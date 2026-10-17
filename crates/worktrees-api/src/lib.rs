@@ -41,16 +41,20 @@
 pub mod config;
 pub mod docserver;
 pub mod editors;
+pub mod files;
+pub mod hostenv;
 pub mod log;
 pub mod meta;
 pub mod project;
 pub mod projects;
 pub mod status;
+pub mod term;
 pub mod watch;
 pub mod workspace;
 pub mod util;
 pub mod viewer;
 pub mod ops;
+pub mod prefs;
 pub mod profiles;
 
 use std::path::PathBuf;
@@ -97,11 +101,28 @@ pub struct Ctx {
     /// share one set of watches and one model cache. Previously three
     /// `static`s in the app — see `watch` for why they stopped being that.
     pub watch: Arc<watch::Watch>,
+    /// The tmux attaches this process holds open.
+    pub terminals: Arc<term::Terminals>,
+    /// The dock's own shells — PTYs this process OWNS, unlike the attaches
+    /// above, which belong to tmux.
+    pub shells: Arc<term::Shells>,
+    /// The documentation server and what it is currently serving.
+    pub viewer: Arc<viewer::Viewer>,
+    /// basename → paths per repo, for the Files tab's "find by name".
+    pub docnames: Arc<files::DocNameIndex>,
 }
 
 impl Ctx {
     pub fn new(config_dir: PathBuf, host: Arc<dyn Host>) -> Self {
-        Ctx { config_dir, host, watch: Arc::new(watch::Watch::default()) }
+        Ctx {
+            config_dir,
+            host,
+            watch: Arc::new(watch::Watch::default()),
+            terminals: Arc::new(term::Terminals::default()),
+            shells: Arc::new(term::Shells::default()),
+            viewer: Arc::new(viewer::Viewer::default()),
+            docnames: Arc::new(files::DocNameIndex::default()),
+        }
     }
 
     /// The app's own pre-registry project list. Only ever READ — it is the

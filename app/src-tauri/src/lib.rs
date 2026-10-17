@@ -6,21 +6,40 @@
 //                 shell, and OWNS the dock's scratch shells outright (no tmux).
 // See DESIGN.md / MIGRATION.md.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::io::Write;
+use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::thread;
-
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
-use serde::{Deserialize, Serialize};
 use std::time::Duration;
+
 use tauri::ipc::{Channel, InvokeResponseBody};
-use tauri::{AppHandle, Emitter, Manager, State};
-use worktrees_core::{git, harness, ops, provider, sync, sysclock, tmux, Project};
-// Pure helper, shared with the extracted command layer so both answer alike.
+use tauri::{AppHandle, Emitter, Manager};
+use worktrees_core::{provider, sync, sysclock};
+
+// The command layer. Every handler below is a wrapper over one of these; what
+// is left in this file is the three things a window has that a socket does
+// not — the updater, page zoom, and window state — plus the poll that drives
+// the nav dots and the `Ctx` the wrappers resolve from.
+use worktrees_api::files::ShellRef;
+use worktrees_api::ops::{
+    draft_trace_filter, fetch_origin_root, scan_drafts, trace_spawns, CmdResult, Draft, Drafts,
+    UpdateInfo, FETCH_INTERVAL_SECS, REPO_SLUG,
+};
+use worktrees_api::prefs::UiEvent;
+use worktrees_api::projects::read_projects;
+use worktrees_api::status::{list_published_releases, valid_tag};
 use worktrees_api::util::fmt_utc;
+use worktrees_api::viewer;
+
+/// Is tmux reachable right now? The body re-resolves the GUI `PATH` when
+/// asked, which is why it cannot be sync: the login-shell probe is
+/// deadline-guarded at 5s and would freeze the main thread for all of it.
+#[tauri::command]
+async fn tmux_check(refresh: bool) -> Result<bool, String> {
+    worktrees_api::hostenv::tmux_check(refresh)
+}
+use worktrees_core::claude_usage::UsageInfo;
 // The nav-dot poll below drives these; the derivations themselves are the
 // command layer's, so the app and `worktrees serve` light the same dots.
 use worktrees_api::watch::{
@@ -505,68 +524,17 @@ async fn list_drafts() -> Result<Vec<worktrees_api::ops::Draft>, String> {
 }
 
 
-// `close_place` stays here until the dock's `Shells` registry moves to `Ctx`:
-// it sweeps that registry, and splitting it now would mean writing the split
-// twice. It moves with the PTY section.
-
-/// End a place's tmux session — the worktree stays (right-click "Close session").
-///
-/// `yes` is the user's word, collected by the frontend's two-click arm. Without
-/// it core refuses to kill an ADOPTED session (one found by pane cwd, not by
-/// this tool's name — a whole tmux session someone started by hand, or one left
-/// under a previous prefix) and returns `EXIT_NEEDS_CONFIRM`. Passing `-y`
-/// unconditionally, as `remove_place` does, would restore exactly the
-/// promptless adopted-kill that confirmation exists to prevent.
-///
-/// `session` is the name the arm DISPLAYED — the frontend sends back the one it
-/// asked about, and core kills only that. The arm is armed at one moment and
-/// clicked at another; without the name, `yes` would authorize whatever a fresh
-/// resolution finds at click time, which can be a different session entirely.
 #[tauri::command]
 async fn close_place(
+    app: AppHandle,
     repo: String,
     slug: String,
     yes: bool,
     session: Option<String>,
     provider: Option<String>,
-    shells: State<'_, Shells>,
 ) -> Result<CmdResult, String> {
-    if let Some(p) = provider.as_deref() {
-        known_harness(p)?;
-    }
-    // core cmd_close sweeps this place's tmux-era sidecars; the owned dock
-    // shells are app state, so they're swept here — same rule as before, the
-    // dock's scratch shells die with the place.
-    let slug_log = slug.clone();
-    let mut args = vec![slug.clone()];
-    if let Some(p) = &provider { args.push("--ai".into()); args.push(p.clone()); }
-    if yes {
-        args.push("-y".into());
-    }
-    let expect = session.filter(|s| !s.is_empty());
-    // The consented session goes in the log line too: when a kill is questioned
-    // later, the record must say WHICH session the user was asked about.
-    let op = match &expect {
-        Some(s) => format!("close {slug_log} yes={yes} session={s}"),
-        None => format!("close {slug_log} yes={yes}"),
-    };
-    if let Some(s) = expect {
-        args.push("--session".into());
-        args.push(s);
-    }
-    let mut r = run_op(&op, &repo, |p, ui| ops::cmd_close(p, ui, &args))?;
-    if r.code == worktrees_core::diag::EXIT_NEEDS_CONFIRM {
-        // Not a failure — a question. Resolve the session core balked at the
-        // same way core did, so the UI can name it verbatim. This is a SECOND
-        // resolution and can differ from core's (the session may have exited in
-        // between) — harmless now that the answer comes back name-bound: the
-        // name shown is the name core is held to, and `None` means there is
-        // nothing left to ask about (the frontend treats it as "already gone").
-        r.needs_confirm = Project::discover(Path::new(&repo)).ok().and_then(|p| ops::place_session(&p, &slug));
-    } else if r.ok && provider.is_none() {
-        kill_place_shells(&shells, &repo, &slug);
-    }
-    Ok(r)
+    let c = ctx(&app);
+    worktrees_api::ops::close_place(repo, slug, yes, session, provider, &c.shells)
 }
 
 // ── usage, service status, releases ──────────────────────────────────────────
@@ -983,2312 +951,164 @@ async fn diagnostics(app: AppHandle, gh: Option<bool>) -> Result<String, String>
     worktrees_api::project::diagnostics(&ctx(&app), gh, viewer_path)
 }
 
-// ── file browser (right dock, Files tab) ─────────────────────────────────────
-// Browse + view + edit the worktree's files. Every path is validated to live
-// UNDER a registered project root (worktrees nest under their main root), so the
-// UI can never read/write arbitrary files. Unlike git/tmux we DON'T shell these
-// FS reads out — they carry no repo semantics — but the listing calls
-// `git check-ignore` so the tree respects .gitignore (best-effort: no git / not
-// a repo → show everything).
+// ── the Files tab: tree, diffs, reads and writes ────────────────────────────
+// Bodies in `worktrees_api::files`.
 
-#[derive(Serialize)]
-struct FsEntry {
-    name: String,
+#[tauri::command]
+async fn list_dir(
+    app: AppHandle,
     path: String,
-    is_dir: bool,
-    /// Only ever true when the caller asked for ignored entries — the filtered
-    /// listing has nothing to mark, since everything ignored is already gone.
-    ignored: bool,
-    /// Symlink target exactly as written — a relative link stays relative,
-    /// because that is what is on disk and what the user would `ls -l`. None
-    /// for every ordinary entry.
-    link: Option<String>,
-    /// Why the tree must not follow this link, or None when it may. A reason
-    /// code rather than a bool: all three render inert, but "outside the
-    /// workspace" is a false statement about a link that merely dangles, and
-    /// the row's tooltip is the only place a user learns why nothing happens.
-    link_block: Option<&'static str>,
+    show_ignored: Option<bool>,
+) -> Result<Vec<worktrees_api::files::FsEntry>, String> {
+    worktrees_api::files::list_dir(&ctx(&app), path, show_ignored)
 }
 
-#[derive(Serialize)]
-struct FileContent {
-    content: String,
-    truncated: bool,
-    binary: bool,
-    /// mtime (ms since epoch) — the dock echoes it back on save as a
-    /// compare-and-swap token so a stale buffer can't clobber a newer edit.
-    mtime: u64,
-    /// Full size on disk (NOT the length of `content`, which is capped) — the
-    /// viewer header shows it, and it's the only honest number for a file that
-    /// came back truncated or binary.
-    size: u64,
-}
-
-/// An image (or any small blob) as base64, for the viewer's `data:` URI. Kept
-/// separate from `read_file` so the text path never pays for the encode.
-#[derive(Serialize)]
-struct FileBlob {
-    b64: String,
-    /// Bytes actually encoded (== `size` unless the cap truncated the read).
-    size: u64,
-    truncated: bool,
-    mtime: u64,
-}
-
-/// How one path differs from the branch's base, coarsely. Four classes is what
-/// a tinted NAME can carry on its own; a fifth would need a second channel.
-#[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
-#[serde(rename_all = "lowercase")]
-enum ChangeKind {
-    Modified,
-    Added,
-    Untracked,
-    Deleted,
-}
-
-#[derive(Serialize, PartialEq, Eq, Debug)]
-struct FileChange {
-    /// Absolute, canonical — the same shape `list_dir` hands the tree, so the
-    /// frontend can look a row up by `entry.path` with no normalizing.
-    path: String,
-    status: ChangeKind,
-}
-
-/// Base-branch candidates, most authoritative first — the remote's view before
-/// the local one, since `origin/main` is what moves on fetch.
-///
-/// Shared by `changed_files` and `file_diff` ON PURPOSE, so the two can never
-/// resolve different BASES. Verified across eight repo shapes (committed-only,
-/// uncommitted-only, base moved on, no origin, no main/master, unrelated
-/// histories, rename): the loops always settle on the same candidate, even
-/// though one breaks on the first `diff <cand>...HEAD` that succeeds and the
-/// other on the first `merge-base` that does — they fail under identical
-/// conditions.
-///
-/// A shared base is NOT a promise the two always agree on a given file, and one
-/// case makes that visible: a file committed on the branch and then changed BACK
-/// in the working tree. `changed_files` marks it (the worktree differs from
-/// HEAD) while `file_diff` vs base correctly finds nothing, so a lit row sits
-/// above "no changes". Both are true — the branch touched it, and it now equals
-/// the base — and the HEAD toggle shows the revert. The set semantics genuinely
-/// differ: commit-range ∪ working-tree status here, merge-base vs worktree there.
-const BASE_CANDS: [&str; 4] = ["origin/main", "origin/master", "main", "master"];
-
-/// Everything in one worktree that differs from its branch's base.
-#[derive(Serialize)]
-struct ChangeSet {
-    /// The repo top-level these paths hang off, canonicalized. Returned rather
-    /// than assumed: the tree walks ancestors to cascade a marker upward, and it
-    /// needs to know where to stop without trusting the `root` it passed in
-    /// (a place path can be a symlink; every path here is resolved).
+#[tauri::command]
+async fn changed_files(
+    app: AppHandle,
     root: String,
-    files: Vec<FileChange>,
+) -> Result<worktrees_api::files::ChangeSet, String> {
+    worktrees_api::files::changed_files(&ctx(&app), root)
 }
 
-/// File mtime in ms since the epoch (0 if unavailable) — a cheap change token.
-fn file_mtime_ms(p: &Path) -> u64 {
-    std::fs::metadata(p)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
-// `guard_under_projects`, `project_roots` and `under_roots` are the command
-// layer's now (`worktrees_api::projects`) — the containment boundary has to
-// hold for a caller that is not this WebView.
-use worktrees_api::viewer;
-use worktrees_api::projects::{guard_under_projects, project_roots, read_projects, under_roots};
-// Types and helpers the sections still in this file share with the ones that
-// have moved. Each goes away as its own section follows.
-use worktrees_api::ops::{
-    draft_trace_filter, fetch_origin_root, known_harness, run_op, scan_drafts,
-    trace_spawns, CmdResult, Draft, Drafts, UpdateInfo, FETCH_INTERVAL_SECS, REPO_SLUG,
-};
-use worktrees_core::proc::run_deadline;
-// Shared with the sections still here: `install_app_version` validates the tag
-// and the release list the same way `check_update` does.
-use worktrees_api::status::{list_published_releases, valid_tag};
-use worktrees_core::claude_usage::UsageInfo;
-
-/// One symlink as the tree needs it: `(is_dir, target, why_not_to_follow)`.
-///
-/// `is_dir` follows the link, because the shape a user means by `_tmp/` is the
-/// target's. `target` is what the link literally says — a relative link stays
-/// relative, matching `ls -l`.
-///
-/// The block reason is the guard's own question asked ahead of time, plus the
-/// one thing the guard does not ask: `.git`. The listing drops it by NAME, so
-/// without this a repo shipping `ln -s .git g` would hand the tree a browsable
-/// caret straight into it — the whole point of not following links is that a
-/// repo's own contents do not get to choose what the app opens.
-fn classify_symlink(p: &Path, roots: &[PathBuf]) -> (bool, Option<String>, Option<&'static str>) {
-    let is_dir = std::fs::metadata(p).map(|m| m.is_dir()).unwrap_or(false);
-    let target = std::fs::read_link(p).map(|t| t.to_string_lossy().to_string()).ok();
-    let block = match std::fs::canonicalize(p) {
-        // Dangling. Every command behind the row canonicalizes too, so it is
-        // just as inert as one pointing away — for a different reason.
-        Err(_) => Some("missing"),
-        Ok(c) if !under_roots(roots, &c) => Some("outside"),
-        Ok(c) if c.components().any(|s| s.as_os_str() == ".git") => Some("git"),
-        Ok(_) => None,
-    };
-    (is_dir, target, block)
-}
-
-/// Immediate children of `path` (one level; the tree lazy-expands). Dirs first,
-/// then case-insensitive by name.
-///
-/// `.git` is always dropped. Gitignored entries are dropped too UNLESS
-/// `show_ignored` asks for them, in which case they are returned flagged rather
-/// than filtered — the tree dims them. The toggle exists because the files a
-/// session actually produces (build output, and this repo's own gitignored
-/// working notes) are exactly the ones the filtered listing hides.
-///
-/// Symlinks are stat'd THROUGH for their shape (so a link to a directory reads
-/// as one) and carry their target plus `link_block`, the reason the tree must
-/// not follow them. Following is left to the tree, which does not: the guard
-/// canonicalizes, so a link out of the workspace is unlistable by construction,
-/// and honouring one would let a repo's own contents choose what the app reads.
 #[tauri::command]
-async fn list_dir(app: AppHandle, path: String, show_ignored: Option<bool>) -> Result<Vec<FsEntry>, String> {
-    let dir = guard_under_projects(&ctx(&app), &path)?;
-    if !dir.is_dir() {
-        return Err(format!("not a directory: {path}"));
-    }
-    let mut entries: Vec<FsEntry> = Vec::new();
-    // Built on the first symlink seen, not up front: most directories have none
-    // and would pay a projects-file read plus a canonicalize per root for it.
-    let mut roots: Option<Vec<PathBuf>> = None;
-    for e in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
-        let e = e.map_err(|e| e.to_string())?;
-        let name = e.file_name().to_string_lossy().to_string();
-        if name == ".git" {
-            continue;
-        }
-        let ft = e.file_type().ok();
-        let p = e.path();
-        // read_dir's file_type is an lstat: it answers about the LINK, so a
-        // symlink to a directory came back `is_dir: false` — a file glyph, no
-        // caret, and a click that tried to open it as a file. Stat the target
-        // for the shape; a broken link has none and stays a file.
-        let (is_dir, link, link_block) = match ft {
-            Some(t) if t.is_symlink() => {
-                classify_symlink(&p, roots.get_or_insert_with(|| project_roots(&ctx(&app))))
-            }
-            other => (other.map(|t| t.is_dir()).unwrap_or(false), None, None),
-        };
-        let path = p.to_string_lossy().to_string();
-        entries.push(FsEntry { name, path, is_dir, ignored: false, link, link_block });
-    }
-    // One `git check-ignore --stdin` batch for the whole directory (NUL-safe).
-    let ignored = git_check_ignore(&dir, entries.iter().map(|e| e.path.as_str()));
-    if show_ignored.unwrap_or(false) {
-        for e in &mut entries {
-            e.ignored = ignored.contains(&e.path);
-        }
-    } else {
-        entries.retain(|e| !ignored.contains(&e.path));
-    }
-    entries.sort_by(|a, b| {
-        b.is_dir.cmp(&a.is_dir).then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
-    });
-    Ok(entries)
+async fn file_diff(
+    app: AppHandle,
+    path: String,
+    against: Option<String>,
+) -> Result<worktrees_api::files::FileDiff, String> {
+    worktrees_api::files::file_diff(&ctx(&app), path, against)
 }
 
-/// Paths git would ignore (best-effort). `-z` in/out keeps it robust to spaces
-/// and newlines in filenames. Empty set on any git failure → nothing filtered.
-fn git_check_ignore<'a>(dir: &Path, paths: impl Iterator<Item = &'a str>) -> std::collections::HashSet<String> {
-    use std::process::{Command, Stdio};
-    let mut stdin_buf = Vec::new();
-    for p in paths {
-        stdin_buf.extend_from_slice(p.as_bytes());
-        stdin_buf.push(0);
-    }
-    if stdin_buf.is_empty() {
-        return Default::default();
-    }
-    let child = Command::new("git")
-        .args(["-C", &dir.to_string_lossy(), "check-ignore", "--stdin", "-z"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn();
-    let mut child = match child {
-        Ok(c) => c,
-        Err(_) => return Default::default(),
-    };
-    // Write stdin on its own thread while the parent drains stdout below — a big
-    // directory's path list can exceed the pipe buffer, and writing all of it
-    // before reading would deadlock (git blocks on stdout, we block on stdin).
-    if let Some(mut si) = child.stdin.take() {
-        thread::spawn(move || {
-            let _ = si.write_all(&stdin_buf);
-            // drop closes the pipe → git sees EOF
-        });
-    }
-    let out = match child.wait_with_output() {
-        Ok(o) => o,
-        Err(_) => return Default::default(),
-    };
-    out.stdout
-        .split(|b| *b == 0)
-        .filter(|s| !s.is_empty())
-        .map(|s| String::from_utf8_lossy(s).to_string())
-        .collect()
-}
-
-/// Every path under `root` that differs from the branch's BASE — committed on
-/// this branch *and* uncommitted (staged, unstaged, untracked). The Files tab
-/// tints those rows and cascades the mark up through their directories.
-///
-/// THREE spawns per call, and the call is per REFRESH, not per directory: the
-/// frontend derives a set once and answers every row from it. Doing this the way
-/// `list_dir` does `check-ignore` — a batch per listing — would be one git
-/// process per open node per poll tick, and the tree re-lists every open node.
-///
-/// A path that is not a repo (or has no git) gets an empty set, not an error:
-/// nothing differs from a base that does not exist, and the tree must still list.
 #[tauri::command]
-async fn changed_files(app: AppHandle, root: String) -> Result<ChangeSet, String> {
-    let dir = guard_under_projects(&ctx(&app), &root)?;
-    if !dir.is_dir() {
-        return Err(format!("not a directory: {root}"));
-    }
-    let cwd = dir.to_string_lossy().to_string();
-    // Porcelain paths are relative to the repo TOP-LEVEL, never to `-C`. For a
-    // place that IS the worktree root they agree; resolving it anyway is what
-    // keeps a root one level down from marking the wrong rows.
-    let top = match git::git_out(&cwd, &["rev-parse", "--show-toplevel"]) {
-        Some(t) if !t.is_empty() => std::fs::canonicalize(&t).unwrap_or_else(|_| PathBuf::from(t)),
-        _ => return Ok(ChangeSet { root: cwd, files: Vec::new() }),
-    };
-    let mut map: BTreeMap<String, ChangeKind> = BTreeMap::new();
-    // Committed on this branch. THREE dots — the diff is against the merge base,
-    // so a base branch that has moved on since doesn't light up every file those
-    // other commits touched. Candidates follow core's `base_ref()` precedence
-    // (the remote's view first, since `origin/main` is what moves on fetch); the
-    // first range git can resolve wins, and a repo with none of them — an unborn
-    // HEAD, a repo with no main/master — just gets the uncommitted half.
-    for cand in BASE_CANDS {
-        if let Some(out) = git::git_out(&cwd, &["diff", "--name-status", "-z", &format!("{cand}...HEAD")]) {
-            for (p, k) in parse_name_status_z(&out) {
-                map.insert(p, k);
-            }
-            break;
-        }
-    }
-    // Uncommitted. `--untracked-files=all` is not optional: the default
-    // `-unormal` collapses a whole new directory into one `dir/` record, which
-    // would mark the directory and leave every file inside it unmarked.
-    //
-    // Applied SECOND so it wins on collision — it describes the disk as it is
-    // now. A file added in a commit and then deleted has to read `deleted`
-    // (there is no row to tint, only a ghost to draw), not `added`.
-    if let Some(out) = git::git_out(&cwd, &["status", "--porcelain", "-z", "--untracked-files=all"]) {
-        for (p, k) in parse_status_z(&out) {
-            map.insert(p, k);
-        }
-    }
-    let files = map
-        .into_iter()
-        .map(|(rel, status)| FileChange { path: top.join(&rel).to_string_lossy().to_string(), status })
-        .collect();
-    Ok(ChangeSet { root: top.to_string_lossy().to_string(), files })
+async fn list_docs(
+    app: AppHandle,
+    repo: String,
+    root: String,
+) -> Result<worktrees_api::files::DocsIndex, String> {
+    worktrees_api::files::list_docs(&ctx(&app), repo, root)
 }
 
-/// `git status --porcelain -z --untracked-files=all` → (repo-relative, kind).
-///
-/// `-z` records are NUL-terminated `XY <path>`, and a rename/copy puts the
-/// ORIGINAL path in the NEXT record instead of after a ` -> ` — which is the
-/// whole reason for `-z`: no C-quoting, and no ambiguity with a filename that
-/// contains an arrow. A rename's original is GONE from disk, so it is reported
-/// deleted; that is what gives the tree a ghost row to draw for it.
-fn parse_status_z(out: &str) -> Vec<(String, ChangeKind)> {
-    let mut it = out.split('\0').filter(|r| !r.is_empty());
-    let mut v = Vec::new();
-    while let Some(rec) = it.next() {
-        // "XY path": two status columns, a space, then at least one path byte.
-        if rec.len() < 4 {
-            continue;
-        }
-        let (x, y) = (rec.as_bytes()[0], rec.as_bytes()[1]);
-        // Byte 3 is a char boundary — the two columns and the space are ASCII.
-        let path = rec[3..].to_string();
-        match (x, y) {
-            (b'?', _) => v.push((path, ChangeKind::Untracked)),
-            (b'!', _) => {} // ignored — only ever emitted with --ignored, never asked for
-            (b'R', _) | (b'C', _) => {
-                let orig = it.next().unwrap_or("").to_string();
-                v.push((path, ChangeKind::Added));
-                // A copy leaves its source where it was; a rename does not.
-                if x == b'R' && !orig.is_empty() {
-                    v.push((orig, ChangeKind::Deleted));
-                }
-            }
-            // Before the `A` arm on purpose: `AD` is staged-added then removed
-            // from the worktree, and the row that would carry `added` is gone.
-            (b'D', _) | (_, b'D') => v.push((path, ChangeKind::Deleted)),
-            (b'A', _) => v.push((path, ChangeKind::Added)),
-            // M, T, U and anything a future git adds: it differs, which is all
-            // four classes are for.
-            _ => v.push((path, ChangeKind::Modified)),
-        }
-    }
-    v
-}
-
-/// `git diff --name-status -z <range>` → (repo-relative, kind). Fields are
-/// NUL-separated, a status token then its path — except `R…`/`C…`, which are
-/// followed by TWO paths (old, then new).
-fn parse_name_status_z(out: &str) -> Vec<(String, ChangeKind)> {
-    let mut it = out.split('\0').filter(|r| !r.is_empty());
-    let mut v = Vec::new();
-    while let Some(tok) = it.next() {
-        let letter = tok.as_bytes()[0];
-        match letter {
-            b'R' | b'C' => {
-                let old = it.next().unwrap_or("").to_string();
-                let new = it.next().unwrap_or("").to_string();
-                if !new.is_empty() {
-                    v.push((new, ChangeKind::Added));
-                }
-                if letter == b'R' && !old.is_empty() {
-                    v.push((old, ChangeKind::Deleted));
-                }
-            }
-            _ => {
-                // A trailing status with no path means truncated output; stop
-                // rather than pairing it with the next record's status token.
-                let Some(path) = it.next() else { break };
-                let kind = match letter {
-                    b'A' => ChangeKind::Added,
-                    b'D' => ChangeKind::Deleted,
-                    _ => ChangeKind::Modified,
-                };
-                v.push((path.to_string(), kind));
-            }
-        }
-    }
-    v
-}
-
-/// One file's diff, as the viewer's two-column renderer consumes it.
-#[derive(Serialize)]
-struct FileDiff {
-    /// Echo of what was asked for ("base" | "head").
-    ///
-    /// Informational only — the toggle's race is handled on the frontend by the
-    /// fetch effect's `alive` flag, which cleanup trips when `diffBase` changes,
-    /// so a stale response is dropped before it can be stored. This field is NOT
-    /// what does that; it is here so a logged or inspected response says which
-    /// question it answered.
-    against: String,
-    /// The ref the base resolved to, for the header. "vs base" without saying
-    /// WHICH base is a claim the reader has to take on faith, and the answer
-    /// differs per repo (`origin/main`, `master`, or nothing at all).
-    base_label: String,
-    /// git's unified diff at full context. EMPTY means the file is identical to
-    /// the base — deliberately distinct from a patch that parses to no rows.
-    patch: String,
-    /// There is no BEFORE for this path, so every line of it is new: either git
-    /// has never seen it, or the repo has no commits yet (an unborn HEAD, where
-    /// a staged file is tracked but has no committed version to diff against).
-    /// No git output at all in that case — the frontend builds all-added rows
-    /// from the content it already read. Spawning `git diff --no-index
-    /// /dev/null` would be a second process for something we derive for free.
-    untracked: bool,
-    binary: bool,
-    /// The patch hit the byte cap below and is cut short at a line boundary.
-    truncated: bool,
-}
-
-/// Byte cap on a patch. Full context means the payload is roughly BOTH copies of
-/// the file, so this is the pair-wise twin of `read_file`'s 1 MiB — and it
-/// crosses the IPC bridge as one string.
-const DIFF_MAX: usize = 2_000_000;
-
-/// Cut `patch` to at most `DIFF_MAX` bytes, at a LINE boundary. Mid-line would
-/// hand the parser half a line of source and it would render as real content.
-fn trim_patch(patch: &str) -> (String, bool) {
-    if patch.len() <= DIFF_MAX {
-        return (patch.to_string(), false);
-    }
-    let mut cut = DIFF_MAX;
-    while cut > 0 && !patch.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    let head = &patch[..cut];
-    // No newline in the first 2 MB means one enormous line; there is no boundary
-    // to fall back to, so the char boundary is the best available cut.
-    let end = head.rfind('\n').map(|i| i + 1).unwrap_or(cut);
-    (patch[..end].to_string(), true)
-}
-
-/// Does this patch say "binary" rather than showing lines?
-fn patch_is_binary(patch: &str) -> bool {
-    patch.lines().any(|l| l.starts_with("Binary files ") || l == "GIT binary patch")
-}
-
-/// One file's diff against its branch's base (or against HEAD).
-///
-/// `--unified=1000000` is the whole design: full context means ONE payload
-/// carries both complete versions of the file *and* their alignment, so the
-/// frontend needs no diff algorithm and can syntax-highlight each side as a
-/// whole file. Hunk-sized context would mis-colour every line whose block
-/// comment or string opened above the hunk.
-///
-/// A path outside a repo, or with no git, returns an empty diff rather than an
-/// error: the tree listed the file perfectly well, and a banner over it would
-/// be reporting the absence of a feature as a failure.
 #[tauri::command]
-async fn file_diff(app: AppHandle, path: String, against: Option<String>) -> Result<FileDiff, String> {
-    let f = guard_under_projects(&ctx(&app), &path)?;
-    if !f.is_file() {
-        return Err(format!("not a file: {path}"));
-    }
-    file_diff_for(&f, against.as_deref() == Some("head"))
+async fn place_plan(
+    app: AppHandle,
+    root: String,
+) -> Result<worktrees_core::plan::PlanSummary, String> {
+    worktrees_api::files::place_plan(&ctx(&app), root)
 }
 
-/// The git half of `file_diff`, split out from the command so it can be tested
-/// against real repos: the command itself needs an `AppHandle` for the path
-/// guard, which a unit test has no way to build. Both of the states worth
-/// pinning here — an unborn HEAD, and a git invocation that genuinely fails —
-/// used to render as "no changes", so they get tests rather than trust.
-fn file_diff_for(f: &Path, want_head: bool) -> Result<FileDiff, String> {
-    let against = if want_head { "head" } else { "base" }.to_string();
-    let none = |label: &str, untracked: bool| FileDiff {
-        against: against.clone(),
-        base_label: label.to_string(),
-        patch: String::new(),
-        untracked,
-        binary: false,
-        truncated: false,
-    };
-    let dir = f.parent().unwrap_or(f).to_string_lossy().to_string();
-    let top = match git::git_out(&dir, &["rev-parse", "--show-toplevel"]) {
-        Some(t) if !t.is_empty() => std::fs::canonicalize(&t).unwrap_or_else(|_| PathBuf::from(t)),
-        _ => return Ok(none("", false)),
-    };
-    let cwd = top.to_string_lossy().to_string();
-    // Relative to the repo TOP, because that is where `-C` points below. A place
-    // one level down from the worktree root would otherwise ask git about a path
-    // that does not exist and get an empty diff for a file that clearly differs.
-    let rel = f.strip_prefix(&top).unwrap_or(f).to_string_lossy().to_string();
-
-    if !git::git_ok(&cwd, &["ls-files", "--error-unmatch", "--", &rel]) {
-        // No label: there is no ref to name, and the viewer says "new file"
-        // rather than trying to phrase the absence of one.
-        return Ok(none("", true));
-    }
-    // An unborn HEAD is the other way to have no BEFORE, and it does not look
-    // like one: a `git add`ed file in a fresh repo IS tracked, so the check
-    // above passes, every `merge-base` then fails, the fallback lands on `HEAD`
-    // — and `git diff HEAD` exits 128 on `fatal: bad revision 'HEAD'`. That used
-    // to arrive as an empty patch and render as "no changes vs HEAD" for a file
-    // the tree had just tinted `added`. Every line of it is new; say so.
-    if !git::has_commits(&cwd) {
-        return Ok(none("", true));
-    }
-
-    // `merge-base`, not the `cand...HEAD` range syntax `changed_files` uses:
-    // that range compares two COMMITS, and what the viewer needs is the base
-    // against the WORKING TREE, so the uncommitted half shows up too. Same
-    // candidates, same precedence, so the two always agree on which base.
-    let (base_rev, base_label) = if want_head {
-        ("HEAD".to_string(), "HEAD".to_string())
-    } else {
-        BASE_CANDS
-            .iter()
-            .find_map(|cand| {
-                git::git_out(&cwd, &["merge-base", cand, "HEAD"])
-                    .filter(|s| !s.is_empty())
-                    .map(|sha| (sha, (*cand).to_string()))
-            })
-            // No main/master anywhere: HEAD is the only base there is, and
-            // saying so beats silently diffing against something else.
-            .unwrap_or_else(|| ("HEAD".to_string(), "HEAD".to_string()))
-    };
-
-    // `None` is a NON-ZERO EXIT, and it must not become an empty patch: empty is
-    // documented and rendered as "identical to the base", so collapsing the two
-    // turns any git failure into a confident, wrong "no changes". `git diff`
-    // without `--exit-code` returns 0 whether or not there are differences, so a
-    // non-zero exit here is always a real failure and belongs in a banner.
-    let patch = git::git_out(
-        &cwd,
-        &["diff", "--no-ext-diff", "--no-color", "--unified=1000000", &base_rev, "--", &rel],
-    )
-    .ok_or_else(|| format!("could not diff {rel} against {base_label}"))?;
-    if patch_is_binary(&patch) {
-        return Ok(FileDiff { against, base_label, patch: String::new(), untracked: false, binary: true, truncated: false });
-    }
-    let (patch, truncated) = trim_patch(&patch);
-    Ok(FileDiff { against, base_label, patch, untracked: false, binary: false, truncated })
-}
-
-/// The Docs tab's index for one place, plus the ref its staleness is measured
-/// against.
-///
-/// `base` is NOT `Place::upstream`, and the difference is the whole reason this
-/// field exists. Core measures `behind` against the project's BASE ref
-/// (`project.rs`: `rev-list --left-right --count <base_ref>...HEAD`, where
-/// `base_ref()` is `origin/main` when a fetch has brought one, else the local
-/// base) — deliberately, because "how far from main" is the question, and
-/// upstream told a different story on any branch that had merged main in. The
-/// `upstream` field is informational and on a feature branch it names
-/// `origin/<that branch>`. So a header reading "25 behind {upstream}" would
-/// print the wrong ref on every pushed branch — a silently-wrong staleness
-/// signal, in the one surface built to stop exactly that.
-#[derive(Serialize)]
-struct DocsIndex {
-    /// e.g. `origin/main`. Named in the header beside `behind`, because a bare
-    /// "25 behind" is the same silent error one level up.
-    base: String,
-    /// `.worktrees.toml` in THIS PLACE did not parse. The index still lists, by
-    /// convention, and the pane says so — a broken config must never be a blank
-    /// Docs tab, which is the "never a dead server for the whole place" rule
-    /// (`ViewErrorBoundary`) applied one level up.
-    config_error: Option<String>,
-    entries: Vec<worktrees_core::docs::DocEntry>,
-    truncated: bool,
-}
-
-/// Walk one place for its documentation (`worktrees_core::docs`).
-///
-/// `async fn` like every other handler — a sync one runs on the main thread,
-/// and this reads up to 2,000 files' heads plus two `show-ref`s.
-///
-/// The walk itself refuses symlinks and `.worktrees`/`.git`/`node_modules`/
-/// `target`/`dist`; this is the other half of that boundary, the same
-/// `guard_under_projects` contract `list_dir` and `read_file` are held to. A
-/// path outside every registered project is refused before anything is read.
-///
-/// A project that cannot be discovered is not a failure: the index still
-/// lists, with an empty `base`, and the header simply says "N behind" without
-/// naming a ref. Losing the ref name is survivable; losing the index is not.
-///
-/// ⚠ **`[docs]` is read from THIS PLACE, not from the main worktree** — the one
-/// consumer of `projcfg` that does, and the divergence is deliberate.
-/// `project_prefix`, materialize, `[ports]` and `[compose]` all read
-/// `main_root` because they describe the PROJECT: one prefix, one port stride,
-/// one compose file list, whatever branch you are standing on. `[docs]`
-/// describes *content that exists on a branch*, and the Docs tab's whole
-/// premise is that content differs per place.
-///
-/// Read main's instead and the feature defeats itself. A restructure that lands
-/// `[docs] paths = ["handbook"]` on main would, on the seven of eleven places
-/// that have not rebased, declare a directory their branch does not have — and
-/// every one of them would show an EMPTY index while their `docs/` sat there
-/// unlisted. A place whose branch predates the key gets the convention, which
-/// is what its tree actually looks like. Both states correct for their branch,
-/// which is the sentence this whole feature exists to make true.
-///
-/// It grants a branch no power it did not have: `Docs` is two `RelPath` fields
-/// (Layer A already applied), the walk re-checks containment (Layer B), and the
-/// place directory itself was guarded above. The worst a hostile branch can do
-/// is point the listing at a different directory inside its own worktree.
-#[tauri::command]
-async fn list_docs(app: AppHandle, repo: String, root: String) -> Result<DocsIndex, String> {
-    let dir = guard_under_projects(&ctx(&app), &root)?;
-    if !dir.is_dir() {
-        return Err(format!("not a directory: {root}"));
-    }
-    let base = Project::discover(Path::new(&repo)).map(|p| p.base_ref()).unwrap_or_default();
-    // A config that does not parse falls back to the convention and SAYS so.
-    // `load` already honours WORKTREES_NO_PROJECT_CONFIG, so the audit switch
-    // turns `[docs]` off with the rest of the project rung — no new code path.
-    let (cfg, config_error) = match worktrees_core::projcfg::load(&dir) {
-        Ok((c, _findings)) => (c, None),
-        Err(e) => {
-            applog("warn", &format!("list_docs root={root}: {e}"));
-            (None, Some(e.to_string()))
-        }
-    };
-    let idx = worktrees_core::docs::index_with(&dir, cfg.as_ref().and_then(|c| c.docs.as_ref()));
-    Ok(DocsIndex { base, config_error, entries: idx.entries, truncated: idx.truncated })
-}
-
-/// The Plan dock tab: the place's planning-with-files summary (goal, phases,
-/// progress, errors) plus its brief, resolved by the project's effective
-/// planning level. `worktrees_core::plan::summarize_place` never
-/// fails — an absent or unreadable plan is `source: "none"` — so the only
-/// error here is the guard. Read-only: the session owns these files.
-#[tauri::command]
-async fn place_plan(app: AppHandle, root: String) -> Result<worktrees_core::plan::PlanSummary, String> {
-    let dir = guard_under_projects(&ctx(&app), &root)?;
-    if !dir.is_dir() {
-        return Err(format!("not a directory: {root}"));
-    }
-    Ok(worktrees_core::plan::summarize_place(&dir))
-}
-
-/// The Plan tab's "Generate plan": paste `ops::PLAN_PROMPT` into the place's
-/// Claude session and leave it there for the user to send.
-///
-/// The app still writes no plan — the SESSION does, when the user presses
-/// Enter on a prompt they can read first. That is why this is a paste and not
-/// a `send-keys … Enter`, and why `paste_to_ai` has no trailing newline. The
-/// text is the fixed constant; nothing from the frontend reaches the pane
-/// except which session to put it in.
-///
-/// `session` rather than a slug for the same reason as `drop_reference`: the
-/// place may be on an ADOPTED session whose name is not the canonical one, and
-/// the frontend already holds the real name from `ls`.
 #[tauri::command]
 async fn plan_prompt(session: String, provider: Option<String>) -> Result<(), String> {
-    // Addressed by the AI's pane, not by an index (`tmux::ai_pane`), and an
-    // honest error when no Claude is there rather than a paste onto a shell.
-    let ai_word = provider.as_deref().unwrap_or(harness::default_adapter().provider().id);
-    let Some(adapter) = harness::by_id(ai_word) else { return Err("unknown agent provider".into()) };
-    // pi's only modal is project trust, whose highlighted answer is Trust: a
-    // paste is input, and the next Enter there trusts the repo. Look first; a
-    // capture that fails is not a clear screen either. (pi folds the paste to
-    // `[paste #1 N chars]` — harmless, the user still submits it.)
-    if adapter.provider().id == provider::PI.id {
-        match worktrees_core::pi::screen_of(&session) {
-            Some(worktrees_core::pi::PiScreen::TrustModal) => {
-                return Err("pi is asking whether to trust this project — answer that in pi first, then generate the plan.".into())
-            }
-            Some(worktrees_core::pi::PiScreen::Gone) => return Err(format!("pi is not running in {session}")),
-            None => return Err(format!("could not read pi's screen in {session}")),
-            _ => {}
-        }
-    }
-    tmux::paste_to_ai(&session, adapter.provider().match_word, ops::PLAN_PROMPT)?;
-    applog("info", &format!("plan_prompt: pasted into {session}"));
-    Ok(())
+    worktrees_api::files::plan_prompt(session, provider)
 }
 
-/// The Plan tab's "Ask (main)": paste `ops::plan_update_prompt(<slug>)` into
-/// `(main)`'s agent, asking the orchestrator to update what it steers for this
-/// place, and leave it there for the user to send.
-///
-/// The same contract as `plan_prompt` — fixed text, a paste with no Enter, an
-/// honest error when no agent is there — with two differences. The SLUG is
-/// ours: it is derived from `root` (guarded, and required to be a direct child
-/// of the project's `.worktrees/`), so `(main)` itself has nothing to ask and
-/// nothing the frontend typed reaches the prompt. And the composer being
-/// pasted into is one the user is NOT looking at, so it is read first: unsent
-/// text there would have the prompt glued onto it, and a modal (`waiting`)
-/// would take the paste as its answer. Both refuse rather than guess.
-///
-/// `session` and `provider` are (main)'s, from `ls` like `plan_prompt`'s:
-/// (main) may sit on an adopted session whose name is not the canonical one.
 #[tauri::command]
-async fn plan_ask_main(app: AppHandle, root: String, session: String, provider: Option<String>) -> Result<(), String> {
-    let dir = guard_under_projects(&ctx(&app), &root)?;
-    let project = Project::discover(&dir).map_err(|e| e.to_string())?;
-    let canon = |p: &Path| std::fs::canonicalize(p).ok();
-    let place = canon(&dir).ok_or_else(|| format!("not a directory: {root}"))?;
-    if place.parent().map(Path::to_path_buf) != canon(Path::new(&project.wt_root)) {
-        return Err("only a place under .worktrees/ can ask (main) about its plan".into());
-    }
-    let slug = place.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-    let prompt = ops::plan_update_prompt(&slug)
-        .ok_or_else(|| format!("refusing to put the place name {slug:?} in a prompt — it is not a plain directory name"))?;
-    let ai_word = provider.as_deref().unwrap_or(harness::default_adapter().provider().id);
-    let Some(adapter) = harness::by_id(ai_word) else { return Err("unknown agent provider".into()) };
-    let prov = adapter.provider();
-    let pane = tmux::ai_pane(&session, prov.match_word)
-        .ok_or_else(|| format!("no {} running in (main)'s session {session}", prov.match_word))?;
-    let plain = tmux::capture(&pane).ok_or_else(|| format!("could not read (main)'s screen in {session}"))?;
-    let styled = if prov.id == provider::CLAUDE.id {
-        let o = tmux::tmux(&["capture-pane", "-e", "-p", "-t", pane.as_str()]).map_err(|e| e.to_string())?;
-        if !o.status.success() {
-            return Err(format!("could not read (main)'s screen in {session}"));
-        }
-        String::from_utf8_lossy(&o.stdout).into_owned()
-    } else {
-        String::new()
-    };
-    // Keyed on the PANE being pasted into (the probe's `tmux` carries its
-    // `%id`), or on the peer name pane-0 claude is launched with — never on
-    // the repo-root cwd, which a claude in some other terminal shares.
-    let claude_waiting = prov.id == provider::CLAUDE.id
-        && worktrees_core::agent::live_probes().iter().any(|p| {
-            let here = p.tmux.as_deref().and_then(worktrees_core::agent::pane_id) == Some(pane.as_str())
-                || p.name.as_deref() == Some(session.as_str());
-            here && worktrees_core::agent::effective_state(p) == "waiting"
-        });
-    let pi_screen = (prov.id == provider::PI.id).then(|| worktrees_core::pi::screen_of(&session));
-    if let Some(why) = ask_main_refusal(prov.id, &plain, &styled, claude_waiting, pi_screen) {
-        return Err(why);
-    }
-    // The pane that was read, not a second lookup that could find another.
-    tmux::paste_into(&pane, &prompt)?;
-    applog("info", &format!("plan_ask_main: pasted into {session} for {slug}"));
-    Ok(())
+async fn plan_ask_main(
+    app: AppHandle,
+    root: String,
+    session: String,
+    provider: Option<String>,
+) -> Result<(), String> {
+    worktrees_api::files::plan_ask_main(&ctx(&app), root, session, provider)
 }
 
-/// Why (main)'s composer cannot take a paste right now, or `None`. Pure, so the
-/// rule is testable on captured screens: `plain` is `capture-pane -p`, `styled`
-/// is `-e` (claude only — its own suggestion is drawn DIM, and only the styled
-/// capture tells it from typing), `pi` is pi's screen read when (main) runs pi.
-fn ask_main_refusal(
-    provider_id: &str,
-    plain: &str,
-    styled: &str,
-    claude_waiting: bool,
-    pi: Option<Option<worktrees_core::pi::PiScreen>>,
-) -> Option<String> {
-    const DRAFT: &str = "(main) has unsent text at its prompt — send or clear it there first, then ask again.";
-    const MODAL: &str = "(main) is asking you something — answer it there first, then ask again.";
-    // An input box this reader does not recognise is NOT an empty one: a
-    // selector, a dialog or a new layout would take the paste as input.
-    const UNREAD: &str = "couldn't read (main)'s prompt — is a menu or dialog open there?";
-    if provider_id == provider::CLAUDE.id {
-        if claude_waiting {
-            return Some(MODAL.into());
-        }
-        if !worktrees_core::agent::prompt_box_on_screen(styled) {
-            return Some(UNREAD.into());
-        }
-        if worktrees_core::agent::draft_from_screen(styled).is_some() {
-            return Some(DRAFT.into());
-        }
-    } else if provider_id == provider::CODEX.id {
-        use worktrees_core::codex::Composer;
-        if worktrees_core::codex::waiting_on_screen(plain) {
-            return Some(MODAL.into());
-        }
-        match worktrees_core::codex::composer_on_screen(plain) {
-            None => return Some(UNREAD.into()),
-            Some(Composer::Text(_)) => return Some(DRAFT.into()),
-            Some(Composer::Empty) => {}
-        }
-    } else if provider_id == provider::PI.id {
-        use worktrees_core::pi::PiScreen;
-        match pi.flatten() {
-            Some(PiScreen::TrustModal) => {
-                return Some("pi in (main) is asking whether to trust this project — answer that there first.".into())
-            }
-            Some(PiScreen::Gone) => return Some("pi is not running in (main)".into()),
-            None => return Some("could not read pi's screen in (main)".into()),
-            _ => {}
-        }
-    }
-    None
-}
-
-/// The staleness facts, as the frontend already holds them in `Place`.
-///
-/// Passed in rather than recomputed. Every field is in the `Place` the dock is
-/// rendering from at the moment the button is pressed, and re-deriving them here
-/// would mean a second git fan-out per click — for numbers that would then be
-/// allowed to DISAGREE with the ones on screen two inches away. `base` is the
-/// exception and stays ours (`Project::base_ref`), because it is the one fact
-/// `Place` does not carry and the one the header gets wrong by guessing
-/// (§11.4: it is the base ref, never `upstream`).
-#[derive(Deserialize)]
-struct ViewerPlace {
-    branch: Option<String>,
-    behind: Option<i64>,
-    dirty: Option<bool>,
-    dirty_files: Option<u32>,
-    last_commit_subject: Option<String>,
-    last_commit_epoch: Option<i64>,
-}
-
-/// Open one place's documentation in the user's real browser.
-///
-/// Returns a URL for the frontend to hand to `openUrl` — the same plugin path
-/// `FilesPane` already uses for an `https:` link in a document. Nothing is
-/// opened from here: the app stays a control surface, and the one thing this
-/// command owns is deciding whether there is a URL worth opening at all.
-///
-/// `async fn` like every other handler, and for a harder reason than most: it
-/// binds a port, walks the place, and writes a few hundred files. On the main
-/// thread that is a frozen window. It is also what puts this call inside a
-/// tokio runtime, which is what `docserver::start` needs in order to spawn its
-/// accept loop.
-///
-/// **Nothing about this runs at launch.** A missing browser bundle surfaces
-/// here, on the click, as one failed invoke — the Docs tab lists and reads
-/// every document with no server at all, which is what phases 1 and 2 shipped.
-/// The frontend's optimism (`tmuxOk`'s shape) is the other half of that rule.
-///
-/// The tree it serves is DERIVED, never the repo's own files: a viewer that
-/// edits what it is viewing is not a viewer, and the `click` directives that
-/// make a diagram navigable have to bake in a port and a token that do not
-/// exist until this function has run (§5.2's answer, "A′").
 #[tauri::command]
 async fn open_docs_viewer(
     app: AppHandle,
-    v: State<'_, viewer::Viewer>,
     repo: String,
     root: String,
     slug: String,
     path: Option<String>,
-    place: ViewerPlace,
+    place: worktrees_api::files::ViewerPlace,
 ) -> Result<String, String> {
-    let dir = guard_under_projects(&ctx(&app), &root)?;
-    if !dir.is_dir() {
-        return Err(format!("not a directory: {root}"));
-    }
-    // The document, if one was named, is guarded on its own terms rather than
-    // trusted because the place was: `path` is frontend-supplied, and the index
-    // lookup below happens against a walk that has not run yet.
-    let want = match path.as_deref() {
-        None => None,
-        Some(p) => Some(guard_under_projects(&ctx(&app), p)?.to_string_lossy().into_owned()),
-    };
-    let base = Project::discover(Path::new(&repo)).map(|p| p.base_ref()).unwrap_or_default();
-    let (cfg, config_error) = match worktrees_core::projcfg::load(&dir) {
-        Ok((c, _findings)) => (c, None),
-        Err(e) => (None, Some(e.to_string())),
-    };
-    if let Some(e) = &config_error {
-        applog("warn", &format!("open_docs_viewer root={root}: {e}"));
-    }
-    let docs_cfg = cfg.as_ref().and_then(|c| c.docs.as_ref()).cloned();
-    // BEFORE the index walk, deliberately: the tick compares this digest against
-    // a later one, and a document written between the two walks has to read as a
-    // change rather than as something already derived. `viewer::Request::
-    // fingerprint` has the long version.
-    let fingerprint = worktrees_core::docs::fingerprint_with(&dir, docs_cfg.as_ref());
-    let idx = worktrees_core::docs::index_with(&dir, docs_cfg.as_ref());
-
-    let config_dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
-    // `resource_dir` is absent in `tauri dev` (there is no bundle), which is
-    // what `WORKTREES_VIEWER_BIN` exists for.
-    let resource_dir = app.path().resource_dir().ok();
-    let req = viewer::Request {
-        root: &dir,
-        slug: &slug,
-        path: want.as_deref(),
-        stale: worktrees_core::derive::Staleness {
-            place: slug.clone(),
-            branch: place.branch,
-            behind: place.behind,
-            base,
-            dirty: place.dirty,
-            dirty_files: place.dirty_files,
-            last_commit_subject: place.last_commit_subject,
-            last_commit_epoch: place.last_commit_epoch,
-            // The transform may not read the clock; this is not the transform.
-            //
-            // The same instant twice, and they mean different things: the facts
-            // above were captured NOW (the frontend read them off the `Place` it
-            // is rendering), and this copy is being written NOW. The tick moves
-            // the second one alone, which is what makes the two separable at
-            // all — see `Staleness::derived_epoch`.
-            now_epoch: sysclock::now_epoch(),
-            derived_epoch: sysclock::now_epoch(),
-        },
-        docs: docs_cfg,
-        fingerprint,
-    };
-    match viewer::open(&v, &config_dir, resource_dir.as_deref(), &idx, &req) {
-        Ok(opened) => {
-            applog("info", &format!("open_docs_viewer slug={slug} entries={}", idx.entries.len()));
-            // An image that was referenced and deliberately not copied is a
-            // broken image in the reader's browser with no other explanation
-            // anywhere — the open succeeded, so there is no error to carry it.
-            for n in &opened.notes {
-                applog("warn", &format!("open_docs_viewer slug={slug}: {n}"));
-            }
-            Ok(opened.url)
-        }
-        Err(e) => {
-            // Never swallowed: the viewer is the one part of this feature the
-            // user cannot see failing anywhere else.
-            applog("error", &format!("open_docs_viewer slug={slug} root={root}: {e}"));
-            Err(e)
-        }
-    }
+    let c = ctx(&app);
+    // `resource_dir` is Tauri's; the viewer bundle it points at is the command
+    // layer's to serve.
+    let res = app.path().resource_dir().ok().map(|p| p.to_string_lossy().into_owned());
+    worktrees_api::files::open_docs_viewer(&c, res, &c.viewer, repo, root, slug, path, place)
 }
 
-/// File contents for the viewer. Capped (default 1 MiB) and binary-guarded
-/// (a NUL byte in the read slice → `binary: true`, empty content). The frontend
-/// shows a "binary / open in editor" placeholder instead of garbage.
 #[tauri::command]
-async fn read_file(app: AppHandle, path: String, max_bytes: Option<u64>) -> Result<FileContent, String> {
-    let f = guard_under_projects(&ctx(&app), &path)?;
-    if !f.is_file() {
-        return Err(format!("not a file: {path}"));
-    }
-    // `max_bytes` is frontend-controlled: clamp it. An unclamped `cap + 1`
-    // overflows on u64::MAX — panicking in a debug build, and in release
-    // wrapping to 0, which would report a non-empty file as empty and NOT
-    // truncated. Saturating keeps the failure mode "reads everything".
-    let cap = max_bytes.unwrap_or(1_000_000).min(u64::MAX - 1);
-    // Bounded read: `take(cap+1)` never allocates more than the cap even for a
-    // multi-GB file the user clicks by accident (video, core dump, tarball).
-    let file = std::fs::File::open(&f).map_err(|e| e.to_string())?;
-    let mut bytes = Vec::new();
-    file.take(cap + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-    let truncated = bytes.len() as u64 > cap;
-    let slice = &bytes[..bytes.len().min(cap as usize)];
-    let mtime = file_mtime_ms(&f);
-    let size = std::fs::metadata(&f).map(|m| m.len()).unwrap_or(bytes.len() as u64);
-    if slice.contains(&0) {
-        return Ok(FileContent { content: String::new(), truncated, binary: true, mtime, size });
-    }
-    Ok(FileContent {
-        content: String::from_utf8_lossy(slice).to_string(),
-        truncated,
-        binary: false,
-        mtime,
-        size,
-    })
+async fn read_file(
+    app: AppHandle,
+    path: String,
+    max_bytes: Option<u64>,
+) -> Result<worktrees_api::files::FileContent, String> {
+    worktrees_api::files::read_file(&ctx(&app), path, max_bytes)
 }
 
-/// Is `path` still a readable file inside the workspace? Answers the question
-/// `files_open` restore has to ask before it reopens a remembered path.
-///
-/// **Returns `Ok(false)` where every other FS command returns `Err`** — that is
-/// the whole point of it existing rather than the frontend calling `read_file`
-/// and catching. A remembered file can be deleted, renamed, gitignored or left
-/// behind by a branch switch between visits, and `FileView` routes a failed
-/// read to `onError`, i.e. the app's error banner. Restoring through a command
-/// that *errors* would therefore greet you with a banner for the entirely
-/// ordinary act of deleting a file you once had open — which is exactly why
-/// `PlacePanels` refused to remember the open file at all until this existed.
-///
-/// So: outside the workspace, missing, or not-a-file all collapse to `false`.
-/// The `Err` arm is left in the signature for an IPC-level failure only; the
-/// guard's own rejection is deliberately swallowed.
 #[tauri::command]
 async fn file_readable(app: AppHandle, path: String) -> Result<bool, String> {
-    Ok(guard_under_projects(&ctx(&app), &path).map(|f| f.is_file()).unwrap_or(false))
+    worktrees_api::files::file_readable(&ctx(&app), path)
 }
 
-/// The dock shell a terminal link came from, so its LIVE cwd can be read.
-#[derive(Deserialize)]
-struct ShellRef {
-    repo: String,
-    slug: String,
-    index: u32,
-}
-
-/// The most candidates one `resolve_term_paths` will look at. A row of output
-/// holds a handful; this only bounds a pathological one.
-const TERM_PATHS_MAX: usize = 64;
-
-/// One path as printed in a terminal → the absolute file it names, or `None`.
-///
-/// A link exists only for what the viewer could actually open: a REGULAR FILE,
-/// after canonicalising (so `..` and symlinks are judged by where they land),
-/// inside a registered project — `guard_under_projects`' own question, asked of
-/// a path that is not a command argument. Everything else is no link at all,
-/// not a link to Finder: the viewer cannot read it, and terminal text is the
-/// one input here that no user chose, so it does not get to name arbitrary
-/// files for the app to act on.
-///
-/// Relative paths try each base in order (the dock shell's live cwd, then the
-/// place root); `~/` is the home dir; and `a/x`/`b/x` — git diff's prefixes —
-/// fall back to `x` when the literal path is not a file.
-fn resolve_term_path(raw: &str, bases: &[PathBuf], home: Option<&Path>, roots: &[PathBuf]) -> Option<String> {
-    if raw.is_empty() || raw.len() > 4096 || raw.contains('\0') {
-        return None;
-    }
-    let hit = |p: PathBuf| -> Option<String> {
-        let c = std::fs::canonicalize(&p).ok()?;
-        (c.is_file() && under_roots(roots, &c)).then(|| c.to_string_lossy().into_owned())
-    };
-    let tries = |rel: &str| -> Option<String> {
-        if let Some(rest) = rel.strip_prefix("~/") {
-            return hit(home?.join(rest));
-        }
-        if Path::new(rel).is_absolute() {
-            return hit(PathBuf::from(rel));
-        }
-        bases.iter().find_map(|b| hit(b.join(rel)))
-    };
-    tries(raw).or_else(|| {
-        let rest = raw.strip_prefix("a/").or_else(|| raw.strip_prefix("b/"))?;
-        tries(rest)
-    })
-}
-
-/// The working directory of a tmux session's active pane, or `None`.
-///
-/// `=name:` is tmux's EXACT session match (a bare `-t name` prefix-matches, so
-/// `cdv-app` would answer for `cdv-app-x`). An unknown session prints an EMPTY
-/// line and still exits 0 — measured on a private `-L` server — so empty is
-/// read as "no answer" rather than trusted as a path.
-fn tmux_pane_cwd(session: &str) -> Option<PathBuf> {
-    if session.is_empty() || session.contains(['\0', '\n']) {
-        return None;
-    }
-    let target = format!("={session}:");
-    let out = worktrees_core::tmux::tmux(&["display-message", "-p", "-t", &target, "#{pane_current_path}"]).ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let cwd = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let p = PathBuf::from(cwd);
-    (p.is_absolute() && p.is_dir()).then_some(p)
-}
-
-/// Which of the paths a terminal printed are files the viewer can open — the
-/// answer behind ⌘-click links (`termLinkProvider` in TerminalPane.tsx). The
-/// frontend batches a row's candidates into one call and caches the answers,
-/// so this is a stat per path plus, for a tmux pane, ONE `display-message` per
-/// call — never a spawn per mousemove.
-///
-/// Relative paths resolve against where the program that printed them IS: a
-/// dock shell's live cwd, or the tmux pane's (`cd app && cargo test` prints
-/// `src/lib.rs`, which means `app/src/lib.rs` — against the place root it is
-/// either no link or, worse, the root's same-named file). The place root is
-/// the fallback after either.
 #[tauri::command]
 async fn resolve_term_paths(
     app: AppHandle,
-    shells: State<'_, Shells>,
     root: String,
     shell: Option<ShellRef>,
     session: Option<String>,
     paths: Vec<String>,
 ) -> Result<Vec<Option<String>>, String> {
-    let mut bases = Vec::new();
-    if let Some(cwd) = session.as_deref().and_then(tmux_pane_cwd) {
-        bases.push(cwd);
-    }
-    if let Some(sh) = shell {
-        // Read live, not from `shell-cwds.json`: that file is a 15 s sample and
-        // the user may have `cd`'d a moment ago. The pid is checked for life
-        // first (see `live_pid` — a reaped pid can belong to a stranger).
-        let pid = {
-            let mut map = shells.0.lock().unwrap();
-            map.get_mut(&(sh.repo, sh.slug, sh.index)).and_then(|s| live_pid(&mut *s.child))
-        };
-        if let Some(cwd) = pid.and_then(proc_cwd) {
-            bases.push(cwd);
-        }
-    }
-    bases.push(PathBuf::from(&root));
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let roots = project_roots(&ctx(&app));
-    Ok(paths
-        .iter()
-        .take(TERM_PATHS_MAX)
-        .map(|p| resolve_term_path(p, &bases, home.as_deref(), &roots))
-        .collect())
+    let c = ctx(&app);
+    worktrees_api::files::resolve_term_paths(&c, &c.shells, root, shell, session, paths)
 }
 
-/// Each place's file names → its repo-relative paths, from ONE
-/// `git ls-files --cached --others --exclude-standard` (an index read plus
-/// the untracked walk git already does for `status`; no traversal of ours).
-/// Measured at 20–35 ms on the largest registered project (3.6k files).
-/// Rebuilt only when the frontend's `generation` moves — the same
-/// `places:changed`/Refresh token that re-lists the Files tree — never per
-/// render. Untracked files are in it on purpose: a plan names the files a
-/// branch is ADDING.
-#[derive(Default)]
-struct DocNameIndex(Mutex<HashMap<String, (u64, Arc<HashMap<String, Vec<String>>>)>>);
-
-/// `ls-files -z` output → basename → paths. Pure, for the tests.
-fn basename_index(listing: &[u8]) -> HashMap<String, Vec<String>> {
-    let mut idx: HashMap<String, Vec<String>> = HashMap::new();
-    for rel in listing.split(|b| *b == 0).filter(|r| !r.is_empty()) {
-        let rel = String::from_utf8_lossy(rel).into_owned();
-        let name = rel.rsplit('/').next().unwrap_or(&rel).to_string();
-        idx.entry(name).or_default().push(rel);
-    }
-    idx
-}
-
-/// How many same-named files a bare name may offer. Past this the dropdown is
-/// a search result, not a disambiguation.
-const DOC_NAME_CHOICES_MAX: usize = 12;
-
-/// A path found in rendered markdown, as the viewer needs it: the absolute
-/// file to open, and how to name it in a tooltip or a menu.
-#[derive(Serialize, Debug, PartialEq)]
-struct DocPathHit {
-    path: String,
-    /// Relative to the place root; the absolute path when it is elsewhere.
-    rel: String,
-}
-
-/// One candidate from a markdown document → every file it may name.
-/// Empty = no link, one = a link, several = the click asks which.
-///
-/// A PATH is decided by `resolve_term_path` — the terminal's rules, not a
-/// second resolver: a regular file, canonicalised, inside a registered
-/// project, `~/`, git's `a/`/`b/`. A BARE NAME (no `/`) that is not a file
-/// next to the doc or at the root is looked up in the place's name index, and
-/// every candidate the index offers goes through the same resolver again, so
-/// a file deleted since the index was built, or a symlink leading out, is
-/// still refused.
-fn resolve_doc_path(
-    raw: &str,
-    bases: &[PathBuf],
-    home: Option<&Path>,
-    roots: &[PathBuf],
-    root: &Path,
-    index: &mut dyn FnMut() -> Option<Arc<HashMap<String, Vec<String>>>>,
-) -> Vec<DocPathHit> {
-    let root_c = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
-    let hit = |abs: String| {
-        let rel = Path::new(&abs).strip_prefix(&root_c).map(|r| r.to_string_lossy().into_owned()).unwrap_or_else(|_| abs.clone());
-        DocPathHit { path: abs, rel }
-    };
-    if let Some(abs) = resolve_term_path(raw, bases, home, roots) {
-        return vec![hit(abs)];
-    }
-    if raw.contains('/') || raw.starts_with('~') || !raw.contains('.') {
-        return Vec::new();
-    }
-    let Some(idx) = index() else { return Vec::new() };
-    let only_root = [root.to_path_buf()];
-    let mut out: Vec<DocPathHit> = Vec::new();
-    for rel in idx.get(raw).into_iter().flatten() {
-        if let Some(abs) = resolve_term_path(rel, &only_root, home, roots) {
-            if !out.iter().any(|h| h.path == abs) {
-                out.push(hit(abs));
-            }
-        }
-        if out.len() >= DOC_NAME_CHOICES_MAX {
-            break;
-        }
-    }
-    out.sort_by(|a, b| a.rel.cmp(&b.rel));
-    out
-}
-
-/// Which tokens in a rendered markdown document name files — the answer
-/// behind its path links (`mdpaths.ts`). The terminal's `resolve_term_paths`
-/// with the bases a DOCUMENT has: its own directory first (a plan that says
-/// `findings.md` means the one beside it), then the place root. The frontend
-/// batches a document's candidates `TERM_PATHS_MAX` at a time and caches the
-/// answers per document.
 #[tauri::command]
 async fn resolve_doc_paths(
     app: AppHandle,
-    names: State<'_, DocNameIndex>,
     root: String,
     doc: Option<String>,
     generation: u64,
     paths: Vec<String>,
-) -> Result<Vec<Vec<DocPathHit>>, String> {
-    let mut bases = Vec::new();
-    if let Some(dir) = doc.as_deref().and_then(|d| Path::new(d).parent()) {
-        bases.push(dir.to_path_buf());
-    }
-    bases.push(PathBuf::from(&root));
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let roots = project_roots(&ctx(&app));
-    let root_p = PathBuf::from(&root);
-    // Built at most once per call, and only when a bare name missed its stat.
-    let mut got: Option<Option<Arc<HashMap<String, Vec<String>>>>> = None;
-    let mut index = || {
-        got.get_or_insert_with(|| {
-            if let Some((g, idx)) = names.0.lock().unwrap().get(&root) {
-                if *g == generation {
-                    return Some(idx.clone());
-                }
-            }
-            let out = git::git(&root, &["ls-files", "-z", "--cached", "--others", "--exclude-standard"]).ok()?;
-            if !out.status.success() {
-                return None;
-            }
-            let idx = Arc::new(basename_index(&out.stdout));
-            names.0.lock().unwrap().insert(root.clone(), (generation, idx.clone()));
-            Some(idx)
-        })
-        .clone()
-    };
-    Ok(paths
-        .iter()
-        .take(TERM_PATHS_MAX)
-        .map(|p| resolve_doc_path(p, &bases, home.as_deref(), &roots, &root_p, &mut index))
-        .collect())
-}
-
-/// Raw bytes as base64 — the viewer builds a `data:` URI from it to show an
-/// image inline. Same path guard as every other FS command. The cap is smaller
-/// than `read_file`'s (base64 inflates 4/3, and this crosses the IPC bridge as
-/// one string): a bigger image reports `truncated` and the viewer refuses to
-/// render a half-decoded file rather than showing a corrupt one.
-#[tauri::command]
-async fn read_file_base64(app: AppHandle, path: String, max_bytes: Option<u64>) -> Result<FileBlob, String> {
-    let f = guard_under_projects(&ctx(&app), &path)?;
-    if !f.is_file() {
-        return Err(format!("not a file: {path}"));
-    }
-    // 4 MiB: base64 inflates 4/3 and the result crosses the IPC bridge as one
-    // string, so a markdown doc full of images can hold several of these at
-    // once. Clamped for the same overflow reason as `read_file`.
-    let cap = max_bytes.unwrap_or(4_000_000).min(u64::MAX - 1);
-    let file = std::fs::File::open(&f).map_err(|e| e.to_string())?;
-    let mut bytes = Vec::new();
-    file.take(cap + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-    let truncated = bytes.len() as u64 > cap;
-    if truncated {
-        bytes.truncate(cap as usize);
-    }
-    Ok(FileBlob {
-        b64: b64_encode(&bytes),
-        size: bytes.len() as u64,
-        truncated,
-        mtime: file_mtime_ms(&f),
-    })
-}
-
-/// Standard base64 (RFC 4648, padded). Hand-rolled: the app pulls in no base64
-/// crate for what is one table and a three-byte loop.
-fn b64_encode(bytes: &[u8]) -> String {
-    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for c in bytes.chunks(3) {
-        let b = [c[0], *c.get(1).unwrap_or(&0), *c.get(2).unwrap_or(&0)];
-        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
-        out.push(T[(n >> 18) as usize & 63] as char);
-        out.push(T[(n >> 12) as usize & 63] as char);
-        out.push(if c.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if c.len() > 2 { T[n as usize & 63] as char } else { '=' });
-    }
-    out
-}
-
-/// Save an edit. The file must already exist (guard canonicalizes) — the dock
-/// edits files it surfaced, it doesn't create new ones. `expected_mtime` is a
-/// compare-and-swap guard: if the file changed on disk since the dock read it
-/// (Claude edited it in another pane), the save is refused rather than silently
-/// clobbering. The write is atomic (temp file + rename) so a crash mid-save
-/// can't leave a half-written file, and preserves the file's mode bits.
-///
-/// Returns the SAVED file's mtime, which is the `expected_mtime` for the next
-/// save in the same sitting. Without it the editor would still hold the mtime
-/// it read before this write, and its second save would be refused as a
-/// conflict with its own first one — the guard firing on the one writer it is
-/// not there to stop.
-#[tauri::command]
-async fn write_file(app: AppHandle, path: String, content: String, expected_mtime: Option<u64>) -> Result<u64, String> {
-    let f = guard_under_projects(&ctx(&app), &path)?;
-    if !f.is_file() {
-        return Err(format!("not a file: {path}"));
-    }
-    if let Some(exp) = expected_mtime {
-        if file_mtime_ms(&f) != exp {
-            return Err("file changed on disk since you opened it — reload to see the latest".into());
-        }
-    }
-    let dir = f.parent().ok_or("no parent directory")?;
-    let base = f.file_name().and_then(|n| n.to_str()).unwrap_or("edit");
-    let tmp = dir.join(format!(".{base}.wt-tmp"));
-    std::fs::write(&tmp, content.as_bytes()).map_err(|e| e.to_string())?;
-    if let Ok(meta) = std::fs::metadata(&f) {
-        let _ = std::fs::set_permissions(&tmp, meta.permissions()); // keep the exec bit etc.
-    }
-    std::fs::rename(&tmp, &f).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        e.to_string()
-    })?;
-    Ok(file_mtime_ms(&f))
-}
-
-// ── dock terminal: scratch-shell sidecar sessions ────────────────────────────
-// The single-pane place session (Claude only) pairs with one or more SIDECAR
-// tmux sessions for the dock's Terminal tab — bare keep-alive shells cwd'd in
-// the worktree, one per shell tab: `<session>~term`, `<session>~term~2`, … Each
-// is persistent + `tmux attach`-able like any place session, and excluded from
-// worktree adoption (tmux::session_in) so none can masquerade as the AI
-// session. Torn down with the place — core cmd_close/cmd_rm sweep them.
-
-/// A place's CANONICAL session name + worktree cwd, both derived backend-side
-/// from `repo` + `slug`. The dock never supplies a session name or path — that
-/// keeps the webview from naming/killing arbitrary tmux sessions or opening a
-/// shell outside the workspace, and keeps sidecar names STABLE (a place's
-/// canonical name doesn't change when it briefly runs under an adopted session).
-fn place_session_cwd(repo: &str, slug: &str) -> Result<(String, String), String> {
-    let p = Project::discover(Path::new(repo)).map_err(|e| e.msg)?;
-    Ok((p.session_name(slug), p.place_dir(slug)))
-}
-
-/// A place's dock shells, with liveness. The dock restores its Terminal tabs
-/// from this; shells don't outlive the app (see `Shells`), so after a restart
-/// it's empty and the dock opens a fresh one. `dead` matters because the
-/// `shell:exit` event is transient — a shell that exits while the dock is
-/// closed has no listener, and without this flag the reopened dock would render
-/// the corpse as a live tab (replayed scrollback, EIO on the first keypress).
-#[derive(Serialize)]
-struct ShellTab {
-    index: u32,
-    dead: bool,
+) -> Result<Vec<Vec<worktrees_api::files::DocPathHit>>, String> {
+    let c = ctx(&app);
+    worktrees_api::files::resolve_doc_paths(&c, &c.docnames, root, doc, generation, paths)
 }
 
 #[tauri::command]
-async fn list_shell_sessions(repo: String, slug: String, shells: State<'_, Shells>) -> Result<Vec<ShellTab>, String> {
-    let mut map = shells.0.lock().unwrap();
-    let mut tabs: Vec<ShellTab> = map
-        .iter_mut()
-        .filter(|((r, s, _), _)| r == &repo && s == &slug)
-        .map(|((_, _, i), sh)| ShellTab { index: *i, dead: matches!(sh.child.try_wait(), Ok(Some(_))) })
-        .collect();
-    tabs.sort_unstable_by_key(|t| t.index);
-    Ok(tabs)
-}
-
-/// End one shell tab — kills the process, unlike `shell_detach`.
-#[tauri::command]
-async fn close_shell_session(
+async fn read_file_base64(
     app: AppHandle,
-    repo: String,
-    slug: String,
-    index: u32,
-    keep_cwd: Option<bool>,
-    shells: State<'_, Shells>,
+    path: String,
+    max_bytes: Option<u64>,
+) -> Result<worktrees_api::files::FileBlob, String> {
+    worktrees_api::files::read_file_base64(&ctx(&app), path, max_bytes)
+}
+
+#[tauri::command]
+async fn write_file(
+    app: AppHandle,
+    path: String,
+    content: String,
+    expected_mtime: Option<u64>,
+) -> Result<u64, String> {
+    worktrees_api::files::write_file(&ctx(&app), path, content, expected_mtime)
+}
+
+// ── backend preferences, the Data pane, local usage metrics ─────────────────
+// Bodies in `worktrees_api::prefs`.
+
+#[tauri::command]
+async fn set_term_history_opts(
+    persist_scrollback: bool,
+    per_tab_history: bool,
 ) -> Result<(), String> {
-    let key: ShellKey = (repo.clone(), slug.clone(), index);
-    let keep = keep_cwd.unwrap_or(false);
-    // A RESTART keeps this tab's scrollback, so persist it up to the second
-    // before the corpse is reaped. This is the one moment where "as of up to 15
-    // seconds ago" would be visible in the same breath as the action that caused
-    // it — and the dead shell's last output is usually the thing being restarted
-    // to get away from.
-    if keep {
-        flush_one_scrollback(&app, &shells, &key);
-    }
-    kill_shell(&shells, &key);
-    // A tab the user CLOSED forgets where it was, exactly as it drops its name
-    // (App.tsx `closeTab`) — otherwise the next tab to take this index would
-    // open in a directory it never visited. A tab being RESTARTED goes through
-    // this same command to reap the corpse and asks to KEEP its directory: it
-    // is the same tab, and restarting a shell that died in a subdirectory only
-    // to land at the place root is the exact papercut this feature removes.
-    if !keep {
-        edit_cwds(&app, |map| forget_tab(map, &repo, &slug, index));
-        // …and its scrollback and command history with it, for the same reason
-        // and with more at stake: the next tab to take this index has never been
-        // here, and inheriting someone else's output is worse than inheriting
-        // their directory.
-        if let Ok(root) = term_hist_dir(&app) {
-            forget_tab_history(&root, &key);
-        }
-    }
-    Ok(())
-}
-
-// ── dock shell cwd memory ────────────────────────────────────────────────────
-// A dock shell dies with the app, so its tab used to reopen at the place root
-// however deep you had cd'd. We remember the DIRECTORY of each tab — nothing
-// else: no history, no scrollback, no environment.
-//
-// Its own file on purpose. `ui-state.json` is written WHOLE-BLOB by the
-// frontend (`set_settings` takes the entire settings object), so anything the
-// backend wrote into it would be erased by the next settings save.
-
-/// `"<repo>|<slug>"` → tab index → last known directory. Same key scheme as the
-/// frontend's `term_tab_names`, which this shadows one-for-one.
-type CwdMap = BTreeMap<String, BTreeMap<u32, String>>;
-
-/// Serialises writers to `shell-cwds.json`: the slow sampler and the shell
-/// commands both read-modify-write, and interleaving them would lose an update.
-static CWD_FILE_LOCK: Mutex<()> = Mutex::new(());
-
-fn cwd_key(repo: &str, slug: &str) -> String {
-    format!("{repo}|{slug}")
-}
-
-fn cwd_file(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    Ok(dir.join("shell-cwds.json"))
-}
-
-/// A missing or corrupt file is an empty memory, never an error: the worst it
-/// can cost is one shell opening at the place root.
-fn read_cwds_at(path: &Path) -> CwdMap {
-    std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
-}
-
-fn read_cwds(app: &AppHandle) -> CwdMap {
-    cwd_file(app).map(|p| read_cwds_at(&p)).unwrap_or_default()
-}
-
-/// Read-modify-write under `CWD_FILE_LOCK`. `f` returns false to skip the write —
-/// the sampler runs every few seconds and an idle shell must not churn the disk.
-fn edit_cwds_at(path: &Path, f: impl FnOnce(&mut CwdMap) -> bool) {
-    let _guard = CWD_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let mut map = read_cwds_at(path);
-    if !f(&mut map) {
-        return;
-    }
-    map.retain(|_, tabs| !tabs.is_empty());
-    let json = match serde_json::to_vec_pretty(&map) {
-        Ok(j) => j,
-        Err(e) => return applog("error", &format!("shell-cwds encode failed: {e}")),
-    };
-    // Write-then-rename, because readers do NOT take this lock: `shell_open`
-    // reads the file while holding the shell registry, and a plain `fs::write`
-    // is a truncate followed by a write — a read landing in between gets half a
-    // JSON document, which parses as "no memory at all".
-    let tmp = path.with_extension("json.tmp");
-    if let Err(e) = std::fs::write(&tmp, json).and_then(|_| std::fs::rename(&tmp, path)) {
-        applog("error", &format!("shell-cwds write failed: {e}"));
-        let _ = std::fs::remove_file(&tmp);
-    }
-}
-
-/// The directory remembered for one tab, if any.
-fn remembered_dir(map: &CwdMap, repo: &str, slug: &str, index: u32) -> Option<String> {
-    map.get(&cwd_key(repo, slug)).and_then(|tabs| tabs.get(&index)).cloned()
-}
-
-/// Drop one tab's directory; true if there was one. Empty places are swept by
-/// `edit_cwds_at`, so a place whose last tab closes leaves no husk.
-fn forget_tab(map: &mut CwdMap, repo: &str, slug: &str, index: u32) -> bool {
-    map.get_mut(&cwd_key(repo, slug)).is_some_and(|tabs| tabs.remove(&index).is_some())
-}
-
-fn edit_cwds(app: &AppHandle, f: impl FnOnce(&mut CwdMap) -> bool) {
-    match cwd_file(app) {
-        Ok(path) => edit_cwds_at(&path, f),
-        // A read that can't find the file is just "no memory yet"; a WRITE that
-        // can't resolve the config dir is a real failure and has to say so.
-        Err(e) => applog("error", &format!("shell-cwds path unavailable: {e}")),
-    }
-}
-
-/// A live process's working directory, straight from the OS — no subprocess and
-/// no shell integration. macOS has no `/proc`, so it goes through libproc
-/// (`libc` is already a dependency for the `kill(pid,0)` probes). The shell-side
-/// alternative, OSC 7, is a non-starter here: Apple's `/etc/zshrc` only emits it
-/// when `TERM_PROGRAM` is `Apple_Terminal`, so we would have to lie about
-/// `TERM_PROGRAM` or edit the user's rc files.
-fn proc_cwd(pid: u32) -> Option<PathBuf> {
-    #[cfg(target_os = "macos")]
-    {
-        let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
-        let want = std::mem::size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
-        // Returns bytes written. Anything short of the whole struct (dead pid,
-        // EPERM) means there is no path to be had — not a truncated one.
-        let got = unsafe {
-            libc::proc_pidinfo(
-                pid as libc::c_int,
-                libc::PROC_PIDVNODEPATHINFO,
-                0,
-                (&mut info as *mut libc::proc_vnodepathinfo).cast(),
-                want,
-            )
-        };
-        if got != want {
-            return None;
-        }
-        // libc spells this MAXPATHLEN buffer `[[c_char; 32]; 32]` (a workaround
-        // for the old rustc it supports), so flatten it back to bytes.
-        let raw = &info.pvi_cdir.vip_path;
-        let bytes = unsafe { std::slice::from_raw_parts(raw.as_ptr().cast::<u8>(), std::mem::size_of_val(raw)) };
-        let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-        (end > 0).then(|| PathBuf::from(String::from_utf8_lossy(&bytes[..end]).into_owned()))
-    }
-    #[cfg(target_os = "linux")]
-    {
-        std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        let _ = pid;
-        None
-    }
-}
-
-/// The pid of a shell that is STILL RUNNING, or `None`.
-///
-/// The liveness half is not defensive tidiness, it is the whole point. A shell
-/// that exits on its own is deliberately left in the registry so the tab can
-/// survive and offer a restart — and `list_shell_sessions` calls `try_wait` on
-/// every dock mount, which REAPS it. `Child::process_id` then keeps handing
-/// back a pid that the OS is free to hand to something else (macOS wraps at
-/// 99999, days on a normal machine). Sampling that pid would read a stranger's
-/// directory and file it under this tab.
-fn live_pid(child: &mut (dyn Child + Send + Sync)) -> Option<u32> {
-    match child.try_wait() {
-        Ok(None) => child.process_id(), // still running
-        _ => None,                      // exited, or we cannot tell — either way, don't sample
-    }
-}
-
-/// Fold a sample into the stored map; true if anything actually moved.
-///
-/// MERGES rather than replaces, and that is the whole subtlety: after a restart
-/// a tab exists as a NAME long before it is re-spawned, so the map holds
-/// entries with no live shell behind them. A wholesale rewrite from the live
-/// set would wipe exactly the directories this feature exists to keep.
-fn merge_cwds(map: &mut CwdMap, sample: Vec<(ShellKey, String)>) -> bool {
-    let mut changed = false;
-    for ((repo, slug, index), path) in sample {
-        let tabs = map.entry(cwd_key(&repo, &slug)).or_default();
-        if tabs.get(&index) != Some(&path) {
-            tabs.insert(index, path);
-            changed = true;
-        }
-    }
-    changed
-}
-
-/// Record where every live dock shell currently is. Called on a slow tick — so
-/// a crash or a force-quit still leaves a recent answer — and once more on the
-/// way out, before the exit sweep kills the shells.
-fn save_shell_cwds(app: &AppHandle, shells: &Shells) {
-    let live: Vec<(ShellKey, u32)> = {
-        let mut map = shells.0.lock().unwrap();
-        map.iter_mut().filter_map(|(k, sh)| live_pid(&mut *sh.child).map(|pid| (k.clone(), pid))).collect()
-    };
-    let sample: Vec<(ShellKey, String)> = live
-        .into_iter()
-        .filter_map(|(key, pid)| proc_cwd(pid).map(|p| (key, p.to_string_lossy().into_owned())))
-        .collect();
-    if sample.is_empty() {
-        return; // no shells (or no cwd to be read) — don't even open the file
-    }
-    edit_cwds(app, |map| {
-        // Membership is re-checked HERE, under the file lock, because the
-        // registry lock was released before the `proc_cwd` reads above. A tab
-        // closed in that gap has already had its entry forgotten, and merging
-        // the reading we took a moment earlier would put it straight back — so
-        // the next tab to reuse that index would open somewhere it has never
-        // been, which is exactly what `close_shell_session` promises cannot
-        // happen. (No lock-order hazard: nothing that holds the registry ever
-        // waits on this file lock — `shell_open` only READS the file, and reads
-        // don't take it.)
-        let open = shells.0.lock().unwrap();
-        let fresh: Vec<(ShellKey, String)> = sample.into_iter().filter(|(k, _)| open.contains_key(k)).collect();
-        drop(open);
-        merge_cwds(map, fresh)
-    });
-}
-
-/// Which `repo|slug` keys no longer name a place on disk. `place_dir` resolves
-/// one, or returns `None` when the PROJECT itself is unreachable — a repo that
-/// has been deleted or moved takes all of its places with it.
-fn vanished_keys(keys: &[String], mut place_dir: impl FnMut(&str, &str) -> Option<String>) -> Vec<String> {
-    keys.iter()
-        .filter(|key| {
-            // repo roots are absolute paths and a slug is a directory basename,
-            // so the LAST separator is the real one
-            match key.rsplit_once('|') {
-                Some((repo, slug)) => !place_dir(repo, slug).is_some_and(|d| Path::new(&d).is_dir()),
-                None => true, // not a key this app writes — it cannot name a live place
-            }
-        })
-        .cloned()
-        .collect()
-}
-
-/// Forget every place whose worktree is gone. The app cleans up after its own
-/// `remove_place`, but `worktrees rm` from a terminal leaves the entry behind,
-/// and the key is only `repo|slug` — so a slug that is later recreated (a
-/// recycled branch name) would inherit the previous life's directories wherever
-/// those paths still exist in the new checkout. Sweeping at startup shrinks
-/// that to the case where the place is removed and recreated with the app
-/// closed, which is accepted: what survives is a real directory inside the
-/// worktree, so the shell opens somewhere that exists rather than anywhere
-/// misleading.
-fn forget_vanished_places(app: &AppHandle) {
-    let keys: Vec<String> = read_cwds(app).keys().cloned().collect();
-    if keys.is_empty() {
-        return;
-    }
-    let mut projects: HashMap<String, Option<Project>> = HashMap::new();
-    let gone = vanished_keys(&keys, |repo, slug| {
-        projects.entry(repo.to_string()).or_insert_with(|| Project::discover(Path::new(repo)).ok());
-        projects[repo].as_ref().map(|p| p.place_dir(slug))
-    });
-    if gone.is_empty() {
-        return;
-    }
-    applog("info", &format!("shell-cwds: forgetting {} place(s) that no longer exist", gone.len()));
-    edit_cwds(app, |map| {
-        let before = map.len();
-        map.retain(|k, _| !gone.contains(k));
-        map.len() != before
-    });
-}
-
-/// Where a tab should reopen: its last known directory if that still exists,
-/// else the place root. No subtree restriction — if you cd'd out of the
-/// worktree, out of the worktree is where you were.
-fn pick_start_dir(saved: Option<&str>, place_dir: &str) -> String {
-    match saved {
-        Some(p) if Path::new(p).is_dir() => p.to_string(),
-        _ => place_dir.to_string(),
-    }
-}
-
-// ── dock shell history: scrollback + per-tab commands ────────────────────────
-// What a tab keeps between app RUNS, beyond the directory above: the output it
-// was showing, and the commands it ran. One directory per tab holds both:
-//
-//   <app config>/term-history/<slug>-<index>-<hash>/
-//       meta.json        which tab this is, and the width the bytes were laid out at
-//       scrollback.bin   the replay ring, verbatim
-//       zdotdir/         the generated ZDOTDIR, and the .zsh_history zsh writes there
-//
-// Its own tree, for the same reason `shell-cwds.json` is its own file:
-// `ui-state.json` is written WHOLE-BLOB by the frontend, so nothing the backend
-// writes may go near it.
-//
-// The directory NAME is only a name. A repo path is absolute and a slug can be
-// anything a branch name can be, so the stem is a hash — and `meta.json` names
-// the tab it belongs to, so a collision, a directory left by an older scheme, or
-// a half-written one reads as "not mine" rather than as someone else's
-// scrollback. Nothing in here is ever an error: the worst any failure costs is a
-// tab that opens blank, which is what every tab did before this existed.
-//
-// It is also the only place this app writes a user's terminal OUTPUT to disk —
-// anything a script echoed, secrets included — so the tree is created 0700 and
-// the files 0600, and Settings says so next to the switch that turns it on.
-
-/// For the directory NAME only — never for identity (see `read_scrollback`).
-/// FNV-1a 64, inline rather than a crate for eight lines. Not a security
-/// boundary: it names a file.
-fn fnv1a64(s: &str) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in s.as_bytes() {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    h
-}
-
-/// A readable, filesystem-safe stem for one tab. The slug is decoration — it is
-/// what makes the directory browsable — so it is clamped hard; the hash carries
-/// all of the uniqueness.
-fn tab_stem(key: &ShellKey) -> String {
-    let (repo, slug, index) = key;
-    let safe: String = slug
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '-' })
-        .take(32)
-        .collect();
-    format!("{safe}-{index}-{:016x}", fnv1a64(&format!("{repo}|{slug}|{index}")))
-}
-
-/// How long an untouched tab's history is kept. This tree holds CONTENT, and
-/// unlike the cwd map there is nothing about it that shrinks on its own, so it
-/// needs a horizon as well as the sweeps.
-const TERM_HIST_MAX_AGE_SECS: i64 = 30 * 24 * 60 * 60;
-
-/// Serialises writers, exactly as `CWD_FILE_LOCK` does for the directories: the
-/// slow sampler, the shell commands and the sweeps all touch this tree.
-static TERM_HIST_LOCK: Mutex<()> = Mutex::new(());
-
-/// Frontend-owned preferences the shell path needs. Set by
-/// `set_term_history_opts` on hydration and on every change — the same shape as
-/// `FETCH_INTERVAL_SECS`, and for the same reason: the backend must never READ
-/// `ui-state.json` to find them out, because it must never write it.
-static PERSIST_SCROLLBACK: AtomicBool = AtomicBool::new(true);
-static PER_TAB_HISTORY: AtomicBool = AtomicBool::new(true);
-
-/// `<app config>/term-history`, created 0700 on demand.
-fn term_hist_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?.join("term-history");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    private_perms(&dir, 0o700);
-    Ok(dir)
-}
-
-/// Tighten a path we just created. Best-effort: a filesystem that cannot express
-/// the mode is not a reason to refuse to remember a tab.
-fn private_perms(path: &Path, mode: u32) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = (path, mode);
-    }
-}
-
-fn tab_dir(root: &Path, key: &ShellKey) -> PathBuf {
-    root.join(tab_stem(key))
-}
-
-/// Which tab a directory belongs to, and the WIDTH its bytes were laid out at.
-///
-/// `cols` is not bookkeeping. Raw bytes replayed into a different grid do not
-/// re-wrap, and the cursor-relative redraws in them were computed for a width
-/// that no longer exists — which is the defect ROADMAP.md parks under
-/// "terminal-state serialization". Recording the width lets the pane hand the
-/// recording the grid it was written for and let xterm reflow it back.
-///
-/// It is the pty's CURRENT width, not the width the oldest byte was written at —
-/// a byte ring has no single true width. It converges: quit at 174, restore at
-/// 100, and the next save records 100.
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
-struct TabMeta {
-    repo: String,
-    slug: String,
-    index: u32,
-    cols: u16,
-    at: i64,
-}
-
-fn read_meta(tab: &Path) -> Option<TabMeta> {
-    serde_json::from_slice(&std::fs::read(tab.join("meta.json")).ok()?).ok()
-}
-
-/// Write-then-rename, 0600. Readers deliberately do NOT take `TERM_HIST_LOCK` —
-/// `shell_open` reads this tree while holding the shell registry, and nothing
-/// holding the registry may wait on a file lock — so a plain write (a truncate
-/// followed by a write) would let a read land on half a document.
-fn hist_write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension("tmp");
-    let r = std::fs::write(&tmp, bytes).and_then(|_| {
-        private_perms(&tmp, 0o600);
-        std::fs::rename(&tmp, path)
-    });
-    if r.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    r
-}
-
-/// Drop a leading partial line.
-///
-/// Only correct for a ring that has actually ROLLED — see `rolled_ring` below,
-/// which is the only caller and exists to state that condition.
-/// Bounded, so a ring with no newline at all is left alone rather than emptied.
-fn trim_to_line_start(b: &[u8]) -> &[u8] {
-    const LOOK: usize = 4096;
-    match b[..b.len().min(LOOK)].iter().position(|&c| c == b'\n') {
-        Some(i) => &b[i + 1..],
-        None => b,
-    }
-}
-
-/// What of a ring is worth saving.
-///
-/// A ring at the CAP has been drained from the front, so it begins wherever
-/// `drain` happened to cut — routinely the tail of an escape sequence whose
-/// introducer is gone, which replays as a few stray characters at the top. That
-/// leading fragment is dropped.
-///
-/// A ring BELOW the cap has never rolled: it begins where the shell began, and
-/// its first line is a real one. Trimming that would throw away a genuine line
-/// on every save — and worse, it COMPOUNDS, because the next restore seeds from
-/// the trimmed copy and the save after that trims the new first line. One line
-/// per restart, silently, off the oldest end. The length test is what separates
-/// the two cases, and it is exact: nothing else can put a ring at the cap.
-fn rolled_ring(bytes: &[u8]) -> &[u8] {
-    if bytes.len() >= SHELL_RING {
-        trim_to_line_start(bytes)
-    } else {
-        bytes
-    }
-}
-
-/// This tab's saved scrollback and the metadata it was saved with, or `None`.
-///
-/// `meta.json` is the identity, not the directory name: anything that does not
-/// name exactly this tab answers `None`. Never an error, and never another tab's
-/// output.
-fn read_scrollback(root: &Path, key: &ShellKey) -> Option<(Vec<u8>, TabMeta)> {
-    let tab = tab_dir(root, key);
-    let meta = read_meta(&tab)?;
-    if meta.repo != key.0 || meta.slug != key.1 || meta.index != key.2 {
-        return None;
-    }
-    let bytes = std::fs::read(tab.join("scrollback.bin")).ok()?;
-    Some((bytes, meta))
-}
-
-/// Stamp a tab's identity without touching its scrollback.
-///
-/// Called when a tab's `zdotdir` is generated, so a tab whose shell is closed
-/// before the first flush still has the `meta.json` every sweep here reads. A
-/// directory with no meta is one nothing can judge, so it would never be
-/// collected.
-fn ensure_meta(root: &Path, key: &ShellKey, cols: u16) {
-    let tab = tab_dir(root, key);
-    if read_meta(&tab).is_some() {
-        return;
-    }
-    write_meta(&tab, key, cols);
-}
-
-fn write_meta(tab: &Path, key: &ShellKey, cols: u16) {
-    let meta = TabMeta {
-        repo: key.0.clone(),
-        slug: key.1.clone(),
-        index: key.2,
-        cols,
-        at: sysclock::now_epoch(),
-    };
-    match serde_json::to_vec_pretty(&meta) {
-        Ok(j) => {
-            if let Err(e) = hist_write_atomic(&tab.join("meta.json"), &j) {
-                applog("error", &format!("term-history meta write failed: {e}"));
-            }
-        }
-        Err(e) => applog("error", &format!("term-history meta encode failed: {e}")),
-    }
-}
-
-/// Persist one tab's ring at the width it is currently being written at.
-fn write_scrollback(root: &Path, key: &ShellKey, bytes: &[u8], cols: u16) {
-    let tab = tab_dir(root, key);
-    let _guard = TERM_HIST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    if let Err(e) = std::fs::create_dir_all(&tab) {
-        return applog("error", &format!("term-history dir failed: {e}"));
-    }
-    private_perms(&tab, 0o700);
-    // bytes THEN meta: meta is what makes the directory readable, so writing it
-    // last means a crash mid-save leaves the PREVIOUS pair, never a new meta
-    // pointing at a half-written ring.
-    if let Err(e) = hist_write_atomic(&tab.join("scrollback.bin"), rolled_ring(bytes)) {
-        return applog("error", &format!("term-history write failed: {e}"));
-    }
-    write_meta(&tab, key, cols);
-}
-
-/// Everything one tab keeps between runs. Called when the tab is CLOSED — a
-/// RESTART keeps it (it is the same tab, and the dead shell's output is usually
-/// the thing you wanted to read), and so does closing the place, which keeps tab
-/// names and therefore has to keep what they hold.
-fn forget_tab_history(root: &Path, key: &ShellKey) {
-    let _guard = TERM_HIST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let _ = std::fs::remove_dir_all(tab_dir(root, key));
-}
-
-/// Every tab of one place. Used when the place is REMOVED.
-fn forget_place_history(root: &Path, repo: &str, slug: &str) {
-    let _guard = TERM_HIST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let Ok(rd) = std::fs::read_dir(root) else { return };
-    for e in rd.flatten() {
-        let p = e.path();
-        if p.is_dir() && read_meta(&p).is_some_and(|m| m.repo == repo && m.slug == slug) {
-            let _ = std::fs::remove_dir_all(&p);
-        }
-    }
-}
-
-/// Which stored tabs should go: the ones whose place no longer exists, and the
-/// ones nobody has touched in a month.
-///
-/// Split out from the filesystem so the decision can be tested directly, the way
-/// `vanished_keys` is. `place_dir` answers `None` when the PROJECT itself is
-/// unreachable — a repo that has been deleted or moved takes its places with it.
-fn stale_history<'a>(
-    metas: &'a [(PathBuf, TabMeta)],
-    now: i64,
-    mut place_dir: impl FnMut(&str, &str) -> Option<String>,
-) -> Vec<&'a PathBuf> {
-    metas
-        .iter()
-        .filter(|(_, m)| {
-            now - m.at > TERM_HIST_MAX_AGE_SECS
-                || !place_dir(&m.repo, &m.slug).is_some_and(|d| Path::new(&d).is_dir())
-        })
-        .map(|(p, _)| p)
-        .collect()
-}
-
-/// Cold-start sweep. Same reasoning as `forget_vanished_places` — a
-/// `worktrees rm` from a terminal never tells the app — plus the age horizon,
-/// because this tree holds content rather than a path.
-fn sweep_term_history(app: &AppHandle) {
-    let Ok(root) = term_hist_dir(app) else { return };
-    let Ok(rd) = std::fs::read_dir(&root) else { return };
-    let metas: Vec<(PathBuf, TabMeta)> = rd
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        // no readable meta = nothing to judge it by; left alone rather than
-        // guessed at (`ensure_meta` is what keeps that set empty)
-        .filter_map(|p| read_meta(&p).map(|m| (p, m)))
-        .collect();
-    if metas.is_empty() {
-        return;
-    }
-    let mut projects: HashMap<String, Option<Project>> = HashMap::new();
-    let gone = stale_history(&metas, sysclock::now_epoch(), |repo, slug| {
-        projects.entry(repo.to_string()).or_insert_with(|| Project::discover(Path::new(repo)).ok());
-        projects[repo].as_ref().map(|p| p.place_dir(slug))
-    });
-    if gone.is_empty() {
-        return;
-    }
-    applog("info", &format!("term-history: sweeping {} tab(s)", gone.len()));
-    let _guard = TERM_HIST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    for p in gone {
-        let _ = std::fs::remove_dir_all(p);
-    }
-}
-
-/// One shell's ring, ready to write once the registry lock is gone.
-type ScrollJob = (ShellKey, Arc<Mutex<VecDeque<u8>>>, u16);
-
-/// Persist every live shell's ring.
-///
-/// Dirty-gated, so a dozen idle tabs cost no I/O at all. The snapshot is taken
-/// under the REGISTRY lock and written after it is released: nothing that holds
-/// the registry may wait on a file lock, which is the same rule `save_shell_cwds`
-/// follows and the reason `shell_open` only ever reads this tree.
-///
-/// The flag is cleared BEFORE the ring is read, not after it is written. Output
-/// landing in that window re-sets it and costs one redundant write next tick;
-/// clearing it afterwards would instead drop the last chunk of a shell that then
-/// went quiet — the one direction that loses something.
-///
-/// Deliberately NOT filtered on `live_pid`, unlike `save_shell_cwds`. A shell
-/// that exited is kept in the registry precisely so its tab survives and can
-/// offer a restart, and its ring is exactly what the user wanted to read; a dead
-/// process has no cwd to sample, but it has plenty of scrollback.
-fn save_shell_scrollback(app: &AppHandle, shells: &Shells) {
-    if !PERSIST_SCROLLBACK.load(Ordering::Relaxed) {
-        return;
-    }
-    let jobs: Vec<ScrollJob> = {
-        let map = shells.0.lock().unwrap();
-        map.iter()
-            .filter(|(_, sh)| sh.dirty.swap(false, Ordering::Relaxed))
-            .map(|(k, sh)| (k.clone(), sh.ring.clone(), sh.size.cols))
-            .collect()
-    };
-    if jobs.is_empty() {
-        return;
-    }
-    let Ok(root) = term_hist_dir(app) else { return };
-    for (key, ring, cols) in jobs {
-        let bytes: Vec<u8> = ring.lock().unwrap().iter().copied().collect();
-        write_scrollback(&root, &key, &bytes, cols);
-    }
-}
-
-/// Persist ONE tab now, whatever its dirty flag says.
-///
-/// Used by the restart path: closing a dead shell to make room for a new one in
-/// the same tab is the one moment where "up to 15 seconds ago" is visible in the
-/// same breath as the action that caused it.
-fn flush_one_scrollback(app: &AppHandle, shells: &Shells, key: &ShellKey) {
-    if !PERSIST_SCROLLBACK.load(Ordering::Relaxed) {
-        return;
-    }
-    let job = {
-        let map = shells.0.lock().unwrap();
-        map.get(key).map(|sh| {
-            sh.dirty.store(false, Ordering::Relaxed);
-            (sh.ring.clone(), sh.size.cols)
-        })
-    };
-    let (Some((ring, cols)), Ok(root)) = (job, term_hist_dir(app)) else { return };
-    let bytes: Vec<u8> = ring.lock().unwrap().iter().copied().collect();
-    write_scrollback(&root, key, &bytes, cols);
-}
-
-/// `at` on the machine's LOCAL wall clock.
-///
-/// The seam below is the one thing this app writes for a person to read where
-/// it sits rather than for a log, and app.log's UTC — which CLAUDE.md already
-/// warns about when cross-referencing — is the wrong register for it. libc,
-/// because chrono is not a dependency and an offset is all `fmt_utc` lacks.
-fn fmt_local(at: i64) -> String {
-    #[cfg(unix)]
-    {
-        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-        let t = at as libc::time_t;
-        if unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {
-            return fmt_utc(at);
-        }
-        return fmt_utc(at + tm.tm_gmtoff as i64);
-    }
-    #[cfg(not(unix))]
-    fmt_utc(at)
-}
-
-/// Opens the seam, and nothing else emits it: `\x18` cancels any control
-/// sequence the ring's tail was cut inside, `\x1b\\` closes an unterminated
-/// OSC/DCS. Without them a seam can be swallowed as the argument of a
-/// half-written sequence — the one failure that reads as "the feature did not
-/// run". It doubles as the marker `trim_trailing_seam` finds.
-const SEAM_HEAD: &[u8] = b"\x18\x1b\\";
-
-/// What separates restored output from the shell about to start under it. Dim,
-/// so it reads as chrome rather than as something a command printed.
-fn restored_seam(at: i64) -> Vec<u8> {
-    let mut out = SEAM_HEAD.to_vec();
-    out.extend_from_slice(format!("\r\n\x1b[2m── restored · {} ──\x1b[0m\r\n", fmt_local(at)).as_bytes());
-    out
-}
-
-/// Drop a seam that is the LAST thing in the buffer — one a previous restore
-/// wrote and nothing has been typed under since. A seam with a session's output
-/// after it is left alone, because it still marks a real boundary.
-///
-/// The test is exact rather than a search: a seam is FIXED WIDTH (`fmt_utc` is),
-/// so the buffer ends with one precisely when the last `n` bytes begin with
-/// `SEAM_HEAD`. Scanning a window instead finds a seam that has work under it —
-/// which trims a boundary that should have stayed, and which is what the second
-/// half of `a_seam_nothing_was_typed_under_is_replaced_not_followed` caught.
-fn trim_trailing_seam(bytes: &[u8]) -> &[u8] {
-    let n = restored_seam(0).len();
-    if bytes.len() < n {
-        return bytes;
-    }
-    let cut = bytes.len() - n;
-    if &bytes[cut..cut + SEAM_HEAD.len()] == SEAM_HEAD {
-        &bytes[..cut]
-    } else {
-        bytes
-    }
-}
-
-/// The bytes a restoring tab is handed first: what it had, then a seam saying
-/// where that ended. Empty when there is nothing saved, so `replay` stays 0 and
-/// the pane keeps treating the shell's own first output as live.
-///
-/// This goes into the RING as well as down the channel — which is a reversal
-/// worth stating, because the tidy-looking rule is the opposite. A re-attach
-/// replays the ring and nothing else, so a seam kept out of it is visible only
-/// until the first tab flip; under React StrictMode the pane re-attaches before
-/// anyone has seen anything, so the seam was effectively dead. Being in the ring
-/// makes it persistable, which is why it carries an ABSOLUTE time rather than an
-/// age that would freeze at "2h ago" forever, and why a seam still sitting at
-/// the very end is REPLACED rather than followed — otherwise three launches with
-/// nothing typed between them stack three of them.
-fn restore_payload(bytes: &[u8], at: i64) -> Vec<u8> {
-    if bytes.is_empty() {
-        return Vec::new();
-    }
-    let mut out = trim_trailing_seam(bytes).to_vec();
-    out.extend_from_slice(&restored_seam(at));
-    out
-}
-
-// ── per-tab command history ─────────────────────────────────────────────────
-// zsh is the whole reason this is not simply `HISTFILE`. macOS's `/etc/zshrc`
-// sets `HISTFILE=${ZDOTDIR:-$HOME}/.zsh_history` UNCONDITIONALLY for every
-// interactive shell — measured: export HISTFILE, ask an interactive zsh what it
-// is, and it answers `~/.zsh_history`. `ZDOTDIR` is the one lever that file
-// honours.
-//
-// The cost is that ZDOTDIR also moves where zsh looks for `.zshenv`,
-// `.zprofile`, `.zshrc` and `.zlogin`, so this directory carries a shim for each
-// that sources the user's real one. We generate our own files and never touch
-// theirs — the same rule that ruled out OSC 7 for the working directory.
-//
-// Two things the shims have to get right, and a naive version of this gets both
-// wrong:
-//
-//   A user's own `~/.zshenv` may set ZDOTDIR — `export ZDOTDIR=$HOME/.config/zsh`
-//   is the standard dotfiles layout. Sourced blind, that hijacks the rest of the
-//   chain: zsh would read THEIR .zshrc, `/etc/zshrc` would put HISTFILE in THEIR
-//   directory, and the tab would quietly share the global history again. So the
-//   shim hands ZDOTDIR back before sourcing theirs, reads whatever they set, and
-//   then takes the chain back.
-//
-//   Their `.zshrc` may reference `$ZDOTDIR` itself (`source $ZDOTDIR/aliases.zsh`
-//   is how every plugin manager lays out a config). So ZDOTDIR is restored to
-//   THEIR value before their rc is sourced — which also means every child shell
-//   from that point on gets a normal environment and writes the normal
-//   `~/.zsh_history`, rather than inheriting this tab's.
-//
-// HISTFILE is then set explicitly, last, from an env var rather than a path baked
-// into a generated file: last so it beats a user rc that sets HISTFILE itself,
-// and explicitly so this does not depend on an Apple-specific line in /etc.
-
-const SHIM_HEADER: &str = "# Generated by worktrees — per-tab shell history. Edits are overwritten.\n";
-
-/// `$ZDOTDIR/.zshenv`: the load-bearing shim. Runs before anything else of the
-/// user's and is the only place that can discover a ZDOTDIR they set themselves.
-const ZSHENV_SHIM: &str = r#"_WT_Z=${ZDOTDIR}
-unset ZDOTDIR
-[ -r "$HOME/.zshenv" ] && . "$HOME/.zshenv"
-_WT_USER_Z=${ZDOTDIR:-$HOME}
-export ZDOTDIR=$_WT_Z
-"#;
-
-const ZPROFILE_SHIM: &str = r#"[ -r "${_WT_USER_Z:-$HOME}/.zprofile" ] && . "${_WT_USER_Z:-$HOME}/.zprofile"
-"#;
-
-/// `$ZDOTDIR/.zshrc`: hand the chain back, source theirs, then take the history.
-///
-/// `INC_APPEND_HISTORY` is not a nicety. The app SIGHUPs its shells on the way
-/// out (portable-pty's `Child::kill()` sends SIGHUP, not SIGKILL), and zsh's
-/// default is to flush history only on a clean exit — without this a force-quit
-/// takes the whole session's commands with it, which is precisely the case this
-/// feature exists to survive. `SHARE_HISTORY` is deliberately NOT set: each tab
-/// has its own file, so there is nothing to share, and it would change arrow-key
-/// behaviour the user never asked us to touch.
-const ZSHRC_SHIM: &str = r#"if [ "${_WT_USER_Z:-$HOME}" = "$HOME" ]; then unset ZDOTDIR; else export ZDOTDIR=$_WT_USER_Z; fi
-[ -r "${_WT_USER_Z:-$HOME}/.zshrc" ] && . "${_WT_USER_Z:-$HOME}/.zshrc"
-[ -n "$WORKTREES_HISTFILE" ] && HISTFILE="$WORKTREES_HISTFILE"
-HISTSIZE=10000
-SAVEHIST=10000
-setopt INC_APPEND_HISTORY
-unset _WT_Z _WT_USER_Z
-"#;
-
-/// `$ZDOTDIR/.zlogin`: only reached by a NON-interactive login shell, because
-/// `.zshrc` has restored ZDOTDIR by the time an interactive one gets here and
-/// zsh then finds the user's own directly.
-const ZLOGIN_SHIM: &str = r#"[ -r "${_WT_USER_Z:-$HOME}/.zlogin" ] && . "${_WT_USER_Z:-$HOME}/.zlogin"
-"#;
-
-/// (Re)write the four shims. Regenerated on every spawn so an app upgrade
-/// refreshes them and a user who deletes the directory gets it back.
-fn write_zdotdir(zdot: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(zdot)?;
-    private_perms(zdot, 0o700);
-    for (name, body) in [
-        (".zshenv", ZSHENV_SHIM),
-        (".zprofile", ZPROFILE_SHIM),
-        (".zshrc", ZSHRC_SHIM),
-        (".zlogin", ZLOGIN_SHIM),
-    ] {
-        std::fs::write(zdot.join(name), format!("{SHIM_HEADER}{body}"))?;
-    }
-    Ok(())
-}
-
-/// Only worth saying once a run — it is a property of the user's `$SHELL`, not
-/// of any one tab, and a spawn happens every time a tab is activated.
-static UNSUPPORTED_SHELL_LOGGED: std::sync::Once = std::sync::Once::new();
-
-/// Point this tab's shell at its own command history. Answers which scheme was
-/// applied, for the tests; the caller ignores it.
-fn apply_tab_history_env(
-    cmd: &mut CommandBuilder,
-    root: &Path,
-    key: &ShellKey,
-    shell_bin: &str,
-) -> Option<&'static str> {
-    let name = Path::new(shell_bin).file_name().and_then(|s| s.to_str()).unwrap_or("");
-    let tab = tab_dir(root, key);
-    match name {
-        "zsh" => {
-            let zdot = tab.join("zdotdir");
-            if let Err(e) = write_zdotdir(&zdot) {
-                applog("error", &format!("per-tab history: {e}"));
-                return None;
-            }
-            cmd.env("WORKTREES_HISTFILE", zdot.join(".zsh_history"));
-            cmd.env("ZDOTDIR", &zdot);
-            Some("zdotdir")
-        }
-        // bash reads HISTFILE from the environment and its rc files almost never
-        // set it, so the simple lever is the right one here. There is no ZDOTDIR
-        // equivalent, and `--rcfile` does not apply to the login shell this must
-        // stay.
-        "bash" | "sh" => {
-            if std::fs::create_dir_all(&tab).is_err() {
-                return None;
-            }
-            private_perms(&tab, 0o700);
-            cmd.env("HISTFILE", tab.join(".bash_history"));
-            Some("histfile")
-        }
-        // fish and the rest keep whatever history they already had. Better than a
-        // half-working scheme that silently loses commands — and the one log line
-        // is what makes "why is there no history here" answerable.
-        other => {
-            let other = other.to_string();
-            UNSUPPORTED_SHELL_LOGGED.call_once(|| {
-                applog(
-                    "info",
-                    &format!("per-tab history: {other} is not supported; shells keep their own history"),
-                );
-            });
-            None
-        }
-    }
-}
-
-// ── commands: preferences and the Data pane ─────────────────────────────────
-
-/// Push the two terminal-history preferences down from the frontend.
-///
-/// The settings blob is backend-opaque and frontend-owned, so the shell path
-/// cannot look them up — the frontend pushes instead, on hydration and on every
-/// change. Same shape as `set_fetch_interval`, and for the same reason.
-#[tauri::command]
-async fn set_term_history_opts(persist_scrollback: bool, per_tab_history: bool) -> Result<(), String> {
-    PERSIST_SCROLLBACK.store(persist_scrollback, Ordering::Relaxed);
-    PER_TAB_HISTORY.store(per_tab_history, Ordering::Relaxed);
-    Ok(())
-}
-
-/// Bytes under one directory, recursively. This tree is only ever
-/// `<tab>/{meta.json, scrollback.bin, zdotdir/*}`, so the recursion is shallow.
-fn dir_bytes(dir: &Path) -> u64 {
-    let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
-    rd.flatten()
-        .map(|e| match e.metadata() {
-            Ok(m) if m.is_dir() => dir_bytes(&e.path()),
-            Ok(m) => m.len(),
-            Err(_) => 0,
-        })
-        .sum()
-}
-
-/// What Settings → Data shows beside "Clear saved terminal history".
-#[derive(Serialize)]
-struct TermHistoryInfo {
-    dir: String,
-    bytes: u64,
-    tabs: usize,
+    worktrees_api::prefs::set_term_history_opts(persist_scrollback, per_tab_history)
 }
 
 #[tauri::command]
-async fn term_history_info(app: AppHandle) -> Result<TermHistoryInfo, String> {
-    let root = term_hist_dir(&app)?;
-    let (mut bytes, mut tabs) = (0u64, 0usize);
-    if let Ok(rd) = std::fs::read_dir(&root) {
-        for e in rd.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                tabs += 1;
-                bytes += dir_bytes(&p);
-            }
-        }
-    }
-    Ok(TermHistoryInfo { dir: root.to_string_lossy().into_owned(), bytes, tabs })
+async fn term_history_info(
+    app: AppHandle,
+) -> Result<worktrees_api::prefs::TermHistoryInfo, String> {
+    worktrees_api::prefs::term_history_info(&ctx(&app))
 }
 
-/// Forget every tab's saved output and command history.
-///
-/// The live rings go too. Leaving them would have the next sampler tick write
-/// the same bytes straight back, which would make the button a lie — but what is
-/// already PAINTED in an open terminal stays, because xterm owns that and
-/// wiping someone's visible screen is not what this asks for.
-///
-/// A tab's `zdotdir` is emptied rather than removed: a running shell holds
-/// `HISTFILE` inside it, and deleting the directory would leave that shell
-/// silently unable to record anything until it was restarted. `meta.json` stays
-/// for the same practical reason — it is identity and width, never user
-/// content, and a directory without it is one no sweep can ever collect.
 #[tauri::command]
-async fn term_history_clear(app: AppHandle, shells: State<'_, Shells>) -> Result<(), String> {
-    // Scoped: nothing that holds the registry may wait on the file lock below.
-    {
-        let map = shells.0.lock().unwrap();
-        for sh in map.values() {
-            sh.ring.lock().unwrap().clear();
-            sh.dirty.store(false, Ordering::Relaxed);
-        }
-    }
-    let root = term_hist_dir(&app)?;
-    let _guard = TERM_HIST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let Ok(rd) = std::fs::read_dir(&root) else { return Ok(()) };
-    let mut cleared = 0usize;
-    for e in rd.flatten() {
-        let tab = e.path();
-        if !tab.is_dir() {
-            continue;
-        }
-        cleared += 1;
-        let _ = std::fs::remove_file(tab.join("scrollback.bin"));
-        let zdot = tab.join("zdotdir");
-        if zdot.is_dir() {
-            let _ = hist_write_atomic(&zdot.join(".zsh_history"), b"");
-        } else {
-            let _ = std::fs::remove_file(tab.join(".bash_history"));
-        }
-    }
-    applog("info", &format!("term-history: cleared {cleared} tab(s) at the user's request"));
-    Ok(())
+async fn term_history_clear(app: AppHandle) -> Result<(), String> {
+    let c = ctx(&app);
+    worktrees_api::prefs::term_history_clear(&c, &c.shells)
 }
 
-/// Remove a place (`rm <slug> -y` [+ --branch/--force]); the UI confirms first.
 #[tauri::command]
 async fn remove_place(
     app: AppHandle,
@@ -3296,707 +1116,97 @@ async fn remove_place(
     slug: String,
     del_branch: bool,
     force: bool,
-    shells: State<'_, Shells>,
 ) -> Result<CmdResult, String> {
-    let slug_log = slug.clone();
-    let slug_sweep = slug.clone();
-    let mut args: Vec<String> = vec![slug, "-y".into()];
-    if del_branch {
-        args.push("--branch".into());
-    }
-    if force {
-        args.push("--force".into());
-    }
-    // Resolved BEFORE the removal, because it cannot be afterwards: the derived
-    // tree is keyed by a hash of the canonical directory, and `canonicalize`
-    // needs the directory to exist. A place nobody opened in the browser has no
-    // tree and this resolves to one that is not there, which is fine.
-    let viewer_root = Project::discover(Path::new(&repo))
-        .ok()
-        .map(|p| p.place_dir(&slug_sweep))
-        .and_then(|d| std::fs::canonicalize(d).ok());
-    // cmd_rm sweeps this place's dock shell sidecars itself (core, only once the
-    // removal proceeds past its dirty/confirm guards — a refused rm keeps them).
-    let r = run_op(&format!("rm {slug_log}"), &repo, move |p, ui| ops::cmd_rm(p, ui, &args))?;
-    if r.ok {
-        kill_place_shells(&shells, &repo, &slug_sweep);
-        // …and the documents the viewer derived from it. `cmd_rm` deleted the
-        // originals; without this the derived copy is the last readable one and
-        // it is on a port.
-        if let (Ok(cfg), Some(root)) = (app.path().app_config_dir(), viewer_root) {
-            viewer::forget_place(&app.state::<viewer::Viewer>(), &cfg, &slug_sweep, &root);
-        }
-        // The place is gone for good, so its remembered directories are too.
-        // (A `close` deliberately does NOT do this: closing keeps the tab names,
-        // so it has to keep what those tabs point at.)
-        edit_cwds(&app, |map| map.remove(&cwd_key(&repo, &slug_sweep)).is_some());
-        if let Ok(root) = term_hist_dir(&app) {
-            forget_place_history(&root, &repo, &slug_sweep);
-        }
-    }
-    Ok(r)
+    let c = ctx(&app);
+    worktrees_api::prefs::remove_place(&c, repo, slug, del_branch, force, &c.shells)
 }
 
-// ── local usage metrics (ui-events.jsonl in the app config dir) ──────────────
-// What gets clicked, and where the hours go — so the UI can shed the controls
-// nobody uses. Everything stays on this Mac; nothing is ever sent anywhere.
-//
-// An event is THREE fixed things and a clock: a control KEY (a name baked into
-// the source), a SURFACE (a fixed enum) and a timestamp. It is never a place, a
-// slug, a path, a branch, a note, a title or anything else the user typed. The
-// frontend is what decides the key — and `valid_token` below is the belt: this
-// side refuses to STORE anything that does not look like a hand-written
-// identifier, so a leak has to get past a hard parse rather than past a review.
-//
-// Its own file, for the same reason `shell-cwds.json` is its own file: the
-// frontend writes `ui-state.json` whole-blob, so a backend write into it would
-// be erased by the next settings save.
-
-/// One line of `ui-events.jsonl`. `ms` is dwell only — an `act` has no duration.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
-struct UiEvent {
-    /// unix MILLIseconds (the frontend's clock; a day bucket needs no more)
-    t: i64,
-    /// `act` (a click or a chord) · `dwell` (foreground ms on one surface)
-    k: String,
-    key: String,
-    s: String,
-    #[serde(default, skip_serializing_if = "is_zero")]
-    ms: i64,
-}
-
-fn is_zero(n: &i64) -> bool {
-    *n == 0
-}
-
-/// Is this a name someone WROTE, rather than something someone typed?
-///
-/// Deliberately an allowlist, not the brief's "no `/`, no spaces" denylist: a
-/// denylist has to imagine every shape user text arrives in, and slugs, branch
-/// names and note text are exactly the shapes nobody imagines. Keys and
-/// surfaces are hand-written identifiers — `nav.row.select`, `chord.cmd-b`,
-/// `dock.files` — so ASCII alphanumerics plus `.`, `-` and `_` is the whole
-/// vocabulary, and 64 chars is far more than any of them needs.
-///
-/// It cannot tell `ui-tweaks` from `dock-files`, and it is not meant to: it is
-/// the last line, not the first. The first is that the frontend resolves keys
-/// from `data-track` attributes, which are constants in the source.
-fn valid_token(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 64
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
-}
-
-fn valid_event(e: &UiEvent) -> bool {
-    matches!(e.k.as_str(), "act" | "dwell") && valid_token(&e.key) && valid_token(&e.s) && e.ms >= 0 && e.t > 0
-}
-
-/// Serialises appenders against the rotation + the clear, all of which
-/// read-modify-write the same two files.
-static UI_EVENTS_LOCK: Mutex<()> = Mutex::new(());
-
-/// Past this the file rotates to `.1` (one generation, then it is dropped).
-/// A month of heavy use is a few hundred KB, so 4 MB is a year of headroom and
-/// still small enough that `ui_usage` can read both generations on demand.
-const UI_EVENTS_MAX: u64 = 4 * 1024 * 1024;
-
-fn ui_events_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    Ok(dir.join("ui-events.jsonl"))
-}
-
-fn ui_events_append_at(path: &Path, events: &[UiEvent]) {
-    let _guard = UI_EVENTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let kept: Vec<&UiEvent> = events.iter().filter(|e| valid_event(e)).collect();
-    let dropped = events.len() - kept.len();
-    if dropped > 0 {
-        // Loud, because the only way to reach it is a frontend that started
-        // building a key out of something it read off the screen.
-        applog("warn", &format!("ui-events: refused {dropped} event(s) that did not look like fixed keys"));
-    }
-    if kept.is_empty() {
-        return;
-    }
-    if std::fs::metadata(path).map(|m| m.len() > UI_EVENTS_MAX).unwrap_or(false) {
-        let _ = std::fs::rename(path, path.with_extension("jsonl.1"));
-    }
-    let mut buf = String::new();
-    for e in kept {
-        match serde_json::to_string(e) {
-            Ok(line) => {
-                buf.push_str(&line);
-                buf.push('\n');
-            }
-            Err(e) => applog("warn", &format!("ui-events encode failed: {e}")),
-        }
-    }
-    // Append, not write-then-rename: a lost tail costs a few clicks out of a
-    // histogram, and a metric may never be the reason the UI stalls.
-    match std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        Ok(mut f) => {
-            if let Err(e) = f.write_all(buf.as_bytes()) {
-                applog("warn", &format!("ui-events write failed: {e}"));
-            }
-        }
-        Err(e) => applog("warn", &format!("ui-events open failed: {e}")),
-    }
-}
-
-/// Append a batch. NEVER fails the UI: a metric that can produce an error toast
-/// is a metric that changes the behaviour it is measuring.
 #[tauri::command]
 async fn ui_events_append(app: AppHandle, events: Vec<UiEvent>) -> Result<(), String> {
-    match ui_events_path(&app) {
-        Ok(path) => ui_events_append_at(&path, &events),
-        Err(e) => applog("warn", &format!("ui-events path unavailable: {e}")),
-    }
-    Ok(())
+    worktrees_api::prefs::ui_events_append(&ctx(&app), events)
 }
 
-// ── aggregation ─────────────────────────────────────────────────────────────
-
-/// Which LOCAL day an event landed in, as a day number since the epoch. The
-/// offset comes from the frontend (`-new Date().getTimezoneOffset()`), because
-/// the backend has no timezone database and the user reads the heatmap in the
-/// only timezone that matters — theirs. `div_euclid`, not `/`: a pre-1970 or
-/// west-of-UTC value must floor, not truncate toward zero.
-fn day_index(t_ms: i64, tz_offset_min: i32) -> i64 {
-    (t_ms.div_euclid(1000) + i64::from(tz_offset_min) * 60).div_euclid(86_400)
-}
-
-/// Day number → `YYYY-MM-DD`. `fmt_utc` already does civil-from-days; taking
-/// its date half at midnight of that day is the same arithmetic.
-fn day_label(day: i64) -> String {
-    fmt_utc(day * 86_400)[..10].to_string()
-}
-
-#[derive(Serialize, PartialEq, Debug)]
-struct ActRow {
-    key: String,
-    total: u64,
-    per_day: Vec<u64>,
-}
-
-#[derive(Serialize, PartialEq, Debug)]
-struct DwellRow {
-    surface: String,
-    ms_total: i64,
-    per_day: Vec<i64>,
-}
-
-#[derive(Serialize, PartialEq, Debug)]
-struct UiUsage {
-    /// oldest first, exactly `days` entries, gaps filled with zeros
-    days: Vec<String>,
-    acts: Vec<ActRow>,
-    dwell: Vec<DwellRow>,
-    file: String,
-}
-
-fn read_events(path: &Path) -> Vec<UiEvent> {
-    let mut out = Vec::new();
-    // Both generations, oldest first. A half-written last line (a crash mid
-    // append) is one dropped event, not a failed read — hence per-line parsing.
-    for p in [path.with_extension("jsonl.1"), path.to_path_buf()] {
-        let Ok(text) = std::fs::read_to_string(&p) else { continue };
-        out.extend(text.lines().filter_map(|l| serde_json::from_str::<UiEvent>(l).ok()).filter(valid_event));
-    }
-    out
-}
-
-/// The whole report, from a set of events. Split out from the command so the
-/// tests can drive it without a clock or an AppHandle.
-fn usage_from(events: &[UiEvent], now_ms: i64, days: u32, tz_offset_min: i32, file: String) -> UiUsage {
-    let n = days.clamp(1, 90) as usize;
-    let last = day_index(now_ms, tz_offset_min);
-    let first = last - (n as i64 - 1);
-
-    let mut acts: BTreeMap<String, Vec<u64>> = BTreeMap::new();
-    let mut dwell: BTreeMap<String, Vec<i64>> = BTreeMap::new();
-    for e in events {
-        // A key the file has EVER seen gets a row, even when every one of its
-        // events is older than the range — a row of zeros is not noise here,
-        // it is the answer: that control has not been touched in a month.
-        // (Dwell is the opposite: a surface at zero is a row of nothing, and
-        // the bar chart drops it.)
-        if e.k == "act" {
-            acts.entry(e.key.clone()).or_insert_with(|| vec![0; n]);
-        }
-        let d = day_index(e.t, tz_offset_min);
-        if d < first || d > last {
-            continue;
-        }
-        let col = (d - first) as usize;
-        match e.k.as_str() {
-            "act" => acts.entry(e.key.clone()).or_insert_with(|| vec![0; n])[col] += 1,
-            "dwell" => dwell.entry(e.s.clone()).or_insert_with(|| vec![0; n])[col] += e.ms,
-            _ => {}
-        }
-    }
-
-    let mut act_rows: Vec<ActRow> =
-        acts.into_iter().map(|(key, per_day)| ActRow { total: per_day.iter().sum(), key, per_day }).collect();
-    // Descending by total, then by key — a stable order, so two runs of the same
-    // data draw the same table and a row does not jump between refreshes.
-    act_rows.sort_by(|a, b| b.total.cmp(&a.total).then_with(|| a.key.cmp(&b.key)));
-
-    let mut dwell_rows: Vec<DwellRow> =
-        dwell.into_iter().map(|(surface, per_day)| DwellRow { ms_total: per_day.iter().sum(), surface, per_day }).collect();
-    dwell_rows.sort_by(|a, b| b.ms_total.cmp(&a.ms_total).then_with(|| a.surface.cmp(&b.surface)));
-
-    UiUsage {
-        days: (first..=last).map(day_label).collect(),
-        acts: act_rows,
-        dwell: dwell_rows,
-        file,
-    }
-}
-
-/// Settings → Usage reads this on open and on every range change. No cache: a
-/// month of heavy use is a few hundred KB and the whole pass is one read plus a
-/// map, which is cheaper than any invalidation rule would be to get right.
 #[tauri::command]
-async fn ui_usage(app: AppHandle, days: u32, tz_offset_min: i32) -> Result<UiUsage, String> {
-    let path = ui_events_path(&app)?;
-    let events = read_events(&path);
-    let now_ms = sysclock::now_epoch() * 1000;
-    Ok(usage_from(&events, now_ms, days, tz_offset_min, path.to_string_lossy().into()))
+async fn ui_usage(
+    app: AppHandle,
+    days: u32,
+    tz_offset_min: i32,
+) -> Result<worktrees_api::prefs::UiUsage, String> {
+    worktrees_api::prefs::ui_usage(&ctx(&app), days, tz_offset_min)
 }
 
-/// Both generations. The button that calls this is two-click armed.
 #[tauri::command]
 async fn ui_events_clear(app: AppHandle) -> Result<(), String> {
-    let path = ui_events_path(&app)?;
-    let _guard = UI_EVENTS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    for p in [path.with_extension("jsonl.1"), path.clone()] {
-        if let Err(e) = std::fs::remove_file(&p) {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                return Err(format!("could not remove {}: {e}", p.display()));
-            }
-        }
+    worktrees_api::prefs::ui_events_clear(&ctx(&app))
+}
+
+// ── the dock: shells, scrollback, and the tmux attach ───────────────────────
+// Bodies in `worktrees_api::term`.
+
+/// Tauri's byte channel as a `ByteSink`. The command layer streams a pty
+/// through the trait; this is the desktop's implementation of it, and the
+/// `Channel`'s own ordering is what makes the replay mute in `TerminalPane`
+/// safe (AGENTS.md: only the channel's order is reliable).
+struct TauriBytes(Channel<InvokeResponseBody>);
+
+impl worktrees_api::ByteSink for TauriBytes {
+    fn send(&self, bytes: &[u8]) -> Result<(), String> {
+        self.0.send(InvokeResponseBody::Raw(bytes.to_vec())).map_err(|e| e.to_string())
     }
-    Ok(())
 }
 
-// ── PTY host: attach to a live tmux session ─────────────────────────────────
-
-struct Term {
-    master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
-    child: Box<dyn Child + Send + Sync>,
-    stop: Arc<AtomicBool>,
-    /// The session this client is attached to — what `term_wheel` resolves to
-    /// a pane.
-    session: String,
-    /// The pane `term_wheel` last scrolled into tmux history, until the next
-    /// keystroke takes it back to live output. See `term_write`.
-    scrolled: Option<String>,
+#[tauri::command]
+async fn list_shell_sessions(
+    app: AppHandle,
+    repo: String,
+    slug: String,
+) -> Result<Vec<worktrees_api::term::ShellTab>, String> {
+    worktrees_api::term::list_shell_sessions(repo, slug, &ctx(&app).shells)
 }
 
-#[derive(Default)]
-struct Terminals(Mutex<HashMap<u32, Term>>);
+#[tauri::command]
+async fn close_shell_session(
+    app: AppHandle,
+    repo: String,
+    slug: String,
+    index: u32,
+    keep_cwd: Option<bool>,
+) -> Result<(), String> {
+    let c = ctx(&app);
+    worktrees_api::term::close_shell_session(&c, repo, slug, index, keep_cwd, &c.shells)
+}
 
-static NEXT_ID: AtomicU32 = AtomicU32::new(1);
-
-/// Attach to an EXISTING tmux session inside a PTY and stream its bytes to the
-/// frontend. We never create or own a shell — tmux owns the shells, panes, and
-/// scrollback; this app is just another tmux client. Closing detaches (the
-/// session survives and stays `tmux attach`-able from a bare terminal).
 #[tauri::command]
 async fn term_open(
+    app: AppHandle,
     session: String,
     cols: u16,
     rows: u16,
     on_bytes: Channel<InvokeResponseBody>,
-    terms: State<'_, Terminals>,
 ) -> Result<u32, String> {
-    let pair = native_pty_system()
-        .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
-        .map_err(|e| e.to_string())?;
-
-    // Sizing: tune the session (window-size latest + aggressive-resize) so a
-    // smaller co-attached client can't clamp us — the clamp left stale painted
-    // cells ("undeletable" artifacts) outside the redrawn region. Covers
-    // sessions that predate the tuning-at-create in ops::launch.
-    worktrees_core::tmux::tune_session(&session);
-    // -u (global flag, must precede the subcommand): declare this client
-    // UTF-8-capable. Without it tmux sniffs LC_ALL/LC_CTYPE/LANG, and a
-    // GUI-launched app has none — tmux then draws every non-ASCII cell as "_".
-    // Always safe here: the receiving end is xterm.js, which is always UTF-8.
-    // -N (`tmux::no_start_args`): an attach under a tty that finds the socket
-    // refused or missing would otherwise unlink it and start a second server,
-    // orphaning every session in the first.
-    let mut cmd = CommandBuilder::new("tmux");
-    cmd.args(worktrees_core::tmux::no_start_args());
-    cmd.args(["-u", "attach-session", "-t", &session]);
-    cmd.env("TERM", "xterm-256color");
-
-    let child = pair.slave.spawn_command(cmd).map_err(|e| {
-        applog("error", &format!("term_open {session}: tmux attach spawn failed: {e}"));
-        e.to_string()
-    })?;
-    drop(pair.slave); // parent doesn't need the slave handle after spawn
-
-    let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
-    let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
-
-    let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop_reader = stop.clone();
-
-    // Reader thread → frontend. Raw binary (no JSON eval of the byte stream).
-    thread::spawn(move || {
-        let mut buf = [0u8; 16384];
-        loop {
-            if stop_reader.load(Ordering::Relaxed) {
-                break;
-            }
-            match reader.read(&mut buf) {
-                Ok(0) => break, // EOF: the tmux client exited (detached)
-                Ok(n) => {
-                    if on_bytes.send(InvokeResponseBody::Raw(buf[..n].to_vec())).is_err() {
-                        break; // frontend gone
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-    });
-
-    // A pane can already be reading history when we attach: scrolled back
-    // before a place switch (term_close detaches; copy-mode lives on in tmux),
-    // before the app quit, or from a bare `tmux attach`. Without the flag the
-    // first keystrokes here would be copy-mode commands — Space selects, Enter
-    // copies and leaves, the typed text is lost — so seed it from the pane.
-    let scrolled = tmux::tmux(&["display-message", "-p", "-t", &format!("={session}:"), "#{pane_id} #{pane_mode}"])
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| scrolled_at_attach(&String::from_utf8_lossy(&o.stdout)));
-    terms.0.lock().unwrap().insert(id, Term { master: pair.master, writer, child, stop, session, scrolled });
-    Ok(id)
-}
-
-/// `#{pane_id} #{pane_mode}` → the pane, when it is in one of the two modes
-/// that hold a pane in history (and that `send-keys -X cancel` leaves).
-fn scrolled_at_attach(line: &str) -> Option<String> {
-    let mut f = line.split_whitespace();
-    let (pane, mode) = (f.next()?, f.next().unwrap_or(""));
-    (pane.starts_with('%') && is_history_mode(mode)).then(|| pane.to_string())
-}
-
-/// copy-mode, and view-mode (tmux's read-only copy-mode, e.g. `run-shell`
-/// output). The other modes — choose-tree, the buffer and client choosers —
-/// are menus, and neither scroll through history nor take `scroll-up`.
-fn is_history_mode(mode: &str) -> bool {
-    matches!(mode, "copy-mode" | "view-mode")
+    worktrees_api::term::term_open(session, cols, rows, std::sync::Arc::new(TauriBytes(on_bytes)), &ctx(&app).terminals)
 }
 
 #[tauri::command]
-async fn term_write(id: u32, data: Vec<u8>, terms: State<'_, Terminals>) -> Result<(), String> {
-    let mut map = terms.0.lock().unwrap();
-    let term = map.get_mut(&id).ok_or("no such terminal")?;
-    // Typing into a pane the wheel scrolled back returns it to live output
-    // FIRST. In copy-mode tmux reads keys as copy-mode commands — `/` searches,
-    // `q` quits, Enter copies — so without this the first keystrokes after a
-    // scroll are eaten, or worse, do something. Done under the map lock on
-    // purpose: a second keystroke must not reach the pty before the cancel has.
-    // It costs one tmux spawn on the first keystroke after a scroll, never more.
-    if let Some(pane) = term.scrolled.take() {
-        // `send-keys -X` fails outside a mode, so success means we really did
-        // take the pane out of history (it may have left on its own: `-e`
-        // exits when scrolled back to the bottom).
-        let left = tmux::tmux(&["send-keys", "-X", "-t", &pane, "cancel"]).is_ok_and(|o| o.status.success());
-        // Esc while scrolled back means "stop reading history", not "interrupt
-        // the agent" — it is pi's and claude's abort key. Swallow it.
-        if left && data == [0x1b] {
-            return Ok(());
-        }
-    }
-    term.writer.write_all(&data).map_err(|e| e.to_string())?;
-    term.writer.flush().map_err(|e| e.to_string())
-}
-
-/// What one wheel gesture does to the pane a tmux client is showing.
-///
-/// Reached only when the pane has NOT asked for the mouse — xterm forwards the
-/// wheel as mouse reports otherwise (claude), and this is never called. Without
-/// it, xterm.js does what every terminal does for an alternate screen with no
-/// mouse mode, and the tmux client's screen always IS alternate: it turns each
-/// notch into ↑/↓ (`CoreBrowserTerminal.ts`, "Convert wheel events into up/down
-/// events"). For a program on the MAIN screen — pi, a shell — that is not a
-/// scroll at all: pi reads ↑ as editor history, zsh as history recall. Its
-/// scrollback is tmux's, and only copy-mode can show it.
-#[derive(Debug, PartialEq, Eq)]
-enum Wheel {
-    /// Already in copy-mode (or view-mode): move through history.
-    Scroll,
-    /// Main screen, wheel up: enter copy-mode (`-e`, so scrolling back to the
-    /// bottom leaves it) and move up.
-    EnterAndScroll,
-    /// Alternate screen, no mouse (less, vim, an agent TUI that draws its own
-    /// transcript): ↑/↓, exactly what xterm sent before — tmux keeps no history
-    /// for such a pane, so there is nothing to scroll to. `send-keys` encodes
-    /// the arrows in the pane's OWN cursor-key mode.
-    Keys,
-    /// Main screen, wheel down, not scrolled back: already live.
-    Nothing,
-}
-
-/// `mode` is `#{pane_mode}`, empty when the pane is in none. NOT
-/// `#{pane_in_mode}`: that is true for choose-tree (C-b w/s) as well, where
-/// `scroll-up` fails "not in a mode" — ↑/↓ is what moves a tree's selection,
-/// and it is what xterm sent there before.
-fn wheel_plan(mode: &str, alternate: bool, up: bool) -> Wheel {
-    if is_history_mode(mode) {
-        return Wheel::Scroll;
-    }
-    match (mode.is_empty(), alternate, up) {
-        (false, _, _) | (true, true, _) => Wheel::Keys,
-        (true, false, true) => Wheel::EnterAndScroll,
-        (true, false, false) => Wheel::Nothing,
-    }
-}
-
-/// The ONE tmux invocation that carries a plan out, or None for `Nothing`.
-/// `lines` < 0 is up (towards history), matching a WheelEvent's `deltaY`.
-fn wheel_args(pane: &str, plan: &Wheel, lines: i32) -> Option<Vec<String>> {
-    let n = lines.unsigned_abs().to_string();
-    let up = lines < 0;
-    let scroll = if up { "scroll-up" } else { "scroll-down" };
-    let v = |a: &[&str]| Some(a.iter().map(|s| s.to_string()).collect());
-    match plan {
-        Wheel::Scroll => v(&["send-keys", "-X", "-N", &n, "-t", pane, scroll]),
-        Wheel::EnterAndScroll => {
-            v(&["copy-mode", "-e", "-t", pane, ";", "send-keys", "-X", "-N", &n, "-t", pane, scroll])
-        }
-        Wheel::Keys => v(&["send-keys", "-N", &n, "-t", pane, if up { "Up" } else { "Down" }]),
-        Wheel::Nothing => None,
-    }
-}
-
-/// `lines` wheel lines on terminal `id` (< 0 = up). The frontend coalesces a
-/// gesture and keeps at most one of these in flight per pane, so this is two
-/// tmux spawns per flush, not per notch.
-#[tauri::command]
-async fn term_wheel(id: u32, lines: i32, terms: State<'_, Terminals>) -> Result<(), String> {
-    if lines == 0 {
-        return Ok(());
-    }
-    let session = terms.0.lock().unwrap().get(&id).ok_or("no such terminal")?.session.clone();
-    // `=name:` — EXACT session, its current window's active pane: the pane this
-    // client is showing. A bare name prefix-matches (tmux.rs's `PaneId` note).
-    let target = format!("={session}:");
-    // pane_mode LAST: it is empty outside a mode, and whitespace-splitting an
-    // empty middle field would shift the others.
-    let out = tmux::tmux(&["display-message", "-p", "-t", &target, "#{pane_id} #{alternate_on} #{pane_mode}"])
-        .map_err(|e| format!("tmux: {e}"))?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut f = text.split_whitespace();
-    let (Some(pane), Some(alt)) = (f.next(), f.next()) else {
-        return Err(format!("tmux: no pane for {session}"));
-    };
-    let plan = wheel_plan(f.next().unwrap_or(""), alt == "1", lines < 0);
-    let Some(args) = wheel_args(pane, &plan, lines) else { return Ok(()) };
-    let history = matches!(plan, Wheel::Scroll | Wheel::EnterAndScroll);
-    let flag = |terms: &Terminals| {
-        if let Some(t) = terms.0.lock().unwrap().get_mut(&id) {
-            t.scrolled = Some(pane.to_string());
-        }
-    };
-    // The flag is set on BOTH sides of the spawn. Before: a keystroke that
-    // lands while copy-mode is being entered must find it and cancel. After:
-    // that keystroke took the flag, and if its cancel ran before copy-mode was
-    // in, the pane would otherwise end up in history with no flag at all —
-    // every later key a copy-mode command. A flag left on a pane that is
-    // already live costs one failed `cancel`, nothing else.
-    if history {
-        flag(&terms);
-    }
-    let args: Vec<&str> = args.iter().map(String::as_str).collect();
-    let out = tmux::tmux(&args).map_err(|e| format!("tmux: {e}"))?;
-    if history {
-        flag(&terms);
-    }
-    if !out.status.success() {
-        return Err(format!("tmux: {}", String::from_utf8_lossy(&out.stderr).trim()));
-    }
-    Ok(())
+async fn term_write(app: AppHandle, id: u32, data: Vec<u8>) -> Result<(), String> {
+    worktrees_api::term::term_write(id, data, &ctx(&app).terminals)
 }
 
 #[tauri::command]
-async fn term_resize(id: u32, cols: u16, rows: u16, terms: State<'_, Terminals>) -> Result<(), String> {
-    let map = terms.0.lock().unwrap();
-    let term = map.get(&id).ok_or("no such terminal")?;
-    term.master
-        .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
-        .map_err(|e| e.to_string())
+async fn term_wheel(app: AppHandle, id: u32, lines: i32) -> Result<(), String> {
+    worktrees_api::term::term_wheel(id, lines, &ctx(&app).terminals)
 }
 
-/// Detach, never kill the session. Killing the `tmux attach-session` CLIENT
-/// process drops the client → tmux detaches it; the session (and its shells /
-/// AI CLI) live on. The killed client also closes the slave, so the reader
-/// thread hits EOF and exits.
 #[tauri::command]
-async fn term_close(id: u32, terms: State<'_, Terminals>) -> Result<(), String> {
-    if let Some(mut term) = terms.0.lock().unwrap().remove(&id) {
-        term.stop.store(true, Ordering::Relaxed);
-        let _ = term.child.kill(); // kills the CLIENT = detach, not the session
-    }
-    Ok(())
+async fn term_resize(app: AppHandle, id: u32, cols: u16, rows: u16) -> Result<(), String> {
+    worktrees_api::term::term_resize(id, cols, rows, &ctx(&app).terminals)
 }
 
-// ── dock shells: PTYs this app OWNS ─────────────────────────────────────────
-// The place's canonical session stays tmux (Claude lives there; it must survive
-// quit and stay `tmux attach`-able from a bare terminal). The dock's scratch
-// shells do NOT: they used to be `<session>~term[~n]` tmux sidecars that a
-// second process then attached, which meant tmux swallowed C-b, scrollback went
-// through copy-mode, a co-attached client could clamp the size (the whole
-// `tune_session` + aggressive-resize dance), and the tab was simply dead when
-// tmux wasn't installed. One owned PTY per tab fixes all four.
-//
-// What tmux WAS providing for free is survival across a detach — the dock
-// closing, a tab flip, a place switch — so the registry keeps the process alive
-// independently of the webview, and a ring buffer replays what was missed. Only
-// quitting the app (or closing the tab) ends a shell.
-
-/// Replay window per shell. Enough for a build log's tail; small enough that a
-/// dozen idle tabs don't add up to anything.
-const SHELL_RING: usize = 256 * 1024;
-
-struct Shell {
-    master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
-    child: Box<dyn Child + Send + Sync>,
-    stop: Arc<AtomicBool>,
-    /// Everything the shell has written, capped. Replayed on re-attach.
-    ring: Arc<Mutex<VecDeque<u8>>>,
-    /// The attached webview channel, if any. `None` = running unwatched.
-    sink: Arc<Mutex<Option<Channel<InvokeResponseBody>>>>,
-    /// Attach generation. Detach names the attach it is undoing, because a
-    /// STALE detach must be a no-op: under React StrictMode the same pane
-    /// mounts, unmounts, and mounts again — and unmount №1's detach can arrive
-    /// AFTER mount №2's attach installed its channel. Keyed detach alone would
-    /// clear the new sink and freeze a live pane (the tmux design was immune:
-    /// every attach had its own id).
-    gen: u64,
-    /// The size the pty is actually at, so a request to be the size it already
-    /// is can be dropped. See `next_pty_size`.
-    size: PtySize,
-    /// Has the ring moved since it was last persisted? Lets the slow sampler
-    /// skip a tab nobody is using, which is most tabs most of the time.
-    dirty: Arc<AtomicBool>,
+#[tauri::command]
+async fn term_close(app: AppHandle, id: u32) -> Result<(), String> {
+    worktrees_api::term::term_close(id, &ctx(&app).terminals)
 }
 
-/// The size to hand `MasterPty::resize`, or `None` when the pty is already
-/// there. `cur` is updated on the way through, so the next request is compared
-/// against what was actually applied.
-///
-/// Resizing a pty to its own size is not the harmless no-op it looks like. It
-/// is at best a wasted ioctl; on any platform whose TIOCSWINSZ does not compare
-/// first (macOS and Linux both do, today) it is a SIGWINCH — and zsh answers
-/// every SIGWINCH by redrawing the prompt and whatever half-typed line is
-/// sitting on it, which lands in the replay ring. Measured on a real login
-/// zsh: one full redraw per size CHANGE, nothing at all for a repeat.
-///
-/// That matters because the ring is raw bytes replayed into a FRESH xterm on
-/// every re-attach, and those redraws are cursor-relative — rendered at a width
-/// other than the one they were computed for they stop overwriting each other
-/// and stack up instead. One column off already leaves residue; replaying a
-/// 174-column ring into an 80-column terminal stacked a pasted path four deep
-/// and left the pane scrolled to the bottom, which is the bug this guards.
-fn next_pty_size(cur: &mut PtySize, cols: u16, rows: u16) -> Option<PtySize> {
-    let want = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
-    if *cur == want {
-        return None;
-    }
-    *cur = want;
-    Some(want)
-}
-
-impl Shell {
-    /// Resize the pty unless it is already that size.
-    fn resize(&mut self, cols: u16, rows: u16) -> Result<(), String> {
-        match next_pty_size(&mut self.size, cols, rows) {
-            Some(want) => self.master.resize(want).map_err(|e| e.to_string()),
-            None => Ok(()),
-        }
-    }
-}
-
-/// (repo, slug, 1-based tab index) — the webview never names a shell, same rule
-/// as the tmux sessions.
-type ShellKey = (String, String, u32);
-
-#[derive(Default)]
-struct Shells(Mutex<HashMap<ShellKey, Shell>>);
-
-fn kill_shell(shells: &Shells, key: &ShellKey) {
-    if let Some(mut sh) = shells.0.lock().unwrap().remove(key) {
-        sh.stop.store(true, Ordering::Relaxed);
-        let _ = sh.child.kill();
-    }
-}
-
-/// Every dock shell of one place. Called when the place is closed or removed —
-/// core's `kill_shell_sidecars` handles the tmux era, but it can't see this map.
-fn kill_place_shells(shells: &Shells, repo: &str, slug: &str) {
-    let keys: Vec<ShellKey> = shells
-        .0
-        .lock()
-        .unwrap()
-        .keys()
-        .filter(|(r, s, _)| r == repo && s == slug)
-        .cloned()
-        .collect();
-    for k in &keys {
-        kill_shell(shells, k);
-    }
-}
-
-/// What `shell_open` answers: the attach generation `shell_detach` must
-/// present, how many bytes were pushed down the channel FIRST, and the grid
-/// those bytes were laid out for.
-///
-/// `replay` is a live shell's ring on a re-attach — and, since tabs started
-/// keeping their scrollback between runs, a fresh spawn's RESTORED ring plus its
-/// seam. Both are recordings; only a spawn with nothing saved still answers 0.
-///
-/// The frontend needs it so it can tell the replay from live output.
-/// The replay is a recording, and a recording must not be answered: any
-/// terminal query in it (vim's DA2 / cursor-position / colour / cursor-blink
-/// burst, say — every `git commit` without `-m` leaves one in the ring) is
-/// re-issued to a FRESH xterm on every re-attach, and xterm dutifully replies
-/// down the pty, where zsh echoes the printable tail of each reply onto the
-/// prompt as if typed. The pane mutes its `onData` until the replay is parsed;
-/// it cannot key that on "arrived before `shell_open` returned", because Tauri
-/// hands a large channel payload to the page through a separate fetch that can
-/// land AFTER the invoke's own response. What IS ordered is the channel: the
-/// snapshot is its first message whenever `replay > 0`.
-///
-/// `replay_cols` is the width the recording was written at. Raw bytes do not
-/// re-wrap, so replaying them into a different grid stacks every full line — the
-/// defect ROADMAP.md parks under "terminal-state serialization". The pane is
-/// always attaching a BRAND-NEW xterm, so it can hand the recording the grid it
-/// was written for and let xterm reflow it back afterwards.
-#[derive(Serialize)]
-struct ShellAttach {
-    gen: u64,
-    replay: usize,
-    replay_cols: Option<u16>,
-}
-
-/// Start (or re-attach to) the dock shell for `index` and stream it to
-/// `on_bytes`; see `ShellAttach` for what it answers.
-/// Idempotent: a second call for a live shell just swaps the sink and replays —
-/// which is exactly what a tab flip or a dock re-open does.
-///
-/// The registry lock is held for the WHOLE body, spawn included. Two calls for
-/// the same key can be in flight at once (StrictMode double-mounts the pane's
-/// effect), and the old check-unlock-spawn-insert shape let both see an empty
-/// slot: two shells spawned, the second insert winning, the first leaked as an
-/// orphan no sweep could see. The spawn is a few ms and there's one webview —
-/// serializing every shell command through it is the cheap correct answer.
 #[tauri::command]
 async fn shell_open(
     app: AppHandle,
@@ -4006,259 +1216,46 @@ async fn shell_open(
     cols: u16,
     rows: u16,
     on_bytes: Channel<InvokeResponseBody>,
-    shells: State<'_, Shells>,
-) -> Result<ShellAttach, String> {
-    let key: ShellKey = (repo.clone(), slug.clone(), index);
-    let mut map = shells.0.lock().unwrap();
-    if let Some(sh) = map.get_mut(&key) {
-        // The grid the ring was written for, read BEFORE the resize below moves
-        // it. This is the pane's reflow input (see `ShellAttach::replay_cols`) —
-        // a tab flip after a ⌘B or a window drag is exactly the case where the
-        // recording and the terminal about to render it disagree.
-        let was_cols = sh.size.cols;
-        // ring THEN sink, the same order the reader takes them — otherwise a
-        // write landing mid-replay is either sent twice or dropped
-        let ring = sh.ring.lock().unwrap();
-        let mut sink = sh.sink.lock().unwrap();
-        let snapshot: Vec<u8> = ring.iter().copied().collect();
-        let replay = snapshot.len();
-        if replay > 0 {
-            let _ = on_bytes.send(InvokeResponseBody::Raw(snapshot));
-        }
-        *sink = Some(on_bytes);
-        drop(sink);
-        drop(ring);
-        // Replay THEN resize, and only if the size really moved. The order is
-        // the ring/sink one above (a resize before the snapshot would let the
-        // SIGWINCH redraw land in neither); the suppression is what keeps a tab
-        // flip from feeding the ring a redraw per attach.
-        let _ = sh.resize(cols, rows);
-        sh.gen += 1;
-        return Ok(ShellAttach { gen: sh.gen, replay, replay_cols: (replay > 0).then_some(was_cols) });
-    }
-
-    let (session, cwd) = place_session_cwd(&repo, &slug)?;
-    // One-time cleanup for anyone upgrading: their `<session>~term*` sidecars
-    // are orphans now — nothing will ever attach them again. Cheap and
-    // idempotent, and only reached when this place has no shell yet. (Runs
-    // under the registry lock — a tmux round-trip, but only on first open.)
-    if worktrees_core::tmux::have_tmux() {
-        worktrees_core::tmux::kill_shell_sidecars(&session);
-    }
-
-    let size = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
-    let pair = native_pty_system().openpty(size).map_err(|e| e.to_string())?;
-
-    // A LOGIN shell, like Terminal.app: it sources the user's profile, so the
-    // shell has the real PATH even though this process was launched by launchd
-    // with a bare one (fixup_gui_path covers our own shell-outs, not this).
-    let shell_bin = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-    let mut cmd = CommandBuilder::new(&shell_bin);
-    cmd.arg("-l");
-    // Only the SPAWN path consults the memory: a re-attach above returned long
-    // ago, and that shell's cwd is whatever the user has since cd'd to.
-    let saved = remembered_dir(&read_cwds(&app), &repo, &slug, index);
-    cmd.cwd(pick_start_dir(saved.as_deref(), &cwd));
-    cmd.env("TERM", "xterm-256color");
-    // This tab's own command history, where the shell can be pointed at one.
-    // Both preferences are read ONCE here: with either on, the tree is resolved
-    // (and created); with both off, nothing on disk is touched at all, which is
-    // what a switch that is off should mean.
-    let want_hist = PER_TAB_HISTORY.load(Ordering::Relaxed);
-    let want_scroll = PERSIST_SCROLLBACK.load(Ordering::Relaxed);
-    let hist_root = (want_hist || want_scroll).then(|| term_hist_dir(&app).ok()).flatten();
-    if want_hist {
-        if let Some(root) = hist_root.as_deref() {
-            // Stamped only when a per-tab shell directory was really created:
-            // that directory is the one thing here no scrollback flush would
-            // write a meta for, and a directory with no meta is one no sweep can
-            // ever collect.
-            if apply_tab_history_env(&mut cmd, root, &key, &shell_bin).is_some() {
-                ensure_meta(root, &key, cols);
-            }
-        }
-    }
-
-    let child = pair.slave.spawn_command(cmd).map_err(|e| {
-        applog("error", &format!("shell_open {slug}#{index}: spawn {shell_bin} failed: {e}"));
-        e.to_string()
-    })?;
-    drop(pair.slave);
-
-    let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
-    let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
-
-    // A tab that ran before this app did starts with its own history: the ring
-    // saved on the last run, replayed into the fresh xterm exactly as a tab flip
-    // replays a live one.
-    //
-    // Sent BEFORE `sink` exists and before the reader thread is spawned, so
-    // nothing the new shell writes can get in front of it — its early output
-    // sits in the pty buffer meanwhile with no reader to forward it. The
-    // ordering is true by construction here, not by a lock.
-    let restored = want_scroll.then(|| hist_root.as_deref().and_then(|root| read_scrollback(root, &key))).flatten();
-    let mut seed = VecDeque::<u8>::with_capacity(8192);
-    let (mut replay, mut replay_cols) = (0usize, None);
-    if let Some((bytes, meta)) = restored {
-        let payload = restore_payload(&bytes, meta.at);
-        if !payload.is_empty() {
-            replay = payload.len();
-            replay_cols = Some(meta.cols);
-            // Ring and channel get the SAME bytes, seam included — a re-attach
-            // replays the ring and nothing else, so anything left out of it is
-            // gone the first time the tab is flipped away from. See
-            // `restore_payload`.
-            seed.extend(payload.iter().copied());
-            let _ = on_bytes.send(InvokeResponseBody::Raw(payload));
-        }
-    }
-
-    let ring = Arc::new(Mutex::new(seed));
-    let sink = Arc::new(Mutex::new(Some(on_bytes)));
-    let stop = Arc::new(AtomicBool::new(false));
-    let dirty = Arc::new(AtomicBool::new(false));
-
-    let (r_ring, r_sink, r_stop, r_dirty) =
-        (ring.clone(), sink.clone(), stop.clone(), dirty.clone());
-    let exit_key = key.clone();
-    thread::spawn(move || {
-        let mut buf = [0u8; 16384];
-        loop {
-            if r_stop.load(Ordering::Relaxed) {
-                return; // closed deliberately — no exit event
-            }
-            match reader.read(&mut buf) {
-                Ok(0) => break,
-                Ok(n) => {
-                    let chunk = &buf[..n];
-                    let mut ring = r_ring.lock().unwrap();
-                    ring.extend(chunk.iter().copied());
-                    let overflow = ring.len().saturating_sub(SHELL_RING);
-                    ring.drain(..overflow);
-                    r_dirty.store(true, Ordering::Relaxed);
-                    // held together with the ring (see the re-attach comment)
-                    if let Some(ch) = r_sink.lock().unwrap().as_ref() {
-                        if ch.send(InvokeResponseBody::Raw(chunk.to_vec())).is_err() {
-                            break; // webview gone
-                        }
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-        // The shell itself exited (`exit`, or it died). The tab stays — the
-        // frontend offers a restart rather than silently vanishing.
-        if !r_stop.load(Ordering::Relaxed) {
-            let (repo, slug, index) = exit_key;
-            let _ = app.emit("shell:exit", serde_json::json!({ "repo": repo, "slug": slug, "index": index }));
-        }
-    });
-
-    map.insert(key, Shell { master: pair.master, writer, child, stop, ring, sink, gen: 1, size, dirty });
-    Ok(ShellAttach { gen: 1, replay, replay_cols })
+) -> Result<worktrees_api::term::ShellAttach, String> {
+    let c = ctx(&app);
+    worktrees_api::term::shell_open(&c, repo, slug, index, cols, rows, std::sync::Arc::new(TauriBytes(on_bytes)), &c.shells)
 }
 
 #[tauri::command]
-async fn shell_write(repo: String, slug: String, index: u32, data: Vec<u8>, shells: State<'_, Shells>) -> Result<(), String> {
-    let mut map = shells.0.lock().unwrap();
-    let sh = map.get_mut(&(repo, slug, index)).ok_or("no such shell")?;
-    sh.writer.write_all(&data).map_err(|e| e.to_string())?;
-    sh.writer.flush().map_err(|e| e.to_string())
+async fn shell_write(
+    app: AppHandle,
+    repo: String,
+    slug: String,
+    index: u32,
+    data: Vec<u8>,
+) -> Result<(), String> {
+    worktrees_api::term::shell_write(repo, slug, index, data, &ctx(&app).shells)
 }
 
 #[tauri::command]
-async fn shell_resize(repo: String, slug: String, index: u32, cols: u16, rows: u16, shells: State<'_, Shells>) -> Result<(), String> {
-    let mut map = shells.0.lock().unwrap();
-    let sh = map.get_mut(&(repo, slug, index)).ok_or("no such shell")?;
-    sh.resize(cols, rows)
+async fn shell_resize(
+    app: AppHandle,
+    repo: String,
+    slug: String,
+    index: u32,
+    cols: u16,
+    rows: u16,
+) -> Result<(), String> {
+    worktrees_api::term::shell_resize(repo, slug, index, cols, rows, &ctx(&app).shells)
 }
 
-/// Stop streaming; the shell keeps running. This is the unmount path — a tab
-/// flip or ⌘J must not kill what you left building. `gen` names the attach
-/// being undone: a detach that lost the race to a newer attach is a no-op
-/// instead of clearing the newcomer's sink (see `Shell::gen`).
 #[tauri::command]
-async fn shell_detach(repo: String, slug: String, index: u32, gen: u64, shells: State<'_, Shells>) -> Result<(), String> {
-    let map = shells.0.lock().unwrap();
-    if let Some(sh) = map.get(&(repo, slug, index)) {
-        if sh.gen == gen {
-            *sh.sink.lock().unwrap() = None;
-        }
-    }
-    Ok(())
+async fn shell_detach(
+    app: AppHandle,
+    repo: String,
+    slug: String,
+    index: u32,
+    gen: u64,
+) -> Result<(), String> {
+    worktrees_api::term::shell_detach(repo, slug, index, gen, &ctx(&app).shells)
 }
 
-/// GUI-launched apps inherit launchd's bare PATH (/usr/bin:/bin:…) — no
-/// homebrew, no ~/.local/bin — so the engine's tmux/git shell-outs fail even
-/// though they work in every terminal (tmux is homebrew-installed: every place
-/// looks dead and Enter errors). Resolve the user's real PATH from their login
-/// shell once at startup (marker-wrapped so chatty profiles can't corrupt it;
-/// deadline-guarded so a hung profile can't block launch).
-///
-/// The usual install dirs are ALWAYS appended, not just when the probe fails:
-/// a login shell whose profile never runs `brew shellenv` reports a PATH with no
-/// /opt/homebrew/bin in it, and a brew-installed tmux would stay invisible even
-/// though the probe "worked". Order is shell PATH → standard dirs → the original
-/// PATH as a safety net, so the user's own resolution still wins; duplicate
-/// entries are harmless.
-///
-/// Re-entrant on purpose: `tmux_check(refresh = true)` calls it again to pick up
-/// a tmux installed after launch.
-fn fixup_gui_path() {
-    let current = std::env::var("PATH").unwrap_or_default();
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-    let mut cmd = std::process::Command::new(&shell);
-    cmd.args(["-lc", r#"printf '\n__WTPATH__%s' "$PATH""#]);
-    let from_shell = run_deadline(cmd, 5)
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .rsplit("__WTPATH__")
-                .next()
-                .map(|p| p.trim().to_string())
-        })
-        .filter(|p| !p.is_empty());
-    let home = std::env::var("HOME").unwrap_or_default();
-    let std_dirs = format!("{home}/.local/bin:{home}/bin:/opt/homebrew/bin:/usr/local/bin");
-    // dups harmless; `current` kept as the final safety net
-    let path = match from_shell {
-        Some(p) => format!("{p}:{std_dirs}:{current}"),
-        None => format!("{std_dirs}:{current}"),
-    };
-    std::env::set_var("PATH", path);
-    // The Codex VS Code extension bundles a usable CLI but does not always
-    // put it on the GUI app's PATH. Its parent directory also lets the tmux
-    // launch use the same `codex` command that MCP setup resolves below.
-    if worktrees_core::profile::bin_on_path("codex").is_none() {
-        if let Some(dir) = worktrees_core::profile::codex_bin().and_then(|p| p.parent().map(Path::to_path_buf)) {
-            let current = std::env::var("PATH").unwrap_or_default();
-            std::env::set_var("PATH", format!("{}:{current}", dir.display()));
-        }
-    }
-}
 
-/// Is tmux reachable right now? `refresh = true` re-resolves the GUI PATH first,
-/// so a tmux installed AFTER the app launched is picked up without a restart
-/// (startup resolves PATH exactly once). Async is not optional here: the
-/// login-shell probe inside `fixup_gui_path` is deadline-guarded at 5s, and a
-/// sync handler would spend all of it frozen on the main thread.
-#[tauri::command]
-async fn tmux_check(refresh: bool) -> Result<bool, String> {
-    if !refresh {
-        return Ok(worktrees_core::tmux::have_tmux());
-    }
-    let before = worktrees_core::tmux::have_tmux();
-    fixup_gui_path();
-    let after = worktrees_core::tmux::have_tmux();
-    if after && !before {
-        applog(
-            "info",
-            &format!("tmux_check: tmux found after PATH refresh; PATH={}", std::env::var("PATH").unwrap_or_default()),
-        );
-    }
-    Ok(after)
-}
 
 /// App-wide zoom — WKWebView's `setPageZoom`, driven by ⌘+ / ⌘− / ⌘0.
 ///
@@ -4289,20 +1286,6 @@ async fn set_zoom(window: tauri::WebviewWindow, factor: f64) -> Result<(), Strin
     })
 }
 
-/// Same launchd-bare-env problem as PATH, but for locale: GUI-launched apps
-/// have no LC_ALL/LC_CTYPE/LANG, so everything we spawn (tmux server via the
-/// engine's shell-outs, shells inside sessions) runs locale-less. The embedded
-/// tmux client is already covered by `-u` in term_open; this covers the server
-/// side when this app is the first tmux invocation.
-fn fixup_gui_locale() {
-    let has_utf8 = ["LC_ALL", "LC_CTYPE", "LANG"]
-        .iter()
-        .filter_map(|k| std::env::var(k).ok())
-        .any(|v| v.to_uppercase().contains("UTF-8") || v.to_uppercase().contains("UTF8"));
-    if !has_utf8 {
-        std::env::set_var("LANG", "en_US.UTF-8");
-    }
-}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -4316,8 +1299,8 @@ pub fn run() {
         applog("panic", &info.to_string());
         prev_hook(info);
     }));
-    fixup_gui_path();
-    fixup_gui_locale();
+    worktrees_api::hostenv::fixup_gui_path();
+    worktrees_api::hostenv::fixup_gui_locale();
     applog(
         "info",
         &format!("startup v{} PATH={}", env!("CARGO_PKG_VERSION"), std::env::var("PATH").unwrap_or_default()),
@@ -4366,10 +1349,10 @@ pub fn run() {
             ));
             Ok(())
         })
-        .manage(Terminals::default())
-        .manage(Shells::default())
-        .manage(DocNameIndex::default())
-        .manage(viewer::Viewer::default())
+        // The four registries that used to be `.manage()`d separately are
+        // fields on the `Ctx` built in `.setup()` above — one object for the
+        // process, so a wrapper resolves them all from the same place. Only
+        // the window tracker stays here: it IS the window.
         .manage(winstate::Tracker::default())
         .setup(|app| {
             // A crash is the one exit `RunEvent::Exit` never sees, and it
@@ -4545,11 +1528,11 @@ pub fn run() {
                 backfill_worked(&pollctx);
                 // Same cold-start slot: drop remembered directories for places
                 // that were removed while the app was closed.
-                forget_vanished_places(&handle);
+                worktrees_api::term::forget_vanished_places(&pollctx);
                 // Same cold-start slot, same reasoning one level out: drop saved
                 // scrollback for places that are gone, and anything past the age
                 // horizon.
-                sweep_term_history(&handle);
+                worktrees_api::term::sweep_term_history(&pollctx);
                 loop {
                     std::thread::sleep(Duration::from_secs(3));
                     let interval = FETCH_INTERVAL_SECS.load(Ordering::Relaxed);
@@ -4608,8 +1591,8 @@ pub fn run() {
                     cwd_ticks += 1;
                     if cwd_ticks >= 5 {
                         cwd_ticks = 0;
-                        save_shell_cwds(&handle, &handle.state::<Shells>());
-                        save_shell_scrollback(&handle, &handle.state::<Shells>());
+                        worktrees_api::term::save_shell_cwds(&pollctx, &pollctx.shells);
+                        worktrees_api::term::save_shell_scrollback(&pollctx, &pollctx.shells);
                     }
                     let fp = worktrees_core::tmux::session_fingerprint();
                     ticks += 1;
@@ -4890,23 +1873,24 @@ pub fn run() {
             }
             if matches!(event, tauri::RunEvent::Exit) {
                 winstate::stop(handle);
-                let shells = handle.state::<Shells>();
+                let c = ctx(handle);
                 // Where each tab ended up, recorded BEFORE the sweep — a killed
                 // shell has no cwd left to read.
-                save_shell_cwds(handle, &shells);
+                worktrees_api::term::save_shell_cwds(&c, &c.shells);
                 // …and what each tab was SHOWING, likewise before the sweep: a
                 // killed shell still has its ring, but it will not have it long.
-                save_shell_scrollback(handle, &shells);
-                let keys: Vec<ShellKey> = shells.0.lock().unwrap().keys().cloned().collect();
+                worktrees_api::term::save_shell_scrollback(&c, &c.shells);
+                let keys: Vec<worktrees_api::term::ShellKey> =
+                    c.shells.0.lock().unwrap().keys().cloned().collect();
                 for k in &keys {
-                    kill_shell(&shells, k);
+                    worktrees_api::term::kill_shell(&c.shells, k);
                 }
                 // And the documentation server, for a harder reason than the
                 // shells': what it is holding is a loopback port onto the
                 // user's documents. Surviving the window would mean serving
                 // them to whatever finds the port, with nothing on screen to
                 // say it is still running.
-                viewer::kill(&handle.state::<viewer::Viewer>());
+                viewer::kill(&c.viewer);
                 // In-flight clones: cancel, and give core a moment to kill
                 // git's group and remove the partial folder (the guard leaves
                 // the map when that is done). Bounded — exit must not hang.
@@ -4931,134 +1915,13 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
 
-    /// "Ask (main)" pastes into a composer the user is not looking at, so the
-    /// paste is refused where it would glue onto typing or answer a modal —
-    /// and goes through on an empty prompt, for each provider that has a
-    /// reader for its composer.
-    #[test]
-    fn ask_main_refuses_a_draft_or_a_modal_and_takes_an_empty_prompt() {
-        use super::ask_main_refusal;
-        use worktrees_core::pi::PiScreen;
-        let empty = "─────────\n❯ \n─────────\n  ⏵⏵ auto mode on\n";
-        let typed = "─────────\n❯ half a thought\n─────────\n  ⏵⏵ auto mode on\n";
-        assert_eq!(ask_main_refusal("claude", empty, empty, false, None), None);
-        assert!(ask_main_refusal("claude", typed, typed, false, None).unwrap().contains("unsent text"));
-        assert!(ask_main_refusal("claude", empty, empty, true, None).unwrap().contains("asking you"));
-        // Claude's own DIM suggestion is not typing — only the `-e` capture
-        // can tell, so plain and styled differ here on purpose.
-        let sugg_plain = "─────\n❯\u{a0}suggested\n─────\n";
-        let sugg_styled = "─────\n\u{1b}[2m❯\u{a0}suggested\u{1b}[0m\n─────\n";
-        assert_eq!(ask_main_refusal("claude", sugg_plain, sugg_styled, false, None), None);
-        // No input box at all (a selector, the trust prompt) is not "empty".
-        let selector = "Do you trust this folder?\n\n❯ No, exit\n  Yes, I trust this folder\n";
-        assert!(ask_main_refusal("claude", selector, selector, false, None).unwrap().contains("couldn't read"));
-
-        let c_empty = include_str!("../../../crates/worktrees-core/tests/fixtures/codex-send/empty.txt");
-        let c_typed = include_str!("../../../crates/worktrees-core/tests/fixtures/codex-send/typed.txt");
-        assert_eq!(ask_main_refusal("codex", c_empty, "", false, None), None);
-        assert!(ask_main_refusal("codex", c_typed, "", false, None).unwrap().contains("unsent text"));
-        assert!(ask_main_refusal("codex", "not a codex screen", "", false, None).unwrap().contains("couldn't read"));
-        let c_modal = include_str!("../../../crates/worktrees-core/tests/fixtures/codex-send/probe-approval.txt");
-        assert!(ask_main_refusal("codex", c_modal, "", false, None).unwrap().contains("asking you"));
-
-        assert_eq!(ask_main_refusal("pi", "", "", false, Some(Some(PiScreen::Other))), None);
-        assert!(ask_main_refusal("pi", "", "", false, Some(Some(PiScreen::TrustModal))).is_some());
-        assert!(ask_main_refusal("pi", "", "", false, Some(None)).is_some());
-    }
 
 
 
 
 
 
-    /// The rules behind a terminal link: a FILE, inside a registered project,
-    /// found from the first base that has it; `~/` and git's `a/`/`b/`.
-    #[test]
-    fn a_terminal_path_is_a_link_only_to_a_file_the_viewer_can_open() {
-        use super::resolve_term_path as r;
-        let base = std::env::temp_dir().join(format!("wt-termpath-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        let proj = base.join("proj");
-        let sub = proj.join("app");
-        std::fs::create_dir_all(sub.join("src")).unwrap();
-        std::fs::write(proj.join("README.md"), "x").unwrap();
-        std::fs::write(sub.join("src/a.ts"), "x").unwrap();
-        std::fs::write(proj.join("only-root.md"), "x").unwrap();
-        std::fs::write(base.join("outside.md"), "x").unwrap();
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(base.join("outside.md"), proj.join("sneaky.md")).unwrap();
-        let canon = |p: &Path| std::fs::canonicalize(p).unwrap().to_string_lossy().into_owned();
-        let roots = vec![std::fs::canonicalize(&proj).unwrap()];
-        let bases = vec![sub.clone(), proj.clone()];
-        let home = Some(proj.as_path());
 
-        assert_eq!(r("src/a.ts", &bases, home, &roots), Some(canon(&sub.join("src/a.ts"))), "first base (a shell's cwd)");
-        assert_eq!(r("only-root.md", &bases, home, &roots), Some(canon(&proj.join("only-root.md"))), "falls back to the place root");
-        assert_eq!(r("../README.md", &bases, home, &roots), Some(canon(&proj.join("README.md"))));
-        assert_eq!(r(&proj.join("README.md").to_string_lossy(), &bases, home, &roots), Some(canon(&proj.join("README.md"))));
-        assert_eq!(r("~/README.md", &bases, home, &roots), Some(canon(&proj.join("README.md"))), "~/ is HOME");
-        assert_eq!(r("b/src/a.ts", &bases, home, &roots), Some(canon(&sub.join("src/a.ts"))), "git diff's b/ prefix");
-        assert_eq!(r("src", &bases, home, &roots), None, "a directory is not a link");
-        assert_eq!(r("and/or", &bases, home, &roots), None, "nothing there");
-        assert_eq!(r("../outside.md", &bases, home, &roots), None, "outside every project");
-        assert_eq!(r(&base.join("outside.md").to_string_lossy(), &bases, home, &roots), None);
-        #[cfg(unix)]
-        assert_eq!(r("sneaky.md", &bases, home, &roots), None, "a symlink is judged by where it LANDS");
-        assert_eq!(r("", &bases, home, &roots), None);
-
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    /// A markdown document's paths: the doc's own directory before the root,
-    /// the terminal's rules for everything that has a `/`, and a bare name
-    /// looked up in the name index — whose answers are re-checked by the same
-    /// resolver, so a stale index entry or an escaping symlink is no link.
-    #[test]
-    fn a_markdown_path_resolves_like_a_terminal_one_and_a_bare_name_by_index() {
-        use super::{basename_index, resolve_doc_path as r, DocPathHit};
-        let base = std::env::temp_dir().join(format!("wt-docpath-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        let proj = base.join("proj");
-        let plan = proj.join(".planning");
-        std::fs::create_dir_all(proj.join("app/src")).unwrap();
-        std::fs::create_dir_all(proj.join("crates/core/src")).unwrap();
-        std::fs::create_dir_all(&plan).unwrap();
-        std::fs::write(proj.join("findings.md"), "root").unwrap();
-        std::fs::write(plan.join("findings.md"), "beside the doc").unwrap();
-        std::fs::write(proj.join("app/src/App.tsx"), "x").unwrap();
-        std::fs::write(proj.join("app/src/lib.rs"), "x").unwrap();
-        std::fs::write(proj.join("crates/core/src/lib.rs"), "x").unwrap();
-        std::fs::write(base.join("outside.rs"), "x").unwrap();
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(base.join("outside.rs"), proj.join("app/src/sneaky.rs")).unwrap();
-        let canon = |p: &Path| std::fs::canonicalize(p).unwrap().to_string_lossy().into_owned();
-        let roots = vec![std::fs::canonicalize(&proj).unwrap()];
-        let bases = vec![plan.clone(), proj.clone()];
-        let listing = b"findings.md\0.planning/findings.md\0app/src/App.tsx\0app/src/lib.rs\0crates/core/src/lib.rs\0app/src/sneaky.rs\0app/src/gone.ts\0";
-        let idx = Arc::new(basename_index(listing));
-        assert_eq!(idx["lib.rs"], ["app/src/lib.rs", "crates/core/src/lib.rs"]);
-        let built = std::cell::Cell::new(0);
-        let mut index = || { built.set(built.get() + 1); Some(idx.clone()) };
-        let one = |abs: String, rel: &str| vec![DocPathHit { path: abs, rel: rel.into() }];
-
-        assert_eq!(r("findings.md", &bases, None, &roots, &proj, &mut index), one(canon(&plan.join("findings.md")), ".planning/findings.md"), "the doc's own directory first");
-        assert_eq!(r("app/src/App.tsx", &bases, None, &roots, &proj, &mut index), one(canon(&proj.join("app/src/App.tsx")), "app/src/App.tsx"), "then the place root");
-        assert_eq!(r("b/app/src/App.tsx", &bases, None, &roots, &proj, &mut index).len(), 1, "git's b/ prefix, as in a terminal");
-        assert_eq!(built.get(), 0, "a path that stats never touches the index");
-        assert_eq!(r("App.tsx", &bases, None, &roots, &proj, &mut index), one(canon(&proj.join("app/src/App.tsx")), "app/src/App.tsx"), "a bare name, by index");
-        let two = r("lib.rs", &bases, None, &roots, &proj, &mut index);
-        assert_eq!(two.iter().map(|h| h.rel.as_str()).collect::<Vec<_>>(), ["app/src/lib.rs", "crates/core/src/lib.rs"], "several = the click asks");
-        assert!(r("gone.ts", &bases, None, &roots, &proj, &mut index).is_empty(), "an index entry that is no longer a file");
-        #[cfg(unix)]
-        assert!(r("sneaky.rs", &bases, None, &roots, &proj, &mut index).is_empty(), "an index entry that leads outside");
-        let before = built.get();
-        assert!(r("src/nope.rs", &bases, None, &roots, &proj, &mut index).is_empty(), "a missing PATH is not a name lookup");
-        assert!(r("Makefile", &bases, None, &roots, &proj, &mut index).is_empty(), "no extension, no lookup");
-        assert_eq!(built.get(), before);
-        assert!(r("../outside.rs", &bases, None, &roots, &proj, &mut index).is_empty(), "outside every project");
-
-        let _ = std::fs::remove_dir_all(&base);
-    }
 
     use super::*;
 
@@ -5076,45 +1939,7 @@ mod tests {
     }
 
 
-    /// The wheel's routing table, and the one invocation each row runs. The
-    /// argv is what the throwaway-server probe in the PR was run against.
-    #[test]
-    fn wheel_scrolls_history_only_where_there_is_history() {
-        // pi / a shell: main screen, not scrolled back
-        assert_eq!(wheel_plan("", false, true), Wheel::EnterAndScroll);
-        assert_eq!(wheel_plan("", false, false), Wheel::Nothing);
-        // already reading history: both directions move through it
-        assert_eq!(wheel_plan("copy-mode", false, true), Wheel::Scroll);
-        assert_eq!(wheel_plan("copy-mode", false, false), Wheel::Scroll);
-        assert_eq!(wheel_plan("copy-mode", true, false), Wheel::Scroll);
-        assert_eq!(wheel_plan("view-mode", false, true), Wheel::Scroll);
-        // alternate screen, no mouse: arrows, as xterm always sent
-        assert_eq!(wheel_plan("", true, true), Wheel::Keys);
-        assert_eq!(wheel_plan("", true, false), Wheel::Keys);
-        // a MENU mode (C-b w / C-b s): ↑/↓ moves its selection; scroll-up
-        // would fail "not in a mode" there
-        assert_eq!(wheel_plan("tree-mode", false, true), Wheel::Keys);
-        assert_eq!(wheel_plan("buffer-mode", true, false), Wheel::Keys);
 
-        let a = |plan, lines| wheel_args("%7", &plan, lines).map(|v| v.join(" "));
-        assert_eq!(a(Wheel::EnterAndScroll, -3).as_deref(), Some("copy-mode -e -t %7 ; send-keys -X -N 3 -t %7 scroll-up"));
-        assert_eq!(a(Wheel::Scroll, 5).as_deref(), Some("send-keys -X -N 5 -t %7 scroll-down"));
-        assert_eq!(a(Wheel::Keys, -2).as_deref(), Some("send-keys -N 2 -t %7 Up"));
-        assert_eq!(a(Wheel::Keys, 1).as_deref(), Some("send-keys -N 1 -t %7 Down"));
-        assert_eq!(a(Wheel::Nothing, 4), None);
-    }
-
-    /// Attaching to a pane that is already reading history must arm the
-    /// cancel, or the first keys typed are copy-mode commands.
-    #[test]
-    fn attach_to_a_scrolled_back_pane_arms_the_cancel() {
-        assert_eq!(scrolled_at_attach("%12 copy-mode\n").as_deref(), Some("%12"));
-        assert_eq!(scrolled_at_attach("%12 view-mode\n").as_deref(), Some("%12"));
-        assert_eq!(scrolled_at_attach("%12 \n"), None, "live pane");
-        assert_eq!(scrolled_at_attach("%12\n"), None, "live pane, field trimmed");
-        assert_eq!(scrolled_at_attach("%12 tree-mode\n"), None, "a menu, not history");
-        assert_eq!(scrolled_at_attach(""), None, "no pane");
-    }
 
 
     fn v(paths: &[&str]) -> Vec<String> {
@@ -5140,1057 +1965,47 @@ mod tests {
 
 
 
-    /// A cut patch must end on a line boundary. Half a line of source is
-    /// indistinguishable from a real line once it reaches the grid — it renders
-    /// as content, with a line number, and nothing says it is a fragment.
-    #[test]
-    fn trim_patch_cuts_on_a_line_boundary() {
-        let small = "@@ -1,1 +1,1 @@\n-a\n+b\n";
-        let (out, cut) = trim_patch(small);
-        assert_eq!(out, small, "a patch under the cap is returned untouched");
-        assert!(!cut);
-
-        // One line per 12 bytes, so the cap lands mid-line rather than on a
-        // boundary by luck — a cap that happened to fall on "\n" would pass
-        // whether or not the boundary logic existed.
-        let big: String = std::iter::repeat(" 0123456789\n").take(DIFF_MAX / 12 + 200).collect();
-        let (out, cut) = trim_patch(&big);
-        assert!(cut, "past the cap it reports truncation");
-        assert!(out.len() <= DIFF_MAX, "never longer than the cap: {}", out.len());
-        assert!(out.ends_with('\n'), "cut on a boundary, not mid-line");
-        assert!(big.starts_with(&out), "the kept part is a prefix of the original");
-    }
-
-    /// Multi-byte characters must not be split. `is_char_boundary` is the guard;
-    /// without it `&patch[..DIFF_MAX]` panics instead of returning a short patch.
-    #[test]
-    fn trim_patch_respects_utf8_boundaries() {
-        // The fixture only tests the guard if the cap lands INSIDE a character,
-        // and whether it does is pure arithmetic on the line length: the first
-        // version of this test used a 7-byte line, `DIFF_MAX % 7 == 2` fell on a
-        // boundary, and the test passed with the guard deleted. Hence the
-        // assertion below — it fails loudly if a future DIFF_MAX makes the
-        // fixture stop straddling.
-        let big: String = std::iter::repeat(" …abcd\n").take(DIFF_MAX / 9 + 200).collect();
-        assert!(
-            !big.is_char_boundary(DIFF_MAX),
-            "fixture no longer straddles a character at the cap — it would pass without the guard",
-        );
-        let (out, cut) = trim_patch(&big);
-        assert!(cut);
-        assert!(out.len() <= DIFF_MAX);
-        assert!(out.ends_with('\n'), "still cut on a line boundary");
-        assert!(big.starts_with(&out));
-    }
-
-    /// Real repos, because the whole question is what git exits with — a fake
-    /// would be asserting my own assumptions back at me. Both cases below
-    /// rendered as "no changes" before the fix, over a row the tree had lit.
-    #[test]
-    fn a_repo_with_no_commits_reports_every_line_as_new() {
-        let base = std::env::temp_dir().join(format!("wt-unborn-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).unwrap();
-        let cwd = base.to_string_lossy().to_string();
-        assert!(git::git_ok(&cwd, &["init", "-q"]), "git init");
-        let f = base.join("f.txt");
-        std::fs::write(&f, "hello\n").unwrap();
-        // STAGED, so `ls-files --error-unmatch` succeeds and the untracked arm
-        // above does NOT catch it — that is exactly what made this reachable.
-        assert!(git::git_ok(&cwd, &["add", "f.txt"]), "git add");
-        assert!(!git::has_commits(&cwd), "fixture must have an unborn HEAD");
-        assert!(
-            git::git_ok(&cwd, &["ls-files", "--error-unmatch", "--", "f.txt"]),
-            "fixture must be TRACKED, or it proves nothing",
-        );
-
-        let d = file_diff_for(&f, false).expect("must not error");
-        assert!(d.untracked, "no commits means no before: every line is new");
-        assert!(d.patch.is_empty(), "the frontend builds the rows from content");
-        assert!(!d.binary);
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    /// A tracked file in a normal repo still diffs — the guard above must not
-    /// have swallowed the ordinary path.
-    #[test]
-    fn a_committed_change_still_produces_a_patch() {
-        let base = std::env::temp_dir().join(format!("wt-diffok-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        std::fs::create_dir_all(&base).unwrap();
-        let cwd = base.to_string_lossy().to_string();
-        assert!(git::git_ok(&cwd, &["init", "-q"]));
-        let f = base.join("f.txt");
-        std::fs::write(&f, "one\n").unwrap();
-        assert!(git::git_ok(&cwd, &["add", "-A"]));
-        assert!(git::git_ok(&cwd, &["-c", "user.email=s@s", "-c", "user.name=s", "commit", "-qm", "base"]));
-        std::fs::write(&f, "one\ntwo\n").unwrap();
-
-        let d = file_diff_for(&f, true).expect("must not error");
-        assert!(!d.untracked, "the file is tracked and has a committed version");
-        assert!(d.patch.contains("+two"), "the working-tree change must be in the patch: {:?}", d.patch);
-        assert_eq!(d.against, "head");
-        let _ = std::fs::remove_dir_all(&base);
-    }
-
-    #[test]
-    fn binary_patches_are_recognised() {
-        assert!(patch_is_binary("diff --git a/x b/x\nBinary files a/x and b/x differ\n"));
-        assert!(patch_is_binary("diff --git a/x b/x\nGIT binary patch\nliteral 12\n"));
-        // A source line that merely mentions the phrase is not a marker: the
-        // test is on the LINE, and this one is a diff body line, so it starts
-        // with a marker character.
-        assert!(!patch_is_binary("@@ -1 +1 @@\n+// Binary files are skipped here\n"));
-    }
-
-    /// Real symlinks on a real filesystem — the whole point of the classifier is
-    /// what the syscalls answer, so a fake would test nothing. Torn down at the
-    /// end; a panic leaves a directory under $TMPDIR, which is what it is for.
-    #[test]
-    fn symlinks_report_target_shape_and_whether_they_leave_the_workspace() {
-        use std::os::unix::fs::symlink;
-        let base = std::env::temp_dir().join(format!("wt-symlink-{}", std::process::id()));
-        let root = base.join("project");
-        let outside = base.join("elsewhere");
-        std::fs::create_dir_all(root.join("sub")).unwrap();
-        std::fs::create_dir_all(&outside).unwrap();
-        std::fs::write(root.join("sub/file.txt"), b"x").unwrap();
-        std::fs::create_dir_all(root.join(".git/objects")).unwrap();
-        symlink("sub", root.join("inside")).unwrap(); // relative, in-workspace
-        symlink(root.join("sub/file.txt"), root.join("inside-file")).unwrap();
-        symlink(&outside, root.join("away")).unwrap(); // absolute, out
-        symlink(root.join("nope"), root.join("broken")).unwrap();
-        symlink(".git", root.join("g")).unwrap(); // the name-skip, routed around
-        let roots = vec![std::fs::canonicalize(&root).unwrap()];
-
-        let (is_dir, target, block) = classify_symlink(&root.join("inside"), &roots);
-        assert!(is_dir, "a link to a directory must read as a directory");
-        assert_eq!(target.as_deref(), Some("sub"), "a relative link stays relative");
-        assert_eq!(block, None, "target is inside the project root — followable");
-
-        let (is_dir, _, block) = classify_symlink(&root.join("inside-file"), &roots);
-        assert!(!is_dir);
-        assert_eq!(block, None);
-
-        let (is_dir, target, block) = classify_symlink(&root.join("away"), &roots);
-        assert!(is_dir);
-        assert!(target.unwrap().ends_with("elsewhere"));
-        assert_eq!(block, Some("outside"), "outside every root — must not be followed");
-
-        // A dangling link resolves nowhere, so it is a file for shape purposes
-        // and just as inert — but for a different reason than one pointing away,
-        // and the row says which.
-        let (is_dir, target, block) = classify_symlink(&root.join("broken"), &roots);
-        assert!(!is_dir);
-        assert!(target.is_some(), "the link still says where it MEANT to point");
-        assert_eq!(block, Some("missing"));
-
-        // `list_dir` drops `.git` by name, so a link is the way around it.
-        let (is_dir, _, block) = classify_symlink(&root.join("g"), &roots);
-        assert!(is_dir);
-        assert_eq!(block, Some("git"), "a link must not be a way back into .git");
-
-        // An ordinary directory is never mistaken for a link out.
-        assert!(under_roots(&roots, &std::fs::canonicalize(root.join("sub")).unwrap()));
-        std::fs::remove_dir_all(&base).unwrap();
-    }
 
 
-    // ── change set parsers ───────────────────────────────────────────────
-    // Fixtures are real `-z` output: NUL-TERMINATED records, not newlines.
 
-    use ChangeKind::*;
 
-    fn st(out: &str) -> Vec<(String, ChangeKind)> {
-        parse_status_z(out)
-    }
-    fn ns(out: &str) -> Vec<(String, ChangeKind)> {
-        parse_name_status_z(out)
-    }
-    fn p(s: &str, k: ChangeKind) -> (String, ChangeKind) {
-        (s.to_string(), k)
-    }
-    /// Records joined the way git emits them: NUL-TERMINATED, one per entry.
-    /// Built from a slice rather than one `\`-continued literal — the
-    /// continuation strips leading whitespace, which would silently eat the very
-    /// status column (` M`, ` D`) these fixtures exist to cover.
-    fn z(recs: &[&str]) -> String {
-        recs.iter().map(|r| format!("{r}\0")).collect()
-    }
 
-    #[test]
-    fn status_z_classifies_every_column_pair_the_tree_can_meet() {
-        let out = z(&[
-            " M src/App.tsx",
-            "M  src/lib.rs",
-            "MM Cargo.toml",
-            "A  src/new.rs",
-            "?? notes.md",
-            " D gone.txt",
-            "D  staged-gone.txt",
-            " T link",
-            "UU conflict.rs",
-        ]);
-        assert_eq!(
-            st(&out),
-            vec![
-                p("src/App.tsx", Modified),
-                p("src/lib.rs", Modified),
-                p("Cargo.toml", Modified),
-                p("src/new.rs", Added),
-                p("notes.md", Untracked),
-                p("gone.txt", Deleted),
-                p("staged-gone.txt", Deleted),
-                p("link", Modified),
-                p("conflict.rs", Modified),
-            ]
-        );
-    }
 
-    /// `AD` is added to the index and then removed from the worktree. There is no
-    /// row on disk to call "added", so it has to come back deleted — otherwise
-    /// the tree marks a directory and shows nothing inside it.
-    #[test]
-    fn status_z_reports_a_staged_add_deleted_from_the_worktree_as_deleted() {
-        assert_eq!(st("AD src/oops.rs\0"), vec![p("src/oops.rs", Deleted)]);
-    }
-
-    /// The original of a rename lives in the NEXT record, and it is gone from
-    /// disk — the ghost row the tree draws for it depends on this pair. A COPY's
-    /// source is still there, so it must not be reported.
-    #[test]
-    fn status_z_splits_a_rename_into_added_plus_deleted_and_leaves_a_copy_alone() {
-        assert_eq!(
-            st("R  new/name.rs\0old/name.rs\0"),
-            vec![p("new/name.rs", Added), p("old/name.rs", Deleted)]
-        );
-        assert_eq!(st("C  copy.rs\0orig.rs\0"), vec![p("copy.rs", Added)]);
-        // …and the extra field must be CONSUMED: a record after a rename is a
-        // status again, not a path.
-        assert_eq!(
-            st("R  a\0b\0?? c\0"),
-            vec![p("a", Added), p("b", Deleted), p("c", Untracked)]
-        );
-    }
-
-    /// A filename git would C-quote in the newline format arrives raw under `-z`
-    /// — including a space, which is why the path starts at byte 3 and is never
-    /// split on whitespace.
-    #[test]
-    fn status_z_keeps_paths_with_spaces_and_non_ascii_whole() {
-        assert_eq!(st("?? docs/my notes.md\0"), vec![p("docs/my notes.md", Untracked)]);
-        assert_eq!(st(" M docs/éclair 🎉.md\0"), vec![p("docs/éclair 🎉.md", Modified)]);
-    }
-
-    #[test]
-    fn status_z_ignores_junk_records() {
-        // `!!` only appears with --ignored, but the tree must not show ignored
-        // files as untracked if it ever does; a stub too short to hold a path is
-        // not a record.
-        assert_eq!(st("!! target/debug\0 M ok.rs\0"), vec![p("ok.rs", Modified)]);
-        assert_eq!(st("?? \0"), vec![]);
-        assert_eq!(st(""), vec![]);
-    }
-
-    #[test]
-    fn name_status_z_pairs_each_letter_with_its_path() {
-        let out = "M\0src/App.tsx\0A\0src/new.rs\0D\0old.rs\0T\0link\0";
-        assert_eq!(
-            ns(out),
-            vec![
-                p("src/App.tsx", Modified),
-                p("src/new.rs", Added),
-                p("old.rs", Deleted),
-                p("link", Modified),
-            ]
-        );
-    }
-
-    /// `R100`/`C75` carry a similarity score on the token and TWO paths after it.
-    /// Reading only one would pair the next record's status with a path.
-    #[test]
-    fn name_status_z_consumes_both_paths_of_a_rename() {
-        assert_eq!(
-            ns("R100\0old.rs\0new.rs\0M\0after.rs\0"),
-            vec![p("new.rs", Added), p("old.rs", Deleted), p("after.rs", Modified)]
-        );
-        assert_eq!(ns("C75\0orig.rs\0copy.rs\0"), vec![p("copy.rs", Added)]);
-    }
-
-    #[test]
-    fn name_status_z_stops_on_a_status_with_no_path() {
-        assert_eq!(ns("M\0a.rs\0M"), vec![p("a.rs", Modified)]);
-        assert_eq!(ns(""), vec![]);
-    }
-
-    /// The two calls' REAL output, captured verbatim from a scratch repo whose
-    /// branch carries one of every shape at once: a commit that modified, added,
-    /// deleted and renamed, then uncommitted work that modified, deleted, and
-    /// left an untracked file inside a brand-new directory. Both parsers are
-    /// covered above; this is the ONE case that asserts what the frontend
-    /// actually receives, and it is real bytes rather than a guess at the format.
-    #[test]
-    fn the_union_matches_what_git_printed_for_a_branch_with_every_shape() {
-        let diff = z(&[
-            "D", "docs/old.md",
-            "A", "src/added.rs",
-            "M", "src/mod.rs",
-            "R100", "src/moved-from.rs", "src/moved-to.rs",
-        ]);
-        let status = z(&[" M src/keep.rs", " D tools/gen.sh", "?? fresh/deep/untracked.txt"]);
-        let mut map: BTreeMap<String, ChangeKind> = BTreeMap::new();
-        for (k, v) in ns(&diff) {
-            map.insert(k, v);
-        }
-        for (k, v) in st(&status) {
-            map.insert(k, v);
-        }
-        let want: BTreeMap<String, ChangeKind> = [
-            // the rename's source is gone, so the tree gets a ghost for it
-            ("docs/old.md", Deleted),
-            ("src/moved-from.rs", Deleted),
-            ("tools/gen.sh", Deleted),
-            ("src/added.rs", Added),
-            ("src/moved-to.rs", Added),
-            ("src/mod.rs", Modified),
-            ("src/keep.rs", Modified),
-            // `-uall`: the file, not the `fresh/` directory that holds it
-            ("fresh/deep/untracked.txt", Untracked),
-        ]
-        .into_iter()
-        .map(|(p, k)| (p.to_string(), k))
-        .collect();
-        assert_eq!(map, want);
-    }
-
-    /// The whole point of the two-call union: the working tree is applied second
-    /// and wins, because it describes the disk the tree is about to list.
-    #[test]
-    fn working_tree_status_overrides_the_committed_one_for_the_same_path() {
-        let mut map: BTreeMap<String, ChangeKind> = BTreeMap::new();
-        for (k, v) in ns("A\0src/new.rs\0M\0src/App.tsx\0") {
-            map.insert(k, v);
-        }
-        for (k, v) in st(" D src/new.rs\0") {
-            map.insert(k, v);
-        }
-        assert_eq!(map.get("src/new.rs"), Some(&Deleted));
-        assert_eq!(map.get("src/App.tsx"), Some(&Modified));
-    }
 
     // ── dock shell cwd memory ────────────────────────────────────────────────
 
-    /// The OS read itself, on the one process whose cwd the test already knows.
-    #[test]
-    fn proc_cwd_reads_a_live_process_directory() {
-        let got = proc_cwd(std::process::id()).expect("own cwd");
-        // /var vs /private/var on macOS — compare resolved paths.
-        assert_eq!(
-            std::fs::canonicalize(got).unwrap(),
-            std::fs::canonicalize(std::env::current_dir().unwrap()).unwrap()
-        );
-    }
 
-    /// Read the master to EOF and throw it away. Production always has one of
-    /// these (`shell_open` spawns a reader thread); a pty test that skips it
-    /// deadlocks in a way the app never can — the shell's output fills the pty
-    /// buffer, and the child then WEDGES MID-EXIT (`ps` shows state `E`, never
-    /// reaped) so even SIGKILL + `wait` hangs forever.
-    fn drain(master: &(dyn MasterPty + Send)) {
-        let mut reader = master.try_clone_reader().unwrap();
-        thread::spawn(move || {
-            let mut buf = [0u8; 4096];
-            while matches!(reader.read(&mut buf), Ok(n) if n > 0) {}
-        });
-    }
 
-    /// SIGKILL + reap, for tests that must not depend on how a shell reacts to
-    /// a signal. `Child::kill` in portable-pty sends SIGHUP (lib.rs:347 of that
-    /// crate), and an interactive `/bin/sh` on a pty whose master is still open
-    /// survives it. The app gets away with SIGHUP because dropping the `Shell`
-    /// closes the master and the EOF finishes the job; a test holding the master
-    /// open would wait forever.
-    fn hard_kill(child: &mut (dyn Child + Send + Sync)) {
-        if let Some(pid) = child.process_id() {
-            unsafe { libc::kill(pid as libc::pid_t, libc::SIGKILL) };
-        }
-        let _ = child.wait();
-    }
 
-    fn cwds(entries: &[(&str, u32, &str)]) -> CwdMap {
-        let mut m = CwdMap::new();
-        for (place, idx, path) in entries {
-            m.entry(place.to_string()).or_default().insert(*idx, path.to_string());
-        }
-        m
-    }
 
-    fn key(repo: &str, slug: &str, index: u32) -> ShellKey {
-        (repo.to_string(), slug.to_string(), index)
-    }
 
-    /// The merge exists so a tab that has NOT been re-spawned since the restart
-    /// keeps its directory. Sampling only the live tab must leave the other one
-    /// exactly as it was.
-    #[test]
-    fn merge_cwds_leaves_unsampled_tabs_alone() {
-        let mut map = cwds(&[("/r|feat", 1, "/r/.worktrees/feat/app"), ("/r|feat", 2, "/r/.worktrees/feat/docs")]);
-        let changed = merge_cwds(&mut map, vec![(key("/r", "feat", 1), "/r/.worktrees/feat/crates".into())]);
-        assert!(changed);
-        assert_eq!(map, cwds(&[("/r|feat", 1, "/r/.worktrees/feat/crates"), ("/r|feat", 2, "/r/.worktrees/feat/docs")]));
-    }
 
-    /// An idle shell samples the same path every 15s; that must not be a write.
-    #[test]
-    fn merge_cwds_reports_no_change_when_nothing_moved() {
-        let mut map = cwds(&[("/r|feat", 1, "/r/.worktrees/feat/app")]);
-        assert!(!merge_cwds(&mut map, vec![(key("/r", "feat", 1), "/r/.worktrees/feat/app".into())]));
-    }
 
-    #[test]
-    fn a_remembered_directory_wins_over_the_place_root() {
-        let here = std::env::current_dir().unwrap();
-        let here = here.to_str().unwrap();
-        assert_eq!(pick_start_dir(Some(here), "/place/root"), here);
-    }
 
-    /// A worktree that was removed, a directory that was renamed: the memory is
-    /// stale, and a shell must still open somewhere real.
-    #[test]
-    fn a_vanished_directory_falls_back_to_the_place_root() {
-        assert_eq!(pick_start_dir(Some("/no/such/dir/anywhere"), "/place/root"), "/place/root");
-        assert_eq!(pick_start_dir(None, "/place/root"), "/place/root");
-        // a FILE is not somewhere a shell can start either
-        let f = std::env::current_dir().unwrap().join("Cargo.toml");
-        assert_eq!(pick_start_dir(Some(f.to_str().unwrap()), "/place/root"), "/place/root");
-    }
 
-    /// The mechanism this whole feature rests on: a REAL shell on a REAL pty,
-    /// told to `cd`, and the directory read back out of the OS by pid. Nothing
-    /// mocked — the unit tests above only ever read this process's own cwd,
-    /// which would pass just as happily if `proc_cwd` could not follow a child.
-    #[test]
-    fn proc_cwd_follows_a_live_shell_into_a_new_directory() {
-        // Unique per run: two concurrent `cargo test` invocations must not share
-        // these, and the test removes them at the end.
-        let base = std::env::temp_dir().join(format!("wt-cwd-shell-{}", std::process::id()));
-        let start = base.join("start");
-        let moved = base.join("moved");
-        std::fs::create_dir_all(&start).unwrap();
-        std::fs::create_dir_all(&moved).unwrap();
-        let real = |p: &Path| std::fs::canonicalize(p).unwrap();
 
-        let pair = native_pty_system()
-            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
-            .unwrap();
-        // /bin/sh, not $SHELL -l: the login shell's rc files are the app's
-        // concern, not this mechanism's, and they make the test environment-
-        // dependent for nothing.
-        let mut cmd = CommandBuilder::new("/bin/sh");
-        cmd.cwd(&start);
-        let mut child = pair.slave.spawn_command(cmd).unwrap();
-        drop(pair.slave);
-        drain(&*pair.master);
-        let pid = live_pid(&mut *child).expect("pid of a running shell");
-
-        assert_eq!(real(&proc_cwd(pid).expect("cwd at spawn")), real(&start));
-
-        let mut w = pair.master.take_writer().unwrap();
-        write!(w, "cd {}\n", moved.display()).unwrap();
-        w.flush().unwrap();
-
-        // The shell needs a moment to read the line; poll rather than sleep a
-        // guessed amount.
-        // resolved BEFORE the cleanup below — canonicalize needs the directory
-        // to still exist, so computing it after the rmdir only ever panics
-        let want = real(&moved);
-        let mut got = None;
-        for _ in 0..100 {
-            let now = proc_cwd(pid).map(|p| real(&p));
-            if now.as_deref() == Some(want.as_path()) {
-                got = now;
-                break;
-            }
-            thread::sleep(Duration::from_millis(20));
-        }
-        hard_kill(&mut *child);
-        let _ = std::fs::remove_dir_all(&base);
-        assert_eq!(got, Some(want), "shell cd was not visible through proc_cwd");
-    }
-
-    /// The reaped-pid guard, which is the difference between sampling this tab
-    /// and sampling whatever process the OS later hands that pid to. A shell
-    /// that exits is deliberately KEPT in the registry (the tab survives and
-    /// offers a restart) and `list_shell_sessions` reaps it on the next dock
-    /// mount — after which `process_id()` still answers, and answers wrongly.
-    #[test]
-    fn a_reaped_shell_reports_no_pid_to_sample() {
-        let pair = native_pty_system()
-            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
-            .unwrap();
-        let mut child = pair.slave.spawn_command(CommandBuilder::new("/bin/sh")).unwrap();
-        drop(pair.slave);
-        drain(&*pair.master);
-
-        let pid = live_pid(&mut *child).expect("running shell has a pid");
-        assert!(proc_cwd(pid).is_some(), "a running shell must have a readable cwd");
-
-        hard_kill(&mut *child); // the reap — try_wait in list_shell_sessions does the same
-        assert!(child.process_id().is_some(), "portable-pty still hands back the dangling pid");
-        assert_eq!(live_pid(&mut *child), None, "a reaped shell must never be sampled");
-    }
 
     // ── dock shell resizes ───────────────────────────────────────────────────
 
-    /// The decision, and the bookkeeping that goes with it. A pane re-attaching
-    /// asks to be the size it already is on every tab flip, and the
-    /// ResizeObserver's first fire repeats whatever the attach just said — so
-    /// "already that size" is the common case, not the corner one. Forgetting to
-    /// record what WAS applied is the subtler half: every later request would
-    /// then be compared against the size the pty had two resizes ago, and a
-    /// repeat would sail through as a change.
-    #[test]
-    fn a_resize_to_the_size_the_pty_already_has_is_dropped() {
-        let mut cur = PtySize { rows: 40, cols: 120, pixel_width: 0, pixel_height: 0 };
-        let applied: Vec<Option<(u16, u16)>> = [(120, 40), (80, 24), (80, 24), (120, 40), (120, 40)]
-            .iter()
-            .map(|(c, r)| next_pty_size(&mut cur, *c, *r).map(|s| (s.cols, s.rows)))
-            .collect();
-        assert_eq!(
-            applied,
-            vec![None, Some((80, 24)), None, Some((120, 40)), None],
-            "only the requests that MOVE the pty may reach it"
-        );
-        assert_eq!((cur.cols, cur.rows), (120, 40), "the record follows what was applied");
-    }
 
-    /// …and the same decision on a real PTY, through the method `shell_resize`
-    /// and `shell_open`'s re-attach both call. A shell that traps SIGWINCH says
-    /// whether the ioctl actually happened.
-    ///
-    /// Note what this can and cannot catch. macOS (and Linux) compare the new
-    /// winsize against the old one inside TIOCSWINSZ and signal only on a
-    /// change, so a suppression bug does NOT show up here as a spurious W — the
-    /// kernel hides it. What it does catch is the opposite and worse failure:
-    /// suppression that swallows a size change, leaving the shell laying its
-    /// prompt out for a terminal that is no longer that shape.
-    #[test]
-    fn a_real_size_change_still_reaches_the_shell() {
-        let size = PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 };
-        let pair = native_pty_system().openpty(size).unwrap();
-        let mut cmd = CommandBuilder::new("/bin/sh");
-        cmd.arg("-c");
-        // `R` once the handler is installed: a resize sent before that is simply
-        // lost, and the test would blame the code for the race.
-        cmd.arg("trap 'printf W' WINCH; printf R; while :; do sleep 0.05; done");
-        let child = pair.slave.spawn_command(cmd).unwrap();
-        drop(pair.slave);
 
-        // Drains the master AND is the assertion's eyes — production always has
-        // exactly one such reader (see `drain`).
-        let seen = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let mine = seen.clone();
-        let mut reader = pair.master.try_clone_reader().unwrap();
-        thread::spawn(move || {
-            let mut buf = [0u8; 256];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) | Err(_) => return,
-                    Ok(n) => mine.lock().unwrap().extend_from_slice(&buf[..n]),
-                }
-            }
-        });
-        let writer = pair.master.take_writer().unwrap();
-        let mut sh = Shell {
-            master: pair.master,
-            writer,
-            child,
-            stop: Arc::new(AtomicBool::new(false)),
-            ring: Arc::new(Mutex::new(VecDeque::new())),
-            sink: Arc::new(Mutex::new(None)),
-            gen: 1,
-            size,
-            dirty: Arc::new(AtomicBool::new(false)),
-        };
-        // Poll rather than sleep a guessed amount; bounded so a shell that never
-        // answers fails the test instead of hanging it.
-        let count_of = |c: u8| seen.lock().unwrap().iter().filter(|b| **b == c).count();
-        let winches = || count_of(b'W');
-        let wait = |f: &dyn Fn() -> usize, n: usize| {
-            for _ in 0..60 {
-                if f() >= n {
-                    return true;
-                }
-                thread::sleep(Duration::from_millis(50));
-            }
-            false
-        };
-        let wait_for = |n: usize| wait(&winches, n);
 
-        assert!(wait(&|| count_of(b'R'), 1), "the trap shell never came up");
-        assert!(sh.resize(100, 30).is_ok());
-        assert!(wait_for(1), "a genuine resize must reach the shell as SIGWINCH");
-        assert!(sh.resize(120, 40).is_ok());
-        assert!(wait_for(2), "and so must the next one — the recorded size has to move with it");
-        assert_eq!((sh.size.cols, sh.size.rows), (120, 40));
 
-        // The repeat: nothing more may arrive. (The kernel would swallow it even
-        // without the guard — this pins the assumption, it does not test it.)
-        assert!(sh.resize(120, 40).is_ok());
-        thread::sleep(Duration::from_millis(300));
-        assert_eq!(winches(), 2, "resizing to the size it already has must be silent");
 
-        hard_kill(&mut *sh.child);
-    }
-
-    /// Round-trip through the real file, including the two rules a plain
-    /// serialize test would miss: an emptied place leaves no husk behind, and a
-    /// `false` return writes nothing at all.
-    #[test]
-    fn the_cwd_file_round_trips_and_prunes() {
-        let dir = std::env::temp_dir().join(format!("wt-cwd-file-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("shell-cwds.json");
-        let _ = std::fs::remove_file(&file);
-
-        edit_cwds_at(&file, |m| merge_cwds(m, vec![(key("/r", "feat", 1), "/tmp".into())]));
-        assert_eq!(read_cwds_at(&file), cwds(&[("/r|feat", 1, "/tmp")]));
-
-        // a no-op edit must not even create noise
-        let before = std::fs::read(&file).unwrap();
-        edit_cwds_at(&file, |m| merge_cwds(m, vec![(key("/r", "feat", 1), "/tmp".into())]));
-        assert_eq!(std::fs::read(&file).unwrap(), before);
-
-        // closing the last tab of a place drops the place, not an empty husk —
-        // through the SAME predicate close_shell_session uses, not a copy of it
-        edit_cwds_at(&file, |m| forget_tab(m, "/r", "feat", 1));
-        assert_eq!(read_cwds_at(&file), CwdMap::new());
-        assert_eq!(std::fs::read_to_string(&file).unwrap().trim(), "{}");
-
-        // a corrupt file reads as "no memory", never as a failure
-        std::fs::write(&file, b"{not json").unwrap();
-        assert_eq!(read_cwds_at(&file), CwdMap::new());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// The startup sweep's decision. A place removed with `worktrees rm` from a
-    /// terminal leaves its entry behind — nothing tells the app — so this is
-    /// what stops a recreated slug inheriting the previous life's directories.
-    #[test]
-    fn only_places_that_no_longer_exist_are_forgotten() {
-        let here = std::env::current_dir().unwrap().to_str().unwrap().to_string();
-        let keys: Vec<String> = ["/r|alive", "/r|removed", "/dead-repo|any", "no-separator"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let gone = vanished_keys(&keys, |repo, slug| match (repo, slug) {
-            ("/r", "alive") => Some(here.clone()),
-            ("/r", "removed") => Some("/gone/for/good".into()),
-            _ => None, // the project itself is unreachable
-        });
-        assert_eq!(gone, vec!["/r|removed", "/dead-repo|any", "no-separator"]);
-    }
-
-    /// A repo path is absolute and may itself contain the separator; the slug
-    /// never does, so the split has to come from the right.
-    #[test]
-    fn a_repo_path_containing_the_separator_still_splits_at_the_slug() {
-        let seen = std::cell::RefCell::new(Vec::new());
-        let keys = vec!["/odd|repo|feat".to_string()];
-        vanished_keys(&keys, |repo, slug| {
-            seen.borrow_mut().push((repo.to_string(), slug.to_string()));
-            None
-        });
-        assert_eq!(seen.into_inner(), vec![("/odd|repo".to_string(), "feat".to_string())]);
-    }
-
-    /// `shell_open`'s actual lookup — `remembered_dir` composed with
-    /// `pick_start_dir` — over a map that came off disk. The pieces were each
-    /// covered; the composition, which is the only thing the feature does for
-    /// the user, was not.
-    #[test]
-    fn a_reopened_tab_starts_in_the_directory_the_file_remembers() {
-        let dir = std::env::temp_dir().join(format!("wt-cwd-open-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("shell-cwds.json");
-        let _ = std::fs::remove_file(&file);
-        let here = std::env::current_dir().unwrap();
-        let here = here.to_str().unwrap().to_string();
-        let place = "/place/root";
-
-        // tab 1 was left in a real directory, tab 2 in one since deleted
-        edit_cwds_at(&file, |m| {
-            merge_cwds(
-                m,
-                vec![
-                    (key("/r", "feat", 1), here.clone()),
-                    (key("/r", "feat", 2), "/gone/for/good".into()),
-                ],
-            )
-        });
-        let map = read_cwds_at(&file);
-
-        let open = |index: u32| pick_start_dir(remembered_dir(&map, "/r", "feat", index).as_deref(), place);
-        assert_eq!(open(1), here, "tab 1 must reopen where it was");
-        assert_eq!(open(2), place, "a vanished directory falls back to the place root");
-        assert_eq!(open(3), place, "a tab with no memory opens at the place root");
-        // a DIFFERENT place must not see this one's memory
-        assert_eq!(
-            pick_start_dir(remembered_dir(&map, "/r", "other", 1).as_deref(), place),
-            place
-        );
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 
     // ── dock shell history: scrollback + per-tab commands ───────────────────
 
-    /// A scratch `term-history` root, unique per run: two concurrent `cargo
-    /// test` invocations must not share one.
-    fn hist_root(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("wt-hist-{tag}-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
 
-    /// Round-trip through the real files, including the two rules a plain
-    /// serialize test would miss: the width travels with the bytes, and a tab
-    /// that has never been saved reads as nothing rather than as an error.
-    #[test]
-    fn a_scrollback_round_trips_with_the_width_it_was_written_at() {
-        let root = hist_root("round");
-        let k = key("/r", "feat", 3);
 
-        assert!(read_scrollback(&root, &k).is_none(), "an unsaved tab has no history");
 
-        write_scrollback(&root, &k, b"line one\nbuild output\n", 174);
-        let (bytes, meta) = read_scrollback(&root, &k).expect("saved tab reads back");
-        assert_eq!(bytes, b"line one\nbuild output\n", "a ring that never rolled keeps its first line");
-        assert_eq!(meta.cols, 174, "the width travels with the bytes");
-        assert_eq!((meta.repo.as_str(), meta.slug.as_str(), meta.index), ("/r", "feat", 3));
 
-        // closing the tab takes everything with it
-        forget_tab_history(&root, &k);
-        assert!(read_scrollback(&root, &k).is_none());
-        let _ = std::fs::remove_dir_all(&root);
-    }
 
-    /// The two halves of `rolled_ring`, and the reason it is not just
-    /// `trim_to_line_start`.
-    ///
-    /// A ring AT the cap begins wherever `drain` cut — routinely mid-escape-
-    /// sequence — so its first fragment goes. A ring BELOW the cap begins where
-    /// the shell began, and trimming that drops a real line. The second case is
-    /// the one that bites, because it COMPOUNDS: the restore seeds from the
-    /// trimmed copy, so the next save trims the next line, one per restart.
-    #[test]
-    fn only_a_ring_that_actually_rolled_loses_its_first_line() {
-        let short = b"line one\nline two\n";
-        assert_eq!(rolled_ring(short), short, "a ring below the cap is saved whole");
 
-        // at the cap, and cut mid-line the way `drain` leaves it
-        let mut full = b"tail-of-a-cut-line".to_vec();
-        full.extend(std::iter::repeat(b'x').take(SHELL_RING));
-        full.insert(18, b'\n');
-        let kept = rolled_ring(&full);
-        assert!(kept.len() < full.len(), "a rolled ring drops its leading fragment");
-        assert_eq!(kept[0], b'x', "…and resumes at the start of a line");
 
-        // the compounding case, stated directly: saving what a restore seeded
-        // must be a fixed point, not another line gone
-        let seeded = rolled_ring(&full).to_vec();
-        assert_eq!(rolled_ring(&seeded), seeded.as_slice(), "re-saving a restored ring loses nothing");
-    }
 
-    /// The directory name is a hash, so it is only a NAME. `meta.json` is the
-    /// identity — without that check a collision would hand one tab another
-    /// tab's output, which is the one failure worse than opening blank.
-    #[test]
-    fn a_meta_that_names_another_tab_reads_as_nothing() {
-        let root = hist_root("ident");
-        let mine = key("/r", "feat", 1);
-        write_scrollback(&root, &mine, b"\nmine\n", 80);
 
-        // forge the collision: same directory, someone else's meta
-        let tab = tab_dir(&root, &mine);
-        let theirs = TabMeta {
-            repo: "/other".into(),
-            slug: "theirs".into(),
-            index: 9,
-            cols: 80,
-            at: sysclock::now_epoch(),
-        };
-        std::fs::write(tab.join("meta.json"), serde_json::to_vec(&theirs).unwrap()).unwrap();
-        assert!(read_scrollback(&root, &mine).is_none(), "another tab's meta is not mine");
 
-        // and a corrupt one is simply no history, never an error
-        std::fs::write(tab.join("meta.json"), b"{not json").unwrap();
-        assert!(read_scrollback(&root, &mine).is_none());
-        let _ = std::fs::remove_dir_all(&root);
-    }
 
-    /// A repo path is absolute and may contain anything; two tabs must never
-    /// land in the same directory, and the same tab must always land in its own.
-    #[test]
-    fn every_tab_gets_its_own_stem_and_keeps_it() {
-        let a = tab_stem(&key("/odd|repo", "feat", 1));
-        assert_eq!(a, tab_stem(&key("/odd|repo", "feat", 1)), "a stem is stable");
-        let others = [
-            key("/odd|repo", "feat", 2),        // same place, next tab
-            key("/odd", "repo|feat", 1),        // the separator moved
-            key("/other", "feat", 1),           // another project
-        ];
-        for o in &others {
-            assert_ne!(a, tab_stem(o), "{o:?} collided with /odd|repo|feat|1");
-        }
-        // a slug that is all path separators still names a file, not a path
-        let s = tab_stem(&key("/r", "feat/../../etc", 1));
-        assert!(!s.contains('/'), "a stem must never contain a separator: {s}");
-    }
-
-    /// The restore payload's contracts: the seam comes AFTER the content, an
-    /// empty save sends nothing at all (which keeps `replay` at 0 so the pane
-    /// treats the new shell's own first output as live), and the seam carries an
-    /// absolute time because it is persisted with the ring.
-    #[test]
-    fn a_seam_follows_the_content_and_an_empty_save_sends_nothing() {
-        let at = 1_700_000_000;
-        assert!(restore_payload(b"", at).is_empty(), "nothing saved, nothing replayed");
-
-        let out = restore_payload(b"the build log\n", at);
-        let text = String::from_utf8_lossy(&out);
-        assert!(text.starts_with("the build log\n"), "the content comes first: {text:?}");
-        assert!(
-            text.find("the build log").unwrap() < text.find("restored").unwrap(),
-            "the seam marks the END of what was restored"
-        );
-        // absolute, not an age: this is seeded into the ring and persisted with
-        // it, so "2h ago" would freeze and be wrong forever after
-        assert!(text.contains(&fmt_local(at)), "the seam names when it was saved: {text:?}");
-        // cancels a control sequence the ring's tail was cut inside, so the seam
-        // cannot be swallowed as somebody's argument
-        assert!(out.starts_with(SEAM_HEAD) || out.windows(SEAM_HEAD.len()).any(|w| w == SEAM_HEAD));
-    }
-
-    /// Three launches with nothing typed between them must not stack three
-    /// seams — but a seam with a session's work under it still marks a real
-    /// boundary and stays.
-    #[test]
-    fn a_seam_nothing_was_typed_under_is_replaced_not_followed() {
-        let (t1, t2) = (1_700_000_000, 1_700_009_000);
-        let once = restore_payload(b"the build log\n", t1);
-        let twice = restore_payload(&once, t2);
-        let text = String::from_utf8_lossy(&twice);
-        assert_eq!(text.matches("── restored · ").count(), 1, "only the newest seam survives: {text:?}");
-        assert!(text.contains(&fmt_local(t2)) && !text.contains(&fmt_local(t1)));
-
-        // …but work done after a seam keeps it
-        let mut worked = once.clone();
-        worked.extend_from_slice(b"$ cargo test\nall good\n");
-        let after = restore_payload(&worked, t2);
-        let text = String::from_utf8_lossy(&after);
-        assert_eq!(text.matches("── restored · ").count(), 2, "a boundary with work under it stays: {text:?}");
-    }
-
-    /// The seam is written for a person sitting in front of the terminal, so it
-    /// is the machine's own clock — unlike app.log, which is UTC.
-    #[test]
-    fn the_seam_time_is_local_not_utc() {
-        let at = 1_700_000_000;
-        let local = fmt_local(at);
-        assert_eq!(local.len(), fmt_utc(at).len(), "same shape, different offset");
-        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-        let t = at as libc::time_t;
-        unsafe { libc::localtime_r(&t, &mut tm) };
-        assert_eq!(local, fmt_utc(at + tm.tm_gmtoff as i64));
-    }
-
-    /// The cold-start sweep's decision, the way `only_places_that_no_longer_exist_are_forgotten`
-    /// covers the cwd map's. Two reasons to drop a tab and one to keep it.
-    #[test]
-    fn a_tab_is_swept_when_its_place_is_gone_or_it_has_gone_stale() {
-        let now = 2_000_000_000;
-        let fresh = now - 60;
-        let old = now - TERM_HIST_MAX_AGE_SECS - 1;
-        let m = |repo: &str, slug: &str, at: i64| TabMeta {
-            repo: repo.into(),
-            slug: slug.into(),
-            index: 1,
-            cols: 80,
-            at,
-        };
-        let metas = vec![
-            (PathBuf::from("/h/alive"), m("/r", "alive", fresh)),
-            (PathBuf::from("/h/removed"), m("/r", "removed", fresh)),
-            (PathBuf::from("/h/stale"), m("/r", "alive", old)),
-            (PathBuf::from("/h/dead-repo"), m("/dead", "any", fresh)),
-        ];
-        let here = std::env::current_dir().unwrap().to_str().unwrap().to_string();
-        let gone = stale_history(&metas, now, |repo, slug| match (repo, slug) {
-            ("/r", "alive") => Some(here.clone()),
-            ("/r", "removed") => Some("/gone/for/good".into()),
-            _ => None, // the project itself is unreachable
-        });
-        let gone: Vec<&str> = gone.iter().map(|p| p.to_str().unwrap()).collect();
-        assert_eq!(gone, vec!["/h/removed", "/h/stale", "/h/dead-repo"]);
-    }
-
-    /// The generated shims, read as text. They are the whole per-tab history
-    /// mechanism, and every clause below is load-bearing — see the section
-    /// comment for which real configuration each one exists for.
-    #[test]
-    fn the_zdotdir_shims_hand_the_users_own_config_back_before_taking_the_history() {
-        let root = hist_root("zdot");
-        let zdot = root.join("zdotdir");
-        write_zdotdir(&zdot).unwrap();
-
-        let read = |n: &str| std::fs::read_to_string(zdot.join(n)).unwrap();
-        for n in [".zshenv", ".zprofile", ".zshrc", ".zlogin"] {
-            assert!(read(n).starts_with("# Generated by worktrees"), "{n} is unlabelled");
-        }
-
-        // .zshenv: their environment while theirs runs, ours back afterwards —
-        // otherwise a `~/.zshenv` that exports ZDOTDIR hijacks the whole chain
-        let env = read(".zshenv");
-        assert!(env.contains("unset ZDOTDIR"), "their .zshenv must see a normal environment");
-        assert!(env.contains(r#". "$HOME/.zshenv""#), "their .zshenv is sourced, not replaced");
-        assert!(
-            env.find("unset ZDOTDIR").unwrap() < env.find("$HOME/.zshenv").unwrap(),
-            "ZDOTDIR must be unset BEFORE theirs is sourced"
-        );
-        assert!(env.contains("export ZDOTDIR=$_WT_Z"), "and taken back after");
-
-        // .zshrc: their ZDOTDIR restored before their rc (which may reference
-        // it), our HISTFILE after it (so a user rc that sets HISTFILE loses)
-        let rc = read(".zshrc");
-        let restore = rc.find("unset ZDOTDIR").expect("restores their ZDOTDIR");
-        let source = rc.find("/.zshrc\"").expect("sources their rc");
-        let hist = rc.find("HISTFILE=\"$WORKTREES_HISTFILE\"").expect("sets our HISTFILE");
-        assert!(restore < source, "their rc must be able to read $ZDOTDIR");
-        assert!(source < hist, "our HISTFILE must be set AFTER theirs, or theirs wins");
-        // without this a force-quit takes the whole session's commands with it:
-        // the app SIGHUPs its shells, and zsh's default flushes only on a clean exit
-        assert!(rc.contains("setopt INC_APPEND_HISTORY"));
-        assert!(!rc.contains("SHARE_HISTORY"), "each tab has its own file; nothing to share");
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// Which lever each shell gets. zsh cannot use `HISTFILE` — macOS's
-    /// `/etc/zshrc` overwrites it unconditionally — and nothing else can use
-    /// ZDOTDIR.
-    #[test]
-    fn each_shell_gets_the_only_lever_that_works_for_it() {
-        let root = hist_root("lever");
-        let k = key("/r", "feat", 1);
-        let zdot = tab_dir(&root, &k).join("zdotdir");
-
-        let mut zsh = CommandBuilder::new("/bin/zsh");
-        assert_eq!(apply_tab_history_env(&mut zsh, &root, &k, "/bin/zsh"), Some("zdotdir"));
-        assert_eq!(zsh.get_env("ZDOTDIR"), Some(zdot.as_os_str()));
-        assert_eq!(zsh.get_env("WORKTREES_HISTFILE"), Some(zdot.join(".zsh_history").as_os_str()));
-        assert!(zsh.get_env("HISTFILE").is_none(), "zsh's HISTFILE is /etc/zshrc's to set");
-
-        let mut bash = CommandBuilder::new("/bin/bash");
-        assert_eq!(apply_tab_history_env(&mut bash, &root, &k, "/bin/bash"), Some("histfile"));
-        assert!(bash.get_env("ZDOTDIR").is_none(), "ZDOTDIR means nothing to bash");
-        assert_eq!(
-            bash.get_env("HISTFILE"),
-            Some(tab_dir(&root, &k).join(".bash_history").as_os_str())
-        );
-
-        let mut fish = CommandBuilder::new("/opt/homebrew/bin/fish");
-        assert_eq!(apply_tab_history_env(&mut fish, &root, &k, "/opt/homebrew/bin/fish"), None);
-        assert!(fish.get_env("ZDOTDIR").is_none() && fish.get_env("HISTFILE").is_none());
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// The one that proves the MECHANISM rather than the strings: a real login
-    /// zsh, with a real `/etc/zshrc` in the way, writing its history where this
-    /// feature says it will.
-    ///
-    /// The string assertions above would pass just as happily if zsh ignored the
-    /// shims entirely. This is the sibling of
-    /// `proc_cwd_follows_a_live_shell_into_a_new_directory`, and it carries the
-    /// same two rules: DRAIN the master (a pty test that does not wedges the
-    /// child mid-exit, unkillable) and SIGKILL rather than trusting a signal.
-    #[test]
-    fn a_real_login_zsh_records_into_the_generated_zdotdir() {
-        if !Path::new("/bin/zsh").exists() {
-            return; // nothing to prove on a box without zsh
-        }
-        let root = hist_root("realzsh");
-        let home = root.join("home");
-        std::fs::create_dir_all(&home).unwrap();
-        // A user rc with something only IT can provide, so "sourced" and
-        // "replaced" cannot look the same.
-        std::fs::write(home.join(".zshrc"), "export WT_TEST_MARKER=from-the-users-rc\n").unwrap();
-
-        let k = key("/r", "feat", 1);
-        let zdot = tab_dir(&root, &k).join("zdotdir");
-        let mut cmd = CommandBuilder::new("/bin/zsh");
-        cmd.arg("-l");
-        cmd.cwd(&root);
-        cmd.env("HOME", &home);
-        cmd.env("TERM", "xterm-256color");
-        assert_eq!(apply_tab_history_env(&mut cmd, &root, &k, "/bin/zsh"), Some("zdotdir"));
-
-        let pair = native_pty_system()
-            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
-            .unwrap();
-        let mut child = pair.slave.spawn_command(cmd).unwrap();
-        drop(pair.slave);
-        drain(&*pair.master);
-
-        // Answer into a FILE rather than parsing the pty: prompts, escape
-        // sequences and echo make the stream a poor witness.
-        let out = root.join("answers");
-        let mut w = pair.master.take_writer().unwrap();
-        write!(
-            w,
-            ": wt-history-probe\n\
-             print -r -- \"HISTFILE=$HISTFILE\" > {out}\n\
-             print -r -- \"MARKER=$WT_TEST_MARKER\" >> {out}\n\
-             print -r -- \"ZDOTDIR=${{ZDOTDIR-unset}}\" >> {out}\n",
-            out = out.display()
-        )
-        .unwrap();
-        w.flush().unwrap();
-
-        let hist = zdot.join(".zsh_history");
-        let mut answers = String::new();
-        for _ in 0..200 {
-            if let Ok(s) = std::fs::read_to_string(&out) {
-                if s.lines().count() >= 3 {
-                    answers = s;
-                    break;
-                }
-            }
-            thread::sleep(Duration::from_millis(25));
-        }
-        // INC_APPEND_HISTORY writes per command, so the probe is already there —
-        // this shell is never asked to exit cleanly, which is the point.
-        let recorded = std::fs::read_to_string(&hist).unwrap_or_default();
-        hard_kill(&mut *child);
-        let _ = std::fs::remove_dir_all(&root);
-
-        assert!(!answers.is_empty(), "the shell never answered");
-        assert!(
-            answers.contains(&format!("HISTFILE={}", hist.display())),
-            "HISTFILE is not the tab's: {answers}"
-        );
-        assert!(
-            answers.contains("MARKER=from-the-users-rc"),
-            "the user's own .zshrc was not sourced: {answers}"
-        );
-        assert!(
-            answers.contains("ZDOTDIR=unset"),
-            "ZDOTDIR must be handed back, so child shells are unaffected: {answers}"
-        );
-        assert!(
-            recorded.contains("wt-history-probe"),
-            "a killed shell still recorded its commands (INC_APPEND_HISTORY): {recorded:?}"
-        );
-    }
 
     // ── "Ask Claude" (ai_status_report) — the two pure pieces ────────────────
     // The spawn itself cannot be tested here: there is no fake `claude` anywhere
@@ -6203,132 +2018,8 @@ mod tests {
 
     // ── local usage metrics ────────────────────────────────────────────────
 
-    fn ev(k: &str, key: &str, s: &str, t_ms: i64, ms: i64) -> UiEvent {
-        UiEvent { t: t_ms, k: k.into(), key: key.into(), s: s.into(), ms }
-    }
 
-    /// The one rule this whole feature rests on: what lands in the file is a
-    /// name from the source, never something a person typed. Every rejected
-    /// shape here is user text wearing a key's clothes.
-    #[test]
-    fn a_key_is_a_written_name_not_typed_text() {
-        for ok in ["nav.row.select", "chord.cmd-b", "dock.files", "main", "a", "files_row"] {
-            assert!(valid_token(ok), "{ok} is a hand-written key");
-        }
-        for bad in [
-            "",                                   // no key at all
-            "/Users/davidpena/workspace/repo",    // a path
-            "feat/redesign",                      // a branch
-            "standup and daily work",             // a typed note
-            "a\tb",                               // whitespace of any kind
-            "café",                               // non-ASCII: user text, or a title
-            "…",
-        ] {
-            assert!(!valid_token(bad), "{bad:?} must be refused");
-        }
-        // 64 is the cap; 65 is not
-        assert!(valid_token(&"a".repeat(64)));
-        assert!(!valid_token(&"a".repeat(65)));
-        assert!(!valid_token(&"k".repeat(100)));
-        // and the whole-event gate rides on it
-        assert!(valid_event(&ev("act", "nav.row", "nav", 1, 0)));
-        assert!(!valid_event(&ev("act", "nav.row", "nav/x", 1, 0)), "the surface is checked too");
-        assert!(!valid_event(&ev("keystroke", "a", "main", 1, 0)), "only act and dwell exist");
-        assert!(!valid_event(&ev("act", "nav.row", "nav", 0, 0)), "an event with no clock is not one");
-    }
 
-    /// The day a click belongs to is the day the USER was having, and the
-    /// frontend is the only thing that knows which that is. Same instant,
-    /// three timezones, three different columns.
-    #[test]
-    fn a_day_bucket_is_the_users_day_not_utcs() {
-        // 2026-09-05T23:30:00Z
-        let late = 1_788_651_000_000i64;
-        assert_eq!(day_label(day_index(late, 0)), "2026-09-05");
-        assert_eq!(day_label(day_index(late, 120)), "2026-09-06", "UTC+2 is already tomorrow");
-        assert_eq!(day_label(day_index(late, -420)), "2026-09-05", "UTC-7 is still today");
-        // 2026-09-06T02:00:00Z — the same wall clock from the other side
-        let early = late + 2 * 3600 * 1000 + 30 * 60 * 1000;
-        assert_eq!(day_label(day_index(early, 0)), "2026-09-06");
-        assert_eq!(day_label(day_index(early, -420)), "2026-09-05", "UTC-7 has not gone to bed yet");
-    }
 
-    /// A heatmap with a hole in it is a lie about the days it skipped, so the
-    /// report is a dense grid: exactly `days` columns, oldest first, zeros where
-    /// nothing happened.
-    #[test]
-    fn the_report_is_a_dense_grid_with_the_gaps_filled() {
-        let day = 86_400_000i64;
-        let now = 1_788_651_000_000i64; // 2026-09-05T23:30:00Z
-        let events = vec![
-            ev("act", "nav.row", "nav", now, 0),
-            ev("act", "nav.row", "nav", now, 0),
-            ev("act", "nav.row", "nav", now - 2 * day, 0),
-            ev("act", "places", "nav", now - 2 * day, 0),
-            ev("dwell", "dwell", "main", now, 3000),
-            ev("dwell", "dwell", "main", now - day, 1000),
-            ev("dwell", "dwell", "home", now, 2000),
-            ev("act", "ancient", "nav", now - 30 * day, 0), // outside the range
-        ];
-        let u = usage_from(&events, now, 3, 0, "/tmp/ui-events.jsonl".into());
-        assert_eq!(u.days, vec!["2026-09-03", "2026-09-04", "2026-09-05"]);
-        assert_eq!(u.acts.len(), 3);
-        assert_eq!(u.acts[0], ActRow { key: "nav.row".into(), total: 3, per_day: vec![1, 0, 2] });
-        assert_eq!(u.acts[1], ActRow { key: "places".into(), total: 1, per_day: vec![1, 0, 0] });
-        // the whole point of the exercise: a control that HAS been used, but
-        // not once in the range, is a row of zeros rather than an absence
-        assert_eq!(u.acts[2], ActRow { key: "ancient".into(), total: 0, per_day: vec![0, 0, 0] });
-        assert_eq!(u.dwell[0], DwellRow { surface: "main".into(), ms_total: 4000, per_day: vec![0, 1000, 3000] });
-        assert_eq!(u.dwell[1], DwellRow { surface: "home".into(), ms_total: 2000, per_day: vec![0, 0, 2000] });
-        // and the columns really are the user's days: 23:30Z is already
-        // tomorrow at UTC+2, so the whole grid — the labels AND every event in
-        // it — slides one day forward rather than the counts moving between
-        // columns. A report bucketed in UTC would put today's clicks under
-        // yesterday for anyone east of Greenwich after 22:00.
-        let shifted = usage_from(&events, now, 3, 120, "/tmp/x".into());
-        assert_eq!(shifted.days, vec!["2026-09-04", "2026-09-05", "2026-09-06"]);
-        assert_eq!(shifted.acts[0], ActRow { key: "nav.row".into(), total: 3, per_day: vec![1, 0, 2] });
-        // one hour further into the past and the oldest pair drops out of the
-        // window entirely — the range is inclusive of exactly `days` days
-        let narrow = usage_from(&events, now, 2, 0, "/tmp/x".into());
-        assert_eq!(narrow.days, vec!["2026-09-04", "2026-09-05"]);
-        assert_eq!(narrow.acts[0], ActRow { key: "nav.row".into(), total: 2, per_day: vec![0, 2] });
-        assert_eq!(narrow.acts.last().map(|r| (r.key.as_str(), r.total)), Some(("places", 0)),
-                   "a key with nothing left in range falls to the bottom at zero");
-    }
 
-    /// Append refuses what does not look like a key, and rotates ONCE — the
-    /// file is a convenience, not an archive.
-    #[test]
-    fn the_events_file_refuses_text_and_rotates_once() {
-        let dir = std::env::temp_dir().join(format!("wt-uievents-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("ui-events.jsonl");
-
-        ui_events_append_at(&file, &[
-            ev("act", "nav.row", "nav", 1_788_651_000_000, 0),
-            ev("act", "/Users/me/workspace/secret-project", "nav", 1_788_651_000_000, 0),
-            ev("act", "ok.two", "main", 1_788_651_000_000, 0),
-        ]);
-        let text = std::fs::read_to_string(&file).unwrap();
-        assert_eq!(text.lines().count(), 2, "the path-shaped key must not be stored: {text}");
-        assert!(!text.contains("secret-project"), "{text}");
-        // `ms` is dwell-only, so an act line does not carry one
-        assert!(!text.lines().next().unwrap().contains("\"ms\""), "{text}");
-
-        // over the cap → one generation aside, and the next append starts clean
-        std::fs::write(&file, "x".repeat(UI_EVENTS_MAX as usize + 1)).unwrap();
-        ui_events_append_at(&file, &[ev("act", "after.rotate", "nav", 1_788_651_000_000, 0)]);
-        assert_eq!(std::fs::read_to_string(&file).unwrap().lines().count(), 1);
-        assert!(dir.join("ui-events.jsonl.1").exists(), "the old generation is kept, once");
-
-        // …and a read spans both generations
-        std::fs::write(dir.join("ui-events.jsonl.1"), "{\"t\":1788651000000,\"k\":\"act\",\"key\":\"older\",\"s\":\"nav\"}\nnot json\n").unwrap();
-        let all = read_events(&file);
-        assert_eq!(all.len(), 2, "one from each generation, the torn line dropped");
-        assert_eq!(all[0].key, "older", "the older generation comes first");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 }

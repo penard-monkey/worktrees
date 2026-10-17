@@ -680,4 +680,5 @@ mod tests {
         assert_eq!(stderr_tail(b"one\ntwo\nthree", 5), "one\ntwo\nthree");
         assert_eq!(stderr_tail(b"one\ntwo\nthree\nfour", 2), "three\nfour", "the END is the reason");
     }
+
 }

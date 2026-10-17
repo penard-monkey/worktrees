@@ -51,9 +51,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 name = "app"
 version = "0.42.0"
 dependencies = [
- "libc",
  "objc2",
- "portable-pty",
  "serde",
  "serde_json",
  "tauri",
@@ -5254,6 +5252,8 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "libc",
+ "portable-pty",
  "serde",
  "serde_json",
  "sha2",

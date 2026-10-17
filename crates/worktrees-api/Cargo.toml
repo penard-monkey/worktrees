@@ -27,3 +27,9 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 tokio = { version = "1", features = ["net", "rt", "rt-multi-thread", "time"] }
 getrandom = "0.3"
+# The PTY host: the tmux attach and the dock's own owned shells.
+portable-pty = "0.9"
+
+[target.'cfg(unix)'.dependencies]
+# `proc_pidinfo` — a dock shell's live cwd, which only the kernel knows.
+libc = "0.2"

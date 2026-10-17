@@ -29,18 +29,13 @@ tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 # preserve_order: round-trip unknown keys in the declared store in file order.
 serde_json = { version = "1", features = ["preserve_order"] }
-# PTY host: attach to a live tmux session (never own a shell). See DESIGN.md P1.
-portable-pty = "0.9"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
-# PID-liveness check for Claude session probes (kill(pid, 0)); already in the
-# lock tree transitively. macOS + Linux.
-libc = "0.2"
-# A place's route segment and its derived tree are disambiguated by
-# The documentation server and its viewer moved to `worktrees-api` with the
-# handlers that drive them, and took every one of their dependencies with
-# them — hyper, hyper-util, http-body-util, tokio, sha2 and getrandom were all
-# theirs. Nothing in this crate names one any more (checked, not assumed).
+# The PTY host, the documentation server and its viewer moved to
+# `worktrees-api` with the handlers that drive them, and took every one of
+# their dependencies with them: portable-pty, libc, hyper, hyper-util,
+# http-body-util, tokio, sha2 and getrandom. No file under `src/` names one
+# any more — checked, not assumed.
 
 
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -82,8 +82,16 @@ if (plan({ agentUp: false }) !== null) fail("no agent in that pane → not a dro
 else ok("no agent up → not a drop target");
 if (plan({ fromRepo: "/w/beta", reach: null }) !== null) fail("reach not read yet → no promise either way");
 else ok("reach unknown → no promise");
-const lib = read("../src-tauri/src/lib.rs");
-const dr = lib.slice(lib.indexOf("async fn drop_reference("), lib.indexOf("fn drop_token("));
+// `drop_reference` moved to the command layer with every other mutating verb;
+// the app keeps a wrapper that would satisfy neither pattern below. Slice the
+// real body, and refuse to pass on a slice that found nothing — an empty
+// string matches no regex, so without this the check would go quiet exactly
+// when the function it guards had been renamed out from under it.
+const lib = read("../../crates/worktrees-api/src/ops.rs");
+const from = lib.indexOf("pub fn drop_reference(");
+const to = lib.indexOf("fn drop_token(", from);
+if (from < 0 || to < 0) fail("drop_reference / drop_token are not where this check looks (worktrees-api/src/ops.rs)");
+const dr = lib.slice(from, to);
 if (!/State::Waiting/.test(dr) || !/prov\.id != worktrees_core::provider::CLAUDE\.id/.test(dr)) {
   fail("drop_reference no longer refuses a waiting Codex/pi pane itself — the frontend's refusal is advice, the backend's is the gate");
 } else ok("drop_reference refuses a waiting Codex/pi pane itself");

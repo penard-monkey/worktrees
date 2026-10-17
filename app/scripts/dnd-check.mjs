@@ -1,6 +1,7 @@
 // Checks the nav's drag-and-drop RULES — app/src/dnd.ts — against the tier
-// semantics in crates/worktrees-core/src/store.rs (`reconcile`) and lib.rs
-// (`LIFECYCLE_LABELS`). No DOM, no React: dnd.ts is pure on purpose.
+// semantics in crates/worktrees-core/src/store.rs (`reconcile`) and
+// crates/worktrees-api/src/ops.rs (`LIFECYCLE_LABELS`). No DOM, no React:
+// dnd.ts is pure on purpose.
 //
 //   node app/scripts/dnd-check.mjs            # exits non-zero on failure
 //
@@ -13,7 +14,11 @@ import { transformWithEsbuild } from "vite";
 
 const SRC = fileURLToPath(new URL("../src/dnd.ts", import.meta.url));
 const CORE = fileURLToPath(new URL("../../crates/worktrees-core/src/store.rs", import.meta.url));
-const APP_RS = fileURLToPath(new URL("../src-tauri/src/lib.rs", import.meta.url));
+// `LIFECYCLE_LABELS` moved out of app/src-tauri/src/lib.rs with the handler
+// that validates against it. A regex that finds nothing threw a TypeError
+// here rather than reporting a drift, which is the right failure mode but a
+// confusing message — so the match is asserted before it is indexed.
+const API_RS = fileURLToPath(new URL("../../crates/worktrees-api/src/ops.rs", import.meta.url));
 
 const js = (await transformWithEsbuild(fs.readFileSync(SRC, "utf8"), "dnd.ts", {
   loader: "ts", format: "esm",
@@ -43,10 +48,11 @@ const product = idle[1].replace(/_/g, "").split("*").reduce((a, s) => a * Number
 eq("IDLE_WINDOW_SECS mirrors store.rs", D.IDLE_WINDOW_SECS, product);
 const sticky = [...core.matchAll(/Some\("(\w+)"\) => return "\1"/g)].map((m) => m[1]).sort();
 eq("sticky labels mirror reconcile()", sticky, ["abandoned", "archived", "saved"]);
-const labels = /LIFECYCLE_LABELS: \[&str; \d+\] = \[([^\]]+)\]/.exec(fs.readFileSync(APP_RS, "utf8"));
-eq("LIFECYCLE_LABELS mirrors lib.rs",
+const labels = /LIFECYCLE_LABELS: \[&str; \d+\] = \[([^\]]+)\]/.exec(fs.readFileSync(API_RS, "utf8"));
+ok("LIFECYCLE_LABELS is still where this check looks", labels);
+eq("LIFECYCLE_LABELS mirrors worktrees-api",
   [...D.LIFECYCLE_LABELS].sort(),
-  labels[1].split(",").map((s) => s.trim().replace(/"/g, "")).filter(Boolean).sort());
+  (labels?.[1] ?? "").split(",").map((s) => s.trim().replace(/"/g, "")).filter(Boolean).sort());
 
 // ── predictTier == reconcile + bucketOf ─────────────────────────────────────
 eq("pin outranks everything",

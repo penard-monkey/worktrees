@@ -410,11 +410,14 @@ if (tcFrom < 0 || tcTo < 0 || tcTo < tcFrom) {
 
 // The Rust side refuses the same shapes, and it is the last belt: if its
 // allowlist ever becomes a denylist, a slug walks straight into the file.
-const RS = read("../src-tauri/src/lib.rs");
+// The ui-events validators moved to the command layer with the handler that
+// uses them — which is the point of R2: a check reachable only through the
+// Tauri wrapper is a check a non-WebView client skips.
+const RS = read("../../crates/worktrees-api/src/prefs.rs");
 if (!/fn valid_token\(s: &str\) -> bool \{[\s\S]*?is_ascii_alphanumeric\(\)[\s\S]*?\}/.test(RS)) {
-  fail("lib.rs: `valid_token` no longer allowlists ASCII identifier characters — the backend would store whatever it is sent");
+  fail("worktrees-api/src/prefs.rs: `valid_token` no longer allowlists ASCII identifier characters — the backend would store whatever it is sent");
 }
-if (!/fn valid_event\(/.test(RS)) fail("lib.rs: `valid_event` is gone — nothing checks a batch on the way in");
+if (!/fn valid_event\(/.test(RS)) fail("worktrees-api/src/prefs.rs: `valid_event` is gone — nothing checks a batch on the way in");
 
 if (bad) { console.error(`\nusage-check: ${bad} failure(s)`); process.exit(1); }
 console.log(`usage-check: ok — key resolution, chord names, the terminal-keystroke rule, every dock tab keyed and surfaced, every track() key a literal, ${SITES.length} pinned controls, and ${TSX.length} .tsx files with no unkeyed dynamic-title button`);

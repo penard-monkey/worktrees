@@ -965,6 +965,56 @@ pub fn trace_spawns() -> bool {
 }
 
 
+/// Close a place. It moved here last of the mutating verbs, because it sweeps
+/// the dock's owned shells and that registry only reached `Ctx` with the PTY
+/// section — splitting the handler earlier would have meant writing the split
+/// and then undoing it.
+pub fn close_place(
+    repo: String,
+    slug: String,
+    yes: bool,
+    session: Option<String>,
+    provider: Option<String>,
+    shells: &crate::term::Shells,
+) -> Result<CmdResult, String> {
+    if let Some(p) = provider.as_deref() {
+        known_harness(p)?;
+    }
+    // core cmd_close sweeps this place's tmux-era sidecars; the owned dock
+    // shells are app state, so they're swept here — same rule as before, the
+    // dock's scratch shells die with the place.
+    let slug_log = slug.clone();
+    let mut args = vec![slug.clone()];
+    if let Some(p) = &provider { args.push("--ai".into()); args.push(p.clone()); }
+    if yes {
+        args.push("-y".into());
+    }
+    let expect = session.filter(|s| !s.is_empty());
+    // The consented session goes in the log line too: when a kill is questioned
+    // later, the record must say WHICH session the user was asked about.
+    let op = match &expect {
+        Some(s) => format!("close {slug_log} yes={yes} session={s}"),
+        None => format!("close {slug_log} yes={yes}"),
+    };
+    if let Some(s) = expect {
+        args.push("--session".into());
+        args.push(s);
+    }
+    let mut r = run_op(&op, &repo, |p, ui| ops::cmd_close(p, ui, &args))?;
+    if r.code == worktrees_core::diag::EXIT_NEEDS_CONFIRM {
+        // Not a failure — a question. Resolve the session core balked at the
+        // same way core did, so the UI can name it verbatim. This is a SECOND
+        // resolution and can differ from core's (the session may have exited in
+        // between) — harmless now that the answer comes back name-bound: the
+        // name shown is the name core is held to, and `None` means there is
+        // nothing left to ask about (the frontend treats it as "already gone").
+        r.needs_confirm = Project::discover(Path::new(&repo)).ok().and_then(|p| ops::place_session(&p, &slug));
+    } else if r.ok && provider.is_none() {
+        crate::term::kill_place_shells(shells, &repo, &slug);
+    }
+    Ok(r)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

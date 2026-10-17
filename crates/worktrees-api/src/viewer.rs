@@ -136,7 +136,7 @@ const BUNDLE_ENV: &str = "WORKTREES_VIEWER_JS";
 /// about which places exist is a drift bug, and the fields the server reads
 /// (`key`, `tree`, `root`, `etag`, `meta`, `index`) are exactly the fields the
 /// derive writes.
-pub(crate) struct Group {
+pub struct Group {
     /// Canonical place root — the walk's root, and the identity of this entry.
     pub(crate) root: PathBuf,
     /// The place's slug. Names the tree directory and is the first fact in the
