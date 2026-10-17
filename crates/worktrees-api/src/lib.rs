@@ -37,6 +37,21 @@
 //!   has a home — a `Ctx` field, or core. It is the one cluster in the
 //!   extraction that is not mechanical, and it is better known now than at
 //!   handler 90.
+//!
+//! ## One engine process per host (decided 2026-10-17)
+//!
+//! The plan drew today's app and tomorrow's `worktrees serve` as alternatives
+//! and never both on one machine — which is the normal case, since the person
+//! holding the phone is sitting at the desktop. Two processes each building a
+//! `Ctx` means two nav-dot polls, two sets of dock-shell PTYs the other cannot
+//! see, two docs servers, and two writers to `shell-cwds.json`, the term-hist
+//! rings and `ui-events.jsonl`. So: **the desktop app becomes a client of a
+//! local `worktrees serve`**, the same way the plan already makes a second
+//! desktop one. The shim keeps the window, the client-local commands
+//! (§III.4.B) and the job of finding or starting the server; everything that
+//! owns a registry runs in exactly one process per host. That makes a version
+//! handshake mandatory rather than nice — after an upgrade, "the app is new and
+//! the server is old" is the default state, not a corner.
 
 pub mod config;
 pub mod docserver;
