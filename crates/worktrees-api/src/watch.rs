@@ -34,17 +34,50 @@ pub struct Watch {
     /// Last answer per transcript/rollout: its length when read, and the model
     /// it named. Read on the 3s snapshot poll, so a file is re-read only once
     /// it has GROWN — an idle session costs one `stat`.
-    pub model_cache: Mutex<HashMap<PathBuf, (u64, Option<String>)>>,
+    model_cache: Mutex<HashMap<PathBuf, (u64, Option<String>)>>,
     /// Worktrees with a live codex session: its tmux session name and the
     /// model the last snapshot showed. Codex writes no status file, so nothing
     /// else tells the poll a codex turn landed; the tick re-reads these and
     /// re-lists when a model CHANGES — exactly when the label would, and never
     /// while a turn merely streams. The session name is what the approval
     /// sample captures.
-    pub codex: Mutex<HashMap<String, CodexWatched>>,
+    codex: Mutex<HashMap<String, CodexWatched>>,
     /// Live pi lanes, by place path: set by the snapshot (like `codex`) while
     /// pi itself runs in the place's `~agent~pi` session.
-    pub pi: Mutex<HashMap<String, PiWatched>>,
+    pi: Mutex<HashMap<String, PiWatched>>,
+}
+
+impl Watch {
+    /// Which place paths are being watched right now, by harness id.
+    ///
+    /// The maps themselves stay private — `pi_watch_set` keeps startup memory
+    /// across a re-list and a direct write would lose it. WHAT is being
+    /// watched is a different question, and a legitimately public one: a
+    /// server wants it for its own status, and without it the sharing
+    /// invariant is untestable from outside this crate.
+    ///
+    /// That invariant: every handler takes its `Ctx` from a clone and the
+    /// poll holds its own, so a clone that stopped sharing these maps would
+    /// have the snapshot record a lane into one and the tick read an empty
+    /// other. No error, no log line, and no nav dots.
+    pub fn watching(&self) -> Vec<(&'static str, String)> {
+        let mut out: Vec<(&'static str, String)> = self
+            .codex
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .map(|k| ("codex", k.clone()))
+            .chain(
+                self.pi
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .keys()
+                    .map(|k| ("pi", k.clone())),
+            )
+            .collect();
+        out.sort_unstable();
+        out
+    }
 }
 
 // The probe reader lives in core (`worktrees_core::agent`) so the MCP server's
