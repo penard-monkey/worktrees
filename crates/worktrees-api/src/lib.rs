@@ -38,6 +38,7 @@
 //!   extraction that is not mechanical, and it is better known now than at
 //!   handler 90.
 
+pub mod config;
 pub mod log;
 pub mod meta;
 pub mod projects;
