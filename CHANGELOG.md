@@ -6,6 +6,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Changed
+- **The 143 app commands moved into a new `worktrees-api` crate**, leaving the
+  Tauri layer as thin wrappers. Nothing changes for the desktop app — the same
+  143 commands with the same arguments, verified against `main` — but the
+  command layer can now be called by something that is not a window, which is
+  what `worktrees serve` will need. `app/src-tauri/src/lib.rs` goes from 11,288
+  lines to about 2,100; the PTY host, the documentation server and its viewer
+  move with the handlers that drive them.
+- **A sandboxed app no longer writes into your real app's log.**
+  `app/scripts/sandbox.sh --app` runs under its own bundle identifier and has
+  always had its own config dir, but `app.log` was keyed to a compile-time
+  constant and went to the installed app's folder regardless. It follows the
+  running identifier now. (The one `startup` line is still written before the
+  app can be asked which identifier it is.)
 - **A project the worktrees rules can be applied to (or updated in) now shows
   "Repair / upgrade…" in its right-click menu**, with no number beside it, so
   Apply is one menu item away instead of buried in Project settings. The rules

@@ -1040,9 +1040,15 @@ parses to an EMPTY catalog on purpose, which reads as "pi offers nothing".
   `cli-missing`, and that state deliberately suppresses the offer, so you would
   measure the wrong thing and conclude the feature is broken. Point `CARGO_HOME`
   and `RUSTUP_HOME` at the real ones or the build re-downloads the registry.
-  Second gap, unrelated: `--app` moves the CONFIG dir to
-  `net.casadelvalle.worktrees.sbx` but `app.log` still goes to the **plain**
-  identifier — a sandbox writes into your real app's log unless HOME is faked.
+  Second gap, unrelated, and now CLOSED: `--app` moves the CONFIG dir to
+  `net.casadelvalle.worktrees.sbx`, and `app.log` used to go to the **plain**
+  identifier regardless, so a sandbox wrote into your real app's log unless
+  HOME was faked. `log_dir()` read `APP_IDENT`, a `const`; it reads a runtime
+  `IDENT` now, set in `.setup()` from `app.config().identifier` — the same
+  field `app_config_dir()` is `config_dir().join(…)` of, which is why the
+  config dir already followed the override and the log did not. One line is
+  still written under the default: the `startup v… PATH=…` line, emitted
+  before any app handle exists to ask.
 - **A vanished sandbox app means the human closed it.** `tauri dev` exits 0 when
   the window closes, which is indistinguishable from a clean shutdown because it
   is one; a harness kill is 143. Twice in one session that was reported as a
