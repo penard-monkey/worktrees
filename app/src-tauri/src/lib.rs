@@ -1914,19 +1914,6 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-
-
-
-
-
-
-
-
-
-    use super::*;
-
-
-
     #[test]
     fn clone_errors_serialize_with_a_kind_the_dialog_can_branch_on() {
         let e = worktrees_core::clone::CloneError {
@@ -1938,74 +1925,15 @@ mod tests {
         assert_eq!(v["message"], "No repository");
     }
 
-
-
-
-
-    fn v(paths: &[&str]) -> Vec<String> {
-        paths.iter().map(|s| s.to_string()).collect()
-    }
-
     // ── rollback: which releases are offered ────────────────────────────────
 
     // ── Claude service status ───────────────────────────────────────────────
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
     // ── dock shell cwd memory ────────────────────────────────────────────────
-
-
-
-
-
-
-
-
-
-
-
 
     // ── dock shell resizes ───────────────────────────────────────────────────
 
-
-
-
-
-
-
     // ── dock shell history: scrollback + per-tab commands ───────────────────
-
-
-
-
-
-
-
-
-
-
-
-
 
     // ── "Ask Claude" (ai_status_report) — the two pure pieces ────────────────
     // The spawn itself cannot be tested here: there is no fake `claude` anywhere
@@ -2013,13 +1941,6 @@ mod tests {
     // why docs/ai-profiles-manual-checks.md §11 exists. What IS testable is the
     // text we hand the model and the check that decides whether to spawn at all.
 
-
-
-
     // ── local usage metrics ────────────────────────────────────────────────
-
-
-
-
 
 }

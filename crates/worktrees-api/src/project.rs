@@ -794,7 +794,21 @@ impl PrCache {
         max_age_secs: u64,
         conclude: impl FnOnce(Option<&PrCacheEntry>) -> PrCacheEntry,
     ) -> PrCacheEntry {
-        let asked = now_ms();
+        self.answer_with(repo, max_age_secs, now_ms, conclude)
+    }
+
+    /// `answer` with the clock injected, so a test can script the stamps a
+    /// caller's "asked" and a conclusion's "done" carry instead of racing two
+    /// sleeps against the scheduler — which is how the test below failed on a
+    /// macOS CI runner while passing 40 of 40 locally.
+    fn answer_with(
+        &self,
+        repo: &str,
+        max_age_secs: u64,
+        now: impl Fn() -> u64,
+        conclude: impl FnOnce(Option<&PrCacheEntry>) -> PrCacheEntry,
+    ) -> PrCacheEntry {
+        let asked = now();
         let lock = self.locks.lock().unwrap_or_else(|e| e.into_inner()).entry(repo.to_string()).or_default().clone();
         let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
         let cached = self.entries.lock().unwrap_or_else(|e| e.into_inner()).get(repo).cloned();
@@ -803,9 +817,9 @@ impl PrCache {
                 return c.clone();
             }
         }
-        let started = now_ms();
+        let started = now();
         let mut e = conclude(cached.as_ref());
-        let done = now_ms();
+        let done = now();
         // a snapshot fetched by THIS conclusion is dated with it; one carried
         // over from before (offline) keeps its own, older, time
         if let Some((t, _)) = e.snap.as_mut() {
@@ -1092,44 +1106,75 @@ pub fn launch_watched(
 mod tests {
     use super::*;
 
-    /// Two callers that both force (`max_age 0`), the second arriving while the
+    /// A scripted clock: each call returns the next stamp, the last one
+    /// repeating. The stamps are the input the rule is about, so they are
+    /// chosen rather than raced.
+    fn clock(ticks: &'static [u64]) -> impl Fn() -> u64 + Send + Sync {
+        let i = std::sync::atomic::AtomicUsize::new(0);
+        move || ticks[i.fetch_add(1, std::sync::atomic::Ordering::SeqCst).min(ticks.len() - 1)]
+    }
+
+    /// Two callers that both force (`max_age 0`), the second asking while the
     /// first is mid-fetch, spend ONE fetch: the queued one finds a conclusion
     /// reached after it asked. A start-stamped conclusion predates it and the
-    /// second fetches again.
+    /// second fetches again (`e.at = started` makes this red).
+    ///
+    /// The stamps are scripted, not measured. The first version slept 40ms and
+    /// expected that to land inside a 150ms fetch on another thread; a macOS
+    /// CI runner spawned the thread late enough that it did not, and the
+    /// failure read as the cache fetching twice. The `Barrier` keeps the SHAPE
+    /// — the second caller is at the door while the first is concluding — and
+    /// the clocks decide the outcome.
     #[test]
     fn a_forced_ask_queued_behind_a_fetch_shares_it() {
-        use super::{now_ms, PrCache, PrCacheEntry};
         use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::Arc;
+        use std::sync::{Arc, Barrier};
         let cache = Arc::new(PrCache::default());
         let calls = Arc::new(AtomicUsize::new(0));
-        let ask = |cache: Arc<PrCache>, calls: Arc<AtomicUsize>| {
+        let entry = |at| PrCacheEntry {
+            at,
+            state: "ok",
+            host: None,
+            web: None,
+            push_owner: String::new(),
+            snap: None,
+            message: None,
+            viewer: None,
+        };
+        // A asks at 1000, starts at 1001, concludes at 2000 — and does not
+        // conclude until B is at the door.
+        let door = Arc::new(Barrier::new(2));
+        let a = {
+            let (cache, calls, door) = (cache.clone(), calls.clone(), door.clone());
             std::thread::spawn(move || {
-                cache.answer("/repo", 0, |_| {
+                cache.answer_with("/repo", 0, clock(&[1000, 1001, 2000]), |_| {
                     calls.fetch_add(1, Ordering::SeqCst);
-                    std::thread::sleep(std::time::Duration::from_millis(150));
-                    PrCacheEntry {
-                        at: now_ms(),
-                        state: "ok",
-                        host: None,
-                        web: None,
-                        push_owner: String::new(),
-                        snap: None,
-                        message: None,
-                        viewer: None,
-                    }
+                    door.wait();
+                    entry(0)
                 })
             })
         };
-        let a = ask(cache.clone(), calls.clone());
-        std::thread::sleep(std::time::Duration::from_millis(40));
-        let b = ask(cache.clone(), calls.clone());
-        a.join().unwrap();
-        b.join().unwrap();
+        // B asks at 1500: after A began, before A concluded.
+        let b = {
+            let (cache, calls, door) = (cache.clone(), calls.clone(), door.clone());
+            std::thread::spawn(move || {
+                door.wait();
+                cache.answer_with("/repo", 0, clock(&[1500, 1501, 1502]), |_| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    entry(0)
+                })
+            })
+        };
+        let got_a = a.join().unwrap();
+        let got_b = b.join().unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1, "the queued forced ask shares the in-flight fetch");
+        assert_eq!(got_a.at, 2000, "a conclusion is stamped when it is REACHED, not when it began");
+        assert_eq!(got_b.at, 2000, "the queued caller is handed that conclusion");
         // a forced ask that comes AFTER both does fetch
-        std::thread::sleep(std::time::Duration::from_millis(2));
-        ask(cache.clone(), calls.clone()).join().unwrap();
+        cache.answer_with("/repo", 0, clock(&[2001, 2002, 2003]), |_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            entry(0)
+        });
         assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 

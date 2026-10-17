@@ -415,16 +415,10 @@ fn place_key_in(
 static ISSUED: Mutex<std::collections::BTreeMap<String, PathBuf>> =
     Mutex::new(std::collections::BTreeMap::new());
 
-/// Take `base` for this root, or the hash-suffixed form when somebody else
-/// already has it. A poisoned lock is stepped over rather than panicked on:
-/// this decides a URL segment, and taking the app down over one is not a trade
-/// worth making.
-fn claim(base: String, root: &Path, clash: bool) -> String {
-    let mut issued = ISSUED.lock().unwrap_or_else(|e| e.into_inner());
-    claim_in(&mut issued, base, root, clash)
-}
-
-/// `claim` against a caller's own map.
+/// Take `base` for this root in `issued`, or the hash-suffixed form when
+/// somebody else already has it. The one lock on `ISSUED` is `place_key`'s,
+/// stepped over when poisoned rather than panicked on: this decides a URL
+/// segment, and taking the app down over one is not a trade worth making.
 ///
 /// **This split exists for the tests, and it is not a convenience.** `ISSUED`
 /// is process-global, so every test in the crate shares it — and a claim made

@@ -323,6 +323,17 @@ PAIR of directions (title/lifecycle must notify, clock fields must not), each
 confirmed red by breaking the fix the opposite way — too narrow is as wrong as
 too broad and does not look like it. Third sibling of the two notes above.
 
+**A test that races two sleeps asserts the scheduler, not the rule.**
+`a_forced_ask_queued_behind_a_fetch_shares_it` slept 40ms and expected to land
+inside a 150ms fetch on another thread; a macOS CI runner spawned that thread
+late enough that it did not, and the failure read as the PR cache fetching
+twice. Locally it passed 40 of 40, which is why it reached CI. The rule was
+about three STAMPS (asked, started, done), so the fix is the `_in` seam one
+level down: `answer_with` takes the clock, the test scripts the stamps, and a
+`Barrier` keeps the shape without deciding the outcome. The Rust twin of
+`termresize-check.mjs`'s virtual clock — any test with a `sleep` on both sides
+of a race wants the same treatment.
+
 **A new test must be shown to FAIL first.** ROADMAP's zombie-children item
 records a regression test that passed identically with and without its fix.
 Break the thing under test (drop the `skip_serializing_if`, restore the old
