@@ -98,12 +98,16 @@ cd app && ./node_modules/.bin/tsc --noEmit && cargo check -p app
 CI mirrors these + builds the app crate on both OSes. Squash-merge PRs.
 
 **Docs-only PRs skip CI by design.** `ci.yml` `paths-ignore` covers `docs/**`,
-`ROADMAP.md`, `CLAUDE.md`, `DESIGN.md`, `MIGRATION.md`, `README.md` and
-`.claude/**` — a close-out archive PR shows ZERO checks, which is correct, not
-a hung run, and nothing blocks the merge (main has no required status checks).
-The skip applies only when EVERY changed file matches the list; mix in one code
-file and the full suite runs. `CHANGELOG.md` is deliberately NOT on the list —
-it ships inside the app binary via `include_str!`.
+`ROADMAP.md`, `AGENTS.md`, `CLAUDE.md`, `DESIGN.md`, `MIGRATION.md`,
+`README.md` and `.claude/**` — a close-out archive PR shows ZERO checks, which
+is correct, not a hung run, and nothing blocks the merge (main has no required
+status checks). The skip applies only when EVERY changed file matches the list;
+mix in one code file and the full suite runs. `CHANGELOG.md` is deliberately
+NOT on the list — it ships inside the app binary via `include_str!`. THIS file
+IS on it, for the same reason as the `CLAUDE.md` that imports it: no
+`include_str!` reads it and no test reads the repo's own copy — every
+`AGENTS.md` under `test/` and `app/scripts/` is a fixture written into a
+scratch repo.
 
 **A CHANGELOG entry can rebase CLEANLY into the wrong release.** An entry
 written under `## [Unreleased]` while a release is cut underneath you applies

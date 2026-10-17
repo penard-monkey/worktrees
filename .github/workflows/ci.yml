@@ -2,7 +2,10 @@ name: ci
 # Prose-only PRs (session archives, roadmap sweeps, working notes) skip the
 # whole suite — nothing below is read by code or tests. CHANGELOG.md is
 # deliberately NOT ignored: it ships inside the app binary via include_str!,
-# and release PRs bump Cargo.toml anyway. paths-ignore skips only when EVERY
+# and release PRs bump Cargo.toml anyway. AGENTS.md is ignored on the same
+# evidence as the CLAUDE.md that imports it: no include_str! reads it, and no
+# test reads the repo's OWN copy — every AGENTS.md in test/ and app/scripts/
+# is a fixture written into a scratch repo, or a comment citing this file. paths-ignore skips only when EVERY
 # changed file matches, so a mixed docs+code PR still runs full CI. main has
 # no required status checks, so a skipped run shows zero checks and merges
 # cleanly. Keep both lists identical (GitHub Actions YAML has no anchors we
@@ -13,6 +16,7 @@ on:
     paths-ignore:
       - 'docs/**'
       - 'ROADMAP.md'
+      - 'AGENTS.md'
       - 'CLAUDE.md'
       - 'DESIGN.md'
       - 'MIGRATION.md'
@@ -22,6 +26,7 @@ on:
     paths-ignore:
       - 'docs/**'
       - 'ROADMAP.md'
+      - 'AGENTS.md'
       - 'CLAUDE.md'
       - 'DESIGN.md'
       - 'MIGRATION.md'
