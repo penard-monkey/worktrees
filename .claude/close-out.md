@@ -22,6 +22,7 @@ make test
 make lint
 cargo test -p worktrees-core
 cargo test -p worktrees-cli
+cargo test -p worktrees-api
 cargo test -p app --lib                  # `check`/`build` do NOT compile `mod tests`
 cd app && ./node_modules/.bin/tsc --noEmit && cargo check -p app
 ```

@@ -135,13 +135,20 @@ jobs:
           pnpm -C app build
       - name: cargo build -p app
         run: cargo build -p app --locked
-      # `build`/`check` do NOT compile `mod tests`, so without this line the app
-      # crate's unit tests only ever run when someone types the command — the
-      # same gap that shipped a broken test module for the CLI crate above.
-      # It matters most on ubuntu: the Linux half of `proc_cwd` (/proc/<pid>/cwd)
-      # is dead code on a mac and this is the only place it is ever executed.
+      # `build`/`check` do NOT compile `mod tests`, so without these lines the
+      # app and api crates' unit tests only ever run when someone types the
+      # command — the same gap that shipped a broken test module for the CLI
+      # crate above. The api line matters most on ubuntu: the Linux half of
+      # `proc_cwd` (/proc/<pid>/cwd) is dead code on a mac, and this is the only
+      # place it is ever executed. It lived in the app crate until the command
+      # layer moved to `worktrees-api`, and for a while after that move it ran
+      # nowhere in CI, under a comment here saying the opposite.
       - name: cargo test -p app
         run: cargo test -p app --lib --locked
+      # No `--lib`: `tests/headless.rs` is the one place the crate is driven
+      # the way `worktrees serve` will drive it, through public API only.
+      - name: cargo test -p worktrees-api
+        run: cargo test -p worktrees-api --locked
       # The `app/scripts/*-check.mjs` family — source-slicing guards for rules
       # tsc and the unit tests cannot see. Last, because they are the cheapest
       # and a compile failure above is the more useful report.
