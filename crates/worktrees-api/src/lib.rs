@@ -40,6 +40,8 @@
 
 pub mod log;
 pub mod meta;
+pub mod projects;
+pub mod watch;
 pub mod util;
 pub mod profiles;
 
@@ -82,11 +84,16 @@ pub struct Ctx {
     /// host machine's whichever client is driving.
     pub config_dir: PathBuf,
     pub host: Arc<dyn Host>,
+    /// The nav-dot poll's registries. Per PROCESS, not per client: they track
+    /// this machine's tmux sessions, so two clients watching the same place
+    /// share one set of watches and one model cache. Previously three
+    /// `static`s in the app — see `watch` for why they stopped being that.
+    pub watch: Arc<watch::Watch>,
 }
 
 impl Ctx {
     pub fn new(config_dir: PathBuf, host: Arc<dyn Host>) -> Self {
-        Ctx { config_dir, host }
+        Ctx { config_dir, host, watch: Arc::new(watch::Watch::default()) }
     }
 
     /// The app's own pre-registry project list. Only ever READ — it is the
