@@ -41,6 +41,7 @@
 pub mod log;
 pub mod meta;
 pub mod projects;
+pub mod status;
 pub mod watch;
 pub mod workspace;
 pub mod util;
