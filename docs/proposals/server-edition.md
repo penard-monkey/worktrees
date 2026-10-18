@@ -93,6 +93,17 @@ the code wins.
   argument-injection invariant matters as soon as any client that is not the
   frontend's own dialogs reaches the git call sites, which a loopback client
   already does, so it belongs no later than Phase 2's remote bind.
+- **Two security settings are decided by whichever client loaded last.**
+  `App.tsx` pushes `set_codex_permissions` and `set_pi_trust` on every page
+  load and on every change. Both land in in-memory, process-global overrides in
+  core (`codex::set_permissions_override`, `trust::PI_TRUST_OVERRIDE`) that
+  outrank the env var and the user config. Under one engine per host, a client
+  whose settings say `full` therefore widens what Codex may do in every lane
+  the host launches, and opening a page is enough to do it. Found by the
+  transport lane driving `serve` on 2026-10-18. These are HOST policy, not
+  client preference: they should live on the host and change only by an
+  explicit act. A page load should not be able to set them. The ruling is
+  needed before Phase 2 lets a second device connect.
 
 ## Part III — the server edition (the plan as written, 2026-10-15)
 
