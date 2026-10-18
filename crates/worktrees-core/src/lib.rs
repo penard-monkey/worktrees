@@ -8,6 +8,7 @@
 pub mod activity;
 pub mod agent;
 pub mod agentfiles;
+pub mod argv;
 pub mod choice;
 pub mod config;
 pub mod codex;

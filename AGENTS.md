@@ -81,6 +81,23 @@ started in a home or scratch directory the moment the app began installing it
 globally. It now handshakes, advertises zero tools and says why; `test/mcp.bats`
 pins that, and the bats suite caught the change by asserting the old contract.
 
+**A client's string is never a flag (R3) — and `--` alone would have made it
+worse.** Every core `cmd_*` parser sorts flags from positionals by the leading
+`-`, and `worktrees-api` pushed the app's strings in bare: `relink`'s `slug:
+"--all"` relinked every place, `--force` included, and came back OK. Three
+parts, all required. The api builds every argv with `worktrees_api::argv::Argv`
+(our flags are `&'static str`, a value is glued on as `--x=<v>`, positionals go
+after `--`; a test fails on any other call to a `cmd_*`). The parsers honour
+`--` (`worktrees_core::argv::split_options`). The boundary refuses a `-`-led
+branch, base or slug with core's `safe_arg`/`branch_arg`, which the MCP server
+shares. The trap is the middle part: core was safe by ACCIDENT, because the
+parser refused every `-`-led positional as an unknown flag. Honour `--` and the
+value reaches git, which permutes options the same way, and `do_switch`'s
+`git fetch origin <base>` with `--upload-pack=<cmd>` RUNS `<cmd>` (measured, on
+a local-path origin). So a git call carrying a client value puts its own `--`
+in front of it, and teaching any other parser `--` starts with walking where its
+positionals land.
+
 ## Gates (run before any PR)
 
 ```sh

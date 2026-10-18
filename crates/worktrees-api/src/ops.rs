@@ -10,8 +10,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Serialize;
 use worktrees_core::ui::CaptureUi;
-use worktrees_core::{harness, mcpsetup, mention, ops, provider, store, sync, sysclock, tmux, Project, Ui};
+use worktrees_core::{argv, harness, mcpsetup, mention, ops, provider, store, sync, sysclock, tmux, Project, Ui};
 
+use crate::argv::Argv;
 use crate::log::log as applog;
 use crate::Ctx;
 
@@ -534,15 +535,7 @@ pub fn run_op<F: FnOnce(&Project, &mut CaptureUi) -> i32>(op: &str, repo: &str, 
     // failures from `output`, and an Err would surface as a thrown invoke with no
     // banner of its own.
     if let Some(msg) = sync::hub_copy_refusal(Path::new(&project.main_root)) {
-        applog("warn", &format!("{op} refused repo={repo}: {msg}"));
-        return Ok(CmdResult {
-            ok: false,
-            code: 1,
-            output: msg,
-            slug: None,
-            needs_confirm: None,
-            warnings: Vec::new(),
-        });
+        return Ok(refused(op, repo, msg));
     }
     let mut ui = CaptureUi::default();
     let code = f(&project, &mut ui);
@@ -561,6 +554,14 @@ pub fn run_op<F: FnOnce(&Project, &mut CaptureUi) -> i32>(op: &str, repo: &str, 
     Ok(CmdResult { ok: code == 0, code, output: ui.lines.join("\n"), slug: None, needs_confirm: None, warnings })
 }
 
+/// An op refused before it ran, shaped like one that failed: the frontend
+/// renders `output`, and a failed create puts the new-worktree form back with
+/// what was typed in it — a thrown error would lose both.
+pub fn refused(op: &str, repo: &str, msg: String) -> CmdResult {
+    applog("warn", &format!("{op} refused repo={repo}: {msg}"));
+    CmdResult { ok: false, code: 1, output: msg, slug: None, needs_confirm: None, warnings: Vec::new() }
+}
+
 /// Create a worktree (`new`). `--no-attach`: the session is created (pane 0 AI,
 /// pane 1 shell) but the app embeds it via its own PTY rather than attaching.
 pub fn new_place(
@@ -572,14 +573,23 @@ pub fn new_place(
     model: Option<String>,
     force: Option<bool>,
 ) -> Result<CmdResult, String> {
+    // R3's second layer, before anything else runs (`argv`).
+    let checked = (|| -> Result<_, String> {
+        let branch = argv::branch_arg(&branch)?;
+        let base = base.filter(|s| !s.trim().is_empty()).map(|b| argv::safe_arg(&b, "base")).transpose()?;
+        let name = name.filter(|s| !s.trim().is_empty()).map(|n| argv::safe_arg(&n, "name")).transpose()?;
+        Ok((branch, base, name))
+    })();
+    let (branch, base, name) = match checked {
+        Ok(v) => v,
+        Err(msg) => return Ok(refused("new", &repo, msg)),
+    };
     let provider = provider.unwrap_or_else(|| harness::default_adapter().provider().id.into());
     known_harness(&provider)?.installed()?;
     let model = model.filter(|m| !m.trim().is_empty());
     if let Some(m) = &model {
         worktrees_core::choice::validate_model(m)?;
     }
-    let branch_log = branch.clone();
-    let name = name.filter(|s| !s.is_empty());
     // Resolve the FINAL slug BEFORE the op — wt_for_branch reflects the holder
     // that reuse targets, and the derived-slug dir doesn't exist yet either way.
     // After the op the holder may have moved (branch now in the new dir), so the
@@ -587,31 +597,22 @@ pub fn new_place(
     let resolved_slug = Project::discover(Path::new(&repo))
         .ok()
         .map(|p| p.resolve_new_slug(&branch, name.as_deref()));
-    let mut args: Vec<String> = vec![branch];
-    if let Some(b) = base.filter(|s| !s.is_empty()) {
-        args.push(b);
-    }
-    if let Some(n) = name {
-        args.push("--name".into());
-        args.push(n);
-    }
-    args.push("--ai".into());
-    args.push(provider);
-    if let Some(m) = model {
-        args.push("--model".into());
-        args.push(m);
-    }
-    if force.unwrap_or(false) {
-        args.push("--force".into());
-    }
-    args.push("--no-attach".into());
+    let op = format!("new {branch}");
     // Single-pane like `open_place` below: Claude gets the full width and the
     // scratch shell lives in the dock's Terminal tab (which is also where deps
     // get installed — no spare pane means no auto-install). Single pane is the
     // CLI's default too now; `--no-spare` stays explicit so the app's layout
     // never rides on that default again.
-    args.push("--no-spare".into());
-    let mut r = run_op(&format!("new {branch_log}"), &repo, |p, ui| ops::cmd_new(p, ui, &args))?;
+    let args = Argv::new()
+        .value_opt("--name", name.as_deref())
+        .value("--ai", &provider)
+        .value_opt("--model", model.as_deref())
+        .flag_if(force.unwrap_or(false), "--force")
+        .flag("--no-attach")
+        .flag("--no-spare")
+        .pos(branch)
+        .pos_opt(base);
+    let mut r = run_op(&op, &repo, |p, ui| args.call(p, ui, ops::cmd_new))?;
     if r.ok {
         r.slug = resolved_slug;
     }
@@ -626,13 +627,19 @@ pub fn switch_place(
     branch: String,
     base: Option<String>,
 ) -> Result<CmdResult, String> {
-    let slug_log = slug.clone();
-    let mut args: Vec<String> = vec![slug, branch];
-    if let Some(b) = base.filter(|s| !s.is_empty()) {
-        args.push(b);
-    }
-    args.push("-y".into());
-    run_op(&format!("switch {slug_log}"), &repo, |p, ui| ops::cmd_switch(p, ui, &args))
+    let checked = (|| -> Result<_, String> {
+        let slug = argv::safe_arg(&slug, "slug")?;
+        let branch = argv::branch_arg(&branch)?;
+        let base = base.filter(|s| !s.trim().is_empty()).map(|b| argv::safe_arg(&b, "base")).transpose()?;
+        Ok((slug, branch, base))
+    })();
+    let (slug, branch, base) = match checked {
+        Ok(v) => v,
+        Err(msg) => return Ok(refused("switch", &repo, msg)),
+    };
+    let op = format!("switch {slug}");
+    let args = Argv::new().flag("-y").pos(slug).pos(branch).pos_opt(base);
+    run_op(&op, &repo, |p, ui| args.call(p, ui, ops::cmd_switch))
 }
 
 /// Branches the status-bar switcher offers, plus the base a NEW branch would be
@@ -670,6 +677,10 @@ pub fn open_place(
     model: Option<String>,
     force: Option<bool>,
 ) -> Result<CmdResult, String> {
+    let slug = match argv::safe_arg(&slug, "slug") {
+        Ok(s) => s,
+        Err(msg) => return Ok(refused("open", &repo, msg)),
+    };
     let provider = provider.unwrap_or_else(|| harness::default_adapter().provider().id.into());
     let adapter = known_harness(&provider)?;
     adapter.installed()?;
@@ -714,20 +725,15 @@ pub fn open_place(
             ai.resume_id = resume_id;
             ops::launch(p, ui, &p.main_root, &session, "", &ai, false, false)
         } else {
-            let mut args = vec![slug, "--no-attach".into(), "--no-spare".into()];
-            args.push("--ai".into());
-            args.push(provider.clone());
-            if resume {
-                args.push("-r".into());
-            }
-            if let Some(m) = &model {
-                args.push("--model".into());
-                args.push(m.clone());
-            }
-            if force {
-                args.push("--force".into());
-            }
-            ops::cmd_open(p, ui, &args)
+            let args = Argv::new()
+                .flag("--no-attach")
+                .flag("--no-spare")
+                .value("--ai", &provider)
+                .flag_if(resume, "-r")
+                .value_opt("--model", model.as_deref())
+                .flag_if(force, "--force")
+                .pos(slug);
+            args.call(p, ui, ops::cmd_open)
         }
     })
 }
@@ -977,30 +983,31 @@ pub fn close_place(
     provider: Option<String>,
     shells: &crate::term::Shells,
 ) -> Result<CmdResult, String> {
+    let slug = match argv::safe_arg(&slug, "slug") {
+        Ok(s) => s,
+        Err(msg) => return Ok(refused("close", &repo, msg)),
+    };
     if let Some(p) = provider.as_deref() {
         known_harness(p)?;
     }
     // core cmd_close sweeps this place's tmux-era sidecars; the owned dock
     // shells are app state, so they're swept here — same rule as before, the
     // dock's scratch shells die with the place.
-    let slug_log = slug.clone();
-    let mut args = vec![slug.clone()];
-    if let Some(p) = &provider { args.push("--ai".into()); args.push(p.clone()); }
-    if yes {
-        args.push("-y".into());
-    }
     let expect = session.filter(|s| !s.is_empty());
     // The consented session goes in the log line too: when a kill is questioned
     // later, the record must say WHICH session the user was asked about.
     let op = match &expect {
-        Some(s) => format!("close {slug_log} yes={yes} session={s}"),
-        None => format!("close {slug_log} yes={yes}"),
+        Some(s) => format!("close {slug} yes={yes} session={s}"),
+        None => format!("close {slug} yes={yes}"),
     };
-    if let Some(s) = expect {
-        args.push("--session".into());
-        args.push(s);
-    }
-    let mut r = run_op(&op, &repo, |p, ui| ops::cmd_close(p, ui, &args))?;
+    // `--session` is glued on and only ever COMPARED with the live name, so it
+    // needs no validation of its own: a wrong one is "changed since confirmation".
+    let args = Argv::new()
+        .value_opt("--ai", provider.as_deref())
+        .flag_if(yes, "-y")
+        .value_opt("--session", expect.as_deref())
+        .pos(slug.clone());
+    let mut r = run_op(&op, &repo, |p, ui| args.call(p, ui, ops::cmd_close))?;
     if r.code == worktrees_core::diag::EXIT_NEEDS_CONFIRM {
         // Not a failure — a question. Resolve the session core balked at the
         // same way core did, so the UI can name it verbatim. This is a SECOND

@@ -556,7 +556,7 @@ pub fn do_switch(p: &Project, ui: &mut dyn Ui, wt: &str, branch: &str, base: Opt
 
     if git::git_ok(main, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")]) {
         ui.info("Branch exists locally — switching.");
-        if let Err(e) = git::git_status_captured(wt, &["switch", branch]) {
+        if let Err(e) = git::git_status_captured(wt, &["switch", "--", branch]) {
             return switch_fail(ui, &e);
         }
     } else {
@@ -566,20 +566,23 @@ pub fn do_switch(p: &Project, ui: &mut dyn Ui, wt: &str, branch: &str, base: Opt
         }
         if git::git_ok(main, &["show-ref", "--verify", "--quiet", &format!("refs/remotes/origin/{branch}")]) {
             ui.info(&format!("Tracking remote branch origin/{branch}."));
-            if let Err(e) = git::git_status_captured(wt, &["switch", branch]) {
+            if let Err(e) = git::git_status_captured(wt, &["switch", "--", branch]) {
                 return switch_fail(ui, &e);
             }
         } else {
             let base = base.map(|s| s.to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| p.default_base());
+            // Every `--` in this function is load-bearing: git reads options
+            // wherever they sit, and `fetch origin --upload-pack=<cmd>` RUNS
+            // <cmd>. A base or branch can reach here from a client (`argv`).
             if do_fetch {
-                let _ = git::git(main, &["fetch", "--quiet", "origin", &base]);
+                let _ = git::git(main, &["fetch", "--quiet", "origin", "--", &base]);
             }
             let mut start = base.clone();
             if git::git_ok(main, &["show-ref", "--verify", "--quiet", &format!("refs/remotes/origin/{base}")]) {
                 start = format!("origin/{base}");
             }
             ui.info(&format!("Creating new branch '{branch}' off '{start}'."));
-            if let Err(e) = git::git_status_captured(wt, &["switch", "-c", branch, &start]) {
+            if let Err(e) = git::git_status_captured(wt, &["switch", "-c", branch, "--", &start]) {
                 return switch_fail(ui, &e);
             }
         }
@@ -795,11 +798,18 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     // pass it, so it stays accepted, and of the two the last one given wins.
     let mut spare_shell = false;
     let mut expect = "";
-    for arg in args {
+    let (opts, rest) = crate::argv::split_options(args);
+    let mut pos: Vec<&str> = Vec::new();
+    for arg in opts {
         if !expect.is_empty() {
             // A brief is prose and is consumed WHOLE as the value — a markdown
             // list starts with `- `, and refusing it would refuse the most
             // natural brief there is. Nothing in it is ever read as a flag.
+            // Every other value is refused when it LOOKS like one: at a shell
+            // that is a value the user forgot (`--name --no-fetch`), and taking
+            // it would swallow the flag they meant. A value that really starts
+            // with `-` can ride glued on, `--name=-x`, which is how the command
+            // layer passes every client value so none of them can hit this.
             if arg.starts_with('-') && expect != "brief" {
                 ui.error(&format!("--{expect} needs a value (got '{arg}')"));
                 return 1;
@@ -835,21 +845,23 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
                 ui.error(&format!("Unknown flag: {s}"));
                 return 1;
             }
-            s => {
-                if branch.is_empty() {
-                    branch = s.to_string();
-                } else if base.is_empty() {
-                    base = s.to_string();
-                } else {
-                    ui.error(&format!("Too many args: {s}"));
-                    return 1;
-                }
-            }
+            s => pos.push(s),
         }
     }
     if !expect.is_empty() {
         ui.error(&format!("--{expect} needs a value"));
         return 1;
+    }
+    pos.extend(rest.iter().map(String::as_str));
+    for s in pos {
+        if branch.is_empty() {
+            branch = s.to_string();
+        } else if base.is_empty() {
+            base = s.to_string();
+        } else {
+            ui.error(&format!("Too many args: {s}"));
+            return 1;
+        }
     }
     if branch.is_empty() {
         ui.error("Branch name required.  e.g. worktrees new feat/foo");
@@ -934,7 +946,7 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         return 1;
     } else if git::git_ok(&p.main_root, &["show-ref", "--verify", "--quiet", &format!("refs/heads/{branch}")]) {
         ui.info(&format!("Branch '{branch}' exists locally — checking it out."));
-        if let Err(e) = git::git_status_captured(&p.main_root, &["worktree", "add", &wt, &branch]) {
+        if let Err(e) = git::git_status_captured(&p.main_root, &["worktree", "add", "--", &wt, &branch]) {
             ui.error(&e);
             ui.error(&format!("Failed to add worktree for '{branch}' at {wt}."));
             return 1;
@@ -971,7 +983,7 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         }
         if git::git_ok(&p.main_root, &["show-ref", "--verify", "--quiet", &format!("refs/remotes/origin/{branch}")]) {
             ui.info(&format!("Checking out remote branch origin/{branch} (tracking)."));
-            if let Err(e) = git::git_status_captured(&p.main_root, &["worktree", "add", "--track", "-b", &branch, &wt, &format!("origin/{branch}")]) {
+            if let Err(e) = git::git_status_captured(&p.main_root, &["worktree", "add", "--track", "-b", &branch, "--", &wt, &format!("origin/{branch}")]) {
                 ui.error(&e);
                 ui.error(&format!("Failed to add tracking worktree for origin/{branch} at {wt}."));
                 return 1;
@@ -982,7 +994,7 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
                 start = format!("origin/{base}");
             }
             ui.info(&format!("Creating new branch '{branch}' off '{start}'."));
-            if let Err(e) = git::git_status_captured(&p.main_root, &["worktree", "add", "-b", &branch, &wt, &start]) {
+            if let Err(e) = git::git_status_captured(&p.main_root, &["worktree", "add", "-b", &branch, "--", &wt, &start]) {
                 ui.error(&e);
                 ui.error(&format!("Failed to create branch '{branch}' off '{start}' at {wt}."));
                 return 1;
@@ -1118,7 +1130,8 @@ fn detect_install_cmd(dir: &str) -> String {
 pub fn cmd_switch(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     let (mut force, mut do_fetch, mut yes) = (false, true, false);
     let mut pos: Vec<String> = Vec::new();
-    for a in args {
+    let (opts, rest) = crate::argv::split_options(args);
+    for a in opts {
         match a.as_str() {
             "--force" => force = true,
             "--no-fetch" => do_fetch = false,
@@ -1130,6 +1143,7 @@ pub fn cmd_switch(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
             s => pos.push(s.to_string()),
         }
     }
+    pos.extend(rest.iter().cloned());
 
     let phys = std::env::current_dir().ok().and_then(|d| std::fs::canonicalize(d).ok()).map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
     let wt_root_slash = format!("{}/", p.wt_root_dir());
@@ -1201,7 +1215,9 @@ pub fn cmd_open(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     // `--no-spare` (the old opt-out) stays accepted; the last one given wins.
     let mut spare_shell = false;
     let mut expect = "";
-    for a in args {
+    let (opts, rest) = crate::argv::split_options(args);
+    let mut pos: Vec<&str> = Vec::new();
+    for a in opts {
         if !expect.is_empty() {
             if a.starts_with('-') {
                 ui.error(&format!("--{expect} needs a value (got '{a}')"));
@@ -1228,19 +1244,21 @@ pub fn cmd_open(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
                 ui.error(&format!("Unknown flag: {s}"));
                 return 1;
             }
-            s => {
-                if name.is_empty() {
-                    name = s.to_string();
-                } else {
-                    ui.error(&format!("Too many args: {s}"));
-                    return 1;
-                }
-            }
+            s => pos.push(s),
         }
     }
     if !expect.is_empty() {
         ui.error(&format!("--{expect} needs a value"));
         return 1;
+    }
+    pos.extend(rest.iter().map(String::as_str));
+    for s in pos {
+        if name.is_empty() {
+            name = s.to_string();
+        } else {
+            ui.error(&format!("Too many args: {s}"));
+            return 1;
+        }
     }
     if name.is_empty() {
         ui.error("open needs a worktree (slug or branch). See: worktrees ls");
@@ -1319,7 +1337,8 @@ pub fn cmd_close(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     let mut want_provider = false;
     let mut expect: Option<String> = None;
     let mut want_val = false;
-    for a in args {
+    let (opts, rest) = crate::argv::split_options(args);
+    for a in opts {
         if want_provider {
             if crate::provider::by_id(a).is_none() { ui.error(&format!("--ai must be {}", crate::provider::choices())); return 1; }
             provider = Some(a.clone());
@@ -1354,6 +1373,7 @@ pub fn cmd_close(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
             s => names.push(s.to_string()),
         }
     }
+    names.extend(rest.iter().cloned());
     if want_provider {
         ui.error("--ai needs a value");
         return 1;
@@ -1553,7 +1573,8 @@ fn close_one(p: &Project, ui: &mut dyn Ui, name: &str, yes: bool, expect: Option
 pub fn cmd_rm(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     let (mut del_branch, mut force, mut yes) = (false, false, false);
     let mut names: Vec<String> = Vec::new();
-    for a in args {
+    let (opts, rest) = crate::argv::split_options(args);
+    for a in opts {
         match a.as_str() {
             "--branch" => del_branch = true,
             "--force" => force = true,
@@ -1565,6 +1586,7 @@ pub fn cmd_rm(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
             s => names.push(s.to_string()),
         }
     }
+    names.extend(rest.iter().cloned());
     if names.is_empty() {
         ui.error("rm needs a worktree name (slug or branch). See: worktrees ls");
         return 1;
@@ -1802,7 +1824,8 @@ fn resolve_place(p: &Project, ui: &mut dyn Ui, name: &str) -> Result<String, i32
 pub fn cmd_relink(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     let (mut all, mut force) = (false, false);
     let mut names: Vec<String> = Vec::new();
-    for a in args {
+    let (opts, rest) = crate::argv::split_options(args);
+    for a in opts {
         match a.as_str() {
             "--all" => all = true,
             "--force" => force = true,
@@ -1813,6 +1836,7 @@ pub fn cmd_relink(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
             s => names.push(s.to_string()),
         }
     }
+    names.extend(rest.iter().cloned());
     if all && !names.is_empty() {
         ui.error("relink takes either <worktree> or --all, not both.");
         return 1;
@@ -1967,7 +1991,8 @@ fn warn_if_tracked(ui: &mut dyn Ui, wt: &str) {
 pub fn cmd_provision(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     let (mut all, mut reallocate) = (false, false);
     let mut names: Vec<String> = Vec::new();
-    for a in args {
+    let (opts, rest) = crate::argv::split_options(args);
+    for a in opts {
         match a.as_str() {
             "--all" => all = true,
             "--reallocate" => reallocate = true,
@@ -1978,6 +2003,7 @@ pub fn cmd_provision(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
             s => names.push(s.to_string()),
         }
     }
+    names.extend(rest.iter().cloned());
     if all && !names.is_empty() {
         ui.error("provision takes either <worktree> or --all, not both.");
         return 1;
@@ -2127,9 +2153,11 @@ fn guidance_findings(p: &Project) -> Vec<Finding> {
 }
 
 pub fn cmd_doctor(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
-    let json = args.iter().any(|a| a == "--json") || std::env::var("WORKTREES_JSON").ok().as_deref() == Some("1");
-    if args.iter().any(|a| a == "--pi") {
-        if let Some(extra) = args.iter().find(|a| *a != "--pi" && *a != "--json") {
+    // Both scans stop at `--`: a place NAMED `--pi` is a name (`argv`).
+    let (opts, rest) = crate::argv::split_options(args);
+    let json = opts.iter().any(|a| a == "--json") || std::env::var("WORKTREES_JSON").ok().as_deref() == Some("1");
+    if opts.iter().any(|a| a == "--pi") {
+        if let Some(extra) = opts.iter().chain(rest).find(|a| *a != "--pi" && *a != "--json") {
             ui.error(&format!("doctor --pi takes only --json (got '{extra}')"));
             return 1;
         }
@@ -2231,7 +2259,8 @@ fn pi_doctor(p: &Project, ui: &mut dyn Ui, json: bool) -> i32 {
 fn doctor_config(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     let (mut json, mut strict, mut config_only) = (false, false, false);
     let mut names: Vec<String> = Vec::new();
-    for a in args {
+    let (opts, rest) = crate::argv::split_options(args);
+    for a in opts {
         match a.as_str() {
             "--json" => json = true,
             "--strict" => strict = true,
@@ -2243,6 +2272,7 @@ fn doctor_config(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
             s => names.push(s.to_string()),
         }
     }
+    names.extend(rest.iter().cloned());
     if names.len() > 1 {
         ui.error("doctor takes at most one worktree.");
         return 1;
@@ -2808,7 +2838,8 @@ fn emit_report(ui: &mut dyn Ui, report: &Report) {
 pub fn cmd_status(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     let mut json = false;
     let mut names: Vec<String> = Vec::new();
-    for a in args {
+    let (opts, rest) = crate::argv::split_options(args);
+    for a in opts {
         match a.as_str() {
             "--json" => json = true,
             s if s.starts_with('-') => {
@@ -2818,6 +2849,7 @@ pub fn cmd_status(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
             s => names.push(s.to_string()),
         }
     }
+    names.extend(rest.iter().cloned());
     // Unlike `doctor`, a name is REQUIRED: a health report is about one place,
     // and "the whole project is at risk" is not a sentence this tool can mean.
     if names.len() != 1 {
@@ -3499,5 +3531,139 @@ mod tests {
         // …but it still outranks a clean neighbour: the question must survive.
         assert_eq!(worse_rc(worse_rc(0, 0), ask), ask);
         assert_eq!(worse_rc(worse_rc(0, ask), 0), ask);
+    }
+
+    /// A repo of the test's own under the temp dir, with one commit on `main`.
+    /// Signing is switched off: a developer's global `commit.gpgsign` would
+    /// otherwise make the fixture depend on a key agent.
+    fn scratch_repo(tag: &str) -> std::path::PathBuf {
+        let base = std::env::temp_dir().join(format!("wt-ops-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let base = std::fs::canonicalize(&base).unwrap();
+        git_in(&base, &["init", "-q", "-b", "main"]);
+        git_in(&base, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        base
+    }
+
+    fn git_in(dir: &Path, args: &[&str]) {
+        let ok = Command::new("git")
+            .args(["-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false", "-C"])
+            .arg(dir)
+            .args(args)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?}");
+    }
+
+    type Cmd = fn(&Project, &mut dyn Ui, &[String]) -> i32;
+
+    fn run_cmd(p: &Project, f: Cmd, args: &[&str]) -> (i32, String) {
+        let mut ui = crate::ui::CaptureUi::default();
+        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let rc = f(p, &mut ui, &args);
+        (rc, ui.lines.join("\n"))
+    }
+
+    /// R3: `--` ends a parser's options, so whatever follows it is DATA, even
+    /// spelled exactly like a flag the parser knows. Every case is refused BY
+    /// NAME — which only happens if the parser took it as the name. Without the
+    /// terminator each of these said "Unknown flag: --".
+    #[test]
+    fn a_double_dash_makes_every_later_argument_positional() {
+        let base = scratch_repo("dashdash");
+        let p = Project::discover(&base).expect("a repo");
+        // A plain directory, so `switch` resolves its first positional as a place.
+        std::fs::create_dir_all(base.join(".worktrees/lane")).unwrap();
+
+        // new: <branch> [base]. A third positional is refused naming itself.
+        let (_, out) = run_cmd(&p, cmd_new, &["--no-tmux", "a", "--", "b", "-c"]);
+        assert!(out.contains("Too many args: -c"), "{out}");
+        // switch: <place> <branch> [base]; `-y` after `--` is a fourth.
+        let (_, out) = run_cmd(&p, cmd_switch, &["--", "lane", "a", "b", "-y"]);
+        assert!(out.contains("Too many args."), "{out}");
+        // The one-name commands: each flag below is one that parser knows.
+        let cases: [(Cmd, &str); 6] = [
+            (cmd_rm, "--force"),
+            (cmd_relink, "--all"),
+            (cmd_provision, "--all"),
+            (cmd_status, "--json"),
+            (cmd_doctor, "--config-only"),
+            (cmd_doctor, "--json"),
+        ];
+        for (f, flag) in cases {
+            let (rc, out) = run_cmd(&p, f, &["--", flag]);
+            assert_eq!(rc, 1, "{flag}: {out}");
+            assert!(out.contains(&format!("No worktree '{flag}'")), "{flag}: {out}");
+        }
+        // open checks for tmux before it resolves the name, and CI may have
+        // none — so the proof is what it did NOT say: no unknown flag, and no
+        // "needs a worktree", which is what an eaten name produces.
+        let (_, out) = run_cmd(&p, cmd_open, &["--", "--force"]);
+        assert!(!out.contains("Unknown flag") && !out.contains("needs a worktree"), "{out}");
+        // close is driven by the bats suite instead: past its parser it asks the
+        // REAL tmux server about sessions, which a unit test must not do.
+
+        // doctor scans for `--pi`/`--json` before its parser runs; neither scan
+        // may look past `--`. Last, so the unfixed code fails above and never
+        // runs pi's doctor (which shells out to pi).
+        let (_, out) = run_cmd(&p, cmd_doctor, &["--", "--pi"]);
+        assert!(out.contains("No worktree '--pi'"), "{out}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The `--` above OPENS a hole unless the git calls behind it close theirs.
+    /// `switch` fetches a new branch's base with `git fetch origin <base>`, and
+    /// git reads options wherever they sit, so a base of `--upload-pack=<cmd>`
+    /// RUNS <cmd> — locally, for a local-path origin (measured, git 2.54). Until
+    /// now the only thing in the way was the parser refusing every `-`-led
+    /// positional as an unknown flag.
+    #[test]
+    fn a_base_spelled_like_a_git_option_is_never_one_to_git_fetch() {
+        let base = scratch_repo("uploadpack");
+        let up = base.with_file_name(format!("{}-origin.git", base.file_name().unwrap().to_string_lossy()));
+        let _ = std::fs::remove_dir_all(&up);
+        git_in(&base, &["init", "-q", "--bare", &up.to_string_lossy()]);
+        git_in(&base, &["remote", "add", "origin", &up.to_string_lossy()]);
+        git_in(&base, &["push", "-q", "origin", "main"]);
+        let marker = base.join("ran");
+        let evil = format!("--upload-pack=touch {}", marker.display());
+
+        let p = Project::discover(&base).expect("a repo");
+        let mut ui = crate::ui::CaptureUi::default();
+        let _ = do_switch(&p, &mut ui, &p.main_root, "newb", Some(&evil), true, false);
+        let out = ui.lines.join("\n");
+        assert!(!marker.exists(), "git ran the base as --upload-pack:\n{out}");
+        assert_eq!(p.wt_branch(&p.main_root), "main", "nothing was switched: {out}");
+        let _ = std::fs::remove_dir_all(&base);
+        let _ = std::fs::remove_dir_all(&up);
+    }
+
+    /// The same hole at `new`'s door. A base after `--` reaches `git worktree
+    /// add -b <branch> <dir> <start>`, where `--lock` would be an OPTION: the
+    /// worktree made off HEAD and locked, the base silently dropped. And a
+    /// branch after `--` that exists locally reaches `git worktree add <dir>
+    /// <branch>` — refs/heads/--lock is a legal REF even though git would never
+    /// create it as a branch, so it is only reachable by update-ref.
+    #[test]
+    fn a_value_spelled_like_a_git_option_never_reaches_worktree_add_as_one() {
+        let base = scratch_repo("wtadd");
+        let p = Project::discover(&base).expect("a repo");
+        let (rc, out) = run_cmd(&p, cmd_new, &["--no-tmux", "--no-install", "--no-fetch", "feat", "--", "--lock"]);
+        assert_ne!(rc, 0, "{out}");
+        assert!(!base.join(".worktrees/feat").exists(), "{out}");
+        assert!(out.contains("--lock"), "git was handed it as a ref: {out}");
+
+        git_in(&base, &["update-ref", "refs/heads/--lock", "HEAD"]);
+        let (rc, out) = run_cmd(&p, cmd_new, &["--no-tmux", "--no-install", "--no-fetch", "--", "--lock"]);
+        // git declines to treat a `-`-led name as a BRANCH even when the ref
+        // exists, so the tree is detached at it. What matters is that it was
+        // read as the thing to check out.
+        assert_eq!(rc, 0, "{out}");
+        assert!(base.join(".worktrees/--lock").is_dir(), "{out}");
+        let locked = Command::new("git").arg("-C").arg(&base).args(["worktree", "list", "--porcelain"]).output().unwrap();
+        assert!(!String::from_utf8_lossy(&locked.stdout).contains("locked"), "and not locked: {out}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

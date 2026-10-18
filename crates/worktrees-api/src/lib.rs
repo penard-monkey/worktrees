@@ -53,6 +53,7 @@
 //! handshake mandatory rather than nice — after an upgrade, "the app is new and
 //! the server is old" is the default state, not a corner.
 
+pub mod argv;
 pub mod config;
 pub mod docserver;
 pub mod editors;

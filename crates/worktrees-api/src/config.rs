@@ -6,10 +6,11 @@ use std::path::Path;
 use serde::Serialize;
 use worktrees_core::proc::run_deadline;
 use worktrees_core::ui::CaptureUi;
-use worktrees_core::{ops, store, sysclock, Project};
+use worktrees_core::{argv, ops, store, sysclock, Project};
 
+use crate::argv::Argv;
 use crate::log::log as applog;
-use crate::ops::{run_op, CmdResult};
+use crate::ops::{refused, run_op, CmdResult};
 
 
 #[derive(Serialize)]
@@ -294,13 +295,20 @@ pub fn doctor(repo: String, slug: Option<String>) -> Result<DoctorReport, String
         applog("error", &format!("doctor repo={repo}: discover failed: {}", e.msg));
         e.msg
     })?;
-    let mut args: Vec<String> = Vec::new();
-    if let Some(s) = slug.filter(|s| !s.trim().is_empty()) {
-        args.push(s);
-    }
-    args.push("--json".into());
+    let slug = match slug.filter(|s| !s.trim().is_empty()).map(|s| argv::safe_arg(&s, "slug")).transpose() {
+        Ok(s) => s,
+        Err(msg) => {
+            applog("warn", &format!("doctor refused repo={repo}: {msg}"));
+            return Ok(DoctorReport {
+                code: 1,
+                schema_version: worktrees_core::diag::SCHEMA_VERSION,
+                findings: Vec::new(),
+                error: Some(msg),
+            });
+        }
+    };
     let mut ui = CaptureUi::default();
-    let code = ops::cmd_doctor(&project, &mut ui, &args);
+    let code = Argv::new().flag("--json").pos_opt(slug).call(&project, &mut ui, ops::cmd_doctor);
     let parsed = ui
         .lines
         .iter()
@@ -353,9 +361,12 @@ pub struct HealthReport {
 /// `None` for the report means `cmd_status` exited on a guard before emitting
 /// any JSON (unknown or unregistered place); the lines ARE the diagnosis then.
 pub fn status_of(project: &Project, slug: &str) -> (i32, Option<worktrees_core::health::Report>, String) {
-    let args: Vec<String> = vec![slug.to_string(), "--json".into()];
+    let slug = match argv::safe_arg(slug, "slug") {
+        Ok(s) => s,
+        Err(msg) => return (1, None, msg),
+    };
     let mut ui = CaptureUi::default();
-    let code = ops::cmd_status(project, &mut ui, &args);
+    let code = Argv::new().flag("--json").pos(slug).call(project, &mut ui, ops::cmd_status);
     let parsed = ui
         .lines
         .iter()
@@ -579,23 +590,26 @@ pub fn ai_status_report(repo: String, slug: String) -> Result<AiStatusReport, St
 /// alongside before it touches one (§7), so the drifted content is never the
 /// only casualty.
 pub fn relink(repo: String, slug: Option<String>, force: bool) -> Result<CmdResult, String> {
-    let target = slug.filter(|s| !s.trim().is_empty());
-    let mut args: Vec<String> = vec![target.clone().unwrap_or_else(|| "--all".into())];
-    if force {
-        args.push("--force".into());
-    }
+    let target = match slug.filter(|s| !s.trim().is_empty()).map(|s| argv::safe_arg(&s, "slug")).transpose() {
+        Ok(t) => t,
+        Err(msg) => return Ok(refused("relink", &repo, msg)),
+    };
     let label = target.as_deref().unwrap_or("--all").to_string();
-    run_op(&format!("relink {label}"), &repo, |p, ui| ops::cmd_relink(p, ui, &args))
+    let args = Argv::new().flag_if(target.is_none(), "--all").flag_if(force, "--force").pos_opt(target);
+    run_op(&format!("relink {label}"), &repo, |p, ui| args.call(p, ui, ops::cmd_relink))
 }
 
 /// Allocate/repair port slots (`provision [<wt>|--all]`). `--reallocate` is
 /// deliberately NOT exposed: §6 makes moving a slot under a running stack a
 /// refuse-by-default, and a GUI button is the last place that decision belongs.
 pub fn provision(repo: String, slug: Option<String>) -> Result<CmdResult, String> {
-    let target = slug.filter(|s| !s.trim().is_empty());
-    let args: Vec<String> = vec![target.clone().unwrap_or_else(|| "--all".into())];
+    let target = match slug.filter(|s| !s.trim().is_empty()).map(|s| argv::safe_arg(&s, "slug")).transpose() {
+        Ok(t) => t,
+        Err(msg) => return Ok(refused("provision", &repo, msg)),
+    };
     let label = target.as_deref().unwrap_or("--all").to_string();
-    run_op(&format!("provision {label}"), &repo, |p, ui| ops::cmd_provision(p, ui, &args))
+    let args = Argv::new().flag_if(target.is_none(), "--all").pos_opt(target);
+    run_op(&format!("provision {label}"), &repo, |p, ui| args.call(p, ui, ops::cmd_provision))
 }
 
 #[cfg(test)]

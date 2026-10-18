@@ -10,6 +10,7 @@ use worktrees_core::proc::run_deadline;
 use worktrees_core::ui::CaptureUi;
 use worktrees_core::{ops, sync, Project};
 
+use crate::argv::Argv;
 use crate::log::log as applog;
 use crate::config::project_at;
 use crate::editors;
@@ -359,8 +360,7 @@ pub fn init_suggest(repo: String) -> Result<InitSuggestion, String> {
 /// where the human says yes. NOT `--force`: an existing config is still refused,
 /// loudly, exactly as on the CLI.
 pub fn init_write(repo: String) -> Result<CmdResult, String> {
-    let args: Vec<String> = vec!["-y".into()];
-    run_op("init", &repo, |p, ui| ops::cmd_init(p, ui, &args))
+    run_op("init", &repo, |p, ui| Argv::new().flag("-y").call(p, ui, ops::cmd_init))
 }
 
 

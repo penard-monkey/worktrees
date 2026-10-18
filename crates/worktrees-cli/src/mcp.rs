@@ -69,6 +69,7 @@ use worktrees_core::mention::uri_map;
 use worktrees_core::model::PlaceRef;
 use worktrees_core::{activity, agent, harness, messages, ops, store, tmux, ui::CaptureUi, Project};
 use worktrees_core::harness::SendOutcome;
+use worktrees_core::argv::{branch_arg, safe_arg};
 
 /// Who is working in a place and what they are doing. `agents` lists every
 /// session, per harness (Claude's from its probe files, Codex's from its
@@ -1703,12 +1704,13 @@ impl Server {
                 Err(e) => Ok(text_err(&e)),
             },
             "create_worktree" => {
-                let branch = match safe_arg(&s("branch"), "branch") {
+                let branch = match branch_arg(&s("branch")) {
                     Ok(v) => v,
                     Err(e) => return Ok(text_err(&e)),
                 };
                 let raw_base = s("base");
-                let mut args = vec![branch, "--no-attach".to_string()];
+                let mut args = vec!["--no-attach".to_string()];
+                let mut base = None;
                 // The one "proceed despite an advisory you have read" override,
                 // the same bool the CLI's `--force` and the app's "Launch
                 // anyway" set. Never a flag per reason: `Refusal` would grow a
@@ -1745,7 +1747,7 @@ impl Server {
                 }
                 if !raw_base.trim().is_empty() {
                     match safe_arg(&raw_base, "base") {
-                        Ok(b) => args.insert(1, b),
+                        Ok(b) => base = Some(b),
                         Err(e) => return Ok(text_err(&e)),
                     }
                 }
@@ -1776,6 +1778,11 @@ impl Server {
                     }
                     Some(_) => return Ok(text_err("brief must be a string")),
                 }
+                // The model's values go after `--`, so even one that slipped
+                // past `safe_arg` is a branch or a base, never a flag (R3).
+                args.push("--".to_string());
+                args.push(branch);
+                args.extend(base);
                 // In another registered project (cross-project P3): named by
                 // its REGISTRY name, never a path; reach `full` + this
                 // server's --mutations; never a hub copy. The target's own
@@ -1827,7 +1834,7 @@ impl Server {
                     Ok((p, sl, _)) => (p, sl),
                     Err(e) => return Ok(text_err(&e)),
                 };
-                let args = vec![slug];
+                let args = vec!["--".to_string(), slug];
                 Ok(run_op_on(&project, move |p, ui| ops::cmd_close(p, ui, &args)))
             }
             "remove_worktree" => {
@@ -1855,7 +1862,7 @@ impl Server {
                     Ok(v) => v,
                     Err(e) => return Ok(text_err(&e)),
                 };
-                let args = vec![slug, "-y".to_string()];
+                let args = vec!["-y".to_string(), "--".to_string(), slug];
                 Ok(self.run_op(move |p, ui| ops::cmd_rm(p, ui, &args)))
             }
             other => Ok(text_err(&format!("unknown tool: {other}"))),
@@ -2788,36 +2795,6 @@ fn run_op_on<F: FnOnce(&Project, &mut CaptureUi) -> i32>(project: &Project, f: F
     }
 }
 
-/// Reject a model-supplied value that a core arg parser would read as a FLAG.
-///
-/// This is the boundary that matters. `ops::cmd_new` and friends parse their own
-/// argv: anything matching a flag pattern is consumed AS a flag and never fills
-/// a positional slot. So `base: "--ai=touch /tmp/x"` does not create a worktree
-/// based on a branch called that — it sets the AI command, which
-/// `ops::launch` interpolates into `sh -ic '<ai_cmd>; …'`. That is a shell
-/// command line, so a tool advertised as "create a worktree" became arbitrary
-/// code execution.
-///
-/// It has to be caught HERE: this is the only layer that knows these strings
-/// came from a model rather than from a person typing a command. `--` would be
-/// the tidier fix but core's parsers have no end-of-options case today.
-fn safe_arg(v: &str, what: &str) -> Result<String, String> {
-    let t = v.trim();
-    if t.is_empty() {
-        return Err(format!("{what} is required"));
-    }
-    if t.starts_with('-') {
-        return Err(format!(
-            "{what} may not begin with '-' (it would be read as a command-line flag)"
-        ));
-    }
-    // Belt and braces: a git ref cannot contain these, and neither can a slug.
-    if t.contains(['\n', '\r', '\0']) || t.contains("..") {
-        return Err(format!("{what} contains characters that are not allowed"));
-    }
-    Ok(t.to_string())
-}
-
 /// Whether `wait until: idle` may answer on `cur`, given the sample before it.
 /// Claude's and Codex's non-busy states are recorded facts and one sample is
 /// enough. pi's can be a moment between writes: before the opener is
@@ -3163,21 +3140,6 @@ mod tests {
         // whole thing would be dropped as a notification — hanging the client.
         assert!(!SUPPORTED.contains(&"2024-11-05"));
         assert!(!SUPPORTED.contains(&"2025-03-26"));
-    }
-
-    #[test]
-    fn a_model_supplied_value_cannot_become_a_command_line_flag() {
-        // THE finding this boundary exists for: core's arg parsers consume
-        // anything flag-shaped AS a flag, and `--ai=<cmd>` reaches
-        // `ops::launch`, which interpolates it into `sh -ic '<cmd>; …'`. A tool
-        // advertised as "create a worktree" was arbitrary code execution.
-        for bad in ["--ai=touch /tmp/x", "-r", "--name=..", "--no-tmux"] {
-            assert!(safe_arg(bad, "base").is_err(), "{bad:?} must be refused");
-        }
-        for bad in ["", "   ", "a\nb", "x..y"] {
-            assert!(safe_arg(bad, "branch").is_err(), "{bad:?} must be refused");
-        }
-        assert_eq!(safe_arg(" feat-x ", "branch").unwrap(), "feat-x");
     }
 
     #[test]

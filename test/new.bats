@@ -291,6 +291,21 @@ setup() {
   [[ "$output" == *"Too many args: c"* ]]
 }
 
+@test "new: -- ends the options; the name after it is the branch" {
+  run_wt new --no-tmux -- feat-dd
+  [ "$status" -eq 0 ]
+  [ "$(git -C "$REPO/.worktrees/feat-dd" rev-parse --abbrev-ref HEAD)" = "feat-dd" ]
+}
+
+@test "new: a flag-shaped base after -- reaches git as a ref, not an option" {
+  # Without git's own `--`, `worktree add -b x <dir> --lock` makes the tree off
+  # HEAD, locks it, and drops the base.
+  run_wt new --no-tmux feat-lk -- --lock
+  [ "$status" -eq 1 ]
+  grep -qF "invalid reference: --lock" <<<"$output"
+  [ ! -d "$REPO/.worktrees/feat-lk" ]
+}
+
 # ── tmux / AI pane behavior ──────────────────────────────────────────────────
 
 @test "new: --no-tmux → no tmux calls, prints cd hint" {

@@ -10,6 +10,7 @@ use std::sync::Mutex;
 use serde::{Deserialize, Serialize};
 use worktrees_core::{ops, sysclock, Project};
 
+use crate::argv::Argv;
 use crate::log::log as applog;
 use crate::util::fmt_utc;
 use crate::ops::{run_op, CmdResult};
@@ -120,15 +121,13 @@ pub fn remove_place(
     force: bool,
     shells: &Shells,
 ) -> Result<CmdResult, String> {
+    let slug = match worktrees_core::argv::safe_arg(&slug, "slug") {
+        Ok(s) => s,
+        Err(msg) => return Ok(crate::ops::refused("rm", &repo, msg)),
+    };
     let slug_log = slug.clone();
     let slug_sweep = slug.clone();
-    let mut args: Vec<String> = vec![slug, "-y".into()];
-    if del_branch {
-        args.push("--branch".into());
-    }
-    if force {
-        args.push("--force".into());
-    }
+    let args = Argv::new().flag("-y").flag_if(del_branch, "--branch").flag_if(force, "--force").pos(slug);
     // Resolved BEFORE the removal, because it cannot be afterwards: the derived
     // tree is keyed by a hash of the canonical directory, and `canonicalize`
     // needs the directory to exist. A place nobody opened in the browser has no
@@ -139,7 +138,7 @@ pub fn remove_place(
         .and_then(|d| std::fs::canonicalize(d).ok());
     // cmd_rm sweeps this place's dock shell sidecars itself (core, only once the
     // removal proceeds past its dirty/confirm guards — a refused rm keeps them).
-    let r = run_op(&format!("rm {slug_log}"), &repo, move |p, ui| ops::cmd_rm(p, ui, &args))?;
+    let r = run_op(&format!("rm {slug_log}"), &repo, move |p, ui| args.call(p, ui, ops::cmd_rm))?;
     if r.ok {
         kill_place_shells(&shells, &repo, &slug_sweep);
         // …and the documents the viewer derived from it. `cmd_rm` deleted the

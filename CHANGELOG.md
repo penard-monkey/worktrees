@@ -48,6 +48,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   brings "Repair / upgrade…" back, with a **Review** button on its To do row,
   and no longer tells a repository with no remote to push it. Once GitHub says
   the branch's PR is merged, the row offers **Remove the place**.
+- **`--` ends the options of `new`, `switch`, `open`, `close`, `rm`, `relink`,
+  `provision`, `doctor` and `status`**, so `worktrees new -- <name>` takes
+  what follows as the name however it is spelled. It used to be an unknown
+  flag.
 
 ### Fixed
 - **"Write .worktrees.toml" in Project settings now writes the file.** In a
@@ -65,6 +69,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   closure, so the one that hands core its log sink never ran: every line those
   readers wrote was dropped without a trace. There is one `.setup` now, and
   `app/scripts/api-boundary-check.mjs` fails if a second appears.
+- **A branch, base or place name that begins with `-` is no longer read as a
+  flag by the app's commands.** They handed what the app sent straight to the
+  CLI's argument parsers, so a base of `--no-fetch` turned the fetch off,
+  `--brief=…` planted a brief the new agent opened on, and relink's place name
+  `--all` relinked every place, `--force` included — and `worktrees serve`
+  will put any client's strings there. Such names are now refused, with the
+  reason, before anything runs. A new branch is held to git's own rule
+  (`git check-ref-format --branch`), so `feat x` is refused up front and the
+  new-worktree form comes back with what you typed. Behind that, every value
+  rides after a `--`, and the git calls that carry one end their own options
+  too: `switch`'s fetch of a new branch's base would otherwise have RUN a base
+  of `--upload-pack=<cmd>`. One narrowing: a place whose name contains `..`
+  (only `--name` can make one) can no longer be opened, switched, closed or
+  removed from the app — the MCP tools have always refused it.
 
 ## [0.42.0] - 2026-10-15
 
