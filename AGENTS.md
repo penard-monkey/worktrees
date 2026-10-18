@@ -40,6 +40,26 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   Codex activity for `place_status`/`wait` and the nav dots comes from ONE
   derivation, `worktrees_core::activity`.
 
+- **`worktrees serve` (Server Edition, Phase 1) hosts the api behind an
+  authenticated WebSocket on `127.0.0.1`**: `{id, cmd, args}` in, `{id, ok}` /
+  `{id, err}` out, channel frames `{channel, seq, data}` for `ByteSink`s and
+  progress, `{event, payload}` for `Host::emit`. The rule set is in
+  `crates/worktrees-cli/src/serve/policy.rs` and every refusal closes the
+  socket with NOTHING written; a missing `Origin` is refused there and allowed
+  by `docserver::origin_ok` ON PURPOSE (different pages, different questions —
+  do not align them). The 150 commands sit in ONE macro table
+  (`serve/dispatch.rs`) with an `Exposure` each; `ClientLocal` rows (clipboard,
+  editor, terminal, browser, zoom, the app bundle) are refused with
+  `err: "client-local"`, never run on the host. `serve-dispatch-check.mjs`
+  holds that table against `generate_handler!`. The engine's wiring every host
+  needs — log sink, panic hook, PATH/locale, the viewer sweep, the project
+  merge, the 3 s poll, the exit sequence — is `worktrees_api::host::{boot,
+  start, stop}`, called by the shim AND by `serve`; `api-boundary-check.mjs`
+  asserts the shim makes all three calls. `<config_dir>/serve.json` (0600,
+  rewritten per launch) is how a client finds the port and the token; the log
+  is `~/.cache/worktrees/serve.log`, version on the first line.
+  `app/scripts/server-stack.sh` runs an isolated one for the frontend lane.
+
 **Adding a harness? Walk `docs/adding-a-harness.md` first, and tick it only
 by SEEING each surface work.** pi shipped in v0.33.0 with a correct core —
 MCP `place_status` said `busy` — and no nav dot at all: the app builds its dots

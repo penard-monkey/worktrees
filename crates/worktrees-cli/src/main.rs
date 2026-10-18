@@ -9,6 +9,7 @@ use worktrees_core::render::error_line;
 use worktrees_core::{CliUi, Project};
 
 mod mcp;
+mod serve;
 mod stale;
 
 const USAGE: &str = "\
@@ -58,6 +59,8 @@ worktrees — one git worktree per branch, one active agent per worktree.
   worktrees run --slot <name> -- <cmd>  run a heavy job (gate, build, full tests) in one of N
                                         machine-wide slots; waits while all are held (--slots N --timeout S)
   worktrees slots [--json]              who holds and who waits for each slot (no repo needed)
+  worktrees serve [--config-dir D] [--port N] [--allow-origin O]  the engine behind a loopback
+                                        WebSocket, one per machine; writes <config-dir>/serve.json
   worktrees mcp [--mutations]           MCP server over stdio (for an AI session; not interactive)
                                         (--cross-project off|read|full: narrow the user's cross_project, never widen)
   worktrees mcp --status [--json] [--ai codex|pi|kimi]  check Claude, Codex, pi or kimi MCP setup (no repo needed)
@@ -140,6 +143,10 @@ fn run() -> i32 {
         // The repo, when there is one, is still resolved — `cmd_mcp` pins its
         // own project from CLAUDE_PROJECT_DIR/cwd, and the setup verbs take it
         // so the local/project scopes can be consulted.
+        // The engine process. Ahead of the guard because it is about the
+        // MACHINE, not the cwd: it serves every registered project, and the
+        // desktop app will start it from wherever it happens to be.
+        Some("serve") => return serve::cmd_serve(args.get(1..).unwrap_or(&[])),
         Some("mcp") => {
             let rest = args.get(1..).unwrap_or(&[]);
             return match mcp::setup_verb(rest) {

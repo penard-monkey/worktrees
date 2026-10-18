@@ -6,6 +6,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Changed
+- **The host wiring every engine process needs lives in one place,
+  `worktrees_api::host`**, and the desktop app calls it the same way `serve`
+  does: `boot` (log sink, panic hook, the launchd-bare PATH and locale repairs,
+  the startup line), `start` (the viewer sweep, the project merge, the 3 s
+  nav-dot poll and the dock-ring flush) and `stop` (the exit sequence). The
+  app's behaviour is unchanged; what changes is that a host can no longer
+  forget one of those steps, which is how pi once shipped with no nav dot.
+  `api-boundary-check.mjs` asserts the shim makes all three calls, and the new
+  `serve-dispatch-check.mjs` holds the socket's command table against the
+  shim's handler list.
 - **The 149 app commands moved into a new `worktrees-api` crate**, leaving the
   Tauri layer as thin wrappers. Nothing changes for the desktop app — the same
   149 commands with the same arguments, verified against `main` — but the
@@ -28,6 +38,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   row — see below).
 
 ### Added
+- **`worktrees serve`: the engine, hosted behind an authenticated WebSocket on
+  loopback** (Server Edition, Phase 1). It speaks the same `{cmd, args}` the
+  app's `invoke` does — all 150 commands, each with an exposure class in one
+  table (`Engine`, `ClientLocal`, `HostAdmin`, `Stream`); the seven that act on
+  the caller's machine (clipboard, editor, terminal, browser, zoom, the app's
+  own bundle) are refused over the socket rather than run on the host.
+  Terminal bytes and progress arrive as ordered channel frames, events as
+  `{event, payload}` to every authenticated socket. It binds `127.0.0.1` only,
+  requires a loopback `Host` and an allow-listed `Origin` (a missing one is
+  refused; `--allow-origin` is a dev flag, never a config key), and its first
+  frame must be the per-launch 256-bit token from `<config-dir>/serve.json`
+  (mode 0600, rewritten every launch); every refusal closes the socket with
+  nothing written. A second `serve` on a live config dir is refused — one
+  engine per machine. Logs to `~/.cache/worktrees/serve.log` with the version
+  on the first line. `app/scripts/server-stack.sh` runs one on an isolated
+  config dir, tmux prefix and port for the frontend lane.
 - **Applying the worktrees rules or the agent-setup Fix now opens a review
   lane for the `agent-instructions` branch**: a place on it, with an agent
   whose brief explains what the branch changes — each file, the AGENTS.md
