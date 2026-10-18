@@ -149,6 +149,19 @@ pipefail promotes that to the pipeline's status — so "found" reads as "not
 found". Two probe results were misread as product bugs before this was spotted.
 Write to a file, then grep the file.
 
+**Inside Claude Code, `grep` is not grep, and it skips binary files without a
+word.** The shell snapshot defines `grep` as a function that runs Claude's
+bundled ugrep with `-I`, so any file holding even one NUL byte is skipped
+rather than searched. `crates/worktrees-core/src/projcfg.rs` holds one, a
+literal NUL in a comment around line 933. So `grep -r USER_ONLY_KEYS
+crates/worktrees-core/src` lists every file that CITES the const and not the
+one that DEFINES it, and a single-file grep prints nothing and exits 1. A lane
+concluded from exactly that, on 2026-10-17, that the const "no longer exists";
+it sits at line 51, and the claim was relayed before anyone checked. git is
+not fooled, because it sniffs only the first 8000 bytes for a NUL, so diffs and
+`git grep` are right. A "not found" that a conclusion rests on needs a second
+witness: `git grep`, `command grep` or `/usr/bin/grep`.
+
 **A pipeline's exit status is the LAST stage's.** `make test | tail -15` exits 0
 because `tail` did, and a mid-stream `not ok` scrolls off a 15-line window — so
 the run reads green whatever bats said. Redirect, then check both halves:

@@ -3,8 +3,8 @@
 //! `app/src-tauri/src/lib.rs` holds 143 `#[tauri::command]` handlers and is the
 //! only thing in the repo that can call them. A server edition needs the same
 //! 143 from something that is not a WebView, so the bodies move here and the
-//! app keeps thin wrappers (`docs/proposals/server-edition.md` §III.0, and the
-//! plan in the `feat-pretty-ui-server` place).
+//! app keeps thin wrappers (`docs/proposals/server-edition.md` §III.2 and
+//! §III.9 Phase 0).
 //!
 //! **What this crate may not depend on.** Not `tauri` — that is the coupling
 //! the extraction exists to remove, and `cargo tree -p worktrees-api` is how
