@@ -4663,18 +4663,25 @@ function App() {
     invoke("set_fetch_interval", { mins: settings.fetch_interval_min }).catch(() => {});
   }, [settings.fetch_interval_min]);
 
-  // Same shape, same reason, for what a dock shell tab keeps between runs: the
-  // shell path in the backend decides whether to restore a ring and whether to
+  // What a dock shell tab keeps between runs, pushed the same way: the shell
+  // path in the backend decides whether to restore a ring and whether to
   // generate a ZDOTDIR, and it cannot read the settings blob to find out.
-  // Pre-hydration this pushes the DEFAULTS (both on), which is also what the
-  // backend already assumes — so an early push is a no-op rather than a window
-  // in which a tab quietly opens blank.
+  // Gated on hydration, unlike the cadence above, because the early push is NOT
+  // harmless here: before hydration `settings` holds DEFAULTS (both on), and
+  // the backend this reaches need not be fresh. A webview reload — or any
+  // client of a long-running engine — finds the user's "off" already there, and
+  // pushing DEFAULTS would turn persistence back ON until hydration landed; a
+  // 15 s flush in that window writes every dirty shell's ring to term-history/,
+  // whatever a command printed. A refusal is surfaced, never swallowed: it
+  // would mean tabs behave differently from what Settings shows.
+  // `hostpolicy-check.mjs` holds this effect to the gate.
   useEffect(() => {
+    if (!hydratedTick) return;
     invoke("set_term_history_opts", {
       persistScrollback: settings.term_persist_scrollback,
       perTabHistory: settings.term_per_tab_history,
-    }).catch(() => {});
-  }, [settings.term_persist_scrollback, settings.term_per_tab_history]);
+    }).catch((e) => fail(`Terminal history: ${String(e)}`));
+  }, [hydratedTick, settings.term_persist_scrollback, settings.term_per_tab_history, fail]);
 
   // hydrate persisted settings BEFORE first meaningful paint. A pre-hydration
   // interaction (⌘B at launch) must neither be visually reverted nor let its

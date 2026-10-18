@@ -65,6 +65,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   chosen is carried over once, the first time the new version starts. The
   CLI and lanes started over MCP still follow `$WORKTREES_CODEX_PERMISSIONS`,
   `$WORKTREES_PI_PROJECT_TRUST` and your config, as before.
+- **Reloading the window no longer briefly turns terminal scrollback saving
+  back on.** With "Keep each tab's output between restarts" (or "Give each tab
+  its own command history") switched off, a reload sent the defaults — both on
+  — to the backend before your settings had loaded, and if the 15-second save
+  landed in that gap, open dock tabs had their output written to disk anyway. The switches now reach the backend only
+  once your settings have loaded, and a refusal shows an error rather than
+  being dropped.
 - **"Write .worktrees.toml" in Project settings now writes the file.** In a
   repo with nothing to suggest — no gitignored credential file, no ports, no
   compose — the button greyed out, came back, and nothing appeared: `init`

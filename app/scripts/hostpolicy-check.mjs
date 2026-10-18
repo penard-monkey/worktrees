@@ -30,8 +30,18 @@
 //      neighbour `Ctx::new`, never ran. A boot line there compiles, passes every
 //      test, and leaves the host on env and config forever.
 //
-// The pre-fix App.tsx fails 1-3; a lib.rs with the boot in a dead closure
-// fails 4 (`node app/scripts/hostpolicy-check.mjs [path/to/lib.rs]`).
+//   5. `set_term_history_opts` — a client preference the page DOES push, from
+//      an effect — is pushed only once hydration has landed: directly inside a
+//      `useEffect` whose callback opens with `if (!hydratedTick) return;` and
+//      lists `hydratedTick` in its deps. Before hydration `settings` holds
+//      DEFAULTS (both switches on), and the backend it reaches need not be
+//      fresh — a webview reload, or any client of a long-running engine, finds
+//      the user's "off" already there and would turn persistence back on until
+//      hydration landed, long enough for the 15 s flush to write every dirty
+//      shell's ring to disk.
+//
+// The pre-fix App.tsx fails 1-3 and 5; a lib.rs with the boot in a dead
+// closure fails 4 (`node app/scripts/hostpolicy-check.mjs [path/to/lib.rs]`).
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -166,6 +176,39 @@ for (const s of SETTERS) {
   if (!seen[s].files.size) fail(`${s} is invoked nowhere — the Settings control that sets it is gone`);
   else if (!seen[s].clicked) fail(`${s} is not reached from any onClick — only a click may change host policy`);
   else ok(`${s} is reached from an onClick`);
+}
+
+// Rule 5.
+{
+  const PUSH = "set_term_history_opts";
+  /** `if (!hydratedTick) return;` (or `{ return; }`) as a statement. */
+  const isGuard = (st) => st && ts.isIfStatement(st) && !st.elseStatement
+    && ts.isPrefixUnaryExpression(st.expression) && st.expression.operator === ts.SyntaxKind.ExclamationToken
+    && ts.isIdentifier(st.expression.operand) && st.expression.operand.text === "hydratedTick"
+    && (ts.isReturnStatement(st.thenStatement)
+      || (ts.isBlock(st.thenStatement) && st.thenStatement.statements.length === 1 && ts.isReturnStatement(st.thenStatement.statements[0])));
+  let pushes = 0;
+  for (const file of files) {
+    const rel = path.relative(SRC, file);
+    const sf = ts.createSourceFile(file, fs.readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true,
+      file.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+    const line = (n) => `${rel}:${sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1}`;
+    for (const m of descendants(sf, (n) => (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) && n.text === PUSH)) {
+      pushes++;
+      let effect = null;
+      for (let p = m.parent; p && !effect; p = p.parent) if (ts.isCallExpression(p) && EFFECTS.has(calleeName(p))) effect = p;
+      const cb = effect?.arguments[0];
+      const deps = effect?.arguments[1];
+      if (!cb || !(ts.isArrowFunction(cb) || ts.isFunctionExpression(cb)) || m.getStart(sf) < cb.getStart(sf)) {
+        fail(`${line(m)} — ${PUSH} is invoked outside an effect; only a hydration-gated effect may push it`);
+      } else if (!ts.isBlock(cb.body) || !isGuard(cb.body.statements[0])) {
+        fail(`${line(m)} — ${PUSH} is pushed from an effect that does not open with \`if (!hydratedTick) return;\` — a reload would push DEFAULTS (persistence on) over the user's choice`);
+      } else if (!deps || !ts.isArrayLiteralExpression(deps) || !deps.elements.some((e) => ts.isIdentifier(e) && e.text === "hydratedTick")) {
+        fail(`${line(m)} — the effect pushing ${PUSH} is gated on hydratedTick but does not list it in its deps, so it never re-runs when hydration lands`);
+      } else ok(`${line(m)} — ${PUSH} is pushed only after hydration`);
+    }
+  }
+  if (!pushes) fail(`${PUSH} is pushed nowhere — the backend would never learn the user's terminal-history choice`);
 }
 
 // Rule 4. Line comments are dropped first, so prose naming the call cannot
