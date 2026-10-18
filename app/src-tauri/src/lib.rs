@@ -6,28 +6,20 @@
 //                 shell, and OWNS the dock's scratch shells outright (no tmux).
 // See DESIGN.md / MIGRATION.md.
 
-use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
-use std::thread;
-use std::time::Duration;
 
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{AppHandle, Emitter, Manager};
-use worktrees_core::{provider, sync, sysclock};
+use worktrees_core::{sync, sysclock};
 
 // The command layer. Every handler below is a wrapper over one of these; what
 // is left in this file is the three things a window has that a socket does
 // not — the updater, page zoom, and window state — plus the poll that drives
 // the nav dots and the `Ctx` the wrappers resolve from.
 use worktrees_api::files::ShellRef;
-use worktrees_api::ops::{
-    draft_trace_filter, fetch_origin_root, scan_drafts, trace_spawns, CmdResult, Draft, Drafts,
-    UpdateInfo, FETCH_INTERVAL_SECS, REPO_SLUG,
-};
+use worktrees_api::ops::{CmdResult, UpdateInfo, REPO_SLUG};
 use worktrees_api::prefs::UiEvent;
-use worktrees_api::projects::read_projects;
 use worktrees_api::status::{list_published_releases, valid_tag};
 use worktrees_api::util::fmt_utc;
 use worktrees_api::viewer;
@@ -40,12 +32,6 @@ async fn tmux_check(refresh: bool) -> Result<bool, String> {
     worktrees_api::hostenv::tmux_check(refresh)
 }
 use worktrees_core::claude_usage::UsageInfo;
-// The nav-dot poll below drives these; the derivations themselves are the
-// command layer's, so the app and `worktrees serve` light the same dots.
-use worktrees_api::watch::{
-    backfill_worked, claude_activity, completion_edges, drain_inbox, harness_feed, merge_activity,
-    new_dones, stamp_worked, Activity, ClaudeActivity, Feed, LaneTick, TaskDone,
-};
 
 // The documentation viewer: one supervised child, N places, and a port. Its own
 // file because it is the only part of this backend that can hand a document to
@@ -66,7 +52,7 @@ use worktrees_core::codex_usage;
 
 /// The identifier to log under when nothing has said otherwise — what a
 /// `tauri build` bundle carries.
-const APP_IDENT: &str = "net.casadelvalle.worktrees";
+const APP_IDENT: &str = worktrees_api::hostenv::APP_IDENT;
 
 /// The identifier this PROCESS is actually running as, which is not always
 /// `APP_IDENT`: `sandbox.sh --app` passes
@@ -1331,22 +1317,12 @@ async fn set_zoom(window: tauri::WebviewWindow, factor: f64) -> Result<(), Strin
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // FIRST: the app's log sink, before anything can want to log. `applog`,
-    // the panic hook below, and every handler now extracted into
-    // `worktrees-api` all route through it.
-    worktrees_api::log::install(std::sync::Arc::new(AppLog));
-    // panics land in the log too (chained: the default stderr hook still runs)
-    let prev_hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(move |info| {
-        applog("panic", &info.to_string());
-        prev_hook(info);
-    }));
-    worktrees_api::hostenv::fixup_gui_path();
-    worktrees_api::hostenv::fixup_gui_locale();
-    applog(
-        "info",
-        &format!("startup v{} PATH={}", env!("CARGO_PKG_VERSION"), std::env::var("PATH").unwrap_or_default()),
-    );
+    // FIRST, and in one call: the log sink, the panic hook, the GUI-bare PATH
+    // and locale repairs, core's log, the startup line. The order inside is
+    // load-bearing and it is the command layer's to keep — `worktrees serve`
+    // runs the same preamble, so a host cannot drift from the other by
+    // forgetting a line here (`worktrees_api::host`).
+    worktrees_api::host::boot(std::sync::Arc::new(AppLog));
     tauri::Builder::default()
         // `open_path` (the Files tab's right-click → Open) needs BOTH halves,
         // and JSON cannot carry the reason: `opener:allow-open-path` in
@@ -1373,13 +1349,9 @@ pub fn run() {
         // `Ctx` itself, so every `ctx()` panicked "state() called before
         // manage()". api-boundary-check.mjs counts them.
         .setup(|app| {
-            // Both usage readers moved into core so the CLI and MCP can read
-            // them too, and they lost their direct `applog` in the move. Hand
-            // it back here, ONCE for the whole engine: the app has a log, the
-            // CLI does not, and core treats an unset sink as "do not log"
-            // rather than as a reason to fail. A per-module sink would make
-            // this a list to keep in step with every reader core gains.
-            worktrees_core::logsink::install(|level, msg| applog(level, msg));
+            // Core's log sink is NOT installed here: `host::boot` above hands
+            // core the same destination, once for the whole engine, before
+            // anything can log — the same call `worktrees serve` makes.
             // The identifier this process is really running as. `sandbox.sh
             // --app` overrides it via `--config`, and `log_dir()` reads this
             // rather than the `APP_IDENT` const so a sandbox stops writing
@@ -1401,21 +1373,9 @@ pub fn run() {
                 config_dir,
                 std::sync::Arc::new(AppHost(app.handle().clone())),
             ));
-            // A crash is the one exit `RunEvent::Exit` never sees, and it
-            // leaves the derived trees on disk: COPIES of the user's documents
-            // — the ones §4.3 says carry a client's signed agreement — outside
-            // the repo's own gitignore, in a directory Spotlight and Time
-            // Machine both index. Sweeping them at startup closes the half of
-            // that a shutdown hook structurally cannot.
-            //
-            // This does not break the rule that nothing about the viewer runs
-            // at launch: it binds no port, reads no configuration and cannot
-            // fail in a way that matters — it empties one directory this app
-            // owns, ignoring whatever will not go. The server itself is still
-            // unreachable from startup; the first press of the button is what
-            // starts it.
+            // The derived-tree sweep a crash leaves behind is `host::start`'s
+            // now (below), with the reason it runs at launch.
             if let Ok(dir) = app.path().app_config_dir() {
-                viewer::cleanup(&dir);
                 // Settings → Behavior → Restore window. Read straight from
                 // ui-state.json because this runs before the frontend exists;
                 // see winstate.rs for why that file is only ever READ here.
@@ -1507,260 +1467,29 @@ pub fn run() {
                     applog("warn", &format!("writing-tools affordance: with_webview failed: {e}"));
                 }
             }
-            // Live-refresh, change-gated. The tmux session set is a cheap
-            // fingerprint that shifts whenever a place is opened/closed (even from a
-            // bare terminal); emit only when it changes, so the UI's full re-pull (a
-            // git sweep) doesn't fire every few seconds. A slow safety re-emit
-            // (~30s) still catches dirty/branch drift that leaves no tmux trace.
+            // The engine's background work — the viewer sweep, the project
+            // merge, and the 3 s poll that lights the nav dots and flushes the
+            // dock rings — is the command layer's, shared with `worktrees
+            // serve` so neither host can forget a beat of it. The ONE hook is
+            // the window: when the inbox delivers a `worktrees show`, the
+            // command layer emits `app:open-doc` and this raises the app so
+            // the person sees it. A phone has no window of ours.
             let handle = app.handle().clone();
-            std::thread::spawn(move || {
-                // Claude's real working state — read from ~/.claude/sessions/<pid>.json
-                // probes (see claude_activity), keyed by worktree path. Replaces the
-                // old tmux #{session_activity} signal, which tracked CLIENT attach/
-                // keypress, not pane output — so the dot decayed while Claude worked.
-                let mut last = worktrees_core::tmux::session_fingerprint();
-                let mut last_busy: Vec<String> = Vec::new();
-                let mut last_waiting: Vec<String> = Vec::new();
-                let mut last_waiting_by: std::collections::BTreeMap<&'static str, Vec<String>> = Default::default();
-                let mut last_models: Option<Vec<(i32, Option<String>)>> = None;
-                let mut ticks: u32 = 0;
-                // Auto-fetch scheduling. The pass runs INLINE on this thread (no
-                // extra thread → passes can never stack; the AtomicU64 interval is
-                // pushed from the frontend). Trade-off: while a pass runs, the 3s
-                // tmux-fingerprint poll below is paused for up to ~60s per repo —
-                // acceptable, since a stale tmux fingerprint only delays a refresh
-                // the fetch itself will trigger via places:changed at the end.
-                let mut last_fetch = std::time::Instant::now();
-                // Consecutive ticks each path has been busy — the dwell guard's
-                // memory, and the only state a completion edge needs.
-                let mut busy_ticks: HashMap<String, u32> = HashMap::new();
-                // The lane completion last stamped per place, per harness (see
-                // `new_dones`).
-                let mut done_seen: HashMap<&'static str, HashMap<String, i64>> = HashMap::new();
-                // Dock-shell cwd sampling, every 5th tick (~15s). Slow on
-                // purpose: the exit hook is the accurate capture, this one only
-                // has to bound how much a crash or a force-quit can lose.
-                let mut cwd_ticks: u32 = 0;
-                // The unsent-prompt sample, on the same 15s beat and for the
-                // same reason: it costs a subprocess, and a draft is a thing a
-                // human is typing — 15s is faster than anyone notices.
-                let mut draft_ticks: u32 = 0;
-                let mut last_drafts: Vec<Draft> = Vec::new();
-                // Logged separately from the emit gate: the SET changes every
-                // time someone adds a word to a prompt, and app.log rotates at
-                // 1MB. The counts are the part worth keeping.
-                let mut last_draft_counts = (usize::MAX, usize::MAX);
-                // Only the first of a repeating tmux failure is worth a line.
-                let mut last_draft_err = String::new();
-                // …and only the first of a repeating viewer-refresh line.
-                //
-                // A SET, not the last message: the tick emits one line per
-                // failing place and one per image a derive refused, so two
-                // places (or one place and one skipped screenshot) alternate
-                // and a one-slot dedup logs both of them every 3 s forever.
-                // Cleared when a tick has nothing to say, so a fault that comes
-                // back after a recovery is heard again, and capped so a place
-                // producing fresh text on every tick cannot grow it without
-                // bound.
-                let mut said_viewer: std::collections::HashSet<String> = std::collections::HashSet::new();
-                // One `Ctx` for the thread's whole life, and the registries
-                // out of it: the dot poll is the hottest reader of both and
-                // must not re-resolve them 20 times a minute.
-                let pollctx = ctx(&handle);
-                let watch = pollctx.watch.clone();
-                let watch = watch.as_ref();
-                // Cold start: what happened while the app was closed. Runs before
-                // the first sleep so the nav's afterglow is right on frame one.
-                backfill_worked(&pollctx);
-                // Same cold-start slot: drop remembered directories for places
-                // that were removed while the app was closed.
-                worktrees_api::term::forget_vanished_places(&pollctx);
-                // Same cold-start slot, same reasoning one level out: drop saved
-                // scrollback for places that are gone, and anything past the age
-                // horizon.
-                worktrees_api::term::sweep_term_history(&pollctx);
-                loop {
-                    std::thread::sleep(Duration::from_secs(3));
-                    let interval = FETCH_INTERVAL_SECS.load(Ordering::Relaxed);
-                    if interval > 0 && last_fetch.elapsed().as_secs() >= interval {
-                        for root in read_projects(&pollctx) {
-                            let _ = fetch_origin_root(&root);
-                        }
-                        last_fetch = std::time::Instant::now(); // measure gap AFTER the pass
-                        let _ = handle.emit("places:changed", ()); // re-pull fresh ahead/behind once
-                    }
-                    // Every tick, not every fifth: a request has a 30 s life
-                    // and a person is waiting on it. The command layer emits
-                    // the `app:open-doc`; raising the window is the half that
-                    // cannot move, because a phone has no window of ours.
-                    if drain_inbox(&pollctx) > 0 {
-                        if let Some(w) = handle.get_webview_window("main") {
+            let raise = app.handle().clone();
+            worktrees_api::host::start(
+                ctx(&handle),
+                worktrees_api::host::Hooks {
+                    on_inbox: Some(Box::new(move || {
+                        if let Some(w) = raise.get_webview_window("main") {
                             let _ = w.unminimize();
                             let _ = w.show();
                             if let Err(e) = w.set_focus() {
                                 applog("warn", &format!("inbox: could not focus the window: {e}"));
                             }
                         }
-                    }
-                    // And the browser's copy of every place the server is
-                    // serving. Every tick for the same reason: somebody is
-                    // watching an agent write, and the page polls its `ETag`
-                    // about once a second — a slower beat here would be a
-                    // browser tab that is visibly behind the dock beside it,
-                    // with a conditional GET saying nothing has changed.
-                    //
-                    // It costs a stat per document per registered place and
-                    // NOTHING when none is registered, which is the normal
-                    // state; `viewer::refresh` is where that is argued. It is
-                    // not gated on window visibility, unlike the pane's own
-                    // poll: the whole point of the browser viewer is the second
-                    // monitor, so "the app is hidden" is exactly when the tab
-                    // most needs to be current.
-                    let notes = viewer::refresh(&pollctx.viewer, sysclock::now_epoch());
-                    if notes.is_empty() {
-                        said_viewer.clear();
-                    }
-                    for n in notes {
-                        // Deduped, like the draft scan below: a place that
-                        // cannot be written will fail every 3 s forever, and a
-                        // log that repeats that is a log nobody reads. The
-                        // LEVEL is the tick's, not this call site's: a skipped
-                        // image is the same event `open_docs_viewer` logs at
-                        // "warn", and saying it louder here made one event two.
-                        if said_viewer.len() > 64 {
-                            said_viewer.clear();
-                        }
-                        if said_viewer.insert(n.msg.clone()) {
-                            applog(n.level, &format!("viewer refresh: {}", n.msg));
-                        }
-                    }
-                    cwd_ticks += 1;
-                    if cwd_ticks >= 5 {
-                        cwd_ticks = 0;
-                        worktrees_api::term::save_shell_cwds(&pollctx, &pollctx.shells);
-                        worktrees_api::term::save_shell_scrollback(&pollctx, &pollctx.shells);
-                    }
-                    let fp = worktrees_core::tmux::session_fingerprint();
-                    ticks += 1;
-                    if fp != last || ticks >= 10 {
-                        last = fp.clone(); // `fp` is the draft sample's session list too
-                        ticks = 0;
-                        let _ = handle.emit("places:changed", ());
-                    }
-                    draft_ticks += 1;
-                    if draft_ticks >= 5 {
-                        draft_ticks = 0;
-                        // `fp` is the session list this tick already paid for,
-                        // so the whole pass is ONE extra tmux spawn per 15s
-                        // regardless of how many sessions are open.
-                        match scan_drafts(&fp) {
-                            Ok(drafts) => {
-                                last_draft_err.clear();
-                                if trace_spawns() {
-                                    applog("info", "trace: draft sample = 1 tmux spawn (chained)");
-                                }
-                                // Emit on EVERY change, the transition to empty
-                                // included: a draft the user just sent must
-                                // take its ✎ with it.
-                                if drafts != last_drafts {
-                                    if let Some(f) = draft_trace_filter() {
-                                        for d in drafts.iter().filter(|d| d.path.contains(&f)) {
-                                            let head: String = d.text.chars().take(20).collect();
-                                            applog("info", &format!(
-                                                "draft {} queued={} {:?}", d.path, d.queued, head));
-                                        }
-                                    }
-                                    let counts =
-                                        (drafts.len(), drafts.iter().filter(|d| d.queued).count());
-                                    if counts != last_draft_counts {
-                                        last_draft_counts = counts;
-                                        applog("info", &format!(
-                                            "drafts: {} ({} queued)", counts.0, counts.1));
-                                    }
-                                    last_drafts = drafts.clone();
-                                    let _ = handle.emit("sessions:drafts", Drafts { drafts });
-                                }
-                            }
-                            // Keep the last known set rather than blanking every
-                            // ✎ on one bad tick (a pane that died mid-chain).
-                            Err(e) => {
-                                if e != last_draft_err {
-                                    last_draft_err = e.clone();
-                                    applog("warn", &format!("draft sample: {e}"));
-                                }
-                            }
-                        }
-                    }
-                    let (busy, waiting, models) = claude_activity(&watch);
-                    // Every harness without a probe file, read once each
-                    // (`harness_feed`: codex's rollouts, pi's session files).
-                    let lanes: Vec<(&'static str, LaneTick)> = provider::PROVIDERS
-                        .iter()
-                        .filter_map(|p| match harness_feed(&watch, p.id, &fp) {
-                            Feed::Lane(t) => Some((p.id, t)),
-                            Feed::Probes | Feed::Unpolled => None,
-                        })
-                        .collect();
-                    // A live agent now names a different model (a first reply,
-                    // a `/model` switch, codex's or pi's next turn) → re-list,
-                    // so the agent label follows within a tick rather than on
-                    // the 30s safety tick. `None` first: the launch already listed.
-                    if lanes.iter().any(|(_, t)| t.models_moved) || last_models.as_ref().is_some_and(|m| *m != models) {
-                        let _ = handle.emit("places:changed", ());
-                    }
-                    last_models = Some(models);
-                    let waiting_by: std::collections::BTreeMap<&'static str, Vec<String>> =
-                        std::iter::once((worktrees_core::provider::CLAUDE.id, waiting.clone()))
-                            .chain(lanes.iter().map(|(id, t)| (*id, t.waiting.clone())))
-                            .map(|(id, mut v)| {
-                                v.sort_unstable();
-                                v.dedup();
-                                (id, v)
-                            })
-                            .collect();
-                    let Activity { busy, waiting, edges } =
-                        merge_activity(busy, waiting, lanes.iter().map(|(_, t)| t));
-                    // Change-gated: emit only when EITHER set shifts, so an idle
-                    // machine stays silent (the frontend just re-applies the last set).
-                    if busy != last_busy || waiting != last_waiting || waiting_by != last_waiting_by {
-                        last_busy = busy.clone();
-                        last_waiting = waiting.clone();
-                        last_waiting_by = waiting_by.clone();
-                        let _ = handle.emit(
-                            "sessions:busy",
-                            ClaudeActivity { busy: busy.clone(), waiting, waiting_by },
-                        );
-                    }
-                    // Completion edges, computed AFTER the busy emit so the dot's
-                    // hand-off (green out, ember in) arrives in that order.
-                    let exits = completion_edges(&mut busy_ticks, &edges);
-                    if !exits.is_empty() {
-                        // read_projects only on a real edge — not every 3s tick
-                        let roots = read_projects(&pollctx);
-                        let epoch = sysclock::now_epoch();
-                        for path in exits {
-                            if stamp_worked(&roots, &path, epoch) {
-                                let _ = handle.emit("sessions:done", TaskDone { path, epoch });
-                            }
-                        }
-                    }
-                    let fresh: Vec<(String, i64)> = lanes
-                        .iter()
-                        .flat_map(|(id, t)| new_dones(done_seen.entry(id).or_default(), &t.done))
-                        .collect();
-                    if !fresh.is_empty() {
-                        let roots = read_projects(&pollctx);
-                        let now = sysclock::now_epoch();
-                        for (path, at) in fresh {
-                            // Bounded by now: the stamp is the agent's clock.
-                            let epoch = at.min(now);
-                            if stamp_worked(&roots, &path, epoch) {
-                                let _ = handle.emit("sessions:done", TaskDone { path, epoch });
-                            }
-                        }
-                    }
-                }
-            });
+                    })),
+                },
+            );
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1917,50 +1646,19 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
-        // Owned dock shells die with the app — they have no tmux server holding
-        // them up, so without this the PTY children outlive the window as
-        // orphaned logins.
         .run(|handle, event| {
             if matches!(event, tauri::RunEvent::Ready) {
                 winstate::ready(handle);
             }
             if matches!(event, tauri::RunEvent::Exit) {
                 winstate::stop(handle);
+                // The dock shells die with the app (no tmux server holds them
+                // up), the docs server releases its port, in-flight clones
+                // are cancelled, the rings and cwds are flushed first: the
+                // whole exit sequence is the command layer's, shared with
+                // `worktrees serve`, in the order `host::stop` documents.
                 let c = ctx(handle);
-                // Where each tab ended up, recorded BEFORE the sweep — a killed
-                // shell has no cwd left to read.
-                worktrees_api::term::save_shell_cwds(&c, &c.shells);
-                // …and what each tab was SHOWING, likewise before the sweep: a
-                // killed shell still has its ring, but it will not have it long.
-                worktrees_api::term::save_shell_scrollback(&c, &c.shells);
-                let keys: Vec<worktrees_api::term::ShellKey> =
-                    c.shells.0.lock().unwrap().keys().cloned().collect();
-                for k in &keys {
-                    worktrees_api::term::kill_shell(&c.shells, k);
-                }
-                // And the documentation server, for a harder reason than the
-                // shells': what it is holding is a loopback port onto the
-                // user's documents. Surviving the window would mean serving
-                // them to whatever finds the port, with nothing on screen to
-                // say it is still running.
-                viewer::kill(&c.viewer);
-                // In-flight clones: cancel, and give core a moment to kill
-                // git's group and remove the partial folder (the guard leaves
-                // the map when that is done). Bounded — exit must not hang.
-                let clones = worktrees_api::workspace::CLONE_JOBS.cancel_all();
-                if !clones.is_empty() {
-                    applog("info", &format!("exit: cancelling {} clone(s): {}", clones.len(), clones.join(", ")));
-                    let deadline = std::time::Instant::now() + Duration::from_secs(3);
-                    while !worktrees_api::workspace::CLONE_JOBS.is_idle() && std::time::Instant::now() < deadline {
-                        thread::sleep(Duration::from_millis(50));
-                    }
-                    if !worktrees_api::workspace::CLONE_JOBS.is_idle() {
-                        applog("warn", "exit: a cancelled clone had not finished cleaning up");
-                    }
-                }
-                if let Ok(d) = handle.path().app_config_dir() {
-                    viewer::cleanup(&d);
-                }
+                worktrees_api::host::stop(&c);
             }
         });
 }

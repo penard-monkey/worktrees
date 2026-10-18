@@ -5,7 +5,7 @@
 //! the reason the app does — no homebrew on the inherited `PATH` means no
 //! tmux, and every place this program manages lives in one.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use worktrees_core::proc::run_deadline;
 
@@ -95,4 +95,26 @@ pub fn fixup_gui_locale() {
     if !has_utf8 {
         std::env::set_var("LANG", "en_US.UTF-8");
     }
+}
+
+/// The identifier a `tauri build` bundle carries, and what the CLI assumes
+/// when nothing has said otherwise. The app's config dir is named by it, so
+/// `worktrees serve` has to agree on it to share that directory.
+pub const APP_IDENT: &str = "net.casadelvalle.worktrees";
+
+/// Where the desktop app keeps `ui-state.json`, `projects.json` and now
+/// `serve.json`: what Tauri's `app_config_dir()` answers, computed without
+/// Tauri. Tauri is `dirs::config_dir().join(identifier)`, which is
+/// `~/Library/Application Support/<id>` on macOS and `$XDG_CONFIG_HOME/<id>`
+/// (falling back to `~/.config/<id>`) on Linux; an empty or relative
+/// `XDG_CONFIG_HOME` is ignored the way `dirs` ignores it.
+pub fn default_config_dir() -> PathBuf {
+    let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    if cfg!(target_os = "macos") {
+        return home.join("Library/Application Support").join(APP_IDENT);
+    }
+    let xdg = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute());
+    xdg.unwrap_or_else(|| home.join(".config")).join(APP_IDENT)
 }

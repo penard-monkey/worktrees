@@ -58,6 +58,7 @@ pub mod config;
 pub mod docserver;
 pub mod editors;
 pub mod files;
+pub mod host;
 pub mod hostenv;
 pub mod hostpolicy;
 pub mod log;
