@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { feedbackConfig } from "./feedbackConfig";
 import { registerEscape } from "./useEscape";

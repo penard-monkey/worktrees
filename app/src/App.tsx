@@ -2,9 +2,8 @@ import { adaptClaude, adaptCodex, adaptKimi, checking, compactUsage, detailMessa
 import { HARNESSES, HARNESS_LABEL, NEEDS_MODEL, type Harness } from "./harness";
 import { ModelPicker, defaultModel, modelOk, useAgentModels, type PiStatus } from "./ModelPicker";
 import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ComponentType } from "react";
-import { Channel, invoke } from "@tauri-apps/api/core";
+import { Channel, invoke, listen, onTransportError } from "./ipc";
 import { copyToClipboard } from "./clipboard";
-import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { clampSteps, doneBounds, doneOpacity, doneTierSeen, isUnread, seenEpoch } from "./afterglow";
@@ -4056,6 +4055,9 @@ function App() {
     setErr(m);
     invoke("log_event", { level: "error", msg: m }).catch(() => {});
   }, []);
+  // A dead socket to `worktrees serve` (dev stack only) says so here — refused,
+  // wrong version, or closed — including a refusal from before this mounted.
+  useEffect(() => onTransportError(fail), [fail]);
 
   // ONE poller for the Claude plan bars, whichever of the three hosts is
   // showing them (Settings → Appearance → Usage meter). It lives up here rather

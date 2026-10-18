@@ -4,7 +4,7 @@ import { Terminal, type ILink } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SearchAddon } from "@xterm/addon-search";
 import { UnicodeGraphemesAddon } from "@xterm/addon-unicode-graphemes";
-import { Channel, invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "./ipc";
 import { FindBar, findColors } from "./Find";
 import { findPaths, hitRange, logicalLine } from "./termlinks";
 import { CtxMenu } from "./CtxMenu";

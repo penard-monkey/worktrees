@@ -3,7 +3,7 @@
 // and owns the menu a name several files share opens. FileView and PlanPane
 // each hold one; anything else that renders `Markdown` passes no `pathLinks`
 // and gets none.
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { CtxMenu } from "./CtxMenu";
 import { resolveDocPaths, type DocPathHit, type PathAnchor, type PathLinks } from "./mdpaths";

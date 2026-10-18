@@ -69,7 +69,9 @@ async function adapter({ mock = false, configured = true, label = 'main', reject
   const env = { VITE_MOCK: mock ? '1' : '', DEV: true, VITE_ORFIS_KEY: configured ? 'pk_test_key' : '', VITE_ORFIS_API_URL: 'http://localhost:4100' };
   const mod = evaluate('app/src/feedback.ts', {
     require(name) {
-      if (name === '@tauri-apps/api/core') return { invoke: (cmd, arg) => { calls.push([cmd, arg]); return cmd === 'get_changelog' ? version : Promise.resolve(); } };
+      // The backend door (ipc.ts), never `@tauri-apps/api/core` directly — an
+      // unknown name throws below, so a file that bypassed the door fails here.
+      if (name === './ipc') return { invoke:(cmd, arg) => { calls.push([cmd, arg]); return cmd === 'get_changelog' ? version : Promise.resolve(); } };
       if (name === '@tauri-apps/api/window') return { getCurrentWindow: () => ({ label }) };
       if (name === './feedbackConfig') return { feedbackConfig };
       if (name === './useEscape') return { registerEscape: escape.registerEscape };

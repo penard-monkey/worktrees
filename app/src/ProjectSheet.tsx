@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useEscape } from "./useEscape";
 import * as Icons from "./icons";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc";
 import type { ProfilesInfo } from "./ProfilesPanel";
 import { AgentFixButton, AgentSetupSection, RulesSection, openPr, useAgentSetup, type AgentSetupStatus } from "./AgentSetup";
 import { projectTodos, type Remedies, type Todo, type TodoHealth } from "./projectTodos";

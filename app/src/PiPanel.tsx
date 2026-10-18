@@ -7,7 +7,7 @@
 // trust.json, and never in a repo.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc";
 import type { PiProjectTrust, Settings } from "./settings";
 import { ModelPicker, REASON_TEXT, modelArg, type ModelOption, type PiLaunchTrust, type PiStatus } from "./ModelPicker";
 import { PiMcpSection, type PiMcpStatus } from "./PiMcpPanel";

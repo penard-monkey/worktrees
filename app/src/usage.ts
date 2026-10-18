@@ -20,7 +20,7 @@
 // Nothing here may ever throw into the UI or raise a toast: a metric that
 // changes the behaviour it measures is worse than no metric.
 
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc";
 
 /** Where the user was when it happened. A FIXED enum — never a place name. */
 export type Surface =

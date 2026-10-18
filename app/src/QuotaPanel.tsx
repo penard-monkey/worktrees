@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc";
 
 /** `quota_settings` (lib.rs): the user's `[quota]` in config.toml, which the
  *  launch gate (`worktrees_core::quota`) reads every time an agent starts. */

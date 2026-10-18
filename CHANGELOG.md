@@ -6,6 +6,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Changed
+- **The frontend reaches its backend through one module, `app/src/ipc.ts`.**
+  The 25 files that imported `invoke`, `Channel` and `listen` from
+  `@tauri-apps/api` import them from there instead; in the desktop app those
+  ARE Tauri's own functions, called with the same arguments, so nothing
+  changes. It is the switch the app will use to become a client of
+  `worktrees serve`. Plugins (opener, dialog, updater, process, the window
+  API) still import their packages directly — they act on the machine the
+  window runs on, whichever engine is driving it.
 - **The host wiring every engine process needs lives in one place,
   `worktrees_api::host`**, and the desktop app calls it the same way `serve`
   does: `boot` (log sink, panic hook, the launchd-bare PATH and locale repairs,
@@ -66,6 +74,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   sent (one serial lane per stream; everything else stays concurrent), and a
   finished channel says so with `{channel, seq, end: true}`, so a client can
   let the handler go the way it does when a Tauri `Channel` drops.
+- **The real frontend can drive a real `worktrees serve` from a browser**
+  (development only: `pnpm dev:serve` with `WT_SERVE_JSON` pointing at the
+  stack's `serve.json`). The page asks the dev server for the port and token —
+  same-origin only, since vite's own CORS default answers every page on every
+  localhost port — keeps the token in memory, and sends it as the socket's
+  first frame; it is never in a URL, in storage, or in a build, which does not
+  contain the socket client at all. Replies are matched by id, terminal bytes
+  and progress are delivered per channel in sequence order, events arrive
+  through `listen`, and the server's version must equal the frontend's (both
+  from the workspace `Cargo.toml`) or nothing is sent. A refused handshake, a
+  version mismatch or a dropped connection appears in the error banner.
+  `app/scripts/transport-check.mjs` holds the client against the server's own
+  frame definitions.
 - **Applying the worktrees rules or the agent-setup Fix now opens a review
   lane for the `agent-instructions` branch**: a place on it, with an agent
   whose brief explains what the branch changes — each file, the AGENTS.md

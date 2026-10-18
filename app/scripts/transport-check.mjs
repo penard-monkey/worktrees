@@ -1,0 +1,646 @@
+// The frontend's door to the backend, held against the server it talks to.
+//
+//   node app/scripts/transport-check.mjs        # from the repo root; exits non-zero on failure
+//
+// `app/src/ipc.ts` is the only module that talks to the backend: Tauri IPC by
+// default, and in the dev stack a WebSocket to `worktrees serve`
+// (`app/src/ipcws.ts`). Neither half is visible to any other suite — the mock
+// harness answers below `@tauri-apps/api/core` and never sees the socket, and
+// the serve lane's Rust tests never see a browser. So this check does four
+// things, the same way `api-boundary-check.mjs` and `termreplay-check.mjs` do:
+//
+//   1. PINS THE WIRE. Every frame key, the channel spelling, the first `seq`,
+//      the client-local marker, the auth key and the byte-channel argument are
+//      read out of wire.rs / policy.rs / dispatch.rs and compared with
+//      `ipcws.ts::WIRE`. And the behavioural tests below build their frames
+//      from the RUST-parsed keys, not from WIRE — so a rename on the Rust side
+//      fails them too, rather than letting a stub agree with a stale client.
+//   2. DRIVES THE REAL CLIENT on a virtual clock against a fake socket: auth
+//      before any request, replies routed by id (a non-string `err` passed
+//      through unchanged), channels in `seq` order including a reordered
+//      arrival, events and unlisten, a version mismatch refused, a refused
+//      handshake and a dead socket surfaced — never swallowed.
+//   3. DRIVES THE REAL CHAIN for the termreplay contract: TerminalPane's
+//      `useTerm` + `shellTransport` → ipc.ts → ipcws.ts → the fake socket. A
+//      replay is a channel's first frame and stays unanswered; a live query
+//      after it is answered.
+//   4. GUARDS THE EDGES: one door (nothing else imports core/event), the
+//      socket client reachable only behind `import.meta.env.DEV`, the dev
+//      server's token endpoint refusing cross-origin asks, the version source,
+//      and — when `app/dist` exists — the client absent from the build.
+//
+// Overrides, so a mutation can be tested without touching the tree:
+//   TRANSPORT_IPCWS, TRANSPORT_IPC, TRANSPORT_WIRE, TRANSPORT_POLICY,
+//   TRANSPORT_DISPATCH, TRANSPORT_MAIN, TRANSPORT_DOOR, TRANSPORT_DIST
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { transformWithEsbuild } from "vite";
+
+const here = (p) => fileURLToPath(new URL(p, import.meta.url));
+const SRC = {
+  ipcws: process.env.TRANSPORT_IPCWS ?? here("../src/ipcws.ts"),
+  ipc: process.env.TRANSPORT_IPC ?? here("../src/ipc.ts"),
+  ipcInTree: here("../src/ipc.ts"),
+  pane: here("../src/TerminalPane.tsx"),
+  main: process.env.TRANSPORT_MAIN ?? here("../src/main.tsx"),
+  door: process.env.TRANSPORT_DOOR ?? here("../vite.serve-door.ts"),
+  vite: here("../vite.config.ts"),
+  envd: here("../src/vite-env.d.ts"),
+  appsrc: here("../src"),
+  dist: process.env.TRANSPORT_DIST ?? here("../dist"),
+  wire: process.env.TRANSPORT_WIRE ?? here("../../crates/worktrees-cli/src/serve/wire.rs"),
+  policy: process.env.TRANSPORT_POLICY ?? here("../../crates/worktrees-cli/src/serve/policy.rs"),
+  dispatch: process.env.TRANSPORT_DISPATCH ?? here("../../crates/worktrees-cli/src/serve/dispatch.rs"),
+  cliToml: here("../../crates/worktrees-cli/Cargo.toml"),
+  wsToml: here("../../Cargo.toml"),
+};
+const read = (p) => fs.readFileSync(p, "utf8");
+
+let failed = 0;
+const fail = (m) => { failed++; console.log(`not ok — ${m}`); };
+const ok = (m) => console.log(`ok — ${m}`);
+const check = (cond, m) => (cond ? ok(m) : fail(m));
+const tick = () => new Promise((r) => setTimeout(r, 0));
+const ticks = async (n = 4) => { for (let i = 0; i < n; i++) await tick(); };
+const b64 = (s) => Buffer.from(s).toString("base64");
+const text = (ab) => new TextDecoder().decode(new Uint8Array(ab));
+const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+
+async function load(file, js) {
+  return import("data:text/javascript;base64," + Buffer.from(js).toString("base64"));
+}
+async function tsModule(file) {
+  const out = await transformWithEsbuild(read(file), path.basename(file), { loader: "ts", format: "esm" });
+  return out.code;
+}
+
+// ── 1. the wire, read out of the Rust ───────────────────────────────────────
+
+/** The body of `fn name` in a Rust source (to the first line that closes it). */
+function rustFn(src, name) {
+  const m = new RegExp(`fn ${name}\\b[^{]*\\{([\\s\\S]*?)\\n\\}`, "m").exec(src);
+  return m ? m[1] : null;
+}
+/** The string keys of the first `json!({ … })` in `body`, in order. */
+function jsonKeys(body) {
+  const m = body && /json!\(\{([\s\S]*?)\}\)/.exec(body);
+  return m ? [...m[1].matchAll(/"([^"]+)"\s*:/g)].map((x) => x[1]) : null;
+}
+const camel = (s) => s.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
+
+const wire = read(SRC.wire);
+const policy = read(SRC.policy);
+const dispatch = read(SRC.dispatch).split("\n#[cfg(test)]")[0];
+
+const K = {};
+{
+  const auth = jsonKeys(rustFn(wire, "auth_reply"));
+  const okk = jsonKeys(rustFn(wire, "reply_ok"));
+  const errk = jsonKeys(rustFn(wire, "reply_err"));
+  const chan = jsonKeys(rustFn(wire, "channel_frame"));
+  const evt = jsonKeys(rustFn(wire, "event_frame"));
+  const req = rustFn(wire, "parse_request");
+  const reqKeys = req ? [...req.matchAll(/o\.remove\("([^"]+)"\)/g)].map((x) => x[1]) : [];
+  const prefix = /strip_prefix\("([^"]+)"\)/.exec(rustFn(wire, "channel_id") ?? "")?.[1];
+  const clientLocal = /pub const CLIENT_LOCAL: &str = "([^"]+)";/.exec(wire)?.[1];
+  const authKey = /obj\.get\("([^"]+)"\)/.exec(rustFn(policy, "auth_ok") ?? "")?.[1];
+  // The first frame a sink writes, as the Rust test asserts it.
+  const firstFrame = /assert_eq!\(seen\[0\], r#"(\{[^"]*"[^#]*)"#\)/.exec(wire)?.[1];
+  const ff = firstFrame ? JSON.parse(firstFrame) : null;
+  const sentFirst = /sink\.send\(b"([^"]*)"\)/.exec(wire)?.[1];
+
+  const need = { auth, okk, errk, chan, evt, prefix, clientLocal, authKey, ff };
+  for (const [k, v] of Object.entries(need)) if (!v) fail(`wire: could not read ${k} out of the Rust — has a function been renamed? (this check would otherwise pass on nothing)`);
+  if (auth && auth.length === 2 && /"ok":\s*true/.test(rustFn(wire, "auth_reply"))) {
+    [K.authOk, K.authVersion] = auth;
+  } else fail(`wire: auth_reply is not {"ok": true, "<version>": …} (got ${JSON.stringify(auth)})`);
+  if (okk?.length === 2) [K.id, K.ok] = okk; else fail(`wire: reply_ok keys ${JSON.stringify(okk)}`);
+  if (errk?.length === 2 && errk[0] === K.id) K.err = errk[1]; else fail(`wire: reply_err keys ${JSON.stringify(errk)}`);
+  if (chan?.length === 3) [K.channel, K.seq, K.data] = chan; else fail(`wire: channel_frame keys ${JSON.stringify(chan)}`);
+  if (evt?.length === 2) [K.event, K.payload] = evt; else fail(`wire: event_frame keys ${JSON.stringify(evt)}`);
+  if (reqKeys.length === 3) [K.reqId, K.cmd, K.args] = reqKeys; else fail(`wire: parse_request reads ${JSON.stringify(reqKeys)}`);
+  K.prefix = prefix;
+  K.clientLocal = clientLocal;
+  K.auth = authKey;
+  if (ff && K.seq) {
+    K.firstSeq = ff[K.seq];
+    if (sentFirst != null && ff[K.data] !== b64(sentFirst)) fail(`wire: the Rust test's first frame data ${ff[K.data]} is not base64 of b"${sentFirst}" — is a ByteSink still base64?`);
+  }
+  K.byteKeys = [...dispatch.matchAll(/frames\.bytes\(a\.channel\("([^"]+)"\)/g)].map((x) => camel(x[1]));
+  K.typedKeys = [...dispatch.matchAll(/frames\.typed::<[^>]+>\(a\.channel\("([^"]+)"\)/g)].map((x) => camel(x[1]));
+  if (!K.byteKeys.length) fail("dispatch: no `frames.bytes(a.channel(…))` found — the byte-channel pin would be vacuous");
+  if (!K.typedKeys.length) fail("dispatch: no `frames.typed::<…>(a.channel(…))` found — the typed-channel pin would be vacuous");
+  K.authDeadline = Number(/AUTH_DEADLINE: std::time::Duration = std::time::Duration::from_secs\((\d+)\)/.exec(policy)?.[1]);
+}
+
+const wsJs = await tsModule(SRC.ipcws);
+check(!/^\s*import\s[^"']*["'][^"']+["']/m.test(wsJs), "ipcws.ts has no runtime import (a data: module could not resolve one — and this check loads it as one)");
+const WS = await load(SRC.ipcws, wsJs);
+{
+  const W = WS.WIRE ?? {};
+  const pairs = [
+    ["auth", K.auth], ["version", K.authVersion], ["id", K.id], ["cmd", K.cmd], ["args", K.args],
+    ["ok", K.ok], ["err", K.err], ["channel", K.channel], ["seq", K.seq], ["data", K.data],
+    ["event", K.event], ["payload", K.payload], ["channelPrefix", K.prefix], ["firstSeq", K.firstSeq],
+    ["clientLocal", K.clientLocal],
+  ];
+  const bad = pairs.filter(([k, v]) => W[k] !== v);
+  for (const [k, v] of bad) fail(`WIRE.${k} is ${JSON.stringify(W[k])}, the Rust says ${JSON.stringify(v)}`);
+  if (!bad.length) ok(`WIRE matches wire.rs/policy.rs — ${pairs.length} keys (${pairs.map(([, v]) => v).join(" ")})`);
+  if (K.reqId !== K.id) fail(`wire: requests carry "${K.reqId}" and replies "${K.id}" — the client echoes one key`);
+  check(K.authOk === K.ok, `the auth reply's success key is the reply's ("${K.authOk}")`);
+  const bk = [...(WS.BYTE_CHANNEL_KEYS ?? [])].sort();
+  check(same(bk, [...new Set(K.byteKeys)].sort()), `byte channels are exactly dispatch.rs's frames.bytes keys (${JSON.stringify(bk)} vs ${JSON.stringify([...new Set(K.byteKeys)])})`);
+  check(K.typedKeys.every((k) => !bk.includes(k)), `no typed progress channel is decoded as bytes (${[...new Set(K.typedKeys)].join(", ")})`);
+  check(K.authDeadline > 0 && WS.AUTH_WAIT_MS > K.authDeadline * 1000, `the client waits longer (${WS.AUTH_WAIT_MS}ms) than the server's AUTH_DEADLINE (${K.authDeadline}s), so a refusal reads as a refusal`);
+}
+
+// ── 2. the client, on a virtual clock ───────────────────────────────────────
+
+const VERSION = "1.2.3";
+const TOKEN = "f".repeat(64);
+
+function clock() {
+  let now = 0, next = 1;
+  const timers = new Map();
+  return {
+    setTimeout(fn, ms) { const id = next++; timers.set(id, { at: now + ms, fn }); return id; },
+    clearTimeout(id) { timers.delete(id); },
+    advance(ms) {
+      now += ms;
+      for (const [id, t] of [...timers]) if (t.at <= now) { timers.delete(id); t.fn(); }
+    },
+    pending: () => timers.size,
+  };
+}
+
+/** The server side of one fake socket: frames go in through `recv`, what the
+ *  client wrote comes out of `sent`. Built from the RUST keys (K). */
+function harness({ version = VERSION } = {}) {
+  const socks = [];
+  class FakeSock {
+    constructor(url) { this.url = url; this.sent = []; this.closed = false; socks.push(this); }
+    send(t) { if (this.closed) throw new Error("send on a closed socket"); this.sent.push(t); }
+    close() { this.closed = true; }
+  }
+  const errors = [];
+  const warns = [];
+  const clk = clock();
+  const door = WS.connectSocket({
+    url: "ws://127.0.0.1:9/", token: TOKEN, version,
+    WebSocket: FakeSock, setTimeout: clk.setTimeout, clearTimeout: clk.clearTimeout,
+    atob: globalThis.atob, onError: (m) => errors.push(m), warn: (m) => warns.push(m),
+  });
+  const sock = socks[0];
+  const h = {
+    door, sock, errors, warns, clk,
+    open: () => sock.onopen?.({}),
+    recv: (obj) => sock.onmessage?.({ data: typeof obj === "string" ? obj : JSON.stringify(obj) }),
+    drop: () => sock.onclose?.({}),
+    frames: () => sock.sent.map((t) => JSON.parse(t)),
+    requests: () => sock.sent.slice(1).map((t) => JSON.parse(t)),
+    authOk: (v = VERSION) => h.recv({ [K.authOk]: true, [K.authVersion]: v }),
+    reply: (id, v) => h.recv({ [K.id]: id, [K.ok]: v }),
+    error: (id, e) => h.recv({ [K.id]: id, [K.err]: e }),
+    chan: (ch, seq, data) => h.recv({ [K.channel]: ch, [K.seq]: seq, [K.data]: data }),
+    event: (name, payload) => h.recv({ [K.event]: name, [K.payload]: payload }),
+    async ready() { h.open(); h.authOk(); await tick(); },
+  };
+  return h;
+}
+/** A call's outcome — or `{hung}`. A client that loses a call leaves its
+ *  promise pending forever, and an awaited one would end this script with
+ *  node's exit 13 and no failure printed: a hang has to be a RESULT. */
+const HANG_MS = 1000;
+const settle = (p) => Promise.race([
+  p.then((v) => ({ ok: v }), (e) => ({ err: e })),
+  new Promise((r) => setTimeout(() => r({ hung: true }), HANG_MS)),
+]);
+const chanId = (s) => Number(String(s).slice(String(K.prefix).length));
+
+// 2a. auth first, and nothing before it.
+{
+  const h = harness();
+  const early = settle(h.door.invoke("list_workspace"));
+  check(h.sock.sent.length === 0, "a call before the socket opens writes nothing");
+  h.open();
+  const f = h.frames();
+  check(f.length === 1 && Object.keys(f[0]).length === 1 && f[0][K.auth] === TOKEN, `the first frame is exactly {"${K.auth}": <token>} (${JSON.stringify(Object.keys(f[0] ?? {}))})`);
+  const mid = settle(h.door.invoke("get_settings"));
+  check(h.sock.sent.length === 1, "a call after open but before the auth reply is still held");
+  h.authOk();
+  const reqs = h.requests();
+  check(reqs.length === 2 && reqs[0][K.cmd] === "list_workspace" && reqs[1][K.cmd] === "get_settings", "held calls go out after the auth reply, in call order");
+  check(reqs.length === 2 && reqs[0][K.id] !== reqs[1][K.id], "each request has its own id");
+  check(same(reqs[0][K.args], {}), "a call with no args sends {} (wire.rs reads a missing args as {}, Tauri sends {})");
+  h.reply(reqs[1][K.id], { theme: "nord" });
+  h.reply(reqs[0][K.id], []);
+  const [a, b] = await Promise.all([early, mid]);
+  check(same(a, { ok: [] }) && same(b, { ok: { theme: "nord" } }), "…and each resolves with its own reply");
+  check(h.clk.pending() === 0, "the handshake timer is cleared once authenticated");
+}
+
+// 2b. replies routed by id, out of order; err passed through unchanged.
+{
+  const h = harness();
+  await h.ready();
+  const p1 = settle(h.door.invoke("set_pin", { repo: "/r", slug: "s", on: true }));
+  const p2 = settle(h.door.invoke("list_places", { repo: "/r" }));
+  const p3 = settle(h.door.invoke("clone_project", { id: "j1", url: "nope", parent: "/tmp", name: null }));
+  const p4 = settle(h.door.invoke("open_editor", { path: "/r/x", cmd: "code" }));
+  const [r1, r2, r3, r4] = h.requests();
+  check(same(r1[K.args], { repo: "/r", slug: "s", on: true }), "args go out exactly as the call site wrote them (camelCase, as Tauri sends)");
+  const cloneErr = { kind: "auth", message: "Permission denied (publickey)", detail: null };
+  h.error(r4[K.id], K.clientLocal);
+  h.error(r3[K.id], cloneErr);
+  h.reply(r2[K.id], [{ slug: "s" }]);
+  h.error(r1[K.id], "no such place");
+  const [o1, o2, o3, o4] = await Promise.all([p1, p2, p3, p4]);
+  check(same(o2, { ok: [{ slug: "s" }] }), "a reply that arrives first resolves its own call");
+  check(o1.err === "no such place", "a string err rejects with that string");
+  check(typeof o3.err === "object" && same(o3.err, cloneErr), "clone_project's CloneError object rejects UNCHANGED — the dialog branches on its kind");
+  check(o4.err === K.clientLocal, `a client-local command rejects with "${K.clientLocal}", unchanged`);
+  check(h.warns.some((w) => w.includes("open_editor")), "…and the refusal is named for the developer (console)");
+  check(h.errors.length === 0, "command errors are the caller's to show, not a transport failure");
+}
+
+// 2c. channels: seq order per channel, bytes vs typed, duplicates.
+{
+  const h = harness();
+  await h.ready();
+  const bytes = h.door.channel();
+  const got = [];
+  bytes.onmessage = (m) => got.push(m);
+  const prog = h.door.channel();
+  const progs = [];
+  prog.onmessage = (m) => progs.push(m);
+  void h.door.invoke("shell_open", { repo: "/r", slug: "s", index: 0, cols: 80, rows: 24, onBytes: bytes });
+  void h.door.invoke("clone_project", { id: "j", url: "u", parent: "/p", name: null, onProgress: prog });
+  const [open, clone] = h.requests();
+  const bc = open[K.args].onBytes, pc = clone[K.args].onProgress;
+  check(typeof bc === "string" && bc.startsWith(K.prefix) && typeof pc === "string" && pc.startsWith(K.prefix) && bc !== pc,
+    `a Channel argument serialises as Tauri's "${K.prefix}<id>", one id per channel (${bc}, ${pc})`);
+  const b = chanId(bc), p = chanId(pc);
+  h.chan(b, K.firstSeq + 1, b64("world"));
+  check(got.length === 0, "a frame that arrives AHEAD of its predecessor is held, not delivered");
+  h.chan(p, K.firstSeq, { phase: "Receiving objects", percent: 10, detail: null });
+  h.chan(b, K.firstSeq, b64("hello "));
+  h.chan(b, K.firstSeq + 2, b64("!"));
+  h.chan(b, K.firstSeq + 1, b64("DUPLICATE"));
+  h.chan(p, K.firstSeq + 1, { phase: "Resolving deltas", percent: 100, detail: null });
+  check(got.length === 3 && got.every((m) => m instanceof ArrayBuffer), "byte frames arrive as ArrayBuffers — what TerminalPane gets from Tauri");
+  check(got.map(text).join("|") === "hello |world|!", `…in seq order, the reordered one released when its predecessor lands (${got.map(text).join("|")})`);
+  check(progs.length === 2 && progs[0].percent === 10 && progs[1].percent === 100, "a typed progress channel delivers the JSON value itself, in its own seq order, unaffected by the other channel");
+}
+
+// 2d. the replay lands before the reply that answers it — and stays first.
+{
+  const h = harness();
+  await h.ready();
+  const order = [];
+  const ch = h.door.channel();
+  ch.onmessage = (m) => order.push(`bytes:${text(m)}`);
+  const opened = settle(h.door.invoke("shell_open", { repo: "/r", slug: "s", index: 0, cols: 80, rows: 24, onBytes: ch }).then((v) => order.push(`reply:${v.replay}`)));
+  const [req] = h.requests();
+  const c = chanId(req[K.args].onBytes);
+  // serve's one outbox: the replay is pushed through the sink BEFORE the reply.
+  h.chan(c, K.firstSeq + 1, b64("live"));
+  h.chan(c, K.firstSeq, b64("REPLAY"));
+  h.reply(req[K.id], { gen: 1, replay: 6, replay_cols: null });
+  await opened;
+  check(same(order, ["bytes:REPLAY", "bytes:live", "reply:6"]), `the replay is the channel's first message even when a live frame overtakes it, and both precede the reply's continuation (${order.join(", ")})`);
+}
+
+// 2e. events: by name, unlisten.
+{
+  const h = harness();
+  await h.ready();
+  const busy = [], changed = [];
+  const un = await h.door.listen("sessions:busy", (e) => busy.push(e));
+  await h.door.listen("places:changed", (e) => changed.push(e));
+  h.event("sessions:busy", { busy: ["wt-a"], waiting: [] });
+  check(busy.length === 1 && busy[0].event === "sessions:busy" && same(busy[0].payload, { busy: ["wt-a"], waiting: [] }) && changed.length === 0,
+    "an event frame reaches that event's listeners as {event, payload}, and only them");
+  un();
+  h.event("sessions:busy", { busy: [], waiting: [] });
+  h.event("places:changed", null);
+  check(busy.length === 1 && changed.length === 1, "unlisten stops delivery to that handler and no other");
+}
+
+// 2f. a version mismatch is refused, visibly.
+for (const [label, v] of [["an older server", "0.0.1"], ["a server that sends no version", undefined]]) {
+  const h = harness();
+  const p = settle(h.door.invoke("list_workspace"));
+  h.open();
+  h.recv(v === undefined ? { [K.authOk]: true } : { [K.authOk]: true, [K.authVersion]: v });
+  const r = await p;
+  const later = await settle(h.door.invoke("get_settings"));
+  check(typeof r.err === "string" && /version mismatch/.test(r.err) && r.err.includes(VERSION) && (v === undefined || r.err.includes(v)),
+    `${label}: the waiting call is refused naming both versions (${r.err})`);
+  check(h.sock.sent.length === 1, `${label}: no request ever reaches it — only the auth frame was written`);
+  check(h.sock.closed, `${label}: the client closes the socket`);
+  check(h.errors.length === 1 && h.errors[0] === r.err, `${label}: reported once through onError → fail()`);
+  check(later.err === r.err, `${label}: later calls fail the same way, at once`);
+}
+
+// 2g. a refused handshake, a dead stack, a silent server — all surfaced.
+{
+  const h = harness();
+  const p = settle(h.door.invoke("list_workspace"));
+  h.open();
+  h.drop(); // serve's refusal: the socket closes with nothing written
+  const r = await p;
+  check(typeof r.err === "string" && /refused/.test(r.err), `a close before the auth reply is a REFUSAL, said so (${r.err})`);
+  check(h.errors.length === 1 && h.errors[0] === r.err, "…reported once through onError → fail()");
+}
+{
+  const h = harness();
+  const p = settle(h.door.invoke("list_workspace"));
+  h.drop(); // never opened
+  const r = await p;
+  check(/could not connect/.test(r.err ?? "") && h.errors.length === 1, `a socket that never opens says it could not connect (${r.err})`);
+}
+{
+  const h = harness();
+  const p = settle(h.door.invoke("list_workspace"));
+  h.open();
+  h.clk.advance(WS.AUTH_WAIT_MS - 1);
+  check(h.errors.length === 0, "the handshake wait is not cut short");
+  h.clk.advance(1);
+  const r = await p;
+  check(/did not answer/.test(r.err ?? "") && h.sock.closed && h.errors.length === 1, `a server that never answers the auth frame times out on the clock and is closed (${r.err})`);
+}
+{
+  const h = harness();
+  await h.ready();
+  const p = settle(h.door.invoke("list_workspace"));
+  h.drop();
+  const r = await p;
+  const later = await settle(h.door.invoke("get_settings"));
+  check(/closed/.test(r.err ?? "") && later.err === r.err && h.errors.length === 1, `a socket that dies after auth fails its waiting call, every later one, and says so once (${r.err})`);
+}
+{
+  const h = harness();
+  await h.ready();
+  const p = settle(h.door.invoke("list_workspace"));
+  h.recv("{not json");
+  const r = await p;
+  check(/unreadable/.test(r.err ?? "") && h.errors.length === 1, "an unreadable frame ends the connection visibly rather than leaving a call to hang");
+}
+
+// ── 3. ipc.ts, and the termreplay contract over the socket ──────────────────
+
+const ipcSrc = read(SRC.ipc);
+for (const want of ['from "@tauri-apps/api/core"', 'from "@tauri-apps/api/event"']) {
+  check(ipcSrc.includes(want), `ipc.ts imports ${want.slice(5)} (it is the door's Tauri half)`);
+}
+/** ipc.ts with its imports replaced by recording stubs. */
+async function loadIpc() {
+  const body = ipcSrc.split("\n").filter((l) => !/^\s*import\s/.test(l)).join("\n");
+  const js = (await transformWithEsbuild(
+    // A fresh module per load (the comment changes the data: URL): each caller
+    // gets its own door and its own stubs.
+    `// ${Math.random()}\nconst { tauriInvoke, tauriListen, TauriChannel } = globalThis.__ipcStubs;\n${body}`,
+    "ipc.ts", { loader: "ts", format: "esm" })).code;
+  return load(SRC.ipc, js);
+}
+{
+  const calls = [];
+  class TauriChannel { constructor(m) { this.tauri = true; this.onmessage = m; } toJSON() { return "__CHANNEL__:t"; } }
+  globalThis.__ipcStubs = {
+    tauriInvoke: (...a) => { calls.push(["invoke", ...a]); return Promise.resolve("tauri"); },
+    tauriListen: (...a) => { calls.push(["listen", ...a]); return Promise.resolve(() => {}); },
+    TauriChannel,
+  };
+  const ipc = await loadIpc();
+  const ch = new ipc.Channel();
+  const args = { session: "wt-a", cols: 80, rows: 24, onBytes: ch };
+  const v = await ipc.invoke("term_open", args);
+  await ipc.invoke("list_workspace");
+  const handler = () => {};
+  await ipc.listen("places:changed", handler);
+  check(ch instanceof TauriChannel, "under Tauri, `new Channel()` IS Tauri's Channel");
+  check(v === "tauri" && calls[0][1] === "term_open" && calls[0][2] === args && calls[0].length === 3,
+    "under Tauri, invoke hands Tauri the same command and the SAME args object, nothing added");
+  check(calls[1][1] === "list_workspace" && calls[1][2] === undefined, "…and an arg-less call stays arg-less (Tauri's own default applies)");
+  check(calls[2][1] === "places:changed" && calls[2][2] === handler, "under Tauri, listen hands Tauri the same event and handler");
+
+  const seen = [];
+  ipc.transportError("refused early");
+  const off = ipc.onTransportError((m) => seen.push(m));
+  ipc.transportError("closed later");
+  off();
+  ipc.transportError("after unsubscribe");
+  check(same(seen, ["refused early", "closed later"]), "a transport failure from before App mounted is replayed to fail(), later ones go straight there");
+}
+
+// The full chain: TerminalPane → ipc.ts → ipcws.ts → the fake socket.
+{
+  const QUERY = "\x1b[>c", REPLY = "\x1b[>0;276;0c";
+  const raw = read(SRC.pane);
+  const body = raw.split("\n").filter((l) => !/^\s*import\s/.test(l)).join("\n").replace(/^export (function|const|type|class) /gm, "$1 ");
+  const js = (await transformWithEsbuild(`
+export function build(env: any) {
+  const {
+    useCallback, useEffect, useRef, useState,
+    Terminal, FitAddon, SearchAddon, UnicodeGraphemesAddon, Channel, invoke,
+    FindBar, findColors, window, document, getComputedStyle, performance,
+    requestAnimationFrame, cancelAnimationFrame, setTimeout, clearTimeout, TextEncoder, h, F,
+  } = env;
+${body}
+  return { useTerm, shellTransport };
+}`, "transport-pane.tsx", { loader: "tsx", format: "esm", jsx: "transform", jsxFactory: "h", jsxFragment: "F" })).code;
+  const { build } = await load(SRC.pane, js);
+
+  async function run(liveFirst) {
+    const h = harness();
+    globalThis.__ipcStubs = { tauriInvoke: () => Promise.reject("tauri must not be reached"), tauriListen: () => Promise.reject("no"), TauriChannel: class {} };
+    const ipc = await loadIpc();
+    ipc.openDoor(h.door);
+    await h.ready();
+    let term = null;
+    class TerminalStub {
+      constructor(o) { this.options = { ...o }; this.unicode = { activeVersion: "" }; this.cols = 100; this.rows = 40; this.element = {}; this.queue = []; this.listener = null; term = this; }
+      loadAddon(a) { a.activate?.(this); } open() {} writeln() {} focus() {} dispose() {}
+      resize(c, r) { this.cols = c; this.rows = r; }
+      onData(fn) { this.listener = fn; }
+      write(bytes, cb) { this.queue.push({ bytes, cb }); }
+      parseNext() { const w = this.queue.shift(); if (!w) throw new Error("nothing queued"); if (new TextDecoder().decode(w.bytes).includes(QUERY)) this.listener?.(REPLY); w.cb?.(); }
+    }
+    const effects = [];
+    const env = {
+      useRef: (i) => ({ current: i }), useState: (i) => [typeof i === "function" ? i() : i, () => {}],
+      useCallback: (f) => f, useEffect: (cb) => { effects.push(cb); },
+      Terminal: TerminalStub, FitAddon: class { activate() {} dispose() {} fit() {} },
+      SearchAddon: class { activate() {} dispose() {} onDidChangeResults() { return { dispose() {} }; } clearDecorations() {} findNext() {} findPrevious() {} },
+      UnicodeGraphemesAddon: class { activate() {} dispose() {} },
+      Channel: ipc.Channel, invoke: ipc.invoke,
+      FindBar: () => null, findColors: () => ({}), h: () => null, F: null,
+      window: { addEventListener() {}, removeEventListener() {} },
+      document: { addEventListener() {}, removeEventListener() {}, documentElement: {}, visibilityState: "visible", hasFocus: () => true },
+      getComputedStyle: () => ({ getPropertyValue: () => "" }), performance: { now: () => 0 },
+      requestAnimationFrame: (cb) => setTimeout(cb, 0), cancelAnimationFrame: (id) => clearTimeout(id),
+      setTimeout, clearTimeout, TextEncoder,
+    };
+    const prevRO = globalThis.ResizeObserver;
+    globalThis.ResizeObserver = class { observe() {} disconnect() {} };
+    const { useTerm, shellTransport } = build(env);
+    const api = useTerm(() => shellTransport("/r", "s", 0), "shell|/r|s|0", 0, 0, true);
+    api.hostRef.current = { clientWidth: 800, clientHeight: 600 };
+    const cleanups = effects.map((cb) => cb()).filter((c) => typeof c === "function");
+    await ticks();
+    const open = h.requests().find((r) => r[K.cmd] === "shell_open");
+    if (!open) { fail("TerminalPane's shellTransport never sent shell_open over the socket"); return; }
+    const c = chanId(open[K.args].onBytes);
+    const RING = `~/x » vim notes.md\r\n${QUERY}\r\n~/x » `;
+    if (liveFirst) h.chan(c, K.firstSeq + 1, b64(QUERY));
+    h.chan(c, K.firstSeq, b64(RING));
+    h.reply(open[K.id], { gen: 1, replay: RING.length, replay_cols: null });
+    if (!liveFirst) h.chan(c, K.firstSeq + 1, b64(QUERY));
+    await ticks();
+    const writes = () => h.requests().filter((r) => r[K.cmd] === "shell_write").map((r) => new TextDecoder().decode(new Uint8Array(r[K.args].data)));
+    term.parseNext();
+    const afterReplay = writes().length;
+    term.parseNext();
+    const all = writes();
+    cleanups.forEach((f) => f());
+    globalThis.ResizeObserver = prevRO;
+    const how = liveFirst ? "a live frame overtaking the replay on the wire" : "in order";
+    check(afterReplay === 0, `over the socket (${how}): the replay's query is NOT answered (${afterReplay} shell_write)`);
+    check(all.length === 1 && all[0] === REPLY, `over the socket (${how}): the live query behind it IS answered, down shell_write (${JSON.stringify(all)})`);
+  }
+  await run(false);
+  await run(true);
+}
+
+// ── 4. the edges ────────────────────────────────────────────────────────────
+
+// One door.
+{
+  const offenders = [];
+  let doorUsers = 0;
+  const walk = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) { if (e.name !== "mock") walk(p); continue; }
+      if (!/\.(ts|tsx)$/.test(e.name) || p === SRC.ipcInTree) continue;
+      const s = read(p);
+      // Code only: a template-string fixture or a comment may name the module.
+      const code = s.split("\n").filter((l) => /^\s*(import|export)\b/.test(l) || /\bimport\(/.test(l));
+      if (code.some((l) => /["']@tauri-apps\/api\/(core|event)["']/.test(l))) offenders.push(path.relative(SRC.appsrc, p));
+      if (code.some((l) => /from "\.\/ipc"/.test(l))) doorUsers++;
+    }
+  };
+  walk(SRC.appsrc);
+  check(offenders.length === 0, `nothing under app/src but ipc.ts (and mock/) imports @tauri-apps/api/core or /event${offenders.length ? `: ${offenders.join(", ")}` : ""}`);
+  check(doorUsers >= 25, `the call sites go through the door (${doorUsers} files import ./ipc)`);
+}
+
+// The socket client is reachable only behind DEV.
+{
+  const main = read(SRC.main);
+  const lines = main.split("\n");
+  const at = lines.findIndex((l) => l.includes('import("./ipcws")'));
+  let guard = null;
+  for (let i = at; i >= 0; i--) if (/^\s*if \(/.test(lines[i])) { guard = lines[i]; break; }
+  check(at >= 0 && guard !== null && /import\.meta\.env\.DEV &&/.test(guard), `main.tsx loads ipcws.ts only under import.meta.env.DEV (${guard?.trim() ?? "no guard found"})`);
+  const statics = [];
+  const walk = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) { walk(p); continue; }
+      if (!/\.(ts|tsx)$/.test(e.name)) continue;
+      if (/^\s*import\s(?!type\b)[^;]*from\s+"\.\/ipcws"/m.test(read(p))) statics.push(path.relative(SRC.appsrc, p));
+    }
+  };
+  walk(SRC.appsrc);
+  check(statics.length === 0, `no file imports ipcws.ts statically, so a build cannot pull it in${statics.length ? `: ${statics.join(", ")}` : ""}`);
+  check(/version: __WT_VERSION__/.test(main), "the dev boot hands the client __WT_VERSION__ as this frontend's version");
+}
+
+// The version source: one, the workspace Cargo.toml, on both ends.
+{
+  const vite = read(SRC.vite);
+  check(/__WT_VERSION__: JSON\.stringify\(workspaceVersion\(\)\)/.test(vite) && /\.\.\/Cargo\.toml/.test(vite) && /workspace\\\.package/.test(vite),
+    "vite.config.ts defines __WT_VERSION__ from ../Cargo.toml's [workspace.package]");
+  check(/^version\.workspace = true$/m.test(read(SRC.cliToml)), "worktrees-cli inherits the workspace version, so serve's auth reply carries the same source");
+  check(/^\[workspace\.package\]\s*\nversion = "[^"]+"/m.test(read(SRC.wsToml)), "the workspace Cargo.toml has the [workspace.package] version the config reads");
+  check(/declare const __WT_VERSION__: string;/.test(read(SRC.envd)), "__WT_VERSION__ is declared for tsc");
+}
+
+// The dev server's token endpoint: same-origin or nothing.
+{
+  const js = (await transformWithEsbuild(read(SRC.door), "vite.serve-door.ts", { loader: "ts", format: "esm" })).code;
+  const D = await load(SRC.door, js);
+  const P = 1430;
+  const good = { method: "POST", peer: "127.0.0.1", localPort: P, headers: { host: `localhost:${P}`, origin: `http://localhost:${P}`, "sec-fetch-site": "same-origin" } };
+  const withH = (h, o = {}) => ({ ...good, ...o, headers: { ...good.headers, ...h } });
+  check(D.sameOriginAsk(good), "the dev page's own POST is answered");
+  check(D.sameOriginAsk(withH({ host: `127.0.0.1:${P}`, origin: `http://127.0.0.1:${P}` })), "…by either loopback spelling of itself");
+  const refused = [
+    ["a GET (a <script src>, an <img>, a navigation)", withH({}, { method: "GET" })],
+    ["another localhost PORT's page (same-site, not same-origin)", withH({ origin: "http://localhost:3000", "sec-fetch-site": "same-site" })],
+    ["a cross-site page", withH({ origin: "https://evil.example", "sec-fetch-site": "cross-site" })],
+    ["a same-origin claim with a foreign Origin", withH({ origin: "http://localhost:3000" })],
+    ["no Sec-Fetch-Site at all", withH({ "sec-fetch-site": undefined })],
+    ["no Origin", withH({ origin: undefined })],
+    ["a rebinding Host", withH({ host: `evil.example:${P}`, origin: `http://evil.example:${P}` })],
+    ["a Host on another port", withH({ host: "localhost:1420", origin: "http://localhost:1420" })],
+    ["a non-loopback peer", withH({}, { peer: "192.168.1.20" })],
+  ];
+  const leaks = refused.filter(([, r]) => D.sameOriginAsk(r));
+  check(leaks.length === 0, `the token endpoint refuses ${refused.length} cross-origin shapes${leaks.length ? ` — LEAKS to: ${leaks.map(([l]) => l).join("; ")}` : ""}`);
+  const endpoint = /const SERVE_ENDPOINT = "([^"]+)"/.exec(read(SRC.door))?.[1];
+  check(endpoint === WS.SERVE_ENDPOINT, `the plugin's endpoint and the client's agree (${endpoint} / ${WS.SERVE_ENDPOINT})`);
+
+  // The middleware itself: CORS headers set upstream are stripped, a refusal is
+  // a bare 403, and the answer is {port, token} with no-store.
+  let mw = null;
+  D.serveDoor().configureServer({ config: { server: { host: undefined } }, middlewares: { use: (p, f) => { if (p === endpoint) mw = f; } } });
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "transport-check-"));
+  const sf = path.join(tmp, "serve.json");
+  fs.writeFileSync(sf, JSON.stringify({ port: 41237, token: TOKEN, pid: 1, version: VERSION }));
+  const call = (ask) => {
+    const headers = new Map([["access-control-allow-origin", "http://localhost:3000"], ["access-control-allow-credentials", "true"]]);
+    const res = { statusCode: 0, body: "", setHeader: (k, v) => headers.set(k.toLowerCase(), v), getHeaderNames: () => [...headers.keys()], removeHeader: (k) => headers.delete(k), end: (b = "") => { res.body = b; } };
+    mw({ method: ask.method, headers: ask.headers, socket: { remoteAddress: ask.peer, localPort: ask.localPort } }, res);
+    return { ...res, headers };
+  };
+  const prev = process.env.WT_SERVE_JSON;
+  process.env.WT_SERVE_JSON = sf;
+  const yes = call(good);
+  const no = call(withH({ origin: "http://localhost:3000", "sec-fetch-site": "same-site" }));
+  if (prev === undefined) delete process.env.WT_SERVE_JSON; else process.env.WT_SERVE_JSON = prev;
+  fs.rmSync(tmp, { recursive: true, force: true });
+  check(mw !== null, "the plugin mounts a middleware on its endpoint");
+  check(yes.statusCode === 200 && same(JSON.parse(yes.body || "null"), { port: 41237, token: TOKEN }) && yes.headers.get("cache-control") === "no-store",
+    "the dev page gets {port, token} — no pid, no version — with Cache-Control: no-store");
+  check(![...yes.headers.keys()].some((k) => k.startsWith("access-control-")), "every Access-Control-* header vite's cors middleware set is stripped, so no other origin can read even a leaked answer");
+  check(no.statusCode === 403 && no.body === "" && !no.body.includes(TOKEN), "a cross-origin ask gets a bare 403");
+  let threw = false;
+  try { D.serveDoor().configureServer({ config: { server: { host: "0.0.0.0" } }, middlewares: { use() {} } }); } catch { threw = true; }
+  check(threw, "the plugin refuses to start on a dev server listening beyond loopback");
+}
+
+// The build: when one exists, the socket client is not in it.
+{
+  const assets = path.join(SRC.dist, "assets");
+  if (!fs.existsSync(assets)) {
+    console.log("ok — app/dist absent — the bundle assertion is skipped on this run (build with `pnpm build` to exercise it)");
+  } else {
+    const markers = ["did not answer the handshake", WS.SERVE_ENDPOINT, "refusing to drive it"];
+    const hits = [];
+    for (const f of fs.readdirSync(assets).filter((f) => f.endsWith(".js"))) {
+      const s = read(path.join(assets, f));
+      for (const m of markers) if (s.includes(m)) hits.push(`${f}: ${m}`);
+    }
+    check(hits.length === 0, `the production bundle carries no socket client (${hits.length ? hits.join("; ") : `${markers.length} markers absent`})`);
+    const stale = fs.statSync(SRC.ipcws).mtimeMs > fs.statSync(assets).mtimeMs;
+    if (stale) console.log("note — app/dist is older than ipcws.ts; rebuild before trusting the bundle assertion");
+  }
+}
+
+console.log(failed ? `\n${failed} failure(s)` : "\nall good");
+process.exit(failed ? 1 : 0);
