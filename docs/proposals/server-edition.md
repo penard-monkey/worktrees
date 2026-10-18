@@ -82,28 +82,12 @@ the code wins.
 
 ## Queued, not yet in a phase
 
-- **Process-global statics in `worktrees-api`.** Under one engine per host, a
-  `static` set from one client's preferences is silently shared by every
-  client. Scrollback persistence, per-tab history and the fetch interval are
-  set from the frontend's settings today. Each static needs a ruling: a
-  process fact stays global; a client preference moves into the client's
-  session. The caches (`PR_CACHE`, `PR_MERGED`, `STATUS_CACHE`, `CLONE_JOBS`)
-  look like process facts. `viewer::ISSUED` is already §III.6's fourth item.
+- **Process-global statics** under one engine per host: ruled in Appendix B.
 - **R3 has no phase.** §III.9 assigns every other OWASP item. The
   argument-injection invariant matters as soon as any client that is not the
   frontend's own dialogs reaches the git call sites, which a loopback client
   already does, so it belongs no later than Phase 2's remote bind.
-- **Two security settings are decided by whichever client loaded last.**
-  `App.tsx` pushes `set_codex_permissions` and `set_pi_trust` on every page
-  load and on every change. Both land in in-memory, process-global overrides in
-  core (`codex::set_permissions_override`, `trust::PI_TRUST_OVERRIDE`) that
-  outrank the env var and the user config. Under one engine per host, a client
-  whose settings say `full` therefore widens what Codex may do in every lane
-  the host launches, and opening a page is enough to do it. Found by the
-  transport lane driving `serve` on 2026-10-18. These are HOST policy, not
-  client preference: they should live on the host and change only by an
-  explicit act. A page load should not be able to set them. The ruling is
-  needed before Phase 2 lets a second device connect.
+- **The last client to load sets Codex permissions and pi trust:** Appendix B; fix in flight: `fix/host-policy`.
 
 ## Part III — the server edition (the plan as written, 2026-10-15)
 
@@ -512,6 +496,13 @@ design, and AGENTS.md already records it making unit tests order-dependent.
 Per-launch is wrong for a long-lived server with reconnecting clients; it needs
 the same `_in` seam the tests got.
 
+> **2026-10-18 (Appendix B):** Two corrections to that paragraph. `ISSUED` is
+> never pruned, so a long life only grows it, and the `_in` seam already
+> exists. And under one engine per host it stays in the desktop shim, because
+> the docs viewer is client-local. Appendix B rules on every process-global
+> static. It also adds a fifth break: a dock shell has one sink, so a second
+> client's attach silences the first client's pane.
+
 ### III.7 Transport
 
 **One authenticated WebSocket per client, carrying both RPC and streams.**
@@ -788,3 +779,539 @@ registered project", which is the right question for a single trusted desktop
 user and the wrong one for a device whose capability names a subset of
 projects. The per-object check belongs in front of it, resolved server-side,
 and it is a Phase 2 exit criterion.
+
+---
+
+## Appendix B — process-global state under one engine per host
+
+Decision 2 puts every client on one `worktrees serve`: the desktop shim, the
+dev stack's browser, and later a phone and a second Mac. Anything global to
+that process is shared by all of them. That covers every `static`, including
+`OnceLock`, `LazyLock`, a `Mutex` static and an atomic. One level out, it also
+covers the registries in `Ctx`, which are per process by construction. Each
+static gets one ruling. A **host fact** describes the machine and stays
+global. A **host policy** stays global, but only an explicit act may change
+it, and it must be persisted on the host. A **client preference** moves into
+the client's session. A **per-launch identity** needs a lifecycle. The rest
+are **const-like** (written once, or a counter that only has to be unique) or
+**test-only**.
+
+**Method.** The audit is at `f308062`. The inventory command was
+`git grep -n -P '(^|\s)static\s+[A-Z_][A-Z0-9_]*\s*:' -- crates/worktrees-api crates/worktrees-core/src app/src-tauri/src`,
+which returns 61 lines with one static each. Every one was read, along with
+its writers and readers. The three crates contain no `thread_local!`,
+`lazy_static!` or `static mut`. Their only production writes to the process
+environment are `hostenv`'s boot-time `PATH` and `LANG` repairs.
+`worktrees-cli` adds one more static, `mcp.rs`'s test-only `ENV_LOCK`. Serve's
+own state was read from `feat/worktrees-serve` at `495df95`, and it has no
+statics. On the frontend, all 169 `useEffect`/`useLayoutEffect` bodies in
+`app/src` (mock excluded) were scanned for `invoke`, and every call site of
+every writing command was checked.
+
+**Result:** 31 host facts, 5 host policies, 0 client preferences, 2 per-launch
+identities, 23 const-like or test-only (17 + 6).
+
+Three things follow.
+
+1. **No static holds a client preference.** The queue had suspected three:
+   the fetch interval, scrollback persistence and per-tab history. Each one
+   configures a single host-owned object: one fetch loop, and one shell per
+   dock tab that every client opening that tab shares. Two clients cannot
+   each hold their own value, so all three are host policy. The client
+   preferences live in `ui-state.json`, which is §III.6.1's problem.
+2. **All five host policies are reached by the same defect.** An effect in
+   `App.tsx` copies a value from the page's settings blob into an in-memory
+   static, on load and on every change. That was harmless while the page and
+   the engine started and died together. Under one engine per host, a page
+   load is an act on the host, and the last page to load decides. The fix for
+   the two security settings is in flight on `fix/host-policy` (the OWASP
+   review of `serve`, finding M2), and the other three take the same shape
+   (see "One fix for all five").
+3. **Phase 1 needs one line from this appendix and one piece of wiring;
+   everything else is Phase 2.** Phase 1 ships exactly one client. The app has
+   one window, and the loopback listener refuses any `Origin` but the app's
+   own. So the multi-client failures below are reachable only on the dev stack
+   (two tabs) until Phase 2 adds a device. The exception is the
+   terminal-history push. It needs no second client, only an engine that
+   outlives the page, and decision 2's find-or-start makes that normal. The
+   wiring is not a static: the docs viewer's refresh has to stay where its
+   registrations are (see `Ctx` below).
+
+### The table
+
+| Static | Where | Ruling | Blocks |
+|---|---|---|---|
+| `log::SINK` | `crates/worktrees-api/src/log.rs:39` | const-like | — |
+| `ops::FETCH_INTERVAL_SECS` | `crates/worktrees-api/src/ops.rs:817` | **host policy** | Phase 2 |
+| `prefs::UI_EVENTS_LOCK` | `crates/worktrees-api/src/prefs.rs:204` | host fact | — |
+| `project::PR_MERGED` | `crates/worktrees-api/src/project.rs:379` | host fact | — |
+| `project::PR_CACHE` | `crates/worktrees-api/src/project.rs:780` | host fact | — |
+| `projects::import_app_projects` `ONCE` | `crates/worktrees-api/src/projects.rs:16` | const-like | — |
+| `status::STATUS_CACHE` | `crates/worktrees-api/src/status.rs:95` | host fact | — |
+| `term::NEXT_ID` | `crates/worktrees-api/src/term.rs:44` | **per-launch identity** | Phase 2 |
+| `term::CWD_FILE_LOCK` | `crates/worktrees-api/src/term.rs:697` | host fact | — |
+| `term::TERM_HIST_LOCK` | `crates/worktrees-api/src/term.rs:962` | host fact | — |
+| `term::PERSIST_SCROLLBACK` | `crates/worktrees-api/src/term.rs:968` | **host policy** | **Phase 1** (interim), Phase 2 |
+| `term::PER_TAB_HISTORY` | `crates/worktrees-api/src/term.rs:969` | **host policy** | **Phase 1** (interim), Phase 2 |
+| `term::UNSUPPORTED_SHELL_LOGGED` | `crates/worktrees-api/src/term.rs:1406` | const-like | — |
+| `viewer::ISSUED` | `crates/worktrees-api/src/viewer.rs:415` | **per-launch identity** | — |
+| `viewer::temp_beside` `N` | `crates/worktrees-api/src/viewer.rs:919` | const-like | — |
+| `viewer::tests::rt` `RT` | `crates/worktrees-api/src/viewer.rs:2175` | test-only | — |
+| `workspace::CLONE_JOBS` | `crates/worktrees-api/src/workspace.rs:429` | host fact | — |
+| shim `IDENT` | `app/src-tauri/src/lib.rs:78` | const-like | — |
+| shim `AFFORDANCE` | `app/src-tauri/src/lib.rs:1409` | const-like | — |
+| `activity::CODEX_TAIL` | `crates/worktrees-core/src/activity.rs:189` | host fact | — |
+| `agentfiles::CLASSIFIED` | `crates/worktrees-core/src/agentfiles.rs:314` | host fact | — |
+| `agentfiles::publish` `SEQ` | `crates/worktrees-core/src/agentfiles.rs:515` | const-like | — |
+| `claude_usage::USAGE_CACHE` | `crates/worktrees-core/src/claude_usage.rs:94` | host fact | — |
+| `claude_usage::USAGE_FAIL_AT` | `crates/worktrees-core/src/claude_usage.rs:96` | host fact | — |
+| `clone::CLI_CANCEL` | `crates/worktrees-core/src/clone.rs:659` | const-like | — |
+| `codex::THREAD_CWD` | `crates/worktrees-core/src/codex.rs:136` | host fact | — |
+| `codex::PERMISSIONS_OVERRIDE` | `crates/worktrees-core/src/codex.rs:214` | **host policy** | Phase 2; fix in flight: `fix/host-policy` |
+| `codex_usage::CACHE` | `crates/worktrees-core/src/codex_usage.rs:502` | host fact | — |
+| `codex_usage::tests` `SEQ` | `crates/worktrees-core/src/codex_usage.rs:814` | test-only | — |
+| `config::USER_CONFIG_LOCK` | `crates/worktrees-core/src/config.rs:97` | host fact | — |
+| `git::have_git` `HAVE` | `crates/worktrees-core/src/git.rs:62` | host fact | — |
+| `git::STDOUT_IS_PROTOCOL` | `crates/worktrees-core/src/git.rs:78` | const-like | — |
+| `github::ssh_host` `CACHE` | `crates/worktrees-core/src/github.rs:258` | host fact | — |
+| `inbox::tests` `HOME_LOCK` | `crates/worktrees-core/src/inbox.rs:296` | test-only | — |
+| `logsink::LOG` | `crates/worktrees-core/src/logsink.rs:20` | const-like | — |
+| `mcpmigrate::apply` `APPLY` | `crates/worktrees-core/src/mcpmigrate.rs:366` | host fact | — |
+| `messages::SEQ` | `crates/worktrees-core/src/messages.rs:104` | const-like | — |
+| `pi::header` `HEADERS` | `crates/worktrees-core/src/pi.rs:140` | host fact | — |
+| `pi::PI_TAIL` | `crates/worktrees-core/src/pi.rs:309` | host fact | — |
+| `pimodels::REACH` | `crates/worktrees-core/src/pimodels.rs:203` | host fact | — |
+| `pimodels::CATALOG` | `crates/worktrees-core/src/pimodels.rs:319` | host fact | — |
+| `pimodels::PREFLIGHT` | `crates/worktrees-core/src/pimodels.rs:526` | host fact | — |
+| `profile::WRITE_LOCK` | `crates/worktrees-core/src/profile.rs:68` | host fact | — |
+| `profile::write_atomic_bytes` `SEQ` | `crates/worktrees-core/src/profile.rs:824` | const-like | — |
+| `profile::materialize_with` `MAT_LOCK` | `crates/worktrees-core/src/profile.rs:889` | host fact | — |
+| `provision::tests` `NEXT_BASE` | `crates/worktrees-core/src/provision.rs:904` | test-only | — |
+| `quota::tests` `LOCK` | `crates/worktrees-core/src/quota.rs:1015` | test-only | — |
+| `registry::WRITE_LOCK` | `crates/worktrees-core/src/registry.rs:43` | host fact | — |
+| `rules::INSPECTED` | `crates/worktrees-core/src/rules.rs:374` | host fact | — |
+| `slots::CHILD` | `crates/worktrees-core/src/slots.rs:614` | const-like | — |
+| `slots::PENDING` | `crates/worktrees-core/src/slots.rs:616` | const-like | — |
+| `slots::INTS` | `crates/worktrees-core/src/slots.rs:617` | const-like | — |
+| `store::WRITE_LOCK` | `crates/worktrees-core/src/store.rs:27` | host fact | — |
+| `sync::write_exclude_file` `SEQ` | `crates/worktrees-core/src/sync.rs:697` | const-like | — |
+| `sysclock::birth_cache` `C` | `crates/worktrees-core/src/sysclock.rs:32` | host fact | — |
+| `sysclock::date_cache` `C` | `crates/worktrees-core/src/sysclock.rs:42` | host fact | — |
+| `sysclock::SysClock::detect` `PROBE` | `crates/worktrees-core/src/sysclock.rs:51` | host fact | — |
+| `tmux::NO_START` | `crates/worktrees-core/src/tmux.rs:84` | host fact | — |
+| `tmux_server::publish` `NEXT` | `crates/worktrees-core/src/tmux_server.rs:172` | const-like | — |
+| `tmux_server::tests` `NEXT` | `crates/worktrees-core/src/tmux_server.rs:272` | test-only | — |
+| `trust::PI_TRUST_OVERRIDE` | `crates/worktrees-core/src/trust.rs:59` | **host policy** | Phase 2; fix in flight: `fix/host-policy` |
+
+### The host policies
+
+#### One fix for all five
+
+The fix moves the value onto the host and stops the page from pushing it.
+
+**Codex permissions and pi trust: fix in flight on `fix/host-policy`.** That
+lane is the OWASP review's finding M2, and this appendix does not propose a
+second design for it. As briefed:
+
+- The value is persisted in a backend-owned file in the engine's config dir
+  (`Ctx::config_dir`), written under a lock and a rename, and never inside
+  `ui-state.json`, whose whole-blob writer is the frontend.
+- Only the Settings click calls the setter. The load effects at
+  `App.tsx:4727` and `4732` are deleted, and Settings renders the host's
+  value, not its own copy.
+- The value already in `ui-state.json` is migrated once, at boot, as a host
+  act. It never moves because a client loaded.
+- Precedence and scope stay as they are: the host's setting, then the env var,
+  then the user config, then the default; and only the engine process reads
+  the host's setting.
+
+Serve already tags both setters `HostAdmin`
+(`feat/worktrees-serve:crates/worktrees-cli/src/serve/dispatch.rs:274`,
+`:282`). Once the push is gone, that tag means what it says: a device without
+the capability cannot change them, instead of failing on every load.
+
+**The other three take the same shape.**
+
+- **Where it is stored.** The fetch cadence and the two terminal switches
+  matter only to the engine, so they belong in the same kind of backend-owned
+  file, next to `shell-cwds.json` and for the same reason. Their statics can
+  stay as the in-memory copy, but boot loads them and the setter is their only
+  writer.
+- **What the setter does.** It persists, and the control renders what the
+  host stored rather than what was clicked last. Serve tags both setters
+  `Engine` (`dispatch.rs:215`, `:355`). Once they persist host policy,
+  `HostAdmin` is the honest tag.
+- **What the page stops doing.** The effects at `App.tsx:4663` and `4673` are
+  deleted. The three `Settings` keys go the way `fix/host-policy` takes its
+  two, so all five stay alike, and `fix/host-policy`'s boot migration can
+  carry three more keys.
+- **Phase 1 interim.** Gate `set_fetch_interval` and `set_term_history_opts` on
+  `hydratedTick`, as the Codex and pi effects already are. That is one line
+  each, and it removes the pre-hydration default push that a long-lived engine
+  makes meaningful.
+
+#### `codex::PERMISSIONS_OVERRIDE` — `crates/worktrees-core/src/codex.rs:214`
+
+`Mutex<Option<Permissions>>`. It holds Settings → Codex → Permissions, which
+is one of three modes: `ask`, `auto-review` (`--approve-for-me` inside the
+workspace-write sandbox, with the git common dir writable and network on), or
+`full` (`--dangerously-bypass-approvals-and-sandbox`). Found by the transport
+lane driving `serve` on 2026-10-18.
+
+- **Writer.** Only `set_permissions_override` (`codex.rs:216`) writes it, and
+  only `project::set_codex_permissions`
+  (`crates/worktrees-api/src/project.rs:566`) calls that. The page invokes it
+  from the effect at `App.tsx:4727`, after hydration and on every change of
+  `settings.codex_permissions`.
+- **Reader.** `codex::permissions()` (`codex.rs:223`), where it outranks
+  `$WORKTREES_CODEX_PERMISSIONS` and the user config. That feeds
+  `codex::launch_flags` (`codex.rs:291`) through `harness.rs:405` and
+  `ops::ai_launch_inner` (`ops.rs:166`), so it decides every Codex launch the
+  process makes.
+
+**Ruling:** host policy. It widens what an agent may do on the host, and
+opening a page is enough to set it.
+
+**The failure.** It needs two clients, so today only two tabs on the dev
+stack reach it; in Phase 2 any second device does. It is the §III.6.1
+lost-update bug turned into a widening:
+
+1. Clients A and B have both loaded `full`.
+2. On A, the user narrows to `ask`. The host override becomes `Ask`, and A
+   saves the whole blob with `ask`.
+3. On B, the user does anything that saves settings: switches a dock tab
+   (`App.tsx:5013`), resizes the dock, or picks a theme. `updateSettings`
+   saves the whole blob (`App.tsx:4747`), and B's blob still says `full`, so
+   the file says `full` again. The override is still `Ask`, so nothing visible
+   changes.
+4. The next client to load reads `full` and pushes it. That could be B
+   reloading, the app restarting or the phone opening. From then on, every
+   Codex lane the host launches runs with
+   `--dangerously-bypass-approvals-and-sandbox`. Nobody chose that after step
+   2, and A's Settings still says `ask`.
+
+Phase 2 adds two more routes. First, a §III.6.1 split that files this key with
+per-device state makes the phone's value the host's every time the phone
+opens. Second, once `HostAdmin` needs a capability, a device without it fails
+this push on every load and shows "Codex permissions: …" each time. Serve
+also runs each request on its own blocking-pool task
+(`serve/conn.rs:276`), so two quick clicks are not even guaranteed to land in
+order. The control has to show what the host stored, not what was clicked
+last.
+
+**Fix in flight: `fix/host-policy`** (see "One fix for all five"). It keeps
+scope as it is, so a split that exists today with a single client stays open:
+the setting is read only by the engine process, so MCP `create_worktree` and
+`worktrees new --ai codex`, which run in other processes, launch from the env
+or config tier and never see Settings → Codex at all. Whether they should is
+the open question that lane reports, because honouring the setting there
+widens what an MCP-created Codex lane may do.
+
+**Blocks:** Phase 2.
+
+#### `trust::PI_TRUST_OVERRIDE` — `crates/worktrees-core/src/trust.rs:59`
+
+`Mutex<Option<PiTrust>>`. It holds Settings → pi → project trust. `never`
+launches pi with `--no-approve`, so a repo's `.pi/extensions` (TypeScript
+that pi runs in its own process), its `.pi/settings.json` and its skills do
+not load. `ask` passes neither flag, which leaves the decision to pi's own
+modal, whose highlighted choice is Trust.
+
+- **Writer.** Only `set_pi_trust_override` (`trust.rs:63`) writes it, and
+  only `project::set_pi_trust` (`project.rs:619`) calls that. The page invokes
+  it from the effect at `App.tsx:4732`, after hydration and on every change.
+- **Reader.** `trust::pi_trust()` (`trust.rs:70`), above
+  `$WORKTREES_PI_PROJECT_TRUST` and the user config. `pi_launch_trust`
+  (`trust.rs:168`) uses it for every pi launch (`ops.rs:176`), and
+  `pi_status` and `doctor --pi` report it.
+
+**Ruling:** host policy.
+
+**The failure:** the Codex sequence with `never` in place of `ask` and `ask`
+in place of `full`. A stale client's whole-blob save, followed by any load,
+reaches every pi lane whose repo is neither in the allowance nor named in
+pi's own `trust.json` (`pi_launch_trust_for`, `trust.rs:148`). Each of those
+lanes then opens on a prompt whose highlighted choice runs the repo's own
+code. The same split with MCP and the CLI exists today.
+
+**Fix in flight: `fix/host-policy`**, the same change as Codex's, with the
+same scope question for MCP and the CLI. The per-repo allowance (`[trust] pi`
+in config.toml) needs nothing: it is already on the host, and only an
+explicit act changes it (`trust::set_allowed`, from Settings → pi or
+`worktrees trust pi`).
+
+**Blocks:** Phase 2.
+
+#### `term::PERSIST_SCROLLBACK` — `crates/worktrees-api/src/term.rs:968`
+
+`AtomicBool`, which starts `true`. It holds whether each dock shell's 256K
+ring is written to `<config>/term-history/<tab>/scrollback.bin` and replayed
+on the next run. The setting's own hint calls this "the only thing that
+writes a terminal's output to disk — whatever a command printed, secrets
+included".
+
+- **Writer.** Only `prefs::set_term_history_opts` (`prefs.rs:29`) writes it.
+  The page calls it from the effect at `App.tsx:4673` on mount, with the
+  default `true` and before hydration, then again after hydration and on
+  every change.
+- **Reader.** Three places: `save_shell_scrollback` (`term.rs:1229`), the
+  poll's 15 s flush of every dirty shell on the host; `flush_one_scrollback`
+  (`term.rs:1255`); and the spawn path in `shell_open` (`term.rs:493`).
+
+**Ruling:** host policy. The shells belong to the host, and any client that
+opens a tab attaches to the same shell. So this setting decides what the host
+keeps on disk about every client's terminals.
+
+**The failure (Phase 1).** The effect's comment calls the pre-hydration push a
+no-op because the backend also starts at `true`. That holds only while the
+page and the engine start together. Under one engine per host, a page can
+load into an engine that is already running: a reload, or an app launch that
+finds a running `serve`, which is what decision 2's "find or start" is for.
+If that engine holds live shells and the user has turned this off, the flag
+is `true` from the default push until the hydrated push lands. A 15 s flush
+that falls inside that window writes every dirty shell's ring to disk. That
+is content the user asked not to keep, and it stays until the tab is closed,
+the 30-day sweep runs (`TERM_HIST_MAX_AGE_SECS`) or the user clears saved
+terminal history. If `get_settings` fails, `loadSettings` answers with
+DEFAULTS, and the flag stays on until the next load. In Phase 2 the window
+lasts a WAN round trip. The same hint's "A dock shell dies with the app"
+stops being true once `serve` outlives the app.
+
+**Fix:** the Phase 1 interim (gate the effect on `hydratedTick`), then the
+rest of "One fix for all five".
+
+**Blocks:** Phase 1 (the interim line), Phase 2 (the rest).
+
+#### `term::PER_TAB_HISTORY` — `crates/worktrees-api/src/term.rs:969`
+
+`AtomicBool`, which starts `true`. It holds whether a newly spawned dock shell
+gets its own command history under `term-history`. For zsh that means a
+generated `ZDOTDIR` with four shims; for bash, `HISTFILE`.
+
+- **Writer:** the same effect and setter as `PERSIST_SCROLLBACK`.
+- **Reader:** `shell_open`'s spawn path reads it once per shell
+  (`term.rs:492`).
+
+**Ruling:** host policy, for the same reason. It decides how a shell that
+every client shares is started, including which rc chain zsh runs.
+
+**The failure:** the same window. A tab spawned inside it, by this client or
+another, gets a `ZDOTDIR` and a history file that the user turned off, and
+keeps them for the shell's whole life. The setting's own hint gives the cost:
+"Turn it off if a shell setup of yours depends on $ZDOTDIR".
+
+**Fix and blocks:** as `PERSIST_SCROLLBACK`. It is one setter and one effect.
+
+#### `ops::FETCH_INTERVAL_SECS` — `crates/worktrees-api/src/ops.rs:817`
+
+`AtomicU64`, in seconds, where 0 means off. It holds the auto-fetch cadence
+from Settings → Behavior.
+
+- **Writer.** Only `set_fetch_interval` (`ops.rs:821`) writes it. The page
+  calls it from the effect at `App.tsx:4663` on mount, with the default `0`
+  and before hydration, then again after hydration and on every change.
+- **Reader.** The engine's 3 s poll (`lib.rs:1538` today, `host::poll` on
+  `feat/worktrees-serve`). When the interval has elapsed, it runs
+  `git fetch origin` for every registered project.
+
+**Ruling:** host policy. One loop fetches for the whole host, so there is
+nothing per-client to give it. It does not widen what an agent may do, but it
+is network and credential use on the host.
+
+**The failure.** Each page load turns auto-fetch off for one round trip, which
+is harmless: at worst one tick is skipped. With two clients whose blobs
+disagree, the last one to load sets the host's cadence. That happens through
+the stale whole-blob write described under the Codex override, or through
+per-device settings in Phase 2.
+
+**Fix:** "One fix for all five".
+
+**Blocks:** Phase 2.
+
+### The per-launch identities
+
+#### `term::NEXT_ID` — `crates/worktrees-api/src/term.rs:44`
+
+`AtomicU32`, counting from 1. It mints the id of every tmux attach
+(`term_open`, `term.rs:87`). The attach itself lives in `Ctx.terminals`.
+
+- **Writer:** every client's place pane, through `term_open`.
+- **Reader:** `term_write`, `term_resize`, `term_wheel` and `term_close`,
+  which address the attach by that id alone (serve's rows are at
+  `dispatch.rs:345`–`351`).
+
+**Ruling:** per-launch identity. The id is a handle that is valid for one
+engine launch, and the engine trusts it from any caller.
+
+**The failure.** When a connection ends, serve closes the attaches it opened
+(`Frames::take_terms`, `serve/conn.rs:297`). Nothing, however, checks that
+the caller of `term_write` opened the id it names. The ids are also small
+integers that every launch hands out again from 1. Once clients reconnect
+across an engine restart, as the phone will in Phase 2, a pane still holding
+an id from the old launch types into whichever attach the new launch gave
+that number. That can be another device's attach, on another place's agent.
+It is latent today because the transport's client never reconnects: after a
+close, every later call is rejected.
+
+**Fix:** record the owning connection with each attach, and refuse a
+`term_*` call for an id the caller did not open. The per-connection set
+already exists in `Frames`. Also make ids unguessable, or tag them with a
+launch nonce, so a stale id fails loudly instead of landing somewhere. No
+test asserts an id, so this one needs no `_in` seam.
+
+**Blocks:** Phase 2.
+
+#### `viewer::ISSUED` — `crates/worktrees-api/src/viewer.rs:415`
+
+`Mutex<BTreeMap<String, PathBuf>>`. It holds every docs-viewer route segment
+issued in the process, mapped to the place root it was issued to. By design
+it is never pruned: freeing a segment once let a removed place's open tab
+poll another project's documents.
+
+- **Writer and reader.** Only `place_key` (`viewer.rs:354`) touches it. Its
+  only caller is `viewer::open` (`viewer.rs:1168`), reached from
+  `files::open_docs_viewer` (`files.rs:893`) and the shim's
+  `open_docs_viewer` command. Serve's table marks that command `ClientLocal`
+  and refuses it (`dispatch.rs:315`).
+
+**Ruling:** per-launch identity. This corrects §III.6's fourth item twice:
+
+- Under one engine per host, `ISSUED` never lives in serve. The docs viewer
+  opens a browser on the client's machine, so the map stays in the desktop
+  shim's process, as it does today.
+- "Per-launch" is not wrong for a long-lived process. Because claims are
+  never pruned, a long life only means a map that grows by one entry per
+  place ever opened, and the old URLs die with the docs server's token anyway.
+
+The `_in` seam that §III.6 asks for also already exists (`place_key_in`,
+`claim_in`). It was added for the order-dependent tests AGENTS.md records.
+
+**Fix:** what remains is tidying. Move the map into `Viewer`, next to `srv`,
+so its lifetime is the docs server's rather than the process's, and the
+`open()` tests stop sharing a global.
+
+**Blocks:** nothing.
+
+### Const-like and test-only (23)
+
+Each of these is written once, is a counter whose only job is uniqueness, or
+belongs to a process that is not the engine:
+
+- `log::SINK`, `logsink::LOG`: the host's log destination, installed once by
+  `host::boot`. The first install wins.
+- `projects::import_app_projects`'s `ONCE`: the one-way merge of the app's
+  pre-registry `projects.json`, done once per process.
+- `term::UNSUPPORTED_SHELL_LOGGED`: logs once that `$SHELL` has no per-tab
+  history scheme.
+- Temp-name counters: `viewer::temp_beside`'s `N`, `agentfiles::publish`'s
+  `SEQ`, `profile::write_atomic_bytes`'s `SEQ`, `sync::write_exclude_file`'s
+  `SEQ` and `tmux_server::publish`'s `NEXT`. Each pairs with the pid, so it is
+  unique per host. `messages::SEQ` does the same job for message ids.
+- The shim's `IDENT` and `AFFORDANCE`: the identifier the window process logs
+  under, and wry's Writing Tools override. Both are client-side and never
+  reach serve.
+- CLI-only state: `clone::CLI_CANCEL` (SIGINT during `worktrees clone`; serve
+  cancels through `CLONE_JOBS`), `slots::CHILD`, `PENDING` and `INTS` (signal
+  forwarding for `worktrees run`), and `git::STDOUT_IS_PROTOCOL`, which only
+  `worktrees mcp` sets because its stdout is JSON-RPC. Serve's protocol is a
+  socket, so it rightly leaves the flag unset. But core's `git_status`
+  inherits stdio, so whatever starts serve must not hand it a stdout pipe that
+  nobody drains.
+- Test-only, inside a `mod tests`: `viewer.rs:2175` `RT`, `codex_usage.rs:814`
+  `SEQ`, `inbox.rs:296` `HOME_LOCK`, `provision.rs:904` `NEXT_BASE`,
+  `quota.rs:1015` `LOCK` and `tmux_server.rs:272` `NEXT`. Outside the count,
+  `crates/worktrees-cli/src/mcp.rs:3517` `ENV_LOCK` is test-only too.
+
+### Host facts worth a sentence
+
+The other 31 are caches of git, tmux, GitHub, the status page, the harnesses'
+own files and the host's tools, plus the registries of host processes and the
+write locks. All of them stay global. Three caveats:
+
+- **One engine per host makes the write locks stronger.** `store`,
+  `registry`, `profile`, `MAT_LOCK`, `mcpmigrate::APPLY`, `CWD_FILE_LOCK`,
+  `TERM_HIST_LOCK` and `UI_EVENTS_LOCK` each serialise writers within one
+  process, and now every client's writes are in that one process. Against
+  the CLI and the MCP servers, which are separate processes, the first five
+  rely on a file lock that sits beside the mutex. The three engine-only files
+  have no other writer. `USER_CONFIG_LOCK` is the exception: no file lock
+  sits beside it, so an engine write to `config.toml` (`[quota]`, the reach
+  level, `[trust] pi`) and a CLI write such as `worktrees trust pi` can still
+  lose one of the two edits. That gap predates `serve` and lies between
+  processes, so one engine per host neither opens nor closes it.
+- **The caches that never evict now live as long as serve.**
+  `codex::THREAD_CWD`, `pi::header`'s `HEADERS`, `activity::CODEX_TAIL`,
+  `pi::PI_TAIL` and the two `sysclock` memos are keyed by path, inode or
+  epoch. They stay correct for any lifetime, and they grow with every file
+  they ever see. Their lifetime used to be one app launch and is now serve's
+  uptime. That is not a defect at today's sizes, but it is a property to keep
+  in mind.
+- **`sysclock::date_cache` formats in the host's local time.** Its own comment
+  accepts a date that is "a day off until restart" after a time-zone change,
+  and "until restart" now means until serve restarts. A Phase 2 device in
+  another zone reads host-local dates. `ui_usage` already takes the client's
+  `tz_offset_min`, which is the right shape for anything a device displays.
+
+### Not statics, same question: `Ctx` and serve's own state
+
+`Ctx`'s registries are per process by construction (its doc comment in
+`crates/worktrees-api/src/lib.rs` says so), so under one engine per host they
+are as shared as any static:
+
+- `watch` (the nav-dot poll's watches and model cache) and `docnames` are
+  host facts.
+- `terminals` holds per-connection objects in a host-wide map. See
+  `term::NEXT_ID`.
+- `shells` holds host objects keyed by `(repo, slug, index)`, so two clients
+  that open the same tab get the same shell. That part is right, as it is for
+  tmux. The problem is that a shell has one sink. `shell_open` on a live shell
+  swaps that sink (`term.rs:438`–`462`), so a second client's attach silences
+  the first client's pane without a word, while the first client's
+  keystrokes still reach the shell. The second client's resize also resizes
+  the pty under the first. This is a fifth item for §III.6, and it blocks
+  Phase 2. The fix shape is a sink per attach, with one attach at a time
+  owning the size, which is what tmux's `window-size` does.
+- `viewer` is filled by the shim's `open_docs_viewer`, which is client-local,
+  while `viewer::refresh` runs in `host::poll`
+  (`feat/worktrees-serve:crates/worktrees-api/src/host.rs:212`) over the
+  host's `Ctx`. Today those are the same process. Once the shim stops running
+  `host::start`, they are two, and nothing refreshes the documents a browser
+  tab is showing. Whoever makes the shim a client has to keep a refresh where
+  the registrations are.
+
+Serve's own state on `feat/worktrees-serve` at `495df95` contains no statics:
+
+- `Shared` (`serve/conn.rs:70`): one per listener. It holds the engine's
+  `Ctx`, the launch token, the port, the Origin allowlist, the client set, and
+  `next_id` for connection ids. This is per-launch identity held by an
+  object, the shape the two per-launch statics above should move toward.
+- `Clients` (`conn.rs:45`): each authenticated connection's queue.
+  `Broadcast::emit` sends every event to every client. That includes the
+  inbox's `app:open-doc`, so once a second device is connected, one
+  `worktrees show` opens the document on every device.
+- Per connection: `Call { ctx, frames }`. `Frames` (`serve/wire.rs:131`) holds
+  the connection's channels and the attaches it opened, and closes them on
+  disconnect. This is the per-connection session the question asks for, and
+  it already exists. If a client preference ever has to live in the engine,
+  it lives here, or in the device's enrollment record (§III.5) when it has to
+  survive a reconnect. Nothing found in this audit needs either.
+
+### The load-time setters
+
+Every `invoke` in `app/src` that writes state from an effect, on load, on a
+settings change, or on a trigger that belongs to one device. Every other
+`invoke` in the 169 effect bodies is a read, and every other call site of a
+writing command is a click handler.
+
+| Call site | Command | When | Writes | Ruling |
+|---|---|---|---|---|
+| `App.tsx:4663` | `set_fetch_interval` | on mount with the default `0`, then after hydration and on every change | `ops::FETCH_INTERVAL_SECS` | host policy: delete; Phase 1 interim, gate on `hydratedTick` |
+| `App.tsx:4673` | `set_term_history_opts` | on mount with the defaults `true, true`, then after hydration and on every change | `term::PERSIST_SCROLLBACK`, `term::PER_TAB_HISTORY` | host policy: **Phase 1, gate on `hydratedTick`**; then delete |
+| `App.tsx:4727` | `set_codex_permissions` | after hydration and on every change | `codex::PERMISSIONS_OVERRIDE` | host policy: delete; fix in flight: `fix/host-policy` |
+| `App.tsx:4732` | `set_pi_trust` | after hydration and on every change | `trust::PI_TRUST_OVERRIDE` | host policy: delete; fix in flight: `fix/host-policy` |
+| `App.tsx:5021` → `settings.ts:558` | `set_zoom` | after hydration and when the zoom changes | WKWebView page zoom | client-local and correct: serve refuses it (`ClientLocal`), and the shim keeps it |
+| `App.tsx:4686` (`useLayoutEffect`) → `settings.ts:839`, `App.tsx:4697`, `4706`, `4713` | `set_settings` | on load: a `settings_rev` migration, a pre-hydration patch, or a new `last_seen_version` | `ui-state.json`, whole | §III.6.1. `last_seen_version` belongs to the device: the first client to load after an upgrade uses up "What's new" for all of them |
+| `App.tsx:5116` → `ack` → `App.tsx:4420` | `mark_seen` | a selected place stays visible for `SEEN_DWELL_MS` | `last_seen_epoch` in `.worktrees.places.json`, forward-only, at the client's clock | shared, since one person reads it, but triggered by one device. A device left open on a place acks every completion there for all of them, and a device whose clock runs ahead stamps a future epoch that forward-only keeps. The host should stamp its own `now`. Phase 2 |
+| `App.tsx:5045` | `open_place` | a selected place has two live agents (state left by an older build) | closes whichever agent is not `settings.default_provider` | a destructive act decided by whichever client selects the place first, using its own default. Phase 2, rare |
+| `usage.ts:284` → `usage.ts:179` | `ui_events_append` | a timer, plus on hide and unload | `ui-events.jsonl` | §III.6.2 |
+| `App.tsx:2473`, `4619`, `4621` | `log_event` | visibility changes, window errors | the host's log | host fact. Every client's lines interleave unlabeled, so R5's audit log should carry the connection |
