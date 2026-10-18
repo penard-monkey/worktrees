@@ -78,13 +78,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   (development only: `pnpm dev:serve` with `WT_SERVE_JSON` pointing at the
   stack's `serve.json`). The page asks the dev server for the port and token —
   same-origin only, since vite's own CORS default answers every page on every
-  localhost port — keeps the token in memory, and sends it as the socket's
-  first frame; it is never in a URL, in storage, or in a build, which does not
-  contain the socket client at all. Replies are matched by id, terminal bytes
+  localhost port — and keeps the token in memory; it is never in a URL, in
+  storage, on the wire, or in a build, which does not contain the socket client
+  at all. The page and `serve` each prove they hold the token with an HMAC over
+  a random challenge from the other, and the page sends nothing else until
+  serve's proof checks out, so a program that takes over the port after serve
+  stops is told so and is sent nothing. Replies are matched by id, terminal bytes
   and progress are delivered per channel in sequence order, events arrive
   through `listen`, and the server's version must equal the frontend's (both
   from the workspace `Cargo.toml`) or nothing is sent. A refused handshake, a
-  version mismatch or a dropped connection appears in the error banner.
+  server that cannot prove itself, a version mismatch or a dropped connection
+  appears in the error banner.
   `app/scripts/transport-check.mjs` holds the client against the server's own
   frame definitions.
 - **Applying the worktrees rules or the agent-setup Fix now opens a review

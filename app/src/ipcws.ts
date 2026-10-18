@@ -3,13 +3,21 @@
 // `import.meta.env.DEV && VITE_SERVE`, which is dead code in a build, so this
 // file is not in a production bundle (transport-check.mjs greps app/dist).
 //
-// The protocol is crates/worktrees-cli/src/serve/wire.rs + policy.rs:
+// The protocol is crates/worktrees-cli/src/serve/wire.rs + policy.rs, and its
+// handshake is v1 (the fix for OWASP H1, spec by (main), 2026-10-18):
 //
-//   → {"auth": "<token>"}                    first frame, nothing before it
-//   ← {"ok": true, "version": "x.y.z"}       or a close with NOTHING said
+//   → {"hello": cn}                          cn: 32 random bytes, hex
+//   ← {"challenge": sn}                      sn: the same, chosen by serve
+//   → {"auth": HMAC(token, client|cn|sn)}    or serve closes with NOTHING said
+//   ← {"ok": true, "version", "proof": HMAC(token, server|cn|sn)}
 //   → {id, cmd, args}                        ← {id, ok} | {id, err}
 //   ← {channel, seq, data}                   a Channel argument's stream
 //   ← {event, payload}                       Host::emit, to every socket
+//
+// The token is the HMAC KEY and never goes on the wire. The client sends
+// nothing but the handshake until serve's proof verifies: before then the
+// server is whoever holds the port — after a crash, possibly not serve — and
+// its version claim is not believed either.
 //
 // `err` is passed through UNCHANGED: a string for 142 commands, the CloneError
 // object for `clone_project`, whose dialog branches on its `kind` — exactly
@@ -26,7 +34,12 @@ import type { Channel, Door, Event, EventCallback, InvokeArgs, UnlistenFn } from
  *  against wire.rs / policy.rs / dispatch.rs, so a rename on the Rust side
  *  fails the check rather than a browser. */
 export const WIRE = {
+  hello: "hello",
+  challenge: "challenge",
   auth: "auth",
+  proof: "proof",
+  clientLabel: "worktrees-serve/v1/client\n",
+  serverLabel: "worktrees-serve/v1/server\n",
   version: "version",
   id: "id",
   cmd: "cmd",
@@ -51,20 +64,36 @@ export const WIRE = {
  *  as it does in dispatch.rs: `frames.bytes(a.channel("on_bytes"))`. */
 export const BYTE_CHANNEL_KEYS: readonly string[] = ["onBytes"];
 
-/** How long connect + auth may take before the client gives up. Longer than
- *  the server's own `policy::AUTH_DEADLINE` (3s), so a server that is there and
- *  refusing is reported as a refusal, not as a timeout. */
+/** How long connect + the whole handshake may take before the client gives
+ *  up. Longer than the server's own `policy::AUTH_DEADLINE` (3s), so a server
+ *  that is there and refusing is reported as a refusal, not as a timeout. */
 export const AUTH_WAIT_MS = 5000;
+
+/** serve binds this and nothing else (conn.rs). Dialled as the LITERAL: a
+ *  second process can bind `[::1]:<port>` beside serve's socket, and
+ *  `localhost` resolves ::1 first (the OWASP review measured it). */
+export const SERVE_HOST = "127.0.0.1";
+
+const HEX32 = /^[0-9a-f]{64}$/;
+const hex = (b: ArrayBuffer | Uint8Array) => Array.from(new Uint8Array(b), (x) => x.toString(16).padStart(2, "0")).join("");
+function unhex(s: string): Uint8Array<ArrayBuffer> {
+  const out = new Uint8Array(s.length / 2);
+  for (let i = 0; i < out.length; i++) out[i] = parseInt(s.slice(2 * i, 2 * i + 2), 16);
+  return out;
+}
 
 /** The browser's WebSocket, as far as this client uses it. */
 export type Sock = Pick<WebSocket, "send" | "close" | "onopen" | "onmessage" | "onclose" | "onerror">;
 
 export type SocketDeps = {
-  url: string;
+  port: number;
+  /** serve.json's token: the HMAC key, never a frame. */
   token: string;
-  /** This frontend's own version (`__WT_VERSION__`). The auth reply must carry
-   *  the same string, or the client refuses to drive the server. */
+  /** This frontend's own version (`__WT_VERSION__`). A PROVEN server's ok must
+   *  carry the same string, or the client refuses to drive it. */
   version: string;
+  /** `window.crypto`. `subtle` exists only in a secure context. */
+  crypto: Pick<Crypto, "getRandomValues"> & { subtle?: SubtleCrypto | null };
   WebSocket: new (url: string) => Sock;
   setTimeout: (fn: () => void, ms: number) => unknown;
   clearTimeout: (handle: unknown) => void;
@@ -117,24 +146,53 @@ export function deadDoor(msg: string): Door {
 }
 
 /** Open a socket to `worktrees serve` and return the door over it. Calls made
- *  before the handshake completes wait for it; nothing but the auth frame is
- *  ever written before the server has answered it. */
+ *  before the handshake completes wait for it; nothing but the handshake is
+ *  ever written before the server has PROVEN it holds the token. */
 export function connectSocket(d: SocketDeps): Door {
   const warn = d.warn ?? (() => {});
-  type State = "connecting" | "authing" | "ready" | "closed";
+  const addr = `${SERVE_HOST}:${d.port}`;
+  const url = `ws://${addr}/`;
+  const maybeSubtle = d.crypto?.subtle;
+  if (!maybeSubtle) {
+    const msg =
+      "this page is not a secure context, so it has no crypto.subtle, and worktrees serve's handshake needs it — " +
+      "open the dev page at http://localhost or http://127.0.0.1";
+    d.onError(msg);
+    return deadDoor(msg);
+  }
+  const subtle: SubtleCrypto = maybeSubtle;
+  // hello → (challenge) → proving → (ok) → verifying → ready.
+  type State = "connecting" | "hello" | "proving" | "verifying" | "ready" | "closed";
   let state: State = "connecting";
   let failure = "";
   let nextId = 1;
   let nextChannel = 1;
   let nextEvent = 1;
   const queued: string[] = [];
+  /** Frames behind serve's ok, held while its proof is checked. */
+  const inbox: unknown[] = [];
   const pending = new Map<number, Pending>();
   const streams = new Map<number, Stream>();
   const listeners = new Map<string, Set<EventCallback<unknown>>>();
 
-  const ws = new d.WebSocket(d.url);
+  const enc = new TextEncoder();
+  const key = subtle.importKey("raw", enc.encode(d.token), { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
+  key.catch(() => {}); // awaited below, where a failure is reported
+  const cn = hex(d.crypto.getRandomValues(new Uint8Array(32)));
+  let sn = "";
+  let proofSent = false;
+  const tagged = (label: string) => enc.encode(label + cn + "\n" + sn);
+
+  /** Whoever answers on serve.json's port is serve only once it proves it.
+   *  Not the user's doing, and nothing of theirs reached it. */
+  const unproven = (why: string) =>
+    `the server on ${addr} did not prove it holds serve.json's token (${why}), so it is not the worktrees serve ` +
+    `that wrote serve.json: the port is stale (serve exited and another process has it) or an impostor is on it. ` +
+    `No request was sent to it. Restart the stack (app/scripts/server-stack.sh); serve picks a new port and rewrites serve.json.`;
+
+  const ws = new d.WebSocket(url);
   const timer = d.setTimeout(() => {
-    shut(`worktrees serve did not answer the handshake within ${AUTH_WAIT_MS / 1000}s (${d.url})`);
+    shut(`worktrees serve did not answer the handshake within ${AUTH_WAIT_MS / 1000}s (${url})`);
   }, AUTH_WAIT_MS);
 
   /** End the connection for good: every waiting call rejects with `msg`, and so
@@ -150,6 +208,7 @@ export function connectSocket(d: SocketDeps): Door {
       /* already closing */
     }
     queued.length = 0;
+    inbox.length = 0;
     const waiting = [...pending.values()];
     pending.clear();
     for (const p of waiting) p.reject(msg);
@@ -209,52 +268,86 @@ export function connectSocket(d: SocketDeps): Door {
     }
   }
 
-  ws.onopen = () => {
-    if (state !== "connecting") return;
-    state = "authing";
-    ws.send(JSON.stringify({ [WIRE.auth]: d.token }));
-  };
+  /** serve's challenge: answer it with this client's proof. */
+  async function onChallenge(f: Record<string, unknown>) {
+    const s = f[WIRE.challenge];
+    if (typeof s !== "string" || !HEX32.test(s)) {
+      shut(unproven(WIRE.challenge in f ? "its challenge is not 32 random bytes in hex" : `it answered the hello with ${JSON.stringify(Object.keys(f))}, not a challenge`));
+      return;
+    }
+    sn = s;
+    state = "proving";
+    const proof = hex(await subtle.sign("HMAC", await key, tagged(WIRE.clientLabel)));
+    if (state !== "proving") return; // shut while signing
+    proofSent = true;
+    ws.send(JSON.stringify({ [WIRE.auth]: proof }));
+  }
 
-  ws.onmessage = (ev) => {
+  /** serve's ok: believed — version included — only once its proof verifies. */
+  async function onWelcome(f: Record<string, unknown>) {
+    const proof = f[WIRE.proof];
+    if (!proofSent) return shut(unproven("it answered before this client had sent its proof"));
+    if (f[WIRE.ok] !== true) return shut(unproven(`it answered the proof with ${JSON.stringify(Object.keys(f))}, not ok`));
+    if (typeof proof !== "string") return shut(unproven("its ok carries no proof"));
+    if (!HEX32.test(proof)) return shut(unproven("its proof is not an HMAC-SHA256 in hex"));
+    state = "verifying";
+    // Constant-time by specification; never `===` on the hex.
+    const good = await subtle.verify("HMAC", await key, unhex(proof), tagged(WIRE.serverLabel));
+    if (state !== "verifying") return; // shut while verifying
+    if (!good) return shut(unproven("its proof does not verify"));
+    const theirs = f[WIRE.version];
+    if (theirs !== d.version) {
+      return shut(
+        `version mismatch: worktrees serve is ${typeof theirs === "string" ? `v${theirs}` : "of an unknown version"}, ` +
+          `this frontend is v${d.version} — refusing to drive it. Rebuild (cargo build --release -p worktrees-cli) and restart the stack.`,
+      );
+    }
+    state = "ready";
+    d.clearTimeout(timer);
+    for (const text of queued.splice(0)) ws.send(text);
+    for (const raw of inbox.splice(0)) handle(raw);
+  }
+
+  function handle(raw: unknown) {
     if (state === "closed") return;
-    if (typeof ev.data !== "string") {
-      shut("worktrees serve sent a binary frame; the protocol is text only");
+    const proven = state === "ready";
+    if (typeof raw !== "string") {
+      shut(proven ? "worktrees serve sent a binary frame; the protocol is text only" : unproven("it sent a binary frame"));
       return;
     }
     let f: Record<string, unknown>;
     try {
-      const v: unknown = JSON.parse(ev.data);
+      const v: unknown = JSON.parse(raw);
       if (!v || typeof v !== "object" || Array.isArray(v)) throw new Error("not an object");
       f = v as Record<string, unknown>;
     } catch (e) {
-      shut(`worktrees serve sent an unreadable frame: ${String(e)}`);
+      shut(proven ? `worktrees serve sent an unreadable frame: ${String(e)}` : unproven("it sent an unreadable frame"));
       return;
     }
-    if (state === "authing") {
-      if (f[WIRE.ok] !== true) {
-        shut(`worktrees serve answered the handshake with ${ev.data.slice(0, 80)}`);
-        return;
-      }
-      const theirs = f[WIRE.version];
-      if (theirs !== d.version) {
-        shut(
-          `version mismatch: worktrees serve is ${typeof theirs === "string" ? `v${theirs}` : "of an unknown version"}, ` +
-            `this frontend is v${d.version} — refusing to drive it. Rebuild (cargo build --release -p worktrees-cli) and restart the stack.`,
-        );
-        return;
-      }
-      state = "ready";
-      d.clearTimeout(timer);
-      for (const text of queued.splice(0)) ws.send(text);
+    if (state === "hello" || state === "proving") {
+      // Async (WebCrypto), and each sets the next state before its first
+      // await, so a frame behind this one meets the right state.
+      (state === "hello" ? onChallenge(f) : onWelcome(f)).catch((e) => shut(`the handshake failed in this client: ${String(e)}`));
       return;
     }
-    if (state !== "ready") return;
     if (WIRE.channel in f) onChannel(Number(f[WIRE.channel]), Number(f[WIRE.seq]), f[WIRE.data]);
     else if (WIRE.event in f) {
       const name = String(f[WIRE.event]);
       for (const h of [...(listeners.get(name) ?? [])]) h({ event: name, id: nextEvent++, payload: f[WIRE.payload] } as Event<unknown>);
     } else if (WIRE.id in f) onReply(f);
-    else warn(`worktrees serve: an unrecognised frame ${ev.data.slice(0, 80)}`);
+    else warn(`worktrees serve: an unrecognised frame ${raw.slice(0, 80)}`);
+  }
+
+  ws.onopen = () => {
+    if (state !== "connecting") return;
+    state = "hello";
+    ws.send(JSON.stringify({ [WIRE.hello]: cn }));
+  };
+
+  ws.onmessage = (ev) => {
+    if (state === "closed") return;
+    if (state === "verifying") inbox.push(ev.data);
+    else handle(ev.data);
   };
 
   ws.onclose = () => {
@@ -264,11 +357,20 @@ export function connectSocket(d: SocketDeps): Door {
     // port. Name both; the stack's serve.log says which.
     if (state === "connecting")
       shut(
-        `could not connect to worktrees serve at ${d.url} — it is not running, or it refused ` +
+        `could not connect to worktrees serve at ${url} — it is not running, or it refused ` +
           `${d.origin ? `this page's Origin (${d.origin})` : "this page's Origin"}: a dev stack needs --allow-origin for it`,
       );
-    else if (state === "authing")
-      shut("worktrees serve refused the connection — it closes with nothing said (wrong token, an Origin it was not started with, or a stale serve.json)");
+    else if (state === "hello")
+      shut(
+        "worktrees serve closed the connection at this client's hello, with nothing said — a serve older than handshake v1 " +
+          "reads a hello as a bad token. Rebuild (cargo build --release -p worktrees-cli) and restart the stack.",
+      );
+    else if (state === "proving")
+      shut(
+        `the server on ${addr} refused this client's proof, closing with nothing said: it does not hold the token ` +
+          "serve.json gave this page (serve.json is stale, or the port now belongs to another process). No request was sent. Restart the stack.",
+      );
+    else if (state === "verifying") shut("the connection to worktrees serve closed during the handshake; no request was sent");
     else shut("the connection to worktrees serve closed");
   };
   // A failed socket fires `error` and then `close`; `close` says what happened.
@@ -314,12 +416,12 @@ export function connectSocket(d: SocketDeps): Door {
  *  never in a URL, never in storage. */
 export const SERVE_ENDPOINT = "/__worktrees/serve";
 
-export type BootDeps = Omit<SocketDeps, "url" | "token"> & {
+export type BootDeps = Omit<SocketDeps, "port" | "token"> & {
   fetch: (url: string, init: { method: string; cache: "no-store"; credentials: "same-origin" }) => Promise<{ ok: boolean; status: number; text(): Promise<string> }>;
 };
 
 /** The dev boot: ask the dev server where the stack is, then connect. The
- *  token lives only in this closure and in the socket's first frame. */
+ *  token lives only in this closure and the HMAC key made from it. */
 export async function bootSocket(d: BootDeps): Promise<Door> {
   let port: number;
   let token: string;
@@ -336,5 +438,5 @@ export async function bootSocket(d: BootDeps): Promise<Door> {
     d.onError(msg);
     return deadDoor(msg);
   }
-  return connectSocket({ ...d, url: `ws://127.0.0.1:${port}/`, token });
+  return connectSocket({ ...d, port, token });
 }

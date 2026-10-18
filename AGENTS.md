@@ -82,7 +82,15 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   `Channel`, `listen`). Nothing else under `app/src` imports
   `@tauri-apps/api/core` or `/event` — `transport-check.mjs` fails on it, the
   mock excepted. In the app the door IS Tauri's functions; in the dev stack it
-  is `ipcws.ts`, a WebSocket to serve. Plugins (opener, dialog, updater,
+  is `ipcws.ts`, a WebSocket to serve, which never sends the token: handshake
+  v1 (OWASP H1) has each side prove it holds it with an HMAC over the other's
+  nonce, and the client sends NOTHING else — no request, and no belief in the
+  version — until serve's proof passes `crypto.subtle.verify`, because whoever
+  holds serve.json's port after a crash need not be serve. `crypto.subtle` is
+  there on `tauri://localhost` (a secure context) and a `ws://127.0.0.1` socket
+  from it is not blocked as mixed content — measured on macOS 27.0 in a
+  standalone WKWebView registered the way wry 0.55 does, NOT in the shipped
+  app. Plugins (opener, dialog, updater,
   process, `api/window`) stay direct imports on purpose: they act on the
   window's machine, and routing them through a socket is the reason the
   plan's WS-backed `__TAURI_INTERNALS__` was not used (`.planning` of
@@ -98,7 +106,9 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   (the check loads it as a `data:` module; `import type` is fine); and **a
   check that awaits a promise a mutation leaves pending exits 13 with NO
   failure printed** — race every await against a deadline, as
-  `transport-check.mjs`'s `settle()` does.
+  `transport-check.mjs`'s `settle()` does, and give fire-and-forget calls the
+  same handler: against a broken client a bare `void invoke(…)` rejects
+  unhandled and kills the run before the failures it found are printed.
 
 **Adding a harness? Walk `docs/adding-a-harness.md` first, and tick it only
 by SEEING each surface work.** pi shipped in v0.33.0 with a correct core —

@@ -17,6 +17,7 @@ async function boot() {
     openDoor(await bootSocket({
       version: __WT_VERSION__,
       fetch: (u, init) => window.fetch(u, init),
+      crypto: window.crypto,
       WebSocket: window.WebSocket,
       setTimeout: (fn, ms) => window.setTimeout(fn, ms),
       clearTimeout: (h) => window.clearTimeout(h as number),

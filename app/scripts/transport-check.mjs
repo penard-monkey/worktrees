@@ -15,11 +15,16 @@
 //      `ipcws.ts::WIRE`. And the behavioural tests below build their frames
 //      from the RUST-parsed keys, not from WIRE — so a rename on the Rust side
 //      fails them too, rather than letting a stub agree with a stale client.
-//   2. DRIVES THE REAL CLIENT on a virtual clock against a fake socket: auth
-//      before any request, replies routed by id (a non-string `err` passed
-//      through unchanged), channels in `seq` order including a reordered
-//      arrival, events and unlisten, a version mismatch refused, a refused
-//      handshake and a dead socket surfaced — never swallowed.
+//   2. DRIVES THE REAL CLIENT on a virtual clock against a fake socket.
+//      Handshake v1 first (the fix for OWASP H1): the client proves it holds
+//      the token and makes the server prove it too, with proofs this check
+//      computes itself with node:crypto from the spec; the token is never on
+//      the wire; a server that cannot prove itself — the review's stand-in on
+//      a dead serve's port among them — is sent nothing, and its version
+//      claim is not believed. Then replies routed by id (a non-string `err`
+//      passed through unchanged), channels in `seq` order including a
+//      reordered arrival, events and unlisten, a version mismatch refused, a
+//      refused handshake and a dead socket surfaced — never swallowed.
 //   3. DRIVES THE REAL CHAIN for the termreplay contract: TerminalPane's
 //      `useTerm` + `shellTransport` → ipc.ts → ipcws.ts → the fake socket. A
 //      replay is a channel's first frame and stays unanswered; a live query
@@ -31,7 +36,9 @@
 //
 // Overrides, so a mutation can be tested without touching the tree:
 //   TRANSPORT_IPCWS, TRANSPORT_IPC, TRANSPORT_WIRE, TRANSPORT_POLICY,
-//   TRANSPORT_DISPATCH, TRANSPORT_MAIN, TRANSPORT_DOOR, TRANSPORT_DIST
+//   TRANSPORT_DISPATCH, TRANSPORT_CONN, TRANSPORT_MAIN, TRANSPORT_DOOR,
+//   TRANSPORT_DIST
+import { createHmac, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -53,6 +60,7 @@ const SRC = {
   wire: process.env.TRANSPORT_WIRE ?? here("../../crates/worktrees-cli/src/serve/wire.rs"),
   policy: process.env.TRANSPORT_POLICY ?? here("../../crates/worktrees-cli/src/serve/policy.rs"),
   dispatch: process.env.TRANSPORT_DISPATCH ?? here("../../crates/worktrees-cli/src/serve/dispatch.rs"),
+  conn: process.env.TRANSPORT_CONN ?? here("../../crates/worktrees-cli/src/serve/conn.rs"),
   cliToml: here("../../crates/worktrees-cli/Cargo.toml"),
   wsToml: here("../../Cargo.toml"),
 };
@@ -90,9 +98,25 @@ function jsonKeys(body) {
 }
 const camel = (s) => s.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
 
+/** Handshake v1 as (main)'s spec states it (owasp-serve/handshake-v1.md,
+ *  2026-10-18, the fix for OWASP H1). This is the check's OWN copy: the fake
+ *  server in §2 builds every handshake frame from it and computes every proof
+ *  with node:crypto, never from ipcws.ts, so a client that drifts from the
+ *  spec fails on behaviour and not merely on a key comparison. */
+const SPEC = {
+  hello: "hello", challenge: "challenge", auth: "auth", ok: "ok", version: "version", proof: "proof",
+  clientLabel: "worktrees-serve/v1/client\n", serverLabel: "worktrees-serve/v1/server\n",
+  host: "127.0.0.1",
+};
+const HEX32 = /^[0-9a-f]{64}$/;
+const hex32 = () => randomBytes(32).toString("hex");
+/** HMAC-SHA256 keyed with the token's UTF-8 bytes, over label + cn + "\n" + sn, as lowercase hex. */
+const spectag = (key, label, cn, sn) => createHmac("sha256", Buffer.from(key, "utf8")).update(`${label}${cn}\n${sn}`, "utf8").digest("hex");
+
 const wire = read(SRC.wire);
 const policy = read(SRC.policy);
 const dispatch = read(SRC.dispatch).split("\n#[cfg(test)]")[0];
+const conn = read(SRC.conn).split("\n#[cfg(test)]")[0];
 
 const K = {};
 {
@@ -155,12 +179,22 @@ const WS = await load(SRC.ipcws, wsJs);
   check(same(bk, [...new Set(K.byteKeys)].sort()), `byte channels are exactly dispatch.rs's frames.bytes keys (${JSON.stringify(bk)} vs ${JSON.stringify([...new Set(K.byteKeys)])})`);
   check(K.typedKeys.every((k) => !bk.includes(k)), `no typed progress channel is decoded as bytes (${[...new Set(K.typedKeys)].join(", ")})`);
   check(K.authDeadline > 0 && WS.AUTH_WAIT_MS > K.authDeadline * 1000, `the client waits longer (${WS.AUTH_WAIT_MS}ms) than the server's AUTH_DEADLINE (${K.authDeadline}s), so a refusal reads as a refusal`);
+
+  const spec = ["hello", "challenge", "auth", "ok", "version", "proof", "clientLabel", "serverLabel"];
+  const sbad = spec.filter((k) => W[k] !== SPEC[k]);
+  for (const k of sbad) fail(`WIRE.${k} is ${JSON.stringify(W[k])}, handshake v1 says ${JSON.stringify(SPEC[k])}`);
+  if (!sbad.length) ok(`WIRE speaks handshake v1 — ${spec.length} keys and labels (${spec.map((k) => JSON.stringify(SPEC[k])).join(" ")})`);
+  check(WS.SERVE_HOST === SPEC.host, `the client dials the literal ${SPEC.host}, never localhost, which resolves ::1 first (SERVE_HOST = ${JSON.stringify(WS.SERVE_HOST)})`);
+  check(/StdListener::bind\(SocketAddr::from\(\(Ipv4Addr::LOCALHOST, port\)\)\)/.test(conn), "serve binds Ipv4Addr::LOCALHOST (conn.rs): the one address it listens on is the one the client dials");
 }
 
 // ── 2. the client, on a virtual clock ───────────────────────────────────────
 
 const VERSION = "1.2.3";
-const TOKEN = "f".repeat(64);
+// Shaped like serve's (servefile.rs: 32 CSPRNG bytes as hex), and random, so
+// finding it in a frame can only mean the client put it there.
+const TOKEN = randomBytes(32).toString("hex");
+const PORT = 41237;
 
 function clock() {
   let now = 0, next = 1;
@@ -176,40 +210,6 @@ function clock() {
   };
 }
 
-/** The server side of one fake socket: frames go in through `recv`, what the
- *  client wrote comes out of `sent`. Built from the RUST keys (K). */
-function harness({ version = VERSION } = {}) {
-  const socks = [];
-  class FakeSock {
-    constructor(url) { this.url = url; this.sent = []; this.closed = false; socks.push(this); }
-    send(t) { if (this.closed) throw new Error("send on a closed socket"); this.sent.push(t); }
-    close() { this.closed = true; }
-  }
-  const errors = [];
-  const warns = [];
-  const clk = clock();
-  const door = WS.connectSocket({
-    url: "ws://127.0.0.1:9/", token: TOKEN, version,
-    WebSocket: FakeSock, setTimeout: clk.setTimeout, clearTimeout: clk.clearTimeout,
-    atob: globalThis.atob, onError: (m) => errors.push(m), warn: (m) => warns.push(m),
-  });
-  const sock = socks[0];
-  const h = {
-    door, sock, errors, warns, clk,
-    open: () => sock.onopen?.({}),
-    recv: (obj) => sock.onmessage?.({ data: typeof obj === "string" ? obj : JSON.stringify(obj) }),
-    drop: () => sock.onclose?.({}),
-    frames: () => sock.sent.map((t) => JSON.parse(t)),
-    requests: () => sock.sent.slice(1).map((t) => JSON.parse(t)),
-    authOk: (v = VERSION) => h.recv({ [K.authOk]: true, [K.authVersion]: v }),
-    reply: (id, v) => h.recv({ [K.id]: id, [K.ok]: v }),
-    error: (id, e) => h.recv({ [K.id]: id, [K.err]: e }),
-    chan: (ch, seq, data) => h.recv({ [K.channel]: ch, [K.seq]: seq, [K.data]: data }),
-    event: (name, payload) => h.recv({ [K.event]: name, [K.payload]: payload }),
-    async ready() { h.open(); h.authOk(); await tick(); },
-  };
-  return h;
-}
 /** A call's outcome — or `{hung}`. A client that loses a call leaves its
  *  promise pending forever, and an awaited one would end this script with
  *  node's exit 13 and no failure printed: a hang has to be a RESULT. */
@@ -218,31 +218,216 @@ const settle = (p) => Promise.race([
   p.then((v) => ({ ok: v }), (e) => ({ err: e })),
   new Promise((r) => setTimeout(() => r({ hung: true }), HANG_MS)),
 ]);
+/** Wait, bounded, for what the client does after an await of its OWN:
+ *  WebCrypto settles on node's thread pool, not on a tick. */
+async function until(cond, ms = HANG_MS) {
+  const end = Date.now() + ms;
+  while (!cond()) { if (Date.now() > end) return false; await tick(); }
+  return true;
+}
 const chanId = (s) => Number(String(s).slice(String(K.prefix).length));
 
-// 2a. auth first, and nothing before it.
-{
-  const h = harness();
-  const early = settle(h.door.invoke("list_workspace"));
-  check(h.sock.sent.length === 0, "a call before the socket opens writes nothing");
-  h.open();
-  const f = h.frames();
-  check(f.length === 1 && Object.keys(f[0]).length === 1 && f[0][K.auth] === TOKEN, `the first frame is exactly {"${K.auth}": <token>} (${JSON.stringify(Object.keys(f[0] ?? {}))})`);
-  const mid = settle(h.door.invoke("get_settings"));
-  check(h.sock.sent.length === 1, "a call after open but before the auth reply is still held");
-  h.authOk();
-  const reqs = h.requests();
-  check(reqs.length === 2 && reqs[0][K.cmd] === "list_workspace" && reqs[1][K.cmd] === "get_settings", "held calls go out after the auth reply, in call order");
-  check(reqs.length === 2 && reqs[0][K.id] !== reqs[1][K.id], "each request has its own id");
-  check(same(reqs[0][K.args], {}), "a call with no args sends {} (wire.rs reads a missing args as {}, Tauri sends {})");
-  h.reply(reqs[1][K.id], { theme: "nord" });
-  h.reply(reqs[0][K.id], []);
-  const [a, b] = await Promise.all([early, mid]);
-  check(same(a, { ok: [] }) && same(b, { ok: { theme: "nord" } }), "…and each resolves with its own reply");
-  check(h.clk.pending() === 0, "the handshake timer is cleared once authenticated");
+/** Every frame any client in this run wrote; the token sweep in §3 reads it. */
+const WIRE_LOG = [];
+const tokenIn = (t) => [TOKEN, b64(TOKEN), Buffer.from(TOKEN, "utf8").toString("hex")].some((x) => t.includes(x));
+
+/** WebCrypto as the page has it (`window.crypto`), wrapped only to SEE the
+ *  server's proof go through `subtle.verify` and, with `gate`, to hold that
+ *  check open while a test looks at what was sent in the meantime. */
+function webcrypto({ gate = null, subtle = globalThis.crypto.subtle } = {}) {
+  const seen = { verify: 0, verified: false };
+  const s = subtle && {
+    importKey: (...a) => subtle.importKey(...a),
+    sign: (...a) => subtle.sign(...a),
+    async verify(...a) {
+      seen.verify++;
+      const r = await subtle.verify(...a);
+      if (gate) await gate;
+      seen.verified = true;
+      return r;
+    },
+  };
+  return { crypto: { getRandomValues: (b) => globalThis.crypto.getRandomValues(b), subtle: s }, seen };
 }
 
-// 2b. replies routed by id, out of order; err passed through unchanged.
+/** One client and the server side of its fake socket: frames go in through
+ *  `recv`, what the client wrote comes out of `frames`. Requests are built
+ *  from the RUST keys (K), the handshake from the spec (SPEC). */
+function harness({ version = VERSION, gate = null, subtle } = {}) {
+  const socks = [];
+  class FakeSock {
+    constructor(url) { this.url = url; this.sent = []; this.closed = false; socks.push(this); }
+    send(t) { if (this.closed) throw new Error("send on a closed socket"); this.sent.push(t); WIRE_LOG.push(t); }
+    close() { this.closed = true; }
+  }
+  const errors = [];
+  const warns = [];
+  const clk = clock();
+  const wc = webcrypto(subtle === undefined ? { gate } : { gate, subtle });
+  const door = WS.connectSocket({
+    port: PORT, token: TOKEN, version, crypto: wc.crypto,
+    WebSocket: FakeSock, setTimeout: clk.setTimeout, clearTimeout: clk.clearTimeout,
+    atob: globalThis.atob, onError: (m) => errors.push(m), warn: (m) => warns.push(m),
+  });
+  const sock = socks[0] ?? null;
+  const frames = () => (sock?.sent ?? []).map((t) => JSON.parse(t));
+  const h = {
+    door, sock, socks, errors, warns, clk, seen: wc.seen, cn: null, sn: null,
+    open: () => sock?.onopen?.({}),
+    recv: (obj) => sock?.onmessage?.({ data: typeof obj === "string" ? obj : JSON.stringify(obj) }),
+    drop: () => sock?.onclose?.({}),
+    frames,
+    /** What the client wrote that is not the handshake: its requests. */
+    requests: () => frames().filter((f) => K.cmd in f),
+    reply: (id, v) => h.recv({ [K.id]: id, [K.ok]: v }),
+    error: (id, e) => h.recv({ [K.id]: id, [K.err]: e }),
+    chan: (ch, seq, data) => h.recv({ [K.channel]: ch, [K.seq]: seq, [K.data]: data }),
+    event: (name, payload) => h.recv({ [K.event]: name, [K.payload]: payload }),
+    // serve's half of handshake v1, by the spec.
+    hello: () => (h.cn = frames()[0]?.[SPEC.hello] ?? null),
+    challenge: (sn = hex32()) => { h.sn = sn; h.recv({ [SPEC.challenge]: sn }); },
+    /** The client's proof, once its own async sign has run (null if never). */
+    async proof() {
+      await until(() => frames().some((f) => SPEC.auth in f));
+      return frames().find((f) => SPEC.auth in f)?.[SPEC.auth] ?? null;
+    },
+    /** serve's ok: its version, and its proof made with the token, unless
+     *  `key`, `proof` or `version` say otherwise (`version: undefined` omits it). */
+    welcome(o = {}) {
+      const v = "version" in o ? o.version : VERSION;
+      const proof = o.proof ?? spectag(o.key ?? TOKEN, SPEC.serverLabel, h.cn, h.sn);
+      h.recv({ [SPEC.ok]: true, [SPEC.version]: v, [SPEC.proof]: proof });
+    },
+    /** Until the client's `subtle.verify` has settled, plus a turn for its continuation. */
+    async verified() { const done = await until(() => wc.seen.verified); await tick(); return done; },
+    async ready() { h.open(); h.hello(); h.challenge(); await h.proof(); h.welcome(); await h.verified(); },
+  };
+  return h;
+}
+
+// 2a. handshake v1, in order, and nothing before it.
+{
+  const h = harness();
+  const heard = [];
+  const early = settle(h.door.invoke("list_workspace"));
+  await h.door.listen("places:changed", (e) => heard.push(e));
+  check(h.sock !== null && h.sock.sent.length === 0, "a call (or a listen) before the socket opens writes nothing");
+  check(h.sock?.url === `ws://${SPEC.host}:${PORT}/`, `the client dials the literal ${SPEC.host}, never localhost (${h.sock?.url})`);
+  h.open();
+  const f0 = h.frames();
+  check(f0.length === 1 && same(Object.keys(f0[0]), [SPEC.hello]) && HEX32.test(f0[0][SPEC.hello]),
+    `the first frame is exactly {"${SPEC.hello}": <32 random bytes, hex>} (${JSON.stringify(f0[0] ?? null).slice(0, 90)})`);
+  h.hello();
+  const mid = settle(h.door.invoke("get_settings"));
+  h.challenge();
+  const proof = await h.proof();
+  const f1 = h.frames();
+  check(f1.length === 2 && same(Object.keys(f1[1] ?? {}), [SPEC.auth]), `the challenge is answered with exactly {"${SPEC.auth}": <proof>} and nothing else (${f1.length} frames)`);
+  check(proof === spectag(TOKEN, SPEC.clientLabel, h.cn, h.sn),
+    "…whose proof is HMAC-SHA256(token, \"worktrees-serve/v1/client\\n\" + cn + \"\\n\" + sn), computed here with node:crypto from the spec");
+  h.welcome();
+  const verified = await h.verified();
+  check(verified && h.seen.verify === 1, `(c) a server whose proof is right (computed here with node:crypto, from the spec) is checked with crypto.subtle.verify, once (${h.seen.verify} calls)`);
+  const reqs = h.requests();
+  check(reqs.length === 2 && reqs[0][K.cmd] === "list_workspace" && reqs[1][K.cmd] === "get_settings", "(c) …and accepted: the held calls go out, in call order");
+  check(reqs.length === 2 && reqs[0][K.id] !== reqs[1][K.id], "each request has its own id");
+  check(same(reqs[0]?.[K.args], {}), "a call with no args sends {} (wire.rs reads a missing args as {}, Tauri sends {})");
+  h.reply(reqs[1]?.[K.id], { theme: "nord" });
+  h.reply(reqs[0]?.[K.id], []);
+  const [a, b] = await Promise.all([early, mid]);
+  check(same(a, { ok: [] }) && same(b, { ok: { theme: "nord" } }), "…and each resolves with its own reply");
+  h.event("places:changed", null);
+  check(heard.length === 1, "a listen made before the handshake hears events once the server is proven");
+  check(h.clk.pending() === 0, "the handshake timer is cleared once the server is proven");
+  const h2 = harness();
+  h2.open();
+  check(h2.hello() !== null && h2.cn !== h.cn, "every connection says hello with a fresh nonce");
+}
+
+// 2b. (e) nothing but the handshake goes out until the server's proof verifies.
+{
+  let open;
+  const gate = new Promise((r) => (open = r));
+  const h = harness({ gate });
+  const heard = [];
+  await h.door.listen("sessions:busy", (e) => heard.push(e));
+  const calls = [settle(h.door.invoke("list_workspace"))];
+  h.open();
+  h.hello();
+  calls.push(settle(h.door.invoke("get_settings")));
+  h.challenge();
+  await h.proof();
+  calls.push(settle(h.door.invoke("list_places", { repo: "/r" })));
+  h.welcome();
+  // serve adds a client to its broadcast set the moment it says ok, so an
+  // event can be right behind the ok, inside the client's verify.
+  h.event("sessions:busy", { busy: ["wt-a"], waiting: [] });
+  calls.push(settle(h.door.invoke("term_write", { id: 1, data: "typed\r" })));
+  await until(() => h.seen.verify > 0);
+  await ticks();
+  check(h.seen.verify === 1 && h.requests().length === 0,
+    `(e) while the server's proof is being verified, nothing is sent: ${h.requests().length} of 4 queued requests went out (verify called ${h.seen.verify}×)`);
+  check(heard.length === 0, "(e) …and an event right behind the ok is held, not delivered, until the proof verifies");
+  open();
+  await h.verified();
+  const reqs = h.requests();
+  check(same(reqs.map((r) => r[K.cmd]), ["list_workspace", "get_settings", "list_places", "term_write"]),
+    `(e) once it verifies, every queued request goes out, in call order (${reqs.map((r) => r[K.cmd]).join(", ")})`);
+  check(heard.length === 1 && heard[0].payload?.busy?.[0] === "wt-a", "(e) …and the held event is delivered");
+}
+
+// 2c. (a)(d) a server without the token is refused, and is sent nothing.
+{
+  const UNPROVEN = /did not prove it holds serve\.json's token/;
+  const upToProof = async (h) => { h.open(); h.hello(); h.challenge(); return h.proof(); };
+  const IMPOSTORS = [
+    // The OWASP review's stand-in (owasp-serve/probes/impostor.py): it took the
+    // port after serve died and answered the first frame with ok.
+    ["(a)", "answers the hello with ok and no challenge (the review's stand-in)", (h) => { h.open(); h.hello(); h.recv({ [SPEC.ok]: true, [SPEC.version]: VERSION }); }],
+    ["(a)", "challenges, then says ok with no proof", async (h) => { await upToProof(h); h.recv({ [SPEC.ok]: true, [SPEC.version]: VERSION }); }],
+    ["(a)", "proves with a key that is not the token", async (h) => { await upToProof(h); h.welcome({ key: hex32() }); }],
+    ["(a)", "reflects the client's own proof back", async (h) => { const p = await upToProof(h); h.welcome({ proof: p ?? hex32() }); }],
+    ["(a)", "replays a good proof from another exchange", async (h) => { await upToProof(h); h.welcome({ proof: spectag(TOKEN, SPEC.serverLabel, hex32(), h.sn) }); }],
+    ["(a)", "sends a proof that is not hex", async (h) => { await upToProof(h); h.welcome({ proof: "Z".repeat(64) }); }],
+    ["(a)", "sends a challenge that is not 32 random bytes", (h) => { h.open(); h.hello(); h.challenge("abc"); }],
+    ["(a)", "pushes an event before proving anything", (h) => { h.open(); h.hello(); h.event("places:changed", { forged: true }); }],
+    // A version is the server's word, and before the proof that word is anyone's.
+    ["(d)", "claims another version, with no challenge", (h) => { h.open(); h.hello(); h.recv({ [SPEC.ok]: true, [SPEC.version]: "0.0.1" }); }],
+    ["(d)", "claims another version behind a proof that fails", async (h) => { await upToProof(h); h.welcome({ version: "0.0.1", key: hex32() }); }],
+  ];
+  for (const [tag, label, act] of IMPOSTORS) {
+    const h = harness();
+    const heard = [];
+    await h.door.listen("places:changed", (e) => heard.push(e));
+    const p = settle(h.door.invoke("list_workspace"));
+    const q = settle(h.door.invoke("term_write", { id: 1, data: "my-sudo-password\r" }));
+    await act(h);
+    await until(() => h.errors.length > 0 || h.requests().length > 0);
+    await ticks();
+    const [r, r2] = await Promise.all([p, q]);
+    const said = String(r.err ?? JSON.stringify(r)).slice(0, 110);
+    check(typeof r.err === "string" && UNPROVEN.test(r.err) && /stale/.test(r.err) && /impostor/.test(r.err) && !/version mismatch/.test(r.err),
+      `${tag} a server that ${label} is refused as one that does not hold the token${tag === "(d)" ? ", NOT as a version mismatch" : ""} (${said})`);
+    check(h.requests().length === 0 && !(h.sock?.sent ?? []).some(tokenIn),
+      `${tag} …it was sent zero request frames and no token bytes (${h.requests().length} requests; frames: ${h.frames().map((f) => Object.keys(f).join("+")).join(", ")})`);
+    check(!!h.sock?.closed && h.errors.length === 1 && r2.err === r.err && heard.length === 0,
+      `${tag} …the socket is closed, the failure reported once, every waiting call refused, and nothing it sent delivered`);
+  }
+}
+
+// 2d. (b) the token is never on the wire.
+{
+  const h = harness();
+  await h.ready();
+  settle(h.door.invoke("term_write", { id: 1, data: [104, 105] }));
+  settle(h.door.invoke("get_settings"));
+  const sent = h.sock?.sent ?? [];
+  const leaked = sent.filter(tokenIn);
+  check(sent.length >= 4 && leaked.length === 0,
+    `(b) the token is in none of the ${sent.length} frames of a whole session, as text, base64 or hex${leaked.length ? ` — LEAKED in ${leaked[0].slice(0, 80)}` : ""}`);
+}
+
+// 2e. replies routed by id, out of order; err passed through unchanged.
 {
   const h = harness();
   await h.ready();
@@ -251,12 +436,12 @@ const chanId = (s) => Number(String(s).slice(String(K.prefix).length));
   const p3 = settle(h.door.invoke("clone_project", { id: "j1", url: "nope", parent: "/tmp", name: null }));
   const p4 = settle(h.door.invoke("open_editor", { path: "/r/x", cmd: "code" }));
   const [r1, r2, r3, r4] = h.requests();
-  check(same(r1[K.args], { repo: "/r", slug: "s", on: true }), "args go out exactly as the call site wrote them (camelCase, as Tauri sends)");
+  check(same(r1?.[K.args], { repo: "/r", slug: "s", on: true }), "args go out exactly as the call site wrote them (camelCase, as Tauri sends)");
   const cloneErr = { kind: "auth", message: "Permission denied (publickey)", detail: null };
-  h.error(r4[K.id], K.clientLocal);
-  h.error(r3[K.id], cloneErr);
-  h.reply(r2[K.id], [{ slug: "s" }]);
-  h.error(r1[K.id], "no such place");
+  h.error(r4?.[K.id], K.clientLocal);
+  h.error(r3?.[K.id], cloneErr);
+  h.reply(r2?.[K.id], [{ slug: "s" }]);
+  h.error(r1?.[K.id], "no such place");
   const [o1, o2, o3, o4] = await Promise.all([p1, p2, p3, p4]);
   check(same(o2, { ok: [{ slug: "s" }] }), "a reply that arrives first resolves its own call");
   check(o1.err === "no such place", "a string err rejects with that string");
@@ -266,7 +451,7 @@ const chanId = (s) => Number(String(s).slice(String(K.prefix).length));
   check(h.errors.length === 0, "command errors are the caller's to show, not a transport failure");
 }
 
-// 2c. channels: seq order per channel, bytes vs typed, duplicates.
+// 2f. channels: seq order per channel, bytes vs typed, duplicates.
 {
   const h = harness();
   await h.ready();
@@ -276,10 +461,10 @@ const chanId = (s) => Number(String(s).slice(String(K.prefix).length));
   const prog = h.door.channel();
   const progs = [];
   prog.onmessage = (m) => progs.push(m);
-  void h.door.invoke("shell_open", { repo: "/r", slug: "s", index: 0, cols: 80, rows: 24, onBytes: bytes });
-  void h.door.invoke("clone_project", { id: "j", url: "u", parent: "/p", name: null, onProgress: prog });
+  settle(h.door.invoke("shell_open", { repo: "/r", slug: "s", index: 0, cols: 80, rows: 24, onBytes: bytes }));
+  settle(h.door.invoke("clone_project", { id: "j", url: "u", parent: "/p", name: null, onProgress: prog }));
   const [open, clone] = h.requests();
-  const bc = open[K.args].onBytes, pc = clone[K.args].onProgress;
+  const bc = open?.[K.args].onBytes, pc = clone?.[K.args].onProgress;
   check(typeof bc === "string" && bc.startsWith(K.prefix) && typeof pc === "string" && pc.startsWith(K.prefix) && bc !== pc,
     `a Channel argument serialises as Tauri's "${K.prefix}<id>", one id per channel (${bc}, ${pc})`);
   const b = chanId(bc), p = chanId(pc);
@@ -295,7 +480,7 @@ const chanId = (s) => Number(String(s).slice(String(K.prefix).length));
   check(progs.length === 2 && progs[0].percent === 10 && progs[1].percent === 100, "a typed progress channel delivers the JSON value itself, in its own seq order, unaffected by the other channel");
 }
 
-// 2d. the replay lands before the reply that answers it — and stays first.
+// 2g. the replay lands before the reply that answers it — and stays first.
 {
   const h = harness();
   await h.ready();
@@ -304,16 +489,16 @@ const chanId = (s) => Number(String(s).slice(String(K.prefix).length));
   ch.onmessage = (m) => order.push(`bytes:${text(m)}`);
   const opened = settle(h.door.invoke("shell_open", { repo: "/r", slug: "s", index: 0, cols: 80, rows: 24, onBytes: ch }).then((v) => order.push(`reply:${v.replay}`)));
   const [req] = h.requests();
-  const c = chanId(req[K.args].onBytes);
+  const c = chanId(req?.[K.args].onBytes);
   // serve's one outbox: the replay is pushed through the sink BEFORE the reply.
   h.chan(c, K.firstSeq + 1, b64("live"));
   h.chan(c, K.firstSeq, b64("REPLAY"));
-  h.reply(req[K.id], { gen: 1, replay: 6, replay_cols: null });
+  h.reply(req?.[K.id], { gen: 1, replay: 6, replay_cols: null });
   await opened;
   check(same(order, ["bytes:REPLAY", "bytes:live", "reply:6"]), `the replay is the channel's first message even when a live frame overtakes it, and both precede the reply's continuation (${order.join(", ")})`);
 }
 
-// 2e. events: by name, unlisten.
+// 2h. events: by name, unlisten.
 {
   const h = harness();
   await h.ready();
@@ -329,31 +514,42 @@ const chanId = (s) => Number(String(s).slice(String(K.prefix).length));
   check(busy.length === 1 && changed.length === 1, "unlisten stops delivery to that handler and no other");
 }
 
-// 2f. a version mismatch is refused, visibly.
+// 2i. a version mismatch from a PROVEN server is refused, visibly.
 for (const [label, v] of [["an older server", "0.0.1"], ["a server that sends no version", undefined]]) {
   const h = harness();
   const p = settle(h.door.invoke("list_workspace"));
-  h.open();
-  h.recv(v === undefined ? { [K.authOk]: true } : { [K.authOk]: true, [K.authVersion]: v });
+  h.open(); h.hello(); h.challenge(); await h.proof();
+  h.welcome({ version: v });
+  await h.verified();
   const r = await p;
   const later = await settle(h.door.invoke("get_settings"));
   check(typeof r.err === "string" && /version mismatch/.test(r.err) && r.err.includes(VERSION) && (v === undefined || r.err.includes(v)),
-    `${label}: the waiting call is refused naming both versions (${r.err})`);
-  check(h.sock.sent.length === 1, `${label}: no request ever reaches it — only the auth frame was written`);
-  check(h.sock.closed, `${label}: the client closes the socket`);
+    `${label}, proven: the waiting call is refused naming both versions (${r.err})`);
+  check(h.requests().length === 0, `${label}: no request ever reaches it — only the handshake was written`);
+  check(!!h.sock?.closed, `${label}: the client closes the socket`);
   check(h.errors.length === 1 && h.errors[0] === r.err, `${label}: reported once through onError → fail()`);
   check(later.err === r.err, `${label}: later calls fail the same way, at once`);
 }
 
-// 2g. a refused handshake, a dead stack, a silent server — all surfaced.
+// 2j. refusals, a dead stack, a silent server — all surfaced, none swallowed.
 {
+  // serve answers anything but a hello by closing with nothing written, and a
+  // serve older than handshake v1 reads a hello as exactly that.
   const h = harness();
   const p = settle(h.door.invoke("list_workspace"));
   h.open();
-  h.drop(); // serve's refusal: the socket closes with nothing written
+  h.drop();
   const r = await p;
-  check(typeof r.err === "string" && /refused/.test(r.err), `a close before the auth reply is a REFUSAL, said so (${r.err})`);
-  check(h.errors.length === 1 && h.errors[0] === r.err, "…reported once through onError → fail()");
+  check(/older than handshake v1/.test(r.err ?? "") && h.errors.length === 1 && h.errors[0] === r.err, `a close at the hello says a serve older than handshake v1 does that (${r.err})`);
+}
+{
+  const h = harness();
+  const p = settle(h.door.invoke("list_workspace"));
+  h.open(); h.hello(); h.challenge(); await h.proof();
+  h.drop(); // serve's refusal of a wrong proof: the socket closes with nothing written
+  const r = await p;
+  check(/refused this client's proof/.test(r.err ?? "") && h.requests().length === 0 && h.errors.length === 1 && h.errors[0] === r.err,
+    `a close after the client's proof is a REFUSAL of it, said so, once (${r.err})`);
 }
 {
   const h = harness();
@@ -365,12 +561,13 @@ for (const [label, v] of [["an older server", "0.0.1"], ["a server that sends no
 {
   const h = harness();
   const p = settle(h.door.invoke("list_workspace"));
-  h.open();
+  h.open(); h.hello(); h.challenge(); await h.proof();
   h.clk.advance(WS.AUTH_WAIT_MS - 1);
   check(h.errors.length === 0, "the handshake wait is not cut short");
   h.clk.advance(1);
   const r = await p;
-  check(/did not answer/.test(r.err ?? "") && h.sock.closed && h.errors.length === 1, `a server that never answers the auth frame times out on the clock and is closed (${r.err})`);
+  check(/did not answer the handshake/.test(r.err ?? "") && !!h.sock?.closed && h.errors.length === 1,
+    `a server that goes quiet mid-handshake times out on the clock — the whole exchange counts — and is closed (${r.err})`);
 }
 {
   const h = harness();
@@ -379,7 +576,7 @@ for (const [label, v] of [["an older server", "0.0.1"], ["a server that sends no
   h.drop();
   const r = await p;
   const later = await settle(h.door.invoke("get_settings"));
-  check(/closed/.test(r.err ?? "") && later.err === r.err && h.errors.length === 1, `a socket that dies after auth fails its waiting call, every later one, and says so once (${r.err})`);
+  check(/closed/.test(r.err ?? "") && later.err === r.err && h.errors.length === 1, `a socket that dies after the handshake fails its waiting call, every later one, and says so once (${r.err})`);
 }
 {
   const h = harness();
@@ -388,6 +585,30 @@ for (const [label, v] of [["an older server", "0.0.1"], ["a server that sends no
   h.recv("{not json");
   const r = await p;
   check(/unreadable/.test(r.err ?? "") && h.errors.length === 1, "an unreadable frame ends the connection visibly rather than leaving a call to hang");
+}
+{
+  // http://localhost is a secure context, a LAN address is not — and without
+  // one there is no crypto.subtle, so no handshake: say so, dial nothing.
+  let h = null, threw = null;
+  try { h = harness({ subtle: null }); } catch (e) { threw = e; }
+  const r = h ? await settle(h.door.invoke("list_workspace")) : {};
+  check(h !== null && h.socks.length === 0 && /secure context/.test(r.err ?? "") && h.errors.length === 1 && h.errors[0] === r.err,
+    `with no crypto.subtle the client opens no socket at all and says why (${threw ? `connectSocket THREW: ${threw}` : `${h.socks.length} sockets; ${r.err}`})`);
+}
+
+// 2k. the dev boot: one POST to the token endpoint, then the literal 127.0.0.1.
+{
+  const socks = [];
+  class FakeSock { constructor(url) { this.url = url; this.sent = []; socks.push(this); } send(t) { this.sent.push(t); WIRE_LOG.push(t); } close() {} }
+  const asked = [];
+  await WS.bootSocket({
+    version: VERSION, crypto: webcrypto().crypto, WebSocket: FakeSock, setTimeout: () => 0, clearTimeout: () => {}, atob: globalThis.atob,
+    onError: () => {},
+    fetch: async (u, init) => { asked.push([u, init]); return { ok: true, status: 200, text: async () => JSON.stringify({ port: 5151, token: TOKEN }) }; },
+  });
+  check(socks.length === 1 && socks[0].url === `ws://${SPEC.host}:5151/`, `the dev boot dials ws://${SPEC.host}:<port>/, never localhost (${socks[0]?.url})`);
+  check(asked.length === 1 && asked[0][0] === WS.SERVE_ENDPOINT && asked[0][1].method === "POST" && !String(socks[0]?.url).includes(TOKEN),
+    "…after one POST to the token endpoint, with nothing but the port in the URL");
 }
 
 // ── 3. ipc.ts, and the termreplay contract over the socket ──────────────────
@@ -515,6 +736,12 @@ ${body}
   await run(true);
 }
 
+// The token never went out, from any client this run made.
+{
+  const leaked = WIRE_LOG.filter(tokenIn);
+  check(WIRE_LOG.length > 50 && leaked.length === 0, `(b) none of the ${WIRE_LOG.length} frames written by every client in this run carries the token${leaked.length ? ` — ${leaked.length} DID, e.g. ${leaked[0].slice(0, 80)}` : ""}`);
+}
+
 // ── 4. the edges ────────────────────────────────────────────────────────────
 
 // One door.
@@ -627,10 +854,13 @@ ${body}
 // The build: when one exists, the socket client is not in it.
 {
   const assets = path.join(SRC.dist, "assets");
+  const markers = ["did not answer the handshake", WS.SERVE_ENDPOINT, "refusing to drive it", "did not prove it holds"];
+  // A marker the client no longer says would be absent from every bundle.
+  const wsText = read(SRC.ipcws);
+  check(markers.every((m) => wsText.includes(m)), `every bundle marker is in ipcws.ts, so its absence from a build means something (${markers.filter((m) => !wsText.includes(m)).join(", ") || "all present"})`);
   if (!fs.existsSync(assets)) {
     console.log("ok — app/dist absent — the bundle assertion is skipped on this run (build with `pnpm build` to exercise it)");
   } else {
-    const markers = ["did not answer the handshake", WS.SERVE_ENDPOINT, "refusing to drive it"];
     const hits = [];
     for (const f of fs.readdirSync(assets).filter((f) => f.endsWith(".js"))) {
       const s = read(path.join(assets, f));
