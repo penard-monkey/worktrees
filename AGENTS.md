@@ -152,6 +152,12 @@ binary; the same goes for the `ls --json` diff below, which then compares the
 shipped binary against another copy of itself. Both read `target/release`, and
 neither notices it predates the change. Rebuild, then confirm before believing a
 result: `[ target/release/worktrees -nt crates/worktrees-core/src/store.rs ]`.
+And know that **`make install-app` REWRITES `target/release/worktrees`**: the
+sidecar overlay makes tauri-build delete it and copy the staged sidecar into
+its place (with a fresh mtime). That is harmless only because
+`app/scripts/sidecar.sh stage` stages that very build seconds earlier, with the
+same `--target` choice as the tauri build; stage any other binary and your CLI
+is silently replaced by it, and the `-nt` check above passes.
 
 **Report cargo with a grep, not a tail.** `cargo test -p worktrees-core | tail -4`
 prints `running 0 tests / ok. 0 passed` — that is the **Doc-tests** block, and
@@ -1142,6 +1148,8 @@ after it is "command not found" — which reads as a sandbox refusing curl.
 - **Never run the bundle's binary to probe it.**
   `target/release/bundle/macos/worktrees.app/Contents/MacOS/app --version` is the
   GUI entry point — it LAUNCHES a second instance instead of printing a version.
+  The file beside it, `Contents/MacOS/worktrees`, is the bundled CLI and DOES
+  answer `--version`; that is what `app/scripts/sidecar.sh check` probes.
 - **A Claude session probe's `status` can be STALE BY DESIGN.**
   `~/.claude/sessions/<pid>.json` is rewritten on status transitions — but ALSO
   on a park, which moves `updatedAt` alone and carries a mid-flight `busy`
@@ -1248,6 +1256,22 @@ after it is "command not found" — which reads as a sandbox refusing curl.
 4. release.yml: CLI ×4 targets + SIGNED app bundles ×2 + latest.json.
    Updater signing key: repo secret `TAURI_SIGNING_PRIVATE_KEY`; local backup
    `~/.tauri/worktrees-updater.key` — irreplaceable, never commit it.
+   **Each app bundle carries the CLI for its own arch at
+   `Contents/MacOS/worktrees`** — a PRIVATE sidecar for the app (it will start
+   `worktrees serve`), never put on PATH; install.sh is still how the CLI
+   reaches PATH (ROADMAP, "Option A"). `externalBin` lives in
+   `app/src-tauri/tauri.bundle.conf.json`, an overlay only release.yml and
+   `make install-app` pass with `--config`, because tauri-build copies every
+   `externalBin` from the BUILD SCRIPT in every profile — in the base config, a
+   clean `cargo check -p app` fails with "resource path
+   `binaries/worktrees-<triple>` doesn't exist". `app/scripts/sidecar.sh stage`
+   builds and stages it; `check` runs on the bundle AND on the unpacked updater
+   tarball (what ships): regular executable file, `lipo -archs` = the target's
+   and the app's, version = the tag — `--version` on the native arm64 one, the
+   x86_64 one never executed and its version read as data from stale.rs's
+   marker. Forget the overlay and `tauri build` still succeeds with no
+   sidecar; only `check` notices. The updater `.sig` is over the whole
+   tarball, so it covers the sidecar with no change to signing.
 5. Users update from inside the app (Settings → Version: CLI + app buttons)
    or by re-running install.sh.
 
@@ -1256,6 +1280,10 @@ after it is "command not found" — which reads as a sandbox refusing curl.
 - CLI stable: `install.sh` (copies). `make install` SYMLINKS the clone's
   build — every rebuild silently becomes "stable"; don't use it for that.
 - App: `make install-app` → /Applications (local builds skip Gatekeeper).
+  It stages and checks the CLI sidecar exactly as release.yml does, so every
+  local install exercises the release's path. `APPDIR=<dir>` installs
+  elsewhere — use a scratch dir to inspect a build without replacing the app
+  the user is running.
 - **macOS re-asks its privacy prompts after every build, and that is signing,
   not a bug.** TCC keys "worktrees would like to access data from other apps"
   to the designated requirement; ad-hoc/linker-signed code (everything cargo

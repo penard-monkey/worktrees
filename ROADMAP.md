@@ -27,6 +27,14 @@ this repo's settings in `.claude/close-out.md`).
   the same shape as the MCP setup offer. Signing is not a factor: macOS stays
   ad-hoc either way (`install.sh` already strips quarantine recursively, so a
   sidecar runs from a terminal); only the iOS target needs Apple signing.
+  B is in place (feat/sidecar-bundle): `Contents/MacOS/worktrees`, staged and
+  checked by `app/scripts/sidecar.sh`, with `externalBin` only in the
+  bundle-time overlay `app/src-tauri/tauri.bundle.conf.json`, so a `tauri
+  dev` or sandbox app has no bundled copy. But `target/debug/worktrees` sits
+  beside its binary whenever the debug CLI has been built, so a resolver that
+  looks next to `current_exe()` finds THAT one; A's "never from a debug build"
+  guard (and the `serve` lane's resolver) must key on more than "the file
+  exists".
   _From: 2026-10-17, feat/server-edition_
 
 - ~~**Before v0.42.0: drive #482 (scroll keep) in the real app.**~~ Done 2026-10-15: David ran it in the sandbox, worked fine. Only the

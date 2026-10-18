@@ -29,6 +29,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   row — see below).
 
 ### Added
+- **The desktop app carries its own copy of the CLI**, at
+  `worktrees.app/Contents/MacOS/worktrees`: built from the same commit, for
+  the bundle's own architecture, and used only by the app (which will start
+  `worktrees serve` with it). It is not put on your `PATH` — the installer's
+  `~/.local/bin/worktrees` is still the CLI you run, and agents and Claude's
+  MCP server keep working whether the app is installed or not. Every release
+  checks the copy inside the bundle it ships: present, executable, the right
+  architecture, and the tag's version. `make install-app` builds it the same
+  way, and takes `APPDIR=<dir>` to install somewhere other than /Applications.
 - **Applying the worktrees rules or the agent-setup Fix now opens a review
   lane for the `agent-instructions` branch**: a place on it, with an agent
   whose brief explains what the branch changes — each file, the AGENTS.md

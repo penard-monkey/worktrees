@@ -88,6 +88,11 @@ WORKTREES_INSTALL_APP=1 \
 From a clone, `make install-app` builds the app locally and installs it to
 /Applications (no signing or quarantine involved).
 
+The app bundle carries its own copy of the CLI, built from the same commit
+(`worktrees.app/Contents/MacOS/worktrees`), for the app's private use. It is
+not put on your `PATH`: the `worktrees` you run in a terminal is still the
+one the installer puts in `~/.local/bin`.
+
 Or clone and build (`make install` compiles the release binary and symlinks it —
 `git pull && make install` upgrades):
 
