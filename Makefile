@@ -5,6 +5,7 @@
 # reached full parity — see MIGRATION.md.)
 
 BINDIR ?= $(HOME)/.local/bin
+APPDIR ?= /Applications
 BATS   := ./test/lib/bats-core/bin/bats
 RELEASE_BIN := $(CURDIR)/target/release/worktrees
 
@@ -69,8 +70,11 @@ dev-app:
 
 # Build the Tauri desktop app + install to /Applications (macOS; local builds
 # aren't quarantined, so no signing needed). App updates = git pull + this.
+# APPDIR=<dir> installs somewhere else — a scratch dir, to inspect a build
+# without replacing the app you are sitting in.
 install-app:
 	@[ "$$(uname -s)" = Darwin ] || { echo "install-app is macOS-only"; exit 1; }
+	@[ -n "$(APPDIR)" ] || { echo "APPDIR is empty"; exit 1; }
 	@# Two different version errors can kill this AFTER you have waited for
 	@# cargo, so both are checked up front. The node one is below; the pnpm one
 	@# is structural and is why the recipe cd's into app/ (see dev-app above).
@@ -92,21 +96,33 @@ install-app:
 	@#                     updater, so there is nothing to sign.
 	@# Do NOT "fix" either by narrowing tauri.conf.json: release.yml builds with
 	@# neither flag and needs both behaviours.
+	@#
+	@# The bundle carries the CLI as a private sidecar (Contents/MacOS/worktrees,
+	@# app/scripts/sidecar.sh says why it is staged and checked like this).
+	@# Staged FIRST and WITHOUT --target, because the tauri build below runs
+	@# without one: the overlay makes tauri-build copy the staged file onto
+	@# target/release/worktrees, which must therefore be this very build. The
+	@# overlay goes before the inline config so that one stays last, as it was.
+	app/scripts/sidecar.sh stage
 	cd app && corepack pnpm tauri build --bundles app \
+	  --config "$(CURDIR)/app/src-tauri/tauri.bundle.conf.json" \
 	  --config '{"bundle":{"createUpdaterArtifacts":false},"build":{"beforeBuildCommand":"corepack pnpm build"}}'
-	rm -rf /Applications/worktrees.app
-	ditto "$(CURDIR)/target/release/bundle/macos/worktrees.app" /Applications/worktrees.app
-	@echo "installed: /Applications/worktrees.app ($$(plutil -extract CFBundleShortVersionString raw /Applications/worktrees.app/Contents/Info.plist))"
+	app/scripts/sidecar.sh check "$(CURDIR)/target/release/bundle/macos/worktrees.app" \
+	  "$$(rustc -vV | sed -n 's/^host: //p')" "$$(sed -n 's/^version = "\(.*\)"$$/\1/p' Cargo.toml)"
+	rm -rf "$(APPDIR)/worktrees.app"
+	ditto "$(CURDIR)/target/release/bundle/macos/worktrees.app" "$(APPDIR)/worktrees.app"
+	@echo "installed: $(APPDIR)/worktrees.app ($$(plutil -extract CFBundleShortVersionString raw "$(APPDIR)/worktrees.app/Contents/Info.plist"))"
 
 uninstall:
 	rm -f $(BINDIR)/worktrees
 	@echo "removed: $(BINDIR)/worktrees"
 
 lint:
-	shellcheck -x bin/worktrees install.sh test/helpers/*.bash
-	bash -n bin/worktrees && bash -n install.sh
-	@# bash-4-ism gate on the shim + installer (must run on stock bash 3.2)
-	@if sed 's/[[:space:]]*#.*//' bin/worktrees install.sh | grep -nE 'mapfile|readarray|declare -A|\$$\{[A-Za-z_]+(,,|\^\^)'; then \
+	shellcheck -x bin/worktrees install.sh app/scripts/sidecar.sh test/helpers/*.bash
+	bash -n bin/worktrees && bash -n install.sh && bash -n app/scripts/sidecar.sh
+	@# bash-4-ism gate on the shim, the installer and the sidecar script, which
+	@# `make install-app` runs (all must run on stock bash 3.2)
+	@if sed 's/[[:space:]]*#.*//' bin/worktrees install.sh app/scripts/sidecar.sh | grep -nE 'mapfile|readarray|declare -A|\$$\{[A-Za-z_]+(,,|\^\^)'; then \
 	  echo "bash-4-ism found (see above)"; exit 1; else echo "bash-3.2 gate: clean"; fi
 
 # The gate = the Rust binary (bin/worktrees shim is common.bash's WT_BIN).

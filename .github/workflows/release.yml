@@ -55,6 +55,8 @@ jobs:
   # macOS desktop-app bundles. Unsigned — install.sh strips the quarantine attr
   # on an explicit, checksum-verified install; local `make install-app` needs
   # neither. Signing/notarization is the later distribution tier (task plan).
+  # Each bundle carries the CLI for its own arch as a private sidecar,
+  # Contents/MacOS/worktrees — the app's to use, never put on PATH by us.
   app-bundle:
     strategy:
       fail-fast: false
@@ -146,13 +148,53 @@ jobs:
           grep -q '^test result: ok. 4 passed' /tmp/gate.log \
             || { echo "::error::the docs-server gate did not run all four cases"; exit 1; }
 
+      # ── the CLI sidecar ───────────────────────────────────────────────────
+      #
+      # Built HERE, from this checkout, for this matrix target — not fetched
+      # from the `build` job — so it is this commit by construction, and so the
+      # path that makes it is the one `make install-app` runs on every local
+      # install rather than one whose first exercise is a release.
+      # `--target` on BOTH this and the tauri build: the overlay makes
+      # tauri-build copy the staged file onto target/<t>/release/worktrees,
+      # which therefore has to be this very build (app/scripts/sidecar.sh).
+      - name: stage the CLI sidecar for this target
+        run: |
+          set -euo pipefail
+          rustup target add "${{ matrix.target }}"
+          app/scripts/sidecar.sh stage "${{ matrix.target }}"
+
+      # The overlay is what adds `externalBin`; it is not in tauri.conf.json
+      # because tauri-build would then demand the binary for every `cargo
+      # check`. Without it this step still succeeds — with no sidecar — which
+      # is why the step after it exists.
       - name: build the app bundle (signed updater artifacts)
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
-          rustup target add "${{ matrix.target }}"
           pnpm -C app install --frozen-lockfile
-          pnpm -C app tauri build --target "${{ matrix.target }}"
+          pnpm -C app tauri build --target "${{ matrix.target }}" \
+            --config "$GITHUB_WORKSPACE/app/src-tauri/tauri.bundle.conf.json"
+
+      # Same rule as the viewer below: assert the sidecar is IN what ships. The
+      # .app directory is never uploaded — the updater tarball is, and both
+      # install.sh and the in-app updater fetch it — so the check runs twice:
+      # on the bundle (did the bundler take it?) and on that tarball unpacked
+      # (did it survive tar, executable bit included?). The check is: a regular
+      # executable file, this target's arch and only that (`lipo`), version ==
+      # the tag. `--version` runs only on the native one; the x86_64 bundle is
+      # cross-built on an arm64 runner and is never executed — its version is
+      # read as data from the marker the CLI embeds. Never Contents/MacOS/app:
+      # that is the GUI and it launches instead of answering.
+      - name: assert the CLI sidecar is inside the shipped bundle
+        run: |
+          set -euo pipefail
+          t="${{ matrix.target }}"
+          bundle="target/$t/release/bundle/macos"
+          app/scripts/sidecar.sh check "$bundle/worktrees.app" "$t" "${GITHUB_REF_NAME#v}"
+          shipped="$RUNNER_TEMP/shipped-$t"
+          rm -rf "$shipped" && mkdir -p "$shipped"
+          tar -xzf "$bundle/worktrees.app.tar.gz" -C "$shipped"
+          app/scripts/sidecar.sh check "$shipped/worktrees.app" "$t" "${GITHUB_REF_NAME#v}"
       # Rule 10's other half: assert the bundle is IN the thing that ships, not
       # merely in the directory the bundler was pointed at. A glob that silently
       # matched nothing, a resources key lost in a merge, or a bundler that put
@@ -175,7 +217,9 @@ jobs:
           asset="worktrees-app-${{ matrix.target }}.app.tar.gz"
           bundle="target/${{ matrix.target }}/release/bundle/macos"
           # createUpdaterArtifacts already produced the tar.gz + minisign .sig —
-          # one artifact serves both install.sh and the in-app updater
+          # one artifact serves both install.sh and the in-app updater. The
+          # .sig is over the whole tarball, so it covers the sidecar with the
+          # rest of the bundle; nothing about signing changes for it.
           cp "$bundle/worktrees.app.tar.gz" "dist/$asset"
           cp "$bundle/worktrees.app.tar.gz.sig" "dist/$asset.sig"
           cd dist
