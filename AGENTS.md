@@ -152,15 +152,25 @@ Write to a file, then grep the file.
 **Inside Claude Code, `grep` is not grep, and it skips binary files without a
 word.** The shell snapshot defines `grep` as a function that runs Claude's
 bundled ugrep with `-I`, so any file holding even one NUL byte is skipped
-rather than searched. `crates/worktrees-core/src/projcfg.rs` holds one, a
-literal NUL in a comment around line 933. So `grep -r USER_ONLY_KEYS
-crates/worktrees-core/src` lists every file that CITES the const and not the
-one that DEFINES it, and a single-file grep prints nothing and exits 1. A lane
-concluded from exactly that, on 2026-10-17, that the const "no longer exists";
-it sits at line 51, and the claim was relayed before anyone checked. git is
-not fooled, because it sniffs only the first 8000 bytes for a NUL, so diffs and
-`git grep` are right. A "not found" that a conclusion rests on needs a second
-witness: `git grep`, `command grep` or `/usr/bin/grep`.
+rather than searched. `projcfg.rs` held one, a literal NUL in a comment, so
+`grep -r USER_ONLY_KEYS crates/worktrees-core/src` listed every file that CITES
+the const and not the one that DEFINES it, and a single-file grep printed
+nothing and exited 1. A lane concluded from exactly that, on 2026-10-17, that
+the const "no longer exists"; it sits at line 51, and the claim was relayed
+before anyone checked. A "not found" that a conclusion rests on needs a second
+witness: `git grep` or `/usr/bin/grep` (`command grep` skips the function),
+which both REPORT a match in a binary file instead of skipping it.
+
+**A backslash escape written through a script can land as the raw byte.**
+`"\x00"` or `"\u0000"` inside an ordinary Python string literal IS a NUL by
+the time the file is written. One archived session summary says in its own
+words that a Python heredoc did this — in a sentence whose `\x00-\x1f\x7f` had
+itself become raw bytes — and `projcfg.rs`'s NUL fits the same shape. When a
+script writes source or docs, use raw strings (`r"…"`) or double the
+backslash, then check the file with `file`, which must say text. Do not count
+on git to notice: it sniffs only the first 8000 bytes, so it showed that
+summary's diffs as `Binary files differ` and rendered `projcfg.rs`, whose NUL
+sat deeper, as ordinary text.
 
 **A pipeline's exit status is the LAST stage's.** `make test | tail -15` exits 0
 because `tail` did, and a mid-stream `not ok` scrolls off a 15-line window — so
