@@ -128,7 +128,11 @@ pub fn edit_user_config(
     if let Some(dir) = target.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
     }
-    let tmp = target.with_extension(format!("toml.tmp-{}", std::process::id()));
+    // Named after the file itself (`config.toml.tmp-<pid>`): worktrees-api's
+    // `host-policy.json` is written through here too, and a stray left by a
+    // crash must not claim to be TOML.
+    let name = target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = target.with_file_name(format!("{name}.tmp-{}", std::process::id()));
     let perms = std::fs::metadata(&target).ok().map(|m| m.permissions());
     let write = || -> Result<(), String> {
         std::fs::write(&tmp, &new).map_err(|e| format!("could not write {}: {e}", tmp.display()))?;

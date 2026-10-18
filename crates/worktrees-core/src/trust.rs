@@ -58,13 +58,13 @@ impl PiTrust {
 
 static PI_TRUST_OVERRIDE: Mutex<Option<PiTrust>> = Mutex::new(None);
 
-/// The app's Settings → pi value, pushed in-process (same shape as
+/// Settings → pi's value as host policy (same shape, and same owner, as
 /// `codex::set_permissions_override`).
 pub fn set_pi_trust_override(t: Option<PiTrust>) {
     *PI_TRUST_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()) = t;
 }
 
-/// app setting > `$WORKTREES_PI_PROJECT_TRUST` > `pi_project_trust` user
+/// host policy > `$WORKTREES_PI_PROJECT_TRUST` > `pi_project_trust` user
 /// config > `never`. An unknown value falls through to the next tier — and in
 /// the end to `never`, the narrow choice.
 pub fn pi_trust() -> PiTrust {

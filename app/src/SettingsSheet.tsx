@@ -1,5 +1,5 @@
 import { FeedbackSection } from "./FeedbackSection";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useEscape } from "./useEscape";
 import { McpSection, type McpStatus } from "./McpPanel";
 import { CodexMcpSection, type CodexMcpStatus } from "./CodexMcpPanel";
@@ -17,7 +17,7 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import ProfilesPanel from "./ProfilesPanel";
 import PiPanel from "./PiPanel";
 import type { PiMcpStatus } from "./PiMcpPanel";
-import type { LayoutTile, Settings, ThemeId, ThemeSetting, UpdateInfo } from "./settings";
+import type { CodexPermissions, LayoutTile, Settings, ThemeId, ThemeSetting, UpdateInfo } from "./settings";
 import { LAYOUT_KEYS } from "./arrange";
 import { clampNav, clampRem, clampTerm, clampZoom, DEFAULTS, LAYOUT_TILES, railsMerged, railsWidth, THEMES, ZOOM_STEPS } from "./settings";
 import { clampSteps, doneBounds, DONE_FIRST_SECS, DONE_HORIZONS, DONE_STEPS_MAX, DONE_STEPS_MIN, fmtSecs, snapHorizon } from "./afterglow";
@@ -386,6 +386,69 @@ function LayoutTiles({ places, dock, onPick }: {
   );
 }
 
+/** Settings → Codex → Permissions. HOST policy, not a setting of this client:
+ *  the host keeps it (`host-policy.json`) and decides every lane it launches,
+ *  so the control renders what the host answers and only a click here changes
+ *  it. A refusal rolls the control back and is reported through `fail`, so it
+ *  is never mistaken for a change that took.
+ *
+ *  Every set is followed by a fresh read, and only the newest read may land
+ *  (`seq`): two quick clicks can reach a server out of order, and the control
+ *  must end on what the host STORED, not on whichever reply came back last. */
+function CodexPermissionsSection({ onFail }: { onFail: (e: unknown) => void }) {
+  const [mode, setMode] = useState<CodexPermissions | null>(null);
+  const seq = useRef(0);
+  const readHost = useCallback(() => {
+    const n = ++seq.current;
+    invoke<CodexPermissions>("get_codex_permissions")
+      .then((m) => { if (seq.current === n) setMode(m); })
+      .catch((e) => onFail(`Codex permissions: ${String(e)}`));
+  }, [onFail]);
+  useEffect(() => {
+    readHost();
+    return () => { seq.current++; };
+  }, [readHost]);
+  const pick = (next: CodexPermissions) => {
+    if (next === mode) return;
+    const prev = mode;
+    const n = ++seq.current;
+    setMode(next);
+    invoke("set_codex_permissions", { mode: next }).then(readHost, (e) => {
+      if (seq.current === n) setMode(prev);
+      onFail(`Codex permissions: ${String(e)}`);
+      readHost();
+    });
+  };
+  return (
+    <section className="setting">
+      <label>Permissions</label>
+      <div className="seg seg-plain" data-testid="codex-permissions">
+        {([
+          ["ask", "Ask"],
+          ["auto-review", "Auto-review"],
+          ["full", "Full access"],
+        ] as const).map(([m, label]) => (
+          <button key={m} className={mode === m ? "on" : ""} disabled={mode === null} onClick={() => pick(m)}>
+            {label}
+          </button>
+        ))}
+      </div>
+      {/* All three lines, always: the choice is only honest if you can read
+          what you are NOT picking. The current one is bold. */}
+      {([
+        ["ask", "Ask", "Codex asks before running commands."],
+        ["auto-review", "Auto-review", "a reviewer approves or refuses each request; commands run sandboxed to this worktree plus the repo's git data (hooks and config included, so commits work) and the network."],
+        ["full", "Full access", "no prompts and no sandbox."],
+      ] as const).map(([m, label, line]) => (
+        <div className="hint" key={m}>
+          {mode === m ? <b>{label}:</b> : `${label}:`} {line}
+        </div>
+      ))}
+      <div className="hint">Kept by this machine rather than this window, and applies to the next Codex launch; a session already running keeps what it started with.</div>
+    </section>
+  );
+}
+
 export function SettingsSheet({
   open,
   at,
@@ -403,6 +466,7 @@ export function SettingsSheet({
   onReset,
   repo,
   onReport,
+  onFail,
   mcpStatus,
   onMcpChanged,
   mcpOfferPending,
@@ -459,6 +523,8 @@ export function SettingsSheet({
   /// needs to know which one to report as effective. Empty is fine (global view).
   repo: string;
   onReport: (msg: string) => void;
+  /** App's `fail`: a refused host-policy change is an error, not a notice. */
+  onFail: (e: unknown) => void;
   /// Claude MCP wiring — fetched by App (Home shows a card from the same
   /// status), so this panel renders rather than re-probes.
   mcpStatus: McpStatus | null;
@@ -905,33 +971,7 @@ export function SettingsSheet({
           </>}
 
           {cat === "codex" && <>
-          <section className="setting">
-            <label>Permissions</label>
-            <div className="seg seg-plain" data-testid="codex-permissions">
-              {([
-                ["ask", "Ask"],
-                ["auto-review", "Auto-review"],
-                ["full", "Full access"],
-              ] as const).map(([mode, label]) => (
-                <button key={mode} className={settings.codex_permissions === mode ? "on" : ""}
-                  onClick={() => onChange({ codex_permissions: mode })}>
-                  {label}
-                </button>
-              ))}
-            </div>
-            {/* All three lines, always: the choice is only honest if you can read
-                what you are NOT picking. The current one is bold. */}
-            {([
-              ["ask", "Ask", "Codex asks before running commands."],
-              ["auto-review", "Auto-review", "a reviewer approves or refuses each request; commands run sandboxed to this worktree plus the repo's git data (hooks and config included, so commits work) and the network."],
-              ["full", "Full access", "no prompts and no sandbox."],
-            ] as const).map(([mode, label, line]) => (
-              <div className="hint" key={mode}>
-                {settings.codex_permissions === mode ? <b>{label}:</b> : `${label}:`} {line}
-              </div>
-            ))}
-            <div className="hint">Applies to the next Codex launch; a session already running keeps what it started with.</div>
-          </section>
+          <CodexPermissionsSection onFail={onFail} />
           {/* ORDER IS LOAD-BEARING: both sections below are deep-link targets
               (offers.ts), and the focus effect scrolls once, on the next frame.
               The MCP panel and its migration table fill in ASYNCHRONOUSLY, so
@@ -944,7 +984,7 @@ export function SettingsSheet({
             offerPending={codexMcpOfferPending} onSilenceOffer={onSilenceCodexMcpOffer} />
           </>}
 
-          {cat === "pi" && <PiPanel settings={settings} repo={repo || null} onChange={onChange} onReport={onReport}
+          {cat === "pi" && <PiPanel settings={settings} repo={repo || null} onChange={onChange} onReport={onReport} onFail={onFail}
             onMcpStatus={(s) => { setPiMcpStatus(s); onPiMcpChanged(s); }}
             mcpOfferPending={piMcpOfferPending} onSilenceMcpOffer={onSilencePiMcpOffer} />}
 

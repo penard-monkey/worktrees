@@ -14,6 +14,7 @@ use crate::argv::Argv;
 use crate::log::log as applog;
 use crate::config::project_at;
 use crate::editors;
+use crate::hostpolicy;
 use crate::ops::{known_harness, run_op, CmdResult};
 use crate::status::cli_binary;
 use crate::Ctx;
@@ -560,17 +561,28 @@ pub fn agent_link_skills() -> Result<Vec<String>, String> {
     })
 }
 
-/// The Settings → Codex permission mode, pushed in-process so the NEXT Codex
-/// launch uses it. An unknown value is refused, never defaulted: a typo must not
-/// quietly widen (or narrow) what Codex may do.
-pub fn set_codex_permissions(mode: String) -> Result<(), String> {
+/// Settings → Codex → Permissions: HOST policy (`hostpolicy`), persisted in
+/// the config dir and then applied in-process so the NEXT Codex launch uses
+/// it. Only the Settings click calls this; loading a client never does. An
+/// unknown value is refused and nothing is written: a typo must not quietly
+/// widen (or narrow) what Codex may do.
+pub fn set_codex_permissions(ctx: &Ctx, mode: String) -> Result<(), String> {
     let Some(p) = worktrees_core::codex::Permissions::parse(&mode) else {
         let e = format!("unknown Codex permission mode '{mode}' (expected ask, auto-review or full)");
         applog("error", &format!("set_codex_permissions: {e}"));
         return Err(e);
     };
+    hostpolicy::set(&ctx.config_dir, hostpolicy::CODEX_PERMISSIONS, p.as_str())
+        .inspect_err(|e| applog("error", &format!("set_codex_permissions: {e}")))?;
     worktrees_core::codex::set_permissions_override(Some(p));
+    applog("info", &format!("host-policy: codex_permissions set to {}", p.as_str()));
     Ok(())
+}
+
+/// What the next Codex launch on this host will use, for Settings to render:
+/// the host's own value, else whatever env or user config decide.
+pub fn get_codex_permissions() -> Result<String, String> {
+    Ok(worktrees_core::codex::permissions().as_str().to_string())
 }
 
 /// What a model picker lists for `harness` (`choice::options_for`): Claude's
@@ -614,15 +626,19 @@ pub fn pi_status(repo: Option<String>) -> Result<PiStatus, String> {
     })
 }
 
-/// Settings → pi's trust mode, pushed in-process like Codex's permissions. An
-/// unknown value is refused, never defaulted.
-pub fn set_pi_trust(mode: String) -> Result<(), String> {
+/// Settings → pi's trust mode: host policy like Codex's permissions, and read
+/// back through `pi_status`'s `trust`. An unknown value is refused, never
+/// defaulted, and nothing is written.
+pub fn set_pi_trust(ctx: &Ctx, mode: String) -> Result<(), String> {
     let Some(t) = worktrees_core::trust::PiTrust::parse(&mode) else {
         let e = format!("unknown pi trust mode '{mode}' (expected never or ask)");
         applog("error", &format!("set_pi_trust: {e}"));
         return Err(e);
     };
+    hostpolicy::set(&ctx.config_dir, hostpolicy::PI_PROJECT_TRUST, t.as_str())
+        .inspect_err(|e| applog("error", &format!("set_pi_trust: {e}")))?;
     worktrees_core::trust::set_pi_trust_override(Some(t));
+    applog("info", &format!("host-policy: pi_project_trust set to {}", t.as_str()));
     Ok(())
 }
 

@@ -849,8 +849,13 @@ async fn agent_link_skills() -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
-async fn set_codex_permissions(mode: String) -> Result<(), String> {
-    worktrees_api::project::set_codex_permissions(mode)
+async fn set_codex_permissions(app: AppHandle, mode: String) -> Result<(), String> {
+    worktrees_api::project::set_codex_permissions(&ctx(&app), mode)
+}
+
+#[tauri::command]
+async fn get_codex_permissions() -> Result<String, String> {
+    worktrees_api::project::get_codex_permissions()
 }
 
 #[tauri::command]
@@ -866,8 +871,8 @@ async fn pi_status(repo: Option<String>) -> Result<worktrees_api::project::PiSta
 }
 
 #[tauri::command]
-async fn set_pi_trust(mode: String) -> Result<(), String> {
-    worktrees_api::project::set_pi_trust(mode)
+async fn set_pi_trust(app: AppHandle, mode: String) -> Result<(), String> {
+    worktrees_api::project::set_pi_trust(&ctx(&app), mode)
 }
 
 #[tauri::command]
@@ -1354,6 +1359,7 @@ pub fn run() {
                 applog("error", &format!("app_config_dir: {e}"));
                 PathBuf::from(".")
             });
+            worktrees_api::hostpolicy::boot(&config_dir);
             app.manage(worktrees_api::Ctx::new(
                 config_dir,
                 std::sync::Arc::new(AppHost(app.handle().clone())),
@@ -1795,6 +1801,7 @@ pub fn run() {
             agent_link_skills,
             agent_user_skills,
             set_codex_permissions,
+            get_codex_permissions,
             agent_guidance_status,
             set_agent_guidance,
             set_agent_guidance_skill,

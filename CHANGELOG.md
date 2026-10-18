@@ -54,6 +54,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   flag.
 
 ### Fixed
+- **Opening the app no longer sets what Codex and pi may do.** Settings →
+  Codex → Permissions and Settings → pi → Project trust were sent to the
+  backend every time the app loaded, from the window's own saved settings, so
+  whichever window loaded last decided them for every lane. With one engine
+  serving several windows or devices, opening a stale one was enough to widen
+  Codex to Full access everywhere. Both now live on this machine, in
+  `host-policy.json` beside the app's settings, and change only when you click
+  them in Settings; the panels show the machine's value. A value you had
+  chosen is carried over once, the first time the new version starts. The
+  CLI and lanes started over MCP still follow `$WORKTREES_CODEX_PERMISSIONS`,
+  `$WORKTREES_PI_PROJECT_TRUST` and your config, as before.
 - **"Write .worktrees.toml" in Project settings now writes the file.** In a
   repo with nothing to suggest — no gitignored credential file, no ports, no
   compose — the button greyed out, came back, and nothing appeared: `init`

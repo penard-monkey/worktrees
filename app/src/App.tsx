@@ -4717,21 +4717,6 @@ function App() {
     })();
   }, []);
 
-  // Settings → Codex → Permissions lives in the backend's process (the app
-  // links core; `codex::set_permissions_override`), so it is pushed after the
-  // load and on every change. Gated on hydration: pushing the DEFAULT first
-  // would be harmless only until someone launches Codex in that gap. A refusal
-  // is surfaced, never swallowed — it would mean the launch uses another mode.
-  useEffect(() => {
-    if (!hydratedTick) return;
-    invoke("set_codex_permissions", { mode: settings.codex_permissions }).catch((e) => fail(`Codex permissions: ${String(e)}`));
-  }, [hydratedTick, settings.codex_permissions, fail]);
-  // Same gate, same reason: under the default, a repo gets --no-approve.
-  useEffect(() => {
-    if (!hydratedTick) return;
-    invoke("set_pi_trust", { mode: settings.pi_project_trust }).catch((e) => fail(`pi trust: ${String(e)}`));
-  }, [hydratedTick, settings.pi_project_trust, fail]);
-
   /** The functional form exists for patches that must be built from OTHER
    *  keys' current value — undo restoring one repo's `manual_order` entry.
    *  Building such a patch from a captured `settings` bakes in whatever that
@@ -9103,7 +9088,7 @@ function App() {
       }} onClose={() => setSettingsAt(null)}
         update={upd} cliStale={cliStale} cliMissing={cliMissing} appStale={appStale} onCheckUpdate={checkUpdate} onCatShown={onSettingsCat}
         onShowNotes={showReleaseNotes} onReset={onReset}
-        repo={sel?.repo ?? ""} onReport={(m) => setNotice(m)}
+        repo={sel?.repo ?? ""} onReport={(m) => setNotice(m)} onFail={fail}
         mcpStatus={mcpStatus} onMcpChanged={setMcpStatus}
         mcpOfferPending={!!mcpOffer} onSilenceMcpOffer={() => mcpOffer && silenceOffer(mcpOffer)}
         onCodexMcpChanged={setCodexMcp}

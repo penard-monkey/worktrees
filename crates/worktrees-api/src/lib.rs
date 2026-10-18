@@ -59,6 +59,7 @@ pub mod docserver;
 pub mod editors;
 pub mod files;
 pub mod hostenv;
+pub mod hostpolicy;
 pub mod log;
 pub mod meta;
 pub mod project;

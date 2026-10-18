@@ -209,15 +209,18 @@ impl Permissions {
     }
 }
 
-/// The app's setting, pushed in-process (the app links this crate). Wins over
-/// env and config so a Settings change applies to the very next launch.
+/// The engine's host policy (worktrees-api `hostpolicy`): loaded from
+/// `host-policy.json` at the engine's boot and set again by the Settings click,
+/// never by a client loading. Wins over env and config so a Settings change
+/// applies to the very next launch. The CLI and MCP-launched lanes never set
+/// it, so they keep env and config.
 static PERMISSIONS_OVERRIDE: Mutex<Option<Permissions>> = Mutex::new(None);
 
 pub fn set_permissions_override(p: Option<Permissions>) {
     *PERMISSIONS_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner()) = p;
 }
 
-/// app setting > `$WORKTREES_CODEX_PERMISSIONS` > `codex_permissions` user
+/// host policy > `$WORKTREES_CODEX_PERMISSIONS` > `codex_permissions` user
 /// config > auto-review. An unknown value falls through rather than failing a
 /// launch.
 pub fn permissions() -> Permissions {
