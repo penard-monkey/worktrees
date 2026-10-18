@@ -1319,7 +1319,18 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .setup(|_app| {
+        // The four registries that used to be `.manage()`d separately are
+        // fields on the `Ctx` built in `.setup()` below — one object for the
+        // process, so a wrapper resolves them all from the same place. Only
+        // the window tracker stays here: it IS the window.
+        .manage(winstate::Tracker::default())
+        // ONE `.setup`. tauri's `Builder::setup` REPLACES the stored closure
+        // (`self.setup = Box::new(setup)`) rather than chaining, so a second
+        // call silently discards the first. Two of them shipped from #358 on:
+        // the dead one held core's log sink, and then, in #508, `IDENT` and the
+        // `Ctx` itself, so every `ctx()` panicked "state() called before
+        // manage()". api-boundary-check.mjs counts them.
+        .setup(|app| {
             // Both usage readers moved into core so the CLI and MCP can read
             // them too, and they lost their direct `applog` in the move. Hand
             // it back here, ONCE for the whole engine: the app has a log, the
@@ -1333,28 +1344,20 @@ pub fn run() {
             // into the real app's log. Lines emitted ABOVE this point (the
             // startup line) still land under the default identifier — this is
             // the earliest an app handle exists to ask.
-            let _ = IDENT.set(_app.config().identifier.clone());
+            let _ = IDENT.set(app.config().identifier.clone());
             // ONE `Ctx` for the process. The config dir is resolved here
             // because it is the earliest point an app handle exists; a failure
             // is logged and falls back to the current directory rather than
             // aborting startup, which is what every `app.path()` call site it
             // replaces did by returning an error the caller logged.
-            let config_dir = _app.path().app_config_dir().unwrap_or_else(|e| {
+            let config_dir = app.path().app_config_dir().unwrap_or_else(|e| {
                 applog("error", &format!("app_config_dir: {e}"));
                 PathBuf::from(".")
             });
-            _app.manage(worktrees_api::Ctx::new(
+            app.manage(worktrees_api::Ctx::new(
                 config_dir,
-                std::sync::Arc::new(AppHost(_app.handle().clone())),
+                std::sync::Arc::new(AppHost(app.handle().clone())),
             ));
-            Ok(())
-        })
-        // The four registries that used to be `.manage()`d separately are
-        // fields on the `Ctx` built in `.setup()` above — one object for the
-        // process, so a wrapper resolves them all from the same place. Only
-        // the window tracker stays here: it IS the window.
-        .manage(winstate::Tracker::default())
-        .setup(|app| {
             // A crash is the one exit `RunEvent::Exit` never sees, and it
             // leaves the derived trees on disk: COPIES of the user's documents
             // — the ones §4.3 says carry a client's signed agreement — outside
@@ -1570,7 +1573,7 @@ pub fn run() {
                     // poll: the whole point of the browser viewer is the second
                     // monitor, so "the app is hidden" is exactly when the tab
                     // most needs to be current.
-                    let notes = viewer::refresh(&handle.state::<viewer::Viewer>(), sysclock::now_epoch());
+                    let notes = viewer::refresh(&pollctx.viewer, sysclock::now_epoch());
                     if notes.is_empty() {
                         said_viewer.clear();
                     }

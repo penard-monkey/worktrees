@@ -60,6 +60,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   (the same all-comments file `--print` has always emitted, which `doctor`
   reads back clean). Without `-y` nothing changes, except that the message
   now says how to ask for the template anyway.
+- **The Claude and Codex usage readers log to app.log again.** Since v0.35.0
+  the app's builder called `.setup()` twice, and tauri keeps only the LAST
+  closure, so the one that hands core its log sink never ran: every line those
+  readers wrote was dropped without a trace. There is one `.setup` now, and
+  `app/scripts/api-boundary-check.mjs` fails if a second appears.
 
 ## [0.42.0] - 2026-10-15
 

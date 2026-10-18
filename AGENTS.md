@@ -459,6 +459,19 @@ parses to an EMPTY catalog on purpose, which reads as "pi offers nothing".
 
 - **Commands must be `async fn`** — sync handlers run on the main thread and
   freeze the UI for every git/tmux shell-out.
+- **`Builder::setup` REPLACES, and `state::<T>()` compiles for any `T`.**
+  tauri 2.11.5 stores `self.setup = Box::new(setup)`, so a second `.setup(…)`
+  in the chain silently discards the first. The first held core's log sink from
+  #358 (v0.35.0) on, and then, in #508, `IDENT` and the `Ctx` itself. Every
+  `ctx()` panicked "state() called before manage()", and #508 sat 9/9 green
+  with an app that could not answer one command: nothing in CI runs the app,
+  and the check that "exactly one Ctx is managed" counted the line textually,
+  in the dead closure. Fixing that surfaced a second of the same kind: the poll
+  still asked `state::<viewer::Viewer>()` for a registry that had moved into
+  the `Ctx`. `api-boundary-check.mjs` now counts `.setup(` and refuses any
+  state lookup but the `Ctx` and the window tracker. Both failures exist only
+  as `[panic] … before manage()` lines in `app.log`, so after any change to
+  `run()`, launch it (`sandbox.sh --app`) and grep the log; no suite will.
 - **GUI launches get launchd's bare PATH** (no homebrew → no tmux).
   `fixup_gui_path()` in lib.rs resolves the login-shell PATH at startup —
   don't add subprocess calls that assume PATH before it runs.

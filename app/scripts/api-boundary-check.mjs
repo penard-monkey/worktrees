@@ -75,7 +75,7 @@ if (inline.length) fail(`these commands have a body in lib.rs rather than a wrap
 else ok(`every command in lib.rs delegates to worktrees-api (except ${[...KEEP].join(", ")})`);
 
 // ── the wiring in run(), which only the source can answer for ──────────────
-// Three facts no Rust test can reach, because they are about the order and
+// Four facts no Rust test can reach, because they are about the order and
 // the arity of calls inside `run()` rather than any function's behaviour.
 // Each fails SILENTLY in the running app, which is why they are here.
 const run = lib.slice(lib.indexOf("pub fn run()"));
@@ -106,5 +106,34 @@ else ok("ctx() clones the one managed Ctx rather than building a new one");
 const managed = (lib.match(/\.manage\(worktrees_api::Ctx::new/g) ?? []).length;
 if (managed !== 1) fail(`the Ctx is managed ${managed} times — expected exactly 1`);
 else ok("exactly one Ctx is managed for the process");
+
+// 4. …and the closure that manages it must be one that RUNS. tauri's
+//    `Builder::setup` REPLACES the stored closure (`self.setup =
+//    Box::new(setup)`, app.rs in the locked 2.11.5) rather than chaining, so
+//    a second `.setup(` in the chain silently discards the first. Check 3
+//    counts `Ctx::new` textually and passed for the whole of #508 while that
+//    line sat in the dead closure: every ctx() call panicked "state() called
+//    before manage()". main had carried a dead first closure since #358,
+//    which installed core's log sink. Comments are stripped first, because
+//    the wiring's own prose says ".setup()".
+const code = run.split("\n").map((l) => l.replace(/\/\/.*$/, "")).join("\n");
+const setups = (code.match(/\.setup\(/g) ?? []).length;
+if (setups !== 1) fail(`run() calls .setup( ${setups} times — tauri keeps only the LAST, so every earlier closure is dead code`);
+else ok("run() has exactly one .setup( — tauri's Builder::setup replaces rather than chains");
+
+// 5. Nothing may look up as Tauri state a thing that now lives on the Ctx.
+//    `handle.state::<T>()` for a type nobody `.manage()`s compiles and panics
+//    at RUNTIME, "state() called before manage()": the poll's docs-viewer
+//    refresh kept asking for `viewer::Viewer` after #508 folded it into the
+//    Ctx, and it fired on every tick once the Ctx itself was fixed. Only two
+//    things are managed — the Ctx and the window tracker — so only those two
+//    may be asked for, and anything else reaches its registry through ctx().
+const stateRe = /\.(?:try_)?state::<\s*([\w:]+)\s*>/g;
+const asked = [...code.matchAll(stateRe)].map((m) => m[1]);
+const libAll = lib.split("\n").map((l) => l.replace(/\/\/.*$/, "")).join("\n");
+const askedAnywhere = [...libAll.matchAll(stateRe)].map((m) => m[1]);
+const stray = [...new Set([...asked, ...askedAnywhere])].filter((t) => !/(^|::)(Ctx|Tracker)$/.test(t));
+if (stray.length) fail(`lib.rs asks Tauri for state nothing manages: ${stray.join(", ")} — reach it through ctx() instead`);
+else ok("lib.rs asks Tauri only for the Ctx and the window tracker, the two things it manages");
 console.log(failed ? `\napi-boundary-check: ${failed} failure(s)` : "\napi-boundary-check: all good");
 process.exit(failed ? 1 : 0);
