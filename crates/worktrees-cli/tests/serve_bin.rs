@@ -65,10 +65,20 @@ impl Sandbox {
         self.launch_with(extra, None)
     }
 
+    /// `launch`, with variables of the test's own added to serve's environment.
+    fn launch_env(&mut self, extra: &[&str], env: &[(&str, &str)]) -> Value {
+        self.launch_full(extra, None, env)
+    }
+
     /// `launch`, optionally with the child's SOFT open-file limit lowered
     /// first (the hard limit left as it is, the way launchd leaves it).
     fn launch_with(&mut self, extra: &[&str], soft_nofile: Option<libc::rlim_t>) -> Value {
+        self.launch_full(extra, soft_nofile, &[])
+    }
+
+    fn launch_full(&mut self, extra: &[&str], soft_nofile: Option<libc::rlim_t>, env: &[(&str, &str)]) -> Value {
         let mut cmd = Command::new(bin());
+        cmd.envs(env.iter().copied());
         if let Some(n) = soft_nofile {
             use std::os::unix::process::CommandExt;
             // SAFETY: getrlimit/setrlimit are async-signal-safe, and the
@@ -210,13 +220,14 @@ fn spec_hmac(key: &[u8], msg: &[u8]) -> String {
 fn rpc(ws: &mut WebSocket<TcpStream>, id: u64, cmd: &str, args: Value) -> Value {
     ws.send(Message::text(json!({ "id": id, "cmd": cmd, "args": args }).to_string())).unwrap();
     // Events may arrive between replies (the poll emits `places:changed`
-    // within seconds of starting); skip them for the reply with our id.
+    // within seconds of starting), and so may the frames of a terminal this
+    // test attached; skip both for the reply with our id.
     loop {
         let v: Value = serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
         if v["id"] == json!(id) {
             return v;
         }
-        assert!(v.get("event").is_some(), "an unexpected frame: {v}");
+        assert!(v.get("event").is_some() || v.get("channel").is_some(), "an unexpected frame: {v}");
     }
 }
 
@@ -293,6 +304,95 @@ fn serve_log_is_owner_only_new_or_inherited() {
     std::fs::set_permissions(sb.log(), std::fs::Permissions::from_mode(0o644)).unwrap();
     sb.launch(&[]);
     assert_eq!(mode(&sb.log()), 0o600, "an inherited 0644 serve.log is {:o}", mode(&sb.log()));
+    assert_eq!(sb.terminate().code(), Some(0));
+}
+
+/// A private tmux server for one test, on a socket of its own that serve is
+/// pointed at through `TMUX` — which is where a tmux client looks when it is
+/// given no `-L`/`-S`, so every tmux call serve makes lands here and none on
+/// the server of whoever runs the tests. This side passes `-S` on every call,
+/// `kill-server` included. In the temp dir itself: a unix socket path has a
+/// ~104-byte limit on macOS.
+struct PrivateTmux {
+    sock: PathBuf,
+}
+
+impl PrivateTmux {
+    fn new(tag: &str) -> Self {
+        PrivateTmux { sock: std::env::temp_dir().join(format!("wtsb-{tag}-{}.sock", std::process::id())) }
+    }
+    /// The value serve's `TMUX` gets: socket, server pid, session index —
+    /// tmux reads only the first field.
+    fn env(&self) -> String {
+        format!("{},0,0", self.sock.display())
+    }
+    fn run(&self, args: &[&str]) -> std::process::Output {
+        Command::new("tmux").arg("-S").arg(&self.sock).args(args).env_remove("TMUX").output().expect("tmux")
+    }
+    fn available() -> bool {
+        Command::new("tmux").arg("-V").output().is_ok_and(|o| o.status.success())
+    }
+    /// The sessions with a client attached, as tmux lists them.
+    fn attached(&self) -> Vec<String> {
+        let o = self.run(&["list-clients", "-F", "#{session_name}"]);
+        String::from_utf8_lossy(&o.stdout).lines().map(str::to_string).collect()
+    }
+}
+
+impl Drop for PrivateTmux {
+    fn drop(&mut self) {
+        let _ = self.run(&["kill-server"]);
+        let _ = std::fs::remove_file(&self.sock);
+    }
+}
+
+/// `term_open` names a tmux session, and a client's name for one is either a
+/// session that exists or an error that says which. It answered ok for a
+/// session that did not exist — the tmux client inside the pty then printed
+/// tmux's complaint and quit, so the client held an id for nothing.
+#[test]
+fn term_open_refuses_a_session_that_does_not_exist() {
+    let tmux = PrivateTmux::new("missing");
+    let mut sb = Sandbox::new("termmissing");
+    let sf = sb.launch_env(&["--allow-origin", "http://localhost:1420"], &[("TMUX", &tmux.env())]);
+    let mut ws = connect(&sf, "http://localhost:1420");
+    let r = rpc(&mut ws, 1, "term_open", json!({ "session": "wtsb-missing", "cols": 80, "rows": 24, "onBytes": "__CHANNEL__:1" }));
+    let err = r["err"].as_str().unwrap_or_else(|| panic!("term_open answered for a missing session: {r}"));
+    assert!(err.contains("wtsb-missing"), "{err}");
+    assert_eq!(sb.terminate().code(), Some(0));
+}
+
+/// ...and the session named EXACTLY. A tmux target is a prefix match, so a
+/// `term_open` for a session that had gone attached whichever session's name
+/// began with it — another place's agent, typed into from this one's pane.
+/// The positive control is in the same server: the real name attaches.
+#[test]
+fn term_open_attaches_only_the_session_named_exactly() {
+    if !PrivateTmux::available() {
+        eprintln!("skipped: no tmux on PATH (the refusal test above still runs)");
+        return;
+    }
+    let tmux = PrivateTmux::new("exact");
+    let made = tmux.run(&["-f", "/dev/null", "new-session", "-d", "-s", "wtsb-lane", "-x", "80", "-y", "24", "sleep 600"]);
+    assert!(made.status.success(), "private tmux: {}", String::from_utf8_lossy(&made.stderr));
+    let mut sb = Sandbox::new("termexact");
+    let sf = sb.launch_env(&["--allow-origin", "http://localhost:1420"], &[("TMUX", &tmux.env())]);
+    let mut ws = connect(&sf, "http://localhost:1420");
+
+    let r = rpc(&mut ws, 1, "term_open", json!({ "session": "wtsb", "cols": 80, "rows": 24, "onBytes": "__CHANNEL__:1" }));
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(r["err"].is_string(), "a prefix of a session's name was attached: {r}, clients on {:?}", tmux.attached());
+    assert!(tmux.attached().is_empty(), "{:?}", tmux.attached());
+
+    let r = rpc(&mut ws, 2, "term_open", json!({ "session": "wtsb-lane", "cols": 80, "rows": 24, "onBytes": "__CHANNEL__:2" }));
+    let id = r["ok"].as_u64().unwrap_or_else(|| panic!("the real session was refused: {r}"));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while tmux.attached().is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(tmux.attached(), vec!["wtsb-lane".to_string()]);
+    let r = rpc(&mut ws, 3, "term_close", json!({ "id": id }));
+    assert_eq!(r["ok"], Value::Null, "{r}");
     assert_eq!(sb.terminate().code(), Some(0));
 }
 

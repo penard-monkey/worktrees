@@ -67,9 +67,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   sent (one serial lane per stream; everything else stays concurrent), and a
   finished channel says so with `{channel, seq, end: true}`, so a client can
   let the handler go the way it does when a Tauri `Channel` drops. A dock
-  shell opens only in a place of the repository named, and a slug that is
-  not one (`--all`, a name no place has) is refused with the reason before
-  any shell starts.
+  shell opens only in a place of the repository named, and a terminal
+  attaches only to a tmux session of exactly the name given; anything else
+  (`--all`, a name no place or session has) is refused with the reason before
+  any shell or tmux client starts.
 - **Applying the worktrees rules or the agent-setup Fix now opens a review
   lane for the `agent-instructions` branch**: a place on it, with an agent
   whose brief explains what the branch changes — each file, the AGENTS.md
@@ -192,6 +193,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   control characters and the bidi overrides are now written as visible
   escapes (`\n`, `\x1b`, `\u{202e}`). And a message over 4000 bytes whose
   cut fell inside a character panicked the logger instead of being written.
+- **A terminal pane attaches only to its own session.** The pane named its
+  session to tmux, which matches a name as a PREFIX, so a pane opened in the
+  seconds after a session ended and before the app noticed (switching to that
+  place, say) could land on another session whose name began with it —
+  another place's agent, and the keys typed with it. It now attaches to that
+  name exactly, and a session that is gone shows as an error in the pane
+  naming it, instead of tmux's own "can't find session".
 
 ## [0.42.0] - 2026-10-15
 

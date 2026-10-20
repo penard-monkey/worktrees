@@ -47,6 +47,15 @@ pub static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 /// frontend. We never create or own a shell — tmux owns the shells, panes, and
 /// scrollback; this app is just another tmux client. Closing detaches (the
 /// session survives and stays `tmux attach`-able from a bare terminal).
+///
+/// EXISTING and exactly that name, or an error saying which, before anything
+/// spawns. It answered ok for a session that did not exist: the tmux client in
+/// the pty printed tmux's complaint and quit, and the caller held an id for
+/// nothing. Worse, a tmux target is a PREFIX match, so the attach for a
+/// session that had just gone landed on whichever one's name began with it —
+/// another place's agent, typed into from this pane. Nothing waits on "ok,
+/// attach later": the main pane mounts only for a session `ls` reports up,
+/// and writes an error into itself.
 pub fn term_open(
     session: String,
     cols: u16,
@@ -54,6 +63,9 @@ pub fn term_open(
     on_bytes: Arc<dyn ByteSink>,
     terms: &Terminals,
 ) -> Result<u32, String> {
+    if !tmux::session_exists(&session) {
+        return Err(format!("no tmux session named {session}"));
+    }
     let pair = native_pty_system()
         .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
         .map_err(|e| e.to_string())?;
@@ -70,9 +82,10 @@ pub fn term_open(
     // -N (`tmux::no_start_args`): an attach under a tty that finds the socket
     // refused or missing would otherwise unlink it and start a second server,
     // orphaning every session in the first.
+    // `=`: exactly this session, should it go between the check and here.
     let mut cmd = CommandBuilder::new("tmux");
     cmd.args(worktrees_core::tmux::no_start_args());
-    cmd.args(["-u", "attach-session", "-t", &session]);
+    cmd.args(["-u", "attach-session", "-t", &format!("={session}")]);
     cmd.env("TERM", "xterm-256color");
 
     let child = pair.slave.spawn_command(cmd).map_err(|e| {
