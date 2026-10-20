@@ -1,4 +1,9 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "mainBinaryName": "worktrees-app"
+  "mainBinaryName": "worktrees-app",
+  "bundle": {
+    "category": "DeveloperTool",
+    "linux": { "deb": { "section": "devel" } },
+    "longDescription": "A durable place for every work stream: each place is a git worktree plus a tmux session running your AI CLI. tmux and git come from the system."
+  }
 }
