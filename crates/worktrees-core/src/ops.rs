@@ -2230,7 +2230,7 @@ fn guidance_findings(p: &Project) -> Vec<Finding> {
 }
 
 pub fn cmd_doctor(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
-    // Both scans stop at `--`: a place NAMED `--pi` is a name (`argv`).
+    // Every scan stops at `--`: a place NAMED `--pi` is a name (`argv`).
     let (opts, rest) = crate::argv::split_options(args);
     let json = opts.iter().any(|a| a == "--json") || std::env::var("WORKTREES_JSON").ok().as_deref() == Some("1");
     if opts.iter().any(|a| a == "--pi") {
@@ -2240,8 +2240,8 @@ pub fn cmd_doctor(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         }
         return pi_doctor(p, ui, json);
     }
-    if args.iter().any(|a| a == "--kimi") {
-        if let Some(extra) = args.iter().find(|a| *a != "--kimi" && *a != "--json") {
+    if opts.iter().any(|a| a == "--kimi") {
+        if let Some(extra) = opts.iter().chain(rest).find(|a| *a != "--kimi" && *a != "--json") {
             ui.error(&format!("doctor --kimi takes only --json (got '{extra}')"));
             return 1;
         }
@@ -3797,11 +3797,13 @@ mod tests {
         // close is driven by the bats suite instead: past its parser it asks the
         // REAL tmux server about sessions, which a unit test must not do.
 
-        // doctor scans for `--pi`/`--json` before its parser runs; neither scan
-        // may look past `--`. Last, so the unfixed code fails above and never
-        // runs pi's doctor (which shells out to pi).
-        let (_, out) = run_cmd(&p, cmd_doctor, &["--", "--pi"]);
-        assert!(out.contains("No worktree '--pi'"), "{out}");
+        // doctor scans for `--pi`/`--kimi`/`--json` before its parser runs; no
+        // scan may look past `--`. Last, so the unfixed code fails above and
+        // never runs pi's or kimi's doctor (each shells out to its harness).
+        for flag in ["--pi", "--kimi"] {
+            let (_, out) = run_cmd(&p, cmd_doctor, &["--", flag]);
+            assert!(out.contains(&format!("No worktree '{flag}'")), "{flag}: {out}");
+        }
         let _ = std::fs::remove_dir_all(&base);
     }
 
