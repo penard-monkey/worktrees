@@ -425,6 +425,62 @@ fn writes_to_one_stream_reach_the_pty_in_the_order_they_were_sent() {
     let _ = std::fs::remove_dir_all(&repo);
 }
 
+/// **End of channel.** A `ByteSink` the engine lets go of — a detach, the
+/// shell exiting — ends its channel with `{channel, seq, end: true}` on the
+/// same queue, so the client can drop the handler and the xterm it closes
+/// over. Tauri does this when the Rust `Channel` drops; before this frame a
+/// serve client had to keep every channel for the life of the page.
+#[test]
+fn a_channel_ends_when_its_sink_is_dropped_by_a_detach_or_an_exit() {
+    std::env::set_var("SHELL", "/bin/sh");
+    let l = live("end");
+    let repo = scratch_repo("end");
+    let repo_s = repo.to_string_lossy().into_owned();
+    let mut ws = client(&l);
+
+    // Detach: the end frame precedes the detach's own reply.
+    let gen = open_quiet_shell(&mut ws, &repo_s, 0, 21);
+    ws.send(Message::text(json!({ "id": 50, "cmd": "shell_detach", "args": { "repo": repo_s, "slug": "(main)", "index": 0, "gen": gen } }).to_string())).unwrap();
+    let mut before_reply = Vec::new();
+    loop {
+        let v = frame(&mut ws, Duration::from_secs(5)).expect("the detach is answered");
+        if v["id"] == json!(50) {
+            break;
+        }
+        before_reply.push(v);
+    }
+    let end = before_reply.iter().find(|v| v["channel"] == json!(21) && v["end"] == json!(true));
+    let end = end.unwrap_or_else(|| panic!("no end frame for channel 21 before the detach reply; saw {before_reply:?}"));
+    assert!(end.get("data").is_none(), "an end frame carries no data: {end}");
+    assert!(end["seq"].as_u64().is_some(), "an end frame has the channel's next seq: {end}");
+
+    // Exit: the shell goes away on its own; the channel ends BEFORE the
+    // `shell:exit` event that announces it, both on the one queue.
+    open_quiet_shell(&mut ws, &repo_s, 1, 22);
+    let line: Vec<u8> = b"exit\r".to_vec();
+    ws.send(Message::text(json!({ "id": 60, "cmd": "shell_write", "args": { "repo": repo_s, "slug": "(main)", "index": 1, "data": line } }).to_string())).unwrap();
+    let mut seen = Vec::new();
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if let Some(v) = frame(&mut ws, Duration::from_millis(500)) {
+            let is_exit = v["event"] == json!("shell:exit");
+            seen.push(v);
+            if is_exit {
+                break;
+            }
+        }
+    }
+    let end_at = seen.iter().position(|v| v["channel"] == json!(22) && v["end"] == json!(true));
+    let exit_at = seen.iter().position(|v| v["event"] == json!("shell:exit"));
+    assert!(exit_at.is_some(), "the shell's exit is announced; saw {seen:?}");
+    assert!(end_at.is_some(), "channel 22 ends when its shell exits; saw {seen:?}");
+    assert!(end_at < exit_at, "the end frame comes before the event: {seen:?}");
+
+    rpc(&mut ws, json!(70), "close_shell_session", json!({ "repo": repo_s, "slug": "(main)", "index": 0, "keepCwd": false }));
+    rpc(&mut ws, json!(71), "close_shell_session", json!({ "repo": repo_s, "slug": "(main)", "index": 1, "keepCwd": false }));
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
 // ── the log ──────────────────────────────────────────────────────────────────
 
 /// **No torn lines.** Eight writers, 300 lines each, through the sink's own

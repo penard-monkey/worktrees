@@ -578,6 +578,12 @@ pub fn shell_open(
         // The shell itself exited (`exit`, or it died). The tab stays — the
         // frontend offers a restart rather than silently vanishing.
         if !r_stop.load(Ordering::Relaxed) {
+            // Nothing will be written to the attached channel again, so let
+            // it go BEFORE announcing the exit: a host that ends a dropped
+            // channel (serve's end frame; Tauri's own on `Channel` drop) then
+            // ends it ahead of the event, on the one ordered queue, and the
+            // client can release the handler the moment it hears.
+            r_sink.lock().unwrap().take();
             let (repo, slug, index) = exit_key;
             exit_ctx.emit("shell:exit", serde_json::json!({ "repo": repo, "slug": slug, "index": index }));
         }

@@ -12,6 +12,34 @@
 // make and the socket can. Both are drift between two lists that nothing
 // compiles together, which is the api-boundary-check family's job to hold.
 //
+// The wire those rows are reached over (`crates/worktrees-cli/src/serve/wire.rs`
+// is the source of truth; this is the summary a client author needs):
+//
+//   request  {id, cmd, args}          id echoed verbatim; args as `invoke` sends
+//   reply    {id, ok: <value>}        or {id, err: <value>} — err is what the
+//                                     Tauri command's Err serializes to
+//   channel  {channel, seq, data}     a ByteSink (data: base64) or a typed
+//                                     progress value; seq counts from 1 per
+//                                     channel; channel is the request's
+//                                     `__CHANNEL__:<id>`
+//   end      {channel, seq, end: true} the LAST frame on a channel: no data,
+//                                     seq one past the last data frame. Sent
+//                                     when the engine lets the sink go — a
+//                                     detach, term_close, the shell exiting,
+//                                     the operation behind a progress callback
+//                                     returning. Drop the handler on it. An
+//                                     err reply to the request that named the
+//                                     channel also finishes it (an end frame
+//                                     precedes it only if a sink was made).
+//   event    {event, payload}         Host::emit, to every authenticated socket
+//
+// Every frame for one connection goes through ONE queue, so order holds across
+// kinds: a channel's end frame cannot overtake its data, a reply cannot
+// overtake the progress it finished. Requests to ONE stream (a `Stream` row
+// naming an existing attach or dock shell) run on a serial lane per stream, so
+// keystrokes reach the pty in the order they were sent; everything else runs
+// concurrently, as Tauri's async commands do.
+//
 // Parsed from the sources rather than from a build: the table is a macro
 // invocation and the handler list is a macro argument, and neither is a Rust
 // item a test could enumerate.

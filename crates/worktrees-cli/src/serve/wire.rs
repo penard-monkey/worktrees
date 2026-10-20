@@ -10,6 +10,15 @@
 //! - channel `{channel, seq, data}` — a `ByteSink` (data: base64) or a typed
 //!   progress callback (data: the value). `channel` is the id the client gave
 //!   in the request, the way Tauri's `Channel` serializes (`__CHANNEL__:<id>`).
+//!   `seq` counts from 1 per channel. The LAST frame on a channel is
+//!   `{channel, seq, end: true}` — no `data`, `seq` one past the last data
+//!   frame — sent when the engine lets the sink go (a detach, `term_close`,
+//!   the shell exiting, the operation behind a progress callback returning),
+//!   so the client can drop the handler and whatever it closes over. Tauri
+//!   does the same when its Rust `Channel` drops. An `err` reply to the
+//!   request that named a channel ALSO finishes it: when the engine had taken
+//!   the sink before failing, its end frame precedes the reply; when the
+//!   request failed on its arguments, no sink existed and no end frame comes.
 //! - event `{event, payload}` — `Host::emit`, to every authenticated socket.
 //!
 //! **ORDER is the contract.** Every frame for one connection — replies, channel
@@ -71,6 +80,11 @@ pub fn channel_frame(channel: u64, seq: u64, data: Value) -> String {
     json!({ "channel": channel, "seq": seq, "data": data }).to_string()
 }
 
+/// The last frame on a channel: no `data`, and `seq` continues the count.
+pub fn end_frame(channel: u64, seq: u64) -> String {
+    json!({ "channel": channel, "seq": seq, "end": true }).to_string()
+}
+
 pub fn event_frame(event: &str, payload: &Value) -> String {
     json!({ "event": event, "payload": payload }).to_string()
 }
@@ -123,6 +137,48 @@ impl ByteSink for FrameSink {
     }
 }
 
+impl Drop for FrameSink {
+    /// The last `Arc` went: the reader thread that owned this sink has
+    /// stopped (EOF, a detach, `term_close`, the client gone), and nothing can
+    /// write to this channel again. Say so, after the last byte — the end
+    /// frame takes the next `seq`, on the same queue, so it cannot overtake
+    /// data. A dead connection is the one case nobody needs telling.
+    fn drop(&mut self) {
+        let seq = self.seq.load(Ordering::SeqCst) + 1;
+        let _ = self.outbox.push(end_frame(self.channel, seq));
+    }
+}
+
+/// A typed channel's state, owned by the closure `Frames::typed` returns, so
+/// that dropping the closure — the operation has returned — ends the channel.
+struct Typed {
+    outbox: Outbox,
+    channel: u64,
+    seq: u64,
+    dead: bool,
+}
+
+impl Typed {
+    fn push(&mut self, data: Value) {
+        if self.dead {
+            return;
+        }
+        self.seq += 1;
+        if self.outbox.push(channel_frame(self.channel, self.seq, data)).is_err() {
+            self.dead = true;
+            worktrees_api::log::warn(&format!("serve: progress channel {} closed; the operation runs on", self.channel));
+        }
+    }
+}
+
+impl Drop for Typed {
+    fn drop(&mut self) {
+        if !self.dead {
+            let _ = self.outbox.push(end_frame(self.channel, self.seq + 1));
+        }
+    }
+}
+
 /// What a request needs to stream back to its own connection, and what the
 /// connection needs to clean up when it goes: the tmux attaches it opened.
 /// Dock shells are NOT on that list — they are owned by the process and a
@@ -145,21 +201,11 @@ impl Frames {
     /// A typed progress callback: each value becomes one channel frame. The
     /// clone and sync bodies take `&mut dyn FnMut(T)`; a dead connection is
     /// noted once and the operation runs on, exactly as the Tauri shim did.
+    /// The callback is a local of the row's body, so it drops — and the
+    /// channel ends — when the operation returns, before the reply is queued.
     pub fn typed<T: serde::Serialize>(&self, channel: u64) -> impl FnMut(T) + Send + 'static {
-        let outbox = self.outbox.clone();
-        let mut seq = 0u64;
-        let mut dead = false;
-        move |t: T| {
-            if dead {
-                return;
-            }
-            seq += 1;
-            let data = serde_json::to_value(&t).unwrap_or(Value::Null);
-            if outbox.push(channel_frame(channel, seq, data)).is_err() {
-                dead = true;
-                worktrees_api::log::warn(&format!("serve: progress channel {channel} closed; the operation runs on"));
-            }
-        }
+        let mut ch = Typed { outbox: self.outbox.clone(), channel, seq: 0, dead: false };
+        move |t: T| ch.push(serde_json::to_value(&t).unwrap_or(Value::Null))
     }
 
     pub fn note_term(&self, id: u32) {
@@ -223,6 +269,42 @@ mod tests {
         assert_eq!(seen[2], r#"{"id":1,"ok":9}"#);
         drop(rx);
         assert!(sink.send(b"x").is_err(), "a closed connection is an Err, so the pty reader stops");
+    }
+
+    /// A sink the engine lets go of ends its channel: one more frame, the
+    /// next `seq`, `end: true`, no `data`. The reader thread that owned it is
+    /// gone, so nothing can follow it on that channel.
+    #[test]
+    fn dropping_a_sink_ends_its_channel_after_its_last_byte() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let frames = Frames::new(Outbox(tx));
+        let sink = frames.bytes(5);
+        sink.send(b"ab").unwrap();
+        drop(sink);
+        let mut seen = Vec::new();
+        while let Ok(m) = rx.try_recv() {
+            seen.push(m.into_text().unwrap().as_str().to_string());
+        }
+        assert_eq!(seen, vec![r#"{"channel":5,"seq":1,"data":"YWI="}"#.to_string(), r#"{"channel":5,"seq":2,"end":true}"#.to_string()]);
+    }
+
+    /// The same for a typed progress callback: the operation returns, the
+    /// callback is dropped, the channel ends — before the reply, which the
+    /// dispatcher queues after the body has returned.
+    #[test]
+    fn dropping_a_typed_callback_ends_its_channel() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let frames = Frames::new(Outbox(tx));
+        let mut progress = frames.typed::<u32>(9);
+        progress(1);
+        progress(2);
+        drop(progress);
+        let mut seen = Vec::new();
+        while let Ok(m) = rx.try_recv() {
+            seen.push(m.into_text().unwrap().as_str().to_string());
+        }
+        assert_eq!(seen.last().map(String::as_str), Some(r#"{"channel":9,"seq":3,"end":true}"#), "{seen:?}");
+        assert_eq!(seen.len(), 3);
     }
 
     #[test]
