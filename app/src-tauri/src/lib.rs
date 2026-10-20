@@ -5506,12 +5506,18 @@ async fn list_dir(app: AppHandle, path: String, show_ignored: Option<bool>) -> R
 /// Asked only AFTER something has already failed, so the common path pays
 /// nothing. `None` means "not a privacy denial" — the caller keeps whatever
 /// error it already had. See `macprivacy` for why this is a separate command
-/// rather than a richer error type on `list_dir`.
+/// rather than a richer error type on `list_dir`, and why it is `None` on
+/// every other OS.
 #[tauri::command]
 async fn privacy_denial(app: AppHandle, path: String) -> Option<macprivacy::Denial> {
     let bundle = app.config().identifier.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        macprivacy::denial_at(std::path::Path::new(&path), &macprivacy::home_dir(), &bundle)
+        macprivacy::denial_at(
+            std::path::Path::new(&path),
+            &macprivacy::home_dir(),
+            &bundle,
+            cfg!(target_os = "macos"),
+        )
     })
     .await
     .ok()
