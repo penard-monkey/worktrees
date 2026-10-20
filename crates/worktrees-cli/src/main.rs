@@ -61,6 +61,7 @@ worktrees — one git worktree per branch, one active agent per worktree.
   worktrees slots [--json]              who holds and who waits for each slot (no repo needed)
   worktrees serve [--config-dir D] [--port N] [--allow-origin O]  the engine behind a loopback
                                         WebSocket, one per machine; writes <config-dir>/serve.json
+                                        (--owner app: the desktop app started it and stops it on quit)
   worktrees mcp [--mutations]           MCP server over stdio (for an AI session; not interactive)
                                         (--cross-project off|read|full: narrow the user's cross_project, never widen)
   worktrees mcp --status [--json] [--ai codex|pi|kimi]  check Claude, Codex, pi or kimi MCP setup (no repo needed)

@@ -7,8 +7,11 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
 ## Architecture
 
 - **One engine**: `crates/worktrees-core`. The CLI (`crates/worktrees-cli`,
-  binary `worktrees`) and the Tauri app (`app/src-tauri`) BOTH use it — the app
-  links it in-process (no subprocess). The legacy bash engine is retired.
+  binary `worktrees`) uses it in-process, and so does `worktrees serve`, which
+  hosts the command layer (`crates/worktrees-api`). The Tauri app
+  (`app/src-tauri`) is serve's CLIENT — one engine per host: its shim finds or
+  starts serve (`engine.rs`) and keeps only the window, the client-local
+  commands and `host::boot`. The legacy bash engine is retired.
 - git/tmux are **shelled out** on purpose (faithful port; keeps the bats
   fake-shim harness intercepting the compiled binary). Don't switch to libs.
 - **Every tmux call goes through `tmux::tmux()`, which adds `-N`** (tmux ≥ 3.2,
@@ -63,17 +66,21 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   there and allowed by `docserver::origin_ok` ON PURPOSE (different pages,
   different questions —
   do not align them). The 150 commands sit in ONE macro table
-  (`serve/dispatch.rs`) with an `Exposure` each; `ClientLocal` rows (clipboard,
-  editor, terminal, browser, zoom, the app bundle) are refused with
-  `err: "client-local"`, never run on the host. `serve-dispatch-check.mjs`
-  holds that table against `generate_handler!`. The engine's wiring every host
-  needs — log sink, panic hook, PATH/locale, the viewer sweep, the project
+  (`serve/dispatch.rs`) with an `Exposure` each; the six `ClientLocal` rows
+  (clipboard, editor, terminal, zoom, the app bundle) are refused with
+  `err: "client-local"`, never run on the host — the docs viewer is an
+  `Engine` row since the app became a client (its registrations are the host
+  poll's). `serve-dispatch-check.mjs` fails if the shim's `generate_handler!`
+  registers any other row: that would be a second engine for it. The engine's
+  wiring — log sink, panic hook, PATH/locale, the viewer sweep, the project
   merge, the 3 s poll, the exit sequence — is `worktrees_api::host::{boot,
-  start, stop}`, called by the shim AND by `serve`; `api-boundary-check.mjs`
-  asserts the shim makes all three calls. Host policy is NOT in that list:
-  `hostpolicy::boot` is the engine's act, so the shim calls it once in its
-  `.setup` (hostpolicy-check.mjs) and serve calls it in `cmd_serve` — a serve
-  that skipped it launched lanes under the default the file overrides. `<config_dir>/serve.json` (0600,
+  start, stop}`: serve calls all three, the shim only `boot` (it logs, can
+  panic and launches editors), and `api-boundary-check.mjs` fails on any
+  engine piece back in lib.rs. Host policy is NOT in that list:
+  `hostpolicy::boot` is the engine's act, so `cmd_serve` calls it once,
+  after the one-engine refusal and before the listener binds, and the shim
+  never does (hostpolicy-check.mjs) — a serve that skipped it launched lanes
+  under the default the file overrides. `<config_dir>/serve.json` (0600,
   rewritten per launch) is how a client finds the port and the token; the log
   is `~/.cache/worktrees/serve.log`, version on the first line.
   `app/scripts/server-stack.sh` runs an isolated one for the frontend lane.
@@ -81,8 +88,13 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
 - **The frontend has ONE door to the backend: `app/src/ipc.ts`** (`invoke`,
   `Channel`, `listen`). Nothing else under `app/src` imports
   `@tauri-apps/api/core` or `/event` — `transport-check.mjs` fails on it, the
-  mock excepted. In the app the door IS Tauri's functions; in the dev stack it
-  is `ipcws.ts`, a WebSocket to serve, which never sends the token: handshake
+  mock excepted. In the app the door is `engineDoor`: the commands in ONE
+  table (`CLIENT_LOCAL` = serve's `ClientLocal` rows, plus `SHIM_COMMANDS`:
+  `engine_connect`, `raise_window`) go to Tauri IPC, everything else to
+  `ipcws.ts`, a WebSocket to serve; `engine-route-check.mjs` holds the table
+  against dispatch.rs and `generate_handler!` both ways. The dev stack is the
+  same door with no local half; the mock keeps plain Tauri. The token reaches
+  the page only as `engine_connect`'s answer, and the socket never sends it: handshake
   v1 (OWASP H1) has each side prove it holds it with an HMAC over the other's
   nonce, and the client sends NOTHING else — no request, and no belief in the
   version — until serve's proof passes `crypto.subtle.verify`, because whoever
@@ -1092,8 +1104,12 @@ after it is "command not found" — which reads as a sandbox refusing curl.
   rejects `/Users/x/repo/.worktrees/tree/f.ts`, which is every path this app
   exists to open. `plugins.opener.requireLiteralLeadingDot: false` in
   tauri.conf.json is what makes the scope mean what it reads as.
-- App log: `~/Library/Logs/net.casadelvalle.worktrees/app.log` (Settings →
-  Logs). Persisted UI settings: `ui-state.json` in the app config dir — written
+- App log: `~/Library/Logs/net.casadelvalle.worktrees/app.log`. Since the app
+  became serve's client it holds the SHIM's lines only — startup, `engine:`
+  (find, start, adopt, replace, quit), the window. The engine's work and the
+  page's `log_event` lines go to serve's log, `~/.cache/worktrees/serve.log`
+  (one file for every serve; `grep '\[<pid>\]'`), and Settings → Logs shows
+  that one. Persisted UI settings: `ui-state.json` in the app config dir — written
   WHOLE-BLOB by the frontend, so the backend must never write into it (its own
   update would be erased by the next settings save; that is why each dock shell
   tab's last directory lives in a separate backend-owned `shell-cwds.json`).
@@ -1208,6 +1224,18 @@ after it is "command not found" — which reads as a sandbox refusing curl.
   config dir already followed the override and the log did not. One line is
   still written under the default: the `startup v… PATH=…` line, emitted
   before any app handle exists to ask.
+- **Give a sandbox drive its own tmux server, and mind the socket path.** The
+  sandbox app and the serve it starts inherit `$TMUX`, so they talk to the
+  user's real server unless it is unset. `env -u TMUX TMUX_TMPDIR=<dir>` on
+  the `sandbox.sh --app` launch moves the app, serve and the CLI onto a
+  private one, and every probe then names it with `tmux -S <dir>/tmux-<uid>/
+  default`. The dir must be SHORT: a Unix socket path over 104 bytes on macOS
+  fails with "File name too long", which a scratchpad path under
+  `/private/tmp/claude-…/<session>/scratchpad` is. `/tmp/claude-<uid>/<x>`
+  works. And `kill <app pid>` is a CRASH as far as the app is concerned: tao
+  installs no SIGTERM handler, so the Exit arm never runs and the serve the
+  app owns keeps running — which is the crash-leftover path, and the next
+  launch adopts it (`owner: "app"` in serve.json). A clean quit is ⌘Q.
 - **A vanished sandbox app means the human closed it.** `tauri dev` exits 0 when
   the window closes, which is indistinguishable from a clean shutdown because it
   is one; a harness kill is 143. Twice in one session that was reported as a
