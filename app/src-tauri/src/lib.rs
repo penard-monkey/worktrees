@@ -2846,6 +2846,16 @@ async fn codex_usage() -> Result<codex_usage::Info, String> {
         .await.map_err(|_| "Codex usage worker failed".to_string())
 }
 
+/// kimi's plan windows, read through kimi's own `kimi web` (core `kimi_usage`:
+/// spawned, asked once, ended — never its token). Cached in core, so focus
+/// pulls cannot start more than one server per 120s.
+#[tauri::command]
+async fn kimi_usage() -> Result<worktrees_core::kimi_usage::Info, String> {
+    tauri::async_runtime::spawn_blocking(worktrees_core::kimi_usage::read)
+        .await
+        .map_err(|_| "kimi usage worker failed".to_string())
+}
+
 // ── Claude service status (status.claude.com) ───────────────────────────────
 // Statuspage's public summary: unauthenticated, ~2KB, no credentials anywhere
 // near it. The page carries SIX components and this app depends on TWO — a
@@ -9127,6 +9137,7 @@ pub fn run() {
             set_zoom,
             claude_usage,
             codex_usage,
+            kimi_usage,
             claude_status,
             log_info,
             list_drafts,

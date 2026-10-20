@@ -3,6 +3,11 @@
 // cannot resolve a runtime one.
 import type { Harness } from "./harness";
 export const CODEX_STALE_SECS = 1800;
+/** kimi's reader ages its answer the same way (core `kimi_usage::STALE`). */
+export const KIMI_STALE_SECS = 1800;
+/** The providers whose answer carries its own age and reset times (codex,
+ *  kimi): their staleness is judged here as well as in core. */
+const AGED = (p: Harness) => p === "codex" || p === "kimi";
 export type PlanLimit = {
   id: string; bucket: string; bucketLabel: string; label: string;
   percent: number; severity: string; resets_at: number | null;
@@ -35,21 +40,29 @@ export function adaptClaude(info: ClaudeUsage): PlanUsage {
       severity: l.severity === "normal" || l.severity === "warning" ? l.severity : "over",
       label: l.kind === "session" ? "5h" : l.kind === "weekly_all" ? "7d" : `${l.label} 7d` })) };
 }
+/** kimi's answer is `codex_usage`'s shape (core `kimi_usage::Limit`); its
+ *  window label is the window's own name (`5h`, `month`), not a duration. */
+export type KimiUsage = CodexUsage;
+export function adaptKimi(info: KimiUsage): PlanUsage {
+  return { ...info, provider: "kimi", limits: info.limits.map(l => ({ ...l, bucket: l.bucket_id,
+    bucketLabel: l.bucket_label, label: l.window_role })) };
+}
 export function adaptCodex(info: CodexUsage): PlanUsage {
   return { ...info, provider: "codex", limits: info.limits.map(l => ({ ...l, bucket: l.bucket_id,
     bucketLabel: l.bucket_label, label: windowLabel(l.window_minutes, l.window_role) })) };
 }
 export function viewUsage(info: PlanUsage, now: number): PlanUsage {
-  if (info.provider !== "codex" || info.fetched_at === null) return info;
+  if (!AGED(info.provider) || info.fetched_at === null) return info;
   const age = now - info.fetched_at;
-  if (age < 0 || age > CODEX_STALE_SECS) return { ...info, state: "unavailable", reason: "expired", limits: [] };
+  const ceiling = info.provider === "kimi" ? KIMI_STALE_SECS : CODEX_STALE_SECS;
+  if (age < 0 || age > ceiling) return { ...info, state: "unavailable", reason: "expired", limits: [] };
   if (info.limits.some(l => expired(info, l, now))) return { ...info, state: "stale" };
   return info;
 }
 export const expired = (info: PlanUsage, limit: PlanLimit, now: number) =>
-  info.provider === "codex" && limit.resets_at !== null && limit.resets_at <= now;
+  AGED(info.provider) && limit.resets_at !== null && limit.resets_at <= now;
 export function summaryLimit(info: PlanUsage, now: number): PlanLimit | undefined {
-  return info.limits.filter(l => !expired(info, l, now) && (info.provider === "claude" || l.bucket === "codex"))
+  return info.limits.filter(l => !expired(info, l, now) && (info.provider === "claude" || l.bucket === info.provider))
     .reduce<PlanLimit | undefined>((a, b) => !a || b.percent > a.percent ? b : a, undefined);
 }
 // Display order never depends on percentages or the provider's response order.
@@ -70,15 +83,17 @@ export const stateLabel = (info: PlanUsage) => ({ checking: "checking...", signe
 export function detailMessage(info: PlanUsage): string {
   switch (info.state) {
     case "checking": return "Checking usage...";
-    case "signed_out": return "Not signed in. Sign in through the Codex CLI, then return here.";
+    case "signed_out": return info.provider === "kimi" ? "Not signed in. Run `kimi login`, then return here."
+      : "Not signed in. Sign in through the Codex CLI, then return here.";
     case "unsupported_auth": return "This Codex login does not provide ChatGPT plan usage to this meter.";
-    case "missing_cli": return "Codex CLI was not found.";
+    case "missing_cli": return info.provider === "kimi" ? "kimi was not found." : "Codex CLI was not found.";
     case "stale": return info.source === "statusline" ? "Statusline snapshot."
       : info.source === "cached" ? "Could not refresh. Showing the last reading." : "Awaiting updated windows.";
-    case "unavailable": return info.reason === "unsupported_protocol" ? "This Codex version cannot provide plan usage."
+    case "unavailable": return info.reason === "not_loopback" ? "kimi's server was reachable from the network, so it was not asked."
+      : info.reason === "unsupported_protocol" ? "This Codex version cannot provide plan usage."
       : info.reason === "no_limits" ? "No plan-limit windows were reported." : "Could not read usage.";
     default: return "";
   }
 }
 
-export const compactUsage = (info: PlanUsage[]) => info.filter(i => !(i.provider === "codex" && i.state === "missing_cli"));
+export const compactUsage = (info: PlanUsage[]) => info.filter(i => !(AGED(i.provider) && i.state === "missing_cli"));

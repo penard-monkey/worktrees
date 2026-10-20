@@ -811,6 +811,13 @@ impl Adapter for Kimi {
         false
     }
 
+    /// kimi's plan windows, read through kimi itself (`kimi_usage`: its own
+    /// `kimi web`, never its token) — so the launch gate and the meter speak
+    /// for kimi as they do for Claude and Codex.
+    fn usage(&self) -> Option<Vec<crate::quota::Window>> {
+        crate::quota::seam(self.provider().id, || windows_from_kimi(&crate::kimi_usage::read()))
+    }
+
     fn resume_arg(&self, _cwd: &str) -> String {
         String::new() // `-S <id>`, resolved once and emitted by `prepare`
     }
@@ -830,7 +837,8 @@ impl Adapter for Kimi {
     /// fresh. A fresh launch takes the chosen model, else `[model] kimi`,
     /// else kimi's own `default_model`, which is the user's and is fine.
     fn prepare(&self, _p: &Project, _slug: &str, _wt: &str, launch: &mut AiLaunch) -> Result<(), Refusal> {
-        kimi_prepare_in(launch, self.installed(), || crate::config::default_model(self.provider().id))
+        kimi_prepare_in(launch, self.installed(), || crate::config::default_model(self.provider().id))?;
+        crate::quota::gate(self, launch, crate::sysclock::now_epoch())
     }
 
     fn never_launched(&self, p: &Project, slug: &str) -> bool {
@@ -987,6 +995,21 @@ pub(crate) fn windows_from_codex(info: &crate::codex_usage::Info) -> Vec<crate::
         .iter()
         .map(|l| crate::quota::Window {
             label: l.bucket_label().to_string(),
+            percent: l.percent(),
+            severity: crate::quota::Severity::from_provider(l.severity()),
+            resets_at: l.resets_at(),
+            model: None,
+            weekly: l.is_weekly(),
+        })
+        .collect()
+}
+
+/// `kimi_usage`'s windows as the shared shape. kimi's are account-wide.
+pub(crate) fn windows_from_kimi(info: &crate::kimi_usage::Info) -> Vec<crate::quota::Window> {
+    info.limits()
+        .iter()
+        .map(|l| crate::quota::Window {
+            label: l.label().to_string(),
             percent: l.percent(),
             severity: crate::quota::Severity::from_provider(l.severity()),
             resets_at: l.resets_at(),

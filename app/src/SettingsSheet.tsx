@@ -1184,7 +1184,9 @@ export function SettingsSheet({
               onChange={e => onChange({ usage_claude: e.target.checked })} /> Claude plan usage</label>
             <label className="usage-setting-toggle"><input type="checkbox" checked={settings.usage_codex}
               onChange={e => onChange({ usage_codex: e.target.checked })} /> Codex plan usage</label>
-            <div className="hint">Account limits use your existing CLI sign-ins. Turning a provider off stops its usage checks.</div>
+            <label className="usage-setting-toggle"><input type="checkbox" checked={settings.usage_kimi}
+              onChange={e => onChange({ usage_kimi: e.target.checked })} /> Kimi plan usage</label>
+            <div className="hint">Account limits use your existing CLI sign-ins. Turning a provider off stops its usage checks. Kimi's are read by starting kimi's own local server (<code>kimi web</code>) for one request, at most every two minutes.</div>
           </section>
           </>}
 

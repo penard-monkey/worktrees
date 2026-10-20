@@ -7,7 +7,7 @@ import { transformWithEsbuild } from "vite";
 const src = fs.readFileSync(new URL("../src/planUsage.ts", import.meta.url), "utf8");
 const js = (await transformWithEsbuild(src, "planUsage.ts", { loader: "ts" })).code;
 const model = await import(`data:text/javascript;base64,${Buffer.from(js).toString("base64")}`);
-const { adaptCodex, adaptClaude, viewUsage, summaryLimit, windowLabel, checking, expired, CODEX_STALE_SECS, compactUsage } = model;
+const { adaptCodex, adaptClaude, adaptKimi, viewUsage, summaryLimit, windowLabel, checking, expired, CODEX_STALE_SECS, KIMI_STALE_SECS, compactUsage } = model;
 let checks = 0;
 function test(name, fn) { fn(); checks++; console.log(`ok ${name}`); }
 const limit = (role, minutes, percent, reset, bucket = "codex") => ({ id: `${bucket}:${role}`, bucket_id: bucket,
@@ -43,6 +43,36 @@ test("Codex reset boundary mirrors the backend expiry rule", () => {
     const backend = reset !== null && (rules[0][1] === "<=" ? reset <= 100 : reset < 100);
     assert.equal(expired(info, { ...info.limits[0], resets_at: reset }, 100), backend);
   }
+});
+// kimi's reader (core `kimi_usage`) ages its answer like Codex's; the frontend
+// mirror must agree with it, sliced the same way.
+const KSRC = fs.readFileSync(new URL("../../crates/worktrees-core/src/kimi_usage.rs", import.meta.url), "utf8");
+const KTESTS_AT = KSRC.search(/^#\[cfg\(test\)\]\s*\nmod tests\b/m);
+assert.notEqual(KTESTS_AT, -1, "expected a `#[cfg(test)] mod tests` marker in kimi_usage.rs");
+const krust = KSRC.slice(0, KTESTS_AT);
+const kimiWire = { provider: "kimi", state: "ready", source: "kimi_web", fetched_at: 100, reason: null, limits: [
+  { id: "kimi:limit5h", bucket_id: "kimi", bucket_label: "Kimi", window_role: "5h", window_minutes: 300, percent: 41, severity: "normal", resets_at: 110 },
+  { id: "kimi:monthTotal", bucket_id: "kimi", bucket_label: "Kimi", window_role: "month", window_minutes: null, percent: 12, severity: "normal", resets_at: 5000 }] };
+test("kimi age ceiling mirrors the backend constant", () => {
+  const defs = [...krust.matchAll(/^const STALE: i64 = ([\d_]+);/gm)];
+  assert.equal(defs.length, 1, "expected exactly one STALE in kimi_usage.rs");
+  assert.equal(KIMI_STALE_SECS, Number(defs[0][1].replaceAll("_", "")));
+});
+test("kimi rows are labelled by their window and summarised from kimi's own bucket", () => {
+  const info = adaptKimi(kimiWire);
+  assert.deepEqual(info.limits.map(l => l.label), ["5h", "month"]);
+  assert.equal(info.provider, "kimi");
+  assert.equal(summaryLimit(info, 101).id, "kimi:limit5h");
+  // A reset in the past stales only that row, as for Codex.
+  const later = viewUsage(info, 111);
+  assert.equal(later.state, "stale");
+  assert.equal(summaryLimit(later, 111).id, "kimi:monthTotal");
+  assert.equal(viewUsage(info, 101 + KIMI_STALE_SECS).limits.length, 0, "never a number past its age");
+});
+test("missing kimi has no compact slot either", () => {
+  const missing = { ...checking("kimi"), state: "missing_cli" };
+  assert.deepEqual(compactUsage([checking("claude"), missing]).map(i => i.provider), ["claude"]);
+  assert.equal(compactUsage([{ ...missing, state: "signed_out" }]).length, 1);
 });
 test("missing Codex has no compact slot, while other states keep theirs", () => {
   const claude = checking("claude");
@@ -140,11 +170,13 @@ function host() {
   const setInterval = (fn, delay) => { timers.set(++timerId, { fn, delay }); return timerId; };
   const clearInterval = id => timers.delete(id);
   const useUsage = new Function("useState", "useEffect", "invoke", "document", "window", "setInterval", "clearInterval",
-    "checking", "adaptClaude", "adaptCodex", "viewUsage", `const USAGE_POLL_MS=180000, USAGE_TICK_MS=15000; ${hooks}; return useUsage;`)(
-    useState, useEffect, invoke, document, window, setInterval, clearInterval, checking, adaptClaude, adaptCodex, viewUsage);
+    "checking", "adaptClaude", "adaptCodex", "adaptKimi", "viewUsage", `const USAGE_POLL_MS=180000, USAGE_TICK_MS=15000; ${hooks}; return useUsage;`)(
+    useState, useEffect, invoke, document, window, setInterval, clearInterval, checking, adaptClaude, adaptCodex, adaptKimi, viewUsage);
   const onError = () => {};
-  const render = (enabled = true, claude = true, codex = true, visible = true) => {
-    cursor = 0; const result = useUsage(enabled, claude, codex, visible, onError);
+  // `kimi` last and off by default: the tests above it count Claude's and
+  // Codex's requests only.
+  const render = (enabled = true, claude = true, codex = true, visible = true, kimi = false) => {
+    cursor = 0; const result = useUsage(enabled, claude, codex, kimi, visible, onError);
     while (pending.length) pending.shift()(); return result;
   };
   return { render, requests, timers, document, providerState: provider => states.find(s => s?.provider === provider), focus: () => listeners.get("focus")?.forEach(f => f()),
@@ -155,6 +187,15 @@ test("global off and independent toggles suppress commands", () => {
   const h = host(); assert.equal(h.render(false).info, null); assert.equal(h.requests.length, 0);
   h.render(true, false, true); assert.deepEqual(h.requests.map(r => r.command), ["codex_usage"]);
   assert.equal(h.render(true, false, false).info, null); assert.equal(h.timers.size, 0); h.unmount();
+});
+test("the kimi toggle alone asks kimi_usage, and its answer is adapted", async () => {
+  const h = host(); h.render(true, false, false, true, true);
+  assert.deepEqual(h.requests.map(r => r.command), ["kimi_usage"]);
+  h.requests[0].resolve({ ...kimiWire, fetched_at: Math.floor(Date.now() / 1000), limits: kimiWire.limits.map(l => ({ ...l, resets_at: null })) });
+  await flush();
+  const info = h.render(true, false, false, true, true).info;
+  assert.equal(info[0].provider, "kimi"); assert.deepEqual(info[0].limits.map(l => l.label), ["5h", "month"]);
+  h.unmount();
 });
 test("hidden startup, transition and focus do not invoke", () => {
   const h = host(); h.document.visibilityState = "hidden"; h.render(true, true, true, false); h.focus();
