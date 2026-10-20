@@ -439,6 +439,13 @@ is one: a sweep for every place a harness is named found nothing in it,
 `PATH`, so `for path in …` in a probe loop empties `PATH`, and every command
 after it is "command not found" — which reads as a sandbox refusing curl.
 
+**A secret-on-argv audit cannot be a keyword grep.** #520's sweep grepped
+every spawn for `token|secret|api_key|bearer|authorization` and called the rest
+clean, and review found `mcpmigrate.rs` putting users' literal MCP env values
+(API keys) on `codex mcp add` argv through `format!("{key}={value}")`, a line
+containing none of those words. Trace where each argument's VALUE comes from
+(user config, keychain, a file another tool owns), not what it is called.
+
 ## Tauri app — hard-won rules
 
 - **Commands must be `async fn`** — sync handlers run on the main thread and
