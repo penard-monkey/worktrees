@@ -8701,6 +8701,12 @@ pub fn run() {
         // pattern also covers a path with a dot component: every worktree this
         // app opens lives under `.worktrees/`, and with the unix default the
         // invoke would reject exactly those — silently.
+        //
+        // `open_url` has the same shape one level up: `opener:default` scopes
+        // it to http(s), mailto and tel, so the privacy card's System Settings
+        // link (`x-apple.systempreferences:`) needs its own allow entry or it
+        // rejects with `ForbiddenUrl`. `macprivacy`'s tests check every pane
+        // against that file.
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
