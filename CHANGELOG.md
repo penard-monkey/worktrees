@@ -84,6 +84,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   (the same all-comments file `--print` has always emitted, which `doctor`
   reads back clean). Without `-y` nothing changes, except that the message
   now says how to ask for the template anyway.
+- **The Claude usage meter no longer puts your Claude login token where other
+  programs can read it.** To fetch the usage bars, worktrees passed Claude
+  Code's OAuth access token to `curl` as a command-line argument, and any
+  process on the Mac can list those (`ps`) while the request runs. The token
+  now goes to `curl` on its standard input, which `ps` does not show. The
+  meter itself works as before.
 
 ## [0.42.0] - 2026-10-15
 
