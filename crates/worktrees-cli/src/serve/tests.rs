@@ -21,7 +21,8 @@ use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::protocol::{Role, WebSocket};
 use tokio_tungstenite::tungstenite::Message;
 
-use super::{start, Running};
+use super::conn::Limits;
+use super::{start_with, Running};
 
 /// RFC 6455 §1.3's worked example: this key yields this accept value. A
 /// server that derives it right is talking the handshake the spec wrote down.
@@ -49,11 +50,15 @@ impl Drop for Live {
 }
 
 fn live(tag: &str) -> Live {
+    live_with(tag, super::conn::LIMITS)
+}
+
+fn live_with(tag: &str, limits: Limits) -> Live {
     let dir = std::env::temp_dir().join(format!("wt-serve-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-    let running = rt.block_on(async { start(dir.clone(), 0, vec![DEV_ORIGIN.to_string()]) }).unwrap();
+    let running = rt.block_on(async { start_with(dir.clone(), 0, vec![DEV_ORIGIN.to_string()], limits) }).unwrap();
     Live { running: Some(running), dir, rt }
 }
 
@@ -532,6 +537,147 @@ fn an_event_is_broadcast_to_every_authenticated_socket() {
     assert_eq!(f["event"], json!("places:changed"));
     // Keep the runtime alive until here.
     let _ = &l.rt;
+}
+
+// ── limits (OWASP M1) ────────────────────────────────────────────────────────
+
+fn idle_tcp(l: &Live) -> TcpStream {
+    TcpStream::connect_timeout(&SocketAddr::from((Ipv4Addr::LOCALHOST, l.port())), Duration::from_secs(5)).unwrap()
+}
+
+/// **Before auth a peer may send a few hundred bytes, not 16 MiB.** The
+/// review drove RSS from 21 MB to 277 MB with six unauthenticated sockets,
+/// each part-way through a 60 MiB message. A frame header claiming 1 MiB and
+/// 4 KiB of its payload must end the connection AT ONCE, with nothing said —
+/// not at the auth deadline, by which time the payload has been buffered.
+#[test]
+fn a_preauth_frame_past_the_byte_budget_is_closed_at_once() {
+    let l = live("budget");
+    let ws = upgraded_ws(&l);
+    let mut s = ws.into_inner();
+    let mut frame = vec![0x81u8, 0x80 | 127];
+    frame.extend_from_slice(&(1u64 << 20).to_be_bytes());
+    frame.extend_from_slice(&[1, 2, 3, 4]);
+    frame.extend(std::iter::repeat_n(b'a', 4096));
+    let started = std::time::Instant::now();
+    let _ = s.write_all(&frame);
+    let (bytes, closed) = rest(&mut s, Duration::from_secs(5));
+    let took = started.elapsed();
+    assert!(bytes.is_empty(), "the server wrote {:?}", String::from_utf8_lossy(&bytes));
+    assert!(closed, "the socket is still open");
+    assert!(took < Duration::from_secs(1), "closed after {took:?}: the budget did not stop it, the auth deadline did");
+}
+
+/// **Unauthenticated connections are capped, and the cap spares the client
+/// that is already in.** Past the cap a NEW connection is closed with nothing
+/// said; the authenticated client keeps getting answers throughout; and once
+/// the flood lets go, a new client gets in.
+#[test]
+fn connections_past_the_unauthenticated_cap_are_closed_and_a_served_client_keeps_working() {
+    let l = live_with("unauthcap", Limits { connections: 32, unauthenticated: 4 });
+    let mut served = client(&l);
+    let held: Vec<TcpStream> = (0..4).map(|_| idle_tcp(&l)).collect();
+    std::thread::sleep(Duration::from_millis(200));
+    for i in 0..6 {
+        let mut extra = idle_tcp(&l);
+        let (bytes, closed) = rest(&mut extra, Duration::from_secs(1));
+        assert!(bytes.is_empty() && closed, "connection {i} past the cap: wrote {bytes:?}, closed {closed}");
+    }
+    assert_eq!(rpc(&mut served, json!(1), "get_settings", json!({})), json!({ "id": 1, "ok": null }), "the served client is still served");
+    drop(held);
+    std::thread::sleep(Duration::from_millis(300));
+    let mut late = client(&l);
+    assert_eq!(rpc(&mut late, json!(2), "get_settings", json!({}))["id"], json!(2), "a new client gets in once the flood lets go");
+}
+
+/// **All connections are capped too**, authenticated ones included: past the
+/// cap even a well-behaved newcomer is closed with nothing said, until one of
+/// the connections ends.
+#[test]
+fn connections_past_the_total_cap_are_closed() {
+    let l = live_with("conncap", Limits { connections: 3, unauthenticated: 3 });
+    let mut ins: Vec<WebSocket<TcpStream>> = (0..3).map(|_| client(&l)).collect();
+    let mut fourth = idle_tcp(&l);
+    let (bytes, closed) = rest(&mut fourth, Duration::from_secs(1));
+    assert!(bytes.is_empty() && closed, "a fourth connection past a cap of three: wrote {bytes:?}, closed {closed}");
+    assert_eq!(rpc(&mut ins[0], json!(1), "get_settings", json!({}))["id"], json!(1));
+    drop(ins.pop());
+    std::thread::sleep(Duration::from_millis(300));
+    let mut next = client(&l);
+    assert_eq!(rpc(&mut next, json!(2), "get_settings", json!({}))["id"], json!(2), "a slot frees when a connection ends");
+}
+
+/// One text message as masked frames of `chunk` bytes: a first frame and
+/// continuations. A browser sends one frame per message; a hostile client
+/// need not, which is why the MESSAGE cap is separate from the frame cap.
+fn send_fragmented(s: &mut TcpStream, payload: &[u8], chunk: usize) {
+    let parts: Vec<&[u8]> = payload.chunks(chunk).collect();
+    let mask = [7u8, 1, 3, 9];
+    for (i, part) in parts.iter().enumerate() {
+        let fin = if i + 1 == parts.len() { 0x80 } else { 0 };
+        let op = if i == 0 { 0x1 } else { 0x0 };
+        let mut f = vec![fin | op];
+        let n = part.len();
+        if n < 126 {
+            f.push(0x80 | n as u8);
+        } else if n < 65_536 {
+            f.push(0x80 | 126);
+            f.extend_from_slice(&(n as u16).to_be_bytes());
+        } else {
+            f.push(0x80 | 127);
+            f.extend_from_slice(&(n as u64).to_be_bytes());
+        }
+        f.extend_from_slice(&mask);
+        f.extend(part.iter().enumerate().map(|(j, b)| b ^ mask[j % 4]));
+        if s.write_all(&f).is_err() {
+            return; // the server has hung up: that is the answer
+        }
+    }
+}
+
+/// **An authenticated message is capped at `MAX_MESSAGE`, with headroom over
+/// the largest legitimate one.** A 1 MB paste (bytes as a JSON array, ~3.5
+/// MiB) is served; a message one byte past the cap, sent as 1 MiB frames so
+/// that no single frame is large, ends the connection unanswered.
+/// (tungstenite's defaults already refused a FRAME past 16 MiB; its MESSAGE
+/// default was 64 MiB, and that is the one this pins.)
+#[test]
+fn a_message_past_the_post_auth_cap_ends_the_connection_and_a_large_paste_is_served() {
+    let l = live("msgcap");
+    let mut ws = client(&l);
+    ws.get_ref().set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    let paste: Vec<u8> = (0..1_000_000u32).map(|i| b' ' + (i % 90) as u8).collect();
+    let r = rpc(&mut ws, json!(1), "shell_write", json!({ "repo": "/nowhere", "slug": "s", "index": 0, "data": paste }));
+    assert_eq!(r["id"], json!(1), "a 1 MB paste is answered: {r}");
+
+    let cap = super::conn::MAX_MESSAGE;
+    let head = r#"{"id":2,"cmd":"get_settings","args":{"pad":""#;
+    let tail = r#""}}"#;
+    let mut big = String::with_capacity(cap + 1);
+    big.push_str(head);
+    big.extend(std::iter::repeat_n('x', cap + 1 - head.len() - tail.len()));
+    big.push_str(tail);
+    assert_eq!(big.len(), cap + 1);
+    send_fragmented(ws.get_mut(), big.as_bytes(), 1 << 20);
+    match ws.read() {
+        Ok(Message::Text(t)) => panic!("a message past the cap was answered: {}", &t.as_str()[..t.as_str().len().min(120)]),
+        Ok(other) => assert!(matches!(other, Message::Close(_)), "{other:?}"),
+        Err(_) => {}
+    }
+}
+
+/// **The HTTP phase is short.** A TCP connection that never sends a byte holds
+/// a task and a descriptor until the handshake deadline: five seconds, no
+/// longer (it was twenty).
+#[test]
+fn a_connection_that_never_speaks_is_closed_within_five_seconds() {
+    let l = live("httpidle");
+    let mut s = idle_tcp(&l);
+    let started = std::time::Instant::now();
+    let (bytes, closed) = rest(&mut s, Duration::from_secs(7));
+    assert!(bytes.is_empty(), "wrote {bytes:?}");
+    assert!(closed, "still open after {:?}", started.elapsed());
+    assert!(started.elapsed() <= Duration::from_millis(5600), "closed after {:?}", started.elapsed());
 }
 
 // ── streams ──────────────────────────────────────────────────────────────────

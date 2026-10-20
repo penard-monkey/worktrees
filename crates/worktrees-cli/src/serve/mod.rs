@@ -124,6 +124,40 @@ fn append_line(dir: &Path, path: &Path, level: &str, msg: &str) {
     }
 }
 
+/// The soft open-file limit serve asks for: macOS's per-process ceiling for
+/// a plain `setrlimit` (OPEN_MAX), and plenty on Linux. Capped rather than
+/// "the hard limit", because a shell or tool this process starts inherits it,
+/// and some close every descriptor up to the limit on start.
+const NOFILE_WANT: libc::rlim_t = 10_240;
+
+/// Raise the SOFT open-file limit toward `NOFILE_WANT`, never past the hard
+/// limit and never down. A launchd-started process on macOS begins at 256
+/// (hard unlimited), and the OWASP review spent all 256 with 300 idle
+/// sockets: the user's own client was RST, an authenticated one's
+/// `tmux_check` failed for want of a descriptor. The connection caps bound
+/// the sockets; this is the headroom for everything else — ptys, git, tmux.
+fn raise_open_file_limit() {
+    let mut rl = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: plain syscalls on a stack value.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) } != 0 {
+        worktrees_api::log::warn(&format!("serve: open-file limit unreadable: {}", std::io::Error::last_os_error()));
+        return;
+    }
+    let old = rl.rlim_cur;
+    let want = NOFILE_WANT.min(rl.rlim_max);
+    if old >= want {
+        worktrees_api::log::info(&format!("serve: open-file limit {old} (left as it is)"));
+        return;
+    }
+    let new = libc::rlimit { rlim_cur: want, rlim_max: rl.rlim_max };
+    // SAFETY: as above.
+    if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &new) } != 0 {
+        worktrees_api::log::warn(&format!("serve: open-file limit {old}, raising to {want} failed: {}", std::io::Error::last_os_error()));
+        return;
+    }
+    worktrees_api::log::info(&format!("serve: open-file limit {old} → {want}"));
+}
+
 // ── the server ───────────────────────────────────────────────────────────────
 
 /// A running server: the listener, the engine's `Ctx`, and the token the
@@ -143,10 +177,15 @@ impl Running {
 
 /// Build the engine and bind the listener. Inside a tokio runtime.
 pub fn start(config_dir: PathBuf, port: u16, allow_origin: Vec<String>) -> Result<Running, String> {
+    start_with(config_dir, port, allow_origin, conn::LIMITS)
+}
+
+/// `start`, with the connection caps given rather than the defaults.
+pub fn start_with(config_dir: PathBuf, port: u16, allow_origin: Vec<String>, limits: conn::Limits) -> Result<Running, String> {
     let clients = Arc::new(conn::Clients::default());
     let ctx = Ctx::new(config_dir, Arc::new(conn::Broadcast(clients.clone())));
     let token = servefile::new_token();
-    let listener = conn::start(ctx.clone(), token.clone(), port, allow_origin, clients)?;
+    let listener = conn::start(ctx.clone(), token.clone(), port, allow_origin, clients, limits)?;
     Ok(Running { ctx, token, listener })
 }
 
@@ -169,6 +208,7 @@ pub fn cmd_serve(args: &[String]) -> i32 {
     host::boot(Arc::new(ServeLog));
     let me = std::process::id();
     worktrees_api::log::info(&format!("serve: pid={me} config_dir={}", opts.config_dir.display()));
+    raise_open_file_limit();
 
     // One engine per host: a second serve on the same config dir is refused
     // while the first is live. A stale file (dead pid, or nothing on the

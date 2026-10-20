@@ -62,7 +62,32 @@ impl Sandbox {
     /// login-shell PATH probe in `host::boot` quick; everything else of the
     /// environment is inherited, PATH included, so `git` still resolves.
     fn launch(&mut self, extra: &[&str]) -> Value {
-        let child = Command::new(bin())
+        self.launch_with(extra, None)
+    }
+
+    /// `launch`, optionally with the child's SOFT open-file limit lowered
+    /// first (the hard limit left as it is, the way launchd leaves it).
+    fn launch_with(&mut self, extra: &[&str], soft_nofile: Option<libc::rlim_t>) -> Value {
+        let mut cmd = Command::new(bin());
+        if let Some(n) = soft_nofile {
+            use std::os::unix::process::CommandExt;
+            // SAFETY: getrlimit/setrlimit are async-signal-safe, and the
+            // closure touches nothing else between fork and exec.
+            unsafe {
+                cmd.pre_exec(move || {
+                    let mut rl = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+                    if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    rl.rlim_cur = n;
+                    if libc::setrlimit(libc::RLIMIT_NOFILE, &rl) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
+            }
+        }
+        let child = cmd
             .arg("serve")
             .arg("--config-dir")
             .arg(self.cfg())
@@ -194,6 +219,23 @@ fn rpc(ws: &mut WebSocket<TcpStream>, id: u64, cmd: &str, args: Value) -> Value 
 
 fn mode(p: &Path) -> u32 {
     std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+}
+
+/// OWASP M1: a launchd-started process begins at a SOFT limit of 256 open
+/// files on macOS (hard unlimited), and 300 idle sockets were enough to deny
+/// the user's own client. serve raises its soft limit at boot and says so.
+#[test]
+fn serve_raises_a_low_soft_open_file_limit_at_boot() {
+    let mut sb = Sandbox::new("nofile");
+    sb.launch_with(&[], Some(256));
+    let log = std::fs::read_to_string(sb.log()).expect("serve.log");
+    let line = log.lines().find(|l| l.contains("serve: open-file limit")).unwrap_or_else(|| panic!("no open-file limit line in:\n{log}"));
+    let tail = line.split("serve: open-file limit ").nth(1).unwrap();
+    let (old, new) = tail.split_once(" → ").unwrap_or_else(|| panic!("{line}"));
+    assert_eq!(old, "256", "{line}");
+    let new: u64 = new.trim().parse().unwrap_or_else(|_| panic!("{line}"));
+    assert!(new > 256, "{line}");
+    assert_eq!(sb.terminate().code(), Some(0));
 }
 
 /// The whole life of a `serve`, end to end through the binary.

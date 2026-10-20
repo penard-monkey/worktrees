@@ -53,7 +53,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   HMAC-SHA256 over nonces the other side chose — the token itself never goes
   on the wire, so a process that takes the port of a server that has died
   learns nothing and cannot pass for it. Every refusal closes the socket with
-  nothing written. A second `serve` on a live config dir is refused — one
+  nothing written. A flood of connections can no longer take the server's
+  memory or descriptors, or a client that is already in: at most 64
+  connections, 16 of them unauthenticated, 512 bytes from a peer before it
+  has proven itself, 16 MiB per message after, a 5-second HTTP phase, and the
+  open-file limit raised at launch. A second `serve` on a live config dir is
+  refused — one
   engine per machine. Logs to `~/.cache/worktrees/serve.log` with the version
   on the first line. `app/scripts/server-stack.sh` runs one on an isolated
   config dir, tmux prefix and port for the frontend lane.

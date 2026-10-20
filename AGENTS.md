@@ -54,8 +54,14 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   HMAC keyed with serve.json's token over the other side's nonce, so the token
   is NEVER in a frame — under v0 it was the first frame, and whatever held a
   dead server's port received it. `AUTH_DEADLINE` covers the whole exchange,
-  not each frame. A missing `Origin` is refused there and allowed
-  by `docserver::origin_ok` ON PURPOSE (different pages, different questions —
+  not each frame. Limits (OWASP M1, `conn.rs`): 64 connections / 16
+  unauthenticated, 512 pre-auth bytes (a `Budget` UNDER tungstenite, which
+  cannot change its own limits after construction), 16 MiB per message after
+  auth, a 5 s HTTP phase, RLIMIT_NOFILE raised at boot. A reconnecting local
+  flood still locks NEW clients out (measured 0 of 49) — it can no longer take
+  memory, descriptors or a client already in. A missing `Origin` is refused
+  there and allowed by `docserver::origin_ok` ON PURPOSE (different pages,
+  different questions —
   do not align them). The 150 commands sit in ONE macro table
   (`serve/dispatch.rs`) with an `Exposure` each; `ClientLocal` rows (clipboard,
   editor, terminal, browser, zoom, the app bundle) are refused with

@@ -9,8 +9,10 @@
 
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdListener};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::task::{ready, Context, Poll};
 
 use futures_util::{SinkExt, StreamExt};
 use http_body_util::Empty;
@@ -19,10 +21,11 @@ use hyper::header::{HeaderMap, HeaderName, CONNECTION, HOST, ORIGIN, SEC_WEBSOCK
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde_json::Value;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
-use tokio_tungstenite::tungstenite::protocol::Role;
+use tokio_tungstenite::tungstenite::protocol::{Role, WebSocketConfig};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 use worktrees_api::log::{info, warn};
@@ -33,10 +36,145 @@ use super::policy;
 use super::servefile;
 use super::wire::{self, Frames, Outbox};
 
-/// How long the HTTP half of a connection gets. The docs server's figure: a
-/// loopback client that opened a socket and then says nothing holds a task
-/// and a descriptor, and nothing else ends it.
-const HANDSHAKE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(20);
+// ── limits (OWASP M1) ────────────────────────────────────────────────────────
+//
+// The review measured, against 495df95: six unauthenticated sockets each
+// part-way through a 60 MiB message took RSS from 21 MB to 277 MB, and 300
+// idle TCP connections spent the default 256 descriptors, after which the
+// user's own client was RST and an authenticated one's `tmux_check` failed.
+// Nothing here can stop a local process making NEW connections hard to get
+// while it floods — it can always hold every unauthenticated slot — but it
+// can no longer take the memory, the descriptors, or a client already in.
+
+/// How long the HTTP half of a connection gets: the upgrade request, from
+/// accept to the 101. A browser needs milliseconds; an idle socket holds a
+/// task, a descriptor and an unauthenticated slot until this ends it. It was
+/// the docs server's 20 s.
+pub(crate) const HANDSHAKE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How many connections may be open at once, and how many of those may be
+/// unauthenticated (from accept until the client's proof verifies). Beyond
+/// either, a NEW connection is accepted and closed at once with nothing
+/// written. Generous for any real use — the desktop app holds one socket, a
+/// dev page a couple — and small enough that a flood costs bounded memory
+/// and descriptors.
+#[derive(Clone, Copy, Debug)]
+pub struct Limits {
+    pub connections: usize,
+    pub unauthenticated: usize,
+}
+pub const LIMITS: Limits = Limits { connections: 64, unauthenticated: 16 };
+
+/// Bytes a peer may send between its upgrade and its proof verifying. The
+/// two handshake frames are under 100 bytes each, framing and mask included;
+/// anything past this ends the connection where it stands, so a peer with no
+/// token cannot make the server buffer a message for it. (tokio-tungstenite
+/// cannot change its limits after construction, so the pre-auth bound lives
+/// in the socket under it — `Budget` — and the codec carries the post-auth one.)
+pub const PREAUTH_BYTES: usize = 512;
+
+/// The largest message, and frame, an AUTHENTICATED client may send.
+/// Measured: the editor saves at most a file it could read, and `read_file`
+/// stops at 1 MB — 0.98 MiB of JSON for this repository's Rust, 5.72 MiB in
+/// the worst escaping case (all control characters); a 1 MB paste goes as a
+/// JSON array of bytes, 3.35 MiB of ASCII or 3.81 MiB of emoji. 16 MiB covers
+/// the worst save 2.8× over and pastes to about 4 MB, where tungstenite's
+/// default let one client make the server hold 64 MiB per message. Past it
+/// the connection ends; the client reconnects.
+pub const MAX_MESSAGE: usize = 16 << 20;
+
+/// hyper's buffer for the HTTP request, before any upgrade (its default is
+/// ~400 KiB). Cookies are per host, not per port, so a browser may send those
+/// of every other dev server on 127.0.0.1 — 64 KiB leaves room for them.
+const MAX_HTTP_BUF: usize = 64 * 1024;
+
+/// A count with a cap. `try_hold` takes one or says no; the `Held` gives it
+/// back on drop, whichever way the connection ends.
+struct Counter {
+    held: AtomicUsize,
+    cap: usize,
+}
+
+struct Held(Arc<Counter>);
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.0.held.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+impl Counter {
+    fn new(cap: usize) -> Arc<Self> {
+        Arc::new(Counter { held: AtomicUsize::new(0), cap })
+    }
+    fn try_hold(self: &Arc<Self>) -> Option<Held> {
+        self.held
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| (n < self.cap).then_some(n + 1))
+            .ok()
+            .map(|_| Held(self.clone()))
+    }
+}
+
+/// One connection's claim on the caps, from accept to close. The
+/// unauthenticated half is handed back the moment the client's proof verifies.
+struct Slot {
+    _connection: Held,
+    unauthenticated: Mutex<Option<Held>>,
+}
+
+impl Slot {
+    fn authenticated(&self) {
+        self.unauthenticated.lock().unwrap().take();
+    }
+}
+
+/// The upgraded socket, read through a byte budget. `left` counts down what a
+/// peer may still send; `usize::MAX` means no budget (set once the client has
+/// proven itself), and a peer that reaches 0 gets a read error, which
+/// tungstenite turns into the end of the connection. Writes pass through.
+struct Budget<T> {
+    inner: T,
+    left: Arc<AtomicUsize>,
+}
+
+impl<T: AsyncRead + Unpin> AsyncRead for Budget<T> {
+    fn poll_read(mut self: Pin<&mut Self>, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>) -> Poll<std::io::Result<()>> {
+        let left = self.left.load(Ordering::SeqCst);
+        if left == usize::MAX {
+            return Pin::new(&mut self.inner).poll_read(cx, buf);
+        }
+        if left == 0 {
+            return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "the pre-auth byte budget is spent")));
+        }
+        let mut tmp = [0u8; PREAUTH_BYTES];
+        let n = left.min(buf.remaining()).min(tmp.len());
+        let mut small = ReadBuf::new(&mut tmp[..n]);
+        ready!(Pin::new(&mut self.inner).poll_read(cx, &mut small))?;
+        let got = small.filled().len();
+        buf.put_slice(small.filled());
+        // Never undo the lift: only a budget still in force is counted down.
+        let _ = self.left.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |l| (l != usize::MAX).then(|| l.saturating_sub(got)));
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl<T: AsyncWrite + Unpin> AsyncWrite for Budget<T> {
+    fn poll_write(mut self: Pin<&mut Self>, cx: &mut Context<'_>, b: &[u8]) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, b)
+    }
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+    fn poll_write_vectored(mut self: Pin<&mut Self>, cx: &mut Context<'_>, b: &[std::io::IoSlice<'_>]) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write_vectored(cx, b)
+    }
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
+}
 
 /// The accept loop's pause after a failed `accept()` — hyper's
 /// `sleep_on_errors` shape, so a process-wide `EMFILE` is a retry rather than a
@@ -106,6 +244,41 @@ pub struct Shared {
     pub origins: Vec<String>,
     pub clients: Arc<Clients>,
     next_id: AtomicU64,
+    connections: Arc<Counter>,
+    unauthenticated: Arc<Counter>,
+    /// At a cap right now, and how many were turned away since it began: the
+    /// log says so once per episode, not once per connection, or a flood
+    /// would become a disk-writing flood.
+    capped: AtomicBool,
+    turned_away: AtomicU64,
+}
+
+impl Shared {
+    /// A slot for a new connection, or `None` past either cap.
+    fn admit(&self) -> Option<Arc<Slot>> {
+        let connection = self.connections.try_hold();
+        let unauthenticated = connection.as_ref().and_then(|_| self.unauthenticated.try_hold());
+        match (connection, unauthenticated) {
+            (Some(c), Some(u)) => {
+                if self.capped.swap(false, Ordering::SeqCst) {
+                    let n = self.turned_away.swap(0, Ordering::SeqCst);
+                    info(&format!("serve: below the connection caps again; {n} connection(s) were closed unanswered meanwhile"));
+                }
+                Some(Arc::new(Slot { _connection: c, unauthenticated: Mutex::new(Some(u)) }))
+            }
+            (c, _) => {
+                let which = if c.is_none() { "connections" } else { "unauthenticated connections" };
+                self.turned_away.fetch_add(1, Ordering::SeqCst);
+                if !self.capped.swap(true, Ordering::SeqCst) {
+                    info(&format!(
+                        "serve: at the cap on {which} ({} total, {} unauthenticated); closing new connections unanswered",
+                        self.connections.cap, self.unauthenticated.cap
+                    ));
+                }
+                None
+            }
+        }
+    }
 }
 
 /// A running listener: its port and the accept task.
@@ -126,7 +299,7 @@ impl Listener {
 /// called inside a tokio runtime. Bound with `std` and handed over, as the
 /// docs server does: the port exists before this returns, so `serve.json`
 /// never names a port nothing is listening on.
-pub fn start(ctx: Ctx, token: String, port: u16, origins: Vec<String>, clients: Arc<Clients>) -> Result<Listener, String> {
+pub fn start(ctx: Ctx, token: String, port: u16, origins: Vec<String>, clients: Arc<Clients>, limits: Limits) -> Result<Listener, String> {
     // 127.0.0.1 only, as a rule and not a default (brief: "you bind 127.0.0.1
     // and nothing else"). Not `localhost`, which may resolve to `::1` first
     // and would make the IPv4 address in serve.json a lie.
@@ -135,7 +308,18 @@ pub fn start(ctx: Ctx, token: String, port: u16, origins: Vec<String>, clients: 
     let port = std_listener.local_addr().map_err(|e| e.to_string())?.port();
     std_listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     let listener = tokio::net::TcpListener::from_std(std_listener).map_err(|e| e.to_string())?;
-    let shared = Arc::new(Shared { ctx, token: Arc::from(token.as_str()), port, origins, clients, next_id: AtomicU64::new(1) });
+    let shared = Arc::new(Shared {
+        ctx,
+        token: Arc::from(token.as_str()),
+        port,
+        origins,
+        clients,
+        next_id: AtomicU64::new(1),
+        connections: Counter::new(limits.connections),
+        unauthenticated: Counter::new(limits.unauthenticated.min(limits.connections)),
+        capped: AtomicBool::new(false),
+        turned_away: AtomicU64::new(0),
+    });
     let task = tokio::spawn(async move {
         let mut said = false;
         loop {
@@ -158,7 +342,9 @@ pub fn start(ctx: Ctx, token: String, port: u16, origins: Vec<String>, clients: 
             if !peer.ip().is_loopback() {
                 continue;
             }
-            tokio::spawn(connection(stream, shared.clone()));
+            // Past a cap the stream is dropped here: closed, nothing written.
+            let Some(slot) = shared.admit() else { continue };
+            tokio::spawn(connection(stream, shared.clone(), slot));
         }
     });
     Ok(Listener { port, task })
@@ -176,13 +362,15 @@ impl std::fmt::Display for Refused {
 }
 impl std::error::Error for Refused {}
 
-async fn connection(stream: TcpStream, shared: Arc<Shared>) {
+async fn connection(stream: TcpStream, shared: Arc<Shared>, slot: Arc<Slot>) {
     let io = TokioIo::new(stream);
     let svc = hyper::service::service_fn(move |req: Request<Incoming>| {
-        let shared = shared.clone();
-        async move { handshake(req, shared) }
+        let (shared, slot) = (shared.clone(), slot.clone());
+        async move { handshake(req, shared, slot) }
     });
-    let conn = hyper::server::conn::http1::Builder::new().serve_connection(io, svc).with_upgrades();
+    let mut http = hyper::server::conn::http1::Builder::new();
+    http.max_buf_size(MAX_HTTP_BUF);
+    let conn = http.serve_connection(io, svc).with_upgrades();
     // The timeout bounds the HTTP phase only: once upgraded, the socket
     // belongs to the session task spawned in `handshake`, and this future
     // has already resolved.
@@ -207,7 +395,7 @@ fn one_header(h: &HeaderMap, name: HeaderName) -> Result<Option<String>, Refused
 }
 
 /// The policy, then the 101. Refusals are logged on the server side only.
-fn handshake(mut req: Request<Incoming>, shared: Arc<Shared>) -> Result<Response<Empty<Bytes>>, Refused> {
+fn handshake(mut req: Request<Incoming>, shared: Arc<Shared>, slot: Arc<Slot>) -> Result<Response<Empty<Bytes>>, Refused> {
     let refuse = |why: &'static str| {
         info(&format!("serve: refused a connection: {why}"));
         Refused(why)
@@ -245,8 +433,11 @@ fn handshake(mut req: Request<Incoming>, shared: Arc<Shared>) -> Result<Response
     tokio::spawn(async move {
         match on_upgrade.await {
             Ok(upgraded) => {
-                let ws = WebSocketStream::from_raw_socket(TokioIo::new(upgraded), Role::Server, None).await;
-                session(ws, shared, id, origin).await;
+                let budget = Arc::new(AtomicUsize::new(PREAUTH_BYTES));
+                let io = Budget { inner: TokioIo::new(upgraded), left: budget.clone() };
+                let config = WebSocketConfig::default().max_message_size(Some(MAX_MESSAGE)).max_frame_size(Some(MAX_MESSAGE));
+                let ws = WebSocketStream::from_raw_socket(io, Role::Server, Some(config)).await;
+                session(ws, shared, id, origin, slot, budget).await;
             }
             Err(e) => warn(&format!("serve: upgrade failed after 101: {e}")),
         }
@@ -260,7 +451,7 @@ fn handshake(mut req: Request<Incoming>, shared: Arc<Shared>) -> Result<Response
         .expect("a 101 with three fixed headers is a valid response"))
 }
 
-type Ws = WebSocketStream<TokioIo<hyper::upgrade::Upgraded>>;
+type Ws = WebSocketStream<Budget<TokioIo<hyper::upgrade::Upgraded>>>;
 
 /// The next frame, if it is text. Anything else — binary, a ping, a close,
 /// an error, the end — is `None`, and `None` before auth is a refusal.
@@ -288,7 +479,7 @@ async fn handshake_v1(ws: &mut Ws, token: &str) -> Option<()> {
 
 /// One authenticated session: the handshake first, then requests until the
 /// client goes.
-async fn session(mut ws: Ws, shared: Arc<Shared>, id: u64, origin: String) {
+async fn session(mut ws: Ws, shared: Arc<Shared>, id: u64, origin: String, slot: Arc<Slot>, budget: Arc<AtomicUsize>) {
     // The deadline is on the WHOLE exchange, not per frame: two quick steps
     // adding up to more than it are refused like silence is. A refusal drops
     // the socket here with nothing more written, not even a Close frame.
@@ -297,6 +488,10 @@ async fn session(mut ws: Ws, shared: Arc<Shared>, id: u64, origin: String) {
         info(&format!("serve: client {id} did not authenticate ({origin})"));
         return;
     }
+    // In: the unauthenticated slot goes back, and the byte budget lifts to
+    // the codec's own MAX_MESSAGE. The connection slot is held until the end.
+    slot.authenticated();
+    budget.store(usize::MAX, Ordering::SeqCst);
     info(&format!("serve: client {id} connected ({origin})"));
 
     let (sink, mut stream) = ws.split();

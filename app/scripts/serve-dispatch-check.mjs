@@ -22,7 +22,9 @@
 //            ← {ok: true, version, proof: HMAC(token, "worktrees-serve/v1/server\n" + cn + "\n" + sn)}
 //            any other frame, a wrong proof, or 3 s for the whole exchange:
 //            the socket closes with nothing written. Verify `proof` before
-//            believing `version` or sending anything else.
+//            believing `version` or sending anything else. Before the proof
+//            verifies a peer may send 512 bytes in all; after it, one message
+//            (or frame) may be 16 MiB, and a larger one ends the connection.
 //   request  {id, cmd, args}          id echoed verbatim; args as `invoke` sends
 //   reply    {id, ok: <value>}        or {id, err: <value>} — err is what the
 //                                     Tauri command's Err serializes to
