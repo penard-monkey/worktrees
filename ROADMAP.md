@@ -16,6 +16,14 @@ this repo's settings in `.claude/close-out.md`).
   paragraph you were reading. See
   docs/sessions/2026-10-15-md-scroll-keep/.
 
+- **Before the release that ships kimi: drive one kimi lane in the real app.**
+  Everything automatable passed (bats, unit, mock harness, a live CLI run on a
+  private tmux socket), but the app itself (WKWebView layout, real refresh
+  timing, the trust note against a real `kimi_status`, the meter) has not been
+  driven. `docs/kimi-manual-checks.md` §10 is a numbered walk-through: new kimi
+  place, trust modal, opener, dots, send, resume, Settings → Kimi, the meter.
+  Run it by hand in `app/scripts/sandbox.sh --app`. See
+  docs/sessions/2026-10-19-kimi-harness/.
 - **A kimi or Codex launch can wait ~14s behind the usage meter.** Both
   readers (`kimi_usage::read_cached`, `codex_usage::read_cached`) hold their
   cache lock across the probe, by design, so concurrent callers share one
