@@ -25,7 +25,7 @@ Works in **any** git repo. No config required.
 
 ## Desktop app
 
-Same engine, a native window. The macOS app (Tauri) links the identical Rust
+Same engine, a native window. The app (Tauri; macOS and Linux) links the identical Rust
 core in-process — no daemon, no subprocess — so everything the CLI knows, the
 app shows live: every place grouped by how active it is, ahead/behind and dirty
 state per branch, and a tmux-attached terminal for each session right in the
@@ -50,8 +50,9 @@ Open a place to see its branch state, notes, and embedded terminal:
   <img src="docs/media/desktop-session.png" width="820" alt="worktrees desktop app — a place with its embedded terminal">
 </p>
 
-Install it alongside the CLI on macOS (`WORKTREES_INSTALL_APP=1`, or answer the
-installer prompt; from a clone, `make install-app`) — see [Install](#install).
+Install it alongside the CLI on macOS or Linux (`WORKTREES_INSTALL_APP=1`, or
+answer the installer prompt; from a clone, `make install-app`) — see
+[Install](#install).
 
 ## Install
 
@@ -76,9 +77,14 @@ The installer fetches the prebuilt binary for your platform (macOS/Linux,
 x86_64/arm64); with no match, or `WORKTREES_INSTALL_FROM_SOURCE=1`, it builds
 from source with `cargo`.
 
-On macOS it also **offers the desktop app** (`worktrees.app` → /Applications,
-checksum-verified; the unsigned bundle's quarantine attr is stripped on your
-explicit opt-in). Non-interactive runs skip the prompt — opt in/out explicitly:
+It also **offers the desktop app**, checksum-verified. On macOS that is
+`worktrees.app` → /Applications (the unsigned bundle's quarantine attr is
+stripped on your explicit opt-in); on Linux, the AppImage →
+`~/Applications/worktrees.AppImage`, with a desktop entry so it shows up in
+your launcher. Each release also has a `.deb` (x86_64/arm64) for
+`sudo apt install ./worktrees-app-*.deb`, which installs the app as
+`worktrees-app` and pulls in the distro's tmux and git. Non-interactive runs
+skip the prompt — opt in/out explicitly:
 
 ```sh
 WORKTREES_INSTALL_APP=1 \
@@ -86,12 +92,14 @@ WORKTREES_INSTALL_APP=1 \
 ```
 
 From a clone, `make install-app` builds the app locally and installs it to
-/Applications (no signing or quarantine involved).
+/Applications (no signing or quarantine involved) — or, on Linux, the AppImage
+to `~/Applications`.
 
-The app bundle carries its own copy of the CLI, built from the same commit
-(`worktrees.app/Contents/MacOS/worktrees`), for the app's private use. It is
-not put on your `PATH`: the `worktrees` you run in a terminal is still the
-one the installer puts in `~/.local/bin`.
+The app carries its own copy of the CLI, built from the same commit
+(`worktrees.app/Contents/MacOS/worktrees`; `usr/lib/worktrees/worktrees` in
+the AppImage and the .deb), for the app's private use. It is not put on your
+`PATH`: the `worktrees` you run in a terminal is still the one the installer
+puts in `~/.local/bin`. tmux and git are always your system's own.
 
 Or clone and build (`make install` compiles the release binary and symlinks it —
 `git pull && make install` upgrades):

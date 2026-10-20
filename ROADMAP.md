@@ -27,15 +27,32 @@ this repo's settings in `.claude/close-out.md`).
   the same shape as the MCP setup offer. Signing is not a factor: macOS stays
   ad-hoc either way (`install.sh` already strips quarantine recursively, so a
   sidecar runs from a terminal); only the iOS target needs Apple signing.
-  B is in place (feat/sidecar-bundle): `Contents/MacOS/worktrees`, staged and
-  checked by `app/scripts/sidecar.sh`, with `externalBin` only in the
-  bundle-time overlay `app/src-tauri/tauri.bundle.conf.json`, so a `tauri
-  dev` or sandbox app has no bundled copy. But `target/debug/worktrees` sits
-  beside its binary whenever the debug CLI has been built, so a resolver that
-  looks next to `current_exe()` finds THAT one; A's "never from a debug build"
-  guard (and the `serve` lane's resolver) must key on more than "the file
-  exists".
+  B is in place (feat/sidecar-bundle), on macOS and Linux:
+  `Contents/MacOS/worktrees`, and `usr/lib/worktrees/worktrees` in the AppImage
+  and .deb (= `resource_dir()/worktrees` for both), mapped in by
+  tauri.conf.json's per-format `files` keys, which only the bundler reads —
+  staged and checked by `app/scripts/sidecar.sh` — so a `tauri dev` or sandbox
+  app has no bundled copy. But a dev app's `resource_dir()` IS its exe dir
+  (`target/debug`), and `target/debug/worktrees` sits there whenever the debug
+  CLI has been built, so a resolver that looks next to `current_exe()` or in
+  `resource_dir()` finds THAT one; A's "never from a debug build" guard (and
+  the `serve` lane's resolver) must key on more than "the file exists". On
+  Linux, A is a link from `~/.local/bin/worktrees` into an AppImage mount that
+  exists only while the app runs — so A there means extracting, or the .deb.
   _From: 2026-10-17, feat/server-edition_
+
+- **The AppImage's links and Docs button open the browser with the AppImage's
+  libraries.** tauri-plugin-opener (`open` 5.4.0) runs `xdg-open` from the
+  app's PATH — whose first entry is the AppImage's own bundled `xdg-open` — with
+  the app's whole environment, `LD_LIBRARY_PATH` into the AppDir included, so
+  a browser it STARTS (not one already running, which takes the URL over IPC)
+  loads the AppImage's GTK stack. `worktrees_core::childenv` fixes this for
+  every spawn that is ours (tmux, panes, the dock's shells, editors, git); the
+  opener is tauri's. The shape: route `openUrl`/`openPath`/`revealItemInDir`
+  through an app command that spawns `xdg-open` (the SYSTEM one, from the
+  scrubbed PATH) via `childenv::scrub`, on Linux only. Not measured with a real
+  browser in Docker.
+  _From: 2026-10-20, feat/sidecar-bundle_
 
 - ~~**Before v0.42.0: drive #482 (scroll keep) in the real app.**~~ Done 2026-10-15: David ran it in the sandbox, worked fine. Only the
   mock was measured, and AGENTS.md says refresh timing needs the real app.

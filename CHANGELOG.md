@@ -38,6 +38,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   checks the copy inside the bundle it ships: present, executable, the right
   architecture, and the tag's version. `make install-app` builds it the same
   way, and takes `APPDIR=<dir>` to install somewhere other than /Applications.
+- **The desktop app on Linux**, for x86_64 and arm64: every release now ships
+  an AppImage and a `.deb` beside the macOS bundles, and the in-app updater
+  takes care of both (an AppImage replaces itself; a `.deb` updates through
+  `pkexec dpkg -i`). The installer offers it on Linux exactly as on macOS — the
+  AppImage goes to `~/Applications/worktrees.AppImage` with a desktop entry,
+  never onto your `PATH` — and `make install-app` builds it on a Linux machine.
+  The `.deb` installs the app as `worktrees-app` and depends on the distro's
+  tmux and git; the AppImage, like the Mac app, uses the ones you have. Both
+  carry the CLI privately at `usr/lib/worktrees/worktrees`, and nothing the
+  app starts for you — tmux and every pane in it, the dock's shells, your
+  editor, git — inherits the AppImage's bundled libraries or paths.
 - **Applying the worktrees rules or the agent-setup Fix now opens a review
   lane for the `agent-instructions` branch**: a place on it, with an agent
   whose brief explains what the branch changes — each file, the AGENTS.md
