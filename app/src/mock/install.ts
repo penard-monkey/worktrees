@@ -39,8 +39,21 @@ function findProject(root: string) {
  *  transcript once the agent has answered; the mock has none. */
 function mockModel(h: Harness, asked: unknown): string {
   if (typeof asked === "string" && asked) return asked;
-  return h === "claude" ? "Opus 5.5" : h === "codex" ? "gpt-6-astra" : "lm-studio/qwen3.6-27b";
+  return h === "claude" ? "Opus 5.5" : h === "codex" ? "gpt-6-astra" : h === "kimi" ? "kimi-code/k3" : "lm-studio/qwen3.6-27b";
 }
+
+// Settings → Kimi's state: `kimi_mcp` and the `[trust] kimi` allowance (core
+// keeps both in ~/.config/worktrees/config.toml). `?kimi=missing` stands in for
+// a machine without kimi.
+let kimiMcpMode: "off" | "read-only" | "mutations" = "off";
+const kimiAllowed = new Set<string>();
+const kimiMissing = () => new URLSearchParams(location.search).get("kimi") === "missing";
+const kimiMcpStatus = () => ({
+  state: kimiMissing() ? "kimi-missing" : kimiMcpMode, mode: kimiMcpMode,
+  kimi_bin: kimiMissing() ? null : "/Users/demo/.kimi-code/bin/kimi",
+  worktrees_bin: "/Users/demo/.local/bin/worktrees",
+  file: "<place>/.kimi-code/mcp.json", source: "config", config_path: "/Users/demo/.config/worktrees/config.toml",
+});
 
 // Settings → pi's allowance (core keeps it in ~/.config/worktrees/config.toml).
 const piAllowed = new Set<string>();
@@ -66,6 +79,15 @@ function setHostPolicy(cmd: string, key: "codex_permissions" | "pi_project_trust
   mockHostPolicy[key] = mode;
   try { sessionStorage.setItem(MOCK_HOST_POLICY_KEY, JSON.stringify(mockHostPolicy)); } catch { /* private mode */ }
 }
+
+/** kimi's catalog as `kimimodels::options_from` shapes it: the aliases its
+ *  config declares, kimi's default first, all ready. */
+const KIMI_MODELS = [
+  { model: { harness: "kimi", backend: null, model: "kimi-code/k3", label: "K3" }, ready: true, reason: null,
+    source: "kimi-config", meta: { context: "1M", thinking: true, images: true } },
+  { model: { harness: "kimi", backend: null, model: "kimi-code/kimi-for-coding-highspeed", label: "K2.7 Code Highspeed" }, ready: true,
+    reason: null, source: "kimi-config", meta: { context: "256K", thinking: true, images: true } },
+];
 
 /** pi's catalog as `choice::options_for("pi")` shapes it: pi's list, the
  *  default it cannot use, and a declared host that does not answer. */
@@ -257,6 +279,7 @@ function mockGuidance(): Record<string, unknown> {
         ...(mode === "codex-own" && on ? { state: "skipped", reason: "you set your own developer_instructions, and -c would replace them" }
           : mode === "unchecked" && on ? { state: "unchecked" } : d(["-c", "'developer_instructions=\"…\"'"])) },
       { id: "pi", label: "pi", installed: true, ...d(["--skill", `'${dir}/skills/worktrees'`, "--append-system-prompt", `'${dir}/rules.md'`]) },
+      { id: "kimi", label: "Kimi", installed: true, ...d([]) },
     ],
     skill: mockSkillEdit && !mockSkillEdit.invalid ? mockSkillEdit.text : MOCK_SKILL_DEFAULT,
     skill_default: MOCK_SKILL_DEFAULT,
@@ -3011,7 +3034,37 @@ Phase 3: Frontend pane and mock harness
         model: { harness: "claude", backend: null, model: m, label: null }, ready: true, reason: null, source: "claude-aliases", meta: {},
       }));
       if (h === "codex") return [];
-      throw `provider must be claude or codex or pi`;
+      if (h === "kimi") return KIMI_MODELS;
+      throw `provider must be claude or codex or pi or kimi`;
+    }
+    case "kimi_status": {
+      const root = typeof args.repo === "string" ? args.repo : null;
+      const missing = kimiMissing();
+      const allowed = !!root && kimiAllowed.has(root);
+      return {
+        kimi_bin: missing ? null : "/Users/demo/.kimi-code/bin/kimi",
+        models_reason: null,
+        mcp: kimiMcpStatus(),
+        allowed: [...kimiAllowed], repo_root: root, repo_allowed: allowed,
+        launch: root ? { env: allowed ? ["KIMI_CODE_TRUST_WORKSPACE", "1"] : null, source: allowed ? "allowance" : "ask", allowed, shadowed: false } : null,
+      };
+    }
+    case "kimi_mcp_status":
+      return kimiMcpStatus();
+    case "kimi_version":
+      if (kimiMissing()) throw "kimi is not installed";
+      return "2.2.0";
+    case "kimi_mcp_set": {
+      const mode = String(args.mode);
+      if (!["off", "read-only", "mutations"].includes(mode)) throw `unknown kimi MCP mode '${mode}' (expected off, read-only or mutations)`;
+      kimiMcpMode = mode as typeof kimiMcpMode;
+      return kimiMcpStatus();
+    }
+    case "set_kimi_allowed": {
+      const root = String(args.repo);
+      const had = kimiAllowed.has(root);
+      if (args.allow) kimiAllowed.add(root); else kimiAllowed.delete(root);
+      return had !== !!args.allow;
     }
     case "pi_status": {
       const root = typeof args.repo === "string" ? args.repo : null;
@@ -3344,10 +3397,11 @@ const WT = "/Users/demo/workspace/worktrees/.worktrees";
 const ACTIVITY_CYCLE: { busy: string[]; waiting: string[] }[] = [
   // both states visible: one place working, another needs input; the pi lane
   // is mid-turn (its session file ends on the user's message)
-  { busy: [`${CDV}/billing-refactor`, `${CDV}/catalog-import`], waiting: [`${WT}/feat-redesign`] },
+  { busy: [`${CDV}/billing-refactor`, `${CDV}/catalog-import`, `${CDV}/ledger-sync`], waiting: [`${WT}/feat-redesign`] },
   // working shifts; the Codex place parks on an approval (amber, from its
   // pane — core `activity::codex_panes`); pi's reply lands (an ember)
-  { busy: [`${CDV}/messaging`], waiting: [`${CDV}/billing-refactor`] },
+  // and the kimi lane stops on an approval (its wire log: lib.rs `kimi_tick`)
+  { busy: [`${CDV}/messaging`], waiting: [`${CDV}/billing-refactor`, `${CDV}/ledger-sync`] },
   // approved: the Codex turn runs on, and a Claude session waits; the pi lane
   // was relaunched and sits on pi's trust modal (lib.rs `pi_tick`)
   { busy: [`${CDV}/billing-refactor`], waiting: [`${CDV}/kitchen-sink`, `${CDV}/catalog-import`] },
@@ -3356,14 +3410,16 @@ const ACTIVITY_CYCLE: { busy: string[]; waiting: string[] }[] = [
 ];
 const CODEX_PLACES = new Set([`${CDV}/billing-refactor`]);
 const PI_PLACES = new Set([`${CDV}/catalog-import`]);
+const KIMI_PLACES = new Set([`${CDV}/ledger-sync`]);
 // `waiting_by` (lib.rs `ClaudeActivity`): the waiting set split by the harness
 // that is waiting, which is what the nav drag's refusal keys on.
 const withWaitingBy = (a: { busy: string[]; waiting: string[] }) => ({
   ...a,
   waiting_by: {
-    claude: a.waiting.filter((p) => !CODEX_PLACES.has(p) && !PI_PLACES.has(p)),
+    claude: a.waiting.filter((p) => !CODEX_PLACES.has(p) && !PI_PLACES.has(p) && !KIMI_PLACES.has(p)),
     codex: a.waiting.filter((p) => CODEX_PLACES.has(p)),
     pi: a.waiting.filter((p) => PI_PLACES.has(p)),
+    kimi: a.waiting.filter((p) => KIMI_PLACES.has(p)),
   },
 });
 let actIdx = 0;
@@ -3382,6 +3438,8 @@ setInterval(() => {
   for (const path of before) {
     if (now.busy.includes(path)) continue;
     if (CODEX_PLACES.has(path) && now.waiting.includes(path)) continue;
+    // Same for kimi: an approval mid-turn is not `agent.turn.ended`.
+    if (KIMI_PLACES.has(path) && now.waiting.includes(path)) continue;
     emitEvent("sessions:done", { path, epoch: nowSec() });
   }
 }, 5000);

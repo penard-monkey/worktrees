@@ -134,6 +134,25 @@ pub fn pi_mcp_uninstall() -> Result<worktrees_core::pimcp::Outcome, String> {
     worktrees_core::pimcp::uninstall().inspect_err(|e| applog("error", &format!("pi_mcp_uninstall: {e}")))
 }
 
+/// Whether kimi lanes get the worktrees MCP server (`kimi_mcp`), and with
+/// which tools. Machine-level: the `kimi-mcp` offer's input.
+pub fn kimi_mcp_status() -> Result<worktrees_core::kimiplace::Status, String> {
+    Ok(worktrees_core::kimiplace::status())
+}
+
+/// Settings → Kimi's MCP choice: `off`, `read-only` or `mutations`, written to
+/// worktrees' OWN config (never kimi's). Lanes pick it up at their next launch,
+/// when their place's `.kimi-code/mcp.json` is written or removed.
+pub fn kimi_mcp_set(mode: String) -> Result<worktrees_core::kimiplace::Status, String> {
+    let Some(m) = worktrees_core::kimiplace::McpMode::parse(&mode) else {
+        let e = format!("unknown kimi MCP mode '{mode}' (expected off, read-only or mutations)");
+        applog("error", &format!("kimi_mcp_set: {e}"));
+        return Err(e);
+    };
+    worktrees_core::kimiplace::set_mode(m).inspect_err(|e| applog("error", &format!("kimi_mcp_set: {e}")))?;
+    Ok(worktrees_core::kimiplace::status())
+}
+
 pub fn codex_mcp_migration_plan() -> Result<Vec<worktrees_core::mcpmigrate::Row>, String> {
     let result = worktrees_core::mcpmigrate::migration_plan();
     if let Err(e) = &result { applog("error", &format!("codex_mcp_migration_plan: {e}")); }

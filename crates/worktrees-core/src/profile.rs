@@ -724,7 +724,7 @@ impl AiLaunch {
             cmd.push(' ');
             cmd.push_str(w);
         }
-        if let Some(o) = self.opener.as_deref().filter(|o| !o.trim().is_empty()) {
+        if let Some(o) = self.opener.as_deref().filter(|o| !o.trim().is_empty() && adapter.opener_in_argv()) {
             cmd.push(' ');
             cmd.push_str(&shell_quote(o));
         }

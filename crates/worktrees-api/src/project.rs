@@ -626,6 +626,51 @@ pub fn pi_status(repo: Option<String>) -> Result<PiStatus, String> {
     })
 }
 
+/// Settings → Kimi and the new-place dialog: whether kimi is here, how a lane
+/// in `repo` would be trusted (the user's allowance — kimi itself always asks
+/// otherwise), and whether lanes get the worktrees MCP server. Reads nothing
+/// under kimi's home but the `[models.*]` half of its config, and only in
+/// `agent_models`.
+#[derive(Serialize)]
+pub struct KimiStatus {
+    pub kimi_bin: Option<String>,
+    /// Why kimi's model list is empty, when it is: `no config.toml` or
+    /// `config.toml unreadable` (`kimimodels::catalog`); `None` when it read.
+    pub models_reason: Option<&'static str>,
+    pub mcp: worktrees_core::kimiplace::Status,
+    pub allowed: Vec<String>,
+    pub repo_root: Option<String>,
+    pub repo_allowed: bool,
+    pub launch: Option<worktrees_core::trust::KimiLaunchTrust>,
+}
+
+pub fn kimi_status(repo: Option<String>) -> Result<KimiStatus, String> {
+    let repo_root = repo.as_deref().and_then(worktrees_core::trust::repo_root);
+    let allowed = worktrees_core::trust::allowed("kimi");
+    let repo_allowed = repo_root.as_ref().is_some_and(|r| allowed.contains(r));
+    let launch = repo_root.as_deref().map(worktrees_core::trust::kimi_launch_trust);
+    // Cheap on purpose — the new-place dialog asks this for availability on
+    // every open and every Start-with flip, so it starts no kimi process (the
+    // version is `kimi_version`, which only Settings → Kimi asks for).
+    Ok(KimiStatus {
+        kimi_bin: worktrees_core::kimi::kimi_bin().map(|p| p.to_string_lossy().into_owned()),
+        models_reason: worktrees_core::kimimodels::catalog().err(),
+        mcp: worktrees_core::kimiplace::status(),
+        allowed,
+        repo_root,
+        repo_allowed,
+        launch,
+    })
+}
+
+/// Settings → Kimi's version line: `kimi --version`, normalised to the bare
+/// version. It starts a kimi process (bounded at 10s), so it is its own
+/// command, asked by the Settings panel alone — and blocking, so the app's
+/// wrapper puts it on the blocking pool.
+pub fn kimi_version() -> Result<String, String> {
+    worktrees_core::kimi::version().inspect_err(|e| applog("warn", &format!("kimi_version: {e}")))
+}
+
 /// Settings → pi's trust mode: host policy like Codex's permissions, and read
 /// back through `pi_status`'s `trust`. An unknown value is refused, never
 /// defaulted, and nothing is written.
@@ -649,8 +694,23 @@ pub fn set_pi_allowed(repo: String, allow: bool) -> Result<bool, String> {
     // A revoke takes the LISTED string as it is (Settings' Revoke button sends
     // exactly that), so a repo that has moved or been deleted can still be
     // revoked; a grant resolves the repo's root through git.
-    let root = worktrees_core::trust::root_for("pi", &repo, allow).ok_or_else(|| format!("{repo} is not inside a git repository"))?;
+    let root = worktrees_core::trust::root_for("pi", &repo, allow).ok_or_else(|| {
+        let e = format!("{repo} is not inside a git repository");
+        applog("warn", &format!("set_pi_allowed: {e}"));
+        e
+    })?;
     worktrees_core::trust::set_allowed("pi", &root, allow).inspect_err(|e| applog("error", &format!("set_pi_allowed: {e}")))
+}
+
+/// Allow (or revoke) this repo's kimi lanes to start trusted. The user's act,
+/// from Settings → Kimi; the MCP server has no path here. Same keying as pi's.
+pub fn set_kimi_allowed(repo: String, allow: bool) -> Result<bool, String> {
+    let root = worktrees_core::trust::root_for("kimi", &repo, allow).ok_or_else(|| {
+        let e = format!("{repo} is not inside a git repository");
+        applog("warn", &format!("set_kimi_allowed: {e}"));
+        e
+    })?;
+    worktrees_core::trust::set_allowed("kimi", &root, allow).inspect_err(|e| applog("error", &format!("set_kimi_allowed: {e}")))
 }
 
 

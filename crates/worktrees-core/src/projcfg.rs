@@ -60,6 +60,9 @@ const USER_ONLY_KEYS: &[&str] = &[
     "model",
     "trust",
     "pi_project_trust",
+    // Whether kimi lanes get the worktrees MCP server, mutating or not
+    // (`kimiplace`): which tools an agent holds is the user's call.
+    "kimi_mcp",
     // Whether agents may reach places in OTHER registered projects
     // (cross-project §5). A repo opting itself into reach, or out of being
     // private, is the consent the registry exists to keep with the user.
@@ -1244,6 +1247,8 @@ mod tests {
             "harness = \"pi\"\n",
             "model = \"lm-studio/qwen3.6-27b\"\n",
             "pi_project_trust = \"ask\"\n",
+            "kimi_mcp = \"mutations\"\n",
+            "[trust]\nkimi = [\"/repo\"]\n",
             "[trust]\npi = [\"/repo\"]\n",
             "[model]\npi = \"x/y\"\n",
             // Cross-project reach is the user's to grant (cross-project §5).

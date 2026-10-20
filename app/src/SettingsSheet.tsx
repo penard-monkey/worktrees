@@ -17,6 +17,7 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import ProfilesPanel from "./ProfilesPanel";
 import PiPanel from "./PiPanel";
 import type { PiMcpStatus } from "./PiMcpPanel";
+import KimiPanel, { type KimiMcpStatus } from "./KimiPanel";
 import type { CodexPermissions, LayoutTile, Settings, ThemeId, ThemeSetting, UpdateInfo } from "./settings";
 import { LAYOUT_KEYS } from "./arrange";
 import { clampNav, clampRem, clampTerm, clampZoom, DEFAULTS, LAYOUT_TILES, railsMerged, railsWidth, THEMES, ZOOM_STEPS } from "./settings";
@@ -91,6 +92,13 @@ function agentSetupLabel(state: string | null): string {
     unreadable: "Config unreadable",
     "pi-missing": "pi not installed",
     "not-applicable": "Unavailable",
+    // kimi's states are its `kimi_mcp` setting, prefixed so they cannot
+    // collide with another harness's words.
+    "kimi-mutations": "Connected",
+    "kimi-read-only": "Connected (read only)",
+    "kimi-off": "Not connected",
+    "kimi-cli-missing": "Worktrees CLI missing",
+    "kimi-kimi-missing": "kimi not installed",
   } as Record<string, string>)[state] ?? state;
 }
 
@@ -110,6 +118,7 @@ const CATS = [
   { id: "claude", label: "Claude" },
   { id: "codex", label: "Codex" },
   { id: "pi", label: "pi" },
+  { id: "kimi", label: "Kimi" },
   // Its own category (decision Q8): it is about every agent, not one harness,
   // and not about AI profiles, which are per-profile and Claude-only.
   { id: "guidance", label: "Agent guidance" },
@@ -477,6 +486,9 @@ export function SettingsSheet({
   onPiMcpChanged,
   piMcpOfferPending,
   onSilencePiMcpOffer,
+  onKimiMcpChanged,
+  kimiMcpOfferPending,
+  onSilenceKimiMcpOffer,
   userSkills,
   onUserSkillsChanged,
   skillsOfferPending,
@@ -543,6 +555,10 @@ export function SettingsSheet({
   onPiMcpChanged: (s: PiMcpStatus) => void;
   piMcpOfferPending: boolean;
   onSilencePiMcpOffer: () => void;
+  /// kimi's twins (offers.ts `kimi-mcp`); Settings → Kimi's section probes for itself.
+  onKimiMcpChanged: (s: KimiMcpStatus) => void;
+  kimiMcpOfferPending: boolean;
+  onSilenceKimiMcpOffer: () => void;
   userSkills: UserSkill[] | null;
   onUserSkillsChanged: (s: UserSkill[]) => void;
   skillsOfferPending: boolean;
@@ -591,6 +607,7 @@ export function SettingsSheet({
   const [editorCustom, setEditorCustom] = useState(false);
   const [codexMcpStatus, setCodexMcpStatus] = useState<CodexMcpStatus | null>(null);
   const [piMcpStatus, setPiMcpStatus] = useState<PiMcpStatus | null>(null);
+  const [kimiMcpStatus, setKimiMcpStatus] = useState<KimiMcpStatus | null>(null);
   useEffect(() => {
     if (!open || cat !== "commands") return;
     let alive = true;
@@ -602,6 +619,9 @@ export function SettingsSheet({
       .catch((e) => { if (alive) onReport(String(e)); });
     invoke<PiMcpStatus>("pi_mcp_status")
       .then((status) => { if (alive) setPiMcpStatus(status); })
+      .catch((e) => { if (alive) onReport(String(e)); });
+    invoke<KimiMcpStatus>("kimi_mcp_status")
+      .then((status) => { if (alive) setKimiMcpStatus(status); })
       .catch((e) => { if (alive) onReport(String(e)); });
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- probe on entry, not every App render
@@ -988,6 +1008,10 @@ export function SettingsSheet({
             onMcpStatus={(s) => { setPiMcpStatus(s); onPiMcpChanged(s); }}
             mcpOfferPending={piMcpOfferPending} onSilenceMcpOffer={onSilencePiMcpOffer} />}
 
+          {cat === "kimi" && <KimiPanel settings={settings} repo={repo || null} onChange={onChange} onReport={onReport}
+            onMcpStatus={(s) => { setKimiMcpStatus(s); onKimiMcpChanged(s); }}
+            mcpOfferPending={kimiMcpOfferPending} onSilenceMcpOffer={onSilenceKimiMcpOffer} />}
+
           {cat === "guidance" && <>
           <GuidanceSection data-focus="agent-guidance" status={guidance} onStatus={onGuidanceChanged} onReport={onReport}
             offerPending={guidanceOfferPending} onSilenceOffer={onSilenceGuidanceOffer}
@@ -1017,11 +1041,12 @@ export function SettingsSheet({
           <section className="setting">
             <label>Worktrees tools for agents</label>
             <div className="hint">Every agent can be connected at the same time. Their MCP setup is independent of the default agent.</div>
-            <div className="hint">Claude: {agentSetupLabel(mcpStatus?.state ?? null)} · Codex: {agentSetupLabel(codexMcpStatus?.state ?? null)} · pi: {agentSetupLabel(piMcpStatus?.state ?? null)}</div>
+            <div className="hint">Claude: {agentSetupLabel(mcpStatus?.state ?? null)} · Codex: {agentSetupLabel(codexMcpStatus?.state ?? null)} · pi: {agentSetupLabel(piMcpStatus?.state ?? null)} · Kimi: {agentSetupLabel(kimiMcpStatus ? `kimi-${kimiMcpStatus.state}` : null)}</div>
             <div className="ver-actions">
               <button className="ctrl sm" onClick={() => setCat("claude")}>Configure Claude</button>
               <button className="ctrl sm" onClick={() => setCat("codex")}>Configure Codex</button>
               <button className="ctrl sm" onClick={() => setCat("pi")}>Configure pi</button>
+              <button className="ctrl sm" onClick={() => setCat("kimi")}>Configure Kimi</button>
             </div>
           </section>
           <section className="setting">

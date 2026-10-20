@@ -677,6 +677,16 @@ async fn pi_mcp_uninstall() -> Result<worktrees_core::pimcp::Outcome, String> {
 }
 
 #[tauri::command]
+async fn kimi_mcp_status() -> Result<worktrees_core::kimiplace::Status, String> {
+    worktrees_api::config::kimi_mcp_status()
+}
+
+#[tauri::command]
+async fn kimi_mcp_set(mode: String) -> Result<worktrees_core::kimiplace::Status, String> {
+    worktrees_api::config::kimi_mcp_set(mode)
+}
+
+#[tauri::command]
 async fn codex_mcp_migration_plan() -> Result<Vec<worktrees_core::mcpmigrate::Row>, String> {
     worktrees_api::config::codex_mcp_migration_plan()
 }
@@ -871,6 +881,18 @@ async fn pi_status(repo: Option<String>) -> Result<worktrees_api::project::PiSta
 }
 
 #[tauri::command]
+async fn kimi_status(repo: Option<String>) -> Result<worktrees_api::project::KimiStatus, String> {
+    worktrees_api::project::kimi_status(repo)
+}
+
+#[tauri::command]
+async fn kimi_version() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(worktrees_api::project::kimi_version)
+        .await
+        .map_err(|_| "kimi version worker failed".to_string())?
+}
+
+#[tauri::command]
 async fn set_pi_trust(app: AppHandle, mode: String) -> Result<(), String> {
     worktrees_api::project::set_pi_trust(&ctx(&app), mode)
 }
@@ -878,6 +900,11 @@ async fn set_pi_trust(app: AppHandle, mode: String) -> Result<(), String> {
 #[tauri::command]
 async fn set_pi_allowed(repo: String, allow: bool) -> Result<bool, String> {
     worktrees_api::project::set_pi_allowed(repo, allow)
+}
+
+#[tauri::command]
+async fn set_kimi_allowed(repo: String, allow: bool) -> Result<bool, String> {
+    worktrees_api::project::set_kimi_allowed(repo, allow)
 }
 
 #[tauri::command]
@@ -1809,6 +1836,11 @@ pub fn run() {
             agent_guidance_merge,
             agent_models,
             pi_status,
+            kimi_status,
+            kimi_mcp_status,
+            kimi_mcp_set,
+            kimi_version,
+            set_kimi_allowed,
             set_pi_trust,
             set_pi_allowed,
             diagnostics,

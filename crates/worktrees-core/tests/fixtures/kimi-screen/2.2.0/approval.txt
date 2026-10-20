@@ -1,0 +1,40 @@
+ │                                                                                                                    │
+ │  ▐█▛█▛█▌  Welcome to Kimi Code!                                                                                    │
+ │  ▐█████▌  Send /help for help information.                                                                         │
+ │                                                                                                                    │
+ │  Directory: /Users/u/w/repo                                    │
+ │  Session:   session_c8ce7b2e-8f8a-4cd2-88e8-c0ca9bbbbf5e                                                           │
+ │  Model:     K2.7 Code Highspeed                                                                                    │
+ │  Version:   2.2.0                                                                                                  │
+ │                                                                                                                    │
+ ╰────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+ ✦ Kimi Code Desktop is here — Everything you love about Kimi Code, now on desktop
+   Run /desktop or visit https://www.kimi.com/code to install
+
+   No session yet — one will be created on your first message.
+   tmux extended-keys is off. Modified Enter keys may not work. Add `set -g extended-keys on` to ~/.tmux.conf and
+ restart tmux.
+
+ ❯ Run ls, then reply DONE.
+
+ ● The user wants me to run ls and then reply DONE. I should use Bash tool for ls since it's a shell command. Then
+   reply with DONE.
+
+ ● Running a command · $ ls
+   Press Ctrl+B to run in background
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   ▶ Run this command?
+
+   cwd: /Users/u/w/repo
+   $ ls
+
+   ▶ 1. Approve once
+     2. Approve for this session
+     3. Reject
+     4. Reject with feedback
+
+   ↑/↓ select · 1/2/3/4 choose · ↵ confirm
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ K2.7 Code Highspeed thinking  …/u/w/repo      main    ctrl+o expand | shift+enter: newline | ctrl+c: cancel
+                                                                                               context: 8% (19.8k/256k)

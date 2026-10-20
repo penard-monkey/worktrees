@@ -701,7 +701,12 @@ mod tests {
             assert_eq!(&got[..2], &old(panes.as_ref(), c, primary, *up)[..], "primary {primary} up={up}");
             let pi_up = panes.as_ref().is_some_and(|p| p.has_session("p-feat~agent~pi"));
             assert_eq!(got[2], ("p-feat~agent~pi".to_string(), pi_up), "primary {primary} up={up}");
+            let kimi_up = panes.as_ref().is_some_and(|p| p.has_session("p-feat~agent~kimi"));
+            assert_eq!(got[3], ("p-feat~agent~kimi".to_string(), kimi_up), "primary {primary} up={up}");
         }
+        let kimi = rows(&[("p-feat~agent~kimi", "kimi")]);
+        let got = agent_sessions_for(&Watch::default(), Some(&kimi), &[], c, c, false, "/nonexistent");
+        assert!(got[3].up && !got[0].up && !got[1].up && !got[2].up, "kimi's sidecar is kimi's");
         let pi = rows(&[("p-feat~agent~pi", "node")]);
         let got = agent_sessions_for(&Watch::default(), Some(&pi), &[], c, c, false, "/nonexistent");
         assert!(got[2].up && !got[0].up && !got[1].up, "a node pane in pi's sidecar is pi, not Claude");
@@ -717,9 +722,12 @@ mod tests {
         }]);
         let got = agent_sessions_for(&Watch::default(), Some(&typed), &[], c, c, true, "/nonexistent");
         let up: Vec<(&str, &str, bool)> = got.iter().map(|s| (s.id, s.name.as_str(), s.up)).collect();
-        assert_eq!(up, [("claude", c, false), ("codex", "p-feat~agent~codex", false), ("pi", c, true)]);
+        assert_eq!(
+            up,
+            [("claude", c, false), ("codex", "p-feat~agent~codex", false), ("pi", c, true), ("kimi", "p-feat~agent~kimi", false)]
+        );
         let ids: Vec<&str> = agent_sessions_for(&Watch::default(), None, &[], c, c, false, "").iter().map(|s| s.id).collect();
-        assert_eq!(ids, ["claude", "codex", "pi"], "one entry per harness, registry order");
+        assert_eq!(ids, ["claude", "codex", "pi", "kimi"], "one entry per harness, registry order");
     }
 
     /// The dialog validates as you type; this is the check that DECIDES. Every

@@ -10,7 +10,8 @@
 //!
 //! ## The registries are `Watch`, not statics
 //!
-//! `MODEL_CACHE`, `CODEX_WATCH` and `PI_WATCH` were process-global `static`s.
+//! `MODEL_CACHE`, `CODEX_WATCH`, `PI_WATCH` and `KIMI_WATCH` were
+//! process-global `static`s.
 //! They are per-process state by nature — one machine, one set of tmux
 //! sessions — but a `static` also makes every test that touches one
 //! order-dependent, which AGENTS.md documents biting `viewer::ISSUED`: the
@@ -28,7 +29,7 @@ use worktrees_core::{git, store, sysclock, Project};
 use crate::log::log as applog;
 use crate::Ctx;
 
-/// The three registries the dot poll keeps between ticks.
+/// The registries the dot poll keeps between ticks.
 #[derive(Default)]
 pub struct Watch {
     /// Last answer per transcript/rollout: its length when read, and the model
@@ -45,6 +46,9 @@ pub struct Watch {
     /// Live pi lanes, by place path: set by the snapshot (like `codex`) while
     /// pi itself runs in the place's `~agent~pi` session.
     pi: Mutex<HashMap<String, PiWatched>>,
+    /// Live kimi lanes, by place path: set by the snapshot (like `codex`)
+    /// while kimi itself runs in the place's session.
+    kimi: Mutex<HashMap<String, KimiWatched>>,
 }
 
 impl Watch {
@@ -73,6 +77,13 @@ impl Watch {
                     .unwrap_or_else(|e| e.into_inner())
                     .keys()
                     .map(|k| ("pi", k.clone())),
+            )
+            .chain(
+                self.kimi
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .keys()
+                    .map(|k| ("kimi", k.clone())),
             )
             .collect();
         out.sort_unstable();
@@ -641,6 +652,100 @@ pub fn pi_tick_in(
     out
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct KimiWatched {
+    pub session: String,
+    pub model: Option<String>,
+}
+
+/// Record what a snapshot showed for `cwd`'s kimi lane: its tmux session
+/// while kimi runs there, `None` when not (which stops the tick watching it).
+pub fn kimi_watch_set(watch: &Watch, cwd: &str, session: Option<&String>, model: &Option<String>) {
+    let mut w = watch.kimi.lock().unwrap_or_else(|e| e.into_inner());
+    match session {
+        Some(session) => {
+            w.insert(cwd.to_string(), KimiWatched { session: session.clone(), model: model.clone() });
+        }
+        None => {
+            w.remove(cwd);
+        }
+    }
+}
+
+/// One tick's read of every watched kimi lane: core's `kimi::lane_state`, the
+/// derivation `place_status` makes, fed the same three inputs — the place's
+/// wire log, one capture of its pane, and the opener marker. Every lane is
+/// captured, in ONE chained `tmux` call: the screen is what says kimi exited
+/// mid-turn (`Gone`, which no log records) and that a "waiting" log already
+/// has its composer back, and skipping it for lanes with a turn on file is
+/// what made the dot and `place_status` disagree (#509 review).
+pub fn kimi_tick(watch: &Watch, sessions: &str) -> LaneTick {
+    let mut watched: HashMap<String, KimiWatched> = {
+        let guard = watch.kimi.lock().unwrap_or_else(|e| e.into_inner());
+        guard.clone()
+    };
+    let before = watched.clone();
+    let out = kimi_tick_in(
+        &mut watched,
+        worktrees_core::kimi::lane_file,
+        worktrees_core::kimi::opener_pending,
+        |targets| {
+            activity::capture_chain(sessions, targets)
+                .into_iter()
+                .map(|(k, cmd, text)| (k, worktrees_core::kimi::screen_from(&cmd, &text)))
+                .collect()
+        },
+    );
+    // Write back only what this tick learned, and only for lanes the snapshot
+    // has not replaced or dropped in the meantime.
+    let mut w = watch.kimi.lock().unwrap_or_else(|e| e.into_inner());
+    for (cwd, now) in watched {
+        if before.get(&cwd) == w.get(&cwd) {
+            w.insert(cwd, now);
+        }
+    }
+    out
+}
+
+/// `kimi_tick`'s body over an explicit watch map, log reader, opener marker
+/// and pane sampler, so a test drives it with fixtures.
+pub fn kimi_tick_in(
+    watched: &mut HashMap<String, KimiWatched>,
+    file_of: impl Fn(&str) -> Option<worktrees_core::kimi::LaneFile>,
+    pending_of: impl Fn(&str) -> bool,
+    panes_of: impl FnOnce(&[(String, String)]) -> Vec<(String, worktrees_core::kimi::KimiScreen)>,
+) -> LaneTick {
+    let mut out = LaneTick::default();
+    let mut files: Vec<(String, Option<worktrees_core::kimi::LaneFile>)> = Vec::new();
+    let mut targets: Vec<(String, String)> = Vec::new();
+    for (cwd, w) in watched.iter_mut() {
+        let file = file_of(cwd);
+        let model = file.as_ref().and_then(|f| f.model.clone());
+        if model.is_some() && model != w.model {
+            w.model = model;
+            out.models_moved = true;
+        }
+        targets.push((cwd.clone(), w.session.clone()));
+        files.push((cwd.clone(), file));
+    }
+    let panes = if targets.is_empty() { Vec::new() } else { panes_of(&targets) };
+    for (cwd, file) in files {
+        let screen = panes.iter().find(|(c, _)| *c == cwd).map(|(_, s)| *s);
+        let turn = file.and_then(|f| f.turn);
+        // ONE derivation (core's), the same `place_status` and `wait` use.
+        let (state, done) = worktrees_core::kimi::lane_state(turn.as_ref(), screen, pending_of(&cwd));
+        match state {
+            activity::State::Busy => out.busy.push(cwd.clone()),
+            activity::State::Waiting => out.waiting.push(cwd.clone()),
+            _ => {}
+        }
+        if let Some(at) = done {
+            out.done.push((cwd, at));
+        }
+    }
+    out
+}
+
 /// How the poll reads a harness's dots. There is deliberately no `_ => Lane`:
 /// a harness added to `provider::PROVIDERS` lands in `Unpolled` until someone
 /// wires it here, and `every_harness_feeds_the_dot_poll` fails until they do
@@ -657,6 +762,7 @@ pub fn harness_feed(watch: &Watch, id: &str, sessions: &str) -> Feed {
         "claude" => Feed::Probes,
         "codex" => Feed::Lane(codex_tick(watch, sessions)),
         "pi" => Feed::Lane(pi_tick(watch, sessions)),
+        "kimi" => Feed::Lane(kimi_tick(watch, sessions)),
         _ => Feed::Unpolled,
     }
 }
@@ -674,6 +780,10 @@ pub fn watch_lane(watch: &Watch, id: &str, cwd: &str, session: Option<&String>, 
         }
         "pi" => {
             pi_watch_set(watch, cwd, session, launch, model);
+            true
+        }
+        "kimi" => {
+            kimi_watch_set(watch, cwd, session, model);
             true
         }
         _ => false,
@@ -846,6 +956,8 @@ pub fn live_model(
         // the session name, which a pi in the canonical session does not carry
         // the sidecar suffix of (a mismatch there re-listed every 3s).
         "pi" => worktrees_core::pi::running_model(session, cwd),
+        // By the place's dir too: kimi's sessions are keyed by it.
+        "kimi" => worktrees_core::kimi::running_model(cwd),
         _ => None,
     }
 }
@@ -935,6 +1047,93 @@ mod tests {
                 "{} is in PROVIDERS but the snapshot never hands its sessions to the poll (`watch_lane`)",
                 p.id
             );
+        }
+    }
+
+    /// A kimi lane's dots through the tick: the wire log answers once a turn
+    /// is on file (no capture at all), the trust modal answers before one is
+    /// (amber), a pending opener holds a quiet lane green, and a finished turn
+    /// is dated by kimi's own record of it.
+    #[test]
+    fn kimi_lanes_feed_busy_waiting_and_done_through_the_tick() {
+        use worktrees_core::kimi::{KimiScreen, KimiTurn, LaneFile};
+        let w = |s: &str| KimiWatched { session: s.into(), model: None };
+        let mut watched = HashMap::from([
+            ("/w/busy".to_string(), w("p-busy~agent~kimi")),
+            ("/w/asking".to_string(), w("p-asking~agent~kimi")),
+            ("/w/trust".to_string(), w("p-trust~agent~kimi")),
+            ("/w/done".to_string(), w("p-done~agent~kimi")),
+            ("/w/opening".to_string(), w("p-opening~agent~kimi")),
+            // kimi died mid-turn: the log still ends on a started turn.
+            ("/w/crashed".to_string(), w("p-crashed~agent~kimi")),
+            // The log says waiting, but the composer is back on screen.
+            ("/w/answered".to_string(), w("p-answered~agent~kimi")),
+        ]);
+        let file = |turn: Option<KimiTurn>| LaneFile { path: "/x".into(), len: 1, model: Some("kimi-code/k3".into()), turn };
+        let captured = std::cell::RefCell::new(Vec::new());
+        let out = kimi_tick_in(
+            &mut watched,
+            |cwd| match cwd {
+                "/w/busy" => Some(file(Some(KimiTurn::Busy))),
+                "/w/asking" => Some(file(Some(KimiTurn::Waiting))),
+                "/w/done" => Some(file(Some(KimiTurn::Done { at: Some(42) }))),
+                "/w/crashed" => Some(file(Some(KimiTurn::Busy))),
+                "/w/answered" => Some(file(Some(KimiTurn::Waiting))),
+                _ => None,
+            },
+            |cwd| cwd == "/w/opening",
+            |targets| {
+                captured.borrow_mut().extend(targets.iter().map(|(c, _)| c.clone()));
+                targets
+                    .iter()
+                    .map(|(c, _)| {
+                        let s = match c.as_str() {
+                            "/w/trust" => KimiScreen::Trust,
+                            "/w/asking" => KimiScreen::Modal,
+                            "/w/crashed" => KimiScreen::Gone,
+                            _ => KimiScreen::Composer,
+                        };
+                        (c.clone(), s)
+                    })
+                    .collect()
+            },
+        );
+        let mut busy = out.busy.clone();
+        busy.sort();
+        assert_eq!(busy, vec!["/w/answered".to_string(), "/w/busy".to_string(), "/w/opening".to_string()]);
+        let mut waiting = out.waiting.clone();
+        waiting.sort();
+        assert_eq!(waiting, vec!["/w/asking".to_string(), "/w/trust".to_string()]);
+        assert!(!busy.contains(&"/w/crashed".to_string()), "a kimi that died mid-turn is not busy");
+        assert_eq!(out.done, vec![("/w/done".to_string(), 42)]);
+        assert!(out.models_moved, "a first model read is a move");
+        // Every lane is captured: the same inputs `place_status` reads, so a
+        // kimi that died mid-turn is not busy here either.
+        assert_eq!(captured.into_inner().len(), 7);
+        for (turn, screen, pending) in [
+            (Some(KimiTurn::Busy), Some(KimiScreen::Gone), false),
+            (Some(KimiTurn::Waiting), Some(KimiScreen::Composer), false),
+            (None, Some(KimiScreen::Trust), true),
+        ] {
+            let path = match (turn.clone(), screen) {
+                (Some(KimiTurn::Busy), _) => "/w/crashed",
+                (Some(KimiTurn::Waiting), _) => "/w/answered",
+                _ => "/w/trust",
+            };
+            let core = worktrees_core::kimi::lane_state(turn.as_ref(), screen, pending);
+            let shown = if out.busy.iter().any(|p| p == path) {
+                activity::State::Busy
+            } else if out.waiting.iter().any(|p| p == path) {
+                activity::State::Waiting
+            } else {
+                activity::State::Idle
+            };
+            let core_dot = match core.0 {
+                activity::State::Busy => activity::State::Busy,
+                activity::State::Waiting => activity::State::Waiting,
+                _ => activity::State::Idle,
+            };
+            assert_eq!(shown, core_dot, "{path}: the dot and place_status disagree");
         }
     }
 

@@ -796,6 +796,7 @@ html[data-guides="off"] .kids > .places::after { display: none; }
 .g-agent-claude { --agent-mark: 1.15em; }
 .g-agent-codex { --agent-mark: 1.18em; }
 .g-agent-pi { --agent-mark: 1.1em; }
+.g-agent-kimi { --agent-mark: 1.05em; }
 .row-age { color: var(--txt-mute); font-size: var(--fs-micro); min-width: 2em; text-align: right; font-variant-numeric: tabular-nums; }
 /* The enter affordance rides in the age's slot. Both children occupy grid cell
    1/1, so the slot is sized by the WIDER of them and the hover swap cannot

@@ -472,6 +472,25 @@ fixture under `tests/fixtures/pi-*` was captured on. Re-run it when pi is
 upgraded — pi's `--list-models` table has no JSON form, and a changed header
 parses to an EMPTY catalog on purpose, which reads as "pi offers nothing".
 
+**kimi has one too, and four of its habits are traps.** `docs/kimi-manual-checks.md`
+pins the 2.2.0 wire log and screens. (1) Interactive kimi takes NO prompt word —
+a trailing one is "unknown command" — so its opener is typed by a helper the
+pane starts (`worktrees kimi-opener`), which waits for an EMPTY composer and
+gives up, logged, after ten minutes. (2) In its `/model` picker, Enter writes
+`default_model` into `~/.kimi-code/config.toml`; Alt+S is session-only — the
+`/model` trap Claude has, one key away. (3) `kimi provider list --json` prints
+the provider API key; the catalog is read from `[models.*]` alone
+(`kimimodels`). (4) `--skills-dir` REPLACES skill discovery, so guidance and
+the MCP server reach kimi as files in the place's own `.kimi-code/`
+(`kimiplace`), each marked as ours and excluded in the common `info/exclude`.
+
+**`grep` here can skip a source file without a word.** It treats a file with
+one stray non-UTF-8 byte as binary, and `crates/worktrees-core/src/projcfg.rs`
+is one: a sweep for every place a harness is named found nothing in it,
+`USER_ONLY_KEYS` included. Sweep with `grep -a`. Its zsh twin: `path` is tied to
+`PATH`, so `for path in …` in a probe loop empties `PATH`, and every command
+after it is "command not found" — which reads as a sandbox refusing curl.
+
 ## Tauri app — hard-won rules
 
 - **Commands must be `async fn`** — sync handlers run on the main thread and

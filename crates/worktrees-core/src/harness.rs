@@ -126,6 +126,14 @@ impl SendOutcome {
 
     /// `note`, in the words of the harness that was typed into.
     pub fn note_for(&self, provider: &str) -> String {
+        if provider == crate::provider::KIMI.id {
+            return match self {
+                Self::Submitted => "Typed into kimi's prompt and confirmed: it is in kimi's session as a user message. Ask it to report back, then wait until: message.".into(),
+                Self::Queued => "kimi was working, so it queued this behind the running turn; it is delivered when that turn ends (it shows above kimi's prompt until then). kimi keeps that queue in memory: if kimi exits or is closed first, the text is lost and is NOT in messages — check the lane before assuming it arrived. Ask it to report back, then wait until: message.".into(),
+                Self::Modal => "kimi showed a prompt (an approval, a question or its folder-trust prompt) while sending. No Enter was pressed into it. The text may be sitting in its input; the user has to answer the prompt. The message copy is left unread; check the composer and inbox before resending.".into(),
+                other => other.note(),
+            };
+        }
         if provider != crate::provider::PI.id {
             return self.note();
         }
@@ -178,6 +186,22 @@ pub trait Adapter: Sync {
     /// `AiLaunch::place_flags` and emitted by `launch_args`.
     fn place_flags(&self, _wt: &str) -> Vec<String> {
         Vec::new()
+    }
+
+    /// Environment derived from the PLACE at launch time, carried on
+    /// `AiLaunch::env` and emitted with it (kimi's per-launch trust: a
+    /// variable, because kimi has no flag for it). Never a secret — it is
+    /// tmux's argv.
+    fn place_env(&self, _wt: &str) -> Vec<(String, String)> {
+        Vec::new()
+    }
+
+    /// Whether the brief opener rides on argv (`launch_cmd` appends it).
+    /// kimi's interactive mode takes no prompt word at all — a trailing word
+    /// is "unknown command" — so its opener is typed in once kimi is at its
+    /// composer, by a helper the pane starts (`ops::launch`, `kimi::deliver_opener`).
+    fn opener_in_argv(&self) -> bool {
+        true
     }
 
     /// The words this harness adds to `launch`'s command when it runs as tmux
@@ -285,10 +309,12 @@ pub trait Adapter: Sync {
 pub struct Claude;
 pub struct Codex;
 pub struct Pi;
+pub struct Kimi;
 
 pub const CLAUDE: &Claude = &Claude;
 pub const CODEX: &Codex = &Codex;
 pub const PI: &Pi = &Pi;
+pub const KIMI: &Kimi = &Kimi;
 
 /// Codex's flag for its inline TUI (see `Codex::launch_args`). Needs
 /// codex-cli >= 0.81.0; an older one rejects it and the lane falls to the shell.
@@ -296,7 +322,7 @@ const CODEX_INLINE: &str = "--no-alt-screen";
 
 /// Every adapter, in registry order (`provider::PROVIDERS`). A new harness is
 /// a row there and an entry here; `registry_and_adapters_line_up` pins it.
-pub const ALL: &[&dyn Adapter] = &[CLAUDE, CODEX, PI];
+pub const ALL: &[&dyn Adapter] = &[CLAUDE, CODEX, PI, KIMI];
 
 /// `<model_arg> '<model>'` for a fresh launch that names one; nothing on a
 /// resume (a resumed session keeps its own model) or without a model.
@@ -756,6 +782,184 @@ impl Adapter for Pi {
 
 }
 
+impl Adapter for Kimi {
+    fn provider(&self) -> &'static Provider {
+        provider::KIMI
+    }
+
+    fn installed(&self) -> Result<(), String> {
+        crate::kimi::kimi_bin()
+            .map(|_| ())
+            .ok_or_else(|| "Kimi Code is not installed. Install it (https://www.kimi.com/code), then sign in with `kimi login`.".into())
+    }
+
+    /// `KIMI_CODE_TRUST_WORKSPACE=1` when the user's allowance covers this
+    /// repo (`trust::kimi_launch_trust`): kimi then trusts the folder for
+    /// THIS launch and writes no record of it. Otherwise nothing, and kimi
+    /// asks — every place is a new folder to it.
+    fn place_env(&self, wt: &str) -> Vec<(String, String)> {
+        crate::trust::kimi_launch_trust(wt).env.map(|(k, v)| vec![(k.to_string(), v.to_string())]).unwrap_or_default()
+    }
+
+    fn launch_args(&self, launch: &AiLaunch, _session: &str) -> LaunchArgs {
+        let mut head = launch.place_flags.clone();
+        head.extend(model_words(self.provider(), launch));
+        LaunchArgs { head, tail: Vec::new() }
+    }
+
+    fn opener_in_argv(&self) -> bool {
+        false
+    }
+
+    fn resume_arg(&self, _cwd: &str) -> String {
+        String::new() // `-S <id>`, resolved once and emitted by `prepare`
+    }
+
+    fn resume_display(&self) -> String {
+        "-S <per place session>".into()
+    }
+
+    fn exact_resume(&self) -> bool {
+        true
+    }
+
+    /// Hard refusal without the binary. A resume emits `-S '<id>'` for the
+    /// session `ops::resume_plan` resolved — never `-c`, which picks the
+    /// newest session for the DIRECTORY and so reopens a removed place's
+    /// conversation when the slug is reused — and with none it launches
+    /// fresh. A fresh launch takes the chosen model, else `[model] kimi`,
+    /// else kimi's own `default_model`, which is the user's and is fine.
+    fn prepare(&self, _p: &Project, _slug: &str, _wt: &str, launch: &mut AiLaunch) -> Result<(), Refusal> {
+        kimi_prepare_in(launch, self.installed(), || crate::config::default_model(self.provider().id))
+    }
+
+    fn never_launched(&self, p: &Project, slug: &str) -> bool {
+        !self.session_present(p, &p.place_dir(slug))
+    }
+
+    fn session_present(&self, _project: &Project, cwd: &str) -> bool {
+        crate::kimi::current_session(cwd).is_some()
+    }
+
+    fn resume_target(&self, _project: &Project, cwd: &str) -> ResumeTarget {
+        match crate::kimi::current_session(cwd) {
+            Some(s) => ResumeTarget::Session(s.id),
+            None => ResumeTarget::Nothing,
+        }
+    }
+
+    fn may_resume(&self, project: &Project, cwd: &str) -> bool {
+        self.session_present(project, cwd)
+    }
+
+    fn running_model(&self, _canonical: &str, path: &str) -> Option<String> {
+        crate::kimi::running_model(path)
+    }
+
+    fn activity(&self, scan: &Scan, canonical: &str, path: &str) -> Option<Activity> {
+        scan.panes.and_then(|p| crate::kimi::kimi_activity(p, canonical, path))
+    }
+
+    fn agents(&self, _scan: &Scan, path: &str, reading: Option<&Activity>) -> Vec<serde_json::Value> {
+        reading
+            .map(|x| {
+                // How the place's last brief opener went (kimi takes it by
+                // typing, so it can fail where argv cannot): an orchestrator
+                // must be able to see "never delivered" without a doctor run.
+                let slug = if path.contains("/.worktrees/") { path.rsplit('/').next().unwrap_or("") } else { "(main)" };
+                let opener = crate::codex::git_common_dir(path).and_then(|g| crate::kimi::last_opener_line(&g, slug));
+                serde_json::json!({
+                    "provider": self.provider().id,
+                    "state": x.state,
+                    "tmux": x.session,
+                    "last_done": x.last_done,
+                    "model": self.running_model("", path),
+                    "opener": opener,
+                })
+            })
+            .into_iter()
+            .collect()
+    }
+
+    /// Type into kimi's composer and confirm it (`kimi::submit_kimi`): idle →
+    /// a `turn.prompt` starting with the attributed header; mid-turn → kimi
+    /// lists it as queued above the composer. Any modal is refused before a
+    /// key is typed — the reading says `waiting` for one mid-turn, and the
+    /// screen is checked again for one opened between turns.
+    fn send(&self, req: &SendRequest) -> Delivery {
+        if let Err(e) = may_type(self.provider().label, req.reading.state) {
+            return Delivery::Refused(e);
+        }
+        // The opener helper types into this same composer; two writers would
+        // interleave keystrokes into one line.
+        if crate::kimi::opener_pending(req.path) {
+            return Delivery::Refused(
+                "kimi is still being handed its brief (the opener has not been typed yet) — wait until: idle, then send.".into(),
+            );
+        }
+        let session = crate::kimi::session_for(req.panes, req.canonical);
+        let Some(pane) = tmux::agent_pane(&session, req.path, req.exclude, self.provider().match_word) else {
+            return Delivery::Refused(format!(
+                "{session} has no pane running kimi in {}; send only types into this project's own kimi pane. \
+                 Use report instead.",
+                req.path
+            ));
+        };
+        match tmux::capture(&pane).map(|s| crate::kimi::read_screen(&s)) {
+            Some(crate::kimi::KimiScreen::Composer) => {}
+            Some(crate::kimi::KimiScreen::Trust | crate::kimi::KimiScreen::Modal) => {
+                return Delivery::Refused(
+                    "kimi has a prompt open (an approval, a question, a picker or its folder-trust prompt) — \
+                     typing would answer it. Answer it, or wait until: idle first."
+                        .into(),
+                )
+            }
+            _ => return Delivery::Refused(format!("kimi in {session} is not at its prompt yet; try again shortly.")),
+        }
+        let prefix = crate::kimi::send_prefix(req.typed);
+        let baseline = crate::kimi::receipts(req.path, &prefix);
+        if let Err(e) = tmux::send_literal(&pane, req.typed) {
+            return Delivery::Refused(format!("could not type into {session}: {e}"));
+        }
+        let t0 = std::time::Instant::now();
+        let outcome = crate::kimi::submit_kimi(
+            &prefix,
+            None,
+            baseline,
+            || tmux::capture(&pane),
+            || crate::kimi::receipts(req.path, &prefix),
+            || tmux::press_enter(&pane),
+            || t0.elapsed().as_millis() as u64,
+            |ms| std::thread::sleep(std::time::Duration::from_millis(ms)),
+        );
+        Delivery::Typed { session, outcome }
+    }
+}
+
+/// `Kimi::prepare` over what it reads (whether kimi is installed, the user's
+/// `[model] kimi`), so a test drives it without touching the process env or
+/// the user's config.
+fn kimi_prepare_in(
+    launch: &mut AiLaunch,
+    installed: Result<(), String>,
+    default_model: impl FnOnce() -> Option<String>,
+) -> Result<(), Refusal> {
+    installed.map_err(Refusal::Hard)?;
+    if launch.resume {
+        match launch.resume_id.as_deref().filter(|id| crate::kimi::valid_session_id(id)) {
+            Some(id) => launch.cmd.push_str(&format!(" -S {}", shell_quote(id))),
+            None => launch.resume = false,
+        }
+    }
+    if !launch.resume && launch.model.is_none() {
+        launch.model = default_model();
+    }
+    if let Some(m) = launch.model.as_deref() {
+        crate::choice::validate_model(m).map_err(Refusal::Hard)?;
+    }
+    Ok(())
+}
+
 /// `claude_usage`'s rows as the shared shape.
 ///
 /// Claude scopes some weekly buckets to a model (a "Fable" row). The reader
@@ -944,6 +1148,39 @@ mod tests {
             "pi --session-dir '/h/.pi/agent/sessions/--w--' --no-approve --session-id 'p-feat-abc123-g2'"
         );
         assert_eq!(PI.provider().name_arg, None, "pi's --name is a label, not an address");
+    }
+
+    /// kimi takes no prompt word, so its opener never reaches argv (a helper
+    /// types it); a fresh launch names its model, a resume names its exact
+    /// session and no model.
+    #[test]
+    fn a_kimi_launch_carries_no_opener_and_resumes_its_exact_session() {
+        let mut l = AiLaunch::plain("kimi");
+        l.model = Some("kimi-code/k3".into());
+        l.opener = Some(crate::ops::BRIEF_OPENER.into());
+        assert_eq!(l.launch_cmd("p-feat~agent~kimi"), "kimi -m 'kimi-code/k3'");
+        assert!(!KIMI.opener_in_argv() && CLAUDE.opener_in_argv() && CODEX.opener_in_argv() && PI.opener_in_argv());
+        let mut r = AiLaunch::plain("kimi");
+        r.resume = true;
+        r.model = Some("kimi-code/k3".into());
+        r.resume_id = Some("session_c8ce7b2e-8f8a-4cd2-88e8-c0ca9bbbbf5e".into());
+        kimi_prepare_in(&mut r, Ok(()), || panic!("a resume never asks for a default model")).unwrap();
+        assert_eq!(r.launch_cmd("p-feat~agent~kimi"), "kimi -S 'session_c8ce7b2e-8f8a-4cd2-88e8-c0ca9bbbbf5e'");
+        // An id that is not kimi's shape never reaches argv: it launches fresh.
+        let mut bad = AiLaunch::plain("kimi");
+        bad.resume = true;
+        bad.resume_id = Some("x'; touch /tmp/PWNED".into());
+        kimi_prepare_in(&mut bad, Ok(()), || Some("kimi-code/k3".into())).unwrap();
+        assert!(!bad.resume);
+        assert!(!bad.launch_cmd("s").contains("-S"), "{}", bad.launch_cmd("s"));
+        assert_eq!(bad.model.as_deref(), Some("kimi-code/k3"), "a fresh launch takes the user's default");
+        // Not installed: refused before anything else.
+        let mut none = AiLaunch::plain("kimi");
+        assert!(matches!(kimi_prepare_in(&mut none, Err("missing".into()), || None), Err(Refusal::Hard(_))));
+        assert_eq!(KIMI.resume_arg("/w"), "");
+        assert!(KIMI.exact_resume());
+        assert_eq!(KIMI.resume_display(), "-S <per place session>");
+        assert_eq!(KIMI.provider().name_arg, None);
     }
 
     /// Codex is launched inline, fresh and resumed alike, so its transcript

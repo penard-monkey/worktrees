@@ -1,0 +1,9 @@
+{"type":"agent.turn.started","turnId":3,"queueItemId":"msg_01M5BGQFJ6V8XA2VEVNTB41ZWA","time":1792461749831,"kind":"event"}
+{"type":"turn.prompt","agentId":"main","input":[{"type":"text","text":"Use the AskUserQuestion tool to ask me to pick red or blue. Nothing else."}],"origin":{"kind":"user"},"promptId":"msg_01M5BGQFJ6V8XA2VEVNTB41ZWA","turnId":3,"time":1792461749833}
+{"type":"llm.request","agentId":"main","kind":"loop","provider":"openai","model":"kimi-for-coding-highspeed","modelAlias":"kimi-code/kimi-for-coding-highspeed","turnStep":"3.1","time":1792461749835}
+{"type":"interaction.request","agentId":"main","id":"question_a1ff0b63-eef0-4cba-9bd3-f4fcb0984407","kind":"question","toolCallId":"tool_wngku5AJqeISnSaNuh8m63VA","time":1792461752467}
+{"type":"interaction.resolved","agentId":"main","id":"question_a1ff0b63-eef0-4cba-9bd3-f4fcb0984407","response":null,"time":1792461766685}
+{"type":"llm.request","agentId":"main","kind":"loop","provider":"openai","model":"kimi-for-coding-highspeed","modelAlias":"kimi-code/kimi-for-coding-highspeed","turnStep":"3.2","time":1792461766691}
+{"type":"agent.turn.ended","turnId":3,"outcome":"done","time":1792461769504,"kind":"event"}
+{"type":"turn.ended","agentId":"main","turnId":3,"reason":"completed","durationMs":19673,"time":1792461769505}
+{"type":"prompt.completed","agentId":"main","promptId":"msg_01M5BGQFJ6V8XA2VEVNTB41ZWA","finishedAt":"2026-10-20T02:02:49.506Z","reason":"completed","time":1792461769506}

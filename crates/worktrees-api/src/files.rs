@@ -665,6 +665,21 @@ pub fn plan_prompt(session: String, provider: Option<String>) -> Result<(), Stri
             _ => {}
         }
     }
+    // kimi: every modal replaces its composer, and a paste into a half-typed
+    // composer would glue onto the user's draft — the composer must be there
+    // and empty (`kimi_paste_refusal`).
+    if adapter.provider().id == provider::KIMI.id {
+        let target = format!("={session}:");
+        let screen = worktrees_core::kimi::capture_target(&target);
+        // The opener helper types into the same composer (`send` refuses too).
+        let pending = tmux::tmux(&["display-message", "-p", "-t", &target, "#{pane_current_path}"])
+            .ok()
+            .filter(|o| o.status.success())
+            .is_some_and(|o| worktrees_core::kimi::opener_pending(String::from_utf8_lossy(&o.stdout).trim()));
+        if let Some(why) = kimi_paste_refusal(screen.as_ref().map(|(c, s)| (c.as_str(), s.as_str())), pending, "this place") {
+            return Err(why);
+        }
+    }
     tmux::paste_to_ai(&session, adapter.provider().match_word, ops::PLAN_PROMPT)?;
     applog("info", &format!("plan_prompt: pasted into {session}"));
     Ok(())
@@ -721,6 +736,9 @@ pub fn plan_ask_main(ctx: &Ctx, root: String, session: String, provider: Option<
             here && worktrees_core::agent::effective_state(p) == "waiting"
         });
     let pi_screen = (prov.id == provider::PI.id).then(|| worktrees_core::pi::screen_of(&session));
+    if prov.id == provider::KIMI.id && worktrees_core::kimi::opener_pending(&project.main_root) {
+        return Err(KIMI_OPENER_PENDING.replace("{place}", "(main)"));
+    }
     if let Some(why) = ask_main_refusal(prov.id, &plain, &styled, claude_waiting, pi_screen) {
         return Err(why);
     }
@@ -766,6 +784,10 @@ pub fn ask_main_refusal(
             Some(Composer::Text(_)) => return Some(DRAFT.into()),
             Some(Composer::Empty) => {}
         }
+    } else if provider_id == provider::KIMI.id {
+        // `plain` is the capture of the pane being pasted into, and it is
+        // running kimi (the pane was found by its command).
+        return kimi_paste_refusal(Some(("kimi", plain)), false, "(main)");
     } else if provider_id == provider::PI.id {
         use worktrees_core::pi::PiScreen;
         match pi.flatten() {
@@ -778,6 +800,30 @@ pub fn ask_main_refusal(
         }
     }
     None
+}
+
+/// Why a paste into a kimi pane must not happen now, from one capture of it
+/// (its pane command and screen), or `None`.
+const KIMI_OPENER_PENDING: &str = "kimi in {place} is still being handed its brief — wait until it starts working, then try again.";
+
+fn kimi_paste_refusal(capture: Option<(&str, &str)>, opener_pending: bool, place: &str) -> Option<String> {
+    use worktrees_core::kimi::{read_composer, screen_from, KimiScreen};
+    if opener_pending {
+        return Some(KIMI_OPENER_PENDING.replace("{place}", place));
+    }
+    let Some((cmd, screen)) = capture else { return Some(format!("could not read kimi's screen in {place}")) };
+    match screen_from(cmd, screen) {
+        KimiScreen::Gone => Some(format!("kimi is not running in {place}")),
+        KimiScreen::Trust => Some(format!("kimi in {place} is asking whether to trust this folder — answer that there first.")),
+        KimiScreen::Modal => Some(format!("kimi in {place} is asking you something — answer it there first, then try again.")),
+        KimiScreen::Other => Some(format!("couldn't read kimi's prompt in {place} — is it still starting?")),
+        KimiScreen::Composer => match read_composer(screen) {
+            Some(c) if !c.input.is_empty() => {
+                Some(format!("kimi in {place} has unsent text at its prompt — send or clear it there first."))
+            }
+            _ => None,
+        },
+    }
 }
 
 /// The staleness facts, as the frontend already holds them in `Place`.
@@ -1648,6 +1694,24 @@ mod tests {
         assert_eq!(ask_main_refusal("pi", "", "", false, Some(Some(PiScreen::Other))), None);
         assert!(ask_main_refusal("pi", "", "", false, Some(Some(PiScreen::TrustModal))).is_some());
         assert!(ask_main_refusal("pi", "", "", false, Some(None)).is_some());
+    }
+
+    const KIMI_IDLE: &str = include_str!("../../../crates/worktrees-core/tests/fixtures/kimi-screen/2.2.0/idle.txt");
+    const KIMI_TYPED: &str = include_str!("../../../crates/worktrees-core/tests/fixtures/kimi-screen/2.2.0/composer-typed.txt");
+    const KIMI_TRUST: &str = include_str!("../../../crates/worktrees-core/tests/fixtures/kimi-screen/2.2.0/trust.txt");
+    const KIMI_APPROVAL: &str = include_str!("../../../crates/worktrees-core/tests/fixtures/kimi-screen/2.2.0/approval.txt");
+
+    #[test]
+    fn a_kimi_paste_needs_an_empty_composer_and_no_prompt_open() {
+        assert_eq!(kimi_paste_refusal(Some(("kimi", KIMI_IDLE)), false, "x"), None);
+        assert!(kimi_paste_refusal(Some(("kimi", KIMI_IDLE)), true, "x").unwrap().contains("handed its brief"), "two writers into one composer");
+        assert!(kimi_paste_refusal(Some(("kimi", KIMI_TYPED)), false, "x").unwrap().contains("unsent text"));
+        assert!(kimi_paste_refusal(Some(("kimi", KIMI_TRUST)), false, "x").unwrap().contains("trust"));
+        assert!(kimi_paste_refusal(Some(("kimi", KIMI_APPROVAL)), false, "x").unwrap().contains("asking you"));
+        assert!(kimi_paste_refusal(Some(("zsh", KIMI_IDLE)), false, "x").unwrap().contains("not running"));
+        assert!(kimi_paste_refusal(None, false, "x").is_some());
+        assert!(ask_main_refusal("kimi", KIMI_TYPED, "", false, None).unwrap().contains("unsent text"));
+        assert_eq!(ask_main_refusal("kimi", KIMI_IDLE, "", false, None), None);
     }
 
     /// A cut patch must end on a line boundary. Half a line of source is

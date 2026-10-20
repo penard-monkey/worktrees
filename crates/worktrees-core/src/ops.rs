@@ -96,7 +96,83 @@ pub fn ai_launch_for(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> cr
     let mut launch = ai_launch_inner(p, ui, wt, ai_cmd);
     launch.guidance = guidance_for(p, ui, wt, &launch);
     launch.planning = planning_for(p, ui, wt, &launch);
+    kimi_place_files(p, ui, wt, &launch);
+    // AFTER the place files: kimi's trust depends on whether OUR `mcp.json`
+    // is written (`trust::kimi_mcp_shadowed`), and deciding it before the
+    // first launch had written one made the first and second launches
+    // disagree (#509 review).
+    if let Some(a) = crate::harness::for_cmd(&launch.cmd).filter(|_| !launch.cmd.is_empty()) {
+        launch.env.extend(a.place_env(wt));
+    }
     launch
+}
+
+/// kimi's per-place files (`kimiplace`), brought in line with this launch: the
+/// worktrees MCP server while `kimi_mcp` is on, and the skill and the rule
+/// while agent guidance would be delivered (on, in a managed repo) — the same
+/// gate `guidance_for` applies to every other harness's flags. Only for kimi,
+/// and never for the fail-closed launch. A file that could not be delivered is
+/// said here, where the launch happens.
+fn kimi_place_files(p: &Project, ui: &mut dyn Ui, wt: &str, launch: &crate::profile::AiLaunch) {
+    use crate::kimiplace::{self, McpMode, Want};
+    let Some(adapter) = crate::harness::for_cmd(&launch.cmd).filter(|_| !launch.cmd.is_empty()) else { return };
+    if adapter.provider().id != crate::provider::KIMI.id {
+        return;
+    }
+    let mcp = match kimiplace::mcp_mode() {
+        McpMode::Off => None,
+        mode => match crate::profile::worktrees_bin() {
+            Some(bin) => Some(kimiplace::render_mcp(&bin.to_string_lossy(), mode == McpMode::Mutations)),
+            None => {
+                ui.warn("kimi MCP: no `worktrees` binary was found to point it at — kimi launches without the worktrees tools");
+                None
+            }
+        },
+    };
+    let s = crate::guidance::settings();
+    let (agents, skill) = if s.enabled && crate::guidance::is_managed(p) {
+        (Some(kimiplace::render_agents(&crate::guidance::rules_text())), Some(crate::guidance::effective_skill()))
+    } else {
+        (None, None)
+    };
+    for w in kimiplace::sync(wt, &p.git_common, &Want { mcp, agents, skill }) {
+        ui.warn(&w);
+    }
+}
+
+/// The shell words that start kimi's deferred opener (`kimi::cmd_opener`)
+/// beside a FRESH launch with a brief: kimi takes no prompt on argv, so a
+/// helper started by the pane's own shell — `$TMUX_PANE` is its exact pane, on
+/// whichever tmux server the pane runs under — waits for kimi's empty composer
+/// and types `BRIEF_OPENER` there. Detached and silent: what happened goes to
+/// the repo's opener log. Empty for every other launch, and when no CLI that
+/// has the helper is found (said, since the brief would then go unread).
+fn deferred_opener(ui: &mut dyn Ui, wt: &str, ai: &crate::profile::AiLaunch) -> String {
+    use crate::profile::shell_quote;
+    let Some(adapter) = crate::harness::for_cmd(&ai.cmd).filter(|_| !ai.cmd.is_empty()) else { return String::new() };
+    if adapter.opener_in_argv() || ai.resume || ai.opener.as_deref().is_none_or(|o| o.trim().is_empty()) {
+        return String::new();
+    }
+    let Some(bin) = crate::kimi::opener_bin() else {
+        ui.warn(&format!(
+            "{}: no worktrees CLI with the opener helper was found, so the brief is not opened automatically — \
+             type \"{BRIEF_OPENER}\" into it (install or update the CLI)",
+            adapter.provider().label
+        ));
+        return String::new();
+    };
+    // Before the session exists, so a `wait` right after `new` already sees
+    // the lane as about to work; the helper clears it when it is done.
+    crate::kimi::mark_opener_pending(wt);
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    format!(
+        "( {} kimi-opener --pane \"$TMUX_PANE\" --dir {} --since {since} </dev/null >/dev/null 2>&1 & ); ",
+        shell_quote(&bin.to_string_lossy()),
+        shell_quote(wt)
+    )
 }
 
 /// Owned planning's Claude plugin for one launch (owned-planning §3.3). Its
@@ -429,7 +505,8 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
         // process name from the resolved target, so `pane_current_command`
         // reads `2.1.277`. See `tmux::is_version_like`.
         let pane0 = if !ai_cmd.is_empty() {
-            format!("exec \"${{SHELL:-/bin/sh}}\" -ic {}", tmux::sq(&ai.pane0_body_for(keep, &session)))
+            let helper = deferred_opener(ui, wt, ai);
+            format!("exec \"${{SHELL:-/bin/sh}}\" -ic {}", tmux::sq(&format!("{helper}{}", ai.pane0_body_for(keep, &session))))
         } else {
             keep.to_string()
         };
@@ -2163,6 +2240,13 @@ pub fn cmd_doctor(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         }
         return pi_doctor(p, ui, json);
     }
+    if args.iter().any(|a| a == "--kimi") {
+        if let Some(extra) = args.iter().find(|a| *a != "--kimi" && *a != "--json") {
+            ui.error(&format!("doctor --kimi takes only --json (got '{extra}')"));
+            return 1;
+        }
+        return kimi_doctor(p, ui, json);
+    }
     let rc = doctor_config(p, ui, args);
     // The pi block rides on a HUMAN run only, and only once pi is in use here:
     // `--json`'s schema is the config report's, and a user who never chose pi
@@ -2170,6 +2254,114 @@ pub fn cmd_doctor(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     if !json && rc != 1 && pi_in_use(p) {
         ui.plain("");
         pi_doctor(p, ui, false);
+    }
+    if !json && rc != 1 && harness_in_use(p, crate::provider::KIMI) {
+        ui.plain("");
+        kimi_doctor(p, ui, false);
+    }
+    rc
+}
+
+/// A harness is in use when it is the configured AI command, the user named a
+/// default model for it, or some place here was last launched on it.
+fn harness_in_use(p: &Project, h: &crate::provider::Provider) -> bool {
+    crate::profile::ai_word_of(&crate::config::resolve_ai_cmd(None)) == h.match_word
+        || crate::config::default_model(h.id).is_some()
+        || crate::store::read_lenient(&p.main_root).places.values().any(|d| d.agent.as_ref().is_some_and(|a| a.harness == h.id))
+}
+
+/// `doctor --kimi`: which kimi a pane gets, the trust posture for this repo,
+/// whether lanes get the worktrees MCP server, the models kimi's config
+/// declares, and how this place's last brief opener went. Exit `2` (findings)
+/// when kimi is not installed. Reads only the `[models.*]` half of kimi's
+/// config (`kimimodels`) — nothing else in kimi's home.
+fn kimi_doctor(p: &Project, ui: &mut dyn Ui, json: bool) -> i32 {
+    let bin = crate::kimi::kimi_bin();
+    let version = bin.as_ref().and_then(|b| {
+        let mut cmd = std::process::Command::new(b);
+        cmd.arg("--version").current_dir("/").stdin(std::process::Stdio::null());
+        crate::proc::run_deadline(cmd, 10).ok().filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    });
+    let mcp = crate::kimiplace::status();
+    let catalog = crate::kimimodels::catalog();
+    // The place doctor runs in (its own .kimi-code/ and .mcp.json decide its
+    // trust), or (main) when that is not a place of this project.
+    let place = std::env::current_dir()
+        .ok()
+        .and_then(|d| {
+            let d = d.to_string_lossy().into_owned();
+            let slug = d.strip_prefix(&format!("{}/", p.wt_root))?.split('/').next()?.to_string();
+            Some(format!("{}/{slug}", p.wt_root))
+        })
+        .unwrap_or_else(|| p.main_root.clone());
+    let launch = crate::trust::kimi_launch_trust(&place);
+    let slug = if place == p.main_root { "(main)".to_string() } else { basename(&place) };
+    let opener = crate::kimi::last_opener_line(&p.git_common, &slug);
+    let missed = crate::kimi::sessions_missed(&crate::kimi::sessions_root(), &place);
+    let rc = if bin.is_none() { crate::diag::EXIT_FINDINGS } else { 0 };
+    if json {
+        let (models, default, catalog_error) = match &catalog {
+            Ok((m, d)) => (crate::kimimodels::options_from(m, d.as_deref()), d.clone(), None),
+            Err(e) => (Vec::new(), None, Some(*e)),
+        };
+        ui.plain(
+            &serde_json::json!({
+                "kimi": bin.as_ref().map(|b| b.to_string_lossy().into_owned()),
+                "version": version,
+                "trust": launch,
+                "mcp": mcp,
+                "models": models,
+                "default_model": default,
+                "catalog_error": catalog_error,
+                "opener": opener,
+                "sessions_missed": missed,
+            })
+            .to_string(),
+        );
+        return rc;
+    }
+    ui.header("kimi");
+    let or_none = |o: Option<String>| o.unwrap_or_else(|| "(none)".into());
+    ui.info(&format!("kimi  {}  {}", or_none(bin.as_ref().map(|b| b.to_string_lossy().into_owned())), or_none(version)));
+    let trust = match launch.source {
+        "allowance" => "this repo is ALLOWED — kimi lanes start trusted (KIMI_CODE_TRUST_WORKSPACE=1, that launch only)",
+        "shadowed" => "kimi asks: a `worktrees` MCP server that is not ours would answer a trusted lane here",
+        _ => "kimi asks once per place (worktrees trust kimi to allow this repo)",
+    };
+    ui.info(&format!("trust {trust}"));
+    let mcp_line = match mcp.state {
+        "mutations" => "mutating — each kimi lane gets <place>/.kimi-code/mcp.json".to_string(),
+        "read-only" => "READ-ONLY — kimi lanes cannot create or close places".to_string(),
+        "off" => "off — install with: worktrees mcp --install --ai kimi".to_string(),
+        "cli-missing" => "on, but no `worktrees` binary was found to point it at".to_string(),
+        other => other.to_string(),
+    };
+    ui.info(&format!("mcp   {mcp_line}"));
+    match &catalog {
+        Ok((models, default)) => {
+            if models.is_empty() {
+                ui.info("models: none declared in kimi's config.toml");
+            }
+            for m in models {
+                let mark = if default.as_deref() == Some(m.alias.as_str()) { "  (kimi's default)" } else { "" };
+                let label = m.label.as_deref().map(|l| format!(" — {l}")).unwrap_or_default();
+                ui.info(&format!("  ✔ {}{label}{mark}", m.alias));
+            }
+        }
+        Err(e) => ui.info(&format!("models: {e}")),
+    }
+    if let Some(line) = opener {
+        ui.info(&format!("opener {line}"));
+    }
+    if missed > 0 {
+        ui.warn(&format!(
+            "kimi keeps {missed} session(s) for {place} under a workspace name worktrees does not derive — \
+             resume and the activity dots cannot see them (a kimi upgrade that changed its naming?)"
+        ));
+    }
+    if bin.is_none() {
+        ui.error("kimi is not installed (or not on PATH / ~/.kimi-code/bin)");
     }
     rc
 }

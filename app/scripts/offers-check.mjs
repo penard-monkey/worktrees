@@ -97,6 +97,18 @@ if (ids({ piMcp: pi("absent", null) }).includes("pi-mcp")) fail("pi-mcp offered 
 else ok("pi-mcp needs pi present");
 if (ids({ piMcp: null }).length !== 0) fail("an unknown pi status must offer nothing");
 
+// ── 1c'. the kimi offer: `off` is kimi's `absent` (never turned on) ─────────
+const kimi = (state, bin = "/Users/me/.kimi-code/bin/kimi") => ({ state, mode: state === "read-only" || state === "mutations" ? state : "off",
+  kimi_bin: bin, worktrees_bin: "/w", file: "<place>/.kimi-code/mcp.json", config_path: "/x/config.toml" });
+const KIMI = ["mutations", "read-only", "off", "cli-missing", "kimi-missing"];
+const kimiOffering = KIMI.filter((st) => ids({ kimiMcp: kimi(st) }).includes("kimi-mcp"));
+if (kimiOffering.join(",") !== "off") {
+  fail(`kimi states that offer: [${kimiOffering}] — expected exactly [off]. cli-missing is Updates' sentence.`);
+} else ok("kimi-mcp: only `off` offers");
+if (ids({ kimiMcp: kimi("off", null) }).includes("kimi-mcp")) fail("kimi-mcp offered with no kimi installed");
+else ok("kimi-mcp needs kimi present");
+if (ids({ kimiMcp: null }).length !== 0) fail("an unknown kimi status must offer nothing");
+
 // agent-guidance (agent-guidance §4.5): not an `absent` install but "this is
 // now happening — review it". True only when delivery is on and some agent is
 // installed to get it; asks once per guidance VERSION, never per wording fix.
@@ -191,7 +203,7 @@ else ok("planning: an unknown status offers nothing");
 // Every offer id, not just the first: a new offer whose deep link lands
 // nowhere is the same bug as the old one.
 const every = pendingOffers(
-  { mcp: status("absent"), codexMcp: codex("absent"), piMcp: pi("absent"), userSkills: skills("missing"), guidance: guidance(true, true, 1, edited(true)), crossProject: xp("off"), planning: pl("unset") }, {});
+  { mcp: status("absent"), codexMcp: codex("absent"), piMcp: pi("absent"), kimiMcp: kimi("off"), userSkills: skills("missing"), guidance: guidance(true, true, 1, edited(true)), crossProject: xp("off"), planning: pl("unset") }, {});
 const sheetSrc = read("../src/SettingsSheet.tsx");
 // The render of ONE category: from its `{cat === "x" && <>` to the next
 // category's. A data-focus found anywhere in src/ proves nothing about where
@@ -217,6 +229,11 @@ for (const o of every) {
     && !(o.id === "pi-mcp" && sheetSrc.includes(`{cat === "pi" && <PiPanel`)
       && read("../src/PiPanel.tsx").includes(`data-focus="${o.to.focus}"`)
       && /<section[^>]*data-focus=\{focusId\}/.test(read("../src/PiMcpPanel.tsx")))
+    // kimi's the same shape: the category mounts KimiPanel, which renders
+    // KimiMcpSection with the target, which puts it on its section.
+    && !(o.id === "kimi-mcp" && sheetSrc.includes(`{cat === "kimi" && <KimiPanel`)
+      && read("../src/KimiPanel.tsx").includes(`data-focus="${o.to.focus}"`)
+      && /<section[^>]*data-focus=\{focusId\}/.test(read("../src/KimiPanel.tsx")))
     // The guidance category mounts GuidanceSection, whose "default changed"
     // band carries this target — rendered for exactly the state that offers it.
     && !(o.id === "agent-guidance-changed" && catSlice("guidance").includes("<GuidanceSection")
@@ -226,12 +243,12 @@ for (const o of every) {
   } else ok(`${o.id} → ${o.to.cat}/${o.to.focus}, rendered by that category`);
   if (Object.values(o).some((v) => typeof v === "function")) fail(`${o.id}: an offer carries no functions`);
   // dismissal, per offer
-  if (pendingOffers({ mcp: status("absent"), codexMcp: codex("absent"), piMcp: pi("absent"), userSkills: skills("missing"), guidance: guidance(true, true, 1, edited(true)), crossProject: xp("off"), planning: pl("unset") },
+  if (pendingOffers({ mcp: status("absent"), codexMcp: codex("absent"), piMcp: pi("absent"), kimiMcp: kimi("off"), userSkills: skills("missing"), guidance: guidance(true, true, 1, edited(true)), crossProject: xp("off"), planning: pl("unset") },
     dismissPatch(o, {})).some((x) => x.id === o.id)) fail(`${o.id}: dismissing it did not silence it`);
   else ok(`${o.id}: dismissal silences its own fingerprint (${JSON.stringify(o.fingerprint)})`);
 }
-if (every.map((o) => o.id).join(",") !== "mcp-server,codex-mcp,pi-mcp,codex-skills,agent-guidance,agent-guidance-changed,cross-project,planning") {
-  fail(`expected all eight offers, got [${every.map((o) => o.id)}]`);
+if (every.map((o) => o.id).join(",") !== "mcp-server,codex-mcp,pi-mcp,kimi-mcp,codex-skills,agent-guidance,agent-guidance-changed,cross-project,planning") {
+  fail(`expected all nine offers, got [${every.map((o) => o.id)}]`);
 }
 // The skills fingerprint is the SET of unlinked skills: a new one is a new question.
 {
@@ -383,9 +400,12 @@ if (offersTitle(1) !== "1 thing to set up — open" || offersTitle(3) !== "3 thi
 // …and the CONTEXT: an offer whose input is never fed can never render. The two
 // Codex inputs must be the machine-level probes, not some project's status.
 const ctxCall = app.match(/pendingOffers\(\{([^}]*)\}/);
-if (!ctxCall || !/\bcodexMcp\b/.test(ctxCall[1]) || !/\bpiMcp\b/.test(ctxCall[1]) || !/\buserSkills\b/.test(ctxCall[1]) || !/\bguidance\b/.test(ctxCall[1]) || !/\bcrossProject\b/.test(ctxCall[1]) || !/\bplanning\b/.test(ctxCall[1])) {
-  fail(`App.tsx feeds pendingOffers({${ctxCall?.[1] ?? "?"}}) — codexMcp, piMcp, userSkills, guidance, crossProject and planning must all reach it`);
-} else ok("pendingOffers is fed mcp + codexMcp + piMcp + userSkills + guidance + crossProject + planning");
+if (!ctxCall || !/\bcodexMcp\b/.test(ctxCall[1]) || !/\bpiMcp\b/.test(ctxCall[1]) || !/\bkimiMcp\b/.test(ctxCall[1]) || !/\buserSkills\b/.test(ctxCall[1]) || !/\bguidance\b/.test(ctxCall[1]) || !/\bcrossProject\b/.test(ctxCall[1]) || !/\bplanning\b/.test(ctxCall[1])) {
+  fail(`App.tsx feeds pendingOffers({${ctxCall?.[1] ?? "?"}}) — codexMcp, piMcp, kimiMcp, userSkills, guidance, crossProject and planning must all reach it`);
+} else ok("pendingOffers is fed mcp + codexMcp + piMcp + kimiMcp + userSkills + guidance + crossProject + planning");
+if (!/invoke<KimiMcpStatus>\("kimi_mcp_status"\)\.then\(setKimiMcp\)/.test(app)) {
+  fail("App.tsx no longer probes kimi_mcp_status straight into the offer input");
+} else ok("the kimi offer input comes from a machine-level probe");
 if (!/invoke<PlanningStatus>\("planning_status"\)\.then\(setPlanning\)/.test(app)) {
   fail("App.tsx no longer probes planning_status straight into the offer input");
 } else ok("the planning offer input comes from a machine-level probe");
@@ -448,6 +468,11 @@ if (!/offerPending/.test(piPanel) || !/onSilenceOffer/.test(piPanel)) fail("PiMc
 else ok("Settings → pi can end its suggestion on demand");
 if (!/piMcpOfferPending=\{!!piMcpOffer\}/.test(app)) fail("App.tsx does not tell Settings whether the pi offer is pending");
 else ok("Settings is told whether the pi offer is pending");
+const kimiPanel = read("../src/KimiPanel.tsx");
+if (!/function KimiMcpSection[\s\S]*offerPending[\s\S]*onSilenceOffer/.test(kimiPanel)) fail("KimiMcpSection has no offerPending/onSilenceOffer");
+else ok("Settings → Kimi can end its suggestion on demand");
+if (!/kimiMcpOfferPending=\{!!kimiMcpOffer\}/.test(app)) fail("App.tsx does not tell Settings whether the kimi offer is pending");
+else ok("Settings is told whether the kimi offer is pending");
 if (!/codexMcpOfferPending=\{!!codexMcpOffer\}/.test(app) || !/skillsOfferPending=\{!!skillsOffer\}/.test(app)) {
   fail("App.tsx does not tell Settings which Codex offers are pending");
 } else ok("Settings is told which Codex offers are pending");

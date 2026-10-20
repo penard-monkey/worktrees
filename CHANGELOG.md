@@ -53,6 +53,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   what follows as the name however it is spelled. It used to be an unknown
   flag.
 
+- **Kimi Code is a fourth agent: `worktrees new|open --ai kimi`** (measured on
+  kimi 2.2.0). A lane runs in its own `~agent~kimi` session, `--model` takes
+  one of the aliases kimi's config declares, and reopening resumes the place's
+  exact session (`-S <id>`, never `-c`, which would pick up a removed place's
+  conversation when the name is reused). Its state comes from kimi's own event
+  log: busy, waiting (on an approval, a question, or its folder-trust prompt)
+  and done all read the same in `place_status`, `wait` and `doctor --kimi`.
+  kimi takes no prompt on its command line, so the brief's opener is typed
+  into kimi once it sits at an empty prompt, never into a half-typed one or
+  over a prompt, and is confirmed from kimi's log; if that cannot happen
+  within ten minutes it gives up and says so (`doctor --kimi`, and the lane's
+  `place_status` row). `send` types into a kimi lane and reports whether kimi
+  took the message or queued it behind a running turn. kimi asks to trust
+  every new place; `worktrees trust kimi` lets this repository's lanes start
+  trusted, for that launch only. `worktrees mcp --install --ai kimi` gives kimi
+  lanes the worktrees tools: worktrees writes them, with the worktrees skill
+  and rule, into the place's own `.kimi-code/`, keeps those files out of git
+  (lines in the repository's `.git/info/exclude`, removed again once no place
+  has any), and never touches kimi's own configuration or a `.kimi-code/` file
+  the repository already has — a launch says when one of yours sits where
+  those lines would hide it from git. A per-place MCP server of your own
+  belongs in the repository's `.mcp.json` or kimi's own `mcp.json`: the place's
+  `.kimi-code/mcp.json` is rewritten at every launch. In the app, the new-worktree dialog offers Kimi
+  with kimi's own model list, and a kimi lane's row gets its mark and the busy,
+  waiting and finished dots. **Settings → Kimi** shows which kimi a lane gets,
+  connects or disconnects the Worktrees tools (with or without create and
+  close), lists kimi's models and picks the one to preselect, and allows or
+  revokes repos whose lanes start trusted. Until the tools are connected,
+  the suggestions button offers it once.
+
 ### Fixed
 - **Opening the app no longer sets what Codex and pi may do.** Settings →
   Codex → Permissions and Settings → pi → Project trust were sent to the

@@ -82,7 +82,7 @@ Seven lanes starting the same monorepo gate at once have locked a machine up.
 - `report` posts a message from your place; `messages` reads yours; `wait`
   blocks until a place's agent goes idle or a message arrives.
 - Claude sessions also have their own messaging (`SendMessage` to the full
-  tmux session name). `send` types into a Codex or pi pane; check the pane is
+  tmux session name). `send` types into a Codex, pi or kimi pane; check the pane is
   not mid-input before typing into it.
 
 ## Across projects
