@@ -258,3 +258,18 @@ EOF
   has "KIMI_CODE_TRUST_WORKSPACE='1' kimi" "$second"
   has "KIMI_CODE_TRUST_WORKSPACE='1' kimi" "$first"
 }
+
+@test "the launch gate speaks for kimi: a spent kimi window refuses the launch, --force goes ahead" {
+  local f="$BATS_TEST_TMPDIR/usage.json"
+  printf '{"kimi":[{"label":"5h","percent":97,"severity":"warning","resets_at":%s}]}\n' "$(( $(date +%s) + 3600 ))" > "$f"
+  export WORKTREES_USAGE_PROBE="$f"
+  run_wt new feat-x --ai kimi --no-attach --no-spare --brief "do x"
+  [ "$status" -eq 5 ]
+  has "Kimi is at 97% of its 5h window" "$output"
+  ! tmux_session_exists 'repo-feat-x~agent~kimi'
+  [ -f "$REPO/.worktrees/feat-x/.planning/brief.md" ]
+  run_wt open feat-x --ai kimi --force --no-attach --no-spare
+  [ "$status" -eq 0 ]
+  # The opener the refused `new` would have given goes with the launch-anyway.
+  has "kimi-opener --pane" "$(kimi_cmd feat-x)"
+}

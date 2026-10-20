@@ -30,6 +30,7 @@ pub mod inbox;
 pub mod logsink;
 pub mod init;
 pub mod kimi;
+pub mod kimi_usage;
 pub mod kimimodels;
 pub mod kimiplace;
 pub mod materialize;

@@ -811,6 +811,13 @@ impl Adapter for Kimi {
         false
     }
 
+    /// kimi's plan windows, read through kimi itself (`kimi_usage`: its own
+    /// `kimi web`, never its token) — so the launch gate and the meter speak
+    /// for kimi as they do for Claude and Codex.
+    fn usage(&self) -> Option<Vec<crate::quota::Window>> {
+        crate::quota::seam(self.provider().id, || windows_from_kimi(&crate::kimi_usage::read()))
+    }
+
     fn resume_arg(&self, _cwd: &str) -> String {
         String::new() // `-S <id>`, resolved once and emitted by `prepare`
     }
@@ -830,7 +837,8 @@ impl Adapter for Kimi {
     /// fresh. A fresh launch takes the chosen model, else `[model] kimi`,
     /// else kimi's own `default_model`, which is the user's and is fine.
     fn prepare(&self, _p: &Project, _slug: &str, _wt: &str, launch: &mut AiLaunch) -> Result<(), Refusal> {
-        kimi_prepare_in(launch, self.installed(), || crate::config::default_model(self.provider().id))
+        kimi_prepare_in(launch, self.installed(), || crate::config::default_model(self.provider().id))?;
+        crate::quota::gate(self, launch, crate::sysclock::now_epoch())
     }
 
     fn never_launched(&self, p: &Project, slug: &str) -> bool {
@@ -976,6 +984,7 @@ pub(crate) fn windows_from_claude(info: &crate::claude_usage::UsageInfo) -> Vec<
             resets_at: l.resets_at(),
             model: l.scoped_model().map(str::to_string),
             weekly: l.is_weekly(),
+            grade: crate::quota::Grade::Provider,
         })
         .collect()
 }
@@ -992,6 +1001,29 @@ pub(crate) fn windows_from_codex(info: &crate::codex_usage::Info) -> Vec<crate::
             resets_at: l.resets_at(),
             model: None,
             weekly: l.is_weekly(),
+            // `codex_usage` grades the bare `usedPercent` at 80%.
+            grade: crate::quota::Grade::Threshold(80),
+        })
+        .collect()
+}
+
+/// `kimi_usage`'s windows as the shared shape, for the launch gate. Only the
+/// 5h and 7d windows: they roll over within a working day or week, as
+/// Claude's session and weekly windows do. The month windows stay on the
+/// meter and never refuse — graded by our 80% they would hold every kimi
+/// launch for weeks. kimi reports only `usedRatio`, so the grade is ours.
+pub(crate) fn windows_from_kimi(info: &crate::kimi_usage::Info) -> Vec<crate::quota::Window> {
+    info.limits()
+        .iter()
+        .filter(|l| matches!(l.label(), "5h" | "7d"))
+        .map(|l| crate::quota::Window {
+            label: l.label().to_string(),
+            percent: l.percent(),
+            severity: crate::quota::Severity::from_provider(l.severity()),
+            resets_at: l.resets_at(),
+            model: None,
+            weekly: l.is_weekly(),
+            grade: crate::quota::Grade::Threshold(80),
         })
         .collect()
 }
@@ -1181,6 +1213,31 @@ mod tests {
         assert!(KIMI.exact_resume());
         assert_eq!(KIMI.resume_display(), "-S <per place session>");
         assert_eq!(KIMI.provider().name_arg, None);
+    }
+
+    fn kimi_info(json: &str) -> crate::kimi_usage::Info {
+        crate::kimi_usage::normalize(&serde_json::from_str(json).unwrap(), 1)
+    }
+
+    /// #511 review: kimi reports only `usedRatio`, and a month window graded
+    /// by OUR 80% refused every kimi launch for weeks. Only the windows that
+    /// roll over within a working day or week (5h, 7d) may gate.
+    #[test]
+    fn a_kimi_month_window_at_95_percent_refuses_nothing() {
+        let info = kimi_info(r#"{"data":{"kind":"ok","quota":{"usages":{"limit5h":{"usedRatio":0.1},"monthTotal":{"usedRatio":0.95},"monthCode":{"usedRatio":0.95}}}}}"#);
+        let windows = windows_from_kimi(&info);
+        let policy = crate::quota::Policy::default();
+        assert_eq!(crate::quota::worst_window(&windows, None, 1, &policy), None, "{windows:?}");
+        // …while a 5h window at 95% still does.
+        let hot = kimi_info(r#"{"data":{"kind":"ok","quota":{"usages":{"limit5h":{"usedRatio":0.95}}}}}"#);
+        assert!(crate::quota::worst_window(&windows_from_kimi(&hot), None, 1, &policy).is_some());
+    }
+
+    #[test]
+    fn kimi_windows_map_with_their_weekly_flag_and_our_grade() {
+        let info = kimi_info(r#"{"data":{"kind":"ok","quota":{"usages":{"limit5h":{"usedRatio":0.5},"limit7d":{"usedRatio":0.5},"monthTotal":{"usedRatio":0.5},"monthCode":{"usedRatio":0.5}}}}}"#);
+        let got: Vec<(String, bool)> = windows_from_kimi(&info).into_iter().map(|w| (w.label, w.weekly)).collect();
+        assert_eq!(got, vec![("5h".to_string(), false), ("7d".to_string(), true)]);
     }
 
     /// Codex is launched inline, fresh and resumed alike, so its transcript

@@ -212,6 +212,7 @@ export type Settings = {
   usage_place: "strip" | "footer" | "rail" | "off";
   usage_claude: boolean;
   usage_codex: boolean;
+  usage_kimi: boolean;
   // Pull requests (docs/proposals/pull-requests.md): the header chip, the dock
   // tab and the rail badge. Off is a REAL off switch, like `usage_place: "off"`:
   // App makes no `project_prs` call at all, so `gh` is never run — not a hidden
@@ -456,6 +457,7 @@ export const DEFAULTS: Settings = {
   usage_place: "strip",
   usage_claude: true,
   usage_codex: true,
+  usage_kimi: true,
   pull_requests: true,
   dock_open: false,
   dock_width: 360,
@@ -795,6 +797,7 @@ export async function loadSettings(): Promise<Settings> {
     delete (s as Partial<Settings> & { pi_project_trust?: unknown }).pi_project_trust;
     s.usage_claude = typeof s.usage_claude === "boolean" ? s.usage_claude : true;
     s.usage_codex = typeof s.usage_codex === "boolean" ? s.usage_codex : true;
+    s.usage_kimi = typeof s.usage_kimi === "boolean" ? s.usage_kimi : true;
     s.pull_requests = typeof s.pull_requests === "boolean" ? s.pull_requests : true;
     s.theme = normalizeTheme(s.theme);
     s.theme_light = normalizePair(s.theme_light, "light", DEFAULTS.theme_light);

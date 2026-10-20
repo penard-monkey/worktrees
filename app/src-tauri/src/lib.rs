@@ -550,6 +550,16 @@ async fn codex_usage() -> Result<codex_usage::Info, String> {
     worktrees_api::status::codex_usage()
 }
 
+/// kimi's plan windows, read through kimi's own `kimi web` (core `kimi_usage`:
+/// spawned, asked once, ended — never its token). On the blocking pool, like
+/// `kimi_version`, because it starts a kimi process and waits for it.
+#[tauri::command]
+async fn kimi_usage() -> Result<worktrees_core::kimi_usage::Info, String> {
+    tauri::async_runtime::spawn_blocking(worktrees_api::status::kimi_usage)
+        .await
+        .map_err(|_| "kimi usage worker failed".to_string())?
+}
+
 #[tauri::command]
 async fn claude_status() -> Result<worktrees_api::status::ClaudeStatus, String> {
     worktrees_api::status::claude_status()
@@ -1848,6 +1858,7 @@ pub fn run() {
             set_zoom,
             claude_usage,
             codex_usage,
+            kimi_usage,
             claude_status,
             log_info,
             list_drafts,

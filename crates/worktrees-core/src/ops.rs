@@ -2245,7 +2245,7 @@ pub fn cmd_doctor(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
             ui.error(&format!("doctor --kimi takes only --json (got '{extra}')"));
             return 1;
         }
-        return kimi_doctor(p, ui, json);
+        return kimi_doctor(p, ui, json, true);
     }
     let rc = doctor_config(p, ui, args);
     // The pi block rides on a HUMAN run only, and only once pi is in use here:
@@ -2257,7 +2257,7 @@ pub fn cmd_doctor(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     }
     if !json && rc != 1 && harness_in_use(p, crate::provider::KIMI) {
         ui.plain("");
-        kimi_doctor(p, ui, false);
+        kimi_doctor(p, ui, false, false);
     }
     rc
 }
@@ -2275,7 +2275,7 @@ fn harness_in_use(p: &Project, h: &crate::provider::Provider) -> bool {
 /// declares, and how this place's last brief opener went. Exit `2` (findings)
 /// when kimi is not installed. Reads only the `[models.*]` half of kimi's
 /// config (`kimimodels`) — nothing else in kimi's home.
-fn kimi_doctor(p: &Project, ui: &mut dyn Ui, json: bool) -> i32 {
+fn kimi_doctor(p: &Project, ui: &mut dyn Ui, json: bool, with_usage: bool) -> i32 {
     let bin = crate::kimi::kimi_bin();
     let version = bin.as_ref().and_then(|b| {
         let mut cmd = std::process::Command::new(b);
@@ -2299,6 +2299,9 @@ fn kimi_doctor(p: &Project, ui: &mut dyn Ui, json: bool) -> i32 {
     let slug = if place == p.main_root { "(main)".to_string() } else { basename(&place) };
     let opener = crate::kimi::last_opener_line(&p.git_common, &slug);
     let missed = crate::kimi::sessions_missed(&crate::kimi::sessions_root(), &place);
+    // Only when asked for by name: it starts kimi's own `kimi web` for one
+    // request (`kimi_usage`), which the plain `doctor` should not pay for.
+    let usage = (with_usage && bin.is_some()).then(crate::kimi_usage::read);
     let rc = if bin.is_none() { crate::diag::EXIT_FINDINGS } else { 0 };
     if json {
         let (models, default, catalog_error) = match &catalog {
@@ -2316,6 +2319,7 @@ fn kimi_doctor(p: &Project, ui: &mut dyn Ui, json: bool) -> i32 {
                 "catalog_error": catalog_error,
                 "opener": opener,
                 "sessions_missed": missed,
+                "usage": usage,
             })
             .to_string(),
         );
@@ -2353,6 +2357,15 @@ fn kimi_doctor(p: &Project, ui: &mut dyn Ui, json: bool) -> i32 {
     }
     if let Some(line) = opener {
         ui.info(&format!("opener {line}"));
+    }
+    if let Some(u) = &usage {
+        if u.limits().is_empty() {
+            ui.info(&format!("usage {} ({})", u.state(), u.reason().unwrap_or("")));
+        }
+        for l in u.limits() {
+            let resets = l.resets_at().map(|t| format!(", resets {}", crate::sysclock::SysClock::detect().fmt_date(t))).unwrap_or_default();
+            ui.info(&format!("usage {:<13} {:>5.1}%{resets}{}", l.label(), l.percent(), if u.state() == "stale" { " (stale)" } else { "" }));
+        }
     }
     if missed > 0 {
         ui.warn(&format!(

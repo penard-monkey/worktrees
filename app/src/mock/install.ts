@@ -1706,6 +1706,23 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
         fetched_at: t - (mode === "old" ? 2520 : mode === "stale" || mode === "expired" ? 480 : 0), limits };
     }
 
+    // kimi plan usage (core `kimi_usage`: kimi's own `kimi web`, asked once).
+    // `?kimiUsage=missing|signedout|unavailable|stale|over` for the other states.
+    case "kimi_usage": {
+      const mode = new URLSearchParams(location.search).get("kimiUsage") ?? "ready";
+      const t = now();
+      const states: Record<string, string> = { unavailable: "unavailable", signedout: "signed_out", missing: "missing_cli" };
+      if (states[mode]) return { provider: "kimi", state: states[mode], source: "unavailable", fetched_at: null, retry_at: t + 120, reason: mode === "missing" ? "missing_cli" : mode === "signedout" ? "signed_out" : "timeout", limits: [] };
+      const w = (key: string, role: string, minutes: number | null, percent: number, reset: number | null) => ({
+        id: `kimi:${key}`, bucket_id: "kimi", bucket_label: "Kimi", window_role: role, window_minutes: minutes,
+        percent, severity: percent >= 100 ? "over" : percent >= 80 ? "warning" : "normal", resets_at: reset,
+      });
+      const five = mode === "over" ? 100 : 41;
+      return { provider: "kimi", state: mode === "stale" ? "stale" : "ready", source: mode === "stale" ? "cached" : "kimi_web",
+        reason: null, retry_at: t + 120, fetched_at: t - (mode === "stale" ? 480 : 0),
+        limits: [w("limit5h", "5h", 300, five, t + 3 * 3600), w("monthTotal", "month", null, 12, t + 20 * 86400), w("monthCode", "code", null, 9, t + 20 * 86400)] };
+    }
+
     // Claude plan usage → the nav-footer bars. Mirrors the oauth shape from
     // lib.rs: a Fable bucket at severity "warning" so the amber tier is
     // exercisable, and `?usage=stale` / `?usage=cached` / `?usage=off` for the

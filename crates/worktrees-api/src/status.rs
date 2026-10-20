@@ -27,6 +27,14 @@ pub fn claude_usage() -> Result<UsageInfo, String> {
     Ok(claude_usage::read())
 }
 
+/// kimi's plan windows (core `kimi_usage`). Blocking: it spawns `kimi web`,
+/// asks once and ends it, and core caches the answer for 120s, so focus pulls
+/// cannot start more than one server in that window. Never Errs, like the
+/// other two readers.
+pub fn kimi_usage() -> Result<worktrees_core::kimi_usage::Info, String> {
+    Ok(worktrees_core::kimi_usage::read())
+}
+
 pub fn codex_usage() -> Result<codex_usage::Info, String> {
     // The neutral probe dir is core's now, and shared: the CLI and MCP read
     // usage too, and two definitions of "somewhere that is not the repo" is one

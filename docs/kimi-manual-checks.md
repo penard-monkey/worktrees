@@ -164,22 +164,101 @@ wt open lane1 --ai kimi --no-attach --no-spare   # after a close
 - [ ] `sessions_missed` is 0 for every place (`doctor --kimi --json`): kimi's workspace-dir naming still matches `kimi::slug`.
 - [x] `worktrees doctor --kimi` lists the aliases from kimi's config with kimi's default marked, the trust posture, the MCP state and the last opener line — and nothing else from that config file.
 
+## 9b. Plan usage (`kimi_usage`)
+
+Re-measure on every kimi upgrade — the route and its answer are kimi's, not a
+published API.
+
+```sh
+worktrees doctor --kimi            # usage lines: 5h / month / code
+lsof -nP -iTCP -sTCP:LISTEN | grep kimi-code   # during a read only; nothing after
+ls ~/.kimi-code/server/instances/  # empty again after a read
+```
+
+- [x] `kimi web --no-open --host 127.0.0.1 --port 0` is accepted (2.2.0) and binds `127.0.0.1` only ("Network: off"), printing its port in the `Local:` line. worktrees passes `--host 127.0.0.1` and still refuses a `Local:` host other than loopback (`unexpected_host`) or a `Network:` line that is not `off` (`not_loopback`), without asking it.
+- [x] Only the 5h and 7d windows can hold a launch; the month windows are on the meter only (a month at 80% would hold kimi for weeks). kimi reports only `usedRatio`, so the 80% line is worktrees', and the refusal says so.
+- [x] `GET /api/v1/oauth/usage` with the printed bearer answers `{kind: "ok", quota: {usages: {limit5h, monthTotal, monthCode…}}}` (`limit7d` absent on this plan). `doctor --kimi` showed the three windows in 2.7s.
+- [x] After a read no `kimi-code` process listens and `server/instances/` is empty (SIGTERM, then SIGKILL after 2s, then a reap; a SIGKILL'd record is pruned by kimi's next start). Unit tests prove the same for a timed-out probe against a fake kimi.
+- [x] The bearer is the persistent one in `~/.kimi-code/server.token`, shared with any `kimi web` you run. It never appears in `doctor --kimi --json` (checked), in app.log or in an error.
+- [x] A second `kimi web` (yours) runs beside ours: there is no single-instance lock, and yours keeps its port.
+- [ ] In the app: the meter shows **Kimi** with its 5h window; hovering lists month and code; Settings → Usage → *Kimi plan usage* off stops the reads.
+
 ## 10. The app, end to end (by hand)
 
-Run with `app/scripts/sandbox.sh --app` (isolated identifier and tmux prefix).
-Drive it yourself; never script input into it.
+One kimi lane, driven by you, in a sandboxed app. Nothing here is scripted:
+the app is driven by hand, and only the terminal commands in the margin
+are for checking. Tick each step as you see it.
 
-- [ ] **Settings → Kimi**: kimi's version and path; *Set up kimi* turns the Worktrees tools on (`kimi_mcp` in `~/.config/worktrees/config.toml` of the sandbox), *Make read-only* / *Disconnect* change it; the models are kimi's aliases; *Allow <repo>* adds `[trust] kimi`, and *Revoke* removes it. `~/.kimi-code/` is untouched (compare mtimes).
-- [ ] Before the tools are connected, the suggestions button (dock rail, ✨) lists "Let kimi drive your worktrees"; *Stop suggesting this* silences it.
-- [ ] **New worktree** dialog: *Start with* offers **Kimi**, with the trust note under it ("kimi asks to trust this new folder first…", or "This repo is allowed…"); its model list is kimi's aliases (K3, K2.8…). Create a lane with a brief.
-- [ ] The row shows the **K** mark. While kimi asks to trust the folder, the dot is **amber**; answer it in the terminal pane.
-- [ ] The opener appears in kimi's composer by itself; the dot goes **green** while it works and leaves the afterglow ring when the turn ends.
-- [ ] Trigger an approval (ask it to run `ls`): **amber** until you answer.
-- [ ] The wheel scrolls kimi's transcript (kimi draws inline; tmux holds the history).
-- [ ] Plan tab → *Generate plan* pastes into kimi's empty prompt; with text typed there it refuses ("unsent text").
-- [ ] From another lane's agent, `send` to it lands (or is queued while it works).
-- [ ] *Switch agent…* to Claude and back; quit and relaunch the app: the lane resumes its own session (`-S`), on its own model.
-- [ ] Remove the place: its `.kimi-code/` files go with it.
+**Before you start.** Run `app/scripts/sandbox.sh --app` from this checkout
+(it builds the branch and uses its own identifier and tmux prefix).
+`sandbox.sh` does **not** isolate `$HOME`: the Settings → Kimi toggles in
+step 7 write your real `~/.config/worktrees/config.toml` (`kimi_mcp`,
+`[trust] kimi`), and kimi writes its own sessions under your real
+`~/.kimi-code/`. Note what you change, and undo it in step 9. Use a scratch
+repo you don't mind kimi touching, and the cheap model (`K2.7 Code Highspeed`).
+
+1. [ ] **New kimi place.** *New worktree* → *Start with* **Kimi**. The note
+   under it says "kimi asks to trust this new folder first…". The model
+   list shows kimi's aliases (K3, K2.7 Code Highspeed…); pick the highspeed
+   one. Brief: `Run ls, then reply with the single word DONE.` → Create. The
+   row appears with the **K** mark.
+2. [ ] **Trust modal.** The lane's terminal shows kimi's "Trust this
+   folder?". The row's dot is **amber** (waiting on you), and nothing is
+   typed into the modal for you. Answer *Trust and continue* in the
+   terminal yourself.
+3. [ ] **Opener.** Within a couple of seconds `Read .planning/brief.md and
+   begin.` appears in kimi's prompt by itself and is submitted. Do not type
+   while it waits: anything you type first makes it step aside. The opener
+   log line says `delivered`:
+   `tail -1 "$(git rev-parse --git-common-dir)/worktrees-kimi-opener.log"`.
+4. [ ] **Dots.**
+   - While kimi works, the dot is **green**.
+   - kimi asks to approve `ls`: the dot is **amber** until you approve it.
+   - When it replies DONE, the dot settles and leaves the afterglow ring.
+     Visiting the place clears the ring.
+   - The wheel scrolls back through kimi's transcript.
+5. [ ] **send.** From another place's agent (or an MCP client in the repo):
+   `send {slug: "<the place>", text: "Reply with the single word ACK."}`.
+   - While kimi is idle it lands and is confirmed (`queued: false`), and kimi
+     answers ACK.
+   - Sent while kimi is still working, it comes back `queued: true`, and kimi
+     lists it above its prompt until the turn ends.
+   - With an approval open, `send` is refused and nothing is typed.
+6. [ ] **Resume.**
+   - *Switch agent…* → Claude, then back to Kimi: kimi reopens the same
+     conversation (its history is above the prompt) on the model it was
+     using.
+   - Quit the sandbox app and launch it again, then open the place: same
+     result.
+   - The place's `place_status` agent row shows the same `model` before and
+     after.
+7. [ ] **Settings → Kimi.**
+   - The version line reads `kimi 2.2.0` (or what you have) and its path.
+   - The models are kimi's aliases. Pick a *Default model* and check the next
+     New worktree preselects it.
+   - *Set up kimi* says "Connected": the next kimi launch in a place writes
+     `.kimi-code/mcp.json` there, and `git status` stays clean.
+   - *Make read-only* / *Disconnect* change it.
+   - *Allow <repo>* lists the repo, and the next new kimi place opens with
+     no trust prompt; *Revoke* brings the prompt back.
+   - Settings → Commands → *Worktrees tools* shows Kimi's state.
+   - Before the tools were connected, the ✨ suggestions button listed "Let
+     kimi drive your worktrees".
+8. [ ] **The meter.**
+   - The usage strip shows **Kimi** with its 5h window, beside Claude and
+     Codex.
+   - Hovering or clicking lists `5h`, `month` and `code`, with reset times.
+   - Settings → Usage → *Kimi plan usage* off makes it go away and stops
+     the reads (no `kimi-code` process appears in `pgrep -fl kimi-code`
+     after two minutes).
+   - Turn it back on.
+9. [ ] **Remove and undo.**
+   - Remove the place: its `.kimi-code/` files go with it, and no
+     `kimi-opener` process is left (`pgrep -fl kimi-opener`).
+   - Undo step 7's settings if you want them gone:
+     `worktrees mcp --uninstall --ai kimi`, `worktrees trust kimi --revoke`.
+   - Delete the scratch repo's kimi sessions under `~/.kimi-code/sessions/`
+     by hand if you like.
 
 ## Checklist (docs/adding-a-harness.md), by surface
 
@@ -199,4 +278,4 @@ Drive it yourself; never script input into it.
 | Security | trust asks by default; allowance per repo; protect-ours over it; `kimi_mcp` and `[trust] kimi` are user-only | unit + bats + §7 |
 | Frontend | `harness.ts`, row mark, dialog + trust note, model picker, Settings → Kimi, the `kimi-mcp` offer, mock place `ledger-sync` | harness-check, offers-check, mock harness (Playwright: panel, setup, offer count); §10 open |
 | Wheel | inline, no alt screen, no mouse mode (measured) | §10 open |
-| Usage | none yet; the `kimi web` route is PR3 | — |
+| Usage | `kimi_usage`: kimi's own `kimi web`, one request, ended; the meter and the launch gate | unit (fake kimi: success, timeout, LAN, 401) + bats (gate) + §9b |
