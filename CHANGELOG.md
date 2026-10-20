@@ -64,7 +64,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   them in Settings; the panels show the machine's value. A value you had
   chosen is carried over once, the first time the new version starts. The
   CLI and lanes started over MCP still follow `$WORKTREES_CODEX_PERMISSIONS`,
-  `$WORKTREES_PI_PROJECT_TRUST` and your config, as before.
+  `$WORKTREES_PI_PROJECT_TRUST` and your config, as before. If you never
+  chose a value in the app, lanes the app starts now follow those too, rather
+  than the default the window used to push: check `codex_permissions` in
+  your config if it says `full`.
 - **Reloading the window no longer briefly turns terminal scrollback saving
   back on.** With "Keep each tab's output between restarts" (or "Give each tab
   its own command history") switched off, a reload sent the defaults — both on

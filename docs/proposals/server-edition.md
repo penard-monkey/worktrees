@@ -65,8 +65,16 @@ the code wins.
      `Origin` is refused. That deliberately diverges from the docs server,
      which allows a missing `Origin` for a same-origin document GET. No CORS
      header, ever.
-   - The first frame must be `{"auth": "<token>"}` within a few seconds. The
-     token is 256 bits, rotated every launch, and never in a URL.
+   - The client and the server each prove they hold the token, and the token
+     itself never crosses the wire: `hello` (client nonce), `challenge`
+     (server nonce), `auth` (the client's HMAC-SHA256 over both), then
+     `{ok, version, proof}` (the server's HMAC, under a different label). The
+     client sends nothing else until the server's proof verifies, and the whole
+     exchange must finish within a few seconds. The token is 256 bits, rotated
+     every launch, and never in a URL. *(2026-10-19: this replaced a first
+     frame of `{"auth": "<token>"}`. The OWASP review of `serve` as built
+     showed that a process holding the port after `serve` died received the
+     live token that way. That was finding H1.)*
    - `serve` writes `serve.json` (`{port, token, pid, version}`) into the app's
      config dir, mode `0600`, under the registry's lock-and-rename discipline.
    - The auth reply carries the server's version, and a client refuses a
@@ -79,15 +87,64 @@ the code wins.
    closes the door on a native, non-browser client until Phase 2 gives it a
    credential. And whether the loopback listener may ever enroll a device is
    not decided.
+7. **Codex permissions and pi trust are host policy, and only the engine reads
+   them** (2026-10-19). They live on the host in `host-policy.json` and change
+   only when someone clicks them in Settings. A client loading never sets them
+   (OWASP review finding M2; Appendix B). The CLI and lanes created over MCP
+   keep following the environment variables and `config.toml`, so an agent's
+   lanes do not inherit a widening someone clicked in the app. When the host
+   holds no app setting, the engine follows the same environment and config
+   order the CLI always has. For someone whose config says `full`, that
+   widens app-launched lanes compared with the old default push. Accepted:
+   it is the documented order.
 
 ## Queued, not yet in a phase
 
 - **Process-global statics** under one engine per host: ruled in Appendix B.
-- **R3 has no phase.** §III.9 assigns every other OWASP item. The
-  argument-injection invariant matters as soon as any client that is not the
-  frontend's own dialogs reaches the git call sites, which a loopback client
-  already does, so it belongs no later than Phase 2's remote bind.
-- **The last client to load sets Codex permissions and pi trust:** Appendix B; fix in flight: `fix/host-policy`.
+- **R3, closed in Phase 0** (2026-10-19, `fix/argv-positionals`, OWASP
+  review finding M3). The invariant: a value a client sent is never read as a
+  flag, by our parsers or by anything they spawn.
+  1. `worktrees-api` reaches a core `cmd_*` only through `argv::Argv::call`.
+     Its own flags are `&'static str`, a flag's value is glued on as one
+     element (`--x=<v>`), and every client positional goes after `--`. A unit
+     test fails on any other reference to a `cmd_*` in the crate.
+  2. Every core parser a client can reach honours `--`
+     (`worktrees_core::argv::split_options`).
+  3. Every subprocess argument derived from a client value is one of:
+     - after a `--`;
+     - `=`-anchored or prefixed, so it cannot begin with `-`;
+     - the value of an option that consumes it whole.
+
+     Each is also validated at the boundary:
+     - a branch with `branch_arg`: git's `check-ref-format --branch` rule,
+       pinned to git by an oracle test, and applied after core strips
+       `origin/`;
+     - a base, slug or name with `safe_arg`: no leading `-`, no control
+       characters, no `..`.
+
+     The MCP server uses the same validators.
+
+  Re-check when a command gains a string parameter, when a core function gains
+  a subprocess call carrying a client value, or when a parser learns `--`. Core
+  was safe only by accident while its parsers refused every `-`-led positional.
+  Teaching them `--` alone would have let a base of
+  `--upload-pack=<cmd>` reach a bare `git fetch` (measured), which is why
+  core's git calls now carry their own `--` too.
+- **The last client to load set Codex permissions and pi trust:** fixed in
+  Phase 0, recorded as decision 7 and in Appendix B (`fix/host-policy`).
+- **Outside R3, for Phase 2's per-object scopes.** Each item below is reachable
+  only by an authenticated client, and an authenticated client can already
+  type into a shell, so none of them escalates today. Each one stops being
+  equivalent to shell access once R1 scopes exist:
+  - `write_file` can overwrite `<project>/.git/config`, and `core.fsmonitor`
+    runs on the next git spawn;
+  - `save_profile` stores `mcp_servers`/`hooks` that run at the next launch;
+  - `term_open.session` reaches `attach-session -t` unanchored;
+  - the rsync destination in `sync.rs` is checked only for being non-empty;
+  - a few containment gaps (`create_initial_commit("")`,
+    `resolve_doc_paths.root`, a `..` slug in `shell_open`/`list_branches`).
+
+  Found by the R3 lane; the list is in its report.
 
 ## Part III — the server edition (the plan as written, 2026-10-15)
 
