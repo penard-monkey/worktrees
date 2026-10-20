@@ -24,6 +24,19 @@ this repo's settings in `.claude/close-out.md`).
   place, trust modal, opener, dots, send, resume, Settings → Kimi, the meter.
   Run it by hand in `app/scripts/sandbox.sh --app`. See
   docs/sessions/2026-10-19-kimi-harness/.
+- **Copying an MCP server to Codex puts its literal env values on argv.**
+  `mcpmigrate.rs:180` turns each literal `env` entry of a Claude user-scope
+  stdio server (status `CopyLiteralEnv`, usually an API key) into
+  `codex mcp add … --env KEY=VALUE`, which `apply()` runs via `codexmcp::run`
+  (`:389`), so the value is in `ps` for that call's life. The module warns about
+  it, and codex's CLI has no stdin or file form for `--env`. The way around it
+  is to write codex's config directly instead of going through the CLI. That is
+  not done here because worktrees never writes `~/.codex` itself (codex's own
+  state, the same rule as `~/.claude.json`), so it needs a decision first: an
+  upstream stdin form, `--env` by NAME with the value inherited from our
+  environment if codex supports that, or an explicit exception. The http branch
+  is clean, since it passes only the variable's NAME (`--bearer-token-env-var`).
+  _From: 2026-10-20, claude-token-argv (#520 review)_
 - **A kimi or Codex launch can wait ~14s behind the usage meter.** Both
   readers (`kimi_usage::read_cached`, `codex_usage::read_cached`) hold their
   cache lock across the probe, by design, so concurrent callers share one

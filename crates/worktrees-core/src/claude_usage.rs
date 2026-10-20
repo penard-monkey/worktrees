@@ -527,6 +527,9 @@ mod tests {
         for k in ["http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"] {
             cmd.env_remove(k);
         }
+        // Order is load-bearing: `accept` above has no timeout, so if curl cannot
+        // run, THIS expect is what fails the test (leaking the blocked server
+        // thread, which is harmless in a test) — never a join that waits forever.
         let out = crate::proc::run_deadline_stdin(cmd, input, 15).expect("curl runs");
         assert!(out.status.success(), "curl failed: {}", String::from_utf8_lossy(&out.stderr));
         let req = server.join().unwrap();

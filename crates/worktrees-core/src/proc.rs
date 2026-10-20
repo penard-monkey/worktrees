@@ -37,7 +37,10 @@ pub fn run_deadline(
 /// The write happens on its own thread and stdin is closed after it, so a child
 /// that reads to EOF sees one, and a child that never reads cannot wedge us on a
 /// full pipe: the writer is never joined, and dies with an EPIPE once the child
-/// is gone (Rust ignores SIGPIPE).
+/// is gone (Rust ignores SIGPIPE). "Gone" means every holder of the pipe's read
+/// end: a child that forks a grandchild inheriting its stdin keeps the writer
+/// blocked until that grandchild exits too — the stdin side of the DIRECT-child
+/// warning on [`run_deadline`]. Harmless for curl, which forks nothing.
 pub fn run_deadline_stdin(
     cmd: std::process::Command,
     input: Vec<u8>,
