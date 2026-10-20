@@ -164,6 +164,25 @@ wt open lane1 --ai kimi --no-attach --no-spare   # after a close
 - [ ] `sessions_missed` is 0 for every place (`doctor --kimi --json`): kimi's workspace-dir naming still matches `kimi::slug`.
 - [x] `worktrees doctor --kimi` lists the aliases from kimi's config with kimi's default marked, the trust posture, the MCP state and the last opener line — and nothing else from that config file.
 
+## 9b. Plan usage (`kimi_usage`)
+
+Re-measure on every kimi upgrade — the route and its answer are kimi's, not a
+published API.
+
+```sh
+worktrees doctor --kimi            # usage lines: 5h / month / code
+lsof -nP -iTCP -sTCP:LISTEN | grep kimi-code   # during a read only; nothing after
+ls ~/.kimi-code/server/instances/  # empty again after a read
+```
+
+- [x] `kimi web --no-open --host 127.0.0.1 --port 0` is accepted (2.2.0) and binds `127.0.0.1` only ("Network: off"), printing its port in the `Local:` line. worktrees passes `--host 127.0.0.1` and still refuses a `Local:` host other than loopback (`unexpected_host`) or a `Network:` line that is not `off` (`not_loopback`), without asking it.
+- [x] Only the 5h and 7d windows can hold a launch; the month windows are on the meter only (a month at 80% would hold kimi for weeks). kimi reports only `usedRatio`, so the 80% line is worktrees', and the refusal says so.
+- [x] `GET /api/v1/oauth/usage` with the printed bearer answers `{kind: "ok", quota: {usages: {limit5h, monthTotal, monthCode…}}}` (`limit7d` absent on this plan). `doctor --kimi` showed the three windows in 2.7s.
+- [x] After a read no `kimi-code` process listens and `server/instances/` is empty (SIGTERM, then SIGKILL after 2s, then a reap; a SIGKILL'd record is pruned by kimi's next start). Unit tests prove the same for a timed-out probe against a fake kimi.
+- [x] The bearer is the persistent one in `~/.kimi-code/server.token`, shared with any `kimi web` you run. It never appears in `doctor --kimi --json` (checked), in app.log or in an error.
+- [x] A second `kimi web` (yours) runs beside ours: there is no single-instance lock, and yours keeps its port.
+- [ ] In the app: the meter shows **Kimi** with its 5h window; hovering lists month and code; Settings → Usage → *Kimi plan usage* off stops the reads.
+
 ## 10. The app, end to end (by hand)
 
 Run with `app/scripts/sandbox.sh --app` (isolated identifier and tmux prefix).
@@ -199,4 +218,4 @@ Drive it yourself; never script input into it.
 | Security | trust asks by default; allowance per repo; protect-ours over it; `kimi_mcp` and `[trust] kimi` are user-only | unit + bats + §7 |
 | Frontend | `harness.ts`, row mark, dialog + trust note, model picker, Settings → Kimi, the `kimi-mcp` offer, mock place `ledger-sync` | harness-check, offers-check, mock harness (Playwright: panel, setup, offer count); §10 open |
 | Wheel | inline, no alt screen, no mouse mode (measured) | §10 open |
-| Usage | none yet; the `kimi web` route is PR3 | — |
+| Usage | `kimi_usage`: kimi's own `kimi web`, one request, ended; the meter and the launch gate | unit (fake kimi: success, timeout, LAN, 401) + bats (gate) + §9b |

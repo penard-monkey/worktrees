@@ -64,7 +64,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   connects or disconnects the Worktrees tools (with or without create and
   close), lists kimi's models and picks the one to preselect, and allows or
   revokes repos whose lanes start trusted. Until the tools are connected,
-  the suggestions button offers it once.
+  the suggestions button offers it once. Kimi's plan usage joins the meter
+  beside Claude's and Codex's — its 5-hour and monthly windows, read through
+  kimi itself (its own local `kimi web`, started for one request at most every
+  two minutes and ended again; worktrees never reads kimi's sign-in) — and a
+  nearly spent 5-hour (or 7-day) kimi window holds a kimi launch the way it
+  does for Claude and Codex (`--force` / Launch anyway); the monthly windows
+  are shown, never used to hold a launch. `worktrees doctor --kimi` shows the windows
+  too. Settings → Usage can turn it off.
 
 ### Fixed
 - **"Write .worktrees.toml" in Project settings now writes the file.** In a

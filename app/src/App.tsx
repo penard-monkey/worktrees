@@ -1,4 +1,4 @@
-import { adaptClaude, adaptCodex, checking, compactUsage, detailMessage, expired, stateLabel, stripLimits, summaryLimit, viewUsage, type ClaudeUsage, type CodexUsage, type PlanUsage } from "./planUsage";
+import { adaptClaude, adaptCodex, adaptKimi, checking, compactUsage, detailMessage, expired, stateLabel, stripLimits, summaryLimit, viewUsage, type ClaudeUsage, type CodexUsage, type KimiUsage, type PlanUsage } from "./planUsage";
 import { HARNESSES, HARNESS_LABEL, NEEDS_MODEL, type Harness } from "./harness";
 import { ModelPicker, defaultModel, modelOk, useAgentModels, type PiStatus } from "./ModelPicker";
 import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ComponentType } from "react";
@@ -108,7 +108,9 @@ function useKimiStatus(repo: string, on: boolean): KimiStatus | null {
   useEffect(() => {
     if (!on) return;
     let alive = true;
-    invoke<KimiStatus>("kimi_status", { repo }).then((v) => { if (alive) setSt(v); }).catch(() => {});
+    // No note is the fallback, but the failure still reaches app.log.
+    invoke<KimiStatus>("kimi_status", { repo }).then((v) => { if (alive) setSt(v); })
+      .catch((e) => { invoke("log_event", { level: "warn", msg: `kimi_status ${repo}: ${String(e)}` }).catch(() => {}); });
     return () => { alive = false; };
   }, [repo, on]);
   return on ? st : null;
@@ -120,7 +122,9 @@ function usePiStatus(repo: string, on: boolean): PiStatus | null {
   useEffect(() => {
     if (!on) return;
     let alive = true;
-    invoke<PiStatus>("pi_status", { repo }).then((v) => { if (alive) setSt(v); }).catch(() => {});
+    // No note is the fallback, but the failure still reaches app.log.
+    invoke<PiStatus>("pi_status", { repo }).then((v) => { if (alive) setSt(v); })
+      .catch((e) => { invoke("log_event", { level: "warn", msg: `pi_status ${repo}: ${String(e)}` }).catch(() => {}); });
     return () => { alive = false; };
   }, [repo, on]);
   return on ? st : null;
@@ -2520,6 +2524,7 @@ const USAGE_HOVER_MS = 140;
 const USAGE_READ: Partial<Record<Harness, () => Promise<PlanUsage>>> = {
   claude: () => invoke<ClaudeUsage>("claude_usage").then(adaptClaude),
   codex: () => invoke<CodexUsage>("codex_usage").then(adaptCodex),
+  kimi: () => invoke<KimiUsage>("kimi_usage").then(adaptKimi),
 };
 
 /** Provider reads settle independently. Hidden windows do not fetch, and late
@@ -2554,19 +2559,20 @@ function useProviderUsage(provider: Harness, enabled: boolean, pageVisible: bool
   return info;
 }
 
-function useUsage(enabled: boolean, claude: boolean, codex: boolean, pageVisible: boolean, onError: (e: unknown) => void) {
+function useUsage(enabled: boolean, claude: boolean, codex: boolean, kimi: boolean, pageVisible: boolean, onError: (e: unknown) => void) {
   const c = useProviderUsage("claude", enabled && claude, pageVisible, onError);
   const x = useProviderUsage("codex", enabled && codex, pageVisible, onError);
+  const k = useProviderUsage("kimi", enabled && kimi, pageVisible, onError);
   const [nowSec, setNowSec] = useState(() => Math.floor(Date.now() / 1000));
   useEffect(() => {
-    if (!enabled || (!claude && !codex) || !pageVisible) return;
+    if (!enabled || (!claude && !codex && !kimi) || !pageVisible) return;
     const tick = () => setNowSec(Math.floor(Date.now() / 1000));
     tick();
     const timer = setInterval(tick, USAGE_TICK_MS);
     window.addEventListener("focus", tick);
     return () => { clearInterval(timer); window.removeEventListener("focus", tick); };
-  }, [enabled, claude, codex, pageVisible]);
-  const info = enabled ? [...(claude ? [c] : []), ...(codex ? [x] : [])].map(i => viewUsage(i, nowSec)) : [];
+  }, [enabled, claude, codex, kimi, pageVisible]);
+  const info = enabled ? [...(claude ? [c] : []), ...(codex ? [x] : []), ...(kimi ? [k] : [])].map(i => viewUsage(i, nowSec)) : [];
   return { info: info.length ? info : null, nowSec };
 }
 
@@ -4056,7 +4062,7 @@ function App() {
   // than inside the meter because the placement setting decides where the meter
   // MOUNTS, and a poller that moved with it would refetch on every change of
   // mind — and because "off" has to reach the effect, not just the render.
-  const usage = useUsage(settingsReady && settings.usage_place !== "off", settings.usage_claude, settings.usage_codex, pageVisible, fail);
+  const usage = useUsage(settingsReady && settings.usage_place !== "off", settings.usage_claude, settings.usage_codex, settings.usage_kimi, pageVisible, fail);
   // Claude's own service status. Polled independently of the usage endpoint —
   // they fail for different reasons, and a machine with no Claude Code
   // credentials (no bars at all) still wants to be told the API is down.
