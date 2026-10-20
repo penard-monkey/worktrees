@@ -303,6 +303,41 @@ mod tests {
     }
 
     #[test]
+    fn every_pane_is_one_the_opener_may_open() {
+        // `opener:default` scopes `open_url` to http(s), mailto and tel, so a
+        // pane the capability file does not name is a Settings button that
+        // rejects with `ForbiddenUrl` — in the real app only, since the mock's
+        // `openUrl` has no scope. The plugin matches each `url` as a glob; the
+        // entries here are all `<prefix>*`, and a fancier one should be read by
+        // hand rather than guessed at.
+        let caps: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        let prefixes: Vec<&str> = caps["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|p| p["identifier"] == "opener:allow-open-url")
+            .flat_map(|p| p["allow"].as_array().into_iter().flatten())
+            .filter_map(|e| e["url"].as_str())
+            .map(|u| {
+                let pre = u.strip_suffix('*').unwrap_or_else(|| panic!("not a <prefix>* glob: {u}"));
+                assert!(!pre.contains(['*', '?', '[']), "not a <prefix>* glob: {u}");
+                pre
+            })
+            .collect();
+        for a in [
+            Area::Desktop, Area::Documents, Area::Downloads, Area::ICloud,
+            Area::Removable, Area::Network, Area::AppData, Area::Other,
+        ] {
+            assert!(
+                prefixes.iter().any(|pre| a.pane().starts_with(pre)),
+                "{a:?}: capabilities/default.json does not let the opener open {}",
+                a.pane()
+            );
+        }
+    }
+
+    #[test]
     fn a_readable_directory_is_never_a_denial() {
         let d = std::env::temp_dir();
         assert!(denial_at(&d, &home(), "net.example.app", true).is_none());
