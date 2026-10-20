@@ -52,18 +52,28 @@ jobs:
           name: worktrees-${{ matrix.target }}
           path: dist/*
 
-  # macOS desktop-app bundles. Unsigned — install.sh strips the quarantine attr
-  # on an explicit, checksum-verified install; local `make install-app` needs
-  # neither. Signing/notarization is the later distribution tier (task plan).
-  # Each bundle carries the CLI for its own arch as a private sidecar,
-  # Contents/MacOS/worktrees — the app's to use, never put on PATH by us.
+  # Desktop-app bundles: macOS (.app → updater .tar.gz) and Linux (AppImage +
+  # .deb), each on a runner of its own arch except the x86_64 Mac, which is
+  # cross-built on arm64 and never executed. Linux is never cross-built: a
+  # WebKitGTK app links the distro's GTK stack, so each Linux arch is built on
+  # its own runner (ubuntu-24.04-arm is a GitHub-hosted runner, free for public
+  # repositories). Apple-unsigned — install.sh strips the quarantine attr on an
+  # explicit, checksum-verified install; local `make install-app` needs neither.
+  # Signing/notarization is the later distribution tier (task plan).
+  # Each bundle carries the CLI for its own arch as a private sidecar — macOS
+  # Contents/MacOS/worktrees, Linux usr/lib/worktrees/worktrees — the app's to
+  # use, never put on PATH by us. tmux and git are not bundled anywhere: the
+  # .deb Depends on the distro's, and the AppImage, like the .app, uses the
+  # system's.
   app-bundle:
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { os: macos-latest, target: aarch64-apple-darwin }
-          - { os: macos-latest, target: x86_64-apple-darwin }
+          - { os: macos-latest,     target: aarch64-apple-darwin }
+          - { os: macos-latest,     target: x86_64-apple-darwin }
+          - { os: ubuntu-latest,    target: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -72,6 +82,17 @@ jobs:
           tag="${GITHUB_REF_NAME#v}"
           grep -q "^version = \"$tag\"$" Cargo.toml \
             || { echo "tag v$tag != workspace version in Cargo.toml"; exit 1; }
+      # CI's `app` job installs the first line; the rest is bundling: patchelf
+      # and xdg-utils for the AppImage (tauri copies xdg-open into it, and
+      # aborts without one — measured on a bare ubuntu:24.04), squashfs-tools
+      # and binutils so sidecar.sh can look inside an AppImage without running it.
+      - name: webkit + gtk + bundling deps (linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev \
+            patchelf xdg-utils squashfs-tools binutils file
       - uses: pnpm/action-setup@v6
         with: { package_json_file: app/package.json }
       - uses: actions/setup-node@v7
@@ -82,7 +103,8 @@ jobs:
       # ── the documentation viewer ──────────────────────────────────────────
       #
       # The browser page. It ships INSIDE the bundle (tauri.conf.json bundles
-      # `viewer/*` into Contents/Resources/) and is served by the app's own
+      # `viewer/*` as resources: Contents/Resources/ on macOS,
+      # usr/lib/worktrees/ in the AppImage and .deb) and is served by the app's own
       # loopback server at `GET /<token>/viewer.js`. Nothing executes it: it is
       # a file the user's browser fetches.
       #
@@ -154,77 +176,145 @@ jobs:
       # from the `build` job — so it is this commit by construction, and so the
       # path that makes it is the one `make install-app` runs on every local
       # install rather than one whose first exercise is a release.
-      # `--target` on BOTH this and the tauri build: the overlay makes
-      # tauri-build copy the staged file onto target/<t>/release/worktrees,
-      # which therefore has to be this very build (app/scripts/sidecar.sh).
+      # tauri.conf.json's per-format `files` mappings carry it from
+      # app/src-tauri/binaries/worktrees into every bundle; the bundler is the
+      # only thing that reads them, and it FAILS with nothing staged ("Failed to
+      # copy custom files"), so this step cannot be skipped by accident.
       - name: stage the CLI sidecar for this target
         run: |
           set -euo pipefail
           rustup target add "${{ matrix.target }}"
           app/scripts/sidecar.sh stage "${{ matrix.target }}"
 
-      # The overlay is what adds `externalBin`; it is not in tauri.conf.json
-      # because tauri-build would then demand the binary for every `cargo
-      # check`. Without it this step still succeeds — with no sidecar — which
-      # is why the step after it exists.
+      # macOS keeps `targets: "all"`: the .app the updater tarball is made from,
+      # plus the dmg. Linux asks for exactly what ships — the AppImage, which is
+      # its own updater artifact, and the .deb — because `all` adds an .rpm
+      # nothing tests. createUpdaterArtifacts signs both Linux files.
       - name: build the app bundle (signed updater artifacts)
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
           pnpm -C app install --frozen-lockfile
           pnpm -C app tauri build --target "${{ matrix.target }}" \
-            --config "$GITHUB_WORKSPACE/app/src-tauri/tauri.bundle.conf.json"
+            ${{ runner.os == 'Linux' && '--bundles deb,appimage' || '' }}
 
-      # Same rule as the viewer below: assert the sidecar is IN what ships. The
-      # .app directory is never uploaded — the updater tarball is, and both
-      # install.sh and the in-app updater fetch it — so the check runs twice:
-      # on the bundle (did the bundler take it?) and on that tarball unpacked
-      # (did it survive tar, executable bit included?). The check is: a regular
-      # executable file, this target's arch and only that (`lipo`), version ==
-      # the tag. `--version` runs only on the native one; the x86_64 bundle is
+      # Same rule as the viewer below: assert the sidecar is IN what ships.
+      # macOS: the .app directory is never uploaded — the updater tarball is,
+      # and both install.sh and the in-app updater fetch it — so the check runs
+      # twice: on the bundle (did the bundler take it?) and on that tarball
+      # unpacked (did it survive tar, executable bit included?). Linux: the
+      # AppImage and the .deb ARE what ships, and the check unpacks each without
+      # running anything in it. The check is: a regular executable file, this
+      # target's arch and only that (`lipo` / the ELF header), the same as the
+      # GUI binary beside it, version == the tag — and on Linux, no worktrees in
+      # usr/bin. `--version` runs only on a native one; the x86_64 Mac bundle is
       # cross-built on an arm64 runner and is never executed — its version is
-      # read as data from the marker the CLI embeds. Never Contents/MacOS/app:
-      # that is the GUI and it launches instead of answering.
+      # read as data from the marker the CLI embeds. Never the GUI binary: on
+      # macOS it launches instead of answering.
       - name: assert the CLI sidecar is inside the shipped bundle
         run: |
           set -euo pipefail
           t="${{ matrix.target }}"
-          bundle="target/$t/release/bundle/macos"
-          app/scripts/sidecar.sh check "$bundle/worktrees.app" "$t" "${GITHUB_REF_NAME#v}"
-          shipped="$RUNNER_TEMP/shipped-$t"
-          rm -rf "$shipped" && mkdir -p "$shipped"
-          tar -xzf "$bundle/worktrees.app.tar.gz" -C "$shipped"
-          app/scripts/sidecar.sh check "$shipped/worktrees.app" "$t" "${GITHUB_REF_NAME#v}"
+          v="${GITHUB_REF_NAME#v}"
+          b="target/$t/release/bundle"
+          if [ "$RUNNER_OS" = macOS ]; then
+            app/scripts/sidecar.sh check "$b/macos/worktrees.app" "$t" "$v"
+            shipped="$RUNNER_TEMP/shipped-$t"
+            rm -rf "$shipped" && mkdir -p "$shipped"
+            tar -xzf "$b/macos/worktrees.app.tar.gz" -C "$shipped"
+            app/scripts/sidecar.sh check "$shipped/worktrees.app" "$t" "$v"
+          else
+            for pkg in "$b"/appimage/*.AppImage "$b"/deb/*.deb; do
+              app/scripts/sidecar.sh check "$pkg" "$t" "$v"
+            done
+          fi
       # Rule 10's other half: assert the bundle is IN the thing that ships, not
       # merely in the directory the bundler was pointed at. A glob that silently
       # matched nothing, a resources key lost in a merge, or a bundler that put
       # it somewhere else all look identical from outside — and all of them
       # produce a release whose Docs button opens a blank tab on every machine
-      # but ours.
+      # but ours. On Linux the AppImage and .deb are unpacked, not their
+      # staging directories.
       - name: assert the viewer bundle is inside the app bundle
         run: |
           set -euo pipefail
-          app="target/${{ matrix.target }}/release/bundle/macos/worktrees.app"
-          v="$app/Contents/Resources/viewer/viewer.js"
-          [ -f "$v" ] || { echo "::error::no bundle at Contents/Resources/viewer/viewer.js"; ls -R "$app/Contents/Resources" || true; exit 1; }
-          bytes=$(wc -c < "$v")
-          [ "$bytes" -gt 10000 ] || { echo "::error::the bundled viewer is $bytes bytes"; exit 1; }
-          echo "bundled viewer: $(du -h "$v" | cut -f1)"
+          b="target/${{ matrix.target }}/release/bundle"
+          viewer() {   # $1 the viewer.js to check  $2 where, as reported
+            if [ ! -f "$1" ]; then
+              echo "::error::no viewer bundle at $2"; ls -R "$(dirname "$(dirname "$1")")" || true; exit 1
+            fi
+            bytes=$(wc -c < "$1")
+            [ "$bytes" -gt 10000 ] || { echo "::error::the viewer at $2 is $bytes bytes"; exit 1; }
+            echo "bundled viewer: $2 ($(du -h "$1" | cut -f1))"
+          }
+          if [ "$RUNNER_OS" = macOS ]; then
+            viewer "$b/macos/worktrees.app/Contents/Resources/viewer/viewer.js" Contents/Resources/viewer/viewer.js
+          else
+            for pkg in "$b"/appimage/*.AppImage "$b"/deb/*.deb; do
+              root="$RUNNER_TEMP/viewer-${pkg##*/}"
+              rm -rf "$root"
+              app/scripts/sidecar.sh unpack "$pkg" "$root"
+              viewer "$root/usr/lib/worktrees/viewer/viewer.js" "usr/lib/worktrees/viewer/viewer.js in ${pkg##*/}"
+            done
+          fi
+      # tmux and git are the SYSTEM's on every platform: a bundled tmux talking
+      # to the user's own tmux server (or the reverse) is client/server version
+      # skew, and the engine shells out to both on purpose. The .deb therefore
+      # declares them, so apt installs the distro's, and the AppImage must not
+      # have picked either up.
+      - name: assert tmux and git come from the distro (linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          b="target/${{ matrix.target }}/release/bundle"
+          for deb in "$b"/deb/*.deb; do
+            deps="$(dpkg-deb -f "$deb" Depends)"
+            echo "${deb##*/} Depends: $deps"
+            for d in tmux git; do
+              case ", $deps," in
+                *", $d,"*|*", $d ("*) ;;
+                *) echo "::error::${deb##*/} does not depend on $d"; exit 1 ;;
+              esac
+            done
+          done
+          for img in "$b"/appimage/*.AppImage; do
+            root="$RUNNER_TEMP/nobundled-${img##*/}"
+            rm -rf "$root"
+            app/scripts/sidecar.sh unpack "$img" "$root"
+            found="$(find "$root" -type f \( -name tmux -o -name git \))"
+            [ -z "$found" ] || { echo "::error::${img##*/} bundles: $found"; exit 1; }
+            echo "${img##*/}: no tmux, no git inside"
+          done
 
       - name: package + checksum
         run: |
+          set -euo pipefail
+          t="${{ matrix.target }}"
+          b="target/$t/release/bundle"
           mkdir -p dist
-          asset="worktrees-app-${{ matrix.target }}.app.tar.gz"
-          bundle="target/${{ matrix.target }}/release/bundle/macos"
-          # createUpdaterArtifacts already produced the tar.gz + minisign .sig —
-          # one artifact serves both install.sh and the in-app updater. The
-          # .sig is over the whole tarball, so it covers the sidecar with the
-          # rest of the bundle; nothing about signing changes for it.
-          cp "$bundle/worktrees.app.tar.gz" "dist/$asset"
-          cp "$bundle/worktrees.app.tar.gz.sig" "dist/$asset.sig"
-          cd dist
-          shasum -a 256 "$asset" > "$asset.sha256"
-          cat "$asset.sha256"
+          if [ "$RUNNER_OS" = macOS ]; then
+            # createUpdaterArtifacts already produced the tar.gz + minisign
+            # .sig — one artifact serves both install.sh and the in-app
+            # updater. The .sig is over the whole tarball, so it covers the
+            # sidecar with the rest of the bundle; nothing about signing
+            # changes for it.
+            asset="worktrees-app-$t.app.tar.gz"
+            cp "$b/macos/worktrees.app.tar.gz" "dist/$asset"
+            cp "$b/macos/worktrees.app.tar.gz.sig" "dist/$asset.sig"
+            (cd dist && shasum -a 256 "$asset" > "$asset.sha256")
+          else
+            # No tarball on Linux: the AppImage is signed as it is, and so is
+            # the .deb. Both are updater artifacts — an app installed from a
+            # .deb updates with `pkexec dpkg -i`, an AppImage by rewriting
+            # itself — and each .sig is over the whole file, sidecar included.
+            for pkg in "$b"/appimage/*.AppImage "$b"/deb/*.deb; do
+              asset="worktrees-app-$t.${pkg##*.}"
+              cp "$pkg" "dist/$asset"
+              cp "$pkg.sig" "dist/$asset.sig"
+              (cd dist && sha256sum "$asset" > "$asset.sha256")
+            done
+          fi
+          cat dist/*.sha256
       - uses: actions/upload-artifact@v7
         with:
           name: worktrees-app-${{ matrix.target }}
@@ -243,18 +333,36 @@ jobs:
           find art -type f -name 'worktrees-*' ! -name '*.sha256' -exec cp {} dist/ \;
           cat art/*/*.sha256 > dist/checksums.txt
           echo "── checksums ──"; cat dist/checksums.txt
+      # The updater looks up `<os>-<arch>-<installer>` first and `<os>-<arch>`
+      # second (tauri-plugin-updater 2.10 `get_urls`), so the plain Linux keys
+      # are the AppImage and the `-deb` keys the .deb: an app installed from a
+      # .deb must never be handed an AppImage, which its installer refuses
+      # (InvalidUpdaterFormat). Every signature is read into a variable first,
+      # so a missing .sig fails here instead of shipping an empty signature.
       - name: updater manifest (latest.json — the in-app updater's endpoint)
         run: |
+          set -euo pipefail
           base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
-          arm="worktrees-app-aarch64-apple-darwin.app.tar.gz"
-          x64="worktrees-app-x86_64-apple-darwin.app.tar.gz"
+          sig() { cat "art/worktrees-app-$1/worktrees-app-$1.$2.sig"; }
+          mac_arm="$(sig aarch64-apple-darwin app.tar.gz)"
+          mac_x64="$(sig x86_64-apple-darwin app.tar.gz)"
+          lin_x64="$(sig x86_64-unknown-linux-gnu AppImage)"
+          lin_arm="$(sig aarch64-unknown-linux-gnu AppImage)"
+          deb_x64="$(sig x86_64-unknown-linux-gnu deb)"
+          deb_arm="$(sig aarch64-unknown-linux-gnu deb)"
           jq -n \
-            --arg version "${GITHUB_REF_NAME#v}" \
-            --arg armurl "$base/$arm" --arg armsig "$(cat "art/worktrees-app-aarch64-apple-darwin/$arm.sig")" \
-            --arg x64url "$base/$x64" --arg x64sig "$(cat "art/worktrees-app-x86_64-apple-darwin/$x64.sig")" \
-            '{version: $version, pub_date: (now | todate), platforms: {
-               "darwin-aarch64": {url: $armurl, signature: $armsig},
-               "darwin-x86_64": {url: $x64url, signature: $x64sig}}}' > dist/latest.json
+            --arg version "${GITHUB_REF_NAME#v}" --arg base "$base" \
+            --arg mac_arm "$mac_arm" --arg mac_x64 "$mac_x64" \
+            --arg lin_x64 "$lin_x64" --arg lin_arm "$lin_arm" \
+            --arg deb_x64 "$deb_x64" --arg deb_arm "$deb_arm" \
+            'def at($t; $ext; $sig): {url: "\($base)/worktrees-app-\($t).\($ext)", signature: $sig};
+             {version: $version, pub_date: (now | todate), platforms: {
+               "darwin-aarch64":    at("aarch64-apple-darwin"; "app.tar.gz"; $mac_arm),
+               "darwin-x86_64":     at("x86_64-apple-darwin"; "app.tar.gz"; $mac_x64),
+               "linux-x86_64":      at("x86_64-unknown-linux-gnu"; "AppImage"; $lin_x64),
+               "linux-aarch64":     at("aarch64-unknown-linux-gnu"; "AppImage"; $lin_arm),
+               "linux-x86_64-deb":  at("x86_64-unknown-linux-gnu"; "deb"; $deb_x64),
+               "linux-aarch64-deb": at("aarch64-unknown-linux-gnu"; "deb"; $deb_arm)}}' > dist/latest.json
           cat dist/latest.json
       - name: changelog notes for this tag
         run: |

@@ -36,7 +36,25 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "createUpdaterArtifacts": true
+    "createUpdaterArtifacts": true,
+    "macOS": {
+      "files": {
+        "MacOS/worktrees": "binaries/worktrees"
+      }
+    },
+    "linux": {
+      "deb": {
+        "depends": ["tmux", "git"],
+        "files": {
+          "/usr/lib/worktrees/worktrees": "binaries/worktrees"
+        }
+      },
+      "appimage": {
+        "files": {
+          "/usr/lib/worktrees/worktrees": "binaries/worktrees"
+        }
+      }
+    }
   },
   "plugins": {
     "opener": {
