@@ -1,0 +1,11 @@
+{"type":"metadata","protocol_version":"1.5","created_at":1792431976182}
+{"type":"profile.bind","agentId":"main","modelAlias":"kimi-code/kimi-for-coding-highspeed","profileName":"agent","thinkingEffort":"on","time":1792431976213}
+{"type":"agent.turn.started","turnId":0,"queueItemId":"msg_01M5AMAVS4YRBHPTREPBVJH1GA","time":1792431976230,"kind":"event"}
+{"type":"turn.prompt","agentId":"main","input":[{"type":"text","text":"Read .planning/brief.md and begin."}],"origin":{"kind":"user"},"promptId":"msg_01M5AMAVS4YRBHPTREPBVJH1GA","turnId":0,"time":1792431976236}
+{"type":"llm.request","agentId":"main","kind":"loop","provider":"openai","model":"kimi-for-coding-highspeed","modelAlias":"kimi-code/kimi-for-coding-highspeed","turnStep":"0.1","time":1792431976247}
+{"type":"llm.request","agentId":"main","kind":"loop","provider":"openai","model":"kimi-for-coding-highspeed","modelAlias":"kimi-code/kimi-for-coding-highspeed","turnStep":"0.2","time":1792431978881}
+{"type":"agent.turn.ended","turnId":0,"outcome":"done","time":1792431981548,"kind":"event"}
+{"type":"turn.ended","agentId":"main","turnId":0,"reason":"completed","durationMs":5318,"time":1792431981554}
+{"type":"prompt.completed","agentId":"main","promptId":"msg_01M5AMAVS4YRBHPTREPBVJH1GA","finishedAt":"2026-10-19T17:46:21.558Z","reason":"completed","time":1792431981558}
+{"type":"config.update","agentId":"main","modelAlias":"kimi-code/kimi-for-coding","thinkingEffort":"max","time":1792461695412}
+{"type":"config.update","agentId":"main","thinkingEffort":"max","time":1792461695414}

@@ -1,0 +1,40 @@
+   wildflowers during brief summers. Snow leopards, mountain goats, and condors navigate cliffs that seem impossible.
+   Rivers born from melting glaciers feed millions of people downstream. When we protect mountain ecosystems, we
+   protect water, biodiversity, and the cultural traditions of highland communities.
+
+   There is also a stillness in mountains that modern life rarely offers. Above the tree line, with only wind and stone
+   for company, the mind slows. Distractions fall away. Many travelers seek mountains not to conquer them, but to be
+   changed by them.
+
+   In the end, mountains teach us perspective. They remind us that the highest views require the longest climbs, that
+   beauty and hardship often share the same path, and that some of the finest things in life rise quietly above the
+   ordinary.
+
+ ❯ [worktrees: message from place "probe"] reply QUEUED-OK
+
+ ● The user sent a message "[worktrees: message from place "probe"] reply QUEUED-OK". This seems to be a specific
+   instruction to reply with QUEUED-OK.
+
+ ● QUEUED-OK
+
+ ❯ Use the AskUserQuestion tool to ask me to pick red or blue. Nothing else.
+
+ ● The user wants me to use AskUserQuestion tool to ask them to pick red or blue, nothing else. I should do exactly
+   that.
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  question
+
+   Q1    Submit
+
+  ? Which color do you prefer?
+
+   → [1] Red
+         Choose the red option.
+     [2] Blue
+         Choose the blue option.
+     [3] Other
+
+   ↑↓ select  1-3 / ↵ choose  ←/→/tab switch  esc cancel
+ ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ K2.7 Code Highspeed thinking  …/repo/.worktrees/feat  feat
+                                                                                               context: 9% (20.6k/256k)

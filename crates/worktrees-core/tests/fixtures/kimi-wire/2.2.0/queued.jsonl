@@ -1,0 +1,12 @@
+{"type":"agent.turn.started","turnId":1,"queueItemId":"msg_01M5BGPDRWRDHHMJQDCWF4PRPX","time":1792461715232,"kind":"event"}
+{"type":"turn.prompt","agentId":"main","input":[{"type":"text","text":"Write 300 words about mountains. No tools."}],"origin":{"kind":"user"},"promptId":"msg_01M5BGPDRWRDHHMJQDCWF4PRPX","turnId":1,"time":1792461715234}
+{"type":"llm.request","agentId":"main","kind":"loop","provider":"openai","model":"kimi-for-coding-highspeed","modelAlias":"kimi-code/kimi-for-coding-highspeed","turnStep":"1.1","time":1792461715260}
+{"type":"agent.turn.ended","turnId":1,"outcome":"done","time":1792461728439,"kind":"event"}
+{"type":"turn.ended","agentId":"main","turnId":1,"reason":"completed","durationMs":13208,"time":1792461728442}
+{"type":"prompt.completed","agentId":"main","promptId":"msg_01M5BGPDRWRDHHMJQDCWF4PRPX","finishedAt":"2026-10-20T02:02:08.445Z","reason":"completed","time":1792461728445}
+{"type":"agent.turn.started","turnId":2,"queueItemId":"msg_01M5BGPTPQ8Q6JS4MDMM66JRP6","time":1792461728472,"kind":"event"}
+{"type":"turn.prompt","agentId":"main","input":[{"type":"text","text":"[worktrees: message from place \"probe\"] reply QUEUED-OK"}],"origin":{"kind":"user"},"promptId":"msg_01M5BGPTPQ8Q6JS4MDMM66JRP6","turnId":2,"time":1792461728475}
+{"type":"llm.request","agentId":"main","kind":"loop","provider":"openai","model":"kimi-for-coding-highspeed","modelAlias":"kimi-code/kimi-for-coding-highspeed","turnStep":"2.1","time":1792461728481}
+{"type":"agent.turn.ended","turnId":2,"outcome":"done","time":1792461731850,"kind":"event"}
+{"type":"turn.ended","agentId":"main","turnId":2,"reason":"completed","durationMs":3378,"time":1792461731852}
+{"type":"prompt.completed","agentId":"main","promptId":"msg_01M5BGPTPQ8Q6JS4MDMM66JRP6","finishedAt":"2026-10-20T02:02:11.854Z","reason":"completed","time":1792461731854}

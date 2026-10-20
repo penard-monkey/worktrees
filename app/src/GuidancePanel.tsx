@@ -50,7 +50,10 @@ function deliveryLine(h: GuidanceHarness): string {
   if (!h.installed) return "not installed";
   switch (h.state) {
     case "on":
-      return h.id === "claude" ? "gets the worktrees plugin (skill)" : h.id === "pi" ? "gets the skill and the rule" : "gets the rule";
+      return h.id === "claude" ? "gets the worktrees plugin (skill)"
+        : h.id === "pi" ? "gets the skill and the rule"
+        : h.id === "kimi" ? "gets the skill and the rule, as files in each place's .kimi-code/"
+        : "gets the rule";
     case "off":
       return "off";
     case "skipped":

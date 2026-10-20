@@ -1106,6 +1106,7 @@ const HARNESS_MARK: Record<Harness, ComponentType<{ size?: number }>> = {
   claude: Icons.ClaudeMark,
   codex: Icons.OpenAIMark,
   pi: Icons.PiMark,
+  kimi: Icons.KimiMark,
 };
 
 /** How a live agent is named on a row: the harness, and for pi the model too —
@@ -2035,9 +2036,12 @@ function NewPlaceDialog({
       invoke<McpStatus>("mcp_status", { repo: project }),
       invoke<{ codex_bin: string | null }>("codex_mcp_status"),
       invoke<PiStatus>("pi_status", { repo: project }).catch(() => null),
-    ]).then(([claude, codex, pi]) => {
+      invoke<{ kimi_bin: string | null }>("kimi_status", { repo: project }).catch(() => null),
+    ]).then(([claude, codex, pi, kimi]) => {
       if (!alive) return;
-      const next: Record<Harness, boolean> = { claude: !!claude.claude_bin, codex: !!codex.codex_bin, pi: !!pi?.preflight.pi_path };
+      const next: Record<Harness, boolean> = {
+        claude: !!claude.claude_bin, codex: !!codex.codex_bin, pi: !!pi?.preflight.pi_path, kimi: !!kimi?.kimi_bin,
+      };
       setAvailable(next);
       // A rejected create reopens with the user's exact choice, even if CLI
       // availability changed while the operation was running.

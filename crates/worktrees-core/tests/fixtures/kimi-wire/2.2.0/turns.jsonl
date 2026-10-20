@@ -1,0 +1,27 @@
+{"type":"metadata","protocol_version":"1.5","created_at":1792431686774}
+{"type":"profile.bind","agentId":"main","modelAlias":"kimi-code/kimi-for-coding-highspeed","profileName":"agent","thinkingEffort":"on","time":1792431686795}
+{"type":"agent.turn.started","turnId":0,"queueItemId":"msg_01M5AM214WSSAKCWNYXN61PARH","time":1792431686814,"kind":"event"}
+{"type":"turn.prompt","agentId":"main","input":[{"type":"text","text":"Run ls, then reply DONE."}],"origin":{"kind":"user"},"promptId":"msg_01M5AM214WSSAKCWNYXN61PARH","turnId":0,"time":1792431686820}
+{"type":"llm.request","agentId":"main","kind":"loop","provider":"openai","model":"kimi-for-coding-highspeed","modelAlias":"kimi-code/kimi-for-coding-highspeed","turnStep":"0.1","time":1792431686833}
+{"type":"interaction.request","agentId":"main","id":"approval_d9af8968-0fd2-4045-93a7-68e5514d7754","kind":"approval","toolCallId":"tool_TKTJ68SRDQkD1X4YMFCPRuyJ","time":1792431690641}
+{"type":"interaction.resolved","agentId":"main","id":"approval_d9af8968-0fd2-4045-93a7-68e5514d7754","response":{"decision":"approved"},"time":1792431729174}
+{"type":"llm.request","agentId":"main","kind":"loop","provider":"openai","model":"kimi-for-coding-highspeed","modelAlias":"kimi-code/kimi-for-coding-highspeed","turnStep":"0.2","time":1792431729190}
+{"type":"agent.turn.ended","turnId":0,"outcome":"done","time":1792431731207,"kind":"event"}
+{"type":"turn.ended","agentId":"main","turnId":0,"reason":"completed","durationMs":44395,"time":1792431731215}
+{"type":"prompt.completed","agentId":"main","promptId":"msg_01M5AM214WSSAKCWNYXN61PARH","finishedAt":"2026-10-19T17:42:11.218Z","reason":"completed","time":1792431731218}
+{"type":"agent.turn.started","turnId":1,"queueItemId":"msg_01M5AM431PVQV18PVFXEAMF3FQ","time":1792431754298,"kind":"event"}
+{"type":"turn.prompt","agentId":"main","input":[{"type":"text","text":"Count slowly from 1 to 200, one number per line."}],"origin":{"kind":"user"},"promptId":"msg_01M5AM431PVQV18PVFXEAMF3FQ","turnId":1,"time":1792431754797}
+{"type":"llm.request","agentId":"main","kind":"loop","provider":"openai","model":"kimi-for-coding-highspeed","modelAlias":"kimi-code/kimi-for-coding-highspeed","turnStep":"1.1","time":1792431754804}
+{"type":"interaction.request","agentId":"main","id":"approval_201fc3b0-bf51-4530-a3d5-42337ad9558c","kind":"approval","toolCallId":"tool_hjQrYqoV7pfvZLOUrHnbJyqD","time":1792431757271}
+{"type":"interaction.resolved","agentId":"main","id":"approval_201fc3b0-bf51-4530-a3d5-42337ad9558c","response":{"decision":"rejected"},"time":1792431758338}
+{"type":"llm.request","agentId":"main","kind":"loop","provider":"openai","model":"kimi-for-coding-highspeed","modelAlias":"kimi-code/kimi-for-coding-highspeed","turnStep":"1.2","time":1792431758342}
+{"type":"agent.turn.ended","turnId":1,"outcome":"done","time":1792431762241,"kind":"event"}
+{"type":"turn.ended","agentId":"main","turnId":1,"reason":"completed","durationMs":7447,"time":1792431762244}
+{"type":"prompt.completed","agentId":"main","promptId":"msg_01M5AM431PVQV18PVFXEAMF3FQ","finishedAt":"2026-10-19T17:42:42.245Z","reason":"completed","time":1792431762245}
+{"type":"agent.turn.started","turnId":2,"queueItemId":"msg_01M5AM4YH1697FAS80ZY3FGY5W","time":1792431782435,"kind":"event"}
+{"type":"turn.prompt","agentId":"main","input":[{"type":"text","text":"Write 600 words about rivers. No tools."}],"origin":{"kind":"user"},"promptId":"msg_01M5AM4YH1697FAS80ZY3FGY5W","turnId":2,"time":1792431782439}
+{"type":"llm.request","agentId":"main","kind":"loop","provider":"openai","model":"kimi-for-coding-highspeed","modelAlias":"kimi-code/kimi-for-coding-highspeed","turnStep":"2.1","time":1792431782444}
+{"type":"turn.cancel","agentId":"main","turnId":2,"target":"active","reason":"user_cancelled","time":1792431785460}
+{"type":"agent.turn.ended","turnId":2,"outcome":"aborted","time":1792431785461,"kind":"event"}
+{"type":"turn.ended","agentId":"main","turnId":2,"reason":"cancelled","durationMs":3025,"time":1792431785463}
+{"type":"prompt.aborted","agentId":"main","promptId":"msg_01M5AM4YH1697FAS80ZY3FGY5W","abortedAt":"2026-10-19T17:43:05.463Z","time":1792431785463}

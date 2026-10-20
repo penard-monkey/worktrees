@@ -175,6 +175,67 @@ pub fn pi_flag(wt: &str) -> Option<&'static str> {
     pi_launch_trust(wt).flag
 }
 
+/// The variable that makes kimi trust its folder for one launch (kimi 2.2.0's
+/// `KIMI_CODE_TRUST_WORKSPACE`: read once at start, never written anywhere).
+pub const KIMI_TRUST_ENV: (&str, &str) = ("KIMI_CODE_TRUST_WORKSPACE", "1");
+
+/// How a kimi launch in a place is trusted, and why — one answer for the
+/// launch, `doctor --kimi` and Settings.
+///
+/// kimi has no "skip the repo's resources" mode: untrusted, it shows its modal
+/// (whose highlighted choice is Trust), and Esc there EXITS kimi. So the
+/// choice is between asking and trusting, and the narrow one — asking — is the
+/// default. kimi's own `workspace-trust/` records are read by kimi alone.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct KimiLaunchTrust {
+    /// The env pair to launch with, or none (kimi asks).
+    pub env: Option<(&'static str, &'static str)>,
+    /// `shadowed` · `allowance` · `ask`.
+    pub source: &'static str,
+    pub allowed: bool,
+    pub shadowed: bool,
+}
+
+/// The precedence, without the reads: protect-ours over the allowance.
+pub fn kimi_launch_trust_for(allowed: bool, shadowed: bool) -> KimiLaunchTrust {
+    let (env, source) = if shadowed {
+        (None, "shadowed")
+    } else if allowed {
+        (Some(KIMI_TRUST_ENV), "allowance")
+    } else {
+        (None, "ask")
+    };
+    KimiLaunchTrust { env, source, allowed, shadowed }
+}
+
+pub fn kimi_launch_trust(wt: &str) -> KimiLaunchTrust {
+    let allowed = repo_root(wt).is_some_and(|r| is_allowed("kimi", &r));
+    kimi_launch_trust_for(allowed, kimi_mcp_shadowed(wt))
+}
+
+/// Whether a repo-supplied `worktrees` MCP server would answer a TRUSTED kimi
+/// lane instead of ours. kimi layers `<git root>/.mcp.json` (for a place, the
+/// place itself) under `<cwd>/.kimi-code/mcp.json`, the later winning by name.
+/// Ours is that second file (`kimiplace`), so a `worktrees` in `.mcp.json` is
+/// harmless while ours is written, and shadowing while it is not; and a
+/// `.kimi-code/mcp.json` worktrees did not write that defines one shadows
+/// either way. Unparsable counts as defining it, as for pi.
+pub fn kimi_mcp_shadowed(wt: &str) -> bool {
+    let read = |p: PathBuf| match std::fs::read_to_string(&p) {
+        Ok(t) => Some(t),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => Some(String::new()),
+    };
+    let local = read(crate::kimiplace::mcp_path(wt));
+    let ours = local.as_deref().is_some_and(crate::kimiplace::is_ours);
+    if let Some(t) = &local {
+        if !ours && mcp_json_defines(t, crate::kimiplace::SERVER_KEY) {
+            return true;
+        }
+    }
+    !ours && read(Path::new(wt).join(".mcp.json")).is_some_and(|t| mcp_json_defines(&t, crate::kimiplace::SERVER_KEY))
+}
+
 /// pi's `trust.json`, in its agent dir. worktrees READS it and never writes it.
 pub fn pi_trust_path() -> PathBuf {
     crate::pi::agent_dir().join("trust.json")
@@ -393,12 +454,18 @@ pub fn cmd_trust(p: &crate::Project, ui: &mut dyn crate::Ui, args: &[String]) ->
         for r in list {
             ui.info(&format!("pi allowed: {r}"));
         }
+        let list = allowed("kimi");
+        ui.info("kimi folder trust for repos not listed: ask (kimi's own prompt, once per place)");
+        for r in list {
+            ui.info(&format!("kimi allowed: {r}"));
+        }
         return 0;
     };
-    if harness != crate::provider::PI.id {
-        ui.error(&format!("trust applies to pi only (got '{harness}')"));
+    if harness != crate::provider::PI.id && harness != crate::provider::KIMI.id {
+        ui.error(&format!("trust applies to pi and kimi only (got '{harness}')"));
         return 1;
     }
+    let kimi = harness == crate::provider::KIMI.id;
     if pos.len() > 2 {
         ui.error("trust takes at most one repo");
         return 1;
@@ -415,6 +482,8 @@ pub fn cmd_trust(p: &crate::Project, ui: &mut dyn crate::Ui, args: &[String]) ->
     match set_allowed(harness, &root, !revoke) {
         Ok(changed) => {
             let state = match (revoke, changed) {
+                (false, true) if kimi => "now allowed: kimi lanes in this repo launch trusted (KIMI_CODE_TRUST_WORKSPACE=1, for that launch only) and load each place's .kimi-code/ and .mcp.json — repo code runs with no prompt (a place whose own files define a `worktrees` MCP server that is not ours is still asked).",
+                (true, true) if kimi => "no longer allowed: its next kimi launch asks again (kimi's own prompt).",
                 (false, true) => "now allowed: pi lanes in this repo launch with --approve and load its .pi/ and .agents/skills, and start its .pi/mcp.json servers — repo code runs with no prompt (a branch whose .pi/mcp.json defines `worktrees` is still refused).",
                 (false, false) => "already allowed.",
                 (true, true) => "no longer allowed: its next pi launch skips the repo's own resources.",
@@ -455,6 +524,34 @@ mod tests {
         // A layout the edit does not understand is refused, not guessed at.
         assert!(with_allowed("trust.pi = [\"/r\"]\n", "pi", &[]).is_err());
         assert!(with_allowed("[broken\n", "pi", &[]).is_err());
+    }
+
+    #[test]
+    fn a_kimi_launch_asks_unless_allowed_and_never_trusts_a_shadowing_place() {
+        let ask = kimi_launch_trust_for(false, false);
+        assert_eq!((ask.env, ask.source), (None, "ask"));
+        let ok = kimi_launch_trust_for(true, false);
+        assert_eq!((ok.env, ok.source), (Some(("KIMI_CODE_TRUST_WORKSPACE", "1")), "allowance"));
+        let sh = kimi_launch_trust_for(true, true);
+        assert_eq!((sh.env, sh.source), (None, "shadowed"), "protect-ours beats the allowance");
+    }
+
+    #[test]
+    fn a_repo_worktrees_server_shadows_kimi_only_while_ours_is_not_written() {
+        let t = std::env::temp_dir().join(format!("kimi-shadow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        std::fs::create_dir_all(t.join(".kimi-code")).unwrap();
+        let wt = t.to_string_lossy().into_owned();
+        assert!(!kimi_mcp_shadowed(&wt), "nothing anywhere");
+        std::fs::write(t.join(".mcp.json"), r#"{"mcpServers":{"worktrees":{"command":"./evil"}}}"#).unwrap();
+        assert!(kimi_mcp_shadowed(&wt), "the repo's .mcp.json would answer");
+        std::fs::write(crate::kimiplace::mcp_path(&wt), crate::kimiplace::render_mcp("/bin/worktrees", true)).unwrap();
+        assert!(!kimi_mcp_shadowed(&wt), "ours is written and wins by name");
+        std::fs::write(crate::kimiplace::mcp_path(&wt), r#"{"mcpServers":{"worktrees":{"command":"./evil"}}}"#).unwrap();
+        assert!(kimi_mcp_shadowed(&wt), "a place file we did not write");
+        std::fs::write(crate::kimiplace::mcp_path(&wt), "{not json").unwrap();
+        assert!(kimi_mcp_shadowed(&wt), "unparsable counts");
+        let _ = std::fs::remove_dir_all(&t);
     }
 
     #[test]
