@@ -7,6 +7,7 @@
 //! the documentation server's "nothing says otherwise" discipline, applied
 //! one notch harder because there is no page here that a human is waiting on.
 
+use hmac::{KeyInit, Mac};
 use worktrees_api::docserver;
 
 /// The origins every planned client is one of: the desktop app's WebView on
@@ -15,9 +16,10 @@ use worktrees_api::docserver;
 /// FLAG and never a config key, so a dev entry cannot ship in a file.
 pub const BUILTIN_ORIGINS: &[&str] = &["tauri://localhost", "http://tauri.localhost"];
 
-/// How long a connection has to produce its auth frame once the upgrade is
-/// done. A client that has opened a socket and says nothing holds a task and
-/// a file descriptor; this is what ends it.
+/// How long the WHOLE handshake may take, from the upgrade to the server's
+/// `ok` — not each frame: two quick steps that add up to more than this are
+/// refused like a silent client is. A client that has opened a socket and
+/// says nothing holds a task and a file descriptor; this is what ends it.
 pub const AUTH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Is this `Host` the loopback interface, on OUR port? Exactly the documentation
@@ -66,7 +68,7 @@ pub struct Handshake<'a> {
 
 /// Is this a WebSocket upgrade for the one endpoint there is? RFC 6455 §4.2.1,
 /// plus two choices of our own: the path is exactly `/` with no query (the
-/// token travels in the first frame, never in the URL, and refusing a query
+/// token never travels at all — see handshake v1 below — and refusing a query
 /// outright means nothing a client might put there is ever parsed), and the
 /// `Connection` and `Upgrade` tokens are matched as the comma-lists they are
 /// (`Connection: keep-alive, Upgrade` is what some browsers send).
@@ -83,20 +85,94 @@ pub fn upgrade_ok(h: &Handshake) -> bool {
         && h.key.is_some_and(|k| !k.trim().is_empty() && k.len() <= 64)
 }
 
-/// Is this first frame `{"auth": "<token>"}` and nothing else?
-///
-/// Exactly one key, exactly `auth`, exactly a string: a frame that carries
-/// anything more is a client that has started talking before it was let in,
-/// and that is refused with the wrong tokens. The comparison itself is the
-/// docs server's constant-time one.
-pub fn auth_ok(frame: &str, token: &str) -> bool {
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(frame) else { return false };
-    let Some(obj) = v.as_object() else { return false };
+// ── handshake v1 ─────────────────────────────────────────────────────────────
+//
+// The spec is (main)'s `handshake-v1.md` (2026-10-18), and it fixes OWASP
+// finding H1: under v0 the client's FIRST frame was the token, so whatever
+// held the port after serve died received it. Now:
+//
+//   C→S {"hello": cn}      S→C {"challenge": sn}
+//   C→S {"auth": HMAC(K, "worktrees-serve/v1/client\n" + cn + "\n" + sn)}
+//   S→C {"ok": true, "version": …, "proof": HMAC(K, "worktrees-serve/v1/server\n" + cn + "\n" + sn)}
+//
+// K is serve.json's token as UTF-8; cn, sn and both proofs are 32 bytes as 64
+// LOWERCASE hex. The token is never in a frame, either way. The server's only
+// output to an unproven peer is a random challenge: it computes its own proof
+// only after the client's has verified, so a stand-in for a client learns
+// nothing it could take elsewhere. Different labels per direction stop either
+// proof being reflected back as the other; `sn`, fresh per connection, stops
+// a recorded proof being replayed. Every refusal is a closed socket with
+// nothing written, as before (D6), and `AUTH_DEADLINE` covers all of it.
+
+/// The client's direction, spelled exactly as the spec spells it.
+pub const CLIENT_LABEL: &str = "worktrees-serve/v1/client\n";
+/// The server's direction.
+pub const SERVER_LABEL: &str = "worktrees-serve/v1/server\n";
+
+/// `hex32`: 32 bytes as 64 lowercase hex characters — the spec's ONE spelling.
+/// Upper case is refused rather than folded: a comparison looser than the
+/// format is a comparison with cases nobody has enumerated.
+pub fn is_hex32(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// The value of a handshake frame that must be exactly `{<key>: <hex32>}`:
+/// one key, that key, a hex32 string. A frame carrying anything more is a
+/// client talking before it was let in.
+fn hex32_field(frame: &str, key: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(frame).ok()?;
+    let obj = v.as_object()?;
     if obj.len() != 1 {
-        return false;
+        return None;
     }
-    let Some(given) = obj.get("auth").and_then(|a| a.as_str()) else { return false };
-    docserver::token_ok(given, token)
+    let s = obj.get(key)?.as_str()?;
+    is_hex32(s).then(|| s.to_string())
+}
+
+/// Frame 1, `{"hello": cn}`: the client's nonce, or `None` (refuse).
+pub fn hello(frame: &str) -> Option<String> {
+    hex32_field(frame, "hello")
+}
+
+/// Frame 3, `{"auth": client_proof}`: the proof, or `None` (refuse).
+pub fn client_proof(frame: &str) -> Option<String> {
+    hex32_field(frame, "auth")
+}
+
+type HmacSha256 = hmac::Hmac<sha2::Sha256>;
+
+/// `HMAC(K, label + cn + "\n" + sn)`, not yet finalized.
+fn mac(token: &str, label: &str, cn: &str, sn: &str) -> HmacSha256 {
+    let mut m = HmacSha256::new_from_slice(token.as_bytes()).expect("HMAC takes a key of any length");
+    m.update(label.as_bytes());
+    m.update(cn.as_bytes());
+    m.update(b"\n");
+    m.update(sn.as_bytes());
+    m
+}
+
+fn unhex32(s: &str) -> Option<[u8; 32]> {
+    if !is_hex32(s) {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).ok()?;
+    }
+    Some(out)
+}
+
+/// Does `proof` show the client holds `token`, for THIS connection's nonces?
+/// `verify_slice` is a constant-time compare.
+pub fn client_proof_ok(token: &str, cn: &str, sn: &str, proof: &str) -> bool {
+    let Some(tag) = unhex32(proof) else { return false };
+    mac(token, CLIENT_LABEL, cn, sn).verify_slice(&tag).is_ok()
+}
+
+/// The server's proof, for the `ok` reply. Call it only after
+/// `client_proof_ok` — the server proves nothing to an unproven peer.
+pub fn server_proof(token: &str, cn: &str, sn: &str) -> String {
+    mac(token, SERVER_LABEL, cn, sn).finalize().into_bytes().iter().map(|x| format!("{x:02x}")).collect()
 }
 
 /// Is this a value `--allow-origin` may take? A serialized origin is
@@ -187,26 +263,55 @@ mod tests {
         assert!(!upgrade_ok(&Handshake { key: None, ..ok }));
     }
 
+    const N: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    /// Each handshake frame is exactly one key with a hex32 value, or it is
+    /// nothing — and the hello is not an auth, nor the auth a hello.
     #[test]
-    fn the_first_frame_is_exactly_the_auth_object_or_it_is_nothing() {
-        let t = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        assert!(auth_ok(&format!("{{\"auth\":\"{t}\"}}"), t));
-        assert!(auth_ok(&format!("{{ \"auth\" : \"{t}\" }}"), t), "whitespace is JSON's business");
+    fn a_handshake_frame_is_exactly_one_hex32_key_or_it_is_nothing() {
+        assert_eq!(hello(&format!("{{\"hello\":\"{N}\"}}")).as_deref(), Some(N));
+        assert_eq!(hello(&format!("{{ \"hello\" : \"{N}\" }}")).as_deref(), Some(N), "whitespace is JSON's business");
+        assert_eq!(client_proof(&format!("{{\"auth\":\"{N}\"}}")).as_deref(), Some(N));
+        assert_eq!(hello(&format!("{{\"auth\":\"{N}\"}}")), None, "an auth is not a hello");
+        assert_eq!(client_proof(&format!("{{\"hello\":\"{N}\"}}")), None, "a hello is not an auth");
         for bad in [
-            format!("{{\"auth\":\"{}\"}}", &t[..63]),
-            format!("{{\"auth\":\"{}x\"}}", t),
-            format!("{{\"auth\":\"{t}\",\"cmd\":\"list_workspace\"}}"),
-            format!("{{\"token\":\"{t}\"}}"),
-            format!("[\"{t}\"]"),
-            format!("\"{t}\""),
-            format!("{{\"id\":1,\"cmd\":\"list_workspace\",\"args\":{{}}}}"),
-            "{\"auth\":null}".to_string(),
+            format!("{{\"hello\":\"{}\"}}", &N[..63]),
+            format!("{{\"hello\":\"{N}0\"}}"),
+            format!("{{\"hello\":\"{}\"}}", N.to_uppercase()),
+            format!("{{\"hello\":\"{}g\"}}", &N[..63]),
+            format!("{{\"hello\":\"{N}\",\"cmd\":\"list_workspace\"}}"),
+            format!("[\"{N}\"]"),
+            format!("\"{N}\""),
+            "{\"hello\":null}".to_string(),
+            "{\"hello\":7}".to_string(),
             "{}".to_string(),
             String::new(),
             "not json".to_string(),
         ] {
-            assert!(!auth_ok(&bad, t), "{bad:?} must not authenticate");
+            assert_eq!(hello(&bad), None, "{bad:?} is not a hello");
         }
+    }
+
+    /// The two directions are tagged apart: the server's proof is not the
+    /// client's, so neither can be reflected as the other, and a proof is
+    /// bound to both nonces and the token.
+    #[test]
+    fn a_proof_is_bound_to_its_direction_its_nonces_and_the_token() {
+        let (t, cn, sn) = ("a".repeat(64), N.to_string(), "b".repeat(64));
+        let server = server_proof(&t, &cn, &sn);
+        assert!(is_hex32(&server), "{server}");
+        let client = {
+            let m = mac(&t, CLIENT_LABEL, &cn, &sn).finalize().into_bytes();
+            m.iter().map(|x| format!("{x:02x}")).collect::<String>()
+        };
+        assert!(client_proof_ok(&t, &cn, &sn, &client));
+        assert_ne!(client, server, "the directions are labelled apart");
+        assert!(!client_proof_ok(&t, &cn, &sn, &server), "a reflected server proof is not a client proof");
+        assert!(!client_proof_ok(&t, &sn, &cn, &client), "cn and sn are ordered");
+        assert!(!client_proof_ok(&t, &cn, &"c".repeat(64), &client), "another challenge, another proof");
+        assert!(!client_proof_ok(&"d".repeat(64), &cn, &sn, &client), "another token, another proof");
+        assert!(!client_proof_ok(&t, &cn, &sn, &client.to_uppercase()), "one spelling");
+        assert!(!client_proof_ok(&t, &cn, &sn, &client[..62]), "the whole tag");
     }
 
     #[test]

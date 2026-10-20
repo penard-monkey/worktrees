@@ -46,11 +46,23 @@ pub fn read(config_dir: &Path) -> Option<ServeFile> {
 /// launch: a token that escaped into a log or a chat window stops working at
 /// the next restart.
 pub fn new_token() -> String {
+    hex32()
+}
+
+/// The server's challenge nonce `sn` in handshake v1: the same 32 bytes from
+/// the same OS CSPRNG as the token, fresh per connection. A predictable `sn`
+/// would let a recorded client proof be replayed.
+pub fn nonce() -> String {
+    hex32()
+}
+
+/// 32 bytes from the OS CSPRNG as 64 lowercase hex characters.
+fn hex32() -> String {
     let mut b = [0u8; 32];
     // The OS refusing entropy is not a state this process can serve in. The
     // fallback is deliberately NOT a clock and a pid — a token anyone can
     // reconstruct is not a token.
-    getrandom::fill(&mut b).expect("the OS refused entropy for the serve token");
+    getrandom::fill(&mut b).expect("the OS refused entropy");
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 

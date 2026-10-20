@@ -140,11 +140,43 @@ fn connect(sf: &Value, origin: &str) -> WebSocket<TcpStream> {
     }
     assert!(String::from_utf8_lossy(&head).starts_with("HTTP/1.1 101 "), "{}", String::from_utf8_lossy(&head));
     let mut ws = WebSocket::from_raw_socket(s, Role::Client, None);
-    ws.send(Message::text(json!({ "auth": sf["token"] }).to_string())).unwrap();
+    // Handshake v1, from the spec: the token is the HMAC key and never sent.
+    let token = sf["token"].as_str().unwrap();
+    let cn = fresh_hex32();
+    ws.send(Message::text(json!({ "hello": cn }).to_string())).unwrap();
+    let challenge: Value = serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
+    let sn = challenge["challenge"].as_str().unwrap_or_else(|| panic!("no challenge: {challenge}")).to_string();
+    let proof = |label: &str| spec_hmac(token.as_bytes(), format!("{label}{cn}\n{sn}").as_bytes());
+    ws.send(Message::text(json!({ "auth": proof("worktrees-serve/v1/client\n") }).to_string())).unwrap();
     let reply: Value = serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
     assert_eq!(reply["ok"], json!(true), "{reply}");
+    assert_eq!(reply["proof"], json!(proof("worktrees-serve/v1/server\n")), "the server's proof: {reply}");
     assert_eq!(reply["version"], json!(env!("CARGO_PKG_VERSION")));
     ws
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+fn fresh_hex32() -> String {
+    let mut b = [0u8; 32];
+    getrandom::fill(&mut b).unwrap();
+    hex(&b)
+}
+
+/// HMAC-SHA256 by RFC 2104 over bare SHA-256 — the same independence from
+/// the server's code as the in-process tests (keys here are 64 bytes, so
+/// never longer than the block).
+fn spec_hmac(key: &[u8], msg: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    assert!(key.len() <= 64);
+    let mut k = [0u8; 64];
+    k[..key.len()].copy_from_slice(key);
+    let ipad: Vec<u8> = k.iter().map(|b| b ^ 0x36).collect();
+    let opad: Vec<u8> = k.iter().map(|b| b ^ 0x5c).collect();
+    let inner = Sha256::new().chain_update(&ipad).chain_update(msg).finalize();
+    hex(&Sha256::new().chain_update(&opad).chain_update(&inner[..]).finalize()[..])
 }
 
 fn rpc(ws: &mut WebSocket<TcpStream>, id: u64, cmd: &str, args: Value) -> Value {

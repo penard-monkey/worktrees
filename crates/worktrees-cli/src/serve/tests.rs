@@ -14,6 +14,7 @@
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -108,21 +109,137 @@ fn good_host(port: u16) -> String {
     format!("127.0.0.1:{port}")
 }
 
-/// A served, authenticated socket, ready for requests.
-fn client(l: &Live) -> WebSocket<TcpStream> {
+// ── handshake v1, written here from the spec — NOT from policy.rs ────────────
+//
+// `handshake-v1.md` ((main), 2026-10-18): hello → challenge → auth → ok+proof,
+// each proof an HMAC-SHA256 keyed with serve.json's token over nonces the
+// OTHER side chose, the token itself never on the wire. Everything below is
+// restated from that text, so a test cannot agree with the server by sharing
+// its code: the labels are spelled out again, and the HMAC is built from the
+// bare SHA-256 primitive by RFC 2104 and checked against RFC 4231's vectors.
+
+const SPEC_CLIENT_LABEL: &str = "worktrees-serve/v1/client\n";
+const SPEC_SERVER_LABEL: &str = "worktrees-serve/v1/server\n";
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02x}")).collect()
+}
+
+/// HMAC-SHA256 by RFC 2104, over SHA-256 alone (no `hmac` crate).
+fn spec_hmac(key: &[u8], msg: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut k = [0u8; 64];
+    if key.len() > 64 {
+        k[..32].copy_from_slice(&Sha256::digest(key)[..]);
+    } else {
+        k[..key.len()].copy_from_slice(key);
+    }
+    let ipad: Vec<u8> = k.iter().map(|b| b ^ 0x36).collect();
+    let opad: Vec<u8> = k.iter().map(|b| b ^ 0x5c).collect();
+    let inner = Sha256::new().chain_update(&ipad).chain_update(msg).finalize();
+    hex(&Sha256::new().chain_update(&opad).chain_update(&inner[..]).finalize()[..])
+}
+
+/// `HMAC(K, label + cn + "\n" + sn)`, K = the token string's UTF-8 bytes.
+fn spec_proof(token: &str, label: &str, cn: &str, sn: &str) -> String {
+    spec_hmac(token.as_bytes(), format!("{label}{cn}\n{sn}").as_bytes())
+}
+
+fn fresh_hex32() -> String {
+    let mut b = [0u8; 32];
+    getrandom::fill(&mut b).unwrap();
+    hex(&b)
+}
+
+fn is_hex32(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// The test's own HMAC, checked before anything leans on it: RFC 4231 test
+/// case 2, and test case 6 (a key longer than the block, hashed first).
+#[test]
+fn the_tests_own_hmac_is_rfc_4231s() {
+    assert_eq!(spec_hmac(b"Jefe", b"what do ya want for nothing?"), "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
+    assert_eq!(
+        spec_hmac(&[0xaa; 131], b"Test Using Larger Than Block-Size Key - Hash Key First"),
+        "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+    );
+}
+
+/// A socket past its 101, with a client-role frame codec on it.
+fn upgraded_ws(l: &Live) -> WebSocket<TcpStream> {
     let (s, head) = upgrade(l.port(), Some(&good_host(l.port())), Some(DEV_ORIGIN), "");
     let head = String::from_utf8_lossy(&head).into_owned();
     assert!(head.starts_with("HTTP/1.1 101 "), "{head}");
-    let mut ws = WebSocket::from_raw_socket(s, Role::Client, None);
-    ws.send(Message::text(json!({ "auth": l.token() }).to_string())).unwrap();
-    let reply: Value = serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
-    assert_eq!(reply["ok"], json!(true), "{reply}");
+    WebSocket::from_raw_socket(s, Role::Client, None)
+}
+
+fn text<S: Read + Write>(ws: &mut WebSocket<S>) -> Value {
+    let m = ws.read().unwrap_or_else(|e| panic!("expected a frame: {e}"));
+    serde_json::from_str(m.to_text().unwrap()).unwrap()
+}
+
+/// `{"hello": cn}` → `{"challenge": sn}`; returns sn.
+fn hello_with<S: Read + Write>(ws: &mut WebSocket<S>, cn: &str) -> String {
+    ws.send(Message::text(json!({ "hello": cn }).to_string())).unwrap();
+    let c = text(ws);
+    assert_eq!(c.as_object().map(|o| o.len()), Some(1), "a challenge is one key: {c}");
+    let sn = c["challenge"].as_str().unwrap_or_else(|| panic!("no challenge: {c}")).to_string();
+    assert!(is_hex32(&sn), "sn is 32 bytes in lowercase hex: {sn:?}");
+    sn
+}
+
+fn hello<S: Read + Write>(ws: &mut WebSocket<S>) -> (String, String) {
+    let cn = fresh_hex32();
+    let sn = hello_with(ws, &cn);
+    (cn, sn)
+}
+
+/// The rest of the exchange on a socket that has said hello: the client's
+/// proof out, the server's ok in — its proof checked the way a client must.
+fn prove<S: Read + Write>(ws: &mut WebSocket<S>, token: &str, cn: &str, sn: &str) -> Value {
+    ws.send(Message::text(json!({ "auth": spec_proof(token, SPEC_CLIENT_LABEL, cn, sn) }).to_string())).unwrap();
+    let ok = text(ws);
+    assert_eq!(ok["ok"], json!(true), "{ok}");
+    assert_eq!(ok["proof"], json!(spec_proof(token, SPEC_SERVER_LABEL, cn, sn)), "the server's proof does not verify: {ok}");
+    ok
+}
+
+/// A served, authenticated socket, ready for requests.
+fn client(l: &Live) -> WebSocket<TcpStream> {
+    let mut ws = upgraded_ws(l);
+    let (cn, sn) = hello(&mut ws);
+    prove(&mut ws, &l.token(), &cn, &sn);
     ws
 }
 
-fn rpc(ws: &mut WebSocket<TcpStream>, id: Value, cmd: &str, args: Value) -> Value {
+fn rpc<S: Read + Write>(ws: &mut WebSocket<S>, id: Value, cmd: &str, args: Value) -> Value {
     ws.send(Message::text(json!({ "id": id, "cmd": cmd, "args": args }).to_string())).unwrap();
-    serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap()
+    text(ws)
+}
+
+/// Whatever is left on the raw socket until it closes or `wait` passes:
+/// (the bytes, whether it closed). A reset counts as closed.
+fn rest(s: &mut TcpStream, wait: Duration) -> (Vec<u8>, bool) {
+    s.set_read_timeout(Some(wait)).unwrap();
+    let mut out = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        match s.read(&mut buf) {
+            Ok(0) => return (out, true),
+            Ok(n) => out.extend_from_slice(&buf[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => return (out, true),
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => return (out, false),
+            Err(e) => panic!("reading what is left: {e}"),
+        }
+    }
+}
+
+/// D6: a refusal closes the socket and writes NOTHING — no frame, no Close.
+fn assert_closed_silently(ws: &mut WebSocket<TcpStream>, what: &str) {
+    let (bytes, closed) = rest(ws.get_mut(), Duration::from_secs(5));
+    assert!(bytes.is_empty(), "{what}: the server wrote {:?}", String::from_utf8_lossy(&bytes));
+    assert!(closed, "{what}: the socket is still open");
 }
 
 /// **The connect-witness, four directions, served case FIRST** so a dead
@@ -174,48 +291,160 @@ fn the_webview_origins_are_built_in_and_a_duplicate_host_is_refused() {
     assert!(out.is_empty(), "a plain GET was answered: {:?}", String::from_utf8_lossy(&out));
 }
 
-/// The first frame decides: the right token is answered with the version;
-/// a wrong token, a request sent first, or a binary frame each close the
-/// socket with no frame written back — not even a Close.
+/// **(a) The raw token as a first frame is refused, with nothing said.** It is
+/// the frame every v0 client sent; under v1 it would hand the token to
+/// whatever holds the port, so the server must not reward it either. Every
+/// first frame that is not exactly `{"hello": <hex32>}` goes the same way.
 #[test]
-fn the_first_frame_must_be_the_auth_object_and_the_reply_names_the_version() {
-    let l = live("auth");
-    let p = l.port();
-
-    let mut ws = client(&l);
-    // (client() already asserted ok:true) — and the version is this binary's.
-    ws.send(Message::text(json!({ "id": 1, "cmd": "get_changelog" }).to_string())).unwrap();
-    let r: Value = serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
-    assert_eq!(r["ok"]["version"], json!(env!("CARGO_PKG_VERSION")));
-
-    let closed = |first: Message| {
-        let (s, head) = upgrade(p, Some(&good_host(p)), Some(DEV_ORIGIN), "");
-        assert!(String::from_utf8_lossy(&head).starts_with("HTTP/1.1 101 "));
-        let mut ws = WebSocket::from_raw_socket(s, Role::Client, None);
+fn the_raw_token_as_a_first_frame_is_closed_with_nothing_said() {
+    let l = live("rawtoken");
+    let firsts = [
+        ("the v0 auth frame, with the REAL token", Message::text(json!({ "auth": l.token() }).to_string())),
+        ("a request", Message::text(json!({ "id": 1, "cmd": "list_workspace" }).to_string())),
+        ("a hello that is not hex32", Message::text(json!({ "hello": "ab" }).to_string())),
+        ("a hello in upper case", Message::text(json!({ "hello": fresh_hex32().to_uppercase() }).to_string())),
+        ("a hello with company", Message::text(json!({ "hello": fresh_hex32(), "auth": "x" }).to_string())),
+        ("a binary hello", Message::binary(json!({ "hello": fresh_hex32() }).to_string().into_bytes())),
+        ("a ping", Message::Ping(Vec::new().into())),
+    ];
+    for (what, first) in firsts {
+        let mut ws = upgraded_ws(&l);
         ws.send(first).unwrap();
-        match ws.read() {
-            Ok(m) => panic!("the server answered an unauthenticated frame: {m:?}"),
-            Err(e) => assert!(
-                !matches!(e, tokio_tungstenite::tungstenite::Error::ConnectionClosed),
-                "a Close frame was sent — the socket must be dropped with nothing said: {e}"
-            ),
-        }
-    };
-    closed(Message::text(json!({ "auth": "0".repeat(64) }).to_string()));
-    closed(Message::text(json!({ "id": 1, "cmd": "list_workspace" }).to_string()));
-    closed(Message::binary(l.token().into_bytes()));
+        assert_closed_silently(&mut ws, what);
+    }
 }
 
-/// The version in the auth reply is `CARGO_PKG_VERSION` — what the app will
-/// compare against its own, and what the serve.json carries.
+/// **(b) A wrong client proof is refused with nothing said** — nothing after
+/// the challenge, which is the only byte an unproven peer ever gets.
 #[test]
-fn the_auth_reply_version_is_the_cargo_version() {
-    let l = live("version");
-    let (s, _) = upgrade(l.port(), Some(&good_host(l.port())), Some(DEV_ORIGIN), "");
-    let mut ws = WebSocket::from_raw_socket(s, Role::Client, None);
-    ws.send(Message::text(json!({ "auth": l.token() }).to_string())).unwrap();
-    let reply: Value = serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
-    assert_eq!(reply, json!({ "ok": true, "version": env!("CARGO_PKG_VERSION") }));
+fn a_wrong_client_proof_is_closed_with_nothing_said_after_the_challenge() {
+    let l = live("badproof");
+    let t = l.token();
+    let other = "f".repeat(64);
+    let cases: Vec<(&str, Box<dyn Fn(&str, &str) -> Value>)> = vec![
+        ("keyed with another token", Box::new(|cn, sn| json!({ "auth": spec_proof(&other, SPEC_CLIENT_LABEL, cn, sn) }))),
+        ("the SERVER's label: a reflected proof", Box::new(|cn, sn| json!({ "auth": spec_proof(&t, SPEC_SERVER_LABEL, cn, sn) }))),
+        ("cn and sn swapped", Box::new(|cn, sn| json!({ "auth": spec_proof(&t, SPEC_CLIENT_LABEL, sn, cn) }))),
+        ("the right proof in upper case", Box::new(|cn, sn| json!({ "auth": spec_proof(&t, SPEC_CLIENT_LABEL, cn, sn).to_uppercase() }))),
+        ("the raw token where the proof goes", Box::new(|_, _| json!({ "auth": t }))),
+        ("a second hello", Box::new(|cn, _| json!({ "hello": cn }))),
+        ("the proof with company", Box::new(|cn, sn| json!({ "auth": spec_proof(&t, SPEC_CLIENT_LABEL, cn, sn), "id": 1 }))),
+    ];
+    for (what, auth) in &cases {
+        let mut ws = upgraded_ws(&l);
+        let (cn, sn) = hello(&mut ws);
+        ws.send(Message::text(auth(&cn, &sn).to_string())).unwrap();
+        assert_closed_silently(&mut ws, what);
+    }
+    // A REPLAY: the right proof for another connection's challenge, with the
+    // same client nonce. The server's fresh `sn` is what makes it stale.
+    let cn = fresh_hex32();
+    let mut first = upgraded_ws(&l);
+    let sn1 = hello_with(&mut first, &cn);
+    let mut second = upgraded_ws(&l);
+    let sn2 = hello_with(&mut second, &cn);
+    assert_ne!(sn1, sn2, "a challenge is fresh per connection");
+    second.send(Message::text(json!({ "auth": spec_proof(&t, SPEC_CLIENT_LABEL, &cn, &sn1) }).to_string())).unwrap();
+    assert_closed_silently(&mut second, "a proof for another connection's challenge");
+}
+
+/// **(c) The server's proof is the spec's formula, computed HERE** — by the
+/// test's own HMAC with the spec's labels spelled out, never by calling the
+/// server's helper — and the reply is exactly `{ok, version, proof}`.
+#[test]
+fn the_server_proof_is_the_specs_hmac_computed_here_and_the_reply_names_the_version() {
+    let l = live("proof");
+    let t = l.token();
+    let mut ws = upgraded_ws(&l);
+    let (cn, sn) = hello(&mut ws);
+    ws.send(Message::text(json!({ "auth": spec_proof(&t, SPEC_CLIENT_LABEL, &cn, &sn) }).to_string())).unwrap();
+    let ok = text(&mut ws);
+    let keys: std::collections::BTreeSet<&str> = ok.as_object().unwrap().keys().map(String::as_str).collect();
+    assert_eq!(keys, ["ok", "proof", "version"].into_iter().collect(), "{ok}");
+    assert_eq!(ok["ok"], json!(true));
+    assert_eq!(ok["version"], json!(env!("CARGO_PKG_VERSION")), "the version is this binary's");
+    let proof = ok["proof"].as_str().unwrap();
+    assert!(is_hex32(proof), "64 lowercase hex: {proof}");
+    assert_eq!(proof, spec_proof(&t, SPEC_SERVER_LABEL, &cn, &sn), "server_proof = HMAC(K, server label + cn + \\n + sn)");
+    assert_ne!(proof, spec_proof(&t, SPEC_CLIENT_LABEL, &cn, &sn), "the two directions' proofs must differ");
+    // And the session is a session.
+    let r = rpc(&mut ws, json!(1), "get_changelog", json!({}));
+    assert_eq!(r["ok"]["version"], json!(env!("CARGO_PKG_VERSION")));
+}
+
+/// Records every byte read off the socket: what the SERVER wrote.
+struct Tap {
+    s: TcpStream,
+    seen: Arc<Mutex<Vec<u8>>>,
+}
+impl Read for Tap {
+    fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.s.read(b)?;
+        self.seen.lock().unwrap().extend_from_slice(&b[..n]);
+        Ok(n)
+    }
+}
+impl Write for Tap {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        self.s.write(b)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.s.flush()
+    }
+}
+
+fn contains(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
+/// **(d) The token never appears in any byte the server writes** — not in the
+/// 101, the challenge, the ok, or the replies after it. Read off the raw
+/// socket, as hex and as the 32 bytes it encodes.
+#[test]
+fn the_token_never_appears_in_any_byte_the_server_writes() {
+    let l = live("leak");
+    let t = l.token();
+    let (s, head) = upgrade(l.port(), Some(&good_host(l.port())), Some(DEV_ORIGIN), "");
+    let seen = Arc::new(Mutex::new(head));
+    let mut ws = WebSocket::from_raw_socket(Tap { s, seen: seen.clone() }, Role::Client, None);
+    let (cn, sn) = hello(&mut ws);
+    prove(&mut ws, &t, &cn, &sn);
+    for (i, cmd) in ["settings_info", "list_workspace", "get_settings", "get_changelog"].into_iter().enumerate() {
+        let r = rpc(&mut ws, json!(i), cmd, json!({}));
+        assert!(r.get("ok").is_some() || r.get("err").is_some(), "{cmd}: {r}");
+    }
+    let seen = seen.lock().unwrap();
+    assert!(seen.len() > 200, "the tap saw the session: {} bytes", seen.len());
+    let raw: Vec<u8> = (0..32).map(|i| u8::from_str_radix(&t[2 * i..2 * i + 2], 16).unwrap()).collect();
+    assert!(!contains(&seen, t.as_bytes()), "the token, in hex, went out on the wire");
+    assert!(!contains(&seen, t.to_uppercase().as_bytes()), "the token, in upper-case hex, went out on the wire");
+    assert!(!contains(&seen, &raw), "the token's 32 bytes went out on the wire");
+}
+
+/// **(e) The deadline covers the WHOLE exchange.** Two steps, each well inside
+/// `AUTH_DEADLINE`, adding up to more than it: refused, with nothing said
+/// after the challenge. A per-frame timeout would let this through. The
+/// control first: the same exchange done briskly is served.
+#[test]
+fn a_handshake_that_outlasts_the_deadline_is_refused_even_when_each_step_is_quick() {
+    let l = live("slowhs");
+    let t = l.token();
+    let d = super::policy::AUTH_DEADLINE;
+
+    let mut ws = upgraded_ws(&l);
+    std::thread::sleep(Duration::from_millis(200));
+    let (cn, sn) = hello(&mut ws);
+    std::thread::sleep(Duration::from_millis(600));
+    prove(&mut ws, &t, &cn, &sn);
+
+    let gap = d * 57 / 100;
+    let mut ws = upgraded_ws(&l);
+    std::thread::sleep(gap);
+    let (cn, sn) = hello(&mut ws);
+    std::thread::sleep(gap);
+    // The server may already have closed; a failed send is part of the answer.
+    let _ = ws.send(Message::text(json!({ "auth": spec_proof(&t, SPEC_CLIENT_LABEL, &cn, &sn) }).to_string()));
+    assert_closed_silently(&mut ws, "an exchange of two quick steps longer than the deadline");
 }
 
 /// A client that says nothing after the upgrade is cut off at the deadline,

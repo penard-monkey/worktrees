@@ -1,6 +1,15 @@
 //! What goes over the socket, and the per-connection queue it goes through.
 //!
-//! Three frame shapes, all JSON text:
+//! First the handshake (v1; `policy.rs` has the rules and the reasons):
+//!
+//!   C→S `{"hello": cn}` · S→C `{"challenge": sn}` · C→S `{"auth": client_proof}`
+//!   · S→C `{"ok": true, "version": "<CARGO_PKG_VERSION>", "proof": server_proof}`
+//!
+//! with the token as the HMAC key and never on the wire; any other frame, a
+//! wrong proof or a missed `AUTH_DEADLINE` closes the socket with NOTHING
+//! written. The client believes `version` only once `proof` verifies.
+//!
+//! Then three frame shapes, all JSON text:
 //!
 //! - request `{id, cmd, args}` → reply `{id, ok: <value>}` or `{id, err: <value>}`,
 //!   the same `{cmd, args}` the frontend's `invoke` builds. `err` is what the
@@ -36,9 +45,15 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio_tungstenite::tungstenite::Message;
 use worktrees_api::ByteSink;
 
-/// The reply to a correct auth frame.
-pub fn auth_reply() -> String {
-    json!({ "ok": true, "version": env!("CARGO_PKG_VERSION") }).to_string()
+/// Handshake frame 2: the server's nonce.
+pub fn challenge_frame(sn: &str) -> String {
+    json!({ "challenge": sn }).to_string()
+}
+
+/// Handshake frame 4, sent only once the client's proof has verified: the
+/// version, and the server's proof that it holds the token too.
+pub fn auth_reply(proof: &str) -> String {
+    json!({ "ok": true, "version": env!("CARGO_PKG_VERSION"), "proof": proof }).to_string()
 }
 
 /// `err` for a command the socket will not run.
@@ -308,9 +323,10 @@ mod tests {
     }
 
     #[test]
-    fn the_auth_reply_carries_this_binarys_version() {
-        let v: Value = serde_json::from_str(&auth_reply()).unwrap();
-        assert_eq!(v["ok"], json!(true));
-        assert_eq!(v["version"], json!(env!("CARGO_PKG_VERSION")));
+    fn the_auth_reply_carries_this_binarys_version_and_the_proof() {
+        let v: Value = serde_json::from_str(&auth_reply("p")).unwrap();
+        assert_eq!(v, json!({ "ok": true, "version": env!("CARGO_PKG_VERSION"), "proof": "p" }));
+        let c: Value = serde_json::from_str(&challenge_frame("s")).unwrap();
+        assert_eq!(c, json!({ "challenge": "s" }));
     }
 }

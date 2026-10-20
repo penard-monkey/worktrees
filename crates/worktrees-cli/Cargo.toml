@@ -52,6 +52,19 @@ tokio-tungstenite = { version = "0.30", default-features = false, features = ["h
 # need those traits in scope. Already in the lock by way of hyper and of
 # tokio-tungstenite itself, with exactly these features; adds nothing.
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+# Handshake v1 (`serve/policy.rs`; the spec is (main)'s, OWASP finding H1):
+# each side proves it holds serve.json's token with an HMAC-SHA256 over nonces
+# the OTHER side chose, so the token itself never goes on the wire and a
+# process that wins a dead server's port learns nothing. RustCrypto's `hmac`
+# 0.13 and `sha2` 0.11 are the releases built on the digest 0.11.3 already in
+# the lock for sha1 above; `hmac` turns on digest's `mac` feature, whose
+# `verify_slice` is a constant-time compare by way of `ctutils` (over `cmov`).
+# `sha2` without its default `alloc`/`oid` features: one hash, nothing else.
+# New in the lock, and nothing else moved: hmac 0.13.0, sha2 0.11.1 (beside
+# the docs server's 0.10.9), ctutils 0.4.3, cmov 0.5.4 — all four checked on
+# OSV at those versions: no advisories.
+hmac = "0.13"
+sha2 = { version = "0.11", default-features = false }
 # `getrandom` for the 256-bit session token (already a dep of worktrees-api
 # for the docs server's path token); `libc` for the flock on serve.json and
 # the `kill(pid, 0)` liveness probe of a previous server.

@@ -30,6 +30,7 @@ use worktrees_api::{Ctx, Host};
 
 use super::dispatch::{self, Args, Call};
 use super::policy;
+use super::servefile;
 use super::wire::{self, Frames, Outbox};
 
 /// How long the HTTP half of a connection gets. The docs server's figure: a
@@ -261,19 +262,39 @@ fn handshake(mut req: Request<Incoming>, shared: Arc<Shared>) -> Result<Response
 
 type Ws = WebSocketStream<TokioIo<hyper::upgrade::Upgraded>>;
 
-/// One authenticated session: the auth frame first, then requests until the
+/// The next frame, if it is text. Anything else — binary, a ping, a close,
+/// an error, the end — is `None`, and `None` before auth is a refusal.
+async fn next_text(ws: &mut Ws) -> Option<String> {
+    match ws.next().await {
+        Some(Ok(Message::Text(t))) => Some(t.as_str().to_string()),
+        _ => None,
+    }
+}
+
+/// Handshake v1 (`policy.rs`), the whole of it inside `AUTH_DEADLINE`. `None`
+/// is a refusal, and the caller drops the socket with nothing more written:
+/// the challenge is the only thing an unproven peer ever receives.
+async fn handshake_v1(ws: &mut Ws, token: &str) -> Option<()> {
+    let cn = policy::hello(&next_text(ws).await?)?;
+    let sn = servefile::nonce();
+    ws.send(Message::text(wire::challenge_frame(&sn))).await.ok()?;
+    let proof = policy::client_proof(&next_text(ws).await?)?;
+    if !policy::client_proof_ok(token, &cn, &sn, &proof) {
+        return None;
+    }
+    // Proven: only now does the server prove itself.
+    ws.send(Message::text(wire::auth_reply(&policy::server_proof(token, &cn, &sn)))).await.ok()
+}
+
+/// One authenticated session: the handshake first, then requests until the
 /// client goes.
 async fn session(mut ws: Ws, shared: Arc<Shared>, id: u64, origin: String) {
-    // FIRST frame, within the deadline, exactly the auth object. Anything
-    // else — wrong token, a request, a binary frame, silence — drops the
-    // socket here with nothing written, not even a Close frame.
-    let first = tokio::time::timeout(policy::AUTH_DEADLINE, ws.next()).await;
-    let authed = matches!(&first, Ok(Some(Ok(Message::Text(t)))) if policy::auth_ok(t.as_str(), &shared.token));
-    if !authed {
+    // The deadline is on the WHOLE exchange, not per frame: two quick steps
+    // adding up to more than it are refused like silence is. A refusal drops
+    // the socket here with nothing more written, not even a Close frame.
+    let authed = tokio::time::timeout(policy::AUTH_DEADLINE, handshake_v1(&mut ws, &shared.token)).await;
+    if !matches!(authed, Ok(Some(()))) {
         info(&format!("serve: client {id} did not authenticate ({origin})"));
-        return;
-    }
-    if ws.send(Message::text(wire::auth_reply())).await.is_err() {
         return;
     }
     info(&format!("serve: client {id} connected ({origin})"));

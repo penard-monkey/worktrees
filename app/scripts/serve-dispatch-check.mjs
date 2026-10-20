@@ -15,6 +15,14 @@
 // The wire those rows are reached over (`crates/worktrees-cli/src/serve/wire.rs`
 // is the source of truth; this is the summary a client author needs):
 //
+//   handshake v1, before anything else (policy.rs; the token is the HMAC key
+//   and is never sent; cn, sn and both proofs are 32 bytes as lowercase hex):
+//            → {hello: cn}   ← {challenge: sn}
+//            → {auth: HMAC(token, "worktrees-serve/v1/client\n" + cn + "\n" + sn)}
+//            ← {ok: true, version, proof: HMAC(token, "worktrees-serve/v1/server\n" + cn + "\n" + sn)}
+//            any other frame, a wrong proof, or 3 s for the whole exchange:
+//            the socket closes with nothing written. Verify `proof` before
+//            believing `version` or sending anything else.
 //   request  {id, cmd, args}          id echoed verbatim; args as `invoke` sends
 //   reply    {id, ok: <value>}        or {id, err: <value>} — err is what the
 //                                     Tauri command's Err serializes to

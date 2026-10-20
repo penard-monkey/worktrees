@@ -49,7 +49,12 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   every frame its own blocking task delivered 26 in-order keystrokes to zsh as
   `0124356789…`; everything else stays concurrent. The rule set is in
   `crates/worktrees-cli/src/serve/policy.rs` and every refusal closes the
-  socket with NOTHING written; a missing `Origin` is refused there and allowed
+  socket with NOTHING written. Auth is handshake v1 ((main)'s spec, for OWASP
+  H1): `hello` → `challenge` → `auth` → `ok` + `proof`, each side's proof an
+  HMAC keyed with serve.json's token over the other side's nonce, so the token
+  is NEVER in a frame — under v0 it was the first frame, and whatever held a
+  dead server's port received it. `AUTH_DEADLINE` covers the whole exchange,
+  not each frame. A missing `Origin` is refused there and allowed
   by `docserver::origin_ok` ON PURPOSE (different pages, different questions —
   do not align them). The 150 commands sit in ONE macro table
   (`serve/dispatch.rs`) with an `Exposure` each; `ClientLocal` rows (clipboard,

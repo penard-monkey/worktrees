@@ -47,9 +47,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   Terminal bytes and progress arrive as ordered channel frames, events as
   `{event, payload}` to every authenticated socket. It binds `127.0.0.1` only,
   requires a loopback `Host` and an allow-listed `Origin` (a missing one is
-  refused; `--allow-origin` is a dev flag, never a config key), and its first
-  frame must be the per-launch 256-bit token from `<config-dir>/serve.json`
-  (mode 0600, rewritten every launch); every refusal closes the socket with
+  refused; `--allow-origin` is a dev flag, never a config key), and a client
+  and the server each prove they hold the per-launch 256-bit token from
+  `<config-dir>/serve.json` (mode 0600, rewritten every launch) with an
+  HMAC-SHA256 over nonces the other side chose — the token itself never goes
+  on the wire, so a process that takes the port of a server that has died
+  learns nothing and cannot pass for it. Every refusal closes the socket with
   nothing written. A second `serve` on a live config dir is refused — one
   engine per machine. Logs to `~/.cache/worktrees/serve.log` with the version
   on the first line. `app/scripts/server-stack.sh` runs one on an isolated
