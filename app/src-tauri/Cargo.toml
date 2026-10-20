@@ -18,10 +18,13 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-# The engine, in-process (no subprocess, no WORKTREES_BIN). See MIGRATION.md Inc 4.
+# Types the client-local commands still name (`ops::REPO_SLUG`, the release
+# list). The ENGINE is not in this process any more: the app is a client of
+# this host's `worktrees serve` (src/engine.rs finds or starts it).
 worktrees-core = { workspace = true }
-# The command layer. Handler bodies live here so `worktrees serve` can call the
-# same commands without a window; this crate keeps the Tauri wrappers.
+# The client-local bodies (editor, terminal, clipboard, release list) and the
+# process preamble `host::boot` — the log sink, the panic hook, the GUI PATH
+# repair the editor and terminal launches depend on. No `Ctx` is built here.
 worktrees-api = { workspace = true }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
@@ -32,10 +35,20 @@ serde_json = { version = "1", features = ["preserve_order"] }
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 # The PTY host, the documentation server and its viewer moved to
-# `worktrees-api` with the handlers that drive them, and took every one of
-# their dependencies with them: portable-pty, libc, hyper, hyper-util,
-# http-body-util, tokio, sha2 and getrandom. No file under `src/` names one
-# any more — checked, not assumed.
+# `worktrees-api` with the handlers that drive them, and took portable-pty,
+# hyper, hyper-util, http-body-util and tokio with them.
+#
+# Finding or starting `worktrees serve` (src/engine.rs): `libc` for
+# `kill(pid, 0)`, SIGTERM and the child's `setsid`; and handshake v1, client
+# side — the shim proves a serve holds serve.json's token before it uses or
+# replaces it. tungstenite's sync client with only `handshake`, and hmac 0.13
+# + sha2 0.11 without defaults: exactly the features worktrees-cli already
+# enables, so the lock gains no crate. getrandom for the client nonce.
+libc = { workspace = true }
+getrandom = "0.3"
+hmac = "0.13"
+sha2 = { version = "0.11", default-features = false }
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 
 
 [target.'cfg(target_os = "macos")'.dependencies]

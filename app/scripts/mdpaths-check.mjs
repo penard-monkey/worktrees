@@ -137,9 +137,9 @@ check(html.includes('<span role="link" tabindex="0" class="md-link md-path" titl
 check(!/href=/.test(html.replace(/<a [^>]*>/g, "")), "a detected path carries no href");
 
 // ── 3. batching ──────────────────────────────────────────────────────────────
-// The Files tab's backend is `worktrees-api` now; what stays in lib.rs is the
-// `#[tauri::command]` wrapper and the invoke-handler list, so the rules below
-// are read from where they actually live.
+// The Files tab's backend is `worktrees-api`, reached through serve's dispatch
+// table (the app is serve's client), so the rules below are read from where
+// they actually live.
 const API = fs.readFileSync(new URL("../../crates/worktrees-api/src/files.rs", import.meta.url), "utf8");
 const MAX = Number(/const TERM_PATHS_MAX: usize = (\d+);/.exec(API)?.[1]);
 check(Number.isFinite(MAX), "TERM_PATHS_MAX is still where this check looks (worktrees-api/src/files.rs)");
@@ -167,7 +167,8 @@ const many = Array.from({ length: 150 }, (_, i) => `d/f${i}.md`);
 }
 
 // ── 4. the shared resolver, and the mock ─────────────────────────────────────
-const lib = fs.readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8").split("\n#[cfg(test)]")[0];
+// The app reaches the command through serve (it is not a shim command any more).
+const dispatch = fs.readFileSync(new URL("../../crates/worktrees-cli/src/serve/dispatch.rs", import.meta.url), "utf8").split("\n#[cfg(test)]")[0];
 const api = API.split("\n#[cfg(test)]")[0];
 const body = (name) => {
   const at = api.indexOf(`fn ${name}(`);
@@ -182,7 +183,7 @@ check(rdp.includes("resolve_term_path(raw,") && rdp.includes("resolve_term_path(
 check(!/canonicalize\(&p|is_file\(\)|under_roots/.test(rdp), "resolve_doc_path has no file/containment test of its own (no second resolver)");
 const cmd = body("resolve_doc_paths");
 check(/\.take\(TERM_PATHS_MAX\)/.test(cmd) && cmd.includes("resolve_doc_path(p,"), "resolve_doc_paths caps at TERM_PATHS_MAX and calls resolve_doc_path");
-check(/^\s*resolve_doc_paths,$/m.test(lib), "resolve_doc_paths is registered in the invoke handler");
+check(/^ {4}resolve_doc_paths: Engine =>/m.test(dispatch), "resolve_doc_paths is an Engine row in serve's dispatch table");
 const mock = fs.readFileSync(new URL("../src/mock/install.ts", import.meta.url), "utf8");
 check(mock.includes('case "resolve_doc_paths":'), "the mock harness tracks resolve_doc_paths");
 

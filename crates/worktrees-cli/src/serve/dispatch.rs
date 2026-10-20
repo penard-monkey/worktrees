@@ -6,9 +6,13 @@
 //! the dispatcher does another — a command missing here is a request that
 //! fails with `unknown command`, never a silent default. The precedent is
 //! `projcfg`'s user-only key list: a missing row is a hard error, not a
-//! fallback. `app/scripts/serve-dispatch-check.mjs` holds this list against
-//! the shim's `generate_handler!`, so a command added to the app without a
-//! row here fails CI rather than failing a phone.
+//! fallback. The desktop app is this table's client: its shim registers only
+//! the `ClientLocal` rows (and two commands of its own), and
+//! `app/scripts/serve-dispatch-check.mjs` fails if it registers any other row —
+//! that would be a second engine for it. `engine-route-check.mjs` holds the
+//! page's routing against the `ClientLocal` rows and every `invoke("…")` the
+//! page makes against this table, so a command added to the frontend without
+//! a row here fails CI rather than failing the app.
 //!
 //! Arguments are read by name from the request's `args` object exactly as
 //! Tauri reads them: each parameter deserialized on its own, a missing key
@@ -155,7 +159,7 @@ fn viewer_bundle() -> Result<(), String> {
 
 macro_rules! commands {
     ($cx:ident, $a:ident; $( $name:ident : $exp:ident => $body:expr ),* $(,)?) => {
-        /// Every command the shim registers, with its exposure. Exhaustive by
+        /// Every command a client can send, with its exposure. Exhaustive by
         /// construction: the dispatcher below is generated from the same list.
         pub const TABLE: &[(&str, Exposure)] = &[ $( (stringify!($name), Exposure::$exp) ),* ];
 
@@ -473,14 +477,14 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 150 rows, no duplicates: the number the shim's handler list has
-    /// (143 at the extraction; host policy's getter and Kimi's six since),
-    /// and the check script holds the names against it.
+    /// 150 rows, no duplicates: the command layer's (143 at the extraction;
+    /// host policy's getter and Kimi's six since), and the check scripts hold
+    /// the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|(n, _)| *n).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 150, "the shim registers 150 commands");
+        assert_eq!(TABLE.len(), 150, "the command layer has 150 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
