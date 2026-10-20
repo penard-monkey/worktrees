@@ -36,6 +36,18 @@
 //! so TCC keys the decision to that exact binary and **the next release
 //! prompts fresh**. That is the same property AGENTS.md records as a nuisance
 //! — grants never surviving a rebuild — working in the user's favour.
+//!
+//! # Off macOS it answers `None`, always
+//!
+//! The paths are only half of a denial. On Linux an unreadable `~/Documents`
+//! refuses with EACCES and matches `Area::Documents` exactly as a TCC denial
+//! would, and the card it produced named macOS, linked a System Settings pane
+//! and offered a `tccutil` line — none of which exist there. Elsewhere the
+//! failure is an ordinary permission problem the raw error already describes,
+//! so this module is inert rather than wrong. The platform is a PARAMETER of
+//! `denial_at`, not a `cfg` inside it, so both answers are tested on every OS:
+//! a `#[cfg(not(target_os = "macos"))]` test would never run on the machine
+//! this app is developed on.
 
 use std::path::{Path, PathBuf};
 
@@ -183,7 +195,14 @@ fn is_denied(e: &std::io::Error) -> bool {
 /// `None` covers every ordinary case: the path reads fine, it is missing, or
 /// it is refused somewhere TCC has no say (a `chmod 000` directory in a
 /// project, say) — none of which a privacy card should claim to fix.
-pub fn denial_at(path: &Path, home: &Path, bundle_id: &str) -> Option<Denial> {
+///
+/// `is_macos` is the platform, and when it is false the answer is `None`
+/// before anything is read: there is no TCC to have refused (see the module
+/// note). Callers pass `cfg!(target_os = "macos")`.
+pub fn denial_at(path: &Path, home: &Path, bundle_id: &str, is_macos: bool) -> Option<Denial> {
+    if !is_macos {
+        return None;
+    }
     let refused = match std::fs::read_dir(path) {
         Ok(_) => false,
         Err(e) => is_denied(&e),
@@ -286,7 +305,7 @@ mod tests {
     #[test]
     fn a_readable_directory_is_never_a_denial() {
         let d = std::env::temp_dir();
-        assert!(denial_at(&d, &home(), "net.example.app").is_none());
+        assert!(denial_at(&d, &home(), "net.example.app", true).is_none());
     }
 
     #[test]
@@ -295,7 +314,7 @@ mod tests {
         // folder that does not exist is worse than the raw error.
         let p = std::env::temp_dir().join("wt-macprivacy-absent-xyz");
         let _ = std::fs::remove_dir_all(&p);
-        assert!(denial_at(&p, &home(), "net.example.app").is_none());
+        assert!(denial_at(&p, &home(), "net.example.app", true).is_none());
     }
 
     #[test]
@@ -310,10 +329,66 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o000)).unwrap();
             // Refused, but `area_of` says None, so no card.
-            assert!(denial_at(&d, &home(), "net.example.app").is_none());
+            assert!(denial_at(&d, &home(), "net.example.app", true).is_none());
             std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// `<fake home>/Documents/repo`, unreadable: a denial's exact shape, made
+    /// with a mode bit so it exists on every OS. Drop restores the mode first,
+    /// since `remove_dir_all` cannot descend a `000` directory.
+    #[cfg(unix)]
+    struct RefusedDocs {
+        home: PathBuf,
+        path: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl RefusedDocs {
+        fn new(tag: &str) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            let home = std::env::temp_dir().join(format!("wt-macprivacy-{tag}-{}", std::process::id()));
+            let path = home.join("Documents/repo");
+            let _ = std::fs::remove_dir_all(&home);
+            std::fs::create_dir_all(&path).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+            // Without a refusal both directions below pass for nothing — the
+            // macOS one fails, but the off-macOS one would assert `None` of a
+            // path that reads fine. Root reads a `000` directory.
+            assert!(std::fs::read_dir(&path).is_err(), "fixture {path:?} must be unreadable (running as root?)");
+            assert_eq!(area_of(&path, &home), Some(Area::Documents));
+            RefusedDocs { home, path }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for RefusedDocs {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o755));
+            let _ = std::fs::remove_dir_all(&self.home);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_protected_path_is_a_denial_on_macos() {
+        let f = RefusedDocs::new("mac");
+        let d = denial_at(&f.path, &f.home, "net.example.app", true).expect("a denial");
+        assert_eq!(d.area, Area::Documents);
+        assert_eq!(d.path, f.path.to_string_lossy());
+        assert_eq!(d.reset_command, "tccutil reset SystemPolicyDocumentsFolder net.example.app");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn off_macos_a_refused_protected_path_is_not_a_denial() {
+        // The same refused `~/Documents` on Linux: no TCC refused it, and a
+        // card naming macOS, System Settings and `tccutil` would be wrong on
+        // every line. The raw error stands.
+        let f = RefusedDocs::new("other");
+        assert!(denial_at(&f.path, &f.home, "net.example.app", false).is_none());
     }
 
     #[test]
