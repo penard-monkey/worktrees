@@ -1,7 +1,11 @@
 //! `<config_dir>/serve.json` — how a client finds this server.
 //!
-//! `{port, token, pid, version}`, mode `0600`, rewritten on every launch with a
-//! fresh token. The desktop app reads it to connect; so does the dev stack.
+//! `{port, token, pid, version, owner?}`, mode `0600`, rewritten on every launch
+//! with a fresh token. `owner` is present only for a serve started with
+//! `--owner app`: the desktop app manages that one's life, and an app that
+//! finds it after a crash adopts it (stops it on quit) rather than leaving it
+//! running unseen. A file without it — the CLI's, the dev stack's, or one from
+//! before the field existed — parses with `None`. The desktop app reads it to connect; so does the dev stack.
 //! The token is a capability for everything the engine can do on this
 //! machine, which is why the file's mode is the first thing the tests check
 //! and why it is written under the same discipline `registry.rs` uses: an
@@ -30,6 +34,9 @@ pub struct ServeFile {
     pub token: String,
     pub pid: u32,
     pub version: String,
+    /// Who manages this serve's life (`--owner`); absent means nobody.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
 }
 
 pub fn path(config_dir: &Path) -> PathBuf {
@@ -173,7 +180,7 @@ mod tests {
     }
 
     fn sf(token: &str) -> ServeFile {
-        ServeFile { port: 1, token: token.into(), pid: std::process::id(), version: "t".into() }
+        ServeFile { port: 1, token: token.into(), pid: std::process::id(), version: "t".into(), owner: None }
     }
 
     /// The file holds a capability for the whole engine, so its mode is the
@@ -211,12 +218,12 @@ mod tests {
         // ESRCH on macOS 27.0 (xnu's PID_MAX is 99998) and on Linux 6.12
         // (`/proc/sys/kernel/pid_max` was 99999 in the containers measured;
         // the kernel caps it at 4194304 on 64-bit).
-        let dead = ServeFile { port: 1, token: "x".into(), pid: 2_000_000_000, version: "t".into() };
+        let dead = ServeFile { port: 1, token: "x".into(), pid: 2_000_000_000, version: "t".into(), owner: None };
         write(&d, &dead).unwrap();
         assert!(live_other(&d, std::process::id()).is_none(), "a dead pid must read as stale");
         // And one OUTSIDE `pid_t`, which a corrupt file can carry: dead
         // without asking the kernel, never cast negative into a pgid probe.
-        let wide = ServeFile { port: 1, token: "x".into(), pid: 4_000_000_000, version: "t".into() };
+        let wide = ServeFile { port: 1, token: "x".into(), pid: 4_000_000_000, version: "t".into(), owner: None };
         write(&d, &wide).unwrap();
         assert!(live_other(&d, std::process::id()).is_none(), "a pid outside pid_t must read as stale");
         write(&d, &dead).unwrap();
@@ -240,12 +247,29 @@ mod tests {
         // A different live pid than ours: the parent process is alive for the
         // life of this test on both platforms.
         let parent = unsafe { libc::getppid() } as u32;
-        write(&d, &ServeFile { port, token: "x".into(), pid: parent, version: "t".into() }).unwrap();
+        write(&d, &ServeFile { port, token: "x".into(), pid: parent, version: "t".into(), owner: None }).unwrap();
         assert!(live_other(&d, std::process::id()).is_none());
         // …and with something listening, the same file names a live server.
         let l = std::net::TcpListener::bind(("127.0.0.1", port)).unwrap();
         assert_eq!(live_other(&d, std::process::id()).map(|s| s.port), Some(port));
         drop(l);
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// `owner` is optional both ways: a file written before the field existed
+    /// (or by a serve nobody owns) parses with `None` and is written back
+    /// without the key, and an owned one round-trips.
+    #[test]
+    fn the_owner_field_is_optional_and_round_trips() {
+        let d = tmp("owner");
+        fs::write(path(&d), r#"{"port": 7, "token": "t", "pid": 9, "version": "0.1.0"}"#).unwrap();
+        assert_eq!(read(&d).unwrap().owner, None, "an old file still parses");
+        let mut sf = read(&d).unwrap();
+        write(&d, &sf).unwrap();
+        assert!(!fs::read_to_string(path(&d)).unwrap().contains("owner"), "no owner, no key");
+        sf.owner = Some("app".into());
+        write(&d, &sf).unwrap();
+        assert_eq!(read(&d).unwrap().owner.as_deref(), Some("app"));
         let _ = fs::remove_dir_all(&d);
     }
 

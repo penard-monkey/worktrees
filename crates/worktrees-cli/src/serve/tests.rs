@@ -962,3 +962,17 @@ fn log_lines_from_concurrent_writers_are_whole() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// `--owner` takes the one owner there is and nothing else: a typo must be an
+/// error at launch, not a serve.json the app then adopts (or fails to).
+#[test]
+fn the_owner_flag_takes_app_and_nothing_else() {
+    let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+    let o = super::parse_args(&s(&["--config-dir", "/tmp/x", "--owner", "app"])).unwrap().unwrap();
+    assert_eq!(o.owner.as_deref(), Some("app"));
+    let o = super::parse_args(&s(&["--config-dir", "/tmp/x"])).unwrap().unwrap();
+    assert_eq!(o.owner, None, "no flag, no owner: the CLI's and the dev stack's serve");
+    for bad in [&["--owner", "App"][..], &["--owner", "cli"], &["--owner", ""], &["--owner"]] {
+        assert!(super::parse_args(&s(bad)).is_err(), "{bad:?} must be refused");
+    }
+}

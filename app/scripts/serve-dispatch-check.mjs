@@ -103,10 +103,10 @@ else ok("every dispatch row is a shim command");
 // api-boundary-check lets keep a body in the shim, plus the ones whose body
 // opens something on the caller's machine. Pinned so a command cannot drift
 // from "runs on the host" to "refused" (or back) without this line changing.
-const CLIENT_LOCAL = ["copy_text", "open_editor", "open_terminal", "detect_editors", "open_docs_viewer", "set_zoom", "install_app_version"];
+const CLIENT_LOCAL = ["copy_text", "open_editor", "open_terminal", "detect_editors", "set_zoom", "install_app_version"];
 const tagged = table.filter((n) => exposure.get(n) === "ClientLocal").sort();
 if (tagged.join() !== [...CLIENT_LOCAL].sort().join()) fail(`client-local rows are [${tagged.join(", ")}], expected [${CLIENT_LOCAL.join(", ")}]`);
-else ok("the client-local set is the expected seven");
+else ok("the client-local set is the expected six");
 
 console.log(failed ? `\nserve-dispatch-check: ${failed} failure(s)` : "\nserve-dispatch-check: all good");
 process.exit(failed ? 1 : 0);

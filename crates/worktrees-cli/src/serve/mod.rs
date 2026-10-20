@@ -28,7 +28,7 @@ use worktrees_api::{host, Ctx};
 use worktrees_core::render::error_line;
 
 pub const USAGE: &str = "\
-usage: worktrees serve [--config-dir DIR] [--port N] [--allow-origin ORIGIN]...
+usage: worktrees serve [--config-dir DIR] [--port N] [--allow-origin ORIGIN]... [--owner app]
 
   --config-dir DIR      the app's config dir (default: the desktop app's own —
                         ~/Library/Application Support/net.casadelvalle.worktrees
@@ -36,18 +36,30 @@ usage: worktrees serve [--config-dir DIR] [--port N] [--allow-origin ORIGIN]...
   --port N              listen on 127.0.0.1:N (default: an ephemeral port)
   --allow-origin ORIGIN also accept this Origin (DEV ONLY; repeatable; a flag,
                         never a config key, so a dev entry cannot ship)
+  --owner app           the desktop app started this serve and stops it when it
+                        quits; recorded in serve.json so an app relaunched after
+                        a crash adopts it instead of leaving it running unseen
 
-Writes <config-dir>/serve.json ({port, token, pid, version}, mode 0600) and
+Writes <config-dir>/serve.json ({port, token, pid, version[, owner]}, mode 0600) and
 serves until SIGINT/SIGTERM. Logs to ~/.cache/worktrees/serve.log.";
 
 pub struct Opts {
     pub config_dir: PathBuf,
     pub port: u16,
     pub allow_origin: Vec<String>,
+    /// Who manages this serve's life, written into serve.json. `None` — the
+    /// CLI, the dev stack — means nobody: a client that finds it uses it and
+    /// never signals it.
+    pub owner: Option<String>,
 }
 
+/// The owners `--owner` takes. One today: the desktop app, which SIGTERMs a
+/// serve it owns when it quits cleanly. Closed rather than free text, so a
+/// typo is an error at launch and not a serve the app silently adopts or not.
+pub const OWNERS: &[&str] = &["app"];
+
 pub fn parse_args(args: &[String]) -> Result<Option<Opts>, String> {
-    let mut o = Opts { config_dir: worktrees_api::hostenv::default_config_dir(), port: 0, allow_origin: Vec::new() };
+    let mut o = Opts { config_dir: worktrees_api::hostenv::default_config_dir(), port: 0, allow_origin: Vec::new(), owner: None };
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -59,6 +71,13 @@ pub fn parse_args(args: &[String]) -> Result<Option<Opts>, String> {
             "--port" => {
                 let v = it.next().ok_or("--port needs a number")?;
                 o.port = v.parse().map_err(|_| format!("--port {v:?}: not a port number"))?;
+            }
+            "--owner" => {
+                let v = it.next().ok_or("--owner needs a name")?;
+                if !OWNERS.contains(&v.as_str()) {
+                    return Err(format!("--owner {v:?}: the only owner is {}", OWNERS.join(", ")));
+                }
+                o.owner = Some(v.clone());
             }
             "--allow-origin" => {
                 let v = it.next().ok_or("--allow-origin needs an origin")?;
@@ -207,7 +226,11 @@ pub fn cmd_serve(args: &[String]) -> i32 {
     // locale, core's log, the startup line.
     host::boot(Arc::new(ServeLog));
     let me = std::process::id();
-    worktrees_api::log::info(&format!("serve: pid={me} config_dir={}", opts.config_dir.display()));
+    worktrees_api::log::info(&format!(
+        "serve: pid={me} config_dir={} owner={}",
+        opts.config_dir.display(),
+        opts.owner.as_deref().unwrap_or("none")
+    ));
     raise_open_file_limit();
 
     // One engine per host: a second serve on the same config dir is refused
@@ -253,6 +276,7 @@ pub fn cmd_serve(args: &[String]) -> i32 {
             token: running.token.clone(),
             pid: me,
             version: env!("CARGO_PKG_VERSION").to_string(),
+            owner: opts.owner.clone(),
         };
         if let Err(e) = servefile::write(&opts.config_dir, &sf) {
             worktrees_api::log::error(&format!("serve: serve.json: {e}"));
