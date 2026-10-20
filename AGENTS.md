@@ -90,7 +90,12 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   there on `tauri://localhost` (a secure context) and a `ws://127.0.0.1` socket
   from it is not blocked as mixed content — measured on macOS 27.0 in a
   standalone WKWebView registered the way wry 0.55 does, NOT in the shipped
-  app. Plugins (opener, dialog, updater,
+  app. A channel ends on serve's `{channel, seq, end: true}` — ordered by
+  `seq` like data — or on an `err` to the request that named it, and the
+  client drops the handler then, as Tauri's `Channel` does when its Rust side
+  drops; and a request over serve's `MAX_MESSAGE` is refused in the client,
+  because serve answers one by ending the whole connection, every terminal on
+  it. Plugins (opener, dialog, updater,
   process, `api/window`) stay direct imports on purpose: they act on the
   window's machine, and routing them through a socket is the reason the
   plan's WS-backed `__TAURI_INTERNALS__` was not used (`.planning` of

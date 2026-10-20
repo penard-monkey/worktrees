@@ -84,8 +84,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   a random challenge from the other, and the page sends nothing else until
   serve's proof checks out, so a program that takes over the port after serve
   stops is told so and is sent nothing. Replies are matched by id, terminal bytes
-  and progress are delivered per channel in sequence order, events arrive
-  through `listen`, and the server's version must equal the frontend's (both
+  and progress are delivered per channel in sequence order and let go when
+  serve says the channel is finished, events arrive through `listen`, a request
+  too big for serve to read fails on its own instead of being sent and ending
+  the connection, and the server's version must equal the frontend's (both
   from the workspace `Cargo.toml`) or nothing is sent. A refused handshake, a
   server that cannot prove itself, a version mismatch or a dropped connection
   appears in the error banner.

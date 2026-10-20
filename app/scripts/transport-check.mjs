@@ -9,10 +9,11 @@
 // the serve lane's Rust tests never see a browser. So this check does four
 // things, the same way `api-boundary-check.mjs` and `termreplay-check.mjs` do:
 //
-//   1. PINS THE WIRE. Every frame key, the channel spelling, the first `seq`,
-//      the client-local marker, the auth key and the byte-channel argument are
-//      read out of wire.rs / policy.rs / dispatch.rs and compared with
-//      `ipcws.ts::WIRE`. And the behavioural tests below build their frames
+//   1. PINS THE WIRE. Every frame key, the channel spelling, the first `seq`
+//      and the end frame's, the client-local marker, the handshake's keys,
+//      labels and spelling (one key a frame, lowercase hex), the size limits
+//      and the byte-channel argument are read out of wire.rs / policy.rs /
+//      conn.rs / servefile.rs / dispatch.rs and compared with `ipcws.ts`. And the behavioural tests below build their frames
 //      from the RUST-parsed keys, not from WIRE — so a rename on the Rust side
 //      fails them too, rather than letting a stub agree with a stale client.
 //   2. DRIVES THE REAL CLIENT on a virtual clock against a fake socket.
@@ -23,7 +24,9 @@
 //      a dead serve's port among them — is sent nothing, and its version
 //      claim is not believed. Then replies routed by id (a non-string `err`
 //      passed through unchanged), channels in `seq` order including a
-//      reordered arrival, events and unlisten, a version mismatch refused, a
+//      reordered arrival, a channel's end (and the `err` that also ends it)
+//      releasing its handler, events and unlisten, a request too big for serve
+//      refused before it can end the connection, a version mismatch refused, a
 //      refused handshake and a dead socket surfaced — never swallowed.
 //   3. DRIVES THE REAL CHAIN for the termreplay contract: TerminalPane's
 //      `useTerm` + `shellTransport` → ipc.ts → ipcws.ts → the fake socket. A
@@ -36,8 +39,8 @@
 //
 // Overrides, so a mutation can be tested without touching the tree:
 //   TRANSPORT_IPCWS, TRANSPORT_IPC, TRANSPORT_WIRE, TRANSPORT_POLICY,
-//   TRANSPORT_DISPATCH, TRANSPORT_CONN, TRANSPORT_MAIN, TRANSPORT_DOOR,
-//   TRANSPORT_DIST
+//   TRANSPORT_DISPATCH, TRANSPORT_CONN, TRANSPORT_SERVEFILE, TRANSPORT_MAIN,
+//   TRANSPORT_DOOR, TRANSPORT_DIST
 import { createHmac, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -61,6 +64,7 @@ const SRC = {
   policy: process.env.TRANSPORT_POLICY ?? here("../../crates/worktrees-cli/src/serve/policy.rs"),
   dispatch: process.env.TRANSPORT_DISPATCH ?? here("../../crates/worktrees-cli/src/serve/dispatch.rs"),
   conn: process.env.TRANSPORT_CONN ?? here("../../crates/worktrees-cli/src/serve/conn.rs"),
+  servefile: process.env.TRANSPORT_SERVEFILE ?? here("../../crates/worktrees-cli/src/serve/servefile.rs"),
   cliToml: here("../../crates/worktrees-cli/Cargo.toml"),
   wsToml: here("../../Cargo.toml"),
 };
@@ -86,11 +90,28 @@ async function tsModule(file) {
 
 // ── 1. the wire, read out of the Rust ───────────────────────────────────────
 
-/** The body of `fn name` in a Rust source (to the first line that closes it). */
+/** The body of `fn name` in a Rust source (to the first line that closes it).
+ *  Exactly ONE definition, or null and a failure: a check that took the first
+ *  of two could be repointed at the wrong one (the docsviewer-check trap). */
 function rustFn(src, name) {
-  const m = new RegExp(`fn ${name}\\b[^{]*\\{([\\s\\S]*?)\\n\\}`, "m").exec(src);
-  return m ? m[1] : null;
+  const re = new RegExp(`fn ${name}\\b[^{]*\\{([\\s\\S]*?)\\n\\}`, "gm");
+  const all = [...src.matchAll(re)];
+  if (all.length > 1) fail(`${all.length} definitions of fn ${name} — which one is the wire?`);
+  return all.length === 1 ? all[0][1] : null;
 }
+/** A Rust `&str` const, with its escapes read the way rustc reads them. */
+const rustStr = (src, name) => {
+  const m = new RegExp(`pub const ${name}: &str = "((?:[^"\\\\]|\\\\.)*)";`).exec(src);
+  return m ? JSON.parse(`"${m[1]}"`) : null;
+};
+/** A `usize` const: a literal, or `a << b`. */
+const rustUsize = (src, name) => {
+  const m = new RegExp(`pub const ${name}: usize = ([^;]+);`).exec(src);
+  const e = m?.[1].trim() ?? "";
+  if (/^\d+$/.test(e)) return Number(e);
+  const sh = /^(\d+)\s*<<\s*(\d+)$/.exec(e);
+  return sh ? Number(sh[1]) * 2 ** Number(sh[2]) : NaN;
+};
 /** The string keys of the first `json!({ … })` in `body`, in order. */
 function jsonKeys(body) {
   const m = body && /json!\(\{([\s\S]*?)\}\)/.exec(body);
@@ -113,10 +134,12 @@ const hex32 = () => randomBytes(32).toString("hex");
 /** HMAC-SHA256 keyed with the token's UTF-8 bytes, over label + cn + "\n" + sn, as lowercase hex. */
 const spectag = (key, label, cn, sn) => createHmac("sha256", Buffer.from(key, "utf8")).update(`${label}${cn}\n${sn}`, "utf8").digest("hex");
 
-const wire = read(SRC.wire);
-const policy = read(SRC.policy);
+const wireAll = read(SRC.wire);
+const wire = wireAll.split("\n#[cfg(test)]")[0];
+const policy = read(SRC.policy).split("\n#[cfg(test)]")[0];
 const dispatch = read(SRC.dispatch).split("\n#[cfg(test)]")[0];
 const conn = read(SRC.conn).split("\n#[cfg(test)]")[0];
+const servefile = read(SRC.servefile).split("\n#[cfg(test)]")[0];
 
 const K = {};
 {
@@ -129,17 +152,24 @@ const K = {};
   const reqKeys = req ? [...req.matchAll(/o\.remove\("([^"]+)"\)/g)].map((x) => x[1]) : [];
   const prefix = /strip_prefix\("([^"]+)"\)/.exec(rustFn(wire, "channel_id") ?? "")?.[1];
   const clientLocal = /pub const CLIENT_LOCAL: &str = "([^"]+)";/.exec(wire)?.[1];
-  const authKey = /obj\.get\("([^"]+)"\)/.exec(rustFn(policy, "auth_ok") ?? "")?.[1];
+  // Handshake v1's client frames, as policy.rs reads them: `{<key>: <hex32>}`.
+  const field = (fn) => /hex32_field\(frame, "([^"]+)"\)/.exec(rustFn(policy, fn) ?? "")?.[1];
+  const helloKey = field("hello");
+  const authKey = field("client_proof");
+  const chall = jsonKeys(rustFn(wire, "challenge_frame"));
+  const endk = jsonKeys(rustFn(wire, "end_frame"));
   // The first frame a sink writes, as the Rust test asserts it.
-  const firstFrame = /assert_eq!\(seen\[0\], r#"(\{[^"]*"[^#]*)"#\)/.exec(wire)?.[1];
+  const firstFrame = /assert_eq!\(seen\[0\], r#"(\{[^"]*"[^#]*)"#\)/.exec(wireAll)?.[1];
   const ff = firstFrame ? JSON.parse(firstFrame) : null;
-  const sentFirst = /sink\.send\(b"([^"]*)"\)/.exec(wire)?.[1];
+  const sentFirst = /sink\.send\(b"([^"]*)"\)/.exec(wireAll)?.[1];
 
-  const need = { auth, okk, errk, chan, evt, prefix, clientLocal, authKey, ff };
+  const need = { auth, okk, errk, chan, evt, prefix, clientLocal, helloKey, authKey, chall, endk, ff };
   for (const [k, v] of Object.entries(need)) if (!v) fail(`wire: could not read ${k} out of the Rust — has a function been renamed? (this check would otherwise pass on nothing)`);
-  if (auth && auth.length === 2 && /"ok":\s*true/.test(rustFn(wire, "auth_reply"))) {
-    [K.authOk, K.authVersion] = auth;
-  } else fail(`wire: auth_reply is not {"ok": true, "<version>": …} (got ${JSON.stringify(auth)})`);
+  if (auth && auth.length === 3 && /"ok":\s*true/.test(rustFn(wire, "auth_reply"))) {
+    [K.authOk, K.authVersion, K.proof] = auth;
+  } else fail(`wire: auth_reply is not {"ok": true, "<version>": …, "<proof>": …} (got ${JSON.stringify(auth)})`);
+  if (chall?.length === 1) K.challenge = chall[0]; else fail(`wire: challenge_frame keys ${JSON.stringify(chall)}`);
+  K.hello = helloKey;
   if (okk?.length === 2) [K.id, K.ok] = okk; else fail(`wire: reply_ok keys ${JSON.stringify(okk)}`);
   if (errk?.length === 2 && errk[0] === K.id) K.err = errk[1]; else fail(`wire: reply_err keys ${JSON.stringify(errk)}`);
   if (chan?.length === 3) [K.channel, K.seq, K.data] = chan; else fail(`wire: channel_frame keys ${JSON.stringify(chan)}`);
@@ -157,6 +187,14 @@ const K = {};
   if (!K.byteKeys.length) fail("dispatch: no `frames.bytes(a.channel(…))` found — the byte-channel pin would be vacuous");
   if (!K.typedKeys.length) fail("dispatch: no `frames.typed::<…>(a.channel(…))` found — the typed-channel pin would be vacuous");
   K.authDeadline = Number(/AUTH_DEADLINE: std::time::Duration = std::time::Duration::from_secs\((\d+)\)/.exec(policy)?.[1]);
+  K.clientLabel = rustStr(policy, "CLIENT_LABEL");
+  K.serverLabel = rustStr(policy, "SERVER_LABEL");
+  // The end frame: the channel frame's own keys, then one that is literally true.
+  if (endk?.length === 3 && endk[0] === K.channel && endk[1] === K.seq && new RegExp(`"${endk[2]}":\\s*true`).test(rustFn(wire, "end_frame") ?? "")) K.end = endk[2];
+  else fail(`wire: end_frame is not {"${K.channel}", "${K.seq}", "<end>": true} (got ${JSON.stringify(endk)})`);
+  K.preauth = rustUsize(conn, "PREAUTH_BYTES");
+  K.maxMessage = rustUsize(conn, "MAX_MESSAGE");
+  if (!(K.preauth > 0) || !(K.maxMessage > 0)) fail(`conn: could not read PREAUTH_BYTES (${K.preauth}) or MAX_MESSAGE (${K.maxMessage})`);
 }
 
 const wsJs = await tsModule(SRC.ipcws);
@@ -165,14 +203,16 @@ const WS = await load(SRC.ipcws, wsJs);
 {
   const W = WS.WIRE ?? {};
   const pairs = [
-    ["auth", K.auth], ["version", K.authVersion], ["id", K.id], ["cmd", K.cmd], ["args", K.args],
-    ["ok", K.ok], ["err", K.err], ["channel", K.channel], ["seq", K.seq], ["data", K.data],
+    ["hello", K.hello], ["challenge", K.challenge], ["auth", K.auth], ["proof", K.proof],
+    ["clientLabel", K.clientLabel], ["serverLabel", K.serverLabel],
+    ["version", K.authVersion], ["id", K.id], ["cmd", K.cmd], ["args", K.args],
+    ["ok", K.ok], ["err", K.err], ["channel", K.channel], ["seq", K.seq], ["data", K.data], ["end", K.end],
     ["event", K.event], ["payload", K.payload], ["channelPrefix", K.prefix], ["firstSeq", K.firstSeq],
     ["clientLocal", K.clientLocal],
   ];
   const bad = pairs.filter(([k, v]) => W[k] !== v);
   for (const [k, v] of bad) fail(`WIRE.${k} is ${JSON.stringify(W[k])}, the Rust says ${JSON.stringify(v)}`);
-  if (!bad.length) ok(`WIRE matches wire.rs/policy.rs — ${pairs.length} keys (${pairs.map(([, v]) => v).join(" ")})`);
+  if (!bad.length) ok(`WIRE matches wire.rs/policy.rs — ${pairs.length} keys and labels (${pairs.map(([, v]) => JSON.stringify(v)).join(" ")})`);
   if (K.reqId !== K.id) fail(`wire: requests carry "${K.reqId}" and replies "${K.id}" — the client echoes one key`);
   check(K.authOk === K.ok, `the auth reply's success key is the reply's ("${K.authOk}")`);
   const bk = [...(WS.BYTE_CHANNEL_KEYS ?? [])].sort();
@@ -186,6 +226,29 @@ const WS = await load(SRC.ipcws, wsJs);
   if (!sbad.length) ok(`WIRE speaks handshake v1 — ${spec.length} keys and labels (${spec.map((k) => JSON.stringify(SPEC[k])).join(" ")})`);
   check(WS.SERVE_HOST === SPEC.host, `the client dials the literal ${SPEC.host}, never localhost, which resolves ::1 first (SERVE_HOST = ${JSON.stringify(WS.SERVE_HOST)})`);
   check(/StdListener::bind\(SocketAddr::from\(\(Ipv4Addr::LOCALHOST, port\)\)\)/.test(conn), "serve binds Ipv4Addr::LOCALHOST (conn.rs): the one address it listens on is the one the client dials");
+  // The spec's rules as serve enforces them, which §2 holds the client to.
+  const f32 = rustFn(policy, "hex32_field") ?? "";
+  check(/if obj\.len\(\) != 1 \{\s*return None;/.test(f32), "serve refuses a handshake frame with more than ONE key (policy.rs hex32_field) — §2 holds the client's hello and auth to one key");
+  const h32 = rustFn(policy, "is_hex32") ?? "";
+  check(/s\.len\(\) == 64/.test(h32) && /\(b'a'\.\.=b'f'\)/.test(h32) && !/b'A'|ignore_ascii_case|to_ascii_lowercase/.test(h32),
+    "serve's hex32 is 64 LOWERCASE hex and nothing else — upper case refused, not folded (policy.rs is_hex32); §2 holds the client to it");
+  check(/\{x:02x\}/.test(rustFn(servefile, "hex32") ?? "") && /\{x:02x\}/.test(rustFn(policy, "server_proof") ?? ""),
+    "serve writes its challenge and its proof as lowercase hex (servefile.rs hex32, policy.rs server_proof), which is all the client accepts");
+  const mac = rustFn(policy, "mac") ?? "";
+  const ups = [...mac.matchAll(/m\.update\((.+?)\);\s*$/gm)].map((x) => x[1]);
+  check(/new_from_slice\(token\.as_bytes\(\)\)/.test(mac) && same(ups, ["label.as_bytes()", "cn.as_bytes()", 'b"\\n"', "sn.as_bytes()"]),
+    `serve's HMAC is keyed with the token's bytes over label + cn + "\\n" + sn — the spec's formula, which §2 computes with node:crypto (${JSON.stringify(ups)})`);
+  check(/mac\(token, CLIENT_LABEL,/.test(rustFn(policy, "client_proof_ok") ?? "") && /mac\(token, SERVER_LABEL,/.test(rustFn(policy, "server_proof") ?? ""),
+    "serve checks the client's proof under the client label and proves itself under the server label (policy.rs)");
+  const hs = rustFn(conn, "handshake_v1") ?? "";
+  const at = (re) => hs.search(re);
+  const steps = [/policy::hello\(/, /wire::challenge_frame\(/, /policy::client_proof\(/, /policy::client_proof_ok\(/, /wire::auth_reply\(&policy::server_proof\(/].map(at);
+  check(steps.every((i, n) => i >= 0 && (n === 0 || i > steps[n - 1])),
+    `serve's handshake is hello → challenge → proof → verified → ok+proof, proving itself only to a proven client (conn.rs handshake_v1; positions ${steps.join(",")})`);
+  check(/let seq = self\.seq\.load\(Ordering::SeqCst\) \+ 1;\s*let _ = self\.outbox\.push\(end_frame\(self\.channel, seq\)\)/.test(wire) &&
+    /end_frame\(self\.channel, self\.seq \+ 1\)/.test(wire),
+    "a channel's end frame takes the seq one past its last data frame, bytes and typed alike (wire.rs Drop impls) — the client orders it like data");
+  check(WS.MAX_MESSAGE === K.maxMessage, `the client's MAX_MESSAGE (${WS.MAX_MESSAGE}) is serve's (conn.rs, ${K.maxMessage}), so a request serve would end the connection over is refused before it is sent`);
 }
 
 // ── 2. the client, on a virtual clock ───────────────────────────────────────
@@ -229,6 +292,11 @@ const chanId = (s) => Number(String(s).slice(String(K.prefix).length));
 
 /** Every frame any client in this run wrote; the token sweep in §3 reads it. */
 const WIRE_LOG = [];
+/** Anything the client threw OUT of a socket callback. In a browser that is an
+ *  uncaught error nobody sees; here it would end the run with the failures it
+ *  found unprinted. So it is recorded, and §2 ends by requiring none. */
+const THROWN = [];
+const cb = (fn) => { try { fn(); } catch (e) { THROWN.push(String(e?.stack ?? e).split("\n").slice(0, 2).join(" ")); } };
 const tokenIn = (t) => [TOKEN, b64(TOKEN), Buffer.from(TOKEN, "utf8").toString("hex")].some((x) => t.includes(x));
 
 /** WebCrypto as the page has it (`window.crypto`), wrapped only to SEE the
@@ -273,15 +341,19 @@ function harness({ version = VERSION, gate = null, subtle } = {}) {
   const frames = () => (sock?.sent ?? []).map((t) => JSON.parse(t));
   const h = {
     door, sock, socks, errors, warns, clk, seen: wc.seen, cn: null, sn: null,
-    open: () => sock?.onopen?.({}),
-    recv: (obj) => sock?.onmessage?.({ data: typeof obj === "string" ? obj : JSON.stringify(obj) }),
-    drop: () => sock?.onclose?.({}),
+    open: () => cb(() => sock?.onopen?.({})),
+    recv: (obj) => cb(() => sock?.onmessage?.({ data: typeof obj === "string" ? obj : JSON.stringify(obj) })),
+    drop: () => cb(() => sock?.onclose?.({})),
     frames,
     /** What the client wrote that is not the handshake: its requests. */
     requests: () => frames().filter((f) => K.cmd in f),
     reply: (id, v) => h.recv({ [K.id]: id, [K.ok]: v }),
     error: (id, e) => h.recv({ [K.id]: id, [K.err]: e }),
     chan: (ch, seq, data) => h.recv({ [K.channel]: ch, [K.seq]: seq, [K.data]: data }),
+    /** A channel's last frame: no data, and the seq one past its last data frame. */
+    end: (ch, seq) => h.recv({ [K.channel]: ch, [K.seq]: seq, [K.end]: true }),
+    /** How many channels the client still holds a handler for. */
+    openChannels: () => h.door.openChannels?.(),
     event: (name, payload) => h.recv({ [K.event]: name, [K.payload]: payload }),
     // serve's half of handshake v1, by the spec.
     hello: () => (h.cn = frames()[0]?.[SPEC.hello] ?? null),
@@ -391,6 +463,9 @@ function harness({ version = VERSION, gate = null, subtle } = {}) {
     ["(a)", "sends a proof that is not hex", async (h) => { await upToProof(h); h.welcome({ proof: "Z".repeat(64) }); }],
     ["(a)", "sends a challenge that is not 32 random bytes", (h) => { h.open(); h.hello(); h.challenge("abc"); }],
     ["(a)", "pushes an event before proving anything", (h) => { h.open(); h.hello(); h.event("places:changed", { forged: true }); }],
+    // The spec has ONE spelling, and serve writes it (servefile.rs, policy.rs: `{x:02x}`).
+    ["(a)", "sends its challenge in upper-case hex", (h) => { h.open(); h.hello(); h.challenge(hex32().toUpperCase()); }],
+    ["(a)", "sends the right proof in upper-case hex", async (h) => { await upToProof(h); h.welcome({ proof: spectag(TOKEN, SPEC.serverLabel, h.cn, h.sn).toUpperCase() }); }],
     // A version is the server's word, and before the proof that word is anyone's.
     ["(d)", "claims another version, with no challenge", (h) => { h.open(); h.hello(); h.recv({ [SPEC.ok]: true, [SPEC.version]: "0.0.1" }); }],
     ["(d)", "claims another version behind a proof that fails", async (h) => { await upToProof(h); h.welcome({ version: "0.0.1", key: hex32() }); }],
@@ -610,6 +685,165 @@ for (const [label, v] of [["an older server", "0.0.1"], ["a server that sends no
   check(asked.length === 1 && asked[0][0] === WS.SERVE_ENDPOINT && asked[0][1].method === "POST" && !String(socks[0]?.url).includes(TOKEN),
     "…after one POST to the token endpoint, with nothing but the port in the URL");
 }
+
+// 2l. a channel's end releases its handler — what Tauri does when its Rust
+//     `Channel` drops — and an `err` to the request that named it does too.
+{
+  const F = K.firstSeq;
+  const shellOpen = (h, ch) => settle(h.door.invoke("shell_open", { repo: "/r", slug: "s", index: 0, cols: 80, rows: 24, onBytes: ch }));
+  const notOpen = (h) => h.warns.filter((w) => /channel \d+/.test(w));
+  {
+    // A dock shell that exits: its bytes, its end, then `shell:exit` (serve
+    // sends the end frame first, on the same queue).
+    const h = harness();
+    await h.ready();
+    const got = [];
+    const ch = h.door.channel();
+    ch.onmessage = (m) => got.push(text(m));
+    let atExit = null;
+    await h.door.listen("shell:exit", () => (atExit = h.openChannels()));
+    const opened = shellOpen(h, ch);
+    const [req] = h.requests();
+    const c = chanId(req?.[K.args].onBytes);
+    h.reply(req?.[K.id], { gen: 1, replay: 0, replay_cols: null });
+    await opened;
+    check(h.openChannels() === 1, `an ok reply does not end the channel its request named — a shell's bytes keep coming after shell_open answers (${h.openChannels()} open)`);
+    h.chan(c, F, b64("a"));
+    h.chan(c, F + 1, b64("b"));
+    h.end(c, F + 2);
+    h.event("shell:exit", { repo: "/r", slug: "s", index: 0 });
+    check(same(got, ["a", "b"]) && h.openChannels() === 0 && atExit === 0,
+      `an end frame releases the channel after its last byte, before the shell:exit behind it (delivered ${JSON.stringify(got)}; ${h.openChannels()} open; ${atExit} at shell:exit)`);
+    h.chan(c, F + 3, b64("late"));
+    check(same(got, ["a", "b"]) && notOpen(h).length === 1, `a frame for an ended channel is not delivered, and is named for the developer (${JSON.stringify(got)}; ${JSON.stringify(notOpen(h))})`);
+  }
+  {
+    // A tmux attach whose end overtakes its data (serve never does that; the
+    // client orders by seq all the same, as Tauri's Channel orders by index).
+    const h = harness();
+    await h.ready();
+    const got = [];
+    const ch = h.door.channel();
+    ch.onmessage = (m) => got.push(text(m));
+    settle(h.door.invoke("term_open", { session: "wt-a", cols: 80, rows: 24, onBytes: ch }));
+    const [req] = h.requests();
+    const c = chanId(req?.[K.args].onBytes);
+    h.reply(req?.[K.id], 7);
+    h.end(c, F + 2);
+    h.chan(c, F + 1, b64("y"));
+    check(got.length === 0 && h.openChannels() === 1, `an end that arrives ahead of data is held: the channel stays open while a frame before it is missing (${h.openChannels()} open)`);
+    h.chan(c, F, b64("x"));
+    check(same(got, ["x", "y"]) && h.openChannels() === 0, `…and is released the moment the frames before it have been delivered (${JSON.stringify(got)}; ${h.openChannels()} open)`);
+  }
+  {
+    // clone_project: progress, its end, then the reply (serve: end precedes it).
+    const h = harness();
+    await h.ready();
+    const progs = [];
+    const prog = h.door.channel();
+    prog.onmessage = (m) => progs.push(m);
+    let atReply = null;
+    const done = settle(h.door.invoke("clone_project", { id: "j", url: "u", parent: "/p", name: null, onProgress: prog }).then((v) => ((atReply = h.openChannels()), v)));
+    const [req] = h.requests();
+    const p = chanId(req?.[K.args].onProgress);
+    h.chan(p, F, { phase: "Receiving objects", percent: 40, detail: null });
+    h.end(p, F + 1);
+    h.reply(req?.[K.id], "/p/u");
+    const r = await done;
+    check(same(r, { ok: "/p/u" }) && progs.length === 1 && progs[0]?.percent === 40 && atReply === 0,
+      `a progress channel ends before its operation's reply: the handler got its one value and NOT the end (${JSON.stringify(progs)}), and is gone when the call resolves (${atReply} open)`);
+  }
+  {
+    // The err rule: a request refused on its arguments made no sink, so no
+    // end frame comes — the err alone ends the channel it named.
+    const h = harness();
+    await h.ready();
+    const ch = h.door.channel();
+    ch.onmessage = () => {};
+    const opened = shellOpen(h, ch);
+    const [req] = h.requests();
+    h.error(req?.[K.id], "invalid args `repo` for command `shell_open`: missing field");
+    const r = await opened;
+    check(typeof r.err === "string" && h.openChannels() === 0, `an err to the request that named a channel ends it, with no end frame (serve made no sink) — ${h.openChannels()} open`);
+    // …and one with a sink: end frame, then the err — released once, quietly.
+    const prog = h.door.channel();
+    prog.onmessage = () => {};
+    const cloned = settle(h.door.invoke("clone_project", { id: "j", url: "u", parent: "/p", name: null, onProgress: prog }));
+    const req2 = h.requests()[1];
+    h.end(chanId(req2?.[K.args].onProgress), F);
+    h.error(req2?.[K.id], { kind: "auth", message: "denied", detail: null });
+    const r2 = await cloned;
+    check(typeof r2.err === "object" && h.openChannels() === 0 && notOpen(h).length === 0, `an end frame then the err: the channel is released once, with nothing to complain about (${JSON.stringify(notOpen(h))})`);
+    // An err to a request that named no channel leaves the open ones alone.
+    const live = h.door.channel();
+    live.onmessage = () => {};
+    const o = shellOpen(h, live);
+    h.reply(h.requests()[2]?.[K.id], { gen: 1, replay: 0, replay_cols: null });
+    await o;
+    const g = settle(h.door.invoke("get_settings"));
+    h.error(h.requests()[3]?.[K.id], "nope");
+    await g;
+    check(h.openChannels() === 1, `an err to a request that named no channel ends none (${h.openChannels()} open)`);
+  }
+  {
+    // A closed connection can deliver nothing again: every handler goes.
+    const h = harness();
+    await h.ready();
+    for (const k of [0, 1]) {
+      const ch = h.door.channel();
+      ch.onmessage = () => {};
+      shellOpen(h, ch);
+      h.reply(h.requests()[k]?.[K.id], { gen: 1, replay: 0, replay_cols: null });
+    }
+    await ticks();
+    const before = h.openChannels();
+    h.drop();
+    check(before === 2 && h.openChannels() === 0, `a closed connection releases every channel it held (${before} → ${h.openChannels()})`);
+  }
+}
+
+// 2m. what the client writes before it is in, by serve's rules: ONE key a
+//     frame, lowercase hex, and all of it inside the pre-proof byte budget.
+{
+  const h = harness();
+  settle(h.door.invoke("write_file", { path: "/r/f", content: "q".repeat(4096), expectedMtime: null })); // queued behind the handshake
+  await h.ready();
+  const all = h.sock?.sent ?? [];
+  const hs = all.filter((t) => !(K.cmd in JSON.parse(t)));
+  const vals = hs.map((t) => Object.values(JSON.parse(t)));
+  check(hs.length === 2 && hs.every((t) => Object.keys(JSON.parse(t)).length === 1),
+    `each handshake frame the client writes has exactly one key — serve refuses a frame with more (${hs.map((t) => Object.keys(JSON.parse(t)).join("+")).join(", ")})`);
+  check(vals.length === 2 && vals.every((v) => v.length === 1 && HEX32.test(String(v[0]))), "…and its value is 64 LOWERCASE hex: serve refuses upper case rather than fold it");
+  // A client frame is masked: 2 bytes of header, 4 of mask, 2 more past 125.
+  const onWire = (t) => { const n = Buffer.byteLength(t); return n + 6 + (n > 125 ? 2 : 0) + (n > 65535 ? 6 : 0); };
+  const pre = hs.reduce((a, t) => a + onWire(t), 0);
+  check(pre <= K.preauth && all.length === 3,
+    `the client's whole output before serve's proof verifies is ${pre} bytes on the wire, inside serve's PREAUTH_BYTES (${K.preauth}); the 4 KiB request queued behind it went only after (${all.length} frames)`);
+}
+
+// 2n. a request bigger than serve reads is refused HERE: serve would end the
+//     whole connection over it, and every terminal on it with the one save.
+{
+  const h = harness();
+  await h.ready();
+  const sent = () => h.requests().length;
+  const over = await settle(h.door.invoke("write_file", { path: "/r/big", content: "x".repeat(K.maxMessage), expectedMtime: null }));
+  check(typeof over.err === "string" && over.err.includes(`${K.maxMessage / 2 ** 20} MiB`) && sent() === 0,
+    `a request over serve's MAX_MESSAGE is refused without being sent, naming the limit (${String(over.err ?? JSON.stringify(over)).slice(0, 120)})`);
+  // Counted in UTF-8 bytes, as serve counts them: 0.6× the limit in "é" is 1.2× on the wire.
+  const wide = await settle(h.door.invoke("write_file", { path: "/r/wide", content: "é".repeat(Math.ceil(K.maxMessage * 0.6)), expectedMtime: null }));
+  check(typeof wide.err === "string" && sent() === 0, "…counted in UTF-8 bytes, as serve counts them, not in string length (0.6× the limit in \"é\" is 1.2× on the wire)");
+  const ch = h.door.channel();
+  const withChan = await settle(h.door.invoke("shell_open", { repo: "/r", slug: "s", index: 0, cols: 80, rows: 24, onBytes: ch, pad: "x".repeat(K.maxMessage) }));
+  check(typeof withChan.err === "string" && h.openChannels() === 0, `…and a channel it named is not held open for frames that cannot come (${h.openChannels()} open)`);
+  const fits = settle(h.door.invoke("write_file", { path: "/r/ok", content: "x".repeat(K.maxMessage - 4096), expectedMtime: null }));
+  check(sent() === 1 && !h.sock?.closed && h.errors.length === 0,
+    "a request under the limit goes out, and a refused one was not a transport failure: the connection stays up, nothing reported");
+  h.reply(h.requests()[0]?.[K.id], null);
+  await fits;
+}
+
+check(THROWN.length === 0, `the client never threw out of a socket callback (${THROWN.length}${THROWN.length ? `: ${THROWN[0]}` : ""})`);
 
 // ── 3. ipc.ts, and the termreplay contract over the socket ──────────────────
 

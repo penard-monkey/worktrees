@@ -12,12 +12,20 @@
 //   ← {"ok": true, "version", "proof": HMAC(token, server|cn|sn)}
 //   → {id, cmd, args}                        ← {id, ok} | {id, err}
 //   ← {channel, seq, data}                   a Channel argument's stream
+//   ← {channel, seq, end: true}              its last frame: the handler goes
 //   ← {event, payload}                       Host::emit, to every socket
 //
 // The token is the HMAC KEY and never goes on the wire. The client sends
 // nothing but the handshake until serve's proof verifies: before then the
 // server is whoever holds the port — after a crash, possibly not serve — and
 // its version claim is not believed either.
+//
+// A channel ends the way Tauri's does when its Rust `Channel` drops: serve
+// sends `{channel, seq, end: true}` after the last data frame (a detach,
+// term_close, a shell exiting, a progress callback's operation returning), and
+// the client drops the handler and whatever it closes over. An `err` reply to
+// the request that named a channel ends it too — serve sends an end frame
+// first only if it had made a sink.
 //
 // `err` is passed through UNCHANGED: a string for 142 commands, the CloneError
 // object for `clone_project`, whose dialog branches on its `kind` — exactly
@@ -49,6 +57,8 @@ export const WIRE = {
   channel: "channel",
   seq: "seq",
   data: "data",
+  /** `{channel, seq, end: true}`: the channel's last frame, `seq` one past its last data. */
+  end: "end",
   event: "event",
   payload: "payload",
   channelPrefix: "__CHANNEL__:",
@@ -68,6 +78,12 @@ export const BYTE_CHANNEL_KEYS: readonly string[] = ["onBytes"];
  *  up. Longer than the server's own `policy::AUTH_DEADLINE` (3s), so a server
  *  that is there and refusing is reported as a refusal, not as a timeout. */
 export const AUTH_WAIT_MS = 5000;
+
+/** The largest message serve reads from an authenticated client (conn.rs
+ *  `MAX_MESSAGE`), counted in UTF-8 bytes. A larger one ENDS the connection,
+ *  every terminal on it included, so a call that would send one is refused
+ *  here instead and the connection stays up. */
+export const MAX_MESSAGE = 16 << 20;
 
 /** serve binds this and nothing else (conn.rs). Dialled as the LITERAL: a
  *  second process can bind `[::1]:<port>` beside serve's socket, and
@@ -123,9 +139,23 @@ type Stream = {
   next: number;
   /** Frames that arrived ahead of `next`, by seq. */
   held: Map<number, unknown>;
+  /** The end frame's seq, once it has arrived: the channel is over when `next` reaches it. */
+  end: number | null;
 };
 
-type Pending = { cmd: string; resolve: (v: unknown) => void; reject: (e: unknown) => void };
+type Pending = {
+  cmd: string;
+  resolve: (v: unknown) => void;
+  reject: (e: unknown) => void;
+  /** The channels this request named: an `err` to it ends them. */
+  channels: number[];
+};
+
+/** The door over a socket, plus what the checks and the drive look at. */
+export type SocketDoor = Door & {
+  /** How many channels this connection still holds a handler for. */
+  openChannels(): number;
+};
 
 function toArrayBuffer(b64: string, atob: (s: string) => string): ArrayBuffer {
   const bin = atob(b64);
@@ -136,19 +166,20 @@ function toArrayBuffer(b64: string, atob: (s: string) => string): ArrayBuffer {
 
 /** A door whose every call fails with `msg` — what the dev boot hands out when
  *  there is no server to connect to at all. */
-export function deadDoor(msg: string): Door {
+export function deadDoor(msg: string): SocketDoor {
   let nextChannel = 1;
   return {
     invoke: () => Promise.reject(msg),
     listen: () => Promise.resolve(() => {}),
     channel: <T>(onmessage?: (response: T) => void) => new WsChannel<T>(nextChannel++, onmessage),
+    openChannels: () => 0,
   };
 }
 
 /** Open a socket to `worktrees serve` and return the door over it. Calls made
  *  before the handshake completes wait for it; nothing but the handshake is
  *  ever written before the server has PROVEN it holds the token. */
-export function connectSocket(d: SocketDeps): Door {
+export function connectSocket(d: SocketDeps): SocketDoor {
   const warn = d.warn ?? (() => {});
   const addr = `${SERVE_HOST}:${d.port}`;
   const url = `ws://${addr}/`;
@@ -209,6 +240,7 @@ export function connectSocket(d: SocketDeps): Door {
     }
     queued.length = 0;
     inbox.length = 0;
+    streams.clear(); // nothing can arrive on them now
     const waiting = [...pending.values()];
     pending.clear();
     for (const p of waiting) p.reject(msg);
@@ -228,25 +260,36 @@ export function connectSocket(d: SocketDeps): Door {
     }
   }
 
-  function onChannel(id: number, seq: number, data: unknown) {
+  /** A channel is over: drop its handler and everything it closes over, as
+   *  Tauri's `Channel` unregisters its callback when the Rust side drops. */
+  function release(id: number) {
+    streams.delete(id);
+  }
+
+  function onChannel(id: number, seq: number, f: Record<string, unknown>) {
     const st = streams.get(id);
     if (!st) {
-      warn(`worktrees serve: a frame for channel ${id}, which this client never sent`);
+      warn(`worktrees serve: a frame for channel ${id}, which is not open here (never sent, or already ended)`);
       return;
     }
-    if (seq < st.next || st.held.has(seq)) return; // a duplicate
-    if (seq !== st.next) {
-      st.held.set(seq, data);
+    if (seq < st.next || st.held.has(seq) || seq === st.end) return; // a duplicate
+    if (f[WIRE.end] === true) {
+      // Ordered like data: it ends the channel once every frame before it is in.
+      st.end = seq;
+    } else if (seq !== st.next) {
+      st.held.set(seq, f[WIRE.data]);
       return;
-    }
-    deliver(st, data);
-    st.next++;
-    while (st.held.has(st.next)) {
-      const held = st.held.get(st.next);
-      st.held.delete(st.next);
-      deliver(st, held);
+    } else {
+      deliver(st, f[WIRE.data]);
       st.next++;
+      while (st.held.has(st.next)) {
+        const held = st.held.get(st.next);
+        st.held.delete(st.next);
+        deliver(st, held);
+        st.next++;
+      }
     }
+    if (st.next === st.end) release(id);
   }
 
   function onReply(f: Record<string, unknown>) {
@@ -261,6 +304,7 @@ export function connectSocket(d: SocketDeps): Door {
     }
     pending.delete(id as number);
     if (WIRE.err in f) {
+      for (const c of p.channels) release(c);
       if (f[WIRE.err] === WIRE.clientLocal) warn(`${p.cmd} is client-local: it acts on the machine the window runs on, and the socket refuses it`);
       p.reject(f[WIRE.err]);
     } else {
@@ -330,7 +374,7 @@ export function connectSocket(d: SocketDeps): Door {
       (state === "hello" ? onChallenge(f) : onWelcome(f)).catch((e) => shut(`the handshake failed in this client: ${String(e)}`));
       return;
     }
-    if (WIRE.channel in f) onChannel(Number(f[WIRE.channel]), Number(f[WIRE.seq]), f[WIRE.data]);
+    if (WIRE.channel in f) onChannel(Number(f[WIRE.channel]), Number(f[WIRE.seq]), f);
     else if (WIRE.event in f) {
       const name = String(f[WIRE.event]);
       for (const h of [...(listeners.get(name) ?? [])]) h({ event: name, id: nextEvent++, payload: f[WIRE.payload] } as Event<unknown>);
@@ -376,19 +420,38 @@ export function connectSocket(d: SocketDeps): Door {
   // A failed socket fires `error` and then `close`; `close` says what happened.
   ws.onerror = () => {};
 
+  /** `text`'s size in UTF-8 bytes if it is over MAX_MESSAGE, else 0. A UTF-16
+   *  unit is 1–3 bytes, so only a string within 3× of the limit is encoded. */
+  function oversize(text: string): number {
+    if (text.length * 3 <= MAX_MESSAGE) return 0;
+    const n = text.length > MAX_MESSAGE ? text.length : enc.encode(text).length;
+    return n > MAX_MESSAGE ? n : 0;
+  }
+
   function invoke<T>(cmd: string, args?: InvokeArgs): Promise<T> {
     if (state === "closed") return Promise.reject(failure);
     const a = (args ?? {}) as Record<string, unknown>;
-    // Channels are bound where they are SENT: the key decides bytes vs typed.
-    for (const [key, v] of Object.entries(a)) {
-      if (v instanceof WsChannel && !streams.has(v.id)) {
-        streams.set(v.id, { ch: v, bytes: BYTE_CHANNEL_KEYS.includes(key), next: WIRE.firstSeq, held: new Map() });
-      }
-    }
     const id = nextId++;
     const text = JSON.stringify({ [WIRE.id]: id, [WIRE.cmd]: cmd, [WIRE.args]: a });
+    const over = oversize(text);
+    if (over) {
+      const mib = (n: number) => `${Math.round((n / 2 ** 20) * 10) / 10} MiB`;
+      return Promise.reject(
+        `${cmd}: this request is over ${mib(over)}, and worktrees serve reads at most ${mib(MAX_MESSAGE)} in one message — ` +
+          "it would end the connection, every terminal on it too, rather than read it. Not sent.",
+      );
+    }
+    // Channels are bound where they are SENT: the key decides bytes vs typed.
+    const channels: number[] = [];
+    for (const [key, v] of Object.entries(a)) {
+      if (!(v instanceof WsChannel)) continue;
+      channels.push(v.id);
+      if (!streams.has(v.id)) {
+        streams.set(v.id, { ch: v, bytes: BYTE_CHANNEL_KEYS.includes(key), next: WIRE.firstSeq, held: new Map(), end: null });
+      }
+    }
     return new Promise<T>((resolve, reject) => {
-      pending.set(id, { cmd, resolve: resolve as (v: unknown) => void, reject });
+      pending.set(id, { cmd, resolve: resolve as (v: unknown) => void, reject, channels });
       if (state === "ready") ws.send(text);
       else queued.push(text);
     });
@@ -408,6 +471,7 @@ export function connectSocket(d: SocketDeps): Door {
     invoke,
     listen,
     channel: <T>(onmessage?: (response: T) => void) => new WsChannel<T>(nextChannel++, onmessage),
+    openChannels: () => streams.size,
   };
 }
 
@@ -422,7 +486,7 @@ export type BootDeps = Omit<SocketDeps, "port" | "token"> & {
 
 /** The dev boot: ask the dev server where the stack is, then connect. The
  *  token lives only in this closure and the HMAC key made from it. */
-export async function bootSocket(d: BootDeps): Promise<Door> {
+export async function bootSocket(d: BootDeps): Promise<SocketDoor> {
   let port: number;
   let token: string;
   try {
