@@ -66,7 +66,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   Keystrokes to one terminal or dock shell reach it in the order they were
   sent (one serial lane per stream; everything else stays concurrent), and a
   finished channel says so with `{channel, seq, end: true}`, so a client can
-  let the handler go the way it does when a Tauri `Channel` drops.
+  let the handler go the way it does when a Tauri `Channel` drops. A dock
+  shell opens only in a place of the repository named, and a slug that is
+  not one (`--all`, a name no place has) is refused with the reason before
+  any shell starts.
 - **Applying the worktrees rules or the agent-setup Fix now opens a review
   lane for the `agent-instructions` branch**: a place on it, with an agent
   whose brief explains what the branch changes — each file, the AGENTS.md

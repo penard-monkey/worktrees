@@ -433,6 +433,10 @@ pub fn shell_open(
     on_bytes: Arc<dyn ByteSink>,
     shells: &Shells,
 ) -> Result<ShellAttach, String> {
+    // A client's string, about to name a directory a login shell starts in:
+    // the shape check here, "is it a place" in `place_session_cwd`, both
+    // before anything spawns.
+    let slug = worktrees_core::argv::safe_arg(&slug, "slug")?;
     let key: ShellKey = (repo.clone(), slug.clone(), index);
     let mut map = shells.0.lock().unwrap();
     if let Some(sh) = map.get_mut(&key) {
@@ -631,8 +635,15 @@ pub fn shell_detach(repo: String, slug: String, index: u32, gen: u64, shells: &S
 /// keeps the webview from naming/killing arbitrary tmux sessions or opening a
 /// shell outside the workspace, and keeps sidecar names STABLE (a place's
 /// canonical name doesn't change when it briefly runs under an adopted session).
+///
+/// Only for a slug that IS a place, by the index `drop_reference` and the MCP
+/// resources read: `place_dir` joins whatever it is given onto `.worktrees/`,
+/// and a slug naming nothing became a shell in a directory that is not one.
 pub fn place_session_cwd(repo: &str, slug: &str) -> Result<(String, String), String> {
     let p = Project::discover(Path::new(repo)).map_err(|e| e.msg)?;
+    if !p.place_index().iter().any(|pl| pl.slug == slug) {
+        return Err(format!("no such place: {slug}"));
+    }
     Ok((p.session_name(slug), p.place_dir(slug)))
 }
 
@@ -2216,5 +2227,66 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// A sink for tests about what happens before a byte is sent.
+    struct Nowhere;
+    impl ByteSink for Nowhere {
+        fn send(&self, _: &[u8]) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// A fresh `git init` with one place under `.worktrees/` beside `(main)`:
+    /// a directory there is all `place_index` reads, no registration needed.
+    /// Returns (scratch root, repo).
+    fn repo_with_a_lane(tag: &str) -> (PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!("wt-shellslug-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = base.join("repo");
+        std::fs::create_dir_all(repo.join(".worktrees/lane")).unwrap();
+        assert!(worktrees_core::git::git_ok(&repo.to_string_lossy(), &["init", "-q"]), "git init");
+        (base, repo)
+    }
+
+    /// `shell_open` starts a login shell in `<wt_root>/<slug>`, and the slug is
+    /// a client's string. It is held to the rule the other place commands
+    /// share — core's `safe_arg`, then "is it a place" — and refused before
+    /// anything spawns: `--all` and a slug naming nothing each got a shell.
+    #[test]
+    fn shell_open_refuses_a_slug_that_is_not_a_place_before_anything_spawns() {
+        let (base, repo) = repo_with_a_lane("refuse");
+        let ctx = Ctx::new(base.join("cfg"), Arc::new(crate::tests::Recorder::default()));
+        let shells = Shells::default();
+        let repo_s = repo.to_string_lossy().into_owned();
+        for (slug, why) in [
+            ("--all", "may not begin with '-'"),
+            ("-x", "may not begin with '-'"),
+            ("nope", "no such place: nope"),
+            ("lane/sub", "no such place: lane/sub"),
+            ("lane/../..", "not allowed"),
+            ("", "slug is required"),
+        ] {
+            let r = shell_open(&ctx, repo_s.clone(), slug.into(), 0, 80, 24, Arc::new(Nowhere), &shells);
+            let e = r.err().unwrap_or_else(|| panic!("`{slug}` was given a shell"));
+            assert!(e.contains(why), "`{slug}`: {e}");
+        }
+        assert!(shells.0.lock().unwrap().is_empty(), "a refused slug left a shell behind");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The other half: a place of the repo still resolves, `(main)` to the
+    /// checkout and a `.worktrees/` directory to itself. (The serve socket
+    /// tests open `(main)` shells end to end.)
+    #[test]
+    fn a_place_of_the_repo_still_resolves_to_its_session_and_directory() {
+        let (base, repo) = repo_with_a_lane("resolve");
+        let repo_s = repo.to_string_lossy().into_owned();
+        let (_, main_cwd) = place_session_cwd(&repo_s, "(main)").unwrap();
+        assert!(main_cwd.ends_with("/repo"), "{main_cwd}");
+        let (session, cwd) = place_session_cwd(&repo_s, "lane").unwrap();
+        assert!(cwd.ends_with("/repo/.worktrees/lane"), "{cwd}");
+        assert!(session.ends_with("-lane"), "{session}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
