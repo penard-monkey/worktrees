@@ -830,20 +830,7 @@ impl Adapter for Kimi {
     /// fresh. A fresh launch takes the chosen model, else `[model] kimi`,
     /// else kimi's own `default_model`, which is the user's and is fine.
     fn prepare(&self, _p: &Project, _slug: &str, _wt: &str, launch: &mut AiLaunch) -> Result<(), Refusal> {
-        self.installed().map_err(Refusal::Hard)?;
-        if launch.resume {
-            match launch.resume_id.as_deref().filter(|id| crate::kimi::valid_session_id(id)) {
-                Some(id) => launch.cmd.push_str(&format!(" -S {}", shell_quote(id))),
-                None => launch.resume = false,
-            }
-        }
-        if !launch.resume && launch.model.is_none() {
-            launch.model = crate::config::default_model(self.provider().id);
-        }
-        if let Some(m) = launch.model.as_deref() {
-            crate::choice::validate_model(m).map_err(Refusal::Hard)?;
-        }
-        Ok(())
+        kimi_prepare_in(launch, self.installed(), || crate::config::default_model(self.provider().id))
     }
 
     fn never_launched(&self, p: &Project, slug: &str) -> bool {
@@ -937,6 +924,7 @@ impl Adapter for Kimi {
         let t0 = std::time::Instant::now();
         let outcome = crate::kimi::submit_kimi(
             &prefix,
+            None,
             baseline,
             || tmux::capture(&pane),
             || crate::kimi::receipts(req.path, &prefix),
@@ -946,6 +934,30 @@ impl Adapter for Kimi {
         );
         Delivery::Typed { session, outcome }
     }
+}
+
+/// `Kimi::prepare` over what it reads (whether kimi is installed, the user's
+/// `[model] kimi`), so a test drives it without touching the process env or
+/// the user's config.
+fn kimi_prepare_in(
+    launch: &mut AiLaunch,
+    installed: Result<(), String>,
+    default_model: impl FnOnce() -> Option<String>,
+) -> Result<(), Refusal> {
+    installed.map_err(Refusal::Hard)?;
+    if launch.resume {
+        match launch.resume_id.as_deref().filter(|id| crate::kimi::valid_session_id(id)) {
+            Some(id) => launch.cmd.push_str(&format!(" -S {}", shell_quote(id))),
+            None => launch.resume = false,
+        }
+    }
+    if !launch.resume && launch.model.is_none() {
+        launch.model = default_model();
+    }
+    if let Some(m) = launch.model.as_deref() {
+        crate::choice::validate_model(m).map_err(Refusal::Hard)?;
+    }
+    Ok(())
 }
 
 /// `claude_usage`'s rows as the shared shape.
@@ -1148,26 +1160,23 @@ mod tests {
         l.opener = Some(crate::ops::BRIEF_OPENER.into());
         assert_eq!(l.launch_cmd("p-feat~agent~kimi"), "kimi -m 'kimi-code/k3'");
         assert!(!KIMI.opener_in_argv() && CLAUDE.opener_in_argv() && CODEX.opener_in_argv() && PI.opener_in_argv());
-        let p = Project::for_test("/repo");
         let mut r = AiLaunch::plain("kimi");
         r.resume = true;
         r.model = Some("kimi-code/k3".into());
         r.resume_id = Some("session_c8ce7b2e-8f8a-4cd2-88e8-c0ca9bbbbf5e".into());
-        // `prepare` refuses without the binary; point it at one that exists.
-        std::env::set_var("WORKTREES_KIMI_BIN", "/bin/sh");
-        KIMI.prepare(&p, "feat", "/repo/.worktrees/feat", &mut r).unwrap();
+        kimi_prepare_in(&mut r, Ok(()), || panic!("a resume never asks for a default model")).unwrap();
         assert_eq!(r.launch_cmd("p-feat~agent~kimi"), "kimi -S 'session_c8ce7b2e-8f8a-4cd2-88e8-c0ca9bbbbf5e'");
         // An id that is not kimi's shape never reaches argv: it launches fresh.
         let mut bad = AiLaunch::plain("kimi");
         bad.resume = true;
         bad.resume_id = Some("x'; touch /tmp/PWNED".into());
-        // A model of its own, so the fresh fallback never reads the user's
-        // real `[model] kimi` — no unit test touches ~/.config/worktrees.
-        bad.model = Some("kimi-code/k3".into());
-        KIMI.prepare(&p, "feat", "/repo/.worktrees/feat", &mut bad).unwrap();
+        kimi_prepare_in(&mut bad, Ok(()), || Some("kimi-code/k3".into())).unwrap();
         assert!(!bad.resume);
         assert!(!bad.launch_cmd("s").contains("-S"), "{}", bad.launch_cmd("s"));
-        std::env::remove_var("WORKTREES_KIMI_BIN");
+        assert_eq!(bad.model.as_deref(), Some("kimi-code/k3"), "a fresh launch takes the user's default");
+        // Not installed: refused before anything else.
+        let mut none = AiLaunch::plain("kimi");
+        assert!(matches!(kimi_prepare_in(&mut none, Err("missing".into()), || None), Err(Refusal::Hard(_))));
         assert_eq!(KIMI.resume_arg("/w"), "");
         assert!(KIMI.exact_resume());
         assert_eq!(KIMI.resume_display(), "-S <per place session>");

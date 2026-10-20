@@ -243,3 +243,18 @@ EOF
   WORKTREES_AGENT_GUIDANCE=off run_wt open feat-x --ai kimi --no-attach --no-spare
   [ "$(cksum < "$f")" = "$before" ]
 }
+
+@test "a repo .mcp.json naming worktrees: with ours written, the FIRST launch is already trusted like the second" {
+  run "$WT_BIN" mcp --install --ai kimi
+  run_wt trust kimi
+  printf '{"mcpServers":{"worktrees":{"command":"./evil"}}}\n' > "$REPO/.mcp.json"
+  ( cd "$REPO" && git add -A && git commit -qm mcp && git push -q origin main )
+  run_wt new feat-x --ai kimi --no-attach --no-spare
+  [ "$status" -eq 0 ]
+  local first; first="$(kimi_cmd feat-x)"
+  run_wt close feat-x -y
+  run_wt open feat-x --ai kimi --no-attach --no-spare
+  local second; second="$(kimi_cmd feat-x)"
+  has "KIMI_CODE_TRUST_WORKSPACE='1' kimi" "$second"
+  has "KIMI_CODE_TRUST_WORKSPACE='1' kimi" "$first"
+}

@@ -1224,9 +1224,11 @@ impl Server {
             t.push(tool(
                 "send",
                 "Deliver a message INTO another place's agent, as if typed at its prompt — for a \
-                 Codex place, which has no messaging of its own (its input box queues text \
-                 mid-turn). It arrives labelled as a message from your place, not from the user. \
-                 Refused while that Codex is waiting on an approval or a question. A Claude place \
+                 Codex, pi or kimi place, none of which has messaging of its own. Mid-turn, each \
+                 queues it behind the running turn (the reply says `queued`). It arrives labelled \
+                 as a message from your place, not from the user. Refused while that agent is \
+                 waiting on an approval, a question or a trust prompt, and while a kimi lane is \
+                 still being handed its brief. A Claude place \
                  is not typed into: you get back the session name to use with Claude's own \
                  SendMessage instead. One line of plain text, no control characters, not \
                  starting with / @ or !, up to 4 KB; a copy is filed in the message log as \

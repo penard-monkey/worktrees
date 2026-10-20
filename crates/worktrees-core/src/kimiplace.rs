@@ -36,6 +36,8 @@ const SKILL_MARK: &str = ".worktrees";
 /// The lines in `info/exclude`. Anchored (`/`): relative to each worktree's
 /// root, which is every place's own `.kimi-code/`.
 pub const EXCLUDES: &[&str] = &["/.kimi-code/mcp.json", "/.kimi-code/AGENTS.md", "/.kimi-code/skills/worktrees/"];
+/// The comment above them, so whoever reads the file knows whose they are.
+pub const EXCLUDE_HEADER: &str = "# worktrees: kimi's per-place files (removed once no place has any)";
 
 pub fn mcp_path(wt: &str) -> PathBuf {
     Path::new(wt).join(DIR).join("mcp.json")
@@ -208,11 +210,97 @@ pub fn sync(wt: &str, git_common: &str, want: &Want) -> Vec<String> {
         warn.extend(sync_file(&dir.join("SKILL.md"), Some(text), |_| true, false, "kimi skill"));
         warn.extend(sync_file(&mark, Some(MARK), |_| true, false, "kimi skill"));
     } else if dir.exists() {
-        if let Err(e) = std::fs::remove_dir_all(&dir) {
-            warn.push(format!("kimi skill: could not remove {}: {e}", dir.display()));
+        // Only what we wrote: the skill and its mark. Anything else the user
+        // put beside them stays, and so does the directory then.
+        for f in [dir.join("SKILL.md"), mark.clone()] {
+            match std::fs::remove_file(&f) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => warn.push(format!("kimi skill: could not remove {}: {e}", f.display())),
+            }
+        }
+        let _ = std::fs::remove_dir(&dir);
+    }
+    // Nothing of ours left here: if no place of the repo has any either, our
+    // exclude lines go too, so they never outlive the files they are for.
+    if !ours_present(wt) {
+        let places = worktree_dirs(wt);
+        if !places.is_empty() && places.iter().all(|w| !ours_present(w)) {
+            if let Err(e) = prune_excluded(git_common) {
+                warn.push(format!("could not remove worktrees' kimi lines from info/exclude: {e}"));
+            }
+        }
+    }
+    // A file of the user's under one of OUR exclude lines is invisible to
+    // `git status` and `git add -A` in every place — say so wherever one is.
+    for rel in [".kimi-code/mcp.json", ".kimi-code/AGENTS.md", ".kimi-code/skills/worktrees/SKILL.md"] {
+        let path = Path::new(wt).join(rel);
+        let mine = match rel {
+            ".kimi-code/mcp.json" => std::fs::read_to_string(&path).is_ok_and(|t| is_ours(&t)),
+            ".kimi-code/AGENTS.md" => std::fs::read_to_string(&path).is_ok_and(|t| agents_is_ours(&t)),
+            _ => mark.is_file(),
+        };
+        if path.is_file() && !mine && !is_tracked(rel) && hidden_by_us(wt, rel) {
+            warn.push(format!(
+                "{} is yours, but worktrees' line in {}/info/exclude hides it from git status and git add — \
+                 `git add -f` it to keep it",
+                path.display(),
+                git_common
+            ));
         }
     }
     warn
+}
+
+/// Whether `wt` holds any kimi file worktrees wrote.
+pub fn ours_present(wt: &str) -> bool {
+    std::fs::read_to_string(mcp_path(wt)).is_ok_and(|t| is_ours(&t))
+        || std::fs::read_to_string(agents_path(wt)).is_ok_and(|t| agents_is_ours(&t))
+        || skill_dir(wt).join(SKILL_MARK).is_file()
+}
+
+/// Every worktree of `wt`'s repo, the main checkout included.
+fn worktree_dirs(wt: &str) -> Vec<String> {
+    let out = std::process::Command::new("git").args(["-C", wt, "worktree", "list", "--porcelain"]).output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .filter_map(|l| l.strip_prefix("worktree "))
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Whether `rel` in `wt` is ignored by one of OUR exclude lines.
+fn hidden_by_us(wt: &str, rel: &str) -> bool {
+    let out = std::process::Command::new("git").args(["-C", wt, "check-ignore", "-v", "--no-index", "--", rel]).output();
+    match out {
+        Ok(o) if o.status.success() => {
+            let line = String::from_utf8_lossy(&o.stdout);
+            line.contains("info/exclude:") && EXCLUDES.iter().any(|e| line.contains(&format!(":{e}\t")))
+        }
+        _ => false,
+    }
+}
+
+/// Remove our lines (and their header) from `<git_common>/info/exclude`.
+pub fn prune_excluded(git_common: &str) -> Result<(), String> {
+    let excl = Path::new(git_common).join("info").join("exclude");
+    let existing = match std::fs::read_to_string(&excl) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("{}: {e}", excl.display())),
+    };
+    let kept: Vec<&str> = existing.lines().filter(|l| l.trim() != EXCLUDE_HEADER && !EXCLUDES.contains(&l.trim())).collect();
+    if kept.len() == existing.lines().count() {
+        return Ok(());
+    }
+    let mut body = kept.join("\n");
+    if !body.is_empty() {
+        body.push('\n');
+    }
+    std::fs::write(&excl, body).map_err(|e| format!("{}: {e}", excl.display()))
 }
 
 /// Append any missing `EXCLUDES` line to `<git_common>/info/exclude`.
@@ -232,6 +320,10 @@ pub fn ensure_excluded(git_common: &str) -> Result<(), String> {
     }
     let mut body = existing;
     if !body.is_empty() && !body.ends_with('\n') {
+        body.push('\n');
+    }
+    if !body.lines().any(|l| l.trim() == EXCLUDE_HEADER) {
+        body.push_str(EXCLUDE_HEADER);
         body.push('\n');
     }
     for l in missing {
@@ -386,7 +478,7 @@ mod tests {
         assert!(std::fs::read_to_string(agents_path(&wt)).unwrap().contains("the rule"));
         assert!(skill_dir(&wt).join("SKILL.md").is_file());
         let excl = std::fs::read_to_string(t.join(".git/info/exclude")).unwrap();
-        for l in EXCLUDES {
+        for l in EXCLUDES.iter().chain([&EXCLUDE_HEADER]) {
             assert_eq!(excl.lines().filter(|x| x == l).count(), 1, "{l}");
         }
         // git sees none of it.
@@ -401,6 +493,9 @@ mod tests {
         assert!(sync(&wt, &common, &Want { mcp: None, agents: None, skill: None }).is_empty());
         assert!(!mcp_path(&wt).exists() && !agents_path(&wt).exists() && !skill_dir(&wt).exists());
         assert!(t.join(".kimi-code/tui-notes.md").is_file());
+        // No place has any of ours now: the lines and their header go too.
+        let after = std::fs::read_to_string(t.join(".git/info/exclude")).unwrap();
+        assert!(EXCLUDES.iter().chain([&EXCLUDE_HEADER]).all(|l| !after.lines().any(|x| x == *l)), "{after}");
         let _ = std::fs::remove_dir_all(&t);
     }
 
@@ -414,14 +509,67 @@ mod tests {
         std::fs::write(agents_path(&wt), "# their own kimi notes\n").unwrap();
         std::fs::write(skill_dir(&wt).join("SKILL.md"), "theirs").unwrap();
         let warn = sync(&wt, &common, &want_all());
+        assert_eq!(warn.iter().filter(|w| w.contains("does not overwrite")).count(), 3, "{warn:?}");
+        // Nothing of ours was written anywhere, so the lines this sync added
+        // came straight back out: none of the user's files is hidden by us.
         assert_eq!(warn.len(), 3, "{warn:?}");
-        assert!(warn.iter().all(|w| w.contains("does not overwrite")), "{warn:?}");
+        let excl = std::fs::read_to_string(t.join(".git/info/exclude")).unwrap_or_default();
+        assert!(EXCLUDES.iter().all(|l| !excl.lines().any(|x| x == *l)), "{excl}");
         assert_eq!(std::fs::read_to_string(mcp_path(&wt)).unwrap(), theirs);
         assert_eq!(std::fs::read_to_string(agents_path(&wt)).unwrap(), "# their own kimi notes\n");
         assert_eq!(std::fs::read_to_string(skill_dir(&wt).join("SKILL.md")).unwrap(), "theirs");
         // Turning it off removes nothing of theirs, and says nothing.
         assert!(sync(&wt, &common, &Want { mcp: None, agents: None, skill: None }).is_empty());
         assert!(mcp_path(&wt).is_file() && agents_path(&wt).is_file());
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    /// Review of #509: our lines outlive the moment they were written for. A
+    /// user who LATER writes their own `.kimi-code/AGENTS.md` must be told it
+    /// is invisible to git, not discover it after a push without it.
+    #[test]
+    fn a_users_own_file_under_our_exclude_line_is_named_at_every_launch() {
+        let (t, common) = repo("hidden");
+        let wt = t.to_string_lossy().into_owned();
+        let only_mcp = Want { mcp: Some(render_mcp("/bin/worktrees", true)), agents: None, skill: None };
+        assert!(sync(&wt, &common, &only_mcp).is_empty());
+        std::fs::write(agents_path(&wt), "# my own kimi notes\n").unwrap();
+        let warn = sync(&wt, &common, &only_mcp);
+        assert_eq!(warn.len(), 1, "{warn:?}");
+        assert!(warn[0].contains("AGENTS.md is yours") && warn[0].contains("git add -f"), "{}", warn[0]);
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn turning_the_skill_off_leaves_what_the_user_put_beside_it() {
+        let (t, common) = repo("skillkeep");
+        let wt = t.to_string_lossy().into_owned();
+        assert!(sync(&wt, &common, &want_all()).is_empty());
+        std::fs::write(skill_dir(&wt).join("notes.md"), "mine").unwrap();
+        sync(&wt, &common, &Want { mcp: None, agents: None, skill: None });
+        assert!(!skill_dir(&wt).join("SKILL.md").exists() && !skill_dir(&wt).join(SKILL_MARK).exists());
+        assert_eq!(std::fs::read_to_string(skill_dir(&wt).join("notes.md")).unwrap(), "mine");
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn the_lines_stay_while_another_place_still_has_our_files() {
+        let (t, common) = repo("stay");
+        let wt = t.to_string_lossy().into_owned();
+        let git = |a: &[&str]| assert!(std::process::Command::new("git").args(a).current_dir(&t).status().unwrap().success());
+        git(&["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"]);
+        let other = t.join("other");
+        git(&["worktree", "add", "-q", "-b", "other", other.to_str().unwrap()]);
+        let ow = other.to_string_lossy().into_owned();
+        assert!(sync(&ow, &common, &want_all()).is_empty());
+        // This place turns it all off; the other still has ours.
+        assert!(sync(&wt, &common, &Want { mcp: None, agents: None, skill: None }).is_empty());
+        let excl = std::fs::read_to_string(t.join(".git/info/exclude")).unwrap();
+        assert!(EXCLUDES.iter().all(|l| excl.lines().any(|x| x == *l)), "{excl}");
+        // The other turns off too: now they go.
+        assert!(sync(&ow, &common, &Want { mcp: None, agents: None, skill: None }).is_empty());
+        let excl = std::fs::read_to_string(t.join(".git/info/exclude")).unwrap();
+        assert!(EXCLUDES.iter().all(|l| !excl.lines().any(|x| x == *l)), "{excl}");
         let _ = std::fs::remove_dir_all(&t);
     }
 

@@ -52,9 +52,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   every new place; `worktrees trust kimi` lets this repository's lanes start
   trusted, for that launch only. `worktrees mcp --install --ai kimi` gives kimi
   lanes the worktrees tools: worktrees writes them, with the worktrees skill
-  and rule, into the place's own `.kimi-code/`, keeps those files out of git,
-  and never touches kimi's own configuration or a `.kimi-code/` file the
-  repository already has. In the app, the new-worktree dialog offers Kimi
+  and rule, into the place's own `.kimi-code/`, keeps those files out of git
+  (lines in the repository's `.git/info/exclude`, removed again once no place
+  has any), and never touches kimi's own configuration or a `.kimi-code/` file
+  the repository already has — a launch says when one of yours sits where
+  those lines would hide it from git. A per-place MCP server of your own
+  belongs in the repository's `.mcp.json` or kimi's own `mcp.json`: the place's
+  `.kimi-code/mcp.json` is rewritten at every launch. In the app, the new-worktree dialog offers Kimi
   with kimi's own model list, and a kimi lane's row gets its mark and the busy,
   waiting and finished dots; Kimi's Settings page comes next.
 

@@ -97,6 +97,13 @@ pub fn ai_launch_for(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> cr
     launch.guidance = guidance_for(p, ui, wt, &launch);
     launch.planning = planning_for(p, ui, wt, &launch);
     kimi_place_files(p, ui, wt, &launch);
+    // AFTER the place files: kimi's trust depends on whether OUR `mcp.json`
+    // is written (`trust::kimi_mcp_shadowed`), and deciding it before the
+    // first launch had written one made the first and second launches
+    // disagree (#509 review).
+    if let Some(a) = crate::harness::for_cmd(&launch.cmd).filter(|_| !launch.cmd.is_empty()) {
+        launch.env.extend(a.place_env(wt));
+    }
     launch
 }
 
@@ -239,7 +246,6 @@ fn ai_launch_inner(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> crat
     // not a profile setting.
     if let Some(a) = crate::harness::by_word(&plain.match_word) {
         plain.place_flags = a.place_flags(wt);
-        plain.env.extend(a.place_env(wt));
         // `trust::pi_flag` already withheld `--approve`; this is the WHY, said
         // where the launch happens rather than discovered in the lane.
         if a.provider().id == crate::provider::PI.id {
@@ -2249,12 +2255,22 @@ fn kimi_doctor(p: &Project, ui: &mut dyn Ui, json: bool) -> i32 {
         crate::proc::run_deadline(cmd, 10).ok().filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
     });
-    let launch = crate::trust::kimi_launch_trust(&p.main_root);
     let mcp = crate::kimiplace::status();
     let catalog = crate::kimimodels::catalog();
-    let place = std::env::current_dir().ok().map(|d| d.to_string_lossy().into_owned()).unwrap_or_else(|| p.main_root.clone());
-    let slug = if place.contains("/.worktrees/") { basename(&place) } else { "(main)".to_string() };
+    // The place doctor runs in (its own .kimi-code/ and .mcp.json decide its
+    // trust), or (main) when that is not a place of this project.
+    let place = std::env::current_dir()
+        .ok()
+        .and_then(|d| {
+            let d = d.to_string_lossy().into_owned();
+            let slug = d.strip_prefix(&format!("{}/", p.wt_root))?.split('/').next()?.to_string();
+            Some(format!("{}/{slug}", p.wt_root))
+        })
+        .unwrap_or_else(|| p.main_root.clone());
+    let launch = crate::trust::kimi_launch_trust(&place);
+    let slug = if place == p.main_root { "(main)".to_string() } else { basename(&place) };
     let opener = crate::kimi::last_opener_line(&p.git_common, &slug);
+    let missed = crate::kimi::sessions_missed(&crate::kimi::sessions_root(), &place);
     let rc = if bin.is_none() { crate::diag::EXIT_FINDINGS } else { 0 };
     if json {
         let (models, default, catalog_error) = match &catalog {
@@ -2271,6 +2287,7 @@ fn kimi_doctor(p: &Project, ui: &mut dyn Ui, json: bool) -> i32 {
                 "default_model": default,
                 "catalog_error": catalog_error,
                 "opener": opener,
+                "sessions_missed": missed,
             })
             .to_string(),
         );
@@ -2308,6 +2325,12 @@ fn kimi_doctor(p: &Project, ui: &mut dyn Ui, json: bool) -> i32 {
     }
     if let Some(line) = opener {
         ui.info(&format!("opener {line}"));
+    }
+    if missed > 0 {
+        ui.warn(&format!(
+            "kimi keeps {missed} session(s) for {place} under a workspace name worktrees does not derive — \
+             resume and the activity dots cannot see them (a kimi upgrade that changed its naming?)"
+        ));
     }
     if bin.is_none() {
         ui.error("kimi is not installed (or not on PATH / ~/.kimi-code/bin)");

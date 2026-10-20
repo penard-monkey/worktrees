@@ -136,6 +136,29 @@ pub fn sessions_in(root: &Path, cwd: &str) -> Vec<KimiSession> {
     out
 }
 
+/// Sessions for `cwd` in workspace dirs whose name is NOT the slug
+/// `sessions_in` derives — what a divergence from kimi's own
+/// `slugifyWorkDirName` (a newer kimi, a name the port gets wrong) would
+/// leave unseen: no resume, no dot, and nothing else saying why. Opens every
+/// workspace dir, so `doctor --kimi` asks, never the poll.
+pub fn sessions_missed(root: &Path, cwd: &str) -> usize {
+    let base = Path::new(cwd.trim_end_matches('/')).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let prefix = format!("wd_{}_", slug(&base));
+    let Ok(workspaces) = std::fs::read_dir(root) else { return 0 };
+    workspaces
+        .flatten()
+        .filter(|ws| {
+            let n = ws.file_name().to_string_lossy().into_owned();
+            n.starts_with("wd_") && !n.starts_with(&prefix)
+        })
+        .filter_map(|ws| std::fs::read_dir(ws.path()).ok())
+        .flat_map(|d| d.flatten())
+        .filter_map(|s| std::fs::read_to_string(s.path().join("state.json")).ok())
+        .filter_map(|t| parse_state(&t))
+        .filter(|(id, scwd, ..)| valid_session_id(id) && same_dir(scwd, cwd))
+        .count()
+}
+
 /// When the place's directory was made, in epoch ms — `None` where the
 /// filesystem cannot say. A place removed and re-created under the same slug
 /// has the same path, so the same kimi workspace: without this, `-c` and every
@@ -475,7 +498,7 @@ pub fn kimi_activity(panes: &tmux::PaneList, canonical: &str, path: &str) -> Opt
         return before_start(name.clone(), pending, panes.has_session(&name));
     }
     let turn = current_session(path).and_then(|s| session_tail(&s.wire()).1);
-    let (state, last_done) = with_pending_opener(kimi_state(turn.as_ref(), capture(&name)), pending);
+    let (state, last_done) = lane_state(turn.as_ref(), capture(&name), pending);
     Some(Activity { provider: Some("kimi"), state, last_done, session: Some(name), reason: None })
 }
 
@@ -489,6 +512,16 @@ pub fn before_start(session: String, pending: bool, session_up: bool) -> Option<
         session: Some(session),
         reason: None,
     })
+}
+
+/// THE kimi reading for a running lane: its log's newest turn, one capture of
+/// its pane, and whether its opener is pending. `place_status`/`wait`
+/// (`kimi_activity`) and the app's dot tick (`kimi_tick_in`) both call this,
+/// each with a capture of its own — never a reading without one, or a kimi
+/// that died mid-turn (`Gone`) stays busy on the dot while `place_status`
+/// says it is gone.
+pub fn lane_state(turn: Option<&KimiTurn>, screen: Option<KimiScreen>, pending: bool) -> (State, Option<i64>) {
+    with_pending_opener(kimi_state(turn, screen), pending)
 }
 
 /// A lane whose opener has not been typed yet is not idle: it is about to
@@ -601,6 +634,7 @@ fn received(before: &Receipts, now: &Receipts) -> bool {
 #[allow(clippy::too_many_arguments)]
 pub fn submit_kimi(
     prefix: &str,
+    exact: Option<&str>,
     baseline: Receipts,
     mut capture: impl FnMut() -> Option<String>,
     mut receipts: impl FnMut() -> Receipts,
@@ -626,14 +660,17 @@ pub fn submit_kimi(
         }
         match capture() {
             Some(screen) => {
+                // After an Enter the log answers first: an approval that opens
+                // within one poll of the turn starting is a DELIVERED message
+                // whose turn is now waiting, not an unconfirmed one.
+                if tries > 0 && received(&baseline, &receipts()) {
+                    return SendOutcome::Submitted;
+                }
                 if matches!(read_screen(&screen), KimiScreen::Trust | KimiScreen::Modal) {
                     return SendOutcome::Modal;
                 }
                 let composer = read_composer(&screen);
                 if tries > 0 {
-                    if received(&baseline, &receipts()) {
-                        return SendOutcome::Submitted;
-                    }
                     if composer.as_ref().is_some_and(|c| c.input.is_empty() && c.queued.iter().filter(|t| ours(t)).count() > queued_before) {
                         return SendOutcome::Queued;
                     }
@@ -641,7 +678,14 @@ pub fn submit_kimi(
                     queued_before = c.queued.iter().filter(|t| ours(t)).count();
                 }
                 let input = composer.map(|c| c.input);
-                let typed = input.as_deref().is_some_and(|i| starts(i, prefix));
+                // With the whole text known (the opener), only that text may be
+                // submitted: anything the user typed after it in the gap before
+                // Enter would ride along as the same turn. `send` matches its
+                // prefix, since a long message wraps in the composer.
+                let typed = input.as_deref().is_some_and(|i| match exact {
+                    Some(t) => normalize(i) == normalize(t),
+                    None => starts(i, prefix),
+                });
                 if !typed || previous != input {
                     stable_since = time;
                 } else if time.saturating_sub(stable_since) >= SEND_STABLE_MS
@@ -781,6 +825,7 @@ pub fn deliver_opener(
                             let t0 = now();
                             return match submit_kimi(
                                 &prefix,
+                                Some(opener),
                                 baseline,
                                 || capture().map(|(_, s)| s),
                                 &mut receipts,
@@ -952,6 +997,11 @@ mod tests {
         assert_eq!(current_session_since(&root, &cwd, None).map(|s| s.id).as_deref(), Some(d));
         assert_eq!(current_session_since(&root, &cwd, Some(1_000)), None);
         assert_eq!(sessions_in(&root, &other).len(), 1);
+        assert_eq!(sessions_missed(&root, &cwd), 0, "every one of them is under the derived slug");
+        // A workspace dir named some other way (kimi changed its slug rule):
+        // the discovery misses it, and doctor can say so.
+        mk("wd_FEAT-renamed_333333333333", "session_00000000-0000-0000-0000-00000000000e", &cwd, 400, 400);
+        assert_eq!(sessions_missed(&root, &cwd), 1);
         let _ = std::fs::remove_dir_all(&t);
     }
 
@@ -1078,6 +1128,7 @@ mod tests {
         let typed = "[worktrees: message from place \"a\"] hello";
         let out = submit_kimi(
             &send_prefix(typed),
+            None,
             (Some("s1".into()), 0),
             || Some(if enters.get() == 0 { composer(typed, &[]) } else { composer("", &[]) }),
             || (Some("s1".into()), enters.get()),
@@ -1107,6 +1158,7 @@ mod tests {
         let typed = "[worktrees: message from place \"probe\"] reply QUEUED-OK";
         let out = submit_kimi(
             &send_prefix(typed),
+            None,
             (Some("s".into()), 0),
             || Some(if enters.get() == 0 { composer(typed, &[]) } else { composer("", &[typed]) }),
             || (Some("s".into()), 0),
@@ -1120,12 +1172,37 @@ mod tests {
         assert_eq!(out, SendOutcome::Queued);
     }
 
+    /// The message reached kimi's log, and its turn opened an approval before
+    /// the next poll: that is a delivered message, not "typed but unconfirmed"
+    /// (which tells the orchestrator to check and resend).
+    #[test]
+    fn a_receipt_wins_over_an_approval_that_opens_right_after_enter() {
+        let clock = Cell::new(0u64);
+        let enters = Cell::new(0);
+        let typed = "[worktrees: message from place \"a\"] run ls";
+        let out = submit_kimi(
+            &send_prefix(typed),
+            None,
+            (Some("s".into()), 0),
+            || Some(if enters.get() == 0 { composer(typed, &[]) } else { fixture("kimi-screen/2.2.0/approval.txt") }),
+            || (Some("s".into()), enters.get()),
+            || {
+                enters.set(enters.get() + 1);
+                Ok(())
+            },
+            || clock.get(),
+            |ms| clock.set(clock.get() + ms),
+        );
+        assert_eq!(out, SendOutcome::Submitted);
+    }
+
     #[test]
     fn a_modal_stops_a_send_with_no_key_pressed() {
         let clock = Cell::new(0u64);
         let enters = Cell::new(0);
         let out = submit_kimi(
             "x",
+            None,
             (None, 0),
             || Some(fixture("kimi-screen/2.2.0/approval.txt")),
             || (None, 0),
@@ -1192,6 +1269,38 @@ mod tests {
             || clock.get(),
             |ms| clock.set(clock.get() + ms),
         )
+    }
+
+    /// Review of #509: the user starts typing in the gap between the helper's
+    /// keys and its Enter. The composer then holds the opener AND their words,
+    /// and Enter would submit both as one turn. The opener's whole text is
+    /// known, so only an exact match may be submitted.
+    #[test]
+    fn the_opener_never_submits_a_composer_the_user_typed_into() {
+        let clock = Cell::new(0u64);
+        let typed = Cell::new(false);
+        let enters = Cell::new(0);
+        let opener = crate::ops::BRIEF_OPENER;
+        let glued = format!("{opener} and also delete everything");
+        let out = deliver_opener(
+            opener,
+            60_000,
+            || Some(("kimi".into(), if typed.get() { composer(&glued, &[]) } else { fixture("kimi-screen/2.2.0/idle.txt") })),
+            || false,
+            || (None, 0),
+            |_| {
+                typed.set(true);
+                Ok(())
+            },
+            || {
+                enters.set(enters.get() + 1);
+                Ok(())
+            },
+            || clock.get(),
+            |ms| clock.set(clock.get() + ms),
+        );
+        assert_eq!(enters.get(), 0, "Enter was pressed on the user's text");
+        assert!(matches!(out, OpenerOutcome::Unconfirmed(_)), "{out:?}");
     }
 
     #[test]

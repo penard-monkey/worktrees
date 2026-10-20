@@ -92,6 +92,13 @@ sleep 14; tail -1 .git/worktrees-kimi-opener.log
 
 ## 3. Activity: busy, waiting, done
 
+**On every upgrade, re-measure the start of a session's log.** A wire log with
+events and no turn boundary in its tail reads as a RUNNING turn
+(`kimi::wire_turn`). On 2.2.0 `metadata`/`profile.bind` land ~20 ms before the
+first `agent.turn.started`, at the first message; a kimi that wrote
+`profile.bind` at LAUNCH would show every fresh lane busy forever. Open a lane,
+send nothing, and check `place_status` says idle.
+
 - [x] `wait until: idle` called right after `new` (trusted, so no modal) holds while kimi starts and while the opener is pending, then returns `idle` with a `last_done` once the brief's turn ends.
 - [ ] An approval (a Bash call) is **waiting** in `place_status` — from kimi's log (`interaction.request`), no screen needed; a question (`AskUserQuestion`) likewise. (The log records were captured live; the reading is unit-tested on them.)
 - [x] After the turn: **idle**, `last_done` from `agent.turn.ended`'s own time, and the agent row's `model` is the alias.
@@ -149,8 +156,12 @@ wt open lane1 --ai kimi --no-attach --no-spare   # after a close
 - [ ] In the lane, kimi lists the `worktrees` MCP tools (`/mcp`), and a `report` from it arrives with `from` = the place.
 - [ ] `mcp --uninstall --ai kimi`, close, open: `mcp.json` is gone; a `.kimi-code/` file of the user's beside it is still there.
 
+- [ ] With every place's kimi files gone (settings off, or places removed), the next kimi launch takes worktrees' lines (and their `# worktrees: …` header) out of `.git/info/exclude`. A `.kimi-code/AGENTS.md` of your own written while they are there is named at launch ("…is yours, but worktrees' line … hides it").
+- Your own per-place MCP server goes in the repo's `.mcp.json` or kimi's `~/.kimi-code/mcp.json`; `.kimi-code/mcp.json` in a place is worktrees' and rewritten at every launch.
+
 ## 9. doctor
 
+- [ ] `sessions_missed` is 0 for every place (`doctor --kimi --json`): kimi's workspace-dir naming still matches `kimi::slug`.
 - [x] `worktrees doctor --kimi` lists the aliases from kimi's config with kimi's default marked, the trust posture, the MCP state and the last opener line — and nothing else from that config file.
 
 ## 10. The app, end to end (by hand)

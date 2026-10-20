@@ -2553,14 +2553,13 @@ fn kimi_watch_set(cwd: &str, session: Option<&String>, model: &Option<String>) {
     }
 }
 
-/// One tick's read of every watched kimi lane. The state is core's
-/// `kimi::kimi_state` + `with_pending_opener` — the derivation `place_status`
-/// makes — fed the place's wire log and, only where the log cannot answer,
-/// one capture of the pane: while the lane has no turn on file yet (kimi's
-/// trust modal comes BEFORE any session exists, and is the amber dot then).
-/// Every such pane goes in ONE chained `tmux` call; a lane with a turn on
-/// file costs a `read_dir` and a `stat`, since kimi writes approvals and
-/// questions to the log itself.
+/// One tick's read of every watched kimi lane: core's `kimi::lane_state`, the
+/// derivation `place_status` makes, fed the same three inputs — the place's
+/// wire log, one capture of its pane, and the opener marker. Every lane is
+/// captured, in ONE chained `tmux` call: the screen is what says kimi exited
+/// mid-turn (`Gone`, which no log records) and that a "waiting" log already
+/// has its composer back, and skipping it for lanes with a turn on file is
+/// what made the dot and `place_status` disagree (#509 review).
 fn kimi_tick(sessions: &str) -> LaneTick {
     let mut watched: HashMap<String, KimiWatched> = {
         let guard = KIMI_WATCH.lock().unwrap_or_else(|e| e.into_inner());
@@ -2606,9 +2605,7 @@ fn kimi_tick_in(
             w.model = model;
             out.models_moved = true;
         }
-        if file.as_ref().and_then(|f| f.turn.as_ref()).is_none() {
-            targets.push((cwd.clone(), w.session.clone()));
-        }
+        targets.push((cwd.clone(), w.session.clone()));
         files.push((cwd.clone(), file));
     }
     let panes = if targets.is_empty() { Vec::new() } else { panes_of(&targets) };
@@ -2616,10 +2613,7 @@ fn kimi_tick_in(
         let screen = panes.iter().find(|(c, _)| *c == cwd).map(|(_, s)| *s);
         let turn = file.and_then(|f| f.turn);
         // ONE derivation (core's), the same `place_status` and `wait` use.
-        let (state, done) = worktrees_core::kimi::with_pending_opener(
-            worktrees_core::kimi::kimi_state(turn.as_ref(), screen),
-            pending_of(&cwd),
-        );
+        let (state, done) = worktrees_core::kimi::lane_state(turn.as_ref(), screen, pending_of(&cwd));
         match state {
             activity::State::Busy => out.busy.push(cwd.clone()),
             activity::State::Waiting => out.waiting.push(cwd.clone()),
@@ -5904,8 +5898,14 @@ async fn plan_prompt(session: String, provider: Option<String>) -> Result<(), St
     // composer would glue onto the user's draft — the composer must be there
     // and empty (`kimi_paste_refusal`).
     if adapter.provider().id == provider::KIMI.id {
-        let screen = worktrees_core::kimi::capture_target(&format!("={session}:"));
-        if let Some(why) = kimi_paste_refusal(screen.as_ref().map(|(c, s)| (c.as_str(), s.as_str())), "this place") {
+        let target = format!("={session}:");
+        let screen = worktrees_core::kimi::capture_target(&target);
+        // The opener helper types into the same composer (`send` refuses too).
+        let pending = tmux::tmux(&["display-message", "-p", "-t", &target, "#{pane_current_path}"])
+            .ok()
+            .filter(|o| o.status.success())
+            .is_some_and(|o| worktrees_core::kimi::opener_pending(String::from_utf8_lossy(&o.stdout).trim()));
+        if let Some(why) = kimi_paste_refusal(screen.as_ref().map(|(c, s)| (c.as_str(), s.as_str())), pending, "this place") {
             return Err(why);
         }
     }
@@ -5966,6 +5966,9 @@ async fn plan_ask_main(app: AppHandle, root: String, session: String, provider: 
             here && worktrees_core::agent::effective_state(p) == "waiting"
         });
     let pi_screen = (prov.id == provider::PI.id).then(|| worktrees_core::pi::screen_of(&session));
+    if prov.id == provider::KIMI.id && worktrees_core::kimi::opener_pending(&project.main_root) {
+        return Err(KIMI_OPENER_PENDING.replace("{place}", "(main)"));
+    }
     if let Some(why) = ask_main_refusal(prov.id, &plain, &styled, claude_waiting, pi_screen) {
         return Err(why);
     }
@@ -6014,7 +6017,7 @@ fn ask_main_refusal(
     } else if provider_id == provider::KIMI.id {
         // `plain` is the capture of the pane being pasted into, and it is
         // running kimi (the pane was found by its command).
-        return kimi_paste_refusal(Some(("kimi", plain)), "(main)");
+        return kimi_paste_refusal(Some(("kimi", plain)), false, "(main)");
     } else if provider_id == provider::PI.id {
         use worktrees_core::pi::PiScreen;
         match pi.flatten() {
@@ -6031,8 +6034,13 @@ fn ask_main_refusal(
 
 /// Why a paste into a kimi pane must not happen now, from one capture of it
 /// (its pane command and screen), or `None`.
-fn kimi_paste_refusal(capture: Option<(&str, &str)>, place: &str) -> Option<String> {
+const KIMI_OPENER_PENDING: &str = "kimi in {place} is still being handed its brief — wait until it starts working, then try again.";
+
+fn kimi_paste_refusal(capture: Option<(&str, &str)>, opener_pending: bool, place: &str) -> Option<String> {
     use worktrees_core::kimi::{read_composer, screen_from, KimiScreen};
+    if opener_pending {
+        return Some(KIMI_OPENER_PENDING.replace("{place}", place));
+    }
     let Some((cmd, screen)) = capture else { return Some(format!("could not read kimi's screen in {place}")) };
     match screen_from(cmd, screen) {
         KimiScreen::Gone => Some(format!("kimi is not running in {place}")),
@@ -10095,6 +10103,10 @@ mod tests {
             ("/w/trust".to_string(), w("p-trust~agent~kimi")),
             ("/w/done".to_string(), w("p-done~agent~kimi")),
             ("/w/opening".to_string(), w("p-opening~agent~kimi")),
+            // kimi died mid-turn: the log still ends on a started turn.
+            ("/w/crashed".to_string(), w("p-crashed~agent~kimi")),
+            // The log says waiting, but the composer is back on screen.
+            ("/w/answered".to_string(), w("p-answered~agent~kimi")),
         ]);
         let file = |turn: Option<KimiTurn>| LaneFile { path: "/x".into(), len: 1, model: Some("kimi-code/k3".into()), turn };
         let captured = std::cell::RefCell::new(Vec::new());
@@ -10104,6 +10116,8 @@ mod tests {
                 "/w/busy" => Some(file(Some(KimiTurn::Busy))),
                 "/w/asking" => Some(file(Some(KimiTurn::Waiting))),
                 "/w/done" => Some(file(Some(KimiTurn::Done { at: Some(42) }))),
+                "/w/crashed" => Some(file(Some(KimiTurn::Busy))),
+                "/w/answered" => Some(file(Some(KimiTurn::Waiting))),
                 _ => None,
             },
             |cwd| cwd == "/w/opening",
@@ -10111,31 +10125,66 @@ mod tests {
                 captured.borrow_mut().extend(targets.iter().map(|(c, _)| c.clone()));
                 targets
                     .iter()
-                    .map(|(c, _)| (c.clone(), if c == "/w/trust" { KimiScreen::Trust } else { KimiScreen::Composer }))
+                    .map(|(c, _)| {
+                        let s = match c.as_str() {
+                            "/w/trust" => KimiScreen::Trust,
+                            "/w/asking" => KimiScreen::Modal,
+                            "/w/crashed" => KimiScreen::Gone,
+                            _ => KimiScreen::Composer,
+                        };
+                        (c.clone(), s)
+                    })
                     .collect()
             },
         );
         let mut busy = out.busy.clone();
         busy.sort();
-        assert_eq!(busy, vec!["/w/busy".to_string(), "/w/opening".to_string()]);
+        assert_eq!(busy, vec!["/w/answered".to_string(), "/w/busy".to_string(), "/w/opening".to_string()]);
         let mut waiting = out.waiting.clone();
         waiting.sort();
         assert_eq!(waiting, vec!["/w/asking".to_string(), "/w/trust".to_string()]);
+        assert!(!busy.contains(&"/w/crashed".to_string()), "a kimi that died mid-turn is not busy");
         assert_eq!(out.done, vec![("/w/done".to_string(), 42)]);
         assert!(out.models_moved, "a first model read is a move");
-        let mut c = captured.into_inner();
-        c.sort();
-        assert_eq!(c, vec!["/w/opening".to_string(), "/w/trust".to_string()], "only lanes with no turn on file are captured");
+        // Every lane is captured: the same inputs `place_status` reads, so a
+        // kimi that died mid-turn is not busy here either.
+        assert_eq!(captured.into_inner().len(), 7);
+        for (turn, screen, pending) in [
+            (Some(KimiTurn::Busy), Some(KimiScreen::Gone), false),
+            (Some(KimiTurn::Waiting), Some(KimiScreen::Composer), false),
+            (None, Some(KimiScreen::Trust), true),
+        ] {
+            let path = match (turn.clone(), screen) {
+                (Some(KimiTurn::Busy), _) => "/w/crashed",
+                (Some(KimiTurn::Waiting), _) => "/w/answered",
+                _ => "/w/trust",
+            };
+            let core = worktrees_core::kimi::lane_state(turn.as_ref(), screen, pending);
+            let shown = if out.busy.iter().any(|p| p == path) {
+                activity::State::Busy
+            } else if out.waiting.iter().any(|p| p == path) {
+                activity::State::Waiting
+            } else {
+                activity::State::Idle
+            };
+            let core_dot = match core.0 {
+                activity::State::Busy => activity::State::Busy,
+                activity::State::Waiting => activity::State::Waiting,
+                _ => activity::State::Idle,
+            };
+            assert_eq!(shown, core_dot, "{path}: the dot and place_status disagree");
+        }
     }
 
     #[test]
     fn a_kimi_paste_needs_an_empty_composer_and_no_prompt_open() {
-        assert_eq!(kimi_paste_refusal(Some(("kimi", KIMI_IDLE)), "x"), None);
-        assert!(kimi_paste_refusal(Some(("kimi", KIMI_TYPED)), "x").unwrap().contains("unsent text"));
-        assert!(kimi_paste_refusal(Some(("kimi", KIMI_TRUST)), "x").unwrap().contains("trust"));
-        assert!(kimi_paste_refusal(Some(("kimi", KIMI_APPROVAL)), "x").unwrap().contains("asking you"));
-        assert!(kimi_paste_refusal(Some(("zsh", KIMI_IDLE)), "x").unwrap().contains("not running"));
-        assert!(kimi_paste_refusal(None, "x").is_some());
+        assert_eq!(kimi_paste_refusal(Some(("kimi", KIMI_IDLE)), false, "x"), None);
+        assert!(kimi_paste_refusal(Some(("kimi", KIMI_IDLE)), true, "x").unwrap().contains("handed its brief"), "two writers into one composer");
+        assert!(kimi_paste_refusal(Some(("kimi", KIMI_TYPED)), false, "x").unwrap().contains("unsent text"));
+        assert!(kimi_paste_refusal(Some(("kimi", KIMI_TRUST)), false, "x").unwrap().contains("trust"));
+        assert!(kimi_paste_refusal(Some(("kimi", KIMI_APPROVAL)), false, "x").unwrap().contains("asking you"));
+        assert!(kimi_paste_refusal(Some(("zsh", KIMI_IDLE)), false, "x").unwrap().contains("not running"));
+        assert!(kimi_paste_refusal(None, false, "x").is_some());
         assert!(ask_main_refusal("kimi", KIMI_TYPED, "", false, None).unwrap().contains("unsent text"));
         assert_eq!(ask_main_refusal("kimi", KIMI_IDLE, "", false, None), None);
     }
