@@ -2,7 +2,7 @@
 //
 //   node app/scripts/api-boundary-check.mjs      # exits non-zero on failure
 //
-// `worktrees-api` holds the bodies of all 143 Tauri commands so that
+// `worktrees-api` holds the bodies of the Tauri commands so that
 // `worktrees serve` can call the same ones over a socket. The single thing
 // that would undo that is a `tauri` dependency creeping back in — directly,
 // or through something that pulls it. A comment in Cargo.toml says so; this

@@ -859,14 +859,18 @@ which returns 61 lines with one static each. Every one was read, along with
 its writers and readers. The three crates contain no `thread_local!`,
 `lazy_static!` or `static mut`. Their only production writes to the process
 environment are `hostenv`'s boot-time `PATH` and `LANG` repairs.
-`worktrees-cli` adds one more static, `mcp.rs`'s test-only `ENV_LOCK`. Serve's
+`worktrees-cli` adds one more static, `mcp.rs`'s test-only `ENV_LOCK`. Two
+have landed since the audit, and the table and counts include them:
+`kimi::KIMI_TAIL`, from merging `main`'s Kimi harness (#509) — the wire-log
+twin of `PI_TAIL` — and `hostpolicy::tests` `SERIAL`, from the host-policy
+fix itself. Serve's
 own state was read from `feat/worktrees-serve` at `495df95`, and it has no
 statics. On the frontend, all 169 `useEffect`/`useLayoutEffect` bodies in
 `app/src` (mock excluded) were scanned for `invoke`, and every call site of
 every writing command was checked.
 
-**Result:** 31 host facts, 5 host policies, 0 client preferences, 2 per-launch
-identities, 23 const-like or test-only (17 + 6).
+**Result:** 32 host facts, 5 host policies, 0 client preferences, 2 per-launch
+identities, 24 const-like or test-only (17 + 7).
 
 Three things follow.
 
@@ -898,6 +902,7 @@ Three things follow.
 
 | Static | Where | Ruling | Blocks |
 |---|---|---|---|
+| `hostpolicy::tests` `SERIAL` | `crates/worktrees-api/src/hostpolicy.rs:191` | test-only | — |
 | `log::SINK` | `crates/worktrees-api/src/log.rs:39` | const-like | — |
 | `ops::FETCH_INTERVAL_SECS` | `crates/worktrees-api/src/ops.rs:817` | **host policy** | Phase 2 |
 | `prefs::UI_EVENTS_LOCK` | `crates/worktrees-api/src/prefs.rs:204` | host fact | — |
@@ -932,6 +937,7 @@ Three things follow.
 | `git::STDOUT_IS_PROTOCOL` | `crates/worktrees-core/src/git.rs:78` | const-like | — |
 | `github::ssh_host` `CACHE` | `crates/worktrees-core/src/github.rs:258` | host fact | — |
 | `inbox::tests` `HOME_LOCK` | `crates/worktrees-core/src/inbox.rs:296` | test-only | — |
+| `kimi::KIMI_TAIL` | `crates/worktrees-core/src/kimi.rs:330` | host fact | — |
 | `logsink::LOG` | `crates/worktrees-core/src/logsink.rs:20` | const-like | — |
 | `mcpmigrate::apply` `APPLY` | `crates/worktrees-core/src/mcpmigrate.rs:366` | host fact | — |
 | `messages::SEQ` | `crates/worktrees-core/src/messages.rs:104` | const-like | — |
@@ -1281,7 +1287,7 @@ belongs to a process that is not the engine:
 
 ### Host facts worth a sentence
 
-The other 31 are caches of git, tmux, GitHub, the status page, the harnesses'
+The other 32 are caches of git, tmux, GitHub, the status page, the harnesses'
 own files and the host's tools, plus the registries of host processes and the
 write locks. All of them stay global. Three caveats:
 
@@ -1298,7 +1304,7 @@ write locks. All of them stay global. Three caveats:
   processes, so one engine per host neither opens nor closes it.
 - **The caches that never evict now live as long as serve.**
   `codex::THREAD_CWD`, `pi::header`'s `HEADERS`, `activity::CODEX_TAIL`,
-  `pi::PI_TAIL` and the two `sysclock` memos are keyed by path, inode or
+  `pi::PI_TAIL`, `kimi::KIMI_TAIL` and the two `sysclock` memos are keyed by path, inode or
   epoch. They stay correct for any lifetime, and they grow with every file
   they ever see. Their lifetime used to be one app launch and is now serve's
   uptime. That is not a defect at today's sizes, but it is a property to keep
