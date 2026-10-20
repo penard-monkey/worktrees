@@ -112,18 +112,8 @@ fn claude_oauth_token() -> Option<String> {
 /// already shells out to curl for the release check and this keeps the dep tree
 /// (and the TLS stack) exactly where it is.
 fn usage_get(token: &str) -> Result<(u16, String), String> {
-    let mut cmd = std::process::Command::new("curl");
-    cmd.args(["-s", "--max-time", "10", "-w", "\n%{http_code}"])
-        .arg("-H")
-        .arg(format!("Authorization: Bearer {token}"))
-        .arg("-H")
-        .arg("anthropic-beta: oauth-2025-04-20")
-        .arg("-H")
-        .arg(format!("User-Agent: {USAGE_UA}"))
-        .arg("-H")
-        .arg("Content-Type: application/json")
-        .arg(USAGE_URL);
-    let out = crate::proc::run_deadline(cmd, 15).map_err(|e| e.to_string())?;
+    let (cmd, input) = usage_cmd(token, USAGE_URL)?;
+    let out = crate::proc::run_deadline_stdin(cmd, input, 15).map_err(|e| e.to_string())?;
     if !out.status.success() {
         return Err(format!("curl exited {}", out.status.code().unwrap_or(-1)));
     }
@@ -132,6 +122,33 @@ fn usage_get(token: &str) -> Result<(u16, String), String> {
     let cut = text.rfind('\n').ok_or("curl produced no status line")?;
     let code: u16 = text[cut + 1..].trim().parse().map_err(|_| "curl produced no status code".to_string())?;
     Ok((code, text[..cut].to_string()))
+}
+
+/// The curl for one usage GET, and the bytes for its stdin.
+///
+/// The bearer goes in on STDIN (`-H @-`), never as an argument: argv is
+/// readable by every process on the machine (`ps -Ao command`) for the life of
+/// the request, and this is Claude Code's live OAuth token. `-H @-` over
+/// `--config -` because each stdin line is one header taken VERBATIM — no
+/// quoting layer to get wrong, so the only bytes that cannot pass are a line
+/// break (and NUL), which are refused rather than escaped. Measured on the
+/// system curl of both CI OSes (macOS 8.7.1, ubuntu-24.04 8.5.0); `-H @file` is
+/// curl ≥ 7.55. The other headers carry nothing secret and stay on argv.
+fn usage_cmd(token: &str, url: &str) -> Result<(std::process::Command, Vec<u8>), String> {
+    if token.bytes().any(|b| matches!(b, b'\r' | b'\n' | 0)) {
+        return Err("keychain: Claude Code token has an unexpected shape".into());
+    }
+    let mut cmd = std::process::Command::new("curl");
+    cmd.args(["-s", "--max-time", "10", "-w", "\n%{http_code}"])
+        .args(["-H", "@-"])
+        .arg("-H")
+        .arg("anthropic-beta: oauth-2025-04-20")
+        .arg("-H")
+        .arg(format!("User-Agent: {USAGE_UA}"))
+        .arg("-H")
+        .arg("Content-Type: application/json")
+        .arg(url);
+    Ok((cmd, format!("Authorization: Bearer {token}\n").into_bytes()))
 }
 
 /// `limits[]` → our rows. Unknown kinds and unparseable entries are SKIPPED, not
@@ -463,4 +480,71 @@ mod tests {
             assert!(usage_in_backoff(1_000, Some(999)));
         }
 
+    // ── the bearer stays off argv ──────────────────────────────────────────
+    //
+    // A curl argument is readable by every process on the machine (`ps -Ao
+    // command`) for as long as the request runs, and this one was Claude Code's
+    // live OAuth token. Synthetic tokens only — never the keychain.
+
+    const FAKE: &str = "sk-ant-oat01-SYNTHETIC-not-a-real-token";
+
+    #[test]
+    fn the_usage_curl_carries_no_argument_containing_the_token() {
+        let (cmd, input) = usage_cmd(FAKE, USAGE_URL).unwrap();
+        for a in cmd.get_args() {
+            let a = a.to_string_lossy();
+            assert!(!a.contains(FAKE), "token on argv: {a}");
+            assert!(!a.contains("Bearer"), "auth header on argv: {a}");
+        }
+        assert!(String::from_utf8_lossy(&input).contains(FAKE), "the token must still reach curl, on stdin");
+    }
+
+    /// The real curl, against a loopback listener: the header that ARRIVES must
+    /// be byte-exact for a token full of the characters a quoting layer would
+    /// mangle.
+    #[test]
+    fn a_token_with_quotes_and_backslashes_arrives_byte_exact() {
+        use std::io::{Read, Write};
+        let token = r#"a"b\c d'e$f\"#;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut c, _) = listener.accept().unwrap();
+            c.set_read_timeout(Some(std::time::Duration::from_secs(10))).unwrap();
+            let mut req = Vec::new();
+            let mut buf = [0u8; 4096];
+            while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = c.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                req.extend_from_slice(&buf[..n]);
+            }
+            let _ = c.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}");
+            req
+        });
+        let (mut cmd, input) = usage_cmd(token, &format!("http://127.0.0.1:{port}/api/oauth/usage")).unwrap();
+        for k in ["http_proxy", "HTTP_PROXY", "all_proxy", "ALL_PROXY"] {
+            cmd.env_remove(k);
+        }
+        let out = crate::proc::run_deadline_stdin(cmd, input, 15).expect("curl runs");
+        assert!(out.status.success(), "curl failed: {}", String::from_utf8_lossy(&out.stderr));
+        let req = server.join().unwrap();
+        let auth: Vec<&[u8]> = req.split(|&b| b == b'\n').filter(|l| l.starts_with(b"Authorization:")).collect();
+        assert_eq!(auth.len(), 1, "exactly one Authorization header");
+        assert_eq!(auth[0], format!("Authorization: Bearer {token}\r").as_bytes());
+        let text = String::from_utf8_lossy(&req);
+        assert!(text.contains("anthropic-beta: oauth-2025-04-20\r\n"));
+        assert!(text.contains(&format!("User-Agent: {USAGE_UA}\r\n")));
+    }
+
+    /// `-H @-` reads one header per LINE, so a line break would end the header
+    /// and start another. Refused — and the refusal never quotes the token.
+    #[test]
+    fn a_token_with_a_line_break_is_refused_without_echoing_it() {
+        for bad in ["SYNTHETIC\nX-Evil: 1", "SYNTHETIC\r", "SYN\0THETIC"] {
+            let e = usage_cmd(bad, USAGE_URL).err().expect("must refuse");
+            assert!(!e.contains("SYN"), "error echoes the token: {e}");
+        }
+    }
 }
