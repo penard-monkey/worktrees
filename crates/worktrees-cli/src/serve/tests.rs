@@ -304,3 +304,50 @@ fn an_event_is_broadcast_to_every_authenticated_socket() {
     // Keep the runtime alive until here.
     let _ = &l.rt;
 }
+
+// ── the log ──────────────────────────────────────────────────────────────────
+
+/// **No torn lines.** Eight writers, 300 lines each, through the sink's own
+/// append path to one file: every line must be whole. The transport lane read
+/// `…03:07:38serve: host-admin codex_mcp_statusZ [` in the real log — a
+/// `writeln!` on an unbuffered handle is several `write(2)`s, and two threads'
+/// pieces interleave. One `write_all` of one formatted `String` is one write.
+#[test]
+fn log_lines_from_concurrent_writers_are_whole() {
+    let dir = std::env::temp_dir().join(format!("wt-serve-log-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("serve.log");
+    const WRITERS: usize = 8;
+    const LINES: usize = 300;
+    let tail = "x".repeat(200);
+    let hs: Vec<_> = (0..WRITERS)
+        .map(|w| {
+            let (dir, path, tail) = (dir.clone(), path.clone(), tail.clone());
+            std::thread::spawn(move || {
+                for i in 0..LINES {
+                    super::append_line(&dir, &path, "info", &format!("w{w}-{i}-{tail}"));
+                }
+            })
+        })
+        .collect();
+    for h in hs {
+        h.join().unwrap();
+    }
+    let text = std::fs::read_to_string(&path).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), WRITERS * LINES, "one line per call");
+    let head_tail = format!("Z [info] [{}] w", std::process::id());
+    let mut seen = std::collections::HashSet::new();
+    for line in &lines {
+        // `<19-char UTC stamp>Z [info] [<pid>] w<writer>-<i>-<200 x>` — anything
+        // else is two writers' pieces in one line.
+        let (ts, rest) = line.split_at(line.len().min(19));
+        assert!(ts.len() == 19 && ts.as_bytes()[4] == b'-' && ts.as_bytes()[10] == b' ', "stamp: {line:?}");
+        let body = rest.strip_prefix(&head_tail).unwrap_or_else(|| panic!("torn: {line:?}"));
+        let (id, x) = body.rsplit_once('-').unwrap_or_else(|| panic!("torn: {line:?}"));
+        assert_eq!(x, tail, "torn: {line:?}");
+        assert!(seen.insert(id.to_string()), "twice: {line:?}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

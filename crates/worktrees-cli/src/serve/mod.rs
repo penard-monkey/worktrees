@@ -20,7 +20,7 @@ mod servefile;
 mod wire;
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use worktrees_api::log::LogSink;
@@ -95,23 +95,32 @@ struct ServeLog;
 
 impl LogSink for ServeLog {
     fn log(&self, level: &str, msg: &str) {
-        let dir = log_dir();
-        let _ = std::fs::create_dir_all(&dir);
-        let path = log_file();
-        if std::fs::metadata(&path).map(|m| m.len() > 1_000_000).unwrap_or(false) {
-            let _ = std::fs::rename(&path, dir.join("serve.log.1"));
-        }
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-            let ts = worktrees_api::util::fmt_utc(worktrees_core::sysclock::now_epoch());
-            // The pid on EVERY line: this is one file for every serve on the
-            // machine — the real one, a stack, a server outliving the binary
-            // that replaced it — and `grep <pid>` is how one of them is read.
-            let _ = writeln!(f, "{ts}Z [{level}] [{}] {msg}", std::process::id());
-        }
+        append_line(&log_dir(), &log_file(), level, msg);
     }
 
     fn location(&self) -> Option<(PathBuf, PathBuf)> {
         Some((log_dir(), log_file()))
+    }
+}
+
+/// One log line, appended to `path` (rotating it into `dir` past ~1MB).
+fn append_line(dir: &Path, path: &Path, level: &str, msg: &str) {
+    let _ = std::fs::create_dir_all(dir);
+    if std::fs::metadata(path).map(|m| m.len() > 1_000_000).unwrap_or(false) {
+        let _ = std::fs::rename(path, dir.join("serve.log.1"));
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let ts = worktrees_api::util::fmt_utc(worktrees_core::sysclock::now_epoch());
+        // The pid on EVERY line: this is one file for every serve on the
+        // machine — the real one, a stack, a server outliving the binary
+        // that replaced it — and `grep <pid>` is how one of them is read.
+        //
+        // ONE `write(2)` per line. `writeln!` on an unbuffered handle is one
+        // write per formatted piece, and two threads' pieces interleave in the
+        // file: the transport lane read `…03:07:38serve: host-admin …Z [` in
+        // the real log. A single short write to an O_APPEND handle lands whole.
+        let line = format!("{ts}Z [{level}] [{}] {msg}\n", std::process::id());
+        let _ = f.write_all(line.as_bytes());
     }
 }
 
