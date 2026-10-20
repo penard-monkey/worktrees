@@ -70,7 +70,10 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   needs — log sink, panic hook, PATH/locale, the viewer sweep, the project
   merge, the 3 s poll, the exit sequence — is `worktrees_api::host::{boot,
   start, stop}`, called by the shim AND by `serve`; `api-boundary-check.mjs`
-  asserts the shim makes all three calls. `<config_dir>/serve.json` (0600,
+  asserts the shim makes all three calls. Host policy is NOT in that list:
+  `hostpolicy::boot` is the engine's act, so the shim calls it once in its
+  `.setup` (hostpolicy-check.mjs) and serve calls it in `cmd_serve` — a serve
+  that skipped it launched lanes under the default the file overrides. `<config_dir>/serve.json` (0600,
   rewritten per launch) is how a client finds the port and the token; the log
   is `~/.cache/worktrees/serve.log`, version on the first line.
   `app/scripts/server-stack.sh` runs an isolated one for the frontend lane.

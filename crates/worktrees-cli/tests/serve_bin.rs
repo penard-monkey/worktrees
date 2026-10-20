@@ -95,6 +95,9 @@ impl Sandbox {
             .env("HOME", self.root.join("home"))
             .env("XDG_CONFIG_HOME", self.root.join("xdg"))
             .env("SHELL", "/bin/sh")
+            // Host policy's env tier would outrank a test's file; hermetic.
+            .env_remove("WORKTREES_CODEX_PERMISSIONS")
+            .env_remove("WORKTREES_PI_PROJECT_TRUST")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -235,6 +238,22 @@ fn serve_raises_a_low_soft_open_file_limit_at_boot() {
     assert_eq!(old, "256", "{line}");
     let new: u64 = new.trim().parse().unwrap_or_else(|_| panic!("{line}"));
     assert!(new > 256, "{line}");
+    assert_eq!(sb.terminate().code(), Some(0));
+}
+
+/// Host policy is the ENGINE's (`worktrees_api::hostpolicy`: "only the engine
+/// reads it; `boot` loads it at startup"), and `serve` is the engine. A host
+/// that chose `ask` for Codex in Settings and then restarted serve must launch
+/// lanes under `ask`, not under the default the file is there to override
+/// (`auto-review`).
+#[test]
+fn serve_loads_host_policy_at_boot() {
+    let mut sb = Sandbox::new("hostpolicy");
+    std::fs::write(sb.cfg().join("host-policy.json"), r#"{"codex_permissions": "ask"}"#).unwrap();
+    let sf = sb.launch(&["--allow-origin", "http://localhost:1420"]);
+    let mut ws = connect(&sf, "http://localhost:1420");
+    let r = rpc(&mut ws, 1, "get_codex_permissions", json!({}));
+    assert_eq!(r["ok"], json!("ask"), "host-policy.json was not loaded at boot: {r}");
     assert_eq!(sb.terminate().code(), Some(0));
 }
 
