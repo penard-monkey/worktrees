@@ -52,9 +52,8 @@ title: claude-token-argv — Claude's OAuth token off curl's argv
   line and declared everything else clean. Review found `mcpmigrate.rs:180`
   building `--env {key}={value}` from a user's literal MCP env values (usually
   API keys). A `format!` of a generic key/value pair contains none of those
-  words. The PR body was corrected and the gap is now in ROADMAP. The lesson
-  went into AGENTS.md: an argv audit has to follow where VALUES come from, not
-  grep for names.
+  words. The PR body was corrected and the gap is now in ROADMAP. The lesson:
+  an argv audit has to follow where VALUES come from, not grep for names.
 - **The byte-exact loopback test passes on the old code**, because argv is
   byte-exact too. It guards the stdin ENCODING, not the fix, so it was shown
   RED against a naively quoted `--config -` (the header arrived cut off at the
