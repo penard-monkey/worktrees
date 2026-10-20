@@ -169,7 +169,9 @@ wt open lane1 --ai kimi --no-attach --no-spare   # after a close
 Run with `app/scripts/sandbox.sh --app` (isolated identifier and tmux prefix).
 Drive it yourself; never script input into it.
 
-- [ ] **New worktree** dialog: *Start with* offers **Kimi**; its model list is kimi's aliases (K3, K2.8…). Create a lane with a brief.
+- [ ] **Settings → Kimi**: kimi's version and path; *Set up kimi* turns the Worktrees tools on (`kimi_mcp` in `~/.config/worktrees/config.toml` of the sandbox), *Make read-only* / *Disconnect* change it; the models are kimi's aliases; *Allow <repo>* adds `[trust] kimi`, and *Revoke* removes it. `~/.kimi-code/` is untouched (compare mtimes).
+- [ ] Before the tools are connected, the suggestions button (dock rail, ✨) lists "Let kimi drive your worktrees"; *Stop suggesting this* silences it.
+- [ ] **New worktree** dialog: *Start with* offers **Kimi**, with the trust note under it ("kimi asks to trust this new folder first…", or "This repo is allowed…"); its model list is kimi's aliases (K3, K2.8…). Create a lane with a brief.
 - [ ] The row shows the **K** mark. While kimi asks to trust the folder, the dot is **amber**; answer it in the terminal pane.
 - [ ] The opener appears in kimi's composer by itself; the dot goes **green** while it works and leaves the afterglow ring when the turn ends.
 - [ ] Trigger an approval (ask it to run `ls`): **amber** until you answer.
@@ -195,6 +197,6 @@ Drive it yourself; never script input into it.
 | Plan paste / Ask (main) | refuse unless kimi is at an EMPTY composer | app unit test; §10 open |
 | Guidance | `.kimi-code/AGENTS.md` + `skills/worktrees/` (kimi never shows MCP `instructions`) | bats + §8 |
 | Security | trust asks by default; allowance per repo; protect-ours over it; `kimi_mcp` and `[trust] kimi` are user-only | unit + bats + §7 |
-| Frontend | `harness.ts`, row mark, dialog, model picker, mock place `ledger-sync` | harness-check, mock harness; Settings → Kimi is PR2 |
+| Frontend | `harness.ts`, row mark, dialog + trust note, model picker, Settings → Kimi, the `kimi-mcp` offer, mock place `ledger-sync` | harness-check, offers-check, mock harness (Playwright: panel, setup, offer count); §10 open |
 | Wheel | inline, no alt screen, no mouse mode (measured) | §10 open |
 | Usage | none yet; the `kimi web` route is PR3 | — |

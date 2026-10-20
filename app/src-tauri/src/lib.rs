@@ -4672,6 +4672,8 @@ async fn pi_status(repo: Option<String>) -> Result<PiStatus, String> {
 #[derive(Serialize)]
 struct KimiStatus {
     kimi_bin: Option<String>,
+    /// `kimi --version`, asked of the binary a pane would run.
+    kimi_version: Option<String>,
     mcp: worktrees_core::kimiplace::Status,
     allowed: Vec<String>,
     repo_root: Option<String>,
@@ -4685,8 +4687,19 @@ async fn kimi_status(repo: Option<String>) -> Result<KimiStatus, String> {
     let allowed = worktrees_core::trust::allowed("kimi");
     let repo_allowed = repo_root.as_ref().is_some_and(|r| allowed.contains(r));
     let launch = repo_root.as_deref().map(worktrees_core::trust::kimi_launch_trust);
+    let bin = worktrees_core::kimi::kimi_bin();
+    let kimi_version = bin.as_ref().and_then(|b| {
+        let mut cmd = std::process::Command::new(b);
+        cmd.arg("--version").current_dir("/").stdin(std::process::Stdio::null());
+        worktrees_core::proc::run_deadline(cmd, 10)
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|v| !v.is_empty())
+    });
     Ok(KimiStatus {
-        kimi_bin: worktrees_core::kimi::kimi_bin().map(|p| p.to_string_lossy().into_owned()),
+        kimi_bin: bin.map(|p| p.to_string_lossy().into_owned()),
+        kimi_version,
         mcp: worktrees_core::kimiplace::status(),
         allowed,
         repo_root,
@@ -4718,6 +4731,35 @@ async fn set_pi_allowed(repo: String, allow: bool) -> Result<bool, String> {
     // revoked; a grant resolves the repo's root through git.
     let root = worktrees_core::trust::root_for("pi", &repo, allow).ok_or_else(|| format!("{repo} is not inside a git repository"))?;
     worktrees_core::trust::set_allowed("pi", &root, allow).inspect_err(|e| applog("error", &format!("set_pi_allowed: {e}")))
+}
+
+/// Allow (or revoke) this repo's kimi lanes to start trusted. The user's act,
+/// from Settings → Kimi; the MCP server has no path here. Same keying as pi's.
+#[tauri::command]
+async fn set_kimi_allowed(repo: String, allow: bool) -> Result<bool, String> {
+    let root = worktrees_core::trust::root_for("kimi", &repo, allow).ok_or_else(|| format!("{repo} is not inside a git repository"))?;
+    worktrees_core::trust::set_allowed("kimi", &root, allow).inspect_err(|e| applog("error", &format!("set_kimi_allowed: {e}")))
+}
+
+/// Whether kimi lanes get the worktrees MCP server (`kimi_mcp`), and with
+/// which tools. Machine-level: the `kimi-mcp` offer's input.
+#[tauri::command]
+async fn kimi_mcp_status() -> Result<worktrees_core::kimiplace::Status, String> {
+    Ok(worktrees_core::kimiplace::status())
+}
+
+/// Settings → Kimi's MCP choice: `off`, `read-only` or `mutations`, written to
+/// worktrees' OWN config (never kimi's). Lanes pick it up at their next launch,
+/// when their place's `.kimi-code/mcp.json` is written or removed.
+#[tauri::command]
+async fn kimi_mcp_set(mode: String) -> Result<worktrees_core::kimiplace::Status, String> {
+    let Some(m) = worktrees_core::kimiplace::McpMode::parse(&mode) else {
+        let e = format!("unknown kimi MCP mode '{mode}' (expected off, read-only or mutations)");
+        applog("error", &format!("kimi_mcp_set: {e}"));
+        return Err(e);
+    };
+    worktrees_core::kimiplace::set_mode(m).inspect_err(|e| applog("error", &format!("kimi_mcp_set: {e}")))?;
+    Ok(worktrees_core::kimiplace::status())
 }
 
 // ── diagnostics (Settings → Logs → Copy diagnostics) ─────────────────────────
@@ -9061,6 +9103,9 @@ pub fn run() {
             agent_models,
             pi_status,
             kimi_status,
+            kimi_mcp_status,
+            kimi_mcp_set,
+            set_kimi_allowed,
             set_pi_trust,
             set_pi_allowed,
             diagnostics,

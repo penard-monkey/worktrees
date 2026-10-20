@@ -49,13 +49,14 @@
 import type { McpStatus } from "./McpPanel";
 import type { CodexMcpStatus } from "./CodexMcpPanel";
 import type { PiMcpStatus } from "./PiMcpPanel";
+import type { KimiMcpStatus } from "./KimiPanel";
 import type { UserSkill } from "./AgentSetup";
 import type { GuidanceStatus } from "./GuidancePanel";
 import type { CrossProjectStatus } from "./CrossProjectPanel";
 import type { PlanningStatus } from "./PlanningPanel";
 import type { CatId } from "./SettingsSheet";
 
-export type OfferId = "mcp-server" | "codex-mcp" | "codex-skills" | "pi-mcp" | "agent-guidance" | "agent-guidance-changed" | "cross-project" | "planning";
+export type OfferId = "mcp-server" | "codex-mcp" | "codex-skills" | "pi-mcp" | "kimi-mcp" | "agent-guidance" | "agent-guidance-changed" | "cross-project" | "planning";
 
 export type Offer = {
   id: OfferId;
@@ -84,6 +85,8 @@ export type OfferCtx = {
   codexMcp?: CodexMcpStatus | null;
   /** App's startup `pi_mcp_status`. Optional, as above. */
   piMcp?: PiMcpStatus | null;
+  /** App's startup `kimi_mcp_status`. Optional, as above. */
+  kimiMcp?: KimiMcpStatus | null;
   /** `agent_user_skills` — a machine-level command, deliberately NOT taken from
    *  some project's `agent_setup_status`: that would make the offer need a
    *  project, which is the v0.25.0 precondition bug again. */
@@ -152,6 +155,19 @@ export function pendingOffers(ctx: OfferCtx, dismissed: Record<string, string>):
       cta: "Set up…",
       to: { cat: "pi", focus: "pi-mcp" },
       fingerprint: "absent",
+    });
+  }
+  // kimi's twin, same rule in kimi's words: `off` is its `absent` (the user
+  // never turned it on). `cli-missing` belongs to Updates, and without kimi
+  // there is nothing to connect (`kimi-missing`, and the bin check).
+  if (ctx.kimiMcp?.state === "off" && ctx.kimiMcp.kimi_bin) {
+    out.push({
+      id: "kimi-mcp",
+      title: "Let kimi drive your worktrees",
+      body: "kimi lanes can report back, wait for other places and create or close worktrees as tools — the same server Claude, Codex and pi use.",
+      cta: "Set up…",
+      to: { cat: "kimi", focus: "kimi-mcp" },
+      fingerprint: "off",
     });
   }
   const missing = (ctx.userSkills ?? []).filter((u) => u.status === "missing").map((u) => u.name).sort();
