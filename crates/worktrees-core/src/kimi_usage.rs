@@ -20,7 +20,20 @@
 //!   then SIGKILL, then reaped, on every path. A SIGKILL leaves a stale
 //!   `server/instances/` record, which kimi's next start prunes itself.
 //! - At most one probe per `TTL`/`FAILURE_FLOOR` (120s), failures included, so
-//!   focus pulls cannot storm it; a probe already running is waited for.
+//!   focus pulls cannot storm it; a probe already running is waited for. The
+//!   cache lock is held across the probe (up to `BUDGET` + the 2s kill
+//!   grace), so a kimi launch whose gate reads usage while the meter is
+//!   pulling waits for that one probe — codex's shape, and a ROADMAP item for
+//!   both.
+//! - Loopback by construction AND by check: `--host 127.0.0.1` on argv, and a
+//!   `Local:` host other than loopback, or a `Network:` line that is not `off`,
+//!   ends the server before it is asked anything.
+//! - Two windows nothing can close here, said so: if `kimi web` died between
+//!   printing its port and our connect, another local process that grabbed
+//!   that port would receive the bearer (local only, a sub-second window);
+//!   and a worktrees process killed outright (SIGKILL — a panic still runs the
+//!   `Drop`) orphans its `kimi web` on loopback until it is stopped. Codex's
+//!   reader shares both.
 
 use serde::Serialize;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -89,6 +102,10 @@ impl Info {
     }
     pub fn state(&self) -> &str {
         self.state
+    }
+    /// Why there is no fresh reading, as a fixed word (`timeout`, `expired`…).
+    pub fn reason(&self) -> Option<&'static str> {
+        self.reason
     }
     fn unavailable(state: &'static str, reason: &'static str) -> Self {
         Self { provider: "kimi", state, source: "unavailable", fetched_at: None, retry_at: None, reason: Some(reason), limits: vec![] }
@@ -197,10 +214,18 @@ impl Drop for Server {
 }
 
 /// Where kimi said it is listening, parsed from its startup output.
-#[derive(Debug, PartialEq)]
+#[derive(PartialEq)]
 pub struct Endpoint {
     pub port: u16,
     pub token: String,
+}
+
+/// By hand, so `{ep:?}` — in a log line, an assert's failure message, a panic —
+/// can never print the persistent bearer.
+impl std::fmt::Debug for Endpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Endpoint").field("port", &self.port).field("token", &"<redacted>").finish()
+    }
 }
 
 /// Read `kimi web`'s startup lines until it says where it listens. `Err` is a
@@ -221,7 +246,8 @@ pub fn endpoint_from(lines: impl Iterator<Item = String>) -> Result<Endpoint, &'
         }
         if let Some(rest) = t.strip_prefix("Local:") {
             let url = rest.trim();
-            let Some(after) = url.strip_prefix("http://127.0.0.1:") else { return Err("not_loopback") };
+            let after = ["http://127.0.0.1:", "http://localhost:", "http://[::1]:"].iter().find_map(|h| url.strip_prefix(h));
+            let Some(after) = after else { return Err("unexpected_host") };
             let (port, frag) = after.split_once('/').unwrap_or((after, ""));
             let port: u16 = port.parse().map_err(|_| "no_port")?;
             let token = frag.strip_prefix("#token=").unwrap_or("").to_string();
@@ -235,20 +261,33 @@ pub fn endpoint_from(lines: impl Iterator<Item = String>) -> Result<Endpoint, &'
 }
 
 /// One GET over loopback, with the bearer, read to EOF (`Connection: close`)
-/// within `budget` and `RESPONSE_CAP`. Returns (status, body).
-fn get(port: u16, path: &str, token: &str, budget: Duration) -> Result<(u16, Vec<u8>), &'static str> {
+/// before `deadline` — ONE deadline for connect, write and every read, so a
+/// server dripping a byte at a time cannot stretch it — and within
+/// `RESPONSE_CAP`. Returns (status, body).
+fn get(port: u16, path: &str, token: &str, deadline: Instant) -> Result<(u16, Vec<u8>), &'static str> {
+    let left = || deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()).ok_or("timeout");
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
-    let mut s = std::net::TcpStream::connect_timeout(&addr, budget).map_err(|_| "connect")?;
-    s.set_read_timeout(Some(budget)).map_err(|_| "connect")?;
-    s.set_write_timeout(Some(budget)).map_err(|_| "connect")?;
+    let mut s = std::net::TcpStream::connect_timeout(&addr, left()?).map_err(|_| "connect")?;
+    s.set_write_timeout(Some(left()?)).map_err(|_| "connect")?;
     let req = format!(
         "GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: Bearer {token}\r\nAccept: application/json\r\nConnection: close\r\n\r\n"
     );
     s.write_all(req.as_bytes()).map_err(|_| "http")?;
     let mut raw = Vec::new();
-    (&mut s).take(RESPONSE_CAP + 1).read_to_end(&mut raw).map_err(|_| "timeout")?;
-    if raw.len() as u64 > RESPONSE_CAP {
-        return Err("response_too_large");
+    let mut buf = [0u8; 8192];
+    loop {
+        s.set_read_timeout(Some(left()?)).map_err(|_| "timeout")?;
+        match s.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                raw.extend_from_slice(&buf[..n]);
+                if raw.len() as u64 > RESPONSE_CAP {
+                    return Err("response_too_large");
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return Err("timeout"),
+        }
     }
     parse_http(&raw)
 }
@@ -290,7 +329,7 @@ pub fn probe(binary: &Path, cwd: &Path, budget: Duration) -> Info {
     let deadline = Instant::now() + budget;
     let left = || deadline.checked_duration_since(Instant::now());
     let spawned = Command::new(binary)
-        .args(["web", "--no-open", "--port", "0"])
+        .args(["web", "--no-open", "--host", "127.0.0.1", "--port", "0"])
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -341,11 +380,7 @@ pub fn probe(binary: &Path, cwd: &Path, budget: Duration) -> Info {
             return Info::unavailable("unavailable", reason);
         }
     };
-    let Some(wait) = left() else {
-        drop(server);
-        return Info::unavailable("unavailable", "timeout");
-    };
-    let answer = get(ep.port, "/api/v1/oauth/usage", &ep.token, wait);
+    let answer = get(ep.port, "/api/v1/oauth/usage", &ep.token, deadline);
     drop(ep);
     drop(server);
     match answer {
@@ -512,10 +547,20 @@ mod tests {
         let ok = l(&["  Kimi server ready  2.2.0", "  Local:    http://127.0.0.1:60220/#token=abc-DEF_1", "  Network:  off  use --host to enable"]);
         assert_eq!(ok, Ok(Endpoint { port: 60220, token: "abc-DEF_1".into() }));
         assert_eq!(l(&["  Local:    http://127.0.0.1:1/#token=t", "  Network:  http://192.168.1.4:1/#token=t"]), Err("not_loopback"));
-        assert_eq!(l(&["  Local:    http://0.0.0.0:1/#token=t"]), Err("not_loopback"));
+        assert_eq!(l(&["  Local:    http://0.0.0.0:1/#token=t"]), Err("unexpected_host"));
+        assert_eq!(l(&["  Local:    http://localhost:7/#token=t", "  Network:  off"]).map(|e| e.port), Ok(7));
+        assert_eq!(l(&["  Local:    http://[::1]:8/#token=t", "  Network:  off"]).map(|e| e.port), Ok(8));
         assert_eq!(l(&["  Local:    http://127.0.0.1:1/"]), Err("no_token"));
         assert_eq!(l(&["  Local:    http://127.0.0.1:1/#token=a b"]), Err("no_token"));
         assert_eq!(l(&["  nothing"]), Err("no_port"));
+    }
+
+    #[test]
+    fn an_endpoint_never_prints_its_token() {
+        let ep = Endpoint { port: 1, token: "SECRET-TOKEN-x1".into() };
+        let shown = format!("{ep:?} {:?}", Ok::<_, ()>(&ep));
+        assert!(!shown.contains("SECRET"), "{shown}");
+        assert!(shown.contains("redacted"), "{shown}");
     }
 
     #[test]
@@ -537,11 +582,17 @@ mod tests {
         d
     }
 
-    /// A fake `kimi` that records its pid, prints `body`, then sleeps until
-    /// killed — so whether it survives a probe is a fact the test can read.
+    /// A fake `kimi` that records its pid and argv, prints `body`, then waits
+    /// until signalled — and marks a SIGTERM, so "terminated politely before
+    /// it was killed" is a fact the test can read, as is whether it survives.
     fn fake(dir: &Path, body: &str) -> PathBuf {
         let p = dir.join("kimi");
-        std::fs::write(&p, format!("#!/bin/sh\necho $$ > '{}/pid'\n{body}\nexec sleep 60\n", dir.display())).unwrap();
+        let d = dir.display();
+        std::fs::write(
+            &p,
+            format!("#!/bin/sh\necho $$ > '{d}/pid'\necho \"$@\" > '{d}/args'\ntrap 'touch \"{d}/term\"; exit 0' TERM\n{body}\nsleep 60 &\nwait\n"),
+        )
+        .unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         p
     }
@@ -594,6 +645,12 @@ mod tests {
         // The token reaches the request and nothing else.
         assert!(!serde_json::to_string(&info).unwrap().contains("SECRET"));
         assert!(wait_dead(&d), "kimi web outlived a successful probe");
+        // SIGTERM first — kimi removes its instance record on it — not a
+        // straight SIGKILL.
+        assert!(d.join("term").exists(), "the server was never sent SIGTERM");
+        // Loopback by construction, not only by check.
+        let args = std::fs::read_to_string(d.join("args")).unwrap();
+        assert!(args.contains("web --no-open --host 127.0.0.1 --port 0"), "{args}");
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -613,10 +670,15 @@ mod tests {
     #[test]
     fn a_server_reachable_from_the_network_is_refused_unasked_and_ended() {
         let d = tmp("lan");
-        let (port, _server) = serve("HTTP/1.1 200 OK\r\n\r\n{}");
+        // Non-blocking and never accepted by a thread: after the probe, an
+        // `accept` that would block proves nobody connected — "unasked".
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.set_nonblocking(true).unwrap();
+        let port = l.local_addr().unwrap().port();
         let bin = fake(&d, &format!("echo '  Local:    http://127.0.0.1:{port}/#token=t'\necho '  Network:  http://192.168.1.9:{port}/#token=t'"));
         let info = probe(&bin, &d, Duration::from_secs(5));
         assert_eq!(info.reason, Some("not_loopback"));
+        assert_eq!(l.accept().map(|_| ()).unwrap_err().kind(), std::io::ErrorKind::WouldBlock, "it was asked");
         assert!(wait_dead(&d));
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -664,17 +726,40 @@ mod tests {
         assert!(old.limits.is_empty(), "never a number past its age");
     }
 
+    /// Eight callers at once (the meter's focus pull, the poll, a launch's
+    /// gate…) start ONE server: the lock is held across the probe. Copied
+    /// from codex's test — a sequential version passes with the lock released
+    /// around the fetch, which is exactly the bug.
     #[test]
-    fn a_second_caller_shares_the_first_ones_probe() {
-        let state = Mutex::new(None);
-        let n = std::sync::atomic::AtomicUsize::new(0);
-        let fetch = || {
-            n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    fn concurrent_callers_share_one_probe_and_a_new_binary_invalidates_it() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        let cache = Arc::new(Mutex::new(None));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let cache = cache.clone();
+                let calls = calls.clone();
+                std::thread::spawn(move || {
+                    read_cached(&cache, "bin-a".into(), || {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        std::thread::sleep(Duration::from_millis(10));
+                        ok(epoch())
+                    })
+                })
+            })
+            .collect();
+        for t in threads {
+            // Every caller got the one probe's windows (their `state` depends
+            // on the fixture's reset times against the clock, not on sharing).
+            assert_eq!(t.join().unwrap().limits.len(), 3);
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        read_cached(&cache, "bin-b".into(), || {
+            calls.fetch_add(1, Ordering::SeqCst);
             ok(epoch())
-        };
-        read_cached(&state, "k".into(), fetch);
-        read_cached(&state, "k".into(), || panic!("a fresh answer must not probe again"));
-        assert_eq!(n.load(std::sync::atomic::Ordering::SeqCst), 1);
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]

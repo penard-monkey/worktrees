@@ -68,8 +68,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   beside Claude's and Codex's — its 5-hour and monthly windows, read through
   kimi itself (its own local `kimi web`, started for one request at most every
   two minutes and ended again; worktrees never reads kimi's sign-in) — and a
-  nearly spent kimi window holds a kimi launch the way it does for Claude and
-  Codex (`--force` / Launch anyway). `worktrees doctor --kimi` shows the windows
+  nearly spent 5-hour (or 7-day) kimi window holds a kimi launch the way it
+  does for Claude and Codex (`--force` / Launch anyway); the monthly windows
+  are shown, never used to hold a launch. `worktrees doctor --kimi` shows the windows
   too. Settings → Usage can turn it off.
 
 ### Fixed

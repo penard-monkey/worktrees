@@ -90,6 +90,7 @@ export function detailMessage(info: PlanUsage): string {
     case "stale": return info.source === "statusline" ? "Statusline snapshot."
       : info.source === "cached" ? "Could not refresh. Showing the last reading." : "Awaiting updated windows.";
     case "unavailable": return info.reason === "not_loopback" ? "kimi's server was reachable from the network, so it was not asked."
+      : info.reason === "unexpected_host" ? "kimi's server reported an address that is not this machine's loopback, so it was not asked."
       : info.reason === "unsupported_protocol" ? "This Codex version cannot provide plan usage."
       : info.reason === "no_limits" ? "No plan-limit windows were reported." : "Could not read usage.";
     default: return "";

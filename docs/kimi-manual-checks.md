@@ -175,7 +175,8 @@ lsof -nP -iTCP -sTCP:LISTEN | grep kimi-code   # during a read only; nothing aft
 ls ~/.kimi-code/server/instances/  # empty again after a read
 ```
 
-- [x] `kimi web --no-open --port 0` binds `127.0.0.1` only ("Network: off") and prints its port in the `Local:` line; worktrees refuses any other host, and a `Network:` line that is not `off`, without asking it.
+- [x] `kimi web --no-open --host 127.0.0.1 --port 0` is accepted (2.2.0) and binds `127.0.0.1` only ("Network: off"), printing its port in the `Local:` line. worktrees passes `--host 127.0.0.1` and still refuses a `Local:` host other than loopback (`unexpected_host`) or a `Network:` line that is not `off` (`not_loopback`), without asking it.
+- [x] Only the 5h and 7d windows can hold a launch; the month windows are on the meter only (a month at 80% would hold kimi for weeks). kimi reports only `usedRatio`, so the 80% line is worktrees', and the refusal says so.
 - [x] `GET /api/v1/oauth/usage` with the printed bearer answers `{kind: "ok", quota: {usages: {limit5h, monthTotal, monthCode…}}}` (`limit7d` absent on this plan). `doctor --kimi` showed the three windows in 2.7s.
 - [x] After a read no `kimi-code` process listens and `server/instances/` is empty (SIGTERM, then SIGKILL after 2s, then a reap; a SIGKILL'd record is pruned by kimi's next start). Unit tests prove the same for a timed-out probe against a fake kimi.
 - [x] The bearer is the persistent one in `~/.kimi-code/server.token`, shared with any `kimi web` you run. It never appears in `doctor --kimi --json` (checked), in app.log or in an error.

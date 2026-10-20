@@ -57,12 +57,15 @@
 //! offline, logged out or simply absent would make the tool unusable for
 //! everyone who does not use that provider.
 //!
-//! # The threshold is the PROVIDER'S, not one we invented
+//! # The threshold is the provider's where it gives one — and says so where not
 //!
-//! Each reader already grades its own windows (`normal` / `warning` / `over`,
-//! Codex at 80%). Reusing that grade means the number moves when the
-//! provider's judgement moves, and there is no second definition of "nearly
-//! out" to drift.
+//! Claude grades its own windows (`normal` / `warning` / `over`), and that
+//! grade is reused, so the number moves when Claude's judgement moves. Codex
+//! and kimi report only a percentage; their readers grade it at 80%, which is
+//! worktrees' threshold, not theirs — `Window::grade` records which, and the
+//! refusal says it rather than crediting the provider with a grade it never
+//! gave. kimi's MONTH windows are display-only: a month at 80% would refuse
+//! launches for weeks (`harness::windows_from_kimi`).
 //!
 //! # …unless the USER says otherwise (`[quota]` in config.toml)
 //!
@@ -143,6 +146,18 @@ pub struct Window {
     /// Codex's window length — because the labels say nothing reliable: Codex
     /// labels a bucket by its NAME ("Codex"), not its span.
     pub weekly: bool,
+    /// Who decided `severity`: the provider, or worktrees' own percentage
+    /// threshold on a provider that reports only a percentage.
+    pub grade: Grade,
+}
+
+/// Who graded a window (`Window::grade`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Grade {
+    /// The provider's own grade (Claude's `severity`).
+    Provider,
+    /// worktrees' threshold, in percent, on the provider's bare percentage.
+    Threshold(u8),
 }
 
 // ── the user's policy ───────────────────────────────────────────────────────
@@ -492,6 +507,7 @@ fn fixture(path: &std::path::Path, provider_id: &str) -> Vec<Window> {
             resets_at: r.get("resets_at").and_then(|x| x.as_i64()),
             model: r.get("model").and_then(|x| x.as_str()).map(str::to_string),
             weekly: r.get("weekly").and_then(|x| x.as_bool()).unwrap_or(false),
+            grade: Grade::Provider,
         })
         .collect()
 }
@@ -517,9 +533,12 @@ pub fn refusal(provider_label: &str, w: &Window, now: i64, others: &[&str], poli
         many => format!(" Other agents available here: {}.", many.join(", ")),
     };
     // Which rule fired, so "too eager" points at the knob that would change it.
-    let rule = match (w.weekly, policy.weekly_warn_pct) {
-        (true, Some(n)) => format!(" (the user's limit: {n}% of a weekly window)"),
-        _ => format!(" ({provider_label} graded it nearly spent)"),
+    let rule = match (w.weekly, policy.weekly_warn_pct, w.grade) {
+        (true, Some(n), _) => format!(" (the user's limit: {n}% of a weekly window)"),
+        (_, _, Grade::Provider) => format!(" ({provider_label} graded it nearly spent)"),
+        (_, _, Grade::Threshold(n)) => {
+            format!(" ({n}% or more used: {provider_label} reports only the percentage, and {n}% is worktrees' line)")
+        }
     };
     format!(
         "{provider_label} is at {:.0}% of its {} window{when} — not starting another agent on it{rule}.{alt} \
@@ -608,6 +627,7 @@ mod tests {
             resets_at: None,
             model: None,
             weekly: false,
+            grade: Grade::Provider,
         }
     }
 
@@ -852,6 +872,11 @@ mod tests {
         assert!(msg.contains("`[quota]` in ~/.config/worktrees/config.toml"), "{msg}");
         let msg = refusal("Codex", &w("5h", 85.0, "warning"), 0, &[], &at(90), HOW);
         assert!(msg.contains("Codex graded it nearly spent"), "{msg}");
+        // A grade worktrees made is never credited to the provider.
+        let ours = Window { grade: Grade::Threshold(80), ..w("5h", 85.0, "warning") };
+        let msg = refusal("Kimi", &ours, 0, &[], &D, HOW);
+        assert!(!msg.contains("graded it"), "{msg}");
+        assert!(msg.contains("80% or more used: Kimi reports only the percentage, and 80% is worktrees' line"), "{msg}");
         assert!(msg.contains("Settings → Behavior → Plan limits"), "{msg}");
     }
 

@@ -2332,7 +2332,7 @@ fn kimi_doctor(p: &Project, ui: &mut dyn Ui, json: bool, with_usage: bool) -> i3
     }
     if let Some(u) = &usage {
         if u.limits().is_empty() {
-            ui.info(&format!("usage {} ({})", u.state(), serde_json::to_value(u).ok().and_then(|v| v["reason"].as_str().map(str::to_string)).unwrap_or_default()));
+            ui.info(&format!("usage {} ({})", u.state(), u.reason().unwrap_or("")));
         }
         for l in u.limits() {
             let resets = l.resets_at().map(|t| format!(", resets {}", crate::sysclock::SysClock::detect().fmt_date(t))).unwrap_or_default();

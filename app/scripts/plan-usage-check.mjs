@@ -58,6 +58,16 @@ test("kimi age ceiling mirrors the backend constant", () => {
   assert.equal(defs.length, 1, "expected exactly one STALE in kimi_usage.rs");
   assert.equal(KIMI_STALE_SECS, Number(defs[0][1].replaceAll("_", "")));
 });
+test("the cadence the app and CHANGELOG promise (\"two minutes\") is kimi_usage's TTL and failure floor", () => {
+  const ttl = [...krust.matchAll(/^const TTL: u64 = (\d+);/gm)];
+  const floor = [...krust.matchAll(/^const FAILURE_FLOOR: u64 = (\d+);/gm)];
+  assert.equal(ttl.length, 1, "expected exactly one TTL in kimi_usage.rs");
+  assert.equal(floor.length, 1, "expected exactly one FAILURE_FLOOR in kimi_usage.rs");
+  assert.equal(Number(ttl[0][1]), 120, "the Settings hint and CHANGELOG say two minutes");
+  assert.equal(Number(floor[0][1]), 120, "…failures included");
+  const sheet = fs.readFileSync(new URL("../src/SettingsSheet.tsx", import.meta.url), "utf8");
+  assert.match(sheet, /for one request, at most every two minutes/);
+});
 test("kimi rows are labelled by their window and summarised from kimi's own bucket", () => {
   const info = adaptKimi(kimiWire);
   assert.deepEqual(info.limits.map(l => l.label), ["5h", "month"]);

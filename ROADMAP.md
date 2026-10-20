@@ -16,6 +16,24 @@ this repo's settings in `.claude/close-out.md`).
   paragraph you were reading. See
   docs/sessions/2026-10-15-md-scroll-keep/.
 
+- **A kimi or Codex launch can wait ~14s behind the usage meter.** Both
+  readers (`kimi_usage::read_cached`, `codex_usage::read_cached`) hold their
+  cache lock across the probe, by design, so concurrent callers share one
+  server rather than starting several. But the launch gate (`Adapter::prepare`
+  → `quota::gate` → `usage()`) takes the same lock, so a launch that lands
+  while the app's meter is mid-probe waits for it: up to the reader's budget
+  (12–13s) plus the 2s kill grace, inline in the app's `run_op`. Options: let
+  the gate answer from the cache's last reading without waiting
+  (`try_lock`, and fail open), or probe on a worker and hand the gate the
+  previous answer. Inherited from Codex's shape; kimi copied it on purpose.
+  _From: 2026-10-19, kimi-harness (#511 review)_
+- **`claude_usage` hands its OAuth bearer to curl on argv.**
+  `claude_usage.rs:117-118` builds `-H "Authorization: Bearer <token>"` as a
+  curl argument, which any local user can read in `ps` for the call's life.
+  The kimi reader (`kimi_usage::get`) shows the alternative: a raw `TcpStream`
+  (or curl's `-H @file` / stdin config, `--config -`) keeps the token out of
+  argv. Raised with David; not fixed in #511 on purpose.
+  _From: 2026-10-19, kimi-harness (#511 review)_
 - **A Project-sheet action prints its result in a different section.**
   `ProjectSheet.tsx` has one `log` for every `run()` (relink, force, provision,
   init) and renders it once, at the bottom of the `health` section — about 160
