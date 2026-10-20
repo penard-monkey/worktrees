@@ -18,8 +18,8 @@ worktrees — one git worktree per branch, one active agent per worktree.
                                         (--spare: + a shell pane, which runs the detected install)
   worktrees co  <branch>                checkout a REMOTE branch (fetch if needed)
   worktrees switch [<worktree>] <branch> [base]   move a worktree to another branch
-  worktrees open <name> [--ai claude|codex|pi]  open or switch the active agent
-                                        (--model <m>: pi takes backend/id; --force: launch despite an advisory refusal)
+  worktrees open <name> [--ai claude|codex|pi|kimi]  open or switch the active agent
+                                        (--model <m>: pi takes backend/id, kimi an alias; --force: launch despite an advisory refusal)
                                         (--spare: + a shell pane beside the agent)
   worktrees close <name> [name...]      end the tmux session (worktree stays; also: main)
                                         (-y to kill an adopted session; --session <s> binds that answer)
@@ -29,7 +29,8 @@ worktrees — one git worktree per branch, one active agent per worktree.
   worktrees provision [<name>|--all]    allocate a port slot + write .worktree.env (--reallocate)
   worktrees doctor [<name>]             report file drift, declared and un- (--json --strict --config-only)
   worktrees doctor --pi                 which pi, on which node; each pi model and why it can't run (--json)
-  worktrees trust pi [<repo>] [--revoke]  let a repo's own pi resources load (.pi/, .agents/skills)
+  worktrees doctor --kimi               which kimi; trust, MCP, its models, the last brief opener (--json)
+  worktrees trust pi|kimi [<repo>] [--revoke]  let a repo's own pi resources load / start kimi lanes trusted
   worktrees status <name>               health verdict for one worktree (--json)
   worktrees show <file>[:line] [--line N]  ask the worktrees app to open a file (at a line)
   worktrees guide [--status] [--json]   what agents are told about places (--rules: the one-line rule;
@@ -59,9 +60,9 @@ worktrees — one git worktree per branch, one active agent per worktree.
   worktrees slots [--json]              who holds and who waits for each slot (no repo needed)
   worktrees mcp [--mutations]           MCP server over stdio (for an AI session; not interactive)
                                         (--cross-project off|read|full: narrow the user's cross_project, never widen)
-  worktrees mcp --status [--json] [--ai codex|pi]    check Claude, Codex or pi MCP setup (no repo needed)
+  worktrees mcp --status [--json] [--ai codex|pi|kimi]  check Claude, Codex, pi or kimi MCP setup (no repo needed)
   worktrees mcp --migrate --ai codex [--json] [--apply <name>…] copy Claude user servers
-  worktrees mcp --install [--read-only] [--ai codex|pi] connect tools to Claude, Codex or pi (--uninstall removes)
+  worktrees mcp --install [--read-only] [--ai codex|pi|kimi] connect tools to Claude, Codex, pi or kimi (--uninstall removes)
   worktrees -V | --version              print version   (also: help / -h)
   worktrees                             (no args) -> ls";
 
@@ -110,6 +111,8 @@ fn run() -> i32 {
         // Machine-wide, not about the cwd's repo: a gate may run anywhere, and
         // the slots span every project (`slots.rs`).
         Some("run") => return worktrees_core::slots::cmd_run(args.get(1..).unwrap_or(&[])),
+        // Started by a kimi lane's own pane (`ops::deferred_opener`); needs no repo.
+        Some("kimi-opener") => return worktrees_core::kimi::cmd_opener(args.get(1..).unwrap_or(&[])),
         Some("slots") => return worktrees_core::slots::cmd_slots(args.get(1..).unwrap_or(&[])),
         Some("plan") => return worktrees_core::plancmd::cmd_plan(args.get(1..).unwrap_or(&[])),
         // Also ahead of the guards: a `pull` that ADOPTS a project, and a

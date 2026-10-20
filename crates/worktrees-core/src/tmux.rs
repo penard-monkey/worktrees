@@ -554,6 +554,13 @@ impl PaneId {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// A `%N` id handed in from outside (`$TMUX_PANE`), or `None` for anything
+    /// else — it becomes a `-t` target, so nothing but that shape is taken.
+    pub fn parse(s: &str) -> Option<PaneId> {
+        let digits = s.strip_prefix('%')?;
+        (!digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())).then(|| PaneId(s.to_string()))
+    }
 }
 
 /// The pane in `session` that is running the AI, as a stable `%id`.

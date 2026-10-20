@@ -175,6 +175,15 @@ function cdv(): ProjectView {
       declared: { last_opened_epoch: NOW - 1800 }, lifecycle_effective: "active",
     }),
     place(P, root, {
+      slug: "ledger-sync", branch: "feat/ledger-sync",
+      tmux_session: { name: `${P}-ledger-sync~agent~kimi`, up: true },
+      // The kimi place: its dots come from kimi's wire log (an approval it is
+      // waiting on is written there), and from its trust modal before then.
+      agent_sessions: agentSessions(`${P}-ledger-sync`, "kimi", "kimi-code/k3"),
+      claude_session_present: false, last_commit_subject: "ledger sync stub",
+      declared: { last_opened_epoch: NOW - 2400 }, lifecycle_effective: "active",
+    }),
+    place(P, root, {
       slug: "kitchen-sink", branch: null, detached: true,
       dirty: true, dirty_files: 12, ahead: 3, behind: 4,
       // ADOPTED session: the name is not `<prefix>-<slug>`, so this tool did not

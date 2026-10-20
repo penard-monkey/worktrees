@@ -108,7 +108,7 @@ export function ModelPicker({ harness, value, options, onChange, testid, disable
       </select>
       {typing && (
         <input className="np-input" data-testid={testid ? `${testid}-other` : undefined} autoFocus
-          placeholder={harness === "pi" ? "backend/model-id" : "model id"} spellCheck={false}
+          placeholder={harness === "pi" ? "backend/model-id" : harness === "kimi" ? "alias (kimi-code/…)" : "model id"} spellCheck={false}
           autoCapitalize="off" autoCorrect="off" value={value}
           onChange={(e) => onChange(e.currentTarget.value.trim())} />
       )}

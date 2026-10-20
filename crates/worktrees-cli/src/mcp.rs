@@ -440,6 +440,9 @@ pub fn cmd_mcp_setup(verb: &str, repo: Option<&str>, args: &[String]) -> i32 {
     if ai("pi") {
         return cmd_pi_mcp_setup(verb, args);
     }
+    if ai("kimi") {
+        return cmd_kimi_mcp_setup(verb, args);
+    }
     if verb == "migrate" {
         eprintln!("MCP migration requires --migrate --ai codex.");
         return 1;
@@ -545,6 +548,63 @@ fn cmd_pi_mcp_setup(verb: &str, args: &[String]) -> i32 {
                         println!("  running pi sessions pick it up on /reload or their next launch");
                     }
                     i32::from(!o.ok)
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+            }
+        }
+        _ => 1,
+    }
+}
+
+/// `worktrees mcp --status|--install|--uninstall --ai kimi`. kimi has no `mcp
+/// add` and no per-launch flag, and its own config is not ours to write — so
+/// installing sets worktrees' own `kimi_mcp`, and every kimi launch writes the
+/// server into the place's `.kimi-code/mcp.json` (`kimiplace`). A running kimi
+/// picks it up at its next launch or `/new`.
+fn cmd_kimi_mcp_setup(verb: &str, args: &[String]) -> i32 {
+    use worktrees_core::kimiplace::{self, McpMode};
+    if verb == "migrate" {
+        eprintln!("--migrate copies Claude's servers into Codex; there is no kimi migration.");
+        return 1;
+    }
+    let json = args.iter().any(|a| a == "--json");
+    let report = |s: &kimiplace::Status| {
+        if json {
+            println!("{}", serde_json::to_string(s).unwrap_or_default());
+            return;
+        }
+        println!("kimi MCP: {}", s.state);
+        if s.mode == McpMode::Off {
+            println!("  install with: worktrees mcp --install --ai kimi [--read-only]");
+        }
+        println!("  lands in: {} (each kimi launch writes it; never kimi's own config)", s.file);
+        println!("  setting: kimi_mcp in {}", s.config_path);
+    };
+    match verb {
+        "status" => {
+            let s = kimiplace::status();
+            report(&s);
+            i32::from(!matches!(s.state, "mutations" | "read-only"))
+        }
+        "install" | "uninstall" => {
+            let mode = if verb == "uninstall" {
+                McpMode::Off
+            } else if args.iter().any(|a| a == "--read-only") {
+                McpMode::ReadOnly
+            } else {
+                McpMode::Mutations
+            };
+            match kimiplace::set_mode(mode) {
+                Ok(_) => {
+                    let s = kimiplace::status();
+                    report(&s);
+                    if !json {
+                        println!("  kimi lanes get it at their next launch (or /new in a running one)");
+                    }
+                    i32::from(verb == "install" && s.state != mode.as_str())
                 }
                 Err(e) => {
                     eprintln!("{e}");
@@ -1164,9 +1224,11 @@ impl Server {
             t.push(tool(
                 "send",
                 "Deliver a message INTO another place's agent, as if typed at its prompt — for a \
-                 Codex place, which has no messaging of its own (its input box queues text \
-                 mid-turn). It arrives labelled as a message from your place, not from the user. \
-                 Refused while that Codex is waiting on an approval or a question. A Claude place \
+                 Codex, pi or kimi place, none of which has messaging of its own. Mid-turn, each \
+                 queues it behind the running turn (the reply says `queued`). It arrives labelled \
+                 as a message from your place, not from the user. Refused while that agent is \
+                 waiting on an approval, a question or a trust prompt, and while a kimi lane is \
+                 still being handed its brief. A Claude place \
                  is not typed into: you get back the session name to use with Claude's own \
                  SendMessage instead. One line of plain text, no control characters, not \
                  starting with / @ or !, up to 4 KB; a copy is filed in the message log as \
@@ -2841,6 +2903,16 @@ fn settled(prev: Option<&activity::Activity>, cur: &activity::Activity) -> bool 
 /// Codex's lists are aliases and free text, not a gate.
 fn model_ok(harness: &str, model: &str, options: &[worktrees_core::choice::ModelOption]) -> Result<(), String> {
     worktrees_core::choice::validate_model(model)?;
+    // kimi runs only the aliases its config declares; with no catalog to read
+    // (no config, or one this cannot parse) the alias is passed as data and
+    // kimi has the last word.
+    if harness == worktrees_core::provider::KIMI.id && !options.is_empty() {
+        if options.iter().any(|o| o.model.arg() == model) {
+            return Ok(());
+        }
+        let names: Vec<String> = options.iter().map(|o| o.model.arg()).collect();
+        return Err(format!("kimi does not offer {model}. Offered: {}", names.join(", ")));
+    }
     if harness != worktrees_core::provider::PI.id {
         return Ok(());
     }
@@ -3098,7 +3170,7 @@ mod tests {
         let server = server_at(&sc.root, true);
         let tools = server.tools();
         let create = tools.iter().find(|t| t["name"] == "create_worktree").unwrap();
-        assert_eq!(create["inputSchema"]["properties"]["provider"]["enum"], serde_json::json!(["claude", "codex", "pi"]));
+        assert_eq!(create["inputSchema"]["properties"]["provider"]["enum"], serde_json::json!(["claude", "codex", "pi", "kimi"]));
         assert_eq!(create["inputSchema"]["properties"]["model"]["type"], "string");
     }
 
@@ -3139,6 +3211,22 @@ mod tests {
         let e = model_ok("pi", "lm-studio/other", &opts).unwrap_err();
         assert!(e.contains("does not offer") && e.contains("lm-studio/qwen3.6-27b"), "{e}");
         assert!(model_ok("pi", "x", &[]).unwrap_err().contains("Ready: none"));
+        // kimi: its declared aliases, and free text only when there is no catalog.
+        let kimi = worktrees_core::kimimodels::options_from(
+            &[worktrees_core::kimimodels::KimiModel {
+                alias: "kimi-code/k3".into(),
+                label: None,
+                context: None,
+                thinking: true,
+                images: false,
+            }],
+            None,
+        );
+        assert!(model_ok("kimi", "kimi-code/k3", &kimi).is_ok());
+        let e = model_ok("kimi", "kimi-code/nope", &kimi).unwrap_err();
+        assert!(e.contains("Offered: kimi-code/k3"), "{e}");
+        assert!(model_ok("kimi", "kimi-code/anything", &[]).is_ok());
+        assert!(model_ok("kimi", "x'; rm", &[]).is_err(), "still data");
         // Claude and Codex: free text, but never argv.
         assert!(model_ok("claude", "some-new-model", &[]).is_ok());
         assert!(model_ok("codex", "--dangerously-bypass", &[]).is_err());

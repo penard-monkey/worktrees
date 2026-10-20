@@ -804,7 +804,7 @@ pub enum Delivery {
 pub fn delivery(harness: &str, m: &Materialized, s: &Settings, codex_own: Option<bool>) -> Delivery {
     use crate::profile::shell_quote;
     let q = |p: &Path| shell_quote(&p.to_string_lossy());
-    let known = [crate::provider::CLAUDE.id, crate::provider::CODEX.id, crate::provider::PI.id];
+    let known = [crate::provider::CLAUDE.id, crate::provider::CODEX.id, crate::provider::PI.id, crate::provider::KIMI.id];
     if !known.contains(&harness) {
         return Delivery::Skipped { reason: "not a harness worktrees knows".into() };
     }
@@ -816,6 +816,10 @@ pub fn delivery(harness: &str, m: &Materialized, s: &Settings, codex_own: Option
         Delivery::On { flags: vec!["--plugin-dir".into(), q(plugin)] }
     } else if harness == crate::provider::PI.id {
         Delivery::On { flags: vec!["--skill".into(), q(&m.skill), "--append-system-prompt".into(), q(&m.rules)] }
+    } else if harness == crate::provider::KIMI.id {
+        // No flags: kimi takes both as files in the place (`kimiplace`),
+        // written by `ops::ai_launch_for` while this says On.
+        Delivery::On { flags: Vec::new() }
     } else {
         match codex_own {
             Some(false) => {
@@ -1031,7 +1035,7 @@ pub fn status() -> Status {
         Err(e) => (None, Some(e)),
     };
     let last = codex_cache();
-    let harnesses = [crate::provider::CLAUDE, crate::provider::CODEX, crate::provider::PI]
+    let harnesses = [crate::provider::CLAUDE, crate::provider::CODEX, crate::provider::PI, crate::provider::KIMI]
         .into_iter()
         .map(|pv| {
             let installed = crate::harness::by_id(pv.id).is_some_and(|a| a.installed().is_ok());
@@ -1540,10 +1544,12 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+        // kimi takes both as files in the place (`kimiplace`), not as flags.
+        assert_eq!(delivery("kimi", &m, &on, None), Delivery::On { flags: vec![] });
         assert!(matches!(delivery("codex", &m, &on, Some(true)), Delivery::Skipped { .. }));
         assert!(matches!(delivery("codex", &m, &on, None), Delivery::Skipped { .. }));
         let off = Settings { enabled: false, guard: true };
-        for h in ["claude", "pi", "codex"] {
+        for h in ["claude", "pi", "codex", "kimi"] {
             assert_eq!(delivery(h, &m, &off, Some(false)), Delivery::Off, "{h}");
         }
         // A guard asked for but impossible: the plain plugin, never nothing.

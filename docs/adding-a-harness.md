@@ -4,7 +4,7 @@ title: "Adding an agent harness — checklist"
 
 # Adding an agent harness — checklist
 
-Claude, Codex and pi are the harnesses today; opencode is proposed
+Claude, Codex, pi and kimi are the harnesses today; opencode is proposed
 ([proposal](proposals/opencode-harness.html)). A harness touches the core, the
 CLI, the MCP server, the app's backend poll and the app's frontend, and **a
 harness that works in one of those can be invisible in another**. pi shipped in

@@ -141,6 +141,7 @@ pub fn options_for(harness: &str) -> Vec<ModelOption> {
             })
             .collect(),
         "pi" => crate::pimodels::options(),
+        "kimi" => crate::kimimodels::options(),
         _ => Vec::new(),
     }
 }

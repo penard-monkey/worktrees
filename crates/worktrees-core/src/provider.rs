@@ -50,10 +50,22 @@ pub const PROVIDERS: &[Provider] = &[
         name_arg: None,
         model_arg: Some("--model"),
     },
+    Provider {
+        id: "kimi",
+        label: "Kimi",
+        match_word: "kimi",
+        sidecar_suffix: "~agent~kimi",
+        canonical_default: false,
+        // kimi has no `--name` at all; it is reached over the MCP message log.
+        name_arg: None,
+        // A model ALIAS from kimi's config (`kimi-code/k3`), never on a resume.
+        model_arg: Some("-m"),
+    },
 ];
 pub const CLAUDE: &Provider = &PROVIDERS[0];
 pub const CODEX: &Provider = &PROVIDERS[1];
 pub const PI: &Provider = &PROVIDERS[2];
+pub const KIMI: &Provider = &PROVIDERS[3];
 
 pub fn by_id(id: &str) -> Option<&'static Provider> {
     PROVIDERS.iter().find(|p| p.id == id)
@@ -136,6 +148,12 @@ mod tests {
         // pi runs as `node` too; its sidecar names it.
         assert_eq!(id("repo-feat~agent~pi", "node"), Some("pi"));
         assert_eq!(id("repo-feat~agent~pi", "zsh"), None);
+        // kimi 2.2.0 is a native binary and reads as `kimi` (measured); an
+        // npm-installed one would be `node`, which its sidecar names.
+        assert_eq!(id("repo-feat~agent~kimi", "kimi"), Some("kimi"));
+        assert_eq!(id("repo-feat~agent~kimi", "node"), Some("kimi"));
+        assert_eq!(id("repo-feat", "kimi"), Some("kimi"));
+        assert_eq!(id("repo-feat~agent~kimi", "zsh"), None);
         // A harness this build does not know is not Claude either.
         assert_eq!(id("repo-feat~agent~opencode", "node"), None);
         assert_eq!(id("repo-feat~agent~opencode", "zsh"), None);
