@@ -2277,7 +2277,7 @@ fn harness_in_use(p: &Project, h: &crate::provider::Provider) -> bool {
 fn kimi_doctor(p: &Project, ui: &mut dyn Ui, json: bool, with_usage: bool) -> i32 {
     let bin = crate::kimi::kimi_bin();
     let version = bin.as_ref().and_then(|b| {
-        let mut cmd = std::process::Command::new(b);
+        let mut cmd = crate::childenv::command(b);
         cmd.arg("--version").current_dir("/").stdin(std::process::Stdio::null());
         crate::proc::run_deadline(cmd, 10).ok().filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
@@ -3637,6 +3637,7 @@ mod tests {
     }
 
     use super::*;
+    use std::process::Command;
 
     /// Agent guidance is for worktrees-managed repos only (decision,
     /// 2026-09-30). Every bats `new` makes its repo managed, so the unmanaged
