@@ -52,7 +52,7 @@ const kimiMcpStatus = () => ({
   state: kimiMissing() ? "kimi-missing" : kimiMcpMode, mode: kimiMcpMode,
   kimi_bin: kimiMissing() ? null : "/Users/demo/.kimi-code/bin/kimi",
   worktrees_bin: "/Users/demo/.local/bin/worktrees",
-  file: "<place>/.kimi-code/mcp.json", config_path: "/Users/demo/.config/worktrees/config.toml",
+  file: "<place>/.kimi-code/mcp.json", source: "config", config_path: "/Users/demo/.config/worktrees/config.toml",
 });
 
 // Settings → pi's state: the trust mode pushed from settings and the user's
@@ -3023,7 +3023,7 @@ Phase 3: Frontend pane and mock harness
       const allowed = !!root && kimiAllowed.has(root);
       return {
         kimi_bin: missing ? null : "/Users/demo/.kimi-code/bin/kimi",
-        kimi_version: missing ? null : "2.2.0",
+        models_reason: null,
         mcp: kimiMcpStatus(),
         allowed: [...kimiAllowed], repo_root: root, repo_allowed: allowed,
         launch: root ? { env: allowed ? ["KIMI_CODE_TRUST_WORKSPACE", "1"] : null, source: allowed ? "allowance" : "ask", allowed, shadowed: false } : null,
@@ -3031,6 +3031,9 @@ Phase 3: Frontend pane and mock harness
     }
     case "kimi_mcp_status":
       return kimiMcpStatus();
+    case "kimi_version":
+      if (kimiMissing()) throw "kimi is not installed";
+      return "2.2.0";
     case "kimi_mcp_set": {
       const mode = String(args.mode);
       if (!["off", "read-only", "mutations"].includes(mode)) throw `unknown kimi MCP mode '${mode}' (expected off, read-only or mutations)`;

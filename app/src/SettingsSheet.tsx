@@ -554,6 +554,9 @@ export function SettingsSheet({
     invoke<PiMcpStatus>("pi_mcp_status")
       .then((status) => { if (alive) setPiMcpStatus(status); })
       .catch((e) => { if (alive) onReport(String(e)); });
+    invoke<KimiMcpStatus>("kimi_mcp_status")
+      .then((status) => { if (alive) setKimiMcpStatus(status); })
+      .catch((e) => { if (alive) onReport(String(e)); });
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- probe on entry, not every App render
   }, [open, cat]);

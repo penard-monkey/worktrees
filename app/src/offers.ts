@@ -160,6 +160,8 @@ export function pendingOffers(ctx: OfferCtx, dismissed: Record<string, string>):
   // kimi's twin, same rule in kimi's words: `off` is its `absent` (the user
   // never turned it on). `cli-missing` belongs to Updates, and without kimi
   // there is nothing to connect (`kimi-missing`, and the bin check).
+  // The bin check is a belt: core reports `kimi-missing`, never `off`, without
+  // kimi — keep both, so neither side's change alone starts offering it.
   if (ctx.kimiMcp?.state === "off" && ctx.kimiMcp.kimi_bin) {
     out.push({
       id: "kimi-mcp",

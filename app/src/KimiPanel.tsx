@@ -21,6 +21,8 @@ export type KimiMcpStatus = {
   kimi_bin: string | null;
   worktrees_bin: string | null;
   file: string;
+  /** `env` while $WORKTREES_KIMI_MCP decides: Settings cannot change it then. */
+  source: "env" | "config";
   config_path: string;
 };
 
@@ -28,7 +30,8 @@ export type KimiLaunchTrust = { env: [string, string] | null; source: "allowance
 
 export type KimiStatus = {
   kimi_bin: string | null;
-  kimi_version: string | null;
+  /** Why the model list is empty, when it is (core `kimimodels::catalog`). */
+  models_reason: string | null;
   mcp: KimiMcpStatus;
   allowed: string[];
   repo_root: string | null;
@@ -74,20 +77,22 @@ export function KimiMcpSection({ onReport, onStatus, offerPending = false, onSil
     finally { setBusy(false); }
   };
   const on = status && (status.mode === "mutations" || status.mode === "read-only");
+  const fromEnv = status?.source === "env";
   return <section className="setting" data-focus={focusId} data-testid="kimi-mcp">
     <label>Worktrees tools</label>
     <div className="hint">Connect the Worktrees tools to kimi lanes, the same server Claude, Codex and pi use.</div>
     <div className="hint" data-testid="kimi-mcp-state">{status ? MCP_VERDICT[status.state] : "Checking…"}</div>
+    {fromEnv && <div className="hint warn" data-testid="kimi-mcp-env">WORKTREES_KIMI_MCP is set in the environment the app was started from, and it decides this — the buttons below cannot change it until it is unset.</div>}
     {status && status.state !== "kimi-missing" && <>
       {!on && <label className="tier-toggle setting-check"><input type="checkbox" checked={mutations}
         onChange={(e) => setMutations(e.currentTarget.checked)} />Allow create and close tools</label>}
       <div className="ver-actions">
-        {!on && <button className="ctrl sm" data-testid="kimi-mcp-install" disabled={busy || !status.worktrees_bin}
+        {!on && <button className="ctrl sm" data-testid="kimi-mcp-install" disabled={busy || fromEnv || !status.worktrees_bin}
           onClick={() => set(mutations ? "mutations" : "read-only")}>{busy ? "Working…" : "Set up kimi"}</button>}
-        {on && <button className="ctrl sm" disabled={busy} data-testid="kimi-mcp-toggle"
+        {on && <button className="ctrl sm" disabled={busy || fromEnv} data-testid="kimi-mcp-toggle"
           onClick={() => set(status.mode === "mutations" ? "read-only" : "mutations")}>
           {status.mode === "mutations" ? "Make read-only" : "Allow create and close"}</button>}
-        {on && <button className="ctrl sm danger" disabled={busy} data-testid="kimi-mcp-remove" onClick={() => set("off")}>Disconnect</button>}
+        {on && <button className="ctrl sm danger" disabled={busy || fromEnv} data-testid="kimi-mcp-remove" onClick={() => set("off")}>Disconnect</button>}
         {offerPending && onSilenceOffer && <button className="mcp-dismiss" onClick={onSilenceOffer}>Stop suggesting this</button>}
       </div>
       <div className="hint">kimi has no setting Worktrees can add a server to without editing kimi's own files, so each kimi launch writes it into the place itself, as <code>{status.file}</code> — kept out of git, and never written over a <code>.kimi-code/mcp.json</code> the repo has. A running kimi picks a change up at its next launch, or <code>/new</code>.</div>
@@ -107,6 +112,12 @@ export default function KimiPanel({ settings, repo, onChange, onReport, onMcpSta
 }) {
   const [status, setStatus] = useState<KimiStatus | null>(null);
   const [models, setModels] = useState<ModelOption[] | null>(null);
+  // Its own command: it starts a kimi process, which nothing on a dialog's
+  // path may wait for. "" while asking, null when it could not be read.
+  const [version, setVersion] = useState<string | null>("");
+  useEffect(() => {
+    invoke<string>("kimi_version").then(setVersion).catch(() => setVersion(null));
+  }, []);
   const reload = useCallback(() => {
     invoke<KimiStatus>("kimi_status", { repo }).then(setStatus).catch((e) => onReport(`kimi: ${String(e)}`));
     setModels(null);
@@ -130,7 +141,7 @@ export default function KimiPanel({ settings, repo, onChange, onReport, onMcpSta
     <section className="setting" data-testid="kimi-install">
       <label>kimi</label>
       {!status ? <div className="hint">reading…</div> : status.kimi_bin ? <div className="ver-rows">
-        <div className="ver-row">kimi <b>{status.kimi_version ?? "?"}</b> · <code>{status.kimi_bin}</code></div>
+        <div className="ver-row" data-testid="kimi-version">kimi <b>{version === "" ? "…" : version ?? "version unknown"}</b> · <code>{status.kimi_bin}</code></div>
       </div> : <div className="hint">Kimi Code is not installed. Install it from kimi.com/code, then sign in with <code>kimi login</code>.</div>}
       <div className="hint">kimi takes no prompt when it starts, so a brief's opener is typed into kimi once its prompt is empty — never over a question or into text you are typing — and given up on after ten minutes. <code>worktrees doctor --kimi</code> says how the last one went.</div>
     </section>
@@ -138,7 +149,10 @@ export default function KimiPanel({ settings, repo, onChange, onReport, onMcpSta
     <section className="setting" data-testid="kimi-models">
       <label>Models</label>
       {models === null ? <div className="hint">reading kimi's models…</div>
-        : models.length === 0 ? <div className="hint">kimi's config declares no models this build can read.</div>
+        : models.length === 0 ? <div className="hint" data-testid="kimi-models-empty">{
+          status?.models_reason === "no config.toml" ? "kimi has no config.toml yet — run kimi once (and kimi login) to create it."
+            : status?.models_reason === "config.toml unreadable" ? "kimi's config.toml could not be read. kimi itself will say why when it starts."
+            : "kimi's config.toml declares no models."}</div>
         : <div className="ver-rows">{models.map((o) => (
           <div className="ver-row" key={modelArg(o)}>
             <code>{modelArg(o)}</code>{o.model.label && <> — {o.model.label}</>}{o.meta.context && <> · {o.meta.context}</>}

@@ -81,11 +81,15 @@ impl McpMode {
 /// default, like every other harness's server: `worktrees mcp --install --ai
 /// kimi` is the act that turns it on (mutating unless `--read-only`).
 pub fn mcp_mode() -> McpMode {
-    let env = std::env::var("WORKTREES_KIMI_MCP").ok();
-    env.as_deref()
-        .and_then(McpMode::parse)
+    env_mode()
         .or_else(|| crate::config::user_cfg("kimi_mcp").as_deref().and_then(McpMode::parse))
         .unwrap_or(McpMode::Off)
+}
+
+/// `$WORKTREES_KIMI_MCP`, when it is set to one of the three words — it then
+/// decides, whatever the config says.
+fn env_mode() -> Option<McpMode> {
+    std::env::var("WORKTREES_KIMI_MCP").ok().as_deref().and_then(McpMode::parse)
 }
 
 /// Our `mcp.json` for a place, pointing at `worktrees_bin`.
@@ -345,6 +349,9 @@ pub struct Status {
     pub worktrees_bin: Option<String>,
     /// Where it lands: each place's own file, written at launch.
     pub file: &'static str,
+    /// `env` while `$WORKTREES_KIMI_MCP` decides (a change from Settings
+    /// cannot take effect then), else `config`.
+    pub source: &'static str,
     pub config_path: String,
 }
 
@@ -365,6 +372,7 @@ pub fn status() -> Status {
         kimi_bin,
         worktrees_bin,
         file: "<place>/.kimi-code/mcp.json",
+        source: if env_mode().is_some() { "env" } else { "config" },
         config_path: crate::config::config_toml_path().to_string_lossy().into_owned(),
     }
 }
@@ -416,7 +424,21 @@ pub fn with_mode(text: &str, mode: McpMode) -> Result<String, String> {
 /// Set the user's `kimi_mcp`. The user's act (the CLI verb, the app); the MCP
 /// server never calls it. Returns whether anything changed.
 pub fn set_mode(mode: McpMode) -> Result<bool, String> {
-    set_mode_at(&crate::config::config_toml_path(), mode)
+    set_mode_guarded(env_mode(), &crate::config::config_toml_path(), mode)
+}
+
+/// `set_mode` over an explicit env reading, so a test proves the refusal
+/// without touching the process environment.
+fn set_mode_guarded(env: Option<McpMode>, path: &Path, mode: McpMode) -> Result<bool, String> {
+    // Writing the config while the env decides would "work" and change
+    // nothing — the setting reads the env first. Refuse, and say why.
+    if let Some(e) = env {
+        return Err(format!(
+            "WORKTREES_KIMI_MCP={} is set in this process's environment and decides kimi's tools; unset it to change them here",
+            e.as_str()
+        ));
+    }
+    set_mode_at(path, mode)
 }
 
 pub fn set_mode_at(path: &Path, mode: McpMode) -> Result<bool, String> {
@@ -601,6 +623,20 @@ mod tests {
         assert!(off.contains("[trust]\npi = [\"/r\"]"), "{off}");
         assert_eq!(with_mode("", McpMode::Mutations).unwrap(), "kimi_mcp = \"mutations\"\n");
         assert!(with_mode("[broken", McpMode::Mutations).is_err());
+    }
+
+    /// #510 review: with the env knob set, a write from Settings changed the
+    /// file and nothing else — the button "worked" and the verdict stayed.
+    #[test]
+    fn the_env_knob_refuses_a_write_it_would_silently_override() {
+        let d = std::env::temp_dir().join(format!("kimi-mode-env-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("config.toml");
+        let e = set_mode_guarded(Some(McpMode::Off), &p, McpMode::Mutations).unwrap_err();
+        assert!(e.contains("WORKTREES_KIMI_MCP=off"), "{e}");
+        assert!(!p.exists(), "nothing was written");
+        assert_eq!(set_mode_guarded(None, &p, McpMode::Mutations), Ok(true));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
