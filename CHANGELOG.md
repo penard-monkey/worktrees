@@ -59,9 +59,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   has proven itself, 16 MiB per message after, a 5-second HTTP phase, and the
   open-file limit raised at launch. A second `serve` on a live config dir is
   refused — one
-  engine per machine. Logs to `~/.cache/worktrees/serve.log` with the version
-  on the first line. `app/scripts/server-stack.sh` runs one on an isolated
-  config dir, tmux prefix and port for the frontend lane.
+  engine per machine. Logs to `~/.cache/worktrees/serve.log`, owner-only
+  (0600) like `serve.json`, with the version on the first line.
+  `app/scripts/server-stack.sh` runs one on an isolated config dir, tmux
+  prefix and port for the frontend lane.
   Keystrokes to one terminal or dock shell reach it in the order they were
   sent (one serial lane per stream; everything else stays concurrent), and a
   finished channel says so with `{channel, seq, end: true}`, so a client can

@@ -281,6 +281,21 @@ fn a_client_cannot_write_a_line_of_its_own_into_serve_log() {
     assert_eq!(sb.terminate().code(), Some(0));
 }
 
+/// OWASP L1, through the binary: serve.log is owner-only like serve.json,
+/// whether this launch made it or found one a wider-moded writer left.
+#[test]
+fn serve_log_is_owner_only_new_or_inherited() {
+    let mut sb = Sandbox::new("logmode");
+    sb.launch(&[]);
+    assert_eq!(mode(&sb.log()), 0o600, "a new serve.log is {:o}", mode(&sb.log()));
+    assert_eq!(sb.terminate().code(), Some(0));
+
+    std::fs::set_permissions(sb.log(), std::fs::Permissions::from_mode(0o644)).unwrap();
+    sb.launch(&[]);
+    assert_eq!(mode(&sb.log()), 0o600, "an inherited 0644 serve.log is {:o}", mode(&sb.log()));
+    assert_eq!(sb.terminate().code(), Some(0));
+}
+
 /// The whole life of a `serve`, end to end through the binary.
 #[test]
 fn serve_writes_its_file_answers_the_workspace_and_cleans_up_on_sigterm() {

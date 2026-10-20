@@ -75,7 +75,9 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   `.setup` (hostpolicy-check.mjs) and serve calls it in `cmd_serve` — a serve
   that skipped it launched lanes under the default the file overrides. `<config_dir>/serve.json` (0600,
   rewritten per launch) is how a client finds the port and the token; the log
-  is `~/.cache/worktrees/serve.log`, version on the first line.
+  is `~/.cache/worktrees/serve.log`, 0600 as well (re-tightened on every
+  write, and after its rotation, which is a `rename` and keeps the mode it
+  found), version on the first line.
   `app/scripts/server-stack.sh` runs an isolated one for the frontend lane.
 
 **Adding a harness? Walk `docs/adding-a-harness.md` first, and tick it only
