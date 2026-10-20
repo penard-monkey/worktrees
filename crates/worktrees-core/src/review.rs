@@ -360,7 +360,7 @@ pub fn pr_state(root: &str) -> Option<String> {
 }
 
 fn pr_state_with(root: &str, gh: &str) -> Option<String> {
-    let mut c = std::process::Command::new(gh);
+    let mut c = crate::childenv::command(gh);
     c.current_dir(root).args(["pr", "view", FIX_BRANCH, "--json", "state", "--jq", ".state"]);
     let out = agentfiles::run_net(c, "gh pr view").ok()?;
     let s = out.trim().to_string();
@@ -579,7 +579,7 @@ pub fn land_with(p: &Project, ui: &mut dyn Ui, gh: &str) -> i32 {
         return 1;
     }
     ui.info(&format!("pushed {FIX_BRANCH} to origin"));
-    let mut c = std::process::Command::new(gh);
+    let mut c = crate::childenv::command(gh);
     c.current_dir(root).args(["pr", "create", "--base", &default, "--head", FIX_BRANCH, "--fill"]);
     match agentfiles::run_net(c, "gh pr create") {
         Ok(out) => {

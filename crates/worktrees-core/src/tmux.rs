@@ -77,8 +77,15 @@ pub fn have_tmux() -> bool {
 /// never stick. Only the `-N` verdict below is cached, and only once a probe
 /// succeeded.
 fn tmux_version() -> Option<String> {
-    let o = Command::new("tmux").arg("-V").output().ok()?;
+    let o = tmux_cmd().arg("-V").output().ok()?;
     o.status.success().then(|| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
+/// Every tmux this crate runs. Through `childenv` like every spawn, and here
+/// it matters most: a tmux that starts a server hands that server's
+/// environment to every pane, for the server's whole life.
+fn tmux_cmd() -> Command {
+    crate::childenv::command("tmux")
 }
 
 static NO_START: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -129,14 +136,14 @@ pub fn supports_no_start(version: &str) -> bool {
 /// running" / "error connecting to …"), so callers that treat a failure as
 /// "no sessions" are unchanged.
 pub fn tmux(args: &[&str]) -> std::io::Result<Output> {
-    Command::new("tmux").args(no_start_args()).args(args).output()
+    tmux_cmd().args(no_start_args()).args(args).output()
 }
 
 /// Run tmux for a command that is MEANT to start a server when none is up
 /// (`new-session`). The only caller that may omit `-N`; see `no_start_args`.
 pub fn tmux_launch(args: &[&str]) -> std::io::Result<Output> {
     wait_out_refusal();
-    Command::new("tmux").args(args).output()
+    tmux_cmd().args(args).output()
 }
 
 /// How long `tmux_launch` waits for a server that is REFUSING connections.
@@ -340,7 +347,7 @@ fn resolve_foreground(panes: &mut [Pane], ps: impl FnOnce(&[&str]) -> Option<Str
 /// Then, and only then, one `ps -A`.
 fn ps_foreground(ttys: &[&str]) -> Option<String> {
     let run = |sel: &[&str]| {
-        let o = Command::new("ps").args(sel).args(["-o", "tty=,pid=,tpgid=,comm="]).output().ok()?;
+        let o = crate::childenv::command("ps").args(sel).args(["-o", "tty=,pid=,tpgid=,comm="]).output().ok()?;
         o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
     };
     run(&["-t", &ttys.join(",")]).or_else(|| run(&["-A"]))
@@ -1051,13 +1058,12 @@ pub fn may_attach(stdin_tty: bool, stdout_tty: bool) -> bool {
 /// no interactive terminal, so the caller can print the detached line.
 pub fn attach_or_switch(session: &str) -> bool {
     use std::io::IsTerminal;
-    use std::process::Command;
     if !may_attach(std::io::stdin().is_terminal(), std::io::stdout().is_terminal()) {
         return false;
     }
     let in_tmux = std::env::var("TMUX").map(|v| !v.is_empty()).unwrap_or(false);
     let sub = if in_tmux { "switch-client" } else { "attach" };
-    let _ = Command::new("tmux").args(no_start_args()).args([sub, "-t", session]).status();
+    let _ = tmux_cmd().args(no_start_args()).args([sub, "-t", session]).status();
     true
 }
 

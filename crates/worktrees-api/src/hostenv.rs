@@ -30,7 +30,10 @@ use crate::log::log as applog;
 pub fn fixup_gui_path() {
     let current = std::env::var("PATH").unwrap_or_default();
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-    let mut cmd = std::process::Command::new(&shell);
+    // Through childenv, as every spawn: under an AppImage the login shell
+    // would otherwise run the user's profile with the AppDir's libraries,
+    // and hand the AppDir's paths straight back in the PATH this reads.
+    let mut cmd = worktrees_core::childenv::command(&shell);
     cmd.args(["-lc", r#"printf '\n__WTPATH__%s' "$PATH""#]);
     let from_shell = run_deadline(cmd, 5)
         .ok()

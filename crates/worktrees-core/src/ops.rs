@@ -6,7 +6,6 @@
 use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd;
 use std::path::Path;
-use std::process::Command;
 
 use crate::config::sanitize_prefix;
 use crate::diag::{Code, Finding, Report, Severity};
@@ -322,7 +321,7 @@ fn ai_launch_inner(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> crat
 /// two simultaneous opens can both see an empty place and create one session
 /// each. The lock lives in Git's private directory, never in tracked files.
 fn lock_agent_switch(main_root: &str) -> Result<File, String> {
-    let output = Command::new("git").args(["-C", main_root, "rev-parse", "--absolute-git-dir"])
+    let output = crate::childenv::command("git").args(["-C", main_root, "rev-parse", "--absolute-git-dir"])
         .output().map_err(|e| format!("could not locate Git directory for agent switch: {e}"))?;
     if !output.status.success() {
         return Err("could not locate Git directory for agent switch".into());
@@ -3650,7 +3649,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         let git = |args: &[&str]| {
-            assert!(Command::new("git").args(["-c", "user.email=t@t", "-c", "user.name=t", "-C"]).arg(&base).args(args).status().unwrap().success());
+            assert!(std::process::Command::new("git").args(["-c", "user.email=t@t", "-c", "user.name=t", "-C"]).arg(&base).args(args).status().unwrap().success());
         };
         git(&["init", "-q"]);
         git(&["commit", "-q", "--allow-empty", "-m", "init"]);
