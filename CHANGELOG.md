@@ -142,6 +142,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   of `--upload-pack=<cmd>`. One narrowing: a place whose name contains `..`
   (only `--name` can make one) can no longer be opened, switched, closed or
   removed from the app — the MCP tools have always refused it.
+- **The Claude usage meter no longer puts your Claude login token where other
+  programs can read it.** To fetch the usage bars, worktrees passed Claude
+  Code's OAuth access token to `curl` as a command-line argument, and any
+  process on the Mac can list those (`ps`) while the request runs. The token
+  now goes to `curl` on its standard input, which `ps` does not show. The
+  meter itself works as before.
 
 ## [0.42.0] - 2026-10-15
 
