@@ -566,10 +566,15 @@ pub fn shell_open(
                     ring.drain(..overflow);
                     r_dirty.store(true, Ordering::Relaxed);
                     // held together with the ring (see the re-attach comment)
-                    if let Some(ch) = r_sink.lock().unwrap().as_ref() {
-                        if ch.send(chunk).is_err() {
-                            break; // webview gone
-                        }
+                    let mut sink = r_sink.lock().unwrap();
+                    if sink.as_ref().is_some_and(|ch| ch.send(chunk).is_err()) {
+                        // The CLIENT is gone, not the shell. Let that client's
+                        // sink go — exactly what a detach does — and keep
+                        // reading: the ring goes on recording and the next
+                        // attach replays it. Breaking here left a live shell
+                        // with nobody reading its pty, which under `serve` is
+                        // every page reload that happens while a shell prints.
+                        *sink = None;
                     }
                 }
                 Err(_) => break,

@@ -481,6 +481,66 @@ fn a_channel_ends_when_its_sink_is_dropped_by_a_detach_or_an_exit() {
     let _ = std::fs::remove_dir_all(&repo);
 }
 
+/// **A dock shell outlives the client that attached it.** A page reload
+/// drops the socket while the shell still holds that connection's sink; the
+/// next thing the shell prints fails to send. That must cost the dead client
+/// its sink, NOT cost the shell its reader — or the shell runs on with
+/// nobody reading its pty, and the next client re-attaches to a corpse that
+/// never answers again.
+#[test]
+fn a_dock_shell_keeps_its_reader_when_the_client_that_attached_it_goes() {
+    std::env::set_var("SHELL", "/bin/sh");
+    let l = live("outlive");
+    let repo = scratch_repo("outlive");
+    let repo_s = repo.to_string_lossy().into_owned();
+
+    // Client A attaches, starts something that prints after A is gone, goes.
+    let mut a = client(&l);
+    open_quiet_shell(&mut a, &repo_s, 0, 31);
+    let later: Vec<u8> = b"sleep 1; echo printed-while-nobody-was-attached\r".to_vec();
+    rpc(&mut a, json!(40), "shell_write", json!({ "repo": repo_s, "slug": "(main)", "index": 0, "data": later }));
+    drop(a);
+    std::thread::sleep(Duration::from_millis(2500));
+
+    // Client B re-attaches the same tab — the replay is the channel's first
+    // frame and precedes the reply — and types.
+    let mut b = client(&l);
+    let open = json!({ "repo": repo_s, "slug": "(main)", "index": 0, "cols": 80, "rows": 24, "onBytes": "__CHANNEL__:32" });
+    b.send(Message::text(json!({ "id": 41, "cmd": "shell_open", "args": open }).to_string())).unwrap();
+    let mut out = Vec::new();
+    loop {
+        let v = frame(&mut b, Duration::from_secs(5)).expect("the re-attach is answered");
+        if v["id"] == json!(41) {
+            assert!(v["ok"]["gen"].as_u64().is_some(), "re-attach: {v}");
+            break;
+        }
+        if v["channel"] == json!(32) && v.get("data").is_some() {
+            out.extend(b64(&v["data"]));
+        }
+    }
+    let typed: Vec<u8> = b"echo still-$((40+2))\r".to_vec();
+    b.send(Message::text(json!({ "id": 42, "cmd": "shell_write", "args": { "repo": repo_s, "slug": "(main)", "index": 0, "data": typed } }).to_string())).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(8);
+    while std::time::Instant::now() < deadline {
+        if let Some(v) = frame(&mut b, Duration::from_millis(400)) {
+            if v["channel"] == json!(32) && v.get("data").is_some() {
+                out.extend(b64(&v["data"]));
+                if String::from_utf8_lossy(&out).contains("still-42") {
+                    break;
+                }
+            }
+        }
+    }
+    let text = String::from_utf8_lossy(&out).into_owned();
+    // The replay carries what the shell printed while nobody was attached,
+    // and the shell answers what B typed: `still-42` exists only as output.
+    assert!(text.contains("printed-while-nobody-was-attached\r\n"), "replay: {text:?}");
+    assert!(text.contains("still-42"), "the shell answered nothing after its first client left: {text:?}");
+
+    rpc(&mut b, json!(43), "close_shell_session", json!({ "repo": repo_s, "slug": "(main)", "index": 0, "keepCwd": false }));
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
 // ── the log ──────────────────────────────────────────────────────────────────
 
 /// **No torn lines.** Eight writers, 300 lines each, through the sink's own
