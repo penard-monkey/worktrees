@@ -66,9 +66,6 @@ pub enum Area {
     Removable,
     Network,
     AppData,
-    /// Readable-in-principle but refused — no specific pane names it, so the
-    /// card falls back to Full Disk Access.
-    Other,
 }
 
 impl Area {
@@ -81,7 +78,6 @@ impl Area {
             Area::Removable => "a removable volume",
             Area::Network => "a network volume",
             Area::AppData => "another app's data",
-            Area::Other => "this folder",
         }
     }
 
@@ -98,7 +94,6 @@ impl Area {
             Area::Removable => "SystemPolicyRemovableVolumes",
             Area::Network => "SystemPolicyNetworkVolumes",
             Area::AppData => "SystemPolicyAppData",
-            Area::Other => "SystemPolicyAllFiles",
         }
     }
 
@@ -107,7 +102,7 @@ impl Area {
     /// post-Ventura ones.
     pub fn pane(self) -> &'static str {
         match self {
-            Area::Desktop | Area::Documents | Area::Downloads | Area::ICloud | Area::Other => {
+            Area::Desktop | Area::Documents | Area::Downloads | Area::ICloud => {
                 "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders"
             }
             Area::Removable => {
@@ -294,7 +289,7 @@ mod tests {
         // what makes that true rather than merely intended.
         for a in [
             Area::Desktop, Area::Documents, Area::Downloads, Area::ICloud,
-            Area::Removable, Area::Network, Area::AppData, Area::Other,
+            Area::Removable, Area::Network, Area::AppData,
         ] {
             assert!(!a.service().is_empty(), "{a:?} has no tccutil service");
             assert!(a.pane().starts_with("x-apple.systempreferences:"), "{a:?} pane: {}", a.pane());
@@ -327,7 +322,7 @@ mod tests {
             .collect();
         for a in [
             Area::Desktop, Area::Documents, Area::Downloads, Area::ICloud,
-            Area::Removable, Area::Network, Area::AppData, Area::Other,
+            Area::Removable, Area::Network, Area::AppData,
         ] {
             assert!(
                 prefixes.iter().any(|pre| a.pane().starts_with(pre)),
