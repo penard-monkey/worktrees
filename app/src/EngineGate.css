@@ -1,0 +1,62 @@
+/* The engine gate (EngineGate.tsx): the screen before the engine has answered
+ * once, and the banner over a still-mounted app once it has gone. Hue lives in
+ * the dot and the tint; words take --txt-hi / --txt-dim (an accent token is a
+ * fill, not text — AGENTS.md). The boot screen paints before App.css loads, so
+ * it styles its own button rather than lean on `.enter-btn`. */
+
+.engine-boot {
+  position: fixed; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  padding: var(--s4);
+  background: var(--bg-abyss); color: var(--txt);
+  font-family: var(--font-ui);
+}
+.engine-boot-card {
+  max-width: 560px; width: 100%;
+  display: flex; flex-direction: column; gap: var(--s3);
+  padding: var(--s5);
+  background: var(--bg-panel);
+  border: 1px solid var(--line); border-radius: var(--r-md);
+}
+.engine-title {
+  display: flex; align-items: center; gap: var(--s2);
+  color: var(--txt-hi); font-size: var(--fs-title); font-weight: var(--fw-bold);
+}
+.engine-why { margin: 0; color: var(--txt); font-size: var(--fs-body); white-space: pre-wrap; word-break: break-word; }
+.engine-log { margin: 0; color: var(--txt-dim); font-size: var(--fs-meta); }
+.engine-boot code, .engine-banner code {
+  background: var(--bg-elev); color: var(--txt-hi);
+  padding: 1px var(--s1); border-radius: var(--r-sm);
+  font-family: var(--font-mono);
+}
+.engine-boot button {
+  align-self: flex-start;
+  background: var(--accent); color: var(--accent-ink); border: 0; border-radius: var(--r-sm);
+  padding: var(--s2) var(--s3); font-size: var(--fs-label); font-weight: var(--fw-bold); cursor: pointer;
+}
+
+.engine-dot {
+  flex: 0 0 auto; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--txt-mute);
+}
+.engine-dot.down { background: var(--danger); }
+.engine-dot.starting { background: var(--warn); animation: engine-pulse 1.2s ease-in-out infinite; }
+@keyframes engine-pulse { 50% { opacity: 0.35; } }
+
+/* Over the app, not instead of it: what it last showed stays readable. */
+.engine-banner {
+  position: fixed; z-index: 1000;
+  top: var(--s3); left: 50%; transform: translateX(-50%);
+  width: max-content; max-width: min(760px, calc(100vw - 2 * var(--s4)));
+  display: flex; align-items: center; gap: var(--s3);
+  padding: var(--s2) var(--s3);
+  background: color-mix(in srgb, var(--danger) 14%, var(--bg-panel));
+  color: var(--txt-hi);
+  border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--line));
+  border-radius: var(--r-md);
+  box-shadow: 0 6px 24px rgb(0 0 0 / 0.35);
+  font-size: var(--fs-meta);
+}
+.engine-banner-txt { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+.engine-banner-txt b { font-weight: var(--fw-bold); }
+.engine-banner button { flex: 0 0 auto; }

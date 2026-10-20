@@ -2,7 +2,8 @@ import { adaptClaude, adaptCodex, adaptKimi, checking, compactUsage, detailMessa
 import { HARNESSES, HARNESS_LABEL, NEEDS_MODEL, type Harness } from "./harness";
 import { ModelPicker, defaultModel, modelOk, useAgentModels, type PiStatus } from "./ModelPicker";
 import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ComponentType } from "react";
-import { Channel, invoke, listen, onTransportError } from "./ipc";
+import { Channel, engineState, invoke, listen } from "./ipc";
+import { useEngine } from "./EngineGate";
 import { copyToClipboard } from "./clipboard";
 import { open } from "@tauri-apps/plugin-dialog";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
@@ -1523,6 +1524,9 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
     setRestartToken((t) => t + 1); // remount the pane → shell_open spawns afresh
   };
   const [restartToken, setRestartToken] = useState(0);
+  // A new connection to the engine re-attaches the shell (its key carries it):
+  // the same remount a restart uses, and the ring replays behind its seam.
+  const engineGen = useEngine().gen;
 
   const addTab = useCallback(() => {
     if (restoringRef.current) return; // don't add a tab the restore is about to overwrite
@@ -1593,7 +1597,7 @@ function TerminalTabs({ repo, slug, sessionUp, termVersion, focusToken, addToken
             </div>
           </div>
         ) : (
-          <ShellPane key={repo + "|" + slug + ":" + active + ":" + restartToken} repo={repo} slug={slug}
+          <ShellPane key={repo + "|" + slug + ":" + active + ":" + restartToken + ":" + engineGen} repo={repo} slug={slug}
             index={active} termVersion={termVersion} focusToken={focusToken}
             root={root} onOpenPath={onOpenPath} onError={onError}
             findOpen={findOpen} findToken={findToken} onFindClose={onFindClose} />
@@ -4051,13 +4055,19 @@ function App() {
 
   // every surfaced error also lands in the app log (Settings → Logs)
   const fail = useCallback((e: unknown) => {
+    // While the engine is gone every call fails for that one reason, which the
+    // engine banner (EngineGate) already says — and the log it would go to is
+    // the engine's. A toast per failed poll would only bury the banner.
+    if (engineState().kind !== "up") return;
     const m = String(e);
     setErr(m);
     invoke("log_event", { level: "error", msg: m }).catch(() => {});
   }, []);
-  // A dead socket to `worktrees serve` (dev stack only) says so here — refused,
-  // wrong version, or closed — including a refusal from before this mounted.
-  useEffect(() => onTransportError(fail), [fail]);
+  // The engine came back (a Reconnect: `gen` counts connections, 1 is the
+  // first). What it knows may have moved on while this page could not hear it —
+  // a new serve, places opened elsewhere — so re-pull as `places:changed` would.
+  // Terminals re-attach on their own: `gen` is in their keys.
+  const engineGen = useEngine().gen;
 
   // ONE poller for the Claude plan bars, whichever of the three hosts is
   // showing them (Settings → Appearance → Usage meter). It lives up here rather
@@ -4310,6 +4320,17 @@ function App() {
   // `pageVisible`, so the listener never has to be torn down and re-registered
   // (and can't act on a stale value).
   const pendingRefresh = useRef(false);
+  // Once per connection, not per `refresh` identity: the ref remembers which
+  // `gen` was already caught up.
+  const caughtUp = useRef(engineGen);
+  useEffect(() => {
+    if (engineGen === caughtUp.current) return;
+    caughtUp.current = engineGen;
+    if (engineGen > 1) {
+      refresh();
+      setPlacesToken((v) => v + 1);
+    }
+  }, [engineGen, refresh]);
   useEffect(() => {
     const un = listen("places:changed", () => {
       if (document.visibilityState === "hidden") { pendingRefresh.current = true; return; }
@@ -4922,6 +4943,9 @@ function App() {
     const un = listen<OpenDocEvent>("app:open-doc", (e) => {
       setSel({ repo: e.payload.repo, slug: e.payload.slug });
       setPendingDoc(e.payload);
+      // The person should SEE it: the engine has no window to raise, so the
+      // shim does it (a client-local command; the mock answers with nothing).
+      invoke("raise_window").catch(() => {});
     });
     return () => { un.then((f) => f()).catch(() => {}); };
   }, []);
@@ -8451,7 +8475,7 @@ function App() {
                             )}
                           </span>
                         </div>
-                        <TerminalPane key={selectedAgents![provider].name} provider={provider} session={selectedAgents![provider].name}
+                        <TerminalPane key={selectedAgents![provider].name + ":" + engineGen} provider={provider} session={selectedAgents![provider].name}
                           termVersion={termVersion} focusToken={termFocus} focusEnabled={provider === planProvider}
                           root={selected.path} onOpenPath={openPathFromTerm} onError={fail}
                           findOpen={findOn === "main"} findToken={findToken} onFindClose={closeFind} />

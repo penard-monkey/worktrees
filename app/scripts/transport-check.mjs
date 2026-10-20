@@ -2,12 +2,15 @@
 //
 //   node app/scripts/transport-check.mjs        # from the repo root; exits non-zero on failure
 //
-// `app/src/ipc.ts` is the only module that talks to the backend: Tauri IPC by
-// default, and in the dev stack a WebSocket to `worktrees serve`
-// (`app/src/ipcws.ts`). Neither half is visible to any other suite — the mock
-// harness answers below `@tauri-apps/api/core` and never sees the socket, and
-// the serve lane's Rust tests never see a browser. So this check does four
-// things, the same way `api-boundary-check.mjs` and `termreplay-check.mjs` do:
+// `app/src/ipc.ts` is the only module that talks to the backend. The shipped
+// app is a client of its host's `worktrees serve`: its door (`engineDoor`)
+// sends every command over a WebSocket (`app/src/ipcws.ts`) except the
+// client-local ones, which stay on Tauri IPC; the dev stack uses the same door
+// in a browser; the mock harness keeps plain Tauri IPC. None of this is
+// visible to any other suite — the mock answers below `@tauri-apps/api/core`
+// and never sees the socket, and serve's Rust tests never see a browser. So
+// this check does four things, the same way `api-boundary-check.mjs` and
+// `termreplay-check.mjs` do:
 //
 //   1. PINS THE WIRE. Every frame key, the channel spelling, the first `seq`
 //      and the end frame's, the client-local marker, the handshake's keys,
@@ -28,14 +31,20 @@
 //      releasing its handler, events and unlisten, a request too big for serve
 //      refused before it can end the connection, a version mismatch refused, a
 //      refused handshake and a dead socket surfaced — never swallowed.
-//   3. DRIVES THE REAL CHAIN for the termreplay contract: TerminalPane's
-//      `useTerm` + `shellTransport` → ipc.ts → ipcws.ts → the fake socket. A
-//      replay is a channel's first frame and stays unanswered; a live query
-//      after it is answered.
-//   4. GUARDS THE EDGES: one door (nothing else imports core/event), the
-//      socket client reachable only behind `import.meta.env.DEV`, the dev
-//      server's token endpoint refusing cross-origin asks, the version source,
-//      and — when `app/dist` exists — the client absent from the build.
+//   3. DRIVES THE ENGINE DOOR (ipc.ts) over real ipcws clients: client-local
+//      commands to the local door and nothing else, every listener carried
+//      across a reconnect, the engine's state (starting → up → down → up, and
+//      `gen` counting connections), a failed dial or a refused handshake
+//      reported as down. And the termreplay contract through the whole chain:
+//      TerminalPane's `useTerm` + `shellTransport` → ipc.ts → ipcws.ts → the
+//      fake socket. A replay is a channel's first frame and stays unanswered;
+//      a live query after it is answered.
+//   4. GUARDS THE EDGES: one door (nothing else imports core/event), the dev
+//      token endpoint's client reachable only behind `import.meta.env.DEV &&
+//      VITE_SERVE` while the app's boot takes the token from the shim's
+//      `engine_connect` alone, the endpoint refusing cross-origin asks, the
+//      version source, and — when `app/dist` exists — the socket client IN the
+//      build (the app is a client) and the dev endpoint's client NOT in it.
 //
 // Overrides, so a mutation can be tested without touching the tree:
 //   TRANSPORT_IPCWS, TRANSPORT_IPC, TRANSPORT_WIRE, TRANSPORT_POLICY,
@@ -321,7 +330,7 @@ function webcrypto({ gate = null, subtle = globalThis.crypto.subtle } = {}) {
 /** One client and the server side of its fake socket: frames go in through
  *  `recv`, what the client wrote comes out of `frames`. Requests are built
  *  from the RUST keys (K), the handshake from the spec (SPEC). */
-function harness({ version = VERSION, gate = null, subtle } = {}) {
+function harness({ version = VERSION, gate = null, subtle, remedy, onError } = {}) {
   const socks = [];
   class FakeSock {
     constructor(url) { this.url = url; this.sent = []; this.closed = false; socks.push(this); }
@@ -335,7 +344,7 @@ function harness({ version = VERSION, gate = null, subtle } = {}) {
   const door = WS.connectSocket({
     port: PORT, token: TOKEN, version, crypto: wc.crypto,
     WebSocket: FakeSock, setTimeout: clk.setTimeout, clearTimeout: clk.clearTimeout,
-    atob: globalThis.atob, onError: (m) => errors.push(m), warn: (m) => warns.push(m),
+    atob: globalThis.atob, onError: (m) => { errors.push(m); onError?.(m); }, warn: (m) => warns.push(m), remedy,
   });
   const sock = socks[0] ?? null;
   const frames = () => (sock?.sent ?? []).map((t) => JSON.parse(t));
@@ -671,6 +680,40 @@ for (const [label, v] of [["an older server", "0.0.1"], ["a server that sends no
     `with no crypto.subtle the client opens no socket at all and says why (${threw ? `connectSocket THREW: ${threw}` : `${h.socks.length} sockets; ${r.err}`})`);
 }
 
+// 2j. `ready` — what the engine door waits on before it calls the engine up —
+//     and the host's remedy, which replaces the dev stack's advice in the app.
+{
+  const h = harness();
+  let r = "pending";
+  h.door.ready.then(() => (r = "resolved"), (e) => (r = `rejected: ${e}`));
+  h.open(); h.hello(); h.challenge(); await h.proof();
+  await tick();
+  check(r === "pending", `ready waits for the server's proof, not the socket's open or the client's own proof (${r})`);
+  h.welcome(); await h.verified(); await tick();
+  check(r === "resolved", `…and resolves once the proof has verified (${r})`);
+  h.drop(); await tick();
+  check(r === "resolved", "a socket that dies later does not un-resolve it — the door reports that through onError");
+}
+{
+  const h = harness();
+  let r = "pending";
+  h.door.ready.then(() => (r = "resolved"), (e) => (r = `rejected: ${e}`));
+  h.open(); h.hello(); h.challenge(); await h.proof();
+  h.welcome({ key: "f".repeat(64) }); await h.verified(); await tick();
+  check(r.startsWith("rejected: ") && r.slice(10) === h.errors[0], `a server that fails the proof rejects ready with the same failure onError got (${r.slice(0, 90)})`);
+}
+{
+  const REMEDY = "Reconnect, and the app looks again.";
+  const app = harness({ remedy: REMEDY });
+  app.open(); app.hello(); app.challenge(); await app.proof();
+  app.welcome({ key: "f".repeat(64) }); await app.verified();
+  const stack = harness();
+  stack.open(); stack.hello(); stack.challenge(); await stack.proof();
+  stack.welcome({ key: "f".repeat(64) }); await stack.verified();
+  check(app.errors[0]?.endsWith(REMEDY) && !/server-stack\.sh|restart the stack/i.test(app.errors[0]) && /server-stack\.sh/.test(stack.errors[0] ?? ""),
+    `each host states its own remedy: the app's Reconnect, the dev stack's restart (app: …${(app.errors[0] ?? "").slice(-60)})`);
+}
+
 // 2k. the dev boot: one POST to the token endpoint, then the literal 127.0.0.1.
 {
   const socks = [];
@@ -881,14 +924,113 @@ async function loadIpc() {
     "under Tauri, invoke hands Tauri the same command and the SAME args object, nothing added");
   check(calls[1][1] === "list_workspace" && calls[1][2] === undefined, "…and an arg-less call stays arg-less (Tauri's own default applies)");
   check(calls[2][1] === "places:changed" && calls[2][2] === handler, "under Tauri, listen hands Tauri the same event and handler");
+  check(ipc.engineState().kind === "up" && ipc.engineState().gen === 0, "with no engine door, the engine reads up at gen 0 — the mock and plain Tauri are never gated");
+}
 
-  const seen = [];
-  ipc.transportError("refused early");
-  const off = ipc.onTransportError((m) => seen.push(m));
-  ipc.transportError("closed later");
-  off();
-  ipc.transportError("after unsubscribe");
-  check(same(seen, ["refused early", "closed later"]), "a transport failure from before App mounted is replayed to fail(), later ones go straight there");
+// The engine door: the shipped app's (with Tauri as its local half) and the dev
+// stack's (with none), over real ipcws clients on fake sockets.
+{
+  globalThis.__ipcStubs = { tauriInvoke: () => Promise.reject("the Tauri stub must not be reached"), tauriListen: () => Promise.reject("no"), TauriChannel: class {} };
+  const ipc = await loadIpc();
+  const local = [];
+  const tauri = {
+    invoke: (cmd, args) => { local.push([cmd, args]); return Promise.resolve(`local:${cmd}`); },
+    listen: () => Promise.reject("the local door has no events"),
+    channel: () => { throw new Error("the local door makes no channels"); },
+  };
+  const dials = [];
+  let nextDial = null; // a test may make the next dial fail, or its server lie
+  const door = ipc.engineDoor(tauri, async (reason, onLost) => {
+    const how = nextDial; nextDial = null;
+    dials.push({ reason });
+    if (how === "throw") throw "engine_connect: no serve binary";
+    const h = harness({ onError: onLost });
+    dials[dials.length - 1].h = h;
+    void (async () => {
+      h.open(); h.hello(); h.challenge(); await h.proof();
+      h.welcome(how === "impostor" ? { key: "f".repeat(64) } : {}); await h.verified();
+    })();
+    return h.door;
+  });
+  ipc.openDoor(door);
+  const st = () => ipc.engineState();
+  check(st().kind === "starting" && st().gen === 0, `an engine door starts out "starting" at gen 0, before anything has dialled — the gate holds the app back (${JSON.stringify(st())})`);
+  const early = await settle(ipc.invoke("list_workspace"));
+  check(typeof early.err === "string" && dials.length === 0, `a call before the first connect is refused, not queued and not dialled (${early.err})`);
+
+  await settle(door.connect(null));
+  const h1 = dials[0]?.h;
+  check(st().kind === "up" && st().gen === 1 && dials.length === 1 && dials[0].reason === null, `connect dials once and the engine is up at gen 1 (${JSON.stringify(st())})`);
+
+  const copied = (await settle(ipc.invoke("copy_text", { text: "x" }))).ok;
+  const raised = (await settle(ipc.invoke("raise_window"))).ok;
+  check(copied === "local:copy_text" && raised === "local:raise_window" && local.length === 2 && local[0][1].text === "x" && !h1?.requests().length,
+    "client-local and shim commands go to the local door with their args, and not one byte of them to the socket");
+  const listed = settle(ipc.invoke("list_workspace"));
+  await tick();
+  const req = h1?.requests().find((r) => r[K.cmd] === "list_workspace");
+  h1?.reply(req?.[K.id], { projects: [] });
+  check(same((await listed).ok, { projects: [] }) && local.length === 2, "every other command goes to the socket and is answered from it");
+  const ch = ipc.Channel ? new ipc.Channel() : null;
+  check(ch && typeof ch.toJSON === "function" && String(ch.toJSON()).startsWith(K.prefix), `a channel is the current socket's (${ch?.toJSON?.()})`);
+
+  const heard = [];
+  await settle(ipc.listen("places:changed", (e) => heard.push(["a", e.payload])));
+  h1?.event("places:changed", 1);
+  check(same(heard, [["a", 1]]), "a listener hears the engine's events");
+
+  h1?.drop();
+  await tick();
+  const lost = st();
+  check(lost.kind === "down" && lost.gen === 1 && /closed/.test(lost.reason), `a socket that dies takes the engine down, keeping gen and naming why (${JSON.stringify(lost)})`);
+  const whileDown = await settle(ipc.invoke("get_settings"));
+  check(whileDown.err === lost.reason, `while down, every engine call fails with that reason (${whileDown.err})`);
+  const deadCh = new ipc.Channel();
+  check(typeof deadCh.toJSON() === "string", "…and a channel can still be made — it just never hears anything");
+  check((await settle(ipc.invoke("copy_text", { text: "y" }))).ok === "local:copy_text", "…while client-local commands still work: the window is still here");
+
+  await settle(ipc.reconnectEngine());
+  const h2 = dials[1]?.h;
+  check(st().kind === "up" && st().gen === 2 && dials[1]?.reason === lost.reason, `Reconnect dials again, telling the shim why, and the engine is up at gen 2 (${JSON.stringify(st())}; reason ${dials[1]?.reason})`);
+  await settle(ipc.listen("sessions:busy", (e) => heard.push(["b", e.payload])));
+  h2?.event("places:changed", 2);
+  h2?.event("sessions:busy", 3);
+  check(same(heard.slice(1), [["a", 2], ["b", 3]]), `a listener from before the reconnect hears the NEW socket's events, beside one added after (${JSON.stringify(heard)})`);
+
+  // Two Reconnect presses are one dial.
+  h2?.drop(); await tick();
+  const p1 = ipc.reconnectEngine(), p2 = ipc.reconnectEngine();
+  await settle(Promise.all([p1, p2]));
+  check(dials.length === 3 && st().gen === 3, `two reconnects at once dial once (${dials.length - 2} dial(s); gen ${st().gen})`);
+
+  // A dial that fails, and a server that cannot prove itself, are both "down".
+  dials[2]?.h?.drop(); await tick();
+  nextDial = "throw";
+  await settle(ipc.reconnectEngine());
+  check(st().kind === "down" && st().gen === 3 && st().reason === "engine_connect: no serve binary", `a dial that fails leaves the engine down with the shim's words (${JSON.stringify(st())})`);
+  nextDial = "impostor";
+  await settle(ipc.reconnectEngine());
+  check(st().kind === "down" && /did not prove/.test(st().reason), `a server that fails the proof leaves the engine down and is never driven (${st().reason?.slice(0, 80)})`);
+  await settle(ipc.reconnectEngine());
+  check(st().kind === "up" && st().gen === 4, `…and the next good dial brings it back at gen 4 (${JSON.stringify(st())})`);
+}
+{
+  // The dev stack's door has no local half: a browser has no Tauri, so even a
+  // client-local command goes to serve — which refuses it.
+  globalThis.__ipcStubs = { tauriInvoke: () => Promise.reject("tauri must not be reached"), tauriListen: () => Promise.reject("no"), TauriChannel: class {} };
+  const ipc = await loadIpc();
+  let h = null;
+  const door = ipc.engineDoor(null, async (_r, onLost) => {
+    h = harness({ onError: onLost });
+    void (async () => { h.open(); h.hello(); h.challenge(); await h.proof(); h.welcome(); await h.verified(); })();
+    return h.door;
+  });
+  await settle(door.connect(null));
+  const p = settle(door.invoke("copy_text", { text: "x" }));
+  await tick();
+  const req = h?.requests().find((r) => r[K.cmd] === "copy_text");
+  h?.error(req?.[K.id], K.clientLocal);
+  check(!!req && (await p).err === K.clientLocal, "with no local half (the dev stack), a client-local command goes to serve and comes back refused");
 }
 
 // The full chain: TerminalPane → ipc.ts → ipcws.ts → the fake socket.
@@ -999,14 +1141,28 @@ ${body}
   check(doorUsers >= 25, `the call sites go through the door (${doorUsers} files import ./ipc)`);
 }
 
-// The socket client is reachable only behind DEV.
+// The dev token endpoint's client is reachable only behind DEV && VITE_SERVE;
+// the app's boot takes the token from the shim's engine_connect and nowhere else.
 {
   const main = read(SRC.main);
   const lines = main.split("\n");
-  const at = lines.findIndex((l) => l.includes('import("./ipcws")'));
-  let guard = null;
-  for (let i = at; i >= 0; i--) if (/^\s*if \(/.test(lines[i])) { guard = lines[i]; break; }
-  check(at >= 0 && guard !== null && /import\.meta\.env\.DEV &&/.test(guard), `main.tsx loads ipcws.ts only under import.meta.env.DEV (${guard?.trim() ?? "no guard found"})`);
+  const guardOf = (at) => { for (let i = at; i >= 0; i--) if (/^\s*(\} else )?if \(/.test(lines[i])) return lines[i]; return null; };
+  const bootAt = lines.findIndex((l) => /\{ bootSocket \} = await import\("\.\/ipcws"\)/.test(l));
+  const bootGuard = bootAt < 0 ? null : guardOf(bootAt);
+  check(bootAt >= 0 && /^\s*if \(import\.meta\.env\.DEV && import\.meta\.env\.VITE_SERVE\) \{\s*$/.test(bootGuard ?? ""),
+    `main.tsx reaches bootSocket (the dev token endpoint) only under import.meta.env.DEV && VITE_SERVE (${bootGuard?.trim() ?? "no guard found"})`);
+  const uses = [...main.split("\n").map((l) => l.replace(/\/\/.*$/, "")).join("\n").matchAll(/bootSocket/g)].length;
+  check(uses === 2, `bootSocket is named twice in main.tsx — the guarded import and its one call — and nowhere else (${uses})`);
+  const appAt = lines.findIndex((l) => /\{ connectSocket \} = await import\("\.\/ipcws"\)/.test(l));
+  const appGuard = appAt < 0 ? null : guardOf(appAt);
+  check(appAt >= 0 && /\} else if \(!import\.meta\.env\.VITE_MOCK && "__TAURI_INTERNALS__" in window\) \{/.test(appGuard ?? ""),
+    `the app's boot connects with connectSocket inside Tauri, and not in the mock (${appGuard?.trim() ?? "no guard found"})`);
+  const appBlock = appAt < 0 ? "" : lines.slice(appAt, lines.findIndex((l, i) => i > appAt && /^\s*gated = true;/.test(l))).join("\n");
+  check(/const ep = await tauriDoor\.invoke<\{ port: number; token: string \}>\("engine_connect", \{ reason \}\);/.test(appBlock) &&
+    /connectSocket\(\{ \.\.\.socketDeps\(onLost, RECONNECT\), port: ep\.port, token: ep\.token \}\)/.test(appBlock) &&
+    /engineDoor\(tauriDoor,/.test(appBlock) && !/localStorage|sessionStorage|location|console\./.test(appBlock),
+    "the app takes port and token from engine_connect's answer alone, hands them straight to connectSocket, and stores and logs neither");
+  check(/engineDoor\(null,/.test(main), "the dev stack's engine door has no local half");
   const statics = [];
   const walk = (dir) => {
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -1017,8 +1173,8 @@ ${body}
     }
   };
   walk(SRC.appsrc);
-  check(statics.length === 0, `no file imports ipcws.ts statically, so a build cannot pull it in${statics.length ? `: ${statics.join(", ")}` : ""}`);
-  check(/version: __WT_VERSION__/.test(main), "the dev boot hands the client __WT_VERSION__ as this frontend's version");
+  check(statics.length === 0, `no file imports ipcws.ts statically — main.tsx's dynamic imports decide what a build carries${statics.length ? `: ${statics.join(", ")}` : ""}`);
+  check(/version: __WT_VERSION__/.test(main), "every socket the page opens hands the client __WT_VERSION__ as this frontend's version");
 }
 
 // The version source: one, the workspace Cargo.toml, on both ends.
@@ -1085,24 +1241,27 @@ ${body}
   check(threw, "the plugin refuses to start on a dev server listening beyond loopback");
 }
 
-// The build: when one exists, the socket client is not in it.
+// The build: when one exists, the socket client IS in it — the shipped app is
+// a client of its host's serve — and the dev token endpoint's client is NOT.
 {
   const assets = path.join(SRC.dist, "assets");
-  const markers = ["did not answer the handshake", WS.SERVE_ENDPOINT, "refusing to drive it", "did not prove it holds"];
-  // A marker the client no longer says would be absent from every bundle.
+  const client = ["did not answer the handshake", "refusing to drive it", "did not prove it holds"];
+  const devOnly = [WS.SERVE_ENDPOINT, "the dev server could not say"];
+  // A marker the source no longer says would be absent from every bundle.
   const wsText = read(SRC.ipcws);
-  check(markers.every((m) => wsText.includes(m)), `every bundle marker is in ipcws.ts, so its absence from a build means something (${markers.filter((m) => !wsText.includes(m)).join(", ") || "all present"})`);
+  const missing = [...client, ...devOnly].filter((m) => !wsText.includes(m));
+  check(missing.length === 0, `every bundle marker is in ipcws.ts, so finding (or not finding) it in a build means something (${missing.join(", ") || "all present"})`);
   if (!fs.existsSync(assets)) {
-    console.log("ok — app/dist absent — the bundle assertion is skipped on this run (build with `pnpm build` to exercise it)");
+    console.log("ok — app/dist absent — the bundle assertions are skipped on this run (build with `pnpm build` to exercise them)");
   } else {
-    const hits = [];
-    for (const f of fs.readdirSync(assets).filter((f) => f.endsWith(".js"))) {
-      const s = read(path.join(assets, f));
-      for (const m of markers) if (s.includes(m)) hits.push(`${f}: ${m}`);
-    }
-    check(hits.length === 0, `the production bundle carries no socket client (${hits.length ? hits.join("; ") : `${markers.length} markers absent`})`);
-    const stale = fs.statSync(SRC.ipcws).mtimeMs > fs.statSync(assets).mtimeMs;
-    if (stale) console.log("note — app/dist is older than ipcws.ts; rebuild before trusting the bundle assertion");
+    const js = fs.readdirSync(assets).filter((f) => f.endsWith(".js")).map((f) => [f, read(path.join(assets, f))]);
+    const absent = client.filter((m) => !js.some(([, s]) => s.includes(m)));
+    check(absent.length === 0, `the production bundle carries the socket client — the app is serve's client (${absent.length ? `MISSING: ${absent.join(", ")}` : `${client.length} markers present`})`);
+    const leaked = [];
+    for (const [f, s] of js) for (const m of devOnly) if (s.includes(m)) leaked.push(`${f}: ${m}`);
+    check(leaked.length === 0, `the production bundle carries no dev token endpoint client (${leaked.length ? leaked.join("; ") : `${devOnly.length} markers absent`})`);
+    const stale = fs.statSync(SRC.ipcws).mtimeMs > fs.statSync(assets).mtimeMs || fs.statSync(SRC.main).mtimeMs > fs.statSync(assets).mtimeMs;
+    if (stale) console.log("note — app/dist is older than ipcws.ts or main.tsx; rebuild before trusting the bundle assertions");
   }
 }
 
