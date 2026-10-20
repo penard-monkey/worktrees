@@ -54,6 +54,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   engine per machine. Logs to `~/.cache/worktrees/serve.log` with the version
   on the first line. `app/scripts/server-stack.sh` runs one on an isolated
   config dir, tmux prefix and port for the frontend lane.
+  Keystrokes to one terminal or dock shell reach it in the order they were
+  sent (one serial lane per stream; everything else stays concurrent).
 - **Applying the worktrees rules or the agent-setup Fix now opens a review
   lane for the `agent-instructions` branch**: a place on it, with an agent
   whose brief explains what the branch changes — each file, the AGENTS.md

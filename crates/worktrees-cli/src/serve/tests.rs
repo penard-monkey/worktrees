@@ -305,6 +305,126 @@ fn an_event_is_broadcast_to_every_authenticated_socket() {
     let _ = &l.rt;
 }
 
+// ── streams ──────────────────────────────────────────────────────────────────
+
+/// A dock shell needs a git repository to be a place of: the `(main)` of a
+/// fresh `git init` is one, with no registration, no tmux and no commit.
+fn scratch_repo(tag: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("wt-serve-repo-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).unwrap();
+    let st = std::process::Command::new("git").args(["init", "-q"]).arg(&d).status().expect("git on PATH");
+    assert!(st.success(), "git init");
+    d
+}
+
+/// One frame, or `None` when nothing arrived within `wait`. Control frames
+/// are tungstenite's business and skipped.
+fn frame(ws: &mut WebSocket<TcpStream>, wait: Duration) -> Option<Value> {
+    ws.get_ref().set_read_timeout(Some(wait)).unwrap();
+    loop {
+        match ws.read() {
+            Ok(Message::Text(t)) => return Some(serde_json::from_str(t.as_str()).unwrap()),
+            Ok(_) => continue,
+            Err(tokio_tungstenite::tungstenite::Error::Io(e))
+                if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) =>
+            {
+                return None
+            }
+            Err(e) => panic!("reading a frame: {e}"),
+        }
+    }
+}
+
+/// Read until the socket has been quiet for `quiet`.
+fn drain(ws: &mut WebSocket<TcpStream>, quiet: Duration) -> Vec<Value> {
+    let mut seen = Vec::new();
+    while let Some(v) = frame(ws, quiet) {
+        seen.push(v);
+    }
+    seen
+}
+
+fn b64(v: &Value) -> Vec<u8> {
+    // RFC 4648, the alphabet `files::b64_encode` writes.
+    const A: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let s = v.as_str().unwrap().as_bytes();
+    let mut out = Vec::new();
+    let mut acc = 0u32;
+    let mut bits = 0;
+    for &c in s {
+        if c == b'=' {
+            break;
+        }
+        acc = (acc << 6) | A.iter().position(|&a| a == c).unwrap() as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((acc >> bits) as u8);
+        }
+    }
+    out
+}
+
+/// Open dock shell `index` of the scratch repo on `channel` and leave it
+/// quiet: a prompt that paints late would be indistinguishable from an echo.
+fn open_quiet_shell(ws: &mut WebSocket<TcpStream>, repo: &str, index: u32, channel: u64) -> u64 {
+    let r = rpc(
+        ws,
+        json!(1000 + index),
+        "shell_open",
+        json!({ "repo": repo, "slug": "(main)", "index": index, "cols": 80, "rows": 24, "onBytes": format!("__CHANNEL__:{channel}") }),
+    );
+    let gen = r["ok"]["gen"].as_u64().unwrap_or_else(|| panic!("shell_open: {r}"));
+    drain(ws, Duration::from_millis(1500));
+    // An empty prompt, so nothing the shell paints can be mistaken for input.
+    let line: Vec<u8> = b"PS1=''\r".to_vec();
+    rpc(ws, json!(1100 + index), "shell_write", json!({ "repo": repo, "slug": "(main)", "index": index, "data": line }));
+    drain(ws, Duration::from_millis(1500));
+    gen
+}
+
+/// **The keystroke order.** 60 single-byte writes to one dock shell, sent
+/// back to back with ascending ids, and the pty's echo — the record of the
+/// order the WRITES reached it — read back off the channel. The transport
+/// lane measured `0124356789…` for 26 in-order frames against a dispatcher
+/// that gave every frame its own blocking task; a lane per stream is what
+/// makes the echo the alphabet.
+#[test]
+fn writes_to_one_stream_reach_the_pty_in_the_order_they_were_sent() {
+    std::env::set_var("SHELL", "/bin/sh");
+    let l = live("order");
+    let repo = scratch_repo("order");
+    let repo_s = repo.to_string_lossy().into_owned();
+    let mut ws = client(&l);
+    open_quiet_shell(&mut ws, &repo_s, 0, 7);
+
+    const ALPHABET: &str = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWX";
+    for (i, c) in ALPHABET.bytes().enumerate() {
+        let req = json!({ "id": 2000 + i, "cmd": "shell_write", "args": { "repo": repo_s, "slug": "(main)", "index": 0, "data": [c] } });
+        ws.send(Message::text(req.to_string())).unwrap();
+    }
+    // Everything the pty echoed, in channel order, until the socket is quiet.
+    let mut echoed = Vec::new();
+    let mut replies = 0;
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    while std::time::Instant::now() < deadline {
+        match frame(&mut ws, Duration::from_millis(800)) {
+            Some(v) if v["channel"] == json!(7) && v.get("data").is_some() => echoed.extend(b64(&v["data"])),
+            Some(v) if v.get("id").is_some() => replies += 1,
+            Some(_) => {}
+            None if replies == ALPHABET.len() => break,
+            None => {}
+        }
+    }
+    let got: String = echoed.iter().filter(|b| ALPHABET.as_bytes().contains(b)).map(|&b| b as char).collect();
+    assert_eq!(replies, ALPHABET.len(), "every write is answered");
+    assert_eq!(got, ALPHABET, "the pty saw the writes in this order");
+
+    rpc(&mut ws, json!(3), "close_shell_session", json!({ "repo": repo_s, "slug": "(main)", "index": 0, "keepCwd": false }));
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
 // ── the log ──────────────────────────────────────────────────────────────────
 
 /// **No torn lines.** Eight writers, 300 lines each, through the sink's own

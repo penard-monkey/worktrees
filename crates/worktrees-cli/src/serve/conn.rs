@@ -18,7 +18,9 @@ use hyper::body::{Bytes, Incoming};
 use hyper::header::{HeaderMap, HeaderName, CONNECTION, HOST, ORIGIN, SEC_WEBSOCKET_ACCEPT, SEC_WEBSOCKET_KEY, SEC_WEBSOCKET_VERSION, UPGRADE};
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
+use serde_json::Value;
 use tokio::net::TcpStream;
+use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::Role;
 use tokio_tungstenite::tungstenite::Message;
@@ -63,6 +65,35 @@ impl Host for Broadcast {
         let text = wire::event_frame(event, &payload);
         let mut map = self.0 .0.lock().unwrap();
         map.retain(|_, out| out.push(text.clone()).is_ok());
+    }
+}
+
+type Job = Box<dyn FnOnce() + Send + 'static>;
+
+/// One connection's serial lanes. A request that names a stream
+/// (`dispatch::lane`) is queued on that stream's lane and runs after the
+/// request before it: each lane awaits its job before taking the next, so the
+/// order is a property of the code, and an idle lane holds no thread — a
+/// parked task and an empty queue, for the life of the connection.
+#[derive(Default)]
+struct Lanes(Mutex<HashMap<String, UnboundedSender<Job>>>);
+
+impl Lanes {
+    fn run(&self, key: String, job: Job) {
+        let mut map = self.0.lock().unwrap();
+        let tx = map.entry(key).or_insert_with(|| {
+            let (tx, mut rx) = mpsc::unbounded_channel::<Job>();
+            tokio::spawn(async move {
+                while let Some(job) = rx.recv().await {
+                    // A panicking body is that request's failure, not the lane's.
+                    let _ = tokio::task::spawn_blocking(job).await;
+                }
+            });
+            tx
+        });
+        // The receiver lives in the lane task, which lives while this sender
+        // is in the map; a send can only fail while the runtime is going down.
+        let _ = tx.send(job);
     }
 }
 
@@ -263,19 +294,41 @@ async fn session(mut ws: Ws, shared: Arc<Shared>, id: u64, origin: String) {
     });
     let frames = Frames::new(outbox.clone());
     let call = Arc::new(Call { ctx: shared.ctx.clone(), frames: frames.clone() });
+    let lanes = Lanes::default();
 
     while let Some(m) = stream.next().await {
         match m {
             Ok(Message::Text(t)) => {
-                // Concurrently, as Tauri runs its async commands: a clone that
-                // takes minutes must not hold up the keystroke behind it. The
-                // bodies are blocking (git, tmux, the disk), so each runs on
-                // the blocking pool and its reply is queued when it is done.
+                // Parsed here, on the reader, because the lane is chosen from
+                // the request; a frame is small and the parse is cheap.
+                let req = match wire::parse_request(t.as_str()) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let _ = outbox.push(wire::reply_err(&Value::Null, e.into()));
+                        continue;
+                    }
+                };
+                let wire::Request { id, cmd, args } = req;
+                let args = Args(args);
+                let lane = dispatch::lane(&cmd, &args);
+                // The bodies are blocking (git, tmux, the disk), so each runs
+                // on the blocking pool and its reply is queued when it is
+                // done. Concurrently, as Tauri runs its async commands — a
+                // clone that takes minutes must not hold up the keystroke
+                // behind it — EXCEPT along one stream, where the keystroke
+                // behind a keystroke must stay behind it: those go down the
+                // stream's lane, one at a time.
                 let call = call.clone();
                 let outbox = outbox.clone();
-                tokio::task::spawn_blocking(move || {
-                    let _ = outbox.push(answer(&call, t.as_str()));
+                let job: Job = Box::new(move || {
+                    let _ = outbox.push(answer(&call, &id, &cmd, &args));
                 });
+                match lane {
+                    Some(key) => lanes.run(key, job),
+                    None => {
+                        tokio::task::spawn_blocking(job);
+                    }
+                }
             }
             // tungstenite queues a Pong on its own when the write half next
             // flushes; queuing one explicitly means it goes out even when
@@ -301,19 +354,15 @@ async fn session(mut ws: Ws, shared: Arc<Shared>, id: u64, origin: String) {
     info(&format!("serve: client {id} disconnected ({} attach(es) closed)", terms.len()));
 }
 
-/// One request frame → one reply frame.
-fn answer(call: &Call, text: &str) -> String {
-    let req = match wire::parse_request(text) {
-        Ok(r) => r,
-        Err(e) => return wire::reply_err(&serde_json::Value::Null, e.into()),
-    };
+/// One parsed request → one reply frame.
+fn answer(call: &Call, id: &Value, cmd: &str, args: &Args) -> String {
     // Host-admin commands change this machine's user-tier state; a line per
     // call is the audit trail Phase 2's gate will want, and it is cheap now.
-    if dispatch::exposure(&req.cmd) == Some(dispatch::Exposure::HostAdmin) {
-        info(&format!("serve: host-admin {}", req.cmd));
+    if dispatch::exposure(cmd) == Some(dispatch::Exposure::HostAdmin) {
+        info(&format!("serve: host-admin {cmd}"));
     }
-    match dispatch::call(call, &req.cmd, &Args(req.args)) {
-        Ok(v) => wire::reply_ok(&req.id, v),
-        Err(e) => wire::reply_err(&req.id, e),
+    match dispatch::call(call, cmd, args) {
+        Ok(v) => wire::reply_ok(id, v),
+        Err(e) => wire::reply_err(id, e),
     }
 }

@@ -164,6 +164,37 @@ pub fn exposure(cmd: &str) -> Option<Exposure> {
     TABLE.iter().find(|(n, _)| *n == cmd).map(|(_, e)| *e)
 }
 
+/// The lane a request runs on, or `None` for the concurrent pool.
+///
+/// Requests to ONE stream must reach it in the order they were sent — a
+/// keystroke behind a keystroke, a resize behind the bytes typed before it —
+/// and a dispatcher that gives every frame its own blocking task does not
+/// keep that (measured: 26 in-order `shell_write`s reaching zsh as
+/// `0124356789…`). So every `Stream` row that names an existing stream is
+/// keyed by that stream: a tmux attach by its `id`, a dock shell by
+/// `(repo, slug, index)`; the connection runs one lane per key, serially, and
+/// everything else stays concurrent, so a long clone still cannot hold up a
+/// keystroke. `term_open` has no id yet and needs no order: nothing can write
+/// to an attach before the reply names it. The key is built from the RAW
+/// args, so a malformed request lands on a lane and fails IN ORDER with its
+/// proper error instead of racing past the requests around it; two keys
+/// that happened to collide would only share a lane, never lose order.
+pub fn lane(cmd: &str, args: &Args) -> Option<String> {
+    if exposure(cmd)? != Exposure::Stream {
+        return None;
+    }
+    if let Some(_) = cmd.strip_prefix("term_") {
+        if cmd == "term_open" {
+            return None;
+        }
+        return Some(format!("term:{}", args.raw("id")));
+    }
+    if cmd.starts_with("shell_") {
+        return Some(format!("shell:{}:{}:{}", args.raw("repo"), args.raw("slug"), args.raw("index")));
+    }
+    None
+}
+
 commands! { cx, a;
     // ── projects and their snapshots (workspace) ─────────────────────────
     list_places: Engine => workspace::list_places(&cx.ctx, a.get("repo")?),
@@ -490,5 +521,26 @@ mod tests {
         let e = super::call(&c, "term_open", &args(json!({"session": "nope", "cols": 80, "rows": 24}))).unwrap_err();
         assert!(e.as_str().unwrap().starts_with("invalid args `on_bytes`"), "{e}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Which requests share a lane: the writes, resizes, wheel, close and
+    /// detach of one stream, by that stream; opens of attaches and everything
+    /// that is not a stream run concurrently.
+    #[test]
+    fn stream_requests_are_keyed_by_their_stream_and_nothing_else_is() {
+        let t = args(json!({ "id": 4, "data": [97] }));
+        assert_eq!(lane("term_write", &t).as_deref(), Some("term:4"));
+        assert_eq!(lane("term_resize", &args(json!({ "id": 4, "cols": 1, "rows": 1 }))).as_deref(), Some("term:4"));
+        assert_eq!(lane("term_wheel", &t), lane("term_close", &t));
+        assert_ne!(lane("term_write", &t), lane("term_write", &args(json!({ "id": 5 }))));
+        assert_eq!(lane("term_open", &args(json!({ "session": "s" }))), None);
+        let sh = args(json!({ "repo": "/r", "slug": "s", "index": 2, "data": [97] }));
+        assert_eq!(lane("shell_write", &sh).as_deref(), Some("shell:\"/r\":\"s\":2"));
+        assert_eq!(lane("shell_open", &sh), lane("shell_detach", &sh));
+        assert_eq!(lane("shell_resize", &sh), lane("shell_write", &sh));
+        assert_ne!(lane("shell_write", &sh), lane("shell_write", &args(json!({ "repo": "/r", "slug": "s", "index": 3 }))));
+        assert_eq!(lane("list_workspace", &args(json!({}))), None);
+        assert_eq!(lane("clone_project", &args(json!({}))), None);
+        assert_eq!(lane("no_such", &args(json!({}))), None);
     }
 }

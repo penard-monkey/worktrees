@@ -43,7 +43,10 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
 - **`worktrees serve` (Server Edition, Phase 1) hosts the api behind an
   authenticated WebSocket on `127.0.0.1`**: `{id, cmd, args}` in, `{id, ok}` /
   `{id, err}` out, channel frames `{channel, seq, data}` for `ByteSink`s and
-  progress, `{event, payload}` for `Host::emit`. The rule set is in
+  progress, `{event, payload}` for `Host::emit`. Requests to ONE stream run on
+  a serial lane per stream (`dispatch::lane`): a dispatcher that gave every
+  frame its own blocking task delivered 26 in-order keystrokes to zsh as
+  `0124356789…`; everything else stays concurrent. The rule set is in
   `crates/worktrees-cli/src/serve/policy.rs` and every refusal closes the
   socket with NOTHING written; a missing `Origin` is refused there and allowed
   by `docserver::origin_ok` ON PURPOSE (different pages, different questions —
