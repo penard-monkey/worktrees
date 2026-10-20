@@ -8,7 +8,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ### Changed
 - **The 149 app commands moved into a new `worktrees-api` crate**, leaving the
   Tauri layer as thin wrappers. Nothing changes for the desktop app — the same
-  149 commands with the same arguments, verified against `main` — but the
+  149 commands with the same arguments, verified against `main`, plus
+  `get_codex_permissions` for the host-policy change below — but the
   command layer can now be called by something that is not a window, which is
   what `worktrees serve` will need. `app/src-tauri/src/lib.rs` goes from 11,288
   lines to about 2,100; the PTY host, the documentation server and its viewer
