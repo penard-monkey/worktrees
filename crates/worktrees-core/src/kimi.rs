@@ -49,6 +49,33 @@ pub fn kimi_bin() -> Option<PathBuf> {
     })
 }
 
+/// `kimi --version`'s output as a bare version: the first `N.N[.N…]` word, so
+/// a launcher that prints `kimi, version 2.2.0` still reads `2.2.0`. `None`
+/// when nothing in it looks like a version.
+pub fn version_from(out: &str) -> Option<String> {
+    out.split(|c: char| c.is_whitespace() || c == ',')
+        .map(|w| w.trim_start_matches('v'))
+        .find(|w| {
+            let parts: Vec<&str> = w.split('.').collect();
+            parts.len() >= 2 && parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+        })
+        .map(str::to_string)
+}
+
+/// kimi's version, asked of the binary a pane would run — for Settings only:
+/// it starts a kimi process, so nothing on a dialog's path calls it.
+/// `Err` says why there is none, for the caller to log.
+pub fn version() -> Result<String, String> {
+    let bin = kimi_bin().ok_or("kimi is not installed")?;
+    let mut cmd = std::process::Command::new(&bin);
+    cmd.arg("--version").current_dir("/").stdin(std::process::Stdio::null());
+    let out = crate::proc::run_deadline(cmd, 10).map_err(|e| format!("kimi --version: {e}"))?;
+    if !out.status.success() {
+        return Err(format!("kimi --version exited {}", out.status.code().unwrap_or(-1)));
+    }
+    version_from(&String::from_utf8_lossy(&out.stdout)).ok_or_else(|| "kimi --version printed no version".into())
+}
+
 /// kimi's `slugifyWorkDirName`: the workspace dir's readable half. Lowercased,
 /// runs outside `[a-z0-9._-]` folded to `-`, trimmed, at most 40 characters.
 pub fn slug(name: &str) -> String {
@@ -943,6 +970,15 @@ mod tests {
 
     fn lines(s: &str) -> Vec<String> {
         s.lines().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn a_version_is_the_version_whatever_the_launcher_says_around_it() {
+        assert_eq!(version_from("2.2.0\n").as_deref(), Some("2.2.0"));
+        assert_eq!(version_from("kimi, version 2.2.0").as_deref(), Some("2.2.0"));
+        assert_eq!(version_from("kimi-code v2.10.1 (darwin-arm64)").as_deref(), Some("2.10.1"));
+        assert_eq!(version_from("no version here"), None);
+        assert_eq!(version_from("1."), None);
     }
 
     #[test]

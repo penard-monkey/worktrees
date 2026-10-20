@@ -4672,6 +4672,9 @@ async fn pi_status(repo: Option<String>) -> Result<PiStatus, String> {
 #[derive(Serialize)]
 struct KimiStatus {
     kimi_bin: Option<String>,
+    /// Why kimi's model list is empty, when it is: `no config.toml` or
+    /// `config.toml unreadable` (`kimimodels::catalog`); `None` when it read.
+    models_reason: Option<&'static str>,
     mcp: worktrees_core::kimiplace::Status,
     allowed: Vec<String>,
     repo_root: Option<String>,
@@ -4685,14 +4688,29 @@ async fn kimi_status(repo: Option<String>) -> Result<KimiStatus, String> {
     let allowed = worktrees_core::trust::allowed("kimi");
     let repo_allowed = repo_root.as_ref().is_some_and(|r| allowed.contains(r));
     let launch = repo_root.as_deref().map(worktrees_core::trust::kimi_launch_trust);
+    // Cheap on purpose — the new-place dialog asks this for availability on
+    // every open and every Start-with flip, so it starts no kimi process (the
+    // version is `kimi_version`, which only Settings → Kimi asks for).
     Ok(KimiStatus {
         kimi_bin: worktrees_core::kimi::kimi_bin().map(|p| p.to_string_lossy().into_owned()),
+        models_reason: worktrees_core::kimimodels::catalog().err(),
         mcp: worktrees_core::kimiplace::status(),
         allowed,
         repo_root,
         repo_allowed,
         launch,
     })
+}
+
+/// Settings → Kimi's version line: `kimi --version`, normalised to the bare
+/// version. It starts a kimi process (bounded at 10s), so it is its own
+/// command, asked by the Settings panel alone.
+#[tauri::command]
+async fn kimi_version() -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(worktrees_core::kimi::version)
+        .await
+        .map_err(|_| "kimi version worker failed".to_string())?
+        .inspect_err(|e| applog("warn", &format!("kimi_version: {e}")))
 }
 
 /// Settings → pi's trust mode, pushed in-process like Codex's permissions. An
@@ -4716,8 +4734,45 @@ async fn set_pi_allowed(repo: String, allow: bool) -> Result<bool, String> {
     // A revoke takes the LISTED string as it is (Settings' Revoke button sends
     // exactly that), so a repo that has moved or been deleted can still be
     // revoked; a grant resolves the repo's root through git.
-    let root = worktrees_core::trust::root_for("pi", &repo, allow).ok_or_else(|| format!("{repo} is not inside a git repository"))?;
+    let root = worktrees_core::trust::root_for("pi", &repo, allow).ok_or_else(|| {
+        let e = format!("{repo} is not inside a git repository");
+        applog("warn", &format!("set_pi_allowed: {e}"));
+        e
+    })?;
     worktrees_core::trust::set_allowed("pi", &root, allow).inspect_err(|e| applog("error", &format!("set_pi_allowed: {e}")))
+}
+
+/// Allow (or revoke) this repo's kimi lanes to start trusted. The user's act,
+/// from Settings → Kimi; the MCP server has no path here. Same keying as pi's.
+#[tauri::command]
+async fn set_kimi_allowed(repo: String, allow: bool) -> Result<bool, String> {
+    let root = worktrees_core::trust::root_for("kimi", &repo, allow).ok_or_else(|| {
+        let e = format!("{repo} is not inside a git repository");
+        applog("warn", &format!("set_kimi_allowed: {e}"));
+        e
+    })?;
+    worktrees_core::trust::set_allowed("kimi", &root, allow).inspect_err(|e| applog("error", &format!("set_kimi_allowed: {e}")))
+}
+
+/// Whether kimi lanes get the worktrees MCP server (`kimi_mcp`), and with
+/// which tools. Machine-level: the `kimi-mcp` offer's input.
+#[tauri::command]
+async fn kimi_mcp_status() -> Result<worktrees_core::kimiplace::Status, String> {
+    Ok(worktrees_core::kimiplace::status())
+}
+
+/// Settings → Kimi's MCP choice: `off`, `read-only` or `mutations`, written to
+/// worktrees' OWN config (never kimi's). Lanes pick it up at their next launch,
+/// when their place's `.kimi-code/mcp.json` is written or removed.
+#[tauri::command]
+async fn kimi_mcp_set(mode: String) -> Result<worktrees_core::kimiplace::Status, String> {
+    let Some(m) = worktrees_core::kimiplace::McpMode::parse(&mode) else {
+        let e = format!("unknown kimi MCP mode '{mode}' (expected off, read-only or mutations)");
+        applog("error", &format!("kimi_mcp_set: {e}"));
+        return Err(e);
+    };
+    worktrees_core::kimiplace::set_mode(m).inspect_err(|e| applog("error", &format!("kimi_mcp_set: {e}")))?;
+    Ok(worktrees_core::kimiplace::status())
 }
 
 // ── diagnostics (Settings → Logs → Copy diagnostics) ─────────────────────────
@@ -9061,6 +9116,10 @@ pub fn run() {
             agent_models,
             pi_status,
             kimi_status,
+            kimi_mcp_status,
+            kimi_mcp_set,
+            kimi_version,
+            set_kimi_allowed,
             set_pi_trust,
             set_pi_allowed,
             diagnostics,

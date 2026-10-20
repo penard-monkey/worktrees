@@ -60,7 +60,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   belongs in the repository's `.mcp.json` or kimi's own `mcp.json`: the place's
   `.kimi-code/mcp.json` is rewritten at every launch. In the app, the new-worktree dialog offers Kimi
   with kimi's own model list, and a kimi lane's row gets its mark and the busy,
-  waiting and finished dots; Kimi's Settings page comes next.
+  waiting and finished dots. **Settings → Kimi** shows which kimi a lane gets,
+  connects or disconnects the Worktrees tools (with or without create and
+  close), lists kimi's models and picks the one to preselect, and allows or
+  revokes repos whose lanes start trusted. Until the tools are connected,
+  the suggestions button offers it once.
 
 ### Fixed
 - **"Write .worktrees.toml" in Project settings now writes the file.** In a

@@ -31,6 +31,7 @@ import {
 import type { AgentSetupStatus, UserSkill } from "./AgentSetup";
 import type { CodexMcpStatus } from "./CodexMcpPanel";
 import type { PiMcpStatus } from "./PiMcpPanel";
+import type { KimiMcpStatus, KimiStatus } from "./KimiPanel";
 import type { GuidanceStatus } from "./GuidancePanel";
 import type { CrossProjectStatus } from "./CrossProjectPanel";
 import { cliSkew, initialPick, pickToWrite, PlanningChoice, type PlanningPick, type PlanningStatus } from "./PlanningPanel";
@@ -90,6 +91,29 @@ function PiTrustNote({ status }: { status: PiStatus | null }) {
   </span>;
 }
 
+/** What a kimi lane in this repo will meet, said where the agent is chosen. */
+function KimiTrustNote({ status }: { status: KimiStatus | null }) {
+  if (!status) return null;
+  if (status.launch?.source === "allowance") {
+    return <span className="np-hint warn" data-testid="kimi-trust-note">This repo is allowed: kimi starts trusted and runs its .mcp.json servers.</span>;
+  }
+  return <span className="np-hint" data-testid="kimi-trust-note">
+    kimi asks to trust this new folder first — answer it in the terminal; the brief is typed in after.
+  </span>;
+}
+
+/** `kimi_status` for `repo`, read while `on`. */
+function useKimiStatus(repo: string, on: boolean): KimiStatus | null {
+  const [st, setSt] = useState<KimiStatus | null>(null);
+  useEffect(() => {
+    if (!on) return;
+    let alive = true;
+    invoke<KimiStatus>("kimi_status", { repo }).then((v) => { if (alive) setSt(v); }).catch(() => {});
+    return () => { alive = false; };
+  }, [repo, on]);
+  return on ? st : null;
+}
+
 /** `pi_status` for `repo`, read while `on`. */
 function usePiStatus(repo: string, on: boolean): PiStatus | null {
   const [st, setSt] = useState<PiStatus | null>(null);
@@ -125,6 +149,7 @@ function AgentSwitchSheet({ pending, defaultModels, onClose, onConfirm, onError 
   const [to, setTo] = useState<Harness>(pending.to);
   const models = useAgentModels(to, onError);
   const piStatus = usePiStatus(pending.repo, to === "pi");
+  const kimiStatus = useKimiStatus(pending.repo, to === "kimi");
   const [pick, setPick] = useState<{ h: Harness; m: string } | null>(null);
   const model = pick?.h === to ? pick.m : defaultModel(models, defaultModels[to], to);
   const live = pending.live;
@@ -156,6 +181,7 @@ function AgentSwitchSheet({ pending, defaultModels, onClose, onConfirm, onError 
           <ModelPicker harness={to} value={model} options={models} testid="switch-model"
             onChange={(m) => setPick({ h: to, m })} />
           {to === "pi" && <PiTrustNote status={piStatus} />}
+          {to === "kimi" && <KimiTrustNote status={kimiStatus} />}
         </div>
         {live && !same && (
           <div className="sync-live" data-testid="agent-switch-effect">
@@ -2018,6 +2044,7 @@ function NewPlaceDialog({
   const [available, setAvailable] = useState<Record<Harness, boolean> | null>(null);
   const models = useAgentModels(provider, onError);
   const piStatus = usePiStatus(project, provider === "pi");
+  const kimiStatus = useKimiStatus(project, provider === "kimi");
   // "" until the user picks: the effective model is then the harness's default
   // (Settings), or pi's first ready one. A choice survives a harness flip only
   // if the user made it for THAT harness.
@@ -2298,6 +2325,7 @@ function NewPlaceDialog({
                     : `leave on the CLI's default, or name one for this place's ${HARNESS_LABEL[provider]}`}
                 </span>
                 {provider === "pi" && <PiTrustNote status={piStatus} />}
+                {provider === "kimi" && <KimiTrustNote status={kimiStatus} />}
               </div>
 
               {/* The preview follows the VERDICT, not the fields. Saying "will
@@ -4164,6 +4192,7 @@ function App() {
   const [codexMcp, setCodexMcp] = useState<CodexMcpStatus | null>(null);
   const [userSkills, setUserSkills] = useState<UserSkill[] | null>(null);
   const [piMcp, setPiMcp] = useState<PiMcpStatus | null>(null);
+  const [kimiMcp, setKimiMcp] = useState<KimiMcpStatus | null>(null);
   // Agent guidance (agent-guidance §4.5): machine-level as well — it reads the
   // worktrees settings file and which agents are installed, never a project.
   const [guidance, setGuidance] = useState<GuidanceStatus | null>(null);
@@ -4190,6 +4219,7 @@ function App() {
     invoke<PlanningStatus>("planning_status").then(setPlanning).catch(() => setPlanning(null));
     invoke<CodexMcpStatus>("codex_mcp_status").then(setCodexMcp).catch(() => setCodexMcp(null));
     invoke<PiMcpStatus>("pi_mcp_status").then(setPiMcp).catch(() => setPiMcp(null));
+    invoke<KimiMcpStatus>("kimi_mcp_status").then(setKimiMcp).catch(() => setKimiMcp(null));
     invoke<UserSkill[]>("agent_user_skills").then(setUserSkills).catch(() => setUserSkills(null));
     invoke<GuidanceStatus>("agent_guidance_status").then(setGuidance).catch(() => setGuidance(null));
   }, []);
@@ -4199,8 +4229,8 @@ function App() {
   // answer, which is how the Home card and the Settings panel came to disagree
   // about whether there was anything to say.
   const offers = useMemo(
-    () => pendingOffers({ mcp: mcpStatus, codexMcp, piMcp, userSkills, guidance, crossProject, planning }, settings.offers_dismissed ?? {}),
-    [mcpStatus, codexMcp, piMcp, userSkills, guidance, crossProject, planning, settings.offers_dismissed],
+    () => pendingOffers({ mcp: mcpStatus, codexMcp, piMcp, kimiMcp, userSkills, guidance, crossProject, planning }, settings.offers_dismissed ?? {}),
+    [mcpStatus, codexMcp, piMcp, kimiMcp, userSkills, guidance, crossProject, planning, settings.offers_dismissed],
   );
   const takeOffer = useCallback((o: Offer) => {
     setSettingsAt(o.to);
@@ -4219,6 +4249,7 @@ function App() {
   const codexMcpOffer = offers.find((o) => o.id === "codex-mcp") ?? null;
   const skillsOffer = offers.find((o) => o.id === "codex-skills") ?? null;
   const piMcpOffer = offers.find((o) => o.id === "pi-mcp") ?? null;
+  const kimiMcpOffer = offers.find((o) => o.id === "kimi-mcp") ?? null;
   const guidanceOffer = offers.find((o) => o.id === "agent-guidance") ?? null;
   const guidanceChangeOffer = offers.find((o) => o.id === "agent-guidance-changed") ?? null;
   const crossProjectOffer = offers.find((o) => o.id === "cross-project") ?? null;
@@ -9114,6 +9145,8 @@ function App() {
         codexMcpOfferPending={!!codexMcpOffer} onSilenceCodexMcpOffer={() => codexMcpOffer && silenceOffer(codexMcpOffer)}
         onPiMcpChanged={setPiMcp}
         piMcpOfferPending={!!piMcpOffer} onSilencePiMcpOffer={() => piMcpOffer && silenceOffer(piMcpOffer)}
+        onKimiMcpChanged={setKimiMcp}
+        kimiMcpOfferPending={!!kimiMcpOffer} onSilenceKimiMcpOffer={() => kimiMcpOffer && silenceOffer(kimiMcpOffer)}
         userSkills={userSkills} onUserSkillsChanged={setUserSkills}
         skillsOfferPending={!!skillsOffer} onSilenceSkillsOffer={() => skillsOffer && silenceOffer(skillsOffer)}
         guidance={guidance} onGuidanceChanged={setGuidance}

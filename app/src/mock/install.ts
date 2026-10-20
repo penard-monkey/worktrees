@@ -42,6 +42,19 @@ function mockModel(h: Harness, asked: unknown): string {
   return h === "claude" ? "Opus 5.5" : h === "codex" ? "gpt-6-astra" : h === "kimi" ? "kimi-code/k3" : "lm-studio/qwen3.6-27b";
 }
 
+// Settings → Kimi's state: `kimi_mcp` and the `[trust] kimi` allowance (core
+// keeps both in ~/.config/worktrees/config.toml). `?kimi=missing` stands in for
+// a machine without kimi.
+let kimiMcpMode: "off" | "read-only" | "mutations" = "off";
+const kimiAllowed = new Set<string>();
+const kimiMissing = () => new URLSearchParams(location.search).get("kimi") === "missing";
+const kimiMcpStatus = () => ({
+  state: kimiMissing() ? "kimi-missing" : kimiMcpMode, mode: kimiMcpMode,
+  kimi_bin: kimiMissing() ? null : "/Users/demo/.kimi-code/bin/kimi",
+  worktrees_bin: "/Users/demo/.local/bin/worktrees",
+  file: "<place>/.kimi-code/mcp.json", source: "config", config_path: "/Users/demo/.config/worktrees/config.toml",
+});
+
 // Settings → pi's state: the trust mode pushed from settings and the user's
 // allowance (core keeps it in ~/.config/worktrees/config.toml).
 let piTrust = "never";
@@ -3006,19 +3019,32 @@ Phase 3: Frontend pane and mock harness
     }
     case "kimi_status": {
       const root = typeof args.repo === "string" ? args.repo : null;
-      // `?kimi=missing` stands in for a machine without kimi.
-      const missing = new URLSearchParams(location.search).get("kimi") === "missing";
+      const missing = kimiMissing();
+      const allowed = !!root && kimiAllowed.has(root);
       return {
         kimi_bin: missing ? null : "/Users/demo/.kimi-code/bin/kimi",
-        mcp: {
-          state: missing ? "kimi-missing" : "off", mode: "off",
-          kimi_bin: missing ? null : "/Users/demo/.kimi-code/bin/kimi",
-          worktrees_bin: "/Users/demo/.local/bin/worktrees",
-          file: "<place>/.kimi-code/mcp.json", config_path: "/Users/demo/.config/worktrees/config.toml",
-        },
-        allowed: [], repo_root: root, repo_allowed: false,
-        launch: root ? { env: null, source: "ask", allowed: false, shadowed: false } : null,
+        models_reason: null,
+        mcp: kimiMcpStatus(),
+        allowed: [...kimiAllowed], repo_root: root, repo_allowed: allowed,
+        launch: root ? { env: allowed ? ["KIMI_CODE_TRUST_WORKSPACE", "1"] : null, source: allowed ? "allowance" : "ask", allowed, shadowed: false } : null,
       };
+    }
+    case "kimi_mcp_status":
+      return kimiMcpStatus();
+    case "kimi_version":
+      if (kimiMissing()) throw "kimi is not installed";
+      return "2.2.0";
+    case "kimi_mcp_set": {
+      const mode = String(args.mode);
+      if (!["off", "read-only", "mutations"].includes(mode)) throw `unknown kimi MCP mode '${mode}' (expected off, read-only or mutations)`;
+      kimiMcpMode = mode as typeof kimiMcpMode;
+      return kimiMcpStatus();
+    }
+    case "set_kimi_allowed": {
+      const root = String(args.repo);
+      const had = kimiAllowed.has(root);
+      if (args.allow) kimiAllowed.add(root); else kimiAllowed.delete(root);
+      return had !== !!args.allow;
     }
     case "pi_status": {
       const root = typeof args.repo === "string" ? args.repo : null;
