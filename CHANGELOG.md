@@ -179,6 +179,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   of `--upload-pack=<cmd>`. One narrowing: a place whose name contains `..`
   (only `--name` can make one) can no longer be opened, switched, closed or
   removed from the app — the MCP tools have always refused it.
+- **A message the window logs is one line of the log, and a long one is no
+  longer lost.** A newline in it started a line of its own with no
+  timestamp, so a stack trace spread over several lines and anything sent
+  through `log_event` could write a line that looked like the app's own,
+  which matters once `worktrees serve` takes that command from any client it
+  has authenticated. Line breaks, other
+  control characters and the bidi overrides are now written as visible
+  escapes (`\n`, `\x1b`, `\u{202e}`). And a message over 4000 bytes whose
+  cut fell inside a character panicked the logger instead of being written.
 
 ## [0.42.0] - 2026-10-15
 

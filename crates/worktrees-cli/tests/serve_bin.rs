@@ -257,6 +257,30 @@ fn serve_loads_host_policy_at_boot() {
     assert_eq!(sb.terminate().code(), Some(0));
 }
 
+/// OWASP L1, through the binary: `log_event` is an Engine command, so any
+/// authenticated client reaches it, and the review used it to write a whole
+/// forged `serve: host-admin` line, timestamp and all, into serve.log. It
+/// must land as ONE `ui:` line, with no byte in the file a terminal or a
+/// line reader would act on.
+#[test]
+fn a_client_cannot_write_a_line_of_its_own_into_serve_log() {
+    let mut sb = Sandbox::new("forge");
+    let sf = sb.launch(&["--allow-origin", "http://localhost:1420"]);
+    let mut ws = connect(&sf, "http://localhost:1420");
+    let forged = "boom\n2026-01-01T00:00:00Z [info] [1] serve: host-admin forged_entry\r\x1b[2K\0tail";
+    let r = rpc(&mut ws, 1, "log_event", json!({ "level": "info", "msg": forged }));
+    assert_eq!(r["ok"], Value::Null, "{r}");
+    let log = std::fs::read(sb.log()).expect("serve.log");
+    let bad: Vec<u8> = log.iter().copied().filter(|b| (*b < 0x20 && *b != b'\n') || *b == 0x7f).collect();
+    assert!(bad.is_empty(), "control bytes {bad:?} in:\n{}", String::from_utf8_lossy(&log));
+    let log = String::from_utf8(log).unwrap();
+    let hits: Vec<&str> = log.lines().filter(|l| l.contains("forged_entry")).collect();
+    assert_eq!(hits.len(), 1, "{log}");
+    assert!(hits[0].contains("] ui: boom") && hits[0].ends_with("tail"), "{}", hits[0]);
+    assert!(!log.lines().any(|l| l.starts_with("2026-01-01")), "{log}");
+    assert_eq!(sb.terminate().code(), Some(0));
+}
+
 /// The whole life of a `serve`, end to end through the binary.
 #[test]
 fn serve_writes_its_file_answers_the_workspace_and_cleans_up_on_sigterm() {
