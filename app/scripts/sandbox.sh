@@ -89,11 +89,15 @@ if [ "$MODE" = app ]; then
   # …and the engine the app finds or starts must be this branch's too: a dev
   # build runs `worktrees serve` from WORKTREES_SERVE_BIN, else from the
   # workspace's newest target/{release,debug} build (app.log says which).
-  export WORKTREES_SERVE_BIN="$BIN"
+  # One already set wins, so a drive can hand the app a stand-in (a serve that
+  # exits at once, for the crash-loop limit) without touching target/release,
+  # which the gates believe in.
+  : "${WORKTREES_SERVE_BIN:=$BIN}"
+  export WORKTREES_SERVE_BIN
   echo "→ launching the app against the sandbox" >&2
   echo "   window title / dock name: 'worktrees (sbx $SLUG)'" >&2
   echo "   tmux sessions:            $PREFIX-<slug>" >&2
-  echo "   engine:                   $BIN serve (its log: ~/.cache/worktrees/serve.log)" >&2
+  echo "   engine:                   $WORKTREES_SERVE_BIN serve (its log: ~/.cache/worktrees/serve.log)" >&2
   echo "   add the repo inside the app: $REPO" >&2
   echo >&2
   echo "   VERIFY the config dir really moved: Settings → Data & Logs should" >&2
