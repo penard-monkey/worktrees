@@ -128,18 +128,9 @@ pub fn edit_user_config(
     if let Some(dir) = target.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).map_err(|e| format!("could not create {}: {e}", dir.display()))?;
     }
-    let tmp = target.with_extension(format!("toml.tmp-{}", std::process::id()));
     let perms = std::fs::metadata(&target).ok().map(|m| m.permissions());
-    let write = || -> Result<(), String> {
-        std::fs::write(&tmp, &new).map_err(|e| format!("could not write {}: {e}", tmp.display()))?;
-        if let Some(p) = perms {
-            std::fs::set_permissions(&tmp, p).map_err(|e| format!("could not set the mode of {}: {e}", tmp.display()))?;
-        }
-        std::fs::rename(&tmp, &target).map_err(|e| format!("could not replace {}: {e}", target.display()))
-    };
-    write().inspect_err(|_| {
-        let _ = std::fs::remove_file(&tmp);
-    })?;
+    crate::fsx::write_atomic(&target, new.as_bytes(), perms)
+        .map_err(|e| format!("could not replace {}: {e}", target.display()))?;
     Ok(true)
 }
 
@@ -397,7 +388,7 @@ pub(crate) fn assert_writes_through_a_link(tag: &str, write: impl Fn(&Path), che
     assert!(check(&std::fs::read_to_string(&plain).unwrap()), "{tag}: plain file not written");
     let mode = std::fs::metadata(&plain).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600, "{tag}: plain file mode {mode:o}, expected 600");
-    let stray: Vec<_> = std::fs::read_dir(dir.join("cfg")).unwrap().chain(std::fs::read_dir(dir.join("dotfiles")).unwrap()).filter_map(|e| e.ok()).map(|e| e.file_name()).filter(|n| n.to_string_lossy().contains(".tmp-")).collect();
+    let stray: Vec<_> = std::fs::read_dir(dir.join("cfg")).unwrap().chain(std::fs::read_dir(dir.join("dotfiles")).unwrap()).filter_map(|e| e.ok()).map(|e| e.file_name()).filter(|n| n.to_string_lossy().contains(".tmp")).collect();
     assert!(stray.is_empty(), "{tag}: temp files left behind: {stray:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
