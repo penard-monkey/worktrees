@@ -100,7 +100,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   Codex to Full access everywhere. Both now live on this machine, in
   `host-policy.json` beside the app's settings, and change only when you click
   them in Settings; the panels show the machine's value. A value you had
-  chosen is carried over once, the first time the new version starts. The
+  chosen is carried over once, the first time the new version starts, and
+  the app's settings file keeps a copy of what you last picked, so going back
+  to an earlier version keeps your choice instead of resetting Codex to
+  Auto-review. The
   CLI and lanes started over MCP still follow `$WORKTREES_CODEX_PERMISSIONS`,
   `$WORKTREES_PI_PROJECT_TRUST` and your config, as before. If you never
   chose a value in the app, lanes the app starts now follow those too, rather

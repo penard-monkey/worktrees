@@ -130,6 +130,11 @@ fn known<T>(m: &Policy, key: &str, parse: fn(&str) -> Option<T>) -> Option<T> {
 /// copying it would turn it into a host setting that outranks env and user
 /// config. Never overwrites; never writes `ui-state.json`. Returns what it
 /// copied.
+///
+/// The frontend still keeps both keys there, as a copy of host policy for an
+/// older build to find after a downgrade (`settings.ts`), written only once a
+/// click has put the key HERE. So "only where this file lacks it" is also what
+/// stops this build reading its own copy back; keep it that way.
 pub fn migrate_from_ui_state(config_dir: &Path) -> Vec<&'static str> {
     let ui = std::fs::read(config_dir.join("ui-state.json"))
         .ok()
@@ -369,7 +374,9 @@ mod tests {
         let v = on_disk(&d.0);
         assert_eq!((v["codex_permissions"].as_str(), v["pi_project_trust"].as_str()), (Some("full"), Some("ask")));
 
-        // …and a value the click set is never overwritten by a stale copy.
+        // …and a value the click set is never overwritten by a stale copy —
+        // which is also what keeps the frontend's downgrade copy of host
+        // policy in ui-state.json (`settings.ts`) from ever being read back.
         set(&d.0, CODEX_PERMISSIONS, "ask").unwrap();
         std::fs::write(&ui, r#"{"codex_permissions":"full"}"#).unwrap();
         assert!(migrate_from_ui_state(&d.0).is_empty());
