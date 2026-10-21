@@ -1006,14 +1006,11 @@ fn parse_short_port(s: &str) -> PortLine {
 
 // ── writing ──────────────────────────────────────────────────────────────────
 
-/// Write `.worktrees.toml`. Atomic (tmp in the same dir, then `rename`), the same
-/// pattern `store.rs::write_atomic` uses — a half-written config is exactly the
-/// half-provisioned state §1 refuses.
+/// Write `.worktrees.toml`. Atomic (`fsx::write_atomic`, as the store is) — a
+/// half-written config is exactly the half-provisioned state §1 refuses.
 pub fn write_config(main_root: &Path, text: &str) -> std::io::Result<PathBuf> {
     let path = main_root.join(projcfg::CONFIG_FILE);
-    let tmp = main_root.join(".worktrees.toml.tmp");
-    fs::write(&tmp, text)?;
-    fs::rename(&tmp, &path)?;
+    crate::fsx::write_atomic(&path, text.as_bytes(), None)?;
     Ok(path)
 }
 
@@ -1731,5 +1728,29 @@ services:
         assert!(text.contains("# path = \"../outside/.env\""));
         let (cfg, _) = projcfg::parse(&text).expect("the live half still parses");
         assert_eq!(cfg.files.len(), 1);
+    }
+
+    /// `.worktrees.toml.tmp` committed as a symlink: `init -y` used to write the
+    /// suggested config through it into whatever it named. Neither that nor a
+    /// regular file of the name may be touched.
+    #[test]
+    fn write_config_never_follows_or_clobbers_the_old_temp_name() {
+        use std::os::unix::fs::symlink;
+        let tmp = Tmp(std::env::temp_dir().join(format!("wtinit-planted-{}", std::process::id())));
+        let (a, b) = (tmp.0.join("a"), tmp.0.join("b"));
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        let victim = tmp.0.join("victim");
+        fs::write(&victim, "precious\n").unwrap();
+        symlink(&victim, a.join(".worktrees.toml.tmp")).unwrap();
+        let path = write_config(&a, "# cfg\n").unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "precious\n", "written through the planted link");
+        assert!(fs::symlink_metadata(&path).unwrap().is_file(), "the config became the link");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "# cfg\n");
+
+        fs::write(b.join(".worktrees.toml.tmp"), "mine\n").unwrap();
+        write_config(&b, "# cfg\n").unwrap();
+        assert_eq!(fs::read_to_string(b.join(".worktrees.toml.tmp")).unwrap(), "mine\n");
+        assert_eq!(fs::read_to_string(b.join(projcfg::CONFIG_FILE)).unwrap(), "# cfg\n");
     }
 }

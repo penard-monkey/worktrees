@@ -166,9 +166,7 @@ pub fn save_settings(s: &Settings) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
     let body = serde_json::to_string_pretty(s).map_err(|e| e.to_string())? + "\n";
-    let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
-    std::fs::write(&tmp, body).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, &path).map_err(|e| format!("{}: {e}", path.display()))
+    crate::fsx::write_atomic(&path, body.as_bytes(), None).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 // ── the user's edit of the skill ────────────────────────────────────────────
@@ -339,9 +337,7 @@ pub fn save_edit(text: Option<&str>) -> Result<(), String> {
 }
 
 fn write_atomic(path: &Path, body: &str) -> Result<(), String> {
-    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
-    std::fs::write(&tmp, body).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))
+    crate::fsx::write_atomic(path, body.as_bytes(), None).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// A scratch directory holding `files`, removed on drop — for the two git
@@ -773,10 +769,7 @@ pub fn codex_own_for_launch(place: &str) -> Option<bool> {
         let next = store(entries, CodexEntry { key, own, at: crate::sysclock::now_epoch() });
         if let (Some(dir), Ok(body)) = (path.parent(), serde_json::to_string_pretty(&next)) {
             let _ = std::fs::create_dir_all(dir);
-            let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
-            if std::fs::write(&tmp, body).is_ok() {
-                let _ = std::fs::rename(&tmp, &path);
-            }
+            let _ = crate::fsx::write_atomic(&path, body.as_bytes(), None);
         }
     }
     own
@@ -1361,13 +1354,20 @@ mod tests {
     #[test]
     fn a_save_that_dies_halfway_still_asks() {
         // Edit saved against OLD; the binary now ships NEW, so it is stale.
-        // "Merge → Save" then fails writing the EDIT (here: its temp path is
-        // taken). The base must not have moved ahead of it, or the old text
-        // would read as current and the offer would retire without a choice.
+        // "Merge → Save" then fails writing the EDIT (here: its path is a
+        // non-empty directory, which no rename replaces — a taken TEMP name no
+        // longer fails anything, `fsx` just picks another). The base must not
+        // have moved ahead of it, or the old text would read as current and the
+        // offer would retire without a choice.
         let dir = tmp("halfway");
         save_edit_in(&dir, OLD, Some(&OLD.replace("One.", "Uno."))).unwrap();
-        std::fs::create_dir_all(dir.join(format!("SKILL.tmp-{}", std::process::id())).join("x")).unwrap();
+        let edit = dir.join(EDIT_FILE);
+        let kept = std::fs::read_to_string(&edit).unwrap();
+        std::fs::remove_file(&edit).unwrap();
+        std::fs::create_dir_all(edit.join("x")).unwrap();
         assert!(save_edit_in(&dir, NEW, Some(&NEW.replace("One.", "Uno."))).is_err());
+        std::fs::remove_dir_all(&edit).unwrap();
+        std::fs::write(&edit, kept).unwrap();
         let e = read_edit_in(&dir, NEW).unwrap();
         assert!(e.stale, "a failed save must leave the edit stale: {e:?}");
         let _ = std::fs::remove_dir_all(&dir);

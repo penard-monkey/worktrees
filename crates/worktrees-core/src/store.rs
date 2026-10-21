@@ -296,13 +296,11 @@ impl Drop for DirLock {
     }
 }
 
+/// The repo root is a checkout, so a fixed temp name here is one a cloned repo
+/// can commit as a symlink — `fsx` picks one it cannot.
 fn write_atomic(path: &Path, store: &Store) -> Result<(), String> {
-    let dir = path.parent().ok_or("no parent dir for store")?;
     let json = serde_json::to_string_pretty(store).map_err(|e| e.to_string())?;
-    // temp in the SAME dir so rename(2) is atomic (same filesystem)
-    let tmp = dir.join(".worktrees.places.json.tmp");
-    fs::write(&tmp, json).map_err(|e| e.to_string())?;
-    fs::rename(&tmp, path).map_err(|e| e.to_string())
+    crate::fsx::write_atomic(path, json.as_bytes(), None).map_err(|e| e.to_string())
 }
 
 /// Read-under-lock → field-merge one place → atomic write. Preserves unknown keys
@@ -612,5 +610,35 @@ mod tests {
         assert!(is_tracked(&repo));
         assert_eq!(declared_model(&repo, "feat", "pi"), None, "a committed store is repo input");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A cloned repo can commit a symlink at the temp name this write used to
+    /// use — git checks a `120000` blob out with no check at all — and the app
+    /// writes the store with no click (every finished Claude turn stamps
+    /// `last_worked_epoch`). The write must not go through the link into the
+    /// file it names, must not clobber a regular file of that name, and must
+    /// leave the store a regular file holding the edit rather than the link.
+    #[test]
+    fn a_planted_temp_name_is_never_followed_or_clobbered() {
+        use std::os::unix::fs::symlink;
+        let t = tmp("planted");
+        let repo_dir = t.0.join("repo");
+        fs::create_dir_all(&repo_dir).unwrap();
+        let victim = t.0.join("victim");
+        fs::write(&victim, "precious\n").unwrap();
+        symlink(&victim, repo_dir.join(".worktrees.places.json.tmp")).unwrap();
+        let repo = repo_dir.to_string_lossy().to_string();
+        edit(&repo, "alpha", |d| d.note = Some("hi".into())).unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "precious\n", "written through the planted link");
+        assert!(fs::symlink_metadata(repo_dir.join(STORE_FILE)).unwrap().is_file(), "the store became the link");
+        assert_eq!(read_lenient(&repo).places["alpha"].note.as_deref(), Some("hi"));
+
+        let t2 = tmp("planted-file");
+        let planted = t2.0.join(".worktrees.places.json.tmp");
+        fs::write(&planted, "mine\n").unwrap();
+        let repo2 = t2.0.to_string_lossy().to_string();
+        edit(&repo2, "alpha", |d| d.pinned = Some(true)).unwrap();
+        assert_eq!(fs::read_to_string(&planted).unwrap(), "mine\n", "a file of the old temp name was clobbered");
+        assert_eq!(read_lenient(&repo2).places["alpha"].pinned, Some(true));
     }
 }
