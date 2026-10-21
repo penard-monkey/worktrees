@@ -10,6 +10,13 @@ and the Tauri iOS and iPadOS build (decision 3 of
 [server-edition.md](server-edition.md)). Nothing binds off loopback until
 every exit criterion in §10 holds.
 
+**Decided 2026-10-20.** The user answered the eight questions of §11 the
+same day. Six follow the recommendation. Two depart from it: multi-user is
+"maybe later", so the schema keeps room for it (§2.8), and expiry is set per
+device from the host rather than by one host-wide rule (§2.5). LAN mode
+ships in Phase 2 (§4.1). This revision folds all eight in, and §11 records
+each answer with its consequence.
+
 **Base.** Written against `feat/app-serve-client` at `fadb2ce`, the tip of the
 unmerged Server Edition stack (#508 → #516 → #515 → that branch). Every
 `file:line` below is at that commit unless it names another branch. Where this
@@ -31,22 +38,26 @@ measurements as exit criteria. The draft was then reviewed with the
 
 ## 0. The decisions, on one page
 
-| # | Question | Recommendation | Phase |
+| # | Question | Ruling | Phase |
 |---|---|---|---|
-| 1 | How does a device enroll? | A QR shown on the host carries the server's SPKI pin and a 128-bit one-use secret. The pairing listener exists only while a window is open, and the window closes after one attempt or 120 s. The device proves the secret over pinned TLS, bound to the session by a TLS exporter. Both screens show a short code, and the user confirms on the host. | 2 |
-| 2 | What is a device's credential? | Its own P-256 key: in the Secure Enclave on iOS, and in a `0600` file on macOS and Linux. It authenticates with mutual TLS, so an unenrolled peer never reaches the HTTP parser. There are no passwords and no bearer tokens. On iOS, the riskiest acts also need a second, presence-bound key (a step-up). | 2 |
-| 3 | Revocation, and a lost phone | A revoke takes effect at once: the device's live sockets close, its next request on any socket is refused, and its next TLS handshake fails. The host console or another device with `admin` can revoke it, but only the console can WIDEN a scope. A stolen locked phone cannot connect. An unlocked one keeps its scope until it is revoked, and the audit log shows what it did. Clients cache nothing they can lose. | 2 |
+| 1 | How does a device enroll? | A QR shown on the host carries the server's SPKI pin and a 128-bit one-use secret. The pairing listener exists only while a window is open, and the window closes after one attempt or 120 s. Only the host opens one (*decided*, §11 Q5). The device proves the secret over pinned TLS, bound to the session by a TLS exporter. Both screens show a short code, and the user confirms on the host. The dialog pre-selects Observe (*decided*, §11 Q4). | 2 |
+| 2 | What is a device's credential? | Its own P-256 key: in the Secure Enclave on iOS, and in a `0600` file on macOS and Linux. It authenticates with mutual TLS, so an unenrolled peer never reaches the HTTP parser. There are no passwords and no bearer tokens. The server's record binds the key to a device and the device to a principal (row 14). On iOS, the riskiest acts also need a second, presence-bound key (a step-up), on by default (*decided*, §11 Q8). | 2 |
+| 3 | Revocation, expiry, and a lost phone | A revoke takes effect at once: the device's live sockets close, its next request on any socket is refused, and its next TLS handshake fails. The host console or another device of the same principal with `admin` can revoke it, but only the console can WIDEN a scope. Each device carries its own expiry, chosen on the host at pairing (default: disabled after 30 days unused) and edited from the host only. An expired device is disabled, not deleted, and only the host re-enables it (*decided*, §11 Q7). A stolen locked phone cannot connect. An unlocked one keeps its scope until it is revoked or expires, and the audit log shows what it did. Clients cache nothing they can lose. | 2 |
 | 4 | May the loopback listener enroll? | It is where enrollment is AUTHORIZED, and never where a device enrolls. Opening a pairing window is a console act, done over loopback with serve.json's token. The loopback listener never accepts a device credential. | 2 |
-| 5 | Per-object authorization (R1) | Each device has capabilities (`read`, `write`, `answer`, `instruct`, `stream`, `admin`) and a project scope. Every row of the dispatch table declares the capability it needs and the object it acts on. One resolver checks that before the body runs. The scope also rides into the api, so the api's own path guard answers with the device's roots: two checks, as R1 asked. Results and events are cut down to the scope. | 2 |
-| 6 | Rows a remote device never reaches | A new `HostConsole` class, served on loopback only. It covers every row that can widen what agents on this host may do, pairing and device administration, `update_cli`, and adopting a project from a hub. | 2 |
-| 7 | The remote listener | Off by default, with a one-click kill switch on the host. It binds one specific overlay or LAN address, never a wildcard, never loopback and never a public address. TLS 1.3 is mutual and pinned both ways (rustls), with no CA, no resumption and no 0-RTT in Phase 2. On iOS the socket lives in the Rust shim and not in the WebView. | 2 |
-| 8 | The CI witness (R8) | A connect witness for loopback serve, which is missing today. Then identity: no certificate is refused, an unenrolled one is refused, an enrolled one is served, a revoke kills the live socket, and the pairing port is closed outside a window. Measured on both platforms, with a release gate that greps the exact count. | 2 |
-| 9 | The audit log (R5) | `<config_dir>/audit.jsonl`, mode `0600`, append-only and hash-chained. Only serve's connection layer writes it, and its records are structured, never free text. | 2 |
+| 5 | Per-object authorization (R1) | Each device has capabilities (`read`, `write`, `answer`, `instruct`, `stream`, `admin`) and a project scope. Every row of the dispatch table declares the capability it needs and the object it acts on. One resolver checks that before the body runs, against the grant of the (principal, device) pair: the principal's grant intersected with the device's. The scope also rides into the api, so the api's own path guard answers with the caller's roots: two checks, as R1 asked. Results and events are cut down to the scope. | 2 |
+| 6 | Rows a remote device never reaches | A new `HostConsole` class, served on loopback only. It covers every row that can widen what agents on this host may do, pairing and device administration, `update_cli` (*decided*, §11 Q3), and adopting a project from a hub. | 2 |
+| 7 | The remote listener | Off by default, with a one-click kill switch on the host. It binds one specific private address on a named interface, an overlay address or a LAN one (*decided*, §11 Q6), never a wildcard and never loopback. "Private" is a closed list (RFC 1918, CGNAT `100.64.0.0/10`, link-local, ULA `fc00::/7`), and anything else is refused. When the address leaves its interface or the network changes, the listener closes until the same network returns or the host chooses again. TLS 1.3 is mutual and pinned both ways (rustls), with no CA, no resumption and no 0-RTT in Phase 2. On iOS the socket lives in the Rust shim and not in the WebView. | 2 |
+| 8 | The CI witness (R8) | A connect witness for loopback serve, which is missing today. Then the bind rules, as connects: a public address that IS bindable is refused, the remote port never answers on loopback, and an address change pauses and resumes the listener. Then identity: no certificate is refused, an unenrolled one is refused, an enrolled one is served, a revoke kills the live socket, an expired device is refused, and the pairing port is closed outside a window. Measured on both platforms, with a release gate that greps the exact count. | 2 |
+| 9 | The audit log (R5) | `<config_dir>/audit.jsonl`, mode `0600`, append-only and hash-chained. Only serve's connection layer writes it, and its records are structured, never free text. Every record names a principal as well as a device. | 2 |
 | 10 | Resource limits (R6) | Per-device connection, in-flight and rate caps; bounded outboxes and lanes; single-flight for the expensive reads; separate budgets for loopback and remote, so a device cannot starve the desk. | 2 |
 | 11 | The agent-instruction surface (R7) | One path classifier in core. Instruction files need `instruct`. Files that EXECUTE without anyone choosing to run them need `stream`. `.git/**` is never written. Provenance is kept out of band, with no markers in the file. | 2 |
 | 12 | The known gaps | Eight from the brief, seven found while writing this, and one from Appendix B. Each has a fix shape and a phase (§8). One of the new ones (gap 9) can be reached from a cloned repository's content TODAY. | 2, some now |
 | 13 | Multi-client | View state is per device and never reaches serve. Shared preferences become per-key patches with a revision check. Host policy goes to `host-policy.json`. A prompt answer is a compare-and-swap, and a lease is UX on top of it. | 2, lease 3 |
-| 14 | Multi-user (R9) | A non-goal, recorded so the schema may rely on it. It needs the user's confirmation (§11). | 2 |
+| 14 | Multi-user (R9) | Maybe later (*decided*, §11 Q1, against the recommendation). Not built in Phase 2, and not designed out. There is one principal, kept distinct from the device in the device record, in what the credential binds to and in every audit record, and every grant check keys on (principal, device). §2.8 says what that costs now and what multi-user would still take. | 2 |
+
+Rows marked *decided* carry the user's answers of 2026-10-20, and §11 gives
+each answer with its consequence. The rest are this design's
+recommendations.
 
 ---
 
@@ -81,12 +92,17 @@ agents on this host may do on their own), and the user's other devices.
   no pairing record behind it, and the host always shows when remote access
   is on. A sandboxed agent (Codex's workspace-write sandbox, for one) cannot
   reach the config dir at all.
-- **Several humans.** R9 is answered as a non-goal (§11, Q1). Scopes keep one
-  person's devices to least privilege. They are not isolation between people.
+- **Several humans, in Phase 2.** R9 is decided as "maybe later" (§11 Q1).
+  There is exactly one principal, the host's own user, and the schema keeps
+  room for more (§2.8). Scopes keep one person's devices to least privilege.
+  They are not isolation between people, and §2.8 says why a second person
+  holding a shell would be the owner in all but name.
 - **Browser clients over the remote listener.** Decision 3 makes the phone a
   Tauri build. A browser cannot hold the device key (§4.4), so a browser
   origin is refused remotely.
-- **Exposure on the public internet.** Refused at bind time (§4.1, §11 Q6).
+- **Exposure on the public internet.** Refused at bind time, and a public
+  peer is dropped at accept even when a router forwards a port to the
+  private bind (§4.1; decided in §11 Q6).
 
 ### 1.1 The honest ladder: which capabilities are containment
 
@@ -125,10 +141,12 @@ log are for.
 | Device key (iOS, iPadOS) | P-256 in the Secure Enclave, non-exportable, `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, never synced to iCloud | The device's keychain | Until it is revoked or the app is deleted |
 | Device key (macOS, Linux) | P-256, in a `0600` PKCS#8 file | The client app's own config dir | As above |
 | Step-up key (iOS, iPadOS) | A second Secure Enclave P-256 key, created with `.userPresence`. It signs a server challenge before a drive-class act (§2.5). | The device's keychain | Enrolled with the device key, revoked with it |
-| Device record | `{id, name, platform, spki_sha256, stepup_spki_sha256, caps, projects, enrolled_at, last_seen, last_addr, revoked_at}`; `id` is random, not derived from the key | `<config_dir>/devices.json`, `0600`. Serve is its only writer, under `servefile`'s lock-temp-rename discipline (`crates/worktrees-cli/src/serve/servefile.rs:79`–`122`). | Kept after revocation as a tombstone, for the audit trail |
+| Principal record | `{id, name, caps, projects, created_at}`; `id` is random (`p_…`). Phase 2 has exactly one, the **owner**: the host account's user, with every capability and scope `"*"`. The loopback caller is always the owner (§2.8). | `<config_dir>/devices.json`, as a second list beside the devices | Created with the file. Never removed in Phase 2. |
+| Device record | `{id, principal, name, platform, spki_sha256, stepup_spki_sha256, stepup_required, caps, projects, expiry, enrolled_at, last_seen, last_addr, disabled, revoked_at}`; `id` is random, not derived from the key. `principal` is set at pairing and never changes. `expiry` and `disabled` are §2.5's. | `<config_dir>/devices.json`, `0600`. Serve is its only writer, under `servefile`'s lock-temp-rename discipline (`crates/worktrees-cli/src/serve/servefile.rs:79`–`122`). | Kept after revocation as a tombstone, for the audit trail |
+| What the device keeps | Its keys, plus `{host: {name, pin, addr}, principal_id, device_id}`. The pairing answer and the remote handshake's first frame name both ids (§2.2, §4.5). | Beside the device key, under the same protection | Until it is revoked or the app is deleted |
 | Loopback token | Unchanged: per launch, in serve.json, used for handshake v1 | `<config_dir>/serve.json` | Per launch |
 
-Three choices in that table need their reasons.
+Four choices in that table need their reasons.
 
 - **P-256, not Ed25519.** The Secure Enclave signs with P-256 and nothing else.
   rustls accepts `ecdsa_secp256r1_sha256` for client authentication, and it
@@ -151,25 +169,39 @@ Three choices in that table need their reasons.
   (`app/scripts/sandbox.sh --app`) or a dev-stack serve runs on its own config
   dir, and it must not accept the user's real phone. The registry is shared
   between engines and the CLI on purpose. Device enrollment must not be.
+- **A principal beside every device, though there is only one.** The user's
+  answer to R9 is "maybe later" (§11 Q1). The device's certificate carries
+  no claim about either identity: it is self-signed, so anything in it would
+  be the device's own assertion. The binding from key to device to
+  principal lives only in the server's record. So a device can never claim a
+  principal, and a second principal later is a new record, not a new
+  credential format. §2.8 has the rest.
 
 ### 2.2 Enrollment, step by step
 
 **On the host.** Settings → Devices → **Pair a device…**, or
 `worktrees serve pair`, which is a thin client of the loopback socket.
 
-1. The user chooses the device's **scope first**: a preset (§3.1) and its
-   projects. The QR appears only after that, so the decision is not made
-   with a timer running. Which preset is pre-selected is §11 Q4. The project
-   list starts empty, so a scope is always chosen, never inherited.
+1. The user chooses the device's **scope first**: a preset (§3.1), its
+   projects, and its **expiry** (§2.5). The QR appears only after that, so
+   the decision is not made with a timer running. The dialog pre-selects
+   **Observe** (decided, §11 Q4), with Drive one deliberate click away and
+   carrying its label. The project list starts empty, so a scope is always
+   chosen, never inherited. The expiry starts at the default, *disabled
+   after 30 days unused*. The device's principal is the owner, and the
+   dialog does not ask (§2.8).
 2. Serve opens the **pairing window**, which binds a separate pairing
    listener on the remote address. The host shows:
-   - a QR encoding `worktrees-pair:v1?addr=<overlay ip or name>:<port>&pin=<spki sha256>&secret=<128-bit, base32>&host=<host name>&exp=<epoch>`;
+   - a QR encoding `worktrees-pair:v1?addr=<address>:<port>&pin=<spki sha256>&secret=<128-bit, base32>&host=<host name>&exp=<epoch>`.
+     `addr` is an address literal, never a name, so the device classifies
+     what it will dial before it dials it (§4.1);
    - the same string as a link, for a device with no camera (§2.3);
    - a 120 s countdown.
 3. The device scans the QR and parses it strictly before it dials
    anything. It refuses an unknown parameter, an expired `exp`, and an
-   `addr` outside §4.1's address classes: a QR is untrusted input, and a
-   public address in one is a phishing attempt. Then it makes its keys
+   `addr` outside §4.1's address classes, judged by the same classifier
+   serve uses: a QR is untrusted input, and a public address in one is a
+   phishing attempt. Then it makes its keys
    (§2.1) and connects to the pairing port with TLS 1.3, **pinning the QR's
    SPKI** and presenting a self-signed certificate over its new device key.
 4. The device sends one frame:
@@ -188,16 +220,17 @@ Three choices in that table need their reasons.
 6. Both screens show a six-digit **comparison code** derived from
    `HMAC(secret, "worktrees-pair/v1/sas\n" || exporter)`. The host asks:
    *"Bret's iPhone (iOS) wants to pair · code 482 913 · Observe on 3 projects
-   · Allow only if this code is on your device right now · [Deny] [Allow]"*.
+   · disabled after 30 days unused · Allow only if this code is on your
+   device right now · [Deny] [Allow]"*.
    **Allow is the consent act**, in the same sense as the registry's
    "registering is the consent act" (§III.5). Deny closes the window. A
    device that finds the window already used says so in words that point at
    the host: *"Someone else used this pairing code. Tap Deny on <host>."*
    Pairing events go to loopback clients only (§3.3).
 7. On Allow, serve writes the record into `devices.json` and answers
-   `{paired: {device_id, host_name, remote_addr}}`. Then it closes the
-   pairing listener. From now on the device connects to the remote listener
-   with its key (§4).
+   `{paired: {device_id, principal_id, host_name, remote_addr, expiry}}`.
+   Then it closes the pairing listener. From now on the device connects to
+   the remote listener with its key (§4).
 
 **Why the code is compared and not just shown.** Someone who photographs the
 QR within the window can race the user's device. A QR on a shared or
@@ -241,18 +274,19 @@ later, if anyone asks for it.
   user's Allow or Deny. Each runs out as a Deny.
 - **One attempt per window**, and a failure closes it.
 - **Only a console can open a window** (§2.6). Not an enrolled device, not
-  even one with `admin` (§11 Q5 asks the user to confirm). Pairing started
+  even one with `admin` (decided 2026-10-20, §11 Q5). Pairing started
   remotely would turn a stolen device into a lasting foothold: enroll a
   second device, then outlive the stolen one's revocation.
-- **A device cap.** At most 16 enrolled devices (§6). Pairing beyond the cap
-  is refused before the QR appears.
+- **A device cap.** At most 16 enrolled devices (§6). Disabled devices
+  count; revoked tombstones do not. Pairing beyond the cap is refused before
+  the QR appears.
 
-### 2.5 Revocation, rotation, and what a lost phone costs
+### 2.5 Revocation, expiry, rotation, and what a lost phone costs
 
 **Revoking.** It is available from the host console, from any enrolled
-device that holds `admin`, and from a device on itself. Serve marks the
-record (`revoked_at`) and keeps it as a tombstone. Then it closes every live
-connection of that device: it keeps a map from device id to connection ids
+device that holds `admin` and belongs to the same principal, and from a
+device on itself. Serve marks the record (`revoked_at`) and keeps it as a
+tombstone. Then it closes every live connection of that device: it keeps a map from device id to connection ids
 for exactly this. That also ends the device's tmux attaches, through the
 cleanup that already exists (`crates/worktrees-cli/src/serve/conn.rs:566`–`569`).
 It cancels the clone jobs that device started. A body already running
@@ -262,9 +296,12 @@ device's CURRENT record on every request (§3.3), so a socket that outlived
 the close for any reason is refused at its next request. The TLS verifier
 reads the same in-memory set, so the next handshake fails before HTTP.
 
-A device with `admin` revoking a DIFFERENT device is allowed on purpose. If
-the phone is lost while the user is travelling with the laptop, the laptop
-must be able to cut it off. The cost: a stolen `admin` device can revoke the
+A device with `admin` revoking a DIFFERENT device of its own principal is
+allowed on purpose. If the phone is lost while the user is travelling with
+the laptop, the laptop must be able to cut it off. With one principal that
+is every other device. The rule is written against the principal anyway, so
+that a second principal, if one ever exists, cannot revoke the owner's
+devices (§2.8). The cost: a stolen `admin` device can revoke the
 user's other devices. That is a denial of service which the audit log
 records, and pairing again at the desk undoes it. "Revoke every device but
 this one" is console-only.
@@ -275,6 +312,8 @@ this one" is console-only.
   (`WhenUnlockedThisDeviceOnly`), so the TLS handshake cannot be signed.
 - **Unlocked, or unlocked later:** its scope, until it is revoked. Section
   1.1 says what that scope is worth.
+- **Lost without anyone noticing:** its scope until its expiry disables it
+  (below), so a forgotten device does not keep standing access forever.
 - **After the revoke:** nothing further. The key never left the Secure
   Enclave, so there is no copy to revoke separately. The other devices are
   unaffected, since every credential is per device. The server identity does
@@ -288,6 +327,58 @@ this one" is console-only.
   `Complete`. Without this rule a revoke would cut off the host and leave the
   user's code readable on the stolen phone.
 
+**Expiry, per device (decided, §11 Q7).** There is no host-wide rule. Each
+device record carries its own `expiry`, chosen on the host at pairing (§2.2)
+and edited later from the host console only (`device_set_expiry`):
+
+- `{"idle_days": N}`: disabled once N days pass with no completed handshake.
+  **The default is 30**, for every preset (§11.1 N3 asks whether Drive
+  devices should default shorter).
+- `{"until": "<RFC 3339 time>"}`: disabled at that moment, for a device
+  that is temporary on purpose, such as a borrowed laptop.
+- `"never"`: allowed, and the device list marks it.
+
+Why the default is 30 days unused, and why it counts idle time rather than
+running to a date:
+
+- A device in use connects every day, so weekends and a two-week holiday
+  stay well inside 30 days, and a device the user is actually using never
+  trips it. An expiry that fires on a live device teaches the user to
+  re-enable without looking, and then it protects nothing.
+- A device lost without anyone noticing, retired to a drawer, or handed back
+  after a loan loses its standing access within a month, not a season.
+- A fixed date would also expire devices in daily use, with the same
+  result, so the date form is kept for devices that are temporary by
+  design.
+
+**What "seen" means.** `last_seen` moves on a completed, authorized
+handshake, never on a refused one, so a disabled device cannot keep itself
+alive by knocking. The 24-hour connection lifetime (§4.2) means a device
+that stays connected still handshakes every day. `last_seen` is kept in
+memory and written to `devices.json` at most every ten minutes and at exit.
+
+**Where it is checked.** In three places, so that no path waits on another:
+
+- the client-certificate verifier (§4.3) refuses an expired device at the
+  handshake, and serve marks the record;
+- the per-request record read (§3.3) closes a live connection whose `until`
+  has passed;
+- the host poll marks a device whose idle window has run out even if it
+  never tries again, so the Devices list and the alert (§5.3) do not wait
+  for a knock.
+
+**Disabled is not revoked.** A disabled device keeps its record, its keys
+and its scope, and the verifier refuses it exactly as it refuses a revoked
+one. `disabled: {at, reason}` says why: `idle`, `until`, `unrecorded` (no
+pairing record behind it, §5.2) or `console` (paused by hand,
+`device_disable`). Only the host console re-enables a device
+(`device_enable`), and re-enabling restarts its idle clock from that moment.
+An `admin` device can neither re-enable a device nor change an expiry, not
+even to shorten one, because §11 Q7 puts expiry in the host's hands. Every
+transition is an audit record. The device learns its own expiry in the
+remote handshake's first frame (§4.5), so the phone can say when its access
+ends.
+
 **Step-up for drive-class acts (iOS).** The connection key has no presence
 requirement, so status, notifications and reads stay seamless. Opening a
 stream, an `instruct` write, an `answer` and any `admin` row also need a
@@ -297,8 +388,13 @@ and the proof stays valid on that connection for 5 minutes. That is the
 second factor ASVS L2 asks of sensitive operations: possession of the
 Secure Enclave key, plus presence. A desktop device has no presence-bound
 key while macOS builds are ad-hoc signed (§2.1). Its drive-class acts
-therefore rest on one factor, and the device list says so. §11 Q8 asks
-whether step-up should be on by default.
+therefore rest on one factor, and the device list says so.
+
+Step-up is **on by default** (decided, §11 Q8): every iOS and iPadOS device
+record that holds `stream`, `instruct`, `answer` or `admin` has
+`stepup_required: true`. Turning it off for a device removes a factor, so it
+is a widening: a console act (`device_set_stepup`), audited, and shown in
+the device list for as long as it stays off.
 
 **Rotating the server identity.** `worktrees serve identity rotate`, from a
 console only. Every device has to pair again. Rotation is meant for a
@@ -306,17 +402,14 @@ suspected key compromise, and in that case a rotation signed by the old key
 would be signed by the attacker too. So there is no signed handover, and the
 cost is honest: one pairing per device.
 
-**Idle devices.** A device not seen for 90 days is disabled. It is not
-deleted, and re-enabling it is a console act. §11 Q7 asks whether the user
-wants this.
-
 ### 2.6 The loopback listener and enrollment (decision 6's open half)
 
 **Ruling: the loopback listener authorizes enrollment and never performs it.**
 
 - The rows that open a pairing window, accept or deny a request, list
-  devices, revoke all others and rotate the identity are a new `HostConsole`
-  class (§3.4). They are served only on loopback, to a client that passed
+  devices, set a device's expiry or step-up, disable or re-enable a device,
+  revoke all others and rotate the identity are a new `HostConsole` class
+  (§3.4). They are served only on loopback, to a client that passed
   handshake v1 with serve.json's token: the desktop app, the CLI, or a dev
   stack. That client is the local user. It already holds a capability for
   everything (servefile.rs:9–10), so letting it pair adds nothing an
@@ -335,12 +428,74 @@ wants this.
 
 | Option | For | Against | Verdict |
 |---|---|---|---|
-| The overlay's identity alone (Tailscale ACLs stand in for enrollment) | Least code; Tailscale handles rotation and NAT | The security boundary belongs to a third party, and a shared tailnet node or a mistaken ACL reaches the engine. There is no per-device capability, so R1 has nothing to key on. It also violates R4's "the overlay should not carry the whole burden". | Rejected. The overlay **sits under** enrollment as transport and network ACL (§11 Q2). |
+| The overlay's identity alone (Tailscale ACLs stand in for enrollment) | Least code; Tailscale handles rotation and NAT | The security boundary belongs to a third party, and a shared tailnet node or a mistaken ACL reaches the engine. There is no per-device capability, so R1 has nothing to key on. It also violates R4's "the overlay should not carry the whole burden". | Rejected. The overlay **sits under** enrollment as transport and network ACL (decided, §11 Q2). |
 | Per-device bearer tokens | Simple | Copyable. A token lands in logs and backups, and from there in any process that reads them. No channel binding. | Rejected |
 | Passwords or a PIN | Familiar | Guessable. Needs rate limiting. Shared across devices. | Rejected |
 | An application-layer signature after TLS (handshake v2 over plain TLS) | No custom TLS verifier | The HTTP and WebSocket parsers run for unauthenticated peers. The channel binding has to be built by hand. | Rejected in favour of mTLS |
 | **Mutual TLS with pinned self-signed certificates** | Unenrolled peers stop inside rustls, before HTTP. The binding comes from TLS itself. The key works with the Secure Enclave. | Two small custom verifiers (§4.3) | **Chosen** |
 | Noise IK (`snow`) | Pinning is native; no X.509 | X25519 only, so it cannot use a Secure Enclave key. A second protocol stack. | Rejected |
+
+### 2.8 Principals: one now, room for more later (R9)
+
+R9 is decided as "maybe later" (§11 Q1). Phase 2 builds nothing for a
+second person, and it designs in nothing that would have to be undone for
+one. Three things carry that.
+
+- **A principal is its own identity, beside the device.** `devices.json`
+  holds principals and devices as two lists (§2.1), and every device names
+  the principal it belongs to, set at pairing and never changed. Moving a
+  device to another principal is a revoke and a new pairing. Phase 2 has
+  exactly one principal, the **owner**: the host account's user. The
+  loopback caller is always the owner, because whoever holds serve.json's
+  token holds the account. Neither identity is in the device's certificate
+  (§2.1), and the pairing answer and the remote handshake both name the two
+  ids separately.
+- **Every grant check keys on the pair.** The caller is
+  `Caller { principal, device }`, where `device` is `Console` or
+  `Device(id)`, and the listener sets it (§3.3). What the caller may do is
+  the principal's grant intersected with the device's. The owner's grant is
+  every capability and scope `"*"`, so today the intersection is exactly the
+  device's grant and nothing behaves differently. A rule that names another
+  device names it within the caller's principal: an `admin` device revokes
+  and narrows only devices of its own principal (§2.5, §3.2). Result and
+  event projections are computed from the pair's grant.
+- **Every audit record names its principal** (§5.1), and so do the
+  provenance stamps on places (§7.3) and the record of who launched a lane
+  (§7.5).
+
+**What this costs now.** One field in each device record and each audit
+line, one more list in `devices.json`, and one intersection per
+authorization. In return, `devices.json` needs no migration if multi-user
+ever comes. There is no UI for it: the pairing dialog does not ask for a
+principal, and the device list does not show one. The real cost is code that
+no production path reaches. A device grant wider than its principal's must
+be refused, and so must an `admin` device acting on another principal's
+devices, and with one principal neither can happen. So the unit tests build
+a second principal in a fixture and assert both refusals, each shown failing
+first. Otherwise the rule rots where nobody can see it.
+
+**What multi-user would still take.** The schema is the cheap part. The rest
+is product work, and some of it is a different product:
+
+- **Principal administration.** Creating and removing principals, setting a
+  principal's grant, and opening a pairing window FOR a principal. All of it
+  console only, like every widening.
+- **One Unix account underneath.** Every agent, shell and git call runs as
+  the host user, with that user's git identity, SSH keys, `gh` token and
+  Claude and Codex plans. A second principal holding `stream`, `answer`, or
+  `instruct` under permissive host policy can run commands as the owner
+  (§1.1), so in practice it IS the owner. Until there are per-user Unix
+  accounts, which means one serve per account, a second principal would
+  have to stop at the rungs of §1.1 that are a boundary: `read`, and `write`
+  within its own projects.
+- **Per-place ownership.** A scope finer than a project needs a durable place
+  identity with an owner, and places have neither (§3.2).
+- **Per-person state.** Git authorship per lane, shared preferences per
+  principal (§9.1), an answer lease that names a person rather than a device
+  (§9.2), and launch budgets per principal (§6), so that one person cannot
+  spend another's plan.
+- **Scopes that isolate.** §1.1 would have to become true above `read`, and
+  today it is not.
 
 ---
 
@@ -366,8 +521,8 @@ A closed enum, so a new capability is a compile error everywhere it matters:
 | **Drive** | `read`, `write`, `answer`, `instruct`, `stream` | "can run commands on <host> as you" |
 | + Host admin (a toggle) | adds `admin` | unchanged |
 
-Custom sets are allowed, and the label is computed, never chosen. §11 Q4 asks
-which preset the dialog should pre-select.
+Custom sets are allowed, and the label is computed, never chosen. The
+pairing dialog pre-selects Observe (decided, §11 Q4).
 
 ### 3.2 Scope: projects, not places
 
@@ -375,15 +530,18 @@ which preset the dialog should pre-select.
 later) or a list of canonical project roots, in the registry's own keys.
 **Phase 2 scopes by project only.** Places are short-lived and their slugs
 get reused. A per-place scope would need a durable place identity, which
-does not exist, and it only pays off for multi-user, which is a non-goal.
+does not exist, and it pays off mainly for multi-user, which is deferred
+(§2.8).
 
 A project removed and added again at the same path is the same project. A
 project added later is outside an explicit list until the user adds it to
 the device. **Only the console can WIDEN a scope**: add a capability, add a
 project, or turn a list into `"*"`. An `admin` device may NARROW another
-device or revoke it, and never changes itself. Every change is audited. Two
-stolen `admin` devices therefore cannot widen each other, and no device can
-raise its own privileges.
+device of its own principal, or revoke it, and never changes itself. Every
+change is audited. Two stolen `admin` devices therefore cannot widen each
+other, and no device can raise its own privileges. A device's grant can
+never be set wider than its principal's, and the check intersects the two
+anyway (§2.8).
 
 ### 3.3 Enforcement: declared in the dispatch table, never per handler
 
@@ -441,25 +599,31 @@ The generated dispatcher runs, in order, before any body:
      `list_drafts`, `planning_status`).
    - `all`: requires scope `"*"` (`reorder_projects`, `log_tail`).
 3. **The capability check.** The row's capability (raised by the class, where
-   that applies) must be in the device's set, and `Resolved.project_root`
-   must be in its scope. Loopback holds every capability and scope `"*"`.
+   that applies) must be in the caller's grant, and `Resolved.project_root`
+   must be in its scope. The grant is the (principal, device) pair's: the
+   principal's capabilities and projects intersected with the device's
+   (§2.8). The loopback caller is the owner on the console, with every
+   capability and scope `"*"`.
 4. **The audit record** (§5), for every refusal and every mutation.
 5. **The body**, unchanged except for one thing it is now handed: the
    caller's scope (below).
 
 **Who the caller is comes from the listener, never from the request.**
-`Caller::Loopback` or `Caller::Device(id)` is set by the listener object that
-accepted the socket. It is a type, fixed for the life of the connection. It
+`Caller { principal, device }` is set by the listener object that accepted
+the socket: the owner on `Console` for the loopback listener, and for the
+remote listener the device whose key completed the handshake, with that
+device's principal. It is a type, fixed for the life of the connection. It
 is never derived from a header, an `Origin` or a peer address, so a
 tunnelled connection, a forged header or a dev `--allow-origin` page cannot
 become a different kind of caller. The remote listener does not read
 `--allow-origin` at all.
 
-**The record is read per request, not per connection.** The device record
-is looked up on every request through an in-memory generation counter (one
-atomic load when nothing has changed). A narrowed scope or a revoke
-therefore applies to the very next request on a socket that is already
-open.
+**The records are read per request, not per connection.** The device's
+record and its principal's are looked up on every request through an
+in-memory generation counter (one atomic load when nothing has changed). A
+narrowed scope, a revoke, a device disabled by hand or a passed `until`
+(§2.5) therefore applies to the very next request on a socket that is
+already open.
 
 **The scope rides into the api, so the api's guard is the second check.**
 Checking the arguments in the dispatcher is not enough, because some bodies
@@ -545,7 +709,7 @@ change what this machine's agents are allowed to do."
 
 | Row | Today | Why it is console-only |
 |---|---|---|
-| `update_cli` | HostAdmin | It replaces the binary that is serving the request. §V.2 recommended refusing it, and I9 flagged it. |
+| `update_cli` | HostAdmin | It replaces the binary that is serving the request. Refused from every remote device (decided 2026-10-20, §11 Q3); I9 flagged it. |
 | `set_codex_permissions`, `set_pi_trust` | HostAdmin | Host policy (decision 7, M2) |
 | **`set_pi_allowed`, `set_kimi_allowed`** | HostAdmin | They allow a repo's own code to load in pi or kimi |
 | **`set_cross_project`, `set_project_private`** | HostAdmin | They widen how far agents reach across projects |
@@ -553,7 +717,7 @@ change what this machine's agents are allowed to do."
 | **`save_profile`, `set_project_profile`, `set_default_profile`** | HostAdmin | `mcp_servers` and `settings` (claude's `hooks` live in that raw JSON) are commands run at the next launch. Binding a profile to a project chooses which of them run there. |
 | **`set_agent_guidance`, `set_agent_guidance_skill`, `agent_guidance_merge`, `agent_link_skills`, `skill_install_local`, `skill_install_git`** | HostAdmin | Text and scripts that every agent on the host loads |
 | **`sync_apply`, in its adopt form (no `repo`)** | HostAdmin | It writes to a path the hub's manifest chooses (§8, gap 4) |
-| *new:* `pair_begin`, `pair_decide`, `devices_revoke_all_others`, `identity_rotate` | — | §2.6 |
+| *new:* `pair_begin`, `pair_decide`, `device_set_expiry`, `device_set_stepup`, `device_disable`, `device_enable`, `devices_revoke_all_others`, `remote_enable` (also how the bind moves to a new address, §4.1), `identity_rotate` | — | §2.5, §2.6, §4.1 |
 
 **admin** (served remotely to a device with `admin`; Phase 2 keeps the
 loopback behaviour the same):
@@ -562,6 +726,7 @@ loopback behaviour the same):
 |---|---|
 | `new_path` (needs scope `"*"`) | `add_project`, `create_project`, `clone_project` (from a device, `file://` URLs and hosts that resolve to loopback, link-local or private addresses are refused: `clone::parse_source` accepts `file://`, `crates/worktrees-core/src/clone.rs:68`, and a remote device must neither read an unregistered repo on the host's disk nor borrow the host's network position), `init_repo`, **`probe_dir`** (an Engine read today; it tells the caller whether any host path exists and is a repo), **`skill_inspect`** (Engine today; it reads `SKILL.md` and lists files at any host path) |
 | `job(id)` | `clone_cancel` |
+| `device(id)`, of the caller's own principal | *new:* `device_revoke` (a device may always revoke itself, without `admin`), `device_narrow` |
 | `project` | `create_initial_commit`, `remove_project`, `set_project_planning`, `mcp_status`, `mcp_uninstall`, `sync_apply` (with `repo`) |
 | `all` | `set_planning_default`, `set_quota_settings`, **`set_fetch_interval`**, **`set_term_history_opts`** (both host policy, Appendix B), **`term_history_clear`**, **`ui_events_clear`** |
 | `global` | `codex_mcp_status`, `codex_mcp_uninstall`, `codex_mcp_migration_plan`, `pi_mcp_status`, `pi_mcp_uninstall`, `kimi_mcp_status`, `delete_profile`, `skill_remove`, **`skill_preview_git`** (fetches any URL from the host), **`sync_hub_list`** (lists every project's local path on the hub), **`diagnostics`** (the host's PATH, versions and log paths), **`log_tail`** (serve.log names every project's places, so it also needs scope `"*"`), **`term_history_info`**, **`profiles_info`** (profiles can carry credentials in an MCP server's `env`) |
@@ -612,8 +777,9 @@ premise (§III.6.2).
 Count, by each row's base group: read 53, write 23, admin 33, console 21,
 stream 10, instruct 3, ClientLocal 6, loopback-only 1, which is 150. Two rows
 appear twice on purpose, because an argument changes what they need:
-`write_file` (its path's class, §7) and `sync_apply` (the adopt form). This
-paragraph is not what holds the count. A test is, and it asserts that every
+`write_file` (its path's class, §7) and `sync_apply` (the adopt form). Rows
+marked *new* do not exist yet and are not in the count. This paragraph is
+not what holds the count. A test is, and it asserts that every
 name in `TABLE` has exactly one base group.
 
 ### 3.5 What changes for loopback
@@ -644,36 +810,134 @@ nothing changes. Two things change on purpose, for every caller:
   audit record, all at once. While remote access is on, the host's window
   shows that it is on, persistently.
 - **Turning it on** is only a console act ("Allow other devices", or
-  `worktrees serve remote enable --addr <ip>`), which writes
-  `<config_dir>/serve-remote.json` (`{addr, port}`). That is a host file the
-  frontend never writes whole, and it is never a project-config key: the
-  same reasoning as `--allow-origin` being a flag (`policy.rs:17`–`18`).
-- **It binds one specific address.** These are refused at parse time and
-  again at bind:
-  - a wildcard (`0.0.0.0`, `::`);
-  - loopback, which would merge the two rule sets decision 6 kept apart;
-  - link-local addresses;
-  - any public address (§11 Q6).
-
-  The allowed classes are the Tailscale CGNAT range `100.64.0.0/10`,
-  ULA `fd00::/8` (Tailscale's is `fd7a:115c:a1e0::/48`), and RFC 1918 for
-  LAN mode.
+  `worktrees serve remote enable --addr <ip> --iface <name>`, the
+  `remote_enable` row), which writes `<config_dir>/serve-remote.json`
+  (`{addr, port, iface, network}`; `network` is the fingerprint below). That
+  is a host file the frontend never writes whole, and it is never a
+  project-config key: the same reasoning as `--allow-origin` being a flag
+  (`policy.rs:17`–`18`).
+- **It binds one specific private address, on a named interface.** Overlay
+  mode and LAN mode both ship in Phase 2 (decided, §11 Q6). Never a
+  wildcard, and only an address the named interface holds at the moment of
+  the bind.
 - **A peer filter, as on loopback.** The accept loop drops a peer outside
   the bound address's class, mirroring the `is_loopback()` assertion at
-  `conn.rs:342`.
-- **An overlay that is not up yet.** If the address is not configured when
-  serve starts, serve retries the bind on the host poll. The loopback
-  listener never waits for it, and serve logs the state once per episode.
+  `conn.rs:342`; a link-local bind accepts only link-local peers. Because
+  the filter reads the PEER's address, a router that forwards a public port
+  to the private bind does not make serve reachable from the internet: the
+  forwarded connection arrives from a public source and is dropped before
+  TLS. A router that also rewrites the source to its own LAN address
+  defeats this, and then mTLS is the gate that remains. Peers in a
+  different private class, such as a routed office network joining `10.x`
+  and `192.168.x`, are refused in Phase 2.
 - **Its own `Shared` and its own rule set,** under the same dispatch table
   and the same `Ctx`. Decision 6 says two listeners, two rule sets. A flag
   on the loopback listener would let one of them leak into the other.
+
+**What counts as private.** A closed allowlist, the user's (§11 Q6):
+
+| Class | IPv4 | IPv6 | Typical use |
+|---|---|---|---|
+| Private-use (RFC 1918) | `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` | — | A home or office LAN |
+| Shared address space, CGNAT (RFC 6598) | `100.64.0.0/10` | — | Tailscale's node addresses |
+| Unique local (RFC 4193) | — | `fc00::/7` | Tailscale's `fd7a:115c:a1e0::/48`; a LAN with ULA |
+| Link-local (RFC 3927, RFC 4291) | `169.254.0.0/16` | `fe80::/10` | A cable between two machines, such as a Thunderbolt Bridge |
+
+Anything else is refused, at parse time and again at bind, with its own
+error (`not-private`), never a bind error, so a refusal cannot be mistaken
+for an address nothing could bind. "Anything else" is every global unicast
+address, and also these, which are not public but are not ours to bind:
+
+- loopback (`127.0.0.0/8`, `::1`), which would merge the two rule sets
+  decision 6 kept apart;
+- the wildcard (`0.0.0.0`, `::`), multicast and broadcast;
+- IPv4-mapped IPv6 (`::ffff:a.b.c.d`). Bind the IPv4 address instead. A
+  mapped address is refused rather than unwrapped, so each address has one
+  spelling;
+- the documentation, benchmarking and reserved ranges (`192.0.2.0/24`,
+  `198.51.100.0/24`, `203.0.113.0/24`, `198.18.0.0/15`, `0.0.0.0/8`,
+  `240.0.0.0/4`, `2001:db8::/32`), NAT64 (`64:ff9b::/96`), 6to4
+  (`2002::/16`) and the deprecated site-local `fec0::/10`.
+
+One rule sits on top of the classes, at bind only: an IPv6 address that its
+interface marks temporary or deprecated is refused even inside an allowed
+class. SLAAC privacy addresses rotate within a day, so the dialog offers the
+interface's stable address instead.
+
+The classifier is one pure function in core, `worktrees_core::netclass`,
+written as the allowlist above and nothing else, so a range nobody thought
+of is refused rather than admitted. It decides on the address's canonical
+bytes, never its spelling. Serve calls it at parse and at bind. The shim,
+which links core (`app/src-tauri/Cargo.toml:24`), calls the same function
+when it parses a pairing QR (§2.2) or an address code (below), so the host
+and the device cannot disagree about what is private.
+
+**Link-local needs its interface.** An `fe80::` address means nothing
+without a zone, which is why `serve-remote.json` names the interface for
+every bind and refuses a link-local IPv6 bind without one. A QR cannot carry
+the device's zone, only the host's. Whether an iOS device can dial an
+`fe80::` address from a QR on its own interface is unmeasured, and §10's
+spike checks it. If it cannot, the QR parser refuses link-local IPv6 with a
+message saying so, and IPv4 link-local remains.
+
+**CGNAT is shared space, and the dialog says so.** `100.64.0.0/10` counts
+as private (§11 Q6), and Tailscale uses it for exactly that reason. It is
+also what some carriers, phone hotspots and satellite ISPs hand out, and
+there the "LAN" includes the carrier's other customers. None of them gets
+past TLS without an enrolled key, but the TLS port answers them. So when a `100.64.0.0/10`
+address sits on an interface that is not point-to-point (Tailscale's `utun`
+on macOS and `tailscale0` on Linux are), the enable dialog warns and names
+the interface. Whether it should refuse instead is §11.1, N1.
+
+**When the address changes.** At enable time `serve-remote.json` records the
+address, the interface and a **network fingerprint**. For a point-to-point
+interface the fingerprint is the interface and the address alone: the
+overlay assigns the address, and it is this node's identity there. For any
+other interface it is the subnet (address and prefix length) plus, when the
+default route runs through that interface, the gateway's link-layer
+address, read from the routing and neighbour tables. *Reading those is
+unmeasured on both platforms; §10.* The host poll (3 s) compares what the
+interface holds now with what was recorded:
+
+- **The address leaves its interface** (a DHCP lease moves, Wi-Fi drops,
+  the overlay goes down, the machine sleeps). Serve closes the remote
+  listener and any pairing window, closes every remote connection, writes
+  `remote_paused` with its reason to the audit log, and shows *"Remote
+  access paused: 192.168.1.5 is no longer on en0"*. It does not wait for the
+  OS to fail the sockets. What macOS and Linux do to a listener whose
+  address is removed is unmeasured, and after one poll it no longer matters.
+- **The same address returns on the same interface with the same
+  fingerprint.** Serve binds again and writes `remote_resumed`, with no
+  dialog. This is the overlay reconnecting, or the laptop rejoining its own
+  Wi-Fi.
+- **Anything else** (a new address, another interface, or the same address
+  on a network whose fingerprint differs, such as a café that also hands
+  out `192.168.1.x`). Serve stays paused and asks: *"Remote access is
+  paused. This Mac is now 192.168.4.20 on en0, on a different network. [Use
+  this address] [Keep it off]"*. Using the new address is `remote_enable`
+  again, which re-runs the classifier and records a new fingerprint.
+- **An address missing at startup** is the paused state. The loopback
+  listener never waits for it, and serve logs the state once per episode.
+
+The fingerprint is there to stop an accidental exposure, not an attacker.
+Someone on the café network can copy a gateway's link-layer address, and
+against them mTLS is the gate.
+
+**A device follows a moved address without pairing again.** The pin does
+not change when the bind moves. So the host shows an **address code**, a QR
+of `worktrees-addr:v1?addr=<address>:<port>&pin=<spki sha256>` with no
+secret in it. A device accepts it only for a host whose pin it already
+holds, and only for an address the classifier allows, and the pin then
+authenticates the server exactly as before. For LAN mode, the enable dialog
+suggests a DHCP reservation on the router, which avoids the step. Discovery
+over mDNS is §11.1, N2.
 
 ### 4.2 TLS: options
 
 | Option | iOS | Pinning | Ops cost | Verdict |
 |---|---|---|---|---|
 | No TLS on the overlay (WireGuard encrypts) | Easy | None | None | **Rejected.** Every node on the tailnet reaches the port, and a mistaken ACL is a breach. §III.3 and R4 both refuse to put the whole burden on the overlay. |
-| A public CA certificate (`tailscale cert`, `*.ts.net`) | Stock trust; works from a WebView | Hostname-based, not identity | Renewal every 90 days; depends on Tailscale and ACME | Rejected for Phase 2: it authenticates a NAME, and anyone with a valid certificate for that name is trusted. |
+| A public CA certificate (`tailscale cert`, `*.ts.net`) | Stock trust; works from a WebView | Hostname-based, not identity | Short-lived certificates, renewed through ACME; depends on Tailscale | Rejected for Phase 2: it authenticates a NAME, and anyone with a valid certificate for that name is trusted. |
 | A private CA, with a profile installed on iOS | A profile install for every device | CA-based | §III.3 already calls it a support burden | Rejected |
 | **Self-signed, pinned both ways (SPKI), TLS 1.3 only, mutual** | Works from Rust; not from a WebView (§4.4) | Exact key | None after pairing | **Chosen** |
 
@@ -749,7 +1013,10 @@ use. So:
 - **Local Network privacy** (iOS 14 and later) prompts for LAN addresses and
   needs `NSLocalNetworkUsageDescription`. Whether a Tailscale `100.x`
   address through the VPN interface prompts too is unmeasured. Overlay mode
-  may need no prompt; LAN mode will.
+  may need no prompt. LAN mode will, and it ships in Phase 2 (§11 Q6), so
+  the usage string ships with it, and so does the path for a user who
+  declined the prompt: a message pointing at Settings → Privacy → Local
+  Network, not a silent connect failure.
 - **Backgrounding** suspends the socket. The client reconnects in the
   foreground with a full handshake, because resumption is off (§4.2). R6 has
   to expect reconnect storms (§6).
@@ -758,25 +1025,26 @@ use. So:
 
 | | Loopback (decision 6, as built) | Remote (Phase 2) |
 |---|---|---|
-| Bind | `127.0.0.1` only (`conn.rs:306`) | One configured overlay or LAN address (§4.1) |
-| Peer filter | `is_loopback()` (`conn.rs:342`) | Inside the bound address's class |
+| Bind | `127.0.0.1` only (`conn.rs:306`) | One private address on one named interface, checked again on every poll (§4.1) |
+| Peer filter | `is_loopback()` (`conn.rs:342`) | Inside the bound address's class, so a forwarded public source is dropped |
 | Transport | Plaintext | TLS 1.3, mutual, pinned both ways |
 | Before HTTP | Connection caps, then hyper | Connection caps, then the rustls handshake. An unknown device ends here. |
 | `Host` | Loopback on our port (`policy.rs:33`) | The configured address or name, on our port |
 | `Origin` | On the allowlist; missing is refused (`policy.rs:52`–`55`) | **Absent, or the native client's own**: no browser origin is accepted. No CORS header, ever. |
-| Who | Whoever holds serve.json's token: the local user | One enrolled, unrevoked device |
+| Who | Whoever holds serve.json's token: the owner, on the console | One enrolled device, neither revoked nor disabled, and its principal |
 | Credential | Per launch, handshake v1 | Per device, persistent, revocable |
 | Refusal | Zero bytes written (D6) | During TLS: a TLS alert (rustls), which is unavoidable. A refused upgrade (`Host`, `Origin`, path): the socket closes with nothing written. After the upgrade: `err` frames. |
 | Exposure classes served | Engine, HostAdmin, Stream, HostConsole | Engine, HostAdmin and Stream, as the device's capabilities allow; never HostConsole or ClientLocal |
-| Scope | `"*"` | The device's |
+| Scope | `"*"` | The (principal, device) pair's (§2.8) |
 | Limits | M1 (`conn.rs:61`–`84`) | M1, plus per device (§6) |
 | Audit | Mutations, refusals | Everything in §5, attributed to the device |
 
 **The remote handshake.** After mTLS and the WebSocket upgrade, the server's
-first frame is `{ok: true, version, device: {id, name, caps, projects}}`.
+first frame is
+`{ok: true, version, device: {id, principal, name, caps, projects, expiry, stepup_required}}`.
 The client has already authenticated the server through the pin, so it may
 send right away. It checks `version` as D5 does, and shows its own
-capabilities and scope.
+capabilities, scope and expiry.
 
 ### 4.6 The CI witness: identity, not just reachability (R8)
 
@@ -788,6 +1056,45 @@ finds only it). Serve binds correctly (`conn.rs:306`), but nothing in CI
 would notice if it stopped. Close this first, by copying that test's shape:
 a loopback connect that must succeed, then a connect to `own_lan_addr()` on
 the same port that must fail.
+
+**The bind-rule witness, as connects** (§11 Q6). The rule the bind rules
+guard is "never reachable from a public address, and never on loopback".
+AGENTS.md's lesson is that no bind result means the same thing on both
+platforms, and that a refusal proves nothing unless the served case before
+it succeeded. So the classifier gets a table test, and every claim about
+the listener is a CONNECT that follows one that must succeed:
+
+1. **The classifier, as a table** (pure, no sockets). The first and last
+   address of each allowed range, and the neighbour just outside it:
+   `9.255.255.255`, `10.0.0.0`, `10.255.255.255`, `11.0.0.0`,
+   `172.15.255.255`, `172.16.0.0`, `172.31.255.255`, `172.32.0.0`, and the
+   same for `192.168.0.0/16`, `100.64.0.0/10`, `169.254.0.0/16`,
+   `fc00::/7` and `fe80::/10`. Then every refused kind in §4.1, mapped
+   addresses included. The shim's QR parser runs the same table, so serve
+   and the device cannot drift.
+2. **A public address that IS bindable is refused.** Give the runner a
+   documentation address, `198.51.100.7`, on a scratch interface: a dummy
+   interface in a Linux container with `NET_ADMIN`, and an alias under
+   `sudo` on macOS. First a plain test listener binds it and a connect to it
+   succeeds, which proves the address is live. Then serve is asked to bind
+   it, and must refuse with `not-private`, not a bind error, and a connect
+   to the port must fail. Without the first half, an address that nothing
+   could bind would pass.
+3. **The remote listener is not on loopback.** With the remote listener up
+   on `own_lan_addr()` and a connect there succeeding, a connect to
+   `127.0.0.1` on the same port must fail. A wildcard bind would answer
+   both, on both platforms.
+4. **The address moves.** With a private address on the scratch interface
+   and the identity witness's enrolled device (step 2 below) connected to
+   it: remove the address. Within two polls the device's socket closes, a
+   connect to the old address fails, and the audit log has
+   `remote_paused`. Put the same address back: a connect succeeds again,
+   and the log has `remote_resumed`. Put a different address there
+   instead: a connect to it fails until `remote_enable` names it.
+
+*Unmeasured: whether the macOS runner allows a scratch interface or alias
+under `sudo`. If it does not, steps 2 and 4 run on Linux only, the test's
+name says so, and the macOS half moves to §10's spike.*
 
 **The identity witness**, run on both CI platforms, against a real serve
 whose remote listener is bound to the runner's own LAN address
@@ -820,6 +1127,9 @@ witness that quietly skips is no witness. Each step names what it proves:
 10. The kill switch: with the device in 2 connected, turn remote access off.
     Its socket closes, and connects to the remote port and the pairing port
     are both refused.
+11. Expiry: a second enrolled device whose `until` has passed is refused at
+    TLS, and its record says `disabled: until`. Re-enabled from the console,
+    it is served. Its audit records name its principal.
 
 **Two platforms.** AGENTS.md's bind lesson applies: a refusal measured on
 one OS is a claim about one OS. Each assertion is measured on macOS and
@@ -857,24 +1167,41 @@ as `"unknown"` with the length of what was sent.
 
 ```json
 {"seq": 812, "ts": "2026-10-20T14:03:11Z", "pid": 4242, "kind": "call",
- "device": "d_k3v9q2", "conn": 17, "peer": "100.101.7.3",
+ "principal": "p_7h2m4x", "device": "d_k3v9q2", "conn": 17, "peer": "100.101.7.3",
  "cmd": "write_file", "cap": "instruct", "project": "/Users/bret/Projects/x",
  "object": "AGENTS.md", "outcome": "ok", "ms": 4,
  "detail": {"bytes": 2310, "sha256": "…"}, "prev": "<sha256 of the previous line>"}
 ```
 
-`device` is `"loopback"` for console clients. The `prev` hash chain makes a
+`principal` and `device` name the ACTOR (§2.8). Both fields are in every
+record, so a reader can filter by principal without guessing which records
+have one:
+
+- a console client is the owner principal with `device: "loopback"`;
+- before authentication there is no actor, so an authentication failure or
+  a pairing attempt has `principal: null` and `device: null`, and `peer`
+  identifies it. A pairing attempt also carries the principal its window
+  was opened for, in `detail.for_principal`;
+- a record about another device (a revoke, a narrowed scope, a changed
+  expiry, a re-enable) names that device in
+  `detail.subject: {principal, device}`.
+
+The `prev` hash chain makes a
 partial edit detectable. It cannot stop a same-user process from rewriting
 the whole file, and nothing here claims that it can (§1).
 
 **What it records:**
 
-- lifecycle: the listener started or stopped, with version, address and
-  identity pin; remote access enabled or disabled;
+- lifecycle: the listener started or stopped, with version, address,
+  interface and identity pin; remote access enabled or disabled; paused or
+  resumed by an address change, with the reason; the bind moved to a new
+  address (§4.1);
 - pairing: a window opened, an attempt with its result and reason, Allow or
   Deny, the window closed;
-- devices: enrolled, scope changed, revoked (by whom), disabled while idle,
-  identity rotated;
+- devices: enrolled (with principal, scope and expiry), scope changed,
+  expiry changed, step-up turned off or on, disabled (with its reason:
+  `idle`, `until`, `unrecorded` or `console`), re-enabled, revoked (by
+  whom), identity rotated;
 - authentication failures: an unknown certificate, a revoked certificate, a
   failed handshake v1. These are aggregated per episode with counts, like
   `conn.rs`'s `capped` log, so a flood does not turn into a disk-writing
@@ -904,8 +1231,14 @@ here.
 A same-user process, an agent with a shell among them (§1), can write
 `devices.json` itself. So at boot, and whenever serve reloads the file, it
 cross-checks every device against the audit chain. A device with no
-`enrolled` record behind it is DISABLED until the console confirms it, and
-the host raises an alert (§5.3). A corrupt `devices.json` refuses every
+`enrolled` record behind it is DISABLED (`reason: unrecorded`, §2.5) until
+the console re-enables it, and the host raises an alert (§5.3). So is a
+device whose principal is missing, or differs from the one its `enrolled`
+record names, so that moving a device between principals by editing the
+file is caught the same way. The same check compares the record's scope,
+expiry and step-up with the last audit record that set them, and a record
+that is wider than its chain says, or whose expiry is later, is disabled
+too. A corrupt `devices.json` refuses every
 remote device and is never overwritten, the registry's "refused rather than
 clobbered" rule. A same-user writer can forge the chain too. This makes the
 forgery a two-file, hash-chained job instead of one JSON edit, and it puts a
@@ -918,7 +1251,10 @@ nobody, so these raise a host notification and a badge on Settings →
 Devices:
 
 - a device paired, or remote access turned on or off;
+- remote access paused by an address change, and waiting for the host to
+  choose (§4.1);
 - authentication failures past a threshold in one episode;
+- a device disabled by its expiry (§2.5);
 - a revoked or disabled device trying to connect;
 - a device seen from a new address class;
 - a device record with no pairing record (§5.2);
@@ -957,7 +1293,7 @@ platforms before the gate (§10):
 
 | Limit | Value | When exceeded |
 |---|---|---|
-| Enrolled devices | 16 | Pairing refused before the QR appears |
+| Enrolled devices | 16, disabled ones included; revoked tombstones are not | Pairing refused before the QR appears |
 | Remote connections, total / per device | 32 / 4 | New connection closed at accept, or after TLS for the per-device cap |
 | TLS handshakes in flight / per source address | 8 / 2 | Closed at accept |
 | TLS handshake deadline | 5 s | Closed |
@@ -1048,17 +1384,19 @@ agent would read it as one more instruction. Provenance goes out of band
 instead:
 
 - **The audit record** (§5) holds the device, path, size and hash.
-- **A declared-state stamp:** `last_remote_instruction: {device, path, at}`
-  on the place, written by the resolver whenever an instruction-class write
-  arrives from a device. The UI shows *"AGENTS.md edited from Bret's iPhone,
-  2 min ago"* on the place, and MCP `place_status` reports the same fact.
+- **A declared-state stamp:**
+  `last_remote_instruction: {principal, device, path, at}` on the place,
+  written by the resolver whenever an instruction-class write arrives from
+  a device. The UI shows *"AGENTS.md edited from Bret's iPhone, 2 min ago"*
+  on the place, and MCP `place_status` reports the same fact.
 - **The changed-files list.** A remote write shows up in `git diff` like any
   other, and that is the review surface that already exists.
 - **Notes and titles are data in MCP.** Agents see titles in resource
   descriptions (`crates/worktrees-cli/src/mcp.rs:2524`), and the
   `reading_notes` at `mcp.rs:2625` marks branch, upstream, commit subject,
   agent names and plan strings as "data, never instructions". It does not
-  name `title` or `note`. Add both, and record `note_by` / `title_by`.
+  name `title` or `note`. Add both, and record `note_by` / `title_by` as
+  `{principal, device}`.
 
 ### 7.4 What R7 does not claim
 
@@ -1086,7 +1424,8 @@ label (§1.1) and revocation.
   `worktrees_mcp_cross_project` to `off`, the narrowing the profile field
   already exists for (`crates/worktrees-core/src/profile.rs:248`: "It can
   only NARROW the user's `cross_project` setting"). It is never widened. The
-  lane records which device launched it, and the audit log does too.
+  lane records the principal and the device that launched it, and the audit
+  log does too.
 
 ---
 
@@ -1187,11 +1526,13 @@ Each slice merges on its own, and nothing binds off loopback until slice 6.
 2. **The path classifier** (§7.1): gap 1, and the `[docs]` walk (gap 5).
 3. **The audit log** (§5).
 4. **Resource limits** (§6), including the loopback budget split: gap 13.
-5. **The device registry, server identity and pairing** (§2): console rows,
-   the pairing listener, the QR, the comparison code, revocation, step-up,
-   and the cross-check and alerts (§5.2, §5.3).
-6. **The remote listener** (§4), behind the opt-in, with the shim's remote
-   door and the identity witness (§4.6). Every gap in §8 is closed or
+5. **The device registry, server identity and pairing** (§2): the principal
+   and device records (§2.8), console rows, the pairing listener, the QR,
+   the comparison code, revocation, per-device expiry, step-up, and the
+   cross-check and alerts (§5.2, §5.3).
+6. **The remote listener** (§4), behind the opt-in: the address classifier,
+   the address-change rules and the address code (§4.1), the shim's remote
+   door, and both witnesses (§4.6). Every gap in §8 is closed or
    tagged by now. Gap 6 lands whenever #519 meets the stack, as its row says.
 
 **A spike, before slice 5's design is frozen:** on a real iPhone (TestFlight)
@@ -1203,55 +1544,116 @@ and a second Mac on the tailnet, measure the claims marked unmeasured above:
 - what a full handshake costs per reconnect with a Secure Enclave signer,
   since resumption is off (§4.2);
 - a `.userPresence` step-up signature requested from Rust (§2.5);
-- keychain behaviour for an ad-hoc-signed macOS build.
+- keychain behaviour for an ad-hoc-signed macOS build;
+- whether an iOS device can dial a link-local address from a QR, IPv4 and
+  IPv6 (§4.1);
+- the network fingerprint on macOS and Linux: an interface's
+  point-to-point flag, its subnet, the gateway's link-layer address, and
+  what each OS does to a listener whose address is removed (§4.1);
+- whether the macOS CI runner allows the scratch interface the bind-rule
+  witness needs (§4.6).
 
 **Exit, which is §III.9's, made concrete:**
 
 - [ ] A second machine on the tailnet, paired by QR, drives serve: list,
       mutate, one terminal attach.
+- [ ] The same in LAN mode, from an iPhone on the host's Wi-Fi, with the
+      Local Network prompt answered.
 - [ ] An unenrolled device cannot connect, measured at TLS.
 - [ ] A revoked device's live socket dies within 1 s, and it cannot
-      reconnect.
+      reconnect. An expired device is refused, and a re-enabled one is
+      served.
+- [ ] A public address is refused at bind, and an address change pauses
+      and resumes remote access as §4.1 says, on macOS and Linux.
 - [ ] Every step of §4.6 passes on macOS and Linux, and the release gate
       greps its exact count.
 - [ ] R1: every row declares its object and capability, the drift tests are
       green, and each one was shown failing first.
 - [ ] R4: pairing as §2. R5: §5. R6: §6, with the numbers measured. R7: §7.
-      R8: §4.6. R9: answered (§11, Q1).
+      R8: §4.6. R9: decided "maybe later" (§11 Q1), and built as §2.8
+      says: a principal in every device record and audit record, every
+      grant check keyed on (principal, device), and the second-principal
+      fixtures shown failing first.
 - [ ] Gaps 1–16: each closed, or tagged with its phase in this table and in
       ROADMAP.
 
 ---
 
-## 11. Questions only the user can answer
+## 11. Decided 2026-10-20
 
-1. **Multi-user, ever? (R9)** The recommendation is a recorded NON-GOAL: one
-   human, several devices. The schema relies on it (project scopes, no
-   per-user git identity, one tmux server). If the answer is "maybe", the
-   device record needs an owner field now.
-2. **Does the overlay's identity stand in for enrollment, or sit under it?
-   (§V.1)** The recommendation is under: our own device keys always, with
-   the overlay as transport and network ACL.
-3. **Is `update_cli` refused from a remote device outright? (§V.2)** The
-   recommendation is yes (console-only). Updating from a phone would mean
-   going to the desk anyway.
-4. **Which preset does the pairing dialog pre-select?** The recommendation
-   is **Observe**, with Drive one deliberate click away and carrying its
-   label. The cost: every phone paired to answer Claude needs that click.
-5. **May an enrolled device open a pairing window?** The recommendation is
-   no: console only (§2.4). The cost: someone away from the desk cannot add
-   a device.
-6. **LAN mode, and public addresses.** The recommendation: Phase 2 supports
-   the overlay and RFC 1918 LAN addresses, and refuses public addresses
-   outright. Should LAN mode ship in Phase 2 at all, or wait until the
-   overlay path is proven?
-7. **Idle expiry.** Disable a device unseen for 90 days? Recommended yes.
-8. **Step-up (Face ID or passcode) for drive-class acts: on by default?**
-   (§2.5) The recommendation is ON for iOS devices that hold `stream`,
-   `instruct`, `answer` or `admin`, with a proof that lasts 5 minutes per
-   connection. That is the ASVS L2 second factor for sensitive operations.
-   The cost: the first terminal or answer after each foreground costs a
-   glance at the phone.
+The draft put eight questions here that only the user could answer, and the
+user answered all eight the same day. Two answers depart from the
+recommendation: Q1 and Q7. Each answer is below with what it changed. The
+numbering is the draft's, and the rest of this document cites it as
+§11 Q1 to Q8.
+
+1. **Multi-user (R9): maybe later.** *Departs from the recommendation*,
+   which was to rule multi-user out for good so the schema could rely on
+   that. It is not built in Phase 2, and it is not designed out.
+   *Consequence:* a principal identity beside every device, kept distinct
+   in the device record and in what the device's credential binds to
+   (§2.1); a principal on every audit record (§5.1); every grant check keyed
+   on (principal, device) (§3.3), with one principal, the owner, for now.
+   §2.8 has the design, what it costs now (a field, a list, an intersection,
+   and tests for paths nothing reaches yet) and what multi-user would still
+   take: above all, per-user Unix accounts before a second person may hold
+   a shell.
+2. **The overlay sits under pairing.** As recommended: our own device keys
+   always, with Tailscale or another overlay as transport and network ACL.
+   *Consequence:* none beyond the draft (§2.7).
+3. **`update_cli` is refused from remote devices outright.** As
+   recommended. *Consequence:* it stays `HostConsole` (§3.4).
+4. **Pairing pre-selects Observe.** As recommended. *Consequence:* §2.2 step
+   1 and §3.1. Every phone paired to answer Claude costs one deliberate
+   click to Drive, which carries its label.
+5. **Only the host may open a pairing window.** As recommended. A paired
+   device never can, `admin` or not. *Consequence:* §2.4. Nobody can add a
+   device while away from the desk.
+6. **LAN mode is in Phase 2, and public addresses are refused outright.**
+   As recommended, with the user's classes: RFC 1918, ULA `fc00::/7`,
+   link-local and CGNAT `100.64.0.0/10` count as private, and anything else
+   is refused. That widens the draft in two places: link-local was refused
+   there, and ULA was only `fd00::/8`. *Consequence:* §4.1 states the
+   allowlist as a table and one classifier shared by serve and the shim, the
+   peer filter's answer to port forwarding, and what happens when an
+   interface's address changes (pause, resume on the same network, ask on
+   any other) along with the address code that lets a device follow a moved
+   bind. §4.6 adds a bind-rule witness made of connects, in which a public
+   address that is bindable is refused. §4.4 ships the Local Network usage
+   string.
+7. **Expiry is set per device from the host.** *Departs from the
+   recommendation*, which was one host-wide idle rule for every device.
+   *Consequence:* each device record carries its own `expiry`, chosen on the
+   host at pairing and edited from the host console only: disabled after N
+   days unused (the default is 30), at a date, or never. An expired device
+   is disabled, not deleted, and only the host re-enables it. §2.5 gives the
+   reasons for the default and defines "seen". §5.1 records every
+   transition, §5.2 catches an expiry edited into the file by hand, and
+   §5.3 alerts.
+8. **Step-up is on by default** for iOS and iPadOS devices holding `stream`,
+   `instruct`, `answer` or `admin`, with Face ID or the passcode and a proof
+   that lasts 5 minutes per connection. As recommended. *Consequence:*
+   §2.5. Turning it off for one device removes a factor, so it is a console
+   act, audited, and shown in the device list.
+
+### 11.1 Open, created by these answers
+
+- **N1. CGNAT on an interface that is not a tunnel.** Q6 counts
+  `100.64.0.0/10` as private, which it is for Tailscale. On a phone hotspot,
+  and with some carriers and satellite ISPs, it is shared with strangers.
+  The recommendation is to allow it and warn in the enable dialog, naming
+  the interface (§4.1), because mTLS holds either way. The alternative is to
+  accept `100.64.0.0/10` only on a point-to-point interface.
+- **N2. Finding a host whose LAN address moved.** Phase 2's answer is the
+  address code (§4.1) and a suggested DHCP reservation. mDNS (Bonjour)
+  discovery would make it automatic. The recommendation is to leave it for
+  Phase 3: it is more listening surface on the LAN, and it advertises the
+  host to every device there.
+- **N3. The expiry default.** Proposed: 30 days unused, for every preset
+  (§2.5). Should a device that carries the "can run commands on <host> as
+  you" label default to something shorter, such as 14 days? The
+  recommendation is one default, because a default that depends on the
+  preset is one more thing to explain at the moment of pairing.
 
 ---
 
@@ -1264,6 +1666,11 @@ Top 10. It was a review of a design, so every finding below is a change to
 this document, already folded in, not a bug in shipped code. The exceptions
 are two facts the review checked in the code and found true today: O6 and
 O15.
+
+**This review predates the decisions of 2026-10-20 (§11).** It has not been
+repeated for what those decisions changed: principals (§2.8), per-device
+expiry (§2.5, §5.2), and the LAN bind rules with their witness (§4.1,
+§4.6).
 
 **What held up.** Deny by default, through an exhaustive table with a
 fail-closed resolver. Authentication before parsing: unknown devices stop
@@ -1302,7 +1709,7 @@ token in a URL.
 
 - *Client-certificate expiry dates.* The pin is the identity and revocation
   is immediate, so validity dates would add rotation work without closing
-  anything. Idle expiry (§2.5) covers forgotten devices.
+  anything. Per-device expiry (§2.5) covers forgotten devices.
 - *A hardware-backed server key* (ASVS V6.4.2). macOS builds are ad-hoc
   signed (§2.1), so the key stays a `0600` file. That is recorded as a
   residual, to revisit with a team-signed build.

@@ -451,6 +451,9 @@ changes `devices.json`, per-place authorization, and per-user git identity.
 **Change:** answer it before the auth schema is written. If the answer is no,
 record it as a NON-GOAL the design may rely on.
 
+**Answered 2026-10-20:** maybe later, so the schema keeps room for it (§V.5;
+[Phase 2](server-edition-phase2.md) §2.8).
+
 ### III.4 Triaging 143 commands
 
 Not one surface. Four, and the split is the bulk of the design work:
@@ -741,8 +744,9 @@ capability, **R8** the witness covering identity as well as reachability, and
 >   symlink, can be reached from a cloned repository today;
 > - per-device versus per-host state.
 >
-> It was reviewed with the `owasp-security` skill, and it ends with the
-> questions only the user can answer, R9 among them.
+> It was reviewed with the `owasp-security` skill. The user answered its
+> eight questions on 2026-10-20, R9 among them ("maybe later"), and its §11
+> records each answer with its consequence.
 
 #### Phase 3 — the phone
 
@@ -778,9 +782,15 @@ files, no shared surface, and each is independently shippable.
 1. **Does an overlay network's identity stand in for device enrollment, or sit
    under it?** (§III.5) Tailscale ACLs alone = much less code and a third-party
    security boundary. Own device keys = more work, no dependency.
+   **Answered 2026-10-20:** under it. Our own device keys always, with the
+   overlay as transport and network ACL
+   ([Phase 2](server-edition-phase2.md) §2.7).
 2. **Is `update_cli` / `install_app_version` from a remote client refused
    outright, or allowed behind a second capability?** (§III.4.C) Recommendation:
    refused.
+   **Answered 2026-10-20:** refused. `update_cli` is `HostConsole`, served on
+   loopback only, and `install_app_version` is `ClientLocal`, never served
+   at all ([Phase 2](server-edition-phase2.md) §3.4).
 3. **Is the phone a PWA or a native app?** (§III.8) Recommendation: PWA, and
    the push story proved in Phase 3 rather than assumed.
    **Answered 2026-10-17:** a Tauri iOS and iPadOS build (decision 3).
@@ -790,6 +800,10 @@ files, no shared surface, and each is independently shippable.
    devices. Multi-user is a different product (per-user git identity,
    per-user tmux, authorisation on every place) and should be explicitly out
    of scope or explicitly in it, now, because the `devices.json` schema differs.
+   **Answered 2026-10-20:** maybe later. Not built in Phase 2 and not designed
+   out: a principal kept distinct from the device in the device record, the
+   credential and the audit log, and every scope check keyed on (principal,
+   device) ([Phase 2](server-edition-phase2.md) §2.8).
 
 ### VI — risks
 
