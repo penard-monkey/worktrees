@@ -175,6 +175,21 @@ export type Dialled = { sock: EngineSocket; owned: boolean; started: boolean };
 
 export type Dial = (ask: DialAsk) => Promise<Dialled>;
 
+/** Events that are one act each rather than a state, kept for a moment when
+ *  they arrive with nobody listening and handed to the first listener.
+ *  `app:open-doc` is a `worktrees show`: serve holds one while no client is
+ *  connected and lets it go the moment one authenticates — before main.tsx has
+ *  mounted App, whose listener is the only one. A state event (`sessions:busy`,
+ *  `places:changed`) is never kept: a late one would be a stale set, and the
+ *  next tick sends a fresh one anyway. */
+const ONE_SHOT: ReadonlySet<string> = new Set(["app:open-doc"]);
+/** How long an unheard one-shot event waits. It bridges "authenticated" to
+ *  "App is listening", which is seconds; the request it carries was already up
+ *  to 30 s old (`inbox::MAX_AGE_SECS`), and a document opening a minute after
+ *  it was asked for would be a surprise, not a service. */
+export const ONE_SHOT_TTL_MS = 10_000;
+const ONE_SHOT_MAX = 16;
+
 /** A channel for a door with no socket: nothing will ever arrive on it, and the
  *  call it is handed to fails anyway. */
 function deadChannel<T>(onmessage?: (response: T) => void): Channel<T> {
@@ -205,7 +220,8 @@ export type EngineDoor = Door & { connect(): Promise<void>; visibility(): void }
  *  before the engine died hears it after. Channels come from the socket
  *  current when they are made; a terminal makes a new one when it re-attaches.
  *  When the socket dies the door retries on its own (`reconnect.ts` holds when,
- *  and whether a try may start a serve); `reconnectEngine()` tries at once. */
+ *  and whether a try may start a serve); `reconnectEngine()` tries at once.
+ *  `env.now` also ages the one-shot events kept for a late listener. */
 export function engineDoor(local: Door | null, dial: Dial, env: RetryEnv): EngineDoor {
   // Nothing reaches the page until the first connect succeeds: the gate in
   // main.tsx mounts the app at gen 1, never against a dead engine.
@@ -214,17 +230,47 @@ export function engineDoor(local: Door | null, dial: Dial, env: RetryEnv): Engin
   let gen = 0;
   let failure = "the engine is not connected yet";
   const handlers = new Map<string, Set<EventCallback<unknown>>>();
+  // The socket being connected or in use, and the names this door listens to
+  // on it. Wired from the moment `dial` returns it, before its handshake is
+  // through: a frame serve sends right behind its ok is handed on as the proof
+  // passes, synchronously, ahead of anything awaiting `ready`.
+  let wired: { s: EngineSocket; names: Set<string> } | null = null;
+  // One-shot events nobody was listening for yet (`ONE_SHOT`).
+  const parked: { name: string; e: Event<unknown>; at: number }[] = [];
 
   const deliver = (name: string) => (e: Event<unknown>) => {
-    for (const h of [...(handlers.get(name) ?? [])]) h(e);
+    const hs = handlers.get(name);
+    if (hs?.size) {
+      for (const h of [...hs]) h(e);
+    } else if (ONE_SHOT.has(name)) {
+      parked.push({ name, e, at: env.now() });
+      if (parked.length > ONE_SHOT_MAX) parked.shift();
+    }
   };
-  const subscribe = (s: EngineSocket, name: string) => {
-    void s.listen(name, deliver(name));
+  const wire = (name: string) => {
+    if (!wired || wired.names.has(name)) return;
+    wired.names.add(name);
+    void wired.s.listen(name, deliver(name));
   };
+  // Handed on a macrotask after a listener arrives, not a microtask: React's
+  // StrictMode listens, lets go and listens again, and App lets go a microtask
+  // late (`un.then(f => f())`), so by now only the listener that stays is here.
+  const flush = (name: string) =>
+    setTimeout(() => {
+      const hs = handlers.get(name);
+      if (!hs?.size) return;
+      const due = parked.filter((p) => p.name === name);
+      parked.splice(0, parked.length, ...parked.filter((p) => p.name !== name));
+      for (const p of due) {
+        if (env.now() - p.at > ONE_SHOT_TTL_MS) continue;
+        for (const h of [...hs]) h(p.e);
+      }
+    }, 0);
 
-  /** One try: dial, prove, re-subscribe, go live. */
+  /** One try: dial, wire, prove, go live. */
   async function attempt(t: Try, onPhase: (p: string) => void): Promise<Outcome> {
     sock = null;
+    wired = null;
     // `onLost` can fire before `dial` has returned the socket it belongs to;
     // the holder lets it name which socket it is about.
     const holder: { s: EngineSocket | null } = { s: null };
@@ -236,6 +282,9 @@ export function engineDoor(local: Door | null, dial: Dial, env: RetryEnv): Engin
         manual: t.manual,
         onPhase,
         onLost: (msg) => {
+          // A dead socket is listened on no more: a name first listened to
+          // while the engine is down is wired by the next try, to its socket.
+          if (wired?.s === holder.s) wired = null;
           if (sock === null || sock !== holder.s) return; // not live yet: the catch below reports it
           sock = null;
           failure = msg;
@@ -244,12 +293,14 @@ export function engineDoor(local: Door | null, dial: Dial, env: RetryEnv): Engin
       });
       started = d.started;
       holder.s = d.sock;
+      wired = { s: d.sock, names: new Set() };
+      for (const name of [...ONE_SHOT, ...handlers.keys()]) wire(name);
       await d.sock.ready;
-      for (const name of handlers.keys()) subscribe(d.sock, name);
       sock = d.sock;
       gen += 1;
       return { ok: true, owned: d.owned, started };
     } catch (e) {
+      wired = null;
       const f = dialFailure(e);
       failure = f.reason;
       return { ok: false, reason: f.reason, started: started || f.started, declined: f.declined };
@@ -277,10 +328,11 @@ export function engineDoor(local: Door | null, dial: Dial, env: RetryEnv): Engin
       let set = handlers.get(event);
       if (!set) {
         handlers.set(event, (set = new Set()));
-        if (sock) subscribe(sock, event);
+        wire(event);
       }
       const h = handler as EventCallback<unknown>;
       set.add(h);
+      if (parked.some((p) => p.name === event)) flush(event);
       return Promise.resolve(() => {
         handlers.get(event)?.delete(h);
       });

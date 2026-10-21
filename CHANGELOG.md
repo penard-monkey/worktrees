@@ -20,8 +20,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   - A serve the app started stops when you quit, which ends the dock shells as
     before.
   - If the app crashes, its serve survives, and the next launch adopts it
-    (`serve --owner app`, recorded in serve.json).
+    (`serve --owner app`, recorded in serve.json). If no launch comes back
+    for two minutes, that serve stops itself the way a quit stops it, so
+    one left behind by a crash does not run on unseen. A `worktrees show`
+    made while no app was connected opens when the app comes back; it used
+    to reach the window before the window was listening, and was lost.
   - A serve you started from the CLI is used and left running.
+  - Its dock saves (a tab's scrollback, the folder it was in) no longer
+    write over a save another app made since; serve logs the one it skipped.
+  - **Going back to an older version: quit Worktrees first.** An older app
+    runs the engine in its own process, so starting one beside a serve this
+    version left running puts two engines on the same settings, places and
+    dock tabs.
   - If the engine goes away, the app keeps what it last showed under a
     banner and reconnects on its own (below); the terminals re-attach, and
     the dock shell replays behind its `── restored ──` seam.
@@ -116,7 +126,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   (`--all`, a name no place or session has) is refused with the reason before
   any shell or tmux client starts. A command that fails unexpectedly is
   answered `internal error` rather than never answered, and the connection
-  and the server go on serving.
+  and the server go on serving. A `worktrees show` that arrives while no
+  client is connected waits for the next one, inside the same 30 seconds it
+  would wait for the app, rather than being taken and shown to nobody.
 - **The real frontend can drive a real `worktrees serve` from a browser**
   (development only: `pnpm dev:serve` with `WT_SERVE_JSON` pointing at the
   stack's `serve.json`). The page asks the dev server for the port and token —
@@ -212,7 +224,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   Codex to Full access everywhere. Both now live on this machine, in
   `host-policy.json` beside the app's settings, and change only when you click
   them in Settings; the panels show the machine's value. A value you had
-  chosen is carried over once, the first time the new version starts. The
+  chosen is carried over once, the first time the new version starts, and
+  the app's settings file keeps a copy of what you last picked, so going back
+  to an earlier version keeps your choice instead of resetting Codex to
+  Auto-review. The
   CLI and lanes started over MCP still follow `$WORKTREES_CODEX_PERMISSIONS`,
   `$WORKTREES_PI_PROJECT_TRUST` and your config, as before. If you never
   chose a value in the app, lanes the app starts now follow those too, rather

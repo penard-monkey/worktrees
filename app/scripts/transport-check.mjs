@@ -1107,7 +1107,9 @@ async function loadIpc() {
     await isUp();
   }
   const made = dials.slice(before);
-  const names = ["places:changed", "sessions:busy"];
+  // app:open-doc is wired on every socket whether or not anyone listens yet:
+  // a one-shot event is kept for the first listener (ONE_SHOT in ipc.ts).
+  const names = ["app:open-doc", "places:changed", "sessions:busy"];
   const subsOk = made.every((d, i) => same([...d.subs].sort(), (i >= 1 ? [...names, "shell:exit"] : names).sort()));
   check(made.length === 5 && subsOk, `5 automatic reconnects: each new socket is subscribed to each event name exactly once (${made.map((d) => d.subs.length).join(",")} subscriptions)`);
   const last = made[made.length - 1].h;
@@ -1131,6 +1133,7 @@ async function loadIpc() {
   door.visibility();
   check(dials.length === before + 6 && !dials[dials.length - 1].manual, "being seen again dials at once");
   await isUp();
+
 
   // Someone else's serve is reconnected to, never restarted.
   dials[dials.length - 1].h.drop(); await tick();
@@ -1177,6 +1180,101 @@ async function loadIpc() {
   const req = h?.requests().find((r) => r[K.cmd] === "copy_text");
   h?.error(req?.[K.id], K.clientLocal);
   check(!!req && (await p).err === K.clientLocal, "with no local half (the dev stack), a client-local command goes to serve and comes back refused");
+}
+// The one-shot blocks below were written against the retry-less door
+// (dial(reason, onLost) -> socket, a bare `now`); here the door takes the
+// retrier's env, whose `now` ages a kept event, and a dial says whose serve.
+const oneShotEnv = (now) => {
+  const c = clock();
+  return { now, setTimeout: c.setTimeout, clearTimeout: c.clearTimeout, random: () => 0, visible: () => true };
+};
+{
+  // A one-shot event that arrives before anything listens for it. serve HOLDS
+  // a `worktrees show` while no client is connected (rehearsal D2) and lets it
+  // go as `app:open-doc` the moment one authenticates, which is before main.tsx
+  // has mounted App — and, when it rides right behind serve's ok, before this
+  // door has put its listeners on the socket at all. Dropping it lost exactly
+  // the show D2 was holding for the relaunched app.
+  globalThis.__ipcStubs = { tauriInvoke: () => Promise.reject("tauri must not be reached"), tauriListen: () => Promise.reject("no"), TauriChannel: class {} };
+  const ipc = await loadIpc();
+  let now = 1_000_000;
+  let h = null;
+  const door = ipc.engineDoor(null, async ({ onLost }) => {
+    h = harness({ onError: onLost });
+    void (async () => {
+      h.open(); h.hello(); h.challenge(); await h.proof(); h.welcome();
+      // Behind the ok, while the client checks serve's proof: held, and
+      // handed on the moment the proof passes.
+      h.event("app:open-doc", { path: "held.md" });
+      h.event("sessions:busy", { busy: ["stale"] });
+      await h.verified();
+    })();
+    return { sock: h.door, owned: true, started: false };
+  }, oneShotEnv(() => now));
+  ipc.openDoor(door);
+  await settle(door.connect());
+  h?.event("app:open-doc", { path: "before-app.md" });
+  await ticks();
+  // App mounts: React's StrictMode listens, lets go, and listens again, and
+  // App's cleanup unlistens a microtask late (`un.then(f => f())`).
+  const first = [], docs = [], busy = [];
+  const un1 = ipc.listen("app:open-doc", (e) => first.push(e.payload.path));
+  void un1.then((f) => f());
+  void ipc.listen("app:open-doc", (e) => docs.push(e.payload.path));
+  void ipc.listen("sessions:busy", (e) => busy.push(e.payload));
+  await ticks();
+  check(same(docs, ["held.md", "before-app.md"]) && first.length === 0,
+    `an app:open-doc that came before App listened reaches App's listener once mounted, in order — behind serve's ok or after it (${JSON.stringify({ docs, first })})`);
+  check(busy.length === 0, `…but a state event nobody heard is not replayed: a late sessions:busy would be a stale set (${JSON.stringify(busy)})`);
+  const again = [];
+  void ipc.listen("app:open-doc", (e) => again.push(e.payload.path));
+  await ticks();
+  check(again.length === 0, `…and it is delivered once, not to every later listener (${JSON.stringify(again)})`);
+  h?.event("app:open-doc", { path: "live.md" });
+  check(same(docs, ["held.md", "before-app.md", "live.md"]), `with a listener there, one goes straight to it (${JSON.stringify(docs)})`);
+}
+{
+  // …and only for a while: one App never came for is not opened later.
+  globalThis.__ipcStubs = { tauriInvoke: () => Promise.reject("tauri must not be reached"), tauriListen: () => Promise.reject("no"), TauriChannel: class {} };
+  const ipc = await loadIpc();
+  let now = 2_000_000;
+  let h = null;
+  const door = ipc.engineDoor(null, async ({ onLost }) => {
+    h = harness({ onError: onLost });
+    void (async () => { h.open(); h.hello(); h.challenge(); await h.proof(); h.welcome(); await h.verified(); })();
+    return { sock: h.door, owned: true, started: false };
+  }, oneShotEnv(() => now));
+  ipc.openDoor(door);
+  await settle(door.connect());
+  h?.event("app:open-doc", { path: "old.md" });
+  now += 11_000;
+  h?.event("app:open-doc", { path: "new.md" });
+  const docs = [];
+  void ipc.listen("app:open-doc", (e) => docs.push(e.payload.path));
+  await ticks();
+  check(same(docs, ["new.md"]), `an unheard app:open-doc is kept 10 s and no longer (${JSON.stringify(docs)})`);
+}
+{
+  // The door listens on a socket from the moment it is dialled, so a name
+  // first listened to WHILE the handshake runs has to be wired to it too.
+  globalThis.__ipcStubs = { tauriInvoke: () => Promise.reject("tauri must not be reached"), tauriListen: () => Promise.reject("no"), TauriChannel: class {} };
+  const ipc = await loadIpc();
+  let h = null;
+  let go = null;
+  const door = ipc.engineDoor(null, async ({ onLost }) => {
+    h = harness({ onError: onLost });
+    void (async () => { h.open(); h.hello(); h.challenge(); await h.proof(); await new Promise((r) => (go = r)); h.welcome(); await h.verified(); })();
+    return { sock: h.door, owned: true, started: false };
+  }, oneShotEnv(() => Date.now()));
+  ipc.openDoor(door);
+  const connecting = settle(door.connect());
+  await until(() => go);
+  const heard = [];
+  void ipc.listen("places:changed", (e) => heard.push(e.payload));
+  go?.();
+  await connecting;
+  h?.event("places:changed", 7);
+  check(same(heard, [7]), `a listener added while the handshake runs hears the socket it was waiting for (${JSON.stringify(heard)})`);
 }
 
 // The full chain: TerminalPane → ipc.ts → ipcws.ts → the fake socket.

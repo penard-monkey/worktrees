@@ -192,6 +192,10 @@ impl Clients {
     fn remove(&self, id: u64) {
         self.0.lock().unwrap().remove(&id);
     }
+    /// How many authenticated clients are connected now.
+    pub fn len(&self) -> usize {
+        self.0.lock().unwrap().len()
+    }
 }
 
 /// The engine's `Host`: an event is one frame to every authenticated socket.
@@ -204,6 +208,12 @@ impl Host for Broadcast {
         let text = wire::event_frame(event, &payload);
         let mut map = self.0 .0.lock().unwrap();
         map.retain(|_, out| out.push(text.clone()).is_ok());
+    }
+
+    /// Somebody authenticated is connected. A connection joins the map once
+    /// it has proven itself and leaves it as it goes.
+    fn has_audience(&self) -> bool {
+        !self.0 .0.lock().unwrap().is_empty()
     }
 }
 

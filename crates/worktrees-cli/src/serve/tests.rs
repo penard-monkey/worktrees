@@ -1033,3 +1033,66 @@ fn the_owner_flag_takes_app_and_nothing_else() {
         assert!(super::parse_args(&s(bad)).is_err(), "{bad:?} must be refused");
     }
 }
+
+// ── the idle stop ────────────────────────────────────────────────────────────
+// A serve the app started outlived an app crash with no client, indefinitely;
+// a downgraded app then ran a second engine beside it on one config dir, and
+// the orphan's flush overwrote the dock ring the old app had just saved
+// (rehearsal D7).
+
+/// Only the app's serve stops on its own. One somebody started by hand — the
+/// CLI, the dev stack — has no owner to come back for it, and never does.
+#[test]
+fn only_a_serve_the_app_owns_has_an_idle_grace() {
+    assert_eq!(super::idle_grace(Some("app")), Some(super::OWNED_IDLE_GRACE));
+    assert_eq!(super::idle_grace(None), None, "a serve with no owner must never stop on its own");
+    // Long enough that a crash → relaunch normally finds it and adopts it.
+    assert!(super::OWNED_IDLE_GRACE >= Duration::from_secs(60), "{:?}", super::OWNED_IDLE_GRACE);
+}
+
+/// The rule, on a scripted clock: the grace runs only while there is NO
+/// client, and any client starts it over.
+#[test]
+fn the_idle_grace_runs_only_while_no_client_is_connected() {
+    use super::idle_step;
+    let g = Duration::from_secs(120);
+    let t0 = std::time::Instant::now();
+    let at = |s: u64| t0 + Duration::from_secs(s);
+    assert_eq!(idle_step(None, 1, at(0), g), (None, false), "a client is connected: no clock");
+    let (since, out) = idle_step(None, 0, at(5), g);
+    assert_eq!((since, out), (Some(at(5)), false), "the first count with none starts the clock");
+    assert_eq!(idle_step(since, 0, at(124), g), (Some(at(5)), false), "short of the grace");
+    assert_eq!(idle_step(since, 0, at(125), g), (Some(at(5)), true), "the grace has run out");
+    let (since, out) = idle_step(since, 1, at(60), g);
+    assert_eq!((since, out), (None, false), "a client in between resets it");
+    let (since, _) = idle_step(since, 0, at(65), g);
+    assert!(!idle_step(since, 0, at(184), g).1);
+    assert!(idle_step(since, 0, at(185), g).1);
+}
+
+/// Wired to the real count: an authenticated client holds the serve up for as
+/// long as it stays, and once it leaves the watch notifies the stop it was
+/// given — which `cmd_serve` gives it as the signals' own.
+#[test]
+fn the_idle_watch_stops_a_serve_its_last_client_left() {
+    let l = live("idle");
+    let clients = l.running.as_ref().unwrap().clients.clone();
+    let until = |n: usize| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while clients.len() != n {
+            assert!(std::time::Instant::now() < deadline, "clients stayed at {}, not {n}", clients.len());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    let mut ws = client(&l);
+    until(1);
+    let stop = Arc::new(tokio::sync::Notify::new());
+    let grace = Duration::from_millis(200);
+    l.rt.spawn(super::idle_watch(clients.clone(), grace, Duration::from_millis(20), stop.clone()));
+    let fired = |wait: Duration| l.rt.block_on(async { tokio::time::timeout(wait, stop.notified()).await.is_ok() });
+    assert!(!fired(grace * 5), "stopped with a client connected");
+    let _ = ws.close(None);
+    drop(ws);
+    until(0);
+    assert!(fired(Duration::from_secs(5)), "no stop once the last client had gone for the grace");
+}

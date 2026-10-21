@@ -43,13 +43,24 @@
 //      hydration landed, long enough for the 15 s flush to write every dirty
 //      shell's ring to disk.
 //
+//   6. ui-state.json keeps `codex_permissions` / `pi_project_trust`, and each
+//      panel copies the host's stored value into them after a click the host
+//      accepted. This build never reads them; v0.42.0 and older read ONLY
+//      ui-state.json, so a downgrade (a reinstall, or "Install <tag>") that
+//      found them gone fell back to Auto-review — wider than a user's Ask —
+//      and pi to Skip, then wrote those defaults back. Run through the REAL
+//      `loadSettings` and its whole-blob save, with a v0.42-shaped blob on
+//      disk, so any way of dropping them fails.
+//
 // The pre-fix App.tsx fails 1-3 and 5; a lib.rs that still boots host policy,
 // or a cmd_serve that boots it out of order or not at all, fails 4
-// (`node app/scripts/hostpolicy-check.mjs [path/to/lib.rs] [path/to/serve/mod.rs]`).
+// (`node app/scripts/hostpolicy-check.mjs [path/to/lib.rs] [path/to/serve/mod.rs]`);
+// the settings.ts that deleted the two keys on load fails 6.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
+import { transformWithEsbuild } from "vite";
 
 const SRC = fileURLToPath(new URL("../src/", import.meta.url));
 const LIB = process.argv[2] ?? fileURLToPath(new URL("../src-tauri/src/lib.rs", import.meta.url));
@@ -234,6 +245,54 @@ for (const s of SETTERS) {
   else if (refusal < 0 || boots[0] < refusal) fail("cmd_serve loads host policy BEFORE the one-engine refusal — a second serve on the same config dir could write the file under a live one");
   else if (bind < 0 || boots[0] > bind) fail("cmd_serve loads host policy AFTER start( binds the listener — a client could be served under the wrong policy");
   else ok("cmd_serve loads host policy once, after the one-engine refusal and before the listener binds");
+}
+
+// Rule 6. The real settings.ts, inlined the way layout-check.mjs does it (a
+// data: URL has no base for `./afterglow`); `invoke` is the only stub, serving
+// the blob on disk and recording what the whole-blob save writes.
+{
+  const MIRROR = { codex_permissions: "ask", pi_project_trust: "ask" };
+  const read = (rel) => fs.readFileSync(path.join(SRC, rel), "utf8");
+  const inline = (rel) => read(rel).replace(/^export /gm, "") + "\n";
+  const stripImport = (src, mod) => {
+    const re = new RegExp(`^import \\{[^}]*\\} from "\\./${mod}";$`, "m");
+    if (!re.test(src)) fail(`settings.ts: no \`import { … } from "./${mod}"\` line — rule 6's inlining is stale`);
+    return src.replace(re, "");
+  };
+  let stored = null;
+  const saved = [];
+  globalThis.__hostpolicyInvoke = (cmd, a) => {
+    if (cmd === "set_settings") saved.push(a.settings);
+    return Promise.resolve(cmd === "get_settings" ? structuredClone(stored) : null);
+  };
+  const src = inline("afterglow.ts") + inline("harness.ts") +
+    stripImport(stripImport(read("settings.ts"), "afterglow"), "harness")
+      .replace(/^import \{ invoke \}.*$/m, "const invoke = (cmd, a) => globalThis.__hostpolicyInvoke(cmd, a);");
+  const js = (await transformWithEsbuild(src, "settings.ts", { loader: "ts", format: "esm" })).code;
+  const S = await import("data:text/javascript;base64," + Buffer.from(js).toString("base64"));
+  const keeps = (o) => Object.entries(MIRROR).every(([k, v]) => o?.[k] === v);
+
+  // A v0.42.0 blob: no settings_rev, so `migrate` runs and saves at once —
+  // the very save that wrote the keys out in the rehearsal.
+  stored = { theme: "nord", ...MIRROR };
+  const s = await S.loadSettings();
+  await new Promise((r) => setTimeout(r, 400)); // saveSettings debounces 250ms
+  if (!keeps(s)) fail(`loadSettings dropped the downgrade mirror: loaded ${JSON.stringify({ codex_permissions: s.codex_permissions, pi_project_trust: s.pi_project_trust })} from ${JSON.stringify(MIRROR)} — v0.42.0 would fall back to Auto-review / Skip`);
+  else ok("loadSettings keeps codex_permissions / pi_project_trust for an older build");
+  if (!saved.length) fail("loading a v0.42.0 blob saved nothing — the migration's save is gone, so this rule no longer exercises the whole-blob write");
+  else if (!keeps(saved[saved.length - 1])) fail(`the whole-blob save wrote ${JSON.stringify({ codex_permissions: saved.at(-1).codex_permissions, pi_project_trust: saved.at(-1).pi_project_trust })} to ui-state.json — a downgrade would read the defaults`);
+  else ok("the whole-blob save writes them back to ui-state.json");
+
+  // …and each panel keeps the copy CURRENT: the file that sets a key must
+  // write that key into Settings, or the mirror holds the pre-upgrade value
+  // forever and a downgrade undoes every change made since.
+  for (const [file, key] of [["SettingsSheet.tsx", "codex_permissions"], ["PiPanel.tsx", "pi_project_trust"]]) {
+    const sf = ts.createSourceFile(file, read(file), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const writes = descendants(sf, (n) => ts.isObjectLiteralExpression(n) && n.parent && ts.isCallExpression(n.parent)
+      && n.properties.some((p) => (ts.isPropertyAssignment(p) || ts.isShorthandPropertyAssignment(p)) && p.name.getText() === key));
+    if (!writes.length) fail(`${file} never writes \`${key}\` into Settings — the downgrade mirror would go stale at the first click`);
+    else ok(`${file} mirrors \`${key}\` into Settings`);
+  }
 }
 
 console.log(failed ? `\nhostpolicy-check: ${failed} failure(s)` : "\nhostpolicy-check: all good");
