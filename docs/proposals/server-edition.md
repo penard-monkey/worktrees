@@ -726,6 +726,24 @@ limits, **R7** brief/`.planning/`/agent-instruction writes behind the second
 capability, **R8** the witness covering identity as well as reachability, and
 **R9** answered.
 
+> **2026-10-20 (design): Phase 2 has its own document,
+> [server-edition-phase2.md](server-edition-phase2.md).** It covers:
+> - enrollment by QR over pinned mutual TLS, with per-device keys (the Secure
+>   Enclave on iOS) and revocation;
+> - capabilities and project scopes, declared per row in the dispatch table,
+>   with all 150 commands mapped and a loopback-only `HostConsole` class;
+> - the remote listener's rule set and the identity witness. Serve has no
+>   off-loopback connect witness yet, which decision 6 assumes;
+> - the audit log, limits for authenticated clients, and path classes for
+>   the agent-instruction surface;
+> - the eight known gaps, seven more found by this design and one from
+>   Appendix B. One of the seven, a temp file that follows a planted
+>   symlink, can be reached from a cloned repository today;
+> - per-device versus per-host state.
+>
+> It was reviewed with the `owasp-security` skill, and it ends with the
+> questions only the user can answer, R9 among them.
+
 #### Phase 3 — the phone
 
 PWA install, Web Push for "waiting on you", the conversation view (Part II
