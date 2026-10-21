@@ -129,7 +129,9 @@ impl Sandbox {
                 panic!("serve exited early ({st}): {err}");
             }
             assert!(Instant::now() < deadline, "serve.json never appeared at {}", self.serve_json().display());
-            std::thread::sleep(Duration::from_millis(50));
+            // Tight, so a test that stops serve the moment it is up does so
+            // within a few ms of the file appearing, not up to 50 ms later.
+            std::thread::sleep(Duration::from_millis(5));
         }
     }
 
@@ -250,6 +252,24 @@ fn serve_raises_a_low_soft_open_file_limit_at_boot() {
     let new: u64 = new.trim().parse().unwrap_or_else(|_| panic!("{line}"));
     assert!(new > 256, "{line}");
     assert_eq!(sb.terminate().code(), Some(0));
+}
+
+/// serve.json is how a client, or whatever supervises serve, learns that it
+/// is up, so from the moment the file exists a SIGTERM must be a clean stop:
+/// exit 0, the file removed. The handler used to be installed only after the
+/// file was written and the engine started, and a SIGTERM inside that window
+/// took the default action — killed by the signal, serve.json left behind.
+/// Two tests that stop serve straight after launching it lost that race on a
+/// machine with no tmux.
+#[test]
+fn a_sigterm_as_soon_as_serve_json_exists_is_a_clean_stop() {
+    let mut sb = Sandbox::new("earlyterm");
+    for round in 0..10 {
+        sb.launch(&[]);
+        let st = sb.terminate();
+        assert_eq!(st.code(), Some(0), "round {round}: {st}");
+        assert!(!sb.serve_json().exists(), "round {round}: serve.json was left behind");
+    }
 }
 
 /// Host policy is the ENGINE's (`worktrees_api::hostpolicy`: "only the engine
