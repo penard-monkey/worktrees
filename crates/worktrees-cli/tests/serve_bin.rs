@@ -327,7 +327,13 @@ impl PrivateTmux {
         format!("{},0,0", self.sock.display())
     }
     fn run(&self, args: &[&str]) -> std::process::Output {
-        Command::new("tmux").arg("-S").arg(&self.sock).args(args).env_remove("TMUX").output().expect("tmux")
+        self.try_run(args).expect("tmux")
+    }
+    /// `run` for cleanup, which must not panic when there is no tmux at all:
+    /// the macOS `rust` CI job has none, and a test that needs no tmux (the
+    /// refusal below) failed in its Drop.
+    fn try_run(&self, args: &[&str]) -> std::io::Result<std::process::Output> {
+        Command::new("tmux").arg("-S").arg(&self.sock).args(args).env_remove("TMUX").output()
     }
     fn available() -> bool {
         Command::new("tmux").arg("-V").output().is_ok_and(|o| o.status.success())
@@ -341,7 +347,7 @@ impl PrivateTmux {
 
 impl Drop for PrivateTmux {
     fn drop(&mut self) {
-        let _ = self.run(&["kill-server"]);
+        let _ = self.try_run(&["kill-server"]);
         let _ = std::fs::remove_file(&self.sock);
     }
 }
