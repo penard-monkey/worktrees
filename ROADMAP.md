@@ -2643,7 +2643,12 @@ this repo's settings in `.claude/close-out.md`).
   annotations, which never appears in `gh pr checks`. It runs only on `v*` tags,
   so the first exercise would have been a release. A ~5-line "parse every file in
   `.github/workflows/`" step in the `lint` job closes the whole class. Found by
-  a human opening the run.
+  a human opening the run. Half-addressed since #513: release.yml now also runs
+  on every packaging PR (release-dry-run.yml calls it with `dry_run: true`), so
+  it is no longer tag-only — but a caller whose callee fails to parse is itself
+  a zero-job startup failure, still absent from `gh pr checks`, so the parse
+  step (or actionlint, which also catches a missing required input) still
+  stands.
   _From: [2026-09-20 live-docs-viewer](docs/sessions/2026-09-20-live-docs-viewer/summary.md)_
 
 - **`image_refs` reports images inside 4-space indented code blocks.** It has no

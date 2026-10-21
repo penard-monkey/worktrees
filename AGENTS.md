@@ -1259,7 +1259,8 @@ after it is "command not found" — which reads as a sandbox refusing curl.
    merge. (A piped installer cannot see its URL, so a tagged copy knows its
    tag only by carrying it; `test/misc.bats`, `make release` and release.yml
    all refuse a mismatch.)
-3. `make release VERSION=x.y.z` → `git push origin main vx.y.z`.
+3. `make release VERSION=x.y.z` → `git push origin main vx.y.z` (the tag runs
+   publish.yml, below).
    ⚠ **The app-bundle job builds the docs viewer's browser bundle and gates
    the server that serves it**: the gate step runs the docs-server boundary
    tests by exact name, which start the real server and, over a raw loopback
@@ -1271,8 +1272,26 @@ after it is "command not found" — which reads as a sandbox refusing curl.
    existed, is gone (it never validated `Host` — GHSA-6pff-wf7m-6f5h, reported
    2026-09-16); `place-docs.md` §17 is what replaced it, and there is no
    `vars.VIEWER_MO_*` any more.
-4. release.yml: CLI ×4 targets + SIGNED app bundles ×4 + latest.json. The app
-   bundles are macOS (arm64; x86_64 cross-built on arm64 and never executed)
+4. release.yml: CLI ×4 targets + SIGNED app bundles ×4 + latest.json, built,
+   checked and assembled into ONE `release-dist` artifact — and nothing that
+   publishes; it runs only when called. **publish.yml** (the `v*` tag) calls it
+   with `dry_run: false` and the signing key, then creates the release from
+   exactly that artifact; it is the one workflow holding `contents: write`.
+   **release-dry-run.yml** calls the same file with `dry_run: true` on every
+   PR touching the packaging (the three workflows, `tauri*.conf.json`,
+   `sidecar.sh`, `app/package.json`, the Makefile, install.sh): both Linux
+   arches + the native Mac app, every assertion, a throwaway updater key made
+   in the job, latest.json assembled, no secrets passed — and the bundle step
+   refuses the real key in a dry run. So a release runs the steps the last
+   packaging PR already ran (~30 runner-minutes, ~12 wall-clock, $0 on a
+   public repo). It is not `if: inputs.publish` in one file for two reasons: a
+   tag push carries no inputs, so that guard reads empty, and Actions' loose
+   equality makes empty == false — the real release would silently skip its
+   own publish; and a called workflow can never hold more than its caller
+   grants, so keeping `contents: write` out of release.yml keeps it off the
+   PR path entirely. `app/scripts/release-dryrun-check.mjs` pins the split.
+   A dry run that fails to START is a zero-job run that only
+   `gh run list --commit <sha>` shows. The app bundles are macOS (arm64; x86_64 cross-built on arm64 and never executed)
    and Linux (x86_64 on `ubuntu-latest`, arm64 on `ubuntu-24.04-arm` — free
    for a public repo; WebKitGTK is never cross-built), each Linux one an
    AppImage + a .deb. Updater signing key: repo secret
