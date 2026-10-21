@@ -961,8 +961,9 @@ async function loadIpc() {
   };
   // What the next dials do: undefined (an honest serve, the app's), "unowned"
   // (honest, someone else's), "impostor" (fails the proof), "phase" (reports
-  // the shim's phase first), "throw" (a string), or an object — the shim's
-  // ConnectError — to reject with.
+  // the shim's phase first), "show" (an app:open-doc right behind serve's ok,
+  // as serve lets go of a `worktrees show` it held), "throw" (a string), or an
+  // object — the shim's ConnectError — to reject with.
   const script = [];
   const dials = [];
   const dclk = clock();
@@ -982,7 +983,9 @@ async function loadIpc() {
     h.door.listen = (name, fn) => { d.subs.push(name); return listen(name, fn); };
     void (async () => {
       h.open(); h.hello(); h.challenge(); await h.proof();
-      h.welcome(how === "impostor" ? { key: "f".repeat(64) } : {}); await h.verified();
+      h.welcome(how === "impostor" ? { key: "f".repeat(64) } : {});
+      if (how === "show") h.event("app:open-doc", { path: "held-while-down.md" });
+      await h.verified();
     })();
     return { sock: h.door, owned: how !== "unowned", started: false };
   }, env);
@@ -1134,6 +1137,19 @@ async function loadIpc() {
   check(dials.length === before + 6 && !dials[dials.length - 1].manual, "being seen again dials at once");
   await isUp();
 
+  // A `worktrees show` asked for while the app was disconnected: serve holds
+  // it until a client authenticates and lets it go right behind that ok. The
+  // door wires every reconnect's socket before the proof passes, so App's
+  // listener, kept across the reconnect, hears it once.
+  const shown = [];
+  await settle(ipc.listen("app:open-doc", (e) => shown.push(e.payload.path)));
+  const genBefore = st().gen;
+  dials[dials.length - 1].h.drop(); await tick();
+  script.push("show");
+  dclk.advance(500);
+  await isUp(); await ticks();
+  check(same(shown, ["held-while-down.md"]) && st().gen === genBefore + 1,
+    `a show serve held while the app was down reaches App's listener once, right behind the reconnect's ok (${JSON.stringify(shown)}, gen ${genBefore} → ${st().gen})`);
 
   // Someone else's serve is reconnected to, never restarted.
   dials[dials.length - 1].h.drop(); await tick();
