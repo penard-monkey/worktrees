@@ -1,30 +1,109 @@
-name: release
+name: release bundles
+# Everything a release ships, built, checked, signed and assembled into one
+# `release-dist` artifact — and NOTHING that publishes. Two callers, one set of
+# steps:
+#   publish.yml          — a `v*` tag: `dry_run: false`, the real updater key,
+#                          then its own job uploads release-dist as the release.
+#   release-dry-run.yml  — a pull request touching the packaging: `dry_run:
+#                          true`, no secrets at all, a throwaway key made here.
+# So the steps a release runs are the steps every packaging PR already ran, and
+# the first Linux release is not the first time its Linux jobs execute.
+#
+# Why the publishing step lives in publish.yml and not behind an `if:` here: a
+# called workflow can never hold more than its caller grants, so keeping
+# `contents: write` out of this file means the pull-request path never asks for
+# a write token at all; and a tag push carries no `inputs`, so a guard such as
+# `if: inputs.publish` reads EMPTY on the real release — and Actions' loose
+# equality makes empty == false — which would skip the publish silently. Here
+# `dry_run` is required, so every caller says which it is.
+# `app/scripts/release-dryrun-check.mjs` pins all of it.
 on:
-  push:
-    tags: ['v*']
+  workflow_call:
+    inputs:
+      dry_run:
+        description: true = build and check everything, sign with a throwaway key, publish nothing
+        type: boolean
+        required: true
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY:
+        description: the updater signing key; publish.yml passes it, a dry run must not
+        required: false
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  # The run's one decision: which tag, and which targets. A release builds every
+  # row; a dry run builds the rows marked `dry` — both Linux arches and the
+  # native Mac app — and takes its tag from Cargo.toml, so the version gates and
+  # the sidecar's `--version` check still compare real values.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+      cli_matrix: ${{ steps.plan.outputs.cli_matrix }}
+      app_matrix: ${{ steps.plan.outputs.app_matrix }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: plan
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          # The CLI is pure Rust (git/tmux are shelled out at runtime), so it
+          # cross-compiles: both Linux arches on ubuntu-latest, aarch64 with a
+          # cross linker. The app is a WebKitGTK app on Linux and is never
+          # cross-built, so each Linux arch gets a runner of its own arch
+          # (ubuntu-24.04-arm is GitHub-hosted, free for public repositories).
+          cli='[
+            {"os": "macos-latest",  "target": "aarch64-apple-darwin",      "dry": false},
+            {"os": "macos-latest",  "target": "x86_64-apple-darwin",       "dry": false},
+            {"os": "ubuntu-latest", "target": "x86_64-unknown-linux-gnu",  "dry": true},
+            {"os": "ubuntu-latest", "target": "aarch64-unknown-linux-gnu", "dry": true}]'
+          app='[
+            {"os": "macos-latest",     "target": "aarch64-apple-darwin",      "dry": true},
+            {"os": "macos-latest",     "target": "x86_64-apple-darwin",       "dry": false},
+            {"os": "ubuntu-latest",    "target": "x86_64-unknown-linux-gnu",  "dry": true},
+            {"os": "ubuntu-24.04-arm", "target": "aarch64-unknown-linux-gnu", "dry": true}]'
+          if [ "$DRY_RUN" = true ]; then
+            tag="v$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+            pick='[.[] | select(.dry) | del(.dry)]'
+          else
+            # Only a version tag publishes, whatever the caller said.
+            case "$GITHUB_REF" in
+              refs/tags/v*) ;;
+              *) echo "::error::a publishing run needs a v* tag, not $GITHUB_REF"; exit 1 ;;
+            esac
+            tag="$GITHUB_REF_NAME"
+            pick='map(del(.dry))'
+          fi
+          case "$tag" in v[0-9]*) ;; *) echo "::error::no version for the tag: '$tag'"; exit 1 ;; esac
+          # Assigned first: inside `echo "x=$(jq …)"` a failing jq leaves an
+          # empty matrix and a step that still exits 0 (measured, on an image
+          # with no jq).
+          cli_rows="$(jq -c "$pick" <<<"$cli")"
+          app_rows="$(jq -c "$pick" <<<"$app")"
+          {
+            echo "tag=$tag"
+            echo "cli_matrix=$cli_rows"
+            echo "app_matrix=$app_rows"
+          } | tee -a "$GITHUB_OUTPUT"
+
   # Cross-compile the worktrees binary for the common desktop/server targets.
-  # Pure-Rust (git/tmux are shelled out at runtime), so cross-compilation only
-  # needs the target + (for aarch64-linux) a cross linker.
   build:
+    needs: plan
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { os: macos-latest,  target: aarch64-apple-darwin }
-          - { os: macos-latest,  target: x86_64-apple-darwin }
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
-          - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu }
+        include: ${{ fromJSON(needs.plan.outputs.cli_matrix) }}
     runs-on: ${{ matrix.os }}
+    env:
+      TAG: ${{ needs.plan.outputs.tag }}
     steps:
       - uses: actions/checkout@v7
       - name: version gate — tag matches Cargo.toml and install.sh
         run: |
-          tag="${GITHUB_REF_NAME#v}"
+          tag="${TAG#v}"
           grep -q "^version = \"$tag\"$" Cargo.toml \
             || { echo "tag v$tag != workspace version in Cargo.toml"; exit 1; }
           grep -q "^SCRIPT_VERSION=\"v$tag\"$" install.sh \
@@ -47,10 +126,13 @@ jobs:
           if command -v sha256sum >/dev/null 2>&1; then sha256sum "$asset" > "$asset.sha256"
           else shasum -a 256 "$asset" > "$asset.sha256"; fi
           cat "$asset.sha256"
+      # A dry run's artifacts are only for looking at: a day, then gone.
+      # 0 means the repository's default.
       - uses: actions/upload-artifact@v7
         with:
           name: worktrees-${{ matrix.target }}
           path: dist/*
+          retention-days: ${{ inputs.dry_run && 1 || 0 }}
 
   # Desktop-app bundles: macOS (.app → updater .tar.gz) and Linux (AppImage +
   # .deb), each on a runner of its own arch except the x86_64 Mac, which is
@@ -66,20 +148,19 @@ jobs:
   # .deb Depends on the distro's, and the AppImage, like the .app, uses the
   # system's.
   app-bundle:
+    needs: plan
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { os: macos-latest,     target: aarch64-apple-darwin }
-          - { os: macos-latest,     target: x86_64-apple-darwin }
-          - { os: ubuntu-latest,    target: x86_64-unknown-linux-gnu }
-          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu }
+        include: ${{ fromJSON(needs.plan.outputs.app_matrix) }}
     runs-on: ${{ matrix.os }}
+    env:
+      TAG: ${{ needs.plan.outputs.tag }}
     steps:
       - uses: actions/checkout@v7
       - name: version gate — tag matches Cargo.toml workspace version
         run: |
-          tag="${GITHUB_REF_NAME#v}"
+          tag="${TAG#v}"
           grep -q "^version = \"$tag\"$" Cargo.toml \
             || { echo "tag v$tag != workspace version in Cargo.toml"; exit 1; }
       # CI's `app` job installs the first line; the rest is bundling: patchelf
@@ -190,11 +271,28 @@ jobs:
       # plus the dmg. Linux asks for exactly what ships — the AppImage, which is
       # its own updater artifact, and the .deb — because `all` adds an .rpm
       # nothing tests. createUpdaterArtifacts signs both Linux files.
+      #
+      # The key: a release signs with the real one and refuses to run without
+      # it — a throwaway fallback there would ship updates every installed app
+      # rejects. A dry run is handed no secrets by its caller, refuses to run if
+      # it somehow got the real one, and signs with a key made here and thrown
+      # away with the runner, so createUpdaterArtifacts runs exactly as it ships.
       - name: build the app bundle (signed updater artifacts)
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           pnpm -C app install --frozen-lockfile
+          if [ "$DRY_RUN" = true ]; then
+            if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+              echo "::error::a dry run was handed TAURI_SIGNING_PRIVATE_KEY; its caller must pass no secrets"; exit 1
+            fi
+            app/node_modules/.bin/tauri signer generate --ci -p "" -w "$RUNNER_TEMP/dry-run.key"
+            TAURI_SIGNING_PRIVATE_KEY="$(cat "$RUNNER_TEMP/dry-run.key")"
+            export TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+          elif [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::no TAURI_SIGNING_PRIVATE_KEY: a release is signed with the real updater key"; exit 1
+          fi
           pnpm -C app tauri build --target "${{ matrix.target }}" \
             ${{ runner.os == 'Linux' && '--bundles deb,appimage' || '' }}
 
@@ -215,7 +313,7 @@ jobs:
         run: |
           set -euo pipefail
           t="${{ matrix.target }}"
-          v="${GITHUB_REF_NAME#v}"
+          v="${TAG#v}"
           b="target/$t/release/bundle"
           if [ "$RUNNER_OS" = macOS ]; then
             app/scripts/sidecar.sh check "$b/macos/worktrees.app" "$t" "$v"
@@ -319,10 +417,16 @@ jobs:
         with:
           name: worktrees-app-${{ matrix.target }}
           path: dist/*
+          retention-days: ${{ inputs.dry_run && 1 || 0 }}
 
-  release:
-    needs: [build, app-bundle]
+  # Everything the release will carry, in one artifact: the binaries, the
+  # bundles and their .sigs, checksums.txt, latest.json and the notes.
+  # publish.yml uploads exactly this; a dry run stops here.
+  assemble:
+    needs: [plan, build, app-bundle]
     runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.plan.outputs.tag }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -337,41 +441,55 @@ jobs:
       # second (tauri-plugin-updater 2.10 `get_urls`), so the plain Linux keys
       # are the AppImage and the `-deb` keys the .deb: an app installed from a
       # .deb must never be handed an AppImage, which its installer refuses
-      # (InvalidUpdaterFormat). Every signature is read into a variable first,
-      # so a missing .sig fails here instead of shipping an empty signature.
+      # (InvalidUpdaterFormat). The entries come from the targets this run
+      # BUILT (plan's app matrix), so a target added there cannot ship without
+      # its update; and a publishing run must still come out with all six keys.
+      # Every signature is read into a variable first, so a missing .sig fails
+      # here instead of shipping an empty signature.
       - name: updater manifest (latest.json — the in-app updater's endpoint)
+        env:
+          APP_MATRIX: ${{ needs.plan.outputs.app_matrix }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           set -euo pipefail
-          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
-          sig() { cat "art/worktrees-app-$1/worktrees-app-$1.$2.sig"; }
-          mac_arm="$(sig aarch64-apple-darwin app.tar.gz)"
-          mac_x64="$(sig x86_64-apple-darwin app.tar.gz)"
-          lin_x64="$(sig x86_64-unknown-linux-gnu AppImage)"
-          lin_arm="$(sig aarch64-unknown-linux-gnu AppImage)"
-          deb_x64="$(sig x86_64-unknown-linux-gnu deb)"
-          deb_arm="$(sig aarch64-unknown-linux-gnu deb)"
-          jq -n \
-            --arg version "${GITHUB_REF_NAME#v}" --arg base "$base" \
-            --arg mac_arm "$mac_arm" --arg mac_x64 "$mac_x64" \
-            --arg lin_x64 "$lin_x64" --arg lin_arm "$lin_arm" \
-            --arg deb_x64 "$deb_x64" --arg deb_arm "$deb_arm" \
-            'def at($t; $ext; $sig): {url: "\($base)/worktrees-app-\($t).\($ext)", signature: $sig};
-             {version: $version, pub_date: (now | todate), platforms: {
-               "darwin-aarch64":    at("aarch64-apple-darwin"; "app.tar.gz"; $mac_arm),
-               "darwin-x86_64":     at("x86_64-apple-darwin"; "app.tar.gz"; $mac_x64),
-               "linux-x86_64":      at("x86_64-unknown-linux-gnu"; "AppImage"; $lin_x64),
-               "linux-aarch64":     at("aarch64-unknown-linux-gnu"; "AppImage"; $lin_arm),
-               "linux-x86_64-deb":  at("x86_64-unknown-linux-gnu"; "deb"; $deb_x64),
-               "linux-aarch64-deb": at("aarch64-unknown-linux-gnu"; "deb"; $deb_arm)}}' > dist/latest.json
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+          entries=()
+          for t in $(jq -r '.[].target' <<<"$APP_MATRIX"); do
+            arch="${t%%-*}"
+            case "$t" in
+              *-apple-darwin)      entries+=("darwin-$arch $t app.tar.gz") ;;
+              *-unknown-linux-gnu) entries+=("linux-$arch $t AppImage" "linux-$arch-deb $t deb") ;;
+              *) echo "::error::no updater key for $t"; exit 1 ;;
+            esac
+          done
+          platforms='{}'
+          for e in "${entries[@]}"; do
+            read -r key t ext <<<"$e"
+            sig="$(cat "art/worktrees-app-$t/worktrees-app-$t.$ext.sig")"
+            [ -n "$sig" ] || { echo "::error::empty signature: worktrees-app-$t.$ext.sig"; exit 1; }
+            platforms="$(jq -c --arg k "$key" --arg url "$base/worktrees-app-$t.$ext" --arg sig "$sig" \
+              '. + {($k): {url: $url, signature: $sig}}' <<<"$platforms")"
+          done
+          want="darwin-aarch64 darwin-x86_64 linux-aarch64 linux-aarch64-deb linux-x86_64 linux-x86_64-deb"
+          have="$(jq -r 'keys | join(" ")' <<<"$platforms")"
+          if [ "$DRY_RUN" != true ] && [ "$have" != "$want" ]; then
+            echo "::error::latest.json would carry [$have]; a release needs [$want]"; exit 1
+          fi
+          jq -n --arg version "${TAG#v}" --argjson platforms "$platforms" \
+            '{version: $version, pub_date: (now | todate), platforms: $platforms}' > dist/latest.json
           cat dist/latest.json
       - name: changelog notes for this tag
         run: |
-          v="${GITHUB_REF_NAME#v}"
+          v="${TAG#v}"
           awk -v v="$v" '$0 ~ "^## \\["v"\\]" {f=1; next} /^## \[/ {f=0} f' CHANGELOG.md > dist/notes.md || true
-          [ -s dist/notes.md ] || echo "worktrees $GITHUB_REF_NAME" > dist/notes.md
+          [ -s dist/notes.md ] || echo "worktrees $TAG" > dist/notes.md
           cat dist/notes.md
-      - name: create GitHub release
-        env: { GH_TOKEN: '${{ github.token }}' }
-        run: |
-          gh release create "$GITHUB_REF_NAME" dist/worktrees-* dist/checksums.txt dist/latest.json \
-            --title "worktrees $GITHUB_REF_NAME" --notes-file dist/notes.md
+      - name: what the release would carry
+        run: ls -la dist
+      # publish.yml uploads exactly this, file for file. A dry run keeps it a
+      # day, for looking at.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-dist
+          path: dist/*
+          retention-days: ${{ inputs.dry_run && 1 || 0 }}

@@ -162,7 +162,7 @@ impl RelPath {
             return Err(CfgError::msg(format!("`$` is not expanded and is not allowed in a path: {s}")));
         }
         // Split on `/` ONLY. macOS and Linux are the only shipped targets
-        // (release.yml:18-21), so `\` is an ordinary filename byte here —
+        // (release.yml's `plan` job), so `\` is an ordinary filename byte here —
         // treating it as a separator would make a legitimately-named file
         // unlinkable.
         for c in s.split('/') {
@@ -882,7 +882,7 @@ mod tests {
 
     #[test]
     fn backslash_is_an_ordinary_filename_byte_not_a_separator() {
-        // macOS and Linux are the only shipped targets (release.yml:18-21), so a
+        // macOS and Linux are the only shipped targets (release.yml's `plan` job), so a
         // file literally named `a\b.env` is legal and must stay linkable. If `\`
         // were treated as a separator this string would split into components
         // and the path would be unusable.
