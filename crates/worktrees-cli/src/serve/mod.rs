@@ -254,6 +254,14 @@ pub fn cmd_serve(args: &[String]) -> i32 {
         }
     };
     let code = rt.block_on(async move {
+        // Caught from here on, before serve.json can exist: see `signals`.
+        let stop = match signals() {
+            Ok(n) => n,
+            Err(e) => {
+                eprintln!("{}", error_line(&format!("signal handlers: {e}")));
+                return 1;
+            }
+        };
         let running = match start(opts.config_dir.clone(), opts.port, opts.allow_origin.clone()) {
             Ok(r) => r,
             Err(e) => {
@@ -285,7 +293,7 @@ pub fn cmd_serve(args: &[String]) -> i32 {
         // nowhere else.
         println!("worktrees serve: 127.0.0.1:{} · {}", running.port(), file.display());
 
-        wait_for_signal().await;
+        stop.notified().await;
 
         worktrees_api::log::info("serve: stopping");
         running.listener.stop();
@@ -304,23 +312,29 @@ pub fn cmd_serve(args: &[String]) -> i32 {
     code
 }
 
-/// SIGINT or SIGTERM, whichever comes first. No `select!` (tokio's `macros`
-/// feature stays off): two tasks, one `Notify`.
-async fn wait_for_signal() {
+/// SIGINT or SIGTERM, whichever comes first, as a `Notify` to wait on. No
+/// `select!` (tokio's `macros` feature stays off): a task per signal, one
+/// `Notify`, whose stored permit keeps a signal that lands before anyone waits.
+///
+/// Each handler is in place when `signal()` RETURNS, which is why they are
+/// made here, synchronously, before `start` and serve.json. serve.json is how
+/// a client or a supervisor learns that serve is up, and the handlers used to
+/// be registered only after it was written and the engine started, inside
+/// spawned tasks: a SIGTERM in that window took the default action, so the
+/// process died with the file left behind and no `serve: stopped`.
+fn signals() -> std::io::Result<Arc<tokio::sync::Notify>> {
+    use tokio::signal::unix::{signal, SignalKind};
     let n = Arc::new(tokio::sync::Notify::new());
-    let n1 = n.clone();
-    tokio::spawn(async move {
-        let _ = tokio::signal::ctrl_c().await;
-        n1.notify_one();
-    });
-    let n2 = n.clone();
-    tokio::spawn(async move {
-        if let Ok(mut term) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            term.recv().await;
-            n2.notify_one();
-        }
-    });
-    n.notified().await;
+    for kind in [SignalKind::interrupt(), SignalKind::terminate()] {
+        let mut s = signal(kind)?;
+        let n = n.clone();
+        tokio::spawn(async move {
+            if s.recv().await.is_some() {
+                n.notify_one();
+            }
+        });
+    }
+    Ok(n)
 }
 
 #[cfg(test)]

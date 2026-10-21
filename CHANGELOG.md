@@ -79,7 +79,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   shell opens only in a place of the repository named, and a terminal
   attaches only to a tmux session of exactly the name given; anything else
   (`--all`, a name no place or session has) is refused with the reason before
-  any shell or tmux client starts.
+  any shell or tmux client starts. A command that fails unexpectedly is
+  answered `internal error` rather than never answered, and the connection
+  and the server go on serving.
 - **The real frontend can drive a real `worktrees serve` from a browser**
   (development only: `pnpm dev:serve` with `WT_SERVE_JSON` pointing at the
   stack's `serve.json`). The page asks the dev server for the port and token —

@@ -152,8 +152,18 @@ macro_rules! commands {
     };
 }
 
+/// A command only test builds have, whose body panics with its `why`: the
+/// seam for the tests of what a panic is answered with (`conn::answer`).
+/// Never in `TABLE`, so nothing built for use can reach it.
+#[cfg(test)]
+pub const TEST_PANIC: &str = "__test_panic";
+
 /// Dispatch one request. `Err` is the wire's `err` value.
 pub fn call(cx: &Call, cmd: &str, args: &Args) -> Result<Value, Value> {
+    #[cfg(test)]
+    if cmd == TEST_PANIC {
+        panic!("{}", args.raw("why").as_str().unwrap_or("a test body panicked"));
+    }
     match run(cmd, cx, args) {
         Some(r) => r,
         None => Err(Value::from(format!("unknown command: {cmd}"))),
@@ -180,6 +190,13 @@ pub fn exposure(cmd: &str) -> Option<Exposure> {
 /// proper error instead of racing past the requests around it; two keys
 /// that happened to collide would only share a lane, never lose order.
 pub fn lane(cmd: &str, args: &Args) -> Option<String> {
+    // The panicking test body runs on the lane of the attach its `id` names,
+    // when it names one, so a test can queue a request behind it.
+    #[cfg(test)]
+    if cmd == TEST_PANIC {
+        let id = args.raw("id");
+        return (!id.is_null()).then(|| format!("term:{id}"));
+    }
     if exposure(cmd)? != Exposure::Stream {
         return None;
     }
