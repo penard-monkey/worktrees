@@ -96,28 +96,18 @@ fn locked<T>(config_dir: &Path, f: impl FnOnce() -> Result<T, String>) -> Result
     out
 }
 
-/// Write the file: lock, temp created `0600`, rename.
+/// Write the file: lock, temp created `0600`, rename — `fsx::write_atomic`,
+/// whose temp gets a fresh random name it never opens through a link. The
+/// mode is set at CREATION, not after: a `create` + `set_permissions` pair
+/// leaves a window in which the token sits in a file the umask decided the
+/// mode of.
 pub fn write(config_dir: &Path, sf: &ServeFile) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
     let json = serde_json::to_string_pretty(sf).map_err(|e| e.to_string())?;
     locked(config_dir, || {
-        let tmp = config_dir.join(format!(".{FILE}.{}.tmp", std::process::id()));
-        let _ = fs::remove_file(&tmp);
-        // The mode is set at CREATION, not after: a `create` + `set_permissions`
-        // pair leaves a window in which the token sits in a file the umask
-        // decided the mode of.
-        let mut f = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&tmp)
-            .map_err(|e| format!("{}: {e}", tmp.display()))?;
-        std::io::Write::write_all(&mut f, json.as_bytes()).map_err(|e| format!("{}: {e}", tmp.display()))?;
-        drop(f);
         let dst = path(config_dir);
-        fs::rename(&tmp, &dst).map_err(|e| {
-            let _ = fs::remove_file(&tmp);
-            format!("{}: {e}", dst.display())
-        })
+        worktrees_core::fsx::write_atomic(&dst, json.as_bytes(), Some(fs::Permissions::from_mode(0o600)))
+            .map_err(|e| format!("{}: {e}", dst.display()))
     })
 }
 

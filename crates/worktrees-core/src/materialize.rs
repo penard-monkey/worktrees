@@ -791,11 +791,18 @@ fn make_dir(d: &Path) -> io::Result<()> {
 }
 
 /// `symlink(src, tmp)` + `rename(tmp, dst)`: atomic, and `rename` never follows
-/// a symlink at the destination. Same pattern as `store.rs::write_atomic`, and
-/// never `ln` — `test/helpers/common.bash` builds a PATH whitelist that a new
-/// binary dependency would break.
+/// a symlink at the destination. A predictable temp is safe HERE, unlike for a
+/// copy (`fsx`): `symlink(2)` makes the link itself and refuses an existing
+/// name, and the `remove_file` before it unlinks a name, never follows one. The
+/// name is built here and nowhere else, so no write can borrow it. And never
+/// `ln` — `test/helpers/common.bash` builds a PATH whitelist that a new binary
+/// dependency would break.
 fn link_atomic(src: &Path, dst: &Path) -> io::Result<()> {
-    let tmp = tmp_beside(dst)?;
+    // The destination's OWN directory, so `rename` stays atomic (same filesystem).
+    let dir = dst
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "destination has no parent dir"))?;
+    let tmp = dir.join(format!(".{}.wt-tmp-{}", file_name(dst), std::process::id()));
     let _ = fs::remove_file(&tmp);
     std::os::unix::fs::symlink(src, &tmp)?;
     match fs::rename(&tmp, dst) {
@@ -808,7 +815,9 @@ fn link_atomic(src: &Path, dst: &Path) -> io::Result<()> {
 }
 
 /// `File::open` FIRST, then regular-file-ness on the OPEN fd's metadata — not a
-/// second lstat (§4 TOCTOU). Then tmp-in-the-same-dir + rename, as for links.
+/// second lstat (§4 TOCTOU). Then `fsx::write_atomic`: the worktree is a
+/// checkout, and a temp name it can predict is one a repo can commit — removing
+/// whatever sits there first only trades following it for deleting it.
 fn copy_atomic(src: &Path, dst: &Path) -> io::Result<()> {
     let mut f = fs::File::open(src)?;
     let md = f.metadata()?;
@@ -819,16 +828,7 @@ fn copy_atomic(src: &Path, dst: &Path) -> io::Result<()> {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "source is over the 8 MiB copy cap"));
     }
     let buf = read_capped(&mut f, MAX_COPY_BYTES)?;
-    let tmp = tmp_beside(dst)?;
-    let _ = fs::remove_file(&tmp);
-    fs::write(&tmp, &buf)?;
-    match fs::rename(&tmp, dst) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            Err(e)
-        }
-    }
+    crate::fsx::write_atomic(dst, &buf, None)
 }
 
 /// `take(cap + 1)`, never a bare `read_to_end`: the size check above is true of
@@ -846,15 +846,6 @@ fn read_capped(f: &mut fs::File, cap: u64) -> io::Result<Vec<u8>> {
         ));
     }
     Ok(buf)
-}
-
-/// A temp name in the destination's OWN directory, so `rename` stays atomic
-/// (same filesystem) — `store.rs:126-133`'s rule.
-fn tmp_beside(dst: &Path) -> io::Result<PathBuf> {
-    let dir = dst
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "destination has no parent dir"))?;
-    Ok(dir.join(format!(".{}.wt-tmp-{}", file_name(dst), std::process::id())))
 }
 
 // ── the CI mode (§7) ─────────────────────────────────────────────────────────
@@ -1529,5 +1520,34 @@ mod tests {
         assert_eq!(rc, 0, "a warning does not fail the run");
         assert!(!t.wt().join(".env").exists());
         assert!(lines.iter().any(|l| l.contains("absent from the main checkout")), "{lines:?}");
+    }
+
+    /// The copy's temp name is predictable (`.<name>.wt-tmp-<pid>`) and sits in
+    /// a worktree, which is a checkout of the repo. Removing whatever was there
+    /// first kept a planted link from being FOLLOWED, but deleted a tracked file
+    /// of that name; neither may happen.
+    #[test]
+    fn fs_copy_never_follows_or_removes_a_file_at_the_old_temp_name() {
+        use std::os::unix::fs::symlink;
+        let t = Tmp::new("planted");
+        let src = t.main().join(".env");
+        let dst = t.wt().join(".env");
+        let old_tmp = t.wt().join(format!("..env.wt-tmp-{}", std::process::id()));
+        let victim = t.0.join("victim");
+        fs::write(&victim, "precious\n").unwrap();
+        fs::write(&src, "A=1\n").unwrap();
+        symlink(&victim, &old_tmp).unwrap();
+        copy_atomic(&src, &dst).unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "precious\n");
+        assert!(fs::symlink_metadata(&dst).unwrap().is_file());
+        assert_eq!(fs::read_to_string(&dst).unwrap(), "A=1\n");
+        assert!(fs::symlink_metadata(&old_tmp).unwrap().file_type().is_symlink(), "not ours to remove");
+
+        fs::remove_file(&old_tmp).unwrap();
+        fs::write(&old_tmp, "mine\n").unwrap();
+        fs::write(&src, "A=2\n").unwrap();
+        copy_atomic(&src, &dst).unwrap();
+        assert_eq!(fs::read_to_string(&old_tmp).unwrap(), "mine\n");
+        assert_eq!(fs::read_to_string(&dst).unwrap(), "A=2\n");
     }
 }

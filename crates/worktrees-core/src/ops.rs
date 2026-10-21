@@ -779,16 +779,29 @@ pub fn plan_update_prompt(slug: &str) -> Option<String> {
     plain.then(|| PLAN_UPDATE_PROMPT.replace("{slug}", slug))
 }
 
+/// The worktree is a checkout, so `.planning/brief.md` — or `.planning` — can
+/// arrive as a committed symlink. `fsx` replaces a link at the file rather than
+/// writing through it; a linked `.planning` is refused, as the plan pointer
+/// refuses it, because following it puts the brief wherever it points.
 fn write_brief(wt: &str, text: &str) -> std::io::Result<()> {
     let path = Path::new(wt).join(BRIEF_PATH);
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+    let dir = Path::new(wt).join(PLANNING_DIR);
+    match std::fs::symlink_metadata(&dir) {
+        Ok(m) if m.is_dir() => {}
+        Ok(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{PLANNING_DIR} is not a real directory here"),
+            ))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => std::fs::create_dir(&dir)?,
+        Err(e) => return Err(e),
     }
     let mut body = text.to_string();
     if !body.ends_with('\n') {
         body.push('\n');
     }
-    std::fs::write(path, body)
+    crate::fsx::write_atomic(&path, body.as_bytes(), None)
 }
 
 /// Say what an exclude write came to — only when it wrote or failed; an
@@ -3871,6 +3884,35 @@ mod tests {
         assert!(base.join(".worktrees/--lock").is_dir(), "{out}");
         let locked = Command::new("git").arg("-C").arg(&base).args(["worktree", "list", "--porcelain"]).output().unwrap();
         assert!(!String::from_utf8_lossy(&locked.stdout).contains("locked"), "and not locked: {out}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `new --brief` (MCP `create_worktree` with a brief, an orchestrator's
+    /// everyday call) wrote `.planning/brief.md` with a plain `fs::write`, in a
+    /// worktree that is a checkout of the repo — so a committed link at that
+    /// path had the brief written through it (measured against 0.42.0). The
+    /// link must be replaced, not followed; and a `.planning` that is itself a
+    /// link is refused, since following it puts the brief wherever it points.
+    #[test]
+    fn the_brief_is_never_written_through_a_committed_link() {
+        use std::os::unix::fs::symlink;
+        let base = std::env::temp_dir().join(format!("wt-ops-brief-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (wt, victim) = (base.join("wt"), base.join("victim"));
+        std::fs::create_dir_all(wt.join(PLANNING_DIR)).unwrap();
+        std::fs::write(&victim, "precious\n").unwrap();
+        symlink(&victim, wt.join(BRIEF_PATH)).unwrap();
+        write_brief(&wt.to_string_lossy(), "do the thing").unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious\n", "written through the link");
+        assert!(std::fs::symlink_metadata(wt.join(BRIEF_PATH)).unwrap().is_file());
+        assert_eq!(std::fs::read_to_string(wt.join(BRIEF_PATH)).unwrap(), "do the thing\n");
+
+        let (wt2, elsewhere) = (base.join("wt2"), base.join("elsewhere"));
+        std::fs::create_dir_all(&wt2).unwrap();
+        std::fs::create_dir_all(&elsewhere).unwrap();
+        symlink(&elsewhere, wt2.join(PLANNING_DIR)).unwrap();
+        assert!(write_brief(&wt2.to_string_lossy(), "do the thing").is_err());
+        assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0, "followed the .planning link");
         let _ = std::fs::remove_dir_all(&base);
     }
 }

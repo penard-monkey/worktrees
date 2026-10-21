@@ -21,8 +21,8 @@
 //!   `server/instances/` record, which kimi's next start prunes itself.
 //! - At most one probe per `TTL`/`FAILURE_FLOOR` (120s), failures included, so
 //!   focus pulls cannot storm it; a probe already running is waited for. The
-//!   cache lock is held across the probe (up to `BUDGET` + the 2s kill
-//!   grace), so a kimi launch whose gate reads usage while the meter is
+//!   cache lock is held across the probe (up to `BUDGET` + `GRACE`, the 2s
+//!   kill grace), so a kimi launch whose gate reads usage while the meter is
 //!   pulling waits for that one probe — codex's shape, and a ROADMAP item for
 //!   both.
 //! - Loopback by construction AND by check: `--host 127.0.0.1` on argv, and a
@@ -48,6 +48,9 @@ const TTL: u64 = 120;
 const FAILURE_FLOOR: u64 = 120;
 const STALE: i64 = 1800;
 const BUDGET: Duration = Duration::from_secs(12);
+/// How long `kimi web` has to act on SIGTERM (it removes its instance record)
+/// before its group is SIGKILLed.
+const GRACE: Duration = Duration::from_secs(2);
 const OUTPUT_CAP: u64 = 64 * 1024;
 const RESPONSE_CAP: u64 = 1024 * 1024;
 
@@ -177,15 +180,18 @@ pub fn normalize(body: &serde_json::Value, now: i64) -> Info {
 
 /// The `kimi web` child. Dropping it ends the WHOLE group on every path —
 /// success, timeout, refusal, a panic: SIGTERM so kimi removes its instance
-/// record, SIGKILL after a grace, then a reap.
-struct Server(Child);
+/// record, SIGKILL after `grace`, then a reap.
+struct Server {
+    child: Child,
+    grace: Duration,
+}
 
 impl Server {
     fn signal(&self, sig: i32) {
         // SAFETY: a plain kill(2) on the child's own process group (it was
         // spawned with `process_group(0)`, so its pgid is its pid).
         unsafe {
-            libc::kill(-(self.0.id() as i32), sig);
+            libc::kill(-(self.child.id() as i32), sig);
         }
     }
 }
@@ -193,9 +199,9 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         self.signal(libc::SIGTERM);
-        let until = Instant::now() + Duration::from_secs(2);
+        let until = Instant::now() + self.grace;
         loop {
-            match self.0.try_wait() {
+            match self.child.try_wait() {
                 Ok(Some(_)) => {
                     // The leader is gone; anything left in its group is not.
                     self.signal(libc::SIGKILL);
@@ -204,8 +210,8 @@ impl Drop for Server {
                 Ok(None) if Instant::now() < until => std::thread::sleep(Duration::from_millis(20)),
                 _ => {
                     self.signal(libc::SIGKILL);
-                    let _ = self.0.kill();
-                    let _ = self.0.wait();
+                    let _ = self.child.kill();
+                    let _ = self.child.wait();
                     return;
                 }
             }
@@ -323,9 +329,9 @@ pub fn parse_http(raw: &[u8]) -> Result<(u16, Vec<u8>), &'static str> {
     }
 }
 
-/// One probe: start `kimi web`, find it, ask it, end it. `binary` and `cwd`
-/// are the seams the tests drive with a fake kimi.
-pub fn probe(binary: &Path, cwd: &Path, budget: Duration) -> Info {
+/// One probe: start `kimi web`, find it, ask it, end it. `binary`, `cwd` and
+/// `grace` are the seams the tests drive with a fake kimi.
+pub fn probe(binary: &Path, cwd: &Path, budget: Duration, grace: Duration) -> Info {
     let deadline = Instant::now() + budget;
     let left = || deadline.checked_duration_since(Instant::now());
     let spawned = Command::new(binary)
@@ -338,10 +344,10 @@ pub fn probe(binary: &Path, cwd: &Path, budget: Duration) -> Info {
         .spawn();
     let Ok(mut child) = spawned else { return Info::unavailable("unavailable", "spawn") };
     let Some(stdout) = child.stdout.take() else {
-        drop(Server(child));
+        drop(Server { child, grace });
         return Info::unavailable("unavailable", "pipe");
     };
-    let server = Server(child);
+    let server = Server { child, grace };
     let (tx, rx) = mpsc::channel::<String>();
     std::thread::spawn(move || {
         let reader = BufReader::new(stdout.take(OUTPUT_CAP));
@@ -505,7 +511,7 @@ pub fn read() -> Info {
             if std::fs::create_dir_all(&cwd).is_err() {
                 return Info::unavailable("unavailable", "runtime_directory");
             }
-            probe(&bin, &cwd, BUDGET)
+            probe(&bin, &cwd, BUDGET, GRACE)
         }
     })
 }
@@ -582,32 +588,48 @@ mod tests {
         d
     }
 
-    /// A fake `kimi` that records its pid and argv, prints `body`, then waits
-    /// until signalled — and marks a SIGTERM, so "terminated politely before
-    /// it was killed" is a fact the test can read, as is whether it survives.
+    /// A fake `kimi` that marks a SIGTERM and exits on it, so "terminated
+    /// politely before it was killed" is a fact the test can read, as is
+    /// whether it survives.
     fn fake(dir: &Path, body: &str) -> PathBuf {
+        fake_with(dir, &format!("touch \"{}/term\"; exit 0", dir.display()), body)
+    }
+
+    /// A fake `kimi` that records its pid, argv and its child's pid, runs
+    /// `on_term` on SIGTERM (`""` ignores it), prints `body`, then waits until
+    /// signalled. The child is forked before `body`, so it exists by the time
+    /// the probe ends the server.
+    fn fake_with(dir: &Path, on_term: &str, body: &str) -> PathBuf {
         let p = dir.join("kimi");
         let d = dir.display();
         std::fs::write(
             &p,
-            format!("#!/bin/sh\necho $$ > '{d}/pid'\necho \"$@\" > '{d}/args'\ntrap 'touch \"{d}/term\"; exit 0' TERM\n{body}\nsleep 60 &\nwait\n"),
+            format!("#!/bin/sh\necho $$ > '{d}/pid'\necho \"$@\" > '{d}/args'\ntrap '{on_term}' TERM\nsleep 60 &\necho $! > '{d}/child'\n{body}\nwait\n"),
         )
         .unwrap();
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
         p
     }
 
-    fn alive(dir: &Path) -> bool {
-        let Ok(pid) = std::fs::read_to_string(dir.join("pid")) else { return false };
-        let pid: i32 = pid.trim().parse().unwrap();
+    /// Whether the pid in `dir/<name>` runs. A zombie does not: the child is
+    /// an orphan once the fake is reaped, and only init reaps it — on its own
+    /// schedule, or never in a container with no init.
+    fn alive(dir: &Path, name: &str) -> bool {
+        let Ok(pid) = std::fs::read_to_string(dir.join(name)) else { return false };
+        let pid = pid.trim();
         // SAFETY: signal 0 only asks whether the pid exists.
-        unsafe { libc::kill(pid, 0) == 0 }
+        if unsafe { libc::kill(pid.parse().unwrap(), 0) } != 0 {
+            return false;
+        }
+        let stat = Command::new("ps").args(["-o", "stat=", "-p", pid]).output();
+        !stat.is_ok_and(|o| o.stdout.trim_ascii_start().starts_with(b"Z"))
     }
 
+    /// The fake and the child it forked are both gone, within 5s.
     fn wait_dead(dir: &Path) -> bool {
         let until = Instant::now() + Duration::from_secs(5);
         while Instant::now() < until {
-            if !alive(dir) {
+            if !alive(dir, "pid") && !alive(dir, "child") {
                 return true;
             }
             std::thread::sleep(Duration::from_millis(20));
@@ -630,13 +652,20 @@ mod tests {
         (port, h)
     }
 
+    /// The grace the lifecycle tests give a fake that DOES end on SIGTERM. Its
+    /// trap forks and execs `touch`, which on a loaded CI runner once outlasted
+    /// the product's 2s `GRACE` (run 39438923287): the SIGKILL landed first and
+    /// the test said "never sent SIGTERM" while timing the scheduler. A pass
+    /// never spends it — `Drop` returns the moment the fake exits.
+    const PATIENT: Duration = Duration::from_secs(60);
+
     #[test]
     fn a_probe_reads_usage_and_leaves_no_kimi_running() {
         let d = tmp("ok");
         let body: &'static str = Box::leak(format!("HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{OK}", OK.len()).into_boxed_str());
         let (port, server) = serve(body);
         let bin = fake(&d, &format!("echo '  Local:    http://127.0.0.1:{port}/#token=SECRET-TOKEN-x1'\necho '  Network:  off'"));
-        let info = probe(&bin, &d, Duration::from_secs(5));
+        let info = probe(&bin, &d, Duration::from_secs(5), PATIENT);
         assert_eq!(info.state, "ready", "{info:?}");
         assert_eq!(info.limits.len(), 3);
         let req = server.join().unwrap();
@@ -660,7 +689,7 @@ mod tests {
         // Never says where it listens.
         let bin = fake(&d, "echo '  Kimi server ready'");
         let t0 = Instant::now();
-        let info = probe(&bin, &d, Duration::from_millis(800));
+        let info = probe(&bin, &d, Duration::from_millis(800), GRACE);
         assert_eq!((info.state, info.reason), ("unavailable", Some("timeout")));
         assert!(t0.elapsed() < Duration::from_secs(5), "bounded by the budget (plus the kill grace)");
         assert!(wait_dead(&d), "kimi web outlived a timed-out probe");
@@ -676,7 +705,7 @@ mod tests {
         l.set_nonblocking(true).unwrap();
         let port = l.local_addr().unwrap().port();
         let bin = fake(&d, &format!("echo '  Local:    http://127.0.0.1:{port}/#token=t'\necho '  Network:  http://192.168.1.9:{port}/#token=t'"));
-        let info = probe(&bin, &d, Duration::from_secs(5));
+        let info = probe(&bin, &d, Duration::from_secs(5), GRACE);
         assert_eq!(info.reason, Some("not_loopback"));
         assert_eq!(l.accept().map(|_| ()).unwrap_err().kind(), std::io::ErrorKind::WouldBlock, "it was asked");
         assert!(wait_dead(&d));
@@ -688,8 +717,22 @@ mod tests {
         let d = tmp("401");
         let (port, _server) = serve("HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n");
         let bin = fake(&d, &format!("echo '  Local:    http://127.0.0.1:{port}/#token=t'\necho '  Network:  off'"));
-        assert_eq!(probe(&bin, &d, Duration::from_secs(5)).state, "signed_out");
+        assert_eq!(probe(&bin, &d, Duration::from_secs(5), GRACE).state, "signed_out");
         assert!(wait_dead(&d));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The other half of the rule: a kimi that ignores SIGTERM still goes,
+    /// with its child, once the grace is up.
+    #[test]
+    fn a_server_deaf_to_sigterm_is_killed_with_its_group_after_the_grace() {
+        let d = tmp("deaf");
+        // Refused before it is asked anything, so nothing needs to listen.
+        let bin = fake_with(&d, "", "echo '  Local:    http://127.0.0.1:1/#token=t'\necho '  Network:  http://192.168.1.9:1/#token=t'");
+        let info = probe(&bin, &d, Duration::from_secs(5), Duration::from_millis(100));
+        assert_eq!(info.reason, Some("not_loopback"));
+        assert!(d.join("child").exists(), "no child was forked, so the group went untested");
+        assert!(wait_dead(&d), "a kimi deaf to SIGTERM, or its child, outlived the grace");
         let _ = std::fs::remove_dir_all(&d);
     }
 
