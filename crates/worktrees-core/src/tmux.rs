@@ -527,9 +527,14 @@ pub fn canonical_provider(name: &str) -> &'static crate::provider::Provider {
 /// cells outside the region ("undeletable" artifacts). `window-size latest` +
 /// `aggressive-resize` make OUR sessions follow the most recently active
 /// client instead. Session-scoped: the user's global tmux config is untouched.
+///
+/// `=<session>:` — exactly that session, its current window. A bare name is a
+/// prefix match, and a session that had just gone would have had its options
+/// set on whichever session's name began with it.
 pub fn tune_session(session: &str) {
-    let _ = tmux(&["set-option", "-t", session, "aggressive-resize", "on"]);
-    let _ = tmux(&["set-option", "-w", "-t", session, "window-size", "latest"]);
+    let target = format!("={session}:");
+    let _ = tmux(&["set-option", "-t", &target, "aggressive-resize", "on"]);
+    let _ = tmux(&["set-option", "-w", "-t", &target, "window-size", "latest"]);
 }
 
 /// `new-session -d -s <session> -c <wt> -P -F '#{pane_id}' <pane0>` → pane id.
@@ -1073,6 +1078,63 @@ pub fn kill_session(name: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `tune_session` sets two window options on the session it is given, and
+    /// a tmux target is a PREFIX match: handed a name whose session had gone,
+    /// it tuned whichever session's name began with it. Driven against a
+    /// private server, and the call itself runs in a CHILD — this test binary
+    /// again, filtered to this test, with `TMUX` naming that server's socket —
+    /// because `tmux()` takes its server from the environment, and setting it
+    /// in this process would point every other test's tmux calls there too.
+    #[test]
+    fn tune_session_tunes_only_the_session_named_exactly() {
+        const CHILD: &str = "WT_TUNE_SESSION_CHILD";
+        if let Ok(name) = std::env::var(CHILD) {
+            tune_session(&name);
+            return;
+        }
+        if !have_tmux() {
+            eprintln!("skipped: no tmux on PATH");
+            return;
+        }
+        struct Private(std::path::PathBuf);
+        impl Private {
+            fn run(&self, args: &[&str]) -> Output {
+                Command::new("tmux").arg("-S").arg(&self.0).args(args).env_remove("TMUX").output().unwrap()
+            }
+            fn local(&self, session: &str, opt: &str) -> String {
+                let o = self.run(&["show-options", "-w", "-v", "-t", &format!("={session}:"), opt]);
+                String::from_utf8_lossy(&o.stdout).trim().to_string()
+            }
+        }
+        impl Drop for Private {
+            fn drop(&mut self) {
+                let _ = self.run(&["kill-server"]);
+                let _ = std::fs::remove_file(&self.0);
+            }
+        }
+        // In the temp dir itself: a unix socket path has a ~104-byte limit.
+        let srv = Private(std::env::temp_dir().join(format!("wtt-{}.sock", std::process::id())));
+        let made = srv.run(&["-f", "/dev/null", "new-session", "-d", "-s", "wtt-lane", "-x", "80", "-y", "24", "sleep 60"]);
+        assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
+        let tune_in_child = |name: &str| {
+            let st = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "tmux::tests::tune_session_tunes_only_the_session_named_exactly", "--quiet"])
+                .env(CHILD, name)
+                .env("TMUX", format!("{},0,0", srv.0.display()))
+                .stdout(std::process::Stdio::null())
+                .status()
+                .unwrap();
+            assert!(st.success(), "the child for {name:?}: {st}");
+        };
+
+        tune_in_child("wtt");
+        assert_eq!(srv.local("wtt-lane", "aggressive-resize"), "", "a prefix of its name tuned wtt-lane");
+
+        tune_in_child("wtt-lane");
+        assert_eq!(srv.local("wtt-lane", "aggressive-resize"), "on");
+        assert_eq!(srv.local("wtt-lane", "window-size"), "latest");
+    }
 
     #[test]
     fn no_start_is_offered_only_from_tmux_3_2() {
