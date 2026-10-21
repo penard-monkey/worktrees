@@ -591,24 +591,8 @@ fn answer(call: &Call, id: &Value, cmd: &str, args: &Args) -> String {
         Ok(Ok(v)) => wire::reply_ok(id, v),
         Ok(Err(e)) => wire::reply_err(id, e),
         Err(p) => {
-            error(&format!("serve: {cmd} panicked: {}; answered {:?}", panic_text(&*p), wire::INTERNAL_ERROR));
+            error(&format!("serve: {cmd} panicked: {}; answered {:?}", worktrees_api::log::panic_text(&*p), wire::INTERNAL_ERROR));
             wire::reply_err(id, Value::from(wire::INTERNAL_ERROR))
         }
     }
-}
-
-/// The most of a panic's message that goes into the log.
-const PANIC_TEXT_MAX: usize = 500;
-
-/// A panic's message on one line, and bounded. `{:?}` escapes every control
-/// and line separator (C0, C1, U+2028/2029, the bidi controls, measured), and
-/// the cap matters because a body can panic over all of a client's value.
-fn panic_text(p: &(dyn std::any::Any + Send)) -> String {
-    let s = match (p.downcast_ref::<&str>(), p.downcast_ref::<String>()) {
-        (Some(s), _) => *s,
-        (_, Some(s)) => s.as_str(),
-        _ => "(not a string)",
-    };
-    let cut: String = s.chars().take(PANIC_TEXT_MAX).collect();
-    format!("{cut:?}")
 }
