@@ -143,16 +143,10 @@ pub fn request(path: &Path, at: At, now: i64) -> Result<PathBuf, String> {
     let pid = std::process::id();
     let req = Request { path: canon.to_string_lossy().to_string(), epoch: now, pid, line: at.line, col: at.col };
     let body = serde_json::to_string(&req).map_err(|e| e.to_string())?;
-    // Temp + rename, so a reader mid-`read_dir` never parses a partial file.
-    // Same directory, so the rename cannot cross a filesystem boundary.
-    let stem = format!("{now}-{pid}");
-    let tmp = dir.join(format!(".{stem}.tmp"));
-    let dst = dir.join(format!("{stem}.json"));
-    std::fs::write(&tmp, body).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, &dst).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        format!("{}: {e}", dst.display())
-    })?;
+    // Temp + rename (`fsx`), so a reader mid-`read_dir` never parses a partial
+    // file: the temp is a dot-file ending `.tmp`, never `*.json`.
+    let dst = dir.join(format!("{now}-{pid}.json"));
+    crate::fsx::write_atomic(&dst, body.as_bytes(), None).map_err(|e| format!("{}: {e}", dst.display()))?;
     Ok(dst)
 }
 

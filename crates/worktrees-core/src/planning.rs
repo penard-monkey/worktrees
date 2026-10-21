@@ -132,9 +132,7 @@ pub fn save_global_at(path: &Path, d: GlobalDefault) -> Result<Global, String> {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
     let body = serde_json::to_string_pretty(&g).map_err(|e| e.to_string())? + "\n";
-    let tmp = path.with_extension(format!("json.tmp-{}", std::process::id()));
-    std::fs::write(&tmp, body).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))?;
+    crate::fsx::write_atomic(path, body.as_bytes(), None).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(g)
 }
 

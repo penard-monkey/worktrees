@@ -6609,26 +6609,25 @@ fn b64_encode(bytes: &[u8]) -> String {
 #[tauri::command]
 async fn write_file(app: AppHandle, path: String, content: String, expected_mtime: Option<u64>) -> Result<u64, String> {
     let f = guard_under_projects(&app, &path)?;
+    save_file(&f, &path, content.as_bytes(), expected_mtime)
+}
+
+/// `write_file` past the guard: `f` is canonical and under a project root,
+/// `path` is what the caller asked for (for the message). The temp goes
+/// through `fsx::write_atomic` because `f`'s directory is a checkout — the old
+/// fixed `.<name>.wt-tmp` was a name a repo could commit as a symlink.
+fn save_file(f: &Path, path: &str, content: &[u8], expected_mtime: Option<u64>) -> Result<u64, String> {
     if !f.is_file() {
         return Err(format!("not a file: {path}"));
     }
     if let Some(exp) = expected_mtime {
-        if file_mtime_ms(&f) != exp {
+        if file_mtime_ms(f) != exp {
             return Err("file changed on disk since you opened it — reload to see the latest".into());
         }
     }
-    let dir = f.parent().ok_or("no parent directory")?;
-    let base = f.file_name().and_then(|n| n.to_str()).unwrap_or("edit");
-    let tmp = dir.join(format!(".{base}.wt-tmp"));
-    std::fs::write(&tmp, content.as_bytes()).map_err(|e| e.to_string())?;
-    if let Ok(meta) = std::fs::metadata(&f) {
-        let _ = std::fs::set_permissions(&tmp, meta.permissions()); // keep the exec bit etc.
-    }
-    std::fs::rename(&tmp, &f).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        e.to_string()
-    })?;
-    Ok(file_mtime_ms(&f))
+    let mode = std::fs::metadata(f).ok().map(|m| m.permissions()); // keep the exec bit etc.
+    worktrees_core::fsx::write_atomic(f, content, mode).map_err(|e| e.to_string())?;
+    Ok(file_mtime_ms(f))
 }
 
 // ── dock terminal: scratch-shell sidecar sessions ────────────────────────────
@@ -6767,10 +6766,8 @@ fn edit_cwds_at(path: &Path, f: impl FnOnce(&mut CwdMap) -> bool) {
     // reads the file while holding the shell registry, and a plain `fs::write`
     // is a truncate followed by a write — a read landing in between gets half a
     // JSON document, which parses as "no memory at all".
-    let tmp = path.with_extension("json.tmp");
-    if let Err(e) = std::fs::write(&tmp, json).and_then(|_| std::fs::rename(&tmp, path)) {
+    if let Err(e) = worktrees_core::fsx::write_atomic(path, &json, None) {
         applog("error", &format!("shell-cwds write failed: {e}"));
-        let _ = std::fs::remove_file(&tmp);
     }
 }
 
@@ -7080,15 +7077,8 @@ fn read_meta(tab: &Path) -> Option<TabMeta> {
 /// holding the registry may wait on a file lock — so a plain write (a truncate
 /// followed by a write) would let a read land on half a document.
 fn hist_write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension("tmp");
-    let r = std::fs::write(&tmp, bytes).and_then(|_| {
-        private_perms(&tmp, 0o600);
-        std::fs::rename(&tmp, path)
-    });
-    if r.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    r
+    use std::os::unix::fs::PermissionsExt;
+    worktrees_core::fsx::write_atomic(path, bytes, Some(std::fs::Permissions::from_mode(0o600)))
 }
 
 /// Drop a leading partial line.
@@ -11648,5 +11638,46 @@ mod tests {
         assert_eq!(all[0].key, "older", "the older generation comes first");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The dock editor's save used the fixed temp `.<name>.wt-tmp` beside the
+    /// file, so a repo committing a link of that name had the save write the
+    /// file's own (repo-authored) text through it and chmod the target to the
+    /// file's mode — `~/.zshrc` with the exec bit, for one. The save must leave
+    /// the link's target alone, keep the edited file's mode, return the mtime
+    /// the next save will compare against, and not clobber a regular file of
+    /// the old temp name either.
+    #[test]
+    fn dock_save_never_follows_a_planted_temp_and_keeps_the_mode() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let d = std::env::temp_dir().join(format!("wt-docksave-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let mode = |p: &Path| std::fs::symlink_metadata(p).unwrap().permissions().mode() & 0o7777;
+
+        let f = d.join("run.sh");
+        std::fs::write(&f, "#!/bin/sh\necho hi\n").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let victim = d.join("victim");
+        std::fs::write(&victim, "precious\n").unwrap();
+        std::fs::set_permissions(&victim, std::fs::Permissions::from_mode(0o600)).unwrap();
+        symlink(&victim, d.join(".run.sh.wt-tmp")).unwrap();
+
+        let m = save_file(&f, "run.sh", b"#!/bin/sh\necho edited\n", Some(file_mtime_ms(&f))).unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious\n", "written through the planted link");
+        assert_eq!(mode(&victim), 0o600, "the link's target was chmodded");
+        assert!(std::fs::symlink_metadata(&f).unwrap().is_file(), "the edited file became the link");
+        assert_eq!(std::fs::read_to_string(&f).unwrap(), "#!/bin/sh\necho edited\n");
+        assert_eq!(mode(&f), 0o755, "the exec bit must survive a save");
+        assert_eq!(m, file_mtime_ms(&f), "the next save's expected_mtime");
+
+        let g = d.join("notes.md");
+        std::fs::write(&g, "a\n").unwrap();
+        std::fs::write(d.join(".notes.md.wt-tmp"), "mine\n").unwrap();
+        save_file(&g, "notes.md", b"b\n", None).unwrap();
+        assert_eq!(std::fs::read_to_string(d.join(".notes.md.wt-tmp")).unwrap(), "mine\n");
+        assert_eq!(std::fs::read_to_string(&g).unwrap(), "b\n");
+
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

@@ -90,6 +90,22 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   process on the Mac can list those (`ps`) while the request runs. The token
   now goes to `curl` on its standard input, which `ps` does not show. The
   meter itself works as before.
+- **A cloned repository can no longer make worktrees overwrite files outside
+  it.** Several saves wrote a temporary file under a fixed or guessable name
+  first: `.worktrees.places.json.tmp`, `.worktrees.toml.tmp`, a
+  `.worktree.env` temp named after the process id, and `.<file>.wt-tmp` beside
+  a file saved in the dock editor. A repository could commit a symlink under
+  that name, and the write went through it. Any file you can write, such as
+  `~/.zshrc` or `~/.ssh/authorized_keys`, could be replaced with worktrees'
+  own data. In the app that needed no click, because the place list is
+  rewritten whenever Claude finishes a turn. A plain `worktrees new` did it in a
+  repository that declares ports. A dock-editor save copied the edited file's
+  own text and mode, exec bit included. The brief had the same hole: a
+  committed `.planning/brief.md` link made `new --brief` (and
+  `create_worktree` with a brief) write the brief through it. Temporary files
+  now get a random name and are only ever created fresh, never opened through
+  a link or over an existing file. A link at the brief's path is replaced
+  instead of followed, and a `.planning` that is itself a link is refused.
 
 ## [0.42.0] - 2026-10-15
 
