@@ -147,6 +147,21 @@ export type EngineSocket = Door & { ready: Promise<void> };
  *  died — refused, mismatched, or closed — once. */
 export type Dial = (reason: string | null, onLost: (msg: string) => void) => Promise<EngineSocket>;
 
+/** Events that are one act each rather than a state, kept for a moment when
+ *  they arrive with nobody listening and handed to the first listener.
+ *  `app:open-doc` is a `worktrees show`: serve holds one while no client is
+ *  connected and lets it go the moment one authenticates — before main.tsx has
+ *  mounted App, whose listener is the only one. A state event (`sessions:busy`,
+ *  `places:changed`) is never kept: a late one would be a stale set, and the
+ *  next tick sends a fresh one anyway. */
+const ONE_SHOT: ReadonlySet<string> = new Set(["app:open-doc"]);
+/** How long an unheard one-shot event waits. It bridges "authenticated" to
+ *  "App is listening", which is seconds; the request it carries was already up
+ *  to 30 s old (`inbox::MAX_AGE_SECS`), and a document opening a minute after
+ *  it was asked for would be a surprise, not a service. */
+export const ONE_SHOT_TTL_MS = 10_000;
+const ONE_SHOT_MAX = 16;
+
 /** A channel for a door with no socket: nothing will ever arrive on it, and the
  *  call it is handed to fails anyway. */
 function deadChannel<T>(onmessage?: (response: T) => void): Channel<T> {
@@ -164,7 +179,11 @@ function deadChannel<T>(onmessage?: (response: T) => void): Channel<T> {
  *  socket current when they are made; a terminal makes a new one when it
  *  re-attaches. Nothing is retried on its own: a lost engine says so
  *  (`engineState`), and `reconnectEngine()` is the one way back. */
-export function engineDoor(local: Door | null, dial: Dial): Door & { connect(reason: string | null): Promise<void> } {
+export function engineDoor(
+  local: Door | null,
+  dial: Dial,
+  now: () => number = () => Date.now(),
+): Door & { connect(reason: string | null): Promise<void> } {
   // Nothing reaches the page until the first connect succeeds: the gate in
   // main.tsx mounts the app at gen 1, never against a dead engine.
   setEngine({ kind: "starting", gen: 0 });
@@ -172,19 +191,49 @@ export function engineDoor(local: Door | null, dial: Dial): Door & { connect(rea
   let failure = "the engine is not connected yet";
   let attempt: Promise<void> | null = null;
   const handlers = new Map<string, Set<EventCallback<unknown>>>();
+  // The socket being connected or in use, and the names this door listens to
+  // on it. Wired from the moment `dial` returns it, before its handshake is
+  // through: a frame serve sends right behind its ok is handed on as the proof
+  // passes, synchronously, ahead of anything awaiting `ready`.
+  let wired: { s: EngineSocket; names: Set<string> } | null = null;
+  // One-shot events nobody was listening for yet (`ONE_SHOT`).
+  const parked: { name: string; e: Event<unknown>; at: number }[] = [];
 
   const deliver = (name: string) => (e: Event<unknown>) => {
-    for (const h of [...(handlers.get(name) ?? [])]) h(e);
+    const hs = handlers.get(name);
+    if (hs?.size) {
+      for (const h of [...hs]) h(e);
+    } else if (ONE_SHOT.has(name)) {
+      parked.push({ name, e, at: now() });
+      if (parked.length > ONE_SHOT_MAX) parked.shift();
+    }
   };
-  const subscribe = (s: EngineSocket, name: string) => {
-    void s.listen(name, deliver(name));
+  const wire = (name: string) => {
+    if (!wired || wired.names.has(name)) return;
+    wired.names.add(name);
+    void wired.s.listen(name, deliver(name));
   };
+  // Handed on a macrotask after a listener arrives, not a microtask: React's
+  // StrictMode listens, lets go and listens again, and App lets go a microtask
+  // late (`un.then(f => f())`), so by now only the listener that stays is here.
+  const flush = (name: string) =>
+    setTimeout(() => {
+      const hs = handlers.get(name);
+      if (!hs?.size) return;
+      const due = parked.filter((p) => p.name === name);
+      parked.splice(0, parked.length, ...parked.filter((p) => p.name !== name));
+      for (const p of due) {
+        if (now() - p.at > ONE_SHOT_TTL_MS) continue;
+        for (const h of [...hs]) h(p.e);
+      }
+    }, 0);
 
   function connect(reason: string | null): Promise<void> {
     if (attempt) return attempt;
     attempt = (async () => {
       const gen = engine.gen;
       sock = null;
+      wired = null;
       setEngine({ kind: "starting", gen });
       // `onLost` can fire before `dial` has returned the socket it belongs
       // to; the holder lets it name which socket it is about.
@@ -196,8 +245,9 @@ export function engineDoor(local: Door | null, dial: Dial): Door & { connect(rea
           failure = msg;
           setEngine({ kind: "down", gen: engine.gen, reason: msg });
         });
+        wired = { s: holder.s, names: new Set() };
+        for (const name of [...ONE_SHOT, ...handlers.keys()]) wire(name);
         await holder.s.ready;
-        for (const name of handlers.keys()) subscribe(holder.s, name);
         sock = holder.s;
         setEngine({ kind: "up", gen: gen + 1 });
       } catch (e) {
@@ -222,10 +272,11 @@ export function engineDoor(local: Door | null, dial: Dial): Door & { connect(rea
       let set = handlers.get(event);
       if (!set) {
         handlers.set(event, (set = new Set()));
-        if (sock) subscribe(sock, event);
+        wire(event);
       }
       const h = handler as EventCallback<unknown>;
       set.add(h);
+      if (parked.some((p) => p.name === event)) flush(event);
       return Promise.resolve(() => {
         handlers.get(event)?.delete(h);
       });

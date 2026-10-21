@@ -22,7 +22,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   - If the app crashes, its serve survives, and the next launch adopts it
     (`serve --owner app`, recorded in serve.json). If no launch comes back
     for two minutes, that serve stops itself the way a quit stops it, so
-    one left behind by a crash does not run on unseen.
+    one left behind by a crash does not run on unseen. A `worktrees show`
+    made while no app was connected opens when the app comes back; it used
+    to reach the window before the window was listening, and was lost.
   - A serve you started from the CLI is used and left running.
   - Its dock saves (a tab's scrollback, the folder it was in) no longer
     write over a save another app made since; serve logs the one it skipped.
