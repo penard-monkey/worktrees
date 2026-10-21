@@ -59,6 +59,11 @@ pub fn auth_reply(proof: &str) -> String {
 /// `err` for a command the socket will not run.
 pub const CLIENT_LOCAL: &str = "client-local";
 
+/// `err` for a request whose body panicked. Nothing of the panic goes with it:
+/// its text can carry a path, a client's value or the engine's state, and the
+/// log is where that belongs.
+pub const INTERNAL_ERROR: &str = "internal error";
+
 pub struct Request {
     pub id: Value,
     pub cmd: String,

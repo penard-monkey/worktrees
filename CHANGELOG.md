@@ -71,7 +71,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   shell opens only in a place of the repository named, and a terminal
   attaches only to a tmux session of exactly the name given; anything else
   (`--all`, a name no place or session has) is refused with the reason before
-  any shell or tmux client starts.
+  any shell or tmux client starts. A command that fails unexpectedly is
+  answered `internal error` rather than never answered, and the connection
+  and the server go on serving.
 - **Applying the worktrees rules or the agent-setup Fix now opens a review
   lane for the `agent-instructions` branch**: a place on it, with an agent
   whose brief explains what the branch changes — each file, the AGENTS.md
