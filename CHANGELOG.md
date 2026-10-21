@@ -73,7 +73,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   (`--all`, a name no place or session has) is refused with the reason before
   any shell or tmux client starts. A command that fails unexpectedly is
   answered `internal error` rather than never answered, and the connection
-  and the server go on serving.
+  and the server go on serving. A `worktrees show` that arrives while no
+  client is connected waits for the next one, inside the same 30 seconds it
+  would wait for the app, rather than being taken and shown to nobody.
 - **Applying the worktrees rules or the agent-setup Fix now opens a review
   lane for the `agent-instructions` branch**: a place on it, with an agent
   whose brief explains what the branch changes — each file, the AGENTS.md

@@ -260,10 +260,21 @@ pub struct OpenDoc {
 /// Focusing ONCE for a drained batch rather than once per request is the only
 /// behavioural difference, and it is not one: `show`/`set_focus` are
 /// idempotent, and the batch is drained in a single tick.
-pub fn drain_inbox(ctx: &Ctx) -> usize {
-    let reqs = worktrees_core::inbox::drain(sysclock::now_epoch());
+///
+/// With nobody to show a request to (`Host::has_audience`), nothing is taken:
+/// the fresh requests stay for the next tick that has somebody, inside their
+/// 30 s life, which is what an inbox with no app running has always done. A
+/// `worktrees serve` left client-less by an app crash used to drain every
+/// request within a tick and emit it to nobody, and with a second engine up it
+/// won that race four times out of six (rehearsal D2).
+pub fn drain_inbox(ctx: &Ctx) -> Inbox {
+    let now = sysclock::now_epoch();
+    if !ctx.host.has_audience() {
+        return Inbox::Held(worktrees_core::inbox::sweep(now));
+    }
+    let reqs = worktrees_core::inbox::drain(now);
     if reqs.is_empty() {
-        return 0;
+        return Inbox::Opened(0);
     }
     let roots = crate::projects::read_projects(ctx);
     let mut opened = 0;
@@ -292,7 +303,16 @@ pub fn drain_inbox(ctx: &Ctx) -> usize {
         );
         opened += 1;
     }
-    opened
+    Inbox::Opened(opened)
+}
+
+/// What one tick did with the inbox.
+#[derive(Debug, PartialEq)]
+pub enum Inbox {
+    /// Somebody is listening: this many requests went out as `app:open-doc`.
+    Opened(usize),
+    /// Nobody is: this many fresh requests were left where they are.
+    Held(usize),
 }
 
 /// Stamp `last_worked_epoch` forward-only. Returns true when the store actually
