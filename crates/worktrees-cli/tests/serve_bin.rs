@@ -499,6 +499,71 @@ fn serve_writes_its_file_answers_the_workspace_and_cleans_up_on_sigterm() {
     assert!(log.contains("serve: stopped"), "{log}");
 }
 
+/// A `worktrees show` that lands while NO client is connected waits for the
+/// next one, rather than being taken off the inbox and emitted to nobody. After
+/// an app crash the app's serve lives on client-less, and it used to consume
+/// every request within a tick, lost — where v0.42.0, with the app down, left
+/// it for the next launch, inside the inbox's 30 s life (rehearsal D2).
+///
+/// No sleep decides it: serve SAYS when a tick holds a request, and the old
+/// code fails on the other branch of the same wait, the request gone.
+#[test]
+fn a_show_with_no_client_connected_waits_for_the_next_client() {
+    let mut sb = Sandbox::new("inbox");
+    // A real repo, registered through the app's list that serve merges at
+    // start, so the request is one serve accepts and names a place.
+    let repo = sb.root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let init = Command::new("git").args(["init", "-q"]).current_dir(&repo).env("HOME", sb.root.join("home")).output().unwrap();
+    assert!(init.status.success(), "git init: {}", String::from_utf8_lossy(&init.stderr));
+    std::fs::write(repo.join("README.md"), "# shown\n").unwrap();
+    let repo = std::fs::canonicalize(&repo).unwrap();
+    std::fs::write(sb.cfg().join("projects.json"), json!([repo.to_string_lossy()]).to_string()).unwrap();
+    let sf = sb.launch(&["--allow-origin", "http://localhost:1420"]);
+
+    let out = Command::new(bin())
+        .args(["show", "README.md"])
+        .current_dir(&repo)
+        .env("HOME", sb.root.join("home"))
+        .env("XDG_CONFIG_HOME", sb.root.join("xdg"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "worktrees show: {}", String::from_utf8_lossy(&out.stderr));
+    let inbox = sb.root.join("home/.cache/worktrees/inbox");
+    let pending = || {
+        std::fs::read_dir(&inbox)
+            .map(|rd| rd.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "json")).count())
+            .unwrap_or(0)
+    };
+    assert_eq!(pending(), 1, "the ask must reach the inbox");
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        assert_eq!(pending(), 1, "the request was taken off the inbox with no client connected to show it to");
+        if std::fs::read_to_string(sb.log()).unwrap_or_default().contains("inbox: 1 request(s) held") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "no tick said it held the request");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // The next client is shown it, and that consumes it.
+    let mut ws = connect(&sf, "http://localhost:1420");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let doc = loop {
+        let v: Value = serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
+        if v["event"] == json!("app:open-doc") {
+            break v["payload"].clone();
+        }
+        assert!(Instant::now() < deadline, "the held request never reached the client that connected");
+    };
+    assert_eq!(doc["path"], json!(repo.join("README.md").to_string_lossy()), "{doc}");
+    assert_eq!(doc["slug"], json!("(main)"), "{doc}");
+    assert_eq!(pending(), 0, "a request shown to a client is consumed");
+    drop(ws);
+    assert!(sb.terminate().success());
+}
+
 /// Every launch rotates the token, and the file is rewritten rather than
 /// appended or merged.
 #[test]
