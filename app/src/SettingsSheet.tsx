@@ -403,14 +403,25 @@ function LayoutTiles({ places, dock, onPick }: {
  *
  *  Every set is followed by a fresh read, and only the newest read may land
  *  (`seq`): two quick clicks can reach a server out of order, and the control
- *  must end on what the host STORED, not on whichever reply came back last. */
-function CodexPermissionsSection({ onFail }: { onFail: (e: unknown) => void }) {
+ *  must end on what the host STORED, not on whichever reply came back last.
+ *
+ *  Once a set has succeeded, each read that lands is also copied into
+ *  `Settings.codex_permissions` for an older build to find (`settings.ts`).
+ *  Not before: until then the read may be env or user config speaking. */
+function CodexPermissionsSection({ onFail, onMirror }: { onFail: (e: unknown) => void; onMirror: (m: CodexPermissions) => void }) {
   const [mode, setMode] = useState<CodexPermissions | null>(null);
   const seq = useRef(0);
+  const held = useRef(false);
+  const mirror = useRef(onMirror);
+  mirror.current = onMirror;
   const readHost = useCallback(() => {
     const n = ++seq.current;
     invoke<CodexPermissions>("get_codex_permissions")
-      .then((m) => { if (seq.current === n) setMode(m); })
+      .then((m) => {
+        if (seq.current !== n) return;
+        setMode(m);
+        if (held.current) mirror.current(m);
+      })
       .catch((e) => onFail(`Codex permissions: ${String(e)}`));
   }, [onFail]);
   useEffect(() => {
@@ -422,7 +433,7 @@ function CodexPermissionsSection({ onFail }: { onFail: (e: unknown) => void }) {
     const prev = mode;
     const n = ++seq.current;
     setMode(next);
-    invoke("set_codex_permissions", { mode: next }).then(readHost, (e) => {
+    invoke("set_codex_permissions", { mode: next }).then(() => { held.current = true; readHost(); }, (e) => {
       if (seq.current === n) setMode(prev);
       onFail(`Codex permissions: ${String(e)}`);
       readHost();
@@ -991,7 +1002,7 @@ export function SettingsSheet({
           </>}
 
           {cat === "codex" && <>
-          <CodexPermissionsSection onFail={onFail} />
+          <CodexPermissionsSection onFail={onFail} onMirror={(m) => { if (settings.codex_permissions !== m) onChange({ codex_permissions: m }); }} />
           {/* ORDER IS LOAD-BEARING: both sections below are deep-link targets
               (offers.ts), and the focus effect scrolls once, on the next frame.
               The MCP panel and its migration table fill in ASYNCHRONOUSLY, so
