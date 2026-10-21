@@ -40,11 +40,22 @@ export default function PiPanel({ settings, repo, onChange, onReport, onFail, on
   const [models, setModels] = useState<ModelOption[] | null>(null);
   // Only the newest read may land: a trust click invalidates any read already
   // in flight, so the panel ends on what the host stored after the last click.
+  // Once a trust click has succeeded, each landed read's trust is also copied
+  // into `Settings.pi_project_trust` for an older build (`settings.ts`) — not
+  // before, while `trust` may still be env or user config speaking. A ref, so
+  // App's per-render `onChange` does not re-read the panel on every render.
   const seq = useRef(0);
+  const held = useRef(false);
+  const mirror = useRef<(t: PiProjectTrust) => void>(() => {});
+  mirror.current = (t) => { if (settings.pi_project_trust !== t) onChange({ pi_project_trust: t }); };
   const readStatus = useCallback(() => {
     const n = ++seq.current;
     invoke<PiStatus>("pi_status", { repo })
-      .then((v) => { if (seq.current === n) setStatus(v); })
+      .then((v) => {
+        if (seq.current !== n) return;
+        setStatus(v);
+        if (held.current) mirror.current(v.trust);
+      })
       .catch((e) => onReport(`pi: ${String(e)}`));
   }, [repo, onReport]);
   const reload = useCallback(() => {
@@ -63,7 +74,7 @@ export default function PiPanel({ settings, repo, onChange, onReport, onFail, on
     const prev = status.trust;
     const n = ++seq.current;
     setStatus({ ...status, trust: mode });
-    invoke("set_pi_trust", { mode }).then(readStatus, (e) => {
+    invoke("set_pi_trust", { mode }).then(() => { held.current = true; readStatus(); }, (e) => {
       if (seq.current === n) setStatus((s) => (s ? { ...s, trust: prev } : s));
       onFail(`pi trust: ${String(e)}`);
       readStatus();

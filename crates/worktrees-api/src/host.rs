@@ -32,7 +32,7 @@ use crate::ops::{
 use crate::projects::{import_app_projects, read_projects};
 use crate::watch::{
     backfill_worked, claude_activity, completion_edges, drain_inbox, harness_feed, merge_activity,
-    new_dones, stamp_worked, Activity, ClaudeActivity, Feed, LaneTick, TaskDone,
+    new_dones, stamp_worked, Activity, ClaudeActivity, Feed, Inbox, LaneTick, TaskDone,
 };
 use crate::{term, viewer, workspace, Ctx};
 
@@ -141,6 +141,8 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
     let mut last_waiting_by: BTreeMap<&'static str, Vec<String>> = Default::default();
     let mut last_models: Option<Vec<(i32, Option<String>)>> = None;
     let mut ticks: u32 = 0;
+    // Inbox requests the last tick left waiting for a client, for its log line.
+    let mut held: usize = 0;
     // Auto-fetch scheduling. The pass runs INLINE on this thread (no extra
     // thread → passes can never stack; the AtomicU64 interval is pushed from
     // the client). Trade-off: while a pass runs, the 3s tmux-fingerprint poll
@@ -204,10 +206,22 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
         // Every tick, not every fifth: a request has a 30 s life and a person
         // is waiting on it. The command layer emits the `app:open-doc`; raising
         // the window is the half that cannot move, because a phone has no
-        // window of ours — so it is the host's hook.
-        if drain_inbox(&pollctx) > 0 {
-            if let Some(f) = hooks.on_inbox.as_ref() {
-                f();
+        // window of ours — so it is the host's hook. A held request is said
+        // when the number moves, not on every tick it sits there.
+        match drain_inbox(&pollctx) {
+            Inbox::Opened(n) => {
+                held = 0;
+                if n > 0 {
+                    if let Some(f) = hooks.on_inbox.as_ref() {
+                        f();
+                    }
+                }
+            }
+            Inbox::Held(n) => {
+                if n > 0 && n != held {
+                    log::info(&format!("inbox: {n} request(s) held until a client connects"));
+                }
+                held = n;
             }
         }
         // And the browser's copy of every place the server is serving. Every

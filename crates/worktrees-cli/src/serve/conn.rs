@@ -209,6 +209,12 @@ impl Host for Broadcast {
         let mut map = self.0 .0.lock().unwrap();
         map.retain(|_, out| out.push(text.clone()).is_ok());
     }
+
+    /// Somebody authenticated is connected. A connection joins the map once
+    /// it has proven itself and leaves it as it goes.
+    fn has_audience(&self) -> bool {
+        !self.0 .0.lock().unwrap().is_empty()
+    }
 }
 
 type Job = Box<dyn FnOnce() + Send + 'static>;
