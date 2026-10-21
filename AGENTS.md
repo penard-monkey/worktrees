@@ -1306,9 +1306,18 @@ after it is "command not found" — which reads as a sandbox refusing curl.
    from a .deb, `$APPDIR/usr/lib/…` in an AppImage: both are
    `resource_dir()/worktrees`) — a PRIVATE sidecar for the app (it will start
    `worktrees serve`), never on PATH; install.sh is still how the CLI reaches
-   PATH (ROADMAP, "Option A"). It gets there through tauri.conf.json's
-   per-format `files` mappings (`bundle.macOS.files`, `linux.deb.files`,
-   `linux.appimage.files`), NOT `externalBin`, which is wrong twice over:
+   PATH (ROADMAP, "Option A"). **Nor is it ever HANDED OUT**: running as
+   serve, its `current_exe()` IS the bundle, and `profile::worktrees_bin()` —
+   which every MCP entry (Claude, Codex, pi, kimi, a profile's), hook and pane
+   helper is written from — took any `current_exe()` named `worktrees` as the
+   user's CLI, so `mcpsetup` would have put `<bundle>/Contents/MacOS/worktrees`
+   (on Linux a per-launch `/tmp/.mount_*`) into the user's GLOBAL Claude config
+   (rehearsal D1). `is_bundled_cli` refuses it by path (`Contents/MacOS/`,
+   `usr/lib/<x>/`) and the lookup falls through to PATH, as the in-process app
+   always did; a test reads tauri.conf.json's `files`, so a moved layout fails
+   it. It is the path, not `APPDIR`, because serve starts with that scrubbed.
+   The copy gets there through tauri.conf.json's per-format `files` mappings
+   (`bundle.macOS.files`, `linux.deb.files`, `linux.appimage.files`), NOT `externalBin`, which is wrong twice over:
    tauri-build copies it from the BUILD SCRIPT in every profile (a clean `cargo
    check -p app` fails: "resource path `binaries/worktrees-<triple>` doesn't
    exist"), and on Linux it lands in `usr/bin` — `/usr/bin/worktrees` from a

@@ -4,7 +4,10 @@
 # crates/worktrees-api/src/lib.rs, "One engine process per host"). install.sh
 # still puts the CLI on PATH, exactly as before; nothing outside the bundle
 # points at this copy. Putting it on PATH is a later opt-in (ROADMAP, "Option A
-# for the bundled CLI").
+# for the bundled CLI"). Running AS this copy, current_exe() is the bundle, so
+# core's profile::is_bundled_cli knows the paths below and worktrees_bin() never
+# hands them to an MCP config, a hook or a pane; a core test reads the `files`
+# mappings, so moving one without the rule fails it.
 #
 # Where each format carries it, which is where the app is to look:
 #   macOS     worktrees.app/Contents/MacOS/worktrees   beside current_exe()

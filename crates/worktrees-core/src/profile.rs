@@ -1199,20 +1199,44 @@ fn global_mcp_servers(user: &serde_json::Value) -> Map<String, serde_json::Value
 /// every materialization — an absolute path baked into a profile goes stale the
 /// moment the binary moves or the profile is carried to another machine.
 pub fn worktrees_bin() -> Option<PathBuf> {
+    worktrees_bin_in(
+        std::env::var_os("WORKTREES_CLI_BIN").map(PathBuf::from),
+        std::env::current_exe().ok(),
+        std::env::var("PATH").ok().as_deref(),
+    )
+}
+
+/// The seam behind [`worktrees_bin`]: the override, this executable and `PATH`.
+///
+/// Never a CLI an app bundle carries ([`is_bundled_cli`]): what this returns
+/// is written into the user's global MCP configs, hooks and tmux panes, all of
+/// which outlive the app, and that copy is the app's own.
+fn worktrees_bin_in(over: Option<PathBuf>, exe: Option<PathBuf>, path: Option<&str>) -> Option<PathBuf> {
     // The sandbox app builds this branch's CLI before launch. MCP entries made
     // while testing it must point at that binary, not an older installed CLI.
-    if let Some(bin) = std::env::var_os("WORKTREES_CLI_BIN").map(PathBuf::from)
-        .filter(|p| p.is_absolute() && is_exec(p)) {
+    if let Some(bin) = over.filter(|p| p.is_absolute() && !is_bundled_cli(p) && is_exec(p)) {
         return Some(bin);
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if exe.file_name().and_then(|s| s.to_str()) == Some("worktrees") {
+    if let Some(exe) = exe {
+        if exe.file_name().and_then(|s| s.to_str()) == Some("worktrees") && !is_bundled_cli(&exe) {
             return Some(exe);
         }
     }
-    // The app links core in-process, so current_exe() is the app bundle — fall
-    // back to whatever `worktrees` is on PATH.
-    bin_on_path("worktrees")
+    // The app links core in-process, so current_exe() is the app bundle; serve
+    // runs as the bundle's CLI. Either way, whatever `worktrees` is on PATH.
+    on_path(path, "worktrees").find(|c| !is_bundled_cli(c))
+}
+
+/// True for the CLI an app bundle carries for its own use (`sidecar.sh`):
+/// `<x>.app/Contents/MacOS/worktrees`, or on Linux `usr/lib/<x>/worktrees`,
+/// which is `/usr/lib/worktrees` from a .deb and `$APPDIR/usr/lib/worktrees`
+/// in an AppImage. Told apart by WHERE it is, because nothing else differs: it
+/// is the same build install.sh ships, and serve is started with `APPDIR`
+/// scrubbed (`childenv`), so the variable says nothing there.
+pub fn is_bundled_cli(p: &Path) -> bool {
+    let up = |n: usize| p.ancestors().nth(n).and_then(Path::file_name);
+    let is = |n: usize, name: &str| up(n) == Some(std::ffi::OsStr::new(name));
+    (is(1, "MacOS") && is(2, "Contents")) || (is(2, "lib") && is(3, "usr"))
 }
 
 /// The first executable named `name` on `PATH`, as an absolute path.
@@ -1223,12 +1247,16 @@ pub fn worktrees_bin() -> Option<PathBuf> {
 /// cloned repo. A repo shipping a file named `worktrees` would otherwise be
 /// written into mcp.json as a command for claude to spawn.
 pub fn bin_on_path(name: &str) -> Option<PathBuf> {
-    std::env::var("PATH").ok().and_then(|path| {
-        path.split(':')
-            .filter(|d| d.starts_with('/'))
-            .map(|d| PathBuf::from(d).join(name))
-            .find(|c| is_exec(c))
-    })
+    on_path(std::env::var("PATH").ok().as_deref(), name).next()
+}
+
+/// Every executable named `name` on `path`, in order ([`bin_on_path`]'s rules).
+fn on_path<'a>(path: Option<&'a str>, name: &'a str) -> impl Iterator<Item = PathBuf> + 'a {
+    path.unwrap_or("")
+        .split(':')
+        .filter(|d| d.starts_with('/'))
+        .map(move |d| PathBuf::from(d).join(name))
+        .filter(|c| is_exec(c))
 }
 
 /// The Codex CLI may be bundled with its VS Code extension instead of linked
@@ -2278,6 +2306,115 @@ mod tests {
         assert!(out.warnings.iter().any(|w| w.contains("no `worktrees` binary")), "{:?}", out.warnings);
         let mcp: serde_json::Value = serde_json::from_str(&read(out.mcp.as_ref().unwrap())).unwrap();
         assert!(mcp["mcpServers"].get("worktrees").is_none());
+    }
+
+    /// An executable `worktrees` at `rel` under `root`.
+    fn exe_at(root: &Path, rel: &str) -> PathBuf {
+        let p = root.join(rel);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(&p, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        p
+    }
+
+    #[test]
+    fn the_cli_an_app_bundle_carries_is_never_handed_out() {
+        // serve runs as the app's private sidecar, so current_exe() is inside
+        // the bundle — an AppImage's is a mount that dies with the app. What is
+        // handed out ends up in the user's global MCP config, hooks and panes.
+        let t = tmp("bundled");
+        let user = exe_at(&t.0, "home/.local/bin/worktrees");
+        let path = format!("{}:/usr/bin", user.parent().unwrap().display());
+        let bundles = [
+            exe_at(&t.0, "Applications/Worktrees Server.app/Contents/MacOS/worktrees"),
+            exe_at(&t.0, "tmp/.mount_worktrAbC123/usr/lib/worktrees/worktrees"),
+            exe_at(&t.0, "deb/usr/lib/worktrees/worktrees"),
+        ];
+        for b in &bundles {
+            assert_eq!(worktrees_bin_in(None, Some(b.clone()), Some(&path)), Some(user.clone()), "as {}", b.display());
+            // ...and with no CLI installed, none: mcp_status says cli-missing
+            assert_eq!(worktrees_bin_in(None, Some(b.clone()), Some("/nonexistent")), None, "as {}", b.display());
+            // not on PATH either, even listed ahead of the user's CLI
+            let ahead = format!("{}:{path}", b.parent().unwrap().display());
+            assert_eq!(worktrees_bin_in(None, None, Some(&ahead)), Some(user.clone()), "PATH {ahead}");
+            // nor as the sandbox's override
+            assert_eq!(worktrees_bin_in(Some(b.clone()), None, Some(&path)), Some(user.clone()), "override {}", b.display());
+        }
+    }
+
+    #[test]
+    fn a_cli_outside_a_bundle_is_still_itself() {
+        // What main has always done: the CLI points at itself, the app (in-process,
+        // `Contents/MacOS/app`) at PATH, and the sandbox at its override.
+        let t = tmp("unbundled");
+        let user = exe_at(&t.0, "home/.local/bin/worktrees");
+        let other = exe_at(&t.0, "opt/homebrew/bin/worktrees");
+        let path = format!("{}:{}", other.parent().unwrap().display(), user.parent().unwrap().display());
+        for own in [
+            user.clone(),
+            exe_at(&t.0, "repo/target/release/worktrees"),
+            exe_at(&t.0, "usr/local/lib/worktrees/worktrees"),
+            exe_at(&t.0, "home/.cargo/bin/worktrees"),
+        ] {
+            assert_eq!(worktrees_bin_in(None, Some(own.clone()), Some(&path)), Some(own.clone()));
+        }
+        let app = exe_at(&t.0, "Applications/worktrees.app/Contents/MacOS/app");
+        assert_eq!(worktrees_bin_in(None, Some(app.clone()), Some(&path)), Some(other.clone()));
+        let built = exe_at(&t.0, "wt/target/release/worktrees");
+        assert_eq!(worktrees_bin_in(Some(built.clone()), Some(app.clone()), Some(&path)), Some(built));
+        assert_eq!(worktrees_bin_in(Some("rel/worktrees".into()), Some(app), Some(&path)), Some(other));
+    }
+
+    #[test]
+    fn a_bundled_cli_is_told_apart_by_where_it_is() {
+        for p in [
+            "/Applications/worktrees.app/Contents/MacOS/worktrees",
+            "/Users/x/scratch/Worktrees Server.app/Contents/MacOS/worktrees",
+            "/repo/target/release/bundle/macos/worktrees.app/Contents/MacOS/worktrees",
+            "/usr/lib/worktrees/worktrees",
+            "/tmp/.mount_worktrAbC123/usr/lib/worktrees/worktrees",
+            "/tmp/squashfs-root/usr/lib/worktrees/worktrees",
+        ] {
+            assert!(is_bundled_cli(Path::new(p)), "{p}");
+        }
+        for p in [
+            "/Users/x/.local/bin/worktrees",
+            "/opt/homebrew/bin/worktrees",
+            "/opt/homebrew/Cellar/worktrees/0.42.0/bin/worktrees",
+            "/usr/local/bin/worktrees",
+            "/usr/local/lib/worktrees/worktrees",
+            "/usr/bin/worktrees",
+            "/home/x/.cargo/bin/worktrees",
+            "/repo/target/release/worktrees",
+            "/lib/worktrees",
+            "worktrees",
+        ] {
+            assert!(!is_bundled_cli(Path::new(p)), "{p}");
+        }
+    }
+
+    #[test]
+    fn every_place_a_bundle_puts_the_cli_is_one_the_rule_knows() {
+        // tauri.conf.json's `files` decide where each format carries it; a
+        // layout the rule missed would hand the bundle's copy out again.
+        let conf = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../app/src-tauri/tauri.conf.json")).unwrap();
+        let conf: serde_json::Value = serde_json::from_str(&conf).unwrap();
+        let b = &conf["bundle"];
+        let mut seen = 0;
+        for (files, root) in [
+            (&b["macOS"]["files"], "/Applications/worktrees.app/Contents"), // macOS `files` are under Contents
+            (&b["linux"]["deb"]["files"], "/"),
+            (&b["linux"]["appimage"]["files"], "/tmp/.mount_worktrAbC123"),
+        ] {
+            for (dest, src) in files.as_object().expect("a `files` table") {
+                if src == "binaries/worktrees" {
+                    let at = Path::new(root).join(dest.trim_start_matches('/'));
+                    assert!(is_bundled_cli(&at), "{} is not recognised as the bundle's CLI", at.display());
+                    seen += 1;
+                }
+            }
+        }
+        assert_eq!(seen, 3, "one CLI per bundle format");
     }
 
     #[test]

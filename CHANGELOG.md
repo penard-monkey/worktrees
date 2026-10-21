@@ -34,10 +34,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   the bundle's own architecture, and used only by the app (which will start
   `worktrees serve` with it). It is not put on your `PATH` — the installer's
   `~/.local/bin/worktrees` is still the CLI you run, and agents and Claude's
-  MCP server keep working whether the app is installed or not. Every release
-  checks the copy inside the bundle it ships: present, executable, the right
-  architecture, and the tag's version. `make install-app` builds it the same
-  way, and takes `APPDIR=<dir>` to install somewhere other than /Applications.
+  MCP server keep working whether the app is installed or not. Nothing the app
+  sets up for them points at the bundle's copy: the MCP entries for Claude,
+  Codex, pi and kimi, the agent hooks and the helper a kimi pane starts all
+  name the CLI on your `PATH`, and the app says it is missing when there is
+  none. Every release checks the copy inside the bundle it ships: present,
+  executable, the right architecture, and the tag's version. `make
+  install-app` builds it the same way, and takes `APPDIR=<dir>` to install
+  somewhere other than /Applications.
 - **The desktop app on Linux**, for x86_64 and arm64: every release now ships
   an AppImage and a `.deb` beside the macOS bundles, and the in-app updater
   takes care of both (an AppImage replaces itself; a `.deb` updates through
