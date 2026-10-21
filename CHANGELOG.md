@@ -18,7 +18,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   shim's handler list.
 - **The 149 app commands moved into a new `worktrees-api` crate**, leaving the
   Tauri layer as thin wrappers. Nothing changes for the desktop app — the same
-  149 commands with the same arguments, verified against `main` — but the
+  149 commands with the same arguments, verified against `main`, plus
+  `get_codex_permissions` for the host-policy change below — but the
   command layer can now be called by something that is not a window, which is
   what `worktrees serve` will need. `app/src-tauri/src/lib.rs` goes from 11,288
   lines to about 2,100; the PTY host, the documentation server and its viewer
@@ -184,15 +185,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   of `--upload-pack=<cmd>`. One narrowing: a place whose name contains `..`
   (only `--name` can make one) can no longer be opened, switched, closed or
   removed from the app — the MCP tools have always refused it.
+- **The Claude usage meter no longer puts your Claude login token where other
+  programs can read it.** To fetch the usage bars, worktrees passed Claude
+  Code's OAuth access token to `curl` as a command-line argument, and any
+  process on the Mac can list those (`ps`) while the request runs. The token
+  now goes to `curl` on its standard input, which `ps` does not show. The
+  meter itself works as before.
 - **A message the window logs is one line of the log, and a long one is no
   longer lost.** A newline in it started a line of its own with no
   timestamp, so a stack trace spread over several lines and anything sent
   through `log_event` could write a line that looked like the app's own,
   which matters once `worktrees serve` takes that command from any client it
-  has authenticated. Line breaks, other
-  control characters and the bidi overrides are now written as visible
-  escapes (`\n`, `\x1b`, `\u{202e}`). And a message over 4000 bytes whose
-  cut fell inside a character panicked the logger instead of being written.
+  has authenticated. Line breaks, other control characters and the bidi
+  overrides are now written as visible escapes (`\n`, `\x1b`, `\u{202e}`).
+  And a message over 4000 bytes whose cut fell inside a character panicked
+  the logger instead of being written.
   `app.log` is now readable only by you (0600, its rotated copy too); every
   account on the machine could read it, with your PATH and the places you
   opened in it.
