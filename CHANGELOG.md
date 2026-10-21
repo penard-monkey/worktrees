@@ -20,8 +20,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   - A serve the app started stops when you quit, which ends the dock shells as
     before.
   - If the app crashes, its serve survives, and the next launch adopts it
-    (`serve --owner app`, recorded in serve.json).
+    (`serve --owner app`, recorded in serve.json). If no launch comes back
+    for two minutes, that serve stops itself the way a quit stops it, so
+    one left behind by a crash does not run on unseen.
   - A serve you started from the CLI is used and left running.
+  - Its dock saves (a tab's scrollback, the folder it was in) no longer
+    write over a save another app made since; serve logs the one it skipped.
+  - **Going back to an older version: quit Worktrees first.** An older app
+    runs the engine in its own process, so starting one beside a serve this
+    version left running puts two engines on the same settings, places and
+    dock tabs.
   - If the engine goes away, the app keeps what it last showed under a
     "Disconnected from the engine" banner. Reconnect looks for (or starts)
     serve again, and the terminals re-attach: the dock shell replays behind

@@ -133,10 +133,16 @@ R=$PWD CFG="$HOME/Library/Application Support/net.casadelvalle.worktrees.sbx"
 2. `kill -9 <the app's pid>`. Find it with `pgrep -fl 'target/debug/app'` and
    confirm with `ps -o pid,command`. Never address the app by name.
 3. **Expect:** serve is still running, and its dock shell is still alive.
-4. Relaunch.
+4. Relaunch within two minutes.
    **Expect:** app.log `adopting serve(pid <pid>, …, owner app)`.
 5. ⌘Q.
    **Expect:** app.log `engine: quitting; serve pid=<pid> stopped`.
+6. Again from step 1, but leave it killed for more than two minutes.
+   **Expect:** serve.log `serve: no client for 120s, and the app that owns
+   this serve is gone — stopping`, then `serve: stopping` and `serve:
+   stopped`; serve.json is gone. A relaunch starts a fresh serve, and the
+   dock tab comes back from its saved scrollback behind a `── restored ──`
+   seam.
 
 ## What is not covered here
 

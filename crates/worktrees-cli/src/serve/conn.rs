@@ -192,6 +192,10 @@ impl Clients {
     fn remove(&self, id: u64) {
         self.0.lock().unwrap().remove(&id);
     }
+    /// How many authenticated clients are connected now.
+    pub fn len(&self) -> usize {
+        self.0.lock().unwrap().len()
+    }
 }
 
 /// The engine's `Host`: an event is one frame to every authenticated socket.

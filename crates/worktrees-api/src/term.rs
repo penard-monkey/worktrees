@@ -747,14 +747,28 @@ pub fn read_cwds_at(path: &Path) -> CwdMap {
     std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
 
+/// The engine's read of the memory, which a spawn does — and so what this
+/// engine has SEEN of the file (`unasked_save_ok`).
 pub fn read_cwds(ctx: &Ctx) -> CwdMap {
-    cwd_file(ctx).map(|p| read_cwds_at(&p)).unwrap_or_default()
+    let Ok(path) = cwd_file(ctx) else { return CwdMap::default() };
+    let bytes = std::fs::read(&path).ok();
+    note_seen(&path, seen_of(bytes.as_deref()));
+    bytes.and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
 }
 
 /// Read-modify-write under `CWD_FILE_LOCK`. `f` returns false to skip the write —
 /// the sampler runs every few seconds and an idle shell must not churn the disk.
 pub fn edit_cwds_at(path: &Path, f: impl FnOnce(&mut CwdMap) -> bool) {
+    edit_cwds_as(path, false, f)
+}
+
+/// `edit_cwds_at`, as the SAMPLER's save when `unasked`: then only over a file
+/// this engine is still the last to have written or read (`unasked_save_ok`).
+fn edit_cwds_as(path: &Path, unasked: bool, f: impl FnOnce(&mut CwdMap) -> bool) {
     let _guard = CWD_FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if unasked && !unasked_save_ok(path, "shell-cwds") {
+        return;
+    }
     let mut map = read_cwds_at(path);
     if !f(&mut map) {
         return;
@@ -769,9 +783,13 @@ pub fn edit_cwds_at(path: &Path, f: impl FnOnce(&mut CwdMap) -> bool) {
     // is a truncate followed by a write — a read landing in between gets half a
     // JSON document, which parses as "no memory at all".
     let tmp = path.with_extension("json.tmp");
-    if let Err(e) = std::fs::write(&tmp, json).and_then(|_| std::fs::rename(&tmp, path)) {
-        applog("error", &format!("shell-cwds write failed: {e}"));
-        let _ = std::fs::remove_file(&tmp);
+    let seen = seen_of(Some(&json));
+    match std::fs::write(&tmp, json).and_then(|_| std::fs::rename(&tmp, path)) {
+        Ok(()) => note_seen(path, seen),
+        Err(e) => {
+            applog("error", &format!("shell-cwds write failed: {e}"));
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
 }
 
@@ -874,7 +892,8 @@ pub fn merge_cwds(map: &mut CwdMap, sample: Vec<(ShellKey, String)>) -> bool {
 
 /// Record where every live dock shell currently is. Called on a slow tick — so
 /// a crash or a force-quit still leaves a recent answer — and once more on the
-/// way out, before the exit sweep kills the shells.
+/// way out, before the exit sweep kills the shells. Both are saves nobody
+/// asked for, so both go through `unasked_save_ok`.
 pub fn save_shell_cwds(ctx: &Ctx, shells: &Shells) {
     let live: Vec<(ShellKey, u32)> = {
         let mut map = shells.0.lock().unwrap();
@@ -887,7 +906,11 @@ pub fn save_shell_cwds(ctx: &Ctx, shells: &Shells) {
     if sample.is_empty() {
         return; // no shells (or no cwd to be read) — don't even open the file
     }
-    edit_cwds(ctx, |map| {
+    let path = match cwd_file(ctx) {
+        Ok(p) => p,
+        Err(e) => return applog("error", &format!("shell-cwds path unavailable: {e}")),
+    };
+    edit_cwds_as(&path, true, |map| {
         // Membership is re-checked HERE, under the file lock, because the
         // registry lock was released before the `proc_cwd` reads above. A tab
         // closed in that gap has already had its entry forgotten, and merging
@@ -1108,14 +1131,20 @@ pub fn rolled_ring(bytes: &[u8]) -> &[u8] {
 /// `meta.json` is the identity, not the directory name: anything that does not
 /// name exactly this tab answers `None`. Never an error, and never another tab's
 /// output.
+///
+/// It is also this engine's look at the file, which a spawn takes whatever it
+/// answers — "nothing there" included — so the saves after it know what they
+/// would be writing over (`unasked_save_ok`).
 pub fn read_scrollback(root: &Path, key: &ShellKey) -> Option<(Vec<u8>, TabMeta)> {
     let tab = tab_dir(root, key);
+    let ring = tab.join("scrollback.bin");
+    let bytes = std::fs::read(&ring).ok();
+    note_seen(&ring, seen_of(bytes.as_deref()));
     let meta = read_meta(&tab)?;
     if meta.repo != key.0 || meta.slug != key.1 || meta.index != key.2 {
         return None;
     }
-    let bytes = std::fs::read(tab.join("scrollback.bin")).ok()?;
-    Some((bytes, meta))
+    Some((bytes?, meta))
 }
 
 /// Stamp a tab's identity without touching its scrollback.
@@ -1152,8 +1181,18 @@ pub fn write_meta(tab: &Path, key: &ShellKey, cols: u16) {
 
 /// Persist one tab's ring at the width it is currently being written at.
 pub fn write_scrollback(root: &Path, key: &ShellKey, bytes: &[u8], cols: u16) {
+    write_scrollback_as(root, key, bytes, cols, false)
+}
+
+/// `write_scrollback`, as the flush's save when `unasked`: then only over a
+/// ring this engine is still the last to have written or read (`unasked_save_ok`).
+fn write_scrollback_as(root: &Path, key: &ShellKey, bytes: &[u8], cols: u16, unasked: bool) {
     let tab = tab_dir(root, key);
+    let ring = tab.join("scrollback.bin");
     let _guard = TERM_HIST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if unasked && !unasked_save_ok(&ring, "term-history") {
+        return;
+    }
     if let Err(e) = std::fs::create_dir_all(&tab) {
         return applog("error", &format!("term-history dir failed: {e}"));
     }
@@ -1161,9 +1200,11 @@ pub fn write_scrollback(root: &Path, key: &ShellKey, bytes: &[u8], cols: u16) {
     // bytes THEN meta: meta is what makes the directory readable, so writing it
     // last means a crash mid-save leaves the PREVIOUS pair, never a new meta
     // pointing at a half-written ring.
-    if let Err(e) = hist_write_atomic(&tab.join("scrollback.bin"), rolled_ring(bytes)) {
+    let bytes = rolled_ring(bytes);
+    if let Err(e) = hist_write_atomic(&ring, bytes) {
         return applog("error", &format!("term-history write failed: {e}"));
     }
+    note_seen(&ring, seen_of(Some(bytes)));
     write_meta(&tab, key, cols);
 }
 
@@ -1244,6 +1285,88 @@ pub fn sweep_term_history(ctx: &Ctx) {
 /// One shell's ring, ready to write once the registry lock is gone.
 pub type ScrollJob = (ShellKey, Arc<Mutex<VecDeque<u8>>>, u16);
 
+// ── saves nobody asked for ───────────────────────────────────────────────────
+//
+// The dock's tick and its exit flush write the rings and `shell-cwds.json` on
+// their own. With one engine per config dir that is the whole story; with two
+// it is not. An app crash left its serve running with no client, a downgraded
+// app ran its own engine on the same dir and saved the tab on a clean quit,
+// and the orphan's next tick put its own ring and directory back over both
+// (rehearsal D7). An app-owned serve now stops itself when no client comes
+// back, but its way down IS the exit flush, so the flush has to know better
+// as well: it writes only over a file that is still what this engine last
+// wrote or read there. A save somebody asked for — a restart, closing a tab —
+// is an act in THIS engine, and writes as before.
+//
+// What is left: a new serve could read a tab in the moment before an old one's
+// last write of it, and would then leave that tab alone for its life (logged).
+// serve flushes BEFORE its port closes, and nothing starts a new serve while
+// the old one's port is open, so between two of ours that ordering cannot
+// happen.
+
+/// What this engine saw of a file it saves on its own: a hash of the bytes it
+/// last wrote there or read from it, or `None` for "not there".
+type Seen = Option<u64>;
+
+fn seen_of(bytes: Option<&[u8]>) -> Seen {
+    use std::hash::{Hash, Hasher};
+    bytes.map(|b| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        b.hash(&mut h);
+        h.finish()
+    })
+}
+
+/// Per file, what this process last wrote there or read from it. Keyed by
+/// the full path, so tests on their own scratch dirs never share an entry.
+static SEEN: Mutex<BTreeMap<PathBuf, Seen>> = Mutex::new(BTreeMap::new());
+
+/// The files a refused save has been logged for: once per file per engine
+/// life, since an orphan would otherwise say it every 15 s.
+static SAID: Mutex<std::collections::BTreeSet<PathBuf>> = Mutex::new(std::collections::BTreeSet::new());
+
+fn note_seen(path: &Path, seen: Seen) {
+    SEEN.lock().unwrap_or_else(|e| e.into_inner()).insert(path.to_path_buf(), seen);
+}
+
+/// May a save nobody asked for write over the file as it is `now`? `was` is
+/// what this engine last wrote or read there (`None`: it never looked).
+/// Absent is always fine — there is nothing to lose. Otherwise only the very
+/// bytes this engine saw: anything else is somebody else's save.
+pub fn may_save(was: Option<Seen>, now: Seen) -> bool {
+    match (was, now) {
+        (_, None) => true,
+        (Some(was), now) => was == now,
+        (None, Some(_)) => false,
+    }
+}
+
+/// Whether the refusal for `path` is the first one this engine has had to
+/// say.
+fn first_refusal(path: &Path) -> bool {
+    SAID.lock().unwrap_or_else(|e| e.into_inner()).insert(path.to_path_buf())
+}
+
+/// `may_save` against the file on disk, and the one line when it says no.
+fn unasked_save_ok(path: &Path, what: &str) -> bool {
+    let now = seen_of(std::fs::read(path).ok().as_deref());
+    let was = SEEN.lock().unwrap_or_else(|e| e.into_inner()).get(path).copied();
+    if may_save(was, now) {
+        return true;
+    }
+    if first_refusal(path) {
+        applog(
+            "warn",
+            &format!(
+                "{what}: not saving over {}: another engine changed it after this one last wrote or read it \
+                 (an app with its own engine on the same config dir?)",
+                path.display()
+            ),
+        );
+    }
+    false
+}
+
 /// Persist every live shell's ring.
 ///
 /// Dirty-gated, so a dozen idle tabs cost no I/O at all. The snapshot is taken
@@ -1277,7 +1400,9 @@ pub fn save_shell_scrollback(ctx: &Ctx, shells: &Shells) {
     let Ok(root) = term_hist_dir(ctx) else { return };
     for (key, ring, cols) in jobs {
         let bytes: Vec<u8> = ring.lock().unwrap().iter().copied().collect();
-        write_scrollback(&root, &key, &bytes, cols);
+        // Unasked — the tick, or the exit flush — so never over another
+        // engine's save of this tab (`unasked_save_ok`).
+        write_scrollback_as(&root, &key, &bytes, cols, true);
     }
 }
 
@@ -2300,6 +2425,150 @@ mod tests {
         let (session, cwd) = place_session_cwd(&repo_s, "lane").unwrap();
         assert!(cwd.ends_with("/repo/.worktrees/lane"), "{cwd}");
         assert!(session.ends_with("-lane"), "{session}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    // ── a second engine on the same files (rehearsal D7) ─────────────────────
+    // An app crash left its serve running with no client; a downgraded app
+    // then ran its own engine on the same config dir, saved its dock tab on a
+    // clean quit, and the orphan's next save put its own ring and directory
+    // back over both.
+
+    /// A dock shell for the save tests: a real process sitting in `cwd`, so
+    /// `proc_cwd` has something to read, with `ring` already in it and dirty.
+    /// `sleep` rather than a shell: SIGHUP ends it, which is what `kill_shell`
+    /// sends, and it writes nothing, so the pty needs no reader.
+    fn parked_shell(cwd: &Path, ring: &[u8]) -> Shell {
+        let size = PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 };
+        let pair = native_pty_system().openpty(size).unwrap();
+        let mut cmd = CommandBuilder::new("/bin/sleep");
+        cmd.arg("60"); // bounded, should a failed assertion skip the kill
+        cmd.cwd(cwd);
+        let child = pair.slave.spawn_command(cmd).unwrap();
+        drop(pair.slave);
+        let writer = pair.master.take_writer().unwrap();
+        Shell {
+            master: pair.master,
+            writer,
+            child,
+            stop: Arc::new(AtomicBool::new(false)),
+            ring: Arc::new(Mutex::new(ring.iter().copied().collect())),
+            sink: Arc::new(Mutex::new(None)),
+            gen: 1,
+            size,
+            dirty: Arc::new(AtomicBool::new(true)),
+        }
+    }
+
+    /// An engine whose tab `/r|feat#1` was saved by a previous run and READ by
+    /// this one's spawn, as `shell_open` reads it, with a live shell for it
+    /// sitting in a directory of its own. (ctx, scratch, ring file, cwd file,
+    /// the shell's directory as `proc_cwd` will report it.)
+    fn engine_with_a_saved_tab(tag: &str) -> (Ctx, PathBuf, PathBuf, PathBuf, String) {
+        let base = hist_root(tag);
+        let ctx = Ctx::new(base.join("cfg"), Arc::new(crate::tests::Recorder::default()));
+        let k = key("/r", "feat", 1);
+        let root = term_hist_dir(&ctx).unwrap();
+        let ring = tab_dir(&root, &k).join("scrollback.bin");
+        let cwd_path = cwd_file(&ctx).unwrap();
+        // The previous run was another process: its files are written raw, so
+        // that what this engine knows of them is only what its spawn READ.
+        std::fs::create_dir_all(tab_dir(&root, &k)).unwrap();
+        hist_write_atomic(&ring, b"BEFORE\n").unwrap();
+        write_meta(&tab_dir(&root, &k), &k, 80);
+        std::fs::write(&cwd_path, serde_json::to_vec(&cwds(&[("/r|feat", 1, "/before")])).unwrap()).unwrap();
+        let _ = read_cwds(&ctx);
+        let _ = read_scrollback(&root, &k);
+        let here = base.join("where-the-shell-is");
+        std::fs::create_dir_all(&here).unwrap();
+        let here = std::fs::canonicalize(&here).unwrap().to_string_lossy().into_owned();
+        ctx.shells.0.lock().unwrap().insert(k, parked_shell(Path::new(&here), b"ORPHAN-2\n"));
+        (ctx, base, ring, cwd_path, here)
+    }
+
+    /// D7 itself, at the exit flush — the one every orphan now ends on, since
+    /// an app-owned serve stops itself when no client comes back: another
+    /// engine saved this tab after this one read it, and stopping must leave
+    /// the other's ring and directory exactly as it wrote them.
+    #[test]
+    fn the_exit_flush_leaves_a_ring_and_a_directory_another_engine_saved() {
+        let (ctx, base, ring, cwd_path, _) = engine_with_a_saved_tab("d7-other");
+        // The other engine's save, its own way: an atomic ring, a plain write.
+        hist_write_atomic(&ring, b"DOWNGRADE-2\n").unwrap();
+        std::fs::write(&cwd_path, serde_json::to_vec(&cwds(&[("/r|feat", 1, "/other")])).unwrap()).unwrap();
+        crate::host::stop(&ctx);
+        assert_eq!(
+            String::from_utf8_lossy(&std::fs::read(&ring).unwrap()),
+            "DOWNGRADE-2\n",
+            "the exit flush overwrote the ring another engine saved"
+        );
+        assert_eq!(read_cwds_at(&cwd_path), cwds(&[("/r|feat", 1, "/other")]), "…and its directory");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// And its saves follow each other: what one wrote is what the next one
+    /// finds, so a tick after a tick still saves, and so does a tick after
+    /// the user's own edit. If a write did not count as seen, the second tick
+    /// would find a stranger's file and an engine would save each tab once.
+    #[test]
+    fn this_engines_saves_follow_its_own_saves() {
+        let (ctx, base, ring, cwd_path, here) = engine_with_a_saved_tab("d7-again");
+        let k = key("/r", "feat", 1);
+        save_shell_scrollback(&ctx, &ctx.shells);
+        save_shell_cwds(&ctx, &ctx.shells);
+        {
+            let map = ctx.shells.0.lock().unwrap();
+            let sh = map.get(&k).unwrap();
+            sh.ring.lock().unwrap().extend(b"MORE\n");
+            sh.dirty.store(true, Ordering::Relaxed);
+        }
+        save_shell_scrollback(&ctx, &ctx.shells);
+        assert_eq!(String::from_utf8_lossy(&std::fs::read(&ring).unwrap()), "ORPHAN-2\nMORE\n", "the second tick did not save");
+        edit_cwds(&ctx, |m| forget_tab(m, "/r", "feat", 1));
+        save_shell_cwds(&ctx, &ctx.shells);
+        assert_eq!(read_cwds_at(&cwd_path), cwds(&[("/r|feat", 1, here.as_str())]), "the tick after an edit did not save");
+        crate::host::stop(&ctx);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The rule on its own. Absent is always fine; otherwise only the bytes
+    /// this engine last saw; a file it never looked at is not its to replace.
+    #[test]
+    fn an_unasked_save_writes_only_over_what_this_engine_saw() {
+        let (a, b) = (seen_of(Some(b"mine")), seen_of(Some(b"theirs")));
+        assert!(may_save(None, None), "nothing there, never looked");
+        assert!(may_save(Some(a), None), "removed since (a clear, a closed tab)");
+        assert!(may_save(Some(a), a), "still what this engine saw");
+        assert!(may_save(Some(None), None));
+        assert!(!may_save(Some(a), b), "somebody else saved it since");
+        assert!(!may_save(Some(None), a), "somebody else made it since this engine saw nothing there");
+        assert!(!may_save(None, a), "never looked, and something is there");
+    }
+
+    /// An orphan refused every 15 s for two minutes would say so every 15 s.
+    #[test]
+    fn a_refused_save_is_said_once_per_file() {
+        let p = hist_root("said").join("scrollback.bin");
+        assert!(first_refusal(&p));
+        assert!(!first_refusal(&p));
+        assert!(!first_refusal(&p));
+        assert!(first_refusal(&p.with_file_name("shell-cwds.json")), "per file, not once in all");
+    }
+
+    /// The other direction, so the guard cannot be a lid: with nobody else
+    /// writing, the exit flush saves what this engine's own shell did, over
+    /// the previous run's save it read — and a tab nothing was ever saved for.
+    #[test]
+    fn the_exit_flush_still_saves_this_engines_own_tabs() {
+        let (ctx, base, ring, cwd_path, here) = engine_with_a_saved_tab("d7-own");
+        let fresh = key("/r", "feat", 2);
+        let fresh_ring = tab_dir(&term_hist_dir(&ctx).unwrap(), &fresh).join("scrollback.bin");
+        let _ = read_scrollback(&term_hist_dir(&ctx).unwrap(), &fresh);
+        ctx.shells.0.lock().unwrap().insert(fresh, parked_shell(Path::new(&here), b"FRESH\n"));
+        crate::host::stop(&ctx);
+        assert_eq!(String::from_utf8_lossy(&std::fs::read(&ring).unwrap()), "ORPHAN-2\n");
+        assert_eq!(String::from_utf8_lossy(&std::fs::read(&fresh_ring).unwrap()), "FRESH\n");
+        assert_eq!(read_cwds_at(&cwd_path), cwds(&[("/r|feat", 1, here.as_str()), ("/r|feat", 2, here.as_str())]));
         let _ = std::fs::remove_dir_all(&base);
     }
 }

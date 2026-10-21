@@ -1241,7 +1241,10 @@ after it is "command not found" — which reads as a sandbox refusing curl.
   works. And `kill <app pid>` is a CRASH as far as the app is concerned: tao
   installs no SIGTERM handler, so the Exit arm never runs and the serve the
   app owns keeps running — which is the crash-leftover path, and the next
-  launch adopts it (`owner: "app"` in serve.json). A clean quit is ⌘Q.
+  launch adopts it (`owner: "app"` in serve.json). For two minutes: an
+  app-owned serve with no client for `OWNED_IDLE_GRACE` (serve/mod.rs) stops
+  itself, so a relaunch after that starts a fresh one, and a drive of the
+  adopt path has to relaunch inside it. A clean quit is ⌘Q.
 - **A vanished sandbox app means the human closed it.** `tauri dev` exits 0 when
   the window closes, which is indistinguishable from a clean shutdown because it
   is one; a harness kill is 143. Twice in one session that was reported as a
