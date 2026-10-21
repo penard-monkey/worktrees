@@ -129,7 +129,9 @@ impl Sandbox {
                 panic!("serve exited early ({st}): {err}");
             }
             assert!(Instant::now() < deadline, "serve.json never appeared at {}", self.serve_json().display());
-            std::thread::sleep(Duration::from_millis(50));
+            // Tight, so a test that stops serve the moment it is up does so
+            // within a few ms of the file appearing, not up to 50 ms later.
+            std::thread::sleep(Duration::from_millis(5));
         }
     }
 
@@ -252,6 +254,24 @@ fn serve_raises_a_low_soft_open_file_limit_at_boot() {
     assert_eq!(sb.terminate().code(), Some(0));
 }
 
+/// serve.json is how a client, or whatever supervises serve, learns that it
+/// is up, so from the moment the file exists a SIGTERM must be a clean stop:
+/// exit 0, the file removed. The handler used to be installed only after the
+/// file was written and the engine started, and a SIGTERM inside that window
+/// took the default action — killed by the signal, serve.json left behind.
+/// Two tests that stop serve straight after launching it lost that race on a
+/// machine with no tmux.
+#[test]
+fn a_sigterm_as_soon_as_serve_json_exists_is_a_clean_stop() {
+    let mut sb = Sandbox::new("earlyterm");
+    for round in 0..10 {
+        sb.launch(&[]);
+        let st = sb.terminate();
+        assert_eq!(st.code(), Some(0), "round {round}: {st}");
+        assert!(!sb.serve_json().exists(), "round {round}: serve.json was left behind");
+    }
+}
+
 /// Host policy is the ENGINE's (`worktrees_api::hostpolicy`: "only the engine
 /// reads it; `boot` loads it at startup"), and `serve` is the engine. A host
 /// that chose `ask` for Codex in Settings and then restarted serve must launch
@@ -327,7 +347,13 @@ impl PrivateTmux {
         format!("{},0,0", self.sock.display())
     }
     fn run(&self, args: &[&str]) -> std::process::Output {
-        Command::new("tmux").arg("-S").arg(&self.sock).args(args).env_remove("TMUX").output().expect("tmux")
+        self.try_run(args).expect("tmux")
+    }
+    /// `run` for cleanup, which must not panic when there is no tmux at all:
+    /// the macOS `rust` CI job has none, and a test that needs no tmux (the
+    /// refusal below) failed in its Drop.
+    fn try_run(&self, args: &[&str]) -> std::io::Result<std::process::Output> {
+        Command::new("tmux").arg("-S").arg(&self.sock).args(args).env_remove("TMUX").output()
     }
     fn available() -> bool {
         Command::new("tmux").arg("-V").output().is_ok_and(|o| o.status.success())
@@ -341,7 +367,7 @@ impl PrivateTmux {
 
 impl Drop for PrivateTmux {
     fn drop(&mut self) {
-        let _ = self.run(&["kill-server"]);
+        let _ = self.try_run(&["kill-server"]);
         let _ = std::fs::remove_file(&self.sock);
     }
 }
@@ -487,6 +513,63 @@ fn each_launch_rewrites_serve_json_with_a_new_token() {
     // A WebView origin needs no flag.
     let mut ws = connect(&b, "tauri://localhost");
     assert_eq!(rpc(&mut ws, 1, "get_changelog", json!({}))["ok"]["version"], json!(env!("CARGO_PKG_VERSION")));
+    sb.terminate();
+}
+
+/// This machine's own non-loopback IPv4 address, or `None` if it has only
+/// `lo`: the docs server's `own_lan_addr`, which a test crate cannot import. A
+/// UDP socket "connected" to a TEST-NET address sends nothing, but the kernel
+/// picks the route's source address and `local_addr` reads it back.
+fn own_lan_addr() -> Option<Ipv4Addr> {
+    let s = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    s.connect((Ipv4Addr::new(192, 0, 2, 1), 9)).ok()?;
+    match s.local_addr().ok()?.ip() {
+        std::net::IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_unspecified() => Some(ip),
+        _ => None,
+    }
+}
+
+/// Reachable on loopback and from nowhere else. The witness is a CONNECT to
+/// this machine's own LAN address on serve's port, never a bind: no bind
+/// answers the same on macOS and Linux (the table on the docs server's
+/// `the_server_is_bound_to_loopback_and_its_token_is_fresh_each_time`), while
+/// a connect does — measured on macOS 27.0 and Linux 6.12, refused against a
+/// `127.0.0.1` listener and accepted against `0.0.0.0` on both. `conn.rs`'s
+/// after-accept peer check does not hide a wider bind from this: the kernel
+/// completes the handshake before `accept` returns, so the connect succeeds
+/// and only then is the stream dropped.
+///
+/// The loopback connect comes FIRST because without it a dead server passes.
+/// And on a CI runner, which always has a LAN address, a missing one fails
+/// rather than skipping — a witness that quietly did not run is not one.
+#[test]
+fn serve_can_be_reached_on_loopback_and_not_off_it() {
+    let mut sb = Sandbox::new("lan");
+    let sf = sb.launch(&[]);
+    let port = sf["port"].as_u64().unwrap() as u16;
+    let wait = Duration::from_secs(5);
+
+    let via_lo = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    assert!(
+        TcpStream::connect_timeout(&via_lo, wait).is_ok(),
+        "serve did not answer on loopback, so the refusal below would prove nothing"
+    );
+
+    match own_lan_addr() {
+        // A firewall that DROPs rather than refuses is a timeout, also an
+        // `Err` — the fail-safe direction.
+        Some(ip) => {
+            let via_lan = SocketAddr::from((ip, port));
+            assert!(
+                TcpStream::connect_timeout(&via_lan, wait).is_err(),
+                "{via_lan} answered, so serve is reachable off loopback"
+            );
+        }
+        None => {
+            assert!(std::env::var_os("CI").is_none(), "no non-loopback IPv4 on a CI runner: the LAN half did not run");
+            eprintln!("no non-loopback IPv4 on this host; the LAN half did not run");
+        }
+    }
     sb.terminate();
 }
 

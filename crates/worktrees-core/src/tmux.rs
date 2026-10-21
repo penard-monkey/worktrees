@@ -1100,7 +1100,11 @@ mod tests {
         struct Private(std::path::PathBuf);
         impl Private {
             fn run(&self, args: &[&str]) -> Output {
-                Command::new("tmux").arg("-S").arg(&self.0).args(args).env_remove("TMUX").output().unwrap()
+                self.try_run(args).unwrap()
+            }
+            // For the Drop, which must not panic even with no tmux to run.
+            fn try_run(&self, args: &[&str]) -> std::io::Result<Output> {
+                Command::new("tmux").arg("-S").arg(&self.0).args(args).env_remove("TMUX").output()
             }
             fn local(&self, session: &str, opt: &str) -> String {
                 let o = self.run(&["show-options", "-w", "-v", "-t", &format!("={session}:"), opt]);
@@ -1109,7 +1113,7 @@ mod tests {
         }
         impl Drop for Private {
             fn drop(&mut self) {
-                let _ = self.run(&["kill-server"]);
+                let _ = self.try_run(&["kill-server"]);
                 let _ = std::fs::remove_file(&self.0);
             }
         }

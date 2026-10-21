@@ -114,7 +114,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   shell opens only in a place of the repository named, and a terminal
   attaches only to a tmux session of exactly the name given; anything else
   (`--all`, a name no place or session has) is refused with the reason before
-  any shell or tmux client starts.
+  any shell or tmux client starts. A command that fails unexpectedly is
+  answered `internal error` rather than never answered, and the connection
+  and the server go on serving.
 - **The real frontend can drive a real `worktrees serve` from a browser**
   (development only: `pnpm dev:serve` with `WT_SERVE_JSON` pointing at the
   stack's `serve.json`). The page asks the dev server for the port and token —
@@ -267,7 +269,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   has authenticated. Line breaks, other control characters and the bidi
   overrides are now written as visible escapes (`\n`, `\x1b`, `\u{202e}`).
   And a message over 4000 bytes whose cut fell inside a character panicked
-  the logger instead of being written.
+  the logger instead of being written. A panic is written the same way: one
+  `[panic]` line with where it happened and what it said, where its message
+  used to follow on lines of its own. Two lines written at the same moment
+  no longer tear into each other: each goes to the file in one write.
   `app.log` is now readable only by you (0600, its rotated copy too); every
   account on the machine could read it, with your PATH and the places you
   opened in it.

@@ -33,7 +33,8 @@ const sheet = read("../src/SettingsSheet.tsx");
 // The commands are the ENGINE's: the app is a client of `worktrees serve`, and a
 // command exists for it when serve's dispatch table has a row for it (the shim
 // registers only the client-local ones — engine-route-check.mjs).
-const dispatch = read("../../crates/worktrees-cli/src/serve/dispatch.rs").split("\n#[cfg(test)]")[0];
+// Cut at `mod tests`, not the first `#[cfg(test)]`: test-only items sit above the table.
+const dispatch = read("../../crates/worktrees-cli/src/serve/dispatch.rs").split(/\n#\[cfg\(test\)\]\s*\nmod tests\b/)[0];
 const mock = read("../src/mock/install.ts");
 
 // ── 1. the range ─────────────────────────────────────────────────────────────

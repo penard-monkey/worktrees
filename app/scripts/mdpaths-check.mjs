@@ -168,7 +168,8 @@ const many = Array.from({ length: 150 }, (_, i) => `d/f${i}.md`);
 
 // ── 4. the shared resolver, and the mock ─────────────────────────────────────
 // The app reaches the command through serve (it is not a shim command any more).
-const dispatch = fs.readFileSync(new URL("../../crates/worktrees-cli/src/serve/dispatch.rs", import.meta.url), "utf8").split("\n#[cfg(test)]")[0];
+// Cut at `mod tests`, not the first `#[cfg(test)]`: test-only items sit above the table.
+const dispatch = fs.readFileSync(new URL("../../crates/worktrees-cli/src/serve/dispatch.rs", import.meta.url), "utf8").split(/\n#\[cfg\(test\)\]\s*\nmod tests\b/)[0];
 const api = API.split("\n#[cfg(test)]")[0];
 const body = (name) => {
   const at = api.indexOf(`fn ${name}(`);

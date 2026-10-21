@@ -605,6 +605,10 @@ after it is "command not found" — which reads as a sandbox refusing curl.
   state lookup but the `Ctx` and the window tracker. Both failures exist only
   as `[panic] … before manage()` lines in `app.log`, so after any change to
   `run()`, launch it (`sandbox.sh --app`) and grep the log; no suite will.
+  A panic is ONE line, `[panic] panicked at <file:line:col>: "<message>"`,
+  the message `{:?}`-escaped and cut at 500 chars (`host::panic_line`). Until
+  then the message sat on the NEXT line, raw, so `grep '[panic]'` showed where
+  and never what — `grep -A1` on an older log.
 - **GUI launches get launchd's bare PATH** (no homebrew → no tmux).
   `fixup_gui_path()` in lib.rs resolves the login-shell PATH at startup —
   don't add subprocess calls that assume PATH before it runs.

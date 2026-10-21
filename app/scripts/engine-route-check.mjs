@@ -46,7 +46,10 @@ const SRC = {
 const read = (p) => fs.readFileSync(p, "utf8");
 /** Code only: `//` comments dropped, so prose about a rule cannot satisfy it. */
 const code = (s) => s.split("\n").map((l) => l.replace(/\/\/.*$/, "")).join("\n");
-const noTests = (s) => s.split("\n#[cfg(test)]")[0];
+/** Without the unit-test MODULE: cut at the `#[cfg(test)]` that heads `mod
+ *  tests`, not the first one — dispatch.rs has test-only items above its table
+ *  (`TEST_PANIC`), and a cut there leaves no rows (transport-check's 0fe3493). */
+const noTests = (s) => s.split(/\n#\[cfg\(test\)\]\s*\nmod tests\b/)[0];
 
 let failed = 0;
 const fail = (m) => { failed++; console.log(`FAIL ${m}`); };

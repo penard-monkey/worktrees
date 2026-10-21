@@ -54,7 +54,7 @@ pub fn boot(sink: Arc<dyn LogSink>) -> bool {
     let took = log::install(sink);
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        log::log("panic", &info.to_string());
+        log::log("panic", &panic_line(info));
         prev_hook(info);
     }));
     crate::hostenv::fixup_gui_path();
@@ -70,6 +70,19 @@ pub fn boot(sink: Arc<dyn LogSink>) -> bool {
         std::env::var("PATH").unwrap_or_default()
     ));
     took
+}
+
+/// A panic as ONE log line: `panicked at <file:line:col>: "<message>"`, the
+/// message escaped and bounded by `log::panic_text`. `info.to_string()` is two
+/// lines, the location and then the message raw on its own line, so
+/// `grep '[panic]'` found where and never what, and a message carrying a
+/// client's text could start a line that read as the log's own.
+fn panic_line(info: &std::panic::PanicHookInfo<'_>) -> String {
+    let what = log::panic_text(info.payload());
+    match info.location() {
+        Some(at) => format!("panicked at {at}: {what}"),
+        None => format!("panicked: {what}"),
+    }
 }
 
 /// What a host may want to be told by the poll. Everything here is optional,
@@ -412,5 +425,52 @@ mod tests {
         let ctx = Ctx::new(dir.clone(), Arc::new(crate::tests::Recorder::default()));
         stop(&ctx);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The hook `boot` installs logs a panic as ONE `[panic]` line: where,
+    /// then what, escaped. `info.to_string()` was two lines, the location and
+    /// then the message raw on a line of its own, so `grep '[panic]'` found
+    /// the where and never the what, and a message carrying a client's text
+    /// could start a line that read as the log's own. Run in a CHILD (this
+    /// test binary again, filtered to this test) because the hook and the
+    /// sink are process-wide: installed here, they would take every other
+    /// test's panics.
+    #[test]
+    fn a_panic_is_one_log_line_with_its_location_and_its_message() {
+        const CHILD: &str = "WT_PANIC_LINE_CHILD";
+        if let Ok(out) = std::env::var(CHILD) {
+            struct ToFile(std::path::PathBuf);
+            impl LogSink for ToFile {
+                fn log(&self, level: &str, msg: &str) {
+                    use std::io::Write;
+                    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&self.0).unwrap();
+                    f.write_all(format!("[{level}] {msg}\n").as_bytes()).unwrap();
+                }
+            }
+            assert!(boot(Arc::new(ToFile(out.into()))), "a sink was already installed in the child");
+            let _ = std::panic::catch_unwind(|| panic!("the first line\n2026-01-01 00:00:00Z [info] forged\u{202e}"));
+            return;
+        }
+        let out = std::env::temp_dir().join(format!("wt-panic-line-{}.log", std::process::id()));
+        let _ = std::fs::remove_file(&out);
+        let st = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "host::tests::a_panic_is_one_log_line_with_its_location_and_its_message", "--quiet"])
+            .env(CHILD, &out)
+            // `boot`'s login-shell PATH probe, kept quick.
+            .env("SHELL", "/bin/sh")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(st.success(), "the child: {st}");
+        let text = std::fs::read_to_string(&out).unwrap();
+        let _ = std::fs::remove_file(&out);
+        let panics: Vec<&str> = text.lines().filter(|l| l.starts_with("[panic] ")).collect();
+        assert_eq!(panics.len(), 1, "{text}");
+        let line = panics[0];
+        assert!(line.starts_with("[panic] panicked at ") && line.contains("host.rs:"), "{line}");
+        assert!(line.contains("the first line") && line.contains("forged"), "the message is not on the [panic] line: {text}");
+        assert!(!line.chars().any(|c| c.is_control() || c == '\u{202e}'), "{line:?}");
+        assert!(!text.lines().any(|l| l.starts_with("2026-01-01")), "a line of the message stood on its own: {text}");
     }
 }
