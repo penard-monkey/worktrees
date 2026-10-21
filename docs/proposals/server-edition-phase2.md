@@ -48,7 +48,7 @@ measurements as exit criteria. The draft was then reviewed with the
 | 4 | May the loopback listener enroll? | It is where enrollment is AUTHORIZED, and never where a device enrolls. Opening a pairing window is a console act, done over loopback with serve.json's token. The loopback listener never accepts a device credential. | 2 |
 | 5 | Per-object authorization (R1) | Each device has capabilities (`read`, `write`, `answer`, `instruct`, `stream`, `admin`) and a project scope. Every row of the dispatch table declares the capability it needs and the object it acts on. One resolver checks that before the body runs, against the grant of the (principal, device) pair: the principal's grant intersected with the device's. The scope also rides into the api, so the api's own path guard answers with the caller's roots: two checks, as R1 asked. Results and events are cut down to the scope. | 2 |
 | 6 | Rows a remote device never reaches | A new `HostConsole` class, served on loopback only. It covers every row that can widen what agents on this host may do, pairing and device administration, `update_cli` (*decided*, §11 Q3), and adopting a project from a hub. | 2 |
-| 7 | The remote listener | Off by default, with a one-click kill switch on the host. It binds one specific private address on a named interface, an overlay address or a LAN one (*decided*, §11 Q6), never a wildcard and never loopback. "Private" is a closed list (RFC 1918, CGNAT `100.64.0.0/10`, link-local, ULA `fc00::/7`), and anything else is refused. When the address leaves its interface or the network changes, the listener closes until the same network returns or the host chooses again. On a LAN, devices find a moved host over mDNS: it is advertised only in LAN mode and on the bound interface, it reveals nothing but an opaque id, and a discovered address is adopted only after a pinned handshake (*decided*, §11.1 N2). An address code is the fallback. TLS 1.3 is mutual and pinned both ways (rustls), with no CA, no resumption and no 0-RTT in Phase 2. On iOS the socket lives in the Rust shim and not in the WebView. | 2 |
+| 7 | The remote listener | Off by default, with a one-click kill switch on the host. It binds one specific private address on a named interface, an overlay address or a LAN one (*decided*, §11 Q6), never a wildcard and never loopback. "Private" is a closed list (RFC 1918, CGNAT `100.64.0.0/10`, link-local, ULA `fc00::/7`), and anything else is refused. When the address leaves its interface or the network changes, the listener closes until the same network returns or the host chooses again. A new address on the same network rebinds by itself, at most three times an hour (*decided*, §11.2 N4). On a LAN, devices find a moved host over mDNS: it is advertised only in LAN mode and on the bound interface, it reveals nothing but an opaque id, and a discovered address is adopted only after a pinned handshake (*decided*, §11.1 N2). An address code is the fallback. TLS 1.3 is mutual and pinned both ways (rustls), with no CA, no resumption and no 0-RTT in Phase 2. On iOS the socket lives in the Rust shim and not in the WebView. | 2 |
 | 8 | The CI witness (R8) | A connect witness for loopback serve, which is missing today. Then the bind rules, as connects: a public address that IS bindable is refused, the remote port never answers on loopback, a peer outside the allowed sources is dropped, and an address change pauses and resumes the listener. Then identity: no certificate is refused, an unenrolled one is refused, an enrolled one is served, a revoke kills the live socket, an expired device is refused, and the pairing port is closed outside a window. Measured on both platforms, with a release gate that greps the exact count. | 2 |
 | 9 | The audit log (R5) | `<config_dir>/audit.jsonl`, mode `0600`, append-only and hash-chained. Only serve's connection layer writes it, and its records are structured, never free text. Every record names a principal as well as a device. | 2 |
 | 10 | Resource limits (R6) | Per-device connection, in-flight and rate caps; bounded outboxes and lanes; single-flight for the expensive reads; separate budgets for loopback and remote, so a device cannot starve the desk. | 2 |
@@ -981,12 +981,12 @@ identity there. The interface's NAME is left out on purpose: macOS numbers
 fingerprint that held the name would pause remote access after ordinary
 reboots, and a pause dialog that fires for no reason teaches the user to
 accept the one that matters, the same habituation §2.5 avoids for expiry.
-For any other interface the fingerprint is the interface, the subnet
-(address and prefix length) and, when the default route runs through that
-interface, the gateway's link-layer address, read from the routing and
-neighbour tables. *Reading those is
-unmeasured on both platforms; §10.* The host poll (3 s) compares what the
-interface holds now with what was recorded:
+For any other interface the fingerprint is the interface, the subnet (the
+network prefix and its length, not the host's own address within it) and,
+when the default route runs through that interface, the gateway's
+link-layer address, read from the routing and neighbour tables. *Reading
+those is unmeasured on both platforms; §10.* The host poll (3 s) compares
+what the interface holds now with what was recorded:
 
 - **The address leaves its interface** (a DHCP lease moves, Wi-Fi drops,
   the overlay goes down, the machine sleeps). Serve closes the remote
@@ -999,12 +999,37 @@ interface holds now with what was recorded:
   includes the same interface). Serve binds again and writes
   `remote_resumed`, with no dialog. This is the overlay reconnecting, or
   the laptop rejoining its own Wi-Fi.
-- **Anything else** (a new address, another interface, or the same address
-  on a network whose fingerprint differs, such as a café that also hands
-  out `192.168.1.x`). Serve stays paused and asks: *"Remote access is
+- **A new address in the same subnet, with the same fingerprint** (decided,
+  §11.2 N4). This is what a moved DHCP lease looks like on a LAN: same
+  interface, same subnet, same gateway, and only the host's own address
+  changed. Serve binds the new address by itself, re-running the
+  classifier on it, and writes `bind moved` with both addresses. Devices
+  follow over mDNS (§4.7) and the pinned handshake, or with the address
+  code. It applies to LAN binds only, since a point-to-point fingerprint
+  includes the address. Three limits go with it (§12.3):
+  - at most three automatic moves in an hour. A fourth pauses and asks,
+    with an alert (§5.3), so a rogue DHCP server cannot make the listener
+    flap, dropping every remote connection and writing an audit record
+    each time;
+  - a move closes any open pairing window, whose QR names the old address,
+    and moves the mDNS advert (withdraw, then register);
+  - the subnet recorded at enable must lie wholly inside one row of the
+    allowlist above. A wide netmask, such as a `10.0.0.5/7` that also
+    covers `11.0.0.0/8`, is refused at enable, so "the same subnet" can
+    never include a public address.
+- **Anything else** (an address in another subnet, another interface, or
+  any address on a network whose fingerprint differs, such as a café that
+  also hands out `192.168.1.x`). Serve stays paused and asks: *"Remote access is
   paused. This Mac is now 192.168.4.20 on en0, on a different network. [Use
   this address] [Keep it off]"*. Using the new address is `remote_enable`
-  again, which re-runs the classifier and records a new fingerprint.
+  again, which re-runs the classifier and records a new fingerprint. When
+  the ONLY thing that changed is the gateway's link-layer address (same
+  interface, same subnet), the dialog says so in its own words and the
+  host raises an alert (§5.3): *"The router's hardware address changed.
+  This can mean a different network, or someone on this one pretending to
+  be the router."* That is what ARP spoofing of the gateway looks like, and
+  a generic "different network" would invite the click that records the
+  impersonator as the new fingerprint.
 - **An address missing at startup** is the paused state. The loopback
   listener never waits for it, and serve logs the state once per episode.
 
@@ -1196,8 +1221,12 @@ the listener is a CONNECT that follows one that must succeed:
    it: remove the address. Within two polls the device's socket closes, a
    connect to the old address fails, and the audit log has
    `remote_paused`. Put the same address back: a connect succeeds again,
-   and the log has `remote_resumed`. Put a different address there
-   instead: a connect to it fails until `remote_enable` names it.
+   and the log has `remote_resumed`. Give the interface a NEW address in
+   the same subnet instead: the listener moves by itself, a connect to the
+   new address succeeds, one to the old address fails, and the log has
+   `bind moved` with both. Three more moves inside the hour: the fourth
+   pauses instead, with an alert. Give it an address in a different
+   subnet: a connect to it fails until `remote_enable` names it.
 5. **The peer rule holds** (§4.1, parts 2 and 3). The client binds its
    socket to a chosen source address on the scratch interface before it
    connects. With the remote listener on a `100.64.0.0/10` address on a
@@ -1481,9 +1510,10 @@ the whole file, and nothing here claims that it can (§1).
 
 - lifecycle: the listener started or stopped, with version, address,
   interface and identity pin; remote access enabled or disabled; paused or
-  resumed by an address change, with the reason; the bind moved to a new
-  address (§4.1); the mDNS advert registered or withdrawn, with its
-  interface (§4.7);
+  resumed by an address change, with the reason; `bind moved` to a new
+  address, with both addresses and whether the console chose it or serve
+  moved it within the same subnet (§4.1); the mDNS advert registered or
+  withdrawn, with its interface (§4.7);
 - pairing: a window opened, an attempt with its result and reason, Allow or
   Deny, the window closed;
 - devices: enrolled (with principal, scope and expiry), scope changed,
@@ -1547,6 +1577,8 @@ Devices:
 - a device paired, or remote access turned on or off;
 - remote access paused by an address change, and waiting for the host to
   choose (§4.1);
+- automatic rebinds past their limit, and a gateway whose link-layer
+  address changed on the same subnet (§4.1);
 - authentication failures past a threshold in one episode;
 - a device disabled by its expiry (§2.5);
 - a revoked or disabled device trying to connect;
@@ -1989,19 +2021,20 @@ is visible.
   later, it can become a console-only list of extra private CIDRs, each
   passing the classifier, and audited when it changes.
 
-### 11.2 Open, raised by N2
+### 11.2 Decided 2026-10-20: raised by N2
 
-- **N4. Should a new address on the SAME network rebind by itself?** Today
-  any new address pauses remote access until the host chooses it (§4.1),
-  even when the interface, the subnet and the gateway are all unchanged,
-  which is exactly what a moved DHCP lease looks like. With mDNS in Phase
-  2 the devices can follow such a move without help, but only if the host
-  does too; otherwise every renumbering still needs a click at the desk.
-  The recommendation is yes: rebind automatically when the fingerprint
-  matches and only the address within the subnet changed, and keep asking
-  when anything else changed. The fingerprint already decides what "the
-  same network" means, and a new address inside it changes nothing about
-  who can reach the port.
+- **N4. A new address on the SAME network rebinds by itself.** As
+  recommended. Before this, any new address paused remote access until the
+  host chose it, even when the interface, the subnet and the gateway were
+  all unchanged, which is exactly what a moved DHCP lease looks like. With
+  mDNS in Phase 2 the devices can follow such a move without help, and now
+  the host does too. The fingerprint already decides what "the same
+  network" means, and a new address inside it changes nothing about who
+  can reach the port. *Consequence:* §4.1 rebinds by itself when the
+  fingerprint matches and only the address within the subnet changed,
+  audited as `bind moved`, and any other change still pauses and asks at
+  the host. §4.6 step 4 witnesses both. §12.3 is the check on whether a
+  LAN attacker can steer such a rebind.
 
 ---
 
@@ -2018,7 +2051,7 @@ O15.
 **This first pass predates the decisions of 2026-10-20 (§11).** A second
 pass covered what those decisions changed, and §12.1 lists what it changed
 in turn. §12.2 is a third pass, over the mDNS design (§4.7) that §11.1 N2
-added.
+added, and §12.3 a check of the automatic rebind that §11.2 N4 added.
 
 **What held up.** Deny by default, through an exhaustive table with a
 fail-closed resolver. Authentication before parsing: unknown devices stop
@@ -2163,3 +2196,56 @@ listener. The address code stays as the fallback.
 - *Denial of service by a LAN attacker.* Flooding adverts, or spoofing ARP,
   can keep a device from its host, and nothing at this layer prevents it.
   The address code is the way back.
+
+### 12.3 Check, 2026-10-20: the automatic rebind
+
+§11.2 N4 lets serve move its LAN bind by itself when the fingerprint
+(interface, subnet, gateway link-layer address) matches and only the host's
+own address changed. This check, again with the `owasp-security` skill,
+asked one question of that rule: can an attacker steer such a rebind, and
+what would it gain? It covered A01, A05, A06, A09 and A10, and the
+habituation concern ASI09 names.
+
+**The answer: a LAN attacker can steer it, only within the same subnet,
+and gains nothing but denial of service.**
+
+- **A rogue DHCP server, or a rogue IPv6 router advertisement, on the
+  host's own LAN** can give the host a new address. If it keeps the subnet
+  and the real gateway, the fingerprint matches and serve moves. The
+  listener is still on the same network, in front of the same peers, and
+  the peer rule (§4.1, part 3) is relative to that same subnet. mTLS and
+  the pins are untouched. If the rogue server names itself as the gateway,
+  the gateway's link-layer address changes, the fingerprint does not
+  match, and serve pauses. A new IPv6 prefix is a different subnet, which
+  pauses too.
+- **ARP spoofing of the gateway** changes the link-layer address the host
+  sees, so the fingerprint stops matching and serve pauses. That is a
+  denial of service, plus a dialog the attacker hopes the user will click
+  through.
+- **An evil twin** (a network the laptop joins that copies the home
+  subnet and the gateway's link-layer address) needs that address and a
+  network the laptop will join. Such an attacker could already have served
+  the host its old address, since a DHCP client asks for the address it
+  had, and that address auto-resumed before N4. So N4 adds no capability.
+  What the attacker gets is the TLS port in front of its own network, with
+  mTLS still the gate, as §4.1 already says: the fingerprint stops accidents,
+  not attackers.
+
+**What it changed.** Four limits, all in §4.1:
+
+| # | OWASP | Finding | Change, and where |
+|---|---|---|---|
+| R1 | A06, A10 | A rogue DHCP server could make the listener move without end, dropping every remote connection and writing an audit record each time. | At most three automatic moves an hour. The fourth pauses and asks, with an alert. (§4.1, §4.6, §5.3) |
+| R2 | A09, ASI09 | A gateway change on the same subnet would have shown the generic "different network" dialog, inviting the click that records an impersonator as the new fingerprint. | That case has its own words, naming ARP spoofing as one cause, and an alert. (§4.1, §5.3) |
+| R3 | A05, A06 | "The same subnet" was only as safe as the netmask recorded at enable. A wide one such as `/7` on a `10.x` address also covers `11.0.0.0/8`, which is public. | The recorded subnet must lie wholly inside one allowlist row, and the classifier runs again on every new address. (§4.1) |
+| R4 | A06 | A move left an open pairing window whose QR names the old address, and it did not say what happens to the mDNS advert, which is tied to a listener that closes and reopens. | A move closes any pairing window, and withdraws the advert and registers it again with the new listener. (§4.1) |
+
+**Considered and not changed.**
+
+- *Adding the Wi-Fi network's name (SSID) or the access point's address
+  (BSSID) to the fingerprint.* Reading either needs Location permission on
+  recent macOS, and an evil twin copies the SSID anyway. The gateway's
+  link-layer address already tells home from elsewhere for accidents, which
+  is all the fingerprint is for.
+- *Authenticating the gateway.* Nothing on a home LAN offers it, and mTLS
+  already makes the network's honesty irrelevant to who gets in.
