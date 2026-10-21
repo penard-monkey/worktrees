@@ -15,7 +15,9 @@ same day. Six follow the recommendation. Two depart from it: multi-user is
 "maybe later", so the schema keeps room for it (§2.8), and expiry is set per
 device from the host rather than by one host-wide rule (§2.5). LAN mode
 ships in Phase 2 (§4.1). This revision folds all eight in, and §11 records
-each answer with its consequence.
+each answer with its consequence. The user then answered the three
+questions those answers raised (§11.1). One of them also departs from the
+recommendation: a host is rediscovered over mDNS in Phase 2 (§4.7).
 
 **Base.** Written against `feat/app-serve-client` at `fadb2ce`, the tip of the
 unmerged Server Edition stack (#508 → #516 → #515 → that branch). Every
@@ -42,11 +44,11 @@ measurements as exit criteria. The draft was then reviewed with the
 |---|---|---|---|
 | 1 | How does a device enroll? | A QR shown on the host carries the server's SPKI pin and a 128-bit one-use secret. The pairing listener exists only while a window is open, and the window closes after one attempt or 120 s. Only the host opens one (*decided*, §11 Q5). The device proves the secret over pinned TLS, bound to the session by a TLS exporter. Both screens show a short code, and the user confirms on the host. The dialog pre-selects Observe (*decided*, §11 Q4). | 2 |
 | 2 | What is a device's credential? | Its own P-256 key: in the Secure Enclave on iOS, and in a `0600` file on macOS and Linux. It authenticates with mutual TLS, so an unenrolled peer never reaches the HTTP parser. There are no passwords and no bearer tokens. The server's record binds the key to a device and the device to a principal (row 14). On iOS, the riskiest acts also need a second, presence-bound key (a step-up), on by default (*decided*, §11 Q8). | 2 |
-| 3 | Revocation, expiry, and a lost phone | A revoke takes effect at once: the device's live sockets close, its next request on any socket is refused, and its next TLS handshake fails. The host console or another device of the same principal with `admin` can revoke it, but only the console can WIDEN a scope. Each device carries its own expiry, chosen on the host at pairing (default: disabled after 30 days unused) and edited from the host only. An expired device is disabled, not deleted, and only the host re-enables it (*decided*, §11 Q7). A stolen locked phone cannot connect. An unlocked one keeps its scope until it is revoked or expires, and the audit log shows what it did. Clients cache nothing they can lose. | 2 |
+| 3 | Revocation, expiry, and a lost phone | A revoke takes effect at once: the device's live sockets close, its next request on any socket is refused, and its next TLS handshake fails. The host console or another device of the same principal with `admin` can revoke it, but only the console can WIDEN a scope. Each device carries its own expiry, chosen on the host at pairing (default: disabled after 30 days unused, for every preset; *decided*, §11.1 N3) and edited from the host only. An expired device is disabled, not deleted, and only the host re-enables it (*decided*, §11 Q7). A stolen locked phone cannot connect. An unlocked one keeps its scope until it is revoked or expires, and the audit log shows what it did. Clients cache nothing they can lose. | 2 |
 | 4 | May the loopback listener enroll? | It is where enrollment is AUTHORIZED, and never where a device enrolls. Opening a pairing window is a console act, done over loopback with serve.json's token. The loopback listener never accepts a device credential. | 2 |
 | 5 | Per-object authorization (R1) | Each device has capabilities (`read`, `write`, `answer`, `instruct`, `stream`, `admin`) and a project scope. Every row of the dispatch table declares the capability it needs and the object it acts on. One resolver checks that before the body runs, against the grant of the (principal, device) pair: the principal's grant intersected with the device's. The scope also rides into the api, so the api's own path guard answers with the caller's roots: two checks, as R1 asked. Results and events are cut down to the scope. | 2 |
 | 6 | Rows a remote device never reaches | A new `HostConsole` class, served on loopback only. It covers every row that can widen what agents on this host may do, pairing and device administration, `update_cli` (*decided*, §11 Q3), and adopting a project from a hub. | 2 |
-| 7 | The remote listener | Off by default, with a one-click kill switch on the host. It binds one specific private address on a named interface, an overlay address or a LAN one (*decided*, §11 Q6), never a wildcard and never loopback. "Private" is a closed list (RFC 1918, CGNAT `100.64.0.0/10`, link-local, ULA `fc00::/7`), and anything else is refused. When the address leaves its interface or the network changes, the listener closes until the same network returns or the host chooses again. TLS 1.3 is mutual and pinned both ways (rustls), with no CA, no resumption and no 0-RTT in Phase 2. On iOS the socket lives in the Rust shim and not in the WebView. | 2 |
+| 7 | The remote listener | Off by default, with a one-click kill switch on the host. It binds one specific private address on a named interface, an overlay address or a LAN one (*decided*, §11 Q6), never a wildcard and never loopback. "Private" is a closed list (RFC 1918, CGNAT `100.64.0.0/10`, link-local, ULA `fc00::/7`), and anything else is refused. When the address leaves its interface or the network changes, the listener closes until the same network returns or the host chooses again. On a LAN, devices find a moved host over mDNS: it is advertised only in LAN mode and on the bound interface, it reveals nothing but an opaque id, and a discovered address is adopted only after a pinned handshake (*decided*, §11.1 N2). An address code is the fallback. TLS 1.3 is mutual and pinned both ways (rustls), with no CA, no resumption and no 0-RTT in Phase 2. On iOS the socket lives in the Rust shim and not in the WebView. | 2 |
 | 8 | The CI witness (R8) | A connect witness for loopback serve, which is missing today. Then the bind rules, as connects: a public address that IS bindable is refused, the remote port never answers on loopback, a peer outside the allowed sources is dropped, and an address change pauses and resumes the listener. Then identity: no certificate is refused, an unenrolled one is refused, an enrolled one is served, a revoke kills the live socket, an expired device is refused, and the pairing port is closed outside a window. Measured on both platforms, with a release gate that greps the exact count. | 2 |
 | 9 | The audit log (R5) | `<config_dir>/audit.jsonl`, mode `0600`, append-only and hash-chained. Only serve's connection layer writes it, and its records are structured, never free text. Every record names a principal as well as a device. | 2 |
 | 10 | Resource limits (R6) | Per-device connection, in-flight and rate caps; bounded outboxes and lanes; single-flight for the expensive reads; separate budgets for loopback and remote, so a device cannot starve the desk. | 2 |
@@ -137,13 +139,13 @@ log are for.
 
 | Credential | What it is | Where it lives | Lifetime |
 |---|---|---|---|
-| Server identity | A P-256 key and a self-signed certificate. Its SPKI SHA-256 is the **pin**. | `<config_dir>/server-identity.key` (PKCS#8, `0600`) and `.crt` | Created the first time remote access is enabled. Reused across launches, because a pin must survive a restart, unlike the loopback token. Rotating it means pairing every device again (§2.5). |
+| Server identity | A P-256 key and a self-signed certificate. Its SPKI SHA-256 is the **pin**. Beside it, a **discovery id**: 128 random bits, not derived from the key or anything public, that the mDNS advert carries (§4.7). | `<config_dir>/server-identity.key` (PKCS#8, `0600`) and `.crt`; the discovery id in the same directory, `0600` | Created the first time remote access is enabled. Reused across launches, because a pin must survive a restart, unlike the loopback token. Rotating it means pairing every device again (§2.5), and the discovery id rotates with it. |
 | Device key (iOS, iPadOS) | P-256 in the Secure Enclave, non-exportable, `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, never synced to iCloud | The device's keychain | Until it is revoked or the app is deleted |
 | Device key (macOS, Linux) | P-256, in a `0600` PKCS#8 file | The client app's own config dir | As above |
 | Step-up key (iOS, iPadOS) | A second Secure Enclave P-256 key, created with `.userPresence`. It signs a server challenge before a drive-class act (§2.5). | The device's keychain | Enrolled with the device key, revoked with it |
 | Principal record | `{id, name, caps, projects, created_at}`. Phase 2 has exactly one, the **owner**: the host account's user, with every capability and scope `"*"`. Its `id` is the reserved constant `owner`, so the console never reads the file to know who it is; a later principal would get a random `p_…` id. The loopback caller is always the owner (§2.8). | `<config_dir>/devices.json`, as a second list beside the devices | Created with the file. Never removed in Phase 2. |
 | Device record | `{id, principal, name, platform, spki_sha256, stepup_spki_sha256, stepup_required, caps, projects, expiry, enrolled_at, last_seen, last_addr, disabled, revoked_at}`; `id` is random, not derived from the key. `principal` is set at pairing and never changes. `expiry` and `disabled` are §2.5's. | `<config_dir>/devices.json`, `0600`. Serve is its only writer, under `servefile`'s lock-temp-rename discipline (`crates/worktrees-cli/src/serve/servefile.rs:79`–`122`). | Kept after revocation as a tombstone, for the audit trail |
-| What the device keeps | Its keys, plus `{host: {name, pin, addr}, principal_id, device_id}`. The pairing answer and the remote handshake's first frame name both ids (§2.2, §4.5). | Beside the device key, under the same protection | Until it is revoked or the app is deleted |
+| What the device keeps | Its keys, plus `{host: {name, pin, addr, discovery_id}, principal_id, device_id}`. The pairing answer and the remote handshake's first frame name both ids (§2.2, §4.5). | Beside the device key, under the same protection | Until it is revoked or the app is deleted |
 | Loopback token | Unchanged: per launch, in serve.json, used for handshake v1 | `<config_dir>/serve.json` | Per launch |
 
 Four choices in that table need their reasons.
@@ -228,8 +230,8 @@ Four choices in that table need their reasons.
    the host: *"Someone else used this pairing code. Tap Deny on <host>."*
    Pairing events go to loopback clients only (§3.3).
 7. On Allow, serve writes the record into `devices.json` and answers
-   `{paired: {device_id, principal_id, host_name, remote_addr, expiry}}`.
-   Then it closes the pairing listener. From now on the device connects to
+   `{paired: {device_id, principal_id, host_name, remote_addr, expiry,
+   discovery_id}}`. Then it closes the pairing listener. From now on the device connects to
    the remote listener with its key (§4).
 
 **Why the code is compared and not just shown.** Someone who photographs the
@@ -332,8 +334,7 @@ device record carries its own `expiry`, chosen on the host at pairing (§2.2)
 and edited later from the host console only (`device_set_expiry`):
 
 - `{"idle_days": N}`: disabled once N days pass with no completed handshake.
-  **The default is 30**, for every preset (§11.1 N3 asks whether Drive
-  devices should default shorter).
+  **The default is 30**, for every preset (decided, §11.1 N3).
 - `{"until": "<RFC 3339 time>"}`: disabled at that moment, for a device
   that is temporary on purpose, such as a borrowed laptop.
 - `"never"`: allowed, and the device list marks it.
@@ -754,7 +755,7 @@ change what this machine's agents are allowed to do."
 | **`save_profile`, `set_project_profile`, `set_default_profile`** | HostAdmin | `mcp_servers` and `settings` (claude's `hooks` live in that raw JSON) are commands run at the next launch. Binding a profile to a project chooses which of them run there. |
 | **`set_agent_guidance`, `set_agent_guidance_skill`, `agent_guidance_merge`, `agent_link_skills`, `skill_install_local`, `skill_install_git`** | HostAdmin | Text and scripts that every agent on the host loads |
 | **`sync_apply`, in its adopt form (no `repo`)** | HostAdmin | It writes to a path the hub's manifest chooses (§8, gap 4) |
-| *new:* `pair_begin`, `pair_decide`, `device_set_expiry`, `device_set_stepup`, `device_disable`, `device_enable`, `devices_revoke_all_others`, `remote_enable` (also how the bind moves to a new address, §4.1), `identity_rotate` | — | §2.5, §2.6, §4.1 |
+| *new:* `pair_begin`, `pair_decide`, `device_set_expiry`, `device_set_stepup`, `device_disable`, `device_enable`, `devices_revoke_all_others`, `remote_enable` (also how the bind moves to a new address, §4.1), `remote_advertise` (the mDNS switch, §4.7), `identity_rotate` | — | §2.5, §2.6, §4.1, §4.7 |
 
 **admin** (served remotely to a device with `admin`; Phase 2 keeps the
 loopback behaviour the same):
@@ -901,7 +902,8 @@ nothing changes. Two things change on purpose, for every caller:
   by itself. It could become a setting: a console-only list of extra
   private CIDRs, each passing the classifier, and audited when it changes.
   Phase 2 ships without that setting, because no network in scope needs
-  it, and a setting is one more thing to get wrong.
+  it, and a setting is one more thing to get wrong (decided by `(main)` on
+  the user's behalf, §11.1).
 - **Its own `Shared` and its own rule set,** under the same dispatch table
   and the same `Ctx`. Decision 6 says two listeners, two rule sets. A flag
   on the loopback listener would let one of them leak into the other.
@@ -966,7 +968,8 @@ there the "LAN" includes the carrier's other customers. None of them gets
 past TLS without an enrolled key, but the TLS port answers them. So when a `100.64.0.0/10`
 address sits on an interface that is not point-to-point (Tailscale's `utun`
 on macOS and `tailscale0` on Linux are), the enable dialog warns and names
-the interface. Whether it should refuse instead is §11.1, N1.
+the interface. It is allowed with that warning (decided, §11.1 N1), and
+such a bind is not advertised over mDNS (§4.7).
 
 **When the address changes.** At enable time `serve-remote.json` records the
 address, the interface and a **network fingerprint**. For a point-to-point
@@ -1019,7 +1022,9 @@ keeps its old address and adopts the new one only after a pinned handshake
 to it succeeds. A forged code then costs one failed attempt, which the
 device reports as the wrong host, not a lost one. For LAN mode, the enable
 dialog suggests a DHCP reservation on the router, which avoids the step.
-Discovery over mDNS is §11.1, N2.
+On a LAN, a device also finds a moved host by itself over mDNS (§4.7,
+decided in §11.1 N2), and the address code is the fallback when that
+fails.
 
 ### 4.2 TLS: options
 
@@ -1072,7 +1077,7 @@ exactly two things:
   (§2.2) is what authenticates there.
 - **Client side (`ServerCertVerifier`).** The SPKI must equal the pin. The
   signature is checked by rustls's helper. The hostname is not checked: the
-  pin is stronger than a name.
+  pin is stronger than a name. So the client sends no SNI either (§4.7).
 
 Each branch gets a negative test with a fixture certificate: wrong key,
 right key with a bad signature, revoked, and pairing-only.
@@ -1106,6 +1111,17 @@ use. So:
   the usage string ships with it, and so does the path for a user who
   declined the prompt: a message pointing at Settings → Privacy → Local
   Network, not a silent connect failure.
+- **Bonjour** (§4.7, in Phase 2 by §11.1 N2). Browsing needs
+  `NSBonjourServices` in Info.plist listing `_worktrees._tcp`; a type left
+  off the list fails to browse. Browsing also raises the same Local Network
+  prompt, so a user who declines it loses discovery and LAN mode together,
+  and the message above covers both. Bonjour through the system's own APIs
+  does NOT need the restricted multicast entitlement
+  (`com.apple.developer.networking.multicast`), which only raw multicast
+  sockets need. That is one more reason the client never implements mDNS
+  itself. Whether to browse from Rust through the `dns_sd` C API, which iOS
+  ships, or through a small Swift plugin around `NWBrowser` is for §10's
+  spike.
 - **Backgrounding** suspends the socket. The client reconnects in the
   foreground with a full handshake, because resumption is off (§4.2). R6 has
   to expect reconnect storms (§6).
@@ -1247,6 +1263,165 @@ boundary tests by exact name and greps `test result: ok. 4 passed`
 shape for the serve witness, with its own exact count, because a renamed
 test turns `--exact` into a filter that matches nothing and exits 0.
 
+### 4.7 Rediscovery on the LAN: mDNS (decided, §11.1 N2)
+
+The address code (§4.1) needs someone to scan it. In LAN mode, a device can
+also find a host whose address moved by itself, through DNS-SD over
+multicast DNS (RFC 6762, RFC 6763), so a phone on the same Wi-Fi reconnects
+without help. The address code stays, as the fallback.
+
+**When, and where.**
+
+- Only while LAN mode is on: the remote listener is bound and not paused,
+  on an interface that is not point-to-point. An overlay bind is never
+  advertised, and mDNS would not cross the tunnel anyway.
+- Never for a `100.64.0.0/10` bind on an interface that is not
+  point-to-point (§11.1 N1). That link may include strangers, and the
+  enable dialog already warns about it.
+- Only on the bound interface, registered by its interface index.
+- Withdrawn with a goodbye (TTL 0) the moment the listener closes: a pause
+  (§4.1), the kill switch, or remote access turned off.
+- Visible on the host. While the advert is up, the indicator that remote
+  access is on (§4.1) also says that this Mac can be found on this
+  network. A console switch turns the advert off and leaves LAN mode on. It
+  starts on, as §11.1 N2 decided, and turning it off only narrows.
+
+**What it says.**
+
+- The service type `_worktrees._tcp`.
+- The host's **discovery id** (§2.1): 128 random bits in base32, as both
+  the instance name and the TXT key `id`. It is meaningless to anyone
+  without a record that holds it, and nothing public derives it: not the
+  pin, not the host name, not the key.
+- One other TXT key, `v=1`.
+- An SRV record pointing at the remote listener's port and at the host
+  name the OS already advertises (`<LocalHostName>.local`). Serve adds no
+  host record of its own.
+- The remote listener only. The pairing listener (§2.4) is never
+  advertised, not even while a window is open. One bad attempt closes a
+  window, so a window that announced itself could be burned by anyone on
+  the link the moment it opened.
+
+Serve composes every record from constants and the discovery id, with no
+client string in any of them, so nothing can be injected into the advert.
+
+Nothing else: no user name, no host name beyond the OS's own, no project or
+place names, and no pin.
+
+**How serve advertises.** Through the OS's own responder, never one of its
+own: mDNSResponder (`DNSServiceRegister`) on macOS and Avahi over D-Bus on
+Linux, each given the bound interface's index. So serve parses no multicast
+traffic, and no new UDP listener runs in the engine's process: the one that
+answers is the responder the OS already runs. Where there is none, such as
+a Linux host without Avahi, discovery is off, the enable dialog says so,
+and the address code is the only path. How serve calls each responder, and
+whether either needs a new crate, is decided when it is built and checked
+on OSV, as §4.2 requires.
+
+**How a device uses it.** A device gets the discovery id in the pairing
+answer and keeps it with the host's record (§2.1). It browses
+`_worktrees._tcp` only when it needs to: when its stored address stops
+answering, for at most 30 seconds, with a back-off between rounds. It never
+browses in the background, because a phone that keeps asking for
+`_worktrees._tcp` announces, on every network it joins, that it is a
+worktrees client. Each advert is untrusted input, and a candidate is tried
+only if all of these hold:
+
+- Its TXT record is exactly `v=1` plus an `id` of 26 base32 characters,
+  and that `id` equals the host's discovery id. The device matches on the
+  TXT key and ignores the instance name. mDNS renames an instance whose
+  name another host claimed first, so a squatter could otherwise push the
+  real advert out of sight and put its own in that place.
+- Its address passes the classifier (§4.1) and is on-link for the
+  interface the advert arrived on: inside that interface's own subnet, or
+  link-local. Without this, a spoofed advert could point the phone at any
+  address the phone can reach, a VPN's networks included, and use it as a
+  probe.
+- It is one of the first four distinct candidates this round. A candidate
+  that fails is not tried again in the same round.
+
+A discovered address is adopted only after a pinned handshake to it
+succeeds, the same rule S8 set for the address code, and the old address is
+kept until then. Discovery chooses where to try, never whom to believe.
+
+**A spoofer learns nothing about the device that tries it.** In TLS 1.3
+the server proves its key before the client sends any certificate, and
+rustls checks the pin as soon as the server's certificate arrives (§4.3).
+So a wrong pin ends the handshake before the device's certificate is sent,
+and that certificate would be encrypted in any case. The client sends no
+SNI (rustls's `enable_sni` is off, since the pin needs no name), so the
+ClientHello does not carry the host's name either. A test checks both
+against a server with the wrong key.
+
+**What it costs.**
+
+- In serve: registering and withdrawing an advert on two platforms, tied to
+  the listener's state, plus two audit kinds (§5.1).
+- In the clients: a browse in the shim for iOS and iPadOS (§4.4) and for
+  the desktop client, the `NSBonjourServices` entry, and the
+  `discovery_id` in the host's record.
+- A second Local Network moment on iOS, and on macOS 15 and later (§10's
+  spike).
+- One more thing the user can see on the network, which the next item is
+  about.
+
+**What it exposes.**
+
+- **LAN reconnaissance.** Anyone on the link learns that this host runs
+  worktrees with remote access on, and on which port. A port scan finds the
+  port anyway; the advert removes the effort and labels it. It adds no
+  capability, because the port is mTLS and an unenrolled peer stops inside
+  rustls (§4.3). That is the cost the user accepted in N2, and it is why
+  the advert exists only in LAN mode and on one interface.
+- **Spoofed adverts.** Anyone on the link can advertise any instance,
+  including one carrying a copied discovery id and their own address. The
+  device tries it, the pin does not match, and nothing is adopted.
+- **Replayed adverts.** An old advert, or a cached record of the host's
+  previous address, sends the device to an address that is either still
+  the host (fine) or no longer is (refused at the pin).
+- **Linkability.** The discovery id is stable, so an observer on two
+  networks where LAN mode was on can tell it is the same machine. The SRV
+  target already names the machine through the OS's own `.local` name,
+  which is just as linkable, so the id adds nothing the OS does not already
+  show.
+- **Denial of service.** Anyone on the link can flood candidates, or
+  spoof ARP, and keep a device from finding its host. Nothing at this
+  layer prevents that, and the address code is the way back.
+
+**On the devices.**
+
+- **iOS and iPadOS:** `NSBonjourServices` and the Local Network
+  permission, as §4.4 says. No multicast entitlement.
+- **A macOS client** browses through `dns_sd`. macOS 15 and later has a
+  Local Network permission of its own, and how it treats an ad-hoc-signed
+  client after an update is part of §10's spike.
+- **A Linux client** browses through Avahi when it is present, and uses the
+  address code when it is not.
+- **Android** is not a Phase 2 client (decision 3). If one is ever built,
+  its DNS-SD is `NsdManager`, the same rules apply, and its permission and
+  multicast requirements, which have changed across Android releases, are
+  checked at that time.
+
+**The witness.** In CI, against a real serve in LAN mode on the scratch
+interface (§4.6), with the OS's browser (`dns-sd -B` on macOS,
+`avahi-browse` on Linux):
+
+1. With LAN mode on, the advert is present on the bound interface and on
+   no other, and its TXT record is `v` and `id` exactly. With a pairing
+   window open, no advert names the pairing port.
+2. Pause the listener (§4.6, step 4): the advert is withdrawn. Turn remote
+   access off: still withdrawn. An overlay bind, a `100.64.0.0/10` bind on
+   an interface that is not point-to-point, and the console switch turned
+   off: never advertised.
+3. In the client, as unit tests of the candidate logic:
+   - a discovered address whose pinned handshake fails is not adopted, and
+     the stored address is unchanged;
+   - a candidate that is off-link, or that has any other TXT shape, is
+     never dialled;
+   - at most four candidates are tried in a round;
+   - against a server with the wrong key, the device sends no certificate
+     and no SNI.
+
 ---
 
 ## 5. The audit log (R5)
@@ -1307,7 +1482,8 @@ the whole file, and nothing here claims that it can (§1).
 - lifecycle: the listener started or stopped, with version, address,
   interface and identity pin; remote access enabled or disabled; paused or
   resumed by an address change, with the reason; the bind moved to a new
-  address (§4.1);
+  address (§4.1); the mDNS advert registered or withdrawn, with its
+  interface (§4.7);
 - pairing: a window opened, an attempt with its result and reason, Allow or
   Deny, the window closed;
 - devices: enrolled (with principal, scope and expiry), scope changed,
@@ -1649,9 +1825,10 @@ Each slice merges on its own, and nothing binds off loopback until slice 6.
    the comparison code, revocation, per-device expiry, step-up, and the
    cross-check and alerts (§5.2, §5.3).
 6. **The remote listener** (§4), behind the opt-in: the address classifier,
-   the address-change rules and the address code (§4.1), the shim's remote
-   door, and both witnesses (§4.6). Every gap in §8 is closed or
-   tagged by now. Gap 6 lands whenever #519 meets the stack, as its row says.
+   the address-change rules and the address code (§4.1), mDNS rediscovery
+   (§4.7), the shim's remote door, and both witnesses (§4.6, §4.7). Every
+   gap in §8 is closed or tagged by now. Gap 6 lands whenever #519 meets
+   the stack, as its row says.
 
 **A spike, before slice 5's design is frozen:** on a real iPhone (TestFlight)
 and a second Mac on the tailnet, measure the claims marked unmeasured above:
@@ -1675,7 +1852,19 @@ and a second Mac on the tailnet, measure the claims marked unmeasured above:
   it, and whether `SO_BINDTODEVICE` and `IP_BOUND_IF` scope a listening
   socket (§4.1, peer rule part 2);
 - `utun` numbering across reboots on macOS, which decides whether the
-  point-to-point fingerprint may leave out the name (§4.1).
+  point-to-point fingerprint may leave out the name (§4.1);
+- Bonjour on iOS (§4.4, §4.7): browsing `_worktrees._tcp` from the shim,
+  through the `dns_sd` C API or an `NWBrowser` plugin; that a type missing
+  from `NSBonjourServices` fails; when the Local Network prompt appears,
+  and what a declined prompt looks like to the app;
+- macOS's own Local Network permission (macOS 15 and later), on both ends:
+  whether it touches serve's listener or its advert, which process the
+  prompt is attributed to when the app started serve, and whether an
+  ad-hoc-signed client is asked again after every update, as TCC is
+  (AGENTS.md);
+- registering on one interface only, through mDNSResponder on macOS and
+  Avahi on Linux, and the goodbye on withdrawal, seen from a second
+  machine (§4.7).
 
 **Exit, which is §III.9's, made concrete:**
 
@@ -1683,6 +1872,10 @@ and a second Mac on the tailnet, measure the claims marked unmeasured above:
       mutate, one terminal attach.
 - [ ] The same in LAN mode, from an iPhone on the host's Wi-Fi, with the
       Local Network prompt answered.
+- [ ] The host's LAN address moves, the host chooses the new one, and the
+      iPhone finds it over mDNS and reconnects with no address code. A
+      spoofed advert for the same id is tried, refused at the pin, and
+      changes nothing on the phone.
 - [ ] An unenrolled device cannot connect, measured at TLS.
 - [ ] A revoked device's live socket dies within 1 s, and it cannot
       reconnect. An expired device is refused, and a re-enabled one is
@@ -1760,24 +1953,55 @@ numbering is the draft's, and the rest of this document cites it as
    §2.5. Turning it off for one device removes a factor, so it is a console
    act, audited, and shown in the device list.
 
-### 11.1 Open, created by these answers
+### 11.1 Decided 2026-10-20: the questions those answers raised
 
-- **N1. CGNAT on an interface that is not a tunnel.** Q6 counts
-  `100.64.0.0/10` as private, which it is for Tailscale. On a phone hotspot,
-  and with some carriers and satellite ISPs, it is shared with strangers.
-  The recommendation is to allow it and warn in the enable dialog, naming
-  the interface (§4.1), because mTLS holds either way. The alternative is to
-  accept `100.64.0.0/10` only on a point-to-point interface.
-- **N2. Finding a host whose LAN address moved.** Phase 2's answer is the
-  address code (§4.1) and a suggested DHCP reservation. mDNS (Bonjour)
-  discovery would make it automatic. The recommendation is to leave it for
-  Phase 3: it is more listening surface on the LAN, and it advertises the
-  host to every device there.
-- **N3. The expiry default.** Proposed: 30 days unused, for every preset
-  (§2.5). Should a device that carries the "can run commands on <host> as
-  you" label default to something shorter, such as 14 days? The
-  recommendation is one default, because a default that depends on the
-  preset is one more thing to explain at the moment of pairing.
+The answers above raised three more questions, and the user answered them
+the same day. One departs from the recommendation: N2. A fourth point was
+decided by `(main)` on the user's behalf, and is recorded here so that it
+is visible.
+
+- **N1. CGNAT on an interface that is not a tunnel: allowed, with a
+  warning.** As recommended. `100.64.0.0/10` is private for Tailscale, but
+  on a phone hotspot, and with some carriers and satellite ISPs, it is
+  shared with strangers. *Consequence:* the enable dialog warns and names
+  the interface (§4.1), and mTLS holds either way. Such a bind is not
+  advertised over mDNS (§4.7).
+- **N2. Rediscovery by mDNS (Bonjour) is in Phase 2.** *Departs from the
+  recommendation*, which was to leave it for Phase 3 because it is more
+  surface on the LAN and announces the host to every device there.
+  *Consequence:* a new §4.7. The host is advertised only while LAN mode is
+  on, and only on the bound interface. The advert carries no user name, no
+  host name beyond what the OS already advertises, no project or place
+  name, and no pin, only an opaque id that paired devices hold. A
+  discovered address is adopted only after a pinned handshake to it
+  succeeds, the rule S8 set for the address code, and the address code stays
+  as the fallback. §4.7 says what it costs and what it exposes; §4.4 and
+  §10 cover the iOS side; §12.2 is its own review.
+- **N3. The expiry default is 30 days unused, for every preset.** As
+  recommended. *Consequence:* §2.5 as written. A default that depended on
+  the preset would be one more thing to explain at the moment of pairing.
+- **Routed private peers on a LAN bind stay refused, as a default.**
+  Decided by `(main)` on the user's behalf. This is part 3 of §4.1's peer
+  rule. Unlike parts 1 and 2, it is not a security requirement: a routed
+  private peer still has to get through mTLS, so refusing it shrinks who
+  can reach the TLS handshake but protects no asset by itself. It is
+  refused in Phase 2 because no network in scope needs it. If one does
+  later, it can become a console-only list of extra private CIDRs, each
+  passing the classifier, and audited when it changes.
+
+### 11.2 Open, raised by N2
+
+- **N4. Should a new address on the SAME network rebind by itself?** Today
+  any new address pauses remote access until the host chooses it (§4.1),
+  even when the interface, the subnet and the gateway are all unchanged,
+  which is exactly what a moved DHCP lease looks like. With mDNS in Phase
+  2 the devices can follow such a move without help, but only if the host
+  does too; otherwise every renumbering still needs a click at the desk.
+  The recommendation is yes: rebind automatically when the fingerprint
+  matches and only the address within the subnet changed, and keep asking
+  when anything else changed. The fingerprint already decides what "the
+  same network" means, and a new address inside it changes nothing about
+  who can reach the port.
 
 ---
 
@@ -1793,7 +2017,8 @@ O15.
 
 **This first pass predates the decisions of 2026-10-20 (§11).** A second
 pass covered what those decisions changed, and §12.1 lists what it changed
-in turn.
+in turn. §12.2 is a third pass, over the mDNS design (§4.7) that §11.1 N2
+added.
 
 **What held up.** Deny by default, through an exhaustive table with a
 fail-closed resolver. Authentication before parsing: unknown devices stop
@@ -1878,7 +2103,7 @@ witnesses with the served case first.
 
 - *Refusing `"never"` for a device that can run commands.* §11 Q7 puts
   expiry in the host's hands, the device list marks `"never"`, and the
-  default itself is §11.1 N3, which is with the user.
+  user kept one 30-day default for every preset (§11.1 N3).
 - *Signing the address code with the server's key.* The pinned handshake
   that follows already authenticates the address, so a signature would
   check the same fact twice.
@@ -1888,3 +2113,53 @@ witnesses with the served case first.
 - *A setting for routed LAN peers in Phase 2* (S2, part 3). Refusing them
   protects no asset by itself, so such a setting would be safe, but nothing
   in scope needs one yet.
+
+### 12.2 Third pass, 2026-10-20: mDNS rediscovery
+
+§11.1 N2 put rediscovery over mDNS into Phase 2, against the
+recommendation. §4.7 was drafted to the user's constraints, then reviewed
+with the `owasp-security` skill, together with its hooks in §2.1 (the
+discovery id), §4.3, §4.4 (iOS), §5.1 and §10. The review covered OWASP
+Top 10:2025 (A01, A02, A05, A06, A07, A09), ASVS 5.0 at L2 (input
+validation, communication, logging) and the zero-trust and
+secure-by-default principles, with the brief's focus: spoofed and replayed
+adverts, LAN reconnaissance, the device as a confused deputy, untrusted TXT
+parsing, exposure, and the platform permissions.
+
+**What held up.** Discovery is never trusted on its own: an address is
+adopted only after a pinned handshake. The OS's own responder answers, so
+serve parses no multicast traffic. The advert carries only constants and a
+random id that nothing public derives. It exists only in LAN mode, on one
+interface, never for N1's shared CGNAT links, and it is withdrawn with the
+listener. The address code stays as the fallback.
+
+**What it changed.** Six changes to the draft:
+
+| # | OWASP | Finding in the draft | Change, and where |
+|---|---|---|---|
+| D1 | A01, zero trust | The device "tries their addresses" with no limit on which addresses. A spoofed advert could point a phone at any address it can reach, a VPN's networks included, and use it as a probe. | A candidate must pass the classifier and be on-link for the interface its advert arrived on. At most four distinct candidates per round, none tried twice. (§4.7) |
+| D2 | A05, ASVS input validation | "Keeps the instances whose id matches" did not say which field matched, or how an advert is parsed. mDNS renames an instance whose name was claimed first, so a squatter matching on the instance name could hide the real host and stand in its place. | The device matches on the TXT `id` and ignores the instance name. An advert with any TXT shape but exactly `v=1` and a 26-character base32 `id` is dropped. (§4.7) |
+| D3 | A02, A06 | The draft did not say the pairing listener stays unadvertised. One bad attempt closes a pairing window (§2.4), so a window that announced itself could be burned by anyone on the link. | The pairing port is never advertised, even with a window open, and the witness checks it. The advert is built from constants, so no client string reaches it. (§4.7) |
+| D4 | A07, A04 | What a spoofer learns when a device dials it was unstated. A ClientHello carrying SNI would hand it the host's name. | The pin is checked before the client sends a certificate (the TLS 1.3 order), so a spoofer gets nothing about the device's key, and the client sends no SNI. A test checks both. (§4.3, §4.7) |
+| D5 | A06 | Browsing was unbounded in time. A phone that keeps querying `_worktrees._tcp` announces on every network it joins that it runs a worktrees client: reconnaissance pointed the other way. | The device browses only when its stored address fails, for at most 30 seconds, with back-off, and never in the background. (§4.7) |
+| D6 | A09, secure by default | An advert announcing the host had no visible counterpart on the host, and there was no way to stay in LAN mode without it. | The remote-access indicator says when the host can be found, the advert is audited, and a console switch (`remote_advertise`) turns it off while LAN mode stays on. (§3.4, §4.7, §5.1) |
+
+**Considered and not changed.**
+
+- *A discovery id that rotates* (an HMAC of a per-host key over the time).
+  The SRV target is the OS's own `.local` name, which is just as linkable,
+  so rotating the id would hide nothing the OS does not already show.
+- *Changing the discovery id when a device is revoked.* A revoked device
+  that still recognises the advert learns only what a scan of the LAN
+  shows. A new id would also strand any device whose stored address had
+  gone stale before it could learn the id. Rotating the server identity
+  (§2.5) changes it.
+- *Signed adverts* (DNSSEC or SIG(0) on the records). The pinned handshake
+  already authenticates the host behind any advert, so signing would check
+  the same fact twice.
+- *A responder of serve's own.* It would put a multicast parser in the
+  engine's process, and on iOS a client-side one would need the restricted
+  multicast entitlement. The OS's responder is already running.
+- *Denial of service by a LAN attacker.* Flooding adverts, or spoofing ARP,
+  can keep a device from its host, and nothing at this layer prevents it.
+  The address code is the way back.
