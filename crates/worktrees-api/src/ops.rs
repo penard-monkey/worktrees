@@ -436,8 +436,8 @@ pub fn copy_text(text: String) -> Result<(), String> {
 /// for the same launchd reason as `fixup_gui_path`.
 #[cfg(target_os = "macos")]
 pub fn pbcopy_command() -> std::process::Command {
-    use std::process::{Command, Stdio};
-    let mut c = Command::new("/usr/bin/pbcopy");
+    use std::process::Stdio;
+    let mut c = worktrees_core::childenv::command("/usr/bin/pbcopy");
     c.env_remove("LC_ALL")
         .env("LC_CTYPE", "UTF-8")
         .stdin(Stdio::piped())
@@ -757,7 +757,7 @@ pub struct UpdateInfo {
 /// Latest release tag via the releases/latest REDIRECT (install.sh's trick —
 /// no API, no rate limit, no auth). None when offline or no releases exist.
 pub fn latest_release_tag() -> Option<String> {
-    let out = std::process::Command::new("curl")
+    let out = worktrees_core::childenv::command("curl")
         .args([
             "-fsSLI", "--max-time", "6", "-o", "/dev/null", "-w", "%{url_effective}",
             &format!("https://github.com/{REPO_SLUG}/releases/latest"),
@@ -793,7 +793,7 @@ use worktrees_core::proc::run_deadline;
 /// Result → app.log only (info ok / warn + git's stderr) — background work never
 /// pops a user-facing banner. `Err` carries git's stderr for the manual command.
 pub fn fetch_origin_root(main_root: &str) -> Result<(), String> {
-    let mut cmd = std::process::Command::new("git");
+    let mut cmd = worktrees_core::childenv::command("git");
     cmd.arg("-C")
         .arg(main_root)
         .args(["fetch", "--prune", "origin"])

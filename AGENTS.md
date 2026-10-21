@@ -249,6 +249,9 @@ binary; the same goes for the `ls --json` diff below, which then compares the
 shipped binary against another copy of itself. Both read `target/release`, and
 neither notices it predates the change. Rebuild, then confirm before believing a
 result: `[ target/release/worktrees -nt crates/worktrees-core/src/store.rs ]`.
+(The app bundle's CLI sidecar no longer touches that file: tauri's
+`externalBin`, which it briefly used, made tauri-build copy the staged CLI ONTO
+`target/release/worktrees` with a fresh mtime — see Release, step 4.)
 
 **Report cargo with a grep, not a tail.** `cargo test -p worktrees-core | tail -4`
 prints `running 0 tests / ok. 0 passed` — that is the **Doc-tests** block, and
@@ -1259,6 +1262,29 @@ after it is "command not found" — which reads as a sandbox refusing curl.
 - **Never run the bundle's binary to probe it.**
   `target/release/bundle/macos/worktrees.app/Contents/MacOS/app --version` is the
   GUI entry point — it LAUNCHES a second instance instead of printing a version.
+  The file beside it, `Contents/MacOS/worktrees`, is the bundled CLI and DOES
+  answer `--version`; that is what `app/scripts/sidecar.sh check` probes. On
+  Linux the GUI is `usr/bin/worktrees-app` and the CLI
+  `usr/lib/worktrees/worktrees`, inside an AppImage or .deb that `sidecar.sh
+  unpack` opens without running anything.
+- **An AppImage hands its AppDir to everything the app starts — unless the
+  spawn goes through `worktrees_core::childenv`.** AppRun (AppImageKit's
+  classic one, which linuxdeploy bundles) and linuxdeploy-plugin-gtk's hook
+  start the app with the mount (`$APPDIR`) at the FRONT of `PATH`,
+  `LD_LIBRARY_PATH`, `XDG_DATA_DIRS`, `GI_TYPELIB_PATH`, `PYTHONPATH`, plus
+  `PYTHONHOME`, `GTK_*`, `GDK_BACKEND=x11` and a cwd of `$APPDIR/usr`. The app
+  and WebKit's children need all of it, so it stays in the app process; but a
+  tmux server the app started handed it to every pane (measured: 20 such
+  variables in `tmux show-environment -g` and in a pane's `env`, 23 in the
+  login shell `fixup_gui_path` runs), so the user's git, ssh and python
+  loaded the AppImage's libraries. **Every process the engine starts is made
+  by `childenv::command(..)`**, never `Command::new` (a pty `CommandBuilder`
+  gets `scrub_pty`, `term.rs`), and it is a no-op anywhere but an AppImage.
+  ALL spawns, not the "user-facing" ones: the first cut listed those, and the
+  Docker measurement found two login shells (`cli_binary`, pi's preflight)
+  still leaking. `app/scripts/childenv-check.mjs` fails on a bare
+  `Command::new` outside childenv.rs and tests. tauri's opener plugin
+  (`xdg-open`) is NOT covered: it is not our spawn (ROADMAP).
 - **A Claude session probe's `status` can be STALE BY DESIGN.**
   `~/.claude/sessions/<pid>.json` is rewritten on status transitions — but ALSO
   on a park, which moves `updatedAt` alone and carries a mid-flight `busy`
@@ -1350,7 +1376,8 @@ after it is "command not found" — which reads as a sandbox refusing curl.
    merge. (A piped installer cannot see its URL, so a tagged copy knows its
    tag only by carrying it; `test/misc.bats`, `make release` and release.yml
    all refuse a mismatch.)
-3. `make release VERSION=x.y.z` → `git push origin main vx.y.z`.
+3. `make release VERSION=x.y.z` → `git push origin main vx.y.z` (the tag runs
+   publish.yml, below).
    ⚠ **The app-bundle job builds the docs viewer's browser bundle and gates
    the server that serves it**: the gate step runs the docs-server boundary
    tests by exact name, which start the real server and, over a raw loopback
@@ -1362,9 +1389,70 @@ after it is "command not found" — which reads as a sandbox refusing curl.
    existed, is gone (it never validated `Host` — GHSA-6pff-wf7m-6f5h, reported
    2026-09-16); `place-docs.md` §17 is what replaced it, and there is no
    `vars.VIEWER_MO_*` any more.
-4. release.yml: CLI ×4 targets + SIGNED app bundles ×2 + latest.json.
-   Updater signing key: repo secret `TAURI_SIGNING_PRIVATE_KEY`; local backup
-   `~/.tauri/worktrees-updater.key` — irreplaceable, never commit it.
+4. release.yml: CLI ×4 targets + SIGNED app bundles ×4 + latest.json, built,
+   checked and assembled into ONE `release-dist` artifact — and nothing that
+   publishes; it runs only when called. **publish.yml** (the `v*` tag) calls it
+   with `dry_run: false` and the signing key, then creates the release from
+   exactly that artifact; it is the one workflow holding `contents: write`.
+   **release-dry-run.yml** calls the same file with `dry_run: true` on every
+   PR touching the packaging (the three workflows, `tauri*.conf.json`,
+   `sidecar.sh`, `app/package.json`, the Makefile, install.sh): both Linux
+   arches + the native Mac app, every assertion, a throwaway updater key made
+   in the job, latest.json assembled, no secrets passed — and the bundle step
+   refuses the real key in a dry run. So a release runs the steps the last
+   packaging PR already ran (~30 runner-minutes, ~12 wall-clock, $0 on a
+   public repo). It is not `if: inputs.publish` in one file for two reasons: a
+   tag push carries no inputs, so that guard reads empty, and Actions' loose
+   equality makes empty == false — the real release would silently skip its
+   own publish; and a called workflow can never hold more than its caller
+   grants, so keeping `contents: write` out of release.yml keeps it off the
+   PR path entirely. `app/scripts/release-dryrun-check.mjs` pins the split.
+   A dry run that fails to START is a zero-job run that only
+   `gh run list --commit <sha>` shows. The app bundles are macOS (arm64; x86_64 cross-built on arm64 and never executed)
+   and Linux (x86_64 on `ubuntu-latest`, arm64 on `ubuntu-24.04-arm` — free
+   for a public repo; WebKitGTK is never cross-built), each Linux one an
+   AppImage + a .deb. Updater signing key: repo secret
+   `TAURI_SIGNING_PRIVATE_KEY`; local backup `~/.tauri/worktrees-updater.key`
+   — irreplaceable, never commit it. createUpdaterArtifacts signs the macOS
+   tarball, the AppImage AND the .deb (each `.sig` over the whole file), and
+   latest.json carries `darwin-*`, `linux-*` (the AppImage) and `linux-*-deb`:
+   the updater asks for `<os>-<arch>-<installer>` first, so a .deb install
+   gets a .deb (`pkexec dpkg -i`) and an AppImage rewrites itself.
+   **Each app bundle carries the CLI for its own arch** — macOS
+   `Contents/MacOS/worktrees`, Linux `usr/lib/worktrees/worktrees` (`/usr/lib/…`
+   from a .deb, `$APPDIR/usr/lib/…` in an AppImage: both are
+   `resource_dir()/worktrees`) — a PRIVATE sidecar for the app (it will start
+   `worktrees serve`), never on PATH; install.sh is still how the CLI reaches
+   PATH (ROADMAP, "Option A"). **Nor is it ever HANDED OUT**: running as
+   serve, its `current_exe()` IS the bundle, and `profile::worktrees_bin()` —
+   which every MCP entry (Claude, Codex, pi, kimi, a profile's), hook and pane
+   helper is written from — took any `current_exe()` named `worktrees` as the
+   user's CLI, so `mcpsetup` would have put `<bundle>/Contents/MacOS/worktrees`
+   (on Linux a per-launch `/tmp/.mount_*`) into the user's GLOBAL Claude config
+   (rehearsal D1). `is_bundled_cli` refuses it by path (`Contents/MacOS/`,
+   `usr/lib/<x>/`) and the lookup falls through to PATH, as the in-process app
+   always did; a test reads tauri.conf.json's `files`, so a moved layout fails
+   it. It is the path, not `APPDIR`, because serve starts with that scrubbed.
+   The copy gets there through tauri.conf.json's per-format `files` mappings
+   (`bundle.macOS.files`, `linux.deb.files`, `linux.appimage.files`), NOT `externalBin`, which is wrong twice over:
+   tauri-build copies it from the BUILD SCRIPT in every profile (a clean `cargo
+   check -p app` fails: "resource path `binaries/worktrees-<triple>` doesn't
+   exist"), and on Linux it lands in `usr/bin` — `/usr/bin/worktrees` from a
+   .deb, and first on the AppImage app's own PATH (measured: the app's MCP
+   setup then resolved `worktrees` to it). Only the bundler reads `files`, and
+   it FAILS with nothing staged ("Failed to copy custom files"), so a bundle
+   cannot ship without it. `app/scripts/sidecar.sh stage` builds and stages it;
+   `check` runs on the .app AND the unpacked updater tarball, and on the
+   AppImage and .deb (unpacked with unsquashfs at the ELF-computed offset /
+   `dpkg-deb`, never run): regular executable file, arch = the target's and
+   the GUI's (`lipo` / the ELF header), version = the tag, and on Linux nothing
+   in usr/bin. `--version` runs only on a native one; otherwise the version is
+   read as data from stale.rs's marker. The AppImage's copy is not
+   byte-identical to the build: linuxdeploy's patchelf adds `RUNPATH=$ORIGIN`.
+   The GUI is `worktrees-app` on Linux (`tauri.linux.conf.json`'s
+   `mainBinaryName`; a .deb would otherwise install `/usr/bin/app`). tmux and
+   git are never bundled: the .deb `Depends: tmux, git` and the AppImage, like
+   the .app, uses the system's — release.yml asserts both.
 5. Users update from inside the app (Settings → Version: CLI + app buttons)
    or by re-running install.sh.
 
@@ -1372,7 +1460,16 @@ after it is "command not found" — which reads as a sandbox refusing curl.
 
 - CLI stable: `install.sh` (copies). `make install` SYMLINKS the clone's
   build — every rebuild silently becomes "stable"; don't use it for that.
-- App: `make install-app` → /Applications (local builds skip Gatekeeper).
+- App: `make install-app` → /Applications (local builds skip Gatekeeper); on
+  Linux it builds the AppImage and installs `~/Applications/worktrees.AppImage`
+  (no desktop entry — `install.sh --with-app` writes that). It stages and
+  checks the CLI sidecar exactly as release.yml does, so every local install
+  exercises the release's path. `APPDIR=<dir>` installs elsewhere — use a
+  scratch dir to inspect a build without replacing the app the user is
+  running. A Mac cannot build the Linux app; a Docker `ubuntu:24.04` with CI's
+  apt set plus `xdg-utils` (the AppImage bundler copies `xdg-open` in) and the
+  pinned pnpm installed directly — not through corepack, which refuses the
+  pin from the repo root — runs the Linux branch as is.
 - **macOS re-asks its privacy prompts after every build, and that is signing,
   not a bug.** TCC keys "worktrees would like to access data from other apps"
   to the designated requirement; ad-hoc/linker-signed code (everything cargo

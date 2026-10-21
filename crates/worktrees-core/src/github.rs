@@ -225,7 +225,7 @@ pub fn ssh_hostname_with(ssh: &str, host: &str, deadline_secs: u64) -> Option<St
     if !valid_ssh_host(host) {
         return None;
     }
-    let mut c = Command::new(ssh);
+    let mut c = crate::childenv::command(ssh);
     c.args(["-G", "--", host]);
     let out = run_with(c, deadline_secs, true).ok()?;
     if out.code != Some(0) {
@@ -380,7 +380,7 @@ pub fn classify_auth(spawn_failed: bool, code: Option<i32>, stderr: &str) -> Aut
 /// reaches this process at all — only the exit code and stderr are read.
 /// ~50ms, offline (keyring / config file).
 pub fn probe_auth(gh: &str, host: &str) -> Auth {
-    let mut c = Command::new(gh);
+    let mut c = crate::childenv::command(gh);
     c.args(["auth", "token", "-h", host]);
     match run_with(c, AUTH_DEADLINE_SECS, false) {
         Err(RunErr::Spawn) => Auth::Missing,
@@ -645,7 +645,7 @@ fn first_line(s: &str) -> String {
 /// Run the query for `repo` through `gh`. Network; ~1.2s. The caller probes
 /// auth first ([`probe_auth`]) so the common failures never get this far.
 pub fn fetch(gh: &str, repo: &RepoRef) -> Result<Snapshot, FetchError> {
-    let mut c = Command::new(gh);
+    let mut c = crate::childenv::command(gh);
     c.args(["api", "graphql", "--hostname", &repo.host])
         .arg("-f")
         .arg(format!("query={QUERY}"))
@@ -905,14 +905,14 @@ pub fn view(snap: &Snapshot, push_owner: &str, places: &[PlaceBranch]) -> View {
 /// VALIDATES each token against the API (~0.5s), so the caller gates it on the
 /// Pull requests switch. Never prints a token.
 pub fn diag_line(gh: &str) -> String {
-    let mut v = Command::new(gh);
+    let mut v = crate::childenv::command(gh);
     v.arg("--version");
     let version = match run(v, AUTH_DEADLINE_SECS) {
         Err(RunErr::Spawn) => return "(not found)".into(),
         Err(RunErr::Timeout) => return "(timed out)".into(),
         Ok(o) => o.stdout.lines().next().unwrap_or("").trim().to_string(),
     };
-    let mut s = Command::new(gh);
+    let mut s = crate::childenv::command(gh);
     s.args(["auth", "status", "--json", "hosts"]);
     let hosts = match run(s, AUTH_DEADLINE_SECS) {
         Ok(o) => auth_summary(&o.stdout),

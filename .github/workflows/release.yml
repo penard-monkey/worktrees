@@ -1,30 +1,109 @@
-name: release
+name: release bundles
+# Everything a release ships, built, checked, signed and assembled into one
+# `release-dist` artifact — and NOTHING that publishes. Two callers, one set of
+# steps:
+#   publish.yml          — a `v*` tag: `dry_run: false`, the real updater key,
+#                          then its own job uploads release-dist as the release.
+#   release-dry-run.yml  — a pull request touching the packaging: `dry_run:
+#                          true`, no secrets at all, a throwaway key made here.
+# So the steps a release runs are the steps every packaging PR already ran, and
+# the first Linux release is not the first time its Linux jobs execute.
+#
+# Why the publishing step lives in publish.yml and not behind an `if:` here: a
+# called workflow can never hold more than its caller grants, so keeping
+# `contents: write` out of this file means the pull-request path never asks for
+# a write token at all; and a tag push carries no `inputs`, so a guard such as
+# `if: inputs.publish` reads EMPTY on the real release — and Actions' loose
+# equality makes empty == false — which would skip the publish silently. Here
+# `dry_run` is required, so every caller says which it is.
+# `app/scripts/release-dryrun-check.mjs` pins all of it.
 on:
-  push:
-    tags: ['v*']
+  workflow_call:
+    inputs:
+      dry_run:
+        description: true = build and check everything, sign with a throwaway key, publish nothing
+        type: boolean
+        required: true
+    secrets:
+      TAURI_SIGNING_PRIVATE_KEY:
+        description: the updater signing key; publish.yml passes it, a dry run must not
+        required: false
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
+  # The run's one decision: which tag, and which targets. A release builds every
+  # row; a dry run builds the rows marked `dry` — both Linux arches and the
+  # native Mac app — and takes its tag from Cargo.toml, so the version gates and
+  # the sidecar's `--version` check still compare real values.
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.plan.outputs.tag }}
+      cli_matrix: ${{ steps.plan.outputs.cli_matrix }}
+      app_matrix: ${{ steps.plan.outputs.app_matrix }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: plan
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          # The CLI is pure Rust (git/tmux are shelled out at runtime), so it
+          # cross-compiles: both Linux arches on ubuntu-latest, aarch64 with a
+          # cross linker. The app is a WebKitGTK app on Linux and is never
+          # cross-built, so each Linux arch gets a runner of its own arch
+          # (ubuntu-24.04-arm is GitHub-hosted, free for public repositories).
+          cli='[
+            {"os": "macos-latest",  "target": "aarch64-apple-darwin",      "dry": false},
+            {"os": "macos-latest",  "target": "x86_64-apple-darwin",       "dry": false},
+            {"os": "ubuntu-latest", "target": "x86_64-unknown-linux-gnu",  "dry": true},
+            {"os": "ubuntu-latest", "target": "aarch64-unknown-linux-gnu", "dry": true}]'
+          app='[
+            {"os": "macos-latest",     "target": "aarch64-apple-darwin",      "dry": true},
+            {"os": "macos-latest",     "target": "x86_64-apple-darwin",       "dry": false},
+            {"os": "ubuntu-latest",    "target": "x86_64-unknown-linux-gnu",  "dry": true},
+            {"os": "ubuntu-24.04-arm", "target": "aarch64-unknown-linux-gnu", "dry": true}]'
+          if [ "$DRY_RUN" = true ]; then
+            tag="v$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+            pick='[.[] | select(.dry) | del(.dry)]'
+          else
+            # Only a version tag publishes, whatever the caller said.
+            case "$GITHUB_REF" in
+              refs/tags/v*) ;;
+              *) echo "::error::a publishing run needs a v* tag, not $GITHUB_REF"; exit 1 ;;
+            esac
+            tag="$GITHUB_REF_NAME"
+            pick='map(del(.dry))'
+          fi
+          case "$tag" in v[0-9]*) ;; *) echo "::error::no version for the tag: '$tag'"; exit 1 ;; esac
+          # Assigned first: inside `echo "x=$(jq …)"` a failing jq leaves an
+          # empty matrix and a step that still exits 0 (measured, on an image
+          # with no jq).
+          cli_rows="$(jq -c "$pick" <<<"$cli")"
+          app_rows="$(jq -c "$pick" <<<"$app")"
+          {
+            echo "tag=$tag"
+            echo "cli_matrix=$cli_rows"
+            echo "app_matrix=$app_rows"
+          } | tee -a "$GITHUB_OUTPUT"
+
   # Cross-compile the worktrees binary for the common desktop/server targets.
-  # Pure-Rust (git/tmux are shelled out at runtime), so cross-compilation only
-  # needs the target + (for aarch64-linux) a cross linker.
   build:
+    needs: plan
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { os: macos-latest,  target: aarch64-apple-darwin }
-          - { os: macos-latest,  target: x86_64-apple-darwin }
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu }
-          - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu }
+        include: ${{ fromJSON(needs.plan.outputs.cli_matrix) }}
     runs-on: ${{ matrix.os }}
+    env:
+      TAG: ${{ needs.plan.outputs.tag }}
     steps:
       - uses: actions/checkout@v7
       - name: version gate — tag matches Cargo.toml and install.sh
         run: |
-          tag="${GITHUB_REF_NAME#v}"
+          tag="${TAG#v}"
           grep -q "^version = \"$tag\"$" Cargo.toml \
             || { echo "tag v$tag != workspace version in Cargo.toml"; exit 1; }
           grep -q "^SCRIPT_VERSION=\"v$tag\"$" install.sh \
@@ -47,29 +126,54 @@ jobs:
           if command -v sha256sum >/dev/null 2>&1; then sha256sum "$asset" > "$asset.sha256"
           else shasum -a 256 "$asset" > "$asset.sha256"; fi
           cat "$asset.sha256"
+      # A dry run's artifacts are only for looking at: a day, then gone.
+      # 0 means the repository's default.
       - uses: actions/upload-artifact@v7
         with:
           name: worktrees-${{ matrix.target }}
           path: dist/*
+          retention-days: ${{ inputs.dry_run && 1 || 0 }}
 
-  # macOS desktop-app bundles. Unsigned — install.sh strips the quarantine attr
-  # on an explicit, checksum-verified install; local `make install-app` needs
-  # neither. Signing/notarization is the later distribution tier (task plan).
+  # Desktop-app bundles: macOS (.app → updater .tar.gz) and Linux (AppImage +
+  # .deb), each on a runner of its own arch except the x86_64 Mac, which is
+  # cross-built on arm64 and never executed. Linux is never cross-built: a
+  # WebKitGTK app links the distro's GTK stack, so each Linux arch is built on
+  # its own runner (ubuntu-24.04-arm is a GitHub-hosted runner, free for public
+  # repositories). Apple-unsigned — install.sh strips the quarantine attr on an
+  # explicit, checksum-verified install; local `make install-app` needs neither.
+  # Signing/notarization is the later distribution tier (task plan).
+  # Each bundle carries the CLI for its own arch as a private sidecar — macOS
+  # Contents/MacOS/worktrees, Linux usr/lib/worktrees/worktrees — the app's to
+  # use, never put on PATH by us. tmux and git are not bundled anywhere: the
+  # .deb Depends on the distro's, and the AppImage, like the .app, uses the
+  # system's.
   app-bundle:
+    needs: plan
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { os: macos-latest, target: aarch64-apple-darwin }
-          - { os: macos-latest, target: x86_64-apple-darwin }
+        include: ${{ fromJSON(needs.plan.outputs.app_matrix) }}
     runs-on: ${{ matrix.os }}
+    env:
+      TAG: ${{ needs.plan.outputs.tag }}
     steps:
       - uses: actions/checkout@v7
       - name: version gate — tag matches Cargo.toml workspace version
         run: |
-          tag="${GITHUB_REF_NAME#v}"
+          tag="${TAG#v}"
           grep -q "^version = \"$tag\"$" Cargo.toml \
             || { echo "tag v$tag != workspace version in Cargo.toml"; exit 1; }
+      # CI's `app` job installs the first line; the rest is bundling: patchelf
+      # and xdg-utils for the AppImage (tauri copies xdg-open into it, and
+      # aborts without one — measured on a bare ubuntu:24.04), squashfs-tools
+      # and binutils so sidecar.sh can look inside an AppImage without running it.
+      - name: webkit + gtk + bundling deps (linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q libwebkit2gtk-4.1-dev libxdo-dev libssl-dev \
+            libayatana-appindicator3-dev librsvg2-dev \
+            patchelf xdg-utils squashfs-tools binutils file
       - uses: pnpm/action-setup@v6
         with: { package_json_file: app/package.json }
       - uses: actions/setup-node@v7
@@ -80,7 +184,8 @@ jobs:
       # ── the documentation viewer ──────────────────────────────────────────
       #
       # The browser page. It ships INSIDE the bundle (tauri.conf.json bundles
-      # `viewer/*` into Contents/Resources/) and is served by the app's own
+      # `viewer/*` as resources: Contents/Resources/ on macOS,
+      # usr/lib/worktrees/ in the AppImage and .deb) and is served by the app's own
       # loopback server at `GET /<token>/viewer.js`. Nothing executes it: it is
       # a file the user's browser fetches.
       #
@@ -146,49 +251,182 @@ jobs:
           grep -q '^test result: ok. 4 passed' /tmp/gate.log \
             || { echo "::error::the docs-server gate did not run all four cases"; exit 1; }
 
+      # ── the CLI sidecar ───────────────────────────────────────────────────
+      #
+      # Built HERE, from this checkout, for this matrix target — not fetched
+      # from the `build` job — so it is this commit by construction, and so the
+      # path that makes it is the one `make install-app` runs on every local
+      # install rather than one whose first exercise is a release.
+      # tauri.conf.json's per-format `files` mappings carry it from
+      # app/src-tauri/binaries/worktrees into every bundle; the bundler is the
+      # only thing that reads them, and it FAILS with nothing staged ("Failed to
+      # copy custom files"), so this step cannot be skipped by accident.
+      - name: stage the CLI sidecar for this target
+        run: |
+          set -euo pipefail
+          rustup target add "${{ matrix.target }}"
+          app/scripts/sidecar.sh stage "${{ matrix.target }}"
+
+      # macOS keeps `targets: "all"`: the .app the updater tarball is made from,
+      # plus the dmg. Linux asks for exactly what ships — the AppImage, which is
+      # its own updater artifact, and the .deb — because `all` adds an .rpm
+      # nothing tests. createUpdaterArtifacts signs both Linux files.
+      #
+      # The key: a release signs with the real one and refuses to run without
+      # it — a throwaway fallback there would ship updates every installed app
+      # rejects. A dry run is handed no secrets by its caller, refuses to run if
+      # it somehow got the real one, and signs with a key made here and thrown
+      # away with the runner, so createUpdaterArtifacts runs exactly as it ships.
       - name: build the app bundle (signed updater artifacts)
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
-          rustup target add "${{ matrix.target }}"
           pnpm -C app install --frozen-lockfile
-          pnpm -C app tauri build --target "${{ matrix.target }}"
+          if [ "$DRY_RUN" = true ]; then
+            if [ -n "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+              echo "::error::a dry run was handed TAURI_SIGNING_PRIVATE_KEY; its caller must pass no secrets"; exit 1
+            fi
+            app/node_modules/.bin/tauri signer generate --ci -p "" -w "$RUNNER_TEMP/dry-run.key"
+            TAURI_SIGNING_PRIVATE_KEY="$(cat "$RUNNER_TEMP/dry-run.key")"
+            export TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
+          elif [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "::error::no TAURI_SIGNING_PRIVATE_KEY: a release is signed with the real updater key"; exit 1
+          fi
+          pnpm -C app tauri build --target "${{ matrix.target }}" \
+            ${{ runner.os == 'Linux' && '--bundles deb,appimage' || '' }}
+
+      # Same rule as the viewer below: assert the sidecar is IN what ships.
+      # macOS: the .app directory is never uploaded — the updater tarball is,
+      # and both install.sh and the in-app updater fetch it — so the check runs
+      # twice: on the bundle (did the bundler take it?) and on that tarball
+      # unpacked (did it survive tar, executable bit included?). Linux: the
+      # AppImage and the .deb ARE what ships, and the check unpacks each without
+      # running anything in it. The check is: a regular executable file, this
+      # target's arch and only that (`lipo` / the ELF header), the same as the
+      # GUI binary beside it, version == the tag — and on Linux, no worktrees in
+      # usr/bin. `--version` runs only on a native one; the x86_64 Mac bundle is
+      # cross-built on an arm64 runner and is never executed — its version is
+      # read as data from the marker the CLI embeds. Never the GUI binary: on
+      # macOS it launches instead of answering.
+      - name: assert the CLI sidecar is inside the shipped bundle
+        run: |
+          set -euo pipefail
+          t="${{ matrix.target }}"
+          v="${TAG#v}"
+          b="target/$t/release/bundle"
+          if [ "$RUNNER_OS" = macOS ]; then
+            app/scripts/sidecar.sh check "$b/macos/worktrees.app" "$t" "$v"
+            shipped="$RUNNER_TEMP/shipped-$t"
+            rm -rf "$shipped" && mkdir -p "$shipped"
+            tar -xzf "$b/macos/worktrees.app.tar.gz" -C "$shipped"
+            app/scripts/sidecar.sh check "$shipped/worktrees.app" "$t" "$v"
+          else
+            for pkg in "$b"/appimage/*.AppImage "$b"/deb/*.deb; do
+              app/scripts/sidecar.sh check "$pkg" "$t" "$v"
+            done
+          fi
       # Rule 10's other half: assert the bundle is IN the thing that ships, not
       # merely in the directory the bundler was pointed at. A glob that silently
       # matched nothing, a resources key lost in a merge, or a bundler that put
       # it somewhere else all look identical from outside — and all of them
       # produce a release whose Docs button opens a blank tab on every machine
-      # but ours.
+      # but ours. On Linux the AppImage and .deb are unpacked, not their
+      # staging directories.
       - name: assert the viewer bundle is inside the app bundle
         run: |
           set -euo pipefail
-          app="target/${{ matrix.target }}/release/bundle/macos/worktrees.app"
-          v="$app/Contents/Resources/viewer/viewer.js"
-          [ -f "$v" ] || { echo "::error::no bundle at Contents/Resources/viewer/viewer.js"; ls -R "$app/Contents/Resources" || true; exit 1; }
-          bytes=$(wc -c < "$v")
-          [ "$bytes" -gt 10000 ] || { echo "::error::the bundled viewer is $bytes bytes"; exit 1; }
-          echo "bundled viewer: $(du -h "$v" | cut -f1)"
+          b="target/${{ matrix.target }}/release/bundle"
+          viewer() {   # $1 the viewer.js to check  $2 where, as reported
+            if [ ! -f "$1" ]; then
+              echo "::error::no viewer bundle at $2"; ls -R "$(dirname "$(dirname "$1")")" || true; exit 1
+            fi
+            bytes=$(wc -c < "$1")
+            [ "$bytes" -gt 10000 ] || { echo "::error::the viewer at $2 is $bytes bytes"; exit 1; }
+            echo "bundled viewer: $2 ($(du -h "$1" | cut -f1))"
+          }
+          if [ "$RUNNER_OS" = macOS ]; then
+            viewer "$b/macos/worktrees.app/Contents/Resources/viewer/viewer.js" Contents/Resources/viewer/viewer.js
+          else
+            for pkg in "$b"/appimage/*.AppImage "$b"/deb/*.deb; do
+              root="$RUNNER_TEMP/viewer-${pkg##*/}"
+              rm -rf "$root"
+              app/scripts/sidecar.sh unpack "$pkg" "$root"
+              viewer "$root/usr/lib/worktrees/viewer/viewer.js" "usr/lib/worktrees/viewer/viewer.js in ${pkg##*/}"
+            done
+          fi
+      # tmux and git are the SYSTEM's on every platform: a bundled tmux talking
+      # to the user's own tmux server (or the reverse) is client/server version
+      # skew, and the engine shells out to both on purpose. The .deb therefore
+      # declares them, so apt installs the distro's, and the AppImage must not
+      # have picked either up.
+      - name: assert tmux and git come from the distro (linux)
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          b="target/${{ matrix.target }}/release/bundle"
+          for deb in "$b"/deb/*.deb; do
+            deps="$(dpkg-deb -f "$deb" Depends)"
+            echo "${deb##*/} Depends: $deps"
+            for d in tmux git; do
+              case ", $deps," in
+                *", $d,"*|*", $d ("*) ;;
+                *) echo "::error::${deb##*/} does not depend on $d"; exit 1 ;;
+              esac
+            done
+          done
+          for img in "$b"/appimage/*.AppImage; do
+            root="$RUNNER_TEMP/nobundled-${img##*/}"
+            rm -rf "$root"
+            app/scripts/sidecar.sh unpack "$img" "$root"
+            found="$(find "$root" -type f \( -name tmux -o -name git \))"
+            [ -z "$found" ] || { echo "::error::${img##*/} bundles: $found"; exit 1; }
+            echo "${img##*/}: no tmux, no git inside"
+          done
 
       - name: package + checksum
         run: |
+          set -euo pipefail
+          t="${{ matrix.target }}"
+          b="target/$t/release/bundle"
           mkdir -p dist
-          asset="worktrees-app-${{ matrix.target }}.app.tar.gz"
-          bundle="target/${{ matrix.target }}/release/bundle/macos"
-          # createUpdaterArtifacts already produced the tar.gz + minisign .sig —
-          # one artifact serves both install.sh and the in-app updater
-          cp "$bundle/worktrees.app.tar.gz" "dist/$asset"
-          cp "$bundle/worktrees.app.tar.gz.sig" "dist/$asset.sig"
-          cd dist
-          shasum -a 256 "$asset" > "$asset.sha256"
-          cat "$asset.sha256"
+          if [ "$RUNNER_OS" = macOS ]; then
+            # createUpdaterArtifacts already produced the tar.gz + minisign
+            # .sig — one artifact serves both install.sh and the in-app
+            # updater. The .sig is over the whole tarball, so it covers the
+            # sidecar with the rest of the bundle; nothing about signing
+            # changes for it.
+            asset="worktrees-app-$t.app.tar.gz"
+            cp "$b/macos/worktrees.app.tar.gz" "dist/$asset"
+            cp "$b/macos/worktrees.app.tar.gz.sig" "dist/$asset.sig"
+            (cd dist && shasum -a 256 "$asset" > "$asset.sha256")
+          else
+            # No tarball on Linux: the AppImage is signed as it is, and so is
+            # the .deb. Both are updater artifacts — an app installed from a
+            # .deb updates with `pkexec dpkg -i`, an AppImage by rewriting
+            # itself — and each .sig is over the whole file, sidecar included.
+            for pkg in "$b"/appimage/*.AppImage "$b"/deb/*.deb; do
+              asset="worktrees-app-$t.${pkg##*.}"
+              cp "$pkg" "dist/$asset"
+              cp "$pkg.sig" "dist/$asset.sig"
+              (cd dist && sha256sum "$asset" > "$asset.sha256")
+            done
+          fi
+          cat dist/*.sha256
       - uses: actions/upload-artifact@v7
         with:
           name: worktrees-app-${{ matrix.target }}
           path: dist/*
+          retention-days: ${{ inputs.dry_run && 1 || 0 }}
 
-  release:
-    needs: [build, app-bundle]
+  # Everything the release will carry, in one artifact: the binaries, the
+  # bundles and their .sigs, checksums.txt, latest.json and the notes.
+  # publish.yml uploads exactly this; a dry run stops here.
+  assemble:
+    needs: [plan, build, app-bundle]
     runs-on: ubuntu-latest
+    env:
+      TAG: ${{ needs.plan.outputs.tag }}
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
@@ -199,27 +437,59 @@ jobs:
           find art -type f -name 'worktrees-*' ! -name '*.sha256' -exec cp {} dist/ \;
           cat art/*/*.sha256 > dist/checksums.txt
           echo "── checksums ──"; cat dist/checksums.txt
+      # The updater looks up `<os>-<arch>-<installer>` first and `<os>-<arch>`
+      # second (tauri-plugin-updater 2.10 `get_urls`), so the plain Linux keys
+      # are the AppImage and the `-deb` keys the .deb: an app installed from a
+      # .deb must never be handed an AppImage, which its installer refuses
+      # (InvalidUpdaterFormat). The entries come from the targets this run
+      # BUILT (plan's app matrix), so a target added there cannot ship without
+      # its update; and a publishing run must still come out with all six keys.
+      # Every signature is read into a variable first, so a missing .sig fails
+      # here instead of shipping an empty signature.
       - name: updater manifest (latest.json — the in-app updater's endpoint)
+        env:
+          APP_MATRIX: ${{ needs.plan.outputs.app_matrix }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
-          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
-          arm="worktrees-app-aarch64-apple-darwin.app.tar.gz"
-          x64="worktrees-app-x86_64-apple-darwin.app.tar.gz"
-          jq -n \
-            --arg version "${GITHUB_REF_NAME#v}" \
-            --arg armurl "$base/$arm" --arg armsig "$(cat "art/worktrees-app-aarch64-apple-darwin/$arm.sig")" \
-            --arg x64url "$base/$x64" --arg x64sig "$(cat "art/worktrees-app-x86_64-apple-darwin/$x64.sig")" \
-            '{version: $version, pub_date: (now | todate), platforms: {
-               "darwin-aarch64": {url: $armurl, signature: $armsig},
-               "darwin-x86_64": {url: $x64url, signature: $x64sig}}}' > dist/latest.json
+          set -euo pipefail
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+          entries=()
+          for t in $(jq -r '.[].target' <<<"$APP_MATRIX"); do
+            arch="${t%%-*}"
+            case "$t" in
+              *-apple-darwin)      entries+=("darwin-$arch $t app.tar.gz") ;;
+              *-unknown-linux-gnu) entries+=("linux-$arch $t AppImage" "linux-$arch-deb $t deb") ;;
+              *) echo "::error::no updater key for $t"; exit 1 ;;
+            esac
+          done
+          platforms='{}'
+          for e in "${entries[@]}"; do
+            read -r key t ext <<<"$e"
+            sig="$(cat "art/worktrees-app-$t/worktrees-app-$t.$ext.sig")"
+            [ -n "$sig" ] || { echo "::error::empty signature: worktrees-app-$t.$ext.sig"; exit 1; }
+            platforms="$(jq -c --arg k "$key" --arg url "$base/worktrees-app-$t.$ext" --arg sig "$sig" \
+              '. + {($k): {url: $url, signature: $sig}}' <<<"$platforms")"
+          done
+          want="darwin-aarch64 darwin-x86_64 linux-aarch64 linux-aarch64-deb linux-x86_64 linux-x86_64-deb"
+          have="$(jq -r 'keys | join(" ")' <<<"$platforms")"
+          if [ "$DRY_RUN" != true ] && [ "$have" != "$want" ]; then
+            echo "::error::latest.json would carry [$have]; a release needs [$want]"; exit 1
+          fi
+          jq -n --arg version "${TAG#v}" --argjson platforms "$platforms" \
+            '{version: $version, pub_date: (now | todate), platforms: $platforms}' > dist/latest.json
           cat dist/latest.json
       - name: changelog notes for this tag
         run: |
-          v="${GITHUB_REF_NAME#v}"
+          v="${TAG#v}"
           awk -v v="$v" '$0 ~ "^## \\["v"\\]" {f=1; next} /^## \[/ {f=0} f' CHANGELOG.md > dist/notes.md || true
-          [ -s dist/notes.md ] || echo "worktrees $GITHUB_REF_NAME" > dist/notes.md
+          [ -s dist/notes.md ] || echo "worktrees $TAG" > dist/notes.md
           cat dist/notes.md
-      - name: create GitHub release
-        env: { GH_TOKEN: '${{ github.token }}' }
-        run: |
-          gh release create "$GITHUB_REF_NAME" dist/worktrees-* dist/checksums.txt dist/latest.json \
-            --title "worktrees $GITHUB_REF_NAME" --notes-file dist/notes.md
+      - name: what the release would carry
+        run: ls -la dist
+      # publish.yml uploads exactly this, file for file. A dry run keeps it a
+      # day, for looking at.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-dist
+          path: dist/*
+          retention-days: ${{ inputs.dry_run && 1 || 0 }}

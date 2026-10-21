@@ -456,9 +456,9 @@ pub fn uninstall(repo: Option<&str>) -> Result<Outcome, String> {
 /// shape deadlocks on exactly the chatty failure we most want to report.
 fn run(claude: &str, args: &[&str]) -> Result<(bool, String), String> {
     use std::io::Read;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     let ctx = || format!("running `claude {}`", args.join(" "));
-    let mut child = Command::new(claude)
+    let mut child = crate::childenv::command(claude)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

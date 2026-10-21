@@ -4,7 +4,6 @@
 
 use std::collections::HashMap;
 use std::os::unix::fs::MetadataExt;
-use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 
 pub struct SysClock {
@@ -13,7 +12,7 @@ pub struct SysClock {
 }
 
 fn out(cmd: &str, args: &[&str]) -> Option<String> {
-    let o = Command::new(cmd).args(args).output().ok()?;
+    let o = crate::childenv::command(cmd).args(args).output().ok()?;
     if o.status.success() {
         Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
     } else {
@@ -51,7 +50,7 @@ impl SysClock {
         static PROBE: OnceLock<(bool, bool)> = OnceLock::new();
         let &(stat_gnu, date_gnu) = PROBE.get_or_init(|| {
             // GNU `stat -c` succeeds; BSD `stat` rejects `-c`.
-            let stat_gnu = Command::new("stat")
+            let stat_gnu = crate::childenv::command("stat")
                 .args(["-c", "%Y", "/"])
                 .output()
                 .map(|o| o.status.success())

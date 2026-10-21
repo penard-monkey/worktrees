@@ -14,7 +14,7 @@
 #   WORKTREES_INSTALL_VERSION=v0.1.0     pin a specific release
 #   WORKTREES_INSTALL_DIR=~/bin          alternate target dir
 #   WORKTREES_INSTALL_FROM_SOURCE=1      force a cargo build from source
-#   WORKTREES_INSTALL_APP=1|0            also install the macOS desktop app / never ask
+#   WORKTREES_INSTALL_APP=1|0            also install the desktop app / never ask
 #   install.sh --with-app                same as WORKTREES_INSTALL_APP=1
 #   install.sh --uninstall               remove the installed binary (only that)
 #
@@ -23,9 +23,13 @@
 # run `brew install tmux` (when a terminal is attached to ask on); on Linux it
 # prints your distribution's install command and exits without running anything.
 #
-# Desktop app (macOS): with a terminal attached the installer OFFERS to install
-# worktrees.app to /Applications (checksum-verified, then the quarantine attr is
-# stripped — the bundle is unsigned; you explicitly chose to install it).
+# Desktop app: with a terminal attached the installer OFFERS to install it,
+# checksum-verified. macOS: worktrees.app to /Applications (then the quarantine
+# attr is stripped — the bundle is unsigned; you explicitly chose to install it).
+# Linux: the AppImage to ~/Applications/worktrees.AppImage plus a desktop entry
+# in ~/.local/share/applications. Neither puts anything on PATH: the CLI the app
+# carries inside it is private, and the CLI you run is the one installed above.
+# Both use the system's tmux and git.
 #
 # Checksums: a downloaded binary is verified against the release's checksums.txt.
 # This protects against truncation/corruption — it does NOT prove authorship (the
@@ -106,15 +110,20 @@ require_tmux() {
   exit 1
 }
 
-install_app() {  # $1 version  $2 release download url  $3 tmp dir
-  local version="$1" dl="$2" tmp="$3"
-  local triple; triple="$(detect_triple)"
-  local asset="worktrees-app-$triple.app.tar.gz"
+# Where the Linux desktop app goes: ~/Applications, the directory AppImage
+# integrators (AppImageLauncher) use — and, deliberately, not ~/.local/bin, so
+# the app can never sit on PATH beside the CLI.
+linux_app_dir() { echo "$HOME/Applications"; }
+
+# Download the desktop-app asset for this host and verify its checksum. Returns
+# 1 (after saying so) when the release has no such asset; exits on a mismatch.
+fetch_app_asset() {  # $1 version  $2 release download url  $3 tmp dir  $4 asset
+  local version="$1" dl="$2" tmp="$3" asset="$4"
   echo "fetching $asset ..."
   if ! curl -fsSL -o "$tmp/$asset" "$dl/$asset" 2>/dev/null; then
     echo "NOTE: release $version has no desktop-app bundle ($asset) — app install skipped." >&2
     echo "      From a clone: make install-app" >&2
-    return 0
+    return 1
   fi
   if [ -f "$tmp/checksums.txt" ] || curl -fsSL -o "$tmp/checksums.txt" "$dl/checksums.txt" 2>/dev/null; then
     ( cd "$tmp" && grep "  $asset\$" checksums.txt | sha256_check ) \
@@ -123,6 +132,70 @@ install_app() {  # $1 version  $2 release download url  $3 tmp dir
   else
     echo "WARNING: no checksums.txt on release $version — skipping app verification" >&2
   fi
+}
+
+install_app() {  # $1 version  $2 release download url  $3 tmp dir
+  case "$(uname -s)" in
+    Darwin) install_app_macos "$@" ;;
+    Linux)  install_app_linux "$@" ;;
+  esac
+}
+
+install_app_linux() {  # $1 version  $2 release download url  $3 tmp dir
+  local version="$1" dl="$2" tmp="$3"
+  local triple; triple="$(detect_triple)"
+  local asset="worktrees-app-$triple.AppImage"
+  fetch_app_asset "$version" "$dl" "$tmp" "$asset" || return 0
+  local appdir; appdir="$(linux_app_dir)"
+  local app="$appdir/worktrees.AppImage"
+  mkdir -p "$appdir"
+  chmod 0755 "$tmp/$asset"
+  # Beside the target, then renamed over it: a running copy keeps its own inode.
+  mv -f "$tmp/$asset" "$appdir/.worktrees.AppImage.new"
+  mv -f "$appdir/.worktrees.AppImage.new" "$app"
+  echo "installed: $app"
+
+  # The icon comes out of the AppImage itself. `--appimage-extract` runs the
+  # AppImage's runtime (no FUSE needed for it) — the program just installed.
+  # Best effort: without it the entry still launches, with a generic icon.
+  local data="${XDG_DATA_HOME:-$HOME/.local/share}" icon=""
+  if ( cd "$tmp" && "$app" --appimage-extract 'usr/share/icons/hicolor/128x128/apps/*.png' ) >/dev/null 2>&1; then
+    icon="$(find "$tmp/squashfs-root/usr/share/icons/hicolor/128x128/apps" -name '*.png' 2>/dev/null | head -n 1)"
+  fi
+  if [ -n "$icon" ]; then
+    mkdir -p "$data/icons/hicolor/128x128/apps"
+    cp "$icon" "$data/icons/hicolor/128x128/apps/worktrees.png"
+  fi
+  mkdir -p "$data/applications"
+  # StartupWMClass is the GUI binary's name (tauri.linux.conf.json's
+  # mainBinaryName), which is what the window reports — so the dock groups it.
+  cat > "$data/applications/worktrees.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=worktrees
+Comment=worktrees — one place per branch (desktop app)
+Exec="$app"
+Icon=worktrees
+Terminal=false
+Categories=Development;
+StartupWMClass=worktrees-app
+EOF
+  if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "$data/applications" >/dev/null 2>&1 || true
+  fi
+  echo "desktop entry: $data/applications/worktrees.desktop"
+  # -x on the process NAME: the GUI is worktrees-app in an AppImage and a .deb
+  # alike, and the CLI it carries (usr/lib/worktrees/worktrees) is not.
+  if pgrep -x worktrees-app >/dev/null 2>&1; then
+    echo "NOTE: the worktrees desktop app is currently running — quit + reopen to pick up the new version."
+  fi
+}
+
+install_app_macos() {  # $1 version  $2 release download url  $3 tmp dir
+  local version="$1" dl="$2" tmp="$3"
+  local triple; triple="$(detect_triple)"
+  local asset="worktrees-app-$triple.app.tar.gz"
+  fetch_app_asset "$version" "$dl" "$tmp" "$asset" || return 0
   local appdir="/Applications"
   [ -w "$appdir" ] || appdir="$HOME/Applications"
   mkdir -p "$appdir"
@@ -134,7 +207,10 @@ install_app() {  # $1 version  $2 release download url  $3 tmp dir
   rm -rf "$appdir/worktrees.app"
   ditto "$tmp/worktrees.app" "$appdir/worktrees.app"
   echo "installed: $appdir/worktrees.app  (open -a worktrees)"
-  if pgrep -f "worktrees.app/Contents/MacOS" >/dev/null 2>&1; then
+  # The GUI binary by name: the bundle also carries the CLI beside it
+  # (Contents/MacOS/worktrees), and a running `worktrees serve` from there is
+  # not the app.
+  if pgrep -f "worktrees.app/Contents/MacOS/app" >/dev/null 2>&1; then
     echo "NOTE: worktrees.app is currently running — quit + reopen to pick up the new version."
   fi
 }
@@ -155,6 +231,10 @@ main() {
     fi
     if [ -d "/Applications/worktrees.app" ] || [ -d "$HOME/Applications/worktrees.app" ]; then
       echo "desktop app left in place — remove with: rm -rf /Applications/worktrees.app"
+    fi
+    if [ -f "$(linux_app_dir)/worktrees.AppImage" ]; then
+      echo "desktop app left in place — remove with: rm -f $(linux_app_dir)/worktrees.AppImage" \
+        "${XDG_DATA_HOME:-$HOME/.local/share}/applications/worktrees.desktop"
     fi
     return 0
   fi
@@ -267,18 +347,21 @@ main() {
     echo "         Remove/rename it or reorder PATH, or you'll keep running the old one." >&2
   fi
 
-  # ── desktop app (macOS) ────────────────────────────────────────────────────
-  if [ "$(uname -s)" = Darwin ]; then
+  # ── desktop app (macOS, Linux) ─────────────────────────────────────────────
+  local os; os="$(uname -s)"
+  if [ "$os" = Darwin ] || [ "$os" = Linux ]; then
+    local what="worktrees.app -> /Applications"
+    [ "$os" = Linux ] && what="worktrees.AppImage -> $(linux_app_dir)"
     if [ -z "$with_app" ]; then
       # curl|bash: stdin is the script itself — ask on the controlling terminal.
       # ([ -r /dev/tty ] passes even with NO controlling tty; actually open it.)
       if { : < /dev/tty && : > /dev/tty; } 2>/dev/null; then
-        printf '\nAlso install the desktop app (worktrees.app -> /Applications)? [y/N] ' > /dev/tty
+        printf '\nAlso install the desktop app (%s)? [y/N] ' "$what" > /dev/tty
         ans=""; IFS= read -r ans < /dev/tty || ans=""
         case "$ans" in y|Y|yes|YES) with_app=1 ;; *) with_app=0 ;; esac
       else
         echo ""
-        echo "NOTE: desktop app not installed — rerun with WORKTREES_INSTALL_APP=1 (or --with-app) to add worktrees.app."
+        echo "NOTE: desktop app not installed — rerun with WORKTREES_INSTALL_APP=1 (or --with-app) to add it ($what)."
       fi
     fi
     if [ "$with_app" = 1 ]; then

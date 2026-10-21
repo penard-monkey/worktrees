@@ -32,6 +32,12 @@ read that first.
       not derive a session id from an empty cwd), `prepare` (refusals: missing
       binary, runtime floor, unreachable model host), `running_model`,
       `session_present` / `may_resume`, `activity`, `agents`, `send`.
+- [ ] **Every process it starts is made by `childenv::command(..)`**, never
+      `Command::new` — the version probe, a usage server, a git call about its
+      per-place files. An AppImage launch hands its AppDir (`LD_LIBRARY_PATH`,
+      `PYTHONHOME`, a `PATH` that starts inside the mount) to whatever the app
+      spawns; `app/scripts/childenv-check.mjs` fails on a bare one. kimi landed
+      seven, and in Docker each handed 21 AppImage variables to kimi or git.
 - [ ] **Pane identity.** What does tmux report as `pane_current_command`?
       A `node` or version-string pane was once read as Claude; `for_pane` keys
       on the sidecar suffix first. Test a pane of this harness in its own
