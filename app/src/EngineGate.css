@@ -60,3 +60,13 @@
 .engine-banner-txt { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
 .engine-banner-txt b { font-weight: var(--fw-bold); }
 .engine-banner button { flex: 0 0 auto; }
+/* Retrying is not yet an error: the warning hue's tint until the retries
+ * stop, and only `.down` keeps the danger hue above. */
+.engine-banner:not(.down) {
+  background: color-mix(in srgb, var(--warn) 12%, var(--bg-panel));
+  border-color: color-mix(in srgb, var(--warn) 40%, var(--line));
+}
+.engine-banner-why {
+  display: block; margin-top: 2px;
+  color: var(--txt-dim);
+}

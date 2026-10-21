@@ -28,6 +28,7 @@
 import { Channel as TauriChannel, invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen } from "@tauri-apps/api/event";
 import type { Event, EventCallback, UnlistenFn } from "@tauri-apps/api/event";
+import { retrier, type Outcome, type RetryEnv, type RetryView, type Try } from "./reconnect";
 
 export type { Event, EventCallback, UnlistenFn } from "@tauri-apps/api/event";
 
@@ -101,10 +102,22 @@ const LOCAL = new Set([...CLIENT_LOCAL, ...SHIM_COMMANDS]);
 
 /** Where the page stands with the engine. `gen` counts successful connections:
  *  0 means none yet (the app has not mounted), and every bump is a new socket
- *  that terminals re-attach through (their React keys carry it). */
+ *  that terminals re-attach through (their React keys carry it).
+ *
+ *  - `starting`: one try in flight. `phase` is the shim's news about a long
+ *    one ("waiting-old": a serve still stopping; "starting": spawning one);
+ *    `reason` is why the engine is not up (null at launch).
+ *  - `waiting`: the next automatic try is at `at` (`performance.now()`'s
+ *    clock). `notOurs`: the serve that went was started outside the app, so
+ *    the retries only reconnect.
+ *  - `hidden`: a try fell due while the window was hidden, and waits to be seen.
+ *  - `down`: the retries have STOPPED (the crash-loop limit); only Reconnect
+ *    now goes on. */
 export type EngineState =
-  | { kind: "starting"; gen: number }
+  | { kind: "starting"; gen: number; phase: string | null; manual: boolean; reason: string | null }
   | { kind: "up"; gen: number }
+  | { kind: "waiting"; gen: number; reason: string; at: number; notOurs: boolean }
+  | { kind: "hidden"; gen: number; reason: string; notOurs: boolean }
   | { kind: "down"; gen: number; reason: string };
 
 // "up" at gen 0 is what every door but the engine door reports: the mock and
@@ -130,22 +143,37 @@ export function onEngineState(f: () => void): () => void {
   };
 }
 
-let reconnector: ((reason: string | null) => Promise<void>) | null = null;
+let reconnector: (() => Promise<void>) | null = null;
 
-/** Find or start the engine again and re-attach to it — the "Reconnect"
- *  button. A no-op where there is no engine door. */
+/** Reconnect now: cancel the pending retry and try at once — allowed to start
+ *  a serve, because a person asked. A no-op where there is no engine door. */
 export function reconnectEngine(): Promise<void> {
-  return reconnector ? reconnector(engine.kind === "down" ? engine.reason : null) : Promise.resolve();
+  return reconnector ? reconnector() : Promise.resolve();
 }
 
 /** A socket door, as `ipcws.ts` makes one: `ready` settles once the handshake
  *  has proven the server (or failed). */
 export type EngineSocket = Door & { ready: Promise<void> };
 
-/** Open a socket to the engine. `reason` is why this is a reconnect (null on
- *  the first), for the shim's log; `onLost` is how the socket reports that it
- *  died — refused, mismatched, or closed — once. */
-export type Dial = (reason: string | null, onLost: (msg: string) => void) => Promise<EngineSocket>;
+/** One dial, as the engine door asks for it: the try's `reason` (null at
+ *  launch) and its `start` permission and `manual` mark for the shim, `onLost`
+ *  for the socket to report that it died — refused, mismatched, or closed —
+ *  once, and `onPhase` for the shim's news about a long try. */
+export type DialAsk = {
+  reason: string | null;
+  start: boolean;
+  manual: boolean;
+  onLost: (msg: string) => void;
+  onPhase: (phase: string) => void;
+};
+
+/** What a dial found: the socket, and the shim's two facts — is this serve the
+ *  app's (`owned`), and did this dial start it (`started`). A dial that throws
+ *  rejects with the shim's `ConnectError` ({message, started, declined}), or
+ *  with anything else, which reads as a plain failure. */
+export type Dialled = { sock: EngineSocket; owned: boolean; started: boolean };
+
+export type Dial = (ask: DialAsk) => Promise<Dialled>;
 
 /** A channel for a door with no socket: nothing will ever arrive on it, and the
  *  call it is handed to fails anyway. */
@@ -153,24 +181,38 @@ function deadChannel<T>(onmessage?: (response: T) => void): Channel<T> {
   return { onmessage: onmessage ?? (() => {}), toJSON: () => "__CHANNEL__:0" };
 }
 
+/** The shim's rejection, or anything a dial threw, as an outcome's fields. */
+function dialFailure(e: unknown): { reason: string; started: boolean; declined: boolean } {
+  if (typeof e === "object" && e !== null && typeof (e as { message?: unknown }).message === "string") {
+    const f = e as { message: string; started?: unknown; declined?: unknown };
+    return { reason: f.message, started: f.started === true, declined: f.declined === true };
+  }
+  return { reason: String(e), started: false, declined: false };
+}
+
+/** The engine door's handle on its retries: `connect` is the launch's try,
+ *  `visibility` is called on every `visibilitychange`. */
+export type EngineDoor = Door & { connect(): Promise<void>; visibility(): void };
+
 /** The shipped app's door: `local` (Tauri's, or null in a browser, where every
  *  command goes to the socket and serve refuses the client-local ones) for the
  *  names in `CLIENT_LOCAL` and `SHIM_COMMANDS`, and the engine socket that
  *  `dial` opens for everything else.
  *
  *  It owns its event listeners rather than lending them to one socket, so a
- *  reconnect re-subscribes every one of them on the new socket and a component
- *  that listened before the engine died hears it after. Channels come from the
- *  socket current when they are made; a terminal makes a new one when it
- *  re-attaches. Nothing is retried on its own: a lost engine says so
- *  (`engineState`), and `reconnectEngine()` is the one way back. */
-export function engineDoor(local: Door | null, dial: Dial): Door & { connect(reason: string | null): Promise<void> } {
+ *  reconnect re-subscribes every one of them on the new socket — once per
+ *  socket, whatever happened in between — and a component that listened
+ *  before the engine died hears it after. Channels come from the socket
+ *  current when they are made; a terminal makes a new one when it re-attaches.
+ *  When the socket dies the door retries on its own (`reconnect.ts` holds when,
+ *  and whether a try may start a serve); `reconnectEngine()` tries at once. */
+export function engineDoor(local: Door | null, dial: Dial, env: RetryEnv): EngineDoor {
   // Nothing reaches the page until the first connect succeeds: the gate in
   // main.tsx mounts the app at gen 1, never against a dead engine.
-  setEngine({ kind: "starting", gen: 0 });
+  setEngine({ kind: "starting", gen: 0, phase: null, manual: false, reason: null });
   let sock: EngineSocket | null = null;
+  let gen = 0;
   let failure = "the engine is not connected yet";
-  let attempt: Promise<void> | null = null;
   const handlers = new Map<string, Set<EventCallback<unknown>>>();
 
   const deliver = (name: string) => (e: Event<unknown>) => {
@@ -180,39 +222,52 @@ export function engineDoor(local: Door | null, dial: Dial): Door & { connect(rea
     void s.listen(name, deliver(name));
   };
 
-  function connect(reason: string | null): Promise<void> {
-    if (attempt) return attempt;
-    attempt = (async () => {
-      const gen = engine.gen;
-      sock = null;
-      setEngine({ kind: "starting", gen });
-      // `onLost` can fire before `dial` has returned the socket it belongs
-      // to; the holder lets it name which socket it is about.
-      const holder: { s: EngineSocket | null } = { s: null };
-      try {
-        holder.s = await dial(reason, (msg) => {
+  /** One try: dial, prove, re-subscribe, go live. */
+  async function attempt(t: Try, onPhase: (p: string) => void): Promise<Outcome> {
+    sock = null;
+    // `onLost` can fire before `dial` has returned the socket it belongs to;
+    // the holder lets it name which socket it is about.
+    const holder: { s: EngineSocket | null } = { s: null };
+    let started = false;
+    try {
+      const d = await dial({
+        reason: t.reason === null ? null : t.manual ? t.reason : `automatic retry ${t.attempt}: ${t.reason}`,
+        start: t.start,
+        manual: t.manual,
+        onPhase,
+        onLost: (msg) => {
           if (sock === null || sock !== holder.s) return; // not live yet: the catch below reports it
           sock = null;
           failure = msg;
-          setEngine({ kind: "down", gen: engine.gen, reason: msg });
-        });
-        await holder.s.ready;
-        for (const name of handlers.keys()) subscribe(holder.s, name);
-        sock = holder.s;
-        setEngine({ kind: "up", gen: gen + 1 });
-      } catch (e) {
-        failure = String(e);
-        setEngine({ kind: "down", gen, reason: failure });
-      } finally {
-        attempt = null;
-      }
-    })();
-    return attempt;
+          retries.lost(msg);
+        },
+      });
+      started = d.started;
+      holder.s = d.sock;
+      await d.sock.ready;
+      for (const name of handlers.keys()) subscribe(d.sock, name);
+      sock = d.sock;
+      gen += 1;
+      return { ok: true, owned: d.owned, started };
+    } catch (e) {
+      const f = dialFailure(e);
+      failure = f.reason;
+      return { ok: false, reason: f.reason, started: started || f.started, declined: f.declined };
+    }
   }
-  reconnector = connect;
+
+  const retries = retrier(env, attempt, (v: RetryView) => {
+    if (v.kind === "up") setEngine({ kind: "up", gen });
+    else if (v.kind === "trying") setEngine({ kind: "starting", gen, phase: v.phase, manual: v.manual, reason: v.reason });
+    else if (v.kind === "waiting") setEngine({ kind: "waiting", gen, reason: v.reason, at: v.at, notOurs: v.notOurs });
+    else if (v.kind === "hidden") setEngine({ kind: "hidden", gen, reason: v.reason, notOurs: v.notOurs });
+    else setEngine({ kind: "down", gen, reason: v.reason });
+  });
+  reconnector = retries.now;
 
   return {
-    connect,
+    connect: retries.boot,
+    visibility: retries.visibility,
     invoke<T>(cmd: string, args?: InvokeArgs): Promise<T> {
       if (local && LOCAL.has(cmd)) return local.invoke<T>(cmd, args);
       if (sock) return sock.invoke<T>(cmd, args);

@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import type { SocketDeps } from "./ipcws";
+import type { RetryEnv } from "./reconnect";
 
 /** What every socket to `worktrees serve` is built from, whichever way the page
  *  learned the port and the token. */
@@ -19,8 +20,24 @@ function socketDeps(onError: (msg: string) => void, remedy?: string): Omit<Socke
   };
 }
 
-/** The remedy the app offers for a server it will not drive: its own button. */
-const RECONNECT = "Reconnect, and the app looks for worktrees serve again — and starts or replaces it if it has to.";
+/** The remedy the app offers for a server it will not drive: its own button.
+ *  Only what is true in every state the banner can be in — retrying, waiting
+ *  for the window, or stopped — so nothing about trying on its own. */
+const RECONNECT = "Reconnect now tries again at once.";
+
+/** The clock, chance and visibility the engine door's retries run on
+ *  (reconnect.ts). `performance.now()`, not `Date.now()`: a wall-clock jump
+ *  must not fire or starve a retry, and EngineGate's countdown reads the same
+ *  clock. */
+function retryEnv(): RetryEnv {
+  return {
+    now: () => performance.now(),
+    setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+    clearTimeout: (h) => window.clearTimeout(h as number),
+    random: () => Math.random(),
+    visible: () => document.visibilityState !== "hidden",
+  };
+}
 
 // Three ways to boot, chosen before anything that talks to the backend is
 // imported: the design harness, the dev stack, and the app.
@@ -41,11 +58,20 @@ async function boot() {
   if (import.meta.env.DEV && import.meta.env.VITE_SERVE) {
     const { engineDoor, openDoor } = await import("./ipc");
     const { bootSocket } = await import("./ipcws");
-    const door = engineDoor(null, (_reason, onLost) =>
-      bootSocket({ ...socketDeps(onLost), fetch: (u, init) => window.fetch(u, init) }),
+    // The stack's serve is server-stack.sh's, never the page's: owned false,
+    // so a lost one is only ever reconnected to (re-reading the endpoint).
+    const door = engineDoor(
+      null,
+      async ({ onLost }) => ({
+        sock: await bootSocket({ ...socketDeps(onLost), fetch: (u, init) => window.fetch(u, init) }),
+        owned: false,
+        started: false,
+      }),
+      retryEnv(),
     );
     openDoor(door);
-    void door.connect(null);
+    document.addEventListener("visibilitychange", () => door.visibility());
+    void door.connect();
     gated = true;
   } else if (!import.meta.env.VITE_MOCK && "__TAURI_INTERNALS__" in window) {
     // The app: a client of this host's engine. The shim finds or starts
@@ -54,12 +80,22 @@ async function boot() {
     // and the socket's HMAC key. Client-local commands stay on Tauri IPC.
     const { engineDoor, openDoor, tauriDoor } = await import("./ipc");
     const { connectSocket } = await import("./ipcws");
-    const door = engineDoor(tauriDoor, async (reason, onLost) => {
-      const ep = await tauriDoor.invoke<{ port: number; token: string }>("engine_connect", { reason });
-      return connectSocket({ ...socketDeps(onLost, RECONNECT), port: ep.port, token: ep.token });
-    });
+    // `start` is the retry policy's (reconnect.ts) and the shim obeys it: under
+    // false it starts and replaces nothing. `owned`/`started` are the shim's
+    // answer, and the policy's only source for either.
+    const door = engineDoor(
+      tauriDoor,
+      async ({ reason, start, manual, onLost, onPhase }) => {
+        const onPhaseCh = tauriDoor.channel<string>(onPhase);
+        const ep = await tauriDoor.invoke<{ port: number; token: string; owned: boolean; started: boolean }>("engine_connect", { reason, start, manual, onPhase: onPhaseCh });
+        const sock = connectSocket({ ...socketDeps(onLost, RECONNECT), port: ep.port, token: ep.token });
+        return { sock, owned: ep.owned, started: ep.started };
+      },
+      retryEnv(),
+    );
     openDoor(door);
-    void door.connect(null);
+    document.addEventListener("visibilitychange", () => door.visibility());
+    void door.connect();
     gated = true;
   }
   const { startFeedback, stopFeedback } = await import("./feedback");

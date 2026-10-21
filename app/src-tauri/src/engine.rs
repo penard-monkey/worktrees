@@ -37,6 +37,15 @@
 //! serve.json says `owner: "app"` — so a crash does not leave an engine running
 //! unseen until reboot. A serve someone else started (the CLI, the dev stack)
 //! has no owner, and the app uses it and leaves it running.
+//!
+//! **Reconnecting.** The page retries on its own when the socket drops
+//! (`app/src/reconnect.ts` holds the policy: backoff, the crash-loop budget,
+//! who may be restarted). The shim holds only the mechanism: an ask with
+//! `may_start: false` never spawns and never replaces, and every answer says
+//! truthfully whether this call reached `start()` and whether the serve it
+//! found is this app's — the two facts that policy needs and only this side
+//! knows. A port that closed under a LIVE pid is a serve still stopping, and
+//! is waited for before one is started beside it (`settle`).
 
 use std::ffi::OsString;
 use std::io::{ErrorKind, Read, Write};
@@ -135,6 +144,8 @@ pub enum Decision {
     Start(String),
     /// Something holds the port that may not be touched.
     Refuse(String),
+    /// A start (or a replace) was the answer, and this ask may not start one.
+    Decline(String),
 }
 
 /// The decision, from the observation alone. Pure: every branch is a test.
@@ -157,6 +168,18 @@ pub fn decide(seen: Seen, ours: &str) -> Decision {
         Seen::Proven(sf, theirs) if theirs != ours => Decision::Replace(sf, theirs),
         Seen::Proven(sf, _) if sf.owner.as_deref() == Some(OWNER) => Decision::Adopt(sf),
         Seen::Proven(sf, _) => Decision::Use(sf),
+    }
+}
+
+/// The page's `start: false` applied to a decision. A call that may not start
+/// may not replace either: a replace is a SIGTERM and then a start. Pure.
+pub fn permit(d: Decision, may_start: bool) -> Decision {
+    match d {
+        Decision::Start(why) if !may_start => Decision::Decline(format!("nothing to reconnect to: {why}")),
+        Decision::Replace(sf, theirs) if !may_start => {
+            Decision::Decline(format!("the serve on 127.0.0.1:{} (pid {}) is v{theirs}, not this app's", sf.port, sf.pid))
+        }
+        d => d,
     }
 }
 
@@ -378,16 +401,55 @@ pub fn serve_bin(
 
 /// What the webview needs to connect: the token travels only in this answer
 /// to `engine_connect`, and lives in the page only as an HMAC key.
+/// `owned` and `started` are the two facts the page's reconnect policy needs
+/// and cannot see: whether this serve is the app's to restart if it dies (one
+/// it started or adopted), and whether this call started one (its crash-loop
+/// budget counts those).
 #[derive(Serialize, Clone)]
 pub struct Endpoint {
     pub port: u16,
     pub token: String,
     pub version: String,
+    pub owned: bool,
+    pub started: bool,
 }
 
-impl From<&ServeFile> for Endpoint {
-    fn from(sf: &ServeFile) -> Self {
-        Endpoint { port: sf.port, token: sf.token.clone(), version: sf.version.clone() }
+/// Never the token, as for `ServeFile`.
+impl std::fmt::Debug for Endpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "endpoint(port {}, v{}, owned {}, started {})", self.port, self.version, self.owned, self.started)
+    }
+}
+
+/// What the page asks of one connect. `may_start` is its reconnect policy
+/// reaching the one place that can spawn; `manual` is a person's press of
+/// Reconnect now, which the log says ("on request"). `reason` is why the page
+/// is reconnecting, null at launch.
+#[derive(Debug, Clone, Copy)]
+pub struct Ask<'a> {
+    pub reason: Option<&'a str>,
+    pub may_start: bool,
+    pub manual: bool,
+}
+
+/// Why a connect failed, as the page gets it (Tauri serializes it as the
+/// rejection). `started`: this call reached `start()`, whatever came of it —
+/// a spawn, a spawn that exited, a missing binary — so a serve that can never
+/// come up spends the crash-loop budget instead of being retried forever.
+/// `declined`: nothing usable was there and this ask could not start one.
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct ConnectError {
+    pub message: String,
+    pub started: bool,
+    pub declined: bool,
+}
+
+impl ConnectError {
+    pub fn failed(message: impl Into<String>) -> Self {
+        ConnectError { message: message.into(), started: false, declined: false }
+    }
+    fn after_start(message: impl Into<String>) -> Self {
+        ConnectError { message: message.into(), started: true, declined: false }
     }
 }
 
@@ -439,40 +501,88 @@ impl Engine {
         Engine { config_dir, origin, dev_origin, bin, viewer_js, version, connecting: Mutex::new(()), owned: Mutex::new(None) }
     }
 
-    /// Find or start the engine and say how to reach it. `reason` is the
-    /// client's (why it is reconnecting), for the log. Blocking: up to
-    /// `READY_WAIT` when a serve has to start, `STOP_WAIT` more to replace one.
-    pub fn connect(&self, reason: Option<&str>) -> Result<Endpoint, String> {
+    /// Find or start the engine and say how to reach it. `phase` hears what a
+    /// long call is doing ("waiting-old", "starting"), for the page's banner.
+    /// Blocking: up to `STOP_WAIT` for a stopping serve to go, `READY_WAIT`
+    /// when one has to start, `STOP_WAIT` more to replace one.
+    pub fn connect(&self, ask: Ask, phase: &dyn Fn(&str)) -> Result<Endpoint, ConnectError> {
         let _one = self.connecting.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(r) = reason {
-            log("info", &format!("engine: reconnect requested ({r})"));
+        let on_request = if ask.manual { " on request" } else { "" };
+        if let Some(r) = ask.reason {
+            log("info", &format!("engine: reconnect requested{on_request} ({r}); may start: {}", if ask.may_start { "yes" } else { "no" }));
         }
         let seen = observe(&self.config_dir, &self.origin);
         log("info", &format!("engine: observed {}", describe(&seen)));
-        match decide(seen, &self.version) {
+        // Only a call that may start has a reason to wait for the old one to go.
+        let seen = if ask.may_start { self.settle(seen, STOP_WAIT, phase) } else { seen };
+        match permit(decide(seen, &self.version), ask.may_start) {
             Decision::Use(sf) => {
                 self.keep_if(sf.pid);
                 log("info", &format!("engine: using {sf:?}, started by someone else — it stays running when the app quits"));
-                Ok(Endpoint::from(&sf))
+                Ok(self.endpoint(&sf, false))
             }
             Decision::Adopt(sf) => {
                 self.adopt(sf.pid);
                 log("info", &format!("engine: adopting {sf:?} — an app started it; this app stops it on quit"));
-                Ok(Endpoint::from(&sf))
+                Ok(self.endpoint(&sf, false))
             }
             Decision::Start(why) => {
-                log("info", &format!("engine: {why} → starting one"));
-                self.start()
+                log("info", &format!("engine: {why} → starting one{on_request}"));
+                phase("starting");
+                self.start(ask.manual)
             }
             Decision::Replace(sf, theirs) => {
-                log("info", &format!("engine: {sf:?} proved v{theirs}, this app is v{} → replacing it", self.version));
-                self.terminate(&sf)?;
-                self.start()
+                log("info", &format!("engine: {sf:?} proved v{theirs}, this app is v{} → replacing it{on_request}", self.version));
+                phase("starting");
+                self.terminate(&sf).map_err(ConnectError::failed)?;
+                self.start(ask.manual)
+            }
+            Decision::Decline(why) => {
+                log("info", &format!("engine: {why} → not starting one: this attempt may not"));
+                Err(ConnectError { message: why, started: false, declined: true })
             }
             Decision::Refuse(why) => {
                 log("error", &format!("engine: refused: {why}"));
-                Err(format!("{why} (serve's log: {SERVE_LOG})"))
+                Err(ConnectError::failed(format!("{why} (serve's log: {SERVE_LOG})")))
             }
+        }
+    }
+
+    /// The answer for `sf`. Owned is what this shim MANAGES, not what the file
+    /// claims: `owned` names a pid only after a start or an adopt of it.
+    fn endpoint(&self, sf: &ServeFile, started: bool) -> Endpoint {
+        let owned = self.owned.lock().unwrap_or_else(|p| p.into_inner()).as_ref().is_some_and(|w| w.pid() == sf.pid);
+        Endpoint { port: sf.port, token: sf.token.clone(), version: sf.version.clone(), owned, started }
+    }
+
+    /// A port that closed under a LIVE pid is, nearly always, a serve on its
+    /// way out: serve stops its listener first, then `host::stop` flushes the
+    /// dock rings and shell-cwds.json, and only then removes serve.json.
+    /// Starting now would put a second engine beside one still writing those
+    /// files, and serve's own one-engine refusal cannot see it (`live_other`
+    /// asks the PORT). So wait, up to `bound`, for that pid to go, and look
+    /// again. Past the bound the pid is taken for a reused one — a stale
+    /// serve.json naming some other process — and the observation stands.
+    fn settle(&self, seen: Seen, bound: Duration, phase: &dyn Fn(&str)) -> Seen {
+        let Seen::PortClosed(sf) = &seen else { return seen };
+        phase("waiting-old");
+        log("info", &format!("engine: {sf:?} is alive with nothing on its port — waiting up to {}s for it to stop before starting one", bound.as_secs()));
+        if wait_gone(&self.config_dir, sf.pid, bound) {
+            log("info", &format!("engine: the old serve (pid {}) stopped", sf.pid));
+            let again = observe(&self.config_dir, &self.origin);
+            log("info", &format!("engine: observed {}", describe(&again)));
+            again
+        } else {
+            log(
+                "warn",
+                &format!(
+                    "engine: pid {} is still alive after {}s with nothing on port {} — taking it for a reused pid, not a serve, and starting one anyway",
+                    sf.pid,
+                    bound.as_secs(),
+                    sf.port
+                ),
+            );
+            seen
         }
     }
 
@@ -496,14 +606,9 @@ impl Engine {
     /// pid gone, or its serve.json no longer naming it. Never SIGKILL.
     fn terminate(&self, sf: &ServeFile) -> Result<(), String> {
         signal(sf.pid, libc::SIGTERM).map_err(|e| format!("could not stop the old serve (pid {}): {e} (serve's log: {SERVE_LOG})", sf.pid))?;
-        let deadline = Instant::now() + STOP_WAIT;
-        while Instant::now() < deadline {
-            let named = read_file(&self.config_dir).is_some_and(|f| f.pid == sf.pid);
-            if !pid_alive(sf.pid) || !named {
-                log("info", &format!("engine: the old serve (pid {}) stopped", sf.pid));
-                return Ok(());
-            }
-            std::thread::sleep(Duration::from_millis(100));
+        if wait_gone(&self.config_dir, sf.pid, STOP_WAIT) {
+            log("info", &format!("engine: the old serve (pid {}) stopped", sf.pid));
+            return Ok(());
         }
         let msg = format!(
             "the running worktrees serve (pid {}, v{}) did not stop within {}s of SIGTERM, so this app (v{}) cannot \
@@ -517,11 +622,12 @@ impl Engine {
         Err(msg)
     }
 
-    /// Spawn serve and wait until it is proven on this version.
-    fn start(&self) -> Result<Endpoint, String> {
+    /// Spawn serve and wait until it is proven on this version. Every answer
+    /// says `started`: the call got here.
+    fn start(&self, manual: bool) -> Result<Endpoint, ConnectError> {
         let (bin, how) = self.bin.clone().map_err(|e| {
             log("error", &format!("engine: no serve binary: {e}"));
-            format!("{e} (serve's log: {SERVE_LOG})")
+            ConnectError::after_start(format!("{e} (serve's log: {SERVE_LOG})"))
         })?;
         let args = serve_args(&self.config_dir, self.dev_origin.as_deref());
         let mut cmd = Command::new(&bin);
@@ -548,17 +654,21 @@ impl Engine {
         let mut child = cmd.spawn().map_err(|e| {
             let m = format!("could not start {}: {e}", bin.display());
             log("error", &format!("engine: {m}"));
-            format!("{m} (serve's log: {SERVE_LOG})")
+            ConnectError::after_start(format!("{m} (serve's log: {SERVE_LOG})"))
         })?;
         let pid = child.id();
-        log("info", &format!("engine: started serve pid={pid} bin={} ({how}) dev_origin={}", bin.display(), self.dev_origin.as_deref().unwrap_or("none")));
+        let on_request = if manual { " on request" } else { "" };
+        log(
+            "info",
+            &format!("engine: started serve pid={pid}{on_request} bin={} ({how}) dev_origin={}", bin.display(), self.dev_origin.as_deref().unwrap_or("none")),
+        );
         match self.wait_ready(&mut child) {
             Ok(sf) => {
                 let alive = Arc::new(AtomicBool::new(true));
                 *self.owned.lock().unwrap_or_else(|p| p.into_inner()) = Some(Owned::Started { pid, alive: alive.clone() });
                 reap(child, alive);
                 log("info", &format!("engine: serve pid={pid} is ready on 127.0.0.1:{} — this app stops it on quit", sf.port));
-                Ok(Endpoint::from(&sf))
+                Ok(self.endpoint(&sf, true))
             }
             Err(Ready::Exited(status)) => {
                 // Another launch may have won the race to the config dir: serve
@@ -567,14 +677,14 @@ impl Engine {
                 match decide(observe(&self.config_dir, &self.origin), &self.version) {
                     Decision::Use(sf) => {
                         log("info", &format!("engine: another serve won the race: using {sf:?}"));
-                        Ok(Endpoint::from(&sf))
+                        Ok(self.endpoint(&sf, true))
                     }
                     Decision::Adopt(sf) => {
                         self.adopt(sf.pid);
                         log("info", &format!("engine: another app's serve won the race: adopting {sf:?}"));
-                        Ok(Endpoint::from(&sf))
+                        Ok(self.endpoint(&sf, true))
                     }
-                    _ => Err(format!("worktrees serve exited before it was ready ({status}); its log says why: {SERVE_LOG}")),
+                    _ => Err(ConnectError::after_start(format!("worktrees serve exited before it was ready ({status}); its log says why: {SERVE_LOG}"))),
                 }
             }
             Err(Ready::Failed(why)) => {
@@ -582,7 +692,7 @@ impl Engine {
                 let _ = signal(pid, libc::SIGTERM);
                 reap(child, Arc::new(AtomicBool::new(true)));
                 log("error", &format!("engine: serve pid={pid}: {why}"));
-                Err(format!("{why} (serve's log: {SERVE_LOG})"))
+                Err(ConnectError::after_start(format!("{why} (serve's log: {SERVE_LOG})")))
             }
         }
     }
@@ -662,6 +772,21 @@ impl Engine {
 enum Ready {
     Exited(String),
     Failed(String),
+}
+
+/// Wait, up to `bound`, for `pid` to go: gone, or serve.json no longer naming
+/// it (serve removes its file as the last step of stopping). True if it went.
+fn wait_gone(config_dir: &Path, pid: u32, bound: Duration) -> bool {
+    let deadline = Instant::now() + bound;
+    loop {
+        if !pid_alive(pid) || !read_file(config_dir).is_some_and(|f| f.pid == pid) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 fn read_file(config_dir: &Path) -> Option<ServeFile> {
@@ -777,6 +902,124 @@ mod tests {
         let mut liar = sf(7, None);
         liar.version = "1.0.0".into();
         assert!(matches!(decide(Seen::Proven(liar, "0.9.0".into()), "1.0.0"), Decision::Replace(_, v) if v == "0.9.0"));
+    }
+
+    // ── permit: the page's `start: false`, on every decision ────────────────
+
+    #[test]
+    fn an_ask_that_may_not_start_neither_starts_nor_replaces_and_changes_nothing_else() {
+        let all = || {
+            vec![
+                Decision::Use(sf(7, None)),
+                Decision::Adopt(sf(7, Some(OWNER))),
+                Decision::Replace(sf(7, None), "0.9.0".into()),
+                Decision::Start("no serve.json".into()),
+                Decision::Refuse("unproven".into()),
+            ]
+        };
+        for d in all() {
+            assert_eq!(permit(d.clone(), true), d, "may_start leaves every decision as it is");
+        }
+        let gated: Vec<Decision> = all().into_iter().map(|d| permit(d, false)).collect();
+        assert_eq!(gated[0], Decision::Use(sf(7, None)), "a live serve is always reconnected to");
+        assert_eq!(gated[1], Decision::Adopt(sf(7, Some(OWNER))));
+        assert!(matches!(&gated[2], Decision::Decline(why) if why.contains("v0.9.0") && why.contains("pid 7")), "{:?}", gated[2]);
+        assert!(matches!(&gated[3], Decision::Decline(why) if why.contains("no serve.json")), "{:?}", gated[3]);
+        assert_eq!(gated[4], Decision::Refuse("unproven".into()), "a refusal stays a refusal");
+    }
+
+    /// The page reads these two shapes by name (app/src/ipc.ts, main.tsx).
+    #[test]
+    fn the_answers_carry_ownership_and_whether_a_start_happened() {
+        let ep = Endpoint { port: 1, token: "t".into(), version: "1.0.0".into(), owned: true, started: false };
+        let v = serde_json::to_value(&ep).unwrap();
+        assert_eq!((v["owned"].as_bool(), v["started"].as_bool(), v["port"].as_u64()), (Some(true), Some(false), Some(1)));
+        let e = serde_json::to_value(ConnectError { message: "m".into(), started: true, declined: false }).unwrap();
+        assert_eq!(e, serde_json::json!({ "message": "m", "started": true, "declined": false }));
+    }
+
+    fn engine_on(d: &Path, bin: Result<(PathBuf, String), String>) -> Engine {
+        Engine::new(d.to_path_buf(), APP_ORIGIN.into(), None, bin, None, "1.0.0".into())
+    }
+
+    /// A "serve" that records that it ran and exits at once, so a test can
+    /// tell a start from no start without a real serve.
+    fn marker_bin(d: &Path) -> (PathBuf, PathBuf) {
+        let marker = d.join("ran");
+        let bin = d.join("fake-serve");
+        std::fs::write(&bin, format!("#!/bin/sh\ntouch '{}'\nexit 3\n", marker.display())).unwrap();
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        (bin, marker)
+    }
+
+    #[test]
+    fn connect_under_start_false_spawns_nothing_and_says_it_declined() {
+        let d = tmp("decline");
+        let (bin, marker) = marker_bin(&d);
+        let e = engine_on(&d, Ok((bin, "test".into())));
+        let phases = Mutex::new(Vec::<String>::new());
+        let rec = |p: &str| phases.lock().unwrap().push(p.to_string());
+        let no = e.connect(Ask { reason: Some("lost"), may_start: false, manual: false }, &rec).unwrap_err();
+        assert!(no.declined && !no.started && no.message.contains("no serve.json"), "{no:?}");
+        assert!(!marker.exists(), "start:false ran the serve binary");
+        assert!(phases.lock().unwrap().is_empty(), "nothing to wait for, nothing started");
+        // The same ask allowed to start does start — and says so, though this
+        // "serve" exits at once: that is what the crash-loop budget counts.
+        let yes = e.connect(Ask { reason: Some("lost"), may_start: true, manual: true }, &rec).unwrap_err();
+        assert!(yes.started && !yes.declined && yes.message.contains("exited before it was ready"), "{yes:?}");
+        assert!(marker.exists(), "start:true did not run the serve binary");
+        assert_eq!(*phases.lock().unwrap(), ["starting"]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_missing_binary_counts_as_a_start_so_the_budget_ends_it() {
+        let d = tmp("nobin");
+        let e = engine_on(&d, Err("no CLI".into()));
+        let r = e.connect(Ask { reason: None, may_start: true, manual: false }, &|_: &str| {}).unwrap_err();
+        assert!(r.started && !r.declined && r.message.contains("no CLI"), "{r:?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // ── settle: a serve still stopping is waited for ───────────────────────
+
+    #[test]
+    fn a_closed_port_under_a_pid_that_exits_is_waited_for_then_looked_at_again() {
+        let d = tmp("settle-gone");
+        let mut child = Command::new("sleep").arg("0.4").spawn().unwrap();
+        let pid = child.id();
+        // Reaped as it exits: kill(pid, 0) answers for a zombie too.
+        let reaper = std::thread::spawn(move || child.wait());
+        let closed = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        write(&d, &ServeFile { port: closed, ..sf(pid, Some(OWNER)) });
+        let seen = observe(&d, APP_ORIGIN);
+        assert!(matches!(seen, Seen::PortClosed(_)), "{seen:?}");
+        let phases = Mutex::new(Vec::<String>::new());
+        let t0 = Instant::now();
+        let after = engine_on(&d, Err("unused".into())).settle(seen, Duration::from_secs(5), &|p: &str| phases.lock().unwrap().push(p.into()));
+        assert!(t0.elapsed() < Duration::from_secs(4), "it waited out the bound instead of the pid ({:?})", t0.elapsed());
+        assert!(matches!(after, Seen::DeadPid(ref f) if f.pid == pid), "looked again once the pid went: {after:?}");
+        assert_eq!(*phases.lock().unwrap(), ["waiting-old"]);
+        let _ = reaper.join();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_closed_port_under_a_pid_that_never_goes_falls_through_to_a_start_after_the_bound() {
+        let d = tmp("settle-stuck");
+        let closed = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        write(&d, &ServeFile { port: closed, ..sf(live_pid(), None) });
+        let seen = observe(&d, APP_ORIGIN);
+        let t0 = Instant::now();
+        let after = engine_on(&d, Err("unused".into())).settle(seen.clone(), Duration::from_millis(300), &|_: &str| {});
+        assert!(t0.elapsed() >= Duration::from_millis(300), "gave up before the bound ({:?})", t0.elapsed());
+        assert_eq!(after, seen, "past the bound the observation stands");
+        assert!(matches!(decide(after, "1.0.0"), Decision::Start(_)), "…and it is a start");
+        // Anything but a closed port is not waited for at all.
+        let t1 = Instant::now();
+        assert_eq!(engine_on(&d, Err("unused".into())).settle(Seen::NoFile, Duration::from_secs(5), &|_: &str| panic!("no phase")), Seen::NoFile);
+        assert!(t1.elapsed() < Duration::from_millis(100));
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

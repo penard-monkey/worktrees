@@ -31,11 +31,15 @@
 //      releasing its handler, events and unlisten, a request too big for serve
 //      refused before it can end the connection, a version mismatch refused, a
 //      refused handshake and a dead socket surfaced — never swallowed.
-//   3. DRIVES THE ENGINE DOOR (ipc.ts) over real ipcws clients: client-local
-//      commands to the local door and nothing else, every listener carried
-//      across a reconnect, the engine's state (starting → up → down → up, and
-//      `gen` counting connections), a failed dial or a refused handshake
-//      reported as down. And the termreplay contract through the whole chain:
+//   3. DRIVES THE ENGINE DOOR (ipc.ts) over real ipcws clients, its retries
+//      (reconnect.ts, inlined as the real source) on a virtual clock:
+//      client-local commands to the local door and nothing else, a lost socket
+//      redialled ON ITS OWN on the backoff, every listener carried across
+//      reconnects — subscribed exactly once per socket after five of them —
+//      the engine's state (starting → up → waiting → up, `gen` counting
+//      connections), a failed dial or a refused handshake retried in the
+//      shim's own words, a hidden window deferring, someone else's serve never
+//      restarted, and the crash-loop limit stopping the retries. And the termreplay contract through the whole chain:
 //      TerminalPane's `useTerm` + `shellTransport` → ipc.ts → ipcws.ts → the
 //      fake socket. A replay is a channel's first frame and stays unanswered;
 //      a live query after it is answered.
@@ -47,7 +51,7 @@
 //      build (the app is a client) and the dev endpoint's client NOT in it.
 //
 // Overrides, so a mutation can be tested without touching the tree:
-//   TRANSPORT_IPCWS, TRANSPORT_IPC, TRANSPORT_WIRE, TRANSPORT_POLICY,
+//   TRANSPORT_IPCWS, TRANSPORT_IPC, TRANSPORT_RECONNECT, TRANSPORT_WIRE, TRANSPORT_POLICY,
 //   TRANSPORT_DISPATCH, TRANSPORT_CONN, TRANSPORT_SERVEFILE, TRANSPORT_MAIN,
 //   TRANSPORT_DOOR, TRANSPORT_DIST
 import { createHmac, randomBytes } from "node:crypto";
@@ -61,6 +65,7 @@ const here = (p) => fileURLToPath(new URL(p, import.meta.url));
 const SRC = {
   ipcws: process.env.TRANSPORT_IPCWS ?? here("../src/ipcws.ts"),
   ipc: process.env.TRANSPORT_IPC ?? here("../src/ipc.ts"),
+  reconnect: process.env.TRANSPORT_RECONNECT ?? here("../src/reconnect.ts"),
   ipcInTree: here("../src/ipc.ts"),
   pane: here("../src/TerminalPane.tsx"),
   main: process.env.TRANSPORT_MAIN ?? here("../src/main.tsx"),
@@ -272,6 +277,7 @@ function clock() {
   let now = 0, next = 1;
   const timers = new Map();
   return {
+    now: () => now,
     setTimeout(fn, ms) { const id = next++; timers.set(id, { at: now + ms, fn }); return id; },
     clearTimeout(id) { timers.delete(id); },
     advance(ms) {
@@ -894,13 +900,18 @@ const ipcSrc = read(SRC.ipc);
 for (const want of ['from "@tauri-apps/api/core"', 'from "@tauri-apps/api/event"']) {
   check(ipcSrc.includes(want), `ipc.ts imports ${want.slice(5)} (it is the door's Tauri half)`);
 }
-/** ipc.ts with its imports replaced by recording stubs. */
+check(/^import \{ retrier, [^}]*\} from "\.\/reconnect";$/m.test(ipcSrc), "ipc.ts takes its retries from reconnect.ts — the module inlined below");
+const unimported = (src) => src.split("\n").filter((l) => !/^\s*import\s/.test(l)).join("\n");
+/** ipc.ts with its Tauri imports replaced by recording stubs, and its one
+ *  relative import — reconnect.ts — inlined as the REAL source, exports
+ *  dropped: a `data:` module cannot resolve `./reconnect`, and a stub would be
+ *  a second answer to the rules reconnect-check.mjs holds. */
 async function loadIpc() {
-  const body = ipcSrc.split("\n").filter((l) => !/^\s*import\s/.test(l)).join("\n");
+  const machine = unimported(read(SRC.reconnect)).replace(/^export (function|const|type) /gm, "$1 ");
   const js = (await transformWithEsbuild(
     // A fresh module per load (the comment changes the data: URL): each caller
     // gets its own door and its own stubs.
-    `// ${Math.random()}\nconst { tauriInvoke, tauriListen, TauriChannel } = globalThis.__ipcStubs;\n${body}`,
+    `// ${Math.random()}\nconst { tauriInvoke, tauriListen, TauriChannel } = globalThis.__ipcStubs;\n${machine}\n${unimported(ipcSrc)}`,
     "ipc.ts", { loader: "ts", format: "esm" })).code;
   return load(SRC.ipc, js);
 }
@@ -928,7 +939,9 @@ async function loadIpc() {
 }
 
 // The engine door: the shipped app's (with Tauri as its local half) and the dev
-// stack's (with none), over real ipcws clients on fake sockets.
+// stack's (with none), over real ipcws clients on fake sockets, its retries on
+// a virtual clock. reconnect.ts's own rules are reconnect-check.mjs's; here it
+// is that the door feeds them what the shim said and does what they decide.
 {
   globalThis.__ipcStubs = { tauriInvoke: () => Promise.reject("the Tauri stub must not be reached"), tauriListen: () => Promise.reject("no"), TauriChannel: class {} };
   const ipc = await loadIpc();
@@ -938,29 +951,45 @@ async function loadIpc() {
     listen: () => Promise.reject("the local door has no events"),
     channel: () => { throw new Error("the local door makes no channels"); },
   };
+  // What the next dials do: undefined (an honest serve, the app's), "unowned"
+  // (honest, someone else's), "impostor" (fails the proof), "phase" (reports
+  // the shim's phase first), "throw" (a string), or an object — the shim's
+  // ConnectError — to reject with.
+  const script = [];
   const dials = [];
-  let nextDial = null; // a test may make the next dial fail, or its server lie
-  const door = ipc.engineDoor(tauri, async (reason, onLost) => {
-    const how = nextDial; nextDial = null;
-    dials.push({ reason });
+  const dclk = clock();
+  let seen = true;
+  const env = { now: dclk.now, setTimeout: dclk.setTimeout, clearTimeout: dclk.clearTimeout, random: () => 0, visible: () => seen };
+  const door = ipc.engineDoor(tauri, async (ask) => {
+    const how = script.shift();
+    const d = { reason: ask.reason, start: ask.start, manual: ask.manual, subs: [] };
+    dials.push(d);
     if (how === "throw") throw "engine_connect: no serve binary";
-    const h = harness({ onError: onLost });
-    dials[dials.length - 1].h = h;
+    if (how && typeof how === "object") throw how;
+    if (how === "phase") ask.onPhase("waiting-old");
+    const h = harness({ onError: ask.onLost });
+    d.h = h;
+    // Every subscription this socket is asked for, by name.
+    const listen = h.door.listen;
+    h.door.listen = (name, fn) => { d.subs.push(name); return listen(name, fn); };
     void (async () => {
       h.open(); h.hello(); h.challenge(); await h.proof();
       h.welcome(how === "impostor" ? { key: "f".repeat(64) } : {}); await h.verified();
     })();
-    return h.door;
-  });
+    return { sock: h.door, owned: how !== "unowned", started: false };
+  }, env);
   ipc.openDoor(door);
   const st = () => ipc.engineState();
+  const isUp = () => until(() => st().kind === "up");
   check(st().kind === "starting" && st().gen === 0, `an engine door starts out "starting" at gen 0, before anything has dialled — the gate holds the app back (${JSON.stringify(st())})`);
   const early = await settle(ipc.invoke("list_workspace"));
   check(typeof early.err === "string" && dials.length === 0, `a call before the first connect is refused, not queued and not dialled (${early.err})`);
 
-  await settle(door.connect(null));
+  await settle(door.connect());
+  await isUp();
   const h1 = dials[0]?.h;
-  check(st().kind === "up" && st().gen === 1 && dials.length === 1 && dials[0].reason === null, `connect dials once and the engine is up at gen 1 (${JSON.stringify(st())})`);
+  check(st().kind === "up" && st().gen === 1 && dials.length === 1 && dials[0].reason === null && dials[0].start && !dials[0].manual,
+    `the launch dials once, with no reason, allowed to start, and the engine is up at gen 1 (${JSON.stringify(st())})`);
 
   const copied = (await settle(ipc.invoke("copy_text", { text: "x" }))).ok;
   const raised = (await settle(ipc.invoke("raise_window"))).ok;
@@ -982,37 +1011,120 @@ async function loadIpc() {
   h1?.drop();
   await tick();
   const lost = st();
-  check(lost.kind === "down" && lost.gen === 1 && /closed/.test(lost.reason), `a socket that dies takes the engine down, keeping gen and naming why (${JSON.stringify(lost)})`);
+  check(lost.kind === "waiting" && lost.gen === 1 && /closed/.test(lost.reason) && lost.at === dclk.now() + 500,
+    `a socket that dies leaves the engine waiting to retry in 0.5 s, keeping gen and naming why (${JSON.stringify(lost)})`);
+  check(dials.length === 1, "…and nothing is dialled at once");
   const whileDown = await settle(ipc.invoke("get_settings"));
-  check(whileDown.err === lost.reason, `while down, every engine call fails with that reason (${whileDown.err})`);
+  check(whileDown.err === lost.reason, `while it waits, every engine call fails with that reason (${whileDown.err})`);
   const deadCh = new ipc.Channel();
   check(typeof deadCh.toJSON() === "string", "…and a channel can still be made — it just never hears anything");
   check((await settle(ipc.invoke("copy_text", { text: "y" }))).ok === "local:copy_text", "…while client-local commands still work: the window is still here");
 
-  await settle(ipc.reconnectEngine());
+  dclk.advance(500);
+  check(dials.length === 2 && dials[1].start && !dials[1].manual && dials[1].reason === `automatic retry 1: ${lost.reason}`,
+    `0.5 s later the door redials ON ITS OWN, telling the shim why and that it is a retry (${dials[1]?.reason?.slice(0, 60)})`);
+  await isUp();
   const h2 = dials[1]?.h;
-  check(st().kind === "up" && st().gen === 2 && dials[1]?.reason === lost.reason, `Reconnect dials again, telling the shim why, and the engine is up at gen 2 (${JSON.stringify(st())}; reason ${dials[1]?.reason})`);
+  check(st().kind === "up" && st().gen === 2, `…and the engine is up at gen 2 (${JSON.stringify(st())})`);
   await settle(ipc.listen("sessions:busy", (e) => heard.push(["b", e.payload])));
   h2?.event("places:changed", 2);
   h2?.event("sessions:busy", 3);
   check(same(heard.slice(1), [["a", 2], ["b", 3]]), `a listener from before the reconnect hears the NEW socket's events, beside one added after (${JSON.stringify(heard)})`);
 
-  // Two Reconnect presses are one dial.
+  // Two Reconnect presses are one dial, at once, cancelling the timer.
   h2?.drop(); await tick();
   const p1 = ipc.reconnectEngine(), p2 = ipc.reconnectEngine();
+  check(dials.length === 3 && dials[2].manual && dials[2].start && dials[2].reason === st().reason && dclk.pending() === 0,
+    `Reconnect now dials at once — manual, allowed to start, the timer gone (${dials.length - 2} dial(s), ${dclk.pending()} timer(s))`);
   await settle(Promise.all([p1, p2]));
-  check(dials.length === 3 && st().gen === 3, `two reconnects at once dial once (${dials.length - 2} dial(s); gen ${st().gen})`);
+  await isUp();
+  check(dials.length === 3 && st().gen === 3, `two presses at once are one dial (${dials.length - 2}; gen ${st().gen})`);
 
-  // A dial that fails, and a server that cannot prove itself, are both "down".
+  // Failures keep it retrying, in the shim's words, on the backoff.
   dials[2]?.h?.drop(); await tick();
-  nextDial = "throw";
-  await settle(ipc.reconnectEngine());
-  check(st().kind === "down" && st().gen === 3 && st().reason === "engine_connect: no serve binary", `a dial that fails leaves the engine down with the shim's words (${JSON.stringify(st())})`);
-  nextDial = "impostor";
-  await settle(ipc.reconnectEngine());
-  check(st().kind === "down" && /did not prove/.test(st().reason), `a server that fails the proof leaves the engine down and is never driven (${st().reason?.slice(0, 80)})`);
-  await settle(ipc.reconnectEngine());
+  script.push("throw");
+  dclk.advance(500); await ticks();
+  check(st().kind === "waiting" && st().gen === 3 && st().reason === "engine_connect: no serve binary" && st().at === dclk.now() + 1000,
+    `a dial that throws leaves the engine waiting, in the shim's words, 1 s further on (${JSON.stringify(st())})`);
+  script.push({ message: "worktrees serve exited before it was ready (exit status: 1)", started: true, declined: false });
+  dclk.advance(1000); await ticks();
+  check(st().kind === "waiting" && st().reason === "worktrees serve exited before it was ready (exit status: 1)",
+    `the shim's ConnectError is read by its fields, not stringified (${st().reason})`);
+  script.push("impostor");
+  dclk.advance(2000);
+  await until(() => st().kind === "waiting" && /did not prove/.test(st().reason));
+  check(st().kind === "waiting" && /did not prove/.test(st().reason), `a server that fails the proof is never driven, and the retries go on (${st().reason?.slice(0, 80)})`);
+  script.push("phase");
+  dclk.advance(4000);
+  check(st().kind === "starting" && st().phase === "waiting-old" && !st().manual, `the shim's phase reaches the engine state while its dial is in flight (${JSON.stringify(st())})`);
+  await isUp();
   check(st().kind === "up" && st().gen === 4, `…and the next good dial brings it back at gen 4 (${JSON.stringify(st())})`);
+
+  // Five reconnects later: every event name subscribed ONCE per socket, and
+  // every handler hears each event once — including a listen made, and an
+  // unlisten made, while the engine was down.
+  const before = dials.length;
+  const counts = { a: 0, b: 0, c: 0, gone: 0, late: 0 };
+  await settle(ipc.listen("places:changed", () => counts.c++));
+  const unGone = (await settle(ipc.listen("sessions:busy", () => counts.gone++))).ok;
+  for (let i = 0; i < 5; i++) {
+    dials[dials.length - 1].h.drop(); await tick();
+    if (i === 1) await settle(ipc.listen("shell:exit", () => counts.late++));
+    if (i === 2) unGone?.();
+    dclk.advance(500);
+    await isUp();
+  }
+  const made = dials.slice(before);
+  const names = ["places:changed", "sessions:busy"];
+  const subsOk = made.every((d, i) => same([...d.subs].sort(), (i >= 1 ? [...names, "shell:exit"] : names).sort()));
+  check(made.length === 5 && subsOk, `5 automatic reconnects: each new socket is subscribed to each event name exactly once (${made.map((d) => d.subs.length).join(",")} subscriptions)`);
+  const last = made[made.length - 1].h;
+  const tally = heard.length;
+  last.event("places:changed", 9);
+  last.event("sessions:busy", 9);
+  last.event("shell:exit", 9);
+  check(heard.length === tally + 2 && counts.c === 1 && counts.late === 1 && counts.gone === 0,
+    `…and each handler hears one event once — the old ones, one listened while down, none unlistened while down (a/b +${heard.length - tally}, c ${counts.c}, late ${counts.late}, gone ${counts.gone})`);
+  made[0].h.event("places:changed", 10);
+  dials[0].h.event("places:changed", 10);
+  check(counts.c === 1 && heard.length === tally + 2, "a dead socket's late event reaches nobody");
+  check(st().gen === 9, `gen counted every connection (${st().gen})`);
+
+  // A hidden window defers the retry until it is seen.
+  seen = false;
+  last.drop(); await tick();
+  dclk.advance(500);
+  check(st().kind === "hidden" && dials.length === before + 5, `a retry due while the window is hidden waits (${st().kind}, ${dials.length - before - 5} dial(s))`);
+  seen = true;
+  door.visibility();
+  check(dials.length === before + 6 && !dials[dials.length - 1].manual, "being seen again dials at once");
+  await isUp();
+
+  // Someone else's serve is reconnected to, never restarted.
+  dials[dials.length - 1].h.drop(); await tick();
+  script.push("unowned");
+  dclk.advance(500); await isUp();
+  dials[dials.length - 1].h.drop(); await tick();
+  script.push({ message: "nothing to reconnect to: no serve.json", started: false, declined: true });
+  dclk.advance(500); await ticks();
+  check(!dials[dials.length - 1].start && st().kind === "waiting" && st().notOurs, `after someone else's serve, the retry may not start one, and says whose it was (${JSON.stringify(st())})`);
+  dclk.advance(1000); await isUp();
+
+  // The crash-loop limit, through the door: the shim's `started` is counted.
+  // A minute up first, so the ConnectError above that said `started` has aged
+  // out of the window and the three below are the only starts in it.
+  dclk.advance(61_000);
+  dials[dials.length - 1].h.drop(); await tick();
+  const exits = { message: "worktrees serve exited before it was ready (exit status: 1)", started: true, declined: false };
+  script.push(exits, exits, exits);
+  for (const ms of [500, 1000, 2000]) { dclk.advance(ms); await ticks(); }
+  script.push({ message: "nothing to reconnect to: serve.json names pid 7, which is not running", started: false, declined: true });
+  dclk.advance(4000); await ticks();
+  check(!dials[dials.length - 1].start && st().kind === "down" && /3 times in the last 60 s/.test(st().reason) && dclk.pending() === 0,
+    `three starts the shim reported, then a declined try: the retries STOP, with no timer left (${st().reason?.slice(0, 90)})`);
+  await settle(ipc.reconnectEngine());
+  await isUp();
+  check(dials[dials.length - 1].manual && dials[dials.length - 1].start && st().kind === "up", "a press after the stop dials, may start, and brings it back");
 }
 {
   // The dev stack's door has no local half: a browser has no Tauri, so even a
@@ -1020,12 +1132,14 @@ async function loadIpc() {
   globalThis.__ipcStubs = { tauriInvoke: () => Promise.reject("tauri must not be reached"), tauriListen: () => Promise.reject("no"), TauriChannel: class {} };
   const ipc = await loadIpc();
   let h = null;
-  const door = ipc.engineDoor(null, async (_r, onLost) => {
+  const dclk = clock();
+  const door = ipc.engineDoor(null, async ({ onLost }) => {
     h = harness({ onError: onLost });
     void (async () => { h.open(); h.hello(); h.challenge(); await h.proof(); h.welcome(); await h.verified(); })();
-    return h.door;
-  });
-  await settle(door.connect(null));
+    return { sock: h.door, owned: false, started: false };
+  }, { now: dclk.now, setTimeout: dclk.setTimeout, clearTimeout: dclk.clearTimeout, random: () => 0, visible: () => true });
+  await settle(door.connect());
+  await until(() => ipc.engineState().kind === "up");
   const p = settle(door.invoke("copy_text", { text: "x" }));
   await tick();
   const req = h?.requests().find((r) => r[K.cmd] === "copy_text");
@@ -1158,11 +1272,17 @@ ${body}
   check(appAt >= 0 && /\} else if \(!import\.meta\.env\.VITE_MOCK && "__TAURI_INTERNALS__" in window\) \{/.test(appGuard ?? ""),
     `the app's boot connects with connectSocket inside Tauri, and not in the mock (${appGuard?.trim() ?? "no guard found"})`);
   const appBlock = appAt < 0 ? "" : lines.slice(appAt, lines.findIndex((l, i) => i > appAt && /^\s*gated = true;/.test(l))).join("\n");
-  check(/const ep = await tauriDoor\.invoke<\{ port: number; token: string \}>\("engine_connect", \{ reason \}\);/.test(appBlock) &&
+  check(/const ep = await tauriDoor\.invoke<\{ port: number; token: string; owned: boolean; started: boolean \}>\("engine_connect", \{ reason, start, manual, onPhase: onPhaseCh \}\);/.test(appBlock) &&
     /connectSocket\(\{ \.\.\.socketDeps\(onLost, RECONNECT\), port: ep\.port, token: ep\.token \}\)/.test(appBlock) &&
-    /engineDoor\(tauriDoor,/.test(appBlock) && !/localStorage|sessionStorage|location|console\./.test(appBlock),
-    "the app takes port and token from engine_connect's answer alone, hands them straight to connectSocket, and stores and logs neither");
-  check(/engineDoor\(null,/.test(main), "the dev stack's engine door has no local half");
+    /return \{ sock, owned: ep\.owned, started: ep\.started \};/.test(appBlock) &&
+    /engineDoor\(\s*tauriDoor,/.test(appBlock) && !/localStorage|sessionStorage|location|console\./.test(appBlock),
+    "the app takes port and token from engine_connect's answer alone, hands them straight to connectSocket, and stores and logs neither; the retry policy's start/manual go in, the shim's owned/started come back");
+  check((appBlock.match(/engine_connect/g) ?? []).length === 1 && /\{ reason, start, manual, onLost, onPhase \}/.test(appBlock),
+    "engine_connect is called once, from the one dial, with exactly the try the retry policy made");
+  check(/document\.addEventListener\("visibilitychange", \(\) => door\.visibility\(\)\);/.test(appBlock) && /retryEnv\(\)/.test(appBlock) &&
+    /visible: \(\) => document\.visibilityState !== "hidden"/.test(main) && /now: \(\) => performance\.now\(\)/.test(main),
+    "the app's retries run on performance.now() and hear every visibilitychange, so a hidden window defers them");
+  check(/engineDoor\(\s*null,/.test(main), "the dev stack's engine door has no local half");
   const statics = [];
   const walk = (dir) => {
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
