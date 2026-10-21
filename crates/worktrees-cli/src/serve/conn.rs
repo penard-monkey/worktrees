@@ -28,7 +28,7 @@ use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::{Role, WebSocketConfig};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
-use worktrees_api::log::{info, warn};
+use worktrees_api::log::{error, info, warn};
 use worktrees_api::{Ctx, Host};
 
 use super::dispatch::{self, Args, Call};
@@ -570,15 +570,29 @@ async fn session(mut ws: Ws, shared: Arc<Shared>, id: u64, origin: String, slot:
     info(&format!("serve: client {id} disconnected ({} attach(es) closed)", terms.len()));
 }
 
-/// One parsed request → one reply frame.
+/// One parsed request → one reply frame, whatever its body does.
+///
+/// A body that PANICS is answered as well. Before, it never was: tokio keeps
+/// the panic inside the blocking task, so the connection, its lane and the
+/// server all carried on and the client waited on that id forever. Now the
+/// client gets `internal error` and nothing of the panic, and the log gets
+/// one line naming the command, beside the panic hook's own entry. A command
+/// that panics is always a row of the table, since an unknown one is an
+/// `Err` before any body runs, so `cmd` is safe to log as it is.
+/// `AssertUnwindSafe`, because what a body shares is the engine's state
+/// behind its mutexes, and a lock the panic poisoned reports itself.
 fn answer(call: &Call, id: &Value, cmd: &str, args: &Args) -> String {
     // Host-admin commands change this machine's user-tier state; a line per
     // call is the audit trail Phase 2's gate will want, and it is cheap now.
     if dispatch::exposure(cmd) == Some(dispatch::Exposure::HostAdmin) {
         info(&format!("serve: host-admin {cmd}"));
     }
-    match dispatch::call(call, cmd, args) {
-        Ok(v) => wire::reply_ok(id, v),
-        Err(e) => wire::reply_err(id, e),
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dispatch::call(call, cmd, args))) {
+        Ok(Ok(v)) => wire::reply_ok(id, v),
+        Ok(Err(e)) => wire::reply_err(id, e),
+        Err(p) => {
+            error(&format!("serve: {cmd} panicked: {}; answered {:?}", worktrees_api::log::panic_text(&*p), wire::INTERNAL_ERROR));
+            wire::reply_err(id, Value::from(wire::INTERNAL_ERROR))
+        }
     }
 }

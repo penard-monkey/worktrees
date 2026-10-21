@@ -143,12 +143,17 @@ const hex32 = () => randomBytes(32).toString("hex");
 /** HMAC-SHA256 keyed with the token's UTF-8 bytes, over label + cn + "\n" + sn, as lowercase hex. */
 const spectag = (key, label, cn, sn) => createHmac("sha256", Buffer.from(key, "utf8")).update(`${label}${cn}\n${sn}`, "utf8").digest("hex");
 
+/** A Rust file without its unit-test MODULE (its literals are fixtures). Cut at
+ *  the `#[cfg(test)]` that heads `mod tests`, not at the first one: dispatch.rs
+ *  has test-only items above its table (`TEST_PANIC`), and cutting there left
+ *  every channel row out of the slice. */
+const shipped = (src) => src.split(/\n#\[cfg\(test\)\]\s*\nmod tests\b/)[0];
 const wireAll = read(SRC.wire);
-const wire = wireAll.split("\n#[cfg(test)]")[0];
-const policy = read(SRC.policy).split("\n#[cfg(test)]")[0];
-const dispatch = read(SRC.dispatch).split("\n#[cfg(test)]")[0];
-const conn = read(SRC.conn).split("\n#[cfg(test)]")[0];
-const servefile = read(SRC.servefile).split("\n#[cfg(test)]")[0];
+const wire = shipped(wireAll);
+const policy = shipped(read(SRC.policy));
+const dispatch = shipped(read(SRC.dispatch));
+const conn = shipped(read(SRC.conn));
+const servefile = shipped(read(SRC.servefile));
 
 const K = {};
 {

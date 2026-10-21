@@ -515,6 +515,55 @@ fn requests_are_answered_by_id_with_tauris_shapes() {
     assert_eq!(ids, vec![json!("a"), json!("b")]);
 }
 
+/// A log sink that keeps its lines. Installed by the one test that reads the
+/// log; serve's own sink would write the REAL `~/.cache/worktrees/serve.log`.
+#[derive(Default)]
+struct Recorder(Mutex<Vec<String>>);
+
+impl worktrees_api::log::LogSink for Recorder {
+    fn log(&self, level: &str, msg: &str) {
+        self.0.lock().unwrap().push(format!("[{level}] {msg}"));
+    }
+}
+
+/// A body that panics is answered — `internal error`, and nothing of the
+/// panic — and the socket, the lane it ran on and the server all go on
+/// serving. Unanswered, the client waits on that id forever: tokio keeps the
+/// panic inside its blocking task, so nothing else ever notices. The log
+/// gets the panic on ONE line with the command it came from, its text
+/// escaped, since a body can panic over a client's value.
+#[test]
+fn a_body_that_panics_is_answered_and_everything_after_it_is_served() {
+    use super::dispatch::TEST_PANIC;
+    let rec = Arc::new(Recorder::default());
+    assert!(worktrees_api::log::install(rec.clone()), "a log sink was already installed in this test binary");
+    let l = live("panic");
+    let mut ws = client(&l);
+    let why = "a body fell over\n2026-01-01 00:00:00Z [info] forged";
+
+    // On the concurrent pool, then the next request on the same socket.
+    assert_eq!(rpc(&mut ws, json!(1), TEST_PANIC, json!({ "why": why })), json!({ "id": 1, "err": "internal error" }));
+    assert_eq!(rpc(&mut ws, json!(2), "get_settings", json!({})), json!({ "id": 2, "ok": null }));
+
+    // On an attach's lane, with a request queued behind it on that lane.
+    ws.send(Message::text(json!({ "id": 3, "cmd": TEST_PANIC, "args": { "id": 7, "why": why } }).to_string())).unwrap();
+    ws.send(Message::text(json!({ "id": 4, "cmd": "term_write", "args": { "id": 7, "data": [97] } }).to_string())).unwrap();
+    assert_eq!(text(&mut ws), json!({ "id": 3, "err": "internal error" }));
+    assert_eq!(text(&mut ws), json!({ "id": 4, "err": "no such terminal" }));
+
+    // The server: a new client is served too.
+    let mut other = client(&l);
+    assert_eq!(rpc(&mut other, json!(5), "get_settings", json!({})), json!({ "id": 5, "ok": null }));
+
+    let lines = rec.0.lock().unwrap().clone();
+    let ours: Vec<&String> = lines.iter().filter(|s| s.contains(&format!("serve: {TEST_PANIC} panicked"))).collect();
+    assert_eq!(ours.len(), 2, "one line per panic: {lines:#?}");
+    for s in ours {
+        assert!(s.starts_with("[error] ") && s.contains("a body fell over") && s.contains("internal error"), "{s}");
+        assert!(!s.chars().any(char::is_control), "the panic's text is escaped onto one line: {s:?}");
+    }
+}
+
 /// `Host::emit` reaches every authenticated socket as `{event, payload}` —
 /// and only the authenticated ones.
 #[test]
