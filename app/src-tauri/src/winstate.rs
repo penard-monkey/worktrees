@@ -177,8 +177,11 @@ fn write(dir: &Path, st: &WinState) {
     if st.frame.is_none() && !st.fullscreen && !st.maximized {
         return; // nothing observed — leave whatever is on disk alone
     }
+    // The dir first: on a fresh install it is serve that makes it, and the
+    // window can settle before serve has started.
     let res = serde_json::to_vec_pretty(st)
         .map_err(|e| e.to_string())
+        .and_then(|b| std::fs::create_dir_all(dir).map(|()| b).map_err(|e| e.to_string()))
         .and_then(|b| std::fs::write(dir.join(FILE), b).map_err(|e| e.to_string()));
     match res {
         Ok(()) => crate::applog("info", &format!("window state saved: {}", describe(st))),
@@ -366,6 +369,21 @@ mod tests {
     fn a_saved_size_never_goes_under_the_window_minimum() {
         assert_eq!(clamp_size(&Frame { width: 300.0, height: 200.0, ..F }), (900.0, 560.0));
         assert_eq!(clamp_size(&F), (1200.0, 800.0));
+    }
+
+    /// On a fresh install the config dir does not exist yet when the window
+    /// first settles: serve creates it, and since the app became serve's
+    /// client nothing else in the shim does. The first save must not be a
+    /// "could not save: No such file or directory".
+    #[test]
+    fn the_first_save_makes_the_config_dir_it_lands_in() {
+        let base = std::env::temp_dir().join(format!("winstate-fresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let dir = base.join("net.example.fresh");
+        let st = WinState { frame: Some(F), maximized: false, fullscreen: false };
+        write(&dir, &st);
+        assert_eq!(load(&dir), Some(st), "the save did not land in a config dir that was not there yet");
+        std::fs::remove_dir_all(&base).unwrap();
     }
 
     #[test]
