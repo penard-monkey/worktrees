@@ -47,7 +47,7 @@ measurements as exit criteria. The draft was then reviewed with the
 | 5 | Per-object authorization (R1) | Each device has capabilities (`read`, `write`, `answer`, `instruct`, `stream`, `admin`) and a project scope. Every row of the dispatch table declares the capability it needs and the object it acts on. One resolver checks that before the body runs, against the grant of the (principal, device) pair: the principal's grant intersected with the device's. The scope also rides into the api, so the api's own path guard answers with the caller's roots: two checks, as R1 asked. Results and events are cut down to the scope. | 2 |
 | 6 | Rows a remote device never reaches | A new `HostConsole` class, served on loopback only. It covers every row that can widen what agents on this host may do, pairing and device administration, `update_cli` (*decided*, §11 Q3), and adopting a project from a hub. | 2 |
 | 7 | The remote listener | Off by default, with a one-click kill switch on the host. It binds one specific private address on a named interface, an overlay address or a LAN one (*decided*, §11 Q6), never a wildcard and never loopback. "Private" is a closed list (RFC 1918, CGNAT `100.64.0.0/10`, link-local, ULA `fc00::/7`), and anything else is refused. When the address leaves its interface or the network changes, the listener closes until the same network returns or the host chooses again. TLS 1.3 is mutual and pinned both ways (rustls), with no CA, no resumption and no 0-RTT in Phase 2. On iOS the socket lives in the Rust shim and not in the WebView. | 2 |
-| 8 | The CI witness (R8) | A connect witness for loopback serve, which is missing today. Then the bind rules, as connects: a public address that IS bindable is refused, the remote port never answers on loopback, and an address change pauses and resumes the listener. Then identity: no certificate is refused, an unenrolled one is refused, an enrolled one is served, a revoke kills the live socket, an expired device is refused, and the pairing port is closed outside a window. Measured on both platforms, with a release gate that greps the exact count. | 2 |
+| 8 | The CI witness (R8) | A connect witness for loopback serve, which is missing today. Then the bind rules, as connects: a public address that IS bindable is refused, the remote port never answers on loopback, a peer outside the allowed sources is dropped, and an address change pauses and resumes the listener. Then identity: no certificate is refused, an unenrolled one is refused, an enrolled one is served, a revoke kills the live socket, an expired device is refused, and the pairing port is closed outside a window. Measured on both platforms, with a release gate that greps the exact count. | 2 |
 | 9 | The audit log (R5) | `<config_dir>/audit.jsonl`, mode `0600`, append-only and hash-chained. Only serve's connection layer writes it, and its records are structured, never free text. Every record names a principal as well as a device. | 2 |
 | 10 | Resource limits (R6) | Per-device connection, in-flight and rate caps; bounded outboxes and lanes; single-flight for the expensive reads; separate budgets for loopback and remote, so a device cannot starve the desk. | 2 |
 | 11 | The agent-instruction surface (R7) | One path classifier in core. Instruction files need `instruct`. Files that EXECUTE without anyone choosing to run them need `stream`. `.git/**` is never written. Provenance is kept out of band, with no markers in the file. | 2 |
@@ -141,7 +141,7 @@ log are for.
 | Device key (iOS, iPadOS) | P-256 in the Secure Enclave, non-exportable, `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`, never synced to iCloud | The device's keychain | Until it is revoked or the app is deleted |
 | Device key (macOS, Linux) | P-256, in a `0600` PKCS#8 file | The client app's own config dir | As above |
 | Step-up key (iOS, iPadOS) | A second Secure Enclave P-256 key, created with `.userPresence`. It signs a server challenge before a drive-class act (§2.5). | The device's keychain | Enrolled with the device key, revoked with it |
-| Principal record | `{id, name, caps, projects, created_at}`; `id` is random (`p_…`). Phase 2 has exactly one, the **owner**: the host account's user, with every capability and scope `"*"`. The loopback caller is always the owner (§2.8). | `<config_dir>/devices.json`, as a second list beside the devices | Created with the file. Never removed in Phase 2. |
+| Principal record | `{id, name, caps, projects, created_at}`. Phase 2 has exactly one, the **owner**: the host account's user, with every capability and scope `"*"`. Its `id` is the reserved constant `owner`, so the console never reads the file to know who it is; a later principal would get a random `p_…` id. The loopback caller is always the owner (§2.8). | `<config_dir>/devices.json`, as a second list beside the devices | Created with the file. Never removed in Phase 2. |
 | Device record | `{id, principal, name, platform, spki_sha256, stepup_spki_sha256, stepup_required, caps, projects, expiry, enrolled_at, last_seen, last_addr, disabled, revoked_at}`; `id` is random, not derived from the key. `principal` is set at pairing and never changes. `expiry` and `disabled` are §2.5's. | `<config_dir>/devices.json`, `0600`. Serve is its only writer, under `servefile`'s lock-temp-rename discipline (`crates/worktrees-cli/src/serve/servefile.rs:79`–`122`). | Kept after revocation as a tombstone, for the audit trail |
 | What the device keeps | Its keys, plus `{host: {name, pin, addr}, principal_id, device_id}`. The pairing answer and the remote handshake's first frame name both ids (§2.2, §4.5). | Beside the device key, under the same protection | Until it is revoked or the app is deleted |
 | Loopback token | Unchanged: per launch, in serve.json, used for handshake v1 | `<config_dir>/serve.json` | Per launch |
@@ -361,17 +361,25 @@ memory and written to `devices.json` at most every ten minutes and at exit.
 
 - the client-certificate verifier (§4.3) refuses an expired device at the
   handshake, and serve marks the record;
-- the per-request record read (§3.3) closes a live connection whose `until`
-  has passed;
+- a timer set for the earliest `until` among connected devices disables
+  that device when it fires, and closes its live connections. A check that
+  waited for the next request would leave a terminal attach streaming,
+  since an attach sends bytes to the device without being asked (§3.3);
 - the host poll marks a device whose idle window has run out even if it
   never tries again, so the Devices list and the alert (§5.3) do not wait
   for a knock.
 
+An expiry is decided once and recorded as `disabled`, never recomputed from
+the clock at each check. So setting the host's clock back cannot re-enable
+an expired device. `until` is compared with the host's wall clock, and the
+idle rule compares `last_seen` on that same clock.
+
 **Disabled is not revoked.** A disabled device keeps its record, its keys
 and its scope, and the verifier refuses it exactly as it refuses a revoked
-one. `disabled: {at, reason}` says why: `idle`, `until`, `unrecorded` (no
-pairing record behind it, §5.2) or `console` (paused by hand,
-`device_disable`). Only the host console re-enables a device
+one. Disabling, for any reason, closes the device's live connections the
+way a revoke does. `disabled: {at, reason}` says why: `idle`, `until`,
+`unrecorded` (no pairing record behind it, §5.2) or `console` (paused by
+hand, `device_disable`). Only the host console re-enables a device
 (`device_enable`), and re-enabling restarts its idle clock from that moment.
 An `admin` device can neither re-enable a device nor change an expiry, not
 even to shorten one, because §11 Q7 puts expiry in the host's hands. Every
@@ -447,18 +455,30 @@ one. Three things carry that.
   device to another principal is a revoke and a new pairing. Phase 2 has
   exactly one principal, the **owner**: the host account's user. The
   loopback caller is always the owner, because whoever holds serve.json's
-  token holds the account. Neither identity is in the device's certificate
-  (§2.1), and the pairing answer and the remote handshake both name the two
-  ids separately.
+  token holds the account. The owner's id is the reserved constant `owner`
+  and is never looked up, so a corrupt or deleted `devices.json` cannot lock
+  the console out or split the audit trail under a new id. The Phase 2
+  loader treats any other principal in the file as corruption (§5.2: every
+  remote device refused, the file kept, an alert). It is a state no code
+  path creates, so it is refused rather than handled. Neither identity is in
+  the device's certificate (§2.1), and the pairing answer and the remote
+  handshake both name the two ids separately.
 - **Every grant check keys on the pair.** The caller is
   `Caller { principal, device }`, where `device` is `Console` or
   `Device(id)`, and the listener sets it (§3.3). What the caller may do is
   the principal's grant intersected with the device's. The owner's grant is
   every capability and scope `"*"`, so today the intersection is exactly the
-  device's grant and nothing behaves differently. A rule that names another
-  device names it within the caller's principal: an `admin` device revokes
-  and narrows only devices of its own principal (§2.5, §3.2). Result and
-  event projections are computed from the pair's grant.
+  device's grant and nothing behaves differently. The intersection is
+  defined for `"*"` as well, and it is evaluated on every request, never
+  stored: `"*"` ∩ X is X, so a device whose projects are `"*"` under a
+  principal with a list has that list and nothing more, and a project added
+  later does not reach it through the device's `"*"`. A row that needs scope
+  `"*"` (`new_path`, `all`, `log_tail`) needs the EFFECTIVE scope to be
+  `"*"`, which means on both sides. A rule that names another device names
+  it within the caller's principal: an `admin` device revokes and narrows
+  only devices of its own principal (§2.5, §3.2), and `device(id)` resolves
+  that way (§3.3). Result and event projections are computed from the
+  pair's grant.
 - **Every audit record names its principal** (§5.1), and so do the
   provenance stamps on places (§7.3) and the record of who launched a lane
   (§7.5).
@@ -589,6 +609,10 @@ The generated dispatcher runs, in order, before any body:
      `term::NEXT_ID` fix.
    - `shell(repo, slug, index)`: `place(repo, slug)` and a `u32` index.
    - `job(id)`: a clone job this connection started.
+   - `device(id)`: a device of the CALLER's principal (§2.8). A device of
+     another principal, which Phase 2 cannot have, gets the same error as
+     an id that does not exist, and every device listing is filtered to the
+     caller's principal the same way.
    - `new_path(arg)`: a path where a project WILL be. It needs `admin` and
      scope `"*"`, because it changes the registry.
    - `global`: no project object. Allowed for any device that has the
@@ -602,7 +626,8 @@ The generated dispatcher runs, in order, before any body:
    that applies) must be in the caller's grant, and `Resolved.project_root`
    must be in its scope. The grant is the (principal, device) pair's: the
    principal's capabilities and projects intersected with the device's
-   (§2.8). The loopback caller is the owner on the console, with every
+   (§2.8). A row that needs scope `"*"` needs the effective scope to be
+   `"*"`. The loopback caller is the owner on the console, with every
    capability and scope `"*"`.
 4. **The audit record** (§5), for every refusal and every mutation.
 5. **The body**, unchanged except for one thing it is now handed: the
@@ -624,6 +649,18 @@ in-memory generation counter (one atomic load when nothing has changed). A
 narrowed scope, a revoke, a device disabled by hand or a passed `until`
 (§2.5) therefore applies to the very next request on a socket that is
 already open.
+
+**Requests are not the only traffic, so a reduction acts on what is already
+flowing.** A terminal attach, a dock shell and the event stream reach a
+device without any request from it, and a per-request check alone would
+let them run on. Every change that REDUCES a grant therefore also acts on
+the live connections:
+
+- a revoke or a disable closes the device's connections (§2.5);
+- a narrowed scope or a removed capability ends each open channel whose
+  object it no longer covers, with `{channel, seq, end: true}`;
+- event projection reads the grant at the moment of each emit, never a copy
+  taken when the socket connected.
 
 **The scope rides into the api, so the api's guard is the second check.**
 Checking the arguments in the dispatcher is not enough, because some bodies
@@ -818,18 +855,53 @@ nothing changes. Two things change on purpose, for every caller:
   (`policy.rs:17`–`18`).
 - **It binds one specific private address, on a named interface.** Overlay
   mode and LAN mode both ship in Phase 2 (decided, §11 Q6). Never a
-  wildcard, and only an address the named interface holds at the moment of
-  the bind.
-- **A peer filter, as on loopback.** The accept loop drops a peer outside
-  the bound address's class, mirroring the `is_loopback()` assertion at
-  `conn.rs:342`; a link-local bind accepts only link-local peers. Because
-  the filter reads the PEER's address, a router that forwards a public port
-  to the private bind does not make serve reachable from the internet: the
-  forwarded connection arrives from a public source and is dropped before
-  TLS. A router that also rewrites the source to its own LAN address
-  defeats this, and then mTLS is the gate that remains. Peers in a
-  different private class, such as a routed office network joining `10.x`
-  and `192.168.x`, are refused in Phase 2.
+  wildcard, and only an address the interface holds at the moment of the
+  bind. For a point-to-point interface, the name follows the address (see
+  the fingerprint, below).
+- **A peer filter, as on loopback,** mirroring the `is_loopback()`
+  assertion at `conn.rs:342`. It has three parts, and they do not have the
+  same standing (below):
+  1. **Every peer's address passes the classifier.** A router that forwards
+     a public port to the private bind then does not make serve reachable
+     from the internet: the forwarded connection arrives from a public
+     source and is dropped before TLS. A router that also rewrites the
+     source to its own LAN address defeats this, and then mTLS is the gate
+     that remains.
+  2. **On an overlay bind** (a point-to-point interface), the peer is in the
+     bound address's own row of the table below: `100.64.0.0/10` for a
+     Tailscale IPv4 bind, `fc00::/7` for its IPv6 one. Where the OS allows
+     it, the listener is also tied to its interface (`SO_BINDTODEVICE` on
+     Linux, `IP_BOUND_IF` on macOS). *Whether either scopes a LISTENING
+     socket, and with what privileges, is unmeasured; §10.*
+  3. **On a LAN bind,** the peer is on-link: inside the bound address's own
+     subnet. A link-local bind is on-link by definition. A peer routed in
+     from another subnet, such as an office network joining `10.x` and
+     `192.168.x`, is refused in Phase 2.
+
+  **Part 2 exists because a host accepts a packet for any of its addresses
+  on any interface.** Both platforms use the weak host model by default.
+  macOS's `net.inet.ip.check_interface` is 0, and Linux's `rp_filter`
+  checks the route back to the SOURCE, not where the destination lives. So
+  a neighbour on the host's Wi-Fi can send to the host's Tailscale address
+  straight to the host's link-layer address, never touching the tailnet,
+  and the kernel hands the connection to a listener bound there. The
+  tailnet's ACLs, which §11 Q2 made the network layer under pairing, would
+  then cover nothing. Requiring a source in the overlay's own row closes
+  that for an off-path neighbour. It cannot use its own LAN address, and if
+  it forges a `100.x` source, the replies leave through the tunnel and its
+  TCP handshake never completes. *Expected from both platforms' documented
+  defaults, not measured here; §10.*
+
+  **Which parts are requirements, and which is a default.** Parts 1 and 2
+  are security requirements, and neither will ever be a setting. Part 1 is
+  what keeps a port forward from becoming an internet exposure. Part 2 is
+  what keeps the overlay's ACL meaningful. Part 3 is a default. A routed
+  private peer reaching a LAN bind still has to get through mTLS, so
+  refusing it shrinks who can reach the TLS handshake but protects no asset
+  by itself. It could become a setting: a console-only list of extra
+  private CIDRs, each passing the classifier, and audited when it changes.
+  Phase 2 ships without that setting, because no network in scope needs
+  it, and a setting is one more thing to get wrong.
 - **Its own `Shared` and its own rule set,** under the same dispatch table
   and the same `Ctx`. Decision 6 says two listeners, two rule sets. A flag
   on the loopback listener would let one of them leak into the other.
@@ -867,7 +939,14 @@ interface's stable address instead.
 The classifier is one pure function in core, `worktrees_core::netclass`,
 written as the allowlist above and nothing else, so a range nobody thought
 of is refused rather than admitted. It decides on the address's canonical
-bytes, never its spelling. Serve calls it at parse and at bind. The shim,
+bytes, never its spelling. The bytes come from Rust's `std::net` parsers,
+which are strict: no `127.1` shorthand, no hex or octal octets, and no
+leading zeros (std accepted leading zeros until CVE-2021-29922 was fixed in
+Rust 1.53). They never come from `inet_aton` or a resolver, both of which
+accept all of those spellings. A zone (`%en0`) is split off before parsing,
+must name an existing interface and must equal `--iface`. A string the
+parser does not take is refused, never repaired. Serve calls it at parse
+and at bind. The shim,
 which links core (`app/src-tauri/Cargo.toml:24`), calls the same function
 when it parses a pairing QR (§2.2) or an address code (below), so the host
 and the device cannot disagree about what is private.
@@ -891,11 +970,18 @@ the interface. Whether it should refuse instead is §11.1, N1.
 
 **When the address changes.** At enable time `serve-remote.json` records the
 address, the interface and a **network fingerprint**. For a point-to-point
-interface the fingerprint is the interface and the address alone: the
-overlay assigns the address, and it is this node's identity there. For any
-other interface it is the subnet (address and prefix length) plus, when the
-default route runs through that interface, the gateway's link-layer
-address, read from the routing and neighbour tables. *Reading those is
+interface the fingerprint is the address, its prefix length and the
+point-to-point flag. The overlay assigns the address, and it is this node's
+identity there. The interface's NAME is left out on purpose: macOS numbers
+`utun` interfaces in the order they are created, so Tailscale's can be
+`utun3` before a reboot and `utun5` after (*expected, not measured; §10*). A
+fingerprint that held the name would pause remote access after ordinary
+reboots, and a pause dialog that fires for no reason teaches the user to
+accept the one that matters, the same habituation §2.5 avoids for expiry.
+For any other interface the fingerprint is the interface, the subnet
+(address and prefix length) and, when the default route runs through that
+interface, the gateway's link-layer address, read from the routing and
+neighbour tables. *Reading those is
 unmeasured on both platforms; §10.* The host poll (3 s) compares what the
 interface holds now with what was recorded:
 
@@ -906,10 +992,10 @@ interface holds now with what was recorded:
   access paused: 192.168.1.5 is no longer on en0"*. It does not wait for the
   OS to fail the sockets. What macOS and Linux do to a listener whose
   address is removed is unmeasured, and after one poll it no longer matters.
-- **The same address returns on the same interface with the same
-  fingerprint.** Serve binds again and writes `remote_resumed`, with no
-  dialog. This is the overlay reconnecting, or the laptop rejoining its own
-  Wi-Fi.
+- **The same address returns with the same fingerprint** (on a LAN, that
+  includes the same interface). Serve binds again and writes
+  `remote_resumed`, with no dialog. This is the overlay reconnecting, or
+  the laptop rejoining its own Wi-Fi.
 - **Anything else** (a new address, another interface, or the same address
   on a network whose fingerprint differs, such as a café that also hands
   out `192.168.1.x`). Serve stays paused and asks: *"Remote access is
@@ -927,10 +1013,13 @@ against them mTLS is the gate.
 not change when the bind moves. So the host shows an **address code**, a QR
 of `worktrees-addr:v1?addr=<address>:<port>&pin=<spki sha256>` with no
 secret in it. A device accepts it only for a host whose pin it already
-holds, and only for an address the classifier allows, and the pin then
-authenticates the server exactly as before. For LAN mode, the enable dialog
-suggests a DHCP reservation on the router, which avoids the step. Discovery
-over mDNS is §11.1, N2.
+holds, and only for an address the classifier allows. The code itself is
+NOT authenticated: the pin is public, so anyone can print one. So the device
+keeps its old address and adopts the new one only after a pinned handshake
+to it succeeds. A forged code then costs one failed attempt, which the
+device reports as the wrong host, not a lost one. For LAN mode, the enable
+dialog suggests a DHCP reservation on the router, which avoids the step.
+Discovery over mDNS is §11.1, N2.
 
 ### 4.2 TLS: options
 
@@ -1026,7 +1115,7 @@ use. So:
 | | Loopback (decision 6, as built) | Remote (Phase 2) |
 |---|---|---|
 | Bind | `127.0.0.1` only (`conn.rs:306`) | One private address on one named interface, checked again on every poll (§4.1) |
-| Peer filter | `is_loopback()` (`conn.rs:342`) | Inside the bound address's class, so a forwarded public source is dropped |
+| Peer filter | `is_loopback()` (`conn.rs:342`) | Private always; on an overlay bind, in the overlay's own row; on a LAN bind, on-link (§4.1) |
 | Transport | Plaintext | TLS 1.3, mutual, pinned both ways |
 | Before HTTP | Connection caps, then hyper | Connection caps, then the rustls handshake. An unknown device ends here. |
 | `Host` | Loopback on our port (`policy.rs:33`) | The configured address or name, on our port |
@@ -1070,16 +1159,18 @@ the listener is a CONNECT that follows one that must succeed:
    `172.15.255.255`, `172.16.0.0`, `172.31.255.255`, `172.32.0.0`, and the
    same for `192.168.0.0/16`, `100.64.0.0/10`, `169.254.0.0/16`,
    `fc00::/7` and `fe80::/10`. Then every refused kind in §4.1, mapped
-   addresses included. The shim's QR parser runs the same table, so serve
-   and the device cannot drift.
+   addresses included, and the spellings the parser must refuse: `127.1`,
+   `0x7f.0.0.1`, `010.0.0.1`, and a zone naming no interface. The shim's QR
+   parser runs the same table, so serve and the device cannot drift.
 2. **A public address that IS bindable is refused.** Give the runner a
    documentation address, `198.51.100.7`, on a scratch interface: a dummy
    interface in a Linux container with `NET_ADMIN`, and an alias under
    `sudo` on macOS. First a plain test listener binds it and a connect to it
-   succeeds, which proves the address is live. Then serve is asked to bind
-   it, and must refuse with `not-private`, not a bind error, and a connect
-   to the port must fail. Without the first half, an address that nothing
-   could bind would pass.
+   succeeds, which proves the address is live. The test listener closes,
+   and serve is asked to bind the same address and port. It must refuse
+   with `not-private`, not a bind error, and a connect to that port must
+   fail. Without the first half, an address that nothing could bind would
+   pass.
 3. **The remote listener is not on loopback.** With the remote listener up
    on `own_lan_addr()` and a connect there succeeding, a connect to
    `127.0.0.1` on the same port must fail. A wildcard bind would answer
@@ -1091,9 +1182,18 @@ the listener is a CONNECT that follows one that must succeed:
    `remote_paused`. Put the same address back: a connect succeeds again,
    and the log has `remote_resumed`. Put a different address there
    instead: a connect to it fails until `remote_enable` names it.
+5. **The peer rule holds** (§4.1, parts 2 and 3). The client binds its
+   socket to a chosen source address on the scratch interface before it
+   connects. With the remote listener on a `100.64.0.0/10` address on a
+   point-to-point scratch interface (a TUN device on Linux, as Tailscale's
+   is; a plain dummy interface is not point-to-point and would test the LAN
+   rule instead), a connect from a second address in that row succeeds,
+   then one from an RFC 1918 address is dropped with nothing written. Then
+   the same pair for a LAN bind: an on-link source is served, then a
+   private source outside the subnet is dropped.
 
 *Unmeasured: whether the macOS runner allows a scratch interface or alias
-under `sudo`. If it does not, steps 2 and 4 run on Linux only, the test's
+under `sudo`. If it does not, steps 2, 4 and 5 run on Linux only, the test's
 name says so, and the macOS half moves to §10's spike.*
 
 **The identity witness**, run on both CI platforms, against a real serve
@@ -1130,6 +1230,11 @@ witness that quietly skips is no witness. Each step names what it proves:
 11. Expiry: a second enrolled device whose `until` has passed is refused at
     TLS, and its record says `disabled: until`. Re-enabled from the console,
     it is served. Its audit records name its principal.
+12. A reduction reaches live traffic (§3.3): with that device holding an
+    open terminal attach and sending nothing, disable it from the console.
+    Its socket closes within one second. Re-enable it, attach again, and
+    narrow its scope to exclude that place: the attach's channel ends with
+    `end: true`, and the socket stays open.
 
 **Two platforms.** AGENTS.md's bind lesson applies: a refusal measured on
 one OS is a claim about one OS. Each assertion is measured on macOS and
@@ -1152,7 +1257,14 @@ test turns `--exact` into a filter that matches nothing and exits 0.
 `O_NOFOLLOW` and mode `0600` at creation. It refuses to start the remote
 listener if the file exists with another owner or a group or world bit,
 rather than chmod it silently. It rotates at 5 MiB and keeps five files. The
-rotation is itself a record.
+rotation is itself a record. Rotation must not delete the evidence §5.2
+checks devices against: a device paired long ago has its `enrolled` record
+in a file that rotation removed. So each new file opens with a
+`checkpoint` record, which holds the previous file's final hash and, for
+every live device, the security fields of its record (principal, key pin,
+capabilities, projects, expiry, step-up, disabled). The chain continues
+across files, and §5.2 reads from the newest checkpoint onward, never a
+file that rotation may already have removed.
 
 **Who can write it.** Only an `Audit` value that serve's connection layer
 owns (`crates/worktrees-cli/src/serve/`). It is not in `Ctx`, and
@@ -1167,7 +1279,7 @@ as `"unknown"` with the length of what was sent.
 
 ```json
 {"seq": 812, "ts": "2026-10-20T14:03:11Z", "pid": 4242, "kind": "call",
- "principal": "p_7h2m4x", "device": "d_k3v9q2", "conn": 17, "peer": "100.101.7.3",
+ "principal": "owner", "device": "d_k3v9q2", "conn": 17, "peer": "100.101.7.3",
  "cmd": "write_file", "cap": "instruct", "project": "/Users/bret/Projects/x",
  "object": "AGENTS.md", "outcome": "ok", "ms": 4,
  "detail": {"bytes": 2310, "sha256": "…"}, "prev": "<sha256 of the previous line>"}
@@ -1230,7 +1342,10 @@ here.
 
 A same-user process, an agent with a shell among them (§1), can write
 `devices.json` itself. So at boot, and whenever serve reloads the file, it
-cross-checks every device against the audit chain. A device with no
+cross-checks every device against the audit chain, from the newest
+checkpoint onward (§5.1). It matches the records that name the device as
+`detail.subject`, never the actor fields: the console enrolled the device,
+so the console is the actor. A device with no
 `enrolled` record behind it is DISABLED (`reason: unrecorded`, §2.5) until
 the console re-enables it, and the host raises an alert (§5.3). So is a
 device whose principal is missing, or differs from the one its `enrolled`
@@ -1238,9 +1353,12 @@ record names, so that moving a device between principals by editing the
 file is caught the same way. The same check compares the record's scope,
 expiry and step-up with the last audit record that set them, and a record
 that is wider than its chain says, or whose expiry is later, is disabled
-too. A corrupt `devices.json` refuses every
-remote device and is never overwritten, the registry's "refused rather than
-clobbered" rule. A same-user writer can forge the chain too. This makes the
+too. A corrupt `devices.json` refuses every remote device and is never
+overwritten, the registry's "refused rather than clobbered" rule; in Phase
+2, a principal other than the owner counts as corruption (§2.8). The
+console keeps its identity through all of it, because the loopback caller's
+principal is never read from the file (§2.8), so the user at the host can
+still repair it. A same-user writer can forge the chain too. This makes the
 forgery a two-file, hash-chained job instead of one JSON edit, and it puts a
 banner in front of the user either way.
 
@@ -1551,7 +1669,13 @@ and a second Mac on the tailnet, measure the claims marked unmeasured above:
   point-to-point flag, its subnet, the gateway's link-layer address, and
   what each OS does to a listener whose address is removed (§4.1);
 - whether the macOS CI runner allows the scratch interface the bind-rule
-  witness needs (§4.6).
+  witness needs (§4.6);
+- the weak host model on both platforms: whether a packet for the overlay
+  address that arrives on the LAN interface reaches a listener bound to
+  it, and whether `SO_BINDTODEVICE` and `IP_BOUND_IF` scope a listening
+  socket (§4.1, peer rule part 2);
+- `utun` numbering across reboots on macOS, which decides whether the
+  point-to-point fingerprint may leave out the name (§4.1).
 
 **Exit, which is §III.9's, made concrete:**
 
@@ -1667,10 +1791,9 @@ this document, already folded in, not a bug in shipped code. The exceptions
 are two facts the review checked in the code and found true today: O6 and
 O15.
 
-**This review predates the decisions of 2026-10-20 (§11).** It has not been
-repeated for what those decisions changed: principals (§2.8), per-device
-expiry (§2.5, §5.2), and the LAN bind rules with their witness (§4.1,
-§4.6).
+**This first pass predates the decisions of 2026-10-20 (§11).** A second
+pass covered what those decisions changed, and §12.1 lists what it changed
+in turn.
 
 **What held up.** Deny by default, through an exhaustive table with a
 fail-closed resolver. Authentication before parsing: unknown devices stop
@@ -1716,3 +1839,52 @@ token in a URL.
 - *Making `executes` paths console-only* instead of `stream`. A `stream`
   device already has a shell, so console-only would cost the user something
   and protect nothing.
+
+### 12.1 Second pass, 2026-10-20: what the decisions changed
+
+The user's answers (§11) added principals (§2.8), per-device expiry (§2.5),
+LAN binds with one address classifier, and a bind-rule witness (§4.1,
+§4.6). This pass reviewed exactly those parts, again with the
+`owasp-security` skill: OWASP Top 10:2025 (A01, A05, A06, A07, A08, A09,
+A10), the API Security Top 10 (API1), ASVS 5.0 at L2 (access control,
+session management, input validation, logging, communication) and ASI03.
+As before, every finding is a change to this document, already folded in.
+It also answered one question put to it directly: whether refusing routed
+peers is a security requirement or a default (S2).
+
+**What held up.** Credentials that carry no identity claim, so a device
+cannot assert a principal. Expiry and step-up widened only from the
+console, and checked against the audit chain. An allowlist classifier
+rather than a denylist, shared by host and device. Refusals with their own
+error kind, so a refusal is never confused with a failed bind. Connect
+witnesses with the served case first.
+
+**What it changed.** Ten changes:
+
+| # | OWASP | Finding in the revision | Change, and where |
+|---|---|---|---|
+| S1 | A01, ASVS session management | A disable, a passed `until` and a narrowed scope were enforced per REQUEST. A terminal attach, a dock shell and the event stream reach a device without one, so a disabled device would have kept receiving terminal bytes until it next asked for something. | A reduction acts on what is already flowing: a disable or a passed `until` closes the device's connections as a revoke does, a narrowed scope ends the channels whose object it no longer covers, and event projection reads the grant at each emit. (§2.5, §3.3) |
+| S2 | A01, A06 | The peer filter said "same class", while the table made `10.x` and `192.168.x` one class and the example called them different. Worse, both platforms accept a packet for any local address on any interface, so a Wi-Fi neighbour could reach a Tailscale-bound listener through the LAN, around the tailnet ACL that §11 Q2 puts under pairing. | Three parts, each with its standing stated. Every peer private: a requirement. An overlay bind's peer in the overlay's own row, with the listener tied to its interface where the OS allows: a requirement. A LAN bind's peer on-link: a default, which could later become a console-only list of private CIDRs. A connect witness for each. (§4.1, §4.6) |
+| S3 | API1 (BOLA) | `device(id)` had no resolver entry, so nothing said what an `admin` device is told about another principal's device, or what a device listing contains. | `device(id)` resolves within the caller's principal and gives the identical not-found error, and device listings are filtered the same way. (§3.3) |
+| S4 | A01 | "Principal ∩ device" was not defined for `"*"`. Read naively, a device with `"*"` under a principal with a list could reach projects outside the list, and a row needing scope `"*"` could pass on the device's side alone. | `"*"` ∩ X is X, evaluated per request, and a row that needs `"*"` needs it on both sides. (§2.8, §3.3) |
+| S5 | A01, A10 | The owner's id was random and stored in `devices.json`. A corrupt or deleted file would have left the console with no principal to act as, and a recreated one would have split the audit trail under a new id. A second principal in the file was a state no code creates, and nothing refused it. | The owner is the reserved id `owner`, never read from the file. The Phase 2 loader treats any other principal as corruption. (§2.1, §2.8, §5.2) |
+| S6 | A09, A08 | §5.2 checks each device against its `enrolled` record and the records that set its scope, expiry and step-up. Rotation keeps 25 MiB, so a device paired long ago would have lost that evidence and been disabled as `unrecorded`. | Each new file opens with a `checkpoint`: the previous file's final hash and every live device's security fields. §5.2 reads from the newest checkpoint, matching on `detail.subject`. (§5.1, §5.2) |
+| S7 | A05, ASVS input validation | "Canonical bytes, never its spelling" named no parser, and the classic ways around an address check are spellings: `127.1`, `0x7f.0.0.1`, leading zeros. | Rust's strict `std::net` parsers only, never `inet_aton` or a resolver. A zone is split off and must match `--iface`, and an unparsable string is refused, never repaired. The table test includes the spellings. (§4.1, §4.6) |
+| S8 | A06, A07 | The address code carries only public data, so anyone can print one. A device that switched to its address at once could be pointed at a stranger's machine: a denial of service by poster. | The code is marked unauthenticated, and the device adopts its address only after a pinned handshake to it succeeds. (§4.1) |
+| S9 | A06 | A point-to-point fingerprint that included the interface NAME would break across reboots on macOS, which numbers `utun` interfaces in creation order. Each break is a pause dialog, and a dialog that fires for no reason trains the user to accept the one that matters. | The point-to-point fingerprint is the address, its prefix and the point-to-point flag, not the name. Measured in the spike. (§4.1, §10) |
+| S10 | A07, A10 | Nothing said whether an expiry was recomputed from the clock at each check, so setting the host clock back could have re-enabled an expired device. | An expiry is decided once and recorded as `disabled`. (§2.5) |
+
+**Considered and not changed.**
+
+- *Refusing `"never"` for a device that can run commands.* §11 Q7 puts
+  expiry in the host's hands, the device list marks `"never"`, and the
+  default itself is §11.1 N3, which is with the user.
+- *Signing the address code with the server's key.* The pinned handshake
+  that follows already authenticates the address, so a signature would
+  check the same fact twice.
+- *Address-change events (`PF_ROUTE`, netlink) instead of the 3 s poll.*
+  The gap is at most one poll, and it sits behind mTLS. Worth doing when the
+  listener is written, but not a design requirement.
+- *A setting for routed LAN peers in Phase 2* (S2, part 3). Refusing them
+  protects no asset by itself, so such a setting would be safe, but nothing
+  in scope needs one yet.
