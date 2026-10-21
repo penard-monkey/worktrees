@@ -170,12 +170,7 @@ pub fn edit_at<T>(p: &Path, f: impl FnOnce(&mut Registry) -> Result<T, String>) 
     if reg != before {
         reg.version = reg.version.max(1);
         let json = serde_json::to_string_pretty(&reg).map_err(|e| e.to_string())?;
-        let tmp = dir.join(format!(".{FILE}.{}.tmp", std::process::id()));
-        fs::write(&tmp, json).map_err(|e| format!("{}: {e}", tmp.display()))?;
-        fs::rename(&tmp, p).map_err(|e| {
-            let _ = fs::remove_file(&tmp);
-            format!("{}: {e}", p.display())
-        })?;
+        crate::fsx::write_atomic(p, json.as_bytes(), None).map_err(|e| format!("{}: {e}", p.display()))?;
     }
     drop(lock);
     Ok(out)
