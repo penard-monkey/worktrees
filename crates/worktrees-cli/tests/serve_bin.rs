@@ -490,6 +490,63 @@ fn each_launch_rewrites_serve_json_with_a_new_token() {
     sb.terminate();
 }
 
+/// This machine's own non-loopback IPv4 address, or `None` if it has only
+/// `lo`: the docs server's `own_lan_addr`, which a test crate cannot import. A
+/// UDP socket "connected" to a TEST-NET address sends nothing, but the kernel
+/// picks the route's source address and `local_addr` reads it back.
+fn own_lan_addr() -> Option<Ipv4Addr> {
+    let s = std::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).ok()?;
+    s.connect((Ipv4Addr::new(192, 0, 2, 1), 9)).ok()?;
+    match s.local_addr().ok()?.ip() {
+        std::net::IpAddr::V4(ip) if !ip.is_loopback() && !ip.is_unspecified() => Some(ip),
+        _ => None,
+    }
+}
+
+/// Reachable on loopback and from nowhere else. The witness is a CONNECT to
+/// this machine's own LAN address on serve's port, never a bind: no bind
+/// answers the same on macOS and Linux (the table on the docs server's
+/// `the_server_is_bound_to_loopback_and_its_token_is_fresh_each_time`), while
+/// a connect does — measured on macOS 27.0 and Linux 6.12, refused against a
+/// `127.0.0.1` listener and accepted against `0.0.0.0` on both. `conn.rs`'s
+/// after-accept peer check does not hide a wider bind from this: the kernel
+/// completes the handshake before `accept` returns, so the connect succeeds
+/// and only then is the stream dropped.
+///
+/// The loopback connect comes FIRST because without it a dead server passes.
+/// And on a CI runner, which always has a LAN address, a missing one fails
+/// rather than skipping — a witness that quietly did not run is not one.
+#[test]
+fn serve_can_be_reached_on_loopback_and_not_off_it() {
+    let mut sb = Sandbox::new("lan");
+    let sf = sb.launch(&[]);
+    let port = sf["port"].as_u64().unwrap() as u16;
+    let wait = Duration::from_secs(5);
+
+    let via_lo = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+    assert!(
+        TcpStream::connect_timeout(&via_lo, wait).is_ok(),
+        "serve did not answer on loopback, so the refusal below would prove nothing"
+    );
+
+    match own_lan_addr() {
+        // A firewall that DROPs rather than refuses is a timeout, also an
+        // `Err` — the fail-safe direction.
+        Some(ip) => {
+            let via_lan = SocketAddr::from((ip, port));
+            assert!(
+                TcpStream::connect_timeout(&via_lan, wait).is_err(),
+                "{via_lan} answered, so serve is reachable off loopback"
+            );
+        }
+        None => {
+            assert!(std::env::var_os("CI").is_none(), "no non-loopback IPv4 on a CI runner: the LAN half did not run");
+            eprintln!("no non-loopback IPv4 on this host; the LAN half did not run");
+        }
+    }
+    sb.terminate();
+}
+
 /// A bad flag is an error at launch, not a server with a silently empty
 /// allow-list; `--help` is help.
 #[test]
