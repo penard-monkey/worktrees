@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use crate::config::{self, SyncCfg};
@@ -106,7 +106,7 @@ fn pick_rsync_from(cands: &[(String, Option<String>)]) -> Option<Rsync> {
 /// Captured to a buffer, never through a pipe: the bash original SIGPIPEd rsync
 /// that way and misreported the version.
 fn rsync_version(path: &str) -> Option<String> {
-    let o = Command::new(path).arg("--version").output().ok()?;
+    let o = crate::childenv::command(path).arg("--version").output().ok()?;
     Some(String::from_utf8_lossy(&o.stdout).into_owned())
 }
 
@@ -730,7 +730,7 @@ fn slashed(p: &Path) -> String {
 }
 
 fn preview(job: &Job) -> Result<SyncPlan, String> {
-    let out = Command::new(&job.rsync.path)
+    let out = crate::childenv::command(&job.rsync.path)
         .args(["-ani", "--delete"])
         .arg(format!("--exclude-from={}", job.excl.display()))
         .arg(slashed(&job.src))
@@ -745,7 +745,7 @@ fn preview(job: &Job) -> Result<SyncPlan, String> {
 
 /// v3-only. A failure here costs a REPORT, not the sync — hence no error channel.
 fn skipped(job: &Job) -> Vec<(String, u32)> {
-    let Ok(out) = Command::new(&job.rsync.path)
+    let Ok(out) = crate::childenv::command(&job.rsync.path)
         .args(["-an", "-vv"])
         .arg(format!("--exclude-from={}", job.excl.display()))
         .arg(slashed(&job.src))
@@ -815,7 +815,7 @@ fn rsync_failure(code: Option<i32>, stderr: &[u8]) -> String {
 fn apply(job: &Job) -> Result<(), String> {
     // stdout INHERITED so progress reaches the terminal; stderr captured so a
     // failure can be reported rather than lost (git_status_captured's split).
-    let child = Command::new(&job.rsync.path)
+    let child = crate::childenv::command(&job.rsync.path)
         .args(apply_argv(job, &tty_info(job)))
         .stdout(Stdio::inherit())
         .stderr(Stdio::piped())
@@ -842,7 +842,7 @@ const PROGRESS_MIN_GAP: Duration = Duration::from_millis(66);
 /// left showing. Coalescing happens here rather than at the IPC boundary because
 /// only this loop knows where a read chunk ends and when the last one arrived.
 fn apply_streaming(job: &Job, cb: &mut dyn FnMut(SyncProgress)) -> Result<(), String> {
-    let mut child = Command::new(&job.rsync.path)
+    let mut child = crate::childenv::command(&job.rsync.path)
         .args(apply_argv(job, &stream_info(job.rsync.v3)))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -898,7 +898,7 @@ fn apply_streaming(job: &Job, cb: &mut dyn FnMut(SyncProgress)) -> Result<(), St
 /// Additive copy — no `--delete`, no `--backup`. Used for the sessions ferry in
 /// both directions, so neither machine's history is ever the loser.
 fn rsync_additive(rsync: &Rsync, src: &Path, dst: &Path) -> Result<(), String> {
-    let out = Command::new(&rsync.path)
+    let out = crate::childenv::command(&rsync.path)
         .arg("-a")
         .arg(slashed(src))
         .arg(slashed(dst))
@@ -1037,7 +1037,7 @@ fn mkdir_p(p: &Path) -> Result<(), String> {
 }
 
 fn hostname() -> String {
-    Command::new("hostname")
+    crate::childenv::command("hostname")
         .output()
         .ok()
         .filter(|o| o.status.success())
@@ -1556,7 +1556,7 @@ fn after_pull(
             if !quiet {
                 ui.info(&format!("rebuilding: {cmd}"));
             }
-            let ok = Command::new("bash")
+            let ok = crate::childenv::command("bash")
                 .arg("-c")
                 .arg(cmd)
                 .current_dir(local_root)
@@ -2340,6 +2340,7 @@ fn cmd_status(ui: &mut dyn Ui, args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     fn tmp(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("wtsync-{tag}-{}", std::process::id()));

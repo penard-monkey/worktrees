@@ -98,7 +98,7 @@ static USAGE_FAIL_AT: Mutex<Option<i64>> = Mutex::new(None);
 /// The Claude Code OAuth access token, straight out of the login Keychain item.
 /// None on any failure (not macOS, item absent, locked keychain, shape changed).
 fn claude_oauth_token() -> Option<String> {
-    let mut cmd = std::process::Command::new("/usr/bin/security");
+    let mut cmd = crate::childenv::command("/usr/bin/security");
     cmd.args(["find-generic-password", "-s", "Claude Code-credentials", "-w"]);
     let out = crate::proc::run_deadline(cmd, 6).ok()?;
     if !out.status.success() {
@@ -138,7 +138,7 @@ fn usage_cmd(token: &str, url: &str) -> Result<(std::process::Command, Vec<u8>),
     if token.bytes().any(|b| matches!(b, b'\r' | b'\n' | 0)) {
         return Err("keychain: Claude Code token has an unexpected shape".into());
     }
-    let mut cmd = std::process::Command::new("curl");
+    let mut cmd = crate::childenv::command("curl");
     cmd.args(["-s", "--max-time", "10", "-w", "\n%{http_code}"])
         .args(["-H", "@-"])
         .arg("-H")

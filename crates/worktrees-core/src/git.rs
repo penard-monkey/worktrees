@@ -5,8 +5,15 @@
 
 use std::process::{Command, Output};
 
+/// Every git this crate runs (through `childenv`, like every spawn: under an
+/// AppImage its `LD_LIBRARY_PATH` would have the user's git load the
+/// AppImage's copies of the libraries git links).
+fn git_cmd() -> Command {
+    crate::childenv::command("git")
+}
+
 pub fn git(cwd: &str, args: &[&str]) -> std::io::Result<Output> {
-    Command::new("git").arg("-C").arg(cwd).args(args).output()
+    git_cmd().arg("-C").arg(cwd).args(args).output()
 }
 
 /// `git -C cwd <args>` with `input` on stdin. For the one invocation whose `-z`
@@ -15,7 +22,7 @@ pub fn git(cwd: &str, args: &[&str]) -> std::io::Result<Output> {
 /// writes at most one path per path read, and `init.rs` bounds the list.
 pub fn git_stdin(cwd: &str, args: &[&str], input: &[u8]) -> std::io::Result<Output> {
     use std::io::Write;
-    let mut child = Command::new("git")
+    let mut child = git_cmd()
         .arg("-C")
         .arg(cwd)
         .args(args)
@@ -63,7 +70,7 @@ pub fn have_git() -> bool {
     if HAVE.load(std::sync::atomic::Ordering::Relaxed) {
         return true;
     }
-    let ok = Command::new("git").arg("--version").output().map(|o| o.status.success()).unwrap_or(false);
+    let ok = git_cmd().arg("--version").output().map(|o| o.status.success()).unwrap_or(false);
     if ok {
         HAVE.store(true, std::sync::atomic::Ordering::Relaxed);
     }
@@ -90,7 +97,7 @@ fn stdout_is_protocol() -> bool {
 /// whether it exited 0. Under `set_stdout_is_protocol`, git's stdout is sent
 /// to stderr.
 pub fn git_status(cwd: &str, args: &[&str]) -> bool {
-    let mut c = Command::new("git");
+    let mut c = git_cmd();
     c.arg("-C").arg(cwd).args(args);
     if stdout_is_protocol() {
         c.stdout(std::io::stderr());
@@ -110,7 +117,7 @@ pub fn git_status(cwd: &str, args: &[&str]) -> bool {
 ///    caller can route git's real message through `ui.error`.
 pub fn git_status_captured(cwd: &str, args: &[&str]) -> std::result::Result<(), String> {
     use std::io::Write;
-    let out = match Command::new("git").arg("-C").arg(cwd).args(args).output() {
+    let out = match git_cmd().arg("-C").arg(cwd).args(args).output() {
         Ok(o) => o,
         Err(e) => return Err(e.to_string()),
     };

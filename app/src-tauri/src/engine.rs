@@ -51,7 +51,7 @@ use std::ffi::OsString;
 use std::io::{ErrorKind, Read, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -630,7 +630,7 @@ impl Engine {
             ConnectError::after_start(format!("{e} (serve's log: {SERVE_LOG})"))
         })?;
         let args = serve_args(&self.config_dir, self.dev_origin.as_deref());
-        let mut cmd = Command::new(&bin);
+        let mut cmd = worktrees_core::childenv::command(&bin);
         cmd.args(&args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
         // The bundle is handed over only when nobody named one already: an
         // override set on purpose wins, exactly as `viewer::bundle_path` reads it.
@@ -843,6 +843,7 @@ fn log(level: &str, msg: &str) {
 mod tests {
     use super::*;
     use std::net::TcpListener;
+    use std::process::Command;
 
     fn sf(pid: u32, owner: Option<&str>) -> ServeFile {
         ServeFile { port: 41_237, token: "t".repeat(64), pid, version: "1.0.0".into(), owner: owner.map(str::to_string) }

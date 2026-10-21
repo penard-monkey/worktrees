@@ -348,7 +348,7 @@ fn target(entries: &[Entry], root_kind: Option<&DirKind>, read: &dyn Fn(&str) ->
 /// `review.rs` reads the branch side's bytes through it, because a brief that
 /// vouches for a file has to have looked at one.
 pub(crate) fn blob(root: &str, spec: &str) -> Option<String> {
-    let out = std::process::Command::new("git").arg("-C").arg(root).args(["cat-file", "blob", spec]).output().ok()?;
+    let out = crate::childenv::command("git").arg("-C").arg(root).args(["cat-file", "blob", spec]).output().ok()?;
     out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 

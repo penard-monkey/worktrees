@@ -226,7 +226,7 @@ pub fn report_from(reference: &str, dirs: Vec<DirState>, skills: Vec<SkillState>
 // ── git plumbing ─────────────────────────────────────────────────────────────
 
 pub(crate) fn git_env(root: &str, index: Option<&Path>, args: &[&str], input: Option<&[u8]>) -> Result<String, String> {
-    let mut c = Command::new("git");
+    let mut c = crate::childenv::command("git");
     c.arg("-C").arg(root).args(args);
     if let Some(ix) = index {
         c.env("GIT_INDEX_FILE", ix);
@@ -283,7 +283,7 @@ pub(crate) fn run_net(mut c: Command, what: &str) -> Result<String, String> {
 const NET_DEADLINE_SECS: u64 = 60;
 
 pub(crate) fn git_net(root: &str, args: &[&str]) -> Result<String, String> {
-    let mut c = Command::new("git");
+    let mut c = crate::childenv::command("git");
     c.arg("-C").arg(root).args(args);
     run_net(c, &format!("git {}", args.first().unwrap_or(&"")))
 }
@@ -577,7 +577,7 @@ pub(crate) fn publish(
         }
     }
     let base_branch = report.reference.strip_prefix("origin/").unwrap_or(&report.reference).to_string();
-    let mut gh = Command::new(gh_bin);
+    let mut gh = crate::childenv::command(gh_bin);
     gh.current_dir(root).args(["pr", "create", "--base", &base_branch, "--head", FIX_BRANCH, "--title", &pr.title, "--body", &pr.body]);
     match run_net(gh, "gh pr create") {
         Ok(stdout) => {

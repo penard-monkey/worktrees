@@ -67,7 +67,7 @@ pub fn version_from(out: &str) -> Option<String> {
 /// `Err` says why there is none, for the caller to log.
 pub fn version() -> Result<String, String> {
     let bin = kimi_bin().ok_or("kimi is not installed")?;
-    let mut cmd = std::process::Command::new(&bin);
+    let mut cmd = crate::childenv::command(&bin);
     cmd.arg("--version").current_dir("/").stdin(std::process::Stdio::null());
     let out = crate::proc::run_deadline(cmd, 10).map_err(|e| format!("kimi --version: {e}"))?;
     if !out.status.success() {
@@ -881,7 +881,7 @@ pub fn deliver_opener(
 /// upgrade, and an older CLI on PATH would answer "Unknown command".
 pub fn opener_bin() -> Option<PathBuf> {
     let bin = crate::profile::worktrees_bin()?;
-    let mut cmd = std::process::Command::new(&bin);
+    let mut cmd = crate::childenv::command(&bin);
     cmd.args(["kimi-opener", "--probe"]).current_dir("/").stdin(std::process::Stdio::null());
     let out = crate::proc::run_deadline(cmd, 5).ok()?;
     (out.status.success() && String::from_utf8_lossy(&out.stdout).starts_with(OPENER_PROBE)).then_some(bin)

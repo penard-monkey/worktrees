@@ -698,7 +698,7 @@ pub fn cmd_run(args: &[String]) -> i32 {
         libc::signal(libc::SIGHUP, forward as *const () as libc::sighandler_t);
         libc::signal(libc::SIGINT, forward as *const () as libc::sighandler_t);
     }
-    let mut child = match std::process::Command::new(&ra.cmd[0]).args(&ra.cmd[1..]).spawn() {
+    let mut child = match crate::childenv::command(&ra.cmd[0]).args(&ra.cmd[1..]).spawn() {
         Ok(c) => c,
         Err(e) => {
             eprintln!("{}", crate::render::error_line(&format!("run: could not start {}: {e}", ra.cmd[0])));

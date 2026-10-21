@@ -718,13 +718,13 @@ pub fn set_kimi_allowed(repo: String, allow: bool) -> Result<bool, String> {
 /// a short deadline so a wedged tool can't stall the button. Returns the two as
 /// display strings ("(not found)" when absent).
 pub fn tool_report(tool: &str) -> (String, String) {
-    let mut which = std::process::Command::new("which");
+    let mut which = worktrees_core::childenv::command("which");
     which.arg(tool);
     let path = match run_deadline(which, 10) {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         _ => "(not found)".to_string(),
     };
-    let mut ver = std::process::Command::new(tool);
+    let mut ver = worktrees_core::childenv::command(tool);
     ver.arg("--version");
     let version = match run_deadline(ver, 10) {
         Ok(o) if o.status.success() => {
@@ -756,7 +756,7 @@ pub fn diagnostics(_ctx: &Ctx, gh: Option<bool>, viewer_path: String) -> Result<
         "(not checked — Pull requests is off in Settings → Behavior)".to_string()
     } else {
         let gh = worktrees_core::github::gh_bin();
-        let mut which = std::process::Command::new("which");
+        let mut which = worktrees_core::childenv::command("which");
         which.arg(&gh);
         let at = match run_deadline(which, 10) {
             Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
@@ -1097,7 +1097,7 @@ pub fn launch_watched(
 ) -> Result<(), String> {
     use std::io::Read;
     use std::process::Stdio;
-    let mut c = std::process::Command::new("/bin/sh");
+    let mut c = worktrees_core::childenv::command("/bin/sh");
     c.arg("-c").arg(line);
     if let Some(a) = arg0 {
         c.arg(a);

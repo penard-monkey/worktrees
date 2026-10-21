@@ -231,7 +231,7 @@ pub fn status_parse(body: &str, now: i64) -> Result<ClaudeStatus, String> {
 /// GET the status summary → (http status, body). curl, same reasoning as
 /// `usage_get`: the dep tree and the TLS stack stay where they are.
 pub fn status_get() -> Result<(u16, String), String> {
-    let mut cmd = std::process::Command::new("curl");
+    let mut cmd = worktrees_core::childenv::command("curl");
     cmd.args(["-s", "--max-time", "10", "-w", "\n%{http_code}", STATUS_URL]);
     let out = run_deadline(cmd, 15).map_err(|e| e.to_string())?;
     if !out.status.success() {
@@ -314,7 +314,7 @@ pub fn cli_binary() -> Option<(String, String)> {
     let home = std::env::var("HOME").unwrap_or_default();
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     let mut candidates: Vec<String> = Vec::new();
-    let mut probe = std::process::Command::new(&shell);
+    let mut probe = worktrees_core::childenv::command(&shell);
     probe.args(["-lc", "command -v -- worktrees"]);
     if let Ok(out) = run_deadline(probe, 5) {
         if out.status.success() {
@@ -333,7 +333,7 @@ pub fn cli_binary() -> Option<(String, String)> {
     candidates.push("/opt/homebrew/bin/worktrees".into());
     candidates.push("/usr/local/bin/worktrees".into());
     for path in candidates {
-        let mut c = std::process::Command::new(&path);
+        let mut c = worktrees_core::childenv::command(&path);
         c.arg("--version");
         if let Ok(out) = run_deadline(c, 5) {
             if out.status.success() {
@@ -387,7 +387,7 @@ pub fn update_cli(tag: String) -> Result<CmdResult, String> {
 
     let url = format!("https://raw.githubusercontent.com/{REPO_SLUG}/{tag}/install.sh");
     let script = std::env::temp_dir().join(format!("worktrees-install-{}.sh", std::process::id()));
-    let mut fetch = std::process::Command::new("curl");
+    let mut fetch = worktrees_core::childenv::command("curl");
     fetch
         .args(["-fsSL", "--connect-timeout", "10", "--max-time", "120", "-o"])
         .arg(&script)
@@ -409,7 +409,7 @@ pub fn update_cli(tag: String) -> Result<CmdResult, String> {
         });
     }
 
-    let mut run = std::process::Command::new("bash");
+    let mut run = worktrees_core::childenv::command("bash");
     run.arg(&script).env("WORKTREES_INSTALL_VERSION", &tag);
     // replace the binary that's actually resolved, not blindly ~/.local/bin
     if let Some((path, _)) = cli_binary() {
@@ -479,7 +479,7 @@ pub fn parse_releases(body: &str) -> Result<Vec<ReleaseRow>, String> {
 }
 
 pub fn list_published_releases() -> Result<Vec<ReleaseRow>, String> {
-    let mut cmd = std::process::Command::new("curl");
+    let mut cmd = worktrees_core::childenv::command("curl");
     cmd.args(["-fsSL", "--max-time", "10", "-H", "Accept: application/vnd.github+json"])
         .arg(format!("https://api.github.com/repos/{REPO_SLUG}/releases?per_page=30"));
     let out = run_deadline(cmd, 15).map_err(|e| e.to_string())?;

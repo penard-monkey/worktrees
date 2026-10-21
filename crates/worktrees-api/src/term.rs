@@ -41,6 +41,27 @@ pub struct Term {
 #[derive(Default)]
 pub struct Terminals(Mutex<HashMap<u32, Term>>);
 
+/// `worktrees_core::childenv`'s edits and start dir, on a pty child: the rule
+/// lives there, beside the std `Command` spawns it also covers, so the two
+/// cannot drift. Under an AppImage it keeps the AppDir's PATH/LD_LIBRARY_PATH/…
+/// (and its cwd) out of the dock's shells and the tmux client; anywhere else it
+/// changes nothing. Call it before the call site's own `env`/`cwd`.
+fn scrub_pty(cmd: &mut CommandBuilder) {
+    if let Some(d) = worktrees_core::childenv::start_dir() {
+        cmd.cwd(d);
+    }
+    apply_pty(cmd, &worktrees_core::childenv::edits());
+}
+
+fn apply_pty(cmd: &mut CommandBuilder, edits: &[worktrees_core::childenv::Edit]) {
+    for (k, v) in edits {
+        match v {
+            Some(v) => cmd.env(k, v),
+            None => cmd.env_remove(k),
+        }
+    }
+}
+
 pub static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 
 /// Attach to an EXISTING tmux session inside a PTY and stream its bytes to the
@@ -84,6 +105,7 @@ pub fn term_open(
     // orphaning every session in the first.
     // `=`: exactly this session, should it go between the check and here.
     let mut cmd = CommandBuilder::new("tmux");
+    scrub_pty(&mut cmd);
     cmd.args(worktrees_core::tmux::no_start_args());
     cmd.args(["-u", "attach-session", "-t", &format!("={session}")]);
     cmd.env("TERM", "xterm-256color");
@@ -496,6 +518,7 @@ pub fn shell_open(
     // with a bare one (fixup_gui_path covers our own shell-outs, not this).
     let shell_bin = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     let mut cmd = CommandBuilder::new(&shell_bin);
+    scrub_pty(&mut cmd);
     cmd.arg("-l");
     // Only the SPAWN path consults the memory: a re-attach above returned long
     // ago, and that shell's cwd is whatever the user has since cd'd to.
@@ -1617,6 +1640,28 @@ pub fn apply_tab_history_env(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pty side of `childenv`: a removal reaches the child's environment,
+    /// a replacement value too, and no edits (macOS, a .deb) leave the
+    /// inherited environment exactly as it was.
+    #[test]
+    fn a_pty_child_gets_the_childenv_edits_and_nothing_else() {
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.env("LD_LIBRARY_PATH", "/tmp/.mount_x/usr/lib/:");
+        cmd.env("PATH", "/tmp/.mount_x/usr/bin/:/usr/bin:/bin");
+        cmd.env("KEEP", "/home/u");
+        let before: Vec<(String, String)> =
+            cmd.iter_full_env_as_str().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        apply_pty(&mut cmd, &[]);
+        let after: Vec<(String, String)> =
+            cmd.iter_full_env_as_str().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        assert_eq!(before, after);
+
+        apply_pty(&mut cmd, &[("LD_LIBRARY_PATH".into(), None), ("PATH".into(), Some("/usr/bin:/bin".into()))]);
+        assert_eq!(cmd.get_env("LD_LIBRARY_PATH"), None);
+        assert_eq!(cmd.get_env("PATH").and_then(|v| v.to_str()), Some("/usr/bin:/bin"));
+        assert_eq!(cmd.get_env("KEEP").and_then(|v| v.to_str()), Some("/home/u"));
+    }
     use std::time::Duration;
 
     /// The OS read itself, on the one process whose cwd the test already knows.

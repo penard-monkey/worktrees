@@ -148,6 +148,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   appears in the error banner.
   `app/scripts/transport-check.mjs` holds the client against the server's own
   frame definitions.
+- **The desktop app carries its own copy of the CLI**, at
+  `worktrees.app/Contents/MacOS/worktrees`: built from the same commit, for
+  the bundle's own architecture, and used only by the app (which will start
+  `worktrees serve` with it). It is not put on your `PATH` — the installer's
+  `~/.local/bin/worktrees` is still the CLI you run, and agents and Claude's
+  MCP server keep working whether the app is installed or not. Nothing the app
+  sets up for them points at the bundle's copy: the MCP entries for Claude,
+  Codex, pi and kimi, the agent hooks and the helper a kimi pane starts all
+  name the CLI on your `PATH`, and the app says it is missing when there is
+  none. Every release checks the copy inside the bundle it ships: present,
+  executable, the right architecture, and the tag's version. `make
+  install-app` builds it the same way, and takes `APPDIR=<dir>` to install
+  somewhere other than /Applications.
+- **The desktop app on Linux**, for x86_64 and arm64: every release now ships
+  an AppImage and a `.deb` beside the macOS bundles, and the in-app updater
+  takes care of both (an AppImage replaces itself; a `.deb` updates through
+  `pkexec dpkg -i`). The installer offers it on Linux exactly as on macOS — the
+  AppImage goes to `~/Applications/worktrees.AppImage` with a desktop entry,
+  never onto your `PATH` — and `make install-app` builds it on a Linux machine.
+  The `.deb` installs the app as `worktrees-app` and depends on the distro's
+  tmux and git; the AppImage, like the Mac app, uses the ones you have. Both
+  carry the CLI privately at `usr/lib/worktrees/worktrees`, and nothing the
+  app starts for you — tmux and every pane in it, the dock's shells, your
+  editor, git — inherits the AppImage's bundled libraries or paths.
 - **Applying the worktrees rules or the agent-setup Fix now opens a review
   lane for the `agent-instructions` branch**: a place on it, with an agent
   whose brief explains what the branch changes — each file, the AGENTS.md

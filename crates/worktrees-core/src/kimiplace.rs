@@ -141,7 +141,7 @@ pub struct Want {
 
 /// Which of the three paths the repo tracks, in one `git ls-files`.
 fn tracked(wt: &str) -> Vec<String> {
-    let out = std::process::Command::new("git")
+    let out = crate::childenv::command("git")
         .args(["-C", wt, "ls-files", "--", ".kimi-code/mcp.json", ".kimi-code/AGENTS.md", ".kimi-code/skills/worktrees"])
         .output();
     match out {
@@ -265,7 +265,7 @@ pub fn ours_present(wt: &str) -> bool {
 
 /// Every worktree of `wt`'s repo, the main checkout included.
 fn worktree_dirs(wt: &str) -> Vec<String> {
-    let out = std::process::Command::new("git").args(["-C", wt, "worktree", "list", "--porcelain"]).output();
+    let out = crate::childenv::command("git").args(["-C", wt, "worktree", "list", "--porcelain"]).output();
     match out {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
             .lines()
@@ -278,7 +278,7 @@ fn worktree_dirs(wt: &str) -> Vec<String> {
 
 /// Whether `rel` in `wt` is ignored by one of OUR exclude lines.
 fn hidden_by_us(wt: &str, rel: &str) -> bool {
-    let out = std::process::Command::new("git").args(["-C", wt, "check-ignore", "-v", "--no-index", "--", rel]).output();
+    let out = crate::childenv::command("git").args(["-C", wt, "check-ignore", "-v", "--no-index", "--", rel]).output();
     match out {
         Ok(o) if o.status.success() => {
             let line = String::from_utf8_lossy(&o.stdout);
