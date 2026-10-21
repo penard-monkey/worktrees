@@ -117,7 +117,10 @@ fn append_line(dir: &std::path::Path, path: &std::path::Path, level: &str, msg: 
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(path) {
         worktrees_api::log::owner_only(&f);
         let ts = fmt_utc(sysclock::now_epoch());
-        let _ = writeln!(f, "{ts}Z [{level}] {msg}");
+        // ONE write per line: `writeln!` on an unbuffered `File` is a write
+        // per piece of the format, and concurrent writers interleave pieces
+        // (serve.log's ecf6851, the same fix).
+        let _ = f.write_all(format!("{ts}Z [{level}] {msg}\n").as_bytes());
     }
 }
 
@@ -1700,6 +1703,46 @@ mod tests {
     fn set_mode(p: &std::path::Path, m: u32) {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
+    }
+
+    /// One `write(2)` per line, as serve.log has had since ecf6851: a
+    /// `writeln!` on an unbuffered `File` is a write per piece of the format,
+    /// and two threads' pieces interleave inside one line.
+    #[test]
+    fn app_log_lines_from_concurrent_writers_are_whole() {
+        let d = log_scratch("torn");
+        let log = d.join("app.log");
+        const WRITERS: usize = 8;
+        const LINES: usize = 300;
+        let tail = "x".repeat(200);
+        let hs: Vec<_> = (0..WRITERS)
+            .map(|w| {
+                let (d, log, tail) = (d.clone(), log.clone(), tail.clone());
+                std::thread::spawn(move || {
+                    for i in 0..LINES {
+                        super::append_line(&d, &log, "info", &format!("w{w}-{i}-{tail}"));
+                    }
+                })
+            })
+            .collect();
+        for h in hs {
+            h.join().unwrap();
+        }
+        let text = std::fs::read_to_string(&log).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), WRITERS * LINES, "one line per call");
+        let mut seen = std::collections::HashSet::new();
+        for line in &lines {
+            // `<19-char UTC stamp>Z [info] w<writer>-<i>-<200 x>`; anything
+            // else is two writers' pieces in one line.
+            let (ts, rest) = line.split_at(line.len().min(19));
+            assert!(ts.len() == 19 && ts.as_bytes()[4] == b'-' && ts.as_bytes()[10] == b' ', "stamp: {line:?}");
+            let body = rest.strip_prefix("Z [info] w").unwrap_or_else(|| panic!("torn: {line:?}"));
+            let (id, x) = body.rsplit_once('-').unwrap_or_else(|| panic!("torn: {line:?}"));
+            assert_eq!(x, tail, "torn: {line:?}");
+            assert!(seen.insert(id.to_string()), "twice: {line:?}");
+        }
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

@@ -203,7 +203,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   And a message over 4000 bytes whose cut fell inside a character panicked
   the logger instead of being written. A panic is written the same way: one
   `[panic]` line with where it happened and what it said, where its message
-  used to follow on lines of its own.
+  used to follow on lines of its own. Two lines written at the same moment
+  no longer tear into each other: each goes to the file in one write.
   `app.log` is now readable only by you (0600, its rotated copy too); every
   account on the machine could read it, with your PATH and the places you
   opened in it.
