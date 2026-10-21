@@ -7,8 +7,11 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
 ## Architecture
 
 - **One engine**: `crates/worktrees-core`. The CLI (`crates/worktrees-cli`,
-  binary `worktrees`) and the Tauri app (`app/src-tauri`) BOTH use it — the app
-  links it in-process (no subprocess). The legacy bash engine is retired.
+  binary `worktrees`) uses it in-process, and so does `worktrees serve`, which
+  hosts the command layer (`crates/worktrees-api`). The Tauri app
+  (`app/src-tauri`) is serve's CLIENT — one engine per host: its shim finds or
+  starts serve (`engine.rs`) and keeps only the window, the client-local
+  commands and `host::boot`. The legacy bash engine is retired.
 - git/tmux are **shelled out** on purpose (faithful port; keeps the bats
   fake-shim harness intercepting the compiled binary). Don't switch to libs.
 - **Every tmux call goes through `tmux::tmux()`, which adds `-N`** (tmux ≥ 3.2,
@@ -39,6 +42,100 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   server's own place) — Claude↔Claude still uses Claude's own messaging, and
   Codex activity for `place_status`/`wait` and the nav dots comes from ONE
   derivation, `worktrees_core::activity`.
+
+- **`worktrees serve` (Server Edition, Phase 1) hosts the api behind an
+  authenticated WebSocket on `127.0.0.1`**: `{id, cmd, args}` in, `{id, ok}` /
+  `{id, err}` out, channel frames `{channel, seq, data}` for `ByteSink`s and
+  progress — ending in `{channel, seq, end: true}` when the engine lets the
+  sink go — and `{event, payload}` for `Host::emit`. Requests to ONE stream
+  run on a serial lane per stream (`dispatch::lane`): a dispatcher that gave
+  every frame its own blocking task delivered 26 in-order keystrokes to zsh as
+  `0124356789…`; everything else stays concurrent. The rule set is in
+  `crates/worktrees-cli/src/serve/policy.rs` and every refusal closes the
+  socket with NOTHING written. Auth is handshake v1 ((main)'s spec, for OWASP
+  H1): `hello` → `challenge` → `auth` → `ok` + `proof`, each side's proof an
+  HMAC keyed with serve.json's token over the other side's nonce, so the token
+  is NEVER in a frame — under v0 it was the first frame, and whatever held a
+  dead server's port received it. `AUTH_DEADLINE` covers the whole exchange,
+  not each frame. Limits (OWASP M1, `conn.rs`): 64 connections / 16
+  unauthenticated, 512 pre-auth bytes (a `Budget` UNDER tungstenite, which
+  cannot change its own limits after construction), 16 MiB per message after
+  auth, a 5 s HTTP phase, RLIMIT_NOFILE raised at boot. A reconnecting local
+  flood still locks NEW clients out (measured 0 of 49) — it can no longer take
+  memory, descriptors or a client already in. A missing `Origin` is refused
+  there and allowed by `docserver::origin_ok` ON PURPOSE (different pages,
+  different questions —
+  do not align them). The 150 commands sit in ONE macro table
+  (`serve/dispatch.rs`) with an `Exposure` each; the six `ClientLocal` rows
+  (clipboard, editor, terminal, zoom, the app bundle) are refused with
+  `err: "client-local"`, never run on the host — the docs viewer is an
+  `Engine` row since the app became a client (its registrations are the host
+  poll's). `serve-dispatch-check.mjs` fails if the shim's `generate_handler!`
+  registers any other row: that would be a second engine for it. The engine's
+  wiring — log sink, panic hook, PATH/locale, the viewer sweep, the project
+  merge, the 3 s poll, the exit sequence — is `worktrees_api::host::{boot,
+  start, stop}`: serve calls all three, the shim only `boot` (it logs, can
+  panic and launches editors), and `api-boundary-check.mjs` fails on any
+  engine piece back in lib.rs. Host policy is NOT in that list:
+  `hostpolicy::boot` is the engine's act, so `cmd_serve` calls it once,
+  after the one-engine refusal and before the listener binds, and the shim
+  never does (hostpolicy-check.mjs) — a serve that skipped it launched lanes
+  under the default the file overrides. `<config_dir>/serve.json` (0600,
+  rewritten per launch) is how a client finds the port and the token; the log
+  is `~/.cache/worktrees/serve.log`, 0600 as well (re-tightened on every
+  write, and after its rotation, which is a `rename` and keeps the mode it
+  found), version on the first line.
+  `app/scripts/server-stack.sh` runs an isolated one for the frontend lane.
+
+- **The frontend has ONE door to the backend: `app/src/ipc.ts`** (`invoke`,
+  `Channel`, `listen`). Nothing else under `app/src` imports
+  `@tauri-apps/api/core` or `/event` — `transport-check.mjs` fails on it, the
+  mock excepted. In the app the door is `engineDoor`: the commands in ONE
+  table (`CLIENT_LOCAL` = serve's `ClientLocal` rows, plus `SHIM_COMMANDS`:
+  `engine_connect`, `raise_window`) go to Tauri IPC, everything else to
+  `ipcws.ts`, a WebSocket to serve; `engine-route-check.mjs` holds the table
+  against dispatch.rs and `generate_handler!` both ways. The dev stack is the
+  same door with no local half; the mock keeps plain Tauri. The token reaches
+  the page only as `engine_connect`'s answer, and the socket never sends it: handshake
+  v1 (OWASP H1) has each side prove it holds it with an HMAC over the other's
+  nonce, and the client sends NOTHING else — no request, and no belief in the
+  version — until serve's proof passes `crypto.subtle.verify`, because whoever
+  holds serve.json's port after a crash need not be serve. `crypto.subtle` is
+  there on `tauri://localhost` (a secure context) and a `ws://127.0.0.1` socket
+  from it is not blocked as mixed content — measured on macOS 27.0 in a
+  standalone WKWebView registered the way wry 0.55 does, NOT in the shipped
+  app. A channel ends on serve's `{channel, seq, end: true}` — ordered by
+  `seq` like data — or on an `err` to the request that named it, and the
+  client drops the handler then, as Tauri's `Channel` does when its Rust side
+  drops; and a request over serve's `MAX_MESSAGE` is refused in the client,
+  because serve answers one by ending the whole connection, every terminal on
+  it. A lost socket is retried ON ITS OWN, and the policy lives in ONE pure
+  module, `app/src/reconnect.ts` (backoff, ≤3 starts in 60 s, never restart
+  a serve the app did not start or adopt, hidden window defers); the shim
+  only obeys `engine_connect`'s `start: false` (`engine::permit`) and reports
+  `owned`/`started`, the two facts the policy cannot see. Do not grow a
+  second copy of the rule in Rust. **Three starts inside a minute is a crash
+  loop by that rule, whatever killed them** — a drive that `kill -9`s serve
+  three times in 53 s gets a stopped banner, not a fourth serve; space
+  manual checks a minute apart. Plugins (opener, dialog, updater,
+  process, `api/window`) stay direct imports on purpose: they act on the
+  window's machine, and routing them through a socket is the reason the
+  plan's WS-backed `__TAURI_INTERNALS__` was not used (`.planning` of
+  feat-serve-transport, findings §1). Drive it:
+  `J=$(app/scripts/server-stack.sh --allow-origin http://localhost:1430)`, then
+  in `app/`: `WT_SERVE_JSON=$J corepack pnpm dev:serve --force`. Four traps:
+  **vite's dev CORS default answers every `localhost:<any port>` page**, so the
+  token endpoint (`vite.serve-door.ts`) checks `Sec-Fetch-Site`/`Origin` and
+  strips the CORS headers itself — same-origin is not free there;
+  **`vite build --mode development` does NOT make `import.meta.env.DEV` true**
+  (NODE_ENV stays production — `NODE_ENV=development` does), so a "dev build"
+  can look like proof the gate works; **`ipcws.ts` may have no runtime import**
+  (the check loads it as a `data:` module; `import type` is fine); and **a
+  check that awaits a promise a mutation leaves pending exits 13 with NO
+  failure printed** — race every await against a deadline, as
+  `transport-check.mjs`'s `settle()` does, and give fire-and-forget calls the
+  same handler: against a broken client a bare `void invoke(…)` rejects
+  unhandled and kills the run before the failures it found are printed.
 
 **Adding a harness? Walk `docs/adding-a-harness.md` first, and tick it only
 by SEEING each surface work.** pi shipped in v0.33.0 with a correct core —
@@ -511,6 +608,10 @@ after it is "command not found" — which reads as a sandbox refusing curl.
   state lookup but the `Ctx` and the window tracker. Both failures exist only
   as `[panic] … before manage()` lines in `app.log`, so after any change to
   `run()`, launch it (`sandbox.sh --app`) and grep the log; no suite will.
+  A panic is ONE line, `[panic] panicked at <file:line:col>: "<message>"`,
+  the message `{:?}`-escaped and cut at 500 chars (`host::panic_line`). Until
+  then the message sat on the NEXT line, raw, so `grep '[panic]'` showed where
+  and never what — `grep -A1` on an older log.
 - **GUI launches get launchd's bare PATH** (no homebrew → no tmux).
   `fixup_gui_path()` in lib.rs resolves the login-shell PATH at startup —
   don't add subprocess calls that assume PATH before it runs.
@@ -1020,8 +1121,12 @@ after it is "command not found" — which reads as a sandbox refusing curl.
   rejects `/Users/x/repo/.worktrees/tree/f.ts`, which is every path this app
   exists to open. `plugins.opener.requireLiteralLeadingDot: false` in
   tauri.conf.json is what makes the scope mean what it reads as.
-- App log: `~/Library/Logs/net.casadelvalle.worktrees/app.log` (Settings →
-  Logs). Persisted UI settings: `ui-state.json` in the app config dir — written
+- App log: `~/Library/Logs/net.casadelvalle.worktrees/app.log`. Since the app
+  became serve's client it holds the SHIM's lines only — startup, `engine:`
+  (find, start, adopt, replace, quit), the window. The engine's work and the
+  page's `log_event` lines go to serve's log, `~/.cache/worktrees/serve.log`
+  (one file for every serve; `grep '\[<pid>\]'`), and Settings → Logs shows
+  that one. Persisted UI settings: `ui-state.json` in the app config dir — written
   WHOLE-BLOB by the frontend, so the backend must never write into it (its own
   update would be erased by the next settings save; that is why each dock shell
   tab's last directory lives in a separate backend-owned `shell-cwds.json`).
@@ -1136,6 +1241,18 @@ after it is "command not found" — which reads as a sandbox refusing curl.
   config dir already followed the override and the log did not. One line is
   still written under the default: the `startup v… PATH=…` line, emitted
   before any app handle exists to ask.
+- **Give a sandbox drive its own tmux server, and mind the socket path.** The
+  sandbox app and the serve it starts inherit `$TMUX`, so they talk to the
+  user's real server unless it is unset. `env -u TMUX TMUX_TMPDIR=<dir>` on
+  the `sandbox.sh --app` launch moves the app, serve and the CLI onto a
+  private one, and every probe then names it with `tmux -S <dir>/tmux-<uid>/
+  default`. The dir must be SHORT: a Unix socket path over 104 bytes on macOS
+  fails with "File name too long", which a scratchpad path under
+  `/private/tmp/claude-…/<session>/scratchpad` is. `/tmp/claude-<uid>/<x>`
+  works. And `kill <app pid>` is a CRASH as far as the app is concerned: tao
+  installs no SIGTERM handler, so the Exit arm never runs and the serve the
+  app owns keeps running — which is the crash-leftover path, and the next
+  launch adopts it (`owner: "app"` in serve.json). A clean quit is ⌘Q.
 - **A vanished sandbox app means the human closed it.** `tauri dev` exits 0 when
   the window closes, which is indistinguishable from a clean shutdown because it
   is one; a harness kill is 143. Twice in one session that was reported as a

@@ -86,9 +86,18 @@ if [ "$MODE" = app ]; then
   # MCP setup from this app must register the branch under test, not a possibly
   # older `worktrees` installed in ~/.local/bin.
   export WORKTREES_CLI_BIN="$BIN"
+  # …and the engine the app finds or starts must be this branch's too: a dev
+  # build runs `worktrees serve` from WORKTREES_SERVE_BIN, else from the
+  # workspace's newest target/{release,debug} build (app.log says which).
+  # One already set wins, so a drive can hand the app a stand-in (a serve that
+  # exits at once, for the crash-loop limit) without touching target/release,
+  # which the gates believe in.
+  : "${WORKTREES_SERVE_BIN:=$BIN}"
+  export WORKTREES_SERVE_BIN
   echo "→ launching the app against the sandbox" >&2
   echo "   window title / dock name: 'worktrees (sbx $SLUG)'" >&2
   echo "   tmux sessions:            $PREFIX-<slug>" >&2
+  echo "   engine:                   $WORKTREES_SERVE_BIN serve (its log: ~/.cache/worktrees/serve.log)" >&2
   echo "   add the repo inside the app: $REPO" >&2
   echo >&2
   echo "   VERIFY the config dir really moved: Settings → Data & Logs should" >&2
@@ -98,8 +107,10 @@ if [ "$MODE" = app ]; then
   echo "   installed app before continuing." >&2
   echo >&2
   cd "$APP_DIR"
+  # `beforeDevCommand` overridden as `make dev-app` does: tauri.conf.json's is a
+  # bare `pnpm`, which `nvm use` takes off PATH (AGENTS.md).
   exec ./node_modules/.bin/tauri dev --config \
-    '{"identifier":"net.casadelvalle.worktrees.sbx","productName":"worktrees (sbx '"$SLUG"')"}'
+    '{"identifier":"net.casadelvalle.worktrees.sbx","productName":"worktrees (sbx '"$SLUG"')","build":{"beforeDevCommand":"corepack pnpm dev"}}'
 fi
 
 # CLI mode: emit exports for `eval`, and put the branch's binary first on PATH.

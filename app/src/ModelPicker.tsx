@@ -8,7 +8,7 @@
 // where the model they configured went.
 
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc";
 import { NEEDS_MODEL, type Harness } from "./harness";
 
 export type ModelReason = "no_credentials" | "endpoint_unreachable" | "not_served";

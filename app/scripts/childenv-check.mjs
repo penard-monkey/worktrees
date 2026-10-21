@@ -56,6 +56,11 @@ for (const d of DIRS) {
   for (const f of rsFiles(abs)) {
     files++;
     const rel = path.relative(ROOT, f);
+    // A test module kept in its own file (`#[cfg(test)] mod tests;` in the
+    // sibling mod.rs, as serve/tests.rs is) is test code from its first line.
+    const parent = path.join(path.dirname(f), "mod.rs");
+    if (path.basename(f) === "tests.rs" && fs.existsSync(parent) &&
+        /^#\[cfg\(test\)\]\s*\nmod tests;/m.test(fs.readFileSync(parent, "utf8"))) continue;
     const lines = code(fs.readFileSync(f, "utf8"));
     lines.forEach((l, i) => {
       if (/\bCommand::new\(/.test(l) && !rel.endsWith("childenv.rs")) {

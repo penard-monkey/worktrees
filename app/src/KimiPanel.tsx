@@ -9,7 +9,7 @@
 // or `worktrees trust kimi`.
 
 import { useCallback, useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc";
 import type { Settings } from "./settings";
 import { ModelPicker, modelArg, type ModelOption } from "./ModelPicker";
 

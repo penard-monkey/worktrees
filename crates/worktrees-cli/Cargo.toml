@@ -11,6 +11,62 @@ path = "src/main.rs"
 
 [dependencies]
 worktrees-core = { workspace = true }
+# The command layer, for `worktrees serve`: the same 143 bodies the desktop app
+# wraps, hosted behind a loopback socket. The api crate deliberately owns no
+# transport (its Cargo.toml says so), so the socket is this crate's.
+worktrees-api = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 # clap is added when subcommand dispatch lands (Increment 1/2). Increment 0 only
 # needs version/help, which is trivial by hand.
+#
+# ── `worktrees serve`'s stack ───────────────────────────────────────────────
+# hyper + tokio are already compiled into this binary by way of worktrees-api
+# (the documentation server), so the HTTP/1.1 half of the WebSocket handshake
+# costs nothing new: hyper parses the upgrade request, the policy (Host,
+# Origin) runs over its typed headers, and a refusal is the service returning
+# `Err`, which hyper answers by closing the connection with no bytes written —
+# the "nothing said" the loopback rule set requires. tungstenite's own
+# `accept_hdr` cannot do that: it WRITES an error response on a refused
+# handshake. `signal` is the SIGINT/SIGTERM path that flushes the rings and
+# removes serve.json; `sync` is the per-connection writer queue that makes
+# frame order a property of the code rather than of timing.
+tokio = { version = "1", features = ["net", "rt-multi-thread", "time", "sync", "signal"] }
+hyper = { version = "1.11", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+# The ONE WebSocket crate, and only its frame codec. `handshake` is enabled for
+# exactly one function, `derive_accept_key` (the SHA-1 of the client's key,
+# which is the only thing in RFC 6455 worth not writing by hand); the HTTP side
+# of the handshake is hyper's, above, and the stream is built with
+# `WebSocketStream::from_raw_socket` on the upgraded connection. No `connect`,
+# no TLS features, no `url` — this process never dials anything. Pinned to the
+# minor; the lock pins the patch. New in the lock because of it: tungstenite,
+# data-encoding, sha1 with the digest-0.11 family under it (block-buffer,
+# const-oid, cpufeatures, crypto-common, digest, hybrid-array — the sha2 the
+# docs server already carries is on digest 0.10), and rand with rand_core and
+# chacha20. Thirteen crates, no network code among them.
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+# Not a dependency so much as a trait import: the stream tokio-tungstenite
+# hands back speaks `futures` `Stream`/`Sink`, and `.next()`/`.send()` on it
+# need those traits in scope. Already in the lock by way of hyper and of
+# tokio-tungstenite itself, with exactly these features; adds nothing.
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+# Handshake v1 (`serve/policy.rs`; the spec is (main)'s, OWASP finding H1):
+# each side proves it holds serve.json's token with an HMAC-SHA256 over nonces
+# the OTHER side chose, so the token itself never goes on the wire and a
+# process that wins a dead server's port learns nothing. RustCrypto's `hmac`
+# 0.13 and `sha2` 0.11 are the releases built on the digest 0.11.3 already in
+# the lock for sha1 above; `hmac` turns on digest's `mac` feature, whose
+# `verify_slice` is a constant-time compare by way of `ctutils` (over `cmov`).
+# `sha2` without its default `alloc`/`oid` features: one hash, nothing else.
+# New in the lock, and nothing else moved: hmac 0.13.0, sha2 0.11.1 (beside
+# the docs server's 0.10.9), ctutils 0.4.3, cmov 0.5.4 — all four checked on
+# OSV at those versions: no advisories.
+hmac = "0.13"
+sha2 = { version = "0.11", default-features = false }
+# `getrandom` for the 256-bit session token (already a dep of worktrees-api
+# for the docs server's path token); `libc` for the flock on serve.json and
+# the `kill(pid, 0)` liveness probe of a previous server.
+getrandom = "0.3"
+libc = { workspace = true }

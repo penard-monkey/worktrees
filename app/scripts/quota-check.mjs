@@ -15,8 +15,9 @@
 //      another category would leave every refusal pointing at nothing. So the
 //      path is checked against what SettingsSheet actually renders.
 //
-// Plus the plumbing a new command needs: lib.rs registers both commands and
-// the mock answers both, or the harness cannot drive the panel.
+// Plus the plumbing a new command needs: serve's dispatch table has a row for
+// both commands (the app is its client) and the mock answers both, or the
+// harness cannot drive the panel.
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -29,7 +30,11 @@ const ok = (m) => console.log(`ok   ${m}`);
 const quota = read("../../crates/worktrees-core/src/quota.rs").split("#[cfg(test)]\nmod tests")[0];
 const panel = read("../src/QuotaPanel.tsx");
 const sheet = read("../src/SettingsSheet.tsx");
-const lib = read("../src-tauri/src/lib.rs");
+// The commands are the ENGINE's: the app is a client of `worktrees serve`, and a
+// command exists for it when serve's dispatch table has a row for it (the shim
+// registers only the client-local ones — engine-route-check.mjs).
+// Cut at `mod tests`, not the first `#[cfg(test)]`: test-only items sit above the table.
+const dispatch = read("../../crates/worktrees-cli/src/serve/dispatch.rs").split(/\n#\[cfg\(test\)\]\s*\nmod tests\b/)[0];
 const mock = read("../src/mock/install.ts");
 
 // ── 1. the range ─────────────────────────────────────────────────────────────
@@ -69,10 +74,9 @@ else {
 
 // ── 3. plumbing ─────────────────────────────────────────────────────────────
 for (const cmd of ["quota_settings", "set_quota_settings"]) {
-  if (!new RegExp(`async fn ${cmd}\\(`).test(lib)) fail(`lib.rs has no command ${cmd}`);
-  else if (!new RegExp(`^\\s+${cmd},$`, "m").test(lib)) fail(`lib.rs does not register ${cmd} in invoke_handler`);
+  if (!new RegExp(`^ {4}${cmd}: (Engine|HostAdmin) =>`, "m").test(dispatch)) fail(`serve's dispatch table has no Engine/HostAdmin row for ${cmd}`);
   else if (!mock.includes(`case "${cmd}":`)) fail(`mock/install.ts does not answer ${cmd}`);
-  else ok(`${cmd}: defined, registered, mocked`);
+  else ok(`${cmd}: a row in serve's dispatch table, and mocked`);
 }
 
 if (bad) { console.error(`\n${bad} failure(s)`); process.exit(1); }

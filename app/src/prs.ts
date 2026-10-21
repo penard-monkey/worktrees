@@ -12,7 +12,7 @@
 //   always.
 //
 // `enabled: false` (Settings → Behavior → Pull requests off) makes NO call.
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 export type PrState =

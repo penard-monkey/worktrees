@@ -24,7 +24,7 @@
 // Everything here is at MODULE scope per CLAUDE.md — components defined inside
 // App() get a new identity every render and would drop tree expansion state.
 import { Component, Fragment, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc";
 import { copyToClipboard } from "./clipboard";
 // `openPath` is aliased: this module already has an `openPath` — the prop
 // naming the file the viewer has open — and the two would silently shadow each

@@ -6,6 +6,46 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Changed
+- **The desktop app is a client of `worktrees serve` — one engine per host.**
+  The app no longer runs the engine in its own process. On launch it reads
+  `serve.json`, starts the bundled CLI's `worktrees serve` if nothing usable is
+  there, and does everything except the window over serve's authenticated
+  loopback socket: listing, mutations, both kinds of terminal, the docs viewer.
+  It uses a running serve only after that serve proves it holds the file's token
+  and is the app's own version.
+  - A serve on another version is asked to stop (SIGTERM, never SIGKILL) and
+    replaced.
+  - Something that holds the port but cannot prove itself is left alone, and
+    the app says why.
+  - A serve the app started stops when you quit, which ends the dock shells as
+    before.
+  - If the app crashes, its serve survives, and the next launch adopts it
+    (`serve --owner app`, recorded in serve.json).
+  - A serve you started from the CLI is used and left running.
+  - If the engine goes away, the app keeps what it last showed under a
+    banner and reconnects on its own (below); the terminals re-attach, and
+    the dock shell replays behind its `── restored ──` seam.
+
+  The shim now holds the window, the six commands that act on this machine
+  (clipboard, editor, terminal, zoom, the app's own updater) and
+  `engine_connect`, which is the only way serve's token reaches the page. The
+  engine's log lines, and the page's, are in `~/.cache/worktrees/serve.log`.
+  `app.log` keeps the shim's.
+- **The frontend reaches its backend through one module, `app/src/ipc.ts`.**
+  The 25 files that imported `invoke`, `Channel` and `listen` from
+  `@tauri-apps/api` import them from there instead; in the desktop app those
+  ARE Tauri's own functions, called with the same arguments, so nothing
+  changes. It is the switch the app will use to become a client of
+  `worktrees serve`. Plugins (opener, dialog, updater, process, the window
+  API) still import their packages directly — they act on the machine the
+  window runs on, whichever engine is driving it.
+- **The host wiring every engine process needs lives in one place,
+  `worktrees_api::host`**: `boot` (log sink, panic hook, the launchd-bare PATH
+  and locale repairs, the startup line), `start` (the viewer sweep, the
+  project merge, the 3 s nav-dot poll and the dock-ring flush) and `stop` (the
+  exit sequence). `serve` makes all three calls, so a host can no longer
+  forget one of those steps — which is how pi once shipped with no nav dot.
+  The desktop app, now serve's client, keeps only `boot`.
 - **The 149 app commands moved into a new `worktrees-api` crate**, leaving the
   Tauri layer as thin wrappers. Nothing changes for the desktop app — the same
   149 commands with the same arguments, verified against `main`, plus
@@ -29,6 +69,73 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   row — see below).
 
 ### Added
+- **The app reconnects to its engine on its own.** When the connection to
+  `worktrees serve` drops, the banner reads "Reconnecting… Next try in N s"
+  and the app tries again after 0.5, 1, 2, 4, 8 and 16 s, then every 30 s,
+  with a little jitter; **Reconnect now** tries at once.
+  - It restarts serve only if the serve that went was one the app started or
+    adopted, and at most three times in a minute. Past that it stops, says
+    why, and names `~/.cache/worktrees/serve.log`; **Reconnect now** starts
+    one more.
+  - A serve you started yourself is never restarted: the app waits for it to
+    come back, and says so.
+  - A serve still shutting down is waited for (up to 10 s) before another is
+    started, so two engines never write the dock shells' history at once.
+  - While the window is hidden, a due retry waits until you look at it.
+- **`worktrees serve`: the engine, hosted behind an authenticated WebSocket on
+  loopback** (Server Edition, Phase 1). It speaks the same `{cmd, args}` the
+  app's `invoke` does — all 150 commands, each with an exposure class in one
+  table (`Engine`, `ClientLocal`, `HostAdmin`, `Stream`); the six that act on
+  the caller's machine (clipboard, editor, terminal, zoom, the app's own
+  bundle) are refused over the socket rather than run on the host.
+  Terminal bytes and progress arrive as ordered channel frames, events as
+  `{event, payload}` to every authenticated socket. It binds `127.0.0.1` only,
+  requires a loopback `Host` and an allow-listed `Origin` (a missing one is
+  refused; `--allow-origin` is a dev flag, never a config key), and a client
+  and the server each prove they hold the per-launch 256-bit token from
+  `<config-dir>/serve.json` (mode 0600, rewritten every launch) with an
+  HMAC-SHA256 over nonces the other side chose — the token itself never goes
+  on the wire, so a process that takes the port of a server that has died
+  learns nothing and cannot pass for it. Every refusal closes the socket with
+  nothing written. A flood of connections can no longer take the server's
+  memory or descriptors, or a client that is already in: at most 64
+  connections, 16 of them unauthenticated, 512 bytes from a peer before it
+  has proven itself, 16 MiB per message after, a 5-second HTTP phase, and the
+  open-file limit raised at launch. A second `serve` on a live config dir is
+  refused — one
+  engine per machine. Logs to `~/.cache/worktrees/serve.log`, owner-only
+  (0600) like `serve.json`, with the version on the first line.
+  `app/scripts/server-stack.sh` runs one on an isolated config dir, tmux
+  prefix and port for the frontend lane.
+  Keystrokes to one terminal or dock shell reach it in the order they were
+  sent (one serial lane per stream; everything else stays concurrent), and a
+  finished channel says so with `{channel, seq, end: true}`, so a client can
+  let the handler go the way it does when a Tauri `Channel` drops. A dock
+  shell opens only in a place of the repository named, and a terminal
+  attaches only to a tmux session of exactly the name given; anything else
+  (`--all`, a name no place or session has) is refused with the reason before
+  any shell or tmux client starts. A command that fails unexpectedly is
+  answered `internal error` rather than never answered, and the connection
+  and the server go on serving.
+- **The real frontend can drive a real `worktrees serve` from a browser**
+  (development only: `pnpm dev:serve` with `WT_SERVE_JSON` pointing at the
+  stack's `serve.json`). The page asks the dev server for the port and token —
+  same-origin only, since vite's own CORS default answers every page on every
+  localhost port — and keeps the token in memory; it is never in a URL, in
+  storage, on the wire, or in a build, which does not contain the socket client
+  at all. The page and `serve` each prove they hold the token with an HMAC over
+  a random challenge from the other, and the page sends nothing else until
+  serve's proof checks out, so a program that takes over the port after serve
+  stops is told so and is sent nothing. Replies are matched by id, terminal bytes
+  and progress are delivered per channel in sequence order and let go when
+  serve says the channel is finished, events arrive through `listen`, a request
+  too big for serve to read fails on its own instead of being sent and ending
+  the connection, and the server's version must equal the frontend's (both
+  from the workspace `Cargo.toml`) or nothing is sent. A refused handshake, a
+  server that cannot prove itself, a version mismatch or a dropped connection
+  appears in the error banner.
+  `app/scripts/transport-check.mjs` holds the client against the server's own
+  frame definitions.
 - **The desktop app carries its own copy of the CLI**, at
   `worktrees.app/Contents/MacOS/worktrees`: built from the same commit, for
   the bundle's own architecture, and used only by the app (which will start
@@ -116,6 +223,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   too. Settings → Usage can turn it off.
 
 ### Fixed
+- **`app/scripts/sandbox.sh --app` starts again under `nvm use`.** It launched
+  `tauri dev` without the `beforeDevCommand` override `make dev-app` carries, so
+  tauri.conf.json's bare `pnpm` failed wherever `nvm use` had taken pnpm off
+  `PATH`. It now runs `corepack pnpm dev`, and also exports
+  `WORKTREES_SERVE_BIN`, so the sandbox app starts this branch's `serve`.
 - **Opening the app no longer sets what Codex and pi may do.** Settings →
   Codex → Permissions and Settings → pi → Project trust were sent to the
   backend every time the app loaded, from the window's own saved settings, so
@@ -147,10 +259,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   (the same all-comments file `--print` has always emitted, which `doctor`
   reads back clean). Without `-y` nothing changes, except that the message
   now says how to ask for the template anyway.
-- **The Claude and Codex usage readers log to app.log again.** Since v0.35.0
+- **The Claude and Codex usage readers log again.** Since v0.35.0
   the app's builder called `.setup()` twice, and tauri keeps only the LAST
   closure, so the one that hands core its log sink never ran: every line those
-  readers wrote was dropped without a trace. There is one `.setup` now, and
+  readers wrote was dropped without a trace. They run in `worktrees serve`
+  now and write to `serve.log`; the app has one `.setup`, and
   `app/scripts/api-boundary-check.mjs` fails if a second appears.
 - **A branch, base or place name that begins with `-` is no longer read as a
   flag by the app's commands.** They handed what the app sent straight to the
@@ -172,6 +285,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   process on the Mac can list those (`ps`) while the request runs. The token
   now goes to `curl` on its standard input, which `ps` does not show. The
   meter itself works as before.
+- **A message the window logs is one line of the log, and a long one is no
+  longer lost.** A newline in it started a line of its own with no
+  timestamp, so a stack trace spread over several lines and anything sent
+  through `log_event` could write a line that looked like the app's own,
+  which matters once `worktrees serve` takes that command from any client it
+  has authenticated. Line breaks, other control characters and the bidi
+  overrides are now written as visible escapes (`\n`, `\x1b`, `\u{202e}`).
+  And a message over 4000 bytes whose cut fell inside a character panicked
+  the logger instead of being written. A panic is written the same way: one
+  `[panic]` line with where it happened and what it said, where its message
+  used to follow on lines of its own. Two lines written at the same moment
+  no longer tear into each other: each goes to the file in one write.
+  `app.log` is now readable only by you (0600, its rotated copy too); every
+  account on the machine could read it, with your PATH and the places you
+  opened in it.
+- **A terminal pane attaches only to its own session.** The pane named its
+  session to tmux, which matches a name as a PREFIX, so a pane opened in the
+  seconds after a session ended and before the app noticed (switching to that
+  place, say) could land on another session whose name began with it —
+  another place's agent, and the keys typed with it. It now attaches to that
+  name exactly, and a session that is gone shows as an error in the pane
+  naming it, instead of tmux's own "can't find session".
 
 ## [0.42.0] - 2026-10-15
 

@@ -7,6 +7,7 @@
   "scripts": {
     "dev": "vite",
     "dev:mock": "VITE_MOCK=1 vite",
+    "dev:serve": "VITE_SERVE=1 vite --port 1430",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",

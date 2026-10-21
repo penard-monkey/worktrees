@@ -1,11 +1,102 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
+import type { SocketDeps } from "./ipcws";
+import type { RetryEnv } from "./reconnect";
 
-// Design harness (VITE_MOCK=1): install the fake Tauri backend BEFORE anything
-// imports @tauri-apps/api, so invoke()/Channel resolve against the mock + fixtures.
+/** What every socket to `worktrees serve` is built from, whichever way the page
+ *  learned the port and the token. */
+function socketDeps(onError: (msg: string) => void, remedy?: string): Omit<SocketDeps, "port" | "token"> {
+  return {
+    version: __WT_VERSION__,
+    crypto: window.crypto,
+    WebSocket: window.WebSocket,
+    setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+    clearTimeout: (h) => window.clearTimeout(h as number),
+    atob: (s) => window.atob(s),
+    onError,
+    warn: (m) => console.warn(`[ipc] ${m}`),
+    origin: window.location.origin,
+    remedy,
+  };
+}
+
+/** The remedy the app offers for a server it will not drive: its own button.
+ *  Only what is true in every state the banner can be in — retrying, waiting
+ *  for the window, or stopped — so nothing about trying on its own. */
+const RECONNECT = "Reconnect now tries again at once.";
+
+/** The clock, chance and visibility the engine door's retries run on
+ *  (reconnect.ts). `performance.now()`, not `Date.now()`: a wall-clock jump
+ *  must not fire or starve a retry, and EngineGate's countdown reads the same
+ *  clock. */
+function retryEnv(): RetryEnv {
+  return {
+    now: () => performance.now(),
+    setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+    clearTimeout: (h) => window.clearTimeout(h as number),
+    random: () => Math.random(),
+    visible: () => document.visibilityState !== "hidden",
+  };
+}
+
+// Three ways to boot, chosen before anything that talks to the backend is
+// imported: the design harness, the dev stack, and the app.
 async function boot() {
+  // Design harness (VITE_MOCK=1): install the fake Tauri backend BEFORE anything
+  // imports @tauri-apps/api, so invoke()/Channel resolve against the mock +
+  // fixtures. It answers everything itself; there is no engine to connect to.
   if (import.meta.env.VITE_MOCK) {
     await import("./mock/install");
+  }
+  let gated = false;
+  // Dev stack (`pnpm dev:serve`, VITE_SERVE=1): a browser page on a real
+  // `worktrees serve`, which learns the port and token from vite's token
+  // endpoint (`bootSocket`). DEV is the literal `false` in a build, so this
+  // block — and the endpoint's client with it — is dead code there;
+  // transport-check.mjs greps app/dist to prove it. No local half: a browser
+  // has no Tauri, so serve refuses the client-local commands, as it should.
+  if (import.meta.env.DEV && import.meta.env.VITE_SERVE) {
+    const { engineDoor, openDoor } = await import("./ipc");
+    const { bootSocket } = await import("./ipcws");
+    // The stack's serve is server-stack.sh's, never the page's: owned false,
+    // so a lost one is only ever reconnected to (re-reading the endpoint).
+    const door = engineDoor(
+      null,
+      async ({ onLost }) => ({
+        sock: await bootSocket({ ...socketDeps(onLost), fetch: (u, init) => window.fetch(u, init) }),
+        owned: false,
+        started: false,
+      }),
+      retryEnv(),
+    );
+    openDoor(door);
+    document.addEventListener("visibilitychange", () => door.visibility());
+    void door.connect();
+    gated = true;
+  } else if (!import.meta.env.VITE_MOCK && "__TAURI_INTERNALS__" in window) {
+    // The app: a client of this host's engine. The shim finds or starts
+    // `worktrees serve` and answers `engine_connect` with its port and token —
+    // the only way the token reaches this page, which keeps it in this closure
+    // and the socket's HMAC key. Client-local commands stay on Tauri IPC.
+    const { engineDoor, openDoor, tauriDoor } = await import("./ipc");
+    const { connectSocket } = await import("./ipcws");
+    // `start` is the retry policy's (reconnect.ts) and the shim obeys it: under
+    // false it starts and replaces nothing. `owned`/`started` are the shim's
+    // answer, and the policy's only source for either.
+    const door = engineDoor(
+      tauriDoor,
+      async ({ reason, start, manual, onLost, onPhase }) => {
+        const onPhaseCh = tauriDoor.channel<string>(onPhase);
+        const ep = await tauriDoor.invoke<{ port: number; token: string; owned: boolean; started: boolean }>("engine_connect", { reason, start, manual, onPhase: onPhaseCh });
+        const sock = connectSocket({ ...socketDeps(onLost, RECONNECT), port: ep.port, token: ep.token });
+        return { sock, owned: ep.owned, started: ep.started };
+      },
+      retryEnv(),
+    );
+    openDoor(door);
+    document.addEventListener("visibilitychange", () => door.visibility());
+    void door.connect();
+    gated = true;
   }
   const { startFeedback, stopFeedback } = await import("./feedback");
   const { FeedbackNotice } = await import("./FeedbackSection");
@@ -13,9 +104,20 @@ async function boot() {
   window.addEventListener("pagehide", stopFeedback, { once: true });
   if (import.meta.hot) import.meta.hot.dispose(stopFeedback);
   const { default: App } = await import("./App");
+  // The gate holds the app back until the engine has answered once — App
+  // hydrates its settings on mount, and against a dead engine it would hydrate
+  // DEFAULTS and later save them over the real ones — and after that keeps it
+  // mounted under a "disconnected" banner rather than blanking it.
+  const { EngineGate } = await import("./EngineGate");
   ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <React.StrictMode>
-      <App />
+      {gated ? (
+        <EngineGate>
+          <App />
+        </EngineGate>
+      ) : (
+        <App />
+      )}
       <FeedbackNotice />
     </React.StrictMode>,
   );

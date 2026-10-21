@@ -5,7 +5,7 @@
 // run by the backend; this app never edits pi's file.
 
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc";
 
 export type PiMcpStatus = {
   state: "installed" | "read-only" | "disabled" | "stale" | "foreign" | "unreadable" | "absent" | "cli-missing" | "pi-missing";
