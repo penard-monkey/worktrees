@@ -225,8 +225,16 @@ fn rpc<S: Read + Write>(ws: &mut WebSocket<S>, id: Value, cmd: &str, args: Value
 
 /// Whatever is left on the raw socket until it closes or `wait` passes:
 /// (the bytes, whether it closed). A reset counts as closed.
+///
+/// macOS refuses `SO_RCVTIMEO` with EINVAL on a socket the peer has already
+/// RESET — a test's send after the server's close draws exactly that — and the
+/// handshake-deadline test lost that race under a loaded gate run. Such a
+/// socket cannot block a read (the next one answers ECONNRESET, measured), so
+/// the timeout is moot there, not missing. Anything else is still a failure.
 fn rest(s: &mut TcpStream, wait: Duration) -> (Vec<u8>, bool) {
-    s.set_read_timeout(Some(wait)).unwrap();
+    if let Err(e) = s.set_read_timeout(Some(wait)) {
+        assert_eq!(e.raw_os_error(), Some(libc::EINVAL), "set_read_timeout: {e}");
+    }
     let mut out = Vec::new();
     let mut buf = [0u8; 4096];
     loop {

@@ -82,7 +82,9 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   never does (hostpolicy-check.mjs) — a serve that skipped it launched lanes
   under the default the file overrides. `<config_dir>/serve.json` (0600,
   rewritten per launch) is how a client finds the port and the token; the log
-  is `~/.cache/worktrees/serve.log`, version on the first line.
+  is `~/.cache/worktrees/serve.log`, 0600 as well (re-tightened on every
+  write, and after its rotation, which is a `rename` and keeps the mode it
+  found), version on the first line.
   `app/scripts/server-stack.sh` runs an isolated one for the frontend lane.
 
 - **The frontend has ONE door to the backend: `app/src/ipc.ts`** (`invoke`,

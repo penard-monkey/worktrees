@@ -73,21 +73,36 @@ struct AppLog;
 
 impl worktrees_api::log::LogSink for AppLog {
     fn log(&self, level: &str, msg: &str) {
-        let dir = log_dir();
-        let _ = std::fs::create_dir_all(&dir);
-        let path = log_file();
-        // single-slot rotation at ~1MB so the log can't grow unbounded
-        if std::fs::metadata(&path).map(|m| m.len() > 1_000_000).unwrap_or(false) {
-            let _ = std::fs::rename(&path, dir.join("app.log.1"));
-        }
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-            let ts = fmt_utc(sysclock::now_epoch());
-            let _ = writeln!(f, "{ts}Z [{level}] {msg}");
-        }
+        append_line(&log_dir(), &log_file(), level, msg);
     }
 
     fn location(&self) -> Option<(PathBuf, PathBuf)> {
         Some((log_dir(), log_file()))
+    }
+}
+
+/// One line of app.log, appended to `path` (rotating it into `dir` past ~1MB).
+///
+/// Owner-only, the same three ways as serve.log: 0600 at creation, an existing
+/// file tightened on every write (a log from before this release is 0644), and
+/// the rotated copy tightened after the `rename`, which keeps whatever mode the
+/// file had.
+fn append_line(dir: &std::path::Path, path: &std::path::Path, level: &str, msg: &str) {
+    use std::os::unix::fs::OpenOptionsExt;
+    let _ = std::fs::create_dir_all(dir);
+    // single-slot rotation at ~1MB so the log can't grow unbounded
+    if std::fs::metadata(path).map(|m| m.len() > 1_000_000).unwrap_or(false) {
+        let rotated = dir.join("app.log.1");
+        if std::fs::rename(path, &rotated).is_ok() {
+            if let Ok(f) = std::fs::File::open(&rotated) {
+                worktrees_api::log::owner_only(&f);
+            }
+        }
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(path) {
+        worktrees_api::log::owner_only(&f);
+        let ts = fmt_utc(sysclock::now_epoch());
+        let _ = writeln!(f, "{ts}Z [{level}] {msg}");
     }
 }
 
@@ -457,6 +472,65 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
+    // ── app.log's mode ───────────────────────────────────────────────────────
+    // The same three cases as serve.log's (`worktrees serve`, OWASP L1): the
+    // app's log carries the same kind of thing — PATH, the places opened, the
+    // engine's own errors — and sat at 0644 in a 0755 directory.
+
+    fn log_scratch(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("wt-app-log-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn mode(p: &std::path::Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+    }
+
+    fn set_mode(p: &std::path::Path, m: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(p, std::fs::Permissions::from_mode(m)).unwrap();
+    }
+
+    #[test]
+    fn a_new_app_log_is_owner_only() {
+        let d = log_scratch("fresh");
+        let log = d.join("app.log");
+        super::append_line(&d, &log, "info", "hello");
+        assert_eq!(mode(&log), 0o600, "app.log is {:o}", mode(&log));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_wider_app_log_already_there_is_tightened_and_kept() {
+        let d = log_scratch("wide");
+        let log = d.join("app.log");
+        std::fs::write(&log, "an earlier line\n").unwrap();
+        set_mode(&log, 0o644);
+        super::append_line(&d, &log, "info", "hello");
+        assert_eq!(mode(&log), 0o600, "app.log is {:o}", mode(&log));
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(text.starts_with("an earlier line\n") && text.ends_with("hello\n"), "{text}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A `rename` keeps the mode the file had.
+    #[test]
+    fn the_rotated_app_log_is_owner_only_too() {
+        let d = log_scratch("rotate");
+        let log = d.join("app.log");
+        std::fs::write(&log, vec![b'x'; 1_000_001]).unwrap();
+        set_mode(&log, 0o644);
+        super::append_line(&d, &log, "info", "hello");
+        let old = d.join("app.log.1");
+        assert_eq!(std::fs::metadata(&old).unwrap().len(), 1_000_001, "the full log was not the one rotated");
+        assert_eq!(mode(&old), 0o600, "app.log.1 is {:o}", mode(&old));
+        assert_eq!(mode(&log), 0o600, "app.log is {:o}", mode(&log));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn clone_errors_serialize_with_a_kind_the_dialog_can_branch_on() {
         let e = worktrees_core::clone::CloneError {

@@ -20,6 +20,7 @@ mod servefile;
 mod wire;
 
 use std::io::Write;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -123,12 +124,25 @@ impl LogSink for ServeLog {
 }
 
 /// One log line, appended to `path` (rotating it into `dir` past ~1MB).
+///
+/// Owner-only, like serve.json beside it (OWASP L1): the log carries the
+/// engine's PATH, the places opened and every client connect, and was created
+/// 0644. The mode at creation covers a new file; an existing one is tightened
+/// on every write, because every serve on the machine shares this file and an
+/// older binary may have made it; and the rotated copy is tightened as well,
+/// because a `rename` keeps whatever mode the file had.
 fn append_line(dir: &Path, path: &Path, level: &str, msg: &str) {
     let _ = std::fs::create_dir_all(dir);
     if std::fs::metadata(path).map(|m| m.len() > 1_000_000).unwrap_or(false) {
-        let _ = std::fs::rename(path, dir.join("serve.log.1"));
+        let rotated = dir.join("serve.log.1");
+        if std::fs::rename(path, &rotated).is_ok() {
+            if let Ok(f) = std::fs::File::open(&rotated) {
+                worktrees_api::log::owner_only(&f);
+            }
+        }
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(path) {
+        worktrees_api::log::owner_only(&f);
         let ts = worktrees_api::util::fmt_utc(worktrees_core::sysclock::now_epoch());
         // The pid on EVERY line: this is one file for every serve on the
         // machine — the real one, a stack, a server outliving the binary
@@ -335,3 +349,68 @@ async fn wait_for_signal() {
 
 #[cfg(test)]
 mod tests;
+
+/// serve.log's mode. Not the socket's business, so not in `tests`: these drive
+/// `append_line` on a directory of their own.
+#[cfg(test)]
+mod log_tests {
+    use super::append_line;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+
+    fn dir(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("wt-serve-log-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn mode(p: &Path) -> u32 {
+        std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+    }
+
+    /// OWASP L1: serve.log was created 0644, readable by every local user,
+    /// with the engine's PATH, the places opened and every client connect in
+    /// it — beside a serve.json that is 0600.
+    #[test]
+    fn a_new_serve_log_is_owner_only() {
+        let d = dir("fresh");
+        let log = d.join("serve.log");
+        append_line(&d, &log, "info", "hello");
+        assert_eq!(mode(&log), 0o600, "serve.log is {:o}", mode(&log));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A log a previous serve left world-readable is tightened the next time
+    /// one writes to it, not only when a new one is made. Every serve on the
+    /// machine shares the file, an older binary among them.
+    #[test]
+    fn a_wider_serve_log_already_there_is_tightened_and_kept() {
+        let d = dir("wide");
+        let log = d.join("serve.log");
+        std::fs::write(&log, "an earlier line\n").unwrap();
+        std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o644)).unwrap();
+        append_line(&d, &log, "info", "hello");
+        assert_eq!(mode(&log), 0o600, "serve.log is {:o}", mode(&log));
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(text.starts_with("an earlier line\n") && text.ends_with("hello\n"), "{text}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The rotation is a `rename`, and a rename keeps the mode the file had:
+    /// a 0644 log past the cap became a 0644 `serve.log.1`.
+    #[test]
+    fn the_rotated_log_is_owner_only_too() {
+        let d = dir("rotate");
+        let log = d.join("serve.log");
+        std::fs::write(&log, vec![b'x'; 1_000_001]).unwrap();
+        std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o644)).unwrap();
+        append_line(&d, &log, "info", "hello");
+        let old = d.join("serve.log.1");
+        assert_eq!(std::fs::metadata(&old).unwrap().len(), 1_000_001, "the full log was not the one rotated");
+        assert_eq!(mode(&old), 0o600, "serve.log.1 is {:o}", mode(&old));
+        assert_eq!(mode(&log), 0o600, "serve.log is {:o}", mode(&log));
+        assert!(std::fs::read_to_string(&log).unwrap().ends_with("hello\n"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}

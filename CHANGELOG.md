@@ -48,7 +48,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   The desktop app, now serve's client, keeps only `boot`.
 - **The 149 app commands moved into a new `worktrees-api` crate**, leaving the
   Tauri layer as thin wrappers. Nothing changes for the desktop app — the same
-  149 commands with the same arguments, verified against `main` — but the
+  149 commands with the same arguments, verified against `main`, plus
+  `get_codex_permissions` for the host-policy change below — but the
   command layer can now be called by something that is not a window, which is
   what `worktrees serve` will need. `app/src-tauri/src/lib.rs` goes from 11,288
   lines to about 2,100; the PTY host, the documentation server and its viewer
@@ -102,13 +103,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   has proven itself, 16 MiB per message after, a 5-second HTTP phase, and the
   open-file limit raised at launch. A second `serve` on a live config dir is
   refused — one
-  engine per machine. Logs to `~/.cache/worktrees/serve.log` with the version
-  on the first line. `app/scripts/server-stack.sh` runs one on an isolated
-  config dir, tmux prefix and port for the frontend lane.
+  engine per machine. Logs to `~/.cache/worktrees/serve.log`, owner-only
+  (0600) like `serve.json`, with the version on the first line.
+  `app/scripts/server-stack.sh` runs one on an isolated config dir, tmux
+  prefix and port for the frontend lane.
   Keystrokes to one terminal or dock shell reach it in the order they were
   sent (one serial lane per stream; everything else stays concurrent), and a
   finished channel says so with `{channel, seq, end: true}`, so a client can
-  let the handler go the way it does when a Tauri `Channel` drops.
+  let the handler go the way it does when a Tauri `Channel` drops. A dock
+  shell opens only in a place of the repository named, and a terminal
+  attaches only to a tmux session of exactly the name given; anything else
+  (`--all`, a name no place or session has) is refused with the reason before
+  any shell or tmux client starts.
 - **The real frontend can drive a real `worktrees serve` from a browser**
   (development only: `pnpm dev:serve` with `WT_SERVE_JSON` pointing at the
   stack's `serve.json`). The page asks the dev server for the port and token —
@@ -227,10 +233,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   (the same all-comments file `--print` has always emitted, which `doctor`
   reads back clean). Without `-y` nothing changes, except that the message
   now says how to ask for the template anyway.
-- **The Claude and Codex usage readers log to app.log again.** Since v0.35.0
+- **The Claude and Codex usage readers log again.** Since v0.35.0
   the app's builder called `.setup()` twice, and tauri keeps only the LAST
   closure, so the one that hands core its log sink never ran: every line those
-  readers wrote was dropped without a trace. There is one `.setup` now, and
+  readers wrote was dropped without a trace. They run in `worktrees serve`
+  now and write to `serve.log`; the app has one `.setup`, and
   `app/scripts/api-boundary-check.mjs` fails if a second appears.
 - **A branch, base or place name that begins with `-` is no longer read as a
   flag by the app's commands.** They handed what the app sent straight to the
@@ -246,6 +253,31 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   of `--upload-pack=<cmd>`. One narrowing: a place whose name contains `..`
   (only `--name` can make one) can no longer be opened, switched, closed or
   removed from the app — the MCP tools have always refused it.
+- **The Claude usage meter no longer puts your Claude login token where other
+  programs can read it.** To fetch the usage bars, worktrees passed Claude
+  Code's OAuth access token to `curl` as a command-line argument, and any
+  process on the Mac can list those (`ps`) while the request runs. The token
+  now goes to `curl` on its standard input, which `ps` does not show. The
+  meter itself works as before.
+- **A message the window logs is one line of the log, and a long one is no
+  longer lost.** A newline in it started a line of its own with no
+  timestamp, so a stack trace spread over several lines and anything sent
+  through `log_event` could write a line that looked like the app's own,
+  which matters once `worktrees serve` takes that command from any client it
+  has authenticated. Line breaks, other control characters and the bidi
+  overrides are now written as visible escapes (`\n`, `\x1b`, `\u{202e}`).
+  And a message over 4000 bytes whose cut fell inside a character panicked
+  the logger instead of being written.
+  `app.log` is now readable only by you (0600, its rotated copy too); every
+  account on the machine could read it, with your PATH and the places you
+  opened in it.
+- **A terminal pane attaches only to its own session.** The pane named its
+  session to tmux, which matches a name as a PREFIX, so a pane opened in the
+  seconds after a session ended and before the app noticed (switching to that
+  place, say) could land on another session whose name began with it —
+  another place's agent, and the keys typed with it. It now attaches to that
+  name exactly, and a session that is gone shows as an error in the pane
+  naming it, instead of tmux's own "can't find session".
 
 ## [0.42.0] - 2026-10-15
 
