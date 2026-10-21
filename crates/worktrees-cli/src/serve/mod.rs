@@ -118,12 +118,12 @@ fn append_line(dir: &Path, path: &Path, level: &str, msg: &str) {
         let rotated = dir.join("serve.log.1");
         if std::fs::rename(path, &rotated).is_ok() {
             if let Ok(f) = std::fs::File::open(&rotated) {
-                owner_only(&f);
+                worktrees_api::log::owner_only(&f);
             }
         }
     }
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(path) {
-        owner_only(&f);
+        worktrees_api::log::owner_only(&f);
         let ts = worktrees_api::util::fmt_utc(worktrees_core::sysclock::now_epoch());
         // The pid on EVERY line: this is one file for every serve on the
         // machine — the real one, a stack, a server outliving the binary
@@ -135,16 +135,6 @@ fn append_line(dir: &Path, path: &Path, level: &str, msg: &str) {
         // the real log. A single short write to an O_APPEND handle lands whole.
         let line = format!("{ts}Z [{level}] [{}] {msg}\n", std::process::id());
         let _ = f.write_all(line.as_bytes());
-    }
-}
-
-/// Take group and other access off an open log file. Through the handle, so
-/// the file checked is the file changed. A failure is left alone: a file this
-/// user does not own cannot be appended to either.
-fn owner_only(f: &std::fs::File) {
-    use std::os::unix::fs::PermissionsExt;
-    if f.metadata().is_ok_and(|m| m.permissions().mode() & 0o077 != 0) {
-        let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
     }
 }
 

@@ -193,6 +193,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   control characters and the bidi overrides are now written as visible
   escapes (`\n`, `\x1b`, `\u{202e}`). And a message over 4000 bytes whose
   cut fell inside a character panicked the logger instead of being written.
+  `app.log` is now readable only by you (0600, its rotated copy too); every
+  account on the machine could read it, with your PATH and the places you
+  opened in it.
 - **A terminal pane attaches only to its own session.** The pane named its
   session to tmux, which matches a name as a PREFIX, so a pane opened in the
   seconds after a session ended and before the app noticed (switching to that
