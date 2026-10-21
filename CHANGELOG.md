@@ -201,7 +201,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   has authenticated. Line breaks, other control characters and the bidi
   overrides are now written as visible escapes (`\n`, `\x1b`, `\u{202e}`).
   And a message over 4000 bytes whose cut fell inside a character panicked
-  the logger instead of being written.
+  the logger instead of being written. A panic is written the same way: one
+  `[panic]` line with where it happened and what it said, where its message
+  used to follow on lines of its own.
   `app.log` is now readable only by you (0600, its rotated copy too); every
   account on the machine could read it, with your PATH and the places you
   opened in it.
