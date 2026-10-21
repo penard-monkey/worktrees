@@ -23,9 +23,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
     (`serve --owner app`, recorded in serve.json).
   - A serve you started from the CLI is used and left running.
   - If the engine goes away, the app keeps what it last showed under a
-    "Disconnected from the engine" banner. Reconnect looks for (or starts)
-    serve again, and the terminals re-attach: the dock shell replays behind
-    its `── restored ──` seam.
+    banner and reconnects on its own (below); the terminals re-attach, and
+    the dock shell replays behind its `── restored ──` seam.
 
   The shim now holds the window, the six commands that act on this machine
   (clipboard, editor, terminal, zoom, the app's own updater) and
@@ -69,6 +68,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   row — see below).
 
 ### Added
+- **The app reconnects to its engine on its own.** When the connection to
+  `worktrees serve` drops, the banner reads "Reconnecting… Next try in N s"
+  and the app tries again after 0.5, 1, 2, 4, 8 and 16 s, then every 30 s,
+  with a little jitter; **Reconnect now** tries at once.
+  - It restarts serve only if the serve that went was one the app started or
+    adopted, and at most three times in a minute. Past that it stops, says
+    why, and names `~/.cache/worktrees/serve.log`; **Reconnect now** starts
+    one more.
+  - A serve you started yourself is never restarted: the app waits for it to
+    come back, and says so.
+  - A serve still shutting down is waited for (up to 10 s) before another is
+    started, so two engines never write the dock shells' history at once.
+  - While the window is hidden, a due retry waits until you look at it.
 - **`worktrees serve`: the engine, hosted behind an authenticated WebSocket on
   loopback** (Server Edition, Phase 1). It speaks the same `{cmd, args}` the
   app's `invoke` does — all 150 commands, each with an exposure class in one

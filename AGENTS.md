@@ -107,7 +107,15 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   client drops the handler then, as Tauri's `Channel` does when its Rust side
   drops; and a request over serve's `MAX_MESSAGE` is refused in the client,
   because serve answers one by ending the whole connection, every terminal on
-  it. Plugins (opener, dialog, updater,
+  it. A lost socket is retried ON ITS OWN, and the policy lives in ONE pure
+  module, `app/src/reconnect.ts` (backoff, ≤3 starts in 60 s, never restart
+  a serve the app did not start or adopt, hidden window defers); the shim
+  only obeys `engine_connect`'s `start: false` (`engine::permit`) and reports
+  `owned`/`started`, the two facts the policy cannot see. Do not grow a
+  second copy of the rule in Rust. **Three starts inside a minute is a crash
+  loop by that rule, whatever killed them** — a drive that `kill -9`s serve
+  three times in 53 s gets a stopped banner, not a fourth serve; space
+  manual checks a minute apart. Plugins (opener, dialog, updater,
   process, `api/window`) stay direct imports on purpose: they act on the
   window's machine, and routing them through a socket is the reason the
   plan's WS-backed `__TAURI_INTERNALS__` was not used (`.planning` of
