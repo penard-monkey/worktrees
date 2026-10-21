@@ -684,21 +684,11 @@ pub fn provision(req: &Request, cfg: &ProjectConfig) -> Result<Outcome, Provisio
     Ok(if held { Outcome::Updated { slot } } else { Outcome::Allocated { slot } })
 }
 
-/// tmp in the SAME dir + `rename` — `store.rs:126-133`'s pattern, so a consumer
-/// mid-`. .worktree.env` never sees a half-written file.
+/// `fsx::write_atomic`, so a consumer mid-`. .worktree.env` never sees a
+/// half-written file — and so the worktree, a checkout of the repo, cannot
+/// hand us a temp name to write through.
 fn write_atomic(path: &Path, text: &str) -> io::Result<()> {
-    let dir = path
-        .parent()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no parent dir"))?;
-    let tmp = dir.join(format!(".{ENV_FILE}.tmp-{}", std::process::id()));
-    fs::write(&tmp, text)?;
-    match fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            Err(e)
-        }
-    }
+    crate::fsx::write_atomic(path, text.as_bytes(), None)
 }
 
 #[cfg(test)]
@@ -1133,5 +1123,33 @@ mod tests {
         // our own pid IS alive, so a second acquire while one is held times out
         let _held = SlotLock::acquire(&t.0).unwrap();
         assert!(SlotLock::acquire(&t.0).is_err(), "a live holder must not be evicted");
+    }
+
+    /// The temp was `..worktree.env.tmp-<pid>` in the WORKTREE — a checkout of
+    /// the repo — and a pid is predictable, so a repo declaring `[ports]` could
+    /// commit a link for every pid and have a plain `worktrees new` write
+    /// through one. Measured against 0.42.0 with a 3000-pid window.
+    #[test]
+    fn fs_a_file_at_the_old_temp_name_is_neither_followed_nor_clobbered() {
+        use std::os::unix::fs::symlink;
+        let t = Tmp::new("planted");
+        let victim = t.0.join("victim");
+        fs::write(&victim, "precious\n").unwrap();
+        let old_tmp = |wt: &Path| wt.join(format!(".{ENV_FILE}.tmp-{}", std::process::id()));
+
+        let wt = t.wt("feat");
+        symlink(&victim, old_tmp(&wt)).unwrap();
+        t.run("feat", false).unwrap();
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "precious\n", "written through the planted link");
+        let env = wt.join(ENV_FILE);
+        assert!(fs::symlink_metadata(&env).unwrap().is_file(), ".worktree.env became the link");
+        assert!(fs::read_to_string(&env).unwrap().contains("WORKTREE_SLOT="));
+        assert!(fs::symlink_metadata(old_tmp(&wt)).unwrap().file_type().is_symlink(), "not ours to remove");
+
+        let other = t.wt("other");
+        fs::write(old_tmp(&other), "mine\n").unwrap();
+        t.run("other", false).unwrap();
+        assert_eq!(fs::read_to_string(old_tmp(&other)).unwrap(), "mine\n");
+        assert!(fs::read_to_string(other.join(ENV_FILE)).unwrap().contains("WORKTREE_SLOT="));
     }
 }
