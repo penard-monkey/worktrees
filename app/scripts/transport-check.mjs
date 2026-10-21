@@ -39,7 +39,10 @@
 //      the engine's state (starting → up → waiting → up, `gen` counting
 //      connections), a failed dial or a refused handshake retried in the
 //      shim's own words, a hidden window deferring, someone else's serve never
-//      restarted, and the crash-loop limit stopping the retries. And the termreplay contract through the whole chain:
+//      restarted, and the crash-loop limit stopping the retries. A command's
+//      own refusal (term_open for a session that died while the engine was
+//      down) is the caller's error, never a lost engine: no retry, no dial.
+//      And the termreplay contract through the whole chain:
 //      TerminalPane's `useTerm` + `shellTransport` → ipc.ts → ipcws.ts → the
 //      fake socket. A replay is a channel's first frame and stays unanswered;
 //      a live query after it is answered.
@@ -1030,6 +1033,30 @@ async function loadIpc() {
   h2?.event("places:changed", 2);
   h2?.event("sessions:busy", 3);
   check(same(heard.slice(1), [["a", 2], ["b", 3]]), `a listener from before the reconnect hears the NEW socket's events, beside one added after (${JSON.stringify(heard)})`);
+
+  // The reconnect remounts the panes, and a tmux session that died while the
+  // engine was down is refused by term_open with an {id, err}. That is the
+  // pane's error, not the engine's: no retry, no dial (so no start), and the
+  // socket stays up for every other pane.
+  {
+    const chans = h2?.openChannels();
+    const opened = settle(ipc.invoke("term_open", { session: "wt-gone", cols: 80, rows: 24, onBytes: new ipc.Channel() }));
+    await tick();
+    const r = h2?.requests().find((q) => q[K.cmd] === "term_open");
+    check(h2?.openChannels() === chans + 1, `a remounted pane's term_open goes out on the new socket, naming its channel (${h2?.openChannels()} open)`);
+    h2?.error(r?.[K.id], "no tmux session named wt-gone");
+    const res = await opened;
+    await ticks();
+    check(res.err === "no tmux session named wt-gone", `term_open's refusal reaches the pane in serve's words (${JSON.stringify(res)})`);
+    check(st().kind === "up" && st().gen === 2 && dials.length === 2 && dclk.pending() === 0 && !h2?.sock.closed,
+      `…and is not an engine failure: still up at gen 2, no dial, no retry timer, the socket open (${JSON.stringify(st())}; ${dials.length} dials, ${dclk.pending()} timers)`);
+    const next = settle(ipc.invoke("list_workspace"));
+    await tick();
+    const r2 = h2?.requests().filter((q) => q[K.cmd] === "list_workspace").at(-1);
+    h2?.reply(r2?.[K.id], { projects: [] });
+    check(same((await next).ok, { projects: [] }) && h2?.openChannels() === chans,
+      `the same socket answers the next call, and the refused attach's channel is let go (${h2?.openChannels()} open, ${chans} before)`);
+  }
 
   // Two Reconnect presses are one dial, at once, cancelling the timer.
   h2?.drop(); await tick();
