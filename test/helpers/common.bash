@@ -239,6 +239,15 @@ case "$sub" in
     [ -n "$last" ] && echo "cmd1=${positional[0]:-}" >> "$TMUX_STATE/$last" ;;
   select-pane|attach|attach-session|switch-client) : ;;
   kill-session)  rm -f "$TMUX_STATE/$target" 2>/dev/null; : ;;
+  rename-session)
+    # Refused, as tmux refuses it, when the session is missing or the new
+    # name is taken. A session's .cmd/.screen fixtures move with it.
+    new="${positional[0]:-}"
+    { [ -n "$new" ] && [ -f "$TMUX_STATE/$target" ] && [ ! -f "$TMUX_STATE/$new" ]; } || exit 1
+    mv "$TMUX_STATE/$target" "$TMUX_STATE/$new"
+    for x in cmd screen; do
+      [ ! -f "$TMUX_STATE/$target.$x" ] || mv "$TMUX_STATE/$target.$x" "$TMUX_STATE/$new.$x"
+    done ;;
   display-message)
     # The codex pane sample (activity::codex_panes): one chained call per
     # target, `@@ 0 @@`, the pane's command, then its screen. One target only.

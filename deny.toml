@@ -1,0 +1,99 @@
+# cargo-deny: what the dependency graph may contain. CI runs every section
+# (`deny` in ci.yml); locally, `cargo deny check` from the repo root.
+#
+# The graph is the WHOLE workspace on the four release targets: the CLI that
+# ships on PATH, the engine it hosts as `worktrees serve`, and the Tauri app,
+# whose tree is most of the 500-odd crates. Server Edition Phase 2 (§4.2) put this here
+# because the network-facing binary is about to carry a TLS stack.
+
+[graph]
+# The four targets release.yml builds, so a Linux-only crate (zbus, gtk) is
+# judged from a macOS run and the other way round, and a crate that only a
+# target we never build pulls in (Windows, Android) is not in the graph.
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+]
+all-features = false
+
+[advisories]
+# The RustSec database. A VULNERABILITY is never listed here: it is fixed, or
+# it keeps this check red until it is (ci.yml runs advisories as its own leg,
+# visibly, so a new advisory does not hold up an unrelated PR).
+#
+# Each entry below is an UNMAINTAINED notice for a crate upstream of tauri,
+# gtk or zbus, with no maintained replacement we control: none is a direct
+# dependency of a workspace crate, and all of them are in the app's tree only
+# (none reaches worktrees-cli, -core or -api). Revisit at the next tauri bump,
+# and drop any entry whose crate has left the graph (cargo-deny warns on an
+# ignore that matches nothing).
+#
+# Not listed because not in the graph: the zip advisories (RUSTSEC-2026-0367,
+# -0368, -0369, via tauri-plugin-updater) and webpki-root-certs'
+# (RUSTSEC-2026-0383, via rustls-platform-verifier) fire only for targets we
+# do not build, so the four-target graph above excludes them. They reappear
+# here the day a target that pulls them in is added.
+ignore = [
+    { id = "RUSTSEC-2024-0370", reason = "proc-macro-error: via glib-macros (gtk, Linux); upstream of tauri/gtk, revisit at the next tauri bump" },
+    { id = "RUSTSEC-2025-0075", reason = "unic-char-range: via tauri-utils -> urlpattern; upstream of tauri, revisit at the next tauri bump" },
+    { id = "RUSTSEC-2025-0080", reason = "unic-common: via tauri-utils -> urlpattern; upstream of tauri, revisit at the next tauri bump" },
+    { id = "RUSTSEC-2025-0081", reason = "unic-char-property: via tauri-utils -> urlpattern; upstream of tauri, revisit at the next tauri bump" },
+    { id = "RUSTSEC-2025-0098", reason = "unic-ucd-version: via tauri-utils -> urlpattern; upstream of tauri, revisit at the next tauri bump" },
+    { id = "RUSTSEC-2025-0100", reason = "unic-ucd-ident: via tauri-utils -> urlpattern; upstream of tauri, revisit at the next tauri bump" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant: via tauri-plugin-opener -> zbus (Linux); upstream of tauri/zbus, revisit at the next tauri bump" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names: via tauri-plugin-opener -> zbus (Linux); upstream of tauri/zbus, revisit at the next tauri bump" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: via tauri-plugin-opener -> zbus (Linux); upstream of tauri/zbus, revisit at the next tauri bump" },
+]
+# The default ("all") on purpose: an unmaintained crate deep in tauri's tree is
+# still in the binary, so it is named above rather than scoped away here.
+unmaintained = "all"
+yanked = "deny"
+
+[licenses]
+# The project is MIT, and ships binaries (the CLI, the app bundles, the .deb).
+# Allowed: the licenses the current graph NEEDS, each one permissive or
+# file-scoped. A crate that adds a new license fails here until someone reads
+# it and adds it, with a reason.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception", # rustix, linux-raw-sys, wasi, wit-bindgen, target-lexicon
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",                     # the ICU4X crates (url's IDNA path)
+    # File-scoped copyleft: obligations attach to the MPL files themselves, which
+    # we ship unmodified from crates.io. cssparser, selectors, dtoa-short (via
+    # tauri's HTML handling) and option-ext (dirs).
+    "MPL-2.0",
+]
+confidence-threshold = 0.93
+
+# The app crate has no `license` field; it is this repository's, under its
+# LICENSE (MIT), like the three crates that inherit `license.workspace`.
+[[licenses.clarify]]
+crate = "app"
+expression = "MIT"
+license-files = []
+
+[bans]
+# tauri's tree carries several majors of windows-sys, bitflags, syn and the
+# like; none of them is ours to unify, so duplicates are reported, not fatal.
+multiple-versions = "warn"
+# Not denied: what this flags today is the workspace's own path dependencies
+# (`worktrees-core = { workspace = true }`), and `allow-wildcard-paths` exempts
+# only crates marked `publish = false`, which none of ours is. A `*` from
+# crates.io could not float anyway: Cargo.lock is committed and CI and
+# release.yml build `--locked`.
+wildcards = "allow"
+
+[sources]
+# crates.io only. A git dependency or another registry is a supply-chain
+# decision, made here by name, not picked up from a Cargo.toml in passing.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

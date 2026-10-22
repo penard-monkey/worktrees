@@ -5,7 +5,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::config::resolve_prefix_from;
+use crate::config::{legacy_prefix_from, resolve_prefix_from};
 use crate::error::{Result, WtError};
 use crate::model::{LsJson, Place, PlaceRef, Stray, TmuxSession, SCHEMA_VERSION};
 use crate::projcfg;
@@ -67,7 +67,10 @@ impl Project {
         let main_root = canon(PathBuf::from(&git_common).join(".."))
             .ok_or_else(|| WtError::new("cannot resolve main checkout"))?;
         let wt_root = format!("{main_root}/.worktrees");
-        let prefix = resolve_prefix(&main_root);
+        let (prefix, legacy) = resolve_prefix(&main_root);
+        if let Some(old) = legacy {
+            rename_legacy_sessions(&main_root, &old, &prefix);
+        }
         Ok(Project { main_root, git_common, wt_root, prefix, clock: SysClock::detect() })
     }
 
@@ -655,8 +658,10 @@ impl Project {
 }
 
 /// Live prefix resolution — the impure half of `config::resolve_prefix_from`,
-/// which owns the order and the sanitization.
-fn resolve_prefix(main_root: &str) -> String {
+/// which owns the order and the sanitization. Second: the prefix an older
+/// binary made of the same inputs, when gap 8 changed it
+/// (`config::legacy_prefix_from`).
+fn resolve_prefix(main_root: &str) -> (String, Option<String>) {
     let env = std::env::var("WORKTREES_PREFIX").ok();
     let file = prefix_file(main_root);
     let project = projcfg::project_prefix(Path::new(main_root));
@@ -664,13 +669,53 @@ fn resolve_prefix(main_root: &str) -> String {
     // tier of the user rung too, and reading only the legacy kv file here was
     // why `prefix` in `config.toml` silently did nothing.
     let cfg = crate::config::user_cfg("prefix");
-    resolve_prefix_from(
-        env.as_deref(),
-        file.as_deref(),
-        project.as_deref(),
-        cfg.as_deref(),
-        &basename(main_root),
-    )
+    let fallback = basename(main_root);
+    let (e, f, p, c) = (env.as_deref(), file.as_deref(), project.as_deref(), cfg.as_deref());
+    (resolve_prefix_from(e, f, p, c, &fallback), legacy_prefix_from(e, f, p, c, &fallback))
+}
+
+/// Gap 8's other half: a session an older binary named `<old>-<slug>` is
+/// renamed to `<prefix>-<slug>`, once per process per repo, the first time the
+/// repo is discovered. Only a prefix the change touched gets here (it began
+/// with `-`, or with a character the allow-list maps to one, as `.dotfiles`
+/// does), so every other repo pays nothing, not even the `list-sessions`.
+///
+/// Renamed rather than left to adoption by pane cwd (`ops::live_session`),
+/// which would find the place's own session but not its provider sidecars:
+/// codex, pi and kimi activity look those up by the CANONICAL name. A pane
+/// attached to the session stays attached (tmux attaches the session, not the
+/// name), and a claude in it keeps the `--name` it was launched with, which
+/// is what claude's messaging addresses and what `place_status` reports.
+///
+/// Once per process because the app's poll discovers every project every few
+/// seconds. A session an older binary still running makes AFTER the sweep is
+/// adopted by pane cwd, and swept by the next process that discovers the repo.
+fn rename_legacy_sessions(main_root: &str, legacy: &str, prefix: &str) {
+    static SWEPT: std::sync::Mutex<std::collections::BTreeSet<String>> =
+        std::sync::Mutex::new(std::collections::BTreeSet::new());
+    if !SWEPT.lock().map(|mut s| s.insert(main_root.to_string())).unwrap_or(false) {
+        return;
+    }
+    for (old, new) in legacy_renames(legacy, prefix, &tmux::session_names()) {
+        tmux::rename_session(&old, &new);
+    }
+}
+
+/// Which of the `live` sessions to rename, as `(old, new)`: every one named
+/// `<legacy>-…`, given `<prefix>-…`, unless that name is taken. PURE.
+///
+/// The match is on the whole `<legacy>-` head, so a prefix that merely begins
+/// with this one's letters (`-dotty` beside `-dot`) is not this repo's. A
+/// taken name is left alone: two sessions cannot share one, and the old one is
+/// still found by pane cwd.
+fn legacy_renames(legacy: &str, prefix: &str, live: &[String]) -> Vec<(String, String)> {
+    let head = format!("{legacy}-");
+    live.iter()
+        .filter_map(|old| {
+            let new = format!("{prefix}-{}", old.strip_prefix(&head)?);
+            (!live.contains(&new)).then(|| (old.clone(), new))
+        })
+        .collect()
 }
 
 /// First line of `<main_root>/.worktree-prefix`, whitespace stripped; a file
@@ -829,5 +874,26 @@ worktree /w/repo-design-skills\nHEAD ddd\ndetached\n";
         assert_eq!(strays_from(&l, "/w/repo", "/w/repo/.worktrees/").len(), 2);
         // nothing registered beyond main + places → empty, never a phantom
         assert!(strays_from(&l[..2], "/w/repo", "/w/repo/.worktrees").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod prefix_tests {
+    use super::*;
+
+    /// Gap 8: a session an older binary named under the `-`-led prefix is given
+    /// the name the current one renders, sidecars and `(main)` included, and
+    /// nothing else is touched: not a session outside `<old>-`, not one whose
+    /// new name is already taken (adoption by pane cwd still finds it).
+    #[test]
+    fn sessions_under_the_old_prefix_are_planned_onto_the_new_one() {
+        let live: Vec<String> = ["-dot-main", "-dot-(main)", "-dot-feat~agent~codex", "-dot-x", "_dot-x", "-dotty-y", "-dot", "work"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let got = legacy_renames("-dot", "_dot", &live);
+        let want = [("-dot-main", "_dot-main"), ("-dot-(main)", "_dot-(main)"), ("-dot-feat~agent~codex", "_dot-feat~agent~codex")];
+        assert_eq!(got, want.map(|(a, b)| (a.to_string(), b.to_string())).to_vec());
+        assert!(legacy_renames("-dot", "_dot", &[]).is_empty());
     }
 }
