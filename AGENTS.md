@@ -65,7 +65,10 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   memory, descriptors or a client already in. A missing `Origin` is refused
   there and allowed by `docserver::origin_ok` ON PURPOSE (different pages,
   different questions —
-  do not align them). The 150 commands sit in ONE macro table
+  do not align them). hyper parses the HTTP and tungstenite sees only frames,
+  also ON PURPOSE: tungstenite's `accept_hdr_async` WRITES an HTTP error
+  response when it refuses, while a hyper service that returns `Err` closes
+  with 0 bytes. The 150 commands sit in ONE macro table
   (`serve/dispatch.rs`) with an `Exposure` each; the six `ClientLocal` rows
   (clipboard, editor, terminal, zoom, the app bundle) are refused with
   `err: "client-local"`, never run on the host — the docs viewer is an
@@ -84,7 +87,14 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   rewritten per launch) is how a client finds the port and the token; the log
   is `~/.cache/worktrees/serve.log`, 0600 as well (re-tightened on every
   write, and after its rotation, which is a `rename` and keeps the mode it
-  found), version on the first line.
+  found), version on the first line. serve installs its signal handlers
+  BEFORE it writes serve.json: a supervisor's SIGTERM in that gap killed it
+  with no exit status. Anything consumed by being emitted (the inbox's
+  `worktrees show`) waits for `Host::has_audience()` — and the app's own
+  verification probe authenticates, so that reads true for a few ms at every
+  launch (ROADMAP). There is no CLI client: a per-command log line
+  (`mcp_status`) appears only once a client calls the command, so probing
+  serve by hand needs a handshake-v1 client — copy `serve_bin.rs::connect`.
   `app/scripts/server-stack.sh` runs an isolated one for the frontend lane.
 
 - **The frontend has ONE door to the backend: `app/src/ipc.ts`** (`invoke`,
@@ -100,7 +110,13 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   v1 (OWASP H1) has each side prove it holds it with an HMAC over the other's
   nonce, and the client sends NOTHING else — no request, and no belief in the
   version — until serve's proof passes `crypto.subtle.verify`, because whoever
-  holds serve.json's port after a crash need not be serve. `crypto.subtle` is
+  holds serve.json's port after a crash need not be serve. Frames that arrive
+  during verification are held and handed on SYNCHRONOUSLY as the proof
+  passes, so a listener added after `await ready` misses them — a held
+  `app:open-doc` rides right behind `ok`: wire listeners before the proof. A
+  parked event reaches React on a macrotask (`setTimeout(0)`), because
+  StrictMode's throwaway listener has a microtask cleanup that a microtask
+  hand-off reaches first. `crypto.subtle` is
   there on `tauri://localhost` (a secure context) and a `ws://127.0.0.1` socket
   from it is not blocked as mixed content — measured on macOS 27.0 in a
   standalone WKWebView registered the way wry 0.55 does, NOT in the shipped
@@ -117,7 +133,10 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   second copy of the rule in Rust. **Three starts inside a minute is a crash
   loop by that rule, whatever killed them** — a drive that `kill -9`s serve
   three times in 53 s gets a stopped banner, not a fourth serve; space
-  manual checks a minute apart. Plugins (opener, dialog, updater,
+  manual checks a minute apart. And keep the window VISIBLE while you drive
+  it: fully covered, WKWebView reports `hidden` and the retrier defers by
+  design, which looks exactly like a missed loss (check CGWindowList before
+  calling it a bug). Plugins (opener, dialog, updater,
   process, `api/window`) stay direct imports on purpose: they act on the
   window's machine, and routing them through a socket is the reason the
   plan's WS-backed `__TAURI_INTERNALS__` was not used (`.planning` of
@@ -140,7 +159,7 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
 **Adding a harness? Walk `docs/adding-a-harness.md` first, and tick it only
 by SEEING each surface work.** pi shipped in v0.33.0 with a correct core —
 MCP `place_status` said `busy` — and no nav dot at all: the app builds its dots
-in its own poll (`lib.rs`: `claude_activity` + `codex_tick` → `merge_activity`
+in its own poll (`lib.rs` then, `worktrees_api::watch` now: `claude_activity` + `codex_tick` → `merge_activity`
 → `sessions:busy`/`sessions:done`) and pi was never added to it. Three reviews
 passed it because every check exercised the core and none looked at what the
 running app draws. "Core reports it" is not "the user sees it"; the checklist
@@ -241,6 +260,25 @@ and wrong for the HEADER. Nothing complains — the file renders, the rebase exi
 0, and the second header is below where the eye stops. `grep -c '^### Fixed'`
 between the `[Unreleased]` and the release under it, every time, the same way
 the duplicate `## [Unreleased]` hazard in ROADMAP has to be checked by counting.
+The same trap in code: **"keep both" on two blocks that each APPEND at the end
+of a container drops a closing brace.** Both sides added tests at the end of
+`mod tests`, git hoisted their shared `    }` out of both, and the union
+failed with "unclosed delimiter" — in two lanes, on one merge pair (#508 ×
+#523). Put the hoisted line back between the sides.
+
+**A clean merge is not a compiling one.** Merging #522 into the stack that
+held #513 reported no conflict and failed with E0433: #513 had dropped a
+`Command` import that a test #522 added still used. Run `cargo check
+--workspace --all-targets` straight after any cross-branch merge; plain `cargo
+check` skips test code. When the branch MOVED code (#508), main's fix to the
+old file conflicts in a file that no longer holds it: `checkout --ours` only
+once `git diff <base> origin/main -- <file>` shows the fix is main's whole
+delta there, then port it and its tests by hand. A path-keyed allowlist
+(`OWN_TEMP_NAMES`) going red on exactly the moved rows is the proof the port
+took. And **`git merge … -F -`
+does not read stdin**: it fails (rc 129), no merge happens, and every check
+after it examines the old HEAD. Use `git merge --no-ff --no-commit <rev>`,
+then `git commit -S -F -`.
 
 **A stale release binary does not only make bats FAIL — it can make it PASS.**
 The note above says "fail mysteriously", which is the friendlier half. Edit a
@@ -251,7 +289,11 @@ neither notices it predates the change. Rebuild, then confirm before believing a
 result: `[ target/release/worktrees -nt crates/worktrees-core/src/store.rs ]`.
 (The app bundle's CLI sidecar no longer touches that file: tauri's
 `externalBin`, which it briefly used, made tauri-build copy the staged CLI ONTO
-`target/release/worktrees` with a fresh mtime — see Release, step 4.)
+`target/release/worktrees` with a fresh mtime — see Release, step 4.) Its
+cousin: a before/after pair built from COPIED sources whose mtimes predate the
+existing outputs rebuilds nothing, and a Docker "after" binary came out
+byte-identical to "before". `cmp` the two binaries before believing the
+comparison.
 
 **Report cargo with a grep, not a tail.** `cargo test -p worktrees-core | tail -4`
 prints `running 0 tests / ok. 0 passed` — that is the **Doc-tests** block, and
@@ -296,7 +338,11 @@ the run reads green whatever bats said. Redirect, then check both halves:
 grep traps above, and the reason to run gates with `make -C <repo-root>`: the
 Bash tool's cwd persists between calls, so an earlier `cd app` turns a later
 `make test` into "No rule to make target `test`" — a failure that looks like the
-change broke the build.
+change broke the build. And count against the tool's REAL output: a gate
+summary that counted `^FAIL` read `fail=0` on a red transport-check, which
+prints `not ok`; only the exit code caught it. `make test-frontend` stops at
+the first failing check, so run the `*-check.mjs` in a loop that does not,
+or the first failure hides the rest.
 
 **Two `gh` commands lie about CI, in opposite directions.**
 `gh pr checks <n> --watch` run in the gap between a push and the run
@@ -324,6 +370,14 @@ queue that never started. #310 sat like that until a rebase, then its run
 appeared within seconds. Check `gh pr view <n> --json mergeStateStatus` (DIRTY)
 before debugging the workflow. Note `mergeStateStatus` also reads `UNKNOWN` for
 a few seconds after any push while GitHub recomputes it.
+
+**A GitHub-native PR stack loses its linear history the moment main moves.**
+After #522/#523 merged, the Server Edition stack's bottom (#508) went DIRTY and
+every PR above it sat at `unknown` with no CI at all; close/reopen did
+nothing, and changing a base is refused ("part of a stack"). Merge main into
+the BOTTOM branch, then each branch into the one above it, all the way up, so
+every branch contains the tip below it again. Land the finished stack in one
+go, by squash: one commit per PR and no intermediate main that fails.
 
 **Run `app/scripts/*-check.mjs` from the REPO ROOT, as CI does.** From `app/`
 at least one (`plan-usage-check.mjs`) fails even on `main`, for a reason that
@@ -401,7 +455,11 @@ broken for a whole branch, and since it runs only on `v*` tags the first
 exercise would have been a release. `gh run list --commit <sha>` shows the runs
 `gh pr checks` does not. The twin trap: that same paste was meant to REPLACE a
 step and instead duplicated it, leaving an assertion for a binary the branch
-deleted, so valid YAML would only have moved the failure later.
+deleted, so valid YAML would only have moved the failure later. A third way to
+a green run that ran nothing: **`echo "k=$(cmd)" >> "$GITHUB_OUTPUT"` throws
+away `cmd`'s exit status.** A failing `jq` in the plan job emitted empty
+matrices, which is zero jobs and a pass; it was found only because a Docker
+image had no jq. Assign first (`v=$(cmd)`), then echo.
 
 **A process-global `static` makes unit tests order-dependent, and the suite
 hides it.** `viewer::ISSUED` is per-launch by design, so a test asserting an
@@ -426,7 +484,15 @@ for and whether production ever does it.
 the real emitter drifted from the strip rule, green throughout. Slice off `mod
 tests` (its `format!`s are fixtures) and fail when more than one line claims to
 be the emitter, rather than guessing. Same family as the mirror-drift rule
-below: a guard that cannot be wrong is a guard that cannot fail.
+below: a guard that cannot be wrong is a guard that cannot fail. And **cutting
+a Rust file at its FIRST `#[cfg(test)]` is not slicing off `mod tests`**: a
+test-only `#[cfg(test)] static TEST_PANIC` above dispatch.rs's table moved the
+cut, and three checks read an empty table (transport-check went red on the
+merge, the lucky outcome). Cut at the `#[cfg(test)]` that heads `mod tests`
+(`\n#[cfg(test)]\s*\nmod tests\b`), or drop gated items one at a time as fsx's
+`live_lines` does. Neither sees a test module declared from ANOTHER file
+(`#[cfg(test)] mod tests;`), which is why `serve/tests.rs` carries its own
+allowlist row (ROADMAP).
 
 **`symlink_metadata` refuses to follow only the LAST component.** Every
 intermediate directory in the path is resolved exactly as `metadata` would
@@ -448,6 +514,10 @@ absent — and passed, because nothing had put a `brief.md` in it. It was shown 
 fail first, against the right code, for the wrong reason. Sibling of the
 "recovery test that hand-clears the blocker" note below: when a test reaches its
 assertion, ask what is NOT in the fixture as well as what was poked into it.
+Its twin: **a fixture written THROUGH the code under test can do the very step
+the test must prove.** D7's fixture went through `write_scrollback`, which
+records the file as seen, so the read-on-spawn path the test was about never
+ran. Write fixtures raw.
 
 **A temp file beside its target has a name a cloned repo can commit.** Every
 "atomic write" here was `fs::write(<fixed or pid-named tmp>)` + `rename`, and
@@ -492,6 +562,16 @@ level down: `answer_with` takes the clock, the test scripts the stamps, and a
 `termresize-check.mjs`'s virtual clock — any test with a `sleep` on both sides
 of a race wants the same treatment.
 
+**To reproduce a macOS CI timing flake, starve the TEST, not the CPU.** `yes`
+hogs did nothing in 400 runs (macOS demotes them); the test binary under
+`taskpolicy -b` reproduced #522's kimi SIGTERM failure 17 times in 400, and a
+`touch` shim on PATH sleeping 2.5 s made it deterministic. Read the CI log
+first: libtest runs tests in sorted order, so the previous test's finish to
+`FAILED` is how long the failing one ran — about the bound (2.07 s against a
+2 s grace) means a timeout expired, about zero means a signal was lost. Run a
+stress loop OUTSIDE the gate slot, one line per run, under a time cap: one
+inside it held the slot ~82 min through a machine sleep, printing nothing.
+
 **A new test must be shown to FAIL first.** ROADMAP's zombie-children item
 records a regression test that passed identically with and without its fix.
 Break the thing under test (drop the `skip_serializing_if`, restore the old
@@ -500,7 +580,10 @@ confirmed this way. **Restore by editing back, never `mv file.bak file`**: `mv` 
 backup's OLDER mtime, cargo sees an artifact newer than the source and keeps
 the mutated build, and the "restored" run stays red — or, the other way
 round, a mutation copied in with `cp -p` reads green. `touch` the file after
-any restore before believing the next run.
+any restore before believing the next run. A mutation can also HANG a test
+instead of failing it: serve's M11 (a second serve never refused) left a test
+waiting on `.output()` forever. Bound every wait on a child: spawn, poll,
+kill.
 
 **A message's REMEDY is a claim, and it needs following, not proofreading.**
 B3 refused a declared symlink source with "link the real file, or point the
@@ -608,6 +691,17 @@ is one: a sweep for every place a harness is named found nothing in it,
 `USER_ONLY_KEYS` included. Sweep with `grep -a`. Its zsh twin: `path` is tied to
 `PATH`, so `for path in …` in a probe loop empties `PATH`, and every command
 after it is "command not found" — which reads as a sandbox refusing curl.
+
+**More zsh: a probe written for bash fails quietly in it,** and the Server
+Edition lanes hit these in nearly every place. `$VAR:x` is a history
+modifier: `git show $M:crates/a.rs` asked for `origin/mainrates/a.rs` (`:c`),
+and this close-out's own `$r:app/…` turned into an absolute path (`:a`) —
+write `${M}:path`. `for x in $list` and `kill $kids` do NOT word-split, which
+orphaned a stress run's `yes` hogs: use `${=list}` or `(${(f)"$(…)"})`. A word
+that starts with `=` is a command lookup, so `echo =====` dies "= not found",
+and so does an unquoted tmux target `=name:`. `wait` returns 127 for a job
+started inside `$(…)`. macOS has no `timeout`, and its `ps` has no `etimes`: a
+wait loop on it never ended and a sandbox app ran for two hours.
 
 ## Tauri app — hard-won rules
 
@@ -1014,7 +1108,11 @@ after it is "command not found" — which reads as a sandbox refusing curl.
   width) rather than search a window, or it eats a boundary that had a session's
   work under it. And the ring is flushed on a 15s tick + at exit but NOT on
   `shell_detach`: a tab flip is not worth a 256K write, and detach runs under the
-  registry lock, which may never wait on a file lock.
+  registry lock, which may never wait on a file lock. Those UNASKED saves
+  write only over what this engine last wrote or read (a content hash), since
+  an orphaned serve's tick overwrote a downgraded app's ring (rehearsal D7) —
+  and the guard is in the save FUNCTIONS, because the exit flush went around a
+  tick-only one. A write guard belongs in the writer, not its busiest caller.
 - **`HISTFILE` in the environment does nothing to zsh on macOS.** `/etc/zshrc:16`
   sets `HISTFILE=${ZDOTDIR:-$HOME}/.zsh_history` UNCONDITIONALLY for every
   interactive shell — export it, ask, and you get `~/.zsh_history` back. Same
@@ -1054,6 +1152,12 @@ after it is "command not found" — which reads as a sandbox refusing curl.
   impl is an unconditional `Some(self.id())`, and `list_shell_sessions` reaps on
   every dock mount — so anything sampling by pid needs a `try_wait` liveness
   check first, or it eventually reads a stranger's process).
+- **`kill(pid, 0)` is a weak liveness check, twice over.** It SUCCEEDS on a
+  zombie, so a test waiting for an orphaned grandchild to die waits on init —
+  late, or never in a container with none (Linux CI); read `ps -o stat=` for
+  `Z`. And a pid outside `pid_t`, cast, goes NEGATIVE and probes a process
+  GROUP: refuse it rather than cast (containers here had `pid_max` 99999, not
+  the 4194304 a comment had guessed).
 - **A Rust panic that never happened is an ObjC exception.** `panic in a
   function that cannot unwind` with **no** panic line before it is not our bug:
   the app's hook logs every real panic, so the missing line IS the evidence. An
@@ -1139,15 +1243,31 @@ after it is "command not found" — which reads as a sandbox refusing curl.
   rejects `/Users/x/repo/.worktrees/tree/f.ts`, which is every path this app
   exists to open. `plugins.opener.requireLiteralLeadingDot: false` in
   tauri.conf.json is what makes the scope mean what it reads as.
-- App log: `~/Library/Logs/net.casadelvalle.worktrees/app.log`. Since the app
-  became serve's client it holds the SHIM's lines only — startup, `engine:`
-  (find, start, adopt, replace, quit), the window. The engine's work and the
-  page's `log_event` lines go to serve's log, `~/.cache/worktrees/serve.log`
-  (one file for every serve; `grep '\[<pid>\]'`), and Settings → Logs shows
-  that one. Persisted UI settings: `ui-state.json` in the app config dir — written
+- **Logs: two files, one per process.** The app SHIM writes `app.log`: macOS
+  `~/Library/Logs/<identifier>/app.log`, Linux
+  `~/.local/share/<identifier>/logs/app.log` (HOME-relative; `XDG_DATA_HOME`
+  is not read, ROADMAP). It holds the shim's lines only: its `startup` line,
+  `engine:` (find, start, adopt, replace, quit), the window, and the shim's own
+  `[panic]`s. The ENGINE is serve, and every serve on the machine (the app's,
+  one started from the CLI, a sandbox's) writes `~/.cache/worktrees/serve.log`,
+  a version line at each start; `grep '\[<pid>\]'` for one of them. That file
+  has every command's work, the poll, the page's `log_event` lines (tagged
+  `ui:`) and the engine's panics, and it is the one Settings → Logs shows
+  (`log_info` reports whichever sink its process installed, and it runs in
+  serve). Persisted UI settings: `ui-state.json` in the app config dir — written
   WHOLE-BLOB by the frontend, so the backend must never write into it (its own
   update would be erased by the next settings save; that is why each dock shell
   tab's last directory lives in a separate backend-owned `shell-cwds.json`).
+- **Retiring a key from `ui-state.json` breaks a DOWNGRADE.** The blob is
+  saved whole, so a key the new build stops writing is erased on disk, and an
+  older build that still reads it falls back to its default. 0.43's first cut
+  did that to `codex_permissions` when host policy took it over: a downgrade
+  showed Auto-review, WIDER than the user's Ask, and wrote it back (rehearsal
+  D6). Leave a retired key in the blob; `loadSettings` carries unknown keys
+  already. Its twin: **a getter that returns the EFFECTIVE value is not a
+  record of what the host holds.** `get_codex_permissions` answers host > env
+  > config > default, so copying its answer anywhere a migration reads turns
+  env or config into host policy; copy only after a set the host ACCEPTED.
 - **A `place_panels` field whose global twin is a SEED must be optional.** Every
   key in that record also exists as a flat `Settings` key, and `panelsFor` uses
   the flat one as the seed for a place with no entry. `updatePanels` writes the
@@ -1258,7 +1378,13 @@ after it is "command not found" — which reads as a sandbox refusing curl.
   field `app_config_dir()` is `config_dir().join(…)` of, which is why the
   config dir already followed the override and the log did not. One line is
   still written under the default: the `startup v… PATH=…` line, emitted
-  before any app handle exists to ask.
+  before any app handle exists to ask. serve.log is NOT isolated at all: it is
+  `$HOME/.cache/worktrees/serve.log` for every serve, so a sandbox's serve
+  writes into yours, told apart only by its pid. And a faked HOME does not
+  isolate WebKit either: it keys storage on NSHomeDirectory, so a
+  HOME-isolated run still writes the REAL `~/Library/{Caches,WebKit}/
+  <identifier>`. Use a throwaway identifier and remove exactly those two dirs
+  afterwards.
 - **Give a sandbox drive its own tmux server, and mind the socket path.** The
   sandbox app and the serve it starts inherit `$TMUX`, so they talk to the
   user's real server unless it is unset. `env -u TMUX TMUX_TMPDIR=<dir>` on
@@ -1392,9 +1518,14 @@ after it is "command not found" — which reads as a sandbox refusing curl.
 
 1. CHANGELOG: move `[Unreleased]` into `## [x.y.z] - date` (release.yml uses
    the section as notes; the app shows it as "What's new" — it ships in the
-   binary via include_str!).
-2. Bump workspace `Cargo.toml` AND `install.sh`'s `SCRIPT_VERSION` → PR →
-   merge. (A piped installer cannot see its URL, so a tagged copy knows its
+   binary via include_str!). Read the section against the FINAL state, not
+   bullet by bullet: one assembled from a PR stack carries bullets written for
+   an intermediate PR, and v0.43.0's ipc.ts bullet said "nothing changes" for
+   the app that #524, in the same release, made serve's client.
+2. Bump workspace `Cargo.toml` AND `install.sh`'s `SCRIPT_VERSION`, then
+   `cargo update --workspace` for Cargo.lock → PR → merge. Never a bare
+   `cargo update`: it drags third-party upgrades into the release commit.
+   (A piped installer cannot see its URL, so a tagged copy knows its
    tag only by carrying it; `test/misc.bats`, `make release` and release.yml
    all refuse a mismatch.)
 3. `make release VERSION=x.y.z` → `git push origin main vx.y.z` (the tag runs
@@ -1442,8 +1573,8 @@ after it is "command not found" — which reads as a sandbox refusing curl.
    **Each app bundle carries the CLI for its own arch** — macOS
    `Contents/MacOS/worktrees`, Linux `usr/lib/worktrees/worktrees` (`/usr/lib/…`
    from a .deb, `$APPDIR/usr/lib/…` in an AppImage: both are
-   `resource_dir()/worktrees`) — a PRIVATE sidecar for the app (it will start
-   `worktrees serve`), never on PATH; install.sh is still how the CLI reaches
+   `resource_dir()/worktrees`) — a PRIVATE sidecar for the app (it starts
+   `worktrees serve` with it), never on PATH; install.sh is still how the CLI reaches
    PATH (ROADMAP, "Option A"). **Nor is it ever HANDED OUT**: running as
    serve, its `current_exe()` IS the bundle, and `profile::worktrees_bin()` —
    which every MCP entry (Claude, Codex, pi, kimi, a profile's), hook and pane
@@ -1454,6 +1585,11 @@ after it is "command not found" — which reads as a sandbox refusing curl.
    `usr/lib/<x>/`) and the lookup falls through to PATH, as the in-process app
    always did; a test reads tauri.conf.json's `files`, so a moved layout fails
    it. It is the path, not `APPDIR`, because serve starts with that scrubbed.
+   The sidecar lane had written this down as safe ("in the app,
+   `current_exe()` is `Contents/MacOS/app`"), which was true of the GUI
+   process one phase before serve ran the same core AS the sidecar: a note
+   about `current_exe()` describes a PROCESS, so re-check it whenever code
+   moves into another one.
    The copy gets there through tauri.conf.json's per-format `files` mappings
    (`bundle.macOS.files`, `linux.deb.files`, `linux.appimage.files`), NOT `externalBin`, which is wrong twice over:
    tauri-build copies it from the BUILD SCRIPT in every profile (a clean `cargo
@@ -1476,6 +1612,17 @@ after it is "command not found" — which reads as a sandbox refusing curl.
    the .app, uses the system's — release.yml asserts both.
 5. Users update from inside the app (Settings → Version: CLI + app buttons)
    or by re-running install.sh.
+
+**Rehearsing an in-app update takes one patched line.** The recipe that drove
+v0.42.0 → 0.43.0 → 0.43.1 through the real updater is in
+`docs/sessions/2026-10-21-server-edition/rehearsal-report.md`. Updater
+`endpoints` in `--config` do NOT make "Update app" appear: its "latest" is
+`latest_release_tag()`'s hardcoded github.com curl, so point that line at a
+local server and set every proxy variable to a dead `127.0.0.1:9` as proof
+nothing else left the machine. An in-app relaunch (`relaunch()`, an updater
+install) spawns `Contents/MacOS/<exe>` DIRECTLY, not via LaunchServices, so an
+isolated environment survives it. Use a throwaway identifier and HOME (WebKit
+still escapes HOME, see `sandbox.sh` above), and stop everything by pid.
 
 ## Local installs
 
