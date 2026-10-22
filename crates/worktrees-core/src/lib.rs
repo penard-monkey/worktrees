@@ -42,6 +42,7 @@ pub mod mention;
 pub mod messages;
 pub mod model;
 pub mod ops;
+pub mod pathclass;
 pub mod pi;
 pub mod pimcp;
 pub mod pimodels;

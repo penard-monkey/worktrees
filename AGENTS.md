@@ -503,10 +503,11 @@ entry as it descends is safe; a check that lstats a path built from a CONSTANT
 in `docs.rs` — the walker refused the link, the by-name read went through it,
 and the half that leaked was the half that always listed. The tell is that a
 partial guard looks like a working one: the rows the walker refused are missing,
-exactly as they would be if it all worked. `resolve_rel` and every
-`root.join(rel)` under `[docs]` still have this (ROADMAP); the fix shape is
-`docserver::safe_under`'s — canonicalise and require the result under the
-canonical root.
+exactly as they would be if it all worked. `[docs]` paths had the same hole
+through `resolve_rel` and `root.join(rel)`. `docs::passes_through` closed it:
+it lstats every intermediate component and lets a link through only when its
+target canonicalises back under the place root (`safe_under`'s rule), so a
+monorepo's inside link keeps its tree.
 
 **A test can pass because its FIXTURE omits the thing.** The regression test for
 that symlink wrote a directory behind the link and asserted the plan rows were

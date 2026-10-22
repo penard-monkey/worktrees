@@ -19,7 +19,7 @@ use serde::Serialize;
 use worktrees_core::{git, harness, provider, store, sysclock, tmux, Project};
 
 use crate::log::log as applog;
-use crate::projects::read_projects;
+use crate::projects::{project_roots, read_projects};
 use crate::watch::Watch;
 use crate::Ctx;
 
@@ -350,6 +350,7 @@ pub fn create_project(ctx: &Ctx, location: String, name: String) -> Result<Works
         ));
     }
     let target = base.join(name);
+    crate::projects::forbid_new_path(&project_roots(ctx), &target)?;
     if target.exists() {
         return Err(if target.join(".git").exists() {
             format!(
@@ -476,6 +477,7 @@ pub fn clone_project(
     let src = wclone::parse_source(&url).map_err(invalid)?;
     let folder = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).unwrap_or_else(|| src.name.clone());
     let target = wclone::plan_target(&parent, &folder)?;
+    crate::projects::forbid_new_path(&project_roots(ctx), &target).map_err(invalid)?;
     // Never the raw URL: `https://user:TOKEN@host/…` is a legal thing to paste.
     let shown = wclone::redact_url(&src.url);
     applog("info", &format!("clone_project start {shown} -> {}", target.display()));
@@ -536,6 +538,7 @@ pub fn init_repo(ctx: &Ctx, dir: String) -> Result<Workspace, String> {
     if !Path::new(&dir).is_dir() {
         return Err(format!("{dir} is not a directory"));
     }
+    crate::projects::forbid_new_path(&project_roots(ctx), Path::new(&dir))?;
     if !git::git_ok(&dir, &["rev-parse", "--is-inside-work-tree"]) {
         git::git_status_captured(&dir, &["init"]).map_err(|e| {
             applog("error", &format!("git init failed in {dir}: {e}"));

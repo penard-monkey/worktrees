@@ -69,3 +69,102 @@ pub fn project_roots(ctx: &Ctx) -> Vec<PathBuf> {
 pub fn under_roots(roots: &[PathBuf], canon: &Path) -> bool {
     roots.iter().any(|r| canon == r || canon.starts_with(r))
 }
+
+/// Refuse a write that NO caller may make, the desktop included: a path of
+/// class `Forbidden` (`worktrees_core::pathclass`, proposal §7.1). `canon` is
+/// what `guard_under_projects` returned, so a `notes.md -> .git/config` link
+/// is judged by what it writes; `shown` is what the caller asked for.
+///
+/// "Under some root" (`guard_under_projects`) was the whole write rule until
+/// this, and `.git/config` is under a root: `core.fsmonitor` in it runs at the
+/// next git spawn, and the engine's poll spawns git every 3 s (gap 1).
+pub fn forbid_write(roots: &[PathBuf], canon: &Path, shown: &str) -> Result<(), String> {
+    use worktrees_core::pathclass::{self, Access};
+    match pathclass::classify_canonical(roots, canon) {
+        Some(c) if c.refuses_every_caller(Access::Write) => Err(forbidden_message(shown, canon)),
+        _ => Ok(()),
+    }
+}
+
+/// `forbid_write` for a path that does not exist YET — a project to create,
+/// a clone's target, a directory to `git init`. The deepest ancestor that
+/// exists is canonicalised and the rest re-appended, so a link on the way is
+/// judged by where it leads. A `.git` component refuses even outside every
+/// registered root: no new project belongs inside a repository's git
+/// directory.
+pub fn forbid_new_path(roots: &[PathBuf], target: &Path) -> Result<(), String> {
+    let shown = target.to_string_lossy().into_owned();
+    let mut base = target.to_path_buf();
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    let canon = loop {
+        if let Ok(c) = std::fs::canonicalize(&base) {
+            break rest.iter().rev().fold(c, |p, n| p.join(n));
+        }
+        match (base.file_name().map(|n| n.to_os_string()), base.parent()) {
+            (Some(n), Some(p)) => {
+                rest.push(n);
+                base = p.to_path_buf();
+            }
+            // Nothing on the way exists, so nothing on the way can be a link.
+            _ => break target.to_path_buf(),
+        }
+    };
+    if worktrees_core::pathclass::has_git_component(&canon) {
+        return Err(forbidden_message(&shown, &canon));
+    }
+    forbid_write(roots, &canon, &shown)
+}
+
+fn forbidden_message(shown: &str, canon: &Path) -> String {
+    if worktrees_core::pathclass::has_git_component(canon) {
+        format!(
+            "{shown}: worktrees never writes inside .git, for any caller — a change to its config or \
+             hooks runs code the next time git runs, and worktrees runs git every few seconds. \
+             Use a terminal if you mean to."
+        )
+    } else {
+        format!(
+            "{shown}: worktrees never writes this file directly — it is worktrees' own state \
+             (.worktrees/ or .worktrees.places.json), changed only through its own controls."
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A project, a clone or a `git init` aimed into a repository's `.git` or
+    /// into a project's `.worktrees/` is refused before anything is created —
+    /// including through a link on the way, which the fixture plants, and
+    /// including a `.git` under no registered root at all.
+    #[test]
+    fn a_new_path_inside_git_or_the_tools_tree_is_refused() {
+        let base = std::env::temp_dir().join(format!("wt-forbid-new-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = base.join("repo");
+        std::fs::create_dir_all(repo.join(".git/hooks")).unwrap();
+        std::fs::create_dir_all(repo.join(".worktrees")).unwrap();
+        std::fs::create_dir_all(repo.join("sub")).unwrap();
+        std::fs::create_dir_all(base.join("other/.git")).unwrap();
+        std::os::unix::fs::symlink(repo.join(".git"), base.join("gitlink")).unwrap();
+        let roots = vec![std::fs::canonicalize(&repo).unwrap()];
+
+        for t in [
+            repo.join(".git/hooks/post-checkout"),
+            repo.join(".git/newproj/deeper"),
+            repo.join(".worktrees/newproj"),
+            base.join("gitlink/newproj"),
+            base.join("other/.git/newproj"),
+        ] {
+            let err = forbid_new_path(&roots, &t).expect_err(&t.to_string_lossy());
+            assert!(err.contains("never writes"), "{}: {err}", t.display());
+            assert!(!t.exists(), "{} was created", t.display());
+        }
+        forbid_new_path(&roots, &repo.join("sub/newproj")).unwrap();
+        forbid_new_path(&roots, &base.join("elsewhere/newproj")).unwrap();
+        forbid_new_path(&roots, Path::new("/nonexistent-root-xyz/a/b")).unwrap();
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+}
