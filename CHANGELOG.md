@@ -7,6 +7,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ### Fixed
 - **The "Not a git repo" card and the "Not configured" nudge show their ✕.** It was always there but invisible; Escape now dismisses the "Not a git repo" card too.
+- **The app's TLS libraries are past five published advisories.** rustls 0.23.42 → 0.23.46 (RUSTSEC-2026-0285, RUSTSEC-2026-0346, RUSTSEC-2026-0348, RUSTSEC-2026-0349) and rustls-webpki 0.103.13 → 0.103.16 (RUSTSEC-2026-0382). Only the in-app updater's HTTPS uses them; the CLI does not link either.
 
 ## [0.43.0] - 2026-10-21
 
