@@ -1,5 +1,6 @@
 # cargo-deny: what the dependency graph may contain. CI runs every section
-# (`deny` in ci.yml); locally, `cargo deny check` from the repo root.
+# (.github/workflows/deny.yml), and release.yml runs advisories as a gate;
+# locally, `cargo deny check` from the repo root.
 #
 # The graph is the WHOLE workspace on the four release targets: the CLI that
 # ships on PATH, the engine it hosts as `worktrees serve`, and the Tauri app,
@@ -20,8 +21,9 @@ all-features = false
 
 [advisories]
 # The RustSec database. A VULNERABILITY is never listed here: it is fixed, or
-# it keeps this check red until it is (ci.yml runs advisories as its own leg,
-# visibly, so a new advisory does not hold up an unrelated PR).
+# it keeps this check red until it is. That red does not hold up an unrelated
+# PR (deny.yml's advisories leg is non-blocking on a pull request), but it
+# fails the weekly scheduled run and it stops a release (release.yml's plan).
 #
 # Each entry below is an UNMAINTAINED notice for a crate upstream of tauri,
 # gtk or zbus, with no maintained replacement we control: none is a direct

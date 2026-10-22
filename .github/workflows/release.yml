@@ -88,6 +88,14 @@ jobs:
             echo "cli_matrix=$cli_rows"
             echo "app_matrix=$app_rows"
           } | tee -a "$GITHUB_OUTPUT"
+      # Once per release, here because every other job needs `plan`: no build
+      # starts while the lockfile carries a RustSec advisory deny.toml does not
+      # name. A pull request only SEES its advisories (deny.yml); a release
+      # cannot ship past one. The dry run of a packaging PR stops here too,
+      # which is the point of rehearsing the release's own steps.
+      - uses: ./.github/actions/cargo-deny
+      - name: GATE — no untriaged RustSec advisory in the lockfile
+        run: cargo deny --locked check advisories
 
   # Cross-compile the worktrees binary for the common desktop/server targets.
   build:

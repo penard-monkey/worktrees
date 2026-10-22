@@ -324,12 +324,15 @@ write_config() {
   run_wt new feat-x --no-install --no-attach
   [ "$status" -eq 0 ]
   # What an older binary left running: the place's session and a provider
-  # sidecar under the `-`-led name, beside a session that is not this repo's.
+  # sidecar under the `-`-led name, beside sessions that are not this repo's:
+  # one under another prefix, and one that shares the `-x-` head but names no
+  # place here.
   rm -f "$TMUX_STATE"/*
   local wt="$REPO/.worktrees/feat-x"
   "$SHIMS/tmux" new-session -d -s -x-feat-x -c "$wt" >/dev/null
   "$SHIMS/tmux" new-session -d -s '-x-feat-x~agent~codex' -c "$wt" >/dev/null
   "$SHIMS/tmux" new-session -d -s -xy-other -c "$REPO" >/dev/null
+  "$SHIMS/tmux" new-session -d -s -x-unrelated -c "$BATS_TEST_TMPDIR" >/dev/null
   : > "$TMUX_LOG"
 
   run_wt ls --json
@@ -339,6 +342,8 @@ write_config() {
   [ ! -f "$TMUX_STATE/-x-feat-x" ]
   [ ! -f "$TMUX_STATE/-x-feat-x~agent~codex" ]
   tmux_session_exists -xy-other
+  tmux_session_exists -x-unrelated
+  [ ! -f "$TMUX_STATE/_x-unrelated" ]
   # exact-match targets, and the snapshot already reads the new name
   grep -qxF 'tmux rename-session -t =-x-feat-x _x-feat-x' "$TMUX_LOG"
   grep -qF '"name":"_x-feat-x","up":true' <<<"$output"

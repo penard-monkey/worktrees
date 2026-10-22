@@ -68,10 +68,11 @@ impl Project {
             .ok_or_else(|| WtError::new("cannot resolve main checkout"))?;
         let wt_root = format!("{main_root}/.worktrees");
         let (prefix, legacy) = resolve_prefix(&main_root);
+        let p = Project { main_root, git_common, wt_root, prefix, clock: SysClock::detect() };
         if let Some(old) = legacy {
-            rename_legacy_sessions(&main_root, &old, &prefix);
+            p.rename_legacy_sessions(&old);
         }
-        Ok(Project { main_root, git_common, wt_root, prefix, clock: SysClock::detect() })
+        Ok(p)
     }
 
     /// A `Project` for tests that need one only to pass it along — the paths
@@ -92,7 +93,50 @@ impl Project {
     }
 
     pub fn session_name(&self, slug: &str) -> String {
-        format!("{}-{}", self.prefix, slug).replace('.', "-")
+        session_name_under(&self.prefix, slug)
+    }
+
+    /// Gap 8's other half: a session an older binary named under `legacy`, the
+    /// prefix the rule before gap 8 made (`config::legacy_prefix_from`), is
+    /// renamed to the name the current prefix renders, once per process per
+    /// repo, the first time the repo is discovered. Only a prefix the change
+    /// touched gets here (it began with `-`, or with a character the
+    /// allow-list maps to one, as `.dotfiles` does), so every other repo pays
+    /// nothing, not even the `list-sessions`.
+    ///
+    /// Only this repo's EXACT names move (`legacy_renames`): the slugs are the
+    /// directories under `.worktrees/` plus `(main)`, the same set
+    /// `place_index` lists, read without a git call.
+    ///
+    /// Renamed rather than left to adoption by pane cwd (`ops::live_session`),
+    /// which would find the place's own session but not its provider sidecars:
+    /// codex, pi and kimi activity look those up by the CANONICAL name. A pane
+    /// attached to the session stays attached (tmux attaches the session, not
+    /// the name), and a claude in it keeps the `--name` it was launched with,
+    /// which is what claude's messaging addresses and what `place_status`
+    /// reports.
+    ///
+    /// Once per process because the app's poll discovers every project every
+    /// few seconds. A session an older binary still running makes AFTER the
+    /// sweep is adopted by pane cwd, and swept by the next process that
+    /// discovers the repo.
+    fn rename_legacy_sessions(&self, legacy: &str) {
+        static SWEPT: std::sync::Mutex<std::collections::BTreeSet<String>> =
+            std::sync::Mutex::new(std::collections::BTreeSet::new());
+        if !SWEPT.lock().map(|mut s| s.insert(self.main_root.clone())).unwrap_or(false) {
+            return;
+        }
+        let live = tmux::session_names();
+        let head = format!("{legacy}-");
+        if !live.iter().any(|s| s.starts_with(&head)) {
+            return;
+        }
+        let slugs: Vec<String> = std::iter::once("(main)".to_string())
+            .chain(self.worktree_dirs().iter().map(|d| basename(d)))
+            .collect();
+        for (old, new) in legacy_renames(legacy, &self.prefix, &slugs, &live) {
+            tmux::rename_session(&old, &new);
+        }
     }
 
     /// The claude config dir in effect for THIS repo — the bound profile's, or
@@ -674,48 +718,36 @@ fn resolve_prefix(main_root: &str) -> (String, Option<String>) {
     (resolve_prefix_from(e, f, p, c, &fallback), legacy_prefix_from(e, f, p, c, &fallback))
 }
 
-/// Gap 8's other half: a session an older binary named `<old>-<slug>` is
-/// renamed to `<prefix>-<slug>`, once per process per repo, the first time the
-/// repo is discovered. Only a prefix the change touched gets here (it began
-/// with `-`, or with a character the allow-list maps to one, as `.dotfiles`
-/// does), so every other repo pays nothing, not even the `list-sessions`.
-///
-/// Renamed rather than left to adoption by pane cwd (`ops::live_session`),
-/// which would find the place's own session but not its provider sidecars:
-/// codex, pi and kimi activity look those up by the CANONICAL name. A pane
-/// attached to the session stays attached (tmux attaches the session, not the
-/// name), and a claude in it keeps the `--name` it was launched with, which
-/// is what claude's messaging addresses and what `place_status` reports.
-///
-/// Once per process because the app's poll discovers every project every few
-/// seconds. A session an older binary still running makes AFTER the sweep is
-/// adopted by pane cwd, and swept by the next process that discovers the repo.
-fn rename_legacy_sessions(main_root: &str, legacy: &str, prefix: &str) {
-    static SWEPT: std::sync::Mutex<std::collections::BTreeSet<String>> =
-        std::sync::Mutex::new(std::collections::BTreeSet::new());
-    if !SWEPT.lock().map(|mut s| s.insert(main_root.to_string())).unwrap_or(false) {
-        return;
-    }
-    for (old, new) in legacy_renames(legacy, prefix, &tmux::session_names()) {
-        tmux::rename_session(&old, &new);
-    }
+/// A place's session name under `prefix`: `<prefix>-<slug>`, `.` → `-`.
+fn session_name_under(prefix: &str, slug: &str) -> String {
+    format!("{prefix}-{slug}").replace('.', "-")
 }
 
-/// Which of the `live` sessions to rename, as `(old, new)`: every one named
-/// `<legacy>-…`, given `<prefix>-…`, unless that name is taken. PURE.
+/// Which of the `live` sessions to rename, as `(old, new)`. PURE.
 ///
-/// The match is on the whole `<legacy>-` head, so a prefix that merely begins
-/// with this one's letters (`-dotty` beside `-dot`) is not this repo's. A
-/// taken name is left alone: two sessions cannot share one, and the old one is
-/// still found by pane cwd.
-fn legacy_renames(legacy: &str, prefix: &str, live: &[String]) -> Vec<(String, String)> {
-    let head = format!("{legacy}-");
-    live.iter()
-        .filter_map(|old| {
-            let new = format!("{prefix}-{}", old.strip_prefix(&head)?);
-            (!live.contains(&new)).then(|| (old.clone(), new))
-        })
-        .collect()
+/// A session moves only if its name is EXACTLY one this repo would have made
+/// under `legacy`: a place's session `<legacy>-<slug>` for one of `slugs`, or
+/// that name with a provider sidecar suffix (`~agent~<id>`, for a provider this
+/// build knows) or a dock-shell one (`~term`, `~term~<n>`). Anything else that
+/// merely starts with `<legacy>-` is not ours: another tool's session, or a
+/// place that no longer exists. A taken new name is left alone, since two
+/// sessions cannot share one and the old one is still found by pane cwd.
+fn legacy_renames(legacy: &str, prefix: &str, slugs: &[String], live: &[String]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for slug in slugs {
+        let (old, new) = (session_name_under(legacy, slug), session_name_under(prefix, slug));
+        for name in live {
+            let Some(rest) = name.strip_prefix(&old) else { continue };
+            let ours = rest.is_empty()
+                || crate::provider::PROVIDERS.iter().any(|p| rest == p.sidecar_suffix)
+                || tmux::shell_sidecar_index(&old, name).is_some();
+            let target = format!("{new}{rest}");
+            if ours && !live.contains(&target) {
+                out.push((name.clone(), target));
+            }
+        }
+    }
+    out
 }
 
 /// First line of `<main_root>/.worktree-prefix`, whitespace stripped; a file
@@ -882,18 +914,46 @@ mod prefix_tests {
     use super::*;
 
     /// Gap 8: a session an older binary named under the `-`-led prefix is given
-    /// the name the current one renders, sidecars and `(main)` included, and
-    /// nothing else is touched: not a session outside `<old>-`, not one whose
-    /// new name is already taken (adoption by pane cwd still finds it).
+    /// the name the current one renders: a place's own session, `(main)`'s,
+    /// and their provider and dock-shell sidecars. Only EXACT names of this
+    /// repo's places move. A session that merely starts with `<old>-` (someone
+    /// else's `-dot-unrelated`, a place that no longer exists) is not ours, and
+    /// one whose new name is already taken is left for adoption by pane cwd.
     #[test]
-    fn sessions_under_the_old_prefix_are_planned_onto_the_new_one() {
-        let live: Vec<String> = ["-dot-main", "-dot-(main)", "-dot-feat~agent~codex", "-dot-x", "_dot-x", "-dotty-y", "-dot", "work"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let got = legacy_renames("-dot", "_dot", &live);
-        let want = [("-dot-main", "_dot-main"), ("-dot-(main)", "_dot-(main)"), ("-dot-feat~agent~codex", "_dot-feat~agent~codex")];
-        assert_eq!(got, want.map(|(a, b)| (a.to_string(), b.to_string())).to_vec());
-        assert!(legacy_renames("-dot", "_dot", &[]).is_empty());
+    fn only_this_repos_exact_session_names_are_planned_onto_the_new_prefix() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<String>>();
+        let slugs = s(&["(main)", "feat", "feat.v2", "x"]);
+        let live = s(&[
+            "-dot-(main)",
+            "-dot-feat",
+            "-dot-feat~agent~codex",
+            "-dot-feat~term",
+            "-dot-feat~term~3",
+            "-dot-feat-v2",
+            "-dot-x",
+            "_dot-x",
+            "-dot-unrelated",
+            "-dot-feat-extra",
+            "-dot-feat~agent~nope",
+            "-dotty-feat",
+            "work",
+        ]);
+        let got = legacy_renames("-dot", "_dot", &slugs, &live);
+        let want = s(&[
+            "-dot-(main)",
+            "-dot-feat",
+            "-dot-feat~agent~codex",
+            "-dot-feat~term",
+            "-dot-feat~term~3",
+            "-dot-feat-v2",
+        ]);
+        let want: Vec<(String, String)> = want.into_iter().map(|o| (o.clone(), format!("_{}", &o[1..]))).collect();
+        let mut got_sorted = got.clone();
+        got_sorted.sort();
+        let mut want_sorted = want.clone();
+        want_sorted.sort();
+        assert_eq!(got_sorted, want_sorted);
+        assert!(legacy_renames("-dot", "_dot", &slugs, &[]).is_empty());
+        assert!(legacy_renames("-dot", "_dot", &[], &live).is_empty(), "no places, nothing is ours");
     }
 }
