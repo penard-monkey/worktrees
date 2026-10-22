@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="390" height="844" viewBox="0 0 390 844" role="img" aria-labelledby="title desc">
+<title id="title">ios-ui-design</title>
+<desc id="desc">Worktrees iOS wireframe, Catppuccin Mocha dark. Fictional host and session data. System surfaces are schematic.</desc>
+<rect x="0" y="0" width="390" height="844" rx="0" fill="#181825"/>
+<text x="28" y="30" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="14" font-weight="600" fill="#cdd6f4">9:41</text>
+<rect x="310" y="19" width="4" height="9" rx="1" fill="#cdd6f4"/>
+<rect x="317" y="16" width="4" height="12" rx="1" fill="#cdd6f4"/>
+<rect x="324" y="13" width="4" height="15" rx="1" fill="#cdd6f4"/>
+<rect x="341" y="14" width="25" height="13" rx="3" fill="#181825" stroke="#cdd6f4"/>
+<rect x="344" y="17" width="17" height="7" rx="1" fill="#cdd6f4"/>
+<text x="20" y="77" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="17" font-weight="400" fill="#cdd6f4">‹ Worktrees</text>
+<text x="20" y="127" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="28" font-weight="600" fill="#cdd6f4">ios-ui-design</text>
+<text x="20" y="155" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="14" font-weight="400" fill="#a6adc8">Studio Mac · Worktrees</text>
+<rect x="20" y="179" width="350" height="151" rx="10" fill="#1e1e2e"/>
+<circle cx="40" cy="210" r="4" fill="#fab387"/>
+<text x="56" y="216" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="17" font-weight="600" fill="#cdd6f4">Claude needs input</text>
+<text x="36" y="251" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="16" font-weight="400" fill="#cdd6f4">Allow running the UI checks?</text>
+<rect x="36" y="273" width="318" height="50" rx="10" fill="#89b4fa"/>
+<text x="195.0" y="304" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="17" font-weight="600" fill="#11111b" text-anchor="middle">Review prompt</text>
+<rect x="20" y="346" width="350" height="180" rx="10" fill="#1e1e2e"/>
+<text x="36" y="379" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="17" font-weight="600" fill="#cdd6f4">Session</text>
+<text x="36" y="411" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="15" font-weight="400" fill="#cdd6f4">Claude · Sonnet</text>
+<text x="36" y="436" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="15" font-weight="400" fill="#cdd6f4">Started by Bret’s iPhone</text>
+<text x="36" y="461" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="15" font-weight="400" fill="#cdd6f4">Last activity · just now</text>
+<text x="36" y="486" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="15" font-weight="400" fill="#cdd6f4">Branch · docs/ios-ui-design</text>
+<rect x="20" y="542" width="350" height="130" rx="10" fill="#1e1e2e"/>
+<text x="36" y="575" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="17" font-weight="600" fill="#cdd6f4">Brief</text>
+<text x="36" y="608" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="16" font-weight="400" fill="#cdd6f4">Design the Worktrees iOS MVP.</text>
+<text x="36" y="633" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="16" font-weight="400" fill="#cdd6f4">Make approvals clear on a phone.</text>
+<rect x="20" y="690" width="171" height="50" rx="10" fill="#89b4fa"/>
+<text x="105.5" y="721" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="17" font-weight="600" fill="#11111b" text-anchor="middle">Send message</text>
+<rect x="199" y="690" width="171" height="50" rx="10" fill="#1e1e2e" stroke="#cdd6f4"/>
+<text x="284.5" y="721" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="17" font-weight="600" fill="#cdd6f4" text-anchor="middle">Recent turns</text>
+<text x="20" y="780" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="14" font-weight="400" fill="#a6adc8">Session actions and note below ↓</text>
+<rect x="127" y="824" width="136" height="5" rx="3" fill="#cdd6f4"/>
+</svg>

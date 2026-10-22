@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="390" height="844" viewBox="0 0 390 844" role="img" aria-labelledby="title desc">
+<title id="title">Host paired</title>
+<desc id="desc">Worktrees iOS wireframe, Catppuccin Latte light. Fictional host and session data. System surfaces are schematic.</desc>
+<rect x="0" y="0" width="390" height="844" rx="0" fill="#e6e9ef"/>
+<text x="28" y="30" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="14" font-weight="600" fill="#4c4f69">9:41</text>
+<rect x="310" y="19" width="4" height="9" rx="1" fill="#4c4f69"/>
+<rect x="317" y="16" width="4" height="12" rx="1" fill="#4c4f69"/>
+<rect x="324" y="13" width="4" height="15" rx="1" fill="#4c4f69"/>
+<rect x="341" y="14" width="25" height="13" rx="3" fill="#e6e9ef" stroke="#4c4f69"/>
+<rect x="344" y="17" width="17" height="7" rx="1" fill="#4c4f69"/>
+<text x="20" y="127" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="28" font-weight="600" fill="#4c4f69">Host paired</text>
+<text x="20" y="155" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="14" font-weight="400" fill="#5c5f77">Studio Mac</text>
+<rect x="20" y="197" width="350" height="160" rx="10" fill="#eff1f5"/>
+<circle cx="40" cy="233" r="4" fill="#40a02b"/>
+<text x="56" y="239" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="17" font-weight="600" fill="#4c4f69">This iPhone is paired</text>
+<text x="36" y="280" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="17" font-weight="400" fill="#4c4f69">Access: Observe</text>
+<text x="36" y="305" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="17" font-weight="400" fill="#4c4f69">Projects: Worktrees</text>
+<text x="20" y="413" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="17" font-weight="400" fill="#4c4f69">You can now check your sessions.</text>
+<text x="20" y="438" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="17" font-weight="400" fill="#4c4f69">To answer or send messages, change</text>
+<text x="20" y="463" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="17" font-weight="400" fill="#4c4f69">this device’s access on Studio Mac.</text>
+<rect x="20" y="638" width="350" height="50" rx="10" fill="#1e66f5"/>
+<text x="195.0" y="669" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="17" font-weight="600" fill="#ffffff" text-anchor="middle">View projects</text>
+<rect x="20" y="700" width="350" height="50" rx="10" fill="#eff1f5" stroke="#4c4f69"/>
+<text x="195.0" y="731" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="17" font-weight="600" fill="#4c4f69" text-anchor="middle">View device access</text>
+<text x="20" y="785" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="14" font-weight="400" fill="#5c5f77">Connection checks finish before projects load.</text>
+<rect x="127" y="824" width="136" height="5" rx="3" fill="#4c4f69"/>
+</svg>

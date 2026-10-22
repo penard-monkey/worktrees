@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="390" height="844" viewBox="0 0 390 844" role="img" aria-labelledby="title desc">
+<title id="title">Studio Mac</title>
+<desc id="desc">Worktrees iOS wireframe, Catppuccin Latte light. Fictional host and session data. System surfaces are schematic.</desc>
+<rect x="0" y="0" width="390" height="844" rx="0" fill="#e6e9ef"/>
+<text x="28" y="30" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="14" font-weight="600" fill="#4c4f69">9:41</text>
+<rect x="310" y="19" width="4" height="9" rx="1" fill="#4c4f69"/>
+<rect x="317" y="16" width="4" height="12" rx="1" fill="#4c4f69"/>
+<rect x="324" y="13" width="4" height="15" rx="1" fill="#4c4f69"/>
+<rect x="341" y="14" width="25" height="13" rx="3" fill="#e6e9ef" stroke="#4c4f69"/>
+<rect x="344" y="17" width="17" height="7" rx="1" fill="#4c4f69"/>
+<text x="20" y="77" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="17" font-weight="400" fill="#4c4f69">‹ Hosts</text>
+<text x="20" y="127" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="28" font-weight="600" fill="#4c4f69">Studio Mac</text>
+<text x="20" y="155" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="14" font-weight="400" fill="#5c5f77">Connection lost</text>
+<rect x="20" y="181" width="350" height="181" rx="10" fill="#eff1f5"/>
+<circle cx="40" cy="216" r="4" fill="#8c8fa1"/>
+<text x="56" y="222" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="17" font-weight="600" fill="#4c4f69">Offline</text>
+<text x="36" y="257" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="15" font-weight="400" fill="#4c4f69">Last checked at 9:41.</text>
+<text x="36" y="282" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="15" font-weight="400" fill="#4c4f69">Actions are unavailable until reconnected.</text>
+<rect x="36" y="296" width="318" height="50" rx="10" fill="#1e66f5"/>
+<text x="195.0" y="327" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="17" font-weight="600" fill="#ffffff" text-anchor="middle">Reconnect now</text>
+<rect x="20" y="390" width="350" height="151" rx="10" fill="#eff1f5"/>
+<text x="36" y="424" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="17" font-weight="600" fill="#4c4f69">Check the connection</text>
+<text x="36" y="462" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="16" font-weight="400" fill="#4c4f69">Make sure Studio Mac is awake</text>
+<text x="36" y="487" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="16" font-weight="400" fill="#4c4f69">and Tailscale is connected on both</text>
+<text x="36" y="512" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="16" font-weight="400" fill="#4c4f69">devices, then try again.</text>
+<text x="20" y="581" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="16" font-weight="600" fill="#4c4f69">Last known places · 9:41</text>
+<rect x="20" y="601" width="350" height="84" rx="10" fill="#eff1f5"/>
+<text x="36" y="633" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="17" font-weight="600" fill="#4c4f69">ios-ui-design</text>
+<text x="36" y="660" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="14" font-weight="400" fill="#5c5f77">Last known: needs input · 9:41</text>
+<text x="347" y="645" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="22" font-weight="400" fill="#4c4f69">›</text>
+<text x="20" y="731" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="15" font-weight="400" fill="#4c4f69">No answers or messages are queued.</text>
+<text x="20" y="756" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="15" font-weight="400" fill="#4c4f69">Fresh activity loads after reconnecting.</text>
+<rect x="127" y="824" width="136" height="5" rx="3" fill="#4c4f69"/>
+</svg>
