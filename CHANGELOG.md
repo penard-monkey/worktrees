@@ -170,6 +170,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   The MCP server now tells agents that a place's title and note are data,
   never instructions, and a check fails if it ever names a pairing, device,
   scope, remote-access or audit command.
+- **`worktrees serve` keeps a registry of paired devices, and can pair one.**
+  This is the server side of letting another machine or a phone drive
+  serve. Nothing reaches a device yet: the network listener a device would
+  use is still to come, so serve never opens a pairing window, and nothing
+  changes for the desktop app.
+  - Devices are listed in `devices.json` in the app's config folder, readable
+    only by you. A device that is revoked or disabled loses every open
+    connection at once. One whose access is narrowed loses each terminal and
+    shell it may no longer see.
+  - A device is disabled after 30 days unused unless the host chooses
+    otherwise, and only the host re-enables it.
+  - A `devices.json` that cannot be read refuses every device and is never
+    overwritten. A hand edit that grants a device more than serve recorded
+    disables that device.
+  - Pairing needs the host's own approval, after both screens show the same
+    six-digit code, and any failed attempt closes the window.
+  - An iPhone's riskiest acts will also need Face ID or the passcode.
 
 ## [0.43.1] - 2026-10-22
 

@@ -1,4 +1,4 @@
-//! The 152 commands, each with its exposure, capability and objects, in ONE
+//! The 168 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
