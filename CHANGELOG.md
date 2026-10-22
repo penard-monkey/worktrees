@@ -6,6 +6,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Changed
+- **The frontend reaches its backend through one module, `app/src/ipc.ts`.**
+  The 25 files that imported `invoke`, `Channel` and `listen` from
+  `@tauri-apps/api` import them from there instead; in the desktop app those
+  ARE Tauri's own functions, called with the same arguments, so nothing
+  changes. It is the switch the app will use to become a client of
+  `worktrees serve`. Plugins (opener, dialog, updater, process, the window
+  API) still import their packages directly — they act on the machine the
+  window runs on, whichever engine is driving it.
 - **The host wiring every engine process needs lives in one place,
   `worktrees_api::host`**, and the desktop app calls it the same way `serve`
   does: `boot` (log sink, panic hook, the launchd-bare PATH and locale repairs,
@@ -76,6 +84,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   and the server go on serving. A `worktrees show` that arrives while no
   client is connected waits for the next one, inside the same 30 seconds it
   would wait for the app, rather than being taken and shown to nobody.
+- **The real frontend can drive a real `worktrees serve` from a browser**
+  (development only: `pnpm dev:serve` with `WT_SERVE_JSON` pointing at the
+  stack's `serve.json`). The page asks the dev server for the port and token —
+  same-origin only, since vite's own CORS default answers every page on every
+  localhost port — and keeps the token in memory; it is never in a URL, in
+  storage, on the wire, or in a build, which does not contain the socket client
+  at all. The page and `serve` each prove they hold the token with an HMAC over
+  a random challenge from the other, and the page sends nothing else until
+  serve's proof checks out, so a program that takes over the port after serve
+  stops is told so and is sent nothing. Replies are matched by id, terminal bytes
+  and progress are delivered per channel in sequence order and let go when
+  serve says the channel is finished, events arrive through `listen`, a request
+  too big for serve to read fails on its own instead of being sent and ending
+  the connection, and the server's version must equal the frontend's (both
+  from the workspace `Cargo.toml`) or nothing is sent. A refused handshake, a
+  server that cannot prove itself, a version mismatch or a dropped connection
+  appears in the error banner.
+  `app/scripts/transport-check.mjs` holds the client against the server's own
+  frame definitions.
 - **Applying the worktrees rules or the agent-setup Fix now opens a review
   lane for the `agent-instructions` branch**: a place on it, with an agent
   whose brief explains what the branch changes — each file, the AGENTS.md

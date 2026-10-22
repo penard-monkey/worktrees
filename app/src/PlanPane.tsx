@@ -18,7 +18,7 @@
 // text nodes only; `Markdown` already renders raw HTML as inert text.
 import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { useScrollKeep } from "./scrollkeep";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Markdown } from "./markdown";
 import { useDocPathLinks } from "./useDocPathLinks";

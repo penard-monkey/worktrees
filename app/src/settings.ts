@@ -2,7 +2,7 @@
 // (the mock tolerates both; real backend writes ui-state.json in app-config-dir).
 // Every visual setting is a CSS custom property, so applying settings is just
 // variable assignment — no component re-render logic.
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc";
 import { clampSteps, snapHorizon } from "./afterglow";
 import { HARNESSES, isHarness, type Harness } from "./harness";
 

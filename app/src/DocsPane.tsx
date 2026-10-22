@@ -24,7 +24,7 @@
 // for a `docs-check.mjs` to guard — which is the point of putting the walk in
 // core rather than splitting it.
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import * as Icons from "./icons";
 import { track } from "./usage";

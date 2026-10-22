@@ -9,7 +9,7 @@ import { PlanningSection, type PlanningStatus } from "./PlanningPanel";
 import { QuotaSection } from "./QuotaPanel";
 import { UserSkillsSection, type UserSkill } from "./AgentSetup";
 import * as Icons from "./icons";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc";
 import { copyToClipboard } from "./clipboard";
 import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { check as checkAppUpdate } from "@tauri-apps/plugin-updater";

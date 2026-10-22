@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 const INSTALL_URL = "https://developers.openai.com/codex/cli/";

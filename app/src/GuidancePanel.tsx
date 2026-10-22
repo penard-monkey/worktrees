@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc";
 import { DiffView, type FileDiffDto } from "./DiffView";
 import { useEscape } from "./useEscape";
 

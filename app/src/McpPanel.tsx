@@ -13,7 +13,7 @@
 // (a session in `(main)` briefing sessions in the other places) needs the
 // mutating half, which is why "full" is the default the buttons offer.
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc";
 import { copyToClipboard } from "./clipboard";
 import * as Icons from "./icons";
 

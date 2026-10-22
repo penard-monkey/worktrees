@@ -80,6 +80,43 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   found), version on the first line.
   `app/scripts/server-stack.sh` runs an isolated one for the frontend lane.
 
+- **The frontend has ONE door to the backend: `app/src/ipc.ts`** (`invoke`,
+  `Channel`, `listen`). Nothing else under `app/src` imports
+  `@tauri-apps/api/core` or `/event` — `transport-check.mjs` fails on it, the
+  mock excepted. In the app the door IS Tauri's functions; in the dev stack it
+  is `ipcws.ts`, a WebSocket to serve, which never sends the token: handshake
+  v1 (OWASP H1) has each side prove it holds it with an HMAC over the other's
+  nonce, and the client sends NOTHING else — no request, and no belief in the
+  version — until serve's proof passes `crypto.subtle.verify`, because whoever
+  holds serve.json's port after a crash need not be serve. `crypto.subtle` is
+  there on `tauri://localhost` (a secure context) and a `ws://127.0.0.1` socket
+  from it is not blocked as mixed content — measured on macOS 27.0 in a
+  standalone WKWebView registered the way wry 0.55 does, NOT in the shipped
+  app. A channel ends on serve's `{channel, seq, end: true}` — ordered by
+  `seq` like data — or on an `err` to the request that named it, and the
+  client drops the handler then, as Tauri's `Channel` does when its Rust side
+  drops; and a request over serve's `MAX_MESSAGE` is refused in the client,
+  because serve answers one by ending the whole connection, every terminal on
+  it. Plugins (opener, dialog, updater,
+  process, `api/window`) stay direct imports on purpose: they act on the
+  window's machine, and routing them through a socket is the reason the
+  plan's WS-backed `__TAURI_INTERNALS__` was not used (`.planning` of
+  feat-serve-transport, findings §1). Drive it:
+  `J=$(app/scripts/server-stack.sh --allow-origin http://localhost:1430)`, then
+  in `app/`: `WT_SERVE_JSON=$J corepack pnpm dev:serve --force`. Four traps:
+  **vite's dev CORS default answers every `localhost:<any port>` page**, so the
+  token endpoint (`vite.serve-door.ts`) checks `Sec-Fetch-Site`/`Origin` and
+  strips the CORS headers itself — same-origin is not free there;
+  **`vite build --mode development` does NOT make `import.meta.env.DEV` true**
+  (NODE_ENV stays production — `NODE_ENV=development` does), so a "dev build"
+  can look like proof the gate works; **`ipcws.ts` may have no runtime import**
+  (the check loads it as a `data:` module; `import type` is fine); and **a
+  check that awaits a promise a mutation leaves pending exits 13 with NO
+  failure printed** — race every await against a deadline, as
+  `transport-check.mjs`'s `settle()` does, and give fire-and-forget calls the
+  same handler: against a broken client a bare `void invoke(…)` rejects
+  unhandled and kills the run before the failures it found are printed.
+
 **Adding a harness? Walk `docs/adding-a-harness.md` first, and tick it only
 by SEEING each surface work.** pi shipped in v0.33.0 with a correct core —
 MCP `place_status` said `busy` — and no nav dot at all: the app builds its dots

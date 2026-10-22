@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc";
 
 /** `cross_project_status` (lib.rs): the user's level and every registered
  *  project. Machine-level — nothing here is about the project in focus. */

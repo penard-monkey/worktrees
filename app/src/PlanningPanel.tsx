@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc";
 
 /** A project's planning level (`planning::Level`). */
 export type PlanningLevel = "off" | "show" | "full";

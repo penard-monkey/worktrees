@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useEscape } from "./useEscape";
 import * as Icons from "./icons";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke } from "./ipc";
 import { Markdown } from "./markdown";
 
 // One place's health check, in two hosts. `StatusBody` is everything the check
