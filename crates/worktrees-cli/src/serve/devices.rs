@@ -593,6 +593,8 @@ impl DeviceEvent {
     }
 
     /// Worth a host notification (§5.3).
+    // A seam: the audit lane (#534) wires it; until then, the tests.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn alerts(&self) -> bool {
         match self {
             DeviceEvent::Enrolled { .. } | DeviceEvent::Unreadable { .. } | DeviceEvent::IdentityRotated { .. } => true,
@@ -924,6 +926,8 @@ impl DeviceRegistry {
     }
 
     /// Every unrevoked device's security fields: §5.1's checkpoint.
+    // A seam: the audit lane (#534) wires it; until then, the tests.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn checkpoint(&self) -> Vec<SecurityFields> {
         let st = self.state.read().unwrap();
         st.file.as_ref().map(|f| f.devices.iter().filter(|d| !d.is_revoked()).map(DeviceRecord::security).collect()).unwrap_or_default()
@@ -1132,6 +1136,8 @@ impl DeviceRegistry {
     /// and reaches the file at most every [`SEEN_FLUSH_SECS`] and at exit. A
     /// refused handshake never comes here, so a disabled device cannot keep
     /// itself alive by knocking.
+    // A seam: slice 6's remote listener calls it; until then, the tests.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn seen(&self, id: &DeviceId, addr: Option<String>, now: i64) {
         self.seen.lock().unwrap().insert(id.clone(), (now, addr));
         self.flush_due(now);
@@ -1208,6 +1214,8 @@ impl DeviceRegistry {
     /// disabled HERE, at the knock, and refused. Every refusal of a known
     /// device is an event (§5.3: "a revoked or disabled device trying to
     /// connect").
+    // A seam: slice 6's remote listener calls it; until then, the tests.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn admit(&self, spki_sha256: &str, now: i64) -> Result<Caller, ConnectRefusal> {
         let found = {
             let st = self.state.read().unwrap();
@@ -1249,6 +1257,8 @@ impl DeviceRegistry {
     /// is disabled as `unrecorded`, and so is one whose record says more than
     /// its evidence; a tombstone edited back to life is revoked again. The
     /// devices corrected. The audit lane wires this at boot.
+    // A seam: the audit lane (#534) wires it; until then, the tests.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn cross_check(&self, evidence: &HashMap<DeviceId, SecurityFields>, now: i64) -> Result<Vec<DeviceId>, String> {
         self.mutate(|f, events| {
             let before = events.len();
@@ -1766,6 +1776,25 @@ mod tests {
         assert!(reg.cross_check(&chain, NOW).unwrap() == vec![c.id.clone()], "no enrolled record behind c");
         assert!(reg.device_grant(&PrincipalId::owner(), &a.id).is_some());
         let _ = fs::remove_dir_all(&d);
+    }
+
+    /// §5.1's checkpoint is every unrevoked device's security fields, and it
+    /// is exactly the evidence §5.2 needs: fed back as the chain, it vouches
+    /// for every device and corrects nothing.
+    #[test]
+    fn the_checkpoint_is_the_evidence_the_cross_check_reads() {
+        let reg = DeviceRegistry::in_memory();
+        let a = phone(&reg, "A", 1, &[Read, Stream]);
+        let b = phone(&reg, "B", 2, &[Read]);
+        reg.revoke(&Caller::console(), &Grant::everything(), &b.id, NOW).unwrap();
+        let cp = reg.checkpoint();
+        assert_eq!(cp.iter().map(|f| f.device.clone()).collect::<Vec<_>>(), vec![a.id.clone()], "tombstones are not live");
+        assert_eq!(cp[0].caps, Caps::of(&[Read, Stream]));
+        assert_eq!(cp[0].principal, PrincipalId::owner());
+        let chain: HashMap<DeviceId, SecurityFields> = reg.snapshot().unwrap().devices.iter().map(|d| (d.id.clone(), d.security())).collect();
+        assert!(reg.cross_check(&chain, NOW).unwrap().is_empty());
+        let only_live: HashMap<DeviceId, SecurityFields> = cp.into_iter().map(|f| (f.device.clone(), f)).collect();
+        assert_eq!(reg.cross_check(&only_live, NOW).unwrap(), Vec::<DeviceId>::new(), "a tombstone needs no evidence to stay revoked");
     }
 
     #[test]

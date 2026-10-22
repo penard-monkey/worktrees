@@ -2370,11 +2370,21 @@ mod devices {
         for cmd in ["shell_write", "shell_resize", "close_shell_session"] {
             assert_eq!(write(cmd, json!({"cols": 80, "rows": 24})), Err(json!("step-up required")), "{cmd} on a shell it never opened");
         }
+        // A hold on a shell that is not live (no shell runs in a test) holds
+        // nothing either.
         call.frames.note_shell(ShellHold { repo: a.clone(), slug: "(main)".into(), index: 0, gen: 3 });
-        assert_ne!(write("shell_write", json!({})), Err(json!("step-up required")), "a shell it opened");
+        assert_eq!(write("shell_write", json!({})), Err(json!("step-up required")), "a hold on no live shell");
         assert_eq!(write("shell_open", json!({"cols": 80, "rows": 24})), Err(json!("step-up required")), "opening is always asked");
         call.frames.note_term(905, "s".into());
         assert_ne!(write("term_write", json!({})), Err(json!("step-up required")), "its own attach");
+        // Held means: the shell's LIVE attach is this connection's.
+        let row = dispatch::row("shell_write").unwrap();
+        let args = Args(json!({"repo": a, "slug": "(main)", "index": 0}).as_object().cloned().unwrap());
+        assert!(dispatch::holds_channel_with(&call, row, &args, &|_, _, _| Some(3)), "its own live attach");
+        assert!(!dispatch::holds_channel_with(&call, row, &args, &|_, _, _| Some(4)), "re-attached since, or a new shell under the key");
+        assert!(!dispatch::holds_channel_with(&call, row, &args, &|_, _, _| None), "no live shell");
+        let other = Args(json!({"repo": a, "slug": "(main)", "index": 1}).as_object().cloned().unwrap());
+        assert!(!dispatch::holds_channel_with(&call, row, &other, &|_, _, _| Some(3)), "another tab");
     }
 
     /// Which acts are drive-class (§2.5): instruct, answer and admin, a raised

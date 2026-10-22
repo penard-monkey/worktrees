@@ -275,6 +275,8 @@ pub struct ShellHold {
 }
 
 impl Frames {
+    /// A connection with no TLS session (the tests' loopback calls).
+    #[cfg(test)]
     pub fn new(outbox: Outbox) -> Self {
         Frames::with_exporter(outbox, None)
     }
@@ -304,11 +306,6 @@ impl Frames {
     /// so it cannot be guessed from another connection.
     pub fn tag(&self) -> &str {
         &self.tag
-    }
-
-    /// The connection's queue, for a frame of the connection's own (a close).
-    pub fn outbox(&self) -> &Outbox {
-        &self.outbox
     }
 
     /// The attach `id` was opened on this connection and not closed since.

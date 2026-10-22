@@ -227,6 +227,8 @@ impl Pairing {
 
     /// Where windows open. `None` (the default, and all of slice 5 in serve)
     /// refuses every `pair_begin`, and closes any window that is open.
+    // A seam: slice 6's remote listener calls it; until then, the tests.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn set_bind(&self, bind: Option<Bind>) {
         if bind.is_none() {
             self.cancel_with(Ended::Cancelled);

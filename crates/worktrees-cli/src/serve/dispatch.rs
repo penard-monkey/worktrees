@@ -515,14 +515,24 @@ pub fn needs_stepup(row: &Row, needs: &[Capability], holds: bool) -> bool {
 }
 
 /// The row acts on a channel this connection holds: its own attach (the
-/// resolver's `attach`/`close` objects proved that), or a dock shell it opened
-/// and has not let go (`Frames::shells`), compared on the canonical arguments.
+/// resolver's `attach`/`close` objects proved that), or a dock shell whose
+/// LIVE attach is the one this connection made — the hold's generation is the
+/// shell's current one (`term::shell_gen`; generations are unique per
+/// process). A hold the desktop has since re-attached over, or one on a shell
+/// since closed and spawned again under the same key, holds nothing.
 fn holds_channel(cx: &Call, row: &Row, args: &Args) -> bool {
+    holds_channel_with(cx, row, args, &|repo, slug, index| term::shell_gen(repo, slug, index, &cx.ctx.shells))
+}
+
+/// [`holds_channel`], with the live generation looked up by `live` — the
+/// tests', since a real dock shell is a login shell on a pty.
+pub fn holds_channel_with(cx: &Call, row: &Row, args: &Args, live: &dyn Fn(&str, &str, u32) -> Option<u64>) -> bool {
     row.objects.iter().any(|o| match *o {
         Obj::Attach(_) | Obj::Close(_) => true,
         Obj::Shell(r, s, i) => {
-            let (repo, slug, index) = (args.raw(r), args.raw(s), args.raw(i));
-            cx.frames.shells().iter().any(|h| Value::from(h.repo.as_str()) == repo && Value::from(h.slug.as_str()) == slug && Value::from(h.index) == index)
+            let (Ok(repo), Ok(slug), Ok(index)) = (args.get::<String>(r), args.get::<String>(s), args.get::<u32>(i)) else { return false };
+            let Some(gen) = live(&repo, &slug, index) else { return false };
+            cx.frames.shells().iter().any(|h| (h.repo.as_str(), h.slug.as_str(), h.index, h.gen) == (repo.as_str(), slug.as_str(), index, gen))
         }
         _ => false,
     })
@@ -794,9 +804,11 @@ commands! { cx, a;
 
     // ── the dock: shells, scrollback, and the tmux attach (term) ─────────
     list_shell_sessions: Engine [read, place(repo, slug)] => term::list_shell_sessions(a.get("repo")?, a.get("slug")?, &cx.ctx.shells),
-    close_shell_session: Engine [stream, shell(repo, slug, index)] => term::close_shell_session(
-        &cx.ctx, a.get("repo")?, a.get("slug")?, a.get("index")?, a.get("keep_cwd")?, &cx.ctx.shells,
-    ),
+    close_shell_session: Engine [stream, shell(repo, slug, index)] => {
+        let (repo, slug, index): (String, String, u32) = (a.get("repo")?, a.get("slug")?, a.get("index")?);
+        cx.frames.forget_shell(&repo, &slug, index);
+        term::close_shell_session(&cx.ctx, repo, slug, index, a.get("keep_cwd")?, &cx.ctx.shells)
+    },
     shell_open: Stream [stream, shell(repo, slug, index)] => {
         let (repo, slug, index): (String, String, u32) = (a.get("repo")?, a.get("slug")?, a.get("index")?);
         let at = term::shell_open(

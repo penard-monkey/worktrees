@@ -44,6 +44,8 @@ use super::identity::Identity;
 pub const EXPORTER_PAIR: &[u8] = b"EXPORTER-worktrees-pair-v1";
 
 /// The exporter label a step-up signature is bound with (§2.5).
+// A seam: slice 6's remote listener (and the shim's remote door) use it.
+#[cfg_attr(not(test), allow(dead_code))]
 pub const EXPORTER_STEPUP: &[u8] = b"EXPORTER-worktrees-stepup-v1";
 
 /// The one signature scheme: ECDSA P-256, SHA-256.
@@ -74,12 +76,15 @@ fn no_tls12() -> Error {
 
 /// The remote listener's client verifier: a live device's key, and a valid
 /// signature with it.
+// A seam: slice 6's remote listener (and the shim's remote door) use it.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug)]
 pub struct DeviceVerifier {
     devices: Arc<DeviceRegistry>,
 }
 
 impl DeviceVerifier {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(devices: Arc<DeviceRegistry>) -> Self {
         DeviceVerifier { devices }
     }
@@ -153,12 +158,15 @@ impl ClientCertVerifier for AnyKey {
 }
 
 /// A device's server verifier: the server's key is the pinned one.
+// A seam: slice 6's remote listener (and the shim's remote door) use it.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug)]
 pub struct PinnedServer {
     pin: String,
 }
 
 impl PinnedServer {
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new(pin: &str) -> Self {
         PinnedServer { pin: pin.to_string() }
     }
@@ -203,6 +211,8 @@ pub fn server_config(id: &Identity, clients: Arc<dyn ClientCertVerifier>) -> Res
 
 /// A device's config: TLS 1.3, the server pinned, its own key presented, no
 /// SNI, nothing resumed, no early data.
+// A seam: slice 6's remote listener (and the shim's remote door) use it.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn client_config(pin: &str, cert: CertificateDer<'static>, key: PrivateKeyDer<'static>) -> Result<Arc<ClientConfig>, String> {
     let mut c = ClientConfig::builder_with_provider(provider())
         .with_protocol_versions(&[&rustls::version::TLS13])
@@ -226,6 +236,8 @@ pub fn exporter(conn: &rustls::ServerConnection, label: &[u8]) -> Result<[u8; 32
 /// The device check again, after the handshake, from the peer's certificate
 /// against the live set (§4.2): a device revoked between the verifier and
 /// here is refused all the same.
+// A seam: slice 6's remote listener (and the shim's remote door) use it.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn admit_peer(conn: &rustls::ServerConnection, devices: &DeviceRegistry, now: i64) -> Result<Caller, ConnectRefusal> {
     let cert = conn.peer_certificates().and_then(|c| c.first()).ok_or(ConnectRefusal::Unknown)?;
     let pin = pin_of_cert(cert).ok_or(ConnectRefusal::Unknown)?;
@@ -362,6 +374,33 @@ mod tests {
         assert!(handshake(&rt, cfg.clone(), devices.clone(), id.pin(), &k).server.is_ok(), "re-enabled");
         devices.revoke(&Caller::console(), &Grant::everything(), &dev, worktrees_core::sysclock::now_epoch()).unwrap();
         assert!(handshake(&rt, cfg, devices, id.pin(), &k).server.is_err(), "revoked");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The step-up exporter (§2.5) is the session's own, the same at both
+    /// ends, and not the pairing one: a proof made for one purpose is not one
+    /// for the other.
+    #[test]
+    fn the_step_up_exporter_is_this_sessions_and_only_for_step_up() {
+        let rt = rt();
+        let (id, dir) = identity("stepup-exporter");
+        let cfg = server_config(&id, Arc::new(AnyKey)).unwrap();
+        let k = device_key();
+        let (server, client) = rt.block_on(async {
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = l.local_addr().unwrap();
+            let s = tokio::spawn(async move {
+                let (tcp, _) = l.accept().await.unwrap();
+                let tls = tokio_rustls::TlsAcceptor::from(cfg).accept(tcp).await.unwrap();
+                let c = tls.get_ref().1;
+                (exporter(c, EXPORTER_STEPUP).unwrap(), exporter(c, EXPORTER_PAIR).unwrap())
+            });
+            let tls = dial(addr, id.pin(), &k).await.unwrap();
+            let c = tls.get_ref().1.export_keying_material([0u8; 32], EXPORTER_STEPUP, None).unwrap();
+            (s.await.unwrap(), c)
+        });
+        assert_eq!(server.0, client, "both ends");
+        assert_ne!(server.0, server.1, "not the pairing exporter");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

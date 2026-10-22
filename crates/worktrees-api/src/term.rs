@@ -12,7 +12,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -413,6 +413,24 @@ impl Shell {
 /// as the tmux sessions.
 pub type ShellKey = (String, String, u32);
 
+/// Attach generations, unique across every shell this process runs — not
+/// counted from 1 per shell. A generation then names ONE attach of ONE shell
+/// instance: a holder of an old one (an attach since replaced, or a shell
+/// since closed and spawned again under the same key) never matches the live
+/// shell. `shell_detach` has always compared them for equality only; serve's
+/// step-up hold relies on the uniqueness.
+static NEXT_GEN: AtomicU64 = AtomicU64::new(1);
+
+fn next_gen() -> u64 {
+    NEXT_GEN.fetch_add(1, Ordering::Relaxed)
+}
+
+/// The generation of the attach that holds `(repo, slug, index)`'s live shell
+/// now, if there is one.
+pub fn shell_gen(repo: &str, slug: &str, index: u32, shells: &Shells) -> Option<u64> {
+    shells.0.lock().unwrap().get(&(repo.to_string(), slug.to_string(), index)).map(|s| s.gen)
+}
+
 #[derive(Default)]
 pub struct Shells(pub Mutex<HashMap<ShellKey, Shell>>);
 
@@ -521,7 +539,7 @@ pub fn shell_open(
         // SIGWINCH redraw land in neither); the suppression is what keeps a tab
         // flip from feeding the ring a redraw per attach.
         let _ = sh.resize(cols, rows);
-        sh.gen += 1;
+        sh.gen = next_gen();
         return Ok(ShellAttach { gen: sh.gen, replay, replay_cols: (replay > 0).then_some(was_cols) });
     }
 
@@ -658,8 +676,9 @@ pub fn shell_open(
         }
     });
 
-    map.insert(key, Shell { master: pair.master, writer, child, stop, ring, sink, gen: 1, size, dirty });
-    Ok(ShellAttach { gen: 1, replay, replay_cols })
+    let gen = next_gen();
+    map.insert(key, Shell { master: pair.master, writer, child, stop, ring, sink, gen, size, dirty });
+    Ok(ShellAttach { gen, replay, replay_cols })
 }
 
 pub fn shell_write(repo: String, slug: String, index: u32, data: Vec<u8>, shells: &Shells) -> Result<(), String> {
@@ -1655,6 +1674,16 @@ pub fn apply_tab_history_env(
 mod tests {
     /// gap 16's launch nonce: an id is never 0, and a launch's count starts
     /// far enough below the top that it does not wrap into small ids.
+    /// A shell's attach generation names one attach of one shell instance:
+    /// generations come from one counter for the whole process, so a shell
+    /// spawned again under the same key never reuses an old one.
+    #[test]
+    fn attach_generations_never_repeat_within_a_process() {
+        let a = next_gen();
+        let b = next_gen();
+        assert!(b > a, "{a} then {b}");
+    }
+
     #[test]
     fn a_launch_numbers_its_attaches_from_a_random_base() {
         for r in [0, 1, 2, u32::MAX / 2, u32::MAX / 2 + 1, u32::MAX - 1, u32::MAX, 0xdead_beef] {
