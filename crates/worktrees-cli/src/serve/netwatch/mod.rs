@@ -40,10 +40,18 @@
 //! resumes or moves by itself and a bind serve resumed on its own pauses —
 //! the host is asked once ([`Question::CannotConfirm`]). The record is
 //! completed ([`Action::Learn`]) only on the bind the host itself just chose
-//! with `remote_enable`, before anything has paused it: never after a resume,
-//! a move or a restart, which would write whatever network serve happened to
-//! be on into "home". (Found by an automated review of the first cut, which
-//! resumed on such a café and learned its router.)
+//! with `remote_enable`, before anything has paused it and within
+//! [`LEARN_WINDOW`] of the choice: never after a resume, a move or a restart,
+//! which would write whatever network serve happened to be on into "home",
+//! and never hours later, since a network can change under a live bind
+//! between two polls without the address ever being seen to leave. (Both
+//! found by automated reviews of the first cut, which resumed on such a café
+//! and learned its router.) `Instant` does not advance while the machine
+//! sleeps, on macOS or Linux, so a sleep inside the window does not use it
+//! up; the enable path closes that by reading the router BEFORE it records
+//! (slice 6: prompt the neighbour entry with one datagram to the router from
+//! the bound interface, then read), which leaves the window for the rare
+//! entry that still arrives late.
 //!
 //! **The transitions** (§4.1):
 //! - the address leaves its interface, the interface goes down, or is
@@ -343,6 +351,10 @@ pub enum Action {
 pub const MOVES_PER_HOUR: usize = 3;
 pub const MOVE_WINDOW: Duration = Duration::from_secs(3600);
 
+/// How long after `remote_enable` the host's confirmation may complete the
+/// record (module doc).
+pub const LEARN_WINDOW: Duration = Duration::from_secs(60);
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum State {
     /// Before the first poll.
@@ -377,21 +389,22 @@ pub struct Watch {
     /// A move was refused for the limit: none happen automatically until the
     /// host chooses (a new watch) or the recorded address returns.
     held_for_host: bool,
-    /// Bound where the host just chose, and nothing has paused or moved it
-    /// since: the only state in which the record may be completed.
-    confirmed: bool,
+    /// When the host chose this bind, while nothing has paused or moved it
+    /// since: the only state in which the record may be completed, and only
+    /// within [`LEARN_WINDOW`] of it.
+    confirmed: Option<Instant>,
 }
 
 impl Watch {
     /// `remote_enable`: the host chose this bind just now.
-    pub fn enabled(record: Record) -> Watch {
-        Watch { record, state: State::Starting, moves: VecDeque::new(), held_for_host: false, confirmed: true }
+    pub fn enabled(record: Record, at: Instant) -> Watch {
+        Watch { record, state: State::Starting, moves: VecDeque::new(), held_for_host: false, confirmed: Some(at) }
     }
 
     /// Serve starting on the bind `serve-remote.json` records: on whatever
     /// network the machine is on now, which the host has not looked at.
     pub fn restored(record: Record) -> Watch {
-        Watch { record, state: State::Starting, moves: VecDeque::new(), held_for_host: false, confirmed: false }
+        Watch { record, state: State::Starting, moves: VecDeque::new(), held_for_host: false, confirmed: None }
     }
 
     /// The record as it stands: a move changes its address, a learn its
@@ -414,7 +427,7 @@ impl Watch {
                 _ => self.pause(Why::Unconfirmed { addr: b.ip, iface: b.iface.clone() }, &mut out),
             },
             Seen::Held(b, Match::Unrecorded) => {
-                let on_the_hosts_bind = self.confirmed
+                let on_the_hosts_bind = self.confirmed.is_some_and(|at| now.saturating_duration_since(at) <= LEARN_WINDOW)
                     && match &self.state {
                         State::Starting => true,
                         State::Listening(cur) => *cur == b,
@@ -533,7 +546,7 @@ impl Watch {
                 let why = Why::InterfaceReplaced { iface: cur.iface.clone(), was: cur.index, now: b.index };
                 out.push(Action::Pause { why, starting: false });
                 out.push(Action::Resume(b.clone()));
-                self.confirmed = false;
+                self.confirmed = None;
             }
             State::Starting => out.push(Action::Start(b.clone())),
             State::Paused { .. } => out.push(Action::Resume(b.clone())),
@@ -568,11 +581,11 @@ impl Watch {
         out.push(Action::Move { from: self.record.addr, to: to.clone() });
         self.record.addr = to.ip;
         self.state = State::Listening(to);
-        self.confirmed = false;
+        self.confirmed = None;
     }
 
     fn pause(&mut self, why: Why, out: &mut Vec<Action>) {
-        self.confirmed = false;
+        self.confirmed = None;
         match &self.state {
             State::Listening(_) => out.push(Action::Pause { why, starting: false }),
             State::Starting => out.push(Action::Pause { why, starting: true }),
@@ -583,7 +596,7 @@ impl Watch {
     }
 
     fn ask(&mut self, why: Why, q: Question, out: &mut Vec<Action>) {
-        self.confirmed = false;
+        self.confirmed = None;
         match &self.state {
             State::Listening(_) => out.push(Action::Pause { why, starting: false }),
             State::Starting => out.push(Action::Pause { why, starting: true }),
@@ -644,8 +657,12 @@ mod tests {
 
     /// The enable path, for real: parse, the bind-time check, the record.
     fn enabled(addr: &str, iface: &str, s: &Snapshot) -> Watch {
+        enabled_at(addr, iface, s, Instant::now())
+    }
+
+    fn enabled_at(addr: &str, iface: &str, s: &Snapshot, at: Instant) -> Watch {
         let bound = at_bind(&parse_bind(addr, iface).unwrap(), &s.ifaces).unwrap();
-        Watch::enabled(Record::enable(&bound, s))
+        Watch::enabled(Record::enable(&bound, s), at)
     }
 
     fn b(ip_: &str, iface: &str, index: u32) -> Binding {
@@ -926,6 +943,34 @@ mod tests {
                 Action::Ask(Question::CannotConfirm { addr: ip("169.254.7.7"), iface: "bridge0".into() })
             ]
         );
+    }
+
+    /// The host's confirmation is about the network at the moment it chose
+    /// it, so it expires (found by a second automated review): a record
+    /// still incomplete after [`LEARN_WINDOW`] is never completed by itself,
+    /// however long the bind has stayed up, since a network can change under
+    /// a live bind between two polls.
+    #[test]
+    fn the_hosts_confirmation_expires_after_the_learn_window() {
+        let t0 = Instant::now();
+        let quiet = home(&["192.168.1.5/24"], None);
+        let known = home(&["192.168.1.5/24"], Some(GW));
+        let mut w = enabled_at("192.168.1.5", "en0", &quiet, t0);
+        assert_eq!(w.poll(t0, &quiet), [Action::Start(b("192.168.1.5", "en0", 14))]);
+        assert_eq!(w.poll(t0 + LEARN_WINDOW / 2, &quiet), []);
+        let mut late = enabled_at("192.168.1.5", "en0", &quiet, t0);
+        late.poll(t0, &quiet);
+        assert!(matches!(w.poll(t0 + LEARN_WINDOW, &known)[..], [Action::Learn(_)]), "inside the window");
+        let incomplete = late.record().clone();
+        let after = t0 + LEARN_WINDOW + Duration::from_secs(1);
+        assert_eq!(
+            late.poll(after, &known),
+            [
+                pause(Why::Unconfirmed { addr: ip("192.168.1.5"), iface: "en0".into() }),
+                Action::Ask(Question::CannotConfirm { addr: ip("192.168.1.5"), iface: "en0".into() })
+            ]
+        );
+        assert_eq!(late.record(), &incomplete);
     }
 
     /// A café that also hands out 192.168.1.x: everything matches but the
