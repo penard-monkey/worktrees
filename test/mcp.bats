@@ -227,6 +227,117 @@ print("ok")
   [ ! -d "$REPO/.worktrees/agent-invalid" ]
 }
 
+# ── open_place: (re)open an existing place, optionally re-briefing it ───────
+# String checks go through grep: a mid-test `[[ ]]` asserts nothing (AGENTS.md).
+
+OPENER="Read .planning/brief.md and begin."
+# The last frame's result: isError on the first line, then every text item.
+last_result() { jq_out 'import sys,json
+f=[json.loads(l) for l in sys.stdin.read().splitlines() if l.strip()]
+r=f[-1]["result"]; print(str(r["isError"]).lower())
+for c in r["content"]: print(c["text"])'; }
+claude_ran() {
+  local d m
+  for d in "$REPO/.worktrees/$1" "$(cd "$REPO/.worktrees/$1" && pwd -P)"; do
+    m="$(printf '%s' "$d" | sed 's/[^A-Za-z0-9]/-/g')"
+    mkdir -p "$HOME/.claude/projects/$m" && : > "$HOME/.claude/projects/$m/s.jsonl"
+  done
+}
+
+@test "open_place is a --mutations tool, and re-briefs a place where claude has run" {
+  export WORKTREES_AI_CMD=claude
+  run_wt new agent-ob --brief "old task" --no-tmux
+  [ "$status" -eq 0 ]
+  claude_ran agent-ob
+  mcp "" '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+  ! grep -qF '"open_place"' <<<"$output" || false
+  mcp --mutations '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+  grep -qF '"open_place"' <<<"$output"
+  mcp --mutations '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"open_place","arguments":{"slug":"agent-ob","brief":"# New\n- do z"}}}'
+  [ "$(last_result | head -n1)" = false ]
+  [ "$(cat "$REPO/.worktrees/agent-ob/.planning/brief.md")" = $'# New\n- do z' ]
+  grep -qE "claude --name .*repo-agent-ob.* .*Read \.planning/brief\.md and begin\." <<<"$(tmux_pane0_cmd repo-agent-ob)"
+  ! grep -qF "do z" <<<"$(tmux_pane0_cmd repo-agent-ob)" || false
+}
+
+@test "open_place without a brief opens like open, and its result carries the re-brief warning" {
+  export WORKTREES_AI_CMD=claude
+  run_wt new agent-ow --brief "do x" --no-tmux
+  claude_ran agent-ow
+  mcp --mutations '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"open_place","arguments":{"slug":"agent-ow"}}}'
+  [ "$(last_result | head -n1)" = false ]
+  tmux_session_exists repo-agent-ow
+  ! grep -qF "$OPENER" <<<"$(tmux_pane0_cmd repo-agent-ow)" || false
+  grep -qF "this place has a brief (.planning/brief.md), but claude has run here before, so it won't be told to read it" <<<"$(last_result)"
+  # The MCP result names the TOOL to re-brief with, not only the CLI.
+  grep -qF "open_place with brief" <<<"$(last_result)"
+}
+
+@test "open_place refuses a live session, a blank or non-string brief, and a bad model — writing nothing" {
+  export WORKTREES_AI_CMD=claude
+  run_wt new agent-ol --brief "old task" --no-attach
+  [ "$status" -eq 0 ]
+  tmux_session_exists repo-agent-ol
+  : > "$TMUX_LOG"
+  mcp --mutations '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"open_place","arguments":{"slug":"agent-ol","brief":"new task"}}}'
+  [ "$(last_result | head -n1)" = true ]
+  grep -qF "already running in 'agent-ol'" <<<"$(last_result)"
+  for args in '{"slug":"agent-ol","brief":"  "}' '{"slug":"agent-ol","brief":7}' \
+              '{"slug":"agent-ol","model":"x; touch '"$BATS_TEST_TMPDIR"'/PWNED"}' \
+              '{"slug":"agent-ol","model":4}' '{"slug":"agent-ol","force":true,"provider":"other"}' \
+              '{"slug":"agent-ol","provider":"other"}' '{"slug":"nope","brief":"x"}'; do
+    mcp --mutations '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"open_place","arguments":'"$args"'}}'
+    [ "$(last_result | head -n1)" = true ] || { echo "accepted: $args"; false; }
+  done
+  [ ! -e "$BATS_TEST_TMPDIR/PWNED" ]
+  [ "$(cat "$REPO/.worktrees/agent-ol/.planning/brief.md")" = "old task" ]
+  ! grep -qE 'new-session|kill-session' "$TMUX_LOG" || false
+}
+
+@test "open_place composes provider and brief: codex starts on the opener" {
+  install_fake_cmd codex
+  export WORKTREES_AI_CMD=claude
+  run_wt new agent-oc --no-tmux
+  mcp --mutations '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"open_place","arguments":{"slug":"agent-oc","provider":"codex","brief":"Review this branch"}}}'
+  [ "$(last_result | head -n1)" = false ]
+  grep -qF "'$OPENER'" <<<"$(tmux_pane0_cmd 'repo-agent-oc~agent~codex')"
+  [ "$(cat "$REPO/.worktrees/agent-oc/.planning/brief.md")" = "Review this branch" ]
+}
+
+# §7.5: an agent this server starts is launched for the caller of the place the
+# server runs in, so a scoped device's lane cannot start, or re-brief, a lane
+# with the host's reach. A launch with no serve caller (the CLI) clears it.
+@test "open_place and create_worktree launch for the server's own lane's caller; the CLI clears it" {
+  export WORKTREES_AI_CMD=claude
+  run_wt new agent-oi --brief "old task" --no-tmux
+  [ "$status" -eq 0 ]
+  local phone='{"principal":"owner","device":{"kind":"paired","id":"phone"},"cross_project":"off"}'
+  python3 - "$REPO/.worktrees.places.json" "$phone" <<'EOF'
+import json, os, sys
+p, stamp = sys.argv[1], json.loads(sys.argv[2])
+d = json.load(open(p)) if os.path.exists(p) and os.path.getsize(p) else {"version": 1, "places": {}}
+d.setdefault("places", {}).setdefault("(main)", {})["launched_by"] = stamp
+json.dump(d, open(p, "w"))
+EOF
+  stamp_of() { python3 -c 'import json,sys; print(json.dumps(json.load(open(sys.argv[1]))["places"].get(sys.argv[2], {}).get("launched_by"), sort_keys=True))' "$REPO/.worktrees.places.json" "$1"; }
+  local want; want="$(python3 -c 'import json,sys; print(json.dumps(json.loads(sys.argv[1]), sort_keys=True))' "$phone")"
+  # The server runs in (main), whose stamp is the phone's.
+  mcp --mutations '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"open_place","arguments":{"slug":"agent-oi","brief":"new task"}}}'
+  [ "$(last_result | head -n1)" = false ]
+  tmux_session_exists repo-agent-oi
+  [ "$(stamp_of agent-oi)" = "$want" ]
+  mcp --mutations '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"create_worktree","arguments":{"branch":"agent-oj"}}}'
+  [ "$(last_result | head -n1)" = false ]
+  [ "$(stamp_of agent-oj)" = "$want" ]
+  # The CLI's launch has no serve caller: it clears the stamp, --brief included.
+  run_wt close agent-oi
+  [ "$status" -eq 0 ]
+  printf 'cli task\n' > "$BATS_TEST_TMPDIR/b.md"
+  run_wt open agent-oi --brief "$BATS_TEST_TMPDIR/b.md" --no-attach
+  [ "$status" -eq 0 ]
+  [ "$(stamp_of agent-oi)" = null ]
+}
+
 @test "place_status reports the claude session(s) working in the place" {
   run_wt new feat-ag --no-tmux
   local q='{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"place_status","arguments":{"slug":"feat-ag"}}}'

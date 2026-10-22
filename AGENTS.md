@@ -42,6 +42,15 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   server's own place) — Claude↔Claude still uses Claude's own messaging, and
   Codex activity for `place_status`/`wait` and the nav dots comes from ONE
   derivation, `worktrees_core::activity`.
+  **Re-briefing an existing place needs `open --brief` (MCP `open_place`
+  with `brief`); a plain `open` never re-sends the opener.** The opener goes
+  out on a harness's FIRST launch in a place (`Adapter::never_launched`: it
+  exists for a `new --brief` whose launch was refused), so rewriting
+  `.planning/brief.md` and reopening started four lanes blank for an hour on
+  2026-10-22, while every surface showed the brief as their plan. `open` now
+  warns in that case (`ops::opener_plan`). A re-brief refuses a live session
+  and writes nothing, because the opener reaches only a session the launch
+  CREATES (`ops::session_to_reuse`): close it, or message the agent.
 
 - **`worktrees serve` (Server Edition, Phase 1) hosts the api behind an
   authenticated WebSocket on `127.0.0.1`**: `{id, cmd, args}` in, `{id, ok}` /
@@ -141,10 +150,10 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   session exists, because the lane's `worktrees mcp` reads it ONCE, at start,
   to cap its reach. Every other launch (CLI, an MCP tool with nothing to
   inherit) passes `None`, which CLEARS the stamp, or a CLI relaunch would keep
-  counting as the device's lane. An MCP `create_worktree` passes its own
-  lane's stamp, so a scoped lane cannot start an unscoped one through a tool;
-  through its shell it still can (the O10 overlap; host policy is the
-  control). The device-lane cap counts places whose session is OPEN
+  counting as the device's lane. An MCP `create_worktree` or `open_place`
+  passes its own lane's stamp, so a scoped lane cannot start an unscoped one
+  through a tool; through its shell it still can (the O10 overlap; host policy
+  is the control). The device-lane cap counts places whose session is OPEN
   (`PaneList::sessions_in`), not ones running an agent: a new pane is the
   shell for a moment before it execs the agent, and the next device launch,
   queued behind this one, counts exactly then. `provenance.rs`'s test reads

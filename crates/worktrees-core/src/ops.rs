@@ -350,6 +350,27 @@ fn lock_agent_switch(main_root: &str) -> Result<File, String> {
     Ok(file)
 }
 
+/// The live session `launch` REUSES instead of creating one for `session_in`
+/// in `wt`: that session, else (for a name that is not a provider sidecar) one
+/// adopted by pane cwd. `None` means the launch creates a session — the only
+/// kind an opener reaches. `launch` asks this after closing the place's other
+/// providers' sessions, and `open --brief` asks it before; the answers agree,
+/// because the sessions closed are sidecars (never adopted) or the canonical
+/// one when `session_in` is a sidecar (when nothing is adopted).
+pub fn session_to_reuse(p: &Project, wt: &str, session_in: &str, ai_word: &str) -> Option<String> {
+    if tmux::session_exists(session_in) {
+        return Some(session_in.to_string());
+    }
+    if crate::provider::is_sidecar(session_in) {
+        return None;
+    }
+    // Adopting MAIN must skip panes under `.worktrees/` — worktree dirs nest
+    // inside the main root, so without the exclusion opening main could
+    // adopt (and attach to) a worktree's session instead of creating main's.
+    let exclude = if wt == p.main_root { Some(p.wt_root.as_str()) } else { None };
+    tmux::worktree_session_excluding(wt, ai_word, exclude).filter(|s| tmux::session_exists(s))
+}
+
 // ── (re)open a worktree's tmux session, then attach ──────────────────────────
 // Returns 0 on success (session live / adopted / attached), 1 when tmux refuses
 // to create the session (the reason is surfaced via ui.error — the app shows it
@@ -373,9 +394,14 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
         }
     } else { None };
     let place_slug = if wt == p.main_root { "(main)".to_string() } else { basename(wt) };
+    // A launch carrying the opener is retried WITH the brief: where the harness
+    // has run before, a plain `open --force` would start it blank.
+    let brief_retry = ai.opener.is_some().then(|| Path::new(wt).join(BRIEF_PATH));
     let soft_refusal = |ui: &mut dyn Ui, why: &str| -> i32 {
         let again = if place_slug == "(main)" {
             "re-run with --force (the app: Launch anyway)".to_string()
+        } else if let Some(brief) = &brief_retry {
+            format!("worktrees open {place_slug} --force --brief {}", brief.display())
         } else {
             format!("worktrees open {place_slug} --force")
         };
@@ -474,17 +500,9 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
             ui.info(&format!("closed the other agent session '{name}' before starting {ai_word}"));
         }
     }
-    let mut session = session_in.to_string();
-    if !tmux::session_exists(&session) && !crate::provider::is_sidecar(&session) {
-        // Adopting MAIN must skip panes under `.worktrees/` — worktree dirs nest
-        // inside the main root, so without the exclusion opening main could
-        // adopt (and attach to) a worktree's session instead of creating main's.
-        let exclude = if wt == p.main_root { Some(p.wt_root.as_str()) } else { None };
-        if let Some(existing) = tmux::worktree_session_excluding(wt, &ai_word, exclude) {
-            session = existing;
-        }
-    }
-    if tmux::session_exists(&session) {
+    let reused = session_to_reuse(p, wt, session_in, &ai_word);
+    let session = reused.clone().unwrap_or_else(|| session_in.to_string());
+    if reused.is_some() {
         // INFO, not warn. Finding the session already up is the normal, healthy
         // outcome of reopening a place — it is what a durable place IS — so it is
         // not something the user has to act on. At Warn severity it rode out
@@ -503,6 +521,17 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
         // splitting a live agent's pane is not this flag's job.
         if spare_shell {
             ui.info("--spare applies only when the session is created; this one keeps its panes (close it and open again to get the split).");
+        }
+        // The opener reaches only a session this launch CREATES. `open --brief`
+        // refuses a live session before it writes anything; `new --brief` on a
+        // place that already exists gets here with the brief written and its
+        // agent never told — which used to be silent.
+        if ai.opener.is_some() {
+            ui.warn(&format!(
+                "the brief was written, but tmux session '{session}' is already running here, so its agent was not told to read it \
+                 — to start it on the brief: `worktrees close {place_slug}`, then `worktrees open {place_slug} --brief {}`; or message the agent",
+                Path::new(wt).join(BRIEF_PATH).display()
+            ));
         }
     } else {
         ui.header(&format!("Opening tmux session '{session}'"));
@@ -828,6 +857,68 @@ fn write_brief(wt: &str, text: &str) -> std::io::Result<()> {
         body.push('\n');
     }
     crate::fsx::write_atomic(&path, body.as_bytes(), None)
+}
+
+/// Write a brief and say so — `new --brief` and `open --brief` alike. A
+/// failure is loud and the caller's launch must not go ahead: a session
+/// started on "read the brief" with no brief sits asking what to do.
+fn put_brief(ui: &mut dyn Ui, wt: &str, text: &str) -> bool {
+    if let Err(e) = write_brief(wt, text) {
+        ui.error(&format!("could not write {BRIEF_PATH}: {e}"));
+        return false;
+    }
+    ui.info(&format!("brief: {BRIEF_PATH}"));
+    // Belongs to the session, never to the branch. Real git answers this
+    // (the bats harness runs real git), so the warning is exact, not a guess.
+    if !git::git_ok(wt, &["check-ignore", "-q", BRIEF_PATH]) {
+        ui.warn(".planning/ is not ignored by git in this repo — add `.planning/` to .gitignore (or .git/info/exclude) so the brief never lands in a commit");
+    }
+    true
+}
+
+/// The text of `open`'s warning when a place has a brief its agent will not
+/// be told about. MCP's `open_place` finds it in a result by this phrase.
+pub const BRIEF_SKIPPED: &str = "so it won't be told to read it";
+
+/// Whether `open` hands the agent `BRIEF_OPENER`, and whether it has to say
+/// that it does not.
+#[derive(Debug, PartialEq, Eq)]
+pub enum OpenerPlan {
+    Send,
+    Skip,
+    /// The place has a brief and this harness has run there before, so the
+    /// opener is not sent — say so (`BRIEF_SKIPPED`), naming `open --brief`.
+    Warn,
+}
+
+/// `open`'s opener decision. `rebrief` (`--brief`) always sends it; the caller
+/// has already refused a re-brief that could not reach a NEW session (a live
+/// one, a resume, no agent). Otherwise the opener goes only to a fresh launch
+/// of a harness that has never run in a place with a brief — a `new --brief`
+/// whose launch was refused — and a fresh launch of one that HAS is the silent
+/// case this warns about. A reused session starts nothing, so nothing is
+/// skipped. The two questions that cost something are closures, asked only
+/// when the answer matters: `reuses` asks tmux, and `never_launched` can walk
+/// a harness's whole history (Codex's), on an `open` the app makes constantly.
+pub fn opener_plan(
+    rebrief: bool,
+    resume: bool,
+    agent: bool,
+    has_brief: bool,
+    reuses: impl FnOnce() -> bool,
+    never_launched: impl FnOnce() -> bool,
+) -> OpenerPlan {
+    if rebrief {
+        return OpenerPlan::Send;
+    }
+    if resume || !agent || !has_brief || reuses() {
+        return OpenerPlan::Skip;
+    }
+    if never_launched() {
+        OpenerPlan::Send
+    } else {
+        OpenerPlan::Warn
+    }
 }
 
 /// Say what an exclude write came to — only when it wrote or failed; an
@@ -1168,15 +1259,8 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     // fatal — a session launched on "read the brief" with no brief would sit
     // asking what to do, which is exactly the silent shape this exists to end.
     if let Some(text) = brief.as_deref() {
-        if let Err(e) = write_brief(&wt, text) {
-            ui.error(&format!("could not write {BRIEF_PATH}: {e}"));
+        if !put_brief(ui, &wt, text) {
             return 1;
-        }
-        ui.info(&format!("brief: {BRIEF_PATH}"));
-        // Belongs to the session, never to the branch. Real git answers this
-        // (the bats harness runs real git), so the warning is exact, not a guess.
-        if !git::git_ok(&wt, &["check-ignore", "-q", BRIEF_PATH]) {
-            ui.warn(".planning/ is not ignored by git in this repo — add `.planning/` to .gitignore (or .git/info/exclude) so the brief never lands in a commit");
         }
     }
 
@@ -1324,38 +1408,64 @@ pub fn cmd_switch(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
 }
 
 // ── open ─────────────────────────────────────────────────────────────────────
+
+/// What `open` was asked to do. The CLI's argv (`cmd_open`) and MCP's
+/// `open_place` both arrive at `open_place`, so a re-brief follows one set of
+/// rules whichever door it came through.
+#[derive(Debug, Default, Clone)]
+pub struct OpenRequest {
+    /// A place's slug, or a branch some place holds.
+    pub name: String,
+    /// `--ai`: a provider word; `None` is the project's AI command.
+    pub ai: Option<String>,
+    pub model: Option<String>,
+    pub force: bool,
+    pub resume: bool,
+    pub attach: bool,
+    /// `--spare`: a shell pane beside the agent, on a session this creates.
+    pub spare: bool,
+    /// A re-brief: the brief's TEXT (the CLI has already read `--brief
+    /// <file>`). Written to `BRIEF_PATH`, and the launch opens on
+    /// `BRIEF_OPENER` whether or not the harness has run in the place before.
+    pub brief: Option<String>,
+}
+
 pub fn cmd_open(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
-    let (mut name, mut ai_flag, mut resume, mut do_attach) = (String::new(), None::<String>, false, true);
-    let (mut model, mut force) = (None::<String>, false);
     // Single pane by default; `--spare` opts into a spare shell as pane 1.
     // `--no-spare` (the old opt-out) stays accepted; the last one given wins.
-    let mut spare_shell = false;
+    let mut req = OpenRequest { attach: true, ..Default::default() };
+    // `--brief <file>`, or `-` for stdin: a FILE here, where `new --brief`
+    // takes the text — a re-brief is usually a document already written.
+    let mut brief_src: Option<String> = None;
     let mut expect = "";
     let (opts, rest) = crate::argv::split_options(args);
     let mut pos: Vec<&str> = Vec::new();
     for a in opts {
         if !expect.is_empty() {
-            if a.starts_with('-') {
+            if a.starts_with('-') && !(expect == "brief" && a == "-") {
                 ui.error(&format!("--{expect} needs a value (got '{a}')"));
                 return 1;
             }
             match expect {
-                "ai" => ai_flag = Some(a.clone()),
-                _ => model = Some(a.clone()),
+                "ai" => req.ai = Some(a.clone()),
+                "brief" => brief_src = Some(a.clone()),
+                _ => req.model = Some(a.clone()),
             }
             expect = "";
             continue;
         }
         match a.as_str() {
-            "--no-attach" => do_attach = false,
-            "--spare" => spare_shell = true,
-            "--no-spare" => spare_shell = false,
-            "-r" | "--resume" => resume = true,
-            "--force" => force = true,
+            "--no-attach" => req.attach = false,
+            "--spare" => req.spare = true,
+            "--no-spare" => req.spare = false,
+            "-r" | "--resume" => req.resume = true,
+            "--force" => req.force = true,
             "--ai" => expect = "ai",
-            s if s.starts_with("--ai=") => ai_flag = Some(s["--ai=".len()..].to_string()),
+            s if s.starts_with("--ai=") => req.ai = Some(s["--ai=".len()..].to_string()),
             "--model" => expect = "model",
-            s if s.starts_with("--model=") => model = Some(s["--model=".len()..].to_string()),
+            s if s.starts_with("--model=") => req.model = Some(s["--model=".len()..].to_string()),
+            "--brief" => expect = "brief",
+            s if s.starts_with("--brief=") => brief_src = Some(s["--brief=".len()..].to_string()),
             s if s.starts_with('-') => {
                 ui.error(&format!("Unknown flag: {s}"));
                 return 1;
@@ -1369,13 +1479,76 @@ pub fn cmd_open(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     }
     pos.extend(rest.iter().map(String::as_str));
     for s in pos {
-        if name.is_empty() {
-            name = s.to_string();
+        if req.name.is_empty() {
+            req.name = s.to_string();
         } else {
             ui.error(&format!("Too many args: {s}"));
             return 1;
         }
     }
+    if let Some(src) = brief_src {
+        match read_brief_source(&src) {
+            Ok(text) => req.brief = Some(text),
+            Err(e) => {
+                ui.error(&e);
+                return 1;
+            }
+        }
+    }
+    open_place(p, ui, &req)
+}
+
+/// `open --brief <src>`: the file's text, or stdin's for `-`.
+fn read_brief_source(src: &str) -> Result<String, String> {
+    use std::io::Read;
+    if src == "-" {
+        let mut text = String::new();
+        std::io::stdin().read_to_string(&mut text).map_err(|e| format!("could not read the brief from stdin: {e}"))?;
+        return Ok(text);
+    }
+    std::fs::read_to_string(src).map_err(|e| format!("could not read the brief {src}: {e}"))
+}
+
+/// Why a re-brief cannot reach a NEW session of the agent, or `None`. Asked
+/// before the brief is written, so a refusal leaves the file saying what the
+/// agent there was last told.
+///
+/// A live session is refused rather than typed into. Claude, the usual
+/// harness, is never typed into by design (`send` hands back its session name
+/// for Claude's own messaging), a running agent is mid-way through the OLD
+/// task, and replacing it would end that agent — which `close` asks for in
+/// its own words. So: close it, or message it; this does neither for you.
+fn rebrief_refusal(p: &Project, slug: &str, wt: &str, canonical: &str, ai_cmd: &str, resume: bool, text: &str) -> Option<String> {
+    if text.trim().is_empty() {
+        return Some("the brief is empty — say what the agent is to do".into());
+    }
+    if resume {
+        return Some(
+            "--brief starts the agent fresh on the brief; it does not combine with --resume, which \
+             continues the conversation the old brief started"
+                .into(),
+        );
+    }
+    let Some(adapter) = crate::harness::for_cmd(ai_cmd).filter(|_| !ai_cmd.is_empty()) else {
+        return Some(format!(
+            "--brief needs an agent that can be told to read it ({}); the AI command here is `{ai_cmd}`",
+            crate::provider::choices()
+        ));
+    };
+    let word = adapter.provider().match_word;
+    let live = session_to_reuse(p, wt, &agent_session_name(canonical, word), word)?;
+    Some(format!(
+        "tmux session '{live}' is already running in '{slug}', and --brief starts a NEW session on the brief — \
+         it never types into a live one, so nothing was written. Close it first (`worktrees close {slug}`, \
+         which ends its agent) and run this again, or give the running agent the new work as a message"
+    ))
+}
+
+/// Enter a place: write the brief when re-briefing, launch or reuse its
+/// session, attach when asked. The body of `worktrees open` and of MCP's
+/// `open_place`.
+pub fn open_place(p: &Project, ui: &mut dyn Ui, req: &OpenRequest) -> i32 {
+    let name = req.name.as_str();
     if name.is_empty() {
         ui.error("open needs a worktree (slug or branch). See: worktrees ls");
         return 1;
@@ -1384,10 +1557,10 @@ pub fn cmd_open(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         ui.error("tmux not found");
         return 1;
     }
-    let mut slug = slugify(&name);
+    let mut slug = slugify(name);
     let mut wt = format!("{}/{}", p.wt_root_dir(), slug);
     if !Path::new(&wt).is_dir() {
-        match p.wt_for_branch(strip_origin(&name)) {
+        match p.wt_for_branch(strip_origin(name)) {
             Some(holder) => {
                 slug = basename(&holder);
                 wt = holder;
@@ -1400,36 +1573,59 @@ pub fn cmd_open(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         }
     }
     let session = p.session_name(&slug);
-    let mut ai_cmd = crate::config::resolve_ai_cmd(ai_flag.as_deref());
-    if let Err(e) = check_model(model.as_deref(), &ai_cmd) {
+    let mut ai_cmd = crate::config::resolve_ai_cmd(req.ai.as_deref());
+    if let Err(e) = check_model(req.model.as_deref(), &ai_cmd) {
         ui.error(&e);
         return 1;
     }
-    let (allowed, resume_id) = if resume && !ai_cmd.is_empty() {
+    if let Some(text) = req.brief.as_deref() {
+        if let Some(why) = rebrief_refusal(p, &slug, &wt, &session, &ai_cmd, req.resume, text) {
+            ui.error(&why);
+            return 1;
+        }
+        if !put_brief(ui, &wt, text) {
+            return 1;
+        }
+    }
+    let (allowed, resume_id) = if req.resume && !ai_cmd.is_empty() {
         resume_plan(p, &ai_cmd, &wt)
     } else {
         (false, None)
     };
-    let resume = resume && allowed;
+    let resume = req.resume && allowed;
     if resume {
         ai_cmd = resume_command(&ai_cmd, &wt);
     }
     let mut ai = ai_launch_for(p, ui, &wt, &ai_cmd);
-    (ai.model, ai.resume, ai.force) = (model, resume, force);
+    (ai.model, ai.resume, ai.force) = (req.model.clone(), resume, req.force);
     ai.resume_id = resume_id;
-    // `new --brief` whose launch was REFUSED (pi's model host down, a spent
-    // Claude/Codex window) wrote the brief and started nothing; the
-    // launch-anyway that follows is this `open`. Without the opener that
-    // agent would start blank and the brief would never be read — so a first
-    // fresh launch of such a harness in a place with a brief gets the same
-    // opener `new` would have passed.
-    if !resume && !ai.cmd.is_empty() && Path::new(&wt).join(BRIEF_PATH).is_file() {
-        if crate::harness::by_word(&ai.match_word).is_some_and(|a| a.never_launched(p, &slug)) {
-            ai.opener = Some(BRIEF_OPENER.to_string());
-        }
-    }
     let session = agent_session_name(&session, &ai.match_word);
-    launch(p, ui, &wt, &session, "", &ai, do_attach, spare_shell)
+    // Without `--brief`: `new --brief` whose launch was REFUSED (pi's model
+    // host down, a spent Claude/Codex window) wrote the brief and started
+    // nothing; the launch-anyway that follows is this `open`, and its first
+    // fresh launch of such a harness gets the opener `new` would have passed.
+    // Where the harness HAS run, the opener is not re-sent — and that is said,
+    // because a brief rewritten in place reads as the plan on every surface
+    // while the agent starts blank (four lanes, one idle hour).
+    let adapter = crate::harness::by_word(&ai.match_word);
+    let plan = opener_plan(
+        req.brief.is_some(),
+        resume,
+        adapter.is_some() && !ai.cmd.is_empty(),
+        Path::new(&wt).join(BRIEF_PATH).is_file(),
+        || session_to_reuse(p, &wt, &session, &ai.match_word).is_some(),
+        || adapter.is_some_and(|a| a.never_launched(p, &slug)),
+    );
+    match plan {
+        OpenerPlan::Send => ai.opener = Some(BRIEF_OPENER.to_string()),
+        OpenerPlan::Warn => ui.warn(&format!(
+            "this place has a brief ({BRIEF_PATH}), but {} has run here before, {BRIEF_SKIPPED} — to re-brief it: \
+             `worktrees close {slug}`, then `worktrees open {slug} --brief <file>`",
+            adapter.map_or("the agent", |a| a.provider().id)
+        )),
+        OpenerPlan::Skip => {}
+    }
+    launch(p, ui, &wt, &session, "", &ai, req.attach, req.spare)
 }
 
 /// `--model` is data for a harness's `model_arg`: it must pass
@@ -3949,6 +4145,53 @@ mod tests {
         let locked = Command::new("git").arg("-C").arg(&base).args(["worktree", "list", "--porcelain"]).output().unwrap();
         assert!(!String::from_utf8_lossy(&locked.stdout).contains("locked"), "and not locked: {out}");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `open`'s opener: a re-brief always sends it; otherwise only a fresh
+    /// launch, of a known agent, in a place with a brief, that the harness has
+    /// never run in — and the same launch where it HAS run is the one that
+    /// must say it is not sending it (four lanes sat blank for an hour when it
+    /// did not). The costly questions are not asked when the answer is known.
+    #[test]
+    fn the_opener_goes_to_a_rebrief_or_a_first_launch_and_a_skip_is_said() {
+        use OpenerPlan::{Send, Skip, Warn};
+        let never = || -> bool { panic!("never_launched asked when the answer was already known") };
+        let no_reuse = || -> bool { panic!("tmux asked when the answer was already known") };
+        // --brief: sent, whatever else is true (its refusals ran before).
+        assert_eq!(opener_plan(true, false, true, true, no_reuse, never), Send);
+        // No reason to send one, nothing to say.
+        assert_eq!(opener_plan(false, true, true, true, no_reuse, never), Skip, "a resume continues the conversation");
+        assert_eq!(opener_plan(false, false, false, true, no_reuse, never), Skip, "no agent the opener reaches");
+        assert_eq!(opener_plan(false, false, true, false, no_reuse, never), Skip, "no brief");
+        assert_eq!(opener_plan(false, false, true, true, || true, never), Skip, "a reused session starts nothing");
+        // A fresh launch in a briefed place: the harness's history decides.
+        assert_eq!(opener_plan(false, false, true, true, || false, || true), Send, "never ran: a refused `new --brief`");
+        assert_eq!(opener_plan(false, false, true, true, || false, || false), Warn, "ran before: the silent skip");
+    }
+
+    /// `open --brief`'s refusals that need no tmux: each is said before
+    /// anything is written. (The live-session one is bats', with the fake tmux.)
+    #[test]
+    fn a_rebrief_is_refused_before_anything_is_written() {
+        let sc = scratch_repo("rebrief");
+        let p = Project::discover(&sc).unwrap();
+        let wt = sc.join(".worktrees/lane");
+        let wt = wt.to_string_lossy();
+        let refuse = |ai: &str, resume: bool, text: &str| rebrief_refusal(&p, "lane", &wt, "repo-lane", ai, resume, text);
+        assert!(refuse("claude", false, " \n ").unwrap().contains("the brief is empty"));
+        assert!(refuse("claude", true, "do x").unwrap().contains("does not combine with --resume"));
+        assert!(refuse("", false, "do x").unwrap().contains("--brief needs an agent"));
+        assert!(refuse("fake-ai", false, "do x").unwrap().contains("--brief needs an agent"));
+        assert!(!wt.is_empty() && !Path::new(&*wt).join(BRIEF_PATH).exists(), "nothing written");
+        // The parser: `-` is stdin, any other `-`-led value is a forgotten one,
+        // and a file that cannot be read stops the open before it starts.
+        let (rc, out) = run_cmd(&p, cmd_open, &["lane", "--brief", "--force"]);
+        assert_eq!(rc, 1);
+        assert!(out.contains("--brief needs a value (got '--force')"), "{out}");
+        let (rc, out) = run_cmd(&p, cmd_open, &["lane", "--brief=/nonexistent/brief.md"]);
+        assert_eq!(rc, 1);
+        assert!(out.contains("could not read the brief /nonexistent/brief.md"), "{out}");
+        let _ = std::fs::remove_dir_all(&sc);
     }
 
     /// `new --brief` (MCP `create_worktree` with a brief, an orchestrator's

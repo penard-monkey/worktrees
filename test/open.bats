@@ -311,3 +311,170 @@ session_count() {
   grep -qx '|attach' "$TMUX_LOG.globals"
   ! grep -q -- '-N' "$TMUX_LOG.globals"
 }
+
+# ── re-brief: open --brief ───────────────────────────────────────────────────
+# An orchestrator rewrote .planning/brief.md in four places and ran a plain
+# `open --ai claude`: claude had run in each before, so `open` passed no opener
+# and all four sat blank for an hour. `open --brief` is the explicit re-brief;
+# a plain open says when it is NOT re-sending the opener.
+#
+# String checks go through `has`/`lacks`: a standalone `[[ ]]` that is not a
+# test's last line asserts nothing in bats (AGENTS.md).
+
+OPENER="Read .planning/brief.md and begin."
+has()   { grep -qF -- "$1" <<<"$2" || { printf 'missing: %s\nin: %s\n' "$1" "$2"; return 1; }; }
+lacks() { ! grep -qF -- "$1" <<<"$2" || { printf 'unexpected: %s\nin: %s\n' "$1" "$2"; return 1; }; }
+
+# What `claude_session_present` reads: a transcript under claude's project dir,
+# for both spellings of the worktree path (macOS's /var vs /private/var).
+claude_has_run() {
+  local d m
+  for d in "$REPO/.worktrees/$1" "$(cd "$REPO/.worktrees/$1" && pwd -P)"; do
+    m="$(printf '%s' "$d" | sed 's/[^A-Za-z0-9]/-/g')"
+    mkdir -p "$HOME/.claude/projects/$m" && : > "$HOME/.claude/projects/$m/s.jsonl"
+  done
+}
+
+@test "open --brief: where claude has run, writes the brief and passes the opener" {
+  export WORKTREES_AI_CMD=claude
+  make_worktree feat-rb --brief "old task"
+  claude_has_run feat-rb
+  printf '# New task\n- do z\n' > "$BATS_TEST_TMPDIR/brief.md"
+  run_wt open feat-rb --brief "$BATS_TEST_TMPDIR/brief.md" --no-attach
+  [ "$status" -eq 0 ]
+  [ "$(cat "$REPO/.worktrees/feat-rb/.planning/brief.md")" = $'# New task\n- do z' ]
+  has "brief: .planning/brief.md" "$output"
+  # pane0 is shell-quoted inside `-ic '…'`, hence the pattern
+  grep -qE "claude --name .*repo-feat-rb.* .*Read \.planning/brief\.md and begin\." <<<"$(tmux_pane0_cmd repo-feat-rb)"
+  # the brief itself never travels through argv — only the pointer to it does
+  lacks "do z" "$(tmux_pane0_cmd repo-feat-rb)"
+  lacks "won't be told to read it" "$output"
+}
+
+@test "open: a briefed place where claude has run gets no opener, and says so" {
+  export WORKTREES_AI_CMD=claude
+  make_worktree feat-pw --brief "do x"
+  claude_has_run feat-pw
+  run_wt open feat-pw --no-attach
+  [ "$status" -eq 0 ]
+  tmux_session_exists repo-feat-pw
+  lacks "$OPENER" "$(tmux_pane0_cmd repo-feat-pw)"
+  has "this place has a brief (.planning/brief.md), but claude has run here before, so it won't be told to read it" "$output"
+  # this open STARTS the session, so the re-brief it names closes that first
+  has "to re-brief it: \`worktrees close feat-pw\`, then \`worktrees open feat-pw --brief <file>\`" "$output"
+}
+
+@test "open: no re-brief warning when the opener is sent, when resuming, or on a live session" {
+  export WORKTREES_AI_CMD=claude
+  # claude never ran: the first launch carries the opener, nothing to warn about
+  make_worktree feat-nw --brief "do x"
+  run_wt open feat-nw --no-attach
+  [ "$status" -eq 0 ]
+  has "$OPENER" "$(tmux_pane0_cmd repo-feat-nw)"
+  lacks "won't be told" "$output"
+  # a live session is reused: nothing starts, so nothing is skipped
+  claude_has_run feat-nw
+  run_wt open feat-nw --no-attach
+  [ "$status" -eq 0 ]
+  has "reusing it." "$output"
+  lacks "won't be told" "$output"
+  # -r continues the conversation the brief already reached
+  run_wt close feat-nw
+  run_wt open feat-nw -r --no-attach
+  [ "$status" -eq 0 ]
+  lacks "won't be told" "$output"
+}
+
+@test "open --brief -: the brief comes from stdin" {
+  export WORKTREES_AI_CMD=claude
+  make_worktree feat-si
+  claude_has_run feat-si
+  run bash -c 'cd "$1" && printf "from stdin\n- step\n" | "$2" open feat-si --brief - --no-attach' _ "$REPO" "$WT_BIN"
+  [ "$status" -eq 0 ]
+  [ "$(cat "$REPO/.worktrees/feat-si/.planning/brief.md")" = $'from stdin\n- step' ]
+  has "'$OPENER'" "$(tmux_pane0_cmd repo-feat-si)"
+}
+
+@test "open --brief: a .planning that is a link is refused, and nothing launches" {
+  export WORKTREES_AI_CMD=claude
+  make_worktree feat-ln
+  mkdir -p "$BATS_TEST_TMPDIR/elsewhere"
+  rm -rf "$REPO/.worktrees/feat-ln/.planning"
+  ln -s "$BATS_TEST_TMPDIR/elsewhere" "$REPO/.worktrees/feat-ln/.planning"
+  printf 'do z\n' > "$BATS_TEST_TMPDIR/brief.md"
+  run_wt open feat-ln --brief "$BATS_TEST_TMPDIR/brief.md" --no-attach
+  [ "$status" -eq 1 ]
+  has "could not write .planning/brief.md" "$output"
+  has "not a real directory" "$output"
+  [ -z "$(ls -A "$BATS_TEST_TMPDIR/elsewhere")" ]
+  [ ! -f "$TMUX_STATE/repo-feat-ln" ]
+}
+
+@test "open --brief: refused while the place's session is live; the brief is left as it was" {
+  export WORKTREES_AI_CMD=claude
+  make_worktree feat-live --brief "old task"
+  run_wt open feat-live --no-attach
+  [ "$status" -eq 0 ]
+  tmux_session_exists repo-feat-live
+  : > "$TMUX_LOG"
+  printf 'new task\n' > "$BATS_TEST_TMPDIR/brief.md"
+  run_wt open feat-live --brief "$BATS_TEST_TMPDIR/brief.md" --no-attach
+  [ "$status" -eq 1 ]
+  has "tmux session 'repo-feat-live' is already running in 'feat-live'" "$output"
+  has "worktrees close feat-live" "$output"
+  # nothing changed: the file still says what the running agent was told,
+  # and its session was neither killed nor replaced
+  [ "$(cat "$REPO/.worktrees/feat-live/.planning/brief.md")" = "old task" ]
+  tmux_session_exists repo-feat-live
+  lacks "new-session" "$(cat "$TMUX_LOG")"
+  lacks "kill-session" "$(cat "$TMUX_LOG")"
+}
+
+@test "open --brief: refused before anything is written for -r, no agent, or an unreadable/empty file" {
+  export WORKTREES_AI_CMD=claude
+  make_worktree feat-bad --brief "old task"
+  printf 'new task\n' > "$BATS_TEST_TMPDIR/brief.md"
+  run_wt open feat-bad -r --brief "$BATS_TEST_TMPDIR/brief.md" --no-attach
+  [ "$status" -eq 1 ]
+  has "--brief starts the agent fresh" "$output"
+  # fake-ai is no harness the brief opener can reach
+  WORKTREES_AI_CMD=fake-ai run_wt open feat-bad --brief "$BATS_TEST_TMPDIR/brief.md" --no-attach
+  [ "$status" -eq 1 ]
+  has "--brief needs an agent" "$output"
+  run_wt open feat-bad --brief "$BATS_TEST_TMPDIR/nope.md" --no-attach
+  [ "$status" -eq 1 ]
+  has "could not read the brief" "$output"
+  : > "$BATS_TEST_TMPDIR/empty.md"
+  run_wt open feat-bad --brief "$BATS_TEST_TMPDIR/empty.md" --no-attach
+  [ "$status" -eq 1 ]
+  has "is empty" "$output"
+  run_wt open feat-bad --brief
+  [ "$status" -eq 1 ]
+  has "--brief needs a value" "$output"
+  [ "$(cat "$REPO/.worktrees/feat-bad/.planning/brief.md")" = "old task" ]
+  [ ! -f "$TMUX_STATE/repo-feat-bad" ]
+}
+
+@test "open --brief composes with --ai and --model: codex gets the opener and its model" {
+  install_fake_cmd codex
+  export WORKTREES_AI_CMD=claude
+  make_worktree feat-cx --brief "old task"
+  printf 'review this\n' > "$BATS_TEST_TMPDIR/brief.md"
+  run_wt open feat-cx --ai codex --model gpt-5.5 --brief "$BATS_TEST_TMPDIR/brief.md" --no-attach
+  [ "$status" -eq 0 ]
+  has "gpt-5.5" "$(tmux_pane0_cmd 'repo-feat-cx~agent~codex')"
+  has "'$OPENER'" "$(tmux_pane0_cmd 'repo-feat-cx~agent~codex')"
+  [ "$(cat "$REPO/.worktrees/feat-cx/.planning/brief.md")" = "review this" ]
+}
+
+@test "new --brief on a place whose session is live says its agent was not told" {
+  export WORKTREES_AI_CMD=claude
+  run_wt new feat-nl --no-attach
+  [ "$status" -eq 0 ]
+  tmux_session_exists repo-feat-nl
+  run_wt new feat-nl --brief "do x" --no-attach
+  [ "$status" -eq 0 ]
+  [ "$(cat "$REPO/.worktrees/feat-nl/.planning/brief.md")" = "do x" ]
+  has "already running here, so its agent was not told to read it" "$output"
+  has "worktrees close feat-nl" "$output"
+}

@@ -25,6 +25,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
     says so once, and the log records how many lines were lost and when.
   - The per-command `host-admin` line in serve.log is gone; the audit log has
     those commands now.
+- **`worktrees open <slug> --brief <file>` re-briefs a place that already
+  exists.** It rewrites the place's `.planning/brief.md` and starts the agent
+  on it, even when that agent has run there before. `--brief -` reads the
+  brief from stdin. It works with `--ai`, `--model` and `--force`. While the
+  place's session is running, it refuses and writes nothing: close the
+  session first, or message the agent.
+- **MCP `open_place` opens a place that already exists, and can re-brief it.**
+  An orchestrator could create a place with a brief but had no tool to reopen
+  one. `open_place {slug, brief?, provider?, model?, force?}` is a
+  `--mutations` tool. With `brief`, it re-briefs the place as
+  `open --brief` does.
 
 ### Changed
 - **A tmux session name never starts with `-`.** A prefix that would, such as
@@ -55,6 +66,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   in that moment went to the check and was never shown. The window now tells
   the engine it is listening for documents, and a waiting request goes only
   to a window that has, so the check, which says nothing, never takes one.
+- **Reopening a place with a rewritten brief no longer starts its agent
+  blank without saying so.** `worktrees open` passes the brief's opener only
+  the first time an agent runs in a place. An orchestrator that rewrote
+  `.planning/brief.md` in four places and reopened them got four idle
+  sessions, while the brief still showed as each place's plan. Now `open`
+  warns when a place has a brief its agent won't be told to read, and names
+  `open --brief`. `new --brief` on a place whose session is already running
+  says that its agent was not told either. When a launch that carries a brief
+  is refused, its retry command now includes `--brief`.
 
 ### Security
 - **Worktrees never writes inside `.git`, or into its own state, for any
@@ -144,7 +164,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
     Until devices have names, the device's id is shown.
   - an agent started from a device limited to some projects reaches no other
     project through MCP, whatever the cross-project setting says, and neither
-    does an agent it starts with `create_worktree`.
+    does an agent it starts with `create_worktree` or `open_place`.
   - at most four agents started from devices can be open at once. A fifth is
     refused until one of them is closed.
   The MCP server now tells agents that a place's title and note are data,
