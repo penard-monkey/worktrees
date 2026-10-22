@@ -69,7 +69,7 @@ measurements as exit criteria. The draft was then reviewed with the
 | 4 | May the loopback listener enroll? | It is where enrollment is AUTHORIZED, and never where a device enrolls. Opening a pairing window is a console act, done over loopback with serve.json's token. The loopback listener never accepts a device credential. | 2 |
 | 5 | Per-object authorization (R1) | Each device has capabilities (`read`, `write`, `answer`, `instruct`, `stream`, `admin`) and a project scope. Every row of the dispatch table declares the capability it needs and the object it acts on. One resolver checks that before the body runs, against the grant of the (principal, device) pair: the principal's grant intersected with the device's. The scope also rides into the api, so the api's own path guard answers with the caller's roots: two checks, as R1 asked. Results and events are cut down to the scope. | 2 |
 | 6 | Rows a remote device never reaches | A new `HostConsole` class, served on loopback only. It covers every row that can widen what agents on this host may do, pairing and device administration, `update_cli` (*decided*, §11 Q3), and adopting a project from a hub. | 2 |
-| 7 | The remote listener | Off by default, with a one-click kill switch on the host. It binds one specific private address on a named interface, an overlay address or a LAN one (*decided*, §11 Q6), never a wildcard and never loopback. "Private" is a closed list (RFC 1918, CGNAT `100.64.0.0/10`, link-local, ULA `fc00::/7`), and anything else is refused. When the address leaves its interface or the network changes, the listener closes until the same network returns or the host chooses again. A new address on the same network rebinds by itself, at most three times an hour (*decided*, §11.2 N4). On a LAN, devices find a moved host over mDNS: it is advertised only in LAN mode and on the bound interface, it reveals nothing but an opaque id, and a discovered address is adopted only after a pinned handshake (*decided*, §11.1 N2). An address code is the fallback. TLS 1.3 is mutual and pinned both ways (rustls), with no CA, no resumption and no 0-RTT in Phase 2. On iOS the socket lives in the Rust shim and not in the WebView. | 2 |
+| 7 | The remote listener | Off by default, with a one-click kill switch on the host. It binds one specific private address on a named interface, an overlay address or a LAN one (*decided*, §11 Q6), never a wildcard and never loopback. "Private" is a closed list (RFC 1918, CGNAT `100.64.0.0/10`, link-local, ULA `fc00::/7`), and anything else is refused. When the address leaves its interface or the network changes, the listener closes until the same network returns or the host chooses again. A new address on the same network rebinds by itself, at most three times an hour (*decided*, §11.2 N4). On a LAN, devices find a moved host over mDNS: it is advertised only in LAN mode and on the bound interface, nothing serve composes in it is more than an opaque id, and a discovered address is adopted only after a pinned handshake (*decided*, §11.1 N2). Its host name is serve's own opaque one where the platform allows it (recommended, unmeasured); elsewhere it is the OS's `.local` name, which can carry the owner's first name, and the enable dialog shows it (§4.7). An address code is the fallback. TLS 1.3 is mutual and pinned both ways (rustls), with no CA, no resumption and no 0-RTT in Phase 2. On iOS the socket lives in the Rust shim and not in the WebView. | 2 |
 | 8 | The CI witness (R8) | A connect witness for loopback serve, which #516 added to CI (it still needs its release gate). Then the bind rules, as connects: a public address that IS bindable is refused, the remote port never answers on loopback, a peer outside the allowed sources is dropped, and an address change pauses and resumes the listener. Then identity: no certificate is refused, an unenrolled one is refused, an enrolled one is served, a revoke kills the live socket, an expired device is refused, and the pairing port is closed outside a window. Measured on both platforms, with a release gate that greps the exact count. | 2 |
 | 9 | The audit log (R5) | `<config_dir>/audit.jsonl`, mode `0600`, append-only and hash-chained. Only serve's connection layer writes it, and its records are structured, never free text. Every record names a principal as well as a device. | 2 |
 | 10 | Resource limits (R6) | Per-device connection, in-flight and rate caps; bounded outboxes and lanes; single-flight for the expensive reads; separate budgets for loopback and remote, so a device cannot starve the desk. | 2 |
@@ -182,7 +182,14 @@ Four choices in that table need their reasons.
   exactly this reason. A login-keychain item's access control is keyed the
   same way, so every update would ask "allow access?". The data-protection
   keychain and the Secure Enclave need entitlements that an ad-hoc build does
-  not have. *Expected, not measured: §10 lists it.* A `0600` file is the same
+  not have. Measured (spike, 2026-10-21, macOS 27 on Apple silicon, two
+  ad-hoc builds): an ad-hoc rebuild is refused the previous build's
+  login-keychain item, and the data-protection keychain and a persistent
+  Secure Enclave key fail with `-34018`. A Secure Enclave key that is NOT
+  stored in the keychain (CryptoKit) needs no entitlement, and its blob, in
+  a `0600` file, survived a rebuild; the key itself cannot leave the Mac.
+  Prefer that over a PKCS#8 file where a Secure Enclave exists, once the
+  Rust signer path is settled. A `0600` file is the same
   protection serve.json has today, and it matches the threat model (§1).
   Revisit when macOS builds are signed with a team identity.
 - **`<config_dir>`, not `~/.config/worktrees/`.** §III.5 put `devices.json`
@@ -902,28 +909,46 @@ nothing changes. Two things change on purpose, for every caller:
      that remains.
   2. **On an overlay bind** (a point-to-point interface), the peer is in the
      bound address's own row of the table below: `100.64.0.0/10` for a
-     Tailscale IPv4 bind, `fc00::/7` for its IPv6 one. Where the OS allows
-     it, the listener is also tied to its interface (`SO_BINDTODEVICE` on
-     Linux, `IP_BOUND_IF` on macOS). *Whether either scopes a LISTENING
-     socket, and with what privileges, is unmeasured; §10.*
+     Tailscale IPv4 bind, `fc00::/7` for its IPv6 one. The listener is also
+     tied to its interface: `SO_BINDTODEVICE` on Linux, `IP_BOUND_IF` /
+     `IPV6_BOUND_IF` on macOS (`socket2`'s `bind_device` and
+     `bind_device_by_index_v4`/`_v6`; socket2 0.6 is already in the CLI's
+     tree, through tokio, with the `all` feature these calls need).
+     Measured (spike, 2026-10-21): on Linux 6.12 it scopes a listening
+     socket for both families, a peer on another interface gets a RST, and
+     an unprivileged process may set it. On macOS 27 it scopes an IPv4
+     listener (silently, no root); `IPV6_BOUND_IF` did not filter same-host
+     traffic and its cross-host effect is unmeasured (§10). Either way it
+     pins the interface INDEX, so a poll that sees the index change treats
+     it as the address leaving. Same for LAN binds.
   3. **On a LAN bind,** the peer is on-link: inside the bound address's own
      subnet. A link-local bind is on-link by definition. A peer routed in
      from another subnet, such as an office network joining `10.x` and
      `192.168.x`, is refused in Phase 2.
 
-  **Part 2 exists because a host accepts a packet for any of its addresses
-  on any interface.** Both platforms use the weak host model by default.
-  macOS's `net.inet.ip.check_interface` is 0, and Linux's `rp_filter`
-  checks the route back to the SOURCE, not where the destination lives. So
-  a neighbour on the host's Wi-Fi can send to the host's Tailscale address
-  straight to the host's link-layer address, never touching the tailnet,
-  and the kernel hands the connection to a listener bound there. The
-  tailnet's ACLs, which §11 Q2 made the network layer under pairing, would
-  then cover nothing. Requiring a source in the overlay's own row closes
-  that for an off-path neighbour. It cannot use its own LAN address, and if
-  it forges a `100.x` source, the replies leave through the tunnel and its
-  TCP handshake never completes. *Expected from both platforms' documented
-  defaults, not measured here; §10.*
+  **Part 2 exists because a host may accept a packet for any of its
+  addresses on any interface.** Linux uses the weak host model, and
+  `rp_filter` checks the route back to the SOURCE, not where the
+  destination lives (measured, spike, 2026-10-21, Linux 6.12: a LAN
+  neighbour reached a listener on a TUN's `100.x` and `fd7a:` address
+  under `rp_filter` 0, 1 and 2). So a neighbour on the host's Wi-Fi can
+  send to the host's Tailscale address straight to the host's link-layer
+  address, never touching the tailnet, and the kernel hands the connection
+  to a listener bound there. The tailnet's ACLs, which §11 Q2 made the
+  network layer under pairing, would then cover nothing. macOS does not,
+  by default: its `net.inet.ip.check_interface` is 1 (read on macOS 27 by
+  the same spike), a hybrid model that is strong for `utun` and `ipsec`
+  interfaces, for IPv4 and IPv6 (XNU's `IP_CHECKINTERFACE_HYBRID_ES`, read
+  in its source), but only while IP forwarding is off, and not for an
+  overlay on any other kind of interface. The drop itself, seen from a
+  second machine, is unmeasured (§10). Requiring a source in the overlay's
+  own row closes the gap wherever the kernel does not, which is why it
+  stays a requirement on both. A forged source in the row is dropped by
+  Tailscale's own Linux firewall (CGNAT sources off `tailscale0`; read in
+  its source, not measured) or by `rp_filter=1` (measured); failing both,
+  the reply follows the host's route to that source, which for a real peer
+  is the tunnel, so the handshake does not complete (measured on Linux: the
+  SYN-ACK left through the TUN).
 
   **Which parts are requirements, and which is a default.** Parts 1 and 2
   are security requirements, and neither will ever be a setting. Part 1 is
@@ -977,8 +1002,9 @@ bytes, never its spelling. The bytes come from Rust's `std::net` parsers,
 which are strict: no `127.1` shorthand, no hex or octal octets, and no
 leading zeros (std accepted leading zeros until CVE-2021-29922 was fixed in
 Rust 1.53). They never come from `inet_aton` or a resolver, both of which
-accept all of those spellings. A zone (`%en0`) is split off before parsing,
-must name an existing interface and must equal `--iface`. A string the
+accept all of those spellings. In serve's own `--addr`, a zone (`%en0`) is
+split off before parsing, must name an existing interface and must equal
+`--iface`; a QR or an address code carries no zone at all (below). A string the
 parser does not take is refused, never repaired. Serve calls it at parse
 and at bind. The shim,
 which links core (`app/src-tauri/Cargo.toml:24`), calls the same function
@@ -988,10 +1014,23 @@ and the device cannot disagree about what is private.
 **Link-local needs its interface.** An `fe80::` address means nothing
 without a zone, which is why `serve-remote.json` names the interface for
 every bind and refuses a link-local IPv6 bind without one. A QR cannot carry
-the device's zone, only the host's. Whether an iOS device can dial an
-`fe80::` address from a QR on its own interface is unmeasured, and §10's
-spike checks it. If it cannot, the QR parser refuses link-local IPv6 with a
-message saying so, and IPv4 link-local remains.
+the device's zone, only the host's, and the host's means nothing on the
+device. The QR and address-code parsers refuse any `%` in the address:
+Rust's `SocketAddr` parser accepts a numeric zone (`[fe80::1%1]:7000`;
+measured, spike, 2026-10-21, rustc 1.98.1), which would otherwise slip the
+host's interface number into the device's connect. They split the port off
+and parse the host with `IpAddr`, never `SocketAddr` or a resolver. A
+device dialling a link-local address, IPv6 or IPv4, chooses its own
+interface and scopes the socket to it, trying at most four, and adopts the
+address only after a pinned handshake. It skips interfaces that hold a
+link-local address but carry no service, such as macOS's `awdl0`, `llw0`
+and the system `utun`s. IPv4 link-local needs this as much as IPv6 does:
+with two links that both carry `169.254/16`, an unscoped dial follows the
+routing table, which on a Mac is the primary interface (measured: on the
+spike's Mac, `169.254/16` routes to Wi-Fi; on Linux 6.12, two links between
+two containers took the wrong one). Whether iOS can dial either is the
+iPhone spike (§10). If it cannot, the QR parser refuses link-local
+addresses with a message saying so.
 
 **CGNAT is shared space, and the dialog says so.** `100.64.0.0/10` counts
 as private (§11 Q6), and Tailscale uses it for exactly that reason. It is
@@ -1001,7 +1040,10 @@ past TLS without an enrolled key, but the TLS port answers them. So when a `100.
 address sits on an interface that is not point-to-point (Tailscale's `utun`
 on macOS and `tailscale0` on Linux are), the enable dialog warns and names
 the interface. It is allowed with that warning (decided, §11.1 N1), and
-such a bind is not advertised over mDNS (§4.7).
+such a bind is not advertised over mDNS (§4.7). The flag was measured
+(spike, 2026-10-21) for macOS's `utun` and for a Linux TUN, which is what
+`tailscale0` is. A TAP-based overlay, such as ZeroTier's, is not
+point-to-point and is treated as a LAN, advert included.
 
 **When the address changes.** At enable time `serve-remote.json` records the
 address, the interface and a **network fingerprint**. For a point-to-point
@@ -1009,15 +1051,30 @@ interface the fingerprint is the address, its prefix length and the
 point-to-point flag. The overlay assigns the address, and it is this node's
 identity there. The interface's NAME is left out on purpose: macOS numbers
 `utun` interfaces in the order they are created, so Tailscale's can be
-`utun3` before a reboot and `utun5` after (*expected, not measured; §10*). A
-fingerprint that held the name would pause remote access after ordinary
+`utun3` before a reboot and `utun5` after (*expected, not measured; §10*).
+On the spike's Mac, Tailscale is `utun6`, behind six `utun`s the system
+created first. A fingerprint that held the name would pause remote access after ordinary
 reboots, and a pause dialog that fires for no reason teaches the user to
 accept the one that matters, the same habituation §2.5 avoids for expiry.
 For any other interface the fingerprint is the interface, the subnet (the
-network prefix and its length, not the host's own address within it) and,
-when the default route runs through that interface, the gateway's
-link-layer address, read from the routing and neighbour tables. *Reading
-those is unmeasured on both platforms; §10.* The host poll (3 s) compares
+network prefix and its length, not the host's own address within it) and
+the link-layer address of that interface's OWN router: the router of its
+interface-scoped default route, whether or not a VPN or exit node holds the
+primary one. On Linux both come from netlink (`RTM_GETROUTE` in every
+table, `RTM_GETNEIGH`), readable without privilege (measured, spike,
+2026-10-21, Linux 6.12, as uid 65534). On macOS 27 the kernel hides the
+ARP table from non-root processes (measured: no entry for the gateway, even
+right after a ping), so serve reads SystemConfiguration's
+`State:/Network/Service/<service>/IPv4` (`Router`,
+`ARPResolvedHardwareAddress`, and the OS's own `NetworkSignature`; measured
+readable without root). That is one new crate for serve,
+`system-configuration`, which is not in `Cargo.lock` today
+(`core-foundation` is), checked on OSV as §4.2 requires, or a shell-out to
+`scutil`, as with git and tmux. A missing neighbour entry is "not known
+yet" and never counts as a change (on Linux it is missing before the first
+packet to the gateway and after a flush); only a present, different
+address raises the gateway dialog. IPv6 LAN binds use the interface and
+the /64 (plus the router's address where the OS exposes it). The host poll (3 s) compares
 what the interface holds now with what was recorded:
 
 - **The address leaves its interface** (a DHCP lease moves, Wi-Fi drops,
@@ -1025,8 +1082,14 @@ what the interface holds now with what was recorded:
   listener and any pairing window, closes every remote connection, writes
   `remote_paused` with its reason to the audit log, and shows *"Remote
   access paused: 192.168.1.5 is no longer on en0"*. It does not wait for the
-  OS to fail the sockets. What macOS and Linux do to a listener whose
-  address is removed is unmeasured, and after one poll it no longer matters.
+  OS to fail the sockets. Nothing in the kernel does this for serve: on
+  Linux 6.12 (measured, spike, 2026-10-21) the listener and its connections
+  survive the removal, data waits, a re-added address is served again by
+  the old listener, and an address moved to another interface keeps being
+  served there. So the poll checks the address is on the bound interface
+  (and its index), and resume binds a new socket after the old one is
+  closed, because the old one still holds the port. macOS is unmeasured
+  (§10).
 - **The same address returns with the same fingerprint** (on a LAN, that
   includes the same interface). Serve binds again and writes
   `remote_resumed`, with no dialog. This is the overlay reconnecting, or
@@ -1300,11 +1363,19 @@ the listener is a CONNECT that follows one that must succeed:
    rule instead), a connect from a second address in that row succeeds,
    then one from an RFC 1918 address is dropped with nothing written. Then
    the same pair for a LAN bind: an on-link source is served, then a
-   private source outside the subnet is dropped.
+   private source outside the subnet is dropped. When the listener is
+   device-bound (§4.1), the out-of-row client address must sit on the SAME
+   point-to-point scratch interface; one on another interface is refused by
+   the kernel before serve sees it, and the assertion would pass with the
+   peer filter deleted (measured, spike, 2026-10-21, Linux 6.12). So this
+   step is shown failing with the peer filter removed.
 
 *Unmeasured: whether the macOS runner allows a scratch interface or alias
 under `sudo`. If it does not, steps 2, 4 and 5 run on Linux only, the test's
-name says so, and the macOS half moves to §10's spike.*
+name says so, and the macOS half moves to §10's spike.* The Linux half works
+as written in a `NET_ADMIN` container on 6.12 (spike, 2026-10-21: a dummy
+interface with `198.51.100.7`, and a TUN with a `100.64.x` peer). It has
+not yet run on a GitHub runner (§10).
 
 **The identity witness**, run on both CI platforms, against a real serve
 whose remote listener is bound to the runner's own LAN address
@@ -1370,13 +1441,25 @@ without help. The address code stays, as the fallback.
 
 - Only while LAN mode is on: the remote listener is bound and not paused,
   on an interface that is not point-to-point. An overlay bind is never
-  advertised, and mDNS would not cross the tunnel anyway.
+  advertised, and mDNS would not cross the tunnel anyway. A TAP-based
+  overlay (ZeroTier's shape) is not point-to-point, so it is a LAN here
+  and is advertised to that whole virtual network (§4.1).
 - Never for a `100.64.0.0/10` bind on an interface that is not
   point-to-point (§11.1 N1). That link may include strangers, and the
   enable dialog already warns about it.
 - Only on the bound interface, registered by its interface index.
-- Withdrawn with a goodbye (TTL 0) the moment the listener closes: a pause
-  (§4.1), the kill switch, or remote access turned off.
+- Withdrawn the moment the listener closes: a pause (§4.1), the kill
+  switch, or remote access turned off. Withdrawing means freeing the
+  registration, not only closing the socket: Avahi re-announces a live
+  registration by itself when its address returns (measured, spike,
+  2026-10-21, Avahi on Linux 6.12). The goodbye (TTL 0) goes out when the
+  interface still has an address; when the pause is BECAUSE the address
+  left, there is nothing to send it from, and peers may list the host until
+  the records expire (Avahi's TTLs: SRV 120 s, PTR and TXT 75 min).
+  Adoption needs the pinned handshake, so a stale listing costs one failed
+  try. A crashed serve is withdrawn by the responder (measured on both: on
+  Linux on the wire, 2 ms after a SIGKILL; on macOS as the local browser
+  sees it, 1.2 s after one).
 - Visible on the host. While the advert is up, the indicator that remote
   access is on (§4.1) also says that this Mac can be found on this
   network. A console switch turns the advert off and leaves LAN mode on. It
@@ -1390,9 +1473,12 @@ without help. The address code stays, as the fallback.
   without a record that holds it, and nothing public derives it: not the
   pin, not the host name, not the key.
 - One other TXT key, `v=1`.
-- An SRV record pointing at the remote listener's port and at the host
-  name the OS already advertises (`<LocalHostName>.local`). Serve adds no
-  host record of its own.
+- An SRV record pointing at the remote listener's port and at a host name
+  of serve's own, `wt-<discovery id>.local`, whose one address record is
+  the bound address (*recommended, unmeasured*; "The host name", below).
+  Where that cannot be done, the SRV target is the host name the OS
+  already advertises (`<LocalHostName>.local`), and serve adds no host
+  record.
 - The remote listener only. The pairing listener (§2.4) is never
   advertised, not even while a window is open. One bad attempt closes a
   window, so a window that announced itself could be burned by anyone on
@@ -1401,8 +1487,60 @@ without help. The address code stays, as the fallback.
 Serve composes every record from constants and the discovery id, with no
 client string in any of them, so nothing can be injected into the advert.
 
-Nothing else: no user name, no host name beyond the OS's own, no project or
-place names, and no pin.
+Nothing else that serve composes: no project or place names, and no pin.
+
+**The host name: serve's own, not the OS's** (*recommended, unmeasured*;
+§10). The spike found that when serve names no host, the SRV target is the
+OS's own `.local` name, which on a default macOS install is
+`<First name>s-MacBook-Pro` (on the spike's Mac, the owner's first name),
+and that a resolve of it returns every address on the interface: IPv4, ULA
+and link-local (spike, 2026-10-21, macOS 27 and Avahi on Linux 6.12;
+§12.4 T1). That contradicts what decision 7 and §11.1 N2 promised, an
+advert that reveals nothing but an opaque id. So serve registers a host
+record of its own and makes it the SRV target:
+
+- The name is `wt-<discovery id>.local`, using the id the advert already
+  carries, so it is exactly as linkable as the TXT record and reveals
+  nothing more. The label is 29 characters, inside DNS's 63.
+- It has one address record: the bound address (an A or an AAAA record),
+  on the bound interface only. A resolve then returns that address and no
+  other, which is also the only one a device should dial.
+- **mDNSResponder:** one `DNSServiceCreateConnection`; on it, a
+  `DNSServiceRegisterRecord` for the address record
+  (`kDNSServiceFlagsUnique`, the bound interface's index), then
+  `DNSServiceRegister` on the same interface with `host` set to that name.
+  `dns_sd.h` says a host named there gets no address record by itself,
+  which is why the record is registered first. Deallocating the connection
+  removes both.
+- **Avahi:** in the one entry group, `AddAddress` for the name and the
+  bound address (with `AVAHI_PUBLISH_NO_REVERSE`, so it adds no
+  reverse-lookup record beside the one Avahi publishes for its own host
+  name), then `AddService` with its `host` argument set to that name.
+  Resetting or freeing the group removes both.
+- A conflict on the name, meaning another host on the link already claims
+  `wt-<id>.local`, is not resolved by renaming. Serve does not advertise
+  for that episode, writes the conflict to the audit log and says so
+  beside the indicator, and the address code still works. A squatter that
+  answers for the name with its own address gains what a spoofed advert
+  gains: one failed pinned handshake.
+- Every record serve registered is withdrawn together, as "When, and where"
+  says, and a bind move (§4.1, §11.2 N4) withdraws the host record and
+  registers it again with the new address.
+
+What it does not do: the OS's responder still answers for the host's own
+name, with all its addresses, whether or not serve runs. An observer who
+asks for that name can still match one of its addresses to the advert's.
+The opaque host removes the advert's pointer to the name, not the name.
+
+*Fallback, per platform.* If the opaque host cannot be done on a platform,
+that platform advertises with the OS's own host name, and its enable
+dialog shows the name that will be advertised (`scutil --get
+LocalHostName` on macOS, Avahi's host name on Linux), so the user can
+rename the machine before turning discovery on. There, nothing else that
+serve composes appears, but the SRV target is the OS's own `.local` name,
+which on a default macOS install is `<First name>s-MacBook-Pro`, and a
+resolve returns every address on the interface. So on that platform the
+advert does point at a user name, the OS's.
 
 **How serve advertises.** Through the OS's own responder, never one of its
 own: mDNSResponder (`DNSServiceRegister`) on macOS and Avahi over D-Bus on
@@ -1412,7 +1550,9 @@ answers is the responder the OS already runs. Where there is none, such as
 a Linux host without Avahi, discovery is off, the enable dialog says so,
 and the address code is the only path. How serve calls each responder, and
 whether either needs a new crate, is decided when it is built and checked
-on OSV, as §4.2 requires.
+on OSV, as §4.2 requires. One is known already: zbus 5.18 is in
+`Cargo.lock` only under the app (through `tauri-plugin-opener`), so
+calling Avahi over D-Bus from serve adds it to the CLI.
 
 **How a device uses it.** A device gets the discovery id in the pairing
 answer and keeps it with the host's record (§2.1). It browses
@@ -1451,8 +1591,8 @@ against a server with the wrong key.
 
 **What it costs.**
 
-- In serve: registering and withdrawing an advert on two platforms, tied to
-  the listener's state, plus two audit kinds (§5.1).
+- In serve: registering and withdrawing an advert and its host record on
+  two platforms, tied to the listener's state, plus two audit kinds (§5.1).
 - In the clients: a browse in the shim for iOS and iPadOS (§4.4) and for
   the desktop client, the `NSBonjourServices` entry, and the
   `discovery_id` in the host's record.
@@ -1475,11 +1615,18 @@ against a server with the wrong key.
 - **Replayed adverts.** An old advert, or a cached record of the host's
   previous address, sends the device to an address that is either still
   the host (fine) or no longer is (refused at the pin).
+- **Enumeration.** The type is listed under `_services._dns-sd._udp`, so a
+  peer learns that worktrees is here without asking for it by name
+  (measured, spike, 2026-10-21, on Avahi's wire).
 - **Linkability.** The discovery id is stable, so an observer on two
-  networks where LAN mode was on can tell it is the same machine. The SRV
-  target already names the machine through the OS's own `.local` name,
-  which is just as linkable, so the id adds nothing the OS does not already
-  show.
+  networks where LAN mode was on can tell it is the same machine. With the
+  opaque host name the SRV target carries the same id, and nothing more.
+  The host's own `.local` name, which its responder answers for on every
+  network whether or not serve runs, is just as linkable, so the id adds
+  nothing the OS does not already show.
+- **Sleep.** A Mac with "Wake for network access" hands its adverts to a
+  Bonjour Sleep Proxy when it sleeps, so the advert can outlive the awake
+  listener, and a connect may wake the Mac (unmeasured, §10).
 - **Denial of service.** Anyone on the link can flood candidates, or
   spoof ARP, and keep a device from finding its host. Nothing at this
   layer prevents that, and the address code is the way back.
@@ -1503,10 +1650,14 @@ interface (§4.6), with the OS's browser (`dns-sd -B` on macOS,
 `avahi-browse` on Linux):
 
 1. With LAN mode on, the advert is present on the bound interface and on
-   no other, and its TXT record is `v` and `id` exactly. With a pairing
+   no other, and its TXT record is `v` and `id` exactly. Its SRV target is
+   `wt-<id>.local`, and a resolve of it returns the bound address and no
+   other (where the platform takes the opaque host). With a pairing
    window open, no advert names the pairing port.
-2. Pause the listener (§4.6, step 4): the advert is withdrawn. Turn remote
-   access off: still withdrawn. An overlay bind, a `100.64.0.0/10` bind on
+2. Pause the listener (§4.6, step 4): the advert is withdrawn, the host
+   record with it, and when the address returns the advert does not come
+   back until serve binds again. Turn remote access off: still withdrawn.
+   An overlay bind, a `100.64.0.0/10` bind on
    an interface that is not point-to-point, and the console switch turned
    off: never advertised.
 3. In the client, as unit tests of the candidate logic:
@@ -1580,7 +1731,8 @@ the whole file, and nothing here claims that it can (§1).
   resumed by an address change, with the reason; `bind moved` to a new
   address, with both addresses and whether the console chose it or serve
   moved it within the same subnet (§4.1); the mDNS advert registered or
-  withdrawn, with its interface (§4.7);
+  withdrawn, with its interface, or not registered because its host name
+  was claimed (§4.7);
 - pairing: a window opened, an attempt with its result and reason, Allow or
   Deny, the window closed;
 - devices: enrolled (with principal, scope and expiry), scope changed,
@@ -2040,40 +2192,81 @@ Each slice merges on its own, and nothing binds off loopback until slice 6.
    says.
 
 **A spike, before slice 5's design is frozen:** on a real iPhone (TestFlight)
-and a second Mac on the tailnet, measure the claims marked unmeasured above:
+and a second Mac on the tailnet, measure the claims marked unmeasured above.
 
-- rustls from the Rust shim with a Secure Enclave signer;
-- whether ATS or Local Network privacy touches a socket opened from Rust, on
-  `100.x` and on a LAN address;
-- what a full handshake costs per reconnect with a Secure Enclave signer,
-  since resumption is off (§4.2);
-- a `.userPresence` step-up signature requested from Rust (§2.5);
-- keychain behaviour for an ad-hoc-signed macOS build;
-- whether an iOS device can dial a link-local address from a QR, IPv4 and
-  IPv6 (§4.1);
-- the network fingerprint on macOS and Linux: an interface's
-  point-to-point flag, its subnet, the gateway's link-layer address, and
-  what each OS does to a listener whose address is removed (§4.1);
-- whether the macOS CI runner allows the scratch interface the bind-rule
-  witness needs (§4.6);
-- the weak host model on both platforms: whether a packet for the overlay
-  address that arrives on the LAN interface reaches a listener bound to
-  it, and whether `SO_BINDTODEVICE` and `IP_BOUND_IF` scope a listening
-  socket (§4.1, peer rule part 2);
-- `utun` numbering across reboots on macOS, which decides whether the
-  point-to-point fingerprint may leave out the name (§4.1);
-- Bonjour on iOS (§4.4, §4.7): browsing `_worktrees._tcp` from the shim,
-  through the `dns_sd` C API or an `NWBrowser` plugin; that a type missing
-  from `NSBonjourServices` fails; when the Local Network prompt appears,
-  and what a declined prompt looks like to the app;
-- macOS's own Local Network permission (macOS 15 and later), on both ends:
-  whether it touches serve's listener or its advert, which process the
-  prompt is attributed to when the app started serve, and whether an
-  ad-hoc-signed client is asked again after every update, as TCC is
-  (AGENTS.md);
-- registering on one interface only, through mDNSResponder on macOS and
-  Avahi on Linux, and the goodbye on withdrawal, seen from a second
-  machine (§4.7).
+The half that needs neither ran on 2026-10-21: macOS 27 on Apple silicon,
+read-only with no sudo, and Docker containers with their own network
+namespaces on Docker Desktop's Linux 6.12 (`linuxkit`), a kernel that is
+neither a stock distribution's nor a GitHub runner's. Its probes are in `scripts/spike/p2-network/`,
+whose README lists them. Its findings, and the hardware checklist with the
+exact command for each step named in brackets below, are the lane's
+`~/.cache/worktrees/worktrees/spike-p2-network/findings.md` on the machine
+that ran it. **Measured** (the result is in the section cited):
+
+- the network fingerprint on both platforms: the point-to-point flag, the
+  subnet and the IPv6 temporary and deprecated flags, all readable without
+  root; and the gateway's link-layer address, which netlink gives on Linux
+  and macOS hides from a non-root process, while SystemConfiguration
+  publishes it (§4.1);
+- what Linux does to a listener whose address is removed: nothing (§4.1);
+- the weak host model on Linux, under every `rp_filter` mode; the macOS
+  default, a hybrid that is strong for `utun` (from sysctl and XNU's
+  source, not from the wire); and whether `SO_BINDTODEVICE` (Linux, both
+  families, unprivileged) and `IP_BOUND_IF` (macOS, IPv4) scope a
+  listening socket (§4.1, peer rule part 2);
+- Avahi registering on one interface and its goodbye, seen from a peer
+  container on each link (§4.7);
+- registering on one interface through mDNSResponder, as far as the host's
+  own browser sees it (§4.7);
+- keychain behaviour for an ad-hoc-signed macOS build (§2.1);
+- Rust's parsers against link-local and odd IPv4 strings, and how an
+  unscoped link-local dial fails on each OS (§4.1).
+
+**Still to measure**, on the user's hardware:
+
+- *iPhone.* rustls from the Rust shim with a Secure Enclave signer [A1];
+  whether ATS or Local Network privacy touches a socket opened from Rust,
+  on `100.x` and on a LAN address [A2]; what a full handshake costs per
+  reconnect with a Secure Enclave signer, since resumption is off (§4.2;
+  the signature alone took 4.7 ms on the spike's Mac) [A3]; a
+  `.userPresence` step-up signature requested from Rust (§2.5) [A4];
+  whether an iOS device can dial a link-local address from a QR, IPv4 and
+  IPv6, scoped to an interface it picks itself (§4.1) [A5]; Bonjour on iOS
+  (§4.4, §4.7): browsing `_worktrees._tcp` from the shim, through the
+  `dns_sd` C API or an `NWBrowser` plugin, that a type missing from
+  `NSBonjourServices` fails, when the Local Network prompt appears, and
+  what a declined prompt looks like to the app [A6].
+- *A second Mac.* The hybrid host model across hosts: a packet for the
+  Tailscale address that arrives on Wi-Fi is dropped, for IPv4 and IPv6,
+  and whether `IPV6_BOUND_IF` filters it where the kernel does not (§4.1)
+  [B1]; the mDNS wire capture from a second machine: mDNSResponder's
+  records, TTLs and goodbye after a release and after a kill, and nothing
+  on `awdl0` (§4.7) [B2]; the Bonjour Sleep Proxy (§4.7) [B3]; what macOS
+  does to a listener whose address is removed, on a scratch interface
+  under sudo (§4.1) [B4]; link-local between two Macs on a Thunderbolt
+  Bridge (§4.1) [B5]; macOS's own Local Network permission (macOS 15 and
+  later), on both ends: whether it touches serve's listener or its advert,
+  which process the prompt is attributed to when the app started serve,
+  and whether an ad-hoc-signed client is asked again after every update,
+  as TCC is (AGENTS.md); and the Application Firewall's "accept incoming
+  connections" prompt for an ad-hoc serve, again after a rebuild [B6].
+- *The opaque host name* (§4.7), new, with no probe yet (`mdns_reg_mac.c`
+  and `avahi_reg.py` are where to start): `DNSServiceRegisterRecord` plus
+  `DNSServiceRegister` with `host`, and Avahi's `AddAddress` (with
+  `AVAHI_PUBLISH_NO_REVERSE`) plus `AddService` with `host`, each from an
+  unentitled, unprivileged process. Seen from a second machine: the SRV
+  target is `wt-<id>.local`, a resolve returns the bound address and no
+  other, both records go on a release and on a kill, and a name conflict
+  is reported rather than renamed. From the iPhone, that the shim resolves
+  it [with A6].
+- *A reboot.* `utun` numbering across reboots, a Tailscale restart and a
+  sleep, which decides whether the point-to-point fingerprint may leave out
+  the name, and whether the network service's UUID stays stable where the
+  name does not (§4.1) [C1].
+- *CI runners.* Whether the macOS runner allows the scratch interface or
+  alias the bind-rule witness needs (§4.6) [D1]; on the Linux runner's own
+  kernel, an unprivileged `SO_BINDTODEVICE`, the scratch interfaces, and
+  whether Avahi is there at all [D2].
 
 **Exit, which is §III.9's, made concrete:**
 
@@ -2084,7 +2277,9 @@ and a second Mac on the tailnet, measure the claims marked unmeasured above:
 - [ ] The host's LAN address moves, the host chooses the new one, and the
       iPhone finds it over mDNS and reconnects with no address code. A
       spoofed advert for the same id is tried, refused at the pin, and
-      changes nothing on the phone.
+      changes nothing on the phone. The advert names `wt-<id>.local`, which
+      resolves to the bound address alone, or, on a platform that took the
+      fallback, the enable dialog showed the OS's name first (§4.7).
 - [ ] An unenrolled device cannot connect, measured at TLS.
 - [ ] A revoked device's live socket dies within 1 s, and it cannot
       reconnect. An expired device is refused, and a re-enabled one is
@@ -2183,9 +2378,14 @@ is visible.
   recommendation*, which was to leave it for Phase 3 because it is more
   surface on the LAN and announces the host to every device there.
   *Consequence:* a new §4.7. The host is advertised only while LAN mode is
-  on, and only on the bound interface. The advert carries no user name, no
-  host name beyond what the OS already advertises, no project or place
-  name, and no pin, only an opaque id that paired devices hold. A
+  on, and only on the bound interface. Serve puts no project or place name
+  and no pin in the advert, only an opaque id that paired devices hold.
+  *Amended after the spike of 2026-10-21:* the host name the advert points
+  at was to be the OS's own, and on a default Mac that name carries the
+  owner's first name. §4.7 now prefers a host name of serve's own, made
+  from the same opaque id (recommended, unmeasured), and where a platform
+  cannot do that, the enable dialog shows the OS's name before discovery
+  goes on (§12.4 T1). A
   discovered address is adopted only after a pinned handshake to it
   succeeds, the rule S8 set for the address code, and the address code stays
   as the fallback. §4.7 says what it costs and what it exposes; §4.4 and
