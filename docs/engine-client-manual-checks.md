@@ -245,6 +245,54 @@ R=$PWD CFG="$HOME/Library/Application Support/net.casadelvalle.worktrees.sbx"
    dock tab comes back from its saved scrollback behind a `── restored ──`
    seam.
 
+### 7. The auto-fetch cadence and the two terminal switches are the host's
+
+They live in `host-policy.json` in the sandbox's config dir, beside Codex
+permissions and pi trust, and only a change in Settings sets them. Edit a
+JSON file in the config dir only while the app is quit. `serve: host-admin
+<cmd>` in serve.log is the line every set writes, and nothing else writes it.
+
+1. **The one-time copy.** Quit (⌘Q). In `ui-state.json` set
+   `"fetch_interval_min": 15` and `"term_persist_scrollback": false`, which is
+   how v0.43 left a choice. Remove those two keys from `host-policy.json` if it
+   has them. Launch.
+   **Expect:** serve.log `host-policy: copied fetch_interval_min from
+   ui-state.json (once; …)`, the same for `term_persist_scrollback`, then
+   `host-policy: … fetch_interval_min=15 term_persist_scrollback=false
+   term_per_tab_history=true`. Settings → Behavior shows Every 15 min, and
+   Settings → Terminal shows "Keep each tab's output" off.
+2. **Loading sets nothing.** Reload the window (⌘R) twice, then open both
+   panels.
+   **Expect:** no `host-admin set_fetch_interval` or `host-admin
+   set_term_history_opts` line in serve.log.
+3. **A change is the host's.** Behavior → Every 5 min, then Terminal → turn
+   "Give each tab its own command history" off.
+   **Expect:** one `host-admin` line for each, then `host-policy:
+   fetch_interval_min set to 5` and `host-policy: term history set
+   (persist_scrollback=None per_tab_history=Some(false))`. In
+   `host-policy.json` only those two keys changed. After a second,
+   `ui-state.json` holds `fetch_interval_min: 5` and `term_per_tab_history:
+   false`, and still holds `term_persist_scrollback: false` from step 1,
+   because this window never set that one.
+4. **The engine runs what it says.** Open a NEW dock tab and run `echo
+   "$HISTFILE"`.
+   **Expect:** your usual history file (`~/.zsh_history` for zsh). Turn the
+   switch back on, open another new tab, and the same command prints a path
+   under `term-history/`.
+5. **A restart keeps it.** ⌘Q, then launch.
+   **Expect:** the `host-policy: …` line at boot shows `fetch_interval_min=5`,
+   and Settings shows the same values as before the quit.
+6. **A refusal rolls back.** Quit. Save `host-policy.json` aside, write `{
+   "fetch_interval_min": 5, ` into it, and launch. Pick Every 60 min.
+   **Expect:** at boot, serve.log says the file is not a JSON object and
+   that it is ignoring it. On the pick, the app shows `Auto-fetch: … is not
+   valid JSON …`, and the select goes back. Quit and put the file back.
+
+Optional, and never run so far for any host policy (D6 in the server-edition
+rehearsal was a mock drive): after step 5, quit, install v0.43.0, and open its
+Settings. It reads only `ui-state.json`, so it should show Every 5 min, and
+history per tab off.
+
 ## What is not covered here
 
 - **The shipped app on `tauri://localhost`.** This branch's bundle has no CLI

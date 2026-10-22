@@ -6,7 +6,7 @@
 //! `worktrees_core::ops`.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
 
 use serde::Serialize;
 use worktrees_core::ui::CaptureUi;
@@ -816,17 +816,27 @@ pub fn fetch_origin_root(main_root: &str) -> Result<(), String> {
     }
 }
 
-/// Auto-fetch interval in SECONDS (0 = off). The settings blob is backend-opaque
-/// (get_settings/set_settings just shuttle JSON), so the watcher thread can't read
-/// it — the frontend pushes the value here via `set_fetch_interval` after every
-/// settings hydration and change.
+/// Auto-fetch interval in SECONDS (0 = off), which the poll (`host::start`)
+/// reads. HOST policy (`hostpolicy`): one loop fetches for the whole host, so
+/// no client's own settings may decide it. Boot loads it from
+/// host-policy.json, and `set_fetch_interval` is its only other writer.
 pub static FETCH_INTERVAL_SECS: AtomicU64 = AtomicU64::new(0);
 
-/// Frontend → backend sync of the auto-fetch interval. `mins` is 0 (off) or one
-/// of the offered cadences (5 / 15 / 60); stored in whole seconds for the watcher.
-pub fn set_fetch_interval(mins: u64) -> Result<(), String> {
-    FETCH_INTERVAL_SECS.store(mins.saturating_mul(60), Ordering::Relaxed);
+/// Settings → Behavior → Auto-fetch origin: HOST policy, persisted in
+/// host-policy.json and then applied to the poll. `mins` is 0 (off) or one of
+/// the offered cadences (5 / 15 / 60); anything else is refused, and so is a
+/// write the file cannot take, and neither one takes effect.
+pub fn set_fetch_interval(ctx: &Ctx, mins: u64) -> Result<(), String> {
+    crate::hostpolicy::set_fetch_interval(&ctx.config_dir, mins)
+        .inspect_err(|e| applog("error", &format!("set_fetch_interval: {e}")))?;
+    applog("info", &format!("host-policy: fetch_interval_min set to {mins}"));
     Ok(())
+}
+
+/// The cadence the poll fetches on now, in minutes, for Settings to render:
+/// the host's value, else the default. Not a record of what the host holds.
+pub fn get_fetch_interval() -> Result<u64, String> {
+    Ok(crate::hostpolicy::engine_opts().fetch_interval_min)
 }
 
 /// Manual "Fetch origin" verb (project right-click). Discovers the repo from any

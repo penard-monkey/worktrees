@@ -363,26 +363,6 @@ export type Settings = {
   // The release tag whose update bubble was closed ("" = none). Per VERSION, so
   // a newer release asks again; the gear's dot is not affected (updatepoll.ts).
   update_dismissed: string;
-  fetch_interval_min: number; // background `git fetch origin` cadence (0 = off, else 5 | 15 | 60)
-  // ── what a dock shell tab keeps between runs ────────────────────────────
-  // Both are FLAT globals, deliberately not `place_panels` keys: they are how
-  // YOU want your shells to behave, like `files_diff_base`, not something one
-  // worktree can mean differently from the next — so the seed-freeze trap that
-  // forces `files_md_zoom` to be optional does not apply.
-  //
-  // The backend cannot read them (the settings blob is frontend-owned and
-  // written whole), so App pushes both through `set_term_history_opts`, exactly
-  // as it pushes `fetch_interval_min`.
-
-  // Save each tab's scrollback and replay it when the tab reopens. This is the
-  // only thing that writes a terminal's OUTPUT to disk — anything a script
-  // echoed, secrets included — which is why Settings says where it lands.
-  term_persist_scrollback: boolean;
-  // Give each tab its own command history instead of the one
-  // `~/.zsh_history` every terminal on the machine shares. Costs a generated
-  // ZDOTDIR per tab (zsh's rc files move with it, so the directory carries
-  // shims that source the user's own); zsh and bash only.
-  term_per_tab_history: boolean;
   restore_last: boolean; // on launch, SELECT the most recently opened place (selection-only, never enters)
   // Reopen the window as it was left: size, position, maximized, fullscreen.
   // Read by the BACKEND at launch (winstate.rs), before this file ever runs, so
@@ -433,10 +413,14 @@ export type Settings = {
   // already persisted the old value. Without it a default flip is invisible to
   // exactly the people who have been running the app — see `migrate`.
   settings_rev: number;
-  // NOT settings of this build: a copy of the host's Codex permissions and pi
-  // project trust (host policy, above) for an OLDER one. v0.42.0 and earlier
-  // read only this file, so without it a downgrade falls back to Auto-review —
-  // wider than Ask — and to Skip, and writes those back. Never read here.
+  // NOT settings of this build: a copy of the host's policy (`hostpolicy` in
+  // worktrees-api, kept in host-policy.json) for an OLDER one. v0.42.0 and
+  // earlier read only this file for Codex permissions and pi project trust,
+  // and v0.43 for the auto-fetch cadence and the two dock-shell switches too,
+  // so without it a downgrade falls back to the defaults — Auto-review, wider
+  // than Ask; Skip; auto-fetch off; scrollback saved — and writes those back.
+  // Never read here except by the mirror itself (`hostpolicy-check.mjs` rule
+  // 7): every control renders what the HOST answers.
   // Written only after a Settings click the host ACCEPTED, with the value the
   // host then reports, and never at load: the getters answer the EFFECTIVE
   // value, which can come from env or user config while the host holds
@@ -449,6 +433,13 @@ export type Settings = {
   // hand gets this copy back at the next boot rather than env and config.
   codex_permissions?: CodexPermissions;
   pi_project_trust?: PiProjectTrust;
+  // Background `git fetch origin` cadence in minutes (0 = off, else 5 | 15 | 60).
+  fetch_interval_min?: number;
+  // Whether a dock shell tab's scrollback is saved and replayed, and whether
+  // each tab gets its own command history (`term::PERSIST_SCROLLBACK`,
+  // `term::PER_TAB_HISTORY`).
+  term_persist_scrollback?: boolean;
+  term_per_tab_history?: boolean;
 };
 
 /** Current settings revision. Bump ONLY together with a step in `migrate`. */
@@ -505,9 +496,6 @@ export const DEFAULTS: Settings = {
   ai_auto_resume: true,
   update_auto_check: true,
   update_dismissed: "",
-  fetch_interval_min: 0,
-  term_persist_scrollback: true,
-  term_per_tab_history: true,
   restore_last: false,
   restore_window: true,
   sync_with_sessions: false,
@@ -806,10 +794,12 @@ export async function loadSettings(): Promise<Settings> {
     // still carries the key; drop it here so the next whole-blob save stops
     // copying it forward (the merge above would keep it forever otherwise).
     delete (s as Partial<Settings> & { agent_setup_dismissed?: unknown }).agent_setup_dismissed;
-    // NOT retired, though this build never reads them: `codex_permissions` and
-    // `pi_project_trust` stay in the blob, untouched, as an older build's copy
-    // of host policy (see the type). Deleting them here made every downgrade
-    // reset Codex to Auto-review. `hostpolicy-check.mjs` rule 6 pins it.
+    // NOT retired, though this build never reads them: the five host-policy
+    // keys (`codex_permissions`, `pi_project_trust`, `fetch_interval_min`,
+    // `term_persist_scrollback`, `term_per_tab_history`) stay in the blob,
+    // untouched, as an older build's copy of host policy (see the type).
+    // Deleting them here made every downgrade reset Codex to Auto-review.
+    // `hostpolicy-check.mjs` rule 6 pins it.
     s.usage_claude = typeof s.usage_claude === "boolean" ? s.usage_claude : true;
     s.usage_codex = typeof s.usage_codex === "boolean" ? s.usage_codex : true;
     s.usage_kimi = typeof s.usage_kimi === "boolean" ? s.usage_kimi : true;

@@ -58,25 +58,35 @@ const kimiMcpStatus = () => ({
 // Settings → pi's allowance (core keeps it in ~/.config/worktrees/config.toml).
 const piAllowed = new Set<string>();
 
-// Host policy (worktrees-api `hostpolicy`): Codex permissions and pi project
-// trust. The real host keeps them in host-policy.json, so a client reload must
-// not lose them — hence sessionStorage, like the settings blob. Every setter
-// call THIS page load made is recorded (`__mock.hostPolicySets()`), so a
-// harness run can prove a reload sends none and a click sends one.
-// `?hostpolicyfail` refuses every set, the way a corrupt file does, to drive
-// the rollback.
+// Host policy (worktrees-api `hostpolicy`): Codex permissions, pi project
+// trust, the auto-fetch cadence and the two dock-shell switches. The real host
+// keeps them in host-policy.json, so a client reload must not lose them —
+// hence sessionStorage, like the settings blob. Every setter call THIS page
+// load made is recorded (`__mock.hostPolicySets()`), so a harness run can
+// prove a reload sends none and a change sends one. `?hostpolicyfail` refuses
+// every set, the way a corrupt file does, to drive the rollback.
 const MOCK_HOST_POLICY_KEY = "wt-mock-host-policy";
-const mockHostPolicy: { codex_permissions: string; pi_project_trust: string } = (() => {
-  const d = { codex_permissions: "auto-review", pi_project_trust: "never" };
+type MockHostPolicy = {
+  codex_permissions: string;
+  pi_project_trust: string;
+  fetch_interval_min: number;
+  term_persist_scrollback: boolean;
+  term_per_tab_history: boolean;
+};
+const mockHostPolicy: MockHostPolicy = (() => {
+  const d: MockHostPolicy = {
+    codex_permissions: "auto-review", pi_project_trust: "never",
+    fetch_interval_min: 0, term_persist_scrollback: true, term_per_tab_history: true,
+  };
   try { return { ...d, ...JSON.parse(sessionStorage.getItem(MOCK_HOST_POLICY_KEY) ?? "{}") }; } catch { return d; }
 })();
 const mockHostPolicySets: { cmd: string; mode: string }[] = [];
-function setHostPolicy(cmd: string, key: "codex_permissions" | "pi_project_trust", mode: string) {
-  mockHostPolicySets.push({ cmd, mode });
+function setHostPolicy(cmd: string, patch: Partial<MockHostPolicy>) {
+  mockHostPolicySets.push({ cmd, mode: Object.keys(patch).length === 1 ? String(Object.values(patch)[0]) : JSON.stringify(patch) });
   if (location.search.includes("hostpolicyfail")) {
     throw "/Users/demo/Library/Application Support/net.casadelvalle.worktrees/host-policy.json is not valid JSON (EOF while parsing an object at line 1 column 30); not overwriting it";
   }
-  mockHostPolicy[key] = mode;
+  Object.assign(mockHostPolicy, patch);
   try { sessionStorage.setItem(MOCK_HOST_POLICY_KEY, JSON.stringify(mockHostPolicy)); } catch { /* private mode */ }
 }
 
@@ -1609,9 +1619,22 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     case "fetch_origin":
       console.info("[mock] fetch_origin:", args); // no ahead/behind state to model in the harness
       return null;
-    case "set_term_history_opts":
-      console.info("[mock] set_term_history_opts:", args);
+    case "set_term_history_opts": {
+      // A patch, like `prefs::set_term_history_opts`: a switch the call does
+      // not name is left alone; a non-boolean, or naming neither, is refused.
+      const patch: Partial<MockHostPolicy> = {};
+      for (const [arg, key] of [["persistScrollback", "term_persist_scrollback"], ["perTabHistory", "term_per_tab_history"]] as const) {
+        const v = args[arg] ?? null;
+        if (v === null) continue;
+        if (typeof v !== "boolean") throw `invalid args \`${arg}\`: invalid type: ${typeof v}, expected a boolean`;
+        patch[key] = v;
+      }
+      if (!Object.keys(patch).length) throw "nothing to set: name persist_scrollback, per_tab_history or both";
+      setHostPolicy("set_term_history_opts", patch);
       return null;
+    }
+    case "get_term_history_opts":
+      return { persist_scrollback: mockHostPolicy.term_persist_scrollback, per_tab_history: mockHostPolicy.term_per_tab_history };
     case "term_history_info": {
       let bytes = 0;
       savedScrollback.forEach((v) => { bytes += v.text.length; });
@@ -1621,9 +1644,14 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       savedScrollback.clear();
       mockRings.clear(); // the live rings go too, as lib.rs clears them
       return null;
-    case "set_fetch_interval":
-      console.info("[mock] set_fetch_interval:", args);
+    case "set_fetch_interval": {
+      const mins = args.mins as number;
+      if (![0, 5, 15, 60].includes(mins)) throw `unknown auto-fetch interval ${mins} (expected 0, 5, 15 or 60 minutes)`;
+      setHostPolicy("set_fetch_interval", { fetch_interval_min: mins });
       return null;
+    }
+    case "get_fetch_interval":
+      return mockHostPolicy.fetch_interval_min;
     case "detect_editors": {
       // `?editors=none|one|many` (default many) — the picker's three shapes:
       // no list at all (free text only), a single app, and apps + CLIs.
@@ -3134,7 +3162,7 @@ Phase 3: Frontend pane and mock harness
     case "set_pi_trust": {
       const mode = String(args.mode);
       if (!["never", "ask"].includes(mode)) throw `unknown pi trust mode '${mode}' (expected never or ask)`;
-      setHostPolicy("set_pi_trust", "pi_project_trust", mode);
+      setHostPolicy("set_pi_trust", { pi_project_trust: mode });
       return null;
     }
     case "set_pi_allowed": {
@@ -3148,7 +3176,7 @@ Phase 3: Frontend pane and mock harness
       if (!["ask", "auto-review", "full"].includes(mode)) {
         throw `unknown Codex permission mode '${mode}' (expected ask, auto-review or full)`;
       }
-      setHostPolicy("set_codex_permissions", "codex_permissions", mode);
+      setHostPolicy("set_codex_permissions", { codex_permissions: mode });
       return null;
     }
     case "get_codex_permissions":

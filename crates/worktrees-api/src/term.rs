@@ -1038,10 +1038,11 @@ pub const TERM_HIST_MAX_AGE_SECS: i64 = 30 * 24 * 60 * 60;
 /// slow sampler, the shell commands and the sweeps all touch this tree.
 pub static TERM_HIST_LOCK: Mutex<()> = Mutex::new(());
 
-/// Frontend-owned preferences the shell path needs. Set by
-/// `set_term_history_opts` on hydration and on every change — the same shape as
-/// `FETCH_INTERVAL_SECS`, and for the same reason: the backend must never READ
-/// `ui-state.json` to find them out, because it must never write it.
+/// HOST policy the shell path needs (`hostpolicy`): whether a tab's ring is
+/// saved and replayed, and whether a new shell gets its own history. Boot
+/// loads them from host-policy.json and `set_term_history_opts` is their only
+/// other writer — never a page load, and never `ui-state.json`, which the
+/// backend must not read for them because it must never write it.
 pub static PERSIST_SCROLLBACK: AtomicBool = AtomicBool::new(true);
 pub static PER_TAB_HISTORY: AtomicBool = AtomicBool::new(true);
 
