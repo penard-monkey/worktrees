@@ -757,9 +757,9 @@ commands! { cx, a;
         a.get("repo")?, a.get("slug")?, a.get("index")?, a.get("cols")?, a.get("rows")?, &cx.ctx.shells,
     ),
     shell_detach: Stream [stream, shell(repo, slug, index)] => {
-        let (repo, slug, index): (String, String, u32) = (a.get("repo")?, a.get("slug")?, a.get("index")?);
-        cx.frames.forget_shell(&repo, &slug, index);
-        term::shell_detach(repo, slug, index, a.get("gen")?, &cx.ctx.shells)
+        let (repo, slug, index, gen): (String, String, u32, u64) = (a.get("repo")?, a.get("slug")?, a.get("index")?, a.get("gen")?);
+        cx.frames.take_shell_gen(&repo, &slug, index, gen);
+        term::shell_detach(repo, slug, index, gen, &cx.ctx.shells)
     },
     term_open: Stream [stream, session(session)] => {
         let session: String = a.get("session")?;

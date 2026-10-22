@@ -1791,6 +1791,88 @@ mod devices {
         assert_eq!(call.frames.reconciled().load(Ordering::SeqCst), 2);
     }
 
+    /// A `shell_detach` naming a generation this connection does not hold
+    /// releases nothing — `term::shell_detach` ignores it — so the hold stays
+    /// recorded and a later narrowing still lets go of the sink. Forgetting it
+    /// on the client's word would leave the sink attached and unseen.
+    #[test]
+    fn a_detach_naming_another_generation_keeps_the_hold() {
+        let e = engine("detachgen", vec![]);
+        let a = s(&e.dir.join("a"));
+        let dev = enroll(&e.reg, "Dev", 1, &[Read, Stream], Projects::only([a.clone()]));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let out = Outbox(tx);
+        let call = Arc::new(Call {
+            ctx: e.ctx.clone(),
+            frames: Frames::new(out.clone()),
+            caller: caller(&dev),
+            registry: e.reg.clone(),
+            world: Some(Arc::new(Roots { roots: vec![a.clone()], panes: vec![] })),
+            devices: e.reg.clone(),
+        });
+        call.frames.note_shell(ShellHold { repo: a.clone(), slug: "(main)".into(), index: 0, gen: 7 });
+        let _kill = e.clients.join(1, out, call.clone());
+        let detach = |gen: u64| dispatch::call(&call, "shell_detach", &Args(json!({"repo": a, "slug": "(main)", "index": 0, "gen": gen}).as_object().cloned().unwrap()));
+        assert_eq!(detach(8), Ok(Value::Null));
+        assert_eq!(call.frames.shells().len(), 1, "another generation's detach keeps this one's hold");
+        e.reg.set_scope(&dev.id, Grant { capabilities: Caps::of(&[Read]), projects: Projects::only([a.clone()]) }).unwrap();
+        assert!(call.frames.shells().is_empty(), "and the narrowing found it");
+        call.frames.note_shell(ShellHold { repo: a.clone(), slug: "(main)".into(), index: 0, gen: 9 });
+        e.reg.set_scope(&dev.id, Grant { capabilities: Caps::of(&[Read, Stream]), projects: Projects::only([a.clone()]) }).unwrap();
+        assert_eq!(detach(9), Ok(Value::Null));
+        assert!(call.frames.shells().is_empty(), "its own generation's detach releases it");
+    }
+
+    /// The narrowing that lands WHILE a stream is being opened: the request
+    /// was authorized under the old grant, and the narrowing's own reconcile
+    /// ran before the new channel was noted, so it could not see it. The
+    /// world fixture fires that interleaving from inside the request (its
+    /// pane lookup is the resolver's, mid-authorization); the request's
+    /// end-of-answer check must end the channel all the same.
+    struct Racing {
+        root: String,
+        reg: Arc<Quiet>,
+        frames: Frames,
+        fired: std::sync::atomic::AtomicBool,
+    }
+
+    impl World for Racing {
+        fn roots(&self) -> Vec<String> {
+            vec![self.root.clone()]
+        }
+        fn panes(&self) -> Option<worktrees_core::tmux::PaneList> {
+            if !self.fired.swap(true, Ordering::SeqCst) {
+                *self.reg.grant.lock().unwrap() = Grant { capabilities: Caps::of(&[Read]), projects: Projects::All };
+                self.reg.gen.store(2, Ordering::SeqCst);
+                self.frames.reconciled().store(2, Ordering::SeqCst);
+                self.frames.note_term(904, "sa".into());
+            }
+            Some(worktrees_core::tmux::PaneList::from_rows(vec![("sa".into(), self.root.clone(), "zsh".into())]))
+        }
+    }
+
+    #[test]
+    fn a_narrowing_that_lands_mid_open_still_ends_the_new_channel() {
+        let e = engine("midopen", vec![]);
+        let a = s(&e.dir.join("a"));
+        let reg = Arc::new(Quiet { grant: Mutex::new(Grant { capabilities: Caps::of(&[Read, Stream]), projects: Projects::All }), gen: AtomicU64::new(1) });
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let frames = Frames::new(Outbox(tx));
+        let world = Racing { root: a.clone(), reg: reg.clone(), frames: frames.clone(), fired: Default::default() };
+        let call = Call {
+            ctx: e.ctx.clone(),
+            frames: frames.clone(),
+            caller: Caller::paired(PrincipalId::owner(), DeviceId::new("d_q")),
+            registry: reg.clone(),
+            world: Some(Arc::new(world)),
+            devices: e.reg.clone(),
+        };
+        frames.reconciled().store(1, Ordering::SeqCst);
+        // No `cols`: the body fails on its arguments before it reaches tmux.
+        let _ = conn::answer(&call, &json!(1), "term_open", &Args(json!({"session": "sa"}).as_object().cloned().unwrap()));
+        assert!(frames.terms().is_empty(), "the channel opened under the old grant was ended: {:?}", frames.terms());
+    }
+
     /// A revoke cancels the clone jobs the device started (§2.5): every new
     /// job id the resolver namespaces for a connection is remembered for it.
     #[test]

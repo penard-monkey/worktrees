@@ -908,9 +908,23 @@ pub(super) fn answer(call: &Call, au: &ConnAudit, id: &Value, cmd: &str, args: &
     // (§3.3): one atomic load when nothing moved. The registry's own events
     // reconcile at once; this is the backstop for a change that came by
     // another way.
-    if !call.caller.is_console() && call.frames.reconciled().load(Ordering::SeqCst) != call.registry.generation() {
+    let device = !call.caller.is_console();
+    if device && call.frames.reconciled().load(Ordering::SeqCst) != call.registry.generation() {
         reconcile(call);
     }
+    let authorized_at = call.registry.generation();
+    let reply = answer_now(call, au, id, cmd, args);
+    // A change that landed WHILE this request ran — after it was authorized,
+    // perhaps before the channel it opened was noted, so that change's own
+    // reconcile could not see it — is checked now: a stream opened under a
+    // grant that has since narrowed must not outlive it (§3.3).
+    if device && call.registry.generation() != authorized_at {
+        reconcile(call);
+    }
+    reply
+}
+
+fn answer_now(call: &Call, au: &ConnAudit, id: &Value, cmd: &str, args: &Args) -> String {
     use std::panic::{catch_unwind, AssertUnwindSafe};
     let seen = au.request();
     let r = catch_unwind(AssertUnwindSafe(|| dispatch::call_seen(call, cmd, args, &seen)));

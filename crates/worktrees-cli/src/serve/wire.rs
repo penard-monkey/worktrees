@@ -347,6 +347,17 @@ impl Frames {
         self.shells.lock().unwrap().retain(|h| (h.repo.as_str(), h.slug.as_str(), h.index) != (repo, slug, index));
     }
 
+    /// The hold on this shell, if it is generation `gen` — what a client's
+    /// `shell_detach` releases. A detach naming any other generation releases
+    /// nothing (`term::shell_detach` ignores it too), so the hold must stay
+    /// recorded, or the sink would outlive the next narrowing unseen.
+    pub fn take_shell_gen(&self, repo: &str, slug: &str, index: u32, gen: u64) -> bool {
+        let mut v = self.shells.lock().unwrap();
+        let before = v.len();
+        v.retain(|h| (h.repo.as_str(), h.slug.as_str(), h.index, h.gen) != (repo, slug, index, gen));
+        v.len() != before
+    }
+
     pub fn shells(&self) -> Vec<ShellHold> {
         self.shells.lock().unwrap().clone()
     }
