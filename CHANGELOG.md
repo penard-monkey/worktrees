@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.43.0] - 2026-10-21
+
 ### Changed
 - **The desktop app is a client of `worktrees serve` — one engine per host.**
   The app no longer runs the engine in its own process. On launch it reads
@@ -43,12 +45,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `app.log` keeps the shim's.
 - **The frontend reaches its backend through one module, `app/src/ipc.ts`.**
   The 25 files that imported `invoke`, `Channel` and `listen` from
-  `@tauri-apps/api` import them from there instead; in the desktop app those
-  ARE Tauri's own functions, called with the same arguments, so nothing
-  changes. It is the switch the app will use to become a client of
-  `worktrees serve`. Plugins (opener, dialog, updater, process, the window
-  API) still import their packages directly — they act on the machine the
-  window runs on, whichever engine is driving it.
+  `@tauri-apps/api` import them from there instead. It is the switch that
+  makes the app a client of `worktrees serve` (above): the commands that act
+  on this machine go to Tauri, everything else over serve's socket. Plugins
+  (opener, dialog, updater, process, the window API) still import their
+  packages directly — they act on the machine the window runs on, whichever
+  engine is driving it.
 - **The host wiring every engine process needs lives in one place,
   `worktrees_api::host`**: `boot` (log sink, panic hook, the launchd-bare PATH
   and locale repairs, the startup line), `start` (the viewer sweep, the
