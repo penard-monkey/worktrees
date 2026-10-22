@@ -11,10 +11,12 @@
 //!
 //! Modules: `policy` (the pure rule set), `conn` (the socket), `wire` (the
 //! frames and the per-connection queue), `dispatch` (the exposure table and
-//! the arms), `servefile` (`serve.json`).
+//! the arms), `servefile` (`serve.json`), `netwatch` (the remote
+//! listener's address rules, not yet wired).
 
 mod conn;
 mod dispatch;
+mod netwatch;
 mod policy;
 mod resolve;
 mod scope;
