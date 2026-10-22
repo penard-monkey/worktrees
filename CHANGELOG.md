@@ -93,6 +93,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   refused for other devices. A repository cloned this way keeps
   `http.followRedirects=false` in its own config, so later fetches of it do not
   follow redirects either.
+- **What a file is decides what another device needs to read or change
+  it.** This is groundwork as well, and the desktop app reads and saves
+  exactly as before. For another device:
+  - writing an agent's instructions (`AGENTS.md`, `CLAUDE.md`, `.planning/`,
+    `.claude/`, `.worktrees.toml` and their kin) needs the instruct
+    permission;
+  - writing a file that runs on its own (Claude's `settings.json` and hooks,
+    `.mcp.json`, Codex's `config.toml`, `.kimi-code/`) needs terminal access;
+  - reading or writing `.env` files and the files a project declares in
+    `[[file]]` needs terminal access too;
+  - `.git` and worktrees' own state can be read only on the host, and
+    written by no one.
+
+  A symlink counts as the file it leads to. A project nested inside another
+  counts under both, and the stricter answer wins. A folder listing still
+  shows names the device cannot read, marked as such. The Docs tab and file
+  links in terminals and documents leave those files out.
 
 ## [0.43.1] - 2026-10-22
 

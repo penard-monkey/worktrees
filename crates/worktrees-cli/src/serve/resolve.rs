@@ -71,8 +71,15 @@ pub enum Obj {
     /// A PLACE root: a registered root, or a direct child of its `.worktrees/`.
     Root(&'static str),
     /// An existing path under a registered project, owned by the innermost
-    /// project that contains it, and its path class's requirement (§7).
+    /// project that contains it, and its path class's requirement (§7): the
+    /// class can RAISE the capability the row needs ([`file_requirement`]).
     File(&'static str),
+    /// [`Obj::File`] for a yes/no question about the file (`file_readable`).
+    /// A refusal for a missing, out-of-scope or unreadable file is answered
+    /// `false` and the body does not run, which is what the body answers for a
+    /// missing file, so the three look alike. The dispatcher does that
+    /// (`dispatch::call_in`); the refusal keeps its real kind and reason.
+    Probe(&'static str),
     /// A tmux session that belongs to a place in scope (§8 gap 3).
     Session(&'static str),
     /// A tmux session of the project another argument named (that argument's
@@ -142,7 +149,7 @@ impl Obj {
     pub fn args(&self) -> Vec<&'static str> {
         use Obj::*;
         match *self {
-            Project(a) | OptProject(a, _) | Slug(a) | Root(a) | File(a) | Session(a) | Attach(a) | Close(a) | ShellRef(a) | Job(a)
+            Project(a) | OptProject(a, _) | Slug(a) | Root(a) | File(a) | Probe(a) | Session(a) | Attach(a) | Close(a) | ShellRef(a) | Job(a)
             | NewJob(a) | Device(a) | NewPath(a) | RemoteUrl(a) | Places(a) | Roots(a) | Candidates(a) => vec![a],
             SessionIn(s, _) => vec![s],
             Place(r, s) => vec![r, s],
@@ -167,6 +174,11 @@ impl Obj {
             Obj::Filtered(f) => Some(*f),
             _ => None,
         }
+    }
+
+    /// A refusal of this object is the answer `false` ([`Obj::Probe`]).
+    pub fn answers_false(&self) -> bool {
+        matches!(self, Obj::Probe(_))
     }
 }
 
@@ -320,11 +332,19 @@ pub fn authorize(row: &Row, cx: &Call, grant: &Grant, args: &mut Args, world: &d
     Ok(st.out)
 }
 
-/// The path class's requirement for one file, on top of the row's capability.
-/// THE seam for the path classifier (slice 2, `worktrees_core::pathclass`):
-/// until it lands every path is plain, which is exactly today's behaviour.
-pub fn file_requirement(_project_root: &Path, _rel: &Path, _access: Access) -> Requirement {
-    Requirement::Row
+/// The path class's requirement for one file, on top of the row's capability
+/// (§7.1, `worktrees_core::pathclass::requirement`). `canon` is canonical, and
+/// `world_roots` are EVERY registered root, canonical too, whatever the
+/// caller's scope. The class is the strictest over every root that holds the
+/// path, plus "a `.git` anywhere in the absolute path is forbidden", so
+/// neither a nested project nor a root registered inside a `.git` directory
+/// can make a path plainer than it is. A place's own directory is read as a
+/// checkout's root (`Classifier::class_for`). A path under no root cannot be
+/// classed, and is forbidden (the caller has already found its owner, so
+/// that would be a world that changed in between).
+pub fn file_requirement(world_roots: &[PathBuf], canon: &Path, access: Access) -> Requirement {
+    use worktrees_core::pathclass::{self, Class, Classifier};
+    pathclass::requirement(Classifier::new(world_roots).class_for(canon, access).unwrap_or(Class::Forbidden), access)
 }
 
 // ── resolution ───────────────────────────────────────────────────────────────
@@ -432,6 +452,13 @@ impl St<'_> {
         self.roots().iter().find(|r| canon(r).as_deref() == Some(c.as_path())).cloned()
     }
 
+    /// Every registered root, canonical: what a path's class is judged over.
+    /// The world's, never the scope's — a root the caller cannot see can
+    /// still make a path stricter ([`file_requirement`]).
+    fn class_roots(&mut self) -> Vec<PathBuf> {
+        self.roots().iter().filter_map(|r| canon(r)).collect()
+    }
+
     /// The innermost registered project containing canonical `path`, as
     /// (registry key, canonical root).
     fn owner_of(&mut self, path: &Path) -> Option<(String, PathBuf)> {
@@ -521,21 +548,23 @@ impl St<'_> {
                 // error is the one it always had — over the WORLD's roots: the
                 // owning project is the innermost, and it must be in scope.
                 let c = std::fs::canonicalize(&raw).map_err(|e| Refusal::not_found(format!("{raw}: {e}")))?;
-                let (key, root) = self.owner_of(&c).ok_or_else(|| Refusal::not_found(format!("path outside workspace: {raw}")))?;
+                let (key, _) = self.owner_of(&c).ok_or_else(|| Refusal::not_found(format!("path outside workspace: {raw}")))?;
                 self.in_scope(&key)?;
                 let access = if row.cap == Some(Capability::Read) { Access::Read } else { Access::Write };
-                let rel = c.strip_prefix(&root).unwrap_or(Path::new(""));
-                match file_requirement(&root, rel, access) {
+                match file_requirement(&self.class_roots(), &c, access) {
                     Requirement::Row => {}
                     Requirement::Cap(cap) if self.grant.allows(cap) => {}
                     Requirement::Cap(cap) => return Err(Refusal::denied(format!("{} of {raw} needs `{cap}`", row.name))),
                     Requirement::Console if self.cx.caller.is_console() => {}
                     Requirement::Console => return Err(Refusal::denied(format!("{} of {raw} is a console act", row.name))),
-                    Requirement::Never => return Err(Refusal::denied(format!("{raw} is never {}", if access == Access::Read { "read" } else { "written" }))),
+                    // The body's own guard's words (`projects::forbid_write`),
+                    // so the console is told what it always was.
+                    Requirement::Never => return Err(Refusal::denied(worktrees_api::projects::forbidden_message(&raw, &c))),
                 }
                 args.set(a, Value::from(c.to_string_lossy().into_owned()));
                 self.bind(a, key, None);
             }
+            Obj::Probe(a) => self.resolve(row, &Obj::File(a), args)?,
             Obj::Session(a) => {
                 let name: String = self.get(args, a)?;
                 let key = self.session_project(&name, None)?;
@@ -1003,6 +1032,137 @@ mod tests {
             assert_eq!(e.wire_for(&cx.caller), json!(ERR_NOT_FOUND), "one answer for missing and out of scope");
         }
         assert_ne!(out.detail, missing.detail, "the audit keeps the real reason");
+    }
+
+    /// §7.1–7.2: a path's class RAISES the capability its row needs. A plain
+    /// path needs only the row's; an instruction file needs `instruct` to be
+    /// written, a hook `stream`, and a secret `stream` even to be read.
+    #[test]
+    fn a_paths_class_raises_the_capability_its_row_needs() {
+        let t = two("class");
+        std::fs::create_dir_all(t.a.join(".claude")).unwrap();
+        for f in ["AGENTS.md", ".claude/settings.json", ".env"] {
+            std::fs::write(t.a.join(f), "x").unwrap();
+        }
+        let w = t.world();
+        let read = |caps: &[Capability], f: &str| {
+            let (cx, g) = phone(caps, &[&t.a]);
+            try_row("read_file", &cx, &g, json!({ "path": s(&t.a.join(f)) }), &w).map(|_| ())
+        };
+        let write = |caps: &[Capability], f: &str| {
+            let (cx, g) = phone(caps, &[&t.a]);
+            try_row("write_file", &cx, &g, json!({ "path": s(&t.a.join(f)), "content": "y", "expected_mtime": null }), &w).map(|_| ())
+        };
+        let denied = |r: Result<(), Refusal>| r.map_err(|e| (e.kind, e.wire())) == Err((RefusalKind::Denied, json!(ERR_DENIED)));
+        // plain: the row's own capability, and nothing more
+        assert!(read(&[Read], "src/lib.rs").is_ok());
+        assert!(write(&[Read, Write], "src/lib.rs").is_ok());
+        assert!(denied(write(&[Read], "src/lib.rs")), "the row's `write`");
+        // instruction: read as plain, written with `instruct`
+        assert!(read(&[Read], "AGENTS.md").is_ok());
+        assert!(denied(write(&[Read, Write], "AGENTS.md")), "a write to AGENTS.md needs instruct");
+        assert!(write(&[Read, Write, Instruct], "AGENTS.md").is_ok());
+        // executes: read as plain, written with `stream`
+        assert!(read(&[Read], ".claude/settings.json").is_ok());
+        assert!(denied(write(&[Read, Write, Instruct], ".claude/settings.json")), "a hook file needs stream");
+        assert!(write(&[Read, Write, Stream], ".claude/settings.json").is_ok());
+        // secret: `stream` both ways
+        assert!(denied(read(&[Read, Write, Instruct], ".env")), "a read of .env needs stream");
+        assert!(read(&[Read, Stream], ".env").is_ok());
+        assert!(denied(write(&[Read, Write, Instruct], ".env")));
+        assert!(write(&[Read, Write, Stream], ".env").is_ok());
+        // …and a link is the class of what it lands on.
+        std::os::unix::fs::symlink(t.a.join(".env"), t.a.join("src/notes.md")).unwrap();
+        assert!(denied(read(&[Read], "src/notes.md")), "a plain name over a secret");
+    }
+
+    /// `.git/**` is never written, by the console either: `core.fsmonitor` in
+    /// its config runs at the next git spawn. The console alone reads it, and
+    /// its refusal carries the words the body's own guard gives.
+    #[test]
+    fn git_is_never_written_and_read_by_the_console_alone() {
+        let t = two("gitclass");
+        let w = t.world();
+        let config = s(&t.a.join(".git/config"));
+        let (con, all) = console();
+        let (cx, g) = phone(&Capability::ALL, &[&t.a]);
+        let write = |cx: &Call, g: &Grant| try_row("write_file", cx, g, json!({ "path": config, "content": "y", "expected_mtime": null }), &w);
+        let read = |cx: &Call, g: &Grant| try_row("read_file", cx, g, json!({ "path": config }), &w);
+        let e = write(&con, &all).unwrap_err();
+        assert_eq!(e.kind, RefusalKind::Denied, "a write to .git/config is Never, the console included");
+        let told = e.wire_for(&con.caller);
+        assert!(told.as_str().is_some_and(|m| m.contains("never writes inside .git")), "{told}");
+        assert_eq!(write(&cx, &g).unwrap_err().wire(), json!(ERR_DENIED), "every capability is not enough");
+        assert!(read(&con, &all).is_ok(), "the console reads it");
+        assert_eq!(read(&cx, &g).unwrap_err().wire(), json!(ERR_DENIED), "a device does not, whatever it holds");
+    }
+
+    /// A place's own directory is the root of a checkout, and a device lists
+    /// it as it lists `(main)`'s, although nothing may be written or made at
+    /// `.worktrees/<x>`. `.worktrees` itself, and a stray file in it, are
+    /// worktrees' own and stay the console's.
+    #[test]
+    fn a_device_lists_a_places_root_and_not_the_tools_tree() {
+        let t = two("placeroot");
+        std::fs::write(t.a.join(".worktrees/stray.txt"), "x").unwrap();
+        let w = t.world();
+        let (cx, g) = phone(&[Read], &[&t.a]);
+        let list = |p: &Path| try_row("list_dir", &cx, &g, json!({ "path": s(p), "show_ignored": null }), &w).map(|_| ());
+        assert!(list(&t.a).is_ok(), "(main)");
+        assert!(list(&t.a.join(".worktrees/feat")).is_ok(), "a place's root");
+        assert!(list(&t.a.join(".worktrees/feat/../feat")).is_ok(), "however it is spelled");
+        assert_eq!(list(&t.a.join(".worktrees")).unwrap_err().wire(), json!(ERR_DENIED), "the tool's tree");
+        let stray = try_row("read_file", &cx, &g, json!({ "path": s(&t.a.join(".worktrees/stray.txt")) }), &w);
+        assert_eq!(stray.unwrap_err().wire(), json!(ERR_DENIED), "a file directly in it");
+        let (con, all) = console();
+        assert!(try_row("list_dir", &con, &all, json!({ "path": s(&t.a.join(".worktrees")) }), &w).is_ok(), "the console lists it");
+    }
+
+    /// The class is the strictest over EVERY registered root holding the path,
+    /// not the innermost root's alone: an outer project's `[[file]]` reaches
+    /// into a project nested in it, and a root registered INSIDE a `.git`
+    /// does not make `config` a plain file.
+    #[test]
+    fn a_paths_class_is_the_strictest_over_every_registered_root() {
+        let t = two("strictest");
+        let inner = t.a.join("vendor/lib");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::write(inner.join("master.key"), "k").unwrap();
+        std::fs::write(t.a.join(".worktrees.toml"), "[[file]]\npath = \"vendor/lib/master.key\"\n").unwrap();
+        let w = Fixture { roots: vec![s(&t.a), s(&inner)], panes: vec![] };
+        let (cx, g) = phone(&[Read], &[&t.a, &inner]);
+        let e = try_row("read_file", &cx, &g, json!({ "path": s(&inner.join("master.key")) }), &w).unwrap_err();
+        assert_eq!(e.kind, RefusalKind::Denied, "secret to the outer root, plain to the inner one");
+        let (cx, g) = phone(&[Read, Stream], &[&t.a, &inner]);
+        assert!(try_row("read_file", &cx, &g, json!({ "path": s(&inner.join("master.key")) }), &w).is_ok());
+
+        let gitdir = t.a.join(".git");
+        let w = Fixture { roots: vec![s(&gitdir), s(&t.b)], panes: vec![] };
+        let (con, all) = console();
+        let e = try_row("write_file", &con, &all, json!({ "path": s(&gitdir.join("config")), "content": "y", "expected_mtime": null }), &w).unwrap_err();
+        assert_eq!(e.kind, RefusalKind::Denied, "`config` under a root registered inside .git is still .git's");
+    }
+
+    /// `file_readable` answers `false`, never an error, for a file that is
+    /// missing, out of the scope, or of a class the caller may not read. The
+    /// restore that asks it must not raise a banner (`files::file_readable`),
+    /// and a device must not be able to tell the three apart.
+    #[test]
+    fn file_readable_answers_false_for_a_file_it_may_not_read() {
+        let t = two("readable");
+        std::fs::write(t.a.join(".env"), "x").unwrap();
+        let w = t.world();
+        let ask = |cx: &Call, a: Value| super::super::dispatch::call_in(cx, "file_readable", &args(a), &w);
+        let (con, _) = console();
+        assert_eq!(ask(&con, json!({ "path": s(&t.a.join("src/gone.rs")) })), Ok(json!(false)), "the console, of a deleted file");
+        let (cx, g) = phone(&[Read], &[&t.a]);
+        for p in [t.a.join(".env"), t.a.join("src/gone.rs"), t.b.join("src/lib.rs"), t.a.join(".git/config")] {
+            assert_eq!(ask(&cx, json!({ "path": s(&p) })), Ok(json!(false)), "{}", p.display());
+        }
+        // A file it may read passes to the body (not run here: it reads the
+        // registry), and a malformed argument is still an error.
+        assert!(try_row("file_readable", &cx, &g, json!({ "path": s(&t.a.join("src/lib.rs")) }), &w).is_ok());
+        assert!(ask(&cx, json!({ "path": 7 })).is_err());
     }
 
     #[test]

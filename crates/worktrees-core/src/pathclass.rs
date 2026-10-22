@@ -3,10 +3,11 @@
 //!
 //! One classifier, so the write guard, the reads, the tree and the docs index
 //! cannot each grow their own idea of which files steer an agent. It answers
-//! with a `Class` and nothing else: which CAPABILITY a class needs belongs to
-//! the dispatch table's resolver, which owns that type. The one answer that
-//! needs no capability at all is here, because it applies to every caller,
-//! the desktop included: `Forbidden` is never written
+//! with a `Class`, and [`requirement`] says what a class needs on top of a
+//! row's capability, in `authz`'s vocabulary: serve's resolver raises a
+//! `file(…)` row by it, and the api bodies that ENUMERATE paths (a directory
+//! listing, the docs index, the path links) filter by it. One answer applies
+//! to every caller, the desktop included: `Forbidden` is never written
 //! (`Class::refuses_every_caller`).
 //!
 //! **Matching is on the canonical path, folded the way APFS folds.** A
@@ -56,14 +57,30 @@ pub enum Class {
     Forbidden,
 }
 
-/// Which half of the question is being asked.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Access {
-    Read,
-    Write,
+/// Which half of the question is being asked: authz's, so there is one.
+pub use crate::authz::Access;
+use crate::authz::Requirement;
+
+/// What `class` needs for `access` ON TOP OF the row's capability: §7.1's two
+/// capability columns. A plain path needs nothing more, and neither does
+/// reading an instruction or an executes path. Writing one of those needs
+/// `instruct` or `stream`. A secret needs `stream` both ways, because a device
+/// with a shell can `cat` it anyway. A forbidden path is the console's to
+/// read and nobody's to write.
+pub fn requirement(class: Class, access: Access) -> Requirement {
+    use crate::authz::Capability::{Instruct, Stream};
+    match (class, access) {
+        (Class::Plain, _) | (Class::Instruction | Class::Executes, Access::Read) => Requirement::Row,
+        (Class::Instruction, Access::Write) => Requirement::Cap(Instruct),
+        (Class::Executes, Access::Write) | (Class::Secret, _) => Requirement::Cap(Stream),
+        (Class::Forbidden, Access::Read) => Requirement::Console,
+        (Class::Forbidden, Access::Write) => Requirement::Never,
+    }
 }
 
 impl Class {
+    pub const ALL: [Class; 5] = [Class::Plain, Class::Instruction, Class::Executes, Class::Secret, Class::Forbidden];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Class::Plain => "plain",
@@ -74,20 +91,13 @@ impl Class {
         }
     }
 
-    /// No caller may do `access` here, loopback included. Only a write to a
-    /// `Forbidden` path: `core.fsmonitor` in `.git/config` runs at the next git
-    /// spawn, and the engine's own poll spawns git every few seconds, so such a
-    /// write is code execution with nobody in the loop. A terminal can still
-    /// edit `.git/config`; the person at the desk has one.
+    /// No caller may do `access` here, loopback included ([`Requirement::Never`]).
+    /// Only a write to a `Forbidden` path: `core.fsmonitor` in `.git/config`
+    /// runs at the next git spawn, and the engine's own poll spawns git every
+    /// few seconds, so such a write is code execution with nobody in the loop.
+    /// A terminal can still edit `.git/config`; the person at the desk has one.
     pub fn refuses_every_caller(self, access: Access) -> bool {
-        self == Class::Forbidden && access == Access::Write
-    }
-
-    /// No paired DEVICE may do `access` here, whatever it holds. Reads of
-    /// `Forbidden` paths stay open to the loopback caller, which is the person
-    /// at the desk.
-    pub fn refuses_devices(self, _access: Access) -> bool {
-        self == Class::Forbidden
+        requirement(self, access) == Requirement::Never
     }
 }
 
@@ -147,7 +157,8 @@ pub fn declared_files(project_root: &Path) -> Vec<String> {
 /// because a place is a checkout of the same project: its `AGENTS.md` is an
 /// instruction file and its `[[file]]` destinations are secrets, exactly as
 /// they are at the root. `.worktrees` itself and anything directly in it are
-/// the tool's.
+/// the tool's (reading a place's own directory is the one exception, and it
+/// needs a stat: [`Classifier::class_for`]).
 ///
 /// A path that is not relative (absolute, or carrying `..`) cannot be classed
 /// and answers `Forbidden`: failing closed is the only safe reading of a path
@@ -237,17 +248,63 @@ fn classify_place(parts: &[String], declared: &[String]) -> Class {
 /// root registered inside a `.git` directory cannot make `config` a plain file
 /// — the same test `files::classify_symlink` applies to a link's target.
 pub fn classify_canonical(roots: &[PathBuf], canon: &Path) -> Option<Class> {
-    let mut out: Option<Class> = None;
-    for r in roots {
-        let Ok(rel) = canon.strip_prefix(r) else { continue };
-        let c = classify(r, &rel.to_string_lossy());
-        out = Some(out.map_or(c, |o| o.max(c)));
+    Classifier::new(roots).class_of(canon)
+}
+
+/// [`classify_canonical`] for many paths under one set of roots. Each root's
+/// `[[file]]` list is read once, the first time a path under it is asked
+/// about, so a directory listing classes every entry with one config read per
+/// root that contains it, and none for the roots that do not.
+pub struct Classifier {
+    roots: Vec<(PathBuf, std::cell::OnceCell<Vec<String>>)>,
+}
+
+impl Classifier {
+    /// `roots` must be canonical, as `canon` will be.
+    pub fn new(roots: &[PathBuf]) -> Classifier {
+        Classifier { roots: roots.iter().map(|r| (r.clone(), std::cell::OnceCell::new())).collect() }
     }
-    let out = out?;
-    if has_git_component(canon) {
-        return Some(Class::Forbidden);
+
+    /// The class of the canonical path `canon`, or `None` when no root holds it.
+    pub fn class_of(&self, canon: &Path) -> Option<Class> {
+        self.class_for(canon, Access::Write)
     }
-    Some(out)
+
+    /// [`Classifier::class_of`] for the act `access` names, which differs in
+    /// one case. READING a place's own directory, `<root>/.worktrees/<slug>`,
+    /// is reading the root of a checkout, and that is plain, as `(main)`'s root
+    /// is: every place's Files tab lists it. Everything else at
+    /// `.worktrees/<x>` stays `Forbidden`, because only the tool writes or
+    /// creates anything there: a stray file in it, a write, and a project, a
+    /// clone or a `git init` aimed at it (`class_of`, which the write guards
+    /// ask). It has to be an existing directory, so this one case stats.
+    pub fn class_for(&self, canon: &Path, access: Access) -> Option<Class> {
+        let mut out: Option<Class> = None;
+        for (r, declared) in &self.roots {
+            let Ok(rel) = canon.strip_prefix(r) else { continue };
+            let rel = rel.to_string_lossy();
+            let c = if access == Access::Read && is_place_dir(&rel) && canon.is_dir() {
+                Class::Plain
+            } else {
+                classify_with(&rel, declared.get_or_init(|| declared_files(r)))
+            };
+            out = Some(out.map_or(c, |o| o.max(c)));
+        }
+        let out = out?;
+        if has_git_component(canon) {
+            return Some(Class::Forbidden);
+        }
+        Some(out)
+    }
+}
+
+/// `rel` names a place's own directory: `.worktrees/<one component>`, folded.
+fn is_place_dir(rel: &str) -> bool {
+    if rel.starts_with('/') || rel.contains('\0') {
+        return false;
+    }
+    let parts: Vec<String> = rel.split('/').filter(|c| !c.is_empty() && *c != ".").map(fold).collect();
+    parts.len() == 2 && parts[0] == WT_DIR && parts[1] != ".."
 }
 
 /// Does any component of `p` fold to `.git`? The question `classify_canonical`
@@ -381,12 +438,33 @@ mod tests {
         assert_eq!(c("./src//a.rs"), Class::Plain, "`.` and empty components are just separators");
     }
 
+    /// §7.1's two capability columns, every cell: five classes × read/write.
+    #[test]
+    fn each_class_needs_what_section_7_1_says_for_each_access() {
+        use crate::authz::Capability::{Instruct, Stream};
+        use Requirement::{Cap, Console, Never, Row};
+        let cells = [
+            (Class::Plain, Access::Read, Row),
+            (Class::Plain, Access::Write, Row),
+            (Class::Instruction, Access::Read, Row),
+            (Class::Instruction, Access::Write, Cap(Instruct)),
+            (Class::Executes, Access::Read, Row),
+            (Class::Executes, Access::Write, Cap(Stream)),
+            (Class::Secret, Access::Read, Cap(Stream)),
+            (Class::Secret, Access::Write, Cap(Stream)),
+            (Class::Forbidden, Access::Read, Console),
+            (Class::Forbidden, Access::Write, Never),
+        ];
+        for (class, access, want) in cells {
+            assert_eq!(requirement(class, access), want, "{class:?} {access:?}");
+        }
+    }
+
     #[test]
     fn only_a_forbidden_write_is_refused_to_every_caller() {
-        for k in [Class::Plain, Class::Instruction, Class::Executes, Class::Secret, Class::Forbidden] {
+        for k in Class::ALL {
             assert!(!k.refuses_every_caller(Access::Read), "{k:?} read");
             assert_eq!(k.refuses_every_caller(Access::Write), k == Class::Forbidden, "{k:?} write");
-            assert_eq!(k.refuses_devices(Access::Read), k == Class::Forbidden, "{k:?} device read");
         }
     }
 
@@ -439,6 +517,28 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// Reading a place's directory is reading a checkout's root. Nothing else
+    /// at `.worktrees/<x>` changes, and writing there changes for nobody.
+    #[test]
+    fn a_places_own_directory_is_read_as_a_checkouts_root() {
+        let base = std::env::temp_dir().join(format!("wt-pathclass-place-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("repo/.worktrees/feat/src")).unwrap();
+        std::fs::write(base.join("repo/.worktrees/stray.txt"), "x").unwrap();
+        let repo = std::fs::canonicalize(base.join("repo")).unwrap();
+        let wt = repo.join(".worktrees");
+        let cl = Classifier::new(std::slice::from_ref(&repo));
+        assert_eq!(cl.class_for(&wt.join("feat"), Access::Read), Some(Class::Plain));
+        assert_eq!(cl.class_for(&wt.join("feat"), Access::Write), Some(Class::Forbidden));
+        assert_eq!(cl.class_of(&wt.join("feat")), Some(Class::Forbidden), "the write guards' answer");
+        assert_eq!(classify_canonical(std::slice::from_ref(&repo), &wt.join("feat")), Some(Class::Forbidden));
+        assert_eq!(cl.class_for(&wt, Access::Read), Some(Class::Forbidden), "the tool's tree itself");
+        assert_eq!(cl.class_for(&wt.join("stray.txt"), Access::Read), Some(Class::Forbidden), "a file, not a place");
+        assert_eq!(cl.class_for(&wt.join("new"), Access::Read), Some(Class::Forbidden), "no place there");
+        assert_eq!(cl.class_for(&wt.join("feat/src"), Access::Read), Some(Class::Plain), "inside, as ever");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// `classify` reads the project's own config for its `[[file]]` list.
     #[test]
     fn classify_reads_the_declared_files_from_the_projects_config() {
@@ -449,6 +549,12 @@ mod tests {
         assert_eq!(classify(&base, "config/master.key"), Class::Secret);
         assert_eq!(classify(&base, ".worktrees/a/config/master.key"), Class::Secret);
         assert_eq!(classify(&base, "config/other.key"), Class::Plain);
+        // The bulk form reads the same declarations, for every path it is asked.
+        let root = std::fs::canonicalize(&base).unwrap();
+        let many = Classifier::new(std::slice::from_ref(&root));
+        assert_eq!(many.class_of(&root.join("config/master.key")), Some(Class::Secret));
+        assert_eq!(many.class_of(&root.join(".worktrees/a/config/master.key")), Some(Class::Secret));
+        assert_eq!(many.class_of(&root.join("config/other.key")), Some(Class::Plain));
         let _ = std::fs::remove_dir_all(&base);
     }
 }

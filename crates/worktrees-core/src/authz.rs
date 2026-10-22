@@ -155,6 +155,20 @@ pub enum Requirement {
     Never,
 }
 
+impl Requirement {
+    /// A caller holding `caps` meets this, on top of the row's capability.
+    /// `console`: the caller is the console, which alone meets
+    /// [`Requirement::Console`].
+    pub fn met_by(self, caps: Caps, console: bool) -> bool {
+        match self {
+            Requirement::Row => true,
+            Requirement::Cap(c) => caps.has(c),
+            Requirement::Console => console,
+            Requirement::Never => false,
+        }
+    }
+}
+
 // ── scope ────────────────────────────────────────────────────────────────────
 
 /// Which projects a grant reaches (§3.2): every registered project, including
@@ -614,6 +628,16 @@ mod tests {
         assert!(serde_json::from_value::<Grant>(serde_json::json!({"capabilities": ["root"], "projects": "*"})).is_err());
         assert!(serde_json::from_value::<Grant>(serde_json::json!({"capabilities": [], "projects": "all"})).is_err());
         assert_eq!(serde_json::to_value(Caller::console()).unwrap(), serde_json::json!({"principal": "owner", "device": {"kind": "console"}}));
+    }
+
+    #[test]
+    fn a_requirement_is_met_by_the_capability_it_names_and_console_by_the_console_alone() {
+        let drive = Caps::of(&[Read, Write, Instruct, Stream]);
+        assert!(Requirement::Row.met_by(Caps::NONE, false));
+        assert!(Requirement::Cap(Stream).met_by(drive, false) && !Requirement::Cap(Stream).met_by(Caps::of(&[Read]), false));
+        assert!(!Requirement::Console.met_by(Caps::ALL, false), "every capability is still not the console");
+        assert!(Requirement::Console.met_by(Caps::ALL, true));
+        assert!(!Requirement::Never.met_by(Caps::ALL, true), "nor is the console enough for never");
     }
 
     #[test]
