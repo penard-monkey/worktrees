@@ -270,7 +270,9 @@ const WS = await load(SRC.ipcws, wsJs);
   const steps = [/policy::hello\(/, /wire::challenge_frame\(/, /policy::client_proof\(/, /policy::client_proof_ok\(/, /wire::auth_reply\(&policy::server_proof\(/].map(at);
   check(steps.every((i, n) => i >= 0 && (n === 0 || i > steps[n - 1])),
     `serve's handshake is hello → challenge → proof → verified → ok+proof, proving itself only to a proven client (conn.rs handshake_v1; positions ${steps.join(",")})`);
-  check(/let seq = self\.seq\.load\(Ordering::SeqCst\) \+ 1;\s*let _ = self\.outbox\.push\(end_frame\(self\.channel, seq\)\)/.test(wire) &&
+  // `push_end`: an end frame is queued whatever the outbox budget says
+  // (wire.rs), so the client always learns a stream is over.
+  check(/let seq = self\.seq\.load\(Ordering::SeqCst\) \+ 1;\s*self\.outbox\.push_end\(end_frame\(self\.channel, seq\)\)/.test(wire) &&
     /end_frame\(self\.channel, self\.seq \+ 1\)/.test(wire),
     "a channel's end frame takes the seq one past its last data frame, bytes and typed alike (wire.rs Drop impls) — the client orders it like data");
   check(WS.MAX_MESSAGE === K.maxMessage, `the client's MAX_MESSAGE (${WS.MAX_MESSAGE}) is serve's (conn.rs, ${K.maxMessage}), so a request serve would end the connection over is refused before it is sent`);

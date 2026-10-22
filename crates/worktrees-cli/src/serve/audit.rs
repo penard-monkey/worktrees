@@ -1238,9 +1238,35 @@ impl ConnAudit {
         self.audit.record(r);
     }
 
-    /// A limit an authenticated client tripped (a message past `MAX_MESSAGE`).
+    /// A limit an authenticated client tripped that ends its connection (a
+    /// message past `MAX_MESSAGE`, an outbox past its budget): once, as the
+    /// connection goes.
     pub fn limit(&self, limit: &'static str) {
         let mut r = self.base("refused", None, json!({ "limit": limit }));
+        r.outcome = Some("refused");
+        self.audit.record(r);
+    }
+
+    /// A budget limit (`budget.rs`, §6) began refusing this caller: the
+    /// first refusal of an episode, answered `answered` (`busy`, `rate`, or
+    /// `closed` for a device's connection past its cap). The rest are
+    /// counted by the budget into [`ConnAudit::limit_ended`], never a record
+    /// each, so a flood stays two records (§5.1).
+    pub fn limit_began(&self, limit: &'static str, answered: &'static str) {
+        let detail = json!({ "class": "limit", "episode": "began", "limit": limit, "answered": answered });
+        let mut r = self.base("refused", None, detail);
+        r.outcome = Some("refused");
+        self.audit.record(r);
+    }
+
+    /// The episode `limit_began` opened has ended: `count` refusals, from
+    /// `began` (epoch seconds) over `secs`.
+    pub fn limit_ended(&self, limit: &'static str, count: u64, began: i64, secs: u64) {
+        let detail = json!({
+            "class": "limit", "episode": "ended", "limit": limit, "count": count,
+            "began": rfc3339(began), "secs": secs,
+        });
+        let mut r = self.base("refused", None, detail);
         r.outcome = Some("refused");
         self.audit.record(r);
     }

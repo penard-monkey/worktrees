@@ -1005,16 +1005,29 @@ pub fn open_docs_viewer(
 /// File contents for the viewer. Capped (default 1 MiB) and binary-guarded
 /// (a NUL byte in the read slice → `binary: true`, empty content). The frontend
 /// shows a "binary / open in editor" placeholder instead of garbage.
+/// The most `read_file` reads, whatever the client asks: 1 MB, which is
+/// ≤ 5.72 MiB of JSON (all control characters) — the number serve's message
+/// and outbox budgets are sized against.
+pub const READ_MAX: u64 = 1_000_000;
+
+/// The same for `read_file_base64`: 4 MB, 5.33 MiB of base64.
+pub const READ_BASE64_MAX: u64 = 4_000_000;
+
+/// A read's cap: the client's `max_bytes` may lower it and never raise it.
+/// A reply is built whole in memory before any of serve's budgets sees it,
+/// and an unclamped ask made one of any size (the frontend never sends one).
+/// The ceiling also keeps `cap + 1` far from overflow, which in a debug build
+/// panicked on u64::MAX and in release reported a non-empty file as empty.
+fn read_cap(asked: Option<u64>, ceiling: u64) -> u64 {
+    asked.unwrap_or(ceiling).min(ceiling)
+}
+
 pub fn read_file(ctx: &Ctx, path: String, max_bytes: Option<u64>) -> Result<FileContent, String> {
     let f = guard_under_projects(ctx, &path)?;
     if !f.is_file() {
         return Err(format!("not a file: {path}"));
     }
-    // `max_bytes` is frontend-controlled: clamp it. An unclamped `cap + 1`
-    // overflows on u64::MAX — panicking in a debug build, and in release
-    // wrapping to 0, which would report a non-empty file as empty and NOT
-    // truncated. Saturating keeps the failure mode "reads everything".
-    let cap = max_bytes.unwrap_or(1_000_000).min(u64::MAX - 1);
+    let cap = read_cap(max_bytes, READ_MAX);
     // Bounded read: `take(cap+1)` never allocates more than the cap even for a
     // multi-GB file the user clicks by accident (video, core dump, tarball).
     let file = std::fs::File::open(&f).map_err(|e| e.to_string())?;
@@ -1320,10 +1333,10 @@ pub fn read_file_base64(ctx: &Ctx, path: String, max_bytes: Option<u64>) -> Resu
     if !f.is_file() {
         return Err(format!("not a file: {path}"));
     }
-    // 4 MiB: base64 inflates 4/3 and the result crosses the IPC bridge as one
+    // 4 MB: base64 inflates 4/3 and the result crosses the IPC bridge as one
     // string, so a markdown doc full of images can hold several of these at
-    // once. Clamped for the same overflow reason as `read_file`.
-    let cap = max_bytes.unwrap_or(4_000_000).min(u64::MAX - 1);
+    // once.
+    let cap = read_cap(max_bytes, READ_BASE64_MAX);
     let file = std::fs::File::open(&f).map_err(|e| e.to_string())?;
     let mut bytes = Vec::new();
     file.take(cap + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
@@ -1407,6 +1420,17 @@ fn save_file(f: &Path, path: &str, content: &[u8], expected_mtime: Option<u64>) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A client's `max_bytes` lowers a read's cap and never raises it: 10 MB
+    /// asked of `read_file` used to read 10 MB.
+    #[test]
+    fn a_clients_max_bytes_lowers_the_read_cap_and_never_raises_it() {
+        assert_eq!(read_cap(None, READ_MAX), READ_MAX, "no ask: the ceiling");
+        assert_eq!(read_cap(Some(10), READ_MAX), 10, "a lower ask holds");
+        assert_eq!(read_cap(Some(10_000_000), READ_MAX), READ_MAX, "a higher one does not");
+        assert_eq!(read_cap(Some(u64::MAX), READ_BASE64_MAX), READ_BASE64_MAX, "nor the one that overflowed");
+        assert_eq!((READ_MAX, READ_BASE64_MAX), (1_000_000, 4_000_000), "the numbers serve's budgets are sized against");
+    }
 
     /// The rules behind a terminal link: a FILE, inside a registered project,
     /// found from the first base that has it; `~/` and git's `a/`/`b/`.
