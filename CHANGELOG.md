@@ -17,8 +17,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   detail panel, Claude, Codex and kimi each lead with the mark the nav uses
   for a live session, so the bar between providers is gone. On a narrow
   window the logo stands in for the name. In the rail, the meter is a small
-  bar chart rather than a `▥` glyph, and its bars turn amber or red when a
-  window is near or over its limit.
+  bar chart rather than a `▥` glyph, and its bars turn amber when a window
+  is near or over its limit.
 
 ### Fixed
 - **A fresh Codex or kimi reading no longer shows as "unavailable".** On

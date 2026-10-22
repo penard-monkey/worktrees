@@ -3364,13 +3364,15 @@ body.dragging-place.drop-mention .term-wrap[data-drop="mention"] {
 .usage-minimal { display: none; font-size: var(--fs-micro); color: var(--txt-hi); }
 .usage-setting-toggle { display: flex; align-items: center; gap: var(--s2); margin-top: var(--s2); }
 .usage-trig.tile { color: var(--txt-hi); }
-/* The rail tile: a chart icon whose BARS carry the worst window's severity —
-   a fill, so the --warn/--danger-as-text contrast trap does not apply — and
-   whose axis stays neutral. Normal reads like every other rail icon. */
+/* The rail tile: a chart icon whose BARS go amber when any window is near or
+   over its limit — a fill, so the --warn-as-text contrast trap does not apply
+   — and whose axis stays neutral. Never --danger: red on this tile is the
+   service-status `.usage-badge`, and two reds 4px apart meaning unrelated
+   things cannot be told apart (see the status block comment in App.tsx).
+   Which window, and whether it is over, is the panel's to say. */
 .usage-tile-icon { display: flex; flex: none; align-self: center; }
 .usage-tile-icon svg { display: block; flex: none; }
-.usage-tile-icon.warning .chart-bars { stroke: var(--warn); }
-.usage-tile-icon.over .chart-bars { stroke: var(--danger); }
+.usage-tile-icon.warning .chart-bars, .usage-tile-icon.over .chart-bars { stroke: var(--warn); }
 /* Keep each provider's main allowance with the highest usage as space tightens.
    Wrapping above this breakpoint also accommodates arbitrary extra buckets. */
 @container (max-width: 900px) {

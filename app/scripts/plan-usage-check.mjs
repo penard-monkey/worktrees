@@ -7,6 +7,12 @@ import { transformWithEsbuild } from "vite";
 const src = fs.readFileSync(new URL("../src/planUsage.ts", import.meta.url), "utf8");
 const js = (await transformWithEsbuild(src, "planUsage.ts", { loader: "ts" })).code;
 const model = await import(`data:text/javascript;base64,${Buffer.from(js).toString("base64")}`);
+// The meter's clock tick, sliced from App.tsx rather than restated: the slack
+// above has to outlast it, and a copy here would let the two drift apart.
+const app = fs.readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
+const ticks = [...app.matchAll(/^const USAGE_TICK_MS = ([\d_]+);/gm)];
+assert.equal(ticks.length, 1, "expected exactly one USAGE_TICK_MS in App.tsx");
+const USAGE_TICK_MS = Number(ticks[0][1].replaceAll("_", ""));
 const { adaptCodex, adaptClaude, adaptKimi, viewUsage, summaryLimit, windowLabel, checking, expired, CODEX_STALE_SECS, KIMI_STALE_SECS, compactUsage } = model;
 let checks = 0;
 function test(name, fn) { fn(); checks++; console.log(`ok ${name}`); }
@@ -118,7 +124,7 @@ test("a reading fetched just after the local clock last ticked is fresh, not una
     assert.equal(seen.limits.length, 2);
     assert.equal(viewUsage(info, 105 - model.FUTURE_SLACK_SECS).state, "ready", "the slack is inclusive");
   }
-  assert.ok(model.FUTURE_SLACK_SECS * 1000 > 15000, "the slack must cover a whole USAGE_TICK_MS");
+  assert.ok(model.FUTURE_SLACK_SECS * 1000 > USAGE_TICK_MS, "the slack must cover a whole USAGE_TICK_MS");
 });
 test("reserve is never summarized as the main allowance", () => {
   const info = adaptCodex({ ...wire, limits: [limit("primary", 300, 99, 3000, "reserve")] });
@@ -153,7 +159,6 @@ test("strip windows are all current limits in stable duration and bucket order",
     summaryLimit(claude, 100).id, "strip and accessible summary keep the same Claude window after reset");
 });
 
-const app = fs.readFileSync(new URL("../src/App.tsx", import.meta.url), "utf8");
 // Render the actual row component, including its countdown formatter. A copy of
 // the display rule would miss regressions in the JSX branch itself.
 const rowsSource = app.slice(app.indexOf("function UsageRows("), app.indexOf("function UsageMeter("));
@@ -193,7 +198,7 @@ function host() {
   const setInterval = (fn, delay) => { timers.set(++timerId, { fn, delay }); return timerId; };
   const clearInterval = id => timers.delete(id);
   const useUsage = new Function("useState", "useEffect", "invoke", "document", "window", "setInterval", "clearInterval",
-    "checking", "adaptClaude", "adaptCodex", "adaptKimi", "viewUsage", `const USAGE_POLL_MS=180000, USAGE_TICK_MS=15000; ${hooks}; return useUsage;`)(
+    "checking", "adaptClaude", "adaptCodex", "adaptKimi", "viewUsage", `const USAGE_POLL_MS=180000, USAGE_TICK_MS=${USAGE_TICK_MS}; ${hooks}; return useUsage;`)(
     useState, useEffect, invoke, document, window, setInterval, clearInterval, checking, adaptClaude, adaptCodex, adaptKimi, viewUsage);
   const onError = () => {};
   // `kimi` last and off by default: the tests above it count Claude's and

@@ -2579,6 +2579,10 @@ function useUsage(enabled: boolean, claude: boolean, codex: boolean, kimi: boole
     window.addEventListener("focus", tick);
     return () => { clearInterval(timer); window.removeEventListener("focus", tick); };
   }, [enabled, claude, codex, kimi, pageVisible]);
+  // A reading is stamped when its reader FINISHES, after the focus tick above;
+  // re-reading the clock as it lands keeps `fetched_at` from sitting in the
+  // future, so `FUTURE_SLACK_SECS` only has real skew left to cover.
+  useEffect(() => setNowSec(Math.floor(Date.now() / 1000)), [c, x, k]);
   const info = enabled ? [...(claude ? [c] : []), ...(codex ? [x] : []), ...(kimi ? [k] : [])].map(i => viewUsage(i, nowSec)) : [];
   return { info: info.length ? info : null, nowSec };
 }
@@ -2722,11 +2726,13 @@ function UsageMeter({ info, nowSec, shape, side, status, onError }: {
 // mode with no usage data has no tile to badge, and a chip with nowhere to live
 // would just be silence.
 //
-// The one live collision to know about: the tile's bars are already severity-
-// coloured (`.usage-row.warn`/`.over`), so at 92% weekly the tile is ALREADY
-// amber. That is why `.usage-badge` is only ever `--danger` red — degraded vs.
-// down is a distinction the popover makes in words, and two ambers 4px apart
-// meaning unrelated things is not a distinction anyone can read.
+// The one live collision to know about: the tile's chart bars carry plan
+// usage (`.usage-tile-icon`), so at 92% weekly the tile is ALREADY amber. That
+// is why `.usage-badge` is only ever `--danger` red, and why the bars stop at
+// amber even for an over-limit window: on the tile, red means the service and
+// nothing else. Degraded vs. down, and near vs. over, are distinctions the
+// popover makes in words; two colours 4px apart meaning unrelated things are
+// not a distinction anyone can read.
 
 type StatusComponent = { name: string; status: string };
 type StatusIncident = {
