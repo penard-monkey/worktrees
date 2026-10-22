@@ -475,6 +475,8 @@ pub fn clone_project(
     use worktrees_core::clone::{self as wclone, CloneError, CloneErrorKind};
     let invalid = |m: String| CloneError { kind: CloneErrorKind::Invalid, message: m };
     let src = wclone::parse_source(&url).map_err(invalid)?;
+    // A device's clone is pinned to the addresses serve checked (gap 17).
+    let policy = ctx.fetch_policy(&src.url).map_err(invalid)?;
     let folder = name.map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).unwrap_or_else(|| src.name.clone());
     let target = wclone::plan_target(&parent, &folder)?;
     crate::projects::forbid_new_path(&project_roots(ctx), &target).map_err(invalid)?;
@@ -493,7 +495,7 @@ pub fn clone_project(
         // TRANSPORT's problem now, not this layer's: `on_progress` cannot
         // fail, and the Tauri wrapper swallows a closed channel after logging
         // it once, exactly as this function used to inline.
-        wclone::clone_repo(&src2, &t2, &wclone::CloneOpts::default(), &flag, Some(on_progress))
+        wclone::clone_repo(&src2, &t2, &wclone::CloneOpts { policy, ..Default::default() }, &flag, Some(on_progress))
     };
     let out = match out {
         Ok(o) => o,

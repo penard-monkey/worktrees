@@ -82,8 +82,10 @@ pub fn skill_install_local(path: String) -> Result<serde_json::Value, String> {
 }
 
 /// Clone, inspect, discard. Installs nothing — see `skill_install_git`.
-pub fn skill_preview_git(url: String, rev: Option<String>) -> Result<serde_json::Value, String> {
-    let p = worktrees_core::skillstore::preview_git(&url, rev.as_deref().unwrap_or(""))
+/// A device's clone is pinned to the addresses serve checked (gap 17).
+pub fn skill_preview_git(ctx: &crate::Ctx, url: String, rev: Option<String>) -> Result<serde_json::Value, String> {
+    let policy = ctx.fetch_policy(&url)?;
+    let p = worktrees_core::skillstore::preview_git_with(&url, rev.as_deref().unwrap_or(""), &policy)
         .inspect_err(|e| crate::log::log("warn", &format!("skill_preview_git: {e}")))?;
     serde_json::to_value(p).map_err(|e| e.to_string())
 }

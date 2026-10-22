@@ -492,6 +492,17 @@ fn stage_and_swap(src: &Path, dst: &Path) -> Result<(), String> {
 /// contains, and the SKILL.md text they are about to hand the model, before
 /// anything lands in the store.
 pub fn fetch_git(url: &str, rev: &str, tmp: &Path) -> Result<(String, PathBuf, Vec<PathBuf>), String> {
+    fetch_git_with(url, rev, tmp, &crate::fetchpolicy::Policy::Console)
+}
+
+/// [`fetch_git`] under a caller's fetch policy: a device's clone is pinned
+/// (`fetchpolicy`), and the console's is exactly [`fetch_git`].
+pub fn fetch_git_with(
+    url: &str,
+    rev: &str,
+    tmp: &Path,
+    policy: &crate::fetchpolicy::Policy,
+) -> Result<(String, PathBuf, Vec<PathBuf>), String> {
     if !crate::git::have_git() {
         return Err("git not found".into());
     }
@@ -523,16 +534,19 @@ pub fn fetch_git(url: &str, rev: &str, tmp: &Path) -> Result<(String, PathBuf, V
     fs::create_dir_all(tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
     let tmp = &tmp.join("clone");
     fs::create_dir(tmp).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    let mut args: Vec<&str> = vec![
-        // Pin the protocols HERE rather than trusting the host's git config:
-        // `protocol.ext.allow = always` in a user's ~/.gitconfig would otherwise
-        // turn a clone into arbitrary command execution.
+    // Pin the protocols HERE rather than trusting the host's git config:
+    // `protocol.ext.allow = always` in a user's ~/.gitconfig would otherwise
+    // turn a clone into arbitrary command execution. A device's policy comes
+    // after these and narrows them to https.
+    let pins: [&str; 12] = [
         "-c", "protocol.ext.allow=never",
         "-c", "protocol.allow=never",
         "-c", "protocol.https.allow=always",
         "-c", "protocol.ssh.allow=always",
         "-c", "protocol.git.allow=always",
         "-c", "protocol.file.allow=always",
+    ];
+    let mut args: Vec<&str> = vec![
         "clone",
         "--depth", "1",
         "--no-tags",
@@ -548,7 +562,7 @@ pub fn fetch_git(url: &str, rev: &str, tmp: &Path) -> Result<(String, PathBuf, V
     args.push("--");
     args.push(url);
     args.push(".");
-    let out = clone_no_prompt(tmp, &args)?;
+    let out = clone_no_prompt(policy, tmp, &pins, &args)?;
     if !out.status.success() {
         return Err(format!(
             "git clone failed: {}",
@@ -609,16 +623,18 @@ pub fn unique_temp_dir(tag: &str) -> Result<PathBuf, String> {
 
 /// `git clone` with the terminal prompt disabled, so a private URL fails fast
 /// instead of hanging a launch (or a UI thread) on a credential prompt.
-fn clone_no_prompt(cwd: &Path, args: &[&str]) -> Result<std::process::Output, String> {
-    crate::childenv::command("git")
-        .arg("-C")
-        .arg(cwd)
-        .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_ASKPASS", "")
-        .env("SSH_ASKPASS", "")
-        .output()
-        .map_err(|e| e.to_string())
+/// `git -C <cwd> <pins> <the policy's own> <args>`: the policy has the last
+/// word.
+fn clone_no_prompt(
+    policy: &crate::fetchpolicy::Policy,
+    cwd: &Path,
+    pins: &[&str],
+    args: &[&str],
+) -> Result<std::process::Output, String> {
+    let mut pre = vec![std::ffi::OsStr::new("-C"), cwd.as_os_str()];
+    pre.extend(pins.iter().map(std::ffi::OsStr::new));
+    let env = [("GIT_TERMINAL_PROMPT", "0".to_string()), ("GIT_ASKPASS", String::new()), ("SSH_ASKPASS", String::new())];
+    policy.git(pre, args, &env).output().map_err(|e| e.to_string())
 }
 
 /// Install one skill from an already-fetched clone. `dir` must be one of the
@@ -742,9 +758,14 @@ pub struct PreviewSkill {
 /// user never reviewed. Installing re-fetches AT THE PREVIEWED SHA instead, so
 /// the reviewed bytes are the installed bytes even if the branch moved.
 pub fn preview_git(url: &str, rev: &str) -> Result<GitPreview, String> {
+    preview_git_with(url, rev, &crate::fetchpolicy::Policy::Console)
+}
+
+/// [`preview_git`] under a caller's fetch policy (`fetchpolicy`).
+pub fn preview_git_with(url: &str, rev: &str, policy: &crate::fetchpolicy::Policy) -> Result<GitPreview, String> {
     let tmp = unique_temp_dir("wt-skill-preview")?;
     let out = (|| -> Result<GitPreview, String> {
-        let (sha, root, found) = fetch_git(url, rev, &tmp)?;
+        let (sha, root, found) = fetch_git_with(url, rev, &tmp, policy)?;
         let mut skills = Vec::new();
         for d in &found {
             let i = inspect(d)?;
@@ -1424,5 +1445,36 @@ mod tests {
         let s = serde_json::to_string(&m).unwrap();
         assert!(s.contains("future"));
         assert!(s.contains("top"));
+    }
+
+    /// gap 17, at the call site: a device's skill preview (a shallow clone)
+    /// runs under its pin, and works over smart HTTP; a redirect from the
+    /// named server is not followed.
+    #[test]
+    fn a_device_preview_is_pinned_at_the_call_site() {
+        use crate::fetchpolicy::testnet::{bare_repo, Answer, Server};
+        use crate::fetchpolicy::{Pin, Policy, Rules};
+        use std::net::{IpAddr, Ipv4Addr};
+        let t = tmp("pinned-preview");
+        bare_repo(&t.0);
+        let pin = |url: &str| {
+            let admit = |ip: &IpAddr| ip.is_loopback();
+            let none = |h: &str, _: u16| -> Result<Vec<IpAddr>, String> { panic!("looked up {h}") };
+            let rules = Rules { schemes: &["http"], resolve: &none, admit: &admit, git_env: &[] };
+            Policy::Pinned(Pin::resolve_with(url, &rules).unwrap())
+        };
+        let lo = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        let forge = Server::start(lo, 0, Answer::Git(t.0.clone())).unwrap();
+        let url = format!("http://127.0.0.1:{}/r.git", forge.port());
+        let p = preview_git_with(&url, "", &pin(&url)).unwrap();
+        assert_eq!(p.skills.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["pinned"]);
+        assert!(forge.hits().iter().all(|h| h.protocol != "version=2"), "{:?}", forge.hits());
+
+        let witness = Server::start(lo, 0, Answer::Missing).unwrap();
+        let bounce = Server::start(lo, 0, Answer::Redirect(format!("http://127.0.0.1:{}", witness.port()))).unwrap();
+        let url = format!("http://127.0.0.1:{}/r.git", bounce.port());
+        assert!(preview_git_with(&url, "", &pin(&url)).is_err());
+        assert!(!bounce.hits().is_empty() && witness.hits().is_empty(), "redirect followed: {:?}", witness.hits());
     }
 }

@@ -171,6 +171,27 @@ this repo's settings in `.claude/close-out.md`).
   in flight. A different defect from the negative-TTL item further down.
   _From: [2026-10-21 server-edition](docs/sessions/2026-10-21-server-edition/summary.md)_
 
+- **A device's fetch: what the pin does not cover yet.** `fetchpolicy`
+  (gap 17) pins a device's clone and skill preview. Three things are left:
+  - **An exact conditional rewrite.** The host can have a
+    `url.<x>.insteadOf` under `includeIf "gitdir:…"` whose value is EXACTLY
+    the device's URL. A device clone into a directory that condition matches
+    still goes to `<x>`, because git gives that tie to the host's rule. The
+    pre-flight `ls-remote --get-url` runs outside any repository, so it cannot
+    see the rule. A device would have to know the host's config to use it.
+    Closing it needs the pre-flight to run as if inside the target.
+  - **Later fetches of a device's clone are not pinned.** `fetch_origin`, a
+    new place's base and the auto-fetch dial the clone's `origin` as git
+    resolves it. That is on purpose: a project's own LAN remote is
+    legitimate. The clone keeps `http.followRedirects=false`, and its origin
+    is https, so a re-resolved name meets TLS. Revisit if Phase 2 lets a
+    device change a remote's URL.
+  - **ssh for devices.** It is refused, and the module doc says why. A pinned
+    form would need `-o HostName`/`HostKeyAlias`, no
+    `ProxyCommand`/`ProxyJump`/`ForwardAgent`, and an answer to the ssh agent
+    offering every key to a stranger's server.
+  _From: 2026-10-22, feat/p2-fetch-policy (Phase 2 gap 17)_
+
 - ~~**Before v0.42.0: drive #482 (scroll keep) in the real app.**~~ Done 2026-10-15: David ran it in the sandbox, worked fine. Only the
   mock was measured, and AGENTS.md says refresh timing needs the real app.
   Run `app/scripts/sandbox.sh --app` by hand (no scripted input), open a long

@@ -29,6 +29,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use worktrees_core::authz::{self, Access, Capability, Caller, DeviceId, Grant, Requirement};
+use worktrees_core::fetchpolicy::Pin;
 use worktrees_core::tmux::PaneList;
 
 use super::dispatch::{Args, Call, Exposure, Row};
@@ -105,10 +106,11 @@ pub enum Obj {
     /// A path where a project WILL be: `admin` (the row's) and scope `"*"`.
     NewPath(&'static str),
     /// A URL the host will fetch from (§3.4, `clone_project`): from a device,
-    /// no `file://`, no local path, and no host that is — or resolves to — a
-    /// loopback, link-local, private or unspecified address, so a device can
-    /// neither read an unregistered repo on the host's disk nor borrow the
-    /// host's network position. The console is unaffected.
+    /// https only, and no host that is — or resolves to — a loopback,
+    /// link-local, private or unspecified address, so a device can neither
+    /// read an unregistered repo on the host's disk nor borrow the host's
+    /// network position. The resolved addresses are PINNED for the body's git
+    /// (gap 17, `worktrees_core::fetchpolicy`). The console is unaffected.
     RemoteUrl(&'static str),
     /// `project_prs.places`: each `{slug}` of the row's project passes the
     /// slug rule.
@@ -195,8 +197,8 @@ pub enum RefusalKind {
     /// `dispatch::call_in`.
     NoopNotOwned,
     /// A device asked the host to FETCH from somewhere only the host can
-    /// reach — a local path, or a loopback, link-local or private address
-    /// ([`Obj::RemoteUrl`]).
+    /// reach — a local path, or a loopback, link-local or private address —
+    /// or over anything but https ([`Obj::RemoteUrl`]).
     LocalFetch,
 }
 
@@ -286,6 +288,9 @@ impl World for Live<'_> {
 pub struct Resolved {
     /// The registry key of every project an object resolved to, in row order.
     pub projects: Vec<String>,
+    /// A device's fetches, resolved and checked ([`Obj::RemoteUrl`]): the
+    /// addresses the body's git may dial.
+    pub pins: Vec<Pin>,
 }
 
 /// Check `row` for `cx.caller` holding `grant`, and rewrite `args` to the
@@ -593,7 +598,8 @@ impl St<'_> {
             Obj::RemoteUrl(a) => {
                 if !self.cx.caller.is_console() {
                     let url: String = self.get(args, a)?;
-                    remote_only(&url).map_err(|why| Refusal::new(RefusalKind::LocalFetch, why))?;
+                    let pin = remote_only(&url).map_err(|why| Refusal::new(RefusalKind::LocalFetch, why))?;
+                    self.out.pins.push(pin);
                 }
             }
             Obj::Places(a) => {
@@ -692,127 +698,32 @@ impl St<'_> {
     }
 }
 
-/// `Ok` when a URL names a host that is not this one's own network: the
-/// device rule of [`Obj::RemoteUrl`]. Only the shapes `clone::parse_source`
-/// accepts and a host can be read from: `scheme://[user@]host[:port]/…` for
-/// http(s), ssh and git, scp-like `[user@]host:path`, and the `owner/repo`
-/// shorthand (github.com). Anything else is refused rather than guessed at:
-/// a parser that reads a host differently from git's is the hole.
+/// The device rule of [`Obj::RemoteUrl`]: the URL's [`Pin`], or why the host
+/// may not fetch it. The resolution is `worktrees_core::fetchpolicy`'s, and it
+/// is the ONE lookup: the pin goes out in [`Resolved::pins`] to the body's
+/// `Ctx`, so git dials exactly the addresses checked here. A URL is pinned as
+/// `clone::parse_source` writes it for git (the scheme lowercased, the
+/// `owner/repo` shorthand expanded). That is what `clone_project` hands git;
+/// a body that hands git another spelling is resolved again by the policy,
+/// never let through.
 ///
 /// **Not yet a complete SSRF control, and it must be before any remote bind
-/// (slice 6).** Two ways remain around it, both in git rather than here: the
+/// (slice 6).** Two ways remained around it, both in git rather than here: the
 /// host is resolved here and git resolves it again, so a name that flips to a
 /// private address in between (DNS rebinding) gets through; and git follows
 /// an HTTP redirect on the initial request (`http.followRedirects=initial`),
-/// so a public URL that redirects to `http://127.0.0.1/…` does too. The fix is
-/// a fetch policy handed to core's clone and skill-preview git calls for a
-/// non-console caller: `-c http.followRedirects=false`,
+/// so a public URL that redirects to `http://127.0.0.1/…` does too.
+/// **Done (gap 17):** the fix was a fetch policy handed to core's clone and
+/// skill-preview git calls for a non-console caller:
+/// `-c http.followRedirects=false`,
 /// `-c http.curloptResolve=<host>:<port>:<the address checked here>`, and
-/// `-c protocol.file.allow=never`. No device can reach these rows before
-/// slice 5's registry, so it is recorded, not half-built.
-pub fn remote_only(url: &str) -> Result<(), String> {
-    let u = url.trim();
-    let host = if let Some(i) = u.find("://") {
-        let scheme = u[..i].to_ascii_lowercase();
-        if !["https", "http", "ssh", "git", "git+ssh", "ssh+git"].contains(&scheme.as_str()) {
-            return Err(format!("a device may not fetch a {scheme}:// URL from the host"));
-        }
-        let rest = &u[i + 3..];
-        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-        let hostport = authority.rsplit('@').next().unwrap_or("");
-        strip_port(hostport)
-    } else if u.contains(':') && !u[..u.find(':').unwrap_or(0)].contains('/') {
-        let before = &u[..u.find(':').unwrap_or(0)];
-        before.rsplit('@').next().unwrap_or("").to_string()
-    } else if u.split('/').count() == 2 && !u.starts_with(['/', '.', '~']) {
-        "github.com".to_string()
-    } else {
-        return Err("a device may not fetch a local path from the host".into());
-    };
-    if host.is_empty() {
-        return Err(format!("no host in {url:?}"));
-    }
-    let addrs: Vec<std::net::IpAddr> = match host.parse::<std::net::IpAddr>() {
-        Ok(ip) => vec![ip],
-        Err(_) => {
-            use std::net::ToSocketAddrs;
-            if host.eq_ignore_ascii_case("localhost") || host.to_ascii_lowercase().ends_with(".localhost") {
-                return Err(format!("{host} is this host"));
-            }
-            (host.as_str(), 0).to_socket_addrs().map_err(|e| format!("cannot resolve {host}: {e}"))?.map(|a| a.ip()).collect()
-        }
-    };
-    if addrs.is_empty() {
-        return Err(format!("{host} resolves to nothing"));
-    }
-    if let Some(ip) = addrs.iter().find(|ip| host_local(ip)) {
-        return Err(format!("{host} is {ip}, which only the host itself can reach"));
-    }
-    Ok(())
-}
-
-/// `host[:port]` or `[v6][:port]` → the host.
-fn strip_port(hp: &str) -> String {
-    if let Some(rest) = hp.strip_prefix('[') {
-        return rest.split(']').next().unwrap_or("").to_string();
-    }
-    hp.split(':').next().unwrap_or("").to_string()
-}
-
-/// An address a device must not make the host dial for it: anything that is
-/// not plainly GLOBAL unicast. Fail-closed by construction — the list is of
-/// what is refused, but every block a host can hide behind is on it, and an
-/// IPv4 address embedded in IPv6 (mapped, compatible, NAT64 `64:ff9b::/96`,
-/// 6to4 `2002::/16`) is judged as the IPv4 address it carries. Teredo
-/// (`2001::/32`) obfuscates its embedded address, so it is refused whole.
-fn host_local(ip: &std::net::IpAddr) -> bool {
-    use std::net::{IpAddr, Ipv4Addr};
-    match ip {
-        IpAddr::V4(v) => {
-            let o = v.octets();
-            o[0] == 0                                   // 0.0.0.0/8, "this network"
-                || o[0] == 10                           // RFC 1918
-                || o[0] == 127                          // loopback
-                || (o[0] == 100 && (o[1] & 0xc0) == 64) // CGNAT 100.64.0.0/10
-                || (o[0] == 169 && o[1] == 254)         // link-local
-                || (o[0] == 172 && (o[1] & 0xf0) == 16) // RFC 1918
-                || (o[0] == 192 && o[1] == 168)         // RFC 1918
-                || (o[0] == 192 && o[1] == 0 && (o[2] == 0 || o[2] == 2)) // IETF protocol, TEST-NET-1
-                || (o[0] == 198 && (o[1] & 0xfe) == 18) // benchmarking 198.18.0.0/15
-                || (o[0] == 198 && o[1] == 51 && o[2] == 100) // TEST-NET-2
-                || (o[0] == 203 && o[1] == 0 && o[2] == 113)  // TEST-NET-3
-                || o[0] >= 224                          // multicast, reserved, broadcast
-        }
-        IpAddr::V6(v) => {
-            let s = v.segments();
-            let embedded = |hi: u16, lo: u16| Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8);
-            if v.is_loopback() || v.is_unspecified() {
-                return true;
-            }
-            if let Some(m) = v.to_ipv4_mapped() {
-                return host_local(&IpAddr::V4(m));
-            }
-            // IPv4-compatible `::a.b.c.d` (deprecated, still parsed).
-            if s[..6].iter().all(|x| *x == 0) {
-                return host_local(&IpAddr::V4(embedded(s[6], s[7])));
-            }
-            // NAT64 well-known prefix `64:ff9b::/96`.
-            if s[0] == 0x64 && s[1] == 0xff9b && s[2..6].iter().all(|x| *x == 0) {
-                return host_local(&IpAddr::V4(embedded(s[6], s[7])));
-            }
-            // 6to4 `2002:aabb:ccdd::/48` carries a.b.c.d.
-            if s[0] == 0x2002 {
-                return host_local(&IpAddr::V4(embedded(s[1], s[2])));
-            }
-            (s[0] & 0xe000) != 0x2000                   // not global unicast 2000::/3
-                || (s[0] == 0x2001 && s[1] == 0)        // Teredo 2001::/32
-                || (s[0] == 0x2001 && s[1] == 0x0db8)   // documentation 2001:db8::/32
-                || (s[0] & 0xfe00) == 0xfc00            // ULA (outside 2000::/3 anyway)
-                || (s[0] & 0xffc0) == 0xfe80            // link-local
-                || (s[0] & 0xffc0) == 0xfec0            // site-local
-                || (s[0] & 0xff00) == 0xff00            // multicast
-        }
-    }
+/// `-c protocol.file.allow=never`. It is `worktrees_core::fetchpolicy`, applied
+/// by the caller's class (`Ctx::fetch_policy`). It also covers the host's own
+/// git config, proxies and protocol v2, and it lets a device fetch over https
+/// only; the module doc says why for each.
+pub fn remote_only(url: &str) -> Result<Pin, String> {
+    let git_url = worktrees_core::clone::parse_source(url).map(|s| s.url).unwrap_or_else(|_| url.to_string());
+    Pin::resolve(&git_url)
 }
 
 /// Every session name a place answers to: its canonical one and each
@@ -1309,7 +1220,25 @@ mod tests {
             assert_eq!((e.kind, e.wire()), (RefusalKind::LocalFetch, json!(ERR_DENIED)), "{url}");
         }
         assert!(clone(&star, &sg, "https://140.82.112.3/o/r.git").is_ok());
-        assert!(clone(&star, &sg, "git@140.82.112.3:o/r.git").is_ok());
+        // https only (gap 17): ssh, its scp form, plain http and git:// are
+        // refused even to a global address. git or ssh would dial them on its
+        // own, where no pin reaches (`worktrees_core::fetchpolicy`).
+        for url in [
+            "git@140.82.112.3:o/r.git", "ssh://git@140.82.112.3/o/r.git", "git+ssh://git@140.82.112.3/o/r.git",
+            "http://140.82.112.3/o/r.git", "git://140.82.112.3/o/r.git",
+        ] {
+            assert_eq!(clone(&star, &sg, url).unwrap_err().kind, RefusalKind::LocalFetch, "{url}");
+        }
+        // The resolver's ONE lookup is what the body dials: the pin rides out
+        // in `Resolved`, for the body's `Ctx` (`dispatch::call_in`).
+        let mut a = args(json!({ "id": "j", "url": "https://140.82.112.3/o/r.git", "parent": s(&t.top), "name": null }));
+        let out = authorize(row("clone_project"), &star, &sg, &mut a, &w).unwrap();
+        assert_eq!(out.pins.iter().map(|p| p.url.as_str()).collect::<Vec<_>>(), ["https://140.82.112.3/o/r.git"]);
+        // …pinned as `clone_project` will hand it to git (`parse_source`
+        // lowercases the scheme), or the body would find no pin for it.
+        let mut a = args(json!({ "id": "j", "url": "HTTPS://140.82.112.3/o/r.git", "parent": s(&t.top), "name": null }));
+        let out = authorize(row("clone_project"), &star, &sg, &mut a, &w).unwrap();
+        assert_eq!(out.pins.iter().map(|p| p.url.as_str()).collect::<Vec<_>>(), ["https://140.82.112.3/o/r.git"]);
         // A list-scoped admin device cannot clone at all (`new_path`), nor
         // preview a skill from a URL (`all`): both reach past its projects.
         assert_eq!(clone(&cx, &g, "https://140.82.112.3/o/r.git").unwrap_err().wire(), json!(ERR_DENIED));
@@ -1334,6 +1263,9 @@ mod tests {
         // The console clones from a folder on its own disk, as it always could.
         let (con, all) = console();
         assert!(clone(&con, &all, "file:///Users/me/other").is_ok());
+        assert!(clone(&con, &all, "git@localhost:me/x.git").is_ok(), "the console's ssh");
+        let mut a = args(json!({ "id": "j", "url": "https://140.82.112.3/o/r.git", "parent": s(&t.top), "name": null }));
+        assert!(authorize(row("clone_project"), &con, &all, &mut a, &w).unwrap().pins.is_empty(), "the console pins nothing");
     }
 
     /// The capability is the row's, and `denied` names nothing.

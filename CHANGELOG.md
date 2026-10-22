@@ -76,6 +76,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   new file in a fresh directory that only you can open, under
   `~/.cache/worktrees`, and that directory is removed once the installer
   finishes.
+- **A clone or skill preview that another device asks for can reach only a
+  public server, and only over https.** This is groundwork too: no other
+  device can drive serve yet, and the desktop app and the CLI fetch exactly as
+  before. When one can, serve looks up the server's address once, refuses
+  unless every answer is a public address, and makes git connect to exactly
+  that address. git then follows no redirect, uses no proxy, and takes no
+  rewrite from the host's own git config. ssh, `git://` and plain http are
+  refused for other devices. A repository cloned this way keeps
+  `http.followRedirects=false` in its own config, so later fetches of it do not
+  follow redirects either.
 
 ## [0.43.1] - 2026-10-22
 
