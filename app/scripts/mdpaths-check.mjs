@@ -184,7 +184,7 @@ check(rdp.includes("resolve_term_path(raw,") && rdp.includes("resolve_term_path(
 check(!/canonicalize\(&p|is_file\(\)|under_roots/.test(rdp), "resolve_doc_path has no file/containment test of its own (no second resolver)");
 const cmd = body("resolve_doc_paths");
 check(/\.take\(TERM_PATHS_MAX\)/.test(cmd) && cmd.includes("resolve_doc_path(p,"), "resolve_doc_paths caps at TERM_PATHS_MAX and calls resolve_doc_path");
-check(/^ {4}resolve_doc_paths: Engine =>/m.test(dispatch), "resolve_doc_paths is an Engine row in serve's dispatch table");
+check(/^ {4}resolve_doc_paths: Engine\b[^\n]*?=>/m.test(dispatch), "resolve_doc_paths is an Engine row in serve's dispatch table");
 const mock = fs.readFileSync(new URL("../src/mock/install.ts", import.meta.url), "utf8");
 check(mock.includes('case "resolve_doc_paths":'), "the mock harness tracks resolve_doc_paths");
 

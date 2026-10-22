@@ -43,9 +43,10 @@
 //      client to load decides" bug this check exists for, one process out, and
 //      its copy of the overrides would sit in a process no lane is launched from.
 //
-//   5. serve tags every setter `HostAdmin` (or `HostConsole`, once that class
-//      exists): a row tagged `Engine` is one any authenticated client may call,
-//      and the host-admin audit line (`conn.rs`) never names it.
+//   5. serve tags every setter `HostConsole` or an `Engine` row whose
+//      capability is `admin` (Phase 2 §3.4: Codex and pi console-only, the
+//      other three `admin`): a `read` or `write` row is one any granted device
+//      may call, and the host-admin audit line (`conn.rs`) never names it.
 //
 //   6. ui-state.json keeps all five keys, and the panel that sets each one
 //      copies the host's stored value into it after a set the host accepted.
@@ -242,9 +243,10 @@ for (const s of SETTERS) {
   const table = fs.readFileSync(DISPATCH, "utf8").split(/\n#\[cfg\(test\)\]\s*\nmod tests\b/)[0]
     .split("\n").map((l) => l.replace(/\/\/.*$/, "")).join("\n");
   for (const s of SETTERS) {
-    const tag = new RegExp(`^ {4}${s}: ([A-Za-z]+) =>`, "m").exec(table)?.[1];
+    const row = new RegExp(`^ {4}${s}: ([A-Za-z]+)(?: \\[(\\w+)[^\\]]*\\])? =>`, "m").exec(table);
+    const tag = row && (row[2] ? `${row[1]} [${row[2]}]` : row[1]);
     if (!tag) fail(`serve's dispatch table has no row for ${s}`);
-    else if (tag !== "HostAdmin" && tag !== "HostConsole") fail(`serve tags ${s} \`${tag}\` — host policy is HostAdmin at least: any authenticated client may call an Engine row, and the host-admin audit line never names it`);
+    else if (row[1] !== "HostConsole" && tag !== "Engine [admin]") fail(`serve tags ${s} \`${tag}\` — host policy is \`admin\` at least: any granted device may call a read or write row, and the host-admin audit line never names it`);
     else ok(`serve tags ${s} ${tag}`);
   }
 }

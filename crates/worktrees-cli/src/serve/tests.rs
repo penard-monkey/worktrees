@@ -22,7 +22,7 @@ use tokio_tungstenite::tungstenite::protocol::{Role, WebSocket};
 use tokio_tungstenite::tungstenite::Message;
 
 use super::conn::Limits;
-use super::{start_with, Running};
+use super::{start_in, Running};
 
 /// RFC 6455 §1.3's worked example: this key yields this accept value. A
 /// server that derives it right is talking the handshake the spec wrote down.
@@ -58,7 +58,8 @@ fn live_with(tag: &str, limits: Limits) -> Live {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-    let running = rt.block_on(async { start_with(dir.clone(), 0, vec![DEV_ORIGIN.to_string()], limits) }).unwrap();
+    let clients = super::conn::Clients::with(Arc::new(worktrees_core::authz::NoDevices), Some(Arc::new(Registered)));
+    let running = rt.block_on(async { start_in(dir.clone(), 0, vec![DEV_ORIGIN.to_string()], limits, clients) }).unwrap();
     Live { running: Some(running), dir, rt }
 }
 
@@ -496,7 +497,8 @@ fn requests_are_answered_by_id_with_tauris_shapes() {
 
     // Errors: unknown command, invalid args naming the key, client-local.
     assert_eq!(rpc(&mut ws, json!(4), "nope", json!({}))["err"], json!("unknown command: nope"));
-    let r = rpc(&mut ws, json!(5), "set_pin", json!({ "repo": "/r", "slug": "s" }));
+    let repo = scratch_repo("rpc");
+    let r = rpc(&mut ws, json!(5), "set_pin", json!({ "repo": repo, "slug": "(main)" }));
     assert!(r["err"].as_str().unwrap().starts_with("invalid args `on`"), "{r}");
     assert_eq!(rpc(&mut ws, json!(6), "copy_text", json!({ "text": "NEVER" }))["err"], json!("client-local"));
     // A frame that is not a request at all is answered, with no id to echo.
@@ -594,6 +596,72 @@ fn an_event_is_broadcast_to_every_authenticated_socket() {
     assert_eq!(f["event"], json!("places:changed"));
     // Keep the runtime alive until here.
     let _ = &l.rt;
+}
+
+/// gap 12, on the real `Broadcast`: an event reaches each socket PROJECTED to
+/// that socket's caller, read from the registry at the moment of the emit.
+/// The console hears everything exactly as before; a device scoped to one
+/// project hears its members of the busy set and nothing of the other's, and
+/// no `app:open-doc` at all — and the inbox waits for a console, since a
+/// device alone would drain it into nothing.
+#[test]
+fn an_event_reaches_each_socket_projected_to_its_caller() {
+    use super::conn::{Broadcast, Clients};
+    use super::wire::Outbox;
+    use worktrees_api::Host;
+    use worktrees_core::authz::{Capability, Caps, Caller, DeviceId, Grant, PrincipalId, Projects, Registry};
+
+    struct One(Mutex<Grant>);
+    impl Registry for One {
+        fn principal_grant(&self, _: &PrincipalId) -> Option<Grant> {
+            None
+        }
+        fn device_grant(&self, p: &PrincipalId, d: &DeviceId) -> Option<Grant> {
+            (p.is_owner() && d.as_str() == "phone").then(|| self.0.lock().unwrap().clone())
+        }
+        fn device_principal(&self, _: &DeviceId) -> Option<PrincipalId> {
+            Some(PrincipalId::owner())
+        }
+    }
+    struct Two;
+    impl super::resolve::World for Two {
+        fn roots(&self) -> Vec<String> {
+            vec!["/r/a".into(), "/r/b".into()]
+        }
+        fn panes(&self) -> Option<worktrees_core::tmux::PaneList> {
+            None
+        }
+    }
+    let reg = Arc::new(One(Mutex::new(Grant { capabilities: Caps::of(&[Capability::Read]), projects: Projects::only(["/r/a"]) })));
+    let clients = Arc::new(Clients::with(reg.clone(), Some(Arc::new(Two))));
+    let host = Broadcast(clients.clone());
+    let (ctx_tx, mut console) = tokio::sync::mpsc::unbounded_channel();
+    let (ph_tx, mut phone) = tokio::sync::mpsc::unbounded_channel();
+    clients.add(2, Outbox(ph_tx), Caller::paired(PrincipalId::owner(), DeviceId::new("phone")));
+    assert!(!host.has_audience(), "a device alone is no audience for the inbox");
+    clients.add(1, Outbox(ctx_tx), Caller::console());
+    assert!(host.has_audience());
+
+    let next = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<Message>| -> Option<Value> {
+        rx.try_recv().ok().map(|m| serde_json::from_str(m.to_text().unwrap()).unwrap())
+    };
+    host.emit("sessions:busy", json!({ "busy": ["/r/a/.worktrees/x", "/r/b"], "waiting": [], "waiting_by": {} }));
+    assert_eq!(next(&mut console).unwrap()["payload"]["busy"], json!(["/r/a/.worktrees/x", "/r/b"]));
+    assert_eq!(next(&mut phone).unwrap()["payload"]["busy"], json!(["/r/a/.worktrees/x"]));
+    host.emit("sessions:done", json!({ "path": "/r/b", "epoch": 1 }));
+    assert!(next(&mut console).is_some());
+    assert!(next(&mut phone).is_none(), "another project's finished turn");
+    host.emit("app:open-doc", json!({ "repo": "/r/a", "slug": "(main)", "path": "/r/a/x.md" }));
+    assert!(next(&mut console).is_some());
+    assert!(next(&mut phone).is_none(), "worktrees show is for someone at the host");
+    // The grant is read per emit: narrowed to nothing, the phone hears nothing
+    // more of the busy set, with no reconnect.
+    *reg.0.lock().unwrap() = Grant::nothing();
+    host.emit("sessions:busy", json!({ "busy": ["/r/a"], "waiting": [], "waiting_by": {} }));
+    assert_eq!(next(&mut phone).unwrap()["payload"]["busy"], json!([]));
+    assert!(next(&mut console).is_some());
+    host.emit("places:changed", Value::Null);
+    assert!(next(&mut phone).is_some(), "\"re-read\" goes to everyone: the re-read is scoped");
 }
 
 // ── limits (OWASP M1) ────────────────────────────────────────────────────────
@@ -747,7 +815,31 @@ fn scratch_repo(tag: &str) -> PathBuf {
     std::fs::create_dir_all(&d).unwrap();
     let st = std::process::Command::new("git").args(["init", "-q"]).arg(&d).status().expect("git on PATH");
     assert!(st.success(), "git init");
+    register(&d.to_string_lossy());
     d
+}
+
+/// The projects these servers know, as if registered — the user's real
+/// registry is never read or written by a test. Only ever ADDED to, and asked
+/// only "is this one in it", so no test depends on another's entries (a
+/// process-global list that a test asserted EXACTLY would be order-dependent).
+static REGISTERED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn register(root: &str) {
+    REGISTERED.lock().unwrap().push(root.to_string());
+}
+
+/// The world every `live()` server resolves against: `REGISTERED`, and no
+/// tmux server at all.
+struct Registered;
+
+impl super::resolve::World for Registered {
+    fn roots(&self) -> Vec<String> {
+        REGISTERED.lock().unwrap().clone()
+    }
+    fn panes(&self) -> Option<worktrees_core::tmux::PaneList> {
+        None
+    }
 }
 
 /// One frame, or `None` when nothing arrived within `wait`. Control frames

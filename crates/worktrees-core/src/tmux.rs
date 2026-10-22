@@ -412,6 +412,13 @@ impl PaneList {
         self.panes.iter().any(|p| p.session == name)
     }
 
+    /// Where each pane of the session named EXACTLY `name` is cwd'd: what
+    /// serve's resolver keys a session to a place on, by the same evidence
+    /// adoption uses (`session_in`).
+    pub fn session_paths<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a str> + 'a {
+        self.panes.iter().filter(move |p| p.session == name).map(|p| p.path.as_str())
+    }
+
     /// Whether `name` exists and some pane in it is running something other
     /// than a shell. An agent session is launched as `<agent> …; exec
     /// "$SHELL"`, so it OUTLIVES the agent: when codex exits (or is killed —

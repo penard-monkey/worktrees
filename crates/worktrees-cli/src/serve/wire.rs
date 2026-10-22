@@ -203,15 +203,34 @@ impl Drop for Typed {
 /// connection needs to clean up when it goes: the tmux attaches it opened.
 /// Dock shells are NOT on that list — they are owned by the process and a
 /// re-attach replays them, which is the whole point of them surviving.
+///
+/// It is also what a connection OWNS, for the resolver (§3.3): `attach(id)`
+/// asks `owns_term`, and a clone job's id is namespaced with `tag`, so no
+/// connection can type into, resize, close or cancel another's.
 #[derive(Clone)]
 pub struct Frames {
     outbox: Outbox,
     terms: Arc<Mutex<Vec<u32>>>,
+    tag: Arc<str>,
 }
 
 impl Frames {
     pub fn new(outbox: Outbox) -> Self {
-        Frames { outbox, terms: Arc::new(Mutex::new(Vec::new())) }
+        let mut b = [0u8; 8];
+        getrandom::fill(&mut b).expect("the OS refused entropy");
+        let tag: String = b.iter().map(|x| format!("{x:02x}")).collect();
+        Frames { outbox, terms: Arc::new(Mutex::new(Vec::new())), tag: Arc::from(tag.as_str()) }
+    }
+
+    /// This connection's own namespace for ids it hands the engine. Random,
+    /// so it cannot be guessed from another connection.
+    pub fn tag(&self) -> &str {
+        &self.tag
+    }
+
+    /// The attach `id` was opened on this connection and not closed since.
+    pub fn owns_term(&self, id: u32) -> bool {
+        self.terms.lock().unwrap().contains(&id)
     }
 
     pub fn bytes(&self, channel: u64) -> Arc<dyn ByteSink> {

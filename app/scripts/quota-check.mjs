@@ -74,7 +74,7 @@ else {
 
 // ── 3. plumbing ─────────────────────────────────────────────────────────────
 for (const cmd of ["quota_settings", "set_quota_settings"]) {
-  if (!new RegExp(`^ {4}${cmd}: (Engine|HostAdmin) =>`, "m").test(dispatch)) fail(`serve's dispatch table has no Engine/HostAdmin row for ${cmd}`);
+  if (!new RegExp(`^ {4}${cmd}: (Engine|HostConsole)\\b[^\\n]*?=>`, "m").test(dispatch)) fail(`serve's dispatch table has no Engine/HostConsole row for ${cmd}`);
   else if (!mock.includes(`case "${cmd}":`)) fail(`mock/install.ts does not answer ${cmd}`);
   else ok(`${cmd}: a row in serve's dispatch table, and mocked`);
 }

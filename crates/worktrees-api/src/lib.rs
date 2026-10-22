@@ -136,6 +136,14 @@ pub struct Ctx {
     pub viewer: Arc<viewer::Viewer>,
     /// basename → paths per repo, for the Files tab's "find by name".
     pub docnames: Arc<files::DocNameIndex>,
+    /// Which projects THIS call may see: every registered one for the engine's
+    /// own work (the poll, the shim) and for the console, and the caller's
+    /// grant for a request from a scoped device. `projects::read_projects`,
+    /// `project_roots` and `guard_under_projects` answer with it, so a body
+    /// that enumerates the registry is the second check behind serve's
+    /// resolver, and a body that forgets a filter fails closed (Server
+    /// Edition Phase 2, §3.3). Set only through [`Ctx::scoped`].
+    scope: Arc<worktrees_core::authz::Projects>,
 }
 
 impl Ctx {
@@ -148,7 +156,21 @@ impl Ctx {
             shells: Arc::new(term::Shells::default()),
             viewer: Arc::new(viewer::Viewer::default()),
             docnames: Arc::new(files::DocNameIndex::default()),
+            scope: Arc::new(worktrees_core::authz::Projects::All),
         }
+    }
+
+    /// The same engine, seen by a caller whose grant reaches `scope`. Every
+    /// registry and handle is shared; only the view of the registry narrows.
+    /// Narrowing only: a scope is intersected with the one already here, so a
+    /// scoped `Ctx` can never be widened by scoping it again.
+    pub fn scoped(&self, scope: worktrees_core::authz::Projects) -> Ctx {
+        Ctx { scope: Arc::new(self.scope.intersect(&scope)), ..self.clone() }
+    }
+
+    /// The projects this `Ctx` may see.
+    pub fn scope(&self) -> &worktrees_core::authz::Projects {
+        &self.scope
     }
 
     /// The app's own pre-registry project list. Only ever READ — it is the

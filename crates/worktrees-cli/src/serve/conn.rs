@@ -33,8 +33,11 @@ use worktrees_api::{Ctx, Host};
 
 use super::dispatch::{self, Args, Call};
 use super::policy;
+use super::resolve::World;
+use super::scope;
 use super::servefile;
 use super::wire::{self, Frames, Outbox};
+use worktrees_core::authz::{self, Caller, Capability, NoDevices, Registry};
 
 // ── limits (OWASP M1) ────────────────────────────────────────────────────────
 //
@@ -181,39 +184,82 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for Budget<T> {
 /// pegged core (see the docs server, which learned it first).
 const ACCEPT_RETRY: std::time::Duration = std::time::Duration::from_millis(50);
 
-/// Every authenticated connection's queue, for broadcasts.
-#[derive(Default)]
-pub struct Clients(Mutex<HashMap<u64, Outbox>>);
+/// Every authenticated connection's queue and caller, for broadcasts, and
+/// where every caller's grant is read.
+pub struct Clients {
+    map: Mutex<HashMap<u64, (Outbox, Caller)>>,
+    registry: Arc<dyn Registry>,
+    world: Option<Arc<dyn World>>,
+}
 
-impl Clients {
-    fn add(&self, id: u64, out: Outbox) {
-        self.0.lock().unwrap().insert(id, out);
-    }
-    fn remove(&self, id: u64) {
-        self.0.lock().unwrap().remove(&id);
-    }
-    /// How many authenticated clients are connected now.
-    pub fn len(&self) -> usize {
-        self.0.lock().unwrap().len()
+impl Default for Clients {
+    /// No paired devices (Phase 2 slice 1): the console is the only caller
+    /// with a grant. Objects resolve against the live registry and tmux.
+    fn default() -> Self {
+        Clients::with(Arc::new(NoDevices), None)
     }
 }
 
-/// The engine's `Host`: an event is one frame to every authenticated socket.
-/// Fire-and-forget by construction — a dead queue is dropped from the map on
-/// the way past, and nothing here waits on a client.
+impl Clients {
+    /// `world: None` is the live one; a test hands in fixtures.
+    pub fn with(registry: Arc<dyn Registry>, world: Option<Arc<dyn World>>) -> Self {
+        Clients { map: Mutex::new(HashMap::new()), registry, world }
+    }
+    pub(super) fn add(&self, id: u64, out: Outbox, caller: Caller) {
+        self.map.lock().unwrap().insert(id, (out, caller));
+    }
+    pub(super) fn remove(&self, id: u64) {
+        self.map.lock().unwrap().remove(&id);
+    }
+    /// How many authenticated clients are connected now.
+    pub fn len(&self) -> usize {
+        self.map.lock().unwrap().len()
+    }
+    pub fn registry(&self) -> Arc<dyn Registry> {
+        self.registry.clone()
+    }
+    /// The registered roots an event's paths are attributed by: the world's,
+    /// or the registry file's.
+    fn roots(&self) -> Vec<String> {
+        match &self.world {
+            Some(w) => w.roots(),
+            None => worktrees_core::registry::read_lenient().roots(),
+        }
+    }
+}
+
+/// The engine's `Host`: an event is one frame to every authenticated socket —
+/// PROJECTED to that socket's caller (`scope::event`, §3.3 gap 12). The grant
+/// is read at the moment of each emit, never a copy taken at connect, so a
+/// narrowed scope stops the events with the next one. Fire-and-forget by
+/// construction — a dead queue is dropped from the map on the way past, and
+/// nothing here waits on a client.
 pub struct Broadcast(pub Arc<Clients>);
 
 impl Host for Broadcast {
     fn emit(&self, event: &str, payload: serde_json::Value) {
-        let text = wire::event_frame(event, &payload);
-        let mut map = self.0 .0.lock().unwrap();
-        map.retain(|_, out| out.push(text.clone()).is_ok());
+        let whole = wire::event_frame(event, &payload);
+        let clients = &self.0;
+        // Read once per emit, and only if a scoped caller needs it.
+        let mut roots: Option<Vec<String>> = None;
+        let mut map = clients.map.lock().unwrap();
+        map.retain(|_, (out, caller)| {
+            let grant = authz::effective(&*clients.registry, caller);
+            let mut read = || roots.get_or_insert_with(|| clients.roots()).clone();
+            match scope::event(event, &payload, caller, &grant, &mut read) {
+                Some(p) if p == payload => out.push(whole.clone()).is_ok(),
+                Some(p) => out.push(wire::event_frame(event, &p)).is_ok(),
+                None => true,
+            }
+        });
     }
 
-    /// Somebody authenticated is connected. A connection joins the map once
-    /// it has proven itself and leaves it as it goes.
+    /// Somebody at the HOST is connected. What waits on an audience is the
+    /// inbox's `app:open-doc`, which only the console receives (§9.1), so a
+    /// remote device alone must not drain it into nothing. A connection joins
+    /// the map once it has proven itself and leaves it as it goes.
     fn has_audience(&self) -> bool {
-        !self.0 .0.lock().unwrap().is_empty()
+        self.0.map.lock().unwrap().values().any(|(_, c)| c.is_console())
     }
 }
 
@@ -507,7 +553,11 @@ async fn session(mut ws: Ws, shared: Arc<Shared>, id: u64, origin: String, slot:
     let (sink, mut stream) = ws.split();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
     let outbox = Outbox(tx);
-    shared.clients.add(id, outbox.clone());
+    // Who this socket is, fixed for its life: THIS listener's caller, the
+    // owner on the console. Never derived from the request, a header or the
+    // peer address (§3.3); the remote listener (slice 6) sets the device.
+    let caller = Caller::console();
+    shared.clients.add(id, outbox.clone(), caller.clone());
     // THE writer: one task drains the one queue, so every frame for this
     // connection is written in the order it was queued.
     let writer = tokio::spawn(async move {
@@ -519,7 +569,13 @@ async fn session(mut ws: Ws, shared: Arc<Shared>, id: u64, origin: String, slot:
         }
     });
     let frames = Frames::new(outbox.clone());
-    let call = Arc::new(Call { ctx: shared.ctx.clone(), frames: frames.clone() });
+    let call = Arc::new(Call {
+        ctx: shared.ctx.clone(),
+        frames: frames.clone(),
+        caller,
+        registry: shared.clients.registry(),
+        world: shared.clients.world.clone(),
+    });
     let lanes = Lanes::default();
 
     while let Some(m) = stream.next().await {
@@ -592,9 +648,9 @@ async fn session(mut ws: Ws, shared: Arc<Shared>, id: u64, origin: String, slot:
 /// `AssertUnwindSafe`, because what a body shares is the engine's state
 /// behind its mutexes, and a lock the panic poisoned reports itself.
 fn answer(call: &Call, id: &Value, cmd: &str, args: &Args) -> String {
-    // Host-admin commands change this machine's user-tier state; a line per
-    // call is the audit trail Phase 2's gate will want, and it is cheap now.
-    if dispatch::exposure(cmd) == Some(dispatch::Exposure::HostAdmin) {
+    // Console acts and `admin` rows change this machine's user-tier state; a
+    // line per call is the audit trail until slice 3's log replaces it.
+    if dispatch::exposure(cmd) == Some(dispatch::Exposure::HostConsole) || dispatch::cap_of(cmd) == Some(Capability::Admin) {
         info(&format!("serve: host-admin {cmd}"));
     }
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dispatch::call(call, cmd, args))) {

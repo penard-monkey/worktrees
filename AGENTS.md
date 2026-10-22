@@ -68,13 +68,27 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   do not align them). hyper parses the HTTP and tungstenite sees only frames,
   also ON PURPOSE: tungstenite's `accept_hdr_async` WRITES an HTTP error
   response when it refuses, while a hyper service that returns `Err` closes
-  with 0 bytes. The 150 commands sit in ONE macro table
+  with 0 bytes. The 152 commands sit in ONE macro table
   (`serve/dispatch.rs`) with an `Exposure` each; the six `ClientLocal` rows
   (clipboard, editor, terminal, zoom, the app bundle) are refused with
   `err: "client-local"`, never run on the host — the docs viewer is an
   `Engine` row since the app became a client (its registrations are the host
   poll's). `serve-dispatch-check.mjs` fails if the shim's `generate_handler!`
-  registers any other row: that would be a second engine for it. The engine's
+  registers any other row: that would be a second engine for it. **Every row
+  also declares a capability and its objects** (Phase 2 R1:
+  `name: Engine [write, place(repo, slug)] =>`; `HostConsole` rows are
+  console-only, `HostAdmin` is gone), and `serve/resolve.rs` checks them
+  against the caller's (principal, device) grant before the body runs,
+  writing canonical values back; the body gets `Ctx::scoped`, so
+  `read_projects` and everything on it answer with the caller's roots.
+  `Row::new` refuses a row without them at COMPILE time, and the drift tests
+  in `dispatch.rs` fail on an object argument a body reads that its row does
+  not declare. The types are `worktrees_core::authz`. On loopback the caller
+  is `Caller::console()` (scope `"*"`), and its refusals carry the error the
+  body always gave. Serve's in-process tests resolve against a fixture
+  `World`, not the user's registry and tmux: a scratch repo is `register`ed
+  there (`serve/tests.rs`), or every place row says `not a registered
+  project`. The engine's
   wiring — log sink, panic hook, PATH/locale, the viewer sweep, the project
   merge, the 3 s poll, the exit sequence — is `worktrees_api::host::{boot,
   start, stop}`: serve calls all three, the shim only `boot` (it logs, can
