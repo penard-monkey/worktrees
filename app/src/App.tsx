@@ -1053,11 +1053,15 @@ function InitRepoPrompt({ dir, onInit, onCancel }: {
     await onInit(dir);
     setBusy(false);
   };
+  // On the Escape stack like a popover: it holds the overlay nav open
+  // (`navSticky`) until it is answered, and nothing in it takes focus, so the
+  // terminal usually still has the keyboard. Swallowed, not passed on, mid-init.
+  useEscape(() => { if (!busy) onCancel(); });
   return (
     <div className="newform nav-newform">
       <div className="newform-h">
         Not a git repo · <b>{basename(dir)}</b>
-        <button className="mini" title="cancel" onClick={onCancel}><Icons.X size={13} /></button>
+        <button className="mini" title="cancel" disabled={busy} onClick={onCancel}><Icons.X size={13} /></button>
       </div>
       <p className="newform-note">
         <code>{dir}</code> isn't a git repository. Initialize it with an empty first commit?
