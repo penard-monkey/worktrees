@@ -43,6 +43,8 @@ pub mod mcpmigrate;
 pub mod mention;
 pub mod messages;
 pub mod model;
+pub mod netclass;
+pub mod netif;
 pub mod ops;
 pub mod pathclass;
 pub mod pi;
