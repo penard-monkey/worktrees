@@ -699,9 +699,17 @@ impl St<'_> {
 /// shorthand (github.com). Anything else is refused rather than guessed at:
 /// a parser that reads a host differently from git's is the hole.
 ///
-/// The host is resolved here and git resolves it again, so a name that flips
-/// between a public and a private address in between (DNS rebinding) still
-/// gets through; the remote listener's own peer rules (§4.1) are the rest.
+/// **Not yet a complete SSRF control, and it must be before any remote bind
+/// (slice 6).** Two ways remain around it, both in git rather than here: the
+/// host is resolved here and git resolves it again, so a name that flips to a
+/// private address in between (DNS rebinding) gets through; and git follows
+/// an HTTP redirect on the initial request (`http.followRedirects=initial`),
+/// so a public URL that redirects to `http://127.0.0.1/…` does too. The fix is
+/// a fetch policy handed to core's clone and skill-preview git calls for a
+/// non-console caller: `-c http.followRedirects=false`,
+/// `-c http.curloptResolve=<host>:<port>:<the address checked here>`, and
+/// `-c protocol.file.allow=never`. No device can reach these rows before
+/// slice 5's registry, so it is recorded, not half-built.
 pub fn remote_only(url: &str) -> Result<(), String> {
     let u = url.trim();
     let host = if let Some(i) = u.find("://") {
@@ -751,23 +759,58 @@ fn strip_port(hp: &str) -> String {
     hp.split(':').next().unwrap_or("").to_string()
 }
 
-/// Loopback, unspecified, link-local, RFC 1918, CGNAT `100.64.0.0/10`, ULA
-/// `fc00::/7`, and an IPv4-mapped one of those: an address a device must not
-/// make the host dial for it.
+/// An address a device must not make the host dial for it: anything that is
+/// not plainly GLOBAL unicast. Fail-closed by construction — the list is of
+/// what is refused, but every block a host can hide behind is on it, and an
+/// IPv4 address embedded in IPv6 (mapped, compatible, NAT64 `64:ff9b::/96`,
+/// 6to4 `2002::/16`) is judged as the IPv4 address it carries. Teredo
+/// (`2001::/32`) obfuscates its embedded address, so it is refused whole.
 fn host_local(ip: &std::net::IpAddr) -> bool {
-    use std::net::IpAddr;
+    use std::net::{IpAddr, Ipv4Addr};
     match ip {
         IpAddr::V4(v) => {
             let o = v.octets();
-            v.is_loopback() || v.is_unspecified() || v.is_link_local() || v.is_private() || v.is_broadcast()
-                || (o[0] == 100 && (o[1] & 0xc0) == 64)
+            o[0] == 0                                   // 0.0.0.0/8, "this network"
+                || o[0] == 10                           // RFC 1918
+                || o[0] == 127                          // loopback
+                || (o[0] == 100 && (o[1] & 0xc0) == 64) // CGNAT 100.64.0.0/10
+                || (o[0] == 169 && o[1] == 254)         // link-local
+                || (o[0] == 172 && (o[1] & 0xf0) == 16) // RFC 1918
+                || (o[0] == 192 && o[1] == 168)         // RFC 1918
+                || (o[0] == 192 && o[1] == 0 && (o[2] == 0 || o[2] == 2)) // IETF protocol, TEST-NET-1
+                || (o[0] == 198 && (o[1] & 0xfe) == 18) // benchmarking 198.18.0.0/15
+                || (o[0] == 198 && o[1] == 51 && o[2] == 100) // TEST-NET-2
+                || (o[0] == 203 && o[1] == 0 && o[2] == 113)  // TEST-NET-3
+                || o[0] >= 224                          // multicast, reserved, broadcast
         }
         IpAddr::V6(v) => {
+            let s = v.segments();
+            let embedded = |hi: u16, lo: u16| Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8);
+            if v.is_loopback() || v.is_unspecified() {
+                return true;
+            }
             if let Some(m) = v.to_ipv4_mapped() {
                 return host_local(&IpAddr::V4(m));
             }
-            let s = v.segments();
-            v.is_loopback() || v.is_unspecified() || (s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfe80
+            // IPv4-compatible `::a.b.c.d` (deprecated, still parsed).
+            if s[..6].iter().all(|x| *x == 0) {
+                return host_local(&IpAddr::V4(embedded(s[6], s[7])));
+            }
+            // NAT64 well-known prefix `64:ff9b::/96`.
+            if s[0] == 0x64 && s[1] == 0xff9b && s[2..6].iter().all(|x| *x == 0) {
+                return host_local(&IpAddr::V4(embedded(s[6], s[7])));
+            }
+            // 6to4 `2002:aabb:ccdd::/48` carries a.b.c.d.
+            if s[0] == 0x2002 {
+                return host_local(&IpAddr::V4(embedded(s[1], s[2])));
+            }
+            (s[0] & 0xe000) != 0x2000                   // not global unicast 2000::/3
+                || (s[0] == 0x2001 && s[1] == 0)        // Teredo 2001::/32
+                || (s[0] == 0x2001 && s[1] == 0x0db8)   // documentation 2001:db8::/32
+                || (s[0] & 0xfe00) == 0xfc00            // ULA (outside 2000::/3 anyway)
+                || (s[0] & 0xffc0) == 0xfe80            // link-local
+                || (s[0] & 0xffc0) == 0xfec0            // site-local
+                || (s[0] & 0xff00) == 0xff00            // multicast
         }
     }
 }
@@ -1276,6 +1319,18 @@ mod tests {
             try_row("skill_preview_git", &star, &sg, json!({ "url": "file:///etc" }), &w).unwrap_err().kind,
             RefusalKind::LocalFetch
         );
+        // The address forms a host can hide behind: 0/8, multicast and the
+        // reserved block, documentation and benchmarking ranges, IPv4
+        // embedded in IPv6 (compatible, NAT64, 6to4), site-local, multicast v6.
+        for url in [
+            "https://0.1.2.3/x", "https://224.0.0.1/x", "https://255.255.255.255/x", "https://240.0.0.1/x",
+            "https://192.0.2.1/x", "https://198.18.0.1/x", "https://[::127.0.0.1]/x", "https://[64:ff9b::7f00:1]/x",
+            "https://[2002:7f00:1::1]/x", "https://[2002:a00:1::1]/x", "https://[fec0::1]/x", "https://[ff02::1]/x",
+            "https://[2001:db8::1]/x", "https://[2001::1]/x",
+        ] {
+            assert_eq!(clone(&star, &sg, url).unwrap_err().kind, RefusalKind::LocalFetch, "{url}");
+        }
+        assert!(clone(&star, &sg, "https://[2606:4700:4700::1111]/o/r.git").is_ok(), "a global v6 address");
         // The console clones from a folder on its own disk, as it always could.
         let (con, all) = console();
         assert!(clone(&con, &all, "file:///Users/me/other").is_ok());
