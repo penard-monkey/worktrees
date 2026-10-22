@@ -596,6 +596,18 @@ html[data-places-side="right"] .rail-group .rail-icon.active::before { left: aut
   opacity: 1; color: var(--danger); font-weight: var(--fw-bold);
   background: color-mix(in srgb, var(--danger) 18%, transparent);
 }
+/* A card's ✕ (the git-init prompt, the init nudge). No `.project-h` hover ever
+   reveals a .mini outside one, so both sat at opacity 0 from the day they were
+   added: a card whose way out could not be seen. The rest restates the mini
+   look because `.newform button` (0,1,1) outranks `.mini` (0,1,0) and would
+   paint the ✕ as the card's accent button. The hover is `--line-strong`, not
+   `.mini:hover`'s `--bg-elev`, because both cards ARE `--bg-elev`; it sits
+   20+ RGB units off it in all six themes. */
+.newform-h .mini, .init-banner-h .mini {
+  margin-left: auto; opacity: 1; background: transparent; color: var(--txt-mute);
+  padding: 0 5px; font-weight: normal;
+}
+.newform-h .mini:hover, .init-banner-h .mini:hover { color: var(--txt-hi); background: var(--line-strong); }
 
 /* ── new-worktree form ── */
 .newform { display: flex; flex-direction: column; gap: var(--s2); margin: var(--s1) var(--s3) var(--s2); }
@@ -1486,7 +1498,6 @@ body.dragging .menu-catch { pointer-events: none; }
   display: flex; align-items: center; gap: var(--s1);
   font-size: var(--fs-meta); color: var(--warn); font-weight: var(--fw-med);
 }
-.init-banner-h .mini { margin-left: auto; }
 .init-banner p {
   margin: 0; font-size: var(--fs-micro); line-height: var(--lh-prose); color: var(--txt-dim);
 }
@@ -1616,7 +1627,6 @@ body.dragging .menu-catch { pointer-events: none; }
   font-size: var(--fs-meta); color: var(--txt-mute);
 }
 .newform-h b { color: var(--txt); }
-.newform-h .mini { margin-left: auto; }
 /* explanatory line for the remediation prompts (git init / first commit) */
 .newform-note {
   margin: 0; font-size: var(--fs-meta); color: var(--txt-mute); line-height: 1.4;

@@ -5,6 +5,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Fixed
+- **The "Not a git repo" card and the "Not configured" nudge show their ✕.** It was always there but invisible; Escape now dismisses the "Not a git repo" card too.
+
 ## [0.43.0] - 2026-10-21
 
 ### Changed
