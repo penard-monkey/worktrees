@@ -41,6 +41,7 @@ use serde_json::{Map, Value};
 use std::sync::Arc;
 use worktrees_api::{config, files, hostenv, meta, ops, prefs, profiles, project, status, term, viewer, workspace, Ctx};
 use worktrees_core::authz::{self, Caller, Capability, Registry};
+use worktrees_core::fetchpolicy::Fetcher;
 
 use super::resolve::{self, Absent, Obj, World};
 use super::scope;
@@ -328,23 +329,26 @@ pub fn call_in(cx: &Call, cmd: &str, args: &Args, world: &dyn World) -> Result<V
     let Some(row) = row(cmd) else { return Err(Value::from(format!("unknown command: {cmd}"))) };
     let grant = authz::effective(&*cx.registry, &cx.caller);
     let mut args = Args(args.0.clone());
-    if let Err(r) = resolve::authorize(row, cx, &grant, &mut args, world) {
-        // The idempotent close of an attach this connection does not own:
-        // answered as closing a missing one is, and the body never runs.
-        // THE hook for the audit lane's "refused act" record (§5.2).
-        if r.kind == resolve::RefusalKind::NoopNotOwned {
-            return Ok(Value::Null);
+    let resolved = match resolve::authorize(row, cx, &grant, &mut args, world) {
+        Ok(r) => r,
+        Err(r) => {
+            // The idempotent close of an attach this connection does not own:
+            // answered as closing a missing one is, and the body never runs.
+            // THE hook for the audit lane's "refused act" record (§5.2).
+            if r.kind == resolve::RefusalKind::NoopNotOwned {
+                return Ok(Value::Null);
+            }
+            // The real reason, for the host's eyes. The console's ordinary misses
+            // (a file deleted under the tree) are the body errors they always
+            // were, and not worth a line each.
+            if !cx.caller.is_console() {
+                worktrees_api::log::info(&format!("serve: refused {cmd} for {}: {:?}: {}", cx.caller, r.kind, r.detail));
+            }
+            return Err(r.wire_for(&cx.caller));
         }
-        // The real reason, for the host's eyes. The console's ordinary misses
-        // (a file deleted under the tree) are the body errors they always
-        // were, and not worth a line each.
-        if !cx.caller.is_console() {
-            worktrees_api::log::info(&format!("serve: refused {cmd} for {}: {:?}: {}", cx.caller, r.kind, r.detail));
-        }
-        return Err(r.wire_for(&cx.caller));
-    }
+    };
     let scoped = Call {
-        ctx: cx.ctx.scoped(grant.projects.clone()),
+        ctx: body_ctx(cx, &grant, resolved),
         frames: cx.frames.clone(),
         caller: cx.caller.clone(),
         registry: cx.registry.clone(),
@@ -358,6 +362,14 @@ pub fn call_in(cx: &Call, cmd: &str, args: &Args, world: &dyn World) -> Result<V
         }
         None => out,
     })
+}
+
+/// The `Ctx` a body runs on: scoped to the grant, and fetching as its caller
+/// — the console's git for the console, and for a device the addresses the
+/// resolver checked, pinned (gap 17, `worktrees_core::fetchpolicy`).
+fn body_ctx(cx: &Call, grant: &authz::Grant, resolved: resolve::Resolved) -> Ctx {
+    let fetcher = if cx.caller.is_console() { Fetcher::Console } else { Fetcher::Device(resolved.pins) };
+    cx.ctx.scoped(grant.projects.clone()).fetching(fetcher)
 }
 
 /// A command's row.
@@ -662,7 +674,7 @@ commands! { cx, a;
     skills_list: Engine [read, global] => profiles::skills_list(),
     skill_inspect: Engine [admin, new_path(path)] => profiles::skill_inspect(a.get("path")?),
     skill_install_local: HostConsole => profiles::skill_install_local(a.get("path")?),
-    skill_preview_git: Engine [admin, global, all, remote_url(url)] => profiles::skill_preview_git(a.get("url")?, a.get("rev")?),
+    skill_preview_git: Engine [admin, global, all, remote_url(url)] => profiles::skill_preview_git(&cx.ctx, a.get("url")?, a.get("rev")?),
     skill_install_git: HostConsole => profiles::skill_install_git(a.get("url")?, a.get("rev")?, a.get("sha")?, a.get("name")?),
     skill_remove: Engine [admin, global] => profiles::skill_remove(a.get("name")?),
 }
@@ -1006,5 +1018,25 @@ mod tests {
         let projected: HashSet<String> = scope::EVENTS.iter().map(|(n, _)| n.to_string()).collect();
         let unprojected: Vec<_> = emitted.difference(&projected).collect();
         assert!(unprojected.is_empty(), "events with no projection: {unprojected:?}");
+    }
+
+    /// gap 17: a body's `Ctx` fetches as its caller. A device's is pinned to
+    /// the resolver's ONE lookup, and any URL it was not pinned for is
+    /// checked again; the console's is today's git, whatever it is handed.
+    #[test]
+    fn a_body_fetches_as_its_caller() {
+        use worktrees_core::authz::{DeviceId, Grant, PrincipalId};
+        use worktrees_core::fetchpolicy::Policy;
+        let (con, _, _rx) = call("fetch-as");
+        let pin = resolve::remote_only("https://140.82.112.3/o/r.git").unwrap();
+        let resolved = || resolve::Resolved { projects: vec![], pins: vec![pin.clone()] };
+        let ctx = body_ctx(&con, &Grant::everything(), resolved());
+        assert_eq!(*ctx.fetcher(), Fetcher::Console, "the console's git, even handed a pin");
+        let dev = Call { caller: Caller::paired(PrincipalId::owner(), DeviceId::new("phone")), ..con };
+        let ctx = body_ctx(&dev, &Grant::everything(), resolved());
+        assert_eq!(*ctx.fetcher(), Fetcher::Device(vec![pin.clone()]));
+        assert_eq!(ctx.fetch_policy("https://140.82.112.3/o/r.git").unwrap(), Policy::Pinned(pin));
+        assert!(ctx.fetch_policy("file:///etc").is_err(), "a URL the resolver did not pin is checked again");
+        assert!(!ctx.fetching(Fetcher::Console).fetcher().is_console(), "a device's Ctx cannot be made the console's");
     }
 }

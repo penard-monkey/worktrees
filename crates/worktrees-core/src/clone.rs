@@ -484,6 +484,9 @@ pub struct CloneOutcome {
 pub struct CloneOpts {
     /// `None` resolves the user's (`user_ssh_base`).
     pub ssh_base: Option<String>,
+    /// Who asked, as git must honour it (`fetchpolicy`): the console's git by
+    /// default, a device's pinned one when a device asked.
+    pub policy: crate::fetchpolicy::Policy,
 }
 
 const PROGRESS_MIN_GAP: Duration = Duration::from_millis(66);
@@ -556,18 +559,14 @@ fn run_clone(
 ) -> Result<CloneOutcome, CloneError> {
     use std::os::unix::process::CommandExt;
     let base = opts.ssh_base.clone().unwrap_or_else(user_ssh_base);
-    let mut cmd = crate::childenv::command("git");
-    cmd.args(["clone", "--progress", "--", &src.url])
-        .arg(target)
+    let mut cmd = opts.policy.git(Vec::<&str>::new(), ["clone", "--progress", "--", src.url.as_str()], &clone_env(&base));
+    cmd.arg(target)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         // Its own process group, so a cancel reaches git-remote-https, ssh and
         // index-pack too — killing git alone leaves them holding the pipe.
         .process_group(0);
-    for (k, v) in clone_env(&base) {
-        cmd.env(k, v);
-    }
     let mut child = cmd
         .spawn()
         .map_err(|e| CloneError { kind: CloneErrorKind::Other, message: format!("git failed to start: {e}") })?;
@@ -1028,7 +1027,7 @@ mod tests {
         );
         let src = parse_source("ssh://example.invalid/owner/late.git").unwrap();
         let target = plan_target(d.to_str().unwrap(), &src.name).unwrap();
-        let opts = CloneOpts { ssh_base: Some(fake.to_string_lossy().into_owned()) };
+        let opts = CloneOpts { ssh_base: Some(fake.to_string_lossy().into_owned()), ..Default::default() };
         let e = clone_repo(&src, &target, &opts, &AtomicBool::new(false), None).unwrap_err();
         assert_eq!(e.kind, CloneErrorKind::NotFound, "{}", e.message);
         assert!(!e.message.contains("Counting objects"), "evidence is a progress line: {}", e.message);
@@ -1056,7 +1055,7 @@ mod tests {
             }
             c2.store(true, Ordering::SeqCst);
         });
-        let opts = CloneOpts { ssh_base: Some(fake.to_string_lossy().into_owned()) };
+        let opts = CloneOpts { ssh_base: Some(fake.to_string_lossy().into_owned()), ..Default::default() };
         let t0 = Instant::now();
         let e = clone_repo(&src, &target, &opts, &cancel, None).unwrap_err();
         assert_eq!(e.kind, CloneErrorKind::Cancelled, "{}", e.message);
@@ -1067,5 +1066,40 @@ mod tests {
         // SAFETY: signal 0 only probes for existence.
         let alive = unsafe { libc::kill(pid, 0) } == 0;
         assert!(!alive, "the fake ssh (git's grandchild) survived the cancel");
+    }
+
+    /// gap 17, at the call site: `clone_repo` runs a device's clone under its
+    /// pin, with `clone_env` beneath the policy. A redirect from the named
+    /// server is not followed, and a clone that works keeps redirects off.
+    #[test]
+    fn a_device_clone_is_pinned_at_the_call_site() {
+        use crate::fetchpolicy::testnet::{bare_repo, Answer, Server};
+        use crate::fetchpolicy::{Pin, Policy, Rules};
+        use std::net::{IpAddr, Ipv4Addr};
+        let d = tmp("pinned");
+        bare_repo(&d);
+        let pin = |url: &str| {
+            let admit = |ip: &IpAddr| ip.is_loopback();
+            let none = |h: &str, _: u16| -> Result<Vec<IpAddr>, String> { panic!("looked up {h}") };
+            let rules = Rules { schemes: &["http"], resolve: &none, admit: &admit, git_env: &[] };
+            Policy::Pinned(Pin::resolve_with(url, &rules).unwrap())
+        };
+        let lo = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        let witness = Server::start(lo, 0, Answer::Missing).unwrap();
+        let bounce = Server::start(lo, 0, Answer::Redirect(format!("http://127.0.0.1:{}", witness.port()))).unwrap();
+        let src = parse_source(&format!("http://127.0.0.1:{}/r.git", bounce.port())).unwrap();
+        let target = plan_target(d.to_str().unwrap(), "bounced").unwrap();
+        let opts = CloneOpts { policy: pin(&src.url), ..Default::default() };
+        assert!(clone_repo(&src, &target, &opts, &AtomicBool::new(false), None).is_err());
+        assert!(!bounce.hits().is_empty() && witness.hits().is_empty(), "redirect followed: {:?}", witness.hits());
+
+        let forge = Server::start(lo, 0, Answer::Git(d.clone())).unwrap();
+        let src = parse_source(&format!("http://127.0.0.1:{}/r.git", forge.port())).unwrap();
+        let target = plan_target(d.to_str().unwrap(), "pinned-clone").unwrap();
+        let opts = CloneOpts { policy: pin(&src.url), ..Default::default() };
+        let out = clone_repo(&src, &target, &opts, &AtomicBool::new(false), None).unwrap();
+        let kept = Command::new("git").args(["-C", &out.dir, "config", "--local", "--get", "http.followRedirects"]).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&kept.stdout).trim(), "false");
     }
 }

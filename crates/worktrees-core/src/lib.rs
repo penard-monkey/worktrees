@@ -22,6 +22,7 @@ pub mod derive;
 pub mod diag;
 pub mod docs;
 pub mod error;
+pub mod fetchpolicy;
 pub mod fsx;
 pub mod git;
 pub mod guard;

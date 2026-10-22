@@ -85,7 +85,13 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   in `dispatch.rs` fail on an object argument a body reads that its row does
   not declare. The types are `worktrees_core::authz`. On loopback the caller
   is `Caller::console()` (scope `"*"`), and its refusals carry the error the
-  body always gave. Serve's in-process tests resolve against a fixture
+  body always gave. **A git fetch a device can trigger** (`clone_project`,
+  `skill_preview_git`) goes through `worktrees_core::fetchpolicy`, keyed on
+  the caller's class (`Ctx::fetch_policy`). The `remote_url` object resolves
+  the host ONCE, and the body's git dials that pin over https only, with no
+  redirect, proxy, protocol v2 or host-config rewrite left to move it. The
+  console's git is unchanged. A new network git call a device can reach is
+  built with `Policy::git`, never a bare `git`. Serve's in-process tests resolve against a fixture
   `World`, not the user's registry and tmux: a scratch repo is `register`ed
   there (`serve/tests.rs`), or every place row says `not a registered
   project`. The engine's

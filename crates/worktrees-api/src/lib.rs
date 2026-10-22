@@ -144,6 +144,12 @@ pub struct Ctx {
     /// resolver, and a body that forgets a filter fails closed (Server
     /// Edition Phase 2, §3.3). Set only through [`Ctx::scoped`].
     scope: Arc<worktrees_core::authz::Projects>,
+    /// Who is asking the host to fetch, which decides how this call's git
+    /// may dial (`worktrees_core::fetchpolicy`): the console for the engine's
+    /// own work and the console's requests, and a device, with the addresses
+    /// serve's resolver checked, for a paired device's. Set only through
+    /// [`Ctx::fetching`], which narrows.
+    fetch: Arc<worktrees_core::fetchpolicy::Fetcher>,
 }
 
 impl Ctx {
@@ -157,6 +163,7 @@ impl Ctx {
             viewer: Arc::new(viewer::Viewer::default()),
             docnames: Arc::new(files::DocNameIndex::default()),
             scope: Arc::new(worktrees_core::authz::Projects::All),
+            fetch: Arc::new(worktrees_core::fetchpolicy::Fetcher::Console),
         }
     }
 
@@ -171,6 +178,23 @@ impl Ctx {
     /// The projects this `Ctx` may see.
     pub fn scope(&self) -> &worktrees_core::authz::Projects {
         &self.scope
+    }
+
+    /// The same engine, for a caller whose fetches are `fetcher`'s. Narrowing
+    /// only: a device's `Ctx` stays a device's.
+    pub fn fetching(&self, fetcher: worktrees_core::fetchpolicy::Fetcher) -> Ctx {
+        Ctx { fetch: Arc::new(self.fetch.narrow(fetcher)), ..self.clone() }
+    }
+
+    pub fn fetcher(&self) -> &worktrees_core::fetchpolicy::Fetcher {
+        &self.fetch
+    }
+
+    /// How this call's git fetches `url` (exactly as git is handed it):
+    /// today's git for the console; for a device, pinned to the addresses its
+    /// request was checked against, or `Err` when it may not fetch `url`.
+    pub fn fetch_policy(&self, url: &str) -> Result<worktrees_core::fetchpolicy::Policy, String> {
+        self.fetch.policy(url)
     }
 
     /// The app's own pre-registry project list. Only ever READ — it is the
