@@ -16,6 +16,8 @@
 mod conn;
 mod dispatch;
 mod policy;
+mod resolve;
+mod scope;
 mod servefile;
 mod wire;
 
@@ -242,7 +244,13 @@ pub fn start(config_dir: PathBuf, port: u16, allow_origin: Vec<String>) -> Resul
 
 /// `start`, with the connection caps given rather than the defaults.
 pub fn start_with(config_dir: PathBuf, port: u16, allow_origin: Vec<String>, limits: conn::Limits) -> Result<Running, String> {
-    let clients = Arc::new(conn::Clients::default());
+    start_in(config_dir, port, allow_origin, limits, conn::Clients::default())
+}
+
+/// `start_with`, over a given client set — its device registry and the world
+/// objects resolve against (the in-process tests' fixtures).
+pub fn start_in(config_dir: PathBuf, port: u16, allow_origin: Vec<String>, limits: conn::Limits, clients: conn::Clients) -> Result<Running, String> {
+    let clients = Arc::new(clients);
     let ctx = Ctx::new(config_dir, Arc::new(conn::Broadcast(clients.clone())));
     let token = servefile::new_token();
     let listener = conn::start(ctx.clone(), token.clone(), port, allow_origin, clients.clone(), limits)?;

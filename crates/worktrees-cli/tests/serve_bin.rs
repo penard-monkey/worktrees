@@ -139,6 +139,23 @@ impl Sandbox {
         self.child.as_ref().unwrap().id()
     }
 
+    /// A git repository under the sandbox, registered in the sandbox's OWN
+    /// registry (`XDG_CONFIG_HOME` is the sandbox's): the canonical root.
+    fn project(&self, name: &str) -> String {
+        let dir = self.root.join("projects").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        let ok = Command::new("git").args(["init", "-q"]).current_dir(&dir).status().unwrap().success();
+        assert!(ok, "git init {}", dir.display());
+        let root = std::fs::canonicalize(&dir).unwrap().to_string_lossy().into_owned();
+        let reg_dir = self.root.join("xdg/worktrees");
+        std::fs::create_dir_all(&reg_dir).unwrap();
+        let reg = reg_dir.join("projects.json");
+        let mut v: Value = std::fs::read(&reg).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(json!({ "version": 1, "projects": [] }));
+        v["projects"].as_array_mut().unwrap().push(json!({ "root": root, "name": name }));
+        std::fs::write(&reg, serde_json::to_vec(&v).unwrap()).unwrap();
+        root
+    }
+
     /// SIGTERM, then the exit status, within a bound.
     fn terminate(&mut self) -> std::process::ExitStatus {
         let pid = self.pid() as libc::pid_t;
@@ -462,7 +479,10 @@ fn term_open_refuses_a_session_that_does_not_exist() {
 /// ...and the session named EXACTLY. A tmux target is a prefix match, so a
 /// `term_open` for a session that had gone attached whichever session's name
 /// began with it — another place's agent, typed into from this one's pane.
-/// The positive control is in the same server: the real name attaches.
+/// The positive control is in the same server: the real name attaches. And
+/// only a PLACE's session (Server Edition Phase 2, gap 3): one with a pane
+/// in a registered project. A live session that is no place's — the user's
+/// own tmux — is refused, the console included.
 #[test]
 fn term_open_attaches_only_the_session_named_exactly() {
     if !PrivateTmux::available() {
@@ -470,15 +490,23 @@ fn term_open_attaches_only_the_session_named_exactly() {
         return;
     }
     let tmux = PrivateTmux::new("exact");
-    let made = tmux.run(&["-f", "/dev/null", "new-session", "-d", "-s", "wtsb-lane", "-x", "80", "-y", "24", "sleep 600"]);
-    assert!(made.status.success(), "private tmux: {}", String::from_utf8_lossy(&made.stderr));
     let mut sb = Sandbox::new("termexact");
+    let project = sb.project("lane");
+    let made = tmux.run(&["-f", "/dev/null", "new-session", "-d", "-s", "wtsb-lane", "-c", &project, "-x", "80", "-y", "24", "sleep 600"]);
+    assert!(made.status.success(), "private tmux: {}", String::from_utf8_lossy(&made.stderr));
+    let made = tmux.run(&["new-session", "-d", "-s", "wtsb-stranger", "-c", "/", "-x", "80", "-y", "24", "sleep 600"]);
+    assert!(made.status.success(), "private tmux: {}", String::from_utf8_lossy(&made.stderr));
     let sf = sb.launch_env(&["--allow-origin", "http://localhost:1420"], &[("TMUX", &tmux.env())]);
     let mut ws = connect(&sf, "http://localhost:1420");
 
     let r = rpc(&mut ws, 1, "term_open", json!({ "session": "wtsb", "cols": 80, "rows": 24, "onBytes": "__CHANNEL__:1" }));
     std::thread::sleep(Duration::from_millis(500));
     assert!(r["err"].is_string(), "a prefix of a session's name was attached: {r}, clients on {:?}", tmux.attached());
+    assert!(tmux.attached().is_empty(), "{:?}", tmux.attached());
+
+    let r = rpc(&mut ws, 4, "term_open", json!({ "session": "wtsb-stranger", "cols": 80, "rows": 24, "onBytes": "__CHANNEL__:4" }));
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(r["err"].is_string(), "a session that is no place's was attached: {r}");
     assert!(tmux.attached().is_empty(), "{:?}", tmux.attached());
 
     let r = rpc(&mut ws, 2, "term_open", json!({ "session": "wtsb-lane", "cols": 80, "rows": 24, "onBytes": "__CHANNEL__:2" }));
