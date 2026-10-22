@@ -2342,23 +2342,60 @@ mod devices {
         assert!(e.rpc(&mut m, "devices_list", json!({})).get("ok").is_some(), "a desktop has no presence key to ask for");
     }
 
-    /// Which acts are drive-class (§2.5): instruct, answer and admin, a raised
-    /// capability as much as a row's own, and OPENING a stream — not typing
-    /// into one already open. Revoking another device is admin; revoking
-    /// itself is not.
+    /// The bypass a review found: dock shells are the process's, so a device
+    /// with `stream` could type into the shell the DESKTOP opened without ever
+    /// opening one itself — and only opening was gated. Typing into a shell
+    /// this connection does not hold is asked for a step-up; typing into one
+    /// it opened (which was) is not; nor is typing into its own attach.
     #[test]
-    fn drive_class_is_instruct_answer_admin_and_opening_a_stream() {
+    fn typing_into_a_shell_this_connection_never_opened_needs_a_step_up() {
+        let e = engine("stepup-shell", vec![]);
+        let a = s(&e.dir.join("a"));
+        let (rec, _k) = iphone(&e.reg, &[Read, Stream]);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let call = Call {
+            ctx: e.ctx.clone(),
+            frames: Frames::with_exporter(Outbox(tx), Some([1u8; 32])),
+            caller: caller(&rec),
+            registry: e.reg.clone(),
+            world: Some(Arc::new(Roots { roots: vec![a.clone()], panes: vec![] })),
+            devices: e.reg.clone(),
+            pairing: e.clients.pairing(),
+        };
+        let write = |cmd: &str, extra: Value| {
+            let mut args = json!({"repo": a, "slug": "(main)", "index": 0, "data": [104, 105], "id": 905});
+            args.as_object_mut().unwrap().extend(extra.as_object().cloned().unwrap_or_default());
+            dispatch::call(&call, cmd, &Args(args.as_object().cloned().unwrap()))
+        };
+        for cmd in ["shell_write", "shell_resize", "close_shell_session"] {
+            assert_eq!(write(cmd, json!({"cols": 80, "rows": 24})), Err(json!("step-up required")), "{cmd} on a shell it never opened");
+        }
+        call.frames.note_shell(ShellHold { repo: a.clone(), slug: "(main)".into(), index: 0, gen: 3 });
+        assert_ne!(write("shell_write", json!({})), Err(json!("step-up required")), "a shell it opened");
+        assert_eq!(write("shell_open", json!({"cols": 80, "rows": 24})), Err(json!("step-up required")), "opening is always asked");
+        call.frames.note_term(905, "s".into());
+        assert_ne!(write("term_write", json!({})), Err(json!("step-up required")), "its own attach");
+    }
+
+    /// Which acts are drive-class (§2.5): instruct, answer and admin, a raised
+    /// capability as much as a row's own; OPENING a stream; and any stream act
+    /// on a channel this connection does not hold — not typing into one it
+    /// opened. Revoking another device is admin; revoking itself is not.
+    #[test]
+    fn drive_class_is_instruct_answer_admin_and_any_stream_act_not_on_a_held_channel() {
         use super::super::dispatch::{needs_stepup, row, TABLE};
         for r in TABLE {
-            let want = match r.cap {
+            let caps: Vec<_> = r.cap.into_iter().collect();
+            let want = matches!(r.cap, Some(Instruct | Answer | Admin | Stream));
+            assert_eq!(needs_stepup(r, &caps, false), want, "{} on a channel it does not hold", r.name);
+            let held = match r.cap {
                 Some(Instruct | Answer | Admin) => true,
                 Some(Stream) => matches!(r.name, "term_open" | "shell_open"),
                 _ => false,
             };
-            assert_eq!(needs_stepup(r, &r.cap.into_iter().collect::<Vec<_>>()), want, "{}", r.name);
+            assert_eq!(needs_stepup(r, &caps, true), held, "{} on a channel it holds", r.name);
         }
-        assert!(needs_stepup(row("write_file").unwrap(), &[Write, Instruct]), "a write raised to instruct by its path");
-        assert!(!needs_stepup(row("term_write").unwrap(), &[Stream]));
+        assert!(needs_stepup(row("write_file").unwrap(), &[Write, Instruct], false), "a write raised to instruct by its path");
         let e = engine("stepup-revoke", vec![]);
         let (rec, _k) = iphone(&e.reg, &[Read, Admin]);
         let peer = enroll(&e.reg, "Peer", 8, &[Read], Projects::All);

@@ -432,7 +432,7 @@ pub fn call_in_seen(cx: &Call, cmd: &str, args: &Args, world: &dyn World, seen: 
     // or another device can RAISE the act to drive-class (`stepup_gate`).
     // Every refusal is the host's, never the body's, and `seen` hears it so.
     let gated = resolve::authorize(row, cx, &grant, &mut args, world)
-        .and_then(|r| stepup_gate(cx, row, &r).map(|()| r))
+        .and_then(|r| stepup_gate(cx, row, &args, &r).map(|()| r))
         .and_then(|r| Ok((r, provenance::device_lane_gate(cx, row, &args, world)?)));
     let (resolved, _launching) = match gated {
         Ok(r) => r,
@@ -495,19 +495,36 @@ fn body_ctx(cx: &Call, grant: &authz::Grant, resolved: resolve::Resolved) -> Ctx
         .acting_for(provenance::acting(&cx.caller, grant))
 }
 
-/// The rows that OPEN a stream: of `stream`'s rows, the only ones a step-up
-/// gates (§2.5). Typing into, resizing or closing what is open is not
-/// re-asked.
+/// The rows that OPEN a stream, which a step-up always gates (§2.5).
 pub const OPENS_A_STREAM: &[&str] = &["term_open", "shell_open"];
 
 /// Whether an act is drive-class for step-up (§2.5): it needs `instruct`,
 /// `answer` or `admin` — the row's own capability or one its objects raised —
-/// or it opens a stream.
-pub fn needs_stepup(row: &Row, needs: &[Capability]) -> bool {
+/// or it is a `stream` act that is not on a channel this connection already
+/// HOLDS. Typing into, resizing or closing what this connection opened (an
+/// open that was itself gated) is not re-asked; opening is, always; and so
+/// is every act on a dock shell this connection never opened — dock shells
+/// are the process's, so without this a device could type into the shell the
+/// desktop opened and never be asked.
+pub fn needs_stepup(row: &Row, needs: &[Capability], holds: bool) -> bool {
     needs.iter().any(|c| match c {
         Capability::Instruct | Capability::Answer | Capability::Admin => true,
-        Capability::Stream => OPENS_A_STREAM.contains(&row.name),
+        Capability::Stream => OPENS_A_STREAM.contains(&row.name) || !holds,
         Capability::Read | Capability::Write => false,
+    })
+}
+
+/// The row acts on a channel this connection holds: its own attach (the
+/// resolver's `attach`/`close` objects proved that), or a dock shell it opened
+/// and has not let go (`Frames::shells`), compared on the canonical arguments.
+fn holds_channel(cx: &Call, row: &Row, args: &Args) -> bool {
+    row.objects.iter().any(|o| match *o {
+        Obj::Attach(_) | Obj::Close(_) => true,
+        Obj::Shell(r, s, i) => {
+            let (repo, slug, index) = (args.raw(r), args.raw(s), args.raw(i));
+            cx.frames.shells().iter().any(|h| Value::from(h.repo.as_str()) == repo && Value::from(h.slug.as_str()) == slug && Value::from(h.index) == index)
+        }
+        _ => false,
     })
 }
 
@@ -516,9 +533,9 @@ pub fn needs_stepup(row: &Row, needs: &[Capability]) -> bool {
 /// here, after the objects resolved, because a path class or another device
 /// can RAISE the act to drive-class; never in the resolver, whose coverage
 /// check is also what a reduction re-runs on open channels.
-fn stepup_gate(cx: &Call, row: &Row, r: &resolve::Resolved) -> Result<(), resolve::Refusal> {
+fn stepup_gate(cx: &Call, row: &Row, args: &Args, r: &resolve::Resolved) -> Result<(), resolve::Refusal> {
     let authz::Device::Paired(d) = cx.caller.device() else { return Ok(()) };
-    if !needs_stepup(row, &r.needs) || !cx.registry.stepup_required(cx.caller.principal(), d) {
+    if !needs_stepup(row, &r.needs, holds_channel(cx, row, args)) || !cx.registry.stepup_required(cx.caller.principal(), d) {
         return Ok(());
     }
     if cx.frames.stepup().fresh(std::time::Instant::now()) {
