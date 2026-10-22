@@ -948,9 +948,25 @@ mod tests {
     fn marker_bin(d: &Path) -> (PathBuf, PathBuf) {
         let marker = d.join("ran");
         let bin = d.join("fake-serve");
-        std::fs::write(&bin, format!("#!/bin/sh\ntouch '{}'\nexit 3\n", marker.display())).unwrap();
-        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        exec_fixture(&bin, &format!("#!/bin/sh\ntouch '{}'\nexit 3\n", marker.display()));
         (bin, marker)
+    }
+
+    /// `worktrees_core::fsx::exec_fixture`, copied because that one is
+    /// `#[cfg(test)]` in core: an executable a test is about to run, written
+    /// by a short-lived `sh`. An in-process write here leaves an fd that a
+    /// concurrent test's fork can inherit, and Linux refuses to exec a file
+    /// that is open for writing (ETXTBSY).
+    fn exec_fixture(path: &Path, body: &str) {
+        use std::io::Write;
+        let mut sh = Command::new("/bin/sh")
+            .args(["-c", r#"cat > "$1" && chmod 0755 "$1""#, "sh"])
+            .arg(path)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        sh.stdin.take().unwrap().write_all(body.as_bytes()).unwrap();
+        assert!(sh.wait().unwrap().success(), "exec fixture {}", path.display());
     }
 
     #[test]

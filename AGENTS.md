@@ -572,6 +572,23 @@ first: libtest runs tests in sorted order, so the previous test's finish to
 stress loop OUTSIDE the gate slot, one line per run, under a time cap: one
 inside it held the slot ~82 min through a machine sleep, printing nothing.
 
+**A test that writes a fake binary and then runs it can lose to ANOTHER test's
+fork, and only on Linux.** `execve` of a file that any process holds open for
+writing fails with ETXTBSY (errno 26). libtest runs tests on parallel threads,
+and a fork made by one of them inherits every fd the process holds at that
+instant, keeping each until the child's own exec. `O_CLOEXEC` acts AT the exec,
+not before. So `fs::write` + `set_permissions(0o755)` in one test, plus any
+spawn in another, opens a window in which the fake cannot run. It presents as
+the probe's own spawn failure: `codex_usage` answered `"spawn"` where its test
+expected `"timeout"` in the ubuntu job of #526, while macOS, which runs a file
+that is open for writing, stayed green. A rename or a hard link does not help,
+because the check is on the inode. Create every executable a test RUNS with
+`fsx::exec_fixture` (the app crate's copy is in `engine.rs`): a short-lived `sh`
+writes it, so the test process never holds a writable fd for a fork to inherit.
+Measured in `rust:1-bookworm`: 7 of 150 runs of the core suite failed this way
+before the fix, every one a fake's spawn, and 0 of 150 after. Reproduce it in
+docker, never on the Mac.
+
 **A new test must be shown to FAIL first.** ROADMAP's zombie-children item
 records a regression test that passed identically with and without its fix.
 Break the thing under test (drop the `skip_serializing_if`, restore the old

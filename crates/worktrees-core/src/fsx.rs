@@ -109,6 +109,32 @@ fn random_suffix() -> u64 {
     h.finish()
 }
 
+/// Write `body` to `path` as an executable (0755) that a test is about to RUN
+/// (a fake `gh`, `ssh` or `codex`). Do not use `fs::write` + `set_permissions`
+/// for one.
+///
+/// On Linux, `execve` of a file that ANY process holds open for writing fails
+/// with ETXTBSY (errno 26). libtest runs tests on parallel threads, and a fork
+/// made by one of them inherits every fd the process holds at that instant,
+/// keeping each until the child's own exec (`O_CLOEXEC` acts AT the exec, not
+/// before). So an in-process write in one test plus a spawn in another opens a
+/// window in which this test's exec is refused: `codex_usage` reported
+/// `"spawn"` in CI, on Linux only, because macOS runs a file that is open for
+/// writing. Here a short-lived `sh` does the write and is reaped before this
+/// returns. This process never holds a writable fd on the inode, so there is
+/// nothing for a concurrent fork to inherit.
+#[cfg(test)]
+pub(crate) fn exec_fixture(path: &Path, body: &str) {
+    let mut sh = crate::childenv::command("/bin/sh")
+        .args(["-c", r#"cat > "$1" && chmod 0755 "$1""#, "sh"])
+        .arg(path)
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    sh.stdin.take().unwrap().write_all(body.as_bytes()).unwrap();
+    assert!(sh.wait().unwrap().success(), "exec fixture {}", path.display());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

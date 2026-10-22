@@ -519,7 +519,6 @@ pub fn read() -> Info {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     const OK: &str = r#"{"code":0,"msg":"success","data":{"kind":"ok","quota":{"usages":{"limit5h":{"usedRatio":0.0041,"resetAt":"2026-10-20T02:36:16Z"},"monthTotal":{"usedRatio":0.0003,"resetAt":"2026-11-19T01:37:17Z"},"monthCode":{"usedRatio":0.0003,"resetAt":"2026-11-19T01:37:17Z"}},"extraUsage":null}},"request_id":"x"}"#;
 
@@ -602,12 +601,10 @@ mod tests {
     fn fake_with(dir: &Path, on_term: &str, body: &str) -> PathBuf {
         let p = dir.join("kimi");
         let d = dir.display();
-        std::fs::write(
+        crate::fsx::exec_fixture(
             &p,
-            format!("#!/bin/sh\necho $$ > '{d}/pid'\necho \"$@\" > '{d}/args'\ntrap '{on_term}' TERM\nsleep 60 &\necho $! > '{d}/child'\n{body}\nwait\n"),
-        )
-        .unwrap();
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            &format!("#!/bin/sh\necho $$ > '{d}/pid'\necho \"$@\" > '{d}/args'\ntrap '{on_term}' TERM\nsleep 60 &\necho $! > '{d}/child'\n{body}\nwait\n"),
+        );
         p
     }
 
