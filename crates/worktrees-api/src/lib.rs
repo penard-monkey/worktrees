@@ -58,6 +58,7 @@ pub mod config;
 pub mod docserver;
 pub mod editors;
 pub mod files;
+pub mod host;
 pub mod hostenv;
 pub mod hostpolicy;
 pub mod log;
@@ -89,6 +90,14 @@ use std::sync::Arc;
 pub trait Host: Send + Sync {
     /// Push an event to the client(s). Tauri's `app.emit`.
     fn emit(&self, event: &str, payload: serde_json::Value);
+
+    /// Whether an event emitted now would reach anyone. The app always has
+    /// its window; a server with no client connected has nobody, and what is
+    /// CONSUMED by being emitted (the inbox's `worktrees show`) has to wait
+    /// for somebody rather than go out to nobody.
+    fn has_audience(&self) -> bool {
+        true
+    }
 }
 
 /// An ordered byte stream to one client — a terminal attach, a dock shell.

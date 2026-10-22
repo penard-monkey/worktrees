@@ -6,6 +6,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Changed
+- **The host wiring every engine process needs lives in one place,
+  `worktrees_api::host`**, and the desktop app calls it the same way `serve`
+  does: `boot` (log sink, panic hook, the launchd-bare PATH and locale repairs,
+  the startup line), `start` (the viewer sweep, the project merge, the 3 s
+  nav-dot poll and the dock-ring flush) and `stop` (the exit sequence). The
+  app's behaviour is unchanged; what changes is that a host can no longer
+  forget one of those steps, which is how pi once shipped with no nav dot.
+  `api-boundary-check.mjs` asserts the shim makes all three calls, and the new
+  `serve-dispatch-check.mjs` holds the socket's command table against the
+  shim's handler list.
 - **The 149 app commands moved into a new `worktrees-api` crate**, leaving the
   Tauri layer as thin wrappers. Nothing changes for the desktop app — the same
   149 commands with the same arguments, verified against `main`, plus
@@ -29,6 +39,43 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   row — see below).
 
 ### Added
+- **`worktrees serve`: the engine, hosted behind an authenticated WebSocket on
+  loopback** (Server Edition, Phase 1). It speaks the same `{cmd, args}` the
+  app's `invoke` does — all 150 commands, each with an exposure class in one
+  table (`Engine`, `ClientLocal`, `HostAdmin`, `Stream`); the seven that act on
+  the caller's machine (clipboard, editor, terminal, browser, zoom, the app's
+  own bundle) are refused over the socket rather than run on the host.
+  Terminal bytes and progress arrive as ordered channel frames, events as
+  `{event, payload}` to every authenticated socket. It binds `127.0.0.1` only,
+  requires a loopback `Host` and an allow-listed `Origin` (a missing one is
+  refused; `--allow-origin` is a dev flag, never a config key), and a client
+  and the server each prove they hold the per-launch 256-bit token from
+  `<config-dir>/serve.json` (mode 0600, rewritten every launch) with an
+  HMAC-SHA256 over nonces the other side chose — the token itself never goes
+  on the wire, so a process that takes the port of a server that has died
+  learns nothing and cannot pass for it. Every refusal closes the socket with
+  nothing written. A flood of connections can no longer take the server's
+  memory or descriptors, or a client that is already in: at most 64
+  connections, 16 of them unauthenticated, 512 bytes from a peer before it
+  has proven itself, 16 MiB per message after, a 5-second HTTP phase, and the
+  open-file limit raised at launch. A second `serve` on a live config dir is
+  refused — one
+  engine per machine. Logs to `~/.cache/worktrees/serve.log`, owner-only
+  (0600) like `serve.json`, with the version on the first line.
+  `app/scripts/server-stack.sh` runs one on an isolated config dir, tmux
+  prefix and port for the frontend lane.
+  Keystrokes to one terminal or dock shell reach it in the order they were
+  sent (one serial lane per stream; everything else stays concurrent), and a
+  finished channel says so with `{channel, seq, end: true}`, so a client can
+  let the handler go the way it does when a Tauri `Channel` drops. A dock
+  shell opens only in a place of the repository named, and a terminal
+  attaches only to a tmux session of exactly the name given; anything else
+  (`--all`, a name no place or session has) is refused with the reason before
+  any shell or tmux client starts. A command that fails unexpectedly is
+  answered `internal error` rather than never answered, and the connection
+  and the server go on serving. A `worktrees show` that arrives while no
+  client is connected waits for the next one, inside the same 30 seconds it
+  would wait for the app, rather than being taken and shown to nobody.
 - **Applying the worktrees rules or the agent-setup Fix now opens a review
   lane for the `agent-instructions` branch**: a place on it, with an agent
   whose brief explains what the branch changes — each file, the AGENTS.md
@@ -167,6 +214,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   now get a random name and are only ever created fresh, never opened through
   a link or over an existing file. A link at the brief's path is replaced
   instead of followed, and a `.planning` that is itself a link is refused.
+- **A message the window logs is one line of the log, and a long one is no
+  longer lost.** A newline in it started a line of its own with no
+  timestamp, so a stack trace spread over several lines and anything sent
+  through `log_event` could write a line that looked like the app's own,
+  which matters once `worktrees serve` takes that command from any client it
+  has authenticated. Line breaks, other control characters and the bidi
+  overrides are now written as visible escapes (`\n`, `\x1b`, `\u{202e}`).
+  And a message over 4000 bytes whose cut fell inside a character panicked
+  the logger instead of being written. A panic is written the same way: one
+  `[panic]` line with where it happened and what it said, where its message
+  used to follow on lines of its own. Two lines written at the same moment
+  no longer tear into each other: each goes to the file in one write.
+  `app.log` is now readable only by you (0600, its rotated copy too); every
+  account on the machine could read it, with your PATH and the places you
+  opened in it.
+- **A terminal pane attaches only to its own session.** The pane named its
+  session to tmux, which matches a name as a PREFIX, so a pane opened in the
+  seconds after a session ended and before the app noticed (switching to that
+  place, say) could land on another session whose name began with it —
+  another place's agent, and the keys typed with it. It now attaches to that
+  name exactly, and a session that is gone shows as an error in the pane
+  naming it, instead of tmux's own "can't find session".
 
 ## [0.42.0] - 2026-10-15
 

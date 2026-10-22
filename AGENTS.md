@@ -40,6 +40,46 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   Codex activity for `place_status`/`wait` and the nav dots comes from ONE
   derivation, `worktrees_core::activity`.
 
+- **`worktrees serve` (Server Edition, Phase 1) hosts the api behind an
+  authenticated WebSocket on `127.0.0.1`**: `{id, cmd, args}` in, `{id, ok}` /
+  `{id, err}` out, channel frames `{channel, seq, data}` for `ByteSink`s and
+  progress — ending in `{channel, seq, end: true}` when the engine lets the
+  sink go — and `{event, payload}` for `Host::emit`. Requests to ONE stream
+  run on a serial lane per stream (`dispatch::lane`): a dispatcher that gave
+  every frame its own blocking task delivered 26 in-order keystrokes to zsh as
+  `0124356789…`; everything else stays concurrent. The rule set is in
+  `crates/worktrees-cli/src/serve/policy.rs` and every refusal closes the
+  socket with NOTHING written. Auth is handshake v1 ((main)'s spec, for OWASP
+  H1): `hello` → `challenge` → `auth` → `ok` + `proof`, each side's proof an
+  HMAC keyed with serve.json's token over the other side's nonce, so the token
+  is NEVER in a frame — under v0 it was the first frame, and whatever held a
+  dead server's port received it. `AUTH_DEADLINE` covers the whole exchange,
+  not each frame. Limits (OWASP M1, `conn.rs`): 64 connections / 16
+  unauthenticated, 512 pre-auth bytes (a `Budget` UNDER tungstenite, which
+  cannot change its own limits after construction), 16 MiB per message after
+  auth, a 5 s HTTP phase, RLIMIT_NOFILE raised at boot. A reconnecting local
+  flood still locks NEW clients out (measured 0 of 49) — it can no longer take
+  memory, descriptors or a client already in. A missing `Origin` is refused
+  there and allowed by `docserver::origin_ok` ON PURPOSE (different pages,
+  different questions —
+  do not align them). The 150 commands sit in ONE macro table
+  (`serve/dispatch.rs`) with an `Exposure` each; `ClientLocal` rows (clipboard,
+  editor, terminal, browser, zoom, the app bundle) are refused with
+  `err: "client-local"`, never run on the host. `serve-dispatch-check.mjs`
+  holds that table against `generate_handler!`. The engine's wiring every host
+  needs — log sink, panic hook, PATH/locale, the viewer sweep, the project
+  merge, the 3 s poll, the exit sequence — is `worktrees_api::host::{boot,
+  start, stop}`, called by the shim AND by `serve`; `api-boundary-check.mjs`
+  asserts the shim makes all three calls. Host policy is NOT in that list:
+  `hostpolicy::boot` is the engine's act, so the shim calls it once in its
+  `.setup` (hostpolicy-check.mjs) and serve calls it in `cmd_serve` — a serve
+  that skipped it launched lanes under the default the file overrides. `<config_dir>/serve.json` (0600,
+  rewritten per launch) is how a client finds the port and the token; the log
+  is `~/.cache/worktrees/serve.log`, 0600 as well (re-tightened on every
+  write, and after its rotation, which is a `rename` and keeps the mode it
+  found), version on the first line.
+  `app/scripts/server-stack.sh` runs an isolated one for the frontend lane.
+
 **Adding a harness? Walk `docs/adding-a-harness.md` first, and tick it only
 by SEEING each surface work.** pi shipped in v0.33.0 with a correct core —
 MCP `place_status` said `busy` — and no nav dot at all: the app builds its dots
@@ -526,6 +566,10 @@ after it is "command not found" — which reads as a sandbox refusing curl.
   state lookup but the `Ctx` and the window tracker. Both failures exist only
   as `[panic] … before manage()` lines in `app.log`, so after any change to
   `run()`, launch it (`sandbox.sh --app`) and grep the log; no suite will.
+  A panic is ONE line, `[panic] panicked at <file:line:col>: "<message>"`,
+  the message `{:?}`-escaped and cut at 500 chars (`host::panic_line`). Until
+  then the message sat on the NEXT line, raw, so `grep '[panic]'` showed where
+  and never what — `grep -A1` on an older log.
 - **GUI launches get launchd's bare PATH** (no homebrew → no tmux).
   `fixup_gui_path()` in lib.rs resolves the login-shell PATH at startup —
   don't add subprocess calls that assume PATH before it runs.

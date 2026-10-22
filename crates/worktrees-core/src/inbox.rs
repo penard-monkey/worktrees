@@ -160,6 +160,38 @@ pub fn request(path: &Path, at: At, now: i64) -> Result<PathBuf, String> {
 /// Never errors: a missing directory is an empty inbox, which is the normal
 /// state.
 pub fn drain(now: i64) -> Vec<Request> {
+    let mut out = Vec::new();
+    for p in entries() {
+        let body = std::fs::read_to_string(&p).ok();
+        let _ = std::fs::remove_file(&p);
+        if let Some(req) = body.and_then(|b| serde_json::from_str::<Request>(&b).ok()).filter(|r| fresh(r, now)) {
+            out.push(req);
+        }
+    }
+    out
+}
+
+/// Leave every fresh request where it is, delete the rest, and say how many
+/// are waiting. For a reader with nobody to show a request to — `worktrees
+/// serve` with no client connected — which must not consume one (`drain`
+/// would, and the ask would be lost), and must not let the dead ones pile up
+/// either, or a fresh ask would sort behind a backlog `drain` takes
+/// `MAX_DRAIN` at a time and expire in the queue.
+pub fn sweep(now: i64) -> usize {
+    let mut waiting = 0;
+    for p in entries() {
+        match std::fs::read_to_string(&p).ok().and_then(|b| serde_json::from_str::<Request>(&b).ok()) {
+            Some(req) if fresh(&req, now) => waiting += 1,
+            _ => {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+    }
+    waiting
+}
+
+/// The requests waiting, oldest first, at most `MAX_DRAIN` of them.
+fn entries() -> Vec<PathBuf> {
     let Some(dir) = dir() else { return Vec::new() };
     let Ok(rd) = std::fs::read_dir(&dir) else { return Vec::new() };
     let mut names: Vec<PathBuf> = rd
@@ -171,19 +203,13 @@ pub fn drain(now: i64) -> Vec<Request> {
     // chronological for a handful of entries — and a deterministic order beats
     // `read_dir`'s, which is the filesystem's business.
     names.sort();
-    let mut out = Vec::new();
-    for p in names.into_iter().take(MAX_DRAIN) {
-        let body = std::fs::read_to_string(&p).ok();
-        let _ = std::fs::remove_file(&p);
-        let Some(req) = body.and_then(|b| serde_json::from_str::<Request>(&b).ok()) else {
-            continue;
-        };
-        if now - req.epoch > MAX_AGE_SECS || req.epoch > now + MAX_AGE_SECS {
-            continue; // expired, or a clock that disagrees enough to be noise
-        }
-        out.push(req);
-    }
-    out
+    names.truncate(MAX_DRAIN);
+    names
+}
+
+/// Not expired, and not from a clock that disagrees enough to be noise.
+fn fresh(req: &Request, now: i64) -> bool {
+    now - req.epoch <= MAX_AGE_SECS && req.epoch <= now + MAX_AGE_SECS
 }
 
 /// `worktrees show <path> [--line N]` — ask the app to open a file, at a line.
@@ -332,6 +358,24 @@ mod tests {
             std::fs::read_dir(dir().unwrap()).unwrap().next().is_none(),
             "an expired request must still be deleted, or it is re-read every tick forever"
         );
+    }
+
+    /// The reader with nobody to show a request to: a fresh one is left for
+    /// the next reader that has somebody, an expired one is deleted all the
+    /// same, so a long wait with nobody there leaves no backlog.
+    #[test]
+    fn a_sweep_keeps_what_is_fresh_and_deletes_what_has_expired() {
+        let _g = HOME_LOCK.lock().unwrap();
+        let h = home("sweep");
+        request(&doc(&h, "old.md"), At::default(), 1000).unwrap();
+        request(&doc(&h, "new.md"), At::default(), 1000 + MAX_AGE_SECS).unwrap();
+        let now = 1000 + MAX_AGE_SECS + 1;
+        assert_eq!(sweep(now), 1, "one request is still worth showing");
+        assert_eq!(std::fs::read_dir(dir().unwrap()).unwrap().count(), 1, "the expired one must be deleted");
+        assert_eq!(sweep(now), 1, "a sweep consumes nothing fresh");
+        let got = drain(now);
+        assert_eq!(got.len(), 1);
+        assert!(got[0].path.ends_with("new.md"), "got {}", got[0].path);
     }
 
     #[test]

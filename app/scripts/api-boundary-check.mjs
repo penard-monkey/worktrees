@@ -75,21 +75,39 @@ if (inline.length) fail(`these commands have a body in lib.rs rather than a wrap
 else ok(`every command in lib.rs delegates to worktrees-api (except ${[...KEEP].join(", ")})`);
 
 // ── the wiring in run(), which only the source can answer for ──────────────
-// Four facts no Rust test can reach, because they are about the order and
-// the arity of calls inside `run()` rather than any function's behaviour.
-// Each fails SILENTLY in the running app, which is why they are here.
+// Facts no Rust test can reach, because they are about the order and the
+// arity of calls inside `run()` rather than any function's behaviour. Each
+// fails SILENTLY in the running app, which is why they are here.
 const run = lib.slice(lib.indexOf("pub fn run()"));
 
-// 1. The sink must be installed before anything wants to log. The panic hook
-//    is registered immediately after, and the startup line a few lines later;
-//    install it late and both vanish, with nothing to show for it.
-const install = run.indexOf("worktrees_api::log::install");
-const hook = run.indexOf("std::panic::set_hook");
-const firstLog = run.indexOf("applog(");
-if (install < 0) fail("run() never installs the log sink — every applog in the command layer is a no-op");
-else if (hook >= 0 && install > hook) fail("the log sink is installed AFTER the panic hook — a startup panic would not be logged");
-else if (firstLog >= 0 && install > firstLog) fail("the log sink is installed after the first applog in run()");
-else ok("run() installs the log sink before the panic hook and the first applog");
+// 1. The host wiring is the command layer's, in three calls, and the shim
+//    must make all three. `host::boot` installs the log sink before the panic
+//    hook and the first log line — so it must be the FIRST thing run() does,
+//    and nothing in the shim may install a sink or a hook of its own (a second
+//    copy is the drift the shared module exists to prevent: pi shipped with a
+//    correct core and no nav dot because the poll lived in the app and the app
+//    forgot it). `host::start` is the poll — exactly once, holding the managed
+//    Ctx — and `host::stop` is the exit sequence, inside the Exit arm.
+const boot = run.indexOf("worktrees_api::host::boot(");
+const builder = run.indexOf("tauri::Builder::default()");
+if (boot < 0) fail("run() never calls worktrees_api::host::boot — no log sink, no panic hook, no PATH repair");
+else if (builder >= 0 && boot > builder) fail("host::boot is called AFTER the Tauri builder starts — a startup panic or an early applog would be lost");
+else ok("run() calls host::boot before anything else");
+for (const stray of ["worktrees_api::log::install(", "std::panic::set_hook(", "worktrees_core::logsink::install(", "fixup_gui_path()", "fixup_gui_locale()"]) {
+  if (lib.includes(stray)) fail(`the shim still does ${stray} itself — that belongs to host::boot, where serve gets the same line`);
+}
+const starts = (run.match(/worktrees_api::host::start\(/g) ?? []).length;
+if (starts !== 1) fail(`host::start is called ${starts} times in run() — expected exactly 1`);
+else if (!/worktrees_api::host::start\(\s*ctx\(/.test(run)) fail("host::start is not handed the managed Ctx (`ctx(&handle)`) — the poll would hold different registries from the handlers");
+else ok("run() starts the engine's poll exactly once, on the managed Ctx");
+if (/std::thread::spawn\(/.test(run)) fail("run() spawns a thread of its own — the poll moved to worktrees_api::host; a second loop here is the drift it prevents");
+const exitArm = run.slice(run.indexOf("tauri::RunEvent::Exit"));
+if (run.indexOf("tauri::RunEvent::Exit") < 0) fail("run() has no Exit arm");
+else if (!exitArm.includes("worktrees_api::host::stop(")) fail("the Exit arm never calls host::stop — dock shells would outlive the window and the docs server would keep its port");
+else ok("the Exit arm calls host::stop");
+for (const stray of ["kill_shell(", "viewer::kill(", "CLONE_JOBS.cancel_all(", "viewer::cleanup("]) {
+  if (run.includes(stray)) fail(`run() still does ${stray} itself — that is host::stop's (or host::start's) job`);
+}
 
 // 2. `ctx()` must hand out CLONES of the one managed Ctx. Building a fresh
 //    one per call compiles, type-checks and passes every unit test — and
@@ -120,6 +138,16 @@ const code = run.split("\n").map((l) => l.replace(/\/\/.*$/, "")).join("\n");
 const setups = (code.match(/\.setup\(/g) ?? []).length;
 if (setups !== 1) fail(`run() calls .setup( ${setups} times — tauri keeps only the LAST, so every earlier closure is dead code`);
 else ok("run() has exactly one .setup( — tauri's Builder::setup replaces rather than chains");
+// …and inside it, the engine starts only once the Ctx it is handed exists:
+// `host::start(ctx(&handle), …)` above the `manage` is the same panic moved
+// three lines up.
+{
+  const managedAt = code.indexOf("manage(worktrees_api::Ctx::new(");
+  const startedAt = code.indexOf("worktrees_api::host::start(");
+  if (managedAt < 0 || startedAt < 0) fail("cannot find the Ctx's manage() or host::start in run()");
+  else if (startedAt < managedAt) fail("host::start is called BEFORE the Ctx is managed — ctx() would panic at startup");
+  else ok("host::start comes after the Ctx is managed, in the one .setup");
+}
 
 // 5. Nothing may look up as Tauri state a thing that now lives on the Ctx.
 //    `handle.state::<T>()` for a type nobody `.manage()`s compiles and panics

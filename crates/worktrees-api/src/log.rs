@@ -64,6 +64,36 @@ pub fn error(msg: &str) {
     log("error", msg);
 }
 
+/// The most of a panic's message that goes into a log line.
+pub const PANIC_TEXT_MAX: usize = 500;
+
+/// A panic's message as log text: on one line, bounded, quoted. `{:?}` escapes
+/// every control and line separator (C0, C1, U+2028/2029, the bidi controls —
+/// measured), and the cap matters because a panic can carry a client's value
+/// whole. Shared by the panic hook and `serve`'s reply to a body that panicked.
+pub fn panic_text(payload: &(dyn std::any::Any + Send)) -> String {
+    let s = match (payload.downcast_ref::<&str>(), payload.downcast_ref::<String>()) {
+        (Some(s), _) => *s,
+        (_, Some(s)) => s.as_str(),
+        _ => "(not a string)",
+    };
+    let cut: String = s.chars().take(PANIC_TEXT_MAX).collect();
+    format!("{cut:?}")
+}
+
+/// Take group and other access off an open log file — what both hosts' sinks
+/// do to their file on every write and to its rotated copy (OWASP L1: serve.log
+/// and app.log were 0644, with the engine's PATH and the places opened in
+/// them). Through the handle, so the file checked is the file changed. A
+/// failure is left alone: a file this user does not own cannot be appended
+/// to either.
+pub fn owner_only(f: &std::fs::File) {
+    use std::os::unix::fs::PermissionsExt;
+    if f.metadata().is_ok_and(|m| m.permissions().mode() & 0o077 != 0) {
+        let _ = f.set_permissions(std::fs::Permissions::from_mode(0o600));
+    }
+}
+
 /// Where the installed sink writes, if anywhere.
 pub fn location() -> Option<(PathBuf, PathBuf)> {
     SINK.get().and_then(|s| s.location())

@@ -250,6 +250,8 @@ mod tests {
         ("worktrees-api/src/viewer.rs", "\".{name}.{}.{n}.tmp\"", "the app's config dir; a sync per document would cost every derive"),
         ("worktrees-api/src/viewer.rs", "join(std::process::id().to_string())", "a directory in the app's config dir"),
         ("worktrees-api/src/status.rs", "\"worktrees-install-{}.sh\"", "temp_dir(), not a checkout: per-user on macOS; Linux /tmp is a local-user race, not a repo plant"),
+        ("worktrees-cli/src/serve/mod.rs", "[{level}] [{}] {msg}", "a serve.log line carrying the pid; names nothing"),
+        ("worktrees-cli/src/serve/tests.rs", "std::process::id()", "test code: serve/mod.rs declares the file under #[cfg(test)], which a line scan cannot see"),
     ];
 
     /// Every `src` directory in the workspace: each crate's and the app's.

@@ -47,6 +47,15 @@ pub static NEXT_ID: AtomicU32 = AtomicU32::new(1);
 /// frontend. We never create or own a shell — tmux owns the shells, panes, and
 /// scrollback; this app is just another tmux client. Closing detaches (the
 /// session survives and stays `tmux attach`-able from a bare terminal).
+///
+/// EXISTING and exactly that name, or an error saying which, before anything
+/// spawns. It answered ok for a session that did not exist: the tmux client in
+/// the pty printed tmux's complaint and quit, and the caller held an id for
+/// nothing. Worse, a tmux target is a PREFIX match, so the attach for a
+/// session that had just gone landed on whichever one's name began with it —
+/// another place's agent, typed into from this pane. Nothing waits on "ok,
+/// attach later": the main pane mounts only for a session `ls` reports up,
+/// and writes an error into itself.
 pub fn term_open(
     session: String,
     cols: u16,
@@ -54,6 +63,9 @@ pub fn term_open(
     on_bytes: Arc<dyn ByteSink>,
     terms: &Terminals,
 ) -> Result<u32, String> {
+    if !tmux::session_exists(&session) {
+        return Err(format!("no tmux session named {session}"));
+    }
     let pair = native_pty_system()
         .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
         .map_err(|e| e.to_string())?;
@@ -70,9 +82,10 @@ pub fn term_open(
     // -N (`tmux::no_start_args`): an attach under a tty that finds the socket
     // refused or missing would otherwise unlink it and start a second server,
     // orphaning every session in the first.
+    // `=`: exactly this session, should it go between the check and here.
     let mut cmd = CommandBuilder::new("tmux");
     cmd.args(worktrees_core::tmux::no_start_args());
-    cmd.args(["-u", "attach-session", "-t", &session]);
+    cmd.args(["-u", "attach-session", "-t", &format!("={session}")]);
     cmd.env("TERM", "xterm-256color");
 
     let child = pair.slave.spawn_command(cmd).map_err(|e| {
@@ -433,6 +446,10 @@ pub fn shell_open(
     on_bytes: Arc<dyn ByteSink>,
     shells: &Shells,
 ) -> Result<ShellAttach, String> {
+    // A client's string, about to name a directory a login shell starts in:
+    // the shape check here, "is it a place" in `place_session_cwd`, both
+    // before anything spawns.
+    let slug = worktrees_core::argv::safe_arg(&slug, "slug")?;
     let key: ShellKey = (repo.clone(), slug.clone(), index);
     let mut map = shells.0.lock().unwrap();
     if let Some(sh) = map.get_mut(&key) {
@@ -566,10 +583,15 @@ pub fn shell_open(
                     ring.drain(..overflow);
                     r_dirty.store(true, Ordering::Relaxed);
                     // held together with the ring (see the re-attach comment)
-                    if let Some(ch) = r_sink.lock().unwrap().as_ref() {
-                        if ch.send(chunk).is_err() {
-                            break; // webview gone
-                        }
+                    let mut sink = r_sink.lock().unwrap();
+                    if sink.as_ref().is_some_and(|ch| ch.send(chunk).is_err()) {
+                        // The CLIENT is gone, not the shell. Let that client's
+                        // sink go — exactly what a detach does — and keep
+                        // reading: the ring goes on recording and the next
+                        // attach replays it. Breaking here left a live shell
+                        // with nobody reading its pty, which under `serve` is
+                        // every page reload that happens while a shell prints.
+                        *sink = None;
                     }
                 }
                 Err(_) => break,
@@ -578,6 +600,12 @@ pub fn shell_open(
         // The shell itself exited (`exit`, or it died). The tab stays — the
         // frontend offers a restart rather than silently vanishing.
         if !r_stop.load(Ordering::Relaxed) {
+            // Nothing will be written to the attached channel again, so let
+            // it go BEFORE announcing the exit: a host that ends a dropped
+            // channel (serve's end frame; Tauri's own on `Channel` drop) then
+            // ends it ahead of the event, on the one ordered queue, and the
+            // client can release the handler the moment it hears.
+            r_sink.lock().unwrap().take();
             let (repo, slug, index) = exit_key;
             exit_ctx.emit("shell:exit", serde_json::json!({ "repo": repo, "slug": slug, "index": index }));
         }
@@ -620,8 +648,15 @@ pub fn shell_detach(repo: String, slug: String, index: u32, gen: u64, shells: &S
 /// keeps the webview from naming/killing arbitrary tmux sessions or opening a
 /// shell outside the workspace, and keeps sidecar names STABLE (a place's
 /// canonical name doesn't change when it briefly runs under an adopted session).
+///
+/// Only for a slug that IS a place, by the index `drop_reference` and the MCP
+/// resources read: `place_dir` joins whatever it is given onto `.worktrees/`,
+/// and a slug naming nothing became a shell in a directory that is not one.
 pub fn place_session_cwd(repo: &str, slug: &str) -> Result<(String, String), String> {
     let p = Project::discover(Path::new(repo)).map_err(|e| e.msg)?;
+    if !p.place_index().iter().any(|pl| pl.slug == slug) {
+        return Err(format!("no such place: {slug}"));
+    }
     Ok((p.session_name(slug), p.place_dir(slug)))
 }
 
@@ -2196,5 +2231,66 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// A sink for tests about what happens before a byte is sent.
+    struct Nowhere;
+    impl ByteSink for Nowhere {
+        fn send(&self, _: &[u8]) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// A fresh `git init` with one place under `.worktrees/` beside `(main)`:
+    /// a directory there is all `place_index` reads, no registration needed.
+    /// Returns (scratch root, repo).
+    fn repo_with_a_lane(tag: &str) -> (PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!("wt-shellslug-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = base.join("repo");
+        std::fs::create_dir_all(repo.join(".worktrees/lane")).unwrap();
+        assert!(worktrees_core::git::git_ok(&repo.to_string_lossy(), &["init", "-q"]), "git init");
+        (base, repo)
+    }
+
+    /// `shell_open` starts a login shell in `<wt_root>/<slug>`, and the slug is
+    /// a client's string. It is held to the rule the other place commands
+    /// share — core's `safe_arg`, then "is it a place" — and refused before
+    /// anything spawns: `--all` and a slug naming nothing each got a shell.
+    #[test]
+    fn shell_open_refuses_a_slug_that_is_not_a_place_before_anything_spawns() {
+        let (base, repo) = repo_with_a_lane("refuse");
+        let ctx = Ctx::new(base.join("cfg"), Arc::new(crate::tests::Recorder::default()));
+        let shells = Shells::default();
+        let repo_s = repo.to_string_lossy().into_owned();
+        for (slug, why) in [
+            ("--all", "may not begin with '-'"),
+            ("-x", "may not begin with '-'"),
+            ("nope", "no such place: nope"),
+            ("lane/sub", "no such place: lane/sub"),
+            ("lane/../..", "not allowed"),
+            ("", "slug is required"),
+        ] {
+            let r = shell_open(&ctx, repo_s.clone(), slug.into(), 0, 80, 24, Arc::new(Nowhere), &shells);
+            let e = r.err().unwrap_or_else(|| panic!("`{slug}` was given a shell"));
+            assert!(e.contains(why), "`{slug}`: {e}");
+        }
+        assert!(shells.0.lock().unwrap().is_empty(), "a refused slug left a shell behind");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The other half: a place of the repo still resolves, `(main)` to the
+    /// checkout and a `.worktrees/` directory to itself. (The serve socket
+    /// tests open `(main)` shells end to end.)
+    #[test]
+    fn a_place_of_the_repo_still_resolves_to_its_session_and_directory() {
+        let (base, repo) = repo_with_a_lane("resolve");
+        let repo_s = repo.to_string_lossy().into_owned();
+        let (_, main_cwd) = place_session_cwd(&repo_s, "(main)").unwrap();
+        assert!(main_cwd.ends_with("/repo"), "{main_cwd}");
+        let (session, cwd) = place_session_cwd(&repo_s, "lane").unwrap();
+        assert!(cwd.ends_with("/repo/.worktrees/lane"), "{cwd}");
+        assert!(session.ends_with("-lane"), "{session}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
