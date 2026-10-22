@@ -449,6 +449,24 @@ fail first, against the right code, for the wrong reason. Sibling of the
 "recovery test that hand-clears the blocker" note below: when a test reaches its
 assertion, ask what is NOT in the fixture as well as what was poked into it.
 
+**A temp file beside its target has a name a cloned repo can commit.** Every
+"atomic write" here was `fs::write(<fixed or pid-named tmp>)` + `rename`, and
+`fs::write` follows a symlink. git checks a committed `120000` blob out with no
+check, so the store, `.worktrees.toml`, `.worktree.env` and the dock editor's
+save all wrote through a planted link into a file outside the repo (measured on
+0.42.0). In the app the store write needs no click: a finished Claude turn
+rewrites it. Replace a file with `fsx::write_atomic`, which uses a random name,
+`O_CREAT|O_EXCL|O_NOFOLLOW` and fchmod on the handle, and removes only its own
+temp. Do not hand-roll the dance: `fsx::tests::no_source_builds_its_own_temp_name`
+scans every workspace `src` for a temp-like literal or a pid in a name and fails
+unless the line is in its `OWN_TEMP_NAMES` list with a reason. A pid suffix is not randomness: a repo can
+commit one link per pid. Removing whatever sits at a predictable name first
+only trades following the repo's file for deleting it. The same goes for a
+plain write to a fixed path in a checkout: the brief went through a committed
+`.planning/brief.md`. The viewer's derived tree keeps its own writer on
+purpose. It lives in the app's config dir, and a sync per document would cost
+every derive.
+
 **An assertion that describes the MECHANISM instead of the RULE encodes the bug
 as correct.** `the_watch_signal_moves_on_membership_and_not_on_work` ended by
 writing a content-free change to the declared sidecar (`{}` ->

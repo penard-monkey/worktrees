@@ -51,11 +51,9 @@ cd app && ./node_modules/.bin/tsc --noEmit && cargo check -p app
   bases have no remote counterpart and are not meant to.
 - **The archive PR is docs-only and CI skips it by design** (`ci.yml`
   `paths-ignore`: `docs/**`, `ROADMAP.md`, `CLAUDE.md`, `DESIGN.md`,
-  `MIGRATION.md`, `README.md`, `.claude/**`). Zero checks on the PR is the
+  `MIGRATION.md`, `README.md`, `AGENTS.md`, `.claude/**`). Zero checks on the PR is the
   expected state — merge without waiting for CI. The local gates in step 1
   still run.
-  ⚠ **`AGENTS.md` is NOT on that list**, and it is where the hard-won rules now
-  live (`CLAUDE.md` is a pointer to it). An archive PR carrying an AGENTS.md
-  learning runs the FULL suite on both OSes — ten jobs, several minutes — so
-  expect checks, and wait for them, whenever the PR touches it. ROADMAP has the
-  two-line fix as a deliberate decision rather than a drive-by.
+  `AGENTS.md` IS on that list now (it once was not, and this note warned that
+  an archive PR with an AGENTS.md learning ran the full suite), so an archive
+  carrying one shows zero checks too. Only a code file mixed in brings CI back.

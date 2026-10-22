@@ -816,17 +816,10 @@ pub struct Materialized {
 fn write_atomic_bytes(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let dir = path.parent().ok_or("no parent dir")?;
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    // Temp in the SAME directory so rename(2) is atomic (same filesystem).
-    // The name carries pid + a counter as well as the target's name: two
-    // materializations of the SAME profile would otherwise pick the identical
-    // temp path, and one could rename the other's half-written file into place —
-    // exposing exactly the partial file this dance exists to prevent.
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("f");
-    let uniq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = dir.join(format!(".{name}.{}.{uniq}.tmp", std::process::id()));
-    fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
-    fs::rename(&tmp, path).map_err(|e| e.to_string())
+    // A temp of its own per call (`fsx`): two materializations of the SAME
+    // profile must not share one, or one could rename the other's half-written
+    // file into place — exposing exactly the partial file this exists to prevent.
+    crate::fsx::write_atomic(path, bytes, None).map_err(|e| e.to_string())
 }
 
 /// Every filesystem location materialization touches, in one struct.
@@ -1494,9 +1487,7 @@ fn write_atomic(path: &Path, ps: &Profiles) -> Result<(), String> {
     let dir = path.parent().ok_or("no parent dir for profiles")?;
     fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let json = serde_json::to_string_pretty(ps).map_err(|e| e.to_string())?;
-    let tmp = dir.join(".profiles.json.tmp");
-    fs::write(&tmp, json).map_err(|e| e.to_string())?;
-    fs::rename(&tmp, path).map_err(|e| e.to_string())
+    crate::fsx::write_atomic(path, json.as_bytes(), None).map_err(|e| e.to_string())
 }
 
 /// Read-under-lock → mutate → atomic write. Preserves unknown keys and every

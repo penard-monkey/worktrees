@@ -256,10 +256,7 @@ fn remember(dir: &Path, session_id: &str, fp: &str) -> bool {
     let f = dir.join(cache_key(session_id));
     let changed = std::fs::read_to_string(&f).map(|old| old != fp).unwrap_or(true);
     if changed && std::fs::create_dir_all(dir).is_ok() {
-        let tmp = dir.join(format!(".{}.{}", cache_key(session_id), std::process::id()));
-        if std::fs::write(&tmp, fp).is_ok() {
-            let _ = std::fs::rename(&tmp, &f);
-        }
+        let _ = crate::fsx::write_atomic(&f, fp.as_bytes(), None);
     }
     changed
 }

@@ -213,14 +213,11 @@ pub fn post_into(
     };
     let body = serde_json::to_string(&msg).map_err(|e| e.to_string())?;
     let name = format!("{}.{}.json", msg.id, hex(to));
-    // Temp + rename in the same directory: atomic, and never a partial read.
-    let tmp = dir.join(format!(".{}.tmp", msg.id));
+    // Temp + rename in the same directory (`fsx`): atomic, and never a partial
+    // read. The temp is `.<name>.<random>.tmp`, which `prune` sweeps if a crash
+    // strands it.
     let dst = dir.join(&name);
-    std::fs::write(&tmp, body).map_err(|e| format!("{}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, &dst).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        format!("{}: {e}", dst.display())
-    })?;
+    crate::fsx::write_atomic(&dst, body.as_bytes(), None).map_err(|e| format!("{}: {e}", dst.display()))?;
     prune(dir, now_ms);
     Ok(msg)
 }

@@ -805,14 +805,10 @@ fn edit_cwds_as(path: &Path, unasked: bool, f: impl FnOnce(&mut CwdMap) -> bool)
     // reads the file while holding the shell registry, and a plain `fs::write`
     // is a truncate followed by a write — a read landing in between gets half a
     // JSON document, which parses as "no memory at all".
-    let tmp = path.with_extension("json.tmp");
     let seen = seen_of(Some(&json));
-    match std::fs::write(&tmp, json).and_then(|_| std::fs::rename(&tmp, path)) {
+    match worktrees_core::fsx::write_atomic(path, &json, None) {
         Ok(()) => note_seen(path, seen),
-        Err(e) => {
-            applog("error", &format!("shell-cwds write failed: {e}"));
-            let _ = std::fs::remove_file(&tmp);
-        }
+        Err(e) => applog("error", &format!("shell-cwds write failed: {e}")),
     }
 }
 
@@ -1104,15 +1100,8 @@ pub fn read_meta(tab: &Path) -> Option<TabMeta> {
 /// holding the registry may wait on a file lock — so a plain write (a truncate
 /// followed by a write) would let a read land on half a document.
 pub fn hist_write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension("tmp");
-    let r = std::fs::write(&tmp, bytes).and_then(|_| {
-        private_perms(&tmp, 0o600);
-        std::fs::rename(&tmp, path)
-    });
-    if r.is_err() {
-        let _ = std::fs::remove_file(&tmp);
-    }
-    r
+    use std::os::unix::fs::PermissionsExt;
+    worktrees_core::fsx::write_atomic(path, bytes, Some(std::fs::Permissions::from_mode(0o600)))
 }
 
 /// Drop a leading partial line.

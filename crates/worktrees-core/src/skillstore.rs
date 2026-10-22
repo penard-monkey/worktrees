@@ -417,10 +417,7 @@ where
     m.version = m.version.max(1);
     m.updated_epoch = Some(now_epoch());
     let json = serde_json::to_string_pretty(&m).map_err(|e| e.to_string())?;
-    let dir = path.parent().ok_or("no parent dir")?;
-    let tmp = dir.join(format!(".skills.json.{}.tmp", std::process::id()));
-    fs::write(&tmp, json).map_err(|e| e.to_string())?;
-    fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    crate::fsx::write_atomic(&path, json.as_bytes(), None).map_err(|e| e.to_string())?;
     Ok(out)
 }
 
