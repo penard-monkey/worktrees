@@ -117,16 +117,6 @@ this repo's settings in `.claude/close-out.md`).
   reading during the private-staging fix (`fsx::PrivateDir`); the staging
   itself is done.
 
-- **The app's own verification probe counts as an audience for a held
-  `worktrees show`.** The shim's probe completes handshake v1, so for a few ms
-  at every launch `Host::has_audience()` is true, and a `show` serve releases
-  then goes to a socket about to close: lost (estimated 0.1–0.2% of launches,
-  not measured). The client parks `app:open-doc` (#524) but cannot see a frame
-  sent to the probe. The fix is protocol-side: release a held show only to a
-  client that listens for `app:open-doc`. Not in the Phase 2 proposal, whose
-  `app:open-doc` change is "loopback clients only".
-  _From: [2026-10-21 server-edition](docs/sessions/2026-10-21-server-edition/summary.md)_
-
 - **Two Linux packaging leftovers.** (1) The glibc floor: the CLI and both
   Linux bundles build on Ubuntu 24.04 runners, so they need its glibc; building
   on 22.04 would widen reach (measure what they actually require first,

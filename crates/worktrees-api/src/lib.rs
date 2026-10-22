@@ -91,11 +91,13 @@ pub trait Host: Send + Sync {
     /// Push an event to the client(s). Tauri's `app.emit`.
     fn emit(&self, event: &str, payload: serde_json::Value);
 
-    /// Whether an event emitted now would reach anyone. The app always has
-    /// its window; a server with no client connected has nobody, and what is
-    /// CONSUMED by being emitted (the inbox's `worktrees show`) has to wait
-    /// for somebody rather than go out to nobody.
-    fn has_audience(&self) -> bool {
+    /// Whether `event` emitted now would reach anyone who listens for it. The
+    /// app always has its window; a server answers for the clients that have
+    /// DECLARED they listen for it (serve's `{"listen": [...]}`), so a client
+    /// that never does — the app's own verification probe — is no audience.
+    /// What is CONSUMED by being emitted (the inbox's `worktrees show`) has to
+    /// wait for somebody rather than go out to nobody.
+    fn has_audience(&self, _event: &str) -> bool {
         true
     }
 }

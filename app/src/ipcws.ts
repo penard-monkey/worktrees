@@ -13,10 +13,15 @@
 //   ← {"challenge": sn}                      sn: the same, chosen by serve
 //   → {"auth": HMAC(token, client|cn|sn)}    or serve closes with NOTHING said
 //   ← {"ok": true, "version", "proof": HMAC(token, server|cn|sn)}
+//   → {"listen": [event, …]}                 the events this page listens for:
+//                                            first after the proof, again on
+//                                            each change, never answered
 //   → {id, cmd, args}                        ← {id, ok} | {id, err}
 //   ← {channel, seq, data}                   a Channel argument's stream
 //   ← {channel, seq, end: true}              its last frame: the handler goes
-//   ← {event, payload}                       Host::emit, to every socket
+//   ← {event, payload}                       Host::emit, to every socket —
+//                                            a one-shot one (app:open-doc)
+//                                            only to a socket that declared it
 //
 // The token is the HMAC KEY and never goes on the wire. The client sends
 // nothing but the handshake until serve's proof verifies: before then the
@@ -64,6 +69,8 @@ export const WIRE = {
   end: "end",
   event: "event",
   payload: "payload",
+  /** `{"listen": [names]}`: the events this connection listens for (§9.3). */
+  listen: "listen",
   channelPrefix: "__CHANNEL__:",
   /** A channel's first frame is `seq: 1` (FrameSink's `fetch_add(1) + 1`). */
   firstSeq: 1,
@@ -167,6 +174,13 @@ export type SocketDoor = Door & {
   ready: Promise<void>;
   /** How many channels this connection still holds a handler for. */
   openChannels(): number;
+  /** Tell serve which events this connection listens for — a full
+   *  replacement, never answered. serve sends a one-shot event only to a
+   *  connection that declared it, and holds a `worktrees show` until a loopback
+   *  one has (§9.3). Made before the proof passes, the LATEST set is held and
+   *  is the first frame after it, ahead of any queued call; made after, it
+   *  goes at once. */
+  declare(names: readonly string[]): void;
 };
 
 function toArrayBuffer(b64: string, atob: (s: string) => string): ArrayBuffer {
@@ -188,6 +202,7 @@ export function deadDoor(msg: string): SocketDoor {
     listen: () => Promise.resolve(() => {}),
     channel: <T>(onmessage?: (response: T) => void) => new WsChannel<T>(nextChannel++, onmessage),
     openChannels: () => 0,
+    declare: () => {},
   };
 }
 
@@ -217,6 +232,8 @@ export function connectSocket(d: SocketDeps): SocketDoor {
   let nextChannel = 1;
   let nextEvent = 1;
   const queued: string[] = [];
+  /** A declaration made before the proof passed: the latest one, for serve. */
+  let listening: string | null = null;
   let markReady: () => void = () => {};
   let markFailed: (msg: string) => void = () => {};
   const ready = new Promise<void>((res, rej) => {
@@ -263,6 +280,7 @@ export function connectSocket(d: SocketDeps): SocketDoor {
       /* already closing */
     }
     queued.length = 0;
+    listening = null;
     inbox.length = 0;
     streams.clear(); // nothing can arrive on them now
     const waiting = [...pending.values()];
@@ -374,6 +392,10 @@ export function connectSocket(d: SocketDeps): SocketDoor {
     state = "ready";
     d.clearTimeout(timer);
     markReady();
+    // Who listens goes first: serve sends a one-shot event only to a socket
+    // that declared it, so the calls queued behind the proof come after.
+    if (listening !== null) ws.send(listening);
+    listening = null;
     for (const text of queued.splice(0)) ws.send(text);
     for (const raw of inbox.splice(0)) handle(raw);
   }
@@ -484,6 +506,13 @@ export function connectSocket(d: SocketDeps): SocketDoor {
     });
   }
 
+  function declare(names: readonly string[]) {
+    if (state === "closed") return;
+    const text = JSON.stringify({ [WIRE.listen]: [...names] });
+    if (state === "ready") ws.send(text);
+    else listening = text;
+  }
+
   function listen<T>(event: string, handler: EventCallback<T>): Promise<UnlistenFn> {
     let set = listeners.get(event);
     if (!set) listeners.set(event, (set = new Set()));
@@ -500,6 +529,7 @@ export function connectSocket(d: SocketDeps): SocketDoor {
     listen,
     channel: <T>(onmessage?: (response: T) => void) => new WsChannel<T>(nextChannel++, onmessage),
     openChannels: () => streams.size,
+    declare,
   };
 }
 

@@ -598,6 +598,103 @@ fn serve_writes_its_file_answers_the_workspace_and_cleans_up_on_sigterm() {
     assert!(log.contains("serve: stopped"), "{log}");
 }
 
+/// A registered repo with two documents in it, and its canonical path: what a
+/// `worktrees show` names, through the app's list that serve merges at start,
+/// so a request is one serve accepts and names a place.
+fn shown_repo(sb: &Sandbox) -> PathBuf {
+    let repo = sb.root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let init = Command::new("git").args(["init", "-q"]).current_dir(&repo).env("HOME", sb.root.join("home")).output().unwrap();
+    assert!(init.status.success(), "git init: {}", String::from_utf8_lossy(&init.stderr));
+    std::fs::write(repo.join("README.md"), "# shown\n").unwrap();
+    std::fs::write(repo.join("NOTES.md"), "# also shown\n").unwrap();
+    let repo = std::fs::canonicalize(&repo).unwrap();
+    std::fs::write(sb.cfg().join("projects.json"), json!([repo.to_string_lossy()]).to_string()).unwrap();
+    repo
+}
+
+/// `worktrees show <file>` in `repo`, as a session runs it: into the inbox.
+fn show(sb: &Sandbox, repo: &Path, file: &str) {
+    let out = Command::new(bin())
+        .args(["show", file])
+        .current_dir(repo)
+        .env("HOME", sb.root.join("home"))
+        .env("XDG_CONFIG_HOME", sb.root.join("xdg"))
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "worktrees show: {}", String::from_utf8_lossy(&out.stderr));
+}
+
+/// How many requests wait in the inbox.
+fn pending(sb: &Sandbox) -> usize {
+    std::fs::read_dir(sb.root.join("home/.cache/worktrees/inbox"))
+        .map(|rd| rd.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "json")).count())
+        .unwrap_or(0)
+}
+
+/// How far serve.log has got: `until_held` reads only what comes after.
+fn log_mark(sb: &Sandbox) -> usize {
+    std::fs::read(sb.log()).map(|b| b.len()).unwrap_or(0)
+}
+
+/// Until a tick SAYS, after `mark`, that it holds `n` requests, with every one
+/// still in the inbox at each look. serve logs the held count when it moves,
+/// so no sleep decides it: code that takes a request fails on the other
+/// branch of the same wait.
+fn until_held(sb: &Sandbox, n: usize, mark: usize, why: &str) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        assert_eq!(pending(sb), n, "{why}");
+        let log = std::fs::read(sb.log()).unwrap_or_default();
+        if String::from_utf8_lossy(log.get(mark..).unwrap_or_default()).contains(&format!("inbox: {n} request(s) held")) {
+            return;
+        }
+        assert!(Instant::now() < deadline, "no tick said it held {n} request(s)");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Say which events this connection listens for: `{"listen": [...]}` (§9.3),
+/// a full replacement, never answered.
+fn listen(ws: &mut WebSocket<TcpStream>, names: &[&str]) {
+    ws.send(Message::text(json!({ "listen": names }).to_string())).unwrap();
+}
+
+/// Read until `n` `app:open-doc` events have come; their paths, sorted. Any
+/// `err` on the way fails — a listen frame serve could not read is one.
+fn docs(ws: &mut WebSocket<TcpStream>, n: usize) -> Vec<String> {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut got = Vec::new();
+    while got.len() < n {
+        let v: Value = serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
+        assert!(v.get("err").is_none(), "serve refused a frame: {v}");
+        if v["event"] == json!("app:open-doc") {
+            assert_eq!(v["payload"]["slug"], json!("(main)"), "{v}");
+            got.push(v["payload"]["path"].as_str().unwrap().to_string());
+        }
+        assert!(Instant::now() < deadline, "only {} of {n} app:open-doc arrived", got.len());
+    }
+    got.sort();
+    got
+}
+
+/// One round trip, and every `app:open-doc` that arrived before its reply.
+/// The read loop takes a connection's frames in order, so a frame sent before
+/// this request has been read by the time it is answered.
+fn docs_before_reply(ws: &mut WebSocket<TcpStream>, id: u64) -> usize {
+    ws.send(Message::text(json!({ "id": id, "cmd": "get_changelog", "args": {} }).to_string())).unwrap();
+    let mut docs = 0;
+    loop {
+        let v: Value = serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
+        if v["id"] == json!(id) {
+            assert!(v.get("ok").is_some(), "{v}");
+            return docs;
+        }
+        assert!(v.get("err").is_none(), "serve refused a frame: {v}");
+        docs += usize::from(v["event"] == json!("app:open-doc"));
+    }
+}
+
 /// A `worktrees show` that lands while NO client is connected waits for the
 /// next one, rather than being taken off the inbox and emitted to nobody. After
 /// an app crash the app's serve lives on client-less, and it used to consume
@@ -609,57 +706,74 @@ fn serve_writes_its_file_answers_the_workspace_and_cleans_up_on_sigterm() {
 #[test]
 fn a_show_with_no_client_connected_waits_for_the_next_client() {
     let mut sb = Sandbox::new("inbox");
-    // A real repo, registered through the app's list that serve merges at
-    // start, so the request is one serve accepts and names a place.
-    let repo = sb.root.join("repo");
-    std::fs::create_dir_all(&repo).unwrap();
-    let init = Command::new("git").args(["init", "-q"]).current_dir(&repo).env("HOME", sb.root.join("home")).output().unwrap();
-    assert!(init.status.success(), "git init: {}", String::from_utf8_lossy(&init.stderr));
-    std::fs::write(repo.join("README.md"), "# shown\n").unwrap();
-    let repo = std::fs::canonicalize(&repo).unwrap();
-    std::fs::write(sb.cfg().join("projects.json"), json!([repo.to_string_lossy()]).to_string()).unwrap();
+    let repo = shown_repo(&sb);
     let sf = sb.launch(&["--allow-origin", "http://localhost:1420"]);
 
-    let out = Command::new(bin())
-        .args(["show", "README.md"])
-        .current_dir(&repo)
-        .env("HOME", sb.root.join("home"))
-        .env("XDG_CONFIG_HOME", sb.root.join("xdg"))
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "worktrees show: {}", String::from_utf8_lossy(&out.stderr));
-    let inbox = sb.root.join("home/.cache/worktrees/inbox");
-    let pending = || {
-        std::fs::read_dir(&inbox)
-            .map(|rd| rd.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "json")).count())
-            .unwrap_or(0)
-    };
-    assert_eq!(pending(), 1, "the ask must reach the inbox");
+    let mark = log_mark(&sb);
+    show(&sb, &repo, "README.md");
+    assert_eq!(pending(&sb), 1, "the ask must reach the inbox");
+    until_held(&sb, 1, mark, "the request was taken off the inbox with no client connected to show it to");
 
-    let deadline = Instant::now() + Duration::from_secs(20);
-    loop {
-        assert_eq!(pending(), 1, "the request was taken off the inbox with no client connected to show it to");
-        if std::fs::read_to_string(sb.log()).unwrap_or_default().contains("inbox: 1 request(s) held") {
-            break;
-        }
-        assert!(Instant::now() < deadline, "no tick said it held the request");
-        std::thread::sleep(Duration::from_millis(50));
-    }
-
-    // The next client is shown it, and that consumes it.
+    // The next client that listens for it is shown it, and that consumes it.
     let mut ws = connect(&sf, "http://localhost:1420");
-    let deadline = Instant::now() + Duration::from_secs(20);
-    let doc = loop {
-        let v: Value = serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
-        if v["event"] == json!("app:open-doc") {
-            break v["payload"].clone();
-        }
-        assert!(Instant::now() < deadline, "the held request never reached the client that connected");
-    };
-    assert_eq!(doc["path"], json!(repo.join("README.md").to_string_lossy()), "{doc}");
-    assert_eq!(doc["slug"], json!("(main)"), "{doc}");
-    assert_eq!(pending(), 0, "a request shown to a client is consumed");
+    listen(&mut ws, &["app:open-doc"]);
+    assert_eq!(docs(&mut ws, 1), vec![repo.join("README.md").to_string_lossy().to_string()]);
+    assert_eq!(pending(&sb), 0, "a request shown to a client is consumed");
     drop(ws);
+    assert!(sb.terminate().success());
+}
+
+/// **A held show goes to a connection that LISTENS for it, not to any socket**
+/// (§9.3, slice 1b). The app's verification probe completes handshake v1, so
+/// serve counted it as an audience and could release a held show into a
+/// socket about to close (ROADMAP's probe-drain item). Now:
+///
+/// - a connection that declares nothing — the probe's shape — drains nothing
+///   and is sent no `app:open-doc`, however long it stays;
+/// - one that declares `app:open-doc` is shown every held request;
+/// - a declaration REPLACES the last, so declaring nothing makes it no
+///   audience again;
+/// - a new connection (a reconnect) that declares again is shown the next.
+#[test]
+fn a_held_show_goes_only_to_a_connection_that_declared_it_listens() {
+    let mut sb = Sandbox::new("listen");
+    let repo = shown_repo(&sb);
+    let sf = sb.launch(&["--allow-origin", "http://localhost:1420"]);
+    let (readme, notes) = (repo.join("README.md").to_string_lossy().to_string(), repo.join("NOTES.md").to_string_lossy().to_string());
+
+    let mark = log_mark(&sb);
+    show(&sb, &repo, "README.md");
+    until_held(&sb, 1, mark, "taken with no client connected");
+    // The probe's shape: proven, and declaring nothing. A second ask while it
+    // is connected makes a tick SAY it held both, which proves a tick ran
+    // with this connection in.
+    let mut probe = connect(&sf, "http://localhost:1420");
+    let mark = log_mark(&sb);
+    show(&sb, &repo, "NOTES.md");
+    until_held(&sb, 2, mark, "a connection that declared nothing took a held show");
+    assert_eq!(docs_before_reply(&mut probe, 1), 0, "a connection that declared nothing was sent an app:open-doc");
+    drop(probe);
+
+    // A connection that declares it is shown both, and that consumes them.
+    let mut app = connect(&sf, "http://localhost:1420");
+    listen(&mut app, &["places:changed", "app:open-doc", "no:such-event"]);
+    assert_eq!(docs(&mut app, 2), vec![notes.clone(), readme.clone()]);
+    assert_eq!(pending(&sb), 0, "a request shown to a client is consumed");
+
+    // Each frame replaces the last: declaring nothing, it is no audience.
+    listen(&mut app, &[]);
+    assert_eq!(docs_before_reply(&mut app, 2), 0);
+    let mark = log_mark(&sb);
+    show(&sb, &repo, "README.md");
+    until_held(&sb, 1, mark, "a connection whose last declaration was empty took a held show");
+    drop(app);
+
+    // A reconnect: the new connection declares again, and is shown it.
+    let mut again = connect(&sf, "http://localhost:1420");
+    listen(&mut again, &["app:open-doc"]);
+    assert_eq!(docs(&mut again, 1), vec![readme]);
+    assert_eq!(pending(&sb), 0);
+    drop(again);
     assert!(sb.terminate().success());
 }
 

@@ -9,8 +9,15 @@
 //! wrong proof or a missed `AUTH_DEADLINE` closes the socket with NOTHING
 //! written. The client believes `version` only once `proof` verifies.
 //!
-//! Then three frame shapes, all JSON text:
+//! Then four frame shapes, all JSON text:
 //!
+//! - listen `{listen: [<event name>, …]}`, client to server: the events this
+//!   connection listens for (§9.3), sent after `ok` and again whenever the
+//!   set changes. Each is a full replacement and is never answered. Names
+//!   serve does not emit are ignored. A one-shot event (`scope::ONE_SHOT`,
+//!   the inbox's `app:open-doc`) goes only to a connection that declared it,
+//!   and a held `worktrees show` waits until a loopback one has; a connection
+//!   that declares nothing, like the app's verification probe, gets none.
 //! - request `{id, cmd, args}` → reply `{id, ok: <value>}` or `{id, err: <value>}`,
 //!   the same `{cmd, args}` the frontend's `invoke` builds. `err` is what the
 //!   Tauri command's `Err` serializes to — a string for 142 commands, and the
@@ -28,7 +35,8 @@
 //!   request that named a channel ALSO finishes it: when the engine had taken
 //!   the sink before failing, its end frame precedes the reply; when the
 //!   request failed on its arguments, no sink existed and no end frame comes.
-//! - event `{event, payload}` — `Host::emit`, to every authenticated socket.
+//! - event `{event, payload}` — `Host::emit`, to every authenticated socket
+//!   (a one-shot one, to those that declared it).
 //!
 //! **ORDER is the contract.** Every frame for one connection — replies, channel
 //! data, events — goes through ONE unbounded queue drained by ONE writer task,
@@ -64,17 +72,47 @@ pub const CLIENT_LOCAL: &str = "client-local";
 /// log is where that belongs.
 pub const INTERNAL_ERROR: &str = "internal error";
 
+/// The listen frame's one key.
+pub const LISTEN: &str = "listen";
+
 pub struct Request {
     pub id: Value,
     pub cmd: String,
     pub args: Map<String, Value>,
 }
 
-/// Parse one request frame. `id` is echoed back verbatim whatever its type;
-/// `args` defaults to `{}` (an `invoke` with no args sends none).
-pub fn parse_request(text: &str) -> Result<Request, String> {
+/// What a client sends after the handshake.
+pub enum Frame {
+    Request(Request),
+    /// The events it listens for, as it named them: unknown ones included,
+    /// for `scope::Listens` to drop.
+    Listen(Vec<String>),
+}
+
+/// Parse one client frame: `{listen: [...]}` when it has that key, a request
+/// otherwise. A frame that is neither is the client's bug, answered like an
+/// unreadable request — with `id: null`, which a client cannot match to a call.
+pub fn parse_frame(text: &str) -> Result<Frame, String> {
     let v: Value = serde_json::from_str(text).map_err(|e| format!("bad request: {e}"))?;
     let Value::Object(mut o) = v else { return Err("bad request: not an object".into()) };
+    let Some(names) = o.remove(LISTEN) else { return parse_request(o).map(Frame::Request) };
+    if !o.is_empty() {
+        return Err(format!("bad listen: `{LISTEN}` is a frame of its own, with no other key"));
+    }
+    let Value::Array(names) = names else { return Err(format!("bad listen: `{LISTEN}` is not an array")) };
+    names
+        .into_iter()
+        .map(|n| match n {
+            Value::String(s) => Ok(s),
+            _ => Err(format!("bad listen: `{LISTEN}` holds a name that is not a string")),
+        })
+        .collect::<Result<_, _>>()
+        .map(Frame::Listen)
+}
+
+/// One request frame's fields. `id` is echoed back verbatim whatever its type;
+/// `args` defaults to `{}` (an `invoke` with no args sends none).
+pub fn parse_request(mut o: Map<String, Value>) -> Result<Request, String> {
     let id = o.remove("id").unwrap_or(Value::Null);
     let cmd = match o.remove("cmd") {
         Some(Value::String(s)) if !s.is_empty() => s,
@@ -264,17 +302,41 @@ impl Frames {
 mod tests {
     use super::*;
 
+    fn request(text: &str) -> Result<Request, String> {
+        match parse_frame(text)? {
+            Frame::Request(r) => Ok(r),
+            Frame::Listen(_) => Err("a listen frame".into()),
+        }
+    }
+
     #[test]
     fn a_request_is_id_cmd_and_an_optional_args_object() {
-        let r = parse_request(r#"{"id":7,"cmd":"list_workspace"}"#).unwrap();
+        let r = request(r#"{"id":7,"cmd":"list_workspace"}"#).unwrap();
         assert_eq!(r.id, json!(7));
         assert_eq!(r.cmd, "list_workspace");
         assert!(r.args.is_empty());
-        let r = parse_request(r#"{"id":"a-b","cmd":"set_pin","args":{"repo":"/r","slug":"s","on":true}}"#).unwrap();
+        let r = request(r#"{"id":"a-b","cmd":"set_pin","args":{"repo":"/r","slug":"s","on":true}}"#).unwrap();
         assert_eq!(r.id, json!("a-b"));
         assert_eq!(r.args["on"], json!(true));
         for bad in [r#"[]"#, r#"{"cmd":""}"#, r#"{"id":1}"#, r#"{"cmd":"x","args":[1]}"#, "nope"] {
-            assert!(parse_request(bad).is_err(), "{bad}");
+            assert!(request(bad).is_err(), "{bad}");
+        }
+    }
+
+    /// `{listen: [...]}` is the names as sent, unknown ones too (the set
+    /// drops those, `scope::Listens`); anything else under that key, or
+    /// beside it, is a client's bug and an error.
+    #[test]
+    fn a_listen_frame_is_one_array_of_names() {
+        let names = |t: &str| match parse_frame(t) {
+            Ok(Frame::Listen(n)) => Ok(n),
+            Ok(Frame::Request(_)) => Err("a request".to_string()),
+            Err(e) => Err(e),
+        };
+        assert_eq!(names(r#"{"listen":["app:open-doc","no:such"]}"#).unwrap(), vec!["app:open-doc", "no:such"]);
+        assert_eq!(names(r#"{"listen":[]}"#).unwrap(), Vec::<String>::new());
+        for bad in [r#"{"listen":"app:open-doc"}"#, r#"{"listen":[1]}"#, r#"{"listen":null}"#, r#"{"listen":[],"id":1,"cmd":"x"}"#] {
+            assert!(names(bad).unwrap_err().starts_with("bad listen"), "{bad}");
         }
     }
 

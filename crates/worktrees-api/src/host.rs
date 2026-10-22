@@ -219,7 +219,7 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
             }
             Inbox::Held(n) => {
                 if n > 0 && n != held {
-                    log::info(&format!("inbox: {n} request(s) held until a client connects"));
+                    log::info(&format!("inbox: {n} request(s) held until a client listens for them"));
                 }
                 held = n;
             }
