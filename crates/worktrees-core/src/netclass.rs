@@ -17,10 +17,10 @@
 //! IPv4 address written as IPv6 (mapped, compatible, NAT64, 6to4) is refused
 //! rather than unwrapped, so each address has ONE spelling: bind the IPv4
 //! address instead. [`embedded_v4`] decodes those forms for the message here,
-//! and for the INVERSE rule a device's fetch needs (#535's `host_local`, which
-//! refuses everything but global unicast and judges an embedded address as the
-//! IPv4 one it carries): one decoder, so the two cannot read an address
-//! differently.
+//! and for the INVERSE rule a device's fetch needs
+//! ([`crate::fetchpolicy::host_local`], which refuses everything but global
+//! unicast and judges an embedded address as the IPv4 one it carries): one
+//! decoder, so the two cannot read an address differently.
 //!
 //! The parsers:
 //! - [`parse_bind`], serve's `--addr` with `--iface`: a zone is split off
@@ -109,11 +109,9 @@ pub enum Embedding {
 /// is not here: it obfuscates the address it carries, so a caller refuses it
 /// whole rather than decode it.
 ///
-/// #535's `host_local` (the device-fetch rule, `serve/resolve.rs`) decodes the
-/// same four forms inline; once both are on main its V6 arm becomes `if let
-/// Some((_, v4)) = netclass::embedded_v4(v) { return host_local(&v4.into()) }`
-/// after its loopback/unspecified check, with identical results (`::` and
-/// `::1` return `None` here and are refused there by that check).
+/// The device-fetch rule ([`crate::fetchpolicy::host_local`]) decodes with
+/// this too, after its own loopback/unspecified check: `::` and `::1` return
+/// `None` here and are refused there by that check.
 pub fn embedded_v4(v6: &Ipv6Addr) -> Option<(Embedding, Ipv4Addr)> {
     let s = v6.segments();
     let carried = |hi: u16, lo: u16| Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8);
@@ -672,7 +670,7 @@ mod tests {
         assert!(m.contains("192.168.1.5") && m.contains("IPv4-mapped"), "{m}");
     }
 
-    /// The decoder #535's inverse check will share: each form, and the two
+    /// The decoder the device-fetch rule shares: each form, and the two
     /// all-zero-prefix addresses that are NOT the compatible form.
     #[test]
     fn embedded_v4_decodes_the_four_forms_and_nothing_else() {

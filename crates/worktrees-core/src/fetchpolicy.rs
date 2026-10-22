@@ -493,8 +493,10 @@ pub fn global(ip: &IpAddr) -> bool {
 /// not plainly GLOBAL unicast. Fail-closed by construction. The list is of
 /// what is refused, but every block a host can hide behind is on it, and an
 /// IPv4 address embedded in IPv6 (mapped, compatible, NAT64 `64:ff9b::/96`,
-/// 6to4 `2002::/16`) is judged as the IPv4 address it carries. Teredo
-/// (`2001::/32`) obfuscates its embedded address, so it is refused whole.
+/// 6to4 `2002::/16`) is judged as the IPv4 address it carries, decoded by
+/// [`crate::netclass::embedded_v4`], the one decoder the remote listener's
+/// classifier reads them with too. Teredo (`2001::/32`) obfuscates its
+/// embedded address, so it is refused whole.
 pub fn host_local(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v) => {
@@ -513,26 +515,14 @@ pub fn host_local(ip: &IpAddr) -> bool {
                 || o[0] >= 224                          // multicast, reserved, broadcast
         }
         IpAddr::V6(v) => {
-            let s = v.segments();
-            let embedded = |hi: u16, lo: u16| Ipv4Addr::new((hi >> 8) as u8, hi as u8, (lo >> 8) as u8, lo as u8);
+            // Before the decoder: `::` and `::1` are not the compatible form.
             if v.is_loopback() || v.is_unspecified() {
                 return true;
             }
-            if let Some(m) = v.to_ipv4_mapped() {
-                return host_local(&IpAddr::V4(m));
+            if let Some((_, v4)) = crate::netclass::embedded_v4(v) {
+                return host_local(&IpAddr::V4(v4));
             }
-            // IPv4-compatible `::a.b.c.d` (deprecated, still parsed).
-            if s[..6].iter().all(|x| *x == 0) {
-                return host_local(&IpAddr::V4(embedded(s[6], s[7])));
-            }
-            // NAT64 well-known prefix `64:ff9b::/96`.
-            if s[0] == 0x64 && s[1] == 0xff9b && s[2..6].iter().all(|x| *x == 0) {
-                return host_local(&IpAddr::V4(embedded(s[6], s[7])));
-            }
-            // 6to4 `2002:aabb:ccdd::/48` carries a.b.c.d.
-            if s[0] == 0x2002 {
-                return host_local(&IpAddr::V4(embedded(s[1], s[2])));
-            }
+            let s = v.segments();
             (s[0] & 0xe000) != 0x2000                   // not global unicast 2000::/3
                 || (s[0] == 0x2001 && s[1] == 0)        // Teredo 2001::/32
                 || (s[0] == 0x2001 && s[1] == 0x0db8)   // documentation 2001:db8::/32
@@ -1199,6 +1189,24 @@ mod tests {
         }
         for ip in ["140.82.112.3", "1.1.1.1", "2606:4700:4700::1111", "::ffff:8.8.8.8", "64:ff9b::808:808"] {
             assert!(!host_local(&ip.parse().unwrap()), "{ip}");
+        }
+    }
+
+    /// An IPv4 address written in IPv6 is judged as the one it carries,
+    /// through the decoder the remote listener's classifier shares: local
+    /// inside is refused, global inside is not. The global half is what shows
+    /// the decoder runs at all — every form but 6to4 sits outside 2000::/3,
+    /// so without it the local half passes anyway.
+    #[test]
+    fn an_embedded_ipv4_address_is_judged_as_the_one_it_carries() {
+        for (local, global) in [
+            ("::ffff:10.0.0.1", "::ffff:8.8.8.8"),
+            ("::10.0.0.1", "::8.8.8.8"),
+            ("64:ff9b::10.0.0.1", "64:ff9b::8.8.8.8"),
+            ("2002:a00:1::1", "2002:808:808::1"),
+        ] {
+            assert!(host_local(&local.parse().unwrap()), "{local}");
+            assert!(!host_local(&global.parse().unwrap()), "{global}");
         }
     }
 }
