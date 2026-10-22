@@ -4,9 +4,11 @@ Throwaway probes for the claims marked *unmeasured* in
 `docs/proposals/server-edition-phase2.md` §4.1, §4.6, §4.7 and §10. They are
 not product code, nothing builds or tests them, and none of them changes the
 network configuration of the machine they run on. The Linux scripts change
-only the namespaces of throwaway containers. The findings, raw evidence and
-the hardware checklist live outside the repo, in the lane's
-`~/.cache/worktrees/worktrees/spike-p2-network/findings.md`.
+only the namespaces of throwaway containers. What is still to measure on real
+hardware, with the exact commands, is [`CHECKLIST.md`](CHECKLIST.md), beside
+this file. The findings and raw evidence stay outside the repo, in the spike
+lane's `~/.cache/worktrees/worktrees/spike-p2-network/` on the machine that
+ran it.
 
 | Probe | Runs on | What it answers |
 |---|---|---|

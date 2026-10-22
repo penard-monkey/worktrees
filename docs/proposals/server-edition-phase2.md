@@ -2197,9 +2197,10 @@ and a second Mac on the tailnet, measure the claims marked unmeasured above.
 The half that needs neither ran on 2026-10-21: macOS 27 on Apple silicon,
 read-only with no sudo, and Docker containers with their own network
 namespaces on Docker Desktop's Linux 6.12 (`linuxkit`), a kernel that is
-neither a stock distribution's nor a GitHub runner's. Its probes are in `scripts/spike/p2-network/`,
-whose README lists them. Its findings, and the hardware checklist with the
-exact command for each step named in brackets below, are the lane's
+neither a stock distribution's nor a GitHub runner's. Its probes are in
+`scripts/spike/p2-network/`, whose README lists them, and the hardware
+checklist beside them, `CHECKLIST.md`, has the exact commands for each step
+named in brackets below. The findings and raw evidence are the lane's
 `~/.cache/worktrees/worktrees/spike-p2-network/findings.md` on the machine
 that ran it. **Measured** (the result is in the section cited):
 
