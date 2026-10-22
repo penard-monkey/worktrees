@@ -821,10 +821,8 @@ mod tests {
             Self(p)
         }
         fn script(&self, body: &str) -> PathBuf {
-            use std::os::unix::fs::PermissionsExt;
             let p = self.0.join("codex");
-            std::fs::write(&p, format!("#!/usr/bin/env python3\n{body}")).unwrap();
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700)).unwrap();
+            crate::fsx::exec_fixture(&p, &format!("#!/usr/bin/env python3\n{body}"));
             p
         }
     }

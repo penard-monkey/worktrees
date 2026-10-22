@@ -854,12 +854,10 @@ mod tests {
     fn fake_gh(t: &std::path::Path) -> (String, std::path::PathBuf) {
         let state = t.join("pr-state");
         let gh = t.join("gh");
-        std::fs::write(&gh, format!(
+        crate::fsx::exec_fixture(&gh, &format!(
             "#!/bin/sh\ncase \"$1 $2\" in\n  'pr view') [ -f '{s}' ] && cat '{s}' || exit 1 ;;\n  'pr create') echo https://example.invalid/pr/1; echo OPEN > '{s}' ;;\nesac\n",
             s = state.display()
-        )).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        ));
         (gh.to_string_lossy().into_owned(), state)
     }
 

@@ -958,9 +958,7 @@ mod tests {
         // A gh that records its argv, so a wrong --base/--head cannot pass.
         let fake_gh = t.join("gh");
         let gh_log = t.join("gh.log");
-        std::fs::write(&fake_gh, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\necho https://example.invalid/pr/1\n", gh_log.display())).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&fake_gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::fsx::exec_fixture(&fake_gh, &format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\necho https://example.invalid/pr/1\n", gh_log.display()));
 
         let p = crate::project::Project::discover(&repo).unwrap();
         let before = inspect(&p).unwrap();

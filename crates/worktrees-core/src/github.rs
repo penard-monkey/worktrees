@@ -1252,7 +1252,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn fetch_and_probe_go_through_the_gh_seam() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("wt-gh-seam-{}-{}", std::process::id(), crate::sysclock::now_epoch()));
         std::fs::create_dir_all(&dir).unwrap();
         let reply = dir.join("reply.json");
@@ -1261,16 +1260,14 @@ mod tests {
         // the CALL is pinned, not only the reply
         let argv = dir.join("argv");
         let fake = dir.join("gh");
-        std::fs::write(
+        crate::fsx::exec_fixture(
             &fake,
-            format!(
+            &format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\ncase \"$1 $2\" in\n  'auth token') [ \"$4\" = github.com ] && {{ echo tok; exit 0; }}; echo 'no oauth token found for '\"$4\" >&2; exit 1;;\n  'api graphql') cat '{}';;\n  *) exit 2;;\nesac\n",
                 argv.display(),
                 reply.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         let gh = fake.to_str().unwrap();
         assert_eq!(probe_auth(gh, "github.com"), Auth::Ok);
         assert_eq!(probe_auth(gh, "ghe.example.com"), Auth::NoHostToken);
@@ -1362,18 +1359,15 @@ mod tests {
     /// real one does (`hostname <x>` among ~60 other lines).
     #[cfg(unix)]
     fn fake_ssh(dir: &std::path::Path) -> (String, std::path::PathBuf) {
-        use std::os::unix::fs::PermissionsExt;
         let ran = dir.join("ran");
         let fake = dir.join("ssh");
-        std::fs::write(
+        crate::fsx::exec_fixture(
             &fake,
-            format!(
+            &format!(
                 "#!/bin/sh\necho \"$@\" >> '{}'\n[ \"$1 $2\" = '-G --' ] || exit 64\nh=\"$3\"\necho \"user git\"\ncase \"$h\" in\n  github.com-penard-monkey) echo 'hostname github.com';;\n  ghe-work) echo 'hostname GHE.corp.net';;\n  gitlab-alias) echo 'hostname gitlab.com';;\n  firewall) echo 'hostname ssh.github.com';;\n  garbage) echo 'no hostname line here';;\n  hostile) echo 'hostname evil.com/x@y';;\n  broken) echo 'Bad configuration option' >&2; exit 255;;\n  slow) sleep 5;;\n  *) echo \"hostname $h\";;\nesac\necho 'port 22'\n",
                 ran.display()
             ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        );
         (fake.to_str().unwrap().to_string(), ran)
     }
 

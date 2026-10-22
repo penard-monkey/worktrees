@@ -1022,12 +1022,10 @@ mod tests {
         // those first. The fake remote floods ~100 KB of progress, then fails.
         let d = tmp("late");
         let fake = d.join("fake-ssh");
-        std::fs::write(
+        crate::fsx::exec_fixture(
             &fake,
             "#!/bin/sh\ni=0\nwhile [ $i -lt 2500 ]; do printf 'remote: Counting objects:  %d%% (%d/2500)\\r' $((i/25)) $i >&2; i=$((i+1)); done\necho 'ERROR: Repository not found.' >&2\nexit 1\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        );
         let src = parse_source("ssh://example.invalid/owner/late.git").unwrap();
         let target = plan_target(d.to_str().unwrap(), &src.name).unwrap();
         let opts = CloneOpts { ssh_base: Some(fake.to_string_lossy().into_owned()) };
@@ -1043,8 +1041,7 @@ mod tests {
         // A "remote" whose ssh never answers: the shape of a hang. It records
         // its pid so the test can prove the GRANDCHILD died, not just git.
         let fake = d.join("fake-ssh");
-        std::fs::write(&fake, format!("#!/bin/sh\necho $$ > '{}'\nexec sleep 60\n", pidfile.display())).unwrap();
-        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        crate::fsx::exec_fixture(&fake, &format!("#!/bin/sh\necho $$ > '{}'\nexec sleep 60\n", pidfile.display()));
         let src = parse_source("ssh://example.invalid/owner/slow.git").unwrap();
         let target = plan_target(d.to_str().unwrap(), &src.name).unwrap();
         let cancel = Arc::new(AtomicBool::new(false));
