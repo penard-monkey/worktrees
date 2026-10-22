@@ -1479,12 +1479,14 @@ mod devices {
     const PAIR_LONG: Duration = Duration::from_secs(30);
 
     fn engine(tag: &str, panes: Vec<(String, String, String)>) -> Engine {
-        engine_times(tag, panes, PAIR_LONG, PAIR_LONG)
+        engine_times(tag, panes, PAIR_LONG, PAIR_LONG, false)
     }
 
-    fn engine_times(tag: &str, panes: Vec<(String, String, String)>, open_for: Duration, decide_for: Duration) -> Engine {
+    /// With `on_disk`, the registry is `devices.json` in the engine's config
+    /// dir, as serve's is.
+    fn engine_times(tag: &str, panes: Vec<(String, String, String)>, open_for: Duration, decide_for: Duration, on_disk: bool) -> Engine {
         let dir = scratch(tag);
-        let reg = Arc::new(DeviceRegistry::in_memory());
+        let reg = Arc::new(if on_disk { DeviceRegistry::open(&dir.join("cfg")) } else { DeviceRegistry::in_memory() });
         let world = Roots { roots: vec![s(&dir.join("a")), s(&dir.join("b"))], panes };
         let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
 
@@ -2177,7 +2179,7 @@ mod devices {
     /// window, and no decision after the frame.
     #[test]
     fn the_deadlines_run_out_as_a_deny() {
-        let e = engine_times("pairdeadline", vec![], PAIR_OPEN, PAIR_DECIDE);
+        let e = engine_times("pairdeadline", vec![], PAIR_OPEN, PAIR_DECIDE, false);
         e.bind_loopback();
         let mut con = e.connect(Caller::console());
         let before = worktrees_core::sysclock::now_epoch();
@@ -2413,6 +2415,30 @@ mod devices {
         assert_eq!(e.rpc(&mut c, "device_revoke", json!({"id": peer.id.as_str()}))["err"], json!("step-up required"), "another device: admin");
         e.rt.block_on(c.send(Message::text(json!({"id": 1, "cmd": "device_revoke", "args": {"id": rec.id.as_str()}}).to_string()))).unwrap();
         e.closed(&mut c, "revoked", Duration::from_secs(1));
+    }
+
+    /// The file is the registry: a device whose record is cut out of
+    /// `devices.json`, or whose file is deleted, loses its open connections at
+    /// the next look (the expiry watch's minute, or any write), not only its
+    /// next request; and a file that turns unreadable closes every device's.
+    #[test]
+    fn a_device_whose_record_leaves_the_file_is_closed_and_an_unreadable_file_closes_them_all() {
+        let e = engine_times("forgotten", vec![], PAIR_LONG, PAIR_LONG, true);
+        let file = e.dir.join("cfg").join(super::super::devices::FILE);
+        let a = enroll(&e.reg, "A", 1, &[Read], Projects::All);
+        let b = enroll(&e.reg, "B", 2, &[Read], Projects::All);
+        let (mut ca, mut cb) = (e.connect(caller(&a)), e.connect(caller(&b)));
+        let mut v: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        v["devices"].as_array_mut().unwrap().retain(|x| x["id"] != json!(a.id.as_str()));
+        std::fs::write(&file, serde_json::to_vec(&v).unwrap()).unwrap();
+        e.reg.refresh();
+        e.closed(&mut ca, "removed", Duration::from_secs(1));
+        assert!(e.rpc(&mut cb, "get_changelog", json!({})).get("ok").is_some(), "the other device is untouched");
+        std::fs::write(&file, b"not json").unwrap();
+        e.reg.refresh();
+        e.closed(&mut cb, "unreadable", Duration::from_secs(1));
+        let mut con = e.connect(Caller::console());
+        assert!(e.rpc(&mut con, "get_changelog", json!({})).get("ok").is_some(), "the console keeps working");
     }
 
     /// A revoke cancels the clone jobs the device started (§2.5): every new

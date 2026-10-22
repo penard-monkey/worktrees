@@ -555,6 +555,9 @@ pub enum DeviceEvent {
     /// it had to correct is its own `Disabled { reason: unrecorded }` or
     /// `Revoked` event.
     Reloaded,
+    /// A live device's record left the file — deleted with it, or cut out by
+    /// hand. It is refused from now on, as an unknown key is.
+    Forgotten { subject: Subject },
     /// The server identity was rotated on the host (§2.5): a new pin, and every
     /// device revoked, each its own `Revoked` event.
     IdentityRotated { pin: String },
@@ -578,9 +581,17 @@ impl DeviceEvent {
     /// (§2.5).
     pub fn ends(&self) -> Option<&DeviceId> {
         match self {
-            DeviceEvent::Revoked { subject, .. } | DeviceEvent::Disabled { subject, .. } => Some(&subject.device),
+            DeviceEvent::Revoked { subject, .. } | DeviceEvent::Disabled { subject, .. } | DeviceEvent::Forgotten { subject } => {
+                Some(&subject.device)
+            }
             _ => None,
         }
+    }
+
+    /// Every device's connections must close: the file cannot be read, so
+    /// none of them is served (§5.2).
+    pub fn ends_every_device(&self) -> bool {
+        matches!(self, DeviceEvent::Unreadable { .. })
     }
 
     /// The device whose open channels must be checked against its narrowed
@@ -780,8 +791,19 @@ impl DeviceRegistry {
     /// Re-read the file if it is not what serve last read or wrote. A change
     /// nobody here made is cross-checked against the evidence (§5.2) and the
     /// corrections written back; an unreadable file is kept as it is and
-    /// refuses every device.
+    /// refuses every device. A live device whose record is GONE — the file
+    /// deleted, or the record cut out by hand — is `Forgotten`, so its open
+    /// connections end too, not only its next request.
     fn refresh_locked(&self, st: &mut State, events: &mut Vec<DeviceEvent>) {
+        let live: Vec<Subject> =
+            st.file.as_ref().map(|f| f.devices.iter().filter(|d| d.is_live()).map(DeviceRecord::subject).collect()).unwrap_or_default();
+        self.reload_locked(st, events);
+        if let Ok(f) = &st.file {
+            events.extend(live.into_iter().filter(|s| f.device(&s.device).is_none()).map(|subject| DeviceEvent::Forgotten { subject }));
+        }
+    }
+
+    fn reload_locked(&self, st: &mut State, events: &mut Vec<DeviceEvent>) {
         let Some(path) = self.path() else { return };
         let bytes = match read_file(&path) {
             Ok(b) => b,
@@ -1750,6 +1772,38 @@ mod tests {
         let ev = events.lock().unwrap().clone();
         assert!(matches!(ev.first(), Some(DeviceEvent::Reloaded)), "{ev:?}");
         assert_eq!(ev.iter().filter_map(DeviceEvent::ends).count(), 3, "{ev:?}");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// A live device whose record leaves the file — cut out by hand, or the
+    /// file deleted — is `Forgotten`, so its open connections end; a file
+    /// that turns unreadable ends every device's.
+    #[test]
+    fn a_record_that_leaves_the_file_is_forgotten() {
+        let d = dir("forgotten");
+        let reg = DeviceRegistry::open(&d);
+        let events = recorder(&reg);
+        let a = phone(&reg, "A", 1, &[Read]);
+        let b = phone(&reg, "B", 2, &[Read]);
+        let mut v: Value = serde_json::from_slice(&fs::read(d.join(FILE)).unwrap()).unwrap();
+        v["devices"].as_array_mut().unwrap().retain(|x| x["id"] != json!(b.id.as_str()));
+        fs::write(d.join(FILE), serde_json::to_vec(&v).unwrap()).unwrap();
+        events.lock().unwrap().clear();
+        reg.refresh();
+        let ended = |ev: &[DeviceEvent]| ev.iter().filter_map(|e| e.ends().cloned()).collect::<Vec<_>>();
+        assert_eq!(ended(&events.lock().unwrap()), vec![b.id.clone()], "cut out by hand");
+        assert!(events.lock().unwrap().iter().any(|e| matches!(e, DeviceEvent::Forgotten { .. })));
+        fs::remove_file(d.join(FILE)).unwrap();
+        events.lock().unwrap().clear();
+        reg.refresh();
+        assert_eq!(ended(&events.lock().unwrap()), vec![a.id.clone()], "the file deleted");
+        let c = phone(&reg, "C", 3, &[Read]);
+        fs::write(d.join(FILE), b"{").unwrap();
+        events.lock().unwrap().clear();
+        reg.refresh();
+        let ev = events.lock().unwrap().clone();
+        assert!(ev.iter().any(DeviceEvent::ends_every_device), "{ev:?}");
+        assert_eq!(reg.device_grant(&PrincipalId::owner(), &c.id), None);
         let _ = fs::remove_dir_all(&d);
     }
 

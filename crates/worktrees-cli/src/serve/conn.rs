@@ -304,8 +304,25 @@ impl Clients {
     /// (§5.3) — `devices:changed`, which reaches no device (`scope::EVENTS`).
     pub fn hear(self: &Arc<Self>, e: &DeviceEvent) {
         if let Some(d) = e.ends() {
-            let why = if matches!(e, DeviceEvent::Revoked { .. }) { "revoked" } else { "disabled" };
+            let why = match e {
+                DeviceEvent::Revoked { .. } => "revoked",
+                DeviceEvent::Forgotten { .. } => "removed",
+                _ => "disabled",
+            };
             self.end_device(d, why);
+        }
+        if e.ends_every_device() {
+            let ids: Vec<DeviceId> = {
+                let map = self.map.lock().unwrap();
+                let mut ids: Vec<DeviceId> =
+                    map.values().filter_map(|c| match c.caller.device() { Device::Paired(d) => Some(d.clone()), Device::Console => None }).collect();
+                ids.sort();
+                ids.dedup();
+                ids
+            };
+            for d in ids {
+                self.end_device(&d, "unreadable");
+            }
         }
         if let Some(d) = e.reduces() {
             self.reconcile_device(d);
