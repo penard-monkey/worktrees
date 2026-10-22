@@ -12,6 +12,7 @@ import { isHarness, type Harness } from "../harness";
 import { cloneSource, type CloneErrorKind, type CloneProgress } from "../clone";
 import { mockProjectPrs } from "./prs";
 import type { PlaceBranch } from "../prs";
+import type { By } from "../provenance";
 
 /** `worktrees_core::docs::DocEntry` — see the `list_docs` case. */
 type MockDoc = { path: string; rel: string; title: string; group: string; mtime_ms: number };
@@ -66,6 +67,9 @@ const piAllowed = new Set<string>();
 // prove a reload sends none and a change sends one. `?hostpolicyfail` refuses
 // every set, the way a corrupt file does, to drive the rollback.
 const MOCK_HOST_POLICY_KEY = "wt-mock-host-policy";
+
+/** Who the harness is to serve: the owner on the console (`authz::Caller`). */
+const CONSOLE: By = { principal: "owner", device: { kind: "console" } };
 type MockHostPolicy = {
   codex_permissions: string;
   pi_project_trust: string;
@@ -1359,8 +1363,9 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       });
       return null;
     case "set_note":
+      // The harness is the console: serve records it as the author (store.rs).
       editPlace(args.repo, args.slug, (p) => {
-        p.declared = { ...(p.declared ?? {}), note: args.note || undefined };
+        p.declared = { ...(p.declared ?? {}), note: args.note || undefined, note_by: args.note ? CONSOLE : undefined };
       });
       return null;
     // The nav drag's landing. The real one builds the token in Rust and pastes
@@ -1476,7 +1481,8 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     }
     case "set_title":
       editPlace(args.repo, args.slug, (p) => {
-        p.declared = { ...(p.declared ?? {}), title: args.title?.trim() || undefined };
+        const title = args.title?.trim() || undefined;
+        p.declared = { ...(p.declared ?? {}), title, title_by: title ? CONSOLE : undefined };
       });
       return null;
     case "touch_place":

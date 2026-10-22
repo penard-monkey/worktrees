@@ -33,6 +33,15 @@ pub trait Ui {
     fn can_confirm(&self) -> bool {
         true
     }
+    /// Who an op that starts an agent is launching it FOR: serve's caller, a
+    /// principal on a device (Server Edition Phase 2, §7.5). `ops::launch`
+    /// records it on the place as `launched_by` before the session exists.
+    /// `None` — the CLI, an agent's MCP tool with nothing to inherit — clears
+    /// whatever an earlier launch recorded, so a stamp never outlives the
+    /// session it describes.
+    fn launched_by(&self) -> Option<crate::store::LaunchedBy> {
+        None
+    }
 }
 
 /// The CLI's terminal UI — byte-parity with the bash helpers.
@@ -96,6 +105,9 @@ pub struct CaptureUi {
     /// `(severity, message)` for the SAME messages, same order as `lines`.
     pub events: Vec<(Severity, String)>,
     pub errored: bool,
+    /// What `Ui::launched_by` answers: set by a caller that knows who it is
+    /// acting for (serve's api, an MCP server inheriting its own lane's).
+    pub launched_by: Option<crate::store::LaunchedBy>,
 }
 
 impl CaptureUi {
@@ -139,6 +151,9 @@ impl Ui for CaptureUi {
     /// the decline above as consent to do nothing.
     fn can_confirm(&self) -> bool {
         false
+    }
+    fn launched_by(&self) -> Option<crate::store::LaunchedBy> {
+        self.launched_by.clone()
     }
 }
 

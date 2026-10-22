@@ -44,7 +44,7 @@ use worktrees_core::authz::{self, Caller, Capability, Registry};
 use worktrees_core::fetchpolicy::Fetcher;
 
 use super::resolve::{self, Absent, Obj, World};
-use super::scope;
+use super::{provenance, scope};
 use super::wire::{self, Frames, CLIENT_LOCAL};
 
 /// What a command is, seen from a socket: which listener may reach it at all.
@@ -353,6 +353,10 @@ pub fn call_in(cx: &Call, cmd: &str, args: &Args, world: &dyn World) -> Result<V
             return Err(r.wire_for(&cx.caller));
         }
     };
+    // A device's agent launch: the live-lane cap, its lock held across the
+    // body so the next device launch counts this one (§6, LLM10).
+    let _launching = provenance::device_lane_gate(cx, row, &args, world)?;
+    let instruction = resolved.instruction.clone();
     let scoped = Call {
         ctx: body_ctx(cx, &grant, resolved),
         frames: cx.frames.clone(),
@@ -360,7 +364,8 @@ pub fn call_in(cx: &Call, cmd: &str, args: &Args, world: &dyn World) -> Result<V
         registry: cx.registry.clone(),
         world: cx.world.clone(),
     };
-    let out = run(row.name, &scoped, &args).unwrap_or_else(|| Err(Value::from(format!("unknown command: {cmd}"))))?;
+    let out = run(row.name, &scoped, &args).unwrap_or_else(|| Err(Value::from(format!("unknown command: {cmd}"))));
+    let out = provenance::stamped(&cx.caller, instruction.as_ref(), out)?;
     Ok(match row.objects.iter().find_map(Obj::filter) {
         Some(f) => {
             let roots = if grant.projects.is_all() { Vec::new() } else { world.roots() };
@@ -372,12 +377,17 @@ pub fn call_in(cx: &Call, cmd: &str, args: &Args, world: &dyn World) -> Result<V
 
 /// The `Ctx` a body runs on: scoped to the grant, holding its capabilities
 /// (the bodies that list paths drop or mark what the caller may not read),
-/// and fetching as its caller — the console's git for the console, and for a
+/// fetching as its caller — the console's git for the console, and for a
 /// device the addresses the resolver checked, pinned (gap 17,
-/// `worktrees_core::fetchpolicy`).
+/// `worktrees_core::fetchpolicy`) — and acting for it, so what the body
+/// writes and launches records who asked (§7.3, §7.5).
 fn body_ctx(cx: &Call, grant: &authz::Grant, resolved: resolve::Resolved) -> Ctx {
     let fetcher = if cx.caller.is_console() { Fetcher::Console } else { Fetcher::Device(resolved.pins) };
-    cx.ctx.scoped(grant.projects.clone()).granted(grant.capabilities, cx.caller.is_console()).fetching(fetcher)
+    cx.ctx
+        .scoped(grant.projects.clone())
+        .granted(grant.capabilities, cx.caller.is_console())
+        .fetching(fetcher)
+        .acting_for(provenance::acting(&cx.caller, grant))
 }
 
 /// A command's row.
@@ -475,7 +485,7 @@ commands! { cx, a;
     set_settings: Engine [write, global] => ops::set_settings(&cx.ctx, a.get("settings")?),
     set_lifecycle: Engine [write, place(repo, slug)] => ops::set_lifecycle(a.get("repo")?, a.get("slug")?, a.get("label")?),
     set_pin: Engine [write, place(repo, slug)] => ops::set_pin(a.get("repo")?, a.get("slug")?, a.get("on")?),
-    set_note: Engine [write, place(repo, slug)] => ops::set_note(a.get("repo")?, a.get("slug")?, a.get("note")?),
+    set_note: Engine [write, place(repo, slug)] => ops::set_note(&cx.ctx, a.get("repo")?, a.get("slug")?, a.get("note")?),
     drop_reference: Engine [write, place(repo, slug), place(into_repo, into_slug), session_of(into_session, into_repo, into_slug)] => ops::drop_reference(
         a.get("repo")?, a.get("slug")?, a.get("into_repo")?, a.get("into_slug")?, a.get("into_session")?, a.get("provider")?,
     ),
@@ -489,16 +499,16 @@ commands! { cx, a;
     set_quota_settings: Engine [admin, all] => ops::set_quota_settings(a.get("gate")?, a.get("weekly_warn_pct")?),
     set_project_private: HostConsole [console, project(root)] => ops::set_project_private(a.get("root")?, a.get("private")?),
     copy_text: ClientLocal => refused(),
-    set_title: Engine [write, place(repo, slug)] => ops::set_title(a.get("repo")?, a.get("slug")?, a.get("title")?),
+    set_title: Engine [write, place(repo, slug)] => ops::set_title(&cx.ctx, a.get("repo")?, a.get("slug")?, a.get("title")?),
     touch_place: Engine [write, place(repo, slug)] => ops::touch_place(a.get("repo")?, a.get("slug")?),
     mark_seen: Engine [write, place(repo, slug)] => ops::mark_seen(a.get("repo")?, a.get("slug")?, a.get("epoch")?),
     new_place: Engine [write, project(repo)] => ops::new_place(
-        a.get("repo")?, a.get("branch")?, a.get("base")?, a.get("name")?, a.get("provider")?, a.get("model")?, a.get("force")?,
+        &cx.ctx, a.get("repo")?, a.get("branch")?, a.get("base")?, a.get("name")?, a.get("provider")?, a.get("model")?, a.get("force")?,
     ),
     switch_place: Engine [write, place(repo, slug)] => ops::switch_place(a.get("repo")?, a.get("slug")?, a.get("branch")?, a.get("base")?),
     list_branches: Engine [read, place(repo, slug)] => ops::list_branches(a.get("repo")?, a.get("slug")?),
     open_place: Engine [write, place(repo, slug)] => ops::open_place(
-        a.get("repo")?, a.get("slug")?, a.get("fresh")?, a.get("provider")?, a.get("model")?, a.get("force")?,
+        &cx.ctx, a.get("repo")?, a.get("slug")?, a.get("fresh")?, a.get("provider")?, a.get("model")?, a.get("force")?,
     ),
     // Host policy (`worktrees_api::hostpolicy`): `admin`, not console-only like Codex's, as it widens no agent (decision 6).
     set_fetch_interval: Engine [admin, all] => ops::set_fetch_interval(&cx.ctx, a.get("mins")?),
@@ -562,7 +572,7 @@ commands! { cx, a;
     agent_setup_status: Engine [read, project(repo)] => project::agent_setup_status(a.get("repo")?),
     agent_setup_fix: Engine [instruct, project(repo)] => project::agent_setup_fix(&cx.ctx, a.get("repo")?, a.get("push")?),
     rules_apply: Engine [instruct, project(repo)] => project::rules_apply(&cx.ctx, a.get("repo")?, a.get("push")?, a.get("force")?),
-    rules_review: Engine [write, project(repo)] => project::rules_review(a.get("repo")?, a.get("provider")?, a.get("model")?),
+    rules_review: Engine [write, project(repo)] => project::rules_review(&cx.ctx, a.get("repo")?, a.get("provider")?, a.get("model")?),
     rules_lane_remove: Engine [write, project(repo)] => project::rules_lane_remove(&cx.ctx, a.get("repo")?),
     agent_link_skills: HostConsole => project::agent_link_skills(),
     agent_user_skills: Engine [read, global] => project::agent_user_skills(),
@@ -1037,7 +1047,7 @@ mod tests {
         use worktrees_core::fetchpolicy::Policy;
         let (con, _, _rx) = call("fetch-as");
         let pin = resolve::remote_only("https://140.82.112.3/o/r.git").unwrap();
-        let resolved = || resolve::Resolved { projects: vec![], pins: vec![pin.clone()] };
+        let resolved = || resolve::Resolved { pins: vec![pin.clone()], ..Default::default() };
         let ctx = body_ctx(&con, &Grant::everything(), resolved());
         assert_eq!(*ctx.fetcher(), Fetcher::Console, "the console's git, even handed a pin");
         let dev = Call { caller: Caller::paired(PrincipalId::owner(), DeviceId::new("phone")), ..con };

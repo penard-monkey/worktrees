@@ -461,7 +461,7 @@ pub fn rules_apply(ctx: &Ctx, repo: String, push: Option<bool>, force: Option<bo
 /// exists. A launch the machine guard refuses comes back as
 /// `EXIT_LAUNCH_REFUSED` with the place ready — the frontend asks "Launch
 /// anyway?"; nothing is forced here.
-pub fn rules_review(repo: String, provider: Option<String>, model: Option<String>) -> Result<CmdResult, String> {
+pub fn rules_review(ctx: &Ctx, repo: String, provider: Option<String>, model: Option<String>) -> Result<CmdResult, String> {
     let provider = provider.unwrap_or_else(|| worktrees_core::harness::default_adapter().provider().id.into());
     known_harness(&provider)?.installed()?;
     let model = model.filter(|m| !m.trim().is_empty());
@@ -469,7 +469,7 @@ pub fn rules_review(repo: String, provider: Option<String>, model: Option<String
         worktrees_core::choice::validate_model(m)?;
     }
     let mut slug = None;
-    let mut r = run_op("rules review", &repo, |p, ui| {
+    let mut r = crate::ops::run_launch(ctx, "rules review", &repo, |p, ui| {
         let (rc, s) = worktrees_core::review::open_lane(p, ui, true, Some(&provider), model.as_deref());
         slug = Some(s);
         rc

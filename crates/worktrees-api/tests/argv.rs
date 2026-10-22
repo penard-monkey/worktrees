@@ -63,8 +63,9 @@ fn refused(r: &CmdResult, field: &str) {
 #[test]
 fn new_place_refuses_a_flag_shaped_branch_base_or_name() {
     let dir = repo("new", false);
+    let ctx = Ctx::new(std::env::temp_dir(), Arc::new(NoWindow));
     let new = |branch: &str, base: Option<&str>, name: Option<&str>| {
-        worktrees_api::ops::new_place(s(&dir), branch.into(), base.map(Into::into), name.map(Into::into), None, None, None)
+        worktrees_api::ops::new_place(&ctx, s(&dir), branch.into(), base.map(Into::into), name.map(Into::into), None, None, None)
             .expect("a result, not a thrown error")
     };
     // The base slot: `--no-fetch`, `-r` and `--force` each set the flag.
@@ -107,7 +108,8 @@ fn switch_place_refuses_a_flag_shaped_slug_branch_or_base() {
 #[test]
 fn open_place_refuses_a_flag_shaped_slug() {
     let dir = repo("open", true);
-    refused(&worktrees_api::ops::open_place(s(&dir), "--force".into(), None, None, None, None).unwrap(), "slug");
+    let ctx = Ctx::new(std::env::temp_dir(), Arc::new(NoWindow));
+    refused(&worktrees_api::ops::open_place(&ctx, s(&dir), "--force".into(), None, None, None, None).unwrap(), "slug");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

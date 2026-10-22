@@ -2854,6 +2854,12 @@ body.dragging .menu-catch { pointer-events: none; }
    Scoped to rules/model/MCP: skills are symlinked, so they already reached it. */
 .profile-badge { color: var(--txt-dim); }
 .profile-badge.stale { color: var(--warn); }
+/* Provenance (Server Edition Phase 2, §7.3, §7.5). Words in a text token, hue
+   in the dot only: --warn as text on a tint fails contrast in the light
+   themes (AGENTS.md, "an accent token is a FILL"). */
+.device-badge { color: var(--txt-dim); }
+.status-cluster .remote-edit { color: var(--txt-dim); gap: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.remote-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--warn); flex: none; }
 
 /* The rules editor. No <textarea> existed in the app before this; it mirrors the
    .setting input rule above and switches to the mono face, since what goes in it

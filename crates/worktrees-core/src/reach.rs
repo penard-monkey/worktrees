@@ -141,16 +141,23 @@ pub struct Inputs<'a> {
     pub user: Level,
     /// `--cross-project` on the server's argv (a profile's narrowing).
     pub flag: Option<Level>,
+    /// The cap this session's place was LAUNCHED with
+    /// (`store::LaunchedBy::cap`): a device whose scope is a list launches
+    /// lanes that reach no other project (Server Edition Phase 2, §7.5).
+    /// Narrow-only, like `flag`.
+    pub launch: Option<Level>,
     pub registry: Registry,
 }
 
 impl Reach {
     pub fn new(i: Inputs) -> Reach {
         let me = i.registry.by_root(i.main_root).cloned();
-        let level = i.user.min(i.flag.unwrap_or(Level::Full));
+        let level = i.user.min(i.flag.unwrap_or(Level::Full)).min(i.launch.unwrap_or(Level::Full));
         let why_off = if level == Level::Off {
             Some(if i.user == Level::Off {
                 HOW_TO_ENABLE.to_string()
+            } else if i.launch == Some(Level::Off) {
+                "this session was launched from a paired device whose scope is a list of projects, so it reaches no other project".to_string()
             } else {
                 "this session's profile turns cross-project reach off".to_string()
             })
@@ -294,7 +301,7 @@ mod tests {
     }
 
     fn reach(root: &str, user: Level, flag: Option<Level>) -> Reach {
-        Reach::new(Inputs { main_root: root, user, flag, registry: reg() })
+        Reach::new(Inputs { main_root: root, user, flag, launch: None, registry: reg() })
     }
 
     #[test]
@@ -381,6 +388,23 @@ mod tests {
         assert!(r.parse("beta:x").unwrap_err().contains("profile"));
     }
 
+    /// §7.5: a lane a scoped device launched reaches no other project,
+    /// whatever the user's setting and the profile say, and says why. The
+    /// launch's cap is one more narrowing, never a widening: `read` from a
+    /// launch cannot lift a profile's `off`.
+    #[test]
+    fn a_device_launch_narrows_and_never_widens() {
+        let r = |user, flag, launch| Reach::new(Inputs { main_root: "/w/alpha", user, flag, launch, registry: reg() });
+        let off = r(Level::Full, None, Some(Level::Off));
+        assert!(!off.on());
+        let e = off.parse("beta:x").unwrap_err();
+        assert!(e.contains("paired device"), "{e}");
+        assert_eq!(r(Level::Full, None, Some(Level::Read)).level, Level::Read);
+        assert_eq!(r(Level::Read, None, None).level, Level::Read, "no stamp, no cap");
+        assert!(!r(Level::Full, Some(Level::Off), Some(Level::Read)).on(), "a launch cannot lift a profile's off");
+        assert_eq!(r(Level::Read, Some(Level::Full), Some(Level::Full)).level, Level::Read, "nor the user's setting");
+    }
+
     #[test]
     fn no_reach_from_an_unregistered_repo_or_a_private_project() {
         assert!(reach("/w/elsewhere", Level::Read, None).parse("beta:x").unwrap_err().contains("not a registered"));
@@ -415,7 +439,7 @@ mod tests {
     fn a_duplicate_name_from_a_hand_edit_is_refused_not_guessed() {
         let mut g = reg();
         g.projects.push(Entry { root: "/w/beta2".into(), name: "beta".into(), ..Default::default() });
-        let r = Reach::new(Inputs { main_root: "/w/alpha", user: Level::Read, flag: None, registry: g });
+        let r = Reach::new(Inputs { main_root: "/w/alpha", user: Level::Read, flag: None, launch: None, registry: g });
         let e = r.parse("beta:x").unwrap_err();
         assert!(e.contains("ambiguous"), "{e}");
         assert!(!e.contains("/w/"), "no root in the message: {e}");

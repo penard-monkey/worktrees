@@ -16,6 +16,7 @@
 mod conn;
 mod dispatch;
 mod policy;
+mod provenance;
 mod resolve;
 mod scope;
 mod servefile;

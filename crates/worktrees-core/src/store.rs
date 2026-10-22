@@ -10,6 +10,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use crate::authz::{Caller, Device, PrincipalId};
 use crate::sysclock::now_epoch;
 
 pub const IDLE_WINDOW_SECS: i64 = 7 * 24 * 3600;
@@ -101,8 +102,80 @@ pub struct Declared {
     /// decided before the file exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pi_session_gen: Option<u32>,
+    /// Who launched this place's agent through serve (Server Edition Phase 2,
+    /// §7.5): the principal and device of the request that CREATED the
+    /// session, written by `ops::launch` before `new-session` so the lane's
+    /// MCP server reads it when it starts. A launch with no serve caller (the
+    /// CLI, an MCP tool with nothing to inherit) clears it, so it never
+    /// outlives the session it describes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launched_by: Option<LaunchedBy>,
+    /// The last instruction-class file written into this place by a paired
+    /// DEVICE (§7.3): `AGENTS.md edited from <device>, 2 min ago`. Out of band
+    /// on purpose: a marker inside the file would be stripped or forged, and an
+    /// agent would read it as one more instruction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_remote_instruction: Option<RemoteInstruction>,
+    /// Who last set `note` / `title` through serve (§7.3). Absent when it was
+    /// set anywhere else (the CLI, an agent's MCP `set_note`), so it cannot
+    /// name a device for text the device did not write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note_by: Option<By>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_by: Option<By>,
     #[serde(flatten)]
     pub extra: Map<String, serde_json::Value>,
+}
+
+/// A principal on a device: who set a declared field through serve. The JSON
+/// is `authz::Caller`'s — `{"principal": "owner", "device": {"kind": "paired",
+/// "id": "…"}}` — so a log line, an audit record and a stamp spell one caller
+/// the same way.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct By {
+    pub principal: PrincipalId,
+    pub device: Device,
+}
+
+impl By {
+    pub fn of(caller: &Caller) -> By {
+        By { principal: caller.principal().clone(), device: caller.device().clone() }
+    }
+
+    /// A paired device, not the console.
+    pub fn is_device(&self) -> bool {
+        matches!(self.device, Device::Paired(_))
+    }
+}
+
+/// `Declared::launched_by`: who, and the cross-project reach the launch
+/// narrowed the lane to. `cross_project` is set only for a device whose scope
+/// is a list (§7.5, O11): its lanes may not reach past that scope through MCP.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct LaunchedBy {
+    #[serde(flatten)]
+    pub by: By,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cross_project: Option<String>,
+}
+
+impl LaunchedBy {
+    /// The level this launch caps the lane's reach at, or `None` for no cap.
+    /// A value nobody can read is `off`: a stamp that does not parse must
+    /// never widen anything.
+    pub fn cap(&self) -> Option<crate::reach::Level> {
+        self.cross_project.as_deref().map(|s| crate::reach::Level::parse(s).unwrap_or(crate::reach::Level::Off))
+    }
+}
+
+/// `Declared::last_remote_instruction`: `{principal, device, path, at}`, the
+/// path relative to the place's root.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct RemoteInstruction {
+    #[serde(flatten)]
+    pub by: By,
+    pub path: String,
+    pub at: i64,
 }
 
 /// `Declared::agent`: `{harness, model}`, the model in the harness's own
@@ -444,6 +517,61 @@ mod tests {
         edit(&repo, "alpha", |d| d.title = None).unwrap();
         let raw = fs::read_to_string(t.0.join(STORE_FILE)).unwrap();
         assert!(!raw.contains("title"), "cleared title must not be serialized: {raw}");
+    }
+
+    /// Phase 2's provenance stamps (§7.3, §7.5) ride the same no-version-bump
+    /// story: an older store reads them as absent, a write of one leaves every
+    /// other field and unknown key alone, and the JSON is the shape the
+    /// proposal names, `Caller`'s spelling of a principal on a device. A
+    /// second principal's device is spelled with its own principal.
+    #[test]
+    fn provenance_stamps_round_trip_in_the_proposals_shape() {
+        use crate::authz::DeviceId;
+        let t = tmp("provenance");
+        let repo = t.0.to_string_lossy().to_string();
+        fs::write(t.0.join(STORE_FILE), r#"{"version":1,"places":{"alpha":{"note":"n","from_the_future":42}}}"#).unwrap();
+        let d = read_lenient(&repo).places["alpha"].clone();
+        assert!(d.launched_by.is_none() && d.last_remote_instruction.is_none() && d.note_by.is_none() && d.title_by.is_none());
+
+        let bob = By { principal: PrincipalId::new("bob"), device: Device::Paired(DeviceId::new("bob-phone")) };
+        edit(&repo, "alpha", |d| {
+            d.launched_by = Some(LaunchedBy { by: bob.clone(), cross_project: Some("off".into()) });
+            d.last_remote_instruction = Some(RemoteInstruction { by: bob.clone(), path: "AGENTS.md".into(), at: 1_700_000_000 });
+            d.note_by = Some(By::of(&Caller::console()));
+        })
+        .unwrap();
+        let raw: serde_json::Value = serde_json::from_str(&fs::read_to_string(t.0.join(STORE_FILE)).unwrap()).unwrap();
+        let alpha = &raw["places"]["alpha"];
+        assert_eq!(
+            alpha["launched_by"],
+            serde_json::json!({"principal": "bob", "device": {"kind": "paired", "id": "bob-phone"}, "cross_project": "off"})
+        );
+        assert_eq!(
+            alpha["last_remote_instruction"],
+            serde_json::json!({"principal": "bob", "device": {"kind": "paired", "id": "bob-phone"}, "path": "AGENTS.md", "at": 1_700_000_000})
+        );
+        assert_eq!(alpha["note_by"], serde_json::to_value(Caller::console()).unwrap(), "the console, spelled as Caller spells it");
+        assert!(alpha.get("title_by").is_none(), "an absent stamp is not serialized: {alpha}");
+        assert_eq!(alpha["note"], "n");
+        assert_eq!(alpha["from_the_future"], 42);
+
+        let back = read_lenient(&repo).places["alpha"].clone();
+        assert_eq!(back.launched_by.as_ref().map(|l| &l.by), Some(&bob));
+        assert!(back.launched_by.as_ref().unwrap().by.is_device());
+        assert!(!back.note_by.unwrap().is_device());
+    }
+
+    /// The cap a launch stamp carries can only narrow: `off` and `read` are
+    /// read as written, and a value nobody can read is `off`, never "no cap".
+    #[test]
+    fn a_launch_stamps_cap_fails_closed() {
+        use crate::reach::Level;
+        let by = By::of(&Caller::console());
+        let l = |c: Option<&str>| LaunchedBy { by: by.clone(), cross_project: c.map(Into::into) };
+        assert_eq!(l(None).cap(), None);
+        assert_eq!(l(Some("off")).cap(), Some(Level::Off));
+        assert_eq!(l(Some("read")).cap(), Some(Level::Read));
+        assert_eq!(l(Some("everything")).cap(), Some(Level::Off));
     }
 
     /// `last_worked_epoch` must NOT be confused with `last_opened_epoch`: only
