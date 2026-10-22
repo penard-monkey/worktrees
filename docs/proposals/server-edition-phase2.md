@@ -19,12 +19,28 @@ each answer with its consequence. The user then answered the three
 questions those answers raised (§11.1). One of them also departs from the
 recommendation: a host is rediscovered over mDNS in Phase 2 (§4.7).
 
+**Status at v0.43.0 (2026-10-21).** Phase 1 has shipped. `worktrees serve`
+hosts the engine on loopback behind handshake v1 and M1's limits (#516).
+The desktop app is its client (#515, #524). The app reconnects on its own,
+with backoff and a crash-loop limit (#525), and carries the CLI as a private
+sidecar, Linux bundles included (#513, merged with #525). Atomic writes no longer follow a planted
+symlink (#523). Phase 0's extraction (#508) is under all of it. None of this
+document is built. Of its sixteen gaps (§8), #516 and #523 closed 9, 11 and
+15 and closed part of 3 and 5. #516 also answers a panicking body (§6). The
+rest still stands as proposed: identity and pairing (§2), per-object
+authorization (§3), the remote listener and its witnesses (§4), the audit log
+(§5), limits on authenticated clients (§6), the path classes (§7) and the
+multi-client rulings (§9). Shipping Phase 1 also changed one thing here. The
+app now reconnects, including to a serve it restarted. So Appendix B's
+terminal-id fix is no longer latent, and a restarted serve runs the three
+page-pushed host policies at their defaults (§9.1).
+
 **Base.** Written against `feat/app-serve-client` at `fadb2ce`, the tip of the
-unmerged Server Edition stack (#508 → #516 → #515 → that branch). Every
-`file:line` below is at that commit unless it names another branch. Where this
-document and the code disagree, the code wins. The stack has since merged to
-main. #516 as merged also closed gaps 11 and 15 (§8). The line references
-still point at `fadb2ce`.
+Server Edition stack (#508 → #516 → #515 → that branch) before it was
+squash-merged. Every `file:line` below is at that commit unless it names
+another branch. Some PRs took more commits after `fadb2ce`, so where a claim
+has changed on main, the text says so and names the PR. Where this document
+and the code disagree, the code wins.
 
 **Inputs.** `server-edition.md` (decisions 1–7, §III.3–III.9, the Queued
 list, Appendices A and B), the OWASP review of `serve` as built (findings
@@ -55,7 +71,7 @@ measurements as exit criteria. The draft was then reviewed with the
 | 9 | The audit log (R5) | `<config_dir>/audit.jsonl`, mode `0600`, append-only and hash-chained. Only serve's connection layer writes it, and its records are structured, never free text. Every record names a principal as well as a device. | 2 |
 | 10 | Resource limits (R6) | Per-device connection, in-flight and rate caps; bounded outboxes and lanes; single-flight for the expensive reads; separate budgets for loopback and remote, so a device cannot starve the desk. | 2 |
 | 11 | The agent-instruction surface (R7) | One path classifier in core. Instruction files need `instruct`. Files that EXECUTE without anyone choosing to run them need `stream`. `.git/**` is never written. Provenance is kept out of band, with no markers in the file. | 2 |
-| 12 | The known gaps | Eight from the brief, seven found while writing this, and one from Appendix B. Each has a fix shape and a phase (§8). One of the new ones (gap 9) can be reached from a cloned repository's content TODAY; it is fixed on `fix/atomic-write-no-follow`, with a PR to main pending. | 2, some now |
+| 12 | The known gaps | Eight from the brief, seven found while writing this, and one from Appendix B. Each has a fix shape and a phase (§8). One of the new ones (gap 9) could be reached from a cloned repository's content. #523 fixed it on main. #516 closed gaps 11 and 15 and part of gaps 3 and 5. | 2, some now |
 | 13 | Multi-client | View state is per device and never reaches serve. Shared preferences become per-key patches with a revision check. Host policy goes to `host-policy.json`. A prompt answer is a compare-and-swap, and a lease is UX on top of it. | 2, lease 3 |
 | 14 | Multi-user (R9) | Maybe later (*decided*, §11 Q1, against the recommendation). Not built in Phase 2, and not designed out. There is one principal, kept distinct from the device in the device record, in what the credential binds to and in every audit record, and every grant check keys on (principal, device). §2.8 says what that costs now and what multi-user would still take. | 2 |
 
@@ -595,8 +611,12 @@ The generated dispatcher runs, in order, before any body:
      (`crates/worktrees-api/src/projects.rs:45`), which accepts anything
      under a root.
    - `place(repo, slug)`: `project(repo)`, and the slug is `(main)` or a
-     single component that passes core's `safe_arg` (no `/`, no leading `-`,
-     no `..`, no control characters).
+     single component that names an existing place. "Single component" means
+     no `/` and no control characters, both checked by the resolver. Core's
+     `safe_arg` refuses less: a leading `-`, any `..`, and CR, LF and NUL
+     (`crates/worktrees-core/src/argv.rs:42`–`57` on main). Since #516,
+     `shell_open` runs `safe_arg` and then checks that the slug is a place,
+     which is the shape this generalizes.
    - `root(arg)`: a place root, meaning a registered root or a direct child
      of its `.worktrees/`. `plan_ask_main` already checks this shape by hand
      (`crates/worktrees-api/src/files.rs:704`–`710`).
@@ -604,9 +624,11 @@ The generated dispatcher runs, in order, before any body:
      path class (§7). The class can RAISE the capability the row needs: a
      `write_file` to `AGENTS.md` needs `instruct`.
    - `session(arg)`: the session must belong to a place in scope, looked up
-     in the snapshot's place list (adopted sessions included). It is passed
-     on with `=` to anchor it, as `tmux::ai_pane` already does
-     (`crates/worktrees-core/src/tmux.rs:587`).
+     in the snapshot's place list (adopted sessions included). Anchoring is
+     already done: since #516, `term_open` refuses a session that does not
+     exist and attaches `=<name>`, and `tune_session` targets `=<name>:`, as
+     `tmux::ai_pane` did before (`crates/worktrees-core/src/tmux.rs:587`).
+     What the resolver adds is the scope check.
    - `attach(id)`: the id is in this connection's own set (`Frames::note_term`,
      `crates/worktrees-cli/src/serve/wire.rs:226`). That is Appendix B's
      `term::NEXT_ID` fix.
@@ -776,7 +798,7 @@ loopback behaviour the same):
 | Object | Rows |
 |---|---|
 | `shell(repo, slug, index)` | `shell_open`, `shell_write`, `shell_resize`, `shell_detach`, **`close_shell_session`** (Engine today) |
-| `session(session)` | `term_open` (exact-anchored; §8, gap 3) |
+| `session(session)` | `term_open` (anchored since #516; scope-checked here, §8 gap 3) |
 | `attach(id)` | `term_write`, `term_wheel`, `term_resize`, `term_close` |
 
 **instruct:**
@@ -1157,7 +1179,10 @@ use. So:
   spike.
 - **Backgrounding** suspends the socket. The client reconnects in the
   foreground with a full handshake, because resumption is off (§4.2). R6 has
-  to expect reconnect storms (§6).
+  to expect reconnect storms (§6). The policy for WHEN to try exists since
+  #525 (`app/src/reconnect.ts`: jittered exponential backoff capped at 30 s,
+  no try while the window is hidden, one try in flight). The remote door
+  reuses it with one rule taken out: a remote device never starts a serve.
 
 ### 4.5 The two rule sets, side by side
 
@@ -1667,13 +1692,16 @@ All of these fail closed, as `err` frames to an authenticated caller and
 closed sockets before authentication. Each trip is logged once per episode,
 with counts.
 
-**A panicking body must still answer.** The job a request runs pushes its
-reply only when the body RETURNS (`conn.rs:539`–`541`). A body that panics
-is contained by `spawn_blocking`, which is what the serve review measured,
-but its request is never answered, so the client waits forever. Under
-per-connection caps it would also hold an in-flight slot forever. So the job
-runs the body under `catch_unwind` and answers `err: "internal"`, and the
-in-flight count is a drop guard that comes back however the job ends.
+**A panicking body must still answer.** At `fadb2ce` the job a request runs
+pushed its reply only when the body RETURNED (`conn.rs:539`–`541`). A body
+that panicked was contained by `spawn_blocking`, which is what the serve
+review measured, but its request was never answered, so the client waited
+forever. #516 fixed that half: `conn::answer` runs the body under
+`catch_unwind` and answers `err: "internal error"` (`wire::INTERNAL_ERROR`),
+and the log gets one line naming the command. The other half arrives with
+the caps. Under per-connection caps a panicking body would hold an in-flight
+slot forever, so the in-flight count must be a drop guard that comes back
+however the job ends.
 
 ---
 
@@ -1779,29 +1807,29 @@ label (§1.1) and revocation.
 
 The brief's eight are first, then seven found while writing this, then one
 that Appendix B already had. At `fadb2ce`, an authenticated loopback client
-could reach each one. Gap 9 needs less: a cloned repository's content plus
-the user's next ordinary save. #516 as merged closed gaps 11 and 15. The
-`fadb2ce` stack commit came before that, so the two rows keep their original
-text and record the closure in the last column.
+could reach each one. Gap 9 needed less: a cloned repository's content plus
+the user's next ordinary save. Since then, #516 as merged closed gaps 11 and
+15 and part of 3 and 5, and #523 closed gap 9. Those rows keep their
+`fadb2ce` text, and the last column says what main has now.
 
 | # | Gap | Where | Fix shape | Phase |
 |---|---|---|---|---|
 | 1 | `write_file` can overwrite `.git/config`; `core.fsmonitor` runs on the next git spawn, and the host poll spawns git every 3 s | `crates/worktrees-api/src/files.rs:1311`–`1333`. The guard is `guard_under_projects`, "under SOME root" (`projects.rs:45`). | The `forbidden` class (§7.1), for every caller | 2 |
 | 2 | `save_profile` stores `mcp_servers` (commands) and `settings` (claude's `hooks` are a key of that raw JSON), both run at the next launch | `crates/worktrees-api/src/profiles.rs:21`–`25`; the fields at `crates/worktrees-core/src/profile.rs:231`, `:262` | Console-only (§3.4), together with `set_project_profile` and `set_default_profile`, which choose where a profile runs | 2 |
-| 3 | `term_open` passes `session` to `attach-session -t` unanchored, so a name prefix-matches another session. `tune_session` is unanchored too. Any tmux session on the host can be attached, worktrees' or not. | `crates/worktrees-api/src/term.rs:65`, `:75`; `crates/worktrees-core/src/tmux.rs:530`–`533` | `session(…)` resolves the name to a place in scope, then passes `=<name>`. `ai_pane` is the precedent (`tmux.rs:583`–`587`). | 2 |
+| 3 | `term_open` passes `session` to `attach-session -t` unanchored, so a name prefix-matches another session. `tune_session` is unanchored too. Any tmux session on the host can be attached, worktrees' or not. | `crates/worktrees-api/src/term.rs:65`, `:75`; `crates/worktrees-core/src/tmux.rs:530`–`533` | `session(…)` resolves the name to a place in scope, then passes `=<name>`. `ai_pane` is the precedent (`tmux.rs:583`–`587`). | 2. **The prefix match is closed on main by #516:** `term_open` refuses a session that does not exist and attaches `=<name>`, and `tune_session` targets `=<name>:`. Still open: any tmux session on the host can be attached by its exact name, worktrees' or not, until `session(…)` checks it against a place in scope. |
 | 4 | `sync_apply` with no `repo` adopts: the rsync `--delete` destination is the hub manifest's `local_root`, checked only for being non-empty and not a hub copy. Deletions go to a backup dir, but the tree is mirrored over whatever path the manifest names. | `crates/worktrees-core/src/sync.rs:229`, `:1253`, `:1263`; the api passes the client's `confirmed` (`crates/worktrees-api/src/project.rs:138`) | Phase 2: the adopt form is console-only. Later, a destination rule: must not exist or must be empty, must sit under a configured parent, never `$HOME` or an ancestor of a registered root. | 2 (rule: 3) |
-| 5 | Containment under `[docs]`: `resolve_rel` and `root.join(rel)` walk through an intermediate symlink. `create_initial_commit("")` runs git in serve's own cwd (AGENTS.md: `git -C ""` means HERE). `resolve_doc_paths.root` runs `git ls-files` in an unguarded directory, and an untrusted repo's `core.fsmonitor` runs there. A `..` slug in `shell_open`, `list_branches` and the rest. | `crates/worktrees-core/src/docs.rs:451`; `ROADMAP.md:1074`; `crates/worktrees-api/src/workspace.rs:558`–`563`; `files.rs:1212`–`1240`; `project.rs:500`–`505` | R1's resolver (`project`, `root`, the slug rule) for the last three. For `[docs]`, ROADMAP's own shape: lstat each component, and accept a link only if its target canonicalizes back under the place root, which is `docserver::safe_under`'s rule. **These must close before any remote bind** (§III.3a R1). | 2 |
-| 6 | `privacy_denial` (PR #519) is deliberately unguarded. For any path it tells the caller whether that path is refused under a macOS privacy area. | `origin/feat/tcc-recovery:app/src-tauri/src/lib.rs:5512`; `macprivacy.rs:197`–`222` | When #519 meets the stack it becomes an api body and a dispatch row, which `engine-route-check.mjs` will demand. Make it `read · project` with the path checked LEXICALLY against registered roots: canonicalizing could fail on the very denial it exists to name, and the roots are already visible to the caller. It runs in serve, because the denial is the engine's. Its remedy names the RESPONSIBLE process's bundle id, which serve has no `app.config()` to read, so the shim passes it at spawn as it passes `WORKTREES_VIEWER_JS`. A remote client shows the card with "fix this at the host" and greys out the System Settings button. *Unmeasured: TCC attribution for a serve the app started.* | 2 |
+| 5 | Containment under `[docs]`: `resolve_rel` and `root.join(rel)` walk through an intermediate symlink. `create_initial_commit("")` runs git in serve's own cwd (AGENTS.md: `git -C ""` means HERE). `resolve_doc_paths.root` runs `git ls-files` in an unguarded directory, and an untrusted repo's `core.fsmonitor` runs there. A `..` slug in `shell_open`, `list_branches` and the rest. | `crates/worktrees-core/src/docs.rs:451`; `ROADMAP.md:1074`; `crates/worktrees-api/src/workspace.rs:558`–`563`; `files.rs:1212`–`1240`; `project.rs:500`–`505` | R1's resolver (`project`, `root`, the slug rule) for the last three. For `[docs]`, ROADMAP's own shape: lstat each component, and accept a link only if its target canonicalizes back under the place root, which is `docserver::safe_under`'s rule. **These must close before any remote bind** (§III.3a R1). | 2. **On main since #516,** `shell_open` refuses a `..` slug, and any slug that is not a place, before anything spawns. `list_branches` and the rest still hand the raw slug to `place_dir`. |
+| 6 | `privacy_denial` (PR #519) is deliberately unguarded. For any path it tells the caller whether that path is refused under a macOS privacy area. | `origin/feat/tcc-recovery:app/src-tauri/src/lib.rs:5512`; `macprivacy.rs:197`–`222` | #519 is still open. Rebased onto main, where the app has been serve's client since #524, it becomes an api body and a dispatch row, which `engine-route-check.mjs` will demand. Make it `read · project` with the path checked LEXICALLY against registered roots: canonicalizing could fail on the very denial it exists to name, and the roots are already visible to the caller. It runs in serve, because the denial is the engine's. Its remedy names the RESPONSIBLE process's bundle id, which serve has no `app.config()` to read, so the shim passes it at spawn as it passes `WORKTREES_VIEWER_JS`. A remote client shows the card with "fix this at the host" and greys out the System Settings button. *Unmeasured: TCC attribution for a serve the app started.* | 2 |
 | 7 | `open_docs_viewer` answers with `http://127.0.0.1:<port>/<token>/…`. That is meaningless off the host, and it carries the docs server's token. | `crates/worktrees-cli/src/serve/dispatch.rs:387`–`392`; `crates/worktrees-api/src/files.rs:870` | Phase 2: a remote caller gets `err: "unavailable-remote"` and no URL, and its UI greys the button with that reason. Phase 3: serve the pages through the authenticated socket (a `docs_get` read row); the docs server never listens off loopback. | 2, 3 |
 | 8 | `sanitize_prefix` keeps a leading `-`, and the prefix can come from `[project] prefix` in a cloned repo's `.worktrees.toml`. This lane found no call site where a session name is a positional argument rather than a `-t`/`-s` value; it is defence in depth for R3. | `crates/worktrees-core/src/config.rs:16`–`27`, `:308` | Map a leading `-` to `_`. A session already named with a leading `-` is found by the old name once and renamed. | 2 |
-| 9 | **New. Fixed-name temp files follow a planted symlink.** `write_file` writes `.<name>.wt-tmp` beside the target with `std::fs::write`, which follows a symlink, then chmods it and renames it over the target. A repository that tracks `.README.md.wt-tmp -> ../../.zshrc` turns the user's next save of `README.md` into a write of that content into `~/.zshrc`. `README.md` then becomes the link. The same shape is in every declared-state write (`.worktrees.places.json.tmp` in the repo root) and in `init_write` (`.worktrees.toml.tmp`). | `files.rs:1323`–`1328`; `crates/worktrees-core/src/store.rs:303`–`304`; `crates/worktrees-core/src/init.rs:1014`–`1015` | Create the temp file with `create_new(true)` (`O_CREAT \| O_EXCL`, which refuses an existing path, a dangling link included), with a random suffix, as `servefile::write` already does (`servefile.rs:108`–`113`). Sweep core for the same pattern. *Found by reading, not measured. The regression test must be shown failing first.* | **Fixed on `fix/atomic-write-no-follow`; PR to main pending.** One `worktrees_core::fsx::write_atomic` for every site (store, init, provision, materialize, the dock save, the brief, the user-dir writes), with a guard test. A local bug, independent of Phase 2. |
+| 9 | **New. Fixed-name temp files follow a planted symlink.** `write_file` writes `.<name>.wt-tmp` beside the target with `std::fs::write`, which follows a symlink, then chmods it and renames it over the target. A repository that tracks `.README.md.wt-tmp -> ../../.zshrc` turns the user's next save of `README.md` into a write of that content into `~/.zshrc`. `README.md` then becomes the link. The same shape is in every declared-state write (`.worktrees.places.json.tmp` in the repo root) and in `init_write` (`.worktrees.toml.tmp`). | `files.rs:1323`–`1328`; `crates/worktrees-core/src/store.rs:303`–`304`; `crates/worktrees-core/src/init.rs:1014`–`1015` | Create the temp file with `create_new(true)` (`O_CREAT \| O_EXCL`, which refuses an existing path, a dangling link included), with a random suffix, as `servefile::write` already does (`servefile.rs:108`–`113`). Sweep core for the same pattern. *Found by reading, not measured. The regression test must be shown failing first.* | **Closed on main by #523.** One `worktrees_core::fsx::write_atomic` for every site (store, init, provision, materialize, the dock save, the brief, the user-dir writes), with a guard test. A local bug, independent of Phase 2. One more site of the same class is in ROADMAP: `kimiplace::sync_file` writes through a tracked `.kimi-code` link. |
 | 10 | **New. `repo` is never checked against the registry.** `set_note` and the other `store::edit` callers write `.worktrees.places.json` into any directory. `Project::discover` accepts any git repository. | §3.5 | The `project(…)` resolver, for every caller | 2 |
 | 11 | **New. Serve has no off-loopback connect witness**, although decision 6 says it does | §4.6 | Copy the docs server's test | **Closed on main by #516.** `crates/worktrees-cli/tests/serve_bin.rs::serve_can_be_reached_on_loopback_and_not_off_it` runs in CI on both OSes, loopback connect first. Still missing: the release gate, which slice 0 adds (§4.6). |
 | 12 | **New. Events go to every socket**, including the host-wide `sessions:busy` set and `app:open-doc` | `conn.rs:202`–`207`; `host.rs:316` | Projection per event type (§3.3) | 2 |
 | 13 | **New. An authenticated client is unbounded:** a blocking task per request, an unbounded outbox, a lane per key | `conn.rs:545`, `:498`, `:217`–`237` | §6 | 2 |
 | 14 | **New. Arbitrary-path reads exposed as Engine rows:** `probe_dir`, `skill_inspect`, `sync_hub_list` | `dispatch.rs:228`, `:447`, `:317` | `admin` with `new_path` or `global` (§3.4) | 2 |
 | 15 | **New, a residue of L1:** `log_event` keeps newlines and panics on a mid-character truncation; serve.log is `0644` | `meta.rs:27`–`28`; `mod.rs:131` | §5 | **Closed on main by #516.** `meta::ui_line` escapes the controls, the line separators and the bidi controls, then truncates on a character boundary. serve.log is created `0600` and re-tightened on every write, the rotated copy included. |
-| 16 | Known (Appendix B): `term_*` acts on any id, from any connection, and ids restart at 1 every launch | `term.rs:44`, `:138`; `dispatch.rs:422`–`429` | `attach(id)` (§3.3), plus a launch nonce in the id | 2 |
+| 16 | Known (Appendix B): `term_*` acts on any id, from any connection, and ids restart at 1 every launch | `term.rs:44`, `:138`; `dispatch.rs:422`–`429` | `attach(id)` (§3.3), plus a launch nonce in the id | 2. **No longer latent since #525** (§9.1): a pane being replaced after a reconnect sends its old id to the new socket. |
 
 ---
 
@@ -1814,12 +1842,12 @@ text and record the closure in the last column.
 | View state in `ui-state.json`: selection, sidebar mode, sort, terminal visibility, dock open, tab and width, `place_panels`, `files_md_zoom`, theme | One blob, written whole by `set_settings` (`dispatch.rs:243`) | **Per device**, kept by the client: the shim's config dir on a desktop, the app container on iOS. It never reaches serve. A phone's selection is not the desktop's (§III.6.1). Theme follows each device's own appearance. | 2 |
 | `last_seen_version` ("What's new") | The same blob, so the first client to load after an upgrade uses it up for everyone (Appendix B) | Per device | 2 |
 | Shared preferences (default provider and the like) | The same blob | On the host, written by `patch_settings {key, value, rev}`: merged under a lock, refused if `rev` is stale. It is the `expected_mtime` compare-and-swap shape (`files.rs:1316`–`1320`) applied to a key. `key` comes from a CLOSED list of shared keys. A host-policy key or a per-device key is refused, so a client cannot reintroduce M2 through the settings door (API3, mass assignment). No shared key holds data keyed by project, so `get_settings` leaks nothing to a scoped device. | 2 |
-| The five host policies | Two in `host-policy.json`; fetch interval and the two terminal switches still pushed by the page (Appendix B) | All five in `host-policy.json`, set only by explicit acts. Codex and pi are console-only; the other three are `admin` (§3.4). | 2 |
+| The five host policies | Two in `host-policy.json` (#508). The fetch interval and the two terminal switches are still pushed by the page (`App.tsx:4731`, `:4748` on main), at hydration and on each change. Since #525 that has a new failure: the effects do not depend on the connection, and App stays mounted across a reconnect, so a serve the app restarted after a crash keeps its boot defaults (auto-fetch off, scrollback persistence and per-tab history on) until the setting changes or the window reloads. For a user who turned persistence off, the next 15 s flush writes every dirty dock shell's ring to disk. *Found by reading, not measured.* | All five in `host-policy.json`, set only by explicit acts. Codex and pi are console-only; the other three are `admin` (§3.4). | 2 (slice 0, the first of §10) |
 | `ui-events.jsonl` | Appended by any client | Loopback only (§3.4) | 2 |
 | `mark_seen` | Stamps the client's clock, forward-only (Appendix B) | The host stamps its own `now`, and the client's epoch is ignored | 2 |
 | `open_place` closing the second agent | Decided by whichever client selects the place first, using its own default (Appendix B) | Not decided by a client on load. The server decides, using the host's default, or the user is asked. | 2 |
 | A dock shell's single sink | A second attach silences the first pane (`term.rs:438`–`462`) | A sink per attach. The most recently active attach owns the size, which is tmux's `window-size latest`. | 2 |
-| Terminal ids | A global counter from 1, no owner (gap 16) | Owner check plus a launch nonce | 2 |
+| Terminal ids | A global counter from 1, no owner (gap 16). Appendix B called it latent "because the transport's client never reconnects". Since #525 it does, including to a serve it restarted. Panes are keyed by the connection's `gen`, so each one remounts and opens a fresh id. But the pane being replaced closes its OLD id on unmount (`TerminalPane.tsx:106` on main), and that call goes out on the NEW socket. A new launch counts from 1 again, so the id may already name an attach it just handed out: a fresh pane, or another client's. *Found by reading, not measured.* | Owner check plus a launch nonce. The owner check alone turns the stale close into a refusal, because the new connection never opened that id. | 2 |
 | `app:open-doc` | Sent to every socket, so one `worktrees show` opens the document on every device | Loopback clients only: `worktrees show` is run by someone at the host | 2 |
 | Events in general | Every socket | Projected to the scope (§3.3) | 2 |
 | Dates | Host-local (`sysclock::date_cache`) | Displays take the device's time zone, as `ui_usage` already does with `tz_offset_min` | 3 |
@@ -1862,12 +1890,14 @@ the verb and the lease, with the phone, as §III.9 planned.
 
 Each slice merges on its own, and nothing binds off loopback until slice 6.
 
-0. **Local fixes, no remote:** gap 9 (temp files; fixed on
-   `fix/atomic-write-no-follow`, PR to main pending), the release gate for
-   the loopback connect witness (§4.6; the witness itself, gap 11, is on main
-   by #516, as is gap 15's L1 fix), gap 8, `catch_unwind` on every body (§6),
-   `cargo deny` in CI (§4.2), and the three host policies still pushed by
-   the page (Appendix B, "One fix for all five").
+0. **Local fixes, no remote:** the release gate for the loopback connect
+   witness (§4.6), gap 8, `cargo deny` in CI (§4.2), and the three host
+   policies still pushed by the page (Appendix B, "One fix for all five").
+   Since #525 that last item can turn a user's "off" back on (§9.1), which
+   makes it the most urgent of the four. Already on main: gap 9 (#523), the
+   witness itself (gap 11), gap 15's L1 fix, and `catch_unwind` on every
+   body (all #516). The in-flight drop guard that §6 pairs with
+   `catch_unwind` comes with the caps in slice 4.
 1. **The dispatch table:** `HostConsole`, the capability and object columns,
    the resolver, result and event projection, and the tests in §3.3.
    Loopback behaviour is unchanged apart from §3.5. Gaps 2, 3, 4 (the
@@ -1883,8 +1913,8 @@ Each slice merges on its own, and nothing binds off loopback until slice 6.
 6. **The remote listener** (§4), behind the opt-in: the address classifier,
    the address-change rules and the address code (§4.1), mDNS rediscovery
    (§4.7), the shim's remote door, and both witnesses (§4.6, §4.7). Every
-   gap in §8 is closed or tagged by now. Gap 6 lands whenever #519 meets
-   the stack, as its row says.
+   gap in §8 is closed or tagged by now. Gap 6 lands with #519, as its row
+   says.
 
 **A spike, before slice 5's design is frozen:** on a real iPhone (TestFlight)
 and a second Mac on the tailnet, measure the claims marked unmeasured above:
@@ -2069,8 +2099,9 @@ The draft was reviewed with the `owasp-security` skill against OWASP Top
 and the new V17 on WebSockets), the Agentic Top 10 (ASI01–ASI10) and the LLM
 Top 10. It was a review of a design, so every finding below is a change to
 this document, already folded in, not a bug in shipped code. The exceptions
-are two facts the review checked in the code and found true today: O6 and
-O15.
+are two facts the review checked in the code at `fadb2ce` and found true: O6
+and O15. #516 has since fixed O15's unanswered panic. Its in-flight half
+waits for the caps (§6).
 
 **This first pass predates the decisions of 2026-10-20 (§11).** A second
 pass covered what those decisions changed, and §12.1 lists what it changed
@@ -2105,7 +2136,7 @@ token in a URL.
 | O12 | LLM10, API4 | Nothing bounded how many agents a device could launch, so a stolen or buggy device could burn the user's plan. | 10 launches an hour and 4 live device-launched lanes, on top of the quota gate. (§6) |
 | O13 | A05, ASVS V5 | The new inputs were not specified: the device name, and the pairing URI as the DEVICE parses it. | The name is limited in length and stripped of control and bidi characters. The URI parser is strict, with an address-class allowlist and `exp`. (§2.2) |
 | O14 | A04, A06 | The comparison code protected only a user who looks, and the race-lost case gave no guidance. | Host copy: "allow only if this code is on your device right now". The device that lost the race says to Deny. A QR on a shared screen, and an attacker's QR, are named as residuals. (§2.2) |
-| O15 | A10, API4 | A body that panics is contained, but its request is never answered (`conn.rs:539`–`541` pushes only on return), so the client hangs, and in-flight caps would leak a slot. A corrupt `devices.json` had no rule. | `catch_unwind` answers `err: "internal"`, and the in-flight count is a drop guard. A corrupt file refuses every device and is not overwritten. (§5.2, §6, slice 0) |
+| O15 | A10, API4 | A body that panics is contained, but its request is never answered (`conn.rs:539`–`541` pushes only on return), so the client hangs, and in-flight caps would leak a slot. A corrupt `devices.json` had no rule. | `catch_unwind` answers `err: "internal error"` (on main since #516), and the in-flight count is a drop guard. A corrupt file refuses every device and is not overwritten. (§5.2, §6, slice 4) |
 | O16 | A06, A09 | A destructive act from a device left no way back. | `remove_place` with `del_branch` records the tip SHA in the audit log. (§5.1) |
 | O17 | A03 | A TLS stack joins the network-facing binary with no advisory check in CI. | `cargo deny check advisories` in CI. (§4.2, slice 0) |
 | O18 | ASI09 | Answering on a small screen invites approving a truncated command. | The answer verb renders the whole prompt, and there is no approve-all. (§9.2) |

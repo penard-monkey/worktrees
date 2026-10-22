@@ -4,11 +4,13 @@ title: "Proposal — Server Edition"
 
 # Proposal — Server Edition: one machine runs the engine, any device drives it
 
-**Status:** design plus decisions, 2026-10-17. Phase 0 (the `worktrees-api`
-extraction) is built and in review as PR #508. Phase 1 is in progress on
-branches stacked on it: `worktrees serve` (the loopback server), the frontend
-transport, and the packaging that ships the CLI inside the app. Nothing binds
-off loopback, and nothing will until Phase 2's gates hold.
+**Status:** design plus decisions, 2026-10-17. Phase 0 and Phase 1 shipped
+in v0.43.0 (2026-10-21). That covers the `worktrees-api` extraction (#508),
+`worktrees serve` on loopback (#516), the frontend's one door and the app as
+serve's client (#515, #524), automatic reconnection (#525), and the CLI
+bundled inside the app, Linux included (#513, merged with #525). Nothing binds off loopback,
+and nothing will until Phase 2's gates hold. Phase 2 is designed in
+[server-edition-phase2.md](server-edition-phase2.md).
 
 **Provenance.** The design is Part III of the plan kept in the
 `feat-pretty-ui-server` place, written 2026-10-15 against `b47cbe0`. It is
@@ -119,8 +121,8 @@ the code wins.
      - a branch with `branch_arg`: git's `check-ref-format --branch` rule,
        pinned to git by an oracle test, and applied after core strips
        `origin/`;
-     - a base, slug or name with `safe_arg`: no leading `-`, no control
-       characters, no `..`.
+     - a base, slug or name with `safe_arg`: no leading `-`, no `..`, and
+       no CR, LF or NUL (`crates/worktrees-core/src/argv.rs:42`).
 
      The MCP server uses the same validators.
 
@@ -145,12 +147,16 @@ the code wins.
   - `write_file` can overwrite `<project>/.git/config`, and `core.fsmonitor`
     runs on the next git spawn;
   - `save_profile` stores `mcp_servers`/`hooks` that run at the next launch;
-  - `term_open.session` reaches `attach-session -t` unanchored;
+  - `term_open.session` reached `attach-session -t` unanchored (anchored
+    to `=<name>` since #516; any session on the host is still attachable by
+    its exact name);
   - the rsync destination in `sync.rs` is checked only for being non-empty;
   - a few containment gaps (`create_initial_commit("")`,
-    `resolve_doc_paths.root`, a `..` slug in `shell_open`/`list_branches`).
+    `resolve_doc_paths.root`, a `..` slug in `list_branches`, and in
+    `shell_open` until #516 refused one).
 
-  Found by the R3 lane; the list is in its report.
+  Found by the R3 lane; the list is in its report. Phase 2 carries each one
+  as a gap with a fix shape ([Phase 2](server-edition-phase2.md) §8).
 
 ## Part III — the server edition (the plan as written, 2026-10-15)
 
@@ -710,6 +716,15 @@ Exit: drive the real app in Chrome against a real engine over a socket;
 > A serve the app starts runs `--owner app` and is stopped on a clean quit,
 > as is an adopted one, so a crash leftover does not run unseen until reboot.
 > A serve from the CLI or the dev stack has no owner and is never signalled.
+>
+> **2026-10-21 (shipped in v0.43.0):** Phase 1 is on main as #516, #515,
+> #524 and #525, with the CLI sidecar (#513) merged inside #525. Since then,
+> a serve the app owns stops itself after 120 s with no client
+> (`OWNED_IDLE_GRACE`), so a crash leftover does not wait for the next
+> launch either. The page reconnects on
+> its own (`app/src/reconnect.ts`), with backoff and a crash-loop limit, and
+> may start a new serve only when the one it lost was the app's. Panes
+> re-attach on the new connection.
 
 #### Phase 2 — identity, capability, exposure
 
@@ -735,18 +750,20 @@ capability, **R8** the witness covering identity as well as reachability, and
 >   Enclave on iOS) and revocation;
 > - capabilities and project scopes, declared per row in the dispatch table,
 >   with all 150 commands mapped and a loopback-only `HostConsole` class;
-> - the remote listener's rule set and the identity witness. Serve has no
->   off-loopback connect witness yet, which decision 6 assumes;
+> - the remote listener's rule set (overlay and LAN binds, rediscovery over
+>   mDNS) and the identity witness, on top of the loopback connect witness
+>   that decision 6 assumes and #516 added;
 > - the audit log, limits for authenticated clients, and path classes for
 >   the agent-instruction surface;
 > - the eight known gaps, seven more found by this design and one from
->   Appendix B. One of the seven, a temp file that follows a planted
->   symlink, can be reached from a cloned repository today;
+>   Appendix B. One of the seven, a temp file that followed a planted
+>   symlink, could be reached from a cloned repository; #523 fixed it;
 > - per-device versus per-host state.
 >
 > It was reviewed with the `owasp-security` skill. The user answered its
-> eight questions on 2026-10-20, R9 among them ("maybe later"), and its §11
-> records each answer with its consequence.
+> eight questions on 2026-10-20, R9 among them ("maybe later"), and then the
+> four those answers raised. Its §11 records each answer with its
+> consequence. It was refreshed against v0.43.0 on 2026-10-21.
 
 #### Phase 3 — the phone
 
@@ -953,9 +970,9 @@ Three things follow.
    static, on load and on every change. That was harmless while the page and
    the engine started and died together. Under one engine per host, a page
    load is an act on the host, and the last page to load decides. The fix for
-   the two security settings is in flight on `fix/host-policy` (the OWASP
-   review of `serve`, finding M2), and the other three take the same shape
-   (see "One fix for all five").
+   the two security settings shipped in #508 (`fix/host-policy`, the OWASP
+   review of `serve`, finding M2). The other three take the same shape and
+   are still pushed by the page at v0.43.0 (see "One fix for all five").
 3. **Phase 1 needs one line from this appendix and one piece of wiring;
    everything else is Phase 2.** Phase 1 ships exactly one client. The app has
    one window, and the loopback listener refuses any `Origin` but the app's
@@ -981,8 +998,8 @@ Three things follow.
 | `term::NEXT_ID` | `crates/worktrees-api/src/term.rs:44` | **per-launch identity** | Phase 2 |
 | `term::CWD_FILE_LOCK` | `crates/worktrees-api/src/term.rs:697` | host fact | — |
 | `term::TERM_HIST_LOCK` | `crates/worktrees-api/src/term.rs:962` | host fact | — |
-| `term::PERSIST_SCROLLBACK` | `crates/worktrees-api/src/term.rs:968` | **host policy** | **Phase 1** (interim), Phase 2 |
-| `term::PER_TAB_HISTORY` | `crates/worktrees-api/src/term.rs:969` | **host policy** | **Phase 1** (interim), Phase 2 |
+| `term::PERSIST_SCROLLBACK` | `crates/worktrees-api/src/term.rs:968` | **host policy** | Phase 1 interim shipped; the rest Phase 2 |
+| `term::PER_TAB_HISTORY` | `crates/worktrees-api/src/term.rs:969` | **host policy** | Phase 1 interim shipped; the rest Phase 2 |
 | `term::UNSUPPORTED_SHELL_LOGGED` | `crates/worktrees-api/src/term.rs:1406` | const-like | — |
 | `viewer::ISSUED` | `crates/worktrees-api/src/viewer.rs:415` | **per-launch identity** | — |
 | `viewer::temp_beside` `N` | `crates/worktrees-api/src/viewer.rs:919` | const-like | — |
@@ -997,7 +1014,7 @@ Three things follow.
 | `claude_usage::USAGE_FAIL_AT` | `crates/worktrees-core/src/claude_usage.rs:96` | host fact | — |
 | `clone::CLI_CANCEL` | `crates/worktrees-core/src/clone.rs:659` | const-like | — |
 | `codex::THREAD_CWD` | `crates/worktrees-core/src/codex.rs:136` | host fact | — |
-| `codex::PERMISSIONS_OVERRIDE` | `crates/worktrees-core/src/codex.rs:214` | **host policy** | Phase 2; fix in flight: `fix/host-policy` |
+| `codex::PERMISSIONS_OVERRIDE` | `crates/worktrees-core/src/codex.rs:214` | **host policy** | Phase 2; persisted on the host since #508 |
 | `codex_usage::CACHE` | `crates/worktrees-core/src/codex_usage.rs:502` | host fact | — |
 | `codex_usage::tests` `SEQ` | `crates/worktrees-core/src/codex_usage.rs:814` | test-only | — |
 | `config::USER_CONFIG_LOCK` | `crates/worktrees-core/src/config.rs:97` | host fact | — |
@@ -1032,7 +1049,7 @@ Three things follow.
 | `tmux::NO_START` | `crates/worktrees-core/src/tmux.rs:84` | host fact | — |
 | `tmux_server::publish` `NEXT` | `crates/worktrees-core/src/tmux_server.rs:172` | const-like | — |
 | `tmux_server::tests` `NEXT` | `crates/worktrees-core/src/tmux_server.rs:272` | test-only | — |
-| `trust::PI_TRUST_OVERRIDE` | `crates/worktrees-core/src/trust.rs:59` | **host policy** | Phase 2; fix in flight: `fix/host-policy` |
+| `trust::PI_TRUST_OVERRIDE` | `crates/worktrees-core/src/trust.rs:59` | **host policy** | Phase 2; persisted on the host since #508 |
 
 ### The host policies
 
@@ -1040,9 +1057,10 @@ Three things follow.
 
 The fix moves the value onto the host and stops the page from pushing it.
 
-**Codex permissions and pi trust: fix in flight on `fix/host-policy`.** That
-lane is the OWASP review's finding M2, and this appendix does not propose a
-second design for it. As briefed:
+**Codex permissions and pi trust: shipped in #508** (`fix/host-policy`,
+`crates/worktrees-api/src/hostpolicy.rs`, `<config_dir>/host-policy.json`).
+That lane was the OWASP review's finding M2, and this appendix does not
+propose a second design for it. As briefed, and as built:
 
 - The value is persisted in a backend-owned file in the engine's config dir
   (`Ctx::config_dir`), written under a lock and a rename, and never inside
@@ -1073,13 +1091,21 @@ the capability cannot change them, instead of failing on every load.
   `Engine` (`dispatch.rs:215`, `:355`). Once they persist host policy,
   `HostAdmin` is the honest tag.
 - **What the page stops doing.** The effects at `App.tsx:4663` and `4673` are
-  deleted. The three `Settings` keys go the way `fix/host-policy` takes its
-  two, so all five stay alike, and `fix/host-policy`'s boot migration can
-  carry three more keys.
+  deleted. The three `Settings` keys go the way `fix/host-policy` took its
+  two, so all five stay alike, and its boot migration
+  (`hostpolicy::migrate_from_ui_state`) can carry three more keys.
 - **Phase 1 interim.** Gate `set_fetch_interval` and `set_term_history_opts` on
   `hydratedTick`, as the Codex and pi effects already are. That is one line
   each, and it removes the pre-hydration default push that a long-lived engine
-  makes meaningful.
+  makes meaningful. *Shipped for `set_term_history_opts`*
+  (`hostpolicy-check.mjs` holds the gate). `set_fetch_interval` stays
+  ungated, because its early push of `0` costs at most one skipped tick.
+- **Why the rest cannot wait for Phase 2 (since #525).** Both effects run at
+  hydration and on a change of the setting, never on a new connection, and
+  the page stays mounted across a reconnect. A serve the app restarted after
+  a crash therefore keeps its boot defaults until the setting changes or the
+  window reloads: auto-fetch off, scrollback persistence and per-tab history
+  on. *Found by reading, not measured.*
 
 #### `codex::PERMISSIONS_OVERRIDE` — `crates/worktrees-core/src/codex.rs:214`
 
@@ -1130,13 +1156,13 @@ also runs each request on its own blocking-pool task
 order. The control has to show what the host stored, not what was clicked
 last.
 
-**Fix in flight: `fix/host-policy`** (see "One fix for all five"). It keeps
+**Fixed by #508** (see "One fix for all five"). It kept
 scope as it is, so a split that exists today with a single client stays open:
 the setting is read only by the engine process, so MCP `create_worktree` and
 `worktrees new --ai codex`, which run in other processes, launch from the env
 or config tier and never see Settings → Codex at all. Whether they should is
-the open question that lane reports, because honouring the setting there
-widens what an MCP-created Codex lane may do.
+the open question that lane reported, because honouring the setting there
+widens what an MCP-created Codex lane may do. It is still open.
 
 **Blocks:** Phase 2.
 
@@ -1165,7 +1191,7 @@ pi's own `trust.json` (`pi_launch_trust_for`, `trust.rs:148`). Each of those
 lanes then opens on a prompt whose highlighted choice runs the repo's own
 code. The same split with MCP and the CLI exists today.
 
-**Fix in flight: `fix/host-policy`**, the same change as Codex's, with the
+**Fixed by #508**, the same change as Codex's, with the
 same scope question for MCP and the CLI. The per-repo allowance (`[trust] pi`
 in config.toml) needs nothing: it is already on the host, and only an
 explicit act changes it (`trust::set_allowed`, from Settings → pi or
@@ -1209,9 +1235,13 @@ lasts a WAN round trip. The same hint's "A dock shell dies with the app"
 stops being true once `serve` outlives the app.
 
 **Fix:** the Phase 1 interim (gate the effect on `hydratedTick`), then the
-rest of "One fix for all five".
+rest of "One fix for all five". The interim shipped in v0.43.0. Since #525 the
+rest has a second reason. A reconnect to a serve the app restarted never
+re-pushes, so the flag is back at its default `true` there until the setting
+changes or the window reloads. That is the same disk write, with no window
+that closes by itself ("Why the rest cannot wait for Phase 2", above).
 
-**Blocks:** Phase 1 (the interim line), Phase 2 (the rest).
+**Blocks:** Phase 2 (the rest; the interim line shipped).
 
 #### `term::PER_TAB_HISTORY` — `crates/worktrees-api/src/term.rs:969`
 
@@ -1281,8 +1311,17 @@ integers that every launch hands out again from 1. Once clients reconnect
 across an engine restart, as the phone will in Phase 2, a pane still holding
 an id from the old launch types into whichever attach the new launch gave
 that number. That can be another device's attach, on another place's agent.
-It is latent today because the transport's client never reconnects: after a
-close, every later call is rejected.
+This was written as latent "because the transport's client never reconnects:
+after a close, every later call is rejected". **Since #525 that is no longer
+true.** The app reconnects on its own, including to a serve it restarted
+after a crash. It keys every pane by the connection's `gen`, so each pane
+remounts and opens a fresh id. But the pane being replaced closes its old id
+as it unmounts (`TerminalPane.tsx:106` on main), and that `term_close` goes
+out on the NEW socket. On a restarted serve, that id may already name an
+attach the new launch handed out: one of the app's own fresh panes, or, with
+two clients, another client's. *Found by reading, not measured.* The fix below
+turns that call into a refusal, because the new connection never opened the
+id.
 
 **Fix:** record the owning connection with each attach, and refuse a
 `term_*` call for an id the caller did not open. The per-connection set
@@ -1440,9 +1479,9 @@ writing command is a click handler.
 | Call site | Command | When | Writes | Ruling |
 |---|---|---|---|---|
 | `App.tsx:4663` | `set_fetch_interval` | on mount with the default `0`, then after hydration and on every change | `ops::FETCH_INTERVAL_SECS` | host policy: delete; Phase 1 interim, gate on `hydratedTick` |
-| `App.tsx:4673` | `set_term_history_opts` | on mount with the defaults `true, true`, then after hydration and on every change | `term::PERSIST_SCROLLBACK`, `term::PER_TAB_HISTORY` | host policy: **Phase 1, gate on `hydratedTick`**; then delete |
-| `App.tsx:4727` | `set_codex_permissions` | after hydration and on every change | `codex::PERMISSIONS_OVERRIDE` | host policy: delete; fix in flight: `fix/host-policy` |
-| `App.tsx:4732` | `set_pi_trust` | after hydration and on every change | `trust::PI_TRUST_OVERRIDE` | host policy: delete; fix in flight: `fix/host-policy` |
+| `App.tsx:4673` | `set_term_history_opts` | on mount with the defaults `true, true`, then after hydration and on every change | `term::PERSIST_SCROLLBACK`, `term::PER_TAB_HISTORY` | host policy: gated on `hydratedTick` in Phase 1 (shipped); then delete |
+| `App.tsx:4727` | `set_codex_permissions` | after hydration and on every change | `codex::PERMISSIONS_OVERRIDE` | host policy: deleted by #508 |
+| `App.tsx:4732` | `set_pi_trust` | after hydration and on every change | `trust::PI_TRUST_OVERRIDE` | host policy: deleted by #508 |
 | `App.tsx:5021` → `settings.ts:558` | `set_zoom` | after hydration and when the zoom changes | WKWebView page zoom | client-local and correct: serve refuses it (`ClientLocal`), and the shim keeps it |
 | `App.tsx:4686` (`useLayoutEffect`) → `settings.ts:839`, `App.tsx:4697`, `4706`, `4713` | `set_settings` | on load: a `settings_rev` migration, a pre-hydration patch, or a new `last_seen_version` | `ui-state.json`, whole | §III.6.1. `last_seen_version` belongs to the device: the first client to load after an upgrade uses up "What's new" for all of them |
 | `App.tsx:5116` → `ack` → `App.tsx:4420` | `mark_seen` | a selected place stays visible for `SEEN_DWELL_MS` | `last_seen_epoch` in `.worktrees.places.json`, forward-only, at the client's clock | shared, since one person reads it, but triggered by one device. A device left open on a place acks every completion there for all of them, and a device whose clock runs ahead stamps a future epoch that forward-only keeps. The host should stamp its own `now`. Phase 2 |
