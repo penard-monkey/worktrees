@@ -293,6 +293,11 @@ pub fn start_in(
     budgets: budget::Budgets,
     clients: conn::Clients,
 ) -> Result<Running, String> {
+    // A serve a TEST starts runs in the test's process with the user's real
+    // HOME: refuse its registry writes rather than let them land in their
+    // `~/.config/worktrees/projects.json` (`registry::forbid_real_writes`).
+    #[cfg(test)]
+    worktrees_core::registry::forbid_real_writes();
     let clients = Arc::new(clients.budgeted(budgets));
     // A revoke, a disable or a narrowed grant acts on the live connections.
     clients.listen();

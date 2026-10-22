@@ -31,6 +31,9 @@ impl Host for Recorder {
 /// A `Ctx` over a config dir of this test's own, so nothing here can read or
 /// write the real app's state.
 fn ctx(tag: &str) -> (Ctx, Arc<Recorder>, std::path::PathBuf) {
+    // The engine runs in this process with the user's real HOME: a registry
+    // write would land in their projects.json, so it is refused instead.
+    worktrees_core::registry::forbid_real_writes();
     let dir = std::env::temp_dir().join(format!("wt-headless-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();

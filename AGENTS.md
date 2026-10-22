@@ -529,6 +529,29 @@ worth knowing too: **bash expands every assignment on a `local a=1 b="$a"` line
 before binding any of them**, so `b` is empty — and under `set -u` the function
 dies mid-way inside a command substitution, leaving the caller with "".
 
+**The project registry is the USER's, and a test's config dir does not
+isolate it.** `worktrees_core::registry` is
+`$XDG_CONFIG_HOME/worktrees/projects.json`, shared by the CLI and every
+engine. Serve's `--config-dir` and a test's temp `Ctx` isolate ui-state, the
+rings and serve.json, NOT the registry. The same holds for the rest of that
+directory: `planning.json`, `skills.json`, `agent-guidance.json` and
+`guidance/`. On 2026-10-22 a serve socket test's `add_project` registered six
+scratch repos in the user's real file, and then deleted them from disk. Two
+guards now exist:
+- A test that SPAWNS the binary gives that child its own `HOME` and
+  `XDG_CONFIG_HOME` (`serve_bin.rs`, `plan_parity.rs`), per child and never
+  with `std::env::set_var` in the test process.
+- A test that starts the engine IN-PROCESS runs under
+  `registry::forbid_real_writes()`. `serve::start_budgeted` calls it under
+  cfg(test), and so does the api's headless `ctx`. After that, a registry
+  write to the real path fails with an error saying why.
+
+The other files in that directory have no such guard. A test that needs them
+writes a temp file through the `*_at` forms. And show a test that guards real
+state red ONLY under a temp `HOME`: build with `--no-run`, then run the test
+binary with `HOME`/`XDG_CONFIG_HOME` in its own env. Its red run is the very
+write it exists to stop.
+
 **"Measured on this platform" has to say WHICH platform.** A test asserted that
 binding `0.0.0.0:<our port>` succeeds while a loopback-only listener holds it,
 and its comment said it had been measured — on macOS. Linux refuses a wildcard

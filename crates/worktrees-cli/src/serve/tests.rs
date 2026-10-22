@@ -3388,3 +3388,28 @@ fn a_devices_shell_slot_is_held_by_the_stream_until_it_detaches() {
     }
     let _ = std::fs::remove_dir_all(&repo);
 }
+
+/// **A serve a test starts cannot write the user's real project registry.**
+/// The registry is `$XDG_CONFIG_HOME/worktrees/projects.json` — the USER's,
+/// not under the config dir a test gives serve — so a socket test's
+/// `add_project` once registered six scratch repos in the real file, which
+/// were then deleted from disk (2026-10-22). Every serve started in a test
+/// process forbids that (`registry::forbid_real_writes`), and the write now
+/// fails, saying why, while the real file never sees the repo.
+#[test]
+fn a_test_serve_cannot_write_the_users_project_registry() {
+    let l = live("realreg");
+    let repo = scratch_repo("realreg");
+    let canon = std::fs::canonicalize(&repo).unwrap().to_string_lossy().into_owned();
+    let mut ws = client(&l);
+    let r = rpc(&mut ws, json!(1), "add_project", json!({ "dir": repo.to_string_lossy() }));
+    let listed = worktrees_core::registry::read_lenient().roots().contains(&canon);
+    if listed {
+        // Never leave it behind, whatever the assertions below say.
+        let _ = worktrees_core::registry::remove(&canon);
+    }
+    let _ = std::fs::remove_dir_all(&repo);
+    assert!(!listed, "the scratch repo landed in the real registry: {r}");
+    let e = r["err"].as_str().unwrap_or_default();
+    assert!(e.contains("real project registry"), "the refusal says why: {r}");
+}
