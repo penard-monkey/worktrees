@@ -21,8 +21,9 @@ pub fn log_info() -> LogInfo {
 /// Frontend errors land in the same file, tagged `ui:`.
 ///
 /// The message is a CLIENT's string, so it is cleaned here, in the body,
-/// rather than in a sink: the app's `app.log` and serve's `serve.log` get the
-/// same line from the same code. See `ui_line`.
+/// rather than in a sink: whichever host runs it writes the same line (since
+/// the app became serve's client, that is serve, into `serve.log`). See
+/// `ui_line`.
 pub fn log_event(level: &str, msg: String) {
     let lv = match level {
         "error" | "warn" | "info" => level,

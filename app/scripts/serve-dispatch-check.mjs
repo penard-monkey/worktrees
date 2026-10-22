@@ -1,16 +1,20 @@
-// Every command the app registers must be dispatchable over the socket, and
-// nothing the socket dispatches may be a command the app does not have.
+// serve's dispatch table and the shim never both run a command.
 //
 //   node app/scripts/serve-dispatch-check.mjs      # exits non-zero on failure
 //
 // `worktrees serve` answers the same `{cmd, args}` the frontend's `invoke`
 // sends, out of one table in `crates/worktrees-cli/src/serve/dispatch.rs` that
-// pairs each command with its exposure. A command added to the shim's
-// `generate_handler!` without a row there is a request that fails with
-// `unknown command` — correct, loud, and only discovered when a phone presses
-// the button. A row with no handler behind it is a command the desktop cannot
-// make and the socket can. Both are drift between two lists that nothing
-// compiles together, which is the api-boundary-check family's job to hold.
+// pairs each command with its exposure. The desktop app is serve's CLIENT (one
+// engine per host): its shim registers only serve's `ClientLocal` rows and its
+// own two commands, and everything else goes over the socket. So the rule this
+// check holds is the inverse of the one it held while the app was an engine:
+// the shim's `generate_handler!` may contain NO `Engine`, `HostAdmin` or
+// `Stream` row — one that did would be a second engine for that command, with
+// its own registries, invisible to serve. The client-local set is pinned by
+// name so a command cannot drift between "runs on the host" and "refused"
+// without this line changing. (Which names the PAGE routes where, and that
+// every `invoke("…")` it makes is a row or a shim command, is
+// engine-route-check.mjs.)
 //
 // The wire those rows are reached over (`crates/worktrees-cli/src/serve/wire.rs`
 // is the source of truth; this is the summary a client author needs):
@@ -56,8 +60,9 @@
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 
-const SHIM = fileURLToPath(new URL("../src-tauri/src/lib.rs", import.meta.url));
-const TABLE = fileURLToPath(new URL("../../crates/worktrees-cli/src/serve/dispatch.rs", import.meta.url));
+// DISPATCH_SHIM / DISPATCH_TABLE point the check at a mutated copy.
+const SHIM = process.env.DISPATCH_SHIM ?? fileURLToPath(new URL("../src-tauri/src/lib.rs", import.meta.url));
+const TABLE = process.env.DISPATCH_TABLE ?? fileURLToPath(new URL("../../crates/worktrees-cli/src/serve/dispatch.rs", import.meta.url));
 
 let failed = 0;
 const fail = (m) => { failed++; console.log(`FAIL ${m}`); };
@@ -87,26 +92,26 @@ if (table.length === 0) fail("the dispatch table parsed as empty");
 else ok(`${table.length} rows in the dispatch table`);
 
 // ── one against the other ────────────────────────────────────────────────────
-const inShim = new Set(handlers);
-const inTable = new Set(table);
 const dupes = table.filter((n, i) => table.indexOf(n) !== i);
 if (dupes.length) fail(`listed twice in the table: ${[...new Set(dupes)].join(", ")}`);
-const missing = handlers.filter((n) => !inTable.has(n));
-const extra = table.filter((n) => !inShim.has(n));
-if (missing.length) fail(`in the shim but not dispatched over the socket: ${missing.join(", ")}`);
-else ok("every shim command has a dispatch row");
-if (extra.length) fail(`dispatched over the socket but not a shim command: ${extra.join(", ")}`);
-else ok("every dispatch row is a shim command");
+else ok("no command is listed twice");
+const engineSide = handlers.filter((n) => exposure.has(n) && exposure.get(n) !== "ClientLocal");
+if (engineSide.length) fail(`the shim registers engine commands serve also runs: ${engineSide.map((n) => `${n} (${exposure.get(n)})`).join(", ")} — a second engine for each`);
+else ok("the shim registers no Engine, HostAdmin or Stream row — every engine command is serve's alone");
+const localRows = table.filter((n) => exposure.get(n) === "ClientLocal");
+const unregistered = localRows.filter((n) => !handlers.includes(n));
+if (unregistered.length) fail(`ClientLocal rows the shim does not register: ${unregistered.join(", ")} — serve refuses them and nothing else runs them`);
+else ok("every ClientLocal row is registered by the shim");
 
-// ── the client-local set is the shim's own list ──────────────────────────────
-// The commands the socket refuses as `client-local` are exactly the ones the
-// api-boundary-check lets keep a body in the shim, plus the ones whose body
-// opens something on the caller's machine. Pinned so a command cannot drift
-// from "runs on the host" to "refused" (or back) without this line changing.
-const CLIENT_LOCAL = ["copy_text", "open_editor", "open_terminal", "detect_editors", "open_docs_viewer", "set_zoom", "install_app_version"];
+// ── the client-local set, by name ────────────────────────────────────────────
+// Pinned so a command cannot drift from "runs on the host" to "refused" (or
+// back) without this line changing. `open_docs_viewer` left it on 2026-10-20:
+// its body registers a place with the HOST's documentation server, which the
+// host poll refreshes, and the browser is opened by the page's own `openUrl`.
+const CLIENT_LOCAL = ["copy_text", "open_editor", "open_terminal", "detect_editors", "set_zoom", "install_app_version"];
 const tagged = table.filter((n) => exposure.get(n) === "ClientLocal").sort();
 if (tagged.join() !== [...CLIENT_LOCAL].sort().join()) fail(`client-local rows are [${tagged.join(", ")}], expected [${CLIENT_LOCAL.join(", ")}]`);
-else ok("the client-local set is the expected seven");
+else ok("the client-local set is the expected six");
 
 console.log(failed ? `\nserve-dispatch-check: ${failed} failure(s)` : "\nserve-dispatch-check: all good");
 process.exit(failed ? 1 : 0);

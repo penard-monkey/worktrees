@@ -1679,6 +1679,15 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     case "set_zoom":
       return null;
 
+    // The shim's own two commands. `raise_window` brings the real window
+    // forward for `app:open-doc`; a browser tab has nothing to raise.
+    // `engine_connect` is never reached here — the harness boots on this mock,
+    // not on an engine (main.tsx) — and says so if something ever calls it.
+    case "raise_window":
+      return null;
+    case "engine_connect":
+      throw new Error("the mock harness has no engine: it answers every command itself");
+
     // Codex account quotas. Independent states, delay, sequence and invocation
     // counts let browser checks verify real Off and overlapping request behavior.
     case "codex_usage": {

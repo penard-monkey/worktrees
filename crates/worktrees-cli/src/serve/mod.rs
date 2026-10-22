@@ -23,13 +23,14 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use worktrees_api::log::LogSink;
 use worktrees_api::{host, Ctx};
 use worktrees_core::render::error_line;
 
 pub const USAGE: &str = "\
-usage: worktrees serve [--config-dir DIR] [--port N] [--allow-origin ORIGIN]...
+usage: worktrees serve [--config-dir DIR] [--port N] [--allow-origin ORIGIN]... [--owner app]
 
   --config-dir DIR      the app's config dir (default: the desktop app's own —
                         ~/Library/Application Support/net.casadelvalle.worktrees
@@ -37,18 +38,30 @@ usage: worktrees serve [--config-dir DIR] [--port N] [--allow-origin ORIGIN]...
   --port N              listen on 127.0.0.1:N (default: an ephemeral port)
   --allow-origin ORIGIN also accept this Origin (DEV ONLY; repeatable; a flag,
                         never a config key, so a dev entry cannot ship)
+  --owner app           the desktop app started this serve and stops it when it
+                        quits; recorded in serve.json so an app relaunched after
+                        a crash adopts it instead of leaving it running unseen
 
-Writes <config-dir>/serve.json ({port, token, pid, version}, mode 0600) and
+Writes <config-dir>/serve.json ({port, token, pid, version[, owner]}, mode 0600) and
 serves until SIGINT/SIGTERM. Logs to ~/.cache/worktrees/serve.log.";
 
 pub struct Opts {
     pub config_dir: PathBuf,
     pub port: u16,
     pub allow_origin: Vec<String>,
+    /// Who manages this serve's life, written into serve.json. `None` — the
+    /// CLI, the dev stack — means nobody: a client that finds it uses it and
+    /// never signals it.
+    pub owner: Option<String>,
 }
 
+/// The owners `--owner` takes. One today: the desktop app, which SIGTERMs a
+/// serve it owns when it quits cleanly. Closed rather than free text, so a
+/// typo is an error at launch and not a serve the app silently adopts or not.
+pub const OWNERS: &[&str] = &["app"];
+
 pub fn parse_args(args: &[String]) -> Result<Option<Opts>, String> {
-    let mut o = Opts { config_dir: worktrees_api::hostenv::default_config_dir(), port: 0, allow_origin: Vec::new() };
+    let mut o = Opts { config_dir: worktrees_api::hostenv::default_config_dir(), port: 0, allow_origin: Vec::new(), owner: None };
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -60,6 +73,13 @@ pub fn parse_args(args: &[String]) -> Result<Option<Opts>, String> {
             "--port" => {
                 let v = it.next().ok_or("--port needs a number")?;
                 o.port = v.parse().map_err(|_| format!("--port {v:?}: not a port number"))?;
+            }
+            "--owner" => {
+                let v = it.next().ok_or("--owner needs a name")?;
+                if !OWNERS.contains(&v.as_str()) {
+                    return Err(format!("--owner {v:?}: the only owner is {}", OWNERS.join(", ")));
+                }
+                o.owner = Some(v.clone());
             }
             "--allow-origin" => {
                 let v = it.next().ok_or("--allow-origin needs an origin")?;
@@ -181,6 +201,8 @@ pub struct Running {
     pub ctx: Ctx,
     pub token: String,
     pub listener: conn::Listener,
+    /// The authenticated connections, which the idle watch counts.
+    pub clients: Arc<conn::Clients>,
 }
 
 impl Running {
@@ -199,8 +221,62 @@ pub fn start_with(config_dir: PathBuf, port: u16, allow_origin: Vec<String>, lim
     let clients = Arc::new(conn::Clients::default());
     let ctx = Ctx::new(config_dir, Arc::new(conn::Broadcast(clients.clone())));
     let token = servefile::new_token();
-    let listener = conn::start(ctx.clone(), token.clone(), port, allow_origin, clients, limits)?;
-    Ok(Running { ctx, token, listener })
+    let listener = conn::start(ctx.clone(), token.clone(), port, allow_origin, clients.clone(), limits)?;
+    Ok(Running { ctx, token, listener, clients })
+}
+
+// ── the idle stop ────────────────────────────────────────────────────────────
+
+/// How long a serve the APP owns stays up with no client before it stops itself.
+///
+/// A crash leaves the app's serve running with nobody to quit it, and before
+/// this it ran on unseen for good: a downgraded app then put a second engine
+/// on the same config dir — two shells for one dock tab, two polls, and the
+/// orphan's saves over the old app's (rehearsal D7). Two minutes is the
+/// trade. A crash → relaunch inside it adopts the serve, and the dock's live
+/// shells with it; one after it starts a fresh serve, whose shells respawn
+/// from the saved ring behind a seam, and tmux is untouched either way.
+pub const OWNED_IDLE_GRACE: Duration = Duration::from_secs(120);
+
+/// How often the idle watch counts clients. A client that came and went
+/// between two counts is not seen; one that is using the serve stays.
+const IDLE_TICK: Duration = Duration::from_secs(5);
+
+/// The idle grace for a serve with this owner, or `None` for one that never
+/// stops on its own: a serve somebody started by hand (the CLI, the dev
+/// stack) has no owner to come back for it, and is theirs to stop.
+pub fn idle_grace(owner: Option<&str>) -> Option<Duration> {
+    (owner == Some("app")).then_some(OWNED_IDLE_GRACE)
+}
+
+/// One count of the idle watch: (when the server was first counted with no
+/// client, if it has none now; whether that has lasted `grace`).
+pub fn idle_step(since: Option<Instant>, clients: usize, now: Instant, grace: Duration) -> (Option<Instant>, bool) {
+    if clients > 0 {
+        return (None, false);
+    }
+    let since = since.unwrap_or(now);
+    (Some(since), now.duration_since(since) >= grace)
+}
+
+/// Count `clients` every `tick`; once there has been none for `grace`, say
+/// so and notify `stop` — the `Notify` the signals use, so the way down is
+/// the one a SIGTERM takes: flush, close, remove serve.json, "stopped".
+pub async fn idle_watch(clients: Arc<conn::Clients>, grace: Duration, tick: Duration, stop: Arc<tokio::sync::Notify>) {
+    let mut since = None;
+    loop {
+        tokio::time::sleep(tick).await;
+        let (s, out) = idle_step(since, clients.len(), Instant::now(), grace);
+        since = s;
+        if out {
+            worktrees_api::log::info(&format!(
+                "serve: no client for {}s, and the app that owns this serve is gone — stopping",
+                grace.as_secs()
+            ));
+            stop.notify_one();
+            return;
+        }
+    }
 }
 
 /// `worktrees serve …`. Runs until a signal; the exit code is the usual.
@@ -221,7 +297,11 @@ pub fn cmd_serve(args: &[String]) -> i32 {
     // locale, core's log, the startup line.
     host::boot(Arc::new(ServeLog));
     let me = std::process::id();
-    worktrees_api::log::info(&format!("serve: pid={me} config_dir={}", opts.config_dir.display()));
+    worktrees_api::log::info(&format!(
+        "serve: pid={me} config_dir={} owner={}",
+        opts.config_dir.display(),
+        opts.owner.as_deref().unwrap_or("none")
+    ));
     raise_open_file_limit();
 
     // One engine per host: a second serve on the same config dir is refused
@@ -275,6 +355,7 @@ pub fn cmd_serve(args: &[String]) -> i32 {
             token: running.token.clone(),
             pid: me,
             version: env!("CARGO_PKG_VERSION").to_string(),
+            owner: opts.owner.clone(),
         };
         if let Err(e) = servefile::write(&opts.config_dir, &sf) {
             worktrees_api::log::error(&format!("serve: serve.json: {e}"));
@@ -293,9 +374,21 @@ pub fn cmd_serve(args: &[String]) -> i32 {
         // nowhere else.
         println!("worktrees serve: 127.0.0.1:{} · {}", running.port(), file.display());
 
+        // A serve the app started stops itself once no client has come back
+        // for a while (`OWNED_IDLE_GRACE`), by the same way down as a signal.
+        if let Some(grace) = idle_grace(opts.owner.as_deref()) {
+            tokio::spawn(idle_watch(running.clients.clone(), grace, IDLE_TICK, stop.clone()));
+        }
+
         stop.notified().await;
 
         worktrees_api::log::info("serve: stopping");
+        // The dock's rings and directories BEFORE the port closes. A client
+        // that finds the port closed may start a new serve at once, and that
+        // one must not read a tab's ring ahead of this one's last write of
+        // it. `host::stop` flushes again below and finds nothing new.
+        worktrees_api::term::save_shell_cwds(&running.ctx, &running.ctx.shells);
+        worktrees_api::term::save_shell_scrollback(&running.ctx, &running.ctx.shells);
         running.listener.stop();
         host::stop(&running.ctx);
         match servefile::remove_if_ours(&opts.config_dir, me) {

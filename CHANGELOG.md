@@ -6,6 +6,42 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Changed
+- **The desktop app is a client of `worktrees serve` — one engine per host.**
+  The app no longer runs the engine in its own process. On launch it reads
+  `serve.json`, starts the bundled CLI's `worktrees serve` if nothing usable is
+  there, and does everything except the window over serve's authenticated
+  loopback socket: listing, mutations, both kinds of terminal, the docs viewer.
+  It uses a running serve only after that serve proves it holds the file's token
+  and is the app's own version.
+  - A serve on another version is asked to stop (SIGTERM, never SIGKILL) and
+    replaced.
+  - Something that holds the port but cannot prove itself is left alone, and
+    the app says why.
+  - A serve the app started stops when you quit, which ends the dock shells as
+    before.
+  - If the app crashes, its serve survives, and the next launch adopts it
+    (`serve --owner app`, recorded in serve.json). If no launch comes back
+    for two minutes, that serve stops itself the way a quit stops it, so
+    one left behind by a crash does not run on unseen. A `worktrees show`
+    made while no app was connected opens when the app comes back; it used
+    to reach the window before the window was listening, and was lost.
+  - A serve you started from the CLI is used and left running.
+  - Its dock saves (a tab's scrollback, the folder it was in) no longer
+    write over a save another app made since; serve logs the one it skipped.
+  - **Going back to an older version: quit Worktrees first.** An older app
+    runs the engine in its own process, so starting one beside a serve this
+    version left running puts two engines on the same settings, places and
+    dock tabs.
+  - If the engine goes away, the app keeps what it last showed under a
+    "Disconnected from the engine" banner. Reconnect looks for (or starts)
+    serve again, and the terminals re-attach: the dock shell replays behind
+    its `── restored ──` seam.
+
+  The shim now holds the window, the six commands that act on this machine
+  (clipboard, editor, terminal, zoom, the app's own updater) and
+  `engine_connect`, which is the only way serve's token reaches the page. The
+  engine's log lines, and the page's, are in `~/.cache/worktrees/serve.log`.
+  `app.log` keeps the shim's.
 - **The frontend reaches its backend through one module, `app/src/ipc.ts`.**
   The 25 files that imported `invoke`, `Channel` and `listen` from
   `@tauri-apps/api` import them from there instead; in the desktop app those
@@ -15,15 +51,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   API) still import their packages directly — they act on the machine the
   window runs on, whichever engine is driving it.
 - **The host wiring every engine process needs lives in one place,
-  `worktrees_api::host`**, and the desktop app calls it the same way `serve`
-  does: `boot` (log sink, panic hook, the launchd-bare PATH and locale repairs,
-  the startup line), `start` (the viewer sweep, the project merge, the 3 s
-  nav-dot poll and the dock-ring flush) and `stop` (the exit sequence). The
-  app's behaviour is unchanged; what changes is that a host can no longer
-  forget one of those steps, which is how pi once shipped with no nav dot.
-  `api-boundary-check.mjs` asserts the shim makes all three calls, and the new
-  `serve-dispatch-check.mjs` holds the socket's command table against the
-  shim's handler list.
+  `worktrees_api::host`**: `boot` (log sink, panic hook, the launchd-bare PATH
+  and locale repairs, the startup line), `start` (the viewer sweep, the
+  project merge, the 3 s nav-dot poll and the dock-ring flush) and `stop` (the
+  exit sequence). `serve` makes all three calls, so a host can no longer
+  forget one of those steps — which is how pi once shipped with no nav dot.
+  The desktop app, now serve's client, keeps only `boot`.
 - **The 149 app commands moved into a new `worktrees-api` crate**, leaving the
   Tauri layer as thin wrappers. Nothing changes for the desktop app — the same
   149 commands with the same arguments, verified against `main`, plus
@@ -50,9 +83,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 - **`worktrees serve`: the engine, hosted behind an authenticated WebSocket on
   loopback** (Server Edition, Phase 1). It speaks the same `{cmd, args}` the
   app's `invoke` does — all 150 commands, each with an exposure class in one
-  table (`Engine`, `ClientLocal`, `HostAdmin`, `Stream`); the seven that act on
-  the caller's machine (clipboard, editor, terminal, browser, zoom, the app's
-  own bundle) are refused over the socket rather than run on the host.
+  table (`Engine`, `ClientLocal`, `HostAdmin`, `Stream`); the six that act on
+  the caller's machine (clipboard, editor, terminal, zoom, the app's own
+  bundle) are refused over the socket rather than run on the host.
   Terminal bytes and progress arrive as ordered channel frames, events as
   `{event, payload}` to every authenticated socket. It binds `127.0.0.1` only,
   requires a loopback `Host` and an allow-listed `Origin` (a missing one is
@@ -166,6 +199,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   too. Settings → Usage can turn it off.
 
 ### Fixed
+- **`app/scripts/sandbox.sh --app` starts again under `nvm use`.** It launched
+  `tauri dev` without the `beforeDevCommand` override `make dev-app` carries, so
+  tauri.conf.json's bare `pnpm` failed wherever `nvm use` had taken pnpm off
+  `PATH`. It now runs `corepack pnpm dev`, and also exports
+  `WORKTREES_SERVE_BIN`, so the sandbox app starts this branch's `serve`.
 - **Opening the app no longer sets what Codex and pi may do.** Settings →
   Codex → Permissions and Settings → pi → Project trust were sent to the
   backend every time the app loaded, from the window's own saved settings, so
@@ -200,10 +238,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   (the same all-comments file `--print` has always emitted, which `doctor`
   reads back clean). Without `-y` nothing changes, except that the message
   now says how to ask for the template anyway.
-- **The Claude and Codex usage readers log to app.log again.** Since v0.35.0
+- **The Claude and Codex usage readers log again.** Since v0.35.0
   the app's builder called `.setup()` twice, and tauri keeps only the LAST
   closure, so the one that hands core its log sink never ran: every line those
-  readers wrote was dropped without a trace. There is one `.setup` now, and
+  readers wrote was dropped without a trace. They run in `worktrees serve`
+  now and write to `serve.log`; the app has one `.setup`, and
   `app/scripts/api-boundary-check.mjs` fails if a second appears.
 - **A branch, base or place name that begins with `-` is no longer read as a
   flag by the app's commands.** They handed what the app sent straight to the

@@ -132,6 +132,12 @@ the code wins.
   core's git calls now carry their own `--` too.
 - **The last client to load set Codex permissions and pi trust:** fixed in
   Phase 0, recorded as decision 7 and in Appendix B (`fix/host-policy`).
+- **The docs viewer answers with a loopback URL** (2026-10-20).
+  `open_docs_viewer` registers the place with the HOST's documentation server
+  and returns `http://127.0.0.1:<port>/…`. That URL means something only to a
+  browser on the host, so the desktop app on the same machine is fine, and a
+  remote client (Phase 2 or 3) needs a different answer: proxy the pages over
+  its own socket, or grey the button out with the reason.
 - **Outside R3, for Phase 2's per-object scopes.** Each item below is reachable
   only by an authenticated client, and an authenticated client can already
   type into a shell, so none of them escalates today. Each one stops being
@@ -463,6 +469,17 @@ clipboard is not yours. These stay in the Tauri shim and the remote client
 either implements its own (clipboard, zoom) or **greys them out with a reason**
 — silently doing nothing on the server is the worst available outcome.
 
+> **2026-10-20 (as built, `feat/app-serve-client`):** serve's `ClientLocal`
+> rows are six: `copy_text`, `install_app_version`, `open_editor`,
+> `detect_editors`, `open_terminal` and `set_zoom`. `set_title` names a place,
+> so it was always an engine command. `open_docs_viewer` is an `Engine` row:
+> its body registers the place with the HOST's documentation server and
+> returns a URL, and the frontend opens that URL itself with the opener
+> plugin, so the registrations live where the host poll refreshes them. The
+> desktop app routes exactly these six (plus its own `engine_connect` and
+> `raise_window`) to the shim, and everything else to serve
+> (`app/src/ipc.ts`, `engine-route-check.mjs`).
+
 **C. Host-management commands — server-side, and privileged.**
 `install_app_version`, `update_cli`, `check_update`, `list_releases`,
 `add_project`, `remove_project`, `clone_project`, `init_repo`,
@@ -559,6 +576,11 @@ the same `_in` seam the tests got.
 > the docs viewer is client-local. Appendix B rules on every process-global
 > static. It also adds a fifth break: a dock shell has one sink, so a second
 > client's attach silences the first client's pane.
+>
+> **2026-10-20:** the second correction is itself reversed. `open_docs_viewer`
+> became an engine command when the desktop app became a client, so `ISSUED`
+> and the registrations live in serve, refreshed by its host poll. See
+> Appendix B's `viewer::ISSUED`.
 
 ### III.7 Transport
 
@@ -671,6 +693,20 @@ Exit: drive the real app in Chrome against a real engine over a socket;
 > client of a local `worktrees serve`, which the shim finds or starts from the
 > bundled sidecar. The per-launch token is as written; the loopback rule set
 > is what guards it.
+>
+> **2026-10-20 (as built, `feat/app-serve-client`):** the shim's
+> `engine.rs` reads `serve.json` and decides with one pure function:
+> - no file, an unreadable file, a dead pid, or a live pid on a closed port:
+>   start one;
+> - a port whose holder fails the handshake proof: refuse, killing nothing;
+> - a proven serve on the app's version: use it, and ADOPT it if its
+>   serve.json says `owner: "app"`;
+> - a proven serve on another version: replace it (SIGTERM, wait, never
+>   SIGKILL).
+>
+> A serve the app starts runs `--owner app` and is stopped on a clean quit,
+> as is an adopted one, so a crash leftover does not run unseen until reboot.
+> A serve from the CLI or the dev stack has no owner and is never signalled.
 
 #### Phase 2 — identity, capability, exposure
 
@@ -1233,15 +1269,21 @@ poll another project's documents.
 
 - **Writer and reader.** Only `place_key` (`viewer.rs:354`) touches it. Its
   only caller is `viewer::open` (`viewer.rs:1168`), reached from
-  `files::open_docs_viewer` (`files.rs:893`) and the shim's
-  `open_docs_viewer` command. Serve's table marks that command `ClientLocal`
-  and refuses it (`dispatch.rs:315`).
+  `files::open_docs_viewer` (`files.rs:893`), which serve's `open_docs_viewer`
+  row calls. *(Until 2026-10-20 that row was `ClientLocal` and the shim ran
+  the command; it is an `Engine` row now.)*
 
 **Ruling:** per-launch identity. This corrects §III.6's fourth item twice:
 
-- Under one engine per host, `ISSUED` never lives in serve. The docs viewer
-  opens a browser on the client's machine, so the map stays in the desktop
-  shim's process, as it does today.
+- ~~Under one engine per host, `ISSUED` never lives in serve.~~ **Reversed
+  2026-10-20 (`feat/app-serve-client`, (main)'s ruling):** it lives in serve.
+  The command never opened a browser. It registers the place with the host's
+  documentation server and returns a URL, and the frontend opens that URL
+  with the opener plugin. So the registrations, the docs server and
+  `viewer::refresh` are all in one process, the engine. Serve is handed the
+  browser bundle as `WORKTREES_VIEWER_JS` by an app that starts it. A serve
+  started without it refuses the open with a reason (`dispatch.rs`
+  `viewer_bundle`, pinned by a test).
 - "Per-launch" is not wrong for a long-lived process. Because claims are
   never pruned, a long life only means a map that grows by one entry per
   place ever opened, and the old URLs die with the docs server's token anyway.
@@ -1334,13 +1376,10 @@ are as shared as any static:
   the pty under the first. This is a fifth item for §III.6, and it blocks
   Phase 2. The fix shape is a sink per attach, with one attach at a time
   owning the size, which is what tmux's `window-size` does.
-- `viewer` is filled by the shim's `open_docs_viewer`, which is client-local,
-  while `viewer::refresh` runs in `host::poll`
-  (`feat/worktrees-serve:crates/worktrees-api/src/host.rs:212`) over the
-  host's `Ctx`. Today those are the same process. Once the shim stops running
-  `host::start`, they are two, and nothing refreshes the documents a browser
-  tab is showing. Whoever makes the shim a client has to keep a refresh where
-  the registrations are.
+- `viewer` is filled by `open_docs_viewer`, and `viewer::refresh` runs in
+  `host::poll` over the host's `Ctx`. *(Resolved 2026-10-20: `open_docs_viewer`
+  is an engine command, so both are serve's. The shim holds no `Ctx` and polls
+  nothing.)*
 
 Serve's own state on `feat/worktrees-serve` at `495df95` contains no statics:
 

@@ -1,7 +1,10 @@
 // The WebSocket half of the door (`ipc.ts`): `worktrees serve`'s protocol,
-// client side. DEV-ONLY in this lane — `main.tsx` loads it under
-// `import.meta.env.DEV && VITE_SERVE`, which is dead code in a build, so this
-// file is not in a production bundle (transport-check.mjs greps app/dist).
+// client side. The shipped app is a client of its host's serve, so this file
+// SHIPS (`connectSocket`, dialled with the port and token the shim's
+// `engine_connect` answers). Only `bootSocket` — the dev stack's way to learn
+// them, from vite's token endpoint — is dev-only: `main.tsx` reaches it under
+// `import.meta.env.DEV && VITE_SERVE`, which is dead code in a build, and
+// transport-check.mjs greps app/dist to prove the endpoint is not in it.
 //
 // The protocol is crates/worktrees-cli/src/serve/wire.rs + policy.rs, and its
 // handshake is v1 (the fix for OWASP H1, spec by (main), 2026-10-18):
@@ -120,6 +123,11 @@ export type SocketDeps = {
   warn?: (msg: string) => void;
   /** This page's origin, for the one failure the browser cannot diagnose. */
   origin?: string;
+  /** What the person can DO about a server this client will not drive — said
+   *  at the end of every such failure. The dev stack's default restarts the
+   *  stack; the app passes its Reconnect, which finds, starts or replaces
+   *  serve as needed. A remedy is a claim, so each host states its own. */
+  remedy?: string;
 };
 
 class WsChannel<T> implements Channel<T> {
@@ -153,6 +161,10 @@ type Pending = {
 
 /** The door over a socket, plus what the checks and the drive look at. */
 export type SocketDoor = Door & {
+  /** Settles once: resolved when the server has PROVEN it holds the token and
+   *  runs this frontend's version, rejected with the failure (the same string
+   *  `onError` gets) if the connection ends first. */
+  ready: Promise<void>;
   /** How many channels this connection still holds a handler for. */
   openChannels(): number;
 };
@@ -168,7 +180,10 @@ function toArrayBuffer(b64: string, atob: (s: string) => string): ArrayBuffer {
  *  there is no server to connect to at all. */
 export function deadDoor(msg: string): SocketDoor {
   let nextChannel = 1;
+  const ready = Promise.reject(msg);
+  ready.catch(() => {}); // a caller that never awaits it is not an unhandled rejection
   return {
+    ready,
     invoke: () => Promise.reject(msg),
     listen: () => Promise.resolve(() => {}),
     channel: <T>(onmessage?: (response: T) => void) => new WsChannel<T>(nextChannel++, onmessage),
@@ -181,6 +196,8 @@ export function deadDoor(msg: string): SocketDoor {
  *  ever written before the server has PROVEN it holds the token. */
 export function connectSocket(d: SocketDeps): SocketDoor {
   const warn = d.warn ?? (() => {});
+  const restart = d.remedy ?? "Restart the stack (app/scripts/server-stack.sh): serve picks a new port and rewrites serve.json.";
+  const rebuild = d.remedy ?? "Rebuild (cargo build --release -p worktrees-cli) and restart the stack.";
   const addr = `${SERVE_HOST}:${d.port}`;
   const url = `ws://${addr}/`;
   const maybeSubtle = d.crypto?.subtle;
@@ -200,6 +217,13 @@ export function connectSocket(d: SocketDeps): SocketDoor {
   let nextChannel = 1;
   let nextEvent = 1;
   const queued: string[] = [];
+  let markReady: () => void = () => {};
+  let markFailed: (msg: string) => void = () => {};
+  const ready = new Promise<void>((res, rej) => {
+    markReady = res;
+    markFailed = rej;
+  });
+  ready.catch(() => {}); // reported through onError; awaiting it is optional
   /** Frames behind serve's ok, held while its proof is checked. */
   const inbox: unknown[] = [];
   const pending = new Map<number, Pending>();
@@ -219,7 +243,7 @@ export function connectSocket(d: SocketDeps): SocketDoor {
   const unproven = (why: string) =>
     `the server on ${addr} did not prove it holds serve.json's token (${why}), so it is not the worktrees serve ` +
     `that wrote serve.json: the port is stale (serve exited and another process has it) or an impostor is on it. ` +
-    `No request was sent to it. Restart the stack (app/scripts/server-stack.sh); serve picks a new port and rewrites serve.json.`;
+    `No request was sent to it. ${restart}`;
 
   const ws = new d.WebSocket(url);
   const timer = d.setTimeout(() => {
@@ -244,6 +268,7 @@ export function connectSocket(d: SocketDeps): SocketDoor {
     const waiting = [...pending.values()];
     pending.clear();
     for (const p of waiting) p.reject(msg);
+    markFailed(msg); // no-op once ready has resolved
     d.onError(msg);
   }
 
@@ -343,11 +368,12 @@ export function connectSocket(d: SocketDeps): SocketDoor {
     if (theirs !== d.version) {
       return shut(
         `version mismatch: worktrees serve is ${typeof theirs === "string" ? `v${theirs}` : "of an unknown version"}, ` +
-          `this frontend is v${d.version} — refusing to drive it. Rebuild (cargo build --release -p worktrees-cli) and restart the stack.`,
+          `this frontend is v${d.version} — refusing to drive it. ${rebuild}`,
       );
     }
     state = "ready";
     d.clearTimeout(timer);
+    markReady();
     for (const text of queued.splice(0)) ws.send(text);
     for (const raw of inbox.splice(0)) handle(raw);
   }
@@ -402,20 +428,21 @@ export function connectSocket(d: SocketDeps): SocketDoor {
     if (state === "connecting")
       shut(
         `could not connect to worktrees serve at ${url} — it is not running, or it refused ` +
-          `${d.origin ? `this page's Origin (${d.origin})` : "this page's Origin"}: a dev stack needs --allow-origin for it`,
+          `${d.origin ? `this page's Origin (${d.origin})` : "this page's Origin"}` +
+          (d.remedy ? `. ${d.remedy}` : ": a dev stack needs --allow-origin for it"),
       );
     else if (state === "hello")
       shut(
         "worktrees serve closed the connection at this client's hello, with nothing said — a serve older than handshake v1 " +
-          "reads a hello as a bad token. Rebuild (cargo build --release -p worktrees-cli) and restart the stack.",
+          `reads a hello as a bad token. ${rebuild}`,
       );
     else if (state === "proving")
       shut(
         `the server on ${addr} refused this client's proof, closing with nothing said: it does not hold the token ` +
-          "serve.json gave this page (serve.json is stale, or the port now belongs to another process). No request was sent. Restart the stack.",
+          `serve.json gave this page (serve.json is stale, or the port now belongs to another process). No request was sent. ${restart}`,
       );
     else if (state === "verifying") shut("the connection to worktrees serve closed during the handshake; no request was sent");
-    else shut("the connection to worktrees serve closed");
+    else shut(d.remedy ? `the connection to worktrees serve closed. ${d.remedy}` : "the connection to worktrees serve closed");
   };
   // A failed socket fires `error` and then `close`; `close` says what happened.
   ws.onerror = () => {};
@@ -468,6 +495,7 @@ export function connectSocket(d: SocketDeps): SocketDoor {
   }
 
   return {
+    ready,
     invoke,
     listen,
     channel: <T>(onmessage?: (response: T) => void) => new WsChannel<T>(nextChannel++, onmessage),

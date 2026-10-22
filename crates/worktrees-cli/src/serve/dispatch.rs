@@ -6,9 +6,13 @@
 //! the dispatcher does another — a command missing here is a request that
 //! fails with `unknown command`, never a silent default. The precedent is
 //! `projcfg`'s user-only key list: a missing row is a hard error, not a
-//! fallback. `app/scripts/serve-dispatch-check.mjs` holds this list against
-//! the shim's `generate_handler!`, so a command added to the app without a
-//! row here fails CI rather than failing a phone.
+//! fallback. The desktop app is this table's client: its shim registers only
+//! the `ClientLocal` rows (and two commands of its own), and
+//! `app/scripts/serve-dispatch-check.mjs` fails if it registers any other row —
+//! that would be a second engine for it. `engine-route-check.mjs` holds the
+//! page's routing against the `ClientLocal` rows and every `invoke("…")` the
+//! page makes against this table, so a command added to the frontend without
+//! a row here fails CI rather than failing the app.
 //!
 //! Arguments are read by name from the request's `args` object exactly as
 //! Tauri reads them: each parameter deserialized on its own, a missing key
@@ -35,10 +39,15 @@ pub enum Exposure {
     /// project or place. Served to any authenticated client.
     Engine,
     /// Acts on the CLIENT's machine — its clipboard, its editor, its
-    /// terminal emulator, its browser, its window, its app bundle. Refused
-    /// over the socket with `err: "client-local"`, never run on the host:
-    /// `copy_text` would write the SERVER's clipboard and `open_editor` would
-    /// open a window nobody is sitting at. The shim keeps these.
+    /// terminal emulator, its window, its app bundle. Refused over the socket
+    /// with `err: "client-local"`, never run on the host: `copy_text` would
+    /// write the SERVER's clipboard and `open_editor` would open a window
+    /// nobody is sitting at. The shim keeps these, and the frontend routes
+    /// exactly these names to it (`app/src/ipc.ts`, `engine-route-check.mjs`).
+    /// The docs viewer is NOT one of them: its body registers a place with the
+    /// host's documentation server and returns a URL, and the browser is opened
+    /// by the frontend's own `openUrl` — so the registrations live here, where
+    /// the host poll refreshes them.
     ClientLocal,
     /// Changes this MACHINE's user-tier state outside any one project — the
     /// harness configs (`~/.claude.json`, codex, pi), profiles and skills,
@@ -122,9 +131,9 @@ fn refused() -> Result<(), String> {
     Err(CLIENT_LOCAL.into())
 }
 
-/// What `diagnostics` is told about the viewer bundle. The shim resolves it
-/// from Tauri's `resource_dir`; a server has no bundle dir of its own, so only
-/// the `WORKTREES_VIEWER_BUNDLE` override can name one.
+/// What `diagnostics` is told about the viewer bundle. A server has no bundle
+/// dir of its own, so only the `WORKTREES_VIEWER_JS` override can name one —
+/// which the desktop app sets when it starts serve, from its `resource_dir`.
 fn viewer_path() -> String {
     match viewer::bundle_path(None) {
         Some(p) => p.to_string_lossy().into_owned(),
@@ -132,9 +141,25 @@ fn viewer_path() -> String {
     }
 }
 
+/// `open_docs_viewer`'s precondition, checked BEFORE the place is so much as
+/// looked at: serve has no resource dir, so the browser bundle exists only if
+/// `WORKTREES_VIEWER_JS` names one. The desktop app sets it when it starts
+/// serve; a serve started from the CLI (or the dev stack) does not, and the
+/// open must say so rather than fail later — `viewer::open` refuses too, but
+/// in words about restarting an app, after the path guard has spoken first.
+fn viewer_bundle() -> Result<(), String> {
+    if viewer::bundle_path(None).is_some() {
+        return Ok(());
+    }
+    Err("this worktrees serve has no documentation viewer bundle: WORKTREES_VIEWER_JS is not set \
+         (the desktop app sets it when it starts serve; a serve started from the CLI needs it \
+         exported). The Docs tab lists and reads without it; only the browser page cannot render."
+        .to_string())
+}
+
 macro_rules! commands {
     ($cx:ident, $a:ident; $( $name:ident : $exp:ident => $body:expr ),* $(,)?) => {
-        /// Every command the shim registers, with its exposure. Exhaustive by
+        /// Every command a client can send, with its exposure. Exhaustive by
         /// construction: the dispatcher below is generated from the same list.
         pub const TABLE: &[(&str, Exposure)] = &[ $( (stringify!($name), Exposure::$exp) ),* ];
 
@@ -372,7 +397,16 @@ commands! { cx, a;
     place_plan: Engine => files::place_plan(&cx.ctx, a.get("root")?),
     plan_prompt: Engine => files::plan_prompt(a.get("session")?, a.get("provider")?),
     plan_ask_main: Engine => files::plan_ask_main(&cx.ctx, a.get("root")?, a.get("session")?, a.get("provider")?),
-    open_docs_viewer: ClientLocal => refused(),
+    // Engine, not client-local: the registrations and the docs server are the
+    // host's, refreshed by its poll; the frontend opens the returned URL itself.
+    // The URL is loopback on the HOST, so it means something only to a client
+    // on the same machine (the proposal's Queued list has the remote answer).
+    open_docs_viewer: Engine => {
+        viewer_bundle()?;
+        files::open_docs_viewer(
+            &cx.ctx, None, &cx.ctx.viewer, a.get("repo")?, a.get("root")?, a.get("slug")?, a.get("path")?, a.get("place")?,
+        )
+    },
     read_file_base64: Engine => files::read_file_base64(&cx.ctx, a.get("path")?, a.get("max_bytes")?),
     write_file: Engine => files::write_file(&cx.ctx, a.get("path")?, a.get("content")?, a.get("expected_mtime")?),
 
@@ -460,21 +494,21 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 150 rows, no duplicates: the number the shim's handler list has
-    /// (143 at the extraction; host policy's getter and Kimi's six since),
-    /// and the check script holds the names against it.
+    /// 150 rows, no duplicates: the command layer's (143 at the extraction;
+    /// host policy's getter and Kimi's six since), and the check scripts hold
+    /// the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|(n, _)| *n).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 150, "the shim registers 150 commands");
+        assert_eq!(TABLE.len(), 150, "the command layer has 150 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
     #[test]
     fn client_local_commands_are_refused_without_running() {
         let (c, dir, _rx) = call("local");
-        let want: HashSet<&str> = ["copy_text", "open_editor", "open_terminal", "detect_editors", "open_docs_viewer", "set_zoom", "install_app_version"].into();
+        let want: HashSet<&str> = ["copy_text", "open_editor", "open_terminal", "detect_editors", "set_zoom", "install_app_version"].into();
         let tagged: HashSet<&str> = TABLE.iter().filter(|(_, e)| *e == Exposure::ClientLocal).map(|(n, _)| *n).collect();
         assert_eq!(tagged, want);
         for n in &want {
@@ -483,6 +517,30 @@ mod tests {
             let r = super::call(&c, n, &args(json!({"text": "NEVER", "path": "/", "cmd": "x", "session": "s", "factor": 1.0, "tag": "v0"})));
             assert_eq!(r, Err(Value::from(CLIENT_LOCAL)), "{n}");
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The docs viewer runs HERE now (its registrations are the host poll's to
+    /// refresh), and a serve nobody handed a browser bundle — one started from
+    /// the CLI or the dev stack — must refuse the open in words that say why,
+    /// before the place is looked at, and without panicking.
+    #[test]
+    fn open_docs_viewer_without_a_bundle_is_a_clear_refusal() {
+        assert!(
+            std::env::var("WORKTREES_VIEWER_JS").is_err(),
+            "unset WORKTREES_VIEWER_JS to run this test — it decides the question under test",
+        );
+        assert_eq!(exposure("open_docs_viewer"), Some(Exposure::Engine));
+        let (c, dir, _rx) = call("viewer");
+        let place = json!({"branch": "main", "behind": 0, "dirty": false, "dirty_files": null, "last_commit_subject": null, "last_commit_epoch": null});
+        let r = super::call(&c, "open_docs_viewer", &args(json!({
+            "repo": dir.to_string_lossy(), "root": dir.to_string_lossy(), "slug": "s", "path": null, "place": place,
+        })));
+        let e = r.unwrap_err();
+        let e = e.as_str().unwrap_or_default();
+        assert!(e.contains("no documentation viewer bundle") && e.contains("WORKTREES_VIEWER_JS"), "{e}");
+        // Nothing registered and no port bound on the way to saying so is
+        // `viewer::open`'s own test (the precondition here runs before it).
         let _ = std::fs::remove_dir_all(&dir);
     }
 

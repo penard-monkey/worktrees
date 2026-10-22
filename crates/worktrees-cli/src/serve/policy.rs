@@ -11,7 +11,9 @@ use hmac::{KeyInit, Mac};
 use worktrees_api::docserver;
 
 /// The origins every planned client is one of: the desktop app's WebView on
-/// macOS (`tauri://localhost`) and on Windows/Linux (`http://tauri.localhost`).
+/// macOS and Linux (`tauri://localhost`) and on Windows and Android
+/// (`http://tauri.localhost`). wry 0.57's `with_https_scheme` doc names the
+/// split: "the `<scheme>://localhost` protocols used on macOS and Linux".
 /// A browser-hosted dev frontend adds its own with `--allow-origin`, which is a
 /// FLAG and never a config key, so a dev entry cannot ship in a file.
 pub const BUILTIN_ORIGINS: &[&str] = &["tauri://localhost", "http://tauri.localhost"];

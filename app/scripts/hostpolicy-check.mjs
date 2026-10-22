@@ -24,11 +24,14 @@
 //   3. each setter is reached from at least one `onClick` — a guard that a
 //      deleted control also passes is a guard that cannot fail;
 //   4. the host's own boot (`hostpolicy::boot`, which loads the file and runs
-//      the one-time migration) is called once, inside the `.setup` closure that
-//      actually RUNS. tauri's `Builder::setup` replaces its closure rather than
-//      chaining, and #508 shipped two: the first, which held the boot line's
-//      neighbour `Ctx::new`, never ran. A boot line there compiles, passes every
-//      test, and leaves the host on env and config forever.
+//      the one-time migration) is the ENGINE's act, and the engine is `worktrees
+//      serve` — the desktop app is its client. So `cmd_serve` calls it exactly
+//      once, after the one-engine refusal (`live_other`: boot may write the
+//      file, and a second serve must not) and before `start(` binds the
+//      listener (no client is served under the wrong policy); and the shim
+//      calls it NOWHERE — a client that loaded host policy would be the "last
+//      client to load decides" bug this check exists for, one process out, and
+//      its copy of the overrides would sit in a process no lane is launched from.
 //
 //   5. `set_term_history_opts` — a client preference the page DOES push, from
 //      an effect — is pushed only once hydration has landed: directly inside a
@@ -49,8 +52,9 @@
 //      `loadSettings` and its whole-blob save, with a v0.42-shaped blob on
 //      disk, so any way of dropping them fails.
 //
-// The pre-fix App.tsx fails 1-3 and 5; a lib.rs with the boot in a dead
-// closure fails 4 (`node app/scripts/hostpolicy-check.mjs [path/to/lib.rs]`);
+// The pre-fix App.tsx fails 1-3 and 5; a lib.rs that still boots host policy,
+// or a cmd_serve that boots it out of order or not at all, fails 4
+// (`node app/scripts/hostpolicy-check.mjs [path/to/lib.rs] [path/to/serve/mod.rs]`);
 // the settings.ts that deleted the two keys on load fails 6.
 import fs from "node:fs";
 import path from "node:path";
@@ -60,6 +64,7 @@ import { transformWithEsbuild } from "vite";
 
 const SRC = fileURLToPath(new URL("../src/", import.meta.url));
 const LIB = process.argv[2] ?? fileURLToPath(new URL("../src-tauri/src/lib.rs", import.meta.url));
+const SERVE = process.argv[3] ?? fileURLToPath(new URL("../../crates/worktrees-cli/src/serve/mod.rs", import.meta.url));
 const SETTERS = ["set_codex_permissions", "set_pi_trust"];
 const ALLOWED = new Set(["SettingsSheet.tsx", "PiPanel.tsx"]);
 const EFFECTS = new Set(["useEffect", "useLayoutEffect", "useInsertionEffect"]);
@@ -225,13 +230,21 @@ for (const s of SETTERS) {
 // Rule 4. Line comments are dropped first, so prose naming the call cannot
 // count as the call.
 {
-  const lib = fs.readFileSync(LIB, "utf8").split("\n#[cfg(test)]")[0];
-  const run = lib.slice(lib.indexOf("pub fn run()")).split("\n").map((l) => l.replace(/\/\/.*$/, "")).join("\n");
-  const boots = [...run.matchAll(/worktrees_api::hostpolicy::boot\(/g)].map((m) => m.index);
-  const lastSetup = run.lastIndexOf(".setup(");
-  if (boots.length !== 1) fail(`run() calls hostpolicy::boot ${boots.length} times — expected exactly 1 (if it moved into the engine's own startup, point this rule there)`);
-  else if (lastSetup < 0 || boots[0] < lastSetup) fail("hostpolicy::boot is not inside the LAST .setup closure — tauri keeps only that one, so the host would never load its policy");
-  else ok("run() calls hostpolicy::boot once, inside the .setup closure tauri keeps");
+  const strip = (s) => s.split("\n#[cfg(test)]")[0].split("\n").map((l) => l.replace(/\/\/.*$/, "")).join("\n");
+  const lib = strip(fs.readFileSync(LIB, "utf8"));
+  const inShim = (lib.match(/hostpolicy::boot\(/g) ?? []).length;
+  if (inShim) fail(`the shim calls hostpolicy::boot ${inShim} time(s) — it is serve's client, not the engine; loading host policy is serve's act (cmd_serve)`);
+  else ok("the shim never loads host policy — it is the engine's client");
+  const serve = strip(fs.readFileSync(SERVE, "utf8"));
+  const body = /pub fn cmd_serve\(args: &\[String\]\) -> i32 \{([\s\S]*?)\n\}/.exec(serve)?.[1] ?? "";
+  const boots = [...body.matchAll(/worktrees_api::hostpolicy::boot\(/g)].map((m) => m.index);
+  const refusal = body.indexOf("servefile::live_other(");
+  const bind = body.search(/\bstart\(opts\.config_dir/);
+  if (!body) fail("cmd_serve is not where this rule looks (crates/worktrees-cli/src/serve/mod.rs)");
+  else if (boots.length !== 1) fail(`cmd_serve calls hostpolicy::boot ${boots.length} times — expected exactly 1`);
+  else if (refusal < 0 || boots[0] < refusal) fail("cmd_serve loads host policy BEFORE the one-engine refusal — a second serve on the same config dir could write the file under a live one");
+  else if (bind < 0 || boots[0] > bind) fail("cmd_serve loads host policy AFTER start( binds the listener — a client could be served under the wrong policy");
+  else ok("cmd_serve loads host policy once, after the one-engine refusal and before the listener binds");
 }
 
 // Rule 6. The real settings.ts, inlined the way layout-check.mjs does it (a
