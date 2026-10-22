@@ -1,0 +1,52 @@
+name: deny
+# cargo-deny against deny.toml: licenses, bans, sources, advisories, one leg
+# each so one red check cannot hide another.
+#
+# Its own workflow rather than a job in ci.yml, for the weekly schedule: a new
+# RustSec advisory lands against a lockfile nobody touched, and a schedule in
+# ci.yml would rerun the whole suite to find it. On a pull request and on
+# main it runs only when something that decides the graph or the policy
+# changes; the schedule covers the rest.
+#
+# On a pull request the advisories leg does not fail the run, so a fresh
+# advisory does not hold up an unrelated change; the other three are about
+# what a change ADDS, and fail it. On the schedule all four fail for real,
+# because a scheduled run that cannot fail notifies nobody. release.yml's
+# `plan` job runs advisories once more as a hard gate, so a release cannot
+# ship with an untriaged advisory.
+on:
+  pull_request:
+    paths:
+      - 'Cargo.lock'
+      - '**/Cargo.toml'
+      - 'deny.toml'
+      - '.github/workflows/deny.yml'
+      - '.github/actions/cargo-deny/**'
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.lock'
+      - '**/Cargo.toml'
+      - 'deny.toml'
+      - '.github/workflows/deny.yml'
+      - '.github/actions/cargo-deny/**'
+  schedule:
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deny:
+    strategy:
+      fail-fast: false
+      matrix:
+        check: [licenses, bans, sources, advisories]
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.check == 'advisories' && github.event_name == 'pull_request' }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/cargo-deny
+      - name: cargo deny check ${{ matrix.check }}
+        run: cargo deny --locked check ${{ matrix.check }}

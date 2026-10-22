@@ -132,30 +132,54 @@ impl LogSink for ServeLog {
 /// on every write, because every serve on the machine shares this file and an
 /// older binary may have made it; and the rotated copy is tightened as well,
 /// because a `rename` keeps whatever mode the file had.
+///
+/// Only ever a REGULAR file. A FIFO planted at the name hung serve at its
+/// first line, because a plain open for writing waits for a reader; and a
+/// link there was followed by the write, and by the rotation, which renamed
+/// it and chmodded the file behind it. Same-user attacks (Phase 2 §1), cheap
+/// to close: both opens go through `open_regular`, and the size check that
+/// decides a rotation does not follow a link. A line the file refuses goes to
+/// stderr, which the app points at /dev/null and a terminal shows.
 fn append_line(dir: &Path, path: &Path, level: &str, msg: &str) {
+    let ts = worktrees_api::util::fmt_utc(worktrees_core::sysclock::now_epoch());
+    // The pid on EVERY line: this is one file for every serve on the
+    // machine — the real one, a stack, a server outliving the binary
+    // that replaced it — and `grep <pid>` is how one of them is read.
+    let line = format!("{ts}Z [{level}] [{}] {msg}\n", std::process::id());
+    if let Err(e) = append_to(dir, path, &line) {
+        eprint!("serve.log: {e}: {line}");
+    }
+}
+
+fn append_to(dir: &Path, path: &Path, line: &str) -> std::io::Result<()> {
     let _ = std::fs::create_dir_all(dir);
-    if std::fs::metadata(path).map(|m| m.len() > 1_000_000).unwrap_or(false) {
+    if std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file() && m.len() > 1_000_000) {
         let rotated = dir.join("serve.log.1");
         if std::fs::rename(path, &rotated).is_ok() {
-            if let Ok(f) = std::fs::File::open(&rotated) {
+            if let Ok(f) = open_regular(&rotated, std::fs::OpenOptions::new().read(true)) {
                 worktrees_api::log::owner_only(&f);
             }
         }
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).mode(0o600).open(path) {
-        worktrees_api::log::owner_only(&f);
-        let ts = worktrees_api::util::fmt_utc(worktrees_core::sysclock::now_epoch());
-        // The pid on EVERY line: this is one file for every serve on the
-        // machine — the real one, a stack, a server outliving the binary
-        // that replaced it — and `grep <pid>` is how one of them is read.
-        //
-        // ONE `write(2)` per line. `writeln!` on an unbuffered handle is one
-        // write per formatted piece, and two threads' pieces interleave in the
-        // file: the transport lane read `…03:07:38serve: host-admin …Z [` in
-        // the real log. A single short write to an O_APPEND handle lands whole.
-        let line = format!("{ts}Z [{level}] [{}] {msg}\n", std::process::id());
-        let _ = f.write_all(line.as_bytes());
+    let f = open_regular(path, std::fs::OpenOptions::new().create(true).append(true).mode(0o600))?;
+    worktrees_api::log::owner_only(&f);
+    // ONE `write(2)` per line. `writeln!` on an unbuffered handle is one
+    // write per formatted piece, and two threads' pieces interleave in the
+    // file: the transport lane read `…03:07:38serve: host-admin …Z [` in
+    // the real log. A single short write to an O_APPEND handle lands whole.
+    (&f).write_all(line.as_bytes())
+}
+
+/// `opts` plus `O_NOFOLLOW` (a link at the name is an error, not followed)
+/// and `O_NONBLOCK` (a FIFO is an error, not a wait for a reader), then
+/// refused unless `fstat` says regular file. The audit log's writer opens the
+/// same way.
+fn open_regular(path: &Path, opts: &mut std::fs::OpenOptions) -> std::io::Result<std::fs::File> {
+    let f = opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path)?;
+    if !f.metadata()?.is_file() {
+        return Err(std::io::Error::other("not a regular file"));
     }
+    Ok(f)
 }
 
 /// The soft open-file limit serve asks for: macOS's per-process ceiling for
@@ -494,6 +518,64 @@ mod log_tests {
         assert_eq!(mode(&old), 0o600, "serve.log.1 is {:o}", mode(&old));
         assert_eq!(mode(&log), 0o600, "serve.log is {:o}", mode(&log));
         assert!(std::fs::read_to_string(&log).unwrap().ends_with("hello\n"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// `append_line` on a thread, bounded: true if it returned within 5 s.
+    /// When it did not, a reader is opened on `log` so a writer stuck in
+    /// `open(2)` on a FIFO there gets through and the thread ends.
+    fn returns_in_time(d: &Path, log: &Path) -> bool {
+        use std::os::unix::fs::OpenOptionsExt;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (d2, l2) = (d.to_path_buf(), log.to_path_buf());
+        std::thread::spawn(move || {
+            append_line(&d2, &l2, "info", "hello");
+            let _ = tx.send(());
+        });
+        let done = rx.recv_timeout(std::time::Duration::from_secs(5)).is_ok();
+        if !done {
+            let _ = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK).open(log);
+            let _ = rx.recv_timeout(std::time::Duration::from_secs(5));
+        }
+        done
+    }
+
+    /// A FIFO planted at serve.log hung serve at its first log line: a plain
+    /// `open(O_WRONLY)` of a FIFO waits for a reader that never comes. A
+    /// same-user attack (Phase 2 §1), and cheap to close: the open does not
+    /// wait, the FIFO is refused, and the line goes to stderr instead.
+    #[test]
+    fn a_fifo_at_the_log_path_is_refused_without_hanging() {
+        use std::os::unix::fs::FileTypeExt;
+        let d = dir("fifo");
+        let log = d.join("serve.log");
+        let c = std::ffi::CString::new(log.to_str().unwrap()).unwrap();
+        // SAFETY: a plain syscall on a NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0, "mkfifo");
+        assert!(returns_in_time(&d, &log), "append_line hung on a FIFO at serve.log");
+        let ft = std::fs::symlink_metadata(&log).unwrap().file_type();
+        assert!(ft.is_fifo(), "the FIFO was replaced rather than refused");
+        assert!(!d.join("serve.log.1").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A link at serve.log is neither followed nor rotated onto. The size
+    /// check followed it, so a link to any file over the cap was renamed to
+    /// serve.log.1 and the file behind it was opened through the link and
+    /// chmodded 0600; the write itself followed a link at the name, too.
+    #[test]
+    fn a_link_at_the_log_path_is_not_followed_or_rotated() {
+        let d = dir("link");
+        let target = d.join("elsewhere");
+        std::fs::write(&target, vec![b'x'; 1_000_001]).unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let log = d.join("serve.log");
+        std::os::unix::fs::symlink(&target, &log).unwrap();
+        assert!(returns_in_time(&d, &log), "append_line hung");
+        assert!(std::fs::symlink_metadata(&log).unwrap().file_type().is_symlink(), "the link was moved");
+        assert!(!d.join("serve.log.1").exists(), "the link was rotated");
+        assert_eq!(mode(&target), 0o644, "the file behind the link was chmodded");
+        assert_eq!(std::fs::metadata(&target).unwrap().len(), 1_000_001, "the line went through the link");
         let _ = std::fs::remove_dir_all(&d);
     }
 }

@@ -88,6 +88,14 @@ jobs:
             echo "cli_matrix=$cli_rows"
             echo "app_matrix=$app_rows"
           } | tee -a "$GITHUB_OUTPUT"
+      # Once per release, here because every other job needs `plan`: no build
+      # starts while the lockfile carries a RustSec advisory deny.toml does not
+      # name. A pull request only SEES its advisories (deny.yml); a release
+      # cannot ship past one. The dry run of a packaging PR stops here too,
+      # which is the point of rehearsing the release's own steps.
+      - uses: ./.github/actions/cargo-deny
+      - name: GATE — no untriaged RustSec advisory in the lockfile
+        run: cargo deny --locked check advisories
 
   # Cross-compile the worktrees binary for the common desktop/server targets.
   build:
@@ -250,6 +258,24 @@ jobs:
           # count is checked too.
           grep -q '^test result: ok. 4 passed' /tmp/gate.log \
             || { echo "::error::the docs-server gate did not run all four cases"; exit 1; }
+
+      # The same gate for `worktrees serve`, whose binary this job bundles as the
+      # app's engine: reachable on loopback and from nowhere else (decision 6 of
+      # docs/proposals/server-edition.md). The witness is a CONNECT, never a
+      # bind, because no bind result means the same thing on macOS and Linux,
+      # and the loopback connect comes FIRST so a dead server cannot pass the
+      # refusal after it. The runner sets `CI`, so a runner with no LAN address
+      # fails the test instead of skipping its LAN half. `--exact` and the count
+      # for the reason given above: under the wrong crate or `--test` target, or
+      # after a rename, the filter matches nothing and cargo exits 0.
+      - name: GATE — serve answers on loopback and not off it
+        run: |
+          set -euo pipefail
+          cargo test -p worktrees-cli --test serve_bin --locked -- --exact --nocapture \
+            serve_can_be_reached_on_loopback_and_not_off_it \
+            2>&1 | tee /tmp/serve-gate.log
+          grep -q '^test result: ok. 1 passed' /tmp/serve-gate.log \
+            || { echo "::error::the serve loopback gate did not run its one case"; exit 1; }
 
       # ── the CLI sidecar ───────────────────────────────────────────────────
       #

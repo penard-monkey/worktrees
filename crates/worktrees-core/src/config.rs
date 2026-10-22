@@ -12,8 +12,26 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// tmux/name-safe prefix: lowercase, then every byte not in `[a-z0-9_-]` → `-`
-/// (per-byte, NOT run-collapsing — matches `tr -c 'a-z0-9_-' '-'`).
+/// (per-byte, NOT run-collapsing — matches `tr -c 'a-z0-9_-' '-'`), then a
+/// leading `-` → `_`.
+///
+/// The last step is gap 8 of the Server Edition Phase 2 proposal: `-` is in
+/// the allow-list, so a name could START with one, and the prefix can come
+/// from a cloned repo's `[project] prefix`. A session called `--force-main` is
+/// a flag to any tmux call that takes it as a positional rather than a `-t`
+/// value. None does today; this is defence in depth for R3, and a checkout
+/// in `.dotfiles` (`-dotfiles` before) is the everyday case it renames.
 pub fn sanitize_prefix(s: &str) -> String {
+    let mut out = sanitize_prefix_legacy(s);
+    if out.starts_with('-') {
+        out.replace_range(..1, "_");
+    }
+    out
+}
+
+/// `sanitize_prefix` as it was up to 0.43, leading `-` kept. Only for finding
+/// a session an older binary named (`legacy_prefix_from`); never a new name.
+fn sanitize_prefix_legacy(s: &str) -> String {
     s.chars()
         .map(|c| {
             let c = c.to_ascii_lowercase();
@@ -269,10 +287,10 @@ pub fn resolve_ai_cmd_from(
 /// no whitespace into a tmux session name or a `docker -p` argument. The
 /// allow-list in §5 rests on this one call — do not add a path that skips it.
 ///
-/// It does NOT strip a leading `-` (that character is inside the allow-list, and
-/// this function is a faithful port of bash's `tr -c 'a-z0-9_-' '-'` — the
-/// behaviour is long-standing and callers depend on it). `profile::sanitize_id`
-/// does strip one, because a profile id becomes a bare path component.
+/// A leading `-` comes out as `_` (gap 8, see `sanitize_prefix`); a session
+/// an older binary named with the `-` is renamed by `Project::discover`, which
+/// asks `legacy_prefix_from` for the old name. `profile::sanitize_id` strips
+/// one instead, because a profile id becomes a bare path component.
 pub fn resolve_prefix_from(
     env: Option<&str>,
     prefix_file: Option<&str>,
@@ -280,19 +298,43 @@ pub fn resolve_prefix_from(
     cfg: Option<&str>,
     fallback: &str,
 ) -> String {
+    sanitize_prefix(prefix_source(env, prefix_file, project, cfg, fallback))
+}
+
+/// The prefix the rule before gap 8 made of the same inputs, when it is not
+/// the one `resolve_prefix_from` makes now: the name sessions started by an
+/// older binary carry. `None` for every prefix the change did not touch.
+pub fn legacy_prefix_from(
+    env: Option<&str>,
+    prefix_file: Option<&str>,
+    project: Option<&str>,
+    cfg: Option<&str>,
+    fallback: &str,
+) -> Option<String> {
+    let raw = prefix_source(env, prefix_file, project, cfg, fallback);
+    let old = sanitize_prefix_legacy(raw);
+    (old != sanitize_prefix(raw)).then_some(old)
+}
+
+/// The rung that wins, unsanitized.
+fn prefix_source<'a>(
+    env: Option<&'a str>,
+    prefix_file: Option<&'a str>,
+    project: Option<&'a str>,
+    cfg: Option<&'a str>,
+    fallback: &'a str,
+) -> &'a str {
     // Whitespace-only is ABSENT, in every tier — the same rule the legacy file
     // tier has always applied (`project::prefix_file` strips whitespace and then
     // filters empty). Only checking `is_empty` let `[project] prefix = "   "`
     // win its rung and sanitize to `---`, so a repo could rename every session
     // to `----<slug>` with three spaces nobody can see in a diff.
     let present = |s: &&str| !s.trim().is_empty();
-    let raw = env
-        .filter(present)
+    env.filter(present)
         .or(prefix_file.filter(present))
         .or(project.filter(present))
         .or(cfg.filter(present))
-        .unwrap_or(fallback);
-    sanitize_prefix(raw)
+        .unwrap_or(fallback)
 }
 
 /// Resume arg as SETTINGS shows it: `$WORKTREES_AI_RESUME_ARG` >
@@ -488,6 +530,43 @@ mod tests {
         assert_eq!(resolve_prefix_from(None, None, Some("Team.X!"), None, "r"), "team-x-");
         // and the fallback is sanitized too — a repo directory can be named anything
         assert_eq!(resolve_prefix_from(None, None, None, None, "My Repo"), "my-repo");
+    }
+
+    /// Gap 8 (Server Edition Phase 2, §8): `-` is inside the allow-list, so a
+    /// prefix could START with one. `[project] prefix = "--force"` from a cloned
+    /// repo named every session `--force-<slug>`, a flag to anything that takes
+    /// the name as a positional, and a checkout in `.dotfiles` named them
+    /// `-dotfiles-<slug>`. The first character maps to `_`; nothing else moves.
+    #[test]
+    fn a_prefix_never_starts_with_a_dash() {
+        for (raw, want) in [
+            ("--force", "_-force"),
+            ("-rf", "_rf"),
+            (".dotfiles", "_dotfiles"),
+            (" x", "_x"),
+            ("_x", "_x"),
+            ("x-", "x-"),
+            ("My.Repo!", "my-repo-"),
+        ] {
+            assert_eq!(sanitize_prefix(raw), want, "{raw:?}");
+        }
+        assert_eq!(resolve_prefix_from(None, None, Some("--force"), None, "r"), "_-force");
+        assert_eq!(resolve_prefix_from(None, None, None, None, ".dotfiles"), "_dotfiles");
+    }
+
+    /// The name the rule before gap 8 gave the SAME inputs, when it differs:
+    /// that is how a session started by an older binary is found. A prefix that
+    /// already began with `_` was never anything else, so it has no old name.
+    #[test]
+    fn the_old_prefix_is_named_only_when_the_rule_changed_it() {
+        let old = |e, f, p, c, fb| legacy_prefix_from(e, f, p, c, fb);
+        assert_eq!(old(None, None, None, None, ".dotfiles"), Some("-dotfiles".to_string()));
+        assert_eq!(old(None, None, Some("--force"), None, "r"), Some("--force".to_string()));
+        // the same precedence as the live prefix: the env rung wins here
+        assert_eq!(old(Some("-env"), None, Some("-proj"), None, "r"), Some("-env".to_string()));
+        assert_eq!(old(None, None, None, None, "repo"), None);
+        assert_eq!(old(None, None, Some("_x"), None, "r"), None);
+        assert_eq!(old(None, None, Some("   "), None, "r"), None);
     }
 
     #[test]

@@ -2204,6 +2204,18 @@ this repo's settings in `.claude/close-out.md`).
   `.dmux/`, one sibling) that `provision --all` cannot see.
   _From: [2026-07-28 project-settings session](docs/sessions/2026-07-28-project-settings/summary.md)_
 
+- **A `[compose] project` template on a `_`-led prefix names a stack docker
+  refuses.** Since gap 8 a prefix never starts with `-`; one that would (a
+  checkout in `.dotfiles`, `[project] prefix = "-x"`) starts with `_`. So
+  `project = "{prefix}-wt-{slug}"` renders `_x-wt-feat`, and Docker Compose
+  (v5.1.4, measured) refuses it: a project name must "start with a letter or
+  number". The `-x-wt-feat` it rendered before was refused in the same words,
+  so nothing that worked broke, but no `-`- or `_`-led prefix has ever been
+  able to run a compose stack. The shape of a fix: `compose_project_name`
+  trims leading `_`/`-` after `sanitize_prefix`, and `recorded_compose_project`
+  the same, so teardown still names what was started.
+  _From: Server Edition Phase 2, slice 0 (`fix/p2-slice0-hardening`; the proposal's §8, gap 8)_
+
 - **Project-settings polish** — small, all from the same session:
   - `app/src/mock/install.ts`'s `SUGGESTED_TOML` is a hand-written fixture, not
     a mirror of `init::render()`, so the harness preview lacks init's warnings.

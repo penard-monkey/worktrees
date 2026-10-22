@@ -1072,6 +1072,17 @@ pub fn attach_or_switch(session: &str) -> bool {
     true
 }
 
+/// Rename EXACTLY `old` (`-t =old`) to `new`; false if tmux refused (no such
+/// session, or `new` is taken). A `new` that starts with `-` is refused here
+/// rather than handed to tmux, where the positional would read as a flag.
+pub fn rename_session(old: &str, new: &str) -> bool {
+    if new.is_empty() || new.starts_with('-') {
+        return false;
+    }
+    let eq = format!("={old}");
+    matches!(tmux(&["rename-session", "-t", &eq, new]), Ok(o) if o.status.success())
+}
+
 /// Kill EXACTLY `name` (`-t =name`). NO bare fallback: on tmux ≥ 2.1 the exact
 /// form only fails when the session is already gone, so a bare `-t name` retry
 /// could only ever PREFIX-match a sibling (api → api-fix) — the precise case

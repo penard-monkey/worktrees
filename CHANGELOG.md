@@ -5,6 +5,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Changed
+- **A tmux session name never starts with `-`.** A prefix that would, such as
+  a checkout in `.dotfiles` or a cloned repo's `[project] prefix = "-x"`, now
+  starts with `_`: `_dotfiles-main` rather than `-dotfiles-main`. A command
+  that takes a session name as an argument could read a leading `-` as a
+  flag. Sessions an older version named the old way, provider sidecars
+  included, are renamed the first time the repository is used, and a terminal
+  attached to one stays attached.
+
 ## [0.43.1] - 2026-10-22
 
 ### Fixed
