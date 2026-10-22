@@ -24,12 +24,21 @@ pub fn import_app_projects(ctx: &Ctx) {
     });
 }
 
-/// Registered project roots, in nav order. Read fresh every time: another
-/// writer (`worktrees projects add`) may have changed it since the last call,
-/// and a list held here would write that change away.
+/// Registered project roots, in nav order — those `ctx`'s scope reaches. Read
+/// fresh every time: another writer (`worktrees projects add`) may have
+/// changed it since the last call, and a list held here would write that
+/// change away.
+///
+/// The scope is the caller's (`Ctx::scoped`): serve narrows it to a device's
+/// grant, so everything built on this — `project_roots`, `guard_under_projects`,
+/// `list_workspace`, the path resolvers — answers with the caller's roots. That
+/// is R1's second check (Server Edition Phase 2, §3.3); the engine's own `Ctx`
+/// and the console's see every root, as before.
 pub fn read_projects(ctx: &Ctx) -> Vec<String> {
     import_app_projects(ctx);
-    worktrees_core::registry::read_lenient().roots()
+    let mut roots = worktrees_core::registry::read_lenient().roots();
+    roots.retain(|r| ctx.scope().covers_root(r));
+    roots
 }
 
 use std::path::{Path, PathBuf};
