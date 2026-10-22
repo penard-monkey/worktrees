@@ -15,7 +15,15 @@
 //! - **excluded** in the repo's COMMON `info/exclude`, anchored, so the lines
 //!   cover every place of the repo and nothing the user keeps in `.kimi-code/`;
 //! - **gone with the place** (they live in its directory), and removed when
-//!   their setting is turned off, so "off" means off at the next launch.
+//!   their setting is turned off, so "off" means off at the next launch;
+//! - **never through a link**: the place is a checkout, so `.kimi-code`, its
+//!   `skills/` or a file name can arrive as a committed symlink, and git lists
+//!   nothing BEYOND a link — `ls-files .kimi-code/mcp.json` is empty under a
+//!   tracked `.kimi-code -> elsewhere`. Each directory below the place is
+//!   lstat'd on its own and must be real (or absent, then made with
+//!   `fsx::make_dir`), and a link at a file name is not a file of ours.
+//!   Refused means nothing is read, written or removed there; the launch says
+//!   why, and the log has it.
 //!
 //! kimi loads them only for a trusted folder — its own prompt, or the user's
 //! allowance (`trust::kimi_launch_trust`).
@@ -150,15 +158,80 @@ fn tracked(wt: &str) -> Vec<String> {
     }
 }
 
+/// Whether `<wt>/<rel>` is a directory we may use: `Ok(true)` when every
+/// component below the place is a real directory, `Ok(false)` when one is
+/// missing (so is everything under it — `make_dirs` creates them), and `Err`
+/// naming the first that is anything else, a committed link above all.
+///
+/// One `symlink_metadata` per component, from the place down: it refuses to
+/// follow only the LAST component, so asked of `.kimi-code/skills/worktrees`
+/// alone it would read straight through a `.kimi-code -> elsewhere`.
+fn real_dir(wt: &str, rel: &str) -> Result<bool, String> {
+    let mut cur = PathBuf::from(wt);
+    for c in rel.split('/') {
+        cur.push(c);
+        match std::fs::symlink_metadata(&cur) {
+            Ok(m) if m.is_dir() => {}
+            Ok(m) if m.file_type().is_symlink() => return Err(format!("{} is a link, not a real directory", cur.display())),
+            Ok(_) => return Err(format!("{} is not a real directory", cur.display())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(format!("could not read {}: {e}", cur.display())),
+        }
+    }
+    Ok(true)
+}
+
+/// `<wt>/<rel>` made one component at a time, each a real directory or
+/// refused (`fsx::make_dir`) — never `create_dir_all`, which follows a link.
+fn make_dirs(wt: &str, rel: &str) -> std::io::Result<()> {
+    let mut cur = PathBuf::from(wt);
+    for c in rel.split('/') {
+        cur.push(c);
+        crate::fsx::make_dir(&cur)?;
+    }
+    Ok(())
+}
+
+/// `<wt>/<rel>` is a regular file in real directories: a file this place may
+/// hold. A link at the name, or one above it, is not.
+fn real_file(wt: &str, rel: &str) -> bool {
+    let dir = rel.rsplit_once('/').map_or("", |(d, _)| d);
+    (dir.is_empty() || real_dir(wt, dir) == Ok(true))
+        && std::fs::symlink_metadata(Path::new(wt).join(rel)).is_ok_and(|m| m.is_file())
+}
+
+/// A refusal, said where the launch happens AND in the engine's log, where a
+/// repo that pointed our writes elsewhere can still be found once the
+/// launch's own output is gone.
+fn refused(what: &str, why: &str) -> String {
+    let w = format!("{what}: {why} — worktrees does not write through it, so kimi launches without it");
+    crate::logsink::log("warn", &format!("kimiplace: {w}"));
+    w
+}
+
 /// One file's rule: write `want` when the path is absent or ours, remove ours
 /// when nothing is wanted, and leave anything else alone with a reason.
-fn sync_file(path: &Path, want: Option<&str>, ours: impl Fn(&str) -> bool, tracked: bool, what: &str) -> Option<String> {
-    let current = match std::fs::read_to_string(path) {
-        Ok(t) => Some(t),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+/// `rel` is under the place, with a directory (all three of ours have one).
+fn sync_file(wt: &str, rel: &str, want: Option<&str>, ours: impl Fn(&str) -> bool, tracked: bool, what: &str) -> Option<String> {
+    let path = Path::new(wt).join(rel);
+    let dir = rel.rsplit_once('/').map_or("", |(d, _)| d);
+    // A directory that is not real is refused before anything below it is
+    // read, written or removed — turning off says nothing, since nothing of
+    // ours can be in a place through a link.
+    if let Err(why) = real_dir(wt, dir) {
+        return want.map(|_| refused(what, &why));
+    }
+    // A link (or a directory) at the name was never a file of ours.
+    let (current, not_a_file) = match std::fs::symlink_metadata(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (None, false),
         Err(e) => return Some(format!("{what}: could not read {}: {e}", path.display())),
+        Ok(m) if !m.is_file() => (None, true),
+        Ok(_) => match std::fs::read_to_string(&path) {
+            Ok(t) => (Some(t), false),
+            Err(e) => return Some(format!("{what}: could not read {}: {e}", path.display())),
+        },
     };
-    let foreign = tracked || current.as_deref().is_some_and(|t| !ours(t));
+    let foreign = tracked || not_a_file || current.as_deref().is_some_and(|t| !ours(t));
     if foreign {
         return want.map(|_| {
             format!(
@@ -171,14 +244,14 @@ fn sync_file(path: &Path, want: Option<&str>, ours: impl Fn(&str) -> bool, track
     match (want, current.as_deref()) {
         (Some(w), Some(c)) if w == c => None,
         (Some(w), _) => {
-            if let Some(dir) = path.parent() {
-                if let Err(e) = std::fs::create_dir_all(dir) {
-                    return Some(format!("{what}: could not create {}: {e}", dir.display()));
-                }
+            if let Err(e) = make_dirs(wt, dir) {
+                return Some(format!("{what}: could not create {}: {e}", Path::new(wt).join(dir).display()));
             }
-            std::fs::write(path, w).err().map(|e| format!("{what}: could not write {}: {e}", path.display()))
+            crate::fsx::write_atomic(&path, w.as_bytes(), None)
+                .err()
+                .map(|e| format!("{what}: could not write {}: {e}", path.display()))
         }
-        (None, Some(_)) => std::fs::remove_file(path).err().map(|e| format!("{what}: could not remove {}: {e}", path.display())),
+        (None, Some(_)) => std::fs::remove_file(&path).err().map(|e| format!("{what}: could not remove {}: {e}", path.display())),
         (None, None) => None,
     }
 }
@@ -195,15 +268,21 @@ pub fn sync(wt: &str, git_common: &str, want: &Want) -> Vec<String> {
     }
     let tracked = tracked(wt);
     let is_tracked = |rel: &str| tracked.iter().any(|t| t == rel || t.starts_with(&format!("{rel}/")));
-    warn.extend(sync_file(&mcp_path(wt), want.mcp.as_deref(), is_ours, is_tracked(".kimi-code/mcp.json"), "kimi MCP"));
-    warn.extend(sync_file(&agents_path(wt), want.agents.as_deref(), agents_is_ours, is_tracked(".kimi-code/AGENTS.md"), "kimi rule"));
+    warn.extend(sync_file(wt, ".kimi-code/mcp.json", want.mcp.as_deref(), is_ours, is_tracked(".kimi-code/mcp.json"), "kimi MCP"));
+    warn.extend(sync_file(wt, ".kimi-code/AGENTS.md", want.agents.as_deref(), agents_is_ours, is_tracked(".kimi-code/AGENTS.md"), "kimi rule"));
     // The skill: SKILL.md must start with its frontmatter, so its mark is a
     // sibling file — and a skill dir without that mark is not ours.
+    let skill_rel = format!("{DIR}/{SKILL_DIR}");
     let dir = skill_dir(wt);
     let mark = dir.join(SKILL_MARK);
-    let ours = !dir.exists() || mark.is_file();
+    let present = real_dir(wt, &skill_rel);
+    let ours = present == Ok(false) || real_file(wt, &format!("{skill_rel}/{SKILL_MARK}"));
     let skill_tracked = is_tracked(".kimi-code/skills/worktrees");
-    if !ours || skill_tracked {
+    if let Err(why) = &present {
+        if want.skill.is_some() {
+            warn.push(refused("kimi skill", why));
+        }
+    } else if !ours || skill_tracked {
         if want.skill.is_some() {
             warn.push(format!(
                 "kimi skill: {} is the repo's own — worktrees does not overwrite it, so kimi launches without the worktrees skill",
@@ -211,9 +290,9 @@ pub fn sync(wt: &str, git_common: &str, want: &Want) -> Vec<String> {
             ));
         }
     } else if let Some(text) = &want.skill {
-        warn.extend(sync_file(&dir.join("SKILL.md"), Some(text), |_| true, false, "kimi skill"));
-        warn.extend(sync_file(&mark, Some(MARK), |_| true, false, "kimi skill"));
-    } else if dir.exists() {
+        warn.extend(sync_file(wt, &format!("{skill_rel}/SKILL.md"), Some(text), |_| true, false, "kimi skill"));
+        warn.extend(sync_file(wt, &format!("{skill_rel}/{SKILL_MARK}"), Some(MARK), |_| true, false, "kimi skill"));
+    } else if present == Ok(true) {
         // Only what we wrote: the skill and its mark. Anything else the user
         // put beside them stays, and so does the directory then.
         for f in [dir.join("SKILL.md"), mark.clone()] {
@@ -242,9 +321,9 @@ pub fn sync(wt: &str, git_common: &str, want: &Want) -> Vec<String> {
         let mine = match rel {
             ".kimi-code/mcp.json" => std::fs::read_to_string(&path).is_ok_and(|t| is_ours(&t)),
             ".kimi-code/AGENTS.md" => std::fs::read_to_string(&path).is_ok_and(|t| agents_is_ours(&t)),
-            _ => mark.is_file(),
+            _ => real_file(wt, &format!("{skill_rel}/{SKILL_MARK}")),
         };
-        if path.is_file() && !mine && !is_tracked(rel) && hidden_by_us(wt, rel) {
+        if real_file(wt, rel) && !mine && !is_tracked(rel) && hidden_by_us(wt, rel) {
             warn.push(format!(
                 "{} is yours, but worktrees' line in {}/info/exclude hides it from git status and git add — \
                  `git add -f` it to keep it",
@@ -256,11 +335,24 @@ pub fn sync(wt: &str, git_common: &str, want: &Want) -> Vec<String> {
     warn
 }
 
-/// Whether `wt` holds any kimi file worktrees wrote.
+/// Whether the place's `mcp.json` is the one OUR sync keeps: marked, a
+/// regular file in real directories, and untracked. The mark alone is text a
+/// repo can copy, behind a committed link or committed itself — and kimi
+/// reads such a file all the same (`trust::kimi_mcp_shadowed`).
+pub fn mcp_written(wt: &str) -> bool {
+    let rel = ".kimi-code/mcp.json";
+    real_file(wt, rel)
+        && std::fs::read_to_string(mcp_path(wt)).is_ok_and(|t| is_ours(&t))
+        && !tracked(wt).iter().any(|t| t == rel)
+}
+
+/// Whether `wt` holds any kimi file worktrees wrote — in the place itself, so
+/// a marked file behind a link does not count.
 pub fn ours_present(wt: &str) -> bool {
-    std::fs::read_to_string(mcp_path(wt)).is_ok_and(|t| is_ours(&t))
-        || std::fs::read_to_string(agents_path(wt)).is_ok_and(|t| agents_is_ours(&t))
-        || skill_dir(wt).join(SKILL_MARK).is_file()
+    let read = |rel: &str| real_file(wt, rel).then(|| std::fs::read_to_string(Path::new(wt).join(rel)).ok()).flatten();
+    read(".kimi-code/mcp.json").is_some_and(|t| is_ours(&t))
+        || read(".kimi-code/AGENTS.md").is_some_and(|t| agents_is_ours(&t))
+        || real_file(wt, &format!("{DIR}/{SKILL_DIR}/{SKILL_MARK}"))
 }
 
 /// Every worktree of `wt`'s repo, the main checkout included.
@@ -608,6 +700,97 @@ mod tests {
         let warn = sync(&wt, &common, &want_all());
         assert!(warn.iter().any(|w| w.contains("(tracked)")), "{warn:?}");
         assert_eq!(std::fs::read_to_string(mcp_path(&wt)).unwrap(), committed, "left as committed");
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    /// A place and a directory BESIDE it under one fixture root, with `link`
+    /// (a path in the place) committed to the index as a link to `outside`:
+    /// a cloned repo's checkout, with the link's target inside the fixture.
+    fn place_with_link(name: &str, link: &str, target: &str) -> (PathBuf, PathBuf, String) {
+        let root = std::env::temp_dir().join(format!("kimiplace-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (place, outside) = (root.join("place"), root.join("outside"));
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::create_dir_all(&place).unwrap();
+        let git = |a: &[&str]| assert!(std::process::Command::new("git").args(a).current_dir(&place).status().unwrap().success());
+        git(&["init", "-q"]);
+        let at = place.join(link);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(target, &at).unwrap();
+        git(&["add", "--", link]);
+        let common = place.join(".git").to_string_lossy().into_owned();
+        (place, outside, common)
+    }
+
+    fn entries(d: &Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(d).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        v.sort();
+        v
+    }
+
+    /// A committed `.kimi-code -> ../outside`: git lists nothing under the
+    /// three file paths (they are beyond a link), so none of them counted as
+    /// tracked, and `create_dir_all` + `fs::write` put worktrees' files in the
+    /// link's target. Refused now — written, rewritten and removed nowhere.
+    #[test]
+    fn a_tracked_kimi_code_link_is_never_written_through() {
+        let (place, outside, common) = place_with_link("dirlink", ".kimi-code", "../outside");
+        let wt = place.to_string_lossy().into_owned();
+        let warn = sync(&wt, &common, &want_all());
+        assert_eq!(entries(&outside), Vec::<String>::new(), "nothing written through the link: {warn:?}");
+        assert_eq!(warn.iter().filter(|w| w.contains("not a real directory")).count(), 3, "{warn:?}");
+        assert!(std::fs::symlink_metadata(place.join(".kimi-code")).unwrap().file_type().is_symlink(), "the link is left as it was");
+        // Files that carry our marks on the far side are not ours to rewrite
+        // or remove: they are not in this place.
+        let theirs_mcp = render_mcp("/elsewhere/worktrees", false);
+        std::fs::write(outside.join("mcp.json"), &theirs_mcp).unwrap();
+        std::fs::write(outside.join("AGENTS.md"), render_agents("another rule")).unwrap();
+        std::fs::create_dir_all(outside.join("skills/worktrees")).unwrap();
+        std::fs::write(outside.join("skills/worktrees/SKILL.md"), "elsewhere").unwrap();
+        std::fs::write(outside.join("skills/worktrees").join(SKILL_MARK), MARK).unwrap();
+        sync(&wt, &common, &want_all());
+        assert_eq!(std::fs::read_to_string(outside.join("mcp.json")).unwrap(), theirs_mcp);
+        assert_eq!(std::fs::read_to_string(outside.join("skills/worktrees/SKILL.md")).unwrap(), "elsewhere");
+        assert!(sync(&wt, &common, &Want { mcp: None, agents: None, skill: None }).is_empty(), "off says nothing");
+        assert_eq!(entries(&outside), ["AGENTS.md", "mcp.json", "skills"]);
+        assert_eq!(entries(&outside.join("skills/worktrees")), [SKILL_MARK, "SKILL.md"]);
+        assert!(!ours_present(&wt), "what is behind the link is not this place's");
+        let _ = std::fs::remove_dir_all(place.parent().unwrap());
+    }
+
+    /// The same through an INTERMEDIATE component: `.kimi-code` is a real
+    /// directory and its `skills` is the committed link. `symlink_metadata`
+    /// refuses to follow only the last component, so every one is asked.
+    #[test]
+    fn a_link_below_kimi_code_is_refused_and_the_rest_still_delivered() {
+        let (place, outside, common) = place_with_link("sublink", ".kimi-code/skills", "../../outside");
+        let wt = place.to_string_lossy().into_owned();
+        let warn = sync(&wt, &common, &want_all());
+        assert_eq!(entries(&outside), Vec::<String>::new(), "nothing written through the link: {warn:?}");
+        assert_eq!(warn.len(), 1, "{warn:?}");
+        assert!(warn[0].starts_with("kimi skill:") && warn[0].contains(".kimi-code/skills is a link, not a real directory"), "{}", warn[0]);
+        assert!(is_ours(&std::fs::read_to_string(mcp_path(&wt)).unwrap()), "the real directory still gets ours");
+        assert!(std::fs::read_to_string(agents_path(&wt)).unwrap().contains("the rule"));
+        let _ = std::fs::remove_dir_all(place.parent().unwrap());
+    }
+
+    /// A link AT one of our file names, the user's own and untracked, is
+    /// theirs: neither followed nor replaced by a file of ours.
+    #[test]
+    fn a_link_at_our_file_name_is_left_alone() {
+        let (t, common) = repo("filelink");
+        let wt = t.to_string_lossy().into_owned();
+        let target = t.join("shared-mcp.json");
+        let ours_elsewhere = render_mcp("/elsewhere/worktrees", false);
+        std::fs::write(&target, &ours_elsewhere).unwrap();
+        std::fs::create_dir_all(t.join(".kimi-code")).unwrap();
+        std::os::unix::fs::symlink(&target, mcp_path(&wt)).unwrap();
+        let warn = sync(&wt, &common, &want_all());
+        assert!(warn.iter().any(|w| w.starts_with("kimi MCP:") && w.contains("does not overwrite")), "{warn:?}");
+        assert!(std::fs::symlink_metadata(mcp_path(&wt)).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), ours_elsewhere);
+        sync(&wt, &common, &Want { mcp: None, agents: None, skill: None });
+        assert!(std::fs::symlink_metadata(mcp_path(&wt)).unwrap().file_type().is_symlink(), "off removes no link");
         let _ = std::fs::remove_dir_all(&t);
     }
 

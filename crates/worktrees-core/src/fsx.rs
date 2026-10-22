@@ -35,7 +35,7 @@ const ATTEMPTS: u32 = 16;
 /// A symlink AT `path` is replaced, not followed (`rename` never follows),
 /// which is what every caller already relied on. A symlink in a PARENT
 /// component is followed like any path; callers that take a directory from
-/// a repo check it themselves (`materialize::make_dir`, a canonical root).
+/// a repo check it themselves ([`make_dir`] per component, a canonical root).
 pub fn write_atomic(path: &Path, bytes: &[u8], mode: Option<Permissions>) -> io::Result<()> {
     write_atomic_named(path, bytes, mode, random_suffix)
 }
@@ -95,6 +95,28 @@ fn finish(mut file: File, tmp: &Path, path: &Path, bytes: &[u8], mode: Option<Pe
     file.sync_all()?;
     drop(file);
     fs::rename(tmp, path)
+}
+
+/// Create ONE directory, and only if it is genuinely missing. A racing `mkdir`
+/// is fine; a symlink, or anything else that is not a directory, standing where
+/// we expected to create one is not (materialize §4 B6). Never
+/// `create_dir_all` under a checkout: it follows a link it meets on the way.
+pub fn make_dir(d: &Path) -> io::Result<()> {
+    match fs::create_dir(d) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+            let md = fs::symlink_metadata(d)?;
+            if md.file_type().is_symlink() || !md.is_dir() {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("{} is not a real directory", d.display()),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// 64 bits a repo author cannot predict: `RandomState`'s keys come from the

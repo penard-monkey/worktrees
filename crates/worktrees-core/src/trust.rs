@@ -219,7 +219,9 @@ pub fn kimi_launch_trust(wt: &str) -> KimiLaunchTrust {
 /// Ours is that second file (`kimiplace`), so a `worktrees` in `.mcp.json` is
 /// harmless while ours is written, and shadowing while it is not; and a
 /// `.kimi-code/mcp.json` worktrees did not write that defines one shadows
-/// either way. Unparsable counts as defining it, as for pi.
+/// either way — our mark on it is not enough (`kimiplace::mcp_written`).
+/// Read the way kimi reads it, through any link. Unparsable counts as
+/// defining it, as for pi.
 pub fn kimi_mcp_shadowed(wt: &str) -> bool {
     let read = |p: PathBuf| match std::fs::read_to_string(&p) {
         Ok(t) => Some(t),
@@ -227,7 +229,7 @@ pub fn kimi_mcp_shadowed(wt: &str) -> bool {
         Err(_) => Some(String::new()),
     };
     let local = read(crate::kimiplace::mcp_path(wt));
-    let ours = local.as_deref().is_some_and(crate::kimiplace::is_ours);
+    let ours = local.is_some() && crate::kimiplace::mcp_written(wt);
     if let Some(t) = &local {
         if !ours && mcp_json_defines(t, crate::kimiplace::SERVER_KEY) {
             return true;
@@ -551,6 +553,35 @@ mod tests {
         assert!(kimi_mcp_shadowed(&wt), "a place file we did not write");
         std::fs::write(crate::kimiplace::mcp_path(&wt), "{not json").unwrap();
         assert!(kimi_mcp_shadowed(&wt), "unparsable counts");
+        let _ = std::fs::remove_dir_all(&t);
+    }
+
+    /// Our mark is text anyone can copy. A marked `mcp.json` the sync would
+    /// refuse — behind a committed `.kimi-code` link, or committed itself —
+    /// is the repo's, and its `worktrees` entry shadows ours: kimi reads it
+    /// through the link all the same, whatever command it names.
+    #[test]
+    fn a_marked_mcp_json_the_repo_supplies_still_shadows() {
+        let t = std::env::temp_dir().join(format!("kimi-shadow-marked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        let (place, outside) = (t.join("place"), t.join("outside"));
+        std::fs::create_dir_all(&place).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let git = |a: &[&str]| assert!(std::process::Command::new("git").args(a).current_dir(&place).status().unwrap().success());
+        git(&["init", "-q"]);
+        let wt = place.to_string_lossy().into_owned();
+        let marked_evil = crate::kimiplace::render_mcp("./evil", true);
+        std::fs::write(outside.join("mcp.json"), &marked_evil).unwrap();
+        std::os::unix::fs::symlink("../outside", place.join(".kimi-code")).unwrap();
+        git(&["add", ".kimi-code"]);
+        assert!(kimi_mcp_shadowed(&wt), "behind a committed link");
+        git(&["rm", "-q", "--cached", ".kimi-code"]);
+        std::fs::remove_file(place.join(".kimi-code")).unwrap();
+        std::fs::create_dir(place.join(".kimi-code")).unwrap();
+        std::fs::write(crate::kimiplace::mcp_path(&wt), &marked_evil).unwrap();
+        assert!(!kimi_mcp_shadowed(&wt), "untracked, in the place: what our sync wrote");
+        git(&["add", "-f", ".kimi-code/mcp.json"]);
+        assert!(kimi_mcp_shadowed(&wt), "committed with our mark");
         let _ = std::fs::remove_dir_all(&t);
     }
 

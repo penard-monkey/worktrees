@@ -104,16 +104,6 @@ this repo's settings in `.claude/close-out.md`).
   and defers retries by design.
   _From: [2026-10-21 server-edition](docs/sessions/2026-10-21-server-edition/summary.md)_
 
-- **`kimiplace::sync_file` writes through a tracked `.kimi-code` link.**
-  `tracked()` asks git about the three file paths only, so a committed
-  `.kimi-code -> elsewhere` is not "tracked" for them, and `create_dir_all` +
-  `fs::write` follow it: worktrees' `mcp.json`, `AGENTS.md` and skill land in
-  the link's target. It writes only where a file is absent or already ours, so
-  it never clobbers, but it is #523's class. Fix shape: lstat `.kimi-code` (and
-  `skills/`) and refuse a link, as `write_brief` does for `.planning`, and write
-  through `fsx::write_atomic`. Found by reading, not measured.
-  _From: [2026-10-21 server-edition](docs/sessions/2026-10-21-server-edition/summary.md)_
-
 - **The CLI updater runs an installer from a pid-named file in `temp_dir()`.**
   `worktrees_api::status`'s `update_cli` downloads `install.sh` to
   `worktrees-install-<pid>.sh` and runs it. macOS's `temp_dir()` is the
