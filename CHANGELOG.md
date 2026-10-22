@@ -14,6 +14,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   included, are renamed the first time the repository is used, and a terminal
   attached to one stays attached.
 
+### Security
+- **Worktrees never writes inside `.git`, or into its own state, for any
+  caller.** A save from the Files tab could overwrite a project's
+  `.git/config`, and a `core.fsmonitor` line there runs on the next git
+  command, which worktrees itself runs every few seconds. Saves into `.git`,
+  a place's `.git` file, `.worktrees/` and `.worktrees.places.json` are now
+  refused with a message, the desktop app's included. A symlink with a
+  harmless name is judged by the file it writes. New projects, clones and
+  `git init` are refused there too. A terminal can still edit those files.
+- **A `[docs]` path no longer lists files through a symlink that leaves the
+  place.** A declared docs path or index below a linked directory, such as
+  `docs -> ../shared`, was walked into, and the Docs tab listed files from
+  outside the worktree that it could not open. A link to another directory
+  inside the same checkout still works.
+
 ## [0.43.1] - 2026-10-22
 
 ### Fixed

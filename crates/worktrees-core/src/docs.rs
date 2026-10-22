@@ -73,8 +73,11 @@
 //! `symlink_metadata`'d, never `metadata`'d: a committed
 //! `docs/secrets.md -> ~/.ssh/id_rsa` must list as nothing at all. The caller
 //! has already canonicalised `root` and proved it lies under a registered
-//! project (`guard_under_projects`); this walk never leaves it, because it
-//! never follows the one thing that could.
+//! project (`guard_under_projects`); this walk never leaves it. Inside a tree it
+//! never follows a link at all. On the way DOWN to a declared path it follows
+//! one only when the link lands back inside the place (`passes_through`),
+//! because `symlink_metadata` lstats only the last component and would
+//! otherwise follow every link above it.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -448,10 +451,16 @@ fn resolve_name(names: &[String], want: &str) -> Option<String> {
 /// A listing per component rather than one stat, for the reason `resolve_name`
 /// gives — and it is affordable here because there is at most one declared
 /// index per place, two or three components deep.
+///
+/// Every directory is `passes_through`'d before it is listed: a listing
+/// follows a link exactly as `metadata` would.
 fn resolve_rel(root: &Path, rel: &str) -> Option<String> {
     let mut dir = root.to_path_buf();
     let mut parts: Vec<String> = Vec::new();
     for want in rel.split('/').filter(|c| !c.is_empty()) {
+        if !parts.is_empty() && !passes_through(root, &dir) {
+            return None;
+        }
         let names = dir_names(&dir);
         let name = resolve_name(&names, want)?;
         dir = dir.join(&name);
@@ -461,6 +470,44 @@ fn resolve_rel(root: &Path, rel: &str) -> Option<String> {
         return None;
     }
     Some(parts.join("/"))
+}
+
+/// May a walk go THROUGH `p`, an intermediate component of a path the project
+/// declared? A real directory, yes. A symlink only when its target
+/// canonicalises to a directory under the canonical `root` and is not a
+/// `Forbidden` path there (`pathclass`: a `meta -> .git` is inside and still
+/// git's). Anything else, no.
+///
+/// This is the hole `symlink_metadata` leaves: it refuses to follow only the
+/// LAST component, so `root.join("docs/api")` walks through a
+/// `docs -> ../shared` to a perfectly ordinary directory outside the place.
+/// The rule is `safepath::safe_under`'s, which the docs server applies to the
+/// same rows at read time, so the index and the server agree about them.
+fn passes_through(root: &Path, p: &Path) -> bool {
+    let Ok(md) = std::fs::symlink_metadata(p) else { return false };
+    if md.is_dir() {
+        return true;
+    }
+    if !md.file_type().is_symlink() {
+        return false;
+    }
+    let (Ok(target), Ok(canon_root)) = (std::fs::canonicalize(p), std::fs::canonicalize(root)) else { return false };
+    let Ok(rel) = target.strip_prefix(&canon_root) else { return false };
+    target.is_dir() && crate::pathclass::classify_with(&rel.to_string_lossy(), &[]) != crate::pathclass::Class::Forbidden
+}
+
+/// `passes_through` for every component of `rel` but the last, in order, so
+/// each link is judged with the ones before it already proven.
+fn parents_pass(root: &Path, rel: &str) -> bool {
+    let parts: Vec<&str> = rel.split('/').filter(|c| !c.is_empty()).collect();
+    let mut dir = root.to_path_buf();
+    for c in parts.iter().take(parts.len().saturating_sub(1)) {
+        dir.push(c);
+        if !passes_through(root, &dir) {
+            return false;
+        }
+    }
+    true
 }
 
 /// Every entry name in `dir`, or an empty list when it cannot be read — the
@@ -631,12 +678,10 @@ fn walk<T>(root: &Path, docs: Option<&Docs>, mut visit: impl FnMut(&Path, &str, 
     // correctly absent while the brief beside them was listed from outside the
     // place — a split that reads as "the link is handled" and is not.
     //
-    // One stat, both steps, so the two cannot drift apart. It closes this
-    // module's own entry into the hole and not the hole: an intermediate
-    // symlink is still resolved for a `[docs] index` and for a declared path
-    // below a linked directory (`resolve_rel`, and `root.join(rel)` in the
-    // declared loop). Those are pre-existing and wider than this walk; ROADMAP
-    // carries them rather than this comment claiming they are shut.
+    // One stat, both steps, so the two cannot drift apart. The same hole in a
+    // `[docs] index` and a declared path below a linked directory is closed by
+    // `passes_through`, which lets a link through only when it lands back
+    // inside the place; `.planning` is a constant and refuses every link.
     let planning_is_dir = std::fs::symlink_metadata(root.join(crate::ops::PLANNING_DIR))
         .map(|m| m.is_dir())
         .unwrap_or(false);
@@ -717,6 +762,9 @@ fn walk<T>(root: &Path, docs: Option<&Docs>, mut visit: impl FnMut(&Path, &str, 
         // `.planning/`.
         if rel.split('/').next().is_some_and(|c| c.eq_ignore_ascii_case(crate::ops::PLANNING_DIR)) {
             continue;
+        }
+        if !parents_pass(root, &rel) {
+            continue; // through a link that leaves the place: as if absent
         }
         let target = root.join(&rel);
         let Ok(md) = std::fs::symlink_metadata(&target) else { continue }; // declared, absent: skip
@@ -1468,6 +1516,52 @@ mod tests {
             assert!(fs::canonicalize(&e.path).unwrap().starts_with(&canon_root), "{}", e.rel);
         }
         let _ = fs::remove_dir_all(&away);
+    }
+
+    /// `symlink_metadata` refuses to follow only the LAST component, so a
+    /// declared path BELOW a linked directory used to be walked through it.
+    /// The fixture plants real documents where each link leads, or the test
+    /// would pass on an empty target: `docs` leads straight out of the place,
+    /// and `inner` stays inside but its `api` leads out one level down.
+    #[test]
+    fn a_declared_path_below_a_link_out_of_the_place_lists_nothing() {
+        let t = tmp("cfglinkout");
+        let r = &t.0.join("place");
+        write(r, "README.md", "# r");
+        write(&t.0, "shared/docs/index.md", "# shared landing");
+        write(&t.0, "shared/docs/api/secret.md", "# outside the place");
+        write(&t.0, "shared/docs/api/v1/x.md", "# deeper outside");
+        write(r, "real/keep.md", "# inside");
+        std::os::unix::fs::symlink(t.0.join("shared/docs"), r.join("docs")).unwrap();
+        std::os::unix::fs::symlink(r.join("real"), r.join("inner")).unwrap();
+        std::os::unix::fs::symlink(t.0.join("shared/docs/api"), r.join("real/api")).unwrap();
+
+        let i = index_with(r, Some(&cfg(&["docs/api", "inner/api/v1"], Some("docs/index.md"))));
+        assert_eq!(rels(&i), vec!["README.md"], "listed through a link that leaves the place");
+        let j = index_with(r, Some(&cfg(&[], Some("inner/api/v1/x.md"))));
+        assert_eq!(rels(&j), vec!["README.md"], "an index through a chain that leaves the place");
+    }
+
+    /// The other half of the rule, and the reason it is not "refuse every
+    /// link": a monorepo that links its docs directory to another directory
+    /// INSIDE the same checkout keeps its tree. A link into `.git` is inside
+    /// too, and is refused by class (`pathclass`), not by containment.
+    #[test]
+    fn a_declared_path_below_a_link_that_stays_in_the_place_is_walked() {
+        let t = tmp("cfglinkin");
+        let r = &t.0;
+        write(r, "site/docs/index.md", "# landing");
+        write(r, "site/docs/api/a.md", "# a");
+        write(r, ".git/info/notes.md", "# git's");
+        std::os::unix::fs::symlink("site/docs", r.join("docs")).unwrap();
+        std::os::unix::fs::symlink(".git", r.join("meta")).unwrap();
+
+        let i = index_with(r, Some(&cfg(&["docs/api", "meta/info"], Some("docs/index.md"))));
+        assert_eq!(rels(&i), vec!["docs/index.md", "docs/api/a.md"]);
+        let canon_root = fs::canonicalize(r).unwrap();
+        for e in &i.entries {
+            assert!(fs::canonicalize(&e.path).unwrap().starts_with(&canon_root), "{}", e.rel);
+        }
     }
 
     #[test]

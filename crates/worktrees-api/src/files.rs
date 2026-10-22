@@ -1308,9 +1308,21 @@ pub fn b64_encode(bytes: &[u8]) -> String {
 /// it read before this write, and its second save would be refused as a
 /// conflict with its own first one — the guard firing on the one writer it is
 /// not there to stop.
+///
+/// A `Forbidden` path (`.git/**`, worktrees' own state) is refused for every
+/// caller (`projects::forbid_write`). Which OTHER classes need more than
+/// `write` — instruction files, hooks, secrets — is the dispatch table's
+/// question, asked before this body runs.
 pub fn write_file(ctx: &Ctx, path: String, content: String, expected_mtime: Option<u64>) -> Result<u64, String> {
     let f = guard_under_projects(ctx, &path)?;
-    save_file(&f, &path, content.as_bytes(), expected_mtime)
+    write_under(&project_roots(ctx), &f, &path, content.as_bytes(), expected_mtime)
+}
+
+/// `write_file` past the containment guard, with the roots it was checked
+/// against: the class check, then the save.
+fn write_under(roots: &[PathBuf], f: &Path, path: &str, content: &[u8], expected_mtime: Option<u64>) -> Result<u64, String> {
+    crate::projects::forbid_write(roots, f, path)?;
+    save_file(f, path, content, expected_mtime)
 }
 
 /// `write_file` past the guard: `f` is canonical and under a project root,
@@ -1855,5 +1867,45 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&g).unwrap(), "b\n");
 
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Gap 1: `.git/config` is under a registered root, so "under some root"
+    /// let any caller write `core.fsmonitor` into it, and the engine's own
+    /// poll would run it. Every `Forbidden` path is refused and left as it
+    /// was — including through a link whose NAME is plain, which is why the
+    /// fixture plants one — while a plain file beside them still saves.
+    #[test]
+    fn a_save_never_writes_into_git_or_worktrees_own_state() {
+        use std::os::unix::fs::symlink;
+        let base = std::env::temp_dir().join(format!("wt-forbid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = base.join("repo");
+        std::fs::create_dir_all(repo.join(".git/hooks")).unwrap();
+        std::fs::create_dir_all(repo.join(".worktrees/feat-a")).unwrap();
+        let config = "[core]\n\trepositoryformatversion = 0\n";
+        std::fs::write(repo.join(".git/config"), config).unwrap();
+        std::fs::write(repo.join(".git/hooks/pre-commit"), "#!/bin/sh\n").unwrap();
+        std::fs::write(repo.join(".worktrees/feat-a/.git"), "gitdir: ../../.git/worktrees/feat-a\n").unwrap();
+        std::fs::write(repo.join(".worktrees.places.json"), "{}\n").unwrap();
+        std::fs::write(repo.join("README.md"), "hi\n").unwrap();
+        symlink(repo.join(".git/config"), repo.join("notes.md")).unwrap();
+        let roots = vec![std::fs::canonicalize(&repo).unwrap()];
+        let evil = b"[core]\n\tfsmonitor = touch /tmp/pwned\n";
+
+        for rel in [".git/config", ".git/hooks/pre-commit", "notes.md", ".worktrees/feat-a/.git", ".worktrees.places.json"] {
+            let asked = repo.join(rel);
+            let canon = std::fs::canonicalize(&asked).unwrap(); // what guard_under_projects hands on
+            let before = std::fs::read(&canon).unwrap();
+            let err = write_under(&roots, &canon, &asked.to_string_lossy(), evil, None).expect_err(rel);
+            assert!(err.contains("never writes"), "{rel}: {err}");
+            assert_eq!(std::fs::read(&canon).unwrap(), before, "{rel} was written");
+        }
+        assert_eq!(std::fs::read_to_string(repo.join(".git/config")).unwrap(), config);
+
+        let readme = std::fs::canonicalize(repo.join("README.md")).unwrap();
+        write_under(&roots, &readme, "README.md", b"edited\n", None).unwrap();
+        assert_eq!(std::fs::read_to_string(&readme).unwrap(), "edited\n");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
