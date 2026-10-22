@@ -607,6 +607,9 @@ pub enum DeviceEvent {
     /// it had to correct is its own `Disabled { reason: unrecorded }` or
     /// `Revoked` event.
     Reloaded,
+    /// The server identity was rotated on the host (§2.5): a new pin, and every
+    /// device revoked, each its own `Revoked` event.
+    IdentityRotated { pin: String },
 }
 
 impl DeviceEvent {
@@ -631,7 +634,7 @@ impl DeviceEvent {
     /// Worth a host notification (§5.3).
     pub fn alerts(&self) -> bool {
         match self {
-            DeviceEvent::Enrolled { .. } | DeviceEvent::Unreadable { .. } => true,
+            DeviceEvent::Enrolled { .. } | DeviceEvent::Unreadable { .. } | DeviceEvent::IdentityRotated { .. } => true,
             DeviceEvent::Disabled { reason, .. } => *reason != DisabledReason::Console,
             DeviceEvent::ConnectRefused { why, .. } => *why != ConnectRefusal::Unknown,
             _ => false,
@@ -779,6 +782,12 @@ impl DeviceRegistry {
                 h(e);
             }
         }
+    }
+
+    /// Hand an event that is not a record change to the hooks: one the host's
+    /// acts around the registry make (a rotation, a pairing window).
+    pub fn announce(&self, e: DeviceEvent) {
+        self.fire(&[e]);
     }
 
     /// Once at boot, after the hooks: an unreadable file's alert, and every

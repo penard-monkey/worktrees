@@ -20,12 +20,14 @@ mod audit;
 mod conn;
 mod devices;
 mod dispatch;
+mod identity;
 mod netwatch;
 mod policy;
 mod provenance;
 mod resolve;
 mod scope;
 mod servefile;
+mod tls;
 mod wire;
 
 use std::io::Write;

@@ -1873,6 +1873,29 @@ mod devices {
         assert!(frames.terms().is_empty(), "the channel opened under the old grant was ended: {:?}", frames.terms());
     }
 
+    /// §2.5: rotating the server identity is the console's, makes a new pin,
+    /// and revokes every device — each holds the old pin and must pair again
+    /// — closing their connections like any revoke.
+    #[test]
+    fn rotating_the_identity_revokes_every_device() {
+        let e = engine("rotate", vec![]);
+        let before = super::super::identity::Identity::ensure(&e.dir.join("cfg")).unwrap();
+        let phone = enroll(&e.reg, "Phone", 1, &[Read, Admin], Projects::All);
+        let laptop = enroll(&e.reg, "Laptop", 2, &[Read], Projects::All);
+        let mut p = e.connect(caller(&phone));
+        let mut con = e.connect(Caller::console());
+        assert_eq!(e.rpc(&mut p, "identity_rotate", json!({}))["err"], json!("console-only"));
+        let r = e.rpc(&mut con, "identity_rotate", json!({}));
+        let pin = r["ok"]["pin"].as_str().unwrap().to_string();
+        assert_ne!(pin, before.pin());
+        assert_eq!(super::super::identity::Identity::load(&e.dir.join("cfg")).unwrap().unwrap().pin(), pin);
+        assert_eq!(r["ok"]["revoked"].as_array().unwrap().len(), 2, "{r}");
+        e.closed(&mut p, "revoked", Duration::from_secs(1));
+        assert!(e.reg.get(&PrincipalId::owner(), &laptop.id).unwrap().revoked_at.is_some());
+        let rotated = e.skipped.lock().unwrap().iter().any(|v| v["payload"]["event"] == json!("identity_rotated") && v["payload"]["pin"] == json!(pin));
+        assert!(rotated, "the console hears the rotation, with the new pin");
+    }
+
     /// A revoke cancels the clone jobs the device started (§2.5): every new
     /// job id the resolver namespaces for a connection is remembered for it.
     #[test]

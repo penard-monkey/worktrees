@@ -829,6 +829,15 @@ commands! { cx, a;
         let keep: Option<String> = a.get("keep")?;
         cx.devices.revoke_all_others(keep.filter(|k| !k.is_empty()).map(DeviceId::new).as_ref(), now())
     },
+    // A new server key (§2.5): every device's pin is now wrong, so every
+    // device is revoked and pairs again. Meant for a suspected compromise,
+    // where a handover signed by the old key would be signed by the thief.
+    identity_rotate: HostConsole => {
+        let id = super::identity::Identity::rotate(&cx.ctx.config_dir)?;
+        cx.devices.announce(super::devices::DeviceEvent::IdentityRotated { pin: id.pin().to_string() });
+        let revoked = cx.devices.revoke_all_others(None, now())?;
+        ok(serde_json::json!({ "pin": id.pin(), "revoked": revoked }))
+    },
 }
 
 #[cfg(test)]
@@ -860,15 +869,15 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 161 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 162 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters and Kimi's six since) and the device
-    /// registry's nine (Phase 2 slice 5); the check scripts hold the page's
+    /// registry's ten (Phase 2 slice 5); the check scripts hold the page's
     /// commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 161, "the table has 161 commands");
+        assert_eq!(TABLE.len(), 162, "the table has 162 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1121,7 +1130,7 @@ mod tests {
     /// Every row has exactly ONE base group — its capability, or its class
     /// when it has none — and the counts are §3.4's, plus the two host-policy
     /// getters #532 added after it (`read`) and slice 5's device rows: two
-    /// `admin` (`devices_list`, `device_narrow`), six console, and
+    /// `admin` (`devices_list`, `device_narrow`), seven console, and
     /// `device_revoke`, which every device may make for itself (`own`). A row
     /// that moves group fails here until the count (and the proposal's table)
     /// move with it.
@@ -1140,7 +1149,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 55), ("write", 23), ("admin", 35), ("console", 27), ("stream", 10), ("instruct", 3),
+            ("read", 55), ("write", 23), ("admin", 35), ("console", 28), ("stream", 10), ("instruct", 3),
             ("client-local", 6), ("loopback-only", 1), ("own", 1),
         ]
         .into();
