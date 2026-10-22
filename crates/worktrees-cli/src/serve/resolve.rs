@@ -847,6 +847,12 @@ pub(crate) mod fixture {
         fn device_principal(&self, d: &DeviceId) -> Option<PrincipalId> {
             self.devices.get(d).map(|(p, _)| p.clone())
         }
+        fn stepup_required(&self, _: &PrincipalId, _: &DeviceId) -> bool {
+            false
+        }
+        fn generation(&self) -> u64 {
+            0
+        }
     }
 
     /// A fresh scratch directory, canonical (macOS's `/var` is `/private/var`).

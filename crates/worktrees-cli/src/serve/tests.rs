@@ -622,6 +622,12 @@ fn an_event_reaches_each_socket_projected_to_its_caller() {
         fn device_principal(&self, _: &DeviceId) -> Option<PrincipalId> {
             Some(PrincipalId::owner())
         }
+        fn stepup_required(&self, _: &PrincipalId, _: &DeviceId) -> bool {
+            false
+        }
+        fn generation(&self) -> u64 {
+            0
+        }
     }
     struct Two;
     impl super::resolve::World for Two {

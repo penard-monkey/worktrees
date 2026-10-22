@@ -11,12 +11,14 @@
 //!
 //! Modules: `policy` (the pure rule set), `conn` (the socket), `wire` (the
 //! frames and the per-connection queue), `dispatch` (the exposure table and
-//! the arms), `servefile` (`serve.json`), `netwatch` (the remote
+//! the arms), `servefile` (`serve.json`), `devices` (`devices.json`, the
+//! device registry every grant is read from), `netwatch` (the remote
 //! listener's address rules, not yet wired), `audit` (`audit.jsonl`, which
 //! only `conn` writes).
 
 mod audit;
 mod conn;
+mod devices;
 mod dispatch;
 mod netwatch;
 mod policy;
@@ -236,6 +238,9 @@ pub struct Running {
     pub listener: conn::Listener,
     /// The authenticated connections, which the idle watch counts.
     pub clients: Arc<conn::Clients>,
+    /// The paired devices (`devices.json`), or `None` when the caller handed
+    /// in its own registry (the in-process tests' fixtures).
+    pub devices: Option<Arc<devices::DeviceRegistry>>,
 }
 
 impl Running {
@@ -249,9 +254,13 @@ pub fn start(config_dir: PathBuf, port: u16, allow_origin: Vec<String>) -> Resul
     start_with(config_dir, port, allow_origin, conn::LIMITS)
 }
 
-/// `start`, with the connection caps given rather than the defaults.
+/// `start`, with the connection caps given rather than the defaults. Every
+/// grant is read from the config dir's `devices.json` (Phase 2 slice 5).
 pub fn start_with(config_dir: PathBuf, port: u16, allow_origin: Vec<String>, limits: conn::Limits) -> Result<Running, String> {
-    start_in(config_dir, port, allow_origin, limits, conn::Clients::default())
+    let devices = Arc::new(devices::DeviceRegistry::open(&config_dir));
+    let mut running = start_in(config_dir, port, allow_origin, limits, conn::Clients::with(devices.clone(), None))?;
+    running.devices = Some(devices);
+    Ok(running)
 }
 
 /// `start_with`, over a given client set — its device registry and the world
@@ -261,7 +270,49 @@ pub fn start_in(config_dir: PathBuf, port: u16, allow_origin: Vec<String>, limit
     let ctx = Ctx::new(config_dir, Arc::new(conn::Broadcast(clients.clone())));
     let token = servefile::new_token();
     let listener = conn::start(ctx.clone(), token.clone(), port, allow_origin, clients.clone(), limits)?;
-    Ok(Running { ctx, token, listener, clients })
+    Ok(Running { ctx, token, listener, clients, devices: None })
+}
+
+// ── device expiry ────────────────────────────────────────────────────────────
+
+/// The longest the expiry watch sleeps: also how often it looks for a hand
+/// edit of `devices.json` (§5.2) and writes pending `last_seen`s.
+const EXPIRY_TICK: Duration = Duration::from_secs(60);
+
+/// The registry's clock (§2.5): wake at the earliest expiry of a live device,
+/// or after `EXPIRY_TICK`, or as soon as any record changes (a new `until`
+/// may be sooner than the one being slept towards); then re-read the file if
+/// it changed, disable whatever ran out — which closes its connections, as a
+/// revoke does — and write the `last_seen`s that are due. A device idle past
+/// its window is marked here even if it never knocks again, so the Devices
+/// list and the alert do not wait for a knock.
+pub async fn expiry_watch(devices: Arc<devices::DeviceRegistry>) {
+    let changed = Arc::new(tokio::sync::Notify::new());
+    {
+        let changed = changed.clone();
+        devices.subscribe(Arc::new(move |_| changed.notify_one()));
+    }
+    loop {
+        let now = worktrees_core::sysclock::now_epoch();
+        let wait = devices
+            .next_deadline()
+            .map(|at| Duration::from_secs(u64::try_from(at - now).unwrap_or(0)))
+            .unwrap_or(EXPIRY_TICK)
+            .min(EXPIRY_TICK);
+        let sleep = std::pin::pin!(tokio::time::sleep(wait.max(Duration::from_millis(200))));
+        let woke = std::pin::pin!(changed.notified());
+        futures_util::future::select(sleep, woke).await;
+        let d = devices.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let now = worktrees_core::sysclock::now_epoch();
+            d.refresh();
+            if let Err(e) = d.check_expiry(now) {
+                worktrees_api::log::warn(&format!("serve: device expiry: {e}"));
+            }
+            d.flush_due(now);
+        })
+        .await;
+    }
 }
 
 // ── the idle stop ────────────────────────────────────────────────────────────
@@ -404,6 +455,12 @@ pub fn cmd_serve(args: &[String]) -> i32 {
         }
         // The engine's background work: sweep, merge, the 3 s poll.
         host::start(running.ctx.clone(), host::Hooks::default());
+        // The device registry's own: an unreadable file's alert, the expiries
+        // that ran out while serve was down, then the expiry clock.
+        if let Some(devices) = running.devices.clone() {
+            devices.startup(worktrees_core::sysclock::now_epoch());
+            tokio::spawn(expiry_watch(devices));
+        }
         let file = servefile::path(&opts.config_dir);
         worktrees_api::log::info(&format!(
             "serve: listening on 127.0.0.1:{} serve.json={} origins=+{}",
@@ -428,6 +485,10 @@ pub fn cmd_serve(args: &[String]) -> i32 {
         // it. `host::stop` flushes again below and finds nothing new.
         worktrees_api::term::save_shell_cwds(&running.ctx, &running.ctx.shells);
         worktrees_api::term::save_shell_scrollback(&running.ctx, &running.ctx.shells);
+        // `last_seen` is written at most every ten minutes, and at exit (§2.5).
+        if let Some(devices) = &running.devices {
+            devices.flush_seen(worktrees_core::sysclock::now_epoch());
+        }
         running.listener.stop();
         host::stop(&running.ctx);
         match servefile::remove_if_ours(&opts.config_dir, me) {
