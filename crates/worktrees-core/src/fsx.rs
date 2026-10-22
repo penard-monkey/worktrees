@@ -13,12 +13,15 @@
 //! name: an existing path of ANY kind is refused, and refused means "pick
 //! another name", never "remove what is there". The mode is set on the open
 //! handle, and the only file ever deleted is a temp this call created.
+//!
+//! [`PrivateDir`] covers a file that is about to be RUN rather than renamed
+//! into place: a fresh 0700 directory to stage it in.
 
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{self, Write};
-use std::os::unix::fs::OpenOptionsExt;
-use std::path::Path;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::path::{Path, PathBuf};
 
 /// Names tried before giving up. A random 64-bit name is taken only if
 /// something put a file there on purpose; this bounds that, nothing else.
@@ -56,7 +59,7 @@ fn write_atomic_named(
         tmp.push(name);
         tmp.push(format!(".{:016x}.tmp", suffix()));
         let tmp = dir.join(tmp);
-        let file = match create(&tmp, mode.is_some()) {
+        let file = match create(&tmp, if mode.is_some() { 0o600 } else { 0o666 }) {
             Ok(f) => f,
             Err(e) if is_taken(&e) => {
                 taken = Some(e);
@@ -71,13 +74,13 @@ fn write_atomic_named(
     Err(taken.unwrap_or_else(|| io::Error::new(io::ErrorKind::AlreadyExists, "no free temp name")))
 }
 
-fn create(tmp: &Path, private: bool) -> io::Result<File> {
+fn create(path: &Path, mode: u32) -> io::Result<File> {
     OpenOptions::new()
         .write(true)
         .create_new(true)
         .custom_flags(libc::O_NOFOLLOW)
-        .mode(if private { 0o600 } else { 0o666 })
-        .open(tmp)
+        .mode(mode)
+        .open(path)
 }
 
 /// `O_EXCL` answers EEXIST for anything at the name, a link included; with
@@ -129,6 +132,112 @@ fn random_suffix() -> u64 {
     h.write_u64(SEQ.fetch_add(1, Ordering::Relaxed));
     h.write_u32(std::process::id());
     h.finish()
+}
+
+/// A directory only this user can enter, made fresh for one job and removed,
+/// with everything in it, when dropped. For a file that something is about
+/// to RUN or read back, where [`write_atomic`]'s rename would not help.
+///
+/// The updater used to stage install.sh as `temp_dir()/worktrees-install-
+/// <pid>.sh`. On Linux that is the shared `/tmp`, where any local user can
+/// take the name first: with a link, or with a 0666 file of their own that
+/// curl writes into and its owner rewrites before bash reads it (measured:
+/// the planter's script ran as the victim). Here the name is random and made
+/// by `mkdir`, which refuses anything already at it, a link included, so a
+/// taken name means "pick another". The new directory is then opened without
+/// following a link, given 0700 on that handle and checked on it: a
+/// directory, this user's, mode 0700.
+///
+/// `base` is created 0700 if missing. It is refused if someone else could
+/// rename the directory away after that check and put their own in its
+/// place: when others can write it and it is not sticky, or when it belongs
+/// to another user who is not root. A group-writable base passes. Under
+/// umask 002, the user-private-group default on Debian and Ubuntu, the
+/// user's own `~/.cache/worktrees` is 0775 already.
+#[derive(Debug)]
+pub struct PrivateDir(PathBuf);
+
+impl PrivateDir {
+    pub fn new(base: &Path, tag: &str) -> io::Result<PrivateDir> {
+        PrivateDir::new_named(base, tag, random_suffix)
+    }
+
+    fn new_named(base: &Path, tag: &str, mut suffix: impl FnMut() -> u64) -> io::Result<PrivateDir> {
+        fs::DirBuilder::new().recursive(true).mode(0o700).create(base)?;
+        let b = fs::metadata(base)?;
+        if (b.mode() & 0o002 != 0 && b.mode() & 0o1000 == 0) || (b.uid() != euid() && b.uid() != 0) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("{}: another user could replace what is made in it", base.display()),
+            ));
+        }
+        let mut taken = None;
+        for _ in 0..ATTEMPTS {
+            let dir = base.join(format!("{tag}-{:016x}", suffix()));
+            match fs::DirBuilder::new().mode(0o700).create(&dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                    taken = Some(e);
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+            return match seal(&dir) {
+                Ok(()) => Ok(PrivateDir(dir)),
+                Err(e) => {
+                    // `remove_dir` takes only an empty directory: the one
+                    // just made, never one with someone's files in it.
+                    let _ = fs::remove_dir(&dir);
+                    Err(e)
+                }
+            };
+        }
+        Err(taken.unwrap_or_else(|| io::Error::new(io::ErrorKind::AlreadyExists, "no free directory name")))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+
+    /// Create `name` in the directory with `O_CREAT | O_EXCL | O_NOFOLLOW`,
+    /// write `bytes` and set exactly `mode` on the handle, which is closed
+    /// before this returns. Returns the file's path.
+    pub fn create_file(&self, name: &str, bytes: &[u8], mode: u32) -> io::Result<PathBuf> {
+        if Path::new(name).file_name() != Some(name.as_ref()) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("{name}: not a file name")));
+        }
+        let path = self.0.join(name);
+        let mut file = create(&path, 0o600)?;
+        file.write_all(bytes)?;
+        file.set_permissions(Permissions::from_mode(mode))?;
+        Ok(path)
+    }
+}
+
+impl Drop for PrivateDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// 0700 on the directory's own handle, then check that handle: a directory
+/// (not a link, which `O_NOFOLLOW` refuses to open), this user's, 0700.
+fn seal(dir: &Path) -> io::Result<()> {
+    let handle = OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(dir)?;
+    handle.set_permissions(Permissions::from_mode(0o700))?;
+    let m = handle.metadata()?;
+    if !m.is_dir() || m.uid() != euid() || m.mode() & 0o7777 != 0o700 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{}: not a private directory of this user's after creating it", dir.display()),
+        ));
+    }
+    Ok(())
+}
+
+fn euid() -> u32 {
+    // SAFETY: geteuid takes nothing and cannot fail.
+    unsafe { libc::geteuid() }
 }
 
 /// Write `body` to `path` as an executable (0755) that a test is about to RUN
@@ -277,6 +386,109 @@ mod tests {
         assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "no file name to write");
     }
 
+    // ── PrivateDir ───────────────────────────────────────────────────────────
+
+    fn uid(p: &Path) -> u32 {
+        fs::symlink_metadata(p).unwrap().uid()
+    }
+
+    /// Fresh each time, this user's and 0700, under `base`, and gone, with
+    /// everything in it, once dropped. A missing base is made private too.
+    #[test]
+    fn a_private_dir_is_fresh_ours_0700_and_removed_on_drop() {
+        let t = tmp("private");
+        let base = t.0.join("cache/worktrees");
+        let a = PrivateDir::new(&base, "job").unwrap();
+        let b = PrivateDir::new(&base, "job").unwrap();
+        assert_ne!(a.path(), b.path(), "a fresh name each time");
+        for d in [&a, &b] {
+            assert_eq!(d.path().parent(), Some(base.as_path()));
+            assert!(fs::symlink_metadata(d.path()).unwrap().is_dir());
+            assert_eq!(mode(d.path()), 0o700);
+            assert_eq!(uid(d.path()), euid());
+        }
+        assert_eq!(mode(&base), 0o700);
+        let f = a.create_file("install.sh", b"echo hi\n", 0o700).unwrap();
+        assert_eq!(f.parent(), Some(a.path()));
+        assert_eq!(fs::read(&f).unwrap(), b"echo hi\n");
+        assert_eq!(mode(&f), 0o700);
+        let (pa, pb) = (a.path().to_path_buf(), b.path().to_path_buf());
+        drop(a);
+        assert!(!pa.exists(), "dropped with its file");
+        assert!(pb.is_dir(), "the other one is not touched");
+        drop(b);
+        assert!(names(&base).is_empty());
+    }
+
+    /// A name already taken — by a link to someone's directory, or by a
+    /// directory of their own — is skipped, neither entered nor removed, and
+    /// the next name is used. Dropping removes only the one it made.
+    #[test]
+    fn a_taken_private_dir_name_is_skipped_never_entered_or_removed() {
+        let t = tmp("private-taken");
+        let base = t.0.join("base");
+        fs::create_dir(&base).unwrap();
+        let victim = t.0.join("victim");
+        fs::create_dir(&victim).unwrap();
+        fs::set_permissions(&victim, Permissions::from_mode(0o755)).unwrap();
+        let at = |n: u64| base.join(format!("job-{n:016x}"));
+        symlink(&victim, at(1)).unwrap();
+        fs::create_dir(at(2)).unwrap();
+        fs::write(at(2).join("theirs"), "x").unwrap();
+        let mut next = 0;
+        let d = PrivateDir::new_named(&base, "job", || {
+            next += 1;
+            next
+        })
+        .unwrap();
+        assert_eq!(d.path(), at(3), "two taken names, the third used");
+        d.create_file("f", b"y", 0o600).unwrap();
+        drop(d);
+        assert!(fs::symlink_metadata(at(1)).unwrap().file_type().is_symlink());
+        assert!(names(&victim).is_empty(), "nothing was made through the link");
+        assert_eq!(mode(&victim), 0o755, "the mode went through the link");
+        assert_eq!(fs::read_to_string(at(2).join("theirs")).unwrap(), "x");
+        assert_eq!(names(&base), [format!("job-{:016x}", 1), format!("job-{:016x}", 2)]);
+    }
+
+    /// A base that others can write without the sticky bit lets them swap the
+    /// directory out after the check, so nothing is made there. Sticky, like
+    /// `/tmp`, passes, and so does group-writable (umask 002 makes the user's
+    /// own cache 0775).
+    #[test]
+    fn a_base_others_can_write_is_refused_unless_sticky() {
+        let t = tmp("private-base");
+        let base = t.0.join("shared");
+        fs::create_dir(&base).unwrap();
+        fs::set_permissions(&base, Permissions::from_mode(0o777)).unwrap();
+        assert_eq!(PrivateDir::new(&base, "job").unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert!(names(&base).is_empty(), "refused before anything was made");
+        for ok in [0o1777, 0o775] {
+            fs::set_permissions(&base, Permissions::from_mode(ok)).unwrap();
+            let d = PrivateDir::new(&base, "job").unwrap();
+            assert_eq!(mode(d.path()), 0o700, "under a {ok:o} base");
+        }
+    }
+
+    /// Inside, a name is created new: never reused, never followed, and
+    /// always a single component.
+    #[test]
+    fn a_private_file_is_created_new_and_never_followed() {
+        let t = tmp("private-file");
+        let d = PrivateDir::new(&t.0, "job").unwrap();
+        d.create_file("a", b"one", 0o600).unwrap();
+        assert_eq!(d.create_file("a", b"two", 0o600).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(d.path().join("a")).unwrap(), b"one");
+        let victim = t.0.join("victim");
+        fs::write(&victim, "precious").unwrap();
+        symlink(&victim, d.path().join("l")).unwrap();
+        assert!(d.create_file("l", b"x", 0o600).is_err());
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "precious");
+        for bad in ["", ".", "..", "a/b", "/abs"] {
+            assert_eq!(d.create_file(bad, b"x", 0o600).unwrap_err().kind(), io::ErrorKind::InvalidInput, "{bad:?}");
+        }
+    }
+
     // ── the guard: no temp name of its own, anywhere ─────────────────────────
 
     /// Lines a release build compiles that build a temp-like name without
@@ -297,7 +509,6 @@ mod tests {
         ("worktrees-core/src/tmux.rs", "\"worktrees-drop-{}\"", "a tmux buffer name, not a path"),
         ("worktrees-api/src/viewer.rs", "\".{name}.{}.{n}.tmp\"", "the app's config dir; a sync per document would cost every derive"),
         ("worktrees-api/src/viewer.rs", "join(std::process::id().to_string())", "a directory in the app's config dir"),
-        ("worktrees-api/src/status.rs", "\"worktrees-install-{}.sh\"", "temp_dir(), not a checkout: per-user on macOS; Linux /tmp is a local-user race, not a repo plant"),
         ("worktrees-cli/src/serve/mod.rs", "[{level}] [{}] {msg}", "a serve.log line carrying the pid; names nothing"),
         ("worktrees-cli/src/serve/tests.rs", "std::process::id()", "test code: serve/mod.rs declares the file under #[cfg(test)], which a line scan cannot see"),
     ];

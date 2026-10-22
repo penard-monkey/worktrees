@@ -364,9 +364,9 @@ pub fn check_update() -> Result<UpdateInfo, String> {
 /// single source of truth for download/checksum/replace. Hardening (review):
 /// the webview PROPOSES a tag but this side re-resolves it — latest, or (for a
 /// user-chosen rollback) a tag in the published stable list, never an arbitrary
-/// string; the script downloads
-/// to a temp file with a CHECKED curl (a piped `curl | bash` masks download
-/// failure as success — pipeline status is the last command's); and success is
+/// string; the script is fetched with a CHECKED curl (a piped `curl | bash`
+/// masks download failure as success — pipeline status is the last command's)
+/// and run from a private directory ([`run_installer`]); and success is
 /// declared only when the re-probed CLI actually reports the new version.
 pub fn update_cli(tag: String) -> Result<CmdResult, String> {
     if !valid_tag(&tag) {
@@ -386,42 +386,22 @@ pub fn update_cli(tag: String) -> Result<CmdResult, String> {
     }
 
     let url = format!("https://raw.githubusercontent.com/{REPO_SLUG}/{tag}/install.sh");
-    let script = std::env::temp_dir().join(format!("worktrees-install-{}.sh", std::process::id()));
-    let mut fetch = worktrees_core::childenv::command("curl");
-    fetch
-        .args(["-fsSL", "--connect-timeout", "10", "--max-time", "120", "-o"])
-        .arg(&script)
-        .arg(&url);
-    let f = run_deadline(fetch, 150).map_err(|e| {
-        applog("error", &format!("update_cli {tag}: installer download failed: {e}"));
-        format!("installer download failed: {e}")
-    })?;
-    if !f.status.success() {
-        applog("error", &format!("update_cli {tag}: installer download rc={}", f.status.code().unwrap_or(-1)));
-        let _ = std::fs::remove_file(&script);
-        return Ok(CmdResult {
-            ok: false,
-            code: f.status.code().unwrap_or(-1),
-            output: format!("installer download failed\n{}", String::from_utf8_lossy(&f.stderr)),
-            slug: None,
-            needs_confirm: None,
-            warnings: Vec::new(),
-        });
-    }
-
-    let mut run = worktrees_core::childenv::command("bash");
-    run.arg(&script).env("WORKTREES_INSTALL_VERSION", &tag);
     // replace the binary that's actually resolved, not blindly ~/.local/bin
-    if let Some((path, _)) = cli_binary() {
-        if let Some(parent) = Path::new(&path).parent() {
-            run.env("WORKTREES_INSTALL_DIR", parent);
+    let install_dir = cli_binary().and_then(|(path, _)| Path::new(&path).parent().map(Path::to_path_buf));
+    let base = installer_base(std::env::var_os("HOME"));
+    let out = match run_installer(&base, &url, &tag, install_dir.as_deref())? {
+        Installer::Ran(out) => out,
+        Installer::NotFetched(f) => {
+            return Ok(CmdResult {
+                ok: false,
+                code: f.status.code().unwrap_or(-1),
+                output: format!("installer download failed\n{}", String::from_utf8_lossy(&f.stderr)),
+                slug: None,
+                needs_confirm: None,
+                warnings: Vec::new(),
+            });
         }
-    }
-    let out = run_deadline(run, 600).map_err(|e| {
-        applog("error", &format!("update_cli {tag}: installer run failed: {e}"));
-        format!("installer run failed: {e}")
-    })?;
-    let _ = std::fs::remove_file(&script);
+    };
     let mut text = String::from_utf8_lossy(&out.stdout).to_string();
     text.push_str(&String::from_utf8_lossy(&out.stderr));
 
@@ -443,6 +423,64 @@ pub fn update_cli(tag: String) -> Result<CmdResult, String> {
     })
 }
 
+/// How far [`run_installer`] got: the installer ran (its exit status and
+/// output), or curl could not fetch it (curl's).
+enum Installer {
+    Ran(std::process::Output),
+    NotFetched(std::process::Output),
+}
+
+/// Where the installer is staged: worktrees' own cache, `~/.cache/worktrees`,
+/// as for everything else it keeps. Not `temp_dir()`, the shared `/tmp` on
+/// Linux, except for a process with no HOME, where the private directory
+/// [`run_installer`] makes is what holds.
+fn installer_base(home: Option<std::ffi::OsString>) -> std::path::PathBuf {
+    match home.filter(|h| !h.is_empty()) {
+        Some(h) => Path::new(&h).join(".cache/worktrees"),
+        None => std::env::temp_dir(),
+    }
+}
+
+/// Fetch `url` and run it with bash, with `tag` and `install_dir` passed to
+/// install.sh the way it reads them.
+///
+/// It used to go `curl -o temp_dir()/worktrees-install-<pid>.sh`, then
+/// `bash` that path. On Linux that name is in the shared `/tmp`, and another
+/// local user who took it first got their own script run: a 0666 file of
+/// theirs is written into by curl and rewritten by them before bash reads it
+/// (measured), and a link is stopped only by `fs.protected_symlinks`. Now
+/// curl hands the bytes back, and they are written as a new 0700 file in a
+/// fresh 0700 directory under `base` (`fsx::PrivateDir`), which is run by
+/// that path and removed with the directory when this returns.
+fn run_installer(base: &Path, url: &str, tag: &str, install_dir: Option<&Path>) -> Result<Installer, String> {
+    let mut fetch = worktrees_core::childenv::command("curl");
+    fetch.args(["-fsSL", "--connect-timeout", "10", "--max-time", "120"]).arg(url);
+    let f = run_deadline(fetch, 150).map_err(|e| {
+        applog("error", &format!("update_cli {tag}: installer download failed: {e}"));
+        format!("installer download failed: {e}")
+    })?;
+    if !f.status.success() {
+        applog("error", &format!("update_cli {tag}: installer download rc={}", f.status.code().unwrap_or(-1)));
+        return Ok(Installer::NotFetched(f));
+    }
+
+    let staged = worktrees_core::fsx::PrivateDir::new(base, "update-cli")
+        .and_then(|dir| dir.create_file("install.sh", &f.stdout, 0o700).map(|script| (dir, script)));
+    let (_dir, script) = staged.map_err(|e| {
+        applog("error", &format!("update_cli {tag}: staging the installer under {} failed: {e}", base.display()));
+        format!("could not stage the installer under {}: {e}", base.display())
+    })?;
+    let mut run = worktrees_core::childenv::command("bash");
+    run.arg(&script).env("WORKTREES_INSTALL_VERSION", tag);
+    if let Some(dir) = install_dir {
+        run.env("WORKTREES_INSTALL_DIR", dir);
+    }
+    let out = run_deadline(run, 600).map_err(|e| {
+        applog("error", &format!("update_cli {tag}: installer run failed: {e}"));
+        format!("installer run failed: {e}")
+    })?;
+    Ok(Installer::Ran(out))
+}
 
 pub fn valid_tag(tag: &str) -> bool {
     tag.starts_with('v')
@@ -661,4 +699,131 @@ mod tests {
         "components":[{"id":"rwppv331jlwc"}],
         "incident_updates":[{"body":"Unrelated.","updated_at":"2026-09-18T15:04:00Z"}]
     }"#;
+
+    // ── staging the installer ────────────────────────────────────────────────
+
+    struct Scratch(std::path::PathBuf);
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    fn scratch(tag: &str) -> Scratch {
+        let t = std::env::temp_dir().join(format!("wtupd-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&t);
+        std::fs::create_dir_all(&t).unwrap();
+        Scratch(t)
+    }
+
+    /// Whatever a test planted at a fixed path outside its scratch dir.
+    struct Planted(std::path::PathBuf);
+    impl Drop for Planted {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    /// An install.sh, served by real curl from a `file://` URL, that writes
+    /// down where it ran from — `$0`, its own mode, its directory's — and
+    /// what it was handed.
+    fn installer(s: &Scratch) -> String {
+        let src = s.0.join("install.sh");
+        let at = |n: &str| s.0.join(n).display().to_string();
+        std::fs::write(
+            &src,
+            format!(
+                "printf '%s' \"$0\" > '{}'\nls -l \"$0\" > '{}'\nls -ld \"$(dirname \"$0\")\" > '{}'\n\
+                 printf '%s %s' \"$WORKTREES_INSTALL_VERSION\" \"$WORKTREES_INSTALL_DIR\" > '{}'\necho installed\n",
+                at("argv0"),
+                at("mode"),
+                at("dirmode"),
+                at("env")
+            ),
+        )
+        .unwrap();
+        format!("file://{}", src.display())
+    }
+
+    /// Run the installer; [`ran_privately`] then checks where it ran.
+    fn install(base: &Path, url: &str) {
+        let out = match run_installer(base, url, "v9.9.9", Some(Path::new("/opt/wt"))).unwrap() {
+            Installer::Ran(out) => out,
+            Installer::NotFetched(f) => panic!("not fetched: {}", String::from_utf8_lossy(&f.stderr)),
+        };
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "installed\n");
+    }
+
+    /// The fetched script ran, handed the tag and the install dir, from a 0700
+    /// directory of its own under `base`, as a 0700 file, and that directory
+    /// is gone. Returns the directory.
+    fn ran_privately(s: &Scratch, base: &Path) -> std::path::PathBuf {
+        let read = |n: &str| std::fs::read_to_string(s.0.join(n)).unwrap();
+        assert_eq!(read("env"), "v9.9.9 /opt/wt");
+        let argv0 = std::path::PathBuf::from(read("argv0"));
+        let dir = argv0.parent().unwrap().to_path_buf();
+        assert_eq!(dir.parent(), Some(base), "ran from {}, not a directory of its own under the cache", argv0.display());
+        // The first ten columns: macOS appends `@` when there are xattrs.
+        assert_eq!(&read("dirmode")[..10], "drwx------", "the directory was {}", read("dirmode"));
+        assert_eq!(&read("mode")[..10], "-rwx------", "the script was {}", read("mode"));
+        assert!(!dir.exists(), "{} outlived the run", dir.display());
+        dir
+    }
+
+    /// The old staging name, `temp_dir()/worktrees-install-<pid>.sh`, is in
+    /// the shared `/tmp` on Linux, where another local user could plant it
+    /// first. Whatever is there now — a link to someone's file, or a script of
+    /// the planter's own — is never written through, followed or run: the
+    /// installer that runs is the one fetched, from a fresh 0700 directory of
+    /// its own under the cache, which is gone again afterwards.
+    #[test]
+    fn a_planted_shared_name_is_never_written_or_run() {
+        let s = scratch("plant");
+        let base = s.0.join("cache");
+        let url = installer(&s);
+        let old = Planted(std::env::temp_dir().join(format!("worktrees-install-{}.sh", std::process::id())));
+        let _ = std::fs::remove_file(&old.0);
+
+        let victim = s.0.join("victim");
+        std::fs::write(&victim, "precious").unwrap();
+        std::os::unix::fs::symlink(&victim, &old.0).unwrap();
+        install(&base, &url);
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "precious", "the download went through the link");
+        assert_eq!(std::fs::read_link(&old.0).unwrap(), victim, "the planted link was touched");
+        let first = ran_privately(&s, &base);
+
+        std::fs::remove_file(&old.0).unwrap();
+        let pwned = s.0.join("pwned");
+        let plant = format!("touch '{}'\n", pwned.display());
+        std::fs::write(&old.0, &plant).unwrap();
+        install(&base, &url);
+        assert!(!pwned.exists(), "the planted script ran");
+        assert_eq!(std::fs::read_to_string(&old.0).unwrap(), plant, "the planted file was written");
+        let second = ran_privately(&s, &base);
+
+        assert_ne!(first, second, "each run gets a fresh directory");
+        assert_eq!(std::fs::read_dir(&base).unwrap().count(), 0, "nothing is left in the cache");
+    }
+
+    /// A download that fails stages nothing at all.
+    #[test]
+    fn a_failed_download_stages_nothing() {
+        let s = scratch("nofetch");
+        let base = s.0.join("cache");
+        let url = format!("file://{}", s.0.join("absent.sh").display());
+        let Ok(Installer::NotFetched(f)) = run_installer(&base, &url, "v9.9.9", None) else {
+            panic!("a missing installer must come back as not fetched");
+        };
+        assert!(!f.status.success());
+        assert!(!base.exists() || std::fs::read_dir(&base).unwrap().count() == 0);
+    }
+
+    /// worktrees' own cache, as everywhere else: only a process with no HOME
+    /// falls back to `temp_dir()`, and the private directory holds there too.
+    #[test]
+    fn the_installer_is_staged_in_the_cache_not_the_shared_temp_dir() {
+        assert_eq!(installer_base(Some("/home/u".into())), Path::new("/home/u/.cache/worktrees"));
+        assert_eq!(installer_base(Some("".into())), std::env::temp_dir());
+        assert_eq!(installer_base(None), std::env::temp_dir());
+    }
 }

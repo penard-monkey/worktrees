@@ -65,6 +65,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   worktrees' mark that the repository supplied, committed or behind such a
   link, also no longer counts as worktrees' own when the launch decides
   whether to trust the folder, so kimi asks first.
+- **Updating the CLI from the app no longer stages the installer at a
+  guessable path in the shared temp directory.** Settings → Updates → "Update
+  CLI", and installing a chosen version there, downloaded `install.sh` to
+  `worktrees-install-<pid>.sh` in the system temp directory and ran it from
+  there. On Linux that is `/tmp`, which every
+  local user can write: another account on the machine could create that file
+  first and have its own script run as you. macOS gives each user a private
+  temp directory, so this affected Linux. The installer is now written as a
+  new file in a fresh directory that only you can open, under
+  `~/.cache/worktrees`, and that directory is removed once the installer
+  finishes.
 
 ## [0.43.1] - 2026-10-22
 
