@@ -28,6 +28,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `docs -> ../shared`, was walked into, and the Docs tab listed files from
   outside the worktree that it could not open. A link to another directory
   inside the same checkout still works.
+- **`worktrees serve` checks what every command acts on before running it.**
+  This is the groundwork for other devices driving serve, and nothing changes
+  for the desktop app. A client of serve gets refusals for three things:
+  - a `repo` that is not a registered project, such as a note or pin written
+    into any folder;
+  - a place name that is not exactly one existing place, such as `../x`;
+  - a terminal attach to a tmux session that belongs to no place, such as
+    your own tmux sessions outside Worktrees.
+  A terminal connection can no longer type into, resize or close another
+  connection's terminal, and terminal ids no longer restart at 1 when serve
+  restarts.
 
 ## [0.43.1] - 2026-10-22
 
