@@ -1320,14 +1320,18 @@ as it unmounts (`TerminalPane.tsx:106` on main), and that `term_close` goes
 out on the NEW socket. On a restarted serve, that id may already name an
 attach the new launch handed out: one of the app's own fresh panes, or, with
 two clients, another client's. *Found by reading, not measured.* The fix below
-turns that call into a refusal, because the new connection never opened the
+turns that call into a no-op, because the new connection never opened the
 id.
 
-**Fix:** record the owning connection with each attach, and refuse a
-`term_*` call for an id the caller did not open. The per-connection set
-already exists in `Frames`. Also make ids unguessable, or tag them with a
-launch nonce, so a stale id fails loudly instead of landing somewhere. No
-test asserts an id, so this one needs no `_in` seam.
+**Fix:** record the owning connection with each attach, and refuse
+`term_write`, `term_resize` and `term_wheel` for an id the caller did not
+open, with the `no such terminal` an unknown id gets. A `term_close` of such
+an id is a no-op that answers `ok`, as it already does for an unknown id,
+and the audit log records it as a refusal: TerminalPane sends that close
+with no `.catch`, so a refusal would log an error on every reconnect (Phase
+2, §9.1). The per-connection set already exists in `Frames`. Also make ids
+unguessable, or tag them with a launch nonce, so a stale id never lands
+somewhere. No test asserts an id, so this one needs no `_in` seam.
 
 **Blocks:** Phase 2.
 

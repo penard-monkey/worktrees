@@ -634,7 +634,11 @@ The generated dispatcher runs, in order, before any body:
      What the resolver adds is the scope check.
    - `attach(id)`: the id is in this connection's own set (`Frames::note_term`,
      `crates/worktrees-cli/src/serve/wire.rs:226`). That is Appendix B's
-     `term::NEXT_ID` fix.
+     `term::NEXT_ID` fix. `term_write`, `term_resize` and `term_wheel` on an
+     id outside the set are refused with `no such terminal`, the error an
+     unknown id gets today. `term_close` on one is a no-op that answers `ok`,
+     which is what it already answers for an unknown id, and the audit log
+     records it as a refusal (§9.1 says why).
    - `shell(repo, slug, index)`: `place(repo, slug)` and a `u32` index.
    - `job(id)`: a clone job this connection started.
    - `device(id)`: a device of the CALLER's principal (§2.8). A device of
@@ -753,7 +757,8 @@ Each one must be shown failing first (AGENTS.md).
 - Every event name has a projection.
 - A resolver test per kind: canonicalization, symlink escape, `..`, the
   `(main)` slug, a session prefix match (`api` against `api-fix`), and that
-  missing and out-of-scope objects get identical errors.
+  missing and out-of-scope objects get identical errors. For `term_close`
+  the identical answer is `ok`.
 
 ### 3.4 Every command, mapped
 
@@ -1585,7 +1590,9 @@ the whole file, and nothing here claims that it can (§1).
   failed handshake v1. These are aggregated per episode with counts, like
   `conn.rs`'s `capped` log, so a flood does not turn into a disk-writing
   flood;
-- every refusal: an exposure, a capability or scope, a limit tripped;
+- every refusal: an exposure, a capability or scope, a limit tripped. A
+  `term_close` of an id the connection did not open is recorded here too,
+  although the caller is answered `ok` (§9.1);
 - every mutation: every row whose capability is not `read`, with its
   outcome. A destructive one records what it destroyed in a form that can
   be recovered: `remove_place` with `del_branch` records the branch's tip
@@ -1865,7 +1872,7 @@ the user's next ordinary save. Since then, #516 as merged closed gaps 11 and
 | 13 | **New. An authenticated client is unbounded:** a blocking task per request, an unbounded outbox, a lane per key | `conn.rs:545`, `:498`, `:217`–`237` | §6 | 2 |
 | 14 | **New. Arbitrary-path reads exposed as Engine rows:** `probe_dir`, `skill_inspect`, `sync_hub_list` | `dispatch.rs:228`, `:447`, `:317` | `admin` with `new_path` or `global` (§3.4) | 2 |
 | 15 | **New, a residue of L1:** `log_event` keeps newlines and panics on a mid-character truncation; serve.log is `0644` | `meta.rs:27`–`28`; `mod.rs:131` | §5 | **Closed on main by #516.** `meta::ui_line` escapes the controls, the line separators and the bidi controls, then truncates on a character boundary. serve.log is created `0600` and re-tightened on every write, the rotated copy included. |
-| 16 | Known (Appendix B): `term_*` acts on any id, from any connection, and ids restart at 1 every launch | `term.rs:44`, `:138`; `dispatch.rs:422`–`429` | `attach(id)` (§3.3), plus a launch nonce in the id | 2. **No longer latent since #525** (§9.1): a pane being replaced after a reconnect sends its old id to the new socket. |
+| 16 | Known (Appendix B): `term_*` acts on any id, from any connection, and ids restart at 1 every launch | `term.rs:44`, `:138`; `dispatch.rs:422`–`429` | `attach(id)` (§3.3), plus a launch nonce in the id. A stale `term_close` becomes a no-op that answers `ok`; `term_write`, `term_resize` and `term_wheel` on an id the caller did not open are refused (§9.1). | 2. **No longer latent since #525** (§9.1): a pane being replaced after a reconnect sends its old id to the new socket. |
 
 ---
 
@@ -1883,8 +1890,8 @@ the user's next ordinary save. Since then, #516 as merged closed gaps 11 and
 | `mark_seen` | Stamps the client's clock, forward-only (Appendix B) | The host stamps its own `now`, and the client's epoch is ignored | 2 |
 | `open_place` closing the second agent | Decided by whichever client selects the place first, using its own default (Appendix B) | Not decided by a client on load. The server decides, using the host's default, or the user is asked. | 2 |
 | A dock shell's single sink | A second attach silences the first pane (`term.rs:438`–`462`) | A sink per attach. The most recently active attach owns the size, which is tmux's `window-size latest`. | 2 |
-| Terminal ids | A global counter from 1, no owner (gap 16). Appendix B called it latent "because the transport's client never reconnects". Since #525 it does, including to a serve it restarted. Panes are keyed by the connection's `gen`, so each one remounts and opens a fresh id. But the pane being replaced closes its OLD id on unmount (`TerminalPane.tsx:106` on main), and that call goes out on the NEW socket. A new launch counts from 1 again, so the id may already name an attach it just handed out: a fresh pane, or another client's. *Found by reading, not measured.* | Owner check plus a launch nonce. The owner check alone turns the stale close into a refusal, because the new connection never opened that id. | 2 |
-| `app:open-doc` | Sent to every socket, so one `worktrees show` opens the document on every device | Loopback clients only: `worktrees show` is run by someone at the host. A held one is released only to a loopback client that listens for it (§9.3). | 2 |
+| Terminal ids | A global counter from 1, no owner (gap 16). Appendix B called it latent "because the transport's client never reconnects". Since #525 it does, including to a serve it restarted. Panes are keyed by the connection's `gen`, so each one remounts and opens a fresh id. But the pane being replaced closes its OLD id on unmount (`TerminalPane.tsx:106` on main), and that call goes out on the NEW socket. A new launch counts from 1 again, so the id may already name an attach it just handed out: a fresh pane, or another client's. *Found by reading, not measured.* | Owner check plus a launch nonce. With the owner check, the stale close is a no-op that answers `ok`, because the new connection never opened that id. A non-owned id and an unknown id look identical to the caller, and `term_close` already answers `ok` for an unknown one (`crates/worktrees-api/src/term.rs:315`–`320` on main). It is not a refusal because TerminalPane sends the close with no `.catch`, and App logs every unhandled rejection as an error (`App.tsx:4689`), so a refusal would log an error on every reconnect. The audit log records the no-op as a refused act (§5.1). `term_write`, `term_resize` and `term_wheel` on a non-owned id are refused with `no such terminal`, as an unknown id is today. | 2 |
+| `app:open-doc` | Sent to every socket, so one `worktrees show` opens the document on every device | Loopback clients only: `worktrees show` is run by someone at the host. Slice 1 sends it, and releases a held one, to console connections only. Slice 1b narrows that to a loopback connection that declared it listens for `app:open-doc` (§9.3, §10). | 2 |
 | Events in general | Every socket | Projected to the scope (§3.3) | 2 |
 | Dates | Host-local (`sysclock::date_cache`) | Displays take the device's time zone, as `ui_usage` already does with `tz_offset_min` | 3 |
 | The docs viewer URL | Loopback | Refused remotely, then proxied (gap 7) | 2, 3 |
@@ -1952,6 +1959,15 @@ A connection that declares nothing is sent no `app:open-doc`, so the rule
 fails closed. Event projection (§3.3) can use the same set to skip a socket
 that would drop a frame anyway.
 
+*It ships in two steps* (§10). Slice 1 ships the narrower half:
+`has_audience` counts console connections only, meaning connections on the
+loopback listener that passed handshake v1 (§2.6), and `app:open-doc` goes
+only to them. That closes the second case above before any device can
+connect, which is slice 6. It does not close the first: the shim's probe is
+a console connection, so it still counts as an audience. Slice 1b, a
+follow-up after slice 1 merges, adds the `listen` frame and makes
+`has_audience` "a loopback connection that declared `app:open-doc`".
+
 A request still lives 30 s (`inbox::MAX_AGE_SECS`). A show is a host act, so
 the update rehearsal's residue of a held show expiring after 30 s, when no
 app came back, is correct behaviour, not a gap.
@@ -2000,8 +2016,13 @@ Each slice merges on its own, and nothing binds off loopback until slice 6.
    the resolver, result and event projection, and the tests in §3.3.
    Loopback behaviour is unchanged apart from §3.5. Gaps 2, 3, 4 (the
    console tag), 5 (all but the `[docs]` walk), 7 (the remote refusal), 10,
-   12, 14 and 16, and the declared listener set that a held `worktrees show`
-   is released to (§9.3).
+   12, 14 and 16. `has_audience` counts console connections only, and
+   `app:open-doc` goes only to them (§9.3).
+
+   **1b. The declared listener set** (§9.3), its own item, after slice 1
+   merges: the `listen` frame, and `has_audience` becomes a loopback
+   connection that declared `app:open-doc`. Until it lands, the shim's
+   verification probe still takes a held `worktrees show`.
 2. **The path classifier** (§7.1): gap 1, and the `[docs]` walk (gap 5).
 3. **The audit log** (§5).
 4. **Resource limits** (§6), including the loopback budget split: gap 13.
