@@ -266,10 +266,12 @@ pub struct OpenDoc {
 /// 30 s life, which is what an inbox with no app running has always done. A
 /// `worktrees serve` left client-less by an app crash used to drain every
 /// request within a tick and emit it to nobody, and with a second engine up it
-/// won that race four times out of six (rehearsal D2).
+/// won that race four times out of six (rehearsal D2). "Somebody" is a client
+/// that LISTENS for `app:open-doc`, not any socket: the app's verification
+/// probe authenticates and closes, and a request released to it was lost.
 pub fn drain_inbox(ctx: &Ctx) -> Inbox {
     let now = sysclock::now_epoch();
-    if !ctx.host.has_audience() {
+    if !ctx.host.has_audience("app:open-doc") {
         return Inbox::Held(worktrees_core::inbox::sweep(now));
     }
     let reqs = worktrees_core::inbox::drain(now);

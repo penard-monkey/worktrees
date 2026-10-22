@@ -10,8 +10,13 @@
 //! console's, so the desktop app sees exactly what it saw before. An event
 //! with no projection here reaches the console and nobody else: that fails
 //! closed, and a test fails when an `emit("…")` in the api crate has no row.
+//!
+//! A ONE-SHOT event also asks the socket, not only its caller: it goes only
+//! to a connection that declared it listens for it (`Listens`, §9.3).
 
 use std::path::{Component, Path};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use serde_json::Value;
 use worktrees_core::authz::{Caller, Grant, Projects};
@@ -105,6 +110,54 @@ pub const EVENTS: &[(&str, Event)] = &[
     // `worktrees show` is run by someone at the host (§9.1).
     ("app:open-doc", Event::Console),
 ];
+
+// ── who listens (§9.3) ───────────────────────────────────────────────────────
+
+/// Events that are one ACT each and are consumed by being emitted: the inbox
+/// takes a `worktrees show` off the disk as it goes out. Each is sent only to
+/// a connection that declared it listens for it (`Listens`), and the inbox
+/// waits (`Host::has_audience`) until a loopback one has. A connection that
+/// declares nothing — the shim's verification probe, which authenticates and
+/// closes — is sent none and drains nothing, so the rule fails closed. Every
+/// other event goes to every socket, projected, whatever it declared.
+pub const ONE_SHOT: &[&str] = &["app:open-doc"];
+
+pub fn is_one_shot(event: &str) -> bool {
+    ONE_SHOT.contains(&event)
+}
+
+/// The events one connection has declared it listens for: its last
+/// `{"listen": [...]}`, each frame a full replacement (`wire::Frame::Listen`).
+/// Only names `EVENTS` has are kept, one bit each, so whatever a client
+/// sends, the set is one word — and a name this serve never emits is ignored,
+/// never an error: a newer page may listen for an event an older serve does
+/// not have. The session replaces it and `Broadcast` reads it on every emit,
+/// neither under the other's lock. Starts empty: nothing declared.
+#[derive(Clone, Default, Debug)]
+pub struct Listens(Arc<AtomicU64>);
+
+const _: () = assert!(EVENTS.len() <= 64, "Listens keeps one bit per EVENTS row");
+
+fn bit(name: &str) -> u64 {
+    EVENTS.iter().position(|(n, _)| *n == name).map_or(0, |i| 1 << i)
+}
+
+impl Listens {
+    /// Replace the set with `names`, keeping the known ones. `Some` with the
+    /// kept names, in `EVENTS` order, when that changed the set.
+    pub fn declare<'a>(&self, names: impl IntoIterator<Item = &'a str>) -> Option<Vec<&'static str>> {
+        let bits = names.into_iter().fold(0, |b, n| b | bit(n));
+        if self.0.swap(bits, Ordering::SeqCst) == bits {
+            return None;
+        }
+        Some(EVENTS.iter().enumerate().filter(|(i, _)| bits & (1 << i) != 0).map(|(_, (n, _))| *n).collect())
+    }
+
+    pub fn has(&self, event: &str) -> bool {
+        let b = bit(event);
+        b != 0 && self.0.load(Ordering::SeqCst) & b != 0
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Event {
@@ -241,6 +294,28 @@ mod tests {
         let inner = scoped(&["/r/a/inner"]);
         assert!(ev("sessions:done", &json!({"path": "/r/a/inner/.worktrees/x", "epoch": 1}), &me, &inner).is_some());
         assert_eq!(ev("sessions:done", &json!({"path": "/r/a/x", "epoch": 1}), &me, &inner), None);
+    }
+
+    /// A declaration keeps only the names serve emits — one bit each, so a
+    /// frame of any length is one word — replaces the last, and says when it
+    /// changed something (the session logs that, and only that).
+    #[test]
+    fn a_declaration_keeps_known_names_and_replaces_the_last() {
+        let l = Listens::default();
+        assert!(!l.has("app:open-doc"), "nothing is declared until a client says so");
+        assert_eq!(l.declare(["no:such", "app:open-doc", "places:changed", "app:open-doc"]), Some(vec!["places:changed", "app:open-doc"]));
+        assert!(l.has("app:open-doc") && l.has("places:changed") && !l.has("sessions:busy"));
+        assert!(!l.has("no:such"), "an unknown name is ignored, not kept");
+        assert_eq!(l.declare(["places:changed", "app:open-doc"]), None, "the same set again changes nothing");
+        let flood: Vec<String> = (0..10_000).map(|i| format!("x:{i}")).collect();
+        assert_eq!(l.declare(flood.iter().map(String::as_str)), Some(vec![]), "a replacement, not an addition");
+        assert!(!l.has("app:open-doc") && !l.has("places:changed"));
+        let shared = l.clone();
+        l.declare(["app:open-doc"]);
+        assert!(shared.has("app:open-doc"), "the session's handle and the broadcast's are one set");
+        for name in ONE_SHOT {
+            assert!(EVENTS.iter().any(|(n, _)| n == name), "{name} is one-shot and has no EVENTS row, so it could never be declared");
+        }
     }
 
     #[test]

@@ -152,8 +152,9 @@ export function reconnectEngine(): Promise<void> {
 }
 
 /** A socket door, as `ipcws.ts` makes one: `ready` settles once the handshake
- *  has proven the server (or failed). */
-export type EngineSocket = Door & { ready: Promise<void> };
+ *  has proven the server (or failed), and `declare` tells serve which events
+ *  this page listens for (sent once the proof passes). */
+export type EngineSocket = Door & { ready: Promise<void>; declare(names: readonly string[]): void };
 
 /** One dial, as the engine door asks for it: the try's `reason` (null at
  *  launch) and its `start` permission and `manual` mark for the shim, `onLost`
@@ -177,11 +178,14 @@ export type Dial = (ask: DialAsk) => Promise<Dialled>;
 
 /** Events that are one act each rather than a state, kept for a moment when
  *  they arrive with nobody listening and handed to the first listener.
- *  `app:open-doc` is a `worktrees show`: serve holds one while no client is
- *  connected and lets it go the moment one authenticates — before main.tsx has
- *  mounted App, whose listener is the only one. A state event (`sessions:busy`,
- *  `places:changed`) is never kept: a late one would be a stale set, and the
- *  next tick sends a fresh one anyway. */
+ *  `app:open-doc` is a `worktrees show`: serve holds one until a connection
+ *  DECLARES it listens for it, which this door does only while App's listener
+ *  is there (§9.3) — so serve does the waiting, and what is kept here is what
+ *  slips between a declaration and a listener going: StrictMode's throwaway
+ *  listener lets go a microtask late, and the frame that says so goes on the
+ *  next macrotask. A state event (`sessions:busy`, `places:changed`) is never
+ *  kept: a late one would be a stale set, and the next tick sends a fresh one
+ *  anyway. */
 const ONE_SHOT: ReadonlySet<string> = new Set(["app:open-doc"]);
 /** How long an unheard one-shot event waits. It bridges "authenticated" to
  *  "App is listening", which is seconds; the request it carries was already up
@@ -217,7 +221,10 @@ export type EngineDoor = Door & { connect(): Promise<void>; visibility(): void }
  *  It owns its event listeners rather than lending them to one socket, so a
  *  reconnect re-subscribes every one of them on the new socket — once per
  *  socket, whatever happened in between — and a component that listened
- *  before the engine died hears it after. Channels come from the socket
+ *  before the engine died hears it after. It tells each socket which of them
+ *  have a live handler (`declare`, §9.3) — once per macrotask, and afresh on
+ *  every reconnect — because serve sends a one-shot event only to a socket
+ *  that said it listens for it. Channels come from the socket
  *  current when they are made; a terminal makes a new one when it re-attaches.
  *  When the socket dies the door retries on its own (`reconnect.ts` holds when,
  *  and whether a try may start a serve); `reconnectEngine()` tries at once.
@@ -237,6 +244,31 @@ export function engineDoor(local: Door | null, dial: Dial, env: RetryEnv): Engin
   let wired: { s: EngineSocket; names: Set<string> } | null = null;
   // One-shot events nobody was listening for yet (`ONE_SHOT`).
   const parked: { name: string; e: Event<unknown>; at: number }[] = [];
+  // What the socket being connected or in use was last told this door listens
+  // for (§9.3): serve sends a one-shot event only to a connection that
+  // declared it, and holds a `worktrees show` until one has. The set is the
+  // names with a LIVE handler — not ONE_SHOT's, which are wired for parking
+  // whether or not anyone listens — so a show waits in serve until App
+  // listens. At most one frame per macrotask, so StrictMode's listen,
+  // unlisten, listen is one frame or none. Every new socket is told afresh;
+  // it starts out having declared nothing, so an empty set needs no frame.
+  let told: { s: EngineSocket; names: string } | null = null;
+  let telling = false;
+  const tell = () => {
+    telling = false;
+    const s = wired?.s;
+    if (!s) return;
+    const names = [...handlers].filter(([, hs]) => hs.size > 0).map(([name]) => name).sort();
+    const key = names.join("\n");
+    if (told?.s === s ? told.names === key : names.length === 0) return;
+    told = { s, names: key };
+    s.declare(names);
+  };
+  const retell = () => {
+    if (telling) return;
+    telling = true;
+    setTimeout(tell, 0);
+  };
 
   const deliver = (name: string) => (e: Event<unknown>) => {
     const hs = handlers.get(name);
@@ -295,6 +327,7 @@ export function engineDoor(local: Door | null, dial: Dial, env: RetryEnv): Engin
       holder.s = d.sock;
       wired = { s: d.sock, names: new Set() };
       for (const name of [...ONE_SHOT, ...handlers.keys()]) wire(name);
+      tell(); // held by the socket until serve's proof passes, then sent first
       await d.sock.ready;
       sock = d.sock;
       gen += 1;
@@ -332,9 +365,11 @@ export function engineDoor(local: Door | null, dial: Dial, env: RetryEnv): Engin
       }
       const h = handler as EventCallback<unknown>;
       set.add(h);
+      retell();
       if (parked.some((p) => p.name === event)) flush(event);
       return Promise.resolve(() => {
         handlers.get(event)?.delete(h);
+        retell();
       });
     },
     channel<T>(onmessage?: (response: T) => void): Channel<T> {

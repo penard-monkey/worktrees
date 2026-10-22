@@ -214,6 +214,9 @@ const K = {};
   // The end frame: the channel frame's own keys, then one that is literally true.
   if (endk?.length === 3 && endk[0] === K.channel && endk[1] === K.seq && new RegExp(`"${endk[2]}":\\s*true`).test(rustFn(wire, "end_frame") ?? "")) K.end = endk[2];
   else fail(`wire: end_frame is not {"${K.channel}", "${K.seq}", "<end>": true} (got ${JSON.stringify(endk)})`);
+  // The listen frame (§9.3): its one key, and that parse_frame is what reads it.
+  K.listen = rustStr(wire, "LISTEN");
+  if (!K.listen || !/o\.remove\(LISTEN\)/.test(rustFn(wire, "parse_frame") ?? "")) fail(`wire: no LISTEN const that parse_frame reads (${JSON.stringify(K.listen)})`);
   K.preauth = rustUsize(conn, "PREAUTH_BYTES");
   K.maxMessage = rustUsize(conn, "MAX_MESSAGE");
   if (!(K.preauth > 0) || !(K.maxMessage > 0)) fail(`conn: could not read PREAUTH_BYTES (${K.preauth}) or MAX_MESSAGE (${K.maxMessage})`);
@@ -230,7 +233,7 @@ const WS = await load(SRC.ipcws, wsJs);
     ["version", K.authVersion], ["id", K.id], ["cmd", K.cmd], ["args", K.args],
     ["ok", K.ok], ["err", K.err], ["channel", K.channel], ["seq", K.seq], ["data", K.data], ["end", K.end],
     ["event", K.event], ["payload", K.payload], ["channelPrefix", K.prefix], ["firstSeq", K.firstSeq],
-    ["clientLocal", K.clientLocal],
+    ["clientLocal", K.clientLocal], ["listen", K.listen],
   ];
   const bad = pairs.filter(([k, v]) => W[k] !== v);
   for (const [k, v] of bad) fail(`WIRE.${k} is ${JSON.stringify(W[k])}, the Rust says ${JSON.stringify(v)}`);
@@ -900,6 +903,42 @@ for (const [label, v] of [["an older server", "0.0.1"], ["a server that sends no
   await fits;
 }
 
+// 2l. the listen frame (§9.3): serve sends a one-shot event only to a socket
+// that declared it. A declaration is held until serve's proof passes and then
+// is the FIRST frame — the latest one only, ahead of the calls queued behind
+// the proof; after that it goes at once. A server that never proves itself is
+// never told.
+{
+  const h = harness();
+  const listened = (f) => K.listen in f;
+  const early = settle(h.door.invoke("list_workspace"));
+  h.door.declare(["places:changed"]);
+  check(h.sock?.sent.length === 0, "a declaration before the socket opens writes nothing");
+  h.open(); h.hello(); h.challenge();
+  h.door.declare(["app:open-doc", "places:changed"]);
+  await h.proof();
+  check(!h.frames().some(listened), "…nor one made while the handshake runs: nothing but the handshake goes before serve's proof");
+  h.welcome(); await h.verified();
+  const fs = h.frames();
+  check(fs.length === 4 && same(Object.keys(fs[2] ?? {}), [K.listen]) && same(fs[2][K.listen], ["app:open-doc", "places:changed"]) && K.cmd in (fs[3] ?? {}),
+    `once the proof passes, the LATEST declaration is the first frame — {"${K.listen}": [...]}, one key — ahead of the call queued behind the proof (${JSON.stringify(fs.slice(2))})`);
+  const r = h.requests()[0];
+  h.reply(r?.[K.id], []);
+  await early;
+  h.door.declare([]);
+  check(same(h.frames().at(-1), { [K.listen]: [] }) && h.frames().filter(listened).length === 2,
+    "after it, each declaration is one frame at once — an empty one too, since each replaces the last");
+}
+{
+  const h = harness();
+  h.door.declare(["app:open-doc"]);
+  h.open(); h.hello(); h.challenge(); await h.proof();
+  h.welcome({ key: "f".repeat(64) });
+  await until(() => h.errors.length > 0);
+  h.door.declare(["places:changed"]);
+  check(!h.frames().some((f) => K.listen in f) && !!h.sock?.closed && h.errors.length === 1,
+    "a server that fails the proof is never told what this page listens for — nor afterwards, on the closed socket, and declaring there does not throw");
+}
 check(THROWN.length === 0, `the client never threw out of a socket callback (${THROWN.length}${THROWN.length ? `: ${THROWN[0]}` : ""})`);
 
 // ── 3. ipc.ts, and the termreplay contract over the socket ──────────────────
@@ -1018,6 +1057,10 @@ async function loadIpc() {
   await settle(ipc.listen("places:changed", (e) => heard.push(["a", e.payload])));
   h1?.event("places:changed", 1);
   check(same(heard, [["a", 1]]), "a listener hears the engine's events");
+  await ticks();
+  const told = (h) => (h?.frames() ?? []).filter((f) => K.listen in f).map((f) => f[K.listen]);
+  check(same(told(h1), [["places:changed"]]),
+    `the socket is told what the door listens for, once, on the next macrotask — and was told nothing while nothing listened (${JSON.stringify(told(h1))})`);
 
   h1?.drop();
   await tick();
@@ -1115,6 +1158,13 @@ async function loadIpc() {
   const names = ["app:open-doc", "places:changed", "sessions:busy"];
   const subsOk = made.every((d, i) => same([...d.subs].sort(), (i >= 1 ? [...names, "shell:exit"] : names).sort()));
   check(made.length === 5 && subsOk, `5 automatic reconnects: each new socket is subscribed to each event name exactly once (${made.map((d) => d.subs.length).join(",")} subscriptions)`);
+  // …and TOLD once which names have a live handler: serve starts every
+  // connection with nothing declared. Not app:open-doc, which is wired for
+  // parking but has no listener yet — so serve would hold a show, not send it.
+  const live0 = ["places:changed", "sessions:busy"];
+  const tellings = made.map((d) => told(d.h));
+  check(tellings.every((t, i) => t.length === 1 && same(t[0], i >= 1 ? [...live0, "shell:exit"] : live0)),
+    `…and each is told, once, the names with a live handler — one listened while down included (${JSON.stringify(tellings)})`);
   const last = made[made.length - 1].h;
   const tally = heard.length;
   last.event("places:changed", 9);
@@ -1291,6 +1341,54 @@ const oneShotEnv = (now) => {
   await connecting;
   h?.event("places:changed", 7);
   check(same(heard, [7]), `a listener added while the handshake runs hears the socket it was waiting for (${JSON.stringify(heard)})`);
+}
+
+{
+  // What the door declares follows its LIVE handlers (§9.3). App mounting
+  // under StrictMode is ONE frame; a listen and an unlisten in one macrotask
+  // are one frame naming what is left; a reconnect tells the new socket the
+  // same set, as the first frame after its proof; and the last unlisten says
+  // the door listens for nothing.
+  globalThis.__ipcStubs = { tauriInvoke: () => Promise.reject("tauri must not be reached"), tauriListen: () => Promise.reject("no"), TauriChannel: class {} };
+  const ipc = await loadIpc();
+  const socks = [];
+  const door = ipc.engineDoor(null, async ({ onLost }) => {
+    const h = harness({ onError: onLost });
+    socks.push(h);
+    void (async () => { h.open(); h.hello(); h.challenge(); await h.proof(); h.welcome(); await h.verified(); })();
+    return { sock: h.door, owned: true, started: false };
+  }, oneShotEnv(() => Date.now()));
+  ipc.openDoor(door);
+  await settle(door.connect());
+  const told = (h) => (h?.frames() ?? []).filter((f) => K.listen in f).map((f) => f[K.listen]);
+  await ticks();
+  check(told(socks[0]).length === 0, "a door with no listeners tells serve nothing — a connection starts out declaring nothing, the probe's state");
+  const un1 = ipc.listen("app:open-doc", () => {});
+  void un1.then((f) => f());
+  const un2 = ipc.listen("app:open-doc", () => {});
+  await ticks();
+  check(same(told(socks[0]), [["app:open-doc"]]),
+    `App mounting under StrictMode (listen, listen again, the first let go a microtask late) is ONE frame naming the event (${JSON.stringify(told(socks[0]))})`);
+  const unP = (await ipc.listen("places:changed", () => {}));
+  (await un2)();
+  await ticks();
+  check(same(told(socks[0]), [["app:open-doc"], ["places:changed"]]),
+    `a listen and the last unlisten of another name in one macrotask are one frame, naming only what still has a handler (${JSON.stringify(told(socks[0]))})`);
+  const unA = (await ipc.listen("app:open-doc", () => {}));
+  await ticks();
+  socks[0].drop(); await tick();
+  await settle(ipc.reconnectEngine());
+  await until(() => ipc.engineState().kind === "up");
+  const f1 = socks[1]?.frames() ?? [];
+  check(socks.length === 2 && same(Object.keys(f1[2] ?? {}), [K.listen]) && same(f1[2][K.listen], ["app:open-doc", "places:changed"]) && told(socks[1]).length === 1,
+    `a reconnect re-sends the set: the new socket's first frame after its proof, once (${JSON.stringify(f1.slice(2))})`);
+  await ticks();
+  check(told(socks[1]).length === 1, "…and the macrotask that was already due sends nothing more: the set has not changed");
+  unA();
+  unP();
+  await ticks();
+  check(same(told(socks[1]), [["app:open-doc", "places:changed"], []]),
+    `the last unlistens are one frame saying the door listens for nothing — so serve holds the next show (${JSON.stringify(told(socks[1]))})`);
 }
 
 // The full chain: TerminalPane → ipc.ts → ipcws.ts → the fake socket.

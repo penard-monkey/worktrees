@@ -291,7 +291,9 @@ fn read_json<S: Read + Write>(ws: &mut tungstenite::WebSocket<S>) -> Result<serd
 /// Handshake v1 against `127.0.0.1:port`, as a client: hello → challenge →
 /// auth → ok + proof. `Ok` is the version the server's PROVEN reply carries;
 /// `Err` says what went wrong in words for a person. Nothing but the handshake
-/// is ever sent, and the token is the HMAC key — never in a frame.
+/// is ever sent, and the token is the HMAC key — never in a frame. Nor a
+/// `{"listen": …}`: a connection that declares nothing is never sent a held
+/// `worktrees show` (§9.3), and this one closes the moment it is proven.
 pub fn probe(port: u16, token: &str, origin: &str) -> Result<String, String> {
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let stream = TcpStream::connect_timeout(&addr, Duration::from_millis(500)).map_err(|e| format!("connect: {e}"))?;
@@ -1142,7 +1144,7 @@ mod tests {
         let (port, h) = fake_serve(K, "1.2.3", Fake::Honest);
         assert_eq!(probe(port, K, APP_ORIGIN), Ok("1.2.3".to_string()));
         let sent = h.join().unwrap();
-        assert_eq!(sent.len(), 2, "hello and auth, nothing else: {sent:?}");
+        assert_eq!(sent.len(), 2, "hello and auth, nothing else — a probe that declared app:open-doc would take a held show: {sent:?}");
         assert!(sent.iter().all(|f| !f.contains(K)), "the token went on the wire: {sent:?}");
         assert!(sent[0].starts_with("{\"hello\":\""), "{sent:?}");
     }

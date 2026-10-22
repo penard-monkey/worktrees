@@ -27,6 +27,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   panel said they had just been updated. The answer was stamped a few seconds
   after the meter's own clock last moved, and the meter took that for a bad
   timestamp. A timestamp more than a minute in the future is still refused.
+- **A document a session asked to show while the app was starting is no
+  longer lost to the app's own start-up check.** `worktrees show` waits while
+  no window is open, and the app checks that its engine answers by
+  connecting and disconnecting within a few milliseconds. A request released
+  in that moment went to the check and was never shown. The window now tells
+  the engine it is listening for documents, and a waiting request goes only
+  to a window that has, so the check, which says nothing, never takes one.
 
 ### Security
 - **Worktrees never writes inside `.git`, or into its own state, for any

@@ -637,10 +637,11 @@ fn an_event_reaches_each_socket_projected_to_its_caller() {
     let host = Broadcast(clients.clone());
     let (ctx_tx, mut console) = tokio::sync::mpsc::unbounded_channel();
     let (ph_tx, mut phone) = tokio::sync::mpsc::unbounded_channel();
-    clients.add(2, Outbox(ph_tx), Caller::paired(PrincipalId::owner(), DeviceId::new("phone")));
-    assert!(!host.has_audience(), "a device alone is no audience for the inbox");
-    clients.add(1, Outbox(ctx_tx), Caller::console());
-    assert!(host.has_audience());
+    // Both say they listen for `worktrees show`; only the console is shown it.
+    clients.add(2, Outbox(ph_tx), Caller::paired(PrincipalId::owner(), DeviceId::new("phone"))).declare(["app:open-doc"]);
+    assert!(!host.has_audience("app:open-doc"), "a device alone is no audience for the inbox, declared or not");
+    clients.add(1, Outbox(ctx_tx), Caller::console()).declare(["app:open-doc"]);
+    assert!(host.has_audience("app:open-doc"));
 
     let next = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<Message>| -> Option<Value> {
         rx.try_recv().ok().map(|m| serde_json::from_str(m.to_text().unwrap()).unwrap())
@@ -662,6 +663,81 @@ fn an_event_reaches_each_socket_projected_to_its_caller() {
     assert!(next(&mut console).is_some());
     host.emit("places:changed", Value::Null);
     assert!(next(&mut phone).is_some(), "\"re-read\" goes to everyone: the re-read is scoped");
+}
+
+/// §9.3, slice 1b: **a one-shot event goes to a connection that LISTENS for
+/// it.** The app's verification probe is a console connection that proves
+/// itself and closes, declaring nothing; while it counted as an audience, a
+/// held `worktrees show` released in those few ms went into a closing socket.
+/// Now it is no audience and is sent no `app:open-doc`, while the app, which
+/// declared it, is — and every other event still reaches every socket,
+/// declared or not. Each declaration replaces the last.
+#[test]
+fn a_one_shot_event_goes_only_to_a_console_connection_that_declared_it() {
+    use super::conn::{Broadcast, Clients};
+    use super::wire::Outbox;
+    use worktrees_api::Host;
+    use worktrees_core::authz::Caller;
+
+    let clients = Arc::new(Clients::default());
+    let host = Broadcast(clients.clone());
+    let (probe_tx, mut probe) = tokio::sync::mpsc::unbounded_channel();
+    let (app_tx, mut app) = tokio::sync::mpsc::unbounded_channel();
+    let next = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<Message>| -> Option<Value> {
+        rx.try_recv().ok().map(|m| serde_json::from_str(m.to_text().unwrap()).unwrap())
+    };
+    let doc = || json!({ "repo": "/r/a", "slug": "(main)", "path": "/r/a/x.md" });
+
+    clients.add(1, Outbox(probe_tx), Caller::console());
+    assert!(!host.has_audience("app:open-doc"), "a console connection that declared nothing is no audience");
+    let listens = clients.add(2, Outbox(app_tx), Caller::console());
+    listens.declare(["places:changed"]);
+    assert!(!host.has_audience("app:open-doc"), "declaring another event is not declaring this one");
+    listens.declare(["places:changed", "app:open-doc"]);
+    assert!(host.has_audience("app:open-doc"));
+
+    host.emit("app:open-doc", doc());
+    assert_eq!(next(&mut app).unwrap()["event"], json!("app:open-doc"));
+    assert!(next(&mut probe).is_none(), "a connection that declared nothing was sent a one-shot event");
+    host.emit("sessions:busy", json!({ "busy": [], "waiting": [], "waiting_by": {} }));
+    assert!(next(&mut probe).is_some() && next(&mut app).is_some(), "a state event goes to every socket, declared or not");
+
+    listens.declare([]);
+    assert!(!host.has_audience("app:open-doc"), "a declaration replaces the last");
+    host.emit("app:open-doc", doc());
+    assert!(next(&mut app).is_none() && next(&mut probe).is_none());
+}
+
+/// The listen frame over a real socket: read in order with the requests
+/// around it, never answered, unknown names dropped without a word, a
+/// malformed one refused like an unreadable request (and the set left as it
+/// was), and a connection that goes takes its declaration with it.
+#[test]
+fn a_listen_frame_is_read_in_order_and_never_answered() {
+    let l = live("listen");
+    let host = l.running.as_ref().unwrap().ctx.host.clone();
+    let mut ws = client(&l);
+    assert!(!host.has_audience("app:open-doc"), "authenticated, and declared nothing");
+
+    ws.send(Message::text(json!({ "listen": ["no:such-event", "app:open-doc"] }).to_string())).unwrap();
+    let r = rpc(&mut ws, json!(1), "get_changelog", json!({}));
+    assert!(r["id"] == json!(1) && r.get("ok").is_some(), "the next frame answers the request behind it: {r}");
+    assert!(host.has_audience("app:open-doc"), "read before the request that followed it was answered");
+    host.emit("app:open-doc", json!({ "repo": "/r", "slug": "(main)", "path": "/r/x.md" }));
+    assert_eq!(text(&mut ws)["event"], json!("app:open-doc"));
+
+    ws.send(Message::text(json!({ "listen": "app:open-doc" }).to_string())).unwrap();
+    let e = text(&mut ws);
+    assert!(e["id"].is_null() && e["err"].as_str().is_some_and(|s| s.starts_with("bad listen")), "{e}");
+    assert!(host.has_audience("app:open-doc"), "a frame serve could not read changes nothing");
+
+    drop(ws);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while host.has_audience("app:open-doc") {
+        assert!(std::time::Instant::now() < deadline, "a closed connection still counts as an audience");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let _ = &l.rt;
 }
 
 // ── limits (OWASP M1) ────────────────────────────────────────────────────────

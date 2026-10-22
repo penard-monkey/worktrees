@@ -3324,6 +3324,7 @@ Phase 3: Frontend pane and mock harness
     // event system — handlers are registered and fired via emitEvent below
     case "plugin:event|listen": {
       (eventListeners[args.event] ??= new Set()).add(args.handler);
+      if (args.event === "app:open-doc") releaseShows();
       return args.handler;
     }
     case "plugin:event|unlisten": {
@@ -3438,6 +3439,43 @@ const callbacks: Record<number, (v: unknown) => void> = {};
 const eventListeners: Record<string, Set<number>> = {};
 function emitEvent(event: string, payload: unknown) {
   for (const id of eventListeners[event] ?? []) callbacks[id]?.({ event, id, payload });
+}
+
+// `worktrees show` requests nothing has said it listens for yet. serve holds
+// one until a connection DECLARES `app:open-doc` (§9.3), inside the inbox's
+// 30 s life (`inbox::MAX_AGE_SECS`), so a show asked for before App listens
+// is shown once it does rather than lost; the mock does the same. Without an
+// engine door the page listens on the mock directly, so its listeners stand
+// for the declaration; behind `?slowengine`'s door the mock is told what the
+// door declares (`mockDeclare`), exactly as serve is, and the door's own
+// parking subscription does not count.
+const SHOW_MAX_AGE_MS = 30_000;
+const heldShows: { payload: unknown; at: number }[] = [];
+let declared: Set<string> | null = mockEngineDelayMs > 0 ? new Set() : null;
+const listensForShows = () => (declared ? declared.has("app:open-doc") : (eventListeners["app:open-doc"]?.size ?? 0) > 0);
+
+/** `?slowengine`'s socket's `declare`: the events the door says it listens for. */
+export function mockDeclare(names: readonly string[]) {
+  declared = new Set(names);
+  releaseShows();
+}
+
+function offerShow(payload: unknown): boolean {
+  if (listensForShows()) {
+    emitEvent("app:open-doc", payload);
+    return false;
+  }
+  heldShows.push({ payload, at: Date.now() });
+  return true;
+}
+
+/** On a later tick, as serve's poll would: by then StrictMode's throwaway
+ *  listener has let go, and only the one that stays is here. */
+function releaseShows() {
+  setTimeout(() => {
+    if (!heldShows.length || !listensForShows()) return;
+    for (const s of heldShows.splice(0)) if (Date.now() - s.at <= SHOW_MAX_AGE_MS) emitEvent("app:open-doc", s.payload);
+  }, 0);
 }
 (window as any).__TAURI_INTERNALS__ = {
   invoke: (cmd: string, args?: Args) => mockInvoke(cmd, args),
@@ -3634,10 +3672,16 @@ const healthyConfigs: Record<string, MockCfg> = {};
    * `~/.cache/worktrees/inbox`. Unreachable by clicking: the whole point is
    * that it arrives from ANOTHER PROCESS, so without this the frontend half of
    * the feature (select the place, then open the dock on the file, in that
-   * order) could not be driven headlessly at all. */
+   * order) could not be driven headlessly at all. With nothing listening yet
+   * (before App mounts, or behind `?slowengine` before its door declares
+   * `app:open-doc`), it is HELD, as serve holds it, and `held` says so. */
   showDoc(repo: string, slug: string, path: string, line?: number, col?: number) {
-    emitEvent("app:open-doc", { repo, slug, path, line: line ?? null, col: col ?? null });
-    return { repo, slug, path, line, col };
+    const held = offerShow({ repo, slug, path, line: line ?? null, col: col ?? null });
+    return { repo, slug, path, line, col, held };
+  },
+  /** How many shows are held for a listener. */
+  heldShows() {
+    return heldShows.length;
   },
   breakConfig(root: string = CDV_ROOT, msg?: string) {
     const cfg = mockConfigs[root];

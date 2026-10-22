@@ -110,9 +110,14 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   found), version on the first line. serve installs its signal handlers
   BEFORE it writes serve.json: a supervisor's SIGTERM in that gap killed it
   with no exit status. Anything consumed by being emitted (the inbox's
-  `worktrees show`) waits for `Host::has_audience()` — and the app's own
-  verification probe authenticates, so that reads true for a few ms at every
-  launch (ROADMAP). There is no CLI client: a per-command log line
+  `worktrees show`) waits for `Host::has_audience(event)`: a loopback
+  connection that DECLARED the event with `{"listen": [...]}` (§9.3, slice
+  1b). Each listen frame replaces the last and is never answered; serve keeps
+  only names `scope::EVENTS` has, one bit each, and a one-shot event
+  (`scope::ONE_SHOT`) goes only to the sockets that declared it. A socket that
+  declares nothing gets none, which is what keeps the app's own verification
+  probe, which authenticates and closes, from swallowing a held show. A
+  hand-written client that wants `app:open-doc` must declare it. There is no CLI client: a per-command log line
   (`mcp_status`) appears only once a client calls the command, so probing
   serve by hand needs a handshake-v1 client — copy `serve_bin.rs::connect`.
   `app/scripts/server-stack.sh` runs an isolated one for the frontend lane.
@@ -132,9 +137,12 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   version — until serve's proof passes `crypto.subtle.verify`, because whoever
   holds serve.json's port after a crash need not be serve. Frames that arrive
   during verification are held and handed on SYNCHRONOUSLY as the proof
-  passes, so a listener added after `await ready` misses them — a held
-  `app:open-doc` rides right behind `ok`: wire listeners before the proof. A
-  parked event reaches React on a macrotask (`setTimeout(0)`), because
+  passes, so a listener added after `await ready` misses them: wire listeners
+  before the proof. The door DECLARES the names it has a live handler for
+  (`declare`, sent first after the proof, re-sent on every reconnect, at most
+  once per macrotask), so serve holds a `worktrees show` until App listens; a
+  show that slips between a declaration and an unlisten is parked (`ONE_SHOT`).
+  A parked event reaches React on a macrotask (`setTimeout(0)`), because
   StrictMode's throwaway listener has a microtask cleanup that a microtask
   hand-off reaches first. `crypto.subtle` is
   there on `tauri://localhost` (a secure context) and a `ws://127.0.0.1` socket

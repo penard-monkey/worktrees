@@ -48,7 +48,7 @@ async function boot() {
   // unless `?slowengine` puts an engine door in front of it.
   let gated = false;
   if (import.meta.env.VITE_MOCK) {
-    const { mockEngineDelayMs } = await import("./mock/install");
+    const { mockDeclare, mockEngineDelayMs } = await import("./mock/install");
     // `?slowengine[=ms]`: the app's boot over the mock — an engine door whose
     // first connect takes that long, so a call that cannot wait for it is
     // refused here exactly as it is in the app. Its socket is the mock itself.
@@ -58,7 +58,9 @@ async function boot() {
         tauriDoor,
         async () => {
           await new Promise((r) => window.setTimeout(r, mockEngineDelayMs));
-          return { sock: { ...tauriDoor, ready: Promise.resolve() }, owned: true, started: false };
+          // `declare` tells the mock what the door listens for, as it tells
+          // serve: a held show waits for it, not for the door's own wiring.
+          return { sock: { ...tauriDoor, ready: Promise.resolve(), declare: mockDeclare }, owned: true, started: false };
         },
         retryEnv(),
       );

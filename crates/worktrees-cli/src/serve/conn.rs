@@ -34,7 +34,7 @@ use worktrees_api::{Ctx, Host};
 use super::dispatch::{self, Args, Call};
 use super::policy;
 use super::resolve::World;
-use super::scope;
+use super::scope::{self, Listens};
 use super::servefile;
 use super::wire::{self, Frames, Outbox};
 use worktrees_core::authz::{self, Caller, Capability, NoDevices, Registry};
@@ -184,10 +184,10 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for Budget<T> {
 /// pegged core (see the docs server, which learned it first).
 const ACCEPT_RETRY: std::time::Duration = std::time::Duration::from_millis(50);
 
-/// Every authenticated connection's queue and caller, for broadcasts, and
-/// where every caller's grant is read.
+/// Every authenticated connection's queue, caller and declared listeners,
+/// for broadcasts, and where every caller's grant is read.
 pub struct Clients {
-    map: Mutex<HashMap<u64, (Outbox, Caller)>>,
+    map: Mutex<HashMap<u64, (Outbox, Caller, Listens)>>,
     registry: Arc<dyn Registry>,
     world: Option<Arc<dyn World>>,
 }
@@ -205,8 +205,12 @@ impl Clients {
     pub fn with(registry: Arc<dyn Registry>, world: Option<Arc<dyn World>>) -> Self {
         Clients { map: Mutex::new(HashMap::new()), registry, world }
     }
-    pub(super) fn add(&self, id: u64, out: Outbox, caller: Caller) {
-        self.map.lock().unwrap().insert(id, (out, caller));
+    /// A connection joins, having declared nothing. The handle is the set
+    /// its listen frames replace.
+    pub(super) fn add(&self, id: u64, out: Outbox, caller: Caller) -> Listens {
+        let listens = Listens::default();
+        self.map.lock().unwrap().insert(id, (out, caller, listens.clone()));
+        listens
     }
     pub(super) fn remove(&self, id: u64) {
         self.map.lock().unwrap().remove(&id);
@@ -231,7 +235,8 @@ impl Clients {
 /// The engine's `Host`: an event is one frame to every authenticated socket —
 /// PROJECTED to that socket's caller (`scope::event`, §3.3 gap 12). The grant
 /// is read at the moment of each emit, never a copy taken at connect, so a
-/// narrowed scope stops the events with the next one. Fire-and-forget by
+/// narrowed scope stops the events with the next one. A one-shot event goes
+/// only to the sockets that declared it (§9.3). Fire-and-forget by
 /// construction — a dead queue is dropped from the map on the way past, and
 /// nothing here waits on a client.
 pub struct Broadcast(pub Arc<Clients>);
@@ -243,7 +248,10 @@ impl Host for Broadcast {
         // Read once per emit, and only if a scoped caller needs it.
         let mut roots: Option<Vec<String>> = None;
         let mut map = clients.map.lock().unwrap();
-        map.retain(|_, (out, caller)| {
+        map.retain(|_, (out, caller, listens)| {
+            if scope::is_one_shot(event) && !listens.has(event) {
+                return true;
+            }
             let grant = authz::effective(&*clients.registry, caller);
             let mut read = || roots.get_or_insert_with(|| clients.roots()).clone();
             match scope::event(event, &payload, caller, &grant, &mut read) {
@@ -254,12 +262,16 @@ impl Host for Broadcast {
         });
     }
 
-    /// Somebody at the HOST is connected. What waits on an audience is the
-    /// inbox's `app:open-doc`, which only the console receives (§9.1), so a
-    /// remote device alone must not drain it into nothing. A connection joins
-    /// the map once it has proven itself and leaves it as it goes.
-    fn has_audience(&self) -> bool {
-        self.0.map.lock().unwrap().values().any(|(_, c)| c.is_console())
+    /// Somebody at the HOST listens for `event`: a loopback (console)
+    /// connection that declared it. What waits on an audience is the inbox's
+    /// `app:open-doc`, which only the console receives (§9.1), so a remote
+    /// device alone must not drain it into nothing — nor may a console
+    /// connection that never said it listens, which is what the app's
+    /// verification probe is: it authenticates and closes at once, and a
+    /// show released to it was lost (§9.3). A connection joins the map once it
+    /// has proven itself, having declared nothing, and leaves it as it goes.
+    fn has_audience(&self, event: &str) -> bool {
+        self.0.map.lock().unwrap().values().any(|(_, c, l)| c.is_console() && l.has(event))
     }
 }
 
@@ -557,7 +569,7 @@ async fn session(mut ws: Ws, shared: Arc<Shared>, id: u64, origin: String, slot:
     // owner on the console. Never derived from the request, a header or the
     // peer address (§3.3); the remote listener (slice 6) sets the device.
     let caller = Caller::console();
-    shared.clients.add(id, outbox.clone(), caller.clone());
+    let listens = shared.clients.add(id, outbox.clone(), caller.clone());
     // THE writer: one task drains the one queue, so every frame for this
     // connection is written in the order it was queued.
     let writer = tokio::spawn(async move {
@@ -583,8 +595,17 @@ async fn session(mut ws: Ws, shared: Arc<Shared>, id: u64, origin: String, slot:
             Ok(Message::Text(t)) => {
                 // Parsed here, on the reader, because the lane is chosen from
                 // the request; a frame is small and the parse is cheap.
-                let req = match wire::parse_request(t.as_str()) {
-                    Ok(r) => r,
+                let req = match wire::parse_frame(t.as_str()) {
+                    Ok(wire::Frame::Request(r)) => r,
+                    // Taken here, in order with the requests around it, and
+                    // answered by nothing. What it costs is bounded by
+                    // construction: `Listens` keeps one bit per known event.
+                    Ok(wire::Frame::Listen(names)) => {
+                        if let Some(kept) = listens.declare(names.iter().map(String::as_str)) {
+                            info(&format!("serve: client {id} listens for [{}]", kept.join(", ")));
+                        }
+                        continue;
+                    }
                     Err(e) => {
                         let _ = outbox.push(wire::reply_err(&Value::Null, e.into()));
                         continue;
