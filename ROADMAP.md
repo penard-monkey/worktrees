@@ -5,6 +5,27 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (the repo's `/close-out` skill, `.claude/skills/close-out`;
 this repo's settings in `.claude/close-out.md`).
 
+- **`app/scripts/plan-usage-browser.mjs` runs nowhere, so it rots.** It is
+  an optional Playwright gate that no CI job or Make target runs. It went red
+  on main as soon as the mock enabled kimi by default, and nobody noticed until
+  #542 changed the layout it asserts. Either give it a CI job (WebKit on the
+  macOS runner, against `dev:mock`) or fold its WebKit-only layout checks into
+  a `*-check.mjs` that runs in CI.
+  _From: [2026-10-22 usage-strip-fixes](docs/sessions/2026-10-22-usage-strip-fixes/summary.md)_
+- **A lane whose environment sets `WORKTREES_VIEWER_JS` fails two gate tests.**
+  `open_docs_viewer_without_a_bundle_is_a_clear_refusal` (cli) and
+  `a_build_with_no_viewer_bundle_refuses_the_open` (api) refuse to run with it
+  set, which is correct. The gate list in AGENTS.md does not mention it, so
+  every such lane sees two failures and has to re-run them under
+  `env -u WORKTREES_VIEWER_JS`. Fix one of three ways: unset it in the gate
+  commands, have the tests clear it for themselves, or stop exporting it into
+  lanes.
+  _From: [2026-10-22 usage-strip-fixes](docs/sessions/2026-10-22-usage-strip-fixes/summary.md)_
+- **Check #542's fix in the real app.** The false "unavailable" was a timing
+  bug that the mock's instant replies cannot reproduce. Return to the window
+  with Codex and kimi enabled and confirm the strip never says "unavailable"
+  for a reading the panel calls "0 min ago".
+  _From: [2026-10-22 usage-strip-fixes](docs/sessions/2026-10-22-usage-strip-fixes/summary.md)_
 - **Option A for the bundled CLI: offer to put the app's sidecar `worktrees`
   on `PATH`.** Since v0.43.0 the app bundle carries the CLI (tauri.conf.json's
   per-format `files` mappings — not `externalBin`, AGENTS.md says why) and uses
