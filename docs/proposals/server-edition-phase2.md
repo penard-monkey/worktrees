@@ -33,7 +33,10 @@ authorization (§3), the remote listener and its witnesses (§4), the audit log
 multi-client rulings (§9). Shipping Phase 1 also changed one thing here. The
 app now reconnects, including to a serve it restarted. So Appendix B's
 terminal-id fix is no longer latent, and a restarted serve runs the three
-page-pushed host policies at their defaults (§9.1).
+page-pushed host policies at their defaults (§9.1). Phase 1's lanes also
+left three questions for this design. A held `worktrees show` goes to any
+socket, and an app-owned serve's idle stop counts any socket; §9.3 answers
+both. The plugins act on the client's machine; §4.4 answers that.
 
 **Base.** Written against `feat/app-serve-client` at `fadb2ce`, the tip of the
 Server Edition stack (#508 → #516 → #515 → that branch) before it was
@@ -72,7 +75,7 @@ measurements as exit criteria. The draft was then reviewed with the
 | 10 | Resource limits (R6) | Per-device connection, in-flight and rate caps; bounded outboxes and lanes; single-flight for the expensive reads; separate budgets for loopback and remote, so a device cannot starve the desk. | 2 |
 | 11 | The agent-instruction surface (R7) | One path classifier in core. Instruction files need `instruct`. Files that EXECUTE without anyone choosing to run them need `stream`. `.git/**` is never written. Provenance is kept out of band, with no markers in the file. | 2 |
 | 12 | The known gaps | Eight from the brief, seven found while writing this, and one from Appendix B. Each has a fix shape and a phase (§8). One of the new ones (gap 9) could be reached from a cloned repository's content. #523 fixed it on main. #516 closed gaps 11 and 15 and part of gaps 3 and 5. | 2, some now |
-| 13 | Multi-client | View state is per device and never reaches serve. Shared preferences become per-key patches with a revision check. Host policy goes to `host-policy.json`. A prompt answer is a compare-and-swap, and a lease is UX on top of it. | 2, lease 3 |
+| 13 | Multi-client | View state is per device and never reaches serve. Shared preferences become per-key patches with a revision check. Host policy goes to `host-policy.json`. A prompt answer is a compare-and-swap, and a lease is UX on top of it. A held `worktrees show` goes only to a loopback client that listens for it, and an app-owned serve idles out on loopback clients alone, so a device never keeps it running (§9.3). | 2, lease 3 |
 | 14 | Multi-user (R9) | Maybe later (*decided*, §11 Q1, against the recommendation). Not built in Phase 2, and not designed out. There is one principal, kept distinct from the device in the device record, in what the credential binds to and in every audit record, and every grant check keys on (principal, device). §2.8 says what that costs now and what multi-user would still take. | 2 |
 
 Rows marked *decided* carry the user's answers of 2026-10-20, and §11 gives
@@ -1156,6 +1159,27 @@ use. So:
   a drift check, by AGENTS.md's mirror rule. The `ipc.ts` door table gains a
   third door (`remoteDoor`), and `engine-route-check.mjs` holds it like the
   other two.
+- **Plugins act on the client's machine, and a host path means nothing
+  there.** The page imports the opener, dialog, process and updater plugins
+  and the window API directly, not through `ipc.ts`, because they act on the
+  machine the window runs on (AGENTS.md). On the host, that machine is also
+  the engine's. On a remote client it is not:
+  - `revealItemInDir` and `openPath` take a HOST path. `App.tsx`,
+    `DocsPane`, `FilesPane`, `ProfilesPanel`, `SettingsSheet` and
+    `TerminalPane` all call them. On a client the path does not exist, or
+    names a different file.
+  - The dialog's `open` (`App.tsx`, `ProfilesPanel`) picks a CLIENT path and
+    hands it to a host command.
+
+  So a remote client greys every path-taking plugin call, with a reason, as
+  it does for `ClientLocal` rows (§III.4.B: never silently do nothing).
+  `openUrl` keeps working for URLs that mean the same everywhere, such as a
+  pull request or the release notes. The docs viewer's loopback URL is gap
+  7's. The updater updates the client app, which is right, and `update_cli`
+  stays console-only (§3.4). A browser client, such as the dev stack's page,
+  has none of these plugins, and has to grey the same set. So one predicate
+  beside the door table (`ipc.ts`) answers "does this window run on the
+  host", and both kinds of client use it.
 - **App Transport Security** governs the URL Loading System and WebView
   loads. A socket opened from Rust is outside it. *Verify on a device in
   §10's spike.*
@@ -1692,6 +1716,18 @@ All of these fail closed, as `err` frames to an authenticated caller and
 closed sockets before authentication. Each trip is logged once per episode,
 with counts.
 
+**What Phase 2 leaves alone on loopback.** A reconnecting local flood still
+locks NEW loopback clients out: measured on macOS, 0 of 49 got in (AGENTS.md,
+M1). Since M1 it cannot take memory, descriptors or a client already
+connected. A same-user process is outside §1 anyway. Another local user is
+not, and can still keep the user's own app from connecting: a denial of
+service at the desk, which gets no frame past the handshake. Phase 2 does not
+change this, and must not let it spread. The remote listener has its own
+`Shared` and its own caps (§4.1). A remote flood therefore cannot fill
+loopback's 16 unauthenticated slots, and a local flood cannot fill the remote
+listener's. A per-source cap would not help on loopback, where every client
+has the same source address.
+
 **A panicking body must still answer.** At `fadb2ce` the job a request runs
 pushed its reply only when the body RETURNED (`conn.rs:539`–`541`). A body
 that panicked was contained by `spawn_blocking`, which is what the serve
@@ -1848,7 +1884,7 @@ the user's next ordinary save. Since then, #516 as merged closed gaps 11 and
 | `open_place` closing the second agent | Decided by whichever client selects the place first, using its own default (Appendix B) | Not decided by a client on load. The server decides, using the host's default, or the user is asked. | 2 |
 | A dock shell's single sink | A second attach silences the first pane (`term.rs:438`–`462`) | A sink per attach. The most recently active attach owns the size, which is tmux's `window-size latest`. | 2 |
 | Terminal ids | A global counter from 1, no owner (gap 16). Appendix B called it latent "because the transport's client never reconnects". Since #525 it does, including to a serve it restarted. Panes are keyed by the connection's `gen`, so each one remounts and opens a fresh id. But the pane being replaced closes its OLD id on unmount (`TerminalPane.tsx:106` on main), and that call goes out on the NEW socket. A new launch counts from 1 again, so the id may already name an attach it just handed out: a fresh pane, or another client's. *Found by reading, not measured.* | Owner check plus a launch nonce. The owner check alone turns the stale close into a refusal, because the new connection never opened that id. | 2 |
-| `app:open-doc` | Sent to every socket, so one `worktrees show` opens the document on every device | Loopback clients only: `worktrees show` is run by someone at the host | 2 |
+| `app:open-doc` | Sent to every socket, so one `worktrees show` opens the document on every device | Loopback clients only: `worktrees show` is run by someone at the host. A held one is released only to a loopback client that listens for it (§9.3). | 2 |
 | Events in general | Every socket | Projected to the scope (§3.3) | 2 |
 | Dates | Host-local (`sysclock::date_cache`) | Displays take the device's time zone, as `ui_usage` already does with `tz_offset_min` | 3 |
 | The docs viewer URL | Loopback | Refused remotely, then proxied (gap 7) | 2, 3 |
@@ -1884,6 +1920,68 @@ compare-and-swap prevents it outright:
 Phase 2 reserves the `answer` capability and the audit kind. Phase 3 ships
 the verb and the lease, with the phone, as §III.9 planned.
 
+### 9.3 Held requests and the engine's lifetime, with devices connected
+
+Phase 1 gave serve two rules that count its clients. Both assume every
+client is a page on this host, and each needs a different count once a
+device can connect.
+
+**A held `worktrees show` goes to a listener, not to a socket.** Since #516,
+serve keeps a `worktrees show` while nobody can see it, and releases it on
+the first tick that has an audience (`watch::drain_inbox`). The audience is
+`Host::has_audience`, which is true for any authenticated socket
+(`crates/worktrees-cli/src/serve/conn.rs:215` on main). The app's door then
+parks the event for up to 10 s until App listens (`ONE_SHOT_TTL_MS` in
+`ipc.ts`, #524). Serve cannot tell who listens, because a page's `listen`
+never reaches it: every event goes to every socket, and the client filters.
+So two kinds of client take a held show and drop it:
+
+- the shim's own verification probe, which completes handshake v1 and
+  closes at once. ROADMAP records it, estimated at 0.1–0.2% of launches,
+  not measured;
+- in Phase 2, every device. §3.3 sends `app:open-doc` to loopback clients
+  only, so a phone counted as an audience would drain the inbox into an
+  event that no client receives.
+
+*Ruling:* a connection declares the events it listens for, once after
+authentication and again when the set changes. The door already holds that
+set (`engineDoor`'s handlers, re-wired on every reconnect), so the client's
+part is one frame. Serve releases a held request only while a LOOPBACK
+connection declares `app:open-doc`, and sends it only to those connections.
+A connection that declares nothing is sent no `app:open-doc`, so the rule
+fails closed. Event projection (§3.3) can use the same set to skip a socket
+that would drop a frame anyway.
+
+A request still lives 30 s (`inbox::MAX_AGE_SECS`). A show is a host act, so
+the update rehearsal's residue of a held show expiring after 30 s, when no
+app came back, is correct behaviour, not a gap.
+
+**An app-owned serve counts loopback clients for its idle stop.** Since
+#524, a serve the app started (`owner: "app"`) stops itself after 120 s
+with no client (`OWNED_IDLE_GRACE`,
+`crates/worktrees-cli/src/serve/mod.rs:239` on main), so a crash leftover
+does not run unseen. It counts every authenticated socket
+(`conn::Clients`). If devices counted, a phone left connected would keep a
+crashed app's serve running for as long as the phone stayed. The update
+rehearsal's other two residues (ROADMAP, "Re-run the update rehearsal")
+would then have no bound:
+
+- **A downgrade inside the grace runs two engines:** the older app's own
+  engine at the desk, and this serve. Today that lasts at most the 120 s
+  grace. With a device holding the serve up, the device and the desk would
+  drive two engines for as long as it stayed, each with its own terminals,
+  dock shells and in-memory host policy.
+- **With AppImage's extract-and-run, a crash leaves serve running from a
+  mount that no longer exists,** for up to 2 minutes. With a device holding
+  it up, the serve would go on answering that device from a deleted tree.
+
+*Ruling (a recommendation, not yet put to the user):* the idle count is
+loopback clients only, and nothing a device does keeps an app-owned serve
+alive. So a clean quit of the app ends remote access too, and while remote
+access is on, the quit says that it will. A host meant to serve devices
+with no app running runs `worktrees serve` itself. A serve with no owner is
+never signalled and never idles out (Phase 1's rule, §III.9).
+
 ---
 
 ## 10. Order of work and exit criteria
@@ -1902,7 +2000,8 @@ Each slice merges on its own, and nothing binds off loopback until slice 6.
    the resolver, result and event projection, and the tests in §3.3.
    Loopback behaviour is unchanged apart from §3.5. Gaps 2, 3, 4 (the
    console tag), 5 (all but the `[docs]` walk), 7 (the remote refusal), 10,
-   12, 14 and 16.
+   12, 14 and 16, and the declared listener set that a held `worktrees show`
+   is released to (§9.3).
 2. **The path classifier** (§7.1): gap 1, and the `[docs]` walk (gap 5).
 3. **The audit log** (§5).
 4. **Resource limits** (§6), including the loopback budget split: gap 13.
@@ -1912,7 +2011,9 @@ Each slice merges on its own, and nothing binds off loopback until slice 6.
    cross-check and alerts (§5.2, §5.3).
 6. **The remote listener** (§4), behind the opt-in: the address classifier,
    the address-change rules and the address code (§4.1), mDNS rediscovery
-   (§4.7), the shim's remote door, and both witnesses (§4.6, §4.7). Every
+   (§4.7), the shim's remote door and the plugin calls a remote client
+   greys (§4.4), the idle stop that counts loopback clients only (§9.3),
+   and both witnesses (§4.6, §4.7). Every
    gap in §8 is closed or tagged by now. Gap 6 lands with #519, as its row
    says.
 
@@ -1968,6 +2069,10 @@ and a second Mac on the tailnet, measure the claims marked unmeasured above:
       served.
 - [ ] A public address is refused at bind, and an address change pauses
       and resumes remote access as §4.1 says, on macOS and Linux.
+- [ ] With a device connected and the app killed, the app-owned serve
+      still stops after its grace. A `worktrees show` run while the device
+      is connected waits for the desktop and is never sent to the device
+      (§9.3).
 - [ ] Every step of §4.6 passes on macOS and Linux, and the release gate
       greps its exact count.
 - [ ] R1: every row declares its object and capability, the drift tests are
