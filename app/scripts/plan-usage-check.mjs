@@ -102,10 +102,23 @@ test("reset invalidates only its own row between polls", () => {
   assert.equal(info.state, "stale"); assert.equal(expired(info, info.limits[0], 110), true);
   assert.equal(summaryLimit(info, 110).id, "codex:secondary");
 });
-test("age ceiling is inclusive and future timestamps are unavailable", () => {
+test("age ceiling is inclusive and a bogus future timestamp is unavailable", () => {
   assert.equal(viewUsage(adaptCodex(wire), 100 + CODEX_STALE_SECS).limits.length, 2);
   assert.equal(viewUsage(adaptCodex(wire), 101 + CODEX_STALE_SECS).limits.length, 0);
-  assert.equal(viewUsage(adaptCodex(wire), 99).state, "unavailable");
+  assert.equal(viewUsage(adaptCodex(wire), 99 - model.FUTURE_SLACK_SECS).state, "unavailable");
+});
+// The reader stamps `fetched_at` when it FINISHES, and `nowSec` moves only on
+// its 15s tick, so a fresh reply is routinely a few seconds "in the future".
+// That read as "unavailable" until the next tick (2026-10-22).
+test("a reading fetched just after the local clock last ticked is fresh, not unavailable", () => {
+  for (const [adapt, w] of [[adaptCodex, wire], [adaptKimi, kimiWire]]) {
+    const info = adapt({ ...w, fetched_at: 105, limits: w.limits.map(l => ({ ...l, resets_at: 5000 })) });
+    const seen = viewUsage(info, 100);
+    assert.equal(seen.state, "ready", `${info.provider} fetched 5s after now`);
+    assert.equal(seen.limits.length, 2);
+    assert.equal(viewUsage(info, 105 - model.FUTURE_SLACK_SECS).state, "ready", "the slack is inclusive");
+  }
+  assert.ok(model.FUTURE_SLACK_SECS * 1000 > 15000, "the slack must cover a whole USAGE_TICK_MS");
 });
 test("reserve is never summarized as the main allowance", () => {
   const info = adaptCodex({ ...wire, limits: [limit("primary", 300, 99, 3000, "reserve")] });
