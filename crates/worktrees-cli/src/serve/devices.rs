@@ -46,6 +46,7 @@ use sha2::{Digest, Sha256};
 use worktrees_core::authz::{self, Caller, Capability, Caps, Device, DeviceId, Grant, PrincipalId, Projects, Registry};
 
 use super::servefile;
+pub use worktrees_core::pairuri::{base32, display_name_ok as name_ok, is_pin};
 
 pub const FILE: &str = "devices.json";
 
@@ -67,9 +68,6 @@ pub const MAX_IDLE_DAYS: u32 = 3650;
 /// `last_seen` is kept in memory and written at most this often, and at exit
 /// (§2.5).
 pub const SEEN_FLUSH_SECS: i64 = 600;
-
-/// The longest device name, in characters (§2.2 step 4).
-pub const NAME_MAX: usize = 64;
 
 // ── the record ───────────────────────────────────────────────────────────────
 
@@ -467,11 +465,6 @@ impl DevicesFile {
     }
 }
 
-/// SHA-256, as 64 lowercase hex characters.
-pub fn is_pin(s: &str) -> bool {
-    s.len() == 64 && s.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
-}
-
 /// The pin of a DER SubjectPublicKeyInfo: its SHA-256, lowercase hex.
 pub fn pin_of(spki_der: &[u8]) -> String {
     hex(&Sha256::digest(spki_der))
@@ -481,57 +474,12 @@ pub fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
-/// A device name as the host dialog will show it (§2.2 step 4): 1 to 64
-/// characters, no control characters, and nothing invisible or
-/// direction-changing that could make one device pass for another — the
-/// bidirectional overrides, isolates and marks, zero-width characters, the
-/// line and paragraph separators, the soft hyphen. Refused, never stripped.
-pub fn name_ok(name: &str) -> Result<(), String> {
-    let n = name.chars().count();
-    if n == 0 || name.trim().is_empty() {
-        return Err("a device name cannot be empty".into());
-    }
-    if n > NAME_MAX {
-        return Err(format!("a device name is at most {NAME_MAX} characters"));
-    }
-    let invisible = |c: char| {
-        c.is_control()
-            || matches!(c, '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{FEFF}')
-            || ('\u{200B}'..='\u{200F}').contains(&c)
-            || ('\u{2028}'..='\u{202E}').contains(&c)
-            || ('\u{2060}'..='\u{2069}').contains(&c)
-    };
-    if name.chars().any(invisible) {
-        return Err("a device name cannot hold control, invisible or direction-changing characters".into());
-    }
-    Ok(())
-}
-
 /// A fresh device id: `d_` and 128 random bits in lowercase base32. Random,
 /// never derived from the key (§2.1).
 pub fn new_device_id() -> DeviceId {
     let mut b = [0u8; 16];
     getrandom::fill(&mut b).expect("the OS refused entropy");
     DeviceId::new(format!("d_{}", base32(&b)))
-}
-
-/// RFC 4648 base32, lowercase, unpadded.
-pub fn base32(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 32] = b"abcdefghijklmnopqrstuvwxyz234567";
-    let mut out = String::with_capacity(bytes.len().div_ceil(5) * 8);
-    let (mut acc, mut bits) = (0u32, 0u32);
-    for &b in bytes {
-        acc = (acc << 8) | u32::from(b);
-        bits += 8;
-        while bits >= 5 {
-            bits -= 5;
-            out.push(ALPHABET[((acc >> bits) & 31) as usize] as char);
-        }
-    }
-    if bits > 0 {
-        out.push(ALPHABET[((acc << (5 - bits)) & 31) as usize] as char);
-    }
-    out
 }
 
 // ── events ───────────────────────────────────────────────────────────────────
@@ -610,6 +558,19 @@ pub enum DeviceEvent {
     /// The server identity was rotated on the host (§2.5): a new pin, and every
     /// device revoked, each its own `Revoked` event.
     IdentityRotated { pin: String },
+    /// The host opened a pairing window (§2.2, §5.1), for this principal.
+    PairingOpened { for_principal: PrincipalId, expires_at: i64, grant: Grant, expiry: Expiry },
+    /// A device connected to the open window: its one attempt. Before any
+    /// authentication, so the peer address is all that names it.
+    PairingAttempt { for_principal: PrincipalId, peer: String },
+    /// Its proof verified, and the host is asked (§2.2 step 6). `code` is for
+    /// the host's dialog — never for a log.
+    PairingPending { name: String, platform: Platform, code: String, peer: String },
+    /// The host's Allow or Deny.
+    PairingDecided { allow: bool },
+    /// The window closed, and how: paired (with the new device), denied,
+    /// expired, or the failure that ended it.
+    PairingClosed { ended: super::pairing::Ended, device: Option<DeviceId> },
 }
 
 impl DeviceEvent {
@@ -1574,19 +1535,6 @@ mod tests {
         assert!(reg.stepup_required(&PrincipalId::owner(), &DeviceId::new("ghost")));
     }
 
-    #[test]
-    fn a_name_cannot_pass_itself_off_as_another() {
-        for ok in ["Bret's iPhone", "Mac mini (office)", "ラップトップ", &"x".repeat(64)] {
-            assert!(name_ok(ok).is_ok(), "{ok:?}");
-        }
-        for bad in [
-            "", "   ", &"x".repeat(65), "Phone\n", "Phone\u{7}", "Phone\u{85}", "Bret\u{202E}enohP", "Bret\u{2066}x\u{2069}",
-            "i\u{200B}Phone", "Phone\u{200F}", "Phone\u{2028}", "\u{FEFF}Phone", "Pho\u{00AD}ne", "\u{061C}Phone",
-        ] {
-            assert!(name_ok(bad).is_err(), "{bad:?}");
-        }
-    }
-
     /// §2.5: the console revokes any device; a device always revokes itself;
     /// an `admin` device revokes a peer of its principal; nothing else.
     #[test]
@@ -1855,11 +1803,7 @@ mod tests {
     }
 
     #[test]
-    fn base32_is_rfc_4648_lowercase_unpadded() {
-        // RFC 4648 §10's vectors, lowercased and unpadded.
-        for (i, o) in [("", ""), ("f", "my"), ("fo", "mzxq"), ("foo", "mzxw6"), ("foob", "mzxw6yq"), ("fooba", "mzxw6ytb"), ("foobar", "mzxw6ytboi")] {
-            assert_eq!(base32(i.as_bytes()), o);
-        }
+    fn a_device_id_is_random_and_derived_from_nothing() {
         let id = new_device_id();
         assert!(id.as_str().starts_with("d_") && id.as_str().len() == 28, "{id}");
         assert_ne!(new_device_id(), id);

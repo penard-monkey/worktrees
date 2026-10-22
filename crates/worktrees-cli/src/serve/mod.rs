@@ -22,11 +22,13 @@ mod devices;
 mod dispatch;
 mod identity;
 mod netwatch;
+mod pairing;
 mod policy;
 mod provenance;
 mod resolve;
 mod scope;
 mod servefile;
+mod stepup;
 mod tls;
 mod wire;
 
@@ -260,7 +262,10 @@ pub fn start(config_dir: PathBuf, port: u16, allow_origin: Vec<String>) -> Resul
 /// grant is read from the config dir's `devices.json` (Phase 2 slice 5).
 pub fn start_with(config_dir: PathBuf, port: u16, allow_origin: Vec<String>, limits: conn::Limits) -> Result<Running, String> {
     let devices = Arc::new(devices::DeviceRegistry::open(&config_dir));
-    let mut running = start_in(config_dir, port, allow_origin, limits, conn::Clients::serving(devices.clone(), None))?;
+    // Pairing windows bind where slice 6's remote listener says; until it
+    // exists, none ever opens (`Pairing::set_bind`).
+    let pairing = Arc::new(pairing::Pairing::new(Some(config_dir.clone()), devices.clone()));
+    let mut running = start_in(config_dir, port, allow_origin, limits, conn::Clients::serving(devices.clone(), pairing, None))?;
     running.devices = Some(devices);
     Ok(running)
 }

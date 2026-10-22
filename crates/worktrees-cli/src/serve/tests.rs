@@ -1377,6 +1377,7 @@ fn the_audit_log_records_limits_once_per_episode() {
 
 mod devices {
     use super::super::conn::{self, Broadcast, Clients};
+    use super::super::pairing::Pairing;
     use super::super::devices::{DeviceRecord, DeviceRegistry, Enrollment, Expiry, Platform};
     use super::super::dispatch::{self, Args, Call};
     use super::super::resolve::World;
@@ -1470,14 +1471,31 @@ mod devices {
         }
     }
 
+    /// The pairing deadlines of the one test that waits for them: the real
+    /// 120 s and 60 s would make it take minutes. Every other test runs with
+    /// [`PAIR_LONG`], so a slow runner cannot time a handshake out.
+    const PAIR_OPEN: Duration = Duration::from_millis(1500);
+    const PAIR_DECIDE: Duration = Duration::from_millis(1500);
+    const PAIR_LONG: Duration = Duration::from_secs(30);
+
     fn engine(tag: &str, panes: Vec<(String, String, String)>) -> Engine {
+        engine_times(tag, panes, PAIR_LONG, PAIR_LONG)
+    }
+
+    fn engine_times(tag: &str, panes: Vec<(String, String, String)>, open_for: Duration, decide_for: Duration) -> Engine {
         let dir = scratch(tag);
         let reg = Arc::new(DeviceRegistry::in_memory());
         let world = Roots { roots: vec![s(&dir.join("a")), s(&dir.join("b"))], panes };
-        let clients = Arc::new(Clients::serving(reg.clone(), Some(Arc::new(world))));
+        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+
+        // Inside the runtime: a pairing window runs on the one it was made in.
+        let clients = {
+            let _in = rt.enter();
+            let pairing = Arc::new(Pairing::with_times(Some(dir.join("cfg")), reg.clone(), open_for, decide_for));
+            Arc::new(Clients::serving(reg.clone(), pairing, Some(Arc::new(world))))
+        };
         clients.listen();
         let ctx = Ctx::new(dir.join("cfg"), Arc::new(Broadcast(clients.clone())));
-        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
         let (audit, _) = super::super::audit::Audit::open(&dir.join("cfg"), None);
         Engine { rt, reg, clients, ctx, dir, next: AtomicU64::new(100), skipped: Mutex::new(Vec::new()), tasks: Mutex::new(Vec::new()), audit }
     }
@@ -1487,6 +1505,11 @@ mod devices {
     impl Engine {
         /// A session for `who` over a fresh loopback socket pair.
         fn connect(&self, who: Caller) -> Client {
+            self.connect_with(who, None)
+        }
+
+        /// The same, as a TLS session would be: with its step-up exporter.
+        fn connect_with(&self, who: Caller, exporter: Option<[u8; 32]>) -> Client {
             let (clients, ctx, id) = (self.clients.clone(), self.ctx.clone(), self.next.fetch_add(1, Ordering::SeqCst));
             let au = Arc::new(self.audit_of(id, &who));
             let (client, task) = self.rt.block_on(async move {
@@ -1495,7 +1518,7 @@ mod devices {
                 let dial = tokio::spawn(TcpStream::connect(addr));
                 let (server, _) = l.accept().await.unwrap();
                 let ws = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
-                let task = tokio::spawn(conn::serve_caller(ws, ctx, clients, id, who, au));
+                let task = tokio::spawn(conn::serve_caller(ws, ctx, clients, id, who, exporter, au));
                 (WebSocketStream::from_raw_socket(dial.await.unwrap().unwrap(), Role::Client, None).await, task)
             });
             self.tasks.lock().unwrap().push((id, task));
@@ -1600,6 +1623,7 @@ mod devices {
             registry: e.reg.clone(),
             world: None,
             devices: e.reg.clone(),
+            pairing: e.clients.pairing(),
         };
         assert_eq!(dispatch::call(&stale, "get_changelog", &Args(Default::default())), Err(json!("denied")));
         // And its next handshake.
@@ -1719,6 +1743,7 @@ mod devices {
             registry: e.reg.clone(),
             world: Some(Arc::new(world)),
             devices: e.reg.clone(),
+            pairing: e.clients.pairing(),
         });
         call.frames.note_term(901, "sa".into());
         call.frames.note_term(902, "sb".into());
@@ -1776,6 +1801,7 @@ mod devices {
             registry: reg.clone(),
             world: Some(Arc::new(Roots { roots: vec![a.clone()], panes: vec![("sa".into(), a.clone(), "zsh".into())] })),
             devices: e.reg.clone(),
+            pairing: e.clients.pairing(),
         };
         call.frames.reconciled().store(1, Ordering::SeqCst);
         call.frames.note_term(903, "sa".into());
@@ -1809,6 +1835,7 @@ mod devices {
             registry: e.reg.clone(),
             world: Some(Arc::new(Roots { roots: vec![a.clone()], panes: vec![] })),
             devices: e.reg.clone(),
+            pairing: e.clients.pairing(),
         });
         call.frames.note_shell(ShellHold { repo: a.clone(), slug: "(main)".into(), index: 0, gen: 7 });
         let _kill = e.clients.join(1, out, call.clone());
@@ -1866,10 +1893,12 @@ mod devices {
             registry: reg.clone(),
             world: Some(Arc::new(world)),
             devices: e.reg.clone(),
+            pairing: e.clients.pairing(),
         };
         frames.reconciled().store(1, Ordering::SeqCst);
         // No `cols`: the body fails on its arguments before it reaches tmux.
-        let _ = conn::answer(&call, &json!(1), "term_open", &Args(json!({"session": "sa"}).as_object().cloned().unwrap()));
+        let au = e.audit_of(1, &call.caller);
+        let _ = conn::answer(&call, &au, &json!(1), "term_open", &Args(json!({"session": "sa"}).as_object().cloned().unwrap()));
         assert!(frames.terms().is_empty(), "the channel opened under the old grant was ended: {:?}", frames.terms());
     }
 
@@ -1896,6 +1925,449 @@ mod devices {
         assert!(rotated, "the console hears the rotation, with the new pin");
     }
 
+    // ── pairing, end to end, restated from §2.2's text ──────────────────────
+    //
+    // The device side is written from the proposal, not from pairing.rs: the
+    // labels are spelled again, the HMAC is the parent module's RFC 2104 one
+    // over bare SHA-256, and the code is computed here. A server that agreed
+    // with itself would not pass.
+
+    const SPEC_PAIR_LABEL: &[u8] = b"worktrees-pair/v1\n";
+    const SPEC_SAS_LABEL: &[u8] = b"worktrees-pair/v1/sas\n";
+    const SPEC_EXPORTER: &[u8] = b"EXPORTER-worktrees-pair-v1";
+
+    /// A literal `ip:port` and nothing more: the address-rules lane's parser
+    /// (§4.1) will refuse 127.0.0.1 in a real link, so the tests read theirs.
+    fn literal(v: &str) -> Result<std::net::SocketAddr, String> {
+        v.parse().map_err(|e| format!("{e}"))
+    }
+
+    fn sha(b: &[u8]) -> Vec<u8> {
+        use sha2::Digest;
+        sha2::Sha256::digest(b).to_vec()
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    /// What a device chooses to send; each field can be bent to test a refusal.
+    struct Attempt {
+        name: String,
+        platform: &'static str,
+        stepup: Option<super::super::stepup::testkit::StepUpKey>,
+        /// The secret the proof is keyed with (default: the link's).
+        secret: Option<Vec<u8>>,
+        /// An exporter to prove over instead of the session's.
+        exporter: Option<[u8; 32]>,
+        /// A key to prove for instead of the one presented.
+        proof_spki: Option<Vec<u8>>,
+        /// Replace the whole line.
+        line: Option<String>,
+        /// Text put just inside the (otherwise correct) frame's opening
+        /// brace: padding, or a key the frame should not have.
+        insert: String,
+    }
+
+    impl Attempt {
+        fn desktop(name: &str) -> Attempt {
+            Attempt { name: name.into(), platform: "macos", stepup: None, secret: None, exporter: None, proof_spki: None, line: None, insert: String::new() }
+        }
+        fn iphone(name: &str) -> Attempt {
+            Attempt { platform: "ios", stepup: Some(super::super::stepup::testkit::StepUpKey::new()), ..Attempt::desktop(name) }
+        }
+    }
+
+    type DeviceTls = tokio_rustls::client::TlsStream<TcpStream>;
+
+    struct Paired {
+        tls: DeviceTls,
+        code: String,
+        key: super::super::tls::testkit::DeviceKey,
+    }
+
+    impl Engine {
+        /// Open a window from the console as the host would.
+        fn begin(&self, con: &mut Client, caps: &[&str], projects: Value, expiry: Value) -> Value {
+            self.rpc(con, "pair_begin", json!({"caps": caps, "projects": projects, "expiry": expiry}))
+        }
+
+        /// Scan `uri`, dial the pairing listener pinned, send the one frame.
+        fn attempt(&self, uri: &str, a: &Attempt) -> Result<Paired, String> {
+            let link = worktrees_core::pairuri::parse(uri, worktrees_core::sysclock::now_epoch(), &literal)?;
+            let key = super::super::tls::testkit::device_key();
+            self.rt.block_on(async {
+                let mut tls = super::super::tls::testkit::dial(link.addr, &link.pin, &key).await.map_err(|e| e.to_string())?;
+                let ex: [u8; 32] = tls.get_ref().1.export_keying_material([0u8; 32], SPEC_EXPORTER, None).map_err(|e| e.to_string())?;
+                let secret = a.secret.clone().unwrap_or(link.secret.to_vec());
+                let mut msg = SPEC_PAIR_LABEL.to_vec();
+                msg.extend_from_slice(&a.exporter.unwrap_or(ex));
+                msg.extend_from_slice(&sha(a.proof_spki.as_deref().unwrap_or(&key.spki)));
+                msg.extend_from_slice(&a.stepup.as_ref().map(|k| sha(&k.spki)).unwrap_or(vec![0; 32]));
+                msg.extend_from_slice(a.name.as_bytes());
+                let proof = super::spec_hmac(&secret, &msg);
+                let stepup = a.stepup.as_ref().map(|k| worktrees_api::files::b64_encode(&k.spki));
+                let line = a.line.clone().unwrap_or_else(|| {
+                    let l = json!({"pair": {"name": a.name, "platform": a.platform, "stepup_spki": stepup}, "proof": proof}).to_string();
+                    format!("{{{}{}", a.insert, &l[1..])
+                });
+                use tokio::io::AsyncWriteExt;
+                tls.write_all(format!("{line}\n").as_bytes()).await.map_err(|e| e.to_string())?;
+                tls.flush().await.map_err(|e| e.to_string())?;
+                let mut sas = SPEC_SAS_LABEL.to_vec();
+                sas.extend_from_slice(&ex);
+                let t = unhex(&super::spec_hmac(&link.secret, &sas));
+                let code = format!("{:06}", (u32::from_be_bytes([t[0], t[1], t[2], t[3]]) & 0x7fff_ffff) % 1_000_000);
+                Ok(Paired { tls, code, key })
+            })
+        }
+
+        /// The device's next line from the server, or `None` for silence, the
+        /// end or a reset, within `wait`.
+        fn line(&self, tls: &mut DeviceTls, wait: Duration) -> Option<Value> {
+            use tokio::io::AsyncReadExt;
+            self.rt.block_on(async {
+                let mut buf = Vec::new();
+                let mut b = [0u8; 1];
+                loop {
+                    match tokio::time::timeout(wait, tls.read(&mut b)).await {
+                        Ok(Ok(1)) if b[0] == b'\n' => return serde_json::from_slice(&buf).ok(),
+                        Ok(Ok(1)) => buf.push(b[0]),
+                        _ => return None,
+                    }
+                }
+            })
+        }
+
+        fn status(&self, con: &mut Client) -> Value {
+            self.rpc(con, "pair_status", json!({}))["ok"].clone()
+        }
+
+        /// The pairing window's port takes no connection any more.
+        fn port_closed(&self, uri: &str) -> bool {
+            let link = worktrees_core::pairuri::parse(uri, 0, &literal).unwrap();
+            std::net::TcpStream::connect_timeout(&link.addr, Duration::from_millis(500)).is_err()
+        }
+
+        /// Wait (bounded) until the window is closed, and say how.
+        fn closed_as(&self, con: &mut Client) -> Value {
+            let t0 = Instant::now();
+            loop {
+                let st = self.status(con);
+                if st["state"] == json!("closed") || t0.elapsed() > Duration::from_secs(5) {
+                    return st;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+
+        fn bind_loopback(&self) {
+            self.clients.pairing().set_bind(Some(super::super::pairing::Bind {
+                ip: std::net::Ipv4Addr::LOCALHOST.into(),
+                remote: "127.0.0.1:7461".parse().unwrap(),
+            }));
+        }
+    }
+
+    /// §2.2 from end to end: the host chooses the scope, the window opens, the
+    /// device proves the secret over pinned TLS bound to the session, both
+    /// screens show one code, and the host's Allow writes the record — with
+    /// the offer's scope, the device's keys, step-up on — and answers the
+    /// device. Then the listener is gone.
+    #[test]
+    fn a_device_pairs_by_link_proof_code_and_the_hosts_allow() {
+        let e = engine("pair", vec![]);
+        e.bind_loopback();
+        let mut con = e.connect(Caller::console());
+        let a = s(&e.dir.join("a"));
+        let r = e.begin(&mut con, &["read", "write"], json!([a]), json!({"idle_days": 7}));
+        let uri = r["ok"]["uri"].as_str().unwrap_or_else(|| panic!("{r}")).to_string();
+        let identity = super::super::identity::Identity::load(&e.dir.join("cfg")).unwrap().unwrap();
+        assert_eq!(r["ok"]["pin"], json!(identity.pin()));
+        assert_eq!(e.status(&mut con)["state"], json!("open"));
+        let mut p = e.attempt(&uri, &Attempt::iphone("Bret's iPhone")).unwrap();
+        assert_eq!(e.line(&mut p.tls, Duration::from_secs(5)), Some(json!({"pending": true})));
+        let st = e.status(&mut con);
+        assert_eq!(st["state"], json!("pending"), "{st}");
+        assert_eq!(st["request"]["code"], json!(p.code), "both screens show the same code");
+        assert_eq!(st["request"]["name"], json!("Bret's iPhone"));
+        assert_eq!(st["request"]["platform"], json!("ios"));
+        assert!(st["request"].get("spki_sha256").is_none(), "keys are not the dialog's");
+        let rec = e.rpc(&mut con, "pair_decide", json!({"allow": true}));
+        let rec = rec["ok"].clone();
+        assert_eq!(rec["spki_sha256"], json!(p.key.pin), "{rec}");
+        assert_eq!(rec["caps"], json!(["read", "write"]));
+        assert_eq!(rec["projects"], json!([a]));
+        assert_eq!(rec["expiry"], json!({"idle_days": 7}));
+        assert_eq!(rec["stepup_required"], json!(true), "on by default (§11 Q8)");
+        assert_eq!(rec["last_addr"], json!("127.0.0.1"));
+        let answer = e.line(&mut p.tls, Duration::from_secs(5)).expect("the device's answer");
+        let paired = &answer["paired"];
+        assert_eq!(paired["device_id"], rec["id"]);
+        assert_eq!(paired["principal_id"], json!("owner"));
+        assert_eq!(paired["remote_addr"], json!("127.0.0.1:7461"));
+        assert_eq!(paired["expiry"], json!({"idle_days": 7}));
+        assert_eq!(paired["discovery_id"], json!(identity.discovery_id()));
+        assert!(paired["host_name"].is_string());
+        let st = e.closed_as(&mut con);
+        assert_eq!((st["ended"].clone(), st["device"].clone()), (json!("paired"), rec["id"].clone()));
+        assert!(e.port_closed(&uri), "the pairing listener is gone");
+        assert_eq!(e.reg.admit(&p.key.pin, worktrees_core::sysclock::now_epoch()).map(|c| c.device().clone()), Ok(worktrees_core::authz::Device::Paired(DeviceId::new(rec["id"].as_str().unwrap()))));
+        let events: Vec<String> = e.skipped.lock().unwrap().iter().filter(|v| v["event"] == json!("devices:changed")).map(|v| v["payload"]["event"].as_str().unwrap_or("").to_string()).collect();
+        let want = ["pairing_opened", "pairing_attempt", "pairing_pending", "pairing_decided", "enrolled", "pairing_closed"];
+        let mut it = events.iter();
+        assert!(want.iter().all(|w| it.any(|e| e == w)), "in order: {events:?}");
+    }
+
+    /// §2.2 step 5, §2.4: ANY failure closes the window, with no retry and
+    /// nothing said — a proof keyed with another secret, bound to another
+    /// session, or made for another key; a frame that is malformed, too long,
+    /// names its device with a direction-changing character, or brings no
+    /// step-up key from an iPhone.
+    #[test]
+    fn any_failure_closes_the_window_with_no_retry() {
+        let e = engine("pairfail", vec![]);
+        e.bind_loopback();
+        let mut con = e.connect(Caller::console());
+        let other = super::super::tls::testkit::device_key();
+        let cases: Vec<(&str, Attempt, &str)> = vec![
+            ("another secret", Attempt { secret: Some(vec![1; 16]), ..Attempt::desktop("Mac") }, "bad_proof"),
+            ("another session", Attempt { exporter: Some([0; 32]), ..Attempt::desktop("Mac") }, "bad_proof"),
+            ("another key", Attempt { proof_spki: Some(other.spki.clone()), ..Attempt::desktop("Mac") }, "bad_proof"),
+            ("a name with an override", Attempt::desktop("Bret\u{202E}enohP"), "malformed"),
+            ("an iPhone with no step-up key", Attempt { platform: "ios", ..Attempt::desktop("iPhone") }, "malformed"),
+            ("a desktop with one", Attempt { platform: "macos", ..Attempt::iphone("Mac") }, "malformed"),
+            ("an unknown key", Attempt { insert: r#""extra": 1, "#.into(), ..Attempt::desktop("Mac") }, "malformed"),
+            ("an unknown platform", Attempt { platform: "windows", ..Attempt::desktop("PC") }, "malformed"),
+            ("a good frame past 4 KiB", Attempt { insert: " ".repeat(5000), ..Attempt::desktop("Mac") }, "malformed"),
+            ("a line that never ends", Attempt { line: Some("x".repeat(5000)), ..Attempt::desktop("x") }, "malformed"),
+        ];
+        for (what, a, ended) in cases {
+            let r = e.begin(&mut con, &["read"], json!("*"), Value::Null);
+            let uri = r["ok"]["uri"].as_str().unwrap().to_string();
+            let mut p = e.attempt(&uri, &a).unwrap();
+            assert_eq!(e.line(&mut p.tls, Duration::from_millis(500)), None, "{what}: nothing said");
+            let st = e.closed_as(&mut con);
+            assert_eq!(st["ended"], json!(ended), "{what}: {st}");
+            assert!(e.port_closed(&uri), "{what}: no retry");
+            assert_eq!(e.rpc(&mut con, "pair_decide", json!({"allow": true}))["err"], json!("no pairing request is waiting"), "{what}");
+        }
+        assert!(e.reg.list(&PrincipalId::owner()).unwrap().is_empty(), "nothing enrolled");
+    }
+
+    /// §2.4: a second connection ends the window — the race the comparison
+    /// code exists for — and the device already waiting is told `closed`.
+    #[test]
+    fn a_second_connection_ends_the_window_and_the_waiting_device_is_told() {
+        let e = engine("pairsecond", vec![]);
+        e.bind_loopback();
+        let mut con = e.connect(Caller::console());
+        let uri = e.begin(&mut con, &["read"], json!("*"), Value::Null)["ok"]["uri"].as_str().unwrap().to_string();
+        let mut p = e.attempt(&uri, &Attempt::desktop("Mac")).unwrap();
+        assert_eq!(e.line(&mut p.tls, Duration::from_secs(5)), Some(json!({"pending": true})));
+        let link = worktrees_core::pairuri::parse(&uri, 0, &literal).unwrap();
+        let _racer = std::net::TcpStream::connect(link.addr).unwrap();
+        assert_eq!(e.line(&mut p.tls, Duration::from_secs(5)), Some(json!({"denied": "closed"})));
+        assert_eq!(e.closed_as(&mut con)["ended"], json!("second_connection"));
+        assert_eq!(e.rpc(&mut con, "pair_decide", json!({"allow": true}))["err"], json!("no pairing request is waiting"));
+        assert!(e.reg.list(&PrincipalId::owner()).unwrap().is_empty());
+    }
+
+    /// §2.4's two deadlines, each running out as a Deny: no attempt in the
+    /// window, and no decision after the frame.
+    #[test]
+    fn the_deadlines_run_out_as_a_deny() {
+        let e = engine_times("pairdeadline", vec![], PAIR_OPEN, PAIR_DECIDE);
+        e.bind_loopback();
+        let mut con = e.connect(Caller::console());
+        let before = worktrees_core::sysclock::now_epoch();
+        let r = e.begin(&mut con, &["read"], json!("*"), Value::Null);
+        // 1.5 s rounds UP: the link must not read as expired while it is open.
+        assert!(r["ok"]["expires_at"].as_i64().unwrap() >= before + 2, "{r}");
+        let uri = r["ok"]["uri"].as_str().unwrap().to_string();
+        std::thread::sleep(PAIR_OPEN + Duration::from_millis(300));
+        assert_eq!(e.closed_as(&mut con)["ended"], json!("expired"));
+        assert!(e.port_closed(&uri));
+        let uri = e.begin(&mut con, &["read"], json!("*"), Value::Null)["ok"]["uri"].as_str().unwrap().to_string();
+        let mut p = e.attempt(&uri, &Attempt::desktop("Mac")).unwrap();
+        assert_eq!(e.line(&mut p.tls, Duration::from_secs(5)), Some(json!({"pending": true})));
+        assert_eq!(e.line(&mut p.tls, PAIR_DECIDE + Duration::from_secs(2)), Some(json!({"denied": "timeout"})));
+        assert_eq!(e.closed_as(&mut con)["ended"], json!("undecided"));
+        assert!(e.reg.list(&PrincipalId::owner()).unwrap().is_empty());
+    }
+
+    /// Deny, cancel, and one window at a time (§2.4).
+    #[test]
+    fn deny_cancel_and_one_window_at_a_time() {
+        let e = engine("pairdeny", vec![]);
+        e.bind_loopback();
+        let mut con = e.connect(Caller::console());
+        let uri = e.begin(&mut con, &["read"], json!("*"), Value::Null)["ok"]["uri"].as_str().unwrap().to_string();
+        let mut p = e.attempt(&uri, &Attempt::desktop("Mac")).unwrap();
+        assert_eq!(e.line(&mut p.tls, Duration::from_secs(5)), Some(json!({"pending": true})));
+        assert_eq!(e.rpc(&mut con, "pair_decide", json!({"allow": false}))["ok"], Value::Null);
+        assert_eq!(e.line(&mut p.tls, Duration::from_secs(5)), Some(json!({"denied": "denied"})));
+        assert_eq!(e.closed_as(&mut con)["ended"], json!("denied"));
+        let first = e.begin(&mut con, &["read"], json!("*"), Value::Null)["ok"]["uri"].as_str().unwrap().to_string();
+        let second = e.begin(&mut con, &["read"], json!("*"), Value::Null)["ok"]["uri"].as_str().unwrap().to_string();
+        assert_ne!(first, second, "a new window has a new secret and port");
+        // Well inside the first window's own deadline, so only the second
+        // window's opening can have closed it. Watched by its event, not by
+        // dialling it: a dial IS an attempt, and a second one would close it.
+        let t0 = Instant::now();
+        let superseded = || e.skipped.lock().unwrap().iter().any(|v| v["payload"]["event"] == json!("pairing_closed") && v["payload"]["ended"] == json!("superseded"));
+        while !superseded() && t0.elapsed() < Duration::from_millis(500) {
+            e.status(&mut con);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(superseded(), "opening a second window closed the first");
+        assert!(e.port_closed(&first));
+        assert_eq!(e.status(&mut con)["state"], json!("open"));
+        assert_eq!(e.rpc(&mut con, "pair_cancel", json!({}))["ok"], json!(true));
+        assert_eq!(e.closed_as(&mut con)["ended"], json!("cancelled"));
+        assert!(e.port_closed(&second));
+        let used = e.attempt(&second, &Attempt::desktop("Late"));
+        assert!(used.is_err(), "a closed window's link reaches nothing");
+    }
+
+    /// Only the console opens a window (§11 Q5), only while remote access is
+    /// on, and never past 16 enrolled devices (§2.4).
+    #[test]
+    fn a_window_is_the_hosts_and_opens_only_where_and_while_it_may() {
+        let e = engine("pairgate", vec![]);
+        let mut con = e.connect(Caller::console());
+        let r = e.begin(&mut con, &["read"], json!("*"), Value::Null);
+        assert!(r["err"].as_str().unwrap().contains("remote access is off"), "{r}");
+        e.bind_loopback();
+        let admin = enroll(&e.reg, "Admin", 1, &[Read, Admin, Write, Stream], Projects::All);
+        let mut dev = e.connect(caller(&admin));
+        for cmd in ["pair_begin", "pair_decide", "pair_cancel", "pair_status"] {
+            assert_eq!(e.rpc(&mut dev, cmd, json!({"caps": ["read"], "projects": "*", "allow": true}))["err"], json!("console-only"), "{cmd}");
+        }
+        for i in 2..=16u8 {
+            enroll(&e.reg, &format!("D{i}"), i, &[Read], Projects::All);
+        }
+        let r = e.begin(&mut con, &["read"], json!("*"), Value::Null);
+        assert!(r["err"].as_str().unwrap().contains("16 devices"), "{r}");
+        assert_eq!(e.status(&mut con)["state"], json!("none"), "refused before anything opened");
+        let r = e.begin(&mut con, &["read"], json!(["/not/registered"]), Value::Null);
+        assert!(r["err"].is_string());
+    }
+
+    /// While a request waits, the device's connection is watched: a second
+    /// frame, or leaving, ends the window before the host can Allow it.
+    #[test]
+    fn a_frame_after_the_first_or_leaving_ends_the_request() {
+        let e = engine("pairafter", vec![]);
+        e.bind_loopback();
+        let mut con = e.connect(Caller::console());
+        for (what, ended) in [("another frame", "frame_after_first"), ("leaving", "device_left")] {
+            let uri = e.begin(&mut con, &["read"], json!("*"), Value::Null)["ok"]["uri"].as_str().unwrap().to_string();
+            let mut p = e.attempt(&uri, &Attempt::desktop("Mac")).unwrap();
+            assert_eq!(e.line(&mut p.tls, Duration::from_secs(5)), Some(json!({"pending": true})));
+            e.rt.block_on(async {
+                use tokio::io::AsyncWriteExt;
+                if what == "leaving" {
+                    let _ = p.tls.shutdown().await;
+                } else {
+                    let _ = p.tls.write_all(b"{}\n").await;
+                    let _ = p.tls.flush().await;
+                }
+            });
+            if what == "leaving" {
+                drop(p);
+            }
+            assert_eq!(e.closed_as(&mut con)["ended"], json!(ended), "{what}");
+            assert_eq!(e.rpc(&mut con, "pair_decide", json!({"allow": true}))["err"], json!("no pairing request is waiting"), "{what}");
+        }
+    }
+
+    // ── step-up (§2.5) ───────────────────────────────────────────────────────
+
+    fn iphone(reg: &DeviceRegistry, caps: &[Capability]) -> (DeviceRecord, super::super::stepup::testkit::StepUpKey) {
+        let k = super::super::stepup::testkit::StepUpKey::new();
+        let rec = reg
+            .enroll(
+                Enrollment {
+                    principal: PrincipalId::owner(),
+                    name: "iPhone".into(),
+                    platform: Platform::Ios,
+                    spki_sha256: super::super::devices::hex(&[42; 32]),
+                    stepup_spki_sha256: Some(k.pin.clone()),
+                    grant: Grant { capabilities: Caps::of(caps), projects: Projects::All },
+                    expiry: Expiry::default(),
+                    addr: None,
+                },
+                NOW,
+            )
+            .unwrap();
+        (rec, k)
+    }
+
+    /// An iPhone holding `admin`: its admin rows wait for a step-up signed over
+    /// THIS connection's exporter; reads never do; the proof holds on its own
+    /// connection only; and turning step-up off on the host removes the gate.
+    #[test]
+    fn a_drive_class_act_needs_a_step_up_proved_on_its_own_connection() {
+        let e = engine("stepup", vec![]);
+        let (rec, k) = iphone(&e.reg, &[Read, Admin]);
+        let ex1 = [1u8; 32];
+        let mut c1 = e.connect_with(caller(&rec), Some(ex1));
+        let mut c2 = e.connect_with(caller(&rec), Some([2u8; 32]));
+        assert_eq!(e.rpc(&mut c1, "devices_list", json!({}))["err"], json!("step-up required"));
+        assert!(e.rpc(&mut c1, "get_changelog", json!({})).get("ok").is_some(), "a read is never asked");
+        let c = e.rpc(&mut c1, "stepup_challenge", json!({}))["ok"]["challenge"].as_str().unwrap().to_string();
+        let mut msg = super::super::stepup::b64_decode(&c).unwrap();
+        // Signed over the OTHER connection's exporter: refused.
+        let mut wrong = msg.clone();
+        wrong.extend_from_slice(&[2u8; 32]);
+        let r = e.rpc(&mut c1, "stepup_prove", json!({"spki": worktrees_api::files::b64_encode(&k.spki), "signature": worktrees_api::files::b64_encode(&k.sign(&wrong))}));
+        assert!(r["err"].as_str().unwrap().contains("does not verify"), "{r}");
+        let c = e.rpc(&mut c1, "stepup_challenge", json!({}))["ok"]["challenge"].as_str().unwrap().to_string();
+        msg = super::super::stepup::b64_decode(&c).unwrap();
+        msg.extend_from_slice(&ex1);
+        let r = e.rpc(&mut c1, "stepup_prove", json!({"spki": worktrees_api::files::b64_encode(&k.spki), "signature": worktrees_api::files::b64_encode(&k.sign(&msg))}));
+        assert_eq!(r["ok"]["valid_secs"], json!(300), "{r}");
+        assert!(e.rpc(&mut c1, "devices_list", json!({})).get("ok").is_some(), "proved: served");
+        assert_eq!(e.rpc(&mut c2, "devices_list", json!({}))["err"], json!("step-up required"), "per connection");
+        // Off on the host: a widening, audited — and the gate is gone.
+        let mut con = e.connect(Caller::console());
+        assert_eq!(e.rpc(&mut con, "device_set_stepup", json!({"id": rec.id.as_str(), "required": false}))["ok"], json!(true));
+        assert!(e.rpc(&mut c2, "devices_list", json!({})).get("ok").is_some());
+        // The console and a desktop are never asked.
+        assert!(e.rpc(&mut con, "devices_list", json!({})).get("ok").is_some());
+        assert_eq!(e.rpc(&mut con, "stepup_prove", json!({"spki": "", "signature": ""}))["err"], json!("the console needs no step-up"));
+        let mac = enroll(&e.reg, "Mac", 9, &[Read, Admin], Projects::All);
+        let mut m = e.connect_with(caller(&mac), Some([3u8; 32]));
+        assert!(e.rpc(&mut m, "devices_list", json!({})).get("ok").is_some(), "a desktop has no presence key to ask for");
+    }
+
+    /// Which acts are drive-class (§2.5): instruct, answer and admin, a raised
+    /// capability as much as a row's own, and OPENING a stream — not typing
+    /// into one already open. Revoking another device is admin; revoking
+    /// itself is not.
+    #[test]
+    fn drive_class_is_instruct_answer_admin_and_opening_a_stream() {
+        use super::super::dispatch::{needs_stepup, row, TABLE};
+        for r in TABLE {
+            let want = match r.cap {
+                Some(Instruct | Answer | Admin) => true,
+                Some(Stream) => matches!(r.name, "term_open" | "shell_open"),
+                _ => false,
+            };
+            assert_eq!(needs_stepup(r, &r.cap.into_iter().collect::<Vec<_>>()), want, "{}", r.name);
+        }
+        assert!(needs_stepup(row("write_file").unwrap(), &[Write, Instruct]), "a write raised to instruct by its path");
+        assert!(!needs_stepup(row("term_write").unwrap(), &[Stream]));
+        let e = engine("stepup-revoke", vec![]);
+        let (rec, _k) = iphone(&e.reg, &[Read, Admin]);
+        let peer = enroll(&e.reg, "Peer", 8, &[Read], Projects::All);
+        let mut c = e.connect_with(caller(&rec), Some([1u8; 32]));
+        assert_eq!(e.rpc(&mut c, "device_revoke", json!({"id": peer.id.as_str()}))["err"], json!("step-up required"), "another device: admin");
+        e.rt.block_on(c.send(Message::text(json!({"id": 1, "cmd": "device_revoke", "args": {"id": rec.id.as_str()}}).to_string()))).unwrap();
+        e.closed(&mut c, "revoked", Duration::from_secs(1));
+    }
+
     /// A revoke cancels the clone jobs the device started (§2.5): every new
     /// job id the resolver namespaces for a connection is remembered for it.
     #[test]
@@ -1911,6 +2383,7 @@ mod devices {
             registry: e.reg.clone(),
             world: Some(Arc::new(Roots { roots: vec![], panes: vec![] })),
             devices: e.reg.clone(),
+            pairing: e.clients.pairing(),
         });
         let grant = authz::effective(&*e.reg, &call.caller);
         let mut args = Args(json!({"id": "job-1", "parent": "/x", "url": "https://example.com/r.git"}).as_object().cloned().unwrap());

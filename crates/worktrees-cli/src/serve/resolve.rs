@@ -220,6 +220,9 @@ pub enum RefusalKind {
     /// their limit (§6, LLM10): not the resolver's, but the dispatcher's next
     /// step (`provenance::device_lane_gate`), and a refusal all the same.
     DeviceLanes,
+    /// A drive-class act from a device whose step-up is due (§2.5):
+    /// `dispatch::stepup_gate`, after the objects resolved.
+    StepUp,
 }
 
 /// Why a request was not run. `detail` is the real reason, never sent to a
@@ -249,6 +252,10 @@ impl Refusal {
         Refusal::new(RefusalKind::Denied, detail)
     }
 
+    pub fn stepup(detail: impl Into<String>) -> Refusal {
+        Refusal::new(RefusalKind::StepUp, detail)
+    }
+
     /// The wire's `err` for a paired device: fixed words per kind.
     pub fn wire(&self) -> Value {
         Value::from(match self.kind {
@@ -262,6 +269,7 @@ impl Refusal {
             RefusalKind::NoopNotOwned => return Value::Null,
             RefusalKind::LocalFetch => ERR_DENIED,
             RefusalKind::DeviceLanes => super::provenance::ERR_DEVICE_LANES,
+            RefusalKind::StepUp => super::stepup::ERR_STEPUP,
         })
     }
 
@@ -924,7 +932,8 @@ pub(crate) mod fixture {
         std::mem::forget(rx);
         let ctx = worktrees_api::Ctx::new(std::env::temp_dir(), Arc::new(Quiet));
         let devices = std::sync::Arc::new(super::super::devices::DeviceRegistry::in_memory());
-        Call { ctx, frames: super::super::wire::Frames::new(super::super::wire::Outbox(tx)), caller, registry, world: None, devices }
+        let pairing = std::sync::Arc::new(super::super::pairing::Pairing::new(None, devices.clone()));
+        Call { ctx, frames: super::super::wire::Frames::new(super::super::wire::Outbox(tx)), caller, registry, world: None, devices, pairing }
     }
 
     pub fn args(v: Value) -> Args {

@@ -33,6 +33,7 @@ use worktrees_api::{Ctx, Host};
 
 use super::audit::{Audit, ConnAudit, Outcome};
 use super::devices::{DeviceEvent, DeviceRegistry};
+use super::pairing::Pairing;
 use super::dispatch::{self, Args, Call};
 use super::policy;
 use super::resolve::{self, World};
@@ -217,6 +218,8 @@ pub struct Clients {
     /// The registry the device rows change. In serve it IS `registry`; with a
     /// fixture `registry` (the tests) it is an empty one in memory.
     devices: Arc<DeviceRegistry>,
+    /// The pairing windows (§2.2), the console's to open.
+    pairing: Arc<Pairing>,
     world: Option<Arc<dyn World>>,
 }
 
@@ -232,11 +235,16 @@ impl Clients {
     /// Grants from `registry` (a fixture, in the tests); `world: None` is the
     /// live one.
     pub fn with(registry: Arc<dyn Registry>, world: Option<Arc<dyn World>>) -> Self {
-        Clients { map: Mutex::new(HashMap::new()), registry, devices: Arc::new(DeviceRegistry::in_memory()), world }
+        let devices = Arc::new(DeviceRegistry::in_memory());
+        let pairing = Arc::new(Pairing::new(None, devices.clone()));
+        Clients { map: Mutex::new(HashMap::new()), registry, devices, pairing, world }
     }
     /// Grants from the device registry itself, as serve runs.
-    pub fn serving(devices: Arc<DeviceRegistry>, world: Option<Arc<dyn World>>) -> Self {
-        Clients { map: Mutex::new(HashMap::new()), registry: devices.clone(), devices, world }
+    pub fn serving(devices: Arc<DeviceRegistry>, pairing: Arc<Pairing>, world: Option<Arc<dyn World>>) -> Self {
+        Clients { map: Mutex::new(HashMap::new()), registry: devices.clone(), devices, pairing, world }
+    }
+    pub fn pairing(&self) -> Arc<Pairing> {
+        self.pairing.clone()
     }
     /// Subscribe to the device registry's events. Weakly: the registry's hook
     /// list must not keep the client set alive.
@@ -753,16 +761,20 @@ async fn session(mut ws: Ws, shared: Arc<Shared>, id: u64, origin: String, slot:
     // Every audit record the connection writes names it (§5.1).
     let caller = Caller::console();
     let au = Arc::new(ConnAudit::new(shared.audit.clone(), id, peer, caller.clone()));
-    serve_caller(ws, shared.ctx.clone(), shared.clients.clone(), id, caller, au).await;
+    serve_caller(ws, shared.ctx.clone(), shared.clients.clone(), id, caller, None, au).await;
 }
 
 /// An authenticated connection's life, whoever accepted it: requests until
 /// the client goes or its device is revoked or disabled (§2.5). `caller` is
 /// the listener's, fixed here for the life of the socket — the console for
 /// loopback; for the remote listener (slice 6), the device whose key completed
-/// the handshake — and `au` is the audit's view of the connection, naming
-/// it. The in-process tests drive it with fake device callers.
-pub(super) async fn serve_caller<S>(ws: WebSocketStream<S>, ctx: Ctx, clients: Arc<Clients>, id: u64, caller: Caller, au: Arc<ConnAudit>)
+/// the handshake, with `stepup_exporter` its session's step-up exporter
+/// (`tls::EXPORTER_STEPUP`) — and `au` is the audit's view of the
+/// connection, naming it. The in-process tests drive it with fake device
+/// callers.
+pub(super) async fn serve_caller<S>(
+    ws: WebSocketStream<S>, ctx: Ctx, clients: Arc<Clients>, id: u64, caller: Caller, stepup_exporter: Option<[u8; 32]>, au: Arc<ConnAudit>,
+)
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -781,7 +793,7 @@ where
             }
         }
     });
-    let frames = Frames::new(outbox.clone());
+    let frames = Frames::with_exporter(outbox.clone(), stepup_exporter);
     let call = Arc::new(Call {
         ctx: ctx.clone(),
         frames: frames.clone(),
@@ -789,6 +801,7 @@ where
         registry: clients.registry(),
         world: clients.world.clone(),
         devices: clients.devices(),
+        pairing: clients.pairing(),
     });
     frames.reconciled().store(call.registry.generation(), Ordering::SeqCst);
     let (kill, listens) = clients.join(id, outbox.clone(), call.clone());

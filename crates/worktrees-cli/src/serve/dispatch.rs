@@ -44,6 +44,8 @@ use worktrees_core::authz::{self, Caller, Capability, Caps, DeviceId, Grant, Pro
 use worktrees_core::fetchpolicy::Fetcher;
 
 use super::devices::{DeviceRegistry, Expiry};
+use super::pairing::{Offer, Pairing};
+use super::stepup;
 use super::resolve::{self, Absent, Obj, World};
 use super::{provenance, scope};
 use super::wire::{self, Frames, CLIENT_LOCAL};
@@ -144,6 +146,8 @@ pub struct Call {
     /// The device registry the device rows change (`devices.json`). In serve
     /// it is also `registry`; a test may grant from a fixture instead.
     pub devices: Arc<DeviceRegistry>,
+    /// The pairing windows the console opens (§2.2).
+    pub pairing: Arc<Pairing>,
 }
 
 /// The request's `args`, read one parameter at a time.
@@ -422,10 +426,13 @@ pub fn call_in_seen(cx: &Call, cmd: &str, args: &Args, world: &dyn World, seen: 
     };
     let grant = authz::effective(&*cx.registry, &cx.caller);
     let mut args = Args(args.0.clone());
-    // The resolver, then a device launch's live-lane cap (§6, LLM10), whose
-    // lock is held across the body so the next device launch counts this one.
-    // Either refusal is the host's, never the body's, and `seen` hears it so.
+    // The resolver, then step-up, then a device launch's live-lane cap (§6,
+    // LLM10), whose lock is held across the body so the next device launch
+    // counts this one. Step-up is read once the objects resolved: a path class
+    // or another device can RAISE the act to drive-class (`stepup_gate`).
+    // Every refusal is the host's, never the body's, and `seen` hears it so.
     let gated = resolve::authorize(row, cx, &grant, &mut args, world)
+        .and_then(|r| stepup_gate(cx, row, &r).map(|()| r))
         .and_then(|r| Ok((r, provenance::device_lane_gate(cx, row, &args, world)?)));
     let (resolved, _launching) = match gated {
         Ok(r) => r,
@@ -460,6 +467,7 @@ pub fn call_in_seen(cx: &Call, cmd: &str, args: &Args, world: &dyn World, seen: 
         registry: cx.registry.clone(),
         world: cx.world.clone(),
         devices: cx.devices.clone(),
+        pairing: cx.pairing.clone(),
     };
     let out = run(row.name, &scoped, &args).unwrap_or_else(|| Err(Value::from(format!("unknown command: {cmd}"))));
     let out = provenance::stamped(&cx.caller, instruction.as_ref(), out)?;
@@ -485,6 +493,38 @@ fn body_ctx(cx: &Call, grant: &authz::Grant, resolved: resolve::Resolved) -> Ctx
         .granted(grant.capabilities, cx.caller.is_console())
         .fetching(fetcher)
         .acting_for(provenance::acting(&cx.caller, grant))
+}
+
+/// The rows that OPEN a stream: of `stream`'s rows, the only ones a step-up
+/// gates (§2.5). Typing into, resizing or closing what is open is not
+/// re-asked.
+pub const OPENS_A_STREAM: &[&str] = &["term_open", "shell_open"];
+
+/// Whether an act is drive-class for step-up (§2.5): it needs `instruct`,
+/// `answer` or `admin` — the row's own capability or one its objects raised —
+/// or it opens a stream.
+pub fn needs_stepup(row: &Row, needs: &[Capability]) -> bool {
+    needs.iter().any(|c| match c {
+        Capability::Instruct | Capability::Answer | Capability::Admin => true,
+        Capability::Stream => OPENS_A_STREAM.contains(&row.name),
+        Capability::Read | Capability::Write => false,
+    })
+}
+
+/// Step-up (§2.5, §11 Q8): a paired device whose record requires it makes a
+/// drive-class act only with a proof that holds on this connection. Read
+/// here, after the objects resolved, because a path class or another device
+/// can RAISE the act to drive-class; never in the resolver, whose coverage
+/// check is also what a reduction re-runs on open channels.
+fn stepup_gate(cx: &Call, row: &Row, r: &resolve::Resolved) -> Result<(), resolve::Refusal> {
+    let authz::Device::Paired(d) = cx.caller.device() else { return Ok(()) };
+    if !needs_stepup(row, &r.needs) || !cx.registry.stepup_required(cx.caller.principal(), d) {
+        return Ok(());
+    }
+    if cx.frames.stepup().fresh(std::time::Instant::now()) {
+        return Ok(());
+    }
+    Err(resolve::Refusal::stepup(format!("{} is drive-class and {d}'s step-up is due", row.name)))
 }
 
 /// A command's row.
@@ -832,6 +872,32 @@ commands! { cx, a;
     // A new server key (§2.5): every device's pin is now wrong, so every
     // device is revoked and pairs again. Meant for a suspected compromise,
     // where a handover signed by the old key would be signed by the thief.
+    // ── pairing (§2.2–§2.4): the host opens the window, the host decides ──
+    // The scope and the expiry are chosen BEFORE the window exists (§2.2
+    // step 1); a missing expiry is the default, 30 days unused.
+    pair_begin: HostConsole => {
+        let expiry = match a.raw("expiry") {
+            Value::Null => Expiry::default(),
+            v => Expiry::from_value(&v)?,
+        };
+        cx.pairing.begin(Offer { grant: scope_arg(cx, a, true)?, expiry }, now())
+    },
+    pair_decide: HostConsole => cx.pairing.decide(a.get("allow")?, now()),
+    pair_cancel: HostConsole => ok(cx.pairing.cancel()),
+    pair_status: HostConsole => ok(cx.pairing.status()),
+    // ── step-up (§2.5): what a device does for itself, on its own connection ──
+    stepup_challenge: Own => cx.frames.stepup().challenge(std::time::Instant::now()).map(|c| serde_json::json!({
+        "challenge": worktrees_api::files::b64_encode(&c), "valid_secs": stepup::CHALLENGE_FOR.as_secs(),
+    })),
+    stepup_prove: Own => {
+        let authz::Device::Paired(d) = cx.caller.device() else { return Err(Value::from("the console needs no step-up")) };
+        let pin = cx.devices.get(cx.caller.principal(), d).and_then(|r| r.stepup_spki_sha256);
+        let spki = stepup::b64_decode(&a.get::<String>("spki")?).ok_or("invalid args `spki`: not base64")?;
+        let sig = stepup::b64_decode(&a.get::<String>("signature")?).ok_or("invalid args `signature`: not base64")?;
+        cx.frames.stepup().prove(pin.as_deref(), &spki, &sig, std::time::Instant::now()).map(|_| serde_json::json!({
+            "valid_secs": stepup::VALID_FOR.as_secs(),
+        }))
+    },
     identity_rotate: HostConsole => {
         let id = super::identity::Identity::rotate(&cx.ctx.config_dir)?;
         cx.devices.announce(super::devices::DeviceEvent::IdentityRotated { pin: id.pin().to_string() });
@@ -862,22 +928,22 @@ mod tests {
         }
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = Ctx::new(dir.clone(), Arc::new(Quiet));
-        (Call { ctx, frames: Frames::new(wire::Outbox(tx)), caller: Caller::console(), registry: Arc::new(NoDevices), world: None, devices: Arc::new(DeviceRegistry::in_memory()) }, dir, rx)
+        (Call { ctx, frames: Frames::new(wire::Outbox(tx)), caller: Caller::console(), registry: Arc::new(NoDevices), world: None, devices: Arc::new(DeviceRegistry::in_memory()), pairing: Arc::new(Pairing::new(None, Arc::new(DeviceRegistry::in_memory()))) }, dir, rx)
     }
 
     fn args(v: Value) -> Args {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 162 rows, no duplicates: the command layer's (143 at the extraction;
-    /// host policy's three getters and Kimi's six since) and the device
-    /// registry's ten (Phase 2 slice 5); the check scripts hold the page's
-    /// commands against them.
+    /// 168 rows, no duplicates: the command layer's (143 at the extraction;
+    /// host policy's three getters and Kimi's six since) and Phase 2 slice
+    /// 5's sixteen — the device rows, pairing and step-up; the check scripts
+    /// hold the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 162, "the table has 162 commands");
+        assert_eq!(TABLE.len(), 168, "the table has 168 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1129,11 +1195,12 @@ mod tests {
 
     /// Every row has exactly ONE base group — its capability, or its class
     /// when it has none — and the counts are §3.4's, plus the two host-policy
-    /// getters #532 added after it (`read`) and slice 5's device rows: two
-    /// `admin` (`devices_list`, `device_narrow`), seven console, and
-    /// `device_revoke`, which every device may make for itself (`own`). A row
-    /// that moves group fails here until the count (and the proposal's table)
-    /// move with it.
+    /// getters #532 added after it (`read`) and slice 5's rows: two `admin`
+    /// (`devices_list`, `device_narrow`); eleven console (six device acts,
+    /// `identity_rotate` and four pairing rows); and three a device makes for
+    /// itself (`own`: `device_revoke`, `stepup_challenge`, `stepup_prove`). A
+    /// row that moves group fails here until the count (and the proposal's
+    /// table) move with it.
     #[test]
     fn every_row_has_one_base_group_and_the_counts_are_section_3_4s() {
         let mut groups: BTreeMap<&str, usize> = BTreeMap::new();
@@ -1149,8 +1216,8 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 55), ("write", 23), ("admin", 35), ("console", 28), ("stream", 10), ("instruct", 3),
-            ("client-local", 6), ("loopback-only", 1), ("own", 1),
+            ("read", 55), ("write", 23), ("admin", 35), ("console", 32), ("stream", 10), ("instruct", 3),
+            ("client-local", 6), ("loopback-only", 1), ("own", 3),
         ]
         .into();
         assert_eq!(groups, want);

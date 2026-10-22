@@ -260,6 +260,8 @@ pub struct Frames {
     /// The registry generation this connection's channels were last checked
     /// at (`conn::reconcile`).
     reconciled: Arc<AtomicU64>,
+    /// The connection's step-up state (§2.5).
+    stepup: Arc<super::stepup::StepUp>,
 }
 
 /// A dock shell whose output this connection receives: its key, and the
@@ -274,6 +276,12 @@ pub struct ShellHold {
 
 impl Frames {
     pub fn new(outbox: Outbox) -> Self {
+        Frames::with_exporter(outbox, None)
+    }
+
+    /// A connection with a TLS session: `exporter` is its step-up exporter
+    /// (`EXPORTER-worktrees-stepup-v1`), what a step-up proof is bound to.
+    pub fn with_exporter(outbox: Outbox, exporter: Option<[u8; 32]>) -> Self {
         let mut b = [0u8; 8];
         getrandom::fill(&mut b).expect("the OS refused entropy");
         let tag: String = b.iter().map(|x| format!("{x:02x}")).collect();
@@ -284,7 +292,12 @@ impl Frames {
             jobs: Arc::new(Mutex::new(Vec::new())),
             tag: Arc::from(tag.as_str()),
             reconciled: Arc::new(AtomicU64::new(0)),
+            stepup: Arc::new(super::stepup::StepUp::new(exporter)),
         }
+    }
+
+    pub fn stepup(&self) -> &super::stepup::StepUp {
+        &self.stepup
     }
 
     /// This connection's own namespace for ids it hands the engine. Random,

@@ -1015,6 +1015,7 @@ fn reason(kind: RefusalKind) -> &'static str {
         RefusalKind::NoopNotOwned => "not-owned",
         RefusalKind::LocalFetch => "local-fetch",
         RefusalKind::DeviceLanes => "device-lanes",
+        RefusalKind::StepUp => "step-up",
     }
 }
 
