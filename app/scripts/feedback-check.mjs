@@ -58,31 +58,130 @@ function makeDom() {
   return { root, host, documentElement, document: { body: { children: [root, host] }, documentElement } };
 }
 
-async function adapter({ mock = false, configured = true, label = 'main', rejectVersion = false } = {}) {
+/** The REAL backend door — ipc.ts, with the real reconnect.ts behind it — and
+ *  Tauri's own `invoke` replaced by `tauriInvoke`. A fresh module per call, so
+ *  each adapter has a door of its own. A stub here would be a second answer to
+ *  the one question that matters below: what this door does with a command
+ *  before the engine has connected. */
+const reconnect = evaluate('app/src/reconnect.ts');
+function realIpc(tauriInvoke) {
+  return evaluate('app/src/ipc.ts', {
+    require(name) {
+      if (name === '@tauri-apps/api/core') return { invoke: tauriInvoke, Channel: class {} };
+      if (name === '@tauri-apps/api/event') return { listen: () => Promise.resolve(() => {}) };
+      if (name === './reconnect') return reconnect;
+      throw Error(name);
+    },
+    setTimeout, clearTimeout,
+  });
+}
+/** This frontend's own version, as vite's `define` hands it to the build. */
+const BUILT_AS = '9.8.7';
+const ticks = async (n = 8) => { for (let i = 0; i < n; i++) await new Promise(r => setTimeout(r, 0)); };
+/** Plain data out of the vm's realm: strict deep-equality compares prototypes,
+ *  and an object the evaluated source built has the OTHER realm's Object. */
+const plain = (v) => JSON.parse(JSON.stringify(v));
+
+async function adapter({ mock = false, configured = true, label = 'main', builtAs = BUILT_AS, ipc = null, failImport = false, failInit = false } = {}) {
   const dom = makeDom();
-  let sdk = 0, fake = 0, destroyed = 0, calls = [], options;
-  let resolveVersion;
-  const version = rejectVersion ? Promise.reject(Error('private native details')) : new Promise(r => { resolveVersion = r; });
-  // Prevent an unhandled rejection when no configuration means it is never read.
-  version.catch(() => {});
+  let sdk = 0, fake = 0, destroyed = 0, calls = [], errors = [], options;
+  // The plain Tauri door (the mock's, and v0.42.0's) by default. It answers
+  // `get_changelog` with a version that is NOT the build's, so asking the
+  // backend instead of the build shows up as the wrong version, not a pass.
+  ipc ??= realIpc((cmd, arg) => { calls.push([cmd, arg]); return Promise.resolve(cmd === 'get_changelog' ? { version: '0.0.0-backend' } : undefined); });
   const widget = { open() {}, close() {}, destroy() { destroyed++; } };
   const env = { VITE_MOCK: mock ? '1' : '', DEV: true, VITE_ORFIS_KEY: configured ? 'pk_test_key' : '', VITE_ORFIS_API_URL: 'http://localhost:4100' };
   const mod = evaluate('app/src/feedback.ts', {
     require(name) {
       // The backend door (ipc.ts), never `@tauri-apps/api/core` directly — an
       // unknown name throws below, so a file that bypassed the door fails here.
-      if (name === './ipc') return { invoke:(cmd, arg) => { calls.push([cmd, arg]); return cmd === 'get_changelog' ? version : Promise.resolve(); } };
+      if (name === './ipc') return ipc;
       if (name === '@tauri-apps/api/window') return { getCurrentWindow: () => ({ label }) };
       if (name === './feedbackConfig') return { feedbackConfig };
       if (name === './useEscape') return { registerEscape: escape.registerEscape };
-      if (name === './feedbackWidget') { sdk++; return { createFeedbackWidget: (_config, appVersion, cb) => { options = { appVersion, cb }; return widget; } }; }
-      if (name === './mock/feedback') { fake++; return { createMockFeedback: cb => { options = { cb }; return widget; } }; }
+      if (name === './feedbackWidget') {
+        sdk++;
+        if (failImport) throw Error('private native details');
+        return { createFeedbackWidget: (_config, appVersion, cb) => { if (failInit) throw Error('private native details'); options = { appVersion, cb }; return widget; } };
+      }
+      if (name === './mock/feedback') { fake++; return { createMockFeedback: (cb, appVersion) => { options = { appVersion, cb }; return widget; } }; }
       throw Error(name);
     },
-    HTMLElement, document: dom.document,
+    HTMLElement, document: dom.document, __WT_VERSION__: builtAs,
+    console: { ...console, error: (...a) => errors.push(a.join(' ')) },
   }, s => s.replaceAll('import.meta.env', JSON.stringify(env)));
-  return { mod, resolveVersion, counts: () => ({ sdk, fake, destroyed }), calls, options: () => options, dom };
+  return { mod, counts: () => ({ sdk, fake, destroyed }), calls, errors, options: () => options, dom };
 }
+
+// ── Before the engine has connected ──────────────────────────────────────
+// main.tsx starts feedback as soon as it has OPENED the engine door, not once
+// the door has connected, and until then `engineDoor.invoke` refuses every
+// engine command ("the engine is not connected yet"). v0.43.0 asked that door
+// for the version (`get_changelog`), so every launch said "Feedback is
+// unavailable in this build", for good: `starting` is cached, and the log line
+// went through the same refusing door, which is why serve.log never had it.
+// So: the real door, its dial not yet answered — feedback must come up anyway.
+function engineDown() {
+  const ipc = realIpc(() => Promise.reject('the plain Tauri door is not this door'));
+  const local = [], engine = [];
+  let answer;
+  const tauri = {
+    invoke: (cmd) => { local.push(cmd); return Promise.reject('not a client-local command'); },
+    listen: () => Promise.resolve(() => {}),
+    channel: () => ({ onmessage() {}, toJSON: () => '__CHANNEL__:t' }),
+  };
+  const sock = {
+    invoke: (cmd, args) => { engine.push([cmd, args]); return Promise.resolve(); },
+    listen: () => Promise.resolve(() => {}),
+    channel: () => ({ onmessage() {}, toJSON: () => '__CHANNEL__:s' }),
+    ready: Promise.resolve(),
+  };
+  // A clock that never fires: the dial below is simply slow, nothing retries.
+  const clock = { now: () => 0, setTimeout: () => 0, clearTimeout() {}, random: () => 0, visible: () => true };
+  const door = ipc.engineDoor(tauri, () => new Promise(r => { answer = r; }), clock);
+  const asked = [];
+  ipc.openDoor({ ...door, invoke(cmd, args) { asked.push(cmd); return door.invoke(cmd, args); } });
+  void door.connect();
+  assert.equal(ipc.engineState().kind, 'starting', 'precondition: the engine door has not connected');
+  assert.equal(ipc.engineState().gen, 0);
+  return { ipc, asked, local, engine, connect: async () => { answer({ sock, owned: true, started: false }); await ticks(); } };
+}
+{
+  const e = engineDown();
+  const a = await adapter({ ipc: e.ipc });
+  await a.mod.startFeedback();
+  assert.equal(a.mod.feedbackSnapshot().notice, '', `no failure notice before the engine is up (got: ${a.mod.feedbackSnapshot().notice})`);
+  assert.equal(a.mod.feedbackSnapshot().available, true, 'feedback must come up before the engine door has connected');
+  assert.equal(a.options().appVersion, BUILT_AS, 'the widget reports the version this frontend was built as');
+  assert.deepEqual(e.asked, [], `feedback asks the backend for nothing to start (asked: ${e.asked})`);
+  await e.connect();
+  assert.equal(e.ipc.engineState().kind, 'up');
+  assert.deepEqual(e.engine, [], 'and a start that worked logs nothing once the engine is up');
+}
+// A start that DOES fail says what failed rather than blaming the build, keeps
+// native details out of the notice and both logs, and its log line reaches
+// serve.log: it waits for the engine's first connect instead of being handed
+// to a door that refuses it and swallowed.
+{
+  const e = engineDown();
+  const a = await adapter({ ipc: e.ipc, failInit: true });
+  await a.mod.startFeedback();
+  const { available, notice, error } = a.mod.feedbackSnapshot();
+  assert.equal(available, false);
+  assert.equal(error, true);
+  assert.doesNotMatch(notice, /in this build/, 'a failed start must not blame a build that is fine');
+  assert.match(notice, /form did not start/, `the notice says which step failed (got: ${notice})`);
+  assert.deepEqual(a.errors, ['[feedback] Feedback initialization failed: the feedback form did not start'],
+    'the console hears it at once, with the step and nothing else');
+  assert.deepEqual(e.asked, [], 'nothing is handed to the engine door while it would refuse it');
+  await e.connect();
+  assert.deepEqual(plain(e.engine), [['log_event', { level: 'error', msg: 'Feedback initialization failed: the feedback form did not start' }]],
+    'the log line reaches the engine once it is up — once');
+  for (const s of [notice, ...a.errors, ...e.engine.map(([, x]) => x.msg)]) {
+    assert.doesNotMatch(s, /private native details|pk_|localhost:4100/, `no native detail, key or endpoint in "${s}"`);
+  }
+}
+
 for (const args of [{ configured: false }, { label: 'docs-123' }]) {
   const a = await adapter(args);
   await a.mod.startFeedback();
@@ -93,9 +192,9 @@ for (const args of [{ configured: false }, { label: 'docs-123' }]) {
 const real = await adapter();
 const first = real.mod.startFeedback();
 assert.equal(real.mod.startFeedback(), first, 'concurrent startup shares promise');
-real.resolveVersion({ version: '9.8.7' });
 await first;
 await real.mod.startFeedback();
+assert.deepEqual(real.calls, [], 'the plain door is asked for nothing either — the version is the build\'s');
 assert.equal(real.counts().sdk, 1);
 assert.equal(real.options().appVersion, '9.8.7');
 assert.equal(real.mod.feedbackSnapshot().available, true);
@@ -119,7 +218,6 @@ assert.equal(real.counts().destroyed, 1);
 const late = await adapter();
 const pending = late.mod.startFeedback();
 late.mod.stopFeedback();
-late.resolveVersion({ version: '9.8.7' });
 await pending;
 assert.equal(late.counts().sdk, 1, 'module import can finish, but must not create widget');
 assert.equal(late.options(), undefined);
@@ -129,11 +227,21 @@ await mock.mod.startFeedback();
 assert.equal(mock.counts().sdk, 0, 'mock must never even import SDK');
 assert.equal(mock.counts().fake, 1);
 assert.equal(mock.calls.length, 0);
-const bad = await adapter({ rejectVersion: true });
-await bad.mod.startFeedback();
-assert.equal(bad.counts().sdk, 0);
-assert.equal(bad.mod.feedbackSnapshot().available, false);
-assert.equal(bad.calls.at(-1)[1].msg, 'Feedback initialization failed');
+assert.equal(mock.mod.feedbackSnapshot().available, true);
+assert.equal(mock.options().appVersion, BUILT_AS, 'the mock reads the version the same way, so the harness runs that line too');
+// The other steps, on the plain door — which hears the log line at once.
+for (const [args, step, sdk] of [
+  [{ builtAs: '' }, 'the app version is missing', 0],
+  [{ builtAs: 'x'.repeat(65) }, 'the app version is missing', 0],
+  [{ failImport: true }, 'the feedback form did not load', 1],
+]) {
+  const bad = await adapter(args);
+  await bad.mod.startFeedback();
+  assert.equal(bad.counts().sdk, sdk);
+  assert.equal(bad.mod.feedbackSnapshot().available, false);
+  assert.equal(bad.mod.feedbackSnapshot().notice, `Feedback could not start: ${step}.`);
+  assert.deepEqual(plain(bad.calls), [['log_event', { level: 'error', msg: `Feedback initialization failed: ${step}` }]]);
+}
 // The SDK path is live. What used to hold it shut was a constant; what holds
 // it shut NOW is configuration — `feedbackConfig` refuses anything that is not
 // a well-formed `pk_` key on an https (or loopback-in-dev) origin, and the
@@ -171,9 +279,7 @@ assert.match(sectionSrc, /email field is optional/, 'Settings must disclose the 
 // treated as untrusted, and both directions are asserted.
 {
   const a = await adapter();
-  const p = a.mod.startFeedback();
-  a.resolveVersion({ version: '1.2.3' });
-  await p;
+  await a.mod.startFeedback();
   const { opened, closed } = a.options().cb;
   const { root, host, documentElement } = a.dom;
 
@@ -282,4 +388,4 @@ assert.equal(
   'the development endpoint must work in a dev build',
 );
 
-console.log('ok — feedback config, singleton, main-window boundary, offline mock, version, notices (durable + memory), teardown, Escape, SDK gate, vendored license + recorded hash, mode-split routing, background inerting, style-free dialog marker');
+console.log('ok — feedback config, starts before the engine connects (real ipc.ts door), failure logs wait for the engine, singleton, main-window boundary, offline mock, build version, notices (durable + memory), teardown, Escape, SDK gate, vendored license + recorded hash, mode-split routing, background inerting, style-free dialog marker');

@@ -1,4 +1,4 @@
-import { invoke } from "./ipc";
+import { engineState, invoke, onEngineState } from "./ipc";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { feedbackConfig } from "./feedbackConfig";
 import { registerEscape } from "./useEscape";
@@ -87,33 +87,71 @@ const callbacks: FeedbackCallbacks = {
   accepted: () => update({ notice: "", error: false }),
 };
 
-/** Called once by main.tsx, outside React/StrictMode. Duplicate calls share the
- * same promise; teardown invalidates a pending version lookup/import. */
+/** What a failed start says, by the step that failed — never the error itself,
+ *  which can carry native details. */
+const START_FAILED = {
+  window: "the window could not be identified",
+  version: "the app version is missing",
+  load: "the feedback form did not load",
+  init: "the feedback form did not start",
+} as const;
+
+/** `f` once the backend can hear it: at once on any door but the engine door,
+ *  and on that one at its first connect. main.tsx opens the engine door and
+ *  starts feedback in the same breath, and until the door connects it REFUSES
+ *  every engine command — so a log line sent straight away is swallowed. */
+function whenEngineUp(f: () => void) {
+  if (engineState().kind === "up") return f();
+  const off = onEngineState(() => {
+    if (engineState().kind !== "up") return;
+    off();
+    f();
+  });
+}
+
+/** Called once by main.tsx, outside React/StrictMode — before the engine has
+ * connected, so starting must ask the engine for nothing. Duplicate calls share
+ * the same promise; teardown invalidates a pending import. */
 export function startFeedback(): Promise<void> {
   if (starting) return starting;
   const epoch = generation;
+  let step: keyof typeof START_FAILED = "window";
   starting = (async () => {
     const mock = !!import.meta.env.VITE_MOCK;
     const config = feedbackConfig(import.meta.env.VITE_ORFIS_KEY, import.meta.env.VITE_ORFIS_API_URL, import.meta.env.DEV);
     if (!mock && !config) return;
     if (!mock && getCurrentWindow().label !== "main") return;
+    // The version this frontend was BUILT as (vite.config.ts, from the
+    // workspace Cargo.toml the bundle inherits too), not the engine's: the
+    // report is about the build the user is running, an adopted serve can be
+    // another version, and v0.43.0 asked the engine (`get_changelog`) before
+    // it had connected — so feedback was unavailable on every launch. Read
+    // for the mock too, so the harness runs the line that broke.
+    step = "version";
+    const version = __WT_VERSION__;
+    if (!version || version.length > 64) throw new Error("Missing app version");
     if (mock) {
+      step = "load";
       const { createMockFeedback } = await import("./mock/feedback");
       if (epoch !== generation) return;
-      widget = createMockFeedback(callbacks);
+      step = "init";
+      widget = createMockFeedback(callbacks, version);
     } else {
-      const { version } = await invoke<{ version: string }>("get_changelog");
-      if (!version || version.length > 64) throw new Error("Missing app version");
+      step = "load";
       const { createFeedbackWidget } = await import("./feedbackWidget");
       if (epoch !== generation) return;
+      step = "init";
       widget = createFeedbackWidget(config!, version, callbacks);
     }
     update({ available: true });
   })().catch(() => {
     if (epoch !== generation) return;
     // Never include report text, endpoint, key or native error details in logs.
-    update({ available: false, notice: "Feedback is unavailable in this build.", error: true });
-    void invoke("log_event", { level: "error", msg: "Feedback initialization failed" }).catch(() => {});
+    const what = START_FAILED[step];
+    update({ available: false, notice: `Feedback could not start: ${what}.`, error: true });
+    // The console hears it at once; serve.log once the engine is there to.
+    console.error(`[feedback] Feedback initialization failed: ${what}`);
+    whenEngineUp(() => void invoke("log_event", { level: "error", msg: `Feedback initialization failed: ${what}` }).catch(() => {}));
   });
   return starting;
 }

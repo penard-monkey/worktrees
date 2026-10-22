@@ -44,11 +44,29 @@ function retryEnv(): RetryEnv {
 async function boot() {
   // Design harness (VITE_MOCK=1): install the fake Tauri backend BEFORE anything
   // imports @tauri-apps/api, so invoke()/Channel resolve against the mock +
-  // fixtures. It answers everything itself; there is no engine to connect to.
-  if (import.meta.env.VITE_MOCK) {
-    await import("./mock/install");
-  }
+  // fixtures. It answers everything itself; there is no engine to connect to,
+  // unless `?slowengine` puts an engine door in front of it.
   let gated = false;
+  if (import.meta.env.VITE_MOCK) {
+    const { mockEngineDelayMs } = await import("./mock/install");
+    // `?slowengine[=ms]`: the app's boot over the mock — an engine door whose
+    // first connect takes that long, so a call that cannot wait for it is
+    // refused here exactly as it is in the app. Its socket is the mock itself.
+    if (mockEngineDelayMs > 0) {
+      const { engineDoor, openDoor, tauriDoor } = await import("./ipc");
+      const door = engineDoor(
+        tauriDoor,
+        async () => {
+          await new Promise((r) => window.setTimeout(r, mockEngineDelayMs));
+          return { sock: { ...tauriDoor, ready: Promise.resolve() }, owned: true, started: false };
+        },
+        retryEnv(),
+      );
+      openDoor(door);
+      void door.connect();
+      gated = true;
+    }
+  }
   // Dev stack (`pnpm dev:serve`, VITE_SERVE=1): a browser page on a real
   // `worktrees serve`, which learns the port and token from vite's token
   // endpoint (`bootSocket`). DEV is the literal `false` in a build, so this
