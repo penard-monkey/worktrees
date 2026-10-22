@@ -1,7 +1,8 @@
 import type { FeedbackCallbacks, FeedbackWidget } from "../feedbackTypes";
 
-/** No SDK import, network, timers, storage, or replay — including existing outboxes. */
-export function createMockFeedback(callbacks: FeedbackCallbacks): FeedbackWidget {
+/** No SDK import, network, timers, storage, or replay — including existing outboxes.
+ *  `appVersion` is what the real widget would report, shown rather than sent. */
+export function createMockFeedback(callbacks: FeedbackCallbacks, appVersion: string): FeedbackWidget {
   let host: HTMLDivElement | null = null;
   const close = () => {
     if (!host) return;
@@ -17,7 +18,7 @@ export function createMockFeedback(callbacks: FeedbackCallbacks): FeedbackWidget
       host.dataset.feedbackMock = "";
       host.innerHTML = `<section class="modal feedback-mock" role="dialog" aria-modal="true" aria-label="Send feedback about Worktrees">
         <h2>Send feedback about Worktrees</h2>
-        <p>Offline preview. Nothing is sent or saved.</p>
+        <p>Offline preview. Nothing is sent or saved. A report would carry version <span data-version></span>.</p>
         <label>Your message<textarea aria-label="Your message"></textarea></label>
         <div class="ver-actions">
           <button class="ctrl" data-queued>Simulate queued (durable)</button>
@@ -26,6 +27,7 @@ export function createMockFeedback(callbacks: FeedbackCallbacks): FeedbackWidget
           <button class="ctrl" data-close>Close</button>
         </div>
       </section>`;
+      host.querySelector("[data-version]")!.textContent = appVersion;
       host.addEventListener("click", (e) => { if (e.target === host) close(); });
       host.querySelector("[data-close]")!.addEventListener("click", close);
       // Both outcomes, because they say different things to the user and only

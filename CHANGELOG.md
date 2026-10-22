@@ -8,6 +8,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ### Fixed
 - **The "Not a git repo" card and the "Not configured" nudge show their ✕.** It was always there but invisible; Escape now dismisses the "Not a git repo" card too.
 - **The app's TLS libraries are past five published advisories.** rustls 0.23.42 → 0.23.46 (RUSTSEC-2026-0285, RUSTSEC-2026-0346, RUSTSEC-2026-0348, RUSTSEC-2026-0349) and rustls-webpki 0.103.13 → 0.103.16 (RUSTSEC-2026-0382). Only the in-app updater's HTTPS uses them; the CLI does not link either.
+- **Send feedback works again.** In 0.43.0 it said "Feedback is unavailable in this build" on every launch, because it asked the engine for the app's version before the app had connected to it. It now uses the version the app was built as, and if it ever fails to start it says which step failed.
 
 ## [0.43.0] - 2026-10-21
 

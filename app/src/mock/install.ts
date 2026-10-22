@@ -391,6 +391,17 @@ const mockListDelayMs = (() => {
 // scroller that unmounts on every refresh looks perfectly steady in this
 // harness while the real app (IPC + a disk read) throws the document back to
 // its top each time. `?slowread` (default 300ms) or `?slowread=<ms>`.
+// The app boots behind an engine door that refuses every engine command until
+// its first connect (`engine_connect` + the handshake); this harness has no
+// engine at all, so a call made in that gap simply works here. v0.43.0's
+// feedback asked the engine for its version that early and was unavailable on
+// every launch, which nothing here could show. `?slowengine` (default 3000ms)
+// or `?slowengine=<ms>` boots behind a REAL engine door over this mock, whose
+// first connect takes that long (main.tsx).
+export const mockEngineDelayMs = (() => {
+  const m = /[?&]slowengine(?:=(\d+))?/.exec(location.search);
+  return m ? Number(m[1] ?? 3000) : 0;
+})();
 const mockReadDelayMs = (() => {
   const m = /[?&]slowread(?:=(\d+))?/.exec(location.search);
   return m ? Number(m[1] ?? 300) : 0;
