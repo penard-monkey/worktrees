@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.43.1] - 2026-10-22
+
 ### Fixed
 - **The "Not a git repo" card and the "Not configured" nudge show their ✕.** It was always there but invisible; Escape now dismisses the "Not a git repo" card too.
 - **The app's TLS libraries are past five published advisories.** rustls 0.23.42 → 0.23.46 (RUSTSEC-2026-0285, RUSTSEC-2026-0346, RUSTSEC-2026-0348, RUSTSEC-2026-0349) and rustls-webpki 0.103.13 → 0.103.16 (RUSTSEC-2026-0382). Only the in-app updater's HTTPS uses them; the CLI does not link either.
@@ -15,7 +17,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   restarts", "Give each tab its own command history") were still sent to the
   engine from the window's own saved settings every time it loaded. The
   engine runs one fetch loop and one shell per dock tab for every window, so
-  whichever window loaded last decided them for all of them. They now live on
+  whichever window loaded last decided them for all of them. A serve the app
+  restarted after losing its engine also ran on the defaults (auto-fetch off,
+  per-tab history on, and each tab's output kept on disk even if you had
+  turned that off) until you next changed a setting. They now live on
   this machine in `host-policy.json`, beside Codex permissions and pi trust,
   and change only when you change them in Settings, which shows the machine's
   value. Each terminal switch is sent on its own, so changing one never puts
