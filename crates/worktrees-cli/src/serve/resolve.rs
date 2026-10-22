@@ -59,10 +59,13 @@ pub enum Obj {
     Project(&'static str),
     /// [`Obj::Project`] when present (non-null, non-empty); [`Absent`] when not.
     OptProject(&'static str, Absent),
-    /// `project(repo)` and a slug that is `(main)` or one path component.
+    /// `project(repo)` and a slug that is `(main)` or one path component, and
+    /// names a place that EXISTS: the main checkout, or a directory under the
+    /// project's `.worktrees/` — `place_index`'s own rule, as a stat, because
+    /// a dock shell's every keystroke resolves its place.
     Place(&'static str, &'static str),
-    /// A slug alone, of the project an earlier object resolved (an optional
-    /// place: `doctor`'s whole-project form).
+    /// A slug alone, of the project an earlier object resolved, by the same
+    /// rule (an optional place: `doctor`'s whole-project form).
     Slug(&'static str),
     /// A PLACE root: a registered root, or a direct child of its `.worktrees/`.
     Root(&'static str),
@@ -81,7 +84,8 @@ pub enum Obj {
     Attach(&'static str),
     /// [`Obj::Attach`] for a CLOSE, which is idempotent: closing an attach
     /// this connection does not own is answered `ok` without running the body
-    /// — what closing a missing one always was. A pane replaced on reconnect
+    /// — what closing a missing one always was, and indistinguishable from it
+    /// ([`RefusalKind::NoopNotOwned`]). A pane replaced on reconnect
     /// closes its old id over the NEW socket (#525), and on a restarted serve
     /// that id may name someone else's attach; it must neither close it nor
     /// turn a routine stale close into an error.
@@ -100,6 +104,12 @@ pub enum Obj {
     Device(&'static str),
     /// A path where a project WILL be: `admin` (the row's) and scope `"*"`.
     NewPath(&'static str),
+    /// A URL the host will fetch from (§3.4, `clone_project`): from a device,
+    /// no `file://`, no local path, and no host that is — or resolves to — a
+    /// loopback, link-local, private or unspecified address, so a device can
+    /// neither read an unregistered repo on the host's disk nor borrow the
+    /// host's network position. The console is unaffected.
+    RemoteUrl(&'static str),
     /// `project_prs.places`: each `{slug}` of the row's project passes the
     /// slug rule.
     Places(&'static str),
@@ -131,7 +141,7 @@ impl Obj {
         use Obj::*;
         match *self {
             Project(a) | OptProject(a, _) | Slug(a) | Root(a) | File(a) | Session(a) | Attach(a) | Close(a) | ShellRef(a) | Job(a)
-            | NewJob(a) | Device(a) | NewPath(a) | Places(a) | Roots(a) | Candidates(a) => vec![a],
+            | NewJob(a) | Device(a) | NewPath(a) | RemoteUrl(a) | Places(a) | Roots(a) | Candidates(a) => vec![a],
             SessionIn(s, _) => vec![s],
             Place(r, s) => vec![r, s],
             SessionOf(s, _, _) => vec![s],
@@ -179,7 +189,15 @@ pub enum RefusalKind {
     BadArgs,
     /// An idempotent act on something that is not there for this caller
     /// ([`Obj::Close`]): the dispatcher answers `ok` and does not run the body.
-    Gone,
+    /// An id another connection owns and an id nobody owns land here alike,
+    /// so the wire cannot tell them apart; the audit lane records it as a
+    /// refused act (§5.2) at the one place it is turned into `ok`,
+    /// `dispatch::call_in`.
+    NoopNotOwned,
+    /// A device asked the host to FETCH from somewhere only the host can
+    /// reach — a local path, or a loopback, link-local or private address
+    /// ([`Obj::RemoteUrl`]).
+    LocalFetch,
 }
 
 /// Why a request was not run. `detail` is the real reason, never sent to a
@@ -219,7 +237,8 @@ impl Refusal {
             RefusalKind::Denied => ERR_DENIED,
             RefusalKind::NotFound => ERR_NOT_FOUND,
             RefusalKind::BadArgs => return Value::from(self.detail.clone()),
-            RefusalKind::Gone => return Value::Null,
+            RefusalKind::NoopNotOwned => return Value::Null,
+            RefusalKind::LocalFetch => ERR_DENIED,
         })
     }
 
@@ -289,7 +308,7 @@ pub fn authorize(row: &Row, cx: &Call, grant: &Grant, args: &mut Args, world: &d
             return Err(Refusal::denied(format!("{} needs `{cap}`", row.name)));
         }
     }
-    let mut st = St { cx, grant, world, roots: None, bound: Vec::new(), out: Resolved::default() };
+    let mut st = St { cx, grant, world, roots: None, panes: None, bound: Vec::new(), out: Resolved::default() };
     for obj in row.objects {
         st.resolve(row, obj, args)?;
     }
@@ -310,6 +329,8 @@ struct St<'a> {
     grant: &'a Grant,
     world: &'a dyn World,
     roots: Option<Vec<String>>,
+    /// One `list-panes` per request, however many sessions it names.
+    panes: Option<Option<PaneList>>,
     /// Argument name → the project key (and place dir) it resolved to, for
     /// the objects that refer back to an earlier one.
     bound: Vec<(&'static str, String, Option<PathBuf>)>,
@@ -331,6 +352,37 @@ impl St<'_> {
             self.roots = Some(self.world.roots());
         }
         self.roots.as_deref().unwrap_or_default()
+    }
+
+    /// Where each pane of session `name` is cwd'd.
+    fn pane_paths(&mut self, name: &str) -> Vec<String> {
+        if self.panes.is_none() {
+            self.panes = Some(self.world.panes());
+        }
+        match self.panes.as_ref().and_then(Option::as_ref) {
+            Some(p) => p.session_paths(name).map(str::to_string).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// The projects session `name` has panes in, each by its registry key.
+    /// A session with a pane in a project outside the scope is out of scope
+    /// WHOLE: attaching shows every pane, so one split cd'd into an in-scope
+    /// project must not open a session that is another project's.
+    fn session_owners(&mut self, name: &str) -> Result<Vec<String>, Refusal> {
+        let mut owners: Vec<String> = Vec::new();
+        for p in self.pane_paths(name) {
+            let c = canon(&p).unwrap_or_else(|| PathBuf::from(&p));
+            if let Some((key, _)) = self.owner_of(&c) {
+                if !owners.contains(&key) {
+                    owners.push(key);
+                }
+            }
+        }
+        if let Some(k) = owners.iter().find(|k| !self.grant.projects.covers_root(k)) {
+            return Err(Refusal::not_found(format!("session {name} has a pane in a project outside this device's scope: {k}")));
+        }
+        Ok(owners)
     }
 
     fn get<T: serde::de::DeserializeOwned>(&self, args: &Args, key: &str) -> Result<T, Refusal> {
@@ -396,11 +448,18 @@ impl St<'_> {
         Ok(key)
     }
 
-    fn slug(&mut self, arg: &'static str, args: &mut Args) -> Result<String, Refusal> {
+    /// A slug of the project most recently resolved in this row: the shape
+    /// rule, then the place must exist. Returns the slug and the place's dir.
+    fn slug(&mut self, arg: &'static str, args: &mut Args) -> Result<(String, PathBuf), Refusal> {
         let raw: String = self.get(args, arg)?;
         let slug = slug_rule(&raw).map_err(Refusal::not_found)?;
+        let root = self.bound.last().and_then(|b| canon(&b.1));
+        let dir = root.map(|root| if slug == "(main)" { root } else { root.join(".worktrees").join(&slug) });
+        let Some(dir) = dir.filter(|d| d.is_dir()) else {
+            return Err(Refusal::not_found(format!("no such place: {slug}")));
+        };
         args.set(arg, Value::from(slug.clone()));
-        Ok(slug)
+        Ok((slug, dir))
     }
 
     fn resolve(&mut self, row: &Row, obj: &Obj, args: &mut Args) -> Result<(), Refusal> {
@@ -430,11 +489,10 @@ impl St<'_> {
                 }
             }
             Obj::Place(r, s) => {
-                let key = self.project(r, args)?;
-                let slug = self.slug(s, args)?;
-                let dir = canon(&key).map(|root| if slug == "(main)" { root } else { root.join(".worktrees").join(&slug) });
+                self.project(r, args)?;
+                let (_, dir) = self.slug(s, args)?;
                 if let Some(b) = self.bound.iter_mut().rev().find(|(a, _, _)| *a == r) {
-                    b.2 = dir;
+                    b.2 = Some(dir);
                 }
             }
             Obj::Slug(s) => {
@@ -498,7 +556,7 @@ impl St<'_> {
             Obj::Close(a) => {
                 let id: u32 = self.get(args, a)?;
                 if !self.cx.frames.owns_term(id) {
-                    return Err(Refusal::new(RefusalKind::Gone, format!("terminal {id} is not this connection's")));
+                    return Err(Refusal::new(RefusalKind::NoopNotOwned, format!("terminal {id} is not this connection's")));
                 }
             }
             Obj::Shell(r, s, i) => {
@@ -532,6 +590,12 @@ impl St<'_> {
                 }
             }
             Obj::NewPath(_) => self.need_all(row.name)?,
+            Obj::RemoteUrl(a) => {
+                if !self.cx.caller.is_console() {
+                    let url: String = self.get(args, a)?;
+                    remote_only(&url).map_err(|why| Refusal::new(RefusalKind::LocalFetch, why))?;
+                }
+            }
             Obj::Places(a) => {
                 let v = args.raw(a);
                 let list = v.as_array().cloned().unwrap_or_default();
@@ -586,19 +650,14 @@ impl St<'_> {
         if name.trim().is_empty() {
             return Err(missing());
         }
+        let owners = self.session_owners(name)?;
+        match only {
+            Some(o) if owners.iter().any(|k| k == o) => return Ok(o.to_string()),
+            None if !owners.is_empty() => return Ok(owners[0].clone()),
+            _ => {}
+        }
         let grant = self.grant;
         let in_scope = |k: &str| grant.projects.covers_root(k) && only.is_none_or(|o| o == k);
-        if let Some(panes) = self.world.panes() {
-            let paths: Vec<String> = panes.session_paths(name).map(str::to_string).collect();
-            for p in &paths {
-                let c = canon(p).unwrap_or_else(|| PathBuf::from(p));
-                if let Some((key, _)) = self.owner_of(&c) {
-                    if in_scope(&key) {
-                        return Ok(key);
-                    }
-                }
-            }
-        }
         let keys: Vec<String> = self.roots().iter().filter(|k| in_scope(k)).cloned().collect();
         for key in keys {
             let Ok(project) = worktrees_core::Project::discover(Path::new(&key)) else { continue };
@@ -614,6 +673,7 @@ impl St<'_> {
     /// `.worktrees/`, which nests under it — adoption's own exclusion).
     fn session_of_place(&mut self, name: &str, key: &str, slug: &str, dir: Option<&Path>) -> Result<(), Refusal> {
         let missing = || Refusal::not_found(format!("no tmux session named {name} in {slug}"));
+        self.session_owners(name)?;
         if let Ok(project) = worktrees_core::Project::discover(Path::new(key)) {
             if names_of(&project, slug).iter().any(|n| n == name) {
                 return Ok(());
@@ -621,8 +681,7 @@ impl St<'_> {
         }
         let Some(dir) = dir else { return Err(missing()) };
         let exclude = (slug == "(main)").then(|| dir.join(".worktrees"));
-        let Some(panes) = self.world.panes() else { return Err(missing()) };
-        let hit = panes.session_paths(name).any(|p| {
+        let hit = self.pane_paths(name).iter().any(|p| {
             let c = canon(p).unwrap_or_else(|| PathBuf::from(p));
             c.starts_with(dir) && !exclude.as_ref().is_some_and(|e| c.starts_with(e))
         });
@@ -630,6 +689,86 @@ impl St<'_> {
             return Ok(());
         }
         Err(missing())
+    }
+}
+
+/// `Ok` when a URL names a host that is not this one's own network: the
+/// device rule of [`Obj::RemoteUrl`]. Only the shapes `clone::parse_source`
+/// accepts and a host can be read from: `scheme://[user@]host[:port]/…` for
+/// http(s), ssh and git, scp-like `[user@]host:path`, and the `owner/repo`
+/// shorthand (github.com). Anything else is refused rather than guessed at:
+/// a parser that reads a host differently from git's is the hole.
+///
+/// The host is resolved here and git resolves it again, so a name that flips
+/// between a public and a private address in between (DNS rebinding) still
+/// gets through; the remote listener's own peer rules (§4.1) are the rest.
+pub fn remote_only(url: &str) -> Result<(), String> {
+    let u = url.trim();
+    let host = if let Some(i) = u.find("://") {
+        let scheme = u[..i].to_ascii_lowercase();
+        if !["https", "http", "ssh", "git", "git+ssh", "ssh+git"].contains(&scheme.as_str()) {
+            return Err(format!("a device may not fetch a {scheme}:// URL from the host"));
+        }
+        let rest = &u[i + 3..];
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+        let hostport = authority.rsplit('@').next().unwrap_or("");
+        strip_port(hostport)
+    } else if u.contains(':') && !u[..u.find(':').unwrap_or(0)].contains('/') {
+        let before = &u[..u.find(':').unwrap_or(0)];
+        before.rsplit('@').next().unwrap_or("").to_string()
+    } else if u.split('/').count() == 2 && !u.starts_with(['/', '.', '~']) {
+        "github.com".to_string()
+    } else {
+        return Err("a device may not fetch a local path from the host".into());
+    };
+    if host.is_empty() {
+        return Err(format!("no host in {url:?}"));
+    }
+    let addrs: Vec<std::net::IpAddr> = match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => vec![ip],
+        Err(_) => {
+            use std::net::ToSocketAddrs;
+            if host.eq_ignore_ascii_case("localhost") || host.to_ascii_lowercase().ends_with(".localhost") {
+                return Err(format!("{host} is this host"));
+            }
+            (host.as_str(), 0).to_socket_addrs().map_err(|e| format!("cannot resolve {host}: {e}"))?.map(|a| a.ip()).collect()
+        }
+    };
+    if addrs.is_empty() {
+        return Err(format!("{host} resolves to nothing"));
+    }
+    if let Some(ip) = addrs.iter().find(|ip| host_local(ip)) {
+        return Err(format!("{host} is {ip}, which only the host itself can reach"));
+    }
+    Ok(())
+}
+
+/// `host[:port]` or `[v6][:port]` → the host.
+fn strip_port(hp: &str) -> String {
+    if let Some(rest) = hp.strip_prefix('[') {
+        return rest.split(']').next().unwrap_or("").to_string();
+    }
+    hp.split(':').next().unwrap_or("").to_string()
+}
+
+/// Loopback, unspecified, link-local, RFC 1918, CGNAT `100.64.0.0/10`, ULA
+/// `fc00::/7`, and an IPv4-mapped one of those: an address a device must not
+/// make the host dial for it.
+fn host_local(ip: &std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v) => {
+            let o = v.octets();
+            v.is_loopback() || v.is_unspecified() || v.is_link_local() || v.is_private() || v.is_broadcast()
+                || (o[0] == 100 && (o[1] & 0xc0) == 64)
+        }
+        IpAddr::V6(v) => {
+            if let Some(m) = v.to_ipv4_mapped() {
+                return host_local(&IpAddr::V4(m));
+            }
+            let s = v.segments();
+            v.is_loopback() || v.is_unspecified() || (s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfe80
+        }
     }
 }
 
@@ -870,13 +1009,19 @@ mod tests {
         let t = two("slug");
         let (cx, g) = console();
         let w = t.world();
+        std::fs::create_dir_all(t.a.join(".worktrees/feat-x.2")).unwrap();
         for ok in ["(main)", "feat", "feat-x.2"] {
             assert!(try_row("set_pin", &cx, &g, json!({ "repo": s(&t.a), "slug": ok, "on": true }), &w).is_ok(), "{ok}");
         }
-        for bad in ["..", "../b", "a/b", "-x", ".", "", "x\ny", "..x"] {
+        // Well-formed, and no place: refused like the rest (§3.3, refreshed).
+        for bad in ["nope", "..", "../b", "a/b", "-x", ".", "", "x\ny", "..x"] {
             let e = try_row("set_pin", &cx, &g, json!({ "repo": s(&t.a), "slug": bad, "on": true }), &w).unwrap_err();
             assert_eq!(e.kind, RefusalKind::NotFound, "{bad:?}");
         }
+        // An optional slug, where given, by the same rule.
+        assert!(try_row("doctor", &cx, &g, json!({ "repo": s(&t.a), "slug": "feat" }), &w).is_ok());
+        assert!(try_row("doctor", &cx, &g, json!({ "repo": s(&t.a), "slug": null }), &w).is_ok());
+        assert!(try_row("doctor", &cx, &g, json!({ "repo": s(&t.a), "slug": "nope" }), &w).is_err());
         // The same rule in a dock shell's address and a nested one.
         assert!(try_row("shell_write", &cx, &g, json!({ "repo": s(&t.a), "slug": "../b", "index": 0, "data": [] }), &w).is_err());
         let e = try_row("resolve_term_paths", &cx, &g,
@@ -952,6 +1097,29 @@ mod tests {
         assert!(open("mine").is_err());
     }
 
+    /// A session is out of scope WHOLE when any of its panes is in a project
+    /// outside the scope: attaching shows every pane, so one split cd'd into
+    /// an in-scope project does not open another project's session.
+    #[test]
+    fn a_session_with_a_pane_out_of_scope_is_out_of_scope() {
+        let t = two("mixed");
+        let (cx, g) = phone(&[Read, Stream], &[&t.a]);
+        let w = Fixture {
+            roots: vec![s(&t.a), s(&t.b)],
+            panes: vec![
+                ("mixed".into(), s(&t.b.join(".worktrees/feat")), "claude".into()),
+                ("mixed".into(), s(&t.a), "zsh".into()),
+                ("home".into(), s(&t.a), "zsh".into()),
+                ("home".into(), "/".into(), "zsh".into()),
+            ],
+        };
+        let open = |cx: &Call, g: &Grant, name: &str| try_row("term_open", cx, g, json!({ "session": name, "cols": 80, "rows": 24 }), &w);
+        assert_eq!(open(&cx, &g, "mixed").unwrap_err().wire(), json!(ERR_NOT_FOUND));
+        assert!(open(&cx, &g, "home").is_ok(), "a pane outside every project is no other project's");
+        let (con, all) = console();
+        assert!(open(&con, &all, "mixed").is_ok(), "the console's scope is every project");
+    }
+
     /// A canonical session whose panes have all `cd`'d away is still its
     /// place's, by name.
     #[test]
@@ -1006,7 +1174,7 @@ mod tests {
             let e = try_row(cmd, &theirs, &g, json!({ "id": 7, "data": [97], "lines": 1, "cols": 1, "rows": 1 }), &w).unwrap_err();
             assert_eq!(e.kind, RefusalKind::NotFound, "{cmd}");
         }
-        assert_eq!(try_row("term_close", &theirs, &g, json!({ "id": 7 }), &w).unwrap_err().kind, RefusalKind::Gone);
+        assert_eq!(try_row("term_close", &theirs, &g, json!({ "id": 7 }), &w).unwrap_err().kind, RefusalKind::NoopNotOwned);
         mine.frames.forget_term(7);
         assert!(try_row("term_write", &mine, &g, json!({ "id": 7, "data": [97] }), &w).is_err(), "closed is gone");
     }
@@ -1023,7 +1191,7 @@ mod tests {
         let (reconnected, _) = console();
         other.frames.note_term(5);
         let w = Fixture::default();
-        assert_eq!(try_row("term_close", &reconnected, &g, json!({ "id": 5 }), &w).unwrap_err().kind, RefusalKind::Gone);
+        assert_eq!(try_row("term_close", &reconnected, &g, json!({ "id": 5 }), &w).unwrap_err().kind, RefusalKind::NoopNotOwned);
         assert_eq!(super::super::dispatch::call_in(&reconnected, "term_close", &args(json!({ "id": 5 })), &w), Ok(Value::Null));
         assert!(other.frames.owns_term(5), "B's attach is still B's: the body that closes it never ran");
         let e = try_row("term_write", &reconnected, &g, json!({ "id": 5, "data": [97] }), &w).unwrap_err();
@@ -1068,6 +1236,49 @@ mod tests {
         for (cmd, a) in [("update_cli", json!({})), ("ui_events_append", json!({})), ("sync_apply", json!({ "repo": null }))] {
             assert!(try_row(cmd, &con, &all, a, &w).is_ok(), "{cmd}");
         }
+    }
+
+    /// §3.4's rule for what the host FETCHES for a device: no local path, no
+    /// `file://`, and no host that is the host's own network — so a device
+    /// can neither read an unregistered repo on the host's disk nor borrow
+    /// the host's network position. The console's clone is unchanged.
+    #[test]
+    fn a_device_cannot_make_the_host_fetch_from_its_own_network() {
+        let t = two("fetch");
+        let (cx, g) = phone(&Capability::ALL, &[]);
+        let mut reg = Devices::default();
+        reg.devices.insert(DeviceId::new("admin"), (PrincipalId::owner(), Grant::everything()));
+        let caller = Caller::paired(PrincipalId::owner(), DeviceId::new("admin"));
+        let reg: Arc<dyn worktrees_core::authz::Registry> = Arc::new(reg);
+        let star = call_as(caller.clone(), reg.clone());
+        let sg = authz::effective(&*reg, &caller);
+        let w = t.world();
+        let clone = |cx: &Call, g: &Grant, url: &str| {
+            try_row("clone_project", cx, g, json!({ "id": "j", "url": url, "parent": s(&t.top), "name": null }), &w)
+        };
+        for url in [
+            "file:///Users/me/other", "FILE:///x", "/Users/me/other", "./x", "~/x", "git@localhost:me/x.git",
+            "http://127.0.0.1/x.git", "https://[::1]/x.git", "ssh://git@10.0.0.2/x.git", "https://192.168.1.4/x",
+            "https://100.64.1.1/x", "https://169.254.169.254/latest", "git://172.16.0.1/x", "https://user@localhost:8443/x",
+            "https://[::ffff:127.0.0.1]/x", "https://[fd00::1]/x", "https://0.0.0.0/x", "ext::sh -c x",
+        ] {
+            let e = clone(&star, &sg, url).unwrap_err();
+            assert_eq!((e.kind, e.wire()), (RefusalKind::LocalFetch, json!(ERR_DENIED)), "{url}");
+        }
+        assert!(clone(&star, &sg, "https://140.82.112.3/o/r.git").is_ok());
+        assert!(clone(&star, &sg, "git@140.82.112.3:o/r.git").is_ok());
+        // A list-scoped admin device cannot clone at all (`new_path`), nor
+        // preview a skill from a URL (`all`): both reach past its projects.
+        assert_eq!(clone(&cx, &g, "https://140.82.112.3/o/r.git").unwrap_err().wire(), json!(ERR_DENIED));
+        let prev = try_row("skill_preview_git", &cx, &g, json!({ "url": "https://140.82.112.3/o/r.git" }), &w);
+        assert_eq!(prev.unwrap_err().wire(), json!(ERR_DENIED));
+        assert_eq!(
+            try_row("skill_preview_git", &star, &sg, json!({ "url": "file:///etc" }), &w).unwrap_err().kind,
+            RefusalKind::LocalFetch
+        );
+        // The console clones from a folder on its own disk, as it always could.
+        let (con, all) = console();
+        assert!(clone(&con, &all, "file:///Users/me/other").is_ok());
     }
 
     /// The capability is the row's, and `denied` names nothing.

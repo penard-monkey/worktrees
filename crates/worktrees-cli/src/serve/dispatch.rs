@@ -265,6 +265,7 @@ macro_rules! obj {
     (new_job($a:ident)) => { Obj::NewJob(stringify!($a)) };
     (device($a:ident)) => { Obj::Device(stringify!($a)) };
     (new_path($a:ident)) => { Obj::NewPath(stringify!($a)) };
+    (remote_url($a:ident)) => { Obj::RemoteUrl(stringify!($a)) };
     (places($a:ident)) => { Obj::Places(stringify!($a)) };
     (roots($a:ident)) => { Obj::Roots(stringify!($a)) };
     (candidates($a:ident)) => { Obj::Candidates(stringify!($a)) };
@@ -328,7 +329,10 @@ pub fn call_in(cx: &Call, cmd: &str, args: &Args, world: &dyn World) -> Result<V
     let grant = authz::effective(&*cx.registry, &cx.caller);
     let mut args = Args(args.0.clone());
     if let Err(r) = resolve::authorize(row, cx, &grant, &mut args, world) {
-        if r.kind == resolve::RefusalKind::Gone {
+        // The idempotent close of an attach this connection does not own:
+        // answered as closing a missing one is, and the body never runs.
+        // THE hook for the audit lane's "refused act" record (§5.2).
+        if r.kind == resolve::RefusalKind::NoopNotOwned {
             return Ok(Value::Null);
         }
         // The real reason, for the host's eyes. The console's ordinary misses
@@ -348,7 +352,10 @@ pub fn call_in(cx: &Call, cmd: &str, args: &Args, world: &dyn World) -> Result<V
     };
     let out = run(row.name, &scoped, &args).unwrap_or_else(|| Err(Value::from(format!("unknown command: {cmd}"))))?;
     Ok(match row.objects.iter().find_map(Obj::filter) {
-        Some(f) => f(&grant.projects, out),
+        Some(f) => {
+            let roots = if grant.projects.is_all() { Vec::new() } else { world.roots() };
+            f(&scope::View { projects: &grant.projects, roots: &roots }, out)
+        }
         None => out,
     })
 }
@@ -432,7 +439,7 @@ commands! { cx, a;
     add_project: Engine [admin, new_path(dir)] => workspace::add_project(&cx.ctx, a.get("dir")?),
     probe_dir: Engine [admin, new_path(dir)] => workspace::probe_dir(a.get("dir")?),
     create_project: Engine [admin, new_path(location)] => workspace::create_project(&cx.ctx, a.get("location")?, a.get("name")?),
-    clone_project: Engine [admin, new_path(parent), new_job(id)] => {
+    clone_project: Engine [admin, new_path(parent), new_job(id), remote_url(url)] => {
         let mut sink = cx.frames.typed::<worktrees_core::clone::CloneProgress>(a.channel("on_progress")?);
         workspace::clone_project(&cx.ctx, a.get("id")?, a.get("url")?, a.get("parent")?, a.get("name")?, &mut sink)
     },
@@ -655,7 +662,7 @@ commands! { cx, a;
     skills_list: Engine [read, global] => profiles::skills_list(),
     skill_inspect: Engine [admin, new_path(path)] => profiles::skill_inspect(a.get("path")?),
     skill_install_local: HostConsole => profiles::skill_install_local(a.get("path")?),
-    skill_preview_git: Engine [admin, global] => profiles::skill_preview_git(a.get("url")?, a.get("rev")?),
+    skill_preview_git: Engine [admin, global, all, remote_url(url)] => profiles::skill_preview_git(a.get("url")?, a.get("rev")?),
     skill_install_git: HostConsole => profiles::skill_install_git(a.get("url")?, a.get("rev")?, a.get("sha")?, a.get("name")?),
     skill_remove: Engine [admin, global] => profiles::skill_remove(a.get("name")?),
 }
@@ -732,7 +739,7 @@ mod tests {
         let world = Fixture { roots: vec![root.clone()], panes: vec![] };
         let place = json!({"branch": "main", "behind": 0, "dirty": false, "dirty_files": null, "last_commit_subject": null, "last_commit_epoch": null});
         let r = super::call_in(&c, "open_docs_viewer", &args(json!({
-            "repo": root, "root": root, "slug": "s", "path": null, "place": place,
+            "repo": root, "root": root, "slug": "(main)", "path": null, "place": place,
         })), &world);
         let e = r.unwrap_err();
         let e = e.as_str().unwrap_or_default();

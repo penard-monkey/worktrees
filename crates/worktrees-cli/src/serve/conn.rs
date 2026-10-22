@@ -218,6 +218,14 @@ impl Clients {
     pub fn registry(&self) -> Arc<dyn Registry> {
         self.registry.clone()
     }
+    /// The registered roots an event's paths are attributed by: the world's,
+    /// or the registry file's.
+    fn roots(&self) -> Vec<String> {
+        match &self.world {
+            Some(w) => w.roots(),
+            None => worktrees_core::registry::read_lenient().roots(),
+        }
+    }
 }
 
 /// The engine's `Host`: an event is one frame to every authenticated socket —
@@ -232,10 +240,13 @@ impl Host for Broadcast {
     fn emit(&self, event: &str, payload: serde_json::Value) {
         let whole = wire::event_frame(event, &payload);
         let clients = &self.0;
+        // Read once per emit, and only if a scoped caller needs it.
+        let mut roots: Option<Vec<String>> = None;
         let mut map = clients.map.lock().unwrap();
         map.retain(|_, (out, caller)| {
             let grant = authz::effective(&*clients.registry, caller);
-            match scope::event(event, &payload, caller, &grant) {
+            let mut read = || roots.get_or_insert_with(|| clients.roots()).clone();
+            match scope::event(event, &payload, caller, &grant, &mut read) {
                 Some(p) if p == payload => out.push(whole.clone()).is_ok(),
                 Some(p) => out.push(wire::event_frame(event, &p)).is_ok(),
                 None => true,

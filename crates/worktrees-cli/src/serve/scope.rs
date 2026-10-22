@@ -11,54 +11,79 @@
 //! with no projection here reaches the console and nobody else: that fails
 //! closed, and a test fails when an `emit("…")` in the api crate has no row.
 
+use std::path::{Component, Path};
+
 use serde_json::Value;
 use worktrees_core::authz::{Caller, Grant, Projects};
 
-/// A result filter: the scope, and the command's serialized reply.
-pub type Filter = fn(&Projects, Value) -> Value;
+/// What a projection reads: the caller's scope, and the registered roots, by
+/// which a path is attributed to the project that OWNS it — the innermost
+/// registered root containing it, as the resolver's `file(…)` does. Without
+/// the roots a path in a repo checked out under another repo's tree would
+/// count as the outer one's.
+pub struct View<'a> {
+    pub projects: &'a Projects,
+    /// The registry's keys. Read only for a scope that is not `"*"`.
+    pub roots: &'a [String],
+}
 
-/// `path` (as the engine reports it: a place path, a session's cwd) is inside a
-/// project in scope. Lexical first; a non-canonical path is canonicalized once.
-pub fn covers(scope: &Projects, path: &str) -> bool {
-    if scope.covers_path(path) {
+/// A result filter: the caller's view, and the command's serialized reply.
+pub type Filter = fn(&View, Value) -> Value;
+
+/// `path` (as the engine reports it: a place path, a session's cwd) belongs to
+/// a project in scope: its innermost registered root is covered. A path with
+/// a `..` or `.` in it, or one not under any root as written, is judged by its
+/// canonical form instead — `/r/a/../b` is under `/r/b`, whatever its prefix
+/// says — and one that cannot be canonicalized is out.
+pub fn covers(view: &View, path: &str) -> bool {
+    if view.projects.is_all() {
         return true;
     }
-    if scope.is_all() {
-        return true;
+    let owner = |p: &Path| view.roots.iter().filter(|r| p.starts_with(r.as_str())).max_by_key(|r| Path::new(r.as_str()).components().count()).cloned();
+    let p = Path::new(path);
+    let plain = p.is_absolute() && !p.components().any(|c| matches!(c, Component::ParentDir | Component::CurDir));
+    if plain {
+        if let Some(o) = owner(p) {
+            return view.projects.covers_root(&o);
+        }
     }
-    std::fs::canonicalize(path).is_ok_and(|c| scope.covers_path(&c.to_string_lossy()))
+    match std::fs::canonicalize(path) {
+        Ok(c) => owner(&c).is_some_and(|o| view.projects.covers_root(&o)),
+        Err(_) => false,
+    }
 }
 
 /// Keep the elements of the array at `v[key]` (or `v` itself for `key ==
-/// ""`) whose `field` is a path in scope.
-fn keep(scope: &Projects, mut v: Value, key: &str, field: &str, root_only: bool) -> Value {
-    if scope.is_all() {
+/// ""`) whose `field` is in scope: a registry key exactly (`root_only`), or a
+/// path its owning project covers.
+fn keep(view: &View, mut v: Value, key: &str, field: &str, root_only: bool) -> Value {
+    if view.projects.is_all() {
         return v;
     }
     let arr = if key.is_empty() { Some(&mut v) } else { v.get_mut(key) };
     if let Some(Value::Array(items)) = arr {
         items.retain(|el| {
-            el.get(field).and_then(Value::as_str).is_some_and(|p| if root_only { scope.covers_root(p) } else { covers(scope, p) })
+            el.get(field).and_then(Value::as_str).is_some_and(|p| if root_only { view.projects.covers_root(p) } else { covers(view, p) })
         });
     }
     v
 }
 
 /// `list_workspace`: the projects in scope, each by its registry key.
-pub fn workspace(scope: &Projects, v: Value) -> Value {
-    keep(scope, v, "projects", "root", true)
+pub fn workspace(view: &View, v: Value) -> Value {
+    keep(view, v, "projects", "root", true)
 }
 
 /// `list_drafts`: the unsent text people typed into composers, host-wide —
 /// only the drafts of sessions cwd'd in a project in scope.
-pub fn drafts(scope: &Projects, v: Value) -> Value {
-    keep(scope, v, "", "path", false)
+pub fn drafts(view: &View, v: Value) -> Value {
+    keep(view, v, "", "path", false)
 }
 
 /// `planning_status` and `cross_project_status`: a `projects` list keyed by
 /// registry root.
-pub fn by_project(scope: &Projects, v: Value) -> Value {
-    keep(scope, v, "projects", "root", true)
+pub fn by_project(view: &View, v: Value) -> Value {
+    keep(view, v, "projects", "root", true)
 }
 
 // ── events ───────────────────────────────────────────────────────────────────
@@ -91,22 +116,28 @@ pub enum Event {
 }
 
 /// `payload` as `caller` (holding `grant`) may see it, or `None` to send it
-/// nothing.
-pub fn event(name: &str, payload: &Value, caller: &Caller, grant: &Grant) -> Option<Value> {
+/// nothing. `roots` is asked for only when the scope is not `"*"`.
+pub fn event(name: &str, payload: &Value, caller: &Caller, grant: &Grant, roots: &mut dyn FnMut() -> Vec<String>) -> Option<Value> {
     let Some((_, how)) = EVENTS.iter().find(|(n, _)| *n == name) else {
         // Unprojected: the console only.
         return caller.is_console().then(|| payload.clone());
     };
     let scope = &grant.projects;
     match how {
-        Event::Everyone => Some(payload.clone()),
-        Event::Console => caller.is_console().then(|| payload.clone()),
-        _ if scope.is_all() => Some(payload.clone()),
-        Event::ByPath(field) => payload.get(*field).and_then(Value::as_str).is_some_and(|p| covers(scope, p)).then(|| payload.clone()),
+        Event::Everyone => return Some(payload.clone()),
+        Event::Console => return caller.is_console().then(|| payload.clone()),
+        _ if scope.is_all() => return Some(payload.clone()),
+        _ => {}
+    }
+    let roots = roots();
+    let view = View { projects: scope, roots: &roots };
+    match how {
+        Event::Everyone | Event::Console => unreachable!("answered above"),
+        Event::ByPath(field) => payload.get(*field).and_then(Value::as_str).is_some_and(|p| covers(&view, p)).then(|| payload.clone()),
         Event::Drafts => {
             let mut v = payload.clone();
             if let Some(list) = v.get_mut("drafts") {
-                *list = drafts(scope, list.take());
+                *list = drafts(&view, list.take());
             }
             Some(v)
         }
@@ -114,7 +145,7 @@ pub fn event(name: &str, payload: &Value, caller: &Caller, grant: &Grant) -> Opt
             let mut v = payload.clone();
             let cut = |a: &mut Value| {
                 if let Value::Array(items) = a {
-                    items.retain(|p| p.as_str().is_some_and(|p| covers(scope, p)));
+                    items.retain(|p| p.as_str().is_some_and(|p| covers(&view, p)));
                 }
             };
             for k in ["busy", "waiting"] {
@@ -144,18 +175,31 @@ mod tests {
         Caller::paired(PrincipalId::owner(), DeviceId::new("phone"))
     }
 
+    /// The registry: `/r/a`, `/r/b`, and `/r/a/inner` — a repo checked out
+    /// inside another's tree, registered on its own.
+    fn reg() -> Vec<String> {
+        vec!["/r/a".into(), "/r/b".into(), "/r/a/inner".into()]
+    }
+
+    fn ev(name: &str, p: &Value, c: &Caller, g: &Grant) -> Option<Value> {
+        event(name, p, c, g, &mut reg)
+    }
+
     /// The console's scope is `"*"`: every projection is the identity, which
-    /// is what keeps the desktop app's view exactly as it was.
+    /// is what keeps the desktop app's view exactly as it was — and the
+    /// registry is not even read for it.
     #[test]
     fn the_console_sees_every_result_and_event_unchanged() {
         let all = Grant::everything();
         let ws = json!({"projects": [{"root": "/r/a"}, {"root": "/r/b"}]});
-        assert_eq!(workspace(&all.projects, ws.clone()), ws);
+        let roots = reg();
+        assert_eq!(workspace(&View { projects: &all.projects, roots: &roots }, ws.clone()), ws);
+        let mut never = || -> Vec<String> { panic!("the console's projection read the registry") };
         for (name, _) in EVENTS {
             let p = json!({"path": "/elsewhere", "repo": "/elsewhere", "busy": ["/elsewhere"], "drafts": [{"path": "/x"}]});
-            assert_eq!(event(name, &p, &Caller::console(), &all), Some(p.clone()), "{name}");
+            assert_eq!(event(name, &p, &Caller::console(), &all, &mut never), Some(p.clone()), "{name}");
         }
-        assert_eq!(event("not:projected", &json!(1), &Caller::console(), &all), Some(json!(1)));
+        assert_eq!(event("not:projected", &json!(1), &Caller::console(), &all, &mut never), Some(json!(1)));
     }
 
     /// gap 12: a scoped device hears only about its own projects.
@@ -165,29 +209,50 @@ mod tests {
         let me = phone();
         let busy = json!({"busy": ["/r/a/.worktrees/x", "/r/b"], "waiting": ["/r/b/.worktrees/y"], "waiting_by": {"claude": ["/r/b/.worktrees/y", "/r/a"]}});
         assert_eq!(
-            event("sessions:busy", &busy, &me, &g),
+            ev("sessions:busy", &busy, &me, &g),
             Some(json!({"busy": ["/r/a/.worktrees/x"], "waiting": [], "waiting_by": {"claude": ["/r/a"]}}))
         );
-        assert_eq!(event("sessions:done", &json!({"path": "/r/b", "epoch": 1}), &me, &g), None);
-        assert!(event("sessions:done", &json!({"path": "/r/a/.worktrees/x", "epoch": 1}), &me, &g).is_some());
-        assert_eq!(event("shell:exit", &json!({"repo": "/r/ab", "slug": "s", "index": 0}), &me, &g), None, "/r/ab is not under /r/a");
+        assert_eq!(ev("sessions:done", &json!({"path": "/r/b", "epoch": 1}), &me, &g), None);
+        assert!(ev("sessions:done", &json!({"path": "/r/a/.worktrees/x", "epoch": 1}), &me, &g).is_some());
+        assert_eq!(ev("shell:exit", &json!({"repo": "/r/ab", "slug": "s", "index": 0}), &me, &g), None, "/r/ab is not under /r/a");
         assert_eq!(
-            event("sessions:drafts", &json!({"drafts": [{"path": "/r/a", "text": "mine"}, {"path": "/r/b", "text": "theirs"}]}), &me, &g),
+            ev("sessions:drafts", &json!({"drafts": [{"path": "/r/a", "text": "mine"}, {"path": "/r/b", "text": "theirs"}]}), &me, &g),
             Some(json!({"drafts": [{"path": "/r/a", "text": "mine"}]}))
         );
-        assert_eq!(event("places:changed", &Value::Null, &me, &g), Some(Value::Null));
-        assert_eq!(event("app:open-doc", &json!({"path": "/r/a/x.md"}), &me, &Grant::everything()), None, "console only, scope or not");
-        assert_eq!(event("not:projected", &json!(1), &me, &Grant::everything()), None, "fails closed");
+        assert_eq!(ev("places:changed", &Value::Null, &me, &g), Some(Value::Null));
+        assert_eq!(ev("app:open-doc", &json!({"path": "/r/a/x.md"}), &me, &Grant::everything()), None, "console only, scope or not");
+        assert_eq!(ev("not:projected", &json!(1), &me, &Grant::everything()), None, "fails closed");
+    }
+
+    /// A path belongs to its INNERMOST project, and is judged as written only
+    /// when it is plain: a nested repo registered on its own is not the outer
+    /// project's, and `..` does not climb out of a prefix into scope.
+    #[test]
+    fn a_path_is_its_innermost_projects_and_dots_do_not_climb() {
+        let g = scoped(&["/r/a"]);
+        let me = phone();
+        assert_eq!(ev("sessions:done", &json!({"path": "/r/a/inner/.worktrees/x", "epoch": 1}), &me, &g), None);
+        assert_eq!(ev("sessions:done", &json!({"path": "/r/a/../b/x", "epoch": 1}), &me, &g), None);
+        assert!(ev("sessions:done", &json!({"path": "/r/a/./x", "epoch": 1}), &me, &g).is_some(), "an interior `.` is `/r/a/x`");
+        assert_eq!(
+            ev("sessions:busy", &json!({"busy": ["/r/a/inner", "/r/a/x"], "waiting": [], "waiting_by": {}}), &me, &g),
+            Some(json!({"busy": ["/r/a/x"], "waiting": [], "waiting_by": {}}))
+        );
+        let inner = scoped(&["/r/a/inner"]);
+        assert!(ev("sessions:done", &json!({"path": "/r/a/inner/.worktrees/x", "epoch": 1}), &me, &inner).is_some());
+        assert_eq!(ev("sessions:done", &json!({"path": "/r/a/x", "epoch": 1}), &me, &inner), None);
     }
 
     #[test]
     fn results_are_cut_to_the_scope() {
         let g = scoped(&["/r/a"]);
+        let roots = reg();
+        let v = View { projects: &g.projects, roots: &roots };
         let ws = json!({"projects": [{"root": "/r/a", "ok": true}, {"root": "/r/b", "ok": true}]});
-        assert_eq!(workspace(&g.projects, ws), json!({"projects": [{"root": "/r/a", "ok": true}]}));
-        let d = json!([{"path": "/r/a/.worktrees/x", "text": "t"}, {"path": "/r/b", "text": "u"}]);
-        assert_eq!(drafts(&g.projects, d), json!([{"path": "/r/a/.worktrees/x", "text": "t"}]));
+        assert_eq!(workspace(&v, ws), json!({"projects": [{"root": "/r/a", "ok": true}]}));
+        let d = json!([{"path": "/r/a/.worktrees/x", "text": "t"}, {"path": "/r/b", "text": "u"}, {"path": "/r/a/inner", "text": "v"}]);
+        assert_eq!(drafts(&v, d), json!([{"path": "/r/a/.worktrees/x", "text": "t"}]));
         let pl = json!({"default": "off", "projects": [{"root": "/r/b"}, {"root": "/r/a"}]});
-        assert_eq!(by_project(&g.projects, pl), json!({"default": "off", "projects": [{"root": "/r/a"}]}));
+        assert_eq!(by_project(&v, pl), json!({"default": "off", "projects": [{"root": "/r/a"}]}));
     }
 }

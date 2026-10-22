@@ -497,8 +497,8 @@ fn requests_are_answered_by_id_with_tauris_shapes() {
 
     // Errors: unknown command, invalid args naming the key, client-local.
     assert_eq!(rpc(&mut ws, json!(4), "nope", json!({}))["err"], json!("unknown command: nope"));
-    register("/r");
-    let r = rpc(&mut ws, json!(5), "set_pin", json!({ "repo": "/r", "slug": "s" }));
+    let repo = scratch_repo("rpc");
+    let r = rpc(&mut ws, json!(5), "set_pin", json!({ "repo": repo, "slug": "(main)" }));
     assert!(r["err"].as_str().unwrap().starts_with("invalid args `on`"), "{r}");
     assert_eq!(rpc(&mut ws, json!(6), "copy_text", json!({ "text": "NEVER" }))["err"], json!("client-local"));
     // A frame that is not a request at all is answered, with no id to echo.
@@ -623,8 +623,17 @@ fn an_event_reaches_each_socket_projected_to_its_caller() {
             Some(PrincipalId::owner())
         }
     }
+    struct Two;
+    impl super::resolve::World for Two {
+        fn roots(&self) -> Vec<String> {
+            vec!["/r/a".into(), "/r/b".into()]
+        }
+        fn panes(&self) -> Option<worktrees_core::tmux::PaneList> {
+            None
+        }
+    }
     let reg = Arc::new(One(Mutex::new(Grant { capabilities: Caps::of(&[Capability::Read]), projects: Projects::only(["/r/a"]) })));
-    let clients = Arc::new(Clients::with(reg.clone(), None));
+    let clients = Arc::new(Clients::with(reg.clone(), Some(Arc::new(Two))));
     let host = Broadcast(clients.clone());
     let (ctx_tx, mut console) = tokio::sync::mpsc::unbounded_channel();
     let (ph_tx, mut phone) = tokio::sync::mpsc::unbounded_channel();
