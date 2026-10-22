@@ -239,17 +239,37 @@ impl Drop for Typed {
 
 /// What a request needs to stream back to its own connection, and what the
 /// connection needs to clean up when it goes: the tmux attaches it opened.
-/// Dock shells are NOT on that list — they are owned by the process and a
-/// re-attach replays them, which is the whole point of them surviving.
+/// Dock shells are NOT closed with it — they are owned by the process and a
+/// re-attach replays them, which is the whole point of them surviving — but
+/// the sink this connection holds on one is let go.
 ///
 /// It is also what a connection OWNS, for the resolver (§3.3): `attach(id)`
 /// asks `owns_term`, and a clone job's id is namespaced with `tag`, so no
-/// connection can type into, resize, close or cancel another's.
+/// connection can type into, resize, close or cancel another's. And it is what
+/// a REDUCTION acts on (§3.3, Phase 2 slice 5): each attach with the session it
+/// shows, each dock shell this connection holds the sink of, each clone job it
+/// started — so a narrowed grant ends exactly the channels it no longer
+/// covers, and a revoke cancels the device's jobs.
 #[derive(Clone)]
 pub struct Frames {
     outbox: Outbox,
-    terms: Arc<Mutex<Vec<u32>>>,
+    terms: Arc<Mutex<Vec<(u32, String)>>>,
+    shells: Arc<Mutex<Vec<ShellHold>>>,
+    jobs: Arc<Mutex<Vec<String>>>,
     tag: Arc<str>,
+    /// The registry generation this connection's channels were last checked
+    /// at (`conn::reconcile`).
+    reconciled: Arc<AtomicU64>,
+}
+
+/// A dock shell whose output this connection receives: its key, and the
+/// attach generation `shell_detach` needs to let go of exactly this sink.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShellHold {
+    pub repo: String,
+    pub slug: String,
+    pub index: u32,
+    pub gen: u64,
 }
 
 impl Frames {
@@ -257,7 +277,14 @@ impl Frames {
         let mut b = [0u8; 8];
         getrandom::fill(&mut b).expect("the OS refused entropy");
         let tag: String = b.iter().map(|x| format!("{x:02x}")).collect();
-        Frames { outbox, terms: Arc::new(Mutex::new(Vec::new())), tag: Arc::from(tag.as_str()) }
+        Frames {
+            outbox,
+            terms: Arc::new(Mutex::new(Vec::new())),
+            shells: Arc::new(Mutex::new(Vec::new())),
+            jobs: Arc::new(Mutex::new(Vec::new())),
+            tag: Arc::from(tag.as_str()),
+            reconciled: Arc::new(AtomicU64::new(0)),
+        }
     }
 
     /// This connection's own namespace for ids it hands the engine. Random,
@@ -266,9 +293,14 @@ impl Frames {
         &self.tag
     }
 
+    /// The connection's queue, for a frame of the connection's own (a close).
+    pub fn outbox(&self) -> &Outbox {
+        &self.outbox
+    }
+
     /// The attach `id` was opened on this connection and not closed since.
     pub fn owns_term(&self, id: u32) -> bool {
-        self.terms.lock().unwrap().contains(&id)
+        self.terms.lock().unwrap().iter().any(|(t, _)| *t == id)
     }
 
     pub fn bytes(&self, channel: u64) -> Arc<dyn ByteSink> {
@@ -285,16 +317,60 @@ impl Frames {
         move |t: T| ch.push(serde_json::to_value(&t).unwrap_or(Value::Null))
     }
 
-    pub fn note_term(&self, id: u32) {
-        self.terms.lock().unwrap().push(id);
+    /// An attach this connection opened, on the (canonical) session it shows.
+    pub fn note_term(&self, id: u32, session: String) {
+        self.terms.lock().unwrap().push((id, session));
     }
 
     pub fn forget_term(&self, id: u32) {
-        self.terms.lock().unwrap().retain(|t| *t != id);
+        self.terms.lock().unwrap().retain(|(t, _)| *t != id);
     }
 
     pub fn take_terms(&self) -> Vec<u32> {
-        std::mem::take(&mut *self.terms.lock().unwrap())
+        std::mem::take(&mut *self.terms.lock().unwrap()).into_iter().map(|(t, _)| t).collect()
+    }
+
+    /// Every open attach, with its session.
+    pub fn terms(&self) -> Vec<(u32, String)> {
+        self.terms.lock().unwrap().clone()
+    }
+
+    /// A dock shell this connection now holds the sink of. A re-attach of the
+    /// same shell replaces the older hold: only the newest generation is ours.
+    pub fn note_shell(&self, hold: ShellHold) {
+        let mut v = self.shells.lock().unwrap();
+        v.retain(|h| (&h.repo, &h.slug, h.index) != (&hold.repo, &hold.slug, hold.index));
+        v.push(hold);
+    }
+
+    pub fn forget_shell(&self, repo: &str, slug: &str, index: u32) {
+        self.shells.lock().unwrap().retain(|h| (h.repo.as_str(), h.slug.as_str(), h.index) != (repo, slug, index));
+    }
+
+    pub fn shells(&self) -> Vec<ShellHold> {
+        self.shells.lock().unwrap().clone()
+    }
+
+    pub fn take_shells(&self) -> Vec<ShellHold> {
+        std::mem::take(&mut *self.shells.lock().unwrap())
+    }
+
+    /// A clone job this connection started, by its namespaced id.
+    pub fn note_job(&self, id: String) {
+        let mut v = self.jobs.lock().unwrap();
+        if !v.contains(&id) {
+            v.push(id);
+        }
+    }
+
+    pub fn take_jobs(&self) -> Vec<String> {
+        std::mem::take(&mut *self.jobs.lock().unwrap())
+    }
+
+    /// The registry generation this connection's channels were last checked
+    /// at; `swap` it for the current one to learn whether a check is due.
+    pub fn reconciled(&self) -> &AtomicU64 {
+        &self.reconciled
     }
 }
 

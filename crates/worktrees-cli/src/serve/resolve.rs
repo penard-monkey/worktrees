@@ -107,9 +107,13 @@ pub enum Obj {
     Job(&'static str),
     /// The id a new clone job will have, namespaced the same way.
     NewJob(&'static str),
-    /// A device of the caller's own principal (§2.8). No row names one yet:
-    /// slice 5's device rows will.
+    /// A device of the caller's own principal (§2.8); another principal's
+    /// reads as missing. The console's principal is the owner.
     Device(&'static str),
+    /// A device the caller may REVOKE (§2.5): its own, always; another of its
+    /// principal only with `admin` — which also makes the act drive-class for
+    /// step-up. Another principal's device reads as missing.
+    Revocable(&'static str),
     /// A path where a project WILL be: `admin` (the row's) and scope `"*"`.
     NewPath(&'static str),
     /// A URL the host will fetch from (§3.4, `clone_project`): from a device,
@@ -150,7 +154,7 @@ impl Obj {
         use Obj::*;
         match *self {
             Project(a) | OptProject(a, _) | Slug(a) | Root(a) | File(a) | Probe(a) | Session(a) | Attach(a) | Close(a) | ShellRef(a) | Job(a)
-            | NewJob(a) | Device(a) | NewPath(a) | RemoteUrl(a) | Places(a) | Roots(a) | Candidates(a) => vec![a],
+            | NewJob(a) | Device(a) | Revocable(a) | NewPath(a) | RemoteUrl(a) | Places(a) | Roots(a) | Candidates(a) => vec![a],
             SessionIn(s, _) => vec![s],
             Place(r, s) => vec![r, s],
             SessionOf(s, _, _) => vec![s],
@@ -311,6 +315,10 @@ pub struct Resolved {
     /// An instruction-class file a DEVICE is writing (§7.3): the place to
     /// stamp `last_remote_instruction` on once the body has written it.
     pub instruction: Option<super::provenance::Instruction>,
+    /// Every capability the act needs: the row's, and whatever its objects
+    /// RAISED it to (a path class, revoking another device). Step-up (§2.5)
+    /// asks whether any of them is drive-class.
+    pub needs: Vec<Capability>,
 }
 
 /// Check `row` for `cx.caller` holding `grant`, and rewrite `args` to the
@@ -333,7 +341,8 @@ pub fn authorize(row: &Row, cx: &Call, grant: &Grant, args: &mut Args, world: &d
             return Err(Refusal::denied(format!("{} needs `{cap}`", row.name)));
         }
     }
-    let mut st = St { cx, grant, world, roots: None, panes: None, bound: Vec::new(), out: Resolved::default() };
+    let out = Resolved { needs: row.cap.into_iter().collect(), ..Resolved::default() };
+    let mut st = St { cx, grant, world, roots: None, panes: None, bound: Vec::new(), out };
     for obj in row.objects {
         st.resolve(row, obj, args)?;
     }
@@ -429,6 +438,13 @@ impl St<'_> {
 
     fn bound(&self, arg: &str) -> Option<&(&'static str, String, Option<PathBuf>)> {
         self.bound.iter().rev().find(|(a, _, _)| *a == arg)
+    }
+
+    /// The act needs `c` as well as the row's capability (already checked).
+    fn raise(&mut self, c: Capability) {
+        if !self.out.needs.contains(&c) {
+            self.out.needs.push(c);
+        }
     }
 
     fn need_all(&self, what: &str) -> Result<(), Refusal> {
@@ -574,7 +590,7 @@ impl St<'_> {
                 let access = if row.cap == Some(Capability::Read) { Access::Read } else { Access::Write };
                 match file_requirement(&self.class_roots(), &c, access) {
                     Requirement::Row => {}
-                    Requirement::Cap(cap) if self.grant.allows(cap) => {}
+                    Requirement::Cap(cap) if self.grant.allows(cap) => self.raise(cap),
                     Requirement::Cap(cap) => return Err(Refusal::denied(format!("{} of {raw} needs `{cap}`", row.name))),
                     Requirement::Console if self.cx.caller.is_console() => {}
                     Requirement::Console => return Err(Refusal::denied(format!("{} of {raw} is a console act", row.name))),
@@ -637,14 +653,35 @@ impl St<'_> {
                     args.set(a, Value::Object(fixed));
                 }
             }
-            Obj::Job(a) | Obj::NewJob(a) => {
+            Obj::Job(a) => {
                 let id: String = self.get(args, a)?;
                 args.set(a, Value::from(format!("{}/{id}", self.cx.frames.tag())));
+            }
+            Obj::NewJob(a) => {
+                let id: String = self.get(args, a)?;
+                let id = format!("{}/{id}", self.cx.frames.tag());
+                // Remembered, so revoking the device cancels it (§2.5).
+                self.cx.frames.note_job(id.clone());
+                args.set(a, Value::from(id));
             }
             Obj::Device(a) => {
                 let id: String = self.get(args, a)?;
                 if !authz::owns_device(&*self.cx.registry, &self.cx.caller, &DeviceId::new(id.clone())) {
                     return Err(Refusal::not_found(format!("no device {id} of {}", self.cx.caller.principal())));
+                }
+            }
+            Obj::Revocable(a) => {
+                let id: String = self.get(args, a)?;
+                let id = DeviceId::new(id);
+                if !authz::owns_device(&*self.cx.registry, &self.cx.caller, &id) {
+                    return Err(Refusal::not_found(format!("no device {id} of {}", self.cx.caller.principal())));
+                }
+                let own = matches!(self.cx.caller.device(), authz::Device::Paired(me) if me == &id);
+                if !own && !self.cx.caller.is_console() {
+                    if !self.grant.allows(Capability::Admin) {
+                        return Err(Refusal::denied(format!("revoking another device needs `admin` ({id})")));
+                    }
+                    self.raise(Capability::Admin);
                 }
             }
             Obj::NewPath(_) => self.need_all(row.name)?,
@@ -886,7 +923,8 @@ pub(crate) mod fixture {
         // tests never read it, so it is leaked on purpose.
         std::mem::forget(rx);
         let ctx = worktrees_api::Ctx::new(std::env::temp_dir(), Arc::new(Quiet));
-        Call { ctx, frames: super::super::wire::Frames::new(super::super::wire::Outbox(tx)), caller, registry, world: None }
+        let devices = std::sync::Arc::new(super::super::devices::DeviceRegistry::in_memory());
+        Call { ctx, frames: super::super::wire::Frames::new(super::super::wire::Outbox(tx)), caller, registry, world: None, devices }
     }
 
     pub fn args(v: Value) -> Args {
@@ -1311,7 +1349,7 @@ mod tests {
     fn an_attach_is_only_its_own_connections() {
         let (mine, g) = console();
         let (theirs, _) = console();
-        mine.frames.note_term(7);
+        mine.frames.note_term(7, "s".into());
         let w = Fixture::default();
         assert!(try_row("term_write", &mine, &g, json!({ "id": 7, "data": [97] }), &w).is_ok());
         for cmd in ["term_write", "term_wheel", "term_resize"] {
@@ -1333,7 +1371,7 @@ mod tests {
     fn a_stale_close_from_a_reconnected_pane_leaves_anothers_attach_alone() {
         let (other, g) = console();
         let (reconnected, _) = console();
-        other.frames.note_term(5);
+        other.frames.note_term(5, "s".into());
         let w = Fixture::default();
         assert_eq!(try_row("term_close", &reconnected, &g, json!({ "id": 5 }), &w).unwrap_err().kind, RefusalKind::NoopNotOwned);
         assert_eq!(super::super::dispatch::call_in(&reconnected, "term_close", &args(json!({ "id": 5 })), &w), Ok(Value::Null));

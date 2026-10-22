@@ -71,7 +71,7 @@ if (!LOCAL?.length || !SHIM?.length) fail(`ipc.ts: CLIENT_LOCAL (${LOCAL}) or SH
 const dispatch = noTests(read(SRC.dispatch));
 const open = dispatch.indexOf("commands! { cx, a;");
 const block = open < 0 ? "" : dispatch.slice(open, dispatch.indexOf("\n}\n", open));
-const rows = [...block.matchAll(/^ {4}([a-z][a-z0-9_]*): (Engine|ClientLocal|HostConsole|Loopback|Stream)\b[^\n]*?=>/gm)].map((m) => [m[1], m[2]]);
+const rows = [...block.matchAll(/^ {4}([a-z][a-z0-9_]*): (Engine|ClientLocal|HostConsole|Loopback|Stream|Own)\b[^\n]*?=>/gm)].map((m) => [m[1], m[2]]);
 if (rows.length < 100) fail(`dispatch.rs: only ${rows.length} rows parsed — is the commands! block where this check looks?`);
 const ROWS = rows.map(([n]) => n);
 const CLIENT_ROWS = rows.filter(([, e]) => e === "ClientLocal").map(([n]) => n);

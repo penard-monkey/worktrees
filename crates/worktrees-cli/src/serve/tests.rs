@@ -1367,3 +1367,455 @@ fn the_audit_log_records_limits_once_per_episode() {
     let msg = recs.iter().find(|r| r["detail"]["limit"] == "message_size").unwrap_or_else(|| panic!("{recs:#?}"));
     assert_eq!((msg["kind"].as_str(), msg["principal"].as_str(), msg["device"].as_str()), (Some("refused"), Some("owner"), Some("loopback")));
 }
+
+// ── paired devices on the real client set (Phase 2 slice 5) ──────────────────
+//
+// No remote listener exists before slice 6, so a "device" here is
+// `conn::serve_caller` — exactly what that listener will run once mTLS has
+// named the device — driven over a loopback socket pair with a paired caller,
+// on the REAL `Clients`, listening to a REAL `DeviceRegistry`.
+
+mod devices {
+    use super::super::conn::{self, Broadcast, Clients};
+    use super::super::devices::{DeviceRecord, DeviceRegistry, Enrollment, Expiry, Platform};
+    use super::super::dispatch::{self, Args, Call};
+    use super::super::resolve::World;
+    use super::super::wire::{Frames, Outbox, ShellHold};
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::{json, Value};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+    use tokio::net::TcpStream;
+    use tokio_tungstenite::tungstenite::protocol::Role;
+    use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::WebSocketStream;
+    use worktrees_api::Ctx;
+    use worktrees_core::authz::{self, Capability, Caps, Caller, DeviceId, Grant, PrincipalId, Projects, Registry};
+    use Capability::*;
+
+    const NOW: i64 = 1_800_000_000;
+
+    /// Real directories for the registered roots: the resolver canonicalizes.
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("wt-serve-dev-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        for p in ["a", "b", "cfg"] {
+            std::fs::create_dir_all(d.join(p)).unwrap();
+        }
+        std::fs::canonicalize(&d).unwrap()
+    }
+
+    fn s(p: &std::path::Path) -> String {
+        p.to_string_lossy().into_owned()
+    }
+
+    struct Roots {
+        roots: Vec<String>,
+        panes: Vec<(String, String, String)>,
+    }
+
+    impl World for Roots {
+        fn roots(&self) -> Vec<String> {
+            self.roots.clone()
+        }
+        fn panes(&self) -> Option<worktrees_core::tmux::PaneList> {
+            Some(worktrees_core::tmux::PaneList::from_rows(self.panes.clone()))
+        }
+    }
+
+    fn enroll(reg: &DeviceRegistry, name: &str, key: u8, caps: &[Capability], projects: Projects) -> DeviceRecord {
+        reg.enroll(
+            Enrollment {
+                principal: PrincipalId::owner(),
+                name: name.into(),
+                platform: Platform::Macos,
+                spki_sha256: super::super::devices::hex(&[key; 32]),
+                stepup_spki_sha256: None,
+                grant: Grant { capabilities: Caps::of(caps), projects },
+                expiry: Expiry::default(),
+                addr: None,
+            },
+            NOW,
+        )
+        .unwrap()
+    }
+
+    fn caller(d: &DeviceRecord) -> Caller {
+        Caller::paired(d.principal.clone(), d.id.clone())
+    }
+
+    /// The engine as serve builds it, over a registry in memory and a world of
+    /// fixtures: the client set listens to the registry, the `Ctx` emits
+    /// through it.
+    struct Engine {
+        rt: tokio::runtime::Runtime,
+        reg: Arc<DeviceRegistry>,
+        clients: Arc<Clients>,
+        ctx: Ctx,
+        dir: PathBuf,
+        next: AtomicU64,
+        /// Every frame `rpc` skipped on the way to a reply: the events.
+        skipped: Mutex<Vec<Value>>,
+        /// Each session's task, by connection id, to see it end.
+        tasks: Mutex<Vec<(u64, tokio::task::JoinHandle<()>)>>,
+        /// The audit log, in the engine's own config dir.
+        audit: Arc<super::super::audit::Audit>,
+    }
+
+    impl Drop for Engine {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn engine(tag: &str, panes: Vec<(String, String, String)>) -> Engine {
+        let dir = scratch(tag);
+        let reg = Arc::new(DeviceRegistry::in_memory());
+        let world = Roots { roots: vec![s(&dir.join("a")), s(&dir.join("b"))], panes };
+        let clients = Arc::new(Clients::serving(reg.clone(), Some(Arc::new(world))));
+        clients.listen();
+        let ctx = Ctx::new(dir.join("cfg"), Arc::new(Broadcast(clients.clone())));
+        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let (audit, _) = super::super::audit::Audit::open(&dir.join("cfg"), None);
+        Engine { rt, reg, clients, ctx, dir, next: AtomicU64::new(100), skipped: Mutex::new(Vec::new()), tasks: Mutex::new(Vec::new()), audit }
+    }
+
+    type Client = WebSocketStream<TcpStream>;
+
+    impl Engine {
+        /// A session for `who` over a fresh loopback socket pair.
+        fn connect(&self, who: Caller) -> Client {
+            let (clients, ctx, id) = (self.clients.clone(), self.ctx.clone(), self.next.fetch_add(1, Ordering::SeqCst));
+            let au = Arc::new(self.audit_of(id, &who));
+            let (client, task) = self.rt.block_on(async move {
+                let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = l.local_addr().unwrap();
+                let dial = tokio::spawn(TcpStream::connect(addr));
+                let (server, _) = l.accept().await.unwrap();
+                let ws = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
+                let task = tokio::spawn(conn::serve_caller(ws, ctx, clients, id, who, au));
+                (WebSocketStream::from_raw_socket(dial.await.unwrap().unwrap(), Role::Client, None).await, task)
+            });
+            self.tasks.lock().unwrap().push((id, task));
+            client
+        }
+
+        /// The audit's view of connection `id`, for `who`.
+        fn audit_of(&self, id: u64, who: &Caller) -> super::super::audit::ConnAudit {
+            super::super::audit::ConnAudit::new(self.audit.clone(), id, None, who.clone())
+        }
+
+        /// The server's side of the session most recently connected before
+        /// `n` others ends within `within` — whatever the client does. A
+        /// client that never answers the close is ended all the same.
+        fn session_ends(&self, nth_last: usize, within: Duration) {
+            let mut tasks = self.tasks.lock().unwrap();
+            let i = tasks.len() - 1 - nth_last;
+            let (_, task) = tasks.remove(i);
+            let r = self.rt.block_on(async move { tokio::time::timeout(within, task).await });
+            assert!(r.is_ok(), "the session was still running after {within:?}");
+        }
+
+        /// The next frame within `wait`: `Some(Ok(json))` for text,
+        /// `Some(Err(reason))` for a close, `None` for silence or the end.
+        fn next(&self, c: &mut Client, wait: Duration) -> Option<Result<Value, String>> {
+            self.rt.block_on(async {
+                loop {
+                    match tokio::time::timeout(wait, c.next()).await.ok()?? {
+                        Ok(Message::Text(t)) => return Some(Ok(serde_json::from_str(t.as_str()).unwrap())),
+                        Ok(Message::Close(f)) => return Some(Err(f.map(|f| f.reason.to_string()).unwrap_or_default())),
+                        Ok(_) => continue,
+                        Err(_) => return None,
+                    }
+                }
+            })
+        }
+
+        /// One request, and its reply (events and channel frames skipped).
+        fn rpc(&self, c: &mut Client, cmd: &str, args: Value) -> Value {
+            let id = self.next.fetch_add(1, Ordering::SeqCst);
+            self.rt.block_on(c.send(Message::text(json!({"id": id, "cmd": cmd, "args": args}).to_string()))).unwrap();
+            loop {
+                match self.next(c, Duration::from_secs(5)) {
+                    Some(Ok(v)) if v["id"] == json!(id) => return v,
+                    Some(Ok(v)) => self.skipped.lock().unwrap().push(v),
+                    other => panic!("{cmd}: no reply, got {other:?}"),
+                }
+            }
+        }
+
+        /// The socket is closed by serve, saying `why`, within `within`.
+        fn closed(&self, c: &mut Client, why: &str, within: Duration) {
+            let t0 = Instant::now();
+            loop {
+                match self.next(c, within) {
+                    Some(Ok(_)) => continue,
+                    Some(Err(reason)) => {
+                        assert_eq!(reason, why);
+                        break;
+                    }
+                    None => panic!("no close frame within {within:?}"),
+                }
+            }
+            assert!(t0.elapsed() < within, "closed after {:?}", t0.elapsed());
+            assert!(self.next(c, Duration::from_millis(500)).is_none(), "nothing after the close");
+        }
+    }
+
+    /// §2.5 and exit criterion "a revoked device's live socket dies within
+    /// 1 s": the console's revoke closes EVERY connection of the device, with
+    /// a close frame saying why; the device's next request on any socket is
+    /// refused and its next handshake fails; nothing else is touched, and the
+    /// console hears of it while no device does.
+    #[test]
+    fn a_revoke_closes_every_connection_of_the_device_at_once() {
+        let e = engine("revoke", vec![]);
+        let phone = enroll(&e.reg, "Phone", 1, &[Read], Projects::All);
+        let laptop = enroll(&e.reg, "Laptop", 2, &[Read], Projects::All);
+        let (mut p1, _p2) = (e.connect(caller(&phone)), e.connect(caller(&phone)));
+        let mut lap = e.connect(caller(&laptop));
+        let mut con = e.connect(Caller::console());
+        assert!(e.rpc(&mut p1, "get_changelog", json!({})).get("ok").is_some(), "the device is served");
+        assert_eq!(e.clients.len(), 4);
+        let r = e.rpc(&mut con, "device_revoke", json!({"id": phone.id.as_str()}));
+        assert_eq!(r["ok"], json!(true), "{r}");
+        e.closed(&mut p1, "revoked", Duration::from_secs(1));
+        // p2 is never read again, so it never answers the close: serve ends
+        // its session anyway.
+        e.session_ends(2, Duration::from_secs(1));
+        assert_eq!(e.clients.len(), 2, "out of the map at once");
+        // The console heard it (just ahead of its reply); the other device did not.
+        let heard = e.skipped.lock().unwrap().iter().any(|v| v["event"] == json!("devices:changed") && v["payload"]["event"] == json!("revoked"));
+        assert!(heard, "the console hears devices:changed: {:?}", e.skipped.lock().unwrap());
+        let leaked = std::iter::from_fn(|| e.next(&mut lap, Duration::from_millis(300))).flatten().any(|v| v["event"] == json!("devices:changed"));
+        assert!(!leaked, "no device hears another's revoke");
+        assert!(e.rpc(&mut lap, "get_changelog", json!({})).get("ok").is_some(), "another device is untouched");
+        // A socket that outlived the close for any reason: its next request.
+        let stale = Call {
+            ctx: e.ctx.clone(),
+            frames: Frames::new(Outbox(tokio::sync::mpsc::unbounded_channel().0)),
+            caller: caller(&phone),
+            registry: e.reg.clone(),
+            world: None,
+            devices: e.reg.clone(),
+        };
+        assert_eq!(dispatch::call(&stale, "get_changelog", &Args(Default::default())), Err(json!("denied")));
+        // And its next handshake.
+        assert_eq!(e.reg.admit(&phone.spki_sha256, NOW), Err(super::super::devices::ConnectRefusal::Revoked));
+    }
+
+    /// §2.5: a device always revokes ITSELF; another device of its principal
+    /// only with `admin`; and a device without it is refused, not served.
+    #[test]
+    fn a_device_revokes_itself_and_with_admin_a_peer() {
+        let e = engine("selfrevoke", vec![]);
+        let plain = enroll(&e.reg, "Plain", 1, &[Read], Projects::All);
+        let admin = enroll(&e.reg, "Admin", 2, &[Read, Admin], Projects::All);
+        let target = enroll(&e.reg, "Target", 3, &[Read], Projects::All);
+        let mut p = e.connect(caller(&plain));
+        let mut a = e.connect(caller(&admin));
+        let mut t = e.connect(caller(&target));
+        let r = e.rpc(&mut p, "device_revoke", json!({"id": target.id.as_str()}));
+        assert_eq!(r["err"], json!("denied"), "{r}");
+        assert_eq!(e.rpc(&mut p, "devices_list", json!({}))["err"], json!("denied"), "a listing is admin's");
+        assert_eq!(e.rpc(&mut a, "devices_list", json!({}))["ok"].as_array().unwrap().len(), 3);
+        assert_eq!(e.rpc(&mut a, "device_revoke", json!({"id": target.id.as_str()}))["ok"], json!(true));
+        e.closed(&mut t, "revoked", Duration::from_secs(1));
+        // The device that revokes itself is answered by the close.
+        e.rt.block_on(p.send(Message::text(json!({"id": 1, "cmd": "device_revoke", "args": {"id": plain.id.as_str()}}).to_string()))).unwrap();
+        e.closed(&mut p, "revoked", Duration::from_secs(1));
+        assert!(e.reg.get(&PrincipalId::owner(), &plain.id).unwrap().revoked_at.is_some());
+        // Console acts stay the console's, admin or not.
+        for (cmd, args) in [
+            ("device_enable", json!({"id": target.id.as_str()})),
+            ("device_set_scope", json!({"id": admin.id.as_str(), "caps": ["read", "stream"], "projects": "*"})),
+            ("device_set_expiry", json!({"id": admin.id.as_str(), "expiry": "never"})),
+            ("devices_revoke_all_others", json!({"keep": admin.id.as_str()})),
+        ] {
+            assert_eq!(e.rpc(&mut a, cmd, args)["err"], json!("console-only"), "{cmd}");
+        }
+        // An admin device narrows a peer; it can neither widen one nor touch itself.
+        let peer = enroll(&e.reg, "Peer", 4, &[Read, Write], Projects::All);
+        let r = e.rpc(&mut a, "device_narrow", json!({"id": peer.id.as_str(), "caps": ["read"], "projects": "*"}));
+        assert_eq!(r["ok"], json!(true), "{r}");
+        let r = e.rpc(&mut a, "device_narrow", json!({"id": peer.id.as_str(), "caps": ["read", "stream"], "projects": "*"}));
+        assert!(r["err"].as_str().unwrap().contains("widening is the host's"), "{r}");
+        let r = e.rpc(&mut a, "device_narrow", json!({"id": admin.id.as_str(), "caps": ["read"], "projects": "*"}));
+        assert!(r["err"].as_str().unwrap().contains("own scope"), "{r}");
+    }
+
+    /// §2.5: a disable closes the device's connections exactly as a revoke
+    /// does, and refuses it until the HOST re-enables it — after which it is
+    /// served again.
+    #[test]
+    fn a_disable_closes_like_a_revoke_and_only_the_host_reenables() {
+        let e = engine("disable", vec![]);
+        let phone = enroll(&e.reg, "Phone", 1, &[Read], Projects::All);
+        let mut p = e.connect(caller(&phone));
+        let mut con = e.connect(Caller::console());
+        assert_eq!(e.rpc(&mut con, "device_disable", json!({"id": phone.id.as_str()}))["ok"], json!(true));
+        e.closed(&mut p, "disabled", Duration::from_secs(1));
+        let mut again = e.connect(caller(&phone));
+        assert_eq!(e.rpc(&mut again, "get_changelog", json!({}))["err"], json!("denied"));
+        assert_eq!(e.rpc(&mut again, "device_enable", json!({"id": phone.id.as_str()}))["err"], json!("console-only"));
+        assert_eq!(e.rpc(&mut con, "device_enable", json!({"id": phone.id.as_str()}))["ok"], json!(true));
+        assert!(e.rpc(&mut again, "get_changelog", json!({})).get("ok").is_some(), "served again");
+        // An expiry that runs out closes it the same way (the timer's act).
+        e.rpc(&mut con, "device_set_expiry", json!({"id": phone.id.as_str(), "expiry": {"idle_days": 1}}));
+        let mut late = e.connect(caller(&phone));
+        // Enrolled at NOW, which is later than the re-enable's wall clock.
+        assert_eq!(e.reg.check_expiry(NOW + 2 * 86_400).unwrap(), vec![phone.id.clone()]);
+        e.closed(&mut late, "disabled", Duration::from_secs(1));
+        e.closed(&mut again, "disabled", Duration::from_secs(1));
+    }
+
+    /// The console's device rows answer it, and a device of ANOTHER principal
+    /// reads as missing to everyone — the words a device gets are the fixed
+    /// ones, so they say nothing about what exists (§3.3).
+    #[test]
+    fn a_device_row_naming_a_missing_device_says_the_fixed_words() {
+        let e = engine("missing", vec![]);
+        let admin = enroll(&e.reg, "Admin", 2, &[Read, Admin], Projects::All);
+        let mut a = e.connect(caller(&admin));
+        let mut con = e.connect(Caller::console());
+        let r = e.rpc(&mut a, "device_revoke", json!({"id": "d_nosuch"}));
+        assert_eq!(r["err"], json!("not found or not in this device's scope"), "{r}");
+        let r = e.rpc(&mut a, "device_narrow", json!({"id": "d_nosuch", "caps": [], "projects": []}));
+        assert_eq!(r["err"], json!("not found or not in this device's scope"), "{r}");
+        let r = e.rpc(&mut con, "device_disable", json!({"id": "d_nosuch"}));
+        assert!(r["err"].as_str().unwrap().contains("no device d_nosuch"), "the console is told the detail: {r}");
+        // The console widens with registered roots only, and the caps by name.
+        let root_a = s(&e.dir.join("a"));
+        let r = e.rpc(&mut con, "device_set_scope", json!({"id": admin.id.as_str(), "caps": ["read", "admin"], "projects": ["/not/registered"]}));
+        assert!(r["err"].as_str().unwrap().contains("not a registered project"), "{r}");
+        let r = e.rpc(&mut con, "device_set_scope", json!({"id": admin.id.as_str(), "caps": ["read", "root"], "projects": [root_a]}));
+        assert!(r["err"].as_str().unwrap().contains("unknown capability"), "{r}");
+        let r = e.rpc(&mut con, "device_set_scope", json!({"id": admin.id.as_str(), "caps": ["read", "admin", "stream"], "projects": [root_a]}));
+        assert_eq!(r["ok"], json!(true), "{r}");
+        let r = e.rpc(&mut con, "device_set_expiry", json!({"id": admin.id.as_str(), "expiry": {"idle_days": 0}}));
+        assert!(r["err"].is_string(), "{r}");
+    }
+
+    /// §3.3: "a narrowed scope or a removed capability ends each open channel
+    /// whose object it no longer covers". Two attaches (sessions in a and b)
+    /// and two dock shells (a and b) on one device's connection; the console
+    /// narrows the device to a, and only b's channels end; it removes
+    /// `stream`, and the rest do. The check is the resolver's own.
+    #[test]
+    fn a_narrowed_grant_ends_the_channels_it_no_longer_covers() {
+        let e = engine("narrow", vec![]);
+        let (a, b) = (s(&e.dir.join("a")), s(&e.dir.join("b")));
+        // The fixture world's panes: session sa is cwd'd in a, sb in b.
+        let world = Roots { roots: vec![a.clone(), b.clone()], panes: vec![("sa".into(), a.clone(), "zsh".into()), ("sb".into(), b.clone(), "zsh".into())] };
+        let dev = enroll(&e.reg, "Dev", 1, &[Read, Stream], Projects::only([a.clone(), b.clone()]));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let out = Outbox(tx);
+        let call = Arc::new(Call {
+            ctx: e.ctx.clone(),
+            frames: Frames::new(out.clone()),
+            caller: caller(&dev),
+            registry: e.reg.clone(),
+            world: Some(Arc::new(world)),
+            devices: e.reg.clone(),
+        });
+        call.frames.note_term(901, "sa".into());
+        call.frames.note_term(902, "sb".into());
+        call.frames.note_shell(ShellHold { repo: a.clone(), slug: "(main)".into(), index: 0, gen: 7 });
+        call.frames.note_shell(ShellHold { repo: b.clone(), slug: "(main)".into(), index: 0, gen: 9 });
+        let _kill = e.clients.join(1, out, call.clone());
+        // A widening ends nothing.
+        e.reg.set_scope(&dev.id, Grant { capabilities: Caps::of(&[Read, Write, Stream]), projects: Projects::only([a.clone(), b.clone()]) }).unwrap();
+        assert_eq!(call.frames.terms().len(), 2);
+        assert_eq!(call.frames.shells().len(), 2);
+        e.reg.set_scope(&dev.id, Grant { capabilities: Caps::of(&[Read, Stream]), projects: Projects::only([a.clone()]) }).unwrap();
+        assert_eq!(call.frames.terms(), vec![(901, "sa".to_string())], "b's attach ended");
+        assert_eq!(call.frames.shells().iter().map(|h| h.repo.clone()).collect::<Vec<_>>(), vec![a.clone()], "b's shell let go");
+        e.reg.set_scope(&dev.id, Grant { capabilities: Caps::of(&[Read]), projects: Projects::only([a.clone()]) }).unwrap();
+        assert!(call.frames.terms().is_empty() && call.frames.shells().is_empty(), "no stream, no channel");
+        assert_eq!(e.clients.len(), 1, "a narrowing ends channels, not the connection");
+    }
+
+    /// A registry whose changes reach NO hook: the per-request generation
+    /// check is what catches them (§3.3), one atomic load per request when
+    /// nothing moved.
+    struct Quiet {
+        grant: Mutex<Grant>,
+        gen: AtomicU64,
+    }
+
+    impl Registry for Quiet {
+        fn principal_grant(&self, _: &PrincipalId) -> Option<Grant> {
+            None
+        }
+        fn device_grant(&self, _: &PrincipalId, _: &DeviceId) -> Option<Grant> {
+            Some(self.grant.lock().unwrap().clone())
+        }
+        fn device_principal(&self, _: &DeviceId) -> Option<PrincipalId> {
+            Some(PrincipalId::owner())
+        }
+        fn stepup_required(&self, _: &PrincipalId, _: &DeviceId) -> bool {
+            false
+        }
+        fn generation(&self) -> u64 {
+            self.gen.load(Ordering::SeqCst)
+        }
+    }
+
+    #[test]
+    fn the_next_request_checks_open_channels_when_the_registry_moved() {
+        let e = engine("backstop", vec![]);
+        let a = s(&e.dir.join("a"));
+        let reg = Arc::new(Quiet { grant: Mutex::new(Grant { capabilities: Caps::of(&[Read, Stream]), projects: Projects::All }), gen: AtomicU64::new(1) });
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let call = Call {
+            ctx: e.ctx.clone(),
+            frames: Frames::new(Outbox(tx)),
+            caller: Caller::paired(PrincipalId::owner(), DeviceId::new("d_q")),
+            registry: reg.clone(),
+            world: Some(Arc::new(Roots { roots: vec![a.clone()], panes: vec![("sa".into(), a.clone(), "zsh".into())] })),
+            devices: e.reg.clone(),
+        };
+        call.frames.reconciled().store(1, Ordering::SeqCst);
+        call.frames.note_term(903, "sa".into());
+        let au = e.audit_of(1, &call.caller);
+        let _ = conn::answer(&call, &au, &json!(1), "get_changelog", &Args(Default::default()));
+        assert_eq!(call.frames.terms().len(), 1, "nothing moved: nothing checked, nothing ended");
+        *reg.grant.lock().unwrap() = Grant { capabilities: Caps::of(&[Read]), projects: Projects::All };
+        let _ = conn::answer(&call, &au, &json!(2), "get_changelog", &Args(Default::default()));
+        assert_eq!(call.frames.terms().len(), 1, "the grant changed but the generation did not: unseen");
+        reg.gen.store(2, Ordering::SeqCst);
+        let _ = conn::answer(&call, &au, &json!(3), "get_changelog", &Args(Default::default()));
+        assert!(call.frames.terms().is_empty(), "the generation moved: the attach it no longer covers ended");
+        assert_eq!(call.frames.reconciled().load(Ordering::SeqCst), 2);
+    }
+
+    /// A revoke cancels the clone jobs the device started (§2.5): every new
+    /// job id the resolver namespaces for a connection is remembered for it.
+    #[test]
+    fn a_revoke_cancels_the_devices_clone_jobs() {
+        let e = engine("jobs", vec![]);
+        let dev = enroll(&e.reg, "Dev", 1, &[Read, Admin], Projects::All);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let out = Outbox(tx);
+        let call = Arc::new(Call {
+            ctx: e.ctx.clone(),
+            frames: Frames::new(out.clone()),
+            caller: caller(&dev),
+            registry: e.reg.clone(),
+            world: Some(Arc::new(Roots { roots: vec![], panes: vec![] })),
+            devices: e.reg.clone(),
+        });
+        let grant = authz::effective(&*e.reg, &call.caller);
+        let mut args = Args(json!({"id": "job-1", "parent": "/x", "url": "https://example.com/r.git"}).as_object().cloned().unwrap());
+        let _ = super::super::resolve::authorize(dispatch::row("clone_project").unwrap(), &call, &grant, &mut args, &Roots { roots: vec![], panes: vec![] });
+        let job = format!("{}/job-1", call.frames.tag());
+        assert_eq!(call.frames.take_jobs(), vec![job.clone()], "the new job is the connection's");
+        call.frames.note_job(job.clone());
+        let _kill = e.clients.join(7, out, call.clone());
+        e.reg.revoke(&Caller::console(), &Grant::everything(), &dev.id, NOW).unwrap();
+        assert!(call.frames.take_jobs().is_empty(), "the job {job} was taken to be cancelled");
+        assert_eq!(e.clients.len(), 0);
+    }
+}

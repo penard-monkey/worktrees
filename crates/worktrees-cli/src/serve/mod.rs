@@ -258,7 +258,7 @@ pub fn start(config_dir: PathBuf, port: u16, allow_origin: Vec<String>) -> Resul
 /// grant is read from the config dir's `devices.json` (Phase 2 slice 5).
 pub fn start_with(config_dir: PathBuf, port: u16, allow_origin: Vec<String>, limits: conn::Limits) -> Result<Running, String> {
     let devices = Arc::new(devices::DeviceRegistry::open(&config_dir));
-    let mut running = start_in(config_dir, port, allow_origin, limits, conn::Clients::with(devices.clone(), None))?;
+    let mut running = start_in(config_dir, port, allow_origin, limits, conn::Clients::serving(devices.clone(), None))?;
     running.devices = Some(devices);
     Ok(running)
 }
@@ -267,6 +267,8 @@ pub fn start_with(config_dir: PathBuf, port: u16, allow_origin: Vec<String>, lim
 /// objects resolve against (the in-process tests' fixtures).
 pub fn start_in(config_dir: PathBuf, port: u16, allow_origin: Vec<String>, limits: conn::Limits, clients: conn::Clients) -> Result<Running, String> {
     let clients = Arc::new(clients);
+    // A revoke, a disable or a narrowed grant acts on the live connections.
+    clients.listen();
     let ctx = Ctx::new(config_dir, Arc::new(conn::Broadcast(clients.clone())));
     let token = servefile::new_token();
     let listener = conn::start(ctx.clone(), token.clone(), port, allow_origin, clients.clone(), limits)?;

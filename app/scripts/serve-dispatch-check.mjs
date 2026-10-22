@@ -9,7 +9,7 @@
 // own two commands, and everything else goes over the socket. So the rule this
 // check holds is the inverse of the one it held while the app was an engine:
 // the shim's `generate_handler!` may contain NO `Engine`, `HostConsole`,
-// `Loopback` or `Stream` row — one that did would be a second engine for that command, with
+// `Loopback`, `Stream` or `Own` row — one that did would be a second engine for that command, with
 // its own registries, invisible to serve. The client-local set is pinned by
 // name so a command cannot drift between "runs on the host" and "refused"
 // without this line changing. (Which names the PAGE routes where, and that
@@ -87,7 +87,7 @@ const open = src.indexOf("commands! { cx, a;");
 const close = open < 0 ? -1 : src.indexOf("\n}\n", open);
 if (open < 0 || close < 0) fail("the `commands! { cx, a; … }` block is not where this check looks");
 const block = open < 0 ? "" : src.slice(open, close);
-const rows = [...block.matchAll(/^ {4}([a-z][a-z0-9_]*): (Engine|ClientLocal|HostConsole|Loopback|Stream)\b[^\n]*?=>/gm)];
+const rows = [...block.matchAll(/^ {4}([a-z][a-z0-9_]*): (Engine|ClientLocal|HostConsole|Loopback|Stream|Own)\b[^\n]*?=>/gm)];
 const table = rows.map((m) => m[1]);
 const exposure = new Map(rows.map((m) => [m[1], m[2]]));
 if (table.length === 0) fail("the dispatch table parsed as empty");
@@ -99,7 +99,7 @@ if (dupes.length) fail(`listed twice in the table: ${[...new Set(dupes)].join(",
 else ok("no command is listed twice");
 const engineSide = handlers.filter((n) => exposure.has(n) && exposure.get(n) !== "ClientLocal");
 if (engineSide.length) fail(`the shim registers engine commands serve also runs: ${engineSide.map((n) => `${n} (${exposure.get(n)})`).join(", ")} — a second engine for each`);
-else ok("the shim registers no Engine, HostConsole, Loopback or Stream row — every engine command is serve's alone");
+else ok("the shim registers no Engine, HostConsole, Loopback, Stream or Own row — every engine command is serve's alone");
 const localRows = table.filter((n) => exposure.get(n) === "ClientLocal");
 const unregistered = localRows.filter((n) => !handlers.includes(n));
 if (unregistered.length) fail(`ClientLocal rows the shim does not register: ${unregistered.join(", ")} — serve refuses them and nothing else runs them`);
