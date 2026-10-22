@@ -51,23 +51,16 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 name = "app"
 version = "0.42.0"
 dependencies = [
- "getrandom 0.3.4",
- "http-body-util",
- "hyper",
- "hyper-util",
- "libc",
  "objc2",
- "portable-pty",
  "serde",
  "serde_json",
- "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
  "tauri-plugin-process",
  "tauri-plugin-updater",
- "tokio",
+ "worktrees-api",
  "worktrees-core",
 ]
 
@@ -5250,6 +5243,23 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+
+[[package]]
+name = "worktrees-api"
+version = "0.42.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "libc",
+ "portable-pty",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "worktrees-core",
+]
 
 [[package]]
 name = "worktrees-cli"

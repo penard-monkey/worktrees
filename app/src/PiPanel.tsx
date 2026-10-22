@@ -6,9 +6,9 @@
 // user's act. It lives in ~/.config/worktrees/config.toml, never in pi's own
 // trust.json, and never in a repo.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { Settings } from "./settings";
+import type { PiProjectTrust, Settings } from "./settings";
 import { ModelPicker, REASON_TEXT, modelArg, type ModelOption, type PiLaunchTrust, type PiStatus } from "./ModelPicker";
 import { PiMcpSection, type PiMcpStatus } from "./PiMcpPanel";
 
@@ -25,23 +25,61 @@ export function launchTrustText(t: PiLaunchTrust, trustPath: string): string {
   }
 }
 
-export default function PiPanel({ settings, repo, onChange, onReport, onMcpStatus, mcpOfferPending, onSilenceMcpOffer }: {
+export default function PiPanel({ settings, repo, onChange, onReport, onFail, onMcpStatus, mcpOfferPending, onSilenceMcpOffer }: {
   settings: Settings;
   repo: string | null;
   onChange: (patch: Partial<Settings>) => void;
   onReport: (msg: string) => void;
+  /** A refused trust change: App's `fail`, so it is never swallowed. */
+  onFail: (e: unknown) => void;
   onMcpStatus?: (s: PiMcpStatus) => void;
   mcpOfferPending?: boolean;
   onSilenceMcpOffer?: () => void;
 }) {
   const [status, setStatus] = useState<PiStatus | null>(null);
   const [models, setModels] = useState<ModelOption[] | null>(null);
+  // Only the newest read may land: a trust click invalidates any read already
+  // in flight, so the panel ends on what the host stored after the last click.
+  // Once a trust click has succeeded, each landed read's trust is also copied
+  // into `Settings.pi_project_trust` for an older build (`settings.ts`) — not
+  // before, while `trust` may still be env or user config speaking. A ref, so
+  // App's per-render `onChange` does not re-read the panel on every render.
+  const seq = useRef(0);
+  const held = useRef(false);
+  const mirror = useRef<(t: PiProjectTrust) => void>(() => {});
+  mirror.current = (t) => { if (settings.pi_project_trust !== t) onChange({ pi_project_trust: t }); };
+  const readStatus = useCallback(() => {
+    const n = ++seq.current;
+    invoke<PiStatus>("pi_status", { repo })
+      .then((v) => {
+        if (seq.current !== n) return;
+        setStatus(v);
+        if (held.current) mirror.current(v.trust);
+      })
+      .catch((e) => onReport(`pi: ${String(e)}`));
+  }, [repo, onReport]);
   const reload = useCallback(() => {
-    invoke<PiStatus>("pi_status", { repo }).then(setStatus).catch((e) => onReport(`pi: ${String(e)}`));
+    readStatus();
     setModels(null);
     invoke<ModelOption[]>("agent_models", { harness: "pi" }).then(setModels).catch((e) => { setModels([]); onReport(`pi models: ${String(e)}`); });
-  }, [repo, onReport]);
+  }, [readStatus, onReport]);
   useEffect(() => { reload(); }, [reload]);
+
+  // Project trust is HOST policy (`host-policy.json`), read back through
+  // `pi_status.trust` and changed only by the click below — never by this
+  // panel or the app loading. Optimistic, rolled back on a refusal; the re-read
+  // after it also refreshes "This repo", which the trust mode decides.
+  const setTrust = (mode: PiProjectTrust) => {
+    if (!status || status.trust === mode) return;
+    const prev = status.trust;
+    const n = ++seq.current;
+    setStatus({ ...status, trust: mode });
+    invoke("set_pi_trust", { mode }).then(() => { held.current = true; readStatus(); }, (e) => {
+      if (seq.current === n) setStatus((s) => (s ? { ...s, trust: prev } : s));
+      onFail(`pi trust: ${String(e)}`);
+      readStatus();
+    });
+  };
 
   const allow = async (root: string, on: boolean) => {
     try {
@@ -89,12 +127,12 @@ export default function PiPanel({ settings, repo, onChange, onReport, onMcpStatu
       <label>Project trust</label>
       <div className="seg seg-plain">
         {([["never", "Skip repo resources"], ["ask", "Let pi ask"]] as const).map(([mode, label]) => (
-          <button key={mode} className={settings.pi_project_trust === mode ? "on" : ""}
-            onClick={() => onChange({ pi_project_trust: mode })}>{label}</button>
+          <button key={mode} className={status?.trust === mode ? "on" : ""} disabled={!status}
+            onClick={() => setTrust(mode)}>{label}</button>
         ))}
       </div>
-      <div className="hint">{settings.pi_project_trust === "never" ? <b>Skip:</b> : "Skip:"} pi launches with --no-approve, so a repo's .pi/ extensions, settings and .agents/skills do not load. AGENTS.md and CLAUDE.md still do.</div>
-      <div className="hint">{settings.pi_project_trust === "ask" ? <b>Ask:</b> : "Ask:"} pi shows its own trust prompt, whose highlighted choice is Trust. The place's dot shows it as waiting, and nothing is typed into it for you.</div>
+      <div className="hint">{status?.trust === "never" ? <b>Skip:</b> : "Skip:"} pi launches with --no-approve, so a repo's .pi/ extensions, settings and .agents/skills do not load. AGENTS.md and CLAUDE.md still do.</div>
+      <div className="hint">{status?.trust === "ask" ? <b>Ask:</b> : "Ask:"} pi shows its own trust prompt, whose highlighted choice is Trust. The place's dot shows it as waiting, and nothing is typed into it for you.</div>
       <div className="hint">Either way, a folder pi itself already trusts (its own trust.json, e.g. from "Trust parent folder") launches with --approve, and one pi marks as not trusted with --no-approve.</div>
       {status?.launch && <div className="hint" data-testid="pi-trust-source"><b>This repo:</b> {launchTrustText(status.launch, status.pi_trust_path ?? "trust.json")}</div>}
       <label className="sub">Allowed repos</label>

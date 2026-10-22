@@ -98,6 +98,12 @@ mk_wt() {
   [[ "$output" == *"Unknown flag: --nope"* ]]
 }
 
+@test "close: -- ends the options, so a name spelled like a flag is a name" {
+  run_wt close -- -y
+  [ "$status" -eq 1 ]
+  grep -qF "No worktree '-y'" <<<"$output"
+}
+
 @test "close: a worktree literally named 'main' wins over the main-checkout alias" {
   # regression: the alias used to short-circuit BEFORE the dir check and killed
   # the main checkout's session instead of the worktree's.

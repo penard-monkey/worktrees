@@ -55,10 +55,30 @@ const kimiMcpStatus = () => ({
   file: "<place>/.kimi-code/mcp.json", source: "config", config_path: "/Users/demo/.config/worktrees/config.toml",
 });
 
-// Settings → pi's state: the trust mode pushed from settings and the user's
-// allowance (core keeps it in ~/.config/worktrees/config.toml).
-let piTrust = "never";
+// Settings → pi's allowance (core keeps it in ~/.config/worktrees/config.toml).
 const piAllowed = new Set<string>();
+
+// Host policy (worktrees-api `hostpolicy`): Codex permissions and pi project
+// trust. The real host keeps them in host-policy.json, so a client reload must
+// not lose them — hence sessionStorage, like the settings blob. Every setter
+// call THIS page load made is recorded (`__mock.hostPolicySets()`), so a
+// harness run can prove a reload sends none and a click sends one.
+// `?hostpolicyfail` refuses every set, the way a corrupt file does, to drive
+// the rollback.
+const MOCK_HOST_POLICY_KEY = "wt-mock-host-policy";
+const mockHostPolicy: { codex_permissions: string; pi_project_trust: string } = (() => {
+  const d = { codex_permissions: "auto-review", pi_project_trust: "never" };
+  try { return { ...d, ...JSON.parse(sessionStorage.getItem(MOCK_HOST_POLICY_KEY) ?? "{}") }; } catch { return d; }
+})();
+const mockHostPolicySets: { cmd: string; mode: string }[] = [];
+function setHostPolicy(cmd: string, key: "codex_permissions" | "pi_project_trust", mode: string) {
+  mockHostPolicySets.push({ cmd, mode });
+  if (location.search.includes("hostpolicyfail")) {
+    throw "/Users/demo/Library/Application Support/net.casadelvalle.worktrees/host-policy.json is not valid JSON (EOF while parsing an object at line 1 column 30); not overwriting it";
+  }
+  mockHostPolicy[key] = mode;
+  try { sessionStorage.setItem(MOCK_HOST_POLICY_KEY, JSON.stringify(mockHostPolicy)); } catch { /* private mode */ }
+}
 
 /** kimi's catalog as `kimimodels::options_from` shapes it: the aliases its
  *  config declares, kimi's default first, all ready. */
@@ -3071,7 +3091,7 @@ Phase 3: Frontend pane and mock harness
           node_path: "/Users/demo/.local/share/pi-node/current/bin/node", node_version: "26.10.0",
           node_floor: "22.19.0", problem: null,
         },
-        trust: piTrust, allowed: [...piAllowed], repo_root: root, repo_allowed: !!root && piAllowed.has(root),
+        trust: mockHostPolicy.pi_project_trust, allowed: [...piAllowed], repo_root: root, repo_allowed: !!root && piAllowed.has(root),
         // `?pitrust=trusted|untrusted` stands in for pi's own trust.json;
         // `?pitrust=shadowed` for a .pi/mcp.json that defines `worktrees`
         // (pi's file trusting the repo too, so the veto is visible).
@@ -3085,7 +3105,7 @@ Phase 3: Frontend pane and mock harness
           const [flag, source] = allowed ? ["--approve", "allowance"]
             : own === "trusted" ? ["--approve", "pi-trusted"]
             : own === "untrusted" ? ["--no-approve", "pi-untrusted"]
-            : piTrust === "ask" ? [null, "ask"] : ["--no-approve", "never"];
+            : mockHostPolicy.pi_project_trust === "ask" ? [null, "ask"] : ["--no-approve", "never"];
           return { flag, source, pi_entry, shadowed: false, would_approve: allowed || own === "trusted" };
         })() : null,
         pi_trust_path: "/Users/demo/.pi/agent/trust.json",
@@ -3094,7 +3114,7 @@ Phase 3: Frontend pane and mock harness
     case "set_pi_trust": {
       const mode = String(args.mode);
       if (!["never", "ask"].includes(mode)) throw `unknown pi trust mode '${mode}' (expected never or ask)`;
-      piTrust = mode;
+      setHostPolicy("set_pi_trust", "pi_project_trust", mode);
       return null;
     }
     case "set_pi_allowed": {
@@ -3108,11 +3128,11 @@ Phase 3: Frontend pane and mock harness
       if (!["ask", "auto-review", "full"].includes(mode)) {
         throw `unknown Codex permission mode '${mode}' (expected ask, auto-review or full)`;
       }
-      // Readable from the harness (there is no getter command in lib.rs, and
-      // the mock must not invent one): proves the push reached the backend.
-      (window as unknown as { __mockCodexPermissions?: string }).__mockCodexPermissions = mode;
+      setHostPolicy("set_codex_permissions", "codex_permissions", mode);
       return null;
     }
+    case "get_codex_permissions":
+      return mockHostPolicy.codex_permissions;
 
     case "init_suggest":
       return clone(mockSuggestions[args.repo] ?? {
@@ -3487,6 +3507,8 @@ const mockAskMain: { slug: string; session: string; provider: string | null }[] 
 
 const healthyConfigs: Record<string, MockCfg> = {};
 (window as any).__mock = {
+  /** Host-policy setter calls made by THIS page load, oldest first. */
+  hostPolicySets: () => mockHostPolicySets.slice(),
   /** Every ui-event this session recorded, for the privacy assertions: a
    *  harness run greps this JSON for slugs, paths and filter text. */
   uiEvents: () => mockUiEvents.slice(),
@@ -3623,4 +3645,4 @@ const healthyConfigs: Record<string, MockCfg> = {};
   },
 };
 
-console.info("[mock] Tauri backend mocked — design harness active (window.__mock: breakConfig/fixConfig/exitShell/restoreScrollback/createFile/editFile/finishTask/syncFail/syncLive/release/uiEvents)");
+console.info("[mock] Tauri backend mocked — design harness active (window.__mock: breakConfig/fixConfig/exitShell/restoreScrollback/createFile/editFile/finishTask/syncFail/syncLive/release/uiEvents/hostPolicySets)");

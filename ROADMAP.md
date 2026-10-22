@@ -5,6 +5,30 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (the repo's `/close-out` skill, `.claude/skills/close-out`;
 this repo's settings in `.claude/close-out.md`).
 
+- **Option A for the bundled CLI: offer to put the app's sidecar `worktrees`
+  on `PATH`.** The Server Edition's Phase 1 ships the CLI inside the app
+  bundle (Tauri `externalBin`) and uses it ONLY to start `worktrees serve` —
+  option B of the 2026-10-17 design discussion. `install.sh` stays the way
+  the CLI reaches `PATH`, exactly as today, so the engine agents run and the
+  `worktrees mcp` every Claude session launches stay independent of the app's
+  presence. Option A — a link from `~/.local/bin/worktrees` into the bundle,
+  the VS Code / Docker Desktop shape — fixes the version drift between the
+  app's engine and the `PATH` CLI by construction and is the destination. B
+  went first because: (1) a place is durable and the app is a view onto it —
+  under A, moving or trashing the app fails every agent's `worktrees new` and
+  every session's MCP server, and the updater replacing the bundle opens a
+  window where the link points at nothing; (2) A is macOS-shaped — an
+  AppImage mounts at a per-launch path and Windows symlinks need admin or
+  developer mode; (3) A is B plus a `PATH` write plus four guards
+  (refresh-on-launch, remove-on-uninstall, consent not silence, never from a
+  `.sbx`/debug build), each a place to get wrong in the plan's largest phase,
+  and B → A is a one-way door in the right direction. Do A as an opt-in
+  Settings offer — "use the app's CLI on your PATH" — once `serve` is stable,
+  the same shape as the MCP setup offer. Signing is not a factor: macOS stays
+  ad-hoc either way (`install.sh` already strips quarantine recursively, so a
+  sidecar runs from a terminal); only the iOS target needs Apple signing.
+  _From: 2026-10-17, feat/server-edition_
+
 - ~~**Before v0.42.0: drive #482 (scroll keep) in the real app.**~~ Done 2026-10-15: David ran it in the sandbox, worked fine. Only the
   mock was measured, and AGENTS.md says refresh timing needs the real app.
   Run `app/scripts/sandbox.sh --app` by hand (no scripted input), open a long

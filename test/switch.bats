@@ -39,6 +39,17 @@ wt_head() { git -C "$REPO/.worktrees/$1" rev-parse --abbrev-ref HEAD; }
   [ "$(wt_head feat-x)" = "feat-y" ]
 }
 
+@test "switch: a base after -- is a ref to git, never --upload-pack" {
+  # The parser honouring `--` hands this to `git fetch origin <base>`, where
+  # git would RUN it: origin here is a local path, so upload-pack runs locally.
+  make_wt feat-x
+  run_wt switch feat-x newb -- "--upload-pack=touch $BATS_TEST_TMPDIR/PWNED"
+  [ "$status" -eq 1 ]
+  [ ! -e "$BATS_TEST_TMPDIR/PWNED" ]
+  grep -qF "invalid reference: --upload-pack" <<<"$output"
+  [ "$(wt_head feat-x)" = "feat-x" ]
+}
+
 @test "switch <wt> <branch> <base>: new branch created off base" {
   make_wt feat-x
   # local-only base branch with a commit main doesn't have

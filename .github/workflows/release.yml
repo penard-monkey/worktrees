@@ -87,7 +87,7 @@ jobs:
       # There used to be a Go toolchain here, a `git clone` of a third-party
       # viewer, and a gate against it, because the viewer was `mo` and `mo`
       # does not validate the `Host` header (proposal §13.2). The server is
-      # ours now — `app/src-tauri/src/docserver.rs` — so what is gated is our
+      # ours now — `crates/worktrees-api/src/docserver.rs` — so what is gated is our
       # own source, and the gate below runs it.
       - name: build the documentation viewer's browser bundle
         run: |
@@ -127,11 +127,14 @@ jobs:
       # `Host` headers** and sends only one, which made the first run of that
       # case in the transport findings a false pass (§6.1). `--exact` so a
       # rename cannot turn this step into a filter that matches nothing and
-      # exits 0 — which is the shape a gate fails in.
+      # exits 0 — which is the shape a gate fails in. The CRATE matters as much
+      # as the names: these tests moved to `worktrees-api` with the command
+      # layer, and under `-p app` the same filter matches nothing. Only the
+      # count check below notices either mistake.
       - name: GATE — the docs server refuses a forged Host and serves a loopback one
         run: |
           set -euo pipefail
-          cargo test -p app --lib --locked -- --exact --nocapture \
+          cargo test -p worktrees-api --lib --locked -- --exact --nocapture \
             docserver::tests::a_forged_host_is_refused_and_a_loopback_one_is_served \
             docserver::tests::a_duplicate_host_header_is_refused_rather_than_resolved \
             docserver::tests::a_cross_origin_request_is_refused_and_nothing_says_otherwise \

@@ -132,6 +132,10 @@ export function panelsFor(s: Settings, key: string | null): Settings {
 
 // Settings → Codex: how much a Worktrees-launched Codex may do without asking.
 // The same three strings `worktrees_core::codex::Permissions::parse` accepts.
+// HOST policy, like pi's project trust below: neither is a setting of this
+// client. The host keeps both (`host-policy.json`, worktrees-api `hostpolicy`),
+// the panels read them back from it, and only a Settings click writes them.
+// `Settings` carries a copy of each for OLDER builds only (end of the type).
 export const CODEX_PERMISSIONS = ["ask", "auto-review", "full"] as const;
 export type CodexPermissions = (typeof CODEX_PERMISSIONS)[number];
 export const PI_PROJECT_TRUST = ["never", "ask"] as const;
@@ -350,18 +354,10 @@ export type Settings = {
   editor_cmd: string; // "Open in editor" command, e.g. code / cursor / subl
   terminal_cmd: string; // "Open in terminal app" command; {session} → shell-quoted tmux session. "" hides the menu item.
   default_provider: Harness; // app's initial agent
-  // How much a Worktrees-launched Codex may do without asking. Pushed to the
-  // backend (`set_codex_permissions`) at load and on every change; it applies to
-  // the NEXT launch. Mirrors `worktrees_core::codex::Permissions`.
-  codex_permissions: CodexPermissions;
   // The model each harness is preselected on in the new-worktree dialog and the
   // Switch agent sheet. Absent: Claude and Codex use their CLI's default; pi has
   // none worktrees will use, so the first ready model is offered instead.
   default_models: Partial<Record<Harness, string>>;
-  // What a repo NOT in the user's allowance gets from pi: `never` launches with
-  // --no-approve, `ask` lets pi's own trust prompt decide. Pushed to the backend
-  // (`set_pi_trust`) like `codex_permissions`. Mirrors `worktrees_core::trust::PiTrust`.
-  pi_project_trust: PiProjectTrust;
   ai_auto_resume: boolean; // single-click Enter resumes the selected provider when possible
   update_auto_check: boolean; // poll for releases hourly while visible (manual check always works)
   // The release tag whose update bubble was closed ("" = none). Per VERSION, so
@@ -437,6 +433,22 @@ export type Settings = {
   // already persisted the old value. Without it a default flip is invisible to
   // exactly the people who have been running the app — see `migrate`.
   settings_rev: number;
+  // NOT settings of this build: a copy of the host's Codex permissions and pi
+  // project trust (host policy, above) for an OLDER one. v0.42.0 and earlier
+  // read only this file, so without it a downgrade falls back to Auto-review —
+  // wider than Ask — and to Skip, and writes those back. Never read here.
+  // Written only after a Settings click the host ACCEPTED, with the value the
+  // host then reports, and never at load: the getters answer the EFFECTIVE
+  // value, which can come from env or user config while the host holds
+  // nothing, and `hostpolicy::migrate_from_ui_state` copies a chosen value
+  // from here into a host that lacks the key — so a copy taken at load would
+  // turn env or config into host policy. After a click the host has the key,
+  // and the migration never copies over one it has. Two edges, accepted: a
+  // change made in an older build after a downgrade is ignored on the way
+  // back up (the host already has the key), and a host-policy.json deleted by
+  // hand gets this copy back at the next boot rather than env and config.
+  codex_permissions?: CodexPermissions;
+  pi_project_trust?: PiProjectTrust;
 };
 
 /** Current settings revision. Bump ONLY together with a step in `migrate`. */
@@ -489,9 +501,7 @@ export const DEFAULTS: Settings = {
   editor_cmd: "code",
   terminal_cmd: "",
   default_provider: "claude",
-  codex_permissions: "auto-review",
   default_models: {},
-  pi_project_trust: "never",
   ai_auto_resume: true,
   update_auto_check: true,
   update_dismissed: "",
@@ -796,6 +806,10 @@ export async function loadSettings(): Promise<Settings> {
     // still carries the key; drop it here so the next whole-blob save stops
     // copying it forward (the merge above would keep it forever otherwise).
     delete (s as Partial<Settings> & { agent_setup_dismissed?: unknown }).agent_setup_dismissed;
+    // NOT retired, though this build never reads them: `codex_permissions` and
+    // `pi_project_trust` stay in the blob, untouched, as an older build's copy
+    // of host policy (see the type). Deleting them here made every downgrade
+    // reset Codex to Auto-review. `hostpolicy-check.mjs` rule 6 pins it.
     s.usage_claude = typeof s.usage_claude === "boolean" ? s.usage_claude : true;
     s.usage_codex = typeof s.usage_codex === "boolean" ? s.usage_codex : true;
     s.usage_kimi = typeof s.usage_kimi === "boolean" ? s.usage_kimi : true;
@@ -810,8 +824,6 @@ export async function loadSettings(): Promise<Settings> {
     s.done_steps = clampSteps(s.done_steps);
     if (typeof s.projects_parent !== "string") s.projects_parent = "";
     if (!isHarness(s.default_provider)) s.default_provider = HARNESSES[0];
-    if (!CODEX_PERMISSIONS.includes(s.codex_permissions)) s.codex_permissions = "auto-review";
-    if (!PI_PROJECT_TRUST.includes(s.pi_project_trust)) s.pi_project_trust = "never";
     // A tab that no longer exists must land on Files, globally AND per place.
     // Without this, `"automations"` (the tab removed after 0.40.1) persisted in
     // ui-state.json fell through the dock body's ternary to the Terminal with

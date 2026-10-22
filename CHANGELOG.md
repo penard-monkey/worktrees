@@ -6,6 +6,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ## [Unreleased]
 
 ### Changed
+- **The 149 app commands moved into a new `worktrees-api` crate**, leaving the
+  Tauri layer as thin wrappers. Nothing changes for the desktop app — the same
+  149 commands with the same arguments, verified against `main`, plus
+  `get_codex_permissions` for the host-policy change below — but the
+  command layer can now be called by something that is not a window, which is
+  what `worktrees serve` will need. `app/src-tauri/src/lib.rs` goes from 11,288
+  lines to about 2,100; the PTY host, the documentation server and its viewer
+  move with the handlers that drive them.
+- **A sandboxed app no longer writes into your real app's log.**
+  `app/scripts/sandbox.sh --app` runs under its own bundle identifier and has
+  always had its own config dir, but `app.log` was keyed to a compile-time
+  constant and went to the installed app's folder regardless. It follows the
+  running identifier now. (The one `startup` line is still written before the
+  app can be asked which identifier it is.)
 - **A project the worktrees rules can be applied to (or updated in) now shows
   "Repair / upgrade…" in its right-click menu**, with no number beside it, so
   Apply is one menu item away instead of buried in Project settings. The rules
@@ -35,6 +49,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   brings "Repair / upgrade…" back, with a **Review** button on its To do row,
   and no longer tells a repository with no remote to push it. Once GitHub says
   the branch's PR is merged, the row offers **Remove the place**.
+- **`--` ends the options of `new`, `switch`, `open`, `close`, `rm`, `relink`,
+  `provision`, `doctor` and `status`**, so `worktrees new -- <name>` takes
+  what follows as the name however it is spelled. It used to be an unknown
+  flag.
 
 - **Kimi Code is a fourth agent: `worktrees new|open --ai kimi`** (measured on
   kimi 2.2.0). A lane runs in its own `~agent~kimi` session, `--model` takes
@@ -74,6 +92,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   too. Settings → Usage can turn it off.
 
 ### Fixed
+- **Opening the app no longer sets what Codex and pi may do.** Settings →
+  Codex → Permissions and Settings → pi → Project trust were sent to the
+  backend every time the app loaded, from the window's own saved settings, so
+  whichever window loaded last decided them for every lane. With one engine
+  serving several windows or devices, opening a stale one was enough to widen
+  Codex to Full access everywhere. Both now live on this machine, in
+  `host-policy.json` beside the app's settings, and change only when you click
+  them in Settings; the panels show the machine's value. A value you had
+  chosen is carried over once, the first time the new version starts, and
+  the app's settings file keeps a copy of what you last picked, so going back
+  to an earlier version keeps your choice instead of resetting Codex to
+  Auto-review. The
+  CLI and lanes started over MCP still follow `$WORKTREES_CODEX_PERMISSIONS`,
+  `$WORKTREES_PI_PROJECT_TRUST` and your config, as before. If you never
+  chose a value in the app, lanes the app starts now follow those too, rather
+  than the default the window used to push: check `codex_permissions` in
+  your config if it says `full`.
+- **Reloading the window no longer briefly turns terminal scrollback saving
+  back on.** With "Keep each tab's output between restarts" (or "Give each tab
+  its own command history") switched off, a reload sent the defaults — both on
+  — to the backend before your settings had loaded, and if the 15-second save
+  landed in that gap, open dock tabs had their output written to disk anyway. The switches now reach the backend only
+  once your settings have loaded, and a refusal shows an error rather than
+  being dropped.
 - **"Write .worktrees.toml" in Project settings now writes the file.** In a
   repo with nothing to suggest — no gitignored credential file, no ports, no
   compose — the button greyed out, came back, and nothing appeared: `init`
@@ -84,6 +126,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   (the same all-comments file `--print` has always emitted, which `doctor`
   reads back clean). Without `-y` nothing changes, except that the message
   now says how to ask for the template anyway.
+- **The Claude and Codex usage readers log to app.log again.** Since v0.35.0
+  the app's builder called `.setup()` twice, and tauri keeps only the LAST
+  closure, so the one that hands core its log sink never ran: every line those
+  readers wrote was dropped without a trace. There is one `.setup` now, and
+  `app/scripts/api-boundary-check.mjs` fails if a second appears.
+- **A branch, base or place name that begins with `-` is no longer read as a
+  flag by the app's commands.** They handed what the app sent straight to the
+  CLI's argument parsers, so a base of `--no-fetch` turned the fetch off,
+  `--brief=…` planted a brief the new agent opened on, and relink's place name
+  `--all` relinked every place, `--force` included — and `worktrees serve`
+  will put any client's strings there. Such names are now refused, with the
+  reason, before anything runs. A new branch is held to git's own rule
+  (`git check-ref-format --branch`), so `feat x` is refused up front and the
+  new-worktree form comes back with what you typed. Behind that, every value
+  rides after a `--`, and the git calls that carry one end their own options
+  too: `switch`'s fetch of a new branch's base would otherwise have RUN a base
+  of `--upload-pack=<cmd>`. One narrowing: a place whose name contains `..`
+  (only `--name` can make one) can no longer be opened, switched, closed or
+  removed from the app — the MCP tools have always refused it.
 - **The Claude usage meter no longer puts your Claude login token where other
   programs can read it.** To fetch the usage bars, worktrees passed Claude
   Code's OAuth access token to `curl` as a command-line argument, and any

@@ -933,7 +933,7 @@ mod tests {
     #[test]
     fn layer_a_rejects_nul_and_over_length() {
         assert!(err("a\0b").contains("NUL byte"));
-        // and via the parser, where TOML's ` ` escape is the delivery vector
+        // and via the parser, where TOML's `\u0000` escape is the delivery vector
         assert!(parse("[[file]]\npath = \"a\\u0000b\"\n").is_err());
         let long = format!("{}.env", "a".repeat(MAX_PATH_BYTES));
         assert!(err(&long).contains("over the 1024-byte limit"));

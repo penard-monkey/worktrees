@@ -1,0 +1,35 @@
+[package]
+name = "worktrees-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The command layer over worktrees-core: what the Tauri app and `worktrees serve` both call."
+
+[dependencies]
+worktrees-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Deliberately NO tauri: this crate exists so the command layer can be called
+# by something that is not a window. A `tauri` dependency here would re-create
+# the coupling the extraction removes, and `cargo tree -p worktrees-api` is the
+# check — it must report zero.
+#
+# The COMMAND transport still belongs to the caller: nothing here opens or
+# speaks the socket a client connects on, and `worktrees serve` will bring its
+# own. The hyper/tokio below are not that. They are the DOCUMENTATION server
+# (`docserver.rs`), a product feature that serves a place's docs to a browser
+# on loopback and has embedded hyper since it replaced `mo`
+# (GHSA-6pff-wf7m-6f5h). It moved here with `viewer.rs` because the handlers
+# that drive it did; a phone wants it as much as the desktop does.
+sha2 = "0.10"
+hyper = { version = "1.11", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+tokio = { version = "1", features = ["net", "rt", "rt-multi-thread", "time"] }
+getrandom = "0.3"
+# The PTY host: the tmux attach and the dock's own owned shells.
+portable-pty = "0.9"
+
+[target.'cfg(unix)'.dependencies]
+# `proc_pidinfo` — a dock shell's live cwd, which only the kernel knows.
+libc = "0.2"

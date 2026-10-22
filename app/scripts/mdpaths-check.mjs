@@ -137,8 +137,13 @@ check(html.includes('<span role="link" tabindex="0" class="md-link md-path" titl
 check(!/href=/.test(html.replace(/<a [^>]*>/g, "")), "a detected path carries no href");
 
 // ── 3. batching ──────────────────────────────────────────────────────────────
-const MAX = Number(/const TERM_PATHS_MAX: usize = (\d+);/.exec(fs.readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8"))?.[1]);
-eq(P.DOC_PATHS_BATCH, MAX, "DOC_PATHS_BATCH matches lib.rs's TERM_PATHS_MAX");
+// The Files tab's backend is `worktrees-api` now; what stays in lib.rs is the
+// `#[tauri::command]` wrapper and the invoke-handler list, so the rules below
+// are read from where they actually live.
+const API = fs.readFileSync(new URL("../../crates/worktrees-api/src/files.rs", import.meta.url), "utf8");
+const MAX = Number(/const TERM_PATHS_MAX: usize = (\d+);/.exec(API)?.[1]);
+check(Number.isFinite(MAX), "TERM_PATHS_MAX is still where this check looks (worktrees-api/src/files.rs)");
+eq(P.DOC_PATHS_BATCH, MAX, "DOC_PATHS_BATCH matches worktrees-api's TERM_PATHS_MAX");
 const many = Array.from({ length: 150 }, (_, i) => `d/f${i}.md`);
 {
   const calls = [];
@@ -163,11 +168,14 @@ const many = Array.from({ length: 150 }, (_, i) => `d/f${i}.md`);
 
 // ── 4. the shared resolver, and the mock ─────────────────────────────────────
 const lib = fs.readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8").split("\n#[cfg(test)]")[0];
+const api = API.split("\n#[cfg(test)]")[0];
 const body = (name) => {
-  const at = lib.indexOf(`fn ${name}(`);
-  if (at < 0) return "";
-  const end = lib.indexOf("\n}\n", at);
-  return lib.slice(at, end);
+  const at = api.indexOf(`fn ${name}(`);
+  // An empty body matches none of the patterns below, so a renamed function
+  // would read as a drift rather than as a missing check — but say which.
+  if (at < 0) { fail(`${name} is not in worktrees-api/src/files.rs any more`); return ""; }
+  const end = api.indexOf("\n}\n", at);
+  return api.slice(at, end);
 };
 const rdp = body("resolve_doc_path");
 check(rdp.includes("resolve_term_path(raw,") && rdp.includes("resolve_term_path(rel,"), "resolve_doc_path answers a path AND every index entry through resolve_term_path");

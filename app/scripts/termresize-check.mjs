@@ -574,10 +574,12 @@ async function settled(opts) {
 // drift, so raising one without the other is a red gate rather than a quiet
 // regression.
 {
-  const lib = fs.readFileSync(fileURLToPath(new URL("../src-tauri/src/lib.rs", import.meta.url)), "utf8");
-  const ringM = /const SHELL_RING: usize = ([^;]+);/.exec(lib);
+  // The dock shell's ring lives in the command layer now, with the PTY host.
+  const api = fs.readFileSync(
+    fileURLToPath(new URL("../../crates/worktrees-api/src/term.rs", import.meta.url)), "utf8");
+  const ringM = /const SHELL_RING: usize = ([^;]+);/.exec(api);
   const scrollM = /const TERM_SCROLLBACK = (\d+);/.exec(raw);
-  if (!ringM) fail("SHELL_RING not found in lib.rs — has the dock shell's ring been renamed?");
+  if (!ringM) fail("SHELL_RING not found in worktrees-api/src/term.rs — has the dock shell's ring been renamed?");
   else if (!scrollM) fail("TERM_SCROLLBACK not found in TerminalPane.tsx — has the scrollback been inlined again?");
   else {
     const ring = ringM[1].split("*").reduce((a, b) => a * Number(b.trim()), 1);

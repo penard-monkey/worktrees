@@ -81,6 +81,23 @@ started in a home or scratch directory the moment the app began installing it
 globally. It now handshakes, advertises zero tools and says why; `test/mcp.bats`
 pins that, and the bats suite caught the change by asserting the old contract.
 
+**A client's string is never a flag (R3) — and `--` alone would have made it
+worse.** Every core `cmd_*` parser sorts flags from positionals by the leading
+`-`, and `worktrees-api` pushed the app's strings in bare: `relink`'s `slug:
+"--all"` relinked every place, `--force` included, and came back OK. Three
+parts, all required. The api builds every argv with `worktrees_api::argv::Argv`
+(our flags are `&'static str`, a value is glued on as `--x=<v>`, positionals go
+after `--`; a test fails on any other call to a `cmd_*`). The parsers honour
+`--` (`worktrees_core::argv::split_options`). The boundary refuses a `-`-led
+branch, base or slug with core's `safe_arg`/`branch_arg`, which the MCP server
+shares. The trap is the middle part: core was safe by ACCIDENT, because the
+parser refused every `-`-led positional as an unknown flag. Honour `--` and the
+value reaches git, which permutes options the same way, and `do_switch`'s
+`git fetch origin <base>` with `--upload-pack=<cmd>` RUNS `<cmd>` (measured, on
+a local-path origin). So a git call carrying a client value puts its own `--`
+in front of it, and teaching any other parser `--` starts with walking where its
+positionals land.
+
 ## Gates (run before any PR)
 
 ```sh
@@ -91,6 +108,7 @@ make test           # bats suite vs the Rust binary (fake git/tmux shims)
 make lint           # shellcheck + bash-3.2 gate (shim + install.sh)
 cargo test -p worktrees-core
 cargo test -p worktrees-cli   # MCP protocol unit tests live here
+cargo test -p worktrees-api   # the command bodies + tests/headless.rs
 cargo test -p app --lib      # `check`/`build` do NOT compile `mod tests`
 cd app && ./node_modules/.bin/tsc --noEmit && cargo check -p app
 ```
@@ -147,6 +165,29 @@ MATCH.** `-q` exits at the first hit, the upstream stage takes SIGPIPE, and
 pipefail promotes that to the pipeline's status — so "found" reads as "not
 found". Two probe results were misread as product bugs before this was spotted.
 Write to a file, then grep the file.
+
+**Inside Claude Code, `grep` is not grep, and it skips binary files without a
+word.** The shell snapshot defines `grep` as a function that runs Claude's
+bundled ugrep with `-I`, so any file holding even one NUL byte is skipped
+rather than searched. `projcfg.rs` held one, a literal NUL in a comment, so
+`grep -r USER_ONLY_KEYS crates/worktrees-core/src` listed every file that CITES
+the const and not the one that DEFINES it, and a single-file grep printed
+nothing and exited 1. A lane concluded from exactly that, on 2026-10-17, that
+the const "no longer exists"; it sits at line 51, and the claim was relayed
+before anyone checked. A "not found" that a conclusion rests on needs a second
+witness: `git grep` or `/usr/bin/grep` (`command grep` skips the function),
+which both REPORT a match in a binary file instead of skipping it.
+
+**A backslash escape written through a script can land as the raw byte.**
+`"\x00"` or `"\u0000"` inside an ordinary Python string literal IS a NUL by
+the time the file is written. One archived session summary says in its own
+words that a Python heredoc did this — in a sentence whose `\x00-\x1f\x7f` had
+itself become raw bytes — and `projcfg.rs`'s NUL fits the same shape. When a
+script writes source or docs, use raw strings (`r"…"`) or double the
+backslash, then check the file with `file`, which must say text. Do not count
+on git to notice: it sniffs only the first 8000 bytes, so it showed that
+summary's diffs as `Binary files differ` and rendered `projcfg.rs`, whose NUL
+sat deeper, as ordinary text.
 
 **A pipeline's exit status is the LAST stage's.** `make test | tail -15` exits 0
 because `tail` did, and a mid-stream `not ok` scrolls off a 15-line window — so
@@ -340,6 +381,17 @@ PAIR of directions (title/lifecycle must notify, clock fields must not), each
 confirmed red by breaking the fix the opposite way — too narrow is as wrong as
 too broad and does not look like it. Third sibling of the two notes above.
 
+**A test that races two sleeps asserts the scheduler, not the rule.**
+`a_forced_ask_queued_behind_a_fetch_shares_it` slept 40ms and expected to land
+inside a 150ms fetch on another thread; a macOS CI runner spawned that thread
+late enough that it did not, and the failure read as the PR cache fetching
+twice. Locally it passed 40 of 40, which is why it reached CI. The rule was
+about three STAMPS (asked, started, done), so the fix is the `_in` seam one
+level down: `answer_with` takes the clock, the test scripts the stamps, and a
+`Barrier` keeps the shape without deciding the outcome. The Rust twin of
+`termresize-check.mjs`'s virtual clock — any test with a `sleep` on both sides
+of a race wants the same treatment.
+
 **A new test must be shown to FAIL first.** ROADMAP's zombie-children item
 records a regression test that passed identically with and without its fix.
 Break the thing under test (drop the `skip_serializing_if`, restore the old
@@ -461,6 +513,19 @@ after it is "command not found" — which reads as a sandbox refusing curl.
 
 - **Commands must be `async fn`** — sync handlers run on the main thread and
   freeze the UI for every git/tmux shell-out.
+- **`Builder::setup` REPLACES, and `state::<T>()` compiles for any `T`.**
+  tauri 2.11.5 stores `self.setup = Box::new(setup)`, so a second `.setup(…)`
+  in the chain silently discards the first. The first held core's log sink from
+  #358 (v0.35.0) on, and then, in #508, `IDENT` and the `Ctx` itself. Every
+  `ctx()` panicked "state() called before manage()", and #508 sat 9/9 green
+  with an app that could not answer one command: nothing in CI runs the app,
+  and the check that "exactly one Ctx is managed" counted the line textually,
+  in the dead closure. Fixing that surfaced a second of the same kind: the poll
+  still asked `state::<viewer::Viewer>()` for a registry that had moved into
+  the `Ctx`. `api-boundary-check.mjs` now counts `.setup(` and refuses any
+  state lookup but the `Ctx` and the window tracker. Both failures exist only
+  as `[panic] … before manage()` lines in `app.log`, so after any change to
+  `run()`, launch it (`sandbox.sh --app`) and grep the log; no suite will.
 - **GUI launches get launchd's bare PATH** (no homebrew → no tmux).
   `fixup_gui_path()` in lib.rs resolves the login-shell PATH at startup —
   don't add subprocess calls that assume PATH before it runs.
@@ -1077,9 +1142,15 @@ after it is "command not found" — which reads as a sandbox refusing curl.
   `cli-missing`, and that state deliberately suppresses the offer, so you would
   measure the wrong thing and conclude the feature is broken. Point `CARGO_HOME`
   and `RUSTUP_HOME` at the real ones or the build re-downloads the registry.
-  Second gap, unrelated: `--app` moves the CONFIG dir to
-  `net.casadelvalle.worktrees.sbx` but `app.log` still goes to the **plain**
-  identifier — a sandbox writes into your real app's log unless HOME is faked.
+  Second gap, unrelated, and now CLOSED: `--app` moves the CONFIG dir to
+  `net.casadelvalle.worktrees.sbx`, and `app.log` used to go to the **plain**
+  identifier regardless, so a sandbox wrote into your real app's log unless
+  HOME was faked. `log_dir()` read `APP_IDENT`, a `const`; it reads a runtime
+  `IDENT` now, set in `.setup()` from `app.config().identifier` — the same
+  field `app_config_dir()` is `config_dir().join(…)` of, which is why the
+  config dir already followed the override and the log did not. One line is
+  still written under the default: the `startup v… PATH=…` line, emitted
+  before any app handle exists to ask.
 - **A vanished sandbox app means the human closed it.** `tauri dev` exits 0 when
   the window closes, which is indistinguishable from a clean shutdown because it
   is one; a harness kill is 143. Twice in one session that was reported as a
