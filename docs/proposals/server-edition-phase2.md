@@ -22,7 +22,9 @@ recommendation: a host is rediscovered over mDNS in Phase 2 (§4.7).
 **Base.** Written against `feat/app-serve-client` at `fadb2ce`, the tip of the
 unmerged Server Edition stack (#508 → #516 → #515 → that branch). Every
 `file:line` below is at that commit unless it names another branch. Where this
-document and the code disagree, the code wins.
+document and the code disagree, the code wins. The stack has since merged to
+main. #516 as merged also closed gaps 11 and 15 (§8). The line references
+still point at `fadb2ce`.
 
 **Inputs.** `server-edition.md` (decisions 1–7, §III.3–III.9, the Queued
 list, Appendices A and B), the OWASP review of `serve` as built (findings
@@ -49,7 +51,7 @@ measurements as exit criteria. The draft was then reviewed with the
 | 5 | Per-object authorization (R1) | Each device has capabilities (`read`, `write`, `answer`, `instruct`, `stream`, `admin`) and a project scope. Every row of the dispatch table declares the capability it needs and the object it acts on. One resolver checks that before the body runs, against the grant of the (principal, device) pair: the principal's grant intersected with the device's. The scope also rides into the api, so the api's own path guard answers with the caller's roots: two checks, as R1 asked. Results and events are cut down to the scope. | 2 |
 | 6 | Rows a remote device never reaches | A new `HostConsole` class, served on loopback only. It covers every row that can widen what agents on this host may do, pairing and device administration, `update_cli` (*decided*, §11 Q3), and adopting a project from a hub. | 2 |
 | 7 | The remote listener | Off by default, with a one-click kill switch on the host. It binds one specific private address on a named interface, an overlay address or a LAN one (*decided*, §11 Q6), never a wildcard and never loopback. "Private" is a closed list (RFC 1918, CGNAT `100.64.0.0/10`, link-local, ULA `fc00::/7`), and anything else is refused. When the address leaves its interface or the network changes, the listener closes until the same network returns or the host chooses again. A new address on the same network rebinds by itself, at most three times an hour (*decided*, §11.2 N4). On a LAN, devices find a moved host over mDNS: it is advertised only in LAN mode and on the bound interface, it reveals nothing but an opaque id, and a discovered address is adopted only after a pinned handshake (*decided*, §11.1 N2). An address code is the fallback. TLS 1.3 is mutual and pinned both ways (rustls), with no CA, no resumption and no 0-RTT in Phase 2. On iOS the socket lives in the Rust shim and not in the WebView. | 2 |
-| 8 | The CI witness (R8) | A connect witness for loopback serve, which is missing today. Then the bind rules, as connects: a public address that IS bindable is refused, the remote port never answers on loopback, a peer outside the allowed sources is dropped, and an address change pauses and resumes the listener. Then identity: no certificate is refused, an unenrolled one is refused, an enrolled one is served, a revoke kills the live socket, an expired device is refused, and the pairing port is closed outside a window. Measured on both platforms, with a release gate that greps the exact count. | 2 |
+| 8 | The CI witness (R8) | A connect witness for loopback serve, which #516 added to CI (it still needs its release gate). Then the bind rules, as connects: a public address that IS bindable is refused, the remote port never answers on loopback, a peer outside the allowed sources is dropped, and an address change pauses and resumes the listener. Then identity: no certificate is refused, an unenrolled one is refused, an enrolled one is served, a revoke kills the live socket, an expired device is refused, and the pairing port is closed outside a window. Measured on both platforms, with a release gate that greps the exact count. | 2 |
 | 9 | The audit log (R5) | `<config_dir>/audit.jsonl`, mode `0600`, append-only and hash-chained. Only serve's connection layer writes it, and its records are structured, never free text. Every record names a principal as well as a device. | 2 |
 | 10 | Resource limits (R6) | Per-device connection, in-flight and rate caps; bounded outboxes and lanes; single-flight for the expensive reads; separate budgets for loopback and remote, so a device cannot starve the desk. | 2 |
 | 11 | The agent-instruction surface (R7) | One path classifier in core. Instruction files need `instruct`. Files that EXECUTE without anyone choosing to run them need `stream`. `.git/**` is never written. Provenance is kept out of band, with no markers in the file. | 2 |
@@ -793,7 +795,7 @@ loopback behaviour the same):
 | `project` | `new_place`, `fetch_origin`, `rules_review`, `rules_lane_remove` |
 | `root` + `session` | `plan_prompt` and `plan_ask_main`: fixed text, no Enter (`files.rs:649`, `:683`, `:703`) |
 | `file(path)` | `write_file` to a plain path (§7) |
-| `global` | `set_settings` (it becomes a per-key patch; §9), `log_event` (L1 fix, rate-limited) |
+| `global` | `set_settings` (it becomes a per-key patch; §9), `log_event` (L1 closed by #516; rate-limited) |
 | `all` | **`reorder_projects`**: the nav order is host-wide |
 
 **read:**
@@ -1061,9 +1063,15 @@ fails.
 | **Self-signed, pinned both ways (SPKI), TLS 1.3 only, mutual** | Works from Rust; not from a WebView (§4.4) | Exact key | None after pairing | **Chosen** |
 
 **The configuration.** rustls with TLS 1.3 only and its default cipher
-suites. rustls 0.23.42, ring 0.17.14 and tokio-rustls 0.26.4 are already in
-`Cargo.lock`, through the app's updater (`reqwest`), so the CLI gains a
-dependency edge rather than new versions. Certificate generation adds
+suites. rustls 0.23 (≥0.23.46), ring 0.17 and tokio-rustls 0.26 are already
+in the tree, through the app's updater (`tauri-plugin-updater` → `reqwest`),
+so the CLI gains a dependency edge rather than new crates. The floor is
+required. cargo-deny reports four advisories against the rustls that
+`Cargo.lock` held on 2026-10-21 (0.23.42: RUSTSEC-2026-0285, -0346, -0348
+and -0349, all fixed by 0.23.46) and one against its rustls-webpki (0.103.13:
+RUSTSEC-2026-0382, fixed in 0.103.16). A bump PR is on its way. This document
+names floors, not locked versions: the slice that adds TLS takes whatever the
+tree holds then, as long as it meets them. Certificate generation adds
 `rcgen`. Every new crate is pinned and checked on OSV at its locked version
 before it is committed, as handshake v1 requires. CI gains `cargo deny check
 advisories`, the durable check the serve review asked for (its §4), because
@@ -1178,14 +1186,16 @@ capabilities, scope and expiry.
 
 ### 4.6 The CI witness: identity, not just reachability (R8)
 
-**First, a debt from Phase 1.** Decision 6 says "the CI witness is a
-CONNECT with the served case first". Serve has no such test today. The only
-off-loopback connect witness in the repo is the docs server's
-(`crates/worktrees-api/src/docserver.rs:1554`–`1617`; `git grep own_lan_addr`
-finds only it). Serve binds correctly (`conn.rs:306`), but nothing in CI
-would notice if it stopped. Close this first, by copying that test's shape:
-a loopback connect that must succeed, then a connect to `own_lan_addr()` on
-the same port that must fail.
+**First, a debt from Phase 1, now paid in CI.** Decision 6 says "the CI
+witness is a CONNECT with the served case first". At `fadb2ce` serve had no
+such test, and the only off-loopback connect witness in the repo was the docs
+server's (`crates/worktrees-api/src/docserver.rs:1554`–`1617`). #516 as
+merged added one in that shape:
+`crates/worktrees-cli/tests/serve_bin.rs::serve_can_be_reached_on_loopback_and_not_off_it`.
+It makes a loopback connect that must succeed, then a connect to
+`own_lan_addr()` on the same port that must fail. On a runner with no LAN
+address it fails instead of skipping. It runs in CI on both OSes (gap 11). It
+is not yet in the release gate, which slice 0 adds (below).
 
 **The bind-rule witness, as connects** (§11 Q6). The rule the bind rules
 guard is "never reachable from a public address, and never on loopback".
@@ -1290,7 +1300,9 @@ node:22-alpine` or the Linux runner for the Linux half.
 boundary tests by exact name and greps `test result: ok. 4 passed`
 (`.github/workflows/release.yml:134`–`146`). Add a second step of the same
 shape for the serve witness, with its own exact count, because a renamed
-test turns `--exact` into a filter that matches nothing and exits 0.
+test turns `--exact` into a filter that matches nothing and exits 0. Slice 0
+adds it for the loopback witness that is already in the repo. Each later
+witness joins it, with the count raised to match.
 
 ### 4.7 Rediscovery on the LAN: mDNS (decided, §11.1 N2)
 
@@ -1586,13 +1598,21 @@ Devices:
 - a device record with no pairing record (§5.2);
 - a limit tripped by one device repeatedly (§6).
 
-### 5.4 L1's two remainders, fixed in the same slice
+### 5.4 L1's two remainders, closed on main by #516
 
-- `log_event` keeps newlines, and it truncates at byte 4000, which panics in
-  the middle of a UTF-8 character (`crates/worktrees-api/src/meta.rs:27`–`28`).
-  Strip control characters and truncate on a character boundary.
-- serve.log is opened with no mode, so it gets the umask's `0644`
-  (`crates/worktrees-cli/src/serve/mod.rs:131`). Create it `0600`.
+Both were open at `fadb2ce` (gap 15), and the merged #516 closed both:
+
+- `log_event` kept newlines and truncated at byte 4000, which panics in the
+  middle of a UTF-8 character (`crates/worktrees-api/src/meta.rs:27`–`28` at
+  `fadb2ce`). `meta::ui_line` now escapes the C0/C1 controls, the Unicode line
+  and paragraph separators and the bidi controls, then truncates on a
+  character boundary. Escaping rather than stripping keeps an attempt
+  visible.
+- serve.log was opened with no mode, so it got the umask's `0644`
+  (`crates/worktrees-cli/src/serve/mod.rs:131` at `fadb2ce`). It is now
+  created `0600` and re-tightened on every write, since an older binary may
+  have created it. The rotated `serve.log.1` is re-tightened too, because a
+  `rename` keeps the old mode.
 
 ---
 
@@ -1758,9 +1778,11 @@ label (§1.1) and revocation.
 ## 8. The known gaps
 
 The brief's eight are first, then seven found while writing this, then one
-that Appendix B already had. Each is reachable today by an authenticated
-loopback client at `fadb2ce`. Gap 9 needs less: a cloned repository's content
-plus the user's next ordinary save.
+that Appendix B already had. At `fadb2ce`, an authenticated loopback client
+could reach each one. Gap 9 needs less: a cloned repository's content plus
+the user's next ordinary save. #516 as merged closed gaps 11 and 15. The
+`fadb2ce` stack commit came before that, so the two rows keep their original
+text and record the closure in the last column.
 
 | # | Gap | Where | Fix shape | Phase |
 |---|---|---|---|---|
@@ -1774,11 +1796,11 @@ plus the user's next ordinary save.
 | 8 | `sanitize_prefix` keeps a leading `-`, and the prefix can come from `[project] prefix` in a cloned repo's `.worktrees.toml`. This lane found no call site where a session name is a positional argument rather than a `-t`/`-s` value; it is defence in depth for R3. | `crates/worktrees-core/src/config.rs:16`–`27`, `:308` | Map a leading `-` to `_`. A session already named with a leading `-` is found by the old name once and renamed. | 2 |
 | 9 | **New. Fixed-name temp files follow a planted symlink.** `write_file` writes `.<name>.wt-tmp` beside the target with `std::fs::write`, which follows a symlink, then chmods it and renames it over the target. A repository that tracks `.README.md.wt-tmp -> ../../.zshrc` turns the user's next save of `README.md` into a write of that content into `~/.zshrc`. `README.md` then becomes the link. The same shape is in every declared-state write (`.worktrees.places.json.tmp` in the repo root) and in `init_write` (`.worktrees.toml.tmp`). | `files.rs:1323`–`1328`; `crates/worktrees-core/src/store.rs:303`–`304`; `crates/worktrees-core/src/init.rs:1014`–`1015` | Create the temp file with `create_new(true)` (`O_CREAT \| O_EXCL`, which refuses an existing path, a dangling link included), with a random suffix, as `servefile::write` already does (`servefile.rs:108`–`113`). Sweep core for the same pattern. *Found by reading, not measured. The regression test must be shown failing first.* | **Fixed on `fix/atomic-write-no-follow`; PR to main pending.** One `worktrees_core::fsx::write_atomic` for every site (store, init, provision, materialize, the dock save, the brief, the user-dir writes), with a guard test. A local bug, independent of Phase 2. |
 | 10 | **New. `repo` is never checked against the registry.** `set_note` and the other `store::edit` callers write `.worktrees.places.json` into any directory. `Project::discover` accepts any git repository. | §3.5 | The `project(…)` resolver, for every caller | 2 |
-| 11 | **New. Serve has no off-loopback connect witness**, although decision 6 says it does | §4.6 | Copy the docs server's test | 2 (first) |
+| 11 | **New. Serve has no off-loopback connect witness**, although decision 6 says it does | §4.6 | Copy the docs server's test | **Closed on main by #516.** `crates/worktrees-cli/tests/serve_bin.rs::serve_can_be_reached_on_loopback_and_not_off_it` runs in CI on both OSes, loopback connect first. Still missing: the release gate, which slice 0 adds (§4.6). |
 | 12 | **New. Events go to every socket**, including the host-wide `sessions:busy` set and `app:open-doc` | `conn.rs:202`–`207`; `host.rs:316` | Projection per event type (§3.3) | 2 |
 | 13 | **New. An authenticated client is unbounded:** a blocking task per request, an unbounded outbox, a lane per key | `conn.rs:545`, `:498`, `:217`–`237` | §6 | 2 |
 | 14 | **New. Arbitrary-path reads exposed as Engine rows:** `probe_dir`, `skill_inspect`, `sync_hub_list` | `dispatch.rs:228`, `:447`, `:317` | `admin` with `new_path` or `global` (§3.4) | 2 |
-| 15 | **New, a residue of L1:** `log_event` keeps newlines and panics on a mid-character truncation; serve.log is `0644` | `meta.rs:27`–`28`; `mod.rs:131` | §5 | 2 |
+| 15 | **New, a residue of L1:** `log_event` keeps newlines and panics on a mid-character truncation; serve.log is `0644` | `meta.rs:27`–`28`; `mod.rs:131` | §5 | **Closed on main by #516.** `meta::ui_line` escapes the controls, the line separators and the bidi controls, then truncates on a character boundary. serve.log is created `0600` and re-tightened on every write, the rotated copy included. |
 | 16 | Known (Appendix B): `term_*` acts on any id, from any connection, and ids restart at 1 every launch | `term.rs:44`, `:138`; `dispatch.rs:422`–`429` | `attach(id)` (§3.3), plus a launch nonce in the id | 2 |
 
 ---
@@ -1841,8 +1863,9 @@ the verb and the lease, with the phone, as §III.9 planned.
 Each slice merges on its own, and nothing binds off loopback until slice 6.
 
 0. **Local fixes, no remote:** gap 9 (temp files; fixed on
-   `fix/atomic-write-no-follow`, PR to main pending), gap 11 (the loopback
-   connect witness), gap 15 (L1), gap 8, `catch_unwind` on every body (§6),
+   `fix/atomic-write-no-follow`, PR to main pending), the release gate for
+   the loopback connect witness (§4.6; the witness itself, gap 11, is on main
+   by #516, as is gap 15's L1 fix), gap 8, `catch_unwind` on every body (§6),
    `cargo deny` in CI (§4.2), and the three host policies still pushed by
    the page (Appendix B, "One fix for all five").
 1. **The dispatch table:** `HostConsole`, the capability and object columns,
