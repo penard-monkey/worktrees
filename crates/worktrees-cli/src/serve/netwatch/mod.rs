@@ -30,10 +30,20 @@
 //! depend on what serve is doing: a live bind keeps serving through it, and a
 //! paused one WAITS for it before it resumes or moves, rather than resuming on
 //! a network it cannot yet tell from a café's (both silent: no dialog, no
-//! alert). And a fingerprint recorded while the router was unknown is
-//! completed by the first reading on the same network ([`Action::Learn`]) —
-//! otherwise an enable on an idle Linux host would leave the gateway out of
-//! the fingerprint for good.
+//! alert).
+//!
+//! **The other way round, a field the RECORD lacks vouches for nothing.** An
+//! enable on an idle Linux host records no router link-layer address, and a
+//! café that also hands out 192.168.1.5 with its router at .1 would otherwise
+//! match it. Where neither side has the field (a routerless cable) it is the
+//! same; where the network now shows one the record does not hold, nothing
+//! resumes or moves by itself and a bind serve resumed on its own pauses —
+//! the host is asked once ([`Question::CannotConfirm`]). The record is
+//! completed ([`Action::Learn`]) only on the bind the host itself just chose
+//! with `remote_enable`, before anything has paused it: never after a resume,
+//! a move or a restart, which would write whatever network serve happened to
+//! be on into "home". (Found by an automated review of the first cut, which
+//! resumed on such a café and learned its router.)
 //!
 //! **The transitions** (§4.1):
 //! - the address leaves its interface, the interface goes down, or is
@@ -160,6 +170,9 @@ enum Match {
     /// Something recorded is not readable right now (a router, or its
     /// link-layer address). Never a change.
     Unknown,
+    /// The network shows a router, or its link-layer address, that the
+    /// record does not hold, so the record cannot vouch for it.
+    Unrecorded,
     /// Same interface, same subnet, same router address: only the router's
     /// link-layer address differs. What ARP spoofing of the gateway looks like.
     GatewayChanged { router: IpAddr, was: LinkAddr, now: LinkAddr },
@@ -181,12 +194,14 @@ fn compare(rec: &Fingerprint, now: &Fingerprint) -> Match {
                 return Match::Different;
             }
             match (r, s) {
-                (None, _) => Match::Same,
+                (None, None) => Match::Same,
+                (None, Some(_)) => Match::Unrecorded,
                 (Some(_), None) => Match::Unknown,
                 (Some(r), Some(s)) if r.ip != s.ip => Match::Different,
                 (Some(r), Some(s)) => match (&r.lladdr, &s.lladdr) {
                     (Some(a), Some(b)) if a != b => Match::GatewayChanged { router: r.ip, was: a.clone(), now: b.clone() },
                     (Some(_), None) => Match::Unknown,
+                    (None, Some(_)) => Match::Unrecorded,
                     _ => Match::Same,
                 },
             }
@@ -262,8 +277,9 @@ pub enum Why {
     /// The address is still here, but the network around it is not the
     /// recorded one.
     NetworkChanged { addr: IpAddr, iface: String },
-    /// The address is here and the network not yet confirmed: its router, or
-    /// the router's link-layer address, is not readable yet.
+    /// The address is here and the network not confirmed: its router, or the
+    /// router's link-layer address, is not readable yet, or the network shows
+    /// one the record does not hold.
     Unconfirmed { addr: IpAddr, iface: String },
 }
 
@@ -282,6 +298,10 @@ pub enum Question {
     /// A move past [`MOVES_PER_HOUR`]: a rogue DHCP server can make the
     /// listener flap, dropping every remote connection each time.
     TooManyMoves { from: IpAddr, to: IpAddr },
+    /// "This Mac is on 192.168.1.5 on en0, but its network could not be
+    /// confirmed when remote access was turned on." The record lacks the
+    /// router, or its hardware address, that the network now shows.
+    CannotConfirm { addr: IpAddr, iface: String },
 }
 
 impl Question {
@@ -314,7 +334,8 @@ pub enum Action {
     Ask(Question),
     /// The open question no longer describes anything; take it down.
     Retract,
-    /// Persist this fingerprint: the recorded one, completed (module doc).
+    /// Persist this fingerprint: the recorded one, completed on the bind the
+    /// host just confirmed (module doc).
     Learn(Fingerprint),
 }
 
@@ -356,11 +377,21 @@ pub struct Watch {
     /// A move was refused for the limit: none happen automatically until the
     /// host chooses (a new watch) or the recorded address returns.
     held_for_host: bool,
+    /// Bound where the host just chose, and nothing has paused or moved it
+    /// since: the only state in which the record may be completed.
+    confirmed: bool,
 }
 
 impl Watch {
-    pub fn new(record: Record) -> Watch {
-        Watch { record, state: State::Starting, moves: VecDeque::new(), held_for_host: false }
+    /// `remote_enable`: the host chose this bind just now.
+    pub fn enabled(record: Record) -> Watch {
+        Watch { record, state: State::Starting, moves: VecDeque::new(), held_for_host: false, confirmed: true }
+    }
+
+    /// Serve starting on the bind `serve-remote.json` records: on whatever
+    /// network the machine is on now, which the host has not looked at.
+    pub fn restored(record: Record) -> Watch {
+        Watch { record, state: State::Starting, moves: VecDeque::new(), held_for_host: false, confirmed: false }
     }
 
     /// The record as it stands: a move changes its address, a learn its
@@ -373,7 +404,7 @@ impl Watch {
         let seen = self.see(snap);
         let mut out = Vec::new();
         match seen {
-            Seen::Held(b, Match::Same) => self.listen(b, snap, &mut out),
+            Seen::Held(b, Match::Same) => self.listen(b, &mut out),
             Seen::Held(b, Match::Unknown) => match &self.state {
                 State::Listening(cur) if *cur == b => {}
                 State::Listening(cur) => {
@@ -382,6 +413,21 @@ impl Watch {
                 }
                 _ => self.pause(Why::Unconfirmed { addr: b.ip, iface: b.iface.clone() }, &mut out),
             },
+            Seen::Held(b, Match::Unrecorded) => {
+                let on_the_hosts_bind = self.confirmed
+                    && match &self.state {
+                        State::Starting => true,
+                        State::Listening(cur) => *cur == b,
+                        State::Paused { .. } => false,
+                    };
+                if on_the_hosts_bind {
+                    self.listen(b, &mut out);
+                    self.learn(snap, &mut out);
+                } else {
+                    let q = Question::CannotConfirm { addr: b.ip, iface: b.iface.clone() };
+                    self.ask(Why::Unconfirmed { addr: b.ip, iface: b.iface }, q, &mut out)
+                }
+            }
             Seen::Held(b, Match::GatewayChanged { router, was, now }) => {
                 let q = Question::GatewayChanged { iface: b.iface.clone(), router, was, now };
                 self.ask(Why::NetworkChanged { addr: b.ip, iface: b.iface }, q, &mut out)
@@ -393,8 +439,12 @@ impl Watch {
             Seen::Candidate(b, m) => {
                 let left = self.left();
                 match m {
-                    Match::Same => self.try_move(now, b, snap, &mut out),
+                    Match::Same => self.try_move(now, b, &mut out),
                     Match::Unknown => self.pause(left, &mut out),
+                    Match::Unrecorded => {
+                        let q = Question::CannotConfirm { addr: b.ip, iface: b.iface };
+                        self.ask(left, q, &mut out)
+                    }
                     Match::GatewayChanged { router, was, now } => {
                         let q = Question::GatewayChanged { iface: b.iface, router, was, now };
                         self.ask(left, q, &mut out)
@@ -476,20 +526,20 @@ impl Watch {
         Why::AddressLeft { addr: self.record.addr, iface }
     }
 
-    fn listen(&mut self, b: Binding, snap: &Snapshot, out: &mut Vec<Action>) {
+    fn listen(&mut self, b: Binding, out: &mut Vec<Action>) {
         match &self.state {
             State::Listening(cur) if *cur == b => {}
             State::Listening(cur) => {
                 let why = Why::InterfaceReplaced { iface: cur.iface.clone(), was: cur.index, now: b.index };
                 out.push(Action::Pause { why, starting: false });
                 out.push(Action::Resume(b.clone()));
+                self.confirmed = false;
             }
             State::Starting => out.push(Action::Start(b.clone())),
             State::Paused { .. } => out.push(Action::Resume(b.clone())),
         }
         self.held_for_host = false;
         self.state = State::Listening(b);
-        self.learn(snap, out);
     }
 
     fn learn(&mut self, snap: &Snapshot, out: &mut Vec<Action>) {
@@ -504,7 +554,7 @@ impl Watch {
         }
     }
 
-    fn try_move(&mut self, now: Instant, to: Binding, snap: &Snapshot, out: &mut Vec<Action>) {
+    fn try_move(&mut self, now: Instant, to: Binding, out: &mut Vec<Action>) {
         while self.moves.front().is_some_and(|t| now.duration_since(*t) >= MOVE_WINDOW) {
             self.moves.pop_front();
         }
@@ -518,10 +568,11 @@ impl Watch {
         out.push(Action::Move { from: self.record.addr, to: to.clone() });
         self.record.addr = to.ip;
         self.state = State::Listening(to);
-        self.learn(snap, out);
+        self.confirmed = false;
     }
 
     fn pause(&mut self, why: Why, out: &mut Vec<Action>) {
+        self.confirmed = false;
         match &self.state {
             State::Listening(_) => out.push(Action::Pause { why, starting: false }),
             State::Starting => out.push(Action::Pause { why, starting: true }),
@@ -532,6 +583,7 @@ impl Watch {
     }
 
     fn ask(&mut self, why: Why, q: Question, out: &mut Vec<Action>) {
+        self.confirmed = false;
         match &self.state {
             State::Listening(_) => out.push(Action::Pause { why, starting: false }),
             State::Starting => out.push(Action::Pause { why, starting: true }),
@@ -593,7 +645,7 @@ mod tests {
     /// The enable path, for real: parse, the bind-time check, the record.
     fn enabled(addr: &str, iface: &str, s: &Snapshot) -> Watch {
         let bound = at_bind(&parse_bind(addr, iface).unwrap(), &s.ifaces).unwrap();
-        Watch::new(Record::enable(&bound, s))
+        Watch::enabled(Record::enable(&bound, s))
     }
 
     fn b(ip_: &str, iface: &str, index: u32) -> Binding {
@@ -789,7 +841,7 @@ mod tests {
     #[test]
     fn an_unconfirmed_network_at_startup_waits_for_its_gateway() {
         let t = Instant::now();
-        let mut w = enabled("192.168.1.5", "en0", &home(&["192.168.1.5/24"], Some(GW)));
+        let mut w = Watch::restored(enabled("192.168.1.5", "en0", &home(&["192.168.1.5/24"], Some(GW))).record().clone());
         let quiet = home(&["192.168.1.5/24"], None);
         let why = Why::Unconfirmed { addr: ip("192.168.1.5"), iface: "en0".into() };
         assert_eq!(w.poll(t, &quiet), [Action::Pause { why, starting: true }]);
@@ -818,6 +870,62 @@ mod tests {
 
         let mut w = enabled("192.168.1.5", "en0", &snap(vec![lan("en0", 14, &["192.168.1.5/24"])], &[]));
         assert!(matches!(&w.poll(t, &s)[..], [Action::Start(_), Action::Learn(_)]), "no router at all at enable");
+    }
+
+    /// A record that lacks the router's hardware address cannot vouch for
+    /// one (found by an automated review of 558705f). A café that also hands
+    /// out 192.168.1.5, with its router at .1 like most home routers, must
+    /// not be resumed on, moved to or learned as home. Only the bind the host
+    /// just confirmed may complete the record.
+    #[test]
+    fn a_record_cannot_vouch_for_a_router_it_does_not_hold() {
+        let t = Instant::now();
+        let quiet = home(&["192.168.1.5/24"], None);
+        let mut w = enabled("192.168.1.5", "en0", &quiet);
+        let incomplete = w.record().clone();
+        assert_eq!(w.poll(t, &quiet), [Action::Start(b("192.168.1.5", "en0", 14))]);
+        assert_eq!(w.poll(t, &home(&[], None)), [pause(left("192.168.1.5", "en0"))]);
+        let cafe = home(&["192.168.1.5/24"], Some("12:34:56:78:9a:bc"));
+        let q = Question::CannotConfirm { addr: ip("192.168.1.5"), iface: "en0".into() };
+        assert_eq!(w.poll(t, &cafe), [Action::Ask(q.clone())], "no resume, no learn");
+        assert!(!q.alerts());
+        assert_eq!(w.record(), &incomplete);
+        assert_eq!(w.poll(t, &quiet), [Action::Resume(b("192.168.1.5", "en0", 14))], "neither side knows: the same");
+        let unconfirmed = Why::Unconfirmed { addr: ip("192.168.1.5"), iface: "en0".into() };
+        assert_eq!(w.poll(t, &cafe), [pause(unconfirmed.clone()), Action::Ask(q.clone())], "a resumed bind is not the host's");
+        assert_eq!(w.record(), &incomplete);
+        let moved = home(&["192.168.1.9/24"], Some("12:34:56:78:9a:bc"));
+        assert_eq!(w.poll(t, &moved), [Action::Ask(Question::CannotConfirm { addr: ip("192.168.1.9"), iface: "en0".into() })], "no move");
+        let mut r = Watch::restored(incomplete.clone());
+        assert_eq!(r.poll(t, &cafe), [Action::Pause { why: unconfirmed, starting: true }, Action::Ask(q)], "a restart is not the host's either");
+        assert_eq!(r.record(), &incomplete);
+
+        // A move that matched only because neither side knew the lladdr is
+        // not the host's bind either.
+        let mut m = enabled("192.168.1.5", "en0", &quiet);
+        m.poll(t, &quiet);
+        assert!(matches!(m.poll(t, &home(&["192.168.1.9/24"], None))[..], [Action::Move { .. }]));
+        let after = m.record().clone();
+        let unconfirmed9 = Why::Unconfirmed { addr: ip("192.168.1.9"), iface: "en0".into() };
+        let q9 = Question::CannotConfirm { addr: ip("192.168.1.9"), iface: "en0".into() };
+        assert_eq!(m.poll(t, &moved), [pause(unconfirmed9), Action::Ask(q9)], "no learning after a move");
+        assert_eq!(m.record(), &after);
+
+        // No router at all in the record: a link without one resumes, and a
+        // router showing up later is one the record cannot vouch for.
+        let cable = snap(vec![lan("bridge0", 20, &["169.254.7.7/16"])], &[]);
+        let mut c = enabled("169.254.7.7", "bridge0", &cable);
+        c.poll(t, &cable);
+        c.poll(t, &snap(vec![lan("bridge0", 20, &[])], &[]));
+        assert_eq!(c.poll(t, &cable), [Action::Resume(b("169.254.7.7", "bridge0", 20))], "a routerless link resumes");
+        let routed = snap(vec![lan("bridge0", 20, &["169.254.7.7/16"])], &[("bridge0", "169.254.0.1", None)]);
+        assert_eq!(
+            c.poll(t, &routed),
+            [
+                pause(Why::Unconfirmed { addr: ip("169.254.7.7"), iface: "bridge0".into() }),
+                Action::Ask(Question::CannotConfirm { addr: ip("169.254.7.7"), iface: "bridge0".into() })
+            ]
+        );
     }
 
     /// A café that also hands out 192.168.1.x: everything matches but the
