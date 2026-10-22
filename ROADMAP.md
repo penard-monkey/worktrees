@@ -104,14 +104,18 @@ this repo's settings in `.claude/close-out.md`).
   and defers retries by design.
   _From: [2026-10-21 server-edition](docs/sessions/2026-10-21-server-edition/summary.md)_
 
-- **The CLI updater runs an installer from a pid-named file in `temp_dir()`.**
-  `worktrees_api::status`'s `update_cli` downloads `install.sh` to
-  `worktrees-install-<pid>.sh` and runs it. macOS's `temp_dir()` is the
-  per-user `$TMPDIR`; Linux's is the shared `/tmp`, where another local user
-  can plant a link at the guessable name or swap the file between download and
-  run. A cloned repo cannot reach it. Fix shape: a private (0700) directory
-  from `mkdtemp`.
-  _From: [2026-10-21 server-edition](docs/sessions/2026-10-21-server-edition/summary.md)_
+- **The CLI updater runs `install.sh` with nothing but TLS behind it.**
+  `update_cli` fetches it from `raw.githubusercontent.com/<repo>/<tag>/`. The
+  release's `checksums.txt` lists the binaries and app bundles, not
+  `install.sh`, so there is nothing to check it against. A checksum would come
+  from the same GitHub origin and add little. The step worth taking is a
+  signature: publish `install.sh` as a release asset with a `.sig` from the
+  updater key, and have `update_cli` verify it against that key's public half.
+  The public half is in `tauri.conf.json` today, and `update_cli` runs in
+  serve, so serve needs its own copy. Tags that predate the signature need a
+  fallback. Found by
+  reading during the private-staging fix (`fsx::PrivateDir`); the staging
+  itself is done.
 
 - **The app's own verification probe counts as an audience for a held
   `worktrees show`.** The shim's probe completes handshake v1, so for a few ms
