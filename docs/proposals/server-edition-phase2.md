@@ -1096,10 +1096,11 @@ fails.
 suites. rustls 0.23 (≥0.23.46), ring 0.17 and tokio-rustls 0.26 are already
 in the tree, through the app's updater (`tauri-plugin-updater` → `reqwest`),
 so the CLI gains a dependency edge rather than new crates. The floor is
-required. cargo-deny reports four advisories against the rustls that
+required. cargo-deny reported four advisories against the rustls that
 `Cargo.lock` held on 2026-10-21 (0.23.42: RUSTSEC-2026-0285, -0346, -0348
 and -0349, all fixed by 0.23.46) and one against its rustls-webpki (0.103.13:
-RUSTSEC-2026-0382, fixed in 0.103.16). A bump PR is on its way. This document
+RUSTSEC-2026-0382, fixed in 0.103.16). The tree is at the floor since #531,
+which moved `Cargo.lock` to rustls 0.23.46 and rustls-webpki 0.103.16. This document
 names floors, not locked versions: the slice that adds TLS takes whatever the
 tree holds then, as long as it meets them. Certificate generation adds
 `rcgen`. Every new crate is pinned and checked on OSV at its locked version
