@@ -53,6 +53,19 @@ export const ListTree = (p: IconProps) => (
     <path d="M3 10v6c0 1.1.9 2 2 2h3" />
   </Svg>
 );
+/** Plan usage — the rail's meter tile (Lucide `chart-column`). The bars sit
+ *  in their own group so the tile can tint them by the worst window's
+ *  severity while the axis stays neutral: hue in the fill, never the text. */
+export const ChartColumn = (p: IconProps) => (
+  <Svg {...p}>
+    <path d="M3 3v16a2 2 0 0 0 2 2h16" />
+    <g className="chart-bars">
+      <path d="M18 17V9" />
+      <path d="M13 17V5" />
+      <path d="M8 17v-3" />
+    </g>
+  </Svg>
+);
 export const TriangleAlert = (p: IconProps) => (
   <Svg {...p}>
     <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3" />

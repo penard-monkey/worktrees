@@ -3340,10 +3340,16 @@ body.dragging-place.drop-mention .term-wrap[data-drop="mention"] {
    Query the host, not the button, so collapsing labels never causes oscillation. */
 .usage-strip, .statusbar { container-type: inline-size; flex-wrap: wrap; }
 .usage-provider-summary { display: flex; flex-wrap: wrap; min-width: 0; align-items: center; gap: 6px; color: var(--txt-hi); font-size: var(--fs-micro); }
-.usage-provider-summary + .usage-provider-summary { border-left: 2px solid var(--txt-dim); padding-left: var(--s3); min-height: 18px; }
+/* Providers are told apart by the logo leading each name, so the gap between
+   them is plain space — the 2px rule that used to sit there read as a `|`. */
+.usage-provider-summary + .usage-provider-summary { margin-left: var(--s2); }
 .usage-window { display: flex; align-items: center; gap: 6px; flex: none; max-width: 100%; }
 .usage-window + .usage-window { margin-left: var(--s2); }
 .usage-provider-name, .usage-window-label, .usage-state { flex: none; }
+/* `flex: none` on the mark too: a squeezed row must drop words, never shrink a
+   logo to 0. Neutral text colour, like the name — hue stays in the bars. */
+.usage-provider-name, .usage-provider-head strong { display: inline-flex; align-items: center; gap: 4px; }
+.usage-provider-name .g-agent, .usage-provider-head .g-agent { flex: none; color: inherit; }
 .usage-window-label { max-width: 8em; overflow: hidden; text-overflow: ellipsis; }
 .usage-provider-summary .usage-bar { flex: 0 0 40px; width: 40px; min-width: 0; }
 .usage-bar.warning > i { background: var(--warn); }
@@ -3358,6 +3364,15 @@ body.dragging-place.drop-mention .term-wrap[data-drop="mention"] {
 .usage-minimal { display: none; font-size: var(--fs-micro); color: var(--txt-hi); }
 .usage-setting-toggle { display: flex; align-items: center; gap: var(--s2); margin-top: var(--s2); }
 .usage-trig.tile { color: var(--txt-hi); }
+/* The rail tile: a chart icon whose BARS go amber when any window is near or
+   over its limit — a fill, so the --warn-as-text contrast trap does not apply
+   — and whose axis stays neutral. Never --danger: red on this tile is the
+   service-status `.usage-badge`, and two reds 4px apart meaning unrelated
+   things cannot be told apart (see the status block comment in App.tsx).
+   Which window, and whether it is over, is the panel's to say. */
+.usage-tile-icon { display: flex; flex: none; align-self: center; }
+.usage-tile-icon svg { display: block; flex: none; }
+.usage-tile-icon.warning .chart-bars, .usage-tile-icon.over .chart-bars { stroke: var(--warn); }
 /* Keep each provider's main allowance with the highest usage as space tightens.
    Wrapping above this breakpoint also accommodates arbitrary extra buckets. */
 @container (max-width: 900px) {
@@ -3365,7 +3380,9 @@ body.dragging-place.drop-mention .term-wrap[data-drop="mention"] {
   .usage-window.worst { margin-left: 0; }
 }
 @container (max-width: 610px) { .usage-provider-summary .usage-bar { display: none; } }
-@container (max-width: 480px) { .usage-window-label { display: none; } }
+/* At this width the logo alone names the provider (the trigger's aria-label
+   and title still spell it out). */
+@container (max-width: 480px) { .usage-window-label, .usage-provider-text { display: none; } }
 @container (max-width: 360px) {
   .usage-provider-summary { display: none; }
   .usage-minimal { display: inline; }

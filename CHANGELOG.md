@@ -13,6 +13,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   flag. Sessions an older version named the old way, provider sidecars
   included, are renamed the first time the repository is used, and a terminal
   attached to one stays attached.
+- **The usage meter shows each provider's logo.** In the strip and in the
+  detail panel, Claude, Codex and kimi each lead with the mark the nav uses
+  for a live session, so the bar between providers is gone. On a narrow
+  window the logo stands in for the name. In the rail, the meter is a small
+  bar chart rather than a `▥` glyph, and its bars turn amber when a window
+  is near or over its limit.
+
+### Fixed
+- **A fresh Codex or kimi reading no longer shows as "unavailable".** On
+  returning to the window, the usage strip could read "Codex unavailable |
+  Kimi unavailable" for up to 15 seconds and then show the numbers, while the
+  panel said they had just been updated. The answer was stamped a few seconds
+  after the meter's own clock last moved, and the meter took that for a bad
+  timestamp. A timestamp more than a minute in the future is still refused.
 
 ### Security
 - **Worktrees never writes inside `.git`, or into its own state, for any

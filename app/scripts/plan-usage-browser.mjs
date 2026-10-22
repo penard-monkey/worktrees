@@ -8,9 +8,14 @@ const baseURL = process.env.USAGE_MOCK_URL ?? "http://localhost:1438";
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 const results = [];
+// This gate predates kimi and counts Claude's and Codex's windows only; the
+// mock turns kimi on by default, so default it OFF unless a step names it.
+const noKimi = () => { try { const k = "wt-mock-ui-state", s = JSON.parse(sessionStorage.getItem(k) ?? "{}");
+ if (s.usage_kimi === undefined) sessionStorage.setItem(k, JSON.stringify({ ...s, usage_kimi: false })); } catch {} };
 for (const [engine, type] of Object.entries({chromium, webkit})) {
  const browser = await type.launch({headless:true});
  const context = await browser.newContext({viewport:{width:1280,height:800}});
+ await context.addInitScript(noKimi);
  const page=await context.newPage();
  const errors=[]; page.on('pageerror', e=>errors.push(String(e)));
  await page.goto(baseURL+'/?codexUsage=multi');
@@ -48,15 +53,20 @@ for (const [engine, type] of Object.entries({chromium, webkit})) {
     const cs=getComputedStyle(e),bg=background(e),fg=over(rgba(cs.color),bg);const a=lum(fg),b=lum(bg);
     return {text:e.textContent,ratio:(Math.max(a,b)+.05)/(Math.min(a,b)+.05),color:cs.color,neutral:neutral.includes(cs.color)};
    });
-   const divider=document.querySelector('.usage-provider-summary + .usage-provider-summary');
-   const cs=getComputedStyle(divider), bg=background(divider), fg=over(rgba(cs.borderLeftColor),bg);
-   const a=lum(fg), b=lum(bg);
-   return {text,divider:{ratio:(Math.max(a,b)+.05)/(Math.min(a,b)+.05),width:parseFloat(cs.borderLeftWidth),height:divider.getBoundingClientRect().height}};
+   // Providers are told apart by the logo leading each name (no divider since
+   // #542): every summary has one, sized, and visible as a non-text mark.
+   const marks=[...document.querySelectorAll('.usage-provider-summary')].map(s=>{
+    const m=s.querySelector('.usage-provider-name .g-agent'), r=m?.querySelector('svg')?.getBoundingClientRect();
+    if(!m||!r) return {width:0,height:0,ratio:0};
+    const bg=background(m), fg=over(rgba(getComputedStyle(m).color),bg), a=lum(fg), b=lum(bg);
+    return {width:r.width,height:r.height,ratio:(Math.max(a,b)+.05)/(Math.min(a,b)+.05)};
+   });
+   return {text,marks};
   });
-  assert(contrast.divider.ratio>=3 && contrast.divider.width===2 && contrast.divider.height>=18,
-   `${engine} ${theme}: provider divider must be visible`);
+  assert(contrast.marks.length>=2 && contrast.marks.every(m=>m.width>=8 && m.height>=8 && m.ratio>=3),
+   `${engine} ${theme}: every provider must lead with a visible logo`);
   assert(contrast.text.every(c=>c.neutral), "Usage text must use neutral tokens, never severity accents");
-  results.push({engine,theme,minContrast:Math.min(...contrast.text.map(c=>c.ratio)),divider:contrast.divider,contrast});
+  results.push({engine,theme,minContrast:Math.min(...contrast.text.map(c=>c.ratio)),marks:contrast.marks,contrast});
  }
  await page.keyboard.press('Escape'); assert.equal(await page.locator('.usage-pop.pinned').count(),0);
  for (const theme of ['tokyo-night','tokyo-day']) {
@@ -130,13 +140,16 @@ for (const [engine, type] of Object.entries({chromium, webkit})) {
  await browser.close();
 }
 for(const [engine,type] of Object.entries({chromium,webkit})) {
- const browser=await type.launch();const page=await browser.newPage({viewport:{width:1100,height:650}});
+ const browser=await type.launch();const page=await browser.newPage({viewport:{width:1100,height:650}});await page.addInitScript(noKimi);
  await page.goto(baseURL+'/?codexUsage=multi');await page.bringToFront();
  await page.waitForFunction(()=>document.querySelector('.usage-trig')?.textContent.includes('48%'));
  for(const width of [600,450,300]) {
   await page.locator('.usage-strip').evaluate((e,w)=>e.style.width=`${w}px`,width);
-  const m=await page.locator('.usage-trig').evaluate(e=>({width:e.getBoundingClientRect().width,labels:[...e.querySelectorAll('.usage-window-label')].map(n=>n.getBoundingClientRect().width),bars:[...e.querySelectorAll('.usage-bar')].map(n=>getComputedStyle(n).display),minimal:getComputedStyle(e.querySelector('.usage-minimal')).display}));
+  const m=await page.locator('.usage-trig').evaluate(e=>({width:e.getBoundingClientRect().width,labels:[...e.querySelectorAll('.usage-window-label')].map(n=>n.getBoundingClientRect().width),bars:[...e.querySelectorAll('.usage-bar')].map(n=>getComputedStyle(n).display),minimal:getComputedStyle(e.querySelector('.usage-minimal')).display,
+   names:[...e.querySelectorAll('.usage-provider-text')].map(n=>n.getBoundingClientRect().width),logos:[...e.querySelectorAll('.usage-provider-name .g-agent svg')].map(n=>n.getBoundingClientRect().width)}));
   assert(m.width<width);if(width<=600)assert(m.bars.every(d=>d==='none'));if(width<=450)assert(m.labels.every(w=>w===0));if(width===300)assert(m.minimal!=='none');
+  // At <=480px the logo stands in for the name; it never shrinks to nothing.
+  if(width===600)assert(m.names.every(w=>w>0)&&m.logos.every(w=>w>0));if(width===450)assert(m.names.every(w=>w===0)&&m.logos.every(w=>w>=8));
   results.push({engine,hostWidth:width,...m});
  }
  await page.locator('.usage-strip').evaluate(e=>e.style.width='');

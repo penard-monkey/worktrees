@@ -5,6 +5,15 @@ import type { Harness } from "./harness";
 export const CODEX_STALE_SECS = 1800;
 /** kimi's reader ages its answer the same way (core `kimi_usage::STALE`). */
 export const KIMI_STALE_SECS = 1800;
+/** How far in the FUTURE a `fetched_at` may sit and still read as fresh. The
+ *  readers stamp it when they finish, while the caller's `now` moves only on
+ *  App's 15s `USAGE_TICK_MS`, so every fresh reply is up to a tick "ahead" —
+ *  and refusing those read as "unavailable" until the next tick. `fetched_at`
+ *  is the ENGINE's clock, not this page's: one machine today, but a remote
+ *  serve skewed by more than this reads "unavailable" for good, so do not
+ *  tighten it below a tick plus real skew. Further ahead is a bogus stamp, and
+ *  a number we cannot date is not one to show. */
+export const FUTURE_SLACK_SECS = 60;
 /** The providers whose answer carries its own age and reset times (codex,
  *  kimi): their staleness is judged here as well as in core. */
 const AGED = (p: Harness) => p === "codex" || p === "kimi";
@@ -55,7 +64,7 @@ export function viewUsage(info: PlanUsage, now: number): PlanUsage {
   if (!AGED(info.provider) || info.fetched_at === null) return info;
   const age = now - info.fetched_at;
   const ceiling = info.provider === "kimi" ? KIMI_STALE_SECS : CODEX_STALE_SECS;
-  if (age < 0 || age > ceiling) return { ...info, state: "unavailable", reason: "expired", limits: [] };
+  if (age < -FUTURE_SLACK_SECS || age > ceiling) return { ...info, state: "unavailable", reason: "expired", limits: [] };
   if (info.limits.some(l => expired(info, l, now))) return { ...info, state: "stale" };
   return info;
 }

@@ -2579,6 +2579,10 @@ function useUsage(enabled: boolean, claude: boolean, codex: boolean, kimi: boole
     window.addEventListener("focus", tick);
     return () => { clearInterval(timer); window.removeEventListener("focus", tick); };
   }, [enabled, claude, codex, kimi, pageVisible]);
+  // A reading is stamped when its reader FINISHES, after the focus tick above;
+  // re-reading the clock as it lands keeps `fetched_at` from sitting in the
+  // future, so `FUTURE_SLACK_SECS` only has real skew left to cover.
+  useEffect(() => setNowSec(Math.floor(Date.now() / 1000)), [c, x, k]);
   const info = enabled ? [...(claude ? [c] : []), ...(codex ? [x] : []), ...(kimi ? [k] : [])].map(i => viewUsage(i, nowSec)) : [];
   return { info: info.length ? info : null, nowSec };
 }
@@ -2604,6 +2608,21 @@ function UsageRows({ info, nowSec }: { info: PlanUsage; nowSec: number }) {
       </Fragment>;
     })}
   </div>;
+}
+
+/** The harness logo before a provider's name in the usage strip and panel —
+ *  the nav row's marks and sizes (`.g-agent-*`), not `AgentMark`, whose label
+ *  says a session is live. Decorative: the trigger's aria-label names it. */
+function UsageMark({ provider }: { provider: Harness }) {
+  const Mark = HARNESS_MARK[provider];
+  return <span className={"g-agent g-agent-" + provider} aria-hidden="true"><Mark /></span>;
+}
+
+/** The rail tile's tint: the worst severity across every window the strip
+ *  would show, so the 32px tile still says "near a limit" without a number. */
+function tileSeverity(info: PlanUsage[], nowSec: number): string {
+  const all = info.flatMap(i => stripLimits(i, nowSec).map(l => l.severity));
+  return all.includes("over") ? "over" : all.includes("warning") ? "warning" : "normal";
 }
 
 function UsageMeter({ info, nowSec, shape, side, status, onError }: {
@@ -2642,14 +2661,14 @@ function UsageMeter({ info, nowSec, shape, side, status, onError }: {
       onPointerLeave={() => { if (armed.current) clearTimeout(armed.current); setHovering(false); }}
       onFocus={() => setHovering(true)} onBlur={() => setHovering(false)} onClick={() => setPinned(v => !v)}>
       <span className={"usage-shape " + shape}>
-        {shape === "tile" ? <span aria-hidden="true">▥</span> : <>
+        {shape === "tile" ? <span className={"usage-tile-icon " + tileSeverity(compact, nowSec)}><Icons.ChartColumn size={16} /></span> : <>
           <span className={"usage-minimal" + (!compact.length ? " only" : "")} aria-hidden="true">Usage ▾</span>
           {compact.map(i => {
             const limits = stripLimits(i, nowSec);
             const summary = summaryLimit({ ...i, limits }, nowSec);
             const worst = summary ?? limits.reduce<typeof limits[number] | undefined>((a, b) => !a || b.percent > a.percent ? b : a, undefined);
             return <span key={i.provider} className={"usage-provider-summary" + (i.state === "stale" ? " stale" : "")}>
-              <span className="usage-provider-name">{HARNESS_LABEL[i.provider]}</span>
+              <span className="usage-provider-name"><UsageMark provider={i.provider} /><span className="usage-provider-text">{HARNESS_LABEL[i.provider]}</span></span>
               {limits.map(l => <span key={l.id} className={"usage-window" + (l === worst ? " worst" : "")}>
                 <span className="usage-window-label">{l.bucket !== i.provider ? `${l.bucketLabel} ` : ""}{l.label}</span>
                 <span className={"usage-bar " + l.severity}><i style={{ width: `${Math.max(0, Math.min(100, l.percent))}%` }} /></span>
@@ -2672,7 +2691,7 @@ function UsageMeter({ info, nowSec, shape, side, status, onError }: {
       {info.map(i => i.provider === "codex" && i.state === "missing_cli"
         ? <p key={i.provider} className="usage-message" data-provider="codex">Codex CLI was not found.</p>
         : <section className={"usage-provider-detail" + (i.state === "stale" ? " stale" : "")} key={i.provider} data-provider={i.provider}>
-        <div className="usage-provider-head"><strong>{HARNESS_LABEL[i.provider]}</strong>
+        <div className="usage-provider-head"><strong><UsageMark provider={i.provider} />{HARNESS_LABEL[i.provider]}</strong>
           <span>{i.state === "stale" ? "Stale" : i.state === "ready" ? "Updated" : stateLabel(i)}
             {i.fetched_at !== null && <time title={new Date(i.fetched_at * 1000).toLocaleString()}> · {Math.max(0, Math.floor((nowSec - i.fetched_at) / 60))} min ago</time>}
           </span>
@@ -2707,11 +2726,13 @@ function UsageMeter({ info, nowSec, shape, side, status, onError }: {
 // mode with no usage data has no tile to badge, and a chip with nowhere to live
 // would just be silence.
 //
-// The one live collision to know about: the tile's bars are already severity-
-// coloured (`.usage-row.warn`/`.over`), so at 92% weekly the tile is ALREADY
-// amber. That is why `.usage-badge` is only ever `--danger` red — degraded vs.
-// down is a distinction the popover makes in words, and two ambers 4px apart
-// meaning unrelated things is not a distinction anyone can read.
+// The one live collision to know about: the tile's chart bars carry plan
+// usage (`.usage-tile-icon`), so at 92% weekly the tile is ALREADY amber. That
+// is why `.usage-badge` is only ever `--danger` red, and why the bars stop at
+// amber even for an over-limit window: on the tile, red means the service and
+// nothing else. Degraded vs. down, and near vs. over, are distinctions the
+// popover makes in words; two colours 4px apart meaning unrelated things are
+// not a distinction anyone can read.
 
 type StatusComponent = { name: string; status: string };
 type StatusIncident = {
