@@ -62,7 +62,31 @@ fn apply_pty(cmd: &mut CommandBuilder, edits: &[worktrees_core::childenv::Edit])
     }
 }
 
-pub static NEXT_ID: AtomicU32 = AtomicU32::new(1);
+/// The next attach id. Ids are handles valid for ONE engine launch, so each
+/// launch starts its count at a random base (§8 gap 16): a client still
+/// holding an id from a previous serve — a pane replaced on reconnect closes
+/// its old id over the new socket — names nothing here rather than whichever
+/// attach this launch happened to number the same. Serve's resolver adds the
+/// other half, that an attach answers only to the connection that opened it.
+static NEXT_ID: std::sync::LazyLock<AtomicU32> = std::sync::LazyLock::new(|| AtomicU32::new(launch_base(launch_entropy())));
+
+fn launch_entropy() -> u32 {
+    let mut b = [0u8; 4];
+    getrandom::fill(&mut b).expect("the OS refused entropy");
+    u32::from_le_bytes(b)
+}
+
+/// A launch's first id from 32 random bits: never 0 (a JS-falsy id), and far
+/// enough below `u32::MAX` that a launch's count does not wrap into a small
+/// id another launch began at.
+pub fn launch_base(r: u32) -> u32 {
+    (r % (u32::MAX / 2)).max(1)
+}
+
+/// The id for the next attach this process opens.
+pub fn next_term_id() -> u32 {
+    NEXT_ID.fetch_add(1, Ordering::SeqCst)
+}
 
 /// Attach to an EXISTING tmux session inside a PTY and stream its bytes to the
 /// frontend. We never create or own a shell — tmux owns the shells, panes, and
@@ -119,7 +143,7 @@ pub fn term_open(
     let mut reader = pair.master.try_clone_reader().map_err(|e| e.to_string())?;
     let writer = pair.master.take_writer().map_err(|e| e.to_string())?;
 
-    let id = NEXT_ID.fetch_add(1, Ordering::SeqCst);
+    let id = next_term_id();
     let stop = Arc::new(AtomicBool::new(false));
     let stop_reader = stop.clone();
 
@@ -1629,6 +1653,19 @@ pub fn apply_tab_history_env(
 
 #[cfg(test)]
 mod tests {
+    /// gap 16's launch nonce: an id is never 0, and a launch's count starts
+    /// far enough below the top that it does not wrap into small ids.
+    #[test]
+    fn a_launch_numbers_its_attaches_from_a_random_base() {
+        for r in [0, 1, 2, u32::MAX / 2, u32::MAX / 2 + 1, u32::MAX - 1, u32::MAX, 0xdead_beef] {
+            let b = launch_base(r);
+            assert!(b >= 1 && b < u32::MAX / 2, "{r} → {b}");
+        }
+        assert_ne!(launch_base(7), launch_base(8));
+        let first = next_term_id();
+        assert_eq!(next_term_id(), first + 1, "consecutive within a launch");
+    }
+
     use super::*;
 
     /// The pty side of `childenv`: a removal reaches the child's environment,
