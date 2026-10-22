@@ -732,7 +732,7 @@ pub fn apply(plan: &Plan, ui: &mut dyn Ui) -> i32 {
 
 fn run_action(a: &Action) -> io::Result<String> {
     for d in &a.mkdirs {
-        make_dir(d)?;
+        crate::fsx::make_dir(d)?;
     }
     match &a.kind {
         ActionKind::LinkCreate => {
@@ -767,26 +767,6 @@ fn run_action(a: &Action) -> io::Result<String> {
             copy_atomic(&a.src, &a.dst)?;
             Ok(format!("re-copied {} (previous content kept as {})", a.rel, file_name(&backup)))
         }
-    }
-}
-
-/// One component, and only if it is genuinely missing. A racing `mkdir` is fine;
-/// a symlink appearing where we expected to create a directory is not (§4 B6).
-fn make_dir(d: &Path) -> io::Result<()> {
-    match fs::create_dir(d) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-            let md = fs::symlink_metadata(d)?;
-            if md.file_type().is_symlink() || !md.is_dir() {
-                Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("{} is not a real directory", d.display()),
-                ))
-            } else {
-                Ok(())
-            }
-        }
-        Err(e) => Err(e),
     }
 }
 

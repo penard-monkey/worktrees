@@ -53,6 +53,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   A terminal connection can no longer type into, resize or close another
   connection's terminal, and terminal ids no longer restart at 1 when serve
   restarts.
+- **A cloned repository can no longer point kimi's per-place files outside
+  the place.** A kimi lane gets worktrees' `mcp.json`, `AGENTS.md` and skill
+  in the place's `.kimi-code/`. A repository that committed `.kimi-code`, or
+  `.kimi-code/skills`, as a symlink had them written wherever the link
+  pointed: only where nothing was yet, or over a file with worktrees' mark,
+  and turning the files off removed marked files there. Each directory is now
+  checked on its own and must be a real one. Through a link nothing is
+  written, rewritten or removed, and the launch says why, as does the log. A
+  link at one of the file names is left alone too. A `mcp.json` with
+  worktrees' mark that the repository supplied, committed or behind such a
+  link, also no longer counts as worktrees' own when the launch decides
+  whether to trust the folder, so kimi asks first.
 
 ## [0.43.1] - 2026-10-22
 
