@@ -32,8 +32,9 @@ mod winstate;
 // The sink behind `worktrees_api::log`: a plain append-only file at the
 // platform's log location (macOS: ~/Library/Logs/<identifier>/app.log —
 // Console.app finds it). Deliberately AppHandle-free so the panic hook can use
-// it. Every op failure, frontend error, and panic lands here; Settings → Logs
-// opens the folder / tails it.
+// it. Since the app became serve's client, only the shim's own lines and
+// panics land here (startup, `engine:`, the window); command failures and the
+// page's `log_event` lines go to serve.log, which is what Settings → Logs shows.
 
 /// The identifier to log under when nothing has said otherwise — what a
 /// `tauri build` bundle carries.

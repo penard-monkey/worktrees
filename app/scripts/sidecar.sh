@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The CLI the desktop app carries inside its own bundle: a PRIVATE sidecar, for
-# the app's use only (it will start `worktrees serve`; see
-# crates/worktrees-api/src/lib.rs, "One engine process per host"). install.sh
+# the app's use only (it starts `worktrees serve` with it; see
+# app/src-tauri/src/engine.rs, and crates/worktrees-api/src/lib.rs, "One engine
+# process per host"). install.sh
 # still puts the CLI on PATH, exactly as before; nothing outside the bundle
 # points at this copy. Putting it on PATH is a later opt-in (ROADMAP, "Option A
 # for the bundled CLI"). Running AS this copy, current_exe() is the bundle, so

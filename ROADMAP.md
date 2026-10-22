@@ -6,10 +6,11 @@ close-out ritual (the repo's `/close-out` skill, `.claude/skills/close-out`;
 this repo's settings in `.claude/close-out.md`).
 
 - **Option A for the bundled CLI: offer to put the app's sidecar `worktrees`
-  on `PATH`.** The Server Edition's Phase 1 ships the CLI inside the app
-  bundle (Tauri `externalBin`) and uses it ONLY to start `worktrees serve` —
-  option B of the 2026-10-17 design discussion. `install.sh` stays the way
-  the CLI reaches `PATH`, exactly as today, so the engine agents run and the
+  on `PATH`.** Since v0.43.0 the app bundle carries the CLI (tauri.conf.json's
+  per-format `files` mappings — not `externalBin`, AGENTS.md says why) and uses
+  it ONLY to start `worktrees serve` — option B of the 2026-10-17 design
+  discussion. `install.sh` stays the way the CLI reaches `PATH`, exactly as
+  before, so the engine agents run and the
   `worktrees mcp` every Claude session launches stay independent of the app's
   presence. Option A — a link from `~/.local/bin/worktrees` into the bundle,
   the VS Code / Docker Desktop shape — fixes the version drift between the
@@ -27,7 +28,7 @@ this repo's settings in `.claude/close-out.md`).
   the same shape as the MCP setup offer. Signing is not a factor: macOS stays
   ad-hoc either way (`install.sh` already strips quarantine recursively, so a
   sidecar runs from a terminal); only the iOS target needs Apple signing.
-  B is in place (feat/sidecar-bundle), on macOS and Linux:
+  B shipped in v0.43.0 (#513, inside #525), on macOS and Linux:
   `Contents/MacOS/worktrees`, and `usr/lib/worktrees/worktrees` in the AppImage
   and .deb (= `resource_dir()/worktrees` for both), mapped in by
   tauri.conf.json's per-format `files` keys, which only the bundler reads —
@@ -35,11 +36,16 @@ this repo's settings in `.claude/close-out.md`).
   app has no bundled copy. But a dev app's `resource_dir()` IS its exe dir
   (`target/debug`), and `target/debug/worktrees` sits there whenever the debug
   CLI has been built, so a resolver that looks next to `current_exe()` or in
-  `resource_dir()` finds THAT one; A's "never from a debug build" guard (and
-  the `serve` lane's resolver) must key on more than "the file exists". On
+  `resource_dir()` finds THAT one; A's "never from a debug build" guard must
+  key on more than "the file exists" (the shim's own `engine::serve_bin`
+  already ignores `resource_dir()` in dev). On
   Linux, A is a link from `~/.local/bin/worktrees` into an AppImage mount that
   exists only while the app runs — so A there means extracting, or the .deb.
-  _From: 2026-10-17, feat/server-edition_
+  A also meets D1's rule: `profile::is_bundled_cli` refuses a path inside a
+  bundle, and A's `~/.local/bin/worktrees → <bundle>` link passes it today
+  only because `on_path` does not canonicalise. Decide which answer A wants
+  before it ships, and pin it with a test.
+  _From: 2026-10-17, feat/server-edition; [2026-10-21 server-edition](docs/sessions/2026-10-21-server-edition/summary.md)_
 
 - **The AppImage's links and Docs button open the browser with the AppImage's
   libraries.** tauri-plugin-opener (`open` 5.4.0) runs `xdg-open` from the
@@ -54,6 +60,102 @@ this repo's settings in `.claude/close-out.md`).
   browser in Docker.
   _From: 2026-10-20, feat/sidecar-bundle_
 
+- **Re-run the update rehearsal against the published v0.43.0.** The
+  rehearsal ran on the PR stack, before D1–D7 were fixed; every fix since has
+  only unit tests as its witness. Re-run it from the real feed with the
+  archived recipe: adopt inside the 120 s grace, the self-stop after it, a
+  `worktrees show` held while no app is up, D1's `mcp_status` naming
+  `~/.local/bin/worktrees`, and D6 across a downgrade. Never run at all: an
+  in-app update on Linux (AppImage or .deb) and the x86_64 macOS bundle
+  (cross-built, never executed). Residue to confirm, not fix: a downgrade
+  inside the grace still runs two engines (the release note is the only
+  guard), and with AppImage extract-and-run a crash leaves serve on a deleted
+  tree for up to 2 min.
+  _From: [2026-10-21 server-edition](docs/sessions/2026-10-21-server-edition/summary.md) ([report](docs/sessions/2026-10-21-server-edition/rehearsal-report.md))_
+
+- **Run `docs/engine-client-manual-checks.md` by hand, on a bundled build and
+  on Linux.** Nobody has clicked in the app as serve's client. The lanes drove
+  `tauri dev` (page origin `http://localhost:1420`) by PID; the bundled app on
+  `tauri://localhost` never ran, so `crypto.subtle` and a `ws://` socket from
+  there are measured only in a standalone WKWebView. "Reconnect now" was never
+  pressed in WKWebView and the countdown banner was seen only in Chromium. Do
+  step 3's `kill -9` with the window VISIBLE: a covered window reads `hidden`
+  and defers retries by design.
+  _From: [2026-10-21 server-edition](docs/sessions/2026-10-21-server-edition/summary.md)_
+
+- **`kimiplace::sync_file` writes through a tracked `.kimi-code` link.**
+  `tracked()` asks git about the three file paths only, so a committed
+  `.kimi-code -> elsewhere` is not "tracked" for them, and `create_dir_all` +
+  `fs::write` follow it: worktrees' `mcp.json`, `AGENTS.md` and skill land in
+  the link's target. It writes only where a file is absent or already ours, so
+  it never clobbers, but it is #523's class. Fix shape: lstat `.kimi-code` (and
+  `skills/`) and refuse a link, as `write_brief` does for `.planning`, and write
+  through `fsx::write_atomic`. Found by reading, not measured.
+  _From: [2026-10-21 server-edition](docs/sessions/2026-10-21-server-edition/summary.md)_
+
+- **The CLI updater runs an installer from a pid-named file in `temp_dir()`.**
+  `worktrees_api::status`'s `update_cli` downloads `install.sh` to
+  `worktrees-install-<pid>.sh` and runs it. macOS's `temp_dir()` is the
+  per-user `$TMPDIR`; Linux's is the shared `/tmp`, where another local user
+  can plant a link at the guessable name or swap the file between download and
+  run. A cloned repo cannot reach it. Fix shape: a private (0700) directory
+  from `mkdtemp`.
+  _From: [2026-10-21 server-edition](docs/sessions/2026-10-21-server-edition/summary.md)_
+
+- **The app's own verification probe counts as an audience for a held
+  `worktrees show`.** The shim's probe completes handshake v1, so for a few ms
+  at every launch `Host::has_audience()` is true, and a `show` serve releases
+  then goes to a socket about to close: lost (estimated 0.1–0.2% of launches,
+  not measured). The client parks `app:open-doc` (#524) but cannot see a frame
+  sent to the probe. The fix is protocol-side: release a held show only to a
+  client that listens for `app:open-doc`. Not in the Phase 2 proposal, whose
+  `app:open-doc` change is "loopback clients only".
+  _From: [2026-10-21 server-edition](docs/sessions/2026-10-21-server-edition/summary.md)_
+
+- **Two Linux packaging leftovers.** (1) The glibc floor: the CLI and both
+  Linux bundles build on Ubuntu 24.04 runners, so they need its glibc; building
+  on 22.04 would widen reach (measure what they actually require first,
+  `objdump -T`). (2) The shim's app.log on Linux is
+  `$HOME/.local/share/<identifier>/logs`, which ignores `XDG_DATA_HOME`, while
+  tauri's own dirs honour it (`log_dir` in `app/src-tauri/src/lib.rs`).
+  _From: [2026-10-21 server-edition](docs/sessions/2026-10-21-server-edition/summary.md)_
+
+- **`TerminalPane.tsx`'s `term_resize` has no `.catch`.** The transport's
+  `resize` (~:105) fires `invoke("term_resize", …)` bare, so once the engine is
+  gone it surfaces as "Uncaught (in promise)". Give it the pane's failure path,
+  or a `.catch` that logs.
+  _From: [2026-10-21 server-edition](docs/sessions/2026-10-21-server-edition/summary.md)_
+
+- **transport-check's `rustFn` misses a ONE-LINE duplicate fn.** Its regex
+  ends a fn at the next column-0 `}`, so a duplicate written on one line has no
+  `}` of its own, is swallowed into the real fn's match, and the "more than one
+  definition" guard never fires (a multi-line duplicate is caught). Count
+  `fn <name>\b` occurrences separately from extracting the body.
+  _From: [2026-10-21 server-edition](docs/sessions/2026-10-21-server-edition/summary.md)_
+
+- **The fsx guard cannot see a test module declared from another file.**
+  `fsx::tests`'s `live_lines` drops a column-0 `#[cfg(test)]` item, but
+  `#[cfg(test)] mod tests;` puts a whole FILE under test, which a scan of that
+  file cannot know: `serve/tests.rs` carries an `OWN_TEMP_NAMES` row, and
+  `childenv-check.mjs` a special rule, for exactly that. Teach both to read the
+  declaring `mod.rs`.
+  _From: [2026-10-21 server-edition](docs/sessions/2026-10-21-server-edition/summary.md)_
+
+- **A new place with no provider launches Claude whatever `ai_cmd` says.**
+  `worktrees_api::ops::new_place` turns `provider: None` into
+  `harness::default_adapter()` (claude), ignoring a project's `ai_cmd = none`;
+  v0.42.0 did the same. The app always sends a provider, so only a socket
+  client meets it — and since v0.43.0 any authenticated client can. Decide what
+  "no provider" means (probably the project's own setting, `none` included).
+  (Rehearsal N2.)
+  _From: [2026-10-21 server-edition](docs/sessions/2026-10-21-server-edition/summary.md)_
+
+- **`claude_status` is fetched twice on every "window visible".** In both
+  v0.42.0 and v0.43.x, each visibility change logged two `claude_status` curls
+  (rehearsal N3). Probably two callers pulling on one event; share the request
+  in flight. A different defect from the negative-TTL item further down.
+  _From: [2026-10-21 server-edition](docs/sessions/2026-10-21-server-edition/summary.md)_
+
 - ~~**Before v0.42.0: drive #482 (scroll keep) in the real app.**~~ Done 2026-10-15: David ran it in the sandbox, worked fine. Only the
   mock was measured, and AGENTS.md says refresh timing needs the real app.
   Run `app/scripts/sandbox.sh --app` by hand (no scripted input), open a long
@@ -65,14 +167,20 @@ this repo's settings in `.claude/close-out.md`).
   paragraph you were reading. See
   docs/sessions/2026-10-15-md-scroll-keep/.
 
-- **Before the release that ships kimi: drive one kimi lane in the real app.**
-  Everything automatable passed (bats, unit, mock harness, a live CLI run on a
-  private tmux socket), but the app itself (WKWebView layout, real refresh
-  timing, the trust note against a real `kimi_status`, the meter) has not been
-  driven. `docs/kimi-manual-checks.md` §10 is a numbered walk-through: new kimi
-  place, trust modal, opener, dots, send, resume, Settings → Kimi, the meter.
-  Run it by hand in `app/scripts/sandbox.sh --app`. See
-  docs/sessions/2026-10-19-kimi-harness/.
+- **Drive one kimi lane in the real app: v0.43.0 shipped kimi without it.**
+  This was asked for "before the release that ships kimi"; it was raised three
+  times and the release went out without it, so kimi in the app is shipped and
+  still undriven. Everything automatable passed (bats, unit, mock harness, a
+  live CLI run on a private tmux socket), but the app itself (WKWebView
+  layout, real refresh timing, the trust note against a real `kimi_status`,
+  the meter) has not been driven — and since v0.43.0 the app is serve's
+  client, so the drive now covers that path too. `docs/kimi-manual-checks.md`
+  §10 is a numbered walk-through: new kimi place, trust modal, opener, dots,
+  send, resume, Settings → Kimi, the meter. Run it by hand in
+  `app/scripts/sandbox.sh --app`. While kimi is installed, also time real
+  `kimi web`'s SIGTERM → exit against `kimi_usage::GRACE` (2 s, never
+  measured; §9b only states it). See docs/sessions/2026-10-19-kimi-harness/
+  and [2026-10-21 server-edition](docs/sessions/2026-10-21-server-edition/summary.md).
 - **Copying an MCP server to Codex puts its literal env values on argv.**
   `mcpmigrate.rs:180` turns each literal `env` entry of a Claude user-scope
   stdio server (status `CopyLiteralEnv`, usually an API key) into
@@ -133,15 +241,6 @@ this repo's settings in `.claude/close-out.md`).
   the lane opens and its agent explains; say "apply" (no remote: main
   fast-forwards and the session ends last); repeat and say "abandon"; and with an
   origin, land → PR → merge → To do "Remove the place".
-  _From: [2026-10-15 rules-review-lane](docs/sessions/2026-10-15-rules-review-lane/summary.md)_
-
-- **`ops::write_brief` writes through a TRACKED `.planning` symlink.**
-  `std::fs::write(wt/.planning/brief.md)` follows a `.planning -> elsewhere`
-  committed in the repo, so a cloned repo picks where the brief lands. It
-  pre-dates #502 (every `--brief` does it; see the `[docs]` symlink item
-  below), but #502 makes the write automatic on Apply / Fix from the app.
-  Fix shape: lstat `.planning` and refuse (or write beside it) when it is a
-  link, the same constant-path gate the docs walk got.
   _From: [2026-10-15 rules-review-lane](docs/sessions/2026-10-15-rules-review-lane/summary.md)_
 
 - **`a_real_size_change_still_reaches_the_shell` (app pty test) flaked once.**
@@ -434,10 +533,6 @@ this repo's settings in `.claude/close-out.md`).
 - **⌘N with zero projects, never driven in a browser.** It calls `addProject`
   (the folder picker); the mock was only exercised with one, several, and one
   broken project. See docs/sessions/2026-10-06-nav-plus-cmdn/.
-- **`cargo check -p app` warns `function claim is never used`**
-  (`app/src-tauri/src/viewer.rs:422`, dead_code). It predates #446, which touched
-  no Rust; it arrived with #311. Delete it or use it.
-
 - **An agent with a PTY still passes `may_attach`.** An agent whose shell
   allocates a PTY (Codex's exec can) has ttys on stdin and stdout, so it can
   still `switch-client` the app's client. A stricter guard needs a signal that
@@ -496,9 +591,9 @@ this repo's settings in `.claude/close-out.md`).
   Monaco 701 KB) are in the session's `planning.tar.gz`. See
   [the session](docs/sessions/2026-10-06-in-app-editor/summary.md).
 
-- **Three live bugs in the dock's markdown editor** (`FilesPane.tsx`
-  `SourceEditor` + `lib.rs` `read_file` / `write_file`), whatever happens to the
-  in-app editor:
+- **Two live bugs in the dock's markdown editor** (`FilesPane.tsx`
+  `SourceEditor` + `crates/worktrees-api/src/files.rs` `read_file` /
+  `write_file`), whatever happens to the in-app editor:
   1. **CRLF is rewritten to LF on save.** A `<textarea>` normalises line breaks
      (measured in WebKit: `"a\r\nb\r\n"` reads back `"a\nb\n"`), so the first
      keystroke makes every line ending differ and ⌘S writes the file as LF.
@@ -507,10 +602,9 @@ this repo's settings in `.claude/close-out.md`).
   2. **Non-UTF-8 is corrupted on save.** `read_file` decodes with
      `from_utf8_lossy`, so an invalid byte becomes U+FFFD in the buffer and is
      written back. Fix shape: report `utf8: false` and make the view read-only.
-  3. **Two saves of one file race on a fixed temp name** (`.{name}.wt-tmp`) —
-     the dock and the reading overlay are both mounted. Fix shape:
-     `edit_user_config`'s pid-suffixed temp (+ a counter), mode set before the
-     rename.
+  (A third, two saves racing on the fixed temp `.{name}.wt-tmp`, is gone:
+  since #523 each save gets its own random temp through `fsx::write_atomic`,
+  with the mode set on the handle before the rename.)
   Each needs a fail-first test (a CRLF round-trip through `write_file` alone
   will pass — the loss is in the textarea, so pin it in the harness too). See
   [the session](docs/sessions/2026-10-06-in-app-editor/summary.md).
@@ -1118,9 +1212,9 @@ this repo's settings in `.claude/close-out.md`).
   the server disagree, and the index is the one that is wrong.
   Pre-dates the docs index; the `.planning` instance of it was closed when the
   working-memory step landed (that one is a constant, so gating it costs one
-  lstat and nothing else). The WRITE side is untouched and out of the index's
-  scope: `ops::write_brief` `create_dir_all`s and writes through a `.planning`
-  symlink at `cmd_new`, which is creation rather than listing. Closing the
+  lstat and nothing else). The WRITE side's `.planning` instance is closed
+  too: since #523 `ops::write_brief` refuses a `.planning` that is not a real
+  directory and writes the brief through `fsx::write_atomic`. Closing the
   general case is a behaviour DECISION, not a patch: a repo symlinking its docs directory into a monorepo sibling is a
   reasonable thing to do, and refusing it silently drops that repo's whole tree.
   Probably: resolve each component with lstat, and when a link is found, allow
@@ -1168,12 +1262,6 @@ this repo's settings in `.claude/close-out.md`).
   chasing even though nothing has been traced to it yet. It looks like
   `resize`/`syncScrollArea` reaching a terminal whose renderer is already
   disposed.
-  _From: [2026-09-20 terminal-history](docs/sessions/2026-09-20-terminal-history/summary.md)_
-
-- **`fn claim` is never used** (`app/src-tauri/src/viewer.rs`) — the one
-  warning `cargo check -p app` now emits. Arrived with #311; left alone here
-  because silently editing another change's file inside an unrelated PR is
-  worse than the warning.
   _From: [2026-09-20 terminal-history](docs/sessions/2026-09-20-terminal-history/summary.md)_
 
 - ~~**The personal skills repo has no remote, and that already cost it once.**~~
@@ -1985,8 +2073,16 @@ this repo's settings in `.claude/close-out.md`).
   "unsupported_auth"`. That PR touches no core code, and the same tree passed
   on the next run and locally. A fake-CLI test, so look first at what it races
   against (spawn timing, a timeout that a slow runner crosses) before the
-  classification itself.
-  _From: 2026-10-06 in-app-editor lane (#443)_
+  classification itself. Two leads from 2026-10-21: a fake CLI that fails to
+  spawn reads as `unavailable`, and #526's Linux run lost a codex_usage
+  fake-CLI test to ETXTBSY (another test's fork holding the fake's write fd;
+  `fix/test-exec-etxtbsy`), so re-check this one once that lands. And
+  codex_usage still has the shape #522 took out of kimi_usage: a hard 2 s
+  `Drop` grace (`codex_usage.rs` ~:199) and 2 s wall-clock waits in its
+  fake-CLI lifecycle test. A failure that lasts ≈ the bound (read the
+  previous sorted test's finish against FAILED in the CI log) is a timeout,
+  not a lost signal.
+  _From: 2026-10-06 in-app-editor lane (#443); [2026-10-21 server-edition](docs/sessions/2026-10-21-server-edition/summary.md)_
 
 - **Links in release notes still print raw.** `renderInline` (App.tsx) now
   handles `code`, `**strong**` and `*em*` — the markup the changelog bullets
