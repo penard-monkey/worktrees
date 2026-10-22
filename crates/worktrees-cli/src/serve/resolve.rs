@@ -896,7 +896,7 @@ pub(crate) mod fixture {
     /// A git repository at `dir` (the session name rule `discover`s it).
     pub fn git_repo(dir: &Path) {
         std::fs::create_dir_all(dir).unwrap();
-        let ok = std::process::Command::new("git").args(["init", "-q"]).current_dir(dir).status().unwrap().success();
+        let ok = worktrees_core::childenv::command("git").args(["init", "-q"]).current_dir(dir).status().unwrap().success();
         assert!(ok, "git init {}", dir.display());
     }
 
