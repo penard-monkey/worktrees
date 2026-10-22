@@ -255,6 +255,7 @@ macro_rules! obj {
     (slug($a:ident)) => { Obj::Slug(stringify!($a)) };
     (root($a:ident)) => { Obj::Root(stringify!($a)) };
     (file($a:ident)) => { Obj::File(stringify!($a)) };
+    (probe($a:ident)) => { Obj::Probe(stringify!($a)) };
     (session($a:ident)) => { Obj::Session(stringify!($a)) };
     (session_in($a:ident, $b:ident)) => { Obj::SessionIn(stringify!($a), stringify!($b)) };
     (session_of($a:ident, $r:ident, $s:ident)) => { Obj::SessionOf(stringify!($a), stringify!($r), stringify!($s)) };
@@ -344,6 +345,11 @@ pub fn call_in(cx: &Call, cmd: &str, args: &Args, world: &dyn World) -> Result<V
             if !cx.caller.is_console() {
                 worktrees_api::log::info(&format!("serve: refused {cmd} for {}: {:?}: {}", cx.caller, r.kind, r.detail));
             }
+            // A probe's refusal IS its answer (`resolve::Obj::Probe`): a file
+            // this caller may not read is reported as one that is not there.
+            if matches!(r.kind, resolve::RefusalKind::NotFound | resolve::RefusalKind::Denied) && row.objects.iter().any(Obj::answers_false) {
+                return Ok(Value::Bool(false));
+            }
             return Err(r.wire_for(&cx.caller));
         }
     };
@@ -364,12 +370,14 @@ pub fn call_in(cx: &Call, cmd: &str, args: &Args, world: &dyn World) -> Result<V
     })
 }
 
-/// The `Ctx` a body runs on: scoped to the grant, and fetching as its caller
-/// — the console's git for the console, and for a device the addresses the
-/// resolver checked, pinned (gap 17, `worktrees_core::fetchpolicy`).
+/// The `Ctx` a body runs on: scoped to the grant, holding its capabilities
+/// (the bodies that list paths drop or mark what the caller may not read),
+/// and fetching as its caller — the console's git for the console, and for a
+/// device the addresses the resolver checked, pinned (gap 17,
+/// `worktrees_core::fetchpolicy`).
 fn body_ctx(cx: &Call, grant: &authz::Grant, resolved: resolve::Resolved) -> Ctx {
     let fetcher = if cx.caller.is_console() { Fetcher::Console } else { Fetcher::Device(resolved.pins) };
-    cx.ctx.scoped(grant.projects.clone()).fetching(fetcher)
+    cx.ctx.scoped(grant.projects.clone()).granted(grant.capabilities, cx.caller.is_console()).fetching(fetcher)
 }
 
 /// A command's row.
@@ -595,7 +603,7 @@ commands! { cx, a;
     changed_files: Engine [read, root(root)] => files::changed_files(&cx.ctx, a.get("root")?),
     file_diff: Engine [read, file(path)] => files::file_diff(&cx.ctx, a.get("path")?, a.get("against")?),
     read_file: Engine [read, file(path)] => files::read_file(&cx.ctx, a.get("path")?, a.get("max_bytes")?),
-    file_readable: Engine [read, file(path)] => files::file_readable(&cx.ctx, a.get("path")?),
+    file_readable: Engine [read, probe(path)] => files::file_readable(&cx.ctx, a.get("path")?),
     resolve_term_paths: Engine [read, root(root), opt(session_in(session, root)), shell_ref(shell), candidates(paths)] => files::resolve_term_paths(
         &cx.ctx, &cx.ctx.shells, a.get("root")?, a.get("shell")?, a.get("session")?, a.get("paths")?,
     ),

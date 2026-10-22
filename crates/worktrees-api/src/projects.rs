@@ -72,6 +72,18 @@ pub fn project_roots(ctx: &Ctx) -> Vec<PathBuf> {
     read_projects(ctx).iter().filter_map(|r| std::fs::canonicalize(r).ok()).collect()
 }
 
+/// EVERY registered project root, canonicalized, whatever `ctx`'s scope:
+/// what a path's CLASS is judged over (`worktrees_core::pathclass`). The class
+/// is the strictest over every root that holds the path, so a caller whose
+/// scope leaves out a nested project must not get a plainer answer than the
+/// console would: the root it cannot see still makes `.worktrees.places.json`
+/// worktrees' own. Containment stays the scope's question
+/// (`guard_under_projects`).
+pub fn class_roots(ctx: &Ctx) -> Vec<PathBuf> {
+    import_app_projects(ctx);
+    worktrees_core::registry::read_lenient().roots().iter().filter_map(|r| std::fs::canonicalize(r).ok()).collect()
+}
+
 /// The containment test `guard_under_projects` applies, against an ALREADY
 /// canonical path. Split out so the tree can ask the same question about a
 /// symlink target without going through a command that would reject it.
@@ -124,7 +136,10 @@ pub fn forbid_new_path(roots: &[PathBuf], target: &Path) -> Result<(), String> {
     forbid_write(roots, &canon, &shown)
 }
 
-fn forbidden_message(shown: &str, canon: &Path) -> String {
+/// Why a `Forbidden` write is refused, in words for the person at the desk:
+/// `shown` is what they asked for, `canon` where it leads. serve's resolver
+/// refuses such a write before this body runs, with these same words.
+pub fn forbidden_message(shown: &str, canon: &Path) -> String {
     if worktrees_core::pathclass::has_git_component(canon) {
         format!(
             "{shown}: worktrees never writes inside .git, for any caller — a change to its config or \

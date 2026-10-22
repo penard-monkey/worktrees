@@ -45,9 +45,14 @@ import { useScrollKeep } from "./scrollkeep";
 
 // `link` is the symlink target as written (relative stays relative);
 // `link_block` is why the backend will not follow it — absent when it will.
+// `restricted` is the path's class when THIS caller may not read it (a paired
+// device without the capability, §7.1) — always null for the desktop, which
+// is the console and reads every class.
 type LinkBlock = "outside" | "git" | "missing";
+type PathClass = "plain" | "instruction" | "executes" | "secret" | "forbidden";
 type FsEntry = {
   name: string; path: string; is_dir: boolean; ignored?: boolean; link?: string | null; link_block?: LinkBlock | null;
+  restricted?: PathClass | null;
   /** Client-side only: this row has no directory entry behind it. A deleted path
    *  is not on disk, so the tree INVENTS its row (and any directory the deletion
    *  took with it) rather than marking a folder whose changed child can't be
@@ -243,7 +248,7 @@ function TreeNode({ entry, depth, openPath, reveal, showIgnored, reloadToken, ch
   // saying so. A ghost DIRECTORY still toggles; its children come from the
   // change set, not from a listing.
   const ghost = !!entry.ghost;
-  const inert = !!entry.link_block || (ghost && !entry.is_dir);
+  const inert = !!entry.link_block || !!entry.restricted || (ghost && !entry.is_dir);
   useEffect(() => {
     // `inert` too, not just `open`: a link that becomes unfollowable while
     // expanded (retargeted, or its project unregistered) would otherwise keep
@@ -305,6 +310,7 @@ function TreeNode({ entry, depth, openPath, reveal, showIgnored, reloadToken, ch
   const title = [
     entry.link ? `${entry.name} → ${entry.link}` : entry.name,
     entry.link_block ? BLOCK_WHY[entry.link_block] : null,
+    entry.restricted ? `${entry.restricted} — not readable from this device` : null,
     status ? CHANGE_WHY[status] : null,
     // A ghost DIRECTORY has no status of its own — git tracks files, so what is
     // deleted is everything that was under it. Without this the strikethrough is
@@ -1378,7 +1384,7 @@ export function FilesPane(props: FilesPaneProps) {
           still true — its path — and nothing that could only raise a banner. */}
       {ctx && (() => {
         const { entry } = ctx;
-        const inert = !!entry.link_block || (!!entry.ghost && !entry.is_dir);
+        const inert = !!entry.link_block || !!entry.restricted || (!!entry.ghost && !entry.is_dir);
         return (
           <CtxMenu x={ctx.x} y={ctx.y} onClose={closeCtx}>
             <div className="pop-hint">{entry.name}</div>

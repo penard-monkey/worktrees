@@ -14,10 +14,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use serde::{Deserialize, Serialize};
+use worktrees_core::authz::Access;
+use worktrees_core::pathclass::{Class, Classifier};
 use worktrees_core::{git, harness, ops, provider, sysclock, tmux, Project};
 
 use crate::log::log as applog;
-use crate::projects::{guard_under_projects, project_roots, under_roots};
+use crate::projects::{class_roots, guard_under_projects, project_roots, under_roots};
 use crate::term::{live_pid, proc_cwd, Shells};
 use crate::{viewer, Ctx};
 
@@ -39,6 +41,13 @@ pub struct FsEntry {
     /// workspace" is a false statement about a link that merely dangles, and
     /// the row's tooltip is the only place a user learns why nothing happens.
     pub link_block: Option<&'static str>,
+    /// The path's class when THIS caller may not read it (§7.1:
+    /// `list_dir` "shows restricted names but marks them"), or None when it
+    /// may. A class rather than a bool, for the same reason as `link_block`:
+    /// the row's tooltip is where a user learns why opening it is refused.
+    /// Always None for the console, which reads every class, and for a link
+    /// the tree will not follow, whose `link_block` already says why.
+    pub restricted: Option<Class>,
 }
 
 #[derive(Serialize)]
@@ -152,6 +161,20 @@ pub fn classify_symlink(p: &Path, roots: &[PathBuf]) -> (bool, Option<String>, O
     (is_dir, target, block)
 }
 
+/// The class `canon` has when `ctx`'s caller may NOT read it, or None when it
+/// may (§7.1). `canon` is canonical, so a link is judged by where it lands.
+fn unreadable(ctx: &Ctx, classes: &Classifier, canon: &Path) -> Option<Class> {
+    let class = classes.class_for(canon, Access::Read).unwrap_or(Class::Forbidden);
+    (!ctx.may(class, Access::Read)).then_some(class)
+}
+
+/// The classifier a body that lists paths judges them with, over EVERY
+/// registered root (`class_roots`). None for the console, which reads every
+/// class, so the desktop's listings class nothing at all.
+fn read_classes(ctx: &Ctx) -> Option<Classifier> {
+    (!ctx.reads_every_class()).then(|| Classifier::new(&class_roots(ctx)))
+}
+
 /// Immediate children of `path` (one level; the tree lazy-expands). Dirs first,
 /// then case-insensitive by name.
 ///
@@ -166,11 +189,16 @@ pub fn classify_symlink(p: &Path, roots: &[PathBuf]) -> (bool, Option<String>, O
 /// not follow them. Following is left to the tree, which does not: the guard
 /// canonicalizes, so a link out of the workspace is unlistable by construction,
 /// and honouring one would let a repo's own contents choose what the app reads.
+///
+/// A name the caller may not read is listed all the same, with its class in
+/// `restricted` (§7.1): a device that cannot open `.env` still sees that the
+/// project has one, as `ls` would show it.
 pub fn list_dir(ctx: &Ctx, path: String, show_ignored: Option<bool>) -> Result<Vec<FsEntry>, String> {
     let dir = guard_under_projects(ctx, &path)?;
     if !dir.is_dir() {
         return Err(format!("not a directory: {path}"));
     }
+    let classes = read_classes(ctx);
     let mut entries: Vec<FsEntry> = Vec::new();
     // Built on the first symlink seen, not up front: most directories have none
     // and would pay a projects-file read plus a canonicalize per root for it.
@@ -187,14 +215,22 @@ pub fn list_dir(ctx: &Ctx, path: String, show_ignored: Option<bool>) -> Result<V
         // symlink to a directory came back `is_dir: false` — a file glyph, no
         // caret, and a click that tried to open it as a file. Stat the target
         // for the shape; a broken link has none and stays a file.
+        let symlink = ft.is_some_and(|t| t.is_symlink());
         let (is_dir, link, link_block) = match ft {
-            Some(t) if t.is_symlink() => {
-                classify_symlink(&p, roots.get_or_insert_with(|| project_roots(ctx)))
-            }
+            Some(_) if symlink => classify_symlink(&p, roots.get_or_insert_with(|| project_roots(ctx))),
             other => (other.map(|t| t.is_dir()).unwrap_or(false), None, None),
         };
+        // `dir` is canonical, so only a link needs resolving to be judged by
+        // where it lands; one the tree will not follow is not judged at all.
+        let restricted = match (&classes, link_block) {
+            (Some(cl), None) => {
+                let canon = if symlink { std::fs::canonicalize(&p).unwrap_or_else(|_| p.clone()) } else { p.clone() };
+                unreadable(ctx, cl, &canon)
+            }
+            _ => None,
+        };
         let path = p.to_string_lossy().to_string();
-        entries.push(FsEntry { name, path, is_dir, ignored: false, link, link_block });
+        entries.push(FsEntry { name, path, is_dir, ignored: false, link, link_block, restricted });
     }
     // One `git check-ignore --stdin` batch for the whole directory (NUL-safe).
     let ignored = git_check_ignore(&dir, entries.iter().map(|e| e.path.as_str()));
@@ -618,7 +654,17 @@ pub fn list_docs(ctx: &Ctx, repo: String, root: String) -> Result<DocsIndex, Str
         }
     };
     let idx = worktrees_core::docs::index_with(&dir, cfg.as_ref().and_then(|c| c.docs.as_ref()));
-    Ok(DocsIndex { base, config_error, entries: idx.entries, truncated: idx.truncated })
+    let mut entries = idx.entries;
+    // A document the caller may not read is not one of its documents (§7.1).
+    // Canonicalised, because the walk follows a directory link that stays in
+    // the place, and the class is the class of where a path lands.
+    if let Some(cl) = read_classes(ctx) {
+        entries.retain(|e| {
+            let canon = std::fs::canonicalize(&e.path).unwrap_or_else(|_| PathBuf::from(&e.path));
+            unreadable(ctx, &cl, &canon).is_none()
+        });
+    }
+    Ok(DocsIndex { base, config_error, entries, truncated: idx.truncated })
 }
 
 /// The Plan dock tab: the place's planning-with-files summary (goal, phases,
@@ -1115,10 +1161,15 @@ pub fn resolve_term_paths(
     bases.push(PathBuf::from(&root));
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let roots = project_roots(ctx);
+    // A file the caller may not read is no link (§7.1). Dropped AFTER the
+    // resolve, never by trying the next base: the path names the file it
+    // lands on first, and a later base's file of the same name is another one.
+    let classes = read_classes(ctx);
+    let readable = |abs: &String| classes.as_ref().is_none_or(|cl| unreadable(ctx, cl, Path::new(abs)).is_none());
     Ok(paths
         .iter()
         .take(TERM_PATHS_MAX)
-        .map(|p| resolve_term_path(p, &bases, home.as_deref(), &roots))
+        .map(|p| resolve_term_path(p, &bases, home.as_deref(), &roots).filter(readable))
         .collect())
 }
 
@@ -1244,10 +1295,18 @@ pub fn resolve_doc_paths(
         })
         .clone()
     };
+    // A file the caller may not read is no link, as in a terminal.
+    let classes = read_classes(ctx);
     Ok(paths
         .iter()
         .take(TERM_PATHS_MAX)
-        .map(|p| resolve_doc_path(p, &bases, home.as_deref(), &roots, &root_p, &mut index))
+        .map(|p| {
+            let mut hits = resolve_doc_path(p, &bases, home.as_deref(), &roots, &root_p, &mut index);
+            if let Some(cl) = &classes {
+                hits.retain(|h| unreadable(ctx, cl, Path::new(&h.path)).is_none());
+            }
+            hits
+        })
         .collect())
 }
 
@@ -1310,12 +1369,14 @@ pub fn b64_encode(bytes: &[u8]) -> String {
 /// not there to stop.
 ///
 /// A `Forbidden` path (`.git/**`, worktrees' own state) is refused for every
-/// caller (`projects::forbid_write`). Which OTHER classes need more than
-/// `write` — instruction files, hooks, secrets — is the dispatch table's
-/// question, asked before this body runs.
+/// caller (`projects::forbid_write`), judged over EVERY registered root
+/// (`class_roots`), not the caller's: a project nested in one the caller can
+/// see still owns its store. Which OTHER classes need more than `write` —
+/// instruction files, hooks, secrets — is the dispatch table's question,
+/// asked before this body runs.
 pub fn write_file(ctx: &Ctx, path: String, content: String, expected_mtime: Option<u64>) -> Result<u64, String> {
     let f = guard_under_projects(ctx, &path)?;
-    write_under(&project_roots(ctx), &f, &path, content.as_bytes(), expected_mtime)
+    write_under(&class_roots(ctx), &f, &path, content.as_bytes(), expected_mtime)
 }
 
 /// `write_file` past the containment guard, with the roots it was checked

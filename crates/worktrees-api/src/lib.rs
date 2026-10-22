@@ -150,6 +150,14 @@ pub struct Ctx {
     /// serve's resolver checked, for a paired device's. Set only through
     /// [`Ctx::fetching`], which narrows.
     fetch: Arc<worktrees_core::fetchpolicy::Fetcher>,
+    /// What this call's caller holds, for the bodies that ENUMERATE paths: a
+    /// directory listing marks, and the docs index and the path links drop,
+    /// what it may not read by the path's class (§7.1). serve's resolver
+    /// checks only the path a request NAMES. Every capability, and the
+    /// console, for the engine's own work and the console's requests. Set only
+    /// through [`Ctx::granted`], which narrows.
+    caps: worktrees_core::authz::Caps,
+    console: bool,
 }
 
 impl Ctx {
@@ -164,6 +172,8 @@ impl Ctx {
             docnames: Arc::new(files::DocNameIndex::default()),
             scope: Arc::new(worktrees_core::authz::Projects::All),
             fetch: Arc::new(worktrees_core::fetchpolicy::Fetcher::Console),
+            caps: worktrees_core::authz::Caps::ALL,
+            console: true,
         }
     }
 
@@ -188,6 +198,31 @@ impl Ctx {
 
     pub fn fetcher(&self) -> &worktrees_core::fetchpolicy::Fetcher {
         &self.fetch
+    }
+
+    /// The same engine, for a caller holding `caps`, and the console or not.
+    /// Narrowing only: capabilities are intersected, and a `Ctx` that is not
+    /// the console's never becomes it again.
+    pub fn granted(&self, caps: worktrees_core::authz::Caps, console: bool) -> Ctx {
+        Ctx { caps: self.caps.intersect(caps), console: self.console && console, ..self.clone() }
+    }
+
+    /// This caller may `access` a path of `class`: the base capability
+    /// (`read` or `write`) and whatever the class adds
+    /// (`worktrees_core::pathclass::requirement`).
+    pub fn may(&self, class: worktrees_core::pathclass::Class, access: worktrees_core::authz::Access) -> bool {
+        use worktrees_core::authz::{Access, Capability};
+        let base = match access {
+            Access::Read => Capability::Read,
+            Access::Write => Capability::Write,
+        };
+        self.caps.has(base) && worktrees_core::pathclass::requirement(class, access).met_by(self.caps, self.console)
+    }
+
+    /// This caller may read a path of every class, which only the console
+    /// can. The bodies that would class every path they list skip the work.
+    pub fn reads_every_class(&self) -> bool {
+        worktrees_core::pathclass::Class::ALL.iter().all(|c| self.may(*c, worktrees_core::authz::Access::Read))
     }
 
     /// How this call's git fetches `url` (exactly as git is handed it):

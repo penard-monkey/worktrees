@@ -801,7 +801,9 @@ const mockSuggestions: Record<string, any> = {
 // Deterministic + lazily materialized from whatever worktree path the tree
 // asks for, so ANY fixture place works headlessly. Dirs seed their children on
 // first listing; files seed content so read/write round-trips.
-type MockEntry = { name: string; path: string; is_dir: boolean; ignored: boolean; link?: string; link_block?: "outside" | "git" | "missing" };
+// `restricted` is null on every entry, as the backend answers the console: the
+// mock is the desktop, and the desktop reads every path class (§7.1).
+type MockEntry = { name: string; path: string; is_dir: boolean; ignored: boolean; link?: string; link_block?: "outside" | "git" | "missing"; restricted: null };
 // Blocked link paths → the error the REAL backend answers with, or null where
 // it would answer normally. Faithful beats tidy here: the guard refuses a link
 // out of the workspace and a dangling one, but a link into `.git` it happily
@@ -1023,7 +1025,7 @@ function seedDir(dir: string) {
   if (fsChildren.has(dir)) return fsChildren.get(dir)!;
   const base = dir.split("/").pop() || dir;
   const mk = (name: string, is_dir: boolean, ignored = false): MockEntry =>
-    ({ name, path: `${dir}/${name}`, is_dir, ignored });
+    ({ name, path: `${dir}/${name}`, is_dir, ignored, restricted: null });
   /** A symlink. `is_dir` is the TARGET's shape (the backend stats through the
    *  link), and `block` is the reason the guard would refuse it — the row then
    *  renders inert, so both halves of that split are drivable here. */
@@ -1035,7 +1037,7 @@ function seedDir(dir: string) {
         : block === "missing" ? `${path}: No such file or directory (os error 2)`
         : null); // "git": the guard has no opinion, so neither does the mock
     }
-    return { name, path, is_dir, ignored, link: target, link_block: block };
+    return { name, path, is_dir, ignored, link: target, link_block: block, restricted: null };
   };
   let entries: MockEntry[];
   if (base === "src") entries = [
@@ -3609,7 +3611,7 @@ const healthyConfigs: Record<string, MockCfg> = {};
     const kids = seedDir(dir);
     const path = `${dir}/${name}`;
     if (!kids.some((e) => e.path === path)) {
-      kids.push({ name, path, is_dir: false, ignored });
+      kids.push({ name, path, is_dir: false, ignored, restricted: null });
       fsFiles.set(path, { ...mockContent(name, path), mtime: Date.now() });
     }
     emitEvent("places:changed", {});
