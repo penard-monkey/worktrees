@@ -193,11 +193,29 @@ const rustStr = (src, name) => {
   if (unproven !== "Refuse") fail(`decide() answers an UNPROVEN holder of the port with ${unproven ?? "nothing"}, not Refuse`);
   else if (!replaceFrom.length || replaceFrom.some((s) => s !== "Seen::Proven")) fail(`decide() reaches Replace from ${replaceFrom.join(", ") || "nowhere"} — only a PROVEN serve may be replaced`);
   else ok("decide() refuses an unproven port holder and replaces only a proven serve");
-  const connect = /pub fn connect\(&self[^)]*\) -> Result<Endpoint, String> \{([\s\S]*?)\n    \}/.exec(engineCode)?.[1] ?? "";
+  const connect = /pub fn connect\(&self, ask: Ask, phase: &dyn Fn\(&str\)\) -> Result<Endpoint, ConnectError> \{([\s\S]*?)\n    \}/.exec(engineCode)?.[1] ?? "";
+  if (!connect) fail("engine.rs: `pub fn connect(&self, …) -> Result<Endpoint, ConnectError>` not found — the checks below would pass on nothing");
   const terms = [...engineCode.matchAll(/self\.terminate\(/g)].length;
-  const inReplace = /Decision::Replace\(sf, theirs\) => \{(?:(?!Decision::)[\s\S])*?self\.terminate\(&sf\)\?;/.test(connect);
+  const inReplace = /Decision::Replace\(sf, theirs\) => \{(?:(?!Decision::)[\s\S])*?self\.terminate\(&sf\)\.map_err\(ConnectError::failed\)\?;/.test(connect);
   if (terms !== 1 || !inReplace) fail(`self.terminate( is called ${terms} time(s); it must be called once, from connect()'s Decision::Replace arm`);
   else ok("the old serve is SIGTERMed only from the Replace arm");
+
+  // The page's `start: false` is the one thing the shim obeys of its retry
+  // policy (app/src/reconnect.ts): nothing is started or replaced under it.
+  if (!/match permit\(decide\(seen, &self\.version\), ask\.may_start\) \{/.test(connect)) fail("connect() does not decide through permit(decide(…), ask.may_start) — a try the page sent with start:false could start or replace a serve");
+  else ok("connect() decides through permit(…, ask.may_start)");
+  const permitFn = /pub fn permit\(d: Decision, may_start: bool\) -> Decision \{([\s\S]*?)\n\}/.exec(engineCode)?.[1] ?? "";
+  const gated = ["Start(why)", "Replace(sf, theirs)"].filter((arm) => new RegExp(`Decision::${arm.replace(/[()]/g, "\\$&")} if !may_start => \\{?\\s*Decision::Decline`).test(permitFn));
+  if (gated.length !== 2) fail(`permit() must turn BOTH Start and Replace into Decline under !may_start (gated: ${gated.join(", ") || "none"})`);
+  else ok("permit() declines both a start and a replace when the try may not start");
+  const starts = [...engineCode.matchAll(/self\.start\(/g)].length;
+  const inConnect = [...connect.matchAll(/self\.start\(ask\.manual\)/g)].length;
+  if (starts !== 2 || inConnect !== 2) fail(`self.start( is called ${starts} time(s), ${inConnect} from connect(); it must be exactly the Start and Replace arms, after permit()`);
+  else ok("serve is spawned only from connect()'s Start and Replace arms");
+  if (!/let seen = if ask\.may_start \{ self\.settle\(seen, STOP_WAIT, phase\) \} else \{ seen \};/.test(connect)) fail("connect() does not wait (settle, ≤ STOP_WAIT) for a serve still stopping before it may start one");
+  else ok("a try that may start waits for a serve still stopping first (settle, ≤ STOP_WAIT)");
+  if (!/engine::Ask \{ reason: reason\.as_deref\(\), may_start: start, manual \}/.test(code(lib))) fail("lib.rs engine_connect does not hand the page's `start` to connect() as may_start");
+  else ok("engine_connect hands the page's start through as may_start, unaltered");
   if (/SIGKILL/.test(engineCode)) fail("engine.rs sends SIGKILL somewhere — a serve is never killed, only asked to stop");
   else ok("engine.rs never sends SIGKILL");
   if (/libc::kill\(/.test(code(lib))) fail("lib.rs signals a process itself — stopping serve is engine.rs's stop_owned()");

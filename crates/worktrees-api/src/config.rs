@@ -546,7 +546,7 @@ pub fn ai_status_report(repo: String, slug: String) -> Result<AiStatusReport, St
     // (profile::claude_launch). Env goes through `Command::env`, NOT inlined as
     // a `K=V ` prefix: that separation is the point of `AiLaunch`.
     let line = format!("exec {} -p {} --max-turns 12", ai.cmd, worktrees_core::tmux::sq(&prompt));
-    let mut cmd = std::process::Command::new("/bin/sh");
+    let mut cmd = worktrees_core::childenv::command("/bin/sh");
     cmd.args(["-c", &line]).current_dir(&wt_path);
     for (k, v) in &ai.env {
         cmd.env(k, v); // CLAUDE_CONFIG_DIR, when a profile applies

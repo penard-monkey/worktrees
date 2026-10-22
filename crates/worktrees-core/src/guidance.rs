@@ -371,7 +371,7 @@ impl Scratch {
 /// inherited repository cannot be consulted either. `inherited` is the
 /// environment it would otherwise have come from — the test seam.
 fn git_isolated(dir: &Path, inherited: &[(&str, &Path)]) -> std::process::Command {
-    let mut cmd = std::process::Command::new("git");
+    let mut cmd = crate::childenv::command("git");
     cmd.current_dir(dir);
     for (k, v) in inherited {
         cmd.env(k, v);
@@ -499,7 +499,7 @@ pub fn materialize() -> Result<Materialized, String> {
 /// when `guard` does, and answers from any directory.
 pub fn guard_bin() -> Option<PathBuf> {
     let bin = crate::profile::worktrees_bin()?;
-    let mut cmd = std::process::Command::new(&bin);
+    let mut cmd = crate::childenv::command(&bin);
     cmd.args(["guide", "--rules"]);
     let out = crate::proc::run_deadline(cmd, 5).ok()?;
     (out.status.success() && String::from_utf8_lossy(&out.stdout).starts_with("Managed by worktrees:")).then_some(bin)
@@ -652,7 +652,7 @@ pub fn codex_has_own_instructions(prompt_input: &str) -> Option<bool> {
 /// is `None`.
 pub fn probe_codex(dir: &str) -> Option<bool> {
     let bin = crate::profile::codex_bin()?;
-    let mut cmd = std::process::Command::new(bin);
+    let mut cmd = crate::childenv::command(bin);
     cmd.args(["debug", "prompt-input"]).current_dir(dir);
     for name in codex_mcp_server_names(dir) {
         cmd.arg("-c").arg(format!("mcp_servers.{}.enabled=false", toml_key(&name)));

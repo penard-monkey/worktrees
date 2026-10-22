@@ -77,8 +77,8 @@ pub fn status() -> Status {
 
 pub(crate) fn run(codex: &str, args: &[&str]) -> Result<(bool, String), String> {
     use std::io::Read;
-    use std::process::{Command, Stdio};
-    let mut child = Command::new(codex).args(args).stdin(Stdio::null())
+    use std::process::Stdio;
+    let mut child = crate::childenv::command(codex).args(args).stdin(Stdio::null())
         .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
         .map_err(|e| format!("could not run codex mcp: {e}"))?;
     let drain = |mut stream: Option<Box<dyn Read + Send>>| std::thread::spawn(move || {

@@ -4,7 +4,17 @@
 # itself onto your PATH. (The legacy bash engine was retired once the Rust binary
 # reached full parity — see MIGRATION.md.)
 
+UNAME_S := $(shell uname -s)
 BINDIR ?= $(HOME)/.local/bin
+# Where install-app puts the desktop app: /Applications on macOS; on Linux
+# ~/Applications, where AppImage integrators look, and never on PATH.
+ifeq ($(UNAME_S),Darwin)
+APPDIR ?= /Applications
+else
+APPDIR ?= $(HOME)/Applications
+endif
+# cargo's output dir, honouring CARGO_TARGET_DIR as cargo and tauri both do.
+TARGET_DIR := $(or $(CARGO_TARGET_DIR),$(CURDIR)/target)
 BATS   := ./test/lib/bats-core/bin/bats
 RELEASE_BIN := $(CURDIR)/target/release/worktrees
 
@@ -67,10 +77,15 @@ dev-app:
 	cd app && corepack pnpm tauri dev \
 	  --config '{"build":{"beforeDevCommand":"corepack pnpm dev"}}'
 
-# Build the Tauri desktop app + install to /Applications (macOS; local builds
-# aren't quarantined, so no signing needed). App updates = git pull + this.
+# Build the Tauri desktop app + install it: macOS → /Applications/worktrees.app
+# (local builds aren't quarantined, so no signing needed); Linux → the AppImage
+# at ~/Applications/worktrees.AppImage (install.sh --with-app also writes a
+# desktop entry; this does not). App updates = git pull + this.
+# APPDIR=<dir> installs somewhere else — a scratch dir, to inspect a build
+# without replacing the app you are sitting in.
 install-app:
-	@[ "$$(uname -s)" = Darwin ] || { echo "install-app is macOS-only"; exit 1; }
+	@[ "$(UNAME_S)" = Darwin ] || [ "$(UNAME_S)" = Linux ] || { echo "install-app builds the macOS or Linux app, not one for $(UNAME_S)"; exit 1; }
+	@[ -n "$(APPDIR)" ] || { echo "APPDIR is empty"; exit 1; }
 	@# Two different version errors can kill this AFTER you have waited for
 	@# cargo, so both are checked up front. The node one is below; the pnpm one
 	@# is structural and is why the recipe cd's into app/ (see dev-app above).
@@ -78,35 +93,61 @@ install-app:
 	@want=$$(cat $(CURDIR)/.nvmrc); have=$$(node -v | tr -d v); \
 	  [ "$$(printf '%s\n%s\n' "$$want" "$$have" | sort -V | head -1)" = "$$want" ] || \
 	  { echo "node $$have is older than .nvmrc ($$want) — run: nvm use"; exit 1; }
-	@# Two overrides, because this target only ever ditto's the .app below while
+	@# Two overrides, because this target only ever installs one bundle while
 	@# tauri.conf.json is written for RELEASES. Both failures land AFTER the whole
 	@# cargo release build has succeeded, and make stops on them, so the install
 	@# simply never happens — the build log reads like a success with an error
 	@# stapled to the end.
-	@#   --bundles app   : conf asks for `targets: "all"`; the dmg is a published
-	@#                     release artifact and pure waste here.
+	@#   --bundles app|appimage : conf asks for `targets: "all"`; the dmg, the
+	@#                     .deb (which needs root to install) and the .rpm are
+	@#                     release artifacts or nothing, and pure waste here.
 	@#   createUpdaterArtifacts false : conf has an updater pubkey, so tauri signs
-	@#                     the .tar.gz and ABORTS without TAURI_SIGNING_PRIVATE_KEY
-	@#                     (the real blocker — it is a repo secret, see Release in
-	@#                     AGENTS.md). A local install is never served by the
-	@#                     updater, so there is nothing to sign.
+	@#                     the updater artifact and ABORTS without
+	@#                     TAURI_SIGNING_PRIVATE_KEY (the real blocker — it is a
+	@#                     repo secret, see Release in AGENTS.md). A local install
+	@#                     is never served by the updater, so there is nothing to sign.
 	@# Do NOT "fix" either by narrowing tauri.conf.json: release.yml builds with
 	@# neither flag and needs both behaviours.
+	@#
+	@# The bundle carries the CLI as a private sidecar (Contents/MacOS/worktrees;
+	@# usr/lib/worktrees/worktrees in the AppImage), mapped in by tauri.conf.json's
+	@# `files` keys, which make the bundler FAIL if nothing is staged — so stage
+	@# comes first. app/scripts/sidecar.sh says why it is done this way, and
+	@# `check` is the same assertion release.yml makes.
+	app/scripts/sidecar.sh stage
+ifeq ($(UNAME_S),Darwin)
 	cd app && corepack pnpm tauri build --bundles app \
 	  --config '{"bundle":{"createUpdaterArtifacts":false},"build":{"beforeBuildCommand":"corepack pnpm build"}}'
-	rm -rf /Applications/worktrees.app
-	ditto "$(CURDIR)/target/release/bundle/macos/worktrees.app" /Applications/worktrees.app
-	@echo "installed: /Applications/worktrees.app ($$(plutil -extract CFBundleShortVersionString raw /Applications/worktrees.app/Contents/Info.plist))"
+	app/scripts/sidecar.sh check "$(TARGET_DIR)/release/bundle/macos/worktrees.app" \
+	  "$$(rustc -vV | sed -n 's/^host: //p')" "$$(sed -n 's/^version = "\(.*\)"$$/\1/p' Cargo.toml)"
+	rm -rf "$(APPDIR)/worktrees.app"
+	ditto "$(TARGET_DIR)/release/bundle/macos/worktrees.app" "$(APPDIR)/worktrees.app"
+	@echo "installed: $(APPDIR)/worktrees.app ($$(plutil -extract CFBundleShortVersionString raw "$(APPDIR)/worktrees.app/Contents/Info.plist"))"
+else
+	cd app && corepack pnpm tauri build --bundles appimage \
+	  --config '{"bundle":{"createUpdaterArtifacts":false},"build":{"beforeBuildCommand":"corepack pnpm build"}}'
+	@# tauri names it worktrees_<version>_<arch>.AppImage; an older version's
+	@# can still be lying beside it, so this version's, and exactly one.
+	ver="$$(sed -n 's/^version = "\(.*\)"$$/\1/p' Cargo.toml)"; \
+	  set -- "$(TARGET_DIR)/release/bundle/appimage/worktrees_$${ver}_"*.AppImage; \
+	  if [ $$# -ne 1 ] || [ ! -f "$$1" ]; then echo "expected one AppImage for $$ver, found: $$*"; exit 1; fi; \
+	  app/scripts/sidecar.sh check "$$1" "$$(rustc -vV | sed -n 's/^host: //p')" "$$ver" && \
+	  mkdir -p "$(APPDIR)" && \
+	  cp "$$1" "$(APPDIR)/.worktrees.AppImage.new" && chmod 0755 "$(APPDIR)/.worktrees.AppImage.new" && \
+	  mv -f "$(APPDIR)/.worktrees.AppImage.new" "$(APPDIR)/worktrees.AppImage" && \
+	  echo "installed: $(APPDIR)/worktrees.AppImage ($$ver)"
+endif
 
 uninstall:
 	rm -f $(BINDIR)/worktrees
 	@echo "removed: $(BINDIR)/worktrees"
 
 lint:
-	shellcheck -x bin/worktrees install.sh test/helpers/*.bash
-	bash -n bin/worktrees && bash -n install.sh
-	@# bash-4-ism gate on the shim + installer (must run on stock bash 3.2)
-	@if sed 's/[[:space:]]*#.*//' bin/worktrees install.sh | grep -nE 'mapfile|readarray|declare -A|\$$\{[A-Za-z_]+(,,|\^\^)'; then \
+	shellcheck -x bin/worktrees install.sh app/scripts/sidecar.sh test/helpers/*.bash
+	bash -n bin/worktrees && bash -n install.sh && bash -n app/scripts/sidecar.sh
+	@# bash-4-ism gate on the shim, the installer and the sidecar script, which
+	@# `make install-app` runs (all must run on stock bash 3.2)
+	@if sed 's/[[:space:]]*#.*//' bin/worktrees install.sh app/scripts/sidecar.sh | grep -nE 'mapfile|readarray|declare -A|\$$\{[A-Za-z_]+(,,|\^\^)'; then \
 	  echo "bash-4-ism found (see above)"; exit 1; else echo "bash-3.2 gate: clean"; fi
 
 # The gate = the Rust binary (bin/worktrees shim is common.bash's WT_BIN).

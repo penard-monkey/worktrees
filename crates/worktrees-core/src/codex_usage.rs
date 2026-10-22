@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::{mpsc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -238,7 +238,7 @@ impl Rpc {
     fn open(binary: &Path, cwd: &Path, home: &Path, budget: Duration) -> Result<Self, Fault> {
         let deadline = Instant::now() + budget;
         let mut server = Server(
-            Command::new(binary)
+            crate::childenv::command(binary)
                 .args(["app-server", "--listen", "stdio://"])
                 .current_dir(cwd)
                 .env("CODEX_HOME", home)

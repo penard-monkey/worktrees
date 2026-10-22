@@ -33,9 +33,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
     version left running puts two engines on the same settings, places and
     dock tabs.
   - If the engine goes away, the app keeps what it last showed under a
-    "Disconnected from the engine" banner. Reconnect looks for (or starts)
-    serve again, and the terminals re-attach: the dock shell replays behind
-    its `── restored ──` seam.
+    banner and reconnects on its own (below); the terminals re-attach, and
+    the dock shell replays behind its `── restored ──` seam.
 
   The shim now holds the window, the six commands that act on this machine
   (clipboard, editor, terminal, zoom, the app's own updater) and
@@ -80,6 +79,19 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   row — see below).
 
 ### Added
+- **The app reconnects to its engine on its own.** When the connection to
+  `worktrees serve` drops, the banner reads "Reconnecting… Next try in N s"
+  and the app tries again after 0.5, 1, 2, 4, 8 and 16 s, then every 30 s,
+  with a little jitter; **Reconnect now** tries at once.
+  - It restarts serve only if the serve that went was one the app started or
+    adopted, and at most three times in a minute. Past that it stops, says
+    why, and names `~/.cache/worktrees/serve.log`; **Reconnect now** starts
+    one more.
+  - A serve you started yourself is never restarted: the app waits for it to
+    come back, and says so.
+  - A serve still shutting down is waited for (up to 10 s) before another is
+    started, so two engines never write the dock shells' history at once.
+  - While the window is hidden, a due retry waits until you look at it.
 - **`worktrees serve`: the engine, hosted behind an authenticated WebSocket on
   loopback** (Server Edition, Phase 1). It speaks the same `{cmd, args}` the
   app's `invoke` does — all 150 commands, each with an exposure class in one
@@ -136,6 +148,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   appears in the error banner.
   `app/scripts/transport-check.mjs` holds the client against the server's own
   frame definitions.
+- **The desktop app carries its own copy of the CLI**, at
+  `worktrees.app/Contents/MacOS/worktrees`: built from the same commit, for
+  the bundle's own architecture, and used only by the app (which will start
+  `worktrees serve` with it). It is not put on your `PATH` — the installer's
+  `~/.local/bin/worktrees` is still the CLI you run, and agents and Claude's
+  MCP server keep working whether the app is installed or not. Nothing the app
+  sets up for them points at the bundle's copy: the MCP entries for Claude,
+  Codex, pi and kimi, the agent hooks and the helper a kimi pane starts all
+  name the CLI on your `PATH`, and the app says it is missing when there is
+  none. Every release checks the copy inside the bundle it ships: present,
+  executable, the right architecture, and the tag's version. `make
+  install-app` builds it the same way, and takes `APPDIR=<dir>` to install
+  somewhere other than /Applications.
+- **The desktop app on Linux**, for x86_64 and arm64: every release now ships
+  an AppImage and a `.deb` beside the macOS bundles, and the in-app updater
+  takes care of both (an AppImage replaces itself; a `.deb` updates through
+  `pkexec dpkg -i`). The installer offers it on Linux exactly as on macOS — the
+  AppImage goes to `~/Applications/worktrees.AppImage` with a desktop entry,
+  never onto your `PATH` — and `make install-app` builds it on a Linux machine.
+  The `.deb` installs the app as `worktrees-app` and depends on the distro's
+  tmux and git; the AppImage, like the Mac app, uses the ones you have. Both
+  carry the CLI privately at `usr/lib/worktrees/worktrees`, and nothing the
+  app starts for you — tmux and every pane in it, the dock's shells, your
+  editor, git — inherits the AppImage's bundled libraries or paths.
 - **Applying the worktrees rules or the agent-setup Fix now opens a review
   lane for the `agent-instructions` branch**: a place on it, with an agent
   whose brief explains what the branch changes — each file, the AGENTS.md

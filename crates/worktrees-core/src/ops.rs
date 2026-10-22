@@ -6,7 +6,6 @@
 use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd;
 use std::path::Path;
-use std::process::Command;
 
 use crate::config::sanitize_prefix;
 use crate::diag::{Code, Finding, Report, Severity};
@@ -322,7 +321,7 @@ fn ai_launch_inner(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> crat
 /// two simultaneous opens can both see an empty place and create one session
 /// each. The lock lives in Git's private directory, never in tracked files.
 fn lock_agent_switch(main_root: &str) -> Result<File, String> {
-    let output = Command::new("git").args(["-C", main_root, "rev-parse", "--absolute-git-dir"])
+    let output = crate::childenv::command("git").args(["-C", main_root, "rev-parse", "--absolute-git-dir"])
         .output().map_err(|e| format!("could not locate Git directory for agent switch: {e}"))?;
     if !output.status.success() {
         return Err("could not locate Git directory for agent switch".into());
@@ -2291,7 +2290,7 @@ fn harness_in_use(p: &Project, h: &crate::provider::Provider) -> bool {
 fn kimi_doctor(p: &Project, ui: &mut dyn Ui, json: bool, with_usage: bool) -> i32 {
     let bin = crate::kimi::kimi_bin();
     let version = bin.as_ref().and_then(|b| {
-        let mut cmd = std::process::Command::new(b);
+        let mut cmd = crate::childenv::command(b);
         cmd.arg("--version").current_dir("/").stdin(std::process::Stdio::null());
         crate::proc::run_deadline(cmd, 10).ok().filter(|o| o.status.success())
             .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
@@ -3651,6 +3650,7 @@ mod tests {
     }
 
     use super::*;
+    use std::process::Command;
 
     /// Agent guidance is for worktrees-managed repos only (decision,
     /// 2026-09-30). Every bats `new` makes its repo managed, so the unmanaged
@@ -3663,7 +3663,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(&base).unwrap();
         let git = |args: &[&str]| {
-            assert!(Command::new("git").args(["-c", "user.email=t@t", "-c", "user.name=t", "-C"]).arg(&base).args(args).status().unwrap().success());
+            assert!(std::process::Command::new("git").args(["-c", "user.email=t@t", "-c", "user.name=t", "-C"]).arg(&base).args(args).status().unwrap().success());
         };
         git(&["init", "-q"]);
         git(&["commit", "-q", "--allow-empty", "-m", "init"]);

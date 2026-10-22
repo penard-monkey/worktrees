@@ -222,17 +222,27 @@ async fn set_zoom(window: tauri::WebviewWindow, factor: f64) -> Result<(), Strin
 /// answer is the ONLY way the token reaches the page: never a URL, never
 /// storage, never a log line. `reason` is the page's, when it is reconnecting
 /// after losing the engine, so app.log says why a second serve was looked for.
-/// Blocking work (a spawn waits for serve to prove itself), so off the main
-/// thread.
+/// `start` is the page's reconnect policy (app/src/reconnect.ts): under
+/// `false` nothing is started or replaced. `manual` marks a press of Reconnect
+/// now. `on_phase` hears what a long call is doing, for the banner. Blocking
+/// work (a spawn waits for serve to prove itself), so off the main thread.
 #[tauri::command]
 async fn engine_connect(
     engine: tauri::State<'_, Arc<engine::Engine>>,
     reason: Option<String>,
-) -> Result<engine::Endpoint, String> {
+    start: bool,
+    manual: bool,
+    on_phase: tauri::ipc::Channel<String>,
+) -> Result<engine::Endpoint, engine::ConnectError> {
     let e = engine.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || e.connect(reason.as_deref()))
-        .await
-        .map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        let ask = engine::Ask { reason: reason.as_deref(), may_start: start, manual };
+        e.connect(ask, &|p: &str| {
+            let _ = on_phase.send(p.to_string());
+        })
+    })
+    .await
+    .map_err(|e| engine::ConnectError::failed(e.to_string()))?
 }
 
 /// Bring the window forward. The engine's inbox emits `app:open-doc` when a

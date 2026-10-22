@@ -214,7 +214,7 @@ pub fn list_dir(ctx: &Ctx, path: String, show_ignored: Option<bool>) -> Result<V
 /// Paths git would ignore (best-effort). `-z` in/out keeps it robust to spaces
 /// and newlines in filenames. Empty set on any git failure → nothing filtered.
 pub fn git_check_ignore<'a>(dir: &Path, paths: impl Iterator<Item = &'a str>) -> std::collections::HashSet<String> {
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
     let mut stdin_buf = Vec::new();
     for p in paths {
         stdin_buf.extend_from_slice(p.as_bytes());
@@ -223,7 +223,7 @@ pub fn git_check_ignore<'a>(dir: &Path, paths: impl Iterator<Item = &'a str>) ->
     if stdin_buf.is_empty() {
         return Default::default();
     }
-    let child = Command::new("git")
+    let child = worktrees_core::childenv::command("git")
         .args(["-C", &dir.to_string_lossy(), "check-ignore", "--stdin", "-z"])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

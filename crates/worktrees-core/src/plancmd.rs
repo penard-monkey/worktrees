@@ -346,7 +346,7 @@ fn cmd_hook(args: &[String]) -> i32 {
 /// `guidance::guard_bin`.
 pub fn probe_cli() -> Option<(PathBuf, String)> {
     let bin = crate::profile::worktrees_bin()?;
-    let mut cmd = std::process::Command::new(&bin);
+    let mut cmd = crate::childenv::command(&bin);
     cmd.args(["plan", "hook", "--version"]).current_dir("/").stdin(std::process::Stdio::null());
     let out = crate::proc::run_deadline(cmd, 5).ok()?;
     if !out.status.success() {

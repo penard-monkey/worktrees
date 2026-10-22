@@ -28,7 +28,7 @@
 use serde::Serialize;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -421,7 +421,7 @@ pub fn user_ssh_base() -> String {
     }
     // Asked with no repository in play, so a parent folder that happens to sit
     // inside another repo cannot lend its config to this clone.
-    let cfg = Command::new("git")
+    let cfg = crate::childenv::command("git")
         .args(["config", "--get", "core.sshCommand"])
         .current_dir(std::env::temp_dir())
         .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
@@ -556,7 +556,7 @@ fn run_clone(
 ) -> Result<CloneOutcome, CloneError> {
     use std::os::unix::process::CommandExt;
     let base = opts.ssh_base.clone().unwrap_or_else(user_ssh_base);
-    let mut cmd = Command::new("git");
+    let mut cmd = crate::childenv::command("git");
     cmd.args(["clone", "--progress", "--", &src.url])
         .arg(target)
         .stdin(Stdio::null())
@@ -805,6 +805,7 @@ pub fn cmd_clone(ui: &mut dyn crate::ui::Ui, args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
     use std::sync::Arc;
 
     fn tmp(tag: &str) -> PathBuf {

@@ -133,7 +133,7 @@ pub fn pi_bin() -> Option<PathBuf> {
 }
 
 fn run_pi(args: &[&str], secs: u64) -> Option<std::process::Output> {
-    let mut cmd = std::process::Command::new(pi_bin()?);
+    let mut cmd = crate::childenv::command(pi_bin()?);
     cmd.args(args).env("PI_OFFLINE", "1");
     crate::proc::run_deadline(cmd, secs).ok()
 }
@@ -161,7 +161,7 @@ pub enum Reach {
 /// `!command`, which is never evaluated here.
 pub fn probe_now(base_url: &str) -> Reach {
     let Some(url) = probe_url(base_url) else { return Reach::Down };
-    let mut cmd = std::process::Command::new("curl");
+    let mut cmd = crate::childenv::command("curl");
     // `--url`, never a bare positional: the value is from a file pi reads and
     // worktrees does not own, and a positional starting with `-` is an option.
     cmd.args(["-s", "-m", "3", "--connect-timeout", "2", "-o", "-", "-w", "\n%{http_code}", "--url", &url]);
@@ -507,7 +507,7 @@ pub fn judge(m: &HashMap<String, String>, floor: Option<String>, managed: bool) 
 
 pub fn preflight_now() -> Preflight {
     let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into());
-    let mut cmd = std::process::Command::new(shell);
+    let mut cmd = crate::childenv::command(shell);
     cmd.args(["-ic", PREFLIGHT_SCRIPT]);
     let m = match crate::proc::run_deadline(cmd, 5) {
         Ok(out) => marked(&String::from_utf8_lossy(&out.stdout)),

@@ -39,7 +39,7 @@ use serde::Serialize;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::{mpsc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -334,7 +334,7 @@ pub fn parse_http(raw: &[u8]) -> Result<(u16, Vec<u8>), &'static str> {
 pub fn probe(binary: &Path, cwd: &Path, budget: Duration, grace: Duration) -> Info {
     let deadline = Instant::now() + budget;
     let left = || deadline.checked_duration_since(Instant::now());
-    let spawned = Command::new(binary)
+    let spawned = crate::childenv::command(binary)
         .args(["web", "--no-open", "--host", "127.0.0.1", "--port", "0"])
         .current_dir(cwd)
         .stdin(Stdio::null())
@@ -621,7 +621,7 @@ mod tests {
         if unsafe { libc::kill(pid.parse().unwrap(), 0) } != 0 {
             return false;
         }
-        let stat = Command::new("ps").args(["-o", "stat=", "-p", pid]).output();
+        let stat = std::process::Command::new("ps").args(["-o", "stat=", "-p", pid]).output();
         !stat.is_ok_and(|o| o.stdout.trim_ascii_start().starts_with(b"Z"))
     }
 

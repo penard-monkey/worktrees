@@ -159,6 +159,7 @@ impl TmuxServer {
     }
 
     pub fn configure(&self, command: &mut std::process::Command) {
+        crate::childenv::scrub(command);
         command.args(self.endpoint_args()).env("TMUX_TMPDIR", &self.socket_root).env_remove("TMUX");
     }
 }

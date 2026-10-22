@@ -610,7 +610,7 @@ pub fn unique_temp_dir(tag: &str) -> Result<PathBuf, String> {
 /// `git clone` with the terminal prompt disabled, so a private URL fails fast
 /// instead of hanging a launch (or a UI thread) on a credential prompt.
 fn clone_no_prompt(cwd: &Path, args: &[&str]) -> Result<std::process::Output, String> {
-    std::process::Command::new("git")
+    crate::childenv::command("git")
         .arg("-C")
         .arg(cwd)
         .args(args)

@@ -1,0 +1,38 @@
+name: release dry run
+# A pull request that touches the packaging runs the release's own workflow,
+# release.yml, with `dry_run: true`: the CLI and app bundles for both Linux
+# arches plus the native Mac app, every assertion a release makes, signing with
+# a throwaway key, and latest.json + checksums assembled — then it stops. No
+# secrets are passed (release.yml refuses to dry-run with the real key), and the
+# token is read-only, so nothing here can publish.
+#
+# Its own file rather than a job in ci.yml: `paths:` is a workflow-level filter,
+# and a mistake in release.yml's call shape then fails THIS run alone instead of
+# taking every ci check down with it. Like any workflow, a run that fails to
+# start shows in `gh run list --commit <sha>` and not in `gh pr checks`.
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - '.github/workflows/publish.yml'
+      - '.github/workflows/release-dry-run.yml'
+      - 'app/src-tauri/tauri*.conf.json'
+      - 'app/scripts/sidecar.sh'
+      - 'app/package.json'
+      - 'Makefile'
+      - 'install.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push supersedes the dry run of the last one.
+concurrency:
+  group: release-dry-run-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dry-run:
+    uses: ./.github/workflows/release.yml
+    with:
+      dry_run: true

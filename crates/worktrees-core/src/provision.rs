@@ -45,7 +45,6 @@ use std::fs;
 use std::io;
 use std::net::{Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use crate::config::sanitize_prefix;
 use crate::projcfg::{Compose, Ports, ProjectConfig};
@@ -552,7 +551,7 @@ pub fn compose_project_for(wt: &Path, compose: &Compose, prefix: &str, slug: &st
 /// declared in the files it is given, so dropping the base file leaks every
 /// named volume the override does not repeat.
 pub fn compose_down(files: &[PathBuf], project: &str) -> Result<(), String> {
-    let mut cmd = Command::new("docker");
+    let mut cmd = crate::childenv::command("docker");
     cmd.arg("compose");
     for f in files {
         cmd.arg("-f").arg(f);
