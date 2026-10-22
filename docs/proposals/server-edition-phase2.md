@@ -2433,7 +2433,8 @@ waits for the caps (§6).
 **This first pass predates the decisions of 2026-10-20 (§11).** A second
 pass covered what those decisions changed, and §12.1 lists what it changed
 in turn. §12.2 is a third pass, over the mDNS design (§4.7) that §11.1 N2
-added, and §12.3 a check of the automatic rebind that §11.2 N4 added.
+added, §12.3 a check of the automatic rebind that §11.2 N4 added, and
+§12.4 a fourth pass over what the network spike measured.
 
 **What held up.** Deny by default, through an exhaustive table with a
 fail-closed resolver. Authentication before parsing: unknown devices stop
@@ -2475,7 +2476,7 @@ token in a URL.
   anything. Per-device expiry (§2.5) covers forgotten devices.
 - *A hardware-backed server key* (ASVS V6.4.2). macOS builds are ad-hoc
   signed (§2.1), so the key stays a `0600` file. That is recorded as a
-  residual, to revisit with a team-signed build.
+  residual, to revisit with a team-signed build. §12.4 narrows it.
 - *Making `executes` paths console-only* instead of `stream`. A `stream`
   device already has a shell, so console-only would cost the user something
   and protect nothing.
@@ -2562,8 +2563,10 @@ listener. The address code stays as the fallback.
 **Considered and not changed.**
 
 - *A discovery id that rotates* (an HMAC of a per-host key over the time).
-  The SRV target is the OS's own `.local` name, which is just as linkable,
-  so rotating the id would hide nothing the OS does not already show.
+  The host's own `.local` name, which its responder answers for whether or
+  not serve runs, is just as linkable, so rotating the id would hide
+  nothing the OS does not already show. That still holds since §12.4 T1
+  moved the SRV target off that name.
 - *Changing the discovery id when a device is revoked.* A revoked device
   that still recognises the advert learns only what a scan of the LAN
   shows. A new id would also strand any device whose stored address had
@@ -2631,3 +2634,33 @@ and gains nothing but denial of service.**
   is all the fingerprint is for.
 - *Authenticating the gateway.* Nothing on a home LAN offers it, and mTLS
   already makes the network's honesty irrelevant to who gets in.
+
+### 12.4 Fourth pass, 2026-10-22: the spike's measurements
+
+The network spike of 2026-10-21 (§10) measured most of what §4.1, §4.6 and
+§4.7 had left unmeasured, on macOS 27 and on Linux 6.12 in containers, and
+§2.1's keychain claim. This pass, again with the `owasp-security` skill,
+asked which of its results move an OWASP-relevant claim. Most confirm one.
+Six did not, and each is folded in above:
+
+| # | OWASP | What the spike found | Change, and where |
+|---|---|---|---|
+| T1 | A02, ASVS V8 | The advert was said to reveal nothing but an opaque id. Its SRV target is the OS's `.local` name, which on a default Mac is `<First name>s-MacBook-Pro`, and a resolve lists every address on the interface (IPv4, ULA, link-local). The type is enumerable under `_services._dns-sd._udp`, and the PTR and TXT records live 75 minutes in a peer's cache. | Serve registers its own host name, `wt-<id>.local`, with the bound address only (recommended, unmeasured). Where a platform cannot, the enable dialog shows the OS's name before discovery goes on. Enumeration and the Sleep Proxy are listed as exposures. Decision 7 and §11.1 N2 amended. (§4.7, §10) |
+| T2 | A10, A06 | "After one poll it no longer matters" assumed something would close a listener whose address left. On Linux nothing does: the listener and its connections survive, a re-added address is served by the old listener, and a moved address is served on its new interface. | Serve's close at the poll is mandatory. The poll checks the bound interface and its index, resume binds a new socket, and a pause frees the mDNS registration, which Avahi would otherwise announce again by itself. (§4.1, §4.7) |
+| T3 | A01, ASVS V1 | The rationale for peer rule part 2 said both platforms are weak hosts. macOS is a hybrid that is strong for `utun` while IP forwarding is off. | Rationale corrected; the rule is not. Part 2 stays a requirement: Linux is weak, and macOS is weak with forwarding on or for an overlay that is not a `utun`. The listener is bound to its interface on both, which pins the interface index. (§4.1) |
+| T4 | A06, R8 | With a device-bound listener, §4.6 step 5's out-of-row source on ANOTHER scratch interface is refused by the kernel, so the assertion would pass with the peer filter deleted. | The out-of-row source sits on the same point-to-point interface, and the step is shown failing with the filter removed. (§4.6) |
+| T5 | A05, ASVS V5 | Rust's `SocketAddr` parser accepts a numeric zone, so `[fe80::1%1]:7000` in a QR would put the host's interface number into the device's connect, past the zone rule. | The QR and address-code parsers refuse any `%` and parse the host with `IpAddr`. A device scopes a link-local dial, IPv4 or IPv6, to an interface it picks itself. (§4.1) |
+| T6 | A09, ASI09 | The gateway's link-layer address was to come from the neighbour table. macOS hides that table from a non-root process, and on both platforms an entry is often simply absent. Read naively, a quiet network would raise the ARP-spoofing alert, and an alert that fires for nothing teaches the click that matters. | macOS reads SystemConfiguration. An absent entry is "not known yet", and only a present, different address raises the dialog and the alert. (§4.1) |
+
+**Considered and not changed.**
+
+- *The hardware-backed server key* that the first pass left as a residual
+  (ASVS V6.4.2). The spike found that an unentitled CryptoKit Secure
+  Enclave key works in an ad-hoc build, and that its blob survives a
+  rebuild, so the residual no longer waits for a team-signed build. It
+  stays a `0600` PKCS#8 file until the Rust signer path is settled (§2.1).
+- *Advertising on a TAP-based overlay* (ZeroTier's shape), which is not
+  point-to-point and so gets LAN rules and the advert. Its virtual network
+  may span sites, but every peer on it is one the overlay admitted, the
+  pinned handshake is the gate as on any LAN, and the console switch turns
+  the advert off (§4.7).
