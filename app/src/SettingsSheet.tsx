@@ -16,6 +16,7 @@ import { check as checkAppUpdate } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import ProfilesPanel from "./ProfilesPanel";
 import PiPanel from "./PiPanel";
+import { FetchIntervalSection, TermHistorySection } from "./HostPolicyControls";
 import type { PiMcpStatus } from "./PiMcpPanel";
 import KimiPanel, { type KimiMcpStatus } from "./KimiPanel";
 import type { CodexPermissions, LayoutTile, Settings, ThemeId, ThemeSetting, UpdateInfo } from "./settings";
@@ -961,37 +962,7 @@ export function SettingsSheet({
             />
           </section>
 
-          <section className="setting">
-            <label>What a shell tab remembers</label>
-            <label className="tier-toggle setting-check">
-              <input
-                type="checkbox"
-                checked={settings.term_persist_scrollback}
-                onChange={(e) => onChange({ term_persist_scrollback: e.currentTarget.checked })}
-              />
-              Keep each tab's output between restarts
-            </label>
-            <div className="hint">
-              A dock shell dies with the app, so its tab used to reopen blank. Its last
-              256K of output is saved and replayed instead. This is the only thing that
-              writes a terminal's output to disk — whatever a command printed, secrets
-              included — under Application Support. Clear it under Data &amp; Logs.
-            </div>
-            <label className="tier-toggle setting-check">
-              <input
-                type="checkbox"
-                checked={settings.term_per_tab_history}
-                onChange={(e) => onChange({ term_per_tab_history: e.currentTarget.checked })}
-              />
-              Give each tab its own command history
-            </label>
-            <div className="hint">
-              Arrow-up recalls what this tab ran, rather than the one history every
-              terminal on the Mac shares. zsh and bash only; your own rc files are read
-              as usual and never modified. Turn it off if a shell setup of yours depends
-              on $ZDOTDIR.
-            </div>
-          </section>
+          <TermHistorySection settings={settings} onChange={onChange} onFail={onFail} />
           </>}
 
           {cat === "ai" && <ProfilesPanel key={repo || "none"} repo={repo} onReport={onReport} />}
@@ -1267,20 +1238,7 @@ export function SettingsSheet({
             </div>
           </section>
 
-          <section className="setting">
-            <label>Git</label>
-            <label className="sub">Auto-fetch origin</label>
-            <select
-              value={settings.fetch_interval_min}
-              onChange={(e) => onChange({ fetch_interval_min: +e.currentTarget.value })}
-            >
-              <option value={0}>Off</option>
-              <option value={5}>Every 5 min</option>
-              <option value={15}>Every 15 min</option>
-              <option value={60}>Every 60 min</option>
-            </select>
-            <div className="hint">Keeps the divergence counts fresh. Fetches each project's origin in the background.</div>
-          </section>
+          <FetchIntervalSection settings={settings} onChange={onChange} onFail={onFail} />
 
           <section className="setting">
             <label>Pull requests</label>

@@ -4722,34 +4722,12 @@ function App() {
     return startUpdatePoll(() => checkUpdate(true), browserPollEnv());
   }, [checkUpdate, settings.update_auto_check]);
 
-  // Push the auto-fetch cadence to the backend watcher (which owns the pass loop
-  // but can't read the opaque settings blob). Fires post-hydration and on every
-  // change of the setting; before hydration `settings` still holds DEFAULTS
-  // (fetch_interval_min=0 → off), so an early push is a harmless no-op. Idempotent
-  // (a plain store), so re-syncing the same value costs nothing.
-  useEffect(() => {
-    invoke("set_fetch_interval", { mins: settings.fetch_interval_min }).catch(() => {});
-  }, [settings.fetch_interval_min]);
-
-  // What a dock shell tab keeps between runs, pushed the same way: the shell
-  // path in the backend decides whether to restore a ring and whether to
-  // generate a ZDOTDIR, and it cannot read the settings blob to find out.
-  // Gated on hydration, unlike the cadence above, because the early push is NOT
-  // harmless here: before hydration `settings` holds DEFAULTS (both on), and
-  // the backend this reaches need not be fresh. A webview reload — or any
-  // client of a long-running engine — finds the user's "off" already there, and
-  // pushing DEFAULTS would turn persistence back ON until hydration landed; a
-  // 15 s flush in that window writes every dirty shell's ring to term-history/,
-  // whatever a command printed. A refusal is surfaced, never swallowed: it
-  // would mean tabs behave differently from what Settings shows.
-  // `hostpolicy-check.mjs` holds this effect to the gate.
-  useEffect(() => {
-    if (!hydratedTick) return;
-    invoke("set_term_history_opts", {
-      persistScrollback: settings.term_persist_scrollback,
-      perTabHistory: settings.term_per_tab_history,
-    }).catch((e) => fail(`Terminal history: ${String(e)}`));
-  }, [hydratedTick, settings.term_persist_scrollback, settings.term_per_tab_history, fail]);
+  // No effect here pushes host policy — the auto-fetch cadence, the two
+  // dock-shell switches, Codex permissions, pi trust. The host keeps them
+  // (host-policy.json), loads them at boot, and only a Settings control the
+  // user operates changes them; under one engine per host, a push from here
+  // made whichever client loaded last decide for every client
+  // (`hostpolicy-check.mjs`).
 
   // hydrate persisted settings BEFORE first meaningful paint. A pre-hydration
   // interaction (⌘B at launch) must neither be visually reverted nor let its

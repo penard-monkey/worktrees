@@ -317,13 +317,13 @@ pub fn cmd_serve(args: &[String]) -> i32 {
         return 1;
     }
 
-    // Host policy (Codex permissions, pi project trust) is the ENGINE's to
-    // read, and this process is the engine: `hostpolicy::boot` migrates and
-    // loads `host-policy.json` into core's overrides, as the app's `.setup`
-    // does. Here and not in `host::start`, which the app also calls: the
-    // app's one call sits in its `.setup` (hostpolicy-check.mjs). After the
-    // one-engine refusal above, because boot may write the file, and before
-    // the listener exists, so no client is served under the wrong policy.
+    // Host policy (Codex permissions, pi project trust, the auto-fetch
+    // cadence, the two dock-shell switches) is the ENGINE's to read, and this
+    // process is the engine: `hostpolicy::boot` migrates and loads
+    // `host-policy.json` into core's overrides and the engine's statics. The
+    // shim never calls it (hostpolicy-check.mjs). After the one-engine
+    // refusal above, because boot may write the file, and before the
+    // listener exists, so no client is served under the wrong policy.
     worktrees_api::hostpolicy::boot(&opts.config_dir);
 
     let rt = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {

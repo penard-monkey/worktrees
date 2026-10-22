@@ -276,15 +276,86 @@ fn a_sigterm_as_soon_as_serve_json_exists_is_a_clean_stop() {
 /// reads it; `boot` loads it at startup"), and `serve` is the engine. A host
 /// that chose `ask` for Codex in Settings and then restarted serve must launch
 /// lanes under `ask`, not under the default the file is there to override
-/// (`auto-review`).
+/// (`auto-review`) — and the same for the auto-fetch cadence and the two
+/// dock-shell switches.
+///
+/// The same boot carries the one-time migration from the app's ui-state.json:
+/// a key the host lacks and the old file CHOSE (scrollback off) is copied; a
+/// key the host holds is not (the cadence stays 60, not the stale 15); a
+/// default there (per-tab history on) is not copied at all. And a set over
+/// the socket persists before it answers, then takes effect.
 #[test]
 fn serve_loads_host_policy_at_boot() {
     let mut sb = Sandbox::new("hostpolicy");
-    std::fs::write(sb.cfg().join("host-policy.json"), r#"{"codex_permissions": "ask"}"#).unwrap();
+    let policy = sb.cfg().join("host-policy.json");
+    std::fs::write(&policy, r#"{"codex_permissions": "ask", "fetch_interval_min": 60}"#).unwrap();
+    std::fs::write(
+        sb.cfg().join("ui-state.json"),
+        r#"{"fetch_interval_min": 15, "term_persist_scrollback": false, "term_per_tab_history": true}"#,
+    )
+    .unwrap();
     let sf = sb.launch(&["--allow-origin", "http://localhost:1420"]);
     let mut ws = connect(&sf, "http://localhost:1420");
     let r = rpc(&mut ws, 1, "get_codex_permissions", json!({}));
     assert_eq!(r["ok"], json!("ask"), "host-policy.json was not loaded at boot: {r}");
+    let r = rpc(&mut ws, 2, "get_fetch_interval", json!({}));
+    assert_eq!(r["ok"], json!(60), "the host's cadence, not ui-state.json's: {r}");
+    let r = rpc(&mut ws, 3, "get_term_history_opts", json!({}));
+    assert_eq!(r["ok"], json!({"persist_scrollback": false, "per_tab_history": true}), "{r}");
+    let on_disk = || serde_json::from_slice::<Value>(&std::fs::read(&policy).unwrap()).unwrap();
+    let v = on_disk();
+    assert_eq!((v["fetch_interval_min"].clone(), v["term_persist_scrollback"].clone()), (json!(60), json!(false)), "{v}");
+    assert!(v.get("term_per_tab_history").is_none(), "a default was copied: {v}");
+
+    let r = rpc(&mut ws, 4, "set_term_history_opts", json!({"perTabHistory": false}));
+    assert_eq!(r["ok"], Value::Null, "{r}");
+    assert_eq!(on_disk()["term_per_tab_history"], json!(false));
+    let r = rpc(&mut ws, 5, "get_term_history_opts", json!({}));
+    assert_eq!(r["ok"], json!({"persist_scrollback": false, "per_tab_history": false}), "{r}");
+    let r = rpc(&mut ws, 6, "set_fetch_interval", json!({"mins": 7}));
+    assert!(r["err"].as_str().is_some_and(|e| e.contains("unknown auto-fetch interval 7")), "{r}");
+    assert_eq!(on_disk()["fetch_interval_min"], json!(60), "a refused cadence was written");
+    assert_eq!(sb.terminate().code(), Some(0));
+}
+
+/// The crash-restart case (#525's reconnect). Before host policy the page
+/// pushed the auto-fetch cadence and the terminal switches from effects keyed
+/// on hydration and settings, and the app stays mounted across a reconnect, so
+/// a serve started again after a crash ran on its boot defaults: auto-fetch
+/// off, and scrollback persistence back ON, until the user next changed a
+/// setting. Now a set persists before it answers, and boot loads it, so the
+/// new serve holds what was set with no client pushing anything — and a stale
+/// client copy in ui-state.json does not get a say either.
+#[test]
+fn a_serve_started_again_after_a_crash_holds_the_engine_policies_it_was_set() {
+    let mut sb = Sandbox::new("hostpolicy-restart");
+    let sf = sb.launch(&["--allow-origin", "http://localhost:1420"]);
+    let mut ws = connect(&sf, "http://localhost:1420");
+    let r = rpc(&mut ws, 1, "set_fetch_interval", json!({"mins": 15}));
+    assert_eq!(r["ok"], Value::Null, "{r}");
+    let r = rpc(&mut ws, 2, "set_term_history_opts", json!({"persistScrollback": false}));
+    assert_eq!(r["ok"], Value::Null, "{r}");
+    drop(ws);
+
+    // A crash: SIGKILL, so nothing of serve's own exit path runs.
+    let mut dead = sb.child.take().unwrap();
+    dead.kill().unwrap();
+    dead.wait().unwrap();
+    std::fs::write(
+        sb.cfg().join("ui-state.json"),
+        r#"{"fetch_interval_min": 60, "term_persist_scrollback": true, "term_per_tab_history": true}"#,
+    )
+    .unwrap();
+
+    let sf = sb.launch(&["--allow-origin", "http://localhost:1420"]);
+    let mut ws = connect(&sf, "http://localhost:1420");
+    let r = rpc(&mut ws, 1, "get_fetch_interval", json!({}));
+    assert_eq!(r["ok"], json!(15), "the restarted serve lost the cadence it was set: {r}");
+    let r = rpc(&mut ws, 2, "get_term_history_opts", json!({}));
+    assert_eq!(r["ok"], json!({"persist_scrollback": false, "per_tab_history": true}), "{r}");
+    let log = std::fs::read_to_string(sb.log()).unwrap();
+    let sets = log.lines().filter(|l| l.contains("serve: host-admin set_")).count();
+    assert_eq!(sets, 2, "only the two sets before the crash may set host policy:\n{log}");
     assert_eq!(sb.terminate().code(), Some(0));
 }
 

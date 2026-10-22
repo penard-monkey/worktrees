@@ -16,21 +16,39 @@ use crate::util::fmt_utc;
 use crate::ops::{run_op, CmdResult};
 use crate::term::{
     cwd_key, edit_cwds, forget_place_history, hist_write_atomic, kill_place_shells, term_hist_dir,
-    Shells, PERSIST_SCROLLBACK, PER_TAB_HISTORY, TERM_HIST_LOCK,
+    Shells, TERM_HIST_LOCK,
 };
 use crate::viewer;
 use crate::Ctx;
 
 
-/// Push the two terminal-history preferences down from the frontend.
-///
-/// The settings blob is backend-opaque and frontend-owned, so the shell path
-/// cannot look them up — the frontend pushes instead, on hydration and on every
-/// change. Same shape as `set_fetch_interval`, and for the same reason.
-pub fn set_term_history_opts(persist_scrollback: bool, per_tab_history: bool) -> Result<(), String> {
-    PERSIST_SCROLLBACK.store(persist_scrollback, Ordering::Relaxed);
-    PER_TAB_HISTORY.store(per_tab_history, Ordering::Relaxed);
+/// Settings → Terminal → "What a shell tab remembers": HOST policy
+/// (`hostpolicy`), persisted in host-policy.json and then applied. Every
+/// client that opens a tab attaches to the same shell, so these decide what
+/// the host keeps on disk about every client's terminals and how each shell
+/// is started. A patch: a switch the call does not name is left as it is.
+pub fn set_term_history_opts(ctx: &Ctx, persist_scrollback: Option<bool>, per_tab_history: Option<bool>) -> Result<(), String> {
+    crate::hostpolicy::set_term_history(&ctx.config_dir, persist_scrollback, per_tab_history)
+        .inspect_err(|e| applog("error", &format!("set_term_history_opts: {e}")))?;
+    applog(
+        "info",
+        &format!("host-policy: term history set (persist_scrollback={persist_scrollback:?} per_tab_history={per_tab_history:?})"),
+    );
     Ok(())
+}
+
+/// What a dock shell is saved and started under now.
+#[derive(Serialize)]
+pub struct TermHistoryOpts {
+    pub persist_scrollback: bool,
+    pub per_tab_history: bool,
+}
+
+/// The two switches as the engine runs them, for Settings to render: the
+/// host's values, else the defaults. Not a record of what the host holds.
+pub fn get_term_history_opts() -> Result<TermHistoryOpts, String> {
+    let o = crate::hostpolicy::engine_opts();
+    Ok(TermHistoryOpts { persist_scrollback: o.term_persist_scrollback, per_tab_history: o.term_per_tab_history })
 }
 
 /// Bytes under one directory, recursively. This tree is only ever

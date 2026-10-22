@@ -9,6 +9,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 - **The "Not a git repo" card and the "Not configured" nudge show their ✕.** It was always there but invisible; Escape now dismisses the "Not a git repo" card too.
 - **The app's TLS libraries are past five published advisories.** rustls 0.23.42 → 0.23.46 (RUSTSEC-2026-0285, RUSTSEC-2026-0346, RUSTSEC-2026-0348, RUSTSEC-2026-0349) and rustls-webpki 0.103.13 → 0.103.16 (RUSTSEC-2026-0382). Only the in-app updater's HTTPS uses them; the CLI does not link either.
 - **Send feedback works again.** In 0.43.0 it said "Feedback is unavailable in this build" on every launch, because it asked the engine for the app's version before the app had connected to it. It now uses the version the app was built as, and if it ever fails to start it says which step failed.
+- **Opening the app no longer sets how often this machine fetches, or what it
+  keeps of a dock shell.** Settings → Behavior → "Auto-fetch origin" and
+  Settings → Terminal's two switches ("Keep each tab's output between
+  restarts", "Give each tab its own command history") were still sent to the
+  engine from the window's own saved settings every time it loaded. The
+  engine runs one fetch loop and one shell per dock tab for every window, so
+  whichever window loaded last decided them for all of them. They now live on
+  this machine in `host-policy.json`, beside Codex permissions and pi trust,
+  and change only when you change them in Settings, which shows the machine's
+  value. Each terminal switch is sent on its own, so changing one never puts
+  back another window's stale copy of the other. A value you had chosen is
+  carried over once, the first time the new version starts, and the app's
+  settings file keeps a copy of what you last set, so going back to v0.43
+  keeps your choice.
 
 ## [0.43.0] - 2026-10-21
 

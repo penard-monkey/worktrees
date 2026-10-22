@@ -1,4 +1,4 @@
-//! The 150 commands, each with its exposure, in ONE table.
+//! The 152 commands, each with its exposure, in ONE table.
 //!
 //! A row is `name: Exposure => body`, and the macro makes two things of the
 //! list: `TABLE`, the exhaustive `(name, exposure)` slice, and the `match` the
@@ -285,7 +285,9 @@ commands! { cx, a;
     open_place: Engine => ops::open_place(
         a.get("repo")?, a.get("slug")?, a.get("fresh")?, a.get("provider")?, a.get("model")?, a.get("force")?,
     ),
-    set_fetch_interval: Engine => ops::set_fetch_interval(a.get("mins")?),
+    // Host policy (`worktrees_api::hostpolicy`), like Codex's below.
+    set_fetch_interval: HostAdmin => ops::set_fetch_interval(&cx.ctx, a.get("mins")?),
+    get_fetch_interval: Engine => ops::get_fetch_interval(),
     fetch_origin: Engine => ops::fetch_origin(a.get("root")?),
     list_drafts: Engine => ops::list_drafts(),
     close_place: Engine => ops::close_place(
@@ -446,7 +448,9 @@ commands! { cx, a;
     },
 
     // ── backend preferences, the Data pane, local usage metrics (prefs) ──
-    set_term_history_opts: Engine => prefs::set_term_history_opts(a.get("persist_scrollback")?, a.get("per_tab_history")?),
+    // Host policy (`worktrees_api::hostpolicy`), like Codex's.
+    set_term_history_opts: HostAdmin => prefs::set_term_history_opts(&cx.ctx, a.get("persist_scrollback")?, a.get("per_tab_history")?),
+    get_term_history_opts: Engine => prefs::get_term_history_opts(),
     term_history_info: Engine => prefs::term_history_info(&cx.ctx),
     term_history_clear: Engine => prefs::term_history_clear(&cx.ctx, &cx.ctx.shells),
     ui_events_append: Engine => prefs::ui_events_append(&cx.ctx, a.get("events")?),
@@ -494,14 +498,14 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 150 rows, no duplicates: the command layer's (143 at the extraction;
-    /// host policy's getter and Kimi's six since), and the check scripts hold
-    /// the page's commands against them.
+    /// 152 rows, no duplicates: the command layer's (143 at the extraction;
+    /// host policy's three getters and Kimi's six since), and the check
+    /// scripts hold the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|(n, _)| *n).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 150, "the command layer has 150 commands");
+        assert_eq!(TABLE.len(), 152, "the command layer has 152 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
