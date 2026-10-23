@@ -131,7 +131,7 @@ pub fn is_host_id(s: &str) -> bool {
     s.strip_prefix("h_").is_some_and(is_b32_id)
 }
 
-fn is_b32_id(s: &str) -> bool {
+pub(crate) fn is_b32_id(s: &str) -> bool {
     s.len() == 26 && pairuri::base32_decode(s).is_some_and(|b| b.len() == 16)
 }
 
@@ -243,6 +243,24 @@ impl HostStore {
                 Err(e) => return Err(format!("the device key of {}: {e}", rec.name)),
             }
             Ok(rec)
+        })
+    }
+
+    /// Keep `addr` as where host `id` now listens (§4.1, §4.7): called only
+    /// once a pinned open to it has succeeded (`reach`). Re-read under the
+    /// lock, so a record forgotten meanwhile is not brought back, and one
+    /// paired again meanwhile — another pin — is not moved by a handshake
+    /// made with the old one. The address passes the dial rule again.
+    pub fn readdress(&self, id: &str, pin: &str, addr: &str) -> Result<HostRecord, String> {
+        worktrees_core::netclass::parse_dial(addr).map_err(|e| e.to_string())?;
+        self.locked(|f| {
+            let h = f.hosts.iter_mut().find(|h| h.id == id).ok_or_else(|| format!("no host {id:?} is kept here any more"))?;
+            if h.pin != pin {
+                return Err(format!("{} was paired again meanwhile; its address is left as it is", h.name));
+            }
+            h.addr = addr.to_string();
+            h.check()?;
+            Ok(h.clone())
         })
     }
 
@@ -400,6 +418,33 @@ pub(crate) mod tests {
         let s = serde_json::to_string(&a.summary()).unwrap();
         assert!(!s.contains(&a.pin), "{s}");
         assert!(!s.contains("pin") && !s.contains(KEYS_DIR), "{s}");
+    }
+
+    /// A move is kept only for the record it was proven for: the address
+    /// passes the dial rule, and a pin that is no longer the record's (it was
+    /// paired again) or a forgotten host changes nothing.
+    #[test]
+    fn a_readdress_moves_only_the_record_it_was_proven_for() {
+        let d = dir("readdress");
+        let st = HostStore::new(&d);
+        let a = record("Mac mini");
+        st.add(&a, &DeviceKey::generate().unwrap()).unwrap();
+        let moved = st.readdress(&a.id, &a.pin, "192.168.1.9:7461").unwrap();
+        assert_eq!(moved.addr, "192.168.1.9:7461");
+        assert_eq!(st.get(&a.id).unwrap(), moved, "kept");
+        assert_eq!(fs::metadata(d.join(HOSTS_FILE)).unwrap().permissions().mode() & 0o777, 0o600);
+        let before = fs::read(d.join(HOSTS_FILE)).unwrap();
+        for (what, id, pin, addr) in [
+            ("another pin", a.id.as_str(), "cd".repeat(32), "192.168.1.10:7461"),
+            ("a public address", a.id.as_str(), a.pin.clone(), "8.8.8.8:7461"),
+            ("a loopback address", a.id.as_str(), a.pin.clone(), "127.0.0.1:7461"),
+            ("a zone", a.id.as_str(), a.pin.clone(), "[fe80::1%4]:7461"),
+            ("no such host", "h_aaaaaaaaaaaaaaaaaaaaaaaaaa", a.pin.clone(), "192.168.1.10:7461"),
+        ] {
+            assert!(st.readdress(id, &pin, addr).is_err(), "{what}");
+            assert_eq!(fs::read(d.join(HOSTS_FILE)).unwrap(), before, "{what}: unchanged");
+        }
+        let _ = fs::remove_dir_all(&d);
     }
 
     /// Read back, the file is checked as untrusted: an address the dial rule
