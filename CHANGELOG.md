@@ -240,6 +240,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   - Each limit a client trips is logged once per episode, with its count, in
     serve.log and in the audit log, so a flood of refusals does not become a
     flood of log lines.
+- **Updated `ctutils` to 0.4.5 (RUSTSEC-2026-0385).** The constant-time
+  comparison under every HMAC check, including the handshake proof, could
+  branch on common platforms.
+- **Updated `tokio` to 1.53.3 (RUSTSEC-2026-0386).** Its `AsyncFd`
+  constructors accept a file descriptor the caller does not own, which can
+  end in a use-after-free. Neither Worktrees nor any of its dependencies
+  calls them, so nothing in Worktrees could reach it. This keeps the
+  dependency on the fixed release.
 
 ## [0.43.1] - 2026-10-22
 
