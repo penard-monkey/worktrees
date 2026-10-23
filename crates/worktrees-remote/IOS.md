@@ -62,16 +62,19 @@ challenge.
 
 | What happened | Return | What the person sees |
 |---|---|---|
-| The person dismissed Face ID or the passcode sheet | `SignError::Cancelled` | The step-up says it was cancelled on this device: nothing was sent, and the act was not done. The connection is untouched, and the challenge lapses by itself. |
-| Anything else: the phone is locked (`errSecInteractionNotAllowed`), the key is gone (`errSecItemNotFound`, after a restore to a new phone), authentication failed | `SignError::Failed(<words>)`, including the OSStatus | "the key could not sign: …", escaped by `printable` before it is shown |
+| The person dismissed Face ID or the passcode sheet: `LAError.userCancel` (`com.apple.LocalAuthentication` −2), or `errSecUserCanceled` (`NSOSStatusErrorDomain` −128) | `SignError::Cancelled` | The step-up says it was cancelled on this device: nothing was sent, and the act was not done. The connection is untouched, and the challenge lapses by itself. |
+| Anything else: the phone is locked (`errSecInteractionNotAllowed`), the key is gone (`errSecItemNotFound`, after a restore to a new phone), authentication failed | `SignError::Failed(<words>)`, naming the domain and the code | "the key could not sign: …", escaped by `printable` before it is shown |
 
-The error a cancel produces is Phase 0's A4 to MEASURE, not this file's to
-assume. The candidates are `errSecUserCanceled` (−128) in
-`NSOSStatusErrorDomain`, and `LAError.userCancel` (−2), `.systemCancel` (−4)
-or `.appCancel` (−9) in `LAErrorDomain`. Map every one A4 sees on a dismissed
-prompt to `Cancelled`, and nothing else. `.systemCancel` is what the system
-does when the app leaves the foreground, and to the person that is a cancel as
-well.
+**The cancel is measured.** Phase 0's A4 dismissed Face ID on an iPhone, and
+`SecKeyCreateSignature` failed with `LAError.userCancel`:
+`com.apple.LocalAuthentication`, code −2. `errSecUserCanceled` (−128) is the
+Security framework's own cancel, and it stays mapped too. Do not write the
+mapping in Swift: hand the `CFError`'s domain, code and description to
+`SignError::from_apple(domain, code, description)`, which holds both and has
+a test. Every other code is `Failed`, with the domain and the code in its
+words. That includes `.systemCancel` (−4, the app leaving the foreground) and
+`.appCancel` (−9), which nobody has measured on a dismissal. If one of them
+turns up on a cancel, it joins the list there.
 
 `Invalid` is the crate's verdict. A signer never returns it.
 
@@ -109,16 +112,18 @@ apart, because one target builds for both.
 
 ## Costs, and what Phase 0 still has to prove
 
-- **Two device-key signatures per dial**, the certificate's and the
-  handshake's, because the certificate is made fresh at each dial. A3 measures
-  the signature. If it is slow, the crate can make the certificate once per
-  key and keep it, and nothing in this contract changes.
+- **Two device-key signatures per connection**, the certificate's and the
+  handshake's. `reach::open` makes the certificate once per call, however many
+  addresses it tries (the kept one, and up to four on the LAN), and each
+  handshake adds one. A3 measures the signature. If it is slow, the crate can
+  keep the certificate across calls, and nothing in this contract changes.
 - **A1**: rustls with this signer from the shim. That covers whether the
   plugin can be called synchronously from inside rustls's `Signer::sign`
   (with `run_mobile_plugin`, or with an exported C function), and whether a
   development build signed with team `M882BTE3A3` carries the Secure Enclave
   and its keychain entitlement.
-- **A4**: Face ID raised by a `.userPresence` signature asked from a tokio
-  blocking thread, its latency, and the exact error on a cancel (above).
+- **A4**: the cancel is measured (above). Still to confirm: Face ID raised by
+  a `.userPresence` signature asked from a tokio blocking thread, and its
+  latency.
 
 [`DeviceSigner`]: src/sign.rs

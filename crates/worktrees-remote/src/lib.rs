@@ -44,11 +44,12 @@
 //!     }
 //!     fn sign(&self, message: &[u8]) -> Result<Vec<u8>, SignError> {
 //!         // SecKeyCreateSignature(key, .ecdsaSignatureMessageX962SHA256, message),
-//!         // through the Swift plugin; a dismissed Face ID is SignError::Cancelled.
-//!         swift_sign(self.tag, message)
+//!         // through the Swift plugin, which hands back its CFError's domain,
+//!         // code and description: a dismissed Face ID is SignError::Cancelled.
+//!         swift_sign(self.tag, message).map_err(|(domain, code, why)| SignError::from_apple(&domain, code, &why))
 //!     }
 //! }
-//! # fn swift_sign(_: &str, _: &[u8]) -> Result<Vec<u8>, SignError> { Err(SignError::Cancelled) }
+//! # fn swift_sign(_: &str, _: &[u8]) -> Result<Vec<u8>, (String, i64, String)> { Err(("com.apple.LocalAuthentication".into(), -2, "Canceled by user.".into())) }
 //!
 //! # async fn shim(link: &str, device_point: &[u8], stepup_point: &[u8], challenge_b64: &str, now: i64) -> Result<(), Box<dyn std::error::Error>> {
 //! let keys = Keys {

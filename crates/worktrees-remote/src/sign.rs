@@ -84,6 +84,32 @@ impl std::fmt::Display for SignError {
 
 impl std::error::Error for SignError {}
 
+/// `LAError`'s domain (`LAErrorDomain`).
+pub const LA_ERROR_DOMAIN: &str = "com.apple.LocalAuthentication";
+
+/// An `OSStatus`'s domain (`NSOSStatusErrorDomain`).
+pub const OSSTATUS_DOMAIN: &str = "NSOSStatusErrorDomain";
+
+impl SignError {
+    /// What a Secure Enclave signature's failure means: the `CFError`
+    /// `SecKeyCreateSignature` set, as the Swift plugin hands it over — its
+    /// domain, its code and its description. A dismissed prompt is
+    /// [`SignError::Cancelled`]:
+    ///
+    /// - `LAError.userCancel`, [`LA_ERROR_DOMAIN`] −2: what dismissing Face ID
+    ///   gave on an iPhone (Phase 0, A4, measured);
+    /// - `errSecUserCanceled`, [`OSSTATUS_DOMAIN`] −128: the Security
+    ///   framework's own cancel.
+    ///
+    /// Anything else is [`SignError::Failed`], naming the domain and the code.
+    pub fn from_apple(domain: &str, code: i64, description: &str) -> SignError {
+        match (domain, code) {
+            (LA_ERROR_DOMAIN, -2) | (OSSTATUS_DOMAIN, -128) => SignError::Cancelled,
+            _ => SignError::Failed(format!("{domain} {code}: {description}")),
+        }
+    }
+}
+
 /// A P-256 key this crate may ask to sign, and never read.
 ///
 /// Implemented by [`crate::key::DeviceKey`] (a desktop's `0600` file) and, in
@@ -263,6 +289,23 @@ mod tests {
         assert_eq!(checked_sign(&other, &spki, msg), Err(SignError::Invalid), "another key");
         let cancel = Bent { key: Soft::new(), how: |_: &Soft, _: &[u8]| Err(SignError::Cancelled) };
         assert_eq!(checked_sign(&cancel, &cancel.spki_der(), msg), Err(SignError::Cancelled), "a cancel is passed on as one");
+    }
+
+    /// The measured cancel (Phase 0 A4: dismissing Face ID gives
+    /// `LAError.userCancel`, com.apple.LocalAuthentication −2) and the
+    /// Security framework's own (−128) are cancels; the same codes in another
+    /// domain, an unmeasured LocalAuthentication code, and a locked phone are
+    /// failures that name what happened.
+    #[test]
+    fn a_dismissed_face_id_is_a_cancel_and_nothing_else_is() {
+        assert_eq!(SignError::from_apple("com.apple.LocalAuthentication", -2, "Canceled by user."), SignError::Cancelled);
+        assert_eq!(SignError::from_apple("NSOSStatusErrorDomain", -128, "User canceled the operation."), SignError::Cancelled);
+        for (domain, code) in [("NSOSStatusErrorDomain", -2), ("com.apple.LocalAuthentication", -128), ("com.apple.LocalAuthentication", -4), ("NSOSStatusErrorDomain", -25308)] {
+            match SignError::from_apple(domain, code, "why") {
+                SignError::Failed(m) => assert_eq!(m, format!("{domain} {code}: why")),
+                other => panic!("{domain} {code}: {other:?}"),
+            }
+        }
     }
 
     #[test]
