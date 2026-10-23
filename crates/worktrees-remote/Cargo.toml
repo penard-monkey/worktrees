@@ -1,0 +1,42 @@
+[package]
+name = "worktrees-remote"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A paired device's side of worktrees serve's remote listener: pairing, the pinned mutual-TLS pipe, and the host records"
+
+# The CLIENT half of Server Edition Phase 2's remote transport (§2.2, §4.2–§4.4).
+# The desktop app's shim, `worktrees remote …`, and the iOS app (a separate
+# repository that depends on this crate by git) all dial through it, so it
+# carries no tauri, no tmux and no engine (worktrees-api / -cli): an outside
+# crate gets the transport and nothing it would have to stub. worktrees-core is
+# here for four pure modules the host and the device must read alike: pairuri
+# (the link), netclass (which addresses may be dialled), netif and fsx.
+#
+# Every crate below is already in Cargo.lock through serve (worktrees-cli) or
+# the app's updater, at the versions serve uses: these are new EDGES, not new
+# crates. rustls with `ring` and TLS 1.3 only (no `tls12`, no `logging`, never
+# aws-lc-rs); the floor is 0.23.46 (§4.2: four advisories against 0.23.42).
+[dependencies]
+worktrees-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+libc = { workspace = true }
+rustls = { version = "0.23.46", default-features = false, features = ["ring", "std"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+# The WebSocket over the TLS stream: `handshake` for the client upgrade, and
+# nothing that would bring a second TLS stack (no `connect`, no native-tls).
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+tokio = { version = "1", features = ["net", "rt", "time", "io-util", "sync"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+# The device's self-signed certificate over its key, made at each dial: the
+# server pins the SPKI, never the certificate.
+rcgen = { version = "0.14", default-features = false, features = ["ring"] }
+# The pairing proof and comparison code (§2.2), and handshake v1's HMAC.
+hmac = "0.13"
+sha2 = { version = "0.11", default-features = false }
+getrandom = "0.3"
+
+[dev-dependencies]
+# Tests build their own runtimes (no `macros`: tokio-macros is not in the lock).
+tokio = { version = "1", features = ["net", "rt", "rt-multi-thread", "time", "io-util", "sync"] }

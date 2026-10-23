@@ -10,7 +10,7 @@ import { findPaths, hitRange, logicalLine } from "./termlinks";
 import { CtxMenu } from "./CtxMenu";
 import { copyToClipboard } from "./clipboard";
 import { relPath } from "./filekind";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { hostOnly, revealOnHost } from "./onhost";
 import "@xterm/xterm/css/xterm.css";
 
 // Two kinds of embedded terminal, one renderer.
@@ -899,7 +899,7 @@ function TermSurface({ makeTransport, tkey, termVersion, focusToken, focusEnable
         <CtxMenu x={menu.x} y={menu.y} onClose={closeMenu}>
           <div className="pop-hint path" title={menu.path}>{relPath(links.root, menu.path)}{menu.line ? `:${menu.line}${menu.col ? `:${menu.col}` : ""}` : ""}</div>
           <button className="pop-item" onClick={() => act(() => links.onOpen(menu.path, menu.line, menu.col))}>Open in viewer</button>
-          <button className="pop-item" onClick={() => act(() => revealItemInDir(menu.path))}>Reveal in Finder</button>
+          <button className="pop-item" {...hostOnly("Reveal in Finder")} onClick={() => act(() => revealOnHost(menu.path))}>Reveal in Finder</button>
           <div className="ctx-sep" />
           {/* Both, as the Files tree's menu offers: the absolute path is what
               the link RESOLVED to (unambiguous anywhere you paste it), the

@@ -18,7 +18,7 @@
 // says "Disconnected" only once the retries have stopped (the crash-loop
 // limit), with the reason and the log that says more.
 import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
-import { engineState, invoke, listen, onEngineState, reconnectEngine, type EngineState } from "./ipc";
+import { engineState, invoke, listen, onEngineState, reconnectEngine, remoteHost, type EngineState } from "./ipc";
 import "./tokens.css";
 import "./EngineGate.css";
 
@@ -44,8 +44,20 @@ function useSecondsUntil(at: number | null): number {
   return at === null ? 0 : Math.max(0, Math.ceil((at - now) / 1000));
 }
 
+/** Back to this machine's own engine, from a window that drives a paired host
+ *  it cannot reach: the choice is the shim's, and the door is decided at boot. */
+async function driveThisMachine() {
+  try {
+    await invoke("remote_choose", { hostId: null });
+  } finally {
+    window.location.reload();
+  }
+}
+
 /** What a try in flight is doing, in words: the shim's phase, if it sent one. */
 function phaseText(phase: string | null, first: boolean): string {
+  const host = remoteHost();
+  if (host) return first ? `Connecting to ${host}…` : `Reconnecting to ${host}…`;
   if (phase === "waiting-old") return "Waiting for the old engine to stop…";
   if (phase === "starting" || first) return "Starting the engine…";
   return "Reconnecting to the engine…";
@@ -58,7 +70,9 @@ export function EngineGate({ children }: { children: ReactNode }) {
     <>
       {children}
       {st.kind !== "up" && <EngineBanner st={st} />}
-      {st.kind === "up" && <RemoteNotice gen={st.gen} />}
+      {/* The notice is about THIS machine's own engine; a window that drives a
+          paired host is not on it, and `remote_status` is the console's. */}
+      {st.kind === "up" && !remoteHost() && <RemoteNotice gen={st.gen} />}
     </>
   );
 }
@@ -152,12 +166,13 @@ function EngineBoot({ st }: { st: EngineState }) {
     );
   }
   const down = st.kind === "down";
+  const host = remoteHost();
   return (
     <div className="engine-boot">
       <div className="engine-boot-card" role={down ? "alert" : "status"}>
         <div className="engine-title">
           <span className={`engine-dot ${down ? "down" : "starting"}`} aria-hidden />{" "}
-          {down ? "worktrees could not start its engine" : "worktrees could not reach its engine yet"}
+          {host ? `worktrees could not reach ${host} yet` : down ? "worktrees could not start its engine" : "worktrees could not reach its engine yet"}
         </div>
         <p className="engine-why">{st.reason ?? ""}</p>
         {!down && (
@@ -166,11 +181,16 @@ function EngineBoot({ st }: { st: EngineState }) {
           </p>
         )}
         <p className="engine-log">
-          The engine’s log: <code>{SERVE_LOG}</code>
+          {host ? <>The engine’s log is on {host}: <code>{SERVE_LOG}</code></> : <>The engine’s log: <code>{SERVE_LOG}</code></>}
         </p>
         <button className="enter-btn" autoFocus onClick={() => void reconnectEngine()}>
           Reconnect now
         </button>
+        {host && (
+          <button className="enter-btn" onClick={() => void driveThisMachine()}>
+            Drive this machine instead
+          </button>
+        )}
       </div>
     </div>
   );

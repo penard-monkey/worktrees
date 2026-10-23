@@ -514,10 +514,9 @@ pub struct AddrCode {
 pub const ADDR_CODE_PREFIX: &str = "worktrees-addr:v1?";
 
 /// `worktrees-addr:v1?addr=<address>:<port>&pin=<spki sha256>`: exactly those
-/// two keys, once each, in either order, nothing else. The pin is 64
-/// lowercase hex digits — the encoding the proposal leaves open, fixed here
-/// and nowhere else, so slice 5 changes it in one place if the pairing QR
-/// settles on another.
+/// two keys, once each, in either order, nothing else. The pin is the
+/// pairing link's spelling, `pairuri::is_pin` (64 lowercase hex digits), so
+/// the link and the address code cannot spell a pin differently.
 pub fn parse_addr_code(s: &str) -> Result<AddrCode, AddrError> {
     let query = s
         .strip_prefix(ADDR_CODE_PREFIX)
@@ -536,8 +535,7 @@ pub fn parse_addr_code(s: &str) -> Result<AddrCode, AddrError> {
     }
     let addr = parse_dial(addr.ok_or_else(|| AddrError::Code("no addr".into()))?)?;
     let pin = pin.ok_or_else(|| AddrError::Code("no pin".into()))?;
-    let valid = pin.len() == 64 && pin.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
-    if !valid {
+    if !crate::pairuri::is_pin(pin) {
         return Err(AddrError::Code("the pin is 64 lowercase hex digits".into()));
     }
     let mut out = [0u8; 32];

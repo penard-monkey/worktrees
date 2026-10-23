@@ -10,9 +10,12 @@ import { QuotaSection } from "./QuotaPanel";
 import { SlotsSection } from "./SlotsPanel";
 import { UserSkillsSection, type UserSkill } from "./AgentSetup";
 import * as Icons from "./icons";
-import { invoke } from "./ipc";
+import { invoke, notGranted } from "./ipc";
 import { copyToClipboard } from "./clipboard";
-import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { hostOnly, revealOnHost } from "./onhost";
+import { HostsPanel } from "./HostsPanel";
+import { GrantNote } from "./GrantNote";
 import { check as checkAppUpdate } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import ProfilesPanel from "./ProfilesPanel";
@@ -129,6 +132,9 @@ const CATS = [
   // whose whole job is to explain it before anything is turned on.
   { id: "planning", label: "Planning" },
   { id: "behavior", label: "Behavior" },
+  // Which engine this window drives, and pairing with another host (Phase 2
+  // §4.4): the client's own, kept by the shim, never the engine's.
+  { id: "hosts", label: "Hosts" },
   { id: "updates", label: "Updates" },
   { id: "data", label: "Data & Logs" },
   { id: "shortcuts", label: "Shortcuts" },
@@ -232,7 +238,7 @@ function UsagePanel() {
   };
   const reveal = async () => {
     try {
-      if (data?.file) await revealItemInDir(data.file);
+      if (data?.file) await revealOnHost(data.file);
     } catch (e) {
       const m = `reveal usage file failed: ${String(e)}`;
       setErr(m);
@@ -328,7 +334,7 @@ function UsagePanel() {
         </div>
         <div className="hint">Control names and surfaces only — never a place name, a path, or anything you typed. Never sent anywhere.</div>
         <div className="ver-actions">
-          <button className="ctrl sm" onClick={reveal}>Reveal file</button>
+          <button className="ctrl sm" onClick={reveal} {...hostOnly("Reveal in Finder")}>Reveal file</button>
           <button className={"ctrl sm danger" + (clearArmed ? " armed" : "")} onClick={doClear}>
             {clearArmed ? "Clear — sure?" : "Clear"}
           </button>
@@ -786,7 +792,7 @@ export function SettingsSheet({
   const openLogsDir = async () => {
     try {
       const i = await invoke<{ dir: string; file: string }>("log_info");
-      await revealItemInDir(i.file);
+      await revealOnHost(i.file);
     } catch (e) {
       const m = `open logs folder failed: ${String(e)}`;
       setLogTail(m);
@@ -845,10 +851,10 @@ export function SettingsSheet({
     if (!aiConfig) return;
     try {
       if (aiConfig.exists) {
-        await revealItemInDir(aiConfig.path);
+        await revealOnHost(aiConfig.path);
       } else {
         const parent = aiConfig.path.replace(/\/[^/]*$/, "") || "/";
-        await revealItemInDir(parent);
+        await revealOnHost(parent);
       }
     } catch (e) {
       // Same error area as Feature 2 (the Logs-section logTail pane) + app.log.
@@ -876,7 +882,7 @@ export function SettingsSheet({
   const revealSettings = async () => {
     try {
       const i = await invoke<{ dir: string; file: string }>("settings_info");
-      await revealItemInDir(i.file);
+      await revealOnHost(i.file);
     } catch (e) {
       const m = `reveal settings file failed: ${String(e)}`;
       setDataErr(m);
@@ -969,8 +975,9 @@ export function SettingsSheet({
           {cat === "ai" && <ProfilesPanel key={repo || "none"} repo={repo} onReport={onReport} />}
 
           {cat === "claude" && <>
+          {notGranted("mcp_status") ? <GrantNote cmd="mcp_status" label="Claude MCP server" focus="mcp-server" /> :
           <McpSection status={mcpStatus} repo={repo} offerPending={mcpOfferPending}
-            onSilenceOffer={onSilenceMcpOffer} onChanged={onMcpChanged} onReport={onReport} />
+            onSilenceOffer={onSilenceMcpOffer} onChanged={onMcpChanged} onReport={onReport} />}
           </>}
 
           {cat === "codex" && <>
@@ -983,8 +990,9 @@ export function SettingsSheet({
               Skills renders from App's state at once, so it goes above. */}
           <UserSkillsSection data-focus="codex-skills" skills={userSkills} onChanged={onUserSkillsChanged}
             offerPending={skillsOfferPending} onSilenceOffer={onSilenceSkillsOffer} onReport={onReport} />
+          {notGranted("codex_mcp_status") ? <GrantNote cmd="codex_mcp_status" label="Codex MCP server" focus="codex-mcp" /> :
           <CodexMcpSection data-focus="codex-mcp" onReport={onReport} onStatus={onCodexMcpChanged}
-            offerPending={codexMcpOfferPending} onSilenceOffer={onSilenceCodexMcpOffer} />
+            offerPending={codexMcpOfferPending} onSilenceOffer={onSilenceCodexMcpOffer} />}
           </>}
 
           {cat === "pi" && <PiPanel settings={settings} repo={repo || null} onChange={onChange} onReport={onReport} onFail={onFail}
@@ -1098,7 +1106,7 @@ export function SettingsSheet({
               </div>
             </div>
             <div className="ver-actions">
-              <button className="ctrl sm" onClick={revealAiConfig} disabled={!aiConfig}>Reveal config file</button>
+              <button className="ctrl sm" onClick={revealAiConfig} disabled={!aiConfig} {...hostOnly("Reveal in Finder")}>Reveal config file</button>
             </div>
             <div className="hint">The CLI uses this command when you omit --ai. The app uses Default agent above. Shell env vars (WORKTREES_AI_CMD) don't reach the GUI.</div>
           </section>
@@ -1525,7 +1533,7 @@ export function SettingsSheet({
               <div className="ver-row"><span className="ver-path" title={logPath}>{logPath || "…"}</span></div>
             </div>
             <div className="ver-actions">
-              <button className="ctrl sm" onClick={openLogsDir}>Open folder</button>
+              <button className="ctrl sm" onClick={openLogsDir} {...hostOnly("Reveal in Finder")}>Open folder</button>
               <button className="ctrl sm" onClick={viewLogTail}>{logTail ? "Refresh tail" : "View tail"}</button>
               <button className="ctrl sm" onClick={copyDiagnostics}>{diagCopied ? "Copied ✓" : "Copy diagnostics"}</button>
             </div>
@@ -1538,7 +1546,7 @@ export function SettingsSheet({
               <div className="ver-row"><span className="ver-path" title={settingsPath}>{settingsPath || "…"}</span></div>
             </div>
             <div className="ver-actions">
-              <button className="ctrl sm" onClick={revealSettings}>Reveal settings file</button>
+              <button className="ctrl sm" onClick={revealSettings} {...hostOnly("Reveal in Finder")}>Reveal settings file</button>
               <button className={"ctrl sm danger" + (resetArmed ? " armed" : "")} onClick={doReset}>
                 {resetArmed ? "Confirm reset?" : "Reset to defaults"}
               </button>
@@ -1561,6 +1569,8 @@ export function SettingsSheet({
           </section>
           </>}
 
+
+          {cat === "hosts" && <HostsPanel onReport={onReport} onFail={onFail} />}
 
           {cat === "usage" && <UsagePanel />}
 

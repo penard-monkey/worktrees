@@ -53,8 +53,17 @@
 //      version source, and — when `app/dist` exists — the socket client IN the
 //      build (the app is a client) and the dev endpoint's client NOT in it.
 //
+//   5. DRIVES THE REMOTE DOOR (Phase 2 §4.4): the same ipcws.ts, unchanged,
+//      over `ipcremote.ts`'s socket on a fake shim pipe — handshake v1 keyed
+//      with the pipe's session token, frames out in call order however the
+//      shim's sends complete, the shim's words for an end (a revoke) reaching
+//      the retries, every send carrying its own pipe's `conn`, the door's own
+//      routes (settings to the device's blob, host-path commands refused with
+//      a reason) and `windowOnHost()`; and the remote boot never asking for
+//      `engine_connect`.
+//
 // Overrides, so a mutation can be tested without touching the tree:
-//   TRANSPORT_IPCWS, TRANSPORT_IPC, TRANSPORT_RECONNECT, TRANSPORT_WIRE, TRANSPORT_POLICY,
+//   TRANSPORT_IPCWS, TRANSPORT_IPC, TRANSPORT_IPCREMOTE, TRANSPORT_RECONNECT, TRANSPORT_WIRE, TRANSPORT_POLICY,
 //   TRANSPORT_DISPATCH, TRANSPORT_CONN, TRANSPORT_SERVEFILE, TRANSPORT_MAIN,
 //   TRANSPORT_DOOR, TRANSPORT_DIST
 import { createHmac, randomBytes } from "node:crypto";
@@ -68,6 +77,7 @@ const here = (p) => fileURLToPath(new URL(p, import.meta.url));
 const SRC = {
   ipcws: process.env.TRANSPORT_IPCWS ?? here("../src/ipcws.ts"),
   ipc: process.env.TRANSPORT_IPC ?? here("../src/ipc.ts"),
+  ipcremote: process.env.TRANSPORT_IPCREMOTE ?? here("../src/ipcremote.ts"),
   reconnect: process.env.TRANSPORT_RECONNECT ?? here("../src/reconnect.ts"),
   ipcInTree: here("../src/ipc.ts"),
   pane: here("../src/TerminalPane.tsx"),
@@ -1478,6 +1488,139 @@ ${body}
   check(WIRE_LOG.length > 50 && leaked.length === 0, `(b) none of the ${WIRE_LOG.length} frames written by every client in this run carries the token${leaked.length ? ` — ${leaked.length} DID, e.g. ${leaked[0].slice(0, 80)}` : ""}`);
 }
 
+// ── 5. the remote door: ipcws.ts over the shim's pipe ───────────────────────
+
+{
+  const RJ = await load(SRC.ipcremote, await tsModule(SRC.ipcremote));
+  globalThis.__ipcStubs = { tauriInvoke: () => Promise.reject("the Tauri stub must not be reached"), tauriListen: () => Promise.reject("no"), TauriChannel: class {} };
+  const ipc = await loadIpc();
+  const RTOKEN = randomBytes(32).toString("hex");
+  /** Each pipe's device grant, in the host's ok frame: the first without
+   *  admin, the one after the revoke's reconnect with it. */
+  const GRANTS = [["read", "write", "stream"], ["read", "admin"]];
+  /** A fake shim and the host behind it. Each pipe: `conn`, the frames the
+   *  host RECEIVED (in the order the shim's sends completed), and `push` to
+   *  send the page a frame. `delays` makes sends complete out of order, as
+   *  concurrent Tauri commands can. */
+  function fakeShim({ delays = [] } = {}) {
+    const pipes = [];
+    let next = 7;
+    const shim = {
+      async connect(hostId, onFrame) {
+        const p = { conn: next++, hostId, got: [], push: (o) => onFrame({ frame: JSON.stringify(o) }), end: (why) => onFrame({ closed: why }), cn: null, sn: null, closed: false };
+        pipes.push(p);
+        return { conn: p.conn, token: RTOKEN, host: { id: hostId, name: "Studio", addr: "192.168.1.20:7461", device_id: "d_x", expiry: null, paired_at: 1 } };
+      },
+      async send(conn, text) {
+        const p = pipes.find((x) => x.conn === conn);
+        const d = delays.shift() ?? 0;
+        if (d) await new Promise((r) => setTimeout(r, d));
+        WIRE_LOG.push(text);
+        const f = JSON.parse(text);
+        p?.got.push({ conn, f });
+        // The host's half of handshake v1, by the spec, keyed with the token.
+        if (SPEC.hello in f) { p.cn = f[SPEC.hello]; p.sn = hex32(); p.push({ [SPEC.challenge]: p.sn }); }
+        else if (SPEC.auth in f) {
+          if (f[SPEC.auth] === spectag(RTOKEN, SPEC.clientLabel, p.cn, p.sn)) p.push({ [SPEC.ok]: true, [SPEC.version]: VERSION, [SPEC.proof]: spectag(RTOKEN, SPEC.serverLabel, p.cn, p.sn), device: { id: "d_x", caps: GRANTS[p.conn - 7] ?? [] } });
+          else p.end("bad proof");
+        } else if (K.cmd in f) p.push({ [K.id]: f[K.reqId], [K.ok]: `served:${f[K.cmd]}` });
+      },
+      async close(conn) { const p = pipes.find((x) => x.conn === conn); if (p) p.closed = true; },
+    };
+    return { shim, pipes };
+  }
+  const local = [];
+  const tauri = {
+    invoke: (cmd, args) => { local.push([cmd, args]); return Promise.resolve(`local:${cmd}`); },
+    listen: () => Promise.reject("the local door has no events"),
+    channel: () => { throw new Error("the local door makes no channels"); },
+  };
+  // The third command's send completes 40 ms late (hello, auth, then requests).
+  const { shim, pipes } = fakeShim({ delays: [0, 0, 0, 40, 0] });
+  const rclk = clock();
+  const env = { now: rclk.now, setTimeout: rclk.setTimeout, clearTimeout: rclk.clearTimeout, random: () => 0, visible: () => true };
+  const door = ipc.remoteDoor(tauri, "Studio", async ({ onLost }) => {
+    let pipe = null;
+    const lost = (m) => { const w = pipe?.closedWhy(); onLost(w && !m.includes(w) ? `${m} (${w})` : m); };
+    ipc.setRemoteGrant(null);
+    pipe = await RJ.openPipe(shim, "h_studio", { setTimeout: (fn, ms) => setTimeout(fn, ms) }, ipc.setRemoteGrant);
+    const sock = WS.connectSocket({
+      port: 0, token: pipe.connected.token, version: VERSION, crypto: webcrypto().crypto, WebSocket: pipe.WebSocket,
+      setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (h) => clearTimeout(h), atob: globalThis.atob, onError: lost, warn: () => {},
+    });
+    return { sock, owned: false, started: false };
+  }, env);
+  ipc.openDoor(door);
+  check(!ipc.windowOnHost() && ipc.remoteHost() === "Studio", "(remote) a remote door marks the window as NOT on its engine's host, naming the host");
+  await settle(door.connect());
+  await until(() => ipc.engineState().kind === "up");
+  const p1 = pipes[0];
+  check(ipc.engineState().kind === "up" && p1?.got[0] && same(Object.keys(p1.got[0].f), [SPEC.hello]),
+    `(remote) ipcws.ts, unchanged, says hello over the pipe and completes handshake v1 (${JSON.stringify(ipc.engineState())})`);
+  check(!!p1 && p1.got.some((g) => g.f[SPEC.auth] === spectag(RTOKEN, SPEC.clientLabel, p1.cn, p1.sn)), "(remote) …keyed with the pipe's session token: its proof is HMAC(token, client label ‖ cn ‖ sn), computed here from the spec");
+  // In order, however the shim's sends complete.
+  const names = ["list_workspace", "list_places", "get_changelog"];
+  const answers = await Promise.all(names.map((c) => settle(ipc.invoke(c))));
+  const order = (p1?.got ?? []).filter((g) => K.cmd in g.f).map((g) => g.f[K.cmd]);
+  check(same(order, names), `(remote) frames reach the host in call order even when a send completes late (${order.join(", ")})`);
+  check(answers.every((a, i) => a.ok === `served:${names[i]}`), `(remote) …and each call resolves with the host's answer (${JSON.stringify(answers)})`);
+  check(!!p1 && p1.got.every((g) => g.conn === p1.conn), `(remote) every send names its own pipe's conn (${p1?.conn})`);
+  // The door's own routes.
+  const g = await settle(ipc.invoke("get_settings"));
+  const sset = await settle(ipc.invoke("set_settings", { settings: { theme: "nord" } }));
+  check(g.ok === "local:remote_settings_get" && sset.ok === "local:remote_settings_set" && same(local.at(-1)?.[1], { settings: { theme: "nord" } }),
+    "(remote) get_settings / set_settings go to the device's own blob in the shim (§9.1)");
+  check(!(p1?.got ?? []).some((x) => ["get_settings", "set_settings"].includes(x.f[K.cmd])), "(remote) …and not one byte of them to the host, whose ui-state.json is its own window's");
+  const before = local.length;
+  const ed = await settle(ipc.invoke("open_editor", { path: "/host/path", cmd: "code" }));
+  const te = await settle(ipc.invoke("open_terminal", { path: "/host/path" }));
+  check(typeof ed.err === "string" && /Open in editor is not available here: this window drives Studio/.test(ed.err) && typeof te.err === "string" &&
+    local.length === before && !(p1?.got ?? []).some((x) => String(x.f[K.cmd] ?? "").startsWith("open_")),
+    `(remote) open_editor and open_terminal take a HOST path: refused with the reason, sent nowhere (${ed.err})`);
+  const cp = await settle(ipc.invoke("copy_text", { text: "x" }));
+  check(cp.ok === "local:copy_text", "(remote) a client-local command that means the same here still runs here");
+  // The grant, read off the host's ok as it passed: no admin on this pipe.
+  check(!ipc.grantHas("admin") && ipc.grantHas("write"), "(remote) the device's grant is read off the host's ok frame as it passes (read, write, stream — no admin)");
+  const sentBefore = p1?.got.length ?? 0;
+  const ms = await settle(ipc.invoke("mcp_status", { repo: null }));
+  const pb = await settle(ipc.invoke("pair_begin", {}));
+  check(typeof ms.err === "string" && /mcp_status needs admin on Studio: this device was paired without it/.test(ms.err) &&
+    typeof pb.err === "string" && /pair_begin is done at Studio itself/.test(pb.err) && (p1?.got.length ?? 0) === sentBefore,
+    `(remote) an admin row without admin, and a console row always, are refused HERE in words and never sent (${ms.err} / ${pb.err})`);
+  // A revoke: the shim's words reach the retries, which reconnect and never start.
+  p1?.end("the host closed the connection: revoked");
+  await until(() => ipc.engineState().kind !== "up");
+  const st = ipc.engineState();
+  check(st.kind === "waiting" && /revoked/.test(st.reason ?? ""), `(remote) a revoke ends the socket with the host's reason, and the door retries (${JSON.stringify(st).slice(0, 200)})`);
+  rclk.advance(60_000);
+  await until(() => ipc.engineState().kind === "up");
+  const p2 = pipes[1];
+  check(ipc.engineState().kind === "up" && !!p2 && p2.conn !== p1?.conn, `(remote) the retry opens a new pipe (conn ${p2?.conn})`);
+  check(ipc.grantHas("admin"), "(remote) a new socket brings a new grant: this one holds admin");
+  const ms2 = await settle(ipc.invoke("mcp_status", { repo: null }));
+  check(ms2.ok === "served:mcp_status", `(remote) …and with it the admin row goes to the host (${JSON.stringify(ms2)})`);
+  await settle(ipc.invoke("list_workspace"));
+  check(!!p2 && p2.got.some((x) => x.f[K.cmd] === "list_workspace") && p2.got.every((x) => x.conn === p2.conn) && !(p1?.got ?? []).some((x) => x.conn !== p1.conn),
+    "(remote) the new socket's sends name the new conn, and nothing goes to the old pipe");
+  check(!WIRE_LOG.some((t) => t.includes(RTOKEN)), "(remote) the session token is the HMAC key and never goes on the wire");
+}
+
+// The remote boot asks for no local serve, and dials with the pipe's token alone.
+{
+  const main = read(SRC.main);
+  const body = (name) => {
+    const at = main.indexOf(`async function ${name}(`);
+    return at < 0 ? "" : main.slice(at, main.indexOf("\n}\n", at));
+  };
+  const boot = body("remoteBoot");
+  check(boot.length > 0 && !/engine_connect/.test(boot), "(remote) main.tsx's remoteBoot never calls engine_connect: with a host chosen, no local serve is found or started (§4.4)");
+  check(/connectRemote\(\{ \.\.\.socketDeps\(lost, remedy\), port: 0, token: pipe\.connected\.token, WebSocket: pipe\.WebSocket \}\)/.test(boot) &&
+    /return \{ sock, owned: false, started: false \};/.test(boot) && /remoteDoor\(\s*tauriDoor,/.test(boot),
+    "(remote) remoteBoot hands connectSocket the pipe's token and socket, says owned:false, and goes through remoteDoor");
+  check(/const door = host\s*\? await remoteBoot\(host\)\s*: engineDoor\(/.test(main), "(remote) the app's boot takes remoteBoot only when a host is chosen, else the engine door");
+  check(!/^\s*import\s(?!type\b)/m.test(read(SRC.ipcremote)), "(remote) ipcremote.ts has no runtime import (this check loads it as a data: module)");
+}
+
 // ── 4. the edges ────────────────────────────────────────────────────────────
 
 // One door.
@@ -1540,6 +1683,14 @@ ${body}
   };
   walk(SRC.appsrc);
   check(statics.length === 0, `no file imports ipcws.ts statically — main.tsx's dynamic imports decide what a build carries${statics.length ? `: ${statics.join(", ")}` : ""}`);
+  // …and each of those is DESTRUCTURED. A namespace kept in a variable
+  // (`const ws = await import("./ipcws")`) counts, for Rollup, as every export
+  // used, so the dev token client rides into the production chunk — and the
+  // bundle assertion below only sees that when app/dist exists (#555's CI).
+  const dyn = [...main.matchAll(/^\s*(.*?)= await import\("\.\/ipcws"\)/gm)].map((m) => m[1].trim());
+  const namespaced = dyn.filter((lhs) => !/^const \{[^}]*\}$/.test(lhs));
+  check(dyn.length >= 2 && namespaced.length === 0,
+    `every dynamic import of ipcws.ts in main.tsx is destructured, so a production build tree-shakes the dev token client (${dyn.length} imports${namespaced.length ? `; NOT destructured: ${namespaced.join(" | ")}` : ""})`);
   check(/version: __WT_VERSION__/.test(main), "every socket the page opens hands the client __WT_VERSION__ as this frontend's version");
 }
 

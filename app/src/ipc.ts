@@ -78,6 +78,47 @@ export const Channel = function <T>(onmessage?: (response: T) => void): Channel<
   return door.channel<T>(onmessage);
 } as unknown as new <T>(onmessage?: (response: T) => void) => Channel<T>;
 
+// ── does this window run on the host ────────────────────────────────────────
+
+/** Why this window cannot act on its engine's paths, or null when it can.
+ *  The plugins (opener, dialog) and the client-local commands act on the
+ *  machine the WINDOW runs on (§4.4): on the host that is the engine's machine
+ *  too, and a host path means the same file; on a remote window it does not,
+ *  and in a browser (the dev stack) there are no plugins at all. */
+let away: string | null = null;
+
+/** Does this window run on its engine's host — may it reveal, open or pick a
+ *  host path? The ONE predicate every path-taking plugin call and button asks
+ *  (`onhost.ts`). */
+export function windowOnHost(): boolean {
+  return away === null;
+}
+
+/** The reason a path-taking act is greyed, for its title and its refusal. */
+export function notOnHost(what: string): string {
+  return `${what} is not available here: ${away ?? "this window runs on the host"}`;
+}
+
+/** Set by `main.tsx` before anything renders: the dev stack's browser page,
+ *  or the remote door. */
+export function setAway(why: string | null): void {
+  away = why;
+}
+
+/** The paired host this window drives, or null for this machine's own engine. */
+let remoteName: string | null = null;
+
+export function remoteHost(): string | null {
+  return remoteName;
+}
+
+/** This window drives the paired host `hostName`: it is not on its engine's
+ *  host. The remote door's, and the harness's `?remote`. */
+export function markRemote(hostName: string): void {
+  setAway(`this window drives ${hostName}, and a path there is not a path on this machine`);
+  remoteName = hostName;
+}
+
 // ── the engine door ─────────────────────────────────────────────────────────
 
 /** serve's `ClientLocal` rows (crates/worktrees-cli/src/serve/dispatch.rs):
@@ -95,8 +136,23 @@ export const CLIENT_LOCAL: readonly string[] = [
 
 /** The shim's own commands: not serve rows at all, and never to become ones.
  *  `engine_connect` finds or starts serve and is the ONLY way its token reaches
- *  the page; `raise_window` brings the window forward for `app:open-doc`. */
-export const SHIM_COMMANDS: readonly string[] = ["engine_connect", "raise_window"];
+ *  the page; `raise_window` brings the window forward for `app:open-doc`. The
+ *  `remote_*` ones are the remote door's (src-tauri/src/remote.rs): the hosts
+ *  this machine is paired with, pairing, the choice of engine, the pinned pipe
+ *  to a paired host (`ipcremote.ts`), and a remote window's own settings. */
+export const SHIM_COMMANDS: readonly string[] = [
+  "engine_connect",
+  "raise_window",
+  "remote_hosts",
+  "remote_choose",
+  "remote_forget",
+  "remote_pair",
+  "remote_connect",
+  "remote_send",
+  "remote_close",
+  "remote_settings_get",
+  "remote_settings_set",
+];
 
 const LOCAL = new Set([...CLIENT_LOCAL, ...SHIM_COMMANDS]);
 
@@ -374,6 +430,102 @@ export function engineDoor(local: Door | null, dial: Dial, env: RetryEnv): Engin
     },
     channel<T>(onmessage?: (response: T) => void): Channel<T> {
       return sock ? sock.channel<T>(onmessage) : deadChannel<T>(onmessage);
+    },
+  };
+}
+
+// ── the remote door ─────────────────────────────────────────────────────────
+
+/** Client-local commands that act on a HOST object — an editor opened at a
+ *  host path, a terminal attached to a host tmux session: on a remote window
+ *  neither names anything here, so the door refuses them with the reason, and
+ *  their buttons are greyed. */
+export const HOST_PATH_LOCAL: readonly string[] = ["open_editor", "open_terminal"];
+
+/** A remote window's view state is its own (§9.1): these engine rows go to the
+ *  shim's per-device blob instead, so the host's `ui-state.json` — its own
+ *  window's — is never written by a device, and a device that may not write
+ *  is not refused on every save. */
+export const REMOTE_SETTINGS: Readonly<Record<string, string>> = {
+  get_settings: "remote_settings_get",
+  set_settings: "remote_settings_set",
+};
+
+/** serve's rows whose capability is `admin` (dispatch.rs, `Engine [admin, …]`):
+ *  host-wide configuration. A device paired without `admin` is refused each
+ *  one, so a remote window does not ask — it says why instead, and a panel
+ *  that needs one says "needs admin on the host". engine-route-check.mjs holds
+ *  this list against the Rust both ways; serve still decides every call. */
+export const ADMIN_ROWS: readonly string[] = [
+  "add_project", "probe_dir", "create_project", "clone_project", "clone_cancel", "init_repo",
+  "create_initial_commit", "remove_project", "set_planning_default", "set_project_planning",
+  "set_quota_settings", "set_fetch_interval", "mcp_status", "mcp_uninstall", "codex_mcp_status",
+  "codex_mcp_uninstall", "codex_mcp_migration_plan", "pi_mcp_status", "pi_mcp_uninstall", "kimi_mcp_status",
+  "sync_hub_list", "sync_apply", "diagnostics", "log_tail", "set_term_history_opts", "term_history_info",
+  "term_history_clear", "ui_events_clear", "profiles_info", "delete_profile", "skill_inspect",
+  "skill_preview_git", "skill_remove", "devices_list", "device_narrow",
+];
+
+/** serve's rows no device ever reaches (`HostConsole`, `Loopback`): pairing
+ *  and device administration, what widens agents, the CLI's own update —
+ *  done at the host itself. Held both ways by engine-route-check.mjs. */
+export const CONSOLE_ROWS: readonly string[] = [
+  "set_cross_project", "set_project_private", "update_cli", "mcp_install", "codex_mcp_install",
+  "pi_mcp_install", "kimi_mcp_set", "codex_mcp_migrate", "agent_link_skills", "set_codex_permissions",
+  "set_agent_guidance", "set_agent_guidance_skill", "agent_guidance_merge", "set_pi_trust", "set_pi_allowed",
+  "set_kimi_allowed", "ui_events_append", "save_profile", "set_project_profile", "set_default_profile",
+  "skill_install_local", "skill_install_git", "device_set_scope", "device_disable", "device_enable",
+  "device_set_expiry", "device_set_stepup", "devices_revoke_all_others", "pair_begin", "pair_decide",
+  "pair_cancel", "pair_status", "identity_rotate", "set_slot_capacity", "remote_enable", "remote_disable",
+  "remote_status", "remote_advertise",
+];
+
+/** The device's capabilities on the host this window drives, from the remote
+ *  handshake's `ok.device.caps`; null when unknown or on the host itself. */
+let remoteCaps: readonly string[] | null = null;
+
+/** The grant a remote window learned at its last handshake (`ipcremote.ts`
+ *  reads it off the `ok` frame as it passes). */
+export function setRemoteGrant(caps: readonly string[] | null): void {
+  remoteCaps = caps;
+}
+
+/** May this window's caller do what `cap` allows on its engine? Always true on
+ *  the host (the console holds every capability) and while a remote grant is
+ *  not known yet — serve decides then. */
+export function grantHas(cap: string): boolean {
+  return remoteCaps === null || remoteCaps.includes(cap);
+}
+
+/** Why a remote window does not ask for `cmd`, or null when it may. */
+export function notGranted(cmd: string): string | null {
+  if (!remoteName) return null;
+  if (CONSOLE_ROWS.includes(cmd)) return `${cmd} is done at ${remoteName} itself: no paired device may`;
+  if (ADMIN_ROWS.includes(cmd) && !grantHas("admin")) return `${cmd} needs admin on ${remoteName}: this device was paired without it`;
+  return null;
+}
+
+/** The door of a window that drives ANOTHER host's serve: the engine door
+ *  over `dial` (the pinned pipe, `ipcremote.ts`; never `engine_connect` — no
+ *  local serve is found or started), with three routes of its own: settings to
+ *  the shim's blob, the host-path client-local commands refused, and this
+ *  window marked as not on its engine's host — and the rows its grant cannot
+ *  reach (`notGranted`) refused here, in words, rather than on the host. The
+ *  retries are reconnect.ts's,
+ *  with the one rule §4.4 takes out falling out of `owned: false`: a remote
+ *  window never starts a serve. */
+export function remoteDoor(local: Door, hostName: string, dial: Dial, env: RetryEnv): EngineDoor {
+  markRemote(hostName);
+  const inner = engineDoor(local, dial, env);
+  return {
+    ...inner,
+    invoke<T>(cmd: string, args?: InvokeArgs): Promise<T> {
+      if (HOST_PATH_LOCAL.includes(cmd)) return Promise.reject(notOnHost(cmd === "open_editor" ? "Open in editor" : "Open in terminal"));
+      const refused = notGranted(cmd);
+      if (refused) return Promise.reject(refused);
+      const own = REMOTE_SETTINGS[cmd];
+      if (own) return local.invoke<T>(own, args);
+      return inner.invoke<T>(cmd, args);
     },
   };
 }

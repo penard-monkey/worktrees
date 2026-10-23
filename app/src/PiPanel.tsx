@@ -7,7 +7,8 @@
 // trust.json, and never in a repo.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { invoke } from "./ipc";
+import { invoke, notGranted } from "./ipc";
+import { GrantNote } from "./GrantNote";
 import type { PiProjectTrust, Settings } from "./settings";
 import { ModelPicker, REASON_TEXT, modelArg, type ModelOption, type PiLaunchTrust, type PiStatus } from "./ModelPicker";
 import { PiMcpSection, type PiMcpStatus } from "./PiMcpPanel";
@@ -93,8 +94,9 @@ export default function PiPanel({ settings, repo, onChange, onReport, onFail, on
     {/* FIRST: a deep-link target (offers.ts `pi-mcp`), and the sections below
         fill in asynchronously — anything under them is pushed off screen after
         the focus scroll lands (SettingsSheet's Codex note). */}
+    {notGranted("pi_mcp_status") ? <GrantNote cmd="pi_mcp_status" label="pi MCP server" focus="pi-mcp" /> :
     <PiMcpSection data-focus="pi-mcp" onReport={onReport} onStatus={onMcpStatus}
-      offerPending={mcpOfferPending} onSilenceOffer={onSilenceMcpOffer} />
+      offerPending={mcpOfferPending} onSilenceOffer={onSilenceMcpOffer} />}
 
     <section className="setting" data-testid="pi-install">
       <label>pi</label>

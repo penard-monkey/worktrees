@@ -2344,6 +2344,146 @@ mod devices {
         }
     }
 
+    // ── the device's own client (`worktrees_remote::pair`), against this host ──
+    //
+    // The tests above restate the device from §2.2; these drive the device the
+    // shim and `worktrees remote pair` actually run, end to end against the
+    // real pairing listener — the integration check that the two halves of one
+    // protocol, now one implementation of the proof and the code, still meet.
+
+    mod remote_client {
+        use super::*;
+        use worktrees_remote::hosts::HostStore;
+        use worktrees_remote::pair::{self as rpair, Denied, PairError, PairEvent, Platform, Waits};
+
+        /// The pairing listener binds loopback in these tests (slice 6 binds it
+        /// where `netclass` allows), and reports a private remote address the
+        /// device's dial rule accepts and keeps.
+        const REMOTE: &str = "192.168.77.5:7461";
+
+        fn bind(e: &Engine) {
+            e.clients.pairing().set_bind(Some(super::super::super::pairing::Bind {
+                ip: std::net::Ipv4Addr::LOCALHOST.into(),
+                remote: REMOTE.parse().unwrap(),
+                index: 0,
+                rule: None,
+            }));
+        }
+
+        type Outcome = Result<worktrees_remote::hosts::HostRecord, PairError>;
+
+        /// Start the device's pairing on the engine's runtime; the code it
+        /// shows lands in the returned slot.
+        fn start(e: &Engine, store: &HostStore, uri: &str, waits: Waits) -> (Arc<Mutex<Option<String>>>, tokio::task::JoinHandle<Outcome>) {
+            let code = Arc::new(Mutex::new(None));
+            let (slot, store, uri) = (code.clone(), store.clone(), uri.to_string());
+            let task = e.rt.spawn(async move {
+                let mut on = move |ev: PairEvent| {
+                    if let PairEvent::Code(c) = ev {
+                        *slot.lock().unwrap() = Some(c);
+                    }
+                };
+                rpair::pair_with(&store, &uri, "Bret's Laptop", Platform::Macos, worktrees_core::sysclock::now_epoch(), &super::literal, waits, &mut on).await
+            });
+            (code, task)
+        }
+
+        fn wait_for(e: &Engine, con: &mut Client, state: &str) -> Value {
+            let t0 = Instant::now();
+            loop {
+                let st = e.status(con);
+                if st["state"] == json!(state) || t0.elapsed() > Duration::from_secs(10) {
+                    return st;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+
+        fn store(e: &Engine) -> HostStore {
+            HostStore::new(&e.dir.join("client"))
+        }
+
+        /// §2.2 end to end with the device's real client: one code on both
+        /// screens, the host's Allow, and a kept host whose pin is the
+        /// identity's, whose address is the listener's, whose key is the one
+        /// the host enrolled.
+        #[test]
+        fn the_devices_client_pairs_and_keeps_the_host() {
+            let e = engine("rc-pair", vec![]);
+            bind(&e);
+            let mut con = e.connect(Caller::console());
+            let uri = e.begin(&mut con, &["read"], json!("*"), Value::Null)["ok"]["uri"].as_str().unwrap().to_string();
+            let st = store(&e);
+            let (code, task) = start(&e, &st, &uri, Waits::default());
+            let pending = wait_for(&e, &mut con, "pending");
+            assert_eq!(pending["request"]["platform"], json!("macos"), "{pending}");
+            assert_eq!(pending["request"]["name"], json!("Bret's Laptop"));
+            assert_eq!(Some(pending["request"]["code"].as_str().unwrap().to_string()), *code.lock().unwrap(), "both screens show one code");
+            let rec = e.rpc(&mut con, "pair_decide", json!({"allow": true}))["ok"].clone();
+            let kept = e.rt.block_on(task).unwrap().unwrap_or_else(|err| panic!("{err}"));
+            let identity = super::super::super::identity::Identity::load(&e.dir.join("cfg")).unwrap().unwrap();
+            assert_eq!(kept.pin, identity.pin());
+            assert_eq!(kept.addr, REMOTE);
+            assert_eq!(json!(kept.device_id), rec["id"]);
+            assert_eq!(kept.principal_id, "owner");
+            assert_eq!(kept.discovery_id.as_deref(), Some(identity.discovery_id()));
+            assert_eq!(st.list().unwrap().hosts, vec![kept.clone()], "kept on disk");
+            assert_eq!(json!(st.key_for(&kept).unwrap().pin()), rec["spki_sha256"], "the key the host enrolled is the one kept");
+        }
+
+        /// Every `denied` reaches the device as its reason (§2.2 step 6).
+        #[test]
+        fn each_refusal_reaches_the_device_as_its_reason() {
+            let e = engine_times("rc-deny", vec![], PAIR_LONG, Duration::from_millis(1500), false);
+            bind(&e);
+            let mut con = e.connect(Caller::console());
+            let st = store(&e);
+            for (what, act, want) in [("deny", Some(false), Denied::Denied), ("cancel", None, Denied::Closed), ("nothing", Some(true), Denied::Timeout)] {
+                let uri = e.begin(&mut con, &["read"], json!("*"), Value::Null)["ok"]["uri"].as_str().unwrap().to_string();
+                let (_code, task) = start(&e, &st, &uri, Waits::default());
+                wait_for(&e, &mut con, "pending");
+                match (what, act) {
+                    ("deny", Some(allow)) => assert!(e.rpc(&mut con, "pair_decide", json!({"allow": allow}))["err"].is_null()),
+                    ("cancel", _) => assert_eq!(e.rpc(&mut con, "pair_cancel", json!({}))["ok"], json!(true)),
+                    _ => {} // the host's 1.5 s run out
+                }
+                match e.rt.block_on(task).unwrap() {
+                    Err(PairError::Denied { why, .. }) => assert_eq!(why, want, "{what}"),
+                    other => panic!("{what}: {:?}", other.map_err(|e| e.to_string())),
+                }
+            }
+            assert!(st.list().unwrap().hosts.is_empty(), "nothing kept");
+        }
+
+        /// §2.2 step 3: the device's own rule (`pairuri::dial_rule`, netclass)
+        /// refuses a link's address BEFORE anything is dialled. Here the link
+        /// names the loopback listener of a real, open window: had the device
+        /// dialled, the window would have its one attempt.
+        #[test]
+        fn a_link_the_dial_rule_refuses_is_never_dialled() {
+            let e = engine("rc-refuse", vec![]);
+            bind(&e);
+            let mut con = e.connect(Caller::console());
+            let uri = e.begin(&mut con, &["read"], json!("*"), Value::Null)["ok"]["uri"].as_str().unwrap().to_string();
+            let st = store(&e);
+            let r = e.rt.block_on(rpair::pair(&st, &uri, "Laptop", worktrees_core::sysclock::now_epoch(), &mut |_| {}));
+            match r {
+                Err(PairError::Link(m)) => assert!(m.starts_with("not-private: 127.0.0.1"), "the parser's own words: {m}"),
+                other => panic!("{:?}", other.map_err(|e| e.to_string())),
+            }
+            std::thread::sleep(Duration::from_millis(200));
+            assert_eq!(e.status(&mut con)["state"], json!("open"), "no attempt reached the window");
+        }
+
+        /// Handshake v1's labels: the device's copy is serve's.
+        #[test]
+        fn the_devices_handshake_labels_are_serves() {
+            use super::super::super::policy;
+            assert_eq!(worktrees_remote::call::CLIENT_LABEL, policy::CLIENT_LABEL);
+            assert_eq!(worktrees_remote::call::SERVER_LABEL, policy::SERVER_LABEL);
+        }
+    }
+
     /// §2.2 from end to end: the host chooses the scope, the window opens, the
     /// device proves the secret over pinned TLS bound to the session, both
     /// screens show one code, and the host's Allow writes the record — with

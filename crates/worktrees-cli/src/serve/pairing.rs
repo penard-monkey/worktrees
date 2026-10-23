@@ -55,7 +55,6 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures_util::future::{select, Either};
-use hmac::{KeyInit, Mac};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
@@ -78,10 +77,9 @@ pub const TLS_DEADLINE: Duration = Duration::from_secs(5);
 /// The longest frame a device may send, newline included.
 pub const MAX_FRAME: usize = 4096;
 
-pub const PROOF_LABEL: &[u8] = b"worktrees-pair/v1\n";
-pub const SAS_LABEL: &[u8] = b"worktrees-pair/v1/sas\n";
-
-type HmacSha256 = hmac::Hmac<Sha256>;
+// The proof and the comparison code are the device's as well: one
+// implementation, in the transport crate a device pairs through.
+pub use worktrees_remote::pair::{comparison_code, proof_ok};
 
 /// What the host chose before any QR appeared (§2.2 step 1).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -672,29 +670,6 @@ fn unhex32(s: &str) -> Option<[u8; 32]> {
         *b = u8::from_str_radix(s.get(2 * i..2 * i + 2)?, 16).ok()?;
     }
     Some(out)
-}
-
-/// The proof the device must have sent, checked in constant time (§2.2 step
-/// 5).
-pub fn proof_ok(secret: &[u8; 16], exporter: &[u8; 32], device_pin: &str, stepup_pin: Option<&str>, name: &str, proof: &[u8; 32]) -> bool {
-    let (Some(d), Some(s)) = (unhex32(device_pin), stepup_pin.map(unhex32).unwrap_or(Some([0u8; 32]))) else { return false };
-    let mut m = HmacSha256::new_from_slice(secret).expect("HMAC takes a key of any length");
-    m.update(PROOF_LABEL);
-    m.update(exporter);
-    m.update(&d);
-    m.update(&s);
-    m.update(name.as_bytes());
-    m.verify_slice(proof).is_ok()
-}
-
-/// The six-digit comparison code both screens show (§2.2 step 6).
-pub fn comparison_code(secret: &[u8; 16], exporter: &[u8; 32]) -> String {
-    let mut m = HmacSha256::new_from_slice(secret).expect("HMAC takes a key of any length");
-    m.update(SAS_LABEL);
-    m.update(exporter);
-    let t = m.finalize().into_bytes();
-    let n = u32::from_be_bytes([t[0], t[1], t[2], t[3]]) & 0x7fff_ffff;
-    format!("{:06}", n % 1_000_000)
 }
 
 /// This host's name, for the link and the device's screen: the system host

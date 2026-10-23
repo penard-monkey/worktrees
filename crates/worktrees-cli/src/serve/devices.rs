@@ -465,10 +465,10 @@ impl DevicesFile {
     }
 }
 
-/// The pin of a DER SubjectPublicKeyInfo: its SHA-256, lowercase hex.
-pub fn pin_of(spki_der: &[u8]) -> String {
-    hex(&Sha256::digest(spki_der))
-}
+/// The pin of a DER SubjectPublicKeyInfo: its SHA-256, lowercase hex — the
+/// device's own rule (`worktrees_remote::tls`), so the two ends cannot spell
+/// a pin differently.
+pub use worktrees_remote::tls::pin_of_spki as pin_of;
 
 pub fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()

@@ -59,11 +59,6 @@ use super::super::{policy, tls};
 use super::peer::Rule;
 use super::sock;
 
-/// The label handshake v1's key is exported under on a remote session: 32
-/// bytes of RFC 8446 §7.5, no context, computed by both ends.
-// moves to worktrees-remote
-pub const EXPORTER_REMOTE: &[u8] = b"EXPORTER-worktrees-remote-v1";
-
 /// The TLS handshake's deadline (§6).
 pub const TLS_DEADLINE: Duration = Duration::from_secs(5);
 
@@ -350,7 +345,7 @@ fn new_address_class(devices: &DeviceRegistry, caller: &Caller, d: &worktrees_co
 /// What the TLS session established, for the upgrade and the session.
 struct Session {
     caller: Caller,
-    /// handshake v1's key: `hex(exporter(EXPORTER_REMOTE))`.
+    /// handshake v1's key: `hex(exporter(EXPORTER_SESSION))`.
     key: String,
     stepup: [u8; 32],
     device: Value,
@@ -385,7 +380,7 @@ async fn connection(tcp: TcpStream, peer: SocketAddr, shared: Arc<Shared>, adm: 
             shared.deps.refused.note();
             return;
         };
-        let (Ok(key), Ok(stepup)) = (tls::exporter(c, EXPORTER_REMOTE), tls::exporter(c, tls::EXPORTER_STEPUP)) else { return };
+        let (Ok(key), Ok(stepup)) = (tls::exporter(c, tls::EXPORTER_SESSION), tls::exporter(c, tls::EXPORTER_STEPUP)) else { return };
         let Some(device) = device_frame(&shared.deps.devices, &caller) else { return };
         Arc::new(Session { caller, key: hex(&key), stepup, device })
     };
