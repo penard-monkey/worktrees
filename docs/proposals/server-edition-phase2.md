@@ -3335,10 +3335,10 @@ have taken it, and on what it was measured.
       are on main (#534). The device half is in #556 (open). Missing: the
       device records, the checkpoint's device fields, the per-device audit
       budget, `audit_tail` and most alerts (§5.1, §5.3).
-- [ ] R6: §6, with the numbers measured.
+- [x] R6: §6, with the numbers measured.
       *Status:* #538 measured every loopback-reachable cap on both OSes.
-      The remote caps are #556's (open), built on it: its per-device
-      connection count is tested over the remote listener.
+      The remote caps are #556's, built on it: its per-device connection
+      count is tested over the remote listener.
 - [ ] R7: §7.
       *Status:* on main: the classifier (#537), the class raise (#549), and
       provenance with the agent rules (#551). Left: the `instruct` rows with
