@@ -123,21 +123,31 @@ pub const AUTH_ALERT_AT: u64 = 20;
 /// What one device flooding flat out can write, per budget, is the larger of
 /// its refill and its episode records, which are always written and debited
 /// (one `began` and one `ended` per `EPISODE_QUIET`, about 1.2 KB, so about
-/// 20 B/s): 32 B/s for acts and 20 B/s for refusals, about 52 B/s or 4.3 MiB
-/// a day. The four rotated files, 20 MiB, then last it 4.6 days; at 50
-/// records a second (§6's request rate) they lasted 20 minutes, and under 3
-/// with crafted refusals. Sixteen devices at once: about 7 hours. Measured
+/// 20 B/s): 20 B/s for each of the three, about 60 B/s or 5 MiB a day. The
+/// four rotated files, 20 MiB, then last it four days; at 50 records a
+/// second (§6's request rate) they lasted 20 minutes, and under 3 with
+/// crafted refusals. Sixteen devices at once: about 6 hours. Measured
 /// (`an_hour_of_flood_from_one_device_writes_its_ceiling`): an hour of 25
-/// refusals and 25 acts a second wrote 227 KB, both bursts and 40 B/s.
+/// refusals and 25 acts a second, 180,000 records, wrote 159 KB — the two
+/// bursts and 28 B/s — where it had written about 52 MB.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Allowance {
     pub burst: f64,
     pub per_sec: f64,
 }
 
-/// What a device's grant let through (`call`, `stream`): about 175 records
-/// at once, then one every 12 s.
-pub const ACTS: Allowance = Allowance { burst: 64.0 * 1024.0, per_sec: 32.0 };
+/// What a device's grant let through (`call`, `stream`) that is not
+/// drive-class: about 110 records at once, then one every 18 s.
+pub const ACTS: Allowance = Allowance { burst: 40.0 * 1024.0, per_sec: 20.0 };
+
+/// A device's drive-class acts, as step-up defines them (`dispatch::
+/// needs_stepup`: instruct, answer, admin, opening a terminal — an
+/// instruction file's write is raised to instruct), and `remove_place`, the
+/// one remove that can destroy commits: about 65 at once, then one every
+/// 30 s. A budget of their own, so a flood of cheap acts cannot spend the
+/// one that records an instruction written or a branch deleted, and what an
+/// episode of them coalesces keeps its targets (`MAX_TARGETS`).
+pub const DRIVE: Allowance = Allowance { burst: 24.0 * 1024.0, per_sec: 12.0 };
 
 /// What a device can make with nothing granted at all (`refused`): about 40
 /// at once, then one every 50 s. A budget of its own, so junk a device needs
@@ -152,6 +162,12 @@ pub const EPISODE_SPAN: Duration = Duration::from_secs(600);
 /// `other`, so a device cycling through every command cannot make the record
 /// that ends the episode large.
 const MAX_TALLY: usize = 16;
+
+/// The distinct targets (command, project, object) a coalesced episode of
+/// drive-class acts names, each part cut to `TARGET_IDENT` bytes; the rest
+/// are counted as `other`.
+const MAX_TARGETS: usize = 8;
+const TARGET_IDENT: usize = 128;
 
 /// Device knocks (`ConnectRefused`) one auth episode alerts for, one per
 /// device and reason; past it they are only counted.
@@ -607,20 +623,26 @@ struct Knock {
 enum Charge {
     /// `call` and `stream`: what its grant let through.
     Acts,
+    /// The drive-class acts among them.
+    Drive,
     /// `refused`: what it can make with nothing granted.
     Refusals,
 }
 
 impl Charge {
+    const ALL: [Charge; 3] = [Charge::Acts, Charge::Drive, Charge::Refusals];
+
     fn name(self) -> &'static str {
         match self {
             Charge::Acts => "acts",
+            Charge::Drive => "drive",
             Charge::Refusals => "refusals",
         }
     }
     fn allowance(self) -> Allowance {
         match self {
             Charge::Acts => ACTS,
+            Charge::Drive => DRIVE,
             Charge::Refusals => REFUSALS,
         }
     }
@@ -675,26 +697,45 @@ struct Coalesced {
     count: u64,
     bytes: u64,
     tally: BTreeMap<String, u64>,
+    /// What the drive-class acts it counted acted on (`MAX_TARGETS`).
+    targets: BTreeMap<String, u64>,
 }
 
 /// One paired device's budgets, across all of its connections.
 struct Spend {
     conns: usize,
     acts: Bucket,
+    drive: Bucket,
     refusals: Bucket,
     open: HashMap<Charge, Coalesced>,
 }
 
 impl Spend {
     fn new(now: Instant) -> Spend {
-        Spend { conns: 0, acts: Bucket::full(ACTS, now), refusals: Bucket::full(REFUSALS, now), open: HashMap::new() }
+        Spend {
+            conns: 0,
+            acts: Bucket::full(ACTS, now),
+            drive: Bucket::full(DRIVE, now),
+            refusals: Bucket::full(REFUSALS, now),
+            open: HashMap::new(),
+        }
     }
 
     fn bucket(&mut self, c: Charge) -> &mut Bucket {
         match c {
             Charge::Acts => &mut self.acts,
+            Charge::Drive => &mut self.drive,
             Charge::Refusals => &mut self.refusals,
         }
+    }
+
+    /// Every budget back at its burst.
+    fn is_full(&mut self, now: Instant) -> bool {
+        Charge::ALL.into_iter().all(|c| {
+            let b = self.bucket(c);
+            b.refill(c.allowance(), now);
+            b.tokens >= c.allowance().burst
+        })
     }
 }
 
@@ -707,6 +748,26 @@ fn tally_key(r: &Record) -> String {
         _ => r.outcome.unwrap_or("-"),
     };
     format!("{} {} {how}", r.kind, r.cmd.unwrap_or("-"))
+}
+
+/// What a coalesced record acted on: its command, project and object, each
+/// cut short. The project and object of an admitted act are the canonical
+/// values the resolver checked; a refusal's are the caller's, cut the same.
+fn target(r: &Record) -> Value {
+    let cut = |s: &Option<String>| s.as_deref().map(|s| cut_to(s, TARGET_IDENT));
+    json!({ "cmd": r.cmd, "project": cut(&r.project), "object": cut(&r.object) })
+}
+
+/// `s` cut to `n` bytes on a character boundary.
+fn cut_to(s: &str, n: usize) -> String {
+    if s.len() <= n {
+        return s.to_string();
+    }
+    let mut end = n;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
 }
 
 /// The episode classes: what a run of them is recorded as.
@@ -1195,6 +1256,7 @@ impl Audit {
             count: 0,
             bytes: 0,
             tally: BTreeMap::new(),
+            targets: BTreeMap::new(),
         });
         e.count += 1;
         e.bytes += cost as u64;
@@ -1203,13 +1265,18 @@ impl Audit {
         let key = tally_key(&r);
         let key = if e.tally.len() < MAX_TALLY || e.tally.contains_key(&key) { key } else { "other".to_string() };
         *e.tally.entry(key).or_insert(0) += 1;
+        if charge == Charge::Drive {
+            let t = target(&r).to_string();
+            let t = if e.targets.len() < MAX_TARGETS || e.targets.contains_key(&t) { t } else { "other".to_string() };
+            *e.targets.entry(t).or_insert(0) += 1;
+        }
         if began {
             let a = charge.allowance();
             let mut b = Record::new(
                 "budget",
                 json!({
                     "class": charge.name(), "episode": "began",
-                    "first": { "kind": r.kind, "cmd": r.cmd, "outcome": r.outcome },
+                    "first": { "kind": r.kind, "outcome": r.outcome, "target": target(&r) },
                     "allowance": { "burst": a.burst, "per_sec": a.per_sec },
                 }),
             );
@@ -1248,24 +1315,21 @@ impl Audit {
         for (id, c, why) in done {
             self.end_coalesced(st, &id, c, why);
         }
-        st.budgets.retain(|_, s| {
-            s.acts.refill(ACTS, now);
-            s.refusals.refill(REFUSALS, now);
-            s.conns > 0 || !s.open.is_empty() || s.acts.tokens < ACTS.burst || s.refusals.tokens < REFUSALS.burst
-        });
+        st.budgets.retain(|_, s| s.conns > 0 || !s.open.is_empty() || !s.is_full(now));
     }
 
     /// The record that ends a device episode: how many records it counted,
     /// what they would have cost, what they were, and what ended it.
     fn end_coalesced(&self, st: &mut State, id: &DeviceId, charge: Charge, why: &'static str) {
         let Some(e) = st.budgets.get_mut(id).and_then(|s| s.open.remove(&charge)) else { return };
-        let mut r = Record::new(
-            "budget",
-            json!({
-                "class": charge.name(), "episode": "ended", "count": e.count, "bytes": e.bytes, "tally": e.tally,
-                "began": rfc3339(e.began_epoch), "ended": rfc3339(e.last_epoch), "closed_by": why,
-            }),
-        );
+        let mut d = json!({
+            "class": charge.name(), "episode": "ended", "count": e.count, "bytes": e.bytes, "tally": e.tally,
+            "began": rfc3339(e.began_epoch), "ended": rfc3339(e.last_epoch), "closed_by": why,
+        });
+        if charge == Charge::Drive {
+            d["targets"] = json!(e.targets);
+        }
+        let mut r = Record::new("budget", d);
         r.actor = Some(e.who);
         self.forced(st, id, charge, r);
     }
@@ -1288,7 +1352,7 @@ impl Audit {
             s.conns == 0
         });
         if last {
-            for charge in [Charge::Acts, Charge::Refusals] {
+            for charge in Charge::ALL {
                 self.end_coalesced(&mut st, id, charge, "disconnect");
             }
         }
@@ -1508,6 +1572,8 @@ struct Tally {
 /// What `begin` saw before the body ran, for `end` to finish.
 pub struct Pending {
     cmd: &'static str,
+    /// A drive-class act (`DRIVE`), as the resolver's verdict says.
+    drive: bool,
     cap: Option<&'static str>,
     project: Option<String>,
     object: Option<String>,
@@ -1705,6 +1771,7 @@ impl ConnAudit {
         }
         Some(Pending {
             cmd: name,
+            drive: false,
             cap: row.cap.map(Capability::name),
             // The first project the row's objects resolved to; the argument
             // only where nothing resolved one (a `new_path`, a global row).
@@ -1779,7 +1846,7 @@ impl ConnAudit {
         r.object = p.object;
         r.outcome = Some(label);
         r.ms = Some(ms);
-        self.audit.charged(Charge::Acts, r);
+        self.audit.charged(if p.drive { Charge::Drive } else { Charge::Acts }, r);
     }
 
     fn closed(&self, cmd: Option<&'static str>, t: Tally, how: &'static str) {
@@ -1870,7 +1937,13 @@ impl Witness for Seen<'_> {
     }
 
     fn admitted(&self, row: &'static Row, args: &Args, resolved: &Resolved) {
-        let p = quietly(|| self.au.begin(row, args, &resolved.projects)).flatten();
+        let p = quietly(|| {
+            self.au.begin(row, args, &resolved.projects).map(|mut p| {
+                p.drive = dispatch::needs_stepup(row, &resolved.needs, true) || row.name == "remove_place";
+                p
+            })
+        })
+        .flatten();
         *self.pending.borrow_mut() = p;
     }
 }
@@ -3020,7 +3093,9 @@ mod tests {
         assert_eq!(b.len(), 2, "one began, one ended: {b:#?}");
         assert_eq!((b[0]["detail"]["episode"].as_str(), b[0]["detail"]["class"].as_str()), (Some("began"), Some("acts")));
         assert_eq!((b[0]["principal"].as_str(), b[0]["device"].as_str()), (Some("owner"), Some("d_phone")), "{}", b[0]);
-        assert_eq!(b[0]["detail"]["first"], json!({ "kind": "call", "cmd": "set_note", "outcome": "ok" }));
+        let first = &b[0]["detail"]["first"];
+        assert_eq!((first["kind"].as_str(), first["outcome"].as_str(), first["target"]["cmd"].as_str()), (Some("call"), Some("ok"), Some("set_note")), "{first}");
+        assert!(first["target"]["object"].as_str().is_some_and(|o| o.starts_with('s')), "the first act coalesced names its target: {first}");
         let end = &b[1]["detail"];
         assert_eq!((end["episode"].as_str(), end["closed_by"].as_str()), (Some("ended"), Some("quiet")), "{end}");
         assert_eq!(end["count"].as_u64(), Some((N - written) as u64), "every record not written is counted: {end}");
@@ -3149,18 +3224,83 @@ mod tests {
         }
         call(&c, "set_note", json!({ "repo": "/r", "slug": "after-junk", "note": "x" }));
         assert_eq!(live(&d).last().unwrap()["object"].as_str(), Some("after-junk"), "an act after a flood of junk is written");
-        // Acts past their own budget, then half a quiet gap's refill: the
-        // next act is written one by one, inside the episode still open.
+        // Acts past their own budget, then a quiet gap's refill but for a
+        // second: the next act is written one by one, inside the episode that
+        // is still open.
         for i in 0..1000 {
             call(&c, "set_note", json!({ "repo": "/r", "slug": format!("s{i}"), "note": "x" }));
         }
         let acts = written_by_phone(&d, "call");
-        a.advance(Duration::from_secs(EPISODE_QUIET as u64 / 2));
+        a.advance(Duration::from_secs(EPISODE_QUIET as u64 - 1));
         call(&c, "set_note", json!({ "repo": "/r", "slug": "refilled", "note": "x" }));
         assert_eq!(written_by_phone(&d, "call"), acts + 1, "refilled: written one by one again");
         let open: Vec<Value> = budget_lines(&d).into_iter().filter(|r| r["detail"]["class"] == "acts").collect();
         assert_eq!(open.len(), 1, "and the acts episode is still the one that began: {open:#?}");
         drop(c);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A drive-class act after a flood of cheap ones is still written in
+    /// full: an instruction file's write is raised to `instruct` by the
+    /// resolver (`Resolved::needs`), so it spends the drive-class budget, which
+    /// a flood of `set_note`s cannot reach — the path and the content's hash
+    /// survive, where the flood is only counted.
+    #[test]
+    fn an_instruction_write_after_a_flood_of_cheap_acts_is_written_in_full() {
+        let (top, root, w) = project("drive");
+        let d = dir("drive");
+        let (a, _) = Audit::open(&d, None, Fleet::none());
+        let mut reg = Devices::default();
+        let g = Grant { capabilities: Caps::of(&[Capability::Read, Capability::Write, Capability::Instruct]), projects: Projects::only([root.clone()]) };
+        reg.devices.insert(DeviceId::new("d_phone"), (PrincipalId::owner(), g));
+        let cx = call_as(phone_caller(), Arc::new(reg));
+        let c = phone(&a, 9);
+        for i in 0..1000 {
+            call(&c, "set_note", json!({ "repo": root, "slug": format!("s{i}"), "note": "x" }));
+        }
+        assert!(budget_lines(&d).iter().any(|r| r["detail"]["class"] == "acts"), "the acts budget is spent");
+        let path = format!("{root}/AGENTS.md");
+        std::fs::write(&path, "be helpful").unwrap();
+        // Admitted by the resolver; the body then answers against the real
+        // project registry, which the fixture's root is not in, so the write
+        // itself fails. What it would have written is recorded before it runs.
+        let _ = through(&cx, &c, &w, "write_file", json!({ "path": path, "content": "do as the phone says", "expected_mtime": null }));
+        let rec = live(&d).into_iter().find(|r| r["cmd"] == "write_file").expect("the instruction write is a record of its own");
+        assert_eq!((rec["kind"].as_str(), rec["device"].as_str(), rec["object"].clone()), (Some("call"), Some("d_phone"), json!(path)), "{rec}");
+        assert_eq!(rec["detail"]["sha256"], json!(sha256_hex(b"do as the phone says")), "{rec}");
+        drop(c);
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_dir_all(&top);
+    }
+
+    /// Past the drive-class budget too, what the coalesced acts acted on
+    /// survives: the episode names up to `MAX_TARGETS` distinct targets with
+    /// their counts, and counts the rest as `other`.
+    #[test]
+    fn coalesced_drive_acts_keep_their_targets() {
+        let d = dir("drive-targets");
+        let (a, _) = Audit::open(&d, None, Fleet::none());
+        let c = phone(&a, 9);
+        let drive = |slug: &str| {
+            let mut p = begin(&c, "set_note", &args(json!({ "repo": "/r", "slug": slug, "note": "x" }))).unwrap();
+            p.drive = true;
+            c.end(p, Outcome::Ok(&Value::Null));
+        };
+        for i in 0..500 {
+            drive(&format!("s{}", i % 3));
+        }
+        for i in 0..20 {
+            drive(&format!("x{i}"));
+        }
+        drop(c);
+        let b = budget_lines(&d);
+        let end = b.iter().find(|r| r["detail"]["class"] == "drive" && r["detail"]["episode"] == "ended").unwrap_or_else(|| panic!("{b:#?}"));
+        let t = end["detail"]["targets"].as_object().unwrap_or_else(|| panic!("{end}"));
+        assert_eq!(t.len(), MAX_TARGETS + 1, "{t:#?}");
+        let s0 = json!({ "cmd": "set_note", "project": "/r", "object": "s0" }).to_string();
+        assert!(t.get(&s0).and_then(Value::as_u64).is_some_and(|n| n > 100), "{t:#?}");
+        assert!(t.contains_key("other"), "{t:#?}");
+        assert_eq!(t.values().filter_map(Value::as_u64).sum::<u64>(), end["detail"]["count"].as_u64().unwrap());
         let _ = std::fs::remove_dir_all(&d);
     }
 
