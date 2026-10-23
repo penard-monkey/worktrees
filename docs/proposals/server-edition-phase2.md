@@ -5,11 +5,13 @@ title: "Proposal — Server Edition, Phase 2"
 # Proposal — Server Edition, Phase 2: identity, capability, exposure
 
 **Status:** designed 2026-10-20, and being built since 2026-10-22, one
-slice of §10 at a time: slice 0 is on main, and slices 1–4 are open PRs.
-It is the gate before `worktrees serve` answers anything but this machine: a
-second desktop, and the Tauri iOS and iPadOS build (decision 3 of
-[server-edition.md](server-edition.md)). Nothing binds off loopback until
-every exit criterion in §10 holds.
+slice of §10 at a time. On main at `bb5a8f9` (2026-10-23): slices 0–3, 1b
+and 2b, slice 5's server side, slice 6a's address rules, gap 17's fetch
+policy and §7's provenance rules. Open PRs: slice 4 (#538) and slice 6's
+two halves (#556, #555). It is the gate before `worktrees serve` answers
+anything but this machine: a second desktop, and the Tauri iOS and iPadOS
+build (decision 3 of [server-edition.md](server-edition.md)). Nothing binds
+off loopback until every exit criterion in §10 holds.
 
 **Decided 2026-10-20.** The user answered the eight questions of §11 the
 same day. Six follow the recommendation. Two depart from it: multi-user is
@@ -52,6 +54,26 @@ PRs: #535, #537, #534 and #538. §10 says which slice is where. §3.4, §5, §6
 and §7.1 record what each lane decided and measured, each fact cited to
 its PR.
 
+**Status at 2026-10-23 (main at `bb5a8f9`).** Since then nine Phase 2
+PRs have merged: #535 (slice 1), #537 (slice 2), #534 (slice 3), #550
+(slice 1b), #549 (slice 2b), #546 (gap 17), #547 (slice 6a), #551 (§7.3,
+§7.5 and the four-lane cap) and #544 (slice 5's server side). Slice 4
+(#538) is open, built on #544. Slice 6 is built as two open drafts, both
+built on #544: the host's half (#556) and the client machine's (#555),
+which also holds slice 5's desktop client side. Three more lanes build on
+those branches: the device records and a per-device audit budget
+(`feat/p2-device-audit`, on #544), the
+host's remote-access UI (`feat/p2-remote-host-ui`, on #556) and client
+discovery (`feat/p2-remote-client-discovery`, on #555). This revision folds
+in what those PRs decided, departed from and measured. Two departures change
+the design rather than add to it: the remote listener's handshake (§4.5)
+and a place's own directory (§7.1). §11.4 gathers what the user, `(main)`
+and the lanes decided while building, including the choices the user may
+still override. Anything built only in an open PR says "in #n (open)",
+and §10 ticks an exit criterion only when it holds on main. No
+`owasp-security` pass has covered this revision's two departures yet. Where
+a lane's own security review found something, the text cites it.
+
 **Base.** Written against `feat/app-serve-client` at `fadb2ce`, the tip of the
 Server Edition stack (#508 → #516 → #515 → that branch) before it was
 squash-merged. Every `file:line` below is at that commit unless it names
@@ -85,12 +107,12 @@ or lane it comes from, and "measured" appears only where a lane measured.
 | 4 | May the loopback listener enroll? | It is where enrollment is AUTHORIZED, and never where a device enrolls. Opening a pairing window is a console act, done over loopback with serve.json's token. The loopback listener never accepts a device credential. | 2 |
 | 5 | Per-object authorization (R1) | Each device has capabilities (`read`, `write`, `answer`, `instruct`, `stream`, `admin`) and a project scope. Every row of the dispatch table declares the capability it needs and the object it acts on. One resolver checks that before the body runs, against the grant of the (principal, device) pair: the principal's grant intersected with the device's. The scope also rides into the api, so the api's own path guard answers with the caller's roots: two checks, as R1 asked. Results and events are cut down to the scope. | 2 |
 | 6 | Rows a remote device never reaches | A new `HostConsole` class, served on loopback only. It covers every row that can widen what agents on this host may do, pairing and device administration, `update_cli` (*decided*, §11 Q3), and adopting a project from a hub. | 2 |
-| 7 | The remote listener | Off by default, with a one-click kill switch on the host. It binds one specific private address on a named interface, an overlay address or a LAN one (*decided*, §11 Q6), never a wildcard and never loopback. "Private" is a closed list (RFC 1918, CGNAT `100.64.0.0/10`, link-local, ULA `fc00::/7`), and anything else is refused. When the address leaves its interface or the network changes, the listener closes until the same network returns or the host chooses again. A new address on the same network rebinds by itself, at most three times an hour (*decided*, §11.2 N4). On a LAN, devices find a moved host over mDNS: it is advertised only in LAN mode and on the bound interface, nothing serve composes in it is more than an opaque id, and a discovered address is adopted only after a pinned handshake (*decided*, §11.1 N2). Its host name is serve's own opaque one where the platform allows it (recommended, unmeasured); elsewhere it is the OS's `.local` name, which can carry the owner's first name, and the enable dialog shows it (§4.7). An address code is the fallback. TLS 1.3 is mutual and pinned both ways (rustls), with no CA, no resumption and no 0-RTT in Phase 2. On iOS the socket lives in the Rust shim and not in the WebView. | 2 |
+| 7 | The remote listener | Off by default, with a one-click kill switch on the host. It binds one specific private address on a named interface, an overlay address or a LAN one (*decided*, §11 Q6), never a wildcard and never loopback. "Private" is a closed list (RFC 1918, CGNAT `100.64.0.0/10`, link-local, ULA `fc00::/7`), and anything else is refused. When the address leaves its interface or the network changes, the listener closes until the same network returns or the host chooses again. A new address on the same network rebinds by itself, at most three times an hour (*decided*, §11.2 N4). On a LAN, devices find a moved host over mDNS: it is advertised only in LAN mode and on the bound interface, nothing serve composes in it is more than an opaque id, and a discovered address is adopted only after a pinned handshake (*decided*, §11.1 N2). Its host name is serve's own opaque one where the platform allows it (recommended; built for macOS in #556, open, and measured there only as the host itself sees it); elsewhere it is the OS's `.local` name, which can carry the owner's first name, and the enable dialog shows it (§4.7). An address code is the fallback. TLS 1.3 is mutual and pinned both ways (rustls), with no CA, no resumption and no 0-RTT in Phase 2. On iOS the socket lives in the Rust shim and not in the WebView. | 2 |
 | 8 | The CI witness (R8) | A connect witness for loopback serve, which #516 added to CI and #536 to the release gate. Then the bind rules, as connects: a public address that IS bindable is refused, the remote port never answers on loopback, a peer outside the allowed sources is dropped, and an address change pauses and resumes the listener. Then identity: no certificate is refused, an unenrolled one is refused, an enrolled one is served, a revoke kills the live socket, an expired device is refused, and the pairing port is closed outside a window. Measured on both platforms, with a release gate that greps the exact count. | 2 |
 | 9 | The audit log (R5) | `<config_dir>/audit.jsonl`, mode `0600`, append-only and hash-chained. Only serve's connection layer writes it, and its records are structured, never free text. Every record names a principal as well as a device. | 2 |
 | 10 | Resource limits (R6) | Per-device connection, in-flight and rate caps; bounded outboxes and lanes; single-flight for the expensive reads; separate budgets for loopback and remote, so a device cannot starve the desk. Before authentication, a newcomer displaces the unauthenticated connection that has stalled longest, so a local flood no longer locks the app out; macOS keeps a residual (§6). | 2 |
 | 11 | The agent-instruction surface (R7) | One path classifier in core. Instruction files need `instruct`. Files that EXECUTE without anyone choosing to run them need `stream`. `.git/**` is never written. Provenance is kept out of band, with no markers in the file. | 2 |
-| 12 | The known gaps | Eight from the brief, seven found while writing this, one from Appendix B, and one from slice 1's security review (gap 17, which must close before any remote bind). Each has a fix shape and a phase (§8). One of the new ones (gap 9) could be reached from a cloned repository's content. #523 fixed it on main. #516 closed gaps 11 and 15 and part of gaps 3 and 5, and #536 closed gap 8. | 2, some now |
+| 12 | The known gaps | Eight from the brief, seven found while writing this, one from Appendix B, and one from slice 1's security review (gap 17, which must close before any remote bind). Each has a fix shape and a phase (§8). One of the new ones (gap 9) could be reached from a cloned repository's content. #523 fixed it on main. #516 closed gaps 11 and 15 and part of gaps 3 and 5, and #536 closed gap 8. Since then #535, #537 and #546 have closed every other gap on main except 6 (#519, open) and 13 (#538, open). Gaps 4 and 7 keep a Phase 3 half. | 2, most now |
 | 13 | Multi-client | View state is per device and never reaches serve. Shared preferences become per-key patches with a revision check. Host policy goes to `host-policy.json`. A prompt answer is a compare-and-swap, and a lease is UX on top of it. A held `worktrees show` goes only to a loopback client that listens for it, and an app-owned serve idles out on loopback clients alone, so a device never keeps it running and quitting the app ends remote access (*decided*, §11.3; §9.3). | 2, lease 3 |
 | 14 | Multi-user (R9) | Maybe later (*decided*, §11 Q1, against the recommendation). Not built in Phase 2, and not designed out. There is one principal, kept distinct from the device in the device record, in what the credential binds to and in every audit record, and every grant check keys on (principal, device). §2.8 says what that costs now and what multi-user would still take. | 2 |
 
@@ -182,7 +204,7 @@ log are for.
 | Step-up key (iOS, iPadOS) | A second Secure Enclave P-256 key, created with `.userPresence`. It signs a server challenge before a drive-class act (§2.5). | The device's keychain | Enrolled with the device key, revoked with it |
 | Principal record | `{id, name, caps, projects, created_at}`. Phase 2 has exactly one, the **owner**: the host account's user, with every capability and scope `"*"`. Its `id` is the reserved constant `owner`, so the console never reads the file to know who it is; a later principal would get a random `p_…` id. The loopback caller is always the owner (§2.8). | `<config_dir>/devices.json`, as a second list beside the devices | Created with the file. Never removed in Phase 2. |
 | Device record | `{id, principal, name, platform, spki_sha256, stepup_spki_sha256, stepup_required, caps, projects, expiry, enrolled_at, last_seen, last_addr, disabled, revoked_at}`; `id` is random, not derived from the key. `principal` is set at pairing and never changes. `expiry` and `disabled` are §2.5's. | `<config_dir>/devices.json`, `0600`. Serve is its only writer, under `servefile`'s lock-temp-rename discipline (`crates/worktrees-cli/src/serve/servefile.rs:79`–`122`). | Kept after revocation as a tombstone, for the audit trail |
-| What the device keeps | Its keys, plus `{host: {name, pin, addr, discovery_id}, principal_id, device_id}`. The pairing answer and the remote handshake's first frame name both ids (§2.2, §4.5). | Beside the device key, under the same protection | Until it is revoked or the app is deleted |
+| What the device keeps | Its keys, plus `{host: {name, pin, addr, discovery_id}, principal_id, device_id}`. The pairing answer and the remote handshake's `ok` frame name both ids (§2.2, §4.5). | Beside the device key, under the same protection | Until it is revoked or the app is deleted |
 | Loopback token | Unchanged: per launch, in serve.json, used for handshake v1 | `<config_dir>/serve.json` | Per launch |
 
 Four choices in that table need their reasons.
@@ -429,7 +451,7 @@ hand, `device_disable`). Only the host console re-enables a device
 An `admin` device can neither re-enable a device nor change an expiry, not
 even to shorten one, because §11 Q7 puts expiry in the host's hands. Every
 transition is an audit record. The device learns its own expiry in the
-remote handshake's first frame (§4.5), so the phone can say when its access
+remote handshake's `ok` frame (§4.5), so the phone can say when its access
 ends.
 
 **Step-up for drive-class acts (iOS).** The connection key has no presence
@@ -561,6 +583,78 @@ is product work, and some of it is a different product:
   spend another's plan.
 - **Scopes that isolate.** §1.1 would have to become true above `read`, and
   today it is not.
+
+### 2.9 Slice 5's server side as built (#544, merged)
+
+#544 builds §2's server half. That is `devices.json` with one principal,
+`owner`; the server identity, a P-256 key and a self-signed certificate made
+with `rcgen`, and its pin; TLS 1.3 for devices; pairing; revocation;
+per-device expiry; step-up; and §3.3's reductions on live connections. A
+revoke, a disable, a record that leaves the file and an unreadable file
+each close the device's connections, attaches and clone jobs at once. A
+narrowed grant re-checks each open attach. A generation counter backstops
+every request, one already in flight included. Nothing in #544 binds off
+loopback: pairing is tested end to end over TLS on `127.0.0.1`, against a
+device written from §2.2's text. Its rows are in §3.4. The device side
+waits for the hardware spike (§10).
+
+**What it settled where §2 was silent.** These are formats, not policy:
+
+- The pairing link's `pin` is the SPKI SHA-256 in lowercase hex, 64
+  characters. Its `secret` is 26 characters of lowercase, unpadded base32.
+  The step-up SPKI travels as base64 DER.
+- Inside TLS, pairing is newline-delimited JSON, at most one 4 KiB line each
+  way, not a WebSocket. The device sends §2.2's one frame. Serve answers
+  `{"pending": true}`, then `{"paired": {…}}` or `{"denied": "denied" |
+  "timeout" | "closed" | "refused"}`. A bad proof or a malformed frame gets
+  silence and a close. A device with no step-up key puts 32 zero bytes in
+  the proof where the step-up pin goes.
+- The comparison code is the first four bytes of §2.2's HMAC, read
+  big-endian, masked to 31 bits, modulo 10⁶.
+- Pairing is refused past 16 devices (§2.4), and while remote access is
+  off.
+- Step-up is one try per challenge. A challenge lasts 120 s and a proof 300 s
+  on its connection. The acts it gates are §2.5's, raised ones included (a
+  path class, revoking another device), plus opening a stream. The
+  keystrokes, resizes and closes of a stream already open are not asked
+  again, and a lapsed proof ends nothing that is open.
+
+**Its interpretations, for the user to confirm or override.** #544's
+description lists seven, and gives the reason where one is needed:
+
+1. `devices_list` is an `admin` row filtered to the caller's principal, not
+   console-only. Otherwise an `admin` device could not name the device it
+   revokes (§2.5).
+2. `identity_rotate` revokes every device, because §2.5 says every device
+   has to pair again.
+3. A re-enable is recorded as `reenabled_at`, which restarts the idle clock
+   (§2.5), rather than as a faked `last_seen`.
+4. An iOS or iPadOS device gets `stepup_required: true` at pairing whatever
+   its capabilities. Without a drive-class capability it does nothing, and
+   it keeps a later widening safe.
+5. A desktop device that offers a step-up key is refused, for now (§2.5: a
+   desktop has no presence-bound key while macOS builds are ad-hoc signed).
+6. The formats above.
+7. At boot, an existing `devices.json` stands until the audit chain's
+   cross-check. At runtime, serve's own last write is the evidence, so a
+   hand edit that grants more is disabled as `unrecorded` (§5.2). #544
+   builds `cross_check()` and `checkpoint()`, and only its tests call them:
+   the device records they read are not written into the audit log yet
+   (§5.1, `feat/p2-device-audit`).
+
+**A revoke between the handshake and the join.** macOS CI failed #544's
+`a_disable_closes_…` test with "no close frame within 1s". The cause was an
+event that fired after a device's handshake and before its connection
+joined `Clients`: it found no connection to close, and left a socket open
+that §2.5 says is dead. Measured on macOS with the test binary starved
+(`taskpolicy -b`): 49 of 400 runs failed at `e4e2fd0` and 38 of 400 at
+`979a0c9`, so it predated that rebase. The fix is `Clients::end_if_gone`,
+called once a session has joined. The registry commits a change before it
+fires its hooks, so every change either shows there or reaches the
+connection as an event. After the fix, under the same starvation: disable
+0 of 400, the pre-join case 0 of 400, revoke 0 of 1,000. #556 (open)
+extends the same check to a bind that closed mid-handshake, so a device
+still shaking hands cannot outlive the kill switch either.
 
 ---
 
@@ -890,7 +984,7 @@ widen no agent. The getters, `get_fetch_interval` and
 `get_term_history_opts`, are `read` and `global`, on `GLOBAL_OK`: they read
 the host's own value. #535's table tags all four this way.
 
-**Slice 1 as built (#535, open).** The tables above are the design. Slice 1
+**Slice 1 as built (#535, merged).** The tables above are the design. Slice 1
 built them with the same base groups and the same counts, which its test
 pins. Each row is declared in the table itself, and `Row::new` refuses, at
 compile time, an `Engine` or `Stream` row without a capability and an
@@ -971,7 +1065,42 @@ Where §3 was silent, slice 1 chose:
 
 Two more of slice 1's decisions belong to later slices. §3.3's "a reduction
 acts on live connections" goes to slice 5, on the registry's generation
-counter. And the declared listener set is slice 1b (§9.3, §10).
+counter, and #544 built it (§2.9). The declared listener set is
+slice 1b, on main since #550 (§9.3, §10).
+
+**Rows added since.** The tables and the count above are the design's 152
+rows. Main has 168 since #544, and an open PR adds four more. Each PR's own
+test pins its count:
+
+- **#544 (merged), 168 rows.** Sixteen device and pairing rows, and a new
+  exposure, `Own`: what any authenticated caller may always do for itself,
+  whatever its grant. `Own` has no capability, and its objects decide
+  anything further.
+  - `Own`: `device_revoke` (`revocable(id)`: a device may revoke itself;
+    revoking another device needs `admin`), `stepup_challenge`,
+    `stepup_prove`.
+  - `admin`: `devices_list` (`global`, filtered to the caller's principal,
+    §2.9) and `device_narrow` (`device(id)`; it never widens and never
+    applies to the caller itself).
+  - Console: `device_set_scope` (the only widening, §3.2),
+    `device_disable`, `device_enable`, `device_set_expiry`,
+    `device_set_stepup`, `devices_revoke_all_others`, `pair_begin`,
+    `pair_decide`, `pair_cancel`, `pair_status` and `identity_rotate`.
+
+  So the *new* list in the console table above gains `device_set_scope`,
+  `pair_cancel` and `pair_status`, and `device_revoke` is `Own` rather than
+  `admin`. The counts become read 55, write 23, admin 35, console 32,
+  stream 10, instruct 3, ClientLocal 6, loopback-only 1, own 3.
+- **#556 (open), 172 rows.** Four console rows for remote access:
+  `remote_enable {address, iface?, port?, advertise?}`, `remote_disable`
+  (the kill switch, §4.1), `remote_status` and `remote_advertise` (§4.7).
+  Console becomes 36, and the *new* list gains `remote_disable` and
+  `remote_status`.
+
+#554 (open, not Phase 2) adds a `read` row and a console row of its own,
+`slots_settings` and `set_slot_capacity`, and edits this section's tables
+and counts itself. Whichever of #554 and #556 merges later rebases the
+counts.
 
 ### 3.5 What changes for loopback
 
@@ -1260,6 +1389,67 @@ On a LAN, a device also finds a moved host by itself over mDNS (§4.7,
 decided in §11.1 N2), and the address code is the fallback when that
 fails.
 
+**As built: the address rules (slice 6a, #547, merged).** Pure, tested
+modules, and nothing in them binds:
+
+- `worktrees_core::netclass` is the classifier, written as the table above
+  and nothing else. Every refusal carries `not-private` and a reason. The
+  bind check also refuses the subnet's network and broadcast addresses. In a
+  QR or an address code the port must be plain digits. A link-local dial
+  skips point-to-point, `awdl*`, `llw*` and `nan*` interfaces. Slice 1's
+  device-fetch check (gap 17) decodes embedded IPv4 through the same
+  `netclass::embedded_v4`, so there is one decoder, checked on 2 million
+  random addresses.
+- `worktrees_core::netif` reads interfaces through `getifaddrs`, and the
+  IPv6 temporary and deprecated flags from `SIOCGIFAFLAG_IN6` on macOS and
+  `/proc/net/if_inet6` on Linux.
+- `serve/netwatch` holds the fingerprint and the state machine,
+  `Watch::poll(now, &Snapshot) -> Vec<Action>`. Linux reads routes and
+  neighbours over raw netlink. macOS shells out to `/usr/sbin/scutil` by its
+  absolute path, so it needs no new crate and no FFI, and no `PATH` can
+  redirect it. An interface re-created under the listener (the same name,
+  a new index) pauses it, and it resumes on the new index: a device-bound
+  socket is stranded on the dead one.
+- Two rules came from the lane's security review, each shown red first. **A
+  field the record lacks vouches for nothing:** an enable on an idle Linux
+  host records no router link-layer address, and a café handing out the same
+  address with its router at the same IP would otherwise match it. So
+  nothing resumes or moves by itself while the network shows a field the
+  record does not hold, and the host is asked once. **The record is
+  completed only on the bind the host just chose,** within 60 s of the
+  choice, never after a resume, a move or a restart, so serve never writes
+  whatever network it happens to be on into "home".
+
+**As built: the listener (#556, open).** `remote_enable` runs the
+classifier first, and nothing binds before it agrees. The listener is bound
+to one address and tied to its interface (`IP_BOUND_IF` on macOS,
+`SO_BINDTOIFINDEX` on Linux), and never to a wildcard. The netwatch above
+drives it on its own 3 s poll. At enable, one UDP datagram goes from the
+bound address to the interface's router, so the neighbour entry exists when
+the fingerprint is read. It is also meant to raise macOS's Local Network
+prompt at enable rather than at a device's first connect, which is
+unmeasured (B6 in §10). `serve-remote.json` is `0600`, written with
+`fsx::write_atomic` under its own lock, and read strictly: an unknown key or
+a value the parsers refuse makes it unreadable, and remote access stays off.
+Turning remote access off writes `on: false` and keeps the rest, so the next
+enable reuses the PORT. A paired device stores `addr:port`, and a kill
+switch must not cost every device its address. A `100.64.0.0/10` bind on an
+interface that is not point-to-point is allowed with the warning N1
+decided.
+
+**Measured for the listener** (#556's lane, 2026-10-22):
+
+- A connect from the same host reaches a listener tied to its interface:
+  on macOS 27, an `IP_BOUND_IF` listener on en0's address; on Linux 6.12 in
+  Docker, `SO_BINDTOIFINDEX` and `SO_BINDTODEVICE` to eth0, as root and as
+  uid 65534. So §4.6's identity witness needs no second machine.
+- An unprivileged `SO_BINDTOIFINDEX` works on Linux 6.12.
+- By default Linux removes a subnet's secondary addresses WITH its primary,
+  so a move written as "add the new address, remove the old one" leaves the
+  interface with nothing. `promote_secondaries` keeps the new one, and the
+  Linux witness for step 4 needs it (§4.6). Whether a real DHCP client's
+  move looks like that on a host with promotion off is not measured.
+
 ### 4.2 TLS: options
 
 | Option | iOS | Pinning | Ops cost | Verdict |
@@ -1396,6 +1586,70 @@ use. So:
   no try while the window is hidden, one try in flight). The remote door
   reuses it with one rule taken out: a remote device never starts a serve.
 
+**The remote door as built (#555, open).** #555 is the client machine's
+half of slice 6, for a second desktop first:
+
+- **`crates/worktrees-remote` is the device's transport.** It holds pairing
+  by link (the link is read, and its address judged by `netclass`, before
+  anything is dialled), the host records (`remote-hosts.json`, `0600`,
+  written with `fsx::write_atomic` under a lock), one P-256 key per pairing
+  in a `0600` file, and the pinned mutual-TLS WebSocket as a pipe of text
+  frames that parses nothing. It has no tauri, no tmux and no engine, and
+  `api-boundary-check.mjs` holds that, because the iOS repository depends on
+  it (`docs/proposals/ios-mvp.md`). **There is one TLS client half:** serve's
+  `tls.rs` and `pairing.rs` import the pinned verifier, the client config,
+  the pin, the exporter labels, the pairing proof and the comparison code
+  from it.
+- **`worktrees remote pair | hosts | use | call | forget`** is the CLI on the
+  client. `call --follow` keeps the socket open, to show a terminal's output
+  streaming.
+- **The shim is three commands and a channel** (`app/src-tauri/src/remote.rs`).
+  `remote_connect` opens the socket and answers `{conn, token, host}`.
+  `remote_send {conn, text}` writes one frame, and `remote_close {conn}`
+  closes it. Every text frame the host sends reaches the page through one
+  Channel as `{frame: text}`, and the end as exactly one `{closed: why}`.
+  `conn` is a fresh number per socket and rides on every send and close, so
+  a page's stale socket cannot write into the next connection. A window has
+  one remote socket, and a connect replaces the one before it. `token` is
+  §4.5's session key. The page never sees the device key or the pin, and
+  names a host by the id this machine gave the pairing.
+- **`ipcws.ts` runs unchanged** over a socket built from those commands
+  (`app/src/ipcremote.ts`), and `ipc.ts` gains `remoteDoor`. That door keeps
+  the window's settings in its own `remote-ui-state.json`, never the host's
+  `ui-state.json` (§9.1). It refuses in words, before sending, the
+  client-local commands that take a host path, the admin rows when the
+  grant has no `admin`, and every console row. The page reads its grant from
+  the `ok` frame (`ipcremote.ts::grantOf`).
+- **With a paired host chosen, the shim starts no local serve.** The boot
+  never asks `engine_connect`, so nothing is found or started on this
+  machine. Choosing this machine again is a reload.
+- **"Does this window run on the host"** is `windowOnHost()`, beside the
+  door table. `app/src/onhost.ts` is the only file that may call a
+  path-taking opener or dialog API, and `onhost-check.mjs` fails on any
+  other. Each such button greys with its reason, and `open_docs_viewer`
+  greys with `unavailable-remote` in words (gap 7).
+- **Settings → Hosts** pairs from a pasted link, with the comparison code
+  shown large, chooses this machine or a paired host, and forgets one.
+
+Measured on macOS 27, on one Mac over its own LAN address, against #556 and
+#555 merged into a scratch branch: the CLI paired (the codes matched on both
+screens), listed the workspace, set a note that read back on the host, held
+a terminal attach that streamed 11 frames, was refused an out-of-scope read,
+and saw a live revoke end its socket in 0.03 s, after which the next connect
+was refused at TLS. The real app, as a sandbox build quit by pid, connected
+to the remote host at boot, started no local serve, attached its terminal to
+the host's place, kept its settings in `remote-ui-state.json`, and showed a
+revoke as "revoked". On Linux (Docker `rust:1-bookworm`, aarch64), the
+crate's tests and serve's end-to-end pairing tests passed. Not measured: a
+second Mac, macOS's Local Network privacy on the client, and the host's
+Application Firewall, which was off on the Mac measured.
+
+Two follow-ups stay open in #555. A remote window still holds
+`opener:allow-open-path` in its capability: `onhost.ts` gates every call
+today, and a capability split would make that structural. And the client
+refuses any host version but its own (`ipcws.ts`, and `worktrees remote
+call`), which §10 lists as an open design item.
+
 ### 4.5 The two rule sets, side by side
 
 | | Loopback (decision 6, as built) | Remote (Phase 2) |
@@ -1404,22 +1658,59 @@ use. So:
 | Peer filter | `is_loopback()` (`conn.rs:342`) | Private always; on an overlay bind, in the overlay's own row; on a LAN bind, on-link (§4.1) |
 | Transport | Plaintext | TLS 1.3, mutual, pinned both ways |
 | Before HTTP | Connection caps, then hyper | Connection caps, then the rustls handshake. An unknown device ends here. |
-| `Host` | Loopback on our port (`policy.rs:33`) | The configured address or name, on our port |
-| `Origin` | On the allowlist; missing is refused (`policy.rs:52`–`55`) | **Absent, or the native client's own**: no browser origin is accepted. No CORS header, ever. |
+| `Host` | Loopback on our port (`policy.rs:33`) | Exactly the bound address literal on our port, as `SocketAddr` prints it, with no zone (decided 2026-10-22, below) |
+| `Origin` | On the allowlist; missing is refused (`policy.rs:52`–`55`) | **Absent.** Any `Origin` is refused, a native client's included (decided 2026-10-22, below). No CORS header, ever. |
 | Who | Whoever holds serve.json's token: the owner, on the console | One enrolled device, neither revoked nor disabled, and its principal |
-| Credential | Per launch, handshake v1 | Per device, persistent, revocable |
+| Credential | Per launch, handshake v1 | Per device, persistent, revocable. Then handshake v1, keyed by the TLS session (below). |
 | Refusal | Zero bytes written (D6) | During TLS: a TLS alert (rustls), which is unavoidable. A refused upgrade (`Host`, `Origin`, path): the socket closes with nothing written. After the upgrade: `err` frames. |
-| Exposure classes served | Engine, HostAdmin, Stream, HostConsole | Engine, HostAdmin and Stream, as the device's capabilities allow; never HostConsole or ClientLocal |
+| Exposure classes served | Engine, Stream, HostConsole, Loopback, and `Own` since #544. `HostAdmin` is gone since slice 1 (§3.4). | Engine and Stream, as the device's capabilities allow, and `Own` (#544, §3.4); never HostConsole, Loopback or ClientLocal |
 | Scope | `"*"` | The (principal, device) pair's (§2.8) |
 | Limits | M1 (`conn.rs:61`–`84`) | M1, plus per device (§6) |
 | Audit | Mutations, refusals | Everything in §5, attributed to the device |
 
-**The remote handshake.** After mTLS and the WebSocket upgrade, the server's
-first frame is
-`{ok: true, version, device: {id, principal, name, caps, projects, expiry, stepup_required}}`.
-The client has already authenticated the server through the pin, so it may
-send right away. It checks `version` as D5 does, and shows its own
-capabilities, scope and expiry.
+**The remote handshake: handshake v1, keyed by the TLS session** (decided
+by `(main)` on 2026-10-22; built in #556 and #555, both open). After mTLS
+and the WebSocket upgrade, the remote listener runs handshake v1 UNCHANGED:
+`hello`, `challenge`, `auth`, `ok` and `proof`, with the same 512-byte
+pre-auth budget and the same `AUTH_DEADLINE` as loopback. Its HMAC key is
+not serve.json's token. It is the lowercase hex of 32 bytes of the TLS
+exporter (RFC 8446 §7.5) under the label `EXPORTER-worktrees-remote-v1`,
+with no context, which both ends compute. The `ok` frame also carries
+`device: {id, principal, name, caps, projects, expiry, stepup_required}`.
+The client checks `version` as D5 does, and shows its own capabilities,
+scope and expiry.
+
+*This departs from what this section first said,* which was a first frame
+`{ok: true, version, device}` sent at once, with no proof, because the pin
+already authenticates the server. The client lane found that `ipcws.ts`
+cannot run unchanged against that frame: it sends `hello` on open, and
+refuses an `ok` that comes with no proof. Two reasons decided it:
+
+- **One client for the protocol.** `ipcws.ts` stays its only
+  implementation, and the shim stays a pipe that parses no frame (§4.4). The
+  alternatives were a shim that forges `challenge` and `ok` for the page,
+  which would make it parse frames and copy the hold-during-verification
+  logic, or a second entry state in `ipcws.ts`.
+- **The key works only inside the TLS session the shim alone holds.**
+  `remote_connect` hands it to the page as `engine_connect` hands over
+  serve.json's token. It is strictly weaker than that token, because it
+  means nothing outside one TLS session. The page never sees the device key
+  or the pin.
+
+The HMAC adds no security over pinned mutual TLS and claims none. It costs
+one round trip.
+
+The upgrade's rules changed with it. **A remote upgrade carries no
+`Origin`, and the listener refuses one that does.** On loopback every client
+is a page, a page always sends `Origin`, and a missing one means curl or a
+port scanner. On the remote listener every client is a native socket, the
+shim's or the CLI's, holding a device key no page can hold, and a browser
+could not finish a TLS handshake that demands an enrolled certificate. So
+there an `Origin` is the one thing out of place. `--allow-origin` is never
+read. **`Host` must be exactly the bound address literal on its port.** A
+device dials an address, never a name (§2.2), so there is one right answer
+and nothing to fold. Over TLS this is not the DNS-rebinding guard that
+loopback's `host_ok` is; it is the same one-spelling rule.
 
 ### 4.6 The CI witness: identity, not just reachability (R8)
 
@@ -1549,6 +1840,28 @@ test turns `--exact` into a filter that matches nothing and exits 0. #536
 (slice 0) added it for the loopback witness: `--exact` on its one name and
 a grep for `test result: ok. 1 passed`. Each later witness joins it, with
 the count raised to match.
+
+**As built (#556, open).** Two files, and a third gate step:
+
+- **`tests/remote_bin.rs`** runs the real binary on the runner's own LAN
+  address, with a device written from the spec rather than from serve's
+  code, so a server that drifted from the spec fails instead of agreeing
+  with itself. Its two tests cover the identity witness's steps 1–5, 7, 8
+  and 10, and the bind witness's step 3. Steps 6, 9, 11 and 12 have no
+  real-binary witness yet. A runner with no LAN address fails, never skips.
+  release.yml gains a second exact-name step for it, which greps
+  `test result: ok. 2 passed`.
+- **`tests/remote_net_linux.rs`** is the bind witness's steps 2, 4 and 5,
+  as root in a `NET_ADMIN` container with `/dev/net/tun`, gated on
+  `WT_NET_ADMIN=1` and Linux only, because they change the network of the
+  namespace they run in. Step 4 needs `promote_secondaries` (§4.1, "Measured
+  for the listener"), so the container runs with
+  `--sysctl net.ipv4.conf.all.promote_secondaries=1`. Step 5 puts the
+  out-of-row source on the same TUN as the bind, as §12.4 T4 requires.
+  Measured in Docker on Linux 6.12: with the peer filter removed, that
+  source reaches TLS, so the step goes red without the rule. All three tests
+  passed there. None of it has run on a GitHub runner, and the macOS half is
+  unmeasured (D1 and D2 in §10).
 
 ### 4.7 Rediscovery on the LAN: mDNS (decided, §11.1 N2)
 
@@ -1789,6 +2102,39 @@ interface (§4.6), with the OS's browser (`dns-sd -B` on macOS,
    - against a server with the wrong key, the device sends no certificate
      and no SNI.
 
+**As built (#556, open): the host's half, on macOS only.**
+
+- **macOS** registers through `dns_sd` in libSystem, with no crate: one
+  connection, `DNSServiceRegisterRecord` for the opaque `wt-<id>.local` with
+  one A record on the bound interface's index, then `DNSServiceRegister` of
+  `_worktrees._tcp` with that host and TXT `v=1`, `id=<id>`. On a name
+  conflict the host is not advertised that time, and serve.log and
+  `remote_status` say why. This section also asks for an audit record of the
+  conflict, which #556 does not write: its lifecycle records cover
+  registered, withdrawn and switched. The pairing port is never advertised.
+- **Advertising starts on**, per §11.1 N2. The switch (`remote_advertise`)
+  works before remote access is first enabled, and an enable keeps whatever
+  the switch was last set to. An overlay bind, and a `100.64.0.0/10` bind on
+  an interface that is not a tunnel, are never advertised.
+- **Linux has no advert yet.** Avahi over D-Bus means `zbus`, which would add
+  30 crates to the CLI with only its `tokio` feature and 41 with its
+  defaults, a second async runtime among them. `avahi-publish` has no
+  interface option. So Linux reports discovery as unavailable, and the
+  address code is the path, by `(main)`'s rule (§11.4). It is an open design
+  item (§10).
+- **No client browses yet.** The lane `feat/p2-remote-client-discovery`
+  builds it on #555.
+
+Measured on macOS 27, as this host's own browser saw it, 2026-10-22:
+`dns-sd -B _worktrees._tcp` listed the instance on en0 (interface 14)
+alone; `-L` gave `wt-<id>.local.:<port>` and TXT `v=1 id=<id>`; `-G v4v6`
+on that name gave en0's address (TTL 120) and no AAAA record; after `remote
+off` the A record no longer answered. Earlier, on the local-only interface,
+an unprivileged and unentitled process registering a record and then a
+service with that host resolved to exactly the one A record it gave. Not
+measured: the wire from a second machine (B2), a name conflict with another
+host, the goodbye as a peer sees it, and the Sleep Proxy (B3).
+
 ---
 
 ## 5. The audit log (R5)
@@ -1896,20 +2242,83 @@ part of a line is never appended after. The next write rotates first, and
 the new file's checkpoint names the torn bytes, so `verify` can tell a torn
 tail from an edit. The user approved this policy.
 
-*Built in slice 3 (#534, open):* the console half and `Audit::healthy()`,
-with tests. The device half is slice 6's. It reads `healthy()` before the
-remote listener starts and before each non-read request from a device. An
-audit bug never costs a reply either: the writer's locks recover from
-poisoning, and the hooks around each request run inside `catch_unwind`. The
-file is also opened `O_NONBLOCK`, and `fstat` must say it is a regular
-file, because a FIFO planted at its path would otherwise hang serve's boot
-in `open(2)`. A file with the wrong owner or mode is left as it is, and
-`healthy()` reads false.
+*Built in slice 3 (#534, merged):* the console half and `Audit::healthy()`,
+with tests. An audit bug never costs a reply either: the writer's locks
+recover from poisoning, and the hooks around each request run inside
+`catch_unwind`. The file is also opened `O_NONBLOCK`, and `fstat` must say
+it is a regular file, because a FIFO planted at its path would otherwise
+hang serve's boot in `open(2)`. A file with the wrong owner or mode is left
+as it is, and `healthy()` reads false. *The device half is in #556 (open):*
+no remote listener binds while `healthy()` is false, and a device's non-read
+request is refused with `audit-unavailable`, a refusal kind of its own. The
+remote listener's lifecycle (enabled, disabled, started, stopped, paused,
+resumed, moved, asked, and the advert's registered, withdrawn and switched)
+goes into the chain as `lifecycle` records. A remote session gets the same
+per-connection audit as a loopback one, and its TLS, upgrade and handshake
+refusals are audited.
+
+**What #534 records, as built.** One JSON line per record, every field
+present, in the shape above. The kinds are `checkpoint`, `lifecycle`,
+`call`, `stream`, `refused`, `auth`, `alert` and `gap`. serve verifies the
+chain at every start (`audit::verify`) and puts the verdict in its
+`started` record. Where it departs from or settles this section:
+
+- **It hears a request as dispatch's `Witness`,** handed to `call_seen`
+  BESIDE the `Call`, so a body, which gets the `Call`, still cannot reach the
+  log. Plain `dispatch::call` is test-only, so a new caller cannot skip the
+  audit by accident.
+- **A refusal is recorded where the host makes it:** the resolver
+  (`client-local`, `console-only`, `loopback-only`, `unavailable-remote`,
+  `denied`, `not-found`, `bad-args`, `not-owned` for the stale `term_close`
+  answered `ok`, `local-fetch`), and the device-lane cap (`device-lanes`,
+  #551). The reason list is an exhaustive match, so a new refusal kind is a
+  compile error and never a record with no reason. #544 added `step-up`,
+  and #556 (open) adds `audit-unavailable`.
+- **The refusal's own words go in `detail.why`, cut to 1 KiB,** because
+  they name what was asked for: a path, a slug, a session, a terminal id. Two
+  kinds are the exception and record no `why`. A malformed argument's error
+  quotes its value (serde's `invalid type: string "…"`), and a refused
+  fetch's can quote the URL, which can carry a credential, or git's stderr.
+- **The console's misses are not refusals.** A console `not-found` on a row
+  whose call would not be recorded (a read, keystroke traffic) writes
+  nothing. Nothing is outside the console's scope, so for it that is the
+  body error it always was, a brief not written yet or an attach already
+  closed, and a reader polling for one would otherwise write a line a poll.
+  Every other refusal is recorded, every device `not-found` included, since
+  that is a scope probe.
+- **A body that answers `ok: false` is recorded `err`** (a `CmdResult`), as
+  one that answered `err` is. That covers a device launch that core refused
+  to start because its `launched_by` stamp could not be written (§7.5).
+- **`project` and `object` come from the canonical values** the resolver
+  wrote back, read through an allowlist of identifier keys. A note's text, a
+  file's content, a paste or a clone URL can never reach a record by being
+  the argument somebody forgot.
+- **`cap` is the ROW's capability,** not the one a path class raised. The
+  example above, a `write_file` of `AGENTS.md` recorded as `instruct`, is
+  what this section asks for. As built, that record says `write`. Recording
+  the raised one needs the resolver to hand it back.
+- **Not built:** the device records (enrolled, revoked, disabled, scope,
+  expiry, step-up, identity, pairing) and the checkpoint's device fields,
+  which stay an empty list. #544 emits typed `DeviceEvent`s, and nothing
+  writes them into the log yet; the lane `feat/p2-device-audit` is building
+  that, with the budget below. `audit_tail` and Settings → Devices are not
+  built either.
+
+**A per-device audit budget (open design item).** A device at its 50
+requests a second (§6) can make the log write about 50 records a second,
+refusals or mutations. At that rate the 25 MiB the log keeps rotates out in
+roughly 20 minutes, so one device could erase the record of everything else.
+The lane `feat/p2-device-audit` is designing a budget that bounds what ONE
+device can make the log write and never drops a record silently: past the
+budget its records coalesce into an episode with counts, opened and closed
+as #534's limit episodes are, while the security-relevant kinds (enroll,
+revoke, disable, identity, a pairing decision, an episode's first auth
+failure) are always written one by one.
 
 **Reading it.** `audit_tail` is a read under `admin` with scope `"*"`, and
 console. Settings → Devices shows each device's recent records. The
-host-admin line serve writes to serve.log today (`conn.rs:575`–`579`) moves
-here, and #534 moves it.
+host-admin line serve wrote to serve.log (`conn.rs:575`–`579` at
+`fadb2ce`) moved here in #534.
 
 ### 5.2 Records that should not exist
 
@@ -1935,6 +2344,12 @@ still repair it. A same-user writer can forge the chain too. This makes the
 forgery a two-file, hash-chained job instead of one JSON edit, and it puts a
 banner in front of the user either way.
 
+*Status:* #544 (merged) built the check as `DeviceRegistry::cross_check()`,
+and only its tests call it, because the device records it reads are not in
+the log yet (§2.9, §5.1). At runtime, serve's own last write of
+`devices.json` is the evidence, so on main a hand edit that grants more is
+already disabled as `unrecorded`.
+
 ### 5.3 Alerts
 
 ASVS L2 asks for alerting, not only logging. A file nobody reads alerts
@@ -1952,6 +2367,21 @@ Devices:
 - a device seen from a new address class;
 - a device record with no pairing record (§5.2);
 - a limit tripped by one device repeatedly (§6).
+
+*Status.* On main, #534 raises an alert when more than 20 handshakes fail
+in one episode: an `alert` record and an `audit:alert` event, which goes to
+console connections only. In #556 (open), a device seen from a new address
+class raises one, and a question put to the host (a fourth move inside the
+hour, a changed gateway) is a `remote_asked` record that carries an `alert`
+flag, as `remote_status` does. Remote access turned on or off is a
+`lifecycle` record there, not an alert. The host notification and the badge
+are not built, because nothing in the app listens yet; the lane
+`feat/p2-remote-host-ui` surfaces these events as a dismissible notice. The
+device alerts (paired, expired, a revoked or disabled device trying, a
+record with no pairing record) wait on the device records (§5.1). The alert
+for a limit one device trips repeatedly is an open design item: #538 (open)
+records each limit's episodes, per connection and per device, and no rule
+yet says how many episodes make "repeatedly".
 
 ### 5.4 L1's two remainders, closed on main by #516
 
@@ -2000,11 +2430,12 @@ shell, with a client that had stopped reading, took serve to 2.5 GB in 10 s
 measured on both platforms before the gate. Slice 4 (#538, open) built every
 cap a client of the loopback listener can reach, and the per-device caps
 that devices will reach from slice 6 on. It measured them on macOS and Linux
-against `72e7339`. The rest arrive with the device registry (slice 5) and
-the remote listener (slice 6). The last column says which, and it says
-"measured" only where the slice-4 lane measured. "Console" is the loopback
-listener's client and "device" is a paired client of the remote listener,
-as in `budget.rs`.
+against `72e7339`. Since then it has been rebased onto slice 1's `Caller`
+and built on #544. The rest arrived with the device registry (slice 5,
+#544, merged) or arrive with the remote listener (slice 6, #556, open). The
+last column says which, and it says "measured" only where a lane measured.
+"Console" is the loopback listener's client and "device" is a paired client
+of the remote listener, as in `budget.rs`.
 
 | Limit | Value | When exceeded | Status, and what was measured |
 |---|---|---|---|
@@ -2018,16 +2449,16 @@ as in `budget.rs`.
 | Outbox per connection, console and device | 8 MiB, of which byte streams may fill 2 MiB | A stream past its share: its channel ends (`{end: true}`). A reply or an event into a full queue: the connection closes, and the client reconnects and fetches again. Progress frames are dropped. A ping while a stream is behind its share: the connection closes, because tungstenite queues its automatic pong in an unbounded buffer. The lane found that buffer was most of the 91 MB it measured before the fix. | Built (#538). Measured: the `yes` case above stays flat at 11 MB, with the channel ended. A client reading flat out moved 1,271 MiB in 10 s with serve at 7 MB, so a local reader never reaches the share. The 2 MiB share leaves room for the largest reply the frontend can ask for: `read_file`'s 1 MB, at 5.72 MiB of JSON when every byte is a control character, and 5.72 + 2 < 8. *Not yet handled by the client:* the app's terminal does not attach again after an end it did not ask for. That is a frontend change, in ROADMAP (#538). |
 | Lanes per connection | 64 active. An idle lane is reaped, so the cap counts streams with input in flight, not every id ever named. The key comes from the RESOLVED, owned stream (§3.3), never from a raw argument. | `err: "busy"` | Built (#538). Measured: the 200,000-id case above, 340 MB → 38 MB (385 → 42 MB on Linux). |
 | Live attaches and shells per device | 8 + 8. The slot is held by the stream's sink until the stream ends. | `err: "busy"` | Built (#538). |
-| Connections per device | 4 | Closed after TLS | Built (#538): the count. TLS is slice 6's. |
-| Agent launches per device (LLM10) | 10 an hour, burst 10, shared by the rows that start an agent: `new_place`, `open_place` and `rules_review`. At most 4 live lanes launched by devices at once. The existing quota gate (`set_quota_settings`) still applies on top. | `err: "rate"`. A stolen or buggy device must not burn the user's Claude or Codex plan. | The hourly bucket is built (#538). The live count needs to know which device launched a lane, which is slice 5's registry (ROADMAP, #538). |
+| Connections per device | 4 | Closed after TLS | Built (#538): the count. The TLS is #556's (open). |
+| Agent launches per device (LLM10) | 10 an hour, burst 10, shared by the rows that start an agent: `new_place`, `open_place` and `rules_review`. At most 4 live lanes launched by devices at once, across all devices. The existing quota gate (`set_quota_settings`) still applies on top. | `err: "rate"`. A stolen or buggy device must not burn the user's Claude or Codex plan. | The hourly bucket is built (#538, open), keyed on #551's `LAUNCH_ROWS`. The live cap is on main since #551: it is host-wide, and "live" means a session is open in the place (§7.5). |
 | Remote `MAX_MESSAGE` | 16 MiB, as on loopback. `read_file` stops at 1 MB and `read_file_base64` at 4 MB. | The connection ends | The read caps are built (#538), for every caller. Slice 4 found by reading that a client's `max_bytes` was clamped only to `u64::MAX − 1`, so a reply could be any size. Now `max_bytes` can lower a cap and never raise it. The measurements at `conn.rs:76`–`83` hold. |
 | Audit file | 5 × 5 MiB | Rotation, and each new file opens with a checkpoint | Built (#534). |
-| Enrolled devices | 16, disabled ones included; revoked tombstones are not | Pairing refused before the QR appears | Slice 5 |
-| Pairing | One window, one attempt | §2.4 | Slice 5 |
-| Remote connections, total | 32 | New connection closed at accept | Slice 6 |
-| TLS handshakes in flight / per source address | 8 / 2 | Closed at accept | Slice 6 |
-| TLS handshake deadline | 5 s | Closed | Slice 6 |
-| Keepalive | A ping every 20 s; closed after 60 s with no pong | Closed; the client reconnects | Slice 6 |
+| Enrolled devices | 16, disabled ones included; revoked tombstones are not | Pairing refused before the QR appears | On main (#544) |
+| Pairing | One window, one attempt | §2.4 | On main (#544) |
+| Remote connections, total | 32 | New connection closed at accept | Built in #556 (open) |
+| TLS handshakes in flight / per source address | 8 / 2 | Closed at accept | Built in #556 (open). Its in-flight count runs from accept to the end of handshake v1, so it covers the upgrade and the proof as well. |
+| TLS handshake deadline | 5 s | Closed | Built in #556 (open) |
+| Keepalive | A ping every 20 s; closed after 60 s with no pong. A 24-hour lifetime (§4.2). | Closed; the client reconnects | Built in #556 (open), with a test on an enrolled device |
 
 **Coalescing beats rate-limiting for the poll-shaped reads.**
 `list_workspace`, `project_prs`, `claude_usage`, `codex_usage`, `kimi_usage`,
@@ -2038,6 +2469,38 @@ cost one git fan-out, not three. Built in #538 and measured on both
 platforms: 10 concurrent `list_workspace` calls ran git 110 times before and
 11 times after. Single-flight is HOST-wide, so slice 6's remote listener
 must share loopback's `Arc<Flights>` rather than build its own.
+
+**What #538 settled since its rebase** (open; each with the lane's reason):
+
+- **A flight is shared per (scope, fetcher), not per command alone.** The
+  body runs on a `Ctx` scoped to the caller's grant and fetching as that
+  caller (gap 17), so the key carries both: two calls share only when their
+  bodies would see the same projects and fetch the same way. The console
+  and a device scoped `"*"` share; devices with different scopes do not. The
+  flights and the budgets live in `conn::Clients`, which both listeners
+  share.
+- **Every call is resolved for its own caller before it joins a flight,** so
+  a refused call never joins one, and what is shared is the body's outcome
+  alone, which each caller's row filter then cuts to its own grant (§3.3).
+- **Step-up comes before the flight.** It is the caller's own verdict, so a
+  device whose step-up is due is never handed a leader's answer.
+- **A follower never reaches the lane gate.** Only a flight's leader meets
+  #551's device-lane gate, whose lock is held across the body. A follower
+  that met it first would queue behind its own leader and then run the body
+  again.
+- **A budget refusal is an episode, not a refusal kind.** `busy` and `rate`
+  are `err` frames sent at once, never queued. Each limit tripped is one
+  serve.log line and one audit record as it begins, and one with the count
+  as it ends (`limit_began`, `limit_ended`). The resolver's refusals stay
+  `RefusalKind`s, one record each (§5.1).
+- **A device's listen frames cost request tokens,** and so does a request
+  the resolver refused before admission. Neither takes a slot, but each can
+  make a serve.log line and an audit record, so a device's declarations and
+  refusals are rate-limited like any request. The console pays nothing.
+
+How #556's remote listener spends these budgets is settled when the two
+meet: #556 was built without #538 and leaves the per-device remote budgets
+for that rebase.
 
 All of these fail closed, as `err` frames to an authenticated caller and
 closed sockets before authentication. Each trip is logged once per episode,
@@ -2130,7 +2593,7 @@ case-insensitive"). Slice 2 measured that this fold is not only ASCII
 | `secret` | `[[file]]` declared sources and destinations (`projcfg`); `.env` and `.env.*` | `stream` | `stream` |
 | `plain` | everything else | `read` | `write` |
 
-**Slice 2 as built (#537, open).** `worktrees_core::pathclass` orders the
+**Slice 2 as built (#537, merged).** `worktrees_core::pathclass` orders the
 classes `plain < instruction < executes < secret < forbidden`. A path that
 matches several rules takes the strictest: a declared
 `.claude/settings.local.json` is `secret`, and `.kimi-code/AGENTS.md` is
@@ -2183,8 +2646,40 @@ again is followed. That read is the 8 KiB title sniff, because the docs
 server checks again with `safe_under` when it serves. Only something already
 writing symlinks inside the place can do it.
 
-The class's capability is wired by slice 2b, after #535 and #537 (§10).
-Until then the resolver's `file(…)` adds nothing to the row's capability.
+**Slice 2b as built (#549, merged): the class raises the capability.**
+`pathclass::requirement(class, access)` is the two capability columns of
+the table above, a test for each of the ten cells:
+
+| Class | Read | Write |
+|---|---|---|
+| `plain` | the row's capability | the row's capability |
+| `instruction` | the row's | `instruct` |
+| `executes` | the row's | `stream` |
+| `secret` | `stream` | `stream` |
+| `forbidden` | console only | never |
+
+The resolver's `file_requirement` takes the STRICTEST class over every
+registered root that holds the canonical path, whatever the caller's scope,
+plus the absolute-path `.git` rule. So neither a root registered inside
+`.git` nor a nested project's `[[file]]` can make a path plainer than it is.
+`write_file`'s forbidden guard reads the unscoped registry too. The console
+classes nothing, so it pays nothing extra. For devices, `list_dir` marks
+each entry the caller may not read (`FsEntry.restricted`), and the app shows
+such a row inert, with the class as its reason; `list_docs`,
+`resolve_term_paths` and `resolve_doc_paths` drop what the caller may not
+read; and `file_readable` answers `false` when the class refuses (a new
+`probe(path)` object), while the audit log keeps the real reason. That last
+change also fixed a slice-1 regression for the console: through serve, a
+deleted file answered an error where the body answers `false`, so the app's
+"X no longer exists" notice never appeared.
+
+*One departure from the paths column, for reading only.* Slice 2 classes
+everything at `.worktrees/<x>` as `forbidden`, which would have made every
+place's root console-only to list. 2b reads a place's own directory,
+`<root>/.worktrees/<slug>` when it exists as a directory, as `plain`, like
+`(main)`'s root (`Classifier::class_for`). `.worktrees` itself and a stray
+file in it stay `forbidden`, and so does every write and every project,
+clone or `git init` aimed at a place's directory.
 
 **Why `.git/**` is closed to every caller, the desktop included.**
 `core.fsmonitor` in `.git/config` runs on the next git spawn, and the
@@ -2233,6 +2728,31 @@ instead:
   name `title` or `note`. Add both, and record `note_by` / `title_by` as
   `{principal, device}`.
 
+**As built (#551, merged).** The stamps are declared state on the place,
+written through the store's own writer and spelled like `authz::Caller`:
+`last_remote_instruction {principal, device, path, at}`, and `note_by` and
+`title_by`, which are cleared with their text. `reading_notes` now names
+`title` and `note` as data, never instructions. MCP `place_status` and the
+place resources report the stamps, and the app shows "AGENTS.md edited from
+<device>, 2 min ago" in the place header. Device names show as ids until the
+host UI wires `deviceLabel()` to `devices_list` (`feat/p2-remote-host-ui`).
+Two choices where this section was silent, both the lane's, for the user to
+override:
+
+- **An `executes`-class write is stamped too** (a hook, `.mcp.json`), not
+  only an `instruction`-class one.
+- **The stamp follows the write.** It is written only after the write
+  succeeds, since a refused write edited nothing, and a link is classed by
+  its target. A failed stamp is logged and the call still answers `ok`,
+  because the file IS written; its audit record (§5.1) holds what the stamp
+  would have said.
+
+Residuals the lane recorded: the `instruct` rows with no `file(…)` object
+(`init_write`, `rules_apply`, `agent_setup_fix`) are not stamped, and a
+committed `.worktrees.places.json` can carry forged stamps. Those are
+honoured for narrowing, which only narrows, shown in the UI as they are, and
+counted toward the lane cap only while a session is open in that place.
+
 ### 7.4 What R7 does not claim
 
 Every file an agent reads can steer it. A code comment written by an Operate
@@ -2262,6 +2782,33 @@ label (§1.1) and revocation.
   lane records the principal and the device that launched it, and the audit
   log does too.
 
+**As built (#551, merged).**
+
+- **`launched_by {principal, device, cross_project?}` is written BEFORE the
+  agent's session starts,** because the lane's `worktrees mcp` reads it once,
+  at start, and takes the lowest of it, the profile's flag and the user's
+  setting. That works for every harness with no environment variable, which
+  matters because Codex strips its MCP servers' environment. A launch with
+  no serve caller (the CLI, an MCP tool with nothing to inherit) clears the
+  stamp, and a device's launch whose stamp cannot be written is refused.
+  MCP `create_worktree` and `open_place` pass their own lane's stamp on, so
+  a scoped lane cannot start an unscoped one through a tool. Through its
+  shell it still can: that is O10's overlap, and host policy is the control.
+- **The control check** reads `mcp.rs`, cut at `mod tests`, and fails on any
+  pairing, device, identity, step-up, audit, listener or remote-access name,
+  or on `devices.json` or `audit.jsonl`. It tests itself on nine planted
+  names.
+- **At most four live device-launched lanes** (§6's LLM10 row), enforced in
+  `serve/provenance.rs` before the body, under a process-wide lock, with a
+  fixed error that names no place. Two choices, the lane's, for the user to
+  override. **The cap is host-wide:** four across every device, which is
+  what §6's text ("launched by devices") says, although its row's title
+  says "per device". **"Live" means a session is open in the place,** not
+  that an agent is running in it. A new pane runs the shell for a moment
+  before it execs the agent, and the next device launch, queued behind this
+  one, counts in exactly that window. So the cap errs closed: a finished
+  lane counts until its session is closed.
+
 ---
 
 ## 8. The known gaps
@@ -2271,30 +2818,32 @@ that Appendix B already had, then one that slice 1's security review found
 (gap 17). At `fadb2ce`, an authenticated loopback client could reach each of
 the first sixteen. Gap 9 needed less: a cloned repository's content plus
 the user's next ordinary save. Since then, #516 as merged closed gaps 11 and
-15 and part of 3 and 5, #523 closed gap 9, and #536 closed gap 8. Those rows
-keep their `fadb2ce` text, and the last column says what main has now. The
-open PRs of slices 1, 2 and 4 close the gaps §10 gives them once they
-merge. Until then those rows stand as written.
+15 and part of 3 and 5, #523 closed gap 9, and #536 closed gap 8. Then #535
+(slice 1) closed gaps 2, 3, 10, 12, 14 and 16, gap 4's console tag, gap 5
+all but its `[docs]` walk, and gap 7's Phase 2 half. #537 (slice 2) closed
+gap 1 and the `[docs]` walk, and #546 closed gap 17. Those rows keep their
+`fadb2ce` text, and the last column says what main has now. Two gaps are
+still open on main: 6 waits on #519 and 13 on #538, both open PRs.
 
 | # | Gap | Where | Fix shape | Phase |
 |---|---|---|---|---|
-| 1 | `write_file` can overwrite `.git/config`; `core.fsmonitor` runs on the next git spawn, and the host poll spawns git every 3 s | `crates/worktrees-api/src/files.rs:1311`–`1333`. The guard is `guard_under_projects`, "under SOME root" (`projects.rs:45`). | The `forbidden` class (§7.1), for every caller | 2 |
-| 2 | `save_profile` stores `mcp_servers` (commands) and `settings` (claude's `hooks` are a key of that raw JSON), both run at the next launch | `crates/worktrees-api/src/profiles.rs:21`–`25`; the fields at `crates/worktrees-core/src/profile.rs:231`, `:262` | Console-only (§3.4), together with `set_project_profile` and `set_default_profile`, which choose where a profile runs | 2 |
-| 3 | `term_open` passes `session` to `attach-session -t` unanchored, so a name prefix-matches another session. `tune_session` is unanchored too. Any tmux session on the host can be attached, worktrees' or not. | `crates/worktrees-api/src/term.rs:65`, `:75`; `crates/worktrees-core/src/tmux.rs:530`–`533` | `session(…)` resolves the name to a place in scope, then passes `=<name>`. `ai_pane` is the precedent (`tmux.rs:583`–`587`). | 2. **The prefix match is closed on main by #516:** `term_open` refuses a session that does not exist and attaches `=<name>`, and `tune_session` targets `=<name>:`. Still open: any tmux session on the host can be attached by its exact name, worktrees' or not, until `session(…)` checks it against a place in scope. |
-| 4 | `sync_apply` with no `repo` adopts: the rsync `--delete` destination is the hub manifest's `local_root`, checked only for being non-empty and not a hub copy. Deletions go to a backup dir, but the tree is mirrored over whatever path the manifest names. | `crates/worktrees-core/src/sync.rs:229`, `:1253`, `:1263`; the api passes the client's `confirmed` (`crates/worktrees-api/src/project.rs:138`) | Phase 2: the adopt form is console-only. Later, a destination rule: must not exist or must be empty, must sit under a configured parent, never `$HOME` or an ancestor of a registered root. | 2 (rule: 3) |
-| 5 | Containment under `[docs]`: `resolve_rel` and `root.join(rel)` walk through an intermediate symlink. `create_initial_commit("")` runs git in serve's own cwd (AGENTS.md: `git -C ""` means HERE). `resolve_doc_paths.root` runs `git ls-files` in an unguarded directory, and an untrusted repo's `core.fsmonitor` runs there. A `..` slug in `shell_open`, `list_branches` and the rest. | `crates/worktrees-core/src/docs.rs:451`; `ROADMAP.md:1074`; `crates/worktrees-api/src/workspace.rs:558`–`563`; `files.rs:1212`–`1240`; `project.rs:500`–`505` | R1's resolver (`project`, `root`, the slug rule) for the last three. For `[docs]`, ROADMAP's own shape: lstat each component, and accept a link only if its target canonicalizes back under the place root, which is `docserver::safe_under`'s rule. **These must close before any remote bind** (§III.3a R1). | 2. **On main since #516,** `shell_open` refuses a `..` slug, and any slug that is not a place, before anything spawns. `list_branches` and the rest still hand the raw slug to `place_dir`. |
+| 1 | `write_file` can overwrite `.git/config`; `core.fsmonitor` runs on the next git spawn, and the host poll spawns git every 3 s | `crates/worktrees-api/src/files.rs:1311`–`1333`. The guard is `guard_under_projects`, "under SOME root" (`projects.rs:45`). | The `forbidden` class (§7.1), for every caller | 2. **Closed on main by #537:** `write_file` refuses a `forbidden` path by its canonical class, for every caller, and #549 judges it over every registered root (§7.1). |
+| 2 | `save_profile` stores `mcp_servers` (commands) and `settings` (claude's `hooks` are a key of that raw JSON), both run at the next launch | `crates/worktrees-api/src/profiles.rs:21`–`25`; the fields at `crates/worktrees-core/src/profile.rs:231`, `:262` | Console-only (§3.4), together with `set_project_profile` and `set_default_profile`, which choose where a profile runs | 2. **Closed on main by #535:** all three are `HostConsole`. |
+| 3 | `term_open` passes `session` to `attach-session -t` unanchored, so a name prefix-matches another session. `tune_session` is unanchored too. Any tmux session on the host can be attached, worktrees' or not. | `crates/worktrees-api/src/term.rs:65`, `:75`; `crates/worktrees-core/src/tmux.rs:530`–`533` | `session(…)` resolves the name to a place in scope, then passes `=<name>`. `ai_pane` is the precedent (`tmux.rs:583`–`587`). | 2. **The prefix match is closed on main by #516:** `term_open` refuses a session that does not exist and attaches `=<name>`, and `tune_session` targets `=<name>:`. **The rest is closed on main by #535:** `session(…)` resolves the name to a place in the caller's scope, and a session with any pane in a project outside the scope is outside it as a whole (§3.4), with an end-to-end test against a stranger's tmux session. |
+| 4 | `sync_apply` with no `repo` adopts: the rsync `--delete` destination is the hub manifest's `local_root`, checked only for being non-empty and not a hub copy. Deletions go to a backup dir, but the tree is mirrored over whatever path the manifest names. | `crates/worktrees-core/src/sync.rs:229`, `:1253`, `:1263`; the api passes the client's `confirmed` (`crates/worktrees-api/src/project.rs:138`) | Phase 2: the adopt form is console-only. Later, a destination rule: must not exist or must be empty, must sit under a configured parent, never `$HOME` or an ancestor of a registered root. | 2 (rule: 3). **Phase 2's half is on main since #535:** the adopt form is console-only. The destination rule is Phase 3's. |
+| 5 | Containment under `[docs]`: `resolve_rel` and `root.join(rel)` walk through an intermediate symlink. `create_initial_commit("")` runs git in serve's own cwd (AGENTS.md: `git -C ""` means HERE). `resolve_doc_paths.root` runs `git ls-files` in an unguarded directory, and an untrusted repo's `core.fsmonitor` runs there. A `..` slug in `shell_open`, `list_branches` and the rest. | `crates/worktrees-core/src/docs.rs:451`; `ROADMAP.md:1074`; `crates/worktrees-api/src/workspace.rs:558`–`563`; `files.rs:1212`–`1240`; `project.rs:500`–`505` | R1's resolver (`project`, `root`, the slug rule) for the last three. For `[docs]`, ROADMAP's own shape: lstat each component, and accept a link only if its target canonicalizes back under the place root, which is `docserver::safe_under`'s rule. **These must close before any remote bind** (§III.3a R1). | 2. **On main since #516,** `shell_open` refuses a `..` slug, and any slug that is not a place, before anything spawns. **The rest is closed on main:** #535's resolver takes only an existing place's slug, runs `create_initial_commit` only in a registered root and guards `resolve_doc_paths.root`; #537 closed the `[docs]` walk as ROADMAP shaped it (§7.1). |
 | 6 | `privacy_denial` (PR #519) is deliberately unguarded. For any path it tells the caller whether that path is refused under a macOS privacy area. | `origin/feat/tcc-recovery:app/src-tauri/src/lib.rs:5512`; `macprivacy.rs:197`–`222` | #519 is still open. Rebased onto main, where the app has been serve's client since #524, it becomes an api body and a dispatch row, which `engine-route-check.mjs` will demand. Make it `read · project` with the path checked LEXICALLY against registered roots: canonicalizing could fail on the very denial it exists to name, and the roots are already visible to the caller. It runs in serve, because the denial is the engine's. Its remedy names the RESPONSIBLE process's bundle id, which serve has no `app.config()` to read, so the shim passes it at spawn as it passes `WORKTREES_VIEWER_JS`. A remote client shows the card with "fix this at the host" and greys out the System Settings button. *Unmeasured: TCC attribution for a serve the app started.* | 2 |
-| 7 | `open_docs_viewer` answers with `http://127.0.0.1:<port>/<token>/…`. That is meaningless off the host, and it carries the docs server's token. | `crates/worktrees-cli/src/serve/dispatch.rs:387`–`392`; `crates/worktrees-api/src/files.rs:870` | Phase 2: a remote caller gets `err: "unavailable-remote"` and no URL, and its UI greys the button with that reason. Phase 3: serve the pages through the authenticated socket (a `docs_get` read row); the docs server never listens off loopback. | 2, 3 |
+| 7 | `open_docs_viewer` answers with `http://127.0.0.1:<port>/<token>/…`. That is meaningless off the host, and it carries the docs server's token. | `crates/worktrees-cli/src/serve/dispatch.rs:387`–`392`; `crates/worktrees-api/src/files.rs:870` | Phase 2: a remote caller gets `err: "unavailable-remote"` and no URL, and its UI greys the button with that reason. Phase 3: serve the pages through the authenticated socket (a `docs_get` read row); the docs server never listens off loopback. | 2, 3. **Phase 2's half is on main since #535:** `open_docs_viewer` is `not_remote`, and a device gets `unavailable-remote`. In #555 (open) the button greys with that reason. The proxy is Phase 3's. |
 | 8 | `sanitize_prefix` keeps a leading `-`, and the prefix can come from `[project] prefix` in a cloned repo's `.worktrees.toml`. This lane found no call site where a session name is a positional argument rather than a `-t`/`-s` value; it is defence in depth for R3. | `crates/worktrees-core/src/config.rs:16`–`27`, `:308` | Map a leading `-` to `_`. A session already named with a leading `-` is found by the old name once and renamed. | **Closed on main by #536.** `sanitize_prefix` maps a leading `-` to `_`. The first time a repository is used, its sessions named the old way are renamed with `rename-session -t =<old>`, provider and dock-shell sidecars included. Only names this repository would have made are renamed. |
 | 9 | **New. Fixed-name temp files follow a planted symlink.** `write_file` writes `.<name>.wt-tmp` beside the target with `std::fs::write`, which follows a symlink, then chmods it and renames it over the target. A repository that tracks `.README.md.wt-tmp -> ../../.zshrc` turns the user's next save of `README.md` into a write of that content into `~/.zshrc`. `README.md` then becomes the link. The same shape is in every declared-state write (`.worktrees.places.json.tmp` in the repo root) and in `init_write` (`.worktrees.toml.tmp`). | `files.rs:1323`–`1328`; `crates/worktrees-core/src/store.rs:303`–`304`; `crates/worktrees-core/src/init.rs:1014`–`1015` | Create the temp file with `create_new(true)` (`O_CREAT \| O_EXCL`, which refuses an existing path, a dangling link included), with a random suffix, as `servefile::write` already does (`servefile.rs:108`–`113`). Sweep core for the same pattern. *Found by reading, not measured. The regression test must be shown failing first.* | **Closed on main by #523.** One `worktrees_core::fsx::write_atomic` for every site (store, init, provision, materialize, the dock save, the brief, the user-dir writes), with a guard test. A local bug, independent of Phase 2. One more site of the same class is in ROADMAP: `kimiplace::sync_file` writes through a tracked `.kimi-code` link. |
-| 10 | **New. `repo` is never checked against the registry.** `set_note` and the other `store::edit` callers write `.worktrees.places.json` into any directory. `Project::discover` accepts any git repository. | §3.5 | The `project(…)` resolver, for every caller | 2 |
+| 10 | **New. `repo` is never checked against the registry.** `set_note` and the other `store::edit` callers write `.worktrees.places.json` into any directory. `Project::discover` accepts any git repository. | §3.5 | The `project(…)` resolver, for every caller | 2. **Closed on main by #535** (§3.5). |
 | 11 | **New. Serve has no off-loopback connect witness**, although decision 6 says it does | §4.6 | Copy the docs server's test | **Closed on main by #516.** `crates/worktrees-cli/tests/serve_bin.rs::serve_can_be_reached_on_loopback_and_not_off_it` runs in CI on both OSes, loopback connect first. #536 added it to the release gate (§4.6). |
-| 12 | **New. Events go to every socket**, including the host-wide `sessions:busy` set and `app:open-doc` | `conn.rs:202`–`207`; `host.rs:316` | Projection per event type (§3.3) | 2 |
-| 13 | **New. An authenticated client is unbounded:** a blocking task per request, an unbounded outbox, a lane per key | `conn.rs:545`, `:498`, `:217`–`237` | §6 | 2 |
-| 14 | **New. Arbitrary-path reads exposed as Engine rows:** `probe_dir`, `skill_inspect`, `sync_hub_list` | `dispatch.rs:228`, `:447`, `:317` | `admin` with `new_path` or `global` (§3.4) | 2 |
+| 12 | **New. Events go to every socket**, including the host-wide `sessions:busy` set and `app:open-doc` | `conn.rs:202`–`207`; `host.rs:316` | Projection per event type (§3.3) | 2. **Closed on main by #535** (event projection), with #550's declared listeners for the one-shot `app:open-doc` (§9.3). |
+| 13 | **New. An authenticated client is unbounded:** a blocking task per request, an unbounded outbox, a lane per key | `conn.rs:545`, `:498`, `:217`–`237` | §6 | 2. **In #538 (open).** |
+| 14 | **New. Arbitrary-path reads exposed as Engine rows:** `probe_dir`, `skill_inspect`, `sync_hub_list` | `dispatch.rs:228`, `:447`, `:317` | `admin` with `new_path` or `global` (§3.4) | 2. **Closed on main by #535.** |
 | 15 | **New, a residue of L1:** `log_event` keeps newlines and panics on a mid-character truncation; serve.log is `0644` | `meta.rs:27`–`28`; `mod.rs:131` | §5 | **Closed on main by #516.** `meta::ui_line` escapes the controls, the line separators and the bidi controls, then truncates on a character boundary. serve.log is created `0600` and re-tightened on every write, the rotated copy included. |
-| 16 | Known (Appendix B): `term_*` acts on any id, from any connection, and ids restart at 1 every launch | `term.rs:44`, `:138`; `dispatch.rs:422`–`429` | `attach(id)` (§3.3), plus a launch nonce in the id. A stale `term_close` becomes a no-op that answers `ok`; `term_write`, `term_resize` and `term_wheel` on an id the caller did not open are refused (§9.1). | 2. **No longer latent since #525** (§9.1): a pane being replaced after a reconnect sends its old id to the new socket. |
-| 17 | **New, from slice 1's security review: a device's fetch is checked, and then git fetches again.** `remote_url(url)` (`remote_only`) resolves the host of a `clone_project` or `skill_preview_git` URL and refuses every non-global address. Two ways around it remain, both in git. Git resolves the name again, so a name that flips to a private address in between gets through (DNS rebinding). And git follows an HTTP redirect on the initial request (its default, `http.followRedirects=initial`), so a public URL that redirects to `http://127.0.0.1/…` gets through too. A device holding `admin` with scope `"*"` could then make the host fetch from its own loopback or LAN (SSRF). So `remote_only` alone is not an SSRF control. | `remote_only`'s doc comment, `crates/worktrees-cli/src/serve/resolve.rs` on #535 | A fetch policy that core's clone and skill-preview git calls take for a non-console caller: `-c http.followRedirects=false`; `-c http.curloptResolve=<host>:<port>:<the address remote_only checked>`, so git connects to the address that was checked and does not look the name up again; and `-c protocol.file.allow=never`. `remote_only`'s `host_local` becomes §4.1's one address classifier, or shares it. Recorded and not half-built, because no device reaches these rows before slice 5's registry. *Found while writing this revision, from git's documentation, not measured:* `http.curloptResolve` and `http.followRedirects` act on git's HTTP transport only. An `ssh://`, scp-like or `git://` URL is resolved by ssh or by git's own connect, so for a device the policy must also pin those schemes or refuse them. | 2, slice 6. **Must close before ANY remote bind.** |
+| 16 | Known (Appendix B): `term_*` acts on any id, from any connection, and ids restart at 1 every launch | `term.rs:44`, `:138`; `dispatch.rs:422`–`429` | `attach(id)` (§3.3), plus a launch nonce in the id. A stale `term_close` becomes a no-op that answers `ok`; `term_write`, `term_resize` and `term_wheel` on an id the caller did not open are refused (§9.1). | 2. **No longer latent since #525** (§9.1): a pane being replaced after a reconnect sends its old id to the new socket. **Closed on main by #535:** attach ids start at a random base per launch, `term_*` checks the connection owns the id, and a stale `term_close` is the no-op `ok` that the audit log records as `not-owned` (#534). |
+| 17 | **New, from slice 1's security review: a device's fetch is checked, and then git fetches again.** `remote_url(url)` (`remote_only`) resolves the host of a `clone_project` or `skill_preview_git` URL and refuses every non-global address. Two ways around it remain, both in git. Git resolves the name again, so a name that flips to a private address in between gets through (DNS rebinding). And git follows an HTTP redirect on the initial request (its default, `http.followRedirects=initial`), so a public URL that redirects to `http://127.0.0.1/…` gets through too. A device holding `admin` with scope `"*"` could then make the host fetch from its own loopback or LAN (SSRF). So `remote_only` alone is not an SSRF control. | `remote_only`'s doc comment, `crates/worktrees-cli/src/serve/resolve.rs` on #535 | A fetch policy that core's clone and skill-preview git calls take for a non-console caller: `-c http.followRedirects=false`; `-c http.curloptResolve=<host>:<port>:<the address remote_only checked>`, so git connects to the address that was checked and does not look the name up again; and `-c protocol.file.allow=never`. `remote_only`'s `host_local` becomes §4.1's one address classifier, or shares it. Recorded and not half-built, because no device reaches these rows before slice 5's registry. *Found while writing this revision, from git's documentation, not measured:* `http.curloptResolve` and `http.followRedirects` act on git's HTTP transport only. An `ssh://`, scp-like or `git://` URL is resolved by ssh or by git's own connect, so for a device the policy must also pin those schemes or refuse them. | 2, slice 6. **Must close before ANY remote bind.** **Closed on main by #546** (`worktrees_core::fetchpolicy`), before any remote listener exists. A device fetches over https only: ssh, `git://`, `http://` and `file://` are refused, ssh because the user's ssh config would match `Host` and `Match` blocks on the device's chosen name and ssh offers every agent key to whoever answers. The name is resolved once, in our code, and `http.curloptResolve` pins every address checked. Redirects, proxies and protocol v2 are off and TLS verification on, each key set both generic and per URL, because a host's per-URL `http.<url>.*` beats a generic `-c`. The URL maps to itself under `insteadOf`, and a pre-flight `ls-remote --get-url` must return it unchanged. git older than 2.37, which ignores `curloptResolve`, is refused for devices, and a device's clone keeps `followRedirects=false`. *For the user to overrule:* later fetches of a device-cloned project's origin (`fetch_origin`, auto-fetch) are not pinned, because a LAN remote is legitimate there (ROADMAP). The console fetches exactly as before. |
 
 ---
 
@@ -2304,7 +2853,7 @@ merge. Until then those rows stand as written.
 
 | State | Today | Ruling | Phase |
 |---|---|---|---|
-| View state in `ui-state.json`: selection, sidebar mode, sort, terminal visibility, dock open, tab and width, `place_panels`, `files_md_zoom`, theme | One blob, written whole by `set_settings` (`dispatch.rs:243`) | **Per device**, kept by the client: the shim's config dir on a desktop, the app container on iOS. It never reaches serve. A phone's selection is not the desktop's (§III.6.1). Theme follows each device's own appearance. | 2 |
+| View state in `ui-state.json`: selection, sidebar mode, sort, terminal visibility, dock open, tab and width, `place_panels`, `files_md_zoom`, theme | One blob, written whole by `set_settings` (`dispatch.rs:243`) | **Per device**, kept by the client: the shim's config dir on a desktop, the app container on iOS. It never reaches serve. A phone's selection is not the desktop's (§III.6.1). Theme follows each device's own appearance. | 2. **In #555 (open)** for a second desktop: a window driving a paired host keeps the whole blob in the shim's `remote-ui-state.json`, written by the page and never by the backend, and the host's `ui-state.json` is never touched (§4.4). |
 | `last_seen_version` ("What's new") | The same blob, so the first client to load after an upgrade uses it up for everyone (Appendix B) | Per device | 2 |
 | Shared preferences (default provider and the like) | The same blob | On the host, written by `patch_settings {key, value, rev}`: merged under a lock, refused if `rev` is stale. It is the `expected_mtime` compare-and-swap shape (`files.rs:1316`–`1320`) applied to a key. `key` comes from a CLOSED list of shared keys. A host-policy key or a per-device key is refused, so a client cannot reintroduce M2 through the settings door (API3, mass assignment). No shared key holds data keyed by project, so `get_settings` leaks nothing to a scoped device. | 2 |
 | The five host policies | Two in `host-policy.json` (#508). The fetch interval and the two terminal switches are still pushed by the page (`App.tsx:4731`, `:4748` on main), at hydration and on each change. Since #525 that has a new failure: the effects do not depend on the connection, and App stays mounted across a reconnect, so a serve the app restarted after a crash keeps its boot defaults (auto-fetch off, scrollback persistence and per-tab history on) until the setting changes or the window reloads. For a user who turned persistence off, the next 15 s flush writes every dirty dock shell's ring to disk. *Found by reading, not measured.* | All five in `host-policy.json`, set only by explicit acts. Codex and pi are console-only; the other three are `admin` (§3.4). | 2 (slice 0, the first of §10). **Closed on main by #532,** released in v0.43.1. `hostpolicy::boot` loads the three, beside Codex's and pi's, before the listener binds, and migrates a known, non-default value from `ui-state.json` once. The page's push effects are gone, and Settings shows the host's value. |
@@ -2312,8 +2861,8 @@ merge. Until then those rows stand as written.
 | `mark_seen` | Stamps the client's clock, forward-only (Appendix B) | The host stamps its own `now`, and the client's epoch is ignored | 2 |
 | `open_place` closing the second agent | Decided by whichever client selects the place first, using its own default (Appendix B) | Not decided by a client on load. The server decides, using the host's default, or the user is asked. | 2 |
 | A dock shell's single sink | A second attach silences the first pane (`term.rs:438`–`462`) | A sink per attach. The most recently active attach owns the size, which is tmux's `window-size latest`. | 2 |
-| Terminal ids | A global counter from 1, no owner (gap 16). Appendix B called it latent "because the transport's client never reconnects". Since #525 it does, including to a serve it restarted. Panes are keyed by the connection's `gen`, so each one remounts and opens a fresh id. But the pane being replaced closes its OLD id on unmount (`TerminalPane.tsx:106` on main), and that call goes out on the NEW socket. A new launch counts from 1 again, so the id may already name an attach it just handed out: a fresh pane, or another client's. *Found by reading, not measured.* | Owner check plus a launch nonce. With the owner check, the stale close is a no-op that answers `ok`, because the new connection never opened that id. A non-owned id and an unknown id look identical to the caller, and `term_close` already answers `ok` for an unknown one (`crates/worktrees-api/src/term.rs:315`–`320` on main). It is not a refusal because TerminalPane sends the close with no `.catch`, and App logs every unhandled rejection as an error (`App.tsx:4689`), so a refusal would log an error on every reconnect. The audit log records the no-op as a refused act (§5.1). `term_write`, `term_resize` and `term_wheel` on a non-owned id are refused with `no such terminal`, as an unknown id is today. | 2 |
-| `app:open-doc` | Sent to every socket, so one `worktrees show` opens the document on every device | Loopback clients only: `worktrees show` is run by someone at the host. Slice 1 sends it, and releases a held one, to console connections only. Slice 1b narrows that to a loopback connection that declared it listens for `app:open-doc` (§9.3, §10). | 2 |
+| Terminal ids | A global counter from 1, no owner (gap 16). Appendix B called it latent "because the transport's client never reconnects". Since #525 it does, including to a serve it restarted. Panes are keyed by the connection's `gen`, so each one remounts and opens a fresh id. But the pane being replaced closes its OLD id on unmount (`TerminalPane.tsx:106` on main), and that call goes out on the NEW socket. A new launch counts from 1 again, so the id may already name an attach it just handed out: a fresh pane, or another client's. *Found by reading, not measured.* | Owner check plus a launch nonce. With the owner check, the stale close is a no-op that answers `ok`, because the new connection never opened that id. A non-owned id and an unknown id look identical to the caller, and `term_close` already answers `ok` for an unknown one (`crates/worktrees-api/src/term.rs:315`–`320` on main). It is not a refusal because TerminalPane sends the close with no `.catch`, and App logs every unhandled rejection as an error (`App.tsx:4689`), so a refusal would log an error on every reconnect. The audit log records the no-op as a refused act (§5.1). `term_write`, `term_resize` and `term_wheel` on a non-owned id are refused with `no such terminal`, as an unknown id is today. | 2. **Closed on main by #535** (gap 16). |
+| `app:open-doc` | Sent to every socket, so one `worktrees show` opens the document on every device | Loopback clients only: `worktrees show` is run by someone at the host. Slice 1 sends it, and releases a held one, to console connections only. Slice 1b narrows that to a loopback connection that declared it listens for `app:open-doc` (§9.3, §10). | 2. **On main:** slice 1 (#535) and slice 1b (#550). |
 | Events in general | Every socket | Projected to the scope (§3.3) | 2 |
 | Dates | Host-local (`sysclock::date_cache`) | Displays take the device's time zone, as `ui_usage` already does with `tz_offset_min` | 3 |
 | The docs viewer URL | Loopback | Refused remotely, then proxied (gap 7) | 2, 3 |
@@ -2390,6 +2939,21 @@ a console connection, so it still counts as an audience. Slice 1b, a
 follow-up after slice 1 merges, adds the `listen` frame and makes
 `has_audience` "a loopback connection that declared `app:open-doc`".
 
+*Both steps are on main:* slice 1 in #535 and slice 1b in #550. As built,
+the frame is `{"listen": [...]}`, sent after `ok` and again on every change.
+Each one fully replaces the last, and serve never answers it. Serve keeps
+only names `scope::EVENTS` has, one bit each, so the set is bounded by
+construction, and ignores unknown names. A malformed frame is the client's
+bug, answered `{id: null, err: "bad listen: …"}` with the set left as it
+was. `Host::has_audience(event)` is a console connection that declared the
+event. A one-shot event (`scope::ONE_SHOT`, today `app:open-doc`) skips every
+socket that did not declare it, and every other event is unchanged. The
+door declares the names it has a live handler for, at most one frame per
+macrotask, as the FIRST frame after the proof, and again on every
+reconnect. The shim's probe sends nothing past `hello` and `auth`, so it no
+longer takes a held show (rehearsal residue D2). serve.log notes each change
+of a client's set.
+
 A request still lives 30 s (`inbox::MAX_AGE_SECS`). A show is a host act, so
 the update rehearsal's residue of a held show expiring after 30 s, when no
 app came back, is correct behaviour, not a gap.
@@ -2422,14 +2986,21 @@ consequence. A host meant to serve devices with no app running runs
 idles out (Phase 1's rule, §III.9). It is built in slice 6, because no
 remote client exists before it.
 
+*Built in #556 (open).* The idle watch counts `Clients::console_len()`, and
+a test shows a device connection alone does not hold an app-owned serve. The
+quit says what it will do as a persistent one-line notice, shown while
+remote access is on and the app owns serve: "Remote access is on — quitting
+Worktrees turns it off". `(main)` chose a notice over a confirmation on ⌘Q.
+
 ---
 
 ## 10. Order of work and exit criteria
 
 Each slice merges on its own, and nothing binds off loopback until slice 6.
-Status as of 2026-10-22: slice 0 is built and on main. Slices 1–4 are built
-as open PRs, two of them drafts until slice 1 merges. Slice 5's server side
-has started (below).
+Status as of 2026-10-23, main at `bb5a8f9`: slices 0, 1, 1b, 2, 2b, 3, 6a
+and slice 5's server side are on main, and so are gap 17's fetch policy and
+the §7.3/§7.5 rules. Slice 4 (#538) and slice 6 (#556, #555) are open PRs,
+all three built on #544.
 
 0. **Local fixes, no remote.** *Built, on main.* #532 (merged, released in
    v0.43.1) moved the three host policies the page still pushed into
@@ -2444,7 +3015,7 @@ has started (below).
    main before them: gap 9 (#523), the witness itself (gap 11), gap 15's L1
    fix, and `catch_unwind` on every body (all #516). The in-flight drop
    guard that §6 pairs with `catch_unwind` comes with the caps in slice 4.
-1. **The dispatch table.** *Built, #535, open.* `HostConsole`, the capability
+1. **The dispatch table.** *Built, #535, merged.* `HostConsole`, the capability
    and object columns, the resolver, result and event projection, and the
    tests in §3.3. Loopback behaviour is unchanged apart from §3.5. Gaps 2, 3,
    4 (the console tag), 5 (all but the `[docs]` walk), 7 (the remote
@@ -2453,8 +3024,9 @@ has started (below).
    built table departs from the design, and why.
 
    **1b. The declared listener set** (§9.3), its own item, after #535
-   merges. The client sends `{"listen": ["app:open-doc", …]}` after `ok`, and
-   again whenever its set of listeners changes. Each frame is a full
+   merges. *Built, #550, merged;* §9.3 says how. The client sends
+   `{"listen": ["app:open-doc", …]}` after `ok`, and again whenever its set
+   of listeners changes. Each frame is a full
    replacement and gets no answer. Serve keeps the set per connection.
    `has_audience` becomes "a loopback connection that declared
    `app:open-doc`", and only those connections are sent it. A device that
@@ -2464,11 +3036,13 @@ has started (below).
    its order. Until it lands, the shim's verification probe still takes a
    held `worktrees show`. The probe declares nothing, so 1b also closes
    ROADMAP's probe-drain item.
-2. **The path classifier** (§7.1). *Built, #537, open.* Gap 1, enforced in
-   the api for every caller, and the `[docs]` walk (gap 5). §7.1 records the
-   class table as built.
+2. **The path classifier** (§7.1). *Built, #537, merged.* Gap 1, enforced
+   in the api for every caller, and the `[docs]` walk (gap 5). §7.1 records
+   the class table as built.
 
    **2b. The class → capability wiring**, after #535 and #537 both merge.
+   *Built, #549, merged,* with one departure (§7.1: a place's own directory
+   reads as plain).
    - `pathclass::requirement(class, access) -> authz::Requirement`: §7.1's
      two capability columns, with a test for all ten cells. `plain` needs
      only the row's capability. `instruction` and `executes` are read with
@@ -2485,13 +3059,15 @@ has started (below).
    - `file_readable` answers `false`, not an error, when the class refuses.
    - The docs index and `resolve_doc_paths` are filtered or marked by class
      for devices.
-3. **The audit log** (§5). *Built, #534, open,* a draft until it is rebased
-   onto #535. In that rebase its two stand-ins, `audit::cap_of` and
-   `audit::Actor`, become slice 1's `dispatch::cap_of` and `Caller`.
+3. **The audit log** (§5). *Built, #534, merged,* rebased onto slice 1, with
+   its stand-ins replaced by the table's own capability column and slice 1's
+   `Caller` (§5.1 says what it records). Not yet: the device records and the
+   checkpoint's device fields (lane `feat/p2-device-audit`, on #544), and
+   `audit_tail`.
 4. **Resource limits** (§6), including the loopback budget split: gap 13.
-   *Built, #538, open,* a draft until it is rebased onto #535 and its
-   `Payer` stand-in becomes slice 1's `Caller`. It also fixed the loopback
-   flood (§6).
+   *Built, #538, open,* rebased onto slice 1's `Caller` and built on
+   #544. It also fixed the loopback flood (§6). §6 records what it settled
+   since.
 5. **The device registry, server identity and pairing** (§2): the principal
    and device records (§2.8), console rows, the pairing listener, the QR,
    the comparison code, revocation, per-device expiry, step-up, and the
@@ -2503,10 +3079,14 @@ has started (below).
      device's sockets, on the registry's generation counter.
 
    *Started 2026-10-22, server side only, by the user's decision (§11.3).*
-   The registry, server identity, pairing, revocation and expiry are being
-   built on `feat/p2-device-registry` before the hardware spike. The client
+   *The server side is built, #544, merged* (§2.9): the registry, the server
+   identity, pairing, revocation, expiry, step-up and the reductions on live
+   connections. The cross-check is built and not yet called (§5.2), and the
+   device alerts wait on the device records (§5.3). The live count of
+   device-launched lanes is on main instead, from #551 (§7.5). The client
    side waits for the spike: the Secure Enclave signer, the device key and
-   the Local Network prompts.
+   the Local Network prompts. A desktop's client side (its file key, the
+   pinned TLS config, pairing from a link) is in #555 (open).
 6. **The remote listener** (§4), behind the opt-in: the address classifier,
    the address-change rules and the address code (§4.1), mDNS rediscovery
    (§4.7), the shim's remote door and the plugin calls a remote client
@@ -2519,13 +3099,39 @@ has started (below).
      single-flight is host-wide;
    - keepalive and the TLS caps (§6).
 
+   *Status by part:*
+   - **6a, the address rules:** *built, #547, merged* (§4.1).
+   - **Gap 17's fetch policy:** *built, #546, merged* (§8).
+   - **The host's half:** *built, #556, open* (a draft). The listener behind
+     the opt-in, its rule set and the exporter-keyed handshake (§4.1, §4.5);
+     the kill switch and the console rows (§3.4); `worktrees serve pair`,
+     `serve remote on|off|status|advertise` and `serve call`; the address
+     watch on its own poll; the idle stop and its quit notice (§9.3); the
+     audit log's device half and the new-address-class alert (§5.1, §5.3);
+     keepalive, the lifetime and the TLS caps (§6); the mDNS advert on macOS
+     (§4.7); and the §4.6 witnesses it covers. #538's per-device budgets
+     meet it when the two rebase (§6).
+   - **The client machine's half:** *built, #555, open* (a draft).
+     `crates/worktrees-remote`, `worktrees remote`, the shim's remote door,
+     `windowOnHost()` and the greyed host-path calls (§4.4).
+   - **Not built:** the host's remote-access UI (lane
+     `feat/p2-remote-host-ui`, on #556), a client that browses for a moved
+     host and adopts an address code (lane
+     `feat/p2-remote-client-discovery`, on #555), link-local dialling from
+     the client, and the Linux advert (§4.7). `serve remote status` already
+     prints the address code (§4.1); nothing on a client adopts one yet.
+
    Every gap in §8 is closed or tagged by now. Gap 6 lands with #519, as its
    row says.
 
-**A spike, before slice 5's design is frozen:** on a real iPhone (TestFlight)
-and a second Mac on the tailnet, measure the claims marked unmeasured above.
+**A spike, before slice 5's design is frozen:** on a real iPhone and a
+second Mac on the tailnet, measure the claims marked unmeasured above.
 Since 2026-10-22 that applies to slice 5's CLIENT side only. Its server side
-started before the spike, by the user's decision (§11.3).
+started before the spike, by the user's decision (§11.3). The iPhone's half
+is the iOS app's Phase 0, installed straight from Xcode rather than through
+TestFlight, in a repository of its own ([ios-mvp.md](ios-mvp.md)). The
+user has since asked for a second Mac on the SAME LAN first, so the LAN
+measurements now come before the tailnet ones.
 
 The half that needs neither ran on 2026-10-21: macOS 27 on Apple silicon,
 read-only with no sudo, and Docker containers with their own network
@@ -2556,6 +3162,35 @@ that ran it. **Measured** (the result is in the section cited):
 - Rust's parsers against link-local and odd IPv4 strings, and how an
   unscoped link-local dial fails on each OS (§4.1).
 
+**Measured since, by the build lanes** (2026-10-22 and 23; each result is
+in the section cited, and each lane's PR is still open unless it says
+merged):
+
+- *macOS 27, one Mac.* A connect from the same host reaches an
+  `IP_BOUND_IF` listener on en0's address, so the identity witness needs no
+  second machine (#556; §4.1). The real mDNS advert on en0, as the host's
+  own browser sees it: one interface, the opaque `wt-<id>.local`, TXT
+  exactly `v=1 id`, an A record only, and gone after `remote off` (#556;
+  §4.7). Pairing, a call, a mutation, a terminal attach and a live revoke in
+  0.03 s, CLI to CLI and from the real app, over the Mac's own LAN address
+  (#556 with #555; §4.4). A revoke that lands between a device's handshake
+  and its join, under a starved test binary (#544, merged; §2.9).
+- *Linux 6.12 in Docker.* `SO_BINDTOIFINDEX` and `SO_BINDTODEVICE` accept a
+  same-host connect, as root and as uid 65534, and an unprivileged
+  `SO_BINDTOIFINDEX` works (#556; §4.1). "Add the new address, remove the
+  old one" needs `promote_secondaries`, or Linux removes both (#556; §4.1,
+  §4.6). With the peer filter removed, a source outside the overlay's row
+  on the same TUN reaches TLS, which is the case §12.4 T4 asked the witness
+  to cover (#556; §4.6). The address-change witness passes there end to
+  end. The Linux readers for interfaces, routes and neighbours work as uid
+  65534 with no capabilities (#547, merged; §4.1).
+- *Both platforms.* #538's limits, before and after (§6).
+- *Gate-run cost* (#554, open; not Phase 2's, but it decides how many lanes'
+  gates run at once while Phase 2 is built). This repository's full gate,
+  cold, through `run --slot gate` on a 10P+4E-core, 36 GiB Mac: one gate
+  took 7m34s, peaked at 3.2 GiB of RSS and averaged 1.65 busy cores; two at
+  once took 8m57s each, ×1.69 the throughput of one.
+
 **Still to measure**, on the user's hardware:
 
 - *iPhone.* rustls from the Rust shim with a Secure Enclave signer [A1];
@@ -2584,15 +3219,17 @@ that ran it. **Measured** (the result is in the section cited):
   and whether an ad-hoc-signed client is asked again after every update,
   as TCC is (AGENTS.md); and the Application Firewall's "accept incoming
   connections" prompt for an ad-hoc serve, again after a rebuild [B6].
-- *The opaque host name* (§4.7), new, with no probe yet (`mdns_reg_mac.c`
-  and `avahi_reg.py` are where to start): `DNSServiceRegisterRecord` plus
-  `DNSServiceRegister` with `host`, and Avahi's `AddAddress` (with
-  `AVAHI_PUBLISH_NO_REVERSE`) plus `AddService` with `host`, each from an
-  unentitled, unprivileged process. Seen from a second machine: the SRV
-  target is `wt-<id>.local`, a resolve returns the bound address and no
-  other, both records go on a release and on a kill, and a name conflict
-  is reported rather than renamed. From the iPhone, that the shim resolves
-  it [with A6].
+- *The opaque host name* (§4.7). On macOS it is built in #556 and measured
+  from the host's own browser (above). Still to measure, from a second
+  machine: the SRV target is `wt-<id>.local`, a resolve returns the bound
+  address and no other, both records go on a release and on a kill, and a
+  name conflict is reported rather than renamed [with B2]. From the
+  iPhone, that the shim resolves it [with A6]. Avahi's `AddAddress` (with
+  `AVAHI_PUBLISH_NO_REVERSE`) plus `AddService` with `host` is unmeasured,
+  and not built (§4.7).
+- *The client machine* (#555). macOS's Local Network privacy for the
+  client, both the app and a CLI run from a terminal, and a second Mac at
+  all: #555 was measured on one Mac, and the user's two-Mac test is next.
 - *A reboot.* `utun` numbering across reboots, a Tailscale restart and a
   sleep, which decides whether the point-to-point fingerprint may leave out
   the name, and whether the network service's UUID stays stable where the
@@ -2600,42 +3237,126 @@ that ran it. **Measured** (the result is in the section cited):
 - *CI runners.* Whether the macOS runner allows the scratch interface or
   alias the bind-rule witness needs (§4.6) [D1]; on the Linux runner's own
   kernel, an unprivileged `SO_BINDTODEVICE`, the scratch interfaces, and
-  whether Avahi is there at all [D2].
+  whether Avahi is there at all [D2]. Both need a `workflow_dispatch` run,
+  and #556's NET_ADMIN tests have so far run only in Docker.
 
-**Exit, which is §III.9's, made concrete:**
+**Open design items**, each needed before Phase 2's exit:
+
+- **A per-device audit budget** (§5.1). A device at its rate limit can
+  rotate the log's 25 MiB out in about 20 minutes. The lane
+  `feat/p2-device-audit` is designing and building it, with the device
+  records.
+- **The alert for a limit one device trips repeatedly** (§5.3): nothing
+  says yet how many episodes make "repeatedly".
+- **mDNS on Linux** (§4.7). Avahi over D-Bus costs 30 crates through
+  `zbus`, so Linux has no advert, and the address code is its only path.
+  Either a smaller way to reach Avahi, or a decision that Linux hosts
+  rediscover by address code alone.
+- **D1 and D2** (above): until they run, the bind-rule witness's steps 2, 4
+  and 5 have no CI home on either OS.
+- **A version policy between a client and its host.** Today a client
+  refuses any host version but its own: `ipcws.ts` does (D5), and so does
+  `worktrees remote call`. That is fine for two desktops on one build. An
+  iOS app ships on Apple's schedule and a host updates on its own, so the
+  exact rule, equality or a range and who refuses whom, has to be written
+  down before the iOS app ships (#555's follow-up).
+- **The host's remote-access UI** (lane `feat/p2-remote-host-ui`, on #556):
+  Settings → Remote access, the pairing sheet with the QR and the
+  comparison code, the device list, and the alerts as a notice. Today
+  remote access is driven from the host's CLI alone.
+- **Client discovery** (lane `feat/p2-remote-client-discovery`, on #555):
+  browsing for a moved host as §4.7 says, adopting an address code, and
+  link-local dialling if it is small.
+
+**Exit, which is §III.9's, made concrete.** A box is ticked only when the
+criterion holds on main. Under each, *status* says how far the open PRs
+have taken it, and on what it was measured.
 
 - [ ] A second machine on the tailnet, paired by QR, drives serve: list,
       mutate, one terminal attach.
+      *Status:* not measured on a second machine. On ONE Mac, over its own
+      LAN address and not a tailnet, #556 and #555 merged into a scratch
+      branch did all three, by pairing link rather than QR (§4.4).
 - [ ] The same in LAN mode, from an iPhone on the host's Wi-Fi, with the
       Local Network prompt answered.
+      *Status:* no iOS client exists; the iOS app is a repository of its
+      own (`docs/proposals/ios-mvp.md`). The user's two-Mac LAN test comes
+      first.
 - [ ] The host's LAN address moves, the host chooses the new one, and the
       iPhone finds it over mDNS and reconnects with no address code. A
       spoofed advert for the same id is tried, refused at the pin, and
       changes nothing on the phone. The advert names `wt-<id>.local`, which
       resolves to the bound address alone, or, on a platform that took the
       fallback, the enable dialog showed the OS's name first (§4.7).
+      *Status:* the host's move and the macOS advert are in #556, measured
+      from the host's own view and in Docker. No client browses yet
+      (`feat/p2-remote-client-discovery`), and Linux has no advert.
 - [ ] An unenrolled device cannot connect, measured at TLS.
+      *Status:* the verifier is on main (#544), and its tests refuse a key
+      no device holds at TLS, over loopback. Nothing on main listens off
+      loopback, so a device cannot try. #556 (open) witnesses it against the
+      real binary on macOS and in Docker on Linux (§4.6).
 - [ ] A revoked device's live socket dies within 1 s, and it cannot
       reconnect. An expired device is refused, and a re-enabled one is
       served.
+      *Status:* the revoke is witnessed against the real binary in #556, and
+      ended #555's CLI's socket in 0.03 s on one Mac. Expiry and re-enable
+      are on main (#544), tested in its registry; the real-binary witness
+      has no expiry step yet (§4.6, step 11).
 - [ ] A public address is refused at bind, and an address change pauses
       and resumes remote access as §4.1 says, on macOS and Linux.
+      *Status:* in #556. Linux, in a NET_ADMIN container (§4.6). macOS is
+      unmeasured (D1, and B4 for a listener whose address is removed).
 - [ ] With a device connected and the app killed, the app-owned serve
       still stops after its grace. A `worktrees show` run while the device
       is connected waits for the desktop and is never sent to the device
       (§9.3).
+      *Status:* the show half holds on main, since #550 sends a held show
+      only to a console connection that declared it. The idle half is #556's
+      in-process test; it has not been driven with a real device.
 - [ ] Every step of §4.6 passes on macOS and Linux, and the release gate
       greps its exact count.
-- [ ] R1: every row declares its object and capability, the drift tests are
+      *Status:* #556 covers identity steps 1–5, 7, 8 and 10 and bind step 3
+      on both OSes, and its release gate greps `2 passed`. Steps 6, 9, 11
+      and 12 have no real-binary witness, and bind steps 2, 4 and 5 run only
+      in Docker (D1, D2).
+- [x] R1: every row declares its object and capability, the drift tests are
       green, and each one was shown failing first.
-- [ ] R4: pairing as §2. R5: §5. R6: §6, with the numbers measured. R7: §7.
-      R8: §4.6. R9: decided "maybe later" (§11 Q1), and built as §2.8
-      says: a principal in every device record and audit record, every
-      grant check keyed on (principal, device), and the second-principal
-      fixtures shown failing first.
+      *Status:* on main since #535, with #549's class raise. Each open PR's
+      new rows keep it, and its own count test pins them (§3.4).
+- [ ] R4: pairing as §2.
+      *Status:* the server side is on main (#544, §2.9), and pairing over a
+      real remote listener is #556's (open). The desktop's client side is
+      #555's (open), and the iPhone's waits for the hardware spike.
+- [ ] R5: §5.
+      *Status:* the log, its chain, its console half and its failure policy
+      are on main (#534). The device half is in #556 (open). Missing: the
+      device records, the checkpoint's device fields, the per-device audit
+      budget, `audit_tail` and most alerts (§5.1, §5.3).
+- [ ] R6: §6, with the numbers measured.
+      *Status:* #538 (open) measured every loopback-reachable cap on both
+      OSes. The remote caps are #556's (open), and the two have not met yet.
+- [ ] R7: §7.
+      *Status:* on main: the classifier (#537), the class raise (#549), and
+      provenance with the agent rules (#551). Left: the `instruct` rows with
+      no file object are not stamped (§7.3).
+- [ ] R8: §4.6.
+      *Status:* as the §4.6 criterion above.
+- [x] R9: decided "maybe later" (§11 Q1), and built as §2.8 says: a
+      principal in every device record and audit record, every grant check
+      keyed on (principal, device), and the second-principal fixtures shown
+      failing first.
+      *Status:* on main: every grant check and its second-principal
+      fixtures (#535), a principal in every audit record (#534) and in every
+      provenance stamp (#551), and every device record's principal, with a
+      second principal's `admin` device unable to reach the owner's devices
+      or to hold a grant wider than its principal's (#544).
 - [ ] Gaps 1–17: each closed, or tagged with its phase in this table and in
       ROADMAP. Gap 17 is closed, not tagged, before the remote listener
       binds.
+      *Status:* closed on main but 6 (#519, open) and 13 (#538, open), and 4
+      and 7 keep a Phase 3 half (§8). Gap 17 closed on main (#546) before
+      any remote listener existed.
 
 ---
 
@@ -2772,6 +3493,64 @@ Two more points, decided by the user while slices 0–4 were being built.
   slice 5's client side, meaning the Secure Enclave signer, the device key
   and the Local Network prompts (§10).
 
+### 11.4 Decided during the build, 2026-10-22 and 2026-10-23
+
+These were decided by the user, by `(main)` or by the lanes while slices
+1b–6 were built, mostly where this document was silent. They are recorded
+here so that they are visible. Three PRs put their choices to the user to
+confirm or override, and those stand until the user says otherwise.
+
+**By the user.**
+
+- A second Mac on the SAME LAN comes first, and the iOS app as soon as it
+  can. The iOS app lives in a repository of its own, and its Phase 0 is
+  installed straight from Xcode rather than through TestFlight
+  (`docs/proposals/ios-mvp.md`).
+
+**By `(main)`, for the user.**
+
+- **The remote listener runs handshake v1 unchanged, keyed by the TLS
+  session,** and its `ok` names the device; a remote upgrade carries no
+  `Origin`, and `Host` is the bound literal (§4.5, departing from what it
+  said before). The reason: one client for the protocol, and a key that
+  works only inside the TLS session the shim alone holds.
+- **One TLS client half,** in `crates/worktrees-remote`, which serve imports
+  (§4.4).
+- **With a paired host chosen, the shim starts no local serve,** and a
+  remote window keeps its own `remote-ui-state.json` (§4.4, §9.1).
+- **`remote_send` and `remote_close` carry `conn`,** so a stale socket
+  cannot write into the next one (§4.4). `ios-mvp.md` had `{text}` alone.
+- **The quit notice is persistent text, not a confirmation on ⌘Q** (§9.3).
+- **Linux has no mDNS advert for now.** `(main)`'s rule was to take `zbus`
+  only if its tree was small, and it would add 30 crates to the CLI; the
+  address code is Linux's path (§4.7). It stays an open design item (§10).
+- **The device-lane cap is a refusal kind,** `device-lanes`, recorded where
+  the host refuses, like the resolver's refusals (§5.1).
+- **The slice-6 lanes may add `qrcode`** (no default features), each new
+  crate checked on OSV at its locked version.
+
+**By the lanes, put to the user to confirm or override.**
+
+- #544 (merged): seven interpretations, from `devices_list` as an `admin` row
+  to `identity_rotate` revoking every device (§2.9).
+- #546 (merged): a device-cloned project's later fetches are not pinned,
+  because a LAN remote is legitimate there (§8, gap 17).
+- #551 (merged): the four-lane cap is host-wide; "live" means a session is
+  open in the place; an `executes`-class write is stamped as well (§7.3,
+  §7.5).
+
+**By the lanes, recorded where they apply.**
+
+- #547: a field the fingerprint record lacks vouches for nothing, and the
+  record is completed only within 60 s of the host's own choice (§4.1).
+- #549: a place's own directory reads as plain (§7.1).
+- #538: single-flight per (scope, fetcher); a follower never reaches the
+  lane gate; step-up before the flight; budget refusals as episodes; a
+  device's listen frames charged a request token (§6).
+- #556: advertising starts on, per §11.1 N2, and its switch can be set
+  before remote access is first enabled; turning remote access off keeps
+  the port (§4.1, §4.7).
+
 ---
 
 ## 12. The OWASP review of this design
@@ -2789,7 +3568,9 @@ waits for the caps (§6).
 pass covered what those decisions changed, and §12.1 lists what it changed
 in turn. §12.2 is a third pass, over the mDNS design (§4.7) that §11.1 N2
 added, §12.3 a check of the automatic rebind that §11.2 N4 added, and
-§12.4 a fourth pass over what the network spike measured.
+§12.4 a fourth pass over what the network spike measured. No pass has yet
+covered the build's two departures (§11.4): §4.5's exporter-keyed
+handshake with no `Origin`, and §7.1's place directory read as plain.
 
 **What held up.** Deny by default, through an exhaustive table with a
 fail-closed resolver. Authentication before parsing: unknown devices stop
