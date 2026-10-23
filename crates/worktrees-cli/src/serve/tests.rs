@@ -1938,8 +1938,9 @@ mod devices {
     const SPEC_SAS_LABEL: &[u8] = b"worktrees-pair/v1/sas\n";
     const SPEC_EXPORTER: &[u8] = b"EXPORTER-worktrees-pair-v1";
 
-    /// A literal `ip:port` and nothing more: the address-rules lane's parser
-    /// (§4.1) will refuse 127.0.0.1 in a real link, so the tests read theirs.
+    /// A literal `ip:port` and nothing more: a device's rule
+    /// (`pairuri::dial_rule`, §4.1) refuses 127.0.0.1 in a real link, so the
+    /// tests read theirs, over the loopback listener, with this one.
     fn literal(v: &str) -> Result<std::net::SocketAddr, String> {
         v.parse().map_err(|e| format!("{e}"))
     }

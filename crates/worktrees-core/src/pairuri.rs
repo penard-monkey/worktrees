@@ -23,7 +23,8 @@
 //! never `SocketAddr` or a resolver, no `%` zone, the private-class
 //! allowlist — are `netclass`'s, one implementation shared by serve and the
 //! shim (Phase 2 slice 6a). [`parse`] hands the raw `addr` value to the
-//! [`AddrRule`] its caller passes, and refuses the link if that does.
+//! [`AddrRule`] its caller passes, and refuses the link if that does. A
+//! device passes [`dial_rule`], which is `netclass::parse_dial`.
 
 use std::net::{IpAddr, SocketAddr};
 
@@ -52,11 +53,20 @@ pub struct PairUri {
     pub exp: i64,
 }
 
-/// The `addr` parameter's reader: §4.1's rules, from `netclass` (slice 6a).
-/// It gets the value exactly as the link carried it (percent-decoding
-/// does not apply: an address literal needs none, and a `%` must reach the
-/// rule that refuses zones).
+/// The `addr` parameter's reader. It gets the value exactly as the link
+/// carried it (percent-decoding does not apply: an address literal needs
+/// none, and a `%` must reach the rule that refuses zones). A device passes
+/// [`dial_rule`]; serve's tests pass a loopback one, because the pairing
+/// listener binds 127.0.0.1 until slice 6 binds it where `netclass` allows.
 pub type AddrRule<'a> = &'a dyn Fn(&str) -> Result<SocketAddr, String>;
+
+/// §4.1's rule for a link's `addr`: `netclass::parse_dial`, the one the
+/// address code and the remote listener use too, so the host and the device
+/// cannot read an address differently. A link-local address comes back with
+/// no scope: the device picks the interface (`netclass::linklocal_candidates`).
+pub fn dial_rule(v: &str) -> Result<SocketAddr, String> {
+    crate::netclass::parse_dial(v).map(|d| SocketAddr::new(d.ip, d.port)).map_err(|e| e.to_string())
+}
 
 /// The link for `u`. A scoped IPv6 address is refused: a QR carries no zone
 /// (§4.1), since the host's interface means nothing on the device.
@@ -226,17 +236,6 @@ mod tests {
 
     const NOW: i64 = 1_800_000_000;
 
-    /// A stand-in for netclass's rule, for these tests only: an address
-    /// literal and a port, nothing else. The real one adds §4.1's classes.
-    fn literal(v: &str) -> Result<SocketAddr, String> {
-        if v.contains('%') {
-            return Err("a zone".into());
-        }
-        let (h, p) = v.rsplit_once(':').ok_or("no port")?;
-        let ip: IpAddr = h.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(h).parse().map_err(|_| "not an address")?;
-        Ok(SocketAddr::new(ip, p.parse().map_err(|_| "not a port")?))
-    }
-
     fn sample() -> PairUri {
         PairUri { addr: "100.101.7.3:7461".parse().unwrap(), pin: "ab".repeat(32), secret: [7; 16], host: "Bret's Mac mini".into(), exp: NOW + 120 }
     }
@@ -246,11 +245,11 @@ mod tests {
         let s = build(&sample()).unwrap();
         assert!(s.starts_with("worktrees-pair:v1?addr=100.101.7.3:7461&pin="), "{s}");
         assert!(s.contains("&host=Bret%27s%20Mac%20mini&exp="), "{s}");
-        assert_eq!(parse(&s, NOW, &literal).unwrap(), sample());
+        assert_eq!(parse(&s, NOW, &dial_rule).unwrap(), sample());
         let v6 = PairUri { addr: "[fd7a:115c:a1e0::1]:7461".parse().unwrap(), ..sample() };
         let s6 = build(&v6).unwrap();
         assert!(s6.contains("addr=[fd7a:115c:a1e0::1]:7461&"), "{s6}");
-        assert_eq!(parse(&s6, NOW, &literal).unwrap(), v6);
+        assert_eq!(parse(&s6, NOW, &dial_rule).unwrap(), v6);
         let scoped = PairUri { addr: "[fe80::1%4]:7461".parse().unwrap(), ..sample() };
         assert!(build(&scoped).is_err(), "no zone ever goes into a link");
     }
@@ -284,28 +283,33 @@ mod tests {
             swap("host", "%FF"),
             swap("addr", "[fe80::1%254]:7461"),
             swap("addr", "example.com:7461"),
+            swap("addr", "8.8.8.8:7461"),
+            swap("addr", "127.0.0.1:7461"),
             format!("{good}{}", "x".repeat(MAX_LEN)),
             "worktrees-pair:v1".into(),
         ];
         for b in bad {
-            assert!(parse(&b, NOW, &literal).is_err(), "{b}");
+            assert!(parse(&b, NOW, &dial_rule).is_err(), "{b}");
         }
-        let e = parse(&swap("exp", "1000"), NOW, &literal).unwrap_err();
+        let e = parse(&swap("exp", "1000"), NOW, &dial_rule).unwrap_err();
         assert!(e.contains("expired"), "{e}");
     }
 
     /// The address is the rule's to judge, not this parser's: whatever the
-    /// caller's rule refuses (netclass will refuse a public address, §4.1),
-    /// the link is refused with its words.
+    /// caller's rule refuses, the link is refused with its words — and a
+    /// device's rule is netclass's, which refuses a public address (§4.1).
     #[test]
     fn the_address_rule_decides_the_address() {
         let s = build(&sample()).unwrap();
         let public = |_: &str| -> Result<SocketAddr, String> { Err("not-private".into()) };
         assert_eq!(parse(&s, NOW, &public).unwrap_err(), "not-private");
+        let public = PairUri { addr: "8.8.8.8:7461".parse().unwrap(), ..sample() };
+        let e = parse(&build(&public).unwrap(), NOW, &dial_rule).unwrap_err();
+        assert!(e.starts_with("not-private: 8.8.8.8 is public"), "{e}");
         let seen = std::cell::RefCell::new(String::new());
         let spy = |v: &str| {
             *seen.borrow_mut() = v.to_string();
-            literal(v)
+            dial_rule(v)
         };
         parse(&s, NOW, &spy).unwrap();
         assert_eq!(*seen.borrow(), "100.101.7.3:7461", "the raw value, as carried");
