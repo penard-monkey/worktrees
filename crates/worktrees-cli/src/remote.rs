@@ -14,6 +14,7 @@ use serde_json::{json, Value};
 use worktrees_remote::call::{self, CallError};
 use worktrees_remote::hosts::HostStore;
 use worktrees_remote::pair::{self, PairEvent};
+use worktrees_remote::reach::{self, ReachError};
 
 pub const USAGE: &str = "\
 usage: worktrees remote pair <link> [--name NAME]          pair with a host from its pairing link
@@ -24,6 +25,8 @@ usage: worktrees remote pair <link> [--name NAME]          pair with a host from
                                                            show what streams on it — a terminal's bytes)
        worktrees remote use <host> | this                  which engine the desktop app's window drives,
                                                            from its next launch (this: this machine's own)
+       worktrees remote readdress <host> <code>            follow a host that moved, by the address code
+                                                           `worktrees serve remote status` shows there
        worktrees remote forget <host>                      forget a host and delete this machine's key for it
 
   <host> is a host's id (h_…) or its name, as `worktrees remote hosts` lists them.
@@ -31,7 +34,12 @@ usage: worktrees remote pair <link> [--name NAME]          pair with a host from
 
 The link is the `worktrees-pair:v1?…` text the host shows beside its pairing QR.
 Its address is checked before anything is dialled: only a private address
-(a LAN, Tailscale, a cable) is accepted.";
+(a LAN, Tailscale, a cable) is accepted.
+
+When nothing answers at a host's address, `call` looks for it on the LAN
+(macOS) and follows it there once its key matches the pin kept at pairing.
+An address code (`worktrees-addr:v1?…`) is followed the same way: the new
+address is kept only once a connection to it proves the same key.";
 
 struct Opts {
     dir: PathBuf,
@@ -115,7 +123,8 @@ pub fn cmd_remote(args: &[String]) -> i32 {
         ("call", [host, cmd, a]) => rt.block_on(do_call(&store, host, cmd, a, o.timeout, o.follow)),
         ("forget", [host]) => forget(&store, host),
         ("use", [host]) => choose(&store, host),
-        ("pair" | "hosts" | "call" | "forget" | "use", _) => {
+        ("readdress", [host, code]) => rt.block_on(readdress(&store, host, code, o.timeout)),
+        ("pair" | "hosts" | "call" | "forget" | "use" | "readdress", _) => {
             eprintln!("worktrees remote {verb}: wrong arguments\n\n{USAGE}");
             2
         }
@@ -201,7 +210,20 @@ async fn do_call(store: &HostStore, sel: &str, cmd: &str, args: &str, wait: Dura
             return 1;
         }
     };
-    let mut s = match call::connect(&rec, &key, env!("CARGO_PKG_VERSION"), wait).await {
+    let mut said = |m: &str| eprintln!("{}", worktrees_remote::printable(m));
+    let reached = match reach::open(store, &rec, &key, &reach::Env::platform(), wait, &mut said).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("worktrees remote call: {e}");
+            if matches!(e, ReachError::NotFound { .. }) {
+                eprintln!("Then, here: worktrees remote readdress {} '<address code>'", rec.id);
+            }
+            return 1;
+        }
+    };
+    // A move was said as it happened (`said`), so it is not said again here.
+    let rec = reached.rec;
+    let mut s = match call::handshake(reached.pipe, env!("CARGO_PKG_VERSION"), wait).await {
         Ok(s) => s,
         Err(e) => {
             eprintln!("worktrees remote call: {} ({}): {e}", rec.name, rec.addr);
@@ -239,6 +261,37 @@ async fn do_call(store: &HostStore, sel: &str, cmd: &str, args: &str, wait: Dura
         }
         Err(e) => {
             eprintln!("worktrees remote call: {} ({}): {e}", rec.name, rec.addr);
+            1
+        }
+    }
+}
+
+/// `readdress`: follow a host that moved, by its address code. The code is
+/// read first (a public address or a zone is refused before anything else),
+/// a code for another host's pin is refused before anything is dialled, and
+/// the new address is kept only once a pinned connection to it succeeds.
+async fn readdress(store: &HostStore, sel: &str, code: &str, wait: Duration) -> i32 {
+    let code = match reach::parse_code(code) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("worktrees remote readdress: {e}");
+            return 2;
+        }
+    };
+    let rec = match store.get(sel) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("worktrees remote readdress: {e}");
+            return 2;
+        }
+    };
+    match reach::adopt_code(store, &rec, &code, &reach::Env::platform(), wait).await {
+        Ok(moved) => {
+            println!("{} is now at {} (it was at {}): a connection there proved the key kept at pairing.", moved.name, moved.addr, rec.addr);
+            0
+        }
+        Err(e) => {
+            eprintln!("worktrees remote readdress: {}", worktrees_remote::printable(&e));
             1
         }
     }
