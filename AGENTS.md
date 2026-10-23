@@ -337,6 +337,11 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   `tauri dev` run's WebKit data lands in `~/Library/{Caches,WebKit}/app`
   (the unbundled executable's name), NOT under the `--config` identifier, so
   a throwaway identifier does not isolate it — those dirs are every lane's.
+  And **a dynamic import kept as a namespace (`const ws = await
+  import("./ipcws")`) defeats tree-shaking**: the dev token client rode into
+  the production chunk (#555's CI). transport-check's BUNDLE assertions run
+  only when `app/dist` exists, so a local 50/50 without a fresh `pnpm build`
+  did not check them; its static rule now demands destructured imports.
 
 **Adding a harness? Walk `docs/adding-a-harness.md` first, and tick it only
 by SEEING each surface work.** pi shipped in v0.33.0 with a correct core —

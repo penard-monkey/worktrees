@@ -1614,7 +1614,7 @@ ${body}
   };
   const boot = body("remoteBoot");
   check(boot.length > 0 && !/engine_connect/.test(boot), "(remote) main.tsx's remoteBoot never calls engine_connect: with a host chosen, no local serve is found or started (§4.4)");
-  check(/ws\.connectSocket\(\{ \.\.\.socketDeps\(lost, remedy\), port: 0, token: pipe\.connected\.token, WebSocket: pipe\.WebSocket \}\)/.test(boot) &&
+  check(/connectRemote\(\{ \.\.\.socketDeps\(lost, remedy\), port: 0, token: pipe\.connected\.token, WebSocket: pipe\.WebSocket \}\)/.test(boot) &&
     /return \{ sock, owned: false, started: false \};/.test(boot) && /remoteDoor\(\s*tauriDoor,/.test(boot),
     "(remote) remoteBoot hands connectSocket the pipe's token and socket, says owned:false, and goes through remoteDoor");
   check(/const door = host\s*\? await remoteBoot\(host\)\s*: engineDoor\(/.test(main), "(remote) the app's boot takes remoteBoot only when a host is chosen, else the engine door");
@@ -1683,6 +1683,14 @@ ${body}
   };
   walk(SRC.appsrc);
   check(statics.length === 0, `no file imports ipcws.ts statically — main.tsx's dynamic imports decide what a build carries${statics.length ? `: ${statics.join(", ")}` : ""}`);
+  // …and each of those is DESTRUCTURED. A namespace kept in a variable
+  // (`const ws = await import("./ipcws")`) counts, for Rollup, as every export
+  // used, so the dev token client rides into the production chunk — and the
+  // bundle assertion below only sees that when app/dist exists (#555's CI).
+  const dyn = [...main.matchAll(/^\s*(.*?)= await import\("\.\/ipcws"\)/gm)].map((m) => m[1].trim());
+  const namespaced = dyn.filter((lhs) => !/^const \{[^}]*\}$/.test(lhs));
+  check(dyn.length >= 2 && namespaced.length === 0,
+    `every dynamic import of ipcws.ts in main.tsx is destructured, so a production build tree-shakes the dev token client (${dyn.length} imports${namespaced.length ? `; NOT destructured: ${namespaced.join(" | ")}` : ""})`);
   check(/version: __WT_VERSION__/.test(main), "every socket the page opens hands the client __WT_VERSION__ as this frontend's version");
 }
 

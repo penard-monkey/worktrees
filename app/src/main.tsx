@@ -60,7 +60,10 @@ async function chosenHost(door: Door): Promise<HostSummary | null> {
  *  started (§4.4). `owned: false`, so the retries reconnect and never start. */
 async function remoteBoot(host: HostSummary): Promise<EngineDoor> {
   const { remoteDoor, setRemoteGrant, tauriDoor } = await import("./ipc");
-  const ws = await import("./ipcws");
+  // Destructured, never a namespace binding: a dynamic import Rollup sees used
+  // as a whole object keeps EVERY export of ipcws, the dev stack's token client
+  // (`bootSocket`) included, in the production chunk (transport-check).
+  const { connectSocket: connectRemote } = await import("./ipcws");
   const { openPipe, shimOf } = await import("./ipcremote");
   const shim = shimOf(tauriDoor);
   const remedy = `Reconnect now tries again at once. If ${host.name} no longer knows this machine, pair again in Settings → Hosts.`;
@@ -77,7 +80,7 @@ async function remoteBoot(host: HostSummary): Promise<EngineDoor> {
       // A fresh grant per socket: a narrowed device learns it on reconnect.
       setRemoteGrant(null);
       pipe = await openPipe(shim, host.id, { setTimeout: (fn, ms) => window.setTimeout(fn, ms) }, setRemoteGrant);
-      const sock = ws.connectSocket({ ...socketDeps(lost, remedy), port: 0, token: pipe.connected.token, WebSocket: pipe.WebSocket });
+      const sock = connectRemote({ ...socketDeps(lost, remedy), port: 0, token: pipe.connected.token, WebSocket: pipe.WebSocket });
       return { sock, owned: false, started: false };
     },
     retryEnv(),
