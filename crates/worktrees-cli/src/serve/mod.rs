@@ -265,14 +265,15 @@ pub fn start(config_dir: PathBuf, port: u16, allow_origin: Vec<String>) -> Resul
 /// grant is read from the config dir's `devices.json` (Phase 2 slice 5).
 pub fn start_with(config_dir: PathBuf, port: u16, allow_origin: Vec<String>, limits: conn::Limits) -> Result<Running, String> {
     let devices = Arc::new(devices::DeviceRegistry::open(&config_dir));
-    // THE audit seam (§5.1–§5.3; the audit log is #534): every registry
-    // change, pairing step and refused device handshake is a typed
-    // `devices::DeviceEvent`, handed to each hook `devices.subscribe` was
-    // given, after the registry's locks are released. `DeviceEvent::alerts`
-    // marks §5.3's alerts. The log's rotation checkpoint is
-    // `devices.checkpoint()`, and §5.2's boot cross-check is
-    // `devices.cross_check(chain's fields per device, now)`. A hook
-    // subscribed HERE, before `startup`, hears an unreadable file's alert.
+    // Every registry change, pairing step and refused device handshake is a
+    // typed `devices::DeviceEvent`, handed to each hook `devices.subscribe`
+    // was given, after the registry's locks are released. The audit log
+    // subscribes in `conn::start` (`Audit::hear`), before `startup`, so it
+    // hears an unreadable file's alert too, and its checkpoints read
+    // `devices.checkpoint()`. §5.2's boot cross-check,
+    // `devices.cross_check(chain's fields per device, now)`, is not wired
+    // yet; it must run before the log can write a checkpoint, or the first
+    // one vouches for whatever the file held at boot.
     // Pairing windows bind where slice 6's remote listener says; until it
     // exists, none ever opens (`Pairing::set_bind`).
     let pairing = Arc::new(pairing::Pairing::new(Some(config_dir.clone()), devices.clone()));

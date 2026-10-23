@@ -603,9 +603,8 @@ impl DeviceEvent {
         }
     }
 
-    /// Worth a host notification (§5.3).
-    // A seam: the audit lane (#534) wires it; until then, the tests.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Worth a host notification (§5.3): the audit log writes an `alert`
+    /// record and emits `audit:alert` for it.
     pub fn alerts(&self) -> bool {
         match self {
             DeviceEvent::Enrolled { .. } | DeviceEvent::Unreadable { .. } | DeviceEvent::IdentityRotated { .. } => true,
@@ -958,9 +957,8 @@ impl DeviceRegistry {
         self.snapshot()?.devices.into_iter().find(|d| &d.id == id && &d.principal == of)
     }
 
-    /// Every unrevoked device's security fields: §5.1's checkpoint.
-    // A seam: the audit lane (#534) wires it; until then, the tests.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Every unrevoked device's security fields: §5.1's checkpoint, which
+    /// the audit log reads through `audit::Fleet`.
     pub fn checkpoint(&self) -> Vec<SecurityFields> {
         let st = self.state.read().unwrap();
         st.file.as_ref().map(|f| f.devices.iter().filter(|d| !d.is_revoked()).map(DeviceRecord::security).collect()).unwrap_or_default()
