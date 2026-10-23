@@ -78,7 +78,7 @@ impl std::fmt::Display for CallError {
             }
             CallError::Closed(m) => write!(f, "{m}"),
             CallError::TimedOut => write!(f, "no answer in time"),
-            CallError::Refused(v) => write!(f, "{}", v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string())),
+            CallError::Refused(v) => write!(f, "{}", crate::printable(&v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()))),
         }
     }
 }
@@ -125,7 +125,7 @@ pub async fn handshake(p: Pipe, version: &str, wait: Duration) -> Result<Session
         }
         let theirs = ok.get("version").and_then(Value::as_str).unwrap_or("?");
         if theirs != version {
-            return Err(CallError::Version { theirs: theirs.to_string(), ours: version.to_string() });
+            return Err(CallError::Version { theirs: crate::printable(theirs), ours: version.to_string() });
         }
         Ok(ok)
     };

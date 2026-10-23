@@ -214,11 +214,11 @@ async fn do_call(store: &HostStore, sel: &str, cmd: &str, args: &str, wait: Dura
             } else if frame.get("end") == Some(&Value::Bool(true)) {
                 eprintln!("channel {}: ended", frame["channel"]);
             } else if let Some(ev) = frame.get("event").and_then(Value::as_str) {
-                eprintln!("event {ev}");
+                eprintln!("event {}", worktrees_remote::printable(ev));
             }
         };
         if let Some(why) = s.follow(f, &mut seen).await {
-            eprintln!("{why}");
+            eprintln!("{}", worktrees_remote::printable(&why));
             return 1;
         }
         s.close().await;
@@ -231,7 +231,7 @@ async fn do_call(store: &HostStore, sel: &str, cmd: &str, args: &str, wait: Dura
             0
         }
         Err(CallError::Refused(v)) => {
-            eprintln!("{}: {}", cmd, v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()));
+            eprintln!("{}: {}", cmd, worktrees_remote::printable(&v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string())));
             1
         }
         Err(e) => {

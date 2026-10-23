@@ -175,7 +175,7 @@ impl PipeRx {
                 Some(Ok(Message::Text(t))) => return Inbound::Frame(t.to_string()),
                 Some(Ok(Message::Close(c))) => {
                     return Inbound::Closed(match c {
-                        Some(f) if !f.reason.is_empty() => format!("the host closed the connection: {}", f.reason),
+                        Some(f) if !f.reason.is_empty() => format!("the host closed the connection: {}", crate::printable(&f.reason)),
                         _ => "the host closed the connection".into(),
                     })
                 }
