@@ -18,6 +18,7 @@ mod conn;
 mod dispatch;
 mod netwatch;
 mod policy;
+mod provenance;
 mod resolve;
 mod scope;
 mod servefile;

@@ -73,9 +73,14 @@ pub fn set_pin(repo: String, slug: String, on: bool) -> Result<(), String> {
     store::edit(&repo, &slug, |d| d.pinned = Some(on))
 }
 
-pub fn set_note(repo: String, slug: String, note: String) -> Result<(), String> {
+/// Set — or with an empty note clear — a place's note, and record who wrote it
+/// (`note_by`, Server Edition Phase 2 §7.3): serve's caller, or nobody for a
+/// note set outside serve. A cleared note keeps no author.
+pub fn set_note(ctx: &Ctx, repo: String, slug: String, note: String) -> Result<(), String> {
+    let by = ctx.by();
     store::edit(&repo, &slug, |d| {
-        d.note = if note.trim().is_empty() { None } else { Some(note) }
+        d.note = if note.trim().is_empty() { None } else { Some(note) };
+        d.note_by = d.note.as_ref().and(by);
     })
 }
 
@@ -449,10 +454,14 @@ pub fn pbcopy_command() -> std::process::Command {
 /// Rename a place's LABEL. Empty clears it, which is how the UI goes back to
 /// showing the slug — see `Declared::title` for why this is a label and not a
 /// rename of the worktree.
-pub fn set_title(repo: String, slug: String, title: String) -> Result<(), String> {
+/// `set_note`'s rule for the title: `title_by` names serve's caller, and a
+/// cleared title keeps no author.
+pub fn set_title(ctx: &Ctx, repo: String, slug: String, title: String) -> Result<(), String> {
+    let by = ctx.by();
     store::edit(&repo, &slug, |d| {
         let t = title.trim();
-        d.title = if t.is_empty() { None } else { Some(t.to_string()) }
+        d.title = if t.is_empty() { None } else { Some(t.to_string()) };
+        d.title_by = d.title.as_ref().and(by);
     })
 }
 
@@ -522,6 +531,22 @@ pub struct CmdResult {
 }
 
 pub fn run_op<F: FnOnce(&Project, &mut CaptureUi) -> i32>(op: &str, repo: &str, f: F) -> Result<CmdResult, String> {
+    run_op_for(op, repo, None, f)
+}
+
+/// [`run_op`] for an op that may START an agent: `launched_by` is who it is
+/// launched for (`Ctx::launched_by`), and core's launch records it on the place
+/// before the session exists (Server Edition Phase 2, §7.5).
+pub fn run_launch<F: FnOnce(&Project, &mut CaptureUi) -> i32>(ctx: &Ctx, op: &str, repo: &str, f: F) -> Result<CmdResult, String> {
+    run_op_for(op, repo, ctx.launched_by().cloned(), f)
+}
+
+fn run_op_for<F: FnOnce(&Project, &mut CaptureUi) -> i32>(
+    op: &str,
+    repo: &str,
+    launched_by: Option<store::LaunchedBy>,
+    f: F,
+) -> Result<CmdResult, String> {
     let project = Project::discover(Path::new(repo)).map_err(|e| {
         applog("error", &format!("{op} repo={repo}: discover failed: {}", e.msg));
         e.msg
@@ -537,7 +562,7 @@ pub fn run_op<F: FnOnce(&Project, &mut CaptureUi) -> i32>(op: &str, repo: &str, 
     if let Some(msg) = sync::hub_copy_refusal(Path::new(&project.main_root)) {
         return Ok(refused(op, repo, msg));
     }
-    let mut ui = CaptureUi::default();
+    let mut ui = CaptureUi { launched_by, ..CaptureUi::default() };
     let code = f(&project, &mut ui);
     let warnings = ui.warnings();
     if code == 0 {
@@ -565,6 +590,7 @@ pub fn refused(op: &str, repo: &str, msg: String) -> CmdResult {
 /// Create a worktree (`new`). `--no-attach`: the session is created (pane 0 AI,
 /// pane 1 shell) but the app embeds it via its own PTY rather than attaching.
 pub fn new_place(
+    ctx: &Ctx,
     repo: String,
     branch: String,
     base: Option<String>,
@@ -612,7 +638,7 @@ pub fn new_place(
         .flag("--no-spare")
         .pos(branch)
         .pos_opt(base);
-    let mut r = run_op(&op, &repo, |p, ui| args.call(p, ui, ops::cmd_new))?;
+    let mut r = run_launch(ctx, &op, &repo, |p, ui| args.call(p, ui, ops::cmd_new))?;
     if r.ok {
         r.slug = resolved_slug;
     }
@@ -670,6 +696,7 @@ pub fn known_harness(id: &str) -> Result<&'static dyn harness::Adapter, String> 
 /// existing launch path); the main checkout is launched directly since `open` only
 /// targets worktrees under `.worktrees/`.
 pub fn open_place(
+    ctx: &Ctx,
     repo: String,
     slug: String,
     fresh: Option<bool>,
@@ -689,7 +716,7 @@ pub fn open_place(
         worktrees_core::choice::validate_model(m)?;
     }
     let force = force.unwrap_or(false);
-    run_op(&format!("open {slug} fresh={}", fresh.unwrap_or(false)), &repo, move |p, ui| {
+    run_launch(ctx, &format!("open {slug} fresh={}", fresh.unwrap_or(false)), &repo, move |p, ui| {
         // Auto-resume only a conversation belonging to this place, as the
         // selected harness defines it. Codex resolves an exact session UUID
         // before launch; its repository-wide --last selector is never used.

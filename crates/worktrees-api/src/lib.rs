@@ -160,6 +160,12 @@ pub struct Ctx {
     /// through [`Ctx::granted`], which narrows.
     caps: worktrees_core::authz::Caps,
     console: bool,
+    /// Who this call ACTS for, when serve's caller is known: the principal and
+    /// device recorded beside what a body writes (`note_by`, `title_by`) and
+    /// on the agents it launches (`launched_by`, with the reach a scoped
+    /// device's launch narrows to — Server Edition Phase 2, §7.3, §7.5).
+    /// `None` is the engine's own work. Set only through [`Ctx::acting_for`].
+    acting: Arc<Option<worktrees_core::store::LaunchedBy>>,
 }
 
 impl Ctx {
@@ -176,6 +182,7 @@ impl Ctx {
             fetch: Arc::new(worktrees_core::fetchpolicy::Fetcher::Console),
             caps: worktrees_core::authz::Caps::ALL,
             console: true,
+            acting: Arc::new(None),
         }
     }
 
@@ -225,6 +232,26 @@ impl Ctx {
     /// can. The bodies that would class every path they list skip the work.
     pub fn reads_every_class(&self) -> bool {
         worktrees_core::pathclass::Class::ALL.iter().all(|c| self.may(*c, worktrees_core::authz::Access::Read))
+    }
+
+    /// The same engine, acting for `who`. Set once: a `Ctx` that already acts
+    /// for someone keeps them, so a device's call can never be re-labelled as
+    /// another caller's further down.
+    pub fn acting_for(&self, who: worktrees_core::store::LaunchedBy) -> Ctx {
+        if self.acting.is_some() {
+            return self.clone();
+        }
+        Ctx { acting: Arc::new(Some(who)), ..self.clone() }
+    }
+
+    /// Who this call launches agents for, if anyone.
+    pub fn launched_by(&self) -> Option<&worktrees_core::store::LaunchedBy> {
+        self.acting.as_ref().as_ref()
+    }
+
+    /// Who this call writes declared state for, if anyone.
+    pub fn by(&self) -> Option<worktrees_core::store::By> {
+        self.launched_by().map(|l| l.by.clone())
     }
 
     /// How this call's git fetches `url` (exactly as git is handed it):

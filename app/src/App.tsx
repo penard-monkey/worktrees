@@ -39,6 +39,7 @@ import { needsRepair, projectTodos, todoCount, type Remedies } from "./projectTo
 import { StatusBody, StatusSheet, type StatusReport } from "./StatusSheet";
 import { installUsage, setSurface, trackChord } from "./usage";
 import { fileInfo } from "./filekind";
+import { fromDevice, instructionLine, instructionTitle, launchedTitle, deviceLabel, type By, type LaunchedBy, type RemoteInstruction } from "./provenance";
 import { canStep as canStepNav, empty as emptyHistory, goTo as goToNav, label as labelNav, locKey, prune as pruneNav, reachable as reachableNav, record as recordNav, type History as NavHistory, type Loc } from "./navHistory";
 import { applySettings, applyZoom, clampDock, clampMdZoom, clampNav, clampZoom, DEFAULTS, fitLayout, loadSettings, lowerFits, lowerFracFor, lowerRange, panelsFor, placeKey, RAIL_W, railsMerged, railsWidth, saveSettings, stepMdZoom, stepZoom, upperTab, viewportWidth, type PlacePanels, type Settings, type UpdateInfo } from "./settings";
 import {
@@ -266,6 +267,13 @@ type Declared = {
   /// Not a known key of `Declared` in Rust — it round-trips through `extra`,
   /// which is why it shows up here as a plain key on the declared JSON.
   status_report?: StatusReport | null;
+  /// Server Edition Phase 2 provenance (store.rs, ./provenance): who launched
+  /// the agent through serve, the last instruction file a paired DEVICE wrote
+  /// here, and who set the note and title through serve.
+  launched_by?: LaunchedBy;
+  last_remote_instruction?: RemoteInstruction;
+  note_by?: By;
+  title_by?: By;
 } | null;
 
 type AgentSession = { name: string; up: boolean; model?: string | null };
@@ -8333,6 +8341,15 @@ function App() {
                     {selected.lifecycle_effective !== "active" && (
                       <span className={"life " + selected.lifecycle_effective}>{selected.lifecycle_effective}</span>
                     )}
+                    {/* §7.3: an instruction file a paired device wrote here,
+                        marked out of band — never inside the file. */}
+                    {fromDevice(selected.declared?.last_remote_instruction) && (
+                      <span className="s remote-edit" data-testid="remote-instruction"
+                        title={instructionTitle(selected.declared!.last_remote_instruction!)}>
+                        <span className="remote-dot" aria-hidden="true" />
+                        {instructionLine(selected.declared!.last_remote_instruction!)}
+                      </span>
+                    )}
                   </span>
                 )}
               </div>
@@ -8366,6 +8383,13 @@ function App() {
                         {selected.profile_stale ? " · restart to apply" : ""}
                       </span>
                     ) : null}
+                    {/* §7.5: this live agent was launched from a paired device. */}
+                    {fromDevice(selected.declared?.launched_by) && (
+                      <span className="live-badge device-badge" data-testid="launched-by"
+                        title={launchedTitle(selected.declared!.launched_by!)}>
+                        from {deviceLabel(selected.declared!.launched_by!.device)}
+                      </span>
+                    )}
                   </>
                 ) : (
                   <button className="enter-btn with-icon" onClick={() => enterPlace(sel.repo, selected)}>Enter <Icons.ChevronRight size={13} /></button>

@@ -464,6 +464,26 @@ impl PaneList {
         found
     }
 
+    /// Every session with a pane cwd'd in `wt` — `agents_in`'s path test, and
+    /// its dock-shell exclusion, WITHOUT asking what the pane runs. What serve's
+    /// device-lane cap counts (Server Edition Phase 2, §6): a lane's session is
+    /// in this list from `new-session` on, while its pane is still running the
+    /// shell that will exec the agent — the moment `agents_in` cannot see it
+    /// yet, and exactly when the next launch, queued behind this one, counts.
+    pub fn sessions_in(&self, wt: &str, exclude_under: Option<&str>) -> Vec<String> {
+        let prefix = format!("{wt}/");
+        let mut found: Vec<String> = Vec::new();
+        for pane in &self.panes {
+            let (session, path) = (&pane.session, &pane.path);
+            if session.is_empty() || is_shell_sidecar(session) || !(path == wt || path.starts_with(&prefix)) { continue; }
+            if exclude_under.is_some_and(|dir| path == dir || path.starts_with(&format!("{dir}/"))) { continue; }
+            if !found.contains(session) {
+                found.push(session.clone());
+            }
+        }
+        found
+    }
+
     /// Every session on this server with an agent pane, wherever it runs —
     /// the machine-wide count the live-agent cap reads (`guard`). The SAME
     /// test as `agents_in`, minus the path filter, so the cap and the nav dots
@@ -1372,6 +1392,22 @@ mod tests {
             ("old-prefix".into(), "claude"),
             ("codex-sidecar".into(), "codex"),
         ]);
+    }
+
+    /// `sessions_in` is `agents_in`'s place test with no program test: a
+    /// sidecar whose pane is still the shell that will exec its agent counts,
+    /// a dock shell, a neighbouring directory and a nested place do not.
+    #[test]
+    fn sessions_in_counts_a_starting_lane_but_not_a_dock_shell() {
+        let list = pl(&[
+            ("repo-feat~agent~codex", "/repo/.worktrees/feat", "zsh"),
+            ("repo", "/repo", "zsh"),
+            ("repo~term", "/repo", "zsh"),
+            ("neighbor", "/repository", "claude"),
+        ]);
+        assert_eq!(list.sessions_in("/repo/.worktrees/feat", None), vec!["repo-feat~agent~codex".to_string()]);
+        assert!(list.agents_in("/repo/.worktrees/feat", None).is_empty(), "the gap this closes");
+        assert_eq!(list.sessions_in("/repo", Some("/repo/.worktrees")), vec!["repo".to_string()]);
     }
 
     /// npm's codex (and any node-based harness) reports `node`. In a provider

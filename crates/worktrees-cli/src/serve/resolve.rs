@@ -303,6 +303,9 @@ pub struct Resolved {
     /// A device's fetches, resolved and checked ([`Obj::RemoteUrl`]): the
     /// addresses the body's git may dial.
     pub pins: Vec<Pin>,
+    /// An instruction-class file a DEVICE is writing (§7.3): the place to
+    /// stamp `last_remote_instruction` on once the body has written it.
+    pub instruction: Option<super::provenance::Instruction>,
 }
 
 /// Check `row` for `cx.caller` holding `grant`, and rewrite `args` to the
@@ -494,6 +497,19 @@ impl St<'_> {
         Ok((slug, dir))
     }
 
+    /// The stamp a device's write of canonical `path` earns (§7.3), when its
+    /// class is one an agent obeys: `instruction`, or `executes` (a hook or an
+    /// MCP list steers it harder still). Classed over EVERY registered root,
+    /// strictest wins, as the class check itself is (`classify_canonical`).
+    fn instruction(&mut self, key: &str, root: &Path, path: &Path) -> Option<super::provenance::Instruction> {
+        use worktrees_core::pathclass::{classify_canonical, Class};
+        if !matches!(classify_canonical(&self.class_roots(), path), Some(Class::Instruction | Class::Executes)) {
+            return None;
+        }
+        let (slug, path) = super::provenance::place_of(path.strip_prefix(root).ok()?)?;
+        Some(super::provenance::Instruction { project: key.to_string(), slug, path })
+    }
+
     fn resolve(&mut self, row: &Row, obj: &Obj, args: &mut Args) -> Result<(), Refusal> {
         match *obj {
             Obj::Project(a) => {
@@ -548,7 +564,7 @@ impl St<'_> {
                 // error is the one it always had — over the WORLD's roots: the
                 // owning project is the innermost, and it must be in scope.
                 let c = std::fs::canonicalize(&raw).map_err(|e| Refusal::not_found(format!("{raw}: {e}")))?;
-                let (key, _) = self.owner_of(&c).ok_or_else(|| Refusal::not_found(format!("path outside workspace: {raw}")))?;
+                let (key, root) = self.owner_of(&c).ok_or_else(|| Refusal::not_found(format!("path outside workspace: {raw}")))?;
                 self.in_scope(&key)?;
                 let access = if row.cap == Some(Capability::Read) { Access::Read } else { Access::Write };
                 match file_requirement(&self.class_roots(), &c, access) {
@@ -560,6 +576,9 @@ impl St<'_> {
                     // The body's own guard's words (`projects::forbid_write`),
                     // so the console is told what it always was.
                     Requirement::Never => return Err(Refusal::denied(worktrees_api::projects::forbidden_message(&raw, &c))),
+                }
+                if access == Access::Write && !self.cx.caller.is_console() {
+                    self.out.instruction = self.instruction(&key, &root, &c);
                 }
                 args.set(a, Value::from(c.to_string_lossy().into_owned()));
                 self.bind(a, key, None);

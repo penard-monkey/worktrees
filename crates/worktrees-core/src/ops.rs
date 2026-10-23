@@ -317,6 +317,18 @@ fn ai_launch_inner(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> crat
     }
 }
 
+/// Record `by` as `slug`'s `launched_by` — or clear it, for a launch with no
+/// serve caller. No write when the place already says exactly that, so an
+/// ordinary CLI launch in a place no device ever touched leaves
+/// `.worktrees.places.json` alone (the profile stamp's rule, below).
+pub fn stamp_launch(main_root: &str, slug: &str, by: Option<&crate::store::LaunchedBy>) -> Result<(), String> {
+    let cur = crate::store::read_lenient(main_root).places.get(slug).and_then(|d| d.launched_by.clone());
+    if cur.as_ref() == by {
+        return Ok(());
+    }
+    crate::store::edit(main_root, slug, |d| d.launched_by = by.cloned())
+}
+
 /// Serialize provider changes across CLI, MCP and app processes. Without this,
 /// two simultaneous opens can both see an empty place and create one session
 /// each. The lock lives in Git's private directory, never in tracked files.
@@ -520,6 +532,21 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
         } else {
             keep.to_string()
         };
+        // Who this agent is launched for, BEFORE the session exists: its MCP
+        // server reads the stamp when it starts, to narrow its reach (§7.5),
+        // and serve's device-lane count reads it while this launch's lock is
+        // still held. A device launch that cannot be recorded does not start —
+        // unrecorded, it would carry the host's reach and escape the count.
+        if !ai_cmd.is_empty() {
+            let by = ui.launched_by();
+            if let Err(e) = stamp_launch(&p.main_root, &place_slug, by.as_ref()) {
+                if by.as_ref().is_some_and(|b| b.by.is_device()) {
+                    ui.error(&format!("could not record which device launched this agent ({e}) — not starting it"));
+                    return 1;
+                }
+                ui.warn(&format!("could not record who launched this agent: {e}"));
+            }
+        }
         match tmux::new_session(&session, wt, &pane0) {
             Ok(pid) => {
                 tmux::tune_session(&session);
@@ -3601,6 +3628,43 @@ fn hint_init(p: &Project, ui: &mut dyn Ui) {
 
 #[cfg(test)]
 mod tests {
+    /// `launched_by` follows the LAST launch: a device's stamp, then a launch
+    /// with no serve caller clears it (a CLI relaunch must not keep counting as
+    /// the device's lane, or keep its narrowed reach). And a launch with
+    /// nothing to record in a place that records nothing writes no store at
+    /// all, the profile stamp's rule.
+    #[test]
+    fn a_launch_stamp_follows_the_last_launch_and_writes_nothing_needless() {
+        use crate::authz::{Device, DeviceId, PrincipalId};
+        use crate::store::{read_lenient, By, LaunchedBy};
+        let d = std::env::temp_dir().join(format!("wt-ops-stamp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let root = d.to_string_lossy().into_owned();
+        let store = d.join(".worktrees.places.json");
+
+        super::stamp_launch(&root, "lane", None).unwrap();
+        assert!(!store.exists(), "nothing to record, nothing to clear: no store write");
+
+        let phone = LaunchedBy {
+            by: By { principal: PrincipalId::new("bob"), device: Device::Paired(DeviceId::new("bob-phone")) },
+            cross_project: Some("off".into()),
+        };
+        super::stamp_launch(&root, "lane", Some(&phone)).unwrap();
+        assert_eq!(read_lenient(&root).places["lane"].launched_by.as_ref(), Some(&phone));
+        // Every `store::edit` moves `updated_epoch` to now; pin it far in the
+        // past, and a rewrite shows.
+        let mut v: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&store).unwrap()).unwrap();
+        v["updated_epoch"] = serde_json::json!(1);
+        std::fs::write(&store, v.to_string()).unwrap();
+        super::stamp_launch(&root, "lane", Some(&phone)).unwrap();
+        assert_eq!(read_lenient(&root).updated_epoch, Some(1), "an unchanged stamp is not rewritten");
+
+        super::stamp_launch(&root, "lane", None).unwrap();
+        assert_eq!(read_lenient(&root).places["lane"].launched_by, None, "a launch with no serve caller clears it");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     #[test]
     fn nested_projects_are_flagged_from_both_sides_only() {
         use crate::registry::{Entry, Registry};

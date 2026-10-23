@@ -4,6 +4,7 @@
 // dead/broken project, so the design review sees all states at once.
 
 import { HARNESSES, type Harness } from "../harness";
+import type { By, LaunchedBy, RemoteInstruction } from "../provenance";
 
 export type Declared = {
   lifecycle?: string;
@@ -18,6 +19,11 @@ export type Declared = {
   /** The cached "Ask Claude" read (`ai_status_report`). Round-trips through the
    *  Rust store's `extra`, so on the wire it is a plain declared key. */
   status_report?: { text: string; epoch: number; verdict?: string } | null;
+  /** Phase 2 provenance (store.rs, ../provenance). */
+  launched_by?: LaunchedBy;
+  last_remote_instruction?: RemoteInstruction;
+  note_by?: By;
+  title_by?: By;
 } | null;
 
 export type Place = {
@@ -162,7 +168,15 @@ function cdv(): ProjectView {
       // activity cycle in install.ts) light the same dots Claude's do.
       agent_sessions: agentSessions(`${P}-billing-refactor`, "codex", "gpt-6-astra"),
       claude_session_present: false, last_commit_subject: "extract invoice service",
-      declared: { last_opened_epoch: NOW - 3600 }, lifecycle_effective: "active",
+      // Phase 2 provenance: launched from a paired device whose scope is a list
+      // (so its reach is off), which then edited AGENTS.md — the header's
+      // "edited from" line and the "from <device>" badge.
+      declared: {
+        last_opened_epoch: NOW - 3600,
+        launched_by: { principal: "owner", device: { kind: "paired", id: "d-7f3a" }, cross_project: "off" },
+        last_remote_instruction: { principal: "owner", device: { kind: "paired", id: "d-7f3a" }, path: "AGENTS.md", at: NOW - 2 * MIN },
+      },
+      lifecycle_effective: "active",
     }),
     place(P, root, {
       slug: "catalog-import", branch: "feat/catalog-import",

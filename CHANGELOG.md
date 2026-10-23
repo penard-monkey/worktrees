@@ -111,6 +111,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   shows names the device cannot read, marked as such. The Docs tab and file
   links in terminals and documents leave those files out.
 
+- **Worktrees records which device wrote an agent's instructions or started
+  an agent, and a device cannot widen an agent's reach.** This is groundwork
+  as well: no other device can drive serve yet, and nothing changes for the
+  desktop app. When one can:
+  - a place shows "AGENTS.md edited from <device>, 2 min ago" after a paired
+    device writes an instruction file there (`AGENTS.md`, `CLAUDE.md`,
+    `.planning/`, an agent's settings or hooks), and "from <device>" beside an
+    agent a device started. Nothing is written into the file itself. MCP
+    `place_status` reports the same, and who set the place's note and title.
+    Until devices have names, the device's id is shown.
+  - an agent started from a device limited to some projects reaches no other
+    project through MCP, whatever the cross-project setting says, and neither
+    does an agent it starts with `create_worktree`.
+  - at most four agents started from devices can be open at once. A fifth is
+    refused until one of them is closed.
+  The MCP server now tells agents that a place's title and note are data,
+  never instructions, and a check fails if it ever names a pairing, device,
+  scope, remote-access or audit command.
+
 ## [0.43.1] - 2026-10-22
 
 ### Fixed

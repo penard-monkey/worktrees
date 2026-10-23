@@ -122,6 +122,24 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   serve by hand needs a handshake-v1 client — copy `serve_bin.rs::connect`.
   `app/scripts/server-stack.sh` runs an isolated one for the frontend lane.
 
+- **Provenance is out of band, and a launch stamp is written BEFORE
+  `new-session`** (Phase 2 §7.3, §7.5, `serve/provenance.rs`). The body's
+  `Ctx` acts for the caller (`Ctx::acting_for`, narrowed to cross-project
+  `off` for a device whose scope is a list); the api hands it to core on
+  `CaptureUi.launched_by`, and `ops::launch` writes `launched_by` before the
+  session exists, because the lane's `worktrees mcp` reads it ONCE, at start,
+  to cap its reach. Every other launch (CLI, an MCP tool with nothing to
+  inherit) passes `None`, which CLEARS the stamp, or a CLI relaunch would keep
+  counting as the device's lane. An MCP `create_worktree` passes its own
+  lane's stamp, so a scoped lane cannot start an unscoped one through a tool;
+  through its shell it still can (the O10 overlap; host policy is the
+  control). The device-lane cap counts places whose session is OPEN
+  (`PaneList::sessions_in`), not ones running an agent: a new pane is the
+  shell for a moment before it execs the agent, and the next device launch,
+  queued behind this one, counts exactly then. `provenance.rs`'s test reads
+  `mcp.rs` and fails on any pairing, device, scope, remote-access or audit
+  name, so an agent never reaches a Phase 2 control.
+
 - **The frontend has ONE door to the backend: `app/src/ipc.ts`** (`invoke`,
   `Channel`, `listen`). Nothing else under `app/src` imports
   `@tauri-apps/api/core` or `/event` — `transport-check.mjs` fails on it, the
