@@ -36,8 +36,13 @@ export function HostsPanel({ onReport, onFail }: { onReport: (m: string) => void
   const [pairing, setPairing] = useState<{ host?: string; addr?: string; code?: string } | null>(null);
   const [pairErr, setPairErr] = useState<string | null>(null);
   const [armed, setArmed] = useState<string | null>(null);
+  // Set on EVERY mount: StrictMode mounts, unmounts and mounts again, and a
+  // flag only ever cleared would drop every answer after the first unmount.
   const mounted = useRef(true);
-  useEffect(() => () => { mounted.current = false; }, []);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   const reload = () =>
     invoke<HostList>("remote_hosts")

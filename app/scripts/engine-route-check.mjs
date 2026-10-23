@@ -171,7 +171,7 @@ if (LOCAL && SHIM && rows.length && HANDLERS.length) {
   else if (!routed) fail("remoteDoor's invoke does not route exactly: HOST_PATH_LOCAL refused with notOnHost, REMOTE_SETTINGS to the local door, everything else to the engine door");
   else ok("remoteDoor routes by HOST_PATH_LOCAL (refused, with the reason) and REMOTE_SETTINGS (the shim's blob), and sends the rest through the engine door");
   if (/engine_connect/.test(rd)) fail("remoteDoor names engine_connect — a remote window must not find or start a local serve");
-  if (!/setAway\(/.test(rd)) fail("remoteDoor does not mark the window as not on its engine's host (setAway)");
+  if (!/markRemote\(hostName\)/.test(rd) || !/export function markRemote\(hostName: string\): void \{\s*setAway\(/.test(ipc)) fail("remoteDoor does not mark the window as not on its engine's host (markRemote → setAway)");
   else ok("remoteDoor marks the window as not on its engine's host before anything renders");
   const remoteShim = (SHIM ?? []).filter((n) => n.startsWith("remote_"));
   const mod = read(here("../src-tauri/src/remote.rs"));

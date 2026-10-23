@@ -95,8 +95,8 @@ async function boot() {
     // `?remote`: as if a paired host were chosen, so every act that needs the
     // host's paths shows greyed, with its reason (§4.4).
     if (new URLSearchParams(window.location.search).has("remote")) {
-      const { setAway } = await import("./ipc");
-      setAway("this window drives Studio (the harness's paired host), and a path there is not a path on this machine");
+      const { markRemote } = await import("./ipc");
+      markRemote("Studio");
     }
     // `?slowengine[=ms]`: the app's boot over the mock — an engine door whose
     // first connect takes that long, so a call that cannot wait for it is

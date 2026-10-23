@@ -112,6 +112,13 @@ export function remoteHost(): string | null {
   return remoteName;
 }
 
+/** This window drives the paired host `hostName`: it is not on its engine's
+ *  host. The remote door's, and the harness's `?remote`. */
+export function markRemote(hostName: string): void {
+  setAway(`this window drives ${hostName}, and a path there is not a path on this machine`);
+  remoteName = hostName;
+}
+
 // ── the engine door ─────────────────────────────────────────────────────────
 
 /** serve's `ClientLocal` rows (crates/worktrees-cli/src/serve/dispatch.rs):
@@ -452,8 +459,7 @@ export const REMOTE_SETTINGS: Readonly<Record<string, string>> = {
  *  with the one rule §4.4 takes out falling out of `owned: false`: a remote
  *  window never starts a serve. */
 export function remoteDoor(local: Door, hostName: string, dial: Dial, env: RetryEnv): EngineDoor {
-  setAway(`this window drives ${hostName}, and a path there is not a path on this machine`);
-  remoteName = hostName;
+  markRemote(hostName);
   const inner = engineDoor(local, dial, env);
   return {
     ...inner,
