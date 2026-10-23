@@ -2417,6 +2417,41 @@ mod devices {
         e.closed(&mut c, "revoked", Duration::from_secs(1));
     }
 
+    /// A path's class (§7.1, #549) RAISES the act to drive-class. Writing an
+    /// instruction file needs `instruct` and reading a secret needs `stream`,
+    /// so both wait for the step-up, while a plain file in the same project,
+    /// and an instruction file READ, do not. Until #549 every path was plain,
+    /// so nothing exercised the raise.
+    #[test]
+    fn a_paths_class_raises_the_act_to_drive_class_for_step_up() {
+        let e = engine("stepup-class", vec![]);
+        let a = e.dir.join("a");
+        for f in ["AGENTS.md", ".env", "lib.rs"] {
+            std::fs::write(a.join(f), "x").unwrap();
+        }
+        let (rec, k) = iphone(&e.reg, &[Read, Write, Instruct, Stream]);
+        let ex = [1u8; 32];
+        let mut c = e.connect_with(caller(&rec), Some(ex));
+        let due = json!("step-up required");
+        let ask = |c: &mut Client, cmd: &str, f: &str| {
+            let path = s(&a.join(f));
+            let args = if cmd == "read_file" { json!({"path": path, "max_bytes": null}) } else { json!({"path": path, "content": "y", "expected_mtime": null}) };
+            e.rpc(c, cmd, args)["err"].clone()
+        };
+        assert_ne!(ask(&mut c, "read_file", "lib.rs"), due, "a plain read");
+        assert_ne!(ask(&mut c, "write_file", "lib.rs"), due, "a plain write");
+        assert_ne!(ask(&mut c, "read_file", "AGENTS.md"), due, "an instruction file is read as plain");
+        assert_eq!(ask(&mut c, "write_file", "AGENTS.md"), due, "written, it is instruct");
+        assert_eq!(ask(&mut c, "read_file", ".env"), due, "a secret is stream, even to read");
+        let ch = e.rpc(&mut c, "stepup_challenge", json!({}))["ok"]["challenge"].as_str().unwrap().to_string();
+        let mut msg = super::super::stepup::b64_decode(&ch).unwrap();
+        msg.extend_from_slice(&ex);
+        let r = e.rpc(&mut c, "stepup_prove", json!({"spki": worktrees_api::files::b64_encode(&k.spki), "signature": worktrees_api::files::b64_encode(&k.sign(&msg))}));
+        assert!(r.get("ok").is_some(), "{r}");
+        assert_ne!(ask(&mut c, "write_file", "AGENTS.md"), due, "proved on this connection");
+        assert_ne!(ask(&mut c, "read_file", ".env"), due);
+    }
+
     /// The file is the registry: a device whose record is cut out of
     /// `devices.json`, or whose file is deleted, loses its open connections at
     /// the next look (the expiry watch's minute, or any write), not only its
