@@ -2975,30 +2975,6 @@ mod devices {
         assert!(r["err"].as_str().is_some_and(|m| m.contains("revoked")), "{r}");
     }
 
-    /// The console's `devices:changed` says whether its event is one of §5.3's
-    /// alerts — serve's rule (`DeviceEvent::alerts`), so the page's notice
-    /// keeps no copy of it.
-    #[test]
-    fn devices_changed_says_which_events_are_alerts() {
-        let e = engine("alertflag", vec![]);
-        let mut con = e.connect(Caller::console());
-        let d = enroll(&e.reg, "Mac B", 1, &[Read], Projects::All);
-        e.rpc(&mut con, "device_set_expiry", json!({"id": d.id.as_str(), "expiry": "never"}));
-        e.rpc(&mut con, "device_disable", json!({"id": d.id.as_str()}));
-        e.reg.announce(super::super::devices::DeviceEvent::NewAddressClass { subject: d.subject(), from: "cgnat".into(), to: "rfc1918".into() });
-        e.rpc(&mut con, "pair_status", json!({}));
-        let got: Vec<(String, Value)> = e
-            .skipped
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|v| v["event"] == json!("devices:changed"))
-            .map(|v| (v["payload"]["event"].as_str().unwrap_or("").to_string(), v["payload"]["alert"].clone()))
-            .collect();
-        let want = [("enrolled", true), ("expiry_changed", false), ("disabled", false), ("new_address_class", true)];
-        assert_eq!(got, want.map(|(e, a)| (e.to_string(), json!(a))));
-    }
-
     // ── step-up (§2.5) ───────────────────────────────────────────────────────
 
     fn iphone(reg: &DeviceRegistry, caps: &[Capability]) -> (DeviceRecord, super::super::stepup::testkit::StepUpKey) {

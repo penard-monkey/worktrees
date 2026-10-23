@@ -426,13 +426,7 @@ impl Clients {
         if matches!(e, DeviceEvent::ConnectRefused { subject: None, .. }) {
             return;
         }
-        // With serve's own verdict on whether it is one of §5.3's alerts, so
-        // the host app's notice keeps no copy of the rule.
-        let mut v = serde_json::to_value(e).unwrap_or(Value::Null);
-        if let Value::Object(m) = &mut v {
-            m.insert("alert".into(), Value::Bool(e.alerts()));
-        }
-        Broadcast(self.clone()).emit("devices:changed", v);
+        Broadcast(self.clone()).emit("devices:changed", serde_json::to_value(e).unwrap_or(Value::Null));
     }
 
     /// Close every device's connections, now: the kill switch, a pause, a

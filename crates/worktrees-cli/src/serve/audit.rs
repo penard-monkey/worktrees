@@ -1681,6 +1681,11 @@ fn device_record(pairing_for: &mut Option<PrincipalId>, e: &DeviceEvent) -> Opti
         E::StepupChanged { subject, required } => {
             ("device", console(), None, json!({ "event": "stepup_changed", "subject": subject, "required": required }))
         }
+        // The host's act (`device_rename` is console-only). Display names,
+        // held to the pairing frame's rule, bounded like the enrolled one.
+        E::Renamed { subject, from, to } => {
+            ("device", console(), None, json!({ "event": "renamed", "subject": subject, "from": ident(from), "to": ident(to) }))
+        }
         E::ScopeChanged { subject, by, from, to, widened, reduced } => (
             "device",
             by_caller(by),
@@ -3141,6 +3146,7 @@ mod tests {
             E::PairingClosed { ended: Ended::Paired, device: Some(DeviceId::new("d_new")) },
             E::ExpiryChanged { subject: owner_subject("d_new"), from: Expiry::default(), to: Expiry::Never },
             E::StepupChanged { subject: owner_subject("d_new"), required: false },
+            E::Renamed { subject: owner_subject("d_new"), from: "Phone".into(), to: "Work phone".into() },
             E::ScopeChanged { subject: owner_subject("d_new"), by: peer.clone(), from: grant.clone(), to: Grant::nothing(), widened: false, reduced: true },
             E::Disabled { subject: owner_subject("d_new"), reason: DisabledReason::Idle, by: Actor::Serve },
             E::Enabled { subject: owner_subject("d_new") },
@@ -3162,6 +3168,7 @@ mod tests {
                     E::Enabled { .. } => ("device", Some("enabled")),
                     E::ExpiryChanged { .. } => ("device", Some("expiry_changed")),
                     E::StepupChanged { .. } => ("device", Some("stepup_changed")),
+                    E::Renamed { .. } => ("device", Some("renamed")),
                     E::ScopeChanged { .. } => ("device", Some("scope_changed")),
                     E::IdentityRotated { .. } => ("device", Some("identity_rotated")),
                     E::Forgotten { .. } => ("device", Some("forgotten")),
@@ -3215,6 +3222,12 @@ mod tests {
         assert_eq!((rec("enrolled")["device"].as_str(), rec("enrolled")["detail"]["fields"]["spki_sha256"].clone()), (Some("loopback"), json!("a".repeat(64))));
         assert_eq!((rec("attempt")["peer"].as_str(), rec("attempt")["principal"].clone()), (Some("100.64.0.9"), Value::Null), "before any authentication");
         assert_eq!(rec("closed")["detail"]["subject"], json!({ "principal": "owner", "device": "d_new" }));
+        let renamed = rec("renamed");
+        assert_eq!(
+            (renamed["device"].as_str(), renamed["detail"]["from"].as_str(), renamed["detail"]["to"].as_str()),
+            (Some("loopback"), Some("Phone"), Some("Work phone")),
+            "the console renamed it: {renamed}"
+        );
         let knock = l.iter().find(|r| r["kind"] == "auth").unwrap();
         assert_eq!((knock["detail"]["reason"].as_str(), knock["detail"]["subject"]["device"].as_str()), (Some("revoked"), Some("d_new")), "{knock}");
         let emitted = host.0.lock().unwrap();

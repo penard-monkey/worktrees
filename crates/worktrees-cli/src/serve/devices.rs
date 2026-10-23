@@ -612,8 +612,7 @@ impl DeviceEvent {
     }
 
     /// Worth a host notification (§5.3): the audit log writes an `alert`
-    /// record and emits `audit:alert` for it, and `conn::Clients::hear` says
-    /// so in the console's `devices:changed`.
+    /// record and emits `audit:alert` for it.
     pub fn alerts(&self) -> bool {
         match self {
             DeviceEvent::Enrolled { .. } | DeviceEvent::Unreadable { .. } | DeviceEvent::IdentityRotated { .. } | DeviceEvent::NewAddressClass { .. } => true,
