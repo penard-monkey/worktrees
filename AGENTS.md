@@ -176,8 +176,10 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   reserves what ITS record will cost (begun and rendered there, under the
   log's lock, so acts in flight never share bytes; no debt is ever
   forgiven) from `DRIVE` at `Witness::allow`, the last step of
-  `call_in_seen` after the lane gate, and one the budget cannot pay for is
-  refused there (`RefusalKind::AuditBudget`, answered with the seconds to
+  `call_in_seen`, after the lane gate and `audit_gate` (a device's
+  non-read act while the log is unhealthy: `audit-unavailable`, #556), and
+  one the budget cannot pay for is refused there
+  (`RefusalKind::AuditBudget`, answered with the seconds to
   wait), recorded once and charged to `REFUSALS`, so a refusal never keeps
   `DRIVE` spent. The console is never gated. serve installs its signal
   handlers BEFORE it writes serve.json: a supervisor's SIGTERM in that gap killed it
@@ -204,9 +206,14 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   private address on one interface, tied to it (`sock.rs`: socket2's
   `bind_device_by_index_v4/_v6`), the classifier at parse AND at bind; the
   peer rule (`peer.rs`) drops a source before TLS, nothing written. Then
-  TLS 1.3 with #544's `DeviceVerifier` + `admit_peer`, the upgrade with
-  `Host` = the bound literal and NO `Origin` (`policy::remote_*`: a native
-  socket sends none, and the opposite of loopback's rule ON PURPOSE), and
+  TLS 1.3 with #544's `DeviceVerifier` + `admit_peer`. The verifier is built
+  per connection (`tls::with_verifier`, ~0.3 µs, measured as no handshake
+  cost) so the registry's `ConnectRefused` names the peer, and that event is
+  the audit log's ONE record of a knock (`Audit::knock`): the listener
+  records only what else ends TLS, or one knock counts twice. Then the
+  upgrade with `Host` = the bound literal and NO `Origin`
+  (`policy::remote_*`: a native socket sends none, and the opposite of
+  loopback's rule ON PURPOSE), and
   handshake v1 UNCHANGED, keyed by `hex(exporter "EXPORTER-worktrees-remote-
   v1")`, whose `ok` names the device. A session that joins the client set
   checks AFTER joining that its bind is open and its device live: a kill

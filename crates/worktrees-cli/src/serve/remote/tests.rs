@@ -89,6 +89,7 @@ struct Host {
     dir: PathBuf,
     reg: Arc<DeviceRegistry>,
     remote: Arc<RemoteAccess>,
+    audit: Arc<super::super::audit::Audit>,
 }
 
 fn host(tag: &str) -> Host {
@@ -114,7 +115,7 @@ fn host_made(tag: &str, gate: Option<Arc<dyn super::Gate>>, advert: Arc<dyn supe
     prep(&dir.join("cfg"));
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
     let reg = Arc::new(DeviceRegistry::in_memory());
-    let remote = {
+    let (remote, audit) = {
         let _in = rt.enter();
         let pairing = Arc::new(Pairing::new(Some(dir.join("cfg")), reg.clone()));
         let world = Roots(vec![dir.join("a").to_string_lossy().into_owned()]);
@@ -133,11 +134,11 @@ fn host_made(tag: &str, gate: Option<Arc<dyn super::Gate>>, advert: Arc<dyn supe
         audit.hear(&reg);
         reg.cross_check(&super::super::audit::evidence(&dir.join("cfg"), &chain), worktrees_core::sysclock::now_epoch()).unwrap();
         let gate = gate.unwrap_or_else(|| audit.clone());
-        let r = RemoteAccess::new(dir.join("cfg"), ctx, clients.clone(), reg.clone(), pairing, audit, gate, advert, read);
+        let r = RemoteAccess::new(dir.join("cfg"), ctx, clients.clone(), reg.clone(), pairing, audit.clone(), gate, advert, read);
         clients.set_remote(&r);
-        r
+        (r, audit)
     };
-    Host { rt, dir, reg, remote }
+    Host { rt, dir, reg, remote, audit }
 }
 
 impl Host {
@@ -574,6 +575,98 @@ fn a_devices_fifth_live_connection_is_closed_and_the_four_before_it_are_served()
         };
         assert!(last.get("ok").is_some(), "a connection after one of the four ended: {last}");
     });
+}
+
+/// §5.1: a key refused at the remote door is ONE audit record, and it names
+/// the address the key came from. The registry's `ConnectRefused` is that
+/// record (`Audit::knock`), from a verifier made for this connection; the
+/// listener adds nothing for it, so the auth episode ends counting one knock.
+#[test]
+fn a_key_refused_at_the_remote_door_is_one_record_naming_its_address() {
+    let Some(lan) = lan_or_skip() else { return };
+    let h = host_audited("knock", |_| {});
+    h.remote.enable(&lan.to_string(), None, None, None).unwrap();
+    let (at, pin) = (h.at(), h.pin());
+    let key = device_key();
+    h.enroll(&key, &[Capability::Read]);
+    h.rt.block_on(async {
+        let (mut ws, k) = upgrade(at, &pin, &key, &at.to_string(), None).await.expect("a 101");
+        assert!(v1(&mut ws, &k).await.is_some(), "the enrolled key is served first");
+    });
+    let stranger = device_key();
+    assert!(h.rt.block_on(upgrade(at, &pin, &stranger, &at.to_string(), None)).is_err(), "refused inside TLS");
+    // The listener's own record, if it made one, lands as its connection
+    // task ends, which is at once: half a second covers it before the
+    // episode is closed and counted.
+    std::thread::sleep(Duration::from_millis(500));
+    h.audit.stopped();
+    let log = std::fs::read_to_string(h.dir.join("cfg/audit.jsonl")).unwrap();
+    let auth: Vec<Value> = log.lines().map(|l| serde_json::from_str::<Value>(l).unwrap()).filter(|r| r["kind"] == "auth").collect();
+    let began = auth.iter().find(|r| r["detail"]["episode"] == "began").unwrap_or_else(|| panic!("no knock recorded: {auth:#?}"));
+    assert_eq!(began["detail"]["reason"], json!("unknown-key"), "{began}");
+    assert_eq!(began["detail"]["key"], json!(stranger.pin), "{began}");
+    assert_eq!(began["peer"], json!(lan.to_string()), "the address the key came from: {began}");
+    let ended = auth.iter().find(|r| r["detail"]["episode"] == "ended").unwrap_or_else(|| panic!("{auth:#?}"));
+    assert_eq!((&ended["detail"]["count"], &ended["detail"]["reasons"]), (&json!(1), &json!({ "unknown-key": 1 })), "one knock, one count: {ended}");
+}
+
+/// §5.2 on the remote door, through serve's own start path (`start_with`): a
+/// device written into `devices.json` between two runs, which the chain
+/// never enrolled, is disabled at boot and refused at the remote listener's
+/// TLS, with its address in the knock's record; the device the chain did
+/// enroll is served there.
+#[test]
+fn a_device_the_chain_never_enrolled_is_refused_at_the_remote_door() {
+    use super::super::devices::{DevicesFile, Enrollment, Expiry, Platform, FILE};
+    use worktrees_core::authz::DeviceId;
+    let Some(lan) = lan_or_skip() else { return };
+    let dir = scratch("boot").join("cfg");
+    std::fs::create_dir_all(&dir).unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    let boot = || rt.block_on(async { super::super::start_with(dir.clone(), 0, vec![], super::super::conn::LIMITS) }).unwrap();
+    let (real, forged) = (device_key(), device_key());
+    let first = boot();
+    let e = Enrollment {
+        principal: PrincipalId::owner(),
+        name: "Mac B".into(),
+        platform: Platform::Macos,
+        spki_sha256: real.pin.clone(),
+        stepup_spki_sha256: None,
+        grant: Grant { capabilities: Caps::of(&[Capability::Read]), projects: Projects::All },
+        expiry: Expiry::default(),
+        addr: None,
+    };
+    first.devices.as_ref().unwrap().enroll(e, worktrees_core::sysclock::now_epoch()).unwrap();
+    first.listener.stop();
+    drop(first);
+    // Between runs, a same-user process adds a device of its own.
+    let path = dir.join(FILE);
+    let mut f = DevicesFile::parse(&std::fs::read(&path).unwrap()).unwrap();
+    let mut d = f.devices[0].clone();
+    (d.id, d.spki_sha256) = (DeviceId::new("d_forged"), forged.pin.clone());
+    f.devices.push(d);
+    std::fs::write(&path, serde_json::to_vec_pretty(&f).unwrap()).unwrap();
+
+    let second = boot();
+    let remote = second.remote.clone().unwrap();
+    // No advert: a test announces nothing on the LAN.
+    let st = rt.block_on(async { remote.enable(&lan.to_string(), None, None, Some(false)) }).unwrap();
+    assert_eq!(st["state"], json!("listening"), "{st}");
+    let (at, pin) = (remote.at().unwrap(), Identity::load(&dir).unwrap().unwrap().pin().to_string());
+    rt.block_on(async {
+        let (mut ws, k) = upgrade(at, &pin, &real, &at.to_string(), None).await.expect("a 101");
+        assert!(v1(&mut ws, &k).await.is_some(), "the device the chain enrolled is served");
+        assert!(upgrade(at, &pin, &forged, &at.to_string(), None).await.is_err(), "the forged one is refused inside TLS");
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    remote.disable().unwrap();
+    second.listener.stop();
+    let log = std::fs::read_to_string(dir.join(super::super::audit::FILE)).unwrap();
+    let recs: Vec<Value> = log.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    let knock = recs.iter().find(|r| r["kind"] == "auth" && r["detail"]["episode"] == "began").unwrap_or_else(|| panic!("{recs:#?}"));
+    assert_eq!((knock["detail"]["reason"].as_str(), knock["detail"]["subject"]["device"].as_str()), (Some("disabled"), Some("d_forged")), "{knock}");
+    assert_eq!(knock["peer"], json!(lan.to_string()), "{knock}");
+    let _ = std::fs::remove_dir_all(dir.parent().unwrap());
 }
 
 /// §4.1: an address outside the allowlist is refused as `not-private` —

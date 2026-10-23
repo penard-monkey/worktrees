@@ -11,9 +11,12 @@
 //! 2. **TLS 1.3** with `tls::DeviceVerifier`, inside [`TLS_DEADLINE`]: a key
 //!    that is not a live device's ends inside rustls, before HTTP — an
 //!    unknown device never gets as far as a line in serve.log of its own
-//!    (they are counted per episode, `Episode`). Then `tls::admit_peer`
-//!    again from `peer_certificates()`: the verifier is the early exit, not
-//!    the only gate (§4.2).
+//!    (they are counted per episode, `Episode`). The verifier is made per
+//!    connection (`tls::with_verifier`) so the registry's `ConnectRefused`
+//!    names the address, and that event is the audit log's ONE record of the
+//!    knock: the listener records only what ends TLS otherwise. Then
+//!    `tls::admit_peer` again from `peer_certificates()`: the verifier is the
+//!    early exit, not the only gate (§4.2).
 //! 3. **The upgrade**, on the remote rule set (`policy::remote_host_ok`,
 //!    `remote_origin_ok`, `upgrade_ok`). A refusal closes with nothing
 //!    written, as on loopback.
@@ -315,6 +318,15 @@ pub fn device_frame(devices: &DeviceRegistry, caller: &Caller) -> Option<Value> 
 /// was last seen from (`netclass::Class`) — a tailnet device now on the LAN,
 /// a LAN device now through a carrier's CGNAT. Its address within a class
 /// moves all the time and says nothing.
+/// Did `DeviceVerifier` refuse the key? It answers exactly this error for a
+/// registry refusal and for nothing else, and tokio-rustls hands the rustls
+/// error back inside the `io::Error`.
+fn knocked(e: &std::io::Error) -> bool {
+    e.get_ref()
+        .and_then(|i| i.downcast_ref::<rustls::Error>())
+        .is_some_and(|e| matches!(e, rustls::Error::InvalidCertificate(rustls::CertificateError::ApplicationVerificationFailure)))
+}
+
 fn new_address_class(devices: &DeviceRegistry, caller: &Caller, d: &worktrees_core::authz::DeviceId, now: IpAddr) {
     let class = |ip: IpAddr| worktrees_core::netclass::classify(ip).ok();
     let was = devices.last_addr(d).and_then(|a| a.parse::<IpAddr>().ok()).and_then(class);
@@ -345,27 +357,33 @@ struct Session {
 }
 
 async fn connection(tcp: TcpStream, peer: SocketAddr, shared: Arc<Shared>, adm: Arc<Admission>) {
-    let Some(cfg) = shared.deps.tls.lock().unwrap().clone() else { return };
+    let Some(base) = shared.deps.tls.lock().unwrap().clone() else { return };
+    let verifier = Arc::new(tls::DeviceVerifier::for_peer(shared.deps.devices.clone(), peer.ip()));
+    let Ok(cfg) = tls::with_verifier(&base, verifier) else { return };
     let _ = tcp.set_nodelay(true);
     let id = shared.deps.clients.next_id();
     let tls = match tokio::time::timeout(TLS_DEADLINE, tokio_rustls::TlsAcceptor::from(cfg).accept(tcp)).await {
         Ok(Ok(s)) => s,
         r => {
             shared.deps.refused.note();
-            shared.deps.audit.auth_failed(if r.is_err() { "tls-deadline" } else { "tls" }, id, Some(peer.ip().to_string()));
+            // A key the verifier refused is the registry's event, which the
+            // audit log records with this address (`Audit::knock`); recording
+            // it here too would count one knock twice.
+            if !matches!(&r, Ok(Err(e)) if knocked(e)) {
+                shared.deps.audit.auth_failed(if r.is_err() { "tls-deadline" } else { "tls" }, id, Some(peer.ip().to_string()));
+            }
             return;
         }
     };
     let session = {
         let c = tls.get_ref().1;
         let now = worktrees_core::sysclock::now_epoch();
-        let caller = match tls::admit_peer(c, &shared.deps.devices, now) {
-            Ok(caller) => caller,
-            Err(_) => {
-                shared.deps.refused.note();
-                shared.deps.audit.auth_failed("device", id, Some(peer.ip().to_string()));
-                return;
-            }
+        // A refusal here is the registry's event as well, with the address:
+        // the handshake verified a certificate, so it is the registry's
+        // check that said no.
+        let Ok(caller) = tls::admit_peer(c, &shared.deps.devices, now, Some(peer.ip())) else {
+            shared.deps.refused.note();
+            return;
         };
         let (Ok(key), Ok(stepup)) = (tls::exporter(c, EXPORTER_REMOTE), tls::exporter(c, tls::EXPORTER_STEPUP)) else { return };
         let Some(device) = device_frame(&shared.deps.devices, &caller) else { return };
