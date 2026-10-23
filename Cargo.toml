@@ -4,7 +4,7 @@
 # parallel test gate until the migration retires it.
 [workspace]
 resolver = "2"
-members = ["crates/worktrees-core", "crates/worktrees-api", "crates/worktrees-cli", "app/src-tauri"]
+members = ["crates/worktrees-core", "crates/worktrees-api", "crates/worktrees-cli", "crates/worktrees-remote", "app/src-tauri"]
 
 [workspace.package]
 version = "0.43.1"
@@ -25,3 +25,4 @@ libc = "0.2"
 clap = { version = "4", features = ["derive"] }
 worktrees-core = { path = "crates/worktrees-core" }
 worktrees-api = { path = "crates/worktrees-api" }
+worktrees-remote = { path = "crates/worktrees-remote" }

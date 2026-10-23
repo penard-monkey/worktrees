@@ -104,3 +104,8 @@ socket2 = { version = "0.6", features = ["all"] }
 # brings no dependency of its own. New in the lock: qrcode alone. OSV, at
 # 0.14.1 and for every version: no advisory (2026-10-22).
 qrcode = { version = "0.14", default-features = false }
+#
+# The client half of the same TLS, and pairing's proof and comparison code:
+# one implementation for serve and its devices, in the transport crate the
+# desktop shim and the iOS app dial through. `worktrees remote …` is its CLI.
+worktrees-remote = { workspace = true }

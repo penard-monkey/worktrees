@@ -22,55 +22,36 @@
 //! - [`AnyKey`] (the pairing listener's): any certificate, because the
 //!   pairing proof is what authenticates there (§2.2) — but the signature
 //!   must verify, so a device proves it holds the key it is about to enroll.
-//! - [`PinnedServer`] (a device's, here for the pairing tests and the shim
-//!   later): the server's SPKI must equal the pin; no name is checked.
+//! - [`PinnedServer`] (a device's, in `worktrees_remote::tls` with the rest
+//!   of the client half): the server's SPKI must equal the pin; no name is
+//!   checked.
 //!
 //! Every signature is ECDSA P-256 with SHA-256, the one scheme offered: the
 //! Secure Enclave signs with P-256 and nothing else (§2.1).
 
 use std::sync::Arc;
 
-use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
-use rustls::crypto::CryptoProvider;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
+use rustls::client::danger::HandshakeSignatureValid;
+use rustls::pki_types::{CertificateDer, UnixTime};
 use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
-use rustls::{CertificateError, ClientConfig, DigitallySignedStruct, DistinguishedName, Error, ServerConfig, SignatureScheme};
+use rustls::{CertificateError, DigitallySignedStruct, DistinguishedName, Error, ServerConfig, SignatureScheme};
+#[cfg(test)]
+use rustls::{pki_types::{PrivateKeyDer, ServerName}, ClientConfig};
 use worktrees_core::authz::Caller;
 
-use super::devices::{pin_of, ConnectRefusal, DeviceRegistry};
+#[cfg(test)]
+use super::devices::pin_of;
+use super::devices::{ConnectRefusal, DeviceRegistry};
 use super::identity::Identity;
 
-/// The exporter label a pairing proof is bound with (§2.2 step 4).
-pub const EXPORTER_PAIR: &[u8] = b"EXPORTER-worktrees-pair-v1";
-
-/// The exporter label a step-up signature is bound with (§2.5).
-pub const EXPORTER_STEPUP: &[u8] = b"EXPORTER-worktrees-stepup-v1";
-
-/// The one signature scheme: ECDSA P-256, SHA-256.
-pub const SCHEME: SignatureScheme = SignatureScheme::ECDSA_NISTP256_SHA256;
-
-pub fn provider() -> Arc<CryptoProvider> {
-    Arc::new(rustls::crypto::ring::default_provider())
-}
-
-/// The pin of a certificate: SHA-256 of its SPKI. `None` for one that does
-/// not parse.
-pub fn pin_of_cert(cert: &CertificateDer<'_>) -> Option<String> {
-    let parsed = rustls::server::ParsedCertificate::try_from(cert).ok()?;
-    Some(pin_of(parsed.subject_public_key_info().as_ref()))
-}
-
-/// rustls's own TLS 1.3 signature check, for [`SCHEME`] alone.
-fn verify13(message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, Error> {
-    if dss.scheme != SCHEME {
-        return Err(Error::PeerIncompatible(rustls::PeerIncompatible::NoSignatureSchemesInCommon));
-    }
-    rustls::crypto::verify_tls13_signature(message, cert, dss, &provider().signature_verification_algorithms)
-}
-
-fn no_tls12() -> Error {
-    Error::PeerIncompatible(rustls::PeerIncompatible::Tls13RequiredForQuic)
-}
+// The client half, and what both halves share — the exporter labels, the one
+// scheme, the provider, the pin, rustls's signature check — are
+// `worktrees_remote::tls`'s: one implementation for serve and its devices.
+pub use worktrees_remote::tls::{pin_of_cert, provider, EXPORTER_PAIR, EXPORTER_STEPUP, SCHEME};
+use worktrees_remote::tls::{no_tls12, verify13};
+// The client half, for serve's own tests of a device.
+#[cfg_attr(not(test), allow(unused_imports))]
+pub use worktrees_remote::tls::{client_config, PinnedServer};
 
 /// The remote listener's client verifier: a live device's key, and a valid
 /// signature with it. `peer` is the address the connection came from, which
@@ -161,43 +142,6 @@ impl ClientCertVerifier for AnyKey {
     }
 }
 
-/// A device's server verifier: the server's key is the pinned one.
-// A seam: slice 6's remote listener (and the shim's remote door) use it.
-#[cfg_attr(not(test), allow(dead_code))]
-#[derive(Debug)]
-pub struct PinnedServer {
-    pin: String,
-}
-
-impl PinnedServer {
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn new(pin: &str) -> Self {
-        PinnedServer { pin: pin.to_string() }
-    }
-}
-
-impl ServerCertVerifier for PinnedServer {
-    fn verify_server_cert(&self, end_entity: &CertificateDer<'_>, _: &[CertificateDer<'_>], _: &ServerName<'_>, _: &[u8], _: UnixTime) -> Result<ServerCertVerified, Error> {
-        match pin_of_cert(end_entity) {
-            Some(p) if p == self.pin => Ok(ServerCertVerified::assertion()),
-            Some(_) => Err(Error::InvalidCertificate(CertificateError::ApplicationVerificationFailure)),
-            None => Err(Error::InvalidCertificate(CertificateError::BadEncoding)),
-        }
-    }
-
-    fn verify_tls12_signature(&self, _: &[u8], _: &CertificateDer<'_>, _: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, Error> {
-        Err(no_tls12())
-    }
-
-    fn verify_tls13_signature(&self, message: &[u8], cert: &CertificateDer<'_>, dss: &DigitallySignedStruct) -> Result<HandshakeSignatureValid, Error> {
-        verify13(message, cert, dss)
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        vec![SCHEME]
-    }
-}
-
 /// The server's config: TLS 1.3, the identity's certificate, `clients` as
 /// the client verifier, and nothing that resumes.
 pub fn server_config(id: &Identity, clients: Arc<dyn ClientCertVerifier>) -> Result<Arc<ServerConfig>, String> {
@@ -232,24 +176,6 @@ fn hardened(mut c: ServerConfig) -> Arc<ServerConfig> {
     c.send_tls13_tickets = 0;
     c.max_early_data_size = 0;
     Arc::new(c)
-}
-
-/// A device's config: TLS 1.3, the server pinned, its own key presented, no
-/// SNI, nothing resumed, no early data.
-// A seam: slice 6's remote listener (and the shim's remote door) use it.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn client_config(pin: &str, cert: CertificateDer<'static>, key: PrivateKeyDer<'static>) -> Result<Arc<ClientConfig>, String> {
-    let mut c = ClientConfig::builder_with_provider(provider())
-        .with_protocol_versions(&[&rustls::version::TLS13])
-        .map_err(|e| e.to_string())?
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(PinnedServer::new(pin)))
-        .with_client_auth_cert(vec![cert], key)
-        .map_err(|e| e.to_string())?;
-    c.resumption = rustls::client::Resumption::disabled();
-    c.enable_sni = false;
-    c.enable_early_data = false;
-    Ok(Arc::new(c))
 }
 
 /// 32 bytes of the session's TLS 1.3 exporter (RFC 8446 §7.5) under `label`,
