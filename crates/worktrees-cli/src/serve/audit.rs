@@ -151,15 +151,20 @@ pub const ACTS: Allowance = Allowance { burst: 40.0 * 1024.0, per_sec: 20.0 };
 ///
 /// Sized so a phone session never meets it. A drive-class record is 400 to
 /// 570 B (measured: an instruction write with a long path and its hash is
-/// 567 B), so 64 KiB is 115 to 160 of them at once — an agent answered every
+/// 567 B, reserved with `RESERVE_SLACK` as about 760 B), so 64 KiB is 85 to
+/// 160 of them at once — an agent answered every
 /// 30 s for an hour — and 40 B/s is one every 10 to 14 s, four to six a
 /// minute, for as long as the device is used. Past that, a device is driving
 /// agents faster than a person can read what they asked.
 pub const DRIVE: Allowance = Allowance { burst: 64.0 * 1024.0, per_sec: 40.0 };
 
-/// What a drive-class act reserves from `DRIVE` before it runs: a typical
-/// record's bytes. Its record, once written, is settled at what it cost.
-pub const DRIVE_RESERVE: f64 = 512.0;
+/// What a drive-class act reserves from `DRIVE` before it runs, beyond its
+/// own record rendered then: the fields only its end can fill (the outcome,
+/// the time, an attach's id and totals). Each act reserves what ITS record
+/// will cost, under the log's lock, so acts in flight together can never
+/// pass on bytes another has already reserved; its record, once written, is
+/// settled at what it did cost.
+const RESERVE_SLACK: f64 = 192.0;
 
 /// What a device can make with nothing granted at all (`refused`): about 40
 /// at once, then one every 50 s. A budget of its own, so junk a device needs
@@ -763,8 +768,9 @@ impl Charge {
 
 /// Bytes a device may still have written, refilled with time. It may go
 /// into debt — the episode records are always written, and paid for out of
-/// later detail — but no deeper than one burst, so a device that stopped
-/// flooding is back in full detail within two bursts' refill.
+/// later detail — as deep as what the device made the log write, and none of
+/// it is forgiven: a device in debt has its next record written in full only
+/// once it has paid.
 struct Bucket {
     tokens: f64,
     at: Instant,
@@ -791,10 +797,11 @@ impl Bucket {
         ok
     }
 
-    /// Take `n` whether or not it is there (a negative `n` gives back).
+    /// Take `n` whether or not it is there (a negative `n` gives back, never
+    /// past the burst).
     fn debit(&mut self, a: Allowance, n: f64, now: Instant) {
         self.refill(a, now);
-        self.tokens = (self.tokens - n).clamp(-a.burst, a.burst);
+        self.tokens = (self.tokens - n).min(a.burst);
     }
 }
 
@@ -1357,12 +1364,6 @@ impl Audit {
         let (now, epoch) = (st.mono(), st.wall());
         let cost = Self::cost(&st, &r);
         let spend = st.budgets.entry(id.clone()).or_insert_with(|| Spend::new(now));
-        // A drive-class act was paid for before it ran ([`Audit::reserve`]):
-        // its record is always written, and settled at what it cost.
-        if charge == Charge::Drive {
-            spend.bucket(charge).debit(DRIVE, cost - DRIVE_RESERVE, now);
-            return self.append(&mut st, &r);
-        }
         if spend.bucket(charge).take(charge.allowance(), cost, now) {
             return self.append(&mut st, &r);
         }
@@ -1431,18 +1432,31 @@ impl Audit {
         }
     }
 
-    /// Before a paired device's drive-class act runs: take `DRIVE_RESERVE`
-    /// from its `DRIVE` budget, or say how many seconds until it can be.
-    /// The console is never asked.
-    fn reserve(&self, c: &Caller) -> Result<(), u64> {
-        let Device::Paired(id) = c.device() else { return Ok(()) };
+    /// Before a paired device's drive-class act runs: take what its record
+    /// will cost (`r`, rendered now, plus `RESERVE_SLACK`) from its `DRIVE`
+    /// budget — the amount reserved — or say how many seconds until it can
+    /// be. Under the lock, so two acts in flight never share bytes.
+    fn reserve(&self, c: &Caller, r: &Record) -> Result<f64, u64> {
+        let Device::Paired(id) = c.device() else { return Ok(0.0) };
         let mut st = guard(&self.st);
-        let now = st.mono();
+        let (now, n) = (st.mono(), Self::cost(&st, r) + RESERVE_SLACK);
         let b = st.budgets.entry(id.clone()).or_insert_with(|| Spend::new(now)).bucket(Charge::Drive);
-        if b.take(DRIVE, DRIVE_RESERVE, now) {
-            return Ok(());
+        if b.take(DRIVE, n, now) {
+            return Ok(n);
         }
-        Err(((DRIVE_RESERVE - b.tokens) / DRIVE.per_sec).ceil().max(1.0) as u64)
+        Err(((n - b.tokens) / DRIVE.per_sec).ceil().max(1.0) as u64)
+    }
+
+    /// A drive-class act's record, paid for before it ran (`reserve`): always
+    /// written, and settled at what it cost against what was reserved.
+    fn settled(&self, r: Record, reserved: f64) {
+        let mut st = guard(&self.st);
+        self.sweep(&mut st, false);
+        if let Some(Device::Paired(id)) = r.actor.as_ref().map(Caller::device) {
+            let (id, now, cost) = (id.clone(), st.mono(), Self::cost(&st, &r));
+            st.budgets.entry(id).or_insert_with(|| Spend::new(now)).bucket(Charge::Drive).debit(DRIVE, cost - reserved, now);
+        }
+        self.append(&mut st, &r);
     }
 
     /// End every device episode that has gone quiet or run its span — or
@@ -1722,8 +1736,10 @@ struct Tally {
 /// What `begin` saw before the body ran, for `end` to finish.
 pub struct Pending {
     cmd: &'static str,
-    /// A drive-class act (`DRIVE`), as the resolver's verdict says.
+    /// A drive-class act (`DRIVE`), as the resolver's verdict says, and the
+    /// bytes it reserved before it ran.
     drive: bool,
+    reserved: f64,
     cap: Option<&'static str>,
     project: Option<String>,
     object: Option<String>,
@@ -1837,17 +1853,28 @@ impl ConnAudit {
     /// sent (§5.1): the name itself is the client's, and not ours to write.
     /// May `row`, admitted by everything before it, run? A paired device's
     /// drive-class act that will be recorded must find its record's bytes in
-    /// `DRIVE` first; past them it is refused, and told when to try again.
-    /// The refusal is recorded by the caller, through `refused`, once.
-    pub fn allow(&self, row: &'static Row, resolved: &Resolved) -> Result<(), Refusal> {
+    /// `DRIVE` first — ITS record, begun here and rendered as it will be
+    /// written, not a typical one, so a long path pays for its length. Past
+    /// them it is refused, and told when to try again; the refusal is
+    /// recorded by the caller, through `refused`, once. `Some` is the record
+    /// begun, which `Seen` keeps for the body's end.
+    pub fn allow(&self, row: &'static Row, args: &Args, resolved: &Resolved) -> Result<Option<Pending>, Refusal> {
         if self.caller.is_console() || !recorded(row) || !drive_class(row, resolved) {
-            return Ok(());
+            return Ok(None);
         }
-        self.audit.reserve(&self.caller).map_err(|secs| {
-            Refusal::audit_budget(format!(
+        let Some(mut p) = self.begin(row, args, &resolved.projects) else { return Ok(None) };
+        let kind = if matches!(p.what, What::Call) { "call" } else { "stream" };
+        let mut r = self.base(kind, Some(p.cmd), Value::Object(p.detail.clone()));
+        (r.cap, r.project, r.object, r.outcome, r.ms) = (p.cap, p.project.clone(), p.object.clone(), Some("panic"), Some(u64::MAX));
+        match self.audit.reserve(&self.caller, &r) {
+            Ok(n) => {
+                (p.drive, p.reserved) = (true, n);
+                Ok(Some(p))
+            }
+            Err(secs) => Err(Refusal::audit_budget(format!(
                 "audit-budget: this device's allowance for drive-class acts in the audit log is spent — try again in {secs} s"
-            ))
-        })
+            ))),
+        }
     }
 
     pub fn unknown(&self, cmd: &str) {
@@ -1946,6 +1973,7 @@ impl ConnAudit {
         Some(Pending {
             cmd: name,
             drive: false,
+            reserved: 0.0,
             cap: row.cap.map(Capability::name),
             // The first project the row's objects resolved to; the argument
             // only where nothing resolved one (a `new_path`, a global row).
@@ -2020,7 +2048,11 @@ impl ConnAudit {
         r.object = p.object;
         r.outcome = Some(label);
         r.ms = Some(ms);
-        self.audit.charged(if p.drive { Charge::Drive } else { Charge::Acts }, r);
+        if p.drive {
+            self.audit.settled(r, p.reserved);
+        } else {
+            self.audit.charged(Charge::Acts, r);
+        }
     }
 
     fn closed(&self, cmd: Option<&'static str>, t: Tally, how: &'static str) {
@@ -2109,23 +2141,29 @@ impl Witness for Seen<'_> {
     }
 
     /// An audit bug lets the act through: it loses that act's reservation,
-    /// never the reply.
-    fn allow(&self, row: &'static Row, _args: &Args, resolved: &Resolved) -> Result<(), Refusal> {
-        quietly(|| self.au.allow(row, resolved)).unwrap_or(Ok(()))
+    /// never the reply. A drive-class act's record is begun here, and kept.
+    fn allow(&self, row: &'static Row, args: &Args, resolved: &Resolved) -> Result<(), Refusal> {
+        match quietly(|| self.au.allow(row, args, resolved)) {
+            Some(Ok(p)) => {
+                *self.pending.borrow_mut() = p;
+                Ok(())
+            }
+            Some(Err(r)) => Err(r),
+            None => Ok(()),
+        }
     }
 
     fn refused(&self, row: &'static Row, args: &Args, r: &Refusal) {
         quietly(|| self.au.refused(row, args, r));
     }
 
+    /// The record to finish once the body is done: the one `allow` began
+    /// for a drive-class act, or begun now.
     fn admitted(&self, row: &'static Row, args: &Args, resolved: &Resolved) {
-        let p = quietly(|| {
-            self.au.begin(row, args, &resolved.projects).map(|mut p| {
-                p.drive = !self.au.caller.is_console() && drive_class(row, resolved);
-                p
-            })
-        })
-        .flatten();
+        if self.pending.borrow().is_some() {
+            return;
+        }
+        let p = quietly(|| self.au.begin(row, args, &resolved.projects)).flatten();
         *self.pending.borrow_mut() = p;
     }
 }
@@ -3558,7 +3596,7 @@ mod tests {
         assert_eq!(g.records("call", "write_file").len(), ran, "every drive-class act that ran is its own record");
         // Settled at what each record cost: the budget bounds BYTES written.
         let bytes: usize = raw_lines(&g.d.join(FILE)).iter().filter(|l| l.contains("\"write_file\"") && l.contains("\"call\"")).map(|l| l.len() + 1).sum();
-        assert!((bytes as f64) <= DRIVE.burst + DRIVE_RESERVE + 2.0 * DRIVE.per_sec, "{bytes} bytes of drive-class records past a {} burst", DRIVE.burst);
+        assert!((bytes as f64) <= DRIVE.burst + RESERVE_SLACK + 2.0 * DRIVE.per_sec, "{bytes} bytes of drive-class records past a {} burst", DRIVE.burst);
         assert!(budget_lines(&g.d).iter().all(|r| r["detail"]["class"] != "drive"), "drive-class acts never coalesce");
         for i in 0..1000 {
             call(&c, "set_note", json!({ "repo": g.root, "slug": format!("s{i}"), "note": "x" }));
@@ -3590,6 +3628,57 @@ mod tests {
         assert!(!format!("{again:?}").contains("audit-budget"), "{again:?}");
         assert_eq!(g.records("call", "write_file").len(), ran + 1);
         drop(c);
+    }
+
+    /// Acts in flight together cannot pass on the same bytes: each reserves
+    /// what ITS record will cost — a long path pays for its length — under
+    /// the log's lock, before any of them ends. However many a device holds
+    /// in flight, what they write stays inside the burst.
+    #[test]
+    fn drive_acts_in_flight_together_reserve_their_own_cost() {
+        let d = dir("gate-inflight");
+        let (a, _) = Audit::open(&d, None, Fleet::none());
+        let c = phone(&a, 9);
+        let resolved = Resolved { needs: vec![Capability::Write, Capability::Instruct], ..Default::default() };
+        let long = format!("/r/{}/AGENTS.md", "p".repeat(MAX_IDENT));
+        let mut held = Vec::new();
+        loop {
+            let a = args(json!({ "path": long, "content": "x", "expected_mtime": null }));
+            match c.allow(row("write_file"), &a, &resolved) {
+                Ok(Some(p)) => held.push(p),
+                Ok(None) => panic!("a device's instruction write is drive-class"),
+                Err(r) => {
+                    assert_eq!(r.kind, RefusalKind::AuditBudget);
+                    break;
+                }
+            }
+            assert!(held.len() < 10_000, "never refused");
+        }
+        let n = held.len();
+        for p in held {
+            c.end(p, Outcome::Ok(&Value::Null));
+        }
+        let bytes: usize = raw_lines(&d.join(FILE)).iter().filter(|l| l.contains("\"write_file\"")).map(|l| l.len() + 1).sum();
+        assert!((bytes as f64) <= DRIVE.burst + RESERVE_SLACK, "{n} acts in flight wrote {bytes} bytes past a {} burst", DRIVE.burst);
+        assert!(n > 10, "{n}");
+        drop(c);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// No debt is forgiven: a device that made the log write more than its
+    /// budget (an episode's records, a record that cost more than reserved)
+    /// pays all of it back before its next record is written in full.
+    #[test]
+    fn a_debt_is_paid_in_full_however_deep() {
+        let t0 = Instant::now();
+        let mut b = Bucket::full(DRIVE, t0);
+        b.debit(DRIVE, 3.0 * DRIVE.burst, t0);
+        assert_eq!(b.tokens, -2.0 * DRIVE.burst);
+        let paid = Duration::from_secs_f64(2.0 * DRIVE.burst / DRIVE.per_sec);
+        assert!(!b.take(DRIVE, 1.0, t0 + paid - Duration::from_secs(1)), "still in debt a second before it is paid");
+        assert!(b.take(DRIVE, 1.0, t0 + paid + Duration::from_secs(1)));
+        b.debit(DRIVE, -10.0 * DRIVE.burst, t0 + paid);
+        assert_eq!(b.tokens, DRIVE.burst, "a refund never lifts it past its burst");
     }
 
     /// The console is the owner at the host, and never gated.
