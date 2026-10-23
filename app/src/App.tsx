@@ -2,7 +2,7 @@ import { adaptClaude, adaptCodex, adaptKimi, checking, compactUsage, detailMessa
 import { HARNESSES, HARNESS_LABEL, NEEDS_MODEL, type Harness } from "./harness";
 import { ModelPicker, defaultModel, modelOk, useAgentModels, type PiStatus } from "./ModelPicker";
 import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ComponentType } from "react";
-import { Channel, engineState, invoke, listen } from "./ipc";
+import { Channel, engineState, grantHas, invoke, listen } from "./ipc";
 import { hostOnly, pickDirForHost, revealOnHost } from "./onhost";
 import { useEngine } from "./EngineGate";
 import { copyToClipboard } from "./clipboard";
@@ -2078,15 +2078,19 @@ function NewPlaceDialog({
 
   useEffect(() => {
     let alive = true;
+    // Which agents the host has. The Claude and Codex answers come from
+    // admin-only rows: a device paired without admin offers both, and the
+    // host says so at launch if one is missing — never an error at open.
+    const admin = grantHas("admin");
     Promise.all([
-      invoke<McpStatus>("mcp_status", { repo: project }),
-      invoke<{ codex_bin: string | null }>("codex_mcp_status"),
+      admin ? invoke<McpStatus>("mcp_status", { repo: project }) : Promise.resolve(null),
+      admin ? invoke<{ codex_bin: string | null }>("codex_mcp_status") : Promise.resolve(null),
       invoke<PiStatus>("pi_status", { repo: project }).catch(() => null),
       invoke<{ kimi_bin: string | null }>("kimi_status", { repo: project }).catch(() => null),
     ]).then(([claude, codex, pi, kimi]) => {
       if (!alive) return;
       const next: Record<Harness, boolean> = {
-        claude: !!claude.claude_bin, codex: !!codex.codex_bin, pi: !!pi?.preflight.pi_path, kimi: !!kimi?.kimi_bin,
+        claude: claude ? !!claude.claude_bin : true, codex: codex ? !!codex.codex_bin : true, pi: !!pi?.preflight.pi_path, kimi: !!kimi?.kimi_bin,
       };
       setAvailable(next);
       // A rejected create reopens with the user's exact choice, even if CLI
@@ -5746,6 +5750,8 @@ function App() {
   // home Resume rows. A plain nav click goes to `selectPlace` above.
   const ensureCodexCli = async (provider: Harness) => {
     if (provider !== "codex") return true;
+    // An admin-only read: without it the launch itself says if codex is missing.
+    if (!grantHas("admin")) return true;
     try {
       const status = await invoke<{ codex_bin: string | null }>("codex_mcp_status");
       if (status.codex_bin) return true;

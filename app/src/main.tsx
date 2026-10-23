@@ -59,7 +59,7 @@ async function chosenHost(door: Door): Promise<HostSummary | null> {
  *  Never `engine_connect`: with a host chosen, no local serve is found or
  *  started (§4.4). `owned: false`, so the retries reconnect and never start. */
 async function remoteBoot(host: HostSummary): Promise<EngineDoor> {
-  const { remoteDoor, tauriDoor } = await import("./ipc");
+  const { remoteDoor, setRemoteGrant, tauriDoor } = await import("./ipc");
   const ws = await import("./ipcws");
   const { openPipe, shimOf } = await import("./ipcremote");
   const shim = shimOf(tauriDoor);
@@ -74,7 +74,9 @@ async function remoteBoot(host: HostSummary): Promise<EngineDoor> {
         const why = pipe?.closedWhy();
         onLost(why && !msg.includes(why) ? `${msg} (${why})` : msg);
       };
-      pipe = await openPipe(shim, host.id, { setTimeout: (fn, ms) => window.setTimeout(fn, ms) });
+      // A fresh grant per socket: a narrowed device learns it on reconnect.
+      setRemoteGrant(null);
+      pipe = await openPipe(shim, host.id, { setTimeout: (fn, ms) => window.setTimeout(fn, ms) }, setRemoteGrant);
       const sock = ws.connectSocket({ ...socketDeps(lost, remedy), port: 0, token: pipe.connected.token, WebSocket: pipe.WebSocket });
       return { sock, owned: false, started: false };
     },
@@ -94,9 +96,13 @@ async function boot() {
     const { mockDeclare, mockEngineDelayMs } = await import("./mock/install");
     // `?remote`: as if a paired host were chosen, so every act that needs the
     // host's paths shows greyed, with its reason (§4.4).
-    if (new URLSearchParams(window.location.search).has("remote")) {
-      const { markRemote } = await import("./ipc");
+    // `?remote=noadmin`: …and a device grant without admin, so the sections
+    // that need it say so.
+    const remote = new URLSearchParams(window.location.search).get("remote");
+    if (remote !== null) {
+      const { markRemote, setRemoteGrant } = await import("./ipc");
       markRemote("Studio");
+      if (remote === "noadmin") setRemoteGrant(["read", "write", "stream"]);
     }
     // `?slowengine[=ms]`: the app's boot over the mock — an engine door whose
     // first connect takes that long, so a call that cannot wait for it is

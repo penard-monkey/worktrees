@@ -9,7 +9,8 @@
 // or `worktrees trust kimi`.
 
 import { useCallback, useEffect, useState } from "react";
-import { invoke } from "./ipc";
+import { invoke, notGranted } from "./ipc";
+import { GrantNote } from "./GrantNote";
 import type { Settings } from "./settings";
 import { ModelPicker, modelArg, type ModelOption } from "./ModelPicker";
 
@@ -135,8 +136,9 @@ export default function KimiPanel({ settings, repo, onChange, onReport, onMcpSta
   return <>
     {/* FIRST: the `kimi-mcp` offer's deep-link target; the sections below
         fill in asynchronously and would push it off screen. */}
+    {notGranted("kimi_mcp_status") ? <GrantNote cmd="kimi_mcp_status" label="kimi MCP server" focus="kimi-mcp" /> :
     <KimiMcpSection data-focus="kimi-mcp" onReport={onReport} onStatus={onMcpStatus}
-      offerPending={mcpOfferPending} onSilenceOffer={onSilenceMcpOffer} />
+      offerPending={mcpOfferPending} onSilenceOffer={onSilenceMcpOffer} />}
 
     <section className="setting" data-testid="kimi-install">
       <label>kimi</label>

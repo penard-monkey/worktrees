@@ -166,10 +166,31 @@ if (LOCAL && SHIM && rows.length && HANDLERS.length) {
     if (!badKeys.length && !badVals.length) ok(`REMOTE_SETTINGS maps engine rows to registered shim commands (${pairs.map(([k, v]) => `${k}→${v}`).join(", ")})`);
   }
   const rd = /export function remoteDoor\([^)]*\): EngineDoor \{([\s\S]*?)\n\}/.exec(ipc)?.[1] ?? "";
-  const routed = /invoke<T>\(cmd: string, args\?: InvokeArgs\): Promise<T> \{\s*if \(HOST_PATH_LOCAL\.includes\(cmd\)\) return Promise\.reject\(notOnHost\([^\n]*\);\s*const own = REMOTE_SETTINGS\[cmd\];\s*if \(own\) return local\.invoke<T>\(own, args\);\s*return inner\.invoke<T>\(cmd, args\);\s*\}/.test(rd);
+  const routed = /invoke<T>\(cmd: string, args\?: InvokeArgs\): Promise<T> \{\s*if \(HOST_PATH_LOCAL\.includes\(cmd\)\) return Promise\.reject\(notOnHost\([^\n]*\);\s*const refused = notGranted\(cmd\);\s*if \(refused\) return Promise\.reject\(refused\);\s*const own = REMOTE_SETTINGS\[cmd\];\s*if \(own\) return local\.invoke<T>\(own, args\);\s*return inner\.invoke<T>\(cmd, args\);\s*\}/.test(rd);
   if (!rd) fail("ipc.ts: remoteDoor not found");
-  else if (!routed) fail("remoteDoor's invoke does not route exactly: HOST_PATH_LOCAL refused with notOnHost, REMOTE_SETTINGS to the local door, everything else to the engine door");
-  else ok("remoteDoor routes by HOST_PATH_LOCAL (refused, with the reason) and REMOTE_SETTINGS (the shim's blob), and sends the rest through the engine door");
+  else if (!routed) fail("remoteDoor's invoke does not route exactly: HOST_PATH_LOCAL refused with notOnHost, what notGranted names refused with its words, REMOTE_SETTINGS to the local door, everything else to the engine door");
+  else ok("remoteDoor routes by HOST_PATH_LOCAL (refused, with the reason), notGranted (refused, in words), REMOTE_SETTINGS (the shim's blob), and sends the rest through the engine door");
+
+  // The rows a device's grant cannot reach, mirrored for the remote door:
+  // ADMIN_ROWS are the `Engine [admin, …]` rows, CONSOLE_ROWS the `HostConsole`
+  // and `Loopback` ones — both ways, so a row that changes capability in
+  // dispatch.rs cannot leave a remote window asking for it, or refusing one it
+  // may run.
+  const all = [...block.matchAll(/^ {4}([a-z][a-z0-9_]*): (Engine|ClientLocal|HostConsole|Loopback|Stream|Own)\b([^\n]*?)=>/gm)].map((m) => [m[1], m[2], m[3]]);
+  const adminRows = all.filter(([, e, r]) => e === "Engine" && /^\s*\[admin\b/.test(r)).map(([n]) => n);
+  const consoleRows = all.filter(([, e]) => e === "HostConsole" || e === "Loopback").map(([n]) => n);
+  for (const [name, mirror, rust] of [["ADMIN_ROWS", tsList("ADMIN_ROWS"), adminRows], ["CONSOLE_ROWS", tsList("CONSOLE_ROWS"), consoleRows]]) {
+    if (!mirror?.length || !rust.length) fail(`${name}: ${mirror?.length ?? 0} in ipc.ts, ${rust.length} in dispatch.rs — this check would pass on nothing`);
+    else if (sameSet(mirror, rust)) ok(`ipc.ts ${name} is dispatch.rs's, both ways (${mirror.length})`);
+    else {
+      const extra = minus(mirror, rust), missing = minus(rust, mirror);
+      if (extra.length) fail(`${name} names rows dispatch.rs does not give that exposure: ${extra.join(", ")} — a remote window refuses what it may run`);
+      if (missing.length) fail(`${name} misses rows dispatch.rs gives that exposure: ${missing.join(", ")} — a remote window asks and is refused`);
+    }
+  }
+  if (!/export function notGranted\(cmd: string\): string \| null \{\s*if \(!remoteName\) return null;\s*if \(CONSOLE_ROWS\.includes\(cmd\)\)[^\n]*\n\s*if \(ADMIN_ROWS\.includes\(cmd\) && !grantHas\("admin"\)\)/.test(ipc))
+    fail("notGranted does not refuse exactly CONSOLE_ROWS, and ADMIN_ROWS without admin, and only in a remote window");
+  else ok("notGranted refuses CONSOLE_ROWS, and ADMIN_ROWS when the device lacks admin — only in a remote window");
   if (/engine_connect/.test(rd)) fail("remoteDoor names engine_connect — a remote window must not find or start a local serve");
   if (!/markRemote\(hostName\)/.test(rd) || !/export function markRemote\(hostName: string\): void \{\s*setAway\(/.test(ipc)) fail("remoteDoor does not mark the window as not on its engine's host (markRemote → setAway)");
   else ok("remoteDoor marks the window as not on its engine's host before anything renders");

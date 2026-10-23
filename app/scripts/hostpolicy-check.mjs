@@ -124,7 +124,17 @@ const descendants = (node, pred, out = []) => {
   ts.forEachChild(node, (c) => { descendants(c, pred, out); });
   return out;
 };
-const isSetter = (n) => (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) && SETTERS.includes(n.text);
+/** A name listed in one of ipc.ts's remote-door tables (`ADMIN_ROWS`,
+ *  `CONSOLE_ROWS`): row names a remote window refuses for a device, compared
+ *  with dispatch.rs by engine-route-check — a list, never a call. Exactly
+ *  those two array literals in ipc.ts; anything else naming a setter counts. */
+const ROUTE_TABLES = ["ADMIN_ROWS", "CONSOLE_ROWS"];
+const inRouteTable = (n) => {
+  const arr = n.parent, decl = arr?.parent;
+  return !!arr && ts.isArrayLiteralExpression(arr) && !!decl && ts.isVariableDeclaration(decl) &&
+    ROUTE_TABLES.includes(decl.name.getText()) && path.basename(decl.getSourceFile().fileName) === "ipc.ts";
+};
+const isSetter = (n) => (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) && SETTERS.includes(n.text) && !inRouteTable(n);
 const isFn = (n) => ts.isFunctionDeclaration(n) || ts.isFunctionExpression(n) || ts.isArrowFunction(n) || ts.isMethodDeclaration(n);
 /** `{ key: … }` (or `{ key }`) handed to a call: a write of `key` into Settings. */
 const isKeyWrite = (n, key) => ts.isObjectLiteralExpression(n) && n.parent && ts.isCallExpression(n.parent)

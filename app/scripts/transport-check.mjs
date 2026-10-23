@@ -1495,6 +1495,9 @@ ${body}
   globalThis.__ipcStubs = { tauriInvoke: () => Promise.reject("the Tauri stub must not be reached"), tauriListen: () => Promise.reject("no"), TauriChannel: class {} };
   const ipc = await loadIpc();
   const RTOKEN = randomBytes(32).toString("hex");
+  /** Each pipe's device grant, in the host's ok frame: the first without
+   *  admin, the one after the revoke's reconnect with it. */
+  const GRANTS = [["read", "write", "stream"], ["read", "admin"]];
   /** A fake shim and the host behind it. Each pipe: `conn`, the frames the
    *  host RECEIVED (in the order the shim's sends completed), and `push` to
    *  send the page a frame. `delays` makes sends complete out of order, as
@@ -1518,7 +1521,7 @@ ${body}
         // The host's half of handshake v1, by the spec, keyed with the token.
         if (SPEC.hello in f) { p.cn = f[SPEC.hello]; p.sn = hex32(); p.push({ [SPEC.challenge]: p.sn }); }
         else if (SPEC.auth in f) {
-          if (f[SPEC.auth] === spectag(RTOKEN, SPEC.clientLabel, p.cn, p.sn)) p.push({ [SPEC.ok]: true, [SPEC.version]: VERSION, [SPEC.proof]: spectag(RTOKEN, SPEC.serverLabel, p.cn, p.sn), device: { id: "d_x" } });
+          if (f[SPEC.auth] === spectag(RTOKEN, SPEC.clientLabel, p.cn, p.sn)) p.push({ [SPEC.ok]: true, [SPEC.version]: VERSION, [SPEC.proof]: spectag(RTOKEN, SPEC.serverLabel, p.cn, p.sn), device: { id: "d_x", caps: GRANTS[p.conn - 7] ?? [] } });
           else p.end("bad proof");
         } else if (K.cmd in f) p.push({ [K.id]: f[K.reqId], [K.ok]: `served:${f[K.cmd]}` });
       },
@@ -1539,7 +1542,8 @@ ${body}
   const door = ipc.remoteDoor(tauri, "Studio", async ({ onLost }) => {
     let pipe = null;
     const lost = (m) => { const w = pipe?.closedWhy(); onLost(w && !m.includes(w) ? `${m} (${w})` : m); };
-    pipe = await RJ.openPipe(shim, "h_studio", { setTimeout: (fn, ms) => setTimeout(fn, ms) });
+    ipc.setRemoteGrant(null);
+    pipe = await RJ.openPipe(shim, "h_studio", { setTimeout: (fn, ms) => setTimeout(fn, ms) }, ipc.setRemoteGrant);
     const sock = WS.connectSocket({
       port: 0, token: pipe.connected.token, version: VERSION, crypto: webcrypto().crypto, WebSocket: pipe.WebSocket,
       setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (h) => clearTimeout(h), atob: globalThis.atob, onError: lost, warn: () => {},
@@ -1575,6 +1579,14 @@ ${body}
     `(remote) open_editor and open_terminal take a HOST path: refused with the reason, sent nowhere (${ed.err})`);
   const cp = await settle(ipc.invoke("copy_text", { text: "x" }));
   check(cp.ok === "local:copy_text", "(remote) a client-local command that means the same here still runs here");
+  // The grant, read off the host's ok as it passed: no admin on this pipe.
+  check(!ipc.grantHas("admin") && ipc.grantHas("write"), "(remote) the device's grant is read off the host's ok frame as it passes (read, write, stream — no admin)");
+  const sentBefore = p1?.got.length ?? 0;
+  const ms = await settle(ipc.invoke("mcp_status", { repo: null }));
+  const pb = await settle(ipc.invoke("pair_begin", {}));
+  check(typeof ms.err === "string" && /mcp_status needs admin on Studio: this device was paired without it/.test(ms.err) &&
+    typeof pb.err === "string" && /pair_begin is done at Studio itself/.test(pb.err) && (p1?.got.length ?? 0) === sentBefore,
+    `(remote) an admin row without admin, and a console row always, are refused HERE in words and never sent (${ms.err} / ${pb.err})`);
   // A revoke: the shim's words reach the retries, which reconnect and never start.
   p1?.end("the host closed the connection: revoked");
   await until(() => ipc.engineState().kind !== "up");
@@ -1584,6 +1596,9 @@ ${body}
   await until(() => ipc.engineState().kind === "up");
   const p2 = pipes[1];
   check(ipc.engineState().kind === "up" && !!p2 && p2.conn !== p1?.conn, `(remote) the retry opens a new pipe (conn ${p2?.conn})`);
+  check(ipc.grantHas("admin"), "(remote) a new socket brings a new grant: this one holds admin");
+  const ms2 = await settle(ipc.invoke("mcp_status", { repo: null }));
+  check(ms2.ok === "served:mcp_status", `(remote) …and with it the admin row goes to the host (${JSON.stringify(ms2)})`);
   await settle(ipc.invoke("list_workspace"));
   check(!!p2 && p2.got.some((x) => x.f[K.cmd] === "list_workspace") && p2.got.every((x) => x.conn === p2.conn) && !(p1?.got ?? []).some((x) => x.conn !== p1.conn),
     "(remote) the new socket's sends name the new conn, and nothing goes to the old pipe");

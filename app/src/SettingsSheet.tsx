@@ -10,11 +10,12 @@ import { QuotaSection } from "./QuotaPanel";
 import { SlotsSection } from "./SlotsPanel";
 import { UserSkillsSection, type UserSkill } from "./AgentSetup";
 import * as Icons from "./icons";
-import { invoke } from "./ipc";
+import { invoke, notGranted } from "./ipc";
 import { copyToClipboard } from "./clipboard";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { hostOnly, revealOnHost } from "./onhost";
 import { HostsPanel } from "./HostsPanel";
+import { GrantNote } from "./GrantNote";
 import { check as checkAppUpdate } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import ProfilesPanel from "./ProfilesPanel";
@@ -974,8 +975,9 @@ export function SettingsSheet({
           {cat === "ai" && <ProfilesPanel key={repo || "none"} repo={repo} onReport={onReport} />}
 
           {cat === "claude" && <>
+          {notGranted("mcp_status") ? <GrantNote cmd="mcp_status" label="Claude MCP server" focus="mcp-server" /> :
           <McpSection status={mcpStatus} repo={repo} offerPending={mcpOfferPending}
-            onSilenceOffer={onSilenceMcpOffer} onChanged={onMcpChanged} onReport={onReport} />
+            onSilenceOffer={onSilenceMcpOffer} onChanged={onMcpChanged} onReport={onReport} />}
           </>}
 
           {cat === "codex" && <>
@@ -988,8 +990,9 @@ export function SettingsSheet({
               Skills renders from App's state at once, so it goes above. */}
           <UserSkillsSection data-focus="codex-skills" skills={userSkills} onChanged={onUserSkillsChanged}
             offerPending={skillsOfferPending} onSilenceOffer={onSilenceSkillsOffer} onReport={onReport} />
+          {notGranted("codex_mcp_status") ? <GrantNote cmd="codex_mcp_status" label="Codex MCP server" focus="codex-mcp" /> :
           <CodexMcpSection data-focus="codex-mcp" onReport={onReport} onStatus={onCodexMcpChanged}
-            offerPending={codexMcpOfferPending} onSilenceOffer={onSilenceCodexMcpOffer} />
+            offerPending={codexMcpOfferPending} onSilenceOffer={onSilenceCodexMcpOffer} />}
           </>}
 
           {cat === "pi" && <PiPanel settings={settings} repo={repo || null} onChange={onChange} onReport={onReport} onFail={onFail}

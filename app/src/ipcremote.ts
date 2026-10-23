@@ -70,9 +70,26 @@ export type OpenPipe = {
 
 type Timers = { setTimeout: (fn: () => void, ms: number) => unknown };
 
-/** Open the pipe to `hostId`. Rejects with the shim's words if it cannot. */
-export async function openPipe(shim: RemoteShim, hostId: string, timers: Timers): Promise<OpenPipe> {
+/** The device's capabilities out of the remote handshake's `ok` frame
+ *  (`{ok: true, version, proof, device: {caps, …}}`), or undefined for any
+ *  other frame. Read as the frame goes past, never instead of ipcws: it only
+ *  tells the door which rows this device's grant cannot reach. */
+export function grantOf(frame: string): string[] | undefined {
+  if (!frame.includes('"device"')) return undefined;
+  try {
+    const v = JSON.parse(frame) as { ok?: unknown; device?: { caps?: unknown } };
+    if (v.ok !== true || !v.device || !Array.isArray(v.device.caps)) return undefined;
+    return v.device.caps.filter((c): c is string => typeof c === "string");
+  } catch {
+    return undefined;
+  }
+}
+
+/** Open the pipe to `hostId`. Rejects with the shim's words if it cannot.
+ *  `onGrant` hears the device's capabilities once the host's `ok` passes. */
+export async function openPipe(shim: RemoteShim, hostId: string, timers: Timers, onGrant?: (caps: string[]) => void): Promise<OpenPipe> {
   const early: PipeMsg[] = [];
+  let granted = false;
   let sock: PipeSock | null = null;
   let why: string | null = null;
   const take = (m: PipeMsg) => {
@@ -112,7 +129,16 @@ export async function openPipe(shim: RemoteShim, hostId: string, timers: Timers)
 
     take(m: PipeMsg) {
       if (this.done) return;
-      if ("frame" in m) this.onmessage?.call(this as unknown as WebSocket, { data: m.frame } as MessageEvent);
+      if ("frame" in m) {
+        if (!granted) {
+          const caps = grantOf(m.frame);
+          if (caps) {
+            granted = true;
+            onGrant?.(caps);
+          }
+        }
+        this.onmessage?.call(this as unknown as WebSocket, { data: m.frame } as MessageEvent);
+      }
       else {
         why = m.closed;
         this.end();
