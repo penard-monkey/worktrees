@@ -173,7 +173,9 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   and first-of-episode records are never charged; #538's limit episodes are
   always written and debited from `REFUSALS`. Drive-class acts (`needs_stepup`
   over `Resolved::needs`, plus `remove_place`) are NEVER coalesced: each
-  reserves its record from `DRIVE` at `Witness::allow`, the last step of
+  reserves what ITS record will cost (begun and rendered there, under the
+  log's lock, so acts in flight never share bytes; no debt is ever
+  forgiven) from `DRIVE` at `Witness::allow`, the last step of
   `call_in_seen` after the lane gate, and one the budget cannot pay for is
   refused there (`RefusalKind::AuditBudget`, answered with the seconds to
   wait), recorded once and charged to `REFUSALS`, so a refusal never keeps
