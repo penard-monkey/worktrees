@@ -205,7 +205,7 @@ export function PairSheet({ onClose }: { onClose: () => void }) {
             <>
               <span className="ra-foot-why">{problem ?? ""}</span>
               <button className="ctrl" onClick={close}>Cancel</button>
-              <button className="enter-btn" disabled={busy || !!problem} title={problem ?? undefined} onClick={begin}>{busy ? "Opening…" : "Show the pairing code"}</button>
+              <button className="enter-btn" data-track="pair-show-code" disabled={busy || !!problem} title={problem ?? undefined} onClick={begin}>{busy ? "Opening…" : "Show the pairing code"}</button>
             </>
           )}
           {phase === "open" && <button className="ctrl" onClick={cancel}>Cancel pairing</button>}

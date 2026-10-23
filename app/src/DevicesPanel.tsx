@@ -54,7 +54,7 @@ function DevicesList({ r }: { r: RemoteState }) {
           reaches only what it was granted, from a key that never leaves it, and only while remote access is on.
         </div>
         <div className="ver-actions">
-          <button className="enter-btn sm" disabled={!!why} title={why ?? undefined} onClick={() => { dismissCat("devices"); setPairing(true); }}>
+          <button className="enter-btn sm" data-track="pair-device" disabled={!!why} title={why ?? undefined} onClick={() => { dismissCat("devices"); setPairing(true); }}>
             Pair a device…
           </button>
         </div>
@@ -188,7 +188,7 @@ function DeviceRow({ d, unprompted, host, projects, now }: {
           <ScopeEditor value={scope} onChange={setScope} projects={projects} unprompted={unprompted} host={host} />
           <div className="ra-note">Taking something away ends the device's open terminals that it no longer covers, at once.</div>
           <div className="ver-actions">
-            <button className="ctrl sm" disabled={busy || !!scopeProblem(scope)} title={scopeProblem(scope) ?? undefined}
+            <button className="ctrl sm" data-track="device-save-scope" disabled={busy || !!scopeProblem(scope)} title={scopeProblem(scope) ?? undefined}
               onClick={() => act("device_set_scope", { caps: scope.caps, projects: scope.projects })}>Save scope</button>
             <button className="ctrl sm" onClick={() => setEditing(null)}>Cancel</button>
           </div>
