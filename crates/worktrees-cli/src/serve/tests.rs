@@ -2449,6 +2449,35 @@ mod devices {
         assert!(e.rpc(&mut m, "devices_list", json!({})).get("ok").is_some(), "a desktop has no presence key to ask for");
     }
 
+    /// A step-up refusal is the host's, so the audit log has it as a refusal
+    /// with its own reason, `step-up` (§5.1) — never as an admitted call — and
+    /// the same act once the step-up holds is an admitted one.
+    #[test]
+    fn a_step_up_refusal_is_audited_as_a_refusal() {
+        let e = engine("stepup-audit", vec![]);
+        let (rec, k) = iphone(&e.reg, &[Read, Admin]);
+        let ex = [1u8; 32];
+        let mut c = e.connect_with(caller(&rec), Some(ex));
+        assert_eq!(e.rpc(&mut c, "devices_list", json!({}))["err"], json!("step-up required"));
+        let lines = || -> Vec<Value> {
+            let text = std::fs::read_to_string(e.dir.join("cfg").join(super::super::audit::FILE)).unwrap();
+            text.lines().map(|l| serde_json::from_str(l).unwrap()).filter(|r: &Value| r["cmd"] == json!("devices_list")).collect()
+        };
+        let recs = lines();
+        assert_eq!(recs.len(), 1, "{recs:#?}");
+        assert_eq!((recs[0]["kind"].as_str(), recs[0]["outcome"].as_str()), (Some("refused"), Some("refused")), "{:#}", recs[0]);
+        assert_eq!(recs[0]["detail"]["reason"], json!("step-up"), "{:#}", recs[0]);
+        assert_eq!(recs[0]["device"].as_str(), Some(rec.id.as_str()), "the record names the device");
+        let ch = e.rpc(&mut c, "stepup_challenge", json!({}))["ok"]["challenge"].as_str().unwrap().to_string();
+        let mut msg = super::super::stepup::b64_decode(&ch).unwrap();
+        msg.extend_from_slice(&ex);
+        let r = e.rpc(&mut c, "stepup_prove", json!({"spki": worktrees_api::files::b64_encode(&k.spki), "signature": worktrees_api::files::b64_encode(&k.sign(&msg))}));
+        assert!(r.get("ok").is_some(), "{r}");
+        assert!(e.rpc(&mut c, "devices_list", json!({})).get("ok").is_some());
+        let recs = lines();
+        assert_eq!((recs[1]["kind"].as_str(), recs[1]["outcome"].as_str()), (Some("call"), Some("ok")), "{recs:#?}");
+    }
+
     /// The bypass a review found: dock shells are the process's, so a device
     /// with `stream` could type into the shell the DESKTOP opened without ever
     /// opening one itself — and only opening was gated. Typing into a shell

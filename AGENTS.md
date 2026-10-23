@@ -133,8 +133,9 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   line — and checked with `audit::verify` at every start. It hears each
   request as `dispatch::Witness`, handed to `call_seen` BESIDE the `Call`
   (a body gets the `Call`): refusals where the host makes them (the
-  resolver, the stale `term_close` it answers `ok` included, and the
-  device-lane cap, `RefusalKind::DeviceLanes`), and admitted rows whose
+  resolver, the stale `term_close` it answers `ok` included, the step-up
+  gate, `RefusalKind::StepUp`, and the device-lane cap,
+  `RefusalKind::DeviceLanes`), and admitted rows whose
   capability COLUMN is not `read` — `err` when a `CmdResult` answers
   `ok: false`, which the wire carries as `ok`. Plain `dispatch::call` is
   test-only, so a new caller cannot skip the audit by accident. serve installs its signal
