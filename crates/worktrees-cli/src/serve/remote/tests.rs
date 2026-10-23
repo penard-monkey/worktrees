@@ -35,7 +35,7 @@ use super::super::pairing::Pairing;
 use super::super::resolve::World;
 use super::super::tls::testkit::{device_key, DeviceKey};
 use super::super::{netwatch, policy};
-use super::listener::EXPORTER_REMOTE;
+use super::super::tls::EXPORTER_SESSION;
 use super::{NoAuditYet, Reader, RemoteAccess};
 
 const WAIT: Duration = Duration::from_secs(5);
@@ -193,7 +193,7 @@ fn spec_mac(key: &str, label: &str, cn: &str, sn: &str) -> String {
 /// with whatever came back instead (empty: nothing was written).
 async fn upgrade(at: SocketAddr, pin: &str, key: &DeviceKey, host: &str, origin: Option<&str>) -> Result<(Ws, String), Vec<u8>> {
     let mut tls = super::super::tls::testkit::dial(at, pin, key).await.map_err(|e| e.to_string().into_bytes())?;
-    let v1 = hex(&tls.get_ref().1.export_keying_material([0u8; 32], EXPORTER_REMOTE, None).unwrap());
+    let v1 = hex(&tls.get_ref().1.export_keying_material([0u8; 32], EXPORTER_SESSION, None).unwrap());
     let origin = origin.map(|o| format!("Origin: {o}\r\n")).unwrap_or_default();
     let req = format!(
         "GET / HTTP/1.1\r\nHost: {host}\r\n{origin}Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n"

@@ -136,6 +136,20 @@ pub fn client_exporter(conn: &rustls::ClientConnection, label: &[u8]) -> Result<
     conn.export_keying_material([0u8; 32], label, None).map_err(|e| e.to_string())
 }
 
+#[cfg(test)]
+mod tests {
+    /// The labels are wire constants both ends export under: a changed byte
+    /// is a device and a host that can no longer agree on a key, a proof or a
+    /// step-up — and nothing else would say why. Spelled out here, from the
+    /// proposal (§2.2, §2.5) and the remote handshake's decision.
+    #[test]
+    fn the_exporter_labels_are_the_wires() {
+        assert_eq!(super::EXPORTER_PAIR, b"EXPORTER-worktrees-pair-v1");
+        assert_eq!(super::EXPORTER_STEPUP, b"EXPORTER-worktrees-stepup-v1");
+        assert_eq!(super::EXPORTER_SESSION, b"EXPORTER-worktrees-remote-v1");
+    }
+}
+
 /// Did this handshake fail because the server's key is not the pin? (The
 /// device's own refusal, made before it sent anything of its own.)
 pub fn is_pin_mismatch(e: &std::io::Error) -> bool {

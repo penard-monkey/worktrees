@@ -47,7 +47,7 @@ use super::identity::Identity;
 // The client half, and what both halves share — the exporter labels, the one
 // scheme, the provider, the pin, rustls's signature check — are
 // `worktrees_remote::tls`'s: one implementation for serve and its devices.
-pub use worktrees_remote::tls::{pin_of_cert, provider, EXPORTER_PAIR, EXPORTER_STEPUP, SCHEME};
+pub use worktrees_remote::tls::{pin_of_cert, provider, EXPORTER_PAIR, EXPORTER_SESSION, EXPORTER_STEPUP, SCHEME};
 use worktrees_remote::tls::{no_tls12, verify13};
 // The client half, for serve's own tests of a device.
 #[cfg_attr(not(test), allow(unused_imports))]
