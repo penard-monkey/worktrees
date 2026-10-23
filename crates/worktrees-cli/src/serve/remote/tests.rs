@@ -765,7 +765,15 @@ fn a_remote_session_is_kept_alive_by_pongs_and_ends_at_its_lifetime() {
         )
         .unwrap();
     let phone = Caller::paired(PrincipalId::owner(), dev.id.clone());
-    // Returns the close reason, and whether the client answered pings.
+    // Answering: the close frame (code, reason, when). Silent: when serve
+    // ENDED the session — the server's own truth, because a client that
+    // never read answers the queued pings only once it reads, into a socket
+    // serve has already closed, and Linux then resets the connection and
+    // drops the unread close frame (macOS 27 delivered it; Linux 6.12 did not).
+    enum Seen {
+        Frame(CloseCode, String, Duration),
+        Ended(Duration),
+    }
     let run = |live: Liveness, answer: bool| {
         let (clients, ctx, phone) = (clients.clone(), ctx.clone(), phone.clone());
         rt.block_on(async move {
@@ -778,11 +786,14 @@ fn a_remote_session_is_kept_alive_by_pongs_and_ends_at_its_lifetime() {
             let t0 = std::time::Instant::now();
             let (audit, _) = super::super::audit::Audit::open(&ctx.config_dir, None, super::super::audit::Fleet::none());
             let au = Arc::new(super::super::audit::ConnAudit::new(audit, 77, None, phone.clone()));
-            tokio::spawn(serve_caller(ws, ctx, clients, 77, phone, None, au, Some(remote)));
+            let session = tokio::spawn(serve_caller(ws, ctx, clients, 77, phone, None, au, Some(remote)));
             let mut c = WebSocketStream::from_raw_socket(dial.await.unwrap().unwrap(), R::Client, None).await;
             if !answer {
                 // Never read: tungstenite answers a ping only while reading.
-                tokio::time::sleep(live.dead_after + live.ping_every * 4).await;
+                // Bounded, so a session that never ends fails here.
+                let ended = tokio::time::timeout(Duration::from_secs(5), session).await;
+                drop(c);
+                return ended.ok().map(|_| Seen::Ended(t0.elapsed()));
             }
             // One deadline for the whole wait: a server that never closes
             // (the rule under test broken) keeps pinging, and must fail here
@@ -790,7 +801,7 @@ fn a_remote_session_is_kept_alive_by_pongs_and_ends_at_its_lifetime() {
             let wait = async {
                 loop {
                     match c.next().await {
-                        Some(Ok(Message::Close(Some(f)))) => return Some((f.code, f.reason.to_string(), t0.elapsed())),
+                        Some(Ok(Message::Close(Some(f)))) => return Some(Seen::Frame(f.code, f.reason.to_string(), t0.elapsed())),
                         Some(Ok(_)) => continue,
                         _ => return None,
                     }
@@ -801,14 +812,18 @@ fn a_remote_session_is_kept_alive_by_pongs_and_ends_at_its_lifetime() {
     };
     let ms = Duration::from_millis;
     // Answering every ping: alive past many `dead_after`s, then the lifetime.
-    let (code, why, took) = run(Liveness { ping_every: ms(40), dead_after: ms(150), lifetime: ms(700) }, true).expect("closed at its lifetime");
+    let Some(Seen::Frame(code, why, took)) = run(Liveness { ping_every: ms(40), dead_after: ms(150), lifetime: ms(700) }, true) else {
+        panic!("not closed at its lifetime")
+    };
     assert_eq!(code, CloseCode::Away);
     assert!(why.contains("lifetime"), "{why}");
     assert!(took >= ms(700), "closed before its lifetime: {took:?}");
-    // Silent: closed for want of a pong, long before the lifetime.
-    let (code, why, _) = run(Liveness { ping_every: ms(40), dead_after: ms(150), lifetime: Duration::from_secs(60) }, false).expect("closed for no pong");
-    assert_eq!(code, CloseCode::Away);
-    assert!(why.contains("ping"), "{why}");
+    // Silent: ended for want of a pong — after `dead_after`, and nowhere near
+    // the minute-long lifetime, which is the only other way it ends here.
+    let Some(Seen::Ended(took)) = run(Liveness { ping_every: ms(40), dead_after: ms(150), lifetime: Duration::from_secs(60) }, false) else {
+        panic!("a silent peer was never closed")
+    };
+    assert!(took >= ms(150) && took < Duration::from_secs(5), "ended after {took:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
