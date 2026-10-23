@@ -66,7 +66,9 @@ async function remoteBoot(host: HostSummary): Promise<EngineDoor> {
   const { connectSocket: connectRemote } = await import("./ipcws");
   const { openPipe, shimOf } = await import("./ipcremote");
   const shim = shimOf(tauriDoor);
-  const remedy = `Reconnect now tries again at once. If ${host.name} no longer knows this machine, pair again in Settings → Hosts.`;
+  const remedy =
+    `Reconnect now tries again at once; each try looks for ${host.name} on the LAN if it is not where it was. ` +
+    `If it moved, paste its address code in Settings → Hosts → Paste a new address; if it no longer knows this machine, pair again there.`;
   return remoteDoor(
     tauriDoor,
     host.name,

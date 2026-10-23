@@ -138,8 +138,9 @@ export const CLIENT_LOCAL: readonly string[] = [
  *  `engine_connect` finds or starts serve and is the ONLY way its token reaches
  *  the page; `raise_window` brings the window forward for `app:open-doc`. The
  *  `remote_*` ones are the remote door's (src-tauri/src/remote.rs): the hosts
- *  this machine is paired with, pairing, the choice of engine, the pinned pipe
- *  to a paired host (`ipcremote.ts`), and a remote window's own settings. */
+ *  this machine is paired with, pairing, the choice of engine, following a
+ *  host that moved (its address code), the pinned pipe to a paired host
+ *  (`ipcremote.ts`), and a remote window's own settings. */
 export const SHIM_COMMANDS: readonly string[] = [
   "engine_connect",
   "raise_window",
@@ -147,6 +148,7 @@ export const SHIM_COMMANDS: readonly string[] = [
   "remote_choose",
   "remote_forget",
   "remote_pair",
+  "remote_readdress",
   "remote_connect",
   "remote_send",
   "remote_close",

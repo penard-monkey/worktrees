@@ -20,6 +20,14 @@
 //! and `conn` (a fresh number per socket) is on every send and close, so a
 //! page's stale socket cannot write into the next one.
 //!
+//! **A host that moved is followed, never trusted.** When nothing answers at
+//! a host's kept address, `remote_connect` looks for it on the LAN for one
+//! bounded round (`worktrees_remote::reach`): a discovered address is kept
+//! only once a connection to it proves the pinned key, and every advert that
+//! did not is in app.log. A TLS refusal at the kept address is not a move and
+//! sends nobody looking. `remote_readdress` follows an address code by the
+//! same rule. Each of `reconnect.ts`'s retries is one such connect.
+//!
 //! Pairing (`remote_pair`), the host list and the choice of engine live here
 //! too: they are the CLIENT's, kept in `remote-hosts.json` beside the app's
 //! other files, shared with `worktrees remote`. With a host chosen, the page
@@ -42,7 +50,8 @@ use tauri::ipc::Channel;
 use tokio::sync::Mutex;
 use worktrees_remote::hosts::{HostRecord, HostStore, HostSummary};
 use worktrees_remote::pair::{self, PairEvent};
-use worktrees_remote::pipe::{self, Inbound, PipeTx};
+use worktrees_remote::pipe::{Inbound, PipeTx};
+use worktrees_remote::reach::{self, ReachError};
 
 /// The settings blob of a window that drives a remote host.
 pub const REMOTE_UI_STATE: &str = "remote-ui-state.json";
@@ -122,11 +131,16 @@ impl Remote {
         // Logged: a remote window that cannot connect shows a banner, and the
         // person at it reads app.log for the rest (the host's serve.log is on
         // the host).
-        let p = pipe::open(&rec, &key, CONNECT_WAIT).await.map_err(|e| {
-            let m = format!("{} ({}): {e}", rec.name, rec.addr);
+        let mut said = |m: &str| crate::applog("info", &format!("remote: {}", worktrees_remote::printable(m)));
+        let reached = reach::open(&self.store, &rec, &key, &reach::Env::platform(), CONNECT_WAIT, &mut said).await.map_err(|e| {
+            let m = match &e {
+                ReachError::NotFound { .. } => format!("{} Then paste it in Settings → Hosts → Paste a new address. {}", e.headline(), e.details()).trim_end().to_string(),
+                e => format!("{} ({}): {e}", rec.name, rec.addr),
+            };
             crate::applog("warn", &format!("remote: connect failed: {m}"));
             m
         })?;
+        let (p, rec) = (reached.pipe, reached.rec);
         let token = p.session_token().to_string();
         let (tx, mut rx) = p.split();
         let conn = self.next.fetch_add(1, Ordering::SeqCst);
@@ -155,6 +169,22 @@ impl Remote {
         });
         crate::applog("info", &format!("remote: connected to {} ({}), conn {conn}", rec.name, rec.addr));
         Ok(Connected { conn, token, host: rec.summary() })
+    }
+
+    /// Follow `id` to the address an address code names, once a pinned
+    /// connection there succeeds.
+    pub async fn readdress(&self, id: &str, code: &str) -> Result<HostSummary, String> {
+        let code = reach::parse_code(code)?;
+        let rec = self.store.get(id)?;
+        if rec.id != id {
+            return Err(format!("{id:?} is not a host id"));
+        }
+        let moved = reach::adopt_code(&self.store, &rec, &code, &reach::Env::platform(), CONNECT_WAIT).await.map_err(|e| {
+            crate::applog("warn", &format!("remote: {}: address code not followed: {}", rec.name, worktrees_remote::printable(&e)));
+            e
+        })?;
+        crate::applog("info", &format!("remote: {} now at {} (was {}), by its address code", moved.name, moved.addr, rec.addr));
+        Ok(moved.summary())
     }
 
     pub async fn send(&self, conn: u64, text: String) -> Result<(), String> {
