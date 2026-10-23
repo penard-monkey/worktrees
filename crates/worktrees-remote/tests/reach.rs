@@ -27,6 +27,7 @@ use worktrees_remote::hosts::{new_host_id, HostRecord, HostStore};
 use worktrees_remote::key::DeviceKey;
 use worktrees_remote::pipe::PipeError;
 use worktrees_remote::reach::{self, Env, Lan, ReachError};
+use worktrees_remote::sign::Keys;
 use worktrees_remote::tls;
 
 const WAIT: Duration = Duration::from_secs(5);
@@ -148,7 +149,8 @@ struct World {
     dir: PathBuf,
     store: HostStore,
     rec: HostRecord,
-    key: DeviceKey,
+    key: Arc<DeviceKey>,
+    keys: Keys,
     routes: Arc<Mutex<HashMap<SocketAddr, SocketAddr>>>,
     dials: Arc<Mutex<Vec<SocketAddr>>>,
     rounds: Arc<AtomicUsize>,
@@ -177,11 +179,12 @@ fn world(rt: &tokio::runtime::Runtime, tag: &str, pin: &str) -> World {
         expiry: serde_json::json!({"idle_days": 30}),
         paired_at: 1_800_000_000,
     };
-    let key = DeviceKey::generate().unwrap();
+    let key = Arc::new(DeviceKey::generate().unwrap());
     store.add(&rec, &key).unwrap();
+    let keys = Keys::device_only(key.clone());
     // A port nothing listens on: a connect there is refused at once.
     let closed = rt.block_on(async { tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap() });
-    World { dir, store, rec, key, routes: Arc::default(), dials: Arc::default(), rounds: Arc::default(), closed }
+    World { dir, store, rec, key, keys, routes: Arc::default(), dials: Arc::default(), rounds: Arc::default(), closed }
 }
 
 impl World {
@@ -223,7 +226,7 @@ impl World {
 
     fn open(&self, rt: &tokio::runtime::Runtime, env: &Env) -> (Result<reach::Reached, ReachError>, Vec<String>) {
         let mut log = Vec::new();
-        let r = rt.block_on(reach::open(&self.store, &self.rec, &self.key, env, WAIT, &mut |m: &str| log.push(m.to_string())));
+        let r = rt.block_on(reach::open(&self.store, &self.rec, &self.keys, env, WAIT, &mut |m: &str| log.push(m.to_string())));
         (r, log)
     }
 }
@@ -475,7 +478,7 @@ fn not_found_says_where_it_looked_and_the_way_back() {
     assert!(e.contains("not looked for on the LAN: no browsing here") && e.contains("address code"), "{e}");
     let mut st = w.rec.clone();
     st.discovery_id = None;
-    let e = rt.block_on(reach::open(&w.store, &st, &w.key, &w.env(vec![], vec![en0()]), WAIT, &mut |_: &str| {})).err().unwrap().to_string();
+    let e = rt.block_on(reach::open(&w.store, &st, &w.keys, &w.env(vec![], vec![en0()]), WAIT, &mut |_: &str| {})).err().unwrap().to_string();
     assert!(e.contains("no discovery id") && e.contains("address code"), "{e}");
 }
 

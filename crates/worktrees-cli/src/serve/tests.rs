@@ -2544,6 +2544,113 @@ mod devices {
             assert_eq!(worktrees_remote::call::CLIENT_LABEL, policy::CLIENT_LABEL);
             assert_eq!(worktrees_remote::call::SERVER_LABEL, policy::SERVER_LABEL);
         }
+
+        // ── an iPhone's keys: signers the client can only ask ──────────────
+        //
+        // `Opaque` stands in for the Secure Enclave (a software key behind
+        // `DeviceSigner` alone). `pair_keys` takes nothing else, and keeps
+        // nothing: the iOS app keeps the record beside its keys.
+
+        use super::super::super::tls::testkit::{How, Opaque};
+        use worktrees_remote::sign::{Keys, SignError};
+
+        fn start_keys(e: &Engine, uri: &str, platform: Platform, keys: Keys) -> (Arc<Mutex<Option<String>>>, tokio::task::JoinHandle<Outcome>) {
+            let code = Arc::new(Mutex::new(None));
+            let (slot, uri) = (code.clone(), uri.to_string());
+            let task = e.rt.spawn(async move {
+                let mut on = move |ev: PairEvent| {
+                    if let PairEvent::Code(c) = ev {
+                        *slot.lock().unwrap() = Some(c);
+                    }
+                };
+                rpair::pair_keys_with(&uri, "Bret's iPhone", platform, &keys, worktrees_core::sysclock::now_epoch(), &super::literal, Waits::default(), &mut on).await
+            });
+            (code, task)
+        }
+
+        /// §2.2 for an iPhone, end to end against the real pairing listener,
+        /// with keys the client cannot read: the host enrolls the device key
+        /// and the step-up key the frame named, step-up on — the device key
+        /// was asked twice (its certificate, the handshake), and the step-up
+        /// key never: pairing enrolls its public half and shows no Face ID.
+        #[test]
+        fn an_iphone_pairs_with_keys_the_client_can_only_ask() {
+            let e = engine("rc-iphone", vec![]);
+            bind(&e);
+            let mut con = e.connect(Caller::console());
+            let uri = e.begin(&mut con, &["read", "admin"], json!("*"), Value::Null)["ok"]["uri"].as_str().unwrap().to_string();
+            let (device, stepup) = (Opaque::new(), Opaque::new());
+            let keys = Keys { device: device.clone(), stepup: Some(stepup.clone()) };
+            let (code, task) = start_keys(&e, &uri, Platform::Ios, keys);
+            let pending = wait_for(&e, &mut con, "pending");
+            assert_eq!(pending["request"]["platform"], json!("ios"), "{pending}");
+            assert_eq!(Some(pending["request"]["code"].as_str().unwrap().to_string()), *code.lock().unwrap());
+            let rec = e.rpc(&mut con, "pair_decide", json!({"allow": true}))["ok"].clone();
+            let kept = e.rt.block_on(task).unwrap().unwrap_or_else(|err| panic!("{err}"));
+            assert_eq!(rec["spki_sha256"], json!(device.pin()), "{rec}");
+            assert_eq!(rec["stepup_spki_sha256"], json!(stepup.pin()), "{rec}");
+            assert_eq!(rec["stepup_required"], json!(true));
+            assert_eq!(json!(kept.device_id), rec["id"]);
+            assert_eq!(kept.addr, REMOTE);
+            assert_eq!((device.asked(), stepup.asked()), (2, 0));
+        }
+
+        /// Keys the host would refuse are refused by the client BEFORE it
+        /// dials, so the window's one attempt is not spent: an iPhone with
+        /// no step-up key, a desktop with one, the device key twice, and a
+        /// device key that cannot sign its certificate. The window is still
+        /// open after each, and a good pairing then goes through it.
+        #[test]
+        fn keys_the_host_would_refuse_never_spend_the_window() {
+            let e = engine("rc-keys", vec![]);
+            bind(&e);
+            let mut con = e.connect(Caller::console());
+            let uri = e.begin(&mut con, &["read"], json!("*"), Value::Null)["ok"]["uri"].as_str().unwrap().to_string();
+            let same = Opaque::new();
+            let cancelled = Opaque::answering(Box::new(|_: usize, _: Vec<u8>| Err(SignError::Cancelled)) as How);
+            let cases: Vec<(&str, Platform, Keys)> = vec![
+                ("an iPhone with no step-up key", Platform::Ios, Keys::device_only(Opaque::new())),
+                ("a desktop with one", Platform::Macos, Keys { device: Opaque::new(), stepup: Some(Opaque::new()) }),
+                ("the device key twice", Platform::Ios, Keys { device: same.clone(), stepup: Some(same.clone()) }),
+                ("a key that cannot sign", Platform::Ios, Keys { device: cancelled.clone(), stepup: Some(Opaque::new()) }),
+            ];
+            for (what, platform, keys) in cases {
+                let (_code, task) = start_keys(&e, &uri, platform, keys);
+                match e.rt.block_on(task).unwrap() {
+                    Err(PairError::Keys(_)) if what != "a key that cannot sign" => {}
+                    Err(PairError::Sign(SignError::Cancelled)) if what == "a key that cannot sign" => {}
+                    other => panic!("{what}: {:?}", other.map_err(|e| e.to_string())),
+                }
+                std::thread::sleep(Duration::from_millis(100));
+                assert_eq!(e.status(&mut con)["state"], json!("open"), "{what}: nothing reached the window");
+            }
+            assert_eq!(cancelled.asked(), 1, "asked for its certificate, and refused there");
+            let (_code, task) = start_keys(&e, &uri, Platform::Ios, Keys { device: Opaque::new(), stepup: Some(Opaque::new()) });
+            wait_for(&e, &mut con, "pending");
+            assert!(e.rpc(&mut con, "pair_decide", json!({"allow": true})).get("ok").is_some());
+            assert!(e.rt.block_on(task).unwrap().is_ok(), "the window was whole");
+        }
+
+        /// A device key that signs its certificate and then refuses the
+        /// handshake's signature (a prompt it should never raise, a phone
+        /// locked mid-dial) is named as the reason, not a TLS failure with
+        /// none. The attempt is spent, as any failed handshake spends it
+        /// (§2.4).
+        #[test]
+        fn a_key_that_refuses_inside_the_pairing_handshake_is_named() {
+            let e = engine("rc-hs-cancel", vec![]);
+            bind(&e);
+            let mut con = e.connect(Caller::console());
+            let uri = e.begin(&mut con, &["read"], json!("*"), Value::Null)["ok"]["uri"].as_str().unwrap().to_string();
+            let device = Opaque::answering(Box::new(|n: usize, sig: Vec<u8>| if n == 0 { Ok(sig) } else { Err(SignError::Cancelled) }) as How);
+            let (_code, task) = start_keys(&e, &uri, Platform::Ios, Keys { device: device.clone(), stepup: Some(Opaque::new()) });
+            match e.rt.block_on(task).unwrap() {
+                Err(PairError::Sign(SignError::Cancelled)) => {}
+                other => panic!("{:?}", other.map_err(|e| e.to_string())),
+            }
+            assert_eq!(device.asked(), 2);
+            assert_eq!(e.closed_as(&mut con)["ended"], json!("bad_tls"));
+        }
     }
 
     /// §2.2 from end to end: the host chooses the scope, the window opens, the
