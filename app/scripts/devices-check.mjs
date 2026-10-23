@@ -5,17 +5,22 @@
 // window ends (pairing.rs `Ended`) and the platforms. A mirror that drifts
 // leaves a page that is confidently wrong while every test of either side
 // passes (AGENTS.md: "a frontend that mirrors a core DECISION needs a drift
-// check"). Also §1.1's label rule, the QR drawing, and the alert wording's
-// one rule: serve decides what is an alert, the page never adds one.
+// check"). Also §1.1's label rule, the QR drawing, the alert wording's one
+// rule (serve decides what is an alert, the page never adds one), and that a
+// window driving a paired host shows these panels greyed with their reason
+// and asks that host for none of the console's rows.
 //
 //   node app/scripts/devices-check.mjs     # exits non-zero on failure
 //   DEVICES_TS=<path> node app/scripts/devices-check.mjs   # check another copy
+//   SRC_DevicesPanel_tsx=<path> …   # another copy of any app/src file read here
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { transformWithEsbuild } from "vite";
 
 const here = (rel) => fileURLToPath(new URL(rel, import.meta.url));
 const read = (p) => fs.readFileSync(p, "utf8");
+/** An app/src file, or the copy `SRC_<its name, . as _>` names. */
+const src = (file) => read(process.env[`SRC_${file.replace(/\W/g, "_")}`] ?? here(`../src/${file}`));
 const SRC = process.env.DEVICES_TS ?? here("../src/devices.ts");
 const js = (await transformWithEsbuild(read(SRC), "devices.ts", { loader: "ts", format: "esm" })).code;
 const D = await import("data:text/javascript;base64," + Buffer.from(js).toString("base64"));
@@ -54,7 +59,7 @@ eq("CAPS are authz::Capability's names, in its order", [...D.CAPS], capNames);
 const constOf = (src, name) => Number(new RegExp(`pub const ${name}: \\w+ = (\\d+);`).exec(src)?.[1]);
 eq("DEFAULT_IDLE_DAYS is devices.rs's", D.DEFAULT_IDLE_DAYS, constOf(devices, "DEFAULT_IDLE_DAYS"));
 eq("MAX_IDLE_DAYS is devices.rs's", D.MAX_IDLE_DAYS, constOf(devices, "MAX_IDLE_DAYS"));
-const panel = read(here("../src/DevicesPanel.tsx"));
+const panel = src("DevicesPanel.tsx");
 eq("DevicesPanel's MAX_DEVICES is devices.rs's", Number(/const MAX_DEVICES = (\d+);/.exec(panel)?.[1]), constOf(devices, "MAX_DEVICES"));
 const snake = (s) => s.replace(/[A-Z]/g, (c, i) => (i ? "_" : "") + c.toLowerCase());
 const variants = (src, name) => {
@@ -128,11 +133,57 @@ eq("an expiry says why", D.alertText(device("disabled", { reason: "idle" }), lab
 eq("auth failures count", D.alertText(D.alertOf({ alert: "auth_failures", count: 20 }, 1), label).startsWith("20 connection attempts failed authentication"), true);
 // The store raises notices from `audit:alert` alone: its `devices:changed`
 // handler re-reads, and never pushes one.
-const store = read(here("../src/remoteStore.ts"));
+const store = src("remoteStore.ts");
 const dc = store.slice(store.indexOf('listen<Record<string, unknown>>("devices:changed"'), store.indexOf('listen<Record<string, unknown>>("audit:alert"'));
 eq("the devices:changed handler is found", dc.length > 0, true);
 eq("devices:changed never raises a notice", /\bpush\(|alertOf\(/.test(dc), false);
 eq("audit:alert does", /push\(alertOf\(/.test(store.slice(store.indexOf('listen<Record<string, unknown>>("audit:alert"'))), true);
+
+// ── a window that drives a paired host (Phase 2 §4.4) ──────────────────────
+// It is not that host's console. Each panel's FIRST return is GrantNote's
+// reason, before any read or control, so a remote window asks for no console
+// row and shows none enabled; the store reads no status and hears no console
+// event there; the corner says nothing about an engine the window does not
+// drive; and every console row this UI calls is one ipc.ts's remote door
+// refuses in words (engine-route-check holds CONSOLE_ROWS to dispatch.rs).
+const CONSOLE = [...(/export const CONSOLE_ROWS: readonly string\[\] = \[([^\]]*)\]/.exec(src("ipc.ts"))?.[1] ?? "").matchAll(/"([a-z_0-9]+)"/g)].map((m) => m[1]);
+eq("ipc.ts CONSOLE_ROWS is found", CONSOLE.length > 30, true);
+const fnBody = (text, name) => {
+  const i = text.indexOf(`export function ${name}(`);
+  return i < 0 ? "" : text.slice(i, text.indexOf("\n}\n", i));
+};
+const READS = /\binvoke\b|\buse(?:Effect|Projects|Unprompted|Now)\(|<button|<input/;
+for (const [file, fn, row] of [["RemoteAccessPanel.tsx", "RemoteAccessSection", "remote_status"], ["DevicesPanel.tsx", "DevicesSection", "pair_begin"]]) {
+  const body = fnBody(src(file), fn);
+  const gate = new RegExp(`if \\(notGranted\\("${row}"\\) \\|\\| notConsole\\(r\\)\\) \\{\\s*return <GrantNote cmd="${row}"[^>]*\\brefused />`).exec(body);
+  eq(`${fn} is found`, body.length > 0, true);
+  eq(`${fn}: a remote window gets GrantNote's reason for ${row}, and serve's console-only the same note`, !!gate, true);
+  eq(`${fn}: the gate is its first return`, gate ? body.indexOf("return") === gate.index + gate[0].indexOf("return") : false, true);
+  eq(`${fn}: nothing reads or renders a control before the gate`, gate ? READS.test(body.slice(0, gate.index)) : true, false);
+}
+const pair = src("PairSheet.tsx");
+eq("the pair sheet's begin is greyed with notGranted's reason",
+  /const problem = notGranted\("pair_begin"\) \?\? scopeProblem\(scope\);/.test(pair) && /disabled=\{busy \|\| !!problem\} title=\{problem \?\? undefined\} onClick=\{begin\}/.test(pair), true);
+const watch = fnBody(store, "watchRemote");
+const stop = watch.indexOf('if (notGranted("remote_status")) return');
+eq("watchRemote is found", watch.length > 0, true);
+eq("watchRemote stops for a remote window before any console read or listen", stop >= 0 && stop < watch.indexOf("readStatus()") && stop < watch.indexOf("listen<"), true);
+eq("…and lists devices only where the grant reaches devices_list",
+  [...watch.matchAll(/readDevices\(\)/g)].length === 1 && /if \(!notGranted\("devices_list"\)\) void readDevices\(\);/.test(watch.slice(0, Math.max(0, stop))), true);
+const layer = fnBody(src("EngineGate.tsx"), "RemoteLayer");
+eq("RemoteLayer shows neither the notice nor an alert on a remote window",
+  /const onConsole = !notGranted\("remote_status"\);/.test(layer) && /const on = onConsole && /.test(layer) && /const shown = on \|\| \(onConsole && alerts\.length > 0\);/.test(layer), true);
+// DeviceRow calls its rows through `act("…", args)`, which adds the id.
+const invoked = new Set(["RemoteAccessPanel.tsx", "DevicesPanel.tsx", "PairSheet.tsx", "remoteStore.ts"]
+  .flatMap((f) => [...src(f).matchAll(/\b(?:invoke(?:<[^>()]*(?:<[^>]*>[^>()]*)*>)?|act)\(\s*"([a-z_0-9]+)"/g)].map((m) => m[1])));
+eq("the rows the remote-access UI calls are found", invoked.size >= 15, true);
+// Not console rows, on purpose: `devices_list` is `[admin]` (a device with
+// admin lists its own principal's), `device_revoke` is `Own` (a device may
+// revoke itself).
+const OTHERS = ["devices_list", "device_revoke"];
+eq("every row the remote-access UI calls is a console row, bar the two that are not",
+  [...invoked].filter((c) => !CONSOLE.includes(c) && !OTHERS.includes(c)), []);
+eq("…and that includes the two this UI added", ["remote_candidates", "device_rename"].every((c) => invoked.has(c) && CONSOLE.includes(c)), true);
 
 // ── a record, in words ─────────────────────────────────────────────────────
 const rec = {

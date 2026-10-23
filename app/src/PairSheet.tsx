@@ -11,7 +11,7 @@
 // sheet while a window is open cancels it: an open window nobody is watching
 // is one a stranger could use.
 import { useEffect, useRef, useState } from "react";
-import { invoke } from "./ipc";
+import { invoke, notGranted } from "./ipc";
 import { copyToClipboard } from "./clipboard";
 import { useEscape } from "./useEscape";
 import { useRemote } from "./remoteStore";
@@ -83,7 +83,9 @@ export function PairSheet({ onClose }: { onClose: () => void }) {
   };
   useEscape(close);
 
-  const problem = scopeProblem(scope);
+  // Unreachable from a remote window (Devices says why instead), and greyed
+  // with the reason if it ever is.
+  const problem = notGranted("pair_begin") ?? scopeProblem(scope);
   const begin = async () => {
     setBusy(true);
     setErr(null);
@@ -203,7 +205,7 @@ export function PairSheet({ onClose }: { onClose: () => void }) {
             <>
               <span className="ra-foot-why">{problem ?? ""}</span>
               <button className="ctrl" onClick={close}>Cancel</button>
-              <button className="enter-btn" disabled={busy || !!problem} onClick={begin}>{busy ? "Opening…" : "Show the pairing code"}</button>
+              <button className="enter-btn" disabled={busy || !!problem} title={problem ?? undefined} onClick={begin}>{busy ? "Opening…" : "Show the pairing code"}</button>
             </>
           )}
           {phase === "open" && <button className="ctrl" onClick={cancel}>Cancel pairing</button>}

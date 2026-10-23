@@ -4,9 +4,10 @@
 // `remote_advertise`, `remote_candidates`); the state shown is `remote_status`
 // as serve last answered it (remoteStore.ts), never a guess.
 import { useEffect, useId, useState } from "react";
-import { invoke } from "./ipc";
+import { invoke, notGranted } from "./ipc";
 import { copyToClipboard } from "./clipboard";
 import { ConfirmDialog } from "./remoteui";
+import { GrantNote } from "./GrantNote";
 import { notConsole, readStatus, useRemote } from "./remoteStore";
 import type { Candidate, RemoteStatus } from "./devices";
 import "./RemoteAccess.css";
@@ -58,13 +59,10 @@ export function RemoteAccessSection({ onReport }: { onReport: (msg: string) => v
   const [err, setErr] = useState<string | null>(null);
   const [copied, setCopied] = useState("");
 
-  if (notConsole(r)) {
-    return (
-      <section className="setting ra" data-focus="remote-access">
-        <label>Remote access</label>
-        <div className="ra-gate">Remote access is managed on the computer that runs this engine, not from a paired device.</div>
-      </section>
-    );
+  // A window that drives a paired host is not that host's console: it does
+  // not ask (ipc.ts CONSOLE_ROWS), and serve's `console-only` says the same.
+  if (notGranted("remote_status") || notConsole(r)) {
+    return <GrantNote cmd="remote_status" label="Remote access" focus="remote-access" refused />;
   }
   if (!st) {
     return (

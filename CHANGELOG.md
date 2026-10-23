@@ -170,6 +170,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
     corner, with a badge on Devices. It is never a pop-up.
   - While remote access is on, the corner of the window says so.
     Clicking it opens Settings → Remote access.
+  - A window that drives another Mac never manages that Mac's remote
+    access or devices. Both categories say they are set up at that Mac
+    itself, and the corner says nothing about remote access.
 
 ### Changed
 - **With nothing set, a slot's capacity is sized from the machine.** It used to

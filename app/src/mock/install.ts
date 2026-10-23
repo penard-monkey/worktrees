@@ -3416,42 +3416,42 @@ Phase 3: Frontend pane and mock harness
       };
 
     // ── remote access and paired devices (Phase 2 slice 6, the host's UI) ──
-    // The console rows, over the state below. `?remote=on` starts listening
+    // The console rows, over the state below. `?access=on` starts listening
     // (an app-owned serve, which RemoteNotice says); `?devices=0` starts with
     // no device paired; `?notconsole` answers every console row the way serve
     // answers a paired device's window (`console-only`).
     case "remote_status":
-      consoleOnly();
-      return mockRemoteStatus();
+      consoleOnly("remote_status");
+      return mockAccessStatus();
     case "remote_candidates":
-      consoleOnly();
+      consoleOnly("remote_candidates");
       return clone(MOCK_CANDIDATES);
     case "remote_enable": {
-      consoleOnly();
+      consoleOnly("remote_enable");
       const c = MOCK_CANDIDATES.find((x) => x.address === args.address && (!args.iface || x.iface === args.iface));
       if (!c) throw `not-held: no interface of this host holds ${args.address}`;
-      Object.assign(mockRemote, { on: true, address: c.address, iface: c.iface, mode: c.mode, paused: null, question: null, warning: c.warning });
+      Object.assign(mockAccess, { on: true, address: c.address, iface: c.iface, mode: c.mode, paused: null, question: null, warning: c.warning });
       remoteChanged();
-      return mockRemoteStatus();
+      return mockAccessStatus();
     }
     case "remote_disable":
-      consoleOnly();
-      mockRemote.on = false;
-      mockRemote.paused = null;
-      mockRemote.question = null;
+      consoleOnly("remote_disable");
+      mockAccess.on = false;
+      mockAccess.paused = null;
+      mockAccess.question = null;
       if (mockPair.window) closeWindow("cancelled");
       remoteChanged();
-      return mockRemoteStatus();
+      return mockAccessStatus();
     case "remote_advertise":
-      consoleOnly();
-      mockRemote.advertise = !!args.on;
+      consoleOnly("remote_advertise");
+      mockAccess.advertise = !!args.on;
       remoteChanged();
-      return mockRemoteStatus();
+      return mockAccessStatus();
     case "devices_list":
-      consoleOnly();
+      consoleOnly("devices_list");
       return clone(mockDevices);
     case "device_rename": {
-      consoleOnly();
+      consoleOnly("device_rename");
       const d = mockDevice(args.id);
       const name = String(args.name ?? "");
       if (!name || name.length > 64 || /[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/.test(name)) throw "a device name is 1 to 64 characters with no control or direction characters";
@@ -3462,7 +3462,7 @@ Phase 3: Frontend pane and mock harness
       return true;
     }
     case "device_disable": {
-      consoleOnly();
+      consoleOnly("device_disable");
       const d = mockDevice(args.id);
       if (d.disabled) return false;
       d.disabled = { at: nowSec(), reason: "console" };
@@ -3470,7 +3470,7 @@ Phase 3: Frontend pane and mock harness
       return true;
     }
     case "device_enable": {
-      consoleOnly();
+      consoleOnly("device_enable");
       const d = mockDevice(args.id);
       if (!d.disabled) return false;
       if (typeof d.expiry === "object" && "until" in d.expiry && Date.parse(d.expiry.until) <= Date.now())
@@ -3481,7 +3481,7 @@ Phase 3: Frontend pane and mock harness
       return true;
     }
     case "device_set_expiry": {
-      consoleOnly();
+      consoleOnly("device_set_expiry");
       const d = mockDevice(args.id);
       const e = args.expiry as MockExpiry;
       if (typeof e === "object" && "idle_days" in e && !(e.idle_days >= 1 && e.idle_days <= 3650)) throw "idle_days must be a whole number from 1 to 3650";
@@ -3491,7 +3491,7 @@ Phase 3: Frontend pane and mock harness
       return true;
     }
     case "device_set_stepup": {
-      consoleOnly();
+      consoleOnly("device_set_stepup");
       const d = mockDevice(args.id);
       if (args.required && !d.stepup_spki_sha256) throw `device ${d.id} enrolled no step-up key`;
       if (d.stepup_required === !!args.required) return false;
@@ -3500,7 +3500,7 @@ Phase 3: Frontend pane and mock harness
       return true;
     }
     case "device_set_scope": {
-      consoleOnly();
+      consoleOnly("device_set_scope");
       const d = mockDevice(args.id);
       const roots = ws.projects.map((p) => p.root);
       const projects = args.projects as "*" | string[];
@@ -3511,7 +3511,7 @@ Phase 3: Frontend pane and mock harness
       return true;
     }
     case "device_revoke": {
-      consoleOnly();
+      consoleOnly("device_revoke");
       const d = mockDevice(args.id);
       if (d.revoked_at != null) return false;
       d.revoked_at = nowSec();
@@ -3519,30 +3519,30 @@ Phase 3: Frontend pane and mock harness
       return true;
     }
     case "pair_begin": {
-      consoleOnly();
-      if (!mockRemote.on || mockRemote.paused) throw "remote access is off: a device pairs over the remote listener's address, so turn remote access on first";
+      consoleOnly("pair_begin");
+      if (!mockAccess.on || mockAccess.paused) throw "remote access is off: a device pairs over the remote listener's address, so turn remote access on first";
       if (mockDevices.filter((d) => d.revoked_at == null).length >= 16) throw "16 devices are enrolled; revoke one before pairing another";
       const projects = args.projects as "*" | string[];
       if (projects !== "*") for (const r of projects) if (!ws.projects.some((p) => p.root === r)) throw `not a registered project: ${r}`;
       if (mockPair.window) closeWindow("superseded");
       const expires_at = nowSec() + 120;
       const secret = Array.from({ length: 26 }, (_, i) => "abcdefghijklmnopqrstuvwxyz234567"[(i * 7 + expires_at) % 32]).join("");
-      const uri = `worktrees-pair:v1?addr=${mockRemote.address}:51877&pin=${MOCK_PIN}&secret=${secret}&host=Demo-MacBook-Pro&exp=${expires_at}`;
+      const uri = `worktrees-pair:v1?addr=${mockAccess.address}:51877&pin=${MOCK_PIN}&secret=${secret}&host=Demo-MacBook-Pro&exp=${expires_at}`;
       mockPair.window = { uri, expires_at, grant: { capabilities: (args.caps as string[]).slice(), projects }, expiry: args.expiry ?? { idle_days: 30 }, phase: { state: "open" } };
       mockPair.timer = window.setTimeout(() => closeWindow("expired"), 120_000);
       deviceEvent({ event: "pairing_opened", for_principal: "owner", expires_at });
       return { uri, expires_at, pin: MOCK_PIN, host: "Demo-MacBook-Pro", qr: mockQr(uri) };
     }
     case "pair_status":
-      consoleOnly();
+      consoleOnly("pair_status");
       return mockPairStatus();
     case "pair_cancel":
-      consoleOnly();
+      consoleOnly("pair_cancel");
       if (!mockPair.window) return false;
       closeWindow("cancelled");
       return true;
     case "pair_decide": {
-      consoleOnly();
+      consoleOnly("pair_decide");
       const w = mockPair.window;
       if (!w || w.phase.state !== "pending") throw "no pairing request is waiting";
       deviceEvent({ event: "pairing_decided", allow: !!args.allow });
@@ -3795,33 +3795,37 @@ const MOCK_CANDIDATES = [
   { address: "169.254.10.2", prefix: 16, iface: "en5", class: "link-local", mode: "lan", warning: null },
   { address: "fe80::1c2e:4bff:fe11:2233", prefix: 64, iface: "en0", class: "link-local", mode: "lan", warning: null },
 ];
-const mockRemote = {
-  on: mockQuery.get("remote") === "on", address: "192.168.1.5", iface: "en0", mode: "lan", port: 51234, advertise: true,
+const mockAccess = {
+  on: mockQuery.get("access") === "on", address: "192.168.1.5", iface: "en0", mode: "lan", port: 51234, advertise: true,
   paused: null as string | null, question: null as null | { text: string; alert: boolean; use_address: string }, warning: null as string | null,
 };
-function mockRemoteStatus() {
+function mockAccessStatus() {
   const base = { owner: "app", host: "Demo-MacBook-Pro" };
-  if (!mockRemote.on) return { ...base, state: "off", port: mockRemote.port, advertise: mockRemote.advertise };
-  const listening = !mockRemote.paused;
+  if (!mockAccess.on) return { ...base, state: "off", port: mockAccess.port, advertise: mockAccess.advertise };
+  const listening = !mockAccess.paused;
   return {
     ...base,
     state: listening ? "listening" : "paused",
-    address: mockRemote.address, port: mockRemote.port, iface: mockRemote.iface, mode: mockRemote.mode,
-    at: listening ? (mockRemote.address.includes(":") ? `[${mockRemote.address}]:${mockRemote.port}` : `${mockRemote.address}:${mockRemote.port}`) : null,
+    address: mockAccess.address, port: mockAccess.port, iface: mockAccess.iface, mode: mockAccess.mode,
+    at: listening ? (mockAccess.address.includes(":") ? `[${mockAccess.address}]:${mockAccess.port}` : `${mockAccess.address}:${mockAccess.port}`) : null,
     pin: MOCK_PIN,
-    address_code: listening ? `worktrees-addr:v1?addr=${mockRemote.address}:${mockRemote.port}&pin=${MOCK_PIN}` : null,
-    paused: mockRemote.paused, question: mockRemote.question, error: null, warning: mockRemote.warning,
-    advertise: mockRemote.advertise,
-    advert: !listening || !mockRemote.advertise ? { state: "off" }
-      : mockRemote.mode === "overlay" ? { state: "not-advertised", why: "an overlay bind is never advertised" }
-        : mockRemote.warning ? { state: "not-advertised", why: "100.64.0.0/10 on an interface that is not a tunnel may be shared with strangers, so it is not advertised" }
+    address_code: listening ? `worktrees-addr:v1?addr=${mockAccess.address}:${mockAccess.port}&pin=${MOCK_PIN}` : null,
+    paused: mockAccess.paused, question: mockAccess.question, error: null, warning: mockAccess.warning,
+    advertise: mockAccess.advertise,
+    advert: !listening || !mockAccess.advertise ? { state: "off" }
+      : mockAccess.mode === "overlay" ? { state: "not-advertised", why: "an overlay bind is never advertised" }
+        : mockAccess.warning ? { state: "not-advertised", why: "100.64.0.0/10 on an interface that is not a tunnel may be shared with strangers, so it is not advertised" }
           : { state: "registered", host: "wt-k7q2m4x9p3r8t6v5w2y4z6a8b0.local" },
   };
 }
 function remoteChanged() {
-  emitEvent("remote:changed", mockRemoteStatus());
+  emitEvent("remote:changed", mockAccessStatus());
 }
-function consoleOnly() {
+/** Every remote-access and device row the page asked for, in order
+ *  (`__mock.accessCalls()`): a remote window (`?remote`) must ask for none. */
+const accessCalls: string[] = [];
+function consoleOnly(cmd: string) {
+  accessCalls.push(cmd);
   if (mockQuery.has("notconsole")) throw "console-only";
 }
 const DAY = 86400;
@@ -4071,6 +4075,8 @@ const mockAskMain: { slug: string; session: string; provider: string | null }[] 
 
 const healthyConfigs: Record<string, MockCfg> = {};
 (window as any).__mock = {
+  /** The remote-access and device rows the page has asked for so far. */
+  accessCalls: () => [...accessCalls],
   /** A device scans the open pairing window and proves its secret: the
    *  request the host is asked about (§2.2 step 6), with its comparison code.
    *  Unreachable by clicking — it comes from ANOTHER machine. With no window
@@ -4105,11 +4111,11 @@ const healthyConfigs: Record<string, MockCfg> = {};
   },
   /** The address watch pauses remote access and asks (§4.1). */
   remotePause(text = "Remote access is paused. This host is now 192.168.4.20 on en0, on a different network.", use = "192.168.1.5") {
-    if (!mockRemote.on) return null;
-    mockRemote.paused = "192.168.1.5 on en0 is on a different network now";
-    mockRemote.question = { text, alert: true, use_address: use };
+    if (!mockAccess.on) return null;
+    mockAccess.paused = "192.168.1.5 on en0 is on a different network now";
+    mockAccess.question = { text, alert: true, use_address: use };
     remoteChanged();
-    return mockRemoteStatus();
+    return mockAccessStatus();
   },
   devices: () => clone(mockDevices),
   /** Host-policy setter calls made by THIS page load, oldest first. */

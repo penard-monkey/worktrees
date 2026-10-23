@@ -29,10 +29,6 @@
 }
 .ra-cmd { display: block; margin-top: var(--s1); }
 .ra-note { font-size: var(--fs-meta); color: var(--txt); line-height: var(--lh-prose); }
-.ra-gate {
-  padding: var(--s2) var(--s3); border-radius: var(--r-sm); border: 1px solid var(--line);
-  background: var(--bg-panel); color: var(--txt); font-size: var(--fs-label);
-}
 .ra-err {
   padding: var(--s2) var(--s3); border-radius: var(--r-sm);
   border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--line));

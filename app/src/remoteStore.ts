@@ -18,7 +18,7 @@
 // (`watchRemote(gen)`, from EngineGate), so a lost socket costs nothing but
 // the moment it is down.
 import { useSyncExternalStore } from "react";
-import { invoke, listen } from "./ipc";
+import { invoke, listen, notGranted } from "./ipc";
 import { setDeviceNames } from "./provenance";
 import { alertOf, type Alert, type DeviceRecord, type RemoteStatus } from "./devices";
 
@@ -154,11 +154,15 @@ function devicesSoon() {
 }
 
 /** Watch serve's console events while the engine `gen` is up. Returns the
- *  teardown. */
+ *  teardown. A window that drives a paired host is not that host's console
+ *  (ipc.ts CONSOLE_ROWS): it reads no status and hears no console event —
+ *  serve would send it none — and it lists devices, for their names, only
+ *  when its grant reaches `devices_list` (admin). */
 export function watchRemote(): () => void {
+  if (!notGranted("devices_list")) void readDevices();
+  if (notGranted("remote_status")) return () => {};
   let live = true;
   void readStatus();
-  void readDevices();
   const uns = [
     listen<RemoteStatus>("remote:changed", () => { if (live) void readStatus(); }),
     listen<Record<string, unknown>>("devices:changed", (e) => {

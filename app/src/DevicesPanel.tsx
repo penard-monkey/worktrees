@@ -5,10 +5,11 @@
 // shown on the row it came from, in serve's words. The list is
 // `devices_list`, re-read on every `devices:changed` (remoteStore.ts).
 import { useState } from "react";
-import { invoke } from "./ipc";
-import { dismissCat, notConsole, readDevices, useRemote } from "./remoteStore";
+import { invoke, notGranted } from "./ipc";
+import { dismissCat, notConsole, readDevices, useRemote, type RemoteState } from "./remoteStore";
 import { ConfirmDialog, ExpiryEditor, RunsLabel, ScopeEditor, scopeProblem, useNow, useProjects, useUnprompted, type ProjectRef, type Scope } from "./remoteui";
 import { PairSheet } from "./PairSheet";
+import { GrantNote } from "./GrantNote";
 import {
   capsWords, deviceState, expiryWords, hasPresenceKey, PLATFORM_LABEL, scopeWords, seenWords, stepupWords,
   type DeviceRecord, type Expiry,
@@ -20,20 +21,22 @@ const MAX_DEVICES = 16;
 
 export function DevicesSection() {
   const r = useRemote();
+  // Pairing and managing devices are the host console's (ipc.ts
+  // CONSOLE_ROWS); serve's `console-only` is the backstop, in the same words.
+  // Gated before the list's own reads (the projects, Codex's permissions).
+  if (notGranted("pair_begin") || notConsole(r)) {
+    return <GrantNote cmd="pair_begin" label="Paired devices" focus="devices" refused />;
+  }
+  return <DevicesList r={r} />;
+}
+
+function DevicesList({ r }: { r: RemoteState }) {
   const [pairing, setPairing] = useState(false);
   const [showRevoked, setShowRevoked] = useState(false);
   const unprompted = useUnprompted();
   const projects = useProjects();
   const now = useNow(30_000);
 
-  if (notConsole(r)) {
-    return (
-      <section className="setting ra" data-focus="devices">
-        <label>Paired devices</label>
-        <div className="ra-gate">Devices are paired and managed on the computer that runs this engine, not from a paired device.</div>
-      </section>
-    );
-  }
   const list = r.devices ?? [];
   const current = list.filter((d) => d.revoked_at == null);
   const revoked = list.filter((d) => d.revoked_at != null);

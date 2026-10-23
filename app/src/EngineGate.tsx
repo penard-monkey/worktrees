@@ -18,7 +18,7 @@
 // says "Disconnected" only once the retries have stopped (the crash-loop
 // limit), with the reason and the log that says more.
 import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
-import { engineState, invoke, onEngineState, reconnectEngine, remoteHost, type EngineState } from "./ipc";
+import { engineState, invoke, notGranted, onEngineState, reconnectEngine, remoteHost, type EngineState } from "./ipc";
 import { dismissAlert, labelOf, openRemoteSettings, useRemote, watchRemote } from "./remoteStore";
 import { alertText, type RemoteStatus } from "./devices";
 import "./tokens.css";
@@ -73,10 +73,7 @@ export function EngineGate({ children }: { children: ReactNode }) {
     <>
       {children}
       {st.kind !== "up" && <EngineBanner st={st} />}
-      {/* Remote access is about THIS machine's own engine; a window that
-          drives a paired host is not on it, and `remote_status` is the
-          console's. */}
-      {st.kind === "up" && !remoteHost() && <RemoteLayer key={st.gen} />}
+      {st.kind === "up" && <RemoteLayer key={st.gen} />}
     </>
   );
 }
@@ -90,8 +87,12 @@ export function EngineGate({ children }: { children: ReactNode }) {
  *  the Settings gear an alert there would cover. */
 export function RemoteLayer() {
   const { status: st, alerts } = useRemote();
-  const on = st !== null && st.state !== "off" && st.state !== "unreadable";
-  const shown = on || alerts.length > 0;
+  // The notice and the alerts are about THIS machine's own engine: a window
+  // that drives a paired host is not on it, and `remote_status` is the
+  // console's (ipc.ts CONSOLE_ROWS). Its watch still names devices.
+  const onConsole = !notGranted("remote_status");
+  const on = onConsole && st !== null && st.state !== "off" && st.state !== "unreadable";
+  const shown = on || (onConsole && alerts.length > 0);
   const at = useClearCorner(shown);
   return (
     <>
