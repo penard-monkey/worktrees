@@ -1073,8 +1073,8 @@ counter, and #544 built it (§2.9). The declared listener set is
 slice 1b, on main since #550 (§9.3, §10).
 
 **Rows added since.** The tables and the count above are the design's 152
-rows. Main has 168 since #544, and two open PRs add six more. Each PR's own
-test pins its count:
+rows. Main has 178 since #563, and #560 adds two more. Each PR's own test
+pins its count:
 
 - **#544 (merged), 168 rows.** Sixteen device and pairing rows, and a new
   exposure, `Own`: what any authenticated caller may always do for itself,
@@ -1095,15 +1095,15 @@ test pins its count:
   `pair_cancel` and `pair_status`, and `device_revoke` is `Own` rather than
   `admin`. The counts become read 55, write 23, admin 35, console 32,
   stream 10, instruct 3, ClientLocal 6, loopback-only 1, own 3.
-- **#556 (open), 174 rows.** Four console rows for remote access:
+- **#556 (merged), 174 rows.** Four console rows for remote access:
   `remote_enable {address, iface?, port?, advertise?}`, `remote_disable`
   (the kill switch, §4.1), `remote_status` and `remote_advertise` (§4.7).
   Console becomes 37 (36 before #554's row), and the *new* list gains
   `remote_disable` and `remote_status`.
-- **The host app's remote-access UI (open, on #556), 176 rows.** Two
-  console rows: `remote_candidates` (the addresses `remote_enable` would
-  take now, §4.1) and `device_rename {id, name}` (`device(id)`). Console
-  becomes 39, and the *new* list gains both.
+- **#560 (open), the host app's remote-access UI, 180 rows** with the iOS
+  MVP's four below. Two console rows: `remote_candidates` (the addresses
+  `remote_enable` would take now, §4.1) and `device_rename {id, name}`
+  (`device(id)`). Console becomes 39, and the *new* list gains both.
 
 #554 (merged, not Phase 2) added a `read` row and a console row of its own,
 `slots_settings` and `set_slot_capacity`, and the counts above include them.
