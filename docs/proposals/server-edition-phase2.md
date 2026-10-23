@@ -1104,6 +1104,13 @@ test pins its count:
 #554 (merged, not Phase 2) added a `read` row and a console row of its own,
 `slots_settings` and `set_slot_capacity`, and the counts above include them.
 
+The iOS MVP's agent rows (`feat/ios-agent-rows`, iOS MVP §2.4 S6–S11) add
+four `Engine` rows: `agent_prompt` and `agent_turns` (`read`),
+`agent_answer` — the first row of `answer`, as §9.2 reserved it — and
+`agent_send` (`instruct`). That is 178 in all: read 58, instruct 4, answer 1,
+the rest unchanged. §9.2's compare-and-swap is built with them, the lease is
+not (iOS MVP §2.4 says why the CAS is enough).
+
 ### 3.5 What changes for loopback
 
 Loopback has scope `"*"` and every capability, so for the desktop app almost
@@ -2899,6 +2906,15 @@ compare-and-swap prevents it outright:
 
 Phase 2 reserves the `answer` capability and the audit kind. Phase 3 ships
 the verb and the lease, with the phone, as §III.9 planned.
+
+**As built (`feat/ios-agent-rows`).** The verb is `agent_answer`, with
+`agent_prompt` to read the prompt (iOS MVP §2.4 S6–S7). The compare-and-swap
+runs under a per-place lock, which is what makes it one: without the lock two
+answers could both see the prompt before either answered. The lease is not
+built; with the lock it is only the politeness it was described as. Choices
+that widen what the agent may do (Claude's "always allow …" and "switch to
+auto mode", Codex's "don't ask again …") are the console's alone, by
+decision 6. The audit record names the choice and the fingerprint.
 
 ### 9.3 Held requests and the engine's lifetime, with devices connected
 

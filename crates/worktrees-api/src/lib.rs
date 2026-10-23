@@ -53,6 +53,7 @@
 //! handshake mandatory rather than nice — after an upgrade, "the app is new and
 //! the server is old" is the default state, not a corner.
 
+pub mod agents;
 pub mod argv;
 pub mod config;
 pub mod docserver;
@@ -136,6 +137,10 @@ pub struct Ctx {
     pub shells: Arc<term::Shells>,
     /// The documentation server and what it is currently serving.
     pub viewer: Arc<viewer::Viewer>,
+    /// The agent rows' pane I/O and the per-place lock their answers and
+    /// sends hold (`agents`). One per engine, so two clients answering one
+    /// prompt meet the same lock.
+    pub agents: Arc<agents::Agents>,
     /// basename → paths per repo, for the Files tab's "find by name".
     pub docnames: Arc<files::DocNameIndex>,
     /// Which projects THIS call may see: every registered one for the engine's
@@ -177,6 +182,7 @@ impl Ctx {
             terminals: Arc::new(term::Terminals::default()),
             shells: Arc::new(term::Shells::default()),
             viewer: Arc::new(viewer::Viewer::default()),
+            agents: Arc::new(agents::Agents::default()),
             docnames: Arc::new(files::DocNameIndex::default()),
             scope: Arc::new(worktrees_core::authz::Projects::All),
             fetch: Arc::new(worktrees_core::fetchpolicy::Fetcher::Console),
@@ -237,6 +243,18 @@ impl Ctx {
     /// The same engine, acting for `who`. Set once: a `Ctx` that already acts
     /// for someone keeps them, so a device's call can never be re-labelled as
     /// another caller's further down.
+    /// This `Ctx` with its agents' pane I/O replaced — serve's tests, which
+    /// script the panes the agent rows read instead of touching tmux.
+    pub fn with_agents(self, agents: agents::Agents) -> Ctx {
+        Ctx { agents: Arc::new(agents), ..self }
+    }
+
+    /// The caller is the host's console (the engine's own work included),
+    /// not a paired device.
+    pub fn is_console(&self) -> bool {
+        self.console
+    }
+
     pub fn acting_for(&self, who: worktrees_core::store::LaunchedBy) -> Ctx {
         if self.acting.is_some() {
             return self.clone();

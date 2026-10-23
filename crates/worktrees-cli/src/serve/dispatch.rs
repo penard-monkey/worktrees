@@ -1,4 +1,4 @@
-//! The 174 commands, each with its exposure, capability and objects, in ONE
+//! The 178 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -39,7 +39,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::sync::Arc;
-use worktrees_api::{config, files, hostenv, meta, ops, prefs, profiles, project, status, term, viewer, workspace, Ctx};
+use worktrees_api::{agents, config, files, hostenv, meta, ops, prefs, profiles, project, status, term, viewer, workspace, Ctx};
 use worktrees_core::authz::{self, Caller, Capability, Caps, DeviceId, Grant, Projects, Registry};
 use worktrees_core::fetchpolicy::Fetcher;
 
@@ -1052,6 +1052,22 @@ commands! { cx, a;
         term::term_close(id, &cx.ctx.terminals)
     },
 
+    // ── the agent in a place: its prompt, an answer, a line, its turns (agents) ──
+    // iOS MVP §2.4 S6–S9. The prompt is the modal alone; an answer is the
+    // compare-and-swap of Phase 2 §9.2, one of the prompt's own choices; a
+    // line is typed only at an empty prompt. `answer` and `instruct` are
+    // drive-class, so step-up and the audit's DRIVE budget gate both.
+    agent_prompt: Engine [read, place(repo, slug)] => agents::agent_prompt(&cx.ctx, a.get("repo")?, a.get("slug")?),
+    agent_answer: Engine [answer, place(repo, slug)] => agents::agent_answer(
+        &cx.ctx, a.get("repo")?, a.get("slug")?, a.get("choice")?, a.get("fingerprint")?,
+    ),
+    agent_send: Engine [instruct, place(repo, slug), session_of(session, repo, slug)] => agents::agent_send(
+        &cx.ctx, a.get("repo")?, a.get("slug")?, a.get("session")?, a.get("text")?,
+    ),
+    agent_turns: Engine [read, place(repo, slug), opt(session_of(session, repo, slug))] => agents::agent_turns(
+        &cx.ctx, a.get("repo")?, a.get("slug")?, a.get("session")?, a.get("n")?,
+    ),
+
     // ── backend preferences, the Data pane, local usage metrics (prefs) ──
     // Host policy (`worktrees_api::hostpolicy`): `admin`, not console-only, as it widens no agent (decision 6).
     set_term_history_opts: Engine [admin, all] => prefs::set_term_history_opts(&cx.ctx, a.get("persist_scrollback")?, a.get("per_tab_history")?),
@@ -1179,16 +1195,16 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 174 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 178 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six and the slots pair since),
-    /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up — and
-    /// slice 6's four `remote_*` console rows; the check scripts hold the
-    /// page's commands against them.
+    /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
+    /// slice 6's four `remote_*` console rows, and the iOS MVP's four agent
+    /// rows; the check scripts hold the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 174, "the table has 174 commands");
+        assert_eq!(TABLE.len(), 178, "the table has 178 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1445,10 +1461,12 @@ mod tests {
     /// (`devices_list`, `device_narrow`); eleven console (six device acts,
     /// `identity_rotate` and four pairing rows), and slice 6's four
     /// (`remote_enable`, `remote_disable`, `remote_status`,
-    /// `remote_advertise`); and three a device makes for
-    /// itself (`own`: `device_revoke`, `stepup_challenge`, `stepup_prove`). A
-    /// row that moves group fails here until the count (and the proposal's
-    /// table) move with it.
+    /// `remote_advertise`); three a device makes for
+    /// itself (`own`: `device_revoke`, `stepup_challenge`, `stepup_prove`);
+    /// and the iOS MVP's agent rows: `agent_prompt` and `agent_turns` (`read`),
+    /// `agent_answer` (`answer`, the capability's first row) and `agent_send`
+    /// (`instruct`). A row that moves group fails here until the count (and
+    /// the proposal's table) move with it.
     #[test]
     fn every_row_has_one_base_group_and_the_counts_are_section_3_4s() {
         let mut groups: BTreeMap<&str, usize> = BTreeMap::new();
@@ -1464,14 +1482,15 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 56), ("write", 23), ("admin", 35), ("console", 37), ("stream", 10), ("instruct", 3),
+            ("read", 58), ("write", 23), ("admin", 35), ("console", 37), ("stream", 10), ("instruct", 4), ("answer", 1),
             ("client-local", 6), ("loopback-only", 1), ("own", 3),
         ]
         .into();
         assert_eq!(groups, want);
-        // The answer capability is defined and reserved: no row needs it until
-        // Phase 3's `agent_answer`.
-        assert!(TABLE.iter().all(|r| r.cap != Some(Capability::Answer)));
+        // `answer` (Phase 2 §9.2) is `agent_answer`'s alone: one of a prompt's
+        // own choices, never free text, which is `instruct`.
+        let answer: Vec<&str> = TABLE.iter().filter(|r| r.cap == Some(Capability::Answer)).map(|r| r.name).collect();
+        assert_eq!(answer, vec!["agent_answer"]);
     }
 
     /// Every event the api emits has a projection (`scope::EVENTS`); one

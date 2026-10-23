@@ -417,10 +417,10 @@ fn turn_of_line(line: &[u8]) -> Option<Turn> {
 
 /// The footer Codex's approval modals end on — a command, a file edit, a
 /// permission grant — captured from the 0.157.1 TUI (`findings.md`).
-const APPROVAL_FOOTER: &str = "Press enter to confirm or esc to cancel";
+pub(crate) const APPROVAL_FOOTER: &str = "Press enter to confirm or esc to cancel";
 /// The footers of a plan-mode `request_user_input` modal: one question, or
 /// the last of several (the key-hint strings in the 0.157.1 binary).
-const QUESTION_FOOTERS: [&str; 2] = ["to submit answer", "to submit all"];
+pub(crate) const QUESTION_FOOTERS: [&str; 2] = ["to submit answer", "to submit all"];
 
 /// Whether a captured Codex pane is sitting on a modal that waits for the
 /// user: an approval (command, edits, permissions) or a plan-mode question.

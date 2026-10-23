@@ -51,6 +51,36 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   warns in that case (`ops::opener_plan`). A re-brief refuses a live session
   and writes nothing, because the opener reaches only a session the launch
   CREATES (`ops::session_to_reuse`): close it, or message the agent.
+  **No agent types into Claude:** MCP `send` refuses a Claude place and names
+  its session for `SendMessage` (`harness::Claude::send`). **The one
+  exception is serve's `agent_send`** (iOS MVP S8), decided by the user on
+  2026-10-23 so a phone's "send a line" reaches every harness one way. It
+  PASTES into Claude's pane and submits (`prompt::submit_claude`), and only
+  when the pane shows no prompt (a modal takes keys as its answer; the
+  client is told to use `agent_answer`) and Claude's composer is EMPTY — read
+  with `capture-pane -e`, because only the styling tells its dim `Try "…"`
+  placeholder from a draft. Its text passes `harness::typed_line_ok`, the
+  ONE rule MCP `send` uses too (no control or invisible format characters —
+  Trojan Source — and no leading `/ @ ! #`). It is `instruct` (drive-class: step-up and the
+  audit's DRIVE budget), the audit log gets the text's length and hash and
+  never the text, and a device's send stamps `last_remote_send`. Do not grow
+  a second path that types into Claude.
+
+- **The agent rows (`worktrees_api::agents`, `worktrees_core::prompt`) read
+  Claude's screen, and Claude 2.1.309 has four traps** (fixtures and README:
+  `crates/worktrees-core/tests/fixtures/claude-screen/2.1.309`). Its FOOTER
+  changes with the highlight (`Esc to cancel · Tab to amend` on "Yes",
+  `Esc to cancel` on the next row), so a prompt is matched on the footer's
+  head and compared without it (`prompt::same_prompt`). A question draws a
+  full-width rule INSIDE its list, so a modal's top is the rule whose next
+  row is not a choice. The folder-trust prompt comes before Claude writes any
+  probe file, so "is it waiting" there is the pane's alone. And a transcript
+  holds the whole system prompt and every CLAUDE.md in `api-request-blob`
+  entries, so anything that returns transcript text reads `user`/`assistant`
+  messages only (`turns`). An answer MOVES the highlight and proves the move
+  on a fresh capture before Enter, all under the place's lock — that lock is
+  what makes §9.2's compare-and-swap atomic; drop it and two clients answer
+  one prompt twice.
 
 - **`worktrees serve` (Server Edition, Phase 1) hosts the api behind an
   authenticated WebSocket on `127.0.0.1`**: `{id, cmd, args}` in, `{id, ok}` /
@@ -83,7 +113,7 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   do not align them). hyper parses the HTTP and tungstenite sees only frames,
   also ON PURPOSE: tungstenite's `accept_hdr_async` WRITES an HTTP error
   response when it refuses, while a hyper service that returns `Err` closes
-  with 0 bytes. The 174 commands sit in ONE macro table
+  with 0 bytes. The 178 commands sit in ONE macro table
   (`serve/dispatch.rs`) with an `Exposure` each; the six `ClientLocal` rows
   (clipboard, editor, terminal, zoom, the app bundle) are refused with
   `err: "client-local"`, never run on the host — the docs viewer is an

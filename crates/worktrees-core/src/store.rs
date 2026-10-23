@@ -116,6 +116,13 @@ pub struct Declared {
     /// agent would read it as one more instruction.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_remote_instruction: Option<RemoteInstruction>,
+    /// The last line a paired DEVICE typed into this place's agent through
+    /// serve's `agent_send` (iOS MVP §2.4, S8): who, into which session, and
+    /// when — never the text, which the audit log holds as a length and a
+    /// hash. The send's counterpart of `last_remote_instruction`: both say who
+    /// instructed this lane from off the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_remote_send: Option<RemoteSend>,
     /// Who last set `note` / `title` through serve (§7.3). Absent when it was
     /// set anywhere else (the CLI, an agent's MCP `set_note`), so it cannot
     /// name a device for text the device did not write.
@@ -175,6 +182,16 @@ pub struct RemoteInstruction {
     #[serde(flatten)]
     pub by: By,
     pub path: String,
+    pub at: i64,
+}
+
+/// `Declared::last_remote_send`: `{principal, device, session, at}`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct RemoteSend {
+    #[serde(flatten)]
+    pub by: By,
+    /// The tmux session the line was typed into.
+    pub session: String,
     pub at: i64,
 }
 
@@ -532,12 +549,14 @@ mod tests {
         fs::write(t.0.join(STORE_FILE), r#"{"version":1,"places":{"alpha":{"note":"n","from_the_future":42}}}"#).unwrap();
         let d = read_lenient(&repo).places["alpha"].clone();
         assert!(d.launched_by.is_none() && d.last_remote_instruction.is_none() && d.note_by.is_none() && d.title_by.is_none());
+        assert!(d.last_remote_send.is_none());
 
         let bob = By { principal: PrincipalId::new("bob"), device: Device::Paired(DeviceId::new("bob-phone")) };
         edit(&repo, "alpha", |d| {
             d.launched_by = Some(LaunchedBy { by: bob.clone(), cross_project: Some("off".into()) });
             d.last_remote_instruction = Some(RemoteInstruction { by: bob.clone(), path: "AGENTS.md".into(), at: 1_700_000_000 });
             d.note_by = Some(By::of(&Caller::console()));
+            d.last_remote_send = Some(RemoteSend { by: bob.clone(), session: "wt-alpha".into(), at: 1_700_000_100 });
         })
         .unwrap();
         let raw: serde_json::Value = serde_json::from_str(&fs::read_to_string(t.0.join(STORE_FILE)).unwrap()).unwrap();
@@ -551,6 +570,10 @@ mod tests {
             serde_json::json!({"principal": "bob", "device": {"kind": "paired", "id": "bob-phone"}, "path": "AGENTS.md", "at": 1_700_000_000})
         );
         assert_eq!(alpha["note_by"], serde_json::to_value(Caller::console()).unwrap(), "the console, spelled as Caller spells it");
+        assert_eq!(
+            alpha["last_remote_send"],
+            serde_json::json!({"principal": "bob", "device": {"kind": "paired", "id": "bob-phone"}, "session": "wt-alpha", "at": 1_700_000_100})
+        );
         assert!(alpha.get("title_by").is_none(), "an absent stamp is not serialized: {alpha}");
         assert_eq!(alpha["note"], "n");
         assert_eq!(alpha["from_the_future"], 42);

@@ -101,6 +101,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   terminal's output streaming); `use <host>|this` chooses what the app's
   window drives from its next launch. A link's address is checked before
   anything is dialled: only a private one is accepted.
+- **serve can show what an agent is asking, answer it, send it a line, and
+  read its recent turns, for any client.** These are the four commands the
+  phone app will use; nothing in the desktop app changes.
+  - `agent_prompt` returns the prompt an agent is waiting on (a permission, a
+    question, a folder-trust prompt) as it stands on screen, and nothing
+    else from the pane. It works for Claude, Codex, kimi and pi.
+  - `agent_answer` makes one of the prompt's own choices. It refuses if the
+    prompt changed since it was read, so a second client can never answer a
+    prompt the first already answered. A choice that would let the agent do
+    more from then on ("always allow", "don't ask again", "switch to auto
+    mode", trusting a folder) can be made only at this machine.
+  - `agent_send` types one line into an agent, Claude included, only while
+    it shows no prompt and nobody has started typing at its prompt.
+  - `agent_send` and MCP `send` refuse a line holding a bidi control or
+    another invisible character (zero-width joiners, a byte-order mark and
+    the like), so what the agent reads is what the screen showed. They share
+    one rule; MCP `send` now also refuses a line starting with `#`.
+  - `agent_turns` returns the last few turns from the agent's own transcript
+    (Claude and Codex): what was asked, the reply, and which tools ran.
+  - From a paired device, answering and sending need a fresh step-up on
+    that connection (on a phone, Face ID), and the audit log records each
+    one. A sent line is recorded by its length and hash, never its text,
+    and MCP `place_status` names the device that last sent a line to the
+    place.
 
 ### Changed
 - **With nothing set, a slot's capacity is sized from the machine.** It used to

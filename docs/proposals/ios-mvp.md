@@ -244,10 +244,10 @@ today:
 | S3 | **A host surface that shows the QR.** #544 adds `pair_begin` and friends as console rows but changes nothing under `app/src` (its diff stat lists no frontend file). The cheapest is `worktrees serve pair`, a console client of the loopback socket that prints the QR in the terminal and the link as text; AGENTS.md notes "there is no CLI client", so it is the first one (copy `serve_bin.rs::connect`). Settings → Devices in the desktop app is the full version. | `worktrees serve pair` in #556 (open), with the QR in the terminal and the link; the app's version is lane `feat/p2-remote-host-ui` | Phase 1 |
 | S4 | **#550 merged** (the `listen` frame). The phone's door sends it after the proof. A serve older than #550 has no parser for the frame and answers it with `err: "bad request: no cmd"` (`wire::parse_request`), so the client sends it only when the `ok` frame's `version` is at or past the release that carries #550; projected events arrive either way. | Merged (#550) | Phase 2 |
 | S5 | **#551 merged** (provenance, the 4-lane cap). `open_place` from a device must write `launched_by` first, or the lane's MCP server carries the host's reach (§7.5). | Merged (#551) | Phase 3 (F7) |
-| S6 | **New row `agent_prompt`** `[read, place(repo, slug)]`: capture the agent pane of the place's session, return `{harness, lines, options, fingerprint}` or `{waiting: false}`; `fingerprint` = SHA-256 of the captured modal; options parsed per harness from the modal's footer (`activity::codex_panes` for Codex; Claude's permission modal needs its own parser, fixture-tested against real captures as `tests/fixtures/codex-inline/` does). | Not built | Phase 3 |
-| S7 | **New row `agent_answer`** `[answer, place(repo, slug)]` with `{choice, fingerprint}`: re-capture, compare, refuse with `err: "the prompt changed"` on mismatch, else send the keystroke(s) for `choice` to the pane. Audit kind reserved by §9.2. The 30 s lease (`agent_lease_take`) is optional UX and can follow. | Not built | Phase 3 |
-| S8 | **New row `agent_send`** `[instruct, place(repo, slug)]` with `{text}`: one line, ≤ 4 KB, no control characters (MCP `send`'s rules); refused while the agent is waiting on an approval or question (`agent_prompt` says so); pasted via `tmux::paste_to_ai` and submitted only when the composer is empty (`agent::draft_from_screen`, `agent.rs:332`). Marked in the audit log; #551's `last_remote_instruction` stamp does not apply (it is a file stamp), so the place gets a `last_remote_send {principal, device, at}` or the audit record alone — decide in review. | Not built | Phase 3 |
-| S9 | **New row `agent_turns`** `[read, place(repo, slug)]` with `{n}`: see F10. Reads the transcript that `agent_sessions` names; never the pane. | Not built | Phase 2 (nice) / 3 |
+| S6 | **New row `agent_prompt`** `[read, place(repo, slug)]`: capture the agent pane of the place's session, return `{harness, lines, options, fingerprint}` or `{waiting: false}`; `fingerprint` = SHA-256 of the captured modal; options parsed per harness from the modal's footer (`activity::codex_panes` for Codex; Claude's permission modal needs its own parser, fixture-tested against real captures as `tests/fixtures/codex-inline/` does). | Built on `feat/ios-agent-rows` (see "As built" below) | Phase 3 |
+| S7 | **New row `agent_answer`** `[answer, place(repo, slug)]` with `{choice, fingerprint}`: re-capture, compare, refuse with `err: "the prompt changed"` on mismatch, else send the keystroke(s) for `choice` to the pane. Audit kind reserved by §9.2. The 30 s lease (`agent_lease_take`) is optional UX and can follow. | Built on `feat/ios-agent-rows` (see "As built" below) | Phase 3 |
+| S8 | **New row `agent_send`** `[instruct, place(repo, slug)]` with `{text}`: one line, ≤ 4 KB, no control characters (MCP `send`'s rules); refused while the agent is waiting on an approval or question (`agent_prompt` says so); pasted via `tmux::paste_to_ai` and submitted only when the composer is empty (`agent::draft_from_screen`, `agent.rs:332`). Marked in the audit log; #551's `last_remote_instruction` stamp does not apply (it is a file stamp), so the place gets a `last_remote_send {principal, device, at}` or the audit record alone — decide in review. | Built on `feat/ios-agent-rows` (see "As built" below) | Phase 3 |
+| S9 | **New row `agent_turns`** `[read, place(repo, slug)]` with `{n}`: see F10. Reads the transcript that `agent_sessions` names; never the pane. | Built on `feat/ios-agent-rows` (see "As built" below) | Phase 2 (nice) / 3 |
 | S10 | **Event projection for the new rows**: none needed if the phone pulls `agent_prompt` when a place enters `waiting` (from `sessions:busy`). An optional `sessions:prompt {path, fingerprint}` event would save one round trip. | — | — |
 | S11 | **Mock and drift checks**: the four rows in `app/src/mock/install.ts`; `engine-route-check.mjs` holds the new `remoteDoor` table; `serve-dispatch-check.mjs` and `dispatch.rs`'s drift tests cover the rows' object arguments (AGENTS.md). | — | Each phase |
 
@@ -255,6 +255,90 @@ Everything in S6–S9 is one lane's work on the server, built red-first
 (AGENTS.md), and none of it binds off loopback, so it can land before slice
 6 and be exercised by the desktop over loopback (the console holds every
 capability, so `agent_answer` from the desktop is a legitimate feature too).
+
+#### As built (S6–S11, `feat/ios-agent-rows`)
+
+The four rows, spelled as `serve/dispatch.rs` spells them.
+`app/scripts/agent-rows-check.mjs` holds this table, the dispatch table, the
+mock (`app/src/mock/install.ts`) and the api's refusal strings
+(`worktrees-api/src/agents.rs`) to one another.
+
+| Row | Capability, objects | Arguments | Answer | Refusals |
+|---|---|---|---|---|
+| `agent_prompt` | `[read, place(repo, slug)]` | — | `{waiting: true, readable: true, harness, session, kind: "permission"\|"question", lines, choices: [{n, label, more?, highlighted, host_only?}], fingerprint, note}`; `{waiting: true, readable: false, harness, session, reason}` when the agent is waiting on a prompt this host cannot read whole; else `{waiting: false}` | the resolver's |
+| `agent_answer` | `[answer, place(repo, slug)]` | `choice` (a choice's `n`), `fingerprint` | `{answered: true, confirmed, harness, session, choice, label}` | `the prompt changed` (the CAS); `no such choice`; a `host_only` choice from a device (`… only the host can make it`); `step-up required`; `audit-budget …` |
+| `agent_send` | `[instruct, place(repo, slug), session_of(session, repo, slug)]` | `session` (from `agent_sessions`), `text` | `{delivered, queued, harness, session, note}` | one line ≤ 4 KB with no control character, no invisible format character (Unicode Cf — every bidi control, zero-width characters — and the line/paragraph separators) and not starting with `/ @ ! #`, the rule MCP `send` shares (`harness::typed_line_ok`); `the agent is waiting on a prompt: answer it with agent_answer`; a composer holding someone's text; no composer to see; `step-up required`; `audit-budget …` |
+| `agent_turns` | `[read, place(repo, slug), opt(session_of(session, repo, slug))]` | `n` (default 5, at most 20), `session` (optional: the first running agent) | `{harness, session, turns: [{at, user, reply, tools, truncated}], more, note}` — Claude and Codex | a harness whose transcript is not read yet (pi, kimi) |
+
+How each item of the spec was met, and what the lane decided:
+
+- **The prompt (S6)** is `worktrees_core::prompt`: per harness, recognised by
+  where it ENDS — Claude's and Codex's footer on the bottom row, kimi's and
+  pi's closing rule, and, for Claude's multi-question review screen, which
+  has no footer, its `← … ✔ Submit →` tab bar — and cut at its own top
+  (Claude's column-0 full-width rule, skipping the one a question draws
+  inside its list; Codex's header after the last history item; the rule
+  that opens kimi's and pi's block). A top it cannot find is no prompt, so
+  nothing above a modal is ever returned. Claude's parser was written
+  against real captures: `crates/worktrees-core/tests/fixtures/
+  claude-screen/2.1.309/` (Claude Code 2.1.309, its README says how). The
+  `fingerprint` is SHA-256 over the harness, the session, the modal's rows
+  and its parsed choices.
+- **Which choices a device may make.** Claude's real Bash approval offers
+  "Yes, and always allow access to … from this project" and "Yes, and switch
+  to auto mode"; Codex's, "don't ask again for commands that start with …".
+  Each widens what the agent may do from then on, which Phase 2 makes the
+  console's alone (§3.4, decision 6). A prompt is a QUESTION (every
+  choice a device's) only by the harness's own drawing — Claude's checkbox
+  header or tab bar, Codex's `Question N/M`, kimi's `[n]` choice rows under
+  its `question` header — never by a footer alone or a row the agent wrote;
+  anything else is a permission. So a permission's choice is open to a
+  device only when it is KNOWN to be one-shot ("Yes", "No", Codex's "Yes,
+  proceed", "Approve once", "Reject", the trust prompts' "No, exit" and "Do
+  not trust"); every other choice — an unknown label included — carries
+  `host_only: "widens"`, and one that opens a text field ("Type something.",
+  kimi's "Other") `host_only: "text"`. The console may make any choice.
+- **The answer (S7)** captures again under the place's lock, refuses unless
+  a prompt with that fingerprint is up, MOVES the highlight to the choice with
+  Up/Down, proves on a fresh capture that the same prompt now highlights it,
+  and only then presses Enter; it waits (≤ 3 s) to see the prompt go
+  (`confirmed`). Keys come from a closed set (`tmux::Key`), one per tmux
+  call, never text. **The lease of Phase 2 §9.2 is not built, and the CAS
+  is enough** because of the lock: without it two clients could capture the
+  same prompt before either answered, and the second key would land on
+  whatever the prompt became; with it the second client re-captures after
+  the first one's prompt has gone and is told `the prompt changed`
+  (`two_answers_to_one_prompt_answer_it_once`). The lease stays what §9.2
+  calls it, UX on top.
+- **The line (S8)** is refused while the target agent shows a prompt and
+  while its composer is not EMPTY (Claude: its input box with no draft, read
+  with `capture-pane -e` because only the styling tells its dim placeholder
+  from typed text; Codex, pi, kimi: their composer readers). Codex, pi and
+  kimi are typed into through `harness::Adapter::send`, as MCP `send` does;
+  **Claude is pasted into and submitted** (Q4, decided by the user on
+  2026-10-23: one mechanism for every harness). A line holding a bidi
+  control or another invisible format character is refused, as MCP `send`
+  refuses it (one validator, `harness::typed_line_ok`): the bytes an agent
+  reads must be the line the phone showed (Trojan Source). The line is not labelled: on
+  a phone it is the user's. A paired device's send stamps
+  `last_remote_send {principal, device, session, at}` on the place (§7.3's
+  shape; MCP `place_status` reports it); the audit record holds the text's
+  length and SHA-256, never the text.
+- **The turns (S9)** are `worktrees_core::turns`, read from the transcript the
+  session's own probe names (Claude) or the place's newest rollout (Codex),
+  never the pane: user and assistant messages only — not Claude's
+  `api-request-blob` system prompt, attachments, sidechains, thinking or
+  tool output, nor Codex's base instructions, developer messages and the
+  `<…>` blocks it injects. Each text is cut at 4,000 characters and the
+  answer at 64 KiB.
+- **S10: no `sessions:prompt` event.** `sessions:busy` already names every
+  place whose agent is `waiting`, so the phone pulls `agent_prompt` on that
+  transition: one round trip on an act the user takes seconds over. An event
+  would cost a pane capture per waiting Claude on every 3 s tick (Claude's
+  `waiting` comes from its probe today, with no capture), and it would push
+  command lines to every listening device unasked.
+- **S11.** The mock answers all four (one scripted Claude prompt per place;
+  `?agentprompt=off` for none). No app UI.
 
 ---
 

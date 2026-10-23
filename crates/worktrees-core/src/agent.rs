@@ -425,7 +425,7 @@ fn prompt_body(line: &str) -> Option<&str> {
 /// newer tmux emits for hyperlinks) and the bare SO/SI bytes `-e` uses for the
 /// DEC line-drawing charset. Plain `-p` output has none and comes back
 /// unchanged.
-fn strip_escapes(line: &str) -> String {
+pub fn strip_escapes(line: &str) -> String {
     let mut out = String::with_capacity(line.len());
     let mut dim = false; // unused here; `skip_escape` is the one scanner
     let mut rest = line;
