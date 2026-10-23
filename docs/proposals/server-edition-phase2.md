@@ -112,7 +112,7 @@ or lane it comes from, and "measured" appears only where a lane measured.
 | 9 | The audit log (R5) | `<config_dir>/audit.jsonl`, mode `0600`, append-only and hash-chained. Only serve's connection layer writes it, and its records are structured, never free text. Every record names a principal as well as a device. | 2 |
 | 10 | Resource limits (R6) | Per-device connection, in-flight and rate caps; bounded outboxes and lanes; single-flight for the expensive reads; separate budgets for loopback and remote, so a device cannot starve the desk. Before authentication, a newcomer displaces the unauthenticated connection that has stalled longest, so a local flood no longer locks the app out; macOS keeps a residual (§6). | 2 |
 | 11 | The agent-instruction surface (R7) | One path classifier in core. Instruction files need `instruct`. Files that EXECUTE without anyone choosing to run them need `stream`. `.git/**` is never written. Provenance is kept out of band, with no markers in the file. | 2 |
-| 12 | The known gaps | Eight from the brief, seven found while writing this, one from Appendix B, and one from slice 1's security review (gap 17, which must close before any remote bind). Each has a fix shape and a phase (§8). One of the new ones (gap 9) could be reached from a cloned repository's content. #523 fixed it on main. #516 closed gaps 11 and 15 and part of gaps 3 and 5, and #536 closed gap 8. Since then #535, #537 and #546 have closed every other gap on main except 6 (#519, open) and 13 (#538, open). Gaps 4 and 7 keep a Phase 3 half. | 2, most now |
+| 12 | The known gaps | Eight from the brief, seven found while writing this, one from Appendix B, and one from slice 1's security review (gap 17, which must close before any remote bind). Each has a fix shape and a phase (§8). One of the new ones (gap 9) could be reached from a cloned repository's content. #523 fixed it on main. #516 closed gaps 11 and 15 and part of gaps 3 and 5, and #536 closed gap 8. Since then #535, #537, #546 and #538 have closed every other gap on main except 6 (#519, open). Gaps 4 and 7 keep a Phase 3 half. | 2, most now |
 | 13 | Multi-client | View state is per device and never reaches serve. Shared preferences become per-key patches with a revision check. Host policy goes to `host-policy.json`. A prompt answer is a compare-and-swap, and a lease is UX on top of it. A held `worktrees show` goes only to a loopback client that listens for it, and an app-owned serve idles out on loopback clients alone, so a device never keeps it running and quitting the app ends remote access (*decided*, §11.3; §9.3). | 2, lease 3 |
 | 14 | Multi-user (R9) | Maybe later (*decided*, §11 Q1, against the recommendation). Not built in Phase 2, and not designed out. There is one principal, kept distinct from the device in the device record, in what the credential binds to and in every audit record, and every grant check keys on (principal, device). §2.8 says what that costs now and what multi-user would still take. | 2 |
 
@@ -2381,7 +2381,7 @@ are not built, because nothing in the app listens yet; the lane
 `feat/p2-remote-host-ui` surfaces these events as a dismissible notice. The
 device alerts (paired, expired, a revoked or disabled device trying, a
 record with no pairing record) wait on the device records (§5.1). The alert
-for a limit one device trips repeatedly is an open design item: #538 (open)
+for a limit one device trips repeatedly is an open design item: #538
 records each limit's episodes, per connection and per device, and no rule
 yet says how many episodes make "repeatedly".
 
@@ -2429,7 +2429,7 @@ shell, with a client that had stopped reading, took serve to 2.5 GB in 10 s
 (385 MB on Linux).
 
 **The limits.** This section first proposed them as starting points, to be
-measured on both platforms before the gate. Slice 4 (#538, open) built every
+measured on both platforms before the gate. Slice 4 (#538) built every
 cap a client of the loopback listener can reach, and the per-device caps
 that devices will reach from slice 6 on. It measured them on macOS and Linux
 against `72e7339`. Since then it has been rebased onto slice 1's `Caller`
@@ -2452,7 +2452,7 @@ of the remote listener, as in `budget.rs`.
 | Lanes per connection | 64 active. An idle lane is reaped, so the cap counts streams with input in flight, not every id ever named. The key comes from the RESOLVED, owned stream (§3.3), never from a raw argument. | `err: "busy"` | Built (#538). Measured: the 200,000-id case above, 340 MB → 38 MB (385 → 42 MB on Linux). |
 | Live attaches and shells per device | 8 + 8. The slot is held by the stream's sink until the stream ends. | `err: "busy"` | Built (#538). |
 | Connections per device | 4 | Closed after TLS and handshake v1, which is where it is known to be this device, with a policy close that says why | Built (#538): the count. The close is #556's (open), tested over the remote listener (`a_devices_fifth_live_connection_is_closed_and_the_four_before_it_are_served`). |
-| Agent launches per device (LLM10) | 10 an hour, burst 10, shared by the rows that start an agent: `new_place`, `open_place` and `rules_review`. At most 4 live lanes launched by devices at once, across all devices. The existing quota gate (`set_quota_settings`) still applies on top. | `err: "rate"`. A stolen or buggy device must not burn the user's Claude or Codex plan. | The hourly bucket is built (#538, open), keyed on #551's `LAUNCH_ROWS`. The live cap is on main since #551: it is host-wide, and "live" means a session is open in the place (§7.5). |
+| Agent launches per device (LLM10) | 10 an hour, burst 10, shared by the rows that start an agent: `new_place`, `open_place` and `rules_review`. At most 4 live lanes launched by devices at once, across all devices. The existing quota gate (`set_quota_settings`) still applies on top. | `err: "rate"`. A stolen or buggy device must not burn the user's Claude or Codex plan. | The hourly bucket is built (#538), keyed on #551's `LAUNCH_ROWS`. The live cap is on main since #551: it is host-wide, and "live" means a session is open in the place (§7.5). |
 | Remote `MAX_MESSAGE` | 16 MiB, as on loopback. `read_file` stops at 1 MB and `read_file_base64` at 4 MB. | The connection ends | The read caps are built (#538), for every caller. Slice 4 found by reading that a client's `max_bytes` was clamped only to `u64::MAX − 1`, so a reply could be any size. Now `max_bytes` can lower a cap and never raise it. The measurements at `conn.rs:76`–`83` hold. |
 | Audit file | 5 × 5 MiB | Rotation, and each new file opens with a checkpoint | Built (#534). |
 | Enrolled devices | 16, disabled ones included; revoked tombstones are not | Pairing refused before the QR appears | On main (#544) |
@@ -2823,9 +2823,9 @@ the user's next ordinary save. Since then, #516 as merged closed gaps 11 and
 15 and part of 3 and 5, #523 closed gap 9, and #536 closed gap 8. Then #535
 (slice 1) closed gaps 2, 3, 10, 12, 14 and 16, gap 4's console tag, gap 5
 all but its `[docs]` walk, and gap 7's Phase 2 half. #537 (slice 2) closed
-gap 1 and the `[docs]` walk, and #546 closed gap 17. Those rows keep their
-`fadb2ce` text, and the last column says what main has now. Two gaps are
-still open on main: 6 waits on #519 and 13 on #538, both open PRs.
+gap 1 and the `[docs]` walk, #546 closed gap 17, and #538 (slice 4) closed
+gap 13. Those rows keep their `fadb2ce` text, and the last column says what
+main has now. One gap is still open on main: 6 waits on #519, an open PR.
 
 | # | Gap | Where | Fix shape | Phase |
 |---|---|---|---|---|
@@ -2841,7 +2841,7 @@ still open on main: 6 waits on #519 and 13 on #538, both open PRs.
 | 10 | **New. `repo` is never checked against the registry.** `set_note` and the other `store::edit` callers write `.worktrees.places.json` into any directory. `Project::discover` accepts any git repository. | §3.5 | The `project(…)` resolver, for every caller | 2. **Closed on main by #535** (§3.5). |
 | 11 | **New. Serve has no off-loopback connect witness**, although decision 6 says it does | §4.6 | Copy the docs server's test | **Closed on main by #516.** `crates/worktrees-cli/tests/serve_bin.rs::serve_can_be_reached_on_loopback_and_not_off_it` runs in CI on both OSes, loopback connect first. #536 added it to the release gate (§4.6). |
 | 12 | **New. Events go to every socket**, including the host-wide `sessions:busy` set and `app:open-doc` | `conn.rs:202`–`207`; `host.rs:316` | Projection per event type (§3.3) | 2. **Closed on main by #535** (event projection), with #550's declared listeners for the one-shot `app:open-doc` (§9.3). |
-| 13 | **New. An authenticated client is unbounded:** a blocking task per request, an unbounded outbox, a lane per key | `conn.rs:545`, `:498`, `:217`–`237` | §6 | 2. **In #538 (open).** |
+| 13 | **New. An authenticated client is unbounded:** a blocking task per request, an unbounded outbox, a lane per key | `conn.rs:545`, `:498`, `:217`–`237` | §6 | 2. **Closed on main by #538** (§6). |
 | 14 | **New. Arbitrary-path reads exposed as Engine rows:** `probe_dir`, `skill_inspect`, `sync_hub_list` | `dispatch.rs:228`, `:447`, `:317` | `admin` with `new_path` or `global` (§3.4) | 2. **Closed on main by #535.** |
 | 15 | **New, a residue of L1:** `log_event` keeps newlines and panics on a mid-character truncation; serve.log is `0644` | `meta.rs:27`–`28`; `mod.rs:131` | §5 | **Closed on main by #516.** `meta::ui_line` escapes the controls, the line separators and the bidi controls, then truncates on a character boundary. serve.log is created `0600` and re-tightened on every write, the rotated copy included. |
 | 16 | Known (Appendix B): `term_*` acts on any id, from any connection, and ids restart at 1 every launch | `term.rs:44`, `:138`; `dispatch.rs:422`–`429` | `attach(id)` (§3.3), plus a launch nonce in the id. A stale `term_close` becomes a no-op that answers `ok`; `term_write`, `term_resize` and `term_wheel` on an id the caller did not open are refused (§9.1). | 2. **No longer latent since #525** (§9.1): a pane being replaced after a reconnect sends its old id to the new socket. **Closed on main by #535:** attach ids start at a random base per launch, `term_*` checks the connection owns the id, and a stale `term_close` is the no-op `ok` that the audit log records as `not-owned` (#534). |
@@ -3067,7 +3067,7 @@ all three built on #544.
    checkpoint's device fields (lane `feat/p2-device-audit`, on #544), and
    `audit_tail`.
 4. **Resource limits** (§6), including the loopback budget split: gap 13.
-   *Built, #538, open,* rebased onto slice 1's `Caller` and built on
+   *Built, #538,* rebased onto slice 1's `Caller` and built on
    #544. It also fixed the loopback flood (§6). §6 records what it settled
    since.
 5. **The device registry, server identity and pairing** (§2): the principal
@@ -3336,8 +3336,9 @@ have taken it, and on what it was measured.
       device records, the checkpoint's device fields, the per-device audit
       budget, `audit_tail` and most alerts (§5.1, §5.3).
 - [ ] R6: §6, with the numbers measured.
-      *Status:* #538 (open) measured every loopback-reachable cap on both
-      OSes. The remote caps are #556's (open), and the two have not met yet.
+      *Status:* #538 measured every loopback-reachable cap on both OSes.
+      The remote caps are #556's (open), built on it: its per-device
+      connection count is tested over the remote listener.
 - [ ] R7: §7.
       *Status:* on main: the classifier (#537), the class raise (#549), and
       provenance with the agent rules (#551). Left: the `instruct` rows with
@@ -3356,8 +3357,8 @@ have taken it, and on what it was measured.
 - [ ] Gaps 1–17: each closed, or tagged with its phase in this table and in
       ROADMAP. Gap 17 is closed, not tagged, before the remote listener
       binds.
-      *Status:* closed on main but 6 (#519, open) and 13 (#538, open), and 4
-      and 7 keep a Phase 3 half (§8). Gap 17 closed on main (#546) before
+      *Status:* closed on main but 6 (#519, open), and 4 and 7
+      keep a Phase 3 half (§8). Gap 17 closed on main (#546) before
       any remote listener existed.
 
 ---
