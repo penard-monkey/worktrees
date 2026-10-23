@@ -125,6 +125,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
     one. A sent line is recorded by its length and hash, never its text,
     and MCP `place_status` names the device that last sent a line to the
     place.
+- **A paired host whose address moved is found again.** When nothing answers
+  at a host's address, the app (each time it reconnects) and `worktrees remote
+  call` look for it on the local network for up to ten seconds, and follow it
+  to its new address only once a connection there proves the key this machine
+  paired with. An advert from another machine, even one that copies the
+  host's id, is refused and changes nothing; a host that refuses this machine
+  is not looked for elsewhere. When the host is nowhere, the message says
+  where its address code is: `worktrees serve remote status` on the host.
+  Paste it in Settings → Hosts → Paste a new address, or run `worktrees remote
+  readdress <host> '<code>'`; it is followed by the same rule. Looking on the
+  network is macOS only for now; the address code works everywhere.
 
 ### Changed
 - **With nothing set, a slot's capacity is sized from the machine.** It used to
