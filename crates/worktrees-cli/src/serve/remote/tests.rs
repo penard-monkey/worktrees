@@ -688,6 +688,23 @@ fn enable_refuses_anything_outside_the_allowlist_as_not_private() {
     assert!(e.starts_with("bad-address") || e.starts_with("not-held"), "{e}");
 }
 
+/// `remote_candidates` (the host app's "Turn on" picker) offers what
+/// `remote_enable` takes: this host's own LAN address is among them, and the
+/// pair it names — address and interface — enables as given.
+#[test]
+fn the_enable_dialog_offers_what_enable_takes() {
+    let Some(lan) = lan_or_skip() else { return };
+    let h = host("cands");
+    let list = h.remote.candidates().unwrap();
+    let mine = list.as_array().unwrap().iter().find(|c| c["address"] == json!(lan.to_string())).cloned();
+    let mine = mine.unwrap_or_else(|| panic!("{lan} is not offered: {list}"));
+    assert!(["lan", "overlay"].contains(&mine["mode"].as_str().unwrap()), "{mine}");
+    assert_eq!(mine["class"], json!(worktrees_core::netclass::classify(IpAddr::V4(lan)).unwrap().name()));
+    let st = h.remote.enable(mine["address"].as_str().unwrap(), mine["iface"].as_str().map(String::from), None, None).unwrap();
+    assert_eq!((st["state"].clone(), st["iface"].clone()), (json!("listening"), mine["iface"].clone()), "{st}");
+    h.remote.disable().unwrap();
+}
+
 /// §9.3, decided by the user 2026-10-22: an app-owned serve idles out on
 /// LOOPBACK clients alone, so a device can never hold up a crashed,
 /// downgraded or deleted app's serve. With only a device connected the

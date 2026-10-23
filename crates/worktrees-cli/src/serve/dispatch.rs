@@ -1,4 +1,4 @@
-//! The 178 commands, each with its exposure, capability and objects, in ONE
+//! The 180 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -1109,6 +1109,9 @@ commands! { cx, a;
     device_enable: HostConsole [console, device(id)] => cx.devices.enable(&device_id(a)?, now()),
     device_set_expiry: HostConsole [console, device(id)] => cx.devices.set_expiry(&device_id(a)?, Expiry::from_value(&a.raw("expiry"))?),
     device_set_stepup: HostConsole [console, device(id)] => cx.devices.set_stepup(&device_id(a)?, a.get("required")?),
+    // What the Devices list calls it: the display-name rule a pairing frame is
+    // held to. Not a security field, but the host's word, like the rest.
+    device_rename: HostConsole [console, device(id)] => cx.devices.rename(&device_id(a)?, &a.get::<String>("name")?),
     devices_revoke_all_others: HostConsole [console, opt(device(keep))] => {
         let keep: Option<String> = a.get("keep")?;
         cx.devices.revoke_all_others(keep.filter(|k| !k.is_empty()).map(DeviceId::new).as_ref(), now())
@@ -1152,6 +1155,8 @@ commands! { cx, a;
     remote_enable: HostConsole => remote(cx)?.enable(&a.get::<String>("address")?, a.get("iface")?, a.get("port")?, a.get("advertise")?),
     remote_disable: HostConsole => remote(cx)?.disable(),
     remote_status: HostConsole => ok(remote(cx)?.status_value()),
+    // The addresses `remote_enable` would take now: the host app's picker.
+    remote_candidates: HostConsole => remote(cx)?.candidates(),
     remote_advertise: HostConsole => remote(cx)?.set_advertise(a.get("on")?),
 }
 
@@ -1195,16 +1200,17 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 178 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 180 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six and the slots pair since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
-    /// slice 6's four `remote_*` console rows, and the iOS MVP's four agent
+    /// slice 6's four `remote_*` console rows, the host app's two
+    /// (`remote_candidates`, `device_rename`), and the iOS MVP's four agent
     /// rows; the check scripts hold the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 178, "the table has 178 commands");
+        assert_eq!(TABLE.len(), 180, "the table has 180 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1459,9 +1465,10 @@ mod tests {
     /// getters #532 added after it (`read`), the slots pair (`slots_settings`
     /// `read`, `set_slot_capacity` console) and slice 5's rows: two `admin`
     /// (`devices_list`, `device_narrow`); eleven console (six device acts,
-    /// `identity_rotate` and four pairing rows), and slice 6's four
+    /// `identity_rotate` and four pairing rows), slice 6's four
     /// (`remote_enable`, `remote_disable`, `remote_status`,
-    /// `remote_advertise`); three a device makes for
+    /// `remote_advertise`) and the host app's two (`remote_candidates`,
+    /// `device_rename`); three a device makes for
     /// itself (`own`: `device_revoke`, `stepup_challenge`, `stepup_prove`);
     /// and the iOS MVP's agent rows: `agent_prompt` and `agent_turns` (`read`),
     /// `agent_answer` (`answer`, the capability's first row) and `agent_send`
@@ -1482,7 +1489,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 58), ("write", 23), ("admin", 35), ("console", 37), ("stream", 10), ("instruct", 4), ("answer", 1),
+            ("read", 58), ("write", 23), ("admin", 35), ("console", 39), ("stream", 10), ("instruct", 4), ("answer", 1),
             ("client-local", 6), ("loopback-only", 1), ("own", 3),
         ]
         .into();

@@ -908,7 +908,7 @@ change what this machine's agents are allowed to do."
 | **`set_agent_guidance`, `set_agent_guidance_skill`, `agent_guidance_merge`, `agent_link_skills`, `skill_install_local`, `skill_install_git`** | HostAdmin | Text and scripts that every agent on the host loads |
 | **`sync_apply`, in its adopt form (no `repo`)** | HostAdmin | It writes to a path the hub's manifest chooses (§8, gap 4) |
 | *added after:* `set_slot_capacity` | — | It administers the host's own resources: how many heavy jobs every lane's gate may run at once on this machine (`[slots]`). Seven at once froze it on 2026-10-14. |
-| *new:* `pair_begin`, `pair_decide`, `device_set_expiry`, `device_set_stepup`, `device_disable`, `device_enable`, `devices_revoke_all_others`, `remote_enable` (also how the bind moves to a new address, §4.1), `remote_advertise` (the mDNS switch, §4.7), `identity_rotate` | — | §2.5, §2.6, §4.1, §4.7 |
+| *new:* `pair_begin`, `pair_decide`, `device_set_expiry`, `device_set_stepup`, `device_disable`, `device_enable`, `devices_revoke_all_others`, `remote_enable` (also how the bind moves to a new address, §4.1), `remote_advertise` (the mDNS switch, §4.7), `identity_rotate`; and the host app's `remote_candidates` (the addresses `remote_enable` would take, §4.1) and `device_rename` | — | §2.5, §2.6, §4.1, §4.7 |
 
 **admin** (served remotely to a device with `admin`; Phase 2 keeps the
 loopback behaviour the same):
@@ -1073,7 +1073,7 @@ counter, and #544 built it (§2.9). The declared listener set is
 slice 1b, on main since #550 (§9.3, §10).
 
 **Rows added since.** The tables and the count above are the design's 152
-rows. Main has 168 since #544, and an open PR adds four more. Each PR's own
+rows. Main has 168 since #544, and two open PRs add six more. Each PR's own
 test pins its count:
 
 - **#544 (merged), 168 rows.** Sixteen device and pairing rows, and a new
@@ -1100,6 +1100,10 @@ test pins its count:
   (the kill switch, §4.1), `remote_status` and `remote_advertise` (§4.7).
   Console becomes 37 (36 before #554's row), and the *new* list gains
   `remote_disable` and `remote_status`.
+- **The host app's remote-access UI (open, on #556), 176 rows.** Two
+  console rows: `remote_candidates` (the addresses `remote_enable` would
+  take now, §4.1) and `device_rename {id, name}` (`device(id)`). Console
+  becomes 39, and the *new* list gains both.
 
 #554 (merged, not Phase 2) added a `read` row and a console row of its own,
 `slots_settings` and `set_slot_capacity`, and the counts above include them.

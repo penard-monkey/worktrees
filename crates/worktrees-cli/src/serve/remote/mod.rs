@@ -504,12 +504,7 @@ impl RemoteAccess {
         let saved = Saved { record: Some(record.clone()), port, advertise, on: true };
         file::write(&self.dir, &saved)?;
         self.unbind(&mut st, "remote access was moved by the host");
-        let warning = bound.shared_space.then(|| {
-            format!(
-                "{} is in 100.64.0.0/10 on {}, which is not a tunnel: on a phone hotspot or some carriers that range is shared with strangers. They cannot get past an enrolled key, but they can reach the port, and this host is not advertised there.",
-                bound.ip, bound.iface
-            )
-        });
+        let warning = bound.shared_space.then(|| shared_space_warning(bound.ip, &bound.iface));
         *st = State { saved: Some(saved), watch: Some(Watch::enabled(record, Instant::now())), warning, ..State::default() };
         self.gate.record("remote_enabled", json!({ "address": bound.ip.to_string(), "iface": bound.iface, "port": port }));
         drop(st);
@@ -584,6 +579,29 @@ impl RemoteAccess {
         let v = self.status_value();
         self.deps.ctx.emit("remote:changed", v.clone());
         Ok(v)
+    }
+
+    /// The addresses `remote_enable` would take now (`remote_candidates`):
+    /// the host app's "Turn on" picker, read from the interfaces as they are
+    /// (`netclass::candidates`, which keeps `at_bind`'s rules), in the order a
+    /// person should meet them, each with its mode and its shared-space
+    /// warning in the words `remote_enable` would say it.
+    pub fn candidates(&self) -> Result<Value, String> {
+        let snap = (self.read)().map_err(|e| format!("could not read this host's interfaces: {e}"))?;
+        let list: Vec<Value> = netclass::candidates(&snap.ifaces)
+            .into_iter()
+            .map(|c| {
+                json!({
+                    "address": c.ip.to_string(),
+                    "prefix": c.prefix,
+                    "iface": c.iface,
+                    "class": c.class.name(),
+                    "mode": if c.point_to_point { "overlay" } else { "lan" },
+                    "warning": c.shared_space.then(|| shared_space_warning(c.ip, &c.iface)),
+                })
+            })
+            .collect();
+        Ok(Value::Array(list))
     }
 
     /// What remote access is doing, for the console (`remote_status`).
@@ -663,6 +681,14 @@ fn holder(address: &str, snap: &Snapshot) -> Result<String, String> {
         [] => Err(format!("not-held: no interface of this host holds {ip}")),
         many => Err(format!("{ip} is on {}: name the interface", many.join(", "))),
     }
+}
+
+/// §4.1, §11.1 N1: a `100.64.0.0/10` address on an interface that is not a
+/// tunnel may be a carrier's or a hotspot's shared space.
+fn shared_space_warning(ip: IpAddr, iface: &str) -> String {
+    format!(
+        "{ip} is in 100.64.0.0/10 on {iface}, which is not a tunnel: on a phone hotspot or some carriers that range is shared with strangers. They cannot get past an enrolled key, but they can reach the port, and this host is not advertised there."
+    )
 }
 
 /// The refusal with its code in front, once (`not-private: …`).
