@@ -39,19 +39,34 @@
 //!   (a one-shot one, to those that declared it).
 //!
 //! **ORDER is the contract.** Every frame for one connection — replies, channel
-//! data, events — goes through ONE unbounded queue drained by ONE writer task,
-//! so a byte that was produced before another is written before it. AGENTS.md
+//! data, events — goes through ONE queue drained by ONE writer task, so a
+//! byte that was produced before another is written before it. AGENTS.md
 //! records a replay being answered as input because an out-of-band payload
 //! overtook the response it belonged to; the queue is what makes that
 //! impossible here rather than merely unlikely.
+//!
+//! **The queue has a byte budget** (Phase 2 §6, `budget::PerConnection`).
+//! Unbounded, `yes` in a dock shell with a client that stopped reading took
+//! serve to 2.5 GB in 10 s. What happens at the bound depends on what the
+//! frame is. Channel data stops at the stream share: the sink reports the
+//! stream gone, its owner lets it go, and the end frame follows, so the
+//! client attaches again. A reply or an event that arrives while the queue
+//! is over the whole budget closes the connection. The client reconnects
+//! and asks again, which costs it less than a reply it never gets. A
+//! progress frame past the stream share is dropped, and a ping that would
+//! need a pong past it closes the connection. End frames always go: the
+//! attach caps bound how many there can be.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde_json::{json, Map, Value};
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::watch;
 use tokio_tungstenite::tungstenite::Message;
 use worktrees_api::ByteSink;
+
+use super::budget::Held;
 
 /// Handshake frame 2: the server's nonce.
 pub fn challenge_frame(sn: &str) -> String {
@@ -162,15 +177,126 @@ pub fn channel_id(v: &Value) -> Result<u64, String> {
 
 /// The per-connection queue. Cheap to clone; every clone feeds the same writer.
 #[derive(Clone)]
-pub struct Outbox(pub UnboundedSender<Message>);
+pub struct Outbox(Arc<Queue>);
+
+struct Queue {
+    tx: UnboundedSender<Message>,
+    /// Bytes queued and not yet handed to the socket (`Outbox::sent`).
+    queued: AtomicUsize,
+    peak: AtomicUsize,
+    cap: usize,
+    stream_cap: usize,
+    /// Set once the budget closed the connection. Every push after it fails.
+    over: watch::Sender<bool>,
+}
+
+/// Why a stream frame was not queued.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Refused {
+    /// Past the stream share: this stream should end, the connection lives.
+    Full,
+    /// The connection is gone.
+    Gone,
+}
+
+/// What a frame costs the budget: its payload bytes.
+pub fn cost(m: &Message) -> usize {
+    match m {
+        Message::Text(t) => t.len(),
+        Message::Binary(b) | Message::Ping(b) | Message::Pong(b) => b.len(),
+        _ => 0,
+    }
+}
 
 impl Outbox {
-    /// Queue one text frame. `Err` means the connection is gone for good.
-    pub fn push(&self, text: String) -> Result<(), ()> {
-        self.0.send(Message::text(text)).map_err(|_| ())
+    /// A queue with a budget of `cap` bytes, `stream_cap` of them for channel
+    /// data, and the receiver its one writer drains.
+    pub fn new(cap: usize, stream_cap: usize) -> (Outbox, UnboundedReceiver<Message>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        (Outbox::with(tx, cap, stream_cap), rx)
     }
+
+    /// No budget at all: the dispatch tests' queue that nobody drains.
+    #[cfg(test)]
+    pub fn unbounded(tx: UnboundedSender<Message>) -> Outbox {
+        Outbox::with(tx, usize::MAX, usize::MAX)
+    }
+
+    fn with(tx: UnboundedSender<Message>, cap: usize, stream_cap: usize) -> Outbox {
+        let (over, _) = watch::channel(false);
+        Outbox(Arc::new(Queue { tx, queued: AtomicUsize::new(0), peak: AtomicUsize::new(0), cap, stream_cap, over }))
+    }
+
+    /// Queue `m` if the queue holds less than `limit` right now. The check is
+    /// on what is ALREADY queued, so one frame larger than the whole budget
+    /// still goes to a reader that is keeping up: its bytes exist either
+    /// way, and what the budget bounds is a backlog.
+    fn queue(&self, m: Message, limit: usize) -> Result<(), Refused> {
+        let q = &self.0;
+        if *q.over.borrow() {
+            return Err(Refused::Gone);
+        }
+        let n = cost(&m);
+        let was = q.queued.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |x| (x < limit).then(|| x.saturating_add(n)));
+        let Ok(was) = was else { return Err(Refused::Full) };
+        q.peak.fetch_max(was.saturating_add(n), Ordering::SeqCst);
+        q.tx.send(m).map_err(|_| Refused::Gone)
+    }
+
+    /// Queue a reply or an event. `Err` means the connection is gone for
+    /// good — and a queue already over its budget is made gone here: the
+    /// session sees `closed` and ends the connection.
+    pub fn push(&self, text: String) -> Result<(), ()> {
+        match self.queue(Message::text(text), self.0.cap) {
+            Ok(()) => Ok(()),
+            Err(Refused::Full) => {
+                self.0.over.send_replace(true);
+                Err(())
+            }
+            Err(Refused::Gone) => Err(()),
+        }
+    }
+
+    /// Queue channel data, within the stream share.
+    pub fn push_stream(&self, text: String) -> Result<(), Refused> {
+        self.queue(Message::text(text), self.0.stream_cap)
+    }
+
+    /// Queue a channel's end frame: always, while the connection lives.
+    fn push_end(&self, text: String) {
+        let _ = self.queue(Message::text(text), usize::MAX);
+    }
+
+    /// Queue a control frame the connection must get whatever its backlog —
+    /// the close a revoke sends (`conn::Clients::end_device`). `Err` means
+    /// the connection is gone.
     pub fn send(&self, m: Message) -> Result<(), ()> {
-        self.0.send(m).map_err(|_| ())
+        self.queue(m, usize::MAX).map_err(|_| ())
+    }
+
+    /// Answer a ping, within the stream share. `Err` means the peer is a
+    /// stream share behind and still pinging: the session closes it. That is
+    /// the only bound there is on pongs, because tungstenite answers every
+    /// ping as well, into a write buffer of its own that nothing limits —
+    /// 200,000 unread pings took serve from 4 MB to 91 MB that way.
+    pub fn pong(&self, payload: tokio_tungstenite::tungstenite::Bytes) -> Result<(), Refused> {
+        self.queue(Message::Pong(payload), self.0.stream_cap)
+    }
+
+    /// The writer handed a frame of `n` bytes (`cost`) to the socket: they
+    /// leave the budget.
+    pub fn sent(&self, n: usize) {
+        let _ = self.0.queued.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |x| Some(x.saturating_sub(n)));
+    }
+
+    /// Becomes `true` when the budget has closed the connection.
+    pub fn closed(&self) -> watch::Receiver<bool> {
+        self.0.over.subscribe()
+    }
+
+    /// The most bytes ever queued at once.
+    pub fn peak(&self) -> usize {
+        self.0.peak.load(Ordering::SeqCst)
     }
 }
 
@@ -179,6 +305,9 @@ struct FrameSink {
     outbox: Outbox,
     channel: u64,
     seq: AtomicU64,
+    /// The device's attach or shell slot (`budget::Ticket::attach`), held for
+    /// as long as the stream lives. `None` on the console.
+    _slot: Option<Held>,
 }
 
 impl ByteSink for FrameSink {
@@ -186,12 +315,23 @@ impl ByteSink for FrameSink {
         // The sequence number is taken and the frame queued in one critical
         // step from the caller's point of view: `ByteSink::send` is called by
         // one reader thread per stream, in order, so `fetch_add` + `push` on
-        // that thread preserves the order the bytes were read in.
-        let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
+        // that thread preserves the order the bytes were read in. A frame the
+        // budget refuses takes no `seq`, so the end frame that follows is
+        // still one past the last data the client was sent.
+        let seq = self.seq.load(Ordering::SeqCst) + 1;
         let data = Value::String(worktrees_api::files::b64_encode(bytes));
-        self.outbox
-            .push(channel_frame(self.channel, seq, data))
-            .map_err(|_| "client gone".to_string())
+        match self.outbox.push_stream(channel_frame(self.channel, seq, data)) {
+            Ok(()) => {
+                self.seq.store(seq, Ordering::SeqCst);
+                Ok(())
+            }
+            // Ending the stream is the owner's act: a tmux attach's reader
+            // stops, a dock shell's lets this sink go and keeps its ring. The
+            // sink then drops, and the end frame tells the client to attach
+            // again.
+            Err(Refused::Full) => Err("the client is not reading: over its outbox budget".to_string()),
+            Err(Refused::Gone) => Err("client gone".to_string()),
+        }
     }
 }
 
@@ -203,7 +343,7 @@ impl Drop for FrameSink {
     /// data. A dead connection is the one case nobody needs telling.
     fn drop(&mut self) {
         let seq = self.seq.load(Ordering::SeqCst) + 1;
-        let _ = self.outbox.push(end_frame(self.channel, seq));
+        self.outbox.push_end(end_frame(self.channel, seq));
     }
 }
 
@@ -221,10 +361,15 @@ impl Typed {
         if self.dead {
             return;
         }
-        self.seq += 1;
-        if self.outbox.push(channel_frame(self.channel, self.seq, data)).is_err() {
-            self.dead = true;
-            worktrees_api::log::warn(&format!("serve: progress channel {} closed; the operation runs on", self.channel));
+        // Progress is a sample, and a newer one follows: past the stream
+        // share this one is dropped, and only a gone connection ends it.
+        match self.outbox.push_stream(channel_frame(self.channel, self.seq + 1, data)) {
+            Ok(()) => self.seq += 1,
+            Err(Refused::Full) => {}
+            Err(Refused::Gone) => {
+                self.dead = true;
+                worktrees_api::log::warn(&format!("serve: progress channel {} closed; the operation runs on", self.channel));
+            }
         }
     }
 }
@@ -232,7 +377,7 @@ impl Typed {
 impl Drop for Typed {
     fn drop(&mut self) {
         if !self.dead {
-            let _ = self.outbox.push(end_frame(self.channel, self.seq + 1));
+            self.outbox.push_end(end_frame(self.channel, self.seq + 1));
         }
     }
 }
@@ -262,6 +407,8 @@ pub struct Frames {
     reconciled: Arc<AtomicU64>,
     /// The connection's step-up state (§2.5).
     stepup: Arc<super::stepup::StepUp>,
+    /// This request's attach or shell slot, for the sink its body creates.
+    slot: Arc<Mutex<Option<Held>>>,
 }
 
 /// A dock shell whose output this connection receives: its key, and the
@@ -295,7 +442,16 @@ impl Frames {
             tag: Arc::from(tag.as_str()),
             reconciled: Arc::new(AtomicU64::new(0)),
             stepup: Arc::new(super::stepup::StepUp::new(exporter)),
+            slot: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// The connection's frames for one request, carrying `slot` to the sink
+    /// that request's body creates. A body that fails first drops it unused.
+    /// The same connection in every other way — its attaches, shells, jobs,
+    /// tag, step-up and reconcile mark — not a new namespace.
+    pub fn for_request(&self, slot: Option<Held>) -> Frames {
+        Frames { slot: Arc::new(Mutex::new(slot)), ..self.clone() }
     }
 
     pub fn stepup(&self) -> &super::stepup::StepUp {
@@ -314,7 +470,8 @@ impl Frames {
     }
 
     pub fn bytes(&self, channel: u64) -> Arc<dyn ByteSink> {
-        Arc::new(FrameSink { outbox: self.outbox.clone(), channel, seq: AtomicU64::new(0) })
+        let slot = self.slot.lock().unwrap().take();
+        Arc::new(FrameSink { outbox: self.outbox.clone(), channel, seq: AtomicU64::new(0), _slot: slot })
     }
 
     /// A typed progress callback: each value becomes one channel frame. The
@@ -406,6 +563,23 @@ mod tests {
         }
     }
 
+    /// A request's frames are its connection's: the same attaches and the
+    /// same tag. An attach one request opens is the connection's for the next
+    /// request (`owns_term`), and a job one request starts is namespaced the
+    /// same for the request that cancels it (the resolver, §3.3). A tag per
+    /// request would make every clone uncancellable.
+    #[test]
+    fn a_requests_frames_are_its_connections() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let conn = Frames::new(Outbox::unbounded(tx));
+        conn.for_request(None).note_term(7, "s".into());
+        let next = conn.for_request(None);
+        assert_eq!(next.tag(), conn.tag());
+        assert!(next.owns_term(7));
+        let (tx2, _rx2) = mpsc::unbounded_channel();
+        assert_ne!(Frames::new(Outbox::unbounded(tx2)).tag(), conn.tag(), "another connection's namespace");
+    }
+
     #[test]
     fn a_request_is_id_cmd_and_an_optional_args_object() {
         let r = request(r#"{"id":7,"cmd":"list_workspace"}"#).unwrap();
@@ -452,7 +626,7 @@ mod tests {
     #[test]
     fn frames_keep_the_order_they_were_queued_in() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let out = Outbox(tx);
+        let out = Outbox::unbounded(tx);
         let frames = Frames::new(out.clone());
         let sink = frames.bytes(5);
         sink.send(b"ab").unwrap();
@@ -475,7 +649,7 @@ mod tests {
     #[test]
     fn dropping_a_sink_ends_its_channel_after_its_last_byte() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let frames = Frames::new(Outbox(tx));
+        let frames = Frames::new(Outbox::unbounded(tx));
         let sink = frames.bytes(5);
         sink.send(b"ab").unwrap();
         drop(sink);
@@ -492,7 +666,7 @@ mod tests {
     #[test]
     fn dropping_a_typed_callback_ends_its_channel() {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        let frames = Frames::new(Outbox(tx));
+        let frames = Frames::new(Outbox::unbounded(tx));
         let mut progress = frames.typed::<u32>(9);
         progress(1);
         progress(2);
@@ -503,6 +677,51 @@ mod tests {
         }
         assert_eq!(seen.last().map(String::as_str), Some(r#"{"channel":9,"seq":3,"end":true}"#), "{seen:?}");
         assert_eq!(seen.len(), 3);
+    }
+
+    /// The budget's three rules on the queue itself, with no socket: channel
+    /// data stops at the stream share, a reply past the whole budget closes
+    /// the connection, and an end frame always goes. What the writer hands to
+    /// the socket leaves the budget.
+    #[test]
+    fn the_outbox_stops_streams_at_their_share_and_closes_on_a_reply_past_the_budget() {
+        let (out, mut rx) = Outbox::new(100, 40);
+        let closed = out.closed();
+        assert_eq!(out.push_stream("x".repeat(30)), Ok(()));
+        assert_eq!(out.push_stream("x".repeat(30)), Ok(()), "queued is checked BEFORE adding: 30 < 40");
+        assert_eq!(out.push_stream("y".into()), Err(Refused::Full), "60 queued, past the share of 40");
+        assert!(out.pong(Default::default()).is_err(), "a pong is held to the share too");
+        assert!(out.push("a reply".into()).is_ok(), "60 < 100: replies still go");
+        out.push_end("end".into());
+        for _ in 0..2 {
+            let m = rx.try_recv().unwrap();
+            out.sent(cost(&m));
+        }
+        assert_eq!(out.push_stream("z".into()), Ok(()), "the two streams' 60 bytes written: 10 queued, under the share");
+        assert!(out.push("r".repeat(95)).is_ok(), "11 queued < 100: a reply larger than what is left still goes");
+        assert!(!*closed.borrow(), "under the budget nothing closes");
+        assert!(out.push("one too many".into()).is_err(), "a reply into a queue past its budget");
+        assert!(*closed.borrow(), "and the connection is told to close");
+        assert_eq!(out.push_stream("after".into()), Err(Refused::Gone), "after which nothing queues");
+        assert!(out.peak() >= 100, "{}", out.peak());
+    }
+
+    /// A sink refused for the budget ends its channel like any other: no
+    /// `seq` spent on the refused frame, then the end frame.
+    #[test]
+    fn a_sink_over_the_stream_share_fails_and_its_end_frame_follows() {
+        // One 35-byte frame takes the queue past a share of 30.
+        let (out, mut rx) = Outbox::new(1 << 20, 30);
+        let frames = Frames::new(out);
+        let sink = frames.bytes(3);
+        sink.send(b"ab").unwrap();
+        assert!(sink.send(b"cd").is_err(), "the first frame filled the share");
+        drop(sink);
+        let mut seen = Vec::new();
+        while let Ok(m) = rx.try_recv() {
+            seen.push(m.into_text().unwrap().as_str().to_string());
+        }
+        assert_eq!(seen, vec![r#"{"channel":3,"seq":1,"data":"YWI="}"#.to_string(), r#"{"channel":3,"seq":2,"end":true}"#.to_string()]);
     }
 
     #[test]

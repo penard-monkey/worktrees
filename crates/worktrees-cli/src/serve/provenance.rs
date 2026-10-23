@@ -20,8 +20,8 @@
 //! `off`; the lane's MCP server reads that from `launched_by` when it starts.
 //!
 //! **At most four live device-launched lanes (§6, LLM10, O12).**
-//! [`device_lane_gate`]. The hourly launch bucket is slice 4's (`budget.rs`,
-//! #538), keyed on the same rows: it should read [`LAUNCH_ROWS`] when it lands.
+//! [`device_lane_gate`]. The hourly launch bucket is slice 4's (`budget.rs`),
+//! and reads the same [`LAUNCH_ROWS`].
 //!
 //! **An agent never reaches a Phase 2 control (§7.5, O10).** The test at the
 //! bottom of this file reads `mcp.rs`.
@@ -104,8 +104,21 @@ pub fn record_instruction(caller: &Caller, i: &Instruction) {
 /// The rows that start an agent (§6, LLM10): a new place launches its
 /// provider, `open_place` launches or resumes one, `rules_review` starts a
 /// review lane. A row that starts an agent and is missing here escapes the
-/// cap; the test below holds each name to the table.
+/// cap, and the hourly launch bucket (`budget.rs`), which reads this list;
+/// the test below holds each name to the table.
 pub const LAUNCH_ROWS: &[&str] = &["new_place", "open_place", "rules_review"];
+
+/// Whether the lane gate counts `name` as a launch: [`LAUNCH_ROWS`], and in
+/// test builds the dispatcher's shared test row, which no real row is — the
+/// seam for the test that a flight's follower never reaches the gate
+/// (`dispatch::tests`).
+fn launches(name: &str) -> bool {
+    #[cfg(test)]
+    if name == super::dispatch::TEST_SHARED {
+        return true;
+    }
+    LAUNCH_ROWS.contains(&name)
+}
 
 /// Lanes launched from paired devices that may be live at once, host-wide.
 pub const MAX_DEVICE_LANES: usize = 4;
@@ -132,7 +145,7 @@ static DEVICE_LAUNCH: Mutex<()> = Mutex::new(());
 /// one. `new_place` and `rules_review` cannot name theirs before the body
 /// runs, and a reuse there is counted — the cap errs closed.
 pub fn device_lane_gate(cx: &Call, row: &Row, args: &Args, world: &dyn World) -> Result<Option<MutexGuard<'static, ()>>, Refusal> {
-    if cx.caller.is_console() || !LAUNCH_ROWS.contains(&row.name) {
+    if cx.caller.is_console() || !launches(row.name) {
         return Ok(None);
     }
     let held = DEVICE_LAUNCH.lock().unwrap_or_else(|e| e.into_inner());

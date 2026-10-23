@@ -29,6 +29,7 @@
 use std::fs;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -41,6 +42,41 @@ pub const FILE: &str = "projects.json";
 /// the guarantee. The mutex only keeps the app's own threads from queueing on
 /// a syscall, and keeps this correct if a later edit ever shares one handle.
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Set by a process that runs the engine for a TEST, in-process
+/// (`forbid_real_writes`). Process-wide and one-way on purpose: a test binary
+/// that starts an engine must never write the user's file, from any thread,
+/// in any order, and nothing in it ever needs to again.
+static REAL_WRITES_FORBIDDEN: AtomicBool = AtomicBool::new(false);
+
+/// From now on, in this process, refuse every write to the user's REAL
+/// registry: `path()` as this process's environment resolves it.
+///
+/// The registry is `$XDG_CONFIG_HOME/worktrees/projects.json`, the user's,
+/// shared by the CLI and every engine. It is not under the config dir a test
+/// hands its `Ctx` or its serve, so an engine a test starts reaches the real
+/// file through `add_project` and every other registry write. A serve socket
+/// test did, 2026-10-22, and left six deleted scratch repos registered.
+/// Tests that start an engine call this (`serve::start_budgeted` under
+/// cfg(test), the api's headless `ctx`), and the write then fails with an
+/// error that says how to fix the test instead of landing.
+pub fn forbid_real_writes() {
+    REAL_WRITES_FORBIDDEN.store(true, Ordering::SeqCst);
+}
+
+/// `Err` for a write to `p` when it is the real registry and real writes are
+/// forbidden: the rule `edit_at` applies, with its inputs given.
+fn refuse_real(p: &Path, real: &Path, forbidden: bool) -> Result<(), String> {
+    if forbidden && p == real {
+        return Err(format!(
+            "refused: a test reached the user's real project registry ({}). Give the engine under test its \
+             own XDG_CONFIG_HOME (in a child's environment, never set_var), or write a temp file with the \
+             `*_at` form.",
+            p.display()
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, Default)]
 pub struct Entry {
@@ -149,6 +185,7 @@ pub fn edit<T>(f: impl FnOnce(&mut Registry) -> Result<T, String>) -> Result<T, 
 }
 
 pub fn edit_at<T>(p: &Path, f: impl FnOnce(&mut Registry) -> Result<T, String>) -> Result<T, String> {
+    refuse_real(p, &path(), REAL_WRITES_FORBIDDEN.load(Ordering::SeqCst))?;
     let _serial = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let dir = p.parent().ok_or("registry path has no parent")?;
     fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
@@ -497,6 +534,20 @@ pub fn cmd_projects(ui: &mut dyn crate::ui::Ui, args: &[String]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rule behind `forbid_real_writes`, on its inputs: only the real
+    /// path, and only once a test has forbidden it. (The flag itself is
+    /// process-wide, so it is set by the tests that start an engine — serve's
+    /// in the CLI crate, the api's headless ones — and never here, where it
+    /// would reach every other test in this binary.)
+    #[test]
+    fn a_forbidden_process_cannot_write_the_real_registry_and_can_write_any_other() {
+        let real = Path::new("/home/u/.config/worktrees/projects.json");
+        let e = refuse_real(real, real, true).unwrap_err();
+        assert!(e.contains("real project registry") && e.contains("XDG_CONFIG_HOME"), "{e}");
+        assert!(refuse_real(real, real, false).is_ok(), "not forbidden: the CLI and the app write it");
+        assert!(refuse_real(Path::new("/tmp/t/projects.json"), real, true).is_ok(), "a test's own file");
+    }
 
     struct Tmp(PathBuf);
     impl Tmp {

@@ -333,7 +333,20 @@ pub struct Resolved {
 /// canonical objects. `Err` is a refusal: the body must not run. `world` is
 /// [`Live`] in serve (`dispatch::call_seen`) and a fixture in the tests.
 pub fn authorize(row: &Row, cx: &Call, grant: &Grant, args: &mut Args, world: &dyn World) -> Result<Resolved, Refusal> {
-    let caller = &cx.caller;
+    admissible(row, &cx.caller, grant)?;
+    let out = Resolved { needs: row.cap.into_iter().collect(), ..Resolved::default() };
+    let mut st = St { cx, grant, world, roots: None, panes: None, bound: Vec::new(), out };
+    for obj in row.objects {
+        st.resolve(row, obj, args)?;
+    }
+    Ok(st.out)
+}
+
+/// [`authorize`]'s first two steps, the ones that read nothing but the row,
+/// the caller and the grant: the exposure and the row's capability. No I/O,
+/// so serve's reader runs them before a request is admitted
+/// (`dispatch::precheck`), and a request they refuse never takes a slot.
+pub fn admissible(row: &Row, caller: &Caller, grant: &Grant) -> Result<(), Refusal> {
     match row.exposure {
         Exposure::ClientLocal => return Err(Refusal::new(RefusalKind::ClientLocal, "a client-local command")),
         Exposure::HostConsole if !caller.is_console() => {
@@ -349,12 +362,7 @@ pub fn authorize(row: &Row, cx: &Call, grant: &Grant, args: &mut Args, world: &d
             return Err(Refusal::denied(format!("{} needs `{cap}`", row.name)));
         }
     }
-    let out = Resolved { needs: row.cap.into_iter().collect(), ..Resolved::default() };
-    let mut st = St { cx, grant, world, roots: None, panes: None, bound: Vec::new(), out };
-    for obj in row.objects {
-        st.resolve(row, obj, args)?;
-    }
-    Ok(st.out)
+    Ok(())
 }
 
 /// The path class's requirement for one file, on top of the row's capability
@@ -933,7 +941,16 @@ pub(crate) mod fixture {
         let ctx = worktrees_api::Ctx::new(std::env::temp_dir(), Arc::new(Quiet));
         let devices = std::sync::Arc::new(super::super::devices::DeviceRegistry::in_memory());
         let pairing = std::sync::Arc::new(super::super::pairing::Pairing::new(None, devices.clone()));
-        Call { ctx, frames: super::super::wire::Frames::new(super::super::wire::Outbox(tx)), caller, registry, world: None, devices, pairing }
+        Call {
+            ctx,
+            frames: super::super::wire::Frames::new(super::super::wire::Outbox::unbounded(tx)),
+            caller,
+            registry,
+            world: None,
+            devices,
+            pairing,
+            flights: Default::default(),
+        }
     }
 
     pub fn args(v: Value) -> Args {

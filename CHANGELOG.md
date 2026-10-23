@@ -207,6 +207,39 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   - Pairing needs the host's own approval, after both screens show the same
     six-digit code, and any failed attempt closes the window.
   - An iPhone's riskiest acts will also need Face ID or the passcode.
+- **A local flood of connections can no longer lock the app out of its engine.**
+  A process without serve's token could keep every unauthenticated slot full
+  by reconnecting the moment it was closed, and every new connection was
+  refused, the app's included: 0 of 49 got in. A new connection now displaces
+  the unauthenticated one that has waited longest on its client, and there
+  are 256 such slots instead of 16. Against the same flood, every new client
+  got in, and a flood holding 512 sockets from one process let all of them
+  in too. A flood large enough to keep the machine's connect rate saturated
+  can still crowd a slow client out.
+- **One client can no longer exhaust `worktrees serve`'s memory or threads.**
+  - A client that stops reading costs at most its 8 MiB outbox. Before, `yes`
+    in a dock shell took serve to 2.5 GB in 10 s. A terminal that outruns its
+    reader now ends its stream (attach again to repaint), and a reply that
+    finds the outbox full closes the connection.
+  - A request past a connection's in-flight cap (64 on the desktop's socket)
+    is answered `busy` at once. Before, 1,000 queued requests held 615 threads,
+    and the app's own request waited 10.8 s behind them.
+  - A stream key is a lane only while it has work queued, and at most 64 are
+    active at once. Before, writes to 200,000 terminal ids held 340 MB.
+  - A client that keeps pinging while it is 2 MiB behind is disconnected.
+  - Concurrent identical calls to the poll-shaped reads (`list_workspace`,
+    `project_prs`, the usage meters, `doctor`, `diagnostics`, the release
+    checks) from callers that see the same projects share one computation.
+    Ten clients asking at once cost one git fan-out, not ten.
+  - A body that panics gives its slot back as well as answering.
+  - `read_file` and `read_file_base64` no longer read past 1 MB and 4 MB
+    whatever `max_bytes` asks for.
+  - The budgets for paired devices (rates, attaches, agent launches, a
+    host-wide share of the engine's threads) are in place for when the remote
+    listener lands. On loopback, the desk is never rate-limited.
+  - Each limit a client trips is logged once per episode, with its count, in
+    serve.log and in the audit log, so a flood of refusals does not become a
+    flood of log lines.
 
 ## [0.43.1] - 2026-10-22
 

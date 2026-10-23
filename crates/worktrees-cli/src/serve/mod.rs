@@ -14,12 +14,15 @@
 //! the arms), `servefile` (`serve.json`), `devices` (`devices.json`, the
 //! device registry every grant is read from), `netwatch` (the remote
 //! listener's address rules, not yet wired), `audit` (`audit.jsonl`, which
-//! only `conn` writes).
+//! only `conn` writes), `budget` (what an authenticated client may cost) and
+//! `flight` (the reads concurrent callers share).
 
 mod audit;
+mod budget;
 mod conn;
 mod devices;
 mod dispatch;
+mod flight;
 mod identity;
 mod netwatch;
 mod pairing;
@@ -273,15 +276,29 @@ pub fn start_with(config_dir: PathBuf, port: u16, allow_origin: Vec<String>, lim
     // Pairing windows bind where slice 6's remote listener says; until it
     // exists, none ever opens (`Pairing::set_bind`).
     let pairing = Arc::new(pairing::Pairing::new(Some(config_dir.clone()), devices.clone()));
-    let mut running = start_in(config_dir, port, allow_origin, limits, conn::Clients::serving(devices.clone(), pairing, None))?;
+    let clients = conn::Clients::serving(devices.clone(), pairing, None);
+    let mut running = start_in(config_dir, port, allow_origin, limits, budget::BUDGETS, clients)?;
     running.devices = Some(devices);
     Ok(running)
 }
 
-/// `start_with`, over a given client set — its device registry and the world
-/// objects resolve against (the in-process tests' fixtures).
-pub fn start_in(config_dir: PathBuf, port: u16, allow_origin: Vec<String>, limits: conn::Limits, clients: conn::Clients) -> Result<Running, String> {
-    let clients = Arc::new(clients);
+/// `start_with`, with the authenticated clients' budgets given too, over a
+/// given client set — its device registry and the world objects resolve
+/// against (the in-process tests' fixtures).
+pub fn start_in(
+    config_dir: PathBuf,
+    port: u16,
+    allow_origin: Vec<String>,
+    limits: conn::Limits,
+    budgets: budget::Budgets,
+    clients: conn::Clients,
+) -> Result<Running, String> {
+    // A serve a TEST starts runs in the test's process with the user's real
+    // HOME: refuse its registry writes rather than let them land in their
+    // `~/.config/worktrees/projects.json` (`registry::forbid_real_writes`).
+    #[cfg(test)]
+    worktrees_core::registry::forbid_real_writes();
+    let clients = Arc::new(clients.budgeted(budgets));
     // A revoke, a disable or a narrowed grant acts on the live connections.
     clients.listen();
     let ctx = Ctx::new(config_dir, Arc::new(conn::Broadcast(clients.clone())));

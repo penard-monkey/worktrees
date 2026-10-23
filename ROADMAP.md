@@ -117,6 +117,58 @@ this repo's settings in `.claude/close-out.md`).
   reading during the private-staging fix (`fsx::PrivateDir`); the staging
   itself is done.
 
+- **A flood at the machine's connect rate can still crowd a slow client
+  out of serve.** At the unauthenticated caps a newcomer displaces the
+  connection that has waited longest on its client (Phase 2 slice 4). That
+  fixed the measured flood: 0 of 49 new clients got in before, all of them
+  after, and a flood of 512 sockets from one process let them all in too.
+  But every displacement closes an attacker socket, which reconnects at
+  once and displaces the next. One core keeps that chain at ~27,000 a
+  second, so the 256 slots turn over every ~10 ms, and a client slower than
+  that per handshake step is displaced in turn. At 1,024 to 2,048 sockets
+  from one process, measured, few or none got in. Before the proof, a peer
+  without the token looks exactly like a real client, so no slot rule fixes
+  this. Two do: an admission tag in `hello` (an HMAC of the client's nonce
+  under the token with its own label, so a stale serve's port gains nothing
+  it can authenticate with), which is a handshake change for its owner; or
+  the peer's uid on loopback (Linux `sock_diag`; macOS has no cheap
+  equivalent).
+  _From: Phase 2 slice 4, `feat/p2-resource-limits` (2026-10-21)_
+
+- **The app's terminal does not attach again when its stream ends
+  unexpectedly.** Since Phase 2 slice 4, a stream whose client falls 2 MiB
+  behind ends with `{end: true}`, and §6 says "the client attaches again
+  (tmux repaints)". `ipcws.ts` releases the handler, and `TerminalPane` goes
+  quiet until the place is switched. A reading client never reaches the
+  share: `yes` in a dock shell delivered 1,370 MiB in 10 s with serve flat at
+  7 MB. So this needs a WebView that stops reading, or a remote reader
+  behind a slow link. Re-attach on an end frame nobody asked for.
+  _From: Phase 2 slice 4, `feat/p2-resource-limits` (2026-10-21)_
+
+- **Phase 2 §6 leftovers that need later slices.**
+  (1) Lane keys come from the raw arguments; §6 wants the RESOLVED, owned
+  stream (§3.3's `attach(id)`). The resolver runs inside the job, after the
+  lane is chosen, and needs I/O (the registry, tmux, the disk), so keying on
+  its answer means resolving on the reader first. Harmless meanwhile: lanes
+  are per connection, so a raw key orders only that connection's requests,
+  and the cap bounds how many there are.
+  (2) §5.3's alert for "a limit tripped by one device repeatedly". The
+  budget's episodes for a device's own limits live on the device and are
+  recorded with it as the actor, so the counts are in the audit log; the
+  threshold and the host notification are not built.
+  (3) A stream ended at its outbox share (`{end: true}`) is in neither log.
+  The sink that ends it is the body's (`Frames`), and handing it the audit
+  would put the audit within a body's reach, which #534 rules out; the
+  session would have to notice the end instead.
+  (4) Keepalive (ping 20 s, close after 60 s), remote connections 32 total,
+  and TLS handshakes 8 / 2 per source belong to the remote listener
+  (slice 6).
+  (5) tungstenite keeps its write buffer's capacity after a large reply
+  (`write_out_buffer` drains a `Vec`, which never shrinks), so a connection
+  that once sent a 5 MiB file holds that much until it closes. Found by
+  reading tungstenite 0.30, not measured.
+  _From: Phase 2 slice 4, `feat/p2-resource-limits` (2026-10-21)_
+
 - **Two Linux packaging leftovers.** (1) The glibc floor: the CLI and both
   Linux bundles build on Ubuntu 24.04 runners, so they need its glibc; building
   on 22.04 would widen reach (measure what they actually require first,

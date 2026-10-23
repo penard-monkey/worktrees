@@ -46,6 +46,7 @@ use worktrees_core::fetchpolicy::Fetcher;
 use super::devices::{DeviceRegistry, Expiry};
 use super::pairing::{Offer, Pairing};
 use super::stepup;
+use super::flight::{self, Flights, Join};
 use super::resolve::{self, Absent, Obj, World};
 use super::{provenance, scope};
 use super::wire::{self, Frames, CLIENT_LOCAL};
@@ -148,6 +149,27 @@ pub struct Call {
     pub devices: Arc<DeviceRegistry>,
     /// The pairing windows the console opens (§2.2).
     pub pairing: Arc<Pairing>,
+    /// The shared reads in the air, host-wide (`flight.rs`): every listener's
+    /// calls join the same ones.
+    pub flights: Arc<Flights>,
+}
+
+impl Call {
+    /// This call on another `ctx` and `frames`: the same caller, registries,
+    /// world and flights. A body's scoped `Ctx` (`call_in_seen`), and a
+    /// request's frames (`conn`'s, carrying its attach slot).
+    pub fn with(&self, ctx: Ctx, frames: Frames) -> Call {
+        Call {
+            ctx,
+            frames,
+            caller: self.caller.clone(),
+            registry: self.registry.clone(),
+            world: self.world.clone(),
+            devices: self.devices.clone(),
+            pairing: self.pairing.clone(),
+            flights: self.flights.clone(),
+        }
+    }
 }
 
 /// The request's `args`, read one parameter at a time.
@@ -358,6 +380,109 @@ macro_rules! commands {
 #[cfg(test)]
 pub const TEST_PANIC: &str = "__test_panic";
 
+/// A command only test builds have, that shares like §6's reads and starts
+/// an agent like `new_place`: `{tag, ms}` sleeps `ms`, `{tag, joins}` waits
+/// (at most 2 s) until that many calls have joined its `Flights`, and either
+/// answers how many times a body with this `tag` has run. In test builds it
+/// is a ROW ([`row`]), a `read` of nothing, so the precheck, the resolver,
+/// the flight and a device launch's lane gate (`provenance::launches`) meet
+/// it where they meet a real row. Never in `TABLE`.
+#[cfg(test)]
+pub const TEST_SHARED: &str = "__test_shared";
+
+#[cfg(test)]
+static TEST_SHARED_ROW: Row = Row::new(TEST_SHARED, Exposure::Engine, Some(Capability::Read), &[Obj::Global]);
+
+#[cfg(test)]
+fn test_shared(cx: &Call, args: &Args) -> Result<Value, Value> {
+    use std::time::{Duration, Instant};
+    static RUNS: std::sync::Mutex<Option<std::collections::HashMap<String, u64>>> = std::sync::Mutex::new(None);
+    if let Some(n) = args.raw("joins").as_u64() {
+        let t0 = Instant::now();
+        while (cx.flights.joins() as u64) < n && t0.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+    std::thread::sleep(Duration::from_millis(args.raw("ms").as_u64().unwrap_or(0)));
+    let tag = args.raw("tag").as_str().unwrap_or("").to_string();
+    let mut runs = RUNS.lock().unwrap();
+    let n = runs.get_or_insert_with(Default::default).entry(tag).or_insert(0);
+    *n += 1;
+    Ok(Value::from(*n))
+}
+
+/// The answer to a command no row names.
+fn unknown(cmd: &str) -> Value {
+    Value::from(format!("unknown command: {cmd}"))
+}
+
+/// What a refused request is answered — THE one refusal path: both refusal
+/// sites, [`precheck`] and [`call_in_seen`], come through here, so `seen`
+/// records every refusal exactly once (§5.1), the stale close answered `ok`
+/// included. Then the real reason, for the host's eyes; the console's
+/// ordinary misses (a file deleted under the tree) are the body errors they
+/// always were, and not worth a line each. A probe's refusal IS its answer
+/// (`resolve::Obj::Probe`): a file this caller may not read is reported as
+/// one that is not there.
+fn refusal_answer(caller: &Caller, row: &'static Row, args: &Args, r: &resolve::Refusal, seen: &dyn Witness) -> Result<Value, Value> {
+    seen.refused(row, args, r);
+    // The idempotent close of an attach this connection does not own:
+    // answered as closing a missing one is, and the body never runs.
+    if r.kind == resolve::RefusalKind::NoopNotOwned {
+        return Ok(Value::Null);
+    }
+    if !caller.is_console() {
+        worktrees_api::log::info(&format!("serve: refused {} for {caller}: {:?}: {}", row.name, r.kind, r.detail));
+    }
+    if matches!(r.kind, resolve::RefusalKind::NotFound | resolve::RefusalKind::Denied) && row.objects.iter().any(Obj::answers_false) {
+        return Ok(Value::Bool(false));
+    }
+    Err(r.wire_for(caller))
+}
+
+/// The checks that need no I/O, for serve's reader to run before a request
+/// is admitted (Phase 2 §6): the command exists, and the caller's exposure
+/// and capability allow it (`resolve::admissible`). A request refused here
+/// never takes an in-flight slot, a lane or a thread: `Some` is its answer,
+/// sent at once, and `seen` has recorded it. `pay` is asked first, so a
+/// caller over its rate is answered with what `pay` says, and its refusal is
+/// counted into that limit's episode (`budget.rs`) instead of costing a log
+/// line and an audit record each.
+///
+/// `None` decides nothing: `call_in_seen` checks all of it again with the
+/// grant read again, so a scope narrowed in between still applies to the
+/// request, and then resolves the objects, which do need I/O.
+pub fn precheck(
+    caller: &Caller,
+    registry: &dyn Registry,
+    cmd: &str,
+    args: &Args,
+    seen: &dyn Witness,
+    pay: impl FnOnce() -> Result<(), &'static str>,
+) -> Option<Result<Value, Value>> {
+    #[cfg(test)]
+    if cmd == TEST_PANIC {
+        return None;
+    }
+    let refusal = match row(cmd) {
+        None => None,
+        Some(row) => match resolve::admissible(row, caller, &authz::effective(registry, caller)) {
+            Ok(()) => return None,
+            Err(r) => Some((row, r)),
+        },
+    };
+    if let Err(rate) = pay() {
+        return Some(Err(Value::from(rate)));
+    }
+    Some(match refusal {
+        None => {
+            seen.unknown(cmd);
+            Err(unknown(cmd))
+        }
+        Some((row, r)) => refusal_answer(caller, row, args, &r, seen),
+    })
+}
+
 /// Dispatch one request, with nothing watching. `Err` is the wire's `err`
 /// value. Test builds only: serve's one caller, `conn::answer`, goes through
 /// [`call_seen`], so no request it serves can skip its audit record.
@@ -367,10 +492,12 @@ pub fn call(cx: &Call, cmd: &str, args: &Args) -> Result<Value, Value> {
 }
 
 /// What the audit sees of one request (§5.1): the resolver's verdict, before
-/// any body runs. Handed to [`call_seen`] BESIDE the `Call`, never inside it —
-/// a body is given the `Call`, so no body can reach the audit. One of the
-/// three is called, once, for every request that names a row or does not;
-/// `()` sees nothing. `audit::Seen` is the one that writes.
+/// any body runs. Handed to [`call_seen`] and [`precheck`] BESIDE the `Call`,
+/// never inside it — a body is given the `Call`, so no body can reach the
+/// audit. One of the three is called, once, for every request dispatch
+/// decides, whichever of the two decides it; a request the budget answers
+/// first (`busy`, `rate`) is counted into its limit's episode instead
+/// (`budget.rs`). `()` sees nothing. `audit::Seen` is the one that writes.
 pub trait Witness {
     /// No row has this name, and nothing ran.
     fn unknown(&self, _cmd: &str) {}
@@ -411,10 +538,25 @@ pub fn call_in(cx: &Call, cmd: &str, args: &Args, world: &dyn World) -> Result<V
 /// In order, before any body: the row; the grant of the caller's (principal,
 /// device) pair, read now and never cached (a narrowed scope applies to the
 /// very next request); the resolver (exposure, capability, objects, canonical
-/// values written back) and, for a device's agent launch, the live-lane cap,
-/// whose verdict `seen` is told. Then the body, on a `Ctx` scoped to the grant
-/// and acting for the caller, a device's instruction write stamped once it
-/// returns `Ok` (§7.3), and the result through the row's filter.
+/// values written back); step-up (§2.5). Then, for one of §6's poll-shaped
+/// reads, the flight in the air for its key (`flight.rs`): a follower is
+/// answered with its leader's outcome, through its own row filter, and goes
+/// no further. The
+/// leader, or a call that never shares, meets a device launch's live-lane cap
+/// next, whose verdict `seen` is told, and then the body, on a `Ctx` scoped
+/// to the grant and acting for the caller, a device's instruction write
+/// stamped once it returns `Ok` (§7.3), and the result through the row's
+/// filter, for this caller alone.
+///
+/// **The flight is joined BEFORE the lane gate, on purpose.** The gate holds
+/// its lock across the body, so a follower that met it first would wait
+/// there behind its own leader, find the flight landed, and run the body —
+/// and take a lane — a second time. Joined first, a follower never touches
+/// the gate. No row both shares and launches today; the test row does both
+/// (`a_follower_never_reaches_the_lane_gate`). Step-up is the other way
+/// round: it is the caller's own verdict, so it comes BEFORE the flight, or a
+/// device whose step-up is due would be handed a leader's `diagnostics`
+/// (`step_up_is_asked_before_a_flight_is_joined`).
 pub fn call_in_seen(cx: &Call, cmd: &str, args: &Args, world: &dyn World, seen: &dyn Witness) -> Result<Value, Value> {
     #[cfg(test)]
     if cmd == TEST_PANIC {
@@ -422,55 +564,67 @@ pub fn call_in_seen(cx: &Call, cmd: &str, args: &Args, world: &dyn World, seen: 
     }
     let Some(row) = row(cmd) else {
         seen.unknown(cmd);
-        return Err(Value::from(format!("unknown command: {cmd}")));
+        return Err(unknown(cmd));
     };
     let grant = authz::effective(&*cx.registry, &cx.caller);
     let mut args = Args(args.0.clone());
-    // The resolver, then step-up, then a device launch's live-lane cap (§6,
-    // LLM10), whose lock is held across the body so the next device launch
-    // counts this one. Step-up is read once the objects resolved: a path class
-    // or another device can RAISE the act to drive-class (`stepup_gate`).
-    // Every refusal is the host's, never the body's, and `seen` hears it so.
-    let gated = resolve::authorize(row, cx, &grant, &mut args, world)
-        .and_then(|r| stepup_gate(cx, row, &args, &r).map(|()| r))
-        .and_then(|r| Ok((r, provenance::device_lane_gate(cx, row, &args, world)?)));
-    let (resolved, _launching) = match gated {
+    // The resolver, then step-up, read once the objects resolved: a path
+    // class or another device can RAISE the act to drive-class
+    // (`stepup_gate`). Both are THIS caller's verdict, so both come before
+    // the flight: a follower answered with its leader's outcome must have
+    // passed them itself. Every refusal is the host's, never the body's, and
+    // `seen` hears it so.
+    let checked = resolve::authorize(row, cx, &grant, &mut args, world).and_then(|r| stepup_gate(cx, row, &args, &r).map(|()| r));
+    let resolved = match checked {
         Ok(r) => r,
+        Err(r) => return refusal_answer(&cx.caller, row, &args, &r, seen),
+    };
+    let scoped = cx.with(body_ctx(cx, &grant, &resolved), cx.frames.clone());
+    let lead = match flight::key(row.name, &args, scoped.ctx.scope(), scoped.ctx.fetcher()).map(|k| cx.flights.join(k)) {
+        Some(Join::Follow(f)) => {
+            seen.admitted(row, &args, &resolved);
+            return filtered(row, &grant, world, f.wait());
+        }
+        Some(Join::Lead(l)) => Some(l),
+        None => None,
+    };
+    // A device launch's live-lane cap (§6, LLM10), whose lock is held across
+    // the body so the next device launch counts this one. Its refusal is the
+    // host's, never the body's, and `seen` hears it so. A leader's followers
+    // get what the leader got, refusal included; a leader whose body panics
+    // drops its `lead` unlanded, which answers them `internal error`.
+    let out = match provenance::device_lane_gate(cx, row, &args, world) {
         Err(r) => {
-            seen.refused(row, &args, &r);
-            // The idempotent close of an attach this connection does not own:
-            // answered as closing a missing one is, and the body never runs.
-            // The audit has it as a refused act all the same (§5.1), above.
-            if r.kind == resolve::RefusalKind::NoopNotOwned {
-                return Ok(Value::Null);
+            let out = refusal_answer(&cx.caller, row, &args, &r, seen);
+            if let Some(l) = lead {
+                l.land(&out);
             }
-            // The real reason, for the host's eyes. The console's ordinary misses
-            // (a file deleted under the tree) are the body errors they always
-            // were, and not worth a line each.
-            if !cx.caller.is_console() {
-                worktrees_api::log::info(&format!("serve: refused {cmd} for {}: {:?}: {}", cx.caller, r.kind, r.detail));
-            }
-            // A probe's refusal IS its answer (`resolve::Obj::Probe`): a file
-            // this caller may not read is reported as one that is not there.
-            if matches!(r.kind, resolve::RefusalKind::NotFound | resolve::RefusalKind::Denied) && row.objects.iter().any(Obj::answers_false) {
-                return Ok(Value::Bool(false));
-            }
-            return Err(r.wire_for(&cx.caller));
+            return out;
+        }
+        Ok(_launching) => {
+            seen.admitted(row, &args, &resolved);
+            let out = body(row.name, &scoped, &args);
+            provenance::stamped(&cx.caller, resolved.instruction.as_ref(), out)
         }
     };
-    seen.admitted(row, &args, &resolved);
-    let instruction = resolved.instruction.clone();
-    let scoped = Call {
-        ctx: body_ctx(cx, &grant, resolved),
-        frames: cx.frames.clone(),
-        caller: cx.caller.clone(),
-        registry: cx.registry.clone(),
-        world: cx.world.clone(),
-        devices: cx.devices.clone(),
-        pairing: cx.pairing.clone(),
-    };
-    let out = run(row.name, &scoped, &args).unwrap_or_else(|| Err(Value::from(format!("unknown command: {cmd}"))));
-    let out = provenance::stamped(&cx.caller, instruction.as_ref(), out)?;
+    if let Some(l) = lead {
+        l.land(&out);
+    }
+    filtered(row, &grant, world, out)
+}
+
+/// The row's body, by name.
+fn body(name: &str, cx: &Call, args: &Args) -> Result<Value, Value> {
+    #[cfg(test)]
+    if name == TEST_SHARED {
+        return test_shared(cx, args);
+    }
+    run(name, cx, args).unwrap_or_else(|| Err(unknown(name)))
+}
+
+/// A body's outcome through `row`'s filter, for this caller's grant alone.
+fn filtered(row: &Row, grant: &authz::Grant, world: &dyn World, out: Result<Value, Value>) -> Result<Value, Value> {
+    let out = out?;
     Ok(match row.objects.iter().find_map(Obj::filter) {
         Some(f) => {
             let roots = if grant.projects.is_all() { Vec::new() } else { world.roots() };
@@ -486,8 +640,8 @@ pub fn call_in_seen(cx: &Call, cmd: &str, args: &Args, world: &dyn World, seen: 
 /// device the addresses the resolver checked, pinned (gap 17,
 /// `worktrees_core::fetchpolicy`) — and acting for it, so what the body
 /// writes and launches records who asked (§7.3, §7.5).
-fn body_ctx(cx: &Call, grant: &authz::Grant, resolved: resolve::Resolved) -> Ctx {
-    let fetcher = if cx.caller.is_console() { Fetcher::Console } else { Fetcher::Device(resolved.pins) };
+fn body_ctx(cx: &Call, grant: &authz::Grant, resolved: &resolve::Resolved) -> Ctx {
+    let fetcher = if cx.caller.is_console() { Fetcher::Console } else { Fetcher::Device(resolved.pins.clone()) };
     cx.ctx
         .scoped(grant.projects.clone())
         .granted(grant.capabilities, cx.caller.is_console())
@@ -556,6 +710,10 @@ fn stepup_gate(cx: &Call, row: &Row, args: &Args, r: &resolve::Resolved) -> Resu
 
 /// A command's row.
 pub fn row(cmd: &str) -> Option<&'static Row> {
+    #[cfg(test)]
+    if cmd == TEST_SHARED {
+        return Some(&TEST_SHARED_ROW);
+    }
     TABLE.iter().find(|r| r.name == cmd)
 }
 
@@ -959,7 +1117,17 @@ mod tests {
         }
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = Ctx::new(dir.clone(), Arc::new(Quiet));
-        (Call { ctx, frames: Frames::new(wire::Outbox(tx)), caller: Caller::console(), registry: Arc::new(NoDevices), world: None, devices: Arc::new(DeviceRegistry::in_memory()), pairing: Arc::new(Pairing::new(None, Arc::new(DeviceRegistry::in_memory()))) }, dir, rx)
+        let call = Call {
+            ctx,
+            frames: Frames::new(wire::Outbox::unbounded(tx)),
+            caller: Caller::console(),
+            registry: Arc::new(NoDevices),
+            world: None,
+            devices: Arc::new(DeviceRegistry::in_memory()),
+            pairing: Arc::new(Pairing::new(None, Arc::new(DeviceRegistry::in_memory()))),
+            flights: Default::default(),
+        };
+        (call, dir, rx)
     }
 
     fn args(v: Value) -> Args {
@@ -1295,13 +1463,181 @@ mod tests {
         let (con, _, _rx) = call("fetch-as");
         let pin = resolve::remote_only("https://140.82.112.3/o/r.git").unwrap();
         let resolved = || resolve::Resolved { pins: vec![pin.clone()], ..Default::default() };
-        let ctx = body_ctx(&con, &Grant::everything(), resolved());
+        let ctx = body_ctx(&con, &Grant::everything(), &resolved());
         assert_eq!(*ctx.fetcher(), Fetcher::Console, "the console's git, even handed a pin");
         let dev = Call { caller: Caller::paired(PrincipalId::owner(), DeviceId::new("phone")), ..con };
-        let ctx = body_ctx(&dev, &Grant::everything(), resolved());
+        let ctx = body_ctx(&dev, &Grant::everything(), &resolved());
         assert_eq!(*ctx.fetcher(), Fetcher::Device(vec![pin.clone()]));
         assert_eq!(ctx.fetch_policy("https://140.82.112.3/o/r.git").unwrap(), Policy::Pinned(pin));
         assert!(ctx.fetch_policy("file:///etc").is_err(), "a URL the resolver did not pin is checked again");
         assert!(!ctx.fetching(Fetcher::Console).fetcher().is_console(), "a device's Ctx cannot be made the console's");
+    }
+
+    /// A refused call never joins a flight (§6): the resolver runs first, for
+    /// each caller, and only a call it lets through shares a body. A console
+    /// naming a project that is not registered and a device the registry
+    /// grants nothing both ask for a shared read; neither joins. The
+    /// console's `doctor` on a registered project joins exactly once.
+    #[test]
+    fn a_refused_call_never_joins_a_flight() {
+        use worktrees_core::authz::{DeviceId, PrincipalId};
+        let (con, dir, _rx) = call("flightrefuse");
+        let root = std::fs::canonicalize(&dir).unwrap().to_string_lossy().into_owned();
+        let world = Fixture { roots: vec![root.clone()], panes: vec![] };
+        let flights = con.flights.clone();
+        let gone = format!("{root}-not-registered");
+        assert!(super::call_in(&con, "doctor", &args(json!({ "repo": gone })), &world).is_err());
+        assert_eq!(flights.joins(), 0, "a project the resolver did not find");
+        let _ = super::call_in(&con, "doctor", &args(json!({ "repo": root })), &world);
+        assert_eq!(flights.joins(), 1, "the call the resolver let through");
+        let phone = Call { caller: Caller::paired(PrincipalId::owner(), DeviceId::new("phone")), ..con };
+        let denied = super::call_in(&phone, "doctor", &args(json!({ "repo": root })), &world);
+        assert_eq!(denied, Err(json!(super::super::resolve::ERR_DENIED)));
+        assert_eq!(flights.joins(), 1, "a device the registry grants nothing");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The reader's precheck answers what needs no I/O and passes the rest
+    /// on. A device the registry grants nothing is told `denied` for a read,
+    /// a refused probe is `false` exactly as `call_in` answers it, nonsense
+    /// is `unknown command`, and a caller over its rate is told `rate`
+    /// instead. The console's read passes, decided later by `call_in`.
+    #[test]
+    fn the_precheck_answers_what_needs_no_io_and_passes_the_rest() {
+        use super::super::resolve::ERR_DENIED;
+        use worktrees_core::authz::{DeviceId, PrincipalId};
+        let phone = Caller::paired(PrincipalId::owner(), DeviceId::new("phone"));
+        let free = || Ok(());
+        let pre = |c: &Caller, cmd: &str, pay: &dyn Fn() -> Result<(), &'static str>| precheck(c, &NoDevices, cmd, &args(json!({})), &(), pay);
+        assert_eq!(pre(&phone, "get_settings", &free), Some(Err(json!(ERR_DENIED))));
+        assert_eq!(pre(&phone, "file_readable", &free), Some(Ok(json!(false))), "a probe's refusal is its answer");
+        assert_eq!(pre(&phone, "not_a_command", &free), Some(Err(json!("unknown command: not_a_command"))));
+        assert_eq!(pre(&phone, "get_settings", &|| Err("rate")), Some(Err(json!("rate"))), "over its rate");
+        assert_eq!(pre(&Caller::console(), "get_settings", &|| panic!("a pass pays nothing")), None);
+        assert_eq!(pre(&Caller::console(), "read_file", &free), None, "objects are call_in's");
+    }
+
+    /// What a `Witness` heard, in order.
+    #[derive(Default)]
+    struct Heard(std::sync::Mutex<Vec<String>>);
+
+    impl Witness for Heard {
+        fn unknown(&self, cmd: &str) {
+            self.0.lock().unwrap().push(format!("unknown {cmd}"));
+        }
+        fn refused(&self, row: &'static Row, _: &Args, r: &resolve::Refusal) {
+            self.0.lock().unwrap().push(format!("refused {} {:?}", row.name, r.kind));
+        }
+        fn admitted(&self, row: &'static Row, _: &Args, _: &resolve::Resolved) {
+            self.0.lock().unwrap().push(format!("admitted {}", row.name));
+        }
+    }
+
+    fn heard(f: impl FnOnce(&Heard)) -> Vec<String> {
+        let h = Heard::default();
+        f(&h);
+        h.0.into_inner().unwrap()
+    }
+
+    /// §5.1: every refusal is witnessed exactly once, whichever of the two
+    /// sites makes it — the reader's precheck (exposure, capability, an
+    /// unknown name) or `call_in_seen` (an object, the stale close answered
+    /// `ok`) — and a request refused for its RATE is not witnessed at all:
+    /// it is counted into that limit's episode (`budget.rs`), so a flood
+    /// costs the log one record, not one a request.
+    #[test]
+    fn every_refusal_is_witnessed_exactly_once_wherever_it_is_made() {
+        use worktrees_core::authz::{DeviceId, PrincipalId};
+        let (con, dir, _rx) = call("witness");
+        let phone = Caller::paired(PrincipalId::owner(), DeviceId::new("phone"));
+        let none = args(json!({}));
+        let pre = |c: &Caller, cmd: &str, h: &Heard| precheck(c, &NoDevices, cmd, &none, h, || Ok(()));
+        assert_eq!(heard(|h| drop(pre(&phone, "get_settings", h))), ["refused get_settings Denied"]);
+        assert_eq!(heard(|h| drop(pre(&phone, "copy_text", h))), ["refused copy_text ClientLocal"]);
+        assert_eq!(heard(|h| drop(pre(&phone, "nope", h))), ["unknown nope"]);
+        assert_eq!(heard(|h| drop(precheck(&phone, &NoDevices, "get_settings", &none, h, || Err("rate")))), Vec::<String>::new());
+        let world = Fixture { roots: vec![], panes: vec![] };
+        let gone = args(json!({ "repo": dir.join("not-registered").to_string_lossy() }));
+        assert_eq!(heard(|h| drop(call_in_seen(&con, "doctor", &gone, &world, h))), ["refused doctor NotFound"]);
+        let stale = args(json!({ "id": 987_654 }));
+        let mut out = None;
+        assert_eq!(heard(|h| out = Some(call_in_seen(&con, "term_close", &stale, &world, h))), ["refused term_close NoopNotOwned"]);
+        assert_eq!(out, Some(Ok(Value::Null)), "the stale close is answered ok, and recorded once");
+        assert_eq!(heard(|h| drop(call_in_seen(&con, "nope", &none, &world, h))), ["unknown nope"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Step-up (§2.5) is the caller's own verdict, so it is asked BEFORE a
+    /// flight is joined. A device whose step-up is due, asking for
+    /// `diagnostics` — `admin`, so drive-class, and one of §6's shared reads
+    /// — is refused `step-up` and joins nothing. Joined first, it could be
+    /// handed the answer a console leader computed.
+    #[test]
+    fn step_up_is_asked_before_a_flight_is_joined() {
+        use super::super::resolve::fixture::call_as;
+        use worktrees_core::authz::{DeviceId, Grant, PrincipalId};
+        struct Due;
+        impl Registry for Due {
+            fn principal_grant(&self, _: &PrincipalId) -> Option<Grant> {
+                Some(Grant::everything())
+            }
+            fn device_grant(&self, _: &PrincipalId, _: &DeviceId) -> Option<Grant> {
+                Some(Grant::everything())
+            }
+            fn device_principal(&self, _: &DeviceId) -> Option<PrincipalId> {
+                Some(PrincipalId::owner())
+            }
+            fn stepup_required(&self, _: &PrincipalId, _: &DeviceId) -> bool {
+                true
+            }
+            fn generation(&self) -> u64 {
+                0
+            }
+        }
+        let cx = call_as(Caller::paired(PrincipalId::owner(), DeviceId::new("phone")), Arc::new(Due));
+        let world = Fixture { roots: vec![], panes: vec![] };
+        let mut out = None;
+        let h = heard(|h| out = Some(call_in_seen(&cx, "diagnostics", &args(json!({})), &world, h)));
+        assert_eq!(out, Some(Err(json!(super::super::stepup::ERR_STEPUP))));
+        assert_eq!(h, ["refused diagnostics StepUp"]);
+        assert_eq!(cx.flights.joins(), 0, "a call step-up refused joins no flight");
+    }
+
+    /// A flight's follower never reaches a device launch's lane gate, whose
+    /// lock is held across the leader's body (§6, LLM10). Four calls from a
+    /// device of a row that both shares and is gated (the test row, which
+    /// no real row is) share ONE run of the body, and each is witnessed as
+    /// admitted. Join the flight after the gate instead and the leader holds
+    /// the lock while the others wait on it outside the flight: each then
+    /// runs the body itself, one after another, and answers 1, 2, 3, 4.
+    #[test]
+    fn a_follower_never_reaches_the_lane_gate() {
+        use super::super::resolve::fixture::{call_as, Devices};
+        use worktrees_core::authz::{Caps, DeviceId, Grant, PrincipalId, Projects};
+        let mut reg = Devices::default();
+        let read = Grant { capabilities: Caps::of(&[Capability::Read]), projects: Projects::All };
+        reg.devices.insert(DeviceId::new("phone"), (PrincipalId::owner(), read));
+        let reg = Arc::new(reg);
+        let phone = Caller::paired(PrincipalId::owner(), DeviceId::new("phone"));
+        let flights: Arc<Flights> = Default::default();
+        let world = Arc::new(Fixture { roots: vec![], panes: vec![] });
+        let tag = format!("gate-follow-{}", std::process::id());
+        let calls: Vec<_> = (0..4)
+            .map(|_| {
+                let cx = Call { flights: flights.clone(), ..call_as(phone.clone(), reg.clone()) };
+                let (a, world) = (args(json!({ "tag": tag, "joins": 4 })), world.clone());
+                std::thread::spawn(move || {
+                    let h = Heard::default();
+                    let out = call_in_seen(&cx, TEST_SHARED, &a, &*world, &h);
+                    (out, h.0.into_inner().unwrap())
+                })
+            })
+            .collect();
+        for c in calls {
+            let (out, heard) = c.join().unwrap();
+            assert_eq!(out, Ok(json!(1)), "every caller got the one run's answer");
+            assert_eq!(heard, [format!("admitted {TEST_SHARED}")]);
+        }
+        assert_eq!(flights.joins(), 4);
     }
 }

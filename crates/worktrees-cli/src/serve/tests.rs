@@ -21,6 +21,7 @@ use serde_json::{json, Value};
 use tokio_tungstenite::tungstenite::protocol::{Role, WebSocket};
 use tokio_tungstenite::tungstenite::Message;
 
+use super::budget::BUDGETS;
 use super::conn::Limits;
 use super::{start_in, Running};
 
@@ -59,7 +60,7 @@ fn live_with(tag: &str, limits: Limits) -> Live {
     std::fs::create_dir_all(&dir).unwrap();
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
     let clients = super::conn::Clients::with(Arc::new(worktrees_core::authz::NoDevices), Some(Arc::new(Registered)));
-    let running = rt.block_on(async { start_in(dir.clone(), 0, vec![DEV_ORIGIN.to_string()], limits, clients) }).unwrap();
+    let running = rt.block_on(async { start_in(dir.clone(), 0, vec![DEV_ORIGIN.to_string()], limits, BUDGETS, clients) }).unwrap();
     Live { running: Some(running), dir, rt }
 }
 
@@ -558,7 +559,10 @@ fn a_body_that_panics_is_answered_and_everything_after_it_is_served() {
     assert_eq!(rpc(&mut other, json!(5), "get_settings", json!({})), json!({ "id": 5, "ok": null }));
 
     let lines = rec.0.lock().unwrap().clone();
-    let ours: Vec<&String> = lines.iter().filter(|s| s.contains(&format!("serve: {TEST_PANIC} panicked"))).collect();
+    // Other tests panic their bodies too, into the same recorder: ours are
+    // the lines with this test's own text.
+    let ours: Vec<&String> =
+        lines.iter().filter(|s| s.contains(&format!("serve: {TEST_PANIC} panicked")) && s.contains("a body fell over")).collect();
     assert_eq!(ours.len(), 2, "one line per panic: {lines:#?}");
     for s in ours {
         assert!(s.starts_with("[error] ") && s.contains("a body fell over") && s.contains("internal error"), "{s}");
@@ -644,9 +648,9 @@ fn an_event_reaches_each_socket_projected_to_its_caller() {
     let (ctx_tx, mut console) = tokio::sync::mpsc::unbounded_channel();
     let (ph_tx, mut phone) = tokio::sync::mpsc::unbounded_channel();
     // Both say they listen for `worktrees show`; only the console is shown it.
-    clients.add(2, Outbox(ph_tx), Caller::paired(PrincipalId::owner(), DeviceId::new("phone"))).declare(["app:open-doc"]);
+    clients.add(2, Outbox::unbounded(ph_tx), Caller::paired(PrincipalId::owner(), DeviceId::new("phone"))).declare(["app:open-doc"]);
     assert!(!host.has_audience("app:open-doc"), "a device alone is no audience for the inbox, declared or not");
-    clients.add(1, Outbox(ctx_tx), Caller::console()).declare(["app:open-doc"]);
+    clients.add(1, Outbox::unbounded(ctx_tx), Caller::console()).declare(["app:open-doc"]);
     assert!(host.has_audience("app:open-doc"));
 
     let next = |rx: &mut tokio::sync::mpsc::UnboundedReceiver<Message>| -> Option<Value> {
@@ -694,9 +698,9 @@ fn a_one_shot_event_goes_only_to_a_console_connection_that_declared_it() {
     };
     let doc = || json!({ "repo": "/r/a", "slug": "(main)", "path": "/r/a/x.md" });
 
-    clients.add(1, Outbox(probe_tx), Caller::console());
+    clients.add(1, Outbox::unbounded(probe_tx), Caller::console());
     assert!(!host.has_audience("app:open-doc"), "a console connection that declared nothing is no audience");
-    let listens = clients.add(2, Outbox(app_tx), Caller::console());
+    let listens = clients.add(2, Outbox::unbounded(app_tx), Caller::console());
     listens.declare(["places:changed"]);
     assert!(!host.has_audience("app:open-doc"), "declaring another event is not declaring this one");
     listens.declare(["places:changed", "app:open-doc"]);
@@ -776,25 +780,37 @@ fn a_preauth_frame_past_the_byte_budget_is_closed_at_once() {
 }
 
 /// **Unauthenticated connections are capped, and the cap spares the client
-/// that is already in.** Past the cap a NEW connection is closed with nothing
-/// said; the authenticated client keeps getting answers throughout; and once
-/// the flood lets go, a new client gets in.
+/// that is already in.** Past the cap a new connection DISPLACES the stalest
+/// unauthenticated one, which is closed with nothing said, oldest first; the
+/// authenticated client keeps getting answers throughout; and a new client
+/// gets in while the cap is still full. (Under M1 the newcomer was the one
+/// closed, which is how a reconnecting flood kept the door shut.)
 #[test]
-fn connections_past_the_unauthenticated_cap_are_closed_and_a_served_client_keeps_working() {
+fn connections_past_the_unauthenticated_cap_displace_the_stalest_and_a_served_client_keeps_working() {
     let l = live_with("unauthcap", Limits { connections: 32, unauthenticated: 4 });
     let mut served = client(&l);
-    let held: Vec<TcpStream> = (0..4).map(|_| idle_tcp(&l)).collect();
+    let mut held: Vec<TcpStream> = Vec::new();
+    for _ in 0..4 {
+        held.push(idle_tcp(&l));
+        // Distinct accept times, so "stalest" names exactly one.
+        std::thread::sleep(Duration::from_millis(20));
+    }
     std::thread::sleep(Duration::from_millis(200));
-    for i in 0..6 {
-        let mut extra = idle_tcp(&l);
-        let (bytes, closed) = rest(&mut extra, Duration::from_secs(1));
-        assert!(bytes.is_empty() && closed, "connection {i} past the cap: wrote {bytes:?}, closed {closed}");
+    for i in 0..4 {
+        let extra = idle_tcp(&l);
+        let (bytes, closed) = rest(&mut held[i], Duration::from_secs(1));
+        assert!(bytes.is_empty() && closed, "the stalest, #{i}, displaced by a newcomer: wrote {bytes:?}, closed {closed}");
+        for later in &mut held[i + 1..] {
+            later.set_nonblocking(true).unwrap();
+            let mut b = [0u8; 1];
+            assert!(matches!(later.read(&mut b), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock), "only the stalest goes");
+            later.set_nonblocking(false).unwrap();
+        }
+        held.push(extra);
     }
     assert_eq!(rpc(&mut served, json!(1), "get_settings", json!({})), json!({ "id": 1, "ok": null }), "the served client is still served");
-    drop(held);
-    std::thread::sleep(Duration::from_millis(300));
     let mut late = client(&l);
-    assert_eq!(rpc(&mut late, json!(2), "get_settings", json!({}))["id"], json!(2), "a new client gets in once the flood lets go");
+    assert_eq!(rpc(&mut late, json!(2), "get_settings", json!({}))["id"], json!(2), "a new client gets in with the cap still full");
 }
 
 /// **All connections are capped too**, authenticated ones included: past the
@@ -1282,6 +1298,20 @@ fn audit_lines(l: &Live) -> Vec<Value> {
         .collect()
 }
 
+/// The first audit record `pred` accepts, waited for (at most 5 s): a record
+/// a connection writes as it goes lands after the client has seen it close.
+fn audit_record(l: &Live, pred: impl Fn(&Value) -> bool) -> Value {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let recs = audit_lines(l);
+        if let Some(r) = recs.iter().find(|r| pred(r)) {
+            return r.clone();
+        }
+        assert!(std::time::Instant::now() < deadline, "no such record: {recs:#?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// The audit unit tests pass with every call in `conn.rs` deleted; this is
 /// whether the socket WRITES them. A refused upgrade and a wrong proof (no
 /// actor, the peer named), then a served client: a read (no record), a write
@@ -1337,21 +1367,32 @@ fn the_audit_log_records_what_reaches_the_socket() {
     assert_eq!(super::audit::verify(&l.dir).broken, None);
 }
 
-/// The limits, in the log: a run of connections closed at the cap is ONE
-/// record when it begins and one when the cap clears, with the count — not a
-/// line per connection, which would turn a flood into a disk-writing flood —
-/// and a message past `MAX_MESSAGE` is a refusal naming its actor.
+/// The limits, in the log: a run of newcomers at the cap — each displacing
+/// the stalest unauthenticated connection, which closes with nothing written
+/// — is ONE record when it begins and one when the flood lets go, with the
+/// count, not a line per connection, which would turn a flood into a
+/// disk-writing flood. A message past `MAX_MESSAGE` is a refusal naming its
+/// actor.
 #[test]
 fn the_audit_log_records_limits_once_per_episode() {
     let l = live_with("auditcap", Limits { connections: 32, unauthenticated: 2 });
-    let held: Vec<TcpStream> = (0..2).map(|_| idle_tcp(&l)).collect();
-    std::thread::sleep(Duration::from_millis(200));
-    for _ in 0..5 {
-        let mut extra = idle_tcp(&l);
-        let (bytes, closed) = rest(&mut extra, Duration::from_secs(1));
-        assert!(bytes.is_empty() && closed);
+    // Every connection apart by more than the progress clock's millisecond,
+    // so the oldest one left is the stalest, never a tie.
+    let gap = || std::thread::sleep(Duration::from_millis(20));
+    let mut idle = std::collections::VecDeque::new();
+    for _ in 0..2 {
+        idle.push_back(idle_tcp(&l));
+        gap();
     }
-    drop(held);
+    for _ in 0..5 {
+        let newcomer = idle_tcp(&l);
+        let mut stalest = idle.pop_front().unwrap();
+        let (bytes, closed) = rest(&mut stalest, Duration::from_secs(2));
+        assert!(bytes.is_empty() && closed, "the stalest is displaced, silently");
+        idle.push_back(newcomer);
+        gap();
+    }
+    drop(idle);
     std::thread::sleep(Duration::from_millis(300));
     let mut ws = client(&l);
     ws.get_ref().set_read_timeout(Some(Duration::from_secs(20))).unwrap();
@@ -1669,12 +1710,13 @@ mod devices {
         // A socket that outlived the close for any reason: its next request.
         let stale = Call {
             ctx: e.ctx.clone(),
-            frames: Frames::new(Outbox(tokio::sync::mpsc::unbounded_channel().0)),
+            frames: Frames::new(Outbox::unbounded(tokio::sync::mpsc::unbounded_channel().0)),
             caller: caller(&phone),
             registry: e.reg.clone(),
             world: None,
             devices: e.reg.clone(),
             pairing: e.clients.pairing(),
+            flights: Default::default(),
         };
         assert_eq!(dispatch::call(&stale, "get_changelog", &Args(Default::default())), Err(json!("denied")));
         // And its next handshake.
@@ -1744,12 +1786,13 @@ mod devices {
         e.closed(&mut again, "disabled");
         let stale = Call {
             ctx: e.ctx.clone(),
-            frames: Frames::new(Outbox(tokio::sync::mpsc::unbounded_channel().0)),
+            frames: Frames::new(Outbox::unbounded(tokio::sync::mpsc::unbounded_channel().0)),
             caller: caller(&phone),
             registry: e.reg.clone(),
             world: None,
             devices: e.reg.clone(),
             pairing: e.clients.pairing(),
+            flights: Default::default(),
         };
         let enable = || Args(json!({"id": phone.id.as_str()}).as_object().cloned().unwrap());
         assert_eq!(dispatch::call(&stale, "get_changelog", &Args(Default::default())), Err(json!("denied")));
@@ -1840,7 +1883,7 @@ mod devices {
         let world = Roots { roots: vec![a.clone(), b.clone()], panes: vec![("sa".into(), a.clone(), "zsh".into()), ("sb".into(), b.clone(), "zsh".into())] };
         let dev = enroll(&e.reg, "Dev", 1, &[Read, Stream], Projects::only([a.clone(), b.clone()]));
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let out = Outbox(tx);
+        let out = Outbox::unbounded(tx);
         let call = Arc::new(Call {
             ctx: e.ctx.clone(),
             frames: Frames::new(out.clone()),
@@ -1849,6 +1892,7 @@ mod devices {
             world: Some(Arc::new(world)),
             devices: e.reg.clone(),
             pairing: e.clients.pairing(),
+            flights: Default::default(),
         });
         call.frames.note_term(901, "sa".into());
         call.frames.note_term(902, "sb".into());
@@ -1901,12 +1945,13 @@ mod devices {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let call = Call {
             ctx: e.ctx.clone(),
-            frames: Frames::new(Outbox(tx)),
+            frames: Frames::new(Outbox::unbounded(tx)),
             caller: Caller::paired(PrincipalId::owner(), DeviceId::new("d_q")),
             registry: reg.clone(),
             world: Some(Arc::new(Roots { roots: vec![a.clone()], panes: vec![("sa".into(), a.clone(), "zsh".into())] })),
             devices: e.reg.clone(),
             pairing: e.clients.pairing(),
+            flights: Default::default(),
         };
         call.frames.reconciled().store(1, Ordering::SeqCst);
         call.frames.note_term(903, "sa".into());
@@ -1932,7 +1977,7 @@ mod devices {
         let a = s(&e.dir.join("a"));
         let dev = enroll(&e.reg, "Dev", 1, &[Read, Stream], Projects::only([a.clone()]));
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let out = Outbox(tx);
+        let out = Outbox::unbounded(tx);
         let call = Arc::new(Call {
             ctx: e.ctx.clone(),
             frames: Frames::new(out.clone()),
@@ -1941,6 +1986,7 @@ mod devices {
             world: Some(Arc::new(Roots { roots: vec![a.clone()], panes: vec![] })),
             devices: e.reg.clone(),
             pairing: e.clients.pairing(),
+            flights: Default::default(),
         });
         call.frames.note_shell(ShellHold { repo: a.clone(), slug: "(main)".into(), index: 0, gen: 7 });
         let _kill = e.clients.join(1, out, call.clone());
@@ -1989,7 +2035,7 @@ mod devices {
         let a = s(&e.dir.join("a"));
         let reg = Arc::new(Quiet { grant: Mutex::new(Grant { capabilities: Caps::of(&[Read, Stream]), projects: Projects::All }), gen: AtomicU64::new(1) });
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let frames = Frames::new(Outbox(tx));
+        let frames = Frames::new(Outbox::unbounded(tx));
         let world = Racing { root: a.clone(), reg: reg.clone(), frames: frames.clone(), fired: Default::default() };
         let call = Call {
             ctx: e.ctx.clone(),
@@ -1999,6 +2045,7 @@ mod devices {
             world: Some(Arc::new(world)),
             devices: e.reg.clone(),
             pairing: e.clients.pairing(),
+            flights: Default::default(),
         };
         frames.reconciled().store(1, Ordering::SeqCst);
         // No `cols`: the body fails on its arguments before it reaches tmux.
@@ -2491,12 +2538,13 @@ mod devices {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let call = Call {
             ctx: e.ctx.clone(),
-            frames: Frames::with_exporter(Outbox(tx), Some([1u8; 32])),
+            frames: Frames::with_exporter(Outbox::unbounded(tx), Some([1u8; 32])),
             caller: caller(&rec),
             registry: e.reg.clone(),
             world: Some(Arc::new(Roots { roots: vec![a.clone()], panes: vec![] })),
             devices: e.reg.clone(),
             pairing: e.clients.pairing(),
+            flights: Default::default(),
         };
         let write = |cmd: &str, extra: Value| {
             let mut args = json!({"repo": a, "slug": "(main)", "index": 0, "data": [104, 105], "id": 905});
@@ -2619,7 +2667,7 @@ mod devices {
         let e = engine("jobs", vec![]);
         let dev = enroll(&e.reg, "Dev", 1, &[Read, Admin], Projects::All);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let out = Outbox(tx);
+        let out = Outbox::unbounded(tx);
         let call = Arc::new(Call {
             ctx: e.ctx.clone(),
             frames: Frames::new(out.clone()),
@@ -2628,6 +2676,7 @@ mod devices {
             world: Some(Arc::new(Roots { roots: vec![], panes: vec![] })),
             devices: e.reg.clone(),
             pairing: e.clients.pairing(),
+            flights: Default::default(),
         });
         let grant = authz::effective(&*e.reg, &call.caller);
         let mut args = Args(json!({"id": "job-1", "parent": "/x", "url": "https://example.com/r.git"}).as_object().cloned().unwrap());
@@ -2640,4 +2689,727 @@ mod devices {
         assert!(call.frames.take_jobs().is_empty(), "the job {job} was taken to be cancelled");
         assert_eq!(e.clients.len(), 0);
     }
+}
+
+// ── resource limits (Phase 2 §6, R6) ─────────────────────────────────────────
+
+/// One whole new client — upgrade, handshake v1, one answered request — or
+/// `false` at the first thing that goes wrong. The flood tests count these,
+/// so nothing here may panic: a refused connection is a data point.
+fn try_served(port: u16, token: &str) -> bool {
+    let attempt = || -> Option<()> {
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        let mut s = TcpStream::connect_timeout(&addr, Duration::from_secs(2)).ok()?;
+        s.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
+        let req = format!(
+            "GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: {DEV_ORIGIN}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+             Sec-WebSocket-Key: {KEY}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+        );
+        s.write_all(req.as_bytes()).ok()?;
+        let mut head = Vec::new();
+        let mut b = [0u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            if s.read(&mut b).ok()? == 0 {
+                return None;
+            }
+            head.push(b[0]);
+        }
+        head.starts_with(b"HTTP/1.1 101 ").then_some(())?;
+        let mut ws = WebSocket::from_raw_socket(s, Role::Client, None);
+        let next = |ws: &mut WebSocket<TcpStream>| -> Option<Value> {
+            serde_json::from_str(ws.read().ok()?.to_text().ok()?).ok()
+        };
+        let cn = fresh_hex32();
+        ws.send(Message::text(json!({ "hello": cn }).to_string())).ok()?;
+        let sn = next(&mut ws)?["challenge"].as_str()?.to_string();
+        ws.send(Message::text(json!({ "auth": spec_proof(token, SPEC_CLIENT_LABEL, &cn, &sn) }).to_string())).ok()?;
+        (next(&mut ws)?["ok"] == json!(true)).then_some(())?;
+        ws.send(Message::text(json!({ "id": 1, "cmd": "get_settings" }).to_string())).ok()?;
+        (next(&mut ws)?["id"] == json!(1)).then_some(())
+    };
+    attempt().is_some()
+}
+
+/// `n` tokenless threads, each opening a connection and holding it until the
+/// server closes it, then, 50 ms later, opening the next. `hello` makes each
+/// one do everything a peer without the token CAN do first — upgrade and say
+/// hello — so it waits at the proof instead of at the request line.
+///
+/// The pause keeps this a test of the RULE and not of a debug build's
+/// throughput: under M1's refuse-the-newcomer rule the door stays shut just
+/// the same — slots free only at the 5 s request deadline, and an attacker
+/// retrying every 50 ms is as likely as anyone to get each one — while
+/// displacement lets a newcomer in at once. The release harness measures the
+/// flood that reconnects with no pause at all.
+fn churn(port: u16, n: usize, hello: bool, stop: Arc<std::sync::atomic::AtomicBool>) -> Vec<std::thread::JoinHandle<u64>> {
+    use std::sync::atomic::Ordering::Relaxed;
+    (0..n)
+        .map(|_| {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let mut opened = 0u64;
+                let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+                while !stop.load(Relaxed) {
+                    let Ok(mut s) = TcpStream::connect_timeout(&addr, Duration::from_secs(1)) else { continue };
+                    opened += 1;
+                    let _ = s.set_read_timeout(Some(Duration::from_secs(10)));
+                    if hello {
+                        let req = format!(
+                            "GET / HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nOrigin: {DEV_ORIGIN}\r\nUpgrade: websocket\r\n\
+                             Connection: Upgrade\r\nSec-WebSocket-Key: {KEY}\r\nSec-WebSocket-Version: 13\r\n\r\n"
+                        );
+                        let _ = s.write_all(req.as_bytes());
+                        // A masked text frame: {"hello":"<64 hex>"}.
+                        let body = json!({ "hello": fresh_hex32() }).to_string().into_bytes();
+                        let mut f = vec![0x81u8, 0x80 | body.len() as u8, 0, 0, 0, 0];
+                        f.extend_from_slice(&body);
+                        let _ = s.write_all(&f);
+                    }
+                    let mut buf = [0u8; 4096];
+                    // Until the server closes it: everything it sends is read
+                    // and dropped, as a peer that never proves itself would.
+                    while matches!(s.read(&mut buf), Ok(n) if n > 0) {}
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                opened
+            })
+        })
+        .collect()
+}
+
+/// The flood's result: how many of `tries` new clients were served, 50 ms
+/// apart, while `n` attackers churn against 32 unauthenticated slots — twice
+/// as many attackers as slots, the serve lane's ratio (32 against 16) — and
+/// how many connections the flood displaced, which must not be 0: a flood
+/// that never reached the cap tests nothing.
+fn served_under_churn(tag: &str, n: usize, hello: bool, tries: usize) -> (usize, u64) {
+    super::raise_open_file_limit();
+    let l = live_with(tag, Limits { connections: 96, unauthenticated: 32 });
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let attackers = churn(l.port(), n, hello, stop.clone());
+    std::thread::sleep(Duration::from_millis(500));
+    let token = l.token();
+    let served = (0..tries)
+        .filter(|_| {
+            let ok = try_served(l.port(), &token);
+            std::thread::sleep(Duration::from_millis(50));
+            ok
+        })
+        .count();
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let displaced = l.running.as_ref().unwrap().listener.shared.displaced();
+    // The server goes first, so every attacker's read ends and its thread
+    // sees the stop.
+    drop(l);
+    for t in attackers {
+        t.join().unwrap();
+    }
+    (served, displaced)
+}
+
+/// **A reconnecting flood of idle sockets does not lock a new client out.**
+/// The serve lane measured 0 of 49 on macOS: 32 tokenless threads, each
+/// holding a bare socket and reopening it the instant the server closed it,
+/// kept all 16 unauthenticated slots full, so every NEW connection — the
+/// app's included — was the one closed at accept. A newcomer now displaces
+/// the STALEST unauthenticated connection instead, and a real client, which
+/// moves forward every millisecond, is never the stalest for long.
+#[test]
+fn a_reconnecting_flood_of_idle_sockets_does_not_lock_a_new_client_out() {
+    let (served, displaced) = served_under_churn("churn-idle", 64, false, 20);
+    assert!(displaced > 0, "the flood never filled the unauthenticated slots: this measured nothing");
+    assert!(served >= 18, "{served} of 20 new clients served while 64 idle attackers churned ({displaced} displaced)");
+}
+
+/// The same with a flood that does everything a peer WITHOUT the token can
+/// do — upgrade, hello — and then waits at the proof it cannot give.
+#[test]
+fn a_reconnecting_flood_that_says_hello_does_not_lock_a_new_client_out() {
+    let (served, displaced) = served_under_churn("churn-hello", 64, true, 20);
+    assert!(displaced > 0, "the flood never filled the unauthenticated slots: this measured nothing");
+    assert!(served >= 18, "{served} of 20 new clients served while 64 hello attackers churned ({displaced} displaced)");
+}
+
+// ── authenticated budgets (budget.rs) ────────────────────────────────────────
+
+use super::budget::{Budgets, Rate};
+use super::conn::seams;
+use super::dispatch::TEST_SHARED;
+use worktrees_core::authz::{Caller, DeviceId, Grant, PrincipalId, Registry};
+
+/// Every paired device is the owner's and granted everything: these tests are
+/// about what a device may COST, and the resolver's own tests about what it
+/// may do.
+struct Unscoped;
+
+impl Registry for Unscoped {
+    fn stepup_required(&self, _: &PrincipalId, _: &DeviceId) -> bool {
+        false
+    }
+    fn generation(&self) -> u64 {
+        0
+    }
+    fn principal_grant(&self, _: &PrincipalId) -> Option<Grant> {
+        None
+    }
+    fn device_grant(&self, p: &PrincipalId, _: &DeviceId) -> Option<Grant> {
+        p.is_owner().then(Grant::everything)
+    }
+    fn device_principal(&self, _: &DeviceId) -> Option<PrincipalId> {
+        Some(PrincipalId::owner())
+    }
+}
+
+/// The owner's devices, each known to the registry and granted NOTHING: a
+/// device it did not know would be closed as it joins (`end_if_gone`), and
+/// these tests are about what a device's refused requests cost.
+struct Grantless;
+
+impl Registry for Grantless {
+    fn stepup_required(&self, _: &PrincipalId, _: &DeviceId) -> bool {
+        false
+    }
+    fn generation(&self) -> u64 {
+        0
+    }
+    fn principal_grant(&self, _: &PrincipalId) -> Option<Grant> {
+        None
+    }
+    fn device_grant(&self, p: &PrincipalId, _: &DeviceId) -> Option<Grant> {
+        use worktrees_core::authz::{Caps, Projects};
+        p.is_owner().then(|| Grant { capabilities: Caps::of(&[]), projects: Projects::All })
+    }
+    fn device_principal(&self, _: &DeviceId) -> Option<PrincipalId> {
+        Some(PrincipalId::owner())
+    }
+}
+
+fn live_budgeted(tag: &str, budgets: Budgets) -> Live {
+    live_budgeted_in(tag, budgets, Arc::new(Unscoped))
+}
+
+/// `live_budgeted`, with the devices' grants from `registry`.
+fn live_budgeted_in(tag: &str, budgets: Budgets, registry: Arc<dyn Registry>) -> Live {
+    let dir = std::env::temp_dir().join(format!("wt-serve-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    let clients = super::conn::Clients::with(registry, Some(Arc::new(Registered)));
+    let running = rt
+        .block_on(async { start_in(dir.clone(), 0, vec![DEV_ORIGIN.to_string()], super::conn::LIMITS, budgets, clients) })
+        .unwrap();
+    Live { running: Some(running), dir, rt }
+}
+
+/// The next client this test connects is device `id`, the owner's, as a
+/// paired device on the remote listener will be.
+fn as_device(l: &Live, id: &str) {
+    let caller = Caller::paired(PrincipalId::owner(), DeviceId::new(id));
+    l.running.as_ref().unwrap().listener.shared.test_callers.lock().unwrap().push_back(caller);
+}
+
+fn send(ws: &mut WebSocket<TcpStream>, id: Value, cmd: &str, args: Value) {
+    ws.send(Message::text(json!({ "id": id, "cmd": cmd, "args": args }).to_string())).unwrap();
+}
+
+/// Replies (frames with an `id`) until `n` have come, by id.
+fn replies(ws: &mut WebSocket<TcpStream>, n: usize) -> std::collections::HashMap<String, Value> {
+    let mut out = std::collections::HashMap::new();
+    while out.len() < n {
+        let f = frame(ws, Duration::from_secs(10)).unwrap_or_else(|| panic!("{} of {n} replies came", out.len()));
+        if let Some(id) = f.get("id") {
+            out.insert(id.to_string(), f);
+        }
+    }
+    out
+}
+
+/// **In-flight requests are capped per connection, and a refusal is at
+/// once.** Four slow bodies fill a cap of four; the two requests behind them
+/// are `busy` before any of the four is done, never queued. When the four are
+/// answered, their slots are back.
+#[test]
+fn requests_past_the_in_flight_cap_are_busy_at_once_and_their_slots_come_back() {
+    let mut b = BUDGETS;
+    b.loopback.in_flight = 4;
+    let l = live_budgeted("inflight", b);
+    let mut ws = client(&l);
+    let t0 = std::time::Instant::now();
+    for i in 0..4 {
+        send(&mut ws, json!(i), seams::SLEEP, json!({ "ms": 600 }));
+    }
+    send(&mut ws, json!(4), seams::SLEEP, json!({ "ms": 600 }));
+    send(&mut ws, json!(5), "get_settings", json!({}));
+    let first_two = replies(&mut ws, 2);
+    assert!(t0.elapsed() < Duration::from_millis(500), "the refusals waited for the bodies: {:?}", t0.elapsed());
+    assert_eq!(first_two["4"]["err"], json!("busy"), "{first_two:?}");
+    assert_eq!(first_two["5"]["err"], json!("busy"), "{first_two:?}");
+    let rest = replies(&mut ws, 4);
+    assert!(rest.values().all(|r| r["ok"] == json!(600)), "{rest:?}");
+    for i in 10..14 {
+        send(&mut ws, json!(i), "get_settings", json!({}));
+    }
+    assert!(replies(&mut ws, 4).values().all(|r| r.get("ok").is_some()), "the slots came back");
+}
+
+/// **A panicking body is answered and gives its slot back.** At a cap of
+/// two, two panics leave room for the next two requests; a slot held by a
+/// body that never returned would leave none.
+#[test]
+fn a_body_that_panics_gives_its_in_flight_slot_back() {
+    use super::dispatch::TEST_PANIC;
+    let mut b = BUDGETS;
+    b.loopback.in_flight = 2;
+    let l = live_budgeted("panicslot", b);
+    let mut ws = client(&l);
+    for round in 0..3 {
+        send(&mut ws, json!(format!("p{round}a")), TEST_PANIC, json!({ "why": "fell over" }));
+        send(&mut ws, json!(format!("p{round}b")), TEST_PANIC, json!({ "why": "fell over" }));
+        let r = replies(&mut ws, 2);
+        assert!(r.values().all(|f| f["err"] == json!("internal error")), "round {round}: {r:?}");
+    }
+    send(&mut ws, json!(1), "get_settings", json!({}));
+    send(&mut ws, json!(2), "get_settings", json!({}));
+    assert!(replies(&mut ws, 2).values().all(|r| r.get("ok").is_some()), "six panics later, both slots are free");
+}
+
+/// **A device is rate-limited; the console is not.** A device's burst, then
+/// `rate`; the desk sends the same twenty and gets twenty answers.
+#[test]
+fn a_device_is_rate_limited_and_the_console_is_not() {
+    let mut b = BUDGETS;
+    b.device.requests = Rate { per_sec: 0.5, burst: 5.0 };
+    let l = live_budgeted("rate", b);
+    as_device(&l, "phone");
+    let mut phone = client(&l);
+    let mut desk = client(&l);
+    let mut got = std::collections::HashMap::<String, usize>::new();
+    for i in 0..20 {
+        let r = rpc(&mut phone, json!(i), "get_settings", json!({}));
+        let k = if r.get("ok").is_some() { "ok".to_string() } else { r["err"].as_str().unwrap().to_string() };
+        *got.entry(k).or_default() += 1;
+    }
+    assert_eq!(got.get("ok"), Some(&5), "{got:?}");
+    assert_eq!(got.get("rate"), Some(&15), "{got:?}");
+    for i in 0..20 {
+        assert!(rpc(&mut desk, json!(i), "get_settings", json!({})).get("ok").is_some(), "the desk's request {i}");
+    }
+}
+
+/// **Devices cannot take the bodies the desk needs.** Remote bodies have a
+/// host-wide budget: two devices fill it with slow requests, the next device
+/// request is `busy`, and the desk's own slow requests run beside them.
+#[test]
+fn devices_cannot_take_the_bodies_the_desk_needs() {
+    let mut b = BUDGETS;
+    b.remote_bodies = 4;
+    let l = live_budgeted("bodies", b);
+    as_device(&l, "phone");
+    let mut phone = client(&l);
+    as_device(&l, "tablet");
+    let mut tablet = client(&l);
+    let mut desk = client(&l);
+    for i in 0..2 {
+        send(&mut phone, json!(i), seams::SLEEP, json!({ "ms": 800 }));
+        send(&mut tablet, json!(i), seams::SLEEP, json!({ "ms": 800 }));
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    send(&mut tablet, json!(9), seams::SLEEP, json!({ "ms": 1 }));
+    for i in 0..8 {
+        send(&mut desk, json!(i), seams::SLEEP, json!({ "ms": 300 }));
+    }
+    let t = replies(&mut tablet, 1);
+    assert_eq!(t["9"]["err"], json!("busy"), "a fifth remote body past a budget of four: {t:?}");
+    let d = replies(&mut desk, 8);
+    assert!(d.values().all(|r| r["ok"] == json!(300)), "the desk is not starved by devices: {d:?}");
+    assert_eq!(replies(&mut phone, 2).len(), 2);
+}
+
+/// **A device's connections are capped.** The third connection of a device
+/// allowed two is closed once it has authenticated; another device and the
+/// desk still get in.
+#[test]
+fn a_device_past_its_connection_cap_is_closed() {
+    let mut b = BUDGETS;
+    b.device.connections = 2;
+    let l = live_budgeted("devconn", b);
+    let mut ins = Vec::new();
+    for _ in 0..2 {
+        as_device(&l, "phone");
+        ins.push(client(&l));
+    }
+    as_device(&l, "phone");
+    let mut third = client(&l);
+    send(&mut third, json!(1), "get_settings", json!({}));
+    let (bytes, closed) = rest(third.get_mut(), Duration::from_secs(5));
+    assert!(closed && !String::from_utf8_lossy(&bytes).contains("\"id\":1"), "the third connection was served");
+    let r = audit_record(&l, |r| r["detail"]["limit"] == "device_connections");
+    assert_eq!((r["detail"]["episode"].as_str(), r["device"].as_str()), (Some("began"), Some("phone")), "a limit tripped (§5.1): {r}");
+    as_device(&l, "tablet");
+    let mut other = client(&l);
+    assert!(rpc(&mut other, json!(2), "get_settings", json!({})).get("ok").is_some());
+    assert!(rpc(&mut ins[0], json!(3), "get_settings", json!({})).get("ok").is_some(), "the two already in are served");
+}
+
+/// **A request the resolver refuses takes no slot.** Its checks that need no
+/// I/O — the command exists, its exposure and capability — run on the reader
+/// before admission (`dispatch::precheck`). So with its one in-flight slot
+/// held, a device the registry knows and grants nothing is told `denied` for a read and
+/// `unknown command` for nonsense, never `busy`. Each refusal still costs it a
+/// request token, so its refusals, and the log line serve writes for each,
+/// stop at its rate.
+#[test]
+fn a_refused_request_takes_no_slot_and_still_costs_a_device_its_rate() {
+    use super::resolve::ERR_DENIED;
+    let mut b = BUDGETS;
+    b.remote.in_flight = 1;
+    b.device.requests = Rate { per_sec: 0.001, burst: 5.0 };
+    let l = live_budgeted_in("refused", b, Arc::new(Grantless));
+    as_device(&l, "phone");
+    let mut phone = client(&l);
+    // The reader takes frames in order: this one holds the slot (and one
+    // token) before the next is read.
+    send(&mut phone, json!("hold"), seams::SLEEP, json!({ "ms": 1500 }));
+    for i in 0..3 {
+        send(&mut phone, json!(i), "get_settings", json!({}));
+    }
+    send(&mut phone, json!(3), "not_a_command", json!({}));
+    send(&mut phone, json!(4), "get_settings", json!({}));
+    let r = replies(&mut phone, 5);
+    for i in 0..3 {
+        assert_eq!(r[&i.to_string()]["err"], json!(ERR_DENIED), "refusal {i}, with the one slot held: {r:?}");
+    }
+    assert_eq!(r["3"]["err"], json!("unknown command: not_a_command"), "{r:?}");
+    assert_eq!(r["4"]["err"], json!("rate"), "five tokens: the hold and four refusals: {r:?}");
+    assert_eq!(replies(&mut phone, 1)["\"hold\""]["ok"], json!(1500), "the slot's own request ran");
+}
+
+/// §5.1 on the socket. A refusal the reader makes before admission is
+/// recorded exactly once, and a limit tripped is ONE record as its episode
+/// begins and one as it ends — at the disconnect here, with the count —
+/// however many requests it refused: the record is rate-limited as the log
+/// line is, or a flood would be a disk-writing flood.
+#[test]
+fn refusals_and_limits_reach_the_audit_log_once() {
+    use super::resolve::ERR_DENIED;
+    let mut b = BUDGETS;
+    b.device.requests = Rate { per_sec: 0.001, burst: 2.0 };
+    let l = live_budgeted_in("auditrate", b, Arc::new(Grantless));
+    as_device(&l, "phone");
+    let mut phone = client(&l);
+    for i in 0..12 {
+        send(&mut phone, json!(i), "get_settings", json!({}));
+    }
+    let r = replies(&mut phone, 12);
+    for i in 0..12 {
+        let want = if i < 2 { json!(ERR_DENIED) } else { json!("rate") };
+        assert_eq!(r[&i.to_string()]["err"], want, "request {i}: {r:?}");
+    }
+    let _ = phone.close(None);
+    drop(phone);
+    let ended = |recs: &[Value]| recs.iter().any(|r| r["detail"]["limit"] == "request_rate" && r["detail"]["episode"] == "ended");
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !ended(&audit_lines(&l)) {
+        assert!(std::time::Instant::now() < deadline, "the episode never ended: {:#?}", audit_lines(&l));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let recs = audit_lines(&l);
+    let refused: Vec<&Value> = recs.iter().filter(|r| r["cmd"] == "get_settings").collect();
+    assert_eq!(refused.len(), 2, "one record per refusal the resolver made: {refused:#?}");
+    assert!(refused.iter().all(|r| r["detail"]["reason"] == "denied" && r["device"] == "phone"), "{refused:#?}");
+    let rate: Vec<&Value> = recs.iter().filter(|r| r["detail"]["limit"] == "request_rate").collect();
+    assert_eq!(rate.len(), 2, "ten refusals for rate: one record as they began, one as they ended: {rate:#?}");
+    assert_eq!((rate[0]["detail"]["episode"].as_str(), rate[0]["detail"]["answered"].as_str()), (Some("began"), Some("rate")));
+    assert_eq!((rate[1]["detail"]["episode"].as_str(), rate[1]["detail"]["count"].as_u64()), (Some("ended"), Some(10)));
+    assert!(rate.iter().all(|r| r["kind"] == "refused" && r["principal"] == "owner" && r["device"] == "phone"), "{rate:#?}");
+    assert_eq!(super::audit::verify(&l.dir).broken, None);
+}
+
+/// #550's listen frames cost a device a request token each, so a device that
+/// keeps changing what it listens for is rate-limited like one that keeps
+/// asking — and so is the log line each change writes. A frame it has no
+/// token for is dropped unapplied, its last set standing. The console's
+/// frames are free.
+#[test]
+fn a_devices_listen_frames_cost_it_requests() {
+    let mut b = BUDGETS;
+    b.device.requests = Rate { per_sec: 0.001, burst: 1.0 };
+    let l = live_budgeted("listenrate", b);
+    let clients = l.running.as_ref().unwrap().clients.clone();
+    let listen = |ws: &mut WebSocket<TcpStream>, names: &[&str]| ws.send(Message::text(json!({ "listen": names }).to_string())).unwrap();
+    as_device(&l, "phone");
+    let mut phone = client(&l);
+    listen(&mut phone, &["app:open-doc"]);
+    listen(&mut phone, &[]);
+    assert_eq!(rpc(&mut phone, json!(1), "get_settings", json!({}))["err"], json!("rate"), "two frames, a burst of one");
+    assert_eq!(clients.listening("app:open-doc"), 1, "the first applied, the second dropped unapplied");
+
+    let mut desk = client(&l);
+    for i in 0..50 {
+        listen(&mut desk, if i % 2 == 0 { &["app:open-doc"] } else { &[] });
+    }
+    assert!(rpc(&mut desk, json!(1), "get_settings", json!({})).get("ok").is_some(), "the console's frames are free");
+    assert_eq!(clients.listening("app:open-doc"), 1, "the desk's last frame declared nothing");
+}
+
+/// **Stream input is metered per stream, by the byte.** A write that would
+/// take a device's attach past its burst is dropped whole and answered
+/// `rate`; the admission comes first, so a write the resolver then refuses
+/// (an attach this connection never opened) still pays.
+#[test]
+fn a_devices_stream_input_past_its_rate_is_dropped_and_answered_rate() {
+    use super::resolve::ERR_NOT_FOUND;
+    let mut b = BUDGETS;
+    b.device.input = Rate { per_sec: 1.0, burst: 10.0 };
+    let l = live_budgeted("input", b);
+    as_device(&l, "phone");
+    let mut phone = client(&l);
+    let w = |n: usize| json!({ "id": 77, "data": vec![97u8; n] });
+    assert_eq!(rpc(&mut phone, json!(1), "term_write", w(8))["err"], json!(ERR_NOT_FOUND), "admitted, then the resolver ran");
+    assert_eq!(rpc(&mut phone, json!(2), "term_write", w(8))["err"], json!("rate"));
+    assert_eq!(rpc(&mut phone, json!(3), "term_write", json!({ "id": 78, "data": vec![97u8; 8] }))["err"], json!(ERR_NOT_FOUND), "its own bucket");
+    let mut desk = client(&l);
+    for i in 0..5 {
+        assert_eq!(rpc(&mut desk, json!(i), "term_write", w(8))["err"], json!("no such terminal"), "the console is not metered");
+    }
+}
+
+/// **Idle lanes are reaped; active ones are capped.** A stream key the
+/// client names gets a lane only while work is queued on it: 300 writes to
+/// 300 distinct ids, one after the other, never meet a cap of four. Four
+/// streams with work in flight do, and a fifth is `busy` — while more work
+/// for a stream that HAS a lane queues behind it, in order.
+#[test]
+fn idle_lanes_are_reaped_and_active_ones_are_capped() {
+    let mut b = BUDGETS;
+    b.loopback.lanes = 4;
+    let l = live_budgeted("lanes", b);
+    let mut ws = client(&l);
+    for i in 0..300 {
+        let r = rpc(&mut ws, json!(i), "term_write", json!({ "id": 5000 + i, "data": [97] }));
+        assert_eq!(r["err"], json!("no such terminal"), "write {i}: {r}");
+    }
+    for (i, lane) in ["a", "b", "c", "d"].iter().enumerate() {
+        send(&mut ws, json!(format!("s{i}")), seams::SLEEP, json!({ "ms": 600, "lane": lane }));
+    }
+    send(&mut ws, json!("e"), seams::SLEEP, json!({ "ms": 1, "lane": "e" }));
+    send(&mut ws, json!("a2"), seams::SLEEP, json!({ "ms": 1, "lane": "a" }));
+    let r = replies(&mut ws, 6);
+    assert_eq!(r["\"e\""]["err"], json!("busy"), "a fifth active lane: {r:?}");
+    assert_eq!(r["\"a2\""]["ok"], json!(1), "work for an active lane queues on it: {r:?}");
+    send(&mut ws, json!("e2"), seams::SLEEP, json!({ "ms": 1, "lane": "e" }));
+    assert_eq!(replies(&mut ws, 1)["\"e2\""]["ok"], json!(1), "the lanes drained and went");
+}
+
+/// **Concurrent identical reads share one body**, host-wide: five clients
+/// asking at once get ONE computation's answer, each under its own id, and
+/// the next call — after that answer is out — computes again.
+#[test]
+fn concurrent_identical_reads_share_one_body() {
+    let l = live("flight");
+    let mut cs: Vec<WebSocket<TcpStream>> = (0..5).map(|_| client(&l)).collect();
+    for (i, c) in cs.iter_mut().enumerate() {
+        send(c, json!(i), TEST_SHARED, json!({ "ms": 500, "tag": "flight" }));
+    }
+    for (i, c) in cs.iter_mut().enumerate() {
+        let r = replies(c, 1);
+        assert_eq!(r[&i.to_string()]["ok"], json!(1), "client {i} got the one computation's answer: {r:?}");
+    }
+    assert_eq!(rpc(&mut cs[0], json!(9), TEST_SHARED, json!({ "ms": 1, "tag": "flight" }))["ok"], json!(2), "not a cache");
+    // Different arguments are a different question.
+    send(&mut cs[0], json!(10), TEST_SHARED, json!({ "ms": 300, "tag": "flight" }));
+    send(&mut cs[1], json!(11), TEST_SHARED, json!({ "ms": 300, "tag": "other" }));
+    assert_eq!(replies(&mut cs[0], 1)["10"]["ok"], json!(3));
+    assert_eq!(replies(&mut cs[1], 1)["11"]["ok"], json!(1));
+}
+
+/// A dock shell printing `yes` forever, on channel 7 of `ws`.
+fn shell_flooding(ws: &mut WebSocket<TcpStream>, repo: &str) {
+    std::env::set_var("SHELL", "/bin/sh");
+    let r = rpc(ws, json!(1), "shell_open", json!({ "repo": repo, "slug": "(main)", "index": 0, "cols": 80, "rows": 24, "onBytes": "__CHANNEL__:7" }));
+    assert!(r["ok"]["gen"].is_u64(), "shell_open: {r}");
+    drain(ws, Duration::from_millis(1000));
+    send(ws, json!(2), "shell_write", json!({ "repo": repo, "slug": "(main)", "index": 0, "data": b"yes\r".to_vec() }));
+}
+
+/// **A stream that outruns its reader ends; the connection lives.** A client
+/// stops reading while its dock shell prints without pause. Unbounded, serve
+/// grew by ~500 MB a second (2.5 GB in 10 s, measured). Now the stream stops
+/// at the outbox's stream share: the client finds an end frame on the
+/// channel when it reads again, the connection still answers, and the shell
+/// itself is fine — a fresh attach replays it.
+#[test]
+fn a_stream_that_outruns_its_reader_ends_and_the_connection_lives() {
+    let mut b = BUDGETS;
+    b.loopback.outbox = 1 << 20;
+    b.loopback.outbox_stream = 64 << 10;
+    let l = live_budgeted("streamcap", b);
+    let repo = scratch_repo("streamcap");
+    let repo_s = repo.to_string_lossy().into_owned();
+    let mut ws = client(&l);
+    shell_flooding(&mut ws, &repo_s);
+    std::thread::sleep(Duration::from_secs(2));
+    let mut ended = false;
+    let mut data = 0usize;
+    // Bounded both ways: a stream that never ends must fail this test, not
+    // hang it (it did, with the share switched off).
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while let Some(f) = frame(&mut ws, Duration::from_secs(2)) {
+        if f["channel"] == json!(7) {
+            if f["end"] == json!(true) {
+                ended = true;
+                break;
+            }
+            data += f["data"].as_str().map_or(0, str::len);
+        }
+        if data > 64 << 20 || std::time::Instant::now() > deadline {
+            break;
+        }
+    }
+    assert!(ended, "no end frame after {data} bytes of channel data");
+    assert!(data < 8 << 20, "{data} bytes reached a client that was not reading");
+    let r = rpc(&mut ws, json!("after"), "get_settings", json!({}));
+    assert!(r.get("ok").is_some(), "{r}");
+    let _ = rpc(&mut ws, json!("x"), "close_shell_session", json!({ "repo": repo_s, "slug": "(main)", "index": 0, "keepCwd": false }));
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+/// **A reply into a full outbox closes the connection.** Fifty changelogs
+/// (~220 KB each) asked for and never read: the queue passes its budget, and
+/// the reply that arrives then ends the connection rather than wait in
+/// memory. Under the old unbounded queue all fifty were delivered.
+#[test]
+fn a_reply_into_a_full_outbox_closes_the_connection() {
+    let mut b = BUDGETS;
+    b.loopback.outbox = 512 << 10;
+    b.loopback.outbox_stream = 64 << 10;
+    let l = live_budgeted("replycap", b);
+    let mut ws = client(&l);
+    for i in 0..50 {
+        send(&mut ws, json!(i), "get_changelog", json!({}));
+    }
+    std::thread::sleep(Duration::from_secs(2));
+    let mut got = 0;
+    let closed = loop {
+        ws.get_ref().set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        match ws.read() {
+            Ok(Message::Text(_)) => got += 1,
+            Ok(_) => {}
+            Err(_) => break true,
+        }
+        if got == 50 {
+            break false;
+        }
+    };
+    assert!(closed && got < 50, "{got} of 50 replies delivered to a client that read none of them for 2 s");
+    let r = audit_record(&l, |r| r["detail"]["limit"] == "outbox");
+    assert_eq!((r["kind"].as_str(), r["device"].as_str()), (Some("refused"), Some("loopback")), "a limit tripped (§5.1): {r}");
+    let mut next = client(&l);
+    assert!(rpc(&mut next, json!(1), "get_settings", json!({})).get("ok").is_some(), "the server lives on");
+}
+
+/// **Pings without reading cost the stream share, not memory.** 300,000
+/// pings — 38 MB of pongs owed, past what the kernel's loopback buffers take
+/// (~12 MB, measured: below that nothing backs up in serve at all) — from a
+/// client that reads nothing. Unbounded, serve grew by ~90 MB for 200,000
+/// (measured), most of it in tungstenite's own pongs. Now the peer is closed
+/// once its pongs are a share behind, having been sent far fewer than it
+/// asked for, and the server goes on serving.
+#[test]
+fn a_client_that_pings_without_reading_is_closed_a_stream_share_behind() {
+    let mut b = BUDGETS;
+    b.loopback.outbox_stream = 16 << 10;
+    let l = live_budgeted("pongs", b);
+    let mut ws = client(&l);
+    let ping = {
+        let mut f = vec![0x89u8, 0x80 | 125, 0, 0, 0, 0];
+        f.extend(std::iter::repeat_n(b'p', 125));
+        f
+    };
+    let burst: Vec<u8> = ping.iter().copied().cycle().take(ping.len() * 1000).collect();
+    for _ in 0..300 {
+        // Closed part-way, the writes start failing: that is the outcome.
+        if ws.get_mut().write_all(&burst).is_err() {
+            break;
+        }
+    }
+    let mut pongs = 0;
+    // EINVAL here is macOS refusing a timeout on a socket the peer RESET
+    // (see `rest`): closed, which is the outcome.
+    let reset = ws.get_ref().set_read_timeout(Some(Duration::from_secs(5))).is_err();
+    let closed = reset || loop {
+        match ws.read() {
+            Ok(Message::Pong(_)) => pongs += 1,
+            Ok(_) => {}
+            Err(tokio_tungstenite::tungstenite::Error::Io(e)) if e.kind() == std::io::ErrorKind::WouldBlock => break false,
+            Err(_) => break true,
+        }
+    };
+    assert!(closed, "a client 300,000 pings in without reading is still connected ({pongs} pongs)");
+    assert!(pongs < 300_000, "{pongs} of 300,000 pongs delivered: none ever backed up");
+    audit_record(&l, |r| r["detail"]["limit"] == "outbox");
+    let mut ws2 = client(&l);
+    assert!(rpc(&mut ws2, json!(1), "get_settings", json!({})).get("ok").is_some());
+}
+
+/// **A device's shell slot lives as long as its stream.** One shell allowed:
+/// the second `shell_open` is `busy` while the first is attached — the
+/// slot is held by the sink, not by the request that opened it — and gets
+/// in once the first is detached.
+#[test]
+fn a_devices_shell_slot_is_held_by_the_stream_until_it_detaches() {
+    std::env::set_var("SHELL", "/bin/sh");
+    let mut b = BUDGETS;
+    b.device.shells = 1;
+    let l = live_budgeted("shellcap", b);
+    let repo = scratch_repo("shellcap");
+    let repo_s = repo.to_string_lossy().into_owned();
+    as_device(&l, "phone");
+    let mut phone = client(&l);
+    // By id: a channel's frames (and a detach's end frame) can come first.
+    let call = |ws: &mut WebSocket<TcpStream>, id: u32, cmd: &str, args: Value| {
+        send(ws, json!(id), cmd, args);
+        replies(ws, 1).remove(&id.to_string()).unwrap()
+    };
+    let open = |ws: &mut WebSocket<TcpStream>, id: u32, index: u32| {
+        call(ws, id, "shell_open", json!({ "repo": repo_s, "slug": "(main)", "index": index, "cols": 80, "rows": 24, "onBytes": format!("__CHANNEL__:{index}") }))
+    };
+    let first = open(&mut phone, 1, 0);
+    let gen = first["ok"]["gen"].as_u64().unwrap_or_else(|| panic!("{first}"));
+    drain(&mut phone, Duration::from_millis(500));
+    assert_eq!(open(&mut phone, 2, 1)["err"], json!("busy"), "a second shell while the first is attached");
+    let d = call(&mut phone, 3, "shell_detach", json!({ "repo": repo_s, "slug": "(main)", "index": 0, "gen": gen }));
+    assert!(d.get("ok").is_some(), "{d}");
+    drain(&mut phone, Duration::from_millis(300));
+    let again = open(&mut phone, 4, 1);
+    assert!(again["ok"]["gen"].is_u64(), "the detach gave the slot back: {again}");
+    for i in 0..2u32 {
+        let _ = call(&mut phone, 10 + i, "close_shell_session", json!({ "repo": repo_s, "slug": "(main)", "index": i, "keepCwd": false }));
+    }
+    let _ = std::fs::remove_dir_all(&repo);
+}
+
+/// **A serve a test starts cannot write the user's real project registry.**
+/// The registry is `$XDG_CONFIG_HOME/worktrees/projects.json` — the USER's,
+/// not under the config dir a test gives serve — so a socket test's
+/// `add_project` once registered six scratch repos in the real file, which
+/// were then deleted from disk (2026-10-22). Every serve started in a test
+/// process forbids that (`registry::forbid_real_writes`), and the write now
+/// fails, saying why, while the real file never sees the repo.
+#[test]
+fn a_test_serve_cannot_write_the_users_project_registry() {
+    let l = live("realreg");
+    let repo = scratch_repo("realreg");
+    let canon = std::fs::canonicalize(&repo).unwrap().to_string_lossy().into_owned();
+    let mut ws = client(&l);
+    let r = rpc(&mut ws, json!(1), "add_project", json!({ "dir": repo.to_string_lossy() }));
+    let listed = worktrees_core::registry::read_lenient().roots().contains(&canon);
+    if listed {
+        // Never leave it behind, whatever the assertions below say.
+        let _ = worktrees_core::registry::remove(&canon);
+    }
+    let _ = std::fs::remove_dir_all(&repo);
+    assert!(!listed, "the scratch repo landed in the real registry: {r}");
+    let e = r["err"].as_str().unwrap_or_default();
+    assert!(e.contains("real project registry"), "the refusal says why: {r}");
 }

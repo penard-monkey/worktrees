@@ -66,12 +66,18 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   HMAC keyed with serve.json's token over the other side's nonce, so the token
   is NEVER in a frame — under v0 it was the first frame, and whatever held a
   dead server's port received it. `AUTH_DEADLINE` covers the whole exchange,
-  not each frame. Limits (OWASP M1, `conn.rs`): 64 connections / 16
+  not each frame. Limits (OWASP M1, `conn.rs`): 320 connections / 256
   unauthenticated, 512 pre-auth bytes (a `Budget` UNDER tungstenite, which
   cannot change its own limits after construction), 16 MiB per message after
-  auth, a 5 s HTTP phase, RLIMIT_NOFILE raised at boot. A reconnecting local
-  flood still locks NEW clients out (measured 0 of 49) — it can no longer take
-  memory, descriptors or a client already in. A missing `Origin` is refused
+  auth, a 5 s HTTP phase, RLIMIT_NOFILE raised at boot. At the caps a newcomer
+  DISPLACES the unauthenticated connection that has waited longest on its
+  client; refusing the newcomer let a reconnecting flood lock every new
+  client out (0 of 49). What an AUTHENTICATED client may cost is
+  `serve/budget.rs` (Phase 2 §6): in-flight, outbox, lanes, and the
+  per-device rates and caps, with every number's measurement beside it. A
+  flood test must flood PAST the cap it tests (and assert it was reached):
+  two of this lane's first ones never filled 256 slots and passed on
+  nothing. A missing `Origin` is refused
   there and allowed by `docserver::origin_ok` ON PURPOSE (different pages,
   different questions —
   do not align them). hyper parses the HTTP and tungstenite sees only frames,
@@ -138,7 +144,21 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   `RefusalKind::DeviceLanes`), and admitted rows whose
   capability COLUMN is not `read` — `err` when a `CmdResult` answers
   `ok: false`, which the wire carries as `ok`. Plain `dispatch::call` is
-  test-only, so a new caller cannot skip the audit by accident. serve installs its signal
+  test-only, so a new caller cannot skip the audit by accident. Both refusal
+  sites, the reader's `dispatch::precheck` and `call_in_seen`, go through ONE
+  `refusal_answer`, so a refusal is recorded once. A budget refusal (`busy`,
+  `rate`) is NOT a `RefusalKind`: it never reaches dispatch, and it is a
+  limit EPISODE (`budget::Trips`) — a record as it begins, one with the count
+  after a quiet minute or at the disconnect, never one per request and never
+  ended by the next admission, which at a cap would be one per request
+  again. A device pays a request token for every frame that runs nothing (a
+  precheck refusal, a listen frame), so it cannot buy log lines for free.
+  The flight is joined AFTER step-up (the caller's own verdict: a follower
+  must pass it itself) and BEFORE `provenance::device_lane_gate`, whose lock
+  is held across the body: a follower that met the gate first would queue
+  behind its own leader and run the body again. The budget and the flights
+  live in `conn::Clients`, so both listeners spend from one and share the
+  other. serve installs its signal
   handlers BEFORE it writes serve.json: a supervisor's SIGTERM in that gap killed it
   with no exit status. Anything consumed by being emitted (the inbox's
   `worktrees show`) waits for `Host::has_audience(event)`: a loopback
@@ -511,6 +531,29 @@ hard-exits unless the directory is non-empty and under `$TMP`. The cause is
 worth knowing too: **bash expands every assignment on a `local a=1 b="$a"` line
 before binding any of them**, so `b` is empty — and under `set -u` the function
 dies mid-way inside a command substitution, leaving the caller with "".
+
+**The project registry is the USER's, and a test's config dir does not
+isolate it.** `worktrees_core::registry` is
+`$XDG_CONFIG_HOME/worktrees/projects.json`, shared by the CLI and every
+engine. Serve's `--config-dir` and a test's temp `Ctx` isolate ui-state, the
+rings and serve.json, NOT the registry. The same holds for the rest of that
+directory: `planning.json`, `skills.json`, `agent-guidance.json` and
+`guidance/`. On 2026-10-22 a serve socket test's `add_project` registered six
+scratch repos in the user's real file, and then deleted them from disk. Two
+guards now exist:
+- A test that SPAWNS the binary gives that child its own `HOME` and
+  `XDG_CONFIG_HOME` (`serve_bin.rs`, `plan_parity.rs`), per child and never
+  with `std::env::set_var` in the test process.
+- A test that starts the engine IN-PROCESS runs under
+  `registry::forbid_real_writes()`. `serve::start_budgeted` calls it under
+  cfg(test), and so does the api's headless `ctx`. After that, a registry
+  write to the real path fails with an error saying why.
+
+The other files in that directory have no such guard. A test that needs them
+writes a temp file through the `*_at` forms. And show a test that guards real
+state red ONLY under a temp `HOME`: build with `--no-run`, then run the test
+binary with `HOME`/`XDG_CONFIG_HOME` in its own env. Its red run is the very
+write it exists to stop.
 
 **"Measured on this platform" has to say WHICH platform.** A test asserted that
 binding `0.0.0.0:<our port>` succeeds while a loopback-only listener holds it,
