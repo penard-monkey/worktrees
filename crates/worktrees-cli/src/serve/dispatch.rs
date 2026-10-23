@@ -307,35 +307,80 @@ macro_rules! commands {
 #[cfg(test)]
 pub const TEST_PANIC: &str = "__test_panic";
 
-/// Dispatch one request. `Err` is the wire's `err` value.
+/// Dispatch one request, with nothing watching. `Err` is the wire's `err`
+/// value. Test builds only: serve's one caller, `conn::answer`, goes through
+/// [`call_seen`], so no request it serves can skip its audit record.
+#[cfg(test)]
 pub fn call(cx: &Call, cmd: &str, args: &Args) -> Result<Value, Value> {
+    call_seen(cx, cmd, args, &())
+}
+
+/// What the audit sees of one request (§5.1): the resolver's verdict, before
+/// any body runs. Handed to [`call_seen`] BESIDE the `Call`, never inside it —
+/// a body is given the `Call`, so no body can reach the audit. One of the
+/// three is called, once, for every request that names a row or does not;
+/// `()` sees nothing. `audit::Seen` is the one that writes.
+pub trait Witness {
+    /// No row has this name, and nothing ran.
+    fn unknown(&self, _cmd: &str) {}
+    /// The host refused `row` — the resolver, or a device launch's lane cap —
+    /// and its body did not run: every refusal, the stale close a caller is
+    /// answered `ok` for included.
+    fn refused(&self, _row: &'static Row, _args: &Args, _r: &resolve::Refusal) {}
+    /// The resolver admitted `row`, and its body is about to run on `args`:
+    /// the canonical values it checked, and the projects they resolved to.
+    fn admitted(&self, _row: &'static Row, _args: &Args, _resolved: &resolve::Resolved) {}
+}
+
+impl Witness for () {}
+
+/// Dispatch one request, with its audit watching (`conn::answer`). `Err` is
+/// the wire's `err` value.
+pub fn call_seen(cx: &Call, cmd: &str, args: &Args, seen: &dyn Witness) -> Result<Value, Value> {
     match &cx.world {
-        Some(w) => call_in(cx, cmd, args, &**w),
-        None => call_in(cx, cmd, args, &resolve::Live(&cx.ctx)),
+        Some(w) => call_in_seen(cx, cmd, args, &**w, seen),
+        None => call_in_seen(cx, cmd, args, &resolve::Live(&cx.ctx), seen),
     }
 }
 
 /// [`call`], resolving against an explicit world (the tests' fixtures).
+#[cfg(test)]
+pub fn call_in(cx: &Call, cmd: &str, args: &Args, world: &dyn World) -> Result<Value, Value> {
+    call_in_seen(cx, cmd, args, world, &())
+}
+
+/// [`call_seen`], resolving against an explicit world.
 ///
 /// In order, before any body: the row; the grant of the caller's (principal,
 /// device) pair, read now and never cached (a narrowed scope applies to the
 /// very next request); the resolver (exposure, capability, objects, canonical
-/// values written back). Then the body, on a `Ctx` scoped to the grant, and
-/// the result through the row's filter.
-pub fn call_in(cx: &Call, cmd: &str, args: &Args, world: &dyn World) -> Result<Value, Value> {
+/// values written back) and, for a device's agent launch, the live-lane cap,
+/// whose verdict `seen` is told. Then the body, on a `Ctx` scoped to the grant
+/// and acting for the caller, a device's instruction write stamped once it
+/// returns `Ok` (§7.3), and the result through the row's filter.
+pub fn call_in_seen(cx: &Call, cmd: &str, args: &Args, world: &dyn World, seen: &dyn Witness) -> Result<Value, Value> {
     #[cfg(test)]
     if cmd == TEST_PANIC {
         panic!("{}", args.raw("why").as_str().unwrap_or("a test body panicked"));
     }
-    let Some(row) = row(cmd) else { return Err(Value::from(format!("unknown command: {cmd}"))) };
+    let Some(row) = row(cmd) else {
+        seen.unknown(cmd);
+        return Err(Value::from(format!("unknown command: {cmd}")));
+    };
     let grant = authz::effective(&*cx.registry, &cx.caller);
     let mut args = Args(args.0.clone());
-    let resolved = match resolve::authorize(row, cx, &grant, &mut args, world) {
+    // The resolver, then a device launch's live-lane cap (§6, LLM10), whose
+    // lock is held across the body so the next device launch counts this one.
+    // Either refusal is the host's, never the body's, and `seen` hears it so.
+    let gated = resolve::authorize(row, cx, &grant, &mut args, world)
+        .and_then(|r| Ok((r, provenance::device_lane_gate(cx, row, &args, world)?)));
+    let (resolved, _launching) = match gated {
         Ok(r) => r,
         Err(r) => {
+            seen.refused(row, &args, &r);
             // The idempotent close of an attach this connection does not own:
             // answered as closing a missing one is, and the body never runs.
-            // THE hook for the audit lane's "refused act" record (§5.2).
+            // The audit has it as a refused act all the same (§5.1), above.
             if r.kind == resolve::RefusalKind::NoopNotOwned {
                 return Ok(Value::Null);
             }
@@ -353,9 +398,7 @@ pub fn call_in(cx: &Call, cmd: &str, args: &Args, world: &dyn World) -> Result<V
             return Err(r.wire_for(&cx.caller));
         }
     };
-    // A device's agent launch: the live-lane cap, its lock held across the
-    // body so the next device launch counts this one (§6, LLM10).
-    let _launching = provenance::device_lane_gate(cx, row, &args, world)?;
+    seen.admitted(row, &args, &resolved);
     let instruction = resolved.instruction.clone();
     let scoped = Call {
         ctx: body_ctx(cx, &grant, resolved),
@@ -400,8 +443,9 @@ pub fn exposure(cmd: &str) -> Option<Exposure> {
 }
 
 /// The capability a command's row declares — `None` for a `HostConsole`,
-/// `Loopback` or `ClientLocal` row, or an unknown command. What the audit log
-/// records beside each request (slice 3).
+/// `Loopback` or `ClientLocal` row, or an unknown command. The audit reads
+/// it from the row it is handed (`Witness`), so only the tests ask by name.
+#[cfg(test)]
 pub fn cap_of(cmd: &str) -> Option<Capability> {
     row(cmd).and_then(|r| r.cap)
 }

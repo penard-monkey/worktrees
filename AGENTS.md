@@ -107,8 +107,19 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   rewritten per launch) is how a client finds the port and the token; the log
   is `~/.cache/worktrees/serve.log`, 0600 as well (re-tightened on every
   write, and after its rotation, which is a `rename` and keeps the mode it
-  found), version on the first line. serve installs its signal handlers
-  BEFORE it writes serve.json: a supervisor's SIGTERM in that gap killed it
+  found), version on the first line. What reached the socket goes to
+  `<config_dir>/audit.jsonl` (Phase 2 §5, `serve/audit.rs`): hash-chained,
+  one record per mutation, refusal and attach, written ONLY through the
+  `Audit` in `conn::Shared` — never `Ctx`, so no command body can write a
+  line — and checked with `audit::verify` at every start. It hears each
+  request as `dispatch::Witness`, handed to `call_seen` BESIDE the `Call`
+  (a body gets the `Call`): refusals where the host makes them (the
+  resolver, the stale `term_close` it answers `ok` included, and the
+  device-lane cap, `RefusalKind::DeviceLanes`), and admitted rows whose
+  capability COLUMN is not `read` — `err` when a `CmdResult` answers
+  `ok: false`, which the wire carries as `ok`. Plain `dispatch::call` is
+  test-only, so a new caller cannot skip the audit by accident. serve installs its signal
+  handlers BEFORE it writes serve.json: a supervisor's SIGTERM in that gap killed it
   with no exit status. Anything consumed by being emitted (the inbox's
   `worktrees show`) waits for `Host::has_audience(event)`: a loopback
   connection that DECLARED the event with `{"listen": [...]}` (§9.3, slice
@@ -648,6 +659,17 @@ any restore before believing the next run. A mutation can also HANG a test
 instead of failing it: serve's M11 (a second serve never refused) left a test
 waiting on `.output()` forever. Bound every wait on a child: spawn, poll,
 kill.
+
+**A tamper test on a hash-chained file tests the CHAIN, whatever rule it
+names.** The audit log's first "a fragment the checkpoint does not name"
+test edited the torn-byte count INSIDE a checkpoint and passed — and kept
+passing with the torn rule deleted, because the edit changed that line's
+hash and the next record's `prev` caught it. Only the mutation run
+showed it (19 of 20 mutations red; that one green). To exercise a rule that
+sits beside a chain, tamper with something the hashes do not cover: there,
+bytes after a rotated file's last newline, which change no complete line.
+Sibling of the fixture notes above: when a test reaches its assertion, ask
+WHICH check fired.
 
 **A message's REMEDY is a claim, and it needs following, not proofreading.**
 B3 refused a declared symlink source with "link the real file, or point the

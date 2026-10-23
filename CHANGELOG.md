@@ -5,6 +5,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- **`worktrees serve` keeps an audit log: `audit.jsonl` in the app's config
+  dir.** One line for everything that reached its socket and was not a plain
+  read: every change, every refusal, every terminal or dock shell opened and
+  closed (with how many bytes were typed into it, never what), and the server
+  starting and stopping. Each line names who did it. Today that is always you,
+  at this machine; the field is there for the phones and second desktops to
+  come.
+  - It never holds what you typed or wrote. A file save is recorded by path,
+    size and SHA-256. Note text, pastes, tokens and URLs are left out.
+  - Each line carries the hash of the one before it, so an edited, removed or
+    reordered line breaks the chain. serve checks the chain every time it
+    starts.
+  - It is created `0600`, rotated at 5 MiB, and five files are kept.
+  - A burst of failed connections is written once when it starts and once
+    when it ends, with the count, instead of one line per connection.
+  - If the log cannot be written (a full disk), the app keeps working. serve.log
+    says so once, and the log records how many lines were lost and when.
+  - The per-command `host-admin` line in serve.log is gone; the audit log has
+    those commands now.
+
 ### Changed
 - **A tmux session name never starts with `-`.** A prefix that would, such as
   a checkout in `.dotfiles` or a cloned repo's `[project] prefix = "-x"`, now

@@ -46,7 +46,7 @@
 //   5. serve tags every setter `HostConsole` or an `Engine` row whose
 //      capability is `admin` (Phase 2 §3.4: Codex and pi console-only, the
 //      other three `admin`): a `read` or `write` row is one any granted device
-//      may call, and the host-admin audit line (`conn.rs`) never names it.
+//      may call.
 //
 //   6. ui-state.json keeps all five keys, and the panel that sets each one
 //      copies the host's stored value into it after a set the host accepted.
@@ -246,7 +246,7 @@ for (const s of SETTERS) {
     const row = new RegExp(`^ {4}${s}: ([A-Za-z]+)(?: \\[(\\w+)[^\\]]*\\])? =>`, "m").exec(table);
     const tag = row && (row[2] ? `${row[1]} [${row[2]}]` : row[1]);
     if (!tag) fail(`serve's dispatch table has no row for ${s}`);
-    else if (row[1] !== "HostConsole" && tag !== "Engine [admin]") fail(`serve tags ${s} \`${tag}\` — host policy is \`admin\` at least: any granted device may call a read or write row, and the host-admin audit line never names it`);
+    else if (row[1] !== "HostConsole" && tag !== "Engine [admin]") fail(`serve tags ${s} \`${tag}\` — host policy is \`admin\` at least: any granted device may call a read or write row`);
     else ok(`serve tags ${s} ${tag}`);
   }
 }

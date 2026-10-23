@@ -35,7 +35,7 @@ use worktrees_core::reach::Level;
 use worktrees_core::store::{self, By, LaunchedBy, RemoteInstruction};
 
 use super::dispatch::{Args, Call, Row};
-use super::resolve::World;
+use super::resolve::{Refusal, RefusalKind, World};
 
 /// Who a request's body acts for. A device whose effective scope is a list
 /// (its own grant intersected with its principal's, §2.8) launches lanes with
@@ -111,7 +111,8 @@ pub const LAUNCH_ROWS: &[&str] = &["new_place", "open_place", "rules_review"];
 pub const MAX_DEVICE_LANES: usize = 4;
 
 /// What a device is told. It names no place: the live ones may be in projects
-/// outside its scope. The host's log has the list.
+/// outside its scope. The refusal's detail has the list, for the host's log
+/// and the audit record.
 pub const ERR_DEVICE_LANES: &str =
     "device-lanes: 4 agents launched from paired devices are already running on this host (the limit) — close one before launching another";
 
@@ -122,13 +123,15 @@ static DEVICE_LAUNCH: Mutex<()> = Mutex::new(());
 
 /// Refuse a device's agent launch while [`MAX_DEVICE_LANES`] device-launched
 /// lanes are live; otherwise hand back the lock for the caller to hold across
-/// the body. `Ok(None)` for the console and for every other row.
+/// the body. `Ok(None)` for the console and for every other row. The refusal
+/// is the host's ([`RefusalKind::DeviceLanes`]), so the dispatcher logs and
+/// audits it as it does the resolver's.
 ///
 /// `open_place`'s own target is not counted: reopening a place reuses its
 /// lane, or replaces it with another agent in the same place, and never adds
 /// one. `new_place` and `rules_review` cannot name theirs before the body
 /// runs, and a reuse there is counted — the cap errs closed.
-pub fn device_lane_gate(cx: &Call, row: &Row, args: &Args, world: &dyn World) -> Result<Option<MutexGuard<'static, ()>>, Value> {
+pub fn device_lane_gate(cx: &Call, row: &Row, args: &Args, world: &dyn World) -> Result<Option<MutexGuard<'static, ()>>, Refusal> {
     if cx.caller.is_console() || !LAUNCH_ROWS.contains(&row.name) {
         return Ok(None);
     }
@@ -137,8 +140,7 @@ pub fn device_lane_gate(cx: &Call, row: &Row, args: &Args, world: &dyn World) ->
     let target = target.as_ref().and_then(|(r, s)| Some((r.as_str()?, s.as_str()?)));
     let live = live_device_lanes(world, target);
     if live.len() >= MAX_DEVICE_LANES {
-        worktrees_api::log::info(&format!("serve: refused {} for {}: device lanes live: {}", row.name, cx.caller, live.join(", ")));
-        return Err(Value::from(ERR_DEVICE_LANES));
+        return Err(Refusal { kind: RefusalKind::DeviceLanes, detail: format!("device lanes live: {}", live.join(", ")) });
     }
     Ok(Some(held))
 }
@@ -393,7 +395,7 @@ mod tests {
     fn gate(c: Caller, reg: Arc<Devices>, world: &Fixture, cmd: &str, a: Value) -> Result<bool, Value> {
         let cx = call_as(c, reg);
         let row = super::super::dispatch::row(cmd).unwrap();
-        device_lane_gate(&cx, row, &args(a), world).map(|held| held.is_some())
+        device_lane_gate(&cx, row, &args(a), world).map(|held| held.is_some()).map_err(|r| r.wire())
     }
 
     /// §6, LLM10, O12: with four device-launched lanes live, host-wide and

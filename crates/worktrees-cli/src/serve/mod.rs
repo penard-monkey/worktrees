@@ -12,8 +12,10 @@
 //! Modules: `policy` (the pure rule set), `conn` (the socket), `wire` (the
 //! frames and the per-connection queue), `dispatch` (the exposure table and
 //! the arms), `servefile` (`serve.json`), `netwatch` (the remote
-//! listener's address rules, not yet wired).
+//! listener's address rules, not yet wired), `audit` (`audit.jsonl`, which
+//! only `conn` writes).
 
+mod audit;
 mod conn;
 mod dispatch;
 mod netwatch;
@@ -48,7 +50,9 @@ usage: worktrees serve [--config-dir DIR] [--port N] [--allow-origin ORIGIN]... 
                         a crash adopts it instead of leaving it running unseen
 
 Writes <config-dir>/serve.json ({port, token, pid, version[, owner]}, mode 0600) and
-serves until SIGINT/SIGTERM. Logs to ~/.cache/worktrees/serve.log.";
+serves until SIGINT/SIGTERM. Logs to ~/.cache/worktrees/serve.log, and keeps an
+audit trail of what reached the socket in <config-dir>/audit.jsonl (mode 0600,
+hash-chained, rotated at 5 MiB, five files kept).";
 
 pub struct Opts {
     pub config_dir: PathBuf,
