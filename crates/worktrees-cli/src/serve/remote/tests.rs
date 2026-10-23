@@ -100,7 +100,18 @@ fn host_with(tag: &str, gate: Arc<dyn super::Gate>) -> Host {
 }
 
 fn host_full(tag: &str, gate: Arc<dyn super::Gate>, advert: Arc<dyn super::Advertiser>) -> Host {
+    host_made(tag, Some(gate), advert, |_| {})
+}
+
+/// The host as serve makes it: the audit log is the gate (§5.1). `prep` runs
+/// on the config dir before the log is opened.
+fn host_audited(tag: &str, prep: impl FnOnce(&std::path::Path)) -> Host {
+    host_made(tag, None, Arc::new(Recorder::default()), prep)
+}
+
+fn host_made(tag: &str, gate: Option<Arc<dyn super::Gate>>, advert: Arc<dyn super::Advertiser>, prep: impl FnOnce(&std::path::Path)) -> Host {
     let dir = scratch(tag);
+    prep(&dir.join("cfg"));
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
     let reg = Arc::new(DeviceRegistry::in_memory());
     let remote = {
@@ -116,7 +127,12 @@ fn host_full(tag: &str, gate: Arc<dyn super::Gate>, advert: Arc<dyn super::Adver
                 s
             })
         });
-        let (audit, _) = super::super::audit::Audit::open(&dir.join("cfg"), None, super::super::audit::Fleet::of(&reg));
+        // As serve's `conn::start` has it (§5.1–§5.2): the log hears the
+        // registry, and the boot cross-check runs before it writes a line.
+        let (audit, chain) = super::super::audit::Audit::open(&dir.join("cfg"), None, super::super::audit::Fleet::of(&reg));
+        audit.hear(&reg);
+        reg.cross_check(&super::super::audit::evidence(&dir.join("cfg"), &chain), worktrees_core::sysclock::now_epoch()).unwrap();
+        let gate = gate.unwrap_or_else(|| audit.clone());
         let r = RemoteAccess::new(dir.join("cfg"), ctx, clients.clone(), reg.clone(), pairing, audit, gate, advert, read);
         clients.set_remote(&r);
         r
@@ -794,4 +810,44 @@ fn a_remote_session_is_kept_alive_by_pongs_and_ends_at_its_lifetime() {
     assert_eq!(code, CloseCode::Away);
     assert!(why.contains("ping"), "{why}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// §5.1 as serve wires it: the audit log IS the gate. A log whose file
+/// another user could read (mode 0644 — the log keeps it as it found it and
+/// reports itself unfit) keeps remote access off; a fit one lets it on, and
+/// then records the host's acts on remote access and a device's own acts
+/// under that device's id and address.
+#[test]
+fn the_audit_log_gates_remote_access_and_records_its_devices() {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(lan) = lan_or_skip() else { return };
+    // Fit first: the served case.
+    let h = host_audited("audited", |_| {});
+    h.remote.enable(&lan.to_string(), None, None, None).expect("a fit log lets remote access on");
+    let (at, pin) = (h.at(), h.pin());
+    let key = device_key();
+    let dev = h.enroll(&key, &[Capability::Read, Capability::Write]);
+    let root = h.dir.join("a").to_string_lossy().into_owned();
+    h.rt.block_on(async {
+        let (mut ws, k) = upgrade(at, &pin, &key, &at.to_string(), None).await.unwrap();
+        v1(&mut ws, &k).await.unwrap();
+        call(&mut ws, "set_note", json!({ "repo": root, "slug": "(main)", "note": "x" })).await;
+    });
+    let log = std::fs::read_to_string(h.dir.join("cfg/audit.jsonl")).unwrap();
+    let lines: Vec<Value> = log.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+    let has = |f: &dyn Fn(&Value) -> bool| lines.iter().any(f);
+    assert!(has(&|r| r["kind"] == json!("lifecycle") && r["detail"]["event"] == json!("remote_enabled")), "{log}");
+    assert!(has(&|r| r["kind"] == json!("lifecycle") && r["detail"]["event"] == json!("remote_started")), "{log}");
+    assert!(
+        has(&|r| r["cmd"] == json!("set_note") && r["device"] == json!(dev.id) && r["peer"] == json!(lan.to_string())),
+        "the device's act is not recorded as the device's: {log}"
+    );
+    // Unfit: off, and saying why.
+    let bad = host_audited("audit-unfit", |cfg| {
+        std::fs::write(cfg.join("audit.jsonl"), "").unwrap();
+        std::fs::set_permissions(cfg.join("audit.jsonl"), std::fs::Permissions::from_mode(0o644)).unwrap();
+    });
+    let e = bad.remote.enable(&lan.to_string(), None, None, None).unwrap_err();
+    assert!(e.contains("audit log"), "{e}");
+    assert_eq!(bad.remote.status_value()["state"], json!("off"));
 }
