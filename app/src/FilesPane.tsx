@@ -30,7 +30,8 @@ import { copyToClipboard } from "./clipboard";
 // naming the file the viewer has open — and the two would silently shadow each
 // other inside FilesPane (tsc catches it as "String has no call signatures",
 // which reads like a typing problem rather than a collision).
-import { openPath as openInDefaultApp, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { hostOnly, openOnHost, revealOnHost } from "./onhost";
 import * as Icons from "./icons";
 import { CodeBlock, type CodeMark } from "./CodeView";
 import { CtxMenu } from "./CtxMenu";
@@ -1040,8 +1041,8 @@ export function FileView(props: FileViewProps) {
           <div className="bin-glyph" aria-hidden="true">▦</div>
           <div className="bin-label">{info.label} file{read.size ? ` · ${humanSize(read.size)}` : ""}</div>
           <div className="bin-actions">
-            <button className="ctrl sm" onClick={() => onOpenEditor(path)}>Open in editor</button>
-            <button className="ctrl sm" onClick={() => revealItemInDir(path).catch(onError)}>Reveal</button>
+            <button className="ctrl sm" {...hostOnly("Open in editor")} onClick={() => onOpenEditor(path)}>Open in editor</button>
+            <button className="ctrl sm" {...hostOnly("Reveal in Finder")} onClick={() => revealOnHost(path).catch(onError)}>Reveal</button>
           </div>
         </div>
       );
@@ -1326,8 +1327,8 @@ export function FilesPane(props: FilesPaneProps) {
     setCtx(null);
     copyToClipboard(text).catch(onError);
   };
-  const reveal = (path: string) => { setCtx(null); revealItemInDir(path).catch(onError); };
-  const openIn = (path: string) => { setCtx(null); openInDefaultApp(path).catch(onError); };
+  const reveal = (path: string) => { setCtx(null); revealOnHost(path).catch(onError); };
+  const openIn = (path: string) => { setCtx(null); openOnHost(path).catch(onError); };
 
   const pct = orient === "split" ? splitPct : stackPct;
   const treeStyle = orient === "split"
@@ -1390,13 +1391,13 @@ export function FilesPane(props: FilesPaneProps) {
             <div className="pop-hint">{entry.name}</div>
             {!inert && (entry.is_dir ? (
               <>
-                <button className="pop-item" onClick={() => openIn(entry.path)}>Open in Finder</button>
-                <button className="pop-item" onClick={() => reveal(entry.path)}>Reveal in Finder</button>
+                <button className="pop-item" {...hostOnly("Open in Finder")} onClick={() => openIn(entry.path)}>Open in Finder</button>
+                <button className="pop-item" {...hostOnly("Reveal in Finder")} onClick={() => reveal(entry.path)}>Reveal in Finder</button>
               </>
             ) : (
               <>
-                <button className="pop-item" onClick={() => reveal(entry.path)}>Reveal in Finder</button>
-                <button className="pop-item" onClick={() => openIn(entry.path)}>Open</button>
+                <button className="pop-item" {...hostOnly("Reveal in Finder")} onClick={() => reveal(entry.path)}>Reveal in Finder</button>
+                <button className="pop-item" {...hostOnly("Open")} onClick={() => openIn(entry.path)}>Open</button>
               </>
             ))}
             {!inert && <div className="ctx-sep" />}

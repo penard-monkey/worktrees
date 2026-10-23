@@ -3,10 +3,10 @@ import { HARNESSES, HARNESS_LABEL, NEEDS_MODEL, type Harness } from "./harness";
 import { ModelPicker, defaultModel, modelOk, useAgentModels, type PiStatus } from "./ModelPicker";
 import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ComponentType } from "react";
 import { Channel, engineState, invoke, listen } from "./ipc";
+import { hostOnly, pickDirForHost, revealOnHost } from "./onhost";
 import { useEngine } from "./EngineGate";
 import { copyToClipboard } from "./clipboard";
-import { open } from "@tauri-apps/plugin-dialog";
-import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { clampSteps, doneBounds, doneOpacity, doneTierSeen, isUnread, seenEpoch } from "./afterglow";
 import * as Icons from "./icons";
 import { CtxMenu } from "./CtxMenu";
@@ -3329,7 +3329,7 @@ function NewProjectDialog({ defaultLocation, planningDefault, busy, error, onBro
                 spellCheck={false} autoCapitalize="off" autoCorrect="off"
                 onChange={(e) => setLoc(e.currentTarget.value)}
                 onKeyDown={(e) => { if (e.key === "Enter") submit(); }} />
-              <button className="ctrl" data-testid="np-browse" disabled={busy}
+              <button className="ctrl" data-testid="np-browse" disabled={busy} {...hostOnly("Choosing a folder")}
                 onClick={async () => { const d = await onBrowse(); if (d) setLoc(d); }}>Browse…</button>
             </div>
           </label>
@@ -3425,7 +3425,7 @@ function CloneDialog({ defaultParent, planningDefault, running, cancelling, prog
                 spellCheck={false} autoCapitalize="off" autoCorrect="off"
                 onChange={(e) => setParent(e.currentTarget.value)}
                 onKeyDown={(e) => { if (e.key === "Enter") submit(); }} />
-              <button className="ctrl" data-testid="clone-browse" disabled={running}
+              <button className="ctrl" data-testid="clone-browse" disabled={running} {...hostOnly("Choosing a folder")}
                 onClick={async () => { const d = await onBrowse(); if (d) setParent(d); }}>Change…</button>
             </div>
           </label>
@@ -5476,8 +5476,8 @@ function App() {
   );
   const addProject = async () => {
     try {
-      const dir = await open({ directory: true, title: "Add a git project" });
-      if (typeof dir !== "string") return;
+      const dir = await pickDirForHost("Add a git project");
+      if (dir === null) return;
       setErr("");
       // Probe BEFORE add_project: a plain folder is a normal thing to pick for a
       // new project, and the answer is an offer (`git init`), not an error.
@@ -5533,8 +5533,7 @@ function App() {
    *  this" — the field stays the thing the Create button reads. */
   const browseLocation = async (): Promise<string | null> => {
     try {
-      const dir = await open({ directory: true, title: "Where should the project live?" });
-      return typeof dir === "string" ? dir : null;
+      return await pickDirForHost("Where should the project live?");
     } catch (e) { fail(e); return null; }
   };
   /** `<location>/<name>` — created, `git init`-ed with a first commit and added
@@ -5588,8 +5587,7 @@ function App() {
   /** Change… — fills the "Clone into" FIELD, starting from what it holds. */
   const browseCloneParent = async (): Promise<string | null> => {
     try {
-      const dir = await open({ directory: true, title: "Clone into which folder?" });
-      return typeof dir === "string" ? dir : null;
+      return await pickDirForHost("Clone into which folder?");
     } catch (e) { fail(e); return null; }
   };
   /** Clone, add, select. Every failure stays IN the dialog with the fields
@@ -5914,7 +5912,7 @@ function App() {
   };
   const revealPlace = (path: string) => {
     closeCtx();
-    revealItemInDir(path).catch((e) => fail(e));
+    revealOnHost(path).catch((e) => fail(e));
   };
   // Settings → "Release notes" and the dock rail's offers button: the What's-new
   // sheet again, with the FULL released history (every section ≤ the running
@@ -9381,7 +9379,7 @@ function App() {
               )}
               <button className="pop-item" onClick={() => copyText(`tmux attach -t ${shq(ctxPlace.tmux_session.name)}`)}>Copy attach command</button>
               {settings.terminal_cmd.trim() && (
-                <button className="pop-item" onClick={() => {
+                <button className="pop-item" {...hostOnly("Open in terminal")} onClick={() => {
                   const session = ctxPlace.tmux_session.name;
                   closeCtx();
                   invoke("open_terminal", { cmd: settings.terminal_cmd, session }).catch((e) => fail(e));
@@ -9431,8 +9429,8 @@ function App() {
               onClick={() => openStatus(ctx.repo, ctxPlace.slug)}>Status check…</button>
           )}
           <button className="pop-item" onClick={() => openRemote(ctx.repo, ctxPlace)}>Open on {remoteHostLabel(remoteBase[ctx.repo])}</button>
-          <button className="pop-item" onClick={() => revealPlace(ctxPlace.path)}>Reveal in Finder</button>
-          <button className="pop-item" onClick={() => editIn(ctxPlace.path)}>Open in editor</button>
+          <button className="pop-item" {...hostOnly("Reveal in Finder")} onClick={() => revealPlace(ctxPlace.path)}>Reveal in Finder</button>
+          <button className="pop-item" {...hostOnly("Open in editor")} onClick={() => editIn(ctxPlace.path)}>Open in editor</button>
           <button className="pop-item" onClick={() => copyText(ctxPlace.path)}>Copy path</button>
           {ctxPlace.branch && <button className="pop-item" onClick={() => copyText(ctxPlace.branch!)}>Copy branch</button>}
           {!ctxPlace.is_main && (
@@ -9456,7 +9454,7 @@ function App() {
               returns (closeMenu discipline). */}
           <button className="pop-item" data-testid="add-new"
             onClick={openNewProject}>New project…</button>
-          <button className="pop-item" data-testid="add-existing"
+          <button className="pop-item" data-testid="add-existing" {...hostOnly("Choosing a folder")}
             onClick={() => { closeCtx(); addProject(); }}>Add existing…</button>
           <button className="pop-item" data-testid="add-clone"
             onClick={openClone}>Clone from URL…</button>
@@ -9537,8 +9535,8 @@ function App() {
               </button>
             )}
             <button className="pop-item" onClick={() => copyText(ctx.root)}>Copy path</button>
-            <button className="pop-item" onClick={() => revealPlace(ctx.root)}>Reveal in Finder</button>
-            <button className="pop-item" onClick={() => editIn(ctx.root)}>Open in editor</button>
+            <button className="pop-item" {...hostOnly("Reveal in Finder")} onClick={() => revealPlace(ctx.root)}>Reveal in Finder</button>
+            <button className="pop-item" {...hostOnly("Open in editor")} onClick={() => editIn(ctx.root)}>Open in editor</button>
             <div className="ctx-sep" />
             <button
               className={"pop-item danger" + (confirmRm === `proj|${ctx.root}` ? " armed" : "")}

@@ -25,10 +25,15 @@
 // core rather than splitting it.
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "./ipc";
-import { openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { hostOnly, revealOnHost } from "./onhost";
 import * as Icons from "./icons";
 import { track } from "./usage";
 import { tree, type DocEntry, type DocNode } from "./doctree";
+
+/** The browser viewer, as a remote window's greyed buttons name it: its pages
+ *  are served on the host's loopback (§8 gap 7). */
+const VIEWER_REMOTE = "The browser viewer";
 
 export type { DocEntry, DocNode };
 
@@ -245,6 +250,7 @@ function DocRows(p: {
                 title="Open in the browser"
                 aria-label={`Open ${e.rel} in the browser`}
                 disabled={p.viewerBusy}
+                {...hostOnly(VIEWER_REMOTE)}
                 onClick={(ev) => { ev.stopPropagation(); p.onBrowse(e.path); }}
               >
                 <Icons.ExternalLink size={13} />
@@ -254,7 +260,8 @@ function DocRows(p: {
                 data-track="docs.reveal"
                 title="Reveal in Finder"
                 aria-label={`Reveal ${e.rel} in Finder`}
-                onClick={(ev) => { ev.stopPropagation(); revealItemInDir(e.path).catch(p.onError); }}
+                {...hostOnly("Reveal in Finder")}
+                onClick={(ev) => { ev.stopPropagation(); revealOnHost(e.path).catch(p.onError); }}
               >
                 <Icons.Folder size={13} />
               </button>
@@ -437,8 +444,11 @@ export function DocsPane({ root, repo, slug, place, reloadToken, pageVisible, se
         setViewerErr(null);
         await openUrl(url);
       } catch (e) {
-        setViewerErr(String(e));
-        onError(e);
+        // serve's own refusal to a remote caller (§8 gap 7): its URL is the
+        // HOST's loopback, which means nothing on this machine.
+        const why = e === "unavailable-remote" ? `${VIEWER_REMOTE} runs on the host, at an address only the host can reach` : String(e);
+        setViewerErr(why);
+        onError(why);
       } finally {
         setViewerBusy(false);
       }
@@ -558,6 +568,7 @@ export function DocsPane({ root, repo, slug, place, reloadToken, pageVisible, se
           data-track="docs.browser"
           title="Open this place in the browser — diagrams render there"
           disabled={viewerBusy || !total}
+          {...hostOnly(VIEWER_REMOTE)}
           onClick={() => void browse(null)}
         >
           <Icons.ExternalLink size={13} />

@@ -92,6 +92,12 @@ async function boot() {
   let gated = false;
   if (import.meta.env.VITE_MOCK) {
     const { mockDeclare, mockEngineDelayMs } = await import("./mock/install");
+    // `?remote`: as if a paired host were chosen, so every act that needs the
+    // host's paths shows greyed, with its reason (§4.4).
+    if (new URLSearchParams(window.location.search).has("remote")) {
+      const { setAway } = await import("./ipc");
+      setAway("this window drives Studio (the harness's paired host), and a path there is not a path on this machine");
+    }
     // `?slowengine[=ms]`: the app's boot over the mock — an engine door whose
     // first connect takes that long, so a call that cannot wait for it is
     // refused here exactly as it is in the app. Its socket is the mock itself.
@@ -119,7 +125,9 @@ async function boot() {
   // transport-check.mjs greps app/dist to prove it. No local half: a browser
   // has no Tauri, so serve refuses the client-local commands, as it should.
   if (import.meta.env.DEV && import.meta.env.VITE_SERVE) {
-    const { engineDoor, openDoor } = await import("./ipc");
+    const { engineDoor, openDoor, setAway } = await import("./ipc");
+    // A browser has no opener or dialog plugin to act on a path with (§4.4).
+    setAway("this page runs in a browser, which cannot open the host's files");
     const { bootSocket } = await import("./ipcws");
     // The stack's serve is server-stack.sh's, never the page's: owned false,
     // so a lost one is only ever reconnected to (re-reading the endpoint).

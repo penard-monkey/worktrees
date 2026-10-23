@@ -1201,6 +1201,21 @@ html[data-guides="off"] .kids > .places::after { display: none; }
   color: var(--txt-mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .ver-actions { display: flex; gap: var(--s2); margin-top: var(--s2); }
+/* Settings → Hosts: this machine, then each paired host; and the pairing
+   code, big enough to compare across a desk with the host's screen. */
+.hosts-list { display: flex; flex-direction: column; gap: var(--s1); margin-top: var(--s2); }
+.hosts-row { display: flex; align-items: center; gap: var(--s2); min-width: 0; }
+.hosts-name { color: var(--txt-hi); font-size: var(--fs-label); white-space: nowrap; }
+.hosts-meta {
+  flex: 1 1 auto; min-width: 0; color: var(--txt-dim); font-size: var(--fs-micro);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.hosts-row .ctrl { flex: none; }
+.hosts-code { margin-top: var(--s2); }
+.hosts-code-digits {
+  font-family: var(--term-family); font-size: calc(var(--fs-label) * 2); letter-spacing: 0.12em;
+  color: var(--txt-hi);
+}
 .update-log {
   margin: var(--s2) 0 0; padding: var(--s2); max-height: 9rem; overflow: auto;
   background: var(--bg-abyss); border: 1px solid var(--line); border-radius: var(--r-sm);

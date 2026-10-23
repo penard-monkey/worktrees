@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "./ipc";
-import { revealItemInDir } from "@tauri-apps/plugin-opener";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { hostOnly, pickDirForHost, revealOnHost } from "./onhost";
 
 // AI profiles: the rules / skills / MCP / model a worktrees-launched `claude`
 // runs with, instead of the user's global ~/.claude setup.
@@ -194,8 +193,8 @@ export default function ProfilesPanel({ repo, onReport }: { repo: string; onRepo
 
   const addSkillFromDisk = async () => {
     try {
-      const dir = await openDialog({ directory: true, title: "Choose a skill directory" });
-      if (!dir || typeof dir !== "string") return;
+      const dir = await pickDirForHost("Choose a skill directory");
+      if (!dir) return;
       const e = await invoke<SkillEntry>("skill_install_local", { path: dir });
       await reload();
       const caps = e?.capabilities ?? [];
@@ -430,7 +429,7 @@ export default function ProfilesPanel({ repo, onReport }: { repo: string; onRepo
               Also load my global <code>~/.claude/skills</code>
             </label>
             <div className="ver-actions">
-              <button className="ctrl sm" onClick={addSkillFromDisk} disabled={busy}>
+              <button className="ctrl sm" onClick={addSkillFromDisk} disabled={busy} {...hostOnly("Choosing a folder")}>
                 Add from folder…
               </button>
             </div>
@@ -517,7 +516,7 @@ export default function ProfilesPanel({ repo, onReport }: { repo: string; onRepo
               </button>
               <button
                 className="ctrl sm"
-                onClick={() => draft.dir && revealItemInDir(draft.dir).catch((e) => fail(e, "reveal"))}
+                onClick={() => draft.dir && revealOnHost(draft.dir).catch((e) => fail(e, "reveal"))}
                 disabled={!draft.dir || draft.ever_launched === false}
                 // usage: one branch of this title is the profile's DIRECTORY
                 // (no key at all), the other is a sentence that reduces to
@@ -525,6 +524,7 @@ export default function ProfilesPanel({ repo, onReport }: { repo: string; onRepo
                 // rows, neither of them its name.
                 data-track="profiles.reveal"
                 title={draft.ever_launched === false ? "Nothing there until its first launch" : draft.dir ?? ""}
+                {...hostOnly("Reveal in Finder")}
               >
                 Reveal files
               </button>
