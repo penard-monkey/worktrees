@@ -88,6 +88,11 @@ pub struct Pipe {
     stepup: Option<StepUp>,
 }
 
+/// How [`Inbound::Closed`] begins when the host closed with a reason, which
+/// follows it — the way a client reads the host's own words (a revoke's, the
+/// protocol floor's) back out of the pipe's. ipcws.ts mirrors it.
+pub const HOST_CLOSED: &str = "the host closed the connection: ";
+
 /// One thing read from the socket.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Inbound {
@@ -216,7 +221,7 @@ impl PipeRx {
                 Some(Ok(Message::Text(t))) => return Inbound::Frame(t.to_string()),
                 Some(Ok(Message::Close(c))) => {
                     return Inbound::Closed(match c {
-                        Some(f) if !f.reason.is_empty() => format!("the host closed the connection: {}", crate::printable(&f.reason)),
+                        Some(f) if !f.reason.is_empty() => format!("{HOST_CLOSED}{}", crate::printable(&f.reason)),
                         _ => "the host closed the connection".into(),
                     })
                 }

@@ -31,6 +31,7 @@ use tokio_tungstenite::tungstenite::Message;
 use worktrees_remote::call::{self, CallError};
 use worktrees_remote::key::DeviceKey;
 use worktrees_remote::pipe::{self, Inbound, PipeError};
+use worktrees_remote::protocol::PROTO;
 use worktrees_remote::sign::{self, DeviceSigner, Keys, SignError};
 
 mod opaque;
@@ -38,7 +39,10 @@ use opaque::{How, Opaque};
 use worktrees_remote::tls;
 
 const WAIT: Duration = Duration::from_secs(5);
+/// The fixture host's release: never this crate's, which a remote client
+/// does not compare.
 const VERSION: &str = "9.9.9";
+const HOST: &str = "Studio";
 
 fn rt() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap()
@@ -105,13 +109,30 @@ struct Seen {
     stepup_exporter: Option<[u8; 32]>,
     requests: Vec<Value>,
     asked: bool,
+    hello: Value,
 }
 
 /// How the fixture misbehaves, when asked to.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Host {
     Honest,
-    /// Proves with another key.
+    /// Speaks protocol 2 and still serves 1.
+    Newer,
+    /// Speaks protocol 1 and serves clients from before the protocol too.
+    ServesAll,
+    /// A host from before the protocol: a hello with anything beside its
+    /// nonce is refused, the socket dropped with nothing said.
+    PreProtocol,
+    /// Proves itself, and its ok names no protocol.
+    NoProto,
+    /// Speaks protocol 0, below every client's floor.
+    BelowFloor,
+    /// Serves protocol 2 and up only.
+    NewMinimum,
+    /// Refuses this client's protocol once its proof verifies, as serve does
+    /// below `PROTO_MIN`: 1008 "Update the app".
+    RefusesClient,
+    /// Proves with another key, and claims a protocol no client accepts.
     WrongProof,
     /// Closes with 1008 "revoked" right after the handshake.
     Revokes,
@@ -166,6 +187,10 @@ fn host(rt: &tokio::runtime::Runtime, id: &Identity, admit: &str, how: Host) -> 
             }
         };
         let Some(hello) = read(ws.next().await) else { return seen };
+        seen.hello = hello.clone();
+        if how == Host::PreProtocol && hello.as_object().is_none_or(|o| o.len() != 1) {
+            return seen;
+        }
         let cn = hello["hello"].as_str().unwrap_or_default().to_string();
         let sn = "5".repeat(64);
         ws.send(Message::text(json!({"challenge": sn}).to_string())).await.unwrap();
@@ -175,7 +200,24 @@ fn host(rt: &tokio::runtime::Runtime, id: &Identity, admit: &str, how: Host) -> 
         }
         let proof = if how == Host::WrongProof { mac("worktrees-serve/v1/server\n", &cn, &"6".repeat(64)) } else { mac("worktrees-serve/v1/server\n", &cn, &sn) };
         let device = json!({"id": "d_x", "principal": "owner", "name": "Laptop", "caps": ["read"], "projects": "*", "expiry": {"idle_days": 30}, "stepup_required": false});
-        ws.send(Message::text(json!({"ok": true, "version": VERSION, "proof": proof, "device": device}).to_string())).await.unwrap();
+        if how == Host::RefusesClient {
+            ws.send(Message::Close(Some(CloseFrame { code: CloseCode::Policy, reason: "Update the app".into() }))).await.unwrap();
+            return seen;
+        }
+        let mut ok = json!({"ok": true, "version": VERSION, "proof": proof, "device": device});
+        let range = match how {
+            Host::NoProto => None,
+            Host::BelowFloor | Host::WrongProof => Some((0, 0)),
+            Host::Newer => Some((2, 1)),
+            Host::ServesAll => Some((1, 0)),
+            Host::NewMinimum => Some((2, 2)),
+            _ => Some((1, 1)),
+        };
+        if let Some((proto, min)) = range {
+            ok["proto"] = json!(proto);
+            ok["proto_min"] = json!(min);
+        }
+        ws.send(Message::text(ok.to_string())).await.unwrap();
         if how == Host::Revokes {
             let _ = ws.send(Message::Close(Some(CloseFrame { code: CloseCode::Policy, reason: "revoked".into() }))).await;
             return seen;
@@ -204,7 +246,7 @@ fn a_paired_device_is_served_over_the_pipe_with_one_session_key_at_both_ends() {
         let p = pipe::open_at(addr, &id.pin, &dev, WAIT).await.unwrap();
         assert!(p.stepup().is_none(), "a desktop has no step-up key");
         let token = p.session_token().to_string();
-        let mut s = call::handshake(p, VERSION, WAIT).await.unwrap();
+        let mut s = call::handshake(p, HOST, WAIT).await.unwrap();
         let out = s.request(7, "list_workspace", json!({}), WAIT).await.unwrap();
         assert_eq!(s.welcome["device"]["id"], json!("d_x"), "the device record rides on ok");
         s.close().await;
@@ -249,7 +291,7 @@ fn a_key_the_host_does_not_hold_is_refused_at_tls() {
 }
 
 /// Proof before anything: a host that cannot prove the session key gets no
-/// request.
+/// request, and its protocol claim is not believed either.
 #[test]
 fn nothing_is_sent_to_a_host_whose_proof_fails() {
     let rt = rt();
@@ -258,7 +300,7 @@ fn nothing_is_sent_to_a_host_whose_proof_fails() {
     let (addr, seen) = host(&rt, &id, &pin, Host::WrongProof);
     let r = rt.block_on(async {
         let p = pipe::open_at(addr, &id.pin, &dev, WAIT).await.unwrap();
-        call::handshake(p, VERSION, WAIT).await.map(|_| ())
+        call::handshake(p, HOST, WAIT).await.map(|_| ())
     });
     assert!(matches!(r, Err(CallError::Handshake(_))), "{:?}", r.err().map(|e| e.to_string()));
     assert!(rt.block_on(seen).unwrap().requests.is_empty());
@@ -273,7 +315,7 @@ fn a_revoke_ends_the_pipe_with_its_reason() {
     let (addr, _seen) = host(&rt, &id, &pin, Host::Revokes);
     let end = rt.block_on(async {
         let p = pipe::open_at(addr, &id.pin, &dev, WAIT).await.unwrap();
-        let mut s = call::handshake(p, VERSION, WAIT).await.unwrap();
+        let mut s = call::handshake(p, HOST, WAIT).await.unwrap();
         s.rx.recv().await
     });
     match end {
@@ -282,19 +324,58 @@ fn a_revoke_ends_the_pipe_with_its_reason() {
     }
 }
 
-/// Another version is refused once proven, before any request.
+/// iOS Q10: a host on another release is driven — this crate's version is
+/// not compared — and so is a newer one that still serves this protocol, and
+/// one that serves clients from before the protocol as well.
+/// The hello says which protocol this client speaks, and a row the host
+/// lacks is the host's own refusal, passed on.
 #[test]
-fn a_proven_host_of_another_version_is_not_driven() {
-    let rt = rt();
-    let id = identity();
-    let (dev, pin) = file_keys();
-    let (addr, seen) = host(&rt, &id, &pin, Host::Honest);
-    let r = rt.block_on(async {
-        let p = pipe::open_at(addr, &id.pin, &dev, WAIT).await.unwrap();
-        call::handshake(p, "1.0.0", WAIT).await.map(|_| ())
-    });
-    assert!(matches!(r, Err(CallError::Version { .. })), "{:?}", r.err().map(|e| e.to_string()));
-    assert!(rt.block_on(seen).unwrap().requests.is_empty());
+fn a_proven_host_of_another_release_on_a_protocol_this_client_speaks_is_driven() {
+    assert_ne!(VERSION, env!("CARGO_PKG_VERSION"));
+    for how in [Host::Honest, Host::Newer, Host::ServesAll] {
+        let rt = rt();
+        let id = identity();
+        let (dev, pin) = file_keys();
+        let (addr, seen) = host(&rt, &id, &pin, how);
+        let r = rt.block_on(async {
+            let p = pipe::open_at(addr, &id.pin, &dev, WAIT).await.unwrap();
+            let mut s = call::handshake(p, HOST, WAIT).await?;
+            let out = s.request(1, "list_workspace", json!({}), WAIT).await;
+            s.close().await;
+            out
+        });
+        assert_eq!(r.map_err(|e| e.to_string()).unwrap(), json!({"echo": "list_workspace"}));
+        let seen = rt.block_on(seen).unwrap();
+        assert_eq!(seen.hello.as_object().map(|o| o.len()), Some(2), "{}", seen.hello);
+        assert_eq!(seen.hello["proto"], json!(PROTO));
+        assert_eq!(seen.requests.len(), 1);
+    }
+}
+
+/// iOS Q10, the other half: a host from before the protocol, one that names
+/// none, one below this client's floor, and one that no longer serves this
+/// client are each sent no request, and the words say which side to update.
+#[test]
+fn a_host_on_an_incompatible_protocol_is_sent_nothing_and_says_which_side_to_update() {
+    for (how, want) in [
+        (Host::PreProtocol, "Update Worktrees on Studio"),
+        (Host::NoProto, "Update Worktrees on Studio"),
+        (Host::BelowFloor, "Update Worktrees on Studio"),
+        (Host::NewMinimum, "Update the app"),
+        (Host::RefusesClient, "Update the app"),
+    ] {
+        let rt = rt();
+        let id = identity();
+        let (dev, pin) = file_keys();
+        let (addr, seen) = host(&rt, &id, &pin, how);
+        let r = rt.block_on(async {
+            let p = pipe::open_at(addr, &id.pin, &dev, WAIT).await.unwrap();
+            call::handshake(p, HOST, WAIT).await.map(|_| ())
+        });
+        let err = r.err().map(|e| e.to_string());
+        assert_eq!(err.as_deref(), Some(want));
+        assert!(rt.block_on(seen).unwrap().requests.is_empty(), "{want}: nothing sent");
+    }
 }
 
 // ── the device key as a signer: the Secure Enclave's stand-in ───────────────
@@ -311,7 +392,7 @@ fn an_opaque_key_is_served_having_only_been_asked_to_sign() {
     let keys = Keys::device_only(key.clone());
     let out = rt.block_on(async {
         let p = pipe::open_at(addr, &id.pin, &keys, WAIT).await.unwrap_or_else(|e| panic!("{e}"));
-        let mut s = call::handshake(p, VERSION, WAIT).await.unwrap();
+        let mut s = call::handshake(p, HOST, WAIT).await.unwrap();
         let out = s.request(1, "list_workspace", json!({}), WAIT).await.unwrap();
         s.close().await;
         out
@@ -385,7 +466,7 @@ fn a_step_up_proof_is_the_step_up_keys_over_this_session() {
         let p = pipe::open_at(addr, &id.pin, &keys, WAIT).await.unwrap();
         let su = p.stepup().expect("a device with a step-up key has a step-up");
         let proof = su.prove(&challenge).await.unwrap();
-        call::handshake(p, VERSION, WAIT).await.unwrap().close().await;
+        call::handshake(p, HOST, WAIT).await.unwrap().close().await;
         proof
     });
     let host_side = rt.block_on(seen).unwrap().stepup_exporter.unwrap();
@@ -409,7 +490,7 @@ fn a_cancelled_step_up_is_a_cancel() {
     let r = rt.block_on(async {
         let p = pipe::open_at(addr, &id.pin, &keys, WAIT).await.unwrap();
         let r = p.stepup().unwrap().prove(&[1; 32]).await;
-        let mut s = call::handshake(p, VERSION, WAIT).await.unwrap();
+        let mut s = call::handshake(p, HOST, WAIT).await.unwrap();
         assert_eq!(s.request(1, "list_workspace", json!({}), WAIT).await.unwrap(), json!({"echo": "list_workspace"}), "still served");
         r
     });

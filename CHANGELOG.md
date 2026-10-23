@@ -101,6 +101,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   terminal's output streaming); `use <host>|this` chooses what the app's
   window drives from its next launch. A link's address is checked before
   anything is dialled: only a private one is accepted.
+- **A paired machine and its host need not run the same release.** They
+  agree on a protocol number instead, which changes only when the
+  connection itself changes, never for a new command. When one side is too
+  old for the other, the window and `worktrees remote call` say which to
+  update: "Update Worktrees on <host>" or "Update the app". A command the
+  host is too old to have is answered `unknown command: <name>`, as before.
+  The app and this machine's own engine must still be the same release.
 - **serve can show what an agent is asking, answer it, send it a line, and
   read its recent turns, for any client.** These are the four commands the
   phone app will use; nothing in the desktop app changes.

@@ -245,11 +245,18 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   (`policy::remote_*`: a native socket sends none, and the opposite of
   loopback's rule ON PURPOSE), and
   handshake v1 UNCHANGED, keyed by `hex(exporter "EXPORTER-worktrees-remote-
-  v1")`, whose `ok` names the device. A session that joins the client set
-  checks AFTER joining that its bind is open and its device live: a kill
-  switch or revoke that swept while it was still shaking hands missed it and
-  it was SERVED (found by review, reproduced red). `netwatch::Watch` runs on
-  RemoteAccess's own 3 s poll; an app-owned serve's idle stop counts
+  v1")`, whose `ok` names the device. **Compatibility there is a protocol
+  number, not the release** (iOS Q10, `worktrees_remote::protocol`, the one
+  copy): the remote hello adds `proto` (absent = 0) and the `ok` adds `proto`
+  and `proto_min`. Only a breaking wire or handshake change bumps `PROTO`; a
+  new row never does, because an older host answers it `unknown command`. A
+  client below `PROTO_MIN` is closed 1008 "Update the app" — said, unlike
+  every other refusal, and only once its proof has passed — and is never
+  welcomed. Loopback's hello and `ok` are unchanged. A session that joins
+  the client set checks AFTER joining that its bind is open and its device
+  live: a kill switch or revoke that swept while it was still shaking hands
+  missed it and it was SERVED (found by review, reproduced red).
+  `netwatch::Watch` runs on RemoteAccess's own 3 s poll; an app-owned serve's idle stop counts
   `Clients::console_len()` only (§9.3), so a device never holds it up and the
   app says quitting ends remote access. mDNS: macOS through `dns_sd` with
   serve's own `wt-<id>.local` (`advert.rs`); Linux has none (zbus = +30
@@ -295,7 +302,9 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   v1 (OWASP H1) has each side prove it holds it with an HMAC over the other's
   nonce, and the client sends NOTHING else — no request, and no belief in the
   version — until serve's proof passes `crypto.subtle.verify`, because whoever
-  holds serve.json's port after a crash need not be serve. Frames that arrive
+  holds serve.json's port after a crash need not be serve. The engine door
+  then keeps EXACT release equality (one build over loopback); the remote
+  door judges the proven host's protocol instead (below). Frames that arrive
   during verification are held and handed on SYNCHRONOUSLY as the proof
   passes, so a listener added after `await ready` misses them: wire listeners
   before the proof. The door DECLARES the names it has a live handler for
@@ -363,7 +372,17 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   — a departure from §4.5's first frame, so `ipcws.ts` stays the protocol's
   one client (`ipcremote.ts` builds a `Sock` from the shim's
   `remote_connect`/`remote_send`/`remote_close`, and serializes sends:
-  concurrent Tauri commands would otherwise swap frames). `remoteDoor` routes
+  concurrent Tauri commands would otherwise swap frames). `remoteHost`, set
+  only by ipcremote, is what makes `connectSocket` the remote door: it sends
+  `PROTO` and, after the proof, refuses a host below `HOST_PROTO_MIN` or one
+  that names no protocol ("Update Worktrees on <host>", as is a close at the
+  hello, which is how a host from before the protocol refuses it) and one
+  whose `proto_min` is above `PROTO` ("Update the app"). Every constant and
+  word is mirrored from protocol.rs and pipe.rs, and transport-check holds
+  them; `worktrees remote call` applies the same rule (`call.rs`). A row the
+  host lacks is NOT refused in the client: its `unknown command: <cmd>`
+  comes back unchanged, and `unsupportedFeature` gives a UI its words.
+  `remoteDoor` routes
   `get_settings`/`set_settings` to the device's own blob (§9.1) and refuses
   `HOST_PATH_LOCAL`; `windowOnHost()` is the one "does this window run on its
   engine's host" predicate, and `onhost.ts` the only file that may import a

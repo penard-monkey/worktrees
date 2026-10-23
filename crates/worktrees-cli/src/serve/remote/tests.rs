@@ -230,7 +230,7 @@ async fn text(ws: &mut Ws) -> Option<Value> {
 /// when the server refused.
 async fn v1(ws: &mut Ws, key: &str) -> Option<Value> {
     let cn = hex(&[7u8; 32]);
-    ws.send(Message::text(json!({ "hello": cn }).to_string())).await.ok()?;
+    ws.send(Message::text(json!({ "hello": cn, "proto": worktrees_remote::protocol::PROTO }).to_string())).await.ok()?;
     let sn = text(ws).await?["challenge"].as_str()?.to_string();
     ws.send(Message::text(json!({ "auth": spec_mac(key, policy::CLIENT_LABEL, &cn, &sn) }).to_string())).await.ok()?;
     let ok = text(ws).await?;
@@ -314,6 +314,53 @@ fn an_enrolled_device_completes_tls_and_handshake_v1_and_is_served() {
     assert_eq!(h.reg.get(&PrincipalId::owner(), &dev.id).map(|d| d.id), Some(dev.id));
 }
 
+/// iOS Q10: the host learns the client's protocol from its hello (absent =
+/// 0) and judges it only once the client's proof verifies. Below
+/// `PROTO_MIN` the answer is a 1008 close saying "Update the app", with no
+/// `ok` and nothing served; at or above it, the `ok` names the host's
+/// protocol range and a row the host lacks is `unknown command`. A client
+/// that cannot prove itself is told nothing, whatever its protocol.
+#[test]
+fn a_proven_client_below_the_protocol_floor_is_told_to_update_and_never_served() {
+    use worktrees_remote::protocol::{PROTO, PROTO_MIN, UPDATE_APP};
+    let Some(lan) = lan_or_skip() else { return };
+    let h = host("proto-floor");
+    h.remote.enable(&lan.to_string(), None, None, None).unwrap();
+    let at = h.at();
+    let key = device_key();
+    h.enroll(&key, &[Capability::Read]);
+    let pin = h.pin();
+    h.rt.block_on(async {
+        for (proto, proven) in [(None, true), (Some(0), true), (Some(PROTO), true), (Some(PROTO + 1), true), (None, false)] {
+            let (mut ws, k) = upgrade(at, &pin, &key, &at.to_string(), None).await.expect("a 101");
+            let cn = hex(&[7u8; 32]);
+            let mut hello = json!({ "hello": cn });
+            if let Some(p) = proto {
+                hello["proto"] = json!(p);
+            }
+            ws.send(Message::text(hello.to_string())).await.unwrap();
+            let sn = text(&mut ws).await.expect("a challenge, whatever the protocol")["challenge"].as_str().unwrap().to_string();
+            let key = if proven { k.clone() } else { hex(&[0u8; 32]) };
+            ws.send(Message::text(json!({ "auth": spec_mac(&key, policy::CLIENT_LABEL, &cn, &sn) }).to_string())).await.unwrap();
+            if !proven {
+                assert_eq!(rest(ws).await, Vec::<u8>::new(), "an unproven pre-protocol client is told nothing");
+                continue;
+            }
+            let f = tokio::time::timeout(WAIT, ws.next()).await.unwrap().unwrap().unwrap();
+            if proto.unwrap_or(0) < PROTO_MIN {
+                assert!(matches!(f, Message::Close(Some(ref c)) if c.code == CloseCode::Policy && c.reason == UPDATE_APP), "proto {proto:?}: {f:?}");
+                assert!(matches!(tokio::time::timeout(WAIT, ws.next()).await, Ok(None | Some(Err(_)))), "proto {proto:?}: nothing after the close");
+            } else {
+                let Message::Text(t) = f else { panic!("proto {proto:?}: {f:?}") };
+                let ok: Value = serde_json::from_str(&t).unwrap();
+                assert_eq!((&ok["proto"], &ok["proto_min"]), (&json!(PROTO), &json!(PROTO_MIN)), "{ok}");
+                assert_eq!(ok["proof"], json!(spec_mac(&k, policy::SERVER_LABEL, &cn, &sn)));
+                assert_eq!(call(&mut ws, "future_feature", json!({})).await["err"], json!("unknown command: future_feature"));
+            }
+        }
+    });
+}
+
 /// §4.3, §4.5: a key no device holds ends INSIDE TLS, with rustls's alert —
 /// no 101, not a byte of HTTP — and so does a revoked one; the enrolled key
 /// before them is served. (Refused after the handshake instead, by the
@@ -381,7 +428,7 @@ fn a_proof_keyed_by_anything_but_the_sessions_exporter_is_refused() {
         assert!(v1(&mut ws, &k).await.is_some(), "served first");
         let (mut ws, _) = upgrade(at, &pin, &key, &at.to_string(), None).await.unwrap();
         let cn = hex(&[7u8; 32]);
-        ws.send(Message::text(json!({ "hello": cn }).to_string())).await.unwrap();
+        ws.send(Message::text(json!({ "hello": cn, "proto": worktrees_remote::protocol::PROTO }).to_string())).await.unwrap();
         let sn = text(&mut ws).await.unwrap()["challenge"].as_str().unwrap().to_string();
         let wrong = hex(&[0u8; 32]);
         ws.send(Message::text(json!({ "auth": spec_mac(&wrong, policy::CLIENT_LABEL, &cn, &sn) }).to_string())).await.unwrap();
@@ -1079,7 +1126,7 @@ mod signer {
 
     async fn session(at: SocketAddr, pin: &str, keys: &Keys) -> rcall::Session {
         let p = worktrees_remote::pipe::open_at(at, pin, keys, WAIT).await.unwrap_or_else(|e| panic!("{e}"));
-        rcall::handshake(p, env!("CARGO_PKG_VERSION"), WAIT).await.unwrap_or_else(|e| panic!("{e}"))
+        rcall::handshake(p, "this host", WAIT).await.unwrap_or_else(|e| panic!("{e}"))
     }
 
     fn refused(r: Result<Value, CallError>) -> Value {

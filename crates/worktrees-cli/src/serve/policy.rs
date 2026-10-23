@@ -167,6 +167,21 @@ pub fn hello(frame: &str) -> Option<String> {
     hex32_field(frame, "hello")
 }
 
+/// The remote listener's frame 1, `{"hello": cn, "proto": n}`: the nonce and
+/// the client's protocol (iOS Q10), or `None` (refuse). A missing `proto` is
+/// a pre-protocol client, 0, kept through its proof so it can be TOLD to
+/// update (`conn::handshake_v1`); anything else malformed is refused with
+/// nothing said, as every hello is. Loopback's hello stays [`hello`].
+pub fn remote_hello(frame: &str) -> Option<(String, u32)> {
+    let mut v: serde_json::Value = serde_json::from_str(frame).ok()?;
+    let obj = v.as_object_mut()?;
+    let proto = match obj.remove("proto") {
+        None => 0,
+        Some(p) => u32::try_from(p.as_u64()?).ok()?,
+    };
+    hello(&v.to_string()).map(|cn| (cn, proto))
+}
+
 /// Frame 3, `{"auth": client_proof}`: the proof, or `None` (refuse).
 pub fn client_proof(frame: &str) -> Option<String> {
     hex32_field(frame, "auth")
@@ -328,6 +343,29 @@ mod tests {
             "not json".to_string(),
         ] {
             assert_eq!(hello(&bad), None, "{bad:?} is not a hello");
+        }
+    }
+
+    /// A remote hello is a hello plus a `proto` that is a u32, or absent (0);
+    /// loopback's still refuses one with `proto` in it.
+    #[test]
+    fn a_remote_hello_carries_a_protocol_number_or_none() {
+        let with = |p: &str| format!("{{\"hello\":\"{N}\",\"proto\":{p}}}");
+        assert_eq!(remote_hello(&with("1")), Some((N.to_string(), 1)));
+        assert_eq!(remote_hello(&with("0")), Some((N.to_string(), 0)));
+        assert_eq!(remote_hello(&with("4294967295")), Some((N.to_string(), u32::MAX)));
+        assert_eq!(remote_hello(&format!("{{\"hello\":\"{N}\"}}")), Some((N.to_string(), 0)), "a pre-protocol client is 0");
+        assert_eq!(hello(&with("1")), None, "loopback's hello is one key");
+        for bad in ["\"1\"", "-1", "1.5", "4294967296", "null", "[1]"] {
+            assert_eq!(remote_hello(&with(bad)), None, "proto {bad} is refused");
+        }
+        for bad in [
+            format!("{{\"hello\":\"{N}\",\"proto\":1,\"cmd\":\"list_workspace\"}}"),
+            format!("{{\"hello\":\"{}\",\"proto\":1}}", N.to_uppercase()),
+            "{\"proto\":1}".to_string(),
+            "not json".to_string(),
+        ] {
+            assert_eq!(remote_hello(&bad), None, "{bad:?} is not a remote hello");
         }
     }
 

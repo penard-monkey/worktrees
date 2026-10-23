@@ -226,7 +226,7 @@ async fn do_call(store: &HostStore, sel: &str, cmd: &str, args: &str, wait: Dura
     };
     // A move was said as it happened (`said`), so it is not said again here.
     let rec = reached.rec;
-    let mut s = match call::handshake(reached.pipe, env!("CARGO_PKG_VERSION"), wait).await {
+    let mut s = match call::handshake(reached.pipe, &rec.name, wait).await {
         Ok(s) => s,
         Err(e) => {
             eprintln!("worktrees remote call: {} ({}): {e}", rec.name, rec.addr);

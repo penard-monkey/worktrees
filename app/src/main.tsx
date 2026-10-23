@@ -82,7 +82,7 @@ async function remoteBoot(host: HostSummary): Promise<EngineDoor> {
       // A fresh grant per socket: a narrowed device learns it on reconnect.
       setRemoteGrant(null);
       pipe = await openPipe(shim, host.id, { setTimeout: (fn, ms) => window.setTimeout(fn, ms) }, setRemoteGrant);
-      const sock = connectRemote({ ...socketDeps(lost, remedy), port: 0, token: pipe.connected.token, WebSocket: pipe.WebSocket });
+      const sock = connectRemote({ ...socketDeps(lost, remedy), port: 0, token: pipe.connected.token, remoteHost: pipe.remoteHost, WebSocket: pipe.WebSocket });
       return { sock, owned: false, started: false };
     },
     retryEnv(),

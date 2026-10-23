@@ -72,6 +72,7 @@
 //! ```
 
 pub mod call;
+pub mod protocol;
 
 /// Text a HOST chose — a close reason, an error, an event's name — made safe
 /// to print: control characters and the invisible or direction-changing ones

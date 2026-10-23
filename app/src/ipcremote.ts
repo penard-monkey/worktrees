@@ -63,6 +63,10 @@ export function shimOf(door: Pick<Door, "invoke" | "channel">): RemoteShim {
  *  `connectSocket` that yields the ONE socket over it, and why it ended. */
 export type OpenPipe = {
   connected: Connected;
+  /** The host's name, for `connectSocket`'s `remoteHost`: it makes the
+   *  socket the remote door (the protocol rule, iOS Q10, not the release)
+   *  and names the host in its refusals. */
+  remoteHost: string;
   WebSocket: new (url: string) => Sock;
   /** The shim's words for the end (a revoke says so), once it has ended. */
   closedWhy(): string | null;
@@ -170,5 +174,5 @@ export async function openPipe(shim: RemoteShim, hostId: string, timers: Timers,
     }
   }
 
-  return { connected, WebSocket: PipeSock as unknown as new (url: string) => Sock, closedWhy: () => why };
+  return { connected, remoteHost: connected.host.name, WebSocket: PipeSock as unknown as new (url: string) => Sock, closedWhy: () => why };
 }

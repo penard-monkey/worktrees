@@ -1093,12 +1093,20 @@ impl Turns for LoopbackTurns<'_> {
 /// The remote listener runs this same exchange over TLS, keyed by the TLS
 /// session's exporter instead of serve.json's token, and its `ok` names the
 /// device the session belongs to (`device`; loopback passes `None`, and its
-/// bytes are what they were). `turns` is told whose move it is: loopback's
+/// bytes are what they were). A remote hello also carries the client's
+/// `proto` (iOS Q10, `worktrees_remote::protocol`); a PROVEN client below
+/// `PROTO_MIN` is closed with 1008 "Update the app" instead of welcomed.
+/// `turns` is told whose move it is: loopback's
 /// displacement admission (`LoopbackTurns`), or nobody (`()`, the remote
 /// listener, whose caps are its own).
 pub(super) async fn handshake_v1(ws: &mut Ws, token: &str, device: Option<&Value>, turns: &dyn Turns) -> Option<()> {
     turns.clients_turn();
-    let cn = policy::hello(&next_text(ws).await?)?;
+    let hello = next_text(ws).await?;
+    let (cn, proto) = if device.is_some() {
+        policy::remote_hello(&hello)?
+    } else {
+        (policy::hello(&hello)?, 0)
+    };
     turns.servers_turn();
     let sn = servefile::nonce();
     ws.send(Message::text(wire::challenge_frame(&sn))).await.ok()?;
@@ -1111,6 +1119,15 @@ pub(super) async fn handshake_v1(ws: &mut Ws, token: &str, device: Option<&Value
     // Proven, and out of reach of a newcomer from here on — unless one
     // displaced it a moment ago, in which case it closes like any other.
     if !turns.authenticated() {
+        return None;
+    }
+    // Said, not silent, and only to a peer that proved itself: a client too
+    // old to serve is told which side to update (its pre-protocol code shows
+    // a close reason as it is), and is never welcomed or served.
+    if device.is_some() && proto < worktrees_remote::protocol::PROTO_MIN {
+        let why = worktrees_remote::protocol::UPDATE_APP;
+        info(&format!("serve: remote: a proven client speaks protocol {proto}, below {}: closed with \"{why}\"", worktrees_remote::protocol::PROTO_MIN));
+        let _ = ws.send(Message::Close(Some(CloseFrame { code: CloseCode::Policy, reason: why.into() }))).await;
         return None;
     }
     // Only now does the server prove itself.

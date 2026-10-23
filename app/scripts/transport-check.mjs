@@ -92,6 +92,8 @@ const SRC = {
   dispatch: process.env.TRANSPORT_DISPATCH ?? here("../../crates/worktrees-cli/src/serve/dispatch.rs"),
   conn: process.env.TRANSPORT_CONN ?? here("../../crates/worktrees-cli/src/serve/conn.rs"),
   servefile: process.env.TRANSPORT_SERVEFILE ?? here("../../crates/worktrees-cli/src/serve/servefile.rs"),
+  protocol: process.env.TRANSPORT_PROTOCOL ?? here("../../crates/worktrees-remote/src/protocol.rs"),
+  pipe: process.env.TRANSPORT_PIPE ?? here("../../crates/worktrees-remote/src/pipe.rs"),
   cliToml: here("../../crates/worktrees-cli/Cargo.toml"),
   wsToml: here("../../Cargo.toml"),
 };
@@ -288,6 +290,28 @@ const WS = await load(SRC.ipcws, wsJs);
   check(WS.MAX_MESSAGE === K.maxMessage, `the client's MAX_MESSAGE (${WS.MAX_MESSAGE}) is serve's (conn.rs, ${K.maxMessage}), so a request serve would end the connection over is refused before it is sent`);
 }
 
+// The remote door's protocol rule (iOS Q10): every number and every word the
+// client mirrors, held against worktrees-remote's protocol.rs and pipe.rs, and
+// the keys against what serve writes and reads.
+{
+  const pr = shipped(read(SRC.protocol));
+  const u32 = (name) => Number(new RegExp(`pub const ${name}: u32 = (\\d+);`).exec(pr)?.[1]);
+  for (const name of ["PROTO", "HOST_PROTO_MIN"]) check(Number.isInteger(u32(name)) && WS[name] === u32(name), `(proto) ${name} is protocol.rs's (${WS[name]} vs ${u32(name)})`);
+  check(WS.UPDATE_APP === rustStr(pr, "UPDATE_APP"), `(proto) "Update the app" is protocol.rs's UPDATE_APP (${JSON.stringify(rustStr(pr, "UPDATE_APP"))})`);
+  const hostWords = /format!\("([^"]*)\{host\}"\)/.exec(rustFn(pr, "update_host") ?? "")?.[1];
+  check(hostWords !== undefined && WS.updateHost?.("Studio") === `${hostWords}Studio`, `(proto) a host to update is worded as protocol.rs's update_host (${JSON.stringify(hostWords)})`);
+  check(WS.UNKNOWN_COMMAND === rustStr(pr, "UNKNOWN_COMMAND") && /protocol::UNKNOWN_COMMAND/.test(/\nfn unknown\(cmd: &str\) -> Value \{([\s\S]*?)\n\}/.exec(dispatch)?.[1] ?? ""),
+    `(proto) a row the host lacks answers protocol.rs's UNKNOWN_COMMAND, and dispatch.rs's unknown() writes it (${JSON.stringify(rustStr(pr, "UNKNOWN_COMMAND"))})`);
+  const feature = /format!\("([^"]*)\{feature\}([^"]*)"\)/.exec(rustFn(pr, "unsupported_feature") ?? "");
+  check(!!feature && WS.unsupportedFeature?.(`${WS.UNKNOWN_COMMAND}x`, "Live agents") === `${feature[1]}Live agents${feature[2]}`, `(proto) unsupportedFeature words it as protocol.rs does (${JSON.stringify(feature?.slice(1))})`);
+  check(WS.HOST_CLOSED === rustStr(shipped(read(SRC.pipe)), "HOST_CLOSED") && /format!\("\{HOST_CLOSED\}\{\}"/.test(read(SRC.pipe)),
+    `(proto) the pipe's words for a host's close are pipe.rs's HOST_CLOSED, which its recv writes (${JSON.stringify(WS.HOST_CLOSED)})`);
+  const auth = rustFn(wire, "auth_reply") ?? "";
+  check(WS.WIRE?.proto === "proto" && WS.WIRE?.protoMin === "proto_min" && /v\["proto"\] = json!\(worktrees_remote::protocol::PROTO\)/.test(auth) && /v\["proto_min"\] = json!\(worktrees_remote::protocol::PROTO_MIN\)/.test(auth),
+    "(proto) the remote ok carries proto and proto_min from protocol.rs (wire.rs auth_reply), under WIRE's keys");
+  check(/remove\("proto"\)/.test(rustFn(policy, "remote_hello") ?? ""), "(proto) the remote hello's proto is the key serve reads (policy.rs remote_hello)");
+}
+
 // ── 2. the client, on a virtual clock ───────────────────────────────────────
 
 const VERSION = "1.2.3";
@@ -359,7 +383,7 @@ function webcrypto({ gate = null, subtle = globalThis.crypto.subtle } = {}) {
 /** One client and the server side of its fake socket: frames go in through
  *  `recv`, what the client wrote comes out of `frames`. Requests are built
  *  from the RUST keys (K), the handshake from the spec (SPEC). */
-function harness({ version = VERSION, gate = null, subtle, remedy, onError } = {}) {
+function harness({ version = VERSION, gate = null, subtle, remedy, onError, remoteHost, socketModule = WS } = {}) {
   const socks = [];
   class FakeSock {
     constructor(url) { this.url = url; this.sent = []; this.closed = false; socks.push(this); }
@@ -370,8 +394,8 @@ function harness({ version = VERSION, gate = null, subtle, remedy, onError } = {
   const warns = [];
   const clk = clock();
   const wc = webcrypto(subtle === undefined ? { gate } : { gate, subtle });
-  const door = WS.connectSocket({
-    port: PORT, token: TOKEN, version, crypto: wc.crypto,
+  const door = socketModule.connectSocket({
+    port: PORT, token: TOKEN, version, remoteHost, crypto: wc.crypto,
     WebSocket: FakeSock, setTimeout: clk.setTimeout, clearTimeout: clk.clearTimeout,
     atob: globalThis.atob, onError: (m) => { errors.push(m); onError?.(m); }, warn: (m) => warns.push(m), remedy,
   });
@@ -381,7 +405,7 @@ function harness({ version = VERSION, gate = null, subtle, remedy, onError } = {
     door, sock, socks, errors, warns, clk, seen: wc.seen, cn: null, sn: null,
     open: () => cb(() => sock?.onopen?.({})),
     recv: (obj) => cb(() => sock?.onmessage?.({ data: typeof obj === "string" ? obj : JSON.stringify(obj) })),
-    drop: () => cb(() => sock?.onclose?.({})),
+    drop: (reason = "") => cb(() => sock?.onclose?.({ reason })),
     frames,
     /** What the client wrote that is not the handshake: its requests. */
     requests: () => frames().filter((f) => K.cmd in f),
@@ -406,7 +430,7 @@ function harness({ version = VERSION, gate = null, subtle, remedy, onError } = {
     welcome(o = {}) {
       const v = "version" in o ? o.version : VERSION;
       const proof = o.proof ?? spectag(o.key ?? TOKEN, SPEC.serverLabel, h.cn, h.sn);
-      h.recv({ [SPEC.ok]: true, [SPEC.version]: v, [SPEC.proof]: proof });
+      h.recv({ [SPEC.ok]: true, [SPEC.version]: v, [SPEC.proof]: proof, ...(o.protocol ?? {}) });
     },
     /** Until the client's `subtle.verify` has settled, plus a turn for its continuation. */
     async verified() { const done = await until(() => wc.seen.verified); await tick(); return done; },
@@ -627,12 +651,17 @@ function harness({ version = VERSION, gate = null, subtle, remedy, onError } = {
   check(busy.length === 1 && changed.length === 1, "unlisten stops delivery to that handler and no other");
 }
 
-// 2i. a version mismatch from a PROVEN server is refused, visibly.
-for (const [label, v] of [["an older server", "0.0.1"], ["a server that sends no version", undefined]]) {
+// 2i. a version mismatch from a PROVEN server is refused, visibly — on the
+// engine door whatever protocol its ok names (iOS Q10 relaxes only the remote
+// door).
+for (const [label, v, protocol] of [
+  ["an older server", "0.0.1"], ["a server that sends no version", undefined],
+  ["a server on another release that names a protocol this client speaks", "0.0.1", { proto: 1, proto_min: 1 }],
+]) {
   const h = harness();
   const p = settle(h.door.invoke("list_workspace"));
   h.open(); h.hello(); h.challenge(); await h.proof();
-  h.welcome({ version: v });
+  h.welcome({ version: v, protocol });
   await h.verified();
   const r = await p;
   const later = await settle(h.door.invoke("get_settings"));
@@ -642,6 +671,85 @@ for (const [label, v] of [["an older server", "0.0.1"], ["a server that sends no
   check(!!h.sock?.closed, `${label}: the client closes the socket`);
   check(h.errors.length === 1 && h.errors[0] === r.err, `${label}: reported once through onError → fail()`);
   check(later.err === r.err, `${label}: later calls fail the same way, at once`);
+}
+
+// 2i'. the remote door (iOS Q10): its hello names this client's protocol, and
+// a PROVEN host's protocol decides — never its release, which differs here in
+// every case. A host too old, or one that names none, is "Update Worktrees on
+// <host>"; one that no longer serves this client is "Update the app"; neither
+// is sent a request or a declaration.
+async function remoteProof(h) { h.open(); h.hello(); h.challenge(); return h.proof(); }
+for (const [label, protocol, want] of [
+  ["a host on another release, same protocol", { proto: 1, proto_min: 1 }, null],
+  ["a newer host that still serves this protocol", { proto: 2, proto_min: 1 }, null],
+  ["a host that serves pre-protocol clients too", { proto: 1, proto_min: 0 }, null],
+  ["a host below HOST_PROTO_MIN", { proto: 0, proto_min: 0 }, "Update Worktrees on Studio"],
+  ["a host that names no protocol", {}, "Update Worktrees on Studio"],
+  ["a host that serves only newer clients", { proto: 2, proto_min: 2 }, "Update the app"],
+  ["a host whose proto is not a number", { proto: "1", proto_min: 1 }, "Update Worktrees on Studio"],
+  ["a host that names no proto_min", { proto: 1 }, "Update Worktrees on Studio"],
+  ["a host whose proto_min is above its proto", { proto: 1, proto_min: 2 }, "Update Worktrees on Studio"],
+]) {
+  const h = harness({ remoteHost: "Studio" });
+  const p = settle(h.door.invoke("future_feature"));
+  h.door.declare(["sessions:busy"]);
+  await remoteProof(h);
+  const hello = h.frames()[0] ?? {};
+  check(same(Object.keys(hello), [SPEC.hello, "proto"]) && hello.proto === 1, `(proto) ${label}: the remote hello is {hello, proto: 1} (${JSON.stringify(Object.keys(hello))})`);
+  h.welcome({ version: "99.0.0", protocol });
+  await h.verified();
+  if (want) {
+    const r = await p;
+    check(r.err === want && h.requests().length === 0 && !h.frames().some((f) => K.listen in f) && !!h.sock?.closed && h.errors.length === 1,
+      `(proto) ${label}: "${want}", once, the socket closed, and no request or declaration sent (${r.err})`);
+  } else {
+    const sent = h.frames().slice(2);
+    const req = h.requests()[0];
+    check(sent.length === 2 && K.listen in sent[0] && req?.[K.cmd] === "future_feature", `(proto) ${label}: served — the declaration, then the call (${JSON.stringify(sent.map(Object.keys))})`);
+    if (req) h.error(req[K.reqId], "unknown command: future_feature");
+    const r = await p;
+    check(r.err === "unknown command: future_feature", `(proto) ${label}: a row the host lacks is sent, and its refusal comes back unchanged (${JSON.stringify(r)})`);
+  }
+}
+// A close during the handshake. Over the pipe a host's reason arrives in its
+// words (HOST_CLOSED), and the engine door never reads one.
+for (const [label, opts, stage, reason, want] of [
+  ["a pre-protocol host drops the remote hello", { remoteHost: "Studio" }, "hello", "", "Update Worktrees on Studio"],
+  ["…as the pipe words it", { remoteHost: "Studio" }, "hello", "the connection ended", "Update Worktrees on Studio"],
+  ["a host refuses this client's protocol", { remoteHost: "Studio" }, "proof", "the host closed the connection: Update the app", "Update the app"],
+  ["…unwrapped", { remoteHost: "Studio" }, "proof", "Update the app", "Update the app"],
+  ["a host closes at the proof for another reason", { remoteHost: "Studio" }, "proof", "the host closed the connection: revoked", /refused this client's proof/],
+  ["the engine door at its proof, whatever the reason", {}, "proof", "Update the app", /refused this client's proof/],
+  ["the engine door at its hello", {}, "hello", "", /older than handshake v1/],
+]) {
+  const h = harness(opts);
+  if (stage === "proof") await remoteProof(h); else { h.open(); h.hello(); }
+  h.drop(reason);
+  const r = await settle(h.door.ready);
+  check(typeof want === "string" ? r.err === want : want.test(String(r.err)), `(proto) ${label}: ${want} (${r.err})`);
+}
+{
+  const h = harness({ remoteHost: "Studio" });
+  await remoteProof(h);
+  h.welcome({ key: hex32(), protocol: { proto: 0, proto_min: 99 } });
+  await h.verified();
+  const r = await settle(h.door.ready);
+  check(/proof does not verify/.test(String(r.err)) && !/Update/.test(String(r.err)), "(proto) an unproven host's protocol claim is never believed: the proof fails first");
+  check(WS.unsupportedFeature?.("unknown command: future_feature", "Live agents") === "This host doesn't support Live agents yet", "(proto) unsupportedFeature words a row the host lacks for a UI");
+  check(WS.unsupportedFeature?.("denied", "Live agents") === undefined && WS.unsupportedFeature?.({ kind: "x" }, "Live agents") === undefined, "(proto) …and leaves every other refusal alone");
+}
+// HOST_PROTO_MIN refuses on its own: a later client may raise its floor (a
+// security property it now relies on) without changing its own protocol.
+{
+  const source = read(SRC.ipcws).replace(/export const HOST_PROTO_MIN = \d+;/, "export const HOST_PROTO_MIN = 2;");
+  const js = await transformWithEsbuild(source, "floor.ts", { loader: "ts", format: "esm" });
+  const future = await load(SRC.ipcws, js.code);
+  const h = harness({ remoteHost: "Studio", socketModule: future });
+  await remoteProof(h);
+  h.welcome({ protocol: { proto: 1, proto_min: 1 } });
+  await h.verified();
+  const r = await settle(h.door.ready);
+  check(r.err === "Update Worktrees on Studio", `(proto) a client whose HOST_PROTO_MIN is 2 refuses a protocol-1 host it would otherwise speak to (${r.err})`);
 }
 
 // 2j. refusals, a dead stack, a silent server — all surfaced, none swallowed.
@@ -1521,9 +1629,9 @@ ${body}
         // The host's half of handshake v1, by the spec, keyed with the token.
         if (SPEC.hello in f) { p.cn = f[SPEC.hello]; p.sn = hex32(); p.push({ [SPEC.challenge]: p.sn }); }
         else if (SPEC.auth in f) {
-          if (f[SPEC.auth] === spectag(RTOKEN, SPEC.clientLabel, p.cn, p.sn)) p.push({ [SPEC.ok]: true, [SPEC.version]: VERSION, [SPEC.proof]: spectag(RTOKEN, SPEC.serverLabel, p.cn, p.sn), device: { id: "d_x", caps: GRANTS[p.conn - 7] ?? [] } });
+          if (f[SPEC.auth] === spectag(RTOKEN, SPEC.clientLabel, p.cn, p.sn)) p.push({ [SPEC.ok]: true, [SPEC.version]: "99.0.0", proto: 1, proto_min: 1, [SPEC.proof]: spectag(RTOKEN, SPEC.serverLabel, p.cn, p.sn), device: { id: "d_x", caps: GRANTS[p.conn - 7] ?? [] } });
           else p.end("bad proof");
-        } else if (K.cmd in f) p.push({ [K.id]: f[K.reqId], [K.ok]: `served:${f[K.cmd]}` });
+        } else if (K.cmd in f) p.push(f[K.cmd] === "future_feature" ? { [K.id]: f[K.reqId], [K.err]: "unknown command: future_feature" } : { [K.id]: f[K.reqId], [K.ok]: `served:${f[K.cmd]}` });
       },
       async close(conn) { const p = pipes.find((x) => x.conn === conn); if (p) p.closed = true; },
     };
@@ -1545,7 +1653,7 @@ ${body}
     ipc.setRemoteGrant(null);
     pipe = await RJ.openPipe(shim, "h_studio", { setTimeout: (fn, ms) => setTimeout(fn, ms) }, ipc.setRemoteGrant);
     const sock = WS.connectSocket({
-      port: 0, token: pipe.connected.token, version: VERSION, crypto: webcrypto().crypto, WebSocket: pipe.WebSocket,
+      port: 0, token: pipe.connected.token, remoteHost: pipe.remoteHost, version: VERSION, crypto: webcrypto().crypto, WebSocket: pipe.WebSocket,
       setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (h) => clearTimeout(h), atob: globalThis.atob, onError: lost, warn: () => {},
     });
     return { sock, owned: false, started: false };
@@ -1555,7 +1663,7 @@ ${body}
   await settle(door.connect());
   await until(() => ipc.engineState().kind === "up");
   const p1 = pipes[0];
-  check(ipc.engineState().kind === "up" && p1?.got[0] && same(Object.keys(p1.got[0].f), [SPEC.hello]),
+  check(ipc.engineState().kind === "up" && p1?.got[0] && same(Object.keys(p1.got[0].f), [SPEC.hello, "proto"]),
     `(remote) ipcws.ts, unchanged, says hello over the pipe and completes handshake v1 (${JSON.stringify(ipc.engineState())})`);
   check(!!p1 && p1.got.some((g) => g.f[SPEC.auth] === spectag(RTOKEN, SPEC.clientLabel, p1.cn, p1.sn)), "(remote) …keyed with the pipe's session token: its proof is HMAC(token, client label ‖ cn ‖ sn), computed here from the spec");
   // In order, however the shim's sends complete.
@@ -1602,6 +1710,8 @@ ${body}
   await settle(ipc.invoke("list_workspace"));
   check(!!p2 && p2.got.some((x) => x.f[K.cmd] === "list_workspace") && p2.got.every((x) => x.conn === p2.conn) && !(p1?.got ?? []).some((x) => x.conn !== p1.conn),
     "(remote) the new socket's sends name the new conn, and nothing goes to the old pipe");
+  const unknown = await settle(door.invoke("future_feature"));
+  check(unknown.err === "unknown command: future_feature" && p2.got.some(g => g.f[K.cmd] === "future_feature"), "(remote) an unknown row is sent and its wire refusal passes through the remote door");
   check(!WIRE_LOG.some((t) => t.includes(RTOKEN)), "(remote) the session token is the HMAC key and never goes on the wire");
 }
 
@@ -1614,7 +1724,7 @@ ${body}
   };
   const boot = body("remoteBoot");
   check(boot.length > 0 && !/engine_connect/.test(boot), "(remote) main.tsx's remoteBoot never calls engine_connect: with a host chosen, no local serve is found or started (§4.4)");
-  check(/connectRemote\(\{ \.\.\.socketDeps\(lost, remedy\), port: 0, token: pipe\.connected\.token, WebSocket: pipe\.WebSocket \}\)/.test(boot) &&
+  check(/connectRemote\(\{ \.\.\.socketDeps\(lost, remedy\), port: 0, token: pipe\.connected\.token, remoteHost: pipe\.remoteHost, WebSocket: pipe\.WebSocket \}\)/.test(boot) &&
     /return \{ sock, owned: false, started: false \};/.test(boot) && /remoteDoor\(\s*tauriDoor,/.test(boot),
     "(remote) remoteBoot hands connectSocket the pipe's token and socket, says owned:false, and goes through remoteDoor");
   check(/const door = host\s*\? await remoteBoot\(host\)\s*: engineDoor\(/.test(main), "(remote) the app's boot takes remoteBoot only when a host is chosen, else the engine door");

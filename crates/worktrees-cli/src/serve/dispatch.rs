@@ -425,9 +425,10 @@ fn test_shared(cx: &Call, args: &Args) -> Result<Value, Value> {
     Ok(Value::from(*n))
 }
 
-/// The answer to a command no row names.
+/// The answer to a command no row names — how a client tells a row this
+/// host lacks, with no protocol bump (`worktrees_remote::protocol`).
 fn unknown(cmd: &str) -> Value {
-    Value::from(format!("unknown command: {cmd}"))
+    Value::from(format!("{}{cmd}", worktrees_remote::protocol::UNKNOWN_COMMAND))
 }
 
 /// What a refused request is answered — THE one refusal path: both refusal
