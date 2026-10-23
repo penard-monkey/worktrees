@@ -202,14 +202,14 @@ pub fn client_proof_ok(token: &str, cn: &str, sn: &str, proof: &str) -> bool {
     mac(token, CLIENT_LABEL, cn, sn).verify_slice(&tag).is_ok()
 }
 
-/// The server's proof, for the `ok` reply. Call it only after
-/// `client_proof_ok` — the server proves nothing to an unproven peer.
 /// The client's proof, as a console client of this serve computes it
 /// (`client.rs`, the CLI's `serve call|remote|pair`).
 pub fn client_proof_for(token: &str, cn: &str, sn: &str) -> String {
     mac(token, CLIENT_LABEL, cn, sn).finalize().into_bytes().iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// The server's proof, for the `ok` reply. Call it only after
+/// `client_proof_ok` — the server proves nothing to an unproven peer.
 pub fn server_proof(token: &str, cn: &str, sn: &str) -> String {
     mac(token, SERVER_LABEL, cn, sn).finalize().into_bytes().iter().map(|x| format!("{x:02x}")).collect()
 }

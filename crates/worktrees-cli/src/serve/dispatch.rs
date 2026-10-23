@@ -721,11 +721,6 @@ pub fn holds_channel_with(cx: &Call, row: &Row, args: &Args, live: &dyn Fn(&str,
     })
 }
 
-/// Step-up (§2.5, §11 Q8): a paired device whose record requires it makes a
-/// drive-class act only with a proof that holds on this connection. Read
-/// here, after the objects resolved, because a path class or another device
-/// can RAISE the act to drive-class; never in the resolver, whose coverage
-/// check is also what a reduction re-runs on open channels.
 /// §5.1, the device half: no non-read act from a device while the audit log
 /// cannot take its record — the console fails open, a device fails closed.
 /// The row's own capability decides, as it decides what is recorded.
@@ -736,6 +731,11 @@ fn audit_gate(cx: &Call, row: &Row) -> Result<(), resolve::Refusal> {
     Err(resolve::Refusal::audit_unavailable(format!("{} is not a read, and the audit log cannot take its record", row.name)))
 }
 
+/// Step-up (§2.5, §11 Q8): a paired device whose record requires it makes a
+/// drive-class act only with a proof that holds on this connection. Read
+/// here, after the objects resolved, because a path class or another device
+/// can RAISE the act to drive-class; never in the resolver, whose coverage
+/// check is also what a reduction re-runs on open channels.
 fn stepup_gate(cx: &Call, row: &Row, args: &Args, r: &resolve::Resolved) -> Result<(), resolve::Refusal> {
     let authz::Device::Paired(d) = cx.caller.device() else { return Ok(()) };
     if !needs_stepup(row, &r.needs, holds_channel(cx, row, args)) || !cx.registry.stepup_required(cx.caller.principal(), d) {
