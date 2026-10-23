@@ -53,8 +53,10 @@ mod tests {
     }
 }
 pub mod dial;
+pub mod discover;
 pub mod hosts;
 pub mod key;
 pub mod pair;
 pub mod pipe;
+pub mod reach;
 pub mod tls;

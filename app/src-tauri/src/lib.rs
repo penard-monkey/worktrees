@@ -300,8 +300,17 @@ async fn remote_pair(
     remote.pair(&link, &name, &on_event).await
 }
 
+/// Follow a kept host to a new address by its address code (§4.1): kept
+/// only once a pinned connection there succeeds; the moved host, or the
+/// refusal in words.
+#[tauri::command]
+async fn remote_readdress(remote: tauri::State<'_, Arc<remote::Remote>>, host_id: String, code: String) -> Result<worktrees_remote::hosts::HostSummary, String> {
+    remote.readdress(&host_id, &code).await
+}
+
 /// Open the pinned socket to a kept host: `{conn, token, host}`, then its
-/// frames on `on_frame` as `{frame}` and, last, `{closed}`.
+/// frames on `on_frame` as `{frame}` and, last, `{closed}`. Nothing answering
+/// at its address sends the shim looking for it on the LAN (`reach`).
 #[tauri::command]
 async fn remote_connect(
     remote: tauri::State<'_, Arc<remote::Remote>>,
@@ -534,6 +543,7 @@ pub fn run() {
             remote_choose,
             remote_forget,
             remote_pair,
+            remote_readdress,
             remote_connect,
             remote_send,
             remote_close,

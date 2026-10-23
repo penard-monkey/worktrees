@@ -65,3 +65,44 @@ SECRET="aaaaaaaaaaaaaaaaaaaaaaaaaa"
   [ "$status" -eq 2 ]
   grep -qF "unknown flag --bogus" <<<"$output"
 }
+
+# A kept host, written by hand: the record only (no key — nothing below gets
+# as far as needing one).
+keep_host() {
+  mkdir -p "$CFG"
+  cat >"$CFG/remote-hosts.json" <<JSON
+{"v": 1, "chosen": null, "hosts": [{"id": "h_aaaaaaaaaaaaaaaaaaaaaaaaaa", "name": "Mac mini", "addr": "192.168.1.5:7461", "pin": "$PIN", "discovery_id": "aaaaaaaaaaaaaaaaaaaaaaaaaa", "device_id": "d_abc", "principal_id": "owner", "expiry": {"idle_days": 30}, "paired_at": 1800000000}]}
+JSON
+}
+
+OTHER_PIN="cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+
+@test "remote readdress refuses a malformed code, a public address and a zone before looking for the host" {
+  run_wt -C "$BATS_TEST_TMPDIR" remote readdress nobody "worktrees-pair:v1?addr=192.168.1.9:7461" --config-dir "$CFG"
+  [ "$status" -eq 2 ]
+  grep -qF "not an address code" <<<"$output"
+  run_wt -C "$BATS_TEST_TMPDIR" remote readdress nobody "worktrees-addr:v1?addr=8.8.8.8:7461&pin=$PIN" --config-dir "$CFG"
+  [ "$status" -eq 2 ]
+  grep -qF "not-private: 8.8.8.8 is public" <<<"$output"
+  run_wt -C "$BATS_TEST_TMPDIR" remote readdress nobody "worktrees-addr:v1?addr=[fe80::1%4]:7461&pin=$PIN" --config-dir "$CFG"
+  [ "$status" -eq 2 ]
+  grep -qF "zone" <<<"$output"
+  [ ! -e "$CFG/remote-hosts.json" ]
+}
+
+@test "remote readdress names an unknown host" {
+  keep_host
+  run_wt -C "$BATS_TEST_TMPDIR" remote readdress nobody "worktrees-addr:v1?addr=192.168.1.9:7461&pin=$PIN" --config-dir "$CFG"
+  [ "$status" -eq 2 ]
+  grep -qF 'no paired host is called "nobody"' <<<"$output"
+}
+
+@test "remote readdress refuses a code for another host's pin, dials nothing, and keeps the record byte for byte" {
+  keep_host
+  cp "$CFG/remote-hosts.json" "$BATS_TEST_TMPDIR/before.json"
+  run_wt -C "$BATS_TEST_TMPDIR" remote readdress "Mac mini" "worktrees-addr:v1?addr=192.168.1.9:7461&pin=$OTHER_PIN" --config-dir "$CFG"
+  [ "$status" -eq 1 ]
+  grep -qF "for another host" <<<"$output"
+  grep -qF "Nothing was dialled" <<<"$output"
+  cmp "$CFG/remote-hosts.json" "$BATS_TEST_TMPDIR/before.json"
+}

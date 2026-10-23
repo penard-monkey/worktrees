@@ -1846,6 +1846,22 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       mockRemote.hosts = [...mockRemote.hosts, h];
       return h;
     }
+    // An address code is followed after a beat; one whose address is public,
+    // or whose pin starts f0f0f0 (a forged code), is refused the way the shim
+    // words it.
+    case "remote_readdress": {
+      const h = mockRemote.hosts.find((x) => x.id === args.hostId);
+      if (!h) throw `no paired host is called "${String(args.hostId)}"`;
+      const code = String(args.code ?? "").trim();
+      const m = /^worktrees-addr:v1\?addr=([^&]+)&pin=[0-9a-f]{64}$/.exec(code);
+      if (!m) throw "not an address code: bad-code: an address code starts with \"worktrees-addr:v1?\"";
+      if (/^(8\.8\.8\.8|1\.1\.1\.1):/.test(m[1])) throw `not an address code: not-private: ${m[1].split(":")[0]} is public — only RFC 1918, 100.64.0.0/10, link-local and fc00::/7 may be used`;
+      await new Promise((r) => setTimeout(r, 400));
+      if (code.includes("f0f0f0")) throw `${m[1]}: the machine at that address is not the paired host: its key does not match the pin, so nothing was sent to it. ${h.name}'s address is unchanged (${h.addr}).`;
+      const moved = { ...h, addr: m[1] };
+      mockRemote.hosts = mockRemote.hosts.map((x) => (x === h ? moved : x));
+      return moved;
+    }
     case "remote_connect":
       throw "the mock harness has no remote host to dial: it answers every command itself";
     case "remote_send":

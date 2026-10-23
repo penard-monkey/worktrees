@@ -7,6 +7,12 @@
 // window: the door is decided once, at boot (main.tsx), and a remote one never
 // finds or starts a local serve.
 //
+// A host that moved is followed by its ADDRESS CODE ("Paste a new address"):
+// `worktrees serve remote status` shows it on the host. The shim keeps the new
+// address only once a connection there proves the key kept at pairing, so a
+// forged code changes nothing. (On a LAN the shim also looks for a moved host
+// by itself, each time it reconnects; this is the way back when that fails.)
+//
 // Pairing takes the LINK a host shows beside its pairing QR (§2.3: carried
 // over Universal Clipboard, AirDrop or a password manager — a desktop has no
 // camera to scan with). Its address is judged before anything is dialled; the
@@ -36,6 +42,9 @@ export function HostsPanel({ onReport, onFail }: { onReport: (m: string) => void
   const [pairing, setPairing] = useState<{ host?: string; addr?: string; code?: string } | null>(null);
   const [pairErr, setPairErr] = useState<string | null>(null);
   const [armed, setArmed] = useState<string | null>(null);
+  // The host whose "Paste a new address" form is open, what is typed there,
+  // whether it is being tried, and the refusal in the shim's words.
+  const [moving, setMoving] = useState<{ id: string; code: string; busy: boolean; err: string | null } | null>(null);
   // Set on EVERY mount: StrictMode mounts, unmounts and mounts again, and a
   // flag only ever cleared would drop every answer after the first unmount.
   const mounted = useRef(true);
@@ -65,6 +74,21 @@ export function HostsPanel({ onReport, onFail }: { onReport: (m: string) => void
       onReport(`Forgot ${h.name}. It still lists this machine until it is revoked there.`);
       await reload();
     } catch (e) { onFail(e); }
+  };
+  const readdress = async (h: HostSummary, code: string) => {
+    setMoving({ id: h.id, code, busy: true, err: null });
+    try {
+      const moved = await invoke<HostSummary>("remote_readdress", { hostId: h.id, code: code.trim() });
+      if (!mounted.current) return;
+      setMoving(null);
+      onReport(
+        `${moved.name} is now at ${moved.addr}: a connection there proved the key kept at pairing.` +
+          (drives && chosen === h.id ? " This window uses it on its next try; Reconnect now tries at once." : ""),
+      );
+      await reload();
+    } catch (e) {
+      if (mounted.current) setMoving({ id: h.id, code, busy: false, err: String(e) });
+    }
   };
   const pair = async () => {
     setPairErr(null);
@@ -115,9 +139,32 @@ export function HostsPanel({ onReport, onFail }: { onReport: (m: string) => void
               <button className="ctrl sm" disabled={chosen === h.id} onClick={() => void choose(h.id)}>
                 {chosen === h.id ? "Driving" : "Drive"}
               </button>
+              <button className="ctrl sm" data-testid="hosts-move" disabled={moving?.id === h.id}
+                onClick={() => setMoving({ id: h.id, code: "", busy: false, err: null })}>
+                Paste a new address
+              </button>
               <button className={"ctrl sm danger" + (armed === h.id ? " armed" : "")} onClick={() => void forget(h)}>
                 {armed === h.id ? "Really forget?" : "Forget"}
               </button>
+              {moving?.id === h.id && (
+                <div className="hosts-move" data-testid="hosts-move-form">
+                  <div className="hint">
+                    On {h.name}, <code>worktrees serve remote status</code> shows its address code
+                    (<code>worktrees-addr:v1?…</code>). It is kept only if {h.name} answers there with the key this
+                    machine paired with.
+                  </div>
+                  <input type="text" value={moving.code} aria-label={`Address code for ${h.name}`} placeholder="worktrees-addr:v1?addr=…"
+                    disabled={moving.busy} autoFocus onChange={(e) => { const code = e.currentTarget.value; setMoving((m) => m && { ...m, code, err: null }); }}
+                    onKeyDown={(e) => { if (e.key === "Enter" && moving.code.trim() && !moving.busy) void readdress(h, moving.code); }} />
+                  <div className="ver-actions">
+                    <button className="ctrl sm" data-testid="hosts-move-go" disabled={moving.busy || !moving.code.trim()} onClick={() => void readdress(h, moving.code)}>
+                      {moving.busy ? `Connecting to ${h.name}…` : "Use this address"}
+                    </button>
+                    <button className="ctrl sm" disabled={moving.busy} onClick={() => setMoving(null)}>Cancel</button>
+                  </div>
+                  {moving.err && <pre className="update-log" data-testid="hosts-move-err">{moving.err}</pre>}
+                </div>
+              )}
             </div>
           ))}
         </div>

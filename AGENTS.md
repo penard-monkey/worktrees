@@ -373,6 +373,26 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   only when `app/dist` exists, so a local 50/50 without a fresh `pnpm build`
   did not check them; its static rule now demands destructured imports.
 
+- **A moved host's new address is a CANDIDATE, never a fact**
+  (`worktrees_remote::{discover, reach}`, §4.1, §4.7). `reach::open` — the
+  shim's `remote_connect`, `worktrees remote call` — looks on the LAN only
+  when the host is not at the kept address: unreachable (`PipeError::Connect`)
+  or answered by another key (`NotThePin`, the old IP handed on). The pinned
+  host refusing THIS device's key is not a move and sends no one looking. One
+  bounded round tries at most four distinct candidates, each dialled with the
+  KEPT pin, and `HostStore::readdress` moves the record only once the whole
+  pipe opens. An address code (`reach::adopt_code`) takes the same path. The
+  browse is dns_sd FFI on macOS, like serve's advert, on ONE shared
+  connection: deallocating it frees every operation on it, so never free those
+  one by one after it. The filter is pure (`discover::candidate`: TXT exactly
+  `v=1`+`id`, the classifier, on-link for the interface the advert arrived
+  on), and tests drive the rule with a scripted `Browser` and `Env::route`,
+  which sends each judged private address to its loopback fixture and records
+  every dial. To forge an advert on one Mac, copy one scratch serve's
+  `server-identity.discovery` into a second's config dir. And `worktrees serve
+  remote …` with no `--config-dir` asks the user's REAL serve: name the
+  scratch dir on every call.
+
 **Adding a harness? Walk `docs/adding-a-harness.md` first, and tick it only
 by SEEING each surface work.** pi shipped in v0.33.0 with a correct core —
 MCP `place_status` said `busy` — and no nav dot at all: the app builds its dots
