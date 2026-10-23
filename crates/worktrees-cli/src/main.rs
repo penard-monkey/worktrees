@@ -9,6 +9,7 @@ use worktrees_core::render::error_line;
 use worktrees_core::{CliUi, Project};
 
 mod mcp;
+mod remote;
 mod serve;
 mod stale;
 
@@ -67,6 +68,8 @@ worktrees — one git worktree per branch, one active agent per worktree.
   worktrees serve [--config-dir D] [--port N] [--allow-origin O]  the engine behind a loopback
                                         WebSocket, one per machine; writes <config-dir>/serve.json
                                         (--owner app: the desktop app started it and stops it on quit)
+  worktrees remote pair|hosts|call|forget  this machine as a paired device of another host's serve
+                                        (pair <link>; call <host> <cmd> [json-args]; no repo needed)
   worktrees mcp [--mutations]           MCP server over stdio (for an AI session; not interactive)
                                         (--cross-project off|read|full: narrow the user's cross_project, never widen)
   worktrees mcp --status [--json] [--ai codex|pi|kimi]  check Claude, Codex, pi or kimi MCP setup (no repo needed)
@@ -153,6 +156,8 @@ fn run() -> i32 {
         // MACHINE, not the cwd: it serves every registered project, and the
         // desktop app will start it from wherever it happens to be.
         Some("serve") => return serve::cmd_serve(args.get(1..).unwrap_or(&[])),
+        // This machine as another host's paired device; needs no repository.
+        Some("remote") => return remote::cmd_remote(args.get(1..).unwrap_or(&[])),
         Some("mcp") => {
             let rest = args.get(1..).unwrap_or(&[]);
             return match mcp::setup_verb(rest) {
