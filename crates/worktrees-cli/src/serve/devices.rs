@@ -958,10 +958,14 @@ impl DeviceRegistry {
     }
 
     /// Every unrevoked device's security fields: §5.1's checkpoint, which
-    /// the audit log reads through `audit::Fleet`.
-    pub fn checkpoint(&self) -> Vec<SecurityFields> {
+    /// the audit log reads through `audit::Fleet`. `None` while serve holds
+    /// no evidence of its own for the file — from boot until §5.2's
+    /// cross-check — so a checkpoint never vouches for a record nobody
+    /// checked: the chain would carry a forged device on as evidence.
+    pub fn checkpoint(&self) -> Option<Vec<SecurityFields>> {
         let st = self.state.read().unwrap();
-        st.file.as_ref().map(|f| f.devices.iter().filter(|d| !d.is_revoked()).map(DeviceRecord::security).collect()).unwrap_or_default()
+        st.evidence.as_ref()?;
+        Some(st.file.as_ref().map(|f| f.devices.iter().filter(|d| !d.is_revoked()).map(DeviceRecord::security).collect()).unwrap_or_default())
     }
 
     // ── changes ──────────────────────────────────────────────────────────────
@@ -1284,18 +1288,48 @@ impl DeviceRegistry {
 
     /// §5.2's cross-check against the audit chain: `evidence` is, per device,
     /// the security fields its last `enrolled`, scope, expiry and step-up
-    /// records set (the newest checkpoint onward). A device with no evidence
-    /// is disabled as `unrecorded`, and so is one whose record says more than
-    /// its evidence; a tombstone edited back to life is revoked again. The
-    /// devices corrected. The audit lane wires this at boot.
-    // A seam: the audit lane (#534) wires it; until then, the tests.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// records set (the newest checkpoint onward, `audit::evidence`). A device
+    /// with no evidence is disabled as `unrecorded`, and so is one whose
+    /// record says more than its evidence; a tombstone edited back to life is
+    /// revoked again. The devices corrected. `conn::start` runs it at boot,
+    /// before the log writes a line.
+    ///
+    /// It always leaves serve holding evidence of its own — the file as it
+    /// corrected it, even when nothing needed correcting — so the next hand
+    /// edit is checked against that and never taken as it stands. A
+    /// correction that cannot be written still applies in memory: a device
+    /// is refused rather than served because the disk is full. An unreadable
+    /// file corrects nothing, and the chain's evidence is what it is checked
+    /// against once it can be read.
     pub fn cross_check(&self, evidence: &HashMap<DeviceId, SecurityFields>, now: i64) -> Result<Vec<DeviceId>, String> {
-        self.mutate(|f, events| {
+        let mut events = Vec::new();
+        let out = self.locked(|| {
+            let mut st = self.state.write().unwrap();
+            self.refresh_locked(&mut st, &mut events);
+            let cur = match &st.file {
+                Ok(f) => f.clone(),
+                Err(why) => {
+                    let why = unreadable(why);
+                    st.evidence = Some(evidence.clone());
+                    return Err(why);
+                }
+            };
+            let mut next = cur.clone();
             let before = events.len();
-            correct(f, evidence, now, events);
-            Ok(events[before..].iter().filter_map(|e| e.ends().cloned()).collect())
-        })
+            correct(&mut next, evidence, now, &mut events);
+            let fixed = events[before..].iter().filter_map(|e| e.ends().cloned()).collect();
+            if next != cur {
+                if let Err(why) = self.write_locked(&mut st, &next) {
+                    worktrees_api::log::error(&format!("serve: {FILE}: could not write the boot cross-check's corrections: {why}"));
+                    st.file = Ok(next.clone());
+                    self.generation.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+            st.evidence = Some(evidence_of(&next));
+            Ok(fixed)
+        });
+        self.fire(&events);
+        out
     }
 }
 
@@ -1841,6 +1875,47 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
     }
 
+    /// A CLEAN cross-check still leaves serve holding evidence of its own:
+    /// a hand edit after it — a device's capabilities widened — is checked
+    /// against what the check vouched for, not taken as it stands. And until
+    /// the check, the registry vouches for nothing in a checkpoint.
+    #[test]
+    fn a_clean_cross_check_leaves_evidence_a_later_edit_is_checked_against() {
+        let d = dir("clean");
+        let a = phone(&DeviceRegistry::open(&d), "A", 1, &[Read]);
+        let reg = DeviceRegistry::open(&d);
+        assert_eq!(reg.checkpoint(), None, "before the cross-check, the file is nobody's evidence");
+        let chain = HashMap::from([(a.id.clone(), a.security())]);
+        assert_eq!(reg.cross_check(&chain, NOW).unwrap(), Vec::<DeviceId>::new(), "nothing to correct");
+        assert_eq!(reg.checkpoint(), Some(vec![a.security()]));
+        let mut f = DevicesFile::parse(&fs::read(d.join(FILE)).unwrap()).unwrap();
+        f.devices[0].caps = Caps::of(&[Read, Write, Stream]);
+        fs::write(d.join(FILE), serde_json::to_vec_pretty(&f).unwrap()).unwrap();
+        reg.refresh();
+        assert_eq!(reg.device_grant(&PrincipalId::owner(), &a.id), None, "a widening after a clean check is corrected");
+        let disabled = reg.snapshot().unwrap().device(&a.id).unwrap().disabled;
+        assert_eq!(disabled.map(|x| x.reason), Some(DisabledReason::Unrecorded));
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// A correction the disk refuses still applies: a device the chain
+    /// never enrolled is refused in memory, not served because devices.json
+    /// could not be rewritten (a read-only config dir here; a full disk).
+    #[test]
+    fn a_correction_that_cannot_be_written_still_refuses_the_device() {
+        let d = dir("ro");
+        let a = phone(&DeviceRegistry::open(&d), "A", 1, &[Read]);
+        let reg = DeviceRegistry::open(&d);
+        fs::set_permissions(&d, fs::Permissions::from_mode(0o500)).unwrap();
+        let fixed = reg.cross_check(&HashMap::new(), NOW);
+        fs::set_permissions(&d, fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(fixed.unwrap(), vec![a.id.clone()]);
+        let on_disk = DevicesFile::parse(&fs::read(d.join(FILE)).unwrap()).unwrap();
+        assert_eq!(on_disk.device(&a.id).unwrap().disabled, None, "the write was refused, so this is the branch under test");
+        assert_eq!(reg.device_grant(&PrincipalId::owner(), &a.id), None, "and the device is refused all the same");
+        let _ = fs::remove_dir_all(&d);
+    }
+
     /// §5.1's checkpoint is every unrevoked device's security fields, and it
     /// is exactly the evidence §5.2 needs: fed back as the chain, it vouches
     /// for every device and corrects nothing.
@@ -1850,7 +1925,7 @@ mod tests {
         let a = phone(&reg, "A", 1, &[Read, Stream]);
         let b = phone(&reg, "B", 2, &[Read]);
         reg.revoke(&Caller::console(), &Grant::everything(), &b.id, NOW).unwrap();
-        let cp = reg.checkpoint();
+        let cp = reg.checkpoint().expect("a registry serve wrote vouches for itself");
         assert_eq!(cp.iter().map(|f| f.device.clone()).collect::<Vec<_>>(), vec![a.id.clone()], "tombstones are not live");
         assert_eq!(cp[0].caps, Caps::of(&[Read, Stream]));
         assert_eq!(cp[0].principal, PrincipalId::owner());

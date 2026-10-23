@@ -162,7 +162,12 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   `DeviceEvent` is a record too (`Audit::hear`, subscribed in `conn::start`;
   the mapping is an exhaustive match, a refused key joins the auth episode,
   and the pairing code never reaches a line), and every checkpoint carries
-  `DeviceRegistry::checkpoint()` (`audit::Fleet`). A paired device's own
+  `DeviceRegistry::checkpoint()` (`audit::Fleet`). §5.2's boot cross-check
+  runs in `conn::start` between `Audit::open` and `started`
+  (`audit::evidence` → `DeviceRegistry::cross_check`, which always leaves
+  serve holding evidence), and `checkpoint()` is `None` — a `null` list —
+  until it has: a checkpoint that listed a file nobody checked would carry a
+  forged device on as evidence into every later boot. A paired device's own
   records spend a per-device BYTE budget (`ACTS`, `DRIVE` — drive-class as
   `needs_stepup` reads `Resolved::needs` — and `REFUSALS`); past it they are
   counted into a `budget` episode, never dropped, and registry, pairing and

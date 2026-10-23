@@ -84,7 +84,7 @@ use worktrees_api::Host;
 
 use worktrees_core::authz::{Caller, Capability, Device, DeviceId, PrincipalId};
 
-use super::devices::{Actor, ConnectRefusal, DeviceEvent, DeviceRegistry, SecurityFields, Subject};
+use super::devices::{self, Actor, ConnectRefusal, DeviceEvent, DeviceRegistry, Disabled, DisabledReason, SecurityFields, Subject};
 use super::dispatch::{self, Args, Row, Witness};
 use super::resolve::{Refusal, RefusalKind, Resolved};
 
@@ -179,12 +179,14 @@ const REOPEN_EVERY: Duration = Duration::from_secs(1);
 
 /// Where a checkpoint reads the devices it carries (§5.1): every unrevoked
 /// device's security fields, which §5.2 compares a `devices.json` with
-/// instead of reading a file rotation removed. Called under the log's lock;
+/// instead of reading a file rotation removed — or `None` while serve holds
+/// no evidence of its own, before the boot cross-check, when the checkpoint
+/// says `null` and vouches for nothing. Called under the log's lock;
 /// the registry's [`DeviceRegistry::checkpoint`] takes only its state's read
 /// lock, and the registry hands its events to the log after releasing its
 /// locks, so the two never wait on each other.
 #[derive(Clone)]
-pub struct Fleet(Arc<dyn Fn() -> Vec<SecurityFields> + Send + Sync>);
+pub struct Fleet(Arc<dyn Fn() -> Option<Vec<SecurityFields>> + Send + Sync>);
 
 impl Fleet {
     /// The registry's devices: serve's.
@@ -196,7 +198,7 @@ impl Fleet {
     /// No device at all: a log with no registry behind it (the unit tests).
     #[cfg(test)]
     pub fn none() -> Fleet {
-        Fleet(Arc::new(Vec::new))
+        Fleet(Arc::new(|| Some(Vec::new())))
     }
 }
 
@@ -584,6 +586,104 @@ pub fn verify(dir: &Path) -> Verdict {
     v.last_seq = prev_seq.unwrap_or(0);
     v.head = prev_hash;
     v
+}
+
+// ── §5.2's evidence ─────────────────────────────────────────────────────────
+
+/// §5.2's evidence, per device: the security fields the chain says it has —
+/// the newest checkpoint's list, then every record after it that sets one
+/// (`enrolled`, `scope_changed`, `expiry_changed`, `stepup_changed`,
+/// `disabled`, `enabled`, `revoked`). Files are read oldest first, so an
+/// older checkpoint is replaced by a newer one; a tombstone stays one across
+/// checkpoints, which list only unrevoked devices, and a `null` list vouches
+/// for nothing new. Read only up to `v`'s first break, and not the record
+/// before it either, which an edit there would have changed: nothing past a
+/// break is evidence. A record about a device names it, and its principal,
+/// in `detail.subject`, and one that names a device the chain does not
+/// already hold sets nothing.
+pub fn evidence(dir: &Path, v: &Verdict) -> HashMap<DeviceId, SecurityFields> {
+    let mut ev = HashMap::new();
+    let names = (1..KEEP).rev().map(rotated_name).filter(|n| std::fs::symlink_metadata(dir.join(n)).is_ok()).chain([FILE.to_string()]);
+    for name in names {
+        // The 1-based line the chain first fails at in this file; 0 for the
+        // file itself.
+        let stop = v.broken.as_ref().filter(|b| b.file == name).map(|b| b.line);
+        let Ok(Some(bytes)) = read_regular(&dir.join(&name)) else {
+            if stop.is_some() {
+                return ev;
+            }
+            continue;
+        };
+        let mut lines: Vec<&[u8]> = bytes.split(|b| *b == b'\n').collect();
+        lines.pop();
+        for (i, line) in lines.iter().enumerate() {
+            if stop.is_some_and(|n| i + 2 >= n) {
+                return ev;
+            }
+            if let Ok(r) = serde_json::from_slice::<Value>(line) {
+                apply_evidence(&mut ev, &r);
+            }
+        }
+        if stop.is_some() {
+            return ev;
+        }
+    }
+    ev
+}
+
+/// `v` as a `T`, if it is one.
+fn parse_as<T: serde::de::DeserializeOwned>(v: &Value) -> Option<T> {
+    serde_json::from_value(v.clone()).ok()
+}
+
+/// One record's part in [`evidence`].
+fn apply_evidence(ev: &mut HashMap<DeviceId, SecurityFields>, r: &Value) {
+    let d = &r["detail"];
+    match r["kind"].as_str() {
+        Some("checkpoint") => {
+            let Some(list) = parse_as::<Vec<SecurityFields>>(&d["devices"]) else { return };
+            ev.retain(|id, f| f.revoked_at.is_some() && !list.iter().any(|x| &x.device == id));
+            ev.extend(list.into_iter().map(|f| (f.device.clone(), f)));
+        }
+        Some("device") => {
+            if d["event"] == "enrolled" {
+                if let Some(f) = parse_as::<SecurityFields>(&d["fields"]) {
+                    ev.insert(f.device.clone(), f);
+                }
+                return;
+            }
+            let (Some(p), Some(id)) = (d["subject"]["principal"].as_str(), d["subject"]["device"].as_str()) else { return };
+            let Some(f) = ev.get_mut(&DeviceId::new(id)).filter(|f| f.principal.as_str() == p) else { return };
+            let at = r["ts"].as_str().and_then(devices::parse_rfc3339).unwrap_or(0);
+            match d["event"].as_str() {
+                Some("revoked") => f.revoked_at = Some(at),
+                Some("disabled") => {
+                    if let Some(reason) = parse_as::<DisabledReason>(&d["reason"]) {
+                        f.disabled = Some(Disabled { at, reason });
+                    }
+                }
+                Some("enabled") => f.disabled = None,
+                Some("expiry_changed") => {
+                    if let Some(x) = parse_as(&d["to"]) {
+                        f.expiry = x;
+                    }
+                }
+                Some("stepup_changed") => {
+                    if let Some(b) = d["required"].as_bool() {
+                        f.stepup_required = b;
+                    }
+                }
+                Some("scope_changed") => {
+                    if let Some(g) = parse_as::<worktrees_core::authz::Grant>(&d["to"]) {
+                        f.caps = g.capabilities;
+                        f.projects = g.projects;
+                    }
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
 }
 
 // ── the writer ──────────────────────────────────────────────────────────────
@@ -1019,11 +1119,12 @@ impl Audit {
 
     /// The record that opens every file. `devices` is the security fields of
     /// every unrevoked device (§5.1), so §5.2 never needs a file rotation
-    /// removed. Read inside `quietly`: a registry that panics costs this
-    /// checkpoint its list (`null`, which no reader can take for "none"),
-    /// never the record or the chain.
+    /// removed — or `null`, which vouches for nothing ([`evidence`] reads on
+    /// from what came before): written before the boot cross-check, or by a
+    /// registry that panicked (read inside `quietly`, so that costs the list,
+    /// never the record or the chain).
     fn checkpoint(&self, st: &mut State, reason: &'static str, torn: Option<u64>) -> std::io::Result<()> {
-        let devices = quietly(|| (self.fleet.0)()).map(|d| json!(d)).unwrap_or(Value::Null);
+        let devices = quietly(|| (self.fleet.0)()).flatten().map(|d| json!(d)).unwrap_or(Value::Null);
         let mut d = json!({ "reason": reason, "devices": devices });
         if let Some(n) = torn {
             d["torn_bytes"] = json!(n);
@@ -3379,6 +3480,165 @@ mod tests {
         assert_eq!(alerts.len(), 2, "revoked once, disabled once: {alerts:#?}");
         assert_eq!(alerts[0]["detail"], json!({ "alert": "device", "event": "connect_refused", "reason": "revoked", "subject": { "principal": "owner", "device": "d_lost" } }));
         assert_eq!(host.0.lock().unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // ── §5.2's evidence ─────────────────────────────────────────────────────
+
+    /// What the chain says each device was given, read back as a boot reads
+    /// it: an enrollment, then every record that set a field, and nothing for
+    /// a device the chain never enrolled.
+    #[test]
+    fn the_chain_is_the_evidence_a_boot_reads() {
+        let d = dir("evidence");
+        let (a, _) = Audit::open(&d, None, Fleet::none());
+        let s = owner_subject("d_new");
+        a.device_event(&DeviceEvent::Enrolled { subject: s.clone(), name: "Phone".into(), platform: Platform::Ios, fields: fields("d_new") });
+        a.device_event(&DeviceEvent::Enrolled { subject: owner_subject("d_old"), name: "Old".into(), platform: Platform::Macos, fields: fields("d_old") });
+        let wide = Grant { capabilities: Caps::of(&[Capability::Read, Capability::Write]), projects: Projects::only(["/p".to_string()]) };
+        let narrow = Grant { capabilities: Caps::of(&[Capability::Read]), projects: Projects::All };
+        a.device_event(&DeviceEvent::ScopeChanged { subject: s.clone(), by: Actor::Console, from: narrow, to: wide.clone(), widened: true, reduced: true });
+        a.device_event(&DeviceEvent::ExpiryChanged { subject: s.clone(), from: Expiry::default(), to: Expiry::Never });
+        a.device_event(&DeviceEvent::StepupChanged { subject: s.clone(), required: true });
+        a.device_event(&DeviceEvent::Disabled { subject: s.clone(), reason: DisabledReason::Idle, by: Actor::Serve });
+        a.device_event(&DeviceEvent::Enabled { subject: s.clone() });
+        a.device_event(&DeviceEvent::Revoked { subject: owner_subject("d_old"), by: Actor::Console });
+        // A record about a device the chain never enrolled sets nothing.
+        a.device_event(&DeviceEvent::Disabled { subject: owner_subject("d_ghost"), reason: DisabledReason::Idle, by: Actor::Serve });
+        let ev = evidence(&d, &verify(&d));
+        let mut want = fields("d_new");
+        (want.caps, want.projects, want.expiry, want.stepup_required) = (wide.capabilities, wide.projects.clone(), Expiry::Never, true);
+        assert_eq!(ev.get(&DeviceId::new("d_new")), Some(&want));
+        assert!(ev.get(&DeviceId::new("d_old")).is_some_and(|f| f.revoked_at.is_some()));
+        assert_eq!(ev.len(), 2, "{ev:#?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A checkpoint is where a boot reads from: its list replaces what came
+    /// before, whose files may be gone, but a tombstone stays one; and a
+    /// `null` list vouches for nothing, so what came before stands.
+    #[test]
+    fn a_checkpoint_replaces_the_evidence_before_it_and_keeps_tombstones() {
+        let enrolled = |id: &str| json!({ "kind": "device", "ts": "2027-01-15T08:00:00Z", "detail": { "event": "enrolled", "fields": fields(id) } });
+        let revoked = |id: &str| json!({ "kind": "device", "ts": "2027-01-15T08:00:00Z", "detail": { "event": "revoked", "subject": owner_subject(id) } });
+        let checkpoint = |list: Value| json!({ "kind": "checkpoint", "detail": { "reason": "rotated", "devices": list } });
+        let mut ev = HashMap::new();
+        for r in [enrolled("d_gone"), enrolled("d_dead"), revoked("d_dead"), enrolled("d_kept")] {
+            apply_evidence(&mut ev, &r);
+        }
+        apply_evidence(&mut ev, &checkpoint(Value::Null));
+        assert_eq!(ev.len(), 3, "a null list vouches for nothing new: {ev:#?}");
+        apply_evidence(&mut ev, &checkpoint(json!([fields("d_kept")])));
+        let mut ids: Vec<&str> = ev.keys().map(DeviceId::as_str).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["d_dead", "d_kept"], "the list replaces the rest, and the tombstone stays");
+        assert!(ev[&DeviceId::new("d_dead")].revoked_at.is_some());
+    }
+
+    /// The point of a checkpoint's devices (§5.1): once rotation has removed
+    /// every file that held a device's enrollment, the newest checkpoint is
+    /// still its evidence — read from the registry, so it says what serve
+    /// holds.
+    #[test]
+    fn a_device_whose_enrollment_rotated_away_is_vouched_for_by_the_checkpoint() {
+        let d = dir("evidence-cp");
+        let reg = Arc::new(DeviceRegistry::in_memory());
+        let (a, _) = Audit::open_with(&d, None, Fleet::of(&reg), 900);
+        a.hear(&reg);
+        let e = Enrollment {
+            principal: PrincipalId::owner(),
+            name: "Mac".into(),
+            platform: Platform::Macos,
+            spki_sha256: "7".repeat(64),
+            stepup_spki_sha256: None,
+            grant: Grant { capabilities: Caps::of(&[Capability::Read]), projects: Projects::All },
+            expiry: Expiry::default(),
+            addr: None,
+        };
+        let mac = reg.enroll(e, now()).unwrap();
+        for i in 0..60 {
+            call(&console(&a), "set_note", json!({ "repo": "/r", "slug": format!("s{i}"), "note": "x" }));
+        }
+        let v = verify(&d);
+        assert!(v.first_seq.unwrap() > 1, "the genesis file is gone: {v:?}");
+        let held: String = v.files.iter().map(|n| std::fs::read_to_string(d.join(n)).unwrap()).collect();
+        assert!(!held.contains("\"enrolled\""), "no enrollment record is left on disk");
+        let ev = evidence(&d, &v);
+        assert_eq!(ev.get(&mac.id), Some(&mac.security()), "{ev:#?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Nothing past a break in the chain is evidence — nor the record before
+    /// the break, which is the one an edit would have changed: a forged
+    /// enrollment slipped into the middle of the log vouches for nothing.
+    #[test]
+    fn a_record_past_a_break_is_not_evidence() {
+        let d = dir("evidence-break");
+        let (a, _) = Audit::open(&d, None, Fleet::none());
+        a.device_event(&DeviceEvent::Enrolled { subject: owner_subject("d_real"), name: "Real".into(), platform: Platform::Macos, fields: fields("d_real") });
+        call(&console(&a), "set_note", json!({ "repo": "/r", "slug": "s", "note": "x" }));
+        call(&console(&a), "set_note", json!({ "repo": "/r", "slug": "t", "note": "x" }));
+        a.device_event(&DeviceEvent::Enrolled { subject: owner_subject("d_later"), name: "Later".into(), platform: Platform::Macos, fields: fields("d_later") });
+        let p = d.join(FILE);
+        let mut lines = raw_lines(&p);
+        // The second set_note, rewritten into an enrollment of a forged device.
+        let forged = lines[4].replace("\"d_later\"", "\"d_forged\"");
+        lines[3] = forged;
+        write_lines(&p, &lines);
+        let v = verify(&d);
+        assert!(v.broken.is_some());
+        let ev = evidence(&d, &v);
+        assert!(ev.contains_key(&DeviceId::new("d_real")), "{ev:#?}");
+        assert!(!ev.contains_key(&DeviceId::new("d_forged")) && !ev.contains_key(&DeviceId::new("d_later")), "{ev:#?}");
+        let _ = std::fs::remove_dir_all(&d);
+
+        // An enrollment edited IN PLACE to grant more: its own `prev` still
+        // holds, and the chain breaks at the line after it — which is why the
+        // record before a break is not evidence either.
+        let d = dir("evidence-edit");
+        let (a, _) = Audit::open(&d, None, Fleet::none());
+        a.device_event(&DeviceEvent::Enrolled { subject: owner_subject("d_real"), name: "Real".into(), platform: Platform::Macos, fields: fields("d_real") });
+        call(&console(&a), "set_note", json!({ "repo": "/r", "slug": "s", "note": "x" }));
+        let p = d.join(FILE);
+        let mut lines = raw_lines(&p);
+        assert!(lines[1].contains("\"enrolled\"") && lines[1].contains("[\"read\"]"), "{}", lines[1]);
+        lines[1] = lines[1].replace("[\"read\"]", "[\"read\",\"write\",\"stream\",\"instruct\",\"answer\",\"admin\"]");
+        write_lines(&p, &lines);
+        let v = verify(&d);
+        assert_eq!(v.broken.as_ref().map(|b| b.line), Some(3), "{v:?}");
+        let ev = evidence(&d, &v);
+        assert!(ev.get(&DeviceId::new("d_real")).is_none_or(|f| f.caps == Caps::of(&[Capability::Read])), "the widened grant is not evidence: {ev:#?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A checkpoint written before the boot cross-check vouches for nothing:
+    /// its list is `null`, not the devices.json serve found — or a forged
+    /// device in it would be carried on as evidence by every later boot.
+    #[test]
+    fn a_checkpoint_before_the_cross_check_vouches_for_nothing() {
+        let d = dir("vouch");
+        let first = DeviceRegistry::open(&d);
+        let e = Enrollment {
+            principal: PrincipalId::owner(),
+            name: "Forged".into(),
+            platform: Platform::Macos,
+            spki_sha256: "9".repeat(64),
+            stepup_spki_sha256: None,
+            grant: Grant::everything(),
+            expiry: Expiry::Never,
+            addr: None,
+        };
+        let forged = first.enroll(e, now()).unwrap();
+        drop(first);
+        let reg = Arc::new(DeviceRegistry::open(&d));
+        let (a, _) = Audit::open(&d, None, Fleet::of(&reg));
+        call(&console(&a), "set_note", json!({ "repo": "/r", "slug": "s", "note": "x" }));
+        let cp = &live(&d)[0];
+        assert_eq!((cp["kind"].as_str(), cp["detail"]["devices"].clone()), (Some("checkpoint"), Value::Null), "{cp}");
+        let ev = evidence(&d, &verify(&d));
+        assert!(ev.is_empty(), "{ev:#?}");
+        assert_eq!(reg.cross_check(&ev, now()).unwrap(), vec![forged.id.clone()]);
+        assert_eq!(worktrees_core::authz::Registry::device_grant(&*reg, &PrincipalId::owner(), &forged.id), None);
         let _ = std::fs::remove_dir_all(&d);
     }
 }

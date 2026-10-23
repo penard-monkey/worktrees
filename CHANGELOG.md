@@ -262,6 +262,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
     A known device trying also raises an alert, once per burst.
   - Each log file begins with the devices and what each may reach, so that
     list survives when older files are rotated away.
+  - When serve starts, it checks every device in `devices.json` against the
+    log before anything can connect. A device the log never saw paired, or
+    one that may reach more than the log recorded, is disabled, and an alert
+    says so. Until that check has run, a new log file vouches for no device.
   - Each device has an allowance of log space. Past it, its lines are counted
     instead of written: one line when the overflow begins, and one when it
     ends with how many lines it held and what they were. Nothing is dropped.

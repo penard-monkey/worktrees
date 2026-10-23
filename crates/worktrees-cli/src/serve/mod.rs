@@ -270,10 +270,10 @@ pub fn start_with(config_dir: PathBuf, port: u16, allow_origin: Vec<String>, lim
     // was given, after the registry's locks are released. The audit log
     // subscribes in `conn::start` (`Audit::hear`), before `startup`, so it
     // hears an unreadable file's alert too, and its checkpoints read
-    // `devices.checkpoint()`. §5.2's boot cross-check,
-    // `devices.cross_check(chain's fields per device, now)`, is not wired
-    // yet; it must run before the log can write a checkpoint, or the first
-    // one vouches for whatever the file held at boot.
+    // `devices.checkpoint()`. §5.2's boot cross-check runs there as well,
+    // before the log writes a line: `devices.cross_check` against
+    // `audit::evidence`, so a device the chain never enrolled is disabled
+    // before anything can serve it, and no checkpoint vouches for it first.
     // Pairing windows bind where slice 6's remote listener says; until it
     // exists, none ever opens (`Pairing::set_bind`).
     let pairing = Arc::new(pairing::Pairing::new(Some(config_dir.clone()), devices.clone()));

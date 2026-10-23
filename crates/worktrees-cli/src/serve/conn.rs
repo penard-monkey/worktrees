@@ -34,7 +34,7 @@ use tokio_tungstenite::WebSocketStream;
 use worktrees_api::log::{error, info, warn};
 use worktrees_api::{Ctx, Host};
 
-use super::audit::{Audit, ConnAudit, Fleet, Outcome};
+use super::audit::{self, Audit, ConnAudit, Fleet, Outcome};
 use super::budget::{self, Budgets, Counter, Held, BUSY};
 use super::devices::{DeviceEvent, DeviceRegistry};
 use super::pairing::Pairing;
@@ -796,8 +796,16 @@ pub fn start(ctx: Ctx, token: String, port: u16, origins: Vec<String>, clients: 
     // The audit log opens with the port bound, so its first record names it.
     // Its checkpoints carry the client set's devices, and every registry
     // event — a pairing, a revoke, a refused key — is one of its records.
-    let (audit, chain) = Audit::open(&ctx.config_dir, Some(ctx.host.clone()), Fleet::of(&clients.devices()));
-    audit.hear(&clients.devices());
+    // Before it writes a line, and so before any checkpoint could vouch for
+    // one, every device in devices.json is checked against what the chain
+    // says it was given (§5.2): one it never enrolled, or one that says more
+    // than its records, is disabled before anything can serve it.
+    let devices = clients.devices();
+    let (audit, chain) = Audit::open(&ctx.config_dir, Some(ctx.host.clone()), Fleet::of(&devices));
+    audit.hear(&devices);
+    if let Err(e) = devices.cross_check(&audit::evidence(&ctx.config_dir, &chain), worktrees_core::sysclock::now_epoch()) {
+        warn(&format!("serve: the boot cross-check of {}: {e}", super::devices::FILE));
+    }
     audit.started(port, &chain);
     let shared = Arc::new(Shared {
         ctx,
