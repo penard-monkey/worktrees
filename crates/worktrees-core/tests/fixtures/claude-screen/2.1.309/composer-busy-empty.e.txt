@@ -1,0 +1,40 @@
+
+
+  [38;5;246mRan [1m1[0m[38;5;246m shell command [39m
+
+[38;5;231m⏺[39m Done.
+
+[38;5;246m✻[39m [38;5;246mSautéed for 3s · done 1:48 PM[39m
+
+[38;5;246m[48;5;237m❯ [38;5;231mUse the AskUserQuestion tool to ask me exactly one question: which colour [39m
+  [38;5;231mshould the demo use, Red or Blue. Then reply with only the colour I picked.[39m
+
+[38;5;246m[49m⏺ [39mUser answered Claude's questions:
+[38;5;246m  ⎿  · Which colour should the demo use? → Blue[39m
+
+[38;5;231m⏺[39m Blue
+
+[38;5;246m✻[39m [38;5;246mBrewed for 2s · done 1:49 PM[39m
+
+[38;5;246m[48;5;237m❯ [38;5;231mUse the Write tool to create notes.txt containing the single line: hello from[39m
+  [38;5;231mthe probe. Do nothing else.[39m
+
+[38;5;211m[49m⏺[39m [1mWrite[0m(]8;id=n2aes3;file:///private/tmp/claude-501/wtfx/repo/notes.txt\notes.txt]8;;\)
+[38;5;246m  ⎿  [38;5;239mUser rejected write to [1m]8;id=n2aes3;file:///private/tmp/claude-501/wtfx/repo/notes.txt\notes.txt[0m]8;;\
+     [2m[38;5;231m 1 hello from the probe[0m
+
+[38;5;246m✻[39m [38;5;246mChurned for 1s · done 1:50 PM[39m
+
+[38;5;246m[48;5;237m❯ [38;5;231mUse the Bash tool to run exactly: sleep 20   Then say ok.[39m
+
+[38;5;246m[49m [39m Sleeping for 20 seconds[38;5;246m · 7s[39m
+[38;5;246m  ⎿  $ sleep 20 (8s)[39m
+     [38;5;246m(ctrl+b ctrl+b (twice) to run in background)[39m
+
+[38;5;174m✽[39m [38;5;216mCogitating…[38;5;174m [38;5;246m(9s · ↓[39m [38;5;246m82 tokens)[39m
+[38;5;246m  ⎿  Tip: Run tasks in the cloud while you keep coding locally · clau.de/web[39m
+
+[38;5;244m────────────────────────────────────────────────────────────────────────────────
+[38;5;246m❯ [39m
+[38;5;244m────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;246m⏸ manual mode on · esc to interrupt · ← 1 agent[39m

@@ -1,0 +1,40 @@
+❯ Use the Write tool to create notes.txt containing the single line: hello from
+  the probe. Do nothing else.
+
+⏺ Write(notes.txt)
+  ⎿  User rejected write to notes.txt
+      1 hello from the probe
+
+✻ Churned for 1s · done 1:50 PM
+
+❯ Use the Bash tool to run exactly: sleep 20   Then say ok.
+
+  Ran 1 shell command
+
+⏺ ok
+
+✻ Crunched for 22s · done 1:50 PM
+
+❯ Use the Bash tool to run exactly: touch probe-b.txt   Do nothing else.
+
+  Ran 1 shell command
+  ⎿  Interrupted · What should Claude do instead?
+
+✻ Cooked for 1s · done 1:51 PM
+
+❯ Use the AskUserQuestion tool ONCE with TWO questions: colour (Red or Blue)
+  and size (Small or Large). Then reply with only my answers.
+────────────────────────────────────────────────────────────────────────────────
+←  ☐ Colour  ☐ Size  ✔ Submit  →
+
+Which colour should the demo use?
+
+❯ 1. Red
+     Use red for the demo.
+  2. Blue
+     Use blue for the demo.
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel

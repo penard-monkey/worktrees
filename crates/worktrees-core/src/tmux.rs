@@ -781,16 +781,54 @@ pub fn send_literal(pane: &PaneId, text: &str) -> Result<(), String> {
 }
 
 pub fn press_enter(pane: &PaneId) -> Result<(), String> {
-    run_ok(&press_enter_args(pane.as_str()))
+    press(pane, Key::Enter)
 }
 
+/// A key that answering a prompt may press (`prompt::steps`). A CLOSED set:
+/// nothing a client sends becomes a tmux key name, and nothing here is text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Key {
+    Up,
+    Down,
+    Enter,
+}
+
+impl Key {
+    /// The tmux key name.
+    pub fn name(self) -> &'static str {
+        match self {
+            Key::Up => "Up",
+            Key::Down => "Down",
+            Key::Enter => "Enter",
+        }
+    }
+}
+
+/// Press ONE `key` in `pane`, leaving copy-mode first. One key per call: an
+/// Ink TUI handed two arrow sequences in one read may take them as one.
+pub fn press(pane: &PaneId, key: Key) -> Result<(), String> {
+    run_ok(&press_args(pane.as_str(), key))
+}
+
+fn press_args(pane: &str, key: Key) -> Vec<&str> {
+    leave_mode(pane).into_iter().chain(["send-keys", "-t", pane, key.name()]).collect()
+}
+
+#[cfg(test)]
 fn press_enter_args(pane: &str) -> Vec<&str> {
-    leave_mode(pane).into_iter().chain(["send-keys", "-t", pane, "Enter"]).collect()
+    press_args(pane, Key::Enter)
 }
 
 /// The visible screen of `pane`, or `None` when tmux cannot say.
 pub fn capture(pane: &PaneId) -> Option<String> {
     let o = tmux(&["capture-pane", "-p", "-t", pane.as_str()]).ok()?;
+    o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
+}
+
+/// [`capture`] with its styling (`-e`): the only way to tell Claude's dim
+/// placeholder from typed text (`agent::draft_from_screen`).
+pub fn capture_styled(pane: &PaneId) -> Option<String> {
+    let o = tmux(&["capture-pane", "-e", "-p", "-t", pane.as_str()]).ok()?;
     o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
 }
 

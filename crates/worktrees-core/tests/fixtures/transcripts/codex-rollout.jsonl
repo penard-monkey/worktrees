@@ -1,0 +1,17 @@
+{"timestamp":"2026-10-23T18:00:00.000Z","type":"session_meta","payload":{"id":"019a","cwd":"/w/repo","cli_version":"0.159.0","base_instructions":{"text":"BASE-INSTRUCTIONS-MARKER"}}}
+{"timestamp":"2026-10-23T18:00:00.000Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"<permissions instructions>DEVELOPER-MARKER</permissions instructions>"}]}}
+{"timestamp":"2026-10-23T18:00:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<environment_context>ENVIRONMENT-MARKER</environment_context>"}]}}
+{"timestamp":"2026-10-23T18:00:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /w/repo\n\nAGENTS-MD-MARKER"}]}}
+{"timestamp":"2026-10-23T18:00:00.000Z","type":"turn_context","payload":{"model":"gpt-6-astra","cwd":"/w/repo"}}
+{"timestamp":"2026-10-23T18:01:00.000Z","type":"event_msg","payload":{"type":"task_started","turn_id":"t1"}}
+{"timestamp":"2026-10-23T18:01:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"run the tests"}]}}
+{"timestamp":"2026-10-23T18:01:01.000Z","type":"response_item","payload":{"type":"reasoning","summary":[{"type":"summary_text","text":"REASONING-MARKER"}],"encrypted_content":"gAAAA"}}
+{"timestamp":"2026-10-23T18:01:02.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Running them."}]}}
+{"timestamp":"2026-10-23T18:01:02.000Z","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"make test\"}","call_id":"c1"}}
+{"timestamp":"2026-10-23T18:01:09.000Z","type":"response_item","payload":{"type":"function_call_output","call_id":"c1","output":"TOOL-OUTPUT-MARKER"}}
+{"timestamp":"2026-10-23T18:01:10.000Z","type":"response_item","payload":{"type":"custom_tool_call","name":"apply_patch","input":"*** Begin Patch","call_id":"c2"}}
+{"timestamp":"2026-10-23T18:01:11.000Z","type":"response_item","payload":{"type":"custom_tool_call_output","call_id":"c2","output":"TOOL-OUTPUT-MARKER"}}
+{"timestamp":"2026-10-23T18:01:12.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"All green."}]}}
+{"timestamp":"2026-10-23T18:01:12.000Z","type":"event_msg","payload":{"type":"task_complete","turn_id":"t1","completed_at":1700000000}}
+{"timestamp":"2026-10-23T18:02:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<image name=[Image #1]>"},{"type":"input_image","image_url":"data:"},{"type":"input_text","text":"</image>"},{"type":"input_text","text":"push it"}]}}
+{"timestamp":"2026-10-23T18:02:05.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Pushed."}]}}
