@@ -146,6 +146,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   connection. A signature in the wrong format is refused on the device before
   anything is sent, so it cannot use up a pairing window. Pairing and
   connecting from a Mac or Linux machine work as before.
+- **Remote access and paired devices have their own place in Settings.**
+  Everything the CLI does for them, the app now does too.
+  - **Settings → Remote access** shows whether remote access is on, with
+    its address, interface and mode, and whether devices on the network can
+    find this computer. Turn it on by picking one of this computer's
+    private addresses. Turn it off with one click and a confirm; that
+    closes every device's connection at once. The switch for announcing
+    the computer on the network is here too.
+  - **Settings → Devices** lists every paired device. For each one it shows
+    what the device may do and where, until when, and when it was last
+    seen and from which address. You can rename, disable, re-enable or
+    revoke it, change its expiry or its scope, and turn step-up on or off
+    for an iPhone or iPad. A device that can run commands on this computer
+    says so, in those words.
+  - **Pair a device…** asks what the new device may do before anything
+    opens. Then it shows a QR code and a link to copy, valid for two
+    minutes. When a device tries to pair, the sheet shows its name, its
+    address and the six-digit code in large type. Allow it only if the
+    same code is on the device.
+  - A device seen from a new kind of network, a refused device that keeps
+    trying, or a burst of failed logins raises a quiet notice in the
+    corner, with a badge on Devices. It is never a pop-up.
+  - While remote access is on, the corner of the window says so.
+    Clicking it opens Settings → Remote access.
 
 ### Changed
 - **With nothing set, a slot's capacity is sized from the machine.** It used to
