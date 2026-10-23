@@ -12,7 +12,7 @@
 //! than read.
 
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -32,6 +32,9 @@ use worktrees_remote::call::{self, CallError};
 use worktrees_remote::key::DeviceKey;
 use worktrees_remote::pipe::{self, Inbound, PipeError};
 use worktrees_remote::sign::{self, DeviceSigner, Keys, SignError};
+
+mod opaque;
+use opaque::{How, Opaque};
 use worktrees_remote::tls;
 
 const WAIT: Duration = Duration::from_secs(5);
@@ -46,52 +49,6 @@ fn file_keys() -> (Keys, String) {
     let k = DeviceKey::generate().unwrap();
     let pin = k.pin().to_string();
     (Keys::device_only(Arc::new(k)), pin)
-}
-
-/// What an [`Opaque`] key answers its `n`th request with (from 0), given the
-/// honest signature.
-type How = Box<dyn Fn(usize, Vec<u8>) -> Result<Vec<u8>, SignError> + Send + Sync>;
-
-/// The Secure Enclave's stand-in: only `spki_der` and `sign`.
-struct Opaque {
-    pair: ring::signature::EcdsaKeyPair,
-    asked: AtomicUsize,
-    how: How,
-}
-
-impl Opaque {
-    fn new() -> Arc<Opaque> {
-        Opaque::answering(Box::new(|_, sig| Ok(sig)))
-    }
-
-    fn answering(how: How) -> Arc<Opaque> {
-        use ring::signature::{EcdsaKeyPair, ECDSA_P256_SHA256_ASN1_SIGNING};
-        let rng = ring::rand::SystemRandom::new();
-        let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &rng).unwrap();
-        let pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8.as_ref(), &rng).unwrap();
-        Arc::new(Opaque { pair, asked: AtomicUsize::new(0), how })
-    }
-
-    fn asked(&self) -> usize {
-        self.asked.load(Ordering::SeqCst)
-    }
-
-    fn pin(&self) -> String {
-        tls::pin_of_spki(&self.spki_der())
-    }
-}
-
-impl DeviceSigner for Opaque {
-    fn spki_der(&self) -> Vec<u8> {
-        use ring::signature::KeyPair;
-        sign::p256_spki(self.pair.public_key().as_ref()).unwrap()
-    }
-
-    fn sign(&self, message: &[u8]) -> Result<Vec<u8>, SignError> {
-        let n = self.asked.fetch_add(1, Ordering::SeqCst);
-        let sig = self.pair.sign(&ring::rand::SystemRandom::new(), message).unwrap().as_ref().to_vec();
-        (self.how)(n, sig)
-    }
 }
 
 /// The fixture host's identity.

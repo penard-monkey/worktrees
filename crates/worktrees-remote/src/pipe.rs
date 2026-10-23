@@ -21,9 +21,11 @@
 //! also hands over [`Pipe::stepup`], which signs step-up proofs for THIS
 //! session only.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::stream::{SplitSink, SplitStream};
+use rustls::sign::CertifiedKey;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream;
@@ -109,7 +111,14 @@ pub async fn open_at(addr: std::net::SocketAddr, pin: &str, keys: &Keys, wait: D
     // The certificate is signed here, before anything is dialled: a key that
     // cannot sign never reaches the host.
     let certified = tls::certified_key(keys.device.clone()).map_err(PipeError::Sign)?;
-    let cfg = tls::client_config(pin, certified).map_err(PipeError::Tls)?;
+    open_certified(addr, pin, &certified, keys, wait).await
+}
+
+/// [`open_at`] with the device's certificate already made
+/// ([`tls::certified_key`]): a caller that dials several addresses for one
+/// connection (`reach`) has the key sign its certificate once.
+pub(crate) async fn open_certified(addr: std::net::SocketAddr, pin: &str, certified: &Arc<CertifiedKey>, keys: &Keys, wait: Duration) -> Result<Pipe, PipeError> {
+    let cfg = tls::client_config(pin, certified.clone()).map_err(PipeError::Tls)?;
     let work = async {
         let tcp = crate::dial::tcp(addr, wait).await.map_err(|e| PipeError::Connect(e.to_string()))?;
         let server = rustls::pki_types::ServerName::IpAddress(addr.ip().into());
