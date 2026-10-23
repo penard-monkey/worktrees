@@ -158,7 +158,14 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   is held across the body: a follower that met the gate first would queue
   behind its own leader and run the body again. The budget and the flights
   live in `conn::Clients`, so both listeners spend from one and share the
-  other. serve installs its signal
+  other. Every
+  `DeviceEvent` is a record too (`Audit::hear`, subscribed in `conn::start`;
+  the mapping is an exhaustive match, a refused key joins the auth episode,
+  and the pairing code never reaches a line), and every checkpoint carries
+  `DeviceRegistry::checkpoint()` (`audit::Fleet`). A paired device's own
+  records spend a per-device BYTE budget (`ACTS`, `REFUSALS`); past it they
+  are counted into a `budget` episode, never dropped, and registry, pairing
+  and first-of-episode records are never charged. serve installs its signal
   handlers BEFORE it writes serve.json: a supervisor's SIGTERM in that gap killed it
   with no exit status. Anything consumed by being emitted (the inbox's
   `worktrees show`) waits for `Host::has_audience(event)`: a loopback

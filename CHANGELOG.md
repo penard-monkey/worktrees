@@ -248,6 +248,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   end in a use-after-free. Neither Worktrees nor any of its dependencies
   calls them, so nothing in Worktrees could reach it. This keeps the
   dependency on the fixed release.
+- **The audit log records every change to paired devices, and no one device
+  can fill it.** This is groundwork too: no device can connect yet.
+  - A pairing is recorded from the window opening to its closing, with the
+    host's Allow or Deny. The six-digit code and the pairing link are never
+    written.
+  - So is every device paired, revoked, disabled or re-enabled, and every
+    change to what a device may reach, when it expires or whether it needs
+    Face ID, with who made the change. Rotating the server's identity is
+    recorded as well.
+  - A revoked, disabled or unknown device trying to connect counts with the
+    other failed connections: one line when a burst begins, one when it ends.
+    A known device trying also raises an alert, once per burst.
+  - Each log file begins with the devices and what each may reach, so that
+    list survives when older files are rotated away.
+  - Each device has an allowance of log space. Past it, its lines are counted
+    instead of written: one line when the overflow begins, and one when it
+    ends with how many lines it held and what they were. Nothing is dropped.
+    A device sending as fast as serve lets it could have rotated the whole
+    log away in about 20 minutes; it now takes more than four days. Pairings,
+    revokes and other device changes are always written in full.
 
 ## [0.43.1] - 2026-10-22
 
