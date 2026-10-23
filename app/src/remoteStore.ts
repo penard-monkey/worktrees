@@ -104,18 +104,28 @@ export function readDevices(): Promise<void> {
 
 // ── alerts ───────────────────────────────────────────────────────────────────
 
+/** Questions the person dismissed, by key: a question stands for as long as
+ *  the pause does, and every status read finds it again, so without this a
+ *  dismissed one would be back on the next `remote:changed`. */
+const dismissedQ = new Set<string>();
+
 function push(a: Alert) {
-  if (state.alerts.some((x) => x.key === a.key)) return;
+  if (state.alerts.some((x) => x.key === a.key) || dismissedQ.has(a.key)) return;
   set({ alerts: [...state.alerts, a].slice(-MAX_ALERTS) });
 }
 
+function forget(keep: (a: Alert) => boolean) {
+  for (const a of state.alerts) if (!keep(a) && a.key.startsWith("q:")) dismissedQ.add(a.key);
+  set({ alerts: state.alerts.filter(keep) });
+}
+
 export function dismissAlert(key: string): void {
-  set({ alerts: state.alerts.filter((a) => a.key !== key) });
+  forget((a) => a.key !== key);
 }
 
 /** Dismiss every notice that points at `cat` — the person went to look. */
 export function dismissCat(cat: Alert["cat"]): void {
-  if (state.alerts.some((a) => a.cat === cat)) set({ alerts: state.alerts.filter((a) => a.cat !== cat) });
+  if (state.alerts.some((a) => a.cat === cat)) forget((a) => a.cat !== cat);
 }
 
 /** The question a pause puts to the host (§4.1) is an alert while it stands
@@ -124,6 +134,8 @@ export function dismissCat(cat: Alert["cat"]): void {
 function syncQuestion(s: RemoteStatus) {
   const q = s.question?.text ?? null;
   const key = q ? `q:${q}` : null;
+  // Answered (or replaced): a later pause asking the same is news again.
+  for (const k of dismissedQ) if (k !== key) dismissedQ.delete(k);
   const kept = state.alerts.filter((a) => !a.key.startsWith("q:") || a.key === key);
   if (kept.length !== state.alerts.length) set({ alerts: kept });
   if (key && q) push({ key, cat: "remote", text: q });
