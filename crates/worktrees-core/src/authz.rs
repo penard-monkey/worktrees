@@ -462,6 +462,15 @@ pub trait Registry: Send + Sync {
     /// `device(id)` object resolves through: a device of another principal is
     /// answered exactly as a missing one is (§3.3).
     fn device_principal(&self, device: &DeviceId) -> Option<PrincipalId>;
+    /// Whether the device's drive-class acts (`stream`, `instruct`, `answer`,
+    /// `admin`) need a fresh step-up proof on the connection (§2.5, §11 Q8).
+    /// A device the registry cannot vouch for answers `true`: no grant
+    /// reaches it anyway, and not knowing must never waive a factor.
+    fn stepup_required(&self, principal: &PrincipalId, device: &DeviceId) -> bool;
+    /// Moves on every change to any record (§3.3). A connection compares it
+    /// with the value it last reconciled its channels at, so "nothing changed"
+    /// costs one atomic load.
+    fn generation(&self) -> u64;
 }
 
 /// Phase 2 slice 1's registry: no paired devices exist, so every device and
@@ -478,6 +487,12 @@ impl Registry for NoDevices {
     }
     fn device_principal(&self, _: &DeviceId) -> Option<PrincipalId> {
         None
+    }
+    fn stepup_required(&self, _: &PrincipalId, _: &DeviceId) -> bool {
+        true
+    }
+    fn generation(&self) -> u64 {
+        0
     }
 }
 
@@ -525,6 +540,12 @@ mod tests {
         }
         fn device_principal(&self, d: &DeviceId) -> Option<PrincipalId> {
             self.devices.get(d).map(|(p, _)| p.clone())
+        }
+        fn stepup_required(&self, _: &PrincipalId, _: &DeviceId) -> bool {
+            false
+        }
+        fn generation(&self) -> u64 {
+            0
         }
     }
 

@@ -113,6 +113,9 @@ pub const EVENTS: &[(&str, Event)] = &[
     // `{alert, …}`: §5.3's alerts are for the person at the host, and a
     // device must not learn that it tripped one.
     ("audit:alert", Event::Console),
+    // The device registry's events, for the Devices list and the alerts:
+    // pairing and device administration are the host's (§3.3, §5.3).
+    ("devices:changed", Event::Console),
 ];
 
 // ── who listens (§9.3) ───────────────────────────────────────────────────────

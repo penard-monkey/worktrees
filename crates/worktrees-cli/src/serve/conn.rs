@@ -32,13 +32,18 @@ use worktrees_api::log::{error, info, warn};
 use worktrees_api::{Ctx, Host};
 
 use super::audit::{Audit, ConnAudit, Outcome};
+use super::devices::{DeviceEvent, DeviceRegistry};
+use super::pairing::Pairing;
 use super::dispatch::{self, Args, Call};
 use super::policy;
-use super::resolve::World;
+use super::resolve::{self, World};
 use super::scope::{self, Listens};
 use super::servefile;
 use super::wire::{self, Frames, Outbox};
-use worktrees_core::authz::{self, Caller, NoDevices, Registry};
+use tokio::sync::Notify;
+use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
+use tokio_tungstenite::tungstenite::protocol::CloseFrame;
+use worktrees_core::authz::{self, Caller, Device, DeviceId, NoDevices, Registry};
 
 // ── limits (OWASP M1) ────────────────────────────────────────────────────────
 //
@@ -185,36 +190,118 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for Budget<T> {
 /// pegged core (see the docs server, which learned it first).
 const ACCEPT_RETRY: std::time::Duration = std::time::Duration::from_millis(50);
 
+/// One authenticated connection, as the client set holds it.
+struct Conn {
+    out: Outbox,
+    caller: Caller,
+    /// The events it declared it listens for (§9.3): what a one-shot event
+    /// and `Host::has_audience` ask. The session's handle is the same set.
+    listens: Listens,
+    /// What the session answers with — its frames (the attaches, dock shells
+    /// and jobs it owns) and its `Ctx`. `None` for a connection added without
+    /// a session (the broadcast tests).
+    call: Option<Arc<Call>>,
+    /// Ends the session: a revoke or a disable closes the device's
+    /// connections at once (§2.5).
+    kill: Arc<Notify>,
+}
+
 /// Every authenticated connection's queue, caller and declared listeners,
-/// for broadcasts, and where every caller's grant is read.
+/// for broadcasts, and where every caller's grant is read. It is also what a
+/// REDUCTION acts on (§3.3): it hears the device registry's events
+/// (`Clients::hear`) and closes a revoked or disabled device's connections,
+/// or ends each channel a narrowed grant no longer covers — the per-request
+/// check alone would let an attach that streams unasked run on.
 pub struct Clients {
-    map: Mutex<HashMap<u64, (Outbox, Caller, Listens)>>,
+    map: Mutex<HashMap<u64, Conn>>,
     registry: Arc<dyn Registry>,
+    /// The registry the device rows change. In serve it IS `registry`; with a
+    /// fixture `registry` (the tests) it is an empty one in memory.
+    devices: Arc<DeviceRegistry>,
+    /// The pairing windows (§2.2), the console's to open.
+    pairing: Arc<Pairing>,
     world: Option<Arc<dyn World>>,
+    /// The sessions that have joined and made their post-join check: what a
+    /// test waits for before an act whose close it times, so the time is the
+    /// close's and not the session's start.
+    #[cfg(test)]
+    ready: Mutex<std::collections::HashSet<u64>>,
 }
 
 impl Default for Clients {
-    /// No paired devices (Phase 2 slice 1): the console is the only caller
-    /// with a grant. Objects resolve against the live registry and tmux.
+    /// No paired devices: the console is the only caller with a grant.
+    /// Objects resolve against the live registry and tmux.
     fn default() -> Self {
         Clients::with(Arc::new(NoDevices), None)
     }
 }
 
 impl Clients {
-    /// `world: None` is the live one; a test hands in fixtures.
+    /// Grants from `registry` (a fixture, in the tests); `world: None` is the
+    /// live one.
     pub fn with(registry: Arc<dyn Registry>, world: Option<Arc<dyn World>>) -> Self {
-        Clients { map: Mutex::new(HashMap::new()), registry, world }
+        let devices = Arc::new(DeviceRegistry::in_memory());
+        let pairing = Arc::new(Pairing::new(None, devices.clone()));
+        Clients {
+            map: Mutex::new(HashMap::new()),
+            registry,
+            devices,
+            pairing,
+            world,
+            #[cfg(test)]
+            ready: Default::default(),
+        }
     }
-    /// A connection joins, having declared nothing. The handle is the set
-    /// its listen frames replace.
+    /// Grants from the device registry itself, as serve runs.
+    pub fn serving(devices: Arc<DeviceRegistry>, pairing: Arc<Pairing>, world: Option<Arc<dyn World>>) -> Self {
+        Clients {
+            map: Mutex::new(HashMap::new()),
+            registry: devices.clone(),
+            devices,
+            pairing,
+            world,
+            #[cfg(test)]
+            ready: Default::default(),
+        }
+    }
+    pub fn pairing(&self) -> Arc<Pairing> {
+        self.pairing.clone()
+    }
+    /// Subscribe to the device registry's events. Weakly: the registry's hook
+    /// list must not keep the client set alive.
+    pub fn listen(self: &Arc<Self>) {
+        let me = Arc::downgrade(self);
+        self.devices.subscribe(Arc::new(move |e: &DeviceEvent| {
+            if let Some(c) = me.upgrade() {
+                c.hear(e);
+            }
+        }));
+    }
+    /// A connection with no session joins, having declared nothing. The
+    /// handle is the set its listen frames would replace.
+    #[cfg(test)]
     pub(super) fn add(&self, id: u64, out: Outbox, caller: Caller) -> Listens {
         let listens = Listens::default();
-        self.map.lock().unwrap().insert(id, (out, caller, listens.clone()));
+        let conn = Conn { out, caller, listens: listens.clone(), call: None, kill: Arc::new(Notify::new()) };
+        self.map.lock().unwrap().insert(id, conn);
         listens
+    }
+    /// A session joins, having declared nothing: its queue, and the `Call` it
+    /// answers with. The handles are what ends it and the set its listen
+    /// frames replace.
+    pub(super) fn join(&self, id: u64, out: Outbox, call: Arc<Call>) -> (Arc<Notify>, Listens) {
+        let kill = Arc::new(Notify::new());
+        let listens = Listens::default();
+        let caller = call.caller.clone();
+        let conn = Conn { out, caller, listens: listens.clone(), call: Some(call), kill: kill.clone() };
+        self.map.lock().unwrap().insert(id, conn);
+        (kill, listens)
     }
     pub(super) fn remove(&self, id: u64) {
         self.map.lock().unwrap().remove(&id);
+    }
+    pub fn devices(&self) -> Arc<DeviceRegistry> {
+        self.devices.clone()
     }
     /// How many authenticated clients are connected now.
     pub fn len(&self) -> usize {
@@ -230,6 +317,159 @@ impl Clients {
             Some(w) => w.roots(),
             None => worktrees_core::registry::read_lenient().roots(),
         }
+    }
+
+    /// One registry event (§2.5, §3.3): a revoke or a disable closes the
+    /// device's connections; a reduction ends the channels it no longer
+    /// covers; and the console hears it, for the Devices list and the alerts
+    /// (§5.3) — `devices:changed`, which reaches no device (`scope::EVENTS`).
+    pub fn hear(self: &Arc<Self>, e: &DeviceEvent) {
+        if let Some(d) = e.ends() {
+            let why = match e {
+                DeviceEvent::Revoked { .. } => "revoked",
+                DeviceEvent::Forgotten { .. } => "removed",
+                _ => "disabled",
+            };
+            self.end_device(d, why);
+        }
+        if e.ends_every_device() {
+            let ids: Vec<DeviceId> = {
+                let map = self.map.lock().unwrap();
+                let mut ids: Vec<DeviceId> =
+                    map.values().filter_map(|c| match c.caller.device() { Device::Paired(d) => Some(d.clone()), Device::Console => None }).collect();
+                ids.sort();
+                ids.dedup();
+                ids
+            };
+            for d in ids {
+                self.end_device(&d, "unreadable");
+            }
+        }
+        if let Some(d) = e.reduces() {
+            self.reconcile_device(d);
+        }
+        Broadcast(self.clone()).emit("devices:changed", serde_json::to_value(e).unwrap_or(Value::Null));
+    }
+
+    /// Close every connection of device `d`, now (§2.5): out of the map, so no
+    /// event reaches it; its clone jobs cancelled and its attaches closed on
+    /// this thread, so nothing streams on while the session notices; a close
+    /// frame saying why; then the session ends. A body already running
+    /// finishes, and its reply goes nowhere. The ids closed.
+    pub fn end_device(&self, d: &DeviceId, why: &'static str) -> Vec<u64> {
+        let ended: Vec<(u64, Conn)> = {
+            let mut map = self.map.lock().unwrap();
+            let ids: Vec<u64> = map.iter().filter(|(_, c)| is_device(&c.caller, d)).map(|(id, _)| *id).collect();
+            ids.into_iter().filter_map(|id| map.remove(&id).map(|c| (id, c))).collect()
+        };
+        for (_, c) in &ended {
+            if let Some(call) = &c.call {
+                for job in call.frames.take_jobs() {
+                    let _ = worktrees_api::workspace::clone_cancel(job);
+                }
+                for t in call.frames.take_terms() {
+                    let _ = worktrees_api::term::term_close(t, &call.ctx.terminals);
+                }
+                release_shells(call);
+            }
+            let _ = c.out.send(Message::Close(Some(CloseFrame { code: CloseCode::Policy, reason: why.into() })));
+            c.kill.notify_one();
+        }
+        if !ended.is_empty() {
+            info(&format!("serve: device {d} {why}: {} connection(s) closed", ended.len()));
+        }
+        ended.into_iter().map(|(id, _)| id).collect()
+    }
+
+    /// Session `id` has joined and made its post-join check.
+    #[cfg(test)]
+    pub(super) fn is_ready(&self, id: u64) -> bool {
+        self.ready.lock().unwrap().contains(&id)
+    }
+
+    /// Connection `id` is in the set: joined, and not closed since.
+    #[cfg(test)]
+    pub(super) fn contains(&self, id: u64) -> bool {
+        self.map.lock().unwrap().contains_key(&id)
+    }
+
+    /// End `caller`'s device's connections now if the registry no longer
+    /// serves it — revoked, disabled, removed, or the file unreadable — with
+    /// the word its event would have sent. A session calls it once it has
+    /// JOINED: an event that fired between the handshake and the join found
+    /// no connection to close, and left a socket open that §2.5 says is dead.
+    /// The registry commits a change before it hands its hooks the event, so
+    /// every change either shows here or reaches the connection through
+    /// [`Clients::hear`].
+    pub(super) fn end_if_gone(&self, caller: &Caller) {
+        let Device::Paired(d) = caller.device() else { return };
+        if self.registry.device_grant(caller.principal(), d).is_none() {
+            self.end_device(d, self.devices.ended_word(d));
+        }
+    }
+
+    /// Re-check every open channel of device `d`'s connections against its
+    /// grant as it stands (§3.3).
+    pub fn reconcile_device(&self, d: &DeviceId) {
+        let calls: Vec<Arc<Call>> =
+            self.map.lock().unwrap().values().filter(|c| is_device(&c.caller, d)).filter_map(|c| c.call.clone()).collect();
+        for call in calls {
+            reconcile(&call);
+        }
+    }
+}
+
+fn is_device(c: &Caller, d: &DeviceId) -> bool {
+    matches!(c.device(), Device::Paired(x) if x == d)
+}
+
+/// Let go of every dock-shell sink this connection holds: the shells stay
+/// (they are the process's), and a sink nobody reads is let go now rather
+/// than at the next attach.
+fn release_shells(call: &Call) {
+    for h in call.frames.take_shells() {
+        let _ = worktrees_api::term::shell_detach(h.repo, h.slug, h.index, h.gen, &call.ctx.shells);
+    }
+}
+
+/// End each channel of this connection that its caller's grant, as it stands
+/// now, no longer covers (§3.3): an attach whose session is out of scope or
+/// whose `stream` is gone is closed, a dock shell's sink let go — each ends
+/// with `{channel, seq, end: true}` as its sink drops. The check is the
+/// resolver's own, for the row that opened the channel, so "covers" means
+/// exactly what it meant at the open. Step-up is not asked again: it gates
+/// OPENING a stream, and a proof that lapsed ends nothing already open. The
+/// console's grant is everything and is never reconciled.
+pub fn reconcile(call: &Call) {
+    if call.caller.is_console() {
+        return;
+    }
+    call.frames.reconciled().store(call.registry.generation(), Ordering::SeqCst);
+    let grant = authz::effective(&*call.registry, &call.caller);
+    let check = |cmd: &str, args: Value, world: &dyn World| {
+        let row = dispatch::row(cmd).expect("a stream row");
+        let mut a = Args(args.as_object().cloned().unwrap_or_default());
+        resolve::authorize(row, call, &grant, &mut a, world).is_ok()
+    };
+    let mut ended = 0;
+    dispatch::with_world(call, |world| {
+        for (id, session) in call.frames.terms() {
+            if !check("term_open", serde_json::json!({ "session": session }), world) {
+                call.frames.forget_term(id);
+                let _ = worktrees_api::term::term_close(id, &call.ctx.terminals);
+                ended += 1;
+            }
+        }
+        for h in call.frames.shells() {
+            if !check("shell_open", serde_json::json!({ "repo": h.repo, "slug": h.slug, "index": h.index }), world) {
+                call.frames.forget_shell(&h.repo, &h.slug, h.index);
+                let _ = worktrees_api::term::shell_detach(h.repo.clone(), h.slug.clone(), h.index, h.gen, &call.ctx.shells);
+                ended += 1;
+            }
+        }
+    });
+    if ended > 0 {
+        info(&format!("serve: {} narrowed: {ended} channel(s) it no longer covers ended", call.caller));
     }
 }
 
@@ -249,15 +489,15 @@ impl Host for Broadcast {
         // Read once per emit, and only if a scoped caller needs it.
         let mut roots: Option<Vec<String>> = None;
         let mut map = clients.map.lock().unwrap();
-        map.retain(|_, (out, caller, listens)| {
-            if scope::is_one_shot(event) && !listens.has(event) {
+        map.retain(|_, c| {
+            if scope::is_one_shot(event) && !c.listens.has(event) {
                 return true;
             }
-            let grant = authz::effective(&*clients.registry, caller);
+            let grant = authz::effective(&*clients.registry, &c.caller);
             let mut read = || roots.get_or_insert_with(|| clients.roots()).clone();
-            match scope::event(event, &payload, caller, &grant, &mut read) {
-                Some(p) if p == payload => out.push(whole.clone()).is_ok(),
-                Some(p) => out.push(wire::event_frame(event, &p)).is_ok(),
+            match scope::event(event, &payload, &c.caller, &grant, &mut read) {
+                Some(p) if p == payload => c.out.push(whole.clone()).is_ok(),
+                Some(p) => c.out.push(wire::event_frame(event, &p)).is_ok(),
                 None => true,
             }
         });
@@ -272,7 +512,7 @@ impl Host for Broadcast {
     /// show released to it was lost (§9.3). A connection joins the map once it
     /// has proven itself, having declared nothing, and leaves it as it goes.
     fn has_audience(&self, event: &str) -> bool {
-        self.0.map.lock().unwrap().values().any(|(_, c, l)| c.is_console() && l.has(event))
+        self.0.map.lock().unwrap().values().any(|c| c.caller.is_console() && c.listens.has(event))
     }
 }
 
@@ -563,8 +803,8 @@ async fn handshake_v1(ws: &mut Ws, token: &str) -> Option<()> {
     ws.send(Message::text(wire::auth_reply(&policy::server_proof(token, &cn, &sn)))).await.ok()
 }
 
-/// One authenticated session: the handshake first, then requests until the
-/// client goes.
+/// One session on the loopback listener: handshake v1 first, then the
+/// console's requests until the client goes.
 async fn session(mut ws: Ws, shared: Arc<Shared>, id: u64, origin: String, slot: Arc<Slot>, budget: Arc<AtomicUsize>, peer: Option<String>) {
     // The deadline is on the WHOLE exchange, not per frame: two quick steps
     // adding up to more than it are refused like silence is. A refusal drops
@@ -586,32 +826,67 @@ async fn session(mut ws: Ws, shared: Arc<Shared>, id: u64, origin: String, slot:
     // Every audit record the connection writes names it (§5.1).
     let caller = Caller::console();
     let au = Arc::new(ConnAudit::new(shared.audit.clone(), id, peer, caller.clone()));
+    serve_caller(ws, shared.ctx.clone(), shared.clients.clone(), id, caller, None, au).await;
+}
 
+/// An authenticated connection's life, whoever accepted it: requests until
+/// the client goes or its device is revoked or disabled (§2.5). `caller` is
+/// the listener's, fixed here for the life of the socket — the console for
+/// loopback; for the remote listener (slice 6), the device whose key completed
+/// the handshake, with `stepup_exporter` its session's step-up exporter
+/// (`tls::EXPORTER_STEPUP`) — and `au` is the audit's view of the
+/// connection, naming it. The in-process tests drive it with fake device
+/// callers.
+pub(super) async fn serve_caller<S>(
+    ws: WebSocketStream<S>, ctx: Ctx, clients: Arc<Clients>, id: u64, caller: Caller, stepup_exporter: Option<[u8; 32]>, au: Arc<ConnAudit>,
+)
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    use futures_util::future::{select, Either};
     let (sink, mut stream) = ws.split();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
     let outbox = Outbox(tx);
-    let listens = shared.clients.add(id, outbox.clone(), caller.clone());
     // THE writer: one task drains the one queue, so every frame for this
     // connection is written in the order it was queued.
-    let writer = tokio::spawn(async move {
+    let mut writer = tokio::spawn(async move {
         let mut sink = sink;
         while let Some(m) = rx.recv().await {
-            if sink.send(m).await.is_err() {
+            let close = matches!(m, Message::Close(_));
+            if sink.send(m).await.is_err() || close {
                 break;
             }
         }
     });
-    let frames = Frames::new(outbox.clone());
+    let frames = Frames::with_exporter(outbox.clone(), stepup_exporter);
     let call = Arc::new(Call {
-        ctx: shared.ctx.clone(),
+        ctx: ctx.clone(),
         frames: frames.clone(),
         caller,
-        registry: shared.clients.registry(),
-        world: shared.clients.world.clone(),
+        registry: clients.registry(),
+        world: clients.world.clone(),
+        devices: clients.devices(),
+        pairing: clients.pairing(),
     });
+    frames.reconciled().store(call.registry.generation(), Ordering::SeqCst);
+    let (kill, listens) = clients.join(id, outbox.clone(), call.clone());
+    clients.end_if_gone(&call.caller);
+    #[cfg(test)]
+    clients.ready.lock().unwrap().insert(id);
     let lanes = Lanes::default();
 
-    while let Some(m) = stream.next().await {
+    let mut killed = false;
+    loop {
+        let next = std::pin::pin!(stream.next());
+        let stop = std::pin::pin!(kill.notified());
+        let m = match select(next, stop).await {
+            Either::Left((Some(m), _)) => m,
+            Either::Left((None, _)) => break,
+            Either::Right(_) => {
+                killed = true;
+                break;
+            }
+        };
         match m {
             Ok(Message::Text(t)) => {
                 // Parsed here, on the reader, because the lane is chosen from
@@ -671,17 +946,23 @@ async fn session(mut ws: Ws, shared: Arc<Shared>, id: u64, origin: String, slot:
         }
     }
 
-    shared.clients.remove(id);
+    clients.remove(id);
+    if killed {
+        // `end_device` queued a close frame saying why; give the writer a
+        // moment to put it on the wire before the socket goes.
+        let _ = tokio::time::timeout(std::time::Duration::from_millis(250), &mut writer).await;
+    }
     writer.abort();
     // The tmux attaches this client opened go with it: each is a tmux client
     // on a session, and a client nobody is reading is a client tmux is still
     // painting for. Dock shells stay — they are the process's, and the next
-    // attach replays them.
+    // attach replays them — but this connection's sinks on them are let go.
     let terms = frames.take_terms();
     for t in &terms {
-        let _ = worktrees_api::term::term_close(*t, &shared.ctx.terminals);
+        let _ = worktrees_api::term::term_close(*t, &ctx.terminals);
     }
-    info(&format!("serve: client {id} disconnected ({} attach(es) closed)", terms.len()));
+    release_shells(&call);
+    info(&format!("serve: client {id} {} ({} attach(es) closed)", if killed { "closed by serve" } else { "disconnected" }, terms.len()));
     au.disconnected();
 }
 
@@ -703,7 +984,28 @@ async fn session(mut ws: Ws, shared: Arc<Shared>, id: u64, origin: String, slot:
 /// capability is not `read` is recorded by `finish`, with its outcome, once
 /// the body is done. The host-admin line serve.log used to carry is one of
 /// those records now.
-fn answer(call: &Call, au: &ConnAudit, id: &Value, cmd: &str, args: &Args) -> String {
+pub(super) fn answer(call: &Call, au: &ConnAudit, id: &Value, cmd: &str, args: &Args) -> String {
+    // A registry change this connection has not been checked against yet
+    // (§3.3): one atomic load when nothing moved. The registry's own events
+    // reconcile at once; this is the backstop for a change that came by
+    // another way.
+    let device = !call.caller.is_console();
+    if device && call.frames.reconciled().load(Ordering::SeqCst) != call.registry.generation() {
+        reconcile(call);
+    }
+    let authorized_at = call.registry.generation();
+    let reply = answer_now(call, au, id, cmd, args);
+    // A change that landed WHILE this request ran — after it was authorized,
+    // perhaps before the channel it opened was noted, so that change's own
+    // reconcile could not see it — is checked now: a stream opened under a
+    // grant that has since narrowed must not outlive it (§3.3).
+    if device && call.registry.generation() != authorized_at {
+        reconcile(call);
+    }
+    reply
+}
+
+fn answer_now(call: &Call, au: &ConnAudit, id: &Value, cmd: &str, args: &Args) -> String {
     use std::panic::{catch_unwind, AssertUnwindSafe};
     let seen = au.request();
     let r = catch_unwind(AssertUnwindSafe(|| dispatch::call_seen(call, cmd, args, &seen)));

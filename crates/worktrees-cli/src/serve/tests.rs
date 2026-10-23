@@ -622,6 +622,12 @@ fn an_event_reaches_each_socket_projected_to_its_caller() {
         fn device_principal(&self, _: &DeviceId) -> Option<PrincipalId> {
             Some(PrincipalId::owner())
         }
+        fn stepup_required(&self, _: &PrincipalId, _: &DeviceId) -> bool {
+            false
+        }
+        fn generation(&self) -> u64 {
+            0
+        }
     }
     struct Two;
     impl super::resolve::World for Two {
@@ -1360,4 +1366,1278 @@ fn the_audit_log_records_limits_once_per_episode() {
     assert_eq!((limit[1]["detail"]["episode"].as_str(), limit[1]["detail"]["count"].as_u64()), (Some("ended"), Some(5)));
     let msg = recs.iter().find(|r| r["detail"]["limit"] == "message_size").unwrap_or_else(|| panic!("{recs:#?}"));
     assert_eq!((msg["kind"].as_str(), msg["principal"].as_str(), msg["device"].as_str()), (Some("refused"), Some("owner"), Some("loopback")));
+}
+
+// ── paired devices on the real client set (Phase 2 slice 5) ──────────────────
+//
+// No remote listener exists before slice 6, so a "device" here is
+// `conn::serve_caller` — exactly what that listener will run once mTLS has
+// named the device — driven over a loopback socket pair with a paired caller,
+// on the REAL `Clients`, listening to a REAL `DeviceRegistry`.
+
+mod devices {
+    use super::super::conn::{self, Broadcast, Clients};
+    use super::super::pairing::Pairing;
+    use super::super::devices::{DeviceRecord, DeviceRegistry, Enrollment, Expiry, Platform};
+    use super::super::dispatch::{self, Args, Call};
+    use super::super::resolve::World;
+    use super::super::wire::{Frames, Outbox, ShellHold};
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::{json, Value};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+    use tokio::net::TcpStream;
+    use tokio_tungstenite::tungstenite::protocol::Role;
+    use tokio_tungstenite::tungstenite::Message;
+    use tokio_tungstenite::WebSocketStream;
+    use worktrees_api::Ctx;
+    use worktrees_core::authz::{self, Capability, Caps, Caller, DeviceId, Grant, PrincipalId, Projects, Registry};
+    use Capability::*;
+
+    const NOW: i64 = 1_800_000_000;
+
+    /// Real directories for the registered roots: the resolver canonicalizes.
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("wt-serve-dev-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        for p in ["a", "b", "cfg"] {
+            std::fs::create_dir_all(d.join(p)).unwrap();
+        }
+        std::fs::canonicalize(&d).unwrap()
+    }
+
+    fn s(p: &std::path::Path) -> String {
+        p.to_string_lossy().into_owned()
+    }
+
+    struct Roots {
+        roots: Vec<String>,
+        panes: Vec<(String, String, String)>,
+    }
+
+    impl World for Roots {
+        fn roots(&self) -> Vec<String> {
+            self.roots.clone()
+        }
+        fn panes(&self) -> Option<worktrees_core::tmux::PaneList> {
+            Some(worktrees_core::tmux::PaneList::from_rows(self.panes.clone()))
+        }
+    }
+
+    fn enroll(reg: &DeviceRegistry, name: &str, key: u8, caps: &[Capability], projects: Projects) -> DeviceRecord {
+        reg.enroll(
+            Enrollment {
+                principal: PrincipalId::owner(),
+                name: name.into(),
+                platform: Platform::Macos,
+                spki_sha256: super::super::devices::hex(&[key; 32]),
+                stepup_spki_sha256: None,
+                grant: Grant { capabilities: Caps::of(caps), projects },
+                expiry: Expiry::default(),
+                addr: None,
+            },
+            NOW,
+        )
+        .unwrap()
+    }
+
+    fn caller(d: &DeviceRecord) -> Caller {
+        Caller::paired(d.principal.clone(), d.id.clone())
+    }
+
+    /// The engine as serve builds it, over a registry in memory and a world of
+    /// fixtures: the client set listens to the registry, the `Ctx` emits
+    /// through it.
+    struct Engine {
+        rt: tokio::runtime::Runtime,
+        reg: Arc<DeviceRegistry>,
+        clients: Arc<Clients>,
+        ctx: Ctx,
+        dir: PathBuf,
+        next: AtomicU64,
+        /// Every frame `rpc` skipped on the way to a reply: the events.
+        skipped: Mutex<Vec<Value>>,
+        /// Each session's task, by connection id, to see it end.
+        tasks: Mutex<Vec<(u64, tokio::task::JoinHandle<()>)>>,
+        /// The audit log, in the engine's own config dir.
+        audit: Arc<super::super::audit::Audit>,
+        /// Each client's own address, to its connection id ([`Engine::ended`]).
+        ids: Mutex<std::collections::HashMap<std::net::SocketAddr, u64>>,
+    }
+
+    /// How long a test waits for a frame it is owed before calling it a hang.
+    /// NOT a bound on serve: the rule a close is held to is that the act made
+    /// it ([`Engine::ended`]), and how soon the queued frame then crosses a
+    /// loopback socket is the scheduler's — a starved, saturated host took
+    /// 1.47 s once. The one wall-clock bound is the revoke test's (§10).
+    const HANG: Duration = Duration::from_secs(10);
+
+    impl Drop for Engine {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// The pairing deadlines of the one test that waits for them: the real
+    /// 120 s and 60 s would make it take minutes. Every other test runs with
+    /// [`PAIR_LONG`], so a slow runner cannot time a handshake out.
+    const PAIR_OPEN: Duration = Duration::from_millis(1500);
+    const PAIR_DECIDE: Duration = Duration::from_millis(1500);
+    const PAIR_LONG: Duration = Duration::from_secs(30);
+
+    fn engine(tag: &str, panes: Vec<(String, String, String)>) -> Engine {
+        engine_times(tag, panes, PAIR_LONG, PAIR_LONG, false)
+    }
+
+    /// With `on_disk`, the registry is `devices.json` in the engine's config
+    /// dir, as serve's is.
+    fn engine_times(tag: &str, panes: Vec<(String, String, String)>, open_for: Duration, decide_for: Duration, on_disk: bool) -> Engine {
+        let dir = scratch(tag);
+        let reg = Arc::new(if on_disk { DeviceRegistry::open(&dir.join("cfg")) } else { DeviceRegistry::in_memory() });
+        let world = Roots { roots: vec![s(&dir.join("a")), s(&dir.join("b"))], panes };
+        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+
+        // Inside the runtime: a pairing window runs on the one it was made in.
+        let clients = {
+            let _in = rt.enter();
+            let pairing = Arc::new(Pairing::with_times(Some(dir.join("cfg")), reg.clone(), open_for, decide_for));
+            Arc::new(Clients::serving(reg.clone(), pairing, Some(Arc::new(world))))
+        };
+        clients.listen();
+        let ctx = Ctx::new(dir.join("cfg"), Arc::new(Broadcast(clients.clone())));
+        let (audit, _) = super::super::audit::Audit::open(&dir.join("cfg"), None);
+        Engine {
+            rt,
+            reg,
+            clients,
+            ctx,
+            dir,
+            next: AtomicU64::new(100),
+            skipped: Mutex::new(Vec::new()),
+            tasks: Mutex::new(Vec::new()),
+            audit,
+            ids: Mutex::new(Default::default()),
+        }
+    }
+
+    type Client = WebSocketStream<TcpStream>;
+
+    impl Engine {
+        /// A session for `who` over a fresh loopback socket pair.
+        fn connect(&self, who: Caller) -> Client {
+            self.connect_with(who, None)
+        }
+
+        /// The same, as a TLS session would be: with its step-up exporter.
+        fn connect_with(&self, who: Caller, exporter: Option<[u8; 32]>) -> Client {
+            let (clients, ctx, id) = (self.clients.clone(), self.ctx.clone(), self.next.fetch_add(1, Ordering::SeqCst));
+            let au = Arc::new(self.audit_of(id, &who));
+            let (client, task) = self.rt.block_on(async move {
+                let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = l.local_addr().unwrap();
+                let dial = tokio::spawn(TcpStream::connect(addr));
+                let (server, peer) = l.accept().await.unwrap();
+                let ws = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
+                let task = tokio::spawn(conn::serve_caller(ws, ctx, clients, id, who, exporter, au));
+                (WebSocketStream::from_raw_socket(dial.await.unwrap().unwrap(), Role::Client, None).await, (task, peer))
+            });
+            let (task, peer) = task;
+            self.tasks.lock().unwrap().push((id, task));
+            self.ids.lock().unwrap().insert(peer, id);
+            // Returned once the session has joined the client set and made its
+            // post-join check. A test that times a close starts its clock after
+            // this, so a starved runner's slow session START is not read as a
+            // slow close (macOS CI, 2026-10-23). The bound is a hang guard.
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while !self.clients.is_ready(id) {
+                assert!(Instant::now() < deadline, "session {id} never joined");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            client
+        }
+
+        /// The audit's view of connection `id`, for `who`.
+        fn audit_of(&self, id: u64, who: &Caller) -> super::super::audit::ConnAudit {
+            super::super::audit::ConnAudit::new(self.audit.clone(), id, None, who.clone())
+        }
+
+        /// The server's side of the session most recently connected before
+        /// `n` others ends within `within` — whatever the client does. A
+        /// client that never answers the close is ended all the same.
+        fn session_ends(&self, nth_last: usize, within: Duration) {
+            let mut tasks = self.tasks.lock().unwrap();
+            let i = tasks.len() - 1 - nth_last;
+            let (_, task) = tasks.remove(i);
+            let r = self.rt.block_on(async move { tokio::time::timeout(within, task).await });
+            assert!(r.is_ok(), "the session was still running after {within:?}");
+        }
+
+        /// The next frame within `wait`: `Some(Ok(json))` for text,
+        /// `Some(Err(reason))` for a close, `None` for silence or the end.
+        fn next(&self, c: &mut Client, wait: Duration) -> Option<Result<Value, String>> {
+            self.rt.block_on(async {
+                loop {
+                    match tokio::time::timeout(wait, c.next()).await.ok()?? {
+                        Ok(Message::Text(t)) => return Some(Ok(serde_json::from_str(t.as_str()).unwrap())),
+                        Ok(Message::Close(f)) => return Some(Err(f.map(|f| f.reason.to_string()).unwrap_or_default())),
+                        Ok(_) => continue,
+                        Err(_) => return None,
+                    }
+                }
+            })
+        }
+
+        /// One request, and its reply (events and channel frames skipped).
+        fn rpc(&self, c: &mut Client, cmd: &str, args: Value) -> Value {
+            let id = self.next.fetch_add(1, Ordering::SeqCst);
+            self.rt.block_on(c.send(Message::text(json!({"id": id, "cmd": cmd, "args": args}).to_string()))).unwrap();
+            loop {
+                match self.next(c, Duration::from_secs(5)) {
+                    Some(Ok(v)) if v["id"] == json!(id) => return v,
+                    Some(Ok(v)) => self.skipped.lock().unwrap().push(v),
+                    other => panic!("{cmd}: no reply, got {other:?}"),
+                }
+            }
+        }
+
+        /// The connection behind `c` is out of the client set NOW: the act that
+        /// just returned closed it — its close frame queued and its session
+        /// told, on the act's own thread — with no poll left to wait for (§2.5).
+        fn ended(&self, c: &Client) {
+            let at = c.get_ref().local_addr().unwrap();
+            let id = self.ids.lock().unwrap()[&at];
+            assert!(!self.clients.contains(id), "connection {id} is still in the client set: its close waits on something");
+        }
+
+        /// The socket is closed by serve, saying `why`, and nothing follows.
+        fn closed(&self, c: &mut Client, why: &str) {
+            self.closed_within(c, why, HANG)
+        }
+
+        /// [`Engine::closed`], within `within` of this call.
+        fn closed_within(&self, c: &mut Client, why: &str, within: Duration) {
+            let t0 = Instant::now();
+            loop {
+                match self.next(c, within) {
+                    Some(Ok(_)) => continue,
+                    Some(Err(reason)) => {
+                        assert_eq!(reason, why);
+                        break;
+                    }
+                    None => panic!("no close frame within {within:?}"),
+                }
+            }
+            assert!(t0.elapsed() < within, "closed after {:?}", t0.elapsed());
+            assert!(self.next(c, Duration::from_millis(500)).is_none(), "nothing after the close");
+        }
+    }
+
+    /// §2.5 and exit criterion "a revoked device's live socket dies within
+    /// 1 s": the console's revoke closes EVERY connection of the device, with
+    /// a close frame saying why; the device's next request on any socket is
+    /// refused and its next handshake fails; nothing else is touched, and the
+    /// console hears of it while no device does.
+    #[test]
+    fn a_revoke_closes_every_connection_of_the_device_at_once() {
+        let e = engine("revoke", vec![]);
+        let phone = enroll(&e.reg, "Phone", 1, &[Read], Projects::All);
+        let laptop = enroll(&e.reg, "Laptop", 2, &[Read], Projects::All);
+        let (mut p1, p2) = (e.connect(caller(&phone)), e.connect(caller(&phone)));
+        let mut lap = e.connect(caller(&laptop));
+        let mut con = e.connect(Caller::console());
+        assert!(e.rpc(&mut p1, "get_changelog", json!({})).get("ok").is_some(), "the device is served");
+        assert_eq!(e.clients.len(), 4);
+        let r = e.rpc(&mut con, "device_revoke", json!({"id": phone.id.as_str()}));
+        assert_eq!(r["ok"], json!(true), "{r}");
+        // The act closed both, on its own thread; and the socket dies within
+        // 1 s (§10's exit criterion — this test's bound, and the only one).
+        e.ended(&p1);
+        e.ended(&p2);
+        e.closed_within(&mut p1, "revoked", Duration::from_secs(1));
+        // p2 is never read again, so it never answers the close: serve ends
+        // its session anyway.
+        e.session_ends(2, HANG);
+        assert_eq!(e.clients.len(), 2, "out of the map at once");
+        // The console heard it (just ahead of its reply); the other device did not.
+        let heard = e.skipped.lock().unwrap().iter().any(|v| v["event"] == json!("devices:changed") && v["payload"]["event"] == json!("revoked"));
+        assert!(heard, "the console hears devices:changed: {:?}", e.skipped.lock().unwrap());
+        let leaked = std::iter::from_fn(|| e.next(&mut lap, Duration::from_millis(300))).flatten().any(|v| v["event"] == json!("devices:changed"));
+        assert!(!leaked, "no device hears another's revoke");
+        assert!(e.rpc(&mut lap, "get_changelog", json!({})).get("ok").is_some(), "another device is untouched");
+        // A socket that outlived the close for any reason: its next request.
+        let stale = Call {
+            ctx: e.ctx.clone(),
+            frames: Frames::new(Outbox(tokio::sync::mpsc::unbounded_channel().0)),
+            caller: caller(&phone),
+            registry: e.reg.clone(),
+            world: None,
+            devices: e.reg.clone(),
+            pairing: e.clients.pairing(),
+        };
+        assert_eq!(dispatch::call(&stale, "get_changelog", &Args(Default::default())), Err(json!("denied")));
+        // And its next handshake.
+        assert_eq!(e.reg.admit(&phone.spki_sha256, NOW), Err(super::super::devices::ConnectRefusal::Revoked));
+    }
+
+    /// §2.5: a device always revokes ITSELF; another device of its principal
+    /// only with `admin`; and a device without it is refused, not served.
+    #[test]
+    fn a_device_revokes_itself_and_with_admin_a_peer() {
+        let e = engine("selfrevoke", vec![]);
+        let plain = enroll(&e.reg, "Plain", 1, &[Read], Projects::All);
+        let admin = enroll(&e.reg, "Admin", 2, &[Read, Admin], Projects::All);
+        let target = enroll(&e.reg, "Target", 3, &[Read], Projects::All);
+        let mut p = e.connect(caller(&plain));
+        let mut a = e.connect(caller(&admin));
+        let mut t = e.connect(caller(&target));
+        let r = e.rpc(&mut p, "device_revoke", json!({"id": target.id.as_str()}));
+        assert_eq!(r["err"], json!("denied"), "{r}");
+        assert_eq!(e.rpc(&mut p, "devices_list", json!({}))["err"], json!("denied"), "a listing is admin's");
+        assert_eq!(e.rpc(&mut a, "devices_list", json!({}))["ok"].as_array().unwrap().len(), 3);
+        assert_eq!(e.rpc(&mut a, "device_revoke", json!({"id": target.id.as_str()}))["ok"], json!(true));
+        e.ended(&t);
+        e.closed(&mut t, "revoked");
+        // The device that revokes itself is answered by the close.
+        e.rt.block_on(p.send(Message::text(json!({"id": 1, "cmd": "device_revoke", "args": {"id": plain.id.as_str()}}).to_string()))).unwrap();
+        e.closed(&mut p, "revoked");
+        assert!(e.reg.get(&PrincipalId::owner(), &plain.id).unwrap().revoked_at.is_some());
+        // Console acts stay the console's, admin or not.
+        for (cmd, args) in [
+            ("device_enable", json!({"id": target.id.as_str()})),
+            ("device_set_scope", json!({"id": admin.id.as_str(), "caps": ["read", "stream"], "projects": "*"})),
+            ("device_set_expiry", json!({"id": admin.id.as_str(), "expiry": "never"})),
+            ("devices_revoke_all_others", json!({"keep": admin.id.as_str()})),
+        ] {
+            assert_eq!(e.rpc(&mut a, cmd, args)["err"], json!("console-only"), "{cmd}");
+        }
+        // An admin device narrows a peer; it can neither widen one nor touch itself.
+        let peer = enroll(&e.reg, "Peer", 4, &[Read, Write], Projects::All);
+        let r = e.rpc(&mut a, "device_narrow", json!({"id": peer.id.as_str(), "caps": ["read"], "projects": "*"}));
+        assert_eq!(r["ok"], json!(true), "{r}");
+        let r = e.rpc(&mut a, "device_narrow", json!({"id": peer.id.as_str(), "caps": ["read", "stream"], "projects": "*"}));
+        assert!(r["err"].as_str().unwrap().contains("widening is the host's"), "{r}");
+        let r = e.rpc(&mut a, "device_narrow", json!({"id": admin.id.as_str(), "caps": ["read"], "projects": "*"}));
+        assert!(r["err"].as_str().unwrap().contains("own scope"), "{r}");
+    }
+
+    /// §2.5: a disable closes the device's connections exactly as a revoke
+    /// does, and refuses it — its handshake, a connection that got past one,
+    /// a request on a socket that outlived the close — until the HOST
+    /// re-enables it, which not even an admin device may; after that it is
+    /// served again.
+    #[test]
+    fn a_disable_closes_like_a_revoke_and_only_the_host_reenables() {
+        let e = engine("disable", vec![]);
+        let phone = enroll(&e.reg, "Phone", 1, &[Read], Projects::All);
+        let admin = enroll(&e.reg, "Admin", 2, &[Read, Admin], Projects::All);
+        let mut p = e.connect(caller(&phone));
+        let mut adm = e.connect(caller(&admin));
+        let mut con = e.connect(Caller::console());
+        assert_eq!(e.rpc(&mut con, "device_disable", json!({"id": phone.id.as_str()}))["ok"], json!(true));
+        e.ended(&p);
+        e.closed(&mut p, "disabled");
+        assert_eq!(e.reg.admit(&phone.spki_sha256, NOW), Err(super::super::devices::ConnectRefusal::Disabled));
+        let mut again = e.connect(caller(&phone));
+        e.ended(&again);
+        e.closed(&mut again, "disabled");
+        let stale = Call {
+            ctx: e.ctx.clone(),
+            frames: Frames::new(Outbox(tokio::sync::mpsc::unbounded_channel().0)),
+            caller: caller(&phone),
+            registry: e.reg.clone(),
+            world: None,
+            devices: e.reg.clone(),
+            pairing: e.clients.pairing(),
+        };
+        let enable = || Args(json!({"id": phone.id.as_str()}).as_object().cloned().unwrap());
+        assert_eq!(dispatch::call(&stale, "get_changelog", &Args(Default::default())), Err(json!("denied")));
+        assert_eq!(dispatch::call(&stale, "device_enable", &enable()), Err(json!("console-only")));
+        assert_eq!(e.rpc(&mut adm, "device_enable", json!({"id": phone.id.as_str()}))["err"], json!("console-only"));
+        assert_eq!(e.rpc(&mut con, "device_enable", json!({"id": phone.id.as_str()}))["ok"], json!(true));
+        let mut back = e.connect(caller(&phone));
+        assert!(e.rpc(&mut back, "get_changelog", json!({})).get("ok").is_some(), "served again");
+        // An expiry that runs out closes it the same way (the timer's act).
+        e.rpc(&mut con, "device_set_expiry", json!({"id": phone.id.as_str(), "expiry": {"idle_days": 1}}));
+        let mut late = e.connect(caller(&phone));
+        // Enrolled at NOW, which is later than the re-enable's wall clock.
+        assert_eq!(e.reg.check_expiry(NOW + 2 * 86_400).unwrap(), vec![phone.id.clone()]);
+        e.ended(&late);
+        e.ended(&back);
+        e.closed(&mut late, "disabled");
+        e.closed(&mut back, "disabled");
+    }
+
+    /// The gap between a device's handshake and its session joining the
+    /// client set: an event that fires there finds no connection to close
+    /// (macOS CI, 2026-10-23: `late` above, connected and disabled before its
+    /// session had joined, was never closed). The session asks the registry
+    /// once it has joined, so a device disabled, revoked or removed in that
+    /// gap is closed as it joins, saying why — not left on an open socket
+    /// whose every request is refused.
+    #[test]
+    fn a_device_ended_before_its_session_joins_is_closed_as_it_joins() {
+        let e = engine("prejoin", vec![]);
+        let phone = enroll(&e.reg, "Phone", 1, &[Read], Projects::All);
+        let tablet = enroll(&e.reg, "Tablet", 2, &[Read], Projects::All);
+        let laptop = enroll(&e.reg, "Laptop", 3, &[Read], Projects::All);
+        // Each act lands as if after the handshake admitted the device and
+        // before its session joined: no connection of it exists yet.
+        e.reg.disable(&phone.id, NOW).unwrap();
+        e.reg.revoke(&Caller::console(), &Grant::everything(), &tablet.id, NOW).unwrap();
+        let mut p = e.connect(caller(&phone));
+        e.ended(&p);
+        e.closed(&mut p, "disabled");
+        let mut t = e.connect(caller(&tablet));
+        e.ended(&t);
+        e.closed(&mut t, "revoked");
+        let mut ghost = e.connect(Caller::paired(PrincipalId::owner(), DeviceId::new("d_ghost")));
+        e.ended(&ghost);
+        e.closed(&mut ghost, "removed");
+        let mut l = e.connect(caller(&laptop));
+        assert!(e.rpc(&mut l, "get_changelog", json!({})).get("ok").is_some(), "a live device is served");
+        assert_eq!(e.clients.len(), 1, "the ended ones are out of the map");
+    }
+
+    /// The console's device rows answer it, and a device of ANOTHER principal
+    /// reads as missing to everyone — the words a device gets are the fixed
+    /// ones, so they say nothing about what exists (§3.3).
+    #[test]
+    fn a_device_row_naming_a_missing_device_says_the_fixed_words() {
+        let e = engine("missing", vec![]);
+        let admin = enroll(&e.reg, "Admin", 2, &[Read, Admin], Projects::All);
+        let mut a = e.connect(caller(&admin));
+        let mut con = e.connect(Caller::console());
+        let r = e.rpc(&mut a, "device_revoke", json!({"id": "d_nosuch"}));
+        assert_eq!(r["err"], json!("not found or not in this device's scope"), "{r}");
+        let r = e.rpc(&mut a, "device_narrow", json!({"id": "d_nosuch", "caps": [], "projects": []}));
+        assert_eq!(r["err"], json!("not found or not in this device's scope"), "{r}");
+        let r = e.rpc(&mut con, "device_disable", json!({"id": "d_nosuch"}));
+        assert!(r["err"].as_str().unwrap().contains("no device d_nosuch"), "the console is told the detail: {r}");
+        // The console widens with registered roots only, and the caps by name.
+        let root_a = s(&e.dir.join("a"));
+        let r = e.rpc(&mut con, "device_set_scope", json!({"id": admin.id.as_str(), "caps": ["read", "admin"], "projects": ["/not/registered"]}));
+        assert!(r["err"].as_str().unwrap().contains("not a registered project"), "{r}");
+        let r = e.rpc(&mut con, "device_set_scope", json!({"id": admin.id.as_str(), "caps": ["read", "root"], "projects": [root_a]}));
+        assert!(r["err"].as_str().unwrap().contains("unknown capability"), "{r}");
+        let r = e.rpc(&mut con, "device_set_scope", json!({"id": admin.id.as_str(), "caps": ["read", "admin", "stream"], "projects": [root_a]}));
+        assert_eq!(r["ok"], json!(true), "{r}");
+        let r = e.rpc(&mut con, "device_set_expiry", json!({"id": admin.id.as_str(), "expiry": {"idle_days": 0}}));
+        assert!(r["err"].is_string(), "{r}");
+    }
+
+    /// §3.3: "a narrowed scope or a removed capability ends each open channel
+    /// whose object it no longer covers". Two attaches (sessions in a and b)
+    /// and two dock shells (a and b) on one device's connection; the console
+    /// narrows the device to a, and only b's channels end; it removes
+    /// `stream`, and the rest do. The check is the resolver's own.
+    #[test]
+    fn a_narrowed_grant_ends_the_channels_it_no_longer_covers() {
+        let e = engine("narrow", vec![]);
+        let (a, b) = (s(&e.dir.join("a")), s(&e.dir.join("b")));
+        // The fixture world's panes: session sa is cwd'd in a, sb in b.
+        let world = Roots { roots: vec![a.clone(), b.clone()], panes: vec![("sa".into(), a.clone(), "zsh".into()), ("sb".into(), b.clone(), "zsh".into())] };
+        let dev = enroll(&e.reg, "Dev", 1, &[Read, Stream], Projects::only([a.clone(), b.clone()]));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let out = Outbox(tx);
+        let call = Arc::new(Call {
+            ctx: e.ctx.clone(),
+            frames: Frames::new(out.clone()),
+            caller: caller(&dev),
+            registry: e.reg.clone(),
+            world: Some(Arc::new(world)),
+            devices: e.reg.clone(),
+            pairing: e.clients.pairing(),
+        });
+        call.frames.note_term(901, "sa".into());
+        call.frames.note_term(902, "sb".into());
+        call.frames.note_shell(ShellHold { repo: a.clone(), slug: "(main)".into(), index: 0, gen: 7 });
+        call.frames.note_shell(ShellHold { repo: b.clone(), slug: "(main)".into(), index: 0, gen: 9 });
+        let _kill = e.clients.join(1, out, call.clone());
+        // A widening ends nothing.
+        e.reg.set_scope(&dev.id, Grant { capabilities: Caps::of(&[Read, Write, Stream]), projects: Projects::only([a.clone(), b.clone()]) }).unwrap();
+        assert_eq!(call.frames.terms().len(), 2);
+        assert_eq!(call.frames.shells().len(), 2);
+        e.reg.set_scope(&dev.id, Grant { capabilities: Caps::of(&[Read, Stream]), projects: Projects::only([a.clone()]) }).unwrap();
+        assert_eq!(call.frames.terms(), vec![(901, "sa".to_string())], "b's attach ended");
+        assert_eq!(call.frames.shells().iter().map(|h| h.repo.clone()).collect::<Vec<_>>(), vec![a.clone()], "b's shell let go");
+        e.reg.set_scope(&dev.id, Grant { capabilities: Caps::of(&[Read]), projects: Projects::only([a.clone()]) }).unwrap();
+        assert!(call.frames.terms().is_empty() && call.frames.shells().is_empty(), "no stream, no channel");
+        assert_eq!(e.clients.len(), 1, "a narrowing ends channels, not the connection");
+    }
+
+    /// A registry whose changes reach NO hook: the per-request generation
+    /// check is what catches them (§3.3), one atomic load per request when
+    /// nothing moved.
+    struct Quiet {
+        grant: Mutex<Grant>,
+        gen: AtomicU64,
+    }
+
+    impl Registry for Quiet {
+        fn principal_grant(&self, _: &PrincipalId) -> Option<Grant> {
+            None
+        }
+        fn device_grant(&self, _: &PrincipalId, _: &DeviceId) -> Option<Grant> {
+            Some(self.grant.lock().unwrap().clone())
+        }
+        fn device_principal(&self, _: &DeviceId) -> Option<PrincipalId> {
+            Some(PrincipalId::owner())
+        }
+        fn stepup_required(&self, _: &PrincipalId, _: &DeviceId) -> bool {
+            false
+        }
+        fn generation(&self) -> u64 {
+            self.gen.load(Ordering::SeqCst)
+        }
+    }
+
+    #[test]
+    fn the_next_request_checks_open_channels_when_the_registry_moved() {
+        let e = engine("backstop", vec![]);
+        let a = s(&e.dir.join("a"));
+        let reg = Arc::new(Quiet { grant: Mutex::new(Grant { capabilities: Caps::of(&[Read, Stream]), projects: Projects::All }), gen: AtomicU64::new(1) });
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let call = Call {
+            ctx: e.ctx.clone(),
+            frames: Frames::new(Outbox(tx)),
+            caller: Caller::paired(PrincipalId::owner(), DeviceId::new("d_q")),
+            registry: reg.clone(),
+            world: Some(Arc::new(Roots { roots: vec![a.clone()], panes: vec![("sa".into(), a.clone(), "zsh".into())] })),
+            devices: e.reg.clone(),
+            pairing: e.clients.pairing(),
+        };
+        call.frames.reconciled().store(1, Ordering::SeqCst);
+        call.frames.note_term(903, "sa".into());
+        let au = e.audit_of(1, &call.caller);
+        let _ = conn::answer(&call, &au, &json!(1), "get_changelog", &Args(Default::default()));
+        assert_eq!(call.frames.terms().len(), 1, "nothing moved: nothing checked, nothing ended");
+        *reg.grant.lock().unwrap() = Grant { capabilities: Caps::of(&[Read]), projects: Projects::All };
+        let _ = conn::answer(&call, &au, &json!(2), "get_changelog", &Args(Default::default()));
+        assert_eq!(call.frames.terms().len(), 1, "the grant changed but the generation did not: unseen");
+        reg.gen.store(2, Ordering::SeqCst);
+        let _ = conn::answer(&call, &au, &json!(3), "get_changelog", &Args(Default::default()));
+        assert!(call.frames.terms().is_empty(), "the generation moved: the attach it no longer covers ended");
+        assert_eq!(call.frames.reconciled().load(Ordering::SeqCst), 2);
+    }
+
+    /// A `shell_detach` naming a generation this connection does not hold
+    /// releases nothing — `term::shell_detach` ignores it — so the hold stays
+    /// recorded and a later narrowing still lets go of the sink. Forgetting it
+    /// on the client's word would leave the sink attached and unseen.
+    #[test]
+    fn a_detach_naming_another_generation_keeps_the_hold() {
+        let e = engine("detachgen", vec![]);
+        let a = s(&e.dir.join("a"));
+        let dev = enroll(&e.reg, "Dev", 1, &[Read, Stream], Projects::only([a.clone()]));
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let out = Outbox(tx);
+        let call = Arc::new(Call {
+            ctx: e.ctx.clone(),
+            frames: Frames::new(out.clone()),
+            caller: caller(&dev),
+            registry: e.reg.clone(),
+            world: Some(Arc::new(Roots { roots: vec![a.clone()], panes: vec![] })),
+            devices: e.reg.clone(),
+            pairing: e.clients.pairing(),
+        });
+        call.frames.note_shell(ShellHold { repo: a.clone(), slug: "(main)".into(), index: 0, gen: 7 });
+        let _kill = e.clients.join(1, out, call.clone());
+        let detach = |gen: u64| dispatch::call(&call, "shell_detach", &Args(json!({"repo": a, "slug": "(main)", "index": 0, "gen": gen}).as_object().cloned().unwrap()));
+        assert_eq!(detach(8), Ok(Value::Null));
+        assert_eq!(call.frames.shells().len(), 1, "another generation's detach keeps this one's hold");
+        e.reg.set_scope(&dev.id, Grant { capabilities: Caps::of(&[Read]), projects: Projects::only([a.clone()]) }).unwrap();
+        assert!(call.frames.shells().is_empty(), "and the narrowing found it");
+        call.frames.note_shell(ShellHold { repo: a.clone(), slug: "(main)".into(), index: 0, gen: 9 });
+        e.reg.set_scope(&dev.id, Grant { capabilities: Caps::of(&[Read, Stream]), projects: Projects::only([a.clone()]) }).unwrap();
+        assert_eq!(detach(9), Ok(Value::Null));
+        assert!(call.frames.shells().is_empty(), "its own generation's detach releases it");
+    }
+
+    /// The narrowing that lands WHILE a stream is being opened: the request
+    /// was authorized under the old grant, and the narrowing's own reconcile
+    /// ran before the new channel was noted, so it could not see it. The
+    /// world fixture fires that interleaving from inside the request (its
+    /// pane lookup is the resolver's, mid-authorization); the request's
+    /// end-of-answer check must end the channel all the same.
+    struct Racing {
+        root: String,
+        reg: Arc<Quiet>,
+        frames: Frames,
+        fired: std::sync::atomic::AtomicBool,
+    }
+
+    impl World for Racing {
+        fn roots(&self) -> Vec<String> {
+            vec![self.root.clone()]
+        }
+        fn panes(&self) -> Option<worktrees_core::tmux::PaneList> {
+            if !self.fired.swap(true, Ordering::SeqCst) {
+                *self.reg.grant.lock().unwrap() = Grant { capabilities: Caps::of(&[Read]), projects: Projects::All };
+                self.reg.gen.store(2, Ordering::SeqCst);
+                self.frames.reconciled().store(2, Ordering::SeqCst);
+                self.frames.note_term(904, "sa".into());
+            }
+            Some(worktrees_core::tmux::PaneList::from_rows(vec![("sa".into(), self.root.clone(), "zsh".into())]))
+        }
+    }
+
+    #[test]
+    fn a_narrowing_that_lands_mid_open_still_ends_the_new_channel() {
+        let e = engine("midopen", vec![]);
+        let a = s(&e.dir.join("a"));
+        let reg = Arc::new(Quiet { grant: Mutex::new(Grant { capabilities: Caps::of(&[Read, Stream]), projects: Projects::All }), gen: AtomicU64::new(1) });
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let frames = Frames::new(Outbox(tx));
+        let world = Racing { root: a.clone(), reg: reg.clone(), frames: frames.clone(), fired: Default::default() };
+        let call = Call {
+            ctx: e.ctx.clone(),
+            frames: frames.clone(),
+            caller: Caller::paired(PrincipalId::owner(), DeviceId::new("d_q")),
+            registry: reg.clone(),
+            world: Some(Arc::new(world)),
+            devices: e.reg.clone(),
+            pairing: e.clients.pairing(),
+        };
+        frames.reconciled().store(1, Ordering::SeqCst);
+        // No `cols`: the body fails on its arguments before it reaches tmux.
+        let au = e.audit_of(1, &call.caller);
+        let _ = conn::answer(&call, &au, &json!(1), "term_open", &Args(json!({"session": "sa"}).as_object().cloned().unwrap()));
+        assert!(frames.terms().is_empty(), "the channel opened under the old grant was ended: {:?}", frames.terms());
+    }
+
+    /// §2.5: rotating the server identity is the console's, makes a new pin,
+    /// and revokes every device — each holds the old pin and must pair again
+    /// — closing their connections like any revoke.
+    #[test]
+    fn rotating_the_identity_revokes_every_device() {
+        let e = engine("rotate", vec![]);
+        let before = super::super::identity::Identity::ensure(&e.dir.join("cfg")).unwrap();
+        let phone = enroll(&e.reg, "Phone", 1, &[Read, Admin], Projects::All);
+        let laptop = enroll(&e.reg, "Laptop", 2, &[Read], Projects::All);
+        let mut p = e.connect(caller(&phone));
+        let mut con = e.connect(Caller::console());
+        assert_eq!(e.rpc(&mut p, "identity_rotate", json!({}))["err"], json!("console-only"));
+        let r = e.rpc(&mut con, "identity_rotate", json!({}));
+        let pin = r["ok"]["pin"].as_str().unwrap().to_string();
+        assert_ne!(pin, before.pin());
+        assert_eq!(super::super::identity::Identity::load(&e.dir.join("cfg")).unwrap().unwrap().pin(), pin);
+        assert_eq!(r["ok"]["revoked"].as_array().unwrap().len(), 2, "{r}");
+        e.ended(&p);
+        e.closed(&mut p, "revoked");
+        assert!(e.reg.get(&PrincipalId::owner(), &laptop.id).unwrap().revoked_at.is_some());
+        let rotated = e.skipped.lock().unwrap().iter().any(|v| v["payload"]["event"] == json!("identity_rotated") && v["payload"]["pin"] == json!(pin));
+        assert!(rotated, "the console hears the rotation, with the new pin");
+    }
+
+    // ── pairing, end to end, restated from §2.2's text ──────────────────────
+    //
+    // The device side is written from the proposal, not from pairing.rs: the
+    // labels are spelled again, the HMAC is the parent module's RFC 2104 one
+    // over bare SHA-256, and the code is computed here. A server that agreed
+    // with itself would not pass.
+
+    const SPEC_PAIR_LABEL: &[u8] = b"worktrees-pair/v1\n";
+    const SPEC_SAS_LABEL: &[u8] = b"worktrees-pair/v1/sas\n";
+    const SPEC_EXPORTER: &[u8] = b"EXPORTER-worktrees-pair-v1";
+
+    /// A literal `ip:port` and nothing more: a device's rule
+    /// (`pairuri::dial_rule`, §4.1) refuses 127.0.0.1 in a real link, so the
+    /// tests read theirs, over the loopback listener, with this one.
+    fn literal(v: &str) -> Result<std::net::SocketAddr, String> {
+        v.parse().map_err(|e| format!("{e}"))
+    }
+
+    fn sha(b: &[u8]) -> Vec<u8> {
+        use sha2::Digest;
+        sha2::Sha256::digest(b).to_vec()
+    }
+
+    fn unhex(s: &str) -> Vec<u8> {
+        (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    /// What a device chooses to send; each field can be bent to test a refusal.
+    struct Attempt {
+        name: String,
+        platform: &'static str,
+        stepup: Option<super::super::stepup::testkit::StepUpKey>,
+        /// The secret the proof is keyed with (default: the link's).
+        secret: Option<Vec<u8>>,
+        /// An exporter to prove over instead of the session's.
+        exporter: Option<[u8; 32]>,
+        /// A key to prove for instead of the one presented.
+        proof_spki: Option<Vec<u8>>,
+        /// Replace the whole line.
+        line: Option<String>,
+        /// Text put just inside the (otherwise correct) frame's opening
+        /// brace: padding, or a key the frame should not have.
+        insert: String,
+    }
+
+    impl Attempt {
+        fn desktop(name: &str) -> Attempt {
+            Attempt { name: name.into(), platform: "macos", stepup: None, secret: None, exporter: None, proof_spki: None, line: None, insert: String::new() }
+        }
+        fn iphone(name: &str) -> Attempt {
+            Attempt { platform: "ios", stepup: Some(super::super::stepup::testkit::StepUpKey::new()), ..Attempt::desktop(name) }
+        }
+    }
+
+    type DeviceTls = tokio_rustls::client::TlsStream<TcpStream>;
+
+    struct Paired {
+        tls: DeviceTls,
+        code: String,
+        key: super::super::tls::testkit::DeviceKey,
+    }
+
+    impl Engine {
+        /// Open a window from the console as the host would.
+        fn begin(&self, con: &mut Client, caps: &[&str], projects: Value, expiry: Value) -> Value {
+            self.rpc(con, "pair_begin", json!({"caps": caps, "projects": projects, "expiry": expiry}))
+        }
+
+        /// Scan `uri`, dial the pairing listener pinned, send the one frame.
+        fn attempt(&self, uri: &str, a: &Attempt) -> Result<Paired, String> {
+            let link = worktrees_core::pairuri::parse(uri, worktrees_core::sysclock::now_epoch(), &literal)?;
+            let key = super::super::tls::testkit::device_key();
+            self.rt.block_on(async {
+                let mut tls = super::super::tls::testkit::dial(link.addr, &link.pin, &key).await.map_err(|e| e.to_string())?;
+                let ex: [u8; 32] = tls.get_ref().1.export_keying_material([0u8; 32], SPEC_EXPORTER, None).map_err(|e| e.to_string())?;
+                let secret = a.secret.clone().unwrap_or(link.secret.to_vec());
+                let mut msg = SPEC_PAIR_LABEL.to_vec();
+                msg.extend_from_slice(&a.exporter.unwrap_or(ex));
+                msg.extend_from_slice(&sha(a.proof_spki.as_deref().unwrap_or(&key.spki)));
+                msg.extend_from_slice(&a.stepup.as_ref().map(|k| sha(&k.spki)).unwrap_or(vec![0; 32]));
+                msg.extend_from_slice(a.name.as_bytes());
+                let proof = super::spec_hmac(&secret, &msg);
+                let stepup = a.stepup.as_ref().map(|k| worktrees_api::files::b64_encode(&k.spki));
+                let line = a.line.clone().unwrap_or_else(|| {
+                    let l = json!({"pair": {"name": a.name, "platform": a.platform, "stepup_spki": stepup}, "proof": proof}).to_string();
+                    format!("{{{}{}", a.insert, &l[1..])
+                });
+                use tokio::io::AsyncWriteExt;
+                tls.write_all(format!("{line}\n").as_bytes()).await.map_err(|e| e.to_string())?;
+                tls.flush().await.map_err(|e| e.to_string())?;
+                let mut sas = SPEC_SAS_LABEL.to_vec();
+                sas.extend_from_slice(&ex);
+                let t = unhex(&super::spec_hmac(&link.secret, &sas));
+                let code = format!("{:06}", (u32::from_be_bytes([t[0], t[1], t[2], t[3]]) & 0x7fff_ffff) % 1_000_000);
+                Ok(Paired { tls, code, key })
+            })
+        }
+
+        /// The device's next line from the server, or `None` for silence, the
+        /// end or a reset, within `wait`.
+        fn line(&self, tls: &mut DeviceTls, wait: Duration) -> Option<Value> {
+            use tokio::io::AsyncReadExt;
+            self.rt.block_on(async {
+                let mut buf = Vec::new();
+                let mut b = [0u8; 1];
+                loop {
+                    match tokio::time::timeout(wait, tls.read(&mut b)).await {
+                        Ok(Ok(1)) if b[0] == b'\n' => return serde_json::from_slice(&buf).ok(),
+                        Ok(Ok(1)) => buf.push(b[0]),
+                        _ => return None,
+                    }
+                }
+            })
+        }
+
+        fn status(&self, con: &mut Client) -> Value {
+            self.rpc(con, "pair_status", json!({}))["ok"].clone()
+        }
+
+        /// The pairing window's port takes no connection any more.
+        fn port_closed(&self, uri: &str) -> bool {
+            let link = worktrees_core::pairuri::parse(uri, 0, &literal).unwrap();
+            std::net::TcpStream::connect_timeout(&link.addr, Duration::from_millis(500)).is_err()
+        }
+
+        /// Wait (bounded) until the window is closed, and say how.
+        fn closed_as(&self, con: &mut Client) -> Value {
+            let t0 = Instant::now();
+            loop {
+                let st = self.status(con);
+                if st["state"] == json!("closed") || t0.elapsed() > Duration::from_secs(5) {
+                    return st;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+
+        fn bind_loopback(&self) {
+            self.clients.pairing().set_bind(Some(super::super::pairing::Bind {
+                ip: std::net::Ipv4Addr::LOCALHOST.into(),
+                remote: "127.0.0.1:7461".parse().unwrap(),
+            }));
+        }
+    }
+
+    /// §2.2 from end to end: the host chooses the scope, the window opens, the
+    /// device proves the secret over pinned TLS bound to the session, both
+    /// screens show one code, and the host's Allow writes the record — with
+    /// the offer's scope, the device's keys, step-up on — and answers the
+    /// device. Then the listener is gone.
+    #[test]
+    fn a_device_pairs_by_link_proof_code_and_the_hosts_allow() {
+        let e = engine("pair", vec![]);
+        e.bind_loopback();
+        let mut con = e.connect(Caller::console());
+        let a = s(&e.dir.join("a"));
+        let r = e.begin(&mut con, &["read", "write"], json!([a]), json!({"idle_days": 7}));
+        let uri = r["ok"]["uri"].as_str().unwrap_or_else(|| panic!("{r}")).to_string();
+        let identity = super::super::identity::Identity::load(&e.dir.join("cfg")).unwrap().unwrap();
+        assert_eq!(r["ok"]["pin"], json!(identity.pin()));
+        assert_eq!(e.status(&mut con)["state"], json!("open"));
+        let mut p = e.attempt(&uri, &Attempt::iphone("Bret's iPhone")).unwrap();
+        assert_eq!(e.line(&mut p.tls, Duration::from_secs(5)), Some(json!({"pending": true})));
+        let st = e.status(&mut con);
+        assert_eq!(st["state"], json!("pending"), "{st}");
+        assert_eq!(st["request"]["code"], json!(p.code), "both screens show the same code");
+        assert_eq!(st["request"]["name"], json!("Bret's iPhone"));
+        assert_eq!(st["request"]["platform"], json!("ios"));
+        assert!(st["request"].get("spki_sha256").is_none(), "keys are not the dialog's");
+        let rec = e.rpc(&mut con, "pair_decide", json!({"allow": true}));
+        let rec = rec["ok"].clone();
+        assert_eq!(rec["spki_sha256"], json!(p.key.pin), "{rec}");
+        assert_eq!(rec["caps"], json!(["read", "write"]));
+        assert_eq!(rec["projects"], json!([a]));
+        assert_eq!(rec["expiry"], json!({"idle_days": 7}));
+        assert_eq!(rec["stepup_required"], json!(true), "on by default (§11 Q8)");
+        assert_eq!(rec["last_addr"], json!("127.0.0.1"));
+        let answer = e.line(&mut p.tls, Duration::from_secs(5)).expect("the device's answer");
+        let paired = &answer["paired"];
+        assert_eq!(paired["device_id"], rec["id"]);
+        assert_eq!(paired["principal_id"], json!("owner"));
+        assert_eq!(paired["remote_addr"], json!("127.0.0.1:7461"));
+        assert_eq!(paired["expiry"], json!({"idle_days": 7}));
+        assert_eq!(paired["discovery_id"], json!(identity.discovery_id()));
+        assert!(paired["host_name"].is_string());
+        let st = e.closed_as(&mut con);
+        assert_eq!((st["ended"].clone(), st["device"].clone()), (json!("paired"), rec["id"].clone()));
+        assert!(e.port_closed(&uri), "the pairing listener is gone");
+        assert_eq!(e.reg.admit(&p.key.pin, worktrees_core::sysclock::now_epoch()).map(|c| c.device().clone()), Ok(worktrees_core::authz::Device::Paired(DeviceId::new(rec["id"].as_str().unwrap()))));
+        let events: Vec<String> = e.skipped.lock().unwrap().iter().filter(|v| v["event"] == json!("devices:changed")).map(|v| v["payload"]["event"].as_str().unwrap_or("").to_string()).collect();
+        let want = ["pairing_opened", "pairing_attempt", "pairing_pending", "pairing_decided", "enrolled", "pairing_closed"];
+        let mut it = events.iter();
+        assert!(want.iter().all(|w| it.any(|e| e == w)), "in order: {events:?}");
+    }
+
+    /// §2.2 step 5, §2.4: ANY failure closes the window, with no retry and
+    /// nothing said — a proof keyed with another secret, bound to another
+    /// session, or made for another key; a frame that is malformed, too long,
+    /// names its device with a direction-changing character, or brings no
+    /// step-up key from an iPhone.
+    #[test]
+    fn any_failure_closes_the_window_with_no_retry() {
+        let e = engine("pairfail", vec![]);
+        e.bind_loopback();
+        let mut con = e.connect(Caller::console());
+        let other = super::super::tls::testkit::device_key();
+        let cases: Vec<(&str, Attempt, &str)> = vec![
+            ("another secret", Attempt { secret: Some(vec![1; 16]), ..Attempt::desktop("Mac") }, "bad_proof"),
+            ("another session", Attempt { exporter: Some([0; 32]), ..Attempt::desktop("Mac") }, "bad_proof"),
+            ("another key", Attempt { proof_spki: Some(other.spki.clone()), ..Attempt::desktop("Mac") }, "bad_proof"),
+            ("a name with an override", Attempt::desktop("Bret\u{202E}enohP"), "malformed"),
+            ("an iPhone with no step-up key", Attempt { platform: "ios", ..Attempt::desktop("iPhone") }, "malformed"),
+            ("a desktop with one", Attempt { platform: "macos", ..Attempt::iphone("Mac") }, "malformed"),
+            ("an unknown key", Attempt { insert: r#""extra": 1, "#.into(), ..Attempt::desktop("Mac") }, "malformed"),
+            ("an unknown platform", Attempt { platform: "windows", ..Attempt::desktop("PC") }, "malformed"),
+            ("a good frame past 4 KiB", Attempt { insert: " ".repeat(5000), ..Attempt::desktop("Mac") }, "malformed"),
+            ("a line that never ends", Attempt { line: Some("x".repeat(5000)), ..Attempt::desktop("x") }, "malformed"),
+        ];
+        for (what, a, ended) in cases {
+            let r = e.begin(&mut con, &["read"], json!("*"), Value::Null);
+            let uri = r["ok"]["uri"].as_str().unwrap().to_string();
+            let mut p = e.attempt(&uri, &a).unwrap();
+            assert_eq!(e.line(&mut p.tls, Duration::from_millis(500)), None, "{what}: nothing said");
+            let st = e.closed_as(&mut con);
+            assert_eq!(st["ended"], json!(ended), "{what}: {st}");
+            assert!(e.port_closed(&uri), "{what}: no retry");
+            assert_eq!(e.rpc(&mut con, "pair_decide", json!({"allow": true}))["err"], json!("no pairing request is waiting"), "{what}");
+        }
+        assert!(e.reg.list(&PrincipalId::owner()).unwrap().is_empty(), "nothing enrolled");
+    }
+
+    /// §2.4: a second connection ends the window — the race the comparison
+    /// code exists for — and the device already waiting is told `closed`.
+    #[test]
+    fn a_second_connection_ends_the_window_and_the_waiting_device_is_told() {
+        let e = engine("pairsecond", vec![]);
+        e.bind_loopback();
+        let mut con = e.connect(Caller::console());
+        let uri = e.begin(&mut con, &["read"], json!("*"), Value::Null)["ok"]["uri"].as_str().unwrap().to_string();
+        let mut p = e.attempt(&uri, &Attempt::desktop("Mac")).unwrap();
+        assert_eq!(e.line(&mut p.tls, Duration::from_secs(5)), Some(json!({"pending": true})));
+        let link = worktrees_core::pairuri::parse(&uri, 0, &literal).unwrap();
+        let _racer = std::net::TcpStream::connect(link.addr).unwrap();
+        assert_eq!(e.line(&mut p.tls, Duration::from_secs(5)), Some(json!({"denied": "closed"})));
+        assert_eq!(e.closed_as(&mut con)["ended"], json!("second_connection"));
+        assert_eq!(e.rpc(&mut con, "pair_decide", json!({"allow": true}))["err"], json!("no pairing request is waiting"));
+        assert!(e.reg.list(&PrincipalId::owner()).unwrap().is_empty());
+    }
+
+    /// §2.4's two deadlines, each running out as a Deny: no attempt in the
+    /// window, and no decision after the frame.
+    #[test]
+    fn the_deadlines_run_out_as_a_deny() {
+        let e = engine_times("pairdeadline", vec![], PAIR_OPEN, PAIR_DECIDE, false);
+        e.bind_loopback();
+        let mut con = e.connect(Caller::console());
+        let before = worktrees_core::sysclock::now_epoch();
+        let r = e.begin(&mut con, &["read"], json!("*"), Value::Null);
+        // 1.5 s rounds UP: the link must not read as expired while it is open.
+        assert!(r["ok"]["expires_at"].as_i64().unwrap() >= before + 2, "{r}");
+        let uri = r["ok"]["uri"].as_str().unwrap().to_string();
+        std::thread::sleep(PAIR_OPEN + Duration::from_millis(300));
+        assert_eq!(e.closed_as(&mut con)["ended"], json!("expired"));
+        assert!(e.port_closed(&uri));
+        let uri = e.begin(&mut con, &["read"], json!("*"), Value::Null)["ok"]["uri"].as_str().unwrap().to_string();
+        let mut p = e.attempt(&uri, &Attempt::desktop("Mac")).unwrap();
+        assert_eq!(e.line(&mut p.tls, Duration::from_secs(5)), Some(json!({"pending": true})));
+        assert_eq!(e.line(&mut p.tls, PAIR_DECIDE + Duration::from_secs(2)), Some(json!({"denied": "timeout"})));
+        assert_eq!(e.closed_as(&mut con)["ended"], json!("undecided"));
+        assert!(e.reg.list(&PrincipalId::owner()).unwrap().is_empty());
+    }
+
+    /// Deny, cancel, and one window at a time (§2.4).
+    #[test]
+    fn deny_cancel_and_one_window_at_a_time() {
+        let e = engine("pairdeny", vec![]);
+        e.bind_loopback();
+        let mut con = e.connect(Caller::console());
+        let uri = e.begin(&mut con, &["read"], json!("*"), Value::Null)["ok"]["uri"].as_str().unwrap().to_string();
+        let mut p = e.attempt(&uri, &Attempt::desktop("Mac")).unwrap();
+        assert_eq!(e.line(&mut p.tls, Duration::from_secs(5)), Some(json!({"pending": true})));
+        assert_eq!(e.rpc(&mut con, "pair_decide", json!({"allow": false}))["ok"], Value::Null);
+        assert_eq!(e.line(&mut p.tls, Duration::from_secs(5)), Some(json!({"denied": "denied"})));
+        assert_eq!(e.closed_as(&mut con)["ended"], json!("denied"));
+        let first = e.begin(&mut con, &["read"], json!("*"), Value::Null)["ok"]["uri"].as_str().unwrap().to_string();
+        let second = e.begin(&mut con, &["read"], json!("*"), Value::Null)["ok"]["uri"].as_str().unwrap().to_string();
+        assert_ne!(first, second, "a new window has a new secret and port");
+        // Well inside the first window's own deadline, so only the second
+        // window's opening can have closed it. Watched by its event, not by
+        // dialling it: a dial IS an attempt, and a second one would close it.
+        let t0 = Instant::now();
+        let superseded = || e.skipped.lock().unwrap().iter().any(|v| v["payload"]["event"] == json!("pairing_closed") && v["payload"]["ended"] == json!("superseded"));
+        while !superseded() && t0.elapsed() < Duration::from_millis(500) {
+            e.status(&mut con);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(superseded(), "opening a second window closed the first");
+        assert!(e.port_closed(&first));
+        assert_eq!(e.status(&mut con)["state"], json!("open"));
+        assert_eq!(e.rpc(&mut con, "pair_cancel", json!({}))["ok"], json!(true));
+        assert_eq!(e.closed_as(&mut con)["ended"], json!("cancelled"));
+        assert!(e.port_closed(&second));
+        let used = e.attempt(&second, &Attempt::desktop("Late"));
+        assert!(used.is_err(), "a closed window's link reaches nothing");
+    }
+
+    /// Only the console opens a window (§11 Q5), only while remote access is
+    /// on, and never past 16 enrolled devices (§2.4).
+    #[test]
+    fn a_window_is_the_hosts_and_opens_only_where_and_while_it_may() {
+        let e = engine("pairgate", vec![]);
+        let mut con = e.connect(Caller::console());
+        let r = e.begin(&mut con, &["read"], json!("*"), Value::Null);
+        assert!(r["err"].as_str().unwrap().contains("remote access is off"), "{r}");
+        e.bind_loopback();
+        let admin = enroll(&e.reg, "Admin", 1, &[Read, Admin, Write, Stream], Projects::All);
+        let mut dev = e.connect(caller(&admin));
+        for cmd in ["pair_begin", "pair_decide", "pair_cancel", "pair_status"] {
+            assert_eq!(e.rpc(&mut dev, cmd, json!({"caps": ["read"], "projects": "*", "allow": true}))["err"], json!("console-only"), "{cmd}");
+        }
+        for i in 2..=16u8 {
+            enroll(&e.reg, &format!("D{i}"), i, &[Read], Projects::All);
+        }
+        let r = e.begin(&mut con, &["read"], json!("*"), Value::Null);
+        assert!(r["err"].as_str().unwrap().contains("16 devices"), "{r}");
+        assert_eq!(e.status(&mut con)["state"], json!("none"), "refused before anything opened");
+        let r = e.begin(&mut con, &["read"], json!(["/not/registered"]), Value::Null);
+        assert!(r["err"].is_string());
+    }
+
+    /// While a request waits, the device's connection is watched: a second
+    /// frame, or leaving, ends the window before the host can Allow it.
+    #[test]
+    fn a_frame_after_the_first_or_leaving_ends_the_request() {
+        let e = engine("pairafter", vec![]);
+        e.bind_loopback();
+        let mut con = e.connect(Caller::console());
+        for (what, ended) in [("another frame", "frame_after_first"), ("leaving", "device_left")] {
+            let uri = e.begin(&mut con, &["read"], json!("*"), Value::Null)["ok"]["uri"].as_str().unwrap().to_string();
+            let mut p = e.attempt(&uri, &Attempt::desktop("Mac")).unwrap();
+            assert_eq!(e.line(&mut p.tls, Duration::from_secs(5)), Some(json!({"pending": true})));
+            e.rt.block_on(async {
+                use tokio::io::AsyncWriteExt;
+                if what == "leaving" {
+                    let _ = p.tls.shutdown().await;
+                } else {
+                    let _ = p.tls.write_all(b"{}\n").await;
+                    let _ = p.tls.flush().await;
+                }
+            });
+            if what == "leaving" {
+                drop(p);
+            }
+            assert_eq!(e.closed_as(&mut con)["ended"], json!(ended), "{what}");
+            assert_eq!(e.rpc(&mut con, "pair_decide", json!({"allow": true}))["err"], json!("no pairing request is waiting"), "{what}");
+        }
+    }
+
+    // ── step-up (§2.5) ───────────────────────────────────────────────────────
+
+    fn iphone(reg: &DeviceRegistry, caps: &[Capability]) -> (DeviceRecord, super::super::stepup::testkit::StepUpKey) {
+        let k = super::super::stepup::testkit::StepUpKey::new();
+        let rec = reg
+            .enroll(
+                Enrollment {
+                    principal: PrincipalId::owner(),
+                    name: "iPhone".into(),
+                    platform: Platform::Ios,
+                    spki_sha256: super::super::devices::hex(&[42; 32]),
+                    stepup_spki_sha256: Some(k.pin.clone()),
+                    grant: Grant { capabilities: Caps::of(caps), projects: Projects::All },
+                    expiry: Expiry::default(),
+                    addr: None,
+                },
+                NOW,
+            )
+            .unwrap();
+        (rec, k)
+    }
+
+    /// An iPhone holding `admin`: its admin rows wait for a step-up signed over
+    /// THIS connection's exporter; reads never do; the proof holds on its own
+    /// connection only; and turning step-up off on the host removes the gate.
+    #[test]
+    fn a_drive_class_act_needs_a_step_up_proved_on_its_own_connection() {
+        let e = engine("stepup", vec![]);
+        let (rec, k) = iphone(&e.reg, &[Read, Admin]);
+        let ex1 = [1u8; 32];
+        let mut c1 = e.connect_with(caller(&rec), Some(ex1));
+        let mut c2 = e.connect_with(caller(&rec), Some([2u8; 32]));
+        assert_eq!(e.rpc(&mut c1, "devices_list", json!({}))["err"], json!("step-up required"));
+        assert!(e.rpc(&mut c1, "get_changelog", json!({})).get("ok").is_some(), "a read is never asked");
+        let c = e.rpc(&mut c1, "stepup_challenge", json!({}))["ok"]["challenge"].as_str().unwrap().to_string();
+        let mut msg = super::super::stepup::b64_decode(&c).unwrap();
+        // Signed over the OTHER connection's exporter: refused.
+        let mut wrong = msg.clone();
+        wrong.extend_from_slice(&[2u8; 32]);
+        let r = e.rpc(&mut c1, "stepup_prove", json!({"spki": worktrees_api::files::b64_encode(&k.spki), "signature": worktrees_api::files::b64_encode(&k.sign(&wrong))}));
+        assert!(r["err"].as_str().unwrap().contains("does not verify"), "{r}");
+        let c = e.rpc(&mut c1, "stepup_challenge", json!({}))["ok"]["challenge"].as_str().unwrap().to_string();
+        msg = super::super::stepup::b64_decode(&c).unwrap();
+        msg.extend_from_slice(&ex1);
+        let r = e.rpc(&mut c1, "stepup_prove", json!({"spki": worktrees_api::files::b64_encode(&k.spki), "signature": worktrees_api::files::b64_encode(&k.sign(&msg))}));
+        assert_eq!(r["ok"]["valid_secs"], json!(300), "{r}");
+        assert!(e.rpc(&mut c1, "devices_list", json!({})).get("ok").is_some(), "proved: served");
+        assert_eq!(e.rpc(&mut c2, "devices_list", json!({}))["err"], json!("step-up required"), "per connection");
+        // Off on the host: a widening, audited — and the gate is gone.
+        let mut con = e.connect(Caller::console());
+        assert_eq!(e.rpc(&mut con, "device_set_stepup", json!({"id": rec.id.as_str(), "required": false}))["ok"], json!(true));
+        assert!(e.rpc(&mut c2, "devices_list", json!({})).get("ok").is_some());
+        // The console and a desktop are never asked.
+        assert!(e.rpc(&mut con, "devices_list", json!({})).get("ok").is_some());
+        assert_eq!(e.rpc(&mut con, "stepup_prove", json!({"spki": "", "signature": ""}))["err"], json!("the console needs no step-up"));
+        let mac = enroll(&e.reg, "Mac", 9, &[Read, Admin], Projects::All);
+        let mut m = e.connect_with(caller(&mac), Some([3u8; 32]));
+        assert!(e.rpc(&mut m, "devices_list", json!({})).get("ok").is_some(), "a desktop has no presence key to ask for");
+    }
+
+    /// A step-up refusal is the host's, so the audit log has it as a refusal
+    /// with its own reason, `step-up` (§5.1) — never as an admitted call — and
+    /// the same act once the step-up holds is an admitted one.
+    #[test]
+    fn a_step_up_refusal_is_audited_as_a_refusal() {
+        let e = engine("stepup-audit", vec![]);
+        let (rec, k) = iphone(&e.reg, &[Read, Admin]);
+        let ex = [1u8; 32];
+        let mut c = e.connect_with(caller(&rec), Some(ex));
+        assert_eq!(e.rpc(&mut c, "devices_list", json!({}))["err"], json!("step-up required"));
+        let lines = || -> Vec<Value> {
+            let text = std::fs::read_to_string(e.dir.join("cfg").join(super::super::audit::FILE)).unwrap();
+            text.lines().map(|l| serde_json::from_str(l).unwrap()).filter(|r: &Value| r["cmd"] == json!("devices_list")).collect()
+        };
+        let recs = lines();
+        assert_eq!(recs.len(), 1, "{recs:#?}");
+        assert_eq!((recs[0]["kind"].as_str(), recs[0]["outcome"].as_str()), (Some("refused"), Some("refused")), "{:#}", recs[0]);
+        assert_eq!(recs[0]["detail"]["reason"], json!("step-up"), "{:#}", recs[0]);
+        assert_eq!(recs[0]["device"].as_str(), Some(rec.id.as_str()), "the record names the device");
+        let ch = e.rpc(&mut c, "stepup_challenge", json!({}))["ok"]["challenge"].as_str().unwrap().to_string();
+        let mut msg = super::super::stepup::b64_decode(&ch).unwrap();
+        msg.extend_from_slice(&ex);
+        let r = e.rpc(&mut c, "stepup_prove", json!({"spki": worktrees_api::files::b64_encode(&k.spki), "signature": worktrees_api::files::b64_encode(&k.sign(&msg))}));
+        assert!(r.get("ok").is_some(), "{r}");
+        assert!(e.rpc(&mut c, "devices_list", json!({})).get("ok").is_some());
+        let recs = lines();
+        assert_eq!((recs[1]["kind"].as_str(), recs[1]["outcome"].as_str()), (Some("call"), Some("ok")), "{recs:#?}");
+    }
+
+    /// The bypass a review found: dock shells are the process's, so a device
+    /// with `stream` could type into the shell the DESKTOP opened without ever
+    /// opening one itself — and only opening was gated. Typing into a shell
+    /// this connection does not hold is asked for a step-up; typing into one
+    /// it opened (which was) is not; nor is typing into its own attach.
+    #[test]
+    fn typing_into_a_shell_this_connection_never_opened_needs_a_step_up() {
+        let e = engine("stepup-shell", vec![]);
+        let a = s(&e.dir.join("a"));
+        let (rec, _k) = iphone(&e.reg, &[Read, Stream]);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let call = Call {
+            ctx: e.ctx.clone(),
+            frames: Frames::with_exporter(Outbox(tx), Some([1u8; 32])),
+            caller: caller(&rec),
+            registry: e.reg.clone(),
+            world: Some(Arc::new(Roots { roots: vec![a.clone()], panes: vec![] })),
+            devices: e.reg.clone(),
+            pairing: e.clients.pairing(),
+        };
+        let write = |cmd: &str, extra: Value| {
+            let mut args = json!({"repo": a, "slug": "(main)", "index": 0, "data": [104, 105], "id": 905});
+            args.as_object_mut().unwrap().extend(extra.as_object().cloned().unwrap_or_default());
+            dispatch::call(&call, cmd, &Args(args.as_object().cloned().unwrap()))
+        };
+        for cmd in ["shell_write", "shell_resize", "close_shell_session"] {
+            assert_eq!(write(cmd, json!({"cols": 80, "rows": 24})), Err(json!("step-up required")), "{cmd} on a shell it never opened");
+        }
+        // A hold on a shell that is not live (no shell runs in a test) holds
+        // nothing either.
+        call.frames.note_shell(ShellHold { repo: a.clone(), slug: "(main)".into(), index: 0, gen: 3 });
+        assert_eq!(write("shell_write", json!({})), Err(json!("step-up required")), "a hold on no live shell");
+        assert_eq!(write("shell_open", json!({"cols": 80, "rows": 24})), Err(json!("step-up required")), "opening is always asked");
+        call.frames.note_term(905, "s".into());
+        assert_ne!(write("term_write", json!({})), Err(json!("step-up required")), "its own attach");
+        // Held means: the shell's LIVE attach is this connection's.
+        let row = dispatch::row("shell_write").unwrap();
+        let args = Args(json!({"repo": a, "slug": "(main)", "index": 0}).as_object().cloned().unwrap());
+        assert!(dispatch::holds_channel_with(&call, row, &args, &|_, _, _| Some(3)), "its own live attach");
+        assert!(!dispatch::holds_channel_with(&call, row, &args, &|_, _, _| Some(4)), "re-attached since, or a new shell under the key");
+        assert!(!dispatch::holds_channel_with(&call, row, &args, &|_, _, _| None), "no live shell");
+        let other = Args(json!({"repo": a, "slug": "(main)", "index": 1}).as_object().cloned().unwrap());
+        assert!(!dispatch::holds_channel_with(&call, row, &other, &|_, _, _| Some(3)), "another tab");
+    }
+
+    /// Which acts are drive-class (§2.5): instruct, answer and admin, a raised
+    /// capability as much as a row's own; OPENING a stream; and any stream act
+    /// on a channel this connection does not hold — not typing into one it
+    /// opened. Revoking another device is admin; revoking itself is not.
+    #[test]
+    fn drive_class_is_instruct_answer_admin_and_any_stream_act_not_on_a_held_channel() {
+        use super::super::dispatch::{needs_stepup, row, TABLE};
+        for r in TABLE {
+            let caps: Vec<_> = r.cap.into_iter().collect();
+            let want = matches!(r.cap, Some(Instruct | Answer | Admin | Stream));
+            assert_eq!(needs_stepup(r, &caps, false), want, "{} on a channel it does not hold", r.name);
+            let held = match r.cap {
+                Some(Instruct | Answer | Admin) => true,
+                Some(Stream) => matches!(r.name, "term_open" | "shell_open"),
+                _ => false,
+            };
+            assert_eq!(needs_stepup(r, &caps, true), held, "{} on a channel it holds", r.name);
+        }
+        assert!(needs_stepup(row("write_file").unwrap(), &[Write, Instruct], false), "a write raised to instruct by its path");
+        let e = engine("stepup-revoke", vec![]);
+        let (rec, _k) = iphone(&e.reg, &[Read, Admin]);
+        let peer = enroll(&e.reg, "Peer", 8, &[Read], Projects::All);
+        let mut c = e.connect_with(caller(&rec), Some([1u8; 32]));
+        assert_eq!(e.rpc(&mut c, "device_revoke", json!({"id": peer.id.as_str()}))["err"], json!("step-up required"), "another device: admin");
+        e.rt.block_on(c.send(Message::text(json!({"id": 1, "cmd": "device_revoke", "args": {"id": rec.id.as_str()}}).to_string()))).unwrap();
+        e.closed(&mut c, "revoked");
+    }
+
+    /// A path's class (§7.1, #549) RAISES the act to drive-class. Writing an
+    /// instruction file needs `instruct` and reading a secret needs `stream`,
+    /// so both wait for the step-up, while a plain file in the same project,
+    /// and an instruction file READ, do not. Until #549 every path was plain,
+    /// so nothing exercised the raise.
+    #[test]
+    fn a_paths_class_raises_the_act_to_drive_class_for_step_up() {
+        let e = engine("stepup-class", vec![]);
+        let a = e.dir.join("a");
+        for f in ["AGENTS.md", ".env", "lib.rs"] {
+            std::fs::write(a.join(f), "x").unwrap();
+        }
+        let (rec, k) = iphone(&e.reg, &[Read, Write, Instruct, Stream]);
+        let ex = [1u8; 32];
+        let mut c = e.connect_with(caller(&rec), Some(ex));
+        let due = json!("step-up required");
+        let ask = |c: &mut Client, cmd: &str, f: &str| {
+            let path = s(&a.join(f));
+            let args = if cmd == "read_file" { json!({"path": path, "max_bytes": null}) } else { json!({"path": path, "content": "y", "expected_mtime": null}) };
+            e.rpc(c, cmd, args)["err"].clone()
+        };
+        assert_ne!(ask(&mut c, "read_file", "lib.rs"), due, "a plain read");
+        assert_ne!(ask(&mut c, "write_file", "lib.rs"), due, "a plain write");
+        assert_ne!(ask(&mut c, "read_file", "AGENTS.md"), due, "an instruction file is read as plain");
+        assert_eq!(ask(&mut c, "write_file", "AGENTS.md"), due, "written, it is instruct");
+        assert_eq!(ask(&mut c, "read_file", ".env"), due, "a secret is stream, even to read");
+        let ch = e.rpc(&mut c, "stepup_challenge", json!({}))["ok"]["challenge"].as_str().unwrap().to_string();
+        let mut msg = super::super::stepup::b64_decode(&ch).unwrap();
+        msg.extend_from_slice(&ex);
+        let r = e.rpc(&mut c, "stepup_prove", json!({"spki": worktrees_api::files::b64_encode(&k.spki), "signature": worktrees_api::files::b64_encode(&k.sign(&msg))}));
+        assert!(r.get("ok").is_some(), "{r}");
+        assert_ne!(ask(&mut c, "write_file", "AGENTS.md"), due, "proved on this connection");
+        assert_ne!(ask(&mut c, "read_file", ".env"), due);
+    }
+
+    /// The file is the registry: a device whose record is cut out of
+    /// `devices.json`, or whose file is deleted, loses its open connections at
+    /// the next look (the expiry watch's minute, or any write), not only its
+    /// next request; and a file that turns unreadable closes every device's.
+    #[test]
+    fn a_device_whose_record_leaves_the_file_is_closed_and_an_unreadable_file_closes_them_all() {
+        let e = engine_times("forgotten", vec![], PAIR_LONG, PAIR_LONG, true);
+        let file = e.dir.join("cfg").join(super::super::devices::FILE);
+        let a = enroll(&e.reg, "A", 1, &[Read], Projects::All);
+        let b = enroll(&e.reg, "B", 2, &[Read], Projects::All);
+        let (mut ca, mut cb) = (e.connect(caller(&a)), e.connect(caller(&b)));
+        let mut v: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        v["devices"].as_array_mut().unwrap().retain(|x| x["id"] != json!(a.id.as_str()));
+        std::fs::write(&file, serde_json::to_vec(&v).unwrap()).unwrap();
+        e.reg.refresh();
+        e.ended(&ca);
+        e.closed(&mut ca, "removed");
+        assert!(e.rpc(&mut cb, "get_changelog", json!({})).get("ok").is_some(), "the other device is untouched");
+        std::fs::write(&file, b"not json").unwrap();
+        e.reg.refresh();
+        e.ended(&cb);
+        e.closed(&mut cb, "unreadable");
+        let mut con = e.connect(Caller::console());
+        assert!(e.rpc(&mut con, "get_changelog", json!({})).get("ok").is_some(), "the console keeps working");
+    }
+
+    /// A revoke cancels the clone jobs the device started (§2.5): every new
+    /// job id the resolver namespaces for a connection is remembered for it.
+    #[test]
+    fn a_revoke_cancels_the_devices_clone_jobs() {
+        let e = engine("jobs", vec![]);
+        let dev = enroll(&e.reg, "Dev", 1, &[Read, Admin], Projects::All);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let out = Outbox(tx);
+        let call = Arc::new(Call {
+            ctx: e.ctx.clone(),
+            frames: Frames::new(out.clone()),
+            caller: caller(&dev),
+            registry: e.reg.clone(),
+            world: Some(Arc::new(Roots { roots: vec![], panes: vec![] })),
+            devices: e.reg.clone(),
+            pairing: e.clients.pairing(),
+        });
+        let grant = authz::effective(&*e.reg, &call.caller);
+        let mut args = Args(json!({"id": "job-1", "parent": "/x", "url": "https://example.com/r.git"}).as_object().cloned().unwrap());
+        let _ = super::super::resolve::authorize(dispatch::row("clone_project").unwrap(), &call, &grant, &mut args, &Roots { roots: vec![], panes: vec![] });
+        let job = format!("{}/job-1", call.frames.tag());
+        assert_eq!(call.frames.take_jobs(), vec![job.clone()], "the new job is the connection's");
+        call.frames.note_job(job.clone());
+        let _kill = e.clients.join(7, out, call.clone());
+        e.reg.revoke(&Caller::console(), &Grant::everything(), &dev.id, NOW).unwrap();
+        assert!(call.frames.take_jobs().is_empty(), "the job {job} was taken to be cancelled");
+        assert_eq!(e.clients.len(), 0);
+    }
 }

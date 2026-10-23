@@ -77,8 +77,14 @@ fn hex32() -> String {
 /// separate open file descriptions, which DO contend under `flock` even inside
 /// one process — the same reasoning as `registry::edit_at`.
 fn locked<T>(config_dir: &Path, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    with_lock(config_dir, FILE, f)
+}
+
+/// [`locked`] for any file of the config dir: `<config_dir>/<file>.lock`,
+/// created `0600`. `devices.json` is written under the same discipline.
+pub(super) fn with_lock<T>(config_dir: &Path, file: &str, f: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
     fs::create_dir_all(config_dir).map_err(|e| format!("{}: {e}", config_dir.display()))?;
-    let lock_path = config_dir.join(format!("{FILE}.lock"));
+    let lock_path = config_dir.join(format!("{file}.lock"));
     let lock = fs::OpenOptions::new()
         .create(true)
         .truncate(false)

@@ -77,7 +77,7 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   do not align them). hyper parses the HTTP and tungstenite sees only frames,
   also ON PURPOSE: tungstenite's `accept_hdr_async` WRITES an HTTP error
   response when it refuses, while a hyper service that returns `Err` closes
-  with 0 bytes. The 152 commands sit in ONE macro table
+  with 0 bytes. The 168 commands sit in ONE macro table
   (`serve/dispatch.rs`) with an `Exposure` each; the six `ClientLocal` rows
   (clipboard, editor, terminal, zoom, the app bundle) are refused with
   `err: "client-local"`, never run on the host — the docs viewer is an
@@ -100,7 +100,17 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   the host ONCE, and the body's git dials that pin over https only, with no
   redirect, proxy, protocol v2 or host-config rewrite left to move it. The
   console's git is unchanged. A new network git call a device can reach is
-  built with `Policy::git`, never a bare `git`. Serve's in-process tests resolve against a fixture
+  built with `Policy::git`, never a bare `git`. **Grants come from `serve/devices.rs`** (`devices.json`
+  in the config dir, Phase 2 slice 5): read on every request, refused WHOLE —
+  every device, file never rewritten — when it is unreadable, and its changes
+  are typed `DeviceEvent`s that `conn::Clients` hears: a revoke or disable
+  closes the device's sockets at once, a narrowed grant ends the channels it
+  no longer covers. Pairing (`serve/pairing.rs`) opens only where
+  `Pairing::set_bind` says, which only slice 6's remote listener calls, so no
+  window opens in serve yet; its tests run over TLS on 127.0.0.1. Step-up
+  (`serve/stepup.rs`) gates a paired iPhone's drive-class acts per
+  connection, and a dock shell counts as held only by its LIVE attach
+  generation, which is why `term`'s generations are unique per process. Serve's in-process tests resolve against a fixture
   `World`, not the user's registry and tmux: a scratch repo is `register`ed
   there (`serve/tests.rs`), or every place row says `not a registered
   project`. The engine's
@@ -123,8 +133,9 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   line — and checked with `audit::verify` at every start. It hears each
   request as `dispatch::Witness`, handed to `call_seen` BESIDE the `Call`
   (a body gets the `Call`): refusals where the host makes them (the
-  resolver, the stale `term_close` it answers `ok` included, and the
-  device-lane cap, `RefusalKind::DeviceLanes`), and admitted rows whose
+  resolver, the stale `term_close` it answers `ok` included, the step-up
+  gate, `RefusalKind::StepUp`, and the device-lane cap,
+  `RefusalKind::DeviceLanes`), and admitted rows whose
   capability COLUMN is not `read` — `err` when a `CmdResult` answers
   `ok: false`, which the wire carries as `ok`. Plain `dispatch::call` is
   test-only, so a new caller cannot skip the audit by accident. serve installs its signal

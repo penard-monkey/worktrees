@@ -1,4 +1,4 @@
-//! The 152 commands, each with its exposure, capability and objects, in ONE
+//! The 168 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -40,9 +40,12 @@ use serde::Serialize;
 use serde_json::{Map, Value};
 use std::sync::Arc;
 use worktrees_api::{config, files, hostenv, meta, ops, prefs, profiles, project, status, term, viewer, workspace, Ctx};
-use worktrees_core::authz::{self, Caller, Capability, Registry};
+use worktrees_core::authz::{self, Caller, Capability, Caps, DeviceId, Grant, Projects, Registry};
 use worktrees_core::fetchpolicy::Fetcher;
 
+use super::devices::{DeviceRegistry, Expiry};
+use super::pairing::{Offer, Pairing};
+use super::stepup;
 use super::resolve::{self, Absent, Obj, World};
 use super::{provenance, scope};
 use super::wire::{self, Frames, CLIENT_LOCAL};
@@ -81,6 +84,11 @@ pub enum Exposure {
     /// with its bytes going back as channel frames on the same connection, and
     /// laned per stream (`lane`).
     Stream,
+    /// What any authenticated caller may always do for ITSELF, whatever its
+    /// grant (Phase 2 §2.5): revoke its own device, prove a step-up on its own
+    /// connection. No capability; the row's objects decide anything further
+    /// (`revocable(id)` needs `admin` for a device other than the caller's).
+    Own,
 }
 
 /// One command: its name, exposure, capability and objects.
@@ -89,7 +97,8 @@ pub struct Row {
     pub name: &'static str,
     pub exposure: Exposure,
     /// What the caller's grant must hold. `None` exactly for the rows no grant
-    /// reaches: `HostConsole`, `Loopback`, `ClientLocal`.
+    /// reaches: `HostConsole`, `Loopback`, `ClientLocal`, and `Own`, which
+    /// every caller may make.
     pub cap: Option<Capability>,
     /// What the arguments address, resolved in this order.
     pub objects: &'static [Obj],
@@ -107,9 +116,9 @@ impl Row {
                     panic!("an Engine or Stream row declares [capability, object, …]");
                 }
             }
-            Exposure::HostConsole | Exposure::Loopback => {
+            Exposure::HostConsole | Exposure::Loopback | Exposure::Own => {
                 if cap.is_some() {
-                    panic!("a HostConsole or Loopback row declares no capability: write [console, object, …] or nothing");
+                    panic!("a HostConsole, Loopback or Own row declares no capability: write [console, object, …] or nothing");
                 }
             }
             Exposure::ClientLocal => {
@@ -134,6 +143,11 @@ pub struct Call {
     /// What objects resolve against: `None` is the live registry and tmux
     /// server (`resolve::Live`); serve's in-process tests hand in their own.
     pub world: Option<Arc<dyn World>>,
+    /// The device registry the device rows change (`devices.json`). In serve
+    /// it is also `registry`; a test may grant from a fixture instead.
+    pub devices: Arc<DeviceRegistry>,
+    /// The pairing windows the console opens (§2.2).
+    pub pairing: Arc<Pairing>,
 }
 
 /// The request's `args`, read one parameter at a time.
@@ -234,11 +248,47 @@ fn viewer_bundle() -> Result<(), String> {
         .to_string())
 }
 
-/// `read` → `Some(Capability::Read)`; `console` (a `HostConsole` row's
-/// placeholder before its objects) and nothing → `None`.
+/// The registry's clock: wall-clock seconds (§2.5 compares `until` and
+/// `last_seen` on the host's own clock).
+fn now() -> i64 {
+    worktrees_core::sysclock::now_epoch()
+}
+
+/// The `id` of a device row, already resolved within the caller's principal.
+fn device_id(a: &Args) -> Result<DeviceId, String> {
+    Ok(DeviceId::new(a.get::<String>("id")?))
+}
+
+/// A `{caps, projects}` scope from a device row: capability names (an unknown
+/// one is an error, never dropped) and `"*"` or a list of project roots. With
+/// `registered`, every root must be a registered project's registry key — the
+/// console's widening names projects as `list_workspace` does; a narrowing
+/// can only name roots the device already has.
+fn scope_arg(cx: &Call, a: &Args, registered: bool) -> Result<Grant, String> {
+    let names: Vec<String> = a.get("caps")?;
+    let caps = names
+        .iter()
+        .map(|c| Capability::parse(c).ok_or_else(|| format!("unknown capability: {c}")))
+        .collect::<Result<Vec<_>, _>>()?;
+    let projects: Projects = a.get("projects")?;
+    if let (true, Projects::Only(set)) = (registered, &projects) {
+        let known = match &cx.world {
+            Some(w) => w.roots(),
+            None => worktrees_api::projects::read_projects(&cx.ctx),
+        };
+        if let Some(r) = set.iter().find(|r| !known.contains(r)) {
+            return Err(format!("not a registered project: {r}"));
+        }
+    }
+    Ok(Grant { capabilities: Caps::of(&caps), projects })
+}
+
+/// `read` → `Some(Capability::Read)`; `console` and `own` (a `HostConsole`
+/// or `Own` row's placeholder before its objects) and nothing → `None`.
 macro_rules! cap {
     () => { None };
     (console) => { None };
+    (own) => { None };
     (read) => { Some(Capability::Read) };
     (write) => { Some(Capability::Write) };
     (answer) => { Some(Capability::Answer) };
@@ -266,6 +316,7 @@ macro_rules! obj {
     (job($a:ident)) => { Obj::Job(stringify!($a)) };
     (new_job($a:ident)) => { Obj::NewJob(stringify!($a)) };
     (device($a:ident)) => { Obj::Device(stringify!($a)) };
+    (revocable($a:ident)) => { Obj::Revocable(stringify!($a)) };
     (new_path($a:ident)) => { Obj::NewPath(stringify!($a)) };
     (remote_url($a:ident)) => { Obj::RemoteUrl(stringify!($a)) };
     (places($a:ident)) => { Obj::Places(stringify!($a)) };
@@ -337,9 +388,15 @@ impl Witness for () {}
 /// Dispatch one request, with its audit watching (`conn::answer`). `Err` is
 /// the wire's `err` value.
 pub fn call_seen(cx: &Call, cmd: &str, args: &Args, seen: &dyn Witness) -> Result<Value, Value> {
+    with_world(cx, |w| call_in_seen(cx, cmd, args, w, seen))
+}
+
+/// `f` over the world `cx`'s objects resolve against: its own, or the live
+/// registry and tmux server.
+pub fn with_world<T>(cx: &Call, f: impl FnOnce(&dyn World) -> T) -> T {
     match &cx.world {
-        Some(w) => call_in_seen(cx, cmd, args, &**w, seen),
-        None => call_in_seen(cx, cmd, args, &resolve::Live(&cx.ctx), seen),
+        Some(w) => f(&**w),
+        None => f(&resolve::Live(&cx.ctx)),
     }
 }
 
@@ -369,10 +426,13 @@ pub fn call_in_seen(cx: &Call, cmd: &str, args: &Args, world: &dyn World, seen: 
     };
     let grant = authz::effective(&*cx.registry, &cx.caller);
     let mut args = Args(args.0.clone());
-    // The resolver, then a device launch's live-lane cap (§6, LLM10), whose
-    // lock is held across the body so the next device launch counts this one.
-    // Either refusal is the host's, never the body's, and `seen` hears it so.
+    // The resolver, then step-up, then a device launch's live-lane cap (§6,
+    // LLM10), whose lock is held across the body so the next device launch
+    // counts this one. Step-up is read once the objects resolved: a path class
+    // or another device can RAISE the act to drive-class (`stepup_gate`).
+    // Every refusal is the host's, never the body's, and `seen` hears it so.
     let gated = resolve::authorize(row, cx, &grant, &mut args, world)
+        .and_then(|r| stepup_gate(cx, row, &args, &r).map(|()| r))
         .and_then(|r| Ok((r, provenance::device_lane_gate(cx, row, &args, world)?)));
     let (resolved, _launching) = match gated {
         Ok(r) => r,
@@ -406,6 +466,8 @@ pub fn call_in_seen(cx: &Call, cmd: &str, args: &Args, world: &dyn World, seen: 
         caller: cx.caller.clone(),
         registry: cx.registry.clone(),
         world: cx.world.clone(),
+        devices: cx.devices.clone(),
+        pairing: cx.pairing.clone(),
     };
     let out = run(row.name, &scoped, &args).unwrap_or_else(|| Err(Value::from(format!("unknown command: {cmd}"))));
     let out = provenance::stamped(&cx.caller, instruction.as_ref(), out)?;
@@ -431,6 +493,65 @@ fn body_ctx(cx: &Call, grant: &authz::Grant, resolved: resolve::Resolved) -> Ctx
         .granted(grant.capabilities, cx.caller.is_console())
         .fetching(fetcher)
         .acting_for(provenance::acting(&cx.caller, grant))
+}
+
+/// The rows that OPEN a stream, which a step-up always gates (§2.5).
+pub const OPENS_A_STREAM: &[&str] = &["term_open", "shell_open"];
+
+/// Whether an act is drive-class for step-up (§2.5): it needs `instruct`,
+/// `answer` or `admin` — the row's own capability or one its objects raised —
+/// or it is a `stream` act that is not on a channel this connection already
+/// HOLDS. Typing into, resizing or closing what this connection opened (an
+/// open that was itself gated) is not re-asked; opening is, always; and so
+/// is every act on a dock shell this connection never opened — dock shells
+/// are the process's, so without this a device could type into the shell the
+/// desktop opened and never be asked.
+pub fn needs_stepup(row: &Row, needs: &[Capability], holds: bool) -> bool {
+    needs.iter().any(|c| match c {
+        Capability::Instruct | Capability::Answer | Capability::Admin => true,
+        Capability::Stream => OPENS_A_STREAM.contains(&row.name) || !holds,
+        Capability::Read | Capability::Write => false,
+    })
+}
+
+/// The row acts on a channel this connection holds: its own attach (the
+/// resolver's `attach`/`close` objects proved that), or a dock shell whose
+/// LIVE attach is the one this connection made — the hold's generation is the
+/// shell's current one (`term::shell_gen`; generations are unique per
+/// process). A hold the desktop has since re-attached over, or one on a shell
+/// since closed and spawned again under the same key, holds nothing.
+fn holds_channel(cx: &Call, row: &Row, args: &Args) -> bool {
+    holds_channel_with(cx, row, args, &|repo, slug, index| term::shell_gen(repo, slug, index, &cx.ctx.shells))
+}
+
+/// [`holds_channel`], with the live generation looked up by `live` — the
+/// tests', since a real dock shell is a login shell on a pty.
+pub fn holds_channel_with(cx: &Call, row: &Row, args: &Args, live: &dyn Fn(&str, &str, u32) -> Option<u64>) -> bool {
+    row.objects.iter().any(|o| match *o {
+        Obj::Attach(_) | Obj::Close(_) => true,
+        Obj::Shell(r, s, i) => {
+            let (Ok(repo), Ok(slug), Ok(index)) = (args.get::<String>(r), args.get::<String>(s), args.get::<u32>(i)) else { return false };
+            let Some(gen) = live(&repo, &slug, index) else { return false };
+            cx.frames.shells().iter().any(|h| (h.repo.as_str(), h.slug.as_str(), h.index, h.gen) == (repo.as_str(), slug.as_str(), index, gen))
+        }
+        _ => false,
+    })
+}
+
+/// Step-up (§2.5, §11 Q8): a paired device whose record requires it makes a
+/// drive-class act only with a proof that holds on this connection. Read
+/// here, after the objects resolved, because a path class or another device
+/// can RAISE the act to drive-class; never in the resolver, whose coverage
+/// check is also what a reduction re-runs on open channels.
+fn stepup_gate(cx: &Call, row: &Row, args: &Args, r: &resolve::Resolved) -> Result<(), resolve::Refusal> {
+    let authz::Device::Paired(d) = cx.caller.device() else { return Ok(()) };
+    if !needs_stepup(row, &r.needs, holds_channel(cx, row, args)) || !cx.registry.stepup_required(cx.caller.principal(), d) {
+        return Ok(());
+    }
+    if cx.frames.stepup().fresh(std::time::Instant::now()) {
+        return Ok(());
+    }
+    Err(resolve::Refusal::stepup(format!("{} is drive-class and {d}'s step-up is due", row.name)))
 }
 
 /// A command's row.
@@ -465,7 +586,7 @@ pub const GLOBAL_OK: &[&str] = &[
     // admin
     "codex_mcp_status", "codex_mcp_uninstall", "codex_mcp_migration_plan", "pi_mcp_status", "pi_mcp_uninstall",
     "kimi_mcp_status", "delete_profile", "skill_remove", "skill_preview_git", "sync_hub_list", "diagnostics",
-    "log_tail", "term_history_info", "profiles_info",
+    "log_tail", "term_history_info", "profiles_info", "devices_list",
 ];
 
 /// The lane a request runs on, or `None` for the concurrent pool.
@@ -683,27 +804,43 @@ commands! { cx, a;
 
     // ── the dock: shells, scrollback, and the tmux attach (term) ─────────
     list_shell_sessions: Engine [read, place(repo, slug)] => term::list_shell_sessions(a.get("repo")?, a.get("slug")?, &cx.ctx.shells),
-    close_shell_session: Engine [stream, shell(repo, slug, index)] => term::close_shell_session(
-        &cx.ctx, a.get("repo")?, a.get("slug")?, a.get("index")?, a.get("keep_cwd")?, &cx.ctx.shells,
-    ),
-    shell_open: Stream [stream, shell(repo, slug, index)] => term::shell_open(
-        &cx.ctx, a.get("repo")?, a.get("slug")?, a.get("index")?, a.get("cols")?, a.get("rows")?,
-        cx.frames.bytes(a.channel("on_bytes")?), &cx.ctx.shells,
-    ),
+    close_shell_session: Engine [stream, shell(repo, slug, index)] => {
+        let (repo, slug, index): (String, String, u32) = (a.get("repo")?, a.get("slug")?, a.get("index")?);
+        cx.frames.forget_shell(&repo, &slug, index);
+        term::close_shell_session(&cx.ctx, repo, slug, index, a.get("keep_cwd")?, &cx.ctx.shells)
+    },
+    shell_open: Stream [stream, shell(repo, slug, index)] => {
+        let (repo, slug, index): (String, String, u32) = (a.get("repo")?, a.get("slug")?, a.get("index")?);
+        let at = term::shell_open(
+            &cx.ctx, repo.clone(), slug.clone(), index, a.get("cols")?, a.get("rows")?,
+            cx.frames.bytes(a.channel("on_bytes")?), &cx.ctx.shells,
+        );
+        // Which sink is this connection's, so a reduction can let go of it.
+        if let Ok(at) = &at {
+            cx.frames.note_shell(super::wire::ShellHold { repo, slug, index, gen: at.gen });
+        }
+        at
+    },
     shell_write: Stream [stream, shell(repo, slug, index)] => term::shell_write(a.get("repo")?, a.get("slug")?, a.get("index")?, a.get("data")?, &cx.ctx.shells),
     shell_resize: Stream [stream, shell(repo, slug, index)] => term::shell_resize(
         a.get("repo")?, a.get("slug")?, a.get("index")?, a.get("cols")?, a.get("rows")?, &cx.ctx.shells,
     ),
-    shell_detach: Stream [stream, shell(repo, slug, index)] => term::shell_detach(a.get("repo")?, a.get("slug")?, a.get("index")?, a.get("gen")?, &cx.ctx.shells),
+    shell_detach: Stream [stream, shell(repo, slug, index)] => {
+        let (repo, slug, index, gen): (String, String, u32, u64) = (a.get("repo")?, a.get("slug")?, a.get("index")?, a.get("gen")?);
+        cx.frames.take_shell_gen(&repo, &slug, index, gen);
+        term::shell_detach(repo, slug, index, gen, &cx.ctx.shells)
+    },
     term_open: Stream [stream, session(session)] => {
+        let session: String = a.get("session")?;
         let id = term::term_open(
-            a.get("session")?, a.get("cols")?, a.get("rows")?, cx.frames.bytes(a.channel("on_bytes")?), &cx.ctx.terminals,
+            session.clone(), a.get("cols")?, a.get("rows")?, cx.frames.bytes(a.channel("on_bytes")?), &cx.ctx.terminals,
         );
         // Remembered per connection, so a client that vanishes takes its
         // attaches with it instead of leaving a tmux client on every session
-        // it ever looked at.
+        // it ever looked at — and with its session, so a narrowed grant ends
+        // the attaches it no longer covers (§3.3).
         if let Ok(id) = &id {
-            cx.frames.note_term(*id);
+            cx.frames.note_term(*id, session);
         }
         id
     },
@@ -739,6 +876,63 @@ commands! { cx, a;
     skill_preview_git: Engine [admin, global, all, remote_url(url)] => profiles::skill_preview_git(&cx.ctx, a.get("url")?, a.get("rev")?),
     skill_install_git: HostConsole => profiles::skill_install_git(a.get("url")?, a.get("rev")?, a.get("sha")?, a.get("name")?),
     skill_remove: Engine [admin, global] => profiles::skill_remove(a.get("name")?),
+
+    // ── paired devices (devices.json; Phase 2 §2.5, §2.8, §3.2) ──────────
+    // A listing is the caller's principal's devices (§3.3), tombstones too.
+    devices_list: Engine [admin, global] => cx.devices.list(cx.caller.principal()),
+    // A device may always revoke ITSELF; another device of its principal
+    // needs `admin` (the object checks; the registry checks again).
+    device_revoke: Own [own, revocable(id)] => cx.devices.revoke(&cx.caller, &authz::effective(&*cx.registry, &cx.caller), &device_id(a)?, now()),
+    // Take capabilities or projects away from a PEER; never add, never self.
+    device_narrow: Engine [admin, device(id)] => cx.devices.narrow(
+        &cx.caller, &authz::effective(&*cx.registry, &cx.caller), &device_id(a)?, scope_arg(cx, a, false)?,
+    ),
+    // The host's alone (§2.5, §2.6, §3.2): widening, pausing, re-enabling,
+    // expiry and step-up, and "every device but this one".
+    device_set_scope: HostConsole [console, device(id)] => cx.devices.set_scope(&device_id(a)?, scope_arg(cx, a, true)?),
+    device_disable: HostConsole [console, device(id)] => cx.devices.disable(&device_id(a)?, now()),
+    device_enable: HostConsole [console, device(id)] => cx.devices.enable(&device_id(a)?, now()),
+    device_set_expiry: HostConsole [console, device(id)] => cx.devices.set_expiry(&device_id(a)?, Expiry::from_value(&a.raw("expiry"))?),
+    device_set_stepup: HostConsole [console, device(id)] => cx.devices.set_stepup(&device_id(a)?, a.get("required")?),
+    devices_revoke_all_others: HostConsole [console, opt(device(keep))] => {
+        let keep: Option<String> = a.get("keep")?;
+        cx.devices.revoke_all_others(keep.filter(|k| !k.is_empty()).map(DeviceId::new).as_ref(), now())
+    },
+    // A new server key (§2.5): every device's pin is now wrong, so every
+    // device is revoked and pairs again. Meant for a suspected compromise,
+    // where a handover signed by the old key would be signed by the thief.
+    // ── pairing (§2.2–§2.4): the host opens the window, the host decides ──
+    // The scope and the expiry are chosen BEFORE the window exists (§2.2
+    // step 1); a missing expiry is the default, 30 days unused.
+    pair_begin: HostConsole => {
+        let expiry = match a.raw("expiry") {
+            Value::Null => Expiry::default(),
+            v => Expiry::from_value(&v)?,
+        };
+        cx.pairing.begin(Offer { grant: scope_arg(cx, a, true)?, expiry }, now())
+    },
+    pair_decide: HostConsole => cx.pairing.decide(a.get("allow")?, now()),
+    pair_cancel: HostConsole => ok(cx.pairing.cancel()),
+    pair_status: HostConsole => ok(cx.pairing.status()),
+    // ── step-up (§2.5): what a device does for itself, on its own connection ──
+    stepup_challenge: Own => cx.frames.stepup().challenge(std::time::Instant::now()).map(|c| serde_json::json!({
+        "challenge": worktrees_api::files::b64_encode(&c), "valid_secs": stepup::CHALLENGE_FOR.as_secs(),
+    })),
+    stepup_prove: Own => {
+        let authz::Device::Paired(d) = cx.caller.device() else { return Err(Value::from("the console needs no step-up")) };
+        let pin = cx.devices.get(cx.caller.principal(), d).and_then(|r| r.stepup_spki_sha256);
+        let spki = stepup::b64_decode(&a.get::<String>("spki")?).ok_or("invalid args `spki`: not base64")?;
+        let sig = stepup::b64_decode(&a.get::<String>("signature")?).ok_or("invalid args `signature`: not base64")?;
+        cx.frames.stepup().prove(pin.as_deref(), &spki, &sig, std::time::Instant::now()).map(|_| serde_json::json!({
+            "valid_secs": stepup::VALID_FOR.as_secs(),
+        }))
+    },
+    identity_rotate: HostConsole => {
+        let id = super::identity::Identity::rotate(&cx.ctx.config_dir)?;
+        cx.devices.announce(super::devices::DeviceEvent::IdentityRotated { pin: id.pin().to_string() });
+        let revoked = cx.devices.revoke_all_others(None, now())?;
+        ok(serde_json::json!({ "pin": id.pin(), "revoked": revoked }))
+    },
 }
 
 #[cfg(test)]
@@ -763,21 +957,22 @@ mod tests {
         }
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let ctx = Ctx::new(dir.clone(), Arc::new(Quiet));
-        (Call { ctx, frames: Frames::new(wire::Outbox(tx)), caller: Caller::console(), registry: Arc::new(NoDevices), world: None }, dir, rx)
+        (Call { ctx, frames: Frames::new(wire::Outbox(tx)), caller: Caller::console(), registry: Arc::new(NoDevices), world: None, devices: Arc::new(DeviceRegistry::in_memory()), pairing: Arc::new(Pairing::new(None, Arc::new(DeviceRegistry::in_memory()))) }, dir, rx)
     }
 
     fn args(v: Value) -> Args {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 152 rows, no duplicates: the command layer's (143 at the extraction;
-    /// host policy's three getters and Kimi's six since), and the check
-    /// scripts hold the page's commands against them.
+    /// 168 rows, no duplicates: the command layer's (143 at the extraction;
+    /// host policy's three getters and Kimi's six since) and Phase 2 slice
+    /// 5's sixteen — the device rows, pairing and step-up; the check scripts
+    /// hold the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 152, "the command layer has 152 commands");
+        assert_eq!(TABLE.len(), 168, "the table has 168 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -969,7 +1164,7 @@ mod tests {
     fn names_an_object(key: &str) -> bool {
         const OBJECTS: &[&str] = &[
             "repo", "root", "path", "slug", "session", "id", "dir", "location", "parent", "doc", "index", "shell", "place",
-            "places", "roots", "paths",
+            "places", "roots", "paths", "keep",
         ];
         OBJECTS.contains(&key) || key.starts_with("into_")
     }
@@ -1029,8 +1224,12 @@ mod tests {
 
     /// Every row has exactly ONE base group — its capability, or its class
     /// when it has none — and the counts are §3.4's, plus the two host-policy
-    /// getters #532 added after it (`read`). A row that moves group fails here
-    /// until the count (and the proposal's table) move with it.
+    /// getters #532 added after it (`read`) and slice 5's rows: two `admin`
+    /// (`devices_list`, `device_narrow`); eleven console (six device acts,
+    /// `identity_rotate` and four pairing rows); and three a device makes for
+    /// itself (`own`: `device_revoke`, `stepup_challenge`, `stepup_prove`). A
+    /// row that moves group fails here until the count (and the proposal's
+    /// table) move with it.
     #[test]
     fn every_row_has_one_base_group_and_the_counts_are_section_3_4s() {
         let mut groups: BTreeMap<&str, usize> = BTreeMap::new();
@@ -1039,14 +1238,15 @@ mod tests {
                 (Exposure::ClientLocal, None) => "client-local",
                 (Exposure::HostConsole, None) => "console",
                 (Exposure::Loopback, None) => "loopback-only",
+                (Exposure::Own, None) => "own",
                 (Exposure::Engine | Exposure::Stream, Some(c)) => c.name(),
                 other => panic!("{} has no base group: {other:?}", r.name),
             };
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 55), ("write", 23), ("admin", 33), ("console", 21), ("stream", 10), ("instruct", 3),
-            ("client-local", 6), ("loopback-only", 1),
+            ("read", 55), ("write", 23), ("admin", 35), ("console", 32), ("stream", 10), ("instruct", 3),
+            ("client-local", 6), ("loopback-only", 1), ("own", 3),
         ]
         .into();
         assert_eq!(groups, want);
