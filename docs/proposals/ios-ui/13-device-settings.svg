@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="390" height="844" viewBox="0 0 390 844" role="img" aria-labelledby="title desc">
+<title id="title">This device</title>
+<desc id="desc">Worktrees iOS wireframe, Catppuccin Latte light. Fictional host and session data. System surfaces are schematic.</desc>
+<rect x="0" y="0" width="390" height="844" rx="0" fill="#e6e9ef"/>
+<text x="28" y="30" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="14" font-weight="600" fill="#4c4f69">9:41</text>
+<rect x="310" y="19" width="4" height="9" rx="1" fill="#4c4f69"/>
+<rect x="317" y="16" width="4" height="12" rx="1" fill="#4c4f69"/>
+<rect x="324" y="13" width="4" height="15" rx="1" fill="#4c4f69"/>
+<rect x="341" y="14" width="25" height="13" rx="3" fill="#e6e9ef" stroke="#4c4f69"/>
+<rect x="344" y="17" width="17" height="7" rx="1" fill="#4c4f69"/>
+<text x="20" y="77" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="17" font-weight="400" fill="#4c4f69">‹ Connection</text>
+<text x="20" y="127" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="28" font-weight="600" fill="#4c4f69">This device</text>
+<text x="20" y="155" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="14" font-weight="400" fill="#5c5f77">Bret’s iPhone · Studio Mac</text>
+<rect x="20" y="181" width="350" height="139" rx="10" fill="#eff1f5"/>
+<text x="36" y="215" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="17" font-weight="600" fill="#4c4f69">Interactive access</text>
+<text x="36" y="250" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="15" font-weight="400" fill="#4c4f69">Can run commands on Studio Mac as you.</text>
+<text x="36" y="275" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="15" font-weight="400" fill="#4c4f69">Face ID or passcode protects answers</text>
+<text x="36" y="300" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="15" font-weight="400" fill="#4c4f69">and messages.</text>
+<rect x="20" y="336" width="350" height="207" rx="10" fill="#eff1f5"/>
+<text x="36" y="370" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="17" font-weight="600" fill="#4c4f69">Allowed on Worktrees</text>
+<text x="36" y="407" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="15" font-weight="400" fill="#4c4f69">Read activity · Start and close sessions</text>
+<text x="36" y="432" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="15" font-weight="400" fill="#4c4f69">Edit notes, pins and lifecycle</text>
+<text x="36" y="457" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="15" font-weight="400" fill="#4c4f69">Answer prompts · Send messages</text>
+<text x="36" y="511" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="14" font-weight="400" fill="#5c5f77">No terminal access · No administration</text>
+<text x="20" y="577" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="15" font-weight="400" fill="#4c4f69">Access is changed on Studio Mac.</text>
+<text x="20" y="602" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="15" font-weight="400" fill="#4c4f69">Disabled after 30 days unused.</text>
+<rect x="20" y="639" width="350" height="50" rx="10" fill="#eff1f5" stroke="#4c4f69"/>
+<text x="195.0" y="670" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="17" font-weight="600" fill="#4c4f69" text-anchor="middle">Revoke this device on Studio Mac</text>
+<rect x="20" y="701" width="350" height="50" rx="10" fill="#eff1f5" stroke="#4c4f69"/>
+<text x="195.0" y="732" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="17" font-weight="600" fill="#4c4f69" text-anchor="middle">Forget this host</text>
+<text x="20" y="785" font-family="ui-sans-serif, -apple-system, system-ui, sans-serif" font-size="13" font-weight="400" fill="#5c5f77">Revoke removes access. Forget removes local pairing.</text>
+<rect x="127" y="824" width="136" height="5" rx="3" fill="#4c4f69"/>
+</svg>
