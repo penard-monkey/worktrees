@@ -168,10 +168,16 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   serve holding evidence), and `checkpoint()` is `None` — a `null` list —
   until it has: a checkpoint that listed a file nobody checked would carry a
   forged device on as evidence into every later boot. A paired device's own
-  records spend a per-device BYTE budget (`ACTS`, `DRIVE` — drive-class as
-  `needs_stepup` reads `Resolved::needs` — and `REFUSALS`); past it they are
-  counted into a `budget` episode, never dropped, and registry, pairing and
-  first-of-episode records are never charged. serve installs its signal
+  records spend a per-device BYTE budget (`ACTS`, `REFUSALS`); past it they
+  are counted into a `budget` episode, never dropped, and registry, pairing
+  and first-of-episode records are never charged; #538's limit episodes are
+  always written and debited from `REFUSALS`. Drive-class acts (`needs_stepup`
+  over `Resolved::needs`, plus `remove_place`) are NEVER coalesced: each
+  reserves its record from `DRIVE` at `Witness::allow`, the last step of
+  `call_in_seen` after the lane gate, and one the budget cannot pay for is
+  refused there (`RefusalKind::AuditBudget`, answered with the seconds to
+  wait), recorded once and charged to `REFUSALS`, so a refusal never keeps
+  `DRIVE` spent. The console is never gated. serve installs its signal
   handlers BEFORE it writes serve.json: a supervisor's SIGTERM in that gap killed it
   with no exit status. Anything consumed by being emitted (the inbox's
   `worktrees show`) waits for `Host::has_audience(event)`: a loopback

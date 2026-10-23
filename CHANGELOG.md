@@ -270,12 +270,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
     instead of written: one line when the overflow begins, and one when it
     ends with how many lines it held and what they were. Nothing is dropped.
     A device sending as fast as serve lets it could have rotated the whole
-    log away in about 20 minutes; it now takes about four days. Pairings,
-    revokes and other device changes are always written in full.
+    log away in about 20 minutes; it now takes about three days. Pairings,
+    revokes and other device changes are always written in full, and an
+    overflow still names what the changes it counted acted on.
   - Writing an agent's instructions, answering an agent, opening a terminal
-    and removing a place have an allowance of their own, so a flood of
-    smaller changes cannot push them out of the log. When they overflow too,
-    the log still names what they acted on.
+    and removing a place are never only counted. They have an allowance of
+    their own, and past it a device is refused them until it refills, with
+    an answer that says how many seconds to wait, so every one that runs is
+    in the log in full. A normal session never meets it: about a hundred at
+    once, then four or more a minute.
 
 ## [0.43.1] - 2026-10-22
 

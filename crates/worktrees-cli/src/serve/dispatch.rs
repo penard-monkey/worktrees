@@ -508,6 +508,12 @@ pub trait Witness {
     /// The resolver admitted `row`, and its body is about to run on `args`:
     /// the canonical values it checked, and the projects they resolved to.
     fn admitted(&self, _row: &'static Row, _args: &Args, _resolved: &resolve::Resolved) {}
+    /// The last word before the body: may `row` run? The audit refuses a
+    /// device's drive-class act its budget cannot record in full
+    /// (`RefusalKind::AuditBudget`). `()` lets everything run.
+    fn allow(&self, _row: &'static Row, _args: &Args, _resolved: &resolve::Resolved) -> Result<(), resolve::Refusal> {
+        Ok(())
+    }
 }
 
 impl Witness for () {}
@@ -601,11 +607,18 @@ pub fn call_in_seen(cx: &Call, cmd: &str, args: &Args, world: &dyn World, seen: 
             }
             return out;
         }
-        Ok(_launching) => {
-            seen.admitted(row, &args, &resolved);
-            let out = body(row.name, &scoped, &args);
-            provenance::stamped(&cx.caller, resolved.instruction.as_ref(), out)
-        }
+        // Last, the audit's word (§5.1): a device's drive-class act its
+        // audit budget cannot record in full does not run. Its refusal is
+        // recorded once, as every refusal is, and charged to the device's
+        // refusals, not to the budget it was refused for.
+        Ok(_launching) => match seen.allow(row, &args, &resolved) {
+            Err(r) => refusal_answer(&cx.caller, row, &args, &r, seen),
+            Ok(()) => {
+                seen.admitted(row, &args, &resolved);
+                let out = body(row.name, &scoped, &args);
+                provenance::stamped(&cx.caller, resolved.instruction.as_ref(), out)
+            }
+        },
     };
     if let Some(l) = lead {
         l.land(&out);

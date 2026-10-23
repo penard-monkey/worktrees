@@ -120,13 +120,15 @@ pub const AUTH_ALERT_AT: u64 = 20;
 /// caller's to choose: three identifiers of `MAX_IDENT` each make one about
 /// 3.3 KB, where a typical record is 370 B.
 ///
-/// What one device flooding flat out can write, per budget, is the larger of
-/// its refill and its episode records, which are always written and debited
-/// (one `began` and one `ended` per `EPISODE_QUIET`, about 1.2 KB, so about
-/// 20 B/s): 20 B/s for each of the three, about 60 B/s or 5 MiB a day. The
-/// four rotated files, 20 MiB, then last it four days; at 50 records a
-/// second (§6's request rate) they lasted 20 minutes, and under 3 with
-/// crafted refusals. Sixteen devices at once: about 6 hours. Measured
+/// What one device flooding flat out can write, per coalescing budget, is the
+/// larger of its refill and its episode records, which are always written
+/// and debited (one `began` and one `ended` per `EPISODE_QUIET`, about
+/// 1.2 KB, so about 20 B/s): 20 B/s for acts and for refusals. Drive-class
+/// acts are refused past theirs, so `DRIVE` adds exactly its refill, 40 B/s:
+/// about 80 B/s in all, 6.6 MiB a day. The four rotated files, 20 MiB, then
+/// last it three days; at 50 records a second (§6's request rate) they
+/// lasted 20 minutes, and under 3 with crafted refusals. Sixteen devices at
+/// once: about 4.5 hours. Measured
 /// (`an_hour_of_flood_from_one_device_writes_its_ceiling`): an hour of 25
 /// refusals and 25 acts a second, 180,000 records, wrote 159 KB — the two
 /// bursts and 28 B/s — where it had written about 52 MB.
@@ -140,14 +142,24 @@ pub struct Allowance {
 /// drive-class: about 110 records at once, then one every 18 s.
 pub const ACTS: Allowance = Allowance { burst: 40.0 * 1024.0, per_sec: 20.0 };
 
-/// A device's drive-class acts, as step-up defines them (`dispatch::
-/// needs_stepup`: instruct, answer, admin, opening a terminal — an
-/// instruction file's write is raised to instruct), and `remove_place`, the
-/// one remove that can destroy commits: about 65 at once, then one every
-/// 30 s. A budget of their own, so a flood of cheap acts cannot spend the
-/// one that records an instruction written or a branch deleted, and what an
-/// episode of them coalesces keeps its targets (`MAX_TARGETS`).
-pub const DRIVE: Allowance = Allowance { burst: 24.0 * 1024.0, per_sec: 12.0 };
+/// A device's drive-class acts ([`drive_class`]): instruct, answer, admin,
+/// opening a terminal — an instruction file's write is raised to instruct —
+/// and `remove_place`, the one remove that can destroy commits. They are
+/// NEVER coalesced: one that its budget cannot pay for is refused before it
+/// runs (`RefusalKind::AuditBudget`), and told when to try again, so every
+/// dangerous act that runs is in the log in full.
+///
+/// Sized so a phone session never meets it. A drive-class record is 400 to
+/// 570 B (measured: an instruction write with a long path and its hash is
+/// 567 B), so 64 KiB is 115 to 160 of them at once — an agent answered every
+/// 30 s for an hour — and 40 B/s is one every 10 to 14 s, four to six a
+/// minute, for as long as the device is used. Past that, a device is driving
+/// agents faster than a person can read what they asked.
+pub const DRIVE: Allowance = Allowance { burst: 64.0 * 1024.0, per_sec: 40.0 };
+
+/// What a drive-class act reserves from `DRIVE` before it runs: a typical
+/// record's bytes. Its record, once written, is settled at what it cost.
+pub const DRIVE_RESERVE: f64 = 512.0;
 
 /// What a device can make with nothing granted at all (`refused`): about 40
 /// at once, then one every 50 s. A budget of its own, so junk a device needs
@@ -164,8 +176,8 @@ pub const EPISODE_SPAN: Duration = Duration::from_secs(600);
 const MAX_TALLY: usize = 16;
 
 /// The distinct targets (command, project, object) a coalesced episode of
-/// drive-class acts names, each part cut to `TARGET_IDENT` bytes; the rest
-/// are counted as `other`.
+/// acts names, each part cut to `TARGET_IDENT` bytes; the rest are counted as
+/// `other`.
 const MAX_TARGETS: usize = 8;
 const TARGET_IDENT: usize = 128;
 
@@ -723,7 +735,8 @@ struct Knock {
 enum Charge {
     /// `call` and `stream`: what its grant let through.
     Acts,
-    /// The drive-class acts among them.
+    /// The drive-class acts among them: reserved before they run, refused
+    /// past the budget, never coalesced.
     Drive,
     /// `refused`: what it can make with nothing granted.
     Refusals,
@@ -778,10 +791,10 @@ impl Bucket {
         ok
     }
 
-    /// Take `n` whether or not it is there.
+    /// Take `n` whether or not it is there (a negative `n` gives back).
     fn debit(&mut self, a: Allowance, n: f64, now: Instant) {
         self.refill(a, now);
-        self.tokens = (self.tokens - n).max(-a.burst);
+        self.tokens = (self.tokens - n).clamp(-a.burst, a.burst);
     }
 }
 
@@ -797,7 +810,7 @@ struct Coalesced {
     count: u64,
     bytes: u64,
     tally: BTreeMap<String, u64>,
-    /// What the drive-class acts it counted acted on (`MAX_TARGETS`).
+    /// What the acts it counted acted on (`MAX_TARGETS`).
     targets: BTreeMap<String, u64>,
 }
 
@@ -1344,6 +1357,12 @@ impl Audit {
         let (now, epoch) = (st.mono(), st.wall());
         let cost = Self::cost(&st, &r);
         let spend = st.budgets.entry(id.clone()).or_insert_with(|| Spend::new(now));
+        // A drive-class act was paid for before it ran ([`Audit::reserve`]):
+        // its record is always written, and settled at what it cost.
+        if charge == Charge::Drive {
+            spend.bucket(charge).debit(DRIVE, cost - DRIVE_RESERVE, now);
+            return self.append(&mut st, &r);
+        }
         if spend.bucket(charge).take(charge.allowance(), cost, now) {
             return self.append(&mut st, &r);
         }
@@ -1366,7 +1385,7 @@ impl Audit {
         let key = tally_key(&r);
         let key = if e.tally.len() < MAX_TALLY || e.tally.contains_key(&key) { key } else { "other".to_string() };
         *e.tally.entry(key).or_insert(0) += 1;
-        if charge == Charge::Drive {
+        if charge == Charge::Acts {
             let t = target(&r).to_string();
             let t = if e.targets.len() < MAX_TARGETS || e.targets.contains_key(&t) { t } else { "other".to_string() };
             *e.targets.entry(t).or_insert(0) += 1;
@@ -1394,6 +1413,36 @@ impl Audit {
             s.bucket(charge).debit(charge.allowance(), cost, now);
         }
         self.append(st, &r);
+    }
+
+    /// A record that is always written, debited from a paired device's
+    /// `charge` (the limit episodes #538's budget opens and ends). Anyone
+    /// else's is written as it is.
+    fn debited(&self, charge: Charge, r: Record) {
+        let mut st = guard(&self.st);
+        self.sweep(&mut st, false);
+        match r.actor.as_ref().map(Caller::device) {
+            Some(Device::Paired(id)) => {
+                let (id, now) = (id.clone(), st.mono());
+                st.budgets.entry(id.clone()).or_insert_with(|| Spend::new(now));
+                self.forced(&mut st, &id, charge, r);
+            }
+            _ => self.append(&mut st, &r),
+        }
+    }
+
+    /// Before a paired device's drive-class act runs: take `DRIVE_RESERVE`
+    /// from its `DRIVE` budget, or say how many seconds until it can be.
+    /// The console is never asked.
+    fn reserve(&self, c: &Caller) -> Result<(), u64> {
+        let Device::Paired(id) = c.device() else { return Ok(()) };
+        let mut st = guard(&self.st);
+        let now = st.mono();
+        let b = st.budgets.entry(id.clone()).or_insert_with(|| Spend::new(now)).bucket(Charge::Drive);
+        if b.take(DRIVE, DRIVE_RESERVE, now) {
+            return Ok(());
+        }
+        Err(((DRIVE_RESERVE - b.tokens) / DRIVE.per_sec).ceil().max(1.0) as u64)
     }
 
     /// End every device episode that has gone quiet or run its span — or
@@ -1427,7 +1476,7 @@ impl Audit {
             "class": charge.name(), "episode": "ended", "count": e.count, "bytes": e.bytes, "tally": e.tally,
             "began": rfc3339(e.began_epoch), "ended": rfc3339(e.last_epoch), "closed_by": why,
         });
-        if charge == Charge::Drive {
+        if charge == Charge::Acts {
             d["targets"] = json!(e.targets);
         }
         let mut r = Record::new("budget", d);
@@ -1725,6 +1774,14 @@ fn recorded(row: &Row) -> bool {
     row.cap != Some(Capability::Read) && !STREAM_TRAFFIC.contains(&row.name)
 }
 
+/// A drive-class act, as the audit budget counts one: what step-up guards
+/// (`dispatch::needs_stepup` over the resolver's `needs`, so a path class's
+/// raise counts), and `remove_place`, the one remove that can destroy
+/// commits.
+fn drive_class(row: &Row, resolved: &Resolved) -> bool {
+    dispatch::needs_stepup(row, &resolved.needs, true) || row.name == "remove_place"
+}
+
 /// A refusal record's `reason`. Exhaustive, so a kind the host gains is a
 /// compile error here and not a record with no reason.
 fn reason(kind: RefusalKind) -> &'static str {
@@ -1740,6 +1797,7 @@ fn reason(kind: RefusalKind) -> &'static str {
         RefusalKind::LocalFetch => "local-fetch",
         RefusalKind::DeviceLanes => "device-lanes",
         RefusalKind::StepUp => "step-up",
+        RefusalKind::AuditBudget => "audit-budget",
     }
 }
 
@@ -1777,6 +1835,21 @@ impl ConnAudit {
 
     /// A name no row has, logged as `unknown` with the length of what was
     /// sent (§5.1): the name itself is the client's, and not ours to write.
+    /// May `row`, admitted by everything before it, run? A paired device's
+    /// drive-class act that will be recorded must find its record's bytes in
+    /// `DRIVE` first; past them it is refused, and told when to try again.
+    /// The refusal is recorded by the caller, through `refused`, once.
+    pub fn allow(&self, row: &'static Row, resolved: &Resolved) -> Result<(), Refusal> {
+        if self.caller.is_console() || !recorded(row) || !drive_class(row, resolved) {
+            return Ok(());
+        }
+        self.audit.reserve(&self.caller).map_err(|secs| {
+            Refusal::audit_budget(format!(
+                "audit-budget: this device's allowance for drive-class acts in the audit log is spent — try again in {secs} s"
+            ))
+        })
+    }
+
     pub fn unknown(&self, cmd: &str) {
         let mut r = self.base("refused", Some("unknown"), json!({ "len": cmd.len(), "reason": "unknown command" }));
         r.outcome = Some("refused");
@@ -1980,11 +2053,13 @@ impl ConnAudit {
     /// `closed` for a device's connection past its cap). The rest are
     /// counted by the budget into [`ConnAudit::limit_ended`], never a record
     /// each, so a flood stays two records (§5.1).
+    /// Always written, and a paired device pays for it out of `REFUSALS`, so
+    /// the limits it trips count against the bytes it may make the log write.
     pub fn limit_began(&self, limit: &'static str, answered: &'static str) {
         let detail = json!({ "class": "limit", "episode": "began", "limit": limit, "answered": answered });
         let mut r = self.base("refused", None, detail);
         r.outcome = Some("refused");
-        self.audit.record(r);
+        self.audit.debited(Charge::Refusals, r);
     }
 
     /// The episode `limit_began` opened has ended: `count` refusals, from
@@ -1996,7 +2071,7 @@ impl ConnAudit {
         });
         let mut r = self.base("refused", None, detail);
         r.outcome = Some("refused");
-        self.audit.record(r);
+        self.audit.debited(Charge::Refusals, r);
     }
 
     /// The client went: every attach it still held is closed, with its total.
@@ -2033,6 +2108,12 @@ impl Witness for Seen<'_> {
         quietly(|| self.au.unknown(cmd));
     }
 
+    /// An audit bug lets the act through: it loses that act's reservation,
+    /// never the reply.
+    fn allow(&self, row: &'static Row, _args: &Args, resolved: &Resolved) -> Result<(), Refusal> {
+        quietly(|| self.au.allow(row, resolved)).unwrap_or(Ok(()))
+    }
+
     fn refused(&self, row: &'static Row, args: &Args, r: &Refusal) {
         quietly(|| self.au.refused(row, args, r));
     }
@@ -2040,7 +2121,7 @@ impl Witness for Seen<'_> {
     fn admitted(&self, row: &'static Row, args: &Args, resolved: &Resolved) {
         let p = quietly(|| {
             self.au.begin(row, args, &resolved.projects).map(|mut p| {
-                p.drive = dispatch::needs_stepup(row, &resolved.needs, true) || row.name == "remove_place";
+                p.drive = !self.au.caller.is_console() && drive_class(row, resolved);
                 p
             })
         })
@@ -3374,34 +3455,193 @@ mod tests {
         let _ = std::fs::remove_dir_all(&top);
     }
 
-    /// Past the drive-class budget too, what the coalesced acts acted on
-    /// survives: the episode names up to `MAX_TARGETS` distinct targets with
-    /// their counts, and counts the rest as `other`.
+    /// What coalesced acts acted on survives: the episode names up to
+    /// `MAX_TARGETS` distinct targets with their counts, and counts the rest
+    /// as `other`.
     #[test]
-    fn coalesced_drive_acts_keep_their_targets() {
-        let d = dir("drive-targets");
+    fn coalesced_acts_keep_their_targets() {
+        let d = dir("act-targets");
         let (a, _) = Audit::open(&d, None, Fleet::none());
         let c = phone(&a, 9);
-        let drive = |slug: &str| {
-            let mut p = begin(&c, "set_note", &args(json!({ "repo": "/r", "slug": slug, "note": "x" }))).unwrap();
-            p.drive = true;
-            c.end(p, Outcome::Ok(&Value::Null));
-        };
-        for i in 0..500 {
-            drive(&format!("s{}", i % 3));
+        for i in 0..1000 {
+            call(&c, "set_note", json!({ "repo": "/r", "slug": format!("s{}", i % 3), "note": "x" }));
         }
         for i in 0..20 {
-            drive(&format!("x{i}"));
+            call(&c, "set_note", json!({ "repo": "/r", "slug": format!("x{i}"), "note": "x" }));
         }
         drop(c);
         let b = budget_lines(&d);
-        let end = b.iter().find(|r| r["detail"]["class"] == "drive" && r["detail"]["episode"] == "ended").unwrap_or_else(|| panic!("{b:#?}"));
+        let end = b.iter().find(|r| r["detail"]["class"] == "acts" && r["detail"]["episode"] == "ended").unwrap_or_else(|| panic!("{b:#?}"));
         let t = end["detail"]["targets"].as_object().unwrap_or_else(|| panic!("{end}"));
         assert_eq!(t.len(), MAX_TARGETS + 1, "{t:#?}");
         let s0 = json!({ "cmd": "set_note", "project": "/r", "object": "s0" }).to_string();
         assert!(t.get(&s0).and_then(Value::as_u64).is_some_and(|n| n > 100), "{t:#?}");
         assert!(t.contains_key("other"), "{t:#?}");
         assert_eq!(t.values().filter_map(Value::as_u64).sum::<u64>(), end["detail"]["count"].as_u64().unwrap());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // ── the audit-budget gate (§5.1; the user's decision, 2026-10-23) ───────
+
+    /// A device with `read`, `write` and `instruct` on a fixture project
+    /// whose root holds an `AGENTS.md`: what the gate tests drive through
+    /// dispatch.
+    struct Gate {
+        top: PathBuf,
+        d: PathBuf,
+        a: Arc<Audit>,
+        cx: dispatch::Call,
+        w: Fixture,
+        root: String,
+    }
+
+    impl Gate {
+        fn new(tag: &str, who: Caller) -> Gate {
+            let (top, root, w) = project(tag);
+            let d = dir(tag);
+            let (a, _) = Audit::open(&d, None, Fleet::none());
+            let mut reg = Devices::default();
+            let g = Grant { capabilities: Caps::of(&[Capability::Read, Capability::Write, Capability::Instruct]), projects: Projects::only([root.clone()]) };
+            reg.devices.insert(DeviceId::new("d_phone"), (PrincipalId::owner(), g));
+            std::fs::write(format!("{root}/AGENTS.md"), "be helpful").unwrap();
+            let cx = call_as(who, Arc::new(reg));
+            Gate { top, d, a, cx, w, root }
+        }
+
+        /// One instruction write, the drive-class act: `Err` with the gate's
+        /// words if it refused, or whatever the body answered.
+        fn drive(&self, c: &ConnAudit) -> Result<Value, Value> {
+            through(&self.cx, c, &self.w, "write_file", json!({ "path": format!("{}/AGENTS.md", self.root), "content": "x", "expected_mtime": null }))
+        }
+
+        /// Drive-class acts until the gate refuses one: how many ran, and its
+        /// answer.
+        fn spend(&self, c: &ConnAudit) -> (usize, String) {
+            for n in 0..2000 {
+                if let Err(Value::String(e)) = self.drive(c) {
+                    if e.starts_with("audit-budget") {
+                        return (n, e);
+                    }
+                }
+            }
+            panic!("never refused");
+        }
+
+        fn records(&self, kind: &str, cmd: &str) -> Vec<Value> {
+            live(&self.d).into_iter().filter(|r| r["kind"] == kind && r["cmd"] == cmd).collect()
+        }
+    }
+
+    impl Drop for Gate {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.d);
+            let _ = std::fs::remove_dir_all(&self.top);
+        }
+    }
+
+    /// The seconds the gate's answer says to wait.
+    fn retry_secs(answer: &str) -> u64 {
+        answer.split("try again in ").nth(1).and_then(|t| t.split(' ').next()).and_then(|n| n.parse().ok()).unwrap_or_else(|| panic!("{answer}"))
+    }
+
+    /// Past its `DRIVE` budget, a device's drive-class act is REFUSED — told
+    /// in words when to try again — and never coalesced: every one that ran
+    /// is a record of its own. An ordinary write past ITS budget is still
+    /// served and counted into the acts episode, and a read is served.
+    #[test]
+    fn over_its_drive_budget_a_drive_act_is_refused_and_a_write_or_read_is_served() {
+        let g = Gate::new("gate", phone_caller());
+        let c = phone(&g.a, 9);
+        let (ran, answer) = g.spend(&c);
+        assert!(ran >= 100, "a phone session's worth runs first: {ran}");
+        assert!(answer.contains("try again in") && retry_secs(&answer) >= 1, "{answer}");
+        assert_eq!(g.records("call", "write_file").len(), ran, "every drive-class act that ran is its own record");
+        // Settled at what each record cost: the budget bounds BYTES written.
+        let bytes: usize = raw_lines(&g.d.join(FILE)).iter().filter(|l| l.contains("\"write_file\"") && l.contains("\"call\"")).map(|l| l.len() + 1).sum();
+        assert!((bytes as f64) <= DRIVE.burst + DRIVE_RESERVE + 2.0 * DRIVE.per_sec, "{bytes} bytes of drive-class records past a {} burst", DRIVE.burst);
+        assert!(budget_lines(&g.d).iter().all(|r| r["detail"]["class"] != "drive"), "drive-class acts never coalesce");
+        for i in 0..1000 {
+            call(&c, "set_note", json!({ "repo": g.root, "slug": format!("s{i}"), "note": "x" }));
+        }
+        let note = through(&g.cx, &c, &g.w, "set_note", json!({ "repo": g.root, "slug": "feat", "note": "x" }));
+        assert!(!format!("{note:?}").contains("audit-budget"), "an ordinary write is not gated: {note:?}");
+        let read = through(&g.cx, &c, &g.w, "read_file", json!({ "path": format!("{}/src/lib.rs", g.root) }));
+        assert!(!format!("{read:?}").contains("audit-budget"), "a read is not gated: {read:?}");
+        assert!(g.records("refused", "set_note").is_empty() && g.records("refused", "read_file").is_empty());
+        drop(c);
+        let acts = budget_lines(&g.d).into_iter().find(|r| r["detail"]["class"] == "acts" && r["detail"]["episode"] == "ended").unwrap();
+        assert!(acts["detail"]["tally"].as_object().unwrap().keys().any(|k| k.starts_with("call set_note")), "{acts}");
+    }
+
+    /// The gate is a budget, not a ban: once the time it named has passed,
+    /// the device's drive-class act runs again, and is recorded — however
+    /// often it tried in between, because a refusal is charged to its
+    /// refusals and never to the budget it was refused for.
+    #[test]
+    fn the_refill_the_answer_names_lets_a_drive_act_through_again() {
+        let g = Gate::new("gate-refill", phone_caller());
+        let c = phone(&g.a, 9);
+        let (ran, answer) = g.spend(&c);
+        for _ in 0..5 {
+            assert!(format!("{:?}", g.drive(&c)).contains("audit-budget"), "too soon");
+        }
+        g.a.advance(Duration::from_secs(retry_secs(&answer)));
+        let again = g.drive(&c);
+        assert!(!format!("{again:?}").contains("audit-budget"), "{again:?}");
+        assert_eq!(g.records("call", "write_file").len(), ran + 1);
+        drop(c);
+    }
+
+    /// The console is the owner at the host, and never gated.
+    #[test]
+    fn the_console_is_never_gated() {
+        let g = Gate::new("gate-console", Caller::console());
+        let c = console(&g.a);
+        for _ in 0..400 {
+            assert!(!format!("{:?}", g.drive(&c)).contains("audit-budget"));
+        }
+        assert_eq!(g.records("call", "write_file").len(), 400);
+        assert!(g.records("refused", "write_file").is_empty());
+    }
+
+    /// Every refused act is a record of its own, recorded ONCE (by the
+    /// dispatcher's one refusal path), with its reason and its answer — and
+    /// charged to the device's refusals, not to the budget it was refused
+    /// for, so a refusal never keeps that budget spent.
+    #[test]
+    fn every_refused_drive_act_is_its_own_record() {
+        let g = Gate::new("gate-each", phone_caller());
+        let c = phone(&g.a, 9);
+        let (ran, _) = g.spend(&c);
+        for _ in 0..5 {
+            assert!(format!("{:?}", g.drive(&c)).contains("audit-budget"));
+        }
+        let refused = g.records("refused", "write_file");
+        assert_eq!(refused.len(), 6, "{refused:#?}");
+        for r in &refused {
+            assert_eq!((r["detail"]["reason"].as_str(), r["device"].as_str()), (Some("audit-budget"), Some("d_phone")), "{r}");
+            assert!(r["detail"]["why"].as_str().is_some_and(|w| w.contains("try again in")), "{r}");
+        }
+        assert_eq!(g.records("call", "write_file").len(), ran, "none of them ran");
+        drop(c);
+    }
+
+    /// #538's limit episodes are always written, and a device pays for them
+    /// out of its refusals: limits tripped spend the bytes it may make the
+    /// log write.
+    #[test]
+    fn a_devices_limit_episodes_are_paid_from_its_refusals() {
+        let d = dir("limit-debit");
+        let (a, _) = Audit::open(&d, None, Fleet::none());
+        let c = phone(&a, 9);
+        for _ in 0..60 {
+            c.limit_began("request_rate", "rate");
+        }
+        assert_eq!(live(&d).iter().filter(|r| r["detail"]["class"] == "limit").count(), 60, "always written");
+        c.unknown("nope");
+        assert_eq!(written_by_phone(&d, "refused") - 60, 0, "the refusal after them is counted, not written");
+        assert!(budget_lines(&d).iter().any(|r| r["detail"]["class"] == "refusals"));
+        drop(c);
         let _ = std::fs::remove_dir_all(&d);
     }
 
