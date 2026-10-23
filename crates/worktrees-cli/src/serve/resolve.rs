@@ -206,12 +206,16 @@ pub enum RefusalKind {
     /// An id another connection owns and an id nobody owns land here alike,
     /// so the wire cannot tell them apart; the audit lane records it as a
     /// refused act (§5.2) at the one place it is turned into `ok`,
-    /// `dispatch::call_in`.
+    /// `dispatch::call_in_seen`.
     NoopNotOwned,
     /// A device asked the host to FETCH from somewhere only the host can
     /// reach — a local path, or a loopback, link-local or private address —
     /// or over anything but https ([`Obj::RemoteUrl`]).
     LocalFetch,
+    /// A device's agent launch while the host's device-launched lanes are at
+    /// their limit (§6, LLM10): not the resolver's, but the dispatcher's next
+    /// step (`provenance::device_lane_gate`), and a refusal all the same.
+    DeviceLanes,
 }
 
 /// Why a request was not run. `detail` is the real reason, never sent to a
@@ -253,6 +257,7 @@ impl Refusal {
             RefusalKind::BadArgs => return Value::from(self.detail.clone()),
             RefusalKind::NoopNotOwned => return Value::Null,
             RefusalKind::LocalFetch => ERR_DENIED,
+            RefusalKind::DeviceLanes => super::provenance::ERR_DEVICE_LANES,
         })
     }
 
@@ -310,7 +315,7 @@ pub struct Resolved {
 
 /// Check `row` for `cx.caller` holding `grant`, and rewrite `args` to the
 /// canonical objects. `Err` is a refusal: the body must not run. `world` is
-/// [`Live`] in serve (`dispatch::call`) and a fixture in the tests.
+/// [`Live`] in serve (`dispatch::call_seen`) and a fixture in the tests.
 pub fn authorize(row: &Row, cx: &Call, grant: &Grant, args: &mut Args, world: &dyn World) -> Result<Resolved, Refusal> {
     let caller = &cx.caller;
     match row.exposure {

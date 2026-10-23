@@ -26,18 +26,19 @@ use tokio::net::TcpStream;
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio_tungstenite::tungstenite::handshake::derive_accept_key;
 use tokio_tungstenite::tungstenite::protocol::{Role, WebSocketConfig};
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 use tokio_tungstenite::WebSocketStream;
 use worktrees_api::log::{error, info, warn};
 use worktrees_api::{Ctx, Host};
 
+use super::audit::{Audit, ConnAudit, Outcome};
 use super::dispatch::{self, Args, Call};
 use super::policy;
 use super::resolve::World;
 use super::scope::{self, Listens};
 use super::servefile;
 use super::wire::{self, Frames, Outbox};
-use worktrees_core::authz::{self, Caller, Capability, NoDevices, Registry};
+use worktrees_core::authz::{self, Caller, NoDevices, Registry};
 
 // ── limits (OWASP M1) ────────────────────────────────────────────────────────
 //
@@ -311,6 +312,9 @@ pub struct Shared {
     pub port: u16,
     pub origins: Vec<String>,
     pub clients: Arc<Clients>,
+    /// The audit log's one writer (`audit.rs`). Here and not in `Ctx`, so
+    /// that no command body can write a line.
+    audit: Arc<Audit>,
     next_id: AtomicU64,
     connections: Arc<Counter>,
     unauthenticated: Arc<Counter>,
@@ -331,12 +335,14 @@ impl Shared {
                 if self.capped.swap(false, Ordering::SeqCst) {
                     let n = self.turned_away.swap(0, Ordering::SeqCst);
                     info(&format!("serve: below the connection caps again; {n} connection(s) were closed unanswered meanwhile"));
+                    self.audit.limit_cleared();
                 }
                 Some(Arc::new(Slot { _connection: c, unauthenticated: Mutex::new(Some(u)) }))
             }
             (c, _) => {
                 let which = if c.is_none() { "connections" } else { "unauthenticated connections" };
                 self.turned_away.fetch_add(1, Ordering::SeqCst);
+                self.audit.limit_reached(if c.is_none() { "connections" } else { "unauthenticated" });
                 if !self.capped.swap(true, Ordering::SeqCst) {
                     info(&format!(
                         "serve: at the cap on {which} ({} total, {} unauthenticated); closing new connections unanswered",
@@ -353,6 +359,7 @@ impl Shared {
 pub struct Listener {
     pub port: u16,
     task: tokio::task::JoinHandle<()>,
+    audit: Arc<Audit>,
 }
 
 impl Listener {
@@ -360,6 +367,7 @@ impl Listener {
     /// tasks and finish on their own; the engine behind them is `host::stop`'s.
     pub fn stop(&self) {
         self.task.abort();
+        self.audit.stopped();
     }
 }
 
@@ -376,12 +384,16 @@ pub fn start(ctx: Ctx, token: String, port: u16, origins: Vec<String>, clients: 
     let port = std_listener.local_addr().map_err(|e| e.to_string())?.port();
     std_listener.set_nonblocking(true).map_err(|e| e.to_string())?;
     let listener = tokio::net::TcpListener::from_std(std_listener).map_err(|e| e.to_string())?;
+    // The audit log opens with the port bound, so its first record names it.
+    let (audit, chain) = Audit::open(&ctx.config_dir, Some(ctx.host.clone()));
+    audit.started(port, &chain);
     let shared = Arc::new(Shared {
         ctx,
         token: Arc::from(token.as_str()),
         port,
         origins,
         clients,
+        audit: audit.clone(),
         next_id: AtomicU64::new(1),
         connections: Counter::new(limits.connections),
         unauthenticated: Counter::new(limits.unauthenticated.min(limits.connections)),
@@ -415,7 +427,7 @@ pub fn start(ctx: Ctx, token: String, port: u16, origins: Vec<String>, clients: 
             tokio::spawn(connection(stream, shared.clone(), slot));
         }
     });
-    Ok(Listener { port, task })
+    Ok(Listener { port, task, audit })
 }
 
 /// A refusal. Carries nothing, because nothing is written: hyper closes the
@@ -431,10 +443,14 @@ impl std::fmt::Display for Refused {
 impl std::error::Error for Refused {}
 
 async fn connection(stream: TcpStream, shared: Arc<Shared>, slot: Arc<Slot>) {
+    // The peer, for the records written before there is an actor to name.
+    let peer = stream.peer_addr().ok().map(|a| a.ip().to_string());
+    let audit = shared.audit.clone();
     let io = TokioIo::new(stream);
+    let p = peer.clone();
     let svc = hyper::service::service_fn(move |req: Request<Incoming>| {
-        let (shared, slot) = (shared.clone(), slot.clone());
-        async move { handshake(req, shared, slot) }
+        let (shared, slot, peer) = (shared.clone(), slot.clone(), p.clone());
+        async move { handshake(req, shared, slot, peer) }
     });
     let mut http = hyper::server::conn::http1::Builder::new();
     http.max_buf_size(MAX_HTTP_BUF);
@@ -445,7 +461,8 @@ async fn connection(stream: TcpStream, shared: Arc<Shared>, slot: Arc<Slot>) {
     match tokio::time::timeout(HANDSHAKE_DEADLINE, conn).await {
         Ok(Err(e)) if e.is_user() => {} // our own Refused, already logged
         Ok(Err(e)) => info(&format!("serve: connection ended: {e}")),
-        Ok(Ok(())) | Err(_) => {}
+        Ok(Ok(())) => {}
+        Err(_) => audit.upgrade_refused("deadline", peer),
     }
 }
 
@@ -463,9 +480,10 @@ fn one_header(h: &HeaderMap, name: HeaderName) -> Result<Option<String>, Refused
 }
 
 /// The policy, then the 101. Refusals are logged on the server side only.
-fn handshake(mut req: Request<Incoming>, shared: Arc<Shared>, slot: Arc<Slot>) -> Result<Response<Empty<Bytes>>, Refused> {
+fn handshake(mut req: Request<Incoming>, shared: Arc<Shared>, slot: Arc<Slot>, peer: Option<String>) -> Result<Response<Empty<Bytes>>, Refused> {
     let refuse = |why: &'static str| {
         info(&format!("serve: refused a connection: {why}"));
+        shared.audit.upgrade_refused(why, peer.clone());
         Refused(why)
     };
     let h = req.headers();
@@ -505,7 +523,7 @@ fn handshake(mut req: Request<Incoming>, shared: Arc<Shared>, slot: Arc<Slot>) -
                 let io = Budget { inner: TokioIo::new(upgraded), left: budget.clone() };
                 let config = WebSocketConfig::default().max_message_size(Some(MAX_MESSAGE)).max_frame_size(Some(MAX_MESSAGE));
                 let ws = WebSocketStream::from_raw_socket(io, Role::Server, Some(config)).await;
-                session(ws, shared, id, origin, slot, budget).await;
+                session(ws, shared, id, origin, slot, budget, peer).await;
             }
             Err(e) => warn(&format!("serve: upgrade failed after 101: {e}")),
         }
@@ -547,13 +565,14 @@ async fn handshake_v1(ws: &mut Ws, token: &str) -> Option<()> {
 
 /// One authenticated session: the handshake first, then requests until the
 /// client goes.
-async fn session(mut ws: Ws, shared: Arc<Shared>, id: u64, origin: String, slot: Arc<Slot>, budget: Arc<AtomicUsize>) {
+async fn session(mut ws: Ws, shared: Arc<Shared>, id: u64, origin: String, slot: Arc<Slot>, budget: Arc<AtomicUsize>, peer: Option<String>) {
     // The deadline is on the WHOLE exchange, not per frame: two quick steps
     // adding up to more than it are refused like silence is. A refusal drops
     // the socket here with nothing more written, not even a Close frame.
     let authed = tokio::time::timeout(policy::AUTH_DEADLINE, handshake_v1(&mut ws, &shared.token)).await;
     if !matches!(authed, Ok(Some(()))) {
         info(&format!("serve: client {id} did not authenticate ({origin})"));
+        shared.audit.auth_failed(if authed.is_err() { "deadline" } else { "handshake" }, id, peer);
         return;
     }
     // In: the unauthenticated slot goes back, and the byte budget lifts to
@@ -561,14 +580,16 @@ async fn session(mut ws: Ws, shared: Arc<Shared>, id: u64, origin: String, slot:
     slot.authenticated();
     budget.store(usize::MAX, Ordering::SeqCst);
     info(&format!("serve: client {id} connected ({origin})"));
+    // Who this socket is, fixed for its life: THIS listener's caller, the
+    // owner on the console. Never derived from the request, a header or the
+    // peer address (§3.3); the remote listener (slice 6) sets the device.
+    // Every audit record the connection writes names it (§5.1).
+    let caller = Caller::console();
+    let au = Arc::new(ConnAudit::new(shared.audit.clone(), id, peer, caller.clone()));
 
     let (sink, mut stream) = ws.split();
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Message>();
     let outbox = Outbox(tx);
-    // Who this socket is, fixed for its life: THIS listener's caller, the
-    // owner on the console. Never derived from the request, a header or the
-    // peer address (§3.3); the remote listener (slice 6) sets the device.
-    let caller = Caller::console();
     let listens = shared.clients.add(id, outbox.clone(), caller.clone());
     // THE writer: one task drains the one queue, so every frame for this
     // connection is written in the order it was queued.
@@ -623,8 +644,9 @@ async fn session(mut ws: Ws, shared: Arc<Shared>, id: u64, origin: String, slot:
                 // stream's lane, one at a time.
                 let call = call.clone();
                 let outbox = outbox.clone();
+                let au = au.clone();
                 let job: Job = Box::new(move || {
-                    let _ = outbox.push(answer(&call, &id, &cmd, &args));
+                    let _ = outbox.push(answer(&call, &au, &id, &cmd, &args));
                 });
                 match lane {
                     Some(key) => lanes.run(key, job),
@@ -638,6 +660,11 @@ async fn session(mut ws: Ws, shared: Arc<Shared>, id: u64, origin: String, slot:
             // nothing else is being written.
             Ok(Message::Ping(p)) => {
                 let _ = outbox.send(Message::Pong(p));
+            }
+            // A message past MAX_MESSAGE ends the connection: a limit tripped.
+            Err(WsError::Capacity(_)) => {
+                au.limit("message_size");
+                break;
             }
             Ok(Message::Close(_)) | Err(_) => break,
             Ok(Message::Binary(_)) | Ok(Message::Pong(_)) | Ok(Message::Frame(_)) => {}
@@ -655,6 +682,7 @@ async fn session(mut ws: Ws, shared: Arc<Shared>, id: u64, origin: String, slot:
         let _ = worktrees_api::term::term_close(*t, &shared.ctx.terminals);
     }
     info(&format!("serve: client {id} disconnected ({} attach(es) closed)", terms.len()));
+    au.disconnected();
 }
 
 /// One parsed request → one reply frame, whatever its body does.
@@ -668,13 +696,27 @@ async fn session(mut ws: Ws, shared: Arc<Shared>, id: u64, origin: String, slot:
 /// `Err` before any body runs, so `cmd` is safe to log as it is.
 /// `AssertUnwindSafe`, because what a body shares is the engine's state
 /// behind its mutexes, and a lock the panic poisoned reports itself.
-fn answer(call: &Call, id: &Value, cmd: &str, args: &Args) -> String {
-    // Console acts and `admin` rows change this machine's user-tier state; a
-    // line per call is the audit trail until slice 3's log replaces it.
-    if dispatch::exposure(cmd) == Some(dispatch::Exposure::HostConsole) || dispatch::cap_of(cmd) == Some(Capability::Admin) {
-        info(&format!("serve: host-admin {cmd}"));
-    }
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| dispatch::call(call, cmd, args))) {
+///
+/// The audit record (§5.1) is taken by the request's `audit::Seen`, which
+/// dispatch hands the resolver's verdict: a refusal is recorded where it is
+/// made, the stale close answered `ok` included, and an admitted row whose
+/// capability is not `read` is recorded by `finish`, with its outcome, once
+/// the body is done. The host-admin line serve.log used to carry is one of
+/// those records now.
+fn answer(call: &Call, au: &ConnAudit, id: &Value, cmd: &str, args: &Args) -> String {
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+    let seen = au.request();
+    let r = catch_unwind(AssertUnwindSafe(|| dispatch::call_seen(call, cmd, args, &seen)));
+    // The audit's own code is kept out of the reply's way as well: a panic in
+    // it loses that record (fail open, as a failed write does), never the
+    // reply and never the body.
+    let outcome = match &r {
+        Ok(Ok(v)) => Outcome::Ok(v),
+        Ok(Err(_)) => Outcome::Err,
+        Err(_) => Outcome::Panic,
+    };
+    let _ = catch_unwind(AssertUnwindSafe(|| seen.finish(outcome)));
+    match r {
         Ok(Ok(v)) => wire::reply_ok(id, v),
         Ok(Err(e)) => wire::reply_err(id, e),
         Err(p) => {

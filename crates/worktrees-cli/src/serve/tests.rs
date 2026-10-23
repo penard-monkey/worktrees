@@ -1264,3 +1264,100 @@ fn the_idle_watch_stops_a_serve_its_last_client_left() {
     until(0);
     assert!(fired(Duration::from_secs(5)), "no stop once the last client had gone for the grace");
 }
+
+// ── the audit log (Phase 2 §5) ───────────────────────────────────────────────
+
+/// `audit.jsonl`'s lines, parsed.
+fn audit_lines(l: &Live) -> Vec<Value> {
+    std::fs::read_to_string(l.dir.join(super::audit::FILE))
+        .unwrap()
+        .lines()
+        .map(|s| serde_json::from_str(s).unwrap())
+        .collect()
+}
+
+/// The audit unit tests pass with every call in `conn.rs` deleted; this is
+/// whether the socket WRITES them. A refused upgrade and a wrong proof (no
+/// actor, the peer named), then a served client: a read (no record), a write
+/// (a record, its content nowhere), a client-local row, an unknown command
+/// and a stale close (refusals), and the listener's start and stop around it
+/// all — one chain.
+#[test]
+fn the_audit_log_records_what_reaches_the_socket() {
+    let l = live("audit");
+    let (_s, head) = upgrade(l.port(), Some(&good_host(l.port())), Some("http://evil.example"), "");
+    assert!(head.is_empty(), "{}", String::from_utf8_lossy(&head));
+    let mut bad = upgraded_ws(&l);
+    let (cn, sn) = hello(&mut bad);
+    bad.send(Message::text(json!({ "auth": spec_proof("not-the-token", SPEC_CLIENT_LABEL, &cn, &sn) }).to_string())).unwrap();
+    assert_closed_silently(&mut bad, "a wrong proof");
+
+    let mut ws = client(&l);
+    assert_eq!(rpc(&mut ws, json!(1), "get_settings", json!({}))["ok"], Value::Null);
+    assert_eq!(rpc(&mut ws, json!(2), "set_settings", json!({ "settings": { "theme": "a-secret-theme" } }))["ok"], Value::Null);
+    assert_eq!(rpc(&mut ws, json!(3), "copy_text", json!({ "text": "NEVER" }))["err"], json!("client-local"));
+    assert!(rpc(&mut ws, json!(4), "nope", json!({}))["err"].is_string());
+    // A close of an attach this connection never opened: `ok` on the wire,
+    // a refused act in the log (§5.1).
+    assert_eq!(rpc(&mut ws, json!(5), "term_close", json!({ "id": 987_654 }))["ok"], Value::Null);
+    l.running.as_ref().unwrap().listener.stop();
+
+    let recs = audit_lines(&l);
+    let find = |pred: &dyn Fn(&Value) -> bool| recs.iter().find(|r| pred(r)).cloned().unwrap_or_else(|| panic!("{recs:#?}"));
+    assert_eq!(recs[0]["detail"]["reason"], json!("genesis"));
+    assert_eq!(recs[1]["detail"]["event"], json!("started"));
+    assert_eq!(recs[1]["detail"]["address"], json!(format!("127.0.0.1:{}", l.port())));
+    assert_eq!(recs.last().unwrap()["detail"]["event"], json!("stopped"));
+
+    let origin = find(&|r| r["detail"]["class"] == "upgrade" && r["detail"]["episode"] == "began");
+    assert_eq!((origin["detail"]["reason"].as_str(), origin["peer"].as_str()), (Some("origin"), Some("127.0.0.1")), "{origin}");
+    assert_eq!((origin["principal"].clone(), origin["device"].clone()), (Value::Null, Value::Null), "{origin}");
+    let auth = find(&|r| r["kind"] == "auth" && r["detail"]["episode"] == "began");
+    assert_eq!(auth["detail"]["reason"], json!("handshake"), "{auth}");
+
+    let write = find(&|r| r["cmd"] == "set_settings");
+    assert_eq!((write["kind"].as_str(), write["outcome"].as_str()), (Some("call"), Some("ok")), "{write}");
+    assert_eq!((write["principal"].as_str(), write["device"].as_str()), (Some("owner"), Some("loopback")), "{write}");
+    assert!(write["conn"].as_u64().is_some(), "{write}");
+    assert_eq!(find(&|r| r["cmd"] == "copy_text")["detail"]["reason"], json!("client-local"));
+    assert_eq!(find(&|r| r["cmd"] == "unknown")["detail"]["len"], json!(4));
+    let stale = find(&|r| r["cmd"] == "term_close");
+    assert_eq!((stale["kind"].as_str(), stale["detail"]["reason"].as_str()), (Some("refused"), Some("not-owned")), "{stale}");
+    assert_eq!((stale["detail"]["answered"].as_str(), stale["object"].as_str()), (Some("ok"), Some("987654")), "{stale}");
+    assert!(recs.iter().all(|r| r["cmd"] != "get_settings"), "a read was recorded: {recs:#?}");
+
+    let text = std::fs::read_to_string(l.dir.join(super::audit::FILE)).unwrap();
+    assert!(!text.contains("a-secret-theme") && !text.contains("NEVER") && !text.contains("not-the-token"), "{text}");
+    assert_eq!(super::audit::verify(&l.dir).broken, None);
+}
+
+/// The limits, in the log: a run of connections closed at the cap is ONE
+/// record when it begins and one when the cap clears, with the count — not a
+/// line per connection, which would turn a flood into a disk-writing flood —
+/// and a message past `MAX_MESSAGE` is a refusal naming its actor.
+#[test]
+fn the_audit_log_records_limits_once_per_episode() {
+    let l = live_with("auditcap", Limits { connections: 32, unauthenticated: 2 });
+    let held: Vec<TcpStream> = (0..2).map(|_| idle_tcp(&l)).collect();
+    std::thread::sleep(Duration::from_millis(200));
+    for _ in 0..5 {
+        let mut extra = idle_tcp(&l);
+        let (bytes, closed) = rest(&mut extra, Duration::from_secs(1));
+        assert!(bytes.is_empty() && closed);
+    }
+    drop(held);
+    std::thread::sleep(Duration::from_millis(300));
+    let mut ws = client(&l);
+    ws.get_ref().set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+    let cap = super::conn::MAX_MESSAGE;
+    send_fragmented(ws.get_mut(), &vec![b' '; cap + 1], 1 << 20);
+    let _ = ws.read();
+
+    let recs = audit_lines(&l);
+    let limit: Vec<&Value> = recs.iter().filter(|r| r["detail"]["class"] == "limit").collect();
+    assert_eq!(limit.len(), 2, "one record as the cap is reached, one as it clears: {limit:#?}");
+    assert_eq!((limit[0]["detail"]["episode"].as_str(), limit[0]["detail"]["reason"].as_str()), (Some("began"), Some("unauthenticated")));
+    assert_eq!((limit[1]["detail"]["episode"].as_str(), limit[1]["detail"]["count"].as_u64()), (Some("ended"), Some(5)));
+    let msg = recs.iter().find(|r| r["detail"]["limit"] == "message_size").unwrap_or_else(|| panic!("{recs:#?}"));
+    assert_eq!((msg["kind"].as_str(), msg["principal"].as_str(), msg["device"].as_str()), (Some("refused"), Some("owner"), Some("loopback")));
+}

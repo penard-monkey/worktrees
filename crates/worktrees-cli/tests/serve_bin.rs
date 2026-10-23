@@ -370,9 +370,15 @@ fn a_serve_started_again_after_a_crash_holds_the_engine_policies_it_was_set() {
     assert_eq!(r["ok"], json!(15), "the restarted serve lost the cadence it was set: {r}");
     let r = rpc(&mut ws, 2, "get_term_history_opts", json!({}));
     assert_eq!(r["ok"], json!({"persist_scrollback": false, "per_tab_history": true}), "{r}");
-    let log = std::fs::read_to_string(sb.log()).unwrap();
-    let sets = log.lines().filter(|l| l.contains("serve: host-admin set_")).count();
-    assert_eq!(sets, 2, "only the two sets before the crash may set host policy:\n{log}");
+    // Every set is a record in the audit log, which both serves append to
+    // (§5.1): the two before the crash, and nothing since.
+    let audit = std::fs::read_to_string(sb.cfg().join("audit.jsonl")).unwrap();
+    let sets = audit
+        .lines()
+        .map(|l| serde_json::from_str::<Value>(l).unwrap())
+        .filter(|r| r["kind"] == "call" && r["cmd"].as_str().is_some_and(|c| c.starts_with("set_")))
+        .count();
+    assert_eq!(sets, 2, "only the two sets before the crash may set host policy:\n{audit}");
     assert_eq!(sb.terminate().code(), Some(0));
 }
 

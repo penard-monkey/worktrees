@@ -94,7 +94,8 @@ pub fn by_project(view: &View, v: Value) -> Value {
 // ── events ───────────────────────────────────────────────────────────────────
 
 /// How each event reaches a caller. Every name the api emits has a row; a
-/// test reads the api's `emit("…")`s and fails on one that does not.
+/// test reads the api's `emit("…")`s and fails on one that does not, and
+/// another reads the audit log's (`audit.rs`).
 pub const EVENTS: &[(&str, Event)] = &[
     // No payload: "re-read", and the re-read is itself scoped.
     ("places:changed", Event::Everyone),
@@ -109,6 +110,9 @@ pub const EVENTS: &[(&str, Event)] = &[
     ("shell:exit", Event::ByPath("repo")),
     // `worktrees show` is run by someone at the host (§9.1).
     ("app:open-doc", Event::Console),
+    // `{alert, …}`: §5.3's alerts are for the person at the host, and a
+    // device must not learn that it tripped one.
+    ("audit:alert", Event::Console),
 ];
 
 // ── who listens (§9.3) ───────────────────────────────────────────────────────
