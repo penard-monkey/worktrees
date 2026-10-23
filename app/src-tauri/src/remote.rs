@@ -119,7 +119,14 @@ impl Remote {
         }
         let key = self.store.key_for(&rec)?;
         self.close_live().await;
-        let p = pipe::open(&rec, &key, CONNECT_WAIT).await.map_err(|e| format!("{} ({}): {e}", rec.name, rec.addr))?;
+        // Logged: a remote window that cannot connect shows a banner, and the
+        // person at it reads app.log for the rest (the host's serve.log is on
+        // the host).
+        let p = pipe::open(&rec, &key, CONNECT_WAIT).await.map_err(|e| {
+            let m = format!("{} ({}): {e}", rec.name, rec.addr);
+            crate::applog("warn", &format!("remote: connect failed: {m}"));
+            m
+        })?;
         let token = p.session_token().to_string();
         let (tx, mut rx) = p.split();
         let conn = self.next.fetch_add(1, Ordering::SeqCst);
