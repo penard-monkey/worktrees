@@ -240,6 +240,11 @@ impl Pairing {
         *self.bind.lock().unwrap() = bind;
     }
 
+    /// This host's name, as a link and the device's screen give it.
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
     /// The window now, or how the last one ended.
     pub fn status(&self) -> Status {
         let cur = self.cur.lock().unwrap();

@@ -604,10 +604,13 @@ impl RemoteAccess {
         Ok(Value::Array(list))
     }
 
-    /// What remote access is doing, for the console (`remote_status`).
+    /// What remote access is doing, for the console (`remote_status`): with
+    /// the host's name, which the pairing dialog's label names ("can run
+    /// commands on <host> as you", §1.1) before any window gives it.
     pub fn status_value(&self) -> Value {
         let mut v = self.status_inner();
         v["owner"] = json!(*self.owner.lock().unwrap());
+        v["host"] = json!(self.pairing.host());
         v
     }
 

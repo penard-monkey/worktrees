@@ -702,6 +702,7 @@ fn the_enable_dialog_offers_what_enable_takes() {
     assert_eq!(mine["class"], json!(worktrees_core::netclass::classify(IpAddr::V4(lan)).unwrap().name()));
     let st = h.remote.enable(mine["address"].as_str().unwrap(), mine["iface"].as_str().map(String::from), None, None).unwrap();
     assert_eq!((st["state"].clone(), st["iface"].clone()), (json!("listening"), mine["iface"].clone()), "{st}");
+    assert_eq!(st["host"], json!(h.remote.pairing.host()), "the label's host name");
     h.remote.disable().unwrap();
 }
 
