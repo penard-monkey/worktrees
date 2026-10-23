@@ -1978,6 +1978,28 @@ impl ConnAudit {
                     detail.insert("sha256".into(), json!(sha256_hex(c.as_bytes())));
                 }
             }
+            // A line typed into an agent (iOS MVP S8): its length and hash and
+            // the session, never the text — the record names what was sent
+            // without the log holding what a phone told an agent.
+            "agent_send" => {
+                if let Some(Value::String(t)) = arg(args, "text") {
+                    detail.insert("bytes".into(), json!(t.len()));
+                    detail.insert("sha256".into(), json!(sha256_hex(t.as_bytes())));
+                }
+                if let Some(Value::String(s)) = arg(args, "session") {
+                    detail.insert("session".into(), json!(ident(s)));
+                }
+            }
+            // An answer (S7, §9.2): which of the prompt's choices, to which
+            // prompt — the fingerprint is a hash of what the device saw.
+            "agent_answer" => {
+                if let Some(c) = arg(args, "choice").and_then(Value::as_u64) {
+                    detail.insert("choice".into(), json!(c));
+                }
+                if let Some(Value::String(f)) = arg(args, "fingerprint") {
+                    detail.insert("fingerprint".into(), json!(ident(f)));
+                }
+            }
             // The one remove that can destroy commits (AGENTS.md): what it
             // destroys, read BEFORE the body, in the form that restores it.
             "remove_place" => {
@@ -3546,9 +3568,9 @@ mod tests {
 
     // ── the audit-budget gate (§5.1; the user's decision, 2026-10-23) ───────
 
-    /// A device with `read`, `write` and `instruct` on a fixture project
-    /// whose root holds an `AGENTS.md`: what the gate tests drive through
-    /// dispatch.
+    /// A device with `read`, `write`, `answer` and `instruct` on a fixture
+    /// project whose root holds an `AGENTS.md`: what the gate tests drive
+    /// through dispatch.
     struct Gate {
         top: PathBuf,
         d: PathBuf,
@@ -3564,7 +3586,10 @@ mod tests {
             let d = dir(tag);
             let (a, _) = Audit::open(&d, None, Fleet::none());
             let mut reg = Devices::default();
-            let g = Grant { capabilities: Caps::of(&[Capability::Read, Capability::Write, Capability::Instruct]), projects: Projects::only([root.clone()]) };
+            let g = Grant {
+                capabilities: Caps::of(&[Capability::Read, Capability::Write, Capability::Answer, Capability::Instruct]),
+                projects: Projects::only([root.clone()]),
+            };
             reg.devices.insert(DeviceId::new("d_phone"), (PrincipalId::owner(), g));
             std::fs::write(format!("{root}/AGENTS.md"), "be helpful").unwrap();
             let cx = call_as(who, Arc::new(reg));
@@ -3600,6 +3625,78 @@ mod tests {
             let _ = std::fs::remove_dir_all(&self.d);
             let _ = std::fs::remove_dir_all(&self.top);
         }
+    }
+
+    // ── the agent rows (iOS MVP S7, S8) ──────────────────────────────────────
+
+    impl Gate {
+        /// The project's `(main)` Claude, scripted (`serve::tests::ScriptedAgent`),
+        /// in the session the place's own name gives it.
+        fn agent(&mut self, screen: &'static str) -> (Arc<super::super::tests::ScriptedAgent>, String) {
+            let session = worktrees_core::Project::discover(Path::new(&self.root)).unwrap().session_name("(main)");
+            let pane = super::super::tests::ScriptedAgent::new(&session, screen, super::super::tests::CLAUDE_EMPTY);
+            self.cx.ctx = self.cx.ctx.clone().with_agents(worktrees_api::agents::Agents::new(pane.clone()));
+            (pane, session)
+        }
+
+        fn send(&self, c: &ConnAudit, session: &str, text: &str) -> Result<Value, Value> {
+            through(&self.cx, c, &self.w, "agent_send", json!({ "repo": self.root, "slug": "(main)", "session": session, "text": text }))
+        }
+    }
+
+    /// A line typed into an agent is recorded by its length, its SHA-256 and
+    /// the session it went to — never its text: not when it is delivered, not
+    /// when the body refuses it, not when the resolver does. An answer is
+    /// recorded by its choice and the prompt's fingerprint.
+    #[test]
+    fn an_agent_send_is_recorded_by_length_and_hash_never_its_text() {
+        let mut g = Gate::new("agentsend", phone_caller());
+        let (pane, session) = g.agent(super::super::tests::CLAUDE_EMPTY);
+        let c = phone(&g.a, 9);
+        let text = "deploy the SECRET-PAYLOAD-1 branch";
+        assert_eq!(g.send(&c, &session, text).map(|v| v["delivered"].clone()), Ok(json!(true)));
+        assert!(g.send(&c, &session, "SECRET-PAYLOAD-2\nline two").is_err(), "a control character: the body refuses");
+        assert!(g.send(&c, "not-a-session", "SECRET-PAYLOAD-3").is_err(), "an unknown session: the resolver refuses");
+        assert_eq!(*pane.sent.lock().unwrap(), vec![text.to_string()]);
+        let raw = std::fs::read_to_string(g.d.join(FILE)).unwrap();
+        assert!(!raw.contains("SECRET-PAYLOAD"), "the text reached the log:\n{raw}");
+        let sent = g.records("call", "agent_send");
+        assert_eq!(sent.len(), 2, "{sent:#?}");
+        assert_eq!(sent[0]["detail"]["bytes"], json!(text.len()));
+        assert_eq!(sent[0]["detail"]["sha256"], json!(sha256_hex(text.as_bytes())));
+        assert_eq!(sent[0]["detail"]["session"], json!(session));
+        assert_eq!((sent[0]["outcome"].as_str(), sent[1]["outcome"].as_str()), (Some("ok"), Some("err")));
+        assert_eq!(g.records("refused", "agent_send").len(), 1);
+
+        *pane.screen.lock().unwrap() = super::super::tests::CLAUDE_TRUST;
+        let p = through(&g.cx, &c, &g.w, "agent_prompt", json!({ "repo": g.root, "slug": "(main)" })).unwrap();
+        let fp = p["fingerprint"].as_str().unwrap().to_string();
+        assert!(g.records("call", "agent_prompt").is_empty(), "a read is not recorded");
+        let r = through(&g.cx, &c, &g.w, "agent_answer", json!({ "repo": g.root, "slug": "(main)", "choice": 1, "fingerprint": fp }));
+        assert_eq!(r.map(|v| v["confirmed"].clone()), Ok(json!(true)));
+        let answered = g.records("call", "agent_answer");
+        assert_eq!((answered[0]["detail"]["choice"].as_u64(), answered[0]["detail"]["fingerprint"].as_str()), (Some(1), Some(fp.as_str())));
+        assert_eq!(answered[0]["cap"], json!("answer"));
+    }
+
+    /// #559's gate reaches the agent rows through the normal chain: past its
+    /// `DRIVE` budget a device's answer and send are refused `audit-budget`
+    /// before their bodies run, and nothing reaches the pane.
+    #[test]
+    fn past_its_drive_budget_a_devices_answer_and_send_are_refused() {
+        let mut g = Gate::new("agentgate", phone_caller());
+        let (pane, session) = g.agent(super::super::tests::CLAUDE_TRUST);
+        let c = phone(&g.a, 9);
+        let p = through(&g.cx, &c, &g.w, "agent_prompt", json!({ "repo": g.root, "slug": "(main)" })).unwrap();
+        let fp = p["fingerprint"].as_str().unwrap().to_string();
+        g.spend(&c);
+        let answer = through(&g.cx, &c, &g.w, "agent_answer", json!({ "repo": g.root, "slug": "(main)", "choice": 1, "fingerprint": fp }));
+        let send = g.send(&c, &session, "one more thing");
+        for r in [answer, send] {
+            assert!(matches!(&r, Err(Value::String(e)) if e.starts_with("audit-budget")), "{r:?}");
+        }
+        assert!(pane.untouched(), "neither body ran");
+        assert!(through(&g.cx, &c, &g.w, "agent_prompt", json!({ "repo": g.root, "slug": "(main)" })).is_ok(), "a read is never gated");
     }
 
     /// The seconds the gate's answer says to wait.

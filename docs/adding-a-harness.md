@@ -90,6 +90,15 @@ The same derivation must reach **all four** readers. Keep them on one reader
       and width.
 - [ ] **Plan tab paste** and **drop into a session** reach it, with the same
       modal guard.
+- [ ] **The agent rows** (serve's `agent_prompt` / `agent_answer` /
+      `agent_send` / `agent_turns`; `worktrees_core::prompt`, `turns`): a
+      `prompt::read` arm that knows the harness's modals by where they END
+      and cuts them at their own top, fixture-tested on real captures with
+      the version written down; its one-shot choices in `prompt::ONE_SHOT`
+      (anything else is host-only); a `prompt::composer_empty` arm; and a
+      transcript reader for `agent_turns`. Without the first, `agent_prompt`
+      says `waiting: false` under an amber dot; without the second,
+      `agent_send` never finds a prompt to type at.
 - [ ] Claude↔Claude uses Claude's own messaging; everything else goes over the
       MCP message log — say which applies.
 - [ ] **Agent guidance** (`guidance::delivery`): how the harness takes the

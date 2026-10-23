@@ -25,6 +25,68 @@ use super::budget::BUDGETS;
 use super::conn::Limits;
 use super::{start_in, Running};
 
+/// A place's Claude for the agent rows (iOS MVP S6–S9), scripted: `screen`
+/// until a key answers it, `after` from then on, the lines `agent_send`
+/// delivered, and a transcript of fixtures. No tmux anywhere — serve's tests
+/// hand it to the engine's `Ctx` (`Ctx::with_agents`). Shared with the audit
+/// tests.
+pub(super) struct ScriptedAgent {
+    pub session: String,
+    pub screen: Mutex<&'static str>,
+    pub after: &'static str,
+    pub keys: Mutex<Vec<worktrees_core::tmux::Key>>,
+    pub sent: Mutex<Vec<String>>,
+}
+
+/// Real Claude 2.1.309 screens (`worktrees-core/tests/fixtures/claude-screen`).
+pub(super) const CLAUDE_TRUST: &str = include_str!("../../../worktrees-core/tests/fixtures/claude-screen/2.1.309/trust.txt");
+pub(super) const CLAUDE_EMPTY: &str = include_str!("../../../worktrees-core/tests/fixtures/claude-screen/2.1.309/composer-empty.e.txt");
+
+impl ScriptedAgent {
+    pub(super) fn new(session: &str, screen: &'static str, after: &'static str) -> Arc<ScriptedAgent> {
+        Arc::new(ScriptedAgent { session: session.to_string(), screen: Mutex::new(screen), after, keys: Default::default(), sent: Default::default() })
+    }
+
+    /// Nothing reached the pane: no key, no line.
+    pub(super) fn untouched(&self) -> bool {
+        self.keys.lock().unwrap().is_empty() && self.sent.lock().unwrap().is_empty()
+    }
+}
+
+impl worktrees_api::agents::AgentIo for ScriptedAgent {
+    fn lanes(&self, _: &worktrees_core::Project, _: &str) -> Vec<worktrees_api::agents::Lane> {
+        vec![worktrees_api::agents::Lane { harness: "claude", session: self.session.clone(), pane: "%1".into() }]
+    }
+    fn activity(&self, _: &worktrees_core::Project, _: &str) -> worktrees_core::activity::Activity {
+        worktrees_core::activity::Activity::none()
+    }
+    fn capture(&self, _: &worktrees_api::agents::Lane) -> Option<String> {
+        Some(self.screen.lock().unwrap().to_string())
+    }
+    fn press(&self, _: &worktrees_api::agents::Lane, key: worktrees_core::tmux::Key) -> Result<(), String> {
+        self.keys.lock().unwrap().push(key);
+        if key == worktrees_core::tmux::Key::Enter {
+            *self.screen.lock().unwrap() = self.after;
+        }
+        Ok(())
+    }
+    fn deliver(
+        &self,
+        _: &worktrees_core::Project,
+        _: &str,
+        _: &worktrees_api::agents::Lane,
+        text: &str,
+    ) -> Result<worktrees_core::harness::SendOutcome, String> {
+        self.sent.lock().unwrap().push(text.to_string());
+        Ok(worktrees_core::harness::SendOutcome::Submitted)
+    }
+    fn transcript(&self, _: &worktrees_core::Project, _: &str, _: &worktrees_api::agents::Lane) -> Result<Vec<String>, String> {
+        let t = include_str!("../../../worktrees-core/tests/fixtures/transcripts/claude-2.1.309.jsonl");
+        Ok(t.lines().map(str::to_string).collect())
+    }
+    fn sleep(&self, _: u64) {}
+}
+
 /// RFC 6455 §1.3's worked example: this key yields this accept value. A
 /// server that derives it right is talking the handshake the spec wrote down.
 const KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
@@ -2822,6 +2884,55 @@ mod devices {
         assert!(e.rpc(&mut c, "devices_list", json!({})).get("ok").is_some());
         let recs = lines();
         assert_eq!((recs[1]["kind"].as_str(), recs[1]["outcome"].as_str()), (Some("call"), Some("ok")), "{recs:#?}");
+    }
+
+    /// Prove a step-up on `c`, whose exporter is `ex`, with `k`.
+    fn prove(e: &Engine, c: &mut Client, k: &super::super::stepup::testkit::StepUpKey, ex: [u8; 32]) {
+        let ch = e.rpc(c, "stepup_challenge", json!({}))["ok"]["challenge"].as_str().unwrap().to_string();
+        let mut msg = super::super::stepup::b64_decode(&ch).unwrap();
+        msg.extend_from_slice(&ex);
+        let r = e.rpc(c, "stepup_prove", json!({"spki": worktrees_api::files::b64_encode(&k.spki), "signature": worktrees_api::files::b64_encode(&k.sign(&msg))}));
+        assert!(r.get("ok").is_some(), "{r}");
+    }
+
+    /// iOS MVP S7/S8 through the real chain: `agent_answer` and `agent_send`
+    /// are drive-class (`answer`, `instruct`), so a phone is asked for a
+    /// step-up on its connection and nothing reaches the pane until one
+    /// holds; `agent_prompt` and `agent_turns` are reads and never asked. A
+    /// device without `answer` or `instruct` is denied either act.
+    #[test]
+    fn an_answer_and_a_send_wait_for_a_step_up_and_the_reads_do_not() {
+        let mut e = engine("agent-stepup", vec![]);
+        let a = e.dir.join("a");
+        assert!(std::process::Command::new("git").args(["init", "-q"]).arg(&a).status().unwrap().success());
+        let repo = s(&a);
+        let session = worktrees_core::Project::discover(&a).unwrap().session_name("(main)");
+        let pane = super::ScriptedAgent::new(&session, super::CLAUDE_TRUST, super::CLAUDE_EMPTY);
+        e.ctx = e.ctx.clone().with_agents(worktrees_api::agents::Agents::new(pane.clone()));
+        let (rec, k) = iphone(&e.reg, &[Read, Write, Answer, Instruct]);
+        let ex = [1u8; 32];
+        let mut c = e.connect_with(caller(&rec), Some(ex));
+        let place = json!({"repo": repo, "slug": "(main)"});
+        let p = e.rpc(&mut c, "agent_prompt", place.clone());
+        let fp = p["ok"]["fingerprint"].as_str().unwrap_or_else(|| panic!("{p}")).to_string();
+        let answer = json!({"repo": repo, "slug": "(main)", "choice": 1, "fingerprint": fp});
+        let send = json!({"repo": repo, "slug": "(main)", "session": session, "text": "and run the linter"});
+        assert_eq!(e.rpc(&mut c, "agent_answer", answer.clone())["err"], json!("step-up required"));
+        assert_eq!(e.rpc(&mut c, "agent_send", send.clone())["err"], json!("step-up required"));
+        assert!(e.rpc(&mut c, "agent_turns", place.clone()).get("ok").is_some(), "a read is never asked");
+        assert!(pane.untouched(), "nothing reached the pane before the step-up");
+        prove(&e, &mut c, &k, ex);
+        let r = e.rpc(&mut c, "agent_answer", answer.clone());
+        assert_eq!(r["ok"]["confirmed"], json!(true), "{r}");
+        let r = e.rpc(&mut c, "agent_send", send.clone());
+        assert_eq!(r["ok"]["delivered"], json!(true), "{r}");
+        assert_eq!(*pane.sent.lock().unwrap(), vec!["and run the linter".to_string()]);
+        // Without the capability: denied, whatever the step-up.
+        let mac = enroll(&e.reg, "Mac", 9, &[Read, Write], Projects::All);
+        let mut m = e.connect_with(caller(&mac), Some([3u8; 32]));
+        assert_eq!(e.rpc(&mut m, "agent_answer", answer)["err"], json!("denied"));
+        assert_eq!(e.rpc(&mut m, "agent_send", send)["err"], json!("denied"));
+        assert_eq!(pane.sent.lock().unwrap().len(), 1);
     }
 
     /// The bypass a review found: dock shells are the process's, so a device

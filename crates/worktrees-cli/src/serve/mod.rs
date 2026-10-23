@@ -5,7 +5,7 @@
 //! shells, the docs server, the writers of `shell-cwds.json` and the rings —
 //! runs here, and the desktop app, a second desktop or a phone are clients of
 //! it. This slice is the server half: the listener, the loopback rule set, the
-//! RPC over the 174 commands, streams and events, and the host wiring every
+//! RPC over the 178 commands, streams and events, and the host wiring every
 //! engine process needs. The frontend transport and the shim becoming a
 //! client are the next lane's.
 //!

@@ -48,6 +48,28 @@ pub fn agent_sessions_for(
     primary_up: bool,
     place_path: &str,
 ) -> Vec<AgentSession> {
+    agent_session_names(panes, canonical, primary_name, primary_up)
+        .into_iter()
+        .map(|(a, name, up)| {
+            let p = a.provider();
+            // The model each live agent last answered with — `null` until its
+            // first reply, and never looked up for a session that is down.
+            let model = if up { crate::watch::live_model(w, p.id, probes, &name, place_path) } else { None };
+            AgentSession { id: p.id, name, up, model }
+        })
+        .collect()
+}
+
+/// [`agent_sessions_for`]'s rule without the models: every harness, its
+/// session name for the place, and whether that session is up. The agent rows
+/// (`agents`) find a place's agents by it, so the snapshot and the rows can
+/// never disagree about which session is whose.
+pub fn agent_session_names(
+    panes: Option<&tmux::PaneList>,
+    canonical: &str,
+    primary_name: &str,
+    primary_up: bool,
+) -> Vec<(&'static dyn harness::Adapter, String, bool)> {
     let owner = panes.map_or(provider::CLAUDE.id, |p| p.canonical_provider(canonical).id);
     let has = |name: &str| panes.is_some_and(|p| p.has_session(name));
     let others: Vec<String> = provider::PROVIDERS
@@ -70,10 +92,7 @@ pub fn agent_sessions_for(
                 let up = has(&name);
                 (name, up)
             };
-            // The model each live agent last answered with — `null` until its
-            // first reply, and never looked up for a session that is down.
-            let model = if up { crate::watch::live_model(w, p.id, probes, &name, place_path) } else { None };
-            AgentSession { id: p.id, name, up, model }
+            (*a, name, up)
         })
         .collect()
 }
