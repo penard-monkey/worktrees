@@ -18,8 +18,9 @@
 //    the words it will meet on a host.
 // 4. the docs (`docs/proposals/ios-mvp.md`, §2.4's "As built" table): each
 //    row's spec, spelled as the table spells it.
+// And the remote door (`app/src/ipc.ts`) refuses none of them locally.
 //
-// AGENT_ROWS_{TABLE,API,MOCK,DOC} point the check at a mutated copy.
+// AGENT_ROWS_{TABLE,API,MOCK,DOC,IPC} point the check at a mutated copy.
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -29,6 +30,7 @@ const SRC = {
   api: process.env.AGENT_ROWS_API ?? here("../../crates/worktrees-api/src/agents.rs"),
   mock: process.env.AGENT_ROWS_MOCK ?? here("../src/mock/install.ts"),
   doc: process.env.AGENT_ROWS_DOC ?? here("../../docs/proposals/ios-mvp.md"),
+  ipc: process.env.AGENT_ROWS_IPC ?? here("../src/ipc.ts"),
 };
 
 let failed = 0;
@@ -88,6 +90,23 @@ else ok("the mock answers all four rows");
 for (const s of [ERR.changed, ERR.noChoice, ERR.promptUp].filter(Boolean)) {
   if (!mock.includes(`throw ${JSON.stringify(s)}`)) fail(`the mock never refuses with ${JSON.stringify(s)}`);
   else ok(`the mock refuses with ${JSON.stringify(s)}`);
+}
+
+// ── 3b. the remote door (app/src/ipc.ts, #555) ───────────────────────────────
+// A window driving a paired host refuses some rows LOCALLY, before the host
+// is asked: CONSOLE_ROWS always, ADMIN_ROWS without `admin`, and it routes
+// HOST_PATH_LOCAL and REMOTE_SETTINGS elsewhere. The agent rows are read,
+// answer and instruct: a device holding those reaches them through the door,
+// and serve decides (step-up, the audit budget). None may sit in those lists.
+const ipc = read(SRC.ipc);
+// The list's whole literal, keys included (REMOTE_SETTINGS is an object).
+const listed = (name) => ipc.match(new RegExp(`export const ${name}[^=]*=\\s*([\\[{][\\s\\S]*?[\\]}]);`))?.[1] ?? null;
+for (const list of ["CONSOLE_ROWS", "ADMIN_ROWS", "HOST_PATH_LOCAL", "REMOTE_SETTINGS"]) {
+  const block = listed(list);
+  if (!block) { fail(`ipc.ts has no ${list} for this check to read`); continue; }
+  const caught = Object.keys(ROWS).filter((n) => new RegExp(`\\b${n}\\b`).test(block));
+  if (caught.length) fail(`ipc.ts's ${list} holds ${caught.join(", ")} — a remote window would never ask the host`);
+  else ok(`the remote door's ${list} leaves the agent rows to the host`);
 }
 
 // ── 4. the docs ──────────────────────────────────────────────────────────────
