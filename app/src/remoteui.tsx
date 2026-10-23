@@ -9,14 +9,18 @@ import {
   runsCommandsLabel, untilEndOf, type Cap, type Expiry, type Preset, type Projects,
 } from "./devices";
 
-/** `Date.now()`, re-read every `ms` while mounted: what a countdown reads. */
+/** `Date.now()` at every render, with a render every `ms` while mounted: what
+ *  a countdown reads. The tick only schedules renders. A clock kept from the
+ *  last tick is up to `ms` old in a render something else caused, and the
+ *  pairing window's answer is one: read a second boundary late, 120 s opened
+ *  at "2:01". */
 export function useNow(ms = 250): number {
-  const [now, setNow] = useState(() => Date.now());
+  const [, setTick] = useState(0);
   useEffect(() => {
-    const id = window.setInterval(() => setNow(Date.now()), ms);
+    const id = window.setInterval(() => setTick((t) => t + 1), ms);
     return () => window.clearInterval(id);
   }, [ms]);
-  return now;
+  return Date.now();
 }
 
 /** Host policy lets agents act unprompted (Codex permissions other than
