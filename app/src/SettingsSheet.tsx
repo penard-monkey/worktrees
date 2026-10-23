@@ -7,6 +7,7 @@ import { GuidanceSection, type GuidanceStatus } from "./GuidancePanel";
 import { CrossProjectSection, type CrossProjectStatus } from "./CrossProjectPanel";
 import { PlanningSection, type PlanningStatus } from "./PlanningPanel";
 import { QuotaSection } from "./QuotaPanel";
+import { SlotsSection } from "./SlotsPanel";
 import { UserSkillsSection, type UserSkill } from "./AgentSetup";
 import * as Icons from "./icons";
 import { invoke } from "./ipc";
@@ -1258,6 +1259,8 @@ export function SettingsSheet({
           </section>
 
           <QuotaSection data-focus="plan-limits" onReport={onReport} />
+
+          <SlotsSection data-focus="heavy-jobs" onReport={onReport} />
           </>}
 
           {cat === "updates" && <>

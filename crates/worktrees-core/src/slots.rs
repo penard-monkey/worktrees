@@ -16,8 +16,10 @@
 //!
 //! The incident spanned two repositories, so the slots live in the user's
 //! state dir (`$XDG_STATE_HOME/worktrees/slots/<name>/`), not in a git common
-//! dir. Capacity comes from the user's `config.toml` (`[slots]`) and never
-//! from a repo — `slots` is in `projcfg`'s `USER_ONLY_KEYS` (ADR 0001).
+//! dir. Capacity comes from the user's `config.toml` (`[slots]`, written by
+//! `worktrees slots set` and Settings) and never from a repo — `slots` is in
+//! `projcfg`'s `USER_ONLY_KEYS` (ADR 0001). With nothing set, it is sized from
+//! the machine's cores and memory (`machine_capacity`, measured below).
 //!
 //! # The lock is the kernel's, so it cannot go stale
 //!
@@ -74,10 +76,14 @@ use std::time::{Duration, Instant};
 
 /// The config table, shared by the reader and `USER_ONLY_KEYS`.
 pub const TABLE: &str = "slots";
-/// Capacity for a name the user's `[slots]` does not list (and for `gate`).
-pub const DEFAULT_CAPACITY: u32 = 2;
+/// The key every name the table does not list falls back to.
+pub const DEFAULT_KEY: &str = "default";
+/// The slot every lane's gate takes (`worktrees run --slot gate`).
+pub const GATE: &str = "gate";
+/// Capacity when neither the config nor the machine can say (`built-in`).
+pub const BUILT_IN: u32 = 2;
 /// The upper bound a capacity may take — past this it is not a limit.
-const CAPACITY_MAX: u32 = 64;
+pub const CAPACITY_MAX: u32 = 64;
 const POLL: Duration = Duration::from_millis(500);
 /// `worktrees run --timeout` expiry: EX_TEMPFAIL, "try again later".
 pub const EXIT_TIMEOUT: i32 = 75;
@@ -130,45 +136,352 @@ pub fn valid_name(n: &str) -> Result<(), String> {
     if ok { Ok(()) } else { Err(format!("slot name `{n}` must be lowercase letters, digits and dashes")) }
 }
 
+/// A capacity a caller may ask for: `1..=CAPACITY_MAX`.
+pub fn valid_capacity(n: u32) -> Result<(), String> {
+    if (1..=CAPACITY_MAX).contains(&n) { Ok(()) } else { Err(format!("capacity must be a whole number from 1 to {CAPACITY_MAX} (got {n})")) }
+}
+
+// ── the machine ─────────────────────────────────────────────────────────────
+
+const GIB: u64 = 1 << 30;
+
+/// What the machine-sized default is computed from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Machine {
+    /// Cores a gate can use at full speed: macOS's performance cores
+    /// (`hw.perflevel0.physicalcpu`, else `hw.physicalcpu` on a machine with
+    /// one kind), Linux's `available_parallelism`, which counts an affinity
+    /// mask AND a cgroup CPU quota — more than `nproc` does: under `docker
+    /// --cpus 4` on a 14-core host `nproc` printed 14 and this reads 4.
+    pub cores: u32,
+    /// Physical memory: `hw.memsize`, `/proc/meminfo` MemTotal (which is the
+    /// host's or VM's, not a container's cgroup limit).
+    pub ram_bytes: u64,
+}
+
+impl Machine {
+    /// Whole GiB, rounded down — what a label says and the formula reads.
+    pub fn ram_gib(&self) -> u64 {
+        self.ram_bytes / GIB
+    }
+
+    /// The default capacity this machine gets.
+    pub fn capacity(&self) -> u32 {
+        machine_capacity(self.cores, self.ram_bytes)
+    }
+}
+
+// The machine default, and what each number stands on. Measured on 2026-10-22
+// with this repository's own full gate (AGENTS.md's list, cold: a fresh clone
+// and an empty target/) on a 10+4-core, 36 GiB Mac that was already carrying
+// ~27 GiB of other work — about fifteen agent sessions, which is the normal
+// load here (`guard` exists because of it):
+//
+// - one gate: 7m34s, peak 3.2 GiB summed over its process tree (2.7 GiB on a
+//   second run); 69% of the wall is the bats suite (serial, ~60 MiB), the
+//   rest compiles that load every core. Over its whole life it averaged 1.65
+//   busy cores (834 s of user+sys CPU in a 505 s run);
+// - two at once: 8m57s each (×1.18 wall, ×1.69 throughput), peak 5.3 GiB
+//   for the pair; the compile steps ran 1.6–2.1× slower, bats 1.07×, and
+//   swap grew by 1.3 GB.
+//
+// So memory decides first: a GATE_RAM_PCT share of RAM — guard's default
+// agent cap (half the RAM in GiB, at ~1.2 GB a session) leaves about that
+// much for the work the sessions start — at GIB_PER_GATE each, the highest
+// peak seen (3.3 GiB) with a margin for a heavier branch and a spike between
+// samples. Cores decide next: CORES_PER_GATE is about twice that 1.65-core
+// average, so the gates' average demand stays near half the fast cores and
+// the rest is left to the agent sessions, which are the user's actual work;
+// and when the compiles coincide, as they do when lanes start together, each
+// shares the machine with at most a third as many gates as there are cores.
+// MACHINE_MAX caps what was not measured: past two, each further gate buys
+// less throughput (only the compiles overlap badly, and they are what grows)
+// while memory grows by a whole gate; the 2026-10-14 freeze was seven.
+// `[slots]` goes higher on a machine its owner knows can take it.
+const GATE_RAM_PCT: u64 = 40;
+const GIB_PER_GATE: u64 = 4;
+const CORES_PER_GATE: u32 = 3;
+/// The most the machine default ever gives; past it only `[slots]` goes.
+pub const MACHINE_MAX: u32 = 4;
+
+/// The machine default: the lower of `cores / CORES_PER_GATE` and
+/// `RAM GiB × GATE_RAM_PCT% / GIB_PER_GATE`, between 1 and `MACHINE_MAX`. A
+/// pure function of the two numbers, so the table test is the whole argument.
+pub fn machine_capacity(cores: u32, ram_bytes: u64) -> u32 {
+    let by_cpu = cores / CORES_PER_GATE;
+    let by_mem = (ram_bytes / GIB) * GATE_RAM_PCT / 100 / GIB_PER_GATE;
+    by_cpu.min(by_mem.min(u64::from(MACHINE_MAX)) as u32).clamp(1, MACHINE_MAX)
+}
+
+/// The machine, read once per process. The test seam is
+/// `WORKTREES_SLOTS_PROBE` (guard's `WORKTREES_GUARD_PROBE` shape): `off`
+/// reads nothing, which is the `built-in` answer, and the bats suite pins it so
+/// a test's capacity does not depend on the runner; a path reads a JSON
+/// `Machine` from that file. Unset reads the machine.
+pub fn machine() -> Option<Machine> {
+    match std::env::var("WORKTREES_SLOTS_PROBE").ok().filter(|s| !s.is_empty()) {
+        Some(v) if v == "off" => None,
+        Some(path) => fs::read_to_string(path).ok().and_then(|t| serde_json::from_str(&t).ok()),
+        None => {
+            static READ: std::sync::OnceLock<Option<Machine>> = std::sync::OnceLock::new();
+            *READ.get_or_init(read_machine)
+        }
+    }
+}
+
+/// Through libc, never a subprocess, like guard's memory reading.
+#[cfg(target_os = "macos")]
+fn read_machine() -> Option<Machine> {
+    let cores = crate::guard::sysctl::<u32>("hw.perflevel0.physicalcpu")
+        .filter(|n| *n > 0)
+        .or_else(|| crate::guard::sysctl::<u32>("hw.physicalcpu").filter(|n| *n > 0))?;
+    let ram_bytes = crate::guard::sysctl::<u64>("hw.memsize").filter(|b| *b > 0)?;
+    Some(Machine { cores, ram_bytes })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn read_machine() -> Option<Machine> {
+    let cores = std::thread::available_parallelism().ok()?.get() as u32;
+    let ram_bytes = fs::read_to_string("/proc/meminfo").ok().and_then(|t| crate::guard::meminfo(&t).ram_bytes)?;
+    Some(Machine { cores, ram_bytes })
+}
+
 // ── config ──────────────────────────────────────────────────────────────────
 
-/// The capacity for `name` from `config.toml`'s text: `[slots] <name>`, else
-/// `[slots] default`, else `DEFAULT_CAPACITY`. Lenient like `[quota]`: a typo
-/// is a problem line, never a refusal to run.
-pub fn capacity_from(text: &str, name: &str) -> (u32, Vec<String>) {
-    let mut problems = Vec::new();
-    let root: std::collections::BTreeMap<String, toml::Value> = match toml::from_str(text) {
+/// Where a slot's capacity came from — what `worktrees slots` and Settings say.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// `[slots] <key>`: the slot's own name, or `default`.
+    Config(String),
+    Machine(Machine),
+    /// Neither the config nor the machine could say: `BUILT_IN`.
+    BuiltIn,
+}
+
+impl Source {
+    /// `config`, `machine` or `built-in`: what a client switches on.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Source::Config(_) => "config",
+            Source::Machine(_) => "machine",
+            Source::BuiltIn => "built-in",
+        }
+    }
+
+    pub fn label(&self) -> String {
+        match self {
+            Source::Config(key) => format!("config [{TABLE}] {key}"),
+            Source::Machine(m) => format!("machine ({} cores, {} GiB)", m.cores, m.ram_gib()),
+            Source::BuiltIn => "built-in".into(),
+        }
+    }
+}
+
+/// A slot's capacity, where it came from, and what was wrong on the way.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Capacity {
+    pub n: u32,
+    pub source: Source,
+    pub problems: Vec<String>,
+}
+
+impl Capacity {
+    /// Set for this very name, i.e. what `slots unset <name>` would remove.
+    pub fn explicit(&self, name: &str) -> bool {
+        matches!(&self.source, Source::Config(k) if k == name)
+    }
+}
+
+/// `[slots]` from `config.toml`'s text, or why there is none to read.
+fn table_from(text: &str, problems: &mut Vec<String>) -> Option<toml::Table> {
+    let root: toml::Table = match toml::from_str(text) {
         Ok(r) => r,
         Err(_) => {
             problems.push("config.toml does not parse, so [slots] could not be read — the defaults apply".into());
-            return (DEFAULT_CAPACITY, problems);
+            return None;
         }
     };
-    let Some(v) = root.get(TABLE) else { return (DEFAULT_CAPACITY, problems) };
-    let Some(t) = v.as_table() else {
-        problems.push("slots must be a table ([slots]) — ignored".into());
-        return (DEFAULT_CAPACITY, problems);
-    };
-    let read = |key: &str, problems: &mut Vec<String>| -> Option<u32> {
-        let v = t.get(key)?;
-        match v.as_integer() {
-            Some(n) if (1..=CAPACITY_MAX as i64).contains(&n) => Some(n as u32),
-            _ => {
-                problems.push(format!("[slots] {key} is not a whole number from 1 to {CAPACITY_MAX} — ignored"));
-                None
-            }
+    match root.get(TABLE)? {
+        toml::Value::Table(t) => Some(t.clone()),
+        _ => {
+            problems.push("slots must be a table ([slots]) — ignored".into());
+            None
         }
-    };
-    let cap = read(name, &mut problems).or_else(|| read("default", &mut problems)).unwrap_or(DEFAULT_CAPACITY);
-    (cap, problems)
+    }
 }
 
-/// The capacity for `name`, read now from the user's config.
-pub fn capacity(name: &str) -> (u32, Vec<String>) {
-    match fs::read_to_string(crate::config::config_toml_path()) {
-        Ok(t) => capacity_from(&t, name),
-        Err(_) => (DEFAULT_CAPACITY, Vec::new()),
+/// One key's capacity, or a problem line when it is set to nonsense.
+fn read_key(t: &toml::Table, key: &str, problems: &mut Vec<String>) -> Option<u32> {
+    let v = t.get(key)?;
+    match v.as_integer() {
+        Some(n) if (1..=CAPACITY_MAX as i64).contains(&n) => Some(n as u32),
+        _ => {
+            problems.push(format!("[slots] {key} is not a whole number from 1 to {CAPACITY_MAX} — ignored"));
+            None
+        }
     }
+}
+
+/// What a name gets once its own key is out of the way: `[slots] default`
+/// (for any name but `default` itself), else the machine's, else `BUILT_IN`.
+fn fallback(t: Option<&toml::Table>, name: &str, machine: Option<Machine>, problems: &mut Vec<String>) -> (u32, Source) {
+    if name != DEFAULT_KEY {
+        if let Some(n) = t.and_then(|t| read_key(t, DEFAULT_KEY, problems)) {
+            return (n, Source::Config(DEFAULT_KEY.into()));
+        }
+    }
+    match machine {
+        Some(m) => (m.capacity(), Source::Machine(m)),
+        None => (BUILT_IN, Source::BuiltIn),
+    }
+}
+
+/// The capacity for `name` from `config.toml`'s text: `[slots] <name>`, else
+/// `[slots] default`, else the machine's, else `BUILT_IN`. An explicit entry
+/// always wins, whatever the machine says. Lenient like `[quota]`: a typo is
+/// a problem line, never a refusal to run.
+pub fn resolve(text: &str, name: &str, machine: Option<Machine>) -> Capacity {
+    let mut problems = Vec::new();
+    let t = table_from(text, &mut problems);
+    if let Some(n) = t.as_ref().and_then(|t| read_key(t, name, &mut problems)) {
+        return Capacity { n, source: Source::Config(name.into()), problems };
+    }
+    let (n, source) = fallback(t.as_ref(), name, machine, &mut problems);
+    Capacity { n, source, problems }
+}
+
+/// The user's config.toml, "" when there is none.
+fn config_text() -> String {
+    fs::read_to_string(crate::config::config_toml_path()).unwrap_or_default()
+}
+
+/// The capacity for `name`, read now from the user's config and the machine.
+pub fn capacity(name: &str) -> Capacity {
+    resolve(&config_text(), name, machine())
+}
+
+// ── writing [slots] ─────────────────────────────────────────────────────────
+
+/// Set (`Some`) or remove (`None`) `[slots] <name>` in the user's config.toml —
+/// the user's act only: the CLI verb and Settings; the MCP server never calls
+/// it. Returns whether anything changed.
+pub fn set_capacity(name: &str, n: Option<u32>) -> Result<bool, String> {
+    set_capacity_at(&crate::config::config_toml_path(), name, n)
+}
+
+pub fn set_capacity_at(path: &Path, name: &str, n: Option<u32>) -> Result<bool, String> {
+    valid_name(name)?;
+    if let Some(n) = n {
+        valid_capacity(n)?;
+    }
+    crate::config::edit_user_config(path, |text| {
+        let root: toml::Table = toml::from_str(text).map_err(|_| unparsable())?;
+        let cur = root.get(TABLE).and_then(|v| v.as_table()).and_then(|t| t.get(name));
+        let same = match (cur, n) {
+            (None, None) => true,
+            (Some(v), Some(n)) => v.as_integer() == Some(i64::from(n)),
+            _ => false,
+        };
+        if same {
+            return Ok(None);
+        }
+        with_slot(text, name, n).map(Some)
+    })
+}
+
+fn unparsable() -> String {
+    "config.toml does not parse — fix it by hand before changing [slots]".into()
+}
+
+/// `text` with `[slots] <name>` set to `n`, or removed for `None`. Pure, for
+/// the tests.
+///
+/// Like `quota::with_policy`: edits the key's VALUE in place, so its inline
+/// comment and indentation survive; keeps the file's line ending; adds a
+/// missing key after the table's last key (or under its header), or the table
+/// at the end. Every other line is kept byte for byte, and the result must
+/// re-parse to exactly the old document with this one key changed, or nothing
+/// is written — so a dotted `slots.gate = …`, an inline `slots = {…}` or a
+/// quoted `"gate" = …` refuses rather than guess.
+pub fn with_slot(text: &str, name: &str, n: Option<u32>) -> Result<String, String> {
+    valid_name(name)?;
+    if let Some(n) = n {
+        valid_capacity(n)?;
+    }
+    let before: toml::Table = toml::from_str(text).map_err(|_| unparsable())?;
+    let refuse = || format!("could not set [slots] {name} in your config.toml safely (an unusual layout?) — edit it by hand");
+    let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let is_ours = |l: &str| l.trim_start().strip_prefix(name).is_some_and(|r| r.trim_start().starts_with('='));
+    let mut out: Vec<String> = Vec::new();
+    let mut in_slots = false;
+    // Where a missing key goes: after the table's last key, else under its header.
+    let mut header: Option<usize> = None;
+    let mut last_key: Option<usize> = None;
+    for l in text.lines() {
+        let t = l.trim_start();
+        if t.starts_with('[') {
+            // `[slots]  # note` is ours; `[slots.sub]` and `[[slots]]` are not.
+            in_slots = t.split('#').next().unwrap_or("").trim_end() == "[slots]";
+            out.push(l.to_string());
+            if in_slots && header.is_none() {
+                header = Some(out.len());
+            }
+            continue;
+        }
+        if in_slots && is_ours(l) {
+            if let Some(n) = n {
+                let indent = &l[..l.len() - t.len()];
+                let after_eq = &t[t.find('=').map_or(t.len(), |i| i + 1)..];
+                // From the whitespace run before the first `#` that follows
+                // whitespace, so the comment keeps its alignment.
+                let comment = after_eq.find(" #").or_else(|| after_eq.find("\t#")).map_or("", |i| {
+                    let start = after_eq[..i].trim_end_matches([' ', '\t']).len();
+                    &after_eq[start..]
+                });
+                out.push(format!("{indent}{name} = {n}{comment}"));
+                last_key = Some(out.len());
+            }
+            continue;
+        }
+        out.push(l.to_string());
+        if in_slots && !t.is_empty() && !t.starts_with('#') {
+            last_key = Some(out.len());
+        }
+    }
+    let had = before.get(TABLE).and_then(|v| v.as_table()).is_some_and(|t| t.contains_key(name));
+    if let (Some(n), false) = (n, had) {
+        let line = format!("{name} = {n}");
+        match last_key.or(header) {
+            Some(at) => out.insert(at, line),
+            None => {
+                if out.last().is_some_and(|l| !l.trim().is_empty()) {
+                    out.push(String::new());
+                }
+                out.push(format!("[{TABLE}]"));
+                out.push(line);
+            }
+        }
+    }
+    let mut new = out.join(eol);
+    new.push_str(eol);
+    let after: toml::Table = toml::from_str(&new).map_err(|_| refuse())?;
+    let mut want = before;
+    match n {
+        Some(n) => {
+            let slots = want.entry(TABLE).or_insert_with(|| toml::Value::Table(toml::Table::new()));
+            let Some(slots) = slots.as_table_mut() else { return Err(refuse()) };
+            slots.insert(name.into(), toml::Value::Integer(i64::from(n)));
+        }
+        None => {
+            if let Some(slots) = want.get_mut(TABLE).and_then(|v| v.as_table_mut()) {
+                slots.remove(name);
+            }
+        }
+    }
+    if after != want {
+        return Err(refuse());
+    }
+    Ok(new)
 }
 
 // ── locks ───────────────────────────────────────────────────────────────────
@@ -481,49 +794,135 @@ pub fn for_worktree(worktree: &str) -> Vec<PlaceSlot> {
 
 // ── `worktrees slots` ───────────────────────────────────────────────────────
 
+/// One slot as `worktrees slots` and Settings show it.
 #[derive(Debug, Serialize)]
 pub struct SlotState {
     pub name: String,
     pub capacity: u32,
+    /// Where `capacity` came from (`Source::label`).
+    pub source: String,
+    /// `[slots] <name>` is set, so `slots unset <name>` would change it.
+    pub explicit: bool,
+    /// What the slot gets without an entry of its own, and from where.
+    pub fallback: u32,
+    pub fallback_source: String,
+    /// `fallback_source`'s `Source::kind`.
+    pub fallback_kind: &'static str,
     pub holders: Vec<Record>,
     pub waiters: Vec<Record>,
 }
 
-pub fn states_in(root: &Path, cap: impl Fn(&str) -> u32) -> Vec<SlotState> {
-    let mut out = Vec::new();
-    let Ok(rd) = fs::read_dir(root) else { return out };
-    let mut dirs: Vec<_> = rd.flatten().filter(|e| e.path().is_dir()).collect();
-    dirs.sort_by_key(|e| e.file_name());
-    for e in dirs {
-        let name = e.file_name().to_string_lossy().into_owned();
-        let holders: Vec<Record> = holders_in(&e.path()).into_iter().map(|(_, r)| r).collect();
-        let waiters = waiters_in(&e.path());
-        if holders.is_empty() && waiters.is_empty() {
-            continue;
-        }
-        out.push(SlotState { capacity: cap(&name), name, holders, waiters });
-    }
-    out
+/// The machine, as the status view describes it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MachineView {
+    pub cores: u32,
+    pub ram_gib: u64,
+    /// What the machine default comes to here.
+    pub capacity: u32,
 }
 
+#[derive(Debug, Serialize)]
+pub struct Overview {
+    /// `gate` first, then every name `[slots]` lists and (`in_use`) every
+    /// slot someone holds or waits for, sorted, and `default` last.
+    pub slots: Vec<SlotState>,
+    pub machine: Option<MachineView>,
+    pub problems: Vec<String>,
+}
+
+/// Every slot worth showing, under the slot root `root` (`None`: no state
+/// dir, so nothing is held). One derivation for the CLI and Settings.
+pub fn overview_in(root: Option<&Path>, text: &str, machine: Option<Machine>, in_use: bool) -> Overview {
+    let mut problems = Vec::new();
+    let t = table_from(text, &mut problems);
+    let mut names: Vec<String> = Vec::new();
+    for k in t.iter().flat_map(|t| t.keys()) {
+        match valid_name(k) {
+            Ok(()) => names.push(k.clone()),
+            Err(_) => problems.push(format!("[slots] `{k}` is not a slot name (lowercase letters, digits and dashes) — ignored")),
+        }
+    }
+    let state = |name: &str| -> (Vec<Record>, Vec<Record>) {
+        match root {
+            Some(r) => (holders_in(&r.join(name)).into_iter().map(|(_, r)| r).collect(), waiters_in(&r.join(name))),
+            None => (Vec::new(), Vec::new()),
+        }
+    };
+    if in_use {
+        if let Some(rd) = root.and_then(|r| fs::read_dir(r).ok()) {
+            for e in rd.flatten().filter(|e| e.path().is_dir()) {
+                let name = e.file_name().to_string_lossy().into_owned();
+                let (h, w) = state(&name);
+                if !h.is_empty() || !w.is_empty() {
+                    names.push(name);
+                }
+            }
+        }
+    }
+    names.retain(|n| n != GATE && n != DEFAULT_KEY);
+    names.sort();
+    names.dedup();
+    names.insert(0, GATE.into());
+    names.push(DEFAULT_KEY.into());
+    let mut slots = Vec::new();
+    for name in names {
+        let c = resolve(text, &name, machine);
+        let (fallback_n, fallback_source) = fallback(t.as_ref(), &name, machine, &mut Vec::new());
+        problems.extend(c.problems.iter().cloned());
+        let (holders, waiters) = state(&name);
+        slots.push(SlotState {
+            explicit: c.explicit(&name),
+            capacity: c.n,
+            source: c.source.label(),
+            fallback: fallback_n,
+            fallback_source: fallback_source.label(),
+            fallback_kind: fallback_source.kind(),
+            name,
+            holders,
+            waiters,
+        });
+    }
+    let mut seen = std::collections::HashSet::new();
+    problems.retain(|p| seen.insert(p.clone()));
+    Overview {
+        slots,
+        machine: machine.map(|m| MachineView { cores: m.cores, ram_gib: m.ram_gib(), capacity: m.capacity() }),
+        problems,
+    }
+}
+
+/// `overview_in` for this user, now.
+pub fn overview(in_use: bool) -> Overview {
+    overview_in(root().as_deref(), &config_text(), machine(), in_use)
+}
+
+const SLOTS_USAGE: &str = "usage: worktrees slots [--json] | worktrees slots set <name> <N> | worktrees slots unset <name>";
+
 pub fn cmd_slots(args: &[String]) -> i32 {
+    match args.first().map(String::as_str) {
+        Some("set") => return cmd_set(&args[1..], true),
+        Some("unset") => return cmd_set(&args[1..], false),
+        _ => {}
+    }
     let json = args.iter().any(|a| a == "--json");
     if let Some(bad) = args.iter().find(|a| *a != "--json") {
-        eprintln!("{}", crate::render::error_line(&format!("slots: unknown argument {bad} (usage: worktrees slots [--json])")));
+        eprintln!("{}", crate::render::error_line(&format!("slots: unknown argument {bad}")));
+        eprintln!("{SLOTS_USAGE}");
         return 1;
     }
-    let states = root().map(|r| states_in(&r, |n| capacity(n).0)).unwrap_or_default();
+    let ov = overview(true);
     if json {
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({ "slots": states })).unwrap_or_default());
-        return 0;
-    }
-    if states.is_empty() {
-        println!("no slots in use");
+        println!("{}", serde_json::to_string_pretty(&ov).unwrap_or_default());
         return 0;
     }
     let now = now_ms();
-    for s in &states {
-        println!("{}  {}/{} held", s.name, s.holders.len(), s.capacity);
+    let w = ov.slots.iter().map(|s| s.name.len()).max().unwrap_or(0);
+    for s in &ov.slots {
+        if s.name == DEFAULT_KEY && s.holders.is_empty() && s.waiters.is_empty() {
+            println!("{:<w$}  {} for any other name  ({})", s.name, s.capacity, s.source);
+        } else {
+            println!("{:<w$}  {}/{} held  ({})", s.name, s.holders.len(), s.capacity, s.source);
+        }
         for h in &s.holders {
             println!("  holds  {}  pid {}  {}  {}", h.who(), h.pid, age(now - h.since_ms), h.cmd);
         }
@@ -536,11 +935,63 @@ pub fn cmd_slots(args: &[String]) -> i32 {
         if !odd.is_empty() {
             let asked: Vec<String> = odd.iter().map(|n| format!("--slots {n}")).collect();
             println!(
-                "  note: callers here asked for {} while your config gives {}; set [slots] {} = N in config.toml so every caller agrees",
+                "  note: callers here asked for {} while this machine gives {}; run `worktrees slots set {} N` so every caller agrees",
                 asked.join(", "),
                 s.capacity,
                 s.name
             );
+        }
+    }
+    for p in &ov.problems {
+        println!("problem: {p}");
+    }
+    if ov.slots.iter().all(|s| s.holders.is_empty() && s.waiters.is_empty()) {
+        println!("no slots in use");
+    }
+    0
+}
+
+/// `worktrees slots set <name> <N>` (`set`) and `worktrees slots unset <name>`.
+fn cmd_set(args: &[String], set: bool) -> i32 {
+    let verb = if set { "set" } else { "unset" };
+    let fail = |e: &str| {
+        eprintln!("{}", crate::render::error_line(&format!("slots {verb}: {e}")));
+        1
+    };
+    let want = if set { 2 } else { 1 };
+    if args.len() != want {
+        eprintln!("{}", crate::render::error_line(&format!("slots {verb}: wrong number of arguments")));
+        eprintln!("{SLOTS_USAGE}");
+        return 1;
+    }
+    let name = args[0].as_str();
+    if let Err(e) = valid_name(name) {
+        return fail(&e);
+    }
+    let n = if set {
+        match args[1].parse::<u32>().ok().filter(|n| valid_capacity(*n).is_ok()) {
+            Some(n) => Some(n),
+            None => return fail(&format!("capacity must be a whole number from 1 to {CAPACITY_MAX} (got {})", args[1])),
+        }
+    } else {
+        None
+    };
+    let before = capacity(name);
+    let changed = match set_capacity(name, n) {
+        Ok(c) => c,
+        Err(e) => return fail(&e),
+    };
+    let after = capacity(name);
+    for p in &after.problems {
+        eprintln!("worktrees: {p}");
+    }
+    let path = crate::config::config_toml_path();
+    match (changed, set) {
+        (false, true) => println!("{name}: already {} ({})", after.n, after.source.label()),
+        (false, false) => println!("{name}: [slots] {name} is not set; it is {} ({})", after.n, after.source.label()),
+        (true, _) => {
+            println!("{name}: {} ({}), was {} ({})", after.n, after.source.label(), before.n, before.source.label());
+            println!("written to {}; a job already waiting keeps the capacity it started with", path.display());
         }
     }
     0
@@ -649,11 +1100,11 @@ pub fn cmd_run(args: &[String]) -> i32 {
             return 2;
         }
     };
-    let (configured, problems) = capacity(&ra.slot);
-    for p in problems {
+    let configured = capacity(&ra.slot);
+    for p in &configured.problems {
         eprintln!("worktrees: {p}");
     }
-    let cap = ra.slots.unwrap_or(configured);
+    let cap = ra.slots.unwrap_or(configured.n);
     let Some(root) = root() else {
         eprintln!("{}", crate::render::error_line("run: no HOME or XDG_STATE_HOME to keep slots in"));
         return 1;
@@ -743,16 +1194,179 @@ mod tests {
         Record { pid, place: Some(format!("p:{pid}")), worktree: None, cmd: "x".into(), since_ms: since, slots: 2 }
     }
 
+    const MAC: Machine = Machine { cores: 10, ram_bytes: 36 * GIB };
+
     #[test]
-    fn capacity_reads_the_name_then_default_then_two() {
-        assert_eq!(capacity_from("", "gate").0, DEFAULT_CAPACITY);
-        assert_eq!(capacity_from("[slots]\ndefault = 3\n", "gate").0, 3);
-        assert_eq!(capacity_from("[slots]\ndefault = 3\ngate = 1\n", "gate").0, 1);
-        let (n, p) = capacity_from("[slots]\ngate = 0\n", "gate");
-        assert_eq!(n, DEFAULT_CAPACITY);
-        assert_eq!(p.len(), 1, "{p:?}");
-        let (n, p) = capacity_from("slots = 4\n", "gate");
-        assert_eq!((n, p.len()), (DEFAULT_CAPACITY, 1));
+    fn capacity_reads_the_name_then_default_then_the_machine_then_built_in() {
+        let r = |text: &str, m: Option<Machine>| {
+            let c = resolve(text, "gate", m);
+            (c.n, c.source.label())
+        };
+        let mac = MAC.capacity();
+        assert_eq!(r("", None), (BUILT_IN, "built-in".into()));
+        assert_eq!(r("", Some(MAC)), (mac, "machine (10 cores, 36 GiB)".into()));
+        assert_eq!(r("[slots]\ndefault = 3\n", Some(MAC)), (3, "config [slots] default".into()));
+        assert_eq!(r("[slots]\ndefault = 3\ngate = 1\n", Some(MAC)), (1, "config [slots] gate".into()));
+        // An explicit entry beats the machine in BOTH directions: below it and
+        // above its ceiling.
+        assert_eq!(r("[slots]\ngate = 1\n", Some(Machine { cores: 512, ram_bytes: 4096 * GIB })).0, 1);
+        assert_eq!(r("[slots]\ngate = 40\n", Some(Machine { cores: 1, ram_bytes: GIB })).0, 40);
+        assert_eq!(r("[slots]\ndefault = 40\n", Some(Machine { cores: 1, ram_bytes: GIB })).0, 40);
+        let c = resolve("[slots]\ngate = 0\n", "gate", Some(MAC));
+        assert_eq!((c.n, c.problems.len()), (mac, 1), "{c:?}");
+        let c = resolve("slots = 4\n", "gate", None);
+        assert_eq!((c.n, c.problems.len()), (BUILT_IN, 1));
+        let c = resolve("not toml [", "gate", Some(MAC));
+        assert_eq!((c.n, c.problems.len()), (mac, 1), "a broken file still gets the machine");
+        // `default` resolves to itself, then the machine — and says so once.
+        let c = resolve("[slots]\ndefault = 0\n", "default", Some(MAC));
+        assert_eq!((c.n, c.source, c.problems.len()), (mac, Source::Machine(MAC), 1));
+        assert!(resolve("[slots]\ngate = 3\n", "gate", None).explicit("gate"));
+        assert!(!resolve("[slots]\ndefault = 3\n", "gate", None).explicit("gate"));
+        assert!(resolve("[slots]\ndefault = 3\n", "default", None).explicit("default"));
+    }
+
+    #[test]
+    fn the_machine_default_is_bounded_on_tiny_and_huge_machines() {
+        let g = |cores: u32, gib: u64| machine_capacity(cores, gib * GIB);
+        let table: &[(u32, u64, u32, &str)] = &[
+            (0, 0, 1, "nothing readable still runs one"),
+            (1, 1, 1, "a 1-core 1 GiB VM"),
+            (2, 4, 1, "a small CI runner"),
+            (4, 16, 1, "GitHub's ubuntu-latest"),
+            (8, 8, 1, "many cores, little memory: memory decides"),
+            (2, 256, 1, "much memory, few cores: cores decide"),
+            (10, 36, 3, "this Mac: 10 performance cores, 36 GiB"),
+            (12, 64, 4, "a 64 GiB workstation"),
+            (128, 1024, MACHINE_MAX, "huge: the ceiling, never more"),
+            (u32::MAX, u64::MAX / GIB, MACHINE_MAX, "no overflow at the limits"),
+        ];
+        for &(cores, gib, want, why) in table {
+            assert_eq!(g(cores, gib), want, "{cores} cores, {gib} GiB: {why}");
+        }
+        for cores in 0..200 {
+            for gib in [0, 1, 2, 3, 7, 15, 31, 63, 127, 511, 4096] {
+                let n = g(cores, gib);
+                assert!((1..=MACHINE_MAX).contains(&n), "{cores} cores, {gib} GiB gave {n}");
+            }
+        }
+    }
+
+    /// The probe this OS uses (sysctl on macOS, nproc + /proc/meminfo on
+    /// Linux) reads something sane — CI runs it on both.
+    #[test]
+    fn this_machine_can_be_read() {
+        let m = read_machine().expect("cores and memory are readable here");
+        assert!(m.cores >= 1 && m.cores <= 4096, "{m:?}");
+        assert!(m.ram_bytes >= 256 << 20, "{m:?}");
+        assert!((1..=MACHINE_MAX).contains(&m.capacity()));
+    }
+
+    #[test]
+    fn the_machine_label_names_cores_and_whole_gib() {
+        let m = Machine { cores: 10, ram_bytes: 38_654_705_664 };
+        assert_eq!(Source::Machine(m).label(), "machine (10 cores, 36 GiB)");
+        assert_eq!(Source::Config("default".into()).label(), "config [slots] default");
+        assert_eq!(Source::BuiltIn.label(), "built-in");
+    }
+
+    #[test]
+    fn with_slot_edits_one_key_and_keeps_every_other_line() {
+        let base = "# mine\nai_cmd = \"claude\" # inline\n\n[slots]\ngate = 2   # tuned\ne2e = 1\n\n# about quota\n[quota]\ngate = false\n";
+        let set = with_slot(base, "gate", Some(3)).unwrap();
+        assert_eq!(set, base.replace("gate = 2   # tuned", "gate = 3   # tuned"), "in place, comment kept");
+        let added = with_slot(base, "lint", Some(1)).unwrap();
+        assert_eq!(added, base.replace("e2e = 1\n", "e2e = 1\nlint = 1\n"), "after the table's last key");
+        let gone = with_slot(base, "gate", None).unwrap();
+        assert_eq!(gone, base.replace("gate = 2   # tuned\n", ""), "only that line goes; [quota] gate stays");
+        assert_eq!(with_slot(base, "lint", None).unwrap(), base, "removing an absent key changes nothing");
+        // No table yet: one is added at the end, after a blank line.
+        let fresh = with_slot("ai_cmd = \"claude\"\n", "default", Some(4)).unwrap();
+        assert_eq!(fresh, "ai_cmd = \"claude\"\n\n[slots]\ndefault = 4\n");
+        assert_eq!(with_slot("", "gate", Some(3)).unwrap(), "[slots]\ngate = 3\n");
+        // An empty table gets the key under its header.
+        assert_eq!(with_slot("[slots] # mine\n\n[x]\n", "gate", Some(2)).unwrap(), "[slots] # mine\ngate = 2\n\n[x]\n");
+        // CRLF stays CRLF.
+        assert_eq!(with_slot("[slots]\r\ngate = 2\r\n", "gate", Some(5)).unwrap(), "[slots]\r\ngate = 5\r\n");
+        // `gate-x` is not `gate`.
+        assert_eq!(with_slot("[slots]\ngate-x = 2\n", "gate", Some(1)).unwrap(), "[slots]\ngate-x = 2\ngate = 1\n");
+    }
+
+    #[test]
+    fn with_slot_refuses_a_layout_it_cannot_edit_or_a_value_it_must_not_write() {
+        for layout in ["slots.gate = 2\n", "slots = { gate = 2 }\n", "[slots]\n\"gate\" = 2\n"] {
+            let e = with_slot(layout, "gate", Some(3)).unwrap_err();
+            assert!(e.contains("edit it by hand"), "{layout:?}: {e}");
+        }
+        assert!(with_slot("slots.gate = 2\n", "gate", None).is_err(), "a dotted key cannot be removed line-wise either");
+        assert!(with_slot("not = [toml", "gate", Some(3)).unwrap_err().contains("does not parse"));
+        for n in [0, CAPACITY_MAX + 1] {
+            assert!(with_slot("", "gate", Some(n)).is_err(), "{n}");
+        }
+        assert!(with_slot("", "gate", Some(CAPACITY_MAX)).is_ok());
+        for bad in ["", "Gate", "../x", "-x", "a b"] {
+            assert!(with_slot("", bad, Some(2)).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn set_capacity_at_writes_unsets_and_reports_no_change() {
+        let d = tmp("set");
+        let f = d.join("cfg").join("config.toml");
+        assert_eq!(set_capacity_at(&f, "gate", Some(3)), Ok(true), "creates the file and its dir");
+        assert_eq!(fs::read_to_string(&f).unwrap(), "[slots]\ngate = 3\n");
+        assert_eq!(set_capacity_at(&f, "gate", Some(3)), Ok(false));
+        fs::write(&f, "prefix = \"wt\"\n[slots]\ngate = 3\n").unwrap();
+        assert_eq!(set_capacity_at(&f, "gate", None), Ok(true));
+        assert_eq!(fs::read_to_string(&f).unwrap(), "prefix = \"wt\"\n[slots]\n");
+        assert_eq!(set_capacity_at(&f, "gate", None), Ok(false));
+        // A nonsense value is still a key to remove.
+        fs::write(&f, "[slots]\ngate = \"lots\"\n").unwrap();
+        assert_eq!(set_capacity_at(&f, "gate", None), Ok(true));
+        assert!(set_capacity_at(&f, "gate", Some(0)).is_err());
+        assert!(set_capacity_at(&f, "../gate", Some(2)).is_err());
+        fs::write(&f, "broken = [").unwrap();
+        assert!(set_capacity_at(&f, "gate", None).unwrap_err().contains("does not parse"));
+        assert_eq!(fs::read_to_string(&f).unwrap(), "broken = [", "a refusal writes nothing");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn the_overview_lists_gate_the_config_names_and_default_with_sources() {
+        let root = tmp("overview");
+        let text = "[slots]\ne2e = 1\ndefault = 3\nBad = 2\n";
+        let _h = try_take(&mkdir(root.join("gate")), 0, &rec(7, 1)).unwrap();
+        let ov = overview_in(Some(&root), text, Some(MAC), false);
+        let rows: Vec<(&str, u32, &str, bool, u32, usize)> = ov
+            .slots
+            .iter()
+            .map(|s| (s.name.as_str(), s.capacity, s.source.as_str(), s.explicit, s.fallback, s.holders.len()))
+            .collect();
+        let mac = MAC.capacity();
+        assert_eq!(
+            rows,
+            vec![
+                ("gate", 3, "config [slots] default", false, 3, 1),
+                ("e2e", 1, "config [slots] e2e", true, 3, 0),
+                ("default", 3, "config [slots] default", true, mac, 0),
+            ]
+        );
+        assert_eq!(ov.slots[2].fallback_source, "machine (10 cores, 36 GiB)");
+        assert_eq!(ov.machine, Some(MachineView { cores: 10, ram_gib: 36, capacity: mac }));
+        assert_eq!(ov.problems.len(), 1, "{:?}", ov.problems);
+        assert!(ov.problems[0].contains("`Bad` is not a slot name"));
+        // `in_use` adds a slot nobody configured, once someone holds it.
+        let _o = try_take(&mkdir(root.join("other")), 0, &rec(8, 1)).unwrap();
+        let names: Vec<String> = overview_in(Some(&root), text, None, true).slots.into_iter().map(|s| s.name).collect();
+        assert_eq!(names, ["gate", "e2e", "other", "default"]);
+        let names: Vec<String> = overview_in(Some(&root), text, None, false).slots.into_iter().map(|s| s.name).collect();
+        assert_eq!(names, ["gate", "e2e", "default"], "Settings lists only what the config names");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    fn mkdir(p: PathBuf) -> PathBuf {
+        fs::create_dir_all(&p).unwrap();
+        p
     }
 
     #[test]

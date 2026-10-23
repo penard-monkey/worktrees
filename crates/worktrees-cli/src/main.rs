@@ -60,7 +60,10 @@ worktrees — one git worktree per branch, one active agent per worktree.
   worktrees sync status                 hub + project sync state (--json; no repo needed)
   worktrees run --slot <name> -- <cmd>  run a heavy job (gate, build, full tests) in one of N
                                         machine-wide slots; waits while all are held (--slots N --timeout S)
-  worktrees slots [--json]              who holds and who waits for each slot (no repo needed)
+  worktrees slots [--json]              each slot's capacity and where it comes from, who holds
+                                        and who waits (no repo needed)
+  worktrees slots set <name> <N>        set [slots] <name> in your config.toml (name may be default)
+  worktrees slots unset <name>          remove it: the slot falls back to default, else the machine's
   worktrees serve [--config-dir D] [--port N] [--allow-origin O]  the engine behind a loopback
                                         WebSocket, one per machine; writes <config-dir>/serve.json
                                         (--owner app: the desktop app started it and stops it on quit)

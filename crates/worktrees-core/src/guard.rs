@@ -162,7 +162,7 @@ pub fn memory() -> Memory {
 }
 
 #[cfg(target_os = "macos")]
-fn sysctl<T: Copy + Default>(name: &str) -> Option<T> {
+pub(crate) fn sysctl<T: Copy + Default>(name: &str) -> Option<T> {
     let cname = std::ffi::CString::new(name).ok()?;
     let mut out = T::default();
     let mut len = std::mem::size_of::<T>();

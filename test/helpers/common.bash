@@ -53,6 +53,10 @@ common_setup() {
   # nothing, which also leaves the RAM-derived agent cap off; test/guard.bats
   # points it at a fixture.
   export WORKTREES_GUARD_PROBE=off
+  # The slots' machine-sized default (slots.rs) for the same reason: a test's
+  # capacity must not depend on the runner's cores and memory. `off` is the
+  # built-in default (2); test/slots.bats points it at a fixture.
+  export WORKTREES_SLOTS_PROBE=off
   # XDG_STATE_HOME for the same reason as XDG_CONFIG_HOME: `init`'s once-only
   # hint marker lives under it, and a developer who exports it would have the
   # suite writing into (and reading back) their real state dir between runs.

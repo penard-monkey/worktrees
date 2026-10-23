@@ -383,6 +383,85 @@ pub fn set_quota_settings(gate: bool, weekly_warn_pct: Option<u8>) -> Result<Quo
     Ok(quota_now())
 }
 
+/// Settings → Behavior → Heavy jobs: the user's `[slots]`
+/// (`worktrees_core::slots`), one row per slot the config names plus `gate`
+/// and `default`. Machine-level, read by every `worktrees run --slot` when it
+/// starts.
+///
+/// A `read`/`global` row: what a slot is set to and how many run in it is
+/// host settings, like `quota_settings`. WHO holds a slot is not: a holder's
+/// record names a place, its worktree and its command line, in whatever
+/// project it is, so only the counts leave this body.
+#[derive(Serialize)]
+pub struct SlotsSettings {
+    pub slots: Vec<SlotRow>,
+    /// `None` when the machine could not be read (the `built-in` default).
+    pub machine: Option<worktrees_core::slots::MachineView>,
+    /// The highest capacity a slot may be set to (`slots::CAPACITY_MAX`).
+    pub max: u32,
+    pub problems: Vec<String>,
+    pub config_path: String,
+}
+#[derive(Serialize)]
+pub struct SlotRow {
+    pub name: String,
+    pub capacity: u32,
+    pub source: String,
+    pub explicit: bool,
+    pub fallback: u32,
+    pub fallback_source: String,
+    /// `config`, `machine` or `built-in` — what Reset's words say.
+    pub fallback_kind: &'static str,
+    pub busy: usize,
+    pub waiting: usize,
+}
+pub fn slots_now() -> SlotsSettings {
+    slots_from(worktrees_core::slots::overview(false))
+}
+
+/// The overview, reduced to what leaves this body: counts, not holders.
+fn slots_from(ov: worktrees_core::slots::Overview) -> SlotsSettings {
+    SlotsSettings {
+        slots: ov
+            .slots
+            .into_iter()
+            .map(|s| SlotRow {
+                busy: s.holders.len(),
+                waiting: s.waiters.len(),
+                name: s.name,
+                capacity: s.capacity,
+                source: s.source,
+                explicit: s.explicit,
+                fallback: s.fallback,
+                fallback_source: s.fallback_source,
+                fallback_kind: s.fallback_kind,
+            })
+            .collect(),
+        machine: ov.machine,
+        max: worktrees_core::slots::CAPACITY_MAX,
+        problems: ov.problems,
+        config_path: worktrees_core::config::config_toml_path().to_string_lossy().into_owned(),
+    }
+}
+
+pub fn slots_settings() -> Result<SlotsSettings, String> {
+    Ok(slots_now())
+}
+
+/// The user's act: set `[slots] <name>` in `~/.config/worktrees/config.toml`,
+/// or remove it (`capacity: None`), which puts the slot back on `default` /
+/// the machine's. A console act: it changes how much of THIS machine every
+/// lane's gate may take.
+pub fn set_slot_capacity(name: String, capacity: Option<u32>) -> Result<SlotsSettings, String> {
+    worktrees_core::slots::set_capacity(&name, capacity)
+        .inspect_err(|e| applog("error", &format!("set_slot_capacity: {e}")))?;
+    match capacity {
+        Some(n) => applog("info", &format!("slots: {name} = {n}")),
+        None => applog("info", &format!("slots: {name} unset")),
+    }
+    Ok(slots_now())
+}
+
 /// Mark a registered project private (out of reach in both directions) or not.
 pub fn set_project_private(root: String, private: bool) -> Result<CrossProjectStatus, String> {
     worktrees_core::registry::set_private(&root, private)?;
@@ -1096,6 +1175,37 @@ mod tests {
         std::fs::write(&cj, r#"{"mcpServers":{"worktrees":{"command":"/x/bin/worktrees","args":["mcp","--mutations"]}}}"#).unwrap();
         assert_eq!(drop_token(&places, "lane", &b.to_string_lossy(), "lane", &cj).unwrap(), "@worktrees:place://lane");
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// `slots_settings` is a `read`/`global` row, so a scoped device gets it:
+    /// a holder's place, worktree and command line belong to whatever project
+    /// it is in, and only the counts may leave.
+    #[test]
+    fn slot_settings_carry_counts_and_never_a_holder() {
+        use worktrees_core::slots::{overview_in, Record};
+        let root = std::env::temp_dir().join(format!("wt-api-slots-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("gate")).unwrap();
+        let mut ov = overview_in(Some(&root), "[slots]\ngate = 3\n", None, false);
+        let secret = Record {
+            pid: 4242,
+            place: Some("private-proj:feat-secret".into()),
+            worktree: Some("/Users/x/private-proj/.worktrees/feat-secret".into()),
+            cmd: "deploy --token hunter2".into(),
+            since_ms: 1,
+            slots: 3,
+        };
+        ov.slots[0].holders.push(secret.clone());
+        ov.slots[0].waiters.push(secret);
+        let out = serde_json::to_string(&slots_from(ov)).unwrap();
+        for leak in ["private-proj", "feat-secret", "hunter2", "4242"] {
+            assert!(!out.contains(leak), "{leak} left the body: {out}");
+        }
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!((v["slots"][0]["name"].as_str(), v["slots"][0]["busy"].as_u64(), v["slots"][0]["waiting"].as_u64()), (Some("gate"), Some(1), Some(1)));
+        assert_eq!(v["slots"][0]["capacity"], 3);
+        assert_eq!(v["max"], worktrees_core::slots::CAPACITY_MAX);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// A GUI launch has no locale, and pbcopy without one mangles every

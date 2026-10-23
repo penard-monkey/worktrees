@@ -813,6 +813,7 @@ change what this machine's agents are allowed to do."
 | **`save_profile`, `set_project_profile`, `set_default_profile`** | HostAdmin | `mcp_servers` and `settings` (claude's `hooks` live in that raw JSON) are commands run at the next launch. Binding a profile to a project chooses which of them run there. |
 | **`set_agent_guidance`, `set_agent_guidance_skill`, `agent_guidance_merge`, `agent_link_skills`, `skill_install_local`, `skill_install_git`** | HostAdmin | Text and scripts that every agent on the host loads |
 | **`sync_apply`, in its adopt form (no `repo`)** | HostAdmin | It writes to a path the hub's manifest chooses (§8, gap 4) |
+| *added after:* `set_slot_capacity` | — | It administers the host's own resources: how many heavy jobs every lane's gate may run at once on this machine (`[slots]`). Seven at once froze it on 2026-10-14. |
 | *new:* `pair_begin`, `pair_decide`, `device_set_expiry`, `device_set_stepup`, `device_disable`, `device_enable`, `devices_revoke_all_others`, `remote_enable` (also how the bind moves to a new address, §4.1), `remote_advertise` (the mDNS switch, §4.7), `identity_rotate` | — | §2.5, §2.6, §4.1, §4.7 |
 
 **admin** (served remotely to a device with `admin`; Phase 2 keeps the
@@ -864,15 +865,18 @@ loopback behaviour the same):
 | `file` | `list_dir`, `file_diff`, `read_file`, `read_file_base64`, `file_readable` (a secret-class path needs `stream`; §7) |
 | `place`, refused remotely in Phase 2 | `open_docs_viewer` (§8, gap 7) |
 | `filtered` | `list_workspace`, **`list_drafts`** (the TEXT people typed into composers, host-wide), `planning_status` |
-| `global` (on `GLOBAL_OK`) | `settings_info`, `get_settings`, `cross_project_status`, `quota_settings`, `claude_usage`, `codex_usage`, `kimi_usage`, `claude_status`, `check_update`, `list_releases`, `get_ai_config`, `get_codex_permissions`, `get_fetch_interval` and `get_term_history_opts` (#532), `agent_guidance_status`, `agent_guidance_diff`, `agent_models`, `agent_user_skills`, `kimi_version`, `tmux_check`, `log_info`, `get_changelog`, `new_profile_id`, `skills_list`, `ui_usage` |
+| `global` (on `GLOBAL_OK`) | `settings_info`, `get_settings`, `cross_project_status`, `quota_settings`, `claude_usage`, `codex_usage`, `kimi_usage`, `claude_status`, `check_update`, `list_releases`, `get_ai_config`, `get_codex_permissions`, `get_fetch_interval` and `get_term_history_opts` (#532), `slots_settings` (added after: capacities and counts, never a holder's place or command), `agent_guidance_status`, `agent_guidance_diff`, `agent_models`, `agent_user_skills`, `kimi_version`, `tmux_check`, `log_info`, `get_changelog`, `new_profile_id`, `skills_list`, `ui_usage` |
 
 **Loopback-only, not console:** `ui_events_append`. Remote clients do not
 emit usage events, so `ui-events.jsonl` keeps its "never leaves the machine"
 premise (§III.6.2).
 
-Count, by each row's base group: read 55, write 23, admin 33, console 21,
-stream 10, instruct 3, ClientLocal 6, loopback-only 1, which is 152 (read
-was 53, and the total 150, before #532's two getters). Two rows
+Count, by each row's base group: read 56, write 23, admin 33, console 22,
+stream 10, instruct 3, ClientLocal 6, loopback-only 1, which is 154 (read
+was 53, and the total 150, before #532's two getters; the slots pair added
+one read and one console row). Slice 5 (#544) has since built sixteen of the
+rows marked *new*, and the test's counts include them: 170 in all, with admin
+35, console 33 and `own` 3. Two rows
 appear twice on purpose, because an argument changes what they need:
 `write_file` (its path's class, §7) and `sync_apply` (the adopt form). Rows
 marked *new* do not exist yet and are not in the count. This paragraph is
