@@ -82,6 +82,25 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
     `worktrees serve` yourself.
   - `worktrees serve call <command> [json]` runs one command on the running
     serve from a terminal.
+- **Drive another Mac's worktrees from this one.** Settings → Hosts pairs
+  this machine with a host from the link its pairing window shows (paste it:
+  Universal Clipboard, AirDrop or a password manager), with a six-digit code
+  to compare against the host's screen before anyone presses Allow there, and
+  switches this window between this machine's own engine and a paired host.
+  A window on a paired host lists, edits and attaches terminals there over a
+  pinned, mutual TLS connection that only an enrolled key opens, and a revoke
+  on the host ends it within a second. What would act on THIS machine's files
+  instead — Reveal in Finder, Open, the folder pickers, the browser docs
+  viewer, the editor and terminal launchers — is greyed, with the reason in
+  its tooltip. The window's own settings stay on this machine and never
+  overwrite the host's. Needs the host's remote access turned on.
+- **`worktrees remote pair | hosts | use | call | forget`**: the same from a
+  terminal, sharing the app's list of hosts. `pair '<link>'` prints the code
+  and waits for the host's Allow; `call <host> <command> [json-args]` runs one
+  request and prints the answer (`--follow S` keeps the connection to show a
+  terminal's output streaming); `use <host>|this` chooses what the app's
+  window drives from its next launch. A link's address is checked before
+  anything is dialled: only a private one is accepted.
 
 ### Changed
 - **With nothing set, a slot's capacity is sized from the machine.** It used to

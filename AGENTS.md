@@ -314,6 +314,30 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   same handler: against a broken client a bare `void invoke(…)` rejects
   unhandled and kills the run before the failures it found are printed.
 
+- **A window can drive a PAIRED host: the remote door (Phase 2 §4.4).** The
+  transport is `crates/worktrees-remote` (no tauri, no engine:
+  api-boundary-check holds it, because the iOS repository depends on it by
+  git): pairing by link, the device key (one `0600` PKCS#8 per pairing),
+  `remote-hosts.json` in the client's config dir, and the pinned mutual-TLS
+  WebSocket as a PIPE — it parses no frame. Serve's tls.rs and pairing.rs
+  import the client half from it (`PinnedServer`, the pin, the exporter
+  labels, the pairing proof and code), so the two ends have one copy.
+  Handshake v1 runs UNCHANGED over the pipe, keyed with
+  `hex(exporter "EXPORTER-worktrees-remote-v1")` instead of serve.json's token
+  — a departure from §4.5's first frame, so `ipcws.ts` stays the protocol's
+  one client (`ipcremote.ts` builds a `Sock` from the shim's
+  `remote_connect`/`remote_send`/`remote_close`, and serializes sends:
+  concurrent Tauri commands would otherwise swap frames). `remoteDoor` routes
+  `get_settings`/`set_settings` to the device's own blob (§9.1) and refuses
+  `HOST_PATH_LOCAL`; `windowOnHost()` is the one "does this window run on its
+  engine's host" predicate, and `onhost.ts` the only file that may import a
+  path-taking opener or dialog call (onhost-check.mjs). With a host chosen
+  the boot never asks `engine_connect`. `worktrees remote …` is the CLI;
+  `--follow` is how a terminal attach is seen without the app. A
+  `tauri dev` run's WebKit data lands in `~/Library/{Caches,WebKit}/app`
+  (the unbundled executable's name), NOT under the `--config` identifier, so
+  a throwaway identifier does not isolate it — those dirs are every lane's.
+
 **Adding a harness? Walk `docs/adding-a-harness.md` first, and tick it only
 by SEEING each surface work.** pi shipped in v0.33.0 with a correct core —
 MCP `place_status` said `busy` — and no nav dot at all: the app builds its dots
