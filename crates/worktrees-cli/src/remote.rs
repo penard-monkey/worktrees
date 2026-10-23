@@ -36,8 +36,9 @@ The link is the `worktrees-pair:v1?…` text the host shows beside its pairing Q
 Its address is checked before anything is dialled: only a private address
 (a LAN, Tailscale, a cable) is accepted.
 
-When nothing answers at a host's address, `call` looks for it on the LAN
-(macOS) and follows it there once its key matches the pin kept at pairing.
+When a host is not at its address (nothing answers, or another machine
+does), `call` looks for it on the LAN (macOS) and follows it there once its
+key matches the pin kept at pairing.
 An address code (`worktrees-addr:v1?…`) is followed the same way: the new
 address is kept only once a connection to it proves the same key.";
 

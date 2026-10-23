@@ -311,26 +311,50 @@ fn a_candidate_that_refuses_this_devices_key_is_not_kept() {
     assert_eq!(real.upgraded.load(Ordering::SeqCst), 0);
 }
 
-/// A kept address that ANSWERS and refuses is not a move: a host that
-/// refuses this device's key, or a machine that is not the pin, sends no one
-/// looking on the LAN.
+/// The kept address answered by a machine that is NOT the pin — the old IP
+/// handed to another machine, maybe another worktrees host — means the host
+/// is not there: the device looks on the LAN, never shows the stranger its
+/// certificate, and keeps the real host's address once its pinned open
+/// succeeds.
 #[test]
-fn a_tls_refusal_at_the_kept_address_looks_nowhere() {
+fn a_stranger_at_the_kept_address_sends_the_device_looking_and_the_host_is_kept() {
     let rt = rt();
     let (id, stranger) = (identity(), identity());
+    let w = world(&rt, "kept-stranger", &id.pin);
+    // The stranger would admit this device's key, were it ever shown.
+    let not_it = host(&rt, &stranger, w.key.pin());
+    let real = host(&rt, &id, w.key.pin());
+    w.route(KEPT, not_it.at);
+    w.route("192.168.1.9:7461", real.at);
+    let (r, log) = w.open(&rt, &w.env(vec![w.sighting("192.168.1.9:7461")], vec![en0()]));
+    let r = r.unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!((r.rec.addr.as_str(), r.moved_from.as_deref()), ("192.168.1.9:7461", Some(KEPT)));
+    assert_eq!(w.store.get(&w.rec.id).unwrap().addr, "192.168.1.9:7461", "kept");
+    assert_eq!(w.rounds.load(Ordering::SeqCst), 1, "one round on the LAN");
+    assert_eq!(w.dialled(), [KEPT, "192.168.1.9:7461"]);
+    assert_eq!(not_it.shown.load(Ordering::SeqCst), 0, "the stranger never saw the device's certificate");
+    assert!(log.iter().any(|l| l.contains("another key") && l.contains("looking for it on the LAN")), "{log:?}");
+}
+
+/// The kept address answered by the PINNED host, which refuses this
+/// device's key (revoked, disabled, expired there), is not a move: the device
+/// is no longer welcome, and finding the host elsewhere would change nothing.
+/// No one goes looking, and nothing is kept.
+#[test]
+fn a_host_that_refuses_this_devices_key_at_the_kept_address_sends_no_one_looking() {
+    let rt = rt();
+    let id = identity();
     let w = world(&rt, "kept-refuses", &id.pin);
     let other = DeviceKey::generate().unwrap();
     let refuses = host(&rt, &id, other.pin());
-    let not_it = host(&rt, &stranger, w.key.pin());
     let real = host(&rt, &id, w.key.pin());
+    w.route(KEPT, refuses.at);
     w.route("192.168.1.9:7461", real.at);
-    for (what, at) in [("refuses the key", refuses.at), ("is not the pin", not_it.at)] {
-        w.route(KEPT, at);
-        let (r, _) = w.open(&rt, &w.env(vec![w.sighting("192.168.1.9:7461")], vec![en0()]));
-        assert!(matches!(r, Err(ReachError::Pipe(_))), "{what}: {:?}", r.as_ref().err().map(|e| e.to_string()));
-    }
+    let (r, _) = w.open(&rt, &w.env(vec![w.sighting("192.168.1.9:7461")], vec![en0()]));
+    assert!(matches!(r, Err(ReachError::Pipe(PipeError::Tls(_)))), "{:?}", r.as_ref().err().map(|e| e.to_string()));
     assert_eq!(w.rounds.load(Ordering::SeqCst), 0, "no browse");
-    assert_eq!(w.dialled(), [KEPT, KEPT], "the advert was never dialled");
+    assert_eq!(w.dialled(), [KEPT], "the advert was never dialled");
+    assert_eq!(real.sni.lock().unwrap().len(), 0);
     assert_eq!(w.store.get(&w.rec.id).unwrap().addr, KEPT);
 }
 

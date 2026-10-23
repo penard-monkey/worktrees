@@ -13,11 +13,14 @@
 //! logged, and changes nothing: in TLS 1.3 it never sees this device's
 //! certificate, and no SNI names the host to it.
 //!
-//! **When to look.** Only after the kept address fails as UNREACHABLE
-//! ([`PipeError::Connect`]: refused, unroutable, silent). A TLS refusal is
-//! not a move: the host is there and said no — revoked, or not the host —
-//! and looking elsewhere would only find the same answer or a stranger. A
-//! round is bounded ([`ROUND`]; §4.7's ceiling is 30 s), tries at most
+//! **When to look.** Only when the host is not at the kept address: nothing
+//! answers there ([`PipeError::Connect`]: refused, unroutable, silent), or a
+//! machine that is not the pin does ([`PipeError::NotThePin`]: the old
+//! address handed to another machine, maybe another worktrees host — it saw
+//! no certificate of this device's). The PINNED host refusing this device's
+//! key is not a move: the device is no longer welcome there (revoked,
+//! disabled, expired), and finding the host elsewhere would change nothing,
+//! so no one goes looking. A round is bounded ([`ROUND`]; §4.7's ceiling is 30 s), tries at most
 //! [`MAX_CANDIDATES`] distinct candidates, never the same one twice, and
 //! never runs in the background: the next round is the caller's next retry
 //! (the app's `reconnect.ts` backs off between them).
@@ -96,11 +99,12 @@ pub enum Lan {
 /// Why [`open`] failed.
 #[derive(Debug)]
 pub enum ReachError {
-    /// The kept address answered and the open failed there — not the pin,
-    /// TLS, the upgrade — or the record cannot be dialled: nothing was looked
-    /// for.
+    /// The pinned host answered at the kept address and the open failed
+    /// there — it refused this device's key, the TLS or the upgrade failed —
+    /// or the record cannot be dialled: nothing was looked for.
     Pipe(PipeError),
-    /// Nothing answered at the kept address, nor on the LAN.
+    /// The host was not at the kept address (nothing answered, or another
+    /// key did), nor on the LAN.
     NotFound { host: String, addr: String, first: String, lan: Lan },
 }
 
@@ -147,8 +151,9 @@ impl std::fmt::Display for ReachError {
     }
 }
 
-/// Open the pipe to `rec`'s host: its kept address, then — only if nothing
-/// answered there — one round on the LAN. A candidate found there is kept in
+/// Open the pipe to `rec`'s host: its kept address, then — only if the host
+/// is not there (nothing answered, or another key did) — one round on the
+/// LAN. A candidate found there is kept in
 /// `store` once its pinned open succeeds. `wait` bounds the kept address's
 /// attempt; [`Env::round`] the rest. `log` hears every candidate that was
 /// not dialled for a reason worth saying, and every one that failed.
@@ -159,6 +164,7 @@ pub async fn open(store: &HostStore, rec: &HostRecord, key: &DeviceKey, env: &En
     let first = match pipe::open_at((env.route)(kept), &rec.pin, key, wait).await {
         Ok(pipe) => return Ok(Reached { pipe, rec: rec.clone(), moved_from: None }),
         Err(PipeError::Connect(m)) => m,
+        Err(PipeError::NotThePin) => "the machine there answered with another key".into(),
         Err(e) => return Err(ReachError::Pipe(e)),
     };
     let not_found = |lan| ReachError::NotFound { host: rec.name.clone(), addr: rec.addr.clone(), first: first.clone(), lan };
@@ -167,7 +173,7 @@ pub async fn open(store: &HostStore, rec: &HostRecord, key: &DeviceKey, env: &En
     };
     let ifaces = (env.interfaces)().map_err(|e| not_found(Lan::Unavailable(format!("this machine's interfaces could not be read ({e})"))))?;
     let mut rx = env.browser.browse(env.round).map_err(|why| not_found(Lan::Unavailable(why)))?;
-    log(&format!("{}: nothing answered at {} ({first}); looking for it on the LAN", rec.name, rec.addr));
+    log(&format!("{}: not at {} ({first}); looking for it on the LAN", rec.name, rec.addr));
     let mut tried: Vec<(SocketAddr, PipeError)> = Vec::new();
     let mut seen: HashSet<SocketAddr> = HashSet::from([kept]);
     let look = async {

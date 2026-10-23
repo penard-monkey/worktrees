@@ -20,12 +20,13 @@
 //! and `conn` (a fresh number per socket) is on every send and close, so a
 //! page's stale socket cannot write into the next one.
 //!
-//! **A host that moved is followed, never trusted.** When nothing answers at
-//! a host's kept address, `remote_connect` looks for it on the LAN for one
-//! bounded round (`worktrees_remote::reach`): a discovered address is kept
-//! only once a connection to it proves the pinned key, and every advert that
-//! did not is in app.log. A TLS refusal at the kept address is not a move and
-//! sends nobody looking. `remote_readdress` follows an address code by the
+//! **A host that moved is followed, never trusted.** When the host is not at
+//! its kept address — nothing answers, or a machine with another key does —
+//! `remote_connect` looks for it on the LAN for one bounded round
+//! (`worktrees_remote::reach`): a discovered address is kept only once a
+//! connection to it proves the pinned key, and every advert that did not is
+//! in app.log. The host refusing this device's key is not a move and sends
+//! nobody looking. `remote_readdress` follows an address code by the
 //! same rule. Each of `reconnect.ts`'s retries is one such connect.
 //!
 //! Pairing (`remote_pair`), the host list and the choice of engine live here
