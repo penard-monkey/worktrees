@@ -172,6 +172,7 @@ Flags:
 |---|---|
 | `new`/`co`/`open` | `-r/--resume` (append the AI resume flag) · `--ai <cmd>` (AI pane command for this run) · `--model <m>` (the agent's model for this launch) · `--force` (launch despite an advisory refusal — see below) · `--spare` (add a spare shell as pane 1; for `new` it runs the detected install there — without it the install is printed as a `then:` hint) · `--no-spare` (accepted, and the default: single pane) |
 | `new`/`co` | `--no-install` · `--no-tmux` · `--no-attach` · `--no-fetch` · `--name <topic>` · `--brief <text>` (write the agent's task to `.planning/brief.md` and launch the selected agent on it) |
+| `open` | `--brief <file>` (re-brief: rewrite `.planning/brief.md` from the file, `-` for stdin, and start the agent on it even where it has run before — a plain `open` sends the brief's opener only on an agent's first launch there, and says so when it does not; refused while the place's session is running) |
 | `switch` | `--force` (despite uncommitted changes) · `--no-fetch` · `-y` |
 | `rm` | `--branch` (delete the branch too) · `--force` · `-y/--yes` |
 
@@ -316,6 +317,8 @@ Connect Worktrees tools separately in Settings → Claude and Settings → Codex
 or run `worktrees mcp --install --ai codex` for Codex. The unqualified MCP setup
 command still targets Claude. The MCP `create_worktree` tool accepts an optional
 `provider: "claude" | "codex"`; without one it uses the project's AI command.
+`open_place` (with `--mutations`) starts the agent in a place that already
+exists; with `brief`, it re-briefs the place as `open --brief` does.
 
 Agents in different places of one project can talk through the same server,
 whichever provider each one is. `report` posts a message to another place

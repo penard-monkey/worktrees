@@ -38,6 +38,12 @@ tmux. The repository's own AGENTS.md / CLAUDE.md wins on repo-specific rules
 - A `brief` is written to `.planning/brief.md` in the new place and the agent
   is started on it. The brief is the whole handover: goal, deliverable, rules,
   and when to stop. It is never passed on a command line.
+- To give a place that already exists a NEW brief, use MCP
+  `open_place {slug, brief}` or `worktrees open <slug> --brief <file>
+  --no-attach`. Rewriting `.planning/brief.md` and reopening the place does
+  not tell an agent that has run there before to read it. A re-brief is
+  refused while the place's agent is running: close it first
+  (`close_session`), or send it the new work as a message.
 - A place with an agent running belongs to that agent. Do not edit its tree;
   talk to it.
 

@@ -181,6 +181,33 @@ JSON
   [[ "$(tmux_pane0_cmd repo-agent-q2)" == *"$OPENER"* ]]
 }
 
+@test "quota: a refused open --brief names a retry that carries the brief, and it works" {
+  # Claude has run here, so a retry WITHOUT --brief would start it blank: the
+  # retry the refusal prints has to carry the brief it just wrote.
+  usage_fixture 40 normal
+  run_wt new feat-rr --brief "old task" --no-attach
+  [ "$status" -eq 0 ]
+  local d m
+  for d in "$REPO/.worktrees/feat-rr" "$(cd "$REPO/.worktrees/feat-rr" && pwd -P)"; do
+    m="$(printf '%s' "$d" | sed 's/[^A-Za-z0-9]/-/g')"
+    mkdir -p "$HOME/.claude/projects/$m" && : > "$HOME/.claude/projects/$m/s.jsonl"
+  done
+  run_wt close feat-rr
+  usage_fixture 92 warning
+  printf 'new task\n' > "$BATS_TEST_TMPDIR/brief.md"
+  run_wt open feat-rr --brief "$BATS_TEST_TMPDIR/brief.md" --no-attach
+  [ "$status" -eq 5 ]
+  [ "$(cat "$REPO/.worktrees/feat-rr/.planning/brief.md")" = "new task" ]
+  [ ! -f "$TMUX_STATE/repo-feat-rr" ]
+  local retry="worktrees open feat-rr --force --brief $REPO/.worktrees/feat-rr/.planning/brief.md"
+  grep -qF -- "$retry" <<<"$output"
+  # Run exactly that (the binary under test, from the repo).
+  run bash -c 'cd "$1" && shift && "$@" --no-attach' _ "$REPO" "$WT_BIN" ${retry#worktrees }
+  [ "$status" -eq 0 ]
+  grep -qF -- "'$OPENER'" <<<"$(tmux_pane0_cmd repo-feat-rr)"
+  [ "$(cat "$REPO/.worktrees/feat-rr/.planning/brief.md")" = "new task" ]
+}
+
 # ── the user's [quota] policy (config.toml) ────────────────────────────────
 # `common_setup` puts HOME in the test's tmpdir and unsets XDG_CONFIG_HOME, so
 # this is the user config the binary reads — never the developer's real one.

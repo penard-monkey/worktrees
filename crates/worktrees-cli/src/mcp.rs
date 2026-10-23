@@ -213,8 +213,9 @@ struct Server {
     registry_src: Option<std::path::PathBuf>,
     /// Who launched the place this server runs for, read from its declared
     /// state at startup (Server Edition Phase 2, §7.5). An agent this server
-    /// starts (`create_worktree`) is launched for the SAME caller, so a lane a
-    /// scoped device started cannot start a sub-lane with the host's reach.
+    /// starts (`create_worktree`, `open_place`) is launched for the SAME
+    /// caller, so a lane a scoped device started cannot start a sub-lane with
+    /// the host's reach.
     launched_by: Option<worktrees_core::store::LaunchedBy>,
 }
 
@@ -1299,6 +1300,33 @@ impl Server {
                 false,
             ));
             t.push(tool(
+                "open_place",
+                "Start the agent in a place that already exists (its tmux session), or re-brief it. \
+                 With `brief`, the brief is REWRITTEN (.planning/brief.md) and the agent is started on \
+                 it, whether or not it has run there before. This is the only way to re-brief: \
+                 rewriting the file and opening without `brief` does NOT tell an agent that has run \
+                 there to read it (the result says so). A re-brief is refused while the place's \
+                 session is running, and nothing is written: close_session first (that ends its \
+                 agent), or send the running agent the new work as a message. Without `brief`, a \
+                 running session is reused as it is. `provider`, `model` and `force` are \
+                 create_worktree's: a launch refused by advice (a spent plan window, an unreachable \
+                 model host) is the user's to override.",
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "slug": { "type": "string", "description": "The place to open." },
+                        "brief": { "type": "string", "description": "The agent's new task, as markdown. Replaces .planning/brief.md; the agent opens on it. Optional." },
+                        "provider": { "type": "string", "enum": worktrees_core::provider::ids(), "description": "Agent to start. Omit to use the project's AI command. Another provider than the one running there closes that one first." },
+                        "model": { "type": "string", "description": "The agent's model, as for create_worktree. Optional." },
+                        "force": { "type": "boolean", "description": "Launch anyway despite an advisory refusal. Only after the user has been told the reason and asked for it. Default false." }
+                    },
+                    "required": ["slug"],
+                    "additionalProperties": false
+                }),
+                false,
+                false,
+            ));
+            t.push(tool(
                 "show_doc",
                 "Open a file from THIS repository in the worktrees desktop app's file viewer, \
                  scrolled to `line` when given, and bring the app to the front. Use it whenever \
@@ -1792,32 +1820,17 @@ impl Server {
                 if a.get("force").and_then(|v| v.as_bool()) == Some(true) {
                     args.push("--force".to_string());
                 }
-                let mut harness = None;
-                match a.get("provider") {
-                    None | Some(serde_json::Value::Null) => {}
-                    Some(serde_json::Value::String(p)) if worktrees_core::provider::by_id(p).is_some() => {
-                        args.push("--ai".to_string());
-                        args.push(p.clone());
-                        harness = Some(p.clone());
-                    }
-                    Some(_) => return Ok(text_err(&format!("provider must be {}", worktrees_core::provider::choices()))),
+                let (provider, model) = match agent_choice(&a) {
+                    Ok(v) => v,
+                    Err(e) => return Ok(text_err(&e)),
+                };
+                if let Some(p) = provider {
+                    args.push("--ai".to_string());
+                    args.push(p);
                 }
-                match a.get("model") {
-                    None | Some(serde_json::Value::Null) => {}
-                    Some(serde_json::Value::String(m)) => {
-                        let harness = harness.unwrap_or_else(|| {
-                            worktrees_core::profile::ai_word_of(&worktrees_core::config::resolve_ai_cmd(None))
-                        });
-                        if harness == worktrees_core::provider::PI.id && worktrees_core::pimodels::pi_bin().is_none() {
-                            return Ok(text_err("pi is not installed where this server runs, so it offers no models"));
-                        }
-                        if let Err(e) = model_ok(&harness, m, &worktrees_core::choice::options_for(&harness)) {
-                            return Ok(text_err(&e));
-                        }
-                        args.push("--model".to_string());
-                        args.push(m.clone());
-                    }
-                    Some(_) => return Ok(text_err("model must be a string")),
+                if let Some(m) = model {
+                    args.push("--model".to_string());
+                    args.push(m);
                 }
                 if !raw_base.trim().is_empty() {
                     match safe_arg(&raw_base, "base") {
@@ -1841,16 +1854,13 @@ impl Server {
                 // The brief is free text and never a flag: it rides as the value
                 // of `--brief`, which core's parser consumes whole — so it needs
                 // no `safe_arg`, only to be a string.
-                match a.get("brief") {
-                    None | Some(serde_json::Value::Null) => {}
-                    Some(serde_json::Value::String(b)) if b.trim().is_empty() => {
-                        return Ok(text_err("brief is empty — leave it out, or say what the agent is to do"))
-                    }
-                    Some(serde_json::Value::String(b)) => {
+                match brief_arg(&a) {
+                    Ok(None) => {}
+                    Ok(Some(b)) => {
                         args.push("--brief".to_string());
-                        args.push(b.clone());
+                        args.push(b);
                     }
-                    Some(_) => return Ok(text_err("brief must be a string")),
+                    Err(e) => return Ok(text_err(&e)),
                 }
                 // The model's values go after `--`, so even one that slipped
                 // past `safe_arg` is a branch or a base, never a flag (R3).
@@ -1910,6 +1920,54 @@ impl Server {
                 };
                 let args = vec!["--".to_string(), slug];
                 Ok(run_op_on(&project, None, move |p, ui| ops::cmd_close(p, ui, &args)))
+            }
+            "open_place" => {
+                let (project, slug, foreign) = match self.mutable_target(&s("slug"), name) {
+                    Ok(t) => t,
+                    Err(e) => return Ok(text_err(&e)),
+                };
+                // A provider switch here would close the caller's own agent,
+                // and a re-brief of it is refused as a live session anyway.
+                if foreign.is_none() && self.caller_place().is_ok_and(|me| me.slug == slug) {
+                    return Ok(text_err("that is your own place — open_place starts ANOTHER place's agent"));
+                }
+                let (provider, model) = match agent_choice(&a) {
+                    Ok(v) => v,
+                    Err(e) => return Ok(text_err(&e)),
+                };
+                // The brief never reaches argv at all: it is a field of the
+                // request, written by core's own brief writer.
+                let mut brief = match brief_arg(&a) {
+                    Ok(b) => b,
+                    Err(e) => return Ok(text_err(&e)),
+                };
+                // Provenance (§5.3), as create_worktree's `project` brief has it.
+                if let (Some(pn), Some(b)) = (foreign.as_deref(), brief.as_mut()) {
+                    *b = format!("{}{b}", self.brief_provenance(pn));
+                }
+                let req = ops::OpenRequest {
+                    name: slug,
+                    ai: provider,
+                    model,
+                    force: a.get("force").and_then(|v| v.as_bool()) == Some(true),
+                    brief,
+                    ..Default::default()
+                };
+                // Launched for this server's own lane's caller, as create_worktree's are
+                // (§7.5): a scoped device's lane must not start, or re-brief, an agent
+                // with the host's reach.
+                let mut out = run_op_with(&project, self.launched_by.clone(), OPEN_REFUSED_NOTE, move |p, ui| ops::open_place(p, ui, &req));
+                // Core's warning names the CLI; say the tools too.
+                let skipped = out["content"][0]["text"].as_str().is_some_and(|t| t.contains(ops::BRIEF_SKIPPED));
+                if skipped {
+                    if let Some(c) = out["content"].as_array_mut() {
+                        c.push(serde_json::json!({ "type": "text", "text":
+                            "Through this server: close_session, then open_place with brief (the task as markdown) \
+                             to start that agent on it."
+                        }));
+                    }
+                }
+                Ok(out)
             }
             "remove_worktree" => {
                 // NEVER across projects, at any reach level (cross-project
@@ -2882,25 +2940,40 @@ fn add_provenance(v: &mut serde_json::Value, d: Option<&store::Declared>) {
     }
 }
 
+/// What a launch refused by advice (exit 5) tells an MCP caller instead of
+/// the CLI's `worktrees open <slug> --force`, per tool. The decision stays
+/// with the user (the `remove_worktree` pattern).
+const CREATE_REFUSED_NOTE: &str = "The worktree and its brief were created; only the agent was not \
+     started. Relay the reason to the user. Retry only if they ask, by calling \
+     create_worktree again for the same branch with force: true.";
+const OPEN_REFUSED_NOTE: &str = "The place is ready, and its brief written if you passed one; only the \
+     agent was not started. Relay the reason to the user. Retry only if they ask, by calling \
+     open_place again with force: true — and the same brief, if you passed one: where the agent \
+     has run before, a retry without it starts that agent blank.";
+
 /// `Server::run_op` against an explicit project — a mutation's TARGET, which
 /// may be another registered project (cross-project P3). `launched_by` is who
 /// an agent it starts is launched for: the server's own lane's caller.
 fn run_op_on<F: FnOnce(&Project, &mut CaptureUi) -> i32>(project: &Project, launched_by: Option<worktrees_core::store::LaunchedBy>, f: F) -> serde_json::Value {
+    run_op_with(project, launched_by, CREATE_REFUSED_NOTE, f)
+}
+
+/// `run_op_on`, with the note a refused launch carries for this tool.
+fn run_op_with<F: FnOnce(&Project, &mut CaptureUi) -> i32>(
+    project: &Project,
+    launched_by: Option<worktrees_core::store::LaunchedBy>,
+    refused: &str,
+    f: F,
+) -> serde_json::Value {
     let mut ui = CaptureUi { launched_by, ..CaptureUi::default() };
     let rc = f(project, &mut ui);
     let body = ui.lines.join("\n");
     if rc == 0 {
         text_ok(if body.is_empty() { "ok" } else { &body })
     } else if rc == worktrees_core::diag::EXIT_LAUNCH_REFUSED {
-        // The place and its brief EXIST; only the agent did not start. The
-        // CLI's own text names `worktrees open <slug> --force`, which an
-        // MCP caller cannot run — name the tool instead, and keep the
-        // decision with the user (the `remove_worktree` pattern).
-        text_err(&format!(
-            "{body}\n\nThe worktree and its brief were created; only the agent was not \
-             started. Relay the reason to the user. Retry only if they ask, by calling \
-             create_worktree again for the same branch with force: true."
-        ))
+        // The place EXISTS; only the agent did not start. The CLI's own text
+        // names a `worktrees open … --force`, which an MCP caller cannot run.
+        text_err(&format!("{body}\n\n{refused}"))
     } else if rc == EXIT_NEEDS_CONFIRM {
         text_err(&format!(
             "{body}\n\nThis operation stopped to ask for confirmation. Relay the question to \
@@ -2925,6 +2998,45 @@ fn settled(prev: Option<&activity::Activity>, cur: &activity::Activity) -> bool 
         return true;
     }
     prev.is_some_and(|p| p.provider == cur.provider && p.state != activity::State::Busy)
+}
+
+/// `provider` and `model` as `create_worktree` and `open_place` take them: a
+/// provider of ours, and a model checked as DATA (`model_ok`) against the
+/// harness that will run it — the chosen one, else the project's AI command.
+/// The values for `--ai` and `--model`.
+fn agent_choice(a: &serde_json::Value) -> Result<(Option<String>, Option<String>), String> {
+    let provider = match a.get("provider") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(p)) if worktrees_core::provider::by_id(p).is_some() => Some(p.clone()),
+        Some(_) => return Err(format!("provider must be {}", worktrees_core::provider::choices())),
+    };
+    let model = match a.get("model") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(m)) => {
+            let harness = provider.clone().unwrap_or_else(|| {
+                worktrees_core::profile::ai_word_of(&worktrees_core::config::resolve_ai_cmd(None))
+            });
+            if harness == worktrees_core::provider::PI.id && worktrees_core::pimodels::pi_bin().is_none() {
+                return Err("pi is not installed where this server runs, so it offers no models".into());
+            }
+            model_ok(&harness, m, &worktrees_core::choice::options_for(&harness))?;
+            Some(m.clone())
+        }
+        Some(_) => return Err("model must be a string".into()),
+    };
+    Ok((provider, model))
+}
+
+/// A `brief` argument: absent, or markdown that says something.
+fn brief_arg(a: &serde_json::Value) -> Result<Option<String>, String> {
+    match a.get("brief") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(b)) if b.trim().is_empty() => {
+            Err("brief is empty — leave it out, or say what the agent is to do".into())
+        }
+        Some(serde_json::Value::String(b)) => Ok(Some(b.clone())),
+        Some(_) => Err("brief must be a string".into()),
+    }
 }
 
 /// A `create_worktree.model`, checked as DATA before it becomes `--model`: the
@@ -3203,6 +3315,60 @@ mod tests {
         let create = tools.iter().find(|t| t["name"] == "create_worktree").unwrap();
         assert_eq!(create["inputSchema"]["properties"]["provider"]["enum"], serde_json::json!(["claude", "codex", "pi", "kimi"]));
         assert_eq!(create["inputSchema"]["properties"]["model"]["type"], "string");
+    }
+
+    /// `open_place` is how an orchestrator re-briefs a place that exists: a
+    /// `--mutations` tool, `slug` required, the rest create_worktree's.
+    #[test]
+    fn open_place_is_a_gated_tool_with_create_worktrees_agent_fields() {
+        let sc = scratch("open-place-schema");
+        assert!(!tool_names(&server_at(&sc.root, false)).contains(&"open_place".to_string()), "a --mutations tool");
+        let server = server_at(&sc.root, true);
+        let tools = server.tools();
+        let open = tools.iter().find(|t| t["name"] == "open_place").expect("advertised with --mutations");
+        let props = &open["inputSchema"]["properties"];
+        assert_eq!(open["inputSchema"]["required"], serde_json::json!(["slug"]));
+        assert_eq!(open["inputSchema"]["additionalProperties"], serde_json::json!(false));
+        let create = tools.iter().find(|t| t["name"] == "create_worktree").unwrap();
+        assert_eq!(props["provider"]["enum"], create["inputSchema"]["properties"]["provider"]["enum"]);
+        for (k, ty) in [("slug", "string"), ("brief", "string"), ("model", "string"), ("force", "boolean")] {
+            assert_eq!(props[k]["type"], ty, "{k}");
+        }
+        assert_eq!(open["annotations"]["readOnlyHint"], serde_json::json!(false), "it writes: the hub-copy guard keys on this");
+        let d = open["description"].as_str().unwrap();
+        assert!(d.contains("only way to re-brief") && d.contains("close_session"), "{d}");
+    }
+
+    /// Arguments are checked as data before core runs, and a place's own
+    /// agent cannot reopen itself (a provider switch would close the caller).
+    ///
+    /// This server talks to the REAL tmux, so every case here is one that core
+    /// would refuse too, before any launch, should this guard ever go: such a
+    /// test fails on its message, never by starting an agent. The cases whose
+    /// fall-through WOULD launch (a non-string brief or model, an unknown
+    /// provider) are bats', under the fake tmux (test/mcp.bats).
+    #[test]
+    fn open_place_refuses_bad_arguments_and_the_callers_own_place_before_anything_runs() {
+        use serde_json::json;
+        let sc = scratch("open-place-args");
+        let wt = repo_with_worktree(&sc);
+        let mut main = server_at(&sc.root, true);
+        for (args, says) in [
+            (json!({ "slug": "feat", "brief": "  \n" }), "brief is empty"),
+            (json!({ "slug": "feat", "model": "x'; touch /tmp/pwned" }), "model"),
+            (json!({ "slug": "nope" }), "no such place: nope"),
+            (json!({ "slug": "--force" }), "slug"),
+        ] {
+            let r = call(&mut main, "open_place", args.clone());
+            assert_eq!(r["isError"], json!(true), "accepted {args}");
+            assert!(text(&r).contains(says), "{args}: {}", text(&r));
+        }
+        assert!(!wt.join(ops::BRIEF_PATH).exists(), "nothing written");
+        // The bad model is the safety net described above.
+        let mut own = server_in(&sc.root, &wt, true);
+        let r = call(&mut own, "open_place", json!({ "slug": "feat", "brief": "do x", "model": "x;y" }));
+        assert!(text(&r).contains("your own place"), "{r}");
+        assert!(!wt.join(ops::BRIEF_PATH).exists(), "nothing written");
     }
 
     /// One non-busy sample ends a wait on Claude or Codex; pi needs two in a
@@ -4527,12 +4693,18 @@ mod tests {
             ("set_note", serde_json::json!({ "slug": "beta:lane", "note": "x" })),
             ("send", serde_json::json!({ "slug": "beta:lane", "text": "x" })),
             ("close_session", serde_json::json!({ "slug": "beta:lane" })),
+            ("open_place", serde_json::json!({ "slug": "beta:lane", "brief": "x" })),
         ] {
             let r = call(&mut s, tool, args);
             // At `read` a mutation across projects is refused, naming the level (P3).
             assert!(text(&r).contains("needs cross_project = \"full\""), "{tool}: {}", text(&r));
         }
         assert!(worktrees_core::store::read_lenient(&t.beta.to_string_lossy()).places.is_empty(), "nothing written into beta");
+        assert!(!t.beta.join(".worktrees/lane").join(ops::BRIEF_PATH).exists(), "no brief written into beta");
+        // The bad model: should the guard go, the call is still refused before
+        // any launch (this server talks to the real tmux).
+        let r = call(&mut s, "open_place", serde_json::json!({ "slug": "alpha:lane", "brief": "x", "model": "x;y" }));
+        assert!(text(&r).contains("your own place"), "{}", text(&r));
         let r = call(&mut s, "report", serde_json::json!({ "to": "alpha:lane", "text": "hi" }));
         assert!(text(&r).contains("you are in lane"), "{}", text(&r));
         let r = call(&mut s, "wait", serde_json::json!({ "until": "idle", "slug": "alpha:lane", "timeout_s": 0 }));

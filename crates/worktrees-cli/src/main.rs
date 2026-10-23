@@ -22,6 +22,8 @@ worktrees — one git worktree per branch, one active agent per worktree.
   worktrees open <name> [--ai claude|codex|pi|kimi]  open or switch the active agent
                                         (--model <m>: pi takes backend/id, kimi an alias; --force: launch despite an advisory refusal)
                                         (--spare: + a shell pane beside the agent)
+                                        (--brief <file>|-: re-brief — rewrite .planning/brief.md and start the
+                                        agent on it, even where it has run; refused while its session runs)
   worktrees close <name> [name...]      end the tmux session (worktree stays; also: main)
                                         (-y to kill an adopted session; --session <s> binds that answer)
   worktrees ls [--json]                 list worktrees + state (--json = machine-readable)
