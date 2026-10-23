@@ -41,10 +41,23 @@
 //! others shift up; `KEEP` files in all, the live one included), and the new
 //! file opens with a `checkpoint` whose `prev` is the old file's final hash,
 //! so the chain runs on across files. The checkpoint also carries the security
-//! fields of every live device (§5.1), so §5.2 can read from the newest
-//! checkpoint onward instead of from a file rotation removed — an empty list
-//! until slice 5's registry exists. EVERY file opens with a checkpoint, and
-//! the oldest one left on disk is where verification anchors.
+//! fields of every unrevoked device (§5.1), read from the registry through
+//! [`Fleet`], so §5.2 can read from the newest checkpoint onward instead of
+//! from a file rotation removed. EVERY file opens with a checkpoint, and the
+//! oldest one left on disk is where verification anchors.
+//!
+//! **Devices** (§5.1). Every `DeviceEvent` the registry fires is a record
+//! ([`Audit::hear`], subscribed in `conn::start`): `device` and `pairing`
+//! records naming the device in `detail.subject` and a pairing's principal
+//! in `detail.for_principal`, never the comparison code, the link or its
+//! secret. A refused device key is an auth failure, in the same episodes as
+//! a failed handshake. §5.3's alerts are `alert` records, emitted to the host.
+//!
+//! **A device's budget.** A paired device's request records spend a byte
+//! budget of its own across its connections ([`ACTS`], [`REFUSALS`]): past it
+//! they are counted into a `budget` episode, a record when it begins and one
+//! with the counts when it ends, never dropped. The device and pairing records
+//! and the first record of any episode are never charged.
 //!
 //! **A write that fails** (decided with (main), 2026-10-21; §5 is silent):
 //! the console fails OPEN — the request is served, serve.log says so once per
@@ -69,8 +82,9 @@ use sha2::{Digest, Sha256};
 use worktrees_api::log::{info, warn};
 use worktrees_api::Host;
 
-use worktrees_core::authz::{Caller, Capability, Device};
+use worktrees_core::authz::{Caller, Capability, Device, DeviceId, PrincipalId};
 
+use super::devices::{self, Actor, ConnectRefusal, DeviceEvent, DeviceRegistry, Disabled, DisabledReason, SecurityFields, Subject};
 use super::dispatch::{self, Args, Row, Witness};
 use super::resolve::{Refusal, RefusalKind, Resolved};
 
@@ -99,9 +113,111 @@ pub const EPISODE_QUIET: i64 = 60;
 /// Failed handshakes in one episode before the host is alerted (§5.3).
 pub const AUTH_ALERT_AT: u64 = 20;
 
+/// What ONE paired device may make the log write, in bytes, across all of
+/// its connections: a token bucket per budget, a record costing its line.
+/// Past it a record is counted into an episode instead of written. Bytes,
+/// not records, because rotation counts bytes, and a refusal's size is the
+/// caller's to choose: three identifiers of `MAX_IDENT` each make one about
+/// 3.3 KB, where a typical record is 370 B.
+///
+/// What one device flooding flat out can write, per coalescing budget, is the
+/// larger of its refill and its episode records, which are always written
+/// and debited (one `began` and one `ended` per `EPISODE_QUIET`, about
+/// 1.2 KB, so about 20 B/s): 20 B/s for acts and for refusals. Drive-class
+/// acts are refused past theirs, so `DRIVE` adds exactly its refill, 40 B/s:
+/// about 80 B/s in all, 6.6 MiB a day. The four rotated files, 20 MiB, then
+/// last it three days; at 50 records a second (§6's request rate) they
+/// lasted 20 minutes, and under 3 with crafted refusals. Sixteen devices at
+/// once: about 4.5 hours. Measured
+/// (`an_hour_of_flood_from_one_device_writes_its_ceiling`): an hour of 25
+/// refusals and 25 acts a second, 180,000 records, wrote 159 KB — the two
+/// bursts and 28 B/s — where it had written about 52 MB.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Allowance {
+    pub burst: f64,
+    pub per_sec: f64,
+}
+
+/// What a device's grant let through (`call`, `stream`) that is not
+/// drive-class: about 110 records at once, then one every 18 s.
+pub const ACTS: Allowance = Allowance { burst: 40.0 * 1024.0, per_sec: 20.0 };
+
+/// A device's drive-class acts ([`drive_class`]): instruct, answer, admin,
+/// opening a terminal — an instruction file's write is raised to instruct —
+/// and `remove_place`, the one remove that can destroy commits. They are
+/// NEVER coalesced: one that its budget cannot pay for is refused before it
+/// runs (`RefusalKind::AuditBudget`), and told when to try again, so every
+/// dangerous act that runs is in the log in full.
+///
+/// Sized so a phone session never meets it. A drive-class record is 400 to
+/// 570 B (measured: an instruction write with a long path and its hash is
+/// 567 B, reserved with `RESERVE_SLACK` as about 760 B), so 64 KiB is 85 to
+/// 160 of them at once — an agent answered every
+/// 30 s for an hour — and 40 B/s is one every 10 to 14 s, four to six a
+/// minute, for as long as the device is used. Past that, a device is driving
+/// agents faster than a person can read what they asked.
+pub const DRIVE: Allowance = Allowance { burst: 64.0 * 1024.0, per_sec: 40.0 };
+
+/// What a drive-class act reserves from `DRIVE` before it runs, beyond its
+/// own record rendered then: the fields only its end can fill (the outcome,
+/// the time, an attach's id and totals). Each act reserves what ITS record
+/// will cost, under the log's lock, so acts in flight together can never
+/// pass on bytes another has already reserved; its record, once written, is
+/// settled at what it did cost.
+const RESERVE_SLACK: f64 = 192.0;
+
+/// What a device can make with nothing granted at all (`refused`): about 40
+/// at once, then one every 50 s. A budget of its own, so junk a device needs
+/// no capability for cannot spend the one that records what its grant did.
+pub const REFUSALS: Allowance = Allowance { burst: 16.0 * 1024.0, per_sec: 8.0 };
+
+/// A device's coalesced episode is written out after this long even while it
+/// goes on: a count held in memory longer is a count a crash loses.
+pub const EPISODE_SPAN: Duration = Duration::from_secs(600);
+
+/// Keys one coalesced episode's tally keeps; the rest are counted as
+/// `other`, so a device cycling through every command cannot make the record
+/// that ends the episode large.
+const MAX_TALLY: usize = 16;
+
+/// The distinct targets (command, project, object) a coalesced episode of
+/// acts names, each part cut to `TARGET_IDENT` bytes; the rest are counted as
+/// `other`.
+const MAX_TARGETS: usize = 8;
+const TARGET_IDENT: usize = 128;
+
+/// Device knocks (`ConnectRefused`) one auth episode alerts for, one per
+/// device and reason; past it they are only counted.
+const MAX_KNOCK_ALERTS: usize = 64;
+
 /// How long a writer that could not open its file waits before trying again,
 /// so a log that stays broken costs one attempt a second, not one a record.
 const REOPEN_EVERY: Duration = Duration::from_secs(1);
+
+/// Where a checkpoint reads the devices it carries (§5.1): every unrevoked
+/// device's security fields, which §5.2 compares a `devices.json` with
+/// instead of reading a file rotation removed — or `None` while serve holds
+/// no evidence of its own, before the boot cross-check, when the checkpoint
+/// says `null` and vouches for nothing. Called under the log's lock;
+/// the registry's [`DeviceRegistry::checkpoint`] takes only its state's read
+/// lock, and the registry hands its events to the log after releasing its
+/// locks, so the two never wait on each other.
+#[derive(Clone)]
+pub struct Fleet(Arc<dyn Fn() -> Option<Vec<SecurityFields>> + Send + Sync>);
+
+impl Fleet {
+    /// The registry's devices: serve's.
+    pub fn of(devices: &Arc<DeviceRegistry>) -> Fleet {
+        let d = devices.clone();
+        Fleet(Arc::new(move || d.checkpoint()))
+    }
+
+    /// No device at all: a log with no registry behind it (the unit tests).
+    #[cfg(test)]
+    pub fn none() -> Fleet {
+        Fleet(Arc::new(|| Some(Vec::new())))
+    }
+}
 
 // ── who acted ───────────────────────────────────────────────────────────────
 
@@ -115,6 +231,17 @@ fn actor(c: &Caller) -> (&str, &str) {
         Device::Paired(id) => id.as_str(),
     };
     (c.principal().as_str(), device)
+}
+
+/// The actor of a registry change, as a record names it: the console, a
+/// paired device, or nobody — serve itself (an expiry, the cross-check, a
+/// reload), whose records say so in `detail.by`.
+fn by_caller(by: &Actor) -> Option<Caller> {
+    match by {
+        Actor::Console => Some(Caller::console()),
+        Actor::Device { principal, device } => Some(Caller::paired(principal.clone(), device.clone())),
+        Actor::Serve => None,
+    }
 }
 
 /// The stream rows, by what they do to an attach. Opens and closes are
@@ -478,6 +605,104 @@ pub fn verify(dir: &Path) -> Verdict {
     v
 }
 
+// ── §5.2's evidence ─────────────────────────────────────────────────────────
+
+/// §5.2's evidence, per device: the security fields the chain says it has —
+/// the newest checkpoint's list, then every record after it that sets one
+/// (`enrolled`, `scope_changed`, `expiry_changed`, `stepup_changed`,
+/// `disabled`, `enabled`, `revoked`). Files are read oldest first, so an
+/// older checkpoint is replaced by a newer one; a tombstone stays one across
+/// checkpoints, which list only unrevoked devices, and a `null` list vouches
+/// for nothing new. Read only up to `v`'s first break, and not the record
+/// before it either, which an edit there would have changed: nothing past a
+/// break is evidence. A record about a device names it, and its principal,
+/// in `detail.subject`, and one that names a device the chain does not
+/// already hold sets nothing.
+pub fn evidence(dir: &Path, v: &Verdict) -> HashMap<DeviceId, SecurityFields> {
+    let mut ev = HashMap::new();
+    let names = (1..KEEP).rev().map(rotated_name).filter(|n| std::fs::symlink_metadata(dir.join(n)).is_ok()).chain([FILE.to_string()]);
+    for name in names {
+        // The 1-based line the chain first fails at in this file; 0 for the
+        // file itself.
+        let stop = v.broken.as_ref().filter(|b| b.file == name).map(|b| b.line);
+        let Ok(Some(bytes)) = read_regular(&dir.join(&name)) else {
+            if stop.is_some() {
+                return ev;
+            }
+            continue;
+        };
+        let mut lines: Vec<&[u8]> = bytes.split(|b| *b == b'\n').collect();
+        lines.pop();
+        for (i, line) in lines.iter().enumerate() {
+            if stop.is_some_and(|n| i + 2 >= n) {
+                return ev;
+            }
+            if let Ok(r) = serde_json::from_slice::<Value>(line) {
+                apply_evidence(&mut ev, &r);
+            }
+        }
+        if stop.is_some() {
+            return ev;
+        }
+    }
+    ev
+}
+
+/// `v` as a `T`, if it is one.
+fn parse_as<T: serde::de::DeserializeOwned>(v: &Value) -> Option<T> {
+    serde_json::from_value(v.clone()).ok()
+}
+
+/// One record's part in [`evidence`].
+fn apply_evidence(ev: &mut HashMap<DeviceId, SecurityFields>, r: &Value) {
+    let d = &r["detail"];
+    match r["kind"].as_str() {
+        Some("checkpoint") => {
+            let Some(list) = parse_as::<Vec<SecurityFields>>(&d["devices"]) else { return };
+            ev.retain(|id, f| f.revoked_at.is_some() && !list.iter().any(|x| &x.device == id));
+            ev.extend(list.into_iter().map(|f| (f.device.clone(), f)));
+        }
+        Some("device") => {
+            if d["event"] == "enrolled" {
+                if let Some(f) = parse_as::<SecurityFields>(&d["fields"]) {
+                    ev.insert(f.device.clone(), f);
+                }
+                return;
+            }
+            let (Some(p), Some(id)) = (d["subject"]["principal"].as_str(), d["subject"]["device"].as_str()) else { return };
+            let Some(f) = ev.get_mut(&DeviceId::new(id)).filter(|f| f.principal.as_str() == p) else { return };
+            let at = r["ts"].as_str().and_then(devices::parse_rfc3339).unwrap_or(0);
+            match d["event"].as_str() {
+                Some("revoked") => f.revoked_at = Some(at),
+                Some("disabled") => {
+                    if let Some(reason) = parse_as::<DisabledReason>(&d["reason"]) {
+                        f.disabled = Some(Disabled { at, reason });
+                    }
+                }
+                Some("enabled") => f.disabled = None,
+                Some("expiry_changed") => {
+                    if let Some(x) = parse_as(&d["to"]) {
+                        f.expiry = x;
+                    }
+                }
+                Some("stepup_changed") => {
+                    if let Some(b) = d["required"].as_bool() {
+                        f.stepup_required = b;
+                    }
+                }
+                Some("scope_changed") => {
+                    if let Some(g) = parse_as::<worktrees_core::authz::Grant>(&d["to"]) {
+                        f.caps = g.capabilities;
+                        f.projects = g.projects;
+                    }
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+}
+
 // ── the writer ──────────────────────────────────────────────────────────────
 
 /// A run of records that could not be written (the console's fail-open).
@@ -494,6 +719,175 @@ struct Episode {
     count: u64,
     reasons: BTreeMap<&'static str, u64>,
     alerted: bool,
+    /// The devices (and why) whose refused knock this episode has alerted
+    /// for: a revoked phone knocking all night is one alert, not thousands.
+    knocks: std::collections::BTreeSet<String>,
+}
+
+/// A refused device key, as an auth episode hears it: what names it in the
+/// record that begins an episode, and, for a known device, its alert, keyed
+/// by device and reason.
+#[derive(Default)]
+struct Knock {
+    detail: Map<String, Value>,
+    alert: Option<(String, Value)>,
+}
+
+// ── a device's budget ───────────────────────────────────────────────────────
+
+/// Which of a device's two budgets a record spends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Charge {
+    /// `call` and `stream`: what its grant let through.
+    Acts,
+    /// The drive-class acts among them: reserved before they run, refused
+    /// past the budget, never coalesced.
+    Drive,
+    /// `refused`: what it can make with nothing granted.
+    Refusals,
+}
+
+impl Charge {
+    const ALL: [Charge; 3] = [Charge::Acts, Charge::Drive, Charge::Refusals];
+
+    fn name(self) -> &'static str {
+        match self {
+            Charge::Acts => "acts",
+            Charge::Drive => "drive",
+            Charge::Refusals => "refusals",
+        }
+    }
+    fn allowance(self) -> Allowance {
+        match self {
+            Charge::Acts => ACTS,
+            Charge::Drive => DRIVE,
+            Charge::Refusals => REFUSALS,
+        }
+    }
+}
+
+/// Bytes a device may still have written, refilled with time. It may go
+/// into debt — the episode records are always written, and paid for out of
+/// later detail — as deep as what the device made the log write, and none of
+/// it is forgiven: a device in debt has its next record written in full only
+/// once it has paid.
+struct Bucket {
+    tokens: f64,
+    at: Instant,
+}
+
+impl Bucket {
+    fn full(a: Allowance, now: Instant) -> Bucket {
+        Bucket { tokens: a.burst, at: now }
+    }
+
+    fn refill(&mut self, a: Allowance, now: Instant) {
+        let dt = now.saturating_duration_since(self.at).as_secs_f64();
+        self.tokens = (self.tokens + dt * a.per_sec).min(a.burst);
+        self.at = now;
+    }
+
+    /// Take `n` if it is there.
+    fn take(&mut self, a: Allowance, n: f64, now: Instant) -> bool {
+        self.refill(a, now);
+        let ok = self.tokens >= n;
+        if ok {
+            self.tokens -= n;
+        }
+        ok
+    }
+
+    /// Take `n` whether or not it is there (a negative `n` gives back, never
+    /// past the burst).
+    fn debit(&mut self, a: Allowance, n: f64, now: Instant) {
+        self.refill(a, now);
+        self.tokens = (self.tokens - n).min(a.burst);
+    }
+}
+
+/// The records one budget counted instead of writing, from the first of them
+/// until `EPISODE_QUIET` passes with none (or `EPISODE_SPAN`, or the device
+/// goes, or serve stops).
+struct Coalesced {
+    who: Caller,
+    began: Instant,
+    began_epoch: i64,
+    last: Instant,
+    last_epoch: i64,
+    count: u64,
+    bytes: u64,
+    tally: BTreeMap<String, u64>,
+    /// What the acts it counted acted on (`MAX_TARGETS`).
+    targets: BTreeMap<String, u64>,
+}
+
+/// One paired device's budgets, across all of its connections.
+struct Spend {
+    conns: usize,
+    acts: Bucket,
+    drive: Bucket,
+    refusals: Bucket,
+    open: HashMap<Charge, Coalesced>,
+}
+
+impl Spend {
+    fn new(now: Instant) -> Spend {
+        Spend {
+            conns: 0,
+            acts: Bucket::full(ACTS, now),
+            drive: Bucket::full(DRIVE, now),
+            refusals: Bucket::full(REFUSALS, now),
+            open: HashMap::new(),
+        }
+    }
+
+    fn bucket(&mut self, c: Charge) -> &mut Bucket {
+        match c {
+            Charge::Acts => &mut self.acts,
+            Charge::Drive => &mut self.drive,
+            Charge::Refusals => &mut self.refusals,
+        }
+    }
+
+    /// Every budget back at its burst.
+    fn is_full(&mut self, now: Instant) -> bool {
+        Charge::ALL.into_iter().all(|c| {
+            let b = self.bucket(c);
+            b.refill(c.allowance(), now);
+            b.tokens >= c.allowance().burst
+        })
+    }
+}
+
+/// What a coalesced record is counted as: its kind, its command and how it
+/// ended, each one of OUR names — a row's, a refusal kind's, an outcome's —
+/// never a client's string.
+fn tally_key(r: &Record) -> String {
+    let how = match r.kind {
+        "refused" => r.detail.get("reason").and_then(Value::as_str).unwrap_or("refused"),
+        _ => r.outcome.unwrap_or("-"),
+    };
+    format!("{} {} {how}", r.kind, r.cmd.unwrap_or("-"))
+}
+
+/// What a coalesced record acted on: its command, project and object, each
+/// cut short. The project and object of an admitted act are the canonical
+/// values the resolver checked; a refusal's are the caller's, cut the same.
+fn target(r: &Record) -> Value {
+    let cut = |s: &Option<String>| s.as_deref().map(|s| cut_to(s, TARGET_IDENT));
+    json!({ "cmd": r.cmd, "project": cut(&r.project), "object": cut(&r.object) })
+}
+
+/// `s` cut to `n` bytes on a character boundary.
+fn cut_to(s: &str, n: usize) -> String {
+    if s.len() <= n {
+        return s.to_string();
+    }
+    let mut end = n;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
 }
 
 /// The episode classes: what a run of them is recorded as.
@@ -541,8 +935,36 @@ struct State {
     /// When the writer may next try to open a file it could not.
     reopen_at: Option<Instant>,
     episodes: HashMap<Class, Episode>,
+    /// Every paired device's budget (`Spend`): the devices connected now, in
+    /// an episode, or still refilling; a full one with neither is forgotten.
+    budgets: HashMap<DeviceId, Spend>,
+    /// The principal the open pairing window was opened for, which every
+    /// pairing record names (§5.1's `detail.for_principal`).
+    pairing_for: Option<PrincipalId>,
     #[cfg(test)]
     fail: Option<(usize, usize)>,
+    /// How far the tests have moved the log's clocks.
+    #[cfg(test)]
+    skew: Duration,
+}
+
+impl State {
+    /// The monotonic clock a budget and its episodes are decided by.
+    fn mono(&self) -> Instant {
+        let t = Instant::now();
+        #[cfg(test)]
+        let t = t + self.skew;
+        t
+    }
+
+    /// The wall clock an episode is dated by, and the handshake, upgrade and
+    /// limit episodes are decided by.
+    fn wall(&self) -> i64 {
+        let t = now();
+        #[cfg(test)]
+        let t = t + self.skew.as_secs() as i64;
+        t
+    }
 }
 
 /// The audit log's one writer. Every method takes the lock for one record
@@ -552,6 +974,7 @@ pub struct Audit {
     dir: PathBuf,
     max_file: u64,
     host: Option<Arc<dyn Host>>,
+    fleet: Fleet,
     st: Mutex<State>,
 }
 
@@ -562,16 +985,18 @@ impl Audit {
     /// Read the chain in `config_dir` and open the live file. Never fails:
     /// a log that cannot be opened is an unhealthy one, and the console is
     /// served regardless (fail open). The `Verdict` is the boot check.
-    pub fn open(config_dir: &Path, host: Option<Arc<dyn Host>>) -> (Arc<Audit>, Verdict) {
-        Self::open_with(config_dir, host, MAX_FILE)
+    /// `fleet` is where every checkpoint reads the devices it carries.
+    pub fn open(config_dir: &Path, host: Option<Arc<dyn Host>>, fleet: Fleet) -> (Arc<Audit>, Verdict) {
+        Self::open_with(config_dir, host, fleet, MAX_FILE)
     }
 
-    pub(crate) fn open_with(config_dir: &Path, host: Option<Arc<dyn Host>>, max_file: u64) -> (Arc<Audit>, Verdict) {
+    pub(crate) fn open_with(config_dir: &Path, host: Option<Arc<dyn Host>>, fleet: Fleet, max_file: u64) -> (Arc<Audit>, Verdict) {
         let _ = std::fs::create_dir_all(config_dir);
         let a = Audit {
             dir: config_dir.to_path_buf(),
             max_file,
             host,
+            fleet,
             st: Mutex::new(State {
                 file: None,
                 size: 0,
@@ -583,8 +1008,12 @@ impl Audit {
                 dangling_torn: None,
                 reopen_at: None,
                 episodes: HashMap::new(),
+                budgets: HashMap::new(),
+                pairing_for: None,
                 #[cfg(test)]
                 fail: None,
+                #[cfg(test)]
+                skew: Duration::ZERO,
             }),
         };
         let v = {
@@ -709,24 +1138,31 @@ impl Audit {
     }
 
     /// The record that opens every file. `devices` is the security fields of
-    /// every live device (§5.1), so §5.2 never needs a file rotation removed;
-    /// there are none until slice 5's registry.
+    /// every unrevoked device (§5.1), so §5.2 never needs a file rotation
+    /// removed — or `null`, which vouches for nothing ([`evidence`] reads on
+    /// from what came before): written before the boot cross-check, or by a
+    /// registry that panicked (read inside `quietly`, so that costs the list,
+    /// never the record or the chain).
     fn checkpoint(&self, st: &mut State, reason: &'static str, torn: Option<u64>) -> std::io::Result<()> {
-        let mut d = json!({ "reason": reason, "devices": [] });
+        let devices = quietly(|| (self.fleet.0)()).flatten().map(|d| json!(d)).unwrap_or(Value::Null);
+        let mut d = json!({ "reason": reason, "devices": devices });
         if let Some(n) = torn {
             d["torn_bytes"] = json!(n);
         }
         self.write_line(st, &Record::new("checkpoint", d))
     }
 
-    /// One line, in ONE `write(2)`: a short or failed write marks the file
-    /// suspect, and the chain's head moves only when the whole line landed.
-    fn write_line(&self, st: &mut State, r: &Record) -> std::io::Result<()> {
-        let seq = st.seq + 1;
+    /// What `r` costs a budget: its line as the next one, newline included.
+    fn cost(st: &State, r: &Record) -> f64 {
+        Self::render(st, r).map(|l| l.len() + 1).unwrap_or(0) as f64
+    }
+
+    /// `r` as the next line of the chain, without its newline.
+    fn render(st: &State, r: &Record) -> std::io::Result<String> {
         let ts = rfc3339(now());
         let who = r.actor.as_ref().map(actor);
-        let line = serde_json::to_string(&Line {
-            seq,
+        serde_json::to_string(&Line {
+            seq: st.seq + 1,
             ts: &ts,
             pid: std::process::id(),
             kind: r.kind,
@@ -743,7 +1179,14 @@ impl Audit {
             detail: &r.detail,
             prev: &st.head,
         })
-        .map_err(std::io::Error::other)?;
+        .map_err(std::io::Error::other)
+    }
+
+    /// One line, in ONE `write(2)`: a short or failed write marks the file
+    /// suspect, and the chain's head moves only when the whole line landed.
+    fn write_line(&self, st: &mut State, r: &Record) -> std::io::Result<()> {
+        let seq = st.seq + 1;
+        let line = Self::render(st, r)?;
         let head = sha256_hex(line.as_bytes());
         let mut buf = line.into_bytes();
         buf.push(b'\n');
@@ -811,7 +1254,7 @@ impl Audit {
 
     /// End every episode that has been quiet long enough (or all of them).
     fn sweep(&self, st: &mut State, all: bool) {
-        let t = now();
+        let t = st.wall();
         let done: Vec<Class> = st
             .episodes
             .iter()
@@ -821,6 +1264,7 @@ impl Audit {
         for c in done {
             self.end_episode(st, c);
         }
+        self.sweep_budgets(st, all.then_some("stopped"));
     }
 
     fn end_episode(&self, st: &mut State, class: Class) {
@@ -839,10 +1283,18 @@ impl Audit {
     /// with what is known of the peer; the rest are counted into the record
     /// that ends it. Returns the alert to emit, if this one crossed a line.
     fn refusal(&self, class: Class, reason: &'static str, conn: Option<u64>, peer: Option<String>) -> Alerts {
+        self.refusal_in(class, reason, conn, peer, None)
+    }
+
+    /// [`Audit::refusal`], for a refused device key as well (`knock`): what
+    /// names it goes into the record that begins an episode, and a known
+    /// device's knock alerts once per episode for each reason (§5.3).
+    fn refusal_in(&self, class: Class, reason: &'static str, conn: Option<u64>, peer: Option<String>, knock: Option<Knock>) -> Alerts {
         let mut alerts = Alerts::new();
         let mut st = guard(&self.st);
         self.sweep(&mut st, false);
-        let t = now();
+        let t = st.wall();
+        let (named, alert) = knock.map(|k| (k.detail, k.alert)).unwrap_or_default();
         if let Some(e) = st.episodes.get_mut(&class) {
             e.count += 1;
             e.last = t;
@@ -853,14 +1305,28 @@ impl Audit {
                 self.append(&mut st, &Record::new("alert", a.clone()));
                 alerts.push(a);
             }
-            return alerts;
+        } else {
+            let mut d = Map::from_iter([
+                ("class".to_string(), json!(class.name())),
+                ("episode".to_string(), json!("began")),
+                ("reason".to_string(), json!(reason)),
+            ]);
+            d.extend(named);
+            let mut r = Record::new(class.kind(), Value::Object(d));
+            r.conn = conn;
+            r.peer = peer;
+            r.outcome = Some("refused");
+            self.append(&mut st, &r);
+            let e = Episode { began: t, last: t, count: 1, reasons: BTreeMap::from([(reason, 1)]), alerted: false, knocks: Default::default() };
+            st.episodes.insert(class, e);
         }
-        let mut r = Record::new(class.kind(), json!({ "class": class.name(), "episode": "began", "reason": reason }));
-        r.conn = conn;
-        r.peer = peer;
-        r.outcome = Some("refused");
-        self.append(&mut st, &r);
-        st.episodes.insert(class, Episode { began: t, last: t, count: 1, reasons: BTreeMap::from([(reason, 1)]), alerted: false });
+        if let Some((key, a)) = alert {
+            let fresh = st.episodes.get_mut(&class).is_some_and(|e| e.knocks.len() < MAX_KNOCK_ALERTS && e.knocks.insert(key));
+            if fresh {
+                self.append(&mut st, &Record::new("alert", a.clone()));
+                alerts.push(a);
+            }
+        }
         alerts
     }
 
@@ -876,6 +1342,247 @@ impl Audit {
         let mut st = guard(&self.st);
         self.sweep(&mut st, false);
         self.append(&mut st, &r);
+    }
+
+    // ── a device's budget ───────────────────────────────────────────────────
+
+    /// A request record against its actor's budget: a paired device's is
+    /// written if `charge` has its bytes and COUNTED into an episode if not,
+    /// never dropped. A record that finds bytes is written even while an
+    /// episode is open, so a device that slows down is back in full detail
+    /// at once, and the episode ends `EPISODE_QUIET` after the last record it
+    /// counted — not at the next one let through, which would begin and end
+    /// an episode per request. Anyone else's is written as it is: the console
+    /// is the owner, at the host.
+    fn charged(&self, charge: Charge, r: Record) {
+        let mut st = guard(&self.st);
+        self.sweep(&mut st, false);
+        let (who, id) = match r.actor.as_ref().map(|c| (c, c.device())) {
+            Some((c, Device::Paired(id))) => (c.clone(), id.clone()),
+            _ => return self.append(&mut st, &r),
+        };
+        let (now, epoch) = (st.mono(), st.wall());
+        let cost = Self::cost(&st, &r);
+        let spend = st.budgets.entry(id.clone()).or_insert_with(|| Spend::new(now));
+        if spend.bucket(charge).take(charge.allowance(), cost, now) {
+            return self.append(&mut st, &r);
+        }
+        let began = !spend.open.contains_key(&charge);
+        let e = spend.open.entry(charge).or_insert_with(|| Coalesced {
+            who: who.clone(),
+            began: now,
+            began_epoch: epoch,
+            last: now,
+            last_epoch: epoch,
+            count: 0,
+            bytes: 0,
+            tally: BTreeMap::new(),
+            targets: BTreeMap::new(),
+        });
+        e.count += 1;
+        e.bytes += cost as u64;
+        e.last = now;
+        e.last_epoch = epoch;
+        let key = tally_key(&r);
+        let key = if e.tally.len() < MAX_TALLY || e.tally.contains_key(&key) { key } else { "other".to_string() };
+        *e.tally.entry(key).or_insert(0) += 1;
+        if charge == Charge::Acts {
+            let t = target(&r).to_string();
+            let t = if e.targets.len() < MAX_TARGETS || e.targets.contains_key(&t) { t } else { "other".to_string() };
+            *e.targets.entry(t).or_insert(0) += 1;
+        }
+        if began {
+            let a = charge.allowance();
+            let mut b = Record::new(
+                "budget",
+                json!({
+                    "class": charge.name(), "episode": "began",
+                    "first": { "kind": r.kind, "outcome": r.outcome, "target": target(&r) },
+                    "allowance": { "burst": a.burst, "per_sec": a.per_sec },
+                }),
+            );
+            b.actor = Some(who);
+            self.forced(&mut st, &id, charge, b);
+        }
+    }
+
+    /// An episode record: always written, and paid for by the device out of
+    /// `charge`, so the records that report a flood are inside its ceiling.
+    fn forced(&self, st: &mut State, id: &DeviceId, charge: Charge, r: Record) {
+        let (cost, now) = (Self::cost(st, &r), st.mono());
+        if let Some(s) = st.budgets.get_mut(id) {
+            s.bucket(charge).debit(charge.allowance(), cost, now);
+        }
+        self.append(st, &r);
+    }
+
+    /// A record that is always written, debited from a paired device's
+    /// `charge` (the limit episodes #538's budget opens and ends). Anyone
+    /// else's is written as it is.
+    fn debited(&self, charge: Charge, r: Record) {
+        let mut st = guard(&self.st);
+        self.sweep(&mut st, false);
+        match r.actor.as_ref().map(Caller::device) {
+            Some(Device::Paired(id)) => {
+                let (id, now) = (id.clone(), st.mono());
+                st.budgets.entry(id.clone()).or_insert_with(|| Spend::new(now));
+                self.forced(&mut st, &id, charge, r);
+            }
+            _ => self.append(&mut st, &r),
+        }
+    }
+
+    /// Before a paired device's drive-class act runs: take what its record
+    /// will cost (`r`, rendered now, plus `RESERVE_SLACK`) from its `DRIVE`
+    /// budget — the amount reserved — or say how many seconds until it can
+    /// be. Under the lock, so two acts in flight never share bytes.
+    fn reserve(&self, c: &Caller, r: &Record) -> Result<f64, u64> {
+        let Device::Paired(id) = c.device() else { return Ok(0.0) };
+        let mut st = guard(&self.st);
+        let (now, n) = (st.mono(), Self::cost(&st, r) + RESERVE_SLACK);
+        let b = st.budgets.entry(id.clone()).or_insert_with(|| Spend::new(now)).bucket(Charge::Drive);
+        if b.take(DRIVE, n, now) {
+            return Ok(n);
+        }
+        Err(((n - b.tokens) / DRIVE.per_sec).ceil().max(1.0) as u64)
+    }
+
+    /// A drive-class act's record, paid for before it ran (`reserve`): always
+    /// written, and settled at what it cost against what was reserved.
+    fn settled(&self, r: Record, reserved: f64) {
+        let mut st = guard(&self.st);
+        self.sweep(&mut st, false);
+        if let Some(Device::Paired(id)) = r.actor.as_ref().map(Caller::device) {
+            let (id, now, cost) = (id.clone(), st.mono(), Self::cost(&st, &r));
+            st.budgets.entry(id).or_insert_with(|| Spend::new(now)).bucket(Charge::Drive).debit(DRIVE, cost - reserved, now);
+        }
+        self.append(&mut st, &r);
+    }
+
+    /// End every device episode that has gone quiet or run its span — or
+    /// every one, saying `all` — then forget the devices with nothing left
+    /// to remember: no connection, no episode, both budgets full.
+    fn sweep_budgets(&self, st: &mut State, all: Option<&'static str>) {
+        let now = st.mono();
+        let quiet = Duration::from_secs(EPISODE_QUIET as u64);
+        let mut done = Vec::new();
+        for (id, s) in &st.budgets {
+            for (c, e) in &s.open {
+                let why = all
+                    .or_else(|| (now.saturating_duration_since(e.last) >= quiet).then_some("quiet"))
+                    .or_else(|| (now.saturating_duration_since(e.began) >= EPISODE_SPAN).then_some("span"));
+                if let Some(why) = why {
+                    done.push((id.clone(), *c, why));
+                }
+            }
+        }
+        for (id, c, why) in done {
+            self.end_coalesced(st, &id, c, why);
+        }
+        st.budgets.retain(|_, s| s.conns > 0 || !s.open.is_empty() || !s.is_full(now));
+    }
+
+    /// The record that ends a device episode: how many records it counted,
+    /// what they would have cost, what they were, and what ended it.
+    fn end_coalesced(&self, st: &mut State, id: &DeviceId, charge: Charge, why: &'static str) {
+        let Some(e) = st.budgets.get_mut(id).and_then(|s| s.open.remove(&charge)) else { return };
+        let mut d = json!({
+            "class": charge.name(), "episode": "ended", "count": e.count, "bytes": e.bytes, "tally": e.tally,
+            "began": rfc3339(e.began_epoch), "ended": rfc3339(e.last_epoch), "closed_by": why,
+        });
+        if charge == Charge::Acts {
+            d["targets"] = json!(e.targets);
+        }
+        let mut r = Record::new("budget", d);
+        r.actor = Some(e.who);
+        self.forced(st, id, charge, r);
+    }
+
+    /// A connection of `c` was made.
+    fn joined(&self, c: &Caller) {
+        let Device::Paired(id) = c.device() else { return };
+        let mut st = guard(&self.st);
+        let now = st.mono();
+        st.budgets.entry(id.clone()).or_insert_with(|| Spend::new(now)).conns += 1;
+    }
+
+    /// A connection of `c` went: at the device's last, its episodes end, so
+    /// what it did is on disk by the time anyone looks.
+    fn left(&self, c: &Caller) {
+        let Device::Paired(id) = c.device() else { return };
+        let mut st = guard(&self.st);
+        let last = st.budgets.get_mut(id).is_some_and(|s| {
+            s.conns = s.conns.saturating_sub(1);
+            s.conns == 0
+        });
+        if last {
+            for charge in Charge::ALL {
+                self.end_coalesced(&mut st, id, charge, "disconnect");
+            }
+        }
+    }
+
+    // ── the devices (§5.1) ──────────────────────────────────────────────────
+
+    /// Hear the device registry: every event it fires becomes a record.
+    /// Weakly, as `Clients::listen` subscribes, so the registry's hook list
+    /// does not keep the log alive; inside `quietly`, so an audit bug never
+    /// reaches the registry's caller.
+    pub fn hear(self: &Arc<Self>, devices: &DeviceRegistry) {
+        let me = Arc::downgrade(self);
+        devices.subscribe(Arc::new(move |e: &DeviceEvent| {
+            if let Some(a) = me.upgrade() {
+                quietly(|| a.device_event(e));
+            }
+        }));
+    }
+
+    /// One registry event, recorded. These records are NEVER charged to a
+    /// budget, whoever acted: they are the evidence §5.2 reads, and they are
+    /// bounded by state changes and the host's own acts, not by a request
+    /// rate — a device revokes itself once and narrows a peer only so far.
+    /// A refused device key is the one event that is not a record each: it
+    /// joins the auth episodes, whose first is.
+    pub fn device_event(&self, e: &DeviceEvent) {
+        if let DeviceEvent::ConnectRefused { subject, spki_sha256, why } = e {
+            return self.knock(subject.as_ref(), spki_sha256, *why);
+        }
+        let mut st = guard(&self.st);
+        self.sweep(&mut st, false);
+        let Some((r, alert)) = device_record(&mut st.pairing_for, e) else { return };
+        self.append(&mut st, &r);
+        if let Some(a) = alert {
+            self.append(&mut st, &Record::new("alert", a.clone()));
+            drop(st);
+            self.emit(vec![a]);
+        }
+    }
+
+    /// A device key refused at the handshake (§5.1's "an unknown certificate,
+    /// a revoked certificate"): an auth failure like a failed handshake v1,
+    /// in the same episodes. A known device's knock alerts (§5.3), once per
+    /// episode for each device and reason.
+    fn knock(&self, subject: Option<&Subject>, key: &str, why: ConnectRefusal) {
+        let reason = match why {
+            ConnectRefusal::Unknown => "unknown-key",
+            ConnectRefusal::Revoked => "revoked",
+            ConnectRefusal::Disabled => "disabled",
+            ConnectRefusal::Expired => "expired",
+            ConnectRefusal::Unreadable => "unreadable",
+        };
+        let detail = Map::from_iter([("subject".to_string(), json!(subject)), ("key".to_string(), json!(ident(key)))]);
+        let alert = (why != ConnectRefusal::Unknown).then(|| {
+            let who = subject.map(|s| s.device.as_str()).unwrap_or("-");
+            (format!("{who} {reason}"), json!({ "alert": "device", "event": "connect_refused", "reason": reason, "subject": subject }))
+        });
+        let a = self.refusal_in(Class::Auth, reason, None, None, Some(Knock { detail, alert }));
+        self.emit(a);
+    }
+
+    /// Move the log's clocks on, for the tests that wait out a quiet gap.
+    #[cfg(test)]
+    pub(crate) fn advance(&self, by: Duration) {
+        guard(&self.st).skew += by;
     }
 
     // ── the events, one method each ─────────────────────────────────────────
@@ -928,6 +1635,84 @@ impl Audit {
     }
 }
 
+/// A registry event as its record (§5.1), with its alert (§5.3) if it raises
+/// one. Exhaustive, so an event the registry gains is a compile error here,
+/// not a kind left unrecorded. A record about a device names it in
+/// `detail.subject`; serve's own acts have no actor and say `by: serve`.
+/// `pairing_for` is the open window's principal, which every pairing record
+/// names (`detail.for_principal`). `None` only for a refused key, which is
+/// an episode's to count ([`Audit::knock`]).
+fn device_record(pairing_for: &mut Option<PrincipalId>, e: &DeviceEvent) -> Option<(Record, Option<Value>)> {
+    use DeviceEvent as E;
+    let console = || Some(Caller::console());
+    let serve = json!(Actor::Serve);
+    let (kind, actor, peer, detail) = match e {
+        E::Enrolled { subject, name, platform, fields } => (
+            "device",
+            console(),
+            None,
+            json!({ "event": "enrolled", "subject": subject, "name": ident(name), "platform": platform, "fields": fields }),
+        ),
+        E::Revoked { subject, by } => ("device", by_caller(by), None, json!({ "event": "revoked", "subject": subject, "by": by })),
+        E::Disabled { subject, reason, by } => {
+            ("device", by_caller(by), None, json!({ "event": "disabled", "subject": subject, "reason": reason, "by": by }))
+        }
+        E::Enabled { subject } => ("device", console(), None, json!({ "event": "enabled", "subject": subject })),
+        E::ExpiryChanged { subject, from, to } => {
+            ("device", console(), None, json!({ "event": "expiry_changed", "subject": subject, "from": from, "to": to }))
+        }
+        E::StepupChanged { subject, required } => {
+            ("device", console(), None, json!({ "event": "stepup_changed", "subject": subject, "required": required }))
+        }
+        E::ScopeChanged { subject, by, from, to, widened, reduced } => (
+            "device",
+            by_caller(by),
+            None,
+            json!({
+                "event": "scope_changed", "subject": subject, "by": by, "from": from, "to": to,
+                "widened": widened, "reduced": reduced,
+            }),
+        ),
+        E::IdentityRotated { pin } => ("device", console(), None, json!({ "event": "identity_rotated", "pin": pin })),
+        E::Forgotten { subject } => ("device", None, None, json!({ "event": "forgotten", "subject": subject, "by": serve })),
+        E::Unreadable { why } => ("device", None, None, json!({ "event": "unreadable", "why": ident(why), "by": serve })),
+        E::Reloaded => ("device", None, None, json!({ "event": "reloaded", "by": serve })),
+        E::ConnectRefused { .. } => return None,
+        // The event holds neither the link nor its secret, and the record
+        // could not name them if it did.
+        E::PairingOpened { for_principal, expires_at, grant, expiry } => {
+            *pairing_for = Some(for_principal.clone());
+            let d = json!({
+                "event": "opened", "for_principal": for_principal, "expires_at": rfc3339(*expires_at),
+                "grant": grant, "expiry": expiry,
+            });
+            ("pairing", console(), None, d)
+        }
+        E::PairingAttempt { for_principal, peer } => {
+            ("pairing", None, Some(ident(peer)), json!({ "event": "attempt", "for_principal": for_principal }))
+        }
+        // The comparison code is the host's dialog's, and never a record's.
+        E::PairingPending { name, platform, code: _, peer } => (
+            "pairing",
+            None,
+            Some(ident(peer)),
+            json!({ "event": "verified", "for_principal": pairing_for, "name": ident(name), "platform": platform }),
+        ),
+        E::PairingDecided { allow } => ("pairing", console(), None, json!({ "event": "decided", "for_principal": pairing_for, "allow": allow })),
+        E::PairingClosed { ended, device } => {
+            let subject = device.as_ref().map(|d| json!({ "principal": pairing_for, "device": d }));
+            ("pairing", None, None, json!({ "event": "closed", "for_principal": pairing_for, "ended": ended, "subject": subject, "by": serve }))
+        }
+    };
+    let alert = e.alerts().then(|| {
+        json!({ "alert": "device", "event": detail["event"], "subject": detail.get("subject"), "reason": detail.get("reason") })
+    });
+    let mut r = Record::new(kind, detail);
+    r.actor = actor;
+    r.peer = peer;
+    Some((r, alert))
+}
+
 // ── one connection's view ───────────────────────────────────────────────────
 
 /// The most attaches one connection's tally holds. Each entry is an attach
@@ -951,6 +1736,10 @@ struct Tally {
 /// What `begin` saw before the body ran, for `end` to finish.
 pub struct Pending {
     cmd: &'static str,
+    /// A drive-class act (`DRIVE`), as the resolver's verdict says, and the
+    /// bytes it reserved before it ran.
+    drive: bool,
+    reserved: f64,
     cap: Option<&'static str>,
     project: Option<String>,
     object: Option<String>,
@@ -1001,6 +1790,14 @@ fn recorded(row: &Row) -> bool {
     row.cap != Some(Capability::Read) && !STREAM_TRAFFIC.contains(&row.name)
 }
 
+/// A drive-class act, as the audit budget counts one: what step-up guards
+/// (`dispatch::needs_stepup` over the resolver's `needs`, so a path class's
+/// raise counts), and `remove_place`, the one remove that can destroy
+/// commits.
+fn drive_class(row: &Row, resolved: &Resolved) -> bool {
+    dispatch::needs_stepup(row, &resolved.needs, true) || row.name == "remove_place"
+}
+
 /// A refusal record's `reason`. Exhaustive, so a kind the host gains is a
 /// compile error here and not a record with no reason.
 fn reason(kind: RefusalKind) -> &'static str {
@@ -1016,6 +1813,7 @@ fn reason(kind: RefusalKind) -> &'static str {
         RefusalKind::LocalFetch => "local-fetch",
         RefusalKind::DeviceLanes => "device-lanes",
         RefusalKind::StepUp => "step-up",
+        RefusalKind::AuditBudget => "audit-budget",
     }
 }
 
@@ -1030,7 +1828,10 @@ fn why_is_safe(kind: RefusalKind) -> bool {
 }
 
 impl ConnAudit {
+    /// A paired device's connections are counted, so its budget's episodes
+    /// end as its last one goes (`Drop`).
     pub fn new(audit: Arc<Audit>, conn: u64, peer: Option<String>, caller: Caller) -> ConnAudit {
+        audit.joined(&caller);
         ConnAudit { audit, conn, peer, caller, streams: Mutex::new(HashMap::new()) }
     }
 
@@ -1050,10 +1851,36 @@ impl ConnAudit {
 
     /// A name no row has, logged as `unknown` with the length of what was
     /// sent (§5.1): the name itself is the client's, and not ours to write.
+    /// May `row`, admitted by everything before it, run? A paired device's
+    /// drive-class act that will be recorded must find its record's bytes in
+    /// `DRIVE` first — ITS record, begun here and rendered as it will be
+    /// written, not a typical one, so a long path pays for its length. Past
+    /// them it is refused, and told when to try again; the refusal is
+    /// recorded by the caller, through `refused`, once. `Some` is the record
+    /// begun, which `Seen` keeps for the body's end.
+    pub fn allow(&self, row: &'static Row, args: &Args, resolved: &Resolved) -> Result<Option<Pending>, Refusal> {
+        if self.caller.is_console() || !recorded(row) || !drive_class(row, resolved) {
+            return Ok(None);
+        }
+        let Some(mut p) = self.begin(row, args, &resolved.projects) else { return Ok(None) };
+        let kind = if matches!(p.what, What::Call) { "call" } else { "stream" };
+        let mut r = self.base(kind, Some(p.cmd), Value::Object(p.detail.clone()));
+        (r.cap, r.project, r.object, r.outcome, r.ms) = (p.cap, p.project.clone(), p.object.clone(), Some("panic"), Some(u64::MAX));
+        match self.audit.reserve(&self.caller, &r) {
+            Ok(n) => {
+                (p.drive, p.reserved) = (true, n);
+                Ok(Some(p))
+            }
+            Err(secs) => Err(Refusal::audit_budget(format!(
+                "audit-budget: this device's allowance for drive-class acts in the audit log is spent — try again in {secs} s"
+            ))),
+        }
+    }
+
     pub fn unknown(&self, cmd: &str) {
         let mut r = self.base("refused", Some("unknown"), json!({ "len": cmd.len(), "reason": "unknown command" }));
         r.outcome = Some("refused");
-        self.audit.record(r);
+        self.audit.charged(Charge::Refusals, r);
     }
 
     /// A request the resolver refused (§5.1: "every refusal: an exposure, a
@@ -1083,7 +1910,7 @@ impl ConnAudit {
         rec.project = arg_ident(args, PROJECT_KEYS);
         rec.object = arg_ident(args, OBJECT_KEYS);
         rec.outcome = Some("refused");
-        self.audit.record(rec);
+        self.audit.charged(Charge::Refusals, rec);
     }
 
     /// The resolver admitted `row`, whose body is about to run on `args` (the
@@ -1145,6 +1972,8 @@ impl ConnAudit {
         }
         Some(Pending {
             cmd: name,
+            drive: false,
+            reserved: 0.0,
             cap: row.cap.map(Capability::name),
             // The first project the row's objects resolved to; the argument
             // only where nothing resolved one (a `new_path`, a global row).
@@ -1219,7 +2048,11 @@ impl ConnAudit {
         r.object = p.object;
         r.outcome = Some(label);
         r.ms = Some(ms);
-        self.audit.record(r);
+        if p.drive {
+            self.audit.settled(r, p.reserved);
+        } else {
+            self.audit.charged(Charge::Acts, r);
+        }
     }
 
     fn closed(&self, cmd: Option<&'static str>, t: Tally, how: &'static str) {
@@ -1235,7 +2068,7 @@ impl ConnAudit {
         r.project = t.project;
         r.object = t.object;
         r.outcome = Some("ok");
-        self.audit.record(r);
+        self.audit.charged(Charge::Acts, r);
     }
 
     /// A limit an authenticated client tripped that ends its connection (a
@@ -1252,11 +2085,13 @@ impl ConnAudit {
     /// `closed` for a device's connection past its cap). The rest are
     /// counted by the budget into [`ConnAudit::limit_ended`], never a record
     /// each, so a flood stays two records (§5.1).
+    /// Always written, and a paired device pays for it out of `REFUSALS`, so
+    /// the limits it trips count against the bytes it may make the log write.
     pub fn limit_began(&self, limit: &'static str, answered: &'static str) {
         let detail = json!({ "class": "limit", "episode": "began", "limit": limit, "answered": answered });
         let mut r = self.base("refused", None, detail);
         r.outcome = Some("refused");
-        self.audit.record(r);
+        self.audit.debited(Charge::Refusals, r);
     }
 
     /// The episode `limit_began` opened has ended: `count` refusals, from
@@ -1268,7 +2103,7 @@ impl ConnAudit {
         });
         let mut r = self.base("refused", None, detail);
         r.outcome = Some("refused");
-        self.audit.record(r);
+        self.audit.debited(Charge::Refusals, r);
     }
 
     /// The client went: every attach it still held is closed, with its total.
@@ -1277,6 +2112,12 @@ impl ConnAudit {
         for t in open {
             self.closed(None, t, "disconnect");
         }
+    }
+}
+
+impl Drop for ConnAudit {
+    fn drop(&mut self) {
+        quietly(|| self.audit.left(&self.caller));
     }
 }
 
@@ -1299,11 +2140,29 @@ impl Witness for Seen<'_> {
         quietly(|| self.au.unknown(cmd));
     }
 
+    /// An audit bug lets the act through: it loses that act's reservation,
+    /// never the reply. A drive-class act's record is begun here, and kept.
+    fn allow(&self, row: &'static Row, args: &Args, resolved: &Resolved) -> Result<(), Refusal> {
+        match quietly(|| self.au.allow(row, args, resolved)) {
+            Some(Ok(p)) => {
+                *self.pending.borrow_mut() = p;
+                Ok(())
+            }
+            Some(Err(r)) => Err(r),
+            None => Ok(()),
+        }
+    }
+
     fn refused(&self, row: &'static Row, args: &Args, r: &Refusal) {
         quietly(|| self.au.refused(row, args, r));
     }
 
+    /// The record to finish once the body is done: the one `allow` began
+    /// for a drive-class act, or begun now.
     fn admitted(&self, row: &'static Row, args: &Args, resolved: &Resolved) {
+        if self.pending.borrow().is_some() {
+            return;
+        }
         let p = quietly(|| self.au.begin(row, args, &resolved.projects)).flatten();
         *self.pending.borrow_mut() = p;
     }
@@ -1416,7 +2275,7 @@ mod tests {
 
     /// `n` records on a fresh log in `d`.
     fn some_records(d: &Path, n: usize) -> Arc<Audit> {
-        let (a, _) = Audit::open(d, None);
+        let (a, _) = Audit::open(d, None, Fleet::none());
         let c = console(&a);
         for i in 0..n {
             call(&c, "set_note", json!({ "repo": "/r", "slug": format!("s{i}"), "note": "x" }));
@@ -1454,7 +2313,7 @@ mod tests {
     #[test]
     fn every_record_carries_principal_and_device() {
         let d = dir("actor");
-        let (a, _) = Audit::open(&d, None);
+        let (a, _) = Audit::open(&d, None, Fleet::none());
         a.auth_failed("handshake", 3, Some("127.0.0.1".into()));
         call(&console(&a), "set_note", json!({ "repo": "/r", "slug": "s", "note": "x" }));
         for l in live(&d) {
@@ -1551,7 +2410,7 @@ mod tests {
     #[test]
     fn rotation_keeps_five_files_and_one_chain_across_them() {
         let d = dir("rotate");
-        let (a, _) = Audit::open_with(&d, None, 900);
+        let (a, _) = Audit::open_with(&d, None, Fleet::none(), 900);
         let c = console(&a);
         for i in 0..60 {
             call(&c, "set_note", json!({ "repo": "/r", "slug": format!("s{i}"), "note": "x" }));
@@ -1569,7 +2428,7 @@ mod tests {
         assert!(v.first_seq.unwrap() > 1, "the genesis file was rotated away, so the oldest checkpoint anchors: {v:?}");
         drop(c);
         drop(a);
-        let (a, again) = Audit::open_with(&d, None, 900);
+        let (a, again) = Audit::open_with(&d, None, Fleet::none(), 900);
         assert_eq!(again.broken, None);
         call(&console(&a), "set_note", json!({ "repo": "/r", "slug": "after", "note": "x" }));
         let v2 = verify(&d);
@@ -1583,7 +2442,7 @@ mod tests {
     #[test]
     fn a_missing_middle_file_breaks_the_chain() {
         let d = dir("hole");
-        let (a, _) = Audit::open_with(&d, None, 900);
+        let (a, _) = Audit::open_with(&d, None, Fleet::none(), 900);
         let c = console(&a);
         for i in 0..60 {
             call(&c, "set_note", json!({ "repo": "/r", "slug": format!("s{i}"), "note": "x" }));
@@ -1649,7 +2508,7 @@ mod tests {
     #[test]
     fn a_fragment_the_checkpoint_does_not_name_is_a_break() {
         let d = dir("fragment");
-        let (a, _) = Audit::open_with(&d, None, 900);
+        let (a, _) = Audit::open_with(&d, None, Fleet::none(), 900);
         let c = console(&a);
         for i in 0..12 {
             call(&c, "set_note", json!({ "repo": "/r", "slug": format!("s{i}"), "note": "x" }));
@@ -1671,7 +2530,7 @@ mod tests {
         let mut f = OpenOptions::new().append(true).open(d.join(FILE)).unwrap();
         f.write_all(b"{\"seq\":4,\"ts").unwrap();
         drop(f);
-        let (a, v) = Audit::open(&d, None);
+        let (a, v) = Audit::open(&d, None, Fleet::none());
         assert_eq!(v.live_torn, Some(12));
         call(&console(&a), "set_note", json!({ "repo": "/r", "slug": "after", "note": "x" }));
         let l = live(&d);
@@ -1688,7 +2547,7 @@ mod tests {
         let d = dir("wide");
         drop(some_records(&d, 1));
         std::fs::set_permissions(d.join(FILE), std::fs::Permissions::from_mode(0o644)).unwrap();
-        let (a, _) = Audit::open(&d, None);
+        let (a, _) = Audit::open(&d, None, Fleet::none());
         assert!(!a.healthy());
         call(&console(&a), "set_note", json!({ "repo": "/r", "slug": "s", "note": "x" }));
         let mode = std::fs::metadata(d.join(FILE)).unwrap().permissions().mode() & 0o777;
@@ -1703,7 +2562,7 @@ mod tests {
         let target = d.join("elsewhere");
         std::fs::write(&target, "untouched\n").unwrap();
         std::os::unix::fs::symlink(&target, d.join(FILE)).unwrap();
-        let (a, _) = Audit::open(&d, None);
+        let (a, _) = Audit::open(&d, None, Fleet::none());
         call(&console(&a), "set_note", json!({ "repo": "/r", "slug": "s", "note": "x" }));
         assert!(!a.healthy());
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "untouched\n");
@@ -1722,7 +2581,7 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let dd = d.clone();
         std::thread::spawn(move || {
-            let (a, _) = Audit::open(&dd, None);
+            let (a, _) = Audit::open(&dd, None, Fleet::none());
             let _ = tx.send(a.healthy());
         });
         let healthy = rx.recv_timeout(Duration::from_secs(5)).expect("Audit::open hung on a FIFO");
@@ -1736,7 +2595,7 @@ mod tests {
     #[test]
     fn a_client_string_cannot_add_a_line_and_content_is_never_recorded() {
         let d = dir("inject");
-        let (a, _) = Audit::open(&d, None);
+        let (a, _) = Audit::open(&d, None, Fleet::none());
         let forged = "s\n{\"seq\":99,\"kind\":\"forged\"}";
         call(&console(&a), "set_note", json!({ "repo": "/r", "slug": forged, "note": "the secret note text" }));
         let text = std::fs::read_to_string(d.join(FILE)).unwrap();
@@ -1749,7 +2608,7 @@ mod tests {
     #[test]
     fn identifiers_are_cut_to_a_bound_on_a_character_boundary() {
         let d = dir("bound");
-        let (a, _) = Audit::open(&d, None);
+        let (a, _) = Audit::open(&d, None, Fleet::none());
         let path = "é".repeat(40_000);
         call(&console(&a), "write_file", json!({ "path": path, "content": "abc" }));
         let o = live(&d).last().unwrap()["object"].as_str().unwrap().to_string();
@@ -1763,7 +2622,7 @@ mod tests {
     #[test]
     fn a_file_write_is_recorded_by_size_and_hash() {
         let d = dir("write");
-        let (a, _) = Audit::open(&d, None);
+        let (a, _) = Audit::open(&d, None, Fleet::none());
         call(&console(&a), "write_file", json!({ "path": "/r/AGENTS.md", "content": "be careful\n" }));
         let l = live(&d).last().unwrap().clone();
         assert_eq!(l["cmd"].as_str(), Some("write_file"));
@@ -1779,7 +2638,7 @@ mod tests {
     #[test]
     fn reads_are_not_recorded_and_every_other_row_is() {
         let d = dir("which");
-        let (a, _) = Audit::open(&d, None);
+        let (a, _) = Audit::open(&d, None, Fleet::none());
         let c = console(&a);
         assert!(begin(&c, "list_workspace", &args(json!({}))).is_none());
         assert!(begin(&c, "read_file", &args(json!({ "path": "/x" }))).is_none());
@@ -1819,7 +2678,7 @@ mod tests {
     fn the_resolvers_refusals_are_recorded_where_it_makes_them() {
         let (top, root, w) = project("refuse");
         let d = dir("refuse");
-        let (a, _) = Audit::open(&d, None);
+        let (a, _) = Audit::open(&d, None, Fleet::none());
         let c = console(&a);
         let cx = call_as(Caller::console(), Arc::new(NoDevices));
         let r = through(&cx, &c, &w, "set_note", json!({ "repo": "/not/registered", "slug": "feat", "note": "the secret note" }));
@@ -1858,7 +2717,7 @@ mod tests {
     fn an_admitted_call_names_the_project_the_resolver_found() {
         let (top, root, w) = project("admit");
         let d = dir("admit");
-        let (a, _) = Audit::open(&d, None);
+        let (a, _) = Audit::open(&d, None, Fleet::none());
         let c = console(&a);
         let cx = call_as(Caller::console(), Arc::new(NoDevices));
         let _ = through(&cx, &c, &w, "write_file", json!({ "path": format!("{root}/./src/../src/lib.rs"), "content": "y" }));
@@ -1878,7 +2737,7 @@ mod tests {
     fn a_devices_refusals_name_it_and_include_its_misses() {
         let (top, root, w) = project("device");
         let d = dir("device");
-        let (a, _) = Audit::open(&d, None);
+        let (a, _) = Audit::open(&d, None, Fleet::none());
         let mut reg = Devices::default();
         let g = Grant { capabilities: Caps::of(&[Capability::Read]), projects: Projects::only([root.clone()]) };
         reg.devices.insert(DeviceId::new("d_phone"), (PrincipalId::owner(), g));
@@ -1927,7 +2786,7 @@ mod tests {
         let g = Grant { capabilities: Caps::of(&[Capability::Read, Capability::Write]), projects: Projects::All };
         reg.devices.insert(DeviceId::new("d_phone"), (PrincipalId::owner(), g));
         let d = dir("lanes");
-        let (a, _) = Audit::open(&d, None);
+        let (a, _) = Audit::open(&d, None, Fleet::none());
         let c = ConnAudit::new(a.clone(), 9, Some("100.101.7.3".into()), phone.clone());
         let cx = call_as(phone, Arc::new(reg));
         // No such harness: a launch that got past the cap would fail in its
@@ -1968,7 +2827,7 @@ mod tests {
     fn a_body_that_answers_ok_false_is_recorded_err() {
         let (top, root, w) = project("okfalse");
         let d = dir("okfalse");
-        let (a, _) = Audit::open(&d, None);
+        let (a, _) = Audit::open(&d, None, Fleet::none());
         let cx = call_as(Caller::console(), Arc::new(NoDevices));
         let r = through(&cx, &console(&a), &w, "new_place", json!({ "repo": root, "branch": "--all" })).unwrap();
         assert_eq!(r["ok"], json!(false), "the caller is answered as the body answered: {r}");
@@ -1984,7 +2843,7 @@ mod tests {
     #[test]
     fn a_refusal_that_would_quote_an_argument_keeps_only_its_kind() {
         let d = dir("why");
-        let (a, _) = Audit::open(&d, None);
+        let (a, _) = Audit::open(&d, None, Fleet::none());
         let c = console(&a);
         for (kind, words) in [
             (RefusalKind::BadArgs, "invalid args `index`: invalid type: string \"a-secret\", expected u32"),
@@ -2019,7 +2878,7 @@ mod tests {
     #[test]
     fn stream_writes_are_totalled_into_the_close() {
         let d = dir("stream");
-        let (a, _) = Audit::open(&d, None);
+        let (a, _) = Audit::open(&d, None, Fleet::none());
         let c = console(&a);
         let p = begin(&c, "term_open", &args(json!({ "session": "wt-x", "cols": 80, "rows": 24, "on_bytes": 1 }))).unwrap();
         c.end(p, Outcome::Ok(&json!(4)));
@@ -2044,7 +2903,7 @@ mod tests {
     #[test]
     fn only_attaches_this_connection_opened_are_tallied_and_the_tally_is_capped() {
         let d = dir("tally-cap");
-        let (a, _) = Audit::open(&d, None);
+        let (a, _) = Audit::open(&d, None, Fleet::none());
         let c = console(&a);
         for id in 0..1000 {
             assert!(begin(&c, "term_write", &args(json!({ "id": id, "data": [1] }))).is_none());
@@ -2070,7 +2929,7 @@ mod tests {
     #[test]
     fn a_disconnect_closes_every_attach_still_held() {
         let d = dir("disconnect");
-        let (a, _) = Audit::open(&d, None);
+        let (a, _) = Audit::open(&d, None, Fleet::none());
         let c = console(&a);
         let shell = json!({ "repo": "/r", "slug": "s", "index": 0, "cols": 80, "rows": 24, "on_bytes": 2 });
         let p = begin(&c, "shell_open", &args(shell)).unwrap();
@@ -2091,7 +2950,7 @@ mod tests {
     fn failed_handshakes_are_an_episode_and_alert_past_the_threshold() {
         let d = dir("episode");
         let host = Arc::new(Catch::default());
-        let (a, _) = Audit::open(&d, Some(host.clone()));
+        let (a, _) = Audit::open(&d, Some(host.clone()), Fleet::none());
         for i in 0..(AUTH_ALERT_AT + 5) {
             a.auth_failed(if i % 2 == 0 { "handshake" } else { "deadline" }, i, Some("127.0.0.1".into()));
         }
@@ -2143,7 +3002,7 @@ mod tests {
         git(&repo, &["worktree", "add", "-q", "-b", "feat/x", ".worktrees/feat-x"]);
         let tip = git(&repo, &["rev-parse", "feat/x"]);
         let repo_s = std::fs::canonicalize(&repo).unwrap().to_string_lossy().into_owned();
-        let (a, _) = Audit::open(&d, None);
+        let (a, _) = Audit::open(&d, None, Fleet::none());
         let c = console(&a);
         let p = begin(&c, "remove_place", &args(json!({ "repo": repo_s, "slug": "feat-x", "del_branch": true, "force": true }))).unwrap();
         c.end(p, Outcome::Ok(&Value::Null));
@@ -2182,6 +3041,933 @@ mod tests {
         a.fail_writes(1, 0);
         call(&console(&a), "set_note", json!({ "repo": "/r", "slug": "s", "note": "x" }));
         assert!(!a.healthy());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // ── devices (§5.1) and their budgets ────────────────────────────────────
+
+    use super::super::devices::{DisabledReason, Enrollment, Expiry, Platform};
+    use super::super::pairing::Ended;
+
+    fn owner_subject(d: &str) -> Subject {
+        Subject { principal: PrincipalId::owner(), device: DeviceId::new(d) }
+    }
+
+    fn fields(d: &str) -> SecurityFields {
+        SecurityFields {
+            principal: PrincipalId::owner(),
+            device: DeviceId::new(d),
+            spki_sha256: "a".repeat(64),
+            stepup_spki_sha256: None,
+            stepup_required: false,
+            caps: Caps::of(&[Capability::Read]),
+            projects: Projects::All,
+            expiry: Expiry::default(),
+            disabled: None,
+            revoked_at: None,
+        }
+    }
+
+    fn phone_caller() -> Caller {
+        Caller::paired(PrincipalId::owner(), DeviceId::new("d_phone"))
+    }
+
+    /// A paired device's connection, as the remote listener will make one.
+    fn phone(a: &Arc<Audit>, conn: u64) -> ConnAudit {
+        ConnAudit::new(a.clone(), conn, Some("100.64.0.2".into()), phone_caller())
+    }
+
+    /// The comparison code the pairing event carries, which no line may.
+    const CODE: &str = "864213";
+
+    /// One of every event the registry fires, and the record each must make
+    /// (kind, `detail.event`) — a `match`, so an event the registry gains
+    /// fails to compile here until it has a record.
+    fn every_event() -> Vec<(DeviceEvent, &'static str, Option<&'static str>)> {
+        use DeviceEvent as E;
+        let peer = Actor::Device { principal: PrincipalId::owner(), device: DeviceId::new("d_peer") };
+        let grant = Grant { capabilities: Caps::of(&[Capability::Read]), projects: Projects::All };
+        let events = vec![
+            E::PairingOpened { for_principal: PrincipalId::owner(), expires_at: 1_800_000_000, grant: grant.clone(), expiry: Expiry::default() },
+            E::PairingAttempt { for_principal: PrincipalId::owner(), peer: "100.64.0.9".into() },
+            E::PairingPending { name: "Phone".into(), platform: Platform::Ios, code: CODE.into(), peer: "100.64.0.9".into() },
+            E::PairingDecided { allow: true },
+            E::Enrolled { subject: owner_subject("d_new"), name: "Phone".into(), platform: Platform::Ios, fields: fields("d_new") },
+            E::PairingClosed { ended: Ended::Paired, device: Some(DeviceId::new("d_new")) },
+            E::ExpiryChanged { subject: owner_subject("d_new"), from: Expiry::default(), to: Expiry::Never },
+            E::StepupChanged { subject: owner_subject("d_new"), required: false },
+            E::ScopeChanged { subject: owner_subject("d_new"), by: peer.clone(), from: grant.clone(), to: Grant::nothing(), widened: false, reduced: true },
+            E::Disabled { subject: owner_subject("d_new"), reason: DisabledReason::Idle, by: Actor::Serve },
+            E::Enabled { subject: owner_subject("d_new") },
+            E::Revoked { subject: owner_subject("d_new"), by: peer },
+            E::IdentityRotated { pin: "b".repeat(64) },
+            E::Unreadable { why: "devices.json does not parse".into() },
+            E::Reloaded,
+            E::Forgotten { subject: owner_subject("d_gone") },
+            E::ConnectRefused { subject: Some(owner_subject("d_new")), spki_sha256: "a".repeat(64), why: ConnectRefusal::Revoked },
+        ];
+        events
+            .into_iter()
+            .map(|e| {
+                let (kind, event) = match &e {
+                    E::Enrolled { .. } => ("device", Some("enrolled")),
+                    E::Revoked { .. } => ("device", Some("revoked")),
+                    E::Disabled { .. } => ("device", Some("disabled")),
+                    E::Enabled { .. } => ("device", Some("enabled")),
+                    E::ExpiryChanged { .. } => ("device", Some("expiry_changed")),
+                    E::StepupChanged { .. } => ("device", Some("stepup_changed")),
+                    E::ScopeChanged { .. } => ("device", Some("scope_changed")),
+                    E::IdentityRotated { .. } => ("device", Some("identity_rotated")),
+                    E::Forgotten { .. } => ("device", Some("forgotten")),
+                    E::Unreadable { .. } => ("device", Some("unreadable")),
+                    E::Reloaded => ("device", Some("reloaded")),
+                    E::ConnectRefused { .. } => ("auth", None),
+                    E::PairingOpened { .. } => ("pairing", Some("opened")),
+                    E::PairingAttempt { .. } => ("pairing", Some("attempt")),
+                    E::PairingPending { .. } => ("pairing", Some("verified")),
+                    E::PairingDecided { .. } => ("pairing", Some("decided")),
+                    E::PairingClosed { .. } => ("pairing", Some("closed")),
+                };
+                (e, kind, event)
+            })
+            .collect()
+    }
+
+    /// §5.1's device and pairing records: every event the registry fires is
+    /// a record of its own, naming the device it is about in
+    /// `detail.subject`, its actor in the actor fields (`by` for serve's own
+    /// acts), a pairing's principal in `detail.for_principal` — and §5.3's
+    /// alerts are alert records too, emitted to the host.
+    #[test]
+    fn every_device_event_is_a_record_naming_its_subject() {
+        let d = dir("devev");
+        let host = Arc::new(Catch::default());
+        let (a, _) = Audit::open(&d, Some(host.clone()), Fleet::none());
+        call(&console(&a), "set_note", json!({ "repo": "/r", "slug": "s", "note": "x" }));
+        for (e, kind, event) in every_event() {
+            let before = live(&d).len();
+            a.device_event(&e);
+            let new = live(&d)[before..].to_vec();
+            let r = new.first().unwrap_or_else(|| panic!("{e:?} wrote no record"));
+            assert_eq!(r["kind"].as_str(), Some(kind), "{e:?}: {r}");
+            if let Some(ev) = event {
+                assert_eq!(r["detail"]["event"].as_str(), Some(ev), "{e:?}: {r}");
+            }
+            if let Some(s) = serde_json::to_value(&e).unwrap().get("subject").filter(|s| !s.is_null()) {
+                assert_eq!(&r["detail"]["subject"], s, "{e:?}: the subject: {r}");
+            }
+            if kind == "pairing" {
+                assert_eq!(r["detail"]["for_principal"], json!("owner"), "{e:?}: {r}");
+            }
+            assert_eq!(new.iter().any(|l| l["kind"] == "alert"), e.alerts(), "{e:?}: its alert: {new:?}");
+        }
+        let l = live(&d);
+        let rec = |ev: &str| l.iter().find(|r| r["detail"]["event"] == json!(ev)).cloned().unwrap();
+        assert_eq!((rec("revoked")["principal"].as_str(), rec("revoked")["device"].as_str()), (Some("owner"), Some("d_peer")), "a device acted");
+        assert_eq!((rec("disabled")["principal"].clone(), rec("disabled")["detail"]["by"].clone()), (Value::Null, json!({ "kind": "serve" })));
+        assert_eq!((rec("enrolled")["device"].as_str(), rec("enrolled")["detail"]["fields"]["spki_sha256"].clone()), (Some("loopback"), json!("a".repeat(64))));
+        assert_eq!((rec("attempt")["peer"].as_str(), rec("attempt")["principal"].clone()), (Some("100.64.0.9"), Value::Null), "before any authentication");
+        assert_eq!(rec("closed")["detail"]["subject"], json!({ "principal": "owner", "device": "d_new" }));
+        let knock = l.iter().find(|r| r["kind"] == "auth").unwrap();
+        assert_eq!((knock["detail"]["reason"].as_str(), knock["detail"]["subject"]["device"].as_str()), (Some("revoked"), Some("d_new")), "{knock}");
+        let emitted = host.0.lock().unwrap();
+        assert!(emitted.iter().all(|(n, _)| n == "audit:alert"), "{emitted:?}");
+        assert_eq!(emitted.len(), every_event().iter().filter(|(e, ..)| e.alerts()).count(), "{emitted:?}");
+        assert_eq!(verify(&d).broken, None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The comparison code is for the host's dialog, never a record — and no
+    /// pairing record can name the link or its secret, which no event holds.
+    #[test]
+    fn the_comparison_code_never_reaches_the_log() {
+        let d = dir("devcode");
+        let (a, _) = Audit::open(&d, None, Fleet::none());
+        for (e, ..) in every_event() {
+            a.device_event(&e);
+        }
+        let text = std::fs::read_to_string(d.join(FILE)).unwrap();
+        assert!(!text.contains(CODE), "{text}");
+        assert!(text.contains("\"verified\""), "the attempt that carried it is recorded: {text}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// §5.1's checkpoint carries every unrevoked device's security fields —
+    /// at genesis and at every rotation — read from the registry as it
+    /// stands, so §5.2 never needs a file rotation removed.
+    #[test]
+    fn the_checkpoint_carries_every_unrevoked_device() {
+        let d = dir("devcheck");
+        let reg = Arc::new(DeviceRegistry::in_memory());
+        let enroll = |pin: char, name: &str| {
+            let e = Enrollment {
+                principal: PrincipalId::owner(),
+                name: name.into(),
+                platform: Platform::Macos,
+                spki_sha256: pin.to_string().repeat(64),
+                stepup_spki_sha256: None,
+                grant: Grant { capabilities: Caps::of(&[Capability::Read]), projects: Projects::All },
+                expiry: Expiry::default(),
+                addr: None,
+            };
+            reg.enroll(e, now()).unwrap()
+        };
+        let kept = enroll('c', "Mac");
+        let gone = enroll('d', "Old Mac");
+        reg.revoke(&Caller::console(), &Grant::everything(), &gone.id, now()).unwrap();
+        let (a, _) = Audit::open_with(&d, None, Fleet::of(&reg), 900);
+        let c = console(&a);
+        for i in 0..20 {
+            call(&c, "set_note", json!({ "repo": "/r", "slug": format!("s{i}"), "note": "x" }));
+        }
+        let want = json!([kept.security()]);
+        let mut seen = 0;
+        for n in [FILE.to_string(), rotated_name(1), rotated_name(2)] {
+            let first = &file_lines(&d.join(&n))[0];
+            assert_eq!(first["kind"].as_str(), Some("checkpoint"), "{n}");
+            assert_eq!(first["detail"]["devices"], want, "{n}: {first}");
+            seen += 1;
+        }
+        assert_eq!(seen, 3);
+        assert_eq!(verify(&d).broken, None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The writer's lock order: an event the registry fires while serve
+    /// rotates the log reads the registry from under the log's lock. A
+    /// registry change made by a THIRD thread at the same time must not
+    /// deadlock with either.
+    #[test]
+    fn registry_events_and_rotation_checkpoints_do_not_deadlock() {
+        let d = dir("devlock");
+        let reg = Arc::new(DeviceRegistry::in_memory());
+        let (a, _) = Audit::open_with(&d, None, Fleet::of(&reg), 2000);
+        a.hear(&reg);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (r2, a2) = (reg.clone(), a.clone());
+        std::thread::spawn(move || {
+            for i in 0..50u8 {
+                let e = Enrollment {
+                    principal: PrincipalId::owner(),
+                    name: format!("Mac {i}"),
+                    platform: Platform::Macos,
+                    spki_sha256: format!("{i:02x}").repeat(32),
+                    stepup_spki_sha256: None,
+                    grant: Grant { capabilities: Caps::of(&[Capability::Read]), projects: Projects::All },
+                    expiry: Expiry::default(),
+                    addr: None,
+                };
+                if let Ok(rec) = r2.enroll(e, now()) {
+                    let _ = r2.revoke(&Caller::console(), &Grant::everything(), &rec.id, now());
+                }
+                call(&console(&a2), "set_note", json!({ "repo": "/r", "slug": "s", "note": "x" }));
+            }
+            tx.send(()).unwrap();
+        });
+        rx.recv_timeout(Duration::from_secs(30)).expect("registry events and checkpoints deadlocked");
+        assert_eq!(verify(&d).broken, None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The `budget` records of `d`'s live file and the rotated ones.
+    fn budget_lines(d: &Path) -> Vec<Value> {
+        let mut all = Vec::new();
+        for n in (1..KEEP).rev().map(rotated_name).chain([FILE.to_string()]) {
+            if d.join(&n).exists() {
+                all.extend(file_lines(&d.join(n)));
+            }
+        }
+        all.into_iter().filter(|l| l["kind"] == "budget").collect()
+    }
+
+    /// A device's records written one by one: everything but the budget
+    /// episodes, the checkpoints and the console's.
+    fn written_by_phone(d: &Path, kind: &str) -> usize {
+        live(d).iter().filter(|l| l["device"] == json!("d_phone") && l["kind"] == json!(kind)).count()
+    }
+
+    /// The budget's rule, end to end: a device at full rate gets its burst
+    /// written one by one, and every record past it COUNTED into one episode
+    /// — a record when it begins and one when it ends, with the count and
+    /// what the records were — so nothing is dropped, and the chain verifies
+    /// after the burst.
+    #[test]
+    fn a_device_past_its_budget_is_coalesced_and_nothing_is_dropped() {
+        let d = dir("budget");
+        let (a, _) = Audit::open(&d, None, Fleet::none());
+        let c = phone(&a, 9);
+        const N: usize = 2000;
+        let t0 = Instant::now();
+        for i in 0..N {
+            call(&c, "set_note", json!({ "repo": "/r", "slug": format!("s{i}"), "note": "x" }));
+        }
+        let written = written_by_phone(&d, "call");
+        assert!(written > 100 && written < N, "the burst is written, the rest is not: {written}");
+        let bytes: usize = raw_lines(&d.join(FILE)).iter().filter(|l| l.contains("\"set_note\"")).map(|l| l.len() + 1).sum();
+        // The burst, and what refilled while the loop ran.
+        let refilled = ACTS.per_sec * t0.elapsed().as_secs_f64() + 400.0;
+        assert!(bytes as f64 <= ACTS.burst + refilled, "{bytes} bytes written past a {} burst", ACTS.burst);
+        a.advance(Duration::from_secs(EPISODE_QUIET as u64));
+        call(&console(&a), "set_note", json!({ "repo": "/r", "slug": "later", "note": "x" }));
+        let b = budget_lines(&d);
+        assert_eq!(b.len(), 2, "one began, one ended: {b:#?}");
+        assert_eq!((b[0]["detail"]["episode"].as_str(), b[0]["detail"]["class"].as_str()), (Some("began"), Some("acts")));
+        assert_eq!((b[0]["principal"].as_str(), b[0]["device"].as_str()), (Some("owner"), Some("d_phone")), "{}", b[0]);
+        let first = &b[0]["detail"]["first"];
+        assert_eq!((first["kind"].as_str(), first["outcome"].as_str(), first["target"]["cmd"].as_str()), (Some("call"), Some("ok"), Some("set_note")), "{first}");
+        assert!(first["target"]["object"].as_str().is_some_and(|o| o.starts_with('s')), "the first act coalesced names its target: {first}");
+        let end = &b[1]["detail"];
+        assert_eq!((end["episode"].as_str(), end["closed_by"].as_str()), (Some("ended"), Some("quiet")), "{end}");
+        assert_eq!(end["count"].as_u64(), Some((N - written) as u64), "every record not written is counted: {end}");
+        assert_eq!(end["tally"], json!({ "call set_note ok": N - written }), "{end}");
+        assert!(end["bytes"].as_u64().unwrap() > 0);
+        assert_eq!(verify(&d).broken, None, "the chain after a burst");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The four ways a device episode ends: `EPISODE_QUIET` with nothing
+    /// counted, `EPISODE_SPAN` while it goes on (a count held in memory
+    /// longer is a count a crash loses), the device's last connection going,
+    /// and serve stopping. Whichever it is, its count lands.
+    #[test]
+    fn a_coalesced_episode_ends_quiet_spanned_disconnected_or_stopped() {
+        let flood = |c: &ConnAudit| {
+            for _ in 0..200 {
+                c.unknown("nope");
+            }
+        };
+        // Quiet: ended by the next record anyone writes, dated by its last.
+        let d = dir("budget-quiet");
+        let (a, _) = Audit::open(&d, None, Fleet::none());
+        let c = phone(&a, 9);
+        flood(&c);
+        a.advance(Duration::from_secs(EPISODE_QUIET as u64 - 1));
+        call(&console(&a), "set_note", json!({ "repo": "/r", "slug": "s", "note": "x" }));
+        assert_eq!(budget_lines(&d).len(), 1, "not quiet long enough yet");
+        a.advance(Duration::from_secs(1));
+        call(&console(&a), "set_note", json!({ "repo": "/r", "slug": "s", "note": "x" }));
+        let b = budget_lines(&d);
+        assert_eq!((b.len(), b[1]["detail"]["closed_by"].as_str(), b[1]["detail"]["class"].as_str()), (2, Some("quiet"), Some("refusals")), "{b:#?}");
+        assert_eq!(b[1]["detail"]["tally"], json!({ "refused unknown unknown command": b[1]["detail"]["count"] }));
+        drop(c);
+        let _ = std::fs::remove_dir_all(&d);
+
+        // Span: a flood that never pauses — always past its refill — still
+        // lands its count.
+        let d = dir("budget-span");
+        let (a, _) = Audit::open(&d, None, Fleet::none());
+        let c = phone(&a, 9);
+        flood(&c);
+        for _ in 0..(EPISODE_SPAN.as_secs() / 30) {
+            a.advance(Duration::from_secs(30));
+            for _ in 0..5 {
+                c.unknown("nope");
+            }
+        }
+        let b = budget_lines(&d);
+        let ended: Vec<&Value> = b.iter().filter(|r| r["detail"]["episode"] == "ended").collect();
+        assert_eq!(ended.first().map(|r| r["detail"]["closed_by"].clone()), Some(json!("span")), "{b:#?}");
+        drop(c);
+        let _ = std::fs::remove_dir_all(&d);
+
+        // Disconnect: at the device's LAST connection, not its first.
+        let d = dir("budget-gone");
+        let (a, _) = Audit::open(&d, None, Fleet::none());
+        let (c1, c2) = (phone(&a, 9), phone(&a, 10));
+        flood(&c1);
+        drop(c1);
+        assert_eq!(budget_lines(&d).len(), 1, "its other connection is still up");
+        drop(c2);
+        let b = budget_lines(&d);
+        assert_eq!(b.last().map(|r| r["detail"]["closed_by"].clone()), Some(json!("disconnect")), "{b:#?}");
+        let _ = std::fs::remove_dir_all(&d);
+
+        // Stopped: the listener's stop ends them before its own record.
+        let d = dir("budget-stop");
+        let (a, _) = Audit::open(&d, None, Fleet::none());
+        let c = phone(&a, 9);
+        flood(&c);
+        a.stopped();
+        let l = live(&d);
+        assert_eq!(l.last().unwrap()["detail"]["event"], json!("stopped"));
+        assert_eq!(l[l.len() - 2]["detail"]["closed_by"], json!("stopped"), "{l:#?}");
+        drop(c);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// What the budget never coalesces, whoever acted: a device over both of
+    /// its budgets still has every registry and pairing record written one
+    /// by one — the evidence §5.2 reads — and so is the first refused key of
+    /// an auth episode.
+    #[test]
+    fn security_records_are_written_whatever_the_budget() {
+        let d = dir("budget-sec");
+        let (a, _) = Audit::open(&d, None, Fleet::none());
+        let c = phone(&a, 9);
+        for i in 0..1000 {
+            c.unknown("nope");
+            call(&c, "set_note", json!({ "repo": "/r", "slug": format!("s{i}"), "note": "x" }));
+        }
+        assert_eq!(budget_lines(&d).len(), 2, "both budgets are spent: {:#?}", budget_lines(&d));
+        let me = Actor::Device { principal: PrincipalId::owner(), device: DeviceId::new("d_phone") };
+        let grant = Grant { capabilities: Caps::of(&[Capability::Read]), projects: Projects::All };
+        let before = live(&d).len();
+        a.device_event(&DeviceEvent::ScopeChanged {
+            subject: owner_subject("d_peer"), by: me.clone(), from: grant, to: Grant::nothing(), widened: false, reduced: true,
+        });
+        a.device_event(&DeviceEvent::Revoked { subject: owner_subject("d_phone"), by: me });
+        a.device_event(&DeviceEvent::Disabled { subject: owner_subject("d_other"), reason: DisabledReason::Idle, by: Actor::Serve });
+        a.device_event(&DeviceEvent::PairingDecided { allow: false });
+        a.device_event(&DeviceEvent::Enrolled { subject: owner_subject("d_new"), name: "Mac".into(), platform: Platform::Macos, fields: fields("d_new") });
+        a.device_event(&DeviceEvent::IdentityRotated { pin: "b".repeat(64) });
+        a.device_event(&DeviceEvent::ConnectRefused { subject: None, spki_sha256: "e".repeat(64), why: ConnectRefusal::Unknown });
+        let new = live(&d)[before..].to_vec();
+        let events: Vec<&str> = new.iter().filter(|r| r["kind"] != "alert").filter_map(|r| r["detail"]["event"].as_str()).collect();
+        assert_eq!(events, vec!["scope_changed", "revoked", "disabled", "decided", "enrolled", "identity_rotated"], "{new:#?}");
+        assert!(new.iter().any(|r| r["kind"] == "auth" && r["detail"]["episode"] == "began"), "{new:#?}");
+        let revoked = new.iter().find(|r| r["detail"]["event"] == "revoked").unwrap();
+        assert_eq!(revoked["device"].as_str(), Some("d_phone"), "the over-budget device is its actor: {revoked}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Acts and refusals spend separate budgets: junk a device can make
+    /// with nothing granted does not cost what its grant did its detail. And
+    /// a device back under its budget is written one by one again while its
+    /// episode is still open (trickle-through).
+    #[test]
+    fn refusals_cannot_spend_the_acts_budget_and_a_refill_writes_again() {
+        let d = dir("budget-split");
+        let (a, _) = Audit::open(&d, None, Fleet::none());
+        let c = phone(&a, 9);
+        for _ in 0..1000 {
+            c.unknown("nope");
+        }
+        call(&c, "set_note", json!({ "repo": "/r", "slug": "after-junk", "note": "x" }));
+        assert_eq!(live(&d).last().unwrap()["object"].as_str(), Some("after-junk"), "an act after a flood of junk is written");
+        // Acts past their own budget, then a quiet gap's refill but for a
+        // second: the next act is written one by one, inside the episode that
+        // is still open.
+        for i in 0..1000 {
+            call(&c, "set_note", json!({ "repo": "/r", "slug": format!("s{i}"), "note": "x" }));
+        }
+        let acts = written_by_phone(&d, "call");
+        a.advance(Duration::from_secs(EPISODE_QUIET as u64 - 1));
+        call(&c, "set_note", json!({ "repo": "/r", "slug": "refilled", "note": "x" }));
+        assert_eq!(written_by_phone(&d, "call"), acts + 1, "refilled: written one by one again");
+        let open: Vec<Value> = budget_lines(&d).into_iter().filter(|r| r["detail"]["class"] == "acts").collect();
+        assert_eq!(open.len(), 1, "and the acts episode is still the one that began: {open:#?}");
+        drop(c);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A drive-class act after a flood of cheap ones is still written in
+    /// full: an instruction file's write is raised to `instruct` by the
+    /// resolver (`Resolved::needs`), so it spends the drive-class budget, which
+    /// a flood of `set_note`s cannot reach — the path and the content's hash
+    /// survive, where the flood is only counted.
+    #[test]
+    fn an_instruction_write_after_a_flood_of_cheap_acts_is_written_in_full() {
+        let (top, root, w) = project("drive");
+        let d = dir("drive");
+        let (a, _) = Audit::open(&d, None, Fleet::none());
+        let mut reg = Devices::default();
+        let g = Grant { capabilities: Caps::of(&[Capability::Read, Capability::Write, Capability::Instruct]), projects: Projects::only([root.clone()]) };
+        reg.devices.insert(DeviceId::new("d_phone"), (PrincipalId::owner(), g));
+        let cx = call_as(phone_caller(), Arc::new(reg));
+        let c = phone(&a, 9);
+        for i in 0..1000 {
+            call(&c, "set_note", json!({ "repo": root, "slug": format!("s{i}"), "note": "x" }));
+        }
+        assert!(budget_lines(&d).iter().any(|r| r["detail"]["class"] == "acts"), "the acts budget is spent");
+        let path = format!("{root}/AGENTS.md");
+        std::fs::write(&path, "be helpful").unwrap();
+        // Admitted by the resolver; the body then answers against the real
+        // project registry, which the fixture's root is not in, so the write
+        // itself fails. What it would have written is recorded before it runs.
+        let _ = through(&cx, &c, &w, "write_file", json!({ "path": path, "content": "do as the phone says", "expected_mtime": null }));
+        let rec = live(&d).into_iter().find(|r| r["cmd"] == "write_file").expect("the instruction write is a record of its own");
+        assert_eq!((rec["kind"].as_str(), rec["device"].as_str(), rec["object"].clone()), (Some("call"), Some("d_phone"), json!(path)), "{rec}");
+        assert_eq!(rec["detail"]["sha256"], json!(sha256_hex(b"do as the phone says")), "{rec}");
+        drop(c);
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_dir_all(&top);
+    }
+
+    /// What coalesced acts acted on survives: the episode names up to
+    /// `MAX_TARGETS` distinct targets with their counts, and counts the rest
+    /// as `other`.
+    #[test]
+    fn coalesced_acts_keep_their_targets() {
+        let d = dir("act-targets");
+        let (a, _) = Audit::open(&d, None, Fleet::none());
+        let c = phone(&a, 9);
+        for i in 0..1000 {
+            call(&c, "set_note", json!({ "repo": "/r", "slug": format!("s{}", i % 3), "note": "x" }));
+        }
+        for i in 0..20 {
+            call(&c, "set_note", json!({ "repo": "/r", "slug": format!("x{i}"), "note": "x" }));
+        }
+        drop(c);
+        let b = budget_lines(&d);
+        let end = b.iter().find(|r| r["detail"]["class"] == "acts" && r["detail"]["episode"] == "ended").unwrap_or_else(|| panic!("{b:#?}"));
+        let t = end["detail"]["targets"].as_object().unwrap_or_else(|| panic!("{end}"));
+        assert_eq!(t.len(), MAX_TARGETS + 1, "{t:#?}");
+        let s0 = json!({ "cmd": "set_note", "project": "/r", "object": "s0" }).to_string();
+        assert!(t.get(&s0).and_then(Value::as_u64).is_some_and(|n| n > 100), "{t:#?}");
+        assert!(t.contains_key("other"), "{t:#?}");
+        assert_eq!(t.values().filter_map(Value::as_u64).sum::<u64>(), end["detail"]["count"].as_u64().unwrap());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // ── the audit-budget gate (§5.1; the user's decision, 2026-10-23) ───────
+
+    /// A device with `read`, `write` and `instruct` on a fixture project
+    /// whose root holds an `AGENTS.md`: what the gate tests drive through
+    /// dispatch.
+    struct Gate {
+        top: PathBuf,
+        d: PathBuf,
+        a: Arc<Audit>,
+        cx: dispatch::Call,
+        w: Fixture,
+        root: String,
+    }
+
+    impl Gate {
+        fn new(tag: &str, who: Caller) -> Gate {
+            let (top, root, w) = project(tag);
+            let d = dir(tag);
+            let (a, _) = Audit::open(&d, None, Fleet::none());
+            let mut reg = Devices::default();
+            let g = Grant { capabilities: Caps::of(&[Capability::Read, Capability::Write, Capability::Instruct]), projects: Projects::only([root.clone()]) };
+            reg.devices.insert(DeviceId::new("d_phone"), (PrincipalId::owner(), g));
+            std::fs::write(format!("{root}/AGENTS.md"), "be helpful").unwrap();
+            let cx = call_as(who, Arc::new(reg));
+            Gate { top, d, a, cx, w, root }
+        }
+
+        /// One instruction write, the drive-class act: `Err` with the gate's
+        /// words if it refused, or whatever the body answered.
+        fn drive(&self, c: &ConnAudit) -> Result<Value, Value> {
+            through(&self.cx, c, &self.w, "write_file", json!({ "path": format!("{}/AGENTS.md", self.root), "content": "x", "expected_mtime": null }))
+        }
+
+        /// Drive-class acts until the gate refuses one: how many ran, and its
+        /// answer.
+        fn spend(&self, c: &ConnAudit) -> (usize, String) {
+            for n in 0..2000 {
+                if let Err(Value::String(e)) = self.drive(c) {
+                    if e.starts_with("audit-budget") {
+                        return (n, e);
+                    }
+                }
+            }
+            panic!("never refused");
+        }
+
+        fn records(&self, kind: &str, cmd: &str) -> Vec<Value> {
+            live(&self.d).into_iter().filter(|r| r["kind"] == kind && r["cmd"] == cmd).collect()
+        }
+    }
+
+    impl Drop for Gate {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.d);
+            let _ = std::fs::remove_dir_all(&self.top);
+        }
+    }
+
+    /// The seconds the gate's answer says to wait.
+    fn retry_secs(answer: &str) -> u64 {
+        answer.split("try again in ").nth(1).and_then(|t| t.split(' ').next()).and_then(|n| n.parse().ok()).unwrap_or_else(|| panic!("{answer}"))
+    }
+
+    /// Past its `DRIVE` budget, a device's drive-class act is REFUSED — told
+    /// in words when to try again — and never coalesced: every one that ran
+    /// is a record of its own. An ordinary write past ITS budget is still
+    /// served and counted into the acts episode, and a read is served.
+    #[test]
+    fn over_its_drive_budget_a_drive_act_is_refused_and_a_write_or_read_is_served() {
+        let g = Gate::new("gate", phone_caller());
+        let c = phone(&g.a, 9);
+        let (ran, answer) = g.spend(&c);
+        assert!(ran >= 100, "a phone session's worth runs first: {ran}");
+        assert!(answer.contains("try again in") && retry_secs(&answer) >= 1, "{answer}");
+        assert_eq!(g.records("call", "write_file").len(), ran, "every drive-class act that ran is its own record");
+        // Settled at what each record cost: the budget bounds BYTES written.
+        let bytes: usize = raw_lines(&g.d.join(FILE)).iter().filter(|l| l.contains("\"write_file\"") && l.contains("\"call\"")).map(|l| l.len() + 1).sum();
+        assert!((bytes as f64) <= DRIVE.burst + RESERVE_SLACK + 2.0 * DRIVE.per_sec, "{bytes} bytes of drive-class records past a {} burst", DRIVE.burst);
+        assert!(budget_lines(&g.d).iter().all(|r| r["detail"]["class"] != "drive"), "drive-class acts never coalesce");
+        for i in 0..1000 {
+            call(&c, "set_note", json!({ "repo": g.root, "slug": format!("s{i}"), "note": "x" }));
+        }
+        let note = through(&g.cx, &c, &g.w, "set_note", json!({ "repo": g.root, "slug": "feat", "note": "x" }));
+        assert!(!format!("{note:?}").contains("audit-budget"), "an ordinary write is not gated: {note:?}");
+        let read = through(&g.cx, &c, &g.w, "read_file", json!({ "path": format!("{}/src/lib.rs", g.root) }));
+        assert!(!format!("{read:?}").contains("audit-budget"), "a read is not gated: {read:?}");
+        assert!(g.records("refused", "set_note").is_empty() && g.records("refused", "read_file").is_empty());
+        drop(c);
+        let acts = budget_lines(&g.d).into_iter().find(|r| r["detail"]["class"] == "acts" && r["detail"]["episode"] == "ended").unwrap();
+        assert!(acts["detail"]["tally"].as_object().unwrap().keys().any(|k| k.starts_with("call set_note")), "{acts}");
+    }
+
+    /// The gate is a budget, not a ban: once the time it named has passed,
+    /// the device's drive-class act runs again, and is recorded — however
+    /// often it tried in between, because a refusal is charged to its
+    /// refusals and never to the budget it was refused for.
+    #[test]
+    fn the_refill_the_answer_names_lets_a_drive_act_through_again() {
+        let g = Gate::new("gate-refill", phone_caller());
+        let c = phone(&g.a, 9);
+        let (ran, answer) = g.spend(&c);
+        for _ in 0..5 {
+            assert!(format!("{:?}", g.drive(&c)).contains("audit-budget"), "too soon");
+        }
+        g.a.advance(Duration::from_secs(retry_secs(&answer)));
+        let again = g.drive(&c);
+        assert!(!format!("{again:?}").contains("audit-budget"), "{again:?}");
+        assert_eq!(g.records("call", "write_file").len(), ran + 1);
+        drop(c);
+    }
+
+    /// Acts in flight together cannot pass on the same bytes: each reserves
+    /// what ITS record will cost — a long path pays for its length — under
+    /// the log's lock, before any of them ends. However many a device holds
+    /// in flight, what they write stays inside the burst.
+    #[test]
+    fn drive_acts_in_flight_together_reserve_their_own_cost() {
+        let d = dir("gate-inflight");
+        let (a, _) = Audit::open(&d, None, Fleet::none());
+        let c = phone(&a, 9);
+        let resolved = Resolved { needs: vec![Capability::Write, Capability::Instruct], ..Default::default() };
+        let long = format!("/r/{}/AGENTS.md", "p".repeat(MAX_IDENT));
+        let mut held = Vec::new();
+        loop {
+            let a = args(json!({ "path": long, "content": "x", "expected_mtime": null }));
+            match c.allow(row("write_file"), &a, &resolved) {
+                Ok(Some(p)) => held.push(p),
+                Ok(None) => panic!("a device's instruction write is drive-class"),
+                Err(r) => {
+                    assert_eq!(r.kind, RefusalKind::AuditBudget);
+                    break;
+                }
+            }
+            assert!(held.len() < 10_000, "never refused");
+        }
+        let n = held.len();
+        for p in held {
+            c.end(p, Outcome::Ok(&Value::Null));
+        }
+        let bytes: usize = raw_lines(&d.join(FILE)).iter().filter(|l| l.contains("\"write_file\"")).map(|l| l.len() + 1).sum();
+        assert!((bytes as f64) <= DRIVE.burst + RESERVE_SLACK, "{n} acts in flight wrote {bytes} bytes past a {} burst", DRIVE.burst);
+        assert!(n > 10, "{n}");
+        drop(c);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// No debt is forgiven: a device that made the log write more than its
+    /// budget (an episode's records, a record that cost more than reserved)
+    /// pays all of it back before its next record is written in full.
+    #[test]
+    fn a_debt_is_paid_in_full_however_deep() {
+        let t0 = Instant::now();
+        let mut b = Bucket::full(DRIVE, t0);
+        b.debit(DRIVE, 3.0 * DRIVE.burst, t0);
+        assert_eq!(b.tokens, -2.0 * DRIVE.burst);
+        let paid = Duration::from_secs_f64(2.0 * DRIVE.burst / DRIVE.per_sec);
+        assert!(!b.take(DRIVE, 1.0, t0 + paid - Duration::from_secs(1)), "still in debt a second before it is paid");
+        assert!(b.take(DRIVE, 1.0, t0 + paid + Duration::from_secs(1)));
+        b.debit(DRIVE, -10.0 * DRIVE.burst, t0 + paid);
+        assert_eq!(b.tokens, DRIVE.burst, "a refund never lifts it past its burst");
+    }
+
+    /// The console is the owner at the host, and never gated.
+    #[test]
+    fn the_console_is_never_gated() {
+        let g = Gate::new("gate-console", Caller::console());
+        let c = console(&g.a);
+        for _ in 0..400 {
+            assert!(!format!("{:?}", g.drive(&c)).contains("audit-budget"));
+        }
+        assert_eq!(g.records("call", "write_file").len(), 400);
+        assert!(g.records("refused", "write_file").is_empty());
+    }
+
+    /// Every refused act is a record of its own, recorded ONCE (by the
+    /// dispatcher's one refusal path), with its reason and its answer — and
+    /// charged to the device's refusals, not to the budget it was refused
+    /// for, so a refusal never keeps that budget spent.
+    #[test]
+    fn every_refused_drive_act_is_its_own_record() {
+        let g = Gate::new("gate-each", phone_caller());
+        let c = phone(&g.a, 9);
+        let (ran, _) = g.spend(&c);
+        for _ in 0..5 {
+            assert!(format!("{:?}", g.drive(&c)).contains("audit-budget"));
+        }
+        let refused = g.records("refused", "write_file");
+        assert_eq!(refused.len(), 6, "{refused:#?}");
+        for r in &refused {
+            assert_eq!((r["detail"]["reason"].as_str(), r["device"].as_str()), (Some("audit-budget"), Some("d_phone")), "{r}");
+            assert!(r["detail"]["why"].as_str().is_some_and(|w| w.contains("try again in")), "{r}");
+        }
+        assert_eq!(g.records("call", "write_file").len(), ran, "none of them ran");
+        drop(c);
+    }
+
+    /// #538's limit episodes are always written, and a device pays for them
+    /// out of its refusals: limits tripped spend the bytes it may make the
+    /// log write.
+    #[test]
+    fn a_devices_limit_episodes_are_paid_from_its_refusals() {
+        let d = dir("limit-debit");
+        let (a, _) = Audit::open(&d, None, Fleet::none());
+        let c = phone(&a, 9);
+        for _ in 0..60 {
+            c.limit_began("request_rate", "rate");
+        }
+        assert_eq!(live(&d).iter().filter(|r| r["detail"]["class"] == "limit").count(), 60, "always written");
+        c.unknown("nope");
+        assert_eq!(written_by_phone(&d, "refused") - 60, 0, "the refusal after them is counted, not written");
+        assert!(budget_lines(&d).iter().any(|r| r["detail"]["class"] == "refusals"));
+        drop(c);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The console is the owner at the host: never budgeted, whatever it
+    /// does (a same-user process can rewrite the file anyway, §1).
+    #[test]
+    fn the_console_is_never_budgeted() {
+        let d = dir("budget-console");
+        let (a, _) = Audit::open(&d, None, Fleet::none());
+        let c = console(&a);
+        for i in 0..500 {
+            call(&c, "set_note", json!({ "repo": "/r", "slug": format!("s{i}"), "note": "x" }));
+            c.unknown("nope");
+        }
+        assert!(budget_lines(&d).is_empty());
+        assert_eq!(live(&d).iter().filter(|l| l["device"] == json!("loopback")).count(), 1000);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// The ceiling the budget promises: a device flooding both budgets flat
+    /// out for an hour writes about what `ACTS` and `REFUSALS` refill plus
+    /// their episode records — kilobytes, where 50 records a second would
+    /// have been tens of megabytes.
+    #[test]
+    fn an_hour_of_flood_from_one_device_writes_its_ceiling() {
+        let d = dir("budget-hour");
+        let (a, _) = Audit::open(&d, None, Fleet::none());
+        let c = phone(&a, 9);
+        for _ in 0..3600 {
+            a.advance(Duration::from_secs(1));
+            for i in 0..50 {
+                if i % 2 == 0 {
+                    c.unknown("nope");
+                } else {
+                    call(&c, "set_note", json!({ "repo": "/r", "slug": "s", "note": "x" }));
+                }
+            }
+        }
+        drop(c);
+        let bytes: u64 = (1..KEEP).map(rotated_name).chain([FILE.to_string()]).filter_map(|n| std::fs::metadata(d.join(n)).ok()).map(|m| m.len()).sum();
+        let ceiling = ACTS.burst + REFUSALS.burst + 3600.0 * (ACTS.per_sec + REFUSALS.per_sec) + 8.0 * 1024.0;
+        assert!((bytes as f64) < ceiling, "{bytes} bytes in an hour, ceiling {ceiling}");
+        let counted: u64 = budget_lines(&d).iter().filter_map(|r| r["detail"]["count"].as_u64()).sum();
+        let written = written_by_phone(&d, "refused") as u64 + written_by_phone(&d, "call") as u64;
+        assert_eq!(counted + written, 3600 * 50, "every record is written or counted");
+        assert_eq!(verify(&d).broken, None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Refused device keys are auth failures (§5.1): one episode with the
+    /// failed handshakes, its first a record naming the key, the rest
+    /// counted — and a known device's knock alerts once per episode for
+    /// each reason, not once per knock (§5.3).
+    #[test]
+    fn refused_keys_join_the_auth_episode_and_alert_once_per_device() {
+        let d = dir("knock");
+        let host = Arc::new(Catch::default());
+        let (a, _) = Audit::open(&d, Some(host.clone()), Fleet::none());
+        let knock = |subject: Option<Subject>, why| {
+            a.device_event(&DeviceEvent::ConnectRefused { subject, spki_sha256: "f".repeat(64), why });
+        };
+        for _ in 0..5 {
+            knock(None, ConnectRefusal::Unknown);
+            knock(Some(owner_subject("d_lost")), ConnectRefusal::Revoked);
+            a.auth_failed("handshake", 1, Some("127.0.0.1".into()));
+        }
+        knock(Some(owner_subject("d_lost")), ConnectRefusal::Disabled);
+        a.stopped();
+        let l = live(&d);
+        let auth: Vec<&Value> = l.iter().filter(|r| r["kind"] == "auth").collect();
+        assert_eq!(auth.len(), 2, "one began, one ended: {auth:#?}");
+        assert_eq!((auth[0]["detail"]["reason"].as_str(), auth[0]["detail"]["key"].clone()), (Some("unknown-key"), json!("f".repeat(64))));
+        assert_eq!(auth[1]["detail"]["count"].as_u64(), Some(16));
+        assert_eq!(auth[1]["detail"]["reasons"], json!({ "disabled": 1, "handshake": 5, "revoked": 5, "unknown-key": 5 }));
+        let alerts: Vec<&Value> = l.iter().filter(|r| r["kind"] == "alert").collect();
+        assert_eq!(alerts.len(), 2, "revoked once, disabled once: {alerts:#?}");
+        assert_eq!(alerts[0]["detail"], json!({ "alert": "device", "event": "connect_refused", "reason": "revoked", "subject": { "principal": "owner", "device": "d_lost" } }));
+        assert_eq!(host.0.lock().unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    // ── §5.2's evidence ─────────────────────────────────────────────────────
+
+    /// What the chain says each device was given, read back as a boot reads
+    /// it: an enrollment, then every record that set a field, and nothing for
+    /// a device the chain never enrolled.
+    #[test]
+    fn the_chain_is_the_evidence_a_boot_reads() {
+        let d = dir("evidence");
+        let (a, _) = Audit::open(&d, None, Fleet::none());
+        let s = owner_subject("d_new");
+        a.device_event(&DeviceEvent::Enrolled { subject: s.clone(), name: "Phone".into(), platform: Platform::Ios, fields: fields("d_new") });
+        a.device_event(&DeviceEvent::Enrolled { subject: owner_subject("d_old"), name: "Old".into(), platform: Platform::Macos, fields: fields("d_old") });
+        let wide = Grant { capabilities: Caps::of(&[Capability::Read, Capability::Write]), projects: Projects::only(["/p".to_string()]) };
+        let narrow = Grant { capabilities: Caps::of(&[Capability::Read]), projects: Projects::All };
+        a.device_event(&DeviceEvent::ScopeChanged { subject: s.clone(), by: Actor::Console, from: narrow, to: wide.clone(), widened: true, reduced: true });
+        a.device_event(&DeviceEvent::ExpiryChanged { subject: s.clone(), from: Expiry::default(), to: Expiry::Never });
+        a.device_event(&DeviceEvent::StepupChanged { subject: s.clone(), required: true });
+        a.device_event(&DeviceEvent::Disabled { subject: s.clone(), reason: DisabledReason::Idle, by: Actor::Serve });
+        a.device_event(&DeviceEvent::Enabled { subject: s.clone() });
+        a.device_event(&DeviceEvent::Revoked { subject: owner_subject("d_old"), by: Actor::Console });
+        // A record about a device the chain never enrolled sets nothing.
+        a.device_event(&DeviceEvent::Disabled { subject: owner_subject("d_ghost"), reason: DisabledReason::Idle, by: Actor::Serve });
+        let ev = evidence(&d, &verify(&d));
+        let mut want = fields("d_new");
+        (want.caps, want.projects, want.expiry, want.stepup_required) = (wide.capabilities, wide.projects.clone(), Expiry::Never, true);
+        assert_eq!(ev.get(&DeviceId::new("d_new")), Some(&want));
+        assert!(ev.get(&DeviceId::new("d_old")).is_some_and(|f| f.revoked_at.is_some()));
+        assert_eq!(ev.len(), 2, "{ev:#?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A checkpoint is where a boot reads from: its list replaces what came
+    /// before, whose files may be gone, but a tombstone stays one; and a
+    /// `null` list vouches for nothing, so what came before stands.
+    #[test]
+    fn a_checkpoint_replaces_the_evidence_before_it_and_keeps_tombstones() {
+        let enrolled = |id: &str| json!({ "kind": "device", "ts": "2027-01-15T08:00:00Z", "detail": { "event": "enrolled", "fields": fields(id) } });
+        let revoked = |id: &str| json!({ "kind": "device", "ts": "2027-01-15T08:00:00Z", "detail": { "event": "revoked", "subject": owner_subject(id) } });
+        let checkpoint = |list: Value| json!({ "kind": "checkpoint", "detail": { "reason": "rotated", "devices": list } });
+        let mut ev = HashMap::new();
+        for r in [enrolled("d_gone"), enrolled("d_dead"), revoked("d_dead"), enrolled("d_kept")] {
+            apply_evidence(&mut ev, &r);
+        }
+        apply_evidence(&mut ev, &checkpoint(Value::Null));
+        assert_eq!(ev.len(), 3, "a null list vouches for nothing new: {ev:#?}");
+        apply_evidence(&mut ev, &checkpoint(json!([fields("d_kept")])));
+        let mut ids: Vec<&str> = ev.keys().map(DeviceId::as_str).collect();
+        ids.sort();
+        assert_eq!(ids, vec!["d_dead", "d_kept"], "the list replaces the rest, and the tombstone stays");
+        assert!(ev[&DeviceId::new("d_dead")].revoked_at.is_some());
+    }
+
+    /// The point of a checkpoint's devices (§5.1): once rotation has removed
+    /// every file that held a device's enrollment, the newest checkpoint is
+    /// still its evidence — read from the registry, so it says what serve
+    /// holds.
+    #[test]
+    fn a_device_whose_enrollment_rotated_away_is_vouched_for_by_the_checkpoint() {
+        let d = dir("evidence-cp");
+        let reg = Arc::new(DeviceRegistry::in_memory());
+        let (a, _) = Audit::open_with(&d, None, Fleet::of(&reg), 900);
+        a.hear(&reg);
+        let e = Enrollment {
+            principal: PrincipalId::owner(),
+            name: "Mac".into(),
+            platform: Platform::Macos,
+            spki_sha256: "7".repeat(64),
+            stepup_spki_sha256: None,
+            grant: Grant { capabilities: Caps::of(&[Capability::Read]), projects: Projects::All },
+            expiry: Expiry::default(),
+            addr: None,
+        };
+        let mac = reg.enroll(e, now()).unwrap();
+        for i in 0..60 {
+            call(&console(&a), "set_note", json!({ "repo": "/r", "slug": format!("s{i}"), "note": "x" }));
+        }
+        let v = verify(&d);
+        assert!(v.first_seq.unwrap() > 1, "the genesis file is gone: {v:?}");
+        let held: String = v.files.iter().map(|n| std::fs::read_to_string(d.join(n)).unwrap()).collect();
+        assert!(!held.contains("\"enrolled\""), "no enrollment record is left on disk");
+        let ev = evidence(&d, &v);
+        assert_eq!(ev.get(&mac.id), Some(&mac.security()), "{ev:#?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Nothing past a break in the chain is evidence — nor the record before
+    /// the break, which is the one an edit would have changed: a forged
+    /// enrollment slipped into the middle of the log vouches for nothing.
+    #[test]
+    fn a_record_past_a_break_is_not_evidence() {
+        let d = dir("evidence-break");
+        let (a, _) = Audit::open(&d, None, Fleet::none());
+        a.device_event(&DeviceEvent::Enrolled { subject: owner_subject("d_real"), name: "Real".into(), platform: Platform::Macos, fields: fields("d_real") });
+        call(&console(&a), "set_note", json!({ "repo": "/r", "slug": "s", "note": "x" }));
+        call(&console(&a), "set_note", json!({ "repo": "/r", "slug": "t", "note": "x" }));
+        a.device_event(&DeviceEvent::Enrolled { subject: owner_subject("d_later"), name: "Later".into(), platform: Platform::Macos, fields: fields("d_later") });
+        let p = d.join(FILE);
+        let mut lines = raw_lines(&p);
+        // The second set_note, rewritten into an enrollment of a forged device.
+        let forged = lines[4].replace("\"d_later\"", "\"d_forged\"");
+        lines[3] = forged;
+        write_lines(&p, &lines);
+        let v = verify(&d);
+        assert!(v.broken.is_some());
+        let ev = evidence(&d, &v);
+        assert!(ev.contains_key(&DeviceId::new("d_real")), "{ev:#?}");
+        assert!(!ev.contains_key(&DeviceId::new("d_forged")) && !ev.contains_key(&DeviceId::new("d_later")), "{ev:#?}");
+        let _ = std::fs::remove_dir_all(&d);
+
+        // An enrollment edited IN PLACE to grant more: its own `prev` still
+        // holds, and the chain breaks at the line after it — which is why the
+        // record before a break is not evidence either.
+        let d = dir("evidence-edit");
+        let (a, _) = Audit::open(&d, None, Fleet::none());
+        a.device_event(&DeviceEvent::Enrolled { subject: owner_subject("d_real"), name: "Real".into(), platform: Platform::Macos, fields: fields("d_real") });
+        call(&console(&a), "set_note", json!({ "repo": "/r", "slug": "s", "note": "x" }));
+        let p = d.join(FILE);
+        let mut lines = raw_lines(&p);
+        assert!(lines[1].contains("\"enrolled\"") && lines[1].contains("[\"read\"]"), "{}", lines[1]);
+        lines[1] = lines[1].replace("[\"read\"]", "[\"read\",\"write\",\"stream\",\"instruct\",\"answer\",\"admin\"]");
+        write_lines(&p, &lines);
+        let v = verify(&d);
+        assert_eq!(v.broken.as_ref().map(|b| b.line), Some(3), "{v:?}");
+        let ev = evidence(&d, &v);
+        assert!(ev.get(&DeviceId::new("d_real")).is_none_or(|f| f.caps == Caps::of(&[Capability::Read])), "the widened grant is not evidence: {ev:#?}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A checkpoint written before the boot cross-check vouches for nothing:
+    /// its list is `null`, not the devices.json serve found — or a forged
+    /// device in it would be carried on as evidence by every later boot.
+    #[test]
+    fn a_checkpoint_before_the_cross_check_vouches_for_nothing() {
+        let d = dir("vouch");
+        let first = DeviceRegistry::open(&d);
+        let e = Enrollment {
+            principal: PrincipalId::owner(),
+            name: "Forged".into(),
+            platform: Platform::Macos,
+            spki_sha256: "9".repeat(64),
+            stepup_spki_sha256: None,
+            grant: Grant::everything(),
+            expiry: Expiry::Never,
+            addr: None,
+        };
+        let forged = first.enroll(e, now()).unwrap();
+        drop(first);
+        let reg = Arc::new(DeviceRegistry::open(&d));
+        let (a, _) = Audit::open(&d, None, Fleet::of(&reg));
+        call(&console(&a), "set_note", json!({ "repo": "/r", "slug": "s", "note": "x" }));
+        let cp = &live(&d)[0];
+        assert_eq!((cp["kind"].as_str(), cp["detail"]["devices"].clone()), (Some("checkpoint"), Value::Null), "{cp}");
+        let ev = evidence(&d, &verify(&d));
+        assert!(ev.is_empty(), "{ev:#?}");
+        assert_eq!(reg.cross_check(&ev, now()).unwrap(), vec![forged.id.clone()]);
+        assert_eq!(worktrees_core::authz::Registry::device_grant(&*reg, &PrincipalId::owner(), &forged.id), None);
         let _ = std::fs::remove_dir_all(&d);
     }
 }

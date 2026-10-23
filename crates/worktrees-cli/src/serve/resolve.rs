@@ -223,6 +223,10 @@ pub enum RefusalKind {
     /// A drive-class act from a device whose step-up is due (§2.5):
     /// `dispatch::stepup_gate`, after the objects resolved.
     StepUp,
+    /// A device's drive-class act whose audit record its budget cannot pay
+    /// for (§5.1, `audit::DRIVE`): refused before it runs, so no dangerous
+    /// act runs without a record of its own. The last step before the body.
+    AuditBudget,
 }
 
 /// Why a request was not run. `detail` is the real reason, never sent to a
@@ -256,6 +260,12 @@ impl Refusal {
         Refusal::new(RefusalKind::StepUp, detail)
     }
 
+    /// `detail` is the answer as well: our own words, with the seconds until
+    /// the budget can pay, and nothing of the request's.
+    pub fn audit_budget(detail: impl Into<String>) -> Refusal {
+        Refusal::new(RefusalKind::AuditBudget, detail)
+    }
+
     /// The wire's `err` for a paired device: fixed words per kind.
     pub fn wire(&self) -> Value {
         Value::from(match self.kind {
@@ -270,6 +280,7 @@ impl Refusal {
             RefusalKind::LocalFetch => ERR_DENIED,
             RefusalKind::DeviceLanes => super::provenance::ERR_DEVICE_LANES,
             RefusalKind::StepUp => super::stepup::ERR_STEPUP,
+            RefusalKind::AuditBudget => return Value::from(self.detail.clone()),
         })
     }
 

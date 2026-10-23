@@ -158,7 +158,28 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   is held across the body: a follower that met the gate first would queue
   behind its own leader and run the body again. The budget and the flights
   live in `conn::Clients`, so both listeners spend from one and share the
-  other. serve installs its signal
+  other. Every
+  `DeviceEvent` is a record too (`Audit::hear`, subscribed in `conn::start`;
+  the mapping is an exhaustive match, a refused key joins the auth episode,
+  and the pairing code never reaches a line), and every checkpoint carries
+  `DeviceRegistry::checkpoint()` (`audit::Fleet`). §5.2's boot cross-check
+  runs in `conn::start` between `Audit::open` and `started`
+  (`audit::evidence` → `DeviceRegistry::cross_check`, which always leaves
+  serve holding evidence), and `checkpoint()` is `None` — a `null` list —
+  until it has: a checkpoint that listed a file nobody checked would carry a
+  forged device on as evidence into every later boot. A paired device's own
+  records spend a per-device BYTE budget (`ACTS`, `REFUSALS`); past it they
+  are counted into a `budget` episode, never dropped, and registry, pairing
+  and first-of-episode records are never charged; #538's limit episodes are
+  always written and debited from `REFUSALS`. Drive-class acts (`needs_stepup`
+  over `Resolved::needs`, plus `remove_place`) are NEVER coalesced: each
+  reserves what ITS record will cost (begun and rendered there, under the
+  log's lock, so acts in flight never share bytes; no debt is ever
+  forgiven) from `DRIVE` at `Witness::allow`, the last step of
+  `call_in_seen` after the lane gate, and one the budget cannot pay for is
+  refused there (`RefusalKind::AuditBudget`, answered with the seconds to
+  wait), recorded once and charged to `REFUSALS`, so a refusal never keeps
+  `DRIVE` spent. The console is never gated. serve installs its signal
   handlers BEFORE it writes serve.json: a supervisor's SIGTERM in that gap killed it
   with no exit status. Anything consumed by being emitted (the inbox's
   `worktrees show`) waits for `Host::has_audience(event)`: a loopback

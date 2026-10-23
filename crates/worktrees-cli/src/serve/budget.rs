@@ -759,7 +759,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("wt-budget-episode-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let (log, _) = Audit::open(&dir, None);
+        let (log, _) = Audit::open(&dir, None, audit::Fleet::none());
         let au = Arc::new(ConnAudit::new(log, 1, None, Caller::console()));
         let mut budgets = BUDGETS;
         budgets.loopback.in_flight = 1;

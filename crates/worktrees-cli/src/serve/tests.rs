@@ -1409,6 +1409,116 @@ fn the_audit_log_records_limits_once_per_episode() {
     assert_eq!((msg["kind"].as_str(), msg["principal"].as_str(), msg["device"].as_str()), (Some("refused"), Some("owner"), Some("loopback")));
 }
 
+/// The device registry reaches the log through serve's own wiring
+/// (`conn::start`), not a test's: a device in the registry before serve
+/// started, with no enrollment in the chain, is disabled by the boot
+/// cross-check (§5.2) and listed so in the first checkpoint; its revoke and
+/// a knock by its revoked key are records, in one chain with the listener's.
+#[test]
+fn the_audit_log_records_the_device_registry() {
+    use super::devices::{Enrollment, Expiry, Platform};
+    use worktrees_core::authz::{Caller, Capability, Caps, Grant, PrincipalId, Projects};
+    let dir = std::env::temp_dir().join(format!("wt-serve-auditdev-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    let clients = super::conn::Clients::with(Arc::new(worktrees_core::authz::NoDevices), Some(Arc::new(Registered)));
+    let reg = clients.devices();
+    let now = worktrees_core::sysclock::now_epoch();
+    let pin = "c".repeat(64);
+    let e = Enrollment {
+        principal: PrincipalId::owner(),
+        name: "Mac".into(),
+        platform: Platform::Macos,
+        spki_sha256: pin.clone(),
+        stepup_spki_sha256: None,
+        grant: Grant { capabilities: Caps::of(&[Capability::Read]), projects: Projects::All },
+        expiry: Expiry::default(),
+        addr: None,
+    };
+    let mac = reg.enroll(e, now).unwrap();
+    let running = rt.block_on(async { start_in(dir.clone(), 0, vec![DEV_ORIGIN.to_string()], super::conn::LIMITS, BUDGETS, clients) }).unwrap();
+    let l = Live { running: Some(running), dir, rt };
+    reg.revoke(&Caller::console(), &Grant::everything(), &mac.id, now).unwrap();
+    assert!(reg.admit(&pin, now).is_err());
+    l.running.as_ref().unwrap().listener.stop();
+
+    let recs = audit_lines(&l);
+    let listed = &recs[0]["detail"]["devices"];
+    assert_eq!((listed[0]["device"].clone(), listed[0]["spki_sha256"].clone()), (json!(mac.id), json!(pin)), "{}", recs[0]);
+    assert_eq!(listed[0]["disabled"]["reason"], json!("unrecorded"), "checked before the first checkpoint: {}", recs[0]);
+    assert!(recs.iter().any(|r| r["detail"]["event"] == "disabled" && r["detail"]["reason"] == "unrecorded"), "{recs:#?}");
+    let revoked = recs.iter().find(|r| r["kind"] == "device" && r["detail"]["event"] == "revoked").unwrap_or_else(|| panic!("{recs:#?}"));
+    assert_eq!(revoked["detail"]["subject"], json!({ "principal": "owner", "device": mac.id }));
+    assert_eq!((revoked["principal"].as_str(), revoked["device"].as_str()), (Some("owner"), Some("loopback")));
+    let knock = recs.iter().find(|r| r["kind"] == "auth").unwrap_or_else(|| panic!("{recs:#?}"));
+    assert_eq!((knock["detail"]["reason"].as_str(), knock["detail"]["subject"]["device"].clone()), (Some("revoked"), json!(mac.id)));
+    assert!(recs.iter().any(|r| r["kind"] == "alert" && r["detail"]["event"] == "connect_refused"), "{recs:#?}");
+    assert_eq!(super::audit::verify(&l.dir).broken, None);
+}
+
+/// §5.2 at boot, on serve's own start path (`start_with`, `devices.json` in
+/// the config dir): a device the chain never enrolled — written into the
+/// file by hand between two runs — is disabled `unrecorded` before anything
+/// can serve it, says so in the log and on disk, and is refused at the
+/// handshake and on every request; a device the chain did enroll is served.
+#[test]
+fn a_device_the_chain_never_enrolled_is_disabled_at_boot_and_never_served() {
+    use super::devices::{ConnectRefusal, DevicesFile, Enrollment, Expiry, Platform, FILE};
+    use worktrees_core::authz::{Capability, Caps, DeviceId, Grant, PrincipalId, Projects, Registry};
+    let dir = std::env::temp_dir().join(format!("wt-serve-boot-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    let now = worktrees_core::sysclock::now_epoch();
+    let boot = || rt.block_on(async { super::start_with(dir.clone(), 0, vec![DEV_ORIGIN.to_string()], super::conn::LIMITS) }).unwrap();
+
+    // The first run pairs a device: its enrollment is in the chain.
+    let first = boot();
+    let e = Enrollment {
+        principal: PrincipalId::owner(),
+        name: "Mac".into(),
+        platform: Platform::Macos,
+        spki_sha256: "c".repeat(64),
+        stepup_spki_sha256: None,
+        grant: Grant { capabilities: Caps::of(&[Capability::Read]), projects: Projects::All },
+        expiry: Expiry::default(),
+        addr: None,
+    };
+    let real = first.devices.as_ref().unwrap().enroll(e, now).unwrap();
+    first.listener.stop();
+    drop(first);
+
+    // Between runs, a same-user process adds a device of its own.
+    let path = dir.join(FILE);
+    let mut f = DevicesFile::parse(&std::fs::read(&path).unwrap()).unwrap();
+    let mut forged = f.devices[0].clone();
+    (forged.id, forged.spki_sha256, forged.caps, forged.projects) = (DeviceId::new("d_forged"), "e".repeat(64), Caps::ALL, Projects::All);
+    f.devices.push(forged);
+    std::fs::write(&path, serde_json::to_vec_pretty(&f).unwrap()).unwrap();
+
+    let second = boot();
+    let reg = second.devices.clone().unwrap();
+    assert_eq!(reg.admit(&"e".repeat(64), now).err(), Some(ConnectRefusal::Disabled), "refused at the handshake");
+    assert_eq!(reg.device_grant(&PrincipalId::owner(), &DeviceId::new("d_forged")), None, "and on every request");
+    assert!(reg.admit(&"c".repeat(64), now).is_ok(), "the enrolled device is served");
+    assert!(reg.device_grant(&PrincipalId::owner(), &real.id).is_some());
+    let on_disk = DevicesFile::parse(&std::fs::read(&path).unwrap()).unwrap();
+    let d = on_disk.device(&DeviceId::new("d_forged")).unwrap();
+    assert_eq!(d.disabled.map(|x| x.reason), Some(super::devices::DisabledReason::Unrecorded), "written back");
+    second.listener.stop();
+    let text = std::fs::read_to_string(dir.join(super::audit::FILE)).unwrap();
+    let recs: Vec<Value> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    let flagged = recs.iter().find(|r| r["detail"]["event"] == "disabled").unwrap_or_else(|| panic!("{recs:#?}"));
+    assert_eq!((flagged["detail"]["subject"]["device"].as_str(), flagged["detail"]["reason"].as_str()), (Some("d_forged"), Some("unrecorded")));
+    let started = recs.iter().rposition(|r| r["detail"]["event"] == "started").unwrap();
+    let at = recs.iter().position(|r| r["detail"]["event"] == "disabled").unwrap();
+    assert!(at < started, "flagged before the listener's start record");
+    assert!(recs.iter().any(|r| r["kind"] == "alert" && r["detail"]["event"] == "disabled"), "an alert (§5.3)");
+    assert_eq!(super::audit::verify(&dir).broken, None);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ── paired devices on the real client set (Phase 2 slice 5) ──────────────────
 //
 // No remote listener exists before slice 6, so a "device" here is
@@ -1548,7 +1658,10 @@ mod devices {
         };
         clients.listen();
         let ctx = Ctx::new(dir.join("cfg"), Arc::new(Broadcast(clients.clone())));
-        let (audit, _) = super::super::audit::Audit::open(&dir.join("cfg"), None);
+        // As `conn::start` opens serve's: the registry's devices in every
+        // checkpoint, and its events in the log.
+        let (audit, _) = super::super::audit::Audit::open(&dir.join("cfg"), None, super::super::audit::Fleet::of(&reg));
+        audit.hear(&reg);
         Engine {
             rt,
             reg,
@@ -2406,6 +2519,44 @@ mod devices {
         assert_eq!(e.status(&mut con)["state"], json!("none"), "refused before anything opened");
         let r = e.begin(&mut con, &["read"], json!(["/not/registered"]), Value::Null);
         assert!(r["err"].is_string());
+    }
+
+    /// A pairing, as the audit log has it (§5.1): the window opened, the
+    /// attempt and its verified proof, the host's Allow, the enrolled device
+    /// and the window closed, in that order — and nowhere the comparison
+    /// code both screens showed, the link, or its secret.
+    #[test]
+    fn a_pairing_is_audited_without_its_code_link_or_secret() {
+        let e = engine("pairaudit", vec![]);
+        e.bind_loopback();
+        let mut con = e.connect(Caller::console());
+        let r = e.begin(&mut con, &["read"], json!("*"), Value::Null);
+        let uri = r["ok"]["uri"].as_str().unwrap_or_else(|| panic!("{r}")).to_string();
+        let mut p = e.attempt(&uri, &Attempt::desktop("Mac")).unwrap();
+        assert_eq!(e.line(&mut p.tls, Duration::from_secs(5)), Some(json!({"pending": true})));
+        let rec = e.rpc(&mut con, "pair_decide", json!({"allow": true}))["ok"].clone();
+        assert_eq!(e.closed_as(&mut con)["ended"], json!("paired"));
+
+        let path = e.dir.join("cfg").join(super::super::audit::FILE);
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<Value> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        let steps: Vec<(String, String)> = lines
+            .iter()
+            .filter(|l| l["kind"] == "pairing" || l["kind"] == "device")
+            .map(|l| (l["kind"].as_str().unwrap().to_string(), l["detail"]["event"].as_str().unwrap().to_string()))
+            .collect();
+        let want = [("pairing", "opened"), ("pairing", "attempt"), ("pairing", "verified"), ("pairing", "decided"), ("device", "enrolled"), ("pairing", "closed")];
+        assert_eq!(steps, want.map(|(k, e)| (k.to_string(), e.to_string())), "{lines:#?}");
+        let enrolled = lines.iter().find(|l| l["detail"]["event"] == "enrolled").unwrap();
+        assert_eq!((enrolled["detail"]["subject"]["device"].clone(), enrolled["detail"]["fields"]["spki_sha256"].clone()), (rec["id"].clone(), json!(p.key.pin)));
+        let closed = lines.iter().find(|l| l["detail"]["event"] == "closed").unwrap();
+        assert_eq!((closed["detail"]["ended"].as_str(), closed["detail"]["subject"]["device"].clone()), (Some("paired"), rec["id"].clone()));
+        let link = worktrees_core::pairuri::parse(&uri, 0, &literal).unwrap();
+        let secret = worktrees_core::pairuri::base32(&link.secret);
+        assert!(!text.contains(&p.code), "the comparison code {} is in the log", p.code);
+        assert!(!text.contains(&secret) && !text.contains(&uri), "the link or its secret is in the log");
+        assert!(lines.iter().all(|l| l["kind"] != "alert" || l["detail"]["event"] == "enrolled"), "{lines:#?}");
+        assert_eq!(super::super::audit::verify(&e.dir.join("cfg")).broken, None);
     }
 
     /// While a request waits, the device's connection is watched: a second
