@@ -221,6 +221,11 @@ pub struct Clients {
     /// The pairing windows (§2.2), the console's to open.
     pairing: Arc<Pairing>,
     world: Option<Arc<dyn World>>,
+    /// The sessions that have joined and made their post-join check: what a
+    /// test waits for before an act whose close it times, so the time is the
+    /// close's and not the session's start.
+    #[cfg(test)]
+    ready: Mutex<std::collections::HashSet<u64>>,
 }
 
 impl Default for Clients {
@@ -237,11 +242,27 @@ impl Clients {
     pub fn with(registry: Arc<dyn Registry>, world: Option<Arc<dyn World>>) -> Self {
         let devices = Arc::new(DeviceRegistry::in_memory());
         let pairing = Arc::new(Pairing::new(None, devices.clone()));
-        Clients { map: Mutex::new(HashMap::new()), registry, devices, pairing, world }
+        Clients {
+            map: Mutex::new(HashMap::new()),
+            registry,
+            devices,
+            pairing,
+            world,
+            #[cfg(test)]
+            ready: Default::default(),
+        }
     }
     /// Grants from the device registry itself, as serve runs.
     pub fn serving(devices: Arc<DeviceRegistry>, pairing: Arc<Pairing>, world: Option<Arc<dyn World>>) -> Self {
-        Clients { map: Mutex::new(HashMap::new()), registry: devices.clone(), devices, pairing, world }
+        Clients {
+            map: Mutex::new(HashMap::new()),
+            registry: devices.clone(),
+            devices,
+            pairing,
+            world,
+            #[cfg(test)]
+            ready: Default::default(),
+        }
     }
     pub fn pairing(&self) -> Arc<Pairing> {
         self.pairing.clone()
@@ -358,6 +379,33 @@ impl Clients {
             info(&format!("serve: device {d} {why}: {} connection(s) closed", ended.len()));
         }
         ended.into_iter().map(|(id, _)| id).collect()
+    }
+
+    /// Session `id` has joined and made its post-join check.
+    #[cfg(test)]
+    pub(super) fn is_ready(&self, id: u64) -> bool {
+        self.ready.lock().unwrap().contains(&id)
+    }
+
+    /// Connection `id` is in the set: joined, and not closed since.
+    #[cfg(test)]
+    pub(super) fn contains(&self, id: u64) -> bool {
+        self.map.lock().unwrap().contains_key(&id)
+    }
+
+    /// End `caller`'s device's connections now if the registry no longer
+    /// serves it — revoked, disabled, removed, or the file unreadable — with
+    /// the word its event would have sent. A session calls it once it has
+    /// JOINED: an event that fired between the handshake and the join found
+    /// no connection to close, and left a socket open that §2.5 says is dead.
+    /// The registry commits a change before it hands its hooks the event, so
+    /// every change either shows here or reaches the connection through
+    /// [`Clients::hear`].
+    pub(super) fn end_if_gone(&self, caller: &Caller) {
+        let Device::Paired(d) = caller.device() else { return };
+        if self.registry.device_grant(caller.principal(), d).is_none() {
+            self.end_device(d, self.devices.ended_word(d));
+        }
     }
 
     /// Re-check every open channel of device `d`'s connections against its
@@ -822,6 +870,9 @@ where
     });
     frames.reconciled().store(call.registry.generation(), Ordering::SeqCst);
     let (kill, listens) = clients.join(id, outbox.clone(), call.clone());
+    clients.end_if_gone(&call.caller);
+    #[cfg(test)]
+    clients.ready.lock().unwrap().insert(id);
     let lanes = Lanes::default();
 
     let mut killed = false;

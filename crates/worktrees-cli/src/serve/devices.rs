@@ -775,6 +775,17 @@ impl DeviceRegistry {
         let _ = self.check_expiry(now);
     }
 
+    /// The word a connection of `id` is closed with once the device is not
+    /// live: the one its event's close frame says (`conn::Clients::hear`).
+    pub fn ended_word(&self, id: &DeviceId) -> &'static str {
+        match self.state.read().unwrap().file.as_ref().map(|f| f.device(id).map(DeviceRecord::is_revoked)) {
+            Err(_) => "unreadable",
+            Ok(None) => "removed",
+            Ok(Some(true)) => "revoked",
+            Ok(Some(false)) => "disabled",
+        }
+    }
+
     /// The file can be read. While it cannot, every device is refused.
     pub fn readable(&self) -> Result<(), String> {
         self.state.read().unwrap().file.as_ref().map(|_| ()).map_err(|why| unreadable(why))

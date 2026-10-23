@@ -1463,7 +1463,16 @@ mod devices {
         tasks: Mutex<Vec<(u64, tokio::task::JoinHandle<()>)>>,
         /// The audit log, in the engine's own config dir.
         audit: Arc<super::super::audit::Audit>,
+        /// Each client's own address, to its connection id ([`Engine::ended`]).
+        ids: Mutex<std::collections::HashMap<std::net::SocketAddr, u64>>,
     }
+
+    /// How long a test waits for a frame it is owed before calling it a hang.
+    /// NOT a bound on serve: the rule a close is held to is that the act made
+    /// it ([`Engine::ended`]), and how soon the queued frame then crosses a
+    /// loopback socket is the scheduler's — a starved, saturated host took
+    /// 1.47 s once. The one wall-clock bound is the revoke test's (§10).
+    const HANG: Duration = Duration::from_secs(10);
 
     impl Drop for Engine {
         fn drop(&mut self) {
@@ -1499,7 +1508,18 @@ mod devices {
         clients.listen();
         let ctx = Ctx::new(dir.join("cfg"), Arc::new(Broadcast(clients.clone())));
         let (audit, _) = super::super::audit::Audit::open(&dir.join("cfg"), None);
-        Engine { rt, reg, clients, ctx, dir, next: AtomicU64::new(100), skipped: Mutex::new(Vec::new()), tasks: Mutex::new(Vec::new()), audit }
+        Engine {
+            rt,
+            reg,
+            clients,
+            ctx,
+            dir,
+            next: AtomicU64::new(100),
+            skipped: Mutex::new(Vec::new()),
+            tasks: Mutex::new(Vec::new()),
+            audit,
+            ids: Mutex::new(Default::default()),
+        }
     }
 
     type Client = WebSocketStream<TcpStream>;
@@ -1518,12 +1538,23 @@ mod devices {
                 let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                 let addr = l.local_addr().unwrap();
                 let dial = tokio::spawn(TcpStream::connect(addr));
-                let (server, _) = l.accept().await.unwrap();
+                let (server, peer) = l.accept().await.unwrap();
                 let ws = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
                 let task = tokio::spawn(conn::serve_caller(ws, ctx, clients, id, who, exporter, au));
-                (WebSocketStream::from_raw_socket(dial.await.unwrap().unwrap(), Role::Client, None).await, task)
+                (WebSocketStream::from_raw_socket(dial.await.unwrap().unwrap(), Role::Client, None).await, (task, peer))
             });
+            let (task, peer) = task;
             self.tasks.lock().unwrap().push((id, task));
+            self.ids.lock().unwrap().insert(peer, id);
+            // Returned once the session has joined the client set and made its
+            // post-join check. A test that times a close starts its clock after
+            // this, so a starved runner's slow session START is not read as a
+            // slow close (macOS CI, 2026-10-23). The bound is a hang guard.
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while !self.clients.is_ready(id) {
+                assert!(Instant::now() < deadline, "session {id} never joined");
+                std::thread::sleep(Duration::from_millis(1));
+            }
             client
         }
 
@@ -1571,8 +1602,22 @@ mod devices {
             }
         }
 
-        /// The socket is closed by serve, saying `why`, within `within`.
-        fn closed(&self, c: &mut Client, why: &str, within: Duration) {
+        /// The connection behind `c` is out of the client set NOW: the act that
+        /// just returned closed it — its close frame queued and its session
+        /// told, on the act's own thread — with no poll left to wait for (§2.5).
+        fn ended(&self, c: &Client) {
+            let at = c.get_ref().local_addr().unwrap();
+            let id = self.ids.lock().unwrap()[&at];
+            assert!(!self.clients.contains(id), "connection {id} is still in the client set: its close waits on something");
+        }
+
+        /// The socket is closed by serve, saying `why`, and nothing follows.
+        fn closed(&self, c: &mut Client, why: &str) {
+            self.closed_within(c, why, HANG)
+        }
+
+        /// [`Engine::closed`], within `within` of this call.
+        fn closed_within(&self, c: &mut Client, why: &str, within: Duration) {
             let t0 = Instant::now();
             loop {
                 match self.next(c, within) {
@@ -1599,17 +1644,21 @@ mod devices {
         let e = engine("revoke", vec![]);
         let phone = enroll(&e.reg, "Phone", 1, &[Read], Projects::All);
         let laptop = enroll(&e.reg, "Laptop", 2, &[Read], Projects::All);
-        let (mut p1, _p2) = (e.connect(caller(&phone)), e.connect(caller(&phone)));
+        let (mut p1, p2) = (e.connect(caller(&phone)), e.connect(caller(&phone)));
         let mut lap = e.connect(caller(&laptop));
         let mut con = e.connect(Caller::console());
         assert!(e.rpc(&mut p1, "get_changelog", json!({})).get("ok").is_some(), "the device is served");
         assert_eq!(e.clients.len(), 4);
         let r = e.rpc(&mut con, "device_revoke", json!({"id": phone.id.as_str()}));
         assert_eq!(r["ok"], json!(true), "{r}");
-        e.closed(&mut p1, "revoked", Duration::from_secs(1));
+        // The act closed both, on its own thread; and the socket dies within
+        // 1 s (§10's exit criterion — this test's bound, and the only one).
+        e.ended(&p1);
+        e.ended(&p2);
+        e.closed_within(&mut p1, "revoked", Duration::from_secs(1));
         // p2 is never read again, so it never answers the close: serve ends
         // its session anyway.
-        e.session_ends(2, Duration::from_secs(1));
+        e.session_ends(2, HANG);
         assert_eq!(e.clients.len(), 2, "out of the map at once");
         // The console heard it (just ahead of its reply); the other device did not.
         let heard = e.skipped.lock().unwrap().iter().any(|v| v["event"] == json!("devices:changed") && v["payload"]["event"] == json!("revoked"));
@@ -1648,10 +1697,11 @@ mod devices {
         assert_eq!(e.rpc(&mut p, "devices_list", json!({}))["err"], json!("denied"), "a listing is admin's");
         assert_eq!(e.rpc(&mut a, "devices_list", json!({}))["ok"].as_array().unwrap().len(), 3);
         assert_eq!(e.rpc(&mut a, "device_revoke", json!({"id": target.id.as_str()}))["ok"], json!(true));
-        e.closed(&mut t, "revoked", Duration::from_secs(1));
+        e.ended(&t);
+        e.closed(&mut t, "revoked");
         // The device that revokes itself is answered by the close.
         e.rt.block_on(p.send(Message::text(json!({"id": 1, "cmd": "device_revoke", "args": {"id": plain.id.as_str()}}).to_string()))).unwrap();
-        e.closed(&mut p, "revoked", Duration::from_secs(1));
+        e.closed(&mut p, "revoked");
         assert!(e.reg.get(&PrincipalId::owner(), &plain.id).unwrap().revoked_at.is_some());
         // Console acts stay the console's, admin or not.
         for (cmd, args) in [
@@ -1673,28 +1723,81 @@ mod devices {
     }
 
     /// §2.5: a disable closes the device's connections exactly as a revoke
-    /// does, and refuses it until the HOST re-enables it — after which it is
+    /// does, and refuses it — its handshake, a connection that got past one,
+    /// a request on a socket that outlived the close — until the HOST
+    /// re-enables it, which not even an admin device may; after that it is
     /// served again.
     #[test]
     fn a_disable_closes_like_a_revoke_and_only_the_host_reenables() {
         let e = engine("disable", vec![]);
         let phone = enroll(&e.reg, "Phone", 1, &[Read], Projects::All);
+        let admin = enroll(&e.reg, "Admin", 2, &[Read, Admin], Projects::All);
         let mut p = e.connect(caller(&phone));
+        let mut adm = e.connect(caller(&admin));
         let mut con = e.connect(Caller::console());
         assert_eq!(e.rpc(&mut con, "device_disable", json!({"id": phone.id.as_str()}))["ok"], json!(true));
-        e.closed(&mut p, "disabled", Duration::from_secs(1));
+        e.ended(&p);
+        e.closed(&mut p, "disabled");
+        assert_eq!(e.reg.admit(&phone.spki_sha256, NOW), Err(super::super::devices::ConnectRefusal::Disabled));
         let mut again = e.connect(caller(&phone));
-        assert_eq!(e.rpc(&mut again, "get_changelog", json!({}))["err"], json!("denied"));
-        assert_eq!(e.rpc(&mut again, "device_enable", json!({"id": phone.id.as_str()}))["err"], json!("console-only"));
+        e.ended(&again);
+        e.closed(&mut again, "disabled");
+        let stale = Call {
+            ctx: e.ctx.clone(),
+            frames: Frames::new(Outbox(tokio::sync::mpsc::unbounded_channel().0)),
+            caller: caller(&phone),
+            registry: e.reg.clone(),
+            world: None,
+            devices: e.reg.clone(),
+            pairing: e.clients.pairing(),
+        };
+        let enable = || Args(json!({"id": phone.id.as_str()}).as_object().cloned().unwrap());
+        assert_eq!(dispatch::call(&stale, "get_changelog", &Args(Default::default())), Err(json!("denied")));
+        assert_eq!(dispatch::call(&stale, "device_enable", &enable()), Err(json!("console-only")));
+        assert_eq!(e.rpc(&mut adm, "device_enable", json!({"id": phone.id.as_str()}))["err"], json!("console-only"));
         assert_eq!(e.rpc(&mut con, "device_enable", json!({"id": phone.id.as_str()}))["ok"], json!(true));
-        assert!(e.rpc(&mut again, "get_changelog", json!({})).get("ok").is_some(), "served again");
+        let mut back = e.connect(caller(&phone));
+        assert!(e.rpc(&mut back, "get_changelog", json!({})).get("ok").is_some(), "served again");
         // An expiry that runs out closes it the same way (the timer's act).
         e.rpc(&mut con, "device_set_expiry", json!({"id": phone.id.as_str(), "expiry": {"idle_days": 1}}));
         let mut late = e.connect(caller(&phone));
         // Enrolled at NOW, which is later than the re-enable's wall clock.
         assert_eq!(e.reg.check_expiry(NOW + 2 * 86_400).unwrap(), vec![phone.id.clone()]);
-        e.closed(&mut late, "disabled", Duration::from_secs(1));
-        e.closed(&mut again, "disabled", Duration::from_secs(1));
+        e.ended(&late);
+        e.ended(&back);
+        e.closed(&mut late, "disabled");
+        e.closed(&mut back, "disabled");
+    }
+
+    /// The gap between a device's handshake and its session joining the
+    /// client set: an event that fires there finds no connection to close
+    /// (macOS CI, 2026-10-23: `late` above, connected and disabled before its
+    /// session had joined, was never closed). The session asks the registry
+    /// once it has joined, so a device disabled, revoked or removed in that
+    /// gap is closed as it joins, saying why — not left on an open socket
+    /// whose every request is refused.
+    #[test]
+    fn a_device_ended_before_its_session_joins_is_closed_as_it_joins() {
+        let e = engine("prejoin", vec![]);
+        let phone = enroll(&e.reg, "Phone", 1, &[Read], Projects::All);
+        let tablet = enroll(&e.reg, "Tablet", 2, &[Read], Projects::All);
+        let laptop = enroll(&e.reg, "Laptop", 3, &[Read], Projects::All);
+        // Each act lands as if after the handshake admitted the device and
+        // before its session joined: no connection of it exists yet.
+        e.reg.disable(&phone.id, NOW).unwrap();
+        e.reg.revoke(&Caller::console(), &Grant::everything(), &tablet.id, NOW).unwrap();
+        let mut p = e.connect(caller(&phone));
+        e.ended(&p);
+        e.closed(&mut p, "disabled");
+        let mut t = e.connect(caller(&tablet));
+        e.ended(&t);
+        e.closed(&mut t, "revoked");
+        let mut ghost = e.connect(Caller::paired(PrincipalId::owner(), DeviceId::new("d_ghost")));
+        e.ended(&ghost);
+        e.closed(&mut ghost, "removed");
+        let mut l = e.connect(caller(&laptop));
+        assert!(e.rpc(&mut l, "get_changelog", json!({})).get("ok").is_some(), "a live device is served");
+        assert_eq!(e.clients.len(), 1, "the ended ones are out of the map");
     }
 
     /// The console's device rows answer it, and a device of ANOTHER principal
@@ -1921,7 +2024,8 @@ mod devices {
         assert_ne!(pin, before.pin());
         assert_eq!(super::super::identity::Identity::load(&e.dir.join("cfg")).unwrap().unwrap().pin(), pin);
         assert_eq!(r["ok"]["revoked"].as_array().unwrap().len(), 2, "{r}");
-        e.closed(&mut p, "revoked", Duration::from_secs(1));
+        e.ended(&p);
+        e.closed(&mut p, "revoked");
         assert!(e.reg.get(&PrincipalId::owner(), &laptop.id).unwrap().revoked_at.is_some());
         let rotated = e.skipped.lock().unwrap().iter().any(|v| v["payload"]["event"] == json!("identity_rotated") && v["payload"]["pin"] == json!(pin));
         assert!(rotated, "the console hears the rotation, with the new pin");
@@ -2415,7 +2519,7 @@ mod devices {
         let mut c = e.connect_with(caller(&rec), Some([1u8; 32]));
         assert_eq!(e.rpc(&mut c, "device_revoke", json!({"id": peer.id.as_str()}))["err"], json!("step-up required"), "another device: admin");
         e.rt.block_on(c.send(Message::text(json!({"id": 1, "cmd": "device_revoke", "args": {"id": rec.id.as_str()}}).to_string()))).unwrap();
-        e.closed(&mut c, "revoked", Duration::from_secs(1));
+        e.closed(&mut c, "revoked");
     }
 
     /// A path's class (§7.1, #549) RAISES the act to drive-class. Writing an
@@ -2468,11 +2572,13 @@ mod devices {
         v["devices"].as_array_mut().unwrap().retain(|x| x["id"] != json!(a.id.as_str()));
         std::fs::write(&file, serde_json::to_vec(&v).unwrap()).unwrap();
         e.reg.refresh();
-        e.closed(&mut ca, "removed", Duration::from_secs(1));
+        e.ended(&ca);
+        e.closed(&mut ca, "removed");
         assert!(e.rpc(&mut cb, "get_changelog", json!({})).get("ok").is_some(), "the other device is untouched");
         std::fs::write(&file, b"not json").unwrap();
         e.reg.refresh();
-        e.closed(&mut cb, "unreadable", Duration::from_secs(1));
+        e.ended(&cb);
+        e.closed(&mut cb, "unreadable");
         let mut con = e.connect(Caller::console());
         assert!(e.rpc(&mut con, "get_changelog", json!({})).get("ok").is_some(), "the console keeps working");
     }
