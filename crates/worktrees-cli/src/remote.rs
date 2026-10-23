@@ -18,8 +18,10 @@ use worktrees_remote::pair::{self, PairEvent};
 pub const USAGE: &str = "\
 usage: worktrees remote pair <link> [--name NAME]          pair with a host from its pairing link
        worktrees remote hosts [--json]                     the hosts this machine is paired with
-       worktrees remote call <host> <cmd> [JSON-ARGS] [--timeout S]
+       worktrees remote call <host> <cmd> [JSON-ARGS] [--timeout S] [--follow S]
                                                            run one request on a host and print its answer
+                                                           (--follow: then keep the socket S seconds and
+                                                           show what streams on it — a terminal's bytes)
        worktrees remote forget <host>                      forget a host and delete this machine's key for it
 
   <host> is a host's id (h_…) or its name, as `worktrees remote hosts` lists them.
@@ -34,11 +36,12 @@ struct Opts {
     name: Option<String>,
     json: bool,
     timeout: Duration,
+    follow: Option<Duration>,
     rest: Vec<String>,
 }
 
 fn parse(args: &[String]) -> Result<Opts, String> {
-    let mut o = Opts { dir: worktrees_api::hostenv::default_config_dir(), name: None, json: false, timeout: Duration::from_secs(30), rest: Vec::new() };
+    let mut o = Opts { dir: worktrees_api::hostenv::default_config_dir(), name: None, json: false, timeout: Duration::from_secs(30), follow: None, rest: Vec::new() };
     let mut it = args.iter();
     let mut positional = false;
     while let Some(a) = it.next() {
@@ -55,6 +58,11 @@ fn parse(args: &[String]) -> Result<Opts, String> {
                 let v = it.next().ok_or("--timeout needs seconds")?;
                 let s: u64 = v.parse().ok().filter(|s| (1..=3600).contains(s)).ok_or_else(|| format!("--timeout {v:?}: 1 to 3600 seconds"))?;
                 o.timeout = Duration::from_secs(s);
+            }
+            "--follow" => {
+                let v = it.next().ok_or("--follow needs seconds")?;
+                let s: u64 = v.parse().ok().filter(|s| (1..=3600).contains(s)).ok_or_else(|| format!("--follow {v:?}: 1 to 3600 seconds"))?;
+                o.follow = Some(Duration::from_secs(s));
             }
             "-h" | "--help" => return Err(String::new()),
             f if f.starts_with('-') && f.len() > 1 => return Err(format!("unknown flag {f}")),
@@ -101,8 +109,8 @@ pub fn cmd_remote(args: &[String]) -> i32 {
     match (verb, o.rest.as_slice()) {
         ("pair", [link]) => rt.block_on(do_pair(&store, link, o.name.as_deref())),
         ("hosts", []) => hosts(&store, o.json),
-        ("call", [host, cmd]) => rt.block_on(do_call(&store, host, cmd, "{}", o.timeout)),
-        ("call", [host, cmd, a]) => rt.block_on(do_call(&store, host, cmd, a, o.timeout)),
+        ("call", [host, cmd]) => rt.block_on(do_call(&store, host, cmd, "{}", o.timeout, o.follow)),
+        ("call", [host, cmd, a]) => rt.block_on(do_call(&store, host, cmd, a, o.timeout, o.follow)),
         ("forget", [host]) => forget(&store, host),
         ("pair" | "hosts" | "call" | "forget", _) => {
             eprintln!("worktrees remote {verb}: wrong arguments\n\n{USAGE}");
@@ -168,7 +176,7 @@ fn hosts(store: &HostStore, as_json: bool) -> i32 {
     0
 }
 
-async fn do_call(store: &HostStore, sel: &str, cmd: &str, args: &str, wait: Duration) -> i32 {
+async fn do_call(store: &HostStore, sel: &str, cmd: &str, args: &str, wait: Duration, follow: Option<Duration>) -> i32 {
     let rec = match store.get(sel) {
         Ok(r) => r,
         Err(e) => {
@@ -190,8 +198,35 @@ async fn do_call(store: &HostStore, sel: &str, cmd: &str, args: &str, wait: Dura
             return 1;
         }
     };
-    match call::call(&rec, &key, env!("CARGO_PKG_VERSION"), cmd, args, wait).await {
-        Ok((_, v)) => {
+    let mut s = match call::connect(&rec, &key, env!("CARGO_PKG_VERSION"), wait).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("worktrees remote call: {} ({}): {e}", rec.name, rec.addr);
+            return 1;
+        }
+    };
+    let answer = s.request(1, cmd, args, wait).await;
+    if let (Ok(v), Some(f)) = (&answer, follow) {
+        println!("{}", serde_json::to_string_pretty(v).unwrap_or_else(|_| v.to_string()));
+        let mut seen = |frame: &Value| {
+            if let (Some(ch), Some(d)) = (frame.get("channel"), frame.get("data").and_then(Value::as_str)) {
+                eprintln!("channel {ch}: {} bytes", d.len() / 4 * 3);
+            } else if frame.get("end") == Some(&Value::Bool(true)) {
+                eprintln!("channel {}: ended", frame["channel"]);
+            } else if let Some(ev) = frame.get("event").and_then(Value::as_str) {
+                eprintln!("event {ev}");
+            }
+        };
+        if let Some(why) = s.follow(f, &mut seen).await {
+            eprintln!("{why}");
+            return 1;
+        }
+        s.close().await;
+        return 0;
+    }
+    s.close().await;
+    match answer {
+        Ok(v) => {
             println!("{}", serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string()));
             0
         }

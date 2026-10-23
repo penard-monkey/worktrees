@@ -157,6 +157,25 @@ impl Session {
         tokio::time::timeout(wait, answer).await.map_err(|_| CallError::TimedOut)?
     }
 
+    /// Keep reading for `wait` after a request — the frames of a channel it
+    /// opened (a terminal's bytes), events — handing each to `seen`. `Some`
+    /// with the host's words if the socket ends first (a revoke says so).
+    pub async fn follow(&mut self, wait: Duration, seen: &mut (dyn FnMut(&Value) + Send)) -> Option<String> {
+        let read = async {
+            loop {
+                match self.rx.recv().await {
+                    Inbound::Frame(t) => {
+                        if let Ok(v) = serde_json::from_str::<Value>(&t) {
+                            seen(&v);
+                        }
+                    }
+                    Inbound::Closed(why) => return why,
+                }
+            }
+        };
+        tokio::time::timeout(wait, read).await.ok()
+    }
+
     pub async fn close(self) {
         self.tx.close().await;
     }
