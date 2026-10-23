@@ -1,0 +1,178 @@
+/* Settings → Remote access, → Devices, and the pairing sheet. Tokens only.
+   The rule the app follows elsewhere holds here: a hue lives in a DOT or a
+   faint tint, and words take --txt-hi / --txt / --txt-dim — an accent as
+   11px text on its own tint fails contrast in the light themes. */
+
+.ra-dot {
+  flex: none; width: 8px; height: 8px; margin-top: 0.4em; border-radius: 50%;
+  background: var(--txt-mute);
+}
+.ra-dot.on { background: var(--ok); }
+.ra-dot.warn { background: var(--warn); }
+.ra-dot.err { background: var(--danger); }
+.ra-dot.off { background: var(--txt-mute); }
+
+.ra-status, .ra-ask, .ra-runs, .ra-outcome {
+  display: flex; align-items: flex-start; gap: var(--s2);
+  font-size: var(--fs-label); color: var(--txt-hi); line-height: var(--lh-prose);
+}
+.ra-ask {
+  padding: var(--s2) var(--s3); border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--warn) 8%, var(--bg-panel));
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, var(--line));
+}
+.ra-ask .ver-actions { margin-top: var(--s2); }
+.ra-runs { font-weight: var(--fw-med); }
+.ra-line { font-size: var(--fs-label); color: var(--txt); line-height: var(--lh-prose); }
+.ra-line code, .ra-cmd {
+  font-family: var(--font-mono); font-size: var(--fs-meta); color: var(--txt-hi);
+}
+.ra-cmd { display: block; margin-top: var(--s1); }
+.ra-note { font-size: var(--fs-meta); color: var(--txt); line-height: var(--lh-prose); }
+.ra-gate {
+  padding: var(--s2) var(--s3); border-radius: var(--r-sm); border: 1px solid var(--line);
+  background: var(--bg-panel); color: var(--txt); font-size: var(--fs-label);
+}
+.ra-err {
+  padding: var(--s2) var(--s3); border-radius: var(--r-sm);
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--line));
+  border-left-width: 3px; border-left-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 6%, var(--bg-panel));
+  color: var(--txt-hi); font-size: var(--fs-label); white-space: pre-wrap; word-break: break-word;
+}
+.ra-linkbtn {
+  align-self: flex-start; background: none; border: 0; padding: 0; cursor: pointer;
+  font-size: var(--fs-meta); color: var(--txt); text-decoration: underline;
+}
+.ra-linkbtn:hover { color: var(--txt-hi); }
+
+/* the address picker */
+.ra-picker {
+  display: flex; flex-direction: column; gap: var(--s2);
+  padding: var(--s3); border: 1px solid var(--line); border-radius: var(--r-md); background: var(--bg-panel);
+}
+.ra-field { display: flex; flex-direction: column; gap: var(--s2); }
+.ra-field-l { font-size: var(--fs-label); color: var(--txt-hi); font-weight: var(--fw-med); }
+.ra-cand {
+  display: flex; align-items: flex-start; gap: var(--s2); cursor: pointer;
+  padding: var(--s1) var(--s2); border-radius: var(--r-sm);
+}
+/* An outline, not a fill: --txt on --bg-elev is 4.05 in catppuccin-latte. */
+.ra-cand:hover { box-shadow: inset 0 0 0 1px var(--line-strong); }
+.ra-cand input { margin-top: 0.25em; }
+.ra-cand-txt { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.ra-cand-addr { font-family: var(--font-mono); font-size: var(--fs-label); color: var(--txt-hi); word-break: break-all; }
+.ra-cand-meta { font-size: var(--fs-meta); color: var(--txt); }
+.ra-cand-warn {
+  font-size: var(--fs-meta); color: var(--txt); line-height: var(--lh-prose);
+  padding-left: var(--s2); border-left: 2px solid var(--warn);
+}
+
+.ra-ident summary { cursor: pointer; font-size: var(--fs-meta); color: var(--txt); }
+.ra-ident[open] { display: flex; flex-direction: column; gap: var(--s2); }
+.ra-kv { display: flex; align-items: baseline; gap: var(--s2); min-width: 0; }
+.ra-kv > span { flex: none; width: 7.5em; font-size: var(--fs-meta); color: var(--txt); }
+.ra-kv code {
+  min-width: 0; flex: 1; font-family: var(--font-mono); font-size: var(--fs-micro); color: var(--txt-hi);
+  word-break: break-all;
+}
+
+/* scope and expiry editors */
+.ra-scope { display: flex; flex-direction: column; gap: var(--s4); }
+.ra-check {
+  display: flex; align-items: flex-start; gap: var(--s2);
+  font-size: var(--fs-label); color: var(--txt); line-height: var(--lh-prose);
+}
+.ra-check input { margin-top: 0.3em; flex: none; }
+/* a row whose words hold an input of their own (days, a date): centred */
+.ra-check.mid { align-items: center; }
+.ra-check.mid > input { margin-top: 0; }
+.ra-check b { color: var(--txt-hi); font-weight: var(--fw-med); }
+.ra-caps, .ra-projects { display: flex; flex-direction: column; gap: var(--s1); padding-left: var(--s1); }
+.ra-projects { max-height: 11rem; overflow-y: auto; }
+.ra-days { width: 5em; }
+.ra-days, .ra-date, .ra-name-input, .ra-link input {
+  background: var(--bg-input); color: var(--txt-hi); border: 1px solid var(--line);
+  border-radius: var(--r-sm); padding: 2px var(--s2); font-size: var(--fs-label); font-family: inherit;
+}
+.ra-scope .seg { align-self: flex-start; }
+
+/* devices */
+.ra-devices { gap: var(--s3); }
+.ra-dev {
+  display: flex; flex-direction: column; gap: var(--s2);
+  padding: var(--s3); border: 1px solid var(--line); border-radius: var(--r-md); background: var(--bg-panel);
+}
+.ra-dev.revoked { padding: var(--s2) var(--s3); background: transparent; }
+.ra-dev-head { display: flex; align-items: baseline; gap: var(--s2); min-width: 0; flex-wrap: wrap; }
+.ra-dev-head .ra-dot { align-self: center; margin-top: 0; }
+.ra-dev-name { font-size: var(--fs-body); color: var(--txt-hi); font-weight: var(--fw-bold); overflow-wrap: anywhere; }
+.ra-dev.revoked .ra-dev-name { font-weight: var(--fw-med); color: var(--txt); }
+.ra-dev-meta { font-size: var(--fs-meta); color: var(--txt); }
+.ra-dev-state { margin-left: auto; font-size: var(--fs-meta); color: var(--txt); }
+.ra-dev-facts { display: flex; flex-direction: column; gap: 2px; font-size: var(--fs-label); color: var(--txt); line-height: var(--lh-prose); }
+.ra-dev-facts b { color: var(--txt-hi); }
+.ra-dev-flag { color: var(--txt-hi); font-weight: var(--fw-med); padding-left: var(--s2); border-left: 2px solid var(--warn); }
+.ra-dev-actions { flex-wrap: wrap; margin-top: 0; }
+.ra-edit { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; }
+.ra-edit.col { flex-direction: column; align-items: stretch; padding-top: var(--s2); border-top: 1px solid var(--line); }
+.ra-name-input { flex: 1; min-width: 10em; }
+
+/* Inside these surfaces the shared controls take --txt-hi: `.ctrl`'s --txt on
+   --bg-elev is 4.05 in catppuccin-latte and `.seg-b`'s --txt-dim 3.0 in
+   tokyo-day, and a consent dialog's buttons are words that must be read. The
+   base rules are untouched: other hosts keep theirs. */
+.ra .ctrl, .ra .seg-b:not(.on) { color: var(--txt-hi); }
+/* A destructive act keeps its hue in the BORDER, never the words (--danger as
+   11px text is 2.1:1 in nord). */
+.ra .ctrl.ra-danger { border-color: color-mix(in srgb, var(--danger) 60%, var(--line)); }
+.ra .ctrl.ra-danger:hover { border-color: var(--danger); }
+
+/* the pairing sheet: wider than the sync family, for the QR beside its words;
+   its body scrolls inside the frame, so the footer never covers a control */
+.ra-pair { width: min(680px, 94%); max-height: min(86vh, 100%); }
+.ra-pair .sync-body, .ra-confirm .sync-body { min-height: 0; flex: 1 1 auto; }
+.ra-confirm { width: min(460px, 92%); }
+.ra-pair .sync-h { align-items: center; }
+.ra-countdown {
+  margin-left: auto; font-size: var(--fs-label); color: var(--txt-hi);
+  font-variant-numeric: tabular-nums;
+}
+.ra-window { display: flex; gap: var(--s4); align-items: flex-start; flex-wrap: wrap; }
+.ra-qr { flex: none; width: 232px; height: 232px; border-radius: var(--r-sm); }
+.ra-window-txt { flex: 1 1 260px; min-width: 0; display: flex; flex-direction: column; gap: var(--s3); }
+.ra-link { display: flex; gap: var(--s2); min-width: 0; }
+.ra-link input { flex: 1; min-width: 0; font-family: var(--font-mono); font-size: var(--fs-meta); }
+.ra-summary { font-size: var(--fs-label); color: var(--txt-hi); }
+.ra-request { display: flex; flex-direction: column; gap: var(--s3); align-items: flex-start; }
+.ra-req-who { display: flex; flex-direction: column; gap: 2px; }
+.ra-req-name { font-size: var(--fs-title); color: var(--txt-hi); overflow-wrap: anywhere; }
+.ra-req-meta { font-size: var(--fs-label); color: var(--txt); font-family: var(--font-ui); }
+.ra-code-l { font-size: var(--fs-meta); color: var(--txt); text-transform: uppercase; letter-spacing: 0.06em; }
+.ra-code {
+  font-family: var(--font-mono); font-size: calc(var(--fs-title) * 2.4); line-height: 1.1;
+  letter-spacing: 0.08em; font-weight: var(--fw-bold); color: var(--txt-hi);
+  font-variant-numeric: tabular-nums;
+  padding: var(--s2) var(--s4); border: 1px solid var(--line-strong); border-radius: var(--r-md);
+}
+.ra-foot-why { margin-right: auto; align-self: center; font-size: var(--fs-meta); color: var(--txt); }
+
+/* §5.3's notices, stacked above the remote-access notice in its corner
+   (EngineGate's RemoteLayer): calm, dismissed with one click, never a modal. */
+.ra-alerts {
+  display: flex; flex-direction: column; gap: var(--s2);
+  width: min(420px, 100%);
+}
+.ra-alert {
+  display: flex; align-items: flex-start; gap: var(--s2);
+  padding: var(--s2) var(--s3); border-radius: var(--r-md);
+  background: var(--bg-panel); border: 1px solid var(--line-strong); box-shadow: var(--shadow-float);
+  font-family: var(--font-ui); font-size: var(--fs-label); color: var(--txt-hi); line-height: var(--lh-prose);
+}
+.ra-alert-txt { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.ra-alert-acts { display: flex; gap: var(--s1); flex: none; align-items: center; }
+.ra-alert-x {
+  background: none; border: 0; cursor: pointer; padding: 0 var(--s1);
+  font-size: var(--fs-body); line-height: 1; color: var(--txt);
+}
+.ra-alert-x:hover { color: var(--txt-hi); }

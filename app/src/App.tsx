@@ -51,6 +51,7 @@ import { useNavDrag, type DragItem } from "./navdrag";
 import { remoteHostLabel, remoteTitle, remoteWebUrl } from "./remote";
 import { PrsPane } from "./PrsPane";
 import { ageOf, prOfPlace, prsShown, prSummary, TAB_MAX_AGE_S, useProjectPrs } from "./prs";
+import { setSettingsOpener, useDeviceList } from "./remoteStore";
 import logoUrl from "./assets/logo.png";
 import "./tokens.css";
 import "./App.css";
@@ -3759,6 +3760,15 @@ function App() {
   const openSettings = useCallback((at?: { cat: CatId; focus?: string }) => {
     setSettingsAt(at ?? { cat: "appearance" });
   }, []);
+  // The remote-access notice and the device alerts live outside App
+  // (EngineGate) and open Settings through this.
+  useEffect(() => {
+    setSettingsOpener((cat) => openSettings({ cat }));
+    return () => setSettingsOpener(null);
+  }, [openSettings]);
+  // `deviceLabel` (provenance.ts) names devices from the Devices list: a new
+  // list re-renders the place header that names them.
+  useDeviceList();
   const [switchOpen, setSwitchOpen] = useState(false);
   const [termVersion, setTermVersion] = useState(0);
   const [termFocus, setTermFocus] = useState(0);

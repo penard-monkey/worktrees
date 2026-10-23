@@ -71,17 +71,28 @@
   color: var(--txt-dim);
 }
 
-/* While remote access is on and the app owns the engine (RemoteNotice): one
- * quiet line, out of the way of the terminal, saying what quitting does. */
-.remote-notice {
-  /* right/bottom are set inline, clear of the bottom band and a right rail. */
+/* While remote access is on (RemoteNotice, §4.1): one quiet line, out of the
+ * way of the terminal, saying so — and what quitting does when the app owns
+ * the engine. A button: it opens Settings → Remote access. The flex box is
+ * the inner span, not the button (WebKit shrink-wraps a flex <button>). */
+/* The corner it shares with §5.3's alerts (RemoteLayer): right/bottom are
+   set inline, clear of the bottom band and a right rail. Only its children
+   take the pointer, so the gap between them never eats a click. */
+.remote-corner {
   position: fixed; z-index: 900;
   right: var(--s3); bottom: var(--s2);
-  display: flex; align-items: center; gap: var(--s2);
+  display: flex; flex-direction: column; align-items: flex-end; gap: var(--s2);
+  max-width: calc(100vw - 2 * var(--s3));
+  pointer-events: none;
+}
+.remote-corner > * { pointer-events: auto; }
+.remote-notice {
+  display: block; cursor: pointer; max-width: 100%; text-align: left;
   padding: var(--s1) var(--s2);
   background: var(--bg-panel); color: var(--txt-dim);
   border: 1px solid var(--line); border-radius: var(--r-md);
   font-family: var(--font-ui); font-size: var(--fs-meta);
-  pointer-events: none;
 }
+.remote-notice:hover { color: var(--txt-hi); border-color: var(--line-strong); }
+.remote-notice-in { display: flex; align-items: center; gap: var(--s2); }
 .engine-dot.remote { background: var(--accent); }

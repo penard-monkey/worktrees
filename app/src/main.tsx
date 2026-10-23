@@ -194,7 +194,7 @@ async function boot() {
   // hydrates its settings on mount, and against a dead engine it would hydrate
   // DEFAULTS and later save them over the real ones — and after that keeps it
   // mounted under a "disconnected" banner rather than blanking it.
-  const { EngineGate } = await import("./EngineGate");
+  const { EngineGate, RemoteLayer } = await import("./EngineGate");
   ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <React.StrictMode>
       {gated ? (
@@ -202,7 +202,10 @@ async function boot() {
           <App />
         </EngineGate>
       ) : (
-        <App />
+        <>
+          <App />
+          <RemoteLayer />
+        </>
       )}
       <FeedbackNotice />
     </React.StrictMode>,
