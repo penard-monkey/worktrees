@@ -8,7 +8,19 @@ title: iOS MVP — implementation plan and handoff
 #544, #549, #550 and #551 read from their branches. Where this document and
 the code disagree, the code wins. Every claim about this codebase cites a
 file and line or a PR; every claim about Apple or Tauri cites a page in
-§12, Sources. Anything not measured on a device is marked **unmeasured**.*
+§11, Sources. Anything not measured on a device is marked **unmeasured**.*
+
+*Updated 2026-10-23, against main at `bb5a8f9`, which has #544, and the
+open PRs #556 (slice 6, the host's half) and #555 (slice 6, the client
+machine's half).
+Four things changed. The iOS app lives in a repository of its own, which
+depends on `worktrees-core` and `worktrees-remote` by git, pinned to a
+commit (§7.1). Phase 0 installs straight from Xcode, not through
+TestFlight (§6, §7.2). The shim's commands carry a connection number,
+`remote_send {conn, text}` and `remote_close {conn}`, and the frame channel
+carries `{frame}` and then `{closed}` (§6, Phase 1). And the version rule
+between the app and its host is an open question (§8, Q10). §2.4 and §9 say
+what is built now.*
 
 **The MVP, in the user's words:** "An app that connects to my remote host
 and does basic operations like interact with sessions. No direct terminal
@@ -27,9 +39,9 @@ AWS-hosted server is deferred and nothing here plans around it.
 | Stack | **Tauri 2's iOS target**: the Rust shim carries the pinned mutual-TLS socket (rustls plus a project-local Swift plugin for the two Secure Enclave keys), a new, phone-sized React UI, and the desktop's protocol code (`ipc.ts`, `ipcws.ts`, `reconnect.ts`) reused unchanged. Not SwiftUI over UniFFI, not pure Swift. | §1 |
 | First connectivity | **Tailscale first, LAN second.** Apple's own definition of a "local network" excludes VPN interfaces, so a `100.x` dial raises no Local Network prompt; a LAN dial does, and Bonjour needs `NSBonjourServices`. Both ship, in that order. | §4 |
 | Device grant | Pair as **Observe** (`read`), as §11 Q4 decided. For the interactive phase the console widens the phone to the custom set **`read` + `write` + `answer` + `instruct`**, never `stream`. That set carries §1.1's label, "can run commands on <host> as you", and step-up (Face ID) is on by default for it. | §3 |
-| Server work the MVP cannot ship without | Slice 6 (the remote listener, netclass, mDNS); #544 merged; a way to SHOW the pairing QR on the host; and **four new dispatch rows**: `agent_prompt` (read), `agent_answer` (answer), `agent_send` (instruct), `agent_turns` (read). | §2.4 |
-| Phases | 0 hardware spike (A1–A6, throwaway TestFlight) · 1 pairing and connection · 2 read-only views · 3 interaction · 4 polish and TestFlight | §6 |
-| Repo | A second Tauri project, `app-ios/`, whose crate joins the workspace and links `worktrees-core` only; the mobile UI is a second vite entry under `app/src/mobile/`; Linux CI is untouched because nothing iOS is in the Linux jobs' package lists. | §7 |
+| Server work the MVP cannot ship without | Slice 6 (the remote listener, netclass, mDNS); #544 merged (done, `bb5a8f9`); a way to SHOW the pairing QR on the host; and **four new dispatch rows**: `agent_prompt` (read), `agent_answer` (answer), `agent_send` (instruct), `agent_turns` (read). | §2.4 |
+| Phases | 0 hardware spike (A1–A6, a throwaway build installed from Xcode) · 1 pairing and connection · 2 read-only views · 3 interaction · 4 polish and TestFlight | §6 |
+| Repo | **A repository of its own** (decided by the user, 2026-10-22), depending on `worktrees-core` and `worktrees-remote` by git, pinned to a commit. This repository's Linux CI is untouched by construction. §7.1's `app-ios/` layout, written before that decision, is superseded. | §7 |
 
 ---
 
@@ -169,17 +181,17 @@ all. "Needs step-up" is #544's rule applied to the row's capability.
 
 | # | Feature | Row(s) | Capability · object | Needs step-up | Status |
 |---|---|---|---|---|---|
-| F1 | **Pair by QR** | Not a dispatch row: the pairing listener's one-frame protocol over TLS (`serve/pairing.rs` header, #544), after `worktrees_core::pairuri::parse` (#544) and the address rule from `netclass` (slice 6a). The answer `{paired: {device_id, principal_id, host_name, remote_addr, expiry, discovery_id}}` is the host record the phone keeps. | — | — | Server side built in #544 (open); listener binds off loopback only in slice 6; the host-side QR display is NOT built (§2.4) |
-| F2 | **Host list** | Device-local: one record per paired host `{name, pin, addr, discovery_id, device_id, principal_id, expiry}` (Phase 2 §2.1, "What the device keeps"). The remote handshake's first frame `{ok, version, device: {id, principal, name, caps, projects, expiry, stepup_required}}` (§4.5) refreshes it. | — | — | First frame is slice 6 |
-| F3 | **Projects and places, with dots** | `list_workspace` (`dispatch.rs:450`, `[read, filtered(workspace)]`) for the tree; events `places:changed` (payload null, re-read), `sessions:busy` `{busy, waiting, waiting_by}` (`crates/worktrees-api/src/host.rs:339`–`349`), `sessions:done` `{path, epoch}` (`watch.rs:163`). The phone declares them in its `listen` frame (#550). The dot rule is the desktop's: busy/waiting from `sessions:busy`, done from `sessions:done` against the place's `declared` state (`afterglow.ts`, `unseenWork`/`unreadOf` in AGENTS.md), idle otherwise. Acking the ring is `mark_seen` (`dispatch.rs:486`, `[write, place]`; the host stamps its own clock, §9.1). | `read`; `write` for the ack | No | Rows and projection on main (slice 1); #550 open |
+| F1 | **Pair by QR** | Not a dispatch row: the pairing listener's one-frame protocol over TLS (`serve/pairing.rs` header, #544), after `worktrees_core::pairuri::parse` (#544) and the address rule from `netclass` (slice 6a). The answer `{paired: {device_id, principal_id, host_name, remote_addr, expiry, discovery_id}}` is the host record the phone keeps. | — | — | Server side built in #544 (open); the pairing listener binds off loopback in #556 (open), and `worktrees serve pair` there shows the QR in the host's terminal; the app's own QR display is not built (§2.4) |
+| F2 | **Host list** | Device-local: one record per paired host `{name, pin, addr, discovery_id, device_id, principal_id, expiry}` (Phase 2 §2.1, "What the device keeps"). The remote handshake's `ok` frame, which carries `device: {id, principal, name, caps, projects, expiry, stepup_required}` (Phase 2 §4.5), refreshes it. | — | — | The `ok` frame is in #556 and #555 (open); a desktop's host record is `worktrees_remote::hosts` in #555 |
+| F3 | **Projects and places, with dots** | `list_workspace` (`dispatch.rs:450`, `[read, filtered(workspace)]`) for the tree; events `places:changed` (payload null, re-read), `sessions:busy` `{busy, waiting, waiting_by}` (`crates/worktrees-api/src/host.rs:339`–`349`), `sessions:done` `{path, epoch}` (`watch.rs:163`). The phone declares them in its `listen` frame (#550). The dot rule is the desktop's: busy/waiting from `sessions:busy`, done from `sessions:done` against the place's `declared` state (`afterglow.ts`, `unseenWork`/`unreadOf` in AGENTS.md), idle otherwise. Acking the ring is `mark_seen` (`dispatch.rs:486`, `[write, place]`; the host stamps its own clock, §9.1). | `read`; `write` for the ack | No | Rows and projection on main (slice 1); the `listen` frame on main (#550) |
 | F4 | **Place detail** | From `list_workspace`'s snapshot: `branch`, `dirty`, `ahead`/`behind`, `last_commit_subject`/`_epoch`, `tmux_session` (`crates/worktrees-core/src/model.rs:20`–`50`), and per harness `agent_sessions: {name, up, model}` (`crates/worktrees-api/src/workspace.rs:137`), which is how the desktop labels the agent and its model (`app/src/mock/fixtures.ts:39`). Plan or brief summary: `place_plan` (`dispatch.rs:606`, `[read, root]`) → `PlanSummary {title, goal, …}` (`crates/worktrees-core/src/plan.rs:147`). Note: `declared.note`. Last activity: `declared.last_worked_epoch` and `sessions:done`. Optional: `project_prs` (`dispatch.rs:579`, `[read, project, places]`). | `read` | No | On main |
 | F5 | **Answer a waiting prompt** | **New:** `agent_prompt {repo, slug}` → the prompt the user must SEE (the modal's lines, recognised by its footer as `activity::codex_panes` does; `crates/worktrees-core/src/activity.rs:286`–`308`, `tmux::capture` at `tmux.rs:772`) plus its `fingerprint`. **New:** `agent_answer {repo, slug, choice, fingerprint}`: the compare-and-swap of §9.2 — serve captures again, refuses if the fingerprint moved, `choice` must be one of the prompt's own options. | `read` for the prompt; **`answer`**, `place(repo, slug)` | **Yes** (answer) | Not built; §9.2 put the verb in Phase 3 and reserved the capability and audit kind |
 | F6 | **Send the agent a message** | **New:** `agent_send {repo, slug, text}`: one line, pasted into the agent's pane and submitted when the composer is empty. Core has the mechanism: `harness::send` / `tmux::paste_to_ai` (`tmux.rs:840`) behind MCP `send`, which refuses mid-approval and queues mid-turn; and `plan_prompt` (`dispatch.rs:607`, `[write, session]`) already pastes FIXED text into a session from serve (`files.rs:649`). Free text is `instruct`, not `answer` (§9.2). | **`instruct`**, `place` + `session_of` | **Yes** (instruct) | Not built. Note MCP `send` refuses a CLAUDE place and answers with the session name for Claude's own `SendMessage` (`crates/worktrees-cli/src/mcp.rs:1234`); from serve, pasting into a Claude pane is the same mechanism `plan_prompt` uses, so the row can serve every harness (open question Q4) |
-| F7 | **Start a session** | `open_place` (`dispatch.rs:492`, `[write, place]`; args `fresh`, `provider`, `model`, `force`, `crates/worktrees-api/src/ops.rs:672`). From a device it counts toward the 10/hour launch bucket (#538) and the 4 live device-launched lanes (#551), and writes `launched_by {principal, device}` on the place (#551). Model choices: `agent_models` (`dispatch.rs:570`, `[read, global]`). | `write` | No | On main; #551 open |
+| F7 | **Start a session** | `open_place` (`dispatch.rs:492`, `[write, place]`; args `fresh`, `provider`, `model`, `force`, `crates/worktrees-api/src/ops.rs:672`). From a device it counts toward the 10/hour launch bucket (#538) and the 4 live device-launched lanes (#551), and writes `launched_by {principal, device}` on the place (#551). Model choices: `agent_models` (`dispatch.rs:570`, `[read, global]`). | `write` | No | On main, #551 included |
 | F8 | **Close a session** | `close_place` (`dispatch.rs:500`, `[write, place, opt(session_of)]`; `ops.rs:988`). | `write` | No | On main |
 | F9 | **Note, pin, lifecycle** | `set_note` (`:470`), `set_pin` (`:469`), `set_lifecycle` (`:468`), all `[write, place]`. #551 stamps `note_by` with the device. | `write` | No | On main |
 | F10 | **Recent turns, not a terminal** | **New:** `agent_turns {repo, slug, n}` → the last `n` user/assistant exchanges as text, from the harness's own transcript: Claude's `~/.claude/projects/<mangled>/<sid>.jsonl` (readers exist: `agent::transcript_model`, `agent.rs:260`; `activity::tail_lines_checked`, `activity.rs:166`), Codex's rollout (`codex::rollout_turn`, `codex.rs:327`). Text only, each turn truncated, tool calls summarised to their names. | `read`, `place` | No | Not built |
-| F11 | **Device self-service** | `device_revoke` (`Own`, "a device may always revoke itself"), `stepup_challenge`, `stepup_prove` (`Own`) — #544 `dispatch.rs:809`, `:842`–`:853` on its branch. | own | `stepup_prove` is the proof | #544 open |
+| F11 | **Device self-service** | `device_revoke` (`Own`, "a device may always revoke itself"), `stepup_challenge`, `stepup_prove` (`Own`) — #544, in `dispatch.rs` on main. | own | `stepup_prove` is the proof | On main (#544) |
 | F12 | **Usage meters** (nice to have) | `claude_usage`, `codex_usage` (`dispatch.rs:508`–`509`, `[read, global]`, on `GLOBAL_OK`). | `read` | No | On main |
 
 **What is explicitly OUT, and how the server enforces it.**
@@ -227,11 +239,11 @@ today:
 
 | # | Prerequisite | Where | Blocks |
 |---|---|---|---|
-| S1 | **Slice 6: the remote listener** — `remote_enable`, the bind and peer rules, `netclass` (6a), `DeviceVerifier` on the listener, `admit_peer` after the handshake, the remote `Shared`, keepalive (ping 20 s, close at 60 s), the remote handshake's first frame, the address code, mDNS advert (§4.1, §4.7, §10). Gap 17 closed on main by #546. | Not started | Everything after Phase 0 |
-| S2 | **#544 merged** (devices, identity, pairing, revocation, expiry, step-up; waits on #534 and #538). | Open | Phase 1 |
-| S3 | **A host surface that shows the QR.** #544 adds `pair_begin` and friends as console rows but changes nothing under `app/src` (its diff stat lists no frontend file). The cheapest is `worktrees serve pair`, a console client of the loopback socket that prints the QR in the terminal and the link as text; AGENTS.md notes "there is no CLI client", so it is the first one (copy `serve_bin.rs::connect`). Settings → Devices in the desktop app is the full version. | Not built | Phase 1 |
-| S4 | **#550 merged** (the `listen` frame). The phone's door sends it after the proof. A serve older than #550 has no parser for the frame and answers it with `err: "bad request: no cmd"` (`wire::parse_request`), so the client sends it only when the first frame's `version` is at or past the release that carries #550; projected events arrive either way. | Open | Phase 2 |
-| S5 | **#551 merged** (provenance, the 4-lane cap). `open_place` from a device must write `launched_by` first, or the lane's MCP server carries the host's reach (§7.5). | Open | Phase 3 (F7) |
+| S1 | **Slice 6: the remote listener** — `remote_enable`, the bind and peer rules, `netclass` (6a), `DeviceVerifier` on the listener, `admit_peer` after the handshake, the remote `Shared`, keepalive (ping 20 s, close at 60 s), the remote handshake and its `ok` frame (Phase 2 §4.5), the address code, mDNS advert (§4.1, §4.7, §10). Gap 17 closed on main by #546. | 6a on main (#547); the listener, its rule set, keepalive, the exporter-keyed handshake and the advert (macOS only) in #556 (open); the client's transport in #555 (open). Not built: a client that browses, and the Linux advert | Everything after Phase 0 |
+| S2 | **#544 merged** (devices, identity, pairing, revocation, expiry, step-up). | Merged (#544, `bb5a8f9`); #538, #556 and #555 are built on it | Phase 1 |
+| S3 | **A host surface that shows the QR.** #544 adds `pair_begin` and friends as console rows but changes nothing under `app/src` (its diff stat lists no frontend file). The cheapest is `worktrees serve pair`, a console client of the loopback socket that prints the QR in the terminal and the link as text; AGENTS.md notes "there is no CLI client", so it is the first one (copy `serve_bin.rs::connect`). Settings → Devices in the desktop app is the full version. | `worktrees serve pair` in #556 (open), with the QR in the terminal and the link; the app's version is lane `feat/p2-remote-host-ui` | Phase 1 |
+| S4 | **#550 merged** (the `listen` frame). The phone's door sends it after the proof. A serve older than #550 has no parser for the frame and answers it with `err: "bad request: no cmd"` (`wire::parse_request`), so the client sends it only when the `ok` frame's `version` is at or past the release that carries #550; projected events arrive either way. | Merged (#550) | Phase 2 |
+| S5 | **#551 merged** (provenance, the 4-lane cap). `open_place` from a device must write `launched_by` first, or the lane's MCP server carries the host's reach (§7.5). | Merged (#551) | Phase 3 (F7) |
 | S6 | **New row `agent_prompt`** `[read, place(repo, slug)]`: capture the agent pane of the place's session, return `{harness, lines, options, fingerprint}` or `{waiting: false}`; `fingerprint` = SHA-256 of the captured modal; options parsed per harness from the modal's footer (`activity::codex_panes` for Codex; Claude's permission modal needs its own parser, fixture-tested against real captures as `tests/fixtures/codex-inline/` does). | Not built | Phase 3 |
 | S7 | **New row `agent_answer`** `[answer, place(repo, slug)]` with `{choice, fingerprint}`: re-capture, compare, refuse with `err: "the prompt changed"` on mismatch, else send the keystroke(s) for `choice` to the pane. Audit kind reserved by §9.2. The 30 s lease (`agent_lease_take`) is optional UX and can follow. | Not built | Phase 3 |
 | S8 | **New row `agent_send`** `[instruct, place(repo, slug)]` with `{text}`: one line, ≤ 4 KB, no control characters (MCP `send`'s rules); refused while the agent is waiting on an approval or question (`agent_prompt` says so); pasted via `tmux::paste_to_ai` and submitted only when the composer is empty (`agent::draft_from_screen`, `agent.rs:332`). Marked in the audit log; #551's `last_remote_instruction` stamp does not apply (it is a file stamp), so the place gets a `last_remote_send {principal, device, at}` or the audit record alone — decide in review. | Not built | Phase 3 |
@@ -382,13 +394,19 @@ Each phase names its server-side dependency by PR or slice. A phase is done
 when its criteria are SEEN on a device, in the sense of
 `docs/adding-a-harness.md`: "core reports it" is not "the user sees it".
 
-### Phase 0 — the hardware spike (A1–A6), a throwaway TestFlight build
+### Phase 0 — the hardware spike (A1–A6), a throwaway build installed from Xcode
 
-**Deliverable:** `scripts/spike/p2-ios/` with the probe code and a
-`findings.md` recording the output of every A-step from
-`scripts/spike/p2-network/CHECKLIST.md`; nothing of it ships.
+**Deliverable:** the probe code and a `findings.md` recording the output of
+every A-step from `scripts/spike/p2-network/CHECKLIST.md`, in the iOS
+repository (§7.1); nothing of it ships.
+**Installed straight from Xcode** onto the phone, not through TestFlight
+(decided by the user, 2026-10-22): team `M882BTE3A3`, bundle id
+`net.casadelvalle.worktrees.ios.spike`. Nothing goes to App Store Connect.
+Whether a development build signed that way carries everything A1 needs
+(the Secure Enclave and its keychain entitlement) is unmeasured, and A1
+answers it first.
 **Dependencies:** an Apple Developer Program membership ($99 a year,
-Sources: Apple Programs); a `developmentTeam`; one iPhone; Mac A on the same
+Sources: Apple Programs); the team above; one iPhone; Mac A on the same
 Wi-Fi and tailnet. Nothing from slice 6: the checklist's `echo_srv.py`,
 `llprobe` and `mdns_reg_mac` stand in for serve.
 
@@ -413,15 +431,24 @@ before Phase 1 starts (§1.3's fallback).
 
 **Builds:**
 
-- `app-ios/` (§7): the crate, `tauri.conf.json`, `Info.ios.plist`, the
-  Swift key plugin from Phase 0, the mobile vite entry.
-- The shim's remote door: `remote_connect {host_id}` opens the pinned mTLS
-  WebSocket from Rust (rustls, `PinnedServer`, no SNI, no resumption) and
-  returns a `Channel` of inbound text frames; `remote_send {text}` writes
-  one outbound frame; `remote_close`. The page's `ipcws.ts` runs unchanged
-  on top of a `Sock` built from those three (its `Sock` type is already
-  structural, `ipcws.ts:105`), and `ipc.ts` gains `remoteDoor` with
-  `engine-route-check.mjs` holding its table.
+- The iOS repository's project (§7.1): the crate, `tauri.conf.json`,
+  `Info.ios.plist`, the Swift key plugin from Phase 0, the mobile UI.
+- The shim's remote door, as #555 (open) built it for the desktop
+  (`app/src-tauri/src/remote.rs`, `app/src/ipcremote.ts`):
+  `remote_connect {host_id}` opens the pinned mTLS WebSocket from Rust
+  (rustls, `PinnedServer`, no SNI, no resumption) and answers `{conn,
+  token, host}`. Every frame the host sends reaches the page on one
+  `Channel` as `{frame: text}`, and the end as exactly one `{closed: why}`.
+  `remote_send {conn, text}` writes one frame and `remote_close {conn}`
+  closes the socket. `conn` is a fresh number per socket, so a stale `Sock`
+  cannot write into the next connection; this plan first had
+  `remote_send {text}` alone. `token` is the session's handshake-v1 key
+  (Phase 2 §4.5). The page's `ipcws.ts` runs unchanged on top of a `Sock`
+  built from those three (its `Sock` type is already structural), and
+  `ipc.ts` gains `remoteDoor`. The page reads its grant from the `ok` frame
+  (`ipcremote.ts::grantOf`) and refuses the admin and console rows locally
+  (`ADMIN_ROWS`, `CONSOLE_ROWS`), and the phone's UI can use the same
+  predicates.
 - The pairing flow: scan (barcode-scanner plugin) → `pairuri::parse` in the
   shim with `netclass` as the address rule → create the two keys → dial the
   pairing port with `AnyKey`-style self-signed client cert over
@@ -429,10 +456,10 @@ before Phase 1 starts (§1.3's fallback).
   `{paired}` or `{denied}` → store the host record. Error copy for every
   `denied` reason, including "Someone else used this pairing code. Tap Deny
   on <host>." (§2.2).
-- Connect to the remote listener; read the first frame; verify `version` as
-  the desktop does (`ipcws.ts`); send the `listen` frame (#550) if the
-  server's version has it; show the device's own grant, scope and expiry on
-  a device screen; `device_revoke` self.
+- Connect to the remote listener; run handshake v1, keyed by the TLS session
+  (Phase 2 §4.5); read the `ok` frame and verify `version` as the desktop
+  does (`ipcws.ts`); send the `listen` frame (#550); show the device's own
+  grant, scope and expiry on a device screen; `device_revoke` self.
 - `reconnect.ts` wired with starts disabled; the `visibility()` hook on
   `visibilitychange`.
 
@@ -542,6 +569,25 @@ Edition decision 3); TestFlight internal distribution.
 
 ### 7.1 Where the iOS project lives
 
+**In a repository of its own** (decided by the user, 2026-10-22, after this
+plan was written). The app depends on `worktrees-remote` and, through it,
+`worktrees-core` by git, pinned to a commit, never by path. #555 (open)
+builds `crates/worktrees-remote` for exactly that: the device's transport
+(pairing by link, the host records, the pinned mutual-TLS pipe) with no
+tauri, no tmux and no engine, which `api-boundary-check.mjs` holds. Its
+`DeviceKey` is the desktop's `0600` file key. iOS replaces it with a Secure
+Enclave signer handed to rustls (A1), and `tls::client_config`'s inputs are
+the seam. How the new repository takes the desktop's protocol client
+(`ipcws.ts`, `ipc.ts`'s door, `reconnect.ts`) is that repository's first
+design question: one implementation of the protocol is still the rule
+(Phase 2 §4.4), and it lives in this repository's `app/src`.
+
+The layout below is the plan as first written, for a project inside this
+workspace. It is superseded where it names `app-ios/`, `app/src/mobile/`,
+the workspace's `members` and this repository's CI (§7.3). What it says
+about the crate's dependencies, `Info.ios.plist`, the Swift key plugin and
+the generated Xcode project still applies inside the new repository.
+
 ```
 app-ios/
   tauri.conf.json          identifier, bundle.iOS { developmentTeam, minimumSystemVersion }, frontendDist → ../app/dist-mobile
@@ -571,14 +617,17 @@ so `transport-check.mjs`'s rule ("nothing else under `app/src` imports
 
 - **Bundle id:** the desktop's is `net.casadelvalle.worktrees`
   (`app/src-tauri/tauri.conf.json:4`). Recommend `net.casadelvalle.worktrees.ios`
-  for the phone and `net.casadelvalle.worktrees.spike` for Phase 0's
-  throwaway, which is deleted from App Store Connect afterwards (Q1). The
-  id "must match the identifier defined in `tauri.conf.json > identifier`"
-  and is registered in App Store Connect (Sources: Tauri distribute).
+  for the phone. Phase 0's throwaway is `net.casadelvalle.worktrees.ios.spike`
+  (the user's choice), and since it is installed from Xcode it never
+  reaches App Store Connect. The id "must match the identifier defined in
+  `tauri.conf.json > identifier`" and, for a TestFlight build, is
+  registered in App Store Connect (Sources: Tauri distribute).
 - **Account:** the Apple Developer Program, "$99 annual membership",
   includes TestFlight and App Store distribution (Sources: Apple Programs).
-  Secure Enclave keys need the `keychain-access-groups` entitlement, which a
-  TestFlight build has (CHECKLIST.md A1).
+  The team is `M882BTE3A3`. Secure Enclave keys need the
+  `keychain-access-groups` entitlement, which a TestFlight build has
+  (CHECKLIST.md A1); whether Phase 0's Xcode-installed build has what it
+  needs is A1's first answer (§6).
 - **Signing:** automatic, `bundle.iOS.developmentTeam` set (or
   `APPLE_DEVELOPMENT_TEAM` in CI). Export methods: `debugging` for a device
   build, `release-testing` for TestFlight, `app-store-connect` for the
@@ -596,6 +645,12 @@ so `transport-check.mjs`'s rule ("nothing else under `app/src` imports
   user's phone runs.
 
 ### 7.3 CI, and Linux
+
+*Written for a crate inside this workspace (§7.1). With the app in its own
+repository, this repository's CI gains nothing for iOS, and these bullets
+describe what the new repository's CI must do instead. One duty stays
+here: `crates/worktrees-remote` must keep building for the iOS target,
+and must keep its "no tauri, no tmux, no engine" boundary.*
 
 - The Linux `rust` job builds `worktrees-core` and `worktrees-cli` by name
   (`.github/workflows/ci.yml:50`–`66`) and the `app` job builds the desktop
@@ -632,7 +687,7 @@ Two loops, both needed:
    (`agent_prompt` with a fixture modal per harness, `agent_answer` with the
    fingerprint check, `agent_send`, `agent_turns`), the `Own` rows
    (`stepup_challenge`/`stepup_prove`, `device_revoke`), and a
-   `?remote=<grant>` mode that answers the first frame with a device grant
+   `?remote=<grant>` mode whose `ok` frame carries a device grant
    and refuses rows outside it with the server's exact words, so the
    `denied` and scope screens are designed against the real refusals. The
    pairing flow gets a `?pair=ok|denied|used|expired` fixture. Playwright
@@ -679,7 +734,7 @@ Two loops, both needed:
 
 | # | Question | Recommendation |
 |---|---|---|
-| Q1 | Bundle id and display name for the phone app, and for the Phase 0 throwaway; which Apple team | `net.casadelvalle.worktrees.ios`, "Worktrees"; `.spike` for Phase 0, deleted after |
+| Q1 | Bundle id and display name for the phone app, and for the Phase 0 throwaway; which Apple team | `net.casadelvalle.worktrees.ios`, "Worktrees". *Partly answered (2026-10-22):* team `M882BTE3A3`, and Phase 0 is `net.casadelvalle.worktrees.ios.spike`, installed from Xcode |
 | Q2 | The Phase 3 grant: `read + write + answer + instruct` with the "can run commands on <host> as you" label, or drop `instruct` (no free-text send) and keep the phone at `read + write + answer`? | Keep `instruct`; sending a line is the second most useful act after answering. The label is honest either way (`answer` + `write` already earns it) |
 | Q3 | Tailscale first, LAN second (recommended), or LAN first? | Tailscale first: no Local Network prompt expected, and the user is on a tailnet already |
 | Q4 | `agent_send` for a Claude place: paste and submit into the pane (one mechanism for every harness), or post to the message bus (`messages_post`, `write`) and let Claude read it on its next `messages`/`wait`? | Paste and submit, refused while a prompt is up; the bus as a later option |
@@ -688,6 +743,7 @@ Two loops, both needed:
 | Q7 | Commit `app-ios/gen/apple/` (Tauri's generated Xcode project) or regenerate it in CI? | Commit it minus `build/` and `xcuserdata/`, so signing settings and `ExportOptions.plist` are reviewed like code |
 | Q8 | Phase 0 before slice 6 lands (parallel lanes), or after? | In parallel: Phase 0 needs no serve, and its findings gate slice 5's client side, which the user already decided waits for the spike (§11.3) |
 | Q9 | Push notifications, later: serve calling APNs directly with a team key on the host (no third party), or a relay? | Direct, when the time comes; it keeps "nothing leaves the host but to Apple" |
+| Q10 | *Added 2026-10-23.* The version rule between the app and its host. Today a client refuses any host version but its own (`ipcws.ts`, D5; and `worktrees remote call` in #555), which suits two desktops on one build. An iOS app updates on Apple's schedule and a host on its own. Exact equality, a range, or a protocol version, and which side refuses? | None yet: it is an open design item in Phase 2's §10, and it must be written down before the app ships |
 
 ---
 
@@ -697,20 +753,25 @@ Two loops, both needed:
 |---|---|
 | Serve over loopback, handshake v1, the frame format, the limits | main; `serve/wire.rs`, `conn.rs`; AGENTS.md |
 | Capabilities, objects, the resolver, result and event projection (slice 1) | main (#535 merged); `authz.rs`, `dispatch.rs`, `resolve.rs` |
-| The path classifier (slice 2); class raises capability (2b) | main (#537); #549 open |
-| The audit log (slice 3); resource limits (slice 4) | #534, #538 open (the Phase 2 doc's §10 says built) |
-| Devices, identity, pairing, revocation, expiry, step-up; `pairuri`; `tls::PinnedServer` | #544 open, branch `feat/p2-device-registry` |
-| The `listen` frame | #550 open |
-| Provenance, `launched_by`, the 4-lane device cap | #551 open |
+| The path classifier (slice 2); class raises capability (2b) | main (#537, #549) |
+| The audit log (slice 3) | main (#534) |
+| Resource limits (slice 4) | #538 open, built on #544 |
+| Devices, identity, pairing, revocation, expiry, step-up; `pairuri` | main (#544) |
+| The `listen` frame | main (#550) |
+| Provenance, `launched_by`, the 4-lane device cap | main (#551) |
 | Gap 17 (a device's git fetch pinned) | main (#546) |
+| `netclass`, `netif`, the address watch (slice 6a) | main (#547) |
+| Slice 6, the host's half: the remote listener, the exporter-keyed handshake and its `ok` frame, keepalive, the kill switch, `worktrees serve pair` (the QR in the terminal), the address code in `serve remote status`, the macOS advert | #556 open (a draft), built on #544 |
+| Slice 6, the client machine's half: `crates/worktrees-remote` (pairing, host records, the pinned pipe, `tls::PinnedServer`), `worktrees remote`, the desktop's remote door | #555 open (a draft), built on #544 |
 | The desktop's protocol client, door table, reconnect policy | main; `app/src/ipc.ts`, `ipcws.ts`, `reconnect.ts` |
 | The network spike's non-hardware half | `scripts/spike/p2-network/`, findings in the lane's cache dir |
 
 | Not built | Needed by |
 |---|---|
-| Slice 6: remote listener, `netclass`, mDNS, address code, remote first frame, keepalive | Phase 1 |
-| A host surface that shows the pairing QR | Phase 1 |
-| The phone app itself: crate, Swift key plugin, remote door, mobile UI | Phases 1–4 |
+| A client that browses for a moved host, or adopts an address code (lane `feat/p2-remote-client-discovery`); the Linux advert | Phase 4 |
+| The host app's pairing sheet and device list (lane `feat/p2-remote-host-ui`); until then, `worktrees serve pair` | Phase 1 |
+| The phone app itself, in its own repository: crate, Swift key plugin, remote door, mobile UI | Phases 1–4 |
+| A written version rule between the app and its host (§8, Q10) | Before the app ships (Phase 4) |
 | `agent_prompt`, `agent_answer`, `agent_send`, `agent_turns` | Phases 2–3 |
 | The hardware measurements A1–A6 | Phase 0 |
 | Any iOS CI step | Phase 4 |
@@ -722,6 +783,11 @@ Two loops, both needed:
 You are a fresh Claude session with no memory, asked to start building the
 iOS MVP of Worktrees. Do these in order.
 
+*Since 2026-10-23 the app lives in a repository of its own (§7.1).* Tasks 1
+and 2 below happen there, not in `scripts/spike/` here, and its own rules
+replace §10.2's where they differ. Task 3, the server rows, stays in this
+repository. The reading list below is this repository's, for both.
+
 ### 10.1 Read first, in this order
 
 1. `AGENTS.md` at the repo root (imported by `CLAUDE.md`): the
@@ -732,11 +798,14 @@ iOS MVP of Worktrees. Do these in order.
 4. `crates/worktrees-cli/src/serve/wire.rs` (the first 45 lines are the
    wire contract), `app/src/ipcws.ts` (the client of it), `app/src/ipc.ts`
    (the door table), `app/src/reconnect.ts`.
-5. On the branch `origin/feat/p2-device-registry` (#544), with `git show
-   origin/feat/p2-device-registry:<path>`: `crates/worktrees-core/src/pairuri.rs`,
+5. On main since #544: `crates/worktrees-core/src/pairuri.rs`,
    `crates/worktrees-cli/src/serve/pairing.rs` (header), `stepup.rs`
-   (header), `tls.rs` (header), and the rows at `dispatch.rs:806`–`855`.
-6. `gh pr view 544 549 550 551` — each description lists the
+   (header), `tls.rs` (header), and the rows from `devices_list` to
+   `identity_rotate` in `dispatch.rs`. Then on `origin/feat/p2-remote-client`
+   (#555): `crates/worktrees-remote/src/lib.rs`, `pipe.rs` and `tls.rs`,
+   `app/src-tauri/src/remote.rs` (header) and `app/src/ipcremote.ts`, the
+   desktop's version of the door the phone needs.
+6. `gh pr view 544 549 550 551 555 556` — each description lists the
    interpretations its lane made.
 7. `app/src-tauri/src/engine.rs` and `lib.rs` (the desktop shim, which the
    phone's shim is a cut-down sibling of), `app/src/mock/install.ts`
@@ -793,19 +862,21 @@ iOS MVP of Worktrees. Do these in order.
 
 ### 10.3 What is built, with PR numbers
 
-See §9. In one line: the server has capabilities and objects on main
-(#535), the classifier (#537), gap 17 (#546); devices, pairing and step-up
-in #544; the listen frame in #550; provenance in #551; the audit log and
-limits in #534 and #538. The phone has nothing yet, and neither does slice
-6 (the remote listener), which the phone cannot connect without. The
-desktop's `ipcws.ts` is the client you will reuse.
+See §9. In one line, as of 2026-10-23: on main, the server has
+capabilities and objects (#535), the classifier and its capability raise
+(#537, #549), the audit log (#534), the listen frame (#550), provenance
+(#551), gap 17 (#546), the address rules (#547), and devices, pairing and
+step-up (#544). Open: limits in #538, and slice 6 in #556 (the host) and
+#555 (the client machine), all built on #544. The phone has nothing yet.
+The desktop's `ipcws.ts` is the protocol client, and #555's
+`crates/worktrees-remote` is the transport the iOS repository depends on.
 
 ### 10.4 The first three concrete tasks
 
-**Task 1 — Phase 0's project and A1.** In a place on a branch
-`spike/p2-ios`, create `scripts/spike/p2-ios/` holding a minimal Tauri 2
-iOS project (`tauri ios init` in a scratch Tauri app there; bundle id
-`net.casadelvalle.worktrees.spike`, `developmentTeam` from the user), a
+**Task 1 — Phase 0's project and A1.** In the iOS repository (§7.1),
+create a minimal Tauri 2 iOS project (`tauri ios init` in a scratch Tauri
+app; bundle id `net.casadelvalle.worktrees.ios.spike`, `developmentTeam`
+`M882BTE3A3`, installed on the phone from Xcode, §6), a
 Swift plugin with three commands (`createKey {tag, userPresence}` →
 public-key DER; `sign {tag, message}` → DER signature; `deleteKey {tag}`),
 and a Rust `SigningKey` that calls `sign`. On the Mac, a rustls server that
