@@ -133,6 +133,54 @@ if (LOCAL && SHIM && rows.length && HANDLERS.length) {
   else ok(`the mock answers every shim command (${(SHIM ?? []).join(", ")})`);
 }
 
+// 6. The remote door's tables (Phase 2 §4.4), held against the Rust both ways.
+//    HOST_PATH_LOCAL is every client-local command whose shim body takes a
+//    HOST object — a path, or a tmux session — and a new one left off would
+//    open THIS machine's file, or attach THIS machine's tmux, in a window that
+//    drives another host. REMOTE_SETTINGS
+//    maps engine rows to the shim's per-device blob (§9.1): its keys must be
+//    serve rows, its values shim commands the shim registers. And remoteDoor
+//    must route by those two tables, and never by anything else.
+{
+  const hostPath = tsList("HOST_PATH_LOCAL");
+  const settingsMap = /export const REMOTE_SETTINGS: Readonly<Record<string, string>> = \{([^}]*)\}/.exec(ipc)?.[1];
+  const pairs = settingsMap ? [...settingsMap.matchAll(/([a-z_0-9]+): "([a-z_0-9]+)"/g)].map((m) => [m[1], m[2]]) : [];
+  if (!hostPath?.length) fail("ipc.ts: HOST_PATH_LOCAL not found — the remote door would refuse nothing");
+  if (!pairs.length) fail("ipc.ts: REMOTE_SETTINGS not found or empty — a remote window would save into the host's ui-state.json");
+  if (hostPath?.length && LOCAL) {
+    const libFns = [...lib.matchAll(/#\[tauri::command\]\s*\nasync fn ([a-z_0-9]+)\(([^)]*)\)/g)].map((m) => [m[1], m[2]]);
+    const takesPath = libFns.filter(([n, params]) => LOCAL.includes(n) && /\b(path|session): String\b/.test(params)).map(([n]) => n);
+    if (!libFns.length) fail("lib.rs: no `#[tauri::command] async fn` parsed — the path rule would pass on nothing");
+    else if (sameSet(hostPath, takesPath)) ok(`HOST_PATH_LOCAL is exactly the client-local commands whose shim body takes a host path or session, both ways (${hostPath.join(", ")})`);
+    else {
+      const extra = minus(hostPath, takesPath), missing = minus(takesPath, hostPath);
+      if (extra.length) fail(`HOST_PATH_LOCAL names commands that are not client-local or take no host path or session: ${extra.join(", ")}`);
+      if (missing.length) fail(`client-local commands that take a HOST path or session but a remote window would run on this machine: ${missing.join(", ")}`);
+    }
+  }
+  if (pairs.length) {
+    const badKeys = pairs.filter(([k]) => !ROWS.includes(k) || CLIENT_ROWS.includes(k)).map(([k]) => k);
+    const badVals = pairs.filter(([, v]) => !(SHIM ?? []).includes(v) || !HANDLERS.includes(v)).map(([, v]) => v);
+    if (badKeys.length) fail(`REMOTE_SETTINGS keys that are not engine rows: ${badKeys.join(", ")}`);
+    if (badVals.length) fail(`REMOTE_SETTINGS values that are not registered shim commands: ${badVals.join(", ")}`);
+    if (!badKeys.length && !badVals.length) ok(`REMOTE_SETTINGS maps engine rows to registered shim commands (${pairs.map(([k, v]) => `${k}→${v}`).join(", ")})`);
+  }
+  const rd = /export function remoteDoor\([^)]*\): EngineDoor \{([\s\S]*?)\n\}/.exec(ipc)?.[1] ?? "";
+  const routed = /invoke<T>\(cmd: string, args\?: InvokeArgs\): Promise<T> \{\s*if \(HOST_PATH_LOCAL\.includes\(cmd\)\) return Promise\.reject\(notOnHost\([^\n]*\);\s*const own = REMOTE_SETTINGS\[cmd\];\s*if \(own\) return local\.invoke<T>\(own, args\);\s*return inner\.invoke<T>\(cmd, args\);\s*\}/.test(rd);
+  if (!rd) fail("ipc.ts: remoteDoor not found");
+  else if (!routed) fail("remoteDoor's invoke does not route exactly: HOST_PATH_LOCAL refused with notOnHost, REMOTE_SETTINGS to the local door, everything else to the engine door");
+  else ok("remoteDoor routes by HOST_PATH_LOCAL (refused, with the reason) and REMOTE_SETTINGS (the shim's blob), and sends the rest through the engine door");
+  if (/engine_connect/.test(rd)) fail("remoteDoor names engine_connect — a remote window must not find or start a local serve");
+  if (!/setAway\(/.test(rd)) fail("remoteDoor does not mark the window as not on its engine's host (setAway)");
+  else ok("remoteDoor marks the window as not on its engine's host before anything renders");
+  const remoteShim = (SHIM ?? []).filter((n) => n.startsWith("remote_"));
+  const mod = read(here("../src-tauri/src/remote.rs"));
+  const leaks = /-> Result<(?:worktrees_remote::hosts::)?HostRecord/.test(code(lib)) || /pub (?:async )?fn [a-z_]+\([^)]*\) -> Result<(?:Vec<)?HostRecord/.test(code(mod));
+  if (remoteShim.length < 9) fail(`expected the nine remote_* shim commands, found ${remoteShim.length}`);
+  else if (leaks) fail("a remote shim command answers a HostRecord (pin and all) — the page may see only a HostSummary");
+  else ok(`the ${remoteShim.length} remote_* shim commands answer summaries, never a HostRecord with its pin`);
+}
+
 // ── the shim's side of serve's contract ─────────────────────────────────────
 
 const engine = noTests(read(SRC.engine));

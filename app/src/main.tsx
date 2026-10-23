@@ -1,5 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
+import type { Door, EngineDoor } from "./ipc";
+import type { HostSummary, OpenPipe } from "./ipcremote";
 import type { SocketDeps } from "./ipcws";
 import type { RetryEnv } from "./reconnect";
 
@@ -37,6 +39,47 @@ function retryEnv(): RetryEnv {
     random: () => Math.random(),
     visible: () => document.visibilityState !== "hidden",
   };
+}
+
+/** The paired host the window was last told to drive (Settings → Hosts), or
+ *  null for this machine's own engine — also when the host list cannot be
+ *  read, which Settings shows. */
+async function chosenHost(door: Door): Promise<HostSummary | null> {
+  try {
+    const h = await door.invoke<{ chosen: string | null; hosts: HostSummary[] }>("remote_hosts");
+    return (h.chosen && h.hosts.find((x) => x.id === h.chosen)) || null;
+  } catch (e) {
+    console.warn(`[hosts] ${String(e)} — this window drives this machine's own engine`);
+    return null;
+  }
+}
+
+/** The door of a window that drives a paired host: ipcws.ts, unchanged, over
+ *  the shim's pinned pipe (ipcremote.ts), keyed with the pipe's session token.
+ *  Never `engine_connect`: with a host chosen, no local serve is found or
+ *  started (§4.4). `owned: false`, so the retries reconnect and never start. */
+async function remoteBoot(host: HostSummary): Promise<EngineDoor> {
+  const { remoteDoor, tauriDoor } = await import("./ipc");
+  const ws = await import("./ipcws");
+  const { openPipe, shimOf } = await import("./ipcremote");
+  const shim = shimOf(tauriDoor);
+  const remedy = `Reconnect now tries again at once. If ${host.name} no longer knows this machine, pair again in Settings → Hosts.`;
+  return remoteDoor(
+    tauriDoor,
+    host.name,
+    async ({ onLost }) => {
+      let pipe: OpenPipe | null = null;
+      // The shim's words for an end (a revoke says so) go with ipcws's.
+      const lost = (msg: string) => {
+        const why = pipe?.closedWhy();
+        onLost(why && !msg.includes(why) ? `${msg} (${why})` : msg);
+      };
+      pipe = await openPipe(shim, host.id, { setTimeout: (fn, ms) => window.setTimeout(fn, ms) });
+      const sock = ws.connectSocket({ ...socketDeps(lost, remedy), port: 0, token: pipe.connected.token, WebSocket: pipe.WebSocket });
+      return { sock, owned: false, started: false };
+    },
+    retryEnv(),
+  );
 }
 
 // Three ways to boot, chosen before anything that talks to the backend is
@@ -100,19 +143,23 @@ async function boot() {
     // and the socket's HMAC key. Client-local commands stay on Tauri IPC.
     const { engineDoor, openDoor, tauriDoor } = await import("./ipc");
     const { connectSocket } = await import("./ipcws");
+    // Which engine: this machine's own, or a paired host (Settings → Hosts).
+    const host = await chosenHost(tauriDoor);
     // `start` is the retry policy's (reconnect.ts) and the shim obeys it: under
     // false it starts and replaces nothing. `owned`/`started` are the shim's
     // answer, and the policy's only source for either.
-    const door = engineDoor(
-      tauriDoor,
-      async ({ reason, start, manual, onLost, onPhase }) => {
-        const onPhaseCh = tauriDoor.channel<string>(onPhase);
-        const ep = await tauriDoor.invoke<{ port: number; token: string; owned: boolean; started: boolean }>("engine_connect", { reason, start, manual, onPhase: onPhaseCh });
-        const sock = connectSocket({ ...socketDeps(onLost, RECONNECT), port: ep.port, token: ep.token });
-        return { sock, owned: ep.owned, started: ep.started };
-      },
-      retryEnv(),
-    );
+    const door = host
+      ? await remoteBoot(host)
+      : engineDoor(
+          tauriDoor,
+          async ({ reason, start, manual, onLost, onPhase }) => {
+            const onPhaseCh = tauriDoor.channel<string>(onPhase);
+            const ep = await tauriDoor.invoke<{ port: number; token: string; owned: boolean; started: boolean }>("engine_connect", { reason, start, manual, onPhase: onPhaseCh });
+            const sock = connectSocket({ ...socketDeps(onLost, RECONNECT), port: ep.port, token: ep.token });
+            return { sock, owned: ep.owned, started: ep.started };
+          },
+          retryEnv(),
+        );
     openDoor(door);
     document.addEventListener("visibilitychange", () => door.visibility());
     void door.connect();

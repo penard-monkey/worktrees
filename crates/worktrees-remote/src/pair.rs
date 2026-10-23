@@ -122,6 +122,24 @@ impl Platform {
     }
 }
 
+/// This machine's name for the host's dialog: the system host name without
+/// `.local`, or a constant when it would not pass the display-name rule.
+pub fn this_name() -> String {
+    let mut buf = [0u8; 256];
+    // SAFETY: a stack buffer and its length.
+    let raw = if unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } == 0 {
+        String::from_utf8_lossy(&buf[..buf.iter().position(|b| *b == 0).unwrap_or(buf.len())]).into_owned()
+    } else {
+        String::new()
+    };
+    let name = raw.strip_suffix(".local").unwrap_or(&raw).to_string();
+    if pairuri::display_name_ok(&name).is_ok() {
+        name
+    } else {
+        "worktrees device".to_string()
+    }
+}
+
 /// Why the host said no (§2.2: `{"denied": …}`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Denied {

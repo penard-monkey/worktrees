@@ -24,6 +24,9 @@ use worktrees_api::util::fmt_utc;
 use worktrees_core::sysclock;
 
 mod engine;
+// This window driving ANOTHER host's serve: pairing, the hosts kept, and the
+// pinned pipe the page's protocol runs over (Phase 2 §4.4).
+mod remote;
 // Window state: where the window was, restored on launch. Its own file because
 // it is the one part of this shim with real logic of its own.
 mod winstate;
@@ -261,6 +264,75 @@ async fn raise_window(app: AppHandle) -> Result<(), String> {
     })
 }
 
+// ── the remote door (remote.rs) ─────────────────────────────────────────────
+// The shim's own commands, like engine_connect: never serve rows. The page
+// never sees a key or a pin through any of them.
+
+/// The hosts this machine is paired with, and which one the window drives
+/// (`null`: this machine's own serve).
+#[tauri::command]
+async fn remote_hosts(remote: tauri::State<'_, Arc<remote::Remote>>) -> Result<remote::HostList, String> {
+    remote.hosts()
+}
+
+/// Choose the engine the window drives: a kept host's id, or `null` for this
+/// machine's own. The page reloads to act on it.
+#[tauri::command]
+async fn remote_choose(remote: tauri::State<'_, Arc<remote::Remote>>, host_id: Option<String>) -> Result<(), String> {
+    remote.choose(host_id.as_deref())
+}
+
+#[tauri::command]
+async fn remote_forget(remote: tauri::State<'_, Arc<remote::Remote>>, host_id: String) -> Result<worktrees_remote::hosts::HostSummary, String> {
+    remote.forget(&host_id).await
+}
+
+/// Pair with the host a `worktrees-pair:v1` link names (§2.2). `on_event`
+/// hears `{dialling}` and then `{code}`, the six digits to compare with the
+/// host's screen; the answer is the kept host, or the refusal in words.
+#[tauri::command]
+async fn remote_pair(
+    remote: tauri::State<'_, Arc<remote::Remote>>,
+    link: String,
+    name: String,
+    on_event: tauri::ipc::Channel<serde_json::Value>,
+) -> Result<worktrees_remote::hosts::HostSummary, String> {
+    remote.pair(&link, &name, &on_event).await
+}
+
+/// Open the pinned socket to a kept host: `{conn, token, host}`, then its
+/// frames on `on_frame` as `{frame}` and, last, `{closed}`.
+#[tauri::command]
+async fn remote_connect(
+    remote: tauri::State<'_, Arc<remote::Remote>>,
+    host_id: String,
+    on_frame: tauri::ipc::Channel<serde_json::Value>,
+) -> Result<remote::Connected, String> {
+    remote.connect(&host_id, on_frame).await
+}
+
+#[tauri::command]
+async fn remote_send(remote: tauri::State<'_, Arc<remote::Remote>>, conn: u64, text: String) -> Result<(), String> {
+    remote.send(conn, text).await
+}
+
+#[tauri::command]
+async fn remote_close(remote: tauri::State<'_, Arc<remote::Remote>>, conn: u64) -> Result<(), String> {
+    remote.close(conn).await
+}
+
+/// A remote window's own settings blob (§9.1), in place of the host's
+/// `get_settings`/`set_settings`: written whole by the page, never edited here.
+#[tauri::command]
+async fn remote_settings_get(remote: tauri::State<'_, Arc<remote::Remote>>) -> Result<Option<serde_json::Value>, String> {
+    remote.settings_get()
+}
+
+#[tauri::command]
+async fn remote_settings_set(remote: tauri::State<'_, Arc<remote::Remote>>, settings: serde_json::Value) -> Result<(), String> {
+    remote.settings_set(settings)
+}
+
 /// The origin of the page `tauri dev` loads (`devUrl`, http://localhost:1420),
 /// which serve does not allow by name: a serve this dev build starts is told
 /// `--allow-origin` it, and the shim's probe presents it.
@@ -344,6 +416,9 @@ pub fn run() {
                 Ok((p, how)) => applog("info", &format!("engine: serve binary {} ({how})", p.display())),
                 Err(e) => applog("error", &format!("engine: no serve binary: {e}")),
             }
+            // The remote door's state: the hosts kept beside the app's other
+            // files, and the one remote socket this window may hold.
+            app.manage(Arc::new(remote::Remote::new(&config_dir)));
             app.manage(Arc::new(engine::Engine::new(
                 config_dir.clone(),
                 origin,
@@ -454,7 +529,16 @@ pub fn run() {
             open_terminal,
             set_zoom,
             engine_connect,
-            raise_window
+            raise_window,
+            remote_hosts,
+            remote_choose,
+            remote_forget,
+            remote_pair,
+            remote_connect,
+            remote_send,
+            remote_close,
+            remote_settings_get,
+            remote_settings_set
         ])
         .build(tauri::generate_context!())
         .expect("error while running tauri application")

@@ -48,6 +48,15 @@ function mockModel(h: Harness, asked: unknown): string {
 // a machine without kimi.
 let kimiMcpMode: "off" | "read-only" | "mutations" = "off";
 const kimiAllowed = new Set<string>();
+/** The remote door's state in the harness: the hosts this "machine" is
+ *  paired with, and the one the window drives. `?remote` starts with one
+ *  chosen, so the path-taking acts can be seen greyed. */
+type MockHost = { id: string; name: string; addr: string; device_id: string; expiry: unknown; paired_at: number };
+const mockRemote: { chosen: string | null; hosts: MockHost[] } = (() => {
+  const studio: MockHost = { id: "h_mockstudioaaaaaaaaaaaaaaaa", name: "Studio", addr: "192.168.1.20:7461", device_id: "d_studio", expiry: { idle_days: 30 }, paired_at: 1_790_000_000 };
+  return { chosen: new URLSearchParams(location.search).has("remote") ? studio.id : null, hosts: [studio] };
+})();
+
 const kimiMissing = () => new URLSearchParams(location.search).get("kimi") === "missing";
 const kimiMcpStatus = () => ({
   state: kimiMissing() ? "kimi-missing" : kimiMcpMode, mode: kimiMcpMode,
@@ -1776,6 +1785,56 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       return null;
     case "engine_connect":
       throw new Error("the mock harness has no engine: it answers every command itself");
+
+    // The remote door's shim commands (src-tauri/src/remote.rs). The hosts this
+    // "machine" is paired with live in the tab; pairing shows a code and keeps
+    // a host after a beat, or refuses a link the way the parser words it.
+    // `?remote` boots as if a paired host were chosen (main.tsx greys every
+    // path-taking act); there is no pipe to dial, so connecting says so.
+    case "remote_hosts":
+      return { chosen: mockRemote.chosen, hosts: mockRemote.hosts, this_name: "Mock Mac" };
+    case "remote_choose": {
+      const id = (args.hostId ?? null) as string | null;
+      if (id !== null && !mockRemote.hosts.some((h) => h.id === id)) throw `no host "${id}" is kept here`;
+      mockRemote.chosen = id;
+      return null;
+    }
+    case "remote_forget": {
+      const h = mockRemote.hosts.find((x) => x.id === args.hostId || x.name === args.hostId);
+      if (!h) throw `no paired host is called "${String(args.hostId)}"`;
+      mockRemote.hosts = mockRemote.hosts.filter((x) => x !== h);
+      if (mockRemote.chosen === h.id) mockRemote.chosen = null;
+      return h;
+    }
+    case "remote_pair": {
+      const link = String(args.link ?? "");
+      const ev = args.onEvent as { onmessage?: (v: unknown) => void } | undefined;
+      if (!link.startsWith("worktrees-pair:v1?")) throw "not a worktrees pairing link (v1)";
+      if (/addr=(8\.8\.8\.8|1\.1\.1\.1)/.test(link)) throw "not-private: that address is public — only RFC 1918, 100.64.0.0/10, link-local and fc00::/7 may be used";
+      ev?.onmessage?.({ dialling: { host: "Mock host", addr: "192.168.1.5:7461" } });
+      await new Promise((r) => setTimeout(r, 300));
+      ev?.onmessage?.({ code: "482913" });
+      await new Promise((r) => setTimeout(r, 1200));
+      if (link.includes("deny")) throw "Mock host said no: Deny was pressed there";
+      const h = { id: `h_mock${mockRemote.hosts.length}aaaaaaaaaaaaaaaaaaaa`.slice(0, 28), name: "Mock host", addr: "192.168.1.5:7461", device_id: "d_mock", expiry: { idle_days: 30 }, paired_at: Math.floor(Date.now() / 1000) };
+      mockRemote.hosts = [...mockRemote.hosts, h];
+      return h;
+    }
+    case "remote_connect":
+      throw "the mock harness has no remote host to dial: it answers every command itself";
+    case "remote_send":
+    case "remote_close":
+      return null;
+    case "remote_settings_get":
+      try {
+        const raw = sessionStorage.getItem(MOCK_SETTINGS_KEY + ":remote");
+        return raw ? JSON.parse(raw) : null;
+      } catch {
+        return null;
+      }
+    case "remote_settings_set":
+      try { sessionStorage.setItem(MOCK_SETTINGS_KEY + ":remote", JSON.stringify(args.settings)); } catch { /* private mode */ }
+      return null;
 
     // Codex account quotas. Independent states, delay, sequence and invocation
     // counts let browser checks verify real Off and overlapping request behavior.

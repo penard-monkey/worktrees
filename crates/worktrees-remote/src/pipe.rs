@@ -103,9 +103,14 @@ pub async fn open_at(addr: std::net::SocketAddr, pin: &str, key: &DeviceKey, wai
             }
         })?;
         let ex = tls::client_exporter(tls.get_ref().1, tls::EXPORTER_SESSION).map_err(PipeError::Tls)?;
-        // `ws://<addr>/`: tungstenite writes Host from it — the literal, with
-        // IPv6 in brackets — and adds no Origin.
-        let req = format!("ws://{addr}/").into_client_request().map_err(|e| PipeError::Upgrade(e.to_string()))?;
+        // Host is the listener's rule exactly: `SocketAddr`'s Display of the
+        // address dialled (`192.168.0.40:53455`, `[fe80::1]:7443` — zone-less,
+        // lowercase, compressed), set here rather than left to how tungstenite
+        // derives it from the URI (which drops a default port). No Origin: the
+        // listener refuses any.
+        let mut req = format!("ws://{addr}/").into_client_request().map_err(|e| PipeError::Upgrade(e.to_string()))?;
+        let host = addr.to_string().parse().map_err(|e: tokio_tungstenite::tungstenite::http::header::InvalidHeaderValue| PipeError::Upgrade(e.to_string()))?;
+        req.headers_mut().insert("Host", host);
         let (ws, _) = tokio_tungstenite::client_async(req, tls).await.map_err(|e| upgrade_error(&e))?;
         Ok(Pipe { ws, token: tls::hex(&ex) })
     };

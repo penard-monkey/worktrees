@@ -56,6 +56,29 @@ if (offenders.length) {
   ok(`${ROOT} reaches no tauri crate (${seen.size} crates in its tree)`);
 }
 
+// The device's transport (`worktrees-remote`) is what an OUTSIDE crate — the
+// iOS app's own repository — depends on by git: it may reach no tauri crate
+// and no engine (worktrees-api, worktrees-cli), or that repository would build
+// a window toolkit and an engine to dial a socket.
+{
+  const R = "worktrees-remote";
+  if (!pkgs.has(R)) fail(`${R} is not in Cargo.lock — has the crate been renamed?`);
+  const seenR = new Set([R]);
+  const q = [[R, [R]]];
+  const bad = [];
+  while (q.length) {
+    const [name, path] = q.shift();
+    for (const d of pkgs.get(name) ?? []) {
+      if (/^tauri(-|$)/.test(d) || d === "worktrees-api" || d === "worktrees-cli") bad.push([...path, d].join(" -> "));
+      if (seenR.has(d)) continue;
+      seenR.add(d);
+      q.push([d, [...path, d]]);
+    }
+  }
+  if (bad.length) for (const b of bad) fail(`${R} reaches tauri or the engine: ${b}`);
+  else if (pkgs.has(R)) ok(`${R} reaches no tauri crate and no engine crate (${seenR.size} crates in its tree)`);
+}
+
 // ── the shim is a CLIENT, not an engine ────────────────────────────────────
 // One engine process per host (decision 2, `worktrees_api`'s crate doc): the
 // nav-dot poll, the dock shells, the docs server and the engine's writers run
@@ -143,16 +166,23 @@ const managed = (run.match(/app\.manage\(Arc::new\(engine::Engine::new\(/g) ?? [
 if (managed !== 1) fail(`the Engine is managed ${managed} times in run() — expected exactly 1, inside the .setup`);
 else if (run.indexOf("app.manage(Arc::new(engine::Engine::new(") < run.indexOf(".setup(")) fail("the Engine is managed outside the .setup closure");
 else ok("exactly one Engine is managed, inside the one .setup");
+// The remote door's state (src-tauri/src/remote.rs: the hosts kept, the one
+// remote socket) is the third managed thing, under the same rule.
+const managedRemote = (run.match(/app\.manage\(Arc::new\(remote::Remote::new\(/g) ?? []).length;
+if (managedRemote !== 1) fail(`the remote door is managed ${managedRemote} times in run() — expected exactly 1, inside the .setup`);
+else if (run.indexOf("app.manage(Arc::new(remote::Remote::new(") < run.indexOf(".setup(")) fail("the remote door is managed outside the .setup closure");
+else ok("exactly one remote door is managed, inside the one .setup");
 
 // 5. Nothing may look up as Tauri state a thing nobody manages: `state::<T>()`
 //    compiles for any T and panics at RUNTIME, "state() called before
-//    manage()". Two things are managed — the window tracker and the Engine.
+//    manage()". Three things are managed — the window tracker, the Engine,
+//    and the remote door.
 const stateRe = /\.(?:try_)?state::<\s*([\w:<>]+?)\s*>(?:\(|\s)/g;
 const asked = [...code.matchAll(stateRe)].map((m) => m[1]);
-const strayState = [...new Set(asked)].filter((t) => !/^(winstate::)?Tracker$|^Arc<engine::Engine>$/.test(t));
-const typedState = [...code.matchAll(/State<'_,\s*([\w:<>]+?)>\s*[,)]/g)].map((m) => m[1]).filter((t) => t !== "Arc<engine::Engine>");
+const strayState = [...new Set(asked)].filter((t) => !/^(winstate::)?Tracker$|^Arc<engine::Engine>$|^Arc<remote::Remote>$/.test(t));
+const typedState = [...code.matchAll(/State<'_,\s*([\w:<>]+?)>\s*[,)]/g)].map((m) => m[1]).filter((t) => t !== "Arc<engine::Engine>" && t !== "Arc<remote::Remote>");
 if (strayState.length || typedState.length) fail(`lib.rs asks Tauri for state nothing manages: ${[...strayState, ...typedState].join(", ")}`);
-else ok("lib.rs asks Tauri only for the window tracker and the Engine, the two things it manages");
+else ok("lib.rs asks Tauri only for the window tracker, the Engine and the remote door, the three things it manages");
 
 // 6. Quitting stops the serve this app MANAGES — and only through the Engine,
 //    which knows whether it started (or adopted) that serve. A bare kill here

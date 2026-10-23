@@ -115,26 +115,8 @@ pub fn cmd_remote(args: &[String]) -> i32 {
     }
 }
 
-/// This machine's name for the host's dialog: the system host name without
-/// `.local`, or a constant when it would not pass the display-name rule.
-fn this_name() -> String {
-    let mut buf = [0u8; 256];
-    // SAFETY: a stack buffer and its length.
-    let raw = if unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) } == 0 {
-        String::from_utf8_lossy(&buf[..buf.iter().position(|b| *b == 0).unwrap_or(buf.len())]).into_owned()
-    } else {
-        String::new()
-    };
-    let name = raw.strip_suffix(".local").unwrap_or(&raw).to_string();
-    if worktrees_core::pairuri::display_name_ok(&name).is_ok() {
-        name
-    } else {
-        "worktrees device".to_string()
-    }
-}
-
 async fn do_pair(store: &HostStore, link: &str, name: Option<&str>) -> i32 {
-    let name = name.map(str::to_string).unwrap_or_else(this_name);
+    let name = name.map(str::to_string).unwrap_or_else(pair::this_name);
     let mut host = String::from("the host");
     let mut on = |ev: PairEvent| match ev {
         PairEvent::Dialling { host: h, addr } => {
