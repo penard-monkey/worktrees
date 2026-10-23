@@ -546,8 +546,10 @@ pub enum DeviceEvent {
     /// something; `reduced` = something was taken away.
     ScopeChanged { subject: Subject, by: Actor, from: Grant, to: Grant, widened: bool, reduced: bool },
     /// A revoked, disabled, expired or unknown key tried to connect. The
-    /// first three are an alert (§5.3); unknown keys are aggregated.
-    ConnectRefused { subject: Option<Subject>, spki_sha256: String, why: ConnectRefusal },
+    /// first three are an alert (§5.3); unknown keys are aggregated. `peer`
+    /// is the address it came from, when the check knew it (the remote
+    /// listener's verifier does).
+    ConnectRefused { subject: Option<Subject>, spki_sha256: String, why: ConnectRefusal, peer: Option<String> },
     /// `devices.json` cannot be read: every device is refused and the file is
     /// left as it is. Alert.
     Unreadable { why: String },
@@ -574,6 +576,10 @@ pub enum DeviceEvent {
     /// The window closed, and how: paired (with the new device), denied,
     /// expired, or the failure that ended it.
     PairingClosed { ended: super::pairing::Ended, device: Option<DeviceId> },
+    /// A device connected from an address of another class than it was last
+    /// seen from (`netclass::Class`: a tailnet device now on the LAN, say).
+    /// Alert (§5.3).
+    NewAddressClass { subject: Subject, from: String, to: String },
 }
 
 impl DeviceEvent {
@@ -607,7 +613,7 @@ impl DeviceEvent {
     /// record and emits `audit:alert` for it.
     pub fn alerts(&self) -> bool {
         match self {
-            DeviceEvent::Enrolled { .. } | DeviceEvent::Unreadable { .. } | DeviceEvent::IdentityRotated { .. } => true,
+            DeviceEvent::Enrolled { .. } | DeviceEvent::Unreadable { .. } | DeviceEvent::IdentityRotated { .. } | DeviceEvent::NewAddressClass { .. } => true,
             DeviceEvent::Disabled { reason, .. } => *reason != DisabledReason::Console,
             DeviceEvent::ConnectRefused { why, .. } => *why != ConnectRefusal::Unknown,
             _ => false,
@@ -1171,11 +1177,18 @@ impl DeviceRegistry {
     /// and reaches the file at most every [`SEEN_FLUSH_SECS`] and at exit. A
     /// refused handshake never comes here, so a disabled device cannot keep
     /// itself alive by knocking.
-    // A seam: slice 6's remote listener calls it; until then, the tests.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn seen(&self, id: &DeviceId, addr: Option<String>, now: i64) {
         self.seen.lock().unwrap().insert(id.clone(), (now, addr));
         self.flush_due(now);
+    }
+
+    /// The address a device was last seen from: the newest completed
+    /// handshake's, even before it reaches the file, else the record's.
+    pub fn last_addr(&self, id: &DeviceId) -> Option<String> {
+        if let Some((_, a)) = self.seen.lock().unwrap().get(id) {
+            return a.clone();
+        }
+        self.snapshot()?.device(id)?.last_addr.clone()
     }
 
     /// [`DeviceRegistry::flush_seen`], if the last write is ten minutes old.
@@ -1248,10 +1261,8 @@ impl DeviceRegistry {
     /// `spki_sha256`, if it may connect now. A device whose expiry ran out is
     /// disabled HERE, at the knock, and refused. Every refusal of a known
     /// device is an event (§5.3: "a revoked or disabled device trying to
-    /// connect").
-    // A seam: slice 6's remote listener calls it; until then, the tests.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub fn admit(&self, spki_sha256: &str, now: i64) -> Result<Caller, ConnectRefusal> {
+    /// connect"), naming `peer`, the address the key came from, when known.
+    pub fn admit(&self, spki_sha256: &str, now: i64, peer: Option<std::net::IpAddr>) -> Result<Caller, ConnectRefusal> {
         let found = {
             let st = self.state.read().unwrap();
             match &st.file {
@@ -1265,7 +1276,7 @@ impl DeviceRegistry {
             }
         };
         let refuse = |subject: Option<Subject>, why| {
-            self.fire(&[DeviceEvent::ConnectRefused { subject, spki_sha256: spki_sha256.to_string(), why }]);
+            self.fire(&[DeviceEvent::ConnectRefused { subject, spki_sha256: spki_sha256.to_string(), why, peer: peer.map(|p| p.to_string()) }]);
             Err(why)
         };
         let d = match found {
@@ -1550,7 +1561,7 @@ mod tests {
             reg.startup(NOW);
             assert!(matches!(events.lock().unwrap().first(), Some(DeviceEvent::Unreadable { .. })), "{why}: the alert");
             assert_eq!(reg.device_grant(&PrincipalId::owner(), &p.id), None, "{why}: the device is refused");
-            assert_eq!(reg.admit(&p.spki_sha256, NOW), Err(ConnectRefusal::Unreadable), "{why}");
+            assert_eq!(reg.admit(&p.spki_sha256, NOW, None), Err(ConnectRefusal::Unreadable), "{why}");
             let e = reg.disable(&p.id, NOW).unwrap_err();
             assert!(e.contains("every device is refused"), "{why}: {e}");
             assert!(reg.enroll(enrollment("New", 9, Platform::Macos, grant(&[Read], Projects::All)), NOW).is_err(), "{why}");
@@ -1583,7 +1594,7 @@ mod tests {
         reg.revoke(&Caller::console(), &Grant::everything(), &a.id, NOW).unwrap();
         let b = reg.enroll(enrollment("B", 1, Platform::Ios, grant(&[Read], Projects::All)), NOW).unwrap();
         // The handshake finds the live record, not the tombstone.
-        assert_eq!(reg.admit(&pin(1), NOW), Ok(caller(&b)));
+        assert_eq!(reg.admit(&pin(1), NOW, None), Ok(caller(&b)));
     }
 
     /// §2.1, §2.5, §11 Q8: an iPhone or iPad enrolls a presence-bound key and
@@ -1627,7 +1638,7 @@ mod tests {
         assert!(!reg.revoke(&Caller::console(), &Grant::everything(), &peer.id, NOW).unwrap(), "idempotent");
         assert!(reg.revoke(&caller(&me), &g(&me), &me.id, NOW).unwrap(), "a device may always revoke itself");
         assert!(reg.enable(&peer.id, NOW).unwrap_err().contains("revoked"), "a tombstone is never re-enabled");
-        assert_eq!(reg.admit(&peer.spki_sha256, NOW), Err(ConnectRefusal::Revoked), "the next handshake fails");
+        assert_eq!(reg.admit(&peer.spki_sha256, NOW, None), Err(ConnectRefusal::Revoked), "the next handshake fails");
         let f = reg.snapshot().unwrap();
         assert!(f.device(&peer.id).unwrap().revoked_at.is_some(), "kept as a tombstone");
     }
@@ -1724,7 +1735,7 @@ mod tests {
         // Back in time: still disabled — the record decides, not the clock.
         assert!(reg.check_expiry(NOW).unwrap().is_empty());
         assert_eq!(reg.device_grant(&PrincipalId::owner(), &idle.id), None);
-        assert_eq!(reg.admit(&idle.spki_sha256, NOW), Err(ConnectRefusal::Disabled));
+        assert_eq!(reg.admit(&idle.spki_sha256, NOW, None), Err(ConnectRefusal::Disabled));
         // Re-enabling restarts the idle clock from that moment.
         assert!(reg.enable(&idle.id, NOW + 50 * DAY).unwrap());
         assert_eq!(reg.next_deadline(), Some(NOW + 80 * DAY));
@@ -1740,12 +1751,12 @@ mod tests {
         let reg = DeviceRegistry::in_memory();
         let events = recorder(&reg);
         let p = phone(&reg, "Phone", 1, &[Read]);
-        assert_eq!(reg.admit(&p.spki_sha256, NOW), Ok(caller(&p)));
-        assert_eq!(reg.admit(&pin(77), NOW), Err(ConnectRefusal::Unknown));
+        assert_eq!(reg.admit(&p.spki_sha256, NOW, None), Ok(caller(&p)));
+        assert_eq!(reg.admit(&pin(77), NOW, None), Err(ConnectRefusal::Unknown));
         // Past its idle window with no tick in between: disabled AT the knock.
-        assert_eq!(reg.admit(&p.spki_sha256, NOW + 31 * DAY), Err(ConnectRefusal::Expired));
+        assert_eq!(reg.admit(&p.spki_sha256, NOW + 31 * DAY, None), Err(ConnectRefusal::Expired));
         assert_eq!(reg.snapshot().unwrap().device(&p.id).unwrap().disabled.unwrap().reason, DisabledReason::Idle);
-        assert_eq!(reg.admit(&p.spki_sha256, NOW + 31 * DAY), Err(ConnectRefusal::Disabled));
+        assert_eq!(reg.admit(&p.spki_sha256, NOW + 31 * DAY, None), Err(ConnectRefusal::Disabled));
         let ev = events.lock().unwrap().clone();
         let refusals: Vec<_> = ev.iter().filter_map(|e| match e {
             DeviceEvent::ConnectRefused { why, subject, .. } => Some((*why, subject.is_some())),

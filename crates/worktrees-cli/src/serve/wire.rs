@@ -75,8 +75,18 @@ pub fn challenge_frame(sn: &str) -> String {
 
 /// Handshake frame 4, sent only once the client's proof has verified: the
 /// version, and the server's proof that it holds the token too.
-pub fn auth_reply(proof: &str) -> String {
-    json!({ "ok": true, "version": env!("CARGO_PKG_VERSION"), "proof": proof }).to_string()
+///
+/// On a remote session it also names the device the session belongs to —
+/// `{id, principal, name, caps, projects, expiry, stepup_required}` — so the
+/// device can show its own grant and expiry (Phase 2 §4.5, as amended by
+/// (main) 2026-10-22: the remote listener runs handshake v1 unchanged, and
+/// this is its `ok`). Loopback's has no `device`.
+pub fn auth_reply(proof: &str, device: Option<&Value>) -> String {
+    let mut v = json!({ "ok": true, "version": env!("CARGO_PKG_VERSION"), "proof": proof });
+    if let Some(d) = device {
+        v["device"] = d.clone();
+    }
+    v.to_string()
 }
 
 /// `err` for a command the socket will not run.
@@ -726,8 +736,11 @@ mod tests {
 
     #[test]
     fn the_auth_reply_carries_this_binarys_version_and_the_proof() {
-        let v: Value = serde_json::from_str(&auth_reply("p")).unwrap();
-        assert_eq!(v, json!({ "ok": true, "version": env!("CARGO_PKG_VERSION"), "proof": "p" }));
+        let v: Value = serde_json::from_str(&auth_reply("p", None)).unwrap();
+        assert_eq!(v, json!({ "ok": true, "version": env!("CARGO_PKG_VERSION"), "proof": "p" }), "loopback's, exactly as it was");
+        let d = json!({ "id": "d_1", "principal": "owner" });
+        let v: Value = serde_json::from_str(&auth_reply("p", Some(&d))).unwrap();
+        assert_eq!(v, json!({ "ok": true, "version": env!("CARGO_PKG_VERSION"), "proof": "p", "device": d }), "a remote session's names its device");
         let c: Value = serde_json::from_str(&challenge_frame("s")).unwrap();
         assert_eq!(c, json!({ "challenge": "s" }));
     }

@@ -10,9 +10,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   dir.** One line for everything that reached its socket and was not a plain
   read: every change, every refusal, every terminal or dock shell opened and
   closed (with how many bytes were typed into it, never what), and the server
-  starting and stopping. Each line names who did it. Today that is always you,
-  at this machine; the field is there for the phones and second desktops to
-  come.
+  starting and stopping. Each line names who did it: you at this machine, or
+  a paired device (below).
   - It never holds what you typed or wrote. A file save is recorded by path,
     size and SHA-256. Note text, pastes, tokens and URLs are left out.
   - Each line carries the hash of the one before it, so an edited, removed or
@@ -48,6 +47,41 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   from and how many jobs run and wait in it now. Change one with − and +, and
   Reset removes it from the config. Only the computer the app runs on can
   change them; a paired device can read them.
+- **Another machine on your network can drive Worktrees, once you turn
+  remote access on.** It is off until you turn it on.
+  `worktrees serve remote on <address>` puts it on one private address of
+  this host: a home or office LAN, a Tailscale address, or a cable between
+  two machines. A public address, loopback or "every address" is refused.
+  `worktrees serve pair --projects <root> --caps read,write,stream` shows a
+  QR code and a link; on the other machine, `worktrees remote pair '<link>'`
+  shows the same six-digit code the host does, and you allow it on the host.
+  - A device connects only with the key it paired with, over TLS pinned both
+    ways, and any other key is refused before anything else is read. A
+    device can never do what only the host may: pair another device, change
+    host policy, or turn remote access on or off.
+  - `worktrees serve remote off` closes every device's connection, the
+    listener and any pairing window at once. Turned on again, it keeps the
+    same port, so paired devices find it where they left it.
+  - When this host's address changes on the same network (a new DHCP lease),
+    remote access moves with it on its own, at most three times an hour. On
+    any other network it pauses and waits for you to choose.
+  - On macOS a paired device can find the host again after its address
+    changes, under an opaque name (`wt-<random id>.local`) that says nothing
+    about you. `worktrees serve remote advertise off` stops that, before or
+    after remote access is on. Linux does not announce the host yet; the
+    address code in `worktrees serve remote status` is the way there.
+  - While the audit log cannot be written, a device can only read.
+  - A key refused at the door is one line in the audit log, with the address
+    it came from. A device added to `devices.json` by hand, which the audit
+    log never saw paired, is refused there as everywhere else.
+  - A device can hold four connections at once. A fifth is closed with the
+    reason, so the device does not mistake it for a lost host.
+  - When the app started the engine, quitting the app ends remote access,
+    and while remote access is on the app says so. A device never keeps the
+    app's engine running; to serve devices with no app open, run
+    `worktrees serve` yourself.
+  - `worktrees serve call <command> [json]` runs one command on the running
+    serve from a terminal.
 
 ### Changed
 - **With nothing set, a slot's capacity is sized from the machine.** It used to
@@ -145,18 +179,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `~/.cache/worktrees`, and that directory is removed once the installer
   finishes.
 - **A clone or skill preview that another device asks for can reach only a
-  public server, and only over https.** This is groundwork too: no other
-  device can drive serve yet, and the desktop app and the CLI fetch exactly as
-  before. When one can, serve looks up the server's address once, refuses
-  unless every answer is a public address, and makes git connect to exactly
-  that address. git then follows no redirect, uses no proxy, and takes no
+  public server, and only over https.** The desktop app and the CLI fetch
+  exactly as before. For another device, serve looks up the server's address
+  once, refuses unless every answer is a public address, and makes git
+  connect to exactly that address. git then follows no redirect, uses no proxy, and takes no
   rewrite from the host's own git config. ssh, `git://` and plain http are
   refused for other devices. A repository cloned this way keeps
   `http.followRedirects=false` in its own config, so later fetches of it do not
   follow redirects either.
 - **What a file is decides what another device needs to read or change
-  it.** This is groundwork as well, and the desktop app reads and saves
-  exactly as before. For another device:
+  it.** The desktop app reads and saves exactly as before. For another
+  device:
   - writing an agent's instructions (`AGENTS.md`, `CLAUDE.md`, `.planning/`,
     `.claude/`, `.worktrees.toml` and their kin) needs the instruct
     permission;
@@ -173,9 +206,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   links in terminals and documents leave those files out.
 
 - **Worktrees records which device wrote an agent's instructions or started
-  an agent, and a device cannot widen an agent's reach.** This is groundwork
-  as well: no other device can drive serve yet, and nothing changes for the
-  desktop app. When one can:
+  an agent, and a device cannot widen an agent's reach.** Nothing changes for
+  the desktop app. When another device drives serve:
   - a place shows "AGENTS.md edited from <device>, 2 min ago" after a paired
     device writes an instruction file there (`AGENTS.md`, `CLAUDE.md`,
     `.planning/`, an agent's settings or hooks), and "from <device>" beside an
@@ -192,9 +224,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   scope, remote-access or audit command.
 - **`worktrees serve` keeps a registry of paired devices, and can pair one.**
   This is the server side of letting another machine or a phone drive
-  serve. Nothing reaches a device yet: the network listener a device would
-  use is still to come, so serve never opens a pairing window, and nothing
-  changes for the desktop app.
+  serve. A pairing window opens only while remote access is on (above), and
+  nothing changes for the desktop app.
   - Devices are listed in `devices.json` in the app's config folder, readable
     only by you. A device that is revoked or disabled loses every open
     connection at once. One whose access is narrowed loses each terminal and

@@ -116,6 +116,9 @@ pub const EVENTS: &[(&str, Event)] = &[
     // The device registry's events, for the Devices list and the alerts:
     // pairing and device administration are the host's (§3.3, §5.3).
     ("devices:changed", Event::Console),
+    // Remote access's state (`remote_status`): on, paused and why, a question
+    // for the host. The host's, like every remote-access act (§4.1).
+    ("remote:changed", Event::Console),
 ];
 
 // ── who listens (§9.3) ───────────────────────────────────────────────────────

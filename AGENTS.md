@@ -83,7 +83,7 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   do not align them). hyper parses the HTTP and tungstenite sees only frames,
   also ON PURPOSE: tungstenite's `accept_hdr_async` WRITES an HTTP error
   response when it refuses, while a hyper service that returns `Err` closes
-  with 0 bytes. The 170 commands sit in ONE macro table
+  with 0 bytes. The 174 commands sit in ONE macro table
   (`serve/dispatch.rs`) with an `Exposure` each; the six `ClientLocal` rows
   (clipboard, editor, terminal, zoom, the app bundle) are refused with
   `err: "client-local"`, never run on the host — the docs viewer is an
@@ -176,8 +176,10 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   reserves what ITS record will cost (begun and rendered there, under the
   log's lock, so acts in flight never share bytes; no debt is ever
   forgiven) from `DRIVE` at `Witness::allow`, the last step of
-  `call_in_seen` after the lane gate, and one the budget cannot pay for is
-  refused there (`RefusalKind::AuditBudget`, answered with the seconds to
+  `call_in_seen`, after the lane gate and `audit_gate` (a device's
+  non-read act while the log is unhealthy: `audit-unavailable`, #556), and
+  one the budget cannot pay for is refused there
+  (`RefusalKind::AuditBudget`, answered with the seconds to
   wait), recorded once and charged to `REFUSALS`, so a refusal never keeps
   `DRIVE` spent. The console is never gated. serve installs its signal
   handlers BEFORE it writes serve.json: a supervisor's SIGTERM in that gap killed it
@@ -193,6 +195,44 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   (`mcp_status`) appears only once a client calls the command, so probing
   serve by hand needs a handshake-v1 client — copy `serve_bin.rs::connect`.
   `app/scripts/server-stack.sh` runs an isolated one for the frontend lane.
+
+- **Remote access is a SECOND listener with its own rule set, never a flag
+  on loopback** (Phase 2 slice 6, `serve/remote/`). Off unless
+  `<config_dir>/serve-remote.json` says `on` (0600, strict; off keeps the
+  record so the next `on` reuses the PORT a paired device stored), set only
+  by the console rows `remote_enable`/`remote_disable` (the kill switch:
+  listener, every device socket and the pairing window at once)/
+  `remote_status`/`remote_advertise`, or `worktrees serve remote …`. One
+  private address on one interface, tied to it (`sock.rs`: socket2's
+  `bind_device_by_index_v4/_v6`), the classifier at parse AND at bind; the
+  peer rule (`peer.rs`) drops a source before TLS, nothing written. Then
+  TLS 1.3 with #544's `DeviceVerifier` + `admit_peer`. The verifier is built
+  per connection (`tls::with_verifier`, ~0.3 µs, measured as no handshake
+  cost) so the registry's `ConnectRefused` names the peer, and that event is
+  the audit log's ONE record of a knock (`Audit::knock`): the listener
+  records only what else ends TLS, or one knock counts twice. Then the
+  upgrade with `Host` = the bound literal and NO `Origin`
+  (`policy::remote_*`: a native socket sends none, and the opposite of
+  loopback's rule ON PURPOSE), and
+  handshake v1 UNCHANGED, keyed by `hex(exporter "EXPORTER-worktrees-remote-
+  v1")`, whose `ok` names the device. A session that joins the client set
+  checks AFTER joining that its bind is open and its device live: a kill
+  switch or revoke that swept while it was still shaking hands missed it and
+  it was SERVED (found by review, reproduced red). `netwatch::Watch` runs on
+  RemoteAccess's own 3 s poll; an app-owned serve's idle stop counts
+  `Clients::console_len()` only (§9.3), so a device never holds it up and the
+  app says quitting ends remote access. mDNS: macOS through `dns_sd` with
+  serve's own `wt-<id>.local` (`advert.rs`); Linux has none (zbus = +30
+  crates, `avahi-publish` cannot pin an interface), the address code instead.
+  Three traps: a **same-host connect reaches a listener tied to its
+  interface** on both OSes (measured), so `tests/remote_bin.rs` witnesses
+  everything on `own_lan_addr` with no second machine; **a pause because the
+  address LEFT cannot deliver a close frame** (no route), so prove it from
+  serve's side, not the device's; and **Linux drops a subnet's secondary
+  addresses with its primary** unless `promote_secondaries` is on, so
+  "add .6, remove .5" leaves nothing — `tests/remote_net_linux.rs` (steps
+  2/4/5, `WT_NET_ADMIN=1`, its doc has the docker line) needs
+  `--sysctl net.ipv4.conf.all.promote_secondaries=1`.
 
 - **Provenance is out of band, and a launch stamp is written BEFORE
   `new-session`** (Phase 2 §7.3, §7.5, `serve/provenance.rs`). The body's

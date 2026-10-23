@@ -38,6 +38,7 @@ use super::audit::{self, Audit, ConnAudit, Fleet, Outcome};
 use super::budget::{self, Budgets, Counter, Held, BUSY};
 use super::devices::{DeviceEvent, DeviceRegistry};
 use super::pairing::Pairing;
+use super::remote::RemoteAccess;
 use super::dispatch::{self, Args, Call};
 use super::flight::Flights;
 use super::policy;
@@ -114,7 +115,7 @@ const READ_BUFFER: usize = 8 * 1024;
 /// hyper's buffer for the HTTP request, before any upgrade (its default is
 /// ~400 KiB). Cookies are per host, not per port, so a browser may send those
 /// of every other dev server on 127.0.0.1 — 64 KiB leaves room for them.
-const MAX_HTTP_BUF: usize = 64 * 1024;
+pub(super) const MAX_HTTP_BUF: usize = 64 * 1024;
 
 /// One connection's claim on the caps, from accept to close. The
 /// unauthenticated half is handed back the moment the client's proof
@@ -175,9 +176,9 @@ impl Slot {
 /// peer may still send; `usize::MAX` means no budget (set once the client has
 /// proven itself), and a peer that reaches 0 gets a read error, which
 /// tungstenite turns into the end of the connection. Writes pass through.
-struct Budget<T> {
-    inner: T,
-    left: Arc<AtomicUsize>,
+pub(super) struct Budget<T> {
+    pub(super) inner: T,
+    pub(super) left: Arc<AtomicUsize>,
 }
 
 impl<T: AsyncRead + Unpin> AsyncRead for Budget<T> {
@@ -265,6 +266,11 @@ pub struct Clients {
     /// close's and not the session's start.
     #[cfg(test)]
     ready: Mutex<std::collections::HashSet<u64>>,
+    /// Connection ids, for BOTH listeners: their sessions share this map.
+    next_id: AtomicU64,
+    /// Remote access, for the console's rows (`remote_*`). Weak: remote
+    /// access holds this client set, not the other way round.
+    remote: std::sync::OnceLock<std::sync::Weak<RemoteAccess>>,
 }
 
 impl Default for Clients {
@@ -291,6 +297,8 @@ impl Clients {
             flights: Default::default(),
             #[cfg(test)]
             ready: Default::default(),
+            next_id: AtomicU64::new(1),
+            remote: Default::default(),
         }
     }
     /// Grants from the device registry itself, as serve runs.
@@ -305,6 +313,8 @@ impl Clients {
             flights: Default::default(),
             #[cfg(test)]
             ready: Default::default(),
+            next_id: AtomicU64::new(1),
+            remote: Default::default(),
         }
     }
     /// The same set, spending from `budgets` instead of `budget::BUDGETS`.
@@ -314,6 +324,17 @@ impl Clients {
     }
     pub fn pairing(&self) -> Arc<Pairing> {
         self.pairing.clone()
+    }
+    /// Remote access, once serve has made it (`mod::start_with`).
+    pub fn set_remote(&self, r: &Arc<RemoteAccess>) {
+        let _ = self.remote.set(Arc::downgrade(r));
+    }
+    pub fn remote(&self) -> Option<Arc<RemoteAccess>> {
+        self.remote.get().and_then(std::sync::Weak::upgrade)
+    }
+    /// A fresh id for a connection on either listener.
+    pub fn next_id(&self) -> u64 {
+        self.next_id.fetch_add(1, Ordering::SeqCst)
     }
     /// Subscribe to the device registry's events. Weakly: the registry's hook
     /// list must not keep the client set alive.
@@ -352,6 +373,7 @@ impl Clients {
         self.devices.clone()
     }
     /// How many authenticated clients are connected now.
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.map.lock().unwrap().len()
     }
@@ -361,6 +383,11 @@ impl Clients {
     #[cfg(test)]
     pub fn listening(&self, event: &str) -> usize {
         self.map.lock().unwrap().values().filter(|c| c.listens.has(event)).count()
+    }
+    /// How many of them are the CONSOLE's: loopback connections that passed
+    /// handshake v1. What an app-owned serve's idle stop counts (§9.3).
+    pub fn console_len(&self) -> usize {
+        self.map.lock().unwrap().values().filter(|c| c.caller.is_console()).count()
     }
     pub fn registry(&self) -> Arc<dyn Registry> {
         self.registry.clone()
@@ -388,22 +415,32 @@ impl Clients {
             self.end_device(d, why);
         }
         if e.ends_every_device() {
-            let ids: Vec<DeviceId> = {
-                let map = self.map.lock().unwrap();
-                let mut ids: Vec<DeviceId> =
-                    map.values().filter_map(|c| match c.caller.device() { Device::Paired(d) => Some(d.clone()), Device::Console => None }).collect();
-                ids.sort();
-                ids.dedup();
-                ids
-            };
-            for d in ids {
-                self.end_device(&d, "unreadable");
-            }
+            self.end_every_device("unreadable");
         }
         if let Some(d) = e.reduces() {
             self.reconcile_device(d);
         }
+        // A key no device holds knocking is the remote listener's to count,
+        // once per episode: one event per refused handshake would turn a
+        // flood of strangers into a flood of frames to the desk.
+        if matches!(e, DeviceEvent::ConnectRefused { subject: None, .. }) {
+            return;
+        }
         Broadcast(self.clone()).emit("devices:changed", serde_json::to_value(e).unwrap_or(Value::Null));
+    }
+
+    /// Close every device's connections, now: the kill switch, a pause, a
+    /// move (§4.1), or a registry nobody can read. The console's stay.
+    pub fn end_every_device(&self, why: &'static str) -> usize {
+        let ids: Vec<DeviceId> = {
+            let map = self.map.lock().unwrap();
+            let mut ids: Vec<DeviceId> =
+                map.values().filter_map(|c| match c.caller.device() { Device::Paired(d) => Some(d.clone()), Device::Console => None }).collect();
+            ids.sort();
+            ids.dedup();
+            ids
+        };
+        ids.iter().map(|d| self.end_device(d, why).len()).sum()
     }
 
     /// Close every connection of device `d`, now (§2.5): out of the map, so no
@@ -412,9 +449,20 @@ impl Clients {
     /// frame saying why; then the session ends. A body already running
     /// finishes, and its reply goes nowhere. The ids closed.
     pub fn end_device(&self, d: &DeviceId, why: &'static str) -> Vec<u64> {
+        let ids: Vec<u64> = self.map.lock().unwrap().iter().filter(|(_, c)| is_device(&c.caller, d)).map(|(id, _)| *id).collect();
+        let ended = self.end_conns(ids, why);
+        if !ended.is_empty() {
+            info(&format!("serve: device {d} {why}: {} connection(s) closed", ended.len()));
+        }
+        ended
+    }
+
+    /// Close these connections, now: out of the map, their jobs cancelled and
+    /// attaches closed on this thread, a close frame saying why, the session
+    /// ended. The ids that were still there.
+    fn end_conns(&self, ids: Vec<u64>, why: &'static str) -> Vec<u64> {
         let ended: Vec<(u64, Conn)> = {
             let mut map = self.map.lock().unwrap();
-            let ids: Vec<u64> = map.iter().filter(|(_, c)| is_device(&c.caller, d)).map(|(id, _)| *id).collect();
             ids.into_iter().filter_map(|id| map.remove(&id).map(|c| (id, c))).collect()
         };
         for (_, c) in &ended {
@@ -429,9 +477,6 @@ impl Clients {
             }
             let _ = c.out.send(Message::Close(Some(CloseFrame { code: CloseCode::Policy, reason: why.into() })));
             c.kill.notify_one();
-        }
-        if !ended.is_empty() {
-            info(&format!("serve: device {d} {why}: {} connection(s) closed", ended.len()));
         }
         ended.into_iter().map(|(id, _)| id).collect()
     }
@@ -456,10 +501,18 @@ impl Clients {
     /// The registry commits a change before it hands its hooks the event, so
     /// every change either shows here or reaches the connection through
     /// [`Clients::hear`].
-    pub(super) fn end_if_gone(&self, caller: &Caller) {
+    ///
+    /// The same check ends a REMOTE session whose bind was stopped while it
+    /// was still shaking hands (`bind_open` false): the kill switch, a pause
+    /// and a move clear the flag before they sweep the client set, so the
+    /// sweep or this check sees the session, whichever ran second (Phase 2
+    /// slice 6; the commit's security review found the session served).
+    pub(super) fn end_if_gone(&self, id: u64, caller: &Caller, bind_open: Option<&AtomicBool>) {
         let Device::Paired(d) = caller.device() else { return };
         if self.registry.device_grant(caller.principal(), d).is_none() {
             self.end_device(d, self.devices.ended_word(d));
+        } else if bind_open.is_some_and(|b| !b.load(Ordering::SeqCst)) {
+            self.end_conns(vec![id], "remote access stopped on the host");
         }
     }
 
@@ -643,7 +696,6 @@ pub struct Shared {
     /// The audit log's one writer (`audit.rs`). Here and not in `Ctx`, so
     /// that no command body can write a line.
     audit: Arc<Audit>,
-    next_id: AtomicU64,
     connections: Arc<Counter>,
     unauthenticated: Arc<Counter>,
     /// The connections that have not proven themselves yet, by slot id: the
@@ -778,6 +830,11 @@ impl Listener {
         self.task.abort();
         self.audit.stopped();
     }
+
+    /// The audit log's one writer, which the remote listener records into too.
+    pub fn audit(&self) -> Arc<Audit> {
+        self.audit.clone()
+    }
 }
 
 /// Bind `127.0.0.1:port` (0 = the OS picks) and start accepting. Must be
@@ -814,7 +871,6 @@ pub fn start(ctx: Ctx, token: String, port: u16, origins: Vec<String>, clients: 
         origins,
         clients,
         audit: audit.clone(),
-        next_id: AtomicU64::new(1),
         connections: Counter::new(limits.connections),
         unauthenticated: Counter::new(limits.unauthenticated.min(limits.connections)),
         pending: Mutex::new(HashMap::new()),
@@ -868,7 +924,7 @@ pub fn start(ctx: Ctx, token: String, port: u16, origins: Vec<String>, clients: 
 /// A refusal. Carries nothing, because nothing is written: hyper closes the
 /// connection when the service errors, and that silence is the design.
 #[derive(Debug)]
-struct Refused(&'static str);
+pub(super) struct Refused(pub(super) &'static str);
 
 impl std::fmt::Display for Refused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -910,7 +966,7 @@ async fn connection(stream: TcpStream, shared: Arc<Shared>, slot: Arc<Slot>) {
 /// is a request built to be read one way by one reader and another way by the
 /// next; an unreadable value is a header we cannot judge. Both are refusals —
 /// "I could not tell" and "it is ours" must never share a branch.
-fn one_header(h: &HeaderMap, name: HeaderName) -> Result<Option<String>, Refused> {
+pub(super) fn one_header(h: &HeaderMap, name: HeaderName) -> Result<Option<String>, Refused> {
     let mut it = h.get_all(&name).iter();
     let Some(first) = it.next() else { return Ok(None) };
     if it.next().is_some() {
@@ -957,7 +1013,7 @@ fn handshake(mut req: Request<Incoming>, shared: Arc<Shared>, slot: Arc<Slot>, p
     let origin = origin.unwrap_or_default();
 
     let on_upgrade = hyper::upgrade::on(&mut req);
-    let id = shared.next_id.fetch_add(1, Ordering::SeqCst);
+    let id = shared.clients.next_id();
     tokio::spawn(async move {
         match on_upgrade.await {
             Ok(upgraded) => {
@@ -986,7 +1042,7 @@ fn handshake(mut req: Request<Incoming>, shared: Arc<Shared>, slot: Arc<Slot>, p
         .expect("a 101 with three fixed headers is a valid response"))
 }
 
-type Ws = WebSocketStream<Budget<TokioIo<hyper::upgrade::Upgraded>>>;
+pub(super) type Ws = WebSocketStream<Budget<TokioIo<hyper::upgrade::Upgraded>>>;
 
 /// The next frame, if it is text. Anything else — binary, a ping, a close,
 /// an error, the end — is `None`, and `None` before auth is a refusal.
@@ -997,29 +1053,68 @@ async fn next_text(ws: &mut Ws) -> Option<String> {
     }
 }
 
+/// Whose move it is during handshake v1, for an admission that cares: the
+/// loopback listener displaces the connection that has waited on its client
+/// longest (`Shared::admit`), so it is told each turn; the remote listener
+/// admits on caps of its own and is told nothing (`()`).
+pub(super) trait Turns: Sync {
+    fn clients_turn(&self) {}
+    fn servers_turn(&self) {}
+    /// The proof verified: `false` when the connection must close instead.
+    fn authenticated(&self) -> bool {
+        true
+    }
+}
+
+impl Turns for () {}
+
+/// The loopback slot's view of the handshake.
+struct LoopbackTurns<'a> {
+    shared: &'a Shared,
+    slot: &'a Slot,
+}
+
+impl Turns for LoopbackTurns<'_> {
+    fn clients_turn(&self) {
+        self.slot.clients_turn(self.shared);
+    }
+    fn servers_turn(&self) {
+        self.slot.servers_turn();
+    }
+    fn authenticated(&self) -> bool {
+        self.slot.authenticated(self.shared)
+    }
+}
+
 /// Handshake v1 (`policy.rs`), the whole of it inside `AUTH_DEADLINE`. `None`
 /// is a refusal, and the caller drops the socket with nothing more written:
 /// the challenge is the only thing an unproven peer ever receives.
-async fn handshake_v1(ws: &mut Ws, shared: &Shared, slot: &Slot) -> Option<()> {
-    let token = &shared.token;
-    slot.clients_turn(shared);
+///
+/// The remote listener runs this same exchange over TLS, keyed by the TLS
+/// session's exporter instead of serve.json's token, and its `ok` names the
+/// device the session belongs to (`device`; loopback passes `None`, and its
+/// bytes are what they were). `turns` is told whose move it is: loopback's
+/// displacement admission (`LoopbackTurns`), or nobody (`()`, the remote
+/// listener, whose caps are its own).
+pub(super) async fn handshake_v1(ws: &mut Ws, token: &str, device: Option<&Value>, turns: &dyn Turns) -> Option<()> {
+    turns.clients_turn();
     let cn = policy::hello(&next_text(ws).await?)?;
-    slot.servers_turn();
+    turns.servers_turn();
     let sn = servefile::nonce();
     ws.send(Message::text(wire::challenge_frame(&sn))).await.ok()?;
-    slot.clients_turn(shared);
+    turns.clients_turn();
     let proof = policy::client_proof(&next_text(ws).await?)?;
-    slot.servers_turn();
+    turns.servers_turn();
     if !policy::client_proof_ok(token, &cn, &sn, &proof) {
         return None;
     }
     // Proven, and out of reach of a newcomer from here on — unless one
     // displaced it a moment ago, in which case it closes like any other.
-    if !slot.authenticated(shared) {
+    if !turns.authenticated() {
         return None;
     }
     // Only now does the server prove itself.
-    ws.send(Message::text(wire::auth_reply(&policy::server_proof(token, &cn, &sn)))).await.ok()
+    ws.send(Message::text(wire::auth_reply(&policy::server_proof(token, &cn, &sn), device))).await.ok()
 }
 
 /// The lane a request runs on: the table's rule, plus the test seams'.
@@ -1039,7 +1134,8 @@ async fn session(mut ws: Ws, shared: Arc<Shared>, id: u64, origin: String, slot:
     // the socket here with nothing more written, not even a Close frame. So
     // does being displaced by a newcomer while still unproven.
     let refused = {
-        let hs = std::pin::pin!(tokio::time::timeout(policy::AUTH_DEADLINE, handshake_v1(&mut ws, &shared, &slot)));
+        let turns = LoopbackTurns { shared: &shared, slot: &slot };
+        let hs = std::pin::pin!(tokio::time::timeout(policy::AUTH_DEADLINE, handshake_v1(&mut ws, &shared.token, None, &turns)));
         match select(hs, std::pin::pin!(slot.displaced())).await {
             Either::Left((Ok(Some(())), _)) => None,
             Either::Left((Ok(None), _)) => Some("handshake"),
@@ -1066,7 +1162,28 @@ async fn session(mut ws: Ws, shared: Arc<Shared>, id: u64, origin: String, slot:
     // Every audit record the connection writes names it (§5.1).
     let caller = shared.caller();
     let au = Arc::new(ConnAudit::new(shared.audit.clone(), id, peer, caller.clone()));
-    serve_caller(ws, shared.ctx.clone(), shared.clients.clone(), id, caller, None, au).await;
+    serve_caller(ws, shared.ctx.clone(), shared.clients.clone(), id, caller, None, au, None).await;
+}
+
+/// A remote connection's keepalive and lifetime (Phase 2 §4.2, §6): a ping
+/// every `ping_every`, closed once `dead_after` passes with no pong, and
+/// closed at `lifetime` whatever it is doing, so a device handshakes (and
+/// steps up) again at least that often. Loopback has none of these.
+#[derive(Clone, Copy, Debug)]
+pub struct Liveness {
+    pub ping_every: std::time::Duration,
+    pub dead_after: std::time::Duration,
+    pub lifetime: std::time::Duration,
+}
+
+/// What a remote session has that loopback's does not: its keepalive, and
+/// its bind's open flag, which `RemoteListener::stop` clears BEFORE the kill
+/// switch, a pause or a move sweeps the client set — so a session still
+/// shaking hands at the sweep is ended by `Clients::end_if_gone` once it
+/// joins, the same check that ends one whose device went away meanwhile.
+pub struct RemoteSession {
+    pub live: Liveness,
+    pub bind_open: Arc<AtomicBool>,
 }
 
 /// An authenticated connection's life, whoever accepted it: requests until
@@ -1074,22 +1191,34 @@ async fn session(mut ws: Ws, shared: Arc<Shared>, id: u64, origin: String, slot:
 /// the listener's, fixed here for the life of the socket — the console for
 /// loopback; for the remote listener (slice 6), the device whose key completed
 /// the handshake, with `stepup_exporter` its session's step-up exporter
-/// (`tls::EXPORTER_STEPUP`) — and `au` is the audit's view of the
-/// connection, naming it. The in-process tests drive it with fake device
-/// callers.
+/// (`tls::EXPORTER_STEPUP`) — `au` is the audit's view of the connection,
+/// naming it, and `remote` the remote listener's keepalive, lifetime and bind
+/// flag. The in-process tests drive it with fake device callers.
 ///
 /// It is also whose budgets the connection spends (`budget.rs`): the client
 /// set's, host-wide, so both listeners' connections spend from one budget
 /// and join one set of flights.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn serve_caller<S>(
-    ws: WebSocketStream<S>, ctx: Ctx, clients: Arc<Clients>, id: u64, caller: Caller, stepup_exporter: Option<[u8; 32]>, au: Arc<ConnAudit>,
-)
-where
+    ws: WebSocketStream<S>,
+    ctx: Ctx,
+    clients: Arc<Clients>,
+    id: u64,
+    caller: Caller,
+    stepup_exporter: Option<[u8; 32]>,
+    au: Arc<ConnAudit>,
+    remote: Option<RemoteSession>,
+) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     use futures_util::future::{select, Either};
     let Some(account) = clients.budget.open(id, &caller, Some(au.clone())) else {
         info(&format!("serve: client {id} ({caller}) refused: its device holds every connection it may"));
+        // Said, so a device does not take the dropped socket for a lost host
+        // and dial straight back.
+        let mut ws = ws;
+        let why = "this device already holds every connection it may";
+        let _ = ws.send(Message::Close(Some(CloseFrame { code: CloseCode::Policy, reason: why.into() }))).await;
         return;
     };
     let (sink, mut stream) = ws.split();
@@ -1118,30 +1247,63 @@ where
         devices: clients.devices(),
         pairing: clients.pairing(),
         flights: clients.flights.clone(),
+        remote: clients.remote(),
     });
     frames.reconciled().store(call.registry.generation(), Ordering::SeqCst);
     let (kill, listens) = clients.join(id, outbox.clone(), call.clone());
-    clients.end_if_gone(&call.caller);
+    clients.end_if_gone(id, &call.caller, remote.as_ref().map(|r| &*r.bind_open));
     #[cfg(test)]
     clients.ready.lock().unwrap().insert(id);
     let lanes = Lanes::new(account.limits.lanes);
 
     let mut killed = false;
-    loop {
+    let live = remote.as_ref().map(|r| r.live);
+    let born = tokio::time::Instant::now();
+    let mut heard = born;
+    let mut next_ping = live.map(|l| born + l.ping_every);
+    while !killed {
         let next = std::pin::pin!(stream.next());
         let stop = std::pin::pin!(kill.notified());
         let full = std::pin::pin!(over.wait_for(|o| *o));
-        let m = match select(next, select(stop, full)).await {
+        let ping_at = next_ping;
+        let tick = std::pin::pin!(async move {
+            match ping_at {
+                Some(at) => tokio::time::sleep_until(at).await,
+                None => std::future::pending().await,
+            }
+        });
+        let m = match select(next, select(stop, select(full, tick))).await {
             Either::Left((Some(m), _)) => m,
             Either::Left((None, _)) => break,
             Either::Right((Either::Left(_), _)) => {
                 killed = true;
                 break;
             }
-            Either::Right((Either::Right(_), _)) => {
+            Either::Right((Either::Right((Either::Left(_), _)), _)) => {
                 info(&format!("serve: client {id}: a reply came while its outbox was over budget ({} KiB); closing", outbox.peak() >> 10));
                 au.limit("outbox");
                 break;
+            }
+            // A remote session's keepalive and lifetime (§4.2, §6).
+            Either::Right((Either::Right((Either::Right(_), _)), _)) => {
+                let Some(l) = live else { continue };
+                let now = tokio::time::Instant::now();
+                let why = if now.duration_since(born) >= l.lifetime {
+                    Some("the connection's lifetime is up; connect again")
+                } else if now.duration_since(heard) >= l.dead_after {
+                    Some("no answer to a ping")
+                } else {
+                    None
+                };
+                if let Some(why) = why {
+                    info(&format!("serve: client {id}: {why}; closing"));
+                    let _ = outbox.send(Message::Close(Some(CloseFrame { code: CloseCode::Away, reason: why.into() })));
+                    killed = true;
+                    break;
+                }
+                let _ = outbox.send(Message::Ping(Bytes::new()));
+                next_ping = Some(now + l.ping_every);
+                continue;
             }
         };
         match m {
@@ -1250,14 +1412,16 @@ where
                 break;
             }
             Ok(Message::Close(_)) | Err(_) => break,
-            Ok(Message::Binary(_)) | Ok(Message::Pong(_)) | Ok(Message::Frame(_)) => {}
+            Ok(Message::Pong(_)) => heard = tokio::time::Instant::now(),
+            Ok(Message::Binary(_)) | Ok(Message::Frame(_)) => {}
         }
     }
 
     clients.remove(id);
     if killed {
-        // `end_device` queued a close frame saying why; give the writer a
-        // moment to put it on the wire before the socket goes.
+        // `end_device`, or the keepalive above, queued a close frame saying
+        // why; give the writer a moment to put it on the wire before the
+        // socket goes.
         let _ = tokio::time::timeout(std::time::Duration::from_millis(250), &mut writer).await;
     }
     writer.abort();

@@ -44,8 +44,6 @@ use super::identity::Identity;
 pub const EXPORTER_PAIR: &[u8] = b"EXPORTER-worktrees-pair-v1";
 
 /// The exporter label a step-up signature is bound with (§2.5).
-// A seam: slice 6's remote listener (and the shim's remote door) use it.
-#[cfg_attr(not(test), allow(dead_code))]
 pub const EXPORTER_STEPUP: &[u8] = b"EXPORTER-worktrees-stepup-v1";
 
 /// The one signature scheme: ECDSA P-256, SHA-256.
@@ -75,18 +73,24 @@ fn no_tls12() -> Error {
 }
 
 /// The remote listener's client verifier: a live device's key, and a valid
-/// signature with it.
-// A seam: slice 6's remote listener (and the shim's remote door) use it.
-#[cfg_attr(not(test), allow(dead_code))]
+/// signature with it. `peer` is the address the connection came from, which
+/// a refused key's event names (§5.1), so the remote listener makes one per
+/// connection ([`with_verifier`]).
 #[derive(Debug)]
 pub struct DeviceVerifier {
     devices: Arc<DeviceRegistry>,
+    peer: Option<std::net::IpAddr>,
 }
 
 impl DeviceVerifier {
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// For the base config, which no connection is served by.
     pub fn new(devices: Arc<DeviceRegistry>) -> Self {
-        DeviceVerifier { devices }
+        DeviceVerifier { devices, peer: None }
+    }
+
+    /// For one connection, from `peer`.
+    pub fn for_peer(devices: Arc<DeviceRegistry>, peer: std::net::IpAddr) -> Self {
+        DeviceVerifier { devices, peer: Some(peer) }
     }
 }
 
@@ -108,7 +112,7 @@ impl ClientCertVerifier for DeviceVerifier {
     fn verify_client_cert(&self, end_entity: &CertificateDer<'_>, _: &[CertificateDer<'_>], _: UnixTime) -> Result<ClientCertVerified, Error> {
         let pin = pin_of_cert(end_entity).ok_or(Error::InvalidCertificate(CertificateError::BadEncoding))?;
         self.devices
-            .admit(&pin, worktrees_core::sysclock::now_epoch())
+            .admit(&pin, worktrees_core::sysclock::now_epoch(), self.peer)
             .map(|_| ClientCertVerified::assertion())
             .map_err(|_| Error::InvalidCertificate(CertificateError::ApplicationVerificationFailure))
     }
@@ -197,16 +201,37 @@ impl ServerCertVerifier for PinnedServer {
 /// The server's config: TLS 1.3, the identity's certificate, `clients` as
 /// the client verifier, and nothing that resumes.
 pub fn server_config(id: &Identity, clients: Arc<dyn ClientCertVerifier>) -> Result<Arc<ServerConfig>, String> {
-    let mut c = ServerConfig::builder_with_provider(provider())
+    let c = ServerConfig::builder_with_provider(provider())
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|e| e.to_string())?
         .with_client_cert_verifier(clients)
         .with_single_cert(vec![id.cert()], id.key())
         .map_err(|e| format!("the server identity: {e}"))?;
+    Ok(hardened(c))
+}
+
+/// `base` with `clients` as its client verifier: the same certificate, and
+/// every setting [`server_config`] makes. rustls keeps a config's verifier
+/// private, so this is a new config around `base`'s certificate resolver
+/// (the key is not parsed again). Measured in release on macOS, 2026-10-23:
+/// 0.3 µs to build; a handshake's median moved +2 µs at 8 in flight and +3
+/// µs at 1 (of ~420 and ~270 µs), inside the ±15 µs between rounds; and on
+/// the remote listener itself, TLS to handshake v1, no difference at all.
+pub fn with_verifier(base: &ServerConfig, clients: Arc<dyn ClientCertVerifier>) -> Result<Arc<ServerConfig>, String> {
+    let c = ServerConfig::builder_with_provider(provider())
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|e| e.to_string())?
+        .with_client_cert_verifier(clients)
+        .with_cert_resolver(base.cert_resolver.clone());
+    Ok(hardened(c))
+}
+
+/// Nothing that resumes, and no early data.
+fn hardened(mut c: ServerConfig) -> Arc<ServerConfig> {
     c.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
     c.send_tls13_tickets = 0;
     c.max_early_data_size = 0;
-    Ok(Arc::new(c))
+    Arc::new(c)
 }
 
 /// A device's config: TLS 1.3, the server pinned, its own key presented, no
@@ -235,13 +260,11 @@ pub fn exporter(conn: &rustls::ServerConnection, label: &[u8]) -> Result<[u8; 32
 
 /// The device check again, after the handshake, from the peer's certificate
 /// against the live set (§4.2): a device revoked between the verifier and
-/// here is refused all the same.
-// A seam: slice 6's remote listener (and the shim's remote door) use it.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn admit_peer(conn: &rustls::ServerConnection, devices: &DeviceRegistry, now: i64) -> Result<Caller, ConnectRefusal> {
+/// here is refused all the same, its event naming `peer`.
+pub fn admit_peer(conn: &rustls::ServerConnection, devices: &DeviceRegistry, now: i64, peer: Option<std::net::IpAddr>) -> Result<Caller, ConnectRefusal> {
     let cert = conn.peer_certificates().and_then(|c| c.first()).ok_or(ConnectRefusal::Unknown)?;
     let pin = pin_of_cert(cert).ok_or(ConnectRefusal::Unknown)?;
-    devices.admit(&pin, now)
+    devices.admit(&pin, now, peer)
 }
 
 #[cfg(test)]
@@ -336,7 +359,7 @@ mod tests {
                 let tls = tokio_rustls::TlsAcceptor::from(cfg).accept(tcp).await.map_err(|e| e.to_string())?;
                 let conn = tls.get_ref().1;
                 let ex = exporter(conn, EXPORTER_PAIR)?;
-                Ok((admit_peer(conn, &devices, worktrees_core::sysclock::now_epoch()), ex, conn.server_name().is_some()))
+                Ok((admit_peer(conn, &devices, worktrees_core::sysclock::now_epoch(), None), ex, conn.server_name().is_some()))
             });
             let client = match dial(addr, pin, key).await {
                 Ok(tls) => tls.get_ref().1.export_keying_material([0u8; 32], EXPORTER_PAIR, None).map_err(|e| e.to_string()),

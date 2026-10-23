@@ -1440,7 +1440,7 @@ fn the_audit_log_records_the_device_registry() {
     let running = rt.block_on(async { start_in(dir.clone(), 0, vec![DEV_ORIGIN.to_string()], super::conn::LIMITS, BUDGETS, clients) }).unwrap();
     let l = Live { running: Some(running), dir, rt };
     reg.revoke(&Caller::console(), &Grant::everything(), &mac.id, now).unwrap();
-    assert!(reg.admit(&pin, now).is_err());
+    assert!(reg.admit(&pin, now, None).is_err());
     l.running.as_ref().unwrap().listener.stop();
 
     let recs = audit_lines(&l);
@@ -1499,9 +1499,9 @@ fn a_device_the_chain_never_enrolled_is_disabled_at_boot_and_never_served() {
 
     let second = boot();
     let reg = second.devices.clone().unwrap();
-    assert_eq!(reg.admit(&"e".repeat(64), now).err(), Some(ConnectRefusal::Disabled), "refused at the handshake");
+    assert_eq!(reg.admit(&"e".repeat(64), now, None).err(), Some(ConnectRefusal::Disabled), "refused at the handshake");
     assert_eq!(reg.device_grant(&PrincipalId::owner(), &DeviceId::new("d_forged")), None, "and on every request");
-    assert!(reg.admit(&"c".repeat(64), now).is_ok(), "the enrolled device is served");
+    assert!(reg.admit(&"c".repeat(64), now, None).is_ok(), "the enrolled device is served");
     assert!(reg.device_grant(&PrincipalId::owner(), &real.id).is_some());
     let on_disk = DevicesFile::parse(&std::fs::read(&path).unwrap()).unwrap();
     let d = on_disk.device(&DeviceId::new("d_forged")).unwrap();
@@ -1694,7 +1694,7 @@ mod devices {
                 let dial = tokio::spawn(TcpStream::connect(addr));
                 let (server, peer) = l.accept().await.unwrap();
                 let ws = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
-                let task = tokio::spawn(conn::serve_caller(ws, ctx, clients, id, who, exporter, au));
+                let task = tokio::spawn(conn::serve_caller(ws, ctx, clients, id, who, exporter, au, None));
                 (WebSocketStream::from_raw_socket(dial.await.unwrap().unwrap(), Role::Client, None).await, (task, peer))
             });
             let (task, peer) = task;
@@ -1830,10 +1830,11 @@ mod devices {
             devices: e.reg.clone(),
             pairing: e.clients.pairing(),
             flights: Default::default(),
+            remote: None,
         };
         assert_eq!(dispatch::call(&stale, "get_changelog", &Args(Default::default())), Err(json!("denied")));
         // And its next handshake.
-        assert_eq!(e.reg.admit(&phone.spki_sha256, NOW), Err(super::super::devices::ConnectRefusal::Revoked));
+        assert_eq!(e.reg.admit(&phone.spki_sha256, NOW, None), Err(super::super::devices::ConnectRefusal::Revoked));
     }
 
     /// §2.5: a device always revokes ITSELF; another device of its principal
@@ -1893,7 +1894,7 @@ mod devices {
         assert_eq!(e.rpc(&mut con, "device_disable", json!({"id": phone.id.as_str()}))["ok"], json!(true));
         e.ended(&p);
         e.closed(&mut p, "disabled");
-        assert_eq!(e.reg.admit(&phone.spki_sha256, NOW), Err(super::super::devices::ConnectRefusal::Disabled));
+        assert_eq!(e.reg.admit(&phone.spki_sha256, NOW, None), Err(super::super::devices::ConnectRefusal::Disabled));
         let mut again = e.connect(caller(&phone));
         e.ended(&again);
         e.closed(&mut again, "disabled");
@@ -1906,6 +1907,7 @@ mod devices {
             devices: e.reg.clone(),
             pairing: e.clients.pairing(),
             flights: Default::default(),
+            remote: None,
         };
         let enable = || Args(json!({"id": phone.id.as_str()}).as_object().cloned().unwrap());
         assert_eq!(dispatch::call(&stale, "get_changelog", &Args(Default::default())), Err(json!("denied")));
@@ -2006,6 +2008,7 @@ mod devices {
             devices: e.reg.clone(),
             pairing: e.clients.pairing(),
             flights: Default::default(),
+            remote: None,
         });
         call.frames.note_term(901, "sa".into());
         call.frames.note_term(902, "sb".into());
@@ -2065,6 +2068,7 @@ mod devices {
             devices: e.reg.clone(),
             pairing: e.clients.pairing(),
             flights: Default::default(),
+            remote: None,
         };
         call.frames.reconciled().store(1, Ordering::SeqCst);
         call.frames.note_term(903, "sa".into());
@@ -2100,6 +2104,7 @@ mod devices {
             devices: e.reg.clone(),
             pairing: e.clients.pairing(),
             flights: Default::default(),
+            remote: None,
         });
         call.frames.note_shell(ShellHold { repo: a.clone(), slug: "(main)".into(), index: 0, gen: 7 });
         let _kill = e.clients.join(1, out, call.clone());
@@ -2159,6 +2164,7 @@ mod devices {
             devices: e.reg.clone(),
             pairing: e.clients.pairing(),
             flights: Default::default(),
+            remote: None,
         };
         frames.reconciled().store(1, Ordering::SeqCst);
         // No `cols`: the body fails on its arguments before it reaches tmux.
@@ -2332,6 +2338,8 @@ mod devices {
             self.clients.pairing().set_bind(Some(super::super::pairing::Bind {
                 ip: std::net::Ipv4Addr::LOCALHOST.into(),
                 remote: "127.0.0.1:7461".parse().unwrap(),
+                index: 0,
+                rule: None,
             }));
         }
     }
@@ -2379,7 +2387,7 @@ mod devices {
         let st = e.closed_as(&mut con);
         assert_eq!((st["ended"].clone(), st["device"].clone()), (json!("paired"), rec["id"].clone()));
         assert!(e.port_closed(&uri), "the pairing listener is gone");
-        assert_eq!(e.reg.admit(&p.key.pin, worktrees_core::sysclock::now_epoch()).map(|c| c.device().clone()), Ok(worktrees_core::authz::Device::Paired(DeviceId::new(rec["id"].as_str().unwrap()))));
+        assert_eq!(e.reg.admit(&p.key.pin, worktrees_core::sysclock::now_epoch(), None).map(|c| c.device().clone()), Ok(worktrees_core::authz::Device::Paired(DeviceId::new(rec["id"].as_str().unwrap()))));
         let events: Vec<String> = e.skipped.lock().unwrap().iter().filter(|v| v["event"] == json!("devices:changed")).map(|v| v["payload"]["event"].as_str().unwrap_or("").to_string()).collect();
         let want = ["pairing_opened", "pairing_attempt", "pairing_pending", "pairing_decided", "enrolled", "pairing_closed"];
         let mut it = events.iter();
@@ -2696,6 +2704,7 @@ mod devices {
             devices: e.reg.clone(),
             pairing: e.clients.pairing(),
             flights: Default::default(),
+            remote: None,
         };
         let write = |cmd: &str, extra: Value| {
             let mut args = json!({"repo": a, "slug": "(main)", "index": 0, "data": [104, 105], "id": 905});
@@ -2828,6 +2837,7 @@ mod devices {
             devices: e.reg.clone(),
             pairing: e.clients.pairing(),
             flights: Default::default(),
+            remote: None,
         });
         let grant = authz::effective(&*e.reg, &call.caller);
         let mut args = Args(json!({"id": "job-1", "parent": "/x", "url": "https://example.com/r.git"}).as_object().cloned().unwrap());

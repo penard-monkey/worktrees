@@ -1544,8 +1544,8 @@ impl Audit {
     /// A refused device key is the one event that is not a record each: it
     /// joins the auth episodes, whose first is.
     pub fn device_event(&self, e: &DeviceEvent) {
-        if let DeviceEvent::ConnectRefused { subject, spki_sha256, why } = e {
-            return self.knock(subject.as_ref(), spki_sha256, *why);
+        if let DeviceEvent::ConnectRefused { subject, spki_sha256, why, peer } = e {
+            return self.knock(subject.as_ref(), spki_sha256, *why, peer.as_deref());
         }
         let mut st = guard(&self.st);
         self.sweep(&mut st, false);
@@ -1560,9 +1560,11 @@ impl Audit {
 
     /// A device key refused at the handshake (§5.1's "an unknown certificate,
     /// a revoked certificate"): an auth failure like a failed handshake v1,
-    /// in the same episodes. A known device's knock alerts (§5.3), once per
-    /// episode for each device and reason.
-    fn knock(&self, subject: Option<&Subject>, key: &str, why: ConnectRefusal) {
+    /// in the same episodes, with the address it came from when the check
+    /// knew it (the remote listener's does, and records nothing else for
+    /// it). A known device's knock alerts (§5.3), once per episode for each
+    /// device and reason.
+    fn knock(&self, subject: Option<&Subject>, key: &str, why: ConnectRefusal, peer: Option<&str>) {
         let reason = match why {
             ConnectRefusal::Unknown => "unknown-key",
             ConnectRefusal::Revoked => "revoked",
@@ -1575,7 +1577,7 @@ impl Audit {
             let who = subject.map(|s| s.device.as_str()).unwrap_or("-");
             (format!("{who} {reason}"), json!({ "alert": "device", "event": "connect_refused", "reason": reason, "subject": subject }))
         });
-        let a = self.refusal_in(Class::Auth, reason, None, None, Some(Knock { detail, alert }));
+        let a = self.refusal_in(Class::Auth, reason, None, peer.map(ident), Some(Knock { detail, alert }));
         self.emit(a);
     }
 
@@ -1596,6 +1598,21 @@ impl Audit {
                 "address": format!("127.0.0.1:{port}"), "pin": null, "chain": chain.summary(),
             }),
         ));
+    }
+
+    /// Remote access's own lifecycle (§5.1): enabled or disabled by the host,
+    /// the listener started, paused, resumed or moved by the address watch
+    /// (with its reason, both addresses, who moved it), the question put to
+    /// the host, the advert registered or withdrawn. `detail` is built by
+    /// `serve::remote` from addresses, interface names and constants — no
+    /// client string — under keys spelled there.
+    pub fn remote(&self, event: &'static str, detail: Value) {
+        let mut d = match detail {
+            Value::Object(m) => m,
+            _ => Map::new(),
+        };
+        d.insert("event".into(), Value::from(event));
+        self.record(Record::new("lifecycle", Value::Object(d)));
     }
 
     /// The listener is down. Open episodes end first, so their counts land.
@@ -1677,6 +1694,11 @@ fn device_record(pairing_for: &mut Option<PrincipalId>, e: &DeviceEvent) -> Opti
         E::Forgotten { subject } => ("device", None, None, json!({ "event": "forgotten", "subject": subject, "by": serve })),
         E::Unreadable { why } => ("device", None, None, json!({ "event": "unreadable", "why": ident(why), "by": serve })),
         E::Reloaded => ("device", None, None, json!({ "event": "reloaded", "by": serve })),
+        // Serve's observation, at the remote listener: the classes, never
+        // the address (§5.3).
+        E::NewAddressClass { subject, from, to } => {
+            ("device", None, None, json!({ "event": "new_address_class", "subject": subject, "from": from, "to": to, "by": serve }))
+        }
         E::ConnectRefused { .. } => return None,
         // The event holds neither the link nor its secret, and the record
         // could not name them if it did.
@@ -1813,6 +1835,7 @@ fn reason(kind: RefusalKind) -> &'static str {
         RefusalKind::LocalFetch => "local-fetch",
         RefusalKind::DeviceLanes => "device-lanes",
         RefusalKind::StepUp => "step-up",
+        RefusalKind::AuditUnavailable => "audit-unavailable",
         RefusalKind::AuditBudget => "audit-budget",
     }
 }
@@ -3104,7 +3127,8 @@ mod tests {
             E::Unreadable { why: "devices.json does not parse".into() },
             E::Reloaded,
             E::Forgotten { subject: owner_subject("d_gone") },
-            E::ConnectRefused { subject: Some(owner_subject("d_new")), spki_sha256: "a".repeat(64), why: ConnectRefusal::Revoked },
+            E::NewAddressClass { subject: owner_subject("d_new"), from: "cgnat".into(), to: "rfc1918".into() },
+            E::ConnectRefused { subject: Some(owner_subject("d_new")), spki_sha256: "a".repeat(64), why: ConnectRefusal::Revoked, peer: None },
         ];
         events
             .into_iter()
@@ -3121,6 +3145,7 @@ mod tests {
                     E::Forgotten { .. } => ("device", Some("forgotten")),
                     E::Unreadable { .. } => ("device", Some("unreadable")),
                     E::Reloaded => ("device", Some("reloaded")),
+                    E::NewAddressClass { .. } => ("device", Some("new_address_class")),
                     E::ConnectRefused { .. } => ("auth", None),
                     E::PairingOpened { .. } => ("pairing", Some("opened")),
                     E::PairingAttempt { .. } => ("pairing", Some("attempt")),
@@ -3420,7 +3445,7 @@ mod tests {
         a.device_event(&DeviceEvent::PairingDecided { allow: false });
         a.device_event(&DeviceEvent::Enrolled { subject: owner_subject("d_new"), name: "Mac".into(), platform: Platform::Macos, fields: fields("d_new") });
         a.device_event(&DeviceEvent::IdentityRotated { pin: "b".repeat(64) });
-        a.device_event(&DeviceEvent::ConnectRefused { subject: None, spki_sha256: "e".repeat(64), why: ConnectRefusal::Unknown });
+        a.device_event(&DeviceEvent::ConnectRefused { subject: None, spki_sha256: "e".repeat(64), why: ConnectRefusal::Unknown, peer: None });
         let new = live(&d)[before..].to_vec();
         let events: Vec<&str> = new.iter().filter(|r| r["kind"] != "alert").filter_map(|r| r["detail"]["event"].as_str()).collect();
         assert_eq!(events, vec!["scope_changed", "revoked", "disabled", "decided", "enrolled", "identity_rotated"], "{new:#?}");
@@ -3790,7 +3815,7 @@ mod tests {
         let host = Arc::new(Catch::default());
         let (a, _) = Audit::open(&d, Some(host.clone()), Fleet::none());
         let knock = |subject: Option<Subject>, why| {
-            a.device_event(&DeviceEvent::ConnectRefused { subject, spki_sha256: "f".repeat(64), why });
+            a.device_event(&DeviceEvent::ConnectRefused { subject, spki_sha256: "f".repeat(64), why, peer: None });
         };
         for _ in 0..5 {
             knock(None, ConnectRefusal::Unknown);

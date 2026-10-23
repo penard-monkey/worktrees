@@ -5,7 +5,7 @@
 //! shells, the docs server, the writers of `shell-cwds.json` and the rings —
 //! runs here, and the desktop app, a second desktop or a phone are clients of
 //! it. This slice is the server half: the listener, the loopback rule set, the
-//! RPC over the 170 commands, streams and events, and the host wiring every
+//! RPC over the 174 commands, streams and events, and the host wiring every
 //! engine process needs. The frontend transport and the shim becoming a
 //! client are the next lane's.
 //!
@@ -13,12 +13,14 @@
 //! frames and the per-connection queue), `dispatch` (the exposure table and
 //! the arms), `servefile` (`serve.json`), `devices` (`devices.json`, the
 //! device registry every grant is read from), `netwatch` (the remote
-//! listener's address rules, not yet wired), `audit` (`audit.jsonl`, which
-//! only `conn` writes), `budget` (what an authenticated client may cost) and
-//! `flight` (the reads concurrent callers share).
+//! listener's address rules), `remote` (the remote listener, §4.1), `client`
+//! (`worktrees serve call|remote|pair`, a loopback client), `audit`
+//! (`audit.jsonl`, which only `conn` writes), `budget` (what an authenticated
+//! client may cost) and `flight` (the reads concurrent callers share).
 
 mod audit;
 mod budget;
+mod client;
 mod conn;
 mod devices;
 mod dispatch;
@@ -28,6 +30,7 @@ mod netwatch;
 mod pairing;
 mod policy;
 mod provenance;
+mod remote;
 mod resolve;
 mod scope;
 mod servefile;
@@ -61,7 +64,10 @@ usage: worktrees serve [--config-dir DIR] [--port N] [--allow-origin ORIGIN]... 
 Writes <config-dir>/serve.json ({port, token, pid, version[, owner]}, mode 0600) and
 serves until SIGINT/SIGTERM. Logs to ~/.cache/worktrees/serve.log, and keeps an
 audit trail of what reached the socket in <config-dir>/audit.jsonl (mode 0600,
-hash-chained, rotated at 5 MiB, five files kept).";
+hash-chained, rotated at 5 MiB, five files kept).
+
+       worktrees serve call | remote | pair …   (clients of a running serve;
+                                                `worktrees serve pair --help`)";
 
 pub struct Opts {
     pub config_dir: PathBuf,
@@ -248,6 +254,9 @@ pub struct Running {
     /// The paired devices (`devices.json`), or `None` when the caller handed
     /// in its own registry (the in-process tests' fixtures).
     pub devices: Option<Arc<devices::DeviceRegistry>>,
+    /// Remote access (Phase 2 §4.1): off unless `serve-remote.json` says
+    /// otherwise; `None` with a caller's own registry, as `devices`.
+    pub remote: Option<Arc<remote::RemoteAccess>>,
 }
 
 impl Running {
@@ -274,12 +283,21 @@ pub fn start_with(config_dir: PathBuf, port: u16, allow_origin: Vec<String>, lim
     // before the log writes a line: `devices.cross_check` against
     // `audit::evidence`, so a device the chain never enrolled is disabled
     // before anything can serve it, and no checkpoint vouches for it first.
-    // Pairing windows bind where slice 6's remote listener says; until it
-    // exists, none ever opens (`Pairing::set_bind`).
+    // Pairing windows bind where the remote listener is (`Pairing::set_bind`),
+    // so none opens while remote access is off.
     let pairing = Arc::new(pairing::Pairing::new(Some(config_dir.clone()), devices.clone()));
-    let clients = conn::Clients::serving(devices.clone(), pairing, None);
-    let mut running = start_in(config_dir, port, allow_origin, limits, budget::BUDGETS, clients)?;
+    let clients = conn::Clients::serving(devices.clone(), pairing.clone(), None);
+    let mut running = start_in(config_dir.clone(), port, allow_origin, limits, budget::BUDGETS, clients)?;
+    let read: remote::Reader = Box::new(netwatch::read::snapshot);
+    // The audit log the loopback listener opened is remote access's too: its
+    // gate (§5.1) and where its lifecycle and connections are recorded.
+    let audit = running.listener.audit();
+    let gate: Arc<dyn remote::Gate> = audit.clone();
+    let advertiser = remote::platform_advertiser();
+    let r = remote::RemoteAccess::new(config_dir, running.ctx.clone(), running.clients.clone(), devices.clone(), pairing, audit, gate, advertiser, read);
+    running.clients.set_remote(&r);
     running.devices = Some(devices);
+    running.remote = Some(r);
     Ok(running)
 }
 
@@ -305,7 +323,7 @@ pub fn start_in(
     let ctx = Ctx::new(config_dir, Arc::new(conn::Broadcast(clients.clone())));
     let token = servefile::new_token();
     let listener = conn::start(ctx.clone(), token.clone(), port, allow_origin, clients.clone(), limits)?;
-    Ok(Running { ctx, token, listener, clients, devices: None })
+    Ok(Running { ctx, token, listener, clients, devices: None, remote: None })
 }
 
 // ── device expiry ────────────────────────────────────────────────────────────
@@ -387,11 +405,18 @@ pub fn idle_step(since: Option<Instant>, clients: usize, now: Instant, grace: Du
 /// Count `clients` every `tick`; once there has been none for `grace`, say
 /// so and notify `stop` — the `Notify` the signals use, so the way down is
 /// the one a SIGTERM takes: flush, close, remove serve.json, "stopped".
+///
+/// Only the CONSOLE's clients count (decided by the user 2026-10-22, Phase
+/// 2 §9.3, §11.3): a device connected over remote access never keeps an
+/// app-owned serve alive, so a crashed, downgraded or deleted app's serve
+/// still goes. Quitting the app therefore ends remote access, and the app
+/// says so while remote access is on. A host meant to serve devices with no
+/// app runs `worktrees serve` itself, which never idles out.
 pub async fn idle_watch(clients: Arc<conn::Clients>, grace: Duration, tick: Duration, stop: Arc<tokio::sync::Notify>) {
     let mut since = None;
     loop {
         tokio::time::sleep(tick).await;
-        let (s, out) = idle_step(since, clients.len(), Instant::now(), grace);
+        let (s, out) = idle_step(since, clients.console_len(), Instant::now(), grace);
         since = s;
         if out {
             worktrees_api::log::info(&format!(
@@ -406,6 +431,10 @@ pub async fn idle_watch(clients: Arc<conn::Clients>, grace: Duration, tick: Dura
 
 /// `worktrees serve …`. Runs until a signal; the exit code is the usual.
 pub fn cmd_serve(args: &[String]) -> i32 {
+    // `serve call|remote|pair`: console clients of a serve that is running.
+    if let Some(code) = client::dispatch(args) {
+        return code;
+    }
     let opts = match parse_args(args) {
         Ok(Some(o)) => o,
         Ok(None) => {
@@ -496,6 +525,13 @@ pub fn cmd_serve(args: &[String]) -> i32 {
             devices.startup(worktrees_core::sysclock::now_epoch());
             tokio::spawn(expiry_watch(devices));
         }
+        // Remote access, if `serve-remote.json` turned it on: the address
+        // watch's first poll binds it, or says why it is paused.
+        if let Some(r) = running.remote.clone() {
+            r.set_owner(opts.owner.clone());
+            r.start_watch();
+            let _ = tokio::task::spawn_blocking(move || r.tick()).await;
+        }
         let file = servefile::path(&opts.config_dir);
         worktrees_api::log::info(&format!(
             "serve: listening on 127.0.0.1:{} serve.json={} origins=+{}",
@@ -523,6 +559,9 @@ pub fn cmd_serve(args: &[String]) -> i32 {
         // `last_seen` is written at most every ten minutes, and at exit (§2.5).
         if let Some(devices) = &running.devices {
             devices.flush_seen(worktrees_core::sysclock::now_epoch());
+        }
+        if let Some(r) = &running.remote {
+            r.shutdown();
         }
         running.listener.stop();
         host::stop(&running.ctx);

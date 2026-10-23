@@ -54,6 +54,37 @@ pub fn origin_ok(origin: Option<&str>, allowed: &[String]) -> bool {
     BUILTIN_ORIGINS.contains(&o) || allowed.iter().any(|a| a == o)
 }
 
+// ── the remote rule set (Phase 2 §4.5) ───────────────────────────────────────
+
+/// Is this `Host` the remote listener's own address, on its port — exactly
+/// as `SocketAddr` prints it, with no zone (`192.168.1.5:7443`,
+/// `[fe80::1]:7443`)? A device dials an address literal, never a name
+/// (§2.2), so there is one right answer and no case or spelling to fold.
+/// Over TLS this is not the DNS-rebinding guard loopback's `host_ok` is (no
+/// page can reach a pinned mutual-TLS socket); it is the same "one spelling"
+/// rule, so a request never names a host this listener is not.
+pub fn remote_host_ok(host: Option<&str>, bound: std::net::SocketAddr) -> bool {
+    host.is_some_and(|h| h == bound.to_string())
+}
+
+/// A remote upgrade carries NO `Origin` (decided by (main), 2026-10-22).
+///
+/// **This deliberately diverges from `origin_ok`, which REFUSES a missing
+/// `Origin`** — different pages, different questions, as `origin_ok` says of
+/// the docs server. On loopback every client is a page, a page always sends
+/// `Origin`, and its absence means curl or a port scanner. On the remote
+/// listener every client is a NATIVE socket (the shim's or the CLI's,
+/// rustls, holding a device key a page could never hold, §4.4), and a native
+/// socket sends no `Origin`; a browser could not even complete the TLS
+/// handshake, which demands an enrolled client certificate. So an `Origin`
+/// here is the one thing out of place: a browser-shaped request has no
+/// business on this socket, and no browser origin is ever served, with or
+/// without `--allow-origin`, which this listener never reads. No CORS header,
+/// ever.
+pub fn remote_origin_ok(origin: Option<&str>) -> bool {
+    origin.is_none()
+}
+
 /// What an upgrade request must look like, read off the request by `conn.rs`.
 /// Every field is a header value as received (`None` = absent); a header that
 /// appeared twice or could not be read as a string never reaches here, because
@@ -169,6 +200,12 @@ fn unhex32(s: &str) -> Option<[u8; 32]> {
 pub fn client_proof_ok(token: &str, cn: &str, sn: &str, proof: &str) -> bool {
     let Some(tag) = unhex32(proof) else { return false };
     mac(token, CLIENT_LABEL, cn, sn).verify_slice(&tag).is_ok()
+}
+
+/// The client's proof, as a console client of this serve computes it
+/// (`client.rs`, the CLI's `serve call|remote|pair`).
+pub fn client_proof_for(token: &str, cn: &str, sn: &str) -> String {
+    mac(token, CLIENT_LABEL, cn, sn).finalize().into_bytes().iter().map(|x| format!("{x:02x}")).collect()
 }
 
 /// The server's proof, for the `ok` reply. Call it only after
