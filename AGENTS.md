@@ -59,7 +59,9 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   when the pane shows no prompt (a modal takes keys as its answer; the
   client is told to use `agent_answer`) and Claude's composer is EMPTY — read
   with `capture-pane -e`, because only the styling tells its dim `Try "…"`
-  placeholder from a draft. It is `instruct` (drive-class: step-up and the
+  placeholder from a draft. Its text passes `harness::typed_line_ok`, the
+  ONE rule MCP `send` uses too (no control or invisible format characters —
+  Trojan Source — and no leading `/ @ ! #`). It is `instruct` (drive-class: step-up and the
   audit's DRIVE budget), the audit log gets the text's length and hash and
   never the text, and a device's send stamps `last_remote_send`. Do not grow
   a second path that types into Claude.

@@ -392,9 +392,6 @@ impl Pulse {
     }
 }
 
-/// Longest text `send` will type. Typed input is a keystroke per byte, and a
-/// composer is not a document; anything longer belongs in `report`.
-const SEND_MAX: usize = 4 * 1024;
 /// `wait`'s ceiling. MCP clients time a tool call out (a couple of minutes is
 /// common), and a call that outlives the client's patience is a lost answer.
 const WAIT_MAX_S: u64 = 120;
@@ -1241,8 +1238,9 @@ impl Server {
                  waiting on an approval, a question or a trust prompt, and while a kimi lane is \
                  still being handed its brief. A Claude place \
                  is not typed into: you get back the session name to use with Claude's own \
-                 SendMessage instead. One line of plain text, no control characters, not \
-                 starting with / @ or !, up to 4 KB; a copy is filed in the message log as \
+                 SendMessage instead. One line of plain text, up to 4 KB, with no control \
+                 characters and no invisible format characters (bidi controls, zero-width \
+                 characters), not starting with / @ ! or #; a copy is filed in the message log as \
                  already read. \
                  Prefer `report` for anything the agent can pick up at its own pace.",
                 serde_json::json!({
@@ -3077,30 +3075,12 @@ fn model_ok(harness: &str, model: &str, options: &[worktrees_core::choice::Model
     }
 }
 
-/// What `send` will type: non-empty, at most `SEND_MAX` bytes, and no control
-/// character at all — a newline would submit early, an ESC would drive the
-/// TUI. A refusal says which, so the caller can fix it.
+/// What `send` will type: `harness::typed_line_ok`, the rule serve's
+/// `agent_send` holds too. The `[worktrees: …]` label already moves a leading
+/// `/`, `@` or `!` off the first column; refusing them as well means a change
+/// to the label cannot reopen a composer command.
 fn send_text_ok(text: &str) -> Result<(), String> {
-    if text.trim().is_empty() {
-        return Err("text is empty".into());
-    }
-    if text.len() > SEND_MAX {
-        return Err(format!("text is {} bytes; send takes up to {SEND_MAX} — use report for more", text.len()));
-    }
-    if text.chars().any(char::is_control) {
-        return Err("text contains a control character (newline, tab, escape…); send types ONE line".into());
-    }
-    // Belt to `attributed`'s braces: at the start of Codex's composer `/` runs
-    // a builtin (`/logout`, `/clear`, `/quit`…), `@` opens the file picker and
-    // `!` runs a shell command. The prefix already moves them off the first
-    // column; refusing them as well means a change to the prefix cannot
-    // reopen this.
-    if let Some(c) = text.trim_start().chars().next().filter(|c| matches!(c, '/' | '@' | '!')) {
-        return Err(format!(
-            "text may not start with '{c}' — at Codex's prompt that is a command, not a message"
-        ));
-    }
-    Ok(())
+    harness::typed_line_ok(text)
 }
 
 
@@ -4359,11 +4339,14 @@ mod tests {
         for (args, want) in [
             (serde_json::json!({ "slug": "(main)", "text": "line one\nline two" }), "control character"),
             (serde_json::json!({ "slug": "(main)", "text": "\u{1b}[A" }), "control character"),
-            (serde_json::json!({ "slug": "(main)", "text": "x".repeat(SEND_MAX + 1) }), "4096"),
+            (serde_json::json!({ "slug": "(main)", "text": "x".repeat(harness::LINE_MAX + 1) }), "4096"),
             (serde_json::json!({ "slug": "(main)", "text": "  " }), "empty"),
             (serde_json::json!({ "slug": "(main)", "text": "/logout" }), "may not start with '/'"),
             (serde_json::json!({ "slug": "(main)", "text": "  @src/main.rs" }), "may not start with '@'"),
             (serde_json::json!({ "slug": "(main)", "text": "!rm -rf ." }), "may not start with '!'"),
+            (serde_json::json!({ "slug": "(main)", "text": "#remember this" }), "may not start with '#'"),
+            (serde_json::json!({ "slug": "(main)", "text": "ok \u{202E}evil" }), "U+202E"),
+            (serde_json::json!({ "slug": "(main)", "text": "zero\u{200B}width" }), "invisible"),
             (serde_json::json!({ "slug": "feat", "text": "hi" }), "your own place"),
             (serde_json::json!({ "slug": "ghost", "text": "hi" }), "no such place"),
         ] {

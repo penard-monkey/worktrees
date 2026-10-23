@@ -1106,6 +1106,59 @@ pub(crate) fn submit_codex(
     }
 }
 
+/// The longest line typed into an agent: MCP `send`'s and serve's
+/// `agent_send`'s bound. Typed input is a keystroke per byte, and a composer
+/// is not a document; anything longer belongs in a message (`report`).
+pub const LINE_MAX: usize = 4 * 1024;
+
+/// The ONE rule for a line typed into an agent, MCP `send`'s and serve's
+/// `agent_send`'s both: not empty, at most [`LINE_MAX`] bytes, no control
+/// character (a newline would submit early, an ESC would drive the TUI), and
+/// not starting with a character that makes a composer RUN something instead
+/// of reading a message — `/` a command (`/logout`, `/clear`), `!` a shell,
+/// `@` a file picker, `#` Claude's memory, which writes an instruction file.
+/// A refusal says which, so the caller can fix it.
+pub fn typed_line_ok(text: &str) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Err("text is empty".into());
+    }
+    if text.len() > LINE_MAX {
+        return Err(format!("text is {} bytes; a line typed into an agent may be up to {LINE_MAX}", text.len()));
+    }
+    if text.chars().any(char::is_control) {
+        return Err("text contains a control character (newline, tab, escape…); only ONE line is typed".into());
+    }
+    if let Some(c) = text.chars().find(|c| invisible(*c)) {
+        return Err(format!(
+            "text contains an invisible format character, U+{:04X} (a bidi control, a zero-width character or another \
+             Unicode format or separator character): what the agent read would differ from what was shown",
+            c as u32
+        ));
+    }
+    if let Some(c) = text.trim_start().chars().next().filter(|c| matches!(c, '/' | '@' | '!' | '#')) {
+        return Err(format!("text may not start with '{c}' — at an agent's prompt that runs something, it is not a message"));
+    }
+    Ok(())
+}
+
+/// Unicode category Cf — every bidi control (U+202A–U+202E, U+2066–U+2069,
+/// U+200E/U+200F, U+061C), the zero-width joiner and non-joiner, the BOM, the
+/// tags and the rest — and Zl/Zp, the line and paragraph separators that
+/// render as breaks: 172 code points, generated from Python's `unicodedata`
+/// 16.0.0. Any of them in a typed line makes what an agent reads differ from
+/// what a person saw (Trojan Source), so [`typed_line_ok`] refuses them all.
+const INVISIBLE: &[(u32, u32)] = &[
+    (0x00AD, 0x00AD), (0x0600, 0x0605), (0x061C, 0x061C), (0x06DD, 0x06DD), (0x070F, 0x070F), (0x0890, 0x0891),
+    (0x08E2, 0x08E2), (0x180E, 0x180E), (0x200B, 0x200F), (0x2028, 0x202E), (0x2060, 0x2064), (0x2066, 0x206F),
+    (0xFEFF, 0xFEFF), (0xFFF9, 0xFFFB), (0x110BD, 0x110BD), (0x110CD, 0x110CD), (0x13430, 0x1343F),
+    (0x1BCA0, 0x1BCA3), (0x1D173, 0x1D17A), (0xE0001, 0xE0001), (0xE0020, 0xE007F),
+];
+
+fn invisible(c: char) -> bool {
+    let c = c as u32;
+    INVISIBLE.iter().any(|&(lo, hi)| (lo..=hi).contains(&c))
+}
+
 /// Whether a harness in `state` may be typed into. Only one that is running
 /// and not stopped on someone: `Waiting` means a modal is up and would take the
 /// keys as its answer — Codex's approval ("Yes, proceed" is highlighted), pi's
@@ -1131,6 +1184,31 @@ pub(crate) fn may_type(label: &str, state: State) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rule both `send`s type by refuses what would make the line an
+    /// agent READS differ from the one a person SAW (Trojan Source, CVE-2021-
+    /// 42574): every bidi control, every zero-width and other invisible format
+    /// character (Unicode category Cf), and the line and paragraph separators
+    /// that render as breaks — named in the refusal. Visible text in any
+    /// script passes.
+    #[test]
+    fn a_typed_line_carries_no_invisible_characters() {
+        for (c, name) in [
+            ('\u{202A}', "U+202A"), ('\u{202B}', "U+202B"), ('\u{202C}', "U+202C"), ('\u{202D}', "U+202D"),
+            ('\u{202E}', "U+202E"), ('\u{2066}', "U+2066"), ('\u{2067}', "U+2067"), ('\u{2068}', "U+2068"),
+            ('\u{2069}', "U+2069"), ('\u{200E}', "U+200E"), ('\u{200F}', "U+200F"), ('\u{061C}', "U+061C"),
+            ('\u{200B}', "U+200B"), ('\u{200C}', "U+200C"), ('\u{200D}', "U+200D"), ('\u{2060}', "U+2060"),
+            ('\u{FEFF}', "U+FEFF"), ('\u{00AD}', "U+00AD"), ('\u{2028}', "U+2028"), ('\u{2029}', "U+2029"),
+            ('\u{FFF9}', "U+FFF9"), ('\u{E0041}', "U+E0041"), ('\u{1D173}', "U+1D173"),
+        ] {
+            let err = typed_line_ok(&format!("approve{c}d")).unwrap_err();
+            assert!(err.contains("invisible") && err.contains(name), "{name}: {err}");
+        }
+        assert_eq!(INVISIBLE.iter().map(|(lo, hi)| hi - lo + 1).sum::<u32>(), 172, "unicodedata 16.0.0's Cf + Zl + Zp");
+        for fine in ["plain", "naïve café", "مرحبا بالعالم", "日本語のテキスト", "a → b", "emoji 🙂 ok", "x".repeat(LINE_MAX).as_str()] {
+            assert_eq!(typed_line_ok(fine), Ok(()), "{fine:?}");
+        }
+    }
 
     #[test]
     fn registry_and_adapters_line_up() {

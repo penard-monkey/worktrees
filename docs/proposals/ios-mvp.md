@@ -267,7 +267,7 @@ mock (`app/src/mock/install.ts`) and the api's refusal strings
 |---|---|---|---|---|
 | `agent_prompt` | `[read, place(repo, slug)]` | — | `{waiting: true, readable: true, harness, session, kind: "permission"\|"question", lines, choices: [{n, label, more?, highlighted, host_only?}], fingerprint, note}`; `{waiting: true, readable: false, harness, session, reason}` when the agent is waiting on a prompt this host cannot read whole; else `{waiting: false}` | the resolver's |
 | `agent_answer` | `[answer, place(repo, slug)]` | `choice` (a choice's `n`), `fingerprint` | `{answered: true, confirmed, harness, session, choice, label}` | `the prompt changed` (the CAS); `no such choice`; a `host_only` choice from a device (`… only the host can make it`); `step-up required`; `audit-budget …` |
-| `agent_send` | `[instruct, place(repo, slug), session_of(session, repo, slug)]` | `session` (from `agent_sessions`), `text` | `{delivered, queued, harness, session, note}` | one line ≤ 4 KB with no control character and not starting with `/ @ ! #`; `the agent is waiting on a prompt: answer it with agent_answer`; a composer holding someone's text; no composer to see; `step-up required`; `audit-budget …` |
+| `agent_send` | `[instruct, place(repo, slug), session_of(session, repo, slug)]` | `session` (from `agent_sessions`), `text` | `{delivered, queued, harness, session, note}` | one line ≤ 4 KB with no control character, no invisible format character (Unicode Cf — every bidi control, zero-width characters — and the line/paragraph separators) and not starting with `/ @ ! #`, the rule MCP `send` shares (`harness::typed_line_ok`); `the agent is waiting on a prompt: answer it with agent_answer`; a composer holding someone's text; no composer to see; `step-up required`; `audit-budget …` |
 | `agent_turns` | `[read, place(repo, slug), opt(session_of(session, repo, slug))]` | `n` (default 5, at most 20), `session` (optional: the first running agent) | `{harness, session, turns: [{at, user, reply, tools, truncated}], more, note}` — Claude and Codex | a harness whose transcript is not read yet (pi, kimi) |
 
 How each item of the spec was met, and what the lane decided:
@@ -288,7 +288,11 @@ How each item of the spec was met, and what the lane decided:
   "Yes, and always allow access to … from this project" and "Yes, and switch
   to auto mode"; Codex's, "don't ask again for commands that start with …".
   Each widens what the agent may do from then on, which Phase 2 makes the
-  console's alone (§3.4, decision 6). So a permission's choice is open to a
+  console's alone (§3.4, decision 6). A prompt is a QUESTION (every
+  choice a device's) only by the harness's own drawing — Claude's checkbox
+  header or tab bar, Codex's `Question N/M`, kimi's `[n]` choice rows under
+  its `question` header — never by a footer alone or a row the agent wrote;
+  anything else is a permission. So a permission's choice is open to a
   device only when it is KNOWN to be one-shot ("Yes", "No", Codex's "Yes,
   proceed", "Approve once", "Reject", the trust prompts' "No, exit" and "Do
   not trust"); every other choice — an unknown label included — carries
@@ -312,7 +316,10 @@ How each item of the spec was met, and what the lane decided:
   from typed text; Codex, pi, kimi: their composer readers). Codex, pi and
   kimi are typed into through `harness::Adapter::send`, as MCP `send` does;
   **Claude is pasted into and submitted** (Q4, decided by the user on
-  2026-10-23: one mechanism for every harness). The line is not labelled: on
+  2026-10-23: one mechanism for every harness). A line holding a bidi
+  control or another invisible format character is refused, as MCP `send`
+  refuses it (one validator, `harness::typed_line_ok`): the bytes an agent
+  reads must be the line the phone showed (Trojan Source). The line is not labelled: on
   a phone it is the user's. A paired device's send stamps
   `last_remote_send {principal, device, session, at}` on the place (§7.3's
   shape; MCP `place_status` reports it); the audit record holds the text's

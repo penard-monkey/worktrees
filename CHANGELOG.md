@@ -114,6 +114,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
     mode", trusting a folder) can be made only at this machine.
   - `agent_send` types one line into an agent, Claude included, only while
     it shows no prompt and nobody has started typing at its prompt.
+  - `agent_send` and MCP `send` refuse a line holding a bidi control or
+    another invisible character (zero-width joiners, a byte-order mark and
+    the like), so what the agent reads is what the screen showed. They share
+    one rule; MCP `send` now also refuses a line starting with `#`.
   - `agent_turns` returns the last few turns from the agent's own transcript
     (Claude and Codex): what was asked, the reply, and which tools ran.
   - From a paired device, answering and sending need a fresh step-up on

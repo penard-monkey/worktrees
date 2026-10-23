@@ -30,7 +30,11 @@
 //! "don't ask again …", a mode switch, trusting a folder — changes what the
 //! agent may do from then on, which Phase 2 makes the console's alone (§3.4,
 //! decision 6). A label this reader has never seen is host-only too: the
-//! failure is "answer it at the host", never a widened agent.
+//! failure is "answer it at the host", never a widened agent. A QUESTION's
+//! choices are all a device's, so a prompt is one only by the harness's own
+//! drawing — Claude's checkbox header or tab bar, Codex's `Question N/M`,
+//! kimi's `[n]` choice rows under its `question` header — never by a footer
+//! alone or by any row the agent wrote; anything else is a permission.
 
 use serde::Serialize;
 
@@ -151,13 +155,19 @@ pub fn claude(screen: &str) -> Option<Modal> {
         return None;
     };
     let top = (0..end).rev().find(|&i| full_rule(&rows[i], width) && !next_is_choice(&rows, i, end))?;
-    if end > last {
+    // A question's choices are all a device's, so "question" is decided by
+    // what CLAUDE draws, never by the footer alone: AskUserQuestion heads its
+    // modal with a checkbox (`☐ Colour`) or, for several questions, the
+    // `← ☐ Colour ☐ Size ✔ Submit →` tab bar. Another dialog with the same
+    // footer is a permission, its unknown choices the host's.
+    let head = rows[top + 1..end].iter().map(|r| r.trim()).find(|t| !t.is_empty())?;
+    let tab_bar = head.starts_with('←') && head.ends_with('→');
+    let asked = tab_bar || head.starts_with(['☐', '☒', '✔']);
+    if end > last && !tab_bar {
         // No footer: only the review screen ends on a choice, under its tab bar.
-        let bar = rows[top + 1..end].iter().map(|r| r.trim()).find(|t| !t.is_empty())?;
-        if !(bar.starts_with('←') && bar.ends_with('→')) {
-            return None;
-        }
+        return None;
     }
+    let kind = if kind == Kind::Question && !asked { Kind::Permission } else { kind };
     let choices = numbered_run(&rows, top + 1, end).or_else(|| marked_run(&rows, top + 1, end, |_| false))?;
     Some(modal(kind, &rows, top + 1, last, end, choices))
 }
@@ -190,6 +200,11 @@ pub fn codex(screen: &str) -> Option<Modal> {
             || t.strip_prefix("Question ").is_some_and(|q| q.starts_with(|c: char| c.is_ascii_digit()))
     };
     let start = (from..first).find(|&i| header(&rows[i])).unwrap_or(from);
+    // A question by Codex's own header, `Question 1/1 (…)`, or not at all.
+    let kind = match kind {
+        Kind::Question if !rows[start].trim().starts_with("Question ") => Kind::Permission,
+        k => k,
+    };
     Some(modal(kind, &rows, start, last, foot, choices))
 }
 
@@ -213,8 +228,12 @@ pub fn kimi(screen: &str) -> Option<Modal> {
     let end = if hint(&rows[last]) { last } else { close };
     let trust = rows[open..close].iter().any(|r| r.trim() == "Trust this folder?");
     let choices = numbered_run(&rows, open + 1, end).or_else(|| marked_run(&rows, open + 1, end, hint))?;
-    let bracketed = rows[open + 1..end].iter().any(|r| r.trim_start().trim_start_matches(MARKS).trim_start().starts_with('['));
-    let kind = if !trust && bracketed { Kind::Question } else { Kind::Permission };
+    // A question by kimi's own drawing — `[n]` on the CHOICE rows, under its
+    // `question` header — never by a row the agent wrote: an approval's
+    // command can print `[1] …`.
+    let bracketed = run_rows(&rows, open + 1, end).is_some_and(|at| at.iter().all(|&i| bracket_numbered(&rows[i])));
+    let headed = rows[open + 1..end].iter().map(|r| r.trim()).find(|t| !t.is_empty()) == Some("question");
+    let kind = if !trust && bracketed && headed { Kind::Question } else { Kind::Permission };
     Some(modal(kind, &rows, open + 1, last, end, choices))
 }
 
@@ -389,33 +408,44 @@ fn numbered(row: &str) -> Option<(bool, u32, &str)> {
 /// not a rule) continue the one above them. Anything numbered out of turn
 /// makes it no list at all — `None`, never a guess.
 fn numbered_run(rows: &[String], start: usize, end: usize) -> Option<Vec<Choice>> {
-    let mut at: Vec<(usize, bool, u32, String)> = Vec::new();
+    let at = run_rows(rows, start, end)?;
+    let choices = at
+        .iter()
+        .enumerate()
+        .map(|(j, &i)| {
+            let (hl, n, text) = numbered(&rows[i]).expect("run_rows found it numbered");
+            let next = at.get(j + 1).copied().unwrap_or(end);
+            let more = rows[i + 1..next].iter().filter(|r| !r.trim().is_empty() && !is_rule(r)).map(|r| r.trim().to_string());
+            choice(n, hl, text, more.collect())
+        })
+        .collect();
+    Some(choices)
+}
+
+/// The rows of [`numbered_run`]'s list, top to bottom.
+fn run_rows(rows: &[String], start: usize, end: usize) -> Option<Vec<usize>> {
+    let mut at: Vec<(usize, u32)> = Vec::new();
     for i in (start..end).rev() {
-        let Some((hl, n, text)) = numbered(&rows[i]) else { continue };
+        let Some((_, n, _)) = numbered(&rows[i]) else { continue };
         match at.last() {
             None => {}
-            Some(&(_, _, below, _)) if n + 1 == below => {}
+            Some(&(_, below)) if n + 1 == below => {}
             Some(_) => return None,
         }
-        at.push((i, hl, n, text.to_string()));
+        at.push((i, n));
         if n == 1 {
             break;
         }
     }
-    if at.last().is_none_or(|c| c.2 != 1) {
+    if at.last().is_none_or(|c| c.1 != 1) {
         return None;
     }
-    at.reverse();
-    let choices = at
-        .iter()
-        .enumerate()
-        .map(|(j, (i, hl, n, text))| {
-            let next = at.get(j + 1).map_or(end, |c| c.0);
-            let more = rows[i + 1..next].iter().filter(|r| !r.trim().is_empty() && !is_rule(r)).map(|r| r.trim().to_string());
-            choice(*n, *hl, text, more.collect())
-        })
-        .collect();
-    Some(choices)
+    Some(at.into_iter().rev().map(|(i, _)| i).collect())
+}
+
+/// A choice row numbered kimi's question way, `[1] Red`, not `1. Red`.
+fn bracket_numbered(row: &str) -> bool {
+    row.trim_start().trim_start_matches(MARKS).trim_start().starts_with('[')
 }
 
 /// An unnumbered list (a trust prompt): the last highlighted row, and the
@@ -717,6 +747,54 @@ mod tests {
             assert!(!p.lines.iter().any(|l| l.starts_with('─')), "the rules are not the modal");
         }
         assert_eq!(pi(include_str!("../tests/fixtures/pi-screen/working.txt")), None);
+    }
+
+    /// A question's choices are all a device's, so "question" must be the
+    /// HARNESS's word for the screen, never the agent's: Claude's checkbox
+    /// header or tab bar, Codex's `Question N/M`, kimi's `[n]` choices under
+    /// its `question` header. A dialog that only shares a question's footer,
+    /// or an approval whose command prints `[1] …`, is a permission, and its
+    /// unknown choices are the host's.
+    #[test]
+    fn a_question_is_only_a_question_by_the_harnesss_own_structure() {
+        let q = claude_fx!("question.txt");
+        assert_eq!(q.matches(" ☐ Colour").count(), 1);
+        let dialog = q.replacen(" ☐ Colour", " Ready to code?", 1).replacen("❯ 1. Red", "❯ 1. Yes, and auto-accept edits", 1);
+        let m = claude(&dialog).expect("still a dialog");
+        assert_eq!(m.kind, Kind::Permission, "a footer alone does not make a question");
+        assert_eq!(m.choices[0].host_only, Some(HostOnly::Widens));
+
+        let cq = include_str!("../tests/fixtures/codex-send/probe-question-modal.txt");
+        let headless = cq.replacen("  Question 1/1 (1 unanswered)\n", "", 1);
+        assert_ne!(headless, cq);
+        let m = codex(&headless).expect("still waiting");
+        assert_eq!(m.kind, Kind::Permission);
+        assert!(m.choices.iter().all(|c| c.host_only.is_some()), "{:#?}", m.choices);
+
+        let ka = include_str!("../tests/fixtures/kimi-screen/2.2.0/approval.txt");
+        assert_eq!(ka.matches("\n   $ ls\n").count(), 1);
+        let forged = ka.replacen("\n   $ ls\n", "\n   $ ls\n   [1] not a choice\n", 1);
+        let m = kimi(&forged).expect("still an approval");
+        assert_eq!(m.kind, Kind::Permission, "the agent's command cannot make an approval a question");
+        assert_eq!(m.choices[1].host_only, Some(HostOnly::Widens), "{:#?}", m.choices);
+        let kq = include_str!("../tests/fixtures/kimi-screen/2.2.0/question.txt");
+        assert_eq!(kq.matches("\n  question\n").count(), 1);
+        let unheaded = kq.replacen("\n  question\n", "\n  approval\n", 1);
+        assert_eq!(kimi(&unheaded).map(|m| m.kind), Some(Kind::Permission), "no `question` header, no question");
+        // The `[n]` must be on the CHOICE rows: a row the agent wrote (here
+        // the question line) starting with `[` does not make dotted choices
+        // a question's.
+        let dotted = kq
+            .replacen("  ? Which color do you prefer?", "  [?] Which color do you prefer?", 1)
+            .replacen("→ [1] Red", "→ 1. Red", 1)
+            .replacen("[2] Blue", "2. Blue", 1)
+            .replacen("[3] Other", "3. Other", 1);
+        assert!(!dotted.contains("[1]") && dotted.contains("  [?] Which color"), "only the agent's row is bracketed");
+        assert_eq!(kimi(&dotted).map(|m| m.kind), Some(Kind::Permission));
+        // And the real questions stay questions.
+        assert_eq!(claude(q).unwrap().kind, Kind::Question);
+        assert_eq!(codex(cq).unwrap().kind, Kind::Question);
+        assert_eq!(kimi(include_str!("../tests/fixtures/kimi-screen/2.2.0/question.txt")).unwrap().kind, Kind::Question);
     }
 
     /// The list reader never guesses: numbers out of turn, or a list that does

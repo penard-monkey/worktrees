@@ -66,7 +66,7 @@ pub const ERR_MID_INPUT: &str = "the agent's prompt has unsent text in it (someo
 pub const ERR_NO_COMPOSER: &str = "the agent is not at its prompt (starting, or a screen this host does not recognise): try again shortly";
 
 /// The longest line `agent_send` types: MCP `send`'s bound.
-pub const SEND_MAX: usize = 4 * 1024;
+pub const SEND_MAX: usize = harness::LINE_MAX;
 /// `agent_turns`'s `n` when the client names none.
 pub const DEFAULT_TURNS: usize = 5;
 
@@ -271,26 +271,10 @@ fn host_only(n: u32, why: HostOnly) -> String {
     }
 }
 
-/// What `agent_send` will type, by MCP `send`'s rules: not empty, at most
-/// [`SEND_MAX`] bytes, no control character (a newline would submit early, an
-/// ESC would drive the TUI), and not starting with a character that makes a
-/// composer run something instead of reading a message — `/` (a command), `!`
-/// (a shell), `@` (a file picker), `#` (Claude's memory, which writes an
-/// instruction file).
+/// What `agent_send` will type: `harness::typed_line_ok`, MCP `send`'s rule
+/// too, so the two can never drift apart.
 pub fn send_text_ok(text: &str) -> Result<(), String> {
-    if text.trim().is_empty() {
-        return Err("text is empty".into());
-    }
-    if text.len() > SEND_MAX {
-        return Err(format!("text is {} bytes; agent_send takes up to {SEND_MAX}", text.len()));
-    }
-    if text.chars().any(char::is_control) {
-        return Err("text contains a control character (newline, tab, escape…); agent_send types ONE line".into());
-    }
-    if let Some(c) = text.trim_start().chars().next().filter(|c| matches!(c, '/' | '@' | '!' | '#')) {
-        return Err(format!("text may not start with '{c}' — at an agent's prompt that runs something, it is not a message"));
-    }
-    Ok(())
+    harness::typed_line_ok(text)
 }
 
 /// `agent_send`: type one line into the agent running in `session` of this
@@ -768,6 +752,21 @@ mod tests {
         assert_eq!(fake.captures.load(Ordering::SeqCst), 0, "refused before the pane is looked at");
         assert!(fake.delivered.lock().unwrap().is_empty());
         assert!(agent_send(&ctx, repo, "lane".into(), "repo-lane".into(), "x".repeat(SEND_MAX)).is_ok(), "4 KB exactly is fine");
+    }
+
+    /// A line whose bytes say something its screen does not — a bidi
+    /// override, a zero-width character — is refused before the pane is
+    /// looked at, by MCP `send`'s rule (`harness::typed_line_ok`).
+    #[test]
+    fn a_line_carries_no_invisible_characters() {
+        let fake = Arc::new(Fake::with(vec![("claude", "repo-lane", pane(vec![fx!("composer-empty.e.txt")], ""))]));
+        let (ctx, repo) = setup("sendbidi", fake.clone());
+        for text in ["approve \u{202E}dlrow", "run \u{2066}rm -rf .\u{2069} later", "zero\u{200D}width", "bom\u{FEFF}"] {
+            let err = agent_send(&device(&ctx), repo.clone(), "lane".into(), "repo-lane".into(), text.into()).unwrap_err();
+            assert!(err.contains("invisible"), "{text:?}: {err}");
+        }
+        assert_eq!(fake.captures.load(Ordering::SeqCst), 0, "refused before the pane is looked at");
+        assert!(fake.delivered.lock().unwrap().is_empty());
     }
 
     /// Claude, from real 2.1.309 panes: an empty composer takes the line, one
