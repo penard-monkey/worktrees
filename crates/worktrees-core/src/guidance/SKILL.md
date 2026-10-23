@@ -68,8 +68,10 @@ Seven lanes starting the same monorepo gate at once have locked a machine up.
 
 - Wrap anything heavy in a slot: `worktrees run --slot gate -- <cmd>` (for
   example `worktrees run --slot gate -- pnpm gate`). It runs the command once
-  one of the machine's gate slots is free (two by default) and passes its
-  exit code back.
+  one of the machine's gate slots is free and passes its exit code back. How
+  many there are is the user's setting, sized from the machine's cores and
+  memory until they choose one; never change it (`worktrees slots set`) to
+  get past the queue.
 - `waiting for slot gate (2/2 held by …)` is expected, not an error. Run the
   command in the background or with a long timeout, and wait. Never drop the
   wrapper to get past the queue. `--timeout <secs>` gives up with exit 75

@@ -194,6 +194,38 @@ let mockQuota: { gate: boolean; weekly_warn_pct: number | null; problems: string
     ? ["[quota] weekly_warn_pct = 150 is not a whole number from 1 to 100 — ignored, the provider's own grade applies"] : [],
 };
 const mockQuotaNow = () => ({ ...mockQuota, config_path: "/Users/demo/.config/worktrees/config.toml" });
+// The user's `[slots]` (`slots_settings`), resolved the way core's
+// `slots::resolve` does: the name's own key, else `default` (for any other
+// name), else the machine's. Starts as this repo's author left it — `gate = 3`
+// on a 10-core 36 GiB Mac — with one gate running and one waiting. `?slots=`
+// takes `name=n` pairs (`?slots=` alone: nothing set), `?slotsmachine=off` the
+// built-in default, and `?slotsbad=1` a hand-edit core ignored.
+const mockSlotsQ = new URLSearchParams(location.search);
+const mockSlotsCfg: Record<string, number> = Object.fromEntries(
+  (mockSlotsQ.get("slots") ?? "gate=3").split(",").filter(Boolean).map((kv) => kv.split("=")).map(([k, v]) => [k, +v]));
+const mockSlotsMachine = mockSlotsQ.get("slotsmachine") === "off" ? null : { cores: 10, ram_gib: 36, capacity: 3 };
+const mockSlotsBusy: Record<string, [number, number]> = { gate: [1, 1] };
+const mockSlotsNow = () => {
+  const own = (n: string) => mockSlotsCfg[n];
+  const fallback = (n: string): [number, string, string] =>
+    n !== "default" && own("default") !== undefined ? [own("default"), "config [slots] default", "config"]
+    : mockSlotsMachine ? [mockSlotsMachine.capacity, `machine (${mockSlotsMachine.cores} cores, ${mockSlotsMachine.ram_gib} GiB)`, "machine"]
+    : [2, "built-in", "built-in"];
+  const names = ["gate", ...Object.keys(mockSlotsCfg).filter((n) => n !== "gate" && n !== "default").sort(), "default"];
+  return {
+    slots: names.map((name) => {
+      const [fb, fbSource, fbKind] = fallback(name);
+      const explicit = own(name) !== undefined;
+      const [busy, waiting] = mockSlotsBusy[name] ?? [0, 0];
+      return { name, capacity: explicit ? own(name) : fb, source: explicit ? `config [slots] ${name}` : fbSource,
+        explicit, fallback: fb, fallback_source: fbSource, fallback_kind: fbKind, busy, waiting };
+    }),
+    machine: mockSlotsMachine,
+    max: 64,
+    problems: mockSlotsQ.get("slotsbad") ? ["[slots] e2e is not a whole number from 1 to 64 — ignored"] : [],
+    config_path: "/Users/demo/.config/worktrees/config.toml",
+  };
+};
 // Roots whose info/exclude already has `/.planning/`: the first full write
 // answers "added", every later one "ignored" — the real core's idempotence.
 // `?planexclude=tracked|failed` makes every write answer that instead, so the
@@ -1405,6 +1437,16 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       // A write rewrites both keys, so whatever the hand-edit got wrong is gone.
       mockQuota = { gate: !!args.gate, weekly_warn_pct: pct, problems: [] };
       return mockQuotaNow();
+    }
+    case "slots_settings":
+      return mockSlotsNow();
+    case "set_slot_capacity": {
+      const name = String(args.name);
+      const n = args.capacity as number | null;
+      if (!/^[a-z0-9][a-z0-9-]{0,39}$/.test(name)) throw `slot name \`${name}\` must be lowercase letters, digits and dashes`;
+      if (n !== null && (!Number.isInteger(n) || n < 1 || n > 64)) throw `capacity must be a whole number from 1 to 64 (got ${n})`;
+      if (n === null) delete mockSlotsCfg[name]; else mockSlotsCfg[name] = n;
+      return mockSlotsNow();
     }
     case "cross_project_status":
       return mockCrossProject();

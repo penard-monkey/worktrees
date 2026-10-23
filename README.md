@@ -157,6 +157,8 @@ worktrees open <name>                 reopen a worktree's tmux session
 worktrees close <name> [name...]      end the tmux session (worktree stays; also: main)
 worktrees ls [--json]                 list worktrees + their state (--json: machine-readable)
 worktrees rm <name> [name...]         tear one (or more) down
+worktrees run --slot gate -- <cmd>    run a heavy job once one of the machine's gate slots is free
+worktrees slots                       each slot's capacity, where it comes from, who holds and waits
 worktrees                             (no args) → ls
 ```
 
@@ -175,6 +177,16 @@ Flags:
 | `open` | `--brief <file>` (re-brief: rewrite `.planning/brief.md` from the file, `-` for stdin, and start the agent on it even where it has run before — a plain `open` sends the brief's opener only on an agent's first launch there, and says so when it does not; refused while the place's session is running) |
 | `switch` | `--force` (despite uncommitted changes) · `--no-fetch` · `-y` |
 | `rm` | `--branch` (delete the branch too) · `--force` · `-y/--yes` |
+| `run` | `--slot <name>` (required; `gate` for gates, builds and full test runs) · `--slots N` (this call's capacity only) · `--timeout SECS` (give up with exit 75, running nothing) |
+| `slots` | `--json` · `set <name> <N>` (write `[slots] <name>` to your `config.toml`; `default` sets every name the table does not list) · `unset <name>` (remove it: the slot falls back to `default`, else the machine's) |
+
+**Heavy jobs share the machine.** `worktrees run --slot gate -- <cmd>` waits
+until one of the machine's gate slots is free, across every project, so lanes
+that start their gates together do not run them all at once. How many slots
+there are is yours to set in `~/.config/worktrees/config.toml` (`worktrees
+slots set gate 3`, or Settings → Behavior → Heavy jobs). With nothing set it is
+sized from the machine: the lower of its performance cores divided by three and
+its memory in GiB divided by ten, from 1 to 4. `worktrees slots` says which.
 
 **An agent is not started on a plan window that is nearly spent.** Before a
 session is created, the harness asks its own provider how much of the current

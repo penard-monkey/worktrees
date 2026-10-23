@@ -254,6 +254,21 @@ this repo's settings in `.claude/close-out.md`).
   doing in one pass so the suite's green means something; expect real failures
   to surface as it lands.
   _From: 2026-10-15, fix/init-template-write_
+- **106 of the bats suite's 110 negated assertions (`! cmd`) are inert too.**
+  Bash exempts a `!`-negated command from errexit, so a mid-test
+  `! tmux_session_exists x` passes whether or not the session exists (measured
+  on bats 1.12.0: `! true` mid-test passes, `! true || false` fails). Only the
+  ones that are a test's last line decide anything. Append `|| false` to each,
+  in the same pass as the `[[ ]]` conversion above; `test/slots.bats` already
+  has.
+  _From: 2026-10-22, feat/slots-config_
+- **The slots' machine default reads a container's HOST memory.** On Linux it
+  takes `/proc/meminfo` MemTotal, which a container shows as its host's (or
+  Docker VM's): measured under `docker --cpus 4 --memory 6g`, the probe read
+  4 cores (available_parallelism honours the CPU quota) and 7 GiB, not 6.
+  Reading cgroup v2 `memory.max` and taking the lower would match the CPU side.
+  Low stakes — a container rarely runs several gates — so it waits.
+  _From: 2026-10-22, feat/slots-config_
 - **Drive "Ask (main)" (#489) once in the real app.** Only the mock was
   driven. By hand in `app/scripts/sandbox.sh --app`, on a place with a brief:
   (1) (main) idle at an empty prompt → the prompt lands, the app switches, and

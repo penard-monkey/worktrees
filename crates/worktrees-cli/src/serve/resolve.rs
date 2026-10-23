@@ -1429,6 +1429,28 @@ mod tests {
         }
     }
 
+    /// A slot's capacity is how much of THIS machine every lane's gate may
+    /// take, so setting it — or removing it — is a console act even for a
+    /// device holding everything. Reading it is a `read`/`global` row like
+    /// `quota_settings` (its body hands out counts, never a holder).
+    #[test]
+    fn slot_capacity_is_set_from_the_console_only() {
+        let t = two("slots");
+        let (cx, g) = phone(&Capability::ALL, &[&t.a]);
+        let w = t.world();
+        for a in [json!({ "name": "gate", "capacity": 3 }), json!({ "name": "gate", "capacity": null })] {
+            let e = try_row("set_slot_capacity", &cx, &g, a.clone(), &w).unwrap_err();
+            assert_eq!((e.kind, e.wire()), (RefusalKind::ConsoleOnly, json!(ERR_CONSOLE_ONLY)), "{a}");
+        }
+        assert!(try_row("slots_settings", &cx, &g, json!({}), &w).is_ok(), "a device may read it");
+        let (ro, rg) = phone(&[Capability::Read], &[&t.a]);
+        assert!(try_row("slots_settings", &ro, &rg, json!({}), &w).is_ok(), "read is enough");
+        let (none, ng) = phone(&[], &[&t.a]);
+        assert!(try_row("slots_settings", &none, &ng, json!({}), &w).is_err(), "and needed");
+        let (con, all) = console();
+        assert!(try_row("set_slot_capacity", &con, &all, json!({ "name": "gate", "capacity": 3 }), &w).is_ok());
+    }
+
     /// §3.4's rule for what the host FETCHES for a device: no local path, no
     /// `file://`, and no host that is the host's own network — so a device
     /// can neither read an unregistered repo on the host's disk nor borrow

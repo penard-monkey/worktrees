@@ -2816,6 +2816,33 @@ body.dragging .menu-catch { pointer-events: none; }
 .setting select:disabled { opacity: 0.5; cursor: default; }
 .quota-problems { font-size: var(--fs-micro); color: var(--txt-dim); margin-top: 2px; }
 .quota-problem-mark { color: var(--warn); }
+/* Settings → Behavior → Heavy jobs (SlotsPanel.tsx). Words in --txt-hi /
+   --txt-dim; the one hue is the busy DOT (an accent is a fill, not text). The
+   steppers are plain text buttons in a div, never a flex <button> (WebKit). */
+.slot-rows { display: flex; flex-direction: column; gap: var(--s2); }
+.slot-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center;
+  column-gap: var(--s3); row-gap: var(--s1); padding: var(--s2) var(--s3);
+  background: var(--bg-panel); border-radius: var(--r-sm);
+}
+.slot-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.slot-name { font-size: var(--fs-label); color: var(--txt-hi); }
+.slot-meta { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1); min-width: 0; font-size: var(--fs-micro); color: var(--txt-dim); }
+.slot-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex: none; }
+.slot-step { display: flex; align-items: center; gap: var(--s1); }
+.slot-step button {
+  width: 24px; height: 24px; padding: 0; background: var(--bg-input); border: 1px solid var(--line);
+  border-radius: var(--r-sm); color: var(--txt-hi); font-size: var(--fs-label); line-height: 1; cursor: pointer;
+}
+.slot-step button:hover:not(:disabled) { border-color: var(--line-strong); }
+.slot-step button:disabled { opacity: 0.4; cursor: default; }
+.slot-cap { min-width: 2.5ch; text-align: center; font-variant-numeric: tabular-nums; font-size: var(--fs-label); color: var(--txt-hi); }
+.slot-reset {
+  grid-column: 1 / -1; justify-self: start; padding: 0; background: none; border: 0;
+  font-size: var(--fs-micro); color: var(--txt-dim); text-decoration: underline; cursor: pointer;
+}
+.slot-reset:hover:not(:disabled) { color: var(--txt-hi); }
+.slot-reset:disabled { opacity: 0.5; cursor: default; }
 .preview { padding: var(--s2); background: var(--bg-panel); border-radius: var(--r-sm); color: var(--txt-hi); font-size: var(--fs-row); }
 .seg { display: flex; gap: 0; border: 1px solid var(--line); border-radius: var(--r-sm); overflow: hidden; width: fit-content; }
 .seg button { background: var(--bg-input); color: var(--txt-dim); border: 0; padding: var(--s2) var(--s4); font-size: var(--fs-label); text-transform: capitalize; }

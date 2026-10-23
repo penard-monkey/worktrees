@@ -36,8 +36,28 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   one. `open_place {slug, brief?, provider?, model?, force?}` is a
   `--mutations` tool. With `brief`, it re-briefs the place as
   `open --brief` does.
+- **`worktrees slots set <name> <N>` and `worktrees slots unset <name>`.** How
+  many heavy jobs a slot lets run at once no longer needs a hand edit of
+  `config.toml`: `set` writes `[slots] <name>` (`default` covers every name
+  the table does not list) and `unset` removes it. Every other line of the
+  file is kept, comments included, and a capacity outside 1 to 64 or a name
+  that is not lowercase letters, digits and dashes is refused. A job already
+  running or waiting keeps the number it started with.
+- **Settings → Behavior → Heavy jobs.** The same capacities in the app: `gate`,
+  `default` and every slot your config names, with where each number comes
+  from and how many jobs run and wait in it now. Change one with − and +, and
+  Reset removes it from the config. Only the computer the app runs on can
+  change them; a paired device can read them.
 
 ### Changed
+- **With nothing set, a slot's capacity is sized from the machine.** It used to
+  be 2 everywhere. It is now the lower of the performance cores divided by
+  three and a tenth of the memory in GiB, never below 1 and never above 4
+  unless `[slots]` says so: a 10-core, 36 GiB Mac gets 3, and a 4-core,
+  16 GiB machine gets 1. An explicit `[slots]` entry always wins.
+  `worktrees slots` now lists `gate` and `default` even when idle, with each
+  capacity's source: `config [slots] gate`, `config [slots] default`,
+  `machine (10 cores, 36 GiB)` or `built-in`.
 - **A tmux session name never starts with `-`.** A prefix that would, such as
   a checkout in `.dotfiles` or a cloned repo's `[project] prefix = "-x"`, now
   starts with `_`: `_dotfiles-main` rather than `-dotfiles-main`. A command

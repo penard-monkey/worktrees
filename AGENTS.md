@@ -77,7 +77,7 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   do not align them). hyper parses the HTTP and tungstenite sees only frames,
   also ON PURPOSE: tungstenite's `accept_hdr_async` WRITES an HTTP error
   response when it refuses, while a hyper service that returns `Err` closes
-  with 0 bytes. The 168 commands sit in ONE macro table
+  with 0 bytes. The 170 commands sit in ONE macro table
   (`serve/dispatch.rs`) with an `Exposure` each; the six `ClientLocal` rows
   (clipboard, editor, terminal, zoom, the app bundle) are refused with
   `err: "client-local"`, never run on the host — the docs viewer is an
@@ -482,7 +482,10 @@ bats suite is green" says less than it looks. Write string assertions as
 herestring, so there is no pipeline and no SIGPIPE games), or load the
 `bats-assert` submodule that is already vendored at `test/lib/bats-assert` and
 never wired up. Found while adding a test that passed before the fix existed;
-see ROADMAP.
+see ROADMAP. Its twin: **a mid-test `! cmd` asserts nothing either** — bash
+exempts a negated command from errexit, so `! grep -qF x <<<"$output"` passes
+whether or not `x` is there (measured, bats 1.12.0). Write `! cmd || false`;
+106 of the suite's 110 negated lines lack it, though a last-line one counts.
 
 **Killing a bats run writes a `not ok` into its log.** A `pkill` (or a branch
 switch under a running suite) fails the in-flight test inside `common_setup`

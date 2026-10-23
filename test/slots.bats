@@ -27,6 +27,15 @@ bg_run() {
   KILL_ME="${KILL_ME:-} $BG"
 }
 
+cfg() { mkdir -p "$HOME/.config/worktrees"; printf '%s\n' "$@" > "$HOME/.config/worktrees/config.toml"; }
+cfg_file() { printf '%s' "$HOME/.config/worktrees/config.toml"; }
+
+# What this machine looks like to slots.rs: $1 cores, $2 GiB.
+machine() {
+  printf '{"cores":%s,"ram_bytes":%s}' "$1" "$(( $2 * 1073741824 ))" > "$BATS_TEST_TMPDIR/machine.json"
+  export WORKTREES_SLOTS_PROBE="$BATS_TEST_TMPDIR/machine.json"
+}
+
 # Wait (≤5s) until `worktrees slots --json` shows $1 holders of slot $2.
 wait_held() {
   local n="$1" name="$2" i got
@@ -77,7 +86,9 @@ print(sum(len(s["holders"]) for s in d["slots"] if s["name"] == sys.argv[1]))' "
   run_wt run --slot e -- sh -c 'exit 3'
   [ "$status" -eq 3 ]
   run "$WT_BIN" slots
-  [ "$output" = "no slots in use" ]
+  [ "$status" -eq 0 ]
+  grep -qxF "no slots in use" <<<"$output"
+  ! grep -qF "  holds  " <<<"$output" || false
 }
 
 @test "run: a daemon the job leaves behind does not keep the slot" {
@@ -110,9 +121,9 @@ print(sum(len(s["holders"]) for s in d["slots"] if s["name"] == sys.argv[1]))' "
   [ "$status" -eq 0 ]
   printf '%s' "$output" | python3 -c '
 import sys, json
-s = json.load(sys.stdin)["slots"][0]
+s = [s for s in json.load(sys.stdin)["slots"] if s["name"] == "j"][0]
 h = s["holders"][0]
-assert s["name"] == "j" and s["capacity"] == 2, s
+assert s["capacity"] == 2 and s["source"] == "built-in" and not s["explicit"], s
 assert h["place"] == "repo:(main)" and h["cmd"] == "sleep 30" and h["slots"] == 2, h
 '
 }
@@ -166,9 +177,11 @@ assert h["place"] == "repo:(main)" and h["cmd"] == "sleep 30" and h["slots"] == 
   kill -INT "$run_pid"
   local n
   for n in $(seq 1 30); do kill -0 "$run_pid" 2>/dev/null || break; sleep 0.1; done
-  ! kill -0 "$run_pid" 2>/dev/null   # the second became a TERM; run is gone
+  ! kill -0 "$run_pid" 2>/dev/null || false   # the second became a TERM; run is gone
   run "$WT_BIN" slots
-  [ "$output" = "no slots in use" ]
+  [ "$status" -eq 0 ]
+  grep -qxF "no slots in use" <<<"$output"
+  ! grep -qF "  holds  " <<<"$output" || false
 }
 
 @test "run and slots work outside any repository" {
@@ -176,4 +189,85 @@ assert h["place"] == "repo:(main)" and h["cmd"] == "sleep 30" and h["slots"] == 
   run bash -c "cd '$out' && '$WT_BIN' run --slot o -- echo hi"
   [ "$status" -eq 0 ]
   [ "$output" = hi ]
+}
+
+@test "slots: the status view gives each slot's capacity and where it comes from" {
+  run "$WT_BIN" slots
+  [ "$status" -eq 0 ]
+  grep -qE '^gate +0/2 held  \(built-in\)$' <<<"$output"
+  grep -qE '^default +2 for any other name  \(built-in\)$' <<<"$output"
+  machine 10 36
+  cfg '[slots]' 'e2e = 1'
+  run "$WT_BIN" slots
+  grep -qE '^gate +0/3 held  \(machine \(10 cores, 36 GiB\)\)$' <<<"$output"
+  grep -qE '^e2e +0/1 held  \(config \[slots\] e2e\)$' <<<"$output"
+  grep -qE '^default +3 for any other name  \(machine \(10 cores, 36 GiB\)\)$' <<<"$output"
+  cfg '[slots]' 'default = 5'
+  run "$WT_BIN" slots
+  grep -qE '^gate +0/5 held  \(config \[slots\] default\)$' <<<"$output"
+}
+
+@test "slots set/unset: writes [slots], keeps every other line, and says what changed" {
+  cfg '# my settings' 'prefix = "wt"  # short' '' '[quota]' 'gate = false' '' '[slots]' 'gate = 2  # tuned'
+  machine 10 36
+  run_wt slots set gate 4
+  [ "$status" -eq 0 ]
+  grep -qF "gate: 4 (config [slots] gate), was 2 (config [slots] gate)" <<<"$output"
+  [ "$(cat "$(cfg_file)")" = "$(printf '%s\n' '# my settings' 'prefix = "wt"  # short' '' '[quota]' 'gate = false' '' '[slots]' 'gate = 4  # tuned')" ]
+  run_wt slots set gate 4
+  grep -qF "gate: already 4" <<<"$output"
+  run_wt slots set default 1
+  [ "$status" -eq 0 ]
+  grep -qxF "default = 1" "$(cfg_file)"
+  run_wt slots unset gate
+  [ "$status" -eq 0 ]
+  grep -qF "gate: 1 (config [slots] default), was 4 (config [slots] gate)" <<<"$output"
+  ! grep -qE '^gate = [0-9]' "$(cfg_file)" || false
+  grep -qxF "gate = false" "$(cfg_file)"   # [quota]'s gate is not [slots]'
+  run_wt slots unset default
+  grep -qF "default: 3 (machine (10 cores, 36 GiB)), was 1 (config [slots] default)" <<<"$output"
+  run_wt slots unset default
+  [ "$status" -eq 0 ]
+  grep -qF "[slots] default is not set; it is 3" <<<"$output"
+}
+
+@test "slots set refuses a bad name or capacity and writes nothing" {
+  cfg '[slots]' 'gate = 2'
+  local before; before="$(cat "$(cfg_file)")"
+  local bad
+  for bad in "gate 0" "gate 65" "gate many" "gate -1" "Gate 2" "../x 2" "gate" "gate 2 3"; do
+    # shellcheck disable=SC2086
+    run_wt slots set $bad
+    [ "$status" -eq 1 ]
+    [ "$(cat "$(cfg_file)")" = "$before" ]
+  done
+  run_wt slots set gate 0
+  grep -qF "capacity must be a whole number from 1 to 64 (got 0)" <<<"$output"
+  run_wt slots set Gate 2
+  grep -qF "slot name \`Gate\` must be lowercase letters, digits and dashes" <<<"$output"
+  run_wt slots unset
+  [ "$status" -eq 1 ]
+  grep -qF "usage: worktrees slots" <<<"$output"
+}
+
+@test "slots set refuses a layout it cannot edit safely" {
+  cfg 'slots = { gate = 2 }'
+  run_wt slots set gate 3
+  [ "$status" -eq 1 ]
+  grep -qF "edit it by hand" <<<"$output"
+  [ "$(cat "$(cfg_file)")" = "slots = { gate = 2 }" ]
+}
+
+@test "run: with nothing in [slots], capacity is the machine's — and an explicit entry beats it" {
+  machine 1 1          # the smallest machine: one slot
+  bg_run --slot g -- sleep 30
+  KILL_ME="$KILL_ME $(sleep 0.3; pgrep -P "$BG" || true)"
+  wait_held 1 g
+  run_wt run --slot g --timeout 1 -- true
+  [ "$status" -eq 75 ]
+  grep -qF "(1/1 held by" <<<"$output"
+  cfg '[slots]' 'g = 2'
+  run_wt run --slot g --timeout 1 -- echo RAN
+  [ "$status" -eq 0 ]
+  grep -qxF RAN <<<"$output"
 }

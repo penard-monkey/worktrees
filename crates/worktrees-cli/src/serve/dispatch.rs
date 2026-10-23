@@ -1,4 +1,4 @@
-//! The 168 commands, each with its exposure, capability and objects, in ONE
+//! The 170 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -577,7 +577,7 @@ pub fn cap_of(cmd: &str) -> Option<Capability> {
 /// ways by a test, so a new `global` row is a second, deliberate edit here.
 pub const GLOBAL_OK: &[&str] = &[
     // read
-    "settings_info", "get_settings", "quota_settings", "claude_usage", "codex_usage", "kimi_usage", "claude_status",
+    "settings_info", "get_settings", "quota_settings", "slots_settings", "claude_usage", "codex_usage", "kimi_usage", "claude_status",
     "check_update", "list_releases", "get_ai_config", "get_codex_permissions", "get_fetch_interval",
     "get_term_history_opts", "agent_guidance_status", "agent_guidance_diff", "agent_models", "agent_user_skills",
     "kimi_version", "tmux_check", "log_info", "get_changelog", "new_profile_id", "skills_list", "ui_usage",
@@ -662,6 +662,8 @@ commands! { cx, a;
     planning_suggested: Engine [read, project(root)] => ops::planning_suggested(a.get("root")?),
     quota_settings: Engine [read, global] => ops::quota_settings(),
     set_quota_settings: Engine [admin, all] => ops::set_quota_settings(a.get("gate")?, a.get("weekly_warn_pct")?),
+    slots_settings: Engine [read, global] => ops::slots_settings(),
+    set_slot_capacity: HostConsole => ops::set_slot_capacity(a.get("name")?, a.get("capacity")?),
     set_project_private: HostConsole [console, project(root)] => ops::set_project_private(a.get("root")?, a.get("private")?),
     copy_text: ClientLocal => refused(),
     set_title: Engine [write, place(repo, slug)] => ops::set_title(&cx.ctx, a.get("repo")?, a.get("slug")?, a.get("title")?),
@@ -964,15 +966,15 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 168 rows, no duplicates: the command layer's (143 at the extraction;
-    /// host policy's three getters and Kimi's six since) and Phase 2 slice
-    /// 5's sixteen — the device rows, pairing and step-up; the check scripts
-    /// hold the page's commands against them.
+    /// 170 rows, no duplicates: the command layer's (143 at the extraction;
+    /// host policy's three getters, Kimi's six and the slots pair since) and
+    /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up; the
+    /// check scripts hold the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 168, "the table has 168 commands");
+        assert_eq!(TABLE.len(), 170, "the table has 170 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1224,7 +1226,8 @@ mod tests {
 
     /// Every row has exactly ONE base group — its capability, or its class
     /// when it has none — and the counts are §3.4's, plus the two host-policy
-    /// getters #532 added after it (`read`) and slice 5's rows: two `admin`
+    /// getters #532 added after it (`read`), the slots pair (`slots_settings`
+    /// `read`, `set_slot_capacity` console) and slice 5's rows: two `admin`
     /// (`devices_list`, `device_narrow`); eleven console (six device acts,
     /// `identity_rotate` and four pairing rows); and three a device makes for
     /// itself (`own`: `device_revoke`, `stepup_challenge`, `stepup_prove`). A
@@ -1245,7 +1248,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 55), ("write", 23), ("admin", 35), ("console", 32), ("stream", 10), ("instruct", 3),
+            ("read", 56), ("write", 23), ("admin", 35), ("console", 33), ("stream", 10), ("instruct", 3),
             ("client-local", 6), ("loopback-only", 1), ("own", 3),
         ]
         .into();
