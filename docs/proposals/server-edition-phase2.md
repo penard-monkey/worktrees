@@ -969,8 +969,8 @@ Count, by each row's base group: read 56, write 23, admin 33, console 22,
 stream 10, instruct 3, ClientLocal 6, loopback-only 1, which is 154 (read
 was 53, and the total 150, before #532's two getters; the slots pair added
 one read and one console row). Slice 5 (#544) has since built sixteen of the
-rows marked *new*, and the test's counts include them: 170 in all, with admin
-35, console 33 and `own` 3. Two rows
+rows marked *new* and slice 6 (#556) four more, and the test's counts include
+them: 174 in all, with admin 35, console 37 and `own` 3. Two rows
 appear twice on purpose, because an argument changes what they need:
 `write_file` (its path's class, §7) and `sync_apply` (the adopt form). Rows
 marked *new* do not exist yet and are not in the count. This paragraph is
@@ -1095,16 +1095,14 @@ test pins its count:
   `pair_cancel` and `pair_status`, and `device_revoke` is `Own` rather than
   `admin`. The counts become read 55, write 23, admin 35, console 32,
   stream 10, instruct 3, ClientLocal 6, loopback-only 1, own 3.
-- **#556 (open), 172 rows.** Four console rows for remote access:
+- **#556 (open), 174 rows.** Four console rows for remote access:
   `remote_enable {address, iface?, port?, advertise?}`, `remote_disable`
   (the kill switch, §4.1), `remote_status` and `remote_advertise` (§4.7).
-  Console becomes 36, and the *new* list gains `remote_disable` and
-  `remote_status`.
+  Console becomes 37 (36 before #554's row), and the *new* list gains
+  `remote_disable` and `remote_status`.
 
-#554 (open, not Phase 2) adds a `read` row and a console row of its own,
-`slots_settings` and `set_slot_capacity`, and edits this section's tables
-and counts itself. Whichever of #554 and #556 merges later rebases the
-counts.
+#554 (merged, not Phase 2) added a `read` row and a console row of its own,
+`slots_settings` and `set_slot_capacity`, and the counts above include them.
 
 ### 3.5 What changes for loopback
 

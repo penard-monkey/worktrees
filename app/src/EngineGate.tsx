@@ -18,7 +18,7 @@
 // says "Disconnected" only once the retries have stopped (the crash-loop
 // limit), with the reason and the log that says more.
 import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
-import { engineState, onEngineState, reconnectEngine, type EngineState } from "./ipc";
+import { engineState, invoke, listen, onEngineState, reconnectEngine, type EngineState } from "./ipc";
 import "./tokens.css";
 import "./EngineGate.css";
 
@@ -58,7 +58,71 @@ export function EngineGate({ children }: { children: ReactNode }) {
     <>
       {children}
       {st.kind !== "up" && <EngineBanner st={st} />}
+      {st.kind === "up" && <RemoteNotice gen={st.gen} />}
     </>
+  );
+}
+
+/** Where the notice sits clear of what is already in the bottom-right
+ *  corner: above the bottom band (the usage strip, or a place's footer) and
+ *  left of a rail on the right, re-measured as those resize. A fixed pill
+ *  over either would hide the meter's last reading or a rail button. */
+function useClearCorner(on: boolean): { bottom: string; right: string } {
+  const [at, setAt] = useState({ bottom: 0, right: 0 });
+  useEffect(() => {
+    if (!on) return;
+    const measure = () => {
+      const band = document.querySelector(".usage-strip, .statusbar");
+      const bottom = band ? Math.max(0, window.innerHeight - band.getBoundingClientRect().top) : 0;
+      const rails = [...document.querySelectorAll(".rail")].map((r) => r.getBoundingClientRect()).filter((b) => b.left > window.innerWidth / 2);
+      const right = rails.length ? Math.max(0, window.innerWidth - Math.min(...rails.map((b) => b.left))) : 0;
+      setAt((cur) => (cur.bottom === bottom && cur.right === right ? cur : { bottom, right }));
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(document.body);
+    for (const el of document.querySelectorAll(".usage-strip, .statusbar, .rail")) ro.observe(el);
+    const id = window.setInterval(measure, 2000);
+    return () => {
+      ro.disconnect();
+      window.clearInterval(id);
+    };
+  }, [on]);
+  return { bottom: `calc(${at.bottom}px + var(--s2))`, right: `calc(${at.right}px + var(--s3))` };
+}
+
+/** `remote_status`, as much as the notice reads. */
+type RemoteStatus = { state: string; owner?: string | null };
+
+/** While remote access is on and this app owns the engine, the app says that
+ *  quitting it ends remote access (Phase 2 §9.3, decided 2026-10-22): an
+ *  app-owned serve stops with the app, and a device never keeps it alive. One
+ *  line, nothing to click; the full remote-access UI is a follow-up. Read
+ *  when the engine comes up and on every `remote:changed`, which only the
+ *  console hears. */
+function RemoteNotice({ gen }: { gen: number }) {
+  const [st, setSt] = useState<RemoteStatus | null>(null);
+  useEffect(() => {
+    let live = true;
+    const read = () =>
+      invoke<RemoteStatus>("remote_status")
+        .then((s) => live && setSt(s))
+        .catch(() => live && setSt(null));
+    read();
+    const un = listen<RemoteStatus>("remote:changed", () => read());
+    return () => {
+      live = false;
+      void un.then((f) => f());
+    };
+  }, [gen]);
+  const on = st !== null && st.state !== "off" && st.state !== "unreadable" && st.owner === "app";
+  const at = useClearCorner(on);
+  if (!on) return null;
+  return (
+    <div className="remote-notice" role="status" style={{ bottom: at.bottom, right: at.right }}>
+      <span className="engine-dot remote" aria-hidden />
+      Remote access is on — quitting Worktrees turns it off
+    </div>
   );
 }
 

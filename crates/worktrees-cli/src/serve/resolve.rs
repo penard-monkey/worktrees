@@ -223,6 +223,10 @@ pub enum RefusalKind {
     /// A drive-class act from a device whose step-up is due (§2.5):
     /// `dispatch::stepup_gate`, after the objects resolved.
     StepUp,
+    /// A device's non-read act while the audit log cannot take its record
+    /// (§5.1, the device half): `dispatch::audit_gate`. The console fails
+    /// open; a device fails closed.
+    AuditUnavailable,
     /// A device's drive-class act whose audit record its budget cannot pay
     /// for (§5.1, `audit::DRIVE`): refused before it runs, so no dangerous
     /// act runs without a record of its own. The last step before the body.
@@ -260,6 +264,10 @@ impl Refusal {
         Refusal::new(RefusalKind::StepUp, detail)
     }
 
+    pub fn audit_unavailable(detail: impl Into<String>) -> Refusal {
+        Refusal::new(RefusalKind::AuditUnavailable, detail)
+    }
+
     /// `detail` is the answer as well: our own words, with the seconds until
     /// the budget can pay, and nothing of the request's.
     pub fn audit_budget(detail: impl Into<String>) -> Refusal {
@@ -280,6 +288,7 @@ impl Refusal {
             RefusalKind::LocalFetch => ERR_DENIED,
             RefusalKind::DeviceLanes => super::provenance::ERR_DEVICE_LANES,
             RefusalKind::StepUp => super::stepup::ERR_STEPUP,
+            RefusalKind::AuditUnavailable => super::dispatch::AUDIT_UNAVAILABLE,
             RefusalKind::AuditBudget => return Value::from(self.detail.clone()),
         })
     }
@@ -961,6 +970,7 @@ pub(crate) mod fixture {
             devices,
             pairing,
             flights: Default::default(),
+            remote: None,
         }
     }
 

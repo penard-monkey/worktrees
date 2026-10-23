@@ -277,6 +277,23 @@ jobs:
           grep -q '^test result: ok. 1 passed' /tmp/serve-gate.log \
             || { echo "::error::the serve loopback gate did not run its one case"; exit 1; }
 
+      # Remote access, by IDENTITY (Phase 2 §4.6): bound to the runner's own
+      # LAN address, a device paired through the real pairing port is served
+      # over pinned mutual TLS, and no certificate, an unenrolled key, the
+      # wrong pin, loopback and a closed pairing port are each refused; a
+      # revoke and the kill switch end a live device within a second. The
+      # served cases come first, and a runner with no LAN address fails. Two
+      # cases, by exact name, and the count, for the reason above.
+      - name: GATE — remote access serves a paired key and nothing else
+        run: |
+          set -euo pipefail
+          cargo test -p worktrees-cli --test remote_bin --locked -- --exact --nocapture \
+            remote_access_serves_a_paired_key_and_refuses_every_other \
+            the_kill_switch_and_a_revoke_end_a_live_device_at_once \
+            2>&1 | tee /tmp/remote-gate.log
+          grep -q '^test result: ok. 2 passed' /tmp/remote-gate.log \
+            || { echo "::error::the remote access gate did not run its two cases"; exit 1; }
+
       # ── the CLI sidecar ───────────────────────────────────────────────────
       #
       # Built HERE, from this checkout, for this matrix target — not fetched

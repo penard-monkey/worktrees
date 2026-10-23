@@ -574,6 +574,10 @@ pub enum DeviceEvent {
     /// The window closed, and how: paired (with the new device), denied,
     /// expired, or the failure that ended it.
     PairingClosed { ended: super::pairing::Ended, device: Option<DeviceId> },
+    /// A device connected from an address of another class than it was last
+    /// seen from (`netclass::Class`: a tailnet device now on the LAN, say).
+    /// Alert (§5.3).
+    NewAddressClass { subject: Subject, from: String, to: String },
 }
 
 impl DeviceEvent {
@@ -607,7 +611,7 @@ impl DeviceEvent {
     /// record and emits `audit:alert` for it.
     pub fn alerts(&self) -> bool {
         match self {
-            DeviceEvent::Enrolled { .. } | DeviceEvent::Unreadable { .. } | DeviceEvent::IdentityRotated { .. } => true,
+            DeviceEvent::Enrolled { .. } | DeviceEvent::Unreadable { .. } | DeviceEvent::IdentityRotated { .. } | DeviceEvent::NewAddressClass { .. } => true,
             DeviceEvent::Disabled { reason, .. } => *reason != DisabledReason::Console,
             DeviceEvent::ConnectRefused { why, .. } => *why != ConnectRefusal::Unknown,
             _ => false,
@@ -1176,6 +1180,15 @@ impl DeviceRegistry {
     pub fn seen(&self, id: &DeviceId, addr: Option<String>, now: i64) {
         self.seen.lock().unwrap().insert(id.clone(), (now, addr));
         self.flush_due(now);
+    }
+
+    /// The address a device was last seen from: the newest completed
+    /// handshake's, even before it reaches the file, else the record's.
+    pub fn last_addr(&self, id: &DeviceId) -> Option<String> {
+        if let Some((_, a)) = self.seen.lock().unwrap().get(id) {
+            return a.clone();
+        }
+        self.snapshot()?.device(id)?.last_addr.clone()
     }
 
     /// [`DeviceRegistry::flush_seen`], if the last write is ten minutes old.

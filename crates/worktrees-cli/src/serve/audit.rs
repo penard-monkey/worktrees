@@ -1598,6 +1598,21 @@ impl Audit {
         ));
     }
 
+    /// Remote access's own lifecycle (§5.1): enabled or disabled by the host,
+    /// the listener started, paused, resumed or moved by the address watch
+    /// (with its reason, both addresses, who moved it), the question put to
+    /// the host, the advert registered or withdrawn. `detail` is built by
+    /// `serve::remote` from addresses, interface names and constants — no
+    /// client string — under keys spelled there.
+    pub fn remote(&self, event: &'static str, detail: Value) {
+        let mut d = match detail {
+            Value::Object(m) => m,
+            _ => Map::new(),
+        };
+        d.insert("event".into(), Value::from(event));
+        self.record(Record::new("lifecycle", Value::Object(d)));
+    }
+
     /// The listener is down. Open episodes end first, so their counts land.
     pub fn stopped(&self) {
         let mut st = guard(&self.st);
@@ -1677,6 +1692,11 @@ fn device_record(pairing_for: &mut Option<PrincipalId>, e: &DeviceEvent) -> Opti
         E::Forgotten { subject } => ("device", None, None, json!({ "event": "forgotten", "subject": subject, "by": serve })),
         E::Unreadable { why } => ("device", None, None, json!({ "event": "unreadable", "why": ident(why), "by": serve })),
         E::Reloaded => ("device", None, None, json!({ "event": "reloaded", "by": serve })),
+        // Serve's observation, at the remote listener: the classes, never
+        // the address (§5.3).
+        E::NewAddressClass { subject, from, to } => {
+            ("device", None, None, json!({ "event": "new_address_class", "subject": subject, "from": from, "to": to, "by": serve }))
+        }
         E::ConnectRefused { .. } => return None,
         // The event holds neither the link nor its secret, and the record
         // could not name them if it did.
@@ -1813,6 +1833,7 @@ fn reason(kind: RefusalKind) -> &'static str {
         RefusalKind::LocalFetch => "local-fetch",
         RefusalKind::DeviceLanes => "device-lanes",
         RefusalKind::StepUp => "step-up",
+        RefusalKind::AuditUnavailable => "audit-unavailable",
         RefusalKind::AuditBudget => "audit-budget",
     }
 }
@@ -3104,6 +3125,7 @@ mod tests {
             E::Unreadable { why: "devices.json does not parse".into() },
             E::Reloaded,
             E::Forgotten { subject: owner_subject("d_gone") },
+            E::NewAddressClass { subject: owner_subject("d_new"), from: "cgnat".into(), to: "rfc1918".into() },
             E::ConnectRefused { subject: Some(owner_subject("d_new")), spki_sha256: "a".repeat(64), why: ConnectRefusal::Revoked },
         ];
         events
@@ -3121,6 +3143,7 @@ mod tests {
                     E::Forgotten { .. } => ("device", Some("forgotten")),
                     E::Unreadable { .. } => ("device", Some("unreadable")),
                     E::Reloaded => ("device", Some("reloaded")),
+                    E::NewAddressClass { .. } => ("device", Some("new_address_class")),
                     E::ConnectRefused { .. } => ("auth", None),
                     E::PairingOpened { .. } => ("pairing", Some("opened")),
                     E::PairingAttempt { .. } => ("pairing", Some("attempt")),

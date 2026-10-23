@@ -1,4 +1,4 @@
-//! The 170 commands, each with its exposure, capability and objects, in ONE
+//! The 174 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -152,12 +152,16 @@ pub struct Call {
     /// The shared reads in the air, host-wide (`flight.rs`): every listener's
     /// calls join the same ones.
     pub flights: Arc<Flights>,
+    /// Remote access (§4.1), for the console's `remote_*` rows. `None` in a
+    /// serve built without it (the in-process tests).
+    pub remote: Option<Arc<super::remote::RemoteAccess>>,
 }
 
 impl Call {
     /// This call on another `ctx` and `frames`: the same caller, registries,
-    /// world and flights. A body's scoped `Ctx` (`call_in_seen`), and a
-    /// request's frames (`conn`'s, carrying its attach slot).
+    /// world, flights and remote access. A body's scoped `Ctx`
+    /// (`call_in_seen`), and a request's frames (`conn`'s, carrying its
+    /// attach slot).
     pub fn with(&self, ctx: Ctx, frames: Frames) -> Call {
         Call {
             ctx,
@@ -168,6 +172,7 @@ impl Call {
             devices: self.devices.clone(),
             pairing: self.pairing.clone(),
             flights: self.flights.clone(),
+            remote: self.remote.clone(),
         }
     }
 }
@@ -232,6 +237,15 @@ fn reply<T: Serialize, E: Serialize>(r: Result<T, E>) -> Result<Value, Value> {
         Err(e) => Err(serde_json::to_value(e).unwrap_or_else(|e| Value::String(format!("serialize error: {e}")))),
     }
 }
+
+/// Remote access, which every serve has; a `Call` built without it (the
+/// in-process tests) says so.
+fn remote(cx: &Call) -> Result<&Arc<super::remote::RemoteAccess>, String> {
+    cx.remote.as_ref().ok_or_else(|| "this serve has no remote access".into())
+}
+
+/// `err` for a device's non-read request while the audit log is unhealthy.
+pub const AUDIT_UNAVAILABLE: &str = "audit-unavailable";
 
 /// For bodies that return a plain value rather than a `Result`.
 fn ok<T>(t: T) -> Result<T, String> {
@@ -599,7 +613,9 @@ pub fn call_in_seen(cx: &Call, cmd: &str, args: &Args, world: &dyn World, seen: 
     // host's, never the body's, and `seen` hears it so. A leader's followers
     // get what the leader got, refusal included; a leader whose body panics
     // drops its `lead` unlanded, which answers them `internal error`.
-    let out = match provenance::device_lane_gate(cx, row, &args, world) {
+    // ...and, last in the chain, the audit log's health for a device's
+    // non-read act (§5.1). A flight is a read, which it never refuses.
+    let out = match provenance::device_lane_gate(cx, row, &args, world).and_then(|held| audit_gate(cx, row).map(|()| held)) {
         Err(r) => {
             let out = refusal_answer(&cx.caller, row, &args, &r, seen);
             if let Some(l) = lead {
@@ -710,6 +726,16 @@ pub fn holds_channel_with(cx: &Call, row: &Row, args: &Args, live: &dyn Fn(&str,
 /// here, after the objects resolved, because a path class or another device
 /// can RAISE the act to drive-class; never in the resolver, whose coverage
 /// check is also what a reduction re-runs on open channels.
+/// §5.1, the device half: no non-read act from a device while the audit log
+/// cannot take its record — the console fails open, a device fails closed.
+/// The row's own capability decides, as it decides what is recorded.
+fn audit_gate(cx: &Call, row: &Row) -> Result<(), resolve::Refusal> {
+    if cx.caller.is_console() || row.cap == Some(Capability::Read) || cx.remote.as_ref().is_none_or(|r| r.audit_healthy()) {
+        return Ok(());
+    }
+    Err(resolve::Refusal::audit_unavailable(format!("{} is not a read, and the audit log cannot take its record", row.name)))
+}
+
 fn stepup_gate(cx: &Call, row: &Row, args: &Args, r: &resolve::Resolved) -> Result<(), resolve::Refusal> {
     let authz::Device::Paired(d) = cx.caller.device() else { return Ok(()) };
     if !needs_stepup(row, &r.needs, holds_channel(cx, row, args)) || !cx.registry.stepup_required(cx.caller.principal(), d) {
@@ -1106,6 +1132,11 @@ commands! { cx, a;
         let revoked = cx.devices.revoke_all_others(None, now())?;
         ok(serde_json::json!({ "pin": id.pin(), "revoked": revoked }))
     },
+    // ── remote access (§4.1): the host's own acts, never a device's ──────────
+    remote_enable: HostConsole => remote(cx)?.enable(&a.get::<String>("address")?, a.get("iface")?, a.get("port")?, a.get("advertise")?),
+    remote_disable: HostConsole => remote(cx)?.disable(),
+    remote_status: HostConsole => ok(remote(cx)?.status_value()),
+    remote_advertise: HostConsole => remote(cx)?.set_advertise(a.get("on")?),
 }
 
 #[cfg(test)]
@@ -1139,6 +1170,7 @@ mod tests {
             devices: Arc::new(DeviceRegistry::in_memory()),
             pairing: Arc::new(Pairing::new(None, Arc::new(DeviceRegistry::in_memory()))),
             flights: Default::default(),
+            remote: None,
         };
         (call, dir, rx)
     }
@@ -1147,15 +1179,16 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 170 rows, no duplicates: the command layer's (143 at the extraction;
-    /// host policy's three getters, Kimi's six and the slots pair since) and
-    /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up; the
-    /// check scripts hold the page's commands against them.
+    /// 174 rows, no duplicates: the command layer's (143 at the extraction;
+    /// host policy's three getters, Kimi's six and the slots pair since),
+    /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up — and
+    /// slice 6's four `remote_*` console rows; the check scripts hold the
+    /// page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 170, "the table has 170 commands");
+        assert_eq!(TABLE.len(), 174, "the table has 174 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1410,7 +1443,9 @@ mod tests {
     /// getters #532 added after it (`read`), the slots pair (`slots_settings`
     /// `read`, `set_slot_capacity` console) and slice 5's rows: two `admin`
     /// (`devices_list`, `device_narrow`); eleven console (six device acts,
-    /// `identity_rotate` and four pairing rows); and three a device makes for
+    /// `identity_rotate` and four pairing rows), and slice 6's four
+    /// (`remote_enable`, `remote_disable`, `remote_status`,
+    /// `remote_advertise`); and three a device makes for
     /// itself (`own`: `device_revoke`, `stepup_challenge`, `stepup_prove`). A
     /// row that moves group fails here until the count (and the proposal's
     /// table) move with it.
@@ -1429,7 +1464,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 56), ("write", 23), ("admin", 35), ("console", 33), ("stream", 10), ("instruct", 3),
+            ("read", 56), ("write", 23), ("admin", 35), ("console", 37), ("stream", 10), ("instruct", 3),
             ("client-local", 6), ("loopback-only", 1), ("own", 3),
         ]
         .into();

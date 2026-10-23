@@ -90,3 +90,17 @@ ring = "0.17"
 # `pem` (the files are DER), no aws-lc-rs, no x509-parser. New in the lock:
 # rcgen and yasna (its ASN.1 writer); `time` and rustls-pki-types were there.
 rcgen = { version = "0.14", default-features = false, features = ["ring"] }
+#
+# ── the remote listener (Phase 2 slice 6, §4.1) ─────────────────────────────
+# The listener's socket is tied to its interface (IP_BOUND_IF / IPV6_BOUND_IF
+# on macOS, SO_BINDTOIFINDEX on Linux) and bound to one address, never a
+# wildcard: socket2's `bind_device_by_index_v4/_v6`, behind its `all` feature.
+# socket2 0.6.5 is already in the lock, under tokio, with exactly that
+# feature, so this is a new EDGE, not a new crate.
+socket2 = { version = "0.6", features = ["all"] }
+# `worktrees serve pair` prints the pairing link as a QR in the terminal, for
+# a phone's camera (§2.2 step 2), beside the link itself, which a desktop
+# pastes (§2.3). No default features: no `image`, `svg` or `pic`, so the crate
+# brings no dependency of its own. New in the lock: qrcode alone. OSV, at
+# 0.14.1 and for every version: no advisory (2026-10-22).
+qrcode = { version = "0.14", default-features = false }

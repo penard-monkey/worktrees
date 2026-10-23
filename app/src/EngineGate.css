@@ -70,3 +70,18 @@
   display: block; margin-top: 2px;
   color: var(--txt-dim);
 }
+
+/* While remote access is on and the app owns the engine (RemoteNotice): one
+ * quiet line, out of the way of the terminal, saying what quitting does. */
+.remote-notice {
+  /* right/bottom are set inline, clear of the bottom band and a right rail. */
+  position: fixed; z-index: 900;
+  right: var(--s3); bottom: var(--s2);
+  display: flex; align-items: center; gap: var(--s2);
+  padding: var(--s1) var(--s2);
+  background: var(--bg-panel); color: var(--txt-dim);
+  border: 1px solid var(--line); border-radius: var(--r-md);
+  font-family: var(--font-ui); font-size: var(--fs-meta);
+  pointer-events: none;
+}
+.engine-dot.remote { background: var(--accent); }

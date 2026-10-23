@@ -5,6 +5,28 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (the repo's `/close-out` skill, `.claude/skills/close-out`;
 this repo's settings in `.claude/close-out.md`).
 
+- **Remote access (Phase 2 slice 6): what the host side leaves open.**
+  - **A host UI for remote access.** Turning it on, the pairing dialog (scope
+    first, the QR, the code, Allow/Deny), the device list, the kill switch,
+    the pause question ("Use this address" / "Keep it off") and the alerts of
+    §5.3 are CLI-only (`worktrees serve remote|pair|call`). The app shows one
+    line while remote access is on and the app owns its engine.
+  - **Linux mDNS.** Not built: zbus adds 30 crates to the CLI even with only
+    its `tokio` feature, and `avahi-publish` cannot pin an interface. Options:
+    a minimal D-Bus client of our own for one entry group (AddAddress with
+    NO_REVERSE, AddService with `host`, Commit, StateChanged), or accept zbus.
+    Until then the address code is how a Linux host's devices follow a move.
+  - **The CI runners' scratch interfaces (CHECKLIST D1/D2)**, so
+    `tests/remote_net_linux.rs` (§4.6 steps 2, 4, 5) runs in CI and the macOS
+    half exists at all. (main) runs the dispatch.
+  - **Unify the two handshake-v1 clients**: `serve/client.rs` (loopback, the
+    CLI's `serve call|remote|pair`) and `crates/worktrees-remote`'s.
+  - **Unmeasured on hardware**: the Local Network and Application Firewall
+    prompts for an ad-hoc serve and whether a rebuild re-asks (B6); the mDNS
+    wire from a second Mac, a name conflict, and the Sleep Proxy (B2, B3);
+    `IPV6_BOUND_IF` across hosts (B1); a listener whose address leaves on
+    macOS (B4). `.planning/two-mac-test.md` of the slice-6 lane has the steps.
+  _From: 2026-10-22, feat/p2-remote-listener (Phase 2 slice 6, host side)_
 - **`app/scripts/plan-usage-browser.mjs` runs nowhere, so it rots.** It is
   an optional Playwright gate that no CI job or Make target runs. It went red
   on main as soon as the mock enabled kimi by default, and nobody noticed until

@@ -547,6 +547,22 @@ pub fn parse_addr_code(s: &str) -> Result<AddrCode, AddrError> {
     Ok(AddrCode { addr, pin: out })
 }
 
+/// The address code the HOST shows after its bind moves (§4.1): exactly what
+/// [`parse_addr_code`] reads back, built here beside it so the two cannot
+/// drift. An address the classifier refuses is refused here too, and the
+/// address carries no zone, ever.
+pub fn addr_code(ip: IpAddr, port: u16, pin: &str) -> Result<String, AddrError> {
+    classify(ip)?;
+    if pin.len() != 64 || !pin.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return Err(AddrError::Code("the pin is 64 lowercase hex digits".into()));
+    }
+    let addr = match ip {
+        IpAddr::V4(v) => format!("{v}:{port}"),
+        IpAddr::V6(v) => format!("[{v}]:{port}"),
+    };
+    Ok(format!("{ADDR_CODE_PREFIX}addr={addr}&pin={pin}"))
+}
+
 /// How many interfaces a device tries for one link-local dial (§4.1).
 pub const LINKLOCAL_TRIES: usize = 4;
 
@@ -760,6 +776,21 @@ mod tests {
         assert_eq!(code(format!("worktrees-addr:v1?addr=10.0.0.1:1&pin={pin}&")), Err("bad-code"));
         assert_eq!(code(format!("worktrees-addr:v1?addr=[fe80::1%251]:1&pin={pin}")), Err("bad-zone"));
         assert_eq!(code(format!("worktrees-addr:v1?addr=8.8.8.8:1&pin={pin}")), Err("not-private"));
+    }
+
+    /// The host builds what a device parses: the same two keys, IPv6 in
+    /// brackets, never a zone — and nothing the parser would refuse.
+    #[test]
+    fn an_address_code_the_host_builds_is_one_the_device_reads() {
+        let pin = "ab".repeat(32);
+        let c = addr_code(ip("192.168.1.5"), 7443, &pin).unwrap();
+        assert_eq!(c, format!("worktrees-addr:v1?addr=192.168.1.5:7443&pin={pin}"));
+        assert_eq!(parse_addr_code(&c).unwrap().addr.port, 7443);
+        let v6 = addr_code(ip("fe80::1"), 7443, &pin).unwrap();
+        assert_eq!(v6, format!("worktrees-addr:v1?addr=[fe80::1]:7443&pin={pin}"));
+        assert_eq!(parse_addr_code(&v6).unwrap().addr.ip, ip("fe80::1"));
+        assert_eq!(addr_code(ip("8.8.8.8"), 7443, &pin).map_err(|e| e.code()), Err("not-private"));
+        assert_eq!(addr_code(ip("10.0.0.1"), 7443, "AB").map_err(|e| e.code()), Err("bad-code"));
     }
 
     fn iface(name: &str, ptp: bool, addrs: &[(&str, u8)]) -> Iface {

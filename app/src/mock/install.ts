@@ -3278,6 +3278,13 @@ Phase 3: Frontend pane and mock harness
         "2026-07-25 20:00:01Z [info] startup v0.2.4 PATH=/usr/bin:...",
       ].join("\n");
 
+    // Remote access (Phase 2 slice 6). `?remote=on` is an app-owned serve
+    // with remote access on, which RemoteNotice says; off otherwise.
+    case "remote_status":
+      return new URLSearchParams(location.search).get("remote") === "on"
+        ? { state: "listening", owner: "app", address: "192.168.1.5", port: 51234, iface: "en0", mode: "lan" }
+        : { state: "off", owner: "app" };
+
     case "get_changelog":
       return {
         version: "0.2.2",

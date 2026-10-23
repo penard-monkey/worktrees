@@ -66,6 +66,7 @@ use worktrees_core::pairuri::{self, PairUri};
 
 use super::devices::{hex, is_pin, name_ok, DeviceEvent, DeviceRegistry, Enrollment, Expiry, Platform, MAX_DEVICES};
 use super::identity::Identity;
+use super::remote::peer::Rule;
 use super::tls;
 
 /// A window with no attempt closes after this (§2.4).
@@ -96,6 +97,13 @@ pub struct Offer {
 pub struct Bind {
     pub ip: IpAddr,
     pub remote: SocketAddr,
+    /// The interface the pairing socket is tied to, as the remote listener's
+    /// is (0: untied — the tests' loopback windows).
+    pub index: u32,
+    /// §4.1's peer rule, as on the remote listener: a peer outside it is
+    /// dropped unanswered and is NOT the attempt, so it cannot burn the
+    /// window. `None` only for the tests' loopback windows.
+    pub rule: Option<super::remote::peer::Rule>,
 }
 
 /// A device's request, waiting for the host (§2.2 step 6). `code` is for the
@@ -270,9 +278,14 @@ impl Pairing {
         }
         let id = Identity::ensure(&dir)?;
         let cfg = tls::server_config(&id, Arc::new(tls::AnyKey))?;
-        let std_listener = std::net::TcpListener::bind(SocketAddr::new(bind.ip, 0)).map_err(|e| format!("the pairing listener: {e}"))?;
-        std_listener.set_nonblocking(true).map_err(|e| e.to_string())?;
-        let addr = std_listener.local_addr().map_err(|e| e.to_string())?;
+        let std_listener = match bind.index {
+            0 => std::net::TcpListener::bind(SocketAddr::new(bind.ip, 0)).and_then(|l| l.set_nonblocking(true).map(|()| l)),
+            i => super::remote::sock::listen(bind.ip, 0, i).map(|(l, _)| l),
+        }
+        .map_err(|e| format!("the pairing listener: {e}"))?;
+        // Zone-less: a link carries none (`pairuri::build`); a device scopes a
+        // link-local dial to an interface of its own (§4.1).
+        let addr = SocketAddr::new(bind.ip, std_listener.local_addr().map_err(|e| e.to_string())?.port());
         let listener = {
             let _in = rt.enter();
             tokio::net::TcpListener::from_std(std_listener).map_err(|e| e.to_string())?
@@ -302,7 +315,7 @@ impl Pairing {
         let deadline = tokio::time::Instant::now() + self.open_for;
         let me = self.clone();
         rt.spawn(async move {
-            let (ended, device) = me.attempt(wid, listener, cfg, secret, deadline, stop, why).await;
+            let (ended, device) = me.attempt(wid, listener, bind.rule, cfg, secret, deadline, stop, why).await;
             me.finish(wid, ended, device);
         });
         Ok(json!({ "uri": uri, "expires_at": expires_at, "pin": id.pin(), "host": self.host }))
@@ -373,6 +386,7 @@ impl Pairing {
         &self,
         wid: u64,
         listener: tokio::net::TcpListener,
+        rule: Option<Rule>,
         cfg: Arc<rustls::ServerConfig>,
         secret: [u8; 16],
         deadline: tokio::time::Instant,
@@ -380,11 +394,14 @@ impl Pairing {
         why: Arc<Mutex<Option<Ended>>>,
     ) -> (Ended, Option<DeviceId>) {
         let stopped = |or: Ended| why.lock().unwrap().unwrap_or(or);
+        // A peer outside §4.1's rule is dropped unanswered, and is not the
+        // attempt: a stranger cannot burn the window.
+        let admits = move |p: &SocketAddr| rule.is_none_or(|r| r.admits(p.ip()));
         // 1. The first connection is the attempt.
         let (tcp, peer) = loop {
             match within(&stop, deadline, listener.accept()).await {
-                Some(Ok(c)) => break c,
-                Some(Err(_)) => continue,
+                Some(Ok(c)) if admits(&c.1) => break c,
+                Some(Ok(_)) | Some(Err(_)) => continue,
                 None => return (stopped(Ended::Expired), None),
             }
         };
@@ -396,9 +413,16 @@ impl Pairing {
         let watcher = {
             let (stop, why) = (stop.clone(), why.clone());
             tokio::spawn(async move {
-                if listener.accept().await.is_ok() {
-                    why.lock().unwrap().get_or_insert(Ended::SecondConnection);
-                    stop.notify_one();
+                loop {
+                    match listener.accept().await {
+                        Ok((_, p)) if !admits(&p) => continue,
+                        Ok(_) => {
+                            why.lock().unwrap().get_or_insert(Ended::SecondConnection);
+                            stop.notify_one();
+                        }
+                        Err(_) => {}
+                    }
+                    break;
                 }
             })
         };

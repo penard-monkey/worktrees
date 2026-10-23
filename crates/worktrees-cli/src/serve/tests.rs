@@ -1694,7 +1694,7 @@ mod devices {
                 let dial = tokio::spawn(TcpStream::connect(addr));
                 let (server, peer) = l.accept().await.unwrap();
                 let ws = WebSocketStream::from_raw_socket(server, Role::Server, None).await;
-                let task = tokio::spawn(conn::serve_caller(ws, ctx, clients, id, who, exporter, au));
+                let task = tokio::spawn(conn::serve_caller(ws, ctx, clients, id, who, exporter, au, None));
                 (WebSocketStream::from_raw_socket(dial.await.unwrap().unwrap(), Role::Client, None).await, (task, peer))
             });
             let (task, peer) = task;
@@ -1830,6 +1830,7 @@ mod devices {
             devices: e.reg.clone(),
             pairing: e.clients.pairing(),
             flights: Default::default(),
+            remote: None,
         };
         assert_eq!(dispatch::call(&stale, "get_changelog", &Args(Default::default())), Err(json!("denied")));
         // And its next handshake.
@@ -1906,6 +1907,7 @@ mod devices {
             devices: e.reg.clone(),
             pairing: e.clients.pairing(),
             flights: Default::default(),
+            remote: None,
         };
         let enable = || Args(json!({"id": phone.id.as_str()}).as_object().cloned().unwrap());
         assert_eq!(dispatch::call(&stale, "get_changelog", &Args(Default::default())), Err(json!("denied")));
@@ -2006,6 +2008,7 @@ mod devices {
             devices: e.reg.clone(),
             pairing: e.clients.pairing(),
             flights: Default::default(),
+            remote: None,
         });
         call.frames.note_term(901, "sa".into());
         call.frames.note_term(902, "sb".into());
@@ -2065,6 +2068,7 @@ mod devices {
             devices: e.reg.clone(),
             pairing: e.clients.pairing(),
             flights: Default::default(),
+            remote: None,
         };
         call.frames.reconciled().store(1, Ordering::SeqCst);
         call.frames.note_term(903, "sa".into());
@@ -2100,6 +2104,7 @@ mod devices {
             devices: e.reg.clone(),
             pairing: e.clients.pairing(),
             flights: Default::default(),
+            remote: None,
         });
         call.frames.note_shell(ShellHold { repo: a.clone(), slug: "(main)".into(), index: 0, gen: 7 });
         let _kill = e.clients.join(1, out, call.clone());
@@ -2159,6 +2164,7 @@ mod devices {
             devices: e.reg.clone(),
             pairing: e.clients.pairing(),
             flights: Default::default(),
+            remote: None,
         };
         frames.reconciled().store(1, Ordering::SeqCst);
         // No `cols`: the body fails on its arguments before it reaches tmux.
@@ -2332,6 +2338,8 @@ mod devices {
             self.clients.pairing().set_bind(Some(super::super::pairing::Bind {
                 ip: std::net::Ipv4Addr::LOCALHOST.into(),
                 remote: "127.0.0.1:7461".parse().unwrap(),
+                index: 0,
+                rule: None,
             }));
         }
     }
@@ -2696,6 +2704,7 @@ mod devices {
             devices: e.reg.clone(),
             pairing: e.clients.pairing(),
             flights: Default::default(),
+            remote: None,
         };
         let write = |cmd: &str, extra: Value| {
             let mut args = json!({"repo": a, "slug": "(main)", "index": 0, "data": [104, 105], "id": 905});
@@ -2828,6 +2837,7 @@ mod devices {
             devices: e.reg.clone(),
             pairing: e.clients.pairing(),
             flights: Default::default(),
+            remote: None,
         });
         let grant = authz::effective(&*e.reg, &call.caller);
         let mut args = Args(json!({"id": "job-1", "parent": "/x", "url": "https://example.com/r.git"}).as_object().cloned().unwrap());
