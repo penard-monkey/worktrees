@@ -22,6 +22,8 @@ usage: worktrees remote pair <link> [--name NAME]          pair with a host from
                                                            run one request on a host and print its answer
                                                            (--follow: then keep the socket S seconds and
                                                            show what streams on it — a terminal's bytes)
+       worktrees remote use <host> | this                  which engine the desktop app's window drives,
+                                                           from its next launch (this: this machine's own)
        worktrees remote forget <host>                      forget a host and delete this machine's key for it
 
   <host> is a host's id (h_…) or its name, as `worktrees remote hosts` lists them.
@@ -112,7 +114,8 @@ pub fn cmd_remote(args: &[String]) -> i32 {
         ("call", [host, cmd]) => rt.block_on(do_call(&store, host, cmd, "{}", o.timeout, o.follow)),
         ("call", [host, cmd, a]) => rt.block_on(do_call(&store, host, cmd, a, o.timeout, o.follow)),
         ("forget", [host]) => forget(&store, host),
-        ("pair" | "hosts" | "call" | "forget", _) => {
+        ("use", [host]) => choose(&store, host),
+        ("pair" | "hosts" | "call" | "forget" | "use", _) => {
             eprintln!("worktrees remote {verb}: wrong arguments\n\n{USAGE}");
             2
         }
@@ -236,6 +239,34 @@ async fn do_call(store: &HostStore, sel: &str, cmd: &str, args: &str, wait: Dura
         }
         Err(e) => {
             eprintln!("worktrees remote call: {} ({}): {e}", rec.name, rec.addr);
+            1
+        }
+    }
+}
+
+/// `use`: the choice the app reads at launch (Settings → Hosts makes the same).
+fn choose(store: &HostStore, sel: &str) -> i32 {
+    let id = if sel == "this" {
+        None
+    } else {
+        match store.get(sel) {
+            Ok(r) => Some(r.id),
+            Err(e) => {
+                eprintln!("worktrees remote use: {e}");
+                return 2;
+            }
+        }
+    };
+    match store.choose(id.as_deref()) {
+        Ok(()) => {
+            match &id {
+                Some(i) => println!("The desktop app's window drives {i} from its next launch."),
+                None => println!("The desktop app's window drives this machine's own engine from its next launch."),
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("worktrees remote use: {e}");
             1
         }
     }

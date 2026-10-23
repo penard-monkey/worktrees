@@ -49,6 +49,15 @@ SECRET="aaaaaaaaaaaaaaaaaaaaaaaaaa"
   [ "$status" -eq 2 ]
 }
 
+@test "remote use names an unknown host, and 'this' needs no host at all" {
+  run_wt -C "$BATS_TEST_TMPDIR" remote use nobody --config-dir "$CFG"
+  [ "$status" -eq 2 ]
+  grep -qF 'no paired host is called "nobody"' <<<"$output"
+  run_wt -C "$BATS_TEST_TMPDIR" remote use this --config-dir "$CFG"
+  [ "$status" -eq 0 ]
+  grep -qF "this machine's own engine" <<<"$output"
+}
+
 @test "remote refuses an unknown verb and an unknown flag" {
   run_wt -C "$BATS_TEST_TMPDIR" remote frobnicate
   [ "$status" -eq 2 ]
