@@ -1437,7 +1437,7 @@ fn the_audit_log_records_the_device_registry() {
         addr: None,
     };
     let mac = reg.enroll(e, now).unwrap();
-    let running = rt.block_on(async { start_in(dir.clone(), 0, vec![DEV_ORIGIN.to_string()], super::conn::LIMITS, clients) }).unwrap();
+    let running = rt.block_on(async { start_in(dir.clone(), 0, vec![DEV_ORIGIN.to_string()], super::conn::LIMITS, BUDGETS, clients) }).unwrap();
     let l = Live { running: Some(running), dir, rt };
     reg.revoke(&Caller::console(), &Grant::everything(), &mac.id, now).unwrap();
     assert!(reg.admit(&pin, now).is_err());
