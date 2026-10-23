@@ -19,8 +19,8 @@
 // limit), with the reason and the log that says more.
 import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
 import { engineState, invoke, onEngineState, reconnectEngine, remoteHost, type EngineState } from "./ipc";
-import { dismissAlert, openRemoteSettings, useRemote, watchRemote } from "./remoteStore";
-import type { RemoteStatus } from "./devices";
+import { dismissAlert, labelOf, openRemoteSettings, useRemote, watchRemote } from "./remoteStore";
+import { alertText, type RemoteStatus } from "./devices";
 import "./tokens.css";
 import "./EngineGate.css";
 import "./RemoteAccess.css";
@@ -140,7 +140,7 @@ function RemoteAlerts() {
       {alerts.map((a) => (
         <div key={a.key} className="ra-alert" role="status" data-alert={a.key}>
           <span className="ra-dot warn" aria-hidden />
-          <span className="ra-alert-txt">{a.text}</span>
+          <span className="ra-alert-txt">{a.payload.alert === "question" ? String(a.payload.text) : alertText(a, labelOf)}</span>
           <span className="ra-alert-acts">
             <button className="ctrl sm" onClick={() => { dismissAlert(a.key); openRemoteSettings(a.cat); }}>Review</button>
             <button className="ra-alert-x" aria-label="Dismiss" title="Dismiss" onClick={() => dismissAlert(a.key)}>×</button>

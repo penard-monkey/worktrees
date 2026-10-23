@@ -112,18 +112,27 @@ eq("qrPath merges a row's run into one rectangle", D.qrPath(3, "111000010"), "M0
 eq("qrPath refuses a matrix of the wrong length", D.qrPath(3, "1"), "");
 
 // ── alerts: worded here, decided by serve ──────────────────────────────────
+// The audit log is §5.3's one alert channel (`audit:alert`): every alert it
+// emits is a notice, and nothing else is.
 const label = (id) => ({ d_1: "Studio Mac" })[id] ?? id;
-eq("an event serve does not call an alert raises nothing",
-  D.alertOf("devices:changed", { event: "enrolled", name: "X", alert: false }, label, 1), null);
-eq("an event with no verdict raises nothing", D.alertOf("devices:changed", { event: "new_address_class" }, label, 1), null);
-eq("a new address class names the device",
-  D.alertOf("devices:changed", { event: "new_address_class", subject: { principal: "owner", device: "d_1" }, from: "cgnat", to: "rfc1918", alert: true }, label, 1)?.text,
-  "Studio Mac connected from a different kind of network (cgnat → rfc1918).");
-eq("a refused revoked device says so",
-  D.alertOf("devices:changed", { event: "connect_refused", subject: { principal: "owner", device: "d_1" }, why: "revoked", alert: true }, label, 1)?.text,
-  "Studio Mac tried to connect and was refused: it is revoked.");
-eq("audit:alert's auth failures are an alert", D.alertOf("audit:alert", { alert: "auth_failures", count: 20 }, label, 5)?.cat, "remote");
-eq("an alert's key is unique per moment", D.alertOf("audit:alert", { alert: "x" }, label, 5)?.key !== D.alertOf("audit:alert", { alert: "x" }, label, 6)?.key, true);
+const sub = { principal: "owner", device: "d_1" };
+const device = (event, extra = {}) => D.alertOf({ alert: "device", event, subject: sub, ...extra }, 1);
+eq("a device alert is the Devices category's", device("enrolled").cat, "devices");
+eq("auth failures are Remote access's", D.alertOf({ alert: "auth_failures", count: 20 }, 1).cat, "remote");
+eq("each alert has its own key", D.alertOf({ alert: "x" }, 5).key !== D.alertOf({ alert: "x" }, 6).key, true);
+eq("a pairing names the device by the list's name", D.alertText(device("enrolled"), label), "Studio Mac was paired with this computer.");
+eq("an unknown id is named by its id", D.alertText(D.alertOf({ alert: "device", event: "enrolled", subject: { principal: "owner", device: "d_9" } }, 1), label), "d_9 was paired with this computer.");
+eq("a new address class names the device", D.alertText(device("new_address_class"), label), "Studio Mac connected from a different kind of network than before.");
+eq("a knock from a revoked device says so", D.alertText(device("connect_refused", { reason: "revoked" }), label), "Studio Mac tried to connect and was refused: it is revoked.");
+eq("an expiry says why", D.alertText(device("disabled", { reason: "idle" }), label), "Studio Mac was disabled: its idle expiry ran out.");
+eq("auth failures count", D.alertText(D.alertOf({ alert: "auth_failures", count: 20 }, 1), label).startsWith("20 connection attempts failed authentication"), true);
+// The store raises notices from `audit:alert` alone: its `devices:changed`
+// handler re-reads, and never pushes one.
+const store = read(here("../src/remoteStore.ts"));
+const dc = store.slice(store.indexOf('listen<Record<string, unknown>>("devices:changed"'), store.indexOf('listen<Record<string, unknown>>("audit:alert"'));
+eq("the devices:changed handler is found", dc.length > 0, true);
+eq("devices:changed never raises a notice", /\bpush\(|alertOf\(/.test(dc), false);
+eq("audit:alert does", /push\(alertOf\(/.test(store.slice(store.indexOf('listen<Record<string, unknown>>("audit:alert"'))), true);
 
 // ── a record, in words ─────────────────────────────────────────────────────
 const rec = {

@@ -5,10 +5,11 @@
 // the place header.
 //
 // Serve tells the console what changed — `remote:changed` (remote access's
-// state), `devices:changed` (every registry change and pairing step, with
-// serve's own `alert` verdict) and `audit:alert` — and each event here is a
-// cue to re-read the row it concerns, never a copy of the state: the rows
-// stay the one source. All three events are the console's alone
+// state), `devices:changed` (every registry change and pairing step) and
+// `audit:alert` (§5.3's alerts, the audit log's) — and each change event here
+// is a cue to re-read the row it concerns, never a copy of the state: the rows
+// stay the one source. Alerts come from `audit:alert` alone, so a notice is
+// exactly an alert record in the log. All three events are the console's alone
 // (`scope::EVENTS`), and so are the rows: a window whose engine refuses
 // `remote_status` with `console-only` is not on its host, and the panels say
 // so instead of offering acts serve will refuse.
@@ -20,6 +21,8 @@ import { useSyncExternalStore } from "react";
 import { invoke, listen } from "./ipc";
 import { setDeviceNames } from "./provenance";
 import { alertOf, type Alert, type DeviceRecord, type RemoteStatus } from "./devices";
+
+let alertSeq = 0;
 
 /** How many notices stay up at once; older ones fold away. */
 const MAX_ALERTS = 4;
@@ -138,7 +141,7 @@ function syncQuestion(s: RemoteStatus) {
   for (const k of dismissedQ) if (k !== key) dismissedQ.delete(k);
   const kept = state.alerts.filter((a) => !a.key.startsWith("q:") || a.key === key);
   if (kept.length !== state.alerts.length) set({ alerts: kept });
-  if (key && q) push({ key, cat: "remote", text: q });
+  if (key && q) push({ key, cat: "remote", payload: { alert: "question", text: q } });
 }
 
 // ── the watch ────────────────────────────────────────────────────────────────
@@ -164,13 +167,10 @@ export function watchRemote(): () => void {
       if (ev.startsWith("pairing_")) set({ pairTick: state.pairTick + 1 });
       else devicesSoon();
       if (ev === "pairing_closed" || ev === "enrolled") devicesSoon();
-      const a = alertOf("devices:changed", e.payload, labelOf, Date.now());
-      if (a) push(a);
     }),
     listen<Record<string, unknown>>("audit:alert", (e) => {
       if (!live) return;
-      const a = alertOf("audit:alert", e.payload, labelOf, Date.now());
-      if (a) push(a);
+      push(alertOf(e.payload, ++alertSeq));
     }),
   ];
   return () => {

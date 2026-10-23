@@ -282,12 +282,15 @@ export function qrPath(size: number, modules: string): string {
 
 // ── alerts (§5.3) ────────────────────────────────────────────────────────────
 
-/** One notice for the person at the host. `key` dedupes and dismisses. */
-export type Alert = { key: string; text: string; cat: "devices" | "remote" };
+/** One notice for the person at the host: `audit:alert`'s payload, kept as
+ *  data and worded when it is drawn (a device paired a moment ago is named
+ *  once the list has been re-read). `key` dedupes and dismisses. */
+export type Alert = { key: string; cat: "devices" | "remote"; payload: Record<string, unknown> };
 
 type Subject = { principal: string; device: string };
 
-/** `devices::ConnectRefusal`, in words (`unknown` is never an alert). */
+/** `devices::ConnectRefusal`, as the audit log spells a knock's reason
+ *  (`unknown-key` is never an alert). */
 const REFUSED_WORDS: Record<string, string> = {
   revoked: "it is revoked",
   disabled: "it is disabled",
@@ -295,34 +298,39 @@ const REFUSED_WORDS: Record<string, string> = {
   unreadable: "devices.json cannot be read",
 };
 
-/** The notice for a console event, or `null` when it is not one of §5.3's
- *  alerts. Serve decides that (`devices:changed` carries `alert`, from
- *  `DeviceEvent::alerts`); this only words it. `label` names a device id. */
-export function alertOf(event: string, payload: unknown, label: (id: string) => string, at: number): Alert | null {
-  const p = (payload ?? {}) as Record<string, unknown>;
-  const who = (s: unknown) => label((s as Subject | null)?.device ?? "a device");
-  if (event === "audit:alert") {
-    if (p.alert === "auth_failures") {
-      return { key: `audit:${at}`, cat: "remote", text: `${p.count ?? "Several"} connection attempts failed authentication since ${p.since ? new Date(String(p.since)).toLocaleTimeString() : "a moment ago"}.` };
-    }
-    return { key: `audit:${at}`, cat: "remote", text: `Security alert: ${String(p.alert ?? "see the audit log")}.` };
+/** The notice for one `audit:alert`. The audit log is §5.3's one alert
+ *  channel: serve decides what is an alert (`DeviceEvent::alerts`, and its
+ *  episodes, so a refused device that keeps knocking alerts once per
+ *  episode), and every one it emits is a notice — the page adds none and
+ *  drops none. `at` keys it. */
+export function alertOf(payload: unknown, at: number): Alert {
+  const p = (payload && typeof payload === "object" ? payload : {}) as Record<string, unknown>;
+  return { key: `audit:${at}:${String(p.alert)}:${String(p.event ?? "")}`, cat: p.alert === "device" ? "devices" : "remote", payload: p };
+}
+
+/** An alert in words. `label` names a device id. */
+export function alertText(a: Alert, label: (id: string) => string): string {
+  const p = a.payload;
+  if (p.alert === "auth_failures") {
+    const since = p.since ? ` since ${new Date(String(p.since)).toLocaleTimeString()}` : "";
+    return `${p.count ?? "Several"} connection attempts failed authentication${since}.`;
   }
-  if (event !== "devices:changed" || p.alert !== true) return null;
-  const key = `dev:${String(p.event)}:${at}`;
+  if (p.alert !== "device") return `Security alert: ${String(p.alert ?? "see the audit log")}.`;
+  const who = (p.subject as Subject | null)?.device ? label((p.subject as Subject).device) : "A device";
   switch (p.event) {
     case "enrolled":
-      return { key, cat: "devices", text: `${String(p.name ?? "A device")} was paired with this computer.` };
+      return `${who} was paired with this computer.`;
     case "new_address_class":
-      return { key, cat: "devices", text: `${who(p.subject)} connected from a different kind of network (${String(p.from)} → ${String(p.to)}).` };
+      return `${who} connected from a different kind of network than before.`;
     case "disabled":
-      return { key, cat: "devices", text: `${who(p.subject)} was disabled: ${DISABLED_WORDS[p.reason as keyof typeof DISABLED_WORDS] ?? String(p.reason)}.` };
+      return `${who} was disabled: ${DISABLED_WORDS[p.reason as keyof typeof DISABLED_WORDS] ?? String(p.reason)}.`;
     case "connect_refused":
-      return { key, cat: "devices", text: `${p.subject ? who(p.subject) : "A device"} tried to connect and was refused: ${REFUSED_WORDS[String(p.why)] ?? String(p.why)}.` };
+      return `${who} tried to connect and was refused: ${REFUSED_WORDS[String(p.reason)] ?? String(p.reason)}.`;
     case "unreadable":
-      return { key, cat: "devices", text: `devices.json cannot be read, so every device is refused until it is fixed.` };
+      return "devices.json cannot be read, so every device is refused until it is fixed.";
     case "identity_rotated":
-      return { key, cat: "devices", text: `This computer's server identity was rotated: every device must pair again.` };
+      return "This computer's server identity was rotated: every device must pair again.";
     default:
-      return { key, cat: "devices", text: `Device alert: ${String(p.event)}.` };
+      return `Device alert: ${String(p.event)}.`;
   }
 }

@@ -3856,12 +3856,15 @@ function mockDevice(id: unknown): MockDevice {
   return d;
 }
 const subj = (d: MockDevice) => ({ principal: d.principal, device: d.id });
-/** `devices:changed`, with serve's `alert` verdict (`DeviceEvent::alerts`). */
+/** `devices:changed`, and — for one of §5.3's alerts (`DeviceEvent::alerts`)
+ *  — the audit log's `audit:alert` (audit.rs `device_record`), which is the
+ *  only channel the page raises a notice from. */
 function deviceEvent(e: Record<string, unknown>) {
   const ev = String(e.event);
+  emitEvent("devices:changed", e);
   const alert = ev === "enrolled" || ev === "unreadable" || ev === "identity_rotated" || ev === "new_address_class"
-    || (ev === "disabled" && e.reason !== "console") || (ev === "connect_refused" && e.why !== "unknown");
-  emitEvent("devices:changed", { ...e, alert });
+    || (ev === "disabled" && e.reason !== "console");
+  if (alert) emitEvent("audit:alert", { alert: "device", event: ev, subject: e.subject ?? null, reason: e.reason ?? null });
 }
 type MockPairPhase =
   | { state: "open" }
@@ -4095,7 +4098,8 @@ const healthyConfigs: Record<string, MockCfg> = {};
   deviceAlert(kind: "new_address_class" | "auth_failures" | "connect_refused" = "new_address_class", id = "d_k3v9q2m7x4") {
     const d = mockDevices.find((x) => x.id === id) ?? mockDevices[0];
     if (kind === "auth_failures") emitEvent("audit:alert", { alert: "auth_failures", count: 20, since: new Date(Date.now() - 90_000).toISOString() });
-    else if (kind === "connect_refused") deviceEvent({ event: "connect_refused", subject: d ? subj(d) : null, spki_sha256: "9".repeat(64), why: "revoked" });
+    // A known device's knock: the audit log's auth episode alerts once (`Audit::knock`).
+    else if (kind === "connect_refused") emitEvent("audit:alert", { alert: "device", event: "connect_refused", reason: "revoked", subject: d ? subj(d) : null });
     else if (d) deviceEvent({ event: "new_address_class", subject: subj(d), from: "cgnat", to: "rfc1918" });
     return kind;
   },
