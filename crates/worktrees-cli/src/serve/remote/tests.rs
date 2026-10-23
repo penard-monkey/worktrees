@@ -255,6 +255,31 @@ async fn rest(ws: Ws) -> Vec<u8> {
     out
 }
 
+/// A request's answer, or how the connection ended instead: `{closed,
+/// reason}` for a close frame, `null` for silence or a dropped socket.
+async fn answer(ws: &mut Ws, cmd: &str) -> Value {
+    if ws.send(Message::text(json!({ "id": 9, "cmd": cmd, "args": {} }).to_string())).await.is_err() {
+        return Value::Null;
+    }
+    loop {
+        match tokio::time::timeout(WAIT, ws.next()).await {
+            Ok(Some(Ok(Message::Text(t)))) => {
+                let v: Value = serde_json::from_str(t.as_str()).unwrap_or_default();
+                if v["id"] == json!(9) {
+                    return v;
+                }
+            }
+            Ok(Some(Ok(Message::Close(f)))) => return closed(f),
+            Ok(Some(Ok(_))) => {}
+            _ => return Value::Null,
+        }
+    }
+}
+
+fn closed(f: Option<tokio_tungstenite::tungstenite::protocol::CloseFrame>) -> Value {
+    f.map_or(json!({ "closed": null }), |f| json!({ "closed": u16::from(f.code), "reason": f.reason.to_string() }))
+}
+
 /// THE milestone: a paired device's key completes TLS against the pin, the
 /// upgrade, and handshake v1 keyed by the session's exporter; the `ok` names
 /// the device with its grant; and the device is served.
@@ -489,6 +514,66 @@ fn a_device_still_shaking_hands_is_closed_by_the_kill_switch_or_its_revoke() {
     let ok = h.rt.block_on(v1(&mut ws, &k));
     let after = if ok.is_some() { served(&mut ws) } else { None };
     assert!(after.as_ref().is_none_or(|v| v.get("ok").is_none()), "served after its revoke: {after:?}");
+}
+
+/// §6: a device holds at most four LIVE connections, counted across them on
+/// the real listener (`budget.rs`). Four are served. A fifth completes TLS
+/// and handshake v1, which is where it is known to be this device, and is
+/// then closed with the reason, never served; the four are still served after
+/// it. One of them ending makes room again, so the cap counts connections
+/// alive, not connections ever made.
+#[test]
+fn a_devices_fifth_live_connection_is_closed_and_the_four_before_it_are_served() {
+    // §6's table, not `BUDGETS`: the test holds the number, so a budget
+    // that drifts from the spec fails here.
+    const PER_DEVICE: usize = 4;
+    let Some(lan) = lan_or_skip() else { return };
+    let h = host("fifth");
+    h.remote.enable(&lan.to_string(), None, None, None).unwrap();
+    let (at, pin) = (h.at(), h.pin());
+    let key = device_key();
+    h.enroll(&key, &[Capability::Read]);
+    h.rt.block_on(async {
+        let mut live = Vec::new();
+        for n in 1..=PER_DEVICE {
+            let (mut ws, k) = upgrade(at, &pin, &key, &at.to_string(), None).await.expect("a 101");
+            v1(&mut ws, &k).await.expect("handshake v1 completes");
+            let r = answer(&mut ws, "get_changelog").await;
+            assert!(r.get("ok").is_some(), "connection {n} of {PER_DEVICE} served: {r}");
+            live.push(ws);
+        }
+        // The fifth: closed, and said why, so the device does not take it for
+        // a lost host and dial straight back. Nothing is sent on it first: a
+        // request at a socket serve has dropped draws a RST, which on Linux
+        // discards the close frame still unread.
+        let (mut fifth, k) = upgrade(at, &pin, &key, &at.to_string(), None).await.expect("a 101");
+        v1(&mut fifth, &k).await.expect("handshake v1 completes");
+        let end = match tokio::time::timeout(WAIT, fifth.next()).await {
+            Ok(Some(Ok(Message::Close(f)))) => closed(f),
+            other => json!({ "not a close": format!("{other:?}") }),
+        };
+        assert_eq!(end["closed"], json!(u16::from(CloseCode::Policy)), "the fifth: {end}");
+        assert_eq!(end["reason"], json!("this device already holds every connection it may"));
+        for (n, ws) in live.iter_mut().enumerate() {
+            let r = answer(ws, "get_changelog").await;
+            assert!(r.get("ok").is_some(), "connection {} still served after the fifth: {r}", n + 1);
+        }
+        // One ends; a new one is served once serve has seen it go.
+        let mut gone = live.pop().unwrap();
+        gone.close(None).await.unwrap();
+        drop(gone);
+        let deadline = tokio::time::Instant::now() + WAIT;
+        let last = loop {
+            let (mut ws, k) = upgrade(at, &pin, &key, &at.to_string(), None).await.expect("a 101");
+            v1(&mut ws, &k).await.expect("handshake v1 completes");
+            let r = answer(&mut ws, "get_changelog").await;
+            if r.get("ok").is_some() || tokio::time::Instant::now() > deadline {
+                break r;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        };
+        assert!(last.get("ok").is_some(), "a connection after one of the four ended: {last}");
+    });
 }
 
 /// §4.1: an address outside the allowlist is refused as `not-private` —

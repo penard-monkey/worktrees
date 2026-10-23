@@ -71,6 +71,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
     after remote access is on. Linux does not announce the host yet; the
     address code in `worktrees serve remote status` is the way there.
   - While the audit log cannot be written, a device can only read.
+  - A device can hold four connections at once. A fifth is closed with the
+    reason, so the device does not mistake it for a lost host.
   - When the app started the engine, quitting the app ends remote access,
     and while remote access is on the app says so. A device never keeps the
     app's engine running; to serve devices with no app open, run
