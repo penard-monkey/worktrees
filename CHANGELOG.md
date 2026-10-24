@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.44.0] - 2026-10-24
+
 ### Added
 - **`worktrees serve` keeps an audit log: `audit.jsonl` in the app's config
   dir.** One line for everything that reached its socket and was not a plain
@@ -127,9 +129,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
     one rule; MCP `send` now also refuses a line starting with `#`.
   - `agent_turns` returns the last few turns from the agent's own transcript
     (Claude and Codex): what was asked, the reply, and which tools ran.
-  - From a paired device, answering and sending need a fresh step-up on
-    that connection (on a phone, Face ID), and the audit log records each
-    one. A sent line is recorded by its length and hash, never its text,
+  - From a device paired with step-up (an iPhone or iPad), answering and
+    sending need a fresh step-up on that connection (Face ID). The audit log
+    records each one from any device. A sent line is recorded by its length and hash, never its text,
     and MCP `place_status` names the device that last sent a line to the
     place.
 - **A paired host whose address moved is found again.** When nothing answers
@@ -155,8 +157,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   connecting from a Mac or Linux machine work as before.
 - **The iOS app can keep its paired hosts in the same hosts file a Mac
   uses, with no key file.** A host paired with keys in the iPhone's Secure
-  Enclave is saved as its record alone. It is followed when it moves, on the
-  network or by its address code, the same way a Mac's host is. Forgetting a
+  Enclave is saved as its record alone. It is followed when it moves by its
+  address code, as a Mac's host is, and on the network once the app supplies
+  its own search for hosts. Forgetting a
   host deletes only a key file worktrees wrote itself: nothing for a host
   whose keys are kept elsewhere, and never a file reached through a link.
 - **Remote access and paired devices have their own place in Settings.**
@@ -249,8 +252,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   outside the worktree that it could not open. A link to another directory
   inside the same checkout still works.
 - **`worktrees serve` checks what every command acts on before running it.**
-  This is the groundwork for other devices driving serve, and nothing changes
-  for the desktop app. A client of serve gets refusals for three things:
+  It is what holds a paired device to what it was granted, and nothing
+  changes for the desktop app. A client of serve gets refusals for three things:
   - a `repo` that is not a registered project, such as a note or pin written
     into any folder;
   - a place name that is not exactly one existing place, such as `../x`;
@@ -317,7 +320,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
     `.planning/`, an agent's settings or hooks), and "from <device>" beside an
     agent a device started. Nothing is written into the file itself. MCP
     `place_status` reports the same, and who set the place's note and title.
-    Until devices have names, the device's id is shown.
+    The app names the device as Settings → Devices does.
   - an agent started from a device limited to some projects reaches no other
     project through MCP, whatever the cross-project setting says, and neither
     does an agent it starts with `create_worktree` or `open_place`.
@@ -369,9 +372,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   - A body that panics gives its slot back as well as answering.
   - `read_file` and `read_file_base64` no longer read past 1 MB and 4 MB
     whatever `max_bytes` asks for.
-  - The budgets for paired devices (rates, attaches, agent launches, a
-    host-wide share of the engine's threads) are in place for when the remote
-    listener lands. On loopback, the desk is never rate-limited.
+  - Paired devices have budgets of their own (rates, attaches, agent
+    launches, a host-wide share of the engine's threads), spent over the
+    remote listener. On loopback, the desk is never rate-limited.
   - Each limit a client trips is logged once per episode, with its count, in
     serve.log and in the audit log, so a flood of refusals does not become a
     flood of log lines.
@@ -384,7 +387,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   calls them, so nothing in Worktrees could reach it. This keeps the
   dependency on the fixed release.
 - **The audit log records every change to paired devices, and no one device
-  can fill it.** This is groundwork too: no device can connect yet.
+  can fill it.**
   - A pairing is recorded from the window opening to its closing, with the
     host's Allow or Deny. The six-digit code and the pairing link are never
     written.
