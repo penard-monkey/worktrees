@@ -181,10 +181,14 @@ impl Remote {
         if rec.id != id {
             return Err(format!("{id:?} is not a host id"));
         }
-        let moved = reach::adopt_code(&self.store, &rec, &code, &reach::Env::platform(), CONNECT_WAIT).await.map_err(|e| {
+        let not_followed = |e: String| {
             crate::applog("warn", &format!("remote: {}: address code not followed: {}", rec.name, worktrees_remote::printable(&e)));
             e
-        })?;
+        };
+        // A code for another host is refused before the key file is read.
+        reach::check_code(&rec, &code).map_err(not_followed)?;
+        let keys = Keys::from(self.store.key_for(&rec).map_err(not_followed)?);
+        let moved = reach::adopt_code(&self.store, &rec, &keys, &code, &reach::Env::platform(), CONNECT_WAIT).await.map_err(not_followed)?;
         crate::applog("info", &format!("remote: {} now at {} (was {}), by its address code", moved.name, moved.addr, rec.addr));
         Ok(moved.summary())
     }
@@ -276,6 +280,28 @@ mod tests {
             assert!(!s.contains("remote-keys") && !s.contains(".key"), "a key path: {s}");
         }
         assert!(list.contains(&rec.id) && list.contains("Mac mini"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// An address code for another host is refused on its pin before this
+    /// machine's key file is read: here the key file is one `key_for` would
+    /// refuse, and the answer is still the pin's. Nothing is kept.
+    #[test]
+    fn a_code_for_another_host_is_refused_before_the_key_file_is_read() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("wt-shim-remote-code-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let r = Remote::new(&d);
+        let rec = record();
+        r.store.add(&rec, &worktrees_remote::key::DeviceKey::generate().unwrap()).unwrap();
+        let key = d.join("remote-keys").join(format!("{}.key", rec.id));
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(r.store.key_for(&rec).is_err(), "a key file key_for refuses");
+        let before = std::fs::read(d.join("remote-hosts.json")).unwrap();
+        let code = format!("worktrees-addr:v1?addr=192.168.1.9:7461&pin={}", "ef".repeat(32));
+        let e = tauri::async_runtime::block_on(r.readdress(&rec.id, &code)).unwrap_err();
+        assert!(e.contains("for another host") && e.contains("Nothing was dialled"), "{e}");
+        assert_eq!(std::fs::read(d.join("remote-hosts.json")).unwrap(), before);
         let _ = std::fs::remove_dir_all(&d);
     }
 

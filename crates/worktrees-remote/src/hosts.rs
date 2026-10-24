@@ -13,6 +13,14 @@
 //! every change re-reads it under the lock, and the file is replaced with
 //! `fsx::write_atomic`, never written in place.
 //!
+//! **A host whose keys the caller holds is kept as its record alone**
+//! ([`HostStore::add_record`]): the iOS app's keys are Secure Enclave signers,
+//! with no bytes to save. Its record carries `"key": "external"`, and the
+//! store never opens, writes or deletes a key file for it. A desktop's record
+//! has no `key` field, so [`HostStore::add`] writes the file it always wrote,
+//! and a build that predates the field reads either kind (it ignores the
+//! field, and finds no key file for an external host).
+//!
 //! Everything read back is checked again — the pin's spelling, the address
 //! through `netclass::parse_dial`, the ids and the name — and a file that
 //! fails is refused with the record it failed on, never repaired: nothing
@@ -154,7 +162,35 @@ struct File1 {
     #[serde(default)]
     chosen: Option<String>,
     #[serde(default)]
-    hosts: Vec<HostRecord>,
+    hosts: Vec<Entry>,
+}
+
+/// One host as the file holds it: the record, and where its device key is.
+/// `key` is the store's own bookkeeping, so it stays off [`HostRecord`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct Entry {
+    #[serde(flatten)]
+    rec: HostRecord,
+    #[serde(default, skip_serializing_if = "KeyHome::is_file")]
+    key: KeyHome,
+}
+
+/// Where a pairing's device key is kept.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum KeyHome {
+    /// `remote-keys/<id>.key`, written by [`HostStore::add`]. Not written
+    /// out, so a desktop's file is the one it always was.
+    #[default]
+    File,
+    /// With the caller ([`HostStore::add_record`]).
+    External,
+}
+
+impl KeyHome {
+    fn is_file(&self) -> bool {
+        *self == KeyHome::File
+    }
 }
 
 /// The hosts file of one config dir.
@@ -191,19 +227,25 @@ impl HostStore {
     /// Every host, and the chosen one. A missing file is no hosts.
     pub fn list(&self) -> Result<Hosts, String> {
         let f = self.read()?;
-        Ok(Hosts { chosen: f.chosen, hosts: f.hosts })
+        Ok(Hosts { chosen: f.chosen, hosts: f.hosts.into_iter().map(|e| e.rec).collect() })
     }
 
     /// The host `sel` names: its id, or else its name when exactly one host
     /// has it.
     pub fn get(&self, sel: &str) -> Result<HostRecord, String> {
-        find(&self.read()?.hosts, sel).cloned()
+        find(&self.read()?.hosts, sel).map(|e| e.rec.clone())
     }
 
-    /// The device key of `rec`'s pairing.
+    /// The device key of `rec`'s pairing. A host kept by [`add_record`]
+    /// has none here, and no key file is opened for it.
+    ///
+    /// [`add_record`]: HostStore::add_record
     pub fn key_for(&self, rec: &HostRecord) -> Result<DeviceKey, String> {
         if !is_host_id(&rec.id) {
             return Err(format!("{:?} is not a host id", rec.id));
+        }
+        if self.read()?.hosts.iter().any(|e| e.rec.id == rec.id && e.key == KeyHome::External) {
+            return Err(format!("{}'s device key is not kept here: the app that paired it holds it", rec.name));
         }
         DeviceKey::load(&self.key_path(&rec.id))
     }
@@ -216,34 +258,112 @@ impl HostStore {
             if f.hosts.len() >= MAX_HOSTS {
                 return Err(format!("this device already keeps {MAX_HOSTS} hosts; forget one first"));
             }
-            if f.hosts.iter().any(|h| h.id == rec.id) {
+            if f.hosts.iter().any(|h| h.rec.id == rec.id) {
                 return Err(format!("a host with id {} is already kept", rec.id));
             }
             let keys = self.dir.join(KEYS_DIR);
             worktrees_core::fsx::make_dir(&keys).map_err(|e| format!("{}: {e}", keys.display()))?;
             fs::set_permissions(&keys, fs::Permissions::from_mode(0o700)).map_err(|e| format!("{}: {e}", keys.display()))?;
             key.save(&self.key_path(&rec.id))?;
-            f.hosts.push(rec.clone());
+            f.hosts.push(Entry { rec: rec.clone(), key: KeyHome::File });
             Ok(())
         })
     }
 
-    /// Forget `sel`: its record, its key, and the choice if it was chosen. The
-    /// record that went.
+    /// Keep a pairing whose keys the CALLER holds — the iOS app's Secure
+    /// Enclave signers, from `pair::pair_keys` — as its record alone: no key
+    /// file is written, now or later, and [`forget`] deletes none. Under the
+    /// same lock, in the same file and format as [`add`].
+    ///
+    /// An upsert by `rec.id`: a new host is added, and a host this call kept
+    /// before is replaced in place. A host [`add`] kept, with its key file
+    /// here, is refused: replacing it would leave that file behind.
+    ///
+    /// The caller keeps the keys first and the record second, as [`add`]
+    /// does, so a record is never kept without its keys; and it deletes the
+    /// keys itself, after [`forget`].
+    ///
+    /// [`add`]: HostStore::add
+    /// [`forget`]: HostStore::forget
+    pub fn add_record(&self, rec: &HostRecord) -> Result<(), String> {
+        rec.check()?;
+        self.locked(|f| {
+            let entry = Entry { rec: rec.clone(), key: KeyHome::External };
+            match f.hosts.iter().position(|h| h.rec.id == rec.id) {
+                Some(i) if f.hosts[i].key == KeyHome::File => {
+                    Err(format!("{} ({}) is kept with a key file on this device; forget it first", f.hosts[i].rec.name, rec.id))
+                }
+                Some(i) => {
+                    f.hosts[i] = entry;
+                    Ok(())
+                }
+                None if f.hosts.len() >= MAX_HOSTS => Err(format!("this device already keeps {MAX_HOSTS} hosts; forget one first")),
+                None => {
+                    f.hosts.push(entry);
+                    Ok(())
+                }
+            }
+        })
+    }
+
+    /// Forget `sel`: its record, its key file if this store wrote one, and
+    /// the choice if it was chosen. The record that went.
+    ///
+    /// Only the store's own key file is deleted: a regular file, in the keys
+    /// directory itself. A link at either is refused, and nothing is deleted
+    /// or written. A host kept by [`add_record`] has no file here, and
+    /// nothing under `remote-keys` is touched for it.
+    ///
+    /// [`add_record`]: HostStore::add_record
     pub fn forget(&self, sel: &str) -> Result<HostRecord, String> {
         self.locked(|f| {
-            let rec = find(&f.hosts, sel)?.clone();
-            f.hosts.retain(|h| h.id != rec.id);
+            let gone = find(&f.hosts, sel)?.clone();
+            let rec = gone.rec;
+            f.hosts.retain(|h| h.rec.id != rec.id);
             if f.chosen.as_deref() == Some(rec.id.as_str()) {
                 f.chosen = None;
             }
-            match fs::remove_file(self.key_path(&rec.id)) {
-                Ok(()) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(format!("the device key of {}: {e}", rec.name)),
+            if gone.key == KeyHome::File {
+                self.remove_key_file(&rec).map_err(|e| format!("{e}; nothing was deleted, and {} is still kept", rec.name))?;
             }
             Ok(rec)
         })
+    }
+
+    /// Unlink `remote-keys/<id>.key` if it is this store's: a regular file in
+    /// the keys directory itself. The directory is opened without following a
+    /// link and the name is looked at and unlinked through that handle, so a
+    /// link standing where either should be is never followed — swapped in
+    /// after the look, a link is what gets unlinked, never its target.
+    fn remove_key_file(&self, rec: &HostRecord) -> Result<(), String> {
+        let keys = self.dir.join(KEYS_DIR);
+        let path = self.key_path(&rec.id);
+        let dir = match OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(&keys) {
+            Ok(d) => d,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(format!("{} is not this store's keys directory ({e})", keys.display())),
+        };
+        let name = std::ffi::CString::new(format!("{}.key", rec.id)).map_err(|_| format!("{:?} is not a host id", rec.id))?;
+        // SAFETY: an all-zero `stat` is a valid value for fstatat to fill in.
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: a live descriptor owned by `dir`, a NUL-terminated name, a
+        // buffer of ours.
+        if unsafe { libc::fstatat(dir.as_raw_fd(), name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) } != 0 {
+            let e = std::io::Error::last_os_error();
+            return match e.kind() {
+                std::io::ErrorKind::NotFound => Ok(()),
+                _ => Err(format!("the device key {}: {e}", path.display())),
+            };
+        }
+        if st.st_mode & libc::S_IFMT != libc::S_IFREG {
+            return Err(format!("{} is not a key file this store wrote", path.display()));
+        }
+        // SAFETY: as above. Flags 0 unlinks a non-directory and never follows
+        // the name.
+        if unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+            return Err(format!("the device key {}: {}", path.display(), std::io::Error::last_os_error()));
+        }
+        Ok(())
     }
 
     /// Keep `addr` as where host `id` now listens (§4.1, §4.7): called only
@@ -254,7 +374,7 @@ impl HostStore {
     pub fn readdress(&self, id: &str, pin: &str, addr: &str) -> Result<HostRecord, String> {
         worktrees_core::netclass::parse_dial(addr).map_err(|e| e.to_string())?;
         self.locked(|f| {
-            let h = f.hosts.iter_mut().find(|h| h.id == id).ok_or_else(|| format!("no host {id:?} is kept here any more"))?;
+            let h = &mut f.hosts.iter_mut().find(|h| h.rec.id == id).ok_or_else(|| format!("no host {id:?} is kept here any more"))?.rec;
             if h.pin != pin {
                 return Err(format!("{} was paired again meanwhile; its address is left as it is", h.name));
             }
@@ -269,7 +389,7 @@ impl HostStore {
     pub fn choose(&self, id: Option<&str>) -> Result<(), String> {
         self.locked(|f| {
             if let Some(id) = id {
-                if !f.hosts.iter().any(|h| h.id == id) {
+                if !f.hosts.iter().any(|h| h.rec.id == id) {
                     return Err(format!("no host {id:?} is kept here"));
                 }
             }
@@ -296,10 +416,10 @@ impl HostStore {
             return Err(format!("{}: version {} is not one this build reads", p.display(), f.v));
         }
         for h in &f.hosts {
-            h.check().map_err(|e| format!("{}: {e}", p.display()))?;
+            h.rec.check().map_err(|e| format!("{}: {e}", p.display()))?;
         }
         if let Some(c) = &f.chosen {
-            if !f.hosts.iter().any(|h| &h.id == c) {
+            if !f.hosts.iter().any(|h| &h.rec.id == c) {
                 return Err(format!("{}: the chosen host {c:?} is not kept", p.display()));
             }
         }
@@ -321,11 +441,11 @@ impl HostStore {
     }
 }
 
-fn find<'a>(hosts: &'a [HostRecord], sel: &str) -> Result<&'a HostRecord, String> {
-    if let Some(h) = hosts.iter().find(|h| h.id == sel) {
+fn find<'a>(hosts: &'a [Entry], sel: &str) -> Result<&'a Entry, String> {
+    if let Some(h) = hosts.iter().find(|h| h.rec.id == sel) {
         return Ok(h);
     }
-    let named: Vec<&HostRecord> = hosts.iter().filter(|h| h.name == sel).collect();
+    let named: Vec<&Entry> = hosts.iter().filter(|h| h.rec.name == sel).collect();
     match named.as_slice() {
         [one] => Ok(one),
         [] => Err(format!("no paired host is called {sel:?} (worktrees remote hosts lists them)")),
@@ -471,5 +591,142 @@ pub(crate) mod tests {
         fs::write(d.join(HOSTS_FILE), &good).unwrap();
         assert!(st.list().is_ok());
         let _ = fs::remove_dir_all(&d);
+    }
+
+    /// The file as every build before the `key` field wrote and read it: the
+    /// v1 shape, records and nothing else.
+    #[derive(Serialize, Deserialize)]
+    struct OldFile1 {
+        v: u32,
+        #[serde(default)]
+        chosen: Option<String>,
+        #[serde(default)]
+        hosts: Vec<HostRecord>,
+    }
+
+    fn mode(p: &Path) -> u32 {
+        fs::metadata(p).unwrap().permissions().mode() & 0o777
+    }
+
+    /// A desktop's pairing is written byte for byte as v1 always wrote it,
+    /// and a file holding a record-only host still reads in a build that
+    /// predates the `key` field (which ignores the field). A `key` this build
+    /// does not know refuses the file.
+    #[test]
+    fn a_desktop_file_is_the_v1_it_was_and_a_record_only_one_still_reads_as_v1() {
+        let d = dir("v1");
+        let st = HostStore::new(&d);
+        let (a, b) = (record("Mac mini"), record("iPhone's host"));
+        st.add(&a, &DeviceKey::generate().unwrap()).unwrap();
+        st.choose(Some(&a.id)).unwrap();
+        let mut old = serde_json::to_vec_pretty(&OldFile1 { v: 1, chosen: Some(a.id.clone()), hosts: vec![a.clone()] }).unwrap();
+        old.push(b'\n');
+        assert_eq!(fs::read(d.join(HOSTS_FILE)).unwrap(), old, "byte for byte");
+        st.add_record(&b).unwrap();
+        let text = fs::read_to_string(d.join(HOSTS_FILE)).unwrap();
+        assert_eq!(text.matches(r#""key": "external""#).count(), 1, "{text}");
+        let read: OldFile1 = serde_json::from_str(&text).unwrap();
+        assert_eq!((read.v, read.hosts), (1, vec![a.clone(), b.clone()]), "an older build reads both");
+        fs::write(d.join(HOSTS_FILE), text.replace(r#""key": "external""#, r#""key": "keychain""#)).unwrap();
+        assert!(st.list().is_err(), "an unknown key home is refused");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// `add_record` keeps the record and writes no key — no file, no keys
+    /// directory — and the store never touches a key path for that host:
+    /// `key_for` refuses it without opening the file a stranger put where its
+    /// key would be, and `forget` leaves that file. An upsert replaces a
+    /// record-only host in place, and refuses one kept with a key file.
+    #[test]
+    fn a_record_is_kept_alone_and_no_key_path_is_touched_for_it() {
+        let d = dir("record");
+        let st = HostStore::new(&d);
+        let (a, b) = (record("Mac mini"), record("Studio"));
+        st.add_record(&a).unwrap();
+        assert!(!d.join(KEYS_DIR).exists(), "no keys dir");
+        assert_eq!(mode(&d.join(HOSTS_FILE)), 0o600);
+        assert_eq!(st.get("Mac mini").unwrap(), a);
+        assert!(st.add(&a, &DeviceKey::generate().unwrap()).is_err(), "kept already");
+        assert!(!d.join(KEYS_DIR).exists(), "and no key written for it");
+
+        let kb = DeviceKey::generate().unwrap();
+        st.add(&b, &kb).unwrap();
+        let renamed = HostRecord { name: "Mac mini (office)".into(), addr: "192.168.1.6:7461".into(), ..a.clone() };
+        st.add_record(&renamed).unwrap();
+        assert_eq!(st.list().unwrap().hosts, vec![renamed.clone(), b.clone()], "replaced in place");
+        let before = fs::read(d.join(HOSTS_FILE)).unwrap();
+        let e = st.add_record(&b).unwrap_err();
+        assert!(e.contains("key file") && e.contains("forget it first"), "{e}");
+        assert_eq!(fs::read(d.join(HOSTS_FILE)).unwrap(), before, "unchanged");
+        assert!(st.add_record(&HostRecord { addr: "8.8.8.8:7461".into(), ..record("x") }).is_err(), "checked like any record");
+
+        // A real key, 0600, where a's would be: never read, never deleted.
+        let stray = st.key_path(&a.id);
+        DeviceKey::generate().unwrap().save(&stray).unwrap();
+        let e = st.key_for(&renamed).unwrap_err();
+        assert!(e.contains("not kept here"), "{e}");
+        assert_eq!(st.key_for(&b).unwrap().pin(), kb.pin(), "a desktop's key still loads");
+        st.choose(Some(&a.id)).unwrap();
+        assert_eq!(st.forget(&a.id).unwrap(), renamed);
+        assert_eq!(st.list().unwrap(), Hosts { chosen: None, hosts: vec![b.clone()] });
+        assert!(stray.exists(), "a file the store did not write is left");
+        assert!(st.key_path(&b.id).exists());
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_record_only_host_counts_toward_the_most_a_device_keeps() {
+        let d = dir("max");
+        let st = HostStore::new(&d);
+        for i in 0..MAX_HOSTS {
+            st.add_record(&record(&format!("host {i}"))).unwrap();
+        }
+        let e = st.add_record(&record("one more")).unwrap_err();
+        assert!(e.contains("forget one first"), "{e}");
+        let first = st.list().unwrap().hosts[0].clone();
+        st.add_record(&HostRecord { name: "renamed".into(), ..first }).unwrap();
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// `forget` deletes the store's own key file and nothing else: not
+    /// through a link where the keys directory should be (the file it would
+    /// reach is someone else's), and not a link where the key file should be.
+    /// Either is refused with nothing deleted or written; once the link is
+    /// gone, the host is forgotten.
+    #[test]
+    fn forget_never_deletes_through_a_link() {
+        let d = dir("forget-link");
+        let victim = dir("forget-link-victim");
+        fs::create_dir_all(&victim).unwrap();
+        let st = HostStore::new(&d);
+        let a = record("Mac mini");
+        st.add(&a, &DeviceKey::generate().unwrap()).unwrap();
+        let name = format!("{}.key", a.id);
+        fs::write(victim.join(&name), b"someone else's").unwrap();
+        let keys = d.join(KEYS_DIR);
+        let before = fs::read(d.join(HOSTS_FILE)).unwrap();
+
+        fs::rename(&keys, d.join("keys-aside")).unwrap();
+        std::os::unix::fs::symlink(&victim, &keys).unwrap();
+        let e = st.forget(&a.id).unwrap_err();
+        assert!(e.contains("not this store's keys directory") && e.contains("still kept"), "{e}");
+        assert!(victim.join(&name).exists(), "nothing deleted through the link");
+        assert_eq!(fs::read(d.join(HOSTS_FILE)).unwrap(), before, "nothing written");
+
+        fs::remove_file(&keys).unwrap();
+        fs::rename(d.join("keys-aside"), &keys).unwrap();
+        fs::remove_file(keys.join(&name)).unwrap();
+        std::os::unix::fs::symlink(victim.join(&name), keys.join(&name)).unwrap();
+        let e = st.forget(&a.id).unwrap_err();
+        assert!(e.contains("not a key file this store wrote"), "{e}");
+        assert!(fs::symlink_metadata(keys.join(&name)).unwrap().file_type().is_symlink(), "the link is left");
+        assert!(victim.join(&name).exists());
+        assert_eq!(fs::read(d.join(HOSTS_FILE)).unwrap(), before);
+
+        fs::remove_file(keys.join(&name)).unwrap();
+        assert_eq!(st.forget(&a.id).unwrap(), a, "no key file left to delete");
+        assert_eq!(fs::read(victim.join(&name)).unwrap(), b"someone else's");
+        let _ = fs::remove_dir_all(&d);
+        let _ = fs::remove_dir_all(&victim);
     }
 }

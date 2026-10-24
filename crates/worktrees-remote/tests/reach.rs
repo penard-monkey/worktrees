@@ -152,7 +152,8 @@ struct World {
     dir: PathBuf,
     store: HostStore,
     rec: HostRecord,
-    key: Arc<DeviceKey>,
+    /// The pin of this device's key: what a host that admits it holds.
+    device_pin: String,
     keys: Keys,
     routes: Arc<Mutex<HashMap<SocketAddr, SocketAddr>>>,
     dials: Arc<Mutex<Vec<SocketAddr>>>,
@@ -166,6 +167,12 @@ fn en0() -> Iface {
 }
 
 fn world(rt: &tokio::runtime::Runtime, tag: &str, pin: &str) -> World {
+    let key = Arc::new(DeviceKey::generate().unwrap());
+    world_keeping(rt, tag, pin, Keys::device_only(key.clone()), |store, rec| store.add(rec, &key))
+}
+
+/// [`world`], with `keys` this device's and the host kept by `keep`.
+fn world_keeping(rt: &tokio::runtime::Runtime, tag: &str, pin: &str, keys: Keys, keep: impl FnOnce(&HostStore, &HostRecord) -> Result<(), String>) -> World {
     let dir = std::env::temp_dir().join(format!("wt-remote-reach-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     let store = HostStore::new(&dir);
@@ -182,12 +189,11 @@ fn world(rt: &tokio::runtime::Runtime, tag: &str, pin: &str) -> World {
         expiry: serde_json::json!({"idle_days": 30}),
         paired_at: 1_800_000_000,
     };
-    let key = Arc::new(DeviceKey::generate().unwrap());
-    store.add(&rec, &key).unwrap();
-    let keys = Keys::device_only(key.clone());
+    keep(&store, &rec).unwrap();
+    let device_pin = tls::pin_of_spki(&keys.device.spki_der());
     // A port nothing listens on: a connect there is refused at once.
     let closed = rt.block_on(async { tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap() });
-    World { dir, store, rec, key, keys, routes: Arc::default(), dials: Arc::default(), rounds: Arc::default(), closed }
+    World { dir, store, rec, device_pin, keys, routes: Arc::default(), dials: Arc::default(), rounds: Arc::default(), closed }
 }
 
 impl World {
@@ -248,7 +254,7 @@ fn a_moved_host_is_found_on_the_lan_and_its_address_kept() {
     let rt = rt();
     let id = identity();
     let w = world(&rt, "found", &id.pin);
-    let real = host(&rt, &id, w.key.pin());
+    let real = host(&rt, &id, &w.device_pin);
     w.route("192.168.1.9:7461", real.at);
     let (r, log) = w.open(&rt, &w.env(vec![w.sighting("192.168.1.9:7461")], vec![en0()]));
     let r = r.unwrap_or_else(|e| panic!("{e}"));
@@ -273,7 +279,7 @@ fn a_spoofed_advert_with_the_same_id_is_refused_at_the_pin_and_changes_nothing()
     let (id, spoofer) = (identity(), identity());
     let w = world(&rt, "spoof", &id.pin);
     // The spoofer would admit this device's key, were it ever shown.
-    let fake = host(&rt, &spoofer, w.key.pin());
+    let fake = host(&rt, &spoofer, &w.device_pin);
     w.route("192.168.1.66:7461", fake.at);
     let before = w.file();
     let (r, log) = w.open(&rt, &w.env(vec![w.sighting("192.168.1.66:7461")], vec![en0()]));
@@ -290,7 +296,7 @@ fn a_spoofed_advert_with_the_same_id_is_refused_at_the_pin_and_changes_nothing()
     assert_eq!(*fake.sni.lock().unwrap(), [None], "one ClientHello, and no SNI in it");
     assert!(log.iter().any(|l| l.contains("192.168.1.66:7461") && l.contains("does not match the pin")), "logged: {log:?}");
 
-    let real = host(&rt, &id, w.key.pin());
+    let real = host(&rt, &id, &w.device_pin);
     w.route("192.168.1.9:7461", real.at);
     let (r, _) = w.open(&rt, &w.env(vec![w.sighting("192.168.1.66:7461"), w.sighting("192.168.1.9:7461")], vec![en0()]));
     assert_eq!(r.unwrap_or_else(|e| panic!("{e}")).rec.addr, "192.168.1.9:7461", "the real advert, after the spoofed one");
@@ -328,8 +334,8 @@ fn a_stranger_at_the_kept_address_sends_the_device_looking_and_the_host_is_kept(
     let (id, stranger) = (identity(), identity());
     let w = world(&rt, "kept-stranger", &id.pin);
     // The stranger would admit this device's key, were it ever shown.
-    let not_it = host(&rt, &stranger, w.key.pin());
-    let real = host(&rt, &id, w.key.pin());
+    let not_it = host(&rt, &stranger, &w.device_pin);
+    let real = host(&rt, &id, &w.device_pin);
     w.route(KEPT, not_it.at);
     w.route("192.168.1.9:7461", real.at);
     let (r, log) = w.open(&rt, &w.env(vec![w.sighting("192.168.1.9:7461")], vec![en0()]));
@@ -353,7 +359,7 @@ fn a_host_that_refuses_this_devices_key_at_the_kept_address_sends_no_one_looking
     let w = world(&rt, "kept-refuses", &id.pin);
     let other = DeviceKey::generate().unwrap();
     let refuses = host(&rt, &id, other.pin());
-    let real = host(&rt, &id, w.key.pin());
+    let real = host(&rt, &id, &w.device_pin);
     w.route(KEPT, refuses.at);
     w.route("192.168.1.9:7461", real.at);
     let (r, _) = w.open(&rt, &w.env(vec![w.sighting("192.168.1.9:7461")], vec![en0()]));
@@ -373,7 +379,7 @@ fn a_public_or_loopback_advert_is_never_dialled() {
     let rt = rt();
     let id = identity();
     let w = world(&rt, "netclass", &id.pin);
-    let real = host(&rt, &id, w.key.pin());
+    let real = host(&rt, &id, &w.device_pin);
     let mut odd = en0();
     let a = |ip: &str, prefix| IfAddr { ip: ip.parse().unwrap(), prefix, temporary: false, deprecated: false };
     odd.addrs.extend([a("8.8.8.1", 24), a("127.0.0.2", 8), a("0.0.0.1", 8), a("2001:db8::1", 64)]);
@@ -397,7 +403,7 @@ fn an_off_link_foreign_or_misshapen_advert_is_never_dialled() {
     let rt = rt();
     let id = identity();
     let w = world(&rt, "offlink", &id.pin);
-    let real = host(&rt, &id, w.key.pin());
+    let real = host(&rt, &id, &w.device_pin);
     let mut sightings = Vec::new();
     for at in ["10.0.0.9:7461", "192.168.2.9:7461", "[fd00:2::9]:7461"] {
         w.route(at, real.at);
@@ -493,14 +499,14 @@ fn an_address_code_is_kept_only_after_its_pinned_open() {
     let rt = rt();
     let (id, spoofer) = (identity(), identity());
     let w = world(&rt, "code", &id.pin);
-    let fake = host(&rt, &spoofer, w.key.pin());
-    let real = host(&rt, &id, w.key.pin());
+    let fake = host(&rt, &spoofer, &w.device_pin);
+    let real = host(&rt, &id, &w.device_pin);
     w.route("192.168.1.66:7461", fake.at);
     w.route("192.168.1.9:7461", real.at);
     let env = w.env(vec![], vec![en0()]);
     let code = |addr: &str, pin: &str| format!("worktrees-addr:v1?addr={addr}&pin={pin}");
     let before = w.file();
-    let adopt = |c: &str| rt.block_on(reach::adopt_code(&w.store, &w.rec, &reach::parse_code(c).unwrap(), &env, WAIT));
+    let adopt = |c: &str| rt.block_on(reach::adopt_code(&w.store, &w.rec, &w.keys, &reach::parse_code(c).unwrap(), &env, WAIT));
     let e = adopt(&code("192.168.1.9:7461", &spoofer.pin)).unwrap_err();
     assert!(e.contains("another host") && e.contains("Nothing was dialled"), "{e}");
     assert!(w.dialled().is_empty());
@@ -597,3 +603,90 @@ fn a_key_that_refuses_a_candidates_handshake_ends_the_round() {
     assert!(log.iter().any(|l| l.contains("192.168.1.9:7461") && l.contains("locked")), "{log:?}");
 }
 
+
+// ── a host kept as its record alone (the iOS app's: its keys are signers) ───
+
+/// A device whose keys are opaque signers, its host kept with `add_record`.
+fn record_only(rt: &tokio::runtime::Runtime, tag: &str, pin: &str) -> (World, Arc<Opaque>) {
+    let key = Opaque::new();
+    let w = world_keeping(rt, tag, pin, Keys::device_only(key.clone()), |store, rec| store.add_record(rec));
+    (w, key)
+}
+
+impl World {
+    /// Every path under the store's dir, from there, sorted.
+    fn files(&self) -> Vec<String> {
+        fn walk(base: &std::path::Path, d: &std::path::Path, out: &mut Vec<String>) {
+            for e in std::fs::read_dir(d).unwrap() {
+                let p = e.unwrap().path();
+                out.push(p.strip_prefix(base).unwrap().display().to_string());
+                if std::fs::symlink_metadata(&p).unwrap().is_dir() {
+                    walk(base, &p, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.dir, &self.dir, &mut out);
+        out.sort();
+        out
+    }
+
+    fn says_external(&self) -> bool {
+        String::from_utf8(self.file()).unwrap().contains(r#""key": "external""#)
+    }
+}
+
+/// The iOS app's host, kept by `add_record`: no key file exists anywhere, and
+/// none is needed. It opens at its kept address, and once it has moved it is
+/// found on the LAN and the record follows, with this device's key only ever
+/// asked to sign. What is kept is still the record alone.
+#[test]
+fn a_record_only_host_is_reached_and_followed_with_no_key_file_anywhere() {
+    let rt = rt();
+    let id = identity();
+    let (w, key) = record_only(&rt, "record-only", &id.pin);
+    let only = ["remote-hosts.json", "remote-hosts.lock"];
+    assert_eq!(w.files(), only, "no key file and no keys dir");
+    assert!(w.says_external());
+    let there = host(&rt, &id, &w.device_pin);
+    w.route(KEPT, there.at);
+    let (r, log) = w.open(&rt, &w.env(vec![], vec![en0()]));
+    assert_eq!(r.unwrap_or_else(|e| panic!("{e} {log:?}")).moved_from, None, "at the kept address");
+    w.routes.lock().unwrap().remove(&KEPT.parse().unwrap());
+    let real = host(&rt, &id, &w.device_pin);
+    w.route("192.168.1.9:7461", real.at);
+    let (r, log) = w.open(&rt, &w.env(vec![w.sighting("192.168.1.9:7461")], vec![en0()]));
+    let r = r.unwrap_or_else(|e| panic!("{e} {log:?}"));
+    assert_eq!((r.rec.addr.as_str(), r.moved_from.as_deref()), ("192.168.1.9:7461", Some(KEPT)));
+    assert_eq!(w.store.get(&w.rec.id).unwrap().addr, "192.168.1.9:7461", "readdressed in the store");
+    assert!(w.says_external(), "and still a record alone");
+    assert_eq!(w.files(), only);
+    assert_eq!(key.asked(), 4, "two opens: a certificate and a handshake each");
+    assert_eq!(real.upgraded.load(Ordering::SeqCst), 1);
+}
+
+/// An address code moves a record-only host with the caller's keys, as it
+/// moves a desktop's. A code for another pin is refused before those keys are
+/// asked anything, their public half included, and before anything is
+/// dialled.
+#[test]
+fn an_address_code_moves_a_record_only_host_and_a_foreign_one_touches_no_key() {
+    let rt = rt();
+    let (id, other) = (identity(), identity());
+    let (w, key) = record_only(&rt, "record-only-code", &id.pin);
+    let real = host(&rt, &id, &w.device_pin);
+    w.route("192.168.1.9:7461", real.at);
+    let env = w.env(vec![], vec![en0()]);
+    let code = |pin: &str| reach::parse_code(&format!("worktrees-addr:v1?addr=192.168.1.9:7461&pin={pin}")).unwrap();
+    let before = (key.touched(), w.file());
+    let e = rt.block_on(reach::adopt_code(&w.store, &w.rec, &w.keys, &code(&other.pin), &env, WAIT)).unwrap_err();
+    assert!(e.contains("another host") && e.contains("Nothing was dialled"), "{e}");
+    assert_eq!((key.touched(), w.file()), before, "no key asked, nothing kept");
+    assert!(w.dialled().is_empty(), "{:?}", w.dialled());
+    let moved = rt.block_on(reach::adopt_code(&w.store, &w.rec, &w.keys, &code(&id.pin), &env, WAIT)).unwrap();
+    assert_eq!(moved.addr, "192.168.1.9:7461");
+    assert_eq!(w.store.get(&w.rec.id).unwrap(), moved);
+    assert!(w.says_external());
+    assert_eq!(w.files(), ["remote-hosts.json", "remote-hosts.lock"]);
+    assert_eq!(key.asked(), 2, "a certificate and a handshake");
+}

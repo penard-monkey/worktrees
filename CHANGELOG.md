@@ -153,6 +153,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   connection. A signature in the wrong format is refused on the device before
   anything is sent, so it cannot use up a pairing window. Pairing and
   connecting from a Mac or Linux machine work as before.
+- **The iOS app can keep its paired hosts in the same hosts file a Mac
+  uses, with no key file.** A host paired with keys in the iPhone's Secure
+  Enclave is saved as its record alone. It is followed when it moves, on the
+  network or by its address code, the same way a Mac's host is. Forgetting a
+  host deletes only a key file worktrees wrote itself: nothing for a host
+  whose keys are kept elsewhere, and never a file reached through a link.
 - **Remote access and paired devices have their own place in Settings.**
   Everything the CLI does for them, the app now does too.
   - **Settings → Remote access** shows whether remote access is on, with
