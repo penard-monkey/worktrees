@@ -9,10 +9,10 @@
 // The protocol is crates/worktrees-cli/src/serve/wire.rs + policy.rs, and its
 // handshake is v1 (the fix for OWASP H1, spec by (main), 2026-10-18):
 //
-//   → {"hello": cn}                          cn: 32 random bytes, hex
+//   → {"hello": cn}                          cn: 32 random bytes, hex; remote adds proto
 //   ← {"challenge": sn}                      sn: the same, chosen by serve
 //   → {"auth": HMAC(token, client|cn|sn)}    or serve closes with NOTHING said
-//   ← {"ok": true, "version", "proof": HMAC(token, server|cn|sn)}
+//   ← {"ok": true, "version", "proof": HMAC(token, server|cn|sn)}; remote adds proto/proto_min
 //   → {"listen": [event, …]}                 the events this page listens for:
 //                                            first after the proof, again on
 //                                            each change, never answered
@@ -57,6 +57,10 @@ export const WIRE = {
   clientLabel: "worktrees-serve/v1/client\n",
   serverLabel: "worktrees-serve/v1/server\n",
   version: "version",
+  /** The remote door's protocol (iOS Q10): the hello's, the ok's, and the
+   *  oldest client the ok's host serves. */
+  proto: "proto",
+  protoMin: "proto_min",
   id: "id",
   cmd: "cmd",
   args: "args",
@@ -100,6 +104,30 @@ export const MAX_MESSAGE = 16 << 20;
  *  `localhost` resolves ::1 first (the OWASP review measured it). */
 export const SERVE_HOST = "127.0.0.1";
 
+/** The remote door's compatibility rule (iOS Q10), mirrored from
+ *  crates/worktrees-remote/src/protocol.rs — transport-check holds each one
+ *  equal. A protocol number for the wire and the handshake, separate from the
+ *  release, bumped only for a breaking change: a new row does not bump it, a
+ *  host that lacks one answers `unknown command: <cmd>`. The engine door
+ *  keeps exact release equality and uses none of this. */
+export const PROTO = 1;
+/** The oldest host protocol this client drives. */
+export const HOST_PROTO_MIN = 1;
+/** A host's 1008 reason for a client below its `proto_min`, and this
+ *  client's words when it finds one. */
+export const UPDATE_APP = "Update the app";
+export const updateHost = (host: string) => `Update Worktrees on ${host}`;
+/** How the remote pipe words a host's close (worktrees-remote's
+ *  `pipe::HOST_CLOSED`); the host's reason follows. */
+export const HOST_CLOSED = "the host closed the connection: ";
+export const UNKNOWN_COMMAND = "unknown command: ";
+
+/** A UI's words for a call's refusal when the host lacks the row, or
+ *  undefined for any other refusal. `invoke` passes the refusal on unchanged. */
+export function unsupportedFeature(error: unknown, feature: string): string | undefined {
+  return typeof error === "string" && error.startsWith(UNKNOWN_COMMAND) ? `This host doesn't support ${feature} yet` : undefined;
+}
+
 const HEX32 = /^[0-9a-f]{64}$/;
 const hex = (b: ArrayBuffer | Uint8Array) => Array.from(new Uint8Array(b), (x) => x.toString(16).padStart(2, "0")).join("");
 function unhex(s: string): Uint8Array<ArrayBuffer> {
@@ -115,9 +143,13 @@ export type SocketDeps = {
   port: number;
   /** serve.json's token: the HMAC key, never a frame. */
   token: string;
-  /** This frontend's own version (`__WT_VERSION__`). A PROVEN server's ok must
+  /** This frontend's version (`__WT_VERSION__`). A PROVEN engine's ok must
    *  carry the same string, or the client refuses to drive it. */
   version: string;
+  /** The paired host's name, set only over the remote pipe (ipcremote.ts):
+   *  the door then sends `proto` and judges the host's protocol (`PROTO`)
+   *  instead of its version, and its refusals name this host. */
+  remoteHost?: string;
   /** `window.crypto`. `subtle` exists only in a secure context. */
   crypto: Pick<Crypto, "getRandomValues"> & { subtle?: SubtleCrypto | null };
   WebSocket: new (url: string) => Sock;
@@ -169,7 +201,8 @@ type Pending = {
 /** The door over a socket, plus what the checks and the drive look at. */
 export type SocketDoor = Door & {
   /** Settles once: resolved when the server has PROVEN it holds the token and
-   *  runs this frontend's version, rejected with the failure (the same string
+   *  runs this frontend's version (a remote host: a protocol it speaks),
+   *  rejected with the failure (the same string
    *  `onError` gets) if the connection ends first. */
   ready: Promise<void>;
   /** How many channels this connection still holds a handler for. */
@@ -383,7 +416,13 @@ export function connectSocket(d: SocketDeps): SocketDoor {
     if (state !== "verifying") return; // shut while verifying
     if (!good) return shut(unproven("its proof does not verify"));
     const theirs = f[WIRE.version];
-    if (theirs !== d.version) {
+    if (d.remoteHost !== undefined) {
+      // Believed only now. A host that names no protocol predates it.
+      const u32 = (v: unknown): v is number => typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= 0xffffffff;
+      const proto = f[WIRE.proto], min = f[WIRE.protoMin];
+      if (!u32(proto) || proto < HOST_PROTO_MIN || !u32(min) || min > proto) return shut(updateHost(d.remoteHost));
+      if (PROTO < min) return shut(UPDATE_APP);
+    } else if (theirs !== d.version) {
       return shut(
         `version mismatch: worktrees serve is ${typeof theirs === "string" ? `v${theirs}` : "of an unknown version"}, ` +
           `this frontend is v${d.version} — refusing to drive it. ${rebuild}`,
@@ -433,7 +472,7 @@ export function connectSocket(d: SocketDeps): SocketDoor {
   ws.onopen = () => {
     if (state !== "connecting") return;
     state = "hello";
-    ws.send(JSON.stringify({ [WIRE.hello]: cn }));
+    ws.send(JSON.stringify(d.remoteHost === undefined ? { [WIRE.hello]: cn } : { [WIRE.hello]: cn, [WIRE.proto]: PROTO }));
   };
 
   ws.onmessage = (ev) => {
@@ -442,8 +481,18 @@ export function connectSocket(d: SocketDeps): SocketDoor {
     else handle(ev.data);
   };
 
-  ws.onclose = () => {
+  ws.onclose = (ev) => {
     if (state === "closed") return;
+    // Over the pinned pipe, a close is the host's (TLS proved who it is). A
+    // host from before the protocol drops the socket at a hello with `proto`
+    // in it, with nothing said — a lost connection looks the same, and the
+    // retries still run. A host that will not serve this client's protocol
+    // says so, once this client's proof has passed.
+    if (d.remoteHost !== undefined) {
+      const reason = ev?.reason ?? "";
+      if (state === "proving" && (reason === UPDATE_APP || reason === HOST_CLOSED + UPDATE_APP)) return shut(UPDATE_APP);
+      if (state === "hello") return shut(updateHost(d.remoteHost));
+    }
     // serve refuses a foreign Origin (or Host) by closing during the upgrade
     // with nothing said, so a browser sees exactly what it sees for a dead
     // port. Name both; the stack's serve.log says which.

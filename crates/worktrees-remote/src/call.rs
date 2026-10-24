@@ -4,10 +4,10 @@
 //! the session's exporter instead of serve.json's token.
 //!
 //! ```text
-//! → {"hello": cn}                          cn: 32 random bytes, hex
+//! → {"hello": cn, "proto": PROTO}          cn: 32 random bytes, hex
 //! ← {"challenge": sn}
 //! → {"auth": HMAC(K, "worktrees-serve/v1/client\n" ‖ cn ‖ "\n" ‖ sn)}
-//! ← {"ok": true, "version", "proof": HMAC(K, "…/server\n" ‖ cn ‖ "\n" ‖ sn), "device": {…}}
+//! ← {"ok": true, "version", "proto", "proto_min", "proof": HMAC(K, "…/server\n" ‖ cn ‖ "\n" ‖ sn), "device": {…}}
 //! → {"id": 1, "cmd", "args"}               only after the proof verifies
 //! ← {"id": 1, "ok"} | {"id": 1, "err"}     channel and event frames on the way are skipped
 //! ```
@@ -21,6 +21,9 @@
 //! [`Session::step_up`] runs §2.5's exchange the same way the page will
 //! (`stepup_challenge`, a signature from the step-up key off the reactor,
 //! `stepup_prove`), for a device that holds a step-up key.
+//!
+//! The host's release need not be this client's: what has to agree is the
+//! protocol ([`crate::protocol`], iOS Q10), judged once the proof verifies.
 
 use std::time::Duration;
 
@@ -29,7 +32,8 @@ use serde_json::{json, Value};
 use sha2::Sha256;
 
 use crate::hosts::HostRecord;
-use crate::pipe::{self, Inbound, Pipe, PipeRx, PipeTx};
+use crate::pipe::{self, Inbound, Pipe, PipeRx, PipeTx, HOST_CLOSED};
+use crate::protocol::{self, HOST_PROTO_MIN, PROTO, UPDATE_APP};
 use crate::sign::{Keys, SignError};
 use crate::stepup::{self, StepUp};
 
@@ -64,8 +68,11 @@ pub enum CallError {
     Pipe(pipe::PipeError),
     /// The server did not complete handshake v1: nothing was sent to it.
     Handshake(String),
-    /// The server runs another version.
-    Version { theirs: String, ours: String },
+    /// The host speaks a protocol older than this client drives, or did not
+    /// say which: nothing was sent to it ([`protocol::update_host`]).
+    UpdateHost { host: String },
+    /// The host no longer serves this client's protocol ([`UPDATE_APP`]).
+    UpdateApp,
     /// The socket ended before the answer.
     Closed(String),
     TimedOut,
@@ -86,9 +93,8 @@ impl std::fmt::Display for CallError {
         match self {
             CallError::Pipe(e) => write!(f, "{e}"),
             CallError::Handshake(m) => write!(f, "the host did not complete the handshake ({m}); no request was sent"),
-            CallError::Version { theirs, ours } => {
-                write!(f, "version mismatch: the host runs v{theirs}, this client is v{ours}; refusing to drive it")
-            }
+            CallError::UpdateHost { host } => write!(f, "{}", protocol::update_host(host)),
+            CallError::UpdateApp => write!(f, "{UPDATE_APP}"),
             CallError::Closed(m) => write!(f, "{m}"),
             CallError::TimedOut => write!(f, "no answer in time"),
             CallError::Refused(v) => write!(f, "{}", crate::printable(&v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()))),
@@ -122,15 +128,17 @@ async fn next(rx: &mut PipeRx) -> Result<Value, CallError> {
     }
 }
 
-/// Open the socket with this pairing's `keys` and run handshake v1 over it.
-/// `version` is this client's; a server that proves itself but runs another
-/// is refused.
-pub async fn connect(rec: &HostRecord, keys: &Keys, version: &str, wait: Duration) -> Result<Session, CallError> {
-    handshake(pipe::open(rec, keys, wait).await.map_err(CallError::Pipe)?, version, wait).await
+/// Open the socket to `rec`'s host with this pairing's `keys` and run
+/// [`handshake`] over it.
+pub async fn connect(rec: &HostRecord, keys: &Keys, wait: Duration) -> Result<Session, CallError> {
+    handshake(pipe::open(rec, keys, wait).await.map_err(CallError::Pipe)?, &rec.name, wait).await
 }
 
-/// Handshake v1 over an open pipe, keyed with its session token.
-pub async fn handshake(p: Pipe, version: &str, wait: Duration) -> Result<Session, CallError> {
+/// Handshake v1 over an open pipe, keyed with its session token, then the
+/// protocol rule. `host` is the host's name, for the words that say to
+/// update it.
+pub async fn handshake(p: Pipe, host: &str, wait: Duration) -> Result<Session, CallError> {
+    let update_host = || CallError::UpdateHost { host: crate::printable(host) };
     let token = p.session_token().to_string();
     let stepup = p.stepup();
     let (mut tx, mut rx) = p.split();
@@ -138,19 +146,32 @@ pub async fn handshake(p: Pipe, version: &str, wait: Duration) -> Result<Session
         let mut b = [0u8; 32];
         getrandom::fill(&mut b).expect("the OS refused entropy");
         let cn = crate::tls::hex(&b);
-        tx.send(json!({ "hello": cn }).to_string()).await.map_err(CallError::Closed)?;
-        let c = next(&mut rx).await?;
+        tx.send(json!({ "hello": cn, "proto": PROTO }).to_string()).await.map_err(CallError::Closed)?;
+        // A host from before the protocol reads a hello with `proto` in it as
+        // a bad one and drops the socket, with nothing said. A connection
+        // lost at this moment looks the same; a retry is still the caller's.
+        let c = match next(&mut rx).await {
+            Err(CallError::Closed(_)) => return Err(update_host()),
+            r => r?,
+        };
         let sn = c.get("challenge").and_then(Value::as_str).filter(|s| is_hex32(s)).ok_or_else(|| CallError::Handshake(format!("no challenge: {c}")))?.to_string();
         let auth = crate::tls::hex(&mac(&token, CLIENT_LABEL, &cn, &sn).finalize().into_bytes());
         tx.send(json!({ "auth": auth }).to_string()).await.map_err(CallError::Closed)?;
-        let ok = next(&mut rx).await?;
+        // A host that will not serve this protocol says so, here, in words.
+        let ok = match next(&mut rx).await {
+            Err(CallError::Closed(why)) if why.strip_prefix(HOST_CLOSED) == Some(UPDATE_APP) => return Err(CallError::UpdateApp),
+            r => r?,
+        };
         let proof = ok.get("proof").and_then(Value::as_str).filter(|s| is_hex32(s)).ok_or_else(|| CallError::Handshake("no proof".into()))?;
         if ok.get("ok") != Some(&Value::Bool(true)) || mac(&token, SERVER_LABEL, &cn, &sn).verify_slice(&unhex(proof)).is_err() {
             return Err(CallError::Handshake("its proof does not verify".into()));
         }
-        let theirs = ok.get("version").and_then(Value::as_str).unwrap_or("?");
-        if theirs != version {
-            return Err(CallError::Version { theirs: crate::printable(theirs), ours: version.to_string() });
+        // Believed only now. A host that names no protocol predates it.
+        let number = |key| ok.get(key).and_then(Value::as_u64).and_then(|p| u32::try_from(p).ok());
+        let proto = number("proto").filter(|p| *p >= HOST_PROTO_MIN).ok_or_else(update_host)?;
+        let min = number("proto_min").filter(|p| *p <= proto).ok_or_else(update_host)?;
+        if PROTO < min {
+            return Err(CallError::UpdateApp);
         }
         Ok(ok)
     };
@@ -233,8 +254,8 @@ impl Session {
 }
 
 /// Connect, run one request, close.
-pub async fn call(rec: &HostRecord, keys: &Keys, version: &str, cmd: &str, args: Value, wait: Duration) -> Result<(Value, Value), CallError> {
-    let mut s = connect(rec, keys, version, wait).await?;
+pub async fn call(rec: &HostRecord, keys: &Keys, cmd: &str, args: Value, wait: Duration) -> Result<(Value, Value), CallError> {
+    let mut s = connect(rec, keys, wait).await?;
     let out = s.request(1, cmd, args, wait).await;
     let welcome = s.welcome.clone();
     s.close().await;

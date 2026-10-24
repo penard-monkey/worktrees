@@ -19,8 +19,9 @@ commit (§7.1). Phase 0 installs straight from Xcode, not through
 TestFlight (§6, §7.2). The shim's commands carry a connection number,
 `remote_send {conn, text}` and `remote_close {conn}`, and the frame channel
 carries `{frame}` and then `{closed}` (§6, Phase 1). And the version rule
-between the app and its host is an open question (§8, Q10). §2.4 and §9 say
-what is built now.*
+between the app and its host was an open question (§8, Q10); the user
+decided it the same day, and it is built: a protocol number, not the
+release (Phase 2 §4.5). §2.4 and §9 say what is built now.*
 
 **The MVP, in the user's words:** "An app that connects to my remote host
 and does basic operations like interact with sessions. No direct terminal
@@ -242,7 +243,7 @@ today:
 | S1 | **Slice 6: the remote listener** — `remote_enable`, the bind and peer rules, `netclass` (6a), `DeviceVerifier` on the listener, `admit_peer` after the handshake, the remote `Shared`, keepalive (ping 20 s, close at 60 s), the remote handshake and its `ok` frame (Phase 2 §4.5), the address code, mDNS advert (§4.1, §4.7, §10). Gap 17 closed on main by #546. | 6a on main (#547); the listener, its rule set, keepalive, the exporter-keyed handshake and the advert (macOS only) in #556 (open); the client's transport in #555 (open). Not built: a client that browses, and the Linux advert | Everything after Phase 0 |
 | S2 | **#544 merged** (devices, identity, pairing, revocation, expiry, step-up). | Merged (#544, `bb5a8f9`); #538, #556 and #555 are built on it | Phase 1 |
 | S3 | **A host surface that shows the QR.** #544 adds `pair_begin` and friends as console rows but changes nothing under `app/src` (its diff stat lists no frontend file). The cheapest is `worktrees serve pair`, a console client of the loopback socket that prints the QR in the terminal and the link as text; AGENTS.md notes "there is no CLI client", so it is the first one (copy `serve_bin.rs::connect`). Settings → Devices in the desktop app is the full version. | `worktrees serve pair` in #556 (open), with the QR in the terminal and the link; the app's version is lane `feat/p2-remote-host-ui` | Phase 1 |
-| S4 | **#550 merged** (the `listen` frame). The phone's door sends it after the proof. A serve older than #550 has no parser for the frame and answers it with `err: "bad request: no cmd"` (`wire::parse_request`), so the client sends it only when the `ok` frame's `version` is at or past the release that carries #550; projected events arrive either way. | Merged (#550) | Phase 2 |
+| S4 | **#550 merged** (the `listen` frame). The phone's door sends it after the proof. A serve older than #550 has no parser for the frame and answers it with `err: "bad request: no cmd"` (`wire::parse_request`). That case cannot arise over the remote door: every host with a remote listener has #550, and one too old to speak protocol 1 is refused at the handshake (Q10), so the phone sends the frame after every proof. | Merged (#550) | Phase 2 |
 | S5 | **#551 merged** (provenance, the 4-lane cap). `open_place` from a device must write `launched_by` first, or the lane's MCP server carries the host's reach (§7.5). | Merged (#551) | Phase 3 (F7) |
 | S6 | **New row `agent_prompt`** `[read, place(repo, slug)]`: capture the agent pane of the place's session, return `{harness, lines, options, fingerprint}` or `{waiting: false}`; `fingerprint` = SHA-256 of the captured modal; options parsed per harness from the modal's footer (`activity::codex_panes` for Codex; Claude's permission modal needs its own parser, fixture-tested against real captures as `tests/fixtures/codex-inline/` does). | Built on `feat/ios-agent-rows` (see "As built" below) | Phase 3 |
 | S7 | **New row `agent_answer`** `[answer, place(repo, slug)]` with `{choice, fingerprint}`: re-capture, compare, refuse with `err: "the prompt changed"` on mismatch, else send the keystroke(s) for `choice` to the pane. Audit kind reserved by §9.2. The 30 s lease (`agent_lease_take`) is optional UX and can follow. | Built on `feat/ios-agent-rows` (see "As built" below) | Phase 3 |
@@ -474,6 +475,15 @@ alone on the spike's Mac, §10).
 
 ## 6. Phases, with acceptance criteria
 
+The version rule (Q10) is built on the host, in `worktrees remote call`
+and in the desktop's remote door (Phase 2 §4.5). The phone gets it by
+reusing that door unchanged: `ipcremote.ts`'s pipe sets `remoteHost`, so
+`ipcws.ts` sends `PROTO` in its hello and judges the host's `proto` /
+`proto_min` once the proof verifies, in the desktop's words ("Update
+Worktrees on <host>", "Update the app"). The phone never compares release
+strings, and a row its host lacks is shown with `unsupportedFeature`
+("This host doesn't support <feature> yet").
+
 Each phase names its server-side dependency by PR or slice. A phase is done
 when its criteria are SEEN on a device, in the sense of
 `docs/adding-a-harness.md`: "core reports it" is not "the user sees it".
@@ -541,8 +551,8 @@ before Phase 1 starts (§1.3's fallback).
   `denied` reason, including "Someone else used this pairing code. Tap Deny
   on <host>." (§2.2).
 - Connect to the remote listener; run handshake v1, keyed by the TLS session
-  (Phase 2 §4.5); read the `ok` frame and verify `version` as the desktop
-  does (`ipcws.ts`); send the `listen` frame (#550); show the device's own
+  (Phase 2 §4.5); read the proven `ok` frame and apply Q10's `proto` /
+  `proto_min` rule (`ipcws.ts`); send `listen` (#550); show the device's own
   grant, scope and expiry on a device screen; `device_revoke` self.
 - `reconnect.ts` wired with starts disabled; the `visibility()` hook on
   `visibilitychange`.
@@ -827,7 +837,7 @@ Two loops, both needed:
 | Q7 | Commit `app-ios/gen/apple/` (Tauri's generated Xcode project) or regenerate it in CI? | Commit it minus `build/` and `xcuserdata/`, so signing settings and `ExportOptions.plist` are reviewed like code |
 | Q8 | Phase 0 before slice 6 lands (parallel lanes), or after? | In parallel: Phase 0 needs no serve, and its findings gate slice 5's client side, which the user already decided waits for the spike (§11.3) |
 | Q9 | Push notifications, later: serve calling APNs directly with a team key on the host (no third party), or a relay? | Direct, when the time comes; it keeps "nothing leaves the host but to Apple" |
-| Q10 | *Added 2026-10-23.* The version rule between the app and its host. Today a client refuses any host version but its own (`ipcws.ts`, D5; and `worktrees remote call` in #555), which suits two desktops on one build. An iOS app updates on Apple's schedule and a host on its own. Exact equality, a range, or a protocol version, and which side refuses? | None yet: it is an open design item in Phase 2's §10, and it must be written down before the app ships |
+| Q10 | *Added 2026-10-23.* The version rule between the app and its host. Today a client refuses any host version but its own (`ipcws.ts`, D5; and `worktrees remote call` in #555), which suits two desktops on one build. An iOS app updates on Apple's schedule and a host on its own. Exact equality, a range, or a protocol version, and which side refuses? | **Decided by the user and built (2026-10-23):** a protocol number for the wire and the handshake, separate from the release. `worktrees_remote::protocol` holds `PROTO`, the host's `PROTO_MIN` and the client's `HOST_PROTO_MIN`, all 1. The remote hello carries the client's `proto` and the proven `ok` the host's `proto` and `proto_min`. Each side refuses for its own reason: the client a host below `HOST_PROTO_MIN` ("Update Worktrees on <host>"), the host a client below `proto_min` ("Update the app"). Rows are detected, not versioned: a row the host lacks answers `unknown command: <cmd>`, and a UI says "This host doesn't support <feature> yet". The engine door keeps exact release equality. Phase 2 §4.5 has the details |
 
 ---
 
@@ -849,13 +859,13 @@ Two loops, both needed:
 | Slice 6, the client machine's half: `crates/worktrees-remote` (pairing, host records, the pinned pipe, `tls::PinnedServer`), `worktrees remote`, the desktop's remote door | #555 open (a draft), built on #544 |
 | The desktop's protocol client, door table, reconnect policy | main; `app/src/ipc.ts`, `ipcws.ts`, `reconnect.ts` |
 | The network spike's non-hardware half | `scripts/spike/p2-network/`, findings in the lane's cache dir |
+| The version rule (§8, Q10): `worktrees_remote::protocol`, `proto` in the remote hello and `proto` / `proto_min` in its `ok`, both refusals, and `unsupportedFeature`; the phone inherits it with the desktop's remote door | `feat/remote-proto-version` (Phase 2 §4.5) |
 
 | Not built | Needed by |
 |---|---|
 | A client that browses for a moved host, or adopts an address code (lane `feat/p2-remote-client-discovery`); the Linux advert | Phase 4 |
 | The host app's pairing sheet and device list (lane `feat/p2-remote-host-ui`); until then, `worktrees serve pair` | Phase 1 |
 | The phone app itself, in its own repository: crate, Swift key plugin, remote door, mobile UI | Phases 1–4 |
-| A written version rule between the app and its host (§8, Q10) | Before the app ships (Phase 4) |
 | `agent_prompt`, `agent_answer`, `agent_send`, `agent_turns` | Phases 2–3 |
 | The hardware measurements A1–A6 | Phase 0 |
 | Any iOS CI step | Phase 4 |

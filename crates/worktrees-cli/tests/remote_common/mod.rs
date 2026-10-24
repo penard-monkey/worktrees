@@ -119,9 +119,11 @@ pub fn hmac(key: &[u8], parts: &[&[u8]]) -> Vec<u8> {
 }
 
 /// Handshake v1 as the spec has it, on any stream: `key` is the HMAC key.
-pub fn v1<S: Read + Write>(ws: &mut WebSocket<S>, key: &str) -> Option<Value> {
+pub fn v1<S: Read + Write>(ws: &mut WebSocket<S>, key: &str, remote: bool) -> Option<Value> {
     let cn = hex(&[0x5a; 32]);
-    ws.send(Message::text(json!({ "hello": cn }).to_string())).ok()?;
+    let mut hello = json!({ "hello": cn });
+    if remote { hello["proto"] = json!(worktrees_remote::protocol::PROTO); }
+    ws.send(Message::text(hello.to_string())).ok()?;
     let ch: Value = serde_json::from_str(ws.read().ok()?.to_text().ok()?).ok()?;
     let sn = ch["challenge"].as_str()?.to_string();
     let proof = |label: &str| hex(&hmac(key.as_bytes(), &[label.as_bytes(), cn.as_bytes(), b"\n", sn.as_bytes()]));
@@ -150,7 +152,7 @@ pub fn console(sf: &Value) -> WebSocket<TcpStream> {
     let head = upgrade(&mut s, &format!("127.0.0.1:{port}"), Some("tauri://localhost")).expect("the console's 101");
     assert!(head.starts_with("HTTP/1.1 101 "), "{head}");
     let mut ws = WebSocket::from_raw_socket(s, Role::Client, None);
-    v1(&mut ws, sf["token"].as_str().unwrap()).expect("the console's handshake");
+    v1(&mut ws, sf["token"].as_str().unwrap(), false).expect("the console's handshake");
     ws
 }
 
@@ -251,7 +253,7 @@ pub fn session(at: SocketAddr, pin: &str, dev: &Device) -> Result<(WebSocket<Tls
         other => return Err(format!("no 101: {other:?}")),
     }
     let mut ws = WebSocket::from_raw_socket(s, Role::Client, None);
-    let ok = v1(&mut ws, &key).ok_or("handshake v1 refused")?;
+    let ok = v1(&mut ws, &key, true).ok_or("handshake v1 refused")?;
     Ok((ws, ok))
 }
 

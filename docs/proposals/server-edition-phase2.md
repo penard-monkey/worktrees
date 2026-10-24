@@ -1657,11 +1657,10 @@ crate's tests and serve's end-to-end pairing tests passed. Not measured: a
 second Mac, macOS's Local Network privacy on the client, and the host's
 Application Firewall, which was off on the Mac measured.
 
-Two follow-ups stay open in #555. A remote window still holds
-`opener:allow-open-path` in its capability: `onhost.ts` gates every call
-today, and a capability split would make that structural. And the client
-refuses any host version but its own (`ipcws.ts`, and `worktrees remote
-call`), which §10 lists as an open design item.
+A follow-up stays open in #555: a remote window still holds
+`opener:allow-open-path` in its capability. `onhost.ts` gates every call
+today; a capability split would make that structural. Remote release
+compatibility is now the protocol rule in §4.5 (iOS Q10).
 
 ### 4.5 The two rule sets, side by side
 
@@ -1690,8 +1689,9 @@ not serve.json's token. It is the lowercase hex of 32 bytes of the TLS
 exporter (RFC 8446 §7.5) under the label `EXPORTER-worktrees-remote-v1`,
 with no context, which both ends compute. The `ok` frame also carries
 `device: {id, principal, name, caps, projects, expiry, stepup_required}`.
-The client checks `version` as D5 does, and shows its own capabilities,
-scope and expiry.
+The client shows its own capabilities, scope and expiry. The engine door
+keeps D5's exact release equality; the remote door uses the protocol rule
+below.
 
 *This departs from what this section first said,* which was a first frame
 `{ok: true, version, device}` sent at once, with no proof, because the pin
@@ -1712,6 +1712,59 @@ refuses an `ok` that comes with no proof. Two reasons decided it:
 
 The HMAC adds no security over pinned mutual TLS and claims none. It costs
 one round trip.
+
+**Remote protocol compatibility (iOS MVP Q10, decided by the user and
+built 2026-10-23).** Over the remote door the release `version` is
+informational. What has to agree is `PROTO`, an integer for the wire and
+handshake contract, bumped only for a breaking change to either. A new row
+never bumps it. `worktrees_remote::protocol` is the one copy: `PROTO`, the
+host's `PROTO_MIN` (the oldest client it serves), the client's
+`HOST_PROTO_MIN` (the oldest host it drives, because an older one lacks a
+security property it relies on), all 1 to start, and the words. serve and
+`worktrees remote call` read it, and the iOS app gets it through its git
+pin. `ipcws.ts` mirrors every number and word, and `transport-check.mjs`
+holds them equal.
+
+- **The hello.** Remote frame 1 is `{hello: cn, proto: PROTO}`. A missing
+  `proto` is 0, a client from before the protocol. Anything else malformed
+  (a string, a negative, more than 32 bits, an extra key) is refused in
+  silence, like every bad hello. Loopback's hello stays `{hello: cn}`.
+- **The host refuses a client below `PROTO_MIN`**, but only after the
+  client's proof verifies. It sends a WebSocket close, 1008, reason
+  **"Update the app"**, then no `ok` and no service. This is the one refusal
+  serve SAYS, for two reasons. The peer has already shown the device key to
+  TLS and the session key to the proof, so nothing reaches anyone unproven:
+  a bad proof is still answered with silence. And a close reason is what a
+  pre-protocol client already shows (`worktrees remote call` prints the
+  pipe's words for it, and the app appends them), while a new error frame
+  in place of `ok` would read to that client as an impostor. The client
+  cannot check the close with an HMAC, but the pinned TLS session says
+  who sent it.
+- **The client refuses a host it cannot drive.** The remote `ok` adds
+  `proto` and `proto_min` beside `version`, `proof` and `device`. The
+  client reads them only after the proof verifies, so an unproven claim is
+  never believed. It refuses a host that names neither, or whose `proto` is
+  below `HOST_PROTO_MIN`, or whose fields are malformed: **"Update Worktrees
+  on <host>"**. It refuses a host whose `proto_min` is above its own
+  `PROTO`: **"Update the app"**. Either way it sends no request and no
+  `listen` frame. A host from before the protocol never gets as far as an
+  `ok`: it reads the extended hello as a bad one and drops the socket
+  without a word. So a close at the hello also says "Update Worktrees on
+  <host>". A connection lost at that exact moment looks the same, and the
+  door's retries keep running.
+- **No ceiling.** A newer host keeps serving older clients for as long as
+  its `proto_min` allows. **Rows are detected, not versioned:** a row the
+  host lacks answers its usual `err: "unknown command: <cmd>"`, which
+  reaches the caller unchanged. `unsupportedFeature` (`ipcws.ts`, and
+  `protocol::unsupported_feature`) gives a UI the words **"This host
+  doesn't support <feature> yet"**.
+
+The HMAC labels and nonce proofs of handshake v1 are unchanged, and the
+shim is still a pipe. The witnesses: serve's
+`a_proven_client_below_the_protocol_floor_is_told_to_update_and_never_served`
+(over TLS, a client with no `proto`, 0, 1 and 2, and one with a bad
+proof), worktrees-remote's two protocol tests in `tests/pipe.rs`, and the
+`(proto)` cases in `transport-check.mjs`.
 
 The upgrade's rules changed with it. **A remote upgrade carries no
 `Origin`, and the listener refuses one that does.** On loopback every client
@@ -3276,12 +3329,10 @@ merged):
   rediscover by address code alone.
 - **D1 and D2** (above): until they run, the bind-rule witness's steps 2, 4
   and 5 have no CI home on either OS.
-- **A version policy between a client and its host.** Today a client
-  refuses any host version but its own: `ipcws.ts` does (D5), and so does
-  `worktrees remote call`. That is fine for two desktops on one build. An
-  iOS app ships on Apple's schedule and a host updates on its own, so the
-  exact rule, equality or a range and who refuses whom, has to be written
-  down before the iOS app ships (#555's follow-up).
+- ~~**A version policy between a client and its host.**~~ Decided by the
+  user and built (iOS MVP Q10, 2026-10-23): over the remote door, a
+  protocol number separate from the release, refused by each side for its
+  own reason; the engine door keeps exact equality (§4.5).
 - **The host's remote-access UI** (lane `feat/p2-remote-host-ui`, on #556):
   Settings → Remote access, the pairing sheet with the QR and the
   comparison code, the device list, and the alerts as a notice. Today
