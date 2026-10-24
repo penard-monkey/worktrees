@@ -288,7 +288,15 @@ async fn readdress(store: &HostStore, sel: &str, code: &str, wait: Duration) -> 
             return 2;
         }
     };
-    match reach::adopt_code(store, &rec, &code, &reach::Env::platform(), wait).await {
+    // A code for another host is refused before the key file is read.
+    let keys = match reach::check_code(&rec, &code).and_then(|()| store.key_for(&rec)) {
+        Ok(k) => Keys::from(k),
+        Err(e) => {
+            eprintln!("worktrees remote readdress: {}", worktrees_remote::printable(&e));
+            return 1;
+        }
+    };
+    match reach::adopt_code(store, &rec, &keys, &code, &reach::Env::platform(), wait).await {
         Ok(moved) => {
             println!("{} is now at {} (it was at {}): a connection there proved the key kept at pairing.", moved.name, moved.addr, rec.addr);
             0

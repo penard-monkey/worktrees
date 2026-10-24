@@ -1,7 +1,8 @@
 # The iOS signer contract
 
-What `worktrees-remote` asks of the iOS app's two Secure Enclave keys, and
-what the Swift plugin has to do to answer. The iOS repository depends on this
+What `worktrees-remote` asks of the iOS app's two Secure Enclave keys, what
+the Swift plugin has to do to answer, and how the app keeps the hosts it
+pairs with. The iOS repository depends on this
 crate by git, pinned to a commit, so this file and `src/sign.rs` are a
 contract: a change to either is a change to both repositories.
 
@@ -82,17 +83,21 @@ turns up on a cancel, it joins the list there.
 
 ```rust
 use std::sync::Arc;
-use worktrees_remote::{pair, pipe, sign::Keys, stepup};
+use worktrees_remote::{hosts::HostStore, pair, reach, sign::Keys, stepup};
 
 let keys = Keys { device: Arc::new(device), stepup: Some(Arc::new(stepup)) };
+let store = HostStore::new(&app_support_dir); // "Keeping the hosts", below
 
-// Pairing: nothing is kept by the crate, and the app keeps the record in the
-// Keychain beside its key tags.
+// Pairing: the crate keeps no key. The app has its keys already, and keeps
+// the record second.
 let rec = pair::pair_keys(link, name, pair::Platform::Ios, &keys, now, &mut on_event).await?;
+store.add_record(&rec)?;
 
-// A connection: the page gets the session token, and the shim keeps the
-// step-up handle with the connection.
-let p = pipe::open(&rec, &keys, wait).await?;
+// A connection: at the kept address, or where the host moved, and the record
+// follows. The page gets the session token, and the shim keeps the step-up
+// handle with the connection.
+let reached = reach::open(&store, &rec, &keys, &env, wait, &mut log).await?;
+let p = reached.pipe;
 let token = p.session_token().to_string();
 let su = p.stepup().expect("a pairing with a step-up key has one");
 let (tx, rx) = p.split();
@@ -109,6 +114,60 @@ match su.prove(&challenge).await {
 
 For an iPad, pass `Platform::Ipados`. `Platform::this()` cannot tell the two
 apart, because one target builds for both.
+
+## Keeping the hosts
+
+The keys stay in the Keychain. The records go in this crate's file store,
+`hosts::HostStore`, over a directory the app owns. It is the file a desktop
+keeps (`remote-hosts.json`, version 1, written under a lock and replaced
+atomically), so `reach` can move a record when its host moves, and every
+check made on reading the file back applies on the phone too. Do not write
+the file from Swift: nothing but `HostStore` writes it.
+
+- **Keep.** `store.add_record(&rec)` keeps the record that `pair_keys`
+  returned, and only the record. It writes no key file, and the record says
+  `"key": "external"`. Keep the keys first and the record second, as a
+  desktop does, so the store never holds a record whose keys were not kept.
+  `rec.id` is this device's name for the pairing, fixed for its life and
+  chosen when the host answers. The app ties its two key tags to it; how is
+  the app's choice. `add_record` is an upsert by `rec.id`, and the most hosts
+  a device keeps is `hosts::MAX_HOSTS`.
+- **Connect.** `reach::open(&store, &rec, &keys, &env, wait, &mut log)`
+  tries the kept address. If nothing answers there, or another key does, it
+  looks on the LAN and keeps a new address only once a pinned open to it has
+  succeeded (`HostStore::readdress`, under the store's lock). The record
+  stays `"key": "external"`.
+- **An address code.** `reach::parse_code(text)` reads it, then
+  `reach::adopt_code(&store, &rec, &keys, &code, &env, wait)` follows it. A
+  code for another host's pin is refused before `keys` is asked anything,
+  even its public half, and before anything is dialled.
+- **Forget.** `store.forget(&rec.id)` removes the record, and the choice if
+  it was chosen. For a record kept by `add_record` it deletes nothing, so a
+  file someone put where a key file would be is left alone. The app then
+  deletes its two keys itself.
+- `store.key_for(&rec)` refuses a record kept by `add_record`. Nothing in the
+  crate reads a key for it.
+
+**Where.** Use a directory in Application Support. Caches can be purged by
+the system, and that would lose every pairing. Each write makes a new file
+and renames it over the old one, so a data protection class set on the
+file alone is lost at the next write. Set `NSFileProtectionComplete` as the
+app's default data protection (the Data Protection entitlement), which every
+new file gets. Under that class the file cannot be read while the phone is
+locked, so `list` and `get` fail then with the system's error. The device key
+cannot sign then either (`kSecAttrAccessibleWhenUnlockedThisDeviceOnly`), so
+nothing connects while the phone is locked anyway. If a move cannot be
+written, for any reason, `reach::open` still connects at the new address, and
+`log` says that the record was not moved.
+
+**Finding a moved host on the LAN needs a browser.** `reach::Env::platform()`
+has none on iOS yet: mDNS browsing is built for macOS only. With it,
+`reach::open` tries the kept address and then says it could not look. The
+app can put its own `discover::Browser` in `reach::Env`: Bonjour for
+`discover::SERVICE` (`_worktrees._tcp`) through the Swift plugin, handing
+over each resolved advert as a `discover::Sighting`. Every sighting is then
+judged by `discover::candidate` before anything is dialled, as on a Mac.
+Without a browser, the address code is the way back.
 
 ## Costs, and what Phase 0 still has to prove
 

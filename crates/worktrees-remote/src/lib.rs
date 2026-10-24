@@ -26,11 +26,18 @@
 //! plugin meets: key attributes, signature format, which key signs what, and
 //! how a cancelled Face ID is reported.
 //!
+//! The hosts a device pairs with are kept by [`hosts::HostStore`]: a
+//! desktop's with its key file ([`hosts::HostStore::add`]), the iOS app's as
+//! the record alone ([`hosts::HostStore::add_record`]), since its keys have no
+//! bytes to save. [`reach`] opens either kind and moves its record when the
+//! host moves; nothing on that path reads a key file.
+//!
 //! ```no_run
 //! use std::sync::Arc;
 //! use std::time::Duration;
+//! use worktrees_remote::hosts::HostStore;
 //! use worktrees_remote::sign::{p256_spki, DeviceSigner, Keys, SignError};
-//! use worktrees_remote::{pair, pipe, stepup};
+//! use worktrees_remote::{pair, reach, stepup};
 //!
 //! /// A Secure Enclave key, by its keychain tag.
 //! struct Enclave {
@@ -51,16 +58,21 @@
 //! }
 //! # fn swift_sign(_: &str, _: &[u8]) -> Result<Vec<u8>, (String, i64, String)> { Err(("com.apple.LocalAuthentication".into(), -2, "Canceled by user.".into())) }
 //!
-//! # async fn shim(link: &str, device_point: &[u8], stepup_point: &[u8], challenge_b64: &str, now: i64) -> Result<(), Box<dyn std::error::Error>> {
+//! # async fn shim(app_support: &std::path::Path, link: &str, device_point: &[u8], stepup_point: &[u8], challenge_b64: &str, now: i64) -> Result<(), Box<dyn std::error::Error>> {
 //! let keys = Keys {
 //!     device: Arc::new(Enclave { tag: "device", spki: p256_spki(device_point).ok_or("not a P-256 point")? }),
 //!     stepup: Some(Arc::new(Enclave { tag: "stepup", spki: p256_spki(stepup_point).ok_or("not a P-256 point")? })),
 //! };
-//! // Pair: the crate keeps nothing; the app keeps the record beside its keys.
+//! // Pair: the crate keeps no key. The app's store keeps the record alone.
+//! let store = HostStore::new(app_support);
 //! let rec = pair::pair_keys(link, "Bret's iPhone", pair::Platform::Ios, &keys, now, &mut |_event| {}).await?;
-//! // Connect: the page runs the protocol over the pipe; the shim keeps the step-up.
-//! let p = pipe::open(&rec, &keys, Duration::from_secs(10)).await?;
-//! let stepup = p.stepup().expect("a pairing with a step-up key has one");
+//! store.add_record(&rec)?;
+//! // Connect, where the host is now: the page runs the protocol over the
+//! // pipe; the shim keeps the step-up.
+//! let reached = reach::open(&store, &rec, &keys, &reach::Env::platform(), Duration::from_secs(10), &mut |_: &str| {})
+//!     .await
+//!     .map_err(|e| e.to_string())?;
+//! let stepup = reached.pipe.stepup().expect("a pairing with a step-up key has one");
 //! // A step-up, when the page has a challenge: Face ID shows, off the reactor.
 //! let challenge = stepup::parse_challenge(challenge_b64).ok_or("not a challenge")?;
 //! match stepup.prove(&challenge).await {

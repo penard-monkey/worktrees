@@ -1,7 +1,8 @@
 //! The Secure Enclave's stand-in for the integration tests: a software P-256
 //! key that exposes [`DeviceSigner`] and nothing else — no bytes, no `Debug` —
 //! and counts what it is asked, so a test can see a key was ASKED to sign
-//! rather than read. Shared by `pipe.rs` and `reach.rs`.
+//! rather than read, or was not asked anything at all. Shared by `pipe.rs`
+//! and `reach.rs`.
 #![allow(dead_code)]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -18,6 +19,7 @@ pub type How = Box<dyn Fn(usize, Vec<u8>) -> Result<Vec<u8>, SignError> + Send +
 pub struct Opaque {
     pair: ring::signature::EcdsaKeyPair,
     asked: AtomicUsize,
+    looked: AtomicUsize,
     how: How,
 }
 
@@ -31,11 +33,18 @@ impl Opaque {
         let rng = ring::rand::SystemRandom::new();
         let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &rng).unwrap();
         let pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8.as_ref(), &rng).unwrap();
-        Arc::new(Opaque { pair, asked: AtomicUsize::new(0), how })
+        Arc::new(Opaque { pair, asked: AtomicUsize::new(0), looked: AtomicUsize::new(0), how })
     }
 
+    /// Signatures asked for.
     pub fn asked(&self) -> usize {
         self.asked.load(Ordering::SeqCst)
+    }
+
+    /// Everything asked: signatures and reads of the public half ([`Opaque::pin`]
+    /// is one).
+    pub fn touched(&self) -> usize {
+        self.asked() + self.looked.load(Ordering::SeqCst)
     }
 
     pub fn pin(&self) -> String {
@@ -46,6 +55,7 @@ impl Opaque {
 impl DeviceSigner for Opaque {
     fn spki_der(&self) -> Vec<u8> {
         use ring::signature::KeyPair;
+        self.looked.fetch_add(1, Ordering::SeqCst);
         sign::p256_spki(self.pair.public_key().as_ref()).unwrap()
     }
 

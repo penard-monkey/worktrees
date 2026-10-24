@@ -324,8 +324,9 @@ pub async fn pair_with(
 
 /// Pair with the host `link` names, presenting `keys` — signers this crate
 /// asks and never reads: the iOS app's Secure Enclave keys — and answer the
-/// host's record. Nothing is kept: the caller keeps the record beside its
-/// keys, and connects with both later (`pipe::open`).
+/// host's record. Nothing is kept: the caller, which holds the keys, keeps
+/// the record with [`HostStore::add_record`] and connects with both later
+/// (`reach::open`).
 pub async fn pair_keys(link: &str, name: &str, platform: Platform, keys: &Keys, now: i64, on_event: &mut (dyn FnMut(PairEvent) + Send)) -> Result<HostRecord, PairError> {
     pair_keys_with(link, name, platform, keys, now, &pairuri::dial_rule, Waits::default(), on_event).await
 }

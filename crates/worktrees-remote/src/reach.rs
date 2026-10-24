@@ -248,21 +248,30 @@ pub fn parse_code(code: &str) -> Result<AddrCode, String> {
     worktrees_core::netclass::parse_addr_code(code.trim()).map_err(|e| format!("not an address code: {e}"))
 }
 
-/// Follow an address code (§4.1: `worktrees-addr:v1?addr=…&pin=…`) for
-/// `rec`'s host: a code for another pin is refused before anything is
-/// dialled — or before this device's key is read — and the address is kept
-/// only once a pinned open to it succeeds. The old address stays until then,
-/// so a forged code costs one failed attempt and nothing else.
-pub async fn adopt_code(store: &HostStore, rec: &HostRecord, c: &AddrCode, env: &Env, wait: Duration) -> Result<HostRecord, String> {
+/// Refuse an address code for another host: its pin is not `rec`'s. The
+/// first thing [`adopt_code`] does; a caller that still has to load its keys
+/// (a desktop's key FILE) calls it before that, so a forged code reads no key.
+pub fn check_code(rec: &HostRecord, c: &AddrCode) -> Result<(), String> {
     if crate::tls::hex(&c.pin) != rec.pin {
         return Err(format!("that address code is for another host: its pin is not {}'s. Nothing was dialled.", rec.name));
     }
-    let keys = Keys::from(store.key_for(rec)?);
+    Ok(())
+}
+
+/// Follow an address code (§4.1: `worktrees-addr:v1?addr=…&pin=…`) for
+/// `rec`'s host, presenting `keys`: a code for another pin is refused
+/// ([`check_code`]) before anything is dialled and before `keys` is asked
+/// anything, and the address is kept only once a pinned open to it succeeds.
+/// The old address stays until then, so a forged code costs one failed
+/// attempt and nothing else. Nothing here reads a key file: a host kept with
+/// `HostStore::add_record` follows a code as a desktop's does.
+pub async fn adopt_code(store: &HostStore, rec: &HostRecord, keys: &Keys, c: &AddrCode, env: &Env, wait: Duration) -> Result<HostRecord, String> {
+    check_code(rec, c)?;
     if c.addr.needs_scope() {
         return Err(format!("{} is link-local, which this client cannot dial yet; nothing was dialled", c.addr.ip));
     }
     let at = SocketAddr::new(c.addr.ip, c.addr.port);
-    let p = pipe::open_at((env.route)(at), &rec.pin, &keys, wait)
+    let p = pipe::open_at((env.route)(at), &rec.pin, keys, wait)
         .await
         .map_err(|e| format!("{at}: {e}. {}'s address is unchanged ({}).", rec.name, rec.addr))?;
     let (tx, _rx) = p.split();
