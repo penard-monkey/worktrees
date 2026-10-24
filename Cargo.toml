@@ -7,7 +7,7 @@ resolver = "2"
 members = ["crates/worktrees-core", "crates/worktrees-api", "crates/worktrees-cli", "crates/worktrees-remote", "app/src-tauri"]
 
 [workspace.package]
-version = "0.43.1"
+version = "0.44.0"
 edition = "2021"
 license = "MIT"
 
