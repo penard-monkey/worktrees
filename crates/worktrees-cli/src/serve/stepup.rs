@@ -41,20 +41,11 @@ pub const CHALLENGE_FOR: Duration = Duration::from_secs(120);
 /// `err` for a drive-class act from a device whose step-up is due.
 pub const ERR_STEPUP: &str = "step-up required";
 
-/// The DER prefix of every P-256 SubjectPublicKeyInfo with an uncompressed
-/// point: SEQUENCE { SEQUENCE { id-ecPublicKey, prime256v1 }, BIT STRING 0x00 },
-/// then 65 bytes, `04 ‖ X ‖ Y`.
-const P256_SPKI_PREFIX: [u8; 26] = [
-    0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07,
-    0x03, 0x42, 0x00,
-];
-
-/// The uncompressed point of a P-256 SubjectPublicKeyInfo, or `None` for any
-/// other key or any other encoding of one.
-pub fn p256_point(spki: &[u8]) -> Option<&[u8]> {
-    let point = spki.strip_prefix(&P256_SPKI_PREFIX[..])?;
-    (point.len() == 65 && point[0] == 0x04).then_some(point)
-}
+// What a P-256 key looks like is the device's rule as well: one
+// implementation, in the transport crate a device signs through.
+#[cfg(test)]
+use worktrees_remote::sign::P256_SPKI_PREFIX;
+pub use worktrees_remote::sign::p256_point;
 
 #[derive(Default)]
 struct Inner {

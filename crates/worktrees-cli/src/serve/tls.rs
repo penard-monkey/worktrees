@@ -223,9 +223,65 @@ pub(crate) mod testkit {
         device_key_with(&rcgen::PKCS_ECDSA_P256_SHA256)
     }
 
+    impl DeviceKey {
+        /// The key as rustls presents it, from its bytes: a host's test may
+        /// hold keys no device would (a P-384 one), so this is not the
+        /// device's path (`worktrees_remote::tls::certified_key`, a signer).
+        pub fn certified(&self) -> Arc<rustls::sign::CertifiedKey> {
+            Arc::new(rustls::sign::CertifiedKey::from_der(vec![self.cert.clone()], self.key.clone_key(), &provider()).unwrap())
+        }
+    }
+
+    /// What an [`Opaque`] key answers its `n`th request with (from 0), given
+    /// the honest signature.
+    pub type How = Box<dyn Fn(usize, Vec<u8>) -> Result<Vec<u8>, worktrees_remote::sign::SignError> + Send + Sync>;
+
+    /// The Secure Enclave's stand-in, for the device's real client: a
+    /// software P-256 key behind `DeviceSigner` and nothing else — no bytes,
+    /// no `Debug` — counting what it was asked.
+    pub struct Opaque {
+        pair: ring::signature::EcdsaKeyPair,
+        asked: std::sync::atomic::AtomicUsize,
+        how: How,
+    }
+
+    impl Opaque {
+        pub fn new() -> Arc<Opaque> {
+            Opaque::answering(Box::new(|_, sig| Ok(sig)))
+        }
+
+        pub fn answering(how: How) -> Arc<Opaque> {
+            use ring::signature::{EcdsaKeyPair, ECDSA_P256_SHA256_ASN1_SIGNING};
+            let rng = ring::rand::SystemRandom::new();
+            let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &rng).unwrap();
+            let pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8.as_ref(), &rng).unwrap();
+            Arc::new(Opaque { pair, asked: Default::default(), how })
+        }
+
+        pub fn asked(&self) -> usize {
+            self.asked.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        pub fn pin(&self) -> String {
+            pin_of(&worktrees_remote::sign::DeviceSigner::spki_der(self))
+        }
+    }
+
+    impl worktrees_remote::sign::DeviceSigner for Opaque {
+        fn spki_der(&self) -> Vec<u8> {
+            use ring::signature::KeyPair;
+            worktrees_remote::sign::p256_spki(self.pair.public_key().as_ref()).unwrap()
+        }
+
+        fn sign(&self, message: &[u8]) -> Result<Vec<u8>, worktrees_remote::sign::SignError> {
+            let n = self.asked.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            (self.how)(n, self.pair.sign(&ring::rand::SystemRandom::new(), message).unwrap().as_ref().to_vec())
+        }
+    }
+
     /// Dial `addr` as a device with `key`, pinning `pin`.
     pub async fn dial(addr: std::net::SocketAddr, pin: &str, key: &DeviceKey) -> std::io::Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>> {
-        let cfg = client_config(pin, key.cert.clone(), key.key.clone_key()).unwrap();
+        let cfg = client_config(pin, key.certified()).unwrap();
         let tcp = tokio::net::TcpStream::connect(addr).await?;
         tokio_rustls::TlsConnector::from(cfg).connect(ServerName::IpAddress(addr.ip().into()), tcp).await
     }
@@ -485,7 +541,7 @@ mod tests {
         assert!(!s.session_storage.can_cache(), "no session cache");
         assert!(!s.ticketer.enabled(), "no tickets");
         let k = device_key();
-        let c = client_config(id.pin(), k.cert.clone(), k.key.clone_key()).unwrap();
+        let c = client_config(id.pin(), k.certified()).unwrap();
         assert!(!c.enable_sni && !c.enable_early_data);
         assert_eq!(format!("{:?}", c.resumption), format!("{:?}", rustls::client::Resumption::disabled()));
         let _ = std::fs::remove_dir_all(&dir);

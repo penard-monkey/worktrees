@@ -53,6 +53,7 @@ use worktrees_remote::hosts::{HostRecord, HostStore, HostSummary};
 use worktrees_remote::pair::{self, PairEvent};
 use worktrees_remote::pipe::{Inbound, PipeTx};
 use worktrees_remote::reach::{self, ReachError};
+use worktrees_remote::sign::Keys;
 
 /// The settings blob of a window that drives a remote host.
 pub const REMOTE_UI_STATE: &str = "remote-ui-state.json";
@@ -133,7 +134,7 @@ impl Remote {
         // person at it reads app.log for the rest (the host's serve.log is on
         // the host).
         let mut said = |m: &str| crate::applog("info", &format!("remote: {}", worktrees_remote::printable(m)));
-        let reached = reach::open(&self.store, &rec, &key, &reach::Env::platform(), CONNECT_WAIT, &mut said).await.map_err(|e| {
+        let reached = reach::open(&self.store, &rec, &Keys::from(key), &reach::Env::platform(), CONNECT_WAIT, &mut said).await.map_err(|e| {
             let m = match &e {
                 ReachError::NotFound { .. } => format!("{} Then paste it in Settings → Hosts → Paste a new address. {}", e.headline(), e.details()).trim_end().to_string(),
                 e => format!("{} ({}): {e}", rec.name, rec.addr),

@@ -17,6 +17,10 @@
 //! nothing more: they are there so the remote socket speaks the loopback
 //! protocol byte for byte, and the page's `ipcws.ts` is its one client.
 //! Nothing is sent before the server's proof verifies all the same.
+//!
+//! [`Session::step_up`] runs §2.5's exchange the same way the page will
+//! (`stepup_challenge`, a signature from the step-up key off the reactor,
+//! `stepup_prove`), for a device that holds a step-up key.
 
 use std::time::Duration;
 
@@ -25,8 +29,9 @@ use serde_json::{json, Value};
 use sha2::Sha256;
 
 use crate::hosts::HostRecord;
-use crate::key::DeviceKey;
 use crate::pipe::{self, Inbound, Pipe, PipeRx, PipeTx};
+use crate::sign::{Keys, SignError};
+use crate::stepup::{self, StepUp};
 
 /// Handshake v1's labels (serve's `policy::CLIENT_LABEL` / `SERVER_LABEL`; a
 /// test in worktrees-cli holds them equal).
@@ -66,6 +71,14 @@ pub enum CallError {
     TimedOut,
     /// The command's own refusal, exactly as serve sent it.
     Refused(Value),
+    /// The host answered something this client does not read.
+    Protocol(String),
+    /// A step-up was asked of a device with no step-up key (a desktop).
+    NoStepUpKey,
+    /// The step-up key did not sign — [`SignError::Cancelled`] when the
+    /// person dismissed Face ID or the passcode. Nothing was sent: the
+    /// challenge lapses on its own and the connection is as it was.
+    StepUp(SignError),
 }
 
 impl std::fmt::Display for CallError {
@@ -79,9 +92,17 @@ impl std::fmt::Display for CallError {
             CallError::Closed(m) => write!(f, "{m}"),
             CallError::TimedOut => write!(f, "no answer in time"),
             CallError::Refused(v) => write!(f, "{}", crate::printable(&v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()))),
+            CallError::Protocol(m) => write!(f, "the host answered something this client does not read: {m}"),
+            CallError::NoStepUpKey => write!(f, "this device holds no step-up key, so it cannot confirm a drive-class act"),
+            CallError::StepUp(SignError::Cancelled) => {
+                write!(f, "the step-up was cancelled on this device: nothing was sent, and the act was not done")
+            }
+            CallError::StepUp(e) => write!(f, "the step-up key did not sign: {e}"),
         }
     }
 }
+
+impl std::error::Error for CallError {}
 
 /// A socket that has passed handshake v1.
 pub struct Session {
@@ -90,6 +111,8 @@ pub struct Session {
     /// The server's `ok` frame: its version and, on the remote listener, the
     /// device's own record (`device`).
     pub welcome: Value,
+    stepup: Option<StepUp>,
+    next_id: u64,
 }
 
 async fn next(rx: &mut PipeRx) -> Result<Value, CallError> {
@@ -99,15 +122,17 @@ async fn next(rx: &mut PipeRx) -> Result<Value, CallError> {
     }
 }
 
-/// Open the socket and run handshake v1 over it. `version` is this client's;
-/// a server that proves itself but runs another is refused.
-pub async fn connect(rec: &HostRecord, key: &DeviceKey, version: &str, wait: Duration) -> Result<Session, CallError> {
-    handshake(pipe::open(rec, key, wait).await.map_err(CallError::Pipe)?, version, wait).await
+/// Open the socket with this pairing's `keys` and run handshake v1 over it.
+/// `version` is this client's; a server that proves itself but runs another
+/// is refused.
+pub async fn connect(rec: &HostRecord, keys: &Keys, version: &str, wait: Duration) -> Result<Session, CallError> {
+    handshake(pipe::open(rec, keys, wait).await.map_err(CallError::Pipe)?, version, wait).await
 }
 
 /// Handshake v1 over an open pipe, keyed with its session token.
 pub async fn handshake(p: Pipe, version: &str, wait: Duration) -> Result<Session, CallError> {
     let token = p.session_token().to_string();
+    let stepup = p.stepup();
     let (mut tx, mut rx) = p.split();
     let shake = async {
         let mut b = [0u8; 32];
@@ -130,7 +155,7 @@ pub async fn handshake(p: Pipe, version: &str, wait: Duration) -> Result<Session
         Ok(ok)
     };
     let welcome = tokio::time::timeout(wait, shake).await.map_err(|_| CallError::TimedOut)??;
-    Ok(Session { tx, rx, welcome })
+    Ok(Session { tx, rx, welcome, stepup, next_id: 1 << 32 })
 }
 
 impl Session {
@@ -176,14 +201,40 @@ impl Session {
         tokio::time::timeout(wait, read).await.ok()
     }
 
+    /// §2.5's step-up on this connection: a challenge, the step-up key's
+    /// signature over it and this session's exporter — asked off the reactor,
+    /// for as long as the challenge lives, since Face ID waits for a person —
+    /// and the proof. On success the step-up holds for the returned time.
+    pub async fn step_up(&mut self, wait: Duration) -> Result<Duration, CallError> {
+        let su = self.stepup.clone().ok_or(CallError::NoStepUpKey)?;
+        let id = self.fresh_id();
+        let c = self.request(id, "stepup_challenge", json!({}), wait).await?;
+        let challenge = c.get("challenge").and_then(Value::as_str).and_then(stepup::parse_challenge).ok_or_else(|| CallError::Protocol(format!("a step-up challenge: {c}")))?;
+        let lives = c.get("valid_secs").and_then(Value::as_u64).map(Duration::from_secs).ok_or_else(|| CallError::Protocol(format!("a step-up challenge with no lifetime: {c}")))?;
+        let proof = match tokio::time::timeout(lives, su.prove(&challenge)).await {
+            Ok(p) => p.map_err(CallError::StepUp)?,
+            Err(_) => return Err(CallError::StepUp(SignError::Failed(format!("no signature within the challenge's {}s", lives.as_secs())))),
+        };
+        let id = self.fresh_id();
+        let ok = self.request(id, "stepup_prove", proof.args(), wait).await?;
+        ok.get("valid_secs").and_then(Value::as_u64).map(Duration::from_secs).ok_or_else(|| CallError::Protocol(format!("a step-up answer: {ok}")))
+    }
+
+    /// An id for a request this session makes on its own, above any a caller
+    /// numbers by hand.
+    fn fresh_id(&mut self) -> u64 {
+        self.next_id += 1;
+        self.next_id
+    }
+
     pub async fn close(self) {
         self.tx.close().await;
     }
 }
 
 /// Connect, run one request, close.
-pub async fn call(rec: &HostRecord, key: &DeviceKey, version: &str, cmd: &str, args: Value, wait: Duration) -> Result<(Value, Value), CallError> {
-    let mut s = connect(rec, key, version, wait).await?;
+pub async fn call(rec: &HostRecord, keys: &Keys, version: &str, cmd: &str, args: Value, wait: Duration) -> Result<(Value, Value), CallError> {
+    let mut s = connect(rec, keys, version, wait).await?;
     let out = s.request(1, cmd, args, wait).await;
     let welcome = s.welcome.clone();
     s.close().await;

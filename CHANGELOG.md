@@ -137,6 +137,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   address, or run `worktrees remote readdress <host> '<code>'`; it is followed
   by the same rule. Looking on the network is macOS only for now; the address
   code works everywhere.
+- **A paired device's keys can live where nothing can read them.** Pairing,
+  the connection and a step-up now ask a device's key for a signature and
+  never for the key itself, so the iOS app can keep its device key, and the
+  key behind Face ID, in the iPhone's Secure Enclave
+  (`crates/worktrees-remote/IOS.md` says what its Swift side must do). A Face
+  ID prompt that is dismissed is reported as cancelled, not as a failed
+  connection. A signature in the wrong format is refused on the device before
+  anything is sent, so it cannot use up a pairing window. Pairing and
+  connecting from a Mac or Linux machine work as before.
 
 ### Changed
 - **With nothing set, a slot's capacity is sized from the machine.** It used to

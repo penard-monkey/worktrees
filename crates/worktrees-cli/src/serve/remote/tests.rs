@@ -1044,3 +1044,132 @@ fn the_audit_log_gates_remote_access_and_records_its_devices() {
     assert!(e.contains("audit log"), "{e}");
     assert_eq!(bad.remote.status_value()["state"], json!("off"));
 }
+
+// ── the device's own client, with keys it can only ask (the iOS signer) ─────
+//
+// `worktrees_remote::pipe` and `call` — what the iOS app's shim runs — against
+// the real listener, with `Opaque` keys standing in for the Secure Enclave:
+// a software P-256 key behind `DeviceSigner` and nothing else.
+
+mod signer {
+    use super::*;
+    use crate::serve::tls::testkit::{How, Opaque};
+    use worktrees_remote::call::{self as rcall, CallError};
+    use worktrees_remote::sign::{Keys, SignError};
+
+    impl Host {
+        fn enroll_iphone(&self, device: &Opaque, stepup: &Opaque, caps: &[Capability]) -> DeviceRecord {
+            self.reg
+                .enroll(
+                    Enrollment {
+                        principal: PrincipalId::owner(),
+                        name: "iPhone".into(),
+                        platform: Platform::Ios,
+                        spki_sha256: device.pin(),
+                        stepup_spki_sha256: Some(stepup.pin()),
+                        grant: Grant { capabilities: Caps::of(caps), projects: Projects::All },
+                        expiry: Expiry::default(),
+                        addr: None,
+                    },
+                    worktrees_core::sysclock::now_epoch(),
+                )
+                .unwrap()
+        }
+    }
+
+    async fn session(at: SocketAddr, pin: &str, keys: &Keys) -> rcall::Session {
+        let p = worktrees_remote::pipe::open_at(at, pin, keys, WAIT).await.unwrap_or_else(|e| panic!("{e}"));
+        rcall::handshake(p, env!("CARGO_PKG_VERSION"), WAIT).await.unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    fn refused(r: Result<Value, CallError>) -> Value {
+        match r {
+            Err(CallError::Refused(v)) => v,
+            other => panic!("{:?}", other.map_err(|e| e.to_string())),
+        }
+    }
+
+    /// An iPhone whose keys the client can only ask: served over pinned
+    /// mutual TLS and handshake v1; a drive-class act waits for a step-up;
+    /// the STEP-UP key signs over this session's exporter (asked off the
+    /// reactor), serve's check accepts it, and the act is served. The device
+    /// key was asked twice (certificate, handshake), the step-up key once.
+    #[test]
+    fn an_iphone_with_keys_it_can_only_ask_is_served_and_steps_up() {
+        let Some(lan) = lan_or_skip() else { return };
+        let h = host("signer");
+        h.remote.enable(&lan.to_string(), None, None, None).unwrap();
+        let (at, pin) = (h.at(), h.pin());
+        let (device, stepup) = (Opaque::new(), Opaque::new());
+        let dev = h.enroll_iphone(&device, &stepup, &[Capability::Read, Capability::Admin]);
+        let keys = Keys { device: device.clone(), stepup: Some(stepup.clone()) };
+        h.rt.block_on(async {
+            let mut s = session(at, &pin, &keys).await;
+            assert_eq!(s.welcome["device"]["id"], json!(dev.id));
+            assert_eq!(s.welcome["device"]["stepup_required"], json!(true));
+            assert!(s.request(1, "get_changelog", json!({}), WAIT).await.is_ok(), "a read is never asked");
+            assert_eq!(refused(s.request(2, "devices_list", json!({}), WAIT).await), json!("step-up required"));
+            assert_eq!(s.step_up(WAIT).await.unwrap_or_else(|e| panic!("{e}")), Duration::from_secs(300));
+            assert!(s.request(3, "devices_list", json!({}), WAIT).await.is_ok(), "stepped up: served");
+            s.close().await;
+        });
+        assert_eq!((device.asked(), stepup.asked()), (2, 1));
+    }
+
+    /// Face ID dismissed: the step-up says it was cancelled — not a TLS
+    /// failure, not a refusal — nothing was sent, and the connection is as it
+    /// was: reads served, the act still asked, and the next step-up (a fresh
+    /// challenge) goes through.
+    #[test]
+    fn a_cancelled_step_up_says_so_and_the_connection_stays() {
+        let Some(lan) = lan_or_skip() else { return };
+        let h = host("signer-cancel");
+        h.remote.enable(&lan.to_string(), None, None, None).unwrap();
+        let (at, pin) = (h.at(), h.pin());
+        let device = Opaque::new();
+        let stepup = Opaque::answering(Box::new(|n: usize, sig: Vec<u8>| if n == 0 { Err(SignError::Cancelled) } else { Ok(sig) }) as How);
+        h.enroll_iphone(&device, &stepup, &[Capability::Read, Capability::Admin]);
+        let keys = Keys { device, stepup: Some(stepup.clone()) };
+        h.rt.block_on(async {
+            let mut s = session(at, &pin, &keys).await;
+            let e = s.step_up(WAIT).await.unwrap_err();
+            assert!(matches!(e, CallError::StepUp(SignError::Cancelled)), "{e:?}");
+            assert!(e.to_string().contains("cancelled on this device"), "{e}");
+            assert!(s.request(1, "get_changelog", json!({}), WAIT).await.is_ok(), "the connection stays");
+            assert_eq!(refused(s.request(2, "devices_list", json!({}), WAIT).await), json!("step-up required"));
+            s.step_up(WAIT).await.unwrap_or_else(|e| panic!("{e}"));
+            assert!(s.request(3, "devices_list", json!({}), WAIT).await.is_ok());
+        });
+        assert_eq!(stepup.asked(), 2);
+    }
+
+    /// The host's half of a malformed signature, with the device's own
+    /// check out of the way: the ENROLLED key's certificate, the handshake
+    /// signed by another key — what a broken signer would send. serve's
+    /// verifier refuses it inside TLS: no 101, no panic. The enrolled key,
+    /// honestly signed, first.
+    #[test]
+    fn a_handshake_signature_that_does_not_verify_is_refused_at_tls() {
+        let Some(lan) = lan_or_skip() else { return };
+        let h = host("signer-badsig");
+        h.remote.enable(&lan.to_string(), None, None, None).unwrap();
+        let (at, pin) = (h.at(), h.pin());
+        let (good, other) = (device_key(), device_key());
+        h.enroll(&good, &[Capability::Read]);
+        let forged = Arc::new(rustls::sign::CertifiedKey::new(vec![good.cert.clone()], rustls::crypto::ring::sign::any_ecdsa_type(&other.key).unwrap()));
+        h.rt.block_on(async {
+            assert!(upgrade(at, &pin, &good, &at.to_string(), None).await.is_ok(), "the enrolled key first");
+            let cfg = crate::serve::tls::client_config(&pin, forged).unwrap();
+            let tcp = TcpStream::connect(at).await.unwrap();
+            // TLS 1.3: the client's half completes before the server judges it.
+            let mut tls = tokio_rustls::TlsConnector::from(cfg).connect(rustls::pki_types::ServerName::IpAddress(at.ip().into()), tcp).await.unwrap();
+            let req = format!("GET / HTTP/1.1\r\nHost: {at}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n");
+            let _ = tls.write_all(req.as_bytes()).await;
+            let mut got = Vec::new();
+            let r = tokio::time::timeout(WAIT, tls.read_to_end(&mut got)).await.expect("the host answered");
+            assert!(got.is_empty(), "not a byte of HTTP: {:?}", String::from_utf8_lossy(&got));
+            let e = r.expect_err("refused with an alert");
+            assert!(e.to_string().to_lowercase().contains("alert"), "{e}");
+        });
+    }
+}

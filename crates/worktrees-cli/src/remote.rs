@@ -15,6 +15,7 @@ use worktrees_remote::call::{self, CallError};
 use worktrees_remote::hosts::HostStore;
 use worktrees_remote::pair::{self, PairEvent};
 use worktrees_remote::reach::{self, ReachError};
+use worktrees_remote::sign::Keys;
 
 pub const USAGE: &str = "\
 usage: worktrees remote pair <link> [--name NAME]          pair with a host from its pairing link
@@ -211,8 +212,9 @@ async fn do_call(store: &HostStore, sel: &str, cmd: &str, args: &str, wait: Dura
             return 1;
         }
     };
+    let keys = Keys::from(key);
     let mut said = |m: &str| eprintln!("{}", worktrees_remote::printable(m));
-    let reached = match reach::open(store, &rec, &key, &reach::Env::platform(), wait, &mut said).await {
+    let reached = match reach::open(store, &rec, &keys, &reach::Env::platform(), wait, &mut said).await {
         Ok(r) => r,
         Err(e) => {
             eprintln!("worktrees remote call: {e}");

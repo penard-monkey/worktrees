@@ -26,6 +26,13 @@
 //! (the app's `reconnect.ts` backs off between them).
 //!
 //! Every candidate passes `netclass` before any dial ([`discover::candidate`]).
+//!
+//! **This device's key failing is not a move.** The key signs the device's
+//! certificate once per call, before anything is dialled, so a key that cannot
+//! sign (Face ID dismissed, a locked phone, a broken signer) fails the call
+//! with its own reason and no one looks. A key that refuses a candidate's
+//! handshake ends the round the same way: it would refuse every other one, and
+//! that is not the candidate's failure to log and try past.
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -37,8 +44,9 @@ use worktrees_core::netif::Iface;
 
 use crate::discover::{self, Browser, Skip};
 use crate::hosts::{HostRecord, HostStore};
-use crate::key::DeviceKey;
 use crate::pipe::{self, Pipe, PipeError};
+use crate::sign::{Keys, SignError};
+use crate::tls;
 
 /// How long one round may look on the LAN and try what it finds.
 pub const ROUND: Duration = Duration::from_secs(10);
@@ -157,11 +165,12 @@ impl std::fmt::Display for ReachError {
 /// `store` once its pinned open succeeds. `wait` bounds the kept address's
 /// attempt; [`Env::round`] the rest. `log` hears every candidate that was
 /// not dialled for a reason worth saying, and every one that failed.
-pub async fn open(store: &HostStore, rec: &HostRecord, key: &DeviceKey, env: &Env, wait: Duration, log: &mut (dyn FnMut(&str) + Send)) -> Result<Reached, ReachError> {
+pub async fn open(store: &HostStore, rec: &HostRecord, keys: &Keys, env: &Env, wait: Duration, log: &mut (dyn FnMut(&str) + Send)) -> Result<Reached, ReachError> {
     rec.check().map_err(|e| ReachError::Pipe(PipeError::Record(e)))?;
     let kept = rec.socket_addr().map_err(|e| ReachError::Pipe(PipeError::Record(e)))?;
     let kept = SocketAddr::new(kept.ip, kept.port);
-    let first = match pipe::open_at((env.route)(kept), &rec.pin, key, wait).await {
+    let certified = tls::certified_key(keys.device.clone()).map_err(|e| ReachError::Pipe(PipeError::Sign(e)))?;
+    let first = match pipe::open_certified((env.route)(kept), &rec.pin, &certified, keys, wait).await {
         Ok(pipe) => return Ok(Reached { pipe, rec: rec.clone(), moved_from: None }),
         Err(PipeError::Connect(m)) => m,
         Err(PipeError::NotThePin) => "the machine there answered with another key".into(),
@@ -197,17 +206,25 @@ pub async fn open(store: &HostStore, rec: &HostRecord, key: &DeviceKey, env: &En
                 log(&format!("{}: an advert at {} is link-local, which this client cannot dial yet; not dialled", rec.name, c.addr));
                 continue;
             }
-            match pipe::open_at((env.route)(c.addr), &rec.pin, key, env.candidate_wait).await {
-                Ok(pipe) => return Some((c.addr, pipe)),
+            match pipe::open_certified((env.route)(c.addr), &rec.pin, &certified, keys, env.candidate_wait).await {
+                Ok(pipe) => return Ok(Some((c.addr, pipe))),
+                Err(PipeError::Sign(e)) => {
+                    log(&format!("{}: at {}, this device's key did not sign ({e}); the round stops there", rec.name, c.addr));
+                    return Err(e);
+                }
                 Err(e) => {
                     log(&format!("{}: an advert for it at {}: {e}; the record is unchanged", rec.name, c.addr));
                     tried.push((c.addr, e));
                 }
             }
         }
-        None
+        Ok::<_, SignError>(None)
     };
-    let found = tokio::time::timeout(env.round, look).await.ok().flatten();
+    let found = match tokio::time::timeout(env.round, look).await {
+        Ok(Err(e)) => return Err(ReachError::Pipe(PipeError::Sign(e))),
+        Ok(Ok(found)) => found,
+        Err(_) => None,
+    };
     let Some((at, pipe)) = found else {
         return Err(not_found(Lan::Looked(tried)));
     };
@@ -240,12 +257,12 @@ pub async fn adopt_code(store: &HostStore, rec: &HostRecord, c: &AddrCode, env: 
     if crate::tls::hex(&c.pin) != rec.pin {
         return Err(format!("that address code is for another host: its pin is not {}'s. Nothing was dialled.", rec.name));
     }
-    let key = store.key_for(rec)?;
+    let keys = Keys::from(store.key_for(rec)?);
     if c.addr.needs_scope() {
         return Err(format!("{} is link-local, which this client cannot dial yet; nothing was dialled", c.addr.ip));
     }
     let at = SocketAddr::new(c.addr.ip, c.addr.port);
-    let p = pipe::open_at((env.route)(at), &rec.pin, &key, wait)
+    let p = pipe::open_at((env.route)(at), &rec.pin, &keys, wait)
         .await
         .map_err(|e| format!("{at}: {e}. {}'s address is unchanged ({}).", rec.name, rec.addr))?;
     let (tx, _rx) = p.split();

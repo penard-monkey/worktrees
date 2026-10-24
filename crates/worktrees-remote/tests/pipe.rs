@@ -3,7 +3,13 @@
 //! WebSocket upgrade that records what the client sent, and handshake v1 run
 //! from the spec with the session's exporter as the key. The real remote
 //! listener is serve's (the listener lane); serve's own tests pair against
-//! `worktrees_remote::pair` end to end.
+//! `worktrees_remote::pair` end to end, and dial its remote listener with the
+//! opaque signer below.
+//!
+//! [`Opaque`] stands in for the Secure Enclave: a software P-256 key that
+//! exposes [`DeviceSigner`] and nothing else — no bytes, no `Debug` — and
+//! counts what it is asked, so a test can see the key was ASKED to sign rather
+//! than read.
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,6 +31,10 @@ use tokio_tungstenite::tungstenite::Message;
 use worktrees_remote::call::{self, CallError};
 use worktrees_remote::key::DeviceKey;
 use worktrees_remote::pipe::{self, Inbound, PipeError};
+use worktrees_remote::sign::{self, DeviceSigner, Keys, SignError};
+
+mod opaque;
+use opaque::{How, Opaque};
 use worktrees_remote::tls;
 
 const WAIT: Duration = Duration::from_secs(5);
@@ -32,6 +42,13 @@ const VERSION: &str = "9.9.9";
 
 fn rt() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap()
+}
+
+/// A desktop's keys: a key file, as `HostStore::key_for` hands it over.
+fn file_keys() -> (Keys, String) {
+    let k = DeviceKey::generate().unwrap();
+    let pin = k.pin().to_string();
+    (Keys::device_only(Arc::new(k)), pin)
 }
 
 /// The fixture host's identity.
@@ -79,9 +96,13 @@ impl ClientCertVerifier for OnePin {
 /// What the fixture host saw.
 #[derive(Default, Debug)]
 struct Seen {
+    /// A connection reached the listener at all.
+    accepted: bool,
     host: Option<String>,
     origin: Option<String>,
     session_key: Option<String>,
+    /// The session's exporter under `EXPORTER-worktrees-stepup-v1`.
+    stepup_exporter: Option<[u8; 32]>,
     requests: Vec<Value>,
     asked: bool,
 }
@@ -111,11 +132,15 @@ fn host(rt: &tokio::runtime::Runtime, id: &Identity, admit: &str, how: Host) -> 
     let addr = l.local_addr().unwrap();
     let task = rt.spawn(async move {
         let mut seen = Seen::default();
-        let Ok((tcp, _)) = l.accept().await else { return seen };
+        // A device refused before its dial never comes: the fixture stops
+        // waiting rather than hang the test.
+        let Ok(Ok((tcp, _))) = tokio::time::timeout(Duration::from_secs(2), l.accept()).await else { return seen };
+        seen.accepted = true;
         let tls = tokio_rustls::TlsAcceptor::from(cfg).accept(tcp).await;
         seen.asked = asked.load(Ordering::SeqCst);
         let Ok(tls) = tls else { return seen };
         let ex: [u8; 32] = tls.get_ref().1.export_keying_material([0u8; 32], b"EXPORTER-worktrees-remote-v1", None).unwrap();
+        seen.stepup_exporter = Some(tls.get_ref().1.export_keying_material([0u8; 32], b"EXPORTER-worktrees-stepup-v1", None).unwrap());
         let key = tls::hex(&ex);
         seen.session_key = Some(key.clone());
         let hdr = Arc::new(Mutex::new((None, None)));
@@ -173,10 +198,11 @@ fn host(rt: &tokio::runtime::Runtime, id: &Identity, admit: &str, how: Host) -> 
 fn a_paired_device_is_served_over_the_pipe_with_one_session_key_at_both_ends() {
     let rt = rt();
     let id = identity();
-    let dev = DeviceKey::generate().unwrap();
-    let (addr, seen) = host(&rt, &id, dev.pin(), Host::Honest);
+    let (dev, pin) = file_keys();
+    let (addr, seen) = host(&rt, &id, &pin, Host::Honest);
     let (token, out) = rt.block_on(async {
         let p = pipe::open_at(addr, &id.pin, &dev, WAIT).await.unwrap();
+        assert!(p.stepup().is_none(), "a desktop has no step-up key");
         let token = p.session_token().to_string();
         let mut s = call::handshake(p, VERSION, WAIT).await.unwrap();
         let out = s.request(7, "list_workspace", json!({}), WAIT).await.unwrap();
@@ -199,8 +225,8 @@ fn a_paired_device_is_served_over_the_pipe_with_one_session_key_at_both_ends() {
 fn a_host_that_is_not_the_pin_is_refused_before_it_sees_the_device() {
     let rt = rt();
     let (id, other) = (identity(), identity());
-    let dev = DeviceKey::generate().unwrap();
-    let (addr, seen) = host(&rt, &id, dev.pin(), Host::Honest);
+    let (dev, pin) = file_keys();
+    let (addr, seen) = host(&rt, &id, &pin, Host::Honest);
     let r = rt.block_on(pipe::open_at(addr, &other.pin, &dev, WAIT));
     assert!(matches!(r, Err(PipeError::NotThePin)), "{:?}", r.err());
     let seen = rt.block_on(seen).unwrap();
@@ -214,8 +240,8 @@ fn a_host_that_is_not_the_pin_is_refused_before_it_sees_the_device() {
 fn a_key_the_host_does_not_hold_is_refused_at_tls() {
     let rt = rt();
     let id = identity();
-    let (dev, stranger) = (DeviceKey::generate().unwrap(), DeviceKey::generate().unwrap());
-    let (addr, seen) = host(&rt, &id, dev.pin(), Host::Honest);
+    let ((_, pin), (stranger, _)) = (file_keys(), file_keys());
+    let (addr, seen) = host(&rt, &id, &pin, Host::Honest);
     let r = rt.block_on(pipe::open_at(addr, &id.pin, &stranger, WAIT));
     assert!(matches!(r, Err(PipeError::Tls(_))), "{:?}", r.err().map(|e| e.to_string()));
     let seen = rt.block_on(seen).unwrap();
@@ -228,8 +254,8 @@ fn a_key_the_host_does_not_hold_is_refused_at_tls() {
 fn nothing_is_sent_to_a_host_whose_proof_fails() {
     let rt = rt();
     let id = identity();
-    let dev = DeviceKey::generate().unwrap();
-    let (addr, seen) = host(&rt, &id, dev.pin(), Host::WrongProof);
+    let (dev, pin) = file_keys();
+    let (addr, seen) = host(&rt, &id, &pin, Host::WrongProof);
     let r = rt.block_on(async {
         let p = pipe::open_at(addr, &id.pin, &dev, WAIT).await.unwrap();
         call::handshake(p, VERSION, WAIT).await.map(|_| ())
@@ -243,8 +269,8 @@ fn nothing_is_sent_to_a_host_whose_proof_fails() {
 fn a_revoke_ends_the_pipe_with_its_reason() {
     let rt = rt();
     let id = identity();
-    let dev = DeviceKey::generate().unwrap();
-    let (addr, _seen) = host(&rt, &id, dev.pin(), Host::Revokes);
+    let (dev, pin) = file_keys();
+    let (addr, _seen) = host(&rt, &id, &pin, Host::Revokes);
     let end = rt.block_on(async {
         let p = pipe::open_at(addr, &id.pin, &dev, WAIT).await.unwrap();
         let mut s = call::handshake(p, VERSION, WAIT).await.unwrap();
@@ -261,12 +287,131 @@ fn a_revoke_ends_the_pipe_with_its_reason() {
 fn a_proven_host_of_another_version_is_not_driven() {
     let rt = rt();
     let id = identity();
-    let dev = DeviceKey::generate().unwrap();
-    let (addr, seen) = host(&rt, &id, dev.pin(), Host::Honest);
+    let (dev, pin) = file_keys();
+    let (addr, seen) = host(&rt, &id, &pin, Host::Honest);
     let r = rt.block_on(async {
         let p = pipe::open_at(addr, &id.pin, &dev, WAIT).await.unwrap();
         call::handshake(p, "1.0.0", WAIT).await.map(|_| ())
     });
     assert!(matches!(r, Err(CallError::Version { .. })), "{:?}", r.err().map(|e| e.to_string()));
     assert!(rt.block_on(seen).unwrap().requests.is_empty());
+}
+
+// ── the device key as a signer: the Secure Enclave's stand-in ───────────────
+
+/// The served case with a key this crate can only ask: the pipe opens, v1
+/// completes, the request is answered — and the key was asked exactly twice
+/// (its certificate, then the handshake), the only way the crate can use it.
+#[test]
+fn an_opaque_key_is_served_having_only_been_asked_to_sign() {
+    let rt = rt();
+    let id = identity();
+    let key = Opaque::new();
+    let (addr, seen) = host(&rt, &id, &key.pin(), Host::Honest);
+    let keys = Keys::device_only(key.clone());
+    let out = rt.block_on(async {
+        let p = pipe::open_at(addr, &id.pin, &keys, WAIT).await.unwrap_or_else(|e| panic!("{e}"));
+        let mut s = call::handshake(p, VERSION, WAIT).await.unwrap();
+        let out = s.request(1, "list_workspace", json!({}), WAIT).await.unwrap();
+        s.close().await;
+        out
+    });
+    assert_eq!(out, json!({"echo": "list_workspace"}));
+    assert_eq!(key.asked(), 2, "the certificate's signature and the handshake's");
+    assert!(rt.block_on(seen).unwrap().asked, "the host judged the key by its certificate");
+}
+
+/// A key that cannot sign is refused BEFORE anything is dialled: the
+/// certificate is its first signature. The host never sees a connection.
+#[test]
+fn a_key_that_cannot_sign_never_reaches_the_host() {
+    let rt = rt();
+    let id = identity();
+    for (what, how, want) in [
+        ("cancelled", Box::new(|_: usize, _: Vec<u8>| Err(SignError::Cancelled)) as How, SignError::Cancelled),
+        ("locked", Box::new(|_: usize, _: Vec<u8>| Err(SignError::Failed("the device is locked".into()))), SignError::Failed("the device is locked".into())),
+        ("64 bytes, not DER", Box::new(|_: usize, sig: Vec<u8>| Ok(sig[sig.len() - 64..].to_vec())), SignError::Invalid),
+    ] {
+        let key = Opaque::answering(how);
+        let (addr, seen) = host(&rt, &id, &key.pin(), Host::Honest);
+        let r = rt.block_on(pipe::open_at(addr, &id.pin, &Keys::device_only(key.clone()), WAIT));
+        match r {
+            Err(PipeError::Sign(e)) => assert_eq!(e, want, "{what}"),
+            other => panic!("{what}: {:?}", other.err().map(|e| e.to_string())),
+        }
+        assert_eq!(key.asked(), 1, "{what}: asked once, for the certificate");
+        assert!(!rt.block_on(seen).unwrap().accepted, "{what}: nothing dialled");
+    }
+}
+
+/// A key that signs its certificate and then refuses the handshake — Face ID
+/// dismissed, or garbage — ends the handshake with the key's own reason, not
+/// a TLS failure with none; nothing panics, the host serves nothing.
+#[test]
+fn a_key_that_fails_inside_the_handshake_is_named_as_the_reason() {
+    let rt = rt();
+    let id = identity();
+    for (what, how, want) in [
+        ("cancelled", Box::new(|n: usize, sig: Vec<u8>| if n == 0 { Ok(sig) } else { Err(SignError::Cancelled) }) as How, SignError::Cancelled),
+        ("malformed", Box::new(|n: usize, sig: Vec<u8>| if n == 0 { Ok(sig) } else { Ok(vec![0x30, 0x03, 0x02, 0x01, 0x00]) }), SignError::Invalid),
+        ("another message", Box::new(|n: usize, sig: Vec<u8>| if n == 0 { Ok(sig.clone()) } else { Ok(sig.iter().map(|b| b ^ 1).collect()) }), SignError::Invalid),
+    ] {
+        let key = Opaque::answering(how);
+        let (addr, seen) = host(&rt, &id, &key.pin(), Host::Honest);
+        let r = rt.block_on(pipe::open_at(addr, &id.pin, &Keys::device_only(key.clone()), WAIT));
+        match &r {
+            Err(PipeError::Sign(e)) => assert_eq!(*e, want, "{what}"),
+            other => panic!("{what}: {:?}", other.as_ref().err().map(|e| e.to_string())),
+        }
+        assert!(r.err().unwrap().to_string().contains(&want.to_string()), "{what}: the reason is in the words");
+        assert_eq!(key.asked(), 2, "{what}");
+        let seen = rt.block_on(seen).unwrap();
+        assert!(seen.accepted && seen.session_key.is_none() && seen.host.is_none(), "{what}: refused inside TLS: {seen:?}");
+    }
+}
+
+/// A device with a step-up key gets one per connection: proofs signed by the
+/// STEP-UP key (never the device key) over THIS session's exporter, which the
+/// host computes on its side. A desktop's pipe has none.
+#[test]
+fn a_step_up_proof_is_the_step_up_keys_over_this_session() {
+    let rt = rt();
+    let id = identity();
+    let (device, stepup) = (Opaque::new(), Opaque::new());
+    let (addr, seen) = host(&rt, &id, &device.pin(), Host::Honest);
+    let keys = Keys { device: device.clone(), stepup: Some(stepup.clone()) };
+    let challenge = [5u8; 32];
+    let proof = rt.block_on(async {
+        let p = pipe::open_at(addr, &id.pin, &keys, WAIT).await.unwrap();
+        let su = p.stepup().expect("a device with a step-up key has a step-up");
+        let proof = su.prove(&challenge).await.unwrap();
+        call::handshake(p, VERSION, WAIT).await.unwrap().close().await;
+        proof
+    });
+    let host_side = rt.block_on(seen).unwrap().stepup_exporter.unwrap();
+    // §2.5's message, spelled out here rather than taken from `stepup::message`.
+    let signed = [&challenge[..], &host_side[..]].concat();
+    assert_eq!(proof.spki, stepup.spki_der(), "the step-up key's public half");
+    assert!(sign::verifies(&stepup.spki_der(), &signed, &proof.signature), "over challenge ‖ the host's own exporter");
+    assert!(!sign::verifies(&device.spki_der(), &signed, &proof.signature), "not the device key's");
+    assert_eq!((stepup.asked(), device.asked()), (1, 2), "the step-up key signed once; the device key only for TLS");
+}
+
+/// A step-up cancelled on the device is said as a cancel, and the pipe it
+/// belongs to is untouched.
+#[test]
+fn a_cancelled_step_up_is_a_cancel() {
+    let rt = rt();
+    let id = identity();
+    let device = Opaque::new();
+    let (addr, _seen) = host(&rt, &id, &device.pin(), Host::Honest);
+    let keys = Keys { device: device.clone(), stepup: Some(Opaque::answering(Box::new(|_: usize, _: Vec<u8>| Err(SignError::Cancelled)))) };
+    let r = rt.block_on(async {
+        let p = pipe::open_at(addr, &id.pin, &keys, WAIT).await.unwrap();
+        let r = p.stepup().unwrap().prove(&[1; 32]).await;
+        let mut s = call::handshake(p, VERSION, WAIT).await.unwrap();
+        assert_eq!(s.request(1, "list_workspace", json!({}), WAIT).await.unwrap(), json!({"echo": "list_workspace"}), "still served");
+        r
+    });
+    assert_eq!(r, Err(SignError::Cancelled));
 }

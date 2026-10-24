@@ -5,11 +5,17 @@
 //!    untrusted input, and a public address in one is a phishing attempt. A
 //!    refused link is answered with the parser's own words, and no socket
 //!    exists yet.
-//! 2. Make this pairing's key (§2.2 step 3 — one key per pairing).
+//! 2. This pairing's keys (§2.2 step 3 — one key per pairing): a desktop makes
+//!    a key file here ([`pair`]); the iOS app brings its two Secure Enclave
+//!    keys as signers ([`pair_keys`]). Either way they are only ever asked to
+//!    sign, and they are checked before anything is dialled: P-256, a step-up
+//!    key exactly when the platform has one, and never the device key twice —
+//!    serve answers a frame it refuses with silence, and that would spend the
+//!    window's one attempt.
 //! 3. Dial the pairing port with TLS 1.3 pinned to the link's SPKI, presenting
-//!    a self-signed certificate over the new key.
+//!    a self-signed certificate over the device key.
 //! 4. Send one line:
-//!    `{"pair": {"name", "platform", "stepup_spki": null}, "proof": <64 hex>}`,
+//!    `{"pair": {"name", "platform", "stepup_spki": <base64 DER> | null}, "proof": <64 hex>}`,
 //!    `proof = HMAC-SHA256(secret, "worktrees-pair/v1\n" ‖ exporter ‖
 //!    sha256(device spki) ‖ (sha256(step-up spki) | 32 zero bytes) ‖ name)`,
 //!    `exporter` being 32 bytes of the session's RFC 8446 §7.5 exporter under
@@ -21,13 +27,16 @@
 //!    said in words that point at the host (§2.2 step 6).
 //!
 //! A desktop has no presence-bound key, so it sends no step-up key (`null`);
-//! serve refuses a desktop that sends one, and an iPhone that does not.
+//! serve refuses a desktop that sends one, and an iPhone that does not. The
+//! step-up key is not asked to sign here — only its public half is enrolled —
+//! so pairing never shows Face ID.
 //!
 //! [`proof_ok`] and [`comparison_code`] are serve's as well: its pairing
 //! listener imports them, so the two ends compute the proof and the code with
 //! one implementation, and serve's end-to-end test restates both from §2.2.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use hmac::{KeyInit, Mac};
@@ -38,6 +47,7 @@ use worktrees_core::pairuri::{self, PairUri};
 
 use crate::hosts::{new_host_id, HostRecord, HostStore};
 use crate::key::DeviceKey;
+use crate::sign::{spki_of, Keys, SignError};
 use crate::tls;
 
 pub const PROOF_LABEL: &[u8] = b"worktrees-pair/v1\n";
@@ -97,17 +107,24 @@ pub fn comparison_code(secret: &[u8; 16], exporter: &[u8; 32]) -> String {
     format!("{:06}", n % 1_000_000)
 }
 
-/// What kind of machine this device is, as the pairing frame names it. A
-/// desktop: its drive-class acts rest on one factor (§2.5).
+/// What kind of machine this device is, as the pairing frame names it. An
+/// iPhone or iPad enrolls a step-up key with its device key; a desktop has
+/// none, and its drive-class acts rest on one factor (§2.5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Platform {
+    Ios,
+    Ipados,
     Macos,
     Linux,
 }
 
 impl Platform {
+    /// This build's platform. An iPad is `ios` here (one target for both); the
+    /// iOS app names [`Platform::Ipados`] itself.
     pub fn this() -> Platform {
-        if cfg!(target_os = "macos") {
+        if cfg!(target_os = "ios") {
+            Platform::Ios
+        } else if cfg!(target_os = "macos") {
             Platform::Macos
         } else {
             Platform::Linux
@@ -116,9 +133,17 @@ impl Platform {
 
     pub fn as_str(self) -> &'static str {
         match self {
+            Platform::Ios => "ios",
+            Platform::Ipados => "ipados",
             Platform::Macos => "macos",
             Platform::Linux => "linux",
         }
+    }
+
+    /// The platform pairs with a presence-bound step-up key (serve's
+    /// `Platform::has_presence_key`).
+    pub fn has_presence_key(self) -> bool {
+        matches!(self, Platform::Ios | Platform::Ipados)
     }
 }
 
@@ -173,6 +198,12 @@ pub enum PairError {
     Link(String),
     /// This device's name would not pass the host's dialog.
     Name(String),
+    /// The keys given would be refused by the host (checked before the dial,
+    /// so the window's one attempt is not spent on them).
+    Keys(String),
+    /// The device key did not sign (cancelled, unable, or a signature that
+    /// does not verify), before the dial or inside the handshake.
+    Sign(SignError),
     /// Nothing listens at the link's address any more: its one attempt was
     /// used, or its window closed.
     WindowGone { host: String, addr: SocketAddr },
@@ -193,6 +224,8 @@ impl std::fmt::Display for PairError {
         match self {
             PairError::Link(m) => write!(f, "{m}"),
             PairError::Name(m) => write!(f, "this device's name: {m}"),
+            PairError::Keys(m) => write!(f, "this device's keys: {m}; nothing was dialled"),
+            PairError::Sign(e) => write!(f, "this device's key did not sign the pairing: {e}"),
             PairError::WindowGone { host, addr } => write!(
                 f,
                 "nothing answered at {addr}: someone else used this pairing code, or its window has closed. \
@@ -233,6 +266,8 @@ impl std::fmt::Display for PairError {
     }
 }
 
+impl std::error::Error for PairError {}
+
 /// How long each step may take. The host's own deadlines are 120 s for the
 /// frame and 60 s for its decision (§2.4); a device waits a little longer than
 /// each, so the host's answer, not the device's clock, decides.
@@ -258,7 +293,8 @@ pub enum PairEvent {
     Code(String),
 }
 
-/// Pair with the host `link` names and keep the pairing in `store`.
+/// Pair with the host `link` names, with a new key file, and keep the
+/// pairing — the record and the key — in `store`. A desktop's pairing.
 pub async fn pair(store: &HostStore, link: &str, name: &str, now: i64, on_event: &mut (dyn FnMut(PairEvent) + Send)) -> Result<HostRecord, PairError> {
     pair_with(store, link, name, Platform::this(), now, &pairuri::dial_rule, Waits::default(), on_event).await
 }
@@ -276,13 +312,45 @@ pub async fn pair_with(
     waits: Waits,
     on_event: &mut (dyn FnMut(PairEvent) + Send),
 ) -> Result<HostRecord, PairError> {
+    // The link and the name are read before the key is made (§2.2 step 3);
+    // `pair_keys_with` reads them again, as it does for a caller with keys.
+    pairuri::parse(link, now, rule).map_err(PairError::Link)?;
+    pairuri::display_name_ok(name).map_err(PairError::Name)?;
+    let key = Arc::new(DeviceKey::generate().map_err(PairError::Store)?);
+    let rec = pair_keys_with(link, name, platform, &Keys::device_only(key.clone()), now, rule, waits, on_event).await?;
+    store.add(&rec, &key).map_err(PairError::Store)?;
+    Ok(rec)
+}
+
+/// Pair with the host `link` names, presenting `keys` — signers this crate
+/// asks and never reads: the iOS app's Secure Enclave keys — and answer the
+/// host's record. Nothing is kept: the caller keeps the record beside its
+/// keys, and connects with both later (`pipe::open`).
+pub async fn pair_keys(link: &str, name: &str, platform: Platform, keys: &Keys, now: i64, on_event: &mut (dyn FnMut(PairEvent) + Send)) -> Result<HostRecord, PairError> {
+    pair_keys_with(link, name, platform, keys, now, &pairuri::dial_rule, Waits::default(), on_event).await
+}
+
+/// [`pair_keys`], with the address rule and the waits given.
+#[allow(clippy::too_many_arguments)]
+pub async fn pair_keys_with(
+    link: &str,
+    name: &str,
+    platform: Platform,
+    keys: &Keys,
+    now: i64,
+    rule: &(dyn Fn(&str) -> Result<SocketAddr, String> + Sync),
+    waits: Waits,
+    on_event: &mut (dyn FnMut(PairEvent) + Send),
+) -> Result<HostRecord, PairError> {
     // 1. Nothing is dialled before the link — its address above all — is read.
     let u: PairUri = pairuri::parse(link, now, rule).map_err(PairError::Link)?;
     pairuri::display_name_ok(name).map_err(PairError::Name)?;
     let host = u.host.clone();
-    // 2. This pairing's key.
-    let key = DeviceKey::generate().map_err(PairError::Store)?;
-    let cfg = key.client_config(&u.pin).map_err(|why| PairError::Tls { host: host.clone(), why })?;
+    // 2. The keys, as the host will judge them.
+    let (device_pin, stepup_spki) = check_keys(platform, keys)?;
+    let stepup_pin = stepup_spki.as_deref().map(tls::pin_of_spki);
+    let certified = tls::certified_key(keys.device.clone()).map_err(PairError::Sign)?;
+    let cfg = tls::client_config(&u.pin, certified).map_err(|why| PairError::Tls { host: host.clone(), why })?;
     on_event(PairEvent::Dialling { host: host.clone(), addr: u.addr });
     // 3. Pinned TLS to the pairing port.
     let tcp = crate::dial::tcp(u.addr, waits.connect).await.map_err(|e| match e.kind() {
@@ -294,13 +362,14 @@ pub async fn pair_with(
     let tls = match tokio::time::timeout(waits.connect, connector.connect(server, tcp)).await {
         Ok(Ok(s)) => s,
         Ok(Err(e)) if tls::is_pin_mismatch(&e) => return Err(PairError::NotThePin { host, addr: u.addr }),
-        Ok(Err(e)) => return Err(PairError::Tls { host, why: e.to_string() }),
+        Ok(Err(e)) => return Err(tls::sign_error(&e).map_or_else(|| PairError::Tls { host, why: e.to_string() }, |s| PairError::Sign(s.clone()))),
         Err(_) => return Err(PairError::Tls { host, why: "the handshake did not finish in time".into() }),
     };
     let exporter = tls::client_exporter(tls.get_ref().1, tls::EXPORTER_PAIR).map_err(|why| PairError::Tls { host: host.clone(), why })?;
     // 4. The one frame.
-    let p = proof(&u.secret, &exporter, key.pin(), None, name).ok_or_else(|| PairError::Store("a pin that is not hex".into()))?;
-    let line = json!({"pair": {"name": name, "platform": platform.as_str(), "stepup_spki": null}, "proof": tls::hex(&p)}).to_string();
+    let p = proof(&u.secret, &exporter, &device_pin, stepup_pin.as_deref(), name).ok_or_else(|| PairError::Store("a pin that is not hex".into()))?;
+    let stepup_field = stepup_spki.as_deref().map_or(Value::Null, |d| Value::from(crate::stepup::b64_encode(d)));
+    let line = json!({"pair": {"name": name, "platform": platform.as_str(), "stepup_spki": stepup_field}, "proof": tls::hex(&p)}).to_string();
     let mut s = BufReader::new(tls);
     let sent = async {
         s.get_mut().write_all(format!("{line}\n").as_bytes()).await?;
@@ -319,9 +388,26 @@ pub async fn pair_with(
     // 6. The host's answer.
     let v = read_line(&mut s, waits.decision).await.ok_or_else(|| PairError::Denied { host: host.clone(), why: Denied::Timeout })?;
     let rec = answer(&host, v)?;
-    let rec = HostRecord { pin: u.pin.clone(), paired_at: now, ..rec };
-    store.add(&rec, &key).map_err(PairError::Store)?;
-    Ok(rec)
+    Ok(HostRecord { pin: u.pin.clone(), paired_at: now, ..rec })
+}
+
+/// The keys as the host will judge them (serve's `pairing::parse_frame` and
+/// `DeviceRegistry::enroll`), and one rule of the device's own: the step-up
+/// key is a SECOND key, or step-up is one factor wearing two names. The
+/// device key's pin and the step-up key's SPKI.
+fn check_keys(platform: Platform, keys: &Keys) -> Result<(String, Option<Vec<u8>>), PairError> {
+    let bad = |e: SignError| PairError::Keys(e.to_string());
+    let device = spki_of(&*keys.device, "device").map_err(bad)?;
+    let stepup = match (&keys.stepup, platform.has_presence_key()) {
+        (Some(k), true) => Some(spki_of(&**k, "step-up").map_err(bad)?),
+        (None, false) => None,
+        (None, true) => return Err(PairError::Keys(format!("{} pairs with a step-up key beside its device key", platform.as_str()))),
+        (Some(_), false) => return Err(PairError::Keys(format!("{} has no presence-bound step-up key to enroll", platform.as_str()))),
+    };
+    if stepup.as_deref() == Some(device.as_slice()) {
+        return Err(PairError::Keys("the step-up key is the device key; it must be a second, presence-bound key".into()));
+    }
+    Ok((tls::pin_of_spki(&device), stepup))
 }
 
 /// The host's last line: a record to keep, or a refusal in its words.

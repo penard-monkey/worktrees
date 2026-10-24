@@ -20,14 +20,28 @@
 //!
 //! Every signature is ECDSA P-256 with SHA-256, the one scheme offered: the
 //! Secure Enclave signs with P-256 and nothing else (§2.1).
+//!
+//! **The device's key is a signer, never bytes** (`crate::sign`). Its
+//! certificate is made by rcgen with the key as a REMOTE signer
+//! ([`device_cert`]: rcgen 0.14 signs through any `rcgen::SigningKey`, which
+//! is the point and a `sign`), and rustls holds it as a `SigningKey` whose
+//! `Signer` asks the same trait ([`certified_key`]). So a dial costs the key
+//! two signatures, the certificate's and the handshake's, and a Secure
+//! Enclave key serves exactly as a key file does.
 
 use std::sync::Arc;
 
+use std::cell::RefCell;
+
+use rcgen::{CertificateParams, PublicKeyData, PKCS_ECDSA_P256_SHA256};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::crypto::CryptoProvider;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
-use rustls::{CertificateError, ClientConfig, DigitallySignedStruct, Error, SignatureScheme};
+use rustls::pki_types::{CertificateDer, ServerName, SubjectPublicKeyInfoDer, UnixTime};
+use rustls::sign::CertifiedKey;
+use rustls::{CertificateError, ClientConfig, DigitallySignedStruct, Error, OtherError, SignatureAlgorithm, SignatureScheme};
 use sha2::{Digest, Sha256};
+
+use crate::sign::{checked_sign, p256_point, spki_of, DeviceSigner, SignError};
 
 /// The exporter label a pairing proof is bound with (§2.2 step 4).
 pub const EXPORTER_PAIR: &[u8] = b"EXPORTER-worktrees-pair-v1";
@@ -114,16 +128,128 @@ impl ServerCertVerifier for PinnedServer {
     }
 }
 
-/// A device's config: TLS 1.3, the server pinned, its own key presented, no
-/// SNI, nothing resumed, no early data.
-pub fn client_config(pin: &str, cert: CertificateDer<'static>, key: PrivateKeyDer<'static>) -> Result<Arc<ClientConfig>, String> {
+/// rcgen's view of a device key: the point, and signatures through
+/// [`checked_sign`]. rcgen reports a failed signature only as
+/// `RemoteKeyError`, so the signer's own error is kept here for the caller.
+struct CertSigner<'a> {
+    key: &'a dyn DeviceSigner,
+    spki: &'a [u8],
+    failed: RefCell<Option<SignError>>,
+}
+
+impl PublicKeyData for CertSigner<'_> {
+    fn der_bytes(&self) -> &[u8] {
+        p256_point(self.spki).unwrap_or_default()
+    }
+
+    fn algorithm(&self) -> &'static rcgen::SignatureAlgorithm {
+        &PKCS_ECDSA_P256_SHA256
+    }
+}
+
+impl rcgen::SigningKey for CertSigner<'_> {
+    fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, rcgen::Error> {
+        checked_sign(self.key, self.spki, msg).map_err(|e| {
+            *self.failed.borrow_mut() = Some(e);
+            rcgen::Error::RemoteKeyError
+        })
+    }
+}
+
+/// The certificate a device presents: self-signed by `key` — through the
+/// signer, so the key's bytes are never needed — naming nobody. The server
+/// pins its SPKI and reads nothing else in it. It is rcgen's certificate from
+/// the same parameters a key file's always had, so for one key the
+/// to-be-signed part is the same bytes either way.
+pub fn device_cert(key: &dyn DeviceSigner) -> Result<CertificateDer<'static>, SignError> {
+    let spki = spki_of(key, "device")?;
+    let signer = CertSigner { key, spki: &spki, failed: RefCell::new(None) };
+    let params = CertificateParams::new(Vec::<String>::new()).map_err(|e| SignError::Failed(e.to_string()))?;
+    match params.self_signed(&signer) {
+        Ok(cert) => Ok(cert.der().clone()),
+        Err(e) => Err(signer.failed.take().unwrap_or_else(|| SignError::Failed(format!("its certificate: {e}")))),
+    }
+}
+
+/// A device key as rustls holds it: [`SCHEME`] alone, every signature through
+/// [`checked_sign`].
+struct TlsKey {
+    key: Arc<dyn DeviceSigner>,
+    spki: Arc<[u8]>,
+}
+
+impl std::fmt::Debug for TlsKey {
+    /// The pin, never more.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TlsKey").field("pin", &pin_of_spki(&self.spki)).finish()
+    }
+}
+
+impl rustls::sign::SigningKey for TlsKey {
+    fn choose_scheme(&self, offered: &[SignatureScheme]) -> Option<Box<dyn rustls::sign::Signer>> {
+        offered.contains(&SCHEME).then(|| Box::new(TlsSigner { key: self.key.clone(), spki: self.spki.clone() }) as Box<dyn rustls::sign::Signer>)
+    }
+
+    fn public_key(&self) -> Option<SubjectPublicKeyInfoDer<'_>> {
+        Some(SubjectPublicKeyInfoDer::from(&self.spki[..]))
+    }
+
+    fn algorithm(&self) -> SignatureAlgorithm {
+        SignatureAlgorithm::ECDSA
+    }
+}
+
+struct TlsSigner {
+    key: Arc<dyn DeviceSigner>,
+    spki: Arc<[u8]>,
+}
+
+impl std::fmt::Debug for TlsSigner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TlsSigner").field("pin", &pin_of_spki(&self.spki)).finish()
+    }
+}
+
+impl rustls::sign::Signer for TlsSigner {
+    /// The handshake's CertificateVerify. A refusal ends the handshake with
+    /// the [`SignError`] inside it, which [`sign_error`] finds again.
+    fn sign(&self, message: &[u8]) -> Result<Vec<u8>, Error> {
+        checked_sign(&*self.key, &self.spki, message).map_err(|e| Error::Other(OtherError(Arc::new(e))))
+    }
+
+    fn scheme(&self) -> SignatureScheme {
+        SCHEME
+    }
+}
+
+/// A device key as a client certificate: its certificate, made now (one
+/// signature), and the key itself for the handshake's (a second, at each
+/// dial). A key that cannot sign fails HERE, before anything is dialled.
+pub fn certified_key(key: Arc<dyn DeviceSigner>) -> Result<Arc<CertifiedKey>, SignError> {
+    let cert = device_cert(&*key)?;
+    let spki: Arc<[u8]> = spki_of(&*key, "device")?.into();
+    Ok(Arc::new(CertifiedKey::new(vec![cert], Arc::new(TlsKey { key, spki }))))
+}
+
+/// The [`SignError`] that ended a handshake, when one did: the device's own
+/// key refused or failed to sign, not the network or the host.
+pub fn sign_error(e: &std::io::Error) -> Option<&SignError> {
+    match e.get_ref()?.downcast_ref::<Error>()? {
+        Error::Other(OtherError(inner)) => inner.downcast_ref::<SignError>(),
+        _ => None,
+    }
+}
+
+/// A device's config: TLS 1.3, the server pinned, `key` presented
+/// ([`certified_key`]: a device key behind [`DeviceSigner`]), no SNI, nothing
+/// resumed, no early data.
+pub fn client_config(pin: &str, key: Arc<CertifiedKey>) -> Result<Arc<ClientConfig>, String> {
     let mut c = ClientConfig::builder_with_provider(provider())
         .with_protocol_versions(&[&rustls::version::TLS13])
         .map_err(|e| e.to_string())?
         .dangerous()
         .with_custom_certificate_verifier(Arc::new(PinnedServer::new(pin)))
-        .with_client_auth_cert(vec![cert], key)
-        .map_err(|e| e.to_string())?;
+        .with_client_cert_resolver(Arc::new(rustls::sign::SingleCertAndKey::from(key)));
     c.resumption = rustls::client::Resumption::disabled();
     c.enable_sni = false;
     c.enable_early_data = false;

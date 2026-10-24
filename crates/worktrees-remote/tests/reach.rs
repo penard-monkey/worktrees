@@ -27,6 +27,10 @@ use worktrees_remote::hosts::{new_host_id, HostRecord, HostStore};
 use worktrees_remote::key::DeviceKey;
 use worktrees_remote::pipe::PipeError;
 use worktrees_remote::reach::{self, Env, Lan, ReachError};
+use worktrees_remote::sign::{Keys, SignError};
+
+mod opaque;
+use opaque::{How, Opaque};
 use worktrees_remote::tls;
 
 const WAIT: Duration = Duration::from_secs(5);
@@ -148,7 +152,8 @@ struct World {
     dir: PathBuf,
     store: HostStore,
     rec: HostRecord,
-    key: DeviceKey,
+    key: Arc<DeviceKey>,
+    keys: Keys,
     routes: Arc<Mutex<HashMap<SocketAddr, SocketAddr>>>,
     dials: Arc<Mutex<Vec<SocketAddr>>>,
     rounds: Arc<AtomicUsize>,
@@ -177,11 +182,12 @@ fn world(rt: &tokio::runtime::Runtime, tag: &str, pin: &str) -> World {
         expiry: serde_json::json!({"idle_days": 30}),
         paired_at: 1_800_000_000,
     };
-    let key = DeviceKey::generate().unwrap();
+    let key = Arc::new(DeviceKey::generate().unwrap());
     store.add(&rec, &key).unwrap();
+    let keys = Keys::device_only(key.clone());
     // A port nothing listens on: a connect there is refused at once.
     let closed = rt.block_on(async { tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap().local_addr().unwrap() });
-    World { dir, store, rec, key, routes: Arc::default(), dials: Arc::default(), rounds: Arc::default(), closed }
+    World { dir, store, rec, key, keys, routes: Arc::default(), dials: Arc::default(), rounds: Arc::default(), closed }
 }
 
 impl World {
@@ -223,7 +229,7 @@ impl World {
 
     fn open(&self, rt: &tokio::runtime::Runtime, env: &Env) -> (Result<reach::Reached, ReachError>, Vec<String>) {
         let mut log = Vec::new();
-        let r = rt.block_on(reach::open(&self.store, &self.rec, &self.key, env, WAIT, &mut |m: &str| log.push(m.to_string())));
+        let r = rt.block_on(reach::open(&self.store, &self.rec, &self.keys, env, WAIT, &mut |m: &str| log.push(m.to_string())));
         (r, log)
     }
 }
@@ -475,7 +481,7 @@ fn not_found_says_where_it_looked_and_the_way_back() {
     assert!(e.contains("not looked for on the LAN: no browsing here") && e.contains("address code"), "{e}");
     let mut st = w.rec.clone();
     st.discovery_id = None;
-    let e = rt.block_on(reach::open(&w.store, &st, &w.key, &w.env(vec![], vec![en0()]), WAIT, &mut |_: &str| {})).err().unwrap().to_string();
+    let e = rt.block_on(reach::open(&w.store, &st, &w.keys, &w.env(vec![], vec![en0()]), WAIT, &mut |_: &str| {})).err().unwrap().to_string();
     assert!(e.contains("no discovery id") && e.contains("address code"), "{e}");
 }
 
@@ -509,3 +515,85 @@ fn an_address_code_is_kept_only_after_its_pinned_open() {
     assert_eq!(moved.addr, "192.168.1.9:7461");
     assert_eq!(w.store.get(&w.rec.id).unwrap().addr, "192.168.1.9:7461");
 }
+
+// ── the device key as a signer (an iPhone's: asked, never read) ─────────────
+
+impl World {
+    fn open_with(&self, rt: &tokio::runtime::Runtime, keys: &Keys, env: &Env) -> (Result<reach::Reached, ReachError>, Vec<String>) {
+        let mut log = Vec::new();
+        let r = rt.block_on(reach::open(&self.store, &self.rec, keys, env, WAIT, &mut |m: &str| log.push(m.to_string())));
+        (r, log)
+    }
+}
+
+/// A key that cannot sign is this device's trouble, not a host that moved:
+/// the call fails with the key's own reason before anything is dialled — the
+/// host at the kept address, which would admit it, sees no ClientHello — and
+/// no one looks on the LAN.
+#[test]
+fn a_key_that_cannot_sign_is_not_a_moved_host() {
+    let rt = rt();
+    let id = identity();
+    let w = world(&rt, "cannot-sign", &id.pin);
+    let key = Opaque::answering(Box::new(|_: usize, _: Vec<u8>| Err(SignError::Cancelled)) as How);
+    let kept = host(&rt, &id, &key.pin());
+    let real = host(&rt, &id, &key.pin());
+    w.route(KEPT, kept.at);
+    w.route("192.168.1.9:7461", real.at);
+    let before = w.file();
+    let (r, _) = w.open_with(&rt, &Keys::device_only(key.clone()), &w.env(vec![w.sighting("192.168.1.9:7461")], vec![en0()]));
+    assert!(matches!(r, Err(ReachError::Pipe(PipeError::Sign(SignError::Cancelled)))), "{:?}", r.as_ref().err().map(|e| e.to_string()));
+    assert_eq!(w.rounds.load(Ordering::SeqCst), 0, "no one looked on the LAN");
+    assert_eq!((kept.sni.lock().unwrap().len(), real.sni.lock().unwrap().len()), (0, 0), "nothing was dialled");
+    assert_eq!(key.asked(), 1);
+    assert_eq!(w.file(), before);
+}
+
+/// One reach call makes the device's certificate once, whatever it dials:
+/// here a stranger at the kept address, then the host found on the LAN —
+/// the key signs the certificate and the one handshake that completes, two
+/// signatures, not one certificate per address tried. (A Secure Enclave
+/// signature is the dial's cost on a phone; §4.7 tries up to four
+/// candidates a round.)
+#[test]
+fn a_reach_call_signs_one_certificate_whatever_it_dials() {
+    let rt = rt();
+    let (id, stranger) = (identity(), identity());
+    let w = world(&rt, "one-cert", &id.pin);
+    let key = Opaque::new();
+    let not_it = host(&rt, &stranger, &key.pin());
+    let real = host(&rt, &id, &key.pin());
+    w.route(KEPT, not_it.at);
+    w.route("192.168.1.9:7461", real.at);
+    let (r, _) = w.open_with(&rt, &Keys::device_only(key.clone()), &w.env(vec![w.sighting("192.168.1.9:7461")], vec![en0()]));
+    let r = r.unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(r.rec.addr, "192.168.1.9:7461");
+    assert_eq!(w.dialled(), [KEPT, "192.168.1.9:7461"]);
+    assert_eq!(key.asked(), 2, "one certificate, one handshake");
+}
+
+/// A candidate whose handshake this device's key refuses to sign ends the
+/// round there, with the key's reason: the key would refuse every other
+/// candidate too, and that is not the candidate's failure to be logged and
+/// tried past. The second advert is never dialled, and nothing is kept.
+#[test]
+fn a_key_that_refuses_a_candidates_handshake_ends_the_round() {
+    let rt = rt();
+    let id = identity();
+    let w = world(&rt, "refuses-round", &id.pin);
+    let key = Opaque::answering(Box::new(|n: usize, sig: Vec<u8>| if n == 0 { Ok(sig) } else { Err(SignError::Failed("the phone is locked".into())) }) as How);
+    let (a, b) = (host(&rt, &id, &key.pin()), host(&rt, &id, &key.pin()));
+    w.route("192.168.1.9:7461", a.at);
+    w.route("192.168.1.10:7461", b.at);
+    let before = w.file();
+    let (r, log) = w.open_with(&rt, &Keys::device_only(key.clone()), &w.env(vec![w.sighting("192.168.1.9:7461"), w.sighting("192.168.1.10:7461")], vec![en0()]));
+    match &r {
+        Err(ReachError::Pipe(PipeError::Sign(SignError::Failed(why)))) => assert_eq!(why, "the phone is locked"),
+        other => panic!("{:?}", other.as_ref().err().map(|e| e.to_string())),
+    }
+    assert_eq!(w.dialled(), [KEPT, "192.168.1.9:7461"], "the round stopped at the first candidate");
+    assert_eq!(b.sni.lock().unwrap().len(), 0);
+    assert_eq!(w.file(), before);
+    assert!(log.iter().any(|l| l.contains("192.168.1.9:7461") && l.contains("locked")), "{log:?}");
+}
+

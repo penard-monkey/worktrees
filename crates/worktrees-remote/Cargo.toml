@@ -32,6 +32,11 @@ futures-util = { version = "0.3", default-features = false, features = ["sink", 
 # The device's self-signed certificate over its key, made at each dial: the
 # server pins the SPKI, never the certificate.
 rcgen = { version = "0.14", default-features = false, features = ["ring"] }
+# Every signature a device key makes is checked against its own public half
+# before it is used (`sign::checked_sign`), with the ECDSA P-256 / SHA-256
+# verifier serve's step-up check uses. Already under rustls and rcgen, at the
+# spec worktrees-cli has: a new edge.
+ring = "0.17"
 # The pairing proof and comparison code (§2.2), and handshake v1's HMAC.
 hmac = "0.13"
 sha2 = { version = "0.11", default-features = false }

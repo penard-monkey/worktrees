@@ -352,6 +352,12 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   WebSocket as a PIPE — it parses no frame. Serve's tls.rs and pairing.rs
   import the client half from it (`PinnedServer`, the pin, the exporter
   labels, the pairing proof and code), so the two ends have one copy.
+  **A key there is a SIGNER, never bytes** (`sign::DeviceSigner`: its public
+  half and a DER signature, checked against that half before use), for the
+  certificate, the handshake, pairing and step-up alike, so the iOS app's
+  Secure Enclave keys plug in unchanged (`crates/worktrees-remote/IOS.md` is
+  their contract). Only `key.rs` holds key bytes, and
+  `only_the_key_file_holds_private_bytes` reads the sources to keep it so.
   Handshake v1 runs UNCHANGED over the pipe, keyed with
   `hex(exporter "EXPORTER-worktrees-remote-v1")` instead of serve.json's token
   — a departure from §4.5's first frame, so `ipcws.ts` stays the protocol's
