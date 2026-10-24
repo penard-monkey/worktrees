@@ -479,7 +479,7 @@ export const CONSOLE_ROWS: readonly string[] = [
   "skill_install_local", "skill_install_git", "device_set_scope", "device_disable", "device_enable",
   "device_set_expiry", "device_set_stepup", "devices_revoke_all_others", "pair_begin", "pair_decide",
   "pair_cancel", "pair_status", "identity_rotate", "set_slot_capacity", "remote_enable", "remote_disable",
-  "remote_status", "remote_advertise",
+  "remote_status", "remote_advertise", "remote_candidates", "device_rename",
 ];
 
 /** The device's capabilities on the host this window drives, from the remote

@@ -21,6 +21,9 @@ import { relaunch } from "@tauri-apps/plugin-process";
 import ProfilesPanel from "./ProfilesPanel";
 import PiPanel from "./PiPanel";
 import { FetchIntervalSection, TermHistorySection } from "./HostPolicyControls";
+import { RemoteAccessSection } from "./RemoteAccessPanel";
+import { DevicesSection } from "./DevicesPanel";
+import { dismissCat, useRemote } from "./remoteStore";
 import type { PiMcpStatus } from "./PiMcpPanel";
 import KimiPanel, { type KimiMcpStatus } from "./KimiPanel";
 import type { CodexPermissions, LayoutTile, Settings, ThemeId, ThemeSetting, UpdateInfo } from "./settings";
@@ -135,6 +138,11 @@ const CATS = [
   // Which engine this window drives, and pairing with another host (Phase 2
   // §4.4): the client's own, kept by the shim, never the engine's.
   { id: "hosts", label: "Hosts" },
+  // Phase 2: who else may reach this computer's engine. Two categories, as
+  // the proposal names them (§2.2 "Settings → Devices", §5.3's badge on
+  // Devices): the listener, and the devices that use it.
+  { id: "remote", label: "Remote access" },
+  { id: "devices", label: "Devices" },
   { id: "updates", label: "Updates" },
   { id: "data", label: "Data & Logs" },
   { id: "shortcuts", label: "Shortcuts" },
@@ -914,6 +922,16 @@ export function SettingsSheet({
   // the press and Settings stays put until they are gone.
   useEscape(onClose, open);
 
+  // Remote access and devices: the alerts' badge, retired once looked at.
+  const remote = useRemote();
+  const remoteBadge = (id: "remote" | "devices"): string | null => {
+    const n = remote.alerts.filter((a) => a.cat === id).length;
+    return n > 0 ? String(n) : null;
+  };
+  useEffect(() => {
+    if (open && (cat === "remote" || cat === "devices")) dismissCat(cat);
+  }, [open, cat, remote.alerts]);
+
   if (!open) return null;
 
   return (
@@ -950,6 +968,9 @@ export function SettingsSheet({
                   standing mark being a chore. A BROKEN server is a different
                   claim and earns the mark. */}
               {c.id === "claude" && mcpStatus?.state === "stale" ? <span className="upd-tag warn">!</span> : null}
+              {/* §5.3: an alert raises a badge on Devices (and a pause's
+                  question on Remote access) until the person looks. */}
+              {(c.id === "devices" || c.id === "remote") && remoteBadge(c.id) ? <span className="upd-tag warn" data-testid={`badge-${c.id}`}>{remoteBadge(c.id)}</span> : null}
             </button>
           ))}
         </nav>
@@ -973,6 +994,10 @@ export function SettingsSheet({
           </>}
 
           {cat === "ai" && <ProfilesPanel key={repo || "none"} repo={repo} onReport={onReport} />}
+
+          {cat === "remote" && <RemoteAccessSection onReport={onReport} />}
+
+          {cat === "devices" && <DevicesSection />}
 
           {cat === "claude" && <>
           {notGranted("mcp_status") ? <GrantNote cmd="mcp_status" label="Claude MCP server" focus="mcp-server" /> :

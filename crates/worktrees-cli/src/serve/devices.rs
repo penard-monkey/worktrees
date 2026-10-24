@@ -542,6 +542,8 @@ pub enum DeviceEvent {
     ExpiryChanged { subject: Subject, from: Expiry, to: Expiry },
     /// Step-up turned off (a widening) or back on.
     StepupChanged { subject: Subject, required: bool },
+    /// Renamed on the host.
+    Renamed { subject: Subject, from: String, to: String },
     /// Capabilities or projects changed. `widened` = the console added
     /// something; `reduced` = something was taken away.
     ScopeChanged { subject: Subject, by: Actor, from: Grant, to: Grant, widened: bool, reduced: bool },
@@ -1134,6 +1136,27 @@ impl DeviceRegistry {
             }
             d.stepup_required = required;
             events.push(DeviceEvent::StepupChanged { subject: d.subject(), required });
+            Ok(true)
+        })
+    }
+
+    /// Rename a device, on the host only (the Devices list), under the
+    /// display-name rule its pairing frame was held to (§2.2 step 4), so a
+    /// name cannot pass itself off as another device's. Not a security field
+    /// (§5.1's checkpoint leaves it out). A tombstone keeps the name it was
+    /// revoked under. `Ok(false)` if it already had this name.
+    pub fn rename(&self, id: &DeviceId, name: &str) -> Result<bool, String> {
+        name_ok(name)?;
+        self.mutate(|f, events| {
+            let d = f.device_mut(id)?;
+            if d.is_revoked() {
+                return Err(format!("device {id} is revoked"));
+            }
+            if d.name == name {
+                return Ok(false);
+            }
+            let from = std::mem::replace(&mut d.name, name.to_string());
+            events.push(DeviceEvent::Renamed { subject: d.subject(), from, to: name.to_string() });
             Ok(true)
         })
     }

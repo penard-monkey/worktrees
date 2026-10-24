@@ -2904,6 +2904,77 @@ mod devices {
         }
     }
 
+    // ── the host app's remote-access UI ──────────────────────────────────────
+
+    /// `pair_begin` answers its link as a QR the host app draws itself (no JS
+    /// QR library): level M of exactly the link — the matrix the CLI prints —
+    /// row-major, `1` dark, no quiet zone, with the three finder patterns
+    /// where a reader looks for them.
+    #[test]
+    fn a_window_answers_its_link_as_a_qr_the_page_draws() {
+        let e = engine("pairqr", vec![]);
+        e.bind_loopback();
+        let mut con = e.connect(Caller::console());
+        let r = e.begin(&mut con, &["read"], json!("*"), Value::Null);
+        let uri = r["ok"]["uri"].as_str().unwrap_or_else(|| panic!("{r}"));
+        let (n, m) = (r["ok"]["qr"]["size"].as_u64().unwrap_or_else(|| panic!("no qr: {r}")) as usize, r["ok"]["qr"]["modules"].as_str().unwrap());
+        assert_eq!(m.len(), n * n);
+        let want = qrcode::QrCode::with_error_correction_level(uri.as_bytes(), qrcode::EcLevel::M).unwrap();
+        let colors: String = want.to_colors().iter().map(|c| if *c == qrcode::Color::Dark { '1' } else { '0' }).collect();
+        assert_eq!((n, m), (want.width(), colors.as_str()));
+        let dark = |x: usize, y: usize| m.as_bytes()[y * n + x] == b'1';
+        for (ox, oy) in [(0, 0), (n - 7, 0), (0, n - 7)] {
+            for y in 0..7 {
+                for x in 0..7 {
+                    let ring = x == 0 || y == 0 || x == 6 || y == 6;
+                    let core = (2..=4).contains(&x) && (2..=4).contains(&y);
+                    assert_eq!(dark(ox + x, oy + y), ring || core, "finder at ({ox},{oy}) module ({x},{y})");
+                }
+            }
+        }
+        e.rpc(&mut con, "pair_cancel", json!({}));
+    }
+
+    /// The UI's two rows are the host's, like every device act: a device,
+    /// `admin` or not, is refused `console-only` before the body runs.
+    #[test]
+    fn the_host_uis_rows_are_the_consoles() {
+        let e = engine("hostui", vec![]);
+        let admin = enroll(&e.reg, "Admin", 1, &[Read, Admin, Write, Stream], Projects::All);
+        let mut dev = e.connect(caller(&admin));
+        for (cmd, args) in [("remote_candidates", json!({})), ("device_rename", json!({"id": admin.id.as_str(), "name": "Mine now"}))] {
+            assert_eq!(e.rpc(&mut dev, cmd, args)["err"], json!("console-only"), "{cmd}");
+        }
+        assert_eq!(e.reg.get(&PrincipalId::owner(), &admin.id).unwrap().name, "Admin", "nothing ran");
+    }
+
+    /// `device_rename`: the console renames a device under the display-name
+    /// rule its pairing frame was held to; a tombstone keeps the name it was
+    /// revoked under; the Devices list hears it as `devices:changed`.
+    #[test]
+    fn the_console_renames_a_device_and_the_list_hears_it() {
+        let e = engine("rename", vec![]);
+        let d = enroll(&e.reg, "Mac B", 1, &[Read], Projects::All);
+        let mut con = e.connect(Caller::console());
+        let r = e.rpc(&mut con, "device_rename", json!({"id": d.id.as_str(), "name": "Studio Mac"}));
+        assert_eq!(r["ok"], json!(true), "{r}");
+        assert_eq!(e.reg.get(&PrincipalId::owner(), &d.id).unwrap().name, "Studio Mac");
+        assert_eq!(e.rpc(&mut con, "device_rename", json!({"id": d.id.as_str(), "name": "Studio Mac"}))["ok"], json!(false), "unchanged");
+        let long = "x".repeat(65);
+        for bad in ["", "Bret\u{202E}enohP", "a\nb", long.as_str()] {
+            let r = e.rpc(&mut con, "device_rename", json!({"id": d.id.as_str(), "name": bad}));
+            assert!(r["err"].is_string(), "{bad:?}: {r}");
+        }
+        assert_eq!(e.reg.get(&PrincipalId::owner(), &d.id).unwrap().name, "Studio Mac", "a refused name changes nothing");
+        let heard = e.skipped.lock().unwrap().iter().any(|v| {
+            v["event"] == json!("devices:changed") && v["payload"]["event"] == json!("renamed") && v["payload"]["from"] == json!("Mac B") && v["payload"]["to"] == json!("Studio Mac")
+        });
+        assert!(heard, "{:?}", e.skipped.lock().unwrap());
+        assert_eq!(e.rpc(&mut con, "device_revoke", json!({"id": d.id.as_str()}))["ok"], json!(true));
+        let r = e.rpc(&mut con, "device_rename", json!({"id": d.id.as_str(), "name": "Gone"}));
+        assert!(r["err"].as_str().is_some_and(|m| m.contains("revoked")), "{r}");
+    }
+
     // ── step-up (§2.5) ───────────────────────────────────────────────────────
 
     fn iphone(reg: &DeviceRegistry, caps: &[Capability]) -> (DeviceRecord, super::super::stepup::testkit::StepUpKey) {

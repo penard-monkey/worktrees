@@ -5,9 +5,10 @@
 import { CONSOLE_ROWS, notGranted, remoteHost } from "./ipc";
 
 /** Why `label` is not shown here, as a settings section; nothing when this
- *  window may ask for `cmd`. */
-export function GrantNote({ cmd, label, focus }: { cmd: string; label: string; focus?: string }) {
-  if (!notGranted(cmd)) return null;
+ *  window may ask for `cmd`, unless serve already `refused` it (the backstop:
+ *  serve decides every call, and its refusal says the same). */
+export function GrantNote({ cmd, label, focus, refused = false }: { cmd: string; label: string; focus?: string; refused?: boolean }) {
+  if (!notGranted(cmd) && !refused) return null;
   const host = remoteHost() ?? "the host";
   return (
     <section className="setting" data-focus={focus} data-testid="grant-note">

@@ -18,9 +18,12 @@
 // says "Disconnected" only once the retries have stopped (the crash-loop
 // limit), with the reason and the log that says more.
 import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
-import { engineState, invoke, listen, onEngineState, reconnectEngine, remoteHost, type EngineState } from "./ipc";
+import { engineState, invoke, notGranted, onEngineState, reconnectEngine, remoteHost, type EngineState } from "./ipc";
+import { dismissAlert, labelOf, openRemoteSettings, useRemote, watchRemote } from "./remoteStore";
+import { alertText, type RemoteStatus } from "./devices";
 import "./tokens.css";
 import "./EngineGate.css";
+import "./RemoteAccess.css";
 
 /** Where serve logs: the place that says why it would not start. */
 const SERVE_LOG = "~/.cache/worktrees/serve.log";
@@ -70,10 +73,82 @@ export function EngineGate({ children }: { children: ReactNode }) {
     <>
       {children}
       {st.kind !== "up" && <EngineBanner st={st} />}
-      {/* The notice is about THIS machine's own engine; a window that drives a
-          paired host is not on it, and `remote_status` is the console's. */}
-      {st.kind === "up" && !remoteHost() && <RemoteNotice gen={st.gen} />}
+      {st.kind === "up" && <RemoteLayer key={st.gen} />}
     </>
+  );
+}
+
+/** Remote access's surfaces outside App: the watch on serve's console
+ *  events, and one corner (bottom-right, clear of the bottom band and a
+ *  right rail) holding the alerts above the notice that remote access is on.
+ *  Inside the gate while the engine is up, keyed by its `gen` so a reconnect
+ *  re-reads and re-listens; main.tsx mounts it beside an ungated App (the
+ *  harness). The left edge is the nav's and the rail's, whose bottom holds
+ *  the Settings gear an alert there would cover. */
+export function RemoteLayer() {
+  const { status: st, alerts } = useRemote();
+  // The notice and the alerts are about THIS machine's own engine: a window
+  // that drives a paired host is not on it, and `remote_status` is the
+  // console's (ipc.ts CONSOLE_ROWS). Its watch still names devices.
+  const onConsole = !notGranted("remote_status");
+  const on = onConsole && st !== null && st.state !== "off" && st.state !== "unreadable";
+  const shown = on || (onConsole && alerts.length > 0);
+  const at = useClearCorner(shown);
+  return (
+    <>
+      <RemoteWatch />
+      {shown && (
+        <div className="remote-corner" style={{ bottom: at.bottom, right: at.right }}>
+          {alerts.length > 0 && <RemoteAlerts />}
+          {on && st && <RemoteNotice st={st} />}
+        </div>
+      )}
+    </>
+  );
+}
+
+function RemoteWatch() {
+  useEffect(() => watchRemote(), []);
+  return null;
+}
+
+/** While remote access is on, the window says so, persistently (§4.1), and
+ *  when this app owns the engine, that quitting it ends remote access (§9.3,
+ *  decided 2026-10-22): an app-owned serve stops with the app, and a device
+ *  never keeps it alive. A click opens Settings → Remote access, which is
+ *  also the one-click way back to off. `remote_status` comes from
+ *  remoteStore.ts, re-read on every `remote:changed` (the console's alone). */
+function RemoteNotice({ st }: { st: RemoteStatus }) {
+  const words =
+    st.state === "paused" ? "Remote access is paused" : st.state === "listening" ? "Remote access is on" : "Remote access is on, not listening";
+  const found = st.state === "listening" && st.advert?.state === "registered" ? " · findable on this network" : "";
+  return (
+    <button className="remote-notice" title="Settings → Remote access" onClick={() => openRemoteSettings("remote")}>
+      <span className="remote-notice-in">
+        <span className={`engine-dot remote${st.state === "listening" ? "" : " starting"}`} aria-hidden />
+        <span>{words}{found}{st.owner === "app" ? " — quitting Worktrees turns it off" : ""}</span>
+      </span>
+    </button>
+  );
+}
+
+/** §5.3's alerts, for the person at this computer: a calm notice per alert,
+ *  one click to dismiss and one to look. Never a modal. */
+function RemoteAlerts() {
+  const alerts = useRemote().alerts;
+  return (
+    <div className="ra-alerts ra" aria-live="polite">
+      {alerts.map((a) => (
+        <div key={a.key} className="ra-alert" role="status" data-alert={a.key}>
+          <span className="ra-dot warn" aria-hidden />
+          <span className="ra-alert-txt">{a.payload.alert === "question" ? String(a.payload.text) : alertText(a, labelOf)}</span>
+          <span className="ra-alert-acts">
+            <button className="ctrl sm" onClick={() => { dismissAlert(a.key); openRemoteSettings(a.cat); }}>Review</button>
+            <button className="ra-alert-x" aria-label="Dismiss" title="Dismiss" onClick={() => dismissAlert(a.key)}>×</button>
+          </span>
+        </div>
+      ))}
+    </div>
   );
 }
 
@@ -103,41 +178,6 @@ function useClearCorner(on: boolean): { bottom: string; right: string } {
     };
   }, [on]);
   return { bottom: `calc(${at.bottom}px + var(--s2))`, right: `calc(${at.right}px + var(--s3))` };
-}
-
-/** `remote_status`, as much as the notice reads. */
-type RemoteStatus = { state: string; owner?: string | null };
-
-/** While remote access is on and this app owns the engine, the app says that
- *  quitting it ends remote access (Phase 2 §9.3, decided 2026-10-22): an
- *  app-owned serve stops with the app, and a device never keeps it alive. One
- *  line, nothing to click; the full remote-access UI is a follow-up. Read
- *  when the engine comes up and on every `remote:changed`, which only the
- *  console hears. */
-function RemoteNotice({ gen }: { gen: number }) {
-  const [st, setSt] = useState<RemoteStatus | null>(null);
-  useEffect(() => {
-    let live = true;
-    const read = () =>
-      invoke<RemoteStatus>("remote_status")
-        .then((s) => live && setSt(s))
-        .catch(() => live && setSt(null));
-    read();
-    const un = listen<RemoteStatus>("remote:changed", () => read());
-    return () => {
-      live = false;
-      void un.then((f) => f());
-    };
-  }, [gen]);
-  const on = st !== null && st.state !== "off" && st.state !== "unreadable" && st.owner === "app";
-  const at = useClearCorner(on);
-  if (!on) return null;
-  return (
-    <div className="remote-notice" role="status" style={{ bottom: at.bottom, right: at.right }}>
-      <span className="engine-dot remote" aria-hidden />
-      Remote access is on — quitting Worktrees turns it off
-    </div>
-  );
 }
 
 /** When the next try is, what the one in flight is doing, or why it is not

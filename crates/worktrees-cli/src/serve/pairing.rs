@@ -240,6 +240,11 @@ impl Pairing {
         *self.bind.lock().unwrap() = bind;
     }
 
+    /// This host's name, as a link and the device's screen give it.
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
     /// The window now, or how the last one ended.
     pub fn status(&self) -> Status {
         let cur = self.cur.lock().unwrap();
@@ -314,7 +319,7 @@ impl Pairing {
             let (ended, device) = me.attempt(wid, listener, bind.rule, cfg, secret, deadline, stop, why).await;
             me.finish(wid, ended, device);
         });
-        Ok(json!({ "uri": uri, "expires_at": expires_at, "pin": id.pin(), "host": self.host }))
+        Ok(json!({ "uri": uri, "expires_at": expires_at, "pin": id.pin(), "host": self.host, "qr": qr(&uri)? }))
     }
 
     /// Close the window, if one is open (`pair_cancel`). A device waiting on
@@ -670,6 +675,15 @@ fn unhex32(s: &str) -> Option<[u8; 32]> {
         *b = u8::from_str_radix(s.get(2 * i..2 * i + 2)?, 16).ok()?;
     }
     Some(out)
+}
+
+/// The link as a QR's modules, for the host app to draw (§2.2 step 2): level
+/// M, the matrix `worktrees serve pair` prints, `size` modules a side and
+/// `modules` row-major, `1` dark. No quiet zone: the page draws its margin.
+pub fn qr(uri: &str) -> Result<Value, String> {
+    let q = qrcode::QrCode::with_error_correction_level(uri.as_bytes(), qrcode::EcLevel::M).map_err(|e| format!("the pairing link does not fit a QR: {e}"))?;
+    let modules: String = q.to_colors().iter().map(|c| if *c == qrcode::Color::Dark { '1' } else { '0' }).collect();
+    Ok(json!({ "size": q.width(), "modules": modules }))
 }
 
 /// This host's name, for the link and the device's screen: the system host

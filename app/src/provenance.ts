@@ -17,11 +17,21 @@ export type LaunchedBy = By & { cross_project?: string };
  *  `path` is relative to the place, `at` in epoch seconds. */
 export type RemoteInstruction = By & { path: string; at: number };
 
-/** What a device is called on screen. Device NAMES are slice 5's registry
- *  (#544): until it lands, the id. */
+/** The registry's names, by device id: `devices_list`, as remoteStore.ts
+ *  last read it. Tombstones included, so a revoked device that edited a file
+ *  is still named. */
+const names = new Map<string, string>();
+
+export function setDeviceNames(next: Iterable<[string, string]>): void {
+  names.clear();
+  for (const [id, name] of next) names.set(id, name);
+}
+
+/** What a device is called on screen: its name in the registry, or its id
+ *  until the list has been read (or on a window that may not read it). */
 export function deviceLabel(d: DeviceRef): string {
   if (d.kind === "console") return "this computer";
-  return d.id; // slice 5: the registry's name for d.id
+  return names.get(d.id) ?? d.id;
 }
 
 /** True for a paired device — what the place header speaks about. The

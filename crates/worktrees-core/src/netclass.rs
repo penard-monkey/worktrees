@@ -587,6 +587,75 @@ pub fn linklocal_candidates(ifaces: &[Iface], ip: IpAddr) -> Vec<&Iface> {
         .collect()
 }
 
+impl Class {
+    /// The class's name on the wire and in the audit log.
+    pub fn name(self) -> &'static str {
+        match self {
+            Class::Rfc1918 => "rfc1918",
+            Class::Cgnat => "cgnat",
+            Class::LinkLocal => "link-local",
+            Class::UniqueLocal => "ula",
+        }
+    }
+}
+
+/// One address the host may turn remote access on at: what the enable
+/// dialog offers (§4.1, "the dialog offers the interface's stable address").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Candidate {
+    pub ip: IpAddr,
+    pub prefix: u8,
+    pub iface: String,
+    pub class: Class,
+    /// Overlay mode (a tunnel); LAN mode otherwise.
+    pub point_to_point: bool,
+    /// `100.64.0.0/10` on an interface that is not a tunnel ([`Bound::shared_space`]).
+    pub shared_space: bool,
+}
+
+/// Every address a bind would take now, in the order a person should meet
+/// them: a LAN address first, then shared space (Tailscale), unique-local and
+/// link-local last, IPv4 before IPv6 inside a class, the OS's order otherwise.
+/// [`at_bind`]'s rules decide, never a second copy of them: up and running,
+/// not loopback, and [`check_held`] (the classifier, a stable address, a
+/// subnet inside its row, not a network or broadcast address). Link-local is
+/// left out where nothing could dial it: on a tunnel, which carries no
+/// link-local traffic, and on the macOS interfaces with no service.
+pub fn candidates(ifaces: &[Iface]) -> Vec<Candidate> {
+    let no_service = |name: &str| NO_SERVICE.iter().any(|p| name.strip_prefix(p).is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit())));
+    let mut out: Vec<Candidate> = ifaces
+        .iter()
+        .filter(|i| i.usable() && !i.loopback)
+        .flat_map(|i| {
+            i.addrs.iter().filter_map(move |a| {
+                let class = check_held(a).ok()?;
+                if class == Class::LinkLocal && (i.point_to_point || no_service(&i.name)) {
+                    return None;
+                }
+                Some(Candidate {
+                    ip: a.ip,
+                    prefix: a.prefix,
+                    iface: i.name.clone(),
+                    class,
+                    point_to_point: i.point_to_point,
+                    shared_space: class == Class::Cgnat && !i.point_to_point,
+                })
+            })
+        })
+        .collect();
+    let rank = |c: &Candidate| {
+        let class = match c.class {
+            Class::Rfc1918 => 0,
+            Class::Cgnat => 1,
+            Class::UniqueLocal => 2,
+            Class::LinkLocal => 3,
+        };
+        (class, c.ip.is_ipv6())
+    };
+    out.sort_by_key(rank);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -800,6 +869,46 @@ mod tests {
             loopback: name.starts_with("lo"),
             point_to_point: ptp,
             addrs: addrs.iter().map(|(a, p)| IfAddr { ip: ip(a), prefix: *p, temporary: false, deprecated: false }).collect(),
+        }
+    }
+
+    #[test]
+    fn the_enable_dialog_offers_only_what_a_bind_would_take() {
+        let mut en0 = iface("en0", false, &[("fe80::1", 64), ("fd00::5", 64), ("2001:db8::5", 64), ("192.168.1.5", 24)]);
+        en0.addrs.push(IfAddr { ip: ip("fd00::77"), prefix: 64, temporary: true, deprecated: false });
+        en0.addrs.push(IfAddr { ip: ip("fd00::78"), prefix: 64, temporary: false, deprecated: true });
+        let mut en3 = iface("en3", false, &[("192.168.9.2", 24)]);
+        en3.running = false;
+        let ifs = [
+            iface("lo0", false, &[("127.0.0.1", 8), ("fe80::1", 64)]),
+            en0,
+            iface("utun4", true, &[("fe80::2", 64), ("100.101.102.103", 32), ("fd7a:115c:a1e0::1", 128)]),
+            iface("awdl0", false, &[("fe80::3", 64)]),
+            iface("en7", false, &[("100.70.0.9", 16), ("169.254.7.7", 16)]),
+            iface("en9", false, &[("10.0.0.0", 24), ("10.1.0.5", 7)]),
+            en3,
+            iface("en5", false, &[("8.8.8.8", 24)]),
+        ];
+        let c = candidates(&ifs);
+        let got: Vec<(String, &str)> = c.iter().map(|c| (c.ip.to_string(), c.iface.as_str())).collect();
+        let want = [
+            ("192.168.1.5", "en0"),
+            ("100.101.102.103", "utun4"),
+            ("100.70.0.9", "en7"),
+            ("fd00::5", "en0"),
+            ("fd7a:115c:a1e0::1", "utun4"),
+            ("169.254.7.7", "en7"),
+            ("fe80::1", "en0"),
+        ];
+        assert_eq!(got, want.map(|(a, i)| (a.to_string(), i)));
+        let by = |a: &str| c.iter().find(|c| c.ip == ip(a)).unwrap();
+        assert_eq!((by("100.101.102.103").point_to_point, by("100.101.102.103").shared_space), (true, false));
+        assert_eq!((by("100.70.0.9").point_to_point, by("100.70.0.9").shared_space), (false, true));
+        assert_eq!((by("192.168.1.5").class, by("192.168.1.5").prefix), (Class::Rfc1918, 24));
+        // Each one is an address `at_bind` takes, on the interface it names.
+        for c in &c {
+            let b = at_bind(&parse_bind(&c.ip.to_string(), &c.iface).unwrap(), &ifs).unwrap();
+            assert_eq!((b.class, b.point_to_point, b.shared_space), (c.class, c.point_to_point, c.shared_space), "{}", c.ip);
         }
     }
 
