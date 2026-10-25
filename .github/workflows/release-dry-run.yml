@@ -1,7 +1,7 @@
 name: release dry run
 # A pull request that touches the packaging runs the release's own workflow,
 # release.yml, with `dry_run: true`: the CLI and app bundles for both Linux
-# arches plus the native Mac app, every assertion a release makes, signing with
+# arches plus both Mac apps, every assertion a release makes, signing with
 # a throwaway key, and latest.json + checksums assembled — then it stops. No
 # secrets are passed (release.yml refuses to dry-run with the real key), and the
 # token is read-only, so nothing here can publish.

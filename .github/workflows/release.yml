@@ -34,9 +34,11 @@ permissions:
 
 jobs:
   # The run's one decision: which tag, and which targets. A release builds every
-  # row; a dry run builds the rows marked `dry` — both Linux arches and the
-  # native Mac app — and takes its tag from Cargo.toml, so the version gates and
-  # the sidecar's `--version` check still compare real values.
+  # row; a dry run builds the rows marked `dry` — every app bundle (both Linux
+  # arches and both Mac apps; the Intel one is cross-built, and only a dry run
+  # that builds it catches what that changes: v0.44.1's first run failed there)
+  # and the Linux CLIs — and takes its tag from Cargo.toml, so the version gates
+  # and the sidecar's `--version` check still compare real values.
   plan:
     runs-on: ubuntu-latest
     outputs:
@@ -62,7 +64,7 @@ jobs:
             {"os": "ubuntu-latest", "target": "aarch64-unknown-linux-gnu", "dry": true}]'
           app='[
             {"os": "macos-latest",     "target": "aarch64-apple-darwin",      "dry": true},
-            {"os": "macos-latest",     "target": "x86_64-apple-darwin",       "dry": false},
+            {"os": "macos-latest",     "target": "x86_64-apple-darwin",       "dry": true},
             {"os": "ubuntu-latest",    "target": "x86_64-unknown-linux-gnu",  "dry": true},
             {"os": "ubuntu-24.04-arm", "target": "aarch64-unknown-linux-gnu", "dry": true}]'
           if [ "$DRY_RUN" = true ]; then

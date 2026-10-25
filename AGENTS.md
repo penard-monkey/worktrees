@@ -1866,7 +1866,7 @@ wait loop on it never ended and a sandbox app ran for two hours.
    **release-dry-run.yml** calls the same file with `dry_run: true` on every
    PR touching the packaging (the three workflows, `tauri*.conf.json`,
    `sidecar.sh`, `app/package.json`, the Makefile, install.sh): both Linux
-   arches + the native Mac app, every assertion, a throwaway updater key made
+   arches + both Mac apps, every assertion, a throwaway updater key made
    in the job, latest.json assembled, no secrets passed — and the bundle step
    refuses the real key in a dry run. So a release runs the steps the last
    packaging PR already ran (~30 runner-minutes, ~12 wall-clock, $0 on a
