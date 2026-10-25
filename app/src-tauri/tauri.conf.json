@@ -38,6 +38,7 @@
     ],
     "createUpdaterArtifacts": true,
     "macOS": {
+      "signingIdentity": "-",
       "files": {
         "MacOS/worktrees": "binaries/worktrees"
       }

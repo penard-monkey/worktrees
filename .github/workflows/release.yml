@@ -147,9 +147,10 @@ jobs:
   # cross-built on arm64 and never executed. Linux is never cross-built: a
   # WebKitGTK app links the distro's GTK stack, so each Linux arch is built on
   # its own runner (ubuntu-24.04-arm is a GitHub-hosted runner, free for public
-  # repositories). Apple-unsigned — install.sh strips the quarantine attr on an
-  # explicit, checksum-verified install; local `make install-app` needs neither.
-  # Signing/notarization is the later distribution tier (task plan).
+  # repositories). macOS bundles are ad-hoc signed as complete apps: a linker-
+  # signed executable alone leaves CodeResources absent and fails strict bundle
+  # verification. install.sh still strips quarantine on an explicit,
+  # checksum-verified install; Developer ID + notarization is the later tier.
   # Each bundle carries the CLI for its own arch as a private sidecar — macOS
   # Contents/MacOS/worktrees, Linux usr/lib/worktrees/worktrees — the app's to
   # use, never put on PATH by us. tmux and git are not bundled anywhere: the
@@ -342,8 +343,9 @@ jobs:
       # Same rule as the viewer below: assert the sidecar is IN what ships.
       # macOS: the .app directory is never uploaded — the updater tarball is,
       # and both install.sh and the in-app updater fetch it — so the check runs
-      # twice: on the bundle (did the bundler take it?) and on that tarball
-      # unpacked (did it survive tar, executable bit included?). Linux: the
+      # twice: on the bundle (did the bundler take it, and seal the app?) and on
+      # that tarball unpacked (did it survive tar, seal and executable bit
+      # included?). Linux: the
       # AppImage and the .deb ARE what ships, and the check unpacks each without
       # running anything in it. The check is: a regular executable file, this
       # target's arch and only that (`lipo` / the ELF header), the same as the
