@@ -152,6 +152,14 @@ stage() {
   rm -f "$STAGED"
   cp "$built" "$STAGED"
   chmod 0755 "$STAGED"
+  # tauri seals a Mac bundle, and codesign refuses to seal one holding unsigned
+  # code ("code object is not signed at all / In subcomponent: …/worktrees").
+  # The linker signs an arm64 build by itself; a cross-built x86_64 one has no
+  # signature at all, and v0.44.1's first release run died on exactly that.
+  # Ad-hoc sign it here for both, so the bundle step never meets bare code.
+  case "$triple" in
+    *-apple-darwin) codesign --force --sign - "$STAGED" || die "could not ad-hoc sign $STAGED" ;;
+  esac
   echo "staged: ${STAGED#"$ROOT/"} (worktrees $(marker_version "$STAGED"), $triple)"
 }
 
