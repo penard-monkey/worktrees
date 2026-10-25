@@ -28,8 +28,10 @@
 #       <bundle> is a worktrees.app directory (macOS), or an .AppImage or .deb
 #       (Linux), which are UNPACKED, never run. Asserts the sidecar is a regular
 #       executable file, of the target's architecture and only that (`lipo`, or
-#       the ELF header), the same as the GUI binary beside it, at <version>; on
-#       Linux also that nothing called worktrees is in usr/bin. `--version` is
+#       the ELF header), the same as the GUI binary beside it, at <version>.
+#       On macOS it also verifies the complete bundle's signature and resource
+#       seal; without it Finder can report a browser download as damaged. On
+#       Linux it asserts that nothing called worktrees is in usr/bin. `--version` is
 #       RUN only when the sidecar is native to this machine; a cross-arch one is
 #       never executed and its version is read as data instead, from the marker
 #       stale.rs embeds.
@@ -217,6 +219,11 @@ check() {
       [ -d "$bundle/Contents/MacOS" ] || die "no app bundle at $bundle"
       verify "$bundle/Contents/MacOS/$NAME" "Contents/MacOS/$NAME" \
         "$bundle/Contents/MacOS/app" macos "$arch" "$triple" "$want"
+      # A linker-signed GUI executable is not a signed .app: without the
+      # bundle's CodeResources seal, Gatekeeper can call a browser download
+      # damaged. Check both the build output and the shipped updater tarball.
+      codesign --verify --deep --strict --verbose=4 "$bundle" \
+        || die "$bundle has an invalid macOS bundle signature"
       ;;
     *-linux-gnu)
       command -v readelf >/dev/null 2>&1 || die "readelf not found (binutils)"

@@ -5,6 +5,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Fixed
+- Seal macOS app bundles with an ad-hoc signature before packaging them, and
+  verify the shipped tarball's bundle signature. The v0.44.0 browser download
+  lacked `CodeResources` and failed macOS code-signature verification.
+
 ## [0.44.0] - 2026-10-24
 
 ### Added

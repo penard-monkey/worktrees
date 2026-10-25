@@ -78,7 +78,7 @@ dev-app:
 	  --config '{"build":{"beforeDevCommand":"corepack pnpm dev"}}'
 
 # Build the Tauri desktop app + install it: macOS → /Applications/worktrees.app
-# (local builds aren't quarantined, so no signing needed); Linux → the AppImage
+# (ad-hoc signed as a complete bundle, but not quarantined); Linux → the AppImage
 # at ~/Applications/worktrees.AppImage (install.sh --with-app also writes a
 # desktop entry; this does not). App updates = git pull + this.
 # APPDIR=<dir> installs somewhere else — a scratch dir, to inspect a build
