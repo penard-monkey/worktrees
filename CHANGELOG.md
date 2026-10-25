@@ -5,10 +5,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.44.1] - 2026-10-25
+
 ### Fixed
-- Seal macOS app bundles with an ad-hoc signature before packaging them, and
-  verify the shipped tarball's bundle signature. The v0.44.0 browser download
-  lacked `CodeResources` and failed macOS code-signature verification.
+- The macOS app downloaded from the release page opened as "damaged". No
+  release had signed the app as a whole: the Apple Silicon build signed only its
+  main program and the Intel build nothing, so macOS's signature check failed
+  for every Mac download back to at least 0.30.0. The app is now signed as a
+  complete bundle, and a release whose signature does not verify cannot be
+  published. It is still not notarized, so macOS may warn that it cannot verify
+  the developer; `install.sh --with-app` installs it without that warning.
+  Installs through install.sh or the in-app updater were never affected.
 
 ## [0.44.0] - 2026-10-24
 
