@@ -41,6 +41,8 @@
   font-size: var(--fs-meta); color: var(--txt); text-decoration: underline;
 }
 .ra-linkbtn:hover { color: var(--txt-hi); }
+.ra-ask .ra-linkbtn, [data-testid="pair-why"] .ra-linkbtn { display: block; margin-top: var(--s2); }
+.ra-linkbtn:disabled { opacity: 0.5; cursor: default; }
 
 /* the address picker */
 .ra-picker {
@@ -172,3 +174,9 @@
   font-size: var(--fs-body); line-height: 1; color: var(--txt);
 }
 .ra-alert-x:hover { color: var(--txt-hi); }
+
+/* `.enter-btn` has no disabled style of its own (only `.sync-foot`'s), so a
+   disabled "Pair a device…" kept its full accent and its hover glow: with
+   remote access paused it looked live and did nothing when clicked. Scoped to
+   these panels; the same values as `.sync-foot .enter-btn:disabled`. */
+.ra .enter-btn:disabled { opacity: 0.45; cursor: default; filter: none; }

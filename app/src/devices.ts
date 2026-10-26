@@ -88,6 +88,39 @@ export type PairStatus =
 /** `pair_begin`'s answer. `qr.modules` is row-major, `1` dark. */
 export type PairBegin = { uri: string; expires_at: number; pin: string; host: string; qr: { size: number; modules: string } };
 
+/** devices.rs `MAX_DEVICES`: revoked tombstones do not count. */
+export const MAX_DEVICES = 16;
+
+/** Why the host cannot begin a pairing window right now. Serve's status is
+ *  the authority; the same words appear beside the button and in an open
+ *  pairing sheet if the listener stops while that sheet is on screen. */
+export function pairingBlock(status: RemoteStatus | null, full: boolean, statusErr: string | null = null): {
+  kind: RemoteStatus["state"] | "loading" | "unavailable" | "full";
+  message: string;
+} | null {
+  if (!status) {
+    return statusErr
+      ? { kind: "unavailable", message: `Remote access could not be read: ${statusErr}. Open Remote access to check it.` }
+      : { kind: "loading", message: "Reading remote access before pairing…" };
+  }
+  switch (status.state) {
+    case "off":
+      return { kind: "off", message: "A device pairs over remote access: turn it on in Settings → Remote access first." };
+    case "paused": {
+      const reason = (status.paused?.trim() || `${status.address ?? "The configured address"} is no longer available on ${status.iface ?? "its interface"}`).replace(/[.!?]+$/, "");
+      return { kind: "paused", message: `Remote access is paused: ${reason}. The configured address is no longer valid for pairing. Choose another address in Remote access, or turn remote access off.` };
+    }
+    case "error":
+      return { kind: "error", message: `Remote access is on but not listening: ${status.error ?? "unknown error"}. Open Remote access to choose another address or turn it off.` };
+    case "starting":
+      return { kind: "starting", message: `Remote access is starting on ${status.address ?? "its configured address"} (${status.iface ?? "its interface"}). Wait for it to start listening before pairing.` };
+    case "unreadable":
+      return { kind: "unreadable", message: `Remote access settings cannot be read: ${status.error ?? "unknown error"}. Open Remote access to remove or repair the settings file.` };
+    case "listening":
+      return full ? { kind: "full", message: `${MAX_DEVICES} devices are paired: revoke one before pairing another.` } : null;
+  }
+}
+
 // ── capabilities ─────────────────────────────────────────────────────────────
 
 /** §3.1's presets; `admin` is a separate toggle on top of any of them. The

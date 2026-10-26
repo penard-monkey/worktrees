@@ -60,7 +60,7 @@ const constOf = (src, name) => Number(new RegExp(`pub const ${name}: \\w+ = (\\d
 eq("DEFAULT_IDLE_DAYS is devices.rs's", D.DEFAULT_IDLE_DAYS, constOf(devices, "DEFAULT_IDLE_DAYS"));
 eq("MAX_IDLE_DAYS is devices.rs's", D.MAX_IDLE_DAYS, constOf(devices, "MAX_IDLE_DAYS"));
 const panel = src("DevicesPanel.tsx");
-eq("DevicesPanel's MAX_DEVICES is devices.rs's", Number(/const MAX_DEVICES = (\d+);/.exec(panel)?.[1]), constOf(devices, "MAX_DEVICES"));
+eq("MAX_DEVICES is devices.rs's", D.MAX_DEVICES, constOf(devices, "MAX_DEVICES"));
 const snake = (s) => s.replace(/[A-Z]/g, (c, i) => (i ? "_" : "") + c.toLowerCase());
 const variants = (src, name) => {
   const start = src.indexOf(`pub enum ${name} {`);
@@ -162,8 +162,8 @@ for (const [file, fn, row] of [["RemoteAccessPanel.tsx", "RemoteAccessSection", 
   eq(`${fn}: nothing reads or renders a control before the gate`, gate ? READS.test(body.slice(0, gate.index)) : true, false);
 }
 const pair = src("PairSheet.tsx");
-eq("the pair sheet's begin is greyed with notGranted's reason",
-  /const problem = notGranted\("pair_begin"\) \?\? scopeProblem\(scope\);/.test(pair) && /disabled=\{busy \|\| !!problem\} title=\{problem \?\? undefined\} onClick=\{begin\}/.test(pair), true);
+eq("the pair sheet's begin is greyed with the remote status and notGranted's reason",
+  /const problem = notGranted\("pair_begin"\) \?\? remoteProblem\?\.message \?\? scopeProblem\(scope\);/.test(pair) && /disabled=\{busy \|\| !!problem\} title=\{problem \?\? undefined\} onClick=\{begin\}/.test(pair), true);
 const watch = fnBody(store, "watchRemote");
 const stop = watch.indexOf('if (notGranted("remote_status")) return');
 eq("watchRemote is found", watch.length > 0, true);

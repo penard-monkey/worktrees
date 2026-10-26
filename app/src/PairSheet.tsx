@@ -17,7 +17,7 @@ import { useEscape } from "./useEscape";
 import { useRemote } from "./remoteStore";
 import { ExpiryEditor, RunsLabel, ScopeEditor, scopeProblem, useNow, useProjects, useUnprompted, type Scope } from "./remoteui";
 import {
-  capsWords, codeSpaced, DEFAULT_EXPIRY, ENDED_WORDS, expiryWords, PLATFORM_LABEL, qrPath, scopeWords, secondsLeft,
+  capsWords, codeSpaced, DEFAULT_EXPIRY, ENDED_WORDS, expiryWords, pairingBlock, PLATFORM_LABEL, qrPath, scopeWords, secondsLeft,
   type DeviceRecord, type Expiry, type PairBegin, type PairStatus,
 } from "./devices";
 import "./RemoteAccess.css";
@@ -39,7 +39,7 @@ function Qr({ size, modules }: { size: number; modules: string }) {
   );
 }
 
-export function PairSheet({ onClose }: { onClose: () => void }) {
+export function PairSheet({ onClose, onRemote }: { onClose: () => void; onRemote: () => void }) {
   const r = useRemote();
   const host = r.status?.host;
   const projects = useProjects();
@@ -53,6 +53,7 @@ export function PairSheet({ onClose }: { onClose: () => void }) {
   const [paired, setPaired] = useState<DeviceRecord | null>(null);
   const [copied, setCopied] = useState(false);
   const now = useNow(250);
+  const remoteProblem = pairingBlock(r.status, false, r.statusErr);
 
   // The window as serve has it, while one is ours.
   useEffect(() => {
@@ -66,8 +67,9 @@ export function PairSheet({ onClose }: { onClose: () => void }) {
 
   // Another window (`worktrees serve pair`, say) replaced ours.
   const replaced = !!win && st?.state === "open" && st.uri !== win.uri;
+  const listenerStopped = !!r.status && r.status.state !== "listening";
   const phase: "scope" | "open" | "pending" | "closed" =
-    !win ? "scope" : replaced ? "closed" : st?.state === "pending" ? "pending" : st?.state === "closed" ? "closed" : "open";
+    !win ? "scope" : listenerStopped ? "closed" : replaced ? "closed" : st?.state === "pending" ? "pending" : st?.state === "closed" ? "closed" : "open";
   const live = phase === "open" || phase === "pending";
 
   const liveRef = useRef(live);
@@ -81,11 +83,12 @@ export function PairSheet({ onClose }: { onClose: () => void }) {
     liveRef.current = false;
     onClose();
   };
+  const openRemote = () => { close(); onRemote(); };
   useEscape(close);
 
   // Unreachable from a remote window (Devices says why instead), and greyed
   // with the reason if it ever is.
-  const problem = notGranted("pair_begin") ?? scopeProblem(scope);
+  const problem = notGranted("pair_begin") ?? remoteProblem?.message ?? scopeProblem(scope);
   const begin = async () => {
     setBusy(true);
     setErr(null);
@@ -135,6 +138,15 @@ export function PairSheet({ onClose }: { onClose: () => void }) {
           )}
         </header>
         <div className="sync-body">
+          {remoteProblem && remoteProblem.kind !== "loading" && (
+            <div className="ra-ask" role="alert" data-testid={remoteProblem.kind === "paused" ? "pair-paused" : "pair-unavailable"}>
+              <span className="ra-dot warn" aria-hidden />
+              <div>
+                <div>{remoteProblem.message}</div>
+                <button className="ra-linkbtn" disabled={busy} onClick={openRemote}>Open Remote access</button>
+              </div>
+            </div>
+          )}
           {phase === "scope" && (
             <>
               <div className="ra-line">
@@ -192,7 +204,7 @@ export function PairSheet({ onClose }: { onClose: () => void }) {
             <div className="ra-outcome" role="status" data-testid="pair-outcome">
               <span className={`ra-dot ${paired || (st?.state === "closed" && st.ended === "paired") ? "on" : "off"}`} aria-hidden />
               <div>
-                {replaced ? ENDED_WORDS.superseded : st?.state === "closed" ? ENDED_WORDS[st.ended] ?? st.ended : "The window is closed."}
+                {listenerStopped && !paired ? "The pairing window closed when remote access stopped listening." : replaced ? ENDED_WORDS.superseded : st?.state === "closed" ? ENDED_WORDS[st.ended] ?? st.ended : "The window is closed."}
                 {paired && <div className="ra-line">{paired.name} is paired. It is listed under Devices, where you can change or revoke it.</div>}
               </div>
             </div>
