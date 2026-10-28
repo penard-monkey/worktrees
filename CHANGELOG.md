@@ -5,6 +5,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Fixed
+- When a configured remote-access address disappears (for example, after
+  Tailscale disconnects), Settings → Devices now explains why pairing is
+  unavailable and links to Remote access to choose another address or turn it
+  off. A pairing window that was already open shows the same pause reason.
+
 ## [0.44.1] - 2026-10-25
 
 ### Fixed

@@ -997,7 +997,7 @@ export function SettingsSheet({
 
           {cat === "remote" && <RemoteAccessSection onReport={onReport} />}
 
-          {cat === "devices" && <DevicesSection />}
+          {cat === "devices" && <DevicesSection onRemote={() => setCat("remote")} />}
 
           {cat === "claude" && <>
           {notGranted("mcp_status") ? <GrantNote cmd="mcp_status" label="Claude MCP server" focus="mcp-server" /> :

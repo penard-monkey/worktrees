@@ -11,15 +11,12 @@ import { ConfirmDialog, ExpiryEditor, RunsLabel, ScopeEditor, scopeProblem, useN
 import { PairSheet } from "./PairSheet";
 import { GrantNote } from "./GrantNote";
 import {
-  capsWords, deviceState, expiryWords, hasPresenceKey, PLATFORM_LABEL, scopeWords, seenWords, stepupWords,
+  capsWords, deviceState, expiryWords, hasPresenceKey, MAX_DEVICES, pairingBlock, PLATFORM_LABEL, scopeWords, seenWords, stepupWords,
   type DeviceRecord, type Expiry,
 } from "./devices";
 import "./RemoteAccess.css";
 
-/** devices.rs `MAX_DEVICES`: revoked tombstones do not count. */
-const MAX_DEVICES = 16;
-
-export function DevicesSection() {
+export function DevicesSection({ onRemote }: { onRemote: () => void }) {
   const r = useRemote();
   // Pairing and managing devices are the host console's (ipc.ts
   // CONSOLE_ROWS); serve's `console-only` is the backstop, in the same words.
@@ -27,10 +24,10 @@ export function DevicesSection() {
   if (notGranted("pair_begin") || notConsole(r)) {
     return <GrantNote cmd="pair_begin" label="Paired devices" focus="devices" refused />;
   }
-  return <DevicesList r={r} />;
+  return <DevicesList r={r} onRemote={onRemote} />;
 }
 
-function DevicesList({ r }: { r: RemoteState }) {
+function DevicesList({ r, onRemote }: { r: RemoteState; onRemote: () => void }) {
   const [pairing, setPairing] = useState(false);
   const [showRevoked, setShowRevoked] = useState(false);
   const unprompted = useUnprompted();
@@ -40,11 +37,8 @@ function DevicesList({ r }: { r: RemoteState }) {
   const list = r.devices ?? [];
   const current = list.filter((d) => d.revoked_at == null);
   const revoked = list.filter((d) => d.revoked_at != null);
-  const listening = r.status?.state === "listening";
   const full = current.length >= MAX_DEVICES;
-  const why = !listening
-    ? "A device pairs over remote access: turn it on in Settings → Remote access first."
-    : full ? `${MAX_DEVICES} devices are paired: revoke one before pairing another.` : null;
+  const why = pairingBlock(r.status, full, r.statusErr);
   return (
     <>
       <section className="setting ra" data-focus="devices">
@@ -54,11 +48,21 @@ function DevicesList({ r }: { r: RemoteState }) {
           reaches only what it was granted, from a key that never leaves it, and only while remote access is on.
         </div>
         <div className="ver-actions">
-          <button className="enter-btn sm" data-track="pair-device" disabled={!!why} title={why ?? undefined} onClick={() => { dismissCat("devices"); setPairing(true); }}>
+          <button className="enter-btn sm" data-track="pair-device" disabled={!!why} title={why?.message} onClick={() => { dismissCat("devices"); setPairing(true); }}>
             Pair a device…
           </button>
         </div>
-        {why && <div className="ra-note" data-testid="pair-why">{why}</div>}
+        {why && (
+          <div className={why.kind === "paused" ? "ra-ask" : "ra-note"} data-testid="pair-why" role={why.kind === "paused" ? "alert" : undefined}>
+            {why.kind === "paused" && <span className="ra-dot warn" aria-hidden />}
+            <div>
+              <div>{why.message}</div>
+              {why.kind !== "full" && why.kind !== "loading" && (
+                <button className="ra-linkbtn" data-testid="pair-open-remote" onClick={onRemote}>Open Remote access</button>
+              )}
+            </div>
+          </div>
+        )}
         {r.devicesErr && <div className="ra-err" role="alert">The device list could not be read: {r.devicesErr}</div>}
       </section>
       {current.length > 0 && (
@@ -87,7 +91,7 @@ function DevicesList({ r }: { r: RemoteState }) {
           )}
         </section>
       )}
-      {pairing && <PairSheet onClose={() => { setPairing(false); void readDevices(); }} />}
+      {pairing && <PairSheet onClose={() => { setPairing(false); void readDevices(); }} onRemote={onRemote} />}
     </>
   );
 }

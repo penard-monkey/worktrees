@@ -3417,7 +3417,8 @@ Phase 3: Frontend pane and mock harness
 
     // ── remote access and paired devices (Phase 2 slice 6, the host's UI) ──
     // The console rows, over the state below. `?access=on` starts listening
-    // (an app-owned serve, which RemoteNotice says); `?devices=0` starts with
+    // (an app-owned serve, which RemoteNotice says); `?access=paused` starts
+    // after the configured Tailscale address left; `?devices=0` starts with
     // no device paired; `?notconsole` answers every console row the way serve
     // answers a paired device's window (`console-only`).
     case "remote_status":
@@ -3796,8 +3797,12 @@ const MOCK_CANDIDATES = [
   { address: "fe80::1c2e:4bff:fe11:2233", prefix: 64, iface: "en0", class: "link-local", mode: "lan", warning: null },
 ];
 const mockAccess = {
-  on: mockQuery.get("access") === "on", address: "192.168.1.5", iface: "en0", mode: "lan", port: 51234, advertise: true,
-  paused: null as string | null, question: null as null | { text: string; alert: boolean; use_address: string }, warning: null as string | null,
+  on: ["on", "paused"].includes(mockQuery.get("access") ?? ""),
+  address: mockQuery.get("access") === "paused" ? "100.96.164.69" : "192.168.1.5",
+  iface: mockQuery.get("access") === "paused" ? "utun6" : "en0",
+  mode: mockQuery.get("access") === "paused" ? "overlay" : "lan", port: 51234, advertise: true,
+  paused: (mockQuery.get("access") === "paused" ? "100.96.164.69 is no longer on utun6" : null) as string | null,
+  question: null as null | { text: string; alert: boolean; use_address: string }, warning: null as string | null,
 };
 function mockAccessStatus() {
   const base = { owner: "app", host: "Demo-MacBook-Pro" };
@@ -4110,10 +4115,11 @@ const healthyConfigs: Record<string, MockCfg> = {};
     return kind;
   },
   /** The address watch pauses remote access and asks (§4.1). */
-  remotePause(text = "Remote access is paused. This host is now 192.168.4.20 on en0, on a different network.", use = "192.168.1.5") {
+  remotePause(text = "Remote access is paused. This host is now 192.168.4.20 on en0, on a different network.", use = "192.168.1.5", reason = "192.168.1.5 on en0 is on a different network now") {
     if (!mockAccess.on) return null;
-    mockAccess.paused = "192.168.1.5 on en0 is on a different network now";
+    mockAccess.paused = reason;
     mockAccess.question = { text, alert: true, use_address: use };
+    if (mockPair.window) closeWindow("cancelled");
     remoteChanged();
     return mockAccessStatus();
   },
