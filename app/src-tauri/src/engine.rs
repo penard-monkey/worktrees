@@ -486,6 +486,11 @@ pub struct Engine {
     /// The docs viewer's browser bundle, handed to a serve we start as
     /// `WORKTREES_VIEWER_JS` (serve has no resource dir of its own).
     pub viewer_js: Option<PathBuf>,
+    /// This app's bundle id, handed to a serve we start as
+    /// `RESPONSIBLE_APP_ENV`: macOS charges that serve's file reads to this
+    /// app, and serve has no other way to learn which app that is
+    /// (`worktrees_api::macprivacy`).
+    pub app_id: String,
     pub version: String,
     connecting: Mutex<()>,
     owned: Mutex<Option<Owned>>,
@@ -498,9 +503,10 @@ impl Engine {
         dev_origin: Option<String>,
         bin: Result<(PathBuf, String), String>,
         viewer_js: Option<PathBuf>,
+        app_id: String,
         version: String,
     ) -> Self {
-        Engine { config_dir, origin, dev_origin, bin, viewer_js, version, connecting: Mutex::new(()), owned: Mutex::new(None) }
+        Engine { config_dir, origin, dev_origin, bin, viewer_js, app_id, version, connecting: Mutex::new(()), owned: Mutex::new(None) }
     }
 
     /// Find or start the engine and say how to reach it. `phase` hears what a
@@ -641,6 +647,9 @@ impl Engine {
                 cmd.env("WORKTREES_VIEWER_JS", js);
             }
         }
+        // Always ours, never an inherited value: this app is the spawner, so it
+        // is the one macOS holds responsible for what serve reads.
+        cmd.env(worktrees_api::macprivacy::RESPONSIBLE_APP_ENV, &self.app_id);
         // Its own session: a serve outlives this app on a crash by design, and
         // must not take a SIGINT or SIGHUP meant for the terminal `tauri dev`
         // runs in.
@@ -942,7 +951,7 @@ mod tests {
     }
 
     fn engine_on(d: &Path, bin: Result<(PathBuf, String), String>) -> Engine {
-        Engine::new(d.to_path_buf(), APP_ORIGIN.into(), None, bin, None, "1.0.0".into())
+        Engine::new(d.to_path_buf(), APP_ORIGIN.into(), None, bin, None, "net.example.app".into(), "1.0.0".into())
     }
 
     /// A "serve" that records that it ran and exits at once, so a test can
@@ -988,6 +997,21 @@ mod tests {
         assert!(yes.started && !yes.declined && yes.message.contains("exited before it was ready"), "{yes:?}");
         assert!(marker.exists(), "start:true did not run the serve binary");
         assert_eq!(*phases.lock().unwrap(), ["starting"]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_serve_this_app_starts_is_told_which_app_macos_holds_responsible() {
+        // macOS charges serve's reads to this app, and the privacy card's
+        // `tccutil` line must name it; serve learns it only from here.
+        let d = tmp("respapp");
+        let seen = d.join("seen");
+        let bin = d.join("fake-serve");
+        exec_fixture(&bin, &format!("#!/bin/sh\nprintf '%s' \"${}\" > '{}'\nexit 3\n", worktrees_api::macprivacy::RESPONSIBLE_APP_ENV, seen.display()));
+        let e = engine_on(&d, Ok((bin, "test".into())));
+        let r = e.connect(Ask { reason: None, may_start: true, manual: false }, &|_: &str| {}).unwrap_err();
+        assert!(r.started, "{r:?}");
+        assert_eq!(std::fs::read_to_string(&seen).unwrap(), "net.example.app");
         let _ = std::fs::remove_dir_all(&d);
     }
 

@@ -113,7 +113,7 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   do not align them). hyper parses the HTTP and tungstenite sees only frames,
   also ON PURPOSE: tungstenite's `accept_hdr_async` WRITES an HTTP error
   response when it refuses, while a hyper service that returns `Err` closes
-  with 0 bytes. The 180 commands sit in ONE macro table
+  with 0 bytes. The 181 commands sit in ONE macro table
   (`serve/dispatch.rs`) with an `Exposure` each; the six `ClientLocal` rows
   (clipboard, editor, terminal, zoom, the app bundle) are refused with
   `err: "client-local"`, never run on the host — the docs viewer is an
@@ -1982,6 +1982,22 @@ still escapes HOME, see `sandbox.sh` above), and stop everything by pid.
   reading it needs Full Disk Access on the TERMINAL, and the tccd log is
   redacted. Releases stay ad-hoc; see ROADMAP for the distribution tier (and
   why the Mac App Store is not it).
+- **A TCC denial takes CONTENTS and leaves metadata, and the read that hits it
+  is serve's.** Measured on macOS 27.0 inside an already-refused directory
+  (the FDA-class `~/Library/Safari`, which never prompts — never probe
+  Documents/Desktop/Downloads, whose first touch raises a prompt): `lstat` and
+  `realpath` answer, `readdir` and `open` get EPERM. So `canonicalize`, the
+  `file(path)` resolver and `guard_under_projects` all let a denied path
+  through and the failure is `list_dir`'s bare `Operation not permitted (os
+  error 1)`, with no path in it. The Files-and-Folders class itself is NOT
+  measured — it needs a reset to provoke, and `tccutil reset` is the user's
+  call. The denial is the app's because serve inherits the app's
+  responsibility at spawn; serve learns the app's bundle id only from
+  `WORKTREES_RESPONSIBLE_APP` (`engine.rs`), and a serve started from a
+  terminal has none and names no app (`worktrees_api::macprivacy`). Do not
+  try to prove attribution with `responsibility_get_pid_responsible_for_pid`:
+  unprivileged and unsigned it answers "itself" for every pid, including a
+  plain `fork` child, and `launchctl procinfo` needs root.
 
 ## Decisions
 

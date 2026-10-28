@@ -20,6 +20,36 @@
 //! frontend never pattern-matches an errno or an English message, which is the
 //! mirror that would drift (and `os error 1`'s text is localised).
 //!
+//! # Where it runs: in the process macOS refused
+//!
+//! The probe has to run where `list_dir` ran, because TCC decides per process
+//! — and since the app became serve's client, that is serve, not the app. It
+//! is serve's row `privacy_denial: Engine [read, file(path)]`, beside
+//! `list_dir: Engine [read, file(path)]`: the same object, so whoever could get
+//! the error can ask what it means, and nobody can ask about a path the tree
+//! could not have shown them. `file(path)` canonicalizes, and that is safe
+//! here because a denial leaves metadata alone (measured on macOS 27.0 under a
+//! live denial: `lstat` and `realpath` answer inside a refused directory,
+//! `readdir` and `open` get EPERM), so the resolver lets the path through to
+//! the probe instead of refusing the very thing it exists to describe.
+//!
+//! # Whose decision it is
+//!
+//! TCC charges a read to the RESPONSIBLE process, which a child inherits at
+//! spawn and keeps through `setsid` and reparenting — the rule AGENTS.md
+//! records for the tmux server the app starts. serve is started the same way
+//! (`engine.rs`), so a denial in serve is the APP's decision, and the reset
+//! line must name the app's bundle id. Nothing unprivileged can ask the kernel
+//! that question (`launchctl procinfo` needs root, and
+//! `responsibility_get_pid_responsible_for_pid` answered "itself" even for a
+//! plain fork child here), so the spawner SAYS it: `engine.rs` puts its own
+//! identifier in serve's environment as [`RESPONSIBLE_APP_ENV`]. An
+//! environment variable is inherited along exactly the edges responsibility
+//! is, so a serve started from a terminal — whose reads macOS charges to that
+//! terminal — carries none, and the answer is `None`: a card telling the user
+//! to switch on worktrees, when the app they need is their terminal, would be
+//! wrong on its most important line.
+//!
 //! # Why the probe re-reads instead of taking the caller's `io::Error`
 //!
 //! Same reason: the error has already been flattened to a `String` by the time
@@ -51,6 +81,12 @@
 
 use std::path::{Path, PathBuf};
 
+/// The environment variable that names the app macOS holds responsible for
+/// this process: its bundle id, set by the app on the serve it starts
+/// (`engine.rs`) and inherited along the same spawn edges TCC's attribution
+/// follows. Unset in a serve started from a terminal (see the module note).
+pub const RESPONSIBLE_APP_ENV: &str = "WORKTREES_RESPONSIBLE_APP";
+
 /// A protected area, in the vocabulary of the pane that unlocks it.
 ///
 /// `service` is the `tccutil reset` service name, `pane` the System Settings
@@ -69,6 +105,18 @@ pub enum Area {
 }
 
 impl Area {
+    /// Every variant, for the checks that must cover each one: here, and the
+    /// app crate's, which holds every pane against the opener's URL scope.
+    pub const ALL: [Area; 7] = [
+        Area::Desktop,
+        Area::Documents,
+        Area::Downloads,
+        Area::ICloud,
+        Area::Removable,
+        Area::Network,
+        Area::AppData,
+    ];
+
     pub fn label(self) -> &'static str {
         match self {
             Area::Desktop => "your Desktop folder",
@@ -193,23 +241,16 @@ fn is_denied(e: &std::io::Error) -> bool {
 ///
 /// `is_macos` is the platform, and when it is false the answer is `None`
 /// before anything is read: there is no TCC to have refused (see the module
-/// note). Callers pass `cfg!(target_os = "macos")`.
-pub fn denial_at(path: &Path, home: &Path, bundle_id: &str, is_macos: bool) -> Option<Denial> {
+/// note). Callers pass `cfg!(target_os = "macos")`. `app` is the bundle id
+/// macOS charges this process's reads to, and with none there is no app the
+/// card could truthfully tell the user to switch on, so the answer is `None`
+/// as well.
+pub fn denial_at(path: &Path, home: &Path, app: Option<&str>, is_macos: bool) -> Option<Denial> {
     if !is_macos {
         return None;
     }
-    let refused = match std::fs::read_dir(path) {
-        Ok(_) => false,
-        Err(e) => is_denied(&e),
-    };
-    // A FILE is legitimate here too — the Files tab opens one — so fall back
-    // to a metadata read before concluding anything.
-    let refused = refused
-        && match std::fs::metadata(path) {
-            Ok(_) => true,
-            Err(e) => is_denied(&e),
-        };
-    if !refused {
+    let app = app?;
+    if !refused(path) {
         return None;
     }
     let area = area_of(path, home)?;
@@ -218,8 +259,33 @@ pub fn denial_at(path: &Path, home: &Path, bundle_id: &str, is_macos: bool) -> O
         label: area.label().to_string(),
         path: path.to_string_lossy().to_string(),
         pane: area.pane().to_string(),
-        reset_command: format!("tccutil reset {} {bundle_id}", area.service()),
+        reset_command: format!("tccutil reset {} {app}", area.service()),
     })
+}
+
+/// Is reading `path` refused right now?
+///
+/// A denial takes a path's CONTENTS and leaves its metadata (measured on macOS
+/// 27.0: `lstat` answers, `readdir` and `open` get EPERM), so the metadata
+/// says only what to try: a listing for a directory, an open for anything
+/// else — the Files tab opens files too, and `read_dir` on a file is ENOTDIR
+/// whatever its permissions. A metadata read that is itself refused counts,
+/// for whatever macOS refuses one level further up.
+fn refused(path: &Path) -> bool {
+    let read = match std::fs::metadata(path) {
+        Ok(m) if m.is_dir() => std::fs::read_dir(path).map(drop),
+        Ok(_) => std::fs::File::open(path).map(drop),
+        Err(e) => Err(e),
+    };
+    matches!(read, Err(e) if is_denied(&e))
+}
+
+/// serve's `privacy_denial` row: the denial for `path` in THIS process, under
+/// the app [`RESPONSIBLE_APP_ENV`] names. The row's `file(path)` has already
+/// placed the path in a registered project and canonicalized it.
+pub fn privacy_denial(path: String) -> Option<Denial> {
+    let app = std::env::var(RESPONSIBLE_APP_ENV).ok().filter(|a| !a.is_empty());
+    denial_at(Path::new(&path), &home_dir(), app.as_deref(), cfg!(target_os = "macos"))
 }
 
 /// `$HOME`, or `/` when it is unset — which makes every `under()` above false
@@ -287,10 +353,7 @@ mod tests {
     fn every_area_carries_a_service_and_a_pane() {
         // The pair is data on the enum so neither can be forgotten; this is
         // what makes that true rather than merely intended.
-        for a in [
-            Area::Desktop, Area::Documents, Area::Downloads, Area::ICloud,
-            Area::Removable, Area::Network, Area::AppData,
-        ] {
+        for a in Area::ALL {
             assert!(!a.service().is_empty(), "{a:?} has no tccutil service");
             assert!(a.pane().starts_with("x-apple.systempreferences:"), "{a:?} pane: {}", a.pane());
             assert!(!a.label().is_empty(), "{a:?} has no label");
@@ -298,44 +361,9 @@ mod tests {
     }
 
     #[test]
-    fn every_pane_is_one_the_opener_may_open() {
-        // `opener:default` scopes `open_url` to http(s), mailto and tel, so a
-        // pane the capability file does not name is a Settings button that
-        // rejects with `ForbiddenUrl` — in the real app only, since the mock's
-        // `openUrl` has no scope. The plugin matches each `url` as a glob; the
-        // entries here are all `<prefix>*`, and a fancier one should be read by
-        // hand rather than guessed at.
-        let caps: serde_json::Value =
-            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
-        let prefixes: Vec<&str> = caps["permissions"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|p| p["identifier"] == "opener:allow-open-url")
-            .flat_map(|p| p["allow"].as_array().into_iter().flatten())
-            .filter_map(|e| e["url"].as_str())
-            .map(|u| {
-                let pre = u.strip_suffix('*').unwrap_or_else(|| panic!("not a <prefix>* glob: {u}"));
-                assert!(!pre.contains(['*', '?', '[']), "not a <prefix>* glob: {u}");
-                pre
-            })
-            .collect();
-        for a in [
-            Area::Desktop, Area::Documents, Area::Downloads, Area::ICloud,
-            Area::Removable, Area::Network, Area::AppData,
-        ] {
-            assert!(
-                prefixes.iter().any(|pre| a.pane().starts_with(pre)),
-                "{a:?}: capabilities/default.json does not let the opener open {}",
-                a.pane()
-            );
-        }
-    }
-
-    #[test]
     fn a_readable_directory_is_never_a_denial() {
         let d = std::env::temp_dir();
-        assert!(denial_at(&d, &home(), "net.example.app", true).is_none());
+        assert!(denial_at(&d, &home(), Some("net.example.app"), true).is_none());
     }
 
     #[test]
@@ -344,7 +372,7 @@ mod tests {
         // folder that does not exist is worse than the raw error.
         let p = std::env::temp_dir().join("wt-macprivacy-absent-xyz");
         let _ = std::fs::remove_dir_all(&p);
-        assert!(denial_at(&p, &home(), "net.example.app", true).is_none());
+        assert!(denial_at(&p, &home(), Some("net.example.app"), true).is_none());
     }
 
     #[test]
@@ -359,7 +387,7 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o000)).unwrap();
             // Refused, but `area_of` says None, so no card.
-            assert!(denial_at(&d, &home(), "net.example.app", true).is_none());
+            assert!(denial_at(&d, &home(), Some("net.example.app"), true).is_none());
             std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let _ = std::fs::remove_dir_all(&d);
@@ -405,10 +433,33 @@ mod tests {
     #[test]
     fn a_refused_protected_path_is_a_denial_on_macos() {
         let f = RefusedDocs::new("mac");
-        let d = denial_at(&f.path, &f.home, "net.example.app", true).expect("a denial");
+        let d = denial_at(&f.path, &f.home, Some("net.example.app"), true).expect("a denial");
         assert_eq!(d.area, Area::Documents);
         assert_eq!(d.path, f.path.to_string_lossy());
         assert_eq!(d.reset_command, "tccutil reset SystemPolicyDocumentsFolder net.example.app");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_refused_file_in_a_protected_area_is_a_denial_on_macos() {
+        // A FILE refuses its read and keeps its metadata, the same split a
+        // directory shows (measured under a live TCC denial: `lstat` and
+        // `realpath` answer, `open` and `readdir` get EPERM). `read_dir` on a
+        // file is ENOTDIR whatever the permissions, so a probe that only lists
+        // can never see a refused file, and a metadata read cannot either.
+        use std::os::unix::fs::PermissionsExt;
+        let home = std::env::temp_dir().join(format!("wt-macprivacy-file-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let file = home.join("Documents/repo/notes.md");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "x").unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
+        assert!(std::fs::File::open(&file).is_err(), "fixture {file:?} must be unreadable (running as root?)");
+        let d = denial_at(&file, &home, Some("net.example.app"), true);
+        let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644));
+        let _ = std::fs::remove_dir_all(&home);
+        let d = d.expect("a refused file in Documents is a denial");
+        assert_eq!(d.area, Area::Documents);
     }
 
     #[cfg(unix)]
@@ -418,7 +469,18 @@ mod tests {
         // card naming macOS, System Settings and `tccutil` would be wrong on
         // every line. The raw error stands.
         let f = RefusedDocs::new("other");
-        assert!(denial_at(&f.path, &f.home, "net.example.app", false).is_none());
+        assert!(denial_at(&f.path, &f.home, Some("net.example.app"), false).is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_refusal_no_app_answers_for_is_not_claimed() {
+        // A serve started from a terminal: macOS charges its reads to that
+        // terminal, and a card telling the user to switch worktrees on — with a
+        // `tccutil` line naming worktrees — sends them to the one switch that
+        // changes nothing. The raw error stands.
+        let f = RefusedDocs::new("noapp");
+        assert!(denial_at(&f.path, &f.home, None, true).is_none());
     }
 
     #[test]
