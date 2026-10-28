@@ -878,6 +878,18 @@ Measured in `rust:1-bookworm`: 7 of 150 runs of the core suite failed this way
 before the fix, every one a fake's spawn, and 0 of 150 after. Reproduce it in
 docker, never on the Mac.
 
+**A lane that uses Docker removes what it made before it reports done.** The
+Linux checks here run in Docker (`rust:1-bookworm`, `node:22-alpine`, the Linux
+app build), and a named volume for the cargo registry or the target dir
+outlives its container. Three finished lanes left seven of them behind
+(`wt-p2rl-*`, `wt-upd-*`, `wt-etx-*`): 6.8 GB that nothing used, found on
+2026-10-24 when free disk fell to 5 GiB. Run throwaway containers with `--rm`,
+give every volume and image the lane's own prefix, and `docker volume rm` /
+`docker image rm` exactly those names as the lane's last step. Never prune
+wider: the other projects' services and data live in the same Docker. Docker
+Desktop hands freed space back to macOS only gradually, so `df` will not show
+it at once.
+
 **A new test must be shown to FAIL first.** ROADMAP's zombie-children item
 records a regression test that passed identically with and without its fix.
 Break the thing under test (drop the `skip_serializing_if`, restore the old
