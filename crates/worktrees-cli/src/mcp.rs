@@ -1187,7 +1187,8 @@ impl Server {
                 "wait",
                 "Block until something happens, instead of polling. until: \"idle\" waits for the \
                  agent in place `slug` to stop working (returns its state: idle, waiting — stopped \
-                 on an approval or a question — or none if no agent runs there). until: \"message\" \
+                 on an approval, a question or a first-run trust prompt — or none if no agent \
+                 runs there). until: \"message\" \
                  waits for an unread message to YOUR place (from `slug` only, if given) and \
                  returns it without marking it read — call `messages` to take it. Returns \
                  {\"event\": \"timeout\"} after timeout_s (default 60, max 120, because MCP clients \

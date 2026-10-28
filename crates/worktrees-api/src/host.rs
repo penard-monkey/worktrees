@@ -306,7 +306,7 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
                 }
             }
         }
-        let (busy, waiting, models) = claude_activity(watch);
+        let (busy, waiting, models) = claude_activity(watch, &fp);
         // Every harness without a probe file, read once each (`harness_feed`:
         // codex's rollouts, pi's session files).
         let lanes: Vec<(&'static str, LaneTick)> = provider::PROVIDERS

@@ -815,3 +815,64 @@ print(len(s), s[0]["state"] if s else "-", s[0]["name"] if s else "-", s[0]["cmd
   kill -9 "$holder" $child 2>/dev/null || true
   [ "$(jq_out "$pick")" = "1 holding gate sleep 30" ]
 }
+
+# No rollout/probe/session file: the pane is the only witness. Exercise the
+# wire readers, not just a state helper, and assert wait returns WAITING.
+first_run_prompt() {
+  local provider="$1" fixture="$2"
+  run_wt new first-run --no-tmux
+  [ "$status" -eq 0 ]
+  local session="repo-first-run~agent~$provider"
+  printf 'cwd=%s\n' "$REPO/.worktrees/first-run" > "$TMUX_STATE/$session"
+  printf '%s' "$provider" > "$TMUX_STATE/$session.cmd"
+  cp "$BATS_TEST_DIRNAME/../crates/worktrees-core/tests/fixtures/$fixture" "$TMUX_STATE/$session.screen"
+  local pick='
+import sys,json
+r=json.loads(sys.stdin.read().splitlines()[-1])["result"]
+assert not r["isError"], r
+p=json.loads(r["content"][0]["text"])
+a=p["activity"]
+assert p.get("agent_state", p.get("event")) == "waiting", p
+assert a["state"] == "waiting" and a["last_done"] is None, p
+assert "trust" in a["reason"].lower(), p
+print(a["provider"])'
+  mcp_in "$REPO" "" '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"place_status","arguments":{"slug":"first-run"}}}'
+  [ "$(jq_out "$pick")" = "$provider" ]
+  # Keep the client connected: EOF cancels an in-flight wait, and pi needs
+  # two samples to distinguish a real stop from the gap before its opener.
+  run python3 - "$REPO" "$WT_BIN" <<'PYWAIT'
+import json, os, selectors, subprocess, sys
+binary = os.path.abspath(sys.argv[2])
+p = subprocess.Popen([binary, "mcp"], cwd=sys.argv[1], stdin=subprocess.PIPE,
+                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+try:
+    p.stdin.write(json.dumps({"jsonrpc":"2.0", "id":2, "method":"tools/call", "params":{
+        "name":"wait", "arguments":{"until":"idle", "slug":"first-run", "timeout_s":5}}}) + "\n")
+    p.stdin.flush()
+    selector = selectors.DefaultSelector()
+    selector.register(p.stdout, selectors.EVENT_READ)
+    assert selector.select(10), "wait did not answer before the deadline"
+    print(p.stdout.readline(), end="")
+finally:
+    p.stdin.close()
+    try: p.wait(timeout=3)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        p.wait()
+PYWAIT
+  [ "$status" -eq 0 ]
+  [ "$(jq_out "$pick")" = "$provider" ]
+}
+
+@test "first-run Codex trust reaches status reason and wakes wait" {
+  first_run_prompt codex codex-trust/0.160.1/subdirectory.txt
+}
+@test "first-run Claude trust reaches status reason and wakes wait" {
+  first_run_prompt claude claude-screen/2.1.309/trust.txt
+}
+@test "first-run kimi trust reaches status reason and wakes wait" {
+  first_run_prompt kimi kimi-screen/2.2.0/trust.txt
+}
+@test "first-run pi trust reaches status reason and wakes wait" {
+  first_run_prompt pi pi-screen/0.99.1/trust-modal.txt
+}

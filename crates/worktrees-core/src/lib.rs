@@ -14,6 +14,7 @@ pub mod childenv;
 pub mod choice;
 pub mod config;
 pub mod codex;
+pub mod codextrust;
 pub mod claude_usage;
 pub mod clone;
 pub mod codex_usage;

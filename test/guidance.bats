@@ -54,6 +54,7 @@ SH
   # The probe STARTS Codex's MCP servers, so it switches off each one it can see.
   mkdir -p "$HOME/.codex"
   printf '[mcp_servers.worktrees]\ncommand = "worktrees"\n\n[mcp_servers."odd.name"]\ncommand = "x"\n' > "$HOME/.codex/config.toml"
+  codex_trusts_repo
   WORKTREES_AI_CMD=codex run_wt new feat-cx
   [ "$status" -eq 0 ]
   [[ "$(tmux_pane0_cmd 'repo-feat-cx~agent~codex')" == *"-c "*"developer_instructions="*"Managed by worktrees:"* ]]

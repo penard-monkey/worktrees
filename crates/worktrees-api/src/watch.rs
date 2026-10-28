@@ -32,6 +32,9 @@ use crate::Ctx;
 /// The registries the dot poll keeps between ticks.
 #[derive(Default)]
 pub struct Watch {
+    /// Each place's live Claude session (cwd → tmux session), as the last
+    /// snapshot saw it: the tick reads the pane of one with no probe yet.
+    claude: Mutex<HashMap<String, String>>,
     /// Last answer per transcript/rollout: its length when read, and the model
     /// it named. Read on the 3s snapshot poll, so a file is re-read only once
     /// it has GROWN — an idle session costs one `stat`.
@@ -104,12 +107,14 @@ impl Watch {
 /// watches moves when it changes: a `/model` switch touches neither tmux nor
 /// the probe's status, and a 2s first reply never spans the two ticks the busy
 /// set needs to see it. Costs a `stat` per session per tick, plus a tail read
-/// only for a transcript that grew.
-pub fn claude_activity(w: &Watch) -> (Vec<String>, Vec<String>, Vec<(i32, Option<String>)>) {
+/// only for a transcript that grew, plus ONE chained capture while some live
+/// claude has no probe yet (`claude_startup_tick`) — and none otherwise.
+pub fn claude_activity(w: &Watch, sessions: &str) -> (Vec<String>, Vec<String>, Vec<(i32, Option<String>)>) {
     let mut busy = Vec::new();
     let mut waiting = Vec::new();
     let mut models = Vec::new();
-    for probe in worktrees_core::agent::live_probes() {
+    let probes = worktrees_core::agent::live_probes();
+    for probe in &probes {
         if probe.tmux.is_some() {
             models.push((probe.pid, probe_model(w, &probe)));
         }
@@ -117,13 +122,37 @@ pub fn claude_activity(w: &Watch) -> (Vec<String>, Vec<String>, Vec<(i32, Option
         // MCP server's `place_status` / `wait`, so the dot and an orchestrator
         // cannot disagree about what "busy" means.
         match activity::claude_state(&worktrees_core::agent::effective_state(&probe)) {
-            activity::State::Busy => busy.push(probe.cwd),
-            activity::State::Waiting => waiting.push(probe.cwd),
+            activity::State::Busy => busy.push(probe.cwd.clone()),
+            activity::State::Waiting => waiting.push(probe.cwd.clone()),
             _ => {} // idle / shell / parked-away busy (`delegated`) → no dot
         }
     }
+    let watched = w.claude.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    waiting.extend(claude_startup_tick(&watched, &probes, |targets| {
+        activity::capture_chain(sessions, targets)
+    }));
     models.sort_unstable();
     (busy, waiting, models)
+}
+
+/// The waiting cwds among watched Claude sessions that have no probe: Claude's
+/// folder-trust prompt comes before it writes one, so the pane is the only
+/// witness. A session with a probe is never captured here.
+fn claude_startup_tick(
+    watched: &HashMap<String, String>,
+    probes: &[worktrees_core::agent::ClaudeProbe],
+    capture: impl FnOnce(&[(String, String)]) -> Vec<(String, String, String)>,
+) -> Vec<String> {
+    let targets: Vec<_> = watched.iter().filter(|(cwd, _)| {
+        activity::claude_activity(probes, cwd).is_none()
+    }).map(|(cwd, session)| (cwd.clone(), session.clone())).collect();
+    if targets.is_empty() {
+        return Vec::new();
+    }
+    capture(&targets).into_iter().filter_map(|(cwd, cmd, screen)| {
+        let session = watched.get(&cwd)?;
+        activity::startup_activity("claude", session, &cmd, &screen).map(|_| cwd)
+    }).collect()
 }
 
 /// Payload for `sessions:busy` — PATHS (worktree dirs), keyed to a place's `path`.
@@ -423,7 +452,7 @@ pub fn transcript_epoch(path: &Path) -> Option<i64> {
 }
 
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct CodexWatched {
     pub session: String,
     pub model: Option<String>,
@@ -514,34 +543,52 @@ pub struct LaneTick {
 ///
 /// A mid-turn session may be parked on an approval or a plan-mode question,
 /// which nothing codex writes to disk tells apart from a running command
-/// (`findings.md`, 2026-09-26) — so those panes, and only those, are captured
+/// (`findings.md`, 2026-09-26). Turn-less sessions can be at startup trust.
+/// Those two sets are captured
 /// and read with `codex::waiting_on_screen`. `sessions` is the tick's tmux
 /// fingerprint, reused exactly as `scan_drafts` reuses it.
 pub fn codex_tick(watch: &Watch, sessions: &str) -> LaneTick {
-    let watched: Vec<(String, CodexWatched)> = {
-        let guard = watch.codex.lock().unwrap_or_else(|e| e.into_inner());
-        guard.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
-    };
+    let mut watched = watch.codex.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let before = watched.clone();
+    let out = codex_tick_in(
+        &mut watched,
+        |cwd| worktrees_core::codex::latest_rollout(cwd).map(|r| codex_tail(&r)).unwrap_or_default(),
+        |targets| activity::codex_panes(sessions, targets),
+    );
+    // Keep the models this tick read, but never over an entry a snapshot
+    // changed meanwhile (a session that went down, a new one recorded).
+    let mut current = watch.codex.lock().unwrap_or_else(|e| e.into_inner());
+    for (cwd, w) in watched {
+        if current.get(&cwd) == before.get(&cwd) {
+            current.insert(cwd, w);
+        }
+    }
+    out
+}
+
+/// `codex_tick`'s work over a copy of the registry, with the rollout read and
+/// the pane capture handed in, so a test can script both.
+fn codex_tick_in(
+    watched: &mut HashMap<String, CodexWatched>,
+    read: impl Fn(&str) -> (Option<String>, Option<worktrees_core::codex::Turn>),
+    capture: impl FnOnce(&[(String, String)]) -> Vec<(String, activity::CodexPane)>,
+) -> LaneTick {
     let mut out = LaneTick::default();
     let mut turns: Vec<(String, Option<worktrees_core::codex::Turn>)> = Vec::new();
-    let mut mid_turn: Vec<(String, String)> = Vec::new();
-    for (cwd, w) in watched {
-        let (model, turn) = match worktrees_core::codex::latest_rollout(&cwd) {
-            Some(r) => codex_tail(&r),
-            None => (None, None),
-        };
+    let mut wanted: Vec<(String, String)> = Vec::new();
+    for (cwd, w) in watched.iter_mut() {
+        let (model, turn) = read(&cwd);
         if model != w.model {
-            codex_watch_set(watch, &cwd, Some(&w.session), &model);
+            w.model = model;
             out.models_moved = true;
         }
-        if matches!(turn, Some(worktrees_core::codex::Turn::Busy)) {
-            mid_turn.push((cwd.clone(), w.session));
+        if activity::codex_needs_pane(turn.as_ref()) {
+            wanted.push((cwd.clone(), w.session.clone()));
         }
-        turns.push((cwd, turn));
+        turns.push((cwd.clone(), turn));
     }
-    // Only mid-turn panes are captured: one chained tmux call for all of them,
-    // none at all while no codex turn runs.
-    let panes = activity::codex_panes(sessions, &mid_turn);
+    // Busy and turn-less panes share one chain; completed idle lanes cost none.
+    let panes = capture(&wanted);
     for (cwd, turn) in turns {
         let pane = panes.iter().find(|(c, _)| *c == cwd).map(|(_, p)| *p);
         // ONE derivation (core's), the same `place_status` and `wait` use.
@@ -795,7 +842,12 @@ pub fn harness_feed(watch: &Watch, id: &str, sessions: &str) -> Feed {
 /// arm.
 pub fn watch_lane(watch: &Watch, id: &str, cwd: &str, session: Option<&String>, launch: Option<&str>, model: &Option<String>) -> bool {
     match id {
-        "claude" => true, // probes are global; nothing to watch per place
+        "claude" => {
+            let mut lanes = watch.claude.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(session) = session { lanes.insert(cwd.into(), session.clone()); }
+            else { lanes.remove(cwd); }
+            true
+        },
         "codex" => {
             codex_watch_set(watch, cwd, session, model);
             true
@@ -991,6 +1043,49 @@ mod tests {
 
     fn v(paths: &[&str]) -> Vec<String> {
         paths.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// A Claude still at its folder-trust prompt has written no probe, so the
+    /// tick reads its pane and the dot goes amber — and only then: a probed
+    /// session costs no capture, and a shell left showing the modal is no
+    /// waiting agent.
+    #[test]
+    fn claude_without_a_probe_reaches_the_amber_dot() {
+        let watched = HashMap::from_iter([("/fresh".into(), "repo-fresh".into())]);
+        let waiting = claude_startup_tick(&watched, &[], |targets| {
+            assert_eq!(targets.len(), 1);
+            vec![("/fresh".into(), "claude".into(), include_str!("../../worktrees-core/tests/fixtures/claude-screen/2.1.309/trust.txt").into())]
+        });
+        assert_eq!(merge_activity(vec![], waiting, []).waiting, ["/fresh"]);
+        let probe = serde_json::from_value(serde_json::json!({"pid":1,"cwd":"/fresh","status":"idle"})).unwrap();
+        assert!(claude_startup_tick(&watched, &[probe], |_| panic!("a probed idle session must not be captured")).is_empty());
+        let waiting = claude_startup_tick(&watched, &[], |_| vec![("/fresh".into(), "zsh".into(),
+            include_str!("../../worktrees-core/tests/fixtures/claude-screen/2.1.309/trust.txt").into())]);
+        assert!(waiting.is_empty(), "a shell retaining a modal is not a waiting agent");
+    }
+
+    /// Codex's trust prompt comes before any rollout, so a turn-less session is
+    /// captured with the mid-turn ones and reaches the amber set; a lane idle
+    /// after a finished or aborted turn costs no capture.
+    #[test]
+    fn turnless_codex_is_captured_and_reaches_the_amber_dot() {
+        use worktrees_core::codex::Turn;
+        let mut watched = HashMap::from_iter(["fresh", "metadata", "done", "aborted", "busy"].map(|cwd| {
+            (cwd.into(), CodexWatched { session: format!("repo-{cwd}"), model: None })
+        }));
+        let tick = codex_tick_in(&mut watched, |cwd| (None, match cwd {
+            "done" => Some(Turn::Done { at: Some(12), turn_id: None }),
+            "aborted" => Some(Turn::Aborted), "busy" => Some(Turn::Busy), _ => None,
+        }), |targets| {
+            let mut names: Vec<_> = targets.iter().map(|(cwd, _)| cwd.as_str()).collect();
+            names.sort();
+            assert_eq!(names, ["busy", "fresh", "metadata"], "only busy and turnless sessions cost captures");
+            targets.iter().map(|(cwd, _)| (cwd.clone(), activity::CodexPane::Waiting)).collect()
+        });
+        let merged = merge_activity(vec![], vec![], [&tick]);
+        assert_eq!(merged.waiting, ["busy", "fresh", "metadata"]);
+        assert_eq!(tick.done, [("done".into(), 12)]);
+        assert!(merged.busy.is_empty());
     }
 
     /// The dwell guard: a place must be seen busy on two consecutive ticks

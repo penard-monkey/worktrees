@@ -95,6 +95,10 @@ pub struct Modal {
     /// `Esc to cancel` on the next row), so it cannot be part of it.
     #[serde(skip)]
     body: Vec<String>,
+    /// The width of the widest rule on the screen — the screen's own width
+    /// where the harness draws one edge to edge ([`Modal::summary`]).
+    #[serde(skip)]
+    edge: Option<usize>,
 }
 
 /// The highlight marks: Claude `❯`, Codex `›`, kimi `▶` / `→`, pi `→`.
@@ -185,7 +189,7 @@ pub fn codex(screen: &str) -> Option<Modal> {
         return None;
     }
     let last = last_nonblank(&rows, rows.len())?;
-    let is_foot = |t: &str| t.contains(codex::APPROVAL_FOOTER) || codex::QUESTION_FOOTERS.iter().any(|f| t.contains(f));
+    let is_foot = |t: &str| t.contains(codex::APPROVAL_FOOTER) || codex::QUESTION_FOOTERS.iter().any(|f| t.contains(f)) || codex::TRUST_FOOTERS.iter().any(|f| t.contains(f));
     // A narrow pane wraps the footer onto two rows (`waiting_on_screen` joins them).
     let foot = if is_foot(&rows[last]) { last } else { last_nonblank(&rows, last)? };
     let joined = rows[foot..=last].iter().map(|r| r.trim()).collect::<Vec<_>>().join(" ");
@@ -196,7 +200,7 @@ pub fn codex(screen: &str) -> Option<Modal> {
     let from = history.map_or(0, |h| h + 1);
     let header = |r: &str| {
         let t = r.trim();
-        t.starts_with("Would you like to ")
+        t == "Folder access" || t.starts_with("Would you like to ")
             || t.strip_prefix("Question ").is_some_and(|q| q.starts_with(|c: char| c.is_ascii_digit()))
     };
     let start = (from..first).find(|&i| header(&rows[i])).unwrap_or(from);
@@ -270,6 +274,36 @@ pub fn steps(m: &Modal, n: u32) -> Option<Vec<Key>> {
 pub fn same_prompt(a: &Modal, b: &Modal) -> bool {
     let unmarked = |m: &Modal| m.choices.iter().map(|c| (c.n, c.label.clone(), c.more.clone(), c.host_only)).collect::<Vec<_>>();
     a.kind == b.kind && a.body == b.body && unmarked(a) == unmarked(b)
+}
+
+impl Modal {
+    /// What the prompt says, on one line: its rows above the first choice,
+    /// rules dropped — the reason `place_status` gives for a lane that waits.
+    /// A long path is cut at the screen's edge, not at a word: a row with no
+    /// space in it as wide as the screen's rule (or, where the harness draws
+    /// none, Codex, as the modal's widest row) joins the next with no space.
+    pub fn summary(&self) -> String {
+        let is_choice = |r: &str| {
+            let t = r.trim_start();
+            let t = t.strip_prefix(&MARKS[..]).map_or(t, str::trim_start).trim_end();
+            numbered(r).is_some() || self.choices.iter().any(|c| c.label == t)
+        };
+        let edge = self.edge.or_else(|| self.lines.iter().map(|r| r.chars().count()).max());
+        let mut said = String::new();
+        let mut cut = false;
+        for r in self.lines.iter().take_while(|r| !is_choice(r)).filter(|r| !is_rule(r)) {
+            let t = r.trim();
+            if t.is_empty() {
+                continue;
+            }
+            if !said.is_empty() && !cut {
+                said.push(' ');
+            }
+            said.push_str(t);
+            cut = Some(r.chars().count()) == edge && !t.contains(char::is_whitespace);
+        }
+        said
+    }
 }
 
 /// Whether `harness`'s composer on `screen` is EMPTY: `Some(true)` when it is
@@ -521,7 +555,8 @@ fn modal(kind: Kind, rows: &[String], start: usize, last: usize, foot: usize, mu
     for c in &mut choices {
         c.host_only = classify(kind, c);
     }
-    Modal { kind, lines, choices, body }
+    let edge = rows.iter().filter(|r| is_rule(r)).map(|r| r.chars().count()).max();
+    Modal { kind, lines, choices, body, edge }
 }
 
 fn classify(kind: Kind, c: &Choice) -> Option<HostOnly> {
@@ -711,6 +746,56 @@ mod tests {
         assert_eq!(composer_empty("codex", include_str!("../tests/fixtures/codex-send/empty.txt")), Some(true));
         assert_eq!(composer_empty("codex", include_str!("../tests/fixtures/codex-send/typed.txt")), Some(false));
         assert_eq!(composer_empty("codex", include_str!("../tests/fixtures/codex-send/probe-approval.txt")), None);
+    }
+
+    /// Codex 0.160.1's first-run folder-trust prompt (fixture
+    /// `codex-trust/0.160.1`): a permission, trusting is the host's, and
+    /// the footer is what makes it one — the same rows above a composer are
+    /// history. Attached to its daemon, Codex ends the same prompt on
+    /// `esc back` (upstream's snapshots).
+    #[test]
+    fn real_codex_folder_access_is_a_permission_not_a_question() {
+        let screen = include_str!("../tests/fixtures/codex-trust/0.160.1/subdirectory.txt");
+        let m = read("codex", screen).expect("first-run trust prompt");
+        assert_eq!(m.kind, Kind::Permission);
+        assert_eq!(m.lines[0].trim(), "Folder access");
+        assert_eq!(m.choices[0].label, "Trust and continue");
+        assert_eq!(m.choices[0].host_only, Some(HostOnly::Widens));
+        assert_eq!(m.choices[1].label, "Quit");
+        assert!(read("codex", &format!("{screen}\n› Ask Codex anything\n? for shortcuts\n")).is_none());
+        let daemon = screen.replace("esc quit", "esc back");
+        assert_eq!(read("codex", &daemon).map(|m| m.choices.len()), Some(2));
+    }
+
+    /// The summary is the prompt's words: no rule, no choice, no footer.
+    #[test]
+    fn a_trust_summary_is_the_question_alone() {
+        let codex = read("codex", include_str!("../tests/fixtures/codex-trust/0.160.1/subdirectory.txt")).unwrap();
+        let s = codex.summary();
+        assert!(s.starts_with("Folder access /private/tmp/wt-trust-investigation/repo/subdir Note: "), "{s}");
+        assert!(s.ends_with("Your trust decision will be saved."), "{s}");
+        let claude = read("claude", claude_fx!("trust.txt")).unwrap();
+        let s = claude.summary();
+        assert!(s.starts_with("Accessing workspace: /private/tmp/claude-501/wtfx/repo Quick safety check"), "{s}");
+        assert!(s.ends_with("Security guide"), "{s}");
+        // A path longer than the screen wraps mid-word, and is read back whole.
+        let long = format!("/private/tmp/{}/repo/.worktrees/live-a", "x".repeat(130));
+        let width = claude_fx!("trust.txt").lines().map(|l| l.trim_end().chars().count()).max().unwrap();
+        let (head, tail) = long.split_at(width - 1);
+        let wrapped = claude_fx!("trust.txt").replace(" /private/tmp/claude-501/wtfx/repo\n", &format!(" {head}\n {tail}\n"));
+        let s = read("claude", &wrapped).unwrap().summary();
+        assert!(s.starts_with(&format!("Accessing workspace: {long} Quick safety check")), "{s}");
+        // Real Codex 0.160.1 at 80 columns, in a linked worktree: both paths
+        // wrap, and the prose beside them still breaks at its spaces.
+        let s = read("codex", include_str!("../tests/fixtures/codex-trust/0.160.1/linked-worktree-80col.txt")).unwrap().summary();
+        let root = "/private/tmp/claude-501/-Users-bret-Projects-worktrees--worktrees-fix-codex-trust-blocks-launch/bf8c1a40-59f0-46cf-9d58-39c3fc5f4898/scratchpad/live/repo";
+        assert!(s.starts_with(&format!("Folder access {root}/.worktrees/live-a Note: You’re in a subdirectory")), "{s}");
+        assert!(s.contains(&format!("repository root: {root} Trust this folder? Codex can read, edit, and run files here, subject to your permission")), "{s}");
+        for m in [&codex, &claude] {
+            for c in &m.choices {
+                assert!(!m.summary().contains(&c.label), "{} in {}", c.label, m.summary());
+            }
+        }
     }
 
     #[test]

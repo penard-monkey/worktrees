@@ -69,6 +69,15 @@ The same derivation must reach **all four** readers. Keep them on one reader
       `every_harness_feeds_the_dot_poll` fails until both arms exist. Check
       in the RUNNING APP: a busy lane shows the busy dot, a lane waiting on you
       shows amber, a finished turn leaves the afterglow ring.
+- [ ] **A first-run prompt reads as `waiting` before any file exists.** Folder
+      trust comes before a harness writes its first probe, rollout or session
+      file, so a reader keyed on files alone says idle — three Codex lanes sat
+      on it for eight hours that way (2026-10-23). Capture the pane of a live
+      session with no turn yet (and only those, plus mid-turn ones), run the
+      `prompt::read` arm, and give `place_status` its `reason`. Where the
+      harness's own config says up front that it WILL ask (Codex's
+      `[projects]`, `codextrust`), refuse the launch with `Refusal::Soft` —
+      READ that config, never write it.
 - [ ] **Re-list triggers.** Anything the snapshot shows from agent state (the
       model label, the session) needs its own trigger — neither a finished
       turn nor a model switch moves tmux (`codex_models_moved` is the

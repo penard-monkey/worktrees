@@ -641,17 +641,7 @@ pub fn screen_of(session: &str) -> Option<PiScreen> {
 /// Capture one pi pane: its current command, then its screen, in ONE `tmux`
 /// call. `None` when tmux could not answer.
 fn capture(session: &str) -> Option<PiScreen> {
-    let target = format!("={session}:");
-    let out = tmux::tmux(&[
-        "display-message", "-p", "-t", &target, "#{pane_current_command}", ";", "capture-pane", "-p", "-t", &target,
-    ])
-    .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let (cmd, screen) = text.split_once('\n').unwrap_or((&text, ""));
-    Some(screen_from(cmd.trim(), screen))
+    activity::capture_one(session).map(|(cmd, screen)| screen_from(&cmd, &screen))
 }
 
 /// One capture of a pi pane, read: its current command first (a shell means pi
@@ -724,8 +714,11 @@ pub fn pi_activity(panes: &tmux::PaneList, canonical: &str, path: &str) -> Optio
         return None;
     }
     let turn = current_session(&session_dir(path), path).and_then(|s| session_tail(&s.path).1);
-    let (state, last_done) = pi_state(turn.as_ref(), capture(&name));
-    Some(Activity { provider: Some("pi"), state, last_done, session: Some(name), reason: None })
+    let capture = activity::capture_one(&name);
+    let screen = capture.as_ref().map(|(cmd, text)| screen_from(cmd, text));
+    let (state, last_done) = pi_state(turn.as_ref(), screen);
+    let reason = capture.as_ref().filter(|_| state == State::Waiting).and_then(|(_, text)| activity::waiting_reason("pi", text));
+    Some(Activity { provider: Some("pi"), state, last_done, session: Some(name), reason })
 }
 
 /// The model the place's current pi session is on, from its file.
