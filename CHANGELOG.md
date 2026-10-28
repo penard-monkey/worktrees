@@ -19,7 +19,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   deliberately no "try again": nothing an app can call re-raises the prompt.
   The card appears only when the path really is refused AND sits somewhere
   macOS gates, so an ordinary unreadable directory still reports itself
-  honestly.
+  honestly. On a window that drives another Mac, the Settings button is
+  greyed — the grant is that Mac's to give — and the card says where the fix
+  is made.
 
 ### Fixed
 - When a configured remote-access address disappears (for example, after

@@ -9,10 +9,12 @@
 // such call goes through here: it runs when `windowOnHost()` says the window
 // is on its engine's host, and otherwise is refused WITH the reason, never
 // silently; and `hostOnly(what)` greys the button that would make it, with the
-// same reason as its title. `openUrl` is not here: a URL means the same on
-// every machine. onhost-check.mjs fails on any other file importing these.
+// same reason as its title. `openUrl` is not here: an http(s) URL means the
+// same on every machine. A System Settings deep link does NOT — it opens the
+// window's own Settings — so that one is (`openSettingsOnHost`).
+// onhost-check.mjs fails on any other file importing these, or opening one.
 import { open as dialogOpen } from "@tauri-apps/plugin-dialog";
-import { openPath as openerOpenPath, revealItemInDir } from "@tauri-apps/plugin-opener";
+import { openPath as openerOpenPath, openUrl, revealItemInDir } from "@tauri-apps/plugin-opener";
 import { notOnHost, windowOnHost } from "./ipc";
 
 export { windowOnHost };
@@ -32,6 +34,13 @@ export function revealOnHost(path: string): Promise<void> {
 /** Open a HOST path with its default app. */
 export function openOnHost(path: string): Promise<void> {
   return windowOnHost() ? openerOpenPath(path) : Promise.reject(notOnHost("Open"));
+}
+
+/** Open a System Settings pane (`x-apple.systempreferences:`) for the HOST:
+ *  a privacy grant is the host's to give, and on a window that drives a
+ *  paired host this would unlock the wrong Mac. */
+export function openSettingsOnHost(url: string): Promise<void> {
+  return windowOnHost() ? openUrl(url) : Promise.reject(notOnHost("Opening System Settings"));
 }
 
 /** Pick a folder for a HOST command. `null` when the person cancels. */
