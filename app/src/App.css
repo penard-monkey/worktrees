@@ -395,12 +395,13 @@ html[data-places-side="right"] .rail-group .rail-icon.active::before { left: aut
    near end. `auto` rather than a spacer element, so a row with no meter at all
    (usage unavailable, chip only) still lands it in the same place. */
 .usage-strip .status-chip, .statusbar .status-chip { margin-left: auto; }
-/* The footer's far end: the chip, then the remote-access notice. One group,
-   so a row that wraps keeps both at the far end of whichever line they land
-   on. Two `auto` siblings would split the free space between them, and
-   zeroing the second one's margin leaves it at the NEAR end of a line it
-   wrapped onto (measured: the notice at x 336 of an 856px row). */
-.statusbar-end {
+/* A bottom bar's far end (the strip's or a place's footer): the chip, then
+   the remote-access notice. One group, so a row that wraps keeps both at the
+   far end of whichever line they land on. Two `auto` siblings would split the
+   free space between them, and zeroing the second one's margin leaves it at
+   the NEAR end of a line it wrapped onto (measured: the notice at x 336 of an
+   856px row). The chip's own `auto` above is a no-op inside it. */
+.bar-end {
   margin-left: auto; min-width: 0;
   display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: var(--s3);
 }
@@ -2394,11 +2395,10 @@ body.dragging .menu-catch { pointer-events: none; }
 
 /* status bar */
 /* What is left of the status bar: one row under the terminal, rendered only
-   when it has something to carry (the usage meter as its host, the status
-   chip, the remote-access notice), and the same row under Home's briefing
-   while remote access is on. The branch switcher moved to the header chip and
-   the tmux facts were deleted (every one of them is said elsewhere: the nav
-   dot, the agent dot, and the header's own name). */
+   when it is the usage meter's host (the status chip and the remote-access
+   notice follow the meter here). The branch switcher moved to the header chip
+   and the tmux facts were deleted (every one of them is said elsewhere: the
+   nav dot, the agent dot, and the header's own name). */
 .statusbar {
   display: flex; align-items: center; gap: var(--s3); min-width: 0;
   padding: var(--s1) var(--s3); border-top: 1px solid var(--line); background: var(--bg-panel);
@@ -2462,9 +2462,9 @@ body.dragging .menu-catch { pointer-events: none; }
 /* the tmux facts truncate rather than shove the switcher out of the bar */
 
 /* Home (empty state): logo + open button, then the resume list. It scrolls in
-   `.home-scroll`, so Home's footer (the remote-access notice) is never pushed
-   below the pane. The briefing's auto margins centre it there and resolve to
-   0 once it overflows, so its top stays reachable (never `place-items`). */
+   `.home-scroll`: without it a briefing taller than the pane was clipped with
+   nothing to scroll. The briefing's auto margins centre it there and resolve
+   to 0 once it overflows, so its top stays reachable (never `place-items`). */
 .home-scroll { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; }
 .briefing { margin: auto; width: min(560px, 82%); padding: var(--s6) 0; }
 /* Back / forward (‹ ›). Leads the topbar; on Home, which has no topbar, it

@@ -5,24 +5,30 @@
 //   SRC_App_tsx=<path> …   # another copy of any app/src file read here
 //                          # (SRC_<its name, every non-word character as _>)
 //
-// WHY THIS EXISTS. The notice is App's footer item (`<footer
-// className="statusbar">`), on a place AND on Home, and it no longer says
-// "— quitting Worktrees turns it off" (Settings → Remote access says what
-// quitting does). It used to be a fixed pill in EngineGate's bottom-right
+// WHY THIS EXISTS. The notice is an item in the bar at the bottom: the one
+// the status chip uses, by the chip's own rule (`remoteNoticeHost` beside
+// `statusChipHost` in App.tsx). That is the window-wide `.usage-strip`, the
+// only bar that is there on Home and through a restored selection, unless
+// the usage meter lives in a place's footer, which then takes both. It no
+// longer says "— quitting Worktrees turns it off" (Settings → Remote access
+// says what quitting does). It used to be a fixed pill in EngineGate's
 // corner, `.remote-corner`, which §5.3's alerts still use. Nothing that runs
-// in CI renders either placement, and the two ways back to the old shape both
-// look fine in the harness:
+// in CI renders any of this, and every wrong placement looks fine in the
+// harness:
 //
-//   1. Back in the corner, it renders as convincingly as in the footer.
-//   2. In a footer gated only on what the footer USED to carry (the usage
-//      meter, the status chip), it renders nowhere at all for the default
-//      `usage_place: "strip"`: a notice that is "in the footer" and on no
-//      screen, while §4.1 says it stays for as long as remote access is on.
+//   1. Back in the corner, it renders as convincingly as in a bar.
+//   2. In a footer gated only on what the footer USED to carry, it renders
+//      nowhere at all for the default `usage_place: "strip"`.
+//   3. In a footer of its own (the first cut of this, aaeb4da), it adds a
+//      SECOND bar above the strip, which is the bar the user actually sees.
 //
-// So this pins: the words (evaluated from devices.ts, the one source), that
-// RemoteLayer's corner holds no notice, that every RemoteNotice in App sits
-// inside a `.statusbar` footer whose own condition names the notice, and that
-// Home has one. Slice-the-real-source, as race-check.mjs and offers-check.mjs.
+// So this pins the words (evaluated from devices.ts, the one source), that
+// RemoteLayer's corner holds no notice, and the rule itself: the host
+// expressions and every render condition on the way to the notice are sliced
+// out of App.tsx and evaluated over every placement × selection × meter ×
+// chip × notice, so the notice is in exactly one bar, the one its host
+// names, beside the chip, and there are never two bars at the bottom.
+// Slice-the-real-source, as race-check.mjs and offers-check.mjs.
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 // vite's esbuild re-export — see race-check.mjs: bare "esbuild" does not resolve
@@ -80,41 +86,107 @@ const layer = fnBody(gate, "RemoteLayer");
 eq("RemoteLayer is found", layer.length > 0, true);
 eq("RemoteLayer's corner renders no RemoteNotice", /<RemoteNotice\b/.test(layer), false);
 const notice = fnBody(gate, "RemoteNotice");
-eq("RemoteNotice is exported for App's footer", notice.length > 0, true);
+eq("RemoteNotice is exported for App's bars", notice.length > 0, true);
 eq("RemoteNotice's words are remoteNoticeWords(st), nothing added", /<span className="remote-notice-txt">\{remoteNoticeWords\(st\)\}<\/span>/.test(notice), true);
 eq("RemoteNotice still opens Settings → Remote access", /onClick=\{\(\) => openRemoteSettings\("remote"\)\}/.test(notice), true);
 
-// ── 3. App.tsx: every notice is in a .statusbar footer that exists for it ──
+// ── 3. App.tsx: the host rule, evaluated ───────────────────────────────────
 const app = src("App.tsx");
-const FOOTER = '<footer className="statusbar">';
-const footers = [];
-for (let i = app.indexOf(FOOTER); i >= 0; i = app.indexOf(FOOTER, i + 1)) {
-  const end = app.indexOf("</footer>", i);
-  const lineStart = app.lastIndexOf("\n", i);
-  const condLine = app.slice(app.lastIndexOf("\n", lineStart - 1) + 1, lineStart);
-  footers.push({ at: i, end, body: app.slice(i, end), cond: condLine });
-}
-const notices = [...app.matchAll(/<RemoteNotice\b/g)].map((m) => m.index);
-eq("App renders RemoteNotice twice (a place's footer and Home's)", notices.length, 2);
-eq("every RemoteNotice sits inside a .statusbar footer", notices.every((n) => footers.some((f) => n > f.at && n < f.end)), true);
-const hosting = footers.filter((f) => /<RemoteNotice\b/.test(f.body));
-eq("…each footer that hosts it is rendered for it (its condition names remoteNotice)",
-  hosting.map((f) => /\bremoteNotice\b/.test(f.cond)), hosting.map(() => true));
-eq("…and remoteNotice is useRemoteNotice()'s", /const remoteNotice = useRemoteNotice\(\);/.test(app), true);
-const briefing = app.indexOf('<div className="briefing">');
-const mainEnd = app.indexOf("</main>", briefing);
-eq("Home has its own footer for the notice, after the briefing and inside .main",
-  hosting.some((f) => f.at > briefing && f.end < mainEnd), true);
-eq("…and a place's footer is the other one", hosting.some((f) => f.end < briefing), true);
-eq("Home's briefing scrolls in .home-scroll, so its footer stays on screen",
-  /<div className="home-scroll">\s*<div className="briefing">/.test(app), true);
+eq("remoteNotice is useRemoteNotice()'s", /const remoteNotice = useRemoteNotice\(\);/.test(app), true);
+const SCOPE = ["settings", "usage", "selected", "claudeStatus", "statusOnTile", "statusChipHost", "remoteNotice", "remoteNoticeHost"];
+/** An expression from App.tsx, as a function of SCOPE; `fallback` if absent.
+ *  The text is this repository's own source — the code the app runs — read
+ *  from disk by a dev-only check, never input from anywhere else. */
+const fn = (expr, fallback) => {
+  if (expr == null) return () => fallback;
+  try {
+    const f = new Function(...SCOPE, `return (${expr});`);
+    return (s) => f(...SCOPE.map((k) => s[k]));
+  } catch (e) {
+    eq(`App.tsx expression parses: ${expr.slice(0, 60)}`, String(e), "");
+    return () => fallback;
+  }
+};
+const declared = (name) => new RegExp(`const ${name}(?::[^=]+)?=\\s*([^;]+);`).exec(app)?.[1] ?? null;
+eq("App.tsx declares remoteNoticeHost", declared("remoteNoticeHost") !== null, true);
+const onTile = fn(declared("statusOnTile"), null);
+const chipHost = fn(declared("statusChipHost"), null);
+const noticeHost = fn(declared("remoteNoticeHost"), undefined);
 
-// ── 4. CSS: a button sized by flex is a WebKit trap ────────────────────────
+/** A bar: its render condition, the far-end group's condition, and the
+ *  notice's own guard, each sliced out of the bar's block. */
+function bar(opener, close) {
+  const m = new RegExp(`\\{\\((.+)\\) && \\(\\s*${opener}`).exec(app);
+  if (!m) return null;
+  const block = app.slice(m.index, app.indexOf(close, m.index + m[0].length));
+  const group = /\{\((.+)\) && \(\s*<span className="bar-end">/.exec(block);
+  const guard = /\{([^{}\n]+?) && <RemoteNotice\b/.exec(block);
+  const chipAt = block.indexOf("<StatusChip"), noticeAt = block.indexOf("<RemoteNotice");
+  const groupEnd = group ? block.indexOf("</span>", group.index) : -1;
+  return {
+    shown: fn(m[1], false),
+    group: group ? fn(group[1], false) : () => true,
+    guard: guard ? fn(guard[1], false) : () => noticeAt >= 0,
+    hasNotice: noticeAt >= 0,
+    // The chip, then the notice, both inside the far-end group.
+    besideChip: !!group && chipAt > group.index && noticeAt > chipAt && noticeAt < groupEnd,
+  };
+}
+const FOOTER = '<footer className="statusbar">';
+eq("App has ONE .statusbar footer, a place's (Home's bar is the strip)", app.split(FOOTER).length - 1, 1);
+const bars = { footer: bar(FOOTER, "</footer>"), strip: bar('<div className="usage-strip">', "</div>") };
+eq("both bars are found", [!!bars.footer, !!bars.strip], [true, true]);
+eq("App renders RemoteNotice twice, once in each bar and nowhere else",
+  [[...app.matchAll(/<RemoteNotice\b/g)].length, bars.footer?.hasNotice, bars.strip?.hasNotice], [2, true, true]);
+eq("…beside the chip in each bar's far-end group (.bar-end), the notice last",
+  [bars.footer?.besideChip, bars.strip?.besideChip], [true, true]);
+
+const bad = { twoBars: [], notExactlyOne: [], wrongBar: [], notChipRule: [], strayNotice: [] };
+const SEL = { slug: "x" }, INFO = { at: 1 }, STATUS = { level: "degraded" }, ON = { state: "listening" };
+for (const usage_place of ["strip", "footer", "rail", "off"])
+  for (const selected of [SEL, null])
+    for (const info of [INFO, null])
+      for (const claudeStatus of [STATUS, null])
+        for (const remoteNotice of [ON, null]) {
+          const s = { settings: { usage_place }, usage: { info }, selected, claudeStatus, remoteNotice };
+          s.statusOnTile = onTile(s);
+          s.statusChipHost = chipHost(s);
+          s.remoteNoticeHost = noticeHost(s);
+          const label = JSON.stringify({ usage_place, selected: !!selected, info: !!info, chip: !!claudeStatus, notice: !!remoteNotice });
+          if (!bars.footer || !bars.strip) continue;
+          // The footer is in the place branch, which renders on `selected && sel`.
+          const shown = { footer: !!selected && !!bars.footer.shown(s), strip: !!bars.strip.shown(s) };
+          const inBar = {};
+          for (const k of ["footer", "strip"]) inBar[k] = shown[k] && !!bars[k].group(s) && !!bars[k].guard(s);
+          if (shown.footer && shown.strip) bad.twoBars.push(label);
+          if (!remoteNotice) {
+            if (inBar.footer || inBar.strip) bad.strayNotice.push(label);
+            continue;
+          }
+          if (Number(inBar.footer) + Number(inBar.strip) !== 1) bad.notExactlyOne.push(label);
+          if (!inBar[s.remoteNoticeHost]) bad.wrongBar.push(`${label} host=${s.remoteNoticeHost}`);
+          // The chip's rule, without the tile (a 44px rail has no room for a sentence).
+          const rule = chipHost({ ...s, claudeStatus: STATUS, statusOnTile: null });
+          if (s.remoteNoticeHost !== rule) bad.notChipRule.push(`${label} host=${s.remoteNoticeHost} chip rule=${rule}`);
+        }
+const first = (a) => (a.length ? `${a.length} cases, e.g. ${a[0]}` : "none");
+eq("never two bars at the bottom", first(bad.twoBars), "none");
+eq("with remote access on, the notice is in exactly one bar", first(bad.notExactlyOne), "none");
+eq("…the one remoteNoticeHost names", first(bad.wrongBar), "none");
+eq("…which is the status chip's host rule, minus the tile", first(bad.notChipRule), "none");
+eq("with remote access off, no notice anywhere", first(bad.strayNotice), "none");
+
+// ── 4. CSS ─────────────────────────────────────────────────────────────────
 const css = src("EngineGate.css");
-const rule = (sel) => new RegExp(`(?:^|\\n)${sel.replace(/[.]/g, "\\.")} \\{([^}]*)\\}`).exec(css)?.[1] ?? null;
-eq(".remote-notice is found", rule(".remote-notice") !== null, true);
-eq(".remote-notice (the <button>) is not a flex container; its inner span is",
-  [/display:\s*(?:inline-)?flex/.test(rule(".remote-notice") ?? ""), /display:\s*flex/.test(rule(".remote-notice-in") ?? "")], [false, true]);
+const rule = (sheet, sel) => new RegExp(`(?:^|\\n)${sel.replace(/[.]/g, "\\.")} \\{([^}]*)\\}`).exec(sheet)?.[1] ?? null;
+eq(".remote-notice is found", rule(css, ".remote-notice") !== null, true);
+eq(".remote-notice (the <button>) is not a flex container; its inner span is (WebKit)",
+  [/display:\s*(?:inline-)?flex/.test(rule(css, ".remote-notice") ?? ""), /display:\s*flex/.test(rule(css, ".remote-notice-in") ?? "")], [false, true]);
+// One far-end group, so a wrapped row keeps the chip and the notice at the
+// far end of their line (two `auto` siblings left the notice at the near end).
+const barEnd = rule(src("App.css"), ".bar-end") ?? "";
+eq(".bar-end keeps the far end on any line it wraps onto",
+  [/margin-left:\s*auto/.test(barEnd), /flex-wrap:\s*wrap/.test(barEnd), /justify-content:\s*flex-end/.test(barEnd)], [true, true, true]);
 
 if (failed) {
   console.log(`\n${failed} failed, ${passed} passed`);

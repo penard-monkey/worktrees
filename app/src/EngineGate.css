@@ -83,15 +83,17 @@
 }
 .remote-corner > * { pointer-events: auto; }
 /* While remote access is on (RemoteNotice, §4.1): one quiet item at the far
- * end of App's footer (`.statusbar-end`, on a place and on Home), after the
- * status chip when there is one. A button: it opens Settings → Remote access.
- * The flex box is the inner span, not the button (WebKit shrink-wraps a flex
- * <button>). It sits on the footer's own --bg-panel, so it draws no box of its
- * own (a panel on the same panel is a border and nothing else) and takes the
- * usage trigger's hover instead. Its words wrap rather than clip at a narrow
- * pane: the row wraps it onto a line of its own first. Words are --txt, not
- * the row's --txt-dim: on --bg-panel that is 3.6:1 in tokyo-day, 3.8 in nord
- * and 4.4 in catppuccin-latte, and --txt is 5.5:1 or more in all six themes. */
+ * end (`.bar-end`) of the bottom bar the status chip uses, after the chip when
+ * there is one: the window-wide strip, or a place's footer when the usage
+ * meter lives there (App.tsx `remoteNoticeHost`). A button: it opens
+ * Settings → Remote access. The flex box is the inner span, not the button
+ * (WebKit shrink-wraps a flex <button>). Both bars paint --bg-panel, so it
+ * draws no box of its own (a panel on the same panel is a border and nothing
+ * else) and takes the usage trigger's hover instead. Its words wrap rather
+ * than clip at a narrow pane: the row wraps it onto a line of its own first.
+ * Words are --txt, not --txt-dim: on --bg-panel that is 3.6:1 in tokyo-day,
+ * 3.8 in nord and 4.4 in catppuccin-latte, and --txt is 5.5:1 or more in all
+ * six themes. */
 .remote-notice {
   display: block; cursor: pointer; max-width: 100%; text-align: left;
   padding: 2px var(--s2);

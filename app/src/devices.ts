@@ -121,7 +121,7 @@ export function pairingBlock(status: RemoteStatus | null, full: boolean, statusE
   }
 }
 
-/** The footer's line while remote access is on (§4.1, EngineGate's
+/** The bottom bar's line while remote access is on (§4.1, EngineGate's
  *  RemoteNotice), or null when it shows none: off, or a settings file serve
  *  cannot read, which Settings → Remote access explains. What quitting does is
  *  Settings' to say, never this line's. */

@@ -3417,8 +3417,8 @@ Phase 3: Frontend pane and mock harness
 
     // ── remote access and paired devices (Phase 2 slice 6, the host's UI) ──
     // The console rows, over the state below. `?access=on` starts listening
-    // (an app-owned serve; the footer's RemoteNotice says remote access is
-    // on); `?access=paused` starts after the configured Tailscale address
+    // (an app-owned serve; the bottom bar's RemoteNotice says remote access
+    // is on); `?access=paused` starts after the configured Tailscale address
     // left; `?access=error` starts on and not listening (the bind failed);
     // `?devices=0` starts with no device paired; `?notconsole` answers every
     // console row the way serve answers a paired device's window

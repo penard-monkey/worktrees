@@ -81,11 +81,11 @@ export function EngineGate({ children }: { children: ReactNode }) {
 /** Remote access's surfaces outside App: the watch on serve's console
  *  events, and one corner (bottom-right, clear of the bottom band and a
  *  right rail) holding §5.3's alerts. The notice that remote access is on is
- *  not here: it is App's, in the footer (RemoteNotice below). Inside the gate
- *  while the engine is up, keyed by its `gen` so a reconnect re-reads and
- *  re-listens; main.tsx mounts it beside an ungated App (the harness). The
- *  left edge is the nav's and the rail's, whose bottom holds the Settings
- *  gear an alert there would cover. */
+ *  not here: it is App's, in the bottom bar (RemoteNotice below). Inside the
+ *  gate while the engine is up, keyed by its `gen` so a reconnect re-reads
+ *  and re-listens; main.tsx mounts it beside an ungated App (the harness).
+ *  The left edge is the nav's and the rail's, whose bottom holds the
+ *  Settings gear an alert there would cover. */
 export function RemoteLayer() {
   const { alerts } = useRemote();
   // The alerts are about THIS machine's own engine: a window that drives a
@@ -111,12 +111,13 @@ function RemoteWatch() {
   return null;
 }
 
-/** The status App's footer shows while remote access is on, or null for no
- *  notice: only on the console (a window that drives a paired host is not on
- *  this machine's engine, and `remote_status` is the console's), only while
- *  the engine is up (RemoteLayer's watch is what keeps the status current,
- *  and it runs only then), and never for off or unreadable
- *  (`remoteNoticeWords`). The footer exists whenever this is not null. */
+/** The status App's bottom bar shows while remote access is on, or null for
+ *  no notice: only on the console (a window that drives a paired host is not
+ *  on this machine's engine, and `remote_status` is the console's), only
+ *  while the engine is up (RemoteLayer's watch is what keeps the status
+ *  current, and it runs only then), and never for off or unreadable
+ *  (`remoteNoticeWords`). App's bar for it exists whenever this is not null
+ *  (`remoteNoticeHost`). */
 export function useRemoteNotice(): RemoteStatus | null {
   const { status } = useRemote();
   const up = useEngine().kind === "up";
@@ -124,7 +125,9 @@ export function useRemoteNotice(): RemoteStatus | null {
 }
 
 /** While remote access is on, the window says so, persistently (§4.1), in
- *  the footer (App's `.statusbar`, on a place and on Home). It does not say
+ *  the bottom bar the status chip uses (App's `remoteNoticeHost`: the
+ *  window-wide `.usage-strip`, or a place's `.statusbar` when the usage meter
+ *  lives there), on a place and on Home. It does not say
  *  what quitting does: an app-owned serve still stops with the app (§9.3),
  *  and Settings → Remote access says so. A click opens that section, which
  *  is also the one-click way back to off. `remote_status` comes from
@@ -161,8 +164,8 @@ function RemoteAlerts() {
 }
 
 /** Where the alerts sit clear of what is already in the bottom-right
- *  corner: above the bottom band (the usage strip, or the footer, on a place
- *  or on Home) and left of a rail on the right, re-measured as those resize.
+ *  corner: above the bottom band (the usage strip, or a place's footer) and
+ *  left of a rail on the right, re-measured as those resize.
  *  A fixed card over either would hide the meter's last reading, the remote
  *  notice or a rail button. */
 function useClearCorner(on: boolean): { bottom: string; right: string } {

@@ -4145,8 +4145,8 @@ function App() {
   // (it would change length exactly when you are confused about why Claude
   // stopped answering).
   const statusOnTile = settings.usage_place === "rail" && usage.info ? claudeStatus : null;
-  // While remote access is on, the footer says so (§4.1), on a place and on
-  // Home alike — the one thing the footer carries whatever `usage_place` says.
+  // While remote access is on, the bottom bar says so (§4.1), on a place and
+  // on Home alike. Which bar is `remoteNoticeHost`'s, beside the chip's.
   const remoteNotice = useRemoteNotice();
 
   // The message a FAILED refresh put in the banner, so a later successful one can
@@ -5169,6 +5169,15 @@ function App() {
   // and it appeared nowhere at all. The strip is the only always-available host.
   const statusChipHost: "strip" | "footer" | null =
     !claudeStatus || statusOnTile ? null
+      : settings.usage_place === "footer" && selected ? "footer"
+        : "strip";
+  // The remote-access notice joins the bar the user already sees, by the
+  // chip's rule and for the chip's reason: a place's footer only when the
+  // meter lives there, otherwise the strip — the one bar that is there on
+  // Home, through a restored selection, and for "rail" and "off" (a 44px tile
+  // has no room for a sentence). One bar, never a second row above it.
+  const remoteNoticeHost: "strip" | "footer" | null =
+    !remoteNotice ? null
       : settings.usage_place === "footer" && selected ? "footer"
         : "strip";
   // The topbar's remote link needs the base before it can render — re-read on
@@ -8603,99 +8612,86 @@ function App() {
                     were deleted outright — "up" is the nav dot, "pane0 claude"
                     is the agent dot, and the session name is the prefix plus the
                     slug already in the header. So the row exists only when it
-                    has something to carry: the usage meter, when it is the
-                    meter's host and there is usage to show; the status chip; or
-                    the notice that remote access is on, which stays for as long
-                    as it is on (§4.1). The chip and the notice share the far end
-                    (`.statusbar-end`), the notice last: the chip comes and goes
-                    with Claude's health, and the notice stays put while remote
-                    access is on. */}
-                {((settings.usage_place === "footer" && usage.info) || statusChipHost === "footer" || remoteNotice) && (
+                    is the usage meter's host: the meter, when there is usage to
+                    show, and the status chip and the remote-access notice, which
+                    follow the meter here (`statusChipHost`, `remoteNoticeHost`).
+                    The chip and the notice share the far end (`.bar-end`), the
+                    notice last: the chip comes and goes with Claude's health,
+                    and the notice stays put while remote access is on. */}
+                {((settings.usage_place === "footer" && usage.info) || statusChipHost === "footer" || remoteNoticeHost === "footer") && (
                   <footer className="statusbar">
                     {settings.usage_place === "footer" && usage.info && (
                       <UsageMeter info={usage.info} nowSec={usage.nowSec} shape="line" side="up" />
                     )}
-                    {((statusChipHost === "footer" && claudeStatus) || remoteNotice) && (
-                      <span className="statusbar-end">
+                    {((statusChipHost === "footer" && claudeStatus) || remoteNoticeHost === "footer") && (
+                      <span className="bar-end">
                         {statusChipHost === "footer" && claudeStatus && (
                           <StatusChip info={claudeStatus} side="up" onError={fail} />
                         )}
-                        {remoteNotice && <RemoteNotice st={remoteNotice} />}
+                        {remoteNoticeHost === "footer" && remoteNotice && <RemoteNotice st={remoteNotice} />}
                       </span>
                     )}
                   </footer>
                 )}
               </>
             ) : (
-              <>
-                {/* Home scrolls in its own box, so the footer below it stays on
-                    screen however tall the briefing is; before the footer it
-                    overflowed `.main` and was clipped. `.briefing`'s auto margins
-                    still centre it, and resolve to 0 once it overflows. */}
-                <div className="home-scroll">
-                  <div className="briefing">
-                    {/* Home has no topbar, so the pair sits at the top of the view —
-                        the same buttons, the same place on screen. */}
-                    <div className="navhist-home">{navButtons}</div>
-                    <div className="home-hero">
-                      <img className="home-logo" src={logoUrl} alt="worktrees logo" />
-                      <div className="home-id">
-                        <h1>worktrees</h1>
-                        <div className="home-tag">a place for every work stream</div>
-                      </div>
-                    </div>
-                    {/* The two moments a workspace starts from: a new user makes a
-                        project, a new MACHINE imports one it already owns. Adding a
-                        repo that is already on disk is the third way in and lives in
-                        the nav footer's menu, one click away, beside these. */}
-                    <div className="home-actions">
-                      <button className="enter-btn big home-open with-icon" data-testid="new-project-home" onClick={openNewProject}>
-                        <Icons.Plus size={15} /> New project…
-                      </button>
-                      <button className="ctrl home-import with-icon" data-testid="import-open-home" onClick={openImport}>
-                        <Icons.Import size={13} /> Import from hub…
-                      </button>
-                    </div>
-                    <div className="chips">
-                      <span className="chip"><span className="dot" style={{ background: "var(--ok)" }} /> {stats.live} live</span>
-                      <span className="chip"><span className="dot" style={{ background: "var(--dirty)" }} /> {stats.dirty} dirty</span>
-                    </div>
-                    <div className="resume-h">RESUME WHERE YOU LEFT OFF</div>
-                    <div className="resume">
-                      {resume.length === 0 && <div className="empty small">No places yet — open a project to start.</div>}
-                      {resume.map(({ pv, p }) => (
-                        <div className="resume-row" data-track="home.resume" key={pv.root + p.slug} onClick={() => enterPlace(pv.root, p)} onContextMenu={(e) => placeCtx(e, pv.root, p)}>
-                          <span className={"status-dot" + dotClass(p)} style={dotStyle(p)} title={dotTitle(p)} />
-                          <span className="rr-name">{p.declared?.pinned ? "★ " : ""}{nameOf(p)}</span>
-                          <span className="rr-proj">{basename(pv.root)}</span>
-                          <span className="rr-life">{p.lifecycle_effective}</span>
-                          {/* Same line as ⌘K's, for the same reason: the Home
-                              briefing is the other place you pick from. */}
-                          {draftPaths.get(p.path) && (
-                            <span className="rr-draft" title={draftTitle(draftPaths.get(p.path)!)}>
-                              ✎ {draftLead(draftPaths.get(p.path)!)}
-                            </span>
-                          )}
-                          <span className="rr-age">{ago(activityAt(p))}</span>
-                          <button className="enter-btn sm with-icon">Enter <Icons.ChevronRight size={12} /></button>
-                        </div>
-                      ))}
+              /* Home scrolls in its own box. Without it a briefing taller
+                 than the pane overflowed `.main` and was clipped with nothing
+                 to scroll (measured: in a 900×420 window the last resume row
+                 ended at y 534 and its Enter could not be hit).
+                 `.briefing`'s auto margins still centre it, and resolve to 0
+                 once it overflows. */
+              <div className="home-scroll">
+                <div className="briefing">
+                  {/* Home has no topbar, so the pair sits at the top of the view —
+                      the same buttons, the same place on screen. */}
+                  <div className="navhist-home">{navButtons}</div>
+                  <div className="home-hero">
+                    <img className="home-logo" src={logoUrl} alt="worktrees logo" />
+                    <div className="home-id">
+                      <h1>worktrees</h1>
+                      <div className="home-tag">a place for every work stream</div>
                     </div>
                   </div>
+                  {/* The two moments a workspace starts from: a new user makes a
+                      project, a new MACHINE imports one it already owns. Adding a
+                      repo that is already on disk is the third way in and lives in
+                      the nav footer's menu, one click away, beside these. */}
+                  <div className="home-actions">
+                    <button className="enter-btn big home-open with-icon" data-testid="new-project-home" onClick={openNewProject}>
+                      <Icons.Plus size={15} /> New project…
+                    </button>
+                    <button className="ctrl home-import with-icon" data-testid="import-open-home" onClick={openImport}>
+                      <Icons.Import size={13} /> Import from hub…
+                    </button>
+                  </div>
+                  <div className="chips">
+                    <span className="chip"><span className="dot" style={{ background: "var(--ok)" }} /> {stats.live} live</span>
+                    <span className="chip"><span className="dot" style={{ background: "var(--dirty)" }} /> {stats.dirty} dirty</span>
+                  </div>
+                  <div className="resume-h">RESUME WHERE YOU LEFT OFF</div>
+                  <div className="resume">
+                    {resume.length === 0 && <div className="empty small">No places yet — open a project to start.</div>}
+                    {resume.map(({ pv, p }) => (
+                      <div className="resume-row" data-track="home.resume" key={pv.root + p.slug} onClick={() => enterPlace(pv.root, p)} onContextMenu={(e) => placeCtx(e, pv.root, p)}>
+                        <span className={"status-dot" + dotClass(p)} style={dotStyle(p)} title={dotTitle(p)} />
+                        <span className="rr-name">{p.declared?.pinned ? "★ " : ""}{nameOf(p)}</span>
+                        <span className="rr-proj">{basename(pv.root)}</span>
+                        <span className="rr-life">{p.lifecycle_effective}</span>
+                        {/* Same line as ⌘K's, for the same reason: the Home
+                            briefing is the other place you pick from. */}
+                        {draftPaths.get(p.path) && (
+                          <span className="rr-draft" title={draftTitle(draftPaths.get(p.path)!)}>
+                            ✎ {draftLead(draftPaths.get(p.path)!)}
+                          </span>
+                        )}
+                        <span className="rr-age">{ago(activityAt(p))}</span>
+                        <button className="enter-btn sm with-icon">Enter <Icons.ChevronRight size={12} /></button>
+                      </div>
+                    ))}
+                  </div>
                 </div>
-                {/* Home's footer: the same row as a place's, at the bottom of the
-                    main pane, so the notice sits in the same spot in both views.
-                    It carries the notice alone (a footer-placed usage meter is
-                    still a place's only, and the status chip still goes to the
-                    strip here), so it exists only while remote access is on. */}
-                {remoteNotice && (
-                  <footer className="statusbar">
-                    <span className="statusbar-end">
-                      <RemoteNotice st={remoteNotice} />
-                    </span>
-                  </footer>
-                )}
-              </>
+              </div>
             )}
           </main>
 
@@ -9598,8 +9594,10 @@ function App() {
       })()}
     </div>
     {/* The window-wide host: under rail, sidebar, terminal and dock alike, so it
-        survives ⌘B and is the only placement that is also there on Home. No
-        `info`, no row — an empty 26px band would be worse than no band. */}
+        survives ⌘B and is the only placement that is also there on Home. It
+        also carries the status chip and the remote-access notice wherever the
+        footer does not (`statusChipHost`, `remoteNoticeHost`). Nothing to
+        carry, no row — an empty 26px band would be worse than no band. */}
     {bubble && !settingsOpen && (
       <UpdateBubble
         tag={bubble} appVersion={upd?.app_version} cliVersion={upd?.cli_version}
@@ -9609,13 +9607,18 @@ function App() {
         onDismiss={() => dismissBubble(bubble)} onLift={setBubbleLift}
       />
     )}
-    {((settings.usage_place === "strip" && usage.info) || statusChipHost === "strip") && (
+    {((settings.usage_place === "strip" && usage.info) || statusChipHost === "strip" || remoteNoticeHost === "strip") && (
       <div className="usage-strip">
         {settings.usage_place === "strip" && usage.info && (
           <UsageMeter info={usage.info} nowSec={usage.nowSec} shape="line" side="up" />
         )}
-        {statusChipHost === "strip" && claudeStatus && (
-          <StatusChip info={claudeStatus} side="up" onError={fail} />
+        {((statusChipHost === "strip" && claudeStatus) || remoteNoticeHost === "strip") && (
+          <span className="bar-end">
+            {statusChipHost === "strip" && claudeStatus && (
+              <StatusChip info={claudeStatus} side="up" onError={fail} />
+            )}
+            {remoteNoticeHost === "strip" && remoteNotice && <RemoteNotice st={remoteNotice} />}
+          </span>
         )}
       </div>
     )}
