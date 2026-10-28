@@ -1,10 +1,11 @@
 # worktrees
 
-**A durable place for every work stream.** Not a throwaway worktree per branch —
-a place you keep: `ui-changes`, `prod-reviews`, `mcp-server`. Each place is a
-git worktree + a tmux session running your AI CLI (claude, codex, opencode, …)
-— with `--spare`, a second pane installs deps and gives you a shell — and it lives as long
-as the work does: an afternoon, or weeks of async iteration until it's right.
+**A durable place for every work stream.** Worktrees is a desktop app and CLI
+for managing parallel development with AI coding agents. Keep a place for
+`ui-changes`, `prod-reviews`, or `mcp-server`: a git worktree with a tmux
+session, its own files, and its agent's conversation. Work with Claude Code,
+Codex, pi, or Kimi Code, or use a plain shell. A place can last an afternoon
+or weeks of iteration.
 
 **Branches flow through places.** The place keeps the expensive parts
 (directory, AI CLI history, node_modules, the running session); a branch is the
@@ -14,7 +15,7 @@ otherwise; `switch` moves it to the next branch without touching anything
 expensive.
 
 ```
-worktrees new feat/checkout          # worktree + branch + tmux (AI | deps+shell)
+worktrees new feat/checkout          # worktree + branch + tmux (one agent pane)
 worktrees ls                         # what places exist, what's on them
 worktrees switch feat/checkout-v2    # same place, next branch (run inside it)
 worktrees open feat-checkout         # reattach later
@@ -23,14 +24,76 @@ worktrees rm feat-checkout           # tear the place down when it's done
 
 Works in **any** git repo. No config required.
 
+## Features
+
+- **Keep parallel work in separate places.** Create or check out a branch,
+  reopen its session, and switch that place to the next branch when the work
+  ships. Keep the directory, installed dependencies, and saved agent history
+  through branch changes. Tmux agent sessions keep running when you quit the app.
+- **See all your projects and agents.** Add an existing repository, create a
+  project, or clone from a git URL. The desktop workspace groups places by
+  activity and lifecycle, with working, waiting, and finished indicators,
+  branch divergence, dirty files, names, pins, and notes. A Home view, quick
+  switcher, and back/forward history help you resume work.
+- **Choose the agent for each place.** Claude Code, Codex, pi, and Kimi Code
+  have dedicated integrations for launch, resume, models, activity, and
+  Worktrees MCP setup. Run one provider at a time in a place, with a separate
+  saved conversation for each. Custom AI commands are also supported.
+- **Work beside the agent.** The embedded agent terminal attaches to tmux.
+  Add named shell tabs, search terminal output, and open file paths at a line.
+  Arrange the agent, navigation, reference panels, and lower terminal by
+  dragging; keep panel choices per place and choose light or dark themes.
+- **Read the work behind a branch.** Browse files with change markers, view
+  diffs, render Markdown, inspect source and images, or expand a document into
+  reading mode. Edit Markdown in the app with a check
+  for concurrent file changes; open other code in your preferred editor.
+  The Docs tab indexes a place's documentation and shows how far its branch
+  is behind the project's base. Open docs in the browser viewer for rendered
+  Mermaid diagrams.
+- **Give agents a brief and follow their plans.** Launch a lane on a written
+  brief; the Plan tab shows its goal, current phase, checklist progress, and
+  source document. Opt into Worktrees-managed planning or point it at an
+  existing plan. Apply shared agent instructions and close-out guidance to a
+  project, with a review place for the proposed instruction changes.
+- **Coordinate agents through MCP.** Agents can inspect places and plans,
+  report to another place, wait for work or replies, and show you files.
+  Enable mutation tools to create and reopen lanes, re-brief stopped places,
+  and manage their sessions. Cross-project visibility and actions are opt-in.
+- **Configure Claude for each project.** AI profiles select Claude's rules,
+  skills, MCP servers, model, and settings separately from your normal terminal
+  setup. Install skills from a local folder or a Git repository, pin Git
+  installs to a commit, and assign a profile per project.
+- **Track pull requests.** For GitHub projects, see a branch's PR, checks,
+  review state, conflicts, and recent merges in the header and Pull requests
+  tab. Requires an authenticated `gh`; PR tracking reads status and opens
+  GitHub for actions.
+- **See usage and share the machine.** Read Claude, Codex, and Kimi plan usage
+  and reset times. Configurable launch guards can hold new agents when a
+  plan window is nearly spent, too many agents are running, or memory is low.
+  Machine-wide job slots queue heavy builds and tests across projects.
+- **Set up each worktree consistently.** Optional `.worktrees.toml` declares
+  files to link, copy, or template, port allocations, Compose naming, and
+  documentation paths. Project settings and `doctor` expose drift and repair
+  options. Courier sync can move projects through a mounted drive using
+  rsync, with a preview and optional Claude conversations.
+- **Drive a paired host.** Turn on remote access for a private network or
+  Tailscale address, pair another machine, and use its projects, files, and
+  terminals from the desktop app or CLI. Settings manages hosts, pairing,
+  device permissions, expiry, and revocation. Connections use pinned mutual
+  TLS; a hash-chained audit log records changes and refusals. Remote access
+  starts off, and quitting an app-owned engine ends remote access.
+
 ## Desktop app
 
-Same engine, a native window. The app (Tauri; macOS and Linux) links the identical Rust
-core in-process — no daemon, no subprocess — so everything the CLI knows, the
-app shows live: every place grouped by how active it is, ahead/behind and dirty
-state per branch, and a tmux-attached terminal for each session right in the
-window. Create a place, drop into its session, switch branches, tear it down —
-without leaving the app.
+The native Tauri app runs on **macOS and Linux**. It connects to
+`worktrees serve`, the engine on that host, and finds or starts it for you.
+The CLI uses the same Rust core, so both work with the same git worktrees,
+tmux sessions, and declared state. The window can also connect to a paired
+remote host.
+
+Create a place, work in its terminal, read its plan and changes, switch branches,
+and remove the place when you are finished. Agent terminals attach to tmux,
+so their sessions survive quitting the app.
 
 <p align="center">
   <img src="docs/media/desktop-flow.gif" width="820" alt="Creating a place and opening its session in the worktrees desktop app">
@@ -53,6 +116,26 @@ Open a place to see its branch state, notes, and embedded terminal:
 Install it alongside the CLI on macOS or Linux (`WORKTREES_INSTALL_APP=1`, or
 answer the installer prompt; from a clone, `make install-app`) — see
 [Install](#install).
+
+### Remote hosts and devices
+
+Remote access is off until you enable it in Settings → Remote access and choose
+one of the host's private addresses. Settings → Devices → Pair a device asks
+which projects and capabilities to grant, then shows a QR code and pairing
+link. On the other computer, paste the link into Settings → Hosts, compare
+the six-digit code on both screens, and allow the pairing at the host.
+
+A paired window can browse the granted projects and files and attach to their
+terminals. Device settings at the host let you rename, disable, revoke, or
+change a device's scope and expiry. Turning remote access off closes all device
+connections and the pairing window. To keep serving after the desktop app
+quits, run `worktrees serve` yourself.
+
+Connections use pinned mutual TLS. A hash-chained audit log records mutations,
+refusals, and terminal attachments without storing the text you type. Network
+discovery is currently macOS-only; on Linux, use the host's address code when
+its address changes. Actions that require opening a path on the window's own
+computer, such as launching an external editor, are unavailable for a remote host.
 
 ## Install
 
@@ -78,22 +161,26 @@ x86_64/arm64); with no match, or `WORKTREES_INSTALL_FROM_SOURCE=1`, it builds
 from source with `cargo`.
 
 It also **offers the desktop app**, checksum-verified. On macOS that is
-`worktrees.app` → /Applications (the unsigned bundle's quarantine attr is
-stripped on your explicit opt-in); on Linux, the AppImage →
+`worktrees.app` → /Applications (the bundle's quarantine attribute is
+removed when you opt in); on Linux, the AppImage →
 `~/Applications/worktrees.AppImage`, with a desktop entry so it shows up in
-your launcher. Each release also has a `.deb` (x86_64/arm64) for
+your launcher. Releases since v0.43.0 also have a `.deb` (x86_64/arm64) for
 `sudo apt install ./worktrees-app-*.deb`, which installs the app as
 `worktrees-app` and pulls in the distro's tmux and git. Non-interactive runs
 skip the prompt — opt in/out explicitly:
 
 ```sh
-WORKTREES_INSTALL_APP=1 \
-  curl -fsSL https://raw.githubusercontent.com/penard-monkey/worktrees/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/penard-monkey/worktrees/main/install.sh | WORKTREES_INSTALL_APP=1 bash
 ```
 
+Since v0.44.1, macOS releases are ad-hoc signed as a complete app bundle, with
+signature verification required before publication. They are not notarized:
+a browser download may still prompt that Apple cannot verify the developer.
+The installer handles quarantine when you opt into the app installation.
+
 From a clone, `make install-app` builds the app locally and installs it to
-/Applications (no signing or quarantine involved) — or, on Linux, the AppImage
-to `~/Applications`.
+/Applications (ad-hoc signed, without download quarantine) — or, on Linux,
+the AppImage to `~/Applications`.
 
 The app carries its own copy of the CLI, built from the same commit
 (`worktrees.app/Contents/MacOS/worktrees`; `usr/lib/worktrees/worktrees` in
@@ -125,8 +212,7 @@ worktrees --version   # confirm
 Roll back (or hold) a version by pinning the release tag:
 
 ```sh
-WORKTREES_INSTALL_VERSION=v0.1.0 \
-  curl -fsSL https://raw.githubusercontent.com/penard-monkey/worktrees/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/penard-monkey/worktrees/v0.44.1/install.sh | WORKTREES_INSTALL_VERSION=v0.44.1 bash
 ```
 
 The same re-run updates the desktop app when you opt in (`WORKTREES_INSTALL_APP=1`
@@ -139,12 +225,13 @@ App from a clone: `git pull && make install-app`.
 
 Updates never touch your repos' state: worktrees under `.worktrees/`, the
 declared store (`.worktrees.places.json`, schema-versioned), tmux sessions, and
-`~/.config/worktrees/config` all survive binary swaps. Running sessions keep
+your user configuration all survive binary swaps. Running tmux sessions keep
 running — the CLI attaches to tmux, it doesn't own it.
 
-**Requires:** git ≥ 2.23. tmux ≥ 1.9 recommended (`new` degrades to `--no-tmux`
-without it; `open` needs it). Prebuilt binaries for macOS + Linux (x86_64/arm64);
-building from source needs a Rust toolchain.
+**Requires:** git ≥ 2.23 and tmux (≥ 1.9 recommended). The installer requires
+tmux; worktree-only CLI use is available with `new --no-tmux`. Prebuilt binaries
+for macOS + Linux (x86_64/arm64); building from source needs a Rust toolchain.
+Install and sign in to your chosen agent CLI separately.
 
 ## Commands
 
@@ -161,6 +248,21 @@ worktrees run --slot gate -- <cmd>    run a heavy job once one of the machine's 
 worktrees slots                       each slot's capacity, where it comes from, who holds and waits
 worktrees                             (no args) → ls
 ```
+
+Additional workflows (see `worktrees help` for options):
+
+| Commands | Purpose |
+|---|---|
+| `projects`, `clone` | Register, organize, or clone projects. |
+| `status <name>`, `doctor [<name>]` | Inspect a place's health or project configuration drift. |
+| `init`, `relink`, `provision` | Suggest project config, apply declared files, and allocate worktree ports. |
+| `show <file>[:line]` | Open a file in the desktop viewer. |
+| `plan`, `guide`, `rules`, `agent-setup` | Resolve plans and set up shared agent instructions. |
+| `skills` | Manage the skills used by Claude AI profiles. |
+| `mcp --install [--ai codex\|pi\|kimi]` | Connect Worktrees tools to an agent (Claude by default). |
+| `sync push`, `sync pull`, `sync status` | Transfer projects through a mounted hub. |
+| `serve`, `serve remote`, `serve pair` | Run the host engine and manage remote access or pairing. |
+| `remote pair`, `remote hosts`, `remote use`, `remote call`, `remote readdress`, `remote forget` | Pair with, select, use, readdress, or forget another host. |
 
 `new`/`co`/`switch` are do-what-I-mean: reuse an existing worktree, check out an
 existing local **or** remote branch (fetching it first), or create a new branch
@@ -247,8 +349,9 @@ output is byte-for-byte unchanged. Shape (`schema_version` 1):
 - the **main checkout first** (`slug:"(main)", is_main:true`), then each worktree in
   the same recency order as the table;
 - per place: `slug, path, branch` (null when detached, with `detached:true`),
-  `dirty, dirty_files, ahead, behind, upstream` (the last three null when there's no
-  upstream), `created, created_epoch, last_commit_epoch, last_commit_subject,
+  `dirty, dirty_files, ahead, behind, upstream` (`ahead`/`behind` compare with
+  the project's base ref; `upstream` names the branch's tracking ref),
+  `created, created_epoch, last_commit_epoch, last_commit_subject,
   tmux_session:{name,up}, claude_session_present, install_cmd`, and `lifecycle_effective`.
 
 All state is derived live on every call — nothing is cached. `stack` and `declared`
@@ -257,8 +360,9 @@ are reserved (null for now). No `jq` required to produce it.
 ## Configuration
 
 Precedence: **flag > environment > user config > default.** User config lives at
-`~/.config/worktrees/config` (respects `$XDG_CONFIG_HOME`) — `key = value`
-lines, `#` comments. It is parsed as data, never executed.
+`~/.config/worktrees/config.toml` (respects `$XDG_CONFIG_HOME`). The original
+`~/.config/worktrees/config` file remains a fallback, key by key. Configuration
+is parsed as data.
 
 | What | Flag | Env | Config key | Default |
 |---|---|---|---|---|
@@ -267,13 +371,12 @@ lines, `#` comments. It is parsed as data, never executed.
 | Session/name prefix | — | `WORKTREES_PREFIX` | `prefix` | repo dir name |
 | Codex permissions (`ask`, `auto-review`, `full`) | — | `WORKTREES_CODEX_PERMISSIONS` | `codex_permissions` | `auto-review` |
 
-```ini
-# ~/.config/worktrees/config
-ai_cmd = codex
-ai_resume_arg = resume
+```toml
+# ~/.config/worktrees/config.toml
+ai_cmd = "codex"
 ```
 
-- `ai_cmd = none` (or `--ai none`) → pane 0 is a plain shell, no AI.
+- `ai_cmd = "none"` (or `--ai none`) → pane 0 is a plain shell, no AI.
 - `WORKTREES_CLAUDE_CMD` is honored as a **deprecated** alias of `WORKTREES_AI_CMD`.
 - A repo can pin its prefix with a committed `.worktree-prefix` file (one line);
   the env var wins over it.
@@ -300,18 +403,18 @@ ai_resume_arg = resume
   anything outside its markers. MCP: `rules_status`, `apply_rules`.
 
 Examples: `--ai claude`, `--ai "claude --model opus"`, `--ai codex`,
-`--ai opencode`, `--ai none`.
+`--ai pi --model <backend/id>`, `--ai kimi`, `--ai opencode`, `--ai none`.
 
-Claude and Codex can both be configured, but each worktree runs one provider
-session at a time. Switching providers closes the current managed tmux session
-before opening the other; each provider keeps its own saved conversation. Settings →
-Claude and Settings → Codex can both be configured. When both CLIs are available,
-the New worktree dialog asks which agent to start; it preselects Settings →
-Commands → Default agent. Entering an existing place keeps its running provider;
+Claude, Codex, pi, and Kimi can all be configured, but each worktree runs one
+provider session at a time. Switching providers closes the current managed
+tmux session before opening the other; each provider keeps its own saved
+conversation. Configure them in their own Settings categories. The New worktree
+dialog offers the available agents and preselects Settings → Commands →
+Default agent. Entering an existing place keeps its running provider;
 the default is used when no agent is running. Changing the default does not
 stop a running session. The CLI keeps its
-`ai_cmd` default and accepts `open <place> --ai claude|codex` and
-`close <place> --ai claude|codex`. An unqualified `close` closes both managed
+`ai_cmd` default and accepts `open <place> --ai claude|codex|pi|kimi` and
+`close <place> --ai claude|codex|pi|kimi`. An unqualified `close` closes all managed
 agent sessions. Codex resumes the newest interactive conversation started in
 that exact place with `codex resume <session-id>`, excluding subagents and
 scripted runs. Without a matching conversation it starts fresh. The generic
@@ -325,10 +428,10 @@ for or store an OpenAI API key. If Codex is currently signed in with an API
 key, sign out with `codex logout` and sign back in with `codex login` before
 opening it from Worktrees.
 
-Connect Worktrees tools separately in Settings → Claude and Settings → Codex,
-or run `worktrees mcp --install --ai codex` for Codex. The unqualified MCP setup
+Connect Worktrees tools in the agent's Settings category, or run
+`worktrees mcp --install --ai codex` (or `pi` / `kimi`). The unqualified MCP setup
 command still targets Claude. The MCP `create_worktree` tool accepts an optional
-`provider: "claude" | "codex"`; without one it uses the project's AI command.
+`provider: "claude" | "codex" | "pi" | "kimi"`; without one it uses the project's AI command.
 `open_place` (with `--mutations`) starts the agent in a place that already
 exists; with `brief`, it re-briefs the place as `open --brief` does.
 
@@ -341,8 +444,8 @@ waits instead of polling. The sender is the place the agent is working in,
 never a name it passes; anything running as your user can still write the
 log, so that is the trust boundary. Messages live in the repository's shared git data, untracked, and expire
 after a week. With `--mutations`, `send` types one line into another place's
-Codex, labelled as coming from the sending place and never while that Codex is
-waiting on an approval; for a Claude place it answers with the session name to use with
+Codex, pi, or Kimi, labelled as coming from the sending place and guarded
+against interrupting an approval; for a Claude place it answers with the session name to use with
 Claude's own `SendMessage`.
 
 ## Compatibility notes
@@ -355,10 +458,13 @@ Claude's own `SendMessage`.
 
 ## Development
 
+Install the Worktrees CLI first to use the shared job slots for builds and tests.
+
 ```sh
 git clone --recurse-submodules https://github.com/penard-monkey/worktrees
-make check            # shellcheck + bash-3.2 gates + bats suite
-make test-real-tmux   # 3 integration smokes against real tmux
+cd worktrees
+worktrees run --slot gate -- make check           # lint + bats suite
+worktrees run --slot gate -- make test-real-tmux  # real-tmux integration tests
 ```
 
 Tests are bats-core (vendored as submodules); the suite fakes tmux with a PATH
@@ -373,8 +479,8 @@ installed once per clone:
 
 ```sh
 nvm use                      # or any node >= the version in .nvmrc
-cd app && corepack pnpm install   # first time only
-make dev-app                      # or, from app/: corepack pnpm tauri dev
+(cd app && corepack pnpm install)   # first time only
+worktrees run --slot gate -- make dev-app
 ```
 
 Run **`corepack pnpm`, from `app/`** — not a bare `pnpm`, and not
@@ -403,6 +509,8 @@ Both are development loops. To actually *use* a locally built app, see
 it in `/Applications`.
 
 ### Scripts
+
+These scripts live in `app/scripts/`:
 
 | Script | What it does | Touches |
 |---|---|---|
@@ -444,6 +552,14 @@ tmux ls | grep -v sbx-   # yours, untouched
 It also isolates the AI-profile store and, with `--app`, overrides the bundle
 identifier so the sandbox app gets its own `ui-state.json` instead of sharing
 yours.
+
+## Documentation
+
+- [AI profiles](docs/ai-profiles.html) — Claude rules, skills, MCP servers, and models.
+- [Changelog](CHANGELOG.md) — release history and feature details.
+- [Decisions](docs/adr/index.md) and [proposals](docs/proposals/index.md) — design
+  context; check the implementation and changelog for what has shipped.
+- [Roadmap](ROADMAP.md) — deferred work and known follow-ups.
 
 ## License
 
