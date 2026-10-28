@@ -3,10 +3,15 @@
 // `RemoteInstruction`). The JSON is `authz::Caller`'s spelling of a principal
 // on a device. Pure: App.tsx renders what these return.
 
-export type DeviceRef = { kind: "console" } | { kind: "paired"; id: string };
+/** A paired device's `id` is absent when the host shows this window another
+ *  device's stamp: a window that is itself a paired device is told which
+ *  device by name only. */
+export type DeviceRef = { kind: "console" } | { kind: "paired"; id?: string };
 
-/** A principal on a device. */
-export type By = { principal: string; device: DeviceRef };
+/** A principal on a device. `device_name` is the paired device's name as the
+ *  host's registry has it now, which serve adds on every read; absent for a
+ *  device the registry no longer has. */
+export type By = { principal: string; device: DeviceRef; device_name?: string };
 
 /** Who launched the place's agent through serve; `cross_project: "off"` when
  *  a device whose scope is a list launched it (its lanes reach no other
@@ -27,16 +32,20 @@ export function setDeviceNames(next: Iterable<[string, string]>): void {
   for (const [id, name] of next) names.set(id, name);
 }
 
-/** What a device is called on screen: its name in the registry, or its id
- *  until the list has been read (or on a window that may not read it). */
-export function deviceLabel(d: DeviceRef): string {
+/** What a device is called on screen: the name the stamp carries, else its
+ *  name in the Devices list, else its id until the list has been read (or on
+ *  a window that may not read it), else — a stamp that names neither — "another
+ *  paired device". */
+export function deviceLabel(by: By): string {
+  const d = by.device;
   if (d.kind === "console") return "this computer";
-  return names.get(d.id) ?? d.id;
+  if (by.device_name) return by.device_name;
+  return d.id === undefined ? "another paired device" : names.get(d.id) ?? d.id;
 }
 
 /** True for a paired device — what the place header speaks about. The
  *  console is the person at this desk; saying so would be noise. */
-export function fromDevice(by?: By | null): by is By & { device: { kind: "paired"; id: string } } {
+export function fromDevice(by?: By | null): by is By & { device: { kind: "paired"; id?: string } } {
   return by?.device.kind === "paired";
 }
 
@@ -53,13 +62,13 @@ export function agoWords(epoch: number, now: number = Date.now() / 1000): string
  *  full path is the title's. */
 export function instructionLine(i: RemoteInstruction, now?: number): string {
   const name = i.path.split("/").pop() || i.path;
-  return `${name} edited from ${deviceLabel(i.device)}, ${agoWords(i.at, now)}`;
+  return `${name} edited from ${deviceLabel(i)}, ${agoWords(i.at, now)}`;
 }
 
 /** The longer form, for a tooltip. */
 export function instructionTitle(i: RemoteInstruction): string {
   const who = i.principal === "owner" ? "" : ` (${i.principal})`;
-  return `${i.path} was last written from the paired device ${deviceLabel(i.device)}${who} at ${new Date(i.at * 1000).toLocaleString()}. Review it in Changes before an agent reads it.`;
+  return `${i.path} was last written from the paired device ${deviceLabel(i)}${who} at ${new Date(i.at * 1000).toLocaleString()}. Review it in Changes before an agent reads it.`;
 }
 
 /** "from <device>" beside a live session the device launched, and why its
@@ -67,5 +76,5 @@ export function instructionTitle(i: RemoteInstruction): string {
 export function launchedTitle(l: LaunchedBy): string {
   const who = l.principal === "owner" ? "" : ` (${l.principal})`;
   const reach = l.cross_project === "off" ? " Its scope is a list of projects, so this agent reaches no other project." : "";
-  return `This agent was launched from the paired device ${deviceLabel(l.device)}${who}.${reach}`;
+  return `This agent was launched from the paired device ${deviceLabel(l)}${who}.${reach}`;
 }

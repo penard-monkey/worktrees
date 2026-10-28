@@ -31,8 +31,8 @@ use crate::ops::{
 };
 use crate::projects::{import_app_projects, read_projects};
 use crate::watch::{
-    backfill_worked, claude_activity, completion_edges, drain_inbox, harness_feed, merge_activity,
-    new_dones, stamp_worked, Activity, ClaudeActivity, Feed, Inbox, LaneTick, TaskDone,
+    announce_done, backfill_worked, claude_activity, completion_edges, drain_inbox, harness_feed, merge_activity,
+    new_dones, Activity, ClaudeActivity, Feed, Inbox, LaneTick,
 };
 use crate::{term, viewer, workspace, Ctx};
 
@@ -136,9 +136,7 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
     // tmux #{session_activity} signal, which tracked CLIENT attach/keypress,
     // not pane output — so the dot decayed while Claude worked.
     let mut last = worktrees_core::tmux::session_fingerprint();
-    let mut last_busy: Vec<String> = Vec::new();
-    let mut last_waiting: Vec<String> = Vec::new();
-    let mut last_waiting_by: BTreeMap<&'static str, Vec<String>> = Default::default();
+    let mut busy_gate = BusyGate::default();
     let mut last_models: Option<Vec<(i32, Option<String>)>> = None;
     let mut ticks: u32 = 0;
     // Inbox requests the last tick left waiting for a client, for its log line.
@@ -334,16 +332,13 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
                 })
                 .collect();
         let Activity { busy, waiting, edges } = merge_activity(busy, waiting, lanes.iter().map(|(_, t)| t));
-        // Change-gated: emit only when EITHER set shifts, so an idle machine
-        // stays silent (the client just re-applies the last set).
-        if busy != last_busy || waiting != last_waiting || waiting_by != last_waiting_by {
-            last_busy = busy.clone();
-            last_waiting = waiting.clone();
-            last_waiting_by = waiting_by.clone();
-            pollctx.emit(
-                "sessions:busy",
-                payload(&ClaudeActivity { busy: busy.clone(), waiting, waiting_by }),
-            );
+        // Change-gated: emit only when a set shifts, so an idle machine stays
+        // silent (the client just re-applies the last set) — and on the first
+        // tick whatever they are (`BusyGate`).
+        let sets = (busy, waiting, waiting_by);
+        if busy_gate.moved(&sets) {
+            let (busy, waiting, waiting_by) = sets;
+            pollctx.emit("sessions:busy", payload(&ClaudeActivity { busy, waiting, waiting_by }));
         }
         // Completion edges, computed AFTER the busy emit so the dot's hand-off
         // (green out, ember in) arrives in that order.
@@ -353,9 +348,7 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
             let roots = read_projects(&pollctx);
             let epoch = sysclock::now_epoch();
             for path in exits {
-                if stamp_worked(&roots, &path, epoch) {
-                    pollctx.emit("sessions:done", payload(&TaskDone { path, epoch }));
-                }
+                announce_done(&pollctx, &roots, path, epoch);
             }
         }
         let fresh: Vec<(String, i64)> = lanes
@@ -367,12 +360,33 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
             let now = sysclock::now_epoch();
             for (path, at) in fresh {
                 // Bounded by now: the stamp is the agent's clock.
-                let epoch = at.min(now);
-                if stamp_worked(&roots, &path, epoch) {
-                    pollctx.emit("sessions:done", payload(&TaskDone { path, epoch }));
-                }
+                announce_done(&pollctx, &roots, path, at.min(now));
             }
         }
+    }
+}
+
+/// The busy, waiting and waiting-by sets one tick read.
+type BusySets = (Vec<String>, Vec<String>, BTreeMap<&'static str, Vec<String>>);
+
+/// The `sessions:busy` gate: a tick's sets go out only when they differ from
+/// the last ones sent, and on the poll's FIRST tick whatever they are. Serve
+/// sends a connection that declares the event the last push
+/// (`scope::SNAPSHOT`), so the first tick is what gives an idle host a state
+/// to send; seeded with empty sets, a host where nothing was busy at start
+/// pushed nothing, and a phone that connected showed no state at all until
+/// the first agent moved.
+#[derive(Default)]
+struct BusyGate(Option<BusySets>);
+
+impl BusyGate {
+    /// Whether this tick's `sets` are to be emitted; remembered when they are.
+    fn moved(&mut self, sets: &BusySets) -> bool {
+        if self.0.as_ref() == Some(sets) {
+            return false;
+        }
+        self.0 = Some(sets.clone());
+        true
     }
 }
 
@@ -439,6 +453,26 @@ mod tests {
         let ctx = Ctx::new(dir.clone(), Arc::new(crate::tests::Recorder::default()));
         stop(&ctx);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The poll's first tick sends the busy sets whatever they are, an idle
+    /// host's empty ones included, and only a change after that. Serve sends
+    /// a connection that declares `sessions:busy` the last push
+    /// (`scope::SNAPSHOT`), so a gate seeded with empty sets left a host
+    /// where nothing was busy at start with nothing to send, and a phone that
+    /// connected showed no state until the first agent moved.
+    #[test]
+    fn the_first_tick_sends_the_busy_sets_even_when_they_are_empty() {
+        let mut g = BusyGate::default();
+        let idle = BusySets::default();
+        assert!(g.moved(&idle), "the first tick: an idle host's state is a state");
+        assert!(!g.moved(&idle), "then only a change");
+        let busy: BusySets = (vec!["/a".into()], Vec::new(), BTreeMap::new());
+        assert!(g.moved(&busy));
+        assert!(!g.moved(&busy));
+        let by: BusySets = (vec!["/a".into()], Vec::new(), BTreeMap::from([("claude", Vec::new())]));
+        assert!(g.moved(&by), "the per-harness set is part of the state");
+        assert!(g.moved(&idle), "and back to idle is a change");
     }
 
     /// The hook `boot` installs logs a panic as ONE `[panic]` line: where,

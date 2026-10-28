@@ -13,23 +13,30 @@
 //!
 //! A ONE-SHOT event also asks the socket, not only its caller: it goes only
 //! to a connection that declared it listens for it (`Listens`, §9.3).
+//!
+//! A place's PROVENANCE (§7.3, §7.5) is projected for every caller, the
+//! console included: each stamp names its device as the registry does now
+//! ([`stamps`]).
 
 use std::path::{Component, Path};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use serde_json::Value;
-use worktrees_core::authz::{Caller, Grant, Projects};
+use worktrees_core::authz::{Caller, Device, DeviceId, Grant, NoDevices, Projects, Registry};
 
 /// What a projection reads: the caller's scope, and the registered roots, by
 /// which a path is attributed to the project that OWNS it — the innermost
 /// registered root containing it, as the resolver's `file(…)` does. Without
 /// the roots a path in a repo checked out under another repo's tree would
-/// count as the outer one's.
+/// count as the outer one's. And who the caller is, with the registry that
+/// names devices, for a place's provenance stamps.
 pub struct View<'a> {
     pub projects: &'a Projects,
     /// The registry's keys. Read only for a scope that is not `"*"`.
     pub roots: &'a [String],
+    pub caller: &'a Caller,
+    pub names: &'a dyn Registry,
 }
 
 /// A result filter: the caller's view, and the command's serialized reply.
@@ -74,9 +81,82 @@ fn keep(view: &View, mut v: Value, key: &str, field: &str, root_only: bool) -> V
     v
 }
 
-/// `list_workspace`: the projects in scope, each by its registry key.
+/// `list_workspace`: the projects in scope, each by its registry key, and
+/// every place's provenance stamps projected ([`stamps`]).
 pub fn workspace(view: &View, v: Value) -> Value {
-    keep(view, v, "projects", "root", true)
+    let mut v = keep(view, v, "projects", "root", true);
+    if let Some(Value::Array(projects)) = v.get_mut("projects") {
+        for p in projects.iter_mut().filter_map(|p| p.get_mut("snapshot")) {
+            places_stamps(view, p);
+        }
+    }
+    v
+}
+
+/// `clone_project`: the workspace it answers with, under `workspace`, as
+/// [`workspace`] projects it.
+pub fn cloned(view: &View, mut v: Value) -> Value {
+    if let Some(w) = v.get_mut("workspace") {
+        *w = workspace(view, w.take());
+    }
+    v
+}
+
+/// `list_places`: one project's snapshot, the resolver's to admit, with its
+/// places' provenance stamps projected ([`stamps`]).
+pub fn places(view: &View, mut v: Value) -> Value {
+    places_stamps(view, &mut v);
+    v
+}
+
+fn places_stamps(view: &View, snapshot: &mut Value) {
+    if let Some(Value::Array(places)) = snapshot.get_mut("places") {
+        for d in places.iter_mut().filter_map(|p| p.get_mut("declared")) {
+            stamps(view, d);
+        }
+    }
+}
+
+/// The declared fields that say which caller did something there: each is a
+/// `store::By` (`{principal, device}`) flattened with what it did.
+pub const STAMPS: &[&str] = &["launched_by", "last_remote_instruction", "last_remote_send", "note_by", "title_by"];
+
+/// What another device's stamp keeps: who (the principal, and the device by
+/// KIND and name) and what (the file, the session, when). Named rather than
+/// stripped, so a field a stamp gains later reaches only the console and the
+/// device itself until it is added here.
+const SHARED: &[&str] = &["principal", "device", "device_name", "path", "at", "session"];
+
+/// One place's `declared`, as `view.caller` may see it. A stamp by a paired
+/// device gains `device_name`: the device's name as the registry has it NOW,
+/// read per reply, so a rename shows on the next read, and a stamp written
+/// before names existed is named too. A device the registry no longer has
+/// is unnamed; a name a store file carries is never the one shown. The
+/// console and the stamping device see the stamp whole — its id is how a
+/// phone says "this device". Any other device sees [`SHARED`] alone, its
+/// `device` cut to `{"kind": "paired"}`: never the id, which addresses the
+/// device in the registry's rows, nor `cross_project`, the reach the
+/// device's scope gave the lane. The console's own stamps are left as they
+/// are.
+pub fn stamps(view: &View, declared: &mut Value) {
+    let Some(d) = declared.as_object_mut() else { return };
+    for key in STAMPS {
+        let Some(Value::Object(s)) = d.get_mut(*key) else { continue };
+        let device = s.get("device");
+        if device.and_then(|d| d.get("kind")).and_then(Value::as_str) != Some("paired") {
+            continue;
+        }
+        let id = device.and_then(|d| d.get("id")).and_then(Value::as_str).map(DeviceId::new);
+        match id.as_ref().and_then(|id| view.names.device_name(view.caller.principal(), id)) {
+            Some(name) => s.insert("device_name".into(), Value::from(name)),
+            None => s.remove("device_name"),
+        };
+        let own = matches!((view.caller.device(), &id), (Device::Paired(me), Some(id)) if me == id);
+        if !view.caller.is_console() && !own {
+            s.retain(|k, _| SHARED.contains(&k.as_str()));
+            s.insert("device".into(), serde_json::json!({ "kind": "paired" }));
+        }
+    }
 }
 
 /// `list_drafts`: the unsent text people typed into composers, host-wide —
@@ -136,6 +216,23 @@ pub fn is_one_shot(event: &str) -> bool {
     ONE_SHOT.contains(&event)
 }
 
+/// Events whose payload is the WHOLE state, not a change to it, and whose
+/// push is change-gated: a client that connects between two changes would
+/// hold no state until the next one, so a connection that DECLARES one is
+/// sent the last payload at once, projected as the push is
+/// (`conn::Clients::declare`). `sessions:busy` is the busy and waiting sets
+/// (a phone reconnects on every foreground). `sessions:done` and
+/// `places:changed` are not here: the first is one turn and the second
+/// "re-read", and a client re-pulls the workspace, which carries
+/// `last_worked_epoch`, on every reconnect. `sessions:drafts` has
+/// `list_drafts`.
+pub const SNAPSHOT: &[&str] = &["sessions:busy"];
+
+/// `event`'s row in [`SNAPSHOT`], for the `'static` name a cache keys on.
+pub fn snapshot(event: &str) -> Option<&'static str> {
+    SNAPSHOT.iter().copied().find(|n| *n == event)
+}
+
 /// The events one connection has declared it listens for: its last
 /// `{"listen": [...]}`, each frame a full replacement (`wire::Frame::Listen`).
 /// Only names `EVENTS` has are kept, one bit each, so whatever a client
@@ -193,7 +290,8 @@ pub fn event(name: &str, payload: &Value, caller: &Caller, grant: &Grant, roots:
         _ => {}
     }
     let roots = roots();
-    let view = View { projects: scope, roots: &roots };
+    // No event carries a stamp, so none names a device.
+    let view = View { projects: scope, roots: &roots, caller, names: &NoDevices };
     match how {
         Event::Everyone | Event::Console => unreachable!("answered above"),
         Event::ByPath(field) => payload.get(*field).and_then(Value::as_str).is_some_and(|p| covers(&view, p)).then(|| payload.clone()),
@@ -256,7 +354,8 @@ mod tests {
         let all = Grant::everything();
         let ws = json!({"projects": [{"root": "/r/a"}, {"root": "/r/b"}]});
         let roots = reg();
-        assert_eq!(workspace(&View { projects: &all.projects, roots: &roots }, ws.clone()), ws);
+        let desk = Caller::console();
+        assert_eq!(workspace(&View { projects: &all.projects, roots: &roots, caller: &desk, names: &NoDevices }, ws.clone()), ws);
         let mut never = || -> Vec<String> { panic!("the console's projection read the registry") };
         for (name, _) in EVENTS {
             let p = json!({"path": "/elsewhere", "repo": "/elsewhere", "busy": ["/elsewhere"], "drafts": [{"path": "/x"}]});
@@ -326,13 +425,111 @@ mod tests {
         for name in ONE_SHOT {
             assert!(EVENTS.iter().any(|(n, _)| n == name), "{name} is one-shot and has no EVENTS row, so it could never be declared");
         }
+        for name in SNAPSHOT {
+            assert!(EVENTS.iter().any(|(n, _)| n == name), "{name} is a snapshot and has no EVENTS row, so it could never be declared");
+            assert!(!is_one_shot(name), "{name}: a state is not an act consumed by being sent");
+        }
+    }
+
+    /// `list_workspace` holds each project's places under `snapshot`, and
+    /// their provenance stamps are projected there as `list_places`' are
+    /// (dispatch's test drives that row through a real body): cut to the
+    /// scope first, then each stamp named, another device's id and reach
+    /// gone. A project with no snapshot, or a place with nothing declared,
+    /// passes as it was.
+    #[test]
+    fn a_workspaces_stamps_are_projected_in_every_project() {
+        struct Named;
+        impl Registry for Named {
+            fn principal_grant(&self, _: &PrincipalId) -> Option<Grant> {
+                None
+            }
+            fn device_grant(&self, _: &PrincipalId, _: &DeviceId) -> Option<Grant> {
+                None
+            }
+            fn device_principal(&self, _: &DeviceId) -> Option<PrincipalId> {
+                None
+            }
+            fn stepup_required(&self, _: &PrincipalId, _: &DeviceId) -> bool {
+                true
+            }
+            fn generation(&self) -> u64 {
+                0
+            }
+            fn device_name(&self, p: &PrincipalId, d: &DeviceId) -> Option<String> {
+                (p.is_owner() && d.as_str() == "launcher").then(|| "Bret's iPhone".into())
+            }
+        }
+        let stamp = json!({ "principal": "owner", "device": { "kind": "paired", "id": "launcher" }, "cross_project": "off" });
+        let place = |slug: &str, declared: Value| json!({ "slug": slug, "declared": declared });
+        let ws = json!({ "projects": [
+            { "root": "/r/a", "ok": true, "snapshot": { "places": [place("(main)", json!({ "launched_by": stamp })), place("x", Value::Null)] } },
+            { "root": "/r/b", "ok": true, "snapshot": { "places": [place("(main)", json!({ "launched_by": stamp }))] } },
+            { "root": "/r/a/inner", "ok": false, "snapshot": null },
+        ] });
+        let roots = reg();
+        let at = |v: &Value, i: usize| v["projects"][i]["snapshot"]["places"][0]["declared"]["launched_by"].clone();
+        let shared = json!({ "principal": "owner", "device": { "kind": "paired" }, "device_name": "Bret's iPhone" });
+        let mut whole = stamp.clone();
+        whole["device_name"] = json!("Bret's iPhone");
+
+        let all = Grant::everything();
+        let desk = Caller::console();
+        let v = workspace(&View { projects: &all.projects, roots: &roots, caller: &desk, names: &Named }, ws.clone());
+        assert_eq!((at(&v, 0), at(&v, 1)), (whole.clone(), whole.clone()), "the console: every project, whole and named");
+        assert_eq!(v["projects"][0]["snapshot"]["places"][1], ws["projects"][0]["snapshot"]["places"][1]);
+        assert_eq!(v["projects"][2], ws["projects"][2]);
+
+        let me = phone();
+        let v = workspace(&View { projects: &all.projects, roots: &roots, caller: &me, names: &Named }, ws.clone());
+        assert_eq!((at(&v, 0), at(&v, 1)), (shared.clone(), shared.clone()), "another device, in every project");
+
+        let g = scoped(&["/r/a"]);
+        let launcher = Caller::paired(PrincipalId::owner(), DeviceId::new("launcher"));
+        let v = workspace(&View { projects: &g.projects, roots: &roots, caller: &launcher, names: &Named }, ws.clone());
+        assert_eq!(v["projects"].as_array().map(Vec::len), Some(1), "cut to the scope first");
+        assert_eq!(at(&v, 0), whole, "the launching device sees its own stamp whole");
+    }
+
+    /// Every declared field that records a caller is a stamp: `Declared`'s
+    /// fields typed `By`, or a struct that flattens one, read off store.rs.
+    /// One missing from [`STAMPS`] would reach every device unprojected, its
+    /// device's id and all.
+    #[test]
+    fn every_declared_field_that_names_a_caller_is_a_stamp() {
+        let src = include_str!("../../../worktrees-core/src/store.rs");
+        let src = src.split("\n#[cfg(test)]\nmod tests").next().unwrap();
+        let body = |name: &str| -> &str {
+            let at = src.find(&format!("pub struct {name} {{")).unwrap_or_else(|| panic!("no struct {name}"));
+            let rest = &src[at..];
+            &rest[..rest.find("\n}").unwrap()]
+        };
+        let mut types = vec!["By".to_string()];
+        for (i, _) in src.match_indices("pub struct ") {
+            let name: String = src[i + "pub struct ".len()..].chars().take_while(|c| c.is_alphanumeric()).collect();
+            if body(&name).contains("pub by: By,") {
+                types.push(name);
+            }
+        }
+        assert!(types.len() > 2, "the scan found the stamp types: {types:?}");
+        let mut fields: Vec<String> = body("Declared")
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("pub ")?.split_once(": Option<"))
+            .filter(|(_, ty)| types.iter().any(|t| ty.trim_end_matches(">,") == t))
+            .map(|(f, _)| f.to_string())
+            .collect();
+        fields.sort();
+        let mut want: Vec<String> = STAMPS.iter().map(|s| s.to_string()).collect();
+        want.sort();
+        assert_eq!(fields, want);
     }
 
     #[test]
     fn results_are_cut_to_the_scope() {
         let g = scoped(&["/r/a"]);
         let roots = reg();
-        let v = View { projects: &g.projects, roots: &roots };
+        let me = phone();
+        let v = View { projects: &g.projects, roots: &roots, caller: &me, names: &NoDevices };
         let ws = json!({"projects": [{"root": "/r/a", "ok": true}, {"root": "/r/b", "ok": true}]});
         assert_eq!(workspace(&v, ws), json!({"projects": [{"root": "/r/a", "ok": true}]}));
         let d = json!([{"path": "/r/a/.worktrees/x", "text": "t"}, {"path": "/r/b", "text": "u"}, {"path": "/r/a/inner", "text": "v"}]);

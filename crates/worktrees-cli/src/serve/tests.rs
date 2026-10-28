@@ -812,6 +812,114 @@ fn a_listen_frame_is_read_in_order_and_never_answered() {
     let _ = &l.rt;
 }
 
+/// The registry's `/r/a` and `/r/b`, for an event whose paths are judged by
+/// the project that owns them.
+struct TwoRoots;
+
+impl super::resolve::World for TwoRoots {
+    fn roots(&self) -> Vec<String> {
+        vec!["/r/a".into(), "/r/b".into()]
+    }
+    fn panes(&self) -> Option<worktrees_core::tmux::PaneList> {
+        None
+    }
+}
+
+/// Device `phone`, the owner's, granted read on `/r/a` alone.
+struct PhoneOnA;
+
+impl Registry for PhoneOnA {
+    fn stepup_required(&self, _: &PrincipalId, _: &DeviceId) -> bool {
+        false
+    }
+    fn generation(&self) -> u64 {
+        0
+    }
+    fn principal_grant(&self, _: &PrincipalId) -> Option<Grant> {
+        None
+    }
+    fn device_grant(&self, p: &PrincipalId, d: &DeviceId) -> Option<Grant> {
+        use worktrees_core::authz::{Capability, Caps, Projects};
+        (p.is_owner() && d.as_str() == "phone").then(|| Grant { capabilities: Caps::of(&[Capability::Read]), projects: Projects::only(["/r/a"]) })
+    }
+    fn device_principal(&self, _: &DeviceId) -> Option<PrincipalId> {
+        Some(PrincipalId::owner())
+    }
+}
+
+/// A server whose devices are `registry`'s and whose projects are `/r/a` and
+/// `/r/b`.
+fn live_on_two(tag: &str, registry: Arc<dyn Registry>) -> Live {
+    let dir = std::env::temp_dir().join(format!("wt-serve-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+    let clients = super::conn::Clients::with(registry, Some(Arc::new(TwoRoots)));
+    let running = rt.block_on(async { start_in(dir.clone(), 0, vec![DEV_ORIGIN.to_string()], super::conn::LIMITS, BUDGETS, clients) }).unwrap();
+    Live { running: Some(running), dir, rt }
+}
+
+fn listen_for(ws: &mut WebSocket<TcpStream>, names: &[&str]) {
+    ws.send(Message::text(json!({ "listen": names }).to_string())).unwrap();
+}
+
+/// §9.3, the iOS ask: **a connection that DECLARES `sessions:busy` is sent
+/// the current set at once.** The push is change-gated, so a client that
+/// connects between two changes had no working or waiting state until the
+/// next one — a phone reconnects on every foreground. Only the declaring
+/// connection is sent it, never a re-broadcast; a re-declaration that keeps
+/// the event sends nothing (the connection has had every push since it
+/// joined); and the pushes stream on as before. A connection that drops the
+/// event and declares it again is sent the set as it stands then.
+#[test]
+fn a_connection_that_declares_sessions_busy_is_sent_the_current_set() {
+    let l = live_on_two("busysnap", Arc::new(PhoneOnA));
+    let host = l.running.as_ref().unwrap().ctx.host.clone();
+    let set = json!({ "busy": ["/r/a/.worktrees/x", "/r/b"], "waiting": ["/r/b/.worktrees/y"], "waiting_by": { "claude": ["/r/b/.worktrees/y"] } });
+    // The host's state, set before anyone was connected to hear it.
+    host.emit("sessions:busy", set.clone());
+    let mut app = client(&l);
+    let mut other = client(&l);
+    let wait = Duration::from_secs(5);
+
+    listen_for(&mut app, &["places:changed", "sessions:busy"]);
+    assert_eq!(frame(&mut app, wait), Some(json!({ "event": "sessions:busy", "payload": set })), "the declaring connection");
+    assert_eq!(rpc(&mut other, json!(1), "get_changelog", json!({}))["id"], json!(1), "the other connection was sent nothing");
+
+    listen_for(&mut app, &["sessions:busy"]);
+    assert_eq!(rpc(&mut app, json!(2), "get_changelog", json!({}))["id"], json!(2), "a re-declaration that keeps it sends nothing");
+
+    let next = json!({ "busy": ["/r/a"], "waiting": [], "waiting_by": { "claude": [] } });
+    host.emit("sessions:busy", next.clone());
+    for ws in [&mut app, &mut other] {
+        assert_eq!(frame(ws, wait), Some(json!({ "event": "sessions:busy", "payload": next })), "a change still reaches every socket");
+    }
+
+    listen_for(&mut app, &["places:changed"]);
+    listen_for(&mut app, &["sessions:busy"]);
+    assert_eq!(frame(&mut app, wait), Some(json!({ "event": "sessions:busy", "payload": next })), "declared again: the set as it stands now");
+}
+
+/// The snapshot is projected exactly as the push is: a device scoped to one
+/// project is sent that project's members of the busy, waiting and
+/// waiting-by sets, and nothing of the other's.
+#[test]
+fn a_device_that_declares_sessions_busy_is_sent_its_scopes_members() {
+    let l = live_on_two("busysnapdev", Arc::new(PhoneOnA));
+    let host = l.running.as_ref().unwrap().ctx.host.clone();
+    host.emit(
+        "sessions:busy",
+        json!({ "busy": ["/r/a/.worktrees/x", "/r/b"], "waiting": ["/r/b/.worktrees/y", "/r/a"], "waiting_by": { "claude": ["/r/b/.worktrees/y"], "codex": ["/r/a"] } }),
+    );
+    as_device(&l, "phone");
+    let mut phone = client(&l);
+    listen_for(&mut phone, &["sessions:busy"]);
+    assert_eq!(
+        frame(&mut phone, Duration::from_secs(5)),
+        Some(json!({ "event": "sessions:busy", "payload": { "busy": ["/r/a/.worktrees/x"], "waiting": ["/r/a"], "waiting_by": { "claude": [], "codex": ["/r/a"] } } }))
+    );
+}
+
 // ── limits (OWASP M1) ────────────────────────────────────────────────────────
 
 fn idle_tcp(l: &Live) -> TcpStream {
@@ -3584,6 +3692,35 @@ fn a_device_is_rate_limited_and_the_console_is_not() {
     for i in 0..20 {
         assert!(rpc(&mut desk, json!(i), "get_settings", json!({})).get("ok").is_some(), "the desk's request {i}");
     }
+}
+
+/// **The agent-start limit has a word of its own.** A device past its hourly
+/// start bucket is told `start-budget: <seconds until it may start one
+/// again>`, which a client can tell from the request rate's `rate`; the
+/// limit is the DEVICE's (its share, across its connections), and the desk
+/// has none. The episode records the limit it was, answered by that word.
+#[test]
+fn a_device_past_its_start_budget_is_told_when_it_may_start_again() {
+    let mut b = BUDGETS;
+    b.device.launches = Rate { per_sec: 10.0 / 3600.0, burst: 1.0 };
+    let l = live_budgeted("startbudget", b);
+    let nowhere = json!({ "repo": "/nowhere", "branch": "x" });
+    as_device(&l, "phone");
+    let mut phone = client(&l);
+    let first = rpc(&mut phone, json!(1), "new_place", nowhere.clone());
+    assert!(!first["err"].as_str().unwrap_or("").starts_with("start-budget"), "the burst's one start was admitted: {first}");
+    assert_eq!(rpc(&mut phone, json!(2), "new_place", nowhere.clone())["err"], json!("start-budget: 360"), "ten an hour: one back in 360 s");
+    as_device(&l, "phone");
+    let mut again = client(&l);
+    assert_eq!(rpc(&mut again, json!(3), "open_place", json!({ "repo": "/nowhere", "slug": "x" }))["err"], json!("start-budget: 360"), "the device's, across its connections");
+    assert!(rpc(&mut phone, json!(4), "get_settings", json!({})).get("ok").is_some(), "the request rate is another limit");
+    let mut desk = client(&l);
+    for i in 0..5 {
+        let r = rpc(&mut desk, json!(i), "new_place", nowhere.clone());
+        assert!(!r["err"].as_str().unwrap_or("").starts_with("start-budget"), "the desk has no start budget: {r}");
+    }
+    let r = audit_record(&l, |r| r["detail"]["limit"] == "launch_rate");
+    assert_eq!((r["detail"]["episode"].as_str(), r["detail"]["answered"].as_str()), (Some("began"), Some("start-budget")), "{r}");
 }
 
 /// **Devices cannot take the bodies the desk needs.** Remote bodies have a

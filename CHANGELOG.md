@@ -22,8 +22,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   honestly. On a window that drives another Mac, the Settings button is
   greyed — the grant is that Mac's to give — and the card says where the fix
   is made.
+- **A place says which paired device launched its agent, edited its
+  instructions or typed to it by the device's name.** `worktrees serve` names
+  the device as it is called now, so renaming a device in Settings → Devices
+  renames it everywhere on the next refresh, and records written before this
+  release are named too. Another paired device that can read the place sees
+  that name and nothing else about the device: not its id, and not the reach
+  its scope gave the agent. The device itself, and this computer, see
+  everything as before. A device that has since been removed is not named.
 
 ### Changed
+- A paired device that has used up its hourly allowance of agent starts is
+  now told so in its own words: `start-budget: <seconds>`, the time until it
+  may start one again, instead of the `rate` it shared with every other
+  limit. The allowance is per device, ten starts an hour, and this computer
+  has none.
 - The notice that remote access is on now sits in the bar at the bottom of
   the window, beside the usage meter and Claude's status (in a place's footer
   when the usage meter is placed there), instead of floating over the
@@ -40,6 +53,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 - Home scrolls when its content is taller than the window. Before, the
   bottom of the list ran off the window with nothing to scroll, so its last
   places could not be opened from Home.
+- An app or a phone that connected to `worktrees serve` showed no agent as
+  working or waiting until the next agent changed state, because serve only
+  sent that state when it changed. A connection that asks for it now gets the
+  current state at once, limited to the projects it may see, and serve has a
+  state to send from its first check after it starts.
 - When a configured remote-access address disappears (for example, after
   Tailscale disconnects), Settings → Devices now explains why pairing is
   unavailable and links to Remote access to choose another address or turn it

@@ -157,9 +157,12 @@ impl Flights {
 
     /// Join the flight in the air for `key`, or lead a new one.
     pub fn join(self: &Arc<Self>, key: String) -> Join {
+        let mut map = self.map.lock().unwrap();
+        // Counted under the lock the lookup takes: counted before it, a
+        // leader waiting for N joins could see the Nth, land and leave
+        // before that caller looked, and the caller led a second flight.
         #[cfg(test)]
         self.joins.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        let mut map = self.map.lock().unwrap();
         if let Some(f) = map.get(&key) {
             return Join::Follow(f.clone());
         }

@@ -173,8 +173,8 @@ function cdv(): ProjectView {
       // "edited from" line and the "from <device>" badge.
       declared: {
         last_opened_epoch: NOW - 3600,
-        launched_by: { principal: "owner", device: { kind: "paired", id: "d-7f3a" }, cross_project: "off" },
-        last_remote_instruction: { principal: "owner", device: { kind: "paired", id: "d-7f3a" }, path: "AGENTS.md", at: NOW - 2 * MIN },
+        launched_by: { principal: "owner", device: { kind: "paired", id: "d-7f3a" }, device_name: "Bret's iPhone", cross_project: "off" },
+        last_remote_instruction: { principal: "owner", device: { kind: "paired", id: "d-7f3a" }, device_name: "Bret's iPhone", path: "AGENTS.md", at: NOW - 2 * MIN },
       },
       lifecycle_effective: "active",
     }),

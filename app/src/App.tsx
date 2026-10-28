@@ -8413,7 +8413,7 @@ function App() {
                     {fromDevice(selected.declared?.launched_by) && (
                       <span className="live-badge device-badge" data-testid="launched-by"
                         title={launchedTitle(selected.declared!.launched_by!)}>
-                        from {deviceLabel(selected.declared!.launched_by!.device)}
+                        from {deviceLabel(selected.declared!.launched_by!)}
                       </span>
                     )}
                   </>
