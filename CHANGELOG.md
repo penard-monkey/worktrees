@@ -24,6 +24,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   is made.
 
 ### Fixed
+- A review lane's brief no longer trusts a repository's root `AGENTS.md` (or
+  `CLAUDE.md`) just because its worktrees rules block is unchanged. Text a
+  branch adds around that block is now listed as a change for the reviewing
+  agent to read, not described as trusted agent instructions.
 - When a configured remote-access address disappears (for example, after
   Tailscale disconnects), Settings → Devices now explains why pairing is
   unavailable and links to Remote access to choose another address or turn it
