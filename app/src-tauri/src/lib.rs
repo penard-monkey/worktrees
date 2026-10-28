@@ -378,6 +378,13 @@ pub fn run() {
         // pattern also covers a path with a dot component: every worktree this
         // app opens lives under `.worktrees/`, and with the unix default the
         // invoke would reject exactly those — silently.
+        //
+        // `open_url` has the same shape one level up: `opener:default` scopes
+        // it to http(s), mailto and tel, so the privacy card's System Settings
+        // link (`x-apple.systempreferences:`) needs its own allow entry or it
+        // rejects with `ForbiddenUrl`. The test
+        // `every_privacy_pane_is_one_the_opener_may_open` holds every pane
+        // against that file.
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -434,6 +441,7 @@ pub fn run() {
                 dev,
                 bin,
                 worktrees_api::viewer::bundle_path(resource_dir.as_deref()),
+                app.config().identifier.clone(),
                 env!("CARGO_PKG_VERSION").to_string(),
             )));
             // Settings → Behavior → Restore window. Read straight from
@@ -678,6 +686,42 @@ mod tests {
         let v = serde_json::to_value(&e).unwrap();
         assert_eq!(v["kind"], "not_found");
         assert_eq!(v["message"], "No repository");
+    }
+
+    // ── the privacy card's System Settings link ─────────────────────────────
+
+    #[test]
+    fn every_privacy_pane_is_one_the_opener_may_open() {
+        // `opener:default` scopes `open_url` to http(s), mailto and tel, so a
+        // pane the capability file does not name is a Settings button that
+        // rejects with `ForbiddenUrl` — in the real app only, since the mock's
+        // `openUrl` has no scope. The panes are serve's (`macprivacy`); the
+        // scope is this window's, which is why the check lives here. The
+        // plugin matches each `url` as a glob; the entries here are all
+        // `<prefix>*`, and a fancier one should be read by hand rather than
+        // guessed at.
+        let caps: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/default.json")).unwrap();
+        let prefixes: Vec<&str> = caps["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|p| p["identifier"] == "opener:allow-open-url")
+            .flat_map(|p| p["allow"].as_array().into_iter().flatten())
+            .filter_map(|e| e["url"].as_str())
+            .map(|u| {
+                let pre = u.strip_suffix('*').unwrap_or_else(|| panic!("not a <prefix>* glob: {u}"));
+                assert!(!pre.contains(['*', '?', '[']), "not a <prefix>* glob: {u}");
+                pre
+            })
+            .collect();
+        for a in worktrees_api::macprivacy::Area::ALL {
+            assert!(
+                prefixes.iter().any(|pre| a.pane().starts_with(pre)),
+                "{a:?}: capabilities/default.json does not let the opener open {}",
+                a.pane()
+            );
+        }
     }
 
     // ── rollback: which releases are offered ────────────────────────────────

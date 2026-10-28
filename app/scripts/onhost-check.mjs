@@ -13,8 +13,12 @@
 //     handed to a host command);
 //   - a wrapper in onhost.ts calls its plugin without asking the predicate, or
 //     refuses without `notOnHost`'s reason (never silently);
-//   - the predicate stops being ipc.ts's.
-// `openUrl` is free: a URL means the same on every machine.
+//   - the predicate stops being ipc.ts's;
+//   - a System Settings deep link (a `Denial.pane`, or any
+//     `x-apple.systempreferences:` literal) is opened with `openUrl` anywhere
+//     but onhost.ts: it opens the WINDOW's machine's Settings, so on a window
+//     that drives a paired host it unlocks the wrong Mac.
+// Any other `openUrl` is free: an http(s) URL means the same on every machine.
 //
 // Override, so a mutation can be tested without touching the tree:
 //   ONHOST_SRC (onhost.ts), ONHOST_APPSRC (the tree to walk)
@@ -64,6 +68,7 @@ const ok = (m) => console.log(`ok   ${m}`);
     ["revealOnHost", "revealItemInDir("],
     ["openOnHost", "openerOpenPath("],
     ["pickDirForHost", "dialogOpen("],
+    ["openSettingsOnHost", "openUrl("],
   ];
   for (const [fn, call] of fns) {
     const body = new RegExp(`export (?:async )?function ${fn}\\([^)]*\\)[^{]*\\{([\\s\\S]*?)\\n\\}`).exec(src)?.[1] ?? "";
@@ -81,6 +86,30 @@ const ok = (m) => console.log(`ok   ${m}`);
   else ok("hostOnly greys a button, with the reason as its title, exactly when the window is not on its host");
   if (!/import \{ notOnHost, windowOnHost \} from "\.\/ipc";/.test(src)) fail("onhost.ts does not take the predicate from ipc.ts");
   else ok("the predicate is ipc.ts's, beside the door table");
+}
+
+// 2b. A Settings deep link never reaches a bare `openUrl`. It is a URL, so rule
+//     1 lets the import through; what makes it host-only is what it opens.
+{
+  const offenders = [];
+  let files = 0;
+  const walk = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) { if (e.name !== "mock") walk(p); continue; }
+      if (!/\.(ts|tsx)$/.test(e.name) || e.name.endsWith(".d.ts") || path.basename(p) === "onhost.ts") continue;
+      files++;
+      const src = read(p);
+      for (const m of src.matchAll(/\bopenUrl\(([^)]*)\)/g)) {
+        if (/\.pane\b|x-apple\.systempreferences/.test(m[1])) offenders.push(`${path.relative(APPSRC, p)}: openUrl(${m[1]})`);
+      }
+      if (/["'`]x-apple\.systempreferences:/.test(src)) offenders.push(`${path.relative(APPSRC, p)}: an x-apple.systempreferences: literal`);
+    }
+  };
+  walk(APPSRC);
+  if (files < 20) fail(`only ${files} source files walked under ${APPSRC} — this check would pass on nothing`);
+  else if (offenders.length) for (const o of offenders) fail(`a System Settings link opened outside openSettingsOnHost — ${o}`);
+  else ok(`no file but onhost.ts opens a System Settings link (${files} files)`);
 }
 
 // 3. The predicate is false exactly when something set the window away.
