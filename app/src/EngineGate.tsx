@@ -20,7 +20,7 @@
 import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
 import { engineState, invoke, notGranted, onEngineState, reconnectEngine, remoteHost, type EngineState } from "./ipc";
 import { dismissAlert, labelOf, openRemoteSettings, useRemote, watchRemote } from "./remoteStore";
-import { alertText, type RemoteStatus } from "./devices";
+import { alertText, remoteNoticeWords, type RemoteStatus } from "./devices";
 import "./tokens.css";
 import "./EngineGate.css";
 import "./RemoteAccess.css";
@@ -80,27 +80,26 @@ export function EngineGate({ children }: { children: ReactNode }) {
 
 /** Remote access's surfaces outside App: the watch on serve's console
  *  events, and one corner (bottom-right, clear of the bottom band and a
- *  right rail) holding the alerts above the notice that remote access is on.
- *  Inside the gate while the engine is up, keyed by its `gen` so a reconnect
- *  re-reads and re-listens; main.tsx mounts it beside an ungated App (the
- *  harness). The left edge is the nav's and the rail's, whose bottom holds
- *  the Settings gear an alert there would cover. */
+ *  right rail) holding §5.3's alerts. The notice that remote access is on is
+ *  not here: it is App's, in the footer (RemoteNotice below). Inside the gate
+ *  while the engine is up, keyed by its `gen` so a reconnect re-reads and
+ *  re-listens; main.tsx mounts it beside an ungated App (the harness). The
+ *  left edge is the nav's and the rail's, whose bottom holds the Settings
+ *  gear an alert there would cover. */
 export function RemoteLayer() {
-  const { status: st, alerts } = useRemote();
-  // The notice and the alerts are about THIS machine's own engine: a window
-  // that drives a paired host is not on it, and `remote_status` is the
-  // console's (ipc.ts CONSOLE_ROWS). Its watch still names devices.
+  const { alerts } = useRemote();
+  // The alerts are about THIS machine's own engine: a window that drives a
+  // paired host is not on it, and `remote_status` is the console's (ipc.ts
+  // CONSOLE_ROWS). Its watch still names devices.
   const onConsole = !notGranted("remote_status");
-  const on = onConsole && st !== null && st.state !== "off" && st.state !== "unreadable";
-  const shown = on || (onConsole && alerts.length > 0);
+  const shown = onConsole && alerts.length > 0;
   const at = useClearCorner(shown);
   return (
     <>
       <RemoteWatch />
       {shown && (
         <div className="remote-corner" style={{ bottom: at.bottom, right: at.right }}>
-          {alerts.length > 0 && <RemoteAlerts />}
-          {on && st && <RemoteNotice st={st} />}
+          <RemoteAlerts />
         </div>
       )}
     </>
@@ -112,21 +111,30 @@ function RemoteWatch() {
   return null;
 }
 
-/** While remote access is on, the window says so, persistently (§4.1), and
- *  when this app owns the engine, that quitting it ends remote access (§9.3,
- *  decided 2026-10-22): an app-owned serve stops with the app, and a device
- *  never keeps it alive. A click opens Settings → Remote access, which is
- *  also the one-click way back to off. `remote_status` comes from
+/** The status App's footer shows while remote access is on, or null for no
+ *  notice: only on the console (a window that drives a paired host is not on
+ *  this machine's engine, and `remote_status` is the console's), only while
+ *  the engine is up (RemoteLayer's watch is what keeps the status current,
+ *  and it runs only then), and never for off or unreadable
+ *  (`remoteNoticeWords`). The footer exists whenever this is not null. */
+export function useRemoteNotice(): RemoteStatus | null {
+  const { status } = useRemote();
+  const up = useEngine().kind === "up";
+  return up && !notGranted("remote_status") && remoteNoticeWords(status) !== null ? status : null;
+}
+
+/** While remote access is on, the window says so, persistently (§4.1), in
+ *  the footer (App's `.statusbar`, on a place and on Home). It does not say
+ *  what quitting does: an app-owned serve still stops with the app (§9.3),
+ *  and Settings → Remote access says so. A click opens that section, which
+ *  is also the one-click way back to off. `remote_status` comes from
  *  remoteStore.ts, re-read on every `remote:changed` (the console's alone). */
-function RemoteNotice({ st }: { st: RemoteStatus }) {
-  const words =
-    st.state === "paused" ? "Remote access is paused" : st.state === "listening" ? "Remote access is on" : "Remote access is on, not listening";
-  const found = st.state === "listening" && st.advert?.state === "registered" ? " · findable on this network" : "";
+export function RemoteNotice({ st }: { st: RemoteStatus }) {
   return (
     <button className="remote-notice" title="Settings → Remote access" onClick={() => openRemoteSettings("remote")}>
       <span className="remote-notice-in">
         <span className={`engine-dot remote${st.state === "listening" ? "" : " starting"}`} aria-hidden />
-        <span>{words}{found}{st.owner === "app" ? " — quitting Worktrees turns it off" : ""}</span>
+        <span className="remote-notice-txt">{remoteNoticeWords(st)}</span>
       </span>
     </button>
   );
@@ -152,10 +160,11 @@ function RemoteAlerts() {
   );
 }
 
-/** Where the notice sits clear of what is already in the bottom-right
- *  corner: above the bottom band (the usage strip, or a place's footer) and
- *  left of a rail on the right, re-measured as those resize. A fixed pill
- *  over either would hide the meter's last reading or a rail button. */
+/** Where the alerts sit clear of what is already in the bottom-right
+ *  corner: above the bottom band (the usage strip, or the footer, on a place
+ *  or on Home) and left of a rail on the right, re-measured as those resize.
+ *  A fixed card over either would hide the meter's last reading, the remote
+ *  notice or a rail button. */
 function useClearCorner(on: boolean): { bottom: string; right: string } {
   const [at, setAt] = useState({ bottom: 0, right: 0 });
   useEffect(() => {

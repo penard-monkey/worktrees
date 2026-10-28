@@ -3417,10 +3417,12 @@ Phase 3: Frontend pane and mock harness
 
     // ── remote access and paired devices (Phase 2 slice 6, the host's UI) ──
     // The console rows, over the state below. `?access=on` starts listening
-    // (an app-owned serve, which RemoteNotice says); `?access=paused` starts
-    // after the configured Tailscale address left; `?devices=0` starts with
-    // no device paired; `?notconsole` answers every console row the way serve
-    // answers a paired device's window (`console-only`).
+    // (an app-owned serve; the footer's RemoteNotice says remote access is
+    // on); `?access=paused` starts after the configured Tailscale address
+    // left; `?access=error` starts on and not listening (the bind failed);
+    // `?devices=0` starts with no device paired; `?notconsole` answers every
+    // console row the way serve answers a paired device's window
+    // (`console-only`).
     case "remote_status":
       consoleOnly("remote_status");
       return mockAccessStatus();
@@ -3431,7 +3433,7 @@ Phase 3: Frontend pane and mock harness
       consoleOnly("remote_enable");
       const c = MOCK_CANDIDATES.find((x) => x.address === args.address && (!args.iface || x.iface === args.iface));
       if (!c) throw `not-held: no interface of this host holds ${args.address}`;
-      Object.assign(mockAccess, { on: true, address: c.address, iface: c.iface, mode: c.mode, paused: null, question: null, warning: c.warning });
+      Object.assign(mockAccess, { on: true, address: c.address, iface: c.iface, mode: c.mode, paused: null, question: null, warning: c.warning, failed: null });
       remoteChanged();
       return mockAccessStatus();
     }
@@ -3439,6 +3441,7 @@ Phase 3: Frontend pane and mock harness
       consoleOnly("remote_disable");
       mockAccess.on = false;
       mockAccess.paused = null;
+      mockAccess.failed = null;
       mockAccess.question = null;
       if (mockPair.window) closeWindow("cancelled");
       remoteChanged();
@@ -3797,25 +3800,27 @@ const MOCK_CANDIDATES = [
   { address: "fe80::1c2e:4bff:fe11:2233", prefix: 64, iface: "en0", class: "link-local", mode: "lan", warning: null },
 ];
 const mockAccess = {
-  on: ["on", "paused"].includes(mockQuery.get("access") ?? ""),
+  on: ["on", "paused", "error"].includes(mockQuery.get("access") ?? ""),
   address: mockQuery.get("access") === "paused" ? "100.96.164.69" : "192.168.1.5",
   iface: mockQuery.get("access") === "paused" ? "utun6" : "en0",
   mode: mockQuery.get("access") === "paused" ? "overlay" : "lan", port: 51234, advertise: true,
   paused: (mockQuery.get("access") === "paused" ? "100.96.164.69 is no longer on utun6" : null) as string | null,
   question: null as null | { text: string; alert: boolean; use_address: string }, warning: null as string | null,
+  /** Why the listener did not bind (`?access=error`): on, and not listening. */
+  failed: (mockQuery.get("access") === "error" ? "could not listen on 192.168.1.5:51234: Address already in use (os error 48)" : null) as string | null,
 };
 function mockAccessStatus() {
   const base = { owner: "app", host: "Demo-MacBook-Pro" };
   if (!mockAccess.on) return { ...base, state: "off", port: mockAccess.port, advertise: mockAccess.advertise };
-  const listening = !mockAccess.paused;
+  const listening = !mockAccess.paused && !mockAccess.failed;
   return {
     ...base,
-    state: listening ? "listening" : "paused",
+    state: listening ? "listening" : mockAccess.paused ? "paused" : "error",
     address: mockAccess.address, port: mockAccess.port, iface: mockAccess.iface, mode: mockAccess.mode,
     at: listening ? (mockAccess.address.includes(":") ? `[${mockAccess.address}]:${mockAccess.port}` : `${mockAccess.address}:${mockAccess.port}`) : null,
     pin: MOCK_PIN,
     address_code: listening ? `worktrees-addr:v1?addr=${mockAccess.address}:${mockAccess.port}&pin=${MOCK_PIN}` : null,
-    paused: mockAccess.paused, question: mockAccess.question, error: null, warning: mockAccess.warning,
+    paused: mockAccess.paused, question: mockAccess.question, error: mockAccess.paused ? null : mockAccess.failed, warning: mockAccess.warning,
     advertise: mockAccess.advertise,
     advert: !listening || !mockAccess.advertise ? { state: "off" }
       : mockAccess.mode === "overlay" ? { state: "not-advertised", why: "an overlay bind is never advertised" }

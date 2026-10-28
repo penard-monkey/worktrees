@@ -121,6 +121,17 @@ export function pairingBlock(status: RemoteStatus | null, full: boolean, statusE
   }
 }
 
+/** The footer's line while remote access is on (§4.1, EngineGate's
+ *  RemoteNotice), or null when it shows none: off, or a settings file serve
+ *  cannot read, which Settings → Remote access explains. What quitting does is
+ *  Settings' to say, never this line's. */
+export function remoteNoticeWords(st: RemoteStatus | null): string | null {
+  if (!st || st.state === "off" || st.state === "unreadable") return null;
+  const words =
+    st.state === "paused" ? "Remote access is paused" : st.state === "listening" ? "Remote access is on" : "Remote access is on, not listening";
+  return st.state === "listening" && st.advert?.state === "registered" ? `${words} · findable on this network` : words;
+}
+
 // ── capabilities ─────────────────────────────────────────────────────────────
 
 /** §3.1's presets; `admin` is a separate toggle on top of any of them. The

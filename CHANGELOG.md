@@ -5,6 +5,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Changed
+- The notice that remote access is on now sits in the footer at the bottom of
+  the main pane, on a place and on Home, instead of floating over the
+  terminal's corner, and it no longer adds "quitting Worktrees turns it off"
+  (Settings → Remote access still says what quitting does). It shows for as
+  long as remote access is on, whatever the usage meter's placement. Alerts
+  about paired devices stay in the corner. Home now scrolls when its content
+  is taller than the window, rather than running off the bottom.
+
 ### Fixed
 - When a configured remote-access address disappears (for example, after
   Tailscale disconnects), Settings → Devices now explains why pairing is
