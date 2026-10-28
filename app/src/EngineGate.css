@@ -71,11 +71,7 @@
   color: var(--txt-dim);
 }
 
-/* While remote access is on (RemoteNotice, §4.1): one quiet line, out of the
- * way of the terminal, saying so — and what quitting does when the app owns
- * the engine. A button: it opens Settings → Remote access. The flex box is
- * the inner span, not the button (WebKit shrink-wraps a flex <button>). */
-/* The corner it shares with §5.3's alerts (RemoteLayer): right/bottom are
+/* §5.3's alerts (RemoteLayer), in the bottom-right corner: right/bottom are
    set inline, clear of the bottom band and a right rail. Only its children
    take the pointer, so the gap between them never eats a click. */
 .remote-corner {
@@ -86,13 +82,25 @@
   pointer-events: none;
 }
 .remote-corner > * { pointer-events: auto; }
+/* While remote access is on (RemoteNotice, §4.1): one quiet item at the far
+ * end (`.bar-end`) of the bottom bar the status chip uses, after the chip when
+ * there is one: the window-wide strip, or a place's footer when the usage
+ * meter lives there (App.tsx `remoteNoticeHost`). A button: it opens
+ * Settings → Remote access. The flex box is the inner span, not the button
+ * (WebKit shrink-wraps a flex <button>). Both bars paint --bg-panel, so it
+ * draws no box of its own (a panel on the same panel is a border and nothing
+ * else) and takes the usage trigger's hover instead. Its words wrap rather
+ * than clip at a narrow pane: the row wraps it onto a line of its own first.
+ * Words are --txt, not --txt-dim: on --bg-panel that is 3.6:1 in tokyo-day,
+ * 3.8 in nord and 4.4 in catppuccin-latte, and --txt is 5.5:1 or more in all
+ * six themes. */
 .remote-notice {
   display: block; cursor: pointer; max-width: 100%; text-align: left;
-  padding: var(--s1) var(--s2);
-  background: var(--bg-panel); color: var(--txt-dim);
-  border: 1px solid var(--line); border-radius: var(--r-md);
+  padding: 2px var(--s2);
+  background: transparent; color: var(--txt);
+  border: 0; border-radius: var(--r-sm);
   font-family: var(--font-ui); font-size: var(--fs-meta);
 }
-.remote-notice:hover { color: var(--txt-hi); border-color: var(--line-strong); }
+.remote-notice:hover { color: var(--txt-hi); background: var(--bg-elev); }
 .remote-notice-in { display: flex; align-items: center; gap: var(--s2); }
 .engine-dot.remote { background: var(--accent); }
