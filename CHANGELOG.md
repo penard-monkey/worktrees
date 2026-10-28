@@ -5,6 +5,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- **A folder macOS is blocking now says so, and how to give it back.** Deny
+  the access prompt by accident — on a repo in Documents, on iCloud Drive, on
+  a USB disk — and macOS never asks again; it just refuses every read. The
+  Files tab showed `Operation not permitted (os error 1)` over an empty tree,
+  which reads as a broken app rather than a permission you can restore. It now
+  names the folder and who refused it, and offers the two things that actually
+  work: a button straight to the right Privacy pane in System Settings, and
+  the exact `tccutil reset` line for the case where the app is not listed
+  there. Both say the part people miss — the decision is read once per
+  process, so the app has to be quit and reopened before a fix takes. There is
+  deliberately no "try again": nothing an app can call re-raises the prompt.
+  The card appears only when the path really is refused AND sits somewhere
+  macOS gates, so an ordinary unreadable directory still reports itself
+  honestly. On a window that drives another Mac, the Settings button is
+  greyed — the grant is that Mac's to give — and the card says where the fix
+  is made.
+
 ### Changed
 - The notice that remote access is on now sits in the bar at the bottom of
   the window, beside the usage meter and Claude's status (in a place's footer
@@ -15,6 +33,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   placement. Alerts about paired devices stay in the corner.
 
 ### Fixed
+- A review lane's brief no longer trusts a repository's root `AGENTS.md` (or
+  `CLAUDE.md`) just because its worktrees rules block is unchanged. Text a
+  branch adds around that block is now listed as a change for the reviewing
+  agent to read, not described as trusted agent instructions.
 - Home scrolls when its content is taller than the window. Before, the
   bottom of the list ran off the window with nothing to scroll, so its last
   places could not be opened from Home.

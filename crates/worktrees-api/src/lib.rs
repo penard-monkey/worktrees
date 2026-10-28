@@ -63,6 +63,7 @@ pub mod host;
 pub mod hostenv;
 pub mod hostpolicy;
 pub mod log;
+pub mod macprivacy;
 pub mod meta;
 pub mod project;
 pub mod projects;

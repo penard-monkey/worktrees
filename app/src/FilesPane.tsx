@@ -32,6 +32,7 @@ import { copyToClipboard } from "./clipboard";
 // which reads like a typing problem rather than a collision).
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { hostOnly, openOnHost, revealOnHost } from "./onhost";
+import { PrivacyCard, type Denial } from "./PrivacyCard";
 import * as Icons from "./icons";
 import { CodeBlock, type CodeMark } from "./CodeView";
 import { CtxMenu } from "./CtxMenu";
@@ -388,6 +389,10 @@ function FileTree({ root, openPath: rawOpen, revealToken, showIgnored, reloadTok
 }) {
   const [entries, setEntries] = useState<FsEntry[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // Why the listing failed, when macOS is the reason. Asked only after `err`
+  // lands, so the happy path costs nothing; `null` means "not a privacy
+  // denial" and the raw error stands.
+  const [denial, setDenial] = useState<Denial | null>(null);
   const [changes, setChanges] = useState<Changes>(NO_CHANGES);
   // No setEntries(null) here: this effect re-runs on every reload, and blanking
   // first would flash "loading…" over the whole tree each time. `root` cannot
@@ -396,8 +401,17 @@ function FileTree({ root, openPath: rawOpen, revealToken, showIgnored, reloadTok
   useEffect(() => {
     let alive = true;
     invoke<FsEntry[]>("list_dir", { path: root, showIgnored })
-      .then((e) => { if (alive) { setEntries(e); setErr(null); } })
-      .catch((e) => { if (alive) setErr(String(e)); });
+      .then((e) => { if (alive) { setEntries(e); setErr(null); setDenial(null); } })
+      .catch((e) => {
+        if (!alive) return;
+        setErr(String(e));
+        // A denial is the interesting half of "this failed". The probe
+        // re-reads, so if access was restored between the failure and here it
+        // answers null and the raw error stands — which is honest.
+        invoke<Denial | null>("privacy_denial", { path: root })
+          .then((d) => { if (alive) setDenial(d ?? null); })
+          .catch(() => { if (alive) setDenial(null); });
+      });
     return () => { alive = false; };
   }, [root, showIgnored, reloadToken]);
   // ONE call for the whole tree, here rather than per node: `TreeNode` would
@@ -447,6 +461,10 @@ function FileTree({ root, openPath: rawOpen, revealToken, showIgnored, reloadTok
     revealRef.current = { openPath, revealToken, reveal: openPath ? { path: openPath, done: false } : null };
   }
   const reveal = revealRef.current.reveal;
+  // Same guard as before — the card replaces the tree only when there is no
+  // tree yet, so a transient failure on reload never unmounts the user's open
+  // directories (see the note above).
+  if (denial && !entries) return <PrivacyCard denial={denial} onError={onError} />;
   if (err && !entries) return <div className="tree-note err-note">{err}</div>;
   if (!entries) return <div className="tree-note">loading…</div>;
   if (!entries.length) return <div className="tree-note">empty worktree</div>;

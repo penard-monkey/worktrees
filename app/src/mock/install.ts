@@ -882,6 +882,12 @@ type MockEntry = { name: string; path: string; is_dir: boolean; ignored: boolean
 // Without this table the harness would browse a link the app cannot, and a test
 // could pass here and fail against the binary.
 const fsBlocked = new Map<string, string | null>();
+// macOS privacy (TCC) denials the harness is pretending to: path → what
+// `privacy_denial` answers. A denial is NOT an `fsBlocked` entry — that table
+// is the workspace guard refusing a symlink, which is our rule. This one is
+// the kernel refusing on TCC's behalf, which no amount of correct code fixes,
+// and the two render completely differently. `__mock.denyFolder` drives it.
+const fsDenied = new Map<string, { area: string; label: string; path: string; pane: string; reset_command: string }>();
 const fsChildren = new Map<string, MockEntry[]>();
 const fsFiles = new Map<string, { content: string; binary: boolean; mtime: number; b64?: string }>();
 // dock shell sidecars, keyed "repo|slug" → set of 1-based tab indices
@@ -2097,6 +2103,13 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       return { ok: true, code: 0, output: `Removed ${args.slug}` };
     }
 
+    // serve's `privacy_denial` row (`worktrees_api::macprivacy`): null for
+    // everything the harness has not been told to deny, which is the common
+    // case and the fail-open answer. The real row's `file(path)` refuses a path
+    // outside the projects first; nothing here asks about one.
+    case "privacy_denial":
+      return fsDenied.get(args.path as string) ?? null;
+
     case "term_open": {
       // best-effort: render a canned banner into the xterm via the Channel
       // The middle lines are paths in the shapes agents print, so the
@@ -2206,6 +2219,15 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       // listing — the tree must never be able to walk one.
       const refusal = fsBlocked.get(args.path as string);
       if (refusal) throw refusal;
+      // Backend parity: a TCC-denied directory throws the kernel's own
+      // message, and serve's `list_dir` passes it on bare — a denial leaves
+      // metadata alone, so the canonicalize before it succeeds and only the
+      // `read_dir` fails, whose error carries no path. The frontend must learn
+      // WHY from `privacy_denial`, never by reading this string — so the
+      // string stays exactly as unhelpful as the real one.
+      if (fsDenied.has(args.path as string)) {
+        throw "Operation not permitted (os error 1)";
+      }
       // Backend parity: gitignored entries are FILTERED unless asked for, and
       // only ever carry the flag in the show-ignored listing.
       const all = seedDir(args.path as string);
@@ -4271,6 +4293,29 @@ const healthyConfigs: Record<string, MockCfg> = {};
     emitEvent("places:changed", {});
     return root;
   },
+  /** Pretend macOS has refused `path` (a TCC denial), so the Files tab shows
+   *  the recovery card instead of a tree. The fields mirror
+   *  `worktrees_api::macprivacy::Denial` — the real `area.service()`/
+   *  `area.pane()` pairing is the Rust side's and is unit-tested there; this
+   *  only has to be shaped the same. `__mock.allowFolder(path)` undoes it.
+   *  With `?remote` the card shows the host's version: Settings greyed. */
+  denyFolder(path: string, area: "documents" | "desktop" | "downloads" | "icloud" | "removable" = "documents") {
+    const label = { documents: "your Documents folder", desktop: "your Desktop folder",
+                    downloads: "your Downloads folder", icloud: "iCloud Drive",
+                    removable: "a removable volume" }[area];
+    const service = { documents: "SystemPolicyDocumentsFolder", desktop: "SystemPolicyDesktopFolder",
+                      downloads: "SystemPolicyDownloadsFolder", icloud: "SystemPolicyAllFiles",
+                      removable: "SystemPolicyRemovableVolumes" }[area];
+    const pane = area === "removable"
+      ? "x-apple.systempreferences:com.apple.preference.security?Privacy_RemovableVolume"
+      : "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders";
+    fsDenied.set(path, { area, label, path, pane,
+      reset_command: `tccutil reset ${service} net.casadelvalle.worktrees` });
+    return path;
+  },
+  allowFolder(path: string) {
+    return fsDenied.delete(path);
+  },
 };
 
-console.info("[mock] Tauri backend mocked — design harness active (window.__mock: breakConfig/fixConfig/exitShell/restoreScrollback/createFile/editFile/finishTask/syncFail/syncLive/release/uiEvents/hostPolicySets)");
+console.info("[mock] Tauri backend mocked — design harness active (window.__mock: breakConfig/fixConfig/exitShell/restoreScrollback/createFile/editFile/finishTask/syncFail/syncLive/release/denyFolder/allowFolder/uiEvents/hostPolicySets)");

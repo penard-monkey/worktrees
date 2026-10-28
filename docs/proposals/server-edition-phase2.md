@@ -956,7 +956,7 @@ loopback behaviour the same):
 | `project` | `list_places`, `project_config_read`, `sync_status`, `sync_preview` (adopt form: `admin` with `"*"`), `init_suggest`, `agent_setup_status`, `pi_status`, `kimi_status`, `remote_url`, `project_prs`, `planning_suggested` |
 | `place` | `doctor`, `place_health`, `ai_status_report`, `list_branches`, `list_shell_sessions` |
 | `root` | `changed_files`, `place_plan`, `list_docs` (plus `project(repo)`), `resolve_term_paths` (plus `session`), `resolve_doc_paths` (plus `file(doc)`) |
-| `file` | `list_dir`, `file_diff`, `read_file`, `read_file_base64`, `file_readable` (a secret-class path needs `stream`; §7) |
+| `file` | `list_dir`, `file_diff`, `read_file`, `read_file_base64`, `file_readable` (a secret-class path needs `stream`; §7), `privacy_denial` (added after; `list_dir`'s object) |
 | `place`, refused remotely in Phase 2 | `open_docs_viewer` (§8, gap 7) |
 | `filtered` | `list_workspace`, **`list_drafts`** (the TEXT people typed into composers, host-wide), `planning_status` |
 | `global` (on `GLOBAL_OK`) | `settings_info`, `get_settings`, `cross_project_status`, `quota_settings`, `claude_usage`, `codex_usage`, `kimi_usage`, `claude_status`, `check_update`, `list_releases`, `get_ai_config`, `get_codex_permissions`, `get_fetch_interval` and `get_term_history_opts` (#532), `slots_settings` (added after: capacities and counts, never a holder's place or command), `agent_guidance_status`, `agent_guidance_diff`, `agent_models`, `agent_user_skills`, `kimi_version`, `tmux_check`, `log_info`, `get_changelog`, `new_profile_id`, `skills_list`, `ui_usage` |
@@ -1114,6 +1114,11 @@ four `Engine` rows: `agent_prompt` and `agent_turns` (`read`),
 `agent_send` (`instruct`). That is 178 in all: read 58, instruct 4, answer 1,
 the rest unchanged. §9.2's compare-and-swap is built with them, the lease is
 not (iOS MVP §2.4 says why the CAS is enough).
+
+`privacy_denial` (`feat/tcc-recovery`, #519) adds one `read` row on
+`file(path)`: why a `list_dir` failed, when macOS refused it. It moved out of
+the shim because TCC decides per process and serve is the process that read.
+181 in all: read 59, the rest unchanged.
 
 ### 3.5 What changes for loopback
 

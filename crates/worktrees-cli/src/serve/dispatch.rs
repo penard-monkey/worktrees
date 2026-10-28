@@ -1,4 +1,4 @@
-//! The 180 commands, each with its exposure, capability and objects, in ONE
+//! The 181 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -39,7 +39,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::sync::Arc;
-use worktrees_api::{agents, config, files, hostenv, meta, ops, prefs, profiles, project, status, term, viewer, workspace, Ctx};
+use worktrees_api::{agents, config, files, hostenv, macprivacy, meta, ops, prefs, profiles, project, status, term, viewer, workspace, Ctx};
 use worktrees_core::authz::{self, Caller, Capability, Caps, DeviceId, Grant, Projects, Registry};
 use worktrees_core::fetchpolicy::Fetcher;
 
@@ -979,6 +979,12 @@ commands! { cx, a;
     file_diff: Engine [read, file(path)] => files::file_diff(&cx.ctx, a.get("path")?, a.get("against")?),
     read_file: Engine [read, file(path)] => files::read_file(&cx.ctx, a.get("path")?, a.get("max_bytes")?),
     file_readable: Engine [read, probe(path)] => files::file_readable(&cx.ctx, a.get("path")?),
+    // Why a listing above failed, when macOS refused it — asked only after a
+    // failure, and only here: TCC decides per process, and serve is the
+    // process that read. `list_dir`'s object, so it can explain no path the
+    // tree could not have shown. `null` off macOS and for a serve no app
+    // started (`macprivacy`'s module note).
+    privacy_denial: Engine [read, file(path)] => ok(macprivacy::privacy_denial(a.get("path")?)),
     resolve_term_paths: Engine [read, root(root), opt(session_in(session, root)), shell_ref(shell), candidates(paths)] => files::resolve_term_paths(
         &cx.ctx, &cx.ctx.shells, a.get("root")?, a.get("shell")?, a.get("session")?, a.get("paths")?,
     ),
@@ -1201,8 +1207,9 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 180 rows, no duplicates: the command layer's (143 at the extraction;
-    /// host policy's three getters, Kimi's six and the slots pair since),
+    /// 181 rows, no duplicates: the command layer's (143 at the extraction;
+    /// host policy's three getters, Kimi's six, the slots pair and
+    /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
     /// slice 6's four `remote_*` console rows, the host app's two
     /// (`remote_candidates`, `device_rename`), and the iOS MVP's four agent
@@ -1211,7 +1218,7 @@ mod tests {
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 180, "the table has 180 commands");
+        assert_eq!(TABLE.len(), 181, "the table has 181 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1490,7 +1497,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 58), ("write", 23), ("admin", 35), ("console", 39), ("stream", 10), ("instruct", 4), ("answer", 1),
+            ("read", 59), ("write", 23), ("admin", 35), ("console", 39), ("stream", 10), ("instruct", 4), ("answer", 1),
             ("client-local", 6), ("loopback-only", 1), ("own", 3),
         ]
         .into();
