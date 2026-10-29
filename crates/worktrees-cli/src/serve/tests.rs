@@ -2486,10 +2486,27 @@ mod devices {
             self.rpc(con, "pair_status", json!({}))["ok"].clone()
         }
 
-        /// The pairing window's port takes no connection any more.
+        /// The pairing window's port takes no connection any more: a connect
+        /// is refused within 5 s, and nothing answers one made before then.
+        /// Not one connect: a child another test forks (a pty spawn goes
+        /// through `pre_exec`) holds every fd this process has, the closed
+        /// listener's too, until it execs. Until then the kernel completes a
+        /// connect into a backlog nothing will accept, and resets it at the
+        /// exec. A listener the window KEPT would accept the probe, and the
+        /// probe reads that as an answer, its close or its words. A plain
+        /// retry would pass there: the watcher's one accept ends it.
         fn port_closed(&self, uri: &str) -> bool {
             let link = worktrees_core::pairuri::parse(uri, 0, &literal).unwrap();
-            std::net::TcpStream::connect_timeout(&link.addr, Duration::from_millis(500)).is_err()
+            let t0 = Instant::now();
+            while t0.elapsed() < Duration::from_secs(5) {
+                let Ok(mut probe) = std::net::TcpStream::connect_timeout(&link.addr, Duration::from_millis(500)) else { return true };
+                probe.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+                if std::io::Read::read(&mut probe, &mut [0u8; 1]).is_ok() {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            false
         }
 
         /// Wait (bounded) until the window is closed, and say how.
