@@ -257,8 +257,12 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   live: a kill switch or revoke that swept while it was still shaking hands
   missed it and it was SERVED (found by review, reproduced red).
   `netwatch::Watch` runs on RemoteAccess's own 3 s poll; an app-owned serve's idle stop counts
-  `Clients::console_len()` only (§9.3), so a device never holds it up and the
-  app says quitting ends remote access. mDNS: macOS through `dns_sd` with
+  `Clients::console_len()` only (§9.3), so a device never holds it up and
+  quitting the app ends remote access. Settings → Remote access says so; the
+  notice in the bottom bar (`RemoteNotice`, hosted by the status chip's rule:
+  `remoteNoticeHost`, the strip unless the meter lives in a place's footer)
+  says only that it is on, and §5.3's alerts keep the corner (`RemoteLayer`).
+  mDNS: macOS through `dns_sd` with
   serve's own `wt-<id>.local` (`advert.rs`); Linux has none (zbus = +30
   crates, `avahi-publish` cannot pin an interface), the address code instead.
   Three traps: a **same-host connect reaches a listener tied to its

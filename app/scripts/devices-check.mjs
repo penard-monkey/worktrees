@@ -170,9 +170,14 @@ eq("watchRemote is found", watch.length > 0, true);
 eq("watchRemote stops for a remote window before any console read or listen", stop >= 0 && stop < watch.indexOf("readStatus()") && stop < watch.indexOf("listen<"), true);
 eq("…and lists devices only where the grant reaches devices_list",
   [...watch.matchAll(/readDevices\(\)/g)].length === 1 && /if \(!notGranted\("devices_list"\)\) void readDevices\(\);/.test(watch.slice(0, Math.max(0, stop))), true);
+// The alerts are RemoteLayer's (the corner); the notice is App's footer's,
+// through useRemoteNotice (remotenotice-check.mjs holds where it renders).
 const layer = fnBody(src("EngineGate.tsx"), "RemoteLayer");
-eq("RemoteLayer shows neither the notice nor an alert on a remote window",
-  /const onConsole = !notGranted\("remote_status"\);/.test(layer) && /const on = onConsole && /.test(layer) && /const shown = on \|\| \(onConsole && alerts\.length > 0\);/.test(layer), true);
+const noticeGate = fnBody(src("EngineGate.tsx"), "useRemoteNotice");
+eq("RemoteLayer shows no alert on a remote window",
+  /const onConsole = !notGranted\("remote_status"\);/.test(layer) && /const shown = onConsole && alerts\.length > 0;/.test(layer), true);
+eq("…and useRemoteNotice no notice there",
+  /return up && !notGranted\("remote_status"\) && remoteNoticeWords\(status\) !== null \? status : null;/.test(noticeGate), true);
 // DeviceRow calls its rows through `act("…", args)`, which adds the id.
 const invoked = new Set(["RemoteAccessPanel.tsx", "DevicesPanel.tsx", "PairSheet.tsx", "remoteStore.ts"]
   .flatMap((f) => [...src(f).matchAll(/\b(?:invoke(?:<[^>()]*(?:<[^>]*>[^>()]*)*>)?|act)\(\s*"([a-z_0-9]+)"/g)].map((m) => m[1])));
