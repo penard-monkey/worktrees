@@ -24,17 +24,20 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use serde::Serialize;
-use worktrees_core::{git, store, sysclock, Project};
+use worktrees_core::{git, provider, store, sysclock, tmux, Project};
 
 use crate::log::log as applog;
 use crate::Ctx;
 
 /// The registries the dot poll keeps between ticks.
+///
+/// Claude has none. Its probes are keyed by cwd, and a Claude that has not
+/// written one yet (its folder-trust prompt comes first) is found by the
+/// tick's own `list-panes -a` (`claude_startup_tick`). A registry the snapshot
+/// filled was only as fresh as the last `list_places`, so on a serve nobody
+/// had listed it was empty and that Claude never went amber.
 #[derive(Default)]
 pub struct Watch {
-    /// Each place's live Claude session (cwd → tmux session), as the last
-    /// snapshot saw it: the tick reads the pane of one with no probe yet.
-    claude: Mutex<HashMap<String, String>>,
     /// Last answer per transcript/rollout: its length when read, and the model
     /// it named. Read on the 3s snapshot poll, so a file is re-read only once
     /// it has GROWN — an idle session costs one `stat`.
@@ -109,48 +112,81 @@ impl Watch {
 /// set needs to see it. Costs a `stat` per session per tick, plus a tail read
 /// only for a transcript that grew, plus ONE chained capture while some live
 /// claude has no probe yet (`claude_startup_tick`) — and none otherwise.
-pub fn claude_activity(w: &Watch, sessions: &str) -> (Vec<String>, Vec<String>, Vec<(i32, Option<String>)>) {
+/// `panes` is the tick's `list-panes -a` and `sessions` its fingerprint.
+pub fn claude_activity(w: &Watch, panes: &mut tmux::PaneList, sessions: &str) -> ClaudeTick {
+    claude_activity_in(w, &worktrees_core::agent::live_probes(), panes, tmux::ps_foreground, |targets| {
+        activity::capture_chain(sessions, targets)
+    })
+}
+
+/// Busy cwds, waiting cwds, and (pid, model) per tmux-hosted session.
+pub type ClaudeTick = (Vec<String>, Vec<String>, Vec<(i32, Option<String>)>);
+
+/// `claude_activity` over handed-in probes, `ps` and pane capture, so a test
+/// drives the whole Claude half of a tick with none of them real.
+fn claude_activity_in(
+    w: &Watch,
+    probes: &[worktrees_core::agent::ClaudeProbe],
+    panes: &mut tmux::PaneList,
+    ps: impl FnOnce(&[&str]) -> Option<String>,
+    capture: impl FnOnce(&[(String, String)]) -> Vec<(String, String, String)>,
+) -> ClaudeTick {
     let mut busy = Vec::new();
     let mut waiting = Vec::new();
     let mut models = Vec::new();
-    let probes = worktrees_core::agent::live_probes();
-    for probe in &probes {
+    for probe in probes {
         if probe.tmux.is_some() {
-            models.push((probe.pid, probe_model(w, &probe)));
+            models.push((probe.pid, probe_model(w, probe)));
         }
         // The mapping is core's (`activity::claude_state`), shared with the
         // MCP server's `place_status` / `wait`, so the dot and an orchestrator
         // cannot disagree about what "busy" means.
-        match activity::claude_state(&worktrees_core::agent::effective_state(&probe)) {
+        match activity::claude_state(&worktrees_core::agent::effective_state(probe)) {
             activity::State::Busy => busy.push(probe.cwd.clone()),
             activity::State::Waiting => waiting.push(probe.cwd.clone()),
             _ => {} // idle / shell / parked-away busy (`delegated`) → no dot
         }
     }
-    let watched = w.claude.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    waiting.extend(claude_startup_tick(&watched, &probes, |targets| {
-        activity::capture_chain(sessions, targets)
-    }));
+    waiting.extend(claude_startup_tick(panes, probes, ps, capture));
     models.sort_unstable();
     (busy, waiting, models)
 }
 
-/// The waiting cwds among watched Claude sessions that have no probe: Claude's
+/// The waiting cwds among Claude panes that have no probe: Claude's
 /// folder-trust prompt comes before it writes one, so the pane is the only
-/// witness. A session with a probe is never captured here.
+/// witness.
+///
+/// The candidates are the tick's own panes, keyed the way that probe will be,
+/// by the pane's cwd: not a dock shell, not a shell, Claude by the rule
+/// `agents_in` uses (`provider::for_pane` on `Pane::program`), and no probe at
+/// that cwd. The probe test comes before anything costs a spawn, so a Claude
+/// with a probe is never captured and the steady state costs nothing. A
+/// `node` pane outside a sidecar needs `ps` to say whether it is Claude, so
+/// `ps` runs only for one that survived every other test. Then the same rule
+/// is asked again with the foreground named.
 fn claude_startup_tick(
-    watched: &HashMap<String, String>,
+    panes: &mut tmux::PaneList,
     probes: &[worktrees_core::agent::ClaudeProbe],
+    ps: impl FnOnce(&[&str]) -> Option<String>,
     capture: impl FnOnce(&[(String, String)]) -> Vec<(String, String, String)>,
 ) -> Vec<String> {
-    let targets: Vec<_> = watched.iter().filter(|(cwd, _)| {
-        activity::claude_activity(probes, cwd).is_none()
-    }).map(|(cwd, session)| (cwd.clone(), session.clone())).collect();
+    let candidate = |p: &tmux::Pane| {
+        !p.session.is_empty()
+            && !tmux::is_shell_sidecar(&p.session)
+            && !tmux::is_shell_command(&p.cmd)
+            && activity::claude_activity(probes, &p.path).is_none()
+            && provider::for_pane(&p.session, p.program()).is_some_and(|x| x.id == provider::CLAUDE.id)
+    };
+    panes.name_foregrounds(candidate, ps);
+    let mut targets: Vec<(String, String)> =
+        panes.panes().iter().filter(|p| candidate(p)).map(|p| (p.path.clone(), p.session.clone())).collect();
+    targets.sort_unstable();
+    targets.dedup();
     if targets.is_empty() {
         return Vec::new();
     }
     capture(&targets).into_iter().filter_map(|(cwd, cmd, screen)| {
-        let session = watched.get(&cwd)?;
+        let (_, session) = targets.iter().find(|(c, _)| *c == cwd)?;
         activity::startup_activity("claude", session, &cmd, &screen).map(|_| cwd)
     }).collect()
 }
@@ -856,12 +892,10 @@ pub fn harness_feed(watch: &Watch, id: &str, sessions: &str) -> Feed {
 /// arm.
 pub fn watch_lane(watch: &Watch, id: &str, cwd: &str, session: Option<&String>, launch: Option<&str>, model: &Option<String>) -> bool {
     match id {
-        "claude" => {
-            let mut lanes = watch.claude.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(session) = session { lanes.insert(cwd.into(), session.clone()); }
-            else { lanes.remove(cwd); }
-            true
-        },
+        // Watched, with nothing to record: the tick reads Claude's probes and
+        // finds one with no probe yet in its own pane list, so it needs no
+        // snapshot to have run (see `Watch`).
+        "claude" => true,
         "codex" => {
             codex_watch_set(watch, cwd, session, model);
             true
@@ -1062,17 +1096,95 @@ mod tests {
     /// waiting agent.
     #[test]
     fn claude_without_a_probe_reaches_the_amber_dot() {
-        let watched = HashMap::from_iter([("/fresh".into(), "repo-fresh".into())]);
-        let waiting = claude_startup_tick(&watched, &[], |targets| {
+        let panes = || tmux::PaneList::from_rows(vec![("repo-fresh".into(), "/fresh".into(), "claude".into())]);
+        let waiting = claude_startup_tick(&mut panes(), &[], no_ps, |targets| {
             assert_eq!(targets.len(), 1);
-            vec![("/fresh".into(), "claude".into(), include_str!("../../worktrees-core/tests/fixtures/claude-screen/2.1.309/trust.txt").into())]
+            vec![("/fresh".into(), "claude".into(), TRUST.into())]
         });
         assert_eq!(merge_activity(vec![], waiting, []).waiting, ["/fresh"]);
         let probe = serde_json::from_value(serde_json::json!({"pid":1,"cwd":"/fresh","status":"idle"})).unwrap();
-        assert!(claude_startup_tick(&watched, &[probe], |_| panic!("a probed idle session must not be captured")).is_empty());
-        let waiting = claude_startup_tick(&watched, &[], |_| vec![("/fresh".into(), "zsh".into(),
-            include_str!("../../worktrees-core/tests/fixtures/claude-screen/2.1.309/trust.txt").into())]);
+        assert!(claude_startup_tick(&mut panes(), &[probe], no_ps, |_| panic!("a probed idle session must not be captured")).is_empty());
+        let waiting = claude_startup_tick(&mut panes(), &[], no_ps, |_| vec![("/fresh".into(), "zsh".into(), TRUST.into())]);
         assert!(waiting.is_empty(), "a shell retaining a modal is not a waiting agent");
+    }
+
+    const TRUST: &str = include_str!("../../worktrees-core/tests/fixtures/claude-screen/2.1.309/trust.txt");
+
+    fn no_ps(_: &[&str]) -> Option<String> {
+        panic!("ps ran for a pane every cheaper test had already ruled out")
+    }
+
+    fn pane(session: &str, path: &str, cmd: &str, tty: Option<&str>) -> tmux::Pane {
+        tmux::Pane { session: session.into(), path: path.into(), cmd: cmd.into(), tty: tty.map(Into::into), ..tmux::Pane::default() }
+    }
+
+    /// A serve no client has listed has an EMPTY `Watch`: no snapshot ever
+    /// ran. A Claude at its folder-trust prompt there still goes amber,
+    /// because the tick finds it in its own `list-panes -a`, keyed by the
+    /// pane's cwd as the probe it has not written yet will be. Main's tick
+    /// took its candidates from a registry only the snapshot filled, and
+    /// answered `[]` here. A native Claude reads as its version (macOS) and an
+    /// npm one as `node`, which only its foreground names.
+    #[test]
+    fn a_trust_prompt_claude_is_waiting_on_a_serve_nobody_listed() {
+        let w = Watch::default();
+        let mut panes = tmux::PaneList::from_panes(vec![
+            pane("repo-fresh", "/w/fresh", "2.1.309", Some("ttys001")),
+            pane("repo-npm", "/w/npm", "node", Some("ttys002")),
+        ]);
+        let mut asked = Vec::new();
+        let (busy, waiting, models) = claude_activity_in(
+            &w,
+            &[],
+            &mut panes,
+            |ttys| {
+                asked = ttys.iter().map(|t| t.to_string()).collect();
+                Some("ttys002 7 7 claude\n".into())
+            },
+            |targets| {
+                assert_eq!(targets, [("/w/fresh".to_string(), "repo-fresh".to_string()), ("/w/npm".to_string(), "repo-npm".to_string())]);
+                targets.iter().map(|(cwd, _)| (cwd.clone(), "2.1.309".to_string(), TRUST.to_string())).collect()
+            },
+        );
+        assert_eq!(asked, ["ttys002"], "ps names the node pane only");
+        assert!(busy.is_empty() && models.is_empty());
+        assert_eq!(merge_activity(busy, waiting, []).waiting, ["/w/fresh", "/w/npm"]);
+    }
+
+    /// What the tick must never capture: a Claude with a probe (the steady
+    /// state, which must cost nothing), a shell, a dock shell running
+    /// anything, and another harness's pane — codex, a pi in its sidecar, and
+    /// a pi typed into a place's own session, which tmux shows as `node` and
+    /// only `ps` names. `ps` runs for that last one alone: the npm Claude WITH
+    /// a probe is ruled out before anything is spawned.
+    #[test]
+    fn a_probed_claude_a_shell_a_dock_shell_and_other_harnesses_are_never_captured() {
+        let probe = |cwd: &str| serde_json::from_value(serde_json::json!({"pid": 1, "cwd": cwd, "status": "idle"})).unwrap();
+        let probes = [probe("/w/probed"), probe("/w/probed-npm")];
+        let mut panes = tmux::PaneList::from_panes(vec![
+            pane("repo-probed", "/w/probed", "2.1.309", Some("ttys001")),
+            pane("repo-probed-npm", "/w/probed-npm", "node", Some("ttys002")),
+            pane("repo-shell", "/w/shell", "-zsh", Some("ttys003")),
+            pane("repo-dock~term", "/w/dock", "2.1.309", Some("ttys004")),
+            pane("repo-dock~term~2", "/w/dock", "node", Some("ttys005")),
+            pane("repo-codex", "/w/codex", "codex", Some("ttys006")),
+            pane("repo-pi~agent~pi", "/w/pi", "node", Some("ttys007")),
+            pane("repo-typed-pi", "/w/typed-pi", "node", Some("ttys008")),
+        ]);
+        let mut asked = Vec::new();
+        let waiting = claude_startup_tick(
+            &mut panes,
+            &probes,
+            |ttys| {
+                asked = ttys.iter().map(|t| t.to_string()).collect();
+                Some("ttys008 9 9 pi\n".into())
+            },
+            |targets| panic!("captured {targets:?}"),
+        );
+        assert!(waiting.is_empty());
+        assert_eq!(asked, ["ttys008"], "ps only for the node pane nothing cheaper ruled out");
+        let mut probed_only = tmux::PaneList::from_panes(vec![pane("repo-probed-npm", "/w/probed-npm", "node", Some("ttys002"))]);
+        assert!(claude_startup_tick(&mut probed_only, &probes, no_ps, |t| panic!("captured {t:?}")).is_empty());
     }
 
     /// Codex's trust prompt comes before any rollout, so a turn-less session is

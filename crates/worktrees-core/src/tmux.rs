@@ -196,14 +196,20 @@ pub fn session_exists(name: &str) -> bool {
 /// UI refresh; an unchanged value lets the poll skip the full git sweep.
 pub fn session_fingerprint() -> String {
     match tmux(&["list-sessions", "-F", "#{session_name}"]) {
-        Ok(o) if o.status.success() => {
-            let text = String::from_utf8_lossy(&o.stdout);
-            let mut names: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
-            names.sort_unstable();
-            names.join("\n")
-        }
+        Ok(o) if o.status.success() => fingerprint_of(String::from_utf8_lossy(&o.stdout).lines()),
         _ => String::new(),
     }
+}
+
+/// The fingerprint's one spelling, for `session_fingerprint` and
+/// `PaneList::fingerprint` alike: the names sorted, once each, newline-joined.
+/// The poll compares one tick's against the last and hands it to every capture
+/// as the live session list, so the two sources must never disagree on a byte.
+fn fingerprint_of<'a>(names: impl Iterator<Item = &'a str>) -> String {
+    let mut names: Vec<&str> = names.filter(|n| !n.is_empty()).collect();
+    names.sort_unstable();
+    names.dedup();
+    names.join("\n")
 }
 
 /// Single-quote `s` for embedding in a shell `-c`/`-ic` string (bash `sq`).
@@ -327,7 +333,13 @@ fn foreground_wanted(pane: &Pane) -> bool {
 /// pane wants it. `ps` is a seam so the tests can count it; it is handed the
 /// wanted ttys (normalised, sorted, once each).
 fn resolve_foreground(panes: &mut [Pane], ps: impl FnOnce(&[&str]) -> Option<String>) {
-    let mut ttys: Vec<&str> = panes.iter().filter(|p| foreground_wanted(p)).filter_map(|p| p.tty.as_deref()).collect();
+    resolve_foreground_of(panes, |_| true, ps)
+}
+
+/// `resolve_foreground` over only the panes `pick` keeps.
+fn resolve_foreground_of(panes: &mut [Pane], pick: impl Fn(&Pane) -> bool, ps: impl FnOnce(&[&str]) -> Option<String>) {
+    let wanted = |p: &Pane| foreground_wanted(p) && pick(p);
+    let mut ttys: Vec<&str> = panes.iter().filter(|p| wanted(p)).filter_map(|p| p.tty.as_deref()).collect();
     if ttys.is_empty() {
         return;
     }
@@ -335,7 +347,7 @@ fn resolve_foreground(panes: &mut [Pane], ps: impl FnOnce(&[&str]) -> Option<Str
     ttys.dedup();
     let Some(text) = ps(&ttys) else { return };
     let fg = parse_foreground(&text);
-    for pane in panes.iter_mut().filter(|p| foreground_wanted(p)) {
+    for pane in panes.iter_mut().filter(|p| wanted(p)) {
         pane.fg = pane.tty.as_deref().and_then(|t| fg.get(t)).cloned();
     }
 }
@@ -345,7 +357,7 @@ fn resolve_foreground(panes: &mut [Pane], ps: impl FnOnce(&[&str]) -> Option<Str
 /// WHOLE call — exit 1, no rows — when any listed tty is gone (macOS: "No such
 /// file or directory"), and a pane can close between `list-panes` and this.
 /// Then, and only then, one `ps -A`.
-fn ps_foreground(ttys: &[&str]) -> Option<String> {
+pub fn ps_foreground(ttys: &[&str]) -> Option<String> {
     let run = |sel: &[&str]| {
         let o = crate::childenv::command("ps").args(sel).args(["-o", "tty=,pid=,tpgid=,comm="]).output().ok()?;
         o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
@@ -358,6 +370,7 @@ fn ps_foreground(ttys: &[&str]) -> Option<String> {
 /// `node` pane needs naming) and reused: `ls`/`place_json` resolves adopted
 /// sessions for many worktrees against this instead of shelling out per
 /// place, and every question asked of it afterwards is pure.
+#[derive(Default)]
 pub struct PaneList {
     panes: Vec<Pane>,
 }
@@ -369,6 +382,17 @@ impl PaneList {
         if !have_tmux() {
             return None;
         }
+        let mut list = PaneList::fetch_unnamed()?;
+        resolve_foreground(&mut list.panes, ps_foreground);
+        Some(list)
+    }
+
+    /// The `list-panes -a` alone: no `tmux -V` probe and no `ps`, so the 3 s
+    /// poll pays the one spawn `session_fingerprint` cost it and gets every
+    /// pane besides. A `node` pane's `fg` stays `None` until the caller names
+    /// the ones it cares about (`name_foregrounds`). `None` when tmux cannot
+    /// answer, which is `session_fingerprint`'s empty string.
+    pub fn fetch_unnamed() -> Option<PaneList> {
         let o = tmux(&[
             "list-panes",
             "-a",
@@ -379,9 +403,25 @@ impl PaneList {
         if !o.status.success() {
             return None;
         }
-        let mut panes = parse_pane_rows(&String::from_utf8_lossy(&o.stdout));
-        resolve_foreground(&mut panes, ps_foreground);
-        Some(PaneList { panes })
+        Some(PaneList { panes: parse_pane_rows(&String::from_utf8_lossy(&o.stdout)) })
+    }
+
+    /// `session_fingerprint()`, byte for byte, from this snapshot: every live
+    /// session has at least one pane, so the panes name them all.
+    pub fn fingerprint(&self) -> String {
+        fingerprint_of(self.panes.iter().map(|p| p.session.as_str()))
+    }
+
+    pub fn panes(&self) -> &[Pane] {
+        &self.panes
+    }
+
+    /// Name the foreground of the panes `pick` keeps, from ONE `ps` (pass
+    /// `ps_foreground`) — and none when no kept pane is a `node` that a name
+    /// does not already explain. For a caller that filters first, so a `ps`
+    /// is paid only for a pane that survived everything cheaper.
+    pub fn name_foregrounds(&mut self, pick: impl Fn(&Pane) -> bool, ps: impl FnOnce(&[&str]) -> Option<String>) {
+        resolve_foreground_of(&mut self.panes, pick, ps)
     }
 
     /// A snapshot from rows a caller already holds, as
@@ -1599,6 +1639,30 @@ pts/5     3007   3007 npm exec x
         assert_eq!(asked, ["ttys000", "ttys009"], "only the wanted ttys, as ps spells them, once each");
         let fg: Vec<Option<&str>> = panes.iter().map(|p| p.fg.as_deref()).collect();
         assert_eq!(fg, [Some("pi"), Some("claude"), None, None, Some("pi")], "only the panes that wanted it");
+    }
+
+    /// The poll's fingerprint comes from its `list-panes -a` now, and it gates
+    /// `places:changed` and is the live-session list every capture is
+    /// filtered by — so it is `session_fingerprint`'s string exactly: a
+    /// session once however many panes it has, sorted, empty for no server.
+    #[test]
+    fn the_pane_fingerprint_is_the_session_fingerprint() {
+        let from_panes = |rows: &str| PaneList::from_panes(parse_pane_rows(rows)).fingerprint();
+        // (what `list-sessions` printed, what `list-panes -a` printed, the fingerprint)
+        let cases = [
+            ("", "", ""),
+            ("repo-main\n", "repo-main\t/w\tzsh\t1\t/dev/ttys001\n", "repo-main"),
+            (
+                "repo-b\nrepo-a~term\nrepo-a\n",
+                "repo-a\t/w/a\t2.1.309\t1\t/dev/ttys001\nrepo-b\t/w/b\tzsh\t2\t/dev/ttys002\nrepo-a\t/w/a\tzsh\t3\t/dev/ttys003\n\
+                 repo-a~term\t/w/a\tzsh\t4\t/dev/ttys004\nrepo-b\t/w/b/src\tvim\t5\t/dev/ttys005\nrepo-a\t/w/a/app\tnode\t6\t/dev/ttys006\n",
+                "repo-a\nrepo-a~term\nrepo-b",
+            ),
+        ];
+        for (sessions, panes, want) in cases {
+            assert_eq!(fingerprint_of(sessions.lines()), want, "list-sessions: {sessions:?}");
+            assert_eq!(from_panes(panes), want, "list-panes -a: {panes:?}");
+        }
     }
 
     /// The real `ps`: a tty that is gone fails `-t` outright (macOS: exit 1,

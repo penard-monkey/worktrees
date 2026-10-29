@@ -22,6 +22,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
+use worktrees_core::tmux::PaneList;
 use worktrees_core::{provider, sysclock};
 
 use crate::log::{self, LogSink};
@@ -135,7 +136,7 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
     // probes (see claude_activity), keyed by worktree path. Replaces the old
     // tmux #{session_activity} signal, which tracked CLIENT attach/keypress,
     // not pane output — so the dot decayed while Claude worked.
-    let mut last = worktrees_core::tmux::session_fingerprint();
+    let mut last = PaneList::fetch_unnamed().unwrap_or_default().fingerprint();
     let mut busy_gate = BusyGate::default();
     let mut last_models: Option<Vec<(i32, Option<String>)>> = None;
     let mut ticks: u32 = 0;
@@ -257,7 +258,12 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
             term::save_shell_cwds(&pollctx, &pollctx.shells);
             term::save_shell_scrollback(&pollctx, &pollctx.shells);
         }
-        let fp = worktrees_core::tmux::session_fingerprint();
+        // ONE `list-panes -a` a tick, where this was a `list-sessions`: the
+        // fingerprint is derived from it byte for byte, and the Claude half
+        // finds a Claude with no probe yet among its panes — at boot and for
+        // one launched later, whether or not any client ever listed places.
+        let mut panes = PaneList::fetch_unnamed().unwrap_or_default();
+        let fp = panes.fingerprint();
         ticks += 1;
         if fp != last || ticks >= 10 {
             last = fp.clone(); // `fp` is the draft sample's session list too
@@ -304,7 +310,7 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
                 }
             }
         }
-        let (busy, waiting, models) = claude_activity(watch, &fp);
+        let (busy, waiting, models) = claude_activity(watch, &mut panes, &fp);
         // Every harness without a probe file, read once each (`harness_feed`:
         // codex's rollouts, pi's session files).
         let lanes: Vec<(&'static str, LaneTick)> = provider::PROVIDERS

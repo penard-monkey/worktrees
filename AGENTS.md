@@ -74,7 +74,10 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   head and compared without it (`prompt::same_prompt`). A question draws a
   full-width rule INSIDE its list, so a modal's top is the rule whose next
   row is not a choice. The folder-trust prompt comes before Claude writes any
-  probe file, so "is it waiting" there is the pane's alone. And a transcript
+  probe file, so "is it waiting" there is the pane's alone; the dot poll finds
+  that pane in its own per-tick `list-panes -a`, by its cwd, because a
+  registry only a snapshot filled was empty on a serve nobody had listed
+  (`watch::claude_startup_tick`). And a transcript
   holds the whole system prompt and every CLAUDE.md in `api-request-blob`
   entries, so anything that returns transcript text reads `user`/`assistant`
   messages only (`turns`). An answer MOVES the highlight and proves the move

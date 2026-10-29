@@ -62,6 +62,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `worktrees open <place> --ai codex`, or to launch anyway with `--force`.
   Worktrees only reads Codex's config to tell. It never trusts a folder for
   you.
+- A Claude stopped at its folder-trust prompt now shows the amber dot even
+  when no client has listed the places yet, such as just after the app or
+  `worktrees serve` starts, or on a host where only a phone is connected.
+  It also shows for a Claude launched after the last listing. Before, such a
+  Claude read as idle until something listed the places again.
 - Home scrolls when its content is taller than the window. Before, the
   bottom of the list ran off the window with nothing to scroll, so its last
   places could not be opened from Home.
