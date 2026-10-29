@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.44.2] - 2026-10-29
+
 ### Added
 - **A folder macOS is blocking now says so, and how to give it back.** Deny
   the access prompt by accident — on a repo in Documents, on iCloud Drive, on
@@ -36,7 +38,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   now told so in its own words: `start-budget: <seconds>`, the time until it
   may start one again, instead of the `rate` it shared with every other
   limit. The allowance is per device, ten starts an hour, and this computer
-  has none.
+  has none. An iPhone app built before this release shows that refusal as
+  its raw text, `start-budget:` and a number of seconds.
 - The notice that remote access is on now sits in the bar at the bottom of
   the window, beside the usage meter and Claude's status (in a place's footer
   when the usage meter is placed there), instead of floating over the
@@ -62,11 +65,6 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `worktrees open <place> --ai codex`, or to launch anyway with `--force`.
   Worktrees only reads Codex's config to tell. It never trusts a folder for
   you.
-- A Claude stopped at its folder-trust prompt now shows the amber dot even
-  when no client has listed the places yet, such as just after the app or
-  `worktrees serve` starts, or on a host where only a phone is connected.
-  It also shows for a Claude launched after the last listing. Before, such a
-  Claude read as idle until something listed the places again.
 - Home scrolls when its content is taller than the window. Before, the
   bottom of the list ran off the window with nothing to scroll, so its last
   places could not be opened from Home.
