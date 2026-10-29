@@ -249,6 +249,12 @@ struct Conn {
 /// check alone would let an attach that streams unasked run on.
 pub struct Clients {
     map: Mutex<HashMap<u64, Conn>>,
+    /// The last payload of each `scope::SNAPSHOT` event, unprojected: what a
+    /// connection that declares one is sent (§9.3). Written by
+    /// `Broadcast::emit` and read by `declare`, each under `map`'s lock, so a
+    /// declaration lands wholly before or wholly after a push and the socket
+    /// ends on the newer set either way. Empty until the first push.
+    last: Mutex<HashMap<&'static str, Value>>,
     registry: Arc<dyn Registry>,
     /// The registry the device rows change. In serve it IS `registry`; with a
     /// fixture `registry` (the tests) it is an empty one in memory.
@@ -289,6 +295,7 @@ impl Clients {
         let pairing = Arc::new(Pairing::new(None, devices.clone()));
         Clients {
             map: Mutex::new(HashMap::new()),
+            last: Mutex::new(HashMap::new()),
             registry,
             devices,
             pairing,
@@ -305,6 +312,7 @@ impl Clients {
     pub fn serving(devices: Arc<DeviceRegistry>, pairing: Arc<Pairing>, world: Option<Arc<dyn World>>) -> Self {
         Clients {
             map: Mutex::new(HashMap::new()),
+            last: Mutex::new(HashMap::new()),
             registry: devices.clone(),
             devices,
             pairing,
@@ -356,15 +364,40 @@ impl Clients {
         listens
     }
     /// A session joins, having declared nothing: its queue, and the `Call` it
-    /// answers with. The handles are what ends it and the set its listen
-    /// frames replace.
-    pub(super) fn join(&self, id: u64, out: Outbox, call: Arc<Call>) -> (Arc<Notify>, Listens) {
+    /// answers with. The handle is what ends it; its listen frames go
+    /// through [`Clients::declare`].
+    pub(super) fn join(&self, id: u64, out: Outbox, call: Arc<Call>) -> Arc<Notify> {
         let kill = Arc::new(Notify::new());
-        let listens = Listens::default();
         let caller = call.caller.clone();
-        let conn = Conn { out, caller, listens: listens.clone(), call: Some(call), kill: kill.clone() };
+        let conn = Conn { out, caller, listens: Listens::default(), call: Some(call), kill: kill.clone() };
         self.map.lock().unwrap().insert(id, conn);
-        (kill, listens)
+        kill
+    }
+    /// Connection `id`'s listen frame (§9.3): its declaration, replaced, and
+    /// `Some` with the names kept when that changed it. Each `scope::SNAPSHOT`
+    /// event the frame ADDS is sent to this connection alone, at once: the
+    /// last payload, projected for its caller as the push would be, through
+    /// its outbox like any event. One the set already held is not sent again:
+    /// the connection has been sent every push since it joined (a state event
+    /// reaches every socket, declared or not), and a page re-declares on
+    /// every listener it adds or drops. Nothing is sent before the first push,
+    /// which every socket is sent anyway.
+    pub(super) fn declare<'a>(&self, id: u64, names: impl IntoIterator<Item = &'a str>) -> Option<Vec<&'static str>> {
+        let map = self.map.lock().unwrap();
+        let c = map.get(&id)?;
+        let had: Vec<bool> = scope::SNAPSHOT.iter().map(|e| c.listens.has(e)).collect();
+        let kept = c.listens.declare(names)?;
+        for (event, had) in scope::SNAPSHOT.iter().zip(had) {
+            if had || !c.listens.has(event) {
+                continue;
+            }
+            let Some(payload) = self.last.lock().unwrap().get(event).cloned() else { continue };
+            let grant = authz::effective(&*self.registry, &c.caller);
+            if let Some(p) = scope::event(event, &payload, &c.caller, &grant, &mut || self.roots()) {
+                let _ = c.out.push(wire::event_frame(event, &p));
+            }
+        }
+        Some(kept)
     }
     pub(super) fn remove(&self, id: u64) {
         self.map.lock().unwrap().remove(&id);
@@ -597,6 +630,9 @@ impl Host for Broadcast {
         // Read once per emit, and only if a scoped caller needs it.
         let mut roots: Option<Vec<String>> = None;
         let mut map = clients.map.lock().unwrap();
+        if let Some(name) = scope::snapshot(event) {
+            clients.last.lock().unwrap().insert(name, payload.clone());
+        }
         map.retain(|_, c| {
             if scope::is_one_shot(event) && !c.listens.has(event) {
                 return true;
@@ -1267,7 +1303,7 @@ pub(super) async fn serve_caller<S>(
         remote: clients.remote(),
     });
     frames.reconciled().store(call.registry.generation(), Ordering::SeqCst);
-    let (kill, listens) = clients.join(id, outbox.clone(), call.clone());
+    let kill = clients.join(id, outbox.clone(), call.clone());
     clients.end_if_gone(id, &call.caller, remote.as_ref().map(|r| &*r.bind_open));
     #[cfg(test)]
     clients.ready.lock().unwrap().insert(id);
@@ -1330,18 +1366,20 @@ pub(super) async fn serve_caller<S>(
                 let req = match wire::parse_frame(t.as_str()) {
                     Ok(wire::Frame::Request(r)) => r,
                     // Taken here, in order with the requests around it, and
-                    // answered by nothing. What it holds is bounded by
-                    // construction: `Listens` keeps one bit per known event.
-                    // What it costs is not: each changed set is a log line,
-                    // so a device pays a request token per frame, and one it
-                    // has no token for is dropped unapplied — its last set
-                    // stands, and the refusal counts into the rate's episode.
-                    // The console's frames are free.
+                    // never answered; a state event it adds is sent its
+                    // current payload (`Clients::declare`). What it holds is
+                    // bounded by construction: `Listens` keeps one bit per
+                    // known event. What it costs is not: each changed set is
+                    // a log line and may be a snapshot, so a device pays a
+                    // request token per frame, and one it has no token for
+                    // is dropped unapplied — its last set stands, and the
+                    // refusal counts into the rate's episode. The console's
+                    // frames are free.
                     Ok(wire::Frame::Listen(names)) => {
                         if account.charge().is_err() {
                             continue;
                         }
-                        if let Some(kept) = listens.declare(names.iter().map(String::as_str)) {
+                        if let Some(kept) = clients.declare(id, names.iter().map(String::as_str)) {
                             info(&format!("serve: client {id} listens for [{}]", kept.join(", ")));
                         }
                         continue;
@@ -1370,11 +1408,12 @@ pub(super) async fn serve_caller<S>(
                     continue;
                 }
                 // Admitted or refused HERE, before anything runs, and a
-                // refusal is answered at once: `busy` or `rate`, never queued.
+                // refusal is answered at once: `busy`, `rate` or
+                // `start-budget: <s>`, never queued.
                 let mut ticket = match account.admit(&cmd, &args, lane.as_deref()) {
                     Ok(t) => t,
                     Err(e) => {
-                        let _ = outbox.push(wire::reply_err(&rid, Value::from(e)));
+                        let _ = outbox.push(wire::reply_err(&rid, e));
                         continue;
                     }
                 };

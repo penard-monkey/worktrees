@@ -19,8 +19,10 @@
 //! threads the desk needs.
 //!
 //! A refusal is an `err` frame sent at once and never queued: `busy` (a slot
-//! is taken; ask again once something has come back) or `rate` (too much,
-//! too fast; slow down). Each limit tripped is an EPISODE ([`Trips`]): one
+//! is taken; ask again once something has come back), `rate` (too much,
+//! too fast; slow down), or, for a device's agent starts, `start-budget: <s>`
+//! (the seconds until it may start one again: a person is told when, not
+//! "slow down"). Each limit tripped is an EPISODE ([`Trips`]): one
 //! serve.log line and one audit record (§5.1) as it begins, one with the
 //! count as it ends, so a flood does not become a disk-writing flood.
 
@@ -42,6 +44,10 @@ use super::provenance::LAUNCH_ROWS;
 pub const BUSY: &str = "busy";
 /// `err` for a request refused because its caller is over a rate.
 pub const RATE: &str = "rate";
+/// The word a device past its agent-start bucket is answered with, as
+/// `start-budget: <seconds>` (`Account::admit`), and the one its episode
+/// records: the start limit, told apart from the request rate.
+pub const START_BUDGET: &str = "start-budget";
 
 // ── counts ───────────────────────────────────────────────────────────────────
 
@@ -211,6 +217,15 @@ impl Bucket {
         }
     }
 
+    /// Whole seconds from `now` until `n` tokens are there, at least one:
+    /// what a refusal says to wait. A hair under a whole second is that
+    /// second, not the next, so float error never adds one.
+    fn wait(&self, rate: Rate, n: f64, now: Instant) -> u64 {
+        let dt = now.saturating_duration_since(self.at).as_secs_f64();
+        let have = (self.tokens + dt * rate.per_sec).min(rate.burst);
+        (((n - have) / rate.per_sec) - 1e-6).ceil().max(1.0) as u64
+    }
+
     /// Back at its burst: as good as no entry at all.
     fn is_full(&self, rate: Rate, now: Instant) -> bool {
         self.tokens + now.saturating_duration_since(self.at).as_secs_f64() * rate.per_sec >= rate.burst
@@ -360,10 +375,22 @@ fn input_len(args: &Args) -> usize {
 }
 
 impl Account {
-    /// Admit one request, or say why not. Slots are taken before tokens, so
-    /// a request refused `busy` costs its caller none of its rate.
-    pub fn admit(&self, cmd: &str, args: &Args, lane: Option<&str>) -> Result<Ticket, &'static str> {
-        self.admit_at(cmd, args, lane, Instant::now())
+    /// Admit one request, or say why not: the `err` to answer it with.
+    /// Slots are taken before tokens, so a request refused `busy` costs its
+    /// caller none of its rate.
+    pub fn admit(&self, cmd: &str, args: &Args, lane: Option<&str>) -> Result<Ticket, Value> {
+        let now = Instant::now();
+        self.admit_at(cmd, args, lane, now).map_err(|e| self.answer(e, now))
+    }
+
+    /// A refusal's word as the client is told it: [`START_BUDGET`] with the
+    /// seconds until the device's start bucket holds one again, every other
+    /// word as it is.
+    fn answer(&self, err: &'static str, now: Instant) -> Value {
+        match (err, &self.device) {
+            (START_BUDGET, Some(d)) => Value::from(format!("{START_BUDGET}: {}", d.launches.lock().unwrap().wait(self.per_device.launches, 1.0, now))),
+            _ => Value::from(err),
+        }
     }
 
     fn admit_at(&self, cmd: &str, args: &Args, lane: Option<&str>, now: Instant) -> Result<Ticket, &'static str> {
@@ -389,7 +416,7 @@ impl Account {
         // The rows that start an agent (LLM10), the lane gate's own list.
         if LAUNCH_ROWS.contains(&cmd) {
             let ok = d.launches.lock().unwrap().take(p.launches, 1.0, now);
-            self.check(t, "launch_rate", RATE, ok.then_some(()), now)?;
+            self.check(t, "launch_rate", START_BUDGET, ok.then_some(()), now)?;
         }
         if matches!(cmd, "term_write" | "shell_write") {
             let ok = take_input(&d.inputs, lane.unwrap_or(cmd), p.input, input_len(args), now);
@@ -733,7 +760,9 @@ mod tests {
     }
 
     /// LLM10: launches have their own hourly budget, on top of the request
-    /// rate.
+    /// rate, and its refusal says so — `start-budget`, with the whole seconds
+    /// until the bucket holds one start again, counted from the refill so
+    /// far.
     #[test]
     fn agent_launches_have_an_hourly_budget() {
         let b = Budget::new(BUDGETS);
@@ -742,9 +771,17 @@ mod tests {
         let ok = (0..15).filter(|_| a.admit_at("new_place", &args(json!({})), None, t0).is_ok()).count();
         assert_eq!(ok, 10, "ten an hour");
         for row in LAUNCH_ROWS {
-            assert_eq!(a.admit_at(row, &args(json!({})), None, t0).err(), Some(RATE), "{row}: every launch row shares it");
+            assert_eq!(a.admit_at(row, &args(json!({})), None, t0).err(), Some(START_BUDGET), "{row}: every launch row shares it");
         }
+        assert_eq!(a.answer(START_BUDGET, t0), json!("start-budget: 360"));
+        let later = t0 + Duration::from_secs(100);
+        assert_eq!(a.admit_at("new_place", &args(json!({})), None, later).err(), Some(START_BUDGET));
+        assert_eq!(a.answer(START_BUDGET, later), json!("start-budget: 260"), "100 s of the 360 have refilled");
+        assert_eq!(a.answer(START_BUDGET, t0 + Duration::from_millis(359_500)), json!("start-budget: 1"), "never 0 while refused");
+        assert_eq!(a.answer(RATE, later), json!("rate"), "every other word as it is");
         assert!(a.admit_at("open_place", &args(json!({})), None, t0 + Duration::from_secs(360)).is_ok(), "one back in six minutes");
+        let desk = b.open(2, &Caller::console(), None).unwrap();
+        assert_eq!(desk.answer(START_BUDGET, t0), json!(START_BUDGET), "no device, no bucket to count");
     }
 
     /// A client sitting AT its cap is admitted and refused by turns, one each

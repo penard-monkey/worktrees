@@ -471,6 +471,14 @@ pub trait Registry: Send + Sync {
     /// with the value it last reconciled its channels at, so "nothing changed"
     /// costs one atomic load.
     fn generation(&self) -> u64;
+    /// A device's display name as it stands NOW, looked up WITHIN `principal`
+    /// as its grant is, whatever its state: a revoked device keeps the name
+    /// it was revoked under, so what it did is still named. What serve names
+    /// the device in a place's provenance stamps with (`scope::stamps`).
+    /// `None` by default: a registry with no names names nothing.
+    fn device_name(&self, _principal: &PrincipalId, _device: &DeviceId) -> Option<String> {
+        None
+    }
 }
 
 /// Phase 2 slice 1's registry: no paired devices exist, so every device and

@@ -375,6 +375,20 @@ pub fn stamp_worked(roots: &[String], path: &str, epoch: i64) -> bool {
     }
 }
 
+/// A finished turn: `last_worked_epoch` stamped, THEN `sessions:done` said.
+/// The order is the point. A client that reconnects between the two re-pulls
+/// the workspace, which carries the stamp, so a push it missed loses nothing;
+/// said first, the push could reach nobody and the re-pull find no stamp.
+/// `false` when nothing was stamped (an untracked repo, newer work already
+/// recorded, a failed write), and then nothing is said.
+pub fn announce_done(ctx: &Ctx, roots: &[String], path: String, epoch: i64) -> bool {
+    if !stamp_worked(roots, &path, epoch) {
+        return false;
+    }
+    ctx.emit("sessions:done", serde_json::to_value(TaskDone { path, epoch }).unwrap_or(serde_json::Value::Null));
+    true
+}
+
 /// How far back the startup backfill looks. Matches the UI's afterglow horizon —
 /// anything older renders as an empty dot slot, so reading it would be waste.
 pub const BACKFILL_WINDOW_SECS: i64 = 12 * 3600;
@@ -998,10 +1012,7 @@ pub fn backfill_worked(ctx: &Ctx) {
     }
     let mut stamped = false;
     for (path, epoch) in newest {
-        if stamp_worked(&roots, &path, epoch) {
-            stamped = true;
-            ctx.emit("sessions:done", serde_json::to_value(TaskDone { path, epoch }).unwrap_or(serde_json::Value::Null));
-        }
+        stamped |= announce_done(ctx, &roots, path, epoch);
     }
     // The emits above almost certainly land before the webview has registered
     // its listener (this runs at thread spawn), and a dropped event has no
@@ -1421,6 +1432,42 @@ mod tests {
         assert!(new_dones(&mut seen, &d("/a", 100)).is_empty());
         assert_eq!(new_dones(&mut seen, &d("/a", 160)), d("/a", 160));
         assert_eq!(new_dones(&mut seen, &d("/b", 100)), d("/b", 100), "places are independent");
+    }
+
+    /// `sessions:done` goes out only once `last_worked_epoch` is on disk. A
+    /// client that reconnects between the two re-pulls the workspace, which
+    /// carries the stamp, so a push it missed loses nothing (the iOS ask);
+    /// said first, the push could reach nobody and the re-pull find nothing.
+    /// The host here reads the store at the moment it hears the event.
+    #[test]
+    fn a_finished_turn_is_stamped_before_it_is_announced() {
+        struct ReadsTheStore {
+            repo: String,
+            seen: Mutex<Vec<Option<i64>>>,
+        }
+        impl crate::Host for ReadsTheStore {
+            fn emit(&self, event: &str, _: serde_json::Value) {
+                if event == "sessions:done" {
+                    let at = store::read_lenient(&self.repo).places.get("(main)").and_then(|d| d.last_worked_epoch);
+                    self.seen.lock().unwrap().push(at);
+                }
+            }
+        }
+        let dir = std::env::temp_dir().join(format!("wt-announce-done-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let dir = dir.canonicalize().unwrap();
+        let repo = dir.to_string_lossy().into_owned();
+        assert!(git::git_ok(&repo, &["init", "-q"]), "git init");
+        let host = std::sync::Arc::new(ReadsTheStore { repo: repo.clone(), seen: Mutex::new(Vec::new()) });
+        let ctx = Ctx::new(dir.join("cfg"), host.clone());
+        let roots = vec![repo.clone()];
+        assert!(announce_done(&ctx, &roots, repo.clone(), 1_700_000_000));
+        assert_eq!(*host.seen.lock().unwrap(), vec![Some(1_700_000_000)], "the stamp was on disk when the event went out");
+        assert!(!announce_done(&ctx, &roots, repo.clone(), 1_600_000_000), "older than what is recorded");
+        assert!(!announce_done(&ctx, &[], repo.clone(), 1_800_000_000), "a repo nobody registered");
+        assert_eq!(host.seen.lock().unwrap().len(), 1, "nothing stamped, nothing said");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The backfill's only judgement call: which history lines are WORK. Slash

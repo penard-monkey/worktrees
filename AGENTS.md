@@ -177,7 +177,10 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   test-only, so a new caller cannot skip the audit by accident. Both refusal
   sites, the reader's `dispatch::precheck` and `call_in_seen`, go through ONE
   `refusal_answer`, so a refusal is recorded once. A budget refusal (`busy`,
-  `rate`) is NOT a `RefusalKind`: it never reaches dispatch, and it is a
+  `rate`, or `start-budget: <s>` for a device past its hourly agent starts —
+  the device's bucket across its connections, `<s>` the seconds until it
+  holds one start again, so a client can say when) is NOT a `RefusalKind`:
+  it never reaches dispatch, and it is a
   limit EPISODE (`budget::Trips`) — a record as it begins, one with the count
   after a quiet minute or at the disconnect, never one per request and never
   ended by the next admission, which at a cap would be one per request
@@ -218,7 +221,12 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   connection that DECLARED the event with `{"listen": [...]}` (§9.3, slice
   1b). Each listen frame replaces the last and is never answered; serve keeps
   only names `scope::EVENTS` has, one bit each, and a one-shot event
-  (`scope::ONE_SHOT`) goes only to the sockets that declared it. A socket that
+  (`scope::ONE_SHOT`) goes only to the sockets that declared it. A state
+  event whose push is change-gated (`scope::SNAPSHOT`: `sessions:busy`) that
+  a frame ADDS is sent to that socket alone at once, its last push projected
+  (`Clients::declare`, under the map lock `Broadcast::emit` caches it under);
+  a frame that keeps it sends nothing, and the poll's first tick always
+  pushes, or an idle host would have nothing to send. A socket that
   declares nothing gets none, which is what keeps the app's own verification
   probe, which authenticates and closes, from swallowing a held show. A
   hand-written client that wants `app:open-doc` must declare it. There is no CLI client: a per-command log line
@@ -291,7 +299,16 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   shell for a moment before it execs the agent, and the next device launch,
   queued behind this one, counts exactly then. `provenance.rs`'s test reads
   `mcp.rs` and fails on any pairing, device, scope, remote-access or audit
-  name, so an agent never reaches a Phase 2 control.
+  name, so an agent never reaches a Phase 2 control. A place's stamps
+  (`launched_by`, `last_remote_*`, `note_by`, `title_by`) are named on READ,
+  not stamped: `scope::stamps`, the filter on every row that answers with
+  places (`list_workspace`, `list_places`, and the project rows that answer
+  with the workspace — a dispatch test reads workspace.rs for them, and a
+  scope test reads `Declared` for the stamps), adds
+  `device_name` from `Registry::device_name` for every caller, and cuts
+  another device's stamp to `scope::SHARED` with `device: {"kind":
+  "paired"}` — no id, no `cross_project`. MCP `place_status` keeps ids and
+  no names, for that test's reason.
 
 - **The frontend has ONE door to the backend: `app/src/ipc.ts`** (`invoke`,
   `Channel`, `listen`). Nothing else under `app/src` imports

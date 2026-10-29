@@ -1476,6 +1476,15 @@ impl Registry for DeviceRegistry {
     fn generation(&self) -> u64 {
         self.generation.load(Ordering::SeqCst)
     }
+
+    /// The record's name, tombstones included (one keeps the name it was
+    /// revoked under). A scan of at most `MAX_DEVICES` live records and their
+    /// tombstones under the read lock, per stamp a reply names a device in.
+    fn device_name(&self, principal: &PrincipalId, device: &DeviceId) -> Option<String> {
+        let st = self.state.read().unwrap();
+        let d = st.file.as_ref().ok()?.device(device)?;
+        (&d.principal == principal).then(|| d.name.clone())
+    }
 }
 
 #[cfg(test)]
@@ -1522,6 +1531,24 @@ mod tests {
 
     fn caller(d: &DeviceRecord) -> Caller {
         Caller::paired(d.principal.clone(), d.id.clone())
+    }
+
+    /// What a place's provenance stamps are named with (`scope::stamps`):
+    /// the record's name as it is NOW, so a rename shows on the next read;
+    /// looked up within the asking principal, as a grant is; and a
+    /// tombstone's, which keeps the name it was revoked under.
+    #[test]
+    fn a_device_is_named_as_it_is_now_within_its_principal() {
+        let reg = DeviceRegistry::in_memory();
+        let p = phone(&reg, "Bret's iPhone", 1, &[Read]);
+        let owner = PrincipalId::owner();
+        assert_eq!(reg.device_name(&owner, &p.id).as_deref(), Some("Bret's iPhone"));
+        assert!(reg.rename(&p.id, "Phone (work)").unwrap());
+        assert_eq!(reg.device_name(&owner, &p.id).as_deref(), Some("Phone (work)"), "renamed: the new name");
+        assert_eq!(reg.device_name(&PrincipalId::new("p_bob"), &p.id), None, "another principal's device is nobody's to name");
+        assert!(reg.revoke(&Caller::console(), &Grant::everything(), &p.id, NOW).unwrap());
+        assert_eq!(reg.device_name(&owner, &p.id).as_deref(), Some("Phone (work)"), "a tombstone keeps its name");
+        assert_eq!(reg.device_name(&owner, &DeviceId::new("d_nobody")), None);
     }
 
     /// Every event a registry hands its hooks, in order.

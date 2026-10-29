@@ -903,11 +903,13 @@ pub(crate) mod fixture {
         }
     }
 
-    /// Principals and devices with grants, each device under one principal.
+    /// Principals and devices with grants, each device under one principal,
+    /// and the names of those that have one.
     #[derive(Default)]
     pub struct Devices {
         pub principals: HashMap<PrincipalId, Grant>,
         pub devices: HashMap<DeviceId, (PrincipalId, Grant)>,
+        pub names: std::sync::Mutex<HashMap<DeviceId, String>>,
     }
 
     impl Registry for Devices {
@@ -925,6 +927,10 @@ pub(crate) mod fixture {
         }
         fn generation(&self) -> u64 {
             0
+        }
+        fn device_name(&self, p: &PrincipalId, d: &DeviceId) -> Option<String> {
+            self.device_principal(d).filter(|owner| owner == p)?;
+            self.names.lock().unwrap().get(d).cloned()
         }
     }
 

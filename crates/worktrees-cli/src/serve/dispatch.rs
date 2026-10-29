@@ -604,7 +604,7 @@ pub fn call_in_seen(cx: &Call, cmd: &str, args: &Args, world: &dyn World, seen: 
     let lead = match flight::key(row.name, &args, scoped.ctx.scope(), scoped.ctx.fetcher()).map(|k| cx.flights.join(k)) {
         Some(Join::Follow(f)) => {
             seen.admitted(row, &args, &resolved);
-            return filtered(row, &grant, world, f.wait());
+            return filtered(row, cx, &grant, world, f.wait());
         }
         Some(Join::Lead(l)) => Some(l),
         None => None,
@@ -640,7 +640,7 @@ pub fn call_in_seen(cx: &Call, cmd: &str, args: &Args, world: &dyn World, seen: 
     if let Some(l) = lead {
         l.land(&out);
     }
-    filtered(row, &grant, world, out)
+    filtered(row, cx, &grant, world, out)
 }
 
 /// The row's body, by name.
@@ -652,13 +652,14 @@ fn body(name: &str, cx: &Call, args: &Args) -> Result<Value, Value> {
     run(name, cx, args).unwrap_or_else(|| Err(unknown(name)))
 }
 
-/// A body's outcome through `row`'s filter, for this caller's grant alone.
-fn filtered(row: &Row, grant: &authz::Grant, world: &dyn World, out: Result<Value, Value>) -> Result<Value, Value> {
+/// A body's outcome through `row`'s filter, for this caller and its grant
+/// alone: a flight's follower is filtered as itself, not as its leader.
+fn filtered(row: &Row, cx: &Call, grant: &authz::Grant, world: &dyn World, out: Result<Value, Value>) -> Result<Value, Value> {
     let out = out?;
     Ok(match row.objects.iter().find_map(Obj::filter) {
         Some(f) => {
             let roots = if grant.projects.is_all() { Vec::new() } else { world.roots() };
-            f(&scope::View { projects: &grant.projects, roots: &roots }, out)
+            f(&scope::View { projects: &grant.projects, roots: &roots, caller: &cx.caller, names: &*cx.registry }, out)
         }
         None => out,
     })
@@ -827,20 +828,20 @@ pub fn lane(cmd: &str, args: &Args) -> Option<String> {
 
 commands! { cx, a;
     // ── projects and their snapshots (workspace) ─────────────────────────
-    list_places: Engine [read, project(repo)] => workspace::list_places(&cx.ctx, a.get("repo")?),
+    list_places: Engine [read, project(repo), filtered(places)] => workspace::list_places(&cx.ctx, a.get("repo")?),
     list_workspace: Engine [read, filtered(workspace)] => workspace::list_workspace(&cx.ctx),
-    add_project: Engine [admin, new_path(dir)] => workspace::add_project(&cx.ctx, a.get("dir")?),
+    add_project: Engine [admin, new_path(dir), filtered(workspace)] => workspace::add_project(&cx.ctx, a.get("dir")?),
     probe_dir: Engine [admin, new_path(dir)] => workspace::probe_dir(a.get("dir")?),
-    create_project: Engine [admin, new_path(location)] => workspace::create_project(&cx.ctx, a.get("location")?, a.get("name")?),
-    clone_project: Engine [admin, new_path(parent), new_job(id), remote_url(url)] => {
+    create_project: Engine [admin, new_path(location), filtered(workspace)] => workspace::create_project(&cx.ctx, a.get("location")?, a.get("name")?),
+    clone_project: Engine [admin, new_path(parent), new_job(id), remote_url(url), filtered(cloned)] => {
         let mut sink = cx.frames.typed::<worktrees_core::clone::CloneProgress>(a.channel("on_progress")?);
         workspace::clone_project(&cx.ctx, a.get("id")?, a.get("url")?, a.get("parent")?, a.get("name")?, &mut sink)
     },
     clone_cancel: Engine [admin, job(id)] => workspace::clone_cancel(a.get("id")?),
-    init_repo: Engine [admin, new_path(dir)] => workspace::init_repo(&cx.ctx, a.get("dir")?),
-    create_initial_commit: Engine [admin, project(repo)] => workspace::create_initial_commit(&cx.ctx, a.get("repo")?),
-    remove_project: Engine [admin, project(root)] => workspace::remove_project(&cx.ctx, a.get("root")?),
-    reorder_projects: Engine [write, all, roots(roots)] => workspace::reorder_projects(&cx.ctx, a.get("roots")?),
+    init_repo: Engine [admin, new_path(dir), filtered(workspace)] => workspace::init_repo(&cx.ctx, a.get("dir")?),
+    create_initial_commit: Engine [admin, project(repo), filtered(workspace)] => workspace::create_initial_commit(&cx.ctx, a.get("repo")?),
+    remove_project: Engine [admin, project(root), filtered(workspace)] => workspace::remove_project(&cx.ctx, a.get("root")?),
+    reorder_projects: Engine [write, all, roots(roots), filtered(workspace)] => workspace::reorder_projects(&cx.ctx, a.get("roots")?),
 
     // ── settings, planning, and the mutating verbs (ops) ─────────────────
     settings_info: Engine [read, global] => ops::settings_info(&cx.ctx),
@@ -1377,6 +1378,82 @@ mod tests {
         let _ = std::fs::remove_dir_all(&cfg);
     }
 
+    /// The iOS ask: a place's provenance stamps NAME the paired device that
+    /// made them (`device_name`), as the registry names it NOW, so a rename
+    /// shows on the next read. The console and the device itself see each
+    /// stamp whole (the id is how a phone says "this device"); any other
+    /// device that can read the place sees the name and the act — never the
+    /// device's id, nor the reach its scope gave the lane (`cross_project`).
+    /// The store here is written raw, as every stamp before this change was:
+    /// with no name in it. A device the registry no longer has is unnamed.
+    #[test]
+    fn a_places_stamps_name_their_device_and_hide_its_id_from_other_devices() {
+        use super::super::resolve::fixture::{call_as, s, Devices};
+        use worktrees_core::authz::{Caps, DeviceId, Grant, PrincipalId, Projects};
+        let dir = scratch("stamps");
+        git_repo(&dir.join("a"));
+        let a = s(&dir.join("a"));
+        let by = |id: &str| json!({ "principal": "owner", "device": { "kind": "paired", "id": id } });
+        let with = |mut v: Value, more: Value| {
+            v.as_object_mut().unwrap().extend(more.as_object().unwrap().clone());
+            v
+        };
+        let console = json!({ "principal": "owner", "device": { "kind": "console" } });
+        let place = json!({
+            "launched_by": with(by("phone"), json!({ "cross_project": "off" })),
+            "last_remote_instruction": with(by("phone"), json!({ "path": "AGENTS.md", "at": 1_700_000_000 })),
+            "last_remote_send": with(by("tablet"), json!({ "session": "wt-a", "at": 1_700_000_100 })),
+            "note": "n",
+            "note_by": by("gone"),
+            "title": "t",
+            "title_by": console,
+        });
+        std::fs::write(dir.join("a/.worktrees.places.json"), json!({ "version": 1, "places": { "(main)": place } }).to_string()).unwrap();
+        let world = Fixture { roots: vec![a.clone()], panes: vec![] };
+        let mut reg = Devices::default();
+        for d in ["phone", "tablet", "ipad"] {
+            let read = Grant { capabilities: Caps::of(&[Capability::Read]), projects: Projects::only([a.clone()]) };
+            reg.devices.insert(DeviceId::new(d), (PrincipalId::owner(), read));
+        }
+        reg.names.lock().unwrap().extend([(DeviceId::new("phone"), "Bret's iPhone".to_string()), (DeviceId::new("tablet"), "Studio iPad".to_string())]);
+        let reg = Arc::new(reg);
+        let declared = |caller: Caller| -> Value {
+            let v = super::call_in(&call_as(caller, reg.clone()), "list_places", &args(json!({ "repo": a })), &world).unwrap();
+            let main = v["places"].as_array().unwrap().iter().find(|p| p["slug"] == json!("(main)")).cloned();
+            main.unwrap_or_else(|| panic!("no (main) in {v}"))["declared"].clone()
+        };
+        let device = |id: &str| Caller::paired(PrincipalId::owner(), DeviceId::new(id));
+        let named = |v: Value, name: &str| with(v, json!({ "device_name": name }));
+        let other = |name: Option<&str>, more: Value| {
+            let v = with(json!({ "principal": "owner", "device": { "kind": "paired" } }), more);
+            name.map_or(v.clone(), |n| named(v, n))
+        };
+
+        let desk = declared(Caller::console());
+        assert_eq!(desk["launched_by"], named(place["launched_by"].clone(), "Bret's iPhone"), "the console sees everything, named");
+        assert_eq!(desk["last_remote_send"], named(place["last_remote_send"].clone(), "Studio iPad"));
+        assert_eq!(desk["note_by"], by("gone"), "a device the registry no longer has: as stored, unnamed");
+        assert_eq!(desk["title_by"], console);
+
+        let own = declared(device("phone"));
+        assert_eq!(own["launched_by"], named(place["launched_by"].clone(), "Bret's iPhone"), "its own stamp, id and reach included");
+        assert_eq!(own["last_remote_instruction"], named(place["last_remote_instruction"].clone(), "Bret's iPhone"));
+        assert_eq!(own["last_remote_send"], other(Some("Studio iPad"), json!({ "session": "wt-a", "at": 1_700_000_100 })), "the tablet's, by name");
+
+        let ipad = declared(device("ipad"));
+        assert_eq!(ipad["launched_by"], other(Some("Bret's iPhone"), json!({})), "no id, no reach: {ipad}");
+        assert_eq!(ipad["last_remote_instruction"], other(Some("Bret's iPhone"), json!({ "path": "AGENTS.md", "at": 1_700_000_000 })));
+        assert_eq!(ipad["last_remote_send"], other(Some("Studio iPad"), json!({ "session": "wt-a", "at": 1_700_000_100 })));
+        assert_eq!(ipad["note_by"], other(None, json!({})), "unnamed and still no id");
+        assert_eq!(ipad["title_by"], console);
+        assert!(!ipad.to_string().contains("\"id\""), "another device's id reached a device: {ipad}");
+        assert_eq!((ipad["note"].clone(), ipad["title"].clone()), (json!("n"), json!("t")), "the rest of the place is as it was");
+
+        reg.names.lock().unwrap().insert(DeviceId::new("phone"), "Phone (work)".into());
+        assert_eq!(declared(device("ipad"))["launched_by"]["device_name"], json!("Phone (work)"), "renamed: the name as it is now");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // ── what keeps the table honest (§3.3) ───────────────────────────────
 
     /// The shipped source of the `commands!` block, `mod tests` sliced off at
@@ -1403,6 +1480,43 @@ mod tests {
             }
         }
         out
+    }
+
+    /// A reply that carries places carries their provenance stamps, so the
+    /// row that returns one declares a filter, or another device's id goes
+    /// out with it (`scope::stamps`). The bodies that do are read off
+    /// workspace.rs: every `pub fn` there that answers a `Workspace`, a
+    /// `CloneDone` (which holds one) or a project's snapshot.
+    #[test]
+    fn every_row_that_answers_with_places_projects_their_stamps() {
+        let src = include_str!("../../../worktrees-api/src/workspace.rs");
+        let shipped = src.split("\n#[cfg(test)]\nmod tests").next().unwrap();
+        let mut bodies: Vec<String> = Vec::new();
+        let mut sig = String::new();
+        for line in shipped.lines() {
+            if line.starts_with("pub fn ") {
+                sig.clear();
+            }
+            if line.starts_with("pub fn ") || !sig.is_empty() {
+                sig.push_str(line);
+                if line.contains('{') {
+                    let places = ["-> Result<Workspace", "-> Result<CloneDone", "-> Result<serde_json::Value"].iter().any(|r| sig.contains(r));
+                    let name = sig["pub fn ".len()..].split(['(', '<']).next().unwrap().to_string();
+                    if places && name != "snapshot" {
+                        bodies.push(name);
+                    }
+                    sig.clear();
+                }
+            }
+        }
+        assert!(bodies.contains(&"list_workspace".to_string()) && bodies.contains(&"clone_project".to_string()), "the scan found the bodies: {bodies:?}");
+        let mut unfiltered = Vec::new();
+        for (row, text) in row_sources() {
+            if bodies.iter().any(|b| text.contains(&format!("workspace::{b}("))) && !text.contains("filtered(") {
+                unfiltered.push(row);
+            }
+        }
+        assert_eq!(unfiltered, Vec::<String>::new(), "rows that answer with places and project nothing");
     }
 
     /// The argument names that name an OBJECT (§3.3), and the arrays and
