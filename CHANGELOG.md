@@ -37,6 +37,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   `CLAUDE.md`) just because its worktrees rules block is unchanged. Text a
   branch adds around that block is now listed as a change for the reviewing
   agent to read, not described as trusted agent instructions.
+- **An agent stopped at its folder-trust prompt no longer reads as idle.**
+  Codex, Claude, kimi and pi ask whether to trust a folder the first time they
+  run in it. A Codex lane waiting there showed no dot and reported "idle" to
+  `place_status` and `wait`, so three lanes sat on that prompt for eight
+  hours before anyone noticed. Now such a lane shows the amber dot, reports
+  **waiting** with what the prompt says, and `wait` returns. A Codex launch
+  into a folder Codex hasn't been told to trust is now refused before it
+  starts, the way a spent plan limit is: the place and its brief are kept, and
+  the message says to open Codex there once and choose Trust, then rerun
+  `worktrees open <place> --ai codex`, or to launch anyway with `--force`.
+  Worktrees only reads Codex's config to tell. It never trusts a folder for
+  you.
 - Home scrolls when its content is taller than the window. Before, the
   bottom of the list ran off the window with nothing to scroll, so its last
   places could not be opened from Home.

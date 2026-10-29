@@ -257,6 +257,7 @@ session_count() {
   install_fake_cmd codex
   make_worktree feat-isolation
   export CODEX_HOME="$BATS_TEST_TMPDIR/codex"
+  codex_trusts_repo
   local day="$CODEX_HOME/sessions/2026/10/05"
   mkdir -p "$day"
   printf '{"type":"session_meta","payload":{"id":"11111111-1111-4111-8111-111111111111","cwd":"%s","source":"cli"}}\n' "$REPO/.worktrees/feat-isolation" > "$day/rollout-a.jsonl"
@@ -275,6 +276,7 @@ session_count() {
   install_fake_cmd codex
   make_worktree feat-isolation
   export CODEX_HOME="$BATS_TEST_TMPDIR/codex"
+  codex_trusts_repo
   local day="$CODEX_HOME/sessions/2026/10/05"
   mkdir -p "$day"
   printf '{"type":"session_meta","payload":{"id":"33333333-3333-4333-8333-333333333333","cwd":"%s","source":{"subagent":"guardian"}}}\n' "$REPO/.worktrees/feat-isolation" > "$day/rollout-y.jsonl"

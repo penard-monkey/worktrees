@@ -716,7 +716,7 @@ pub fn plan_prompt(session: String, provider: Option<String>) -> Result<(), Stri
     // and empty (`kimi_paste_refusal`).
     if adapter.provider().id == provider::KIMI.id {
         let target = format!("={session}:");
-        let screen = worktrees_core::kimi::capture_target(&target);
+        let screen = worktrees_core::activity::capture_target(&target);
         // The opener helper types into the same composer (`send` refuses too).
         let pending = tmux::tmux(&["display-message", "-p", "-t", &target, "#{pane_current_path}"])
             .ok()

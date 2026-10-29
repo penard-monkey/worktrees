@@ -421,9 +421,14 @@ pub(crate) const APPROVAL_FOOTER: &str = "Press enter to confirm or esc to cance
 /// The footers of a plan-mode `request_user_input` modal: one question, or
 /// the last of several (the key-hint strings in the 0.157.1 binary).
 pub(crate) const QUESTION_FOOTERS: [&str; 2] = ["to submit answer", "to submit all"];
+/// The footers of the folder-access prompt (0.160.1), which comes before any
+/// rollout exists: Codex on its own (`esc quit`, fixture `codex-trust/`) and
+/// attached to its daemon (`esc back`, upstream's own snapshots).
+pub(crate) const TRUST_FOOTERS: [&str; 2] = ["enter continue · esc quit", "enter continue · esc back"];
 
 /// Whether a captured Codex pane is sitting on a modal that waits for the
-/// user: an approval (command, edits, permissions) or a plan-mode question.
+/// user: an approval (command, edits, permissions), a plan-mode question, or
+/// the first-run folder-trust prompt.
 /// Nothing Codex writes to disk says so — the rollout's last record is the
 /// same pending tool call whether the command is running or awaiting a yes,
 /// and legacy `notify` has no approval event — so the screen is the witness.
@@ -440,6 +445,7 @@ pub fn waiting_on_screen(screen: &str) -> bool {
     let lines: Vec<&str> = screen.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
     let tail = lines[lines.len().saturating_sub(2)..].join(" ");
     tail.contains(APPROVAL_FOOTER) || QUESTION_FOOTERS.iter().any(|f| tail.contains(f))
+        || TRUST_FOOTERS.iter().any(|f| tail.ends_with(f))
 }
 
 /// Composer content from a captured Codex TUI. Unknown layouts are not evidence

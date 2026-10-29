@@ -101,6 +101,19 @@ make_repo() {   # $REPO with one commit pushed to bare $ORIGIN
   # shellcheck disable=SC2034  # consumed by misc.bats (symlink regression test)
   REPO_LOGICAL="$REPO"
   REPO="$(cd "$REPO" && pwd -P)"
+  # Ordinary launch tests model an already-onboarded Codex. The dedicated
+  # trust suite overrides CODEX_HOME with its own untrusted configuration.
+  codex_trusts_repo
+}
+
+# A Codex that has been told to trust $REPO, which its launch preflight reads
+# (`codextrust`): appended to the config Codex reads — `$CODEX_HOME` when a
+# test moved it. A Codex launch test that is not ABOUT trust models this, or
+# its launch is refused (exit 5) before it starts.
+codex_trusts_repo() {
+  local home="${CODEX_HOME:-$HOME/.codex}"
+  mkdir -p "$home"
+  printf '\n[projects."%s"]\ntrust_level = "trusted"\n' "$REPO" >> "$home/config.toml"
 }
 
 # .worktrees.toml (the COMMITTED project config) at the repo root. Lines are
@@ -262,6 +275,14 @@ case "$sub" in
       *"@@ 0 @@"*capture-pane*)
         t="${target%:}"
         echo "@@ 0 @@"
+        if [ -f "$TMUX_STATE/$t.cmd" ]; then cat "$TMUX_STATE/$t.cmd"; echo; else echo bash; fi
+        screen_of "$t" ;;
+      *"#{pane_current_command}"*capture-pane*)
+        # One pane, unchained (activity::capture_target): its command, then
+        # its screen. A missing session fails, as tmux's own does.
+        t="${target%:}"
+        case "$t" in %*) t="$(cat "$TMUX_STATE/.pane-$t" 2>/dev/null || true)" ;; esac
+        if [ -z "$t" ] || [ ! -f "$TMUX_STATE/$t" ]; then exit 1; fi
         if [ -f "$TMUX_STATE/$t.cmd" ]; then cat "$TMUX_STATE/$t.cmd"; echo; else echo bash; fi
         screen_of "$t" ;;
     esac ;;

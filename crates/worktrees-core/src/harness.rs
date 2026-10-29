@@ -398,8 +398,17 @@ impl Adapter for Claude {
         project.claude_session_present(cwd)
     }
 
-    fn activity(&self, scan: &Scan, _canonical: &str, path: &str) -> Option<Activity> {
-        activity::claude_activity(scan.probes, path)
+    fn activity(&self, scan: &Scan, canonical: &str, path: &str) -> Option<Activity> {
+        let Some(panes) = scan.panes else {
+            return activity::claude_activity(scan.probes, path);
+        };
+        // The pane is read only for a live claude the probe cannot vouch for:
+        // none yet (folder trust comes first), or one that says `waiting`.
+        let sidecar_up = panes.has_session(&provider::CLAUDE.sidecar_name(canonical));
+        let name = provider::CLAUDE.session_name(canonical, panes.canonical_provider(canonical).id, sidecar_up);
+        activity::claude_with_pane(scan.probes, path, &name, || {
+            panes.session_runs_program(&name).then(|| activity::capture_one(&name)).flatten()
+        })
     }
 
     fn agents(&self, scan: &Scan, path: &str, _reading: Option<&Activity>) -> Vec<serde_json::Value> {
@@ -482,7 +491,20 @@ impl Adapter for Codex {
         })
     }
 
-    fn prepare(&self, _p: &Project, _slug: &str, _wt: &str, launch: &mut AiLaunch) -> Result<(), Refusal> {
+    fn prepare(&self, _p: &Project, slug: &str, wt: &str, launch: &mut AiLaunch) -> Result<(), Refusal> {
+        // Before the quota gate: no usage probe for a launch that would only
+        // sit at Codex's folder-trust prompt. Trust is the user's to give, so
+        // this READS Codex's config and never writes it or passes a `-c`.
+        if !launch.force {
+            crate::codextrust::check(std::path::Path::new(wt)).map_err(|why| {
+                let then = if slug == "(main)" {
+                    "launch again".to_string()
+                } else {
+                    format!("worktrees open {} --ai codex", shell_quote(slug))
+                };
+                Refusal::Soft(format!("{why}, then: {then}"))
+            })?;
+        }
         crate::quota::gate(self, launch, crate::sysclock::now_epoch())?;
         if launch.resume {
             match launch.resume_id.as_deref() {
@@ -1389,7 +1411,8 @@ mod tests {
         l.resume = true;
         // `force` short-circuits `quota::gate`, keeping the LIVE Codex usage
         // probe (a `codex app-server` spawn) out of a test about resume. #358's
-        // review: no unit test may touch the network or the keychain.
+        // review: no unit test may touch the network or the keychain. It skips
+        // `codextrust` too, which would read the machine's Codex config.
         l.force = true;
         l.resume_id = None;
         let before = l.cmd.clone();
@@ -1407,7 +1430,8 @@ mod tests {
         l.resume = true;
         // `force` short-circuits `quota::gate`, keeping the LIVE Codex usage
         // probe (a `codex app-server` spawn) out of a test about resume. #358's
-        // review: no unit test may touch the network or the keychain.
+        // review: no unit test may touch the network or the keychain. It skips
+        // `codextrust` too, which would read the machine's Codex config.
         l.force = true;
         l.resume_id = Some("019699ff-7c1a-7a30-9f0e-2b4e8d1c5a77".into());
         CODEX.prepare(&p, "feat", "/repo/.worktrees/feat", &mut l).unwrap();

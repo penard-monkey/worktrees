@@ -397,13 +397,20 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
     // A launch carrying the opener is retried WITH the brief: where the harness
     // has run before, a plain `open --force` would start it blank.
     let brief_retry = ai.opener.is_some().then(|| Path::new(wt).join(BRIEF_PATH));
+    // …and names its harness when that is not the default: a bare `open`
+    // starts the configured one, so a refused `new --ai codex` retried as
+    // printed started Claude.
+    let ai_retry = crate::provider::by_word(&ai_word)
+        .filter(|_| crate::profile::ai_word_of(&crate::config::resolve_ai_cmd(None)) != ai_word)
+        .map(|pr| format!(" --ai {}", pr.id))
+        .unwrap_or_default();
     let soft_refusal = |ui: &mut dyn Ui, why: &str| -> i32 {
         let again = if place_slug == "(main)" {
             "re-run with --force (the app: Launch anyway)".to_string()
         } else if let Some(brief) = &brief_retry {
-            format!("worktrees open {place_slug} --force --brief {}", brief.display())
+            format!("worktrees open {place_slug}{ai_retry} --force --brief {}", brief.display())
         } else {
-            format!("worktrees open {place_slug} --force")
+            format!("worktrees open {place_slug}{ai_retry} --force")
         };
         ui.error(&format!("{why}. The place is ready; to launch anyway: {again}"));
         crate::diag::EXIT_LAUNCH_REFUSED

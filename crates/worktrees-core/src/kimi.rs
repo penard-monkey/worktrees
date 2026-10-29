@@ -463,24 +463,6 @@ pub fn screen_from(cmd: &str, screen: &str) -> KimiScreen {
     }
 }
 
-/// Capture a pane target (`=session:` or a `%id`): its current command and
-/// its screen, in ONE `tmux` call. `None` when tmux could not answer.
-pub fn capture_target(target: &str) -> Option<(String, String)> {
-    let out = tmux::tmux(&[
-        "display-message", "-p", "-t", target, "#{pane_current_command}", ";", "capture-pane", "-p", "-t", target,
-    ])
-    .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&out.stdout).into_owned();
-    let (cmd, screen) = text.split_once('\n').unwrap_or((&text, ""));
-    Some((cmd.trim().to_string(), screen.to_string()))
-}
-
-fn capture(session: &str) -> Option<KimiScreen> {
-    capture_target(&format!("={session}:")).map(|(cmd, screen)| screen_from(&cmd, &screen))
-}
 
 /// A kimi lane's state from its session's newest turn and one capture of its
 /// pane. The screen answers first where only it can: a shell (kimi exited) and
@@ -525,8 +507,11 @@ pub fn kimi_activity(panes: &tmux::PaneList, canonical: &str, path: &str) -> Opt
         return before_start(name.clone(), pending, panes.has_session(&name));
     }
     let turn = current_session(path).and_then(|s| session_tail(&s.wire()).1);
-    let (state, last_done) = lane_state(turn.as_ref(), capture(&name), pending);
-    Some(Activity { provider: Some("kimi"), state, last_done, session: Some(name), reason: None })
+    let capture = activity::capture_one(&name);
+    let screen = capture.as_ref().map(|(cmd, text)| screen_from(cmd, text));
+    let (state, last_done) = lane_state(turn.as_ref(), screen, pending);
+    let reason = capture.as_ref().filter(|_| state == State::Waiting).and_then(|(_, text)| activity::waiting_reason("kimi", text));
+    Some(Activity { provider: Some("kimi"), state, last_done, session: Some(name), reason })
 }
 
 /// The reading for a kimi session whose pane is still a shell: busy while an
@@ -913,7 +898,7 @@ pub fn cmd_opener(args: &[String]) -> i32 {
     let outcome = deliver_opener(
         opener,
         wait,
-        || capture_target(pane.as_str()),
+        || activity::capture_target(pane.as_str()),
         // Any prompt in a session made since the launch: the user went first.
         || sessions_in(&root, &dir).iter().any(|s| s.created_ms >= since && any_prompt(&tail(&s.wire()))),
         || receipts(&dir, &prefix),

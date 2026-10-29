@@ -11,19 +11,20 @@
 //!
 //! - **Claude** comes from its probe file (`agent::effective_state`): `busy` and
 //!   `waiting` are what they say; `idle`, `shell` and a parked-away `delegated`
-//!   busy are all idle for this purpose.
+//!   busy are all idle for this purpose. Before the probe exists, a recognised
+//!   startup modal on the pane supplies waiting.
 //! - **Codex** writes no status file. Its rollout brackets every turn
 //!   (`codex::rollout_turn`), and a mid-turn session parked on an approval or a
 //!   plan-mode question looks exactly like a running command there — so for a
-//!   mid-turn session, and only then, the pane is captured and read with
+//!   mid-turn or turn-less session, the pane is captured and read with
 //!   `codex::waiting_on_screen`. A pane back at a shell means codex exited,
 //!   whatever the rollout's last line says.
 //!
-//! Cost is the app's, unchanged by the move: `codex_tail` re-reads a rollout's
+//! Cost on the app's 3s poll: `codex_tail` re-reads a rollout's
 //! 256K tail only once the file has GROWN (the cache moved here with it), plus
 //! a backward scan of just the bytes that growth added, and
 //! `codex_panes` is one chained `tmux` call for however many sessions are
-//! mid-turn, and none while none are.
+//! mid-turn or turn-less, and none for completed idle lanes.
 
 use std::collections::HashMap;
 use std::io::{Read, Seek};
@@ -46,7 +47,7 @@ pub const ROLLOUT_TAIL_BYTES: u64 = 256 * 1024;
 pub enum State {
     /// Mid-turn and getting on with it.
     Busy,
-    /// Mid-turn and stopped on a person: an approval, a question.
+    /// Stopped on a person: an approval, a question, or startup trust.
     Waiting,
     /// Running, between turns.
     Idle,
@@ -89,7 +90,7 @@ pub struct Activity {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
     /// Why the state is what it is, when the state alone would mislead —
-    /// only `unknown` carries one.
+    /// unknown programs and recognised waiting modals carry one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
 }
@@ -138,21 +139,107 @@ pub enum CodexPane {
 }
 
 /// A RUNNING codex session's state from its rollout's newest turn boundary and,
-/// when that says mid-turn, what its pane showed. Returns the state and the
-/// completion stamp (a finished turn only).
+/// when that says mid-turn or there is no turn yet (`codex_needs_pane`), what
+/// its pane showed. Returns the state and the completion stamp (a finished
+/// turn only).
 ///
 /// A mid-turn session with no pane answer (a tmux failure, a chain cut short)
 /// reads busy: the rollout says busy, and busy is the quiet failure. A rollout
-/// with no boundary at all is a fresh session: idle.
+/// with no boundary at all, or none at all, is a fresh session: idle, unless
+/// its pane is on a modal — the folder-trust prompt comes before any rollout,
+/// and three lanes sat on it all night reading idle (2026-10-23).
 pub fn codex_state(turn: Option<&Turn>, pane: Option<CodexPane>) -> (State, Option<i64>) {
+    match pane {
+        Some(CodexPane::Waiting) => return (State::Waiting, None),
+        Some(CodexPane::Gone) => return (State::None, None),
+        _ => {}
+    }
     match turn {
-        Some(Turn::Busy) => match pane {
-            Some(CodexPane::Waiting) => (State::Waiting, None),
-            Some(CodexPane::Gone) => (State::None, None),
-            _ => (State::Busy, None),
-        },
+        Some(Turn::Busy) => (State::Busy, None),
         Some(Turn::Done { at, .. }) => (State::Idle, *at),
         Some(Turn::Aborted) | None => (State::Idle, None),
+    }
+}
+
+/// Whether a codex session's pane is worth a capture: mid-turn (an approval or
+/// a question looks like a running command on disk) or turn-less (the trust
+/// prompt is on disk nowhere). A lane idle after a turn costs none.
+pub fn codex_needs_pane(turn: Option<&Turn>) -> bool {
+    matches!(turn, None | Some(Turn::Busy))
+}
+
+/// The most of a prompt's words `place_status` repeats; `agent_prompt` has
+/// the whole modal.
+const REASON_CHARS: usize = 240;
+
+/// Why a lane is `waiting`, from the same reader the agent rows answer with
+/// (`prompt::read`): `waiting: ` and what the prompt says, cut short.
+pub fn waiting_reason(provider: &str, screen: &str) -> Option<String> {
+    let said = crate::prompt::read(provider, screen)?.summary();
+    let cut = match said.char_indices().nth(REASON_CHARS) {
+        Some((i, _)) => format!("{}…", said[..i].trim_end()),
+        None => said,
+    };
+    Some(format!("waiting: {cut}"))
+}
+
+/// A Claude with no probe yet can already be asking for folder trust, which
+/// comes before Claude writes one. Only a recognised modal is evidence: a
+/// shell or an unknown screen is not a waiting agent.
+pub fn startup_activity(provider: &'static str, session: &str, command: &str, screen: &str) -> Option<Activity> {
+    if tmux::is_shell_command(command) {
+        return None;
+    }
+    Some(Activity {
+        provider: Some(provider),
+        state: State::Waiting,
+        last_done: None,
+        session: Some(session.into()),
+        reason: Some(waiting_reason(provider, screen)?),
+    })
+}
+
+/// A pane target's (`=session:` or a `%id`) current command and screen, in
+/// ONE `tmux` call. `None` when tmux could not answer. The poll batches its
+/// captures instead (`capture_chain`).
+pub fn capture_target(target: &str) -> Option<(String, String)> {
+    let out = tmux::tmux(&[
+        "display-message", "-p", "-t", target, "#{pane_current_command}", ";", "capture-pane", "-p", "-t", target,
+    ])
+    .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let (cmd, screen) = text.split_once('\n').unwrap_or((&text, ""));
+    Some((cmd.trim().to_string(), screen.to_string()))
+}
+
+/// `capture_target` for a session's active pane.
+pub fn capture_one(session: &str) -> Option<(String, String)> {
+    capture_target(&format!("={session}:"))
+}
+
+/// Claude's reading for `path`, with the pane read only when the probe
+/// cannot answer alone: there is no probe yet (the trust prompt comes first),
+/// or it says `waiting` and the reason is on the screen.
+pub fn claude_with_pane(
+    probes: &[agent::ClaudeProbe],
+    path: &str,
+    session: &str,
+    capture: impl FnOnce() -> Option<(String, String)>,
+) -> Option<Activity> {
+    let reading = claude_activity(probes, path);
+    if reading.as_ref().is_some_and(|a| a.state != State::Waiting) {
+        return reading;
+    }
+    let Some((cmd, screen)) = capture() else {
+        return reading;
+    };
+    match reading {
+        // The probe's own `waiting`, given the words on the screen.
+        Some(a) => Some(Activity { reason: waiting_reason("claude", &screen), ..a }),
+        None => startup_activity("claude", session, &cmd, &screen),
     }
 }
 
@@ -328,13 +415,15 @@ pub fn codex_activity(panes: &tmux::PaneList, canonical: &str, path: &str) -> Op
         return None;
     }
     let turn = codex::latest_rollout(path).and_then(|r| codex_tail(&r).1);
-    let pane = if matches!(turn, Some(Turn::Busy)) {
-        codex_panes(&name, &[(path.to_string(), name.clone())]).into_iter().next().map(|(_, p)| p)
+    let capture = if codex_needs_pane(turn.as_ref()) {
+        capture_chain(&name, &[(path.to_string(), name.clone())]).into_iter().next()
     } else {
         None
     };
+    let pane = capture.as_ref().map(|(_, cmd, screen)| codex_pane(cmd, screen));
     let (state, last_done) = codex_state(turn.as_ref(), pane);
-    Some(Activity { provider: Some("codex"), state, last_done, session: Some(name), reason: None })
+    let reason = capture.as_ref().filter(|_| state == State::Waiting).and_then(|(_, _, screen)| waiting_reason("codex", screen));
+    Some(Activity { provider: Some("codex"), state, last_done, session: Some(name), reason })
 }
 
 /// The Claude half: the most active claude session whose cwd is `path`.
@@ -383,6 +472,51 @@ pub fn place_activity(project: &Project, slug: &str, path: &str) -> Activity {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Codex's first-run folder-trust prompt (real 0.160.1 capture) comes
+    /// before any rollout: no turn, and still waiting on the user.
+    #[test]
+    fn a_turnless_codex_trust_prompt_is_waiting() {
+        for screen in [
+            include_str!("../tests/fixtures/codex-trust/0.160.1/subdirectory.txt"),
+            include_str!("../tests/fixtures/codex-trust/0.160.1/linked-worktree-80col.txt"),
+        ] {
+            let pane = codex_pane("codex", screen);
+            assert_eq!(pane, CodexPane::Waiting);
+            assert_eq!(codex_state(None, Some(pane)), (State::Waiting, None));
+        }
+        assert!(codex_needs_pane(None), "a turn-less session must be captured to be seen");
+    }
+
+    /// `place_status`'s reason: what the prompt says, cut short, and nothing
+    /// for a screen that is no recognised prompt.
+    #[test]
+    fn a_waiting_reason_is_the_prompt_cut_short() {
+        let r = waiting_reason("codex", include_str!("../tests/fixtures/codex-trust/0.160.1/subdirectory.txt")).unwrap();
+        assert!(r.starts_with("waiting: Folder access /private/tmp/wt-trust-investigation/repo/subdir Note:"), "{r}");
+        assert!(r.contains("Trusting will apply to the repository root: /private/tmp/wt-trust-investigation/repo"), "{r}");
+        assert!(r.ends_with('…') && r.chars().count() <= "waiting: ".len() + REASON_CHARS + 1, "{r}");
+        assert_eq!(waiting_reason("codex", "› Ask Codex anything\n  ? for shortcuts\n"), None);
+    }
+
+    /// Claude's pane is read only where its probe cannot answer: none yet
+    /// (folder trust comes before it), or one that says `waiting`.
+    #[test]
+    fn claude_reads_its_pane_only_when_its_probe_cannot_answer() {
+        let trust = include_str!("../tests/fixtures/claude-screen/2.1.309/trust.txt");
+        let fresh = claude_with_pane(&[], "/p", "repo-p", || Some(("claude".into(), trust.into()))).unwrap();
+        assert_eq!((fresh.state, fresh.session.as_deref()), (State::Waiting, Some("repo-p")));
+        assert!(fresh.reason.as_deref().is_some_and(|r| r.contains("trust")), "{fresh:?}");
+        assert_eq!(claude_with_pane(&[], "/p", "repo-p", || Some(("zsh".into(), trust.into()))), None, "a shell is no agent");
+        let probe = |status: &str| -> agent::ClaudeProbe {
+            serde_json::from_value(serde_json::json!({"pid": 1, "cwd": "/p", "status": status})).unwrap()
+        };
+        let idle = claude_with_pane(&[probe("idle")], "/p", "repo-p", || panic!("an idle probe answers alone")).unwrap();
+        assert_eq!((idle.state, idle.reason), (State::Idle, None));
+        let asked = claude_with_pane(&[probe("waiting")], "/p", "repo-p", || Some(("claude".into(), trust.into()))).unwrap();
+        assert_eq!(asked.state, State::Waiting);
+        assert!(asked.reason.is_some(), "the probe's waiting gains the screen's words");
+    }
 
     #[test]
     fn a_codex_turn_maps_to_one_state_per_case() {
