@@ -1541,7 +1541,7 @@ mod tests {
         f.waiting = true;
         *f.asked.get_mut().unwrap() = vec![kept(fx316!("hook-bash.json"), 0), edit.clone()];
         let fake = Arc::new(f);
-        let (ctx, repo) = setup("tall", fake.clone());
+        let (ctx, repo) = setup("tall-record", fake.clone());
         let v = prompt_of(&ctx, &repo);
         assert_eq!((v["readable"].as_bool(), v["kind"].as_str()), (Some(true), Some("permission")), "{v}");
         assert_eq!(v["detail"], json!({ "tool": "Edit", "input": edit.input, "from": "hook" }));
