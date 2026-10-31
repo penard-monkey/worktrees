@@ -1775,10 +1775,16 @@ wait loop on it never ended and a sandbox app ran for two hours.
   that finds none there installs itself there and RELINKS the real
   `~/.local/bin/claude` (HOME is not isolated) to that copy. On 2026-10-31
   an isolated-serve e2e did exactly that, its cleanup deleted the dir, and
-  `claude` was a dangling link for the whole machine. Isolate worktrees'
-  state with `XDG_STATE_HOME`, `XDG_CONFIG_HOME`, `--config-dir` and the tmux
-  socket, never `XDG_DATA_HOME`, for anything that runs Claude, and
-  `readlink ~/.local/bin/claude` before removing a scratch dir.
+  `claude` was a dangling link for the whole machine. Run every scratch
+  Claude with `DISABLE_AUTOUPDATER=1`, so it can neither install nor relink
+  anything. Isolate worktrees' state with `XDG_CONFIG_HOME`, `--config-dir`
+  and the tmux socket, never `XDG_DATA_HOME`; `XDG_STATE_HOME` only together
+  with `DISABLE_AUTOUPDATER=1`, because it also moves Claude's version locks
+  (`$XDG_STATE_HOME/claude/locks`) and the scratch Claude stops seeing the
+  real install's. `readlink ~/.local/bin/claude` before removing a scratch
+  dir. And a Claude in auto mode (the user's settings reach it, HOME being
+  shared) decides before any PermissionRequest: no prompt, no hook. An e2e
+  of a prompt switches it to manual first (shift+tab).
 - **Give a sandbox drive its own tmux server, and mind the socket path.** The
   sandbox app and the serve it starts inherit `$TMUX`, so they talk to the
   user's real server unless it is unset. `env -u TMUX TMUX_TMPDIR=<dir>` on
