@@ -106,6 +106,13 @@ impl worktrees_api::agents::AgentIo for ScriptedAgent {
         let t = include_str!("../../../worktrees-core/tests/fixtures/transcripts/claude-2.1.309.jsonl");
         Ok(t.lines().map(str::to_string).collect())
     }
+    fn asked(&self, _: &worktrees_api::agents::Lane) -> Vec<worktrees_core::pending::Asked> {
+        Vec::new()
+    }
+    fn forget(&self, _: &worktrees_api::agents::Lane, _: worktrees_core::pending::Forget) {}
+    fn plan_file(&self, _: &str) -> Option<(String, String)> {
+        None
+    }
     fn sleep(&self, _: u64) {}
 }
 

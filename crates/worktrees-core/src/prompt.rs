@@ -162,7 +162,9 @@ const ONE_SHOT: &[&str] = &[
     "No, and tell Codex what to do differently (esc)",
     "No, and tell Claude what to do differently (esc)",
     // Claude 2.1.314: a Yes or No whose amend field is open and empty, and a
-    // plan approved with every edit still asked for.
+    // plan approved with every edit still asked for — one-shot by the user's
+    // decision of 2026-10-31, because it grants nothing standing ("Yes, and
+    // use auto mode" does, and stays the host's).
     "Yes, and tell Claude what to do next",
     "No, and tell Claude what to do differently",
     "Yes, manually approve edits",
@@ -225,10 +227,10 @@ pub fn claude(screen: &str) -> Option<Modal> {
     if name_tag(&rows[last], width) {
         last = last_nonblank(&rows, last)?;
     }
-    let foot = rows[last].trim();
-    if foot.starts_with(PLAN_FOOTER) {
-        return claude_plan(&rows, last, width);
+    if let Some((foot, _)) = plan_footer(&rows, last) {
+        return claude_plan(&rows, foot, last, width);
     }
+    let foot = rows[last].trim();
     let (kind, end) = if foot.starts_with("Enter to select") {
         (Kind::Question, last)
     } else if foot.starts_with("Esc to cancel") || foot.starts_with("Enter to confirm") {
@@ -305,13 +307,13 @@ pub fn claude(screen: &str) -> Option<Modal> {
 /// own rules indented, the plan in a dashed box, and a footer that names the
 /// plan's file. A plan longer than its box is CLIPPED inside it — the box's
 /// dashed bottom edge is gone — and then the plan cannot be shown whole, so
-/// it is no modal here.
-fn claude_plan(rows: &[String], last: usize, width: usize) -> Option<Modal> {
-    let top = (0..last).rev().find(|&i| {
+/// it is no modal here. Its footer is rows `foot..=last` ([`plan_footer`]).
+fn claude_plan(rows: &[String], foot: usize, last: usize, width: usize) -> Option<Modal> {
+    let top = (0..foot).rev().find(|&i| {
         let n = rows[i].chars().count();
         rows[i].starts_with('▔') && rows[i].chars().all(|c| c == '▔') && n >= 20 && n + 1 >= width
     })?;
-    let mut at = numbered_at(rows, top + 1, last)?;
+    let mut at = numbered_at(rows, top + 1, foot)?;
     let first = at.first()?.0;
     let dashed = |r: &str| {
         let t = r.trim();
@@ -325,7 +327,23 @@ fn claude_plan(rows: &[String], last: usize, width: usize) -> Option<Modal> {
             c.text = Some(Typing::Field);
         }
     }
-    Some(modal(provider::CLAUDE.id, Kind::Permission, rows, top + 1, last, last, at.into_iter().map(|(_, c)| c).collect()))
+    Some(modal(provider::CLAUDE.id, Kind::Permission, rows, top + 1, last, foot, at.into_iter().map(|(_, c)| c).collect()))
+}
+
+/// A plan approval's footer, `ctrl+g to edit in Vim · <its file>`, ending on
+/// row `last`: the row it starts on and the file it names. A narrow pane
+/// wraps it — at 80 columns the file goes to a row of its own, and a name
+/// longer than the row is cut across two — so it is looked for up to three
+/// rows above, with no blank row inside it, and the file's pieces are joined
+/// as they were cut.
+fn plan_footer(rows: &[String], last: usize) -> Option<(usize, String)> {
+    let head = PLAN_FOOTER.trim_end();
+    let at = (last.saturating_sub(3)..=last).rev().find(|&i| rows[i].trim().starts_with(head))?;
+    if rows[at + 1..=last].iter().any(|r| r.trim().is_empty()) {
+        return None;
+    }
+    let first = rows[at].trim()[head.len()..].trim();
+    Some((at, std::iter::once(first).chain(rows[at + 1..=last].iter().map(|r| r.trim())).collect()))
 }
 
 /// Codex (fixtures `codex-inline/`, `codex-send/probe-*`): the footer is
@@ -564,6 +582,233 @@ pub fn visible(screen: &str) -> Vec<String> {
     let start = (floor..=last).rev().find(|&i| i < last && edge(&rows[i])).map_or(floor, |i| i + 1);
     let start = (start..=last).find(|&i| !rows[i].trim().is_empty()).unwrap_or(start);
     rows[start..=last].to_vec()
+}
+
+/// What a prompt TALLER than its pane asks, as far as the screen shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Asks {
+    /// `Do you want to make this edit to <name>?` — an Edit, a MultiEdit, or
+    /// a Write over a file that exists.
+    Edit { name: String },
+    /// `Do you want to create <name>?` — a Write.
+    Create { name: String },
+    /// `Do you want to proceed?` — a Bash command (and other tools, which
+    /// nothing here matches).
+    Proceed,
+    /// A plan approval whose plan is clipped inside its box; `file` is what
+    /// the footer names (`~/.claude/plans/<name>.md`).
+    Plan { file: Option<String> },
+}
+
+/// A Claude prompt whose top has scrolled off the pane, or whose plan is
+/// clipped inside its box ([`clipped`]). The rows cannot show it whole, so a
+/// client may answer it only beside the whole of what the agent asked, from
+/// somewhere else (Claude's PermissionRequest hook, a plan's own file) — and
+/// only when that agrees with what the screen does show ([`Clipped::agrees`]).
+#[derive(Clone, Debug)]
+pub struct Clipped {
+    /// The prompt as far as it is on screen: its `lines` start at the
+    /// screen's top (or at a plan sheet's), and its choices and footer are
+    /// whole.
+    pub modal: Modal,
+    pub asks: Asks,
+    /// The visible rows of what is asked: the diff's or the file's tail, the
+    /// command's tail, the plan's head.
+    shown: Vec<String>,
+}
+
+/// The prompt on `screen` that [`read`] refuses because it is taller than
+/// the pane: Claude's permission whose top scrolled off (the question, the
+/// choices and the footer are on screen, no column-0 rule above them), or a
+/// plan approval whose plan is clipped inside its box. `None` for anything
+/// [`read`] reads, and for every other harness.
+pub fn clipped(harness: &str, screen: &str) -> Option<Clipped> {
+    if harness != provider::CLAUDE.id || claude(screen).is_some() {
+        return None;
+    }
+    let rows = rows(screen);
+    let width = rows.iter().map(|r| r.chars().count()).max()?;
+    let mut last = last_nonblank(&rows, rows.len())?;
+    if name_tag(&rows[last], width) {
+        last = last_nonblank(&rows, last)?;
+    }
+    if let Some((foot, file)) = plan_footer(&rows, last) {
+        return clipped_plan(&rows, foot, last, width, file);
+    }
+    if !rows[last].trim().starts_with("Esc to cancel") {
+        return None;
+    }
+    let mut at = numbered_at(&rows, 0, last)?;
+    let q = last_nonblank(&rows, at.first()?.0)?;
+    let asks = asks(rows[q].trim())?;
+    // The dashed rule over the question closes what is asked. Above it the
+    // whole screen is the modal: a column-0 rule there would be its top, and
+    // then the whole read refused it for some other reason.
+    let dash = q.checked_sub(1).filter(|&i| dashed(&rows[i], width))?;
+    if rows[..q].iter().any(|r| full_rule(r, width) || r.starts_with('▔')) {
+        return None;
+    }
+    let from = (0..dash).rev().find(|&i| dashed(&rows[i], width)).map_or(0, |i| i + 1);
+    let shown = rows[from..dash].iter().filter(|r| !r.trim().is_empty()).cloned().collect();
+    for (_, c) in &mut at {
+        if c.more.is_empty() && CLAUDE_AMENDS.iter().any(|(closed, open)| c.label == *closed || c.label == *open) {
+            c.text = Some(Typing::Amend);
+        }
+    }
+    let modal = modal(provider::CLAUDE.id, Kind::Permission, &rows, 0, last, last, at.into_iter().map(|(_, c)| c).collect());
+    Some(Clipped { modal, asks, shown })
+}
+
+/// [`claude_plan`]'s sheet with its plan CLIPPED: one dashed edge (the
+/// box's top) above the question, the plan's head under it down to the
+/// sheet's indented rule, and the `↓` Claude draws at the clipped row's end.
+fn clipped_plan(rows: &[String], foot: usize, last: usize, width: usize, file: String) -> Option<Clipped> {
+    let top = (0..foot).rev().find(|&i| {
+        let n = rows[i].chars().count();
+        rows[i].starts_with('▔') && rows[i].chars().all(|c| c == '▔') && n >= 20 && n + 1 >= width
+    })?;
+    let mut at = numbered_at(rows, top + 1, foot)?;
+    let first = at.first()?.0;
+    let indent = |r: &str| r.len() - r.trim_start().len();
+    let edge = |r: &str, c: char| {
+        let t = r.trim();
+        indent(r) <= 2 && t.chars().count() >= 20 && t.chars().all(|x| x == c)
+    };
+    let boxes: Vec<usize> = (top + 1..first).filter(|&i| edge(&rows[i], '╌')).collect();
+    let [open] = boxes[..] else { return None };
+    let close = (open + 1..first).find(|&i| edge(&rows[i], '─'))?;
+    let shown = rows[open + 1..close]
+        .iter()
+        .map(|r| r.trim_end().strip_suffix('↓').unwrap_or(r).trim_end().to_string())
+        .filter(|r| !r.trim().is_empty())
+        .collect();
+    for (_, c) in &mut at {
+        if c.more.last().map(String::as_str) == Some(PLAN_FEEDBACK_HINT) {
+            c.text = Some(Typing::Field);
+        }
+    }
+    let file = Some(file).filter(|f| !f.is_empty());
+    let modal = modal(provider::CLAUDE.id, Kind::Permission, rows, top + 1, last, foot, at.into_iter().map(|(_, c)| c).collect());
+    Some(Clipped { modal, asks: Asks::Plan { file }, shown })
+}
+
+/// The question a Claude permission asks above its choices, as [`Asks`].
+fn asks(q: &str) -> Option<Asks> {
+    let name = |rest: &str| rest.strip_suffix('?').map(str::trim).filter(|n| !n.is_empty()).map(str::to_string);
+    if q == "Do you want to proceed?" {
+        Some(Asks::Proceed)
+    } else if let Some(rest) = q.strip_prefix("Do you want to make this edit to ") {
+        Some(Asks::Edit { name: name(rest)? })
+    } else {
+        Some(Asks::Create { name: name(q.strip_prefix("Do you want to create ")?)? })
+    }
+}
+
+/// A dashed rule from column 0 across the screen: the edges of a Claude
+/// permission's command or diff box.
+fn dashed(row: &str, width: usize) -> bool {
+    let n = row.chars().count();
+    row.starts_with('╌') && row.chars().all(|c| c == '╌') && n >= 20 && n + 1 >= width
+}
+
+impl Clipped {
+    /// `tool` with `input` — what Claude's PermissionRequest hook saw, or a
+    /// plan's file — is the prompt on screen: the tool the question names
+    /// (an edit or a creation of a file whose path ends in the name shown, a
+    /// Bash command, a plan), and the rows shown are its own (the diff's
+    /// added and removed rows inside its new and old text, the command's
+    /// tail, the plan's head). Anything else, or a doubt, is no.
+    pub fn agrees(&self, tool: &str, input: &serde_json::Value) -> bool {
+        let text = |k: &str| input.get(k).and_then(|v| v.as_str());
+        let named = |name: &str, path: Option<&str>| {
+            path.is_some_and(|p| {
+                let (p, n) = (std::path::Path::new(p), std::path::Path::new(name));
+                n.components().count() > 0 && p.ends_with(n)
+            })
+        };
+        match &self.asks {
+            Asks::Edit { name } => {
+                let (new, old): (Vec<&str>, Vec<&str>) = match tool {
+                    "Edit" => (text("new_string").into_iter().collect(), text("old_string").into_iter().collect()),
+                    "MultiEdit" => {
+                        let edits = input.get("edits").and_then(|e| e.as_array()).map(Vec::as_slice).unwrap_or_default();
+                        let field = |k: &str| edits.iter().filter_map(|e| e.get(k)?.as_str()).collect();
+                        (field("new_string"), field("old_string"))
+                    }
+                    "Write" => (text("content").into_iter().collect(), Vec::new()),
+                    _ => return false,
+                };
+                named(name, text("file_path")) && !new.is_empty() && self.diff_in(&new, (tool != "Write").then_some(&old[..]))
+            }
+            Asks::Create { name } => {
+                let content: Vec<&str> = text("content").into_iter().collect();
+                tool == "Write" && named(name, text("file_path")) && !content.is_empty() && self.diff_in(&content, None)
+            }
+            Asks::Proceed => {
+                let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+                // Claude 2.1.316 draws a multi-row command with a `│` gutter.
+                let seen = self
+                    .shown
+                    .iter()
+                    .map(|r| {
+                        let t = r.trim_start();
+                        t.strip_prefix('│').unwrap_or(t)
+                    })
+                    .collect::<String>();
+                let seen = squash(&seen);
+                tool == "Bash" && !seen.is_empty() && text("command").is_some_and(|c| squash(c).ends_with(&seen))
+            }
+            Asks::Plan { file } => {
+                // Claude renders the plan's markdown (`#`, backticks, bullets),
+                // so the plan is compared by its letters and digits alone.
+                let words = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).collect::<String>();
+                let seen = words(&self.shown.concat());
+                let same_file = match (file, text("planFilePath")) {
+                    (Some(f), Some(p)) => {
+                        let base = |s: &str| std::path::Path::new(s).file_name().map(|n| n.to_os_string());
+                        base(f).is_some() && base(f) == base(p)
+                    }
+                    (None, _) => true,
+                    (Some(_), None) => false,
+                };
+                tool == "ExitPlanMode" && same_file && !seen.is_empty() && text("plan").is_some_and(|p| words(p).starts_with(&seen))
+            }
+        }
+    }
+
+    /// Every added row of the diff on screen is in one of `new`. An edit's
+    /// removed rows are in one of its `old`, and its context rows are the
+    /// file's; a Write (`old` is `None`) has no old text to check, and its
+    /// preview's rows, which carry no `+`, are all its content. A row cut with
+    /// `…` is compared up to the cut, and a row with no line number continues
+    /// a wrapped one.
+    fn diff_in(&self, new: &[&str], old: Option<&[&str]>) -> bool {
+        self.shown.iter().filter_map(|r| diff_row(r)).all(|(mark, line)| {
+            let line = line.strip_suffix('…').unwrap_or(line).trim_end();
+            let within = |texts: &[&str]| texts.iter().any(|t| t.contains(line));
+            match (mark, old) {
+                ('+', _) | (' ', None) => within(new),
+                ('-', Some(old)) => within(old),
+                _ => true,
+            }
+        })
+    }
+}
+
+/// A diff or preview row, ` 32 +row 32 changed` / `  1 hello`: its mark
+/// (`+`, `-`, or a space for context and a Write's rows) and its text.
+fn diff_row(row: &str) -> Option<(char, &str)> {
+    let t = row.trim_start();
+    let digits = t.chars().take_while(char::is_ascii_digit).count();
+    let rest = t[digits..].strip_prefix(' ')?;
+    if digits == 0 {
+        return None;
+    }
+    match rest.chars().next() {
+        Some(m @ ('+' | '-')) => Some((m, &rest[1..])),
+        Some(' ') => Some((' ', &rest[1..])),
+        _ => Some((' ', rest)),
+    }
 }
 
 impl Modal {
@@ -1481,5 +1726,200 @@ mod tests {
         let modal = claude_fx!("permission-bash.e.txt");
         assert_eq!(run(vec![empty, modal]), (SendOutcome::Modal, 0), "never an Enter into a modal");
         assert_eq!(run(vec![empty]), (SendOutcome::Unconfirmed, 0), "no draft ever appeared: no Enter");
+    }
+
+    macro_rules! claude316 {
+        ($name:literal) => {
+            include_str!(concat!("../tests/fixtures/claude-screen/2.1.316/", $name))
+        };
+    }
+
+    /// What Claude's PermissionRequest hook saw for a fixture: (tool, input).
+    fn hooked(json: &str) -> (String, serde_json::Value) {
+        let v: serde_json::Value = serde_json::from_str(json).unwrap();
+        (v["tool_name"].as_str().unwrap().to_string(), v["tool_input"].clone())
+    }
+
+    /// A prompt taller than its pane (Claude 2.1.314 and 2.1.316): the
+    /// whole read refuses it, and the clipped read finds its question, its
+    /// choices and its footer — and agrees with the hook's input only when
+    /// that is the same tool on the same file, its added and removed rows
+    /// the ones on screen.
+    #[test]
+    fn a_tall_edit_is_clipped_and_agrees_only_with_its_own_edit() {
+        for screen in [claude316!("permission-edit-tall.txt"), claude314!("permission-edit-tall.txt")] {
+            assert!(claude(screen).is_none(), "its top scrolled off: not whole");
+            let c = clipped("claude", screen).expect("a clipped edit");
+            assert_eq!(c.asks, Asks::Edit { name: "big.txt".into() });
+            assert_eq!(c.modal.kind, Kind::Permission);
+            assert_eq!(c.modal.lines.last().map(String::as_str), Some(" Esc to cancel · Tab to amend"));
+            assert_eq!(
+                labels(&c.modal),
+                vec![
+                    ("Yes", true, None),
+                    (
+                        "Yes, and switch to accept edits (auto-approve file edits and common file commands) for this session (shift+tab)",
+                        false,
+                        Some(HostOnly::Widens)
+                    ),
+                    ("No", false, None),
+                ]
+            );
+            assert_eq!(c.modal.choices[0].text, Some(Typing::Amend));
+            assert!(!c.modal.lines.iter().any(|l| l.contains("wtph-probe") || l.contains("wtap-probe")), "no name tag");
+        }
+
+        let c = clipped("claude", claude316!("permission-edit-tall.txt")).unwrap();
+        let (tool, input) = hooked(claude316!("hook-edit.json"));
+        assert_eq!(tool, "Edit");
+        assert!(c.agrees(&tool, &input), "the hook's own edit");
+        let mut other = input.clone();
+        other["file_path"] = "/private/tmp/claude-501/wtph/repo/other.txt".into();
+        assert!(!c.agrees(&tool, &other), "another file");
+        let mut suffix = input.clone();
+        suffix["file_path"] = "/private/tmp/claude-501/wtph/repo/notbig.txt".into();
+        assert!(!c.agrees(&tool, &suffix), "a name is matched by whole components");
+        let mut changed = input.clone();
+        changed["new_string"] = input["new_string"].as_str().unwrap().replace("row 45 changed", "row 45 CHANGED").into();
+        assert!(!c.agrees(&tool, &changed), "a row on screen is not in its new text");
+        assert!(!c.agrees("Bash", &input), "another tool");
+        assert!(!c.agrees(&tool, &serde_json::json!({})), "no input at all");
+    }
+
+    /// A Bash command taller than its pane, by a resize of the live prompt:
+    /// first the title goes (the command whole in its box), then the
+    /// command's head. The rows on screen must be the command's own TAIL.
+    #[test]
+    fn a_tall_command_agrees_only_with_a_command_that_ends_as_shown() {
+        let (tool, input) = hooked(claude316!("hook-bash.json"));
+        assert_eq!(tool, "Bash");
+        for screen in [
+            claude316!("permission-bash-tall.txt"),
+            claude316!("permission-bash-taller.txt"),
+            claude316!("permission-bash-taller.e.txt"),
+        ] {
+            assert!(claude(screen).is_none());
+            let c = clipped("claude", screen).expect("a clipped command");
+            assert_eq!(c.asks, Asks::Proceed);
+            assert_eq!(c.modal.choices.len(), 4);
+            assert_eq!(c.modal.choices[1].host_only, Some(HostOnly::Widens));
+            assert!(c.agrees(&tool, &input), "the hook's own command");
+            let mut tail = input.clone();
+            tail["command"] = input["command"].as_str().unwrap().replace("> rows.txt", "> ~/.ssh/authorized_keys").into();
+            assert!(!c.agrees(&tool, &tail), "another tail");
+            assert!(!c.agrees("Edit", &input));
+        }
+        // A command that is its tail and nothing before it agrees too: the
+        // screen cannot tell, and the hook's input is what `detail` shows.
+        let c = clipped("claude", claude316!("permission-bash-taller.txt")).unwrap();
+        let tail = input["command"].as_str().unwrap();
+        let tail = &tail[tail.find("'bash row 26'").unwrap()..];
+        assert!(c.agrees("Bash", &serde_json::json!({ "command": tail })));
+        // The same prompt with room to spare reads whole, as before.
+        let whole = claude(claude316!("permission-bash.txt")).expect("2.1.316's approval reads whole");
+        assert_eq!(whole.lines.first().map(String::as_str), Some(" Bash command"));
+        assert!(clipped("claude", claude316!("permission-bash.txt")).is_none());
+    }
+
+    /// A plan longer than its box (2.1.316, then 2.1.314's capture): the
+    /// sheet is there, the plan clipped inside it. The hook's plan agrees;
+    /// the plan's file as it reads NOW (revised after the capture: "hi", not
+    /// "hello") does not.
+    #[test]
+    fn a_clipped_plan_agrees_with_the_plan_it_shows_the_head_of() {
+        let c = clipped("claude", claude316!("plan-approval-tall.txt")).expect("a clipped plan");
+        assert_eq!(c.asks, Asks::Plan { file: Some("~/.claude/plans/plan-adding-a-script-shimmying-glade.md".into()) });
+        assert_eq!(c.modal.choices.iter().map(|c| c.text).collect::<Vec<_>>(), vec![None, None, Some(Typing::Field)]);
+        assert_eq!(
+            c.modal.choices.iter().map(|c| c.host_only).collect::<Vec<_>>(),
+            vec![Some(HostOnly::Widens), None, Some(HostOnly::Text)]
+        );
+        let (tool, input) = hooked(claude316!("hook-exit-plan.json"));
+        assert_eq!(tool, "ExitPlanMode");
+        assert!(c.agrees(&tool, &input));
+        let mut moved = input.clone();
+        moved["planFilePath"] = "/Users/u/.claude/plans/another-plan.md".into();
+        assert!(!c.agrees(&tool, &moved), "another plan's file");
+        let mut edited = input.clone();
+        edited["plan"] = input["plan"].as_str().unwrap().replace("prints \"hello\"", "prints \"bye\"").into();
+        assert!(!c.agrees(&tool, &edited), "a plan whose shown head differs");
+        assert!(!c.agrees("Bash", &input));
+
+        let old = clipped("claude", claude314!("plan-approval-tall.txt")).expect("2.1.314's clipped plan");
+        assert_eq!(old.asks, Asks::Plan { file: Some("~/.claude/plans/plan-add-a-file-reflective-deer.md".into()) });
+        // The plan as it was approved, in markdown (`#`, backticks): its 13
+        // rows on screen and a 14th that is not.
+        let steps = [
+            "Confirm the working directory is the probe worktree.",
+            "Check that `greet.sh` does not already exist.",
+            "Decide the script lives at the worktree root.",
+            "Choose `/bin/sh` as the interpreter.",
+            "Open a new file named `greet.sh`.",
+            "Write the shebang line `#!/bin/sh`.",
+            "Add a blank line after the shebang.",
+            "Add the line `echo hello`.",
+            "End the file with a trailing newline.",
+            "Save the file.",
+            "Confirm the file exists with `ls`.",
+            "Confirm the contents are exactly two lines plus a blank.",
+            "Check the shebang has no stray whitespace.",
+            "Check the file uses LF line endings.",
+        ];
+        let steps: String = steps.iter().zip(1..).map(|(s, n)| format!("{n}. {s}\n")).collect();
+        let as_shown = format!(
+            "# Plan: add greet.sh\n\n## Context\n\nAdd a small shell script, `greet.sh`, to the probe worktree root that \
+             prints \"hello\".\n\n## Steps\n\n{steps}"
+        );
+        let path = "/Users/u/.claude/plans/plan-add-a-file-reflective-deer.md";
+        assert!(old.agrees("ExitPlanMode", &serde_json::json!({ "plan": as_shown, "planFilePath": path })));
+        let now_on_disk = as_shown.replace("prints \"hello\"", "prints \"hi\"");
+        assert!(!old.agrees("ExitPlanMode", &serde_json::json!({ "plan": now_on_disk, "planFilePath": path })));
+        let short = as_shown.split("## Steps").next().unwrap();
+        assert!(!old.agrees("ExitPlanMode", &serde_json::json!({ "plan": short, "planFilePath": path })), "less than is shown");
+    }
+
+    /// An 80-column pane (a detached `worktrees new`) wraps a plan's footer:
+    /// `ctrl+g to edit in Vim ·` on one row, the plan's file on the next.
+    /// Found end to end on 2.1.316: until then no plan read in such a pane,
+    /// whole or clipped.
+    #[test]
+    fn a_narrow_panes_plan_footer_wraps_and_the_plan_still_reads() {
+        let m = claude(claude316!("plan-approval-80.txt")).expect("the whole plan, footer wrapped");
+        assert_eq!(m.kind, Kind::Permission);
+        assert_eq!(m.choices.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(), vec![
+            "Yes, and use auto mode",
+            "Yes, manually approve edits",
+            "Tell Claude what to change"
+        ]);
+        assert_eq!(m.choices[2].text, Some(Typing::Field));
+        assert_eq!(m.lines.last().map(String::as_str), Some("   ~/.claude/plans/plan-adding-a-script-snuggly-dragonfly.md"));
+        assert!(m.lines.iter().any(|l| l.contains("30.")), "the whole plan is in its lines");
+        let styled = claude(claude316!("plan-approval-80.e.txt")).unwrap();
+        assert_eq!(styled.lines, m.lines);
+
+        let c = clipped("claude", claude316!("plan-approval-tall-80.txt")).expect("the clipped plan, footer wrapped");
+        assert_eq!(c.asks, Asks::Plan { file: Some("~/.claude/plans/plan-adding-a-script-snuggly-dragonfly.md".into()) });
+        assert_eq!(c.modal.choices.len(), 3);
+        let (tool, input) = hooked(claude316!("hook-exit-plan-80.json"));
+        assert!(c.agrees(&tool, &input));
+        assert!(!c.agrees(&tool, &hooked(claude316!("hook-exit-plan.json")).1), "another plan");
+    }
+
+    /// Only a prompt the whole read refuses for its height is clipped: every
+    /// whole prompt, a composer, another harness — none.
+    #[test]
+    fn nothing_whole_is_clipped() {
+        for screen in [
+            claude314!("permission-bash.txt"),
+            claude314!("permission-edit.txt"),
+            claude314!("permission-write.txt"),
+            claude314!("plan-approval.txt"),
+            claude314!("question-named.txt"),
+            claude314!("composer-empty.e.txt"),
+            claude_fx!("permission-bash.txt"),
+        ] {
+            assert!(clipped("claude", screen).is_none(), "{screen}");
+        }
+        assert!(clipped("codex", claude316!("permission-edit-tall.txt")).is_none());
     }
 }

@@ -267,7 +267,7 @@ mock (`app/src/mock/install.ts`) and the api's refusal strings
 
 | Row | Capability, objects | Arguments | Answer | Refusals |
 |---|---|---|---|---|
-| `agent_prompt` | `[read, place(repo, slug)]` | — | `{waiting: true, readable: true, harness, session, kind: "permission"\|"question", lines, choices: [{n, label, more?, highlighted, host_only?, checked?, text?: "field"\|"amend"}], multi?, fingerprint, note}`; `{waiting: true, readable: false, harness, session, reason, lines?, note?}` when the agent is waiting on a prompt this host cannot read whole, `lines` being the bottom of its screen (at most 24 rows) to show while answering stays at the host; else `{waiting: false}` | the resolver's |
+| `agent_prompt` | `[read, place(repo, slug)]` | — | `{waiting: true, readable: true, harness, session, kind: "permission"\|"question", lines, choices: [{n, label, more?, highlighted, host_only?, checked?, text?: "field"\|"amend"}], multi?, detail?: {tool, input, from: "hook"\|"plan-file"}, fingerprint, note}` — `detail` only on a prompt taller than the pane, `lines` then the part on screen; `{waiting: true, readable: false, harness, session, reason, lines?, note?}` when the agent is waiting on a prompt this host cannot read whole, `lines` being the bottom of its screen (at most 24 rows) to show while answering stays at the host; else `{waiting: false}` | the resolver's |
 | `agent_answer` | `[answer, place(repo, slug)]` | `choice` (a choice's `n`), `fingerprint` | `{answered: true, confirmed, harness, session, choice, label}` | `the prompt changed` (the CAS); `no such choice`; a `host_only` choice from a device (`… only the host can make it`); a box of a `multi` prompt (`a multi-select: tick its boxes with agent_answer_many`); `step-up required`; `audit-budget …` |
 | `agent_answer_text` | `[instruct, place(repo, slug)]` (and `answer`, checked by the body: text with a choice answers the prompt) | `choice` (one with `text`), `fingerprint`, `text` | `{answered: true, confirmed, harness, session, choice, label}`; a `multi` prompt's text box is filled (and so ticked) but not sent: `{answered: false, …, note}` | a grant without `answer` (`denied: …needs the answer capability as well as instruct`); `agent_send`'s line rule; `the prompt changed`; `no such choice`; `choice N takes no text`; `that choice's text field holds someone's text …`; the field did not open, or the text could not be seen in it (nothing confirmed); `step-up required`; `audit-budget …` |
 | `agent_answer_many` | `[answer, place(repo, slug)]` | `choices` (boxes' `n`), `fingerprint` | `{answered: true, confirmed, harness, session, choices, labels}` — the review screen Claude shows next is a prompt of its own | `not a multi-select: answer it with agent_answer`; `the prompt changed` (also when the ticks moved under it); `no such choice`; `choice N is not one of the boxes`; an unfilled text box; `name at least one box to tick`; `step-up required`; `audit-budget …` |
@@ -302,8 +302,15 @@ How each item of the spec was met, and what the lane decided:
   are `agent_answer_many` (`answer`), each tick proved. A two-question form
   is one `agent_answer` per screen, then the review. Neither is an argument
   on `agent_answer`: an older host ignores unknown arguments and would
-  have half answered. What still reads `readable: false` (a diff or plan
-  taller than its pane) returns the visible rows.
+  have half answered. A diff, command or plan taller than its pane is read
+  CLIPPED (`prompt::clipped`) and is readable only beside `detail`, the
+  whole of what Claude asked, from its PermissionRequest hook (a third
+  `--plugin-dir` on every Claude launch; `worktrees_core::pending`), or for
+  a plan from the file its footer names. The detail must agree with the
+  screen (the same tool and file, the diff's rows in its text, the
+  command's tail, the plan's head), and the fingerprint covers it. What
+  still reads `readable: false` (no hook, a tool it cannot match, a kind
+  it does not know) returns the visible rows.
 - **Which choices a device may make.** Claude's real Bash approval offers
   "Yes, and always allow access to … from this project" and "Yes, and switch
   to auto mode"; Codex's, "don't ask again for commands that start with …".

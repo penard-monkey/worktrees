@@ -1,0 +1,40 @@
+ 32 +row 32 changed
+ 33 +row 33 changed
+ 34 +row 34 changed
+ 35 +row 35 changed
+ 36 +row 36 changed
+ 37 +row 37 changed
+ 38 +row 38 changed
+ 39 +row 39 changed
+ 40 +row 40 changed
+ 41 +row 41 changed
+ 42 +row 42 changed
+ 43 +row 43 changed
+ 44 +row 44 changed
+ 45 +row 45 changed
+ 46 +row 46 changed
+ 47 +row 47 changed
+ 48 +row 48 changed
+ 49 +row 49 changed
+ 50 +row 50 changed
+ 51 +row 51 changed
+ 52 +row 52 changed
+ 53 +row 53 changed
+ 54 +row 54 changed
+ 55 +row 55 changed
+ 56 +row 56 changed
+ 57 +row 57 changed
+ 58 +row 58 changed
+ 59 +row 59 changed
+ 60 +row 60 changed
+ 61  line 61 of the probe file
+ 62  line 62 of the probe file
+ 63  line 63 of the probe file
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Do you want to make this edit to big.txt?
+ ❯ 1. Yes
+   2. Yes, and switch to accept edits (auto-approve file edits and common file commands) for this session (shift+tab)
+   3. No
+
+ Esc to cancel · Tab to amend
+─────────────────────────────────────────────────────────────────────────────────────────────────────────── wtph-probe ─

@@ -93,9 +93,23 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   (`watch::claude_startup_tick`). And a transcript holds the whole system
   prompt and every CLAUDE.md in `api-request-blob` entries, so anything that
   returns transcript text reads `user`/`assistant` messages only (`turns`);
-  it does NOT hold a tool call whose permission is pending (2.1.314 writes it
-  once answered), so a diff or plan taller than the pane has no whole source
-  yet — `agent_prompt` returns `readable: false` and the visible rows. An
+  it does NOT hold a tool call whose permission is pending (2.1.314 and
+  2.1.316 write it once answered). So a diff, command or plan taller than the
+  pane comes from Claude's PermissionRequest hook instead: a THIRD
+  `--plugin-dir` (`claude-prompt`, `guidance::materialize_prompt_in`) on
+  every Claude launch, whatever guidance and planning say, set in
+  `ops::ai_launch_for` (so `new`, `open`, `open --brief`, MCP
+  `create_worktree`/`open_place`, the app's main-checkout launch and profiled
+  sessions all get it). The hook keeps the tool and its whole input
+  (`worktrees_core::pending`: 0600, by session id, ≤4 records, gone at
+  SessionEnd, after an answer that used it, or once no prompt is up), and
+  `agent_prompt` reads a clipped prompt (`prompt::clipped`) only beside a
+  record that AGREES with the screen, as `detail`, which the fingerprint
+  covers; a plan with no record falls back to the file its footer names,
+  read through `safepath::safe_under`. The hook NEVER decides: its command
+  discards stdout and ends `|| true`, because exit 2 or a printed decision
+  would deny the user's prompt. Anything else that cannot be read whole is
+  `readable: false` with the visible rows. An
   answer MOVES the highlight and proves the move on a fresh capture before
   Enter, all under the place's lock — that lock is what makes §9.2's
   compare-and-swap atomic; drop it and two clients answer one prompt twice.
@@ -1756,6 +1770,15 @@ wait loop on it never ended and a sandbox app ran for two hours.
   HOME-isolated run still writes the REAL `~/Library/{Caches,WebKit}/
   <identifier>`. Use a throwaway identifier and remove exactly those two dirs
   afterwards.
+- **Never give a scratch Claude its own `XDG_DATA_HOME`.** Claude's native
+  install keeps its versions in `$XDG_DATA_HOME/claude/versions`; a Claude
+  that finds none there installs itself there and RELINKS the real
+  `~/.local/bin/claude` (HOME is not isolated) to that copy. On 2026-10-31
+  an isolated-serve e2e did exactly that, its cleanup deleted the dir, and
+  `claude` was a dangling link for the whole machine. Isolate worktrees'
+  state with `XDG_STATE_HOME`, `XDG_CONFIG_HOME`, `--config-dir` and the tmux
+  socket, never `XDG_DATA_HOME`, for anything that runs Claude, and
+  `readlink ~/.local/bin/claude` before removing a scratch dir.
 - **Give a sandbox drive its own tmux server, and mind the socket path.** The
   sandbox app and the serve it starts inherit `$TMUX`, so they talk to the
   user's real server unless it is unset. `env -u TMUX TMUX_TMPDIR=<dir>` on

@@ -1,0 +1,60 @@
+
+  ⎿  /plan to preview
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+
+  ────────────────────────────────────────────────────────────────────────────
+   Ready to code?
+
+   Here is Claude's plan:
+  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+   Plan: add greet.sh that prints "hello"
+
+   Context: You asked for a small shell script, greet.sh, that prints hello.
+   It goes at the root of the probe worktree. No other files change.
+
+   1. Work in the probe worktree:
+      /private/tmp/claude-501/wtph/e2e/repo/.worktrees/probe.
+   2. Check that greet.sh doesn't already exist at the worktree root.
+   3. Leave big.txt untouched, since both edits to it were rejected.
+   4. Create greet.sh at the worktree root.
+   5. Line 1: #!/usr/bin/env bash.
+   6. Line 2: set -euo pipefail.
+   7. Line 3: a one-line comment saying what the script does.
+   8. Line 4: echo "hello", the only command.
+   9. End the file with a trailing newline.
+   10. Use LF line endings.
+   11. Take no arguments or flags.
+   12. Need nothing beyond bash.
+   13. Make it executable: chmod +x greet.sh.
+   14. Check the mode with ls -l greet.sh.
+   15. Run ./greet.sh.
+   16. Check that the output is exactly hello.
+   17. Check that the exit code is 0.
+   18. Run bash greet.sh to check it also works without the exec bit.
+   19. Check syntax with bash -n greet.sh.
+   20. Run shellcheck greet.sh if it's installed.
+   21. Fix any shellcheck warnings.
+   22. Check that git status shows greet.sh as the only new file.
+   23. Check that core.fileMode isn't false, so git keeps the exec bit.
+   24. Add no README or docs entry, since none was asked for.
+   25. Add no test file, since the script is one line.
+   26. Change no other files.
+   27. Don't commit unless you ask.
+   28. If you ask for a commit, use "Add greet.sh that prints hello" with no
+       attribution trailer.
+   29. Don't push unless you explicitly ask.
+   30. Report the file contents and the verification output.
+  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+
+  ────────────────────────────────────────────────────────────────────────────
+   Claude has written up a plan and is ready to execute. Would you like to
+   proceed?
+
+   ❯ 1. Yes, and use auto mode
+     2. Yes, manually approve edits
+     3. Tell Claude what to change
+        shift+tab to approve with this feedback
+
+   ctrl+g to edit in Vim ·
+   ~/.claude/plans/plan-adding-a-script-snuggly-dragonfly.md
+─────────────────────────────────────────────────────────────────── wtph-probe ─

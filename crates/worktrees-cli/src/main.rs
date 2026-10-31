@@ -117,6 +117,9 @@ fn run() -> i32 {
         // answer (allow) even where there is no repository at all.
         Some("guide") => return worktrees_core::guidance::cmd_guide(args.get(1..).unwrap_or(&[])),
         Some("guard") => return worktrees_core::guidance::cmd_guard(args.get(1..).unwrap_or(&[])),
+        // Claude's PermissionRequest and SessionEnd hooks from the prompt
+        // plugin (`pending`): from anywhere, silent, and always 0.
+        Some("agent-hook") => return worktrees_core::pending::cmd_agent_hook(args.get(1..).unwrap_or(&[])),
         // Owned planning. Ahead of the guards for `guard`'s reason: `plan hook`
         // is Claude's SessionStart/UserPromptSubmit hook and must answer (with
         // nothing) from anywhere; the other verbs find their repo themselves.

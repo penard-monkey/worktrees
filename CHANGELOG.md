@@ -32,8 +32,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   permission and a step-up, the same as sending a line, and its answer
   permission too, because typed text also picks one of the prompt's
   choices. The audit log keeps only the text's length and a hash of it. A
-  prompt still too tall to read whole, such as a long diff or plan, now
-  shows its visible part, and you answer it at the host.
+  prompt taller than the pane, such as a long diff, command or plan, now
+  comes with the whole of what Claude asked, taken from a hook worktrees
+  adds to every Claude it starts. The hook only reads the prompt and never
+  answers it, and what it keeps is private to you and gone once the prompt
+  is. A tall prompt from a Claude started before this update shows its
+  visible part, and you answer it at the host. A long plan is the exception:
+  it is read from its own plan file.
 
 ## [0.44.2] - 2026-10-29
 
