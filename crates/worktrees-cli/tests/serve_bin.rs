@@ -897,6 +897,16 @@ fn fake_claude(dir: &Path) -> PathBuf {
     bin
 }
 
+/// The pane command that runs the fake Claude AS the pane's foreground
+/// process, as a real launch's Claude is. tmux hands a command string to
+/// `$SHELL -c` (or `/bin/sh -c`): bash and macOS's `sh` exec its one command,
+/// but Debian's and Ubuntu's `sh` is dash, which forks it and stays in front,
+/// so tmux reports the pane as `sh` and no Claude is seen. `exec` makes every
+/// shell replace itself. Measured on ubuntu:24.04 (dash 0.5.12, tmux 3.4).
+fn fake_claude_cmd(claude: &Path) -> String {
+    format!("exec {} 600", claude.display())
+}
+
 /// The reported bug, end to end through the binary. A project's folder is
 /// renamed with Claude running in its (main) and in a lane; the user removes
 /// the old root and adds the new one. `agent_turns` must read the live
@@ -922,15 +932,16 @@ fn a_moved_projects_agent_is_read_before_and_after_it_is_adopted() {
     let old_root = std::fs::canonicalize(&old).unwrap().to_string_lossy().into_owned();
     let claude = fake_claude(&sb.root.join("fake"));
     for (session, dir) in [("old-(main)", old_root.clone()), ("old-lane", format!("{old_root}/.worktrees/lane"))] {
-        let made = tmux.run(&["-f", "/dev/null", "new-session", "-d", "-s", session, "-c", &dir, "-x", "80", "-y", "24", &format!("{} 600", claude.display())]);
+        let made = tmux.run(&["-f", "/dev/null", "new-session", "-d", "-s", session, "-c", &dir, "-x", "80", "-y", "24", &fake_claude_cmd(&claude)]);
         assert!(made.status.success(), "private tmux: {}", String::from_utf8_lossy(&made.stderr));
     }
     // Claude's own files for the (main) one, as Claude writes them: its probe
     // names the session and pane it started in, its transcript is filed under
     // the folder it started in.
-    let shown = tmux.run(&["display-message", "-p", "-t", "=old-(main):", "#{pane_pid}\t#{window_id}\t#{pane_id}"]);
+    // `|`, not a tab: tmux 3.3a's `display-message -p` does not hand a tab back.
+    let shown = tmux.run(&["display-message", "-p", "-t", "=old-(main):", "#{pane_pid}|#{window_id}|#{pane_id}"]);
     let shown = String::from_utf8_lossy(&shown.stdout).trim().to_string();
-    let mut it = shown.split('\t');
+    let mut it = shown.split('|');
     let (pid, window, pane) = (it.next().unwrap().to_string(), it.next().unwrap().to_string(), it.next().unwrap().to_string());
     let claude_home = sb.root.join("home/.claude");
     std::fs::create_dir_all(claude_home.join("sessions")).unwrap();
@@ -1043,7 +1054,7 @@ fn remove_project_names_the_sessions_it_leaves_running() {
     let busy = sb.project("busy");
     let quiet = sb.project("quiet");
     let claude = fake_claude(&sb.root.join("fake"));
-    let made = tmux.run(&["-f", "/dev/null", "new-session", "-d", "-s", "busy-(main)", "-c", &busy, "-x", "80", "-y", "24", &format!("{} 600", claude.display())]);
+    let made = tmux.run(&["-f", "/dev/null", "new-session", "-d", "-s", "busy-(main)", "-c", &busy, "-x", "80", "-y", "24", &fake_claude_cmd(&claude)]);
     assert!(made.status.success(), "private tmux: {}", String::from_utf8_lossy(&made.stderr));
     let sf = sb.launch_env(&["--allow-origin", "http://localhost:1420"], &[("TMUX", &tmux.env())]);
     let mut ws = connect(&sf, "http://localhost:1420");

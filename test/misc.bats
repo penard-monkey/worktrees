@@ -398,16 +398,20 @@ write_config() {
 
   run_wt doctor
   [ "$status" -eq 0 ]                       # a Warn — nothing is broken
-  [[ "$output" == *"repo-(main)"* ]]
-  [[ "$output" == *"teamx-(main)"* ]]
-  [[ "$output" == *"worktrees close main"* ]]   # the CLI spelling, not the (main) slug
+  grep -qF 'live tmux session is `repo-(main)`' <<<"$output"
+  grep -qF '`teamx-(main)`' <<<"$output"
+  # The remedy renames, never closes: `repo-(main)` is provably main's (named
+  # `<X>-(main)`, every pane in the checkout, `repo` no other project's
+  # prefix, `teamx-(main)` free), so the command that adopts it is named.
+  grep -qF "Rename it, closing nothing, with: worktrees projects add '$REPO'" <<<"$output"
+  ! grep -qF "worktrees close" <<<"$output" || false
 
   # a place-scoped run is a question about that place, so main stays out of it
   run_wt new feat-x --no-install --no-attach
   [ "$status" -eq 0 ]
   run_wt doctor feat-x
   [ "$status" -eq 0 ]
-  [[ "$output" != *"(main)"* ]]
+  ! grep -qF "(main)" <<<"$output" || false
 
   # …and the whole scan costs ONE `list-panes -a`, not three tmux subprocesses
   # per place: this sweep grew a place for main, and it must not have grown a
@@ -416,7 +420,7 @@ write_config() {
   run_wt doctor
   [ "$status" -eq 0 ]
   [ "$(grep -c 'list-panes' "$TMUX_LOG")" -eq 1 ]
-  ! grep -q 'list-sessions' "$TMUX_LOG"
+  ! grep -q 'list-sessions' "$TMUX_LOG" || false
 }
 
 # ── AI command precedence chain ──────────────────────────────────────────────
