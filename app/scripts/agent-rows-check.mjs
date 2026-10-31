@@ -1,6 +1,7 @@
-// The agent rows — `agent_prompt`, `agent_answer`, `agent_send`,
-// `agent_turns` (iOS MVP §2.4, S6–S11) — say the same thing in the four places
-// that state them:
+// The agent rows — `agent_prompt`, `agent_answer`, `agent_answer_text`,
+// `agent_answer_many`, `agent_send`, `agent_turns` (iOS MVP §2.4, S6–S11, and
+// feat/actionable-prompts) — say the same thing in the four places that
+// state them:
 //
 //   node app/scripts/agent-rows-check.mjs      # exits non-zero on failure
 //
@@ -8,7 +9,7 @@
 //    each row's capability and objects, PINNED here, because a one-word edit
 //    there (`answer` → `write`) would drop the step-up and the drive-class
 //    audit budget that `answer` and `instruct` buy, with every Rust test of
-//    the body still green. Every `agent_*` row is one of the four, and each
+//    the body still green. Every `agent_*` row is one of ROWS, and each
 //    body is its `agents::` function.
 // 2. the api (`crates/worktrees-api/src/agents.rs`): the refusal strings a
 //    client keys on — `the prompt changed` (the compare-and-swap) and `no such
@@ -42,6 +43,9 @@ const read = (p) => fs.readFileSync(p, "utf8");
 const ROWS = {
   agent_prompt: "read, place(repo, slug)",
   agent_answer: "answer, place(repo, slug)",
+  // Free text is `instruct` (§9.2), never `answer`; boxes are choices.
+  agent_answer_text: "instruct, place(repo, slug)",
+  agent_answer_many: "answer, place(repo, slug)",
   agent_send: "instruct, place(repo, slug), session_of(session, repo, slug)",
   agent_turns: "read, place(repo, slug), opt(session_of(session, repo, slug))",
 };
@@ -86,7 +90,7 @@ else ok("a send while a prompt is up names agent_answer");
 const mock = read(SRC.mock);
 const missing = Object.keys(ROWS).filter((n) => !mock.includes(`case "${n}":`));
 if (missing.length) fail(`mock/install.ts does not answer: ${missing.join(", ")}`);
-else ok("the mock answers all four rows");
+else ok(`the mock answers all ${Object.keys(ROWS).length} rows`);
 for (const s of [ERR.changed, ERR.noChoice, ERR.promptUp].filter(Boolean)) {
   if (!mock.includes(`throw ${JSON.stringify(s)}`)) fail(`the mock never refuses with ${JSON.stringify(s)}`);
   else ok(`the mock refuses with ${JSON.stringify(s)}`);

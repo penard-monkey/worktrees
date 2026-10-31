@@ -259,15 +259,18 @@ capability, so `agent_answer` from the desktop is a legitimate feature too).
 
 #### As built (S6–S11, `feat/ios-agent-rows`)
 
-The four rows, spelled as `serve/dispatch.rs` spells them.
+The rows, spelled as `serve/dispatch.rs` spells them (`agent_answer_text`
+and `agent_answer_many` came after, on `feat/actionable-prompts`).
 `app/scripts/agent-rows-check.mjs` holds this table, the dispatch table, the
 mock (`app/src/mock/install.ts`) and the api's refusal strings
 (`worktrees-api/src/agents.rs`) to one another.
 
 | Row | Capability, objects | Arguments | Answer | Refusals |
 |---|---|---|---|---|
-| `agent_prompt` | `[read, place(repo, slug)]` | — | `{waiting: true, readable: true, harness, session, kind: "permission"\|"question", lines, choices: [{n, label, more?, highlighted, host_only?}], fingerprint, note}`; `{waiting: true, readable: false, harness, session, reason}` when the agent is waiting on a prompt this host cannot read whole; else `{waiting: false}` | the resolver's |
-| `agent_answer` | `[answer, place(repo, slug)]` | `choice` (a choice's `n`), `fingerprint` | `{answered: true, confirmed, harness, session, choice, label}` | `the prompt changed` (the CAS); `no such choice`; a `host_only` choice from a device (`… only the host can make it`); `step-up required`; `audit-budget …` |
+| `agent_prompt` | `[read, place(repo, slug)]` | — | `{waiting: true, readable: true, harness, session, kind: "permission"\|"question", lines, choices: [{n, label, more?, highlighted, host_only?, checked?, text?: "field"\|"amend"}], multi?, fingerprint, note}`; `{waiting: true, readable: false, harness, session, reason, lines?, note?}` when the agent is waiting on a prompt this host cannot read whole, `lines` being the bottom of its screen (at most 24 rows) to show while answering stays at the host; else `{waiting: false}` | the resolver's |
+| `agent_answer` | `[answer, place(repo, slug)]` | `choice` (a choice's `n`), `fingerprint` | `{answered: true, confirmed, harness, session, choice, label}` | `the prompt changed` (the CAS); `no such choice`; a `host_only` choice from a device (`… only the host can make it`); a box of a `multi` prompt (`a multi-select: tick its boxes with agent_answer_many`); `step-up required`; `audit-budget …` |
+| `agent_answer_text` | `[instruct, place(repo, slug)]` | `choice` (one with `text`), `fingerprint`, `text` | `{answered: true, confirmed, harness, session, choice, label}`; a `multi` prompt's text box is filled (and so ticked) but not sent: `{answered: false, …, note}` | `agent_send`'s line rule; `the prompt changed`; `no such choice`; `choice N takes no text`; `that choice's text field holds someone's text …`; the field did not open, or the text could not be seen in it (nothing confirmed); `step-up required`; `audit-budget …` |
+| `agent_answer_many` | `[answer, place(repo, slug)]` | `choices` (boxes' `n`), `fingerprint` | `{answered: true, confirmed, harness, session, choices, labels}` — the review screen Claude shows next is a prompt of its own | `not a multi-select: answer it with agent_answer`; `the prompt changed` (also when the ticks moved under it); `no such choice`; `choice N is not one of the boxes`; an unfilled text box; `name at least one box to tick`; `step-up required`; `audit-budget …` |
 | `agent_send` | `[instruct, place(repo, slug), session_of(session, repo, slug)]` | `session` (from `agent_sessions`), `text` | `{delivered, queued, harness, session, note}` | one line ≤ 4 KB with no control character, no invisible format character (Unicode Cf — every bidi control, zero-width characters — and the line/paragraph separators) and not starting with `/ @ ! #`, the rule MCP `send` shares (`harness::typed_line_ok`); `the agent is waiting on a prompt: answer it with agent_answer`; a composer holding someone's text; no composer to see; `step-up required`; `audit-budget …` |
 | `agent_turns` | `[read, place(repo, slug), opt(session_of(session, repo, slug))]` | `n` (default 5, at most 20), `session` (optional: the first running agent) | `{harness, session, turns: [{at, user, reply, tools, truncated}], more, note}` — Claude and Codex | a harness whose transcript is not read yet (pi, kimi) |
 
@@ -285,6 +288,21 @@ How each item of the spec was met, and what the lane decided:
   claude-screen/2.1.309/` (Claude Code 2.1.309, its README says how). The
   `fingerprint` is SHA-256 over the harness, the session, the modal's rows
   and its parsed choices.
+- **Every prompt, read and answered (`feat/actionable-prompts`).** Every
+  lane worktrees launches gives Claude `--name`, and a named Claude draws a
+  `──── <name> ─` tag as its screen's last row under a modal, so until then
+  no worktrees-launched Claude's prompt read at all (the 2.1.309 fixtures
+  had no `--name`). The reader skips the tag and knows Claude 2.1.314's plan
+  approval and multi-select (fixtures `claude-screen/2.1.314/`, README).
+  Free text is its own row, `agent_answer_text` (`instruct`): into Claude's
+  "Type something." and plan feedback, an amended "Yes"/"No" (`Tab to
+  amend`), a Codex question's notes — moved to, opened, pasted (the paste
+  `agent_send` uses) and proved shown before Enter. A multi-select's boxes
+  are `agent_answer_many` (`answer`), each tick proved. A two-question form
+  is one `agent_answer` per screen, then the review. Neither is an argument
+  on `agent_answer`: an older host ignores unknown arguments and would
+  have half answered. What still reads `readable: false` (a diff or plan
+  taller than its pane) returns the visible rows.
 - **Which choices a device may make.** Claude's real Bash approval offers
   "Yes, and always allow access to … from this project" and "Yes, and switch
   to auto mode"; Codex's, "don't ask again for commands that start with …".
@@ -866,7 +884,7 @@ Two loops, both needed:
 | A client that browses for a moved host, or adopts an address code (lane `feat/p2-remote-client-discovery`); the Linux advert | Phase 4 |
 | The host app's pairing sheet and device list (lane `feat/p2-remote-host-ui`); until then, `worktrees serve pair` | Phase 1 |
 | The phone app itself, in its own repository: crate, Swift key plugin, remote door, mobile UI | Phases 1–4 |
-| `agent_prompt`, `agent_answer`, `agent_send`, `agent_turns` | Phases 2–3 |
+| `agent_prompt`, `agent_answer`, `agent_answer_text`, `agent_answer_many`, `agent_send`, `agent_turns` | Phases 2–3 |
 | The hardware measurements A1–A6 | Phase 0 |
 | Any iOS CI step | Phase 4 |
 

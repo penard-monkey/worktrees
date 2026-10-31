@@ -36,15 +36,30 @@ pub(super) struct ScriptedAgent {
     pub after: &'static str,
     pub keys: Mutex<Vec<worktrees_core::tmux::Key>>,
     pub sent: Mutex<Vec<String>>,
+    /// The screen once something is pasted (`agent_answer_text`); `None`
+    /// keeps the one showing.
+    pub typed: Mutex<Option<&'static str>>,
 }
 
 /// Real Claude 2.1.309 screens (`worktrees-core/tests/fixtures/claude-screen`).
 pub(super) const CLAUDE_TRUST: &str = include_str!("../../../worktrees-core/tests/fixtures/claude-screen/2.1.309/trust.txt");
 pub(super) const CLAUDE_EMPTY: &str = include_str!("../../../worktrees-core/tests/fixtures/claude-screen/2.1.309/composer-empty.e.txt");
+/// A named Claude 2.1.314's question with its "Type something." row
+/// highlighted, and the same once `penguins` is typed there.
+pub(super) const CLAUDE_TYPE_SOMETHING: &str =
+    include_str!("../../../worktrees-core/tests/fixtures/claude-screen/2.1.314/question-type-something.e.txt");
+pub(super) const CLAUDE_TYPED: &str = include_str!("../../../worktrees-core/tests/fixtures/claude-screen/2.1.314/question-typed.e.txt");
 
 impl ScriptedAgent {
     pub(super) fn new(session: &str, screen: &'static str, after: &'static str) -> Arc<ScriptedAgent> {
-        Arc::new(ScriptedAgent { session: session.to_string(), screen: Mutex::new(screen), after, keys: Default::default(), sent: Default::default() })
+        Arc::new(ScriptedAgent {
+            session: session.to_string(),
+            screen: Mutex::new(screen),
+            after,
+            keys: Default::default(),
+            sent: Default::default(),
+            typed: Default::default(),
+        })
     }
 
     /// Nothing reached the pane: no key, no line.
@@ -67,6 +82,13 @@ impl worktrees_api::agents::AgentIo for ScriptedAgent {
         self.keys.lock().unwrap().push(key);
         if key == worktrees_core::tmux::Key::Enter {
             *self.screen.lock().unwrap() = self.after;
+        }
+        Ok(())
+    }
+    fn paste(&self, _: &worktrees_api::agents::Lane, text: &str) -> Result<(), String> {
+        self.sent.lock().unwrap().push(text.to_string());
+        if let Some(s) = *self.typed.lock().unwrap() {
+            *self.screen.lock().unwrap() = s;
         }
         Ok(())
     }
@@ -3236,6 +3258,51 @@ mod devices {
         assert_eq!(e.rpc(&mut m, "agent_answer", answer)["err"], json!("denied"));
         assert_eq!(e.rpc(&mut m, "agent_send", send)["err"], json!("denied"));
         assert_eq!(pane.sent.lock().unwrap().len(), 1);
+    }
+
+    /// The prompt rows past one choice, through the real chain: free text
+    /// (`agent_answer_text`) is `instruct` and a multi-select's boxes
+    /// (`agent_answer_many`) are `answer` — both drive-class, so a phone is
+    /// asked for a step-up first, and a grant without the capability is
+    /// denied. Nothing reaches the pane until both hold.
+    #[test]
+    fn free_text_needs_instruct_and_boxes_need_answer_and_both_a_step_up() {
+        // A place whose Claude shows a question with its "Type something."
+        // row highlighted, on an engine where one iPhone holds `caps`.
+        let setup = |tag: &str, caps: &[Capability]| {
+            let mut e = engine(tag, vec![]);
+            let a = e.dir.join("a");
+            assert!(std::process::Command::new("git").args(["init", "-q"]).arg(&a).status().unwrap().success());
+            let session = worktrees_core::Project::discover(&a).unwrap().session_name("(main)");
+            let pane = super::ScriptedAgent::new(&session, super::CLAUDE_TYPE_SOMETHING, super::CLAUDE_EMPTY);
+            *pane.typed.lock().unwrap() = Some(super::CLAUDE_TYPED);
+            e.ctx = e.ctx.clone().with_agents(worktrees_api::agents::Agents::new(pane.clone()));
+            let (rec, k) = iphone(&e.reg, caps);
+            let ex = [5u8; 32];
+            let mut c = e.connect_with(caller(&rec), Some(ex));
+            let p = e.rpc(&mut c, "agent_prompt", json!({"repo": s(&a), "slug": "(main)"}));
+            let f = p["ok"]["fingerprint"].as_str().unwrap_or_else(|| panic!("{p}")).to_string();
+            let text = json!({"repo": s(&a), "slug": "(main)", "choice": 4, "fingerprint": f, "text": "penguins"});
+            let many = json!({"repo": s(&a), "slug": "(main)", "choices": [1], "fingerprint": f});
+            (e, c, k, ex, pane, text, many)
+        };
+        // `answer` without `instruct`: boxes past a step-up, text never.
+        let (e, mut c, k, ex, pane, text, many) = setup("agent-text-a", &[Read, Answer]);
+        assert_eq!(e.rpc(&mut c, "agent_answer_text", text.clone())["err"], json!("denied"));
+        assert_eq!(e.rpc(&mut c, "agent_answer_many", many.clone())["err"], json!("step-up required"));
+        prove(&e, &mut c, &k, ex);
+        assert_eq!(e.rpc(&mut c, "agent_answer_text", text)["err"], json!("denied"), "a step-up is no grant");
+        assert_eq!(e.rpc(&mut c, "agent_answer_many", many)["err"], json!("not a multi-select: answer it with agent_answer"));
+        assert!(pane.untouched());
+        // With `instruct`: asked for a step-up, then typed, proved and sent.
+        let (e, mut c, k, ex, pane, text, _) = setup("agent-text-i", &[Read, Answer, Instruct]);
+        assert_eq!(e.rpc(&mut c, "agent_answer_text", text.clone())["err"], json!("step-up required"));
+        assert!(pane.untouched());
+        prove(&e, &mut c, &k, ex);
+        let r = e.rpc(&mut c, "agent_answer_text", text);
+        assert_eq!((r["ok"]["answered"].clone(), r["ok"]["confirmed"].clone()), (json!(true), json!(true)), "{r}");
+        assert_eq!(*pane.sent.lock().unwrap(), vec!["penguins".to_string()]);
+        assert_eq!(*pane.keys.lock().unwrap(), vec![worktrees_core::tmux::Key::Enter]);
     }
 
     /// The bypass a review found: dock shells are the process's, so a device

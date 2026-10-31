@@ -852,6 +852,9 @@ pub enum Key {
     Up,
     Down,
     Enter,
+    /// Opens a prompt's own text field (Claude's `Tab to amend`, Codex's
+    /// `tab to add notes`).
+    Tab,
 }
 
 impl Key {
@@ -861,6 +864,7 @@ impl Key {
             Key::Up => "Up",
             Key::Down => "Down",
             Key::Enter => "Enter",
+            Key::Tab => "Tab",
         }
     }
 }

@@ -1,0 +1,43 @@
+
+ ▐▛███▛█   Claude Code v2.1.314
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   /private/tmp/claude-501/wtap/e2e/repo
+
+
+❯ prompt me to select a topic for you to write a joke about
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Joke topic
+
+What topic should I write a joke about?
+
+❯ 1. Programming
+     Bugs, semicolons, and things that work on my machine
+  2. Cats
+     Feline behavior, boxes, and knocking things off tables
+  3. Coffee
+     Mornings, caffeine dependence, and decaf regret
+  4. Something else
+     Type in any topic you want
+  5. Type something.
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  6. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+──────────────────────────────────────────────────────────────────────────────────────────────── wtap-(main) ─

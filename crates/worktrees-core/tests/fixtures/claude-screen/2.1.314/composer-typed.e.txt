@@ -1,0 +1,40 @@
+
+
+  [38;2;153;153;153mCalled worktrees [39m
+[38;2;153;153;153m  ⎿  Interrupted · What should Claude do instead?[39m
+
+[38;2;153;153;153m✻[39m [38;2;153;153;153mBrewed for 2s · done 11:51 PM[39m
+
+[38;2;153;153;153m[48;2;55;55;55m❯ [38;2;255;255;255mUse AskUserQuestion once with multiSelect true: which toppings do I want on a pizza? Options Cheese, Olives, [39m
+  [38;2;255;255;255mMushrooms, each with a one-line description. Nothing else.[39m
+
+[38;2;153;153;153m[49m⏺ [39mUser answered Claude's questions:
+[38;2;153;153;153m  ⎿  · Which toppings do you want on a pizza? → Cheese, Mushrooms[39m
+
+[38;2;255;255;255m⏺[39m You picked Cheese and Mushrooms for the pizza toppings.
+
+[38;2;153;153;153m✻[39m [38;2;153;153;153mBaked for 2s · done 11:52 PM[39m
+
+[38;2;153;153;153m[48;2;55;55;55m❯ [38;2;255;255;255mUse AskUserQuestion once with TWO questions: (1) header Colour: Red or Blue; (2) header Size: Small or Large; each [39m
+  [38;2;255;255;255moption with a one-line description, single select. Nothing else.[39m
+
+[38;2;153;153;153m[49m⏺ [39mUser answered Claude's questions:
+[38;2;153;153;153m  ⎿  · Which colour do you want? → Blue[39m
+     [38;2;153;153;153m· Which size do you want? → Large[39m
+
+[38;2;255;255;255m⏺[39m You chose Blue for colour and Large for size.
+
+[38;2;153;153;153m✻[39m [38;2;153;153;153mChurned for 2s · done 11:53 PM[39m
+
+[38;2;153;153;153m[48;2;55;55;55m❯ [38;2;255;255;255mUse AskUserQuestion once with multiSelect true: which toppings? Options Cheese, Olives, each with a one-line [39m
+  [38;2;255;255;255mdescription. Nothing else.[39m
+[49m
+[38;2;153;153;153m⏺ [39mUser declined to answer questions
+[38;2;153;153;153m  ⎿  · Which toppings? (Cheese / Olives)[39m
+
+[38;2;153;153;153m✻[39m [38;2;153;153;153mWorked for 1s · done 11:54 PM[39m
+                                                                                                    [38;2;153;153;153m◐ medium · /effort[39m
+[38;2;136;136;136m─────────────────────────────────────────────────────────────────────────────────────────────────────────── wtap-probe ─
+[39m❯ half typed draft, not sent
+[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  [38;2;153;153;153m⏸ manual mode on[39m

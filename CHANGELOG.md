@@ -19,6 +19,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   says which file worktrees can't read, `worktrees doctor` lists it with the
   parse error, and the fix it gives is to restart that Claude (`/exit`, then
   reopen it), never to edit the file, which belongs to Claude Code.
+- **An agent's prompts can be read and answered without the terminal.**
+  Every Claude that worktrees starts is named after its session, and a named
+  Claude puts its name under the prompt's last line. Because of that, the
+  chat view and the phone could not read a single Claude prompt, and
+  answering went back to the terminal. A one-question pick was enough to
+  hit it. Questions and permissions now read, including multi-select
+  questions, two-question forms with their review, and plan approvals. You
+  can now answer "Type something.", say "No, and tell Claude what to do
+  differently" (or "Yes, and…"), give a plan feedback, or add a Codex note,
+  all from a client. On a paired phone, typing needs the device's instruct
+  permission and a step-up, the same as sending a line. The audit log keeps
+  only the text's length and a hash of it. A prompt still too tall to read
+  whole, such as a long diff or plan, now shows its visible part, and you
+  answer it at the host.
 
 ## [0.44.2] - 2026-10-29
 
