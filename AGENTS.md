@@ -933,6 +933,20 @@ pass. Copy `/bin/bash` (its own binary everywhere) and have it wait on a
 builtin. Reproduce runner-only failures in the runner's OS: its log prints it
 under "Operating System", and that image ships tmux preinstalled.
 
+**`tmux new-session -c <dir>` returns before the pane is in `<dir>`.** The
+server forks the pane and answers the client at once, and the child's
+`chdir` comes later. When it fails, because the folder has moved or gone,
+tmux puts the pane in `$HOME` and says nothing. On a systemd host the gap is
+a D-Bus round trip: a tmux built with systemd (Ubuntu's 3.6 is) has the child
+ask the user's systemd for a cgroup BEFORE its `chdir` (`spawn.c`,
+`systemd_move_to_new_cgroup`). So the same test, which renames its project a
+few lines after `new-session`, found its lane's pane in `/home/runner` on
+ubuntu-latest (#580). A container has no user bus and skips that wait, and
+passed every time. Pointing `DBUS_SESSION_BUS_ADDRESS` at a socket that
+accepts and says nothing for 50 ms reproduced CI's failure exactly. A test
+that moves a pane's folder waits for `#{pane_current_path}` first
+(`serve_bin.rs`'s `PrivateTmux::wait_for_cwd`).
+
 **A lane that uses Docker removes what it made before it reports done.** The
 Linux checks here run in Docker (`rust:1-bookworm`, `node:22-alpine`, the Linux
 app build), and a named volume for the cargo registry or the target dir

@@ -471,9 +471,27 @@ impl PrivateTmux {
         conf.to_string_lossy().into_owned()
     }
     /// Where a fake Claude's stderr goes (`fake_claude_cmd`). Beside the
-    /// socket, not in the `Sandbox`, which is removed before this drops.
+    /// socket, not in the `Sandbox`.
     fn err_file(&self) -> PathBuf {
         self.sock.with_extension("err")
+    }
+    /// Waits until `target`'s pane is in `dir`. `new-session -c` returns
+    /// before the pane is there: tmux's forked child makes the `chdir`, and
+    /// one that fails, because the folder has moved since, puts the pane in
+    /// `$HOME` without a word. Ubuntu's tmux has that child ask the user's
+    /// systemd for a cgroup first, a D-Bus round trip, so on the ubuntu-latest
+    /// runner the moved test's rename came first (#580).
+    fn wait_for_cwd(&self, target: &str, dir: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let o = self.run(&["display-message", "-p", "-t", target, "#{pane_current_path}"]);
+            let now = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if now == dir {
+                return;
+            }
+            assert!(Instant::now() < deadline, "{target}'s pane never reached {dir}: it is in {now:?}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 }
 
@@ -952,8 +970,10 @@ fn a_moved_projects_agent_is_read_before_and_after_it_is_adopted() {
         eprintln!("skipped: no tmux on PATH");
         return;
     }
-    let tmux = PrivateTmux::new("moved");
     let mut sb = Sandbox::new("moved");
+    // After `sb`, so it drops first: a failing test's dump shows the panes'
+    // folders before the sandbox removes them.
+    let tmux = PrivateTmux::new("moved");
     let projects = sb.root.join("projects");
     let old = projects.join("old");
     std::fs::create_dir_all(&old).unwrap();
@@ -966,6 +986,7 @@ fn a_moved_projects_agent_is_read_before_and_after_it_is_adopted() {
     for (session, dir) in [("old-(main)", old_root.clone()), ("old-lane", format!("{old_root}/.worktrees/lane"))] {
         let made = tmux.run(&["-f", &conf, "new-session", "-d", "-s", session, "-c", &dir, "-x", "80", "-y", "24", &fake_claude_cmd(&claude, &tmux.err_file())]);
         assert!(made.status.success(), "private tmux: {}", String::from_utf8_lossy(&made.stderr));
+        tmux.wait_for_cwd(&format!("={session}:"), &dir);
     }
     // Claude's own files for the (main) one, as Claude writes them: its probe
     // names the session and pane it started in, its transcript is filed under
@@ -1081,8 +1102,8 @@ fn remove_project_names_the_sessions_it_leaves_running() {
         eprintln!("skipped: no tmux on PATH");
         return;
     }
-    let tmux = PrivateTmux::new("rmproj");
     let mut sb = Sandbox::new("rmproj");
+    let tmux = PrivateTmux::new("rmproj"); // after `sb`: see the moved test
     let busy = sb.project("busy");
     let quiet = sb.project("quiet");
     let claude = fake_claude(&sb.root.join("fake"));
