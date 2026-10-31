@@ -936,7 +936,7 @@ fn a_moved_projects_agent_is_read_before_and_after_it_is_adopted() {
     std::fs::create_dir_all(claude_home.join("sessions")).unwrap();
     std::fs::write(
         claude_home.join(format!("sessions/{pid}.json")),
-        json!({ "pid": pid.parse::<i64>().unwrap(), "cwd": old_root, "status": "idle", "kind": "interactive",
+        json!({ "pid": pid.parse::<i64>().unwrap(), "cwd": old_root, "status": "busy", "kind": "interactive",
                 "tmux": format!("old-(main):{window}.{pane}"), "sessionId": "sid-main" }).to_string(),
     )
     .unwrap();
@@ -953,6 +953,7 @@ fn a_moved_projects_agent_is_read_before_and_after_it_is_adopted() {
     sb.register(&new_root, "new");
     let sf = sb.launch_env(&["--allow-origin", "http://localhost:1420"], &[("TMUX", &tmux.env())]);
     let mut ws = connect(&sf, "http://localhost:1420");
+    listen(&mut ws, &["sessions:busy"]);
 
     // Removing the old root: its folder is gone, so nothing of it runs there.
     let r = rpc(&mut ws, 1, "remove_project", json!({ "root": old_root }));
@@ -992,7 +993,40 @@ fn a_moved_projects_agent_is_read_before_and_after_it_is_adopted() {
     // Adding it again finds nothing more to do.
     let r = rpc(&mut ws, 5, "add_project", json!({ "dir": new_root }));
     assert!(r["ok"]["projects"].is_array() && r["ok"].get("adopted").is_none(), "{r}");
+
+    // The nav follows the pane too: the model label (found by the session the
+    // Claude runs in now) and the busy dot (keyed by the place it is in now,
+    // never the folder it started in, which is gone).
+    let r = rpc(&mut ws, 6, "list_places", json!({ "repo": new_root }));
+    let main = r["ok"]["places"].as_array().and_then(|ps| ps.iter().find(|p| p["slug"] == json!("(main)"))).unwrap_or_else(|| panic!("{r}"));
+    assert_eq!(main["agent_sessions"]["claude"]["name"], json!("new-(main)"), "{main}");
+    assert!(main["agent_sessions"]["claude"]["model"].is_string(), "the model label after the rename: {main}");
+    let busy = busy_until(&mut ws, &json!([new_root]), Duration::from_secs(15));
+    assert_eq!(busy, json!([new_root]), "the busy dot names the new folder");
     assert_eq!(sb.terminate().code(), Some(0));
+}
+
+/// Read `sessions:busy` events until one's `busy` is `want`, or `within` has
+/// passed; the last `busy` seen either way.
+fn busy_until(ws: &mut WebSocket<TcpStream>, want: &Value, within: Duration) -> Value {
+    ws.get_mut().set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+    let deadline = Instant::now() + within;
+    let mut last = Value::Null;
+    while Instant::now() < deadline && last != *want {
+        match ws.read() {
+            Ok(m) => {
+                let v: Value = serde_json::from_str(m.to_text().unwrap()).unwrap();
+                if v["event"] == json!("sessions:busy") {
+                    last = v["payload"]["busy"].clone();
+                }
+            }
+            Err(tokio_tungstenite::tungstenite::Error::Io(e))
+                if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+            Err(e) => panic!("reading events: {e}"),
+        }
+    }
+    ws.get_mut().set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    last
 }
 
 /// C, through the binary: `project_sessions` lists a project's live sessions

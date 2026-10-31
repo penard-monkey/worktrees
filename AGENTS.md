@@ -77,7 +77,14 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   started in. `add_project`/`projects add` rename a moved project's sessions
   (`worktrees_core::adopt`, the rule is in `moved_renames`' doc) and repair
   its worktrees' git links. The rename is needed despite adoption because the
-  provider sidecars are found by the CANONICAL name only.
+  provider sidecars are found by the CANONICAL name only. **Never match a
+  Claude probe to a place by `cwd` or by the session named in its `tmux`
+  field**: Claude rewrites neither, so both still name the old folder after a
+  rename. Match by `ClaudeProbe::place_dir()`/`session()`, which come from the
+  probe's live pane (`agent::locate`, using the pane id `PaneList` carries as a
+  6th field, no extra spawn). A pane counts only when it vouches for the probe,
+  because pane ids are per tmux server. A transcript is still found under
+  `cwd`.
 
 - **The agent rows (`worktrees_api::agents`, `worktrees_core::prompt`) read
   Claude's screen, and Claude 2.1.309 has four traps** (fixtures and README:

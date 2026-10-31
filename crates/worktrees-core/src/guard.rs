@@ -242,7 +242,9 @@ pub struct Live {
 /// `exclude` are the sessions the launch itself would replace or reuse.
 pub fn live_agents(panes: Option<&crate::tmux::PaneList>, probes: &[crate::agent::ClaudeProbe], exclude: &[String]) -> Vec<Live> {
     let mut out: Vec<Live> = Vec::new();
-    let named: Vec<&str> = probes.iter().filter_map(|p| p.tmux.as_deref().and_then(crate::agent::session_name)).collect();
+    // By the session each Claude runs in NOW (`ClaudeProbe::session`): after a
+    // rename its probe still names the old one, and it would count twice.
+    let named: Vec<&str> = probes.iter().filter_map(|p| p.session()).collect();
     let in_tmux: Vec<(String, &'static str)> = panes
         .map(|p| p.agent_sessions())
         .unwrap_or_default()
@@ -256,7 +258,7 @@ pub fn live_agents(panes: Option<&crate::tmux::PaneList>, probes: &[crate::agent
         }
     }
     for p in probes {
-        let session = p.tmux.as_deref().and_then(crate::agent::session_name);
+        let session = p.session();
         if session.is_some_and(|s| in_tmux.iter().any(|(n, _)| n == s) || exclude.iter().any(|e| e == s)) {
             continue;
         }
@@ -352,7 +354,7 @@ pub fn admit(provider: Option<&str>, force: bool, exclude: &[String]) -> Result<
         return Ok(problems); // all off: pay for no tmux listing
     }
     let panes = crate::tmux::PaneList::fetch();
-    let probes = crate::agent::live_probes();
+    let probes = crate::agent::live_probes_in(panes.as_ref());
     let live = live_agents(panes.as_ref(), &probes, exclude);
     match decide(provider, &live, &mem, &limits, &how_to_change()) {
         Some(why) => Err(crate::harness::Refusal::Soft(format!("Not started: {why}"))),
@@ -492,6 +494,28 @@ mod tests {
         let labels: Vec<&str> = got.iter().map(|l| l.label.as_str()).collect();
         assert_eq!(labels, ["repo-a", "repo-b", "claude pid 11 (/x)", "claude pid 12 (/x)"]);
         assert_eq!(got[1].provider, "codex");
+    }
+
+    /// A Claude whose session `adopt` renamed still names the old one in its
+    /// probe: located by its pane, it counts once, under the session it runs
+    /// in now — not once for tmux and again as a "claude outside tmux". An
+    /// npm Claude (`node`) needs that probe to vouch for its session at all.
+    #[test]
+    fn a_renamed_claude_counts_once() {
+        for cmd in ["2.1.309", "node"] {
+            let panes = crate::tmux::PaneList::from_panes(vec![crate::tmux::Pane {
+                session: "new-(main)".into(),
+                path: "/u/new".into(),
+                cmd: cmd.into(),
+                id: Some("%115".into()),
+                ..crate::tmux::Pane::default()
+            }]);
+            let mut probes: Vec<crate::agent::ClaudeProbe> =
+                vec![serde_json::from_value(serde_json::json!({"pid": 10, "cwd": "/no/such/old", "status": "idle", "tmux": "old-(main):@114.%115"})).unwrap()];
+            crate::agent::locate(&mut probes, &panes);
+            let labels: Vec<String> = live_agents(Some(&panes), &probes, &[]).into_iter().map(|l| l.label).collect();
+            assert_eq!(labels, ["new-(main)"], "{cmd}");
+        }
     }
 
     /// Review of #486, B1: `node` is claude only where something says so. A

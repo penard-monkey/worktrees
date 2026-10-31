@@ -120,7 +120,7 @@ pub fn snapshot(w: &Watch, repo: &str) -> Result<serde_json::Value, String> {
     // same file in the same tick.
     let effective = worktrees_core::profile::resolve_profile_id_in(&profiles, repo);
     let agent_panes = tmux::PaneList::fetch();
-    let probes = worktrees_core::agent::live_probes();
+    let probes = worktrees_core::agent::live_probes_in(agent_panes.as_ref());
     if let Some(places) = v.get_mut("places").and_then(|p| p.as_array_mut()) {
         for place in places.iter_mut() {
             let slug = place.get("slug").and_then(|s| s.as_str()).unwrap_or("").to_string();

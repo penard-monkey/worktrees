@@ -493,7 +493,7 @@ impl AgentIo for Live {
         }
         let adapter = harness::by_id(lane.harness).ok_or_else(|| format!("unknown harness {}", lane.harness))?;
         let panes = PaneList::fetch().ok_or("tmux is not available")?;
-        let probes = agent::live_probes();
+        let probes = agent::live_probes_in(Some(&panes));
         let scan = harness::Scan { probes: &probes, panes: Some(&panes) };
         let canonical = project.session_name(slug);
         let path = project.place_dir(slug);

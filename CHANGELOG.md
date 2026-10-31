@@ -27,7 +27,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   now finds a place's session by the same rule the nav uses, and adding the
   moved project renames its places' sessions to the new folder's names and
   repairs its worktrees' broken git links. Nothing is closed, the conversation
-  carries on, and a session someone named by hand is left alone. Removing a
+  carries on, and a session someone named by hand is left alone. The place's
+  busy dot, its model label, an agent's unsent-draft marker and `place_status`
+  follow the agent to the new folder too, where they had stayed dark until
+  the agent was restarted. Removing a
   project now names the sessions it would leave running: the app asks whether
   to close them or keep them, and `worktrees projects rm` asks too (`--close`
   or `--keep` answers in advance). `worktrees doctor` now spots a renamed
