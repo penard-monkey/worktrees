@@ -133,6 +133,35 @@
 .chat-choice.closed .chat-choice-label { color: var(--txt-dim); }
 .chat-choice-more, .chat-choice-note { display: block; font-size: var(--fs-meta); color: var(--txt-dim); }
 .chat-choice-note { font-style: italic; }
+/* What the agent asked, resolved, in the conversation: muted beside a live
+   card, the picked option marked. */
+.chat-asked {
+  background: var(--bg-panel); border: 1px solid var(--line); border-radius: var(--r-md);
+  padding: var(--s2) var(--s3); font-size: var(--fs-body);
+}
+.chat-asked-q + .chat-asked-q { margin-top: var(--s2); }
+.chat-asked-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px var(--s2); margin: 0 0 6px; }
+.chat-asked-head .chat-kind { margin-left: 0; }
+.chat-asked-text { color: var(--txt-hi); overflow-wrap: anywhere; }
+.chat-asked-opts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.chat-asked-opt {
+  display: grid; grid-template-columns: 1.4ch minmax(0, 1fr); column-gap: var(--s2);
+  padding: 2px var(--s2); border-radius: var(--r-sm); color: var(--txt-dim);
+}
+.chat-asked-opt.on { color: var(--txt-hi); background: color-mix(in srgb, var(--accent) 16%, var(--bg-panel)); }
+.chat-asked-mark { grid-row: 1 / span 2; font-weight: var(--fw-bold); }
+.chat-asked-label { overflow-wrap: anywhere; }
+.chat-asked-desc { grid-column: 2; font-size: var(--fs-meta); color: var(--txt-dim); }
+.chat-asked-opt.on .chat-asked-desc { color: var(--txt); }
+.chat-asked-summary {
+  margin: 0; padding: 4px var(--s2); font-family: var(--term-family); font-size: var(--fs-label);
+  color: var(--txt-hi); background: var(--bg-input); border-radius: var(--r-sm); white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.chat-asked-plan summary { cursor: pointer; color: var(--txt-hi); }
+.chat-asked-plan[open] summary { margin-bottom: var(--s2); }
+.chat-bubble-answer p { margin: 0; }
+.chat-bubble-answer .chat-answer-note { margin-top: 4px; font-size: var(--fs-meta); }
+
 /* A multi-select's boxes: a row each, the box beside its words. */
 .chat-boxes { display: flex; flex-direction: column; gap: 4px; margin-bottom: var(--s2); }
 .chat-box {

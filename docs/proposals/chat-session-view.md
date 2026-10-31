@@ -205,6 +205,34 @@ was launched without the hook (before it existed, or by hand), when a tool's
 input matches nothing (an MCP tool's long input), or when the record and the
 screen disagree. **"Answer in the terminal"** is always on the card.
 
+### Answered prompts stay in the conversation (2026-10-31)
+
+Once a prompt is answered, the live card goes, and the conversation keeps it
+as what was asked and then the answer, in the order it happened. Both come
+from the TRANSCRIPT (`agent_turns`' new `steps`, `worktrees_core::turns`), so
+they are the same whoever answered: this card, the terminal or a phone.
+`reply` and `tools` are unchanged for older clients. Each step has its own
+time, so a reply after a 12:22 answer is labelled 12:22, not with the time of
+the turn's prompt.
+
+| Asked | Drawn as | From (measured: Claude 2.1.316, codex-cli 0.160.1 scratch sessions) |
+|---|---|---|
+| A Claude question | The header and question; the picked option marked with its description, the others muted; typed text as a marked row | `AskUserQuestion`'s `input.questions`; `toolUseResult.answers` (a multi-select's labels joined by ", "; typed text is the value itself); "Chat about this" is a refusal whose `userFeedback` starts "The user wants to clarify" |
+| A Claude permission | "Asked to use Bash" and the command's first line (a file's path, a URL) | `permissionDecision.source` `user_*` (asked) vs `config` (asked nobody: stays a chip); `toolDenialKind`; a No's reason is `userFeedback`; a Yes's note is a text block beside the result |
+| A Claude plan | The plan, folded under its title | `ExitPlanMode`'s `input.plan`; approved, or sent back with `userFeedback` |
+| A Codex question | As Claude's, with its note | `request_user_input`'s `arguments`; its output's `answers`, a note as `user_note: …` |
+| A Codex approval | Not drawn: a tool chip | The rollout keeps the escalated call and its output, never the decision; a No's "aborted by user" is what an Esc writes too |
+
+**The answer is a bubble on the user's side** ("Banana", "No" with its
+reason under it, "Approved", "Sent back" with the feedback), and the card
+above it marks the option. A bubble reads as the person's turn in the
+conversation, and it is where typed text and notes fit. The card's mark says
+which of the offered options it was.
+
+**This window's "You answered …" line goes once the transcript has an answer
+given after it was sent** (allowing 120 s of clock skew, one recorded answer
+for each line), as a sent message's pending bubble does.
+
 ## 6. What does not fit a chat, so the terminal stays one click away
 
 | Thing | Why | What the chat does |
@@ -227,7 +255,7 @@ screen disagree. **"Answer in the terminal"** is always on the card.
 | `app/src/ChatPane.css` | Plain CSS on `tokens.css` |
 | `app/src/App.tsx` | The switch in `.agent-label`, the terminal wrapped in a hidden, `inert` `.agent-term`, and the activity, done stamp and pane draft passed in |
 | `app/src/settings.ts`, `SettingsSheet.tsx` | `chat_view` (default off), General → Chat view |
-| `app/src/mock/install.ts` | Per-harness turns, the pi/kimi refusal, `?agentsend=mid\|nocomposer\|unconfirmed`, `?agentprompt=permission\|question\|multi\|plan\|tall\|unreadable\|off` (`,waiting` for waiting places only; a Codex place gets Codex's approval), `?agentanswer=unseen`, `?activity=<n>` |
+| `app/src/mock/install.ts` | `?turns=answered` (a transcript whose prompts were answered, as `steps`; a mock answer lands in the transcript 1.5 s later), per-harness turns, the pi/kimi refusal, `?agentsend=mid\|nocomposer\|unconfirmed`, `?agentprompt=permission\|question\|multi\|plan\|tall\|unreadable\|off` (`,waiting` for waiting places only; a Codex place gets Codex's approval), `?agentanswer=unseen`, `?activity=<n>` |
 
 **Checked:**
 - **Contrast**, in all six themes, by the browser's resolved colours. Body
@@ -261,7 +289,7 @@ screen disagree. **"Answer in the terminal"** is always on the card.
 |---|---|---|
 | **A `turns:changed` event** per place (or `agent_turns` with `since`) | Removes the busy poll; a running turn shows as it happens | No updates mid-turn |
 | **Paging:** `agent_turns` with `before` | A conversation longer than 20 turns, or 64 KiB | "Older turns are on the host" |
-| **Tool-call summaries:** each tool's one-line input (the Bash command, the file path) and outcome | Chips that say *what* ran, not only that something did; the most-wanted piece of the terminal | Names only |
+| **Tool-call summaries:** each tool's one-line input (the Bash command, the file path) and outcome | Chips that say *what* ran, not only that something did; the most-wanted piece of the terminal. A call a person was ASKED about already carries its line (`steps`' `summary`) | Names only |
 | **A streaming partial turn**: the reply so far, marked incomplete | Only with the event above; until then the poll shows each finished message | Nothing mid-turn |
 | **`agent_interrupt`** (Esc into the lane's pane, `instruct`-class) | Stopping a runaway turn without the terminal | The terminal on the host |
 | **Multi-line sends**: `\n` allowed for harnesses verified to take one bracketed paste, confirmed by "[Pasted text +N lines]" | Pasting a stack trace or a list | One line (`view-session.md` "Why a message is one line" has the design) |

@@ -12,9 +12,9 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import {
   boxesOf, bytes, choiceOpen, clockMs, clockOf, dayLabel, draftProblem, fieldWords, itemsOf, lineDiff, loadPrompt,
-  loadTurns, promptBody, selectChoice, sendAnswer, sendDraft, sendMany, setAnswerText, setBoxText, setDraft,
-  splitAtRule, ticksOf, toggleTick, turnsUnsupported, useChat, SEND_MAX,
-  type Item, type PromptChoice, type PromptDetail, type ReadablePrompt, type Target,
+  loadTurns, permissionAnswerWords, promptBody, questionAnswerWords, selectChoice, sendAnswer, sendDraft, sendMany,
+  setAnswerText, setBoxText, setDraft, splitAtRule, ticksOf, toggleTick, turnsUnsupported, useChat, SEND_MAX,
+  type AskedStep, type Item, type PromptChoice, type PromptDetail, type ReadablePrompt, type Target,
 } from "./chat";
 import { HARNESS_LABEL, type Harness } from "./harness";
 import * as Icons from "./icons";
@@ -120,7 +120,7 @@ export function ChatPane(props: ChatPaneProps) {
         </p>
         {items.length === 0 && !prompt && <p className="chat-note" data-testid="chat-empty">No messages in this session yet.</p>}
         <ol className="chat-list" data-testid="chat-list">
-          {items.map((it) => <ChatItem key={it.key} it={it} agent={agent} onLink={onLink} pathLinks={pathLinks} />)}
+          {items.map((it) => <ChatItem key={it.key} it={it} agent={agent} root={path} onLink={onLink} pathLinks={pathLinks} />)}
         </ol>
       </>
     );
@@ -240,7 +240,7 @@ const toolsWords = (tools: string[]) => {
   return names.length === 1 ? `Used ${names[0]}.` : `Used ${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}.`;
 };
 
-function ChatItem(props: { it: Item; agent: string; onLink: (href: string) => void; pathLinks: ReturnType<typeof useDocPathLinks>["pathLinks"] }) {
+function ChatItem(props: { it: Item; agent: string; root: string; onLink: (href: string) => void; pathLinks: ReturnType<typeof useDocPathLinks>["pathLinks"] }) {
   const { it, agent } = props;
   switch (it.k) {
     case "sep":
@@ -277,6 +277,15 @@ function ChatItem(props: { it: Item; agent: string; onLink: (href: string) => vo
           </div>
         </li>
       );
+    case "asked":
+      return (
+        <li className="chat-row chat-row-agent">
+          {it.label && <p className="chat-name" aria-hidden="true">{agent}{it.step.at ? <span className="chat-at"> · {clockOf(it.step.at)}</span> : null}</p>}
+          <AskedCard step={it.step} agent={agent} root={props.root} onLink={props.onLink} />
+        </li>
+      );
+    case "answer":
+      return <AnswerBubble step={it.step} />;
     case "answered":
       return (
         <li className="chat-note chat-answered" data-testid="chat-answered">
@@ -293,6 +302,89 @@ function ChatItem(props: { it: Item; agent: string; onLink: (href: string) => vo
         </li>
       );
   }
+}
+
+/** What the agent asked, resolved: a question with the option picked
+ *  marked and described, the others muted; a tool call it asked to make; a
+ *  plan, folded. Read from the transcript, whoever answered it. */
+function AskedCard(props: { step: AskedStep; agent: string; root: string; onLink: (href: string) => void }) {
+  const { step } = props;
+  if (step.kind === "question") {
+    const answers = step.answer?.answers ?? [];
+    return (
+      <div className="chat-asked" role="group" aria-label={`${props.agent} asked`} data-testid="chat-asked">
+        {step.questions.map((q, i) => {
+          const a = answers.find((x) => x.question === q.question) ?? answers[i];
+          return (
+            <div key={i} className="chat-asked-q">
+              <p className="chat-asked-head">
+                {q.header && <span className="chat-kind">{q.header}</span>}
+                <span className="chat-asked-text">{q.question}</span>
+              </p>
+              <ul className="chat-asked-opts" aria-label={q.multi ? "Options, any number" : "Options"}>
+                {q.options.map((o, j) => {
+                  const on = !!a?.picked.includes(o.label);
+                  return (
+                    <li key={j} className={"chat-asked-opt" + (on ? " on" : "")} aria-current={on ? "true" : undefined}>
+                      <span className="chat-asked-mark" aria-hidden="true">{on ? "✓" : ""}</span>
+                      <span className="chat-asked-label">{o.label}</span>
+                      {on && o.description && <span className="chat-asked-desc">{o.description}</span>}
+                    </li>
+                  );
+                })}
+                {a?.typed && (
+                  <li className="chat-asked-opt on typed" aria-current="true">
+                    <span className="chat-asked-mark" aria-hidden="true">✓</span>
+                    <span className="chat-asked-label">{a.typed}</span>
+                    <span className="chat-asked-desc">Typed as the answer</span>
+                  </li>
+                )}
+              </ul>
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+  if (step.kind === "permission") {
+    return (
+      <div className="chat-asked chat-asked-perm" role="group" aria-label={`${props.agent} asked to use ${step.tool}`} data-testid="chat-asked">
+        <p className="chat-asked-head"><span className="chat-kind">Permission</span><span className="chat-asked-text">Asked to use <b>{step.tool}</b></span></p>
+        {step.summary && <pre className="chat-asked-summary">{step.summary.startsWith(props.root + "/") ? step.summary.slice(props.root.length + 1) : step.summary}</pre>}
+      </div>
+    );
+  }
+  const title = step.plan.split("\n").find((l) => l.trim())?.replace(/^#+\s*/, "") || "The plan";
+  return (
+    <div className="chat-asked" role="group" aria-label={`${props.agent}’s plan`} data-testid="chat-asked">
+      <p className="chat-asked-head"><span className="chat-kind">Plan</span></p>
+      <details className="chat-asked-plan">
+        <summary>{title}</summary>
+        <div className="chat-detail-plan"><Markdown src={step.plan} onLink={props.onLink} /></div>
+        {step.plan_file && <p className="chat-detail-sub">Plan file: {step.plan_file}</p>}
+      </details>
+    </div>
+  );
+}
+
+/** The answer a person gave, on their side of the conversation: the options
+ *  or text, Yes or No, approved or sent back, and any note with it. */
+function AnswerBubble(props: { step: AskedStep }) {
+  const { step } = props;
+  const words = step.kind === "question" ? questionAnswerWords(step)
+    : step.kind === "permission" ? permissionAnswerWords(step)
+    : step.approved ? "Approved" : "Sent back";
+  const note = step.kind === "question" ? (step.answer?.answers ?? []).map((a) => a.note).filter(Boolean).join(" · ") || undefined : step.note;
+  return (
+    <li className="chat-row chat-row-user">
+      <div className="chat-bubble chat-bubble-user chat-bubble-answer" role="group"
+        aria-label={`You answered${step.answered_at ? `, ${clockOf(step.answered_at)}` : ""}`} data-testid="chat-answer">
+        <p className="chat-answer-words">{words}</p>
+        {note && <p className="chat-answer-note">{note}</p>}
+      </div>
+      {step.answered_at && <p className="chat-status">Answered · {clockOf(step.answered_at)}</p>}
+    </li>
+  );
 }
 
 /** A waiting prompt, whole, with its own choices. A click selects (or

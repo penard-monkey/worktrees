@@ -738,19 +738,107 @@ const mockPromptUp = (repo: string, slug: string) => {
   const st = mockPromptState(repo, slug);
   return !!st.screen && (!mockPromptOpts().waiting || ACTIVITY_CYCLE[actIdx].waiting.includes(mockPlacePath(repo, slug)));
 };
+// An answer reaches the transcript a moment after the prompt goes, as
+// Claude's does: the step it would read is added to the place's last turn
+// (its reply and tools first made steps, so nothing is drawn twice).
+function mockRecordAnswer(repo: string, slug: string, sc: MockScreen, choice: { label: string; typed?: string }, picks?: string[]) {
+  // A multi-select's review screen sends the boxes already recorded.
+  if ("unreadable" in sc || sc.lines.some((l) => l.includes("Review your answers"))) return;
+  const turns = mockTurnsAt(repo, slug);
+  const turn = turns[turns.length - 1];
+  if (!turn) return;
+  const asked = Math.floor(Date.now() / 1000) - 2;
+  setTimeout(() => {
+    const now = Math.floor(Date.now() / 1000);
+    if (!turn.steps) turn.steps = [...(turn.reply ? [{ kind: "text", at: turn.at, text: turn.reply }] : []), ...turn.tools.map((name) => ({ kind: "tool", at: turn.at, name }))];
+    if (sc.detail?.tool === "ExitPlanMode") {
+      turn.steps.push({ kind: "plan", at: asked, answered_at: now, plan: String(sc.detail.input.plan ?? ""), approved: !/change/i.test(choice.label), ...(choice.typed ? { note: choice.typed } : {}) });
+    } else if (sc.kind === "question") {
+      const header = sc.lines.find((l) => /[☐☒]/.test(l))?.replace(/[←→✔]|Submit|[☐☒]/g, "").trim() ?? "";
+      const question = sc.lines.find((l) => l.trim().endsWith("?"))?.trim() ?? "";
+      const options = sc.choices.filter((c) => !c.text && c.label !== "Chat about this").map((c) => ({ label: c.label, description: c.more?.[0] ?? "" }));
+      const chat = choice.label === "Chat about this";
+      turn.steps.push({
+        kind: "question", at: asked, answered_at: now, questions: [{ header, question, multi: !!sc.multi, options }],
+        answer: chat ? { how: "chat" } : { how: "picked", answers: [{ question, picked: picks ?? (choice.typed ? [] : [choice.label]), ...(choice.typed && !picks ? { typed: choice.typed } : {}) }] },
+      });
+    } else {
+      const no = /^no\b/i.test(choice.label);
+      turn.steps.push({ kind: "permission", at: asked, answered_at: now, tool: sc.detail?.tool ?? "Bash", summary: sc.detail ? String(sc.detail.input.file_path ?? "") : sc.lines.find((l) => /^\s+(touch|\$)/.test(l))?.trim().replace(/^\$\s*/, ""), allowed: !no, ...(no ? {} : { scope: "once" }), ...(choice.typed ? { note: choice.typed } : {}) });
+    }
+  }, 1500);
+}
 const mockPromptFp = (st: { gen: number }) => `9c1f0d6e3b8a4c2e7f51a0b6d4c3e2f1a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5${String(st.gen).padStart(2, "0")}`;
 const mockPlacePath = (repo: string, slug: string) => (slug === "(main)" ? repo : `${repo}/.worktrees/${slug}`);
 const mockHarnessAt = (path: string) =>
   CODEX_PLACES.has(path) ? "codex" : PI_PLACES.has(path) ? "pi" : KIMI_PLACES.has(path) ? "kimi" : "claude";
 // The chat view's transcripts, per place, made on first read: a send appends
 // its line as a turn, and a scripted reply lands a few seconds later.
-const mockTurns = new Map<string, { at: number | null; user: string | null; reply: string; tools: string[]; truncated: boolean }[]>();
+// `?turns=answered` gives every Claude place a transcript whose prompts were
+// answered: a question, a typed answer, a multi-select, "Chat about this",
+// a No with its reason and a Yes with a next step, and a plan sent back and
+// then approved, as `turns::Step`s shaped like claude-2.1.316-answers.jsonl.
+type MockTurn = { at: number | null; user: string | null; reply: string; tools: string[]; truncated: boolean; steps?: Record<string, unknown>[] };
+const mockTurns = new Map<string, MockTurn[]>();
+function mockAnsweredTurns(now: number, place: string): MockTurn[] {
+  const q = (header: string, question: string, multi: boolean, options: [string, string][]) => ({ header, question, multi, options: options.map(([label, description]) => ({ label, description })) });
+  const plan = "# Plan: add greet.sh\n\n## Context\nA small script at the repo root that prints hello.\n\n## Steps\n1. Create `greet.sh` with a `#!/bin/sh` shebang and `echo hello`.\n2. Make it executable.\n3. Run `./greet.sh` and confirm it prints hello.\n";
+  return [
+    {
+      at: now - 2400, user: "Ask me which fruit to write a haiku about, then write it.", reply: "Yellow curve, peeled soft,\nmorning sun on the kitchen table,\na small sweet sunrise.", tools: ["AskUserQuestion"], truncated: false,
+      steps: [
+        { kind: "question", at: now - 2397, answered_at: now - 2392, questions: [q("Fruit", "Which fruit should I write a haiku about?", false, [["Apple", "The classic crisp fruit, often tied to orchards and autumn."], ["Banana", "A soft, curved tropical fruit that is easy to peel."], ["Cherry", "A small, glossy stone fruit that blooms in spring."]])], answer: { how: "picked", answers: [{ question: "Which fruit should I write a haiku about?", picked: ["Banana"] }] } },
+        { kind: "text", at: now - 2390, text: "Yellow curve, peeled soft,\nmorning sun on the kitchen table,\na small sweet sunrise." },
+      ],
+    },
+    {
+      at: now - 2100, user: "Which animal next? Then pizza toppings, as a multi-select.", reply: "Floating on his back, paws folded over his belly, the river rocks him.\n\nI'd add olives too, for the salty bite.", tools: ["AskUserQuestion", "AskUserQuestion"], truncated: false,
+      steps: [
+        { kind: "question", at: now - 2098, answered_at: now - 2090, questions: [q("Animal", "Which animal should the next haiku be about?", false, [["Owl", "A nocturnal bird with silent flight."], ["Fox", "A quick, clever canine that hunts at dusk."], ["Heron", "A tall wading bird, waiting to strike."]])], answer: { how: "picked", answers: [{ question: "Which animal should the next haiku be about?", picked: [], typed: "a sleepy otter" }] } },
+        { kind: "text", at: now - 2088, text: "Floating on his back, paws folded over his belly, the river rocks him." },
+        { kind: "question", at: now - 2080, answered_at: now - 2070, questions: [q("Toppings", "Which toppings do you want on the pizza?", true, [["Cheese", "A melted layer of mozzarella."], ["Olives", "Briny slices with a salty bite."], ["Mushrooms", "Earthy slices that pair well with garlic."]])], answer: { how: "picked", answers: [{ question: "Which toppings do you want on the pizza?", picked: ["Cheese", "Mushrooms"] }] } },
+        { kind: "text", at: now - 2069, text: "I'd add olives too, for the salty bite." },
+      ],
+    },
+    {
+      at: now - 1500, user: "Ask me which season for the last one.", reply: "What would you like to clarify about the season question?", tools: ["AskUserQuestion"], truncated: false,
+      steps: [
+        { kind: "question", at: now - 1498, answered_at: now - 1497, questions: [q("Season", "Which season should the last haiku be about?", false, [["Spring", "Blossoms and rain."], ["Summer", "Long light and heat."], ["Winter", "Snow and stillness."]])], answer: { how: "chat" } },
+        { kind: "text", at: now - 1495, text: "What would you like to clarify about the season question?" },
+      ],
+    },
+    {
+      at: now - 900, user: "Use the Bash tool to run exactly: touch probe-b.txt", reply: "Here's the directory listing: `probe-a.txt` and `probe-c.txt`, no `probe-b.txt`.", tools: ["Bash", "Bash", "Bash"], truncated: false,
+      steps: [
+        { kind: "permission", at: now - 898, answered_at: now - 895, tool: "Bash", summary: "touch probe-b.txt", allowed: false, note: "name it probe-c.txt instead" },
+        { kind: "permission", at: now - 894, answered_at: now - 880, tool: "Bash", summary: "touch probe-c.txt", allowed: true, scope: "once", note: "then list the directory" },
+        { kind: "tool", at: now - 878, name: "Bash" },
+        { kind: "text", at: now - 875, text: "Here's the directory listing: `probe-a.txt` and `probe-c.txt`, no `probe-b.txt`." },
+      ],
+    },
+    {
+      at: now - 300, user: "Plan adding hello.sh at the repo root that prints hello.", reply: "", tools: ["Write", "ExitPlanMode", "Write", "ExitPlanMode", "Write"], truncated: false,
+      steps: [
+        { kind: "tool", at: now - 296, name: "Write" },
+        { kind: "plan", at: now - 294, answered_at: now - 288, plan: plan.replace(/greet/g, "hello"), approved: false, note: "call it greet.sh instead" },
+        { kind: "tool", at: now - 285, name: "Write" },
+        { kind: "plan", at: now - 283, answered_at: now - 268, plan, plan_file: "/Users/demo/.claude/plans/validated-napping-dream.md", approved: true },
+        { kind: "permission", at: now - 266, answered_at: now - 259, tool: "Write", summary: `${place}/greet.sh`, allowed: false },
+      ],
+    },
+  ];
+}
 function mockTurnsAt(repo: string, slug: string) {
   const key = `${repo}|${slug}`;
   let t = mockTurns.get(key);
   if (t) return t;
   const now = Math.floor(Date.now() / 1000);
   const harness = mockHarnessAt(mockPlacePath(repo, slug));
+  if (harness === "claude" && new URLSearchParams(location.search).get("turns") === "answered") {
+    t = mockAnsweredTurns(now, mockPlacePath(repo, slug));
+    mockTurns.set(key, t);
+    return t;
+  }
   t = harness === "codex" ? [
     { at: now - 1500, user: "Move the invoice totals onto the new ledger API.", reply: "Done for `InvoiceSummary` and `InvoiceTable`. Both read `ledger.totals(accountId)` now; the old `computeTotals` helper has no callers left, so I removed it.\n\nTwo tests needed new fixtures (`billing/__fixtures__/ledger.json`).", tools: ["shell", "apply_patch", "apply_patch", "shell"], truncated: false },
     { at: now - 1320, user: "Run the billing tests.", reply: "`pnpm test billing` — 86 passed, 0 failed.", tools: ["shell"], truncated: false },
@@ -3596,6 +3684,7 @@ Phase 3: Frontend pane and mock harness
       const c = sc.choices.find((c) => c.n === args.choice);
       if (!c) throw "no such choice";
       if (c.checked !== undefined) throw "a multi-select: tick its boxes with agent_answer_many";
+      mockRecordAnswer(args.repo, args.slug, sc, c);
       st.screen = null;
       st.gen++;
       return { answered: true, confirmed: true, harness: mockHarnessAt(mockPlacePath(args.repo, args.slug)), session: mockAgentSession(args.slug), choice: c.n, label: c.label };
@@ -3643,6 +3732,7 @@ Phase 3: Frontend pane and mock harness
         st.gen++;
         return { answered: false, harness, session: mockAgentSession(args.slug), choice: c.n, note: "Filled and ticked; nothing is sent until agent_answer_many sends the boxes." };
       }
+      mockRecordAnswer(args.repo, args.slug, sc, { label: c.label, typed: text });
       st.screen = null;
       st.gen++;
       return { answered: true, confirmed: true, harness, session: mockAgentSession(args.slug), choice: c.n, label: c.label };
@@ -3661,6 +3751,7 @@ Phase 3: Frontend pane and mock harness
         if (!c.checked && c.text === "field") throw `choice ${n} is the free-text box: fill it with agent_answer_text first`;
       }
       const labels = sc.choices.filter((c) => want.includes(c.n)).map((c) => c.label);
+      mockRecordAnswer(args.repo, args.slug, sc, { label: labels.join(", ") }, labels);
       st.screen = sc.review ? sc.review(labels) : null;
       st.gen++;
       return { answered: true, confirmed: true, harness: mockHarnessAt(mockPlacePath(args.repo, args.slug)), session: mockAgentSession(args.slug), choices: want, labels };

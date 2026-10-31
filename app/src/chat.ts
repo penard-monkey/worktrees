@@ -26,7 +26,22 @@ import { invoke, windowOnHost } from "./ipc";
 // ── the rows' shapes ────────────────────────────────────────────────────────
 
 /** `turns::Turn`. `user: null` when the window starts inside the turn. */
-export type Turn = { at: number | null; user: string | null; reply: string; tools: string[]; truncated: boolean };
+export type Turn = {
+  at: number | null; user: string | null; reply: string; tools: string[]; truncated: boolean;
+  /** The turn in order (`turns::Step`): absent from a host that predates it. */
+  steps?: Step[];
+};
+/** `turns::Step`: the reply's blocks, the tools, and what a person was asked
+ *  and answered on the way, each at its own time. */
+export type Step =
+  | { kind: "text"; at: number | null; text: string }
+  | { kind: "tool"; at: number | null; name: string }
+  | { kind: "question"; at: number | null; answered_at?: number; questions: AskedQuestion[]; answer?: { how: "picked" | "chat" | "declined"; answers?: QuestionAnswer[] } }
+  | { kind: "permission"; at: number | null; answered_at?: number; tool: string; summary?: string; allowed: boolean; scope?: string; note?: string }
+  | { kind: "plan"; at: number | null; answered_at?: number; plan: string; plan_file?: string; approved?: boolean; note?: string };
+export type AskedQuestion = { header: string; question: string; multi: boolean; options: { label: string; description?: string }[] };
+export type QuestionAnswer = { question: string; picked: string[]; typed?: string; note?: string };
+export type AskedStep = Extract<Step, { kind: "question" | "permission" | "plan" }>;
 /** `agent_turns`' answer; `reason` only when no agent is running. */
 export type AgentTurns = { harness?: string; session?: string; turns: Turn[]; more: boolean; note: string; reason?: string };
 /** `prompt::Choice`. `checked` marks a multi-select's box; `text` a choice
@@ -160,6 +175,8 @@ export type Item =
   | { k: "earlier"; key: string }
   | { k: "user"; key: string; text: string; at: number | null }
   | { k: "reply"; key: string; text: string; tools: string[]; truncated: boolean; at: number | null; label: boolean }
+  | { k: "asked"; key: string; step: AskedStep; label: boolean }
+  | { k: "answer"; key: string; step: AskedStep }
   | { k: "answered"; key: string; a: Answered }
   | { k: "pending"; key: string; p: Pending };
 
@@ -168,36 +185,105 @@ const sameDay = (a: number, b: number) => new Date(a * 1000).toDateString() === 
 
 /** Turns oldest first, with a time separator at a gap of more than five
  *  minutes or a new day, this window's answers where they fall in time, and
- *  the messages the transcript has not shown yet at the end. */
+ *  the messages the transcript has not shown yet at the end. A turn with
+ *  `steps` is drawn in their order: each reply block at its own time, the
+ *  tools after the block they followed, and every question, permission and
+ *  plan a person answered as what was asked and then the answer. */
 export function itemsOf(turns: Turn[], answered: Answered[], pending: Pending[]): Item[] {
   const out: Item[] = [];
   let prevAt: number | null = null;
-  let lastWasReply = false;
+  let lastWasAgent = false;
   const queue = [...answered];
   const flushAnswered = (beforeSec: number | null) => {
     while (queue.length && (beforeSec === null || queue[0].at / 1000 < beforeSec)) {
       const a = queue.shift()!;
       out.push({ k: "answered", key: `a${a.at}`, a });
-      lastWasReply = false;
+      lastWasAgent = false;
     }
+  };
+  const sep = (at: number | null, key: string) => {
+    if (at === null) return;
+    if (prevAt === null || at - prevAt > GAP_S || !sameDay(at, prevAt)) out.push({ k: "sep", key, at });
+    prevAt = at;
   };
   turns.forEach((t, i) => {
     if (t.at !== null) flushAnswered(t.at);
-    if (t.at !== null && (prevAt === null || t.at - prevAt > GAP_S || !sameDay(t.at, prevAt))) out.push({ k: "sep", key: `s${i}`, at: t.at });
-    if (t.at !== null) prevAt = t.at;
+    sep(t.at, `s${i}`);
     if (t.user === null) out.push({ k: "earlier", key: `e${i}` });
     else {
       out.push({ k: "user", key: `u${i}`, text: t.user, at: t.at });
-      lastWasReply = false;
+      lastWasAgent = false;
     }
-    if (t.reply || t.tools.length || t.truncated) {
-      out.push({ k: "reply", key: `r${i}`, text: t.reply, tools: t.tools, truncated: t.truncated, at: t.at, label: !lastWasReply });
-      lastWasReply = true;
+    if (!t.steps?.length) {
+      if (t.reply || t.tools.length || t.truncated) {
+        out.push({ k: "reply", key: `r${i}`, text: t.reply, tools: t.tools, truncated: t.truncated, at: t.at, label: !lastWasAgent });
+        lastWasAgent = true;
+      }
+      return;
+    }
+    let reply: Extract<Item, { k: "reply" }> | null = null;
+    t.steps.forEach((st, j) => {
+      const key = `${i}.${j}`;
+      if (st.kind === "text" || st.kind === "tool") {
+        if (st.kind === "text" || !reply) {
+          if (st.at !== null) { flushAnswered(st.at); sep(st.at, `s${key}`); }
+          reply = { k: "reply", key: `r${key}`, text: st.kind === "text" ? st.text : "", tools: [], truncated: false, at: st.at, label: !lastWasAgent };
+          out.push(reply);
+          lastWasAgent = true;
+        }
+        if (st.kind === "tool") reply.tools.push(st.name);
+        return;
+      }
+      reply = null;
+      // Not answered yet: the live card is where it is shown.
+      if (st.answered_at === undefined) return;
+      if (st.at !== null) sep(st.at, `s${key}`);
+      out.push({ k: "asked", key: `q${key}`, step: st, label: !lastWasAgent });
+      out.push({ k: "answer", key: `a${key}`, step: st });
+      lastWasAgent = false;
+    });
+    if (t.truncated) {
+      const last = [...out].reverse().find((it) => it.k === "reply") as Extract<Item, { k: "reply" }> | undefined;
+      if (last) last.truncated = true;
     }
   });
   flushAnswered(null);
   for (const p of pending) out.push({ k: "pending", key: `p${p.id}`, p });
   return out;
+}
+
+/** This window's answers the transcript has not shown yet: newest first,
+ *  each taking the newest answered step not already taken that was
+ *  answered after it was sent (less the host's clock skew). Whatever
+ *  answered a prompt, the transcript's record of it is the one shown. */
+export function settleAnswered(answered: Answered[], turns: Turn[]): Answered[] {
+  const times = turns.flatMap((t) => (t.steps ?? []).flatMap((s) => ("answered_at" in s && s.answered_at !== undefined ? [s.answered_at] : [])));
+  times.sort((a, b) => b - a);
+  const taken = new Set<number>();
+  const keep: Answered[] = [];
+  for (const a of [...answered].sort((x, y) => y.at - x.at)) {
+    const after = Math.floor(a.at / 1000) - SKEW_S;
+    const hit = times.findIndex((t, i) => !taken.has(i) && t >= after);
+    if (hit >= 0) taken.add(hit);
+    else keep.push(a);
+  }
+  return keep.sort((x, y) => x.at - y.at);
+}
+
+/** How a question was answered, in a line. */
+export function questionAnswerWords(st: Extract<Step, { kind: "question" }>): string {
+  const a = st.answer;
+  if (!a) return "Answered";
+  if (a.how === "chat") return "Chat about this";
+  if (a.how === "declined") return "Declined to answer";
+  const parts = (a.answers ?? []).map((x) => [...x.picked, ...(x.typed ? [x.typed] : [])].join(", "));
+  return parts.filter(Boolean).join(" · ") || "Answered";
+}
+
+/** How a permission was answered, in a line. */
+export function permissionAnswerWords(st: Extract<Step, { kind: "permission" }>): string {
+  if (!st.allowed) return "No";
+  return st.scope && st.scope !== "once" ? `Yes, for this ${st.scope === "session" ? "session" : st.scope}` : "Yes";
 }
 
 /** How far the host's clock may run behind when a pending message is matched. */
@@ -420,7 +506,10 @@ export function loadTurns(t: Target): Promise<void> {
     try {
       const r = await invoke<AgentTurns>("agent_turns", { repo: t.repo, slug: t.slug, session: t.session, n: TURNS_MAX });
       const cur = viewOf(t.path);
-      put(t.path, { turns: { data: r, error: null, loading: false, at: Date.now() }, pending: settlePending(cur.pending, r.turns) });
+      put(t.path, {
+        turns: { data: r, error: null, loading: false, at: Date.now() },
+        pending: settlePending(cur.pending, r.turns), answered: settleAnswered(cur.answered, r.turns),
+      });
     } catch (e) {
       put(t.path, { turns: { ...viewOf(t.path).turns, loading: false, error: String(e) } });
     }
