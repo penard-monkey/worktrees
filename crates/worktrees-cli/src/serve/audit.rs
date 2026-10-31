@@ -1995,6 +1995,29 @@ impl ConnAudit {
                     detail.insert("session".into(), json!(ident(s)));
                 }
             }
+            // Free text into a prompt's field: like a line, its length and
+            // hash and never the text — and which choice, of which prompt.
+            "agent_answer_text" => {
+                if let Some(Value::String(t)) = arg(args, "text") {
+                    detail.insert("bytes".into(), json!(t.len()));
+                    detail.insert("sha256".into(), json!(sha256_hex(t.as_bytes())));
+                }
+                if let Some(c) = arg(args, "choice").and_then(Value::as_u64) {
+                    detail.insert("choice".into(), json!(c));
+                }
+                if let Some(Value::String(f)) = arg(args, "fingerprint") {
+                    detail.insert("fingerprint".into(), json!(ident(f)));
+                }
+            }
+            // A multi-select's boxes: which, to which prompt.
+            "agent_answer_many" => {
+                if let Some(Value::Array(cs)) = arg(args, "choices") {
+                    detail.insert("choices".into(), json!(cs.iter().filter_map(Value::as_u64).take(64).collect::<Vec<_>>()));
+                }
+                if let Some(Value::String(f)) = arg(args, "fingerprint") {
+                    detail.insert("fingerprint".into(), json!(ident(f)));
+                }
+            }
             // An answer (S7, §9.2): which of the prompt's choices, to which
             // prompt — the fingerprint is a hash of what the device saw.
             "agent_answer" => {
@@ -3690,6 +3713,36 @@ mod tests {
         let answered = g.records("call", "agent_answer");
         assert_eq!((answered[0]["detail"]["choice"].as_u64(), answered[0]["detail"]["fingerprint"].as_str()), (Some(1), Some(fp.as_str())));
         assert_eq!(answered[0]["cap"], json!("answer"));
+    }
+
+    /// Free text into a prompt's field is recorded like a line — length,
+    /// SHA-256, and which choice of which prompt — never its text; a
+    /// multi-select's answer by its boxes.
+    #[test]
+    fn an_agent_text_answer_is_recorded_by_length_and_hash_never_its_text() {
+        let mut g = Gate::new("agenttext", phone_caller());
+        let (pane, _) = g.agent(super::super::tests::CLAUDE_TYPE_SOMETHING);
+        *pane.typed.lock().unwrap() = Some(super::super::tests::CLAUDE_TYPED);
+        let c = phone(&g.a, 9);
+        let p = through(&g.cx, &c, &g.w, "agent_prompt", json!({ "repo": g.root, "slug": "(main)" })).unwrap();
+        let fp = p["fingerprint"].as_str().unwrap().to_string();
+        // `penguins` is what the fixture shows typed; the secret is the record's test.
+        let r = through(&g.cx, &c, &g.w, "agent_answer_text", json!({ "repo": g.root, "slug": "(main)", "choice": 4, "fingerprint": fp, "text": "penguins" }));
+        assert_eq!(r.map(|v| v["confirmed"].clone()), Ok(json!(true)));
+        let refused = through(&g.cx, &c, &g.w, "agent_answer_text", json!({ "repo": g.root, "slug": "(main)", "choice": 4, "fingerprint": fp, "text": "SECRET-ANSWER\nline two" }));
+        assert!(refused.is_err(), "a control character: the body refuses");
+        let raw = std::fs::read_to_string(g.d.join(FILE)).unwrap();
+        assert!(!raw.contains("SECRET-ANSWER") && !raw.contains("penguins"), "the text reached the log:\n{raw}");
+        let rec = g.records("call", "agent_answer_text");
+        assert_eq!(rec.len(), 2, "{rec:#?}");
+        assert_eq!(rec[0]["detail"]["bytes"], json!("penguins".len()));
+        assert_eq!(rec[0]["detail"]["sha256"], json!(sha256_hex(b"penguins")));
+        assert_eq!((rec[0]["detail"]["choice"].as_u64(), rec[0]["detail"]["fingerprint"].as_str()), (Some(4), Some(fp.as_str())));
+        assert_eq!(rec[0]["cap"], json!("instruct"));
+        let m = through(&g.cx, &c, &g.w, "agent_answer_many", json!({ "repo": g.root, "slug": "(main)", "choices": [1, 3], "fingerprint": "f00" }));
+        assert!(m.is_err(), "the prompt changed");
+        let rec = g.records("call", "agent_answer_many");
+        assert_eq!((rec[0]["detail"]["choices"].clone(), rec[0]["cap"].clone()), (json!([1, 3]), json!("answer")));
     }
 
     /// #559's gate reaches the agent rows through the normal chain: past its

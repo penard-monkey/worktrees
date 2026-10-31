@@ -49,6 +49,7 @@ pub mod netif;
 pub mod ops;
 pub mod pairuri;
 pub mod pathclass;
+pub mod pending;
 pub mod pi;
 pub mod pimcp;
 pub mod pimodels;

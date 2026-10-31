@@ -63,27 +63,59 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   ONE rule MCP `send` uses too (no control or invisible format characters —
   Trojan Source — and no leading `/ @ ! #`). It is `instruct` (drive-class: step-up and the
   audit's DRIVE budget), the audit log gets the text's length and hash and
-  never the text, and a device's send stamps `last_remote_send`. Do not grow
-  a second path that types into Claude.
+  never the text, and a device's send stamps `last_remote_send`. Its one
+  sibling is `agent_answer_text` (brief of 2026-10-30, `feat/actionable-
+  prompts`): the SAME paste (`AgentIo::paste` = `tmux::paste_into`), the same
+  rule, `instruct` (AND `answer`, checked in the body: an amended "Yes"
+  approves, so `instruct` alone must not reach it), length and hash, stamp —
+  and only into a field the
+  prompt itself opened and shows empty, each step proved before Enter. Do not
+  grow a third path that types into Claude.
 
 - **The agent rows (`worktrees_api::agents`, `worktrees_core::prompt`) read
-  Claude's screen, and Claude 2.1.309 has four traps** (fixtures and README:
-  `crates/worktrees-core/tests/fixtures/claude-screen/2.1.309`). Its FOOTER
-  changes with the highlight (`Esc to cancel · Tab to amend` on "Yes",
-  `Esc to cancel` on the next row), so a prompt is matched on the footer's
-  head and compared without it (`prompt::same_prompt`). A question draws a
-  full-width rule INSIDE its list, so a modal's top is the rule whose next
-  row is not a choice. The folder-trust prompt comes before Claude writes any
-  probe file, so "is it waiting" there is the pane's alone; the dot poll finds
-  that pane in its own per-tick `list-panes -a`, by its cwd, because a
-  registry only a snapshot filled was empty on a serve nobody had listed
-  (`watch::claude_startup_tick`). And a transcript
-  holds the whole system prompt and every CLAUDE.md in `api-request-blob`
-  entries, so anything that returns transcript text reads `user`/`assistant`
-  messages only (`turns`). An answer MOVES the highlight and proves the move
-  on a fresh capture before Enter, all under the place's lock — that lock is
-  what makes §9.2's compare-and-swap atomic; drop it and two clients answer
-  one prompt twice.
+  Claude's screen, and Claude has five traps** (fixtures and READMEs:
+  `crates/worktrees-core/tests/fixtures/claude-screen/2.1.309` and
+  `2.1.314`). **A NAMED Claude draws `──── <name> ─` as the screen's LAST
+  row under every modal** — and every pane-0 Claude worktrees launches gets
+  `--name`. The 2.1.309 fixtures had no `--name`, so until
+  `feat/actionable-prompts` no prompt of a launched Claude read at all
+  (2.1.301 draws it too: capture fixtures the way worktrees LAUNCHES, flags
+  included). Its FOOTER changes with the highlight (`Esc to cancel · Tab to
+  amend` on "Yes", `Esc to cancel` on the next row), so a prompt is matched
+  on the footer's head and compared without it (`prompt::same_prompt`). A
+  question draws a full-width rule INSIDE its list, so a modal's top is the
+  rule whose next row is not a choice — and the option just above that rule
+  is its free-text row, whose words a typed answer REPLACES. The
+  folder-trust prompt comes before Claude writes any probe file, so "is it
+  waiting" there is the pane's alone; the dot poll finds that pane in its own
+  per-tick `list-panes -a`, by its cwd, because a registry only a snapshot
+  filled was empty on a serve nobody had listed
+  (`watch::claude_startup_tick`). And a transcript holds the whole system
+  prompt and every CLAUDE.md in `api-request-blob` entries, so anything that
+  returns transcript text reads `user`/`assistant` messages only (`turns`);
+  it does NOT hold a tool call whose permission is pending (2.1.314 and
+  2.1.316 write it once answered). So a diff, command or plan taller than the
+  pane comes from Claude's PermissionRequest hook instead: a THIRD
+  `--plugin-dir` (`claude-prompt`, `guidance::materialize_prompt_in`) on
+  every Claude launch, whatever guidance and planning say, set in
+  `ops::ai_launch_for` (so `new`, `open`, `open --brief`, MCP
+  `create_worktree`/`open_place`, the app's main-checkout launch and profiled
+  sessions all get it). The hook keeps the tool and its whole input
+  (`worktrees_core::pending`: 0600, by session id, ≤4 records, gone at
+  SessionEnd, after an answer that used it, or once no prompt is up), and
+  `agent_prompt` reads a clipped prompt (`prompt::clipped`) only beside a
+  record that AGREES with the screen, as `detail`, which the fingerprint
+  covers; a plan with no record falls back to the file its footer names,
+  read through `safepath::safe_under`. The hook NEVER decides: its command
+  discards stdout and ends `|| true`, because exit 2 or a printed decision
+  would deny the user's prompt. Anything else that cannot be read whole is
+  `readable: false` with the visible rows. An
+  answer MOVES the highlight and proves the move on a fresh capture before
+  Enter, all under the place's lock — that lock is what makes §9.2's
+  compare-and-swap atomic; drop it and two clients answer one prompt twice.
+  Free text (`agent_answer_text`) and a multi-select's boxes
+  (`agent_answer_many`, where Enter only TICKS) are their own rows: an older
+  host ignores an unknown argument and would half answer.
 
 - **`worktrees serve` (Server Edition, Phase 1) hosts the api behind an
   authenticated WebSocket on `127.0.0.1`**: `{id, cmd, args}` in, `{id, ok}` /
@@ -116,7 +148,7 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   do not align them). hyper parses the HTTP and tungstenite sees only frames,
   also ON PURPOSE: tungstenite's `accept_hdr_async` WRITES an HTTP error
   response when it refuses, while a hyper service that returns `Err` closes
-  with 0 bytes. The 181 commands sit in ONE macro table
+  with 0 bytes. The 183 commands sit in ONE macro table
   (`serve/dispatch.rs`) with an `Exposure` each; the six `ClientLocal` rows
   (clipboard, editor, terminal, zoom, the app bundle) are refused with
   `err: "client-local"`, never run on the host — the docs viewer is an
@@ -1738,6 +1770,15 @@ wait loop on it never ended and a sandbox app ran for two hours.
   HOME-isolated run still writes the REAL `~/Library/{Caches,WebKit}/
   <identifier>`. Use a throwaway identifier and remove exactly those two dirs
   afterwards.
+- **Never give a scratch Claude its own `XDG_DATA_HOME`.** Claude's native
+  install keeps its versions in `$XDG_DATA_HOME/claude/versions`; a Claude
+  that finds none there installs itself there and RELINKS the real
+  `~/.local/bin/claude` (HOME is not isolated) to that copy. On 2026-10-31
+  an isolated-serve e2e did exactly that, its cleanup deleted the dir, and
+  `claude` was a dangling link for the whole machine. Isolate worktrees'
+  state with `XDG_STATE_HOME`, `XDG_CONFIG_HOME`, `--config-dir` and the tmux
+  socket, never `XDG_DATA_HOME`, for anything that runs Claude, and
+  `readlink ~/.local/bin/claude` before removing a scratch dir.
 - **Give a sandbox drive its own tmux server, and mind the socket path.** The
   sandbox app and the serve it starts inherit `$TMUX`, so they talk to the
   user's real server unless it is unset. `env -u TMUX TMUX_TMPDIR=<dir>` on
@@ -1794,6 +1835,19 @@ wait loop on it never ended and a sandbox app ran for two hours.
   substitute — a genuinely busy session can go minutes without a write, which is
   why the dot has no expiry. Anything new read out of that file needs the same
   question asked: which write set this field?
+- **That probe file can carry its predecessor's TAIL, and a reader that skips
+  quietly hides a live session from every surface at once.** (main)'s probe,
+  written 2026-10-28 by Claude Code 2.1.301 and found 2026-10-29, was a whole
+  object plus one stray `}`, a shorter write over a longer one that was never
+  truncated. `serde_json` called that "trailing characters", and the session
+  left the agent rows, the dots and `place_status` together, while
+  `agent_turns` said it had "written no session file yet". `agent::parse_probe`
+  takes the FIRST JSON value, which is the new write; that rule is for this one
+  file we do not own, not a licence for trailing bytes anywhere else. A live
+  pid's file that still does not parse is NAMED (`agent::scan_probes`: the
+  transcript error, `doctor`, one serve.log line per path and mtime), because
+  an agent missing for no stated reason looks exactly like one that never
+  started. Never repair the file: restarting that Claude rewrites it.
 - **A live Claude transcript's MTIME is not its last turn.** Claude Code keeps
   rewriting `~/.claude/projects/<mangled>/<sid>.jsonl` long after the session's
   last entry: measured across every transcript touched in a day, 24 of 28 had an

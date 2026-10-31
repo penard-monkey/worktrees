@@ -498,6 +498,14 @@ pub struct AiLaunch {
     /// user turns guidance off (owned-planning §3.3). Emitted right after
     /// `guidance`.
     pub planning: Vec<String>,
+    /// The prompt plugin (`--plugin-dir <claude-prompt>`, already
+    /// shell-quoted): Claude's PermissionRequest hook, which keeps what a
+    /// permission prompt asks so serve can show one taller than its pane whole
+    /// (`pending`). On every Claude launch, whatever guidance and planning say;
+    /// filled by `ops::ai_launch_for`. Emitted after the adapter's tail
+    /// (`--name`) and before the opener, so it never comes between the ai
+    /// word and a resume arg.
+    pub prompt_hook: Vec<String>,
     /// The model the user chose for THIS launch, validated
     /// (`choice::validate_model`). Emitted by the adapter through the
     /// registry's `model_arg`, on a fresh launch only — never on a resume, which
@@ -572,6 +580,7 @@ pub fn claude_launch(base: &AiLaunch, p: &Profile, m: &Materialized) -> AiLaunch
         place_flags: Vec::new(),
         guidance: base.guidance.clone(),
         planning: base.planning.clone(),
+        prompt_hook: base.prompt_hook.clone(),
         model: base.model.clone(),
         resume: base.resume,
         resume_id: base.resume_id.clone(),
@@ -644,6 +653,7 @@ impl AiLaunch {
             place_flags: Vec::new(),
             guidance: Vec::new(),
             planning: Vec::new(),
+            prompt_hook: Vec::new(),
             model: None,
             resume: false,
             resume_id: None,
@@ -720,7 +730,7 @@ impl AiLaunch {
             cmd.push_str(w);
         }
         cmd.push_str(&self.cmd[split..]);
-        for w in &args.tail {
+        for w in args.tail.iter().chain(&self.prompt_hook) {
             cmd.push(' ');
             cmd.push_str(w);
         }
@@ -1733,6 +1743,7 @@ mod tests {
             place_flags: Vec::new(),
             guidance: Vec::new(),
             planning: Vec::new(),
+            prompt_hook: Vec::new(),
             model: None,
             resume: false,
             resume_id: None,
@@ -1769,6 +1780,7 @@ mod tests {
             place_flags: Vec::new(),
             guidance: Vec::new(),
             planning: Vec::new(),
+            prompt_hook: Vec::new(),
             model: None,
             resume: false,
             resume_id: None,
@@ -1814,6 +1826,7 @@ mod tests {
             place_flags: Vec::new(),
             guidance: Vec::new(),
             planning: Vec::new(),
+            prompt_hook: Vec::new(),
             model: None,
             resume: false,
             resume_id: None,
@@ -1850,6 +1863,16 @@ mod tests {
         // with guidance off, planning still rides
         l.guidance.clear();
         assert!(l.launch_cmd("repo-x").starts_with("claude --plugin-dir '/p/claude-plan'"));
+        // and the prompt plugin rides after `--name` and before the opener,
+        // so a resume arg stays beside the ai word
+        l.prompt_hook = vec!["--plugin-dir".into(), "'/h/claude-prompt'".into()];
+        assert_eq!(l.launch_cmd("repo-x"), "claude --plugin-dir '/p/claude-plan' --name 'repo-x' --plugin-dir '/h/claude-prompt'");
+        l.planning.clear();
+        let r = AiLaunch { cmd: "claude -r".into(), opener: Some("Read .planning/brief.md and begin.".into()), ..l.clone() };
+        assert_eq!(
+            r.launch_cmd("repo-x"),
+            "claude -r --name 'repo-x' --plugin-dir '/h/claude-prompt' 'Read .planning/brief.md and begin.'"
+        );
     }
 
     #[test]
@@ -1876,6 +1899,7 @@ mod tests {
             place_flags: Vec::new(),
             guidance: Vec::new(),
             planning: Vec::new(),
+            prompt_hook: Vec::new(),
             model: None,
             resume: false,
             resume_id: None,

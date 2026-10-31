@@ -1,0 +1,40 @@
+     │ 30. Write a short commit message.                                                   │
+     │ 31. Keep the message to one line.                                                   │
+     │ 32. Do not add any Claude attribution trailer.                                      │
+     │ 33. Commit locally on the probe branch.                                             │
+     │ 34. Confirm the commit with git log -1.                                             │
+     │ 35. Do not push to any remote.                                                      │
+     │ 36. Tell the user the commit is ready to push.                                      │
+     │ 37. Leave the push decision to the user.                                            │
+     │ 38. Re-run ./greet.sh after the commit.                                             │
+     │ 39. Confirm the working tree is clean.                                              │
+     │ 40. Remove any temporary files created.                                             │
+     │ 41. Check the scratchpad holds nothing needed.                                      │
+     │ 42. Note that no other files were touched.                                          │
+     │ 43. Report the final file path.                                                     │
+     │ 44. Report the verification output.                                                 │
+     │ 45. Summarize the result in one short message.                                      │
+     ╰─────────────────────────────────────────────────────────────────────────────────────╯
+
+✻ Cooked for 15s · done 11:50 PM
+
+❯ Call the MCP tool mcp__worktrees__list_places once (load it with ToolSearch first if needed) and tell me how many
+  places it lists. Nothing else.
+
+  Calling worktrees…
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Tool use
+ worktrees — List Places Tool: (MCP)
+
+ About the worktrees — List Places Tool:
+ │ List every place (worktree) in this repository with its branch, git state, tmux session status and declared
+ │ lifecycle. Start here.
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and don't ask again for worktrees — List Places commands in /private/tmp/claude-501/wtap/e2e/repo/.w…
+   3. No
+
+ Esc to cancel · Tab to amend
+─────────────────────────────────────────────────────────────────────────────────────────────────────────── wtap-probe ─

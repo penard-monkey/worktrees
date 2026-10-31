@@ -1,0 +1,40 @@
+
+[38;2;215;119;87m ▐[48;2;0;0;0m▛███▛█[39m[49m   [1mClaude Code[0m [38;2;153;153;153mv2.1.314[39m
+[38;2;215;119;87m▝▜[48;2;0;0;0m█████[49m█▀[39m  [38;2;153;153;153mHaiku 5.5 · Claude Max[39m
+[38;2;215;119;87m ▝▝   ▝▝ [39m  [38;2;153;153;153m/private/tmp/claude-501/wtap/e2e/repo/.worktrees/probe[39m
+
+
+[38;2;153;153;153m[48;2;55;55;55m❯ [38;2;255;255;255mRun the shell command: touch probe-a.txt[39m
+
+[38;2;153;153;153m[49m [39m Creating empty file probe-a.txt
+[38;2;153;153;153m  ⎿  $ touch probe-a.txt[39m
+
+[38;2;177;185;249m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m [1m[38;2;177;185;249mBash command[0m
+ [1mTip: auto mode handles these prompts for you — choose "switch to auto mode" below[0m
+ [38;2;153;153;153mCreate empty file probe-a.txt[39m
+[38;2;80;80;80m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+[39m touch probe-a.txt
+[38;2;80;80;80m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+[39m Do you want to proceed?
+ [38;2;177;185;249m❯[39m [38;2;153;153;153m1. [38;2;177;185;249mYes, [2m[39mand tell Claude what to do next[0m
+   [38;2;153;153;153m2. [39mYes, and always allow access to [1m/private/tmp/claude-501/wtap/e2e/repo/.worktrees/probe[0m from this project
+   [38;2;153;153;153m3. [39mYes, and switch to auto mode[38;2;153;153;153m · auto mode handles these prompts for you[39m
+   [38;2;153;153;153m4. [39mNo, use a different file name
+
+ [38;2;153;153;153mEsc to cancel[39m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[38;2;136;136;136m─────────────────────────────────────────────────────────────────────────────────────────────────────────── wtap-probe ─

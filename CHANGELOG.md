@@ -5,6 +5,41 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Fixed
+- **The phone opens a live agent's conversation again, or says why it
+  can't.** The iPhone app answered "Couldn't load the conversation" for a
+  Claude that was running fine, and the host said that Claude had "written no
+  session file yet". It had: Claude Code had written a shorter session file
+  over a longer one and left one stray byte at the end, and worktrees refused
+  the whole file. That one byte hid the session everywhere at once: the
+  conversation, the busy dot, and what other agents see through
+  `place_status`. worktrees now reads the file and ignores the leftover tail,
+  so that session shows up again. A session file that really is broken (cut
+  short, garbage) is now named instead of silently skipped: the phone's error
+  says which file worktrees can't read, `worktrees doctor` lists it with the
+  parse error, and the fix it gives is to restart that Claude (`/exit`, then
+  reopen it), never to edit the file, which belongs to Claude Code.
+- **An agent's prompts can be read and answered without the terminal.**
+  Every Claude that worktrees starts is named after its session, and a named
+  Claude puts its name under the prompt's last line. Because of that, the
+  chat view and the phone could not read a single Claude prompt, and
+  answering went back to the terminal. A one-question pick was enough to
+  hit it. Questions and permissions now read, including multi-select
+  questions, two-question forms with their review, and plan approvals. You
+  can now answer "Type something.", say "No, and tell Claude what to do
+  differently" (or "Yes, and…"), give a plan feedback, or add a Codex note,
+  all from a client. On a paired phone, typing needs the device's instruct
+  permission and a step-up, the same as sending a line, and its answer
+  permission too, because typed text also picks one of the prompt's
+  choices. The audit log keeps only the text's length and a hash of it. A
+  prompt taller than the pane, such as a long diff, command or plan, now
+  comes with the whole of what Claude asked, taken from a hook worktrees
+  adds to every Claude it starts. The hook only reads the prompt and never
+  answers it, and what it keeps is private to you and gone once the prompt
+  is. A tall prompt from a Claude started before this update shows its
+  visible part, and you answer it at the host. A long plan is the exception:
+  it is read from its own plan file.
+
 ## [0.44.2] - 2026-10-29
 
 ### Added

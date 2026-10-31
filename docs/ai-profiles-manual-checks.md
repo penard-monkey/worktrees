@@ -270,6 +270,40 @@ is now the only headless path to verify.
 
 ---
 
+## 13. The prompt hook (a prompt taller than its pane)
+
+Every Claude worktrees launches gets a third `--plugin-dir`, `…/claude-prompt`,
+whose PermissionRequest hook keeps what a permission prompt asks
+(`worktrees_core::pending`) so `agent_prompt` can show a diff, command or plan
+taller than the pane whole, as `detail`. It rests on three undocumented
+behaviours: the hook FIRES while the prompt is up (before it is answered), its
+stdin carries the whole `tool_input`, and Claude still writes no pending tool
+call to the transcript (if it starts to, the transcript is the better source).
+Verified against 2.1.316. In a scratch repo, in a place worktrees launched:
+
+- [ ] `ps -o command= -p <claude pid>` shows `--plugin-dir …/claude-prompt`,
+      with guidance and planning both off as well as on.
+- [ ] Ask for an Edit on a 60-line file that replaces most of it (or shrink the
+      pane: `tmux resize-window -y 13` on a Bash prompt) → while the prompt is
+      up, `~/.local/state/worktrees/pending/<session id>.json` exists (0600, in a
+      0700 dir) and holds that tool and its whole input.
+- [ ] `agent_prompt` on that place → `readable: true` with `detail.from: "hook"`;
+      answer it from a client → the file loses that record.
+- [ ] Answer a tall prompt AT THE TERMINAL instead, wait for the next
+      `agent_prompt` → the record goes (no prompt up, agent not waiting).
+- [ ] One hook spawn per permission prompt and none while idle: put a counting
+      wrapper in the hook's place (edit a COPY of the materialised
+      `hooks/hooks.json` and launch Claude with that copy's `--plugin-dir`),
+      raise three prompts, idle a minute → three lines, then none.
+- [ ] Point a copy's command at a missing binary → every prompt still appears
+      and answers as normal (the command ends `>/dev/null 2>&1 || true`).
+- [ ] `/exit` → the session's file is gone (SessionEnd).
+- [ ] Plan mode, a plan longer than its box → `detail.from: "hook"`. With a
+      Claude started BEFORE the hook existed (no `claude-prompt` in its argv) →
+      `detail.from: "plan-file"`, the footer's `~/.claude/plans/<name>.md`.
+
+---
+
 ## MCP resources in the `@` menu
 
 `make test-mcp` proves the SERVER side end to end (the list, the reads, the

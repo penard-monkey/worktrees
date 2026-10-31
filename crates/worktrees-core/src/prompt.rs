@@ -9,8 +9,10 @@
 //!   amber dot's rule (`activity::codex_panes`): history can quote "Do you
 //!   want to proceed?", but only a live modal puts its key hints at the bottom
 //!   of the screen, where the composer otherwise sits. Claude and Codex end
-//!   on a footer; kimi and pi close the block with a rule where their composer
-//!   was (`kimi::read_screen`, `pi::read_screen`); Claude's multi-question
+//!   on a footer — under which a NAMED Claude (every lane worktrees launches)
+//!   draws its `──── <name> ─` tag, Claude's own and skipped; kimi and pi
+//!   close the block with a rule where their composer was
+//!   (`kimi::read_screen`, `pi::read_screen`); Claude's multi-question
 //!   review screen has no footer at all and ends on its last choice, so it is
 //!   anchored by its `← … ✔ Submit →` tab bar instead.
 //! - **What is returned is the modal and nothing above it.** Each reader cuts
@@ -35,6 +37,15 @@
 //! drawing — Claude's checkbox header or tab bar, Codex's `Question N/M`,
 //! kimi's `[n]` choice rows under its `question` header — never by a footer
 //! alone or by any row the agent wrote; anything else is a permission.
+//!
+//! **Free text and boxes** are read the same way, by where the harness puts
+//! them: a choice's [`Typing`] — Claude's free-text row is the option just
+//! above the rule inside a question's list (a typed answer replaces its
+//! words), a plan's is the row with Claude's feedback hint under it, and
+//! Tab amends Claude's "Yes"/"No" and adds Codex's notes. A multi-select
+//! (`Modal::multi`) ticks a box per Enter and sends them from a `Submit`
+//! row that is no choice. [`field`], [`shows`], [`same_but`] and
+//! [`same_form`] are what the answering rows prove each step with.
 
 use serde::Serialize;
 
@@ -60,9 +71,25 @@ pub enum HostOnly {
     /// Not a choice this reader knows to be one-shot: it may change what the
     /// agent is allowed to do from now on.
     Widens,
-    /// It opens a text field inside the modal. Free text is `instruct`, not
-    /// `answer` (Phase 2 §9.2), and a half-answered modal helps nobody.
+    /// It opens a text field inside the modal, and that field is empty: as a
+    /// plain choice it answers nothing. Free text is `instruct`, not
+    /// `answer` (Phase 2 §9.2) — `agent_answer_text`, when the choice has a
+    /// [`Typing`]; kimi's have none yet.
     Text,
+}
+
+/// How a choice takes free text (`agent_answer_text`).
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Typing {
+    /// The choice IS a text field: Claude's "Type something.", a plan's "Tell
+    /// Claude what to change". Choosing it while it is empty answers nothing,
+    /// so `agent_answer` keeps it `host_only: text`.
+    Field,
+    /// Tab opens a field that rides with the choice: Claude's "Yes" and "No"
+    /// (`Tab to amend`), a Codex question's notes (`tab to add notes`).
+    /// `agent_answer` still makes the choice without it.
+    Amend,
 }
 
 /// One of a prompt's own choices.
@@ -70,7 +97,7 @@ pub enum HostOnly {
 pub struct Choice {
     /// Its position in the list, from 1 — what `agent_answer` names.
     pub n: u32,
-    /// Its first row, without the highlight mark or the number.
+    /// Its first row, without the highlight mark, the number or a box.
     pub label: String,
     /// Its continuation rows: a wrapped label, a description.
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -78,6 +105,12 @@ pub struct Choice {
     pub highlighted: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host_only: Option<HostOnly>,
+    /// A multi-select box, and whether it is ticked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checked: Option<bool>,
+    /// It takes free text, and how.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<Typing>,
 }
 
 /// A prompt on an agent's screen.
@@ -89,6 +122,10 @@ pub struct Modal {
     /// included, and nothing above it.
     pub lines: Vec<String>,
     pub choices: Vec<Choice>,
+    /// A multi-select question: Enter TICKS a box, and a `Submit` row under
+    /// the boxes sends them (`agent_answer_many`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub multi: bool,
     /// `lines` without the footer, highlight marks blanked — what stays the
     /// same while the highlight moves ([`same_prompt`]). Claude's footer
     /// changes with the highlight (`Esc to cancel · Tab to amend` on "Yes",
@@ -99,6 +136,16 @@ pub struct Modal {
     /// where the harness draws one edge to edge ([`Modal::summary`]).
     #[serde(skip)]
     edge: Option<usize>,
+    /// The rows the highlight walks, top to bottom: a choice's number, or
+    /// `None` for a multi-select's `Submit` row, which is no choice.
+    #[serde(skip)]
+    order: Vec<Option<u32>>,
+    /// The highlight is on that `Submit` row.
+    #[serde(skip)]
+    on_submit: bool,
+    /// The harness that drew it (a provider id): how its fields read.
+    #[serde(skip)]
+    harness: &'static str,
 }
 
 /// The highlight marks: Claude `❯`, Codex `›`, kimi `▶` / `→`, pi `→`.
@@ -114,6 +161,13 @@ const ONE_SHOT: &[&str] = &[
     "Yes, proceed (y)",
     "No, and tell Codex what to do differently (esc)",
     "No, and tell Claude what to do differently (esc)",
+    // Claude 2.1.314: a Yes or No whose amend field is open and empty, and a
+    // plan approved with every edit still asked for — one-shot by the user's
+    // decision of 2026-10-31, because it grants nothing standing ("Yes, and
+    // use auto mode" does, and stays the host's).
+    "Yes, and tell Claude what to do next",
+    "No, and tell Claude what to do differently",
+    "Yes, manually approve edits",
     "Approve once",
     "Reject",
     "Do not trust",
@@ -123,6 +177,24 @@ const ONE_SHOT: &[&str] = &[
 /// Choices that open a text field: Claude's "Type something.", kimi's
 /// "Other", kimi's "Reject with feedback".
 const TEXT_CHOICES: &[&str] = &["Type something.", "Other", "Reject with feedback"];
+
+/// What Claude's text rows say while they are empty: a question's (with its
+/// period on a one-choice list, without it among boxes) and a plan's.
+const CLAUDE_EMPTY_FIELDS: &[&str] = &["Type something.", "Type something", "Tell Claude what to change"];
+/// A permission's one-shot choices that Tab amends (`Tab to amend`), and what
+/// each says once its field is open and empty. Typed text replaces the part
+/// after the comma: `No, use a different file name`.
+const CLAUDE_AMENDS: &[(&str, &str)] =
+    &[("Yes", "Yes, and tell Claude what to do next"), ("No", "No, and tell Claude what to do differently")];
+/// The hint Claude draws under a plan's text row.
+const PLAN_FEEDBACK_HINT: &str = "shift+tab to approve with this feedback";
+/// The head of a plan approval's footer, which goes on to name the plan's
+/// file (`· ~/.claude/plans/<name>.md`).
+const PLAN_FOOTER: &str = "ctrl+g to edit in Vim · ";
+/// What a Codex question's notes row says while it is open and empty.
+const CODEX_EMPTY_NOTES: &str = "Add notes";
+/// The most rows [`visible`] returns.
+pub const VISIBLE_MAX: usize = 24;
 
 /// The prompt on `screen`, read the way `harness` (a provider id) draws one.
 /// `screen` may carry escapes (`capture-pane -e`); they are stripped first.
@@ -136,18 +208,28 @@ pub fn read(harness: &str, screen: &str) -> Option<Modal> {
     }
 }
 
-/// Claude Code (fixtures `claude-screen/2.1.309`). The footer is the bottom
-/// row: `Esc to cancel…` under a permission, `Enter to confirm…` under the
-/// folder-trust prompt, `Enter to select…` under a question; the review
-/// screen of a multi-question form has none and ends on its last choice. The
-/// top is the nearest column-0, full-width rule above it whose next row is
-/// not a choice — a question draws one INSIDE its list, above
-/// `4. Chat about this`. Agent text inside a permission (the command, the
-/// file preview) is indented, so it cannot draw that rule.
+/// Claude Code (fixtures `claude-screen/2.1.309` and `2.1.314`). The footer
+/// is the bottom row: `Esc to cancel…` under a permission, `Enter to
+/// confirm…` under the folder-trust prompt, `Enter to select…` under a
+/// question, `ctrl+g to edit in Vim · <plan file>` under a plan
+/// ([`claude_plan`]); the review screen of a multi-question form has none and
+/// ends on its last choice. Below all of them a NAMED Claude (`--name`, which
+/// every lane worktrees launches gets) draws its name tag, `──── <name> ─`,
+/// as the screen's last row: Claude's own, and never part of the modal. The
+/// top is the nearest column-0, full-width rule above the footer whose next
+/// row is not a choice — a question draws one INSIDE its list, above
+/// `Chat about this`. Agent text inside a permission (the command, the file
+/// preview) is indented, so it cannot draw that rule.
 pub fn claude(screen: &str) -> Option<Modal> {
     let rows = rows(screen);
-    let last = last_nonblank(&rows, rows.len())?;
     let width = rows.iter().map(|r| r.chars().count()).max()?;
+    let mut last = last_nonblank(&rows, rows.len())?;
+    if name_tag(&rows[last], width) {
+        last = last_nonblank(&rows, last)?;
+    }
+    if let Some((foot, _)) = plan_footer(&rows, last) {
+        return claude_plan(&rows, foot, last, width);
+    }
     let foot = rows[last].trim();
     let (kind, end) = if foot.starts_with("Enter to select") {
         (Kind::Question, last)
@@ -161,9 +243,9 @@ pub fn claude(screen: &str) -> Option<Modal> {
     let top = (0..end).rev().find(|&i| full_rule(&rows[i], width) && !next_is_choice(&rows, i, end))?;
     // A question's choices are all a device's, so "question" is decided by
     // what CLAUDE draws, never by the footer alone: AskUserQuestion heads its
-    // modal with a checkbox (`☐ Colour`) or, for several questions, the
-    // `← ☐ Colour ☐ Size ✔ Submit →` tab bar. Another dialog with the same
-    // footer is a permission, its unknown choices the host's.
+    // modal with a checkbox (`☐ Colour`) or, for several questions or boxes,
+    // the `← ☐ Colour ☐ Size ✔ Submit →` tab bar. Another dialog with the
+    // same footer is a permission, its unknown choices the host's.
     let head = rows[top + 1..end].iter().map(|r| r.trim()).find(|t| !t.is_empty())?;
     let tab_bar = head.starts_with('←') && head.ends_with('→');
     let asked = tab_bar || head.starts_with(['☐', '☒', '✔']);
@@ -172,8 +254,96 @@ pub fn claude(screen: &str) -> Option<Modal> {
         return None;
     }
     let kind = if kind == Kind::Question && !asked { Kind::Permission } else { kind };
-    let choices = numbered_run(&rows, top + 1, end).or_else(|| marked_run(&rows, top + 1, end, |_| false))?;
-    Some(modal(kind, &rows, top + 1, last, end, choices))
+    let mut at = match numbered_at(&rows, top + 1, end) {
+        Some(at) => at,
+        None => marked_run(&rows, top + 1, end, |_| false)?.into_iter().map(|c| (0, c)).collect(),
+    };
+    let mut submit = None;
+    if kind == Kind::Question {
+        // A multi-select draws a box on each of its options.
+        for (_, c) in &mut at {
+            if let Some((ticked, rest)) = tick(&c.label) {
+                c.checked = Some(ticked);
+                c.label = rest.to_string();
+            }
+        }
+        // AskUserQuestion's own free-text row is the last option, just above
+        // the rule inside the list — by where Claude puts it, so a typed
+        // answer (which replaces "Type something.") is still that row.
+        let inner = (top + 1..end).find(|&i| full_rule(&rows[i], width) && next_is_choice(&rows, i, end));
+        if let Some(inner) = inner {
+            if let Some((_, c)) = at.iter_mut().rev().find(|(i, _)| *i < inner) {
+                c.text = Some(Typing::Field);
+            }
+            // Among boxes, `Submit` is a row of its own between the last box
+            // and that rule: no choice, but one the highlight walks over.
+            if let Some(j) = at.iter().rposition(|(_, c)| c.checked.is_some()) {
+                let row = (at[j].0 + 1..inner).find(|&i| unmarked(&rows[i]) == "Submit");
+                if let Some(row) = row {
+                    at[j].1.more.retain(|m| unmarked(m) != "Submit");
+                    submit = Some((at[j].1.n, rows[row].trim_start().starts_with(MARKS)));
+                }
+            }
+        }
+    } else if foot.starts_with("Esc to cancel") {
+        for (_, c) in &mut at {
+            if c.more.is_empty() && CLAUDE_AMENDS.iter().any(|(closed, open)| c.label == *closed || c.label == *open) {
+                c.text = Some(Typing::Amend);
+            }
+        }
+    }
+    let mut m = modal(provider::CLAUDE.id, kind, &rows, top + 1, last, end, at.into_iter().map(|(_, c)| c).collect());
+    if let Some((after, on)) = submit {
+        m.multi = true;
+        let i = m.order.iter().position(|o| *o == Some(after)).map_or(m.order.len(), |i| i + 1);
+        m.order.insert(i, None);
+        m.on_submit = on;
+    }
+    Some(m)
+}
+
+/// Claude's plan approval (ExitPlanMode, fixtures `2.1.314/plan-approval*`):
+/// a sheet whose top edge is a column-0 row of `▔` across the screen, its
+/// own rules indented, the plan in a dashed box, and a footer that names the
+/// plan's file. A plan longer than its box is CLIPPED inside it — the box's
+/// dashed bottom edge is gone — and then the plan cannot be shown whole, so
+/// it is no modal here. Its footer is rows `foot..=last` ([`plan_footer`]).
+fn claude_plan(rows: &[String], foot: usize, last: usize, width: usize) -> Option<Modal> {
+    let top = (0..foot).rev().find(|&i| {
+        let n = rows[i].chars().count();
+        rows[i].starts_with('▔') && rows[i].chars().all(|c| c == '▔') && n >= 20 && n + 1 >= width
+    })?;
+    let mut at = numbered_at(rows, top + 1, foot)?;
+    let first = at.first()?.0;
+    let dashed = |r: &str| {
+        let t = r.trim();
+        r.len() - r.trim_start().len() <= 2 && t.chars().count() >= 20 && t.chars().all(|c| c == '╌')
+    };
+    if (top + 1..first).filter(|&i| dashed(&rows[i])).count() != 2 {
+        return None;
+    }
+    for (_, c) in &mut at {
+        if c.more.last().map(String::as_str) == Some(PLAN_FEEDBACK_HINT) {
+            c.text = Some(Typing::Field);
+        }
+    }
+    Some(modal(provider::CLAUDE.id, Kind::Permission, rows, top + 1, last, foot, at.into_iter().map(|(_, c)| c).collect()))
+}
+
+/// A plan approval's footer, `ctrl+g to edit in Vim · <its file>`, ending on
+/// row `last`: the row it starts on and the file it names. A narrow pane
+/// wraps it — at 80 columns the file goes to a row of its own, and a name
+/// longer than the row is cut across two — so it is looked for up to three
+/// rows above, with no blank row inside it, and the file's pieces are joined
+/// as they were cut.
+fn plan_footer(rows: &[String], last: usize) -> Option<(usize, String)> {
+    let head = PLAN_FOOTER.trim_end();
+    let at = (last.saturating_sub(3)..=last).rev().find(|&i| rows[i].trim().starts_with(head))?;
+    if rows[at + 1..=last].iter().any(|r| r.trim().is_empty()) {
+        return None;
+    }
+    let first = rows[at].trim()[head.len()..].trim();
+    Some((at, std::iter::once(first).chain(rows[at + 1..=last].iter().map(|r| r.trim())).collect()))
 }
 
 /// Codex (fixtures `codex-inline/`, `codex-send/probe-*`): the footer is
@@ -209,7 +379,15 @@ pub fn codex(screen: &str) -> Option<Modal> {
         Kind::Question if !rows[start].trim().starts_with("Question ") => Kind::Permission,
         k => k,
     };
-    Some(modal(kind, &rows, start, last, foot, choices))
+    let mut choices = choices;
+    if kind == Kind::Question && (joined.contains("to add notes") || joined.contains("to clear notes")) {
+        // `tab to add notes` (0.160.1): Tab opens a notes row under the
+        // highlighted choice, sent with it.
+        for c in &mut choices {
+            c.text = Some(Typing::Amend);
+        }
+    }
+    Some(modal(provider::CODEX.id, kind, &rows, start, last, foot, choices))
 }
 
 /// kimi 2.2.0 (fixtures `kimi-screen/2.2.0`): `kimi::read_screen`'s rule — a
@@ -238,7 +416,7 @@ pub fn kimi(screen: &str) -> Option<Modal> {
     let bracketed = run_rows(&rows, open + 1, end).is_some_and(|at| at.iter().all(|&i| bracket_numbered(&rows[i])));
     let headed = rows[open + 1..end].iter().map(|r| r.trim()).find(|t| !t.is_empty()) == Some("question");
     let kind = if !trust && bracketed && headed { Kind::Question } else { Kind::Permission };
-    Some(modal(kind, &rows, open + 1, last, end, choices))
+    Some(modal(provider::KIMI.id, kind, &rows, open + 1, last, end, choices))
 }
 
 /// pi 0.99.1 (fixture `pi-screen/0.99.1/trust-modal.txt`): its only modal is
@@ -256,7 +434,7 @@ pub fn pi(screen: &str) -> Option<Modal> {
     let last = last_nonblank(&rows, close)?;
     let hint = |r: &str| r.contains("enter select") && r.contains("navigate");
     let choices = marked_run(&rows, open, last, hint)?;
-    Some(modal(Kind::Permission, &rows, open, last, last, choices))
+    Some(modal(provider::PI.id, Kind::Permission, &rows, open, last, last, choices))
 }
 
 /// The keys that move `m`'s highlight to choice `n` — `None` when `m` has no
@@ -264,19 +442,386 @@ pub fn pi(screen: &str) -> Option<Modal> {
 /// highlighted. Confirming is the caller's: `Enter`, after a fresh look.
 pub fn steps(m: &Modal, n: u32) -> Option<Vec<Key>> {
     m.choices.iter().find(|c| c.n == n)?;
-    let cur = m.choices.iter().find(|c| c.highlighted)?.n;
-    let key = if n > cur { Key::Down } else { Key::Up };
-    Some(vec![key; cur.abs_diff(n) as usize])
+    walk(m, Some(n))
+}
+
+/// The keys that move a multi-select's highlight to its `Submit` row.
+pub fn steps_to_submit(m: &Modal) -> Option<Vec<Key>> {
+    walk(m, None).filter(|_| m.multi)
+}
+
+/// From the highlighted row to `to` along the rows the highlight walks.
+fn walk(m: &Modal, to: Option<u32>) -> Option<Vec<Key>> {
+    let target = m.order.iter().position(|o| *o == to)?;
+    let cur = if m.on_submit {
+        m.order.iter().position(Option::is_none)?
+    } else {
+        let n = m.choices.iter().find(|c| c.highlighted)?.n;
+        m.order.iter().position(|o| *o == Some(n))?
+    };
+    let key = if target > cur { Key::Down } else { Key::Up };
+    Some(vec![key; cur.abs_diff(target)])
+}
+
+/// Whether `m`'s highlight is on its `Submit` row.
+pub fn on_submit(m: &Modal) -> bool {
+    m.on_submit
 }
 
 /// `a` and `b` are the same prompt, wherever its highlight is: the same kind,
 /// the same rows but the footer, the same choices.
 pub fn same_prompt(a: &Modal, b: &Modal) -> bool {
-    let unmarked = |m: &Modal| m.choices.iter().map(|c| (c.n, c.label.clone(), c.more.clone(), c.host_only)).collect::<Vec<_>>();
-    a.kind == b.kind && a.body == b.body && unmarked(a) == unmarked(b)
+    let unmarked = |m: &Modal| m.choices.iter().map(|c| (c.n, c.label.clone(), c.more.clone(), c.host_only, c.checked, c.text)).collect::<Vec<_>>();
+    a.kind == b.kind && a.multi == b.multi && a.body == b.body && unmarked(a) == unmarked(b)
+}
+
+/// `a` and `b` are the same multi-select, whichever boxes are ticked: what
+/// `agent_answer_many` proves between ticks. The tab bar's `☐`/`☒` and each
+/// box follow the ticks, so both are read unticked.
+pub fn same_form(a: &Modal, b: &Modal) -> bool {
+    let body = |m: &Modal| m.body.iter().map(|r| r.replace("[✔]", "[ ]").replace('☒', "☐")).collect::<Vec<_>>();
+    let boxes = |m: &Modal| m.choices.iter().map(|c| (c.n, c.label.clone(), c.more.clone(), c.checked.is_some(), c.text)).collect::<Vec<_>>();
+    a.kind == b.kind && a.multi && b.multi && body(a) == body(b) && boxes(a) == boxes(b)
+}
+
+/// `a` and `b` are the same prompt but for choice `n`'s field: the rows above
+/// the choices and every other choice unchanged — what `agent_answer_text`
+/// proves while a field opens and fills.
+pub fn same_but(a: &Modal, b: &Modal, n: u32) -> bool {
+    let others = |m: &Modal| {
+        m.choices.iter().filter(|c| c.n != n).map(|c| (c.n, c.label.clone(), c.more.clone(), c.checked, c.text)).collect::<Vec<_>>()
+    };
+    // Filling a multi-select's text box ticks it, and the tab bar with it.
+    let head = |m: &Modal| m.head().iter().map(|r| r.replace('☒', "☐")).collect::<Vec<_>>();
+    a.kind == b.kind && a.multi == b.multi && head(a) == head(b) && a.choices.len() == b.choices.len() && others(a) == others(b)
+}
+
+/// What choice `n`'s text field holds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Field {
+    /// Tab has not opened it.
+    Closed,
+    /// Open, and nothing typed.
+    Empty,
+    /// Someone's text: the row as it reads.
+    Holds(String),
+}
+
+/// Choice `n`'s field — `None` when it takes no text.
+pub fn field(m: &Modal, n: u32) -> Option<Field> {
+    let c = m.choices.iter().find(|c| c.n == n)?;
+    let typing = c.text?;
+    if m.harness == provider::CODEX.id {
+        return Some(match c.more.iter().rev().find(|r| r.starts_with(MARKS)) {
+            None => Field::Closed,
+            Some(r) if unmarked(r) == CODEX_EMPTY_NOTES => Field::Empty,
+            Some(r) => Field::Holds(unmarked(r).to_string()),
+        });
+    }
+    match typing {
+        Typing::Field if CLAUDE_EMPTY_FIELDS.contains(&c.label.as_str()) => Some(Field::Empty),
+        Typing::Field => Some(Field::Holds(typed(c).join(" "))),
+        Typing::Amend if CLAUDE_AMENDS.iter().any(|(closed, _)| c.label == *closed) => Some(Field::Closed),
+        Typing::Amend if CLAUDE_AMENDS.iter().any(|(_, open)| c.label == *open) => Some(Field::Empty),
+        Typing::Amend => Some(Field::Holds(c.label.clone())),
+    }
+}
+
+/// The keys that open choice `n`'s field once it is highlighted: none for a
+/// field that is open, Tab for one that is closed.
+pub fn open_keys(m: &Modal, n: u32) -> Option<Vec<Key>> {
+    match field(m, n)? {
+        Field::Closed => Some(vec![Key::Tab]),
+        Field::Empty | Field::Holds(_) => Some(Vec::new()),
+    }
+}
+
+/// Choice `n` shows `text` in its field, wrapping aside: Claude's field as
+/// the row's own words (an amend after its `Yes, ` / `No, `), Codex's as its
+/// notes row. Whitespace is not compared, because a long text wraps. `how`
+/// is the choice's [`Typing`] in the prompt the text was typed into: typed,
+/// `No, use another name` reads as no amend at all.
+pub fn shows(m: &Modal, n: u32, how: Typing, text: &str) -> bool {
+    let Some(c) = m.choices.iter().find(|c| c.n == n) else { return false };
+    let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+    let want = squash(text);
+    if m.harness == provider::CODEX.id {
+        let notes: Vec<&str> = c.more.iter().skip_while(|r| !r.starts_with(MARKS)).map(|r| unmarked(r)).collect();
+        return !notes.is_empty() && squash(&notes.join(" ")) == want;
+    }
+    let shown = squash(&typed(c).join(" "));
+    match how {
+        Typing::Field => shown == want,
+        Typing::Amend => ["Yes,", "No,"].iter().any(|p| shown.strip_prefix(p) == Some(want.as_str())),
+    }
+}
+
+/// A Claude text row's own words: its label and wrapped rows, the plan's
+/// hint left out.
+fn typed(c: &Choice) -> Vec<&str> {
+    std::iter::once(c.label.as_str()).chain(c.more.iter().map(String::as_str).filter(|r| *r != PLAN_FEEDBACK_HINT)).collect()
+}
+
+/// The bottom of an agent's screen that no reader here recognises, for the
+/// user to SEE while answering stays at the host: from the footer up to the
+/// nearest column-0 full rule (a Claude modal's top), at most
+/// [`VISIBLE_MAX`] rows, escapes stripped, Claude's name tag left out. Empty
+/// when the screen is.
+pub fn visible(screen: &str) -> Vec<String> {
+    let rows = rows(screen);
+    let Some(width) = rows.iter().map(|r| r.chars().count()).max() else { return Vec::new() };
+    let Some(mut last) = last_nonblank(&rows, rows.len()) else { return Vec::new() };
+    if name_tag(&rows[last], width) {
+        match last_nonblank(&rows, last) {
+            Some(l) => last = l,
+            None => return Vec::new(),
+        }
+    }
+    let floor = (last + 1).saturating_sub(VISIBLE_MAX);
+    let edge = |r: &str| full_rule(r, width) || (r.starts_with('▔') && r.chars().all(|c| c == '▔'));
+    let start = (floor..=last).rev().find(|&i| i < last && edge(&rows[i])).map_or(floor, |i| i + 1);
+    let start = (start..=last).find(|&i| !rows[i].trim().is_empty()).unwrap_or(start);
+    rows[start..=last].to_vec()
+}
+
+/// What a prompt TALLER than its pane asks, as far as the screen shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Asks {
+    /// `Do you want to make this edit to <name>?` — an Edit, a MultiEdit, or
+    /// a Write over a file that exists.
+    Edit { name: String },
+    /// `Do you want to create <name>?` — a Write.
+    Create { name: String },
+    /// `Do you want to proceed?` — a Bash command (and other tools, which
+    /// nothing here matches).
+    Proceed,
+    /// A plan approval whose plan is clipped inside its box; `file` is what
+    /// the footer names (`~/.claude/plans/<name>.md`).
+    Plan { file: Option<String> },
+}
+
+/// A Claude prompt whose top has scrolled off the pane, or whose plan is
+/// clipped inside its box ([`clipped`]). The rows cannot show it whole, so a
+/// client may answer it only beside the whole of what the agent asked, from
+/// somewhere else (Claude's PermissionRequest hook, a plan's own file) — and
+/// only when that agrees with what the screen does show ([`Clipped::agrees`]).
+#[derive(Clone, Debug)]
+pub struct Clipped {
+    /// The prompt as far as it is on screen: its `lines` start at the
+    /// screen's top (or at a plan sheet's), and its choices and footer are
+    /// whole.
+    pub modal: Modal,
+    pub asks: Asks,
+    /// The visible rows of what is asked: the diff's or the file's tail, the
+    /// command's tail, the plan's head.
+    shown: Vec<String>,
+}
+
+/// The prompt on `screen` that [`read`] refuses because it is taller than
+/// the pane: Claude's permission whose top scrolled off (the question, the
+/// choices and the footer are on screen, no column-0 rule above them), or a
+/// plan approval whose plan is clipped inside its box. `None` for anything
+/// [`read`] reads, and for every other harness.
+pub fn clipped(harness: &str, screen: &str) -> Option<Clipped> {
+    if harness != provider::CLAUDE.id || claude(screen).is_some() {
+        return None;
+    }
+    let rows = rows(screen);
+    let width = rows.iter().map(|r| r.chars().count()).max()?;
+    let mut last = last_nonblank(&rows, rows.len())?;
+    if name_tag(&rows[last], width) {
+        last = last_nonblank(&rows, last)?;
+    }
+    if let Some((foot, file)) = plan_footer(&rows, last) {
+        return clipped_plan(&rows, foot, last, width, file);
+    }
+    if !rows[last].trim().starts_with("Esc to cancel") {
+        return None;
+    }
+    let mut at = numbered_at(&rows, 0, last)?;
+    let q = last_nonblank(&rows, at.first()?.0)?;
+    let asks = asks(rows[q].trim())?;
+    // The dashed rule over the question closes what is asked. Above it the
+    // whole screen is the modal: a column-0 rule there would be its top, and
+    // then the whole read refused it for some other reason.
+    let dash = q.checked_sub(1).filter(|&i| dashed(&rows[i], width))?;
+    if rows[..q].iter().any(|r| full_rule(r, width) || r.starts_with('▔')) {
+        return None;
+    }
+    let from = (0..dash).rev().find(|&i| dashed(&rows[i], width)).map_or(0, |i| i + 1);
+    let shown = rows[from..dash].iter().filter(|r| !r.trim().is_empty()).cloned().collect();
+    for (_, c) in &mut at {
+        if c.more.is_empty() && CLAUDE_AMENDS.iter().any(|(closed, open)| c.label == *closed || c.label == *open) {
+            c.text = Some(Typing::Amend);
+        }
+    }
+    let modal = modal(provider::CLAUDE.id, Kind::Permission, &rows, 0, last, last, at.into_iter().map(|(_, c)| c).collect());
+    Some(Clipped { modal, asks, shown })
+}
+
+/// [`claude_plan`]'s sheet with its plan CLIPPED: one dashed edge (the
+/// box's top) above the question, the plan's head under it down to the
+/// sheet's indented rule, and the `↓` Claude draws at the clipped row's end.
+fn clipped_plan(rows: &[String], foot: usize, last: usize, width: usize, file: String) -> Option<Clipped> {
+    let top = (0..foot).rev().find(|&i| {
+        let n = rows[i].chars().count();
+        rows[i].starts_with('▔') && rows[i].chars().all(|c| c == '▔') && n >= 20 && n + 1 >= width
+    })?;
+    let mut at = numbered_at(rows, top + 1, foot)?;
+    let first = at.first()?.0;
+    let indent = |r: &str| r.len() - r.trim_start().len();
+    let edge = |r: &str, c: char| {
+        let t = r.trim();
+        indent(r) <= 2 && t.chars().count() >= 20 && t.chars().all(|x| x == c)
+    };
+    let boxes: Vec<usize> = (top + 1..first).filter(|&i| edge(&rows[i], '╌')).collect();
+    let [open] = boxes[..] else { return None };
+    let close = (open + 1..first).find(|&i| edge(&rows[i], '─'))?;
+    let shown = rows[open + 1..close]
+        .iter()
+        .map(|r| r.trim_end().strip_suffix('↓').unwrap_or(r).trim_end().to_string())
+        .filter(|r| !r.trim().is_empty())
+        .collect();
+    for (_, c) in &mut at {
+        if c.more.last().map(String::as_str) == Some(PLAN_FEEDBACK_HINT) {
+            c.text = Some(Typing::Field);
+        }
+    }
+    let file = Some(file).filter(|f| !f.is_empty());
+    let modal = modal(provider::CLAUDE.id, Kind::Permission, rows, top + 1, last, foot, at.into_iter().map(|(_, c)| c).collect());
+    Some(Clipped { modal, asks: Asks::Plan { file }, shown })
+}
+
+/// The question a Claude permission asks above its choices, as [`Asks`].
+fn asks(q: &str) -> Option<Asks> {
+    let name = |rest: &str| rest.strip_suffix('?').map(str::trim).filter(|n| !n.is_empty()).map(str::to_string);
+    if q == "Do you want to proceed?" {
+        Some(Asks::Proceed)
+    } else if let Some(rest) = q.strip_prefix("Do you want to make this edit to ") {
+        Some(Asks::Edit { name: name(rest)? })
+    } else {
+        Some(Asks::Create { name: name(q.strip_prefix("Do you want to create ")?)? })
+    }
+}
+
+/// A dashed rule from column 0 across the screen: the edges of a Claude
+/// permission's command or diff box.
+fn dashed(row: &str, width: usize) -> bool {
+    let n = row.chars().count();
+    row.starts_with('╌') && row.chars().all(|c| c == '╌') && n >= 20 && n + 1 >= width
+}
+
+impl Clipped {
+    /// `tool` with `input` — what Claude's PermissionRequest hook saw, or a
+    /// plan's file — is the prompt on screen: the tool the question names
+    /// (an edit or a creation of a file whose path ends in the name shown, a
+    /// Bash command, a plan), and the rows shown are its own (the diff's
+    /// added and removed rows inside its new and old text, the command's
+    /// tail, the plan's head). Anything else, or a doubt, is no.
+    pub fn agrees(&self, tool: &str, input: &serde_json::Value) -> bool {
+        let text = |k: &str| input.get(k).and_then(|v| v.as_str());
+        let named = |name: &str, path: Option<&str>| {
+            path.is_some_and(|p| {
+                let (p, n) = (std::path::Path::new(p), std::path::Path::new(name));
+                n.components().count() > 0 && p.ends_with(n)
+            })
+        };
+        match &self.asks {
+            Asks::Edit { name } => {
+                let (new, old): (Vec<&str>, Vec<&str>) = match tool {
+                    "Edit" => (text("new_string").into_iter().collect(), text("old_string").into_iter().collect()),
+                    "MultiEdit" => {
+                        let edits = input.get("edits").and_then(|e| e.as_array()).map(Vec::as_slice).unwrap_or_default();
+                        let field = |k: &str| edits.iter().filter_map(|e| e.get(k)?.as_str()).collect();
+                        (field("new_string"), field("old_string"))
+                    }
+                    "Write" => (text("content").into_iter().collect(), Vec::new()),
+                    _ => return false,
+                };
+                named(name, text("file_path")) && !new.is_empty() && self.diff_in(&new, (tool != "Write").then_some(&old[..]))
+            }
+            Asks::Create { name } => {
+                let content: Vec<&str> = text("content").into_iter().collect();
+                tool == "Write" && named(name, text("file_path")) && !content.is_empty() && self.diff_in(&content, None)
+            }
+            Asks::Proceed => {
+                let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+                // Claude 2.1.316 draws a multi-row command with a `│` gutter.
+                let seen = self
+                    .shown
+                    .iter()
+                    .map(|r| {
+                        let t = r.trim_start();
+                        t.strip_prefix('│').unwrap_or(t)
+                    })
+                    .collect::<String>();
+                let seen = squash(&seen);
+                tool == "Bash" && !seen.is_empty() && text("command").is_some_and(|c| squash(c).ends_with(&seen))
+            }
+            Asks::Plan { file } => {
+                // Claude renders the plan's markdown (`#`, backticks, bullets),
+                // so the plan is compared by its letters and digits alone.
+                let words = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).collect::<String>();
+                let seen = words(&self.shown.concat());
+                let same_file = match (file, text("planFilePath")) {
+                    (Some(f), Some(p)) => {
+                        let base = |s: &str| std::path::Path::new(s).file_name().map(|n| n.to_os_string());
+                        base(f).is_some() && base(f) == base(p)
+                    }
+                    (None, _) => true,
+                    (Some(_), None) => false,
+                };
+                tool == "ExitPlanMode" && same_file && !seen.is_empty() && text("plan").is_some_and(|p| words(p).starts_with(&seen))
+            }
+        }
+    }
+
+    /// Every added row of the diff on screen is in one of `new`. An edit's
+    /// removed rows are in one of its `old`, and its context rows are the
+    /// file's; a Write (`old` is `None`) has no old text to check, and its
+    /// preview's rows, which carry no `+`, are all its content. A row cut with
+    /// `…` is compared up to the cut, and a row with no line number continues
+    /// a wrapped one.
+    fn diff_in(&self, new: &[&str], old: Option<&[&str]>) -> bool {
+        self.shown.iter().filter_map(|r| diff_row(r)).all(|(mark, line)| {
+            let line = line.strip_suffix('…').unwrap_or(line).trim_end();
+            let within = |texts: &[&str]| texts.iter().any(|t| t.contains(line));
+            match (mark, old) {
+                ('+', _) | (' ', None) => within(new),
+                ('-', Some(old)) => within(old),
+                _ => true,
+            }
+        })
+    }
+}
+
+/// A diff or preview row, ` 32 +row 32 changed` / `  1 hello`: its mark
+/// (`+`, `-`, or a space for context and a Write's rows) and its text.
+fn diff_row(row: &str) -> Option<(char, &str)> {
+    let t = row.trim_start();
+    let digits = t.chars().take_while(char::is_ascii_digit).count();
+    let rest = t[digits..].strip_prefix(' ')?;
+    if digits == 0 {
+        return None;
+    }
+    match rest.chars().next() {
+        Some(m @ ('+' | '-')) => Some((m, &rest[1..])),
+        Some(' ') => Some((' ', &rest[1..])),
+        _ => Some((' ', rest)),
+    }
 }
 
 impl Modal {
+    /// The body's rows above its first choice: what the prompt says. Found
+    /// from the BOTTOM, where the choices are: a plan's own steps are
+    /// numbered too.
+    fn head(&self) -> Vec<&str> {
+        let at = self.choices.first().and_then(|c| {
+            self.body.iter().rposition(|r| numbered(r).is_some_and(|(_, n, _)| n == c.n) || unmarked(r) == c.label)
+        });
+        self.body[..at.unwrap_or(self.body.len())].iter().map(String::as_str).collect()
+    }
+
     /// What the prompt says, on one line: its rows above the first choice,
     /// rules dropped — the reason `place_status` gives for a lane that waits.
     /// A long path is cut at the screen's edge, not at a word: a row with no
@@ -442,6 +987,11 @@ fn numbered(row: &str) -> Option<(bool, u32, &str)> {
 /// not a rule) continue the one above them. Anything numbered out of turn
 /// makes it no list at all — `None`, never a guess.
 fn numbered_run(rows: &[String], start: usize, end: usize) -> Option<Vec<Choice>> {
+    Some(numbered_at(rows, start, end)?.into_iter().map(|(_, c)| c).collect())
+}
+
+/// [`numbered_run`], each choice with the row it starts on.
+fn numbered_at(rows: &[String], start: usize, end: usize) -> Option<Vec<(usize, Choice)>> {
     let at = run_rows(rows, start, end)?;
     let choices = at
         .iter()
@@ -450,10 +1000,34 @@ fn numbered_run(rows: &[String], start: usize, end: usize) -> Option<Vec<Choice>
             let (hl, n, text) = numbered(&rows[i]).expect("run_rows found it numbered");
             let next = at.get(j + 1).copied().unwrap_or(end);
             let more = rows[i + 1..next].iter().filter(|r| !r.trim().is_empty() && !is_rule(r)).map(|r| r.trim().to_string());
-            choice(n, hl, text, more.collect())
+            (i, choice(n, hl, text, more.collect()))
         })
         .collect();
     Some(choices)
+}
+
+/// Claude's session-name tag, `──── wtap-probe ─`: a full rule with the
+/// name set into its right end.
+fn name_tag(row: &str, width: usize) -> bool {
+    let dashes = row.chars().take_while(|c| *c == '─').count();
+    let rest = &row[dashes * '─'.len_utf8()..];
+    let name = rest.strip_prefix(' ').and_then(|r| r.strip_suffix(" ─"));
+    dashes >= 3 && row.chars().count() + 1 >= width && name.is_some_and(|n| !n.is_empty() && n.trim() == n)
+}
+
+/// A multi-select box at the head of a label, `[ ] Cheese` / `[✔] Cheese`:
+/// whether it is ticked, and the label after it.
+fn tick(label: &str) -> Option<(bool, &str)> {
+    if let Some(rest) = label.strip_prefix("[ ] ") {
+        return Some((false, rest));
+    }
+    label.strip_prefix("[✔] ").map(|rest| (true, rest))
+}
+
+/// A row's text without its indent or a highlight mark.
+fn unmarked(row: &str) -> &str {
+    let t = row.trim_start();
+    t.strip_prefix(&MARKS[..]).unwrap_or(t).trim()
 }
 
 /// The rows of [`numbered_run`]'s list, top to bottom.
@@ -537,12 +1111,12 @@ fn choice(n: u32, highlighted: bool, text: &str, mut more: Vec<String>) -> Choic
     if let Some(b) = beside.filter(|b| !b.is_empty()) {
         more.insert(0, b.to_string());
     }
-    Choice { n, label: label.to_string(), more, highlighted, host_only: None }
+    Choice { n, label: label.to_string(), more, highlighted, host_only: None, checked: None, text: None }
 }
 
 /// The modal: rows `start..=last` (leading blanks dropped), its footer being
 /// the rows from `foot` on; the choices classified for `kind`.
-fn modal(kind: Kind, rows: &[String], start: usize, last: usize, foot: usize, mut choices: Vec<Choice>) -> Modal {
+fn modal(harness: &'static str, kind: Kind, rows: &[String], start: usize, last: usize, foot: usize, mut choices: Vec<Choice>) -> Modal {
     let start = (start..=last).find(|&i| !rows[i].trim().is_empty()).unwrap_or(start);
     let lines: Vec<String> = rows[start..=last].to_vec();
     let body = rows[start..foot.min(last + 1)]
@@ -556,10 +1130,16 @@ fn modal(kind: Kind, rows: &[String], start: usize, last: usize, foot: usize, mu
         c.host_only = classify(kind, c);
     }
     let edge = rows.iter().filter(|r| is_rule(r)).map(|r| r.chars().count()).max();
-    Modal { kind, lines, choices, body, edge }
+    let order = choices.iter().map(|c| Some(c.n)).collect();
+    Modal { kind, lines, choices, multi: false, body, edge, order, on_submit: false, harness }
 }
 
 fn classify(kind: Kind, c: &Choice) -> Option<HostOnly> {
+    // A text field is a half answer while it is empty; holding text, it is
+    // an answer the user can read like any other, and grants nothing.
+    if c.text == Some(Typing::Field) {
+        return CLAUDE_EMPTY_FIELDS.contains(&c.label.as_str()).then_some(HostOnly::Text);
+    }
     if TEXT_CHOICES.contains(&c.label.as_str()) {
         return Some(HostOnly::Text);
     }
@@ -579,6 +1159,12 @@ mod tests {
     macro_rules! claude_fx {
         ($name:literal) => {
             include_str!(concat!("../tests/fixtures/claude-screen/2.1.309/", $name))
+        };
+    }
+
+    macro_rules! claude314 {
+        ($name:literal) => {
+            include_str!(concat!("../tests/fixtures/claude-screen/2.1.314/", $name))
         };
     }
 
@@ -676,6 +1262,202 @@ mod tests {
         assert!(review.lines.iter().any(|l| l.contains("→ Large")), "the answers under review are shown");
     }
 
+    /// worktrees launches every Claude with `--name <session>`, and a named
+    /// Claude draws its name into a full rule as the screen's LAST row while a
+    /// modal is up — under the footer, blank rows between. The joke-topic
+    /// question of 2026-10-30 read as "cannot read whole" for exactly that.
+    #[test]
+    fn a_named_claudes_prompt_reads_above_its_name_tag() {
+        let screen = claude314!("question-named.txt");
+        assert!(screen.trim_end().ends_with("── wtap-(main) ─"), "the fixture ends on the name tag");
+        let m = claude(screen).expect("the question a named Claude shows");
+        assert_eq!(m.kind, Kind::Question);
+        assert_eq!(m.lines.first().map(String::as_str), Some(" ☐ Joke topic"));
+        assert_eq!(m.lines.last().map(String::as_str), Some("Enter to select · ↑/↓ to navigate · Esc to cancel"));
+        assert_eq!(m.choices.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(), ["Programming", "Cats", "Coffee", "Something else", "Type something.", "Chat about this"]);
+        let p = claude(claude314!("permission-bash.e.txt")).expect("a named Claude's approval");
+        assert_eq!(p.lines.last().map(String::as_str), Some(" Esc to cancel · Tab to amend"));
+        assert!(!p.lines.iter().any(|l| l.contains("wtap-probe")), "the name tag is Claude's, not the modal's: {:#?}", p.lines);
+    }
+
+    /// Every permission a named 2.1.314 reads whole, its name tag left out;
+    /// "Yes" and "No" are one-shot and take an amend (`Tab to amend`), the
+    /// widening ones neither. A diff taller than the pane has lost its top,
+    /// and is no modal: what is left can only be SEEN ([`visible`]).
+    #[test]
+    fn every_2_1_314_permission_reads_and_yes_and_no_take_an_amend() {
+        for (name, screen, head, n) in [
+            ("bash", claude314!("permission-bash.txt"), " Bash command", 4),
+            ("write", claude314!("permission-write.txt"), " Create file", 3),
+            ("edit", claude314!("permission-edit.txt"), " Edit file", 3),
+            ("mcp", claude314!("permission-mcp.txt"), " Tool use", 3),
+        ] {
+            let m = claude(screen).unwrap_or_else(|| panic!("{name}"));
+            assert_eq!((m.kind, m.lines[0].as_str(), m.choices.len()), (Kind::Permission, head, n), "{name}");
+            for c in &m.choices {
+                let one_shot = c.label == "Yes" || c.label == "No";
+                assert_eq!(c.host_only.is_none(), one_shot, "{name}: {c:?}");
+                assert_eq!(c.text, one_shot.then_some(Typing::Amend), "{name}: {c:?}");
+            }
+            assert_eq!(field(&m, 1), Some(Field::Closed));
+            assert_eq!(open_keys(&m, 1), Some(vec![Key::Tab]));
+            assert_eq!(field(&m, 2), None, "{name}: a widening choice takes no text");
+        }
+        // Tab opened "No"'s field: the same prompt but for that choice.
+        let closed = claude(claude314!("permission-bash-no.txt")).unwrap();
+        let open = claude(claude314!("permission-bash-no-amend.txt")).unwrap();
+        assert_eq!(field(&open, 4), Some(Field::Empty));
+        assert_eq!(open.choices[3].host_only, None, "an open, empty amend is still a one-shot No");
+        assert!(same_but(&closed, &open, 4) && !same_prompt(&closed, &open));
+        let typed = claude(claude314!("permission-bash-no-amend-typed.txt")).unwrap();
+        assert!(shows(&typed, 4, Typing::Amend, "use a different file name"));
+        assert!(!shows(&typed, 4, Typing::Amend, "use a different file"), "the whole text, not a prefix");
+        assert!(same_but(&closed, &typed, 4) && !same_but(&closed, &typed, 1));
+        let yes = claude(claude314!("permission-bash-yes-amend-pasted.txt")).unwrap();
+        assert!(shows(&yes, 1, Typing::Amend, "then list the directory"));
+        // Too tall: no modal, and the bottom is shown bounded, footer last.
+        let tall = claude314!("permission-edit-tall.txt");
+        assert_eq!(claude(tall), None);
+        let seen = visible(tall);
+        assert_eq!(seen.len(), VISIBLE_MAX);
+        assert_eq!(seen.last().map(String::as_str), Some(" Esc to cancel · Tab to amend"));
+        assert!(seen.iter().any(|l| l.contains("Do you want to make this edit to big.txt?")));
+    }
+
+    /// AskUserQuestion's free-text row is the option just above the rule in
+    /// its list: empty, a half answer (`host_only: text`); typed, the row's
+    /// words ARE its label, and it is an answer like any other.
+    #[test]
+    fn a_claude_questions_text_row_is_known_by_where_it_sits() {
+        let m = claude(claude314!("question-type-something.txt")).unwrap();
+        let c = &m.choices[3];
+        assert_eq!((c.label.as_str(), c.text, c.host_only, c.highlighted), ("Type something.", Some(Typing::Field), Some(HostOnly::Text), true));
+        assert_eq!(field(&m, 4), Some(Field::Empty));
+        assert_eq!(open_keys(&m, 4), Some(vec![]));
+        assert_eq!(m.choices[4].text, None, "Chat about this is under the rule");
+        let typed = claude(claude314!("question-typed.txt")).unwrap();
+        let c = &typed.choices[3];
+        assert_eq!((c.label.as_str(), c.text, c.host_only), ("penguins", Some(Typing::Field), None));
+        assert_eq!(field(&typed, 4), Some(Field::Holds("penguins".into())));
+        assert!(shows(&typed, 4, Typing::Field, "penguins") && same_but(&m, &typed, 4));
+        // The highlight left the typed row: the text stays, so does the row's kind.
+        let away = claude(claude314!("question-typed-away.e.txt")).unwrap();
+        assert_eq!((away.choices[3].label.as_str(), away.choices[3].text), ("penguins", Some(Typing::Field)));
+        // Two questions: one screen at a time, then the review, which a named
+        // Claude ends on its last choice and its name tag.
+        let first = claude(claude314!("question-two.txt")).unwrap();
+        assert!(first.lines[0].starts_with('←') && !first.multi);
+        assert_eq!(first.choices[2].text, Some(Typing::Field));
+        let review = claude(claude314!("question-two-review.txt")).unwrap();
+        assert_eq!(labels(&review), vec![("Submit answers", true, None), ("Cancel", false, None)]);
+        assert!(review.lines.iter().any(|l| l.trim() == "→ Large"));
+    }
+
+    /// A multi-select ticks a box per Enter and sends them from a `Submit` row
+    /// that is no choice: the highlight walks over it, and a tick is the same
+    /// form but not the same prompt.
+    #[test]
+    fn a_multi_select_has_boxes_and_a_submit_row_between_them_and_the_rest() {
+        let m = claude(claude314!("question-multiselect.txt")).unwrap();
+        assert!(m.multi && !on_submit(&m));
+        assert_eq!(
+            m.choices.iter().map(|c| (c.label.as_str(), c.checked)).collect::<Vec<_>>(),
+            vec![("Cheese", Some(false)), ("Olives", Some(false)), ("Mushrooms", Some(false)), ("Type something", Some(false)), ("Chat about this", None)]
+        );
+        assert!(m.choices.iter().all(|c| !c.more.iter().any(|r| r.contains("Submit"))), "Submit is not a description");
+        assert_eq!(m.choices[3].host_only, Some(HostOnly::Text));
+        assert_eq!(steps_to_submit(&m), Some(vec![Key::Down; 4]));
+        assert_eq!(steps(&m, 5), Some(vec![Key::Down; 5]), "Chat about this is past the Submit row");
+        let ticked = claude(claude314!("question-multiselect-toggled.txt")).unwrap();
+        assert_eq!(ticked.choices[0].checked, Some(true));
+        assert!(same_form(&m, &ticked) && !same_prompt(&m, &ticked));
+        let on = claude(claude314!("question-multiselect-on-submit.txt")).unwrap();
+        assert!(on_submit(&on) && on.choices.iter().all(|c| !c.highlighted));
+        assert_eq!(steps(&on, 3), Some(vec![Key::Up; 2]));
+        assert_eq!(steps(&on, 5), Some(vec![Key::Down]));
+        assert_eq!(steps_to_submit(&on), Some(vec![]));
+        assert!(same_form(&m, &on));
+        // Typing into the box's text row ticks it.
+        let typed = claude(claude314!("question-multiselect-text-typed.txt")).unwrap();
+        assert_eq!((typed.choices[2].label.as_str(), typed.choices[2].checked, typed.choices[2].host_only), ("pineapple", Some(true), None));
+        assert!(shows(&typed, 3, Typing::Field, "pineapple"));
+        let row = claude(claude314!("question-multiselect-text-row.txt")).unwrap();
+        assert!(same_but(&row, &typed, 3), "filling the box ticks it and the tab bar, and is still that prompt");
+        // A single-select is no multi-select: nothing to submit separately.
+        assert_eq!(steps_to_submit(&claude(claude314!("question.txt")).unwrap()), None);
+        // And neither is the review that follows a multi-select.
+        assert!(!claude(claude314!("question-multiselect-review.txt")).unwrap().multi);
+    }
+
+    /// A plan approval is a sheet under a `▔` edge, its plan in a dashed box,
+    /// its footer naming the plan's file. Approving it with every edit still
+    /// asked is one-shot; auto mode widens; "Tell Claude what to change" is a
+    /// text row. A plan longer than its box is clipped inside it and cannot
+    /// be shown whole.
+    #[test]
+    fn a_plan_reads_whole_or_not_at_all() {
+        let m = claude(claude314!("plan-approval.txt")).unwrap();
+        assert_eq!(m.kind, Kind::Permission);
+        assert!(m.lines.iter().any(|l| l.trim() == "Ready to code?"));
+        assert!(m.lines.iter().any(|l| l.contains("3. Verify by running ./hello.sh")), "the whole plan is shown");
+        assert!(m.lines.last().unwrap().contains("/.claude/plans/"));
+        assert_eq!(
+            labels(&m),
+            vec![
+                ("Yes, and use auto mode", true, Some(HostOnly::Widens)),
+                ("Yes, manually approve edits", false, None),
+                ("Tell Claude what to change", false, Some(HostOnly::Text)),
+            ]
+        );
+        assert_eq!(m.choices[2].text, Some(Typing::Field));
+        let typed = claude(claude314!("plan-approval-feedback-typed.txt")).unwrap();
+        assert!(shows(&typed, 3, Typing::Field, "call it greet.sh instead"));
+        assert_eq!(typed.choices[2].host_only, None);
+        assert!(same_but(&m, &typed, 3));
+        // The whole plan is what stays the same — its numbered steps too.
+        let edited = claude314!("plan-approval-feedback-typed.txt").replacen("3. Verify by running ./hello.sh", "3. Delete everything in ~", 1);
+        assert_ne!(edited, claude314!("plan-approval-feedback-typed.txt"));
+        assert!(!same_but(&m, &claude(&edited).unwrap(), 3), "another plan is another prompt");
+        let tall = claude314!("plan-approval-tall.txt");
+        assert_eq!(claude(tall), None, "a clipped plan is not shown whole");
+        assert!(visible(tall).last().unwrap().contains("/.claude/plans/"));
+    }
+
+    /// Codex 0.160.1 (fixtures `codex-inline/0.160.1`): its approvals as
+    /// before, and a question's notes — Tab opens a row under the
+    /// highlighted choice, sent with it.
+    #[test]
+    fn codex_0_160_reads_its_approvals_and_question_notes() {
+        let cx = |name: &str| match name {
+            "approval" => include_str!("../tests/fixtures/codex-inline/0.160.1/approval.txt"),
+            "edit" => include_str!("../tests/fixtures/codex-inline/0.160.1/approval-edit.txt"),
+            "q" => include_str!("../tests/fixtures/codex-inline/0.160.1/question-two.txt"),
+            "notes" => include_str!("../tests/fixtures/codex-inline/0.160.1/question-notes.txt"),
+            "typed" => include_str!("../tests/fixtures/codex-inline/0.160.1/question-notes-typed.txt"),
+            "q2" => include_str!("../tests/fixtures/codex-inline/0.160.1/question-two-second.txt"),
+            "done" => include_str!("../tests/fixtures/codex-inline/0.160.1/question-two-submitted.txt"),
+            _ => unreachable!(),
+        };
+        for name in ["approval", "edit"] {
+            let a = codex(cx(name)).unwrap();
+            assert_eq!(a.kind, Kind::Permission);
+            assert!(a.choices.iter().all(|c| c.text.is_none()), "an approval takes no text: answer No, then send the line");
+            assert_eq!(a.choices.iter().filter(|c| c.host_only.is_none()).count(), 2, "{name}");
+        }
+        let q = codex(cx("q")).unwrap();
+        assert_eq!((q.kind, q.lines[0].trim()), (Kind::Question, "Question 1/2 (2 unanswered)"));
+        assert!(q.choices.iter().all(|c| c.text == Some(Typing::Amend)));
+        assert_eq!(field(&q, 3), Some(Field::Closed));
+        let notes = codex(cx("notes")).unwrap();
+        assert_eq!(field(&notes, 3), Some(Field::Empty));
+        let typed = codex(cx("typed")).unwrap();
+        assert_eq!(field(&typed, 3), Some(Field::Holds("teal please".into())));
+        assert!(shows(&typed, 3, Typing::Amend, "teal please"));
+        assert!(same_but(&notes, &typed, 3) && !same_but(&notes, &typed, 1));
+        assert_eq!(codex(cx("q2")).unwrap().lines[0].trim(), "Question 2/2 (1 unanswered)");
+        assert_eq!(codex(cx("done")), None);
+    }
+
     /// The folder-trust prompt has no numbers: a list by column, highlight on
     /// "No, exit". Trusting a folder is the host's call; leaving is not.
     #[test]
@@ -705,6 +1487,19 @@ mod tests {
         ] {
             assert_eq!(claude(screen), None, "{name}");
             assert_eq!(composer_empty("claude", screen), Some(empty), "{name}");
+        }
+        // A named 2.1.314's composers: the name sits in the box's top rule,
+        // and they read the same.
+        for (name, screen, empty) in [
+            ("composer-empty", claude314!("composer-empty.e.txt"), true),
+            ("composer-after-turn", claude314!("composer-after-turn.e.txt"), true),
+            ("composer-busy-empty", claude314!("composer-busy-empty.e.txt"), true),
+            ("composer-typed", claude314!("composer-typed.e.txt"), false),
+            ("composer-busy-typed", claude314!("composer-busy-typed.e.txt"), false),
+        ] {
+            assert!(screen.contains("── wtap-probe ─"), "{name}");
+            assert_eq!(claude(screen), None, "{name}");
+            assert_eq!(composer_empty("claude", screen), Some(empty), "2.1.314 {name}");
         }
         // A history that quotes a whole modal, under a live composer.
         let quoted = format!("{}\n{}", claude_fx!("permission-bash.txt"), claude_fx!("composer-empty.e.txt"));
@@ -931,5 +1726,200 @@ mod tests {
         let modal = claude_fx!("permission-bash.e.txt");
         assert_eq!(run(vec![empty, modal]), (SendOutcome::Modal, 0), "never an Enter into a modal");
         assert_eq!(run(vec![empty]), (SendOutcome::Unconfirmed, 0), "no draft ever appeared: no Enter");
+    }
+
+    macro_rules! claude316 {
+        ($name:literal) => {
+            include_str!(concat!("../tests/fixtures/claude-screen/2.1.316/", $name))
+        };
+    }
+
+    /// What Claude's PermissionRequest hook saw for a fixture: (tool, input).
+    fn hooked(json: &str) -> (String, serde_json::Value) {
+        let v: serde_json::Value = serde_json::from_str(json).unwrap();
+        (v["tool_name"].as_str().unwrap().to_string(), v["tool_input"].clone())
+    }
+
+    /// A prompt taller than its pane (Claude 2.1.314 and 2.1.316): the
+    /// whole read refuses it, and the clipped read finds its question, its
+    /// choices and its footer — and agrees with the hook's input only when
+    /// that is the same tool on the same file, its added and removed rows
+    /// the ones on screen.
+    #[test]
+    fn a_tall_edit_is_clipped_and_agrees_only_with_its_own_edit() {
+        for screen in [claude316!("permission-edit-tall.txt"), claude314!("permission-edit-tall.txt")] {
+            assert!(claude(screen).is_none(), "its top scrolled off: not whole");
+            let c = clipped("claude", screen).expect("a clipped edit");
+            assert_eq!(c.asks, Asks::Edit { name: "big.txt".into() });
+            assert_eq!(c.modal.kind, Kind::Permission);
+            assert_eq!(c.modal.lines.last().map(String::as_str), Some(" Esc to cancel · Tab to amend"));
+            assert_eq!(
+                labels(&c.modal),
+                vec![
+                    ("Yes", true, None),
+                    (
+                        "Yes, and switch to accept edits (auto-approve file edits and common file commands) for this session (shift+tab)",
+                        false,
+                        Some(HostOnly::Widens)
+                    ),
+                    ("No", false, None),
+                ]
+            );
+            assert_eq!(c.modal.choices[0].text, Some(Typing::Amend));
+            assert!(!c.modal.lines.iter().any(|l| l.contains("wtph-probe") || l.contains("wtap-probe")), "no name tag");
+        }
+
+        let c = clipped("claude", claude316!("permission-edit-tall.txt")).unwrap();
+        let (tool, input) = hooked(claude316!("hook-edit.json"));
+        assert_eq!(tool, "Edit");
+        assert!(c.agrees(&tool, &input), "the hook's own edit");
+        let mut other = input.clone();
+        other["file_path"] = "/private/tmp/claude-501/wtph/repo/other.txt".into();
+        assert!(!c.agrees(&tool, &other), "another file");
+        let mut suffix = input.clone();
+        suffix["file_path"] = "/private/tmp/claude-501/wtph/repo/notbig.txt".into();
+        assert!(!c.agrees(&tool, &suffix), "a name is matched by whole components");
+        let mut changed = input.clone();
+        changed["new_string"] = input["new_string"].as_str().unwrap().replace("row 45 changed", "row 45 CHANGED").into();
+        assert!(!c.agrees(&tool, &changed), "a row on screen is not in its new text");
+        assert!(!c.agrees("Bash", &input), "another tool");
+        assert!(!c.agrees(&tool, &serde_json::json!({})), "no input at all");
+    }
+
+    /// A Bash command taller than its pane, by a resize of the live prompt:
+    /// first the title goes (the command whole in its box), then the
+    /// command's head. The rows on screen must be the command's own TAIL.
+    #[test]
+    fn a_tall_command_agrees_only_with_a_command_that_ends_as_shown() {
+        let (tool, input) = hooked(claude316!("hook-bash.json"));
+        assert_eq!(tool, "Bash");
+        for screen in [
+            claude316!("permission-bash-tall.txt"),
+            claude316!("permission-bash-taller.txt"),
+            claude316!("permission-bash-taller.e.txt"),
+        ] {
+            assert!(claude(screen).is_none());
+            let c = clipped("claude", screen).expect("a clipped command");
+            assert_eq!(c.asks, Asks::Proceed);
+            assert_eq!(c.modal.choices.len(), 4);
+            assert_eq!(c.modal.choices[1].host_only, Some(HostOnly::Widens));
+            assert!(c.agrees(&tool, &input), "the hook's own command");
+            let mut tail = input.clone();
+            tail["command"] = input["command"].as_str().unwrap().replace("> rows.txt", "> ~/.ssh/authorized_keys").into();
+            assert!(!c.agrees(&tool, &tail), "another tail");
+            assert!(!c.agrees("Edit", &input));
+        }
+        // A command that is its tail and nothing before it agrees too: the
+        // screen cannot tell, and the hook's input is what `detail` shows.
+        let c = clipped("claude", claude316!("permission-bash-taller.txt")).unwrap();
+        let tail = input["command"].as_str().unwrap();
+        let tail = &tail[tail.find("'bash row 26'").unwrap()..];
+        assert!(c.agrees("Bash", &serde_json::json!({ "command": tail })));
+        // The same prompt with room to spare reads whole, as before.
+        let whole = claude(claude316!("permission-bash.txt")).expect("2.1.316's approval reads whole");
+        assert_eq!(whole.lines.first().map(String::as_str), Some(" Bash command"));
+        assert!(clipped("claude", claude316!("permission-bash.txt")).is_none());
+    }
+
+    /// A plan longer than its box (2.1.316, then 2.1.314's capture): the
+    /// sheet is there, the plan clipped inside it. The hook's plan agrees;
+    /// the plan's file as it reads NOW (revised after the capture: "hi", not
+    /// "hello") does not.
+    #[test]
+    fn a_clipped_plan_agrees_with_the_plan_it_shows_the_head_of() {
+        let c = clipped("claude", claude316!("plan-approval-tall.txt")).expect("a clipped plan");
+        assert_eq!(c.asks, Asks::Plan { file: Some("~/.claude/plans/plan-adding-a-script-shimmying-glade.md".into()) });
+        assert_eq!(c.modal.choices.iter().map(|c| c.text).collect::<Vec<_>>(), vec![None, None, Some(Typing::Field)]);
+        assert_eq!(
+            c.modal.choices.iter().map(|c| c.host_only).collect::<Vec<_>>(),
+            vec![Some(HostOnly::Widens), None, Some(HostOnly::Text)]
+        );
+        let (tool, input) = hooked(claude316!("hook-exit-plan.json"));
+        assert_eq!(tool, "ExitPlanMode");
+        assert!(c.agrees(&tool, &input));
+        let mut moved = input.clone();
+        moved["planFilePath"] = "/Users/u/.claude/plans/another-plan.md".into();
+        assert!(!c.agrees(&tool, &moved), "another plan's file");
+        let mut edited = input.clone();
+        edited["plan"] = input["plan"].as_str().unwrap().replace("prints \"hello\"", "prints \"bye\"").into();
+        assert!(!c.agrees(&tool, &edited), "a plan whose shown head differs");
+        assert!(!c.agrees("Bash", &input));
+
+        let old = clipped("claude", claude314!("plan-approval-tall.txt")).expect("2.1.314's clipped plan");
+        assert_eq!(old.asks, Asks::Plan { file: Some("~/.claude/plans/plan-add-a-file-reflective-deer.md".into()) });
+        // The plan as it was approved, in markdown (`#`, backticks): its 13
+        // rows on screen and a 14th that is not.
+        let steps = [
+            "Confirm the working directory is the probe worktree.",
+            "Check that `greet.sh` does not already exist.",
+            "Decide the script lives at the worktree root.",
+            "Choose `/bin/sh` as the interpreter.",
+            "Open a new file named `greet.sh`.",
+            "Write the shebang line `#!/bin/sh`.",
+            "Add a blank line after the shebang.",
+            "Add the line `echo hello`.",
+            "End the file with a trailing newline.",
+            "Save the file.",
+            "Confirm the file exists with `ls`.",
+            "Confirm the contents are exactly two lines plus a blank.",
+            "Check the shebang has no stray whitespace.",
+            "Check the file uses LF line endings.",
+        ];
+        let steps: String = steps.iter().zip(1..).map(|(s, n)| format!("{n}. {s}\n")).collect();
+        let as_shown = format!(
+            "# Plan: add greet.sh\n\n## Context\n\nAdd a small shell script, `greet.sh`, to the probe worktree root that \
+             prints \"hello\".\n\n## Steps\n\n{steps}"
+        );
+        let path = "/Users/u/.claude/plans/plan-add-a-file-reflective-deer.md";
+        assert!(old.agrees("ExitPlanMode", &serde_json::json!({ "plan": as_shown, "planFilePath": path })));
+        let now_on_disk = as_shown.replace("prints \"hello\"", "prints \"hi\"");
+        assert!(!old.agrees("ExitPlanMode", &serde_json::json!({ "plan": now_on_disk, "planFilePath": path })));
+        let short = as_shown.split("## Steps").next().unwrap();
+        assert!(!old.agrees("ExitPlanMode", &serde_json::json!({ "plan": short, "planFilePath": path })), "less than is shown");
+    }
+
+    /// An 80-column pane (a detached `worktrees new`) wraps a plan's footer:
+    /// `ctrl+g to edit in Vim ·` on one row, the plan's file on the next.
+    /// Found end to end on 2.1.316: until then no plan read in such a pane,
+    /// whole or clipped.
+    #[test]
+    fn a_narrow_panes_plan_footer_wraps_and_the_plan_still_reads() {
+        let m = claude(claude316!("plan-approval-80.txt")).expect("the whole plan, footer wrapped");
+        assert_eq!(m.kind, Kind::Permission);
+        assert_eq!(m.choices.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(), vec![
+            "Yes, and use auto mode",
+            "Yes, manually approve edits",
+            "Tell Claude what to change"
+        ]);
+        assert_eq!(m.choices[2].text, Some(Typing::Field));
+        assert_eq!(m.lines.last().map(String::as_str), Some("   ~/.claude/plans/plan-adding-a-script-snuggly-dragonfly.md"));
+        assert!(m.lines.iter().any(|l| l.contains("30.")), "the whole plan is in its lines");
+        let styled = claude(claude316!("plan-approval-80.e.txt")).unwrap();
+        assert_eq!(styled.lines, m.lines);
+
+        let c = clipped("claude", claude316!("plan-approval-tall-80.txt")).expect("the clipped plan, footer wrapped");
+        assert_eq!(c.asks, Asks::Plan { file: Some("~/.claude/plans/plan-adding-a-script-snuggly-dragonfly.md".into()) });
+        assert_eq!(c.modal.choices.len(), 3);
+        let (tool, input) = hooked(claude316!("hook-exit-plan-80.json"));
+        assert!(c.agrees(&tool, &input));
+        assert!(!c.agrees(&tool, &hooked(claude316!("hook-exit-plan.json")).1), "another plan");
+    }
+
+    /// Only a prompt the whole read refuses for its height is clipped: every
+    /// whole prompt, a composer, another harness — none.
+    #[test]
+    fn nothing_whole_is_clipped() {
+        for screen in [
+            claude314!("permission-bash.txt"),
+            claude314!("permission-edit.txt"),
+            claude314!("permission-write.txt"),
+            claude314!("plan-approval.txt"),
+            claude314!("question-named.txt"),
+            claude314!("composer-empty.e.txt"),
+            claude_fx!("permission-bash.txt"),
+        ] {
+            assert!(clipped("claude", screen).is_none(), "{screen}");
+        }
+        assert!(clipped("codex", claude316!("permission-edit-tall.txt")).is_none());
     }
 }

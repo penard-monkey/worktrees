@@ -95,6 +95,7 @@ pub fn ai_launch_for(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> cr
     let mut launch = ai_launch_inner(p, ui, wt, ai_cmd);
     launch.guidance = guidance_for(p, ui, wt, &launch);
     launch.planning = planning_for(p, ui, wt, &launch);
+    launch.prompt_hook = prompt_hook_for(&launch);
     kimi_place_files(p, ui, wt, &launch);
     // AFTER the place files: kimi's trust depends on whether OUR `mcp.json`
     // is written (`trust::kimi_mcp_shadowed`), and deciding it before the
@@ -209,6 +210,27 @@ fn planning_for(p: &Project, ui: &mut dyn Ui, wt: &str, launch: &crate::profile:
     }
 }
 
+/// The prompt plugin for one launch (`guidance::materialize_prompt_in`):
+/// every Claude launch, keyed on nothing but the harness — not on guidance's
+/// gate or planning's level, which a user may turn off for reasons that have
+/// nothing to do with answering a prompt from a phone — and never the
+/// fail-closed launch. Without a CLI that has the hook (`pending::hook_bin`)
+/// it is left out, quietly: a prompt taller than its pane is then
+/// `readable: false`, as it was before the hook.
+fn prompt_hook_for(launch: &crate::profile::AiLaunch) -> Vec<String> {
+    let Some(adapter) = crate::harness::for_cmd(&launch.cmd).filter(|_| !launch.cmd.is_empty()) else {
+        return Vec::new();
+    };
+    if adapter.provider().id != crate::provider::CLAUDE.id {
+        return Vec::new();
+    }
+    let Some(bin) = crate::pending::hook_bin() else { return Vec::new() };
+    match crate::guidance::materialize_prompt_in(&crate::guidance::data_root(), &bin) {
+        Ok(dir) => vec!["--plugin-dir".into(), crate::profile::shell_quote(&dir.to_string_lossy())],
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Agent guidance for one launch (agent-guidance §4.2): only in a
 /// worktrees-managed repo, only for a harness worktrees knows, and never on
 /// the fail-closed launch (its `cmd` is not the harness, so `launch_cmd` would
@@ -308,6 +330,7 @@ fn ai_launch_inner(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> crat
                 place_flags: Vec::new(),
                 guidance: Vec::new(),
                 planning: Vec::new(),
+                prompt_hook: Vec::new(),
                 model: None,
                 resume: false,
                 resume_id: None,
@@ -2501,7 +2524,38 @@ pub fn cmd_doctor(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         ui.plain("");
         kimi_doctor(p, ui, false, false);
     }
+    if !json && rc != 1 {
+        let lines = unreadable_session_lines(&crate::agent::scan_probes().unreadable);
+        if !lines.is_empty() {
+            ui.plain("");
+            ui.header("claude");
+            for line in &lines {
+                ui.warn(line);
+            }
+        }
+    }
     rc
+}
+
+/// Doctor's `claude` block: one warning per LIVE Claude whose session file
+/// does not parse (`agent::scan_probes`). On a human run only, as pi's and
+/// kimi's blocks are: it is a fact about the machine, and the app's per-project
+/// `--json` sweep would put it under every project at once. The remedy is a
+/// restart, which makes Claude write the file whole; the file is Claude Code's
+/// state, so it is never ours to repair.
+fn unreadable_session_lines(unreadable: &[crate::agent::UnreadableProbe]) -> Vec<String> {
+    unreadable
+        .iter()
+        .map(|u| {
+            format!(
+                "{} (pid {}) does not parse: {}. That Claude is running, but the agent rows, the dots and \
+                 place_status cannot see it. Restart it (/exit, then reopen it); never edit the file, it is Claude Code's.",
+                u.shown(),
+                u.pid,
+                u.error
+            )
+        })
+        .collect()
 }
 
 /// A harness is in use when it is the configured AI command, the user named a
@@ -3945,6 +3999,16 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// The prompt plugin is Claude's alone: no other harness, no plain
+    /// shell, and never the fail-closed launch, whose command is not the
+    /// harness — each returns before any probe.
+    #[test]
+    fn only_a_claude_launch_gets_the_prompt_plugin() {
+        for cmd in ["codex", "pi", "kimi", "", "printf 'profile x is broken' >&2"] {
+            assert!(prompt_hook_for(&crate::profile::AiLaunch::plain(cmd)).is_empty(), "{cmd:?}");
+        }
+    }
+
     /// The prompt names no directory: the planning-with-files skill decides
     /// where its files live, and the reader resolves every layout it uses. The
     /// one `.planning/` it may mention is the brief, which the app writes.
@@ -3988,6 +4052,28 @@ mod tests {
             assert!(plan_update_prompt(ok).is_some(), "refused {ok:?}");
         }
         assert!(plan_update_prompt(&"a".repeat(129)).is_none());
+    }
+
+    /// A live Claude whose session file does not parse is a doctor warning
+    /// that names the file and the parse error, and whose remedy is a restart:
+    /// the file is Claude Code's, never ours to edit.
+    #[test]
+    fn doctor_names_an_unreadable_session_file_and_says_restart_never_edit() {
+        let u = crate::agent::UnreadableProbe {
+            path: "/nowhere/.claude/sessions/5389.json".into(),
+            pid: 5389,
+            error: "EOF while parsing an object at line 1 column 200".into(),
+            mtime: None,
+        };
+        let lines = unreadable_session_lines(std::slice::from_ref(&u));
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let l = &lines[0];
+        assert!(l.contains("/nowhere/.claude/sessions/5389.json"), "{l}");
+        assert!(l.contains("pid 5389"), "{l}");
+        assert!(l.contains("EOF while parsing an object at line 1 column 200"), "the parse error: {l}");
+        assert!(l.contains("/exit"), "the remedy is a restart: {l}");
+        assert!(l.contains("never edit"), "{l}");
+        assert!(unreadable_session_lines(&[]).is_empty(), "nothing to say, no claude block");
     }
 
     #[test]

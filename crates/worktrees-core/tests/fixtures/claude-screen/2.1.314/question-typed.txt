@@ -1,0 +1,24 @@
+
+ ▐▛███▛█   Claude Code v2.1.314
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   /private/tmp/claude-501/wtap/repo
+
+
+❯ Use the AskUserQuestion tool to ask me ONE question: which topic should you write a joke about. Give
+  exactly three options, each with a one-sentence description: Programming, Cats, Coffee. Do nothing else.
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Joke topic
+
+Which topic should I write a joke about?
+
+  1. Programming
+     A joke about software, code, bugs, or developers.
+  2. Cats
+     A joke about cats and their famously independent behavior.
+  3. Coffee
+     A joke about coffee, caffeine, and morning routines.
+❯ 4. penguins
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · ↑/↓ to navigate · ctrl+g to edit in Vim · Esc to cancel

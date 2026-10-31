@@ -1,0 +1,40 @@
+     [2m[38;2;80;200;80m[48;2;2;40;0m 50 +[38;2;248;248;242mrow 50 changed                                                                                         [0m
+     [2m[38;2;80;200;80m[48;2;2;40;0m 51 +[38;2;248;248;242mrow 51 changed                                                                                         [0m
+     [2m[38;2;80;200;80m[48;2;2;40;0m 52 +[38;2;248;248;242mrow 52 changed                                                                                         [0m
+     [2m[38;2;80;200;80m[48;2;2;40;0m 53 +[38;2;248;248;242mrow 53 changed                                                                                         [0m
+     [2m[38;2;80;200;80m[48;2;2;40;0m 54 +[38;2;248;248;242mrow 54 changed                                                                                         [0m
+     [2m[38;2;80;200;80m[48;2;2;40;0m 55 +[38;2;248;248;242mrow 55 changed                                                                                         [0m
+     [2m[38;2;248;248;242m 56  line 56 of the probe file[0m
+     [2m[38;2;248;248;242m 57  line 57 of the probe file[0m
+     [2m[38;2;248;248;242m 58  line 58 of the probe file[0m
+
+[38;2;153;153;153m✻[39m [38;2;153;153;153mCrunched for 5s · done 11:43 PM[39m
+
+[38;2;153;153;153m[48;2;55;55;55m❯ [38;2;255;255;255mUse the Write tool to create second.txt containing exactly: MARKER-SECOND-WRITE[39m
+
+[38;2;255;107;128m[49m⏺[39m [1mWrite[0m(]8;id=75swuw;file:///private/tmp/claude-501/wtap/e2e/repo/.worktrees/probe/second.txt\second.txt]8;;\)
+[38;2;153;153;153m  ⎿  [38;2;80;80;80mUser rejected write to [1m]8;id=75swuw;file:///private/tmp/claude-501/wtap/e2e/repo/.worktrees/probe/second.txt\second.txt[0m]8;;\
+     [2m[38;2;248;248;242m 1 MARKER-SECOND-WRITE[0m
+
+[38;2;153;153;153m✻[39m [38;2;153;153;153mBaked for 1s · done 11:47 PM
+
+[48;2;55;55;55m❯ [38;2;255;255;255mUse the Edit tool to change the first line of README.md from 'hi' to 'hello'. Nothing else.[39m
+
+[49m  [38;2;153;153;153mRead [1m1[0m[38;2;153;153;153m file [39m
+
+[38;2;153;153;153m⏺[39m [1mUpdate[0m(]8;id=iptet1;file:///private/tmp/claude-501/wtap/e2e/repo/.worktrees/probe/README.md\README.md]8;;\)
+
+[38;2;177;185;249m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m [1m[38;2;177;185;249mEdit file[0m
+ [38;2;153;153;153mREADME.md[39m
+[38;2;80;80;80m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+[38;2;220;90;90m[48;2;61;1;0m 1 -[38;2;248;248;242mhi
+[38;2;80;200;80m[48;2;2;40;0m 1 +[38;2;248;248;242mhello
+[38;2;80;80;80m[49m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+[39m Do you want to make this edit to [1mREADME.md[0m?
+ [38;2;177;185;249m❯[39m [38;2;153;153;153m1. [38;2;177;185;249mYes[39m
+   [38;2;153;153;153m2. [39mYes, and switch to [1maccept edits (auto-approve file edits and common file commands)[0m for this session [1m(shift+tab)[0m
+   [38;2;153;153;153m3. [39mNo
+
+ [38;2;153;153;153mEsc to cancel · Tab to amend[39m
+[38;2;136;136;136m─────────────────────────────────────────────────────────────────────────────────────────────────────────── wtap-probe ─

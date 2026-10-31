@@ -1,0 +1,40 @@
+      50 +row 50 changed
+      51 +row 51 changed
+      52 +row 52 changed
+      53 +row 53 changed
+      54 +row 54 changed
+      55 +row 55 changed
+      56  line 56 of the probe file
+      57  line 57 of the probe file
+      58  line 58 of the probe file
+
+✻ Crunched for 5s · done 11:43 PM
+
+❯ Use the Write tool to create second.txt containing exactly: MARKER-SECOND-WRITE
+
+⏺ Write(second.txt)
+  ⎿  User rejected write to second.txt
+      1 MARKER-SECOND-WRITE
+
+✻ Baked for 1s · done 11:47 PM
+
+❯ Use the Edit tool to change the first line of README.md from 'hi' to 'hello'. Nothing else.
+
+  Read 1 file
+
+⏺ Update(README.md)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Edit file
+ README.md
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ 1 -hi
+ 1 +hello
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Do you want to make this edit to README.md?
+ ❯ 1. Yes
+   2. Yes, and switch to accept edits (auto-approve file edits and common file commands) for this session (shift+tab)
+   3. No
+
+ Esc to cancel · Tab to amend
+─────────────────────────────────────────────────────────────────────────────────────────────────────────── wtap-probe ─

@@ -3474,6 +3474,22 @@ Phase 3: Frontend pane and mock harness
         note: queued ? "The agent was working: the line is queued behind the running turn." : "Sent: the agent has it (behind its running turn, if it was working).",
       };
     }
+    // The rows past one choice. The scripted permission's "Yes" and "No"
+    // take an amend (Claude 2.1.314's `Tab to amend`); it has no boxes.
+    case "agent_answer_text": {
+      const text = String(args.text ?? "");
+      if (!text.trim()) throw "text is empty";
+      if (/\p{Cc}/u.test(text)) throw "text contains a control character (newline, tab, escape…); agent_send types ONE line";
+      if (!mockPromptUp(args.repo, args.slug) || args.fingerprint !== MOCK_PROMPT_FP) throw "the prompt changed";
+      const c = MOCK_PROMPT_CHOICES.find((c) => c.n === args.choice);
+      if (!c) throw "no such choice";
+      if (c.label !== "Yes" && c.label !== "No") throw `choice ${c.n} takes no text: answer it with agent_answer`;
+      mockAnswered.add(`${args.repo}|${args.slug}`);
+      return { answered: true, confirmed: true, harness: "claude", session: mockAgentSession(args.slug), choice: c.n, label: c.label };
+    }
+    case "agent_answer_many":
+      if (!mockPromptUp(args.repo, args.slug) || args.fingerprint !== MOCK_PROMPT_FP) throw "the prompt changed";
+      throw "not a multi-select: answer it with agent_answer";
     case "agent_turns": {
       const harness = mockHarnessAt(mockPlacePath(args.repo, args.slug));
       if (harness === "pi" || harness === "kimi") throw `agent_turns reads Claude's and Codex's transcripts; ${harness}'s is not read yet`;
