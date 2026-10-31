@@ -922,6 +922,17 @@ Measured in `rust:1-bookworm`: 7 of 150 runs of the core suite failed this way
 before the fix, every one a fake's spawn, and 0 of 150 after. Reproduce it in
 docker, never on the Mac.
 
+**`ubuntu-latest` is Ubuntu 26.04, and its coreutils are ONE binary.** Since
+25.10, Ubuntu's coreutils are uutils: `/bin/sleep` links to a multi-call
+binary that picks its program by argv[0]. So a fake made by copying one under
+another name (`cp /bin/sleep claude`) prints "coreutils: unknown program
+'claude'" and exits 1. In a tmux pane, the session dies with it, and the test
+reads as the product missing a live agent. serve_bin's two moved-project tests
+failed that way, on that runner only: ubuntu:24.04, bookworm and macOS all
+pass. Copy `/bin/bash` (its own binary everywhere) and have it wait on a
+builtin. Reproduce runner-only failures in the runner's OS: its log prints it
+under "Operating System", and that image ships tmux preinstalled.
+
 **A lane that uses Docker removes what it made before it reports done.** The
 Linux checks here run in Docker (`rust:1-bookworm`, `node:22-alpine`, the Linux
 app build), and a named volume for the cargo registry or the target dir

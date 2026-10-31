@@ -463,12 +463,37 @@ impl PrivateTmux {
         let o = self.run(&["list-clients", "-F", "#{session_name}"]);
         String::from_utf8_lossy(&o.stdout).lines().map(str::to_string).collect()
     }
+    /// A config for the server's first `new-session -f`: a pane whose program
+    /// exits stays, dead, so a failing test can still read what ran there.
+    fn keep_dead_panes(&self) -> String {
+        let conf = self.sock.with_extension("conf");
+        std::fs::write(&conf, "set -g remain-on-exit on\n").unwrap();
+        conf.to_string_lossy().into_owned()
+    }
+    /// Where a fake Claude's stderr goes (`fake_claude_cmd`). Beside the
+    /// socket, not in the `Sandbox`, which is removed before this drops.
+    fn err_file(&self) -> PathBuf {
+        self.sock.with_extension("err")
+    }
 }
 
 impl Drop for PrivateTmux {
     fn drop(&mut self) {
+        // A failing test says what its server held: every pane (a dead one
+        // too, under `keep_dead_panes`) and what the fakes wrote to stderr.
+        if std::thread::panicking() {
+            let fmt = "#{session_name} #{pane_id} dead=#{pane_dead} status=#{pane_dead_status} cmd=#{pane_current_command} path=#{pane_current_path}";
+            match self.try_run(&["list-panes", "-a", "-F", fmt]) {
+                Ok(o) => eprintln!("private tmux panes:\n{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)),
+                Err(e) => eprintln!("private tmux panes: {e}"),
+            }
+            let err = std::fs::read_to_string(self.err_file()).unwrap_or_else(|e| format!("({e})"));
+            eprintln!("fake Claude stderr ({}):\n{err}", self.err_file().display());
+        }
         let _ = self.try_run(&["kill-server"]);
-        let _ = std::fs::remove_file(&self.sock);
+        for f in [self.sock.clone(), self.sock.with_extension("conf"), self.err_file()] {
+            let _ = std::fs::remove_file(f);
+        }
     }
 }
 
@@ -882,15 +907,19 @@ fn git_in(dir: &Path, args: &[&str]) {
     assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
 }
 
-/// A stand-in Claude: a copy of `sleep` named `claude`, so tmux reports
-/// `claude` as the pane's command on both OSes. Copied by `cp`, so this
-/// process never holds the file open for writing (the ETXTBSY trap, AGENTS.md),
-/// and ad-hoc signed on macOS, which kills an unsigned copy of a system binary.
+/// A stand-in Claude: a copy of `bash` named `claude`, so tmux reports
+/// `claude` as the pane's command on both OSes. Not a copy of `sleep`: since
+/// 25.10, Ubuntu's coreutils is uutils, ONE binary that picks its program by
+/// argv[0], so a copy named `claude` prints "coreutils: unknown program
+/// 'claude'" and exits, taking its pane, its session and the tmux server
+/// with it (the ubuntu-26.04 runner; measured in ubuntu:26.04). bash is its
+/// own binary everywhere. Copied by `cp`, so this process never holds the
+/// file open for writing (the ETXTBSY trap, AGENTS.md), and ad-hoc signed on
+/// macOS, which kills an unsigned copy of a system binary.
 fn fake_claude(dir: &Path) -> PathBuf {
     std::fs::create_dir_all(dir).unwrap();
     let bin = dir.join("claude");
-    let sleep = if Path::new("/bin/sleep").exists() { "/bin/sleep" } else { "/usr/bin/sleep" };
-    assert!(Command::new("cp").arg(sleep).arg(&bin).status().unwrap().success(), "cp {sleep}");
+    assert!(Command::new("cp").arg("/bin/bash").arg(&bin).status().unwrap().success(), "cp /bin/bash");
     if cfg!(target_os = "macos") {
         let _ = Command::new("codesign").args(["-s", "-", "-f"]).arg(&bin).output();
     }
@@ -903,8 +932,10 @@ fn fake_claude(dir: &Path) -> PathBuf {
 /// but Debian's and Ubuntu's `sh` is dash, which forks it and stays in front,
 /// so tmux reports the pane as `sh` and no Claude is seen. `exec` makes every
 /// shell replace itself. Measured on ubuntu:24.04 (dash 0.5.12, tmux 3.4).
-fn fake_claude_cmd(claude: &Path) -> String {
-    format!("exec {} 600", claude.display())
+/// The fake then waits on its tty with `read`, a builtin, so no other program
+/// runs under it; its stderr goes to `err`, which a failing test prints.
+fn fake_claude_cmd(claude: &Path, err: &Path) -> String {
+    format!("exec {} -c 'read -t 600 _' 2>>{}", claude.display(), err.display())
 }
 
 /// The reported bug, end to end through the binary. A project's folder is
@@ -931,8 +962,9 @@ fn a_moved_projects_agent_is_read_before_and_after_it_is_adopted() {
     git_in(&old, &["worktree", "add", "-q", ".worktrees/lane", "-b", "lane"]);
     let old_root = std::fs::canonicalize(&old).unwrap().to_string_lossy().into_owned();
     let claude = fake_claude(&sb.root.join("fake"));
+    let conf = tmux.keep_dead_panes();
     for (session, dir) in [("old-(main)", old_root.clone()), ("old-lane", format!("{old_root}/.worktrees/lane"))] {
-        let made = tmux.run(&["-f", "/dev/null", "new-session", "-d", "-s", session, "-c", &dir, "-x", "80", "-y", "24", &fake_claude_cmd(&claude)]);
+        let made = tmux.run(&["-f", &conf, "new-session", "-d", "-s", session, "-c", &dir, "-x", "80", "-y", "24", &fake_claude_cmd(&claude, &tmux.err_file())]);
         assert!(made.status.success(), "private tmux: {}", String::from_utf8_lossy(&made.stderr));
     }
     // Claude's own files for the (main) one, as Claude writes them: its probe
@@ -1054,7 +1086,8 @@ fn remove_project_names_the_sessions_it_leaves_running() {
     let busy = sb.project("busy");
     let quiet = sb.project("quiet");
     let claude = fake_claude(&sb.root.join("fake"));
-    let made = tmux.run(&["-f", "/dev/null", "new-session", "-d", "-s", "busy-(main)", "-c", &busy, "-x", "80", "-y", "24", &fake_claude_cmd(&claude)]);
+    let conf = tmux.keep_dead_panes();
+    let made = tmux.run(&["-f", &conf, "new-session", "-d", "-s", "busy-(main)", "-c", &busy, "-x", "80", "-y", "24", &fake_claude_cmd(&claude, &tmux.err_file())]);
     assert!(made.status.success(), "private tmux: {}", String::from_utf8_lossy(&made.stderr));
     let sf = sb.launch_env(&["--allow-origin", "http://localhost:1420"], &[("TMUX", &tmux.env())]);
     let mut ws = connect(&sf, "http://localhost:1420");
