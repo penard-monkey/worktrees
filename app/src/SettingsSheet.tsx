@@ -1291,6 +1291,24 @@ export function SettingsSheet({
             </div>
           </section>
 
+          <section className="setting">
+            <label>Chat view</label>
+            <label className="tier-toggle setting-check">
+              <input
+                type="checkbox"
+                checked={settings.chat_view}
+                onChange={(e) => onChange({ chat_view: e.currentTarget.checked })}
+                data-testid="setting-chat-view"
+              />
+              Show a Chat | Terminal switch on each agent (preview)
+            </label>
+            <div className="hint">
+              Chat shows the agent’s recent turns as messages, its waiting prompt as buttons, and a
+              one-line message box. The terminal stays every place’s default, and one click away:
+              tool output, diffs, slash commands and Esc are only there.
+            </div>
+          </section>
+
           <QuotaSection data-focus="plan-limits" onReport={onReport} />
 
           <SlotsSection data-focus="heavy-jobs" onReport={onReport} />

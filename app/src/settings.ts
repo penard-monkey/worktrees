@@ -220,6 +220,10 @@ export type Settings = {
   // tab that keeps polling. Projects that do not resolve to GitHub show nothing
   // either way, so there is no per-project switch.
   pull_requests: boolean;
+  // The chat view of a place's agent (docs/proposals/chat-session-view.md), a
+  // PREVIEW: on, each agent cell grows a Chat | Terminal switch; the terminal
+  // stays the default view of every place. Off, nothing of it is drawn.
+  chat_view: boolean;
   dock_open: boolean; // right dock (Files / Terminal) visible for the selected place
   dock_width: number; // ≥240, ceiling is viewport-derived (see dockCeiling)
   dock_tab: "files" | "terminal" | "docs" | "plan" | "prs"; // last-used dock tab
@@ -467,6 +471,7 @@ export const DEFAULTS: Settings = {
   usage_codex: true,
   usage_kimi: true,
   pull_requests: true,
+  chat_view: false,
   dock_open: false,
   dock_width: 360,
   dock_tab: "files",
@@ -804,6 +809,7 @@ export async function loadSettings(): Promise<Settings> {
     s.usage_codex = typeof s.usage_codex === "boolean" ? s.usage_codex : true;
     s.usage_kimi = typeof s.usage_kimi === "boolean" ? s.usage_kimi : true;
     s.pull_requests = typeof s.pull_requests === "boolean" ? s.pull_requests : true;
+    s.chat_view = typeof s.chat_view === "boolean" ? s.chat_view : false;
     s.theme = normalizeTheme(s.theme);
     s.theme_light = normalizePair(s.theme_light, "light", DEFAULTS.theme_light);
     s.theme_dark = normalizePair(s.theme_dark, "dark", DEFAULTS.theme_dark);
