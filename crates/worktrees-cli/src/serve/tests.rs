@@ -3294,6 +3294,13 @@ mod devices {
         assert_eq!(e.rpc(&mut c, "agent_answer_text", text)["err"], json!("denied"), "a step-up is no grant");
         assert_eq!(e.rpc(&mut c, "agent_answer_many", many)["err"], json!("not a multi-select: answer it with agent_answer"));
         assert!(pane.untouched());
+        // `instruct` without `answer`: text with a choice is an answer, so
+        // past its step-up it is still refused, and nothing reaches the pane.
+        let (e, mut c, k, ex, pane, text, _) = setup("agent-text-n", &[Read, Instruct]);
+        prove(&e, &mut c, &k, ex);
+        let r = e.rpc(&mut c, "agent_answer_text", text);
+        assert!(r["err"].as_str().is_some_and(|m| m.contains("needs the answer capability")), "{r}");
+        assert!(pane.untouched());
         // With `instruct`: asked for a step-up, then typed, proved and sent.
         let (e, mut c, k, ex, pane, text, _) = setup("agent-text-i", &[Read, Answer, Instruct]);
         assert_eq!(e.rpc(&mut c, "agent_answer_text", text.clone())["err"], json!("step-up required"));

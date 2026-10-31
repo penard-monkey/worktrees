@@ -29,10 +29,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   can now answer "Type something.", say "No, and tell Claude what to do
   differently" (or "Yes, and…"), give a plan feedback, or add a Codex note,
   all from a client. On a paired phone, typing needs the device's instruct
-  permission and a step-up, the same as sending a line. The audit log keeps
-  only the text's length and a hash of it. A prompt still too tall to read
-  whole, such as a long diff or plan, now shows its visible part, and you
-  answer it at the host.
+  permission and a step-up, the same as sending a line, and its answer
+  permission too, because typed text also picks one of the prompt's
+  choices. The audit log keeps only the text's length and a hash of it. A
+  prompt still too tall to read whole, such as a long diff or plan, now
+  shows its visible part, and you answer it at the host.
 
 ## [0.44.2] - 2026-10-29
 

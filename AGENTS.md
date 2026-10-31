@@ -66,7 +66,9 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   never the text, and a device's send stamps `last_remote_send`. Its one
   sibling is `agent_answer_text` (brief of 2026-10-30, `feat/actionable-
   prompts`): the SAME paste (`AgentIo::paste` = `tmux::paste_into`), the same
-  rule, `instruct`, length and hash, stamp — and only into a field the
+  rule, `instruct` (AND `answer`, checked in the body: an amended "Yes"
+  approves, so `instruct` alone must not reach it), length and hash, stamp —
+  and only into a field the
   prompt itself opened and shows empty, each step proved before Enter. Do not
   grow a third path that types into Claude.
 

@@ -1070,7 +1070,8 @@ commands! { cx, a;
         &cx.ctx, a.get("repo")?, a.get("slug")?, a.get("choice")?, a.get("fingerprint")?,
     ),
     // Free text into a field the prompt opened is `instruct` (§9.2), like a
-    // line; ticking a multi-select's boxes is `answer`. Their own rows, never
+    // line — and the body requires `answer` too, because the text rides on
+    // one of the prompt's choices; ticking a multi-select's boxes is `answer`. Their own rows, never
     // new arguments on `agent_answer`, which an older host would ignore.
     agent_answer_text: Engine [instruct, place(repo, slug)] => agents::agent_answer_text(
         &cx.ctx, a.get("repo")?, a.get("slug")?, a.get("choice")?, a.get("fingerprint")?, a.get("text")?,

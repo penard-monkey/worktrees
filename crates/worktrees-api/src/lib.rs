@@ -256,6 +256,12 @@ impl Ctx {
         self.console
     }
 
+    /// The caller's grant includes `cap` — for a body whose act needs a
+    /// second capability beside its row's one (`agents::agent_answer_text`).
+    pub fn holds(&self, cap: worktrees_core::authz::Capability) -> bool {
+        self.caps.has(cap)
+    }
+
     pub fn acting_for(&self, who: worktrees_core::store::LaunchedBy) -> Ctx {
         if self.acting.is_some() {
             return self.clone();

@@ -76,6 +76,9 @@ pub const ERR_PROMPT_UP: &str = "the agent is waiting on a prompt: answer it wit
 pub const ERR_MID_INPUT: &str = "the agent's prompt has unsent text in it (someone is typing there): send nothing until it is empty";
 /// `agent_answer_text` on a field that holds someone's text already.
 pub const ERR_FIELD_HELD: &str = "that choice's text field holds someone's text: answer it at the host, or choose it as it reads with agent_answer";
+/// `agent_answer_text` from a caller whose grant has `instruct` but not
+/// `answer`: text with a choice is an answer too.
+pub const ERR_NEEDS_ANSWER: &str = "denied: answering a prompt with text makes one of its choices, which needs the answer capability as well as instruct";
 /// `agent_answer` on one of a multi-select's boxes, whose Enter only ticks it.
 pub const ERR_MULTI: &str = "a multi-select: tick its boxes with agent_answer_many";
 /// `agent_answer_many` on a prompt that is not one.
@@ -361,8 +364,13 @@ pub fn agent_answer(ctx: &Ctx, repo: String, slug: String, choice: u32, fingerpr
 /// box is only filled (which ticks it), `answered: false`, and sent with its
 /// other boxes by `agent_answer_many`. Free text is `instruct` (§9.2): the
 /// row's capability, so a device needs that grant and step-up, as for
-/// `agent_send`, and the text passes the same rule.
+/// `agent_send`, and the text passes the same rule. And it MAKES one of the
+/// prompt's choices — an amended "Yes" approves the command — so the caller
+/// must hold `answer` as well: `instruct` alone sends lines, never approvals.
 pub fn agent_answer_text(ctx: &Ctx, repo: String, slug: String, choice: u32, fingerprint: String, text: String) -> Result<Value, String> {
+    if !ctx.holds(worktrees_core::authz::Capability::Answer) {
+        return Err(ERR_NEEDS_ANSWER.into());
+    }
     send_text_ok(&text)?;
     let project = discover(&repo)?;
     let io = &*ctx.agents.io;
@@ -1105,6 +1113,14 @@ mod tests {
             err
         };
         assert!(refused(fx314!("permission-bash.txt"), 2, "x").contains("takes no text"));
+        // `instruct` without `answer`: an amended "Yes" would approve the command.
+        let fake = Arc::new(Fake::with(vec![("claude", "repo-lane", script(fx314!("permission-bash.txt"), vec![]))]));
+        let (ctx, repo) = setup("textcaps", fake.clone());
+        let fp = prompt_of(&ctx, &repo)["fingerprint"].as_str().unwrap().to_string();
+        let lines_only = ctx.granted(Caps::of(&[Capability::Read, Capability::Instruct]), false);
+        let err = agent_answer_text(&lines_only, repo, "lane".into(), 1, fp, "and push it".into()).unwrap_err();
+        assert_eq!(err, ERR_NEEDS_ANSWER);
+        assert!(fake.keys().is_empty() && fake.pasted.lock().unwrap().is_empty() && fake.captures.load(Ordering::SeqCst) == 1, "refused before the pane is looked at again");
         assert_eq!(refused(fx314!("question-typed.txt"), 4, "x"), ERR_FIELD_HELD);
         assert_eq!(refused(fx314!("question.txt"), 9, "x"), ERR_NO_CHOICE);
         for (text, why) in [("/logout", "may not start with '/'"), ("two\nlines", "control character"), ("bidi \u{202E}x", "invisible")] {
