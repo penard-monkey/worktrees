@@ -416,6 +416,26 @@ pub fn import_list_at(p: &Path, source: &Path) -> Result<usize, String> {
 
 // ── CLI ─────────────────────────────────────────────────────────────────────
 
+/// What `projects add` adopted. Silent on a first registration with nothing
+/// to do; an add of a registered project (`again`) always says, since running
+/// the adoption is why it was run. A failed repair is the exit code.
+fn report_adoption(ui: &mut dyn crate::ui::Ui, a: &crate::adopt::Adoption, again: bool) -> i32 {
+    for dir in &a.repaired {
+        ui.info(&format!("repaired the git links of {dir} (the folder had moved)"));
+    }
+    for r in &a.renamed {
+        ui.info(&format!("renamed tmux {} → {} (nothing was closed)", r.from, r.to));
+    }
+    if let Some(e) = &a.repair_error {
+        ui.error(&format!("git worktree repair failed: {e}"));
+        return 1;
+    }
+    if again && a.is_empty() {
+        ui.info("nothing to adopt: no live session needs renaming and no worktree link is broken");
+    }
+    0
+}
+
 /// `worktrees projects [ls|add|rm|rename|private]` — user-global, so it runs
 /// anywhere (ahead of main.rs's git guard), like `skills`.
 pub fn cmd_projects(ui: &mut dyn crate::ui::Ui, args: &[String]) -> i32 {
@@ -464,30 +484,74 @@ pub fn cmd_projects(ui: &mut dyn crate::ui::Ui, args: &[String]) -> i32 {
             };
             let had = read_lenient().by_root(&project.main_root).cloned();
             match add(&project.main_root) {
-                Ok(e) if had.is_some() => {
-                    ui.info(&format!("already registered as '{}': {}", e.name, e.root));
-                    0
-                }
                 Ok(e) => {
-                    ui.info(&format!("registered '{}': {}", e.name, e.root));
-                    0
+                    if had.is_some() {
+                        ui.info(&format!("already registered as '{}': {}", e.name, e.root));
+                    } else {
+                        ui.info(&format!("registered '{}': {}", e.name, e.root));
+                    }
+                    // A folder renamed outside worktrees: its worktrees' git
+                    // links and its sessions' names, mended (`adopt`). Run on
+                    // every add, so adding a registered project again is how
+                    // a drifted session is renamed (doctor names this).
+                    report_adoption(ui, &crate::adopt::adopt(&project), had.is_some())
                 }
                 Err(e) => fail(ui, e),
             }
         }
         "rm" | "remove" => {
             let Some(key) = pos.first() else {
-                ui.error("usage: worktrees projects rm <name|root>");
+                ui.error("usage: worktrees projects rm <name|root> [--close|--keep]");
                 return 2;
             };
             let Some(e) = read_lenient().find(&resolve_key(key)).cloned() else {
                 return fail(ui, format!("no registered project: {key}"));
             };
+            let (close, keep) = (rest.iter().any(|a| a == "--close"), rest.iter().any(|a| a == "--keep"));
+            if close && keep {
+                return fail(ui, "--close and --keep contradict each other: pass one".into());
+            }
+            // What would be left running with nothing registered to show it,
+            // named BEFORE the entry goes. A root gone from disk has nothing
+            // running where it was (a renamed folder's sessions are the new
+            // folder's, adopted by `projects add`).
+            let project = Path::new(&e.root).is_dir().then(|| crate::Project::discover(Path::new(&e.root)).ok()).flatten();
+            let live = project.as_ref().map(crate::ops::live_places).unwrap_or_default();
+            let mut kept = false;
+            if let (Some(p), false) = (project.as_ref(), live.is_empty()) {
+                ui.warn(&format!("'{}' has {} live session(s):", e.name, live.len()));
+                for s in &live {
+                    let agent = s.agent.and_then(crate::provider::by_id).map(|a| format!("  ({} running)", a.label)).unwrap_or_default();
+                    ui.plain(&format!("    {}  {}{agent}", s.slug, s.session));
+                }
+                let want = close
+                    || (!keep && ui.can_confirm() && ui.confirm("Close them before unregistering? (No keeps them running) [y/N] "));
+                if want {
+                    // `close`'s own path, bound to the sessions just listed. A
+                    // session that could not be closed keeps the entry: the
+                    // user asked for both, and half of it would hide the rest.
+                    let rc = crate::ops::close_live_places(p, ui, &live);
+                    if rc != 0 {
+                        return fail(ui, format!("'{}' is still registered: not every session closed", e.name));
+                    }
+                } else {
+                    kept = true;
+                }
+            }
             match remove(&e.root) {
                 // Only the registration goes. The repo, its worktrees and its
                 // sessions are untouched.
                 Ok(_) => {
                     ui.info(&format!("unregistered '{}' ({}); nothing on disk changed", e.name, e.root));
+                    if kept {
+                        ui.warn(&format!(
+                            "{} session(s) left running — worktrees no longer lists them; add the project again to see them",
+                            live.len()
+                        ));
+                        if !keep && !ui.can_confirm() {
+                            ui.plain("(pass --close to close them, or --keep to keep them without this note)");
+                        }
+                    }
                     0
                 }
                 Err(err) => fail(ui, err),

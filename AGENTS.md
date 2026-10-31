@@ -66,6 +66,19 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   never the text, and a device's send stamps `last_remote_send`. Do not grow
   a second path that types into Claude.
 
+- **A place's session is `Project::live_session_in`'s, everywhere**: the
+  canonical name, else the session adopted by pane cwd. `close`/`rm`/`doctor`
+  (`ops::live_session`), the snapshot (`place_json`) and the agent rows
+  (`agents::live_agent_sessions`) all call it. The rows once looked up the
+  canonical name alone, so a project whose FOLDER was renamed (its prefix with
+  it) showed a live Claude in the nav while `agent_turns` answered "no agent
+  is running in this place" (2026-10-29). Find a lane's Claude probe by PANE
+  id first (`agents::lane_probe`): the probe keeps naming the session it
+  started in. `add_project`/`projects add` rename a moved project's sessions
+  (`worktrees_core::adopt`, the rule is in `moved_renames`' doc) and repair
+  its worktrees' git links. The rename is needed despite adoption because the
+  provider sidecars are found by the CANONICAL name only.
+
 - **The agent rows (`worktrees_api::agents`, `worktrees_core::prompt`) read
   Claude's screen, and Claude 2.1.309 has four traps** (fixtures and README:
   `crates/worktrees-core/tests/fixtures/claude-screen/2.1.309`). Its FOOTER
@@ -116,7 +129,7 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   do not align them). hyper parses the HTTP and tungstenite sees only frames,
   also ON PURPOSE: tungstenite's `accept_hdr_async` WRITES an HTTP error
   response when it refuses, while a hyper service that returns `Err` closes
-  with 0 bytes. The 181 commands sit in ONE macro table
+  with 0 bytes. The 182 commands sit in ONE macro table
   (`serve/dispatch.rs`) with an `Exposure` each; the six `ClientLocal` rows
   (clipboard, editor, terminal, zoom, the app bundle) are refused with
   `err: "client-local"`, never run on the host — the docs viewer is an

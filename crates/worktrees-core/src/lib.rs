@@ -6,6 +6,7 @@
 //! declared store, and rendering. See MIGRATION.md.
 
 pub mod activity;
+pub mod adopt;
 pub mod agent;
 pub mod agentfiles;
 pub mod argv;

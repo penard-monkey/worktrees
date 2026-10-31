@@ -265,13 +265,37 @@ pub fn list_workspace(ctx: &Ctx) -> Result<Workspace, String> {
     Ok(Workspace { projects })
 }
 
+/// `add_project`'s answer: the workspace, plus what adopting the project did
+/// — present only when it did something.
+#[derive(Serialize)]
+pub struct Added {
+    #[serde(flatten)]
+    pub workspace: Workspace,
+    #[serde(skip_serializing_if = "worktrees_core::adopt::Adoption::is_empty")]
+    pub adopted: worktrees_core::adopt::Adoption,
+}
+
 /// Add a git repo to the workspace (stored by its canonical main root, so a
-/// subdir resolves to the repo and dedupes).
-pub fn add_project(ctx: &Ctx, dir: String) -> Result<Workspace, String> {
+/// subdir resolves to the repo and dedupes), then adopt it
+/// (`worktrees_core::adopt`): a folder renamed outside worktrees gets its
+/// worktrees' git links repaired and its places' live sessions renamed to the
+/// names its folder renders now. On an already-registered root too, exactly
+/// as `worktrees projects add` does, so the two never disagree.
+pub fn add_project(ctx: &Ctx, dir: String) -> Result<Added, String> {
     let project = Project::discover(Path::new(&dir)).map_err(|e| e.msg)?;
     crate::projects::import_app_projects(ctx);
     worktrees_core::registry::add(&project.main_root)?;
-    list_workspace(ctx)
+    let adopted = worktrees_core::adopt::adopt(&project);
+    for r in &adopted.renamed {
+        applog("info", &format!("add_project {}: renamed tmux {} -> {}", project.main_root, r.from, r.to));
+    }
+    if !adopted.repaired.is_empty() {
+        applog("info", &format!("add_project {}: repaired git links of {}", project.main_root, adopted.repaired.join(", ")));
+    }
+    if let Some(e) = &adopted.repair_error {
+        applog("warn", &format!("add_project {}: git worktree repair failed: {e}", project.main_root));
+    }
+    Ok(Added { workspace: list_workspace(ctx)?, adopted })
 }
 
 /// What a picked folder actually IS, before we try to add it. The Add-project
@@ -529,7 +553,7 @@ pub fn clone_project(
     applog("info", &format!("clone_project ok {} ({:.1}s)", out.dir, started.elapsed().as_secs_f32()));
     // Half-success must not read as failure OR success: the files are there,
     // only the bookkeeping failed — say both, and how to finish by hand.
-    let workspace = add_project(ctx, out.dir.clone()).map_err(|e| {
+    let workspace = add_project(ctx, out.dir.clone()).map(|a| a.workspace).map_err(|e| {
         applog("error", &format!("clone_project cloned but add_project failed {}: {e}", out.dir));
         CloneError {
             kind: CloneErrorKind::Other,
@@ -575,7 +599,7 @@ pub fn init_repo(ctx: &Ctx, dir: String) -> Result<Workspace, String> {
         }
         first_commit(&dir)?;
     }
-    add_project(ctx, dir)
+    add_project(ctx, dir).map(|a| a.workspace)
 }
 
 /// Bootstrap commit for a repo that IS tracked but has an unborn HEAD.
@@ -629,10 +653,58 @@ pub fn first_commit(dir: &str) -> Result<(), String> {
     })
 }
 
-pub fn remove_project(ctx: &Ctx, root: String) -> Result<Workspace, String> {
+/// The live sessions of a registered project's places, with the agent each
+/// runs (`ops::live_places`): what removing it would leave running with
+/// nothing registered to show it. The app asks before its remove
+/// confirmation, so the user can close them or keep them. A root that is gone
+/// from disk has nothing running where it was (a renamed folder's sessions are
+/// the NEW folder's, adopted when it is added), and answers an empty list.
+pub fn project_sessions(root: String) -> Result<ProjectSessions, String> {
+    Ok(ProjectSessions { sessions: live_places_of(&root)? })
+}
+
+/// `project_sessions`' answer: sessions by name and slug, and no place
+/// records (so no provenance stamps to project).
+#[derive(Serialize)]
+pub struct ProjectSessions {
+    pub sessions: Vec<worktrees_core::ops::LiveSession>,
+}
+
+fn live_places_of(root: &str) -> Result<Vec<worktrees_core::ops::LiveSession>, String> {
+    if !Path::new(root).is_dir() {
+        return Ok(Vec::new());
+    }
+    let project = Project::discover(Path::new(root)).map_err(|e| e.msg)?;
+    Ok(worktrees_core::ops::live_places(&project))
+}
+
+/// `remove_project`'s answer: the workspace, plus the sessions it left
+/// running — present only when there are some, so a client that never asked
+/// (an older phone) reads the same shape it always did.
+#[derive(Serialize)]
+pub struct Removed {
+    #[serde(flatten)]
+    pub workspace: Workspace,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub left_running: Vec<worktrees_core::ops::LiveSession>,
+}
+
+/// Unregister a project. Its places' live sessions are listed BEFORE the
+/// entry goes and returned as `left_running`: nothing is closed here, and
+/// nothing is refused. A client that wants them closed closes them first,
+/// through `close_place` (the app does, from its remove dialog), because an
+/// older host ignores an argument it does not know and would have unregistered
+/// without closing anything.
+pub fn remove_project(ctx: &Ctx, root: String) -> Result<Removed, String> {
     crate::projects::import_app_projects(ctx);
+    // A repo that cannot be listed any more is still removed: the list is a
+    // courtesy, the removal is what was asked for.
+    let left_running = live_places_of(&root).unwrap_or_else(|e| {
+        applog("warn", &format!("remove_project {root}: its sessions could not be listed: {e}"));
+        Vec::new()
+    });
     worktrees_core::registry::remove(&root)?;
-    list_workspace(ctx)
+    Ok(Removed { workspace: list_workspace(ctx)?, left_running })
 }
 
 /// Re-order the workspace's projects (nav drag). The registry's order IS the
