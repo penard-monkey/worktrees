@@ -2501,7 +2501,38 @@ pub fn cmd_doctor(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         ui.plain("");
         kimi_doctor(p, ui, false, false);
     }
+    if !json && rc != 1 {
+        let lines = unreadable_session_lines(&crate::agent::scan_probes().unreadable);
+        if !lines.is_empty() {
+            ui.plain("");
+            ui.header("claude");
+            for line in &lines {
+                ui.warn(line);
+            }
+        }
+    }
     rc
+}
+
+/// Doctor's `claude` block: one warning per LIVE Claude whose session file
+/// does not parse (`agent::scan_probes`). On a human run only, as pi's and
+/// kimi's blocks are: it is a fact about the machine, and the app's per-project
+/// `--json` sweep would put it under every project at once. The remedy is a
+/// restart, which makes Claude write the file whole; the file is Claude Code's
+/// state, so it is never ours to repair.
+fn unreadable_session_lines(unreadable: &[crate::agent::UnreadableProbe]) -> Vec<String> {
+    unreadable
+        .iter()
+        .map(|u| {
+            format!(
+                "{} (pid {}) does not parse: {}. That Claude is running, but the agent rows, the dots and \
+                 place_status cannot see it. Restart it (/exit, then reopen it); never edit the file, it is Claude Code's.",
+                u.shown(),
+                u.pid,
+                u.error
+            )
+        })
+        .collect()
 }
 
 /// A harness is in use when it is the configured AI command, the user named a
@@ -3988,6 +4019,28 @@ mod tests {
             assert!(plan_update_prompt(ok).is_some(), "refused {ok:?}");
         }
         assert!(plan_update_prompt(&"a".repeat(129)).is_none());
+    }
+
+    /// A live Claude whose session file does not parse is a doctor warning
+    /// that names the file and the parse error, and whose remedy is a restart:
+    /// the file is Claude Code's, never ours to edit.
+    #[test]
+    fn doctor_names_an_unreadable_session_file_and_says_restart_never_edit() {
+        let u = crate::agent::UnreadableProbe {
+            path: "/nowhere/.claude/sessions/5389.json".into(),
+            pid: 5389,
+            error: "EOF while parsing an object at line 1 column 200".into(),
+            mtime: None,
+        };
+        let lines = unreadable_session_lines(std::slice::from_ref(&u));
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        let l = &lines[0];
+        assert!(l.contains("/nowhere/.claude/sessions/5389.json"), "{l}");
+        assert!(l.contains("pid 5389"), "{l}");
+        assert!(l.contains("EOF while parsing an object at line 1 column 200"), "the parse error: {l}");
+        assert!(l.contains("/exit"), "the remedy is a restart: {l}");
+        assert!(l.contains("never edit"), "{l}");
+        assert!(unreadable_session_lines(&[]).is_empty(), "nothing to say, no claude block");
     }
 
     #[test]

@@ -318,6 +318,27 @@ pub fn parse_foreground(ps: &str) -> HashMap<String, String> {
     out
 }
 
+/// Every pid `ps_foreground`'s rows put on `tty`, leader or not: an
+/// `npx`-started Claude's group leader is `npm` (`Pane::program`), so the
+/// leader alone would not name the Claude.
+pub fn pids_on_tty(ps: &str, tty: &str) -> Vec<i32> {
+    let tty = normalize_tty(tty);
+    ps.lines()
+        .filter_map(|line| {
+            let mut it = line.split_whitespace();
+            let (t, pid) = (it.next()?, it.next()?);
+            (normalize_tty(t) == tty).then(|| pid.parse().ok()).flatten()
+        })
+        .collect()
+}
+
+/// `#{pane_tty}` of one pane, as `ps` spells it.
+pub fn pane_tty(pane: &PaneId) -> Option<String> {
+    let o = tmux(&["display-message", "-p", "-t", pane.as_str(), "#{pane_tty}"]).ok()?;
+    let tty = String::from_utf8_lossy(&o.stdout);
+    (o.status.success() && !tty.trim().is_empty()).then(|| normalize_tty(&tty).to_string())
+}
+
 /// Whether `pane`'s foreground leader is worth a `ps`: a wrapper (`node`) in a
 /// session whose NAME does not already say what runs there. A provider
 /// sidecar names its harness (`for_pane` rule 2), and a dock shell is never an
@@ -1575,6 +1596,17 @@ pts/5     3007   3007 npm exec x
         assert_eq!(linux.get("pts/5").map(String::as_str), Some("npm"), "a comm with spaces is its first word");
         assert!(parse_foreground("").is_empty());
         assert!(parse_foreground("ttys1 x x pi\nttys2 7\n").is_empty(), "a malformed row names nothing");
+    }
+
+    /// Every process on the tty, not only its leader: `ps -A`'s fallback rows
+    /// carry every other tty too.
+    #[test]
+    fn every_pid_on_a_tty_is_read_from_both_platforms_ps() {
+        assert_eq!(pids_on_tty(PS_MACOS, "/dev/ttys000"), [78177, 84274, 84388]);
+        assert_eq!(pids_on_tty(PS_MACOS, "ttys009"), [84255, 94379]);
+        assert_eq!(pids_on_tty(PS_LINUX, "pts/5"), [3001, 3007]);
+        assert!(pids_on_tty(PS_MACOS, "ttys0").is_empty(), "a tty, not a prefix");
+        assert!(pids_on_tty("ttys000 x 1 claude\nttys000\n", "ttys000").is_empty(), "a malformed row names nothing");
     }
 
     /// tmux spells a tty `/dev/ttys009`, ps `ttys009` — the first cut of this

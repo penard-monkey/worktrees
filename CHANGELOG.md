@@ -5,6 +5,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Fixed
+- **The phone opens a live agent's conversation again, or says why it
+  can't.** The iPhone app answered "Couldn't load the conversation" for a
+  Claude that was running fine, and the host said that Claude had "written no
+  session file yet". It had: Claude Code had written a shorter session file
+  over a longer one and left one stray byte at the end, and worktrees refused
+  the whole file. That one byte hid the session everywhere at once: the
+  conversation, the busy dot, and what other agents see through
+  `place_status`. worktrees now reads the file and ignores the leftover tail,
+  so that session shows up again. A session file that really is broken (cut
+  short, garbage) is now named instead of silently skipped: the phone's error
+  says which file worktrees can't read, `worktrees doctor` lists it with the
+  parse error, and the fix it gives is to restart that Claude (`/exit`, then
+  reopen it), never to edit the file, which belongs to Claude Code.
+
 ## [0.44.2] - 2026-10-29
 
 ### Added
