@@ -6,8 +6,10 @@ title: "Proposal — a chat view of a place's agent"
 
 **Status:** exploration, 2026-10-30. A prototype is on the branch
 `feat/chat-session-view`, behind a Settings switch that is off by default. It
-is not merged and not reviewed. No server change. Its three open questions
-were decided by the user on 2026-10-30 (§9).
+is not merged and not reviewed. No server change of its own. Its three open
+questions were decided by the user on 2026-10-30 (§9). On 2026-10-31 it took
+in `feat/actionable-prompts` (two new rows, richer prompts, and the prompt
+hook), and the prompt card now answers every prompt those rows can read (§5).
 
 **The ask.** "Some users find the terminal-style view too challenging to use.
 Early feedback on the worktrees-ios UI has been good, so its chat style is a
@@ -19,8 +21,9 @@ links.
 **The recommendation in one paragraph.** Put a **Chat | Terminal switch on
 each agent cell**. The terminal stays the default and stays mounted under the
 chat, hidden, so going back takes one click and keeps its scrollback. The chat
-is the iOS design on the same four serve rows (`agent_turns`, `agent_prompt`,
-`agent_answer`, `agent_send`), adjusted for a console:
+is the iOS design on the same serve rows (`agent_turns`, `agent_prompt`,
+`agent_answer`, `agent_answer_text`, `agent_answer_many`, `agent_send`),
+adjusted for a console:
 - no step-up or grant;
 - the "always allow" choices are answerable here;
 - Enter sends;
@@ -135,25 +138,72 @@ delivery.
 ## 5. A waiting prompt
 
 When `agent_prompt` answers `waiting: true, readable: true`, a card closes the
-conversation:
-- the heading "Claude needs your answer", and its kind (Permission or
-  Question);
+conversation, and what it asks always comes before its choices:
+- the heading "Claude needs your answer", and its kind (Permission, Question,
+  or Plan);
+- for a prompt taller than the pane, its **`detail`, whole**, rendered per
+  tool: an Edit as a line diff of `old_string` → `new_string`, a MultiEdit
+  as one diff per change, a Write as its file, a Bash command as itself with
+  its description, a plan (`ExitPlanMode`) as markdown with its file, and
+  any other tool as its JSON. The clipped rows the terminal shows fold away
+  under "The part the terminal shows";
 - the prompt's own rows, **whole**, in the terminal's font, wrapped and never
   cut;
-- each choice as a button with its exact label and any continuation rows.
+- its choices. A new prompt is scrolled into view, and one taller than the
+  view opens at its top, so it is read before its choices are reached.
 
-A click selects a choice. **Send answer: “Yes”** then calls `agent_answer`
-with the fingerprint the person was shown, and Cancel clears the selection.
+Answering still takes two acts, a selection and then a send (§9.3). How the
+answer goes depends on the choice:
+
+| Choice | On the card | Row |
+|---|---|---|
+| Plain | A button; **Send answer: “Yes”** | `agent_answer` |
+| `text: "amend"` (Claude's Yes/No, every Codex question choice) | "Takes a note". Selected, an optional field: "No, and tell Claude what to do differently", "Yes, and tell Claude what to do next", or for Codex "Add a note". With a note, **Send “No” with the note** | `agent_answer_text` with a note, else `agent_answer` |
+| `text: "field"` with `host_only: "text"` (an empty "Type something.", a plan's "Tell Claude what to change") | Selected, a required field, focused. **Send answer: “penguins”** | `agent_answer_text` |
+| `text: "field"` without `host_only` (someone typed into it in the terminal; its label IS that text) | A plain choice, noted "Typed in the terminal: sent as it reads" | `agent_answer` |
+| `host_only: "widens"` | Allowed from the console, noted "Changes what the agent may do from now on"; refused in a window driving a paired host | as its kind |
+| `host_only: "text"` without `text` (kimi's fields) | Disabled: "answer this one in the terminal" | none |
+| A multi-select's boxes (`multi`, `checked`) | Checkboxes from `checked`. The free-text box is a checkbox and a field; typing ticks it. **Send 3 choices** | The free-text box first with `agent_answer_text` (which ticks it and sends nothing), then the prompt read again, then `agent_answer_many` against the new fingerprint, only if it still shows that box ticked |
+
+A multi-select's other choices ("Chat about this") are plain buttons below the
+boxes. Claude's review screen after a multi-select is an ordinary question,
+and gets an ordinary card. A two-question form is one card per screen, with
+its tab bar in the first row. Codex's "No, and tell Codex what to do
+differently" has no field: it is answered plainly, and the composer then takes
+focus with "Now tell Codex what to do differently: type it here and press
+Enter."
+
+A field or a note is one line under `typed_line_ok`'s rule, checked as it is
+typed, in the same words as the composer. Enter in it is the send.
+
 After the answer:
 - **On success**, the card goes and the conversation gets the line "You
-  answered “Yes” · 10:59 PM", plus "· not confirmed" when serve could not
-  see the prompt go.
-- **On `the prompt changed`**, the selection clears and the card says "Not
-  sent: the prompt changed before the answer reached it. Someone may have
-  answered it in the terminal." A choice never carries over to a new prompt.
+  answered “No” with a note: “use a different name” · 10:59 PM", plus
+  "· not confirmed" when serve could not see the prompt go. A field's answer
+  reads "You answered “penguins”"; a multi-select's lists its boxes.
+- **A refusal gets words** (`answerWords`), and re-reads the prompt when it
+  says the prompt moved:
 
-**An unreadable prompt** (`readable: false`) shows a card that says so and
-offers Open the terminal. **"Answer in the terminal"** is always on the card.
+| Serve says | The card says |
+|---|---|
+| `the prompt changed`, `no such choice`, `… is not one of the boxes` | Not sent: the prompt changed before the answer reached it. Someone may have answered it in the terminal. |
+| `…holds someone's text…` | Someone has typed into this choice’s field in the terminal. Answer it there, or pick the choice as it reads now. |
+| `a multi-select: tick its boxes…` / `not a multi-select…` | This prompt is a multi-select: tick its boxes, then send them. / …no longer a multi-select. It has been read again. |
+| `…takes no text…` | This choice takes no note. Send it without one. |
+| `…did not open…` | The choice’s text field didn’t open, so nothing was typed. Answer it in the terminal. |
+| `…could not be seen there…` | The text was typed into the field but couldn’t be seen there, so nothing was sent. Look at the terminal before answering again. |
+| `name at least one box…` / `choice N is the free-text box…` | Tick at least one box. / Type your own answer in its box before sending it. |
+| any other `… — answer it at the host` | Nothing was answered: <what serve said>. Answer it in the terminal. |
+
+A choice never carries over to a new prompt: a fingerprint that moves clears
+it, except while an answer is in flight (filling a box moves it on purpose).
+
+**An unreadable prompt** (`readable: false`) shows the bottom of the agent's
+screen that serve sends with it (`lines`), says this app can’t answer it, and
+offers **Answer it in the terminal**. A prompt is unreadable when the agent
+was launched without the hook (before it existed, or by hand), when a tool's
+input matches nothing (an MCP tool's long input), or when the record and the
+screen disagree. **"Answer in the terminal"** is always on the card.
 
 ## 6. What does not fit a chat, so the terminal stays one click away
 
@@ -162,7 +212,7 @@ offers Open the terminal. **"Answer in the terminal"** is always on the card.
 | Tool output and diffs | `agent_turns` carries tool **names** only | Chips under the reply; the top line names the terminal. A path in a reply opens the file in the dock |
 | Slash commands | `typed_line_ok` refuses a leading `/`, on purpose | The refusal says "run in the terminal" |
 | Esc / interrupt | No row presses Esc (§8) | Not offered |
-| Free-text modals (`host_only: text`) | `agent_answer` would open the field and leave it | The choice is disabled and names the terminal |
+| Free text the rows cannot type (kimi's fields: `host_only: text`, no `text`) | No row fills them | The choice is disabled and names the terminal. Claude's and Codex's fields and notes are answered on the card (§5) |
 | Images, a pasted screenshot, a file drop | One line of text only | Not offered. The terminal's drag and drop is unchanged |
 | pi, kimi | No transcript reader (`agents.rs`) | A fallback card; sends and prompts still work |
 | ⌘F | Finds in the terminal | Off while Chat is shown |
@@ -177,7 +227,7 @@ offers Open the terminal. **"Answer in the terminal"** is always on the card.
 | `app/src/ChatPane.css` | Plain CSS on `tokens.css` |
 | `app/src/App.tsx` | The switch in `.agent-label`, the terminal wrapped in a hidden, `inert` `.agent-term`, and the activity, done stamp and pane draft passed in |
 | `app/src/settings.ts`, `SettingsSheet.tsx` | `chat_view` (default off), General → Chat view |
-| `app/src/mock/install.ts` | Per-harness turns, the pi/kimi refusal, `?agentsend=mid\|nocomposer\|unconfirmed`, `?agentprompt=waiting`, `?activity=<n>` |
+| `app/src/mock/install.ts` | Per-harness turns, the pi/kimi refusal, `?agentsend=mid\|nocomposer\|unconfirmed`, `?agentprompt=permission\|question\|multi\|plan\|tall\|unreadable\|off` (`,waiting` for waiting places only; a Codex place gets Codex's approval), `?agentanswer=unseen`, `?activity=<n>` |
 
 **Checked:**
 - **Contrast**, in all six themes, by the browser's resolved colours. Body
@@ -190,6 +240,12 @@ offers Open the terminal. **"Answer in the terminal"** is always on the card.
   `elementFromPoint`.
 - **The hidden terminal** is `visibility: hidden` and `inert` while Chat is
   shown.
+- **The 2026-10-31 card** (fields, notes, boxes, `detail`, unreadable lines),
+  in the mock harness at 1280 px and in the 472 px cell, dark and light, and
+  in WebKit: each send button is hit-tested. A diff's words are ≥ 4.87:1 on
+  its tints in all six themes, and the tints sit 23–37 RGB units off the
+  field. Its `+`/`−` marks are `--txt-dim` (2.5:1 in tokyo-day), beside the
+  tint that carries the same meaning.
 
 **Not done:**
 - persisting the choice;

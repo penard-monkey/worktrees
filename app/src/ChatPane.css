@@ -133,6 +133,57 @@
 .chat-choice.closed .chat-choice-label { color: var(--txt-dim); }
 .chat-choice-more, .chat-choice-note { display: block; font-size: var(--fs-meta); color: var(--txt-dim); }
 .chat-choice-note { font-style: italic; }
+/* A multi-select's boxes: a row each, the box beside its words. */
+.chat-boxes { display: flex; flex-direction: column; gap: 4px; margin-bottom: var(--s2); }
+.chat-box {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--s2); align-items: baseline; cursor: pointer;
+  background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--r-sm);
+  padding: 6px var(--s2); font-size: var(--fs-body);
+}
+.chat-box:hover { border-color: var(--line-strong); }
+.chat-box.on { border-color: var(--accent); }
+.chat-box.closed { cursor: default; }
+.chat-box input[type="checkbox"] { margin: 0; accent-color: var(--accent); align-self: center; }
+.chat-box-free { align-items: center; cursor: default; }
+.chat-box-hint { margin: var(--s2) 0 0; }
+
+/* The text a selected choice takes: a field's answer, or a note. */
+.chat-answer { margin: 0 0 4px calc(var(--s2) + 1.2ch + var(--s2)); }
+.chat-answer .chat-line { margin-top: 4px; }
+.chat-answer-field {
+  display: block; width: 100%; min-width: 0;
+  background: var(--bg-input); color: var(--txt-hi); border: 1px solid var(--line); border-radius: var(--r-sm);
+  padding: 5px var(--s2); font: inherit; font-size: var(--fs-body);
+}
+.chat-answer-field::placeholder { color: var(--txt-dim); }
+.chat-answer-field:focus { outline: none; border-color: var(--accent); }
+.chat-answer-field[aria-invalid="true"] { border-color: var(--danger); }
+
+/* `detail`: the whole of a prompt taller than the pane. It sits in the
+   column like the rest of the card, never in a scroller of its own. */
+.chat-detail { margin: var(--s2) 0; }
+.chat-detail-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px var(--s2); margin: 0 0 4px; }
+.chat-detail-title { color: var(--txt-hi); font-weight: var(--fw-bold); overflow-wrap: anywhere; }
+.chat-detail-from { font-size: var(--fs-meta); color: var(--txt-dim); }
+.chat-detail-sub { margin: 4px 0; font-size: var(--fs-meta); color: var(--txt-dim); overflow-wrap: anywhere; }
+.chat-detail-part + .chat-detail-part { margin-top: var(--s2); }
+.chat-detail-code, .chat-diff {
+  margin: 0; padding: var(--s2) 0; font-family: var(--term-family); font-size: var(--fs-label); line-height: 1.5;
+  color: var(--txt-hi); background: var(--bg-input); border: 1px solid var(--line); border-radius: var(--r-sm);
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.chat-detail-code { padding: var(--s2) var(--s3); }
+.chat-diff-row { padding: 0 var(--s3) 0 0; }
+.chat-diff-k { display: inline-block; width: 2.4ch; text-align: center; color: var(--txt-dim); user-select: none; }
+.chat-diff-row.del { background: color-mix(in srgb, var(--danger) 16%, var(--bg-input)); }
+.chat-diff-row.add { background: color-mix(in srgb, var(--ok) 16%, var(--bg-input)); }
+.chat-detail-plan { padding: var(--s2) var(--s3); background: var(--bg-input); border: 1px solid var(--line); border-radius: var(--r-sm); }
+.chat-detail-plan .md > :first-child { margin-top: 0; }
+.chat-detail-plan .md > :last-child { margin-bottom: 0; }
+.chat-screen { margin: var(--s2) 0 0; font-size: var(--fs-meta); color: var(--txt-dim); }
+.chat-screen summary { cursor: pointer; }
+.chat-screen .chat-prompt-lines { font-size: var(--fs-meta); }
+
 .chat-card-foot { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); margin-top: var(--s3); }
 .chat-foot-end { margin-left: auto; }
 .chat-hint { font-size: var(--fs-meta); color: var(--txt-dim); }

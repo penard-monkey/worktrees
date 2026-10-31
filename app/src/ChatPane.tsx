@@ -11,9 +11,10 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import {
-  bytes, choiceOpen, clockMs, clockOf, dayLabel, draftProblem, itemsOf, loadPrompt, loadTurns, promptBody,
-  selectChoice, sendAnswer, sendDraft, setDraft, turnsUnsupported, useChat, SEND_MAX,
-  type Item, type ReadablePrompt, type Target,
+  boxesOf, bytes, choiceOpen, clockMs, clockOf, dayLabel, draftProblem, fieldWords, itemsOf, lineDiff, loadPrompt,
+  loadTurns, promptBody, selectChoice, sendAnswer, sendDraft, sendMany, setAnswerText, setBoxText, setDraft,
+  splitAtRule, ticksOf, toggleTick, turnsUnsupported, useChat, SEND_MAX,
+  type Item, type PromptChoice, type PromptDetail, type ReadablePrompt, type Target,
 } from "./chat";
 import { HARNESS_LABEL, type Harness } from "./harness";
 import * as Icons from "./icons";
@@ -86,7 +87,8 @@ export function ChatPane(props: ChatPaneProps) {
   const data = v.turns.data;
   const items = data ? itemsOf(data.turns, v.answered, v.pending) : [];
   const replies = items.filter((it) => it.k === "reply").length;
-  const { toBottom, fresh, dismiss } = useStickToBottom(scrollRef, items.length, replies, !!data, !!prompt);
+  const promptKey = prompt ? (prompt.readable ? prompt.fingerprint : `unreadable|${(prompt.lines ?? []).join("\n")}`) : null;
+  const { toBottom, fresh, dismiss } = useStickToBottom(scrollRef, items.length, replies, !!data, promptKey);
 
   let body: React.ReactNode;
   if (!data) {
@@ -138,12 +140,19 @@ export function ChatPane(props: ChatPaneProps) {
           )}
           {prompt && (
             prompt.readable
-              ? <PromptCard p={prompt} target={target} agent={agent} onTerminal={props.onTerminal} />
+              ? <PromptCard p={prompt} target={target} agent={agent} onTerminal={props.onTerminal} onLink={onLink} />
               : (
                 <div className="chat-card" data-testid="chat-prompt-unreadable">
-                  <div className="chat-card-head"><span className="chat-card-dot" aria-hidden="true" /><b>{agent} needs input</b></div>
-                  <p>This prompt can’t be read whole here (taller than its pane, or one this app doesn’t know). Answer it in the terminal.</p>
-                  <button className="ctrl sm with-icon" onClick={props.onTerminal}><Icons.SquareTerminal size={13} /> Open the terminal</button>
+                  <div className="chat-card-head"><span className="chat-card-dot" aria-hidden="true" /><b>{agent} needs your answer in the terminal</b></div>
+                  {prompt.lines?.length ? (
+                    <>
+                      <p>This app can’t read this prompt whole, so it can’t answer it. The bottom of {agent}’s screen:</p>
+                      <pre className="chat-prompt-lines" data-testid="chat-prompt-lines">{prompt.lines.join("\n")}</pre>
+                    </>
+                  ) : (
+                    <p>This prompt can’t be read here (taller than its pane, or one this app doesn’t know).</p>
+                  )}
+                  <button className="ctrl sm with-icon" onClick={props.onTerminal}><Icons.SquareTerminal size={13} /> Answer it in the terminal</button>
                 </div>
               )
           )}
@@ -153,7 +162,7 @@ export function ChatPane(props: ChatPaneProps) {
         <button className="chat-new" onClick={() => { dismiss(); toBottom(); }} data-testid="chat-new">New messages ↓</button>
       )}
       </div>
-      <Composer target={target} agent={agent} waiting={!!prompt} paneDraft={props.paneDraft}
+      <Composer target={target} agent={agent} waiting={prompt ? (prompt.readable ? "above" : "terminal") : null} paneDraft={props.paneDraft} followUp={v.followUp}
         onTerminal={props.onTerminal} onRefresh={refresh} loading={v.turns.loading || v.prompt.loading} />
       {menu}
     </div>
@@ -161,13 +170,30 @@ export function ChatPane(props: ChatPaneProps) {
 }
 
 /** Open at the newest; follow new content only when already at the bottom,
- *  else offer "New messages". */
-function useStickToBottom(ref: RefObject<HTMLDivElement | null>, count: number, replies: number, loaded: boolean, prompt: boolean) {
+ *  else offer "New messages". A NEW prompt is always brought into view, and
+ *  one taller than the view opens at its top: what it asks is read before
+ *  its choices, never scrolled past to reach them. */
+function useStickToBottom(ref: RefObject<HTMLDivElement | null>, count: number, replies: number, loaded: boolean, promptKey: string | null) {
   const atBottom = useRef(true);
   const seen = useRef<number | null>(null);
   const seenReplies = useRef(0);
+  const seenPrompt = useRef<string | null>(null);
   const [fresh, setFresh] = useState(false);
   const toBottom = () => { const el = ref.current; if (el) el.scrollTop = el.scrollHeight; };
+  const toPrompt = () => {
+    const el = ref.current;
+    const card = el?.querySelector<HTMLElement>(".chat-card");
+    if (!el || !card) return toBottom();
+    if (card.offsetHeight <= el.clientHeight - 16) return toBottom();
+    el.scrollTop += card.getBoundingClientRect().top - el.getBoundingClientRect().top - 8;
+    atBottom.current = false;
+  };
+  useLayoutEffect(() => {
+    if (!loaded || promptKey === seenPrompt.current) return;
+    seenPrompt.current = promptKey;
+    if (promptKey !== null) toPrompt();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [promptKey, loaded]);
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
@@ -183,17 +209,18 @@ function useStickToBottom(ref: RefObject<HTMLDivElement | null>, count: number, 
     if (seen.current === null) {
       seen.current = count;
       seenReplies.current = replies;
-      toBottom();
+      if (promptKey !== null) toPrompt();
+      else toBottom();
       return;
     }
-    if (count > seen.current || prompt) {
+    if (count > seen.current) {
       if (atBottom.current) toBottom();
       else if (replies > seenReplies.current) setFresh(true);
     }
     seen.current = count;
     seenReplies.current = replies;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [count, replies, loaded, prompt]);
+  }, [count, replies, loaded]);
   // The column growing (a card, a wrapped composer) keeps the bottom in view.
   useEffect(() => {
     const el = ref.current;
@@ -253,7 +280,7 @@ function ChatItem(props: { it: Item; agent: string; onLink: (href: string) => vo
     case "answered":
       return (
         <li className="chat-note chat-answered" data-testid="chat-answered">
-          You answered “{it.a.label}” · {clockMs(it.a.at)}{it.a.confirmed ? "" : " · not confirmed"}
+          You answered “{it.a.label}”{it.a.note ? <> with a note: “{it.a.note}”</> : null} · {clockMs(it.a.at)}{it.a.confirmed ? "" : " · not confirmed"}
         </li>
       );
     case "pending":
@@ -268,51 +295,111 @@ function ChatItem(props: { it: Item; agent: string; onLink: (href: string) => vo
   }
 }
 
-/** A waiting prompt, whole, with its own choices. A click selects; "Send
- *  answer" sends — two acts, because an answer can run a command. */
-function PromptCard(props: { p: ReadablePrompt; target: Target; agent: string; onTerminal: () => void }) {
+/** A waiting prompt, whole, with its own choices. A click selects (or
+ *  ticks); "Send" sends — two acts, because an answer can run a command.
+ *  What it asks comes first, whole: `detail` when the terminal shows only
+ *  part of it, then the question rows. */
+function PromptCard(props: { p: ReadablePrompt; target: Target; agent: string; onTerminal: () => void; onLink: (href: string) => void }) {
   const { p, target, agent } = props;
   const v = useChat(target.path);
   const ids = useId();
+  const rows = promptBody(p);
+  const { above, question } = p.detail ? splitAtRule(rows) : { above: [] as string[], question: rows };
+  const { boxes, freeBox } = p.multi ? boxesOf(p) : { boxes: [] as PromptChoice[], freeBox: null };
+  const others = p.multi ? p.choices.filter((c) => c.checked === undefined) : p.choices;
+  const ticks = p.multi ? ticksOf(v, p) : [];
   const selected = p.choices.find((c) => c.n === v.selected) ?? null;
+  const way = selected ? choiceOpen(selected) : null;
+  const typed = way && way.how !== "plain" ? v.answerText : "";
+  const typedProblem = way && way.how !== "plain" ? draftProblem(typed, way.how === "field" ? "answer" : "note") : null;
+  const canAnswer = !!selected && !!way?.open && !typedProblem && !(way.how === "field" && !typed.trim()) && !v.answering;
+  const freeOn = !!freeBox && ticks.includes(freeBox.n);
+  const boxProblem = freeOn ? (v.boxText.trim() ? draftProblem(v.boxText, "answer") : "Type your own answer in its box, or untick it.") : null;
+  const canSendMany = !!p.multi && !selected && ticks.length > 0 && !boxProblem && !v.answering;
+  const kind = p.detail?.tool === "ExitPlanMode" ? "Plan" : p.kind === "question" ? "Question" : "Permission";
+  const answer = () => { if (canAnswer) void sendAnswer(target, agent); };
+  const many = () => { if (canSendMany) void sendMany(target); };
+  const quote = (s: string) => `“${s.length > 40 ? s.slice(0, 39) + "…" : s}”`;
   return (
     <div className="chat-card chat-prompt" role="group" aria-labelledby={`${ids}-h`} data-testid="chat-prompt">
       <div className="chat-card-head">
         <span className="chat-card-dot" aria-hidden="true" />
         <b id={`${ids}-h`}>{agent} needs your answer</b>
-        <span className="chat-kind">{p.kind === "question" ? "Question" : "Permission"}</span>
+        <span className="chat-kind">{kind}</span>
       </div>
-      <pre className="chat-prompt-lines" data-testid="chat-prompt-lines">{promptBody(p).join("\n")}</pre>
-      <div className="chat-choices" role="group" aria-label="Choices">
-        {p.choices.map((c) => {
-          const { open, note } = choiceOpen(c);
-          const on = v.selected === c.n;
-          return (
-            <button key={c.n} className={"chat-choice" + (on ? " on" : "") + (open ? "" : " closed")}
-              aria-pressed={open ? on : undefined} disabled={!open || v.answering}
-              onClick={() => selectChoice(target.path, on ? null : c.n)} data-testid={`chat-choice-${c.n}`}>
-              {/* The grid is an inner span: WebKit shrink-wraps a <button>
-                  that is itself the container (AGENTS.md, WebKit probe). */}
-              <span className="chat-choice-in">
-                <span className="chat-choice-n" aria-hidden="true">{c.n}</span>
+      {p.detail && <PromptDetail d={p.detail} root={target.path} agent={agent} onLink={props.onLink} />}
+      {above.length > 0 && (
+        <details className="chat-screen" data-testid="chat-prompt-screen">
+          <summary>The part the terminal shows ({above.length} rows)</summary>
+          <pre className="chat-prompt-lines">{above.join("\n")}</pre>
+        </details>
+      )}
+      <pre className="chat-prompt-lines" data-testid="chat-prompt-lines">{question.join("\n")}</pre>
+      {boxes.length > 0 && (
+        <div className="chat-boxes" role="group" aria-label="Tick any, then send them" data-testid="chat-boxes">
+          {boxes.map((c) => {
+            const on = ticks.includes(c.n);
+            const { open, note } = choiceOpen(c);
+            const id = `${ids}-b${c.n}`;
+            if (c === freeBox) {
+              return (
+                <div key={c.n} className={"chat-box chat-box-free" + (on ? " on" : "")}>
+                  <input id={id} type="checkbox" checked={on} disabled={v.answering}
+                    onChange={() => toggleTick(target.path, c.n)} aria-label={`${c.label}: your own answer`} data-testid={`chat-box-${c.n}`} />
+                  <input type="text" className="chat-answer-field" value={v.boxText} placeholder="Type your own answer"
+                    aria-label="Your own answer" aria-invalid={on && boxProblem ? true : undefined} disabled={v.answering}
+                    autoCorrect="off" autoCapitalize="off" autoComplete="off" spellCheck={false}
+                    onChange={(e) => setBoxText(target.path, e.currentTarget.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) { e.preventDefault(); many(); } }}
+                    data-testid="chat-box-text" />
+                </div>
+              );
+            }
+            return (
+              <label key={c.n} htmlFor={id} className={"chat-box" + (on ? " on" : "") + (open ? "" : " closed")}>
+                <input id={id} type="checkbox" checked={on} disabled={!open || v.answering}
+                  onChange={() => toggleTick(target.path, c.n)} data-testid={`chat-box-${c.n}`} />
                 <span className="chat-choice-text">
                   <span className="chat-choice-label">{c.label}</span>
                   {c.more?.map((m, i) => <span key={i} className="chat-choice-more">{m}</span>)}
                   {note && <span className="chat-choice-note">{note}</span>}
                 </span>
-              </span>
-            </button>
-          );
-        })}
-      </div>
-      {v.answerLine && <p className="chat-alert" role="alert" data-testid="chat-answer-line">{v.answerLine}</p>}
+              </label>
+            );
+          })}
+        </div>
+      )}
+      {others.length > 0 && (
+        <div className="chat-choices" role="group" aria-label={p.multi ? "Or instead" : "Choices"}>
+          {others.map((c) => (
+            <ChoiceRow key={c.n} c={c} on={v.selected === c.n} busy={v.answering} path={target.path}
+              harness={p.harness} agent={agent} text={v.answerText} problem={v.selected === c.n ? typedProblem : null} onEnter={answer} />
+          ))}
+        </div>
+      )}
+      {v.answerWords && (
+        <p className="chat-alert" role="alert" data-testid="chat-answer-line">
+          {v.answerWords.line}
+          {v.answerWords.terminal && <> <button className="chat-linkbtn" onClick={props.onTerminal}>Open the terminal</button></>}
+        </p>
+      )}
+      {boxProblem && !selected && <p className="chat-hint chat-box-hint">{boxProblem}</p>}
       <div className="chat-card-foot">
-        {selected ? (
+        {selected && way ? (
           <>
-            <button className="enter-btn sm" disabled={v.answering} onClick={() => void sendAnswer(target)} data-testid="chat-send-answer">
-              {v.answering ? "Answering…" : `Send answer: “${selected.label.length > 40 ? selected.label.slice(0, 39) + "…" : selected.label}”`}
+            <button className="enter-btn sm" disabled={!canAnswer} onClick={answer} data-testid="chat-send-answer">
+              {v.answering ? "Answering…"
+                : way.how === "field" ? (typed.trim() ? `Send answer: ${quote(typed)}` : "Type an answer to send")
+                : way.how === "amend" && typed.trim() ? `Send ${quote(selected.label)} with the note`
+                : `Send answer: ${quote(selected.label)}`}
             </button>
             <button className="ctrl sm" disabled={v.answering} onClick={() => selectChoice(target.path, null)}>Cancel</button>
+          </>
+        ) : p.multi ? (
+          <>
+            <button className="enter-btn sm" disabled={!canSendMany} onClick={many} data-testid="chat-send-many">
+              {v.answering ? "Sending…" : ticks.length ? `Send ${ticks.length} ${ticks.length === 1 ? "choice" : "choices"}` : "Tick one or more to send"}
+            </button>
           </>
         ) : (
           <span className="chat-hint">Pick a choice, then send it.</span>
@@ -323,8 +410,129 @@ function PromptCard(props: { p: ReadablePrompt; target: Target; agent: string; o
   );
 }
 
+/** One choice of a prompt: a button that selects it and, once selected, the
+ *  text it takes — a field's answer, required, or an optional note. */
+function ChoiceRow(props: {
+  c: PromptChoice; on: boolean; busy: boolean; path: string; harness: string; agent: string;
+  text: string; problem: string | null; onEnter: () => void;
+}) {
+  const { c, on } = props;
+  const { open, how, note } = choiceOpen(c);
+  const field = useRef<HTMLInputElement>(null);
+  const ids = useId();
+  // A field IS the answer: selecting it is starting to type. A note is
+  // optional, and focus stays where the click left it.
+  useEffect(() => { if (on && how === "field") field.current?.focus({ preventScroll: true }); }, [on, how]);
+  return (
+    <>
+      <button className={"chat-choice" + (on ? " on" : "") + (open ? "" : " closed")}
+        aria-pressed={open ? on : undefined} disabled={!open || props.busy}
+        onClick={() => selectChoice(props.path, on ? null : c.n)} data-testid={`chat-choice-${c.n}`}>
+        {/* The grid is an inner span: WebKit shrink-wraps a <button>
+            that is itself the container (AGENTS.md, WebKit probe). */}
+        <span className="chat-choice-in">
+          <span className="chat-choice-n" aria-hidden="true">{c.n}</span>
+          <span className="chat-choice-text">
+            <span className="chat-choice-label">{c.label}</span>
+            {c.more?.map((m, i) => <span key={i} className="chat-choice-more">{m}</span>)}
+            {note && <span className="chat-choice-note">{note}</span>}
+            {!on && how === "amend" && <span className="chat-choice-note">Takes a note</span>}
+          </span>
+        </span>
+      </button>
+      {on && how !== "plain" && (
+        <div className="chat-answer">
+          <label htmlFor={`${ids}-t`} className="sr-only">{how === "field" ? `Your answer for “${c.label}”` : `A note with “${c.label}”`}</label>
+          <input id={`${ids}-t`} ref={field} type="text" className="chat-answer-field" value={props.text}
+            placeholder={fieldWords(c, props.harness, props.agent)} disabled={props.busy}
+            aria-invalid={props.problem ? true : undefined} aria-describedby={props.problem ? `${ids}-p` : undefined}
+            autoCorrect="off" autoCapitalize="off" autoComplete="off" spellCheck={false}
+            onChange={(e) => setAnswerText(props.path, e.currentTarget.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) { e.preventDefault(); props.onEnter(); } }}
+            data-testid={`chat-answer-text-${c.n}`} />
+          {props.problem && <p id={`${ids}-p`} className="chat-line alert">{props.problem}</p>}
+        </div>
+      )}
+    </>
+  );
+}
+
+/** What a prompt taller than the pane asks, whole, per tool: an edit as a
+ *  diff, a file as its text, a command as itself, a plan as markdown, and
+ *  anything else as its JSON. Data the agent wrote, never instructions. */
+function PromptDetail(props: { d: PromptDetail; root: string; agent: string; onLink: (href: string) => void }) {
+  const { d, root } = props;
+  const input = d.input ?? {};
+  const str = (k: string) => (typeof input[k] === "string" ? (input[k] as string) : null);
+  const rel = (path: string | null) => (path && path.startsWith(root + "/") ? path.slice(root.length + 1) : path);
+  const file = rel(str("file_path"));
+  let head: string;
+  let body: React.ReactNode;
+  const edits = Array.isArray(input.edits) ? (input.edits as Record<string, unknown>[]) : null;
+  if (d.tool === "Edit" && file && str("old_string") !== null && str("new_string") !== null) {
+    head = `Edit ${file}${input.replace_all === true ? " (every occurrence)" : ""}`;
+    body = <DiffRows a={str("old_string")!} b={str("new_string")!} />;
+  } else if (d.tool === "MultiEdit" && file && edits?.every((e) => typeof e.old_string === "string" && typeof e.new_string === "string")) {
+    head = `Edit ${file}: ${edits.length} ${edits.length === 1 ? "change" : "changes"}`;
+    body = edits.map((e, i) => (
+      <div key={i} className="chat-detail-part">
+        <p className="chat-detail-sub">Change {i + 1} of {edits.length}{e.replace_all === true ? " (every occurrence)" : ""}</p>
+        <DiffRows a={e.old_string as string} b={e.new_string as string} />
+      </div>
+    ));
+  } else if (d.tool === "Write" && file && str("content") !== null) {
+    const n = str("content")!.split("\n").length;
+    head = `Write ${file} (${n} ${n === 1 ? "line" : "lines"})`;
+    body = <pre className="chat-detail-code">{str("content")}</pre>;
+  } else if (d.tool === "Bash" && str("command") !== null) {
+    head = "Run a command";
+    body = (
+      <>
+        {str("description") && <p className="chat-detail-sub">{str("description")}</p>}
+        <pre className="chat-detail-code">{str("command")}</pre>
+      </>
+    );
+  } else if (d.tool === "ExitPlanMode" && str("plan") !== null) {
+    head = `${props.agent}’s plan`;
+    body = (
+      <>
+        <div className="chat-detail-plan"><Markdown src={str("plan")!} onLink={props.onLink} /></div>
+        {str("planFilePath") && <p className="chat-detail-sub">Plan file: {str("planFilePath")}</p>}
+      </>
+    );
+  } else {
+    head = `${d.tool}: its input`;
+    body = <pre className="chat-detail-code">{JSON.stringify(input, null, 2)}</pre>;
+  }
+  return (
+    <section className="chat-detail" aria-label={head} data-testid="chat-detail">
+      <p className="chat-detail-head">
+        <span className="chat-detail-title">{head}</span>
+        <span className="chat-detail-from">{d.from === "plan-file" ? "In full, from its plan file" : `In full, as ${props.agent} asked`}</span>
+      </p>
+      {body}
+    </section>
+  );
+}
+
+function DiffRows(props: { a: string; b: string }) {
+  const rows = lineDiff(props.a, props.b);
+  return (
+    <div className="chat-diff" role="group" aria-label={`${rows.filter((r) => r.k === "-").length} lines out, ${rows.filter((r) => r.k === "+").length} in`}>
+      {rows.map((r, i) => (
+        <div key={i} className={"chat-diff-row" + (r.k === "-" ? " del" : r.k === "+" ? " add" : "")}>
+          <span className="chat-diff-k" aria-hidden="true">{r.k}</span>{r.text || " "}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function Composer(props: {
-  target: Target; agent: string; waiting: boolean; paneDraft: { text: string; queued: boolean } | null;
+  /** Where a waiting prompt is answered: on the card above, or in the terminal. */
+  target: Target; agent: string; waiting: "above" | "terminal" | null; paneDraft: { text: string; queued: boolean } | null;
+  /** What to type next, after an answer that hands over to the composer. */
+  followUp: string | null;
   onTerminal: () => void; onRefresh: () => void; loading: boolean;
 }) {
   const { target, agent } = props;
@@ -338,6 +546,7 @@ function Composer(props: {
   // Switching to Chat is switching to typing here: the hidden terminal has
   // just given the keyboard up (App's `setChatView`).
   useEffect(() => { field.current?.focus({ preventScroll: true }); }, []);
+  useEffect(() => { if (props.followUp) field.current?.focus({ preventScroll: true }); }, [props.followUp]);
 
   // Grow with the text, to six lines; a long line wraps, it never scrolls sideways.
   useLayoutEffect(() => {
@@ -361,7 +570,8 @@ function Composer(props: {
   if (v.sending) line = "Sending…";
   else if (v.sendWords) { line = v.sendWords.line; alert = true; }
   else if (problem) { line = problem; alert = true; }
-  else if (props.waiting) line = "Messages can’t be sent while a prompt is waiting. Answer it above.";
+  else if (props.waiting) line = `Messages can’t be sent while a prompt is waiting. Answer it ${props.waiting === "above" ? "above" : "in the terminal"}.`;
+  else if (props.followUp && !text.trim()) line = props.followUp;
   else line = n >= COUNT_FROM ? `One line · ${n.toLocaleString()} of ${SEND_MAX.toLocaleString()} bytes` : "One line · Enter sends";
 
   return (

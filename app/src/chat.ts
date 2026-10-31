@@ -5,11 +5,15 @@
 // to what the desktop app is: the CONSOLE, so there is no step-up and no
 // grant, and the terminal is one click away rather than on another machine.
 //
-// The four rows are serve's (`worktrees-api/src/agents.rs`):
+// The rows are serve's (`worktrees-api/src/agents.rs`):
 // - `agent_turns` (read): the transcript's last turns, never the pane;
-// - `agent_prompt` (read): a waiting modal, whole, with its own choices;
+// - `agent_prompt` (read): a waiting modal, whole, with its own choices, and
+//   for one taller than the pane the whole of what it asks (`detail`);
 // - `agent_answer` (answer): one of those choices, a compare-and-swap on the
 //   fingerprint the person was shown;
+// - `agent_answer_text` (instruct + answer): a choice with free text, a field
+//   ("Type something.") or a note riding on it (Claude's `Tab to amend`);
+// - `agent_answer_many` (answer): a multi-select's boxes, sent together;
 // - `agent_send` (instruct): ONE line, pasted into an EMPTY composer. The only
 //   path that types into Claude (AGENTS.md); the composer adds no second one.
 //
@@ -25,15 +29,29 @@ import { invoke, windowOnHost } from "./ipc";
 export type Turn = { at: number | null; user: string | null; reply: string; tools: string[]; truncated: boolean };
 /** `agent_turns`' answer; `reason` only when no agent is running. */
 export type AgentTurns = { harness?: string; session?: string; turns: Turn[]; more: boolean; note: string; reason?: string };
-/** `prompt::Choice`. */
-export type PromptChoice = { n: number; label: string; more?: string[]; highlighted: boolean; host_only?: "widens" | "text" };
+/** `prompt::Choice`. `checked` marks a multi-select's box; `text` a choice
+ *  that takes free text: `field` IS a text field, `amend` takes an optional
+ *  note. `host_only: "text"` on a field means it is empty. */
+export type PromptChoice = {
+  n: number; label: string; more?: string[]; highlighted: boolean;
+  host_only?: "widens" | "text"; checked?: boolean; text?: "field" | "amend";
+};
+/** What a prompt taller than the pane asks, whole: Claude's own tool call
+ *  (its PermissionRequest hook) or a plan's own file. */
+export type PromptDetail = { tool: string; input: Record<string, unknown>; from: "hook" | "plan-file" };
 export type AgentPrompt =
   | { waiting: false }
-  | { waiting: true; readable: true; harness: string; session: string; kind: "permission" | "question"; fingerprint: string; lines: string[]; choices: PromptChoice[]; note: string }
-  | { waiting: true; readable: false; harness: string | null; session: string | null; reason: string };
+  | {
+    waiting: true; readable: true; harness: string; session: string; kind: "permission" | "question";
+    fingerprint: string; lines: string[]; choices: PromptChoice[]; note: string; multi?: boolean; detail?: PromptDetail;
+  }
+  | { waiting: true; readable: false; harness: string | null; session: string | null; reason: string; lines?: string[]; note?: string };
 export type ReadablePrompt = Extract<AgentPrompt, { readable: true }>;
 export type AgentSent = { delivered: boolean; queued: boolean; harness: string; session: string; note: string };
 export type AgentAnswer = { answered: true; confirmed: boolean; harness: string; session: string; choice: number; label: string };
+/** A multi-select's free-text box, filled: nothing is sent yet. */
+export type AgentFilled = { answered: false; harness: string; session: string; choice: number; note: string };
+export type AgentAnsweredMany = { answered: true; confirmed: boolean; harness: string; session: string; choices: number[]; labels: string[] };
 
 /** agents.rs's refusal strings, which the words below key on. */
 export const AGENT_ERR = {
@@ -42,6 +60,10 @@ export const AGENT_ERR = {
   promptUp: "the agent is waiting on a prompt: answer it with agent_answer",
   midInput: "the agent's prompt has unsent text in it (someone is typing there): send nothing until it is empty",
   noComposer: "the agent is not at its prompt (starting, or a screen this host does not recognise): try again shortly",
+  fieldHeld: "that choice's text field holds someone's text: answer it at the host, or choose it as it reads with agent_answer",
+  multi: "a multi-select: tick its boxes with agent_answer_many",
+  notMulti: "not a multi-select: answer it with agent_answer",
+  noBox: "name at least one box to tick",
   /** `agent_send` / `agent_turns` naming a session no agent of the place runs in. */
   noLanePrefix: "no agent this place launched is running in ",
   /** `agent_turns` for pi and kimi. */
@@ -57,20 +79,22 @@ export const TURNS_MAX = 20;
 
 export const bytes = (text: string) => new TextEncoder().encode(text).length;
 
-/** Why `agent_send` would refuse a draft, in words, or null. The same rule as
- *  `harness::typed_line_ok` (MCP `send` shares it), checked before the line
- *  leaves so a refusal is explained where it is typed. A pasted draft is never
- *  changed to make it pass. */
-export function draftProblem(text: string): string | null {
+/** Why `agent_send` (or `agent_answer_text`, which shares the rule) would
+ *  refuse `text`, in words, or null. The same rule as `harness::typed_line_ok`
+ *  (MCP `send` shares it), checked before the line leaves so a refusal is
+ *  explained where it is typed. A pasted draft is never changed to make it
+ *  pass. `what` names the thing typed: a message, an answer, a note. */
+export function draftProblem(text: string, what: "message" | "answer" | "note" = "message"): string | null {
   if (!text.trim()) return null;
-  if (/\p{Cc}/u.test(text)) return "Use one line: a message can’t hold line breaks, tabs or other control characters.";
+  const one = `${what === "answer" ? "an" : "a"} ${what}`;
+  if (/\p{Cc}/u.test(text)) return `Use one line: ${one} can’t hold line breaks, tabs or other control characters.`;
   if (/[\p{Cf}\p{Zl}\p{Zp}]/u.test(text)) return "Remove the invisible formatting characters: the agent would read something other than what you see.";
   if (bytes(text) > SEND_MAX) return `Too long: ${bytes(text).toLocaleString()} of ${SEND_MAX.toLocaleString()} bytes.`;
   const lead = text.trimStart()[0];
   if ("/@!#".includes(lead)) {
     return lead === "/"
-      ? "Slash commands run in the terminal: a message can’t start with /."
-      : `A message can’t start with ${lead}: at the agent’s prompt that runs something, it is not a message.`;
+      ? `Slash commands run in the terminal: ${one} can’t start with /.`
+      : `${one[0].toUpperCase()}${one.slice(1)} can’t start with ${lead}: at the agent’s prompt that runs something, it is not ${one}.`;
   }
   return null;
 }
@@ -78,6 +102,8 @@ export function draftProblem(text: string): string | null {
 /** What a refused or unconfirmed send says under the field. `terminal` offers
  *  the way back; `prompt` re-reads the prompt the refusal says is up. */
 export type SendWords = { line: string; terminal?: boolean; prompt?: boolean };
+/** What a refused or unconfirmed answer says on the card. */
+export type Words = SendWords;
 
 export function sendWords(err: string, agent: string): SendWords {
   if (err === AGENT_ERR.promptUp) return { line: `${agent} is waiting on the prompt above. Answer it first.`, prompt: true };
@@ -91,6 +117,32 @@ export function sendWords(err: string, agent: string): SendWords {
   return { line: `Not sent: ${err}`, terminal: true };
 }
 
+/** What a refused answer says on the card. `prompt` re-reads the prompt: the
+ *  refusal says it is not the one the card shows. The `…answer it at the
+ *  host` family typed nothing, or nothing confirmed, and so says to look. */
+export function answerWords(err: string): Words {
+  if (err === AGENT_ERR.changed || err === AGENT_ERR.noChoice || / is not one of the boxes$/.test(err)) return { line: CHANGED, prompt: true };
+  if (err === AGENT_ERR.fieldHeld) {
+    return { line: "Someone has typed into this choice’s field in the terminal. Answer it there, or pick the choice as it reads now.", terminal: true, prompt: true };
+  }
+  if (err === AGENT_ERR.multi) return { line: "This prompt is a multi-select: tick its boxes, then send them.", prompt: true };
+  if (err === AGENT_ERR.notMulti) return { line: "This prompt is no longer a multi-select. It has been read again.", prompt: true };
+  if (err === AGENT_ERR.noBox) return { line: "Tick at least one box." };
+  if (/ takes no text: /.test(err)) return { line: "This choice takes no note. Send it without one.", prompt: true };
+  if (/ is the free-text box: /.test(err)) return { line: "Type your own answer in its box before sending it." };
+  if (/ text field did not open; /.test(err)) return { line: "The choice’s text field didn’t open, so nothing was typed. Answer it in the terminal.", terminal: true, prompt: true };
+  if (/ could not be seen there; /.test(err)) {
+    return { line: "The text was typed into the field but couldn’t be seen there, so nothing was sent. Look at the terminal before answering again.", terminal: true, prompt: true };
+  }
+  if (/ can change what the agent may do from now on, so only the host can make it$/.test(err)) return { line: "Only the host can make this choice: it changes what the agent may do from now on.", terminal: true };
+  if (/ opens a text field in the prompt — answer it at the host$/.test(err)) return { line: "This choice opens a text field the app can’t fill. Answer it in the terminal.", terminal: true };
+  if (/; nothing was (sent|confirmed|typed) — answer it at the host$/.test(err) || / — answer it at the host$/.test(err)) {
+    return { line: `Nothing was answered: ${err.replace(/ — answer it at the host$/, "")}. Answer it in the terminal.`, terminal: true, prompt: true };
+  }
+  if (err.startsWith("text ")) return { line: `Not sent: ${err}.` };
+  return { line: `Not confirmed: ${err}. Check the terminal before answering again.`, terminal: true, prompt: true };
+}
+
 /** The words for a send that typed the line and could not see it submitted. */
 export const UNCONFIRMED = "Typed, but not confirmed. Look at the terminal before sending it again.";
 
@@ -99,7 +151,9 @@ export const UNCONFIRMED = "Typed, but not confirmed. Look at the terminal befor
 /** A message `agent_send` confirmed, held until the transcript has it. */
 export type Pending = { id: number; text: string; sentAt: number; queued: boolean };
 /** An answer this window sent. */
-export type Answered = { label: string; at: number; confirmed: boolean };
+/** An answer this window sent: the choice (a field's: its text), and the
+ *  note that rode on it. */
+export type Answered = { label: string; note?: string; at: number; confirmed: boolean };
 
 export type Item =
   | { k: "sep"; key: string; at: number }
@@ -193,18 +247,109 @@ export function promptBody(p: ReadablePrompt): string[] {
   return rows.map((l) => (Number.isFinite(indent) ? l.slice(indent) : l));
 }
 
-/** Whether a choice can be made from this window. The console may make a
- *  `widens` choice (agents.rs lets `is_console()` through); a window driving
- *  a paired host may not. A `text` choice opens a field inside the modal,
- *  which the chat cannot fill, so it is the terminal's everywhere. */
-export function choiceOpen(c: PromptChoice): { open: boolean; note?: string } {
-  if (c.host_only === "text") return { open: false, note: "Opens a text field: answer this one in the terminal" };
+/** A prompt shown beside its `detail`: the rows from the last rule down (the
+ *  question itself), and the clipped part above it, which the detail shows
+ *  whole. No rule, and every row is the question. */
+export function splitAtRule(rows: string[]): { above: string[]; question: string[] } {
+  let at = -1;
+  rows.forEach((l, i) => { if (/^\s*[╌─━▔┄]{8,}\s*$/.test(l)) at = i; });
+  const question = rows.slice(at + 1);
+  return at < 0 || !question.some((l) => l.trim()) ? { above: [], question: rows } : { above: rows.slice(0, at + 1), question };
+}
+
+/** How a choice is answered from this window, and whether it can be:
+ *  - `plain`: `agent_answer`. A field someone has typed into reads as its
+ *    text, and is sent as it reads.
+ *  - `field`: an empty text field ("Type something."): `agent_answer_text`,
+ *    and only with text, because the empty choice answers nothing.
+ *  - `amend`: plain, or with a note through `agent_answer_text`.
+ *  The console may make a `widens` choice (agents.rs lets `is_console()`
+ *  through); a window driving a paired host may not. A field the reader
+ *  cannot fill (`host_only: text` and no `text`, kimi's) is the terminal's. */
+export type ChoiceWay = { open: boolean; how: "plain" | "field" | "amend"; note?: string };
+export function choiceOpen(c: PromptChoice): ChoiceWay {
+  if (c.host_only === "text" && c.text !== "field") return { open: false, how: "plain", note: "Opens a text field: answer this one in the terminal" };
+  const how = c.text === "field" && c.host_only === "text" ? "field" : c.text === "amend" ? "amend" : "plain";
   if (c.host_only === "widens") {
     return windowOnHost()
-      ? { open: true, note: "Changes what the agent may do from now on" }
-      : { open: false, note: "Answer this one on the host" };
+      ? { open: true, how, note: "Changes what the agent may do from now on" }
+      : { open: false, how, note: "Answer this one on the host" };
   }
-  return { open: true };
+  if (c.text === "field" && how === "plain") return { open: true, how, note: "Typed in the terminal: sent as it reads" };
+  return { open: true, how };
+}
+
+/** What a text field or a note on choice `c` asks for, as a placeholder. */
+export function fieldWords(c: PromptChoice, harness: string, agent: string): string {
+  if (c.text === "amend") {
+    if (harness !== "claude") return "Add a note (optional)";
+    if (/^no\b/i.test(c.label)) return `No, and tell ${agent} what to do differently (optional)`;
+    if (/^yes\b/i.test(c.label)) return `Yes, and tell ${agent} what to do next (optional)`;
+    return "Add a note (optional)";
+  }
+  return /^type something\.?$/i.test(c.label.trim()) ? "Type your answer" : c.label.replace(/\.$/, "");
+}
+
+/** Codex's approval "No, and tell Codex what to do differently" opens no
+ *  field: it ends the turn, and the line goes through the composer. */
+export const tellsAfter = (c: PromptChoice) => !c.text && /\btell \w+ what to do differently\b/i.test(c.label);
+
+/** The boxes of a multi-select, and its free-text box when that is still
+ *  empty (filled, it is a box like the rest, its label the text). */
+export function boxesOf(p: ReadablePrompt): { boxes: PromptChoice[]; freeBox: PromptChoice | null } {
+  const boxes = p.choices.filter((c) => c.checked !== undefined);
+  return { boxes, freeBox: boxes.find((c) => c.text === "field" && c.host_only === "text") ?? null };
+}
+
+/** One row of a diff between two texts. */
+export type DiffLine = { k: " " | "-" | "+"; text: string };
+/** The most cells the line LCS may fill before it gives up on alignment. */
+const DIFF_BUDGET = 400_000;
+
+/** `old` → `new` as rows: the shared head and tail as context, the middle
+ *  aligned by a line LCS, or (past the budget) all of `old` out and all of
+ *  `new` in, which is still the whole of both. An Edit's `old_string` and
+ *  `new_string` are fragments, so every row of both is shown. */
+export function lineDiff(a: string, b: string): DiffLine[] {
+  const A = a.split("\n");
+  const B = b.split("\n");
+  let lo = 0;
+  while (lo < A.length && lo < B.length && A[lo] === B[lo]) lo++;
+  let ea = A.length;
+  let eb = B.length;
+  while (ea > lo && eb > lo && A[ea - 1] === B[eb - 1]) { ea--; eb--; }
+  const out: DiffLine[] = A.slice(0, lo).map((text) => ({ k: " ", text }));
+  const mA = A.slice(lo, ea);
+  const mB = B.slice(lo, eb);
+  if ((mA.length + 1) * (mB.length + 1) > DIFF_BUDGET) {
+    out.push(...mA.map((text) => ({ k: "-" as const, text })), ...mB.map((text) => ({ k: "+" as const, text })));
+  } else {
+    const m = mB.length + 1;
+    const dp = new Int32Array((mA.length + 1) * m);
+    for (let i = mA.length - 1; i >= 0; i--) {
+      for (let j = mB.length - 1; j >= 0; j--) {
+        dp[i * m + j] = mA[i] === mB[j] ? dp[(i + 1) * m + j + 1] + 1 : Math.max(dp[(i + 1) * m + j], dp[i * m + j + 1]);
+      }
+    }
+    let i = 0;
+    let j = 0;
+    while (i < mA.length || j < mB.length) {
+      if (i < mA.length && j < mB.length && mA[i] === mB[j]) { out.push({ k: " ", text: mA[i] }); i++; j++; }
+      else if (j < mB.length && (i === mA.length || dp[i * m + j + 1] >= dp[(i + 1) * m + j])) { out.push({ k: "+", text: mB[j] }); j++; }
+      else { out.push({ k: "-", text: mA[i] }); i++; }
+    }
+    // Within a change, removals before additions, as git shows them.
+    for (let s = 0; s < out.length; s++) {
+      if (out[s].k === " ") continue;
+      let e = s;
+      while (e < out.length && out[e].k !== " ") e++;
+      const run = out.slice(s, e);
+      out.splice(s, e - s, ...run.filter((r) => r.k === "-"), ...run.filter((r) => r.k === "+"));
+      s = e;
+    }
+  }
+  out.push(...A.slice(ea).map((text) => ({ k: " " as const, text })));
+  return out;
 }
 
 // ── the store: one view per place, keyed by its path ────────────────────────
@@ -220,18 +365,27 @@ export type ChatView = {
   draft: string;
   sending: boolean;
   sendWords: SendWords | null;
+  /** What the composer asks for next: Codex's "No, and tell Codex what to
+   *  do differently" ends the turn and the line is a message. */
+  followUp: string | null;
   /** The selected choice: an answer takes a click on it, then a second on
    *  "Send answer", because an answer can run a command. */
   selected: number | null;
+  /** The selected choice's text: a field's answer, or the note on an amend. */
+  answerText: string;
+  /** A multi-select's ticks; null while they are the prompt's own. */
+  ticks: number[] | null;
+  /** A multi-select's free-text box. */
+  boxText: string;
   answering: boolean;
-  answerLine: string | null;
+  answerWords: Words | null;
 };
 
 const blank = (): ChatView => ({
   turns: { data: null, error: null, loading: false, at: null },
   prompt: { data: null, error: null, loading: false, at: null },
-  pending: [], answered: [], draft: "", sending: false, sendWords: null,
-  selected: null, answering: false, answerLine: null,
+  pending: [], answered: [], draft: "", sending: false, sendWords: null, followUp: null,
+  selected: null, answerText: "", ticks: null, boxText: "", answering: false, answerWords: null,
 });
 const EMPTY = blank();
 let views = new Map<string, ChatView>();
@@ -277,20 +431,25 @@ export const turnsUnsupported = (err: string | null) => !!err && err.startsWith(
 
 export const CHANGED = "Not sent: the prompt changed before the answer reached it. Someone may have answered it in the terminal.";
 
-/** The place's prompt. One that is not the prompt a selection was made on
- *  clears the selection, and says so; a choice never carries over. */
+const fpOf = (p: AgentPrompt | null) => (p && p.waiting && p.readable ? p.fingerprint : null);
+/** The card's choices for one prompt: a choice, its text, the ticks. */
+const NO_CHOICE = { selected: null, answerText: "", ticks: null, boxText: "" } as const;
+
+/** The place's prompt. One that is not the prompt a choice was made on
+ *  clears the choice, and says so; a choice never carries over. Not while an
+ *  answer is in flight: filling a multi-select's box moves its fingerprint,
+ *  and that answer reads the prompt again itself. */
 export function loadPrompt(t: Target): Promise<void> {
   return once(`p|${t.path}`, async () => {
-    const before = viewOf(t.path);
-    put(t.path, { prompt: { ...before.prompt, loading: true } });
+    put(t.path, { prompt: { ...viewOf(t.path).prompt, loading: true } });
     try {
       const r = await invoke<AgentPrompt>("agent_prompt", { repo: t.repo, slug: t.slug });
       const cur = viewOf(t.path);
-      const fp = (p: AgentPrompt | null) => (p && p.waiting && p.readable ? p.fingerprint : null);
-      const moved = cur.selected !== null && fp(cur.prompt.data) !== fp(r);
+      const chose = cur.selected !== null || cur.ticks !== null || !!cur.answerText || !!cur.boxText;
+      const moved = !cur.answering && chose && fpOf(cur.prompt.data) !== fpOf(r);
       put(t.path, {
         prompt: { data: r, error: null, loading: false, at: Date.now() },
-        ...(moved ? { selected: null, answerLine: CHANGED } : {}),
+        ...(moved ? { ...NO_CHOICE, answerWords: cur.answerWords ?? { line: CHANGED } } : {}),
       });
     } catch (e) {
       put(t.path, { prompt: { ...viewOf(t.path).prompt, loading: false, error: String(e) } });
@@ -317,7 +476,7 @@ export async function sendDraft(t: Target, agent: string): Promise<void> {
       put(t.path, { sending: false, sendWords: { line: UNCONFIRMED, terminal: true } });
     } else {
       put(t.path, {
-        sending: false,
+        sending: false, followUp: null,
         // Only if nothing new was typed meanwhile.
         draft: cur.draft === text ? "" : cur.draft,
         pending: [...cur.pending, { id: nextPending++, text, sentAt: Date.now(), queued: r.queued }],
@@ -334,28 +493,101 @@ export async function sendDraft(t: Target, agent: string): Promise<void> {
 export function selectChoice(path: string, n: number | null): void {
   const v = viewOf(path);
   if (v.answering) return;
-  put(path, { selected: n, answerLine: null });
+  put(path, { selected: n, answerText: n === v.selected ? v.answerText : "", answerWords: null });
 }
 
-/** Answer with the selected choice, against the fingerprint on screen. */
-export async function sendAnswer(t: Target): Promise<void> {
+export function setAnswerText(path: string, text: string): void {
+  put(path, { answerText: text, answerWords: null });
+}
+
+/** The boxes ticked now: the person's, else the prompt's own. */
+export function ticksOf(v: ChatView, p: ReadablePrompt): number[] {
+  return v.ticks ?? p.choices.filter((c) => c.checked).map((c) => c.n);
+}
+
+/** Tick or untick box `n`. A box is the first act, as a selection is. */
+export function toggleTick(path: string, n: number): void {
+  const v = viewOf(path);
+  const d = v.prompt.data;
+  if (v.answering || !d || !d.waiting || !d.readable || !d.multi) return;
+  const on = new Set(ticksOf(v, d));
+  if (on.has(n)) on.delete(n);
+  else on.add(n);
+  put(path, { ticks: [...on].sort((a, b) => a - b), selected: null, answerText: "", answerWords: null });
+}
+
+/** The free-text box's answer. Typing into it ticks it, as Claude does. */
+export function setBoxText(path: string, text: string): void {
+  const v = viewOf(path);
+  const d = v.prompt.data;
+  if (!d || !d.waiting || !d.readable || !d.multi) return;
+  const { freeBox } = boxesOf(d);
+  const ticks = ticksOf(v, d);
+  const tick = freeBox && text.trim() && !ticks.includes(freeBox.n);
+  put(path, { boxText: text, answerWords: null, ...(tick ? { ticks: [...ticks, freeBox.n].sort((a, b) => a - b), selected: null } : {}) });
+}
+
+/** Answer with the selected choice, against the fingerprint on screen: a
+ *  plain choice, a field's text, or a choice with its note. */
+export async function sendAnswer(t: Target, agent: string): Promise<void> {
   const v = viewOf(t.path);
   const d = v.prompt.data;
   if (v.answering || v.selected === null || !d || !d.waiting || !d.readable) return;
   const c = d.choices.find((x) => x.n === v.selected);
-  if (!c || !choiceOpen(c).open) return;
-  put(t.path, { answering: true, answerLine: null });
+  if (!c) return;
+  const way = choiceOpen(c);
+  const text = way.how === "plain" ? "" : v.answerText;
+  if (!way.open || (way.how === "field" && !text.trim()) || draftProblem(text, way.how === "field" ? "answer" : "note")) return;
+  put(t.path, { answering: true, answerWords: null });
   try {
-    const r = await invoke<AgentAnswer>("agent_answer", { repo: t.repo, slug: t.slug, choice: c.n, fingerprint: d.fingerprint });
+    const args = { repo: t.repo, slug: t.slug, choice: c.n, fingerprint: d.fingerprint };
+    const r = text.trim()
+      ? await invoke<AgentAnswer>("agent_answer_text", { ...args, text })
+      : await invoke<AgentAnswer>("agent_answer", args);
     const cur = viewOf(t.path);
-    put(t.path, { answering: false, selected: null, answered: [...cur.answered, { label: r.label, at: Date.now(), confirmed: r.confirmed }] });
-  } catch (e) {
-    const err = String(e);
-    const changed = err === AGENT_ERR.changed || err === AGENT_ERR.noChoice;
+    const a: Answered = way.how === "field" ? { label: text, at: Date.now(), confirmed: r.confirmed } : { label: r.label, note: text.trim() ? text : undefined, at: Date.now(), confirmed: r.confirmed };
     put(t.path, {
-      answering: false, selected: null,
-      answerLine: changed ? CHANGED : `Not confirmed: ${err}. Check the terminal before answering again.`,
+      ...NO_CHOICE, answering: false, answered: [...cur.answered, a],
+      followUp: tellsAfter(c) ? `Now tell ${agent} what to do differently: type it here and press Enter.` : null,
     });
+  } catch (e) {
+    put(t.path, { answering: false, answerWords: answerWords(String(e)) });
+  }
+  void loadPrompt(t);
+  void loadTurns(t);
+}
+
+/** Send a multi-select's ticks. Its free-text box, when ticked, is filled
+ *  first (`agent_answer_text`, which ticks it and sends nothing); that moves
+ *  the prompt's fingerprint, so the prompt is read again and the boxes go
+ *  against the new one, only if it still shows that box ticked. */
+export async function sendMany(t: Target): Promise<void> {
+  const v = viewOf(t.path);
+  const d = v.prompt.data;
+  if (v.answering || !d || !d.waiting || !d.readable || !d.multi) return;
+  const { freeBox } = boxesOf(d);
+  const want = ticksOf(v, d);
+  const fill = !!freeBox && want.includes(freeBox.n);
+  if (!want.length || (fill && (!v.boxText.trim() || draftProblem(v.boxText, "answer")))) return;
+  put(t.path, { answering: true, answerWords: null });
+  try {
+    let fingerprint = d.fingerprint;
+    if (fill) {
+      await invoke<AgentFilled>("agent_answer_text", { repo: t.repo, slug: t.slug, choice: freeBox.n, fingerprint, text: v.boxText });
+      const now = await invoke<AgentPrompt>("agent_prompt", { repo: t.repo, slug: t.slug });
+      put(t.path, { prompt: { data: now, error: null, loading: false, at: Date.now() } });
+      if (!now.waiting || !now.readable || !now.multi || !now.choices.some((c) => c.n === freeBox.n && c.checked)) {
+        put(t.path, { answering: false, answerWords: { line: "Your answer was typed into its box, then the prompt changed, so nothing was sent. Check the boxes and send again.", terminal: true } });
+        void loadTurns(t);
+        return;
+      }
+      fingerprint = now.fingerprint;
+    }
+    const r = await invoke<AgentAnsweredMany>("agent_answer_many", { repo: t.repo, slug: t.slug, choices: want, fingerprint });
+    const cur = viewOf(t.path);
+    put(t.path, { ...NO_CHOICE, answering: false, answered: [...cur.answered, { label: r.labels.join(", "), at: Date.now(), confirmed: r.confirmed }] });
+  } catch (e) {
+    put(t.path, { answering: false, answerWords: answerWords(String(e)) });
   }
   void loadPrompt(t);
   void loadTurns(t);
