@@ -147,13 +147,19 @@ impl Sandbox {
         let ok = Command::new("git").args(["init", "-q"]).current_dir(&dir).status().unwrap().success();
         assert!(ok, "git init {}", dir.display());
         let root = std::fs::canonicalize(&dir).unwrap().to_string_lossy().into_owned();
+        self.register(&root, name);
+        root
+    }
+
+    /// `root` added to the sandbox's registry as `name`, by writing the file:
+    /// no `add_project`, so nothing is adopted.
+    fn register(&self, root: &str, name: &str) {
         let reg_dir = self.root.join("xdg/worktrees");
         std::fs::create_dir_all(&reg_dir).unwrap();
         let reg = reg_dir.join("projects.json");
         let mut v: Value = std::fs::read(&reg).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(json!({ "version": 1, "projects": [] }));
         v["projects"].as_array_mut().unwrap().push(json!({ "root": root, "name": name }));
         std::fs::write(&reg, serde_json::to_vec(&v).unwrap()).unwrap();
-        root
     }
 
     /// SIGTERM, then the exit status, within a bound.
@@ -869,4 +875,191 @@ fn the_flags_are_checked_at_launch() {
     let out = Command::new(bin()).args(["serve", "--help"]).output().unwrap();
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stdout).contains("--config-dir"));
+}
+
+fn git_in(dir: &Path, args: &[&str]) {
+    let o = Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
+    assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+}
+
+/// A stand-in Claude: a copy of `sleep` named `claude`, so tmux reports
+/// `claude` as the pane's command on both OSes. Copied by `cp`, so this
+/// process never holds the file open for writing (the ETXTBSY trap, AGENTS.md),
+/// and ad-hoc signed on macOS, which kills an unsigned copy of a system binary.
+fn fake_claude(dir: &Path) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    let bin = dir.join("claude");
+    let sleep = if Path::new("/bin/sleep").exists() { "/bin/sleep" } else { "/usr/bin/sleep" };
+    assert!(Command::new("cp").arg(sleep).arg(&bin).status().unwrap().success(), "cp {sleep}");
+    if cfg!(target_os = "macos") {
+        let _ = Command::new("codesign").args(["-s", "-", "-f"]).arg(&bin).output();
+    }
+    bin
+}
+
+/// The reported bug, end to end through the binary. A project's folder is
+/// renamed with Claude running in its (main) and in a lane; the user removes
+/// the old root and adds the new one. `agent_turns` must read the live
+/// Claude's turns both BEFORE adoption — its session still `old-(main)`, found
+/// by pane cwd, by the snapshot's rule — and AFTER `add_project` renamed it to
+/// `new-(main)`, while its probe still names `old-(main)` and only the pane id
+/// ties the two. Before the fix the first read answered "no agent is running
+/// in this place".
+#[test]
+fn a_moved_projects_agent_is_read_before_and_after_it_is_adopted() {
+    if !PrivateTmux::available() {
+        eprintln!("skipped: no tmux on PATH");
+        return;
+    }
+    let tmux = PrivateTmux::new("moved");
+    let mut sb = Sandbox::new("moved");
+    let projects = sb.root.join("projects");
+    let old = projects.join("old");
+    std::fs::create_dir_all(&old).unwrap();
+    git_in(&old, &["init", "-q"]);
+    git_in(&old, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"]);
+    git_in(&old, &["worktree", "add", "-q", ".worktrees/lane", "-b", "lane"]);
+    let old_root = std::fs::canonicalize(&old).unwrap().to_string_lossy().into_owned();
+    let claude = fake_claude(&sb.root.join("fake"));
+    for (session, dir) in [("old-(main)", old_root.clone()), ("old-lane", format!("{old_root}/.worktrees/lane"))] {
+        let made = tmux.run(&["-f", "/dev/null", "new-session", "-d", "-s", session, "-c", &dir, "-x", "80", "-y", "24", &format!("{} 600", claude.display())]);
+        assert!(made.status.success(), "private tmux: {}", String::from_utf8_lossy(&made.stderr));
+    }
+    // Claude's own files for the (main) one, as Claude writes them: its probe
+    // names the session and pane it started in, its transcript is filed under
+    // the folder it started in.
+    let shown = tmux.run(&["display-message", "-p", "-t", "=old-(main):", "#{pane_pid}\t#{window_id}\t#{pane_id}"]);
+    let shown = String::from_utf8_lossy(&shown.stdout).trim().to_string();
+    let mut it = shown.split('\t');
+    let (pid, window, pane) = (it.next().unwrap().to_string(), it.next().unwrap().to_string(), it.next().unwrap().to_string());
+    let claude_home = sb.root.join("home/.claude");
+    std::fs::create_dir_all(claude_home.join("sessions")).unwrap();
+    std::fs::write(
+        claude_home.join(format!("sessions/{pid}.json")),
+        json!({ "pid": pid.parse::<i64>().unwrap(), "cwd": old_root, "status": "busy", "kind": "interactive",
+                "tmux": format!("old-(main):{window}.{pane}"), "sessionId": "sid-main" }).to_string(),
+    )
+    .unwrap();
+    let mangled: String = old_root.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    let tdir = claude_home.join("projects").join(mangled);
+    std::fs::create_dir_all(&tdir).unwrap();
+    std::fs::write(tdir.join("sid-main.jsonl"), include_str!("../../worktrees-core/tests/fixtures/transcripts/claude-2.1.309.jsonl")).unwrap();
+
+    // The rename, outside worktrees. Both registrations, as the user had them.
+    let new = projects.join("new");
+    std::fs::rename(&old, &new).unwrap();
+    let new_root = std::fs::canonicalize(&new).unwrap().to_string_lossy().into_owned();
+    sb.register(&old_root, "old");
+    sb.register(&new_root, "new");
+    let sf = sb.launch_env(&["--allow-origin", "http://localhost:1420"], &[("TMUX", &tmux.env())]);
+    let mut ws = connect(&sf, "http://localhost:1420");
+    listen(&mut ws, &["sessions:busy"]);
+
+    // Removing the old root: its folder is gone, so nothing of it runs there.
+    let r = rpc(&mut ws, 1, "remove_project", json!({ "root": old_root }));
+    assert!(r["ok"]["projects"].is_array() && r["ok"].get("left_running").is_none(), "{r}");
+
+    // A + B, no rename: the session found by pane cwd, the probe by name and pane.
+    let r = rpc(&mut ws, 2, "agent_turns", json!({ "repo": new_root, "slug": "(main)" }));
+    let before = &r["ok"];
+    assert_eq!(before["session"], json!("old-(main)"), "{r}");
+    assert_eq!(before["harness"], json!("claude"), "{r}");
+    let turns = before["turns"].as_array().unwrap_or_else(|| panic!("{r}")).clone();
+    assert!(!turns.is_empty(), "{r}");
+
+    // D: adding the new root adopts it — the lane's git links repaired, both
+    // sessions renamed, nothing closed.
+    let r = rpc(&mut ws, 3, "add_project", json!({ "dir": new_root }));
+    let adopted = &r["ok"]["adopted"];
+    assert_eq!(adopted["repaired"], json!([format!("{new_root}/.worktrees/lane")]), "{r}");
+    let renamed: Vec<(String, String)> = adopted["renamed"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{r}"))
+        .iter()
+        .map(|x| (x["from"].as_str().unwrap().to_string(), x["to"].as_str().unwrap().to_string()))
+        .collect();
+    assert!(renamed.contains(&("old-(main)".into(), "new-(main)".into())) && renamed.contains(&("old-lane".into(), "new-lane".into())), "{r}");
+    let live = String::from_utf8_lossy(&tmux.run(&["list-sessions", "-F", "#{session_name}"]).stdout).into_owned();
+    let mut live: Vec<&str> = live.lines().collect();
+    live.sort_unstable();
+    assert_eq!(live, ["new-(main)", "new-lane"]);
+    git_in(&new.join(".worktrees/lane"), &["status", "-s"]);
+
+    // B, after the rename: the probe still says `old-(main)`; its pane is the lane's.
+    let r = rpc(&mut ws, 4, "agent_turns", json!({ "repo": new_root, "slug": "(main)" }));
+    assert_eq!(r["ok"]["session"], json!("new-(main)"), "{r}");
+    assert_eq!(r["ok"]["turns"], json!(turns), "the same conversation: {r}");
+
+    // Adding it again finds nothing more to do.
+    let r = rpc(&mut ws, 5, "add_project", json!({ "dir": new_root }));
+    assert!(r["ok"]["projects"].is_array() && r["ok"].get("adopted").is_none(), "{r}");
+
+    // The nav follows the pane too: the model label (found by the session the
+    // Claude runs in now) and the busy dot (keyed by the place it is in now,
+    // never the folder it started in, which is gone).
+    let r = rpc(&mut ws, 6, "list_places", json!({ "repo": new_root }));
+    let main = r["ok"]["places"].as_array().and_then(|ps| ps.iter().find(|p| p["slug"] == json!("(main)"))).unwrap_or_else(|| panic!("{r}"));
+    assert_eq!(main["agent_sessions"]["claude"]["name"], json!("new-(main)"), "{main}");
+    assert!(main["agent_sessions"]["claude"]["model"].is_string(), "the model label after the rename: {main}");
+    let busy = busy_until(&mut ws, &json!([new_root]), Duration::from_secs(15));
+    assert_eq!(busy, json!([new_root]), "the busy dot names the new folder");
+    assert_eq!(sb.terminate().code(), Some(0));
+}
+
+/// Read `sessions:busy` events until one's `busy` is `want`, or `within` has
+/// passed; the last `busy` seen either way.
+fn busy_until(ws: &mut WebSocket<TcpStream>, want: &Value, within: Duration) -> Value {
+    ws.get_mut().set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+    let deadline = Instant::now() + within;
+    let mut last = Value::Null;
+    while Instant::now() < deadline && last != *want {
+        match ws.read() {
+            Ok(m) => {
+                let v: Value = serde_json::from_str(m.to_text().unwrap()).unwrap();
+                if v["event"] == json!("sessions:busy") {
+                    last = v["payload"]["busy"].clone();
+                }
+            }
+            Err(tokio_tungstenite::tungstenite::Error::Io(e))
+                if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+            Err(e) => panic!("reading events: {e}"),
+        }
+    }
+    ws.get_mut().set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    last
+}
+
+/// C, through the binary: `project_sessions` lists a project's live sessions
+/// with the agent in each, and `remove_project` names what it leaves running
+/// — and adds nothing to its answer when nothing is.
+#[test]
+fn remove_project_names_the_sessions_it_leaves_running() {
+    if !PrivateTmux::available() {
+        eprintln!("skipped: no tmux on PATH");
+        return;
+    }
+    let tmux = PrivateTmux::new("rmproj");
+    let mut sb = Sandbox::new("rmproj");
+    let busy = sb.project("busy");
+    let quiet = sb.project("quiet");
+    let claude = fake_claude(&sb.root.join("fake"));
+    let made = tmux.run(&["-f", "/dev/null", "new-session", "-d", "-s", "busy-(main)", "-c", &busy, "-x", "80", "-y", "24", &format!("{} 600", claude.display())]);
+    assert!(made.status.success(), "private tmux: {}", String::from_utf8_lossy(&made.stderr));
+    let sf = sb.launch_env(&["--allow-origin", "http://localhost:1420"], &[("TMUX", &tmux.env())]);
+    let mut ws = connect(&sf, "http://localhost:1420");
+
+    let want = json!([{ "slug": "(main)", "session": "busy-(main)", "agent": "claude" }]);
+    let r = rpc(&mut ws, 1, "project_sessions", json!({ "root": busy }));
+    assert_eq!(r["ok"]["sessions"], want, "{r}");
+    let r = rpc(&mut ws, 2, "project_sessions", json!({ "root": quiet }));
+    assert_eq!(r["ok"]["sessions"], json!([]), "{r}");
+
+    let r = rpc(&mut ws, 3, "remove_project", json!({ "root": quiet }));
+    assert!(r["ok"]["projects"].is_array() && r["ok"].get("left_running").is_none(), "nothing new without sessions: {r}");
+    let r = rpc(&mut ws, 4, "remove_project", json!({ "root": busy }));
+    assert_eq!(r["ok"]["left_running"], want, "{r}");
+    assert_eq!(r["ok"]["projects"], json!([]), "removed all the same: {r}");
+    // Nothing was closed: removing a project only unregisters it.
+    assert!(tmux.run(&["has-session", "-t", "=busy-(main)"]).status.success());
+    assert_eq!(sb.terminate().code(), Some(0));
 }

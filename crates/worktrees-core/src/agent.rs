@@ -64,6 +64,78 @@ pub struct ClaudeProbe {
     /// live under `~/.claude`.
     #[serde(skip)]
     pub root: std::path::PathBuf,
+    /// Where this Claude runs NOW: the live pane its `tmux` field names, once
+    /// [`locate`] found it in a pane list. Not in the file. `None` until then,
+    /// and for a probe outside tmux, whose pane is gone, or whose pane does
+    /// not vouch for it (`probe_pane`).
+    #[serde(skip)]
+    pub live: Option<LivePane>,
+}
+
+/// The pane a Claude runs in now, as [`locate`] found it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LivePane {
+    /// `#{pane_current_path}`: the place it is in, which a folder renamed
+    /// since it started has moved, while its `cwd` has not.
+    pub dir: String,
+    /// The session the pane is in, which a rename has moved the same way.
+    pub session: String,
+}
+
+impl ClaudeProbe {
+    /// The directory this Claude is in, which every probe-to-place match keys
+    /// on (`agents_at`, the dots, `place_status`): its live pane's once
+    /// located, else the `cwd` it started in. Claude never rewrites `cwd`, so
+    /// for a project whose folder was renamed it names a folder that is gone.
+    /// A transcript is still found under `cwd`, where Claude filed it.
+    pub fn place_dir(&self) -> &str {
+        self.live.as_ref().map_or(self.cwd.as_str(), |l| l.dir.as_str())
+    }
+
+    /// The tmux session it runs in: its live pane's once located, else the
+    /// name in its `tmux` field, which a session rename leaves behind.
+    pub fn session(&self) -> Option<&str> {
+        self.live.as_ref().map(|l| l.session.as_str()).or_else(|| self.tmux.as_deref().and_then(session_name))
+    }
+}
+
+/// THE rule for where a probe's Claude is: the cwd of the live pane its
+/// `tmux` field names, else its `cwd`. One snapshot, no spawn.
+pub fn probe_dir<'a>(p: &'a ClaudeProbe, panes: &'a crate::tmux::PaneList) -> &'a str {
+    probe_pane(p, panes).map_or(p.cwd.as_str(), |pane| pane.path.as_str())
+}
+
+/// The pane `p`'s `tmux` field names, when it vouches for the probe. A pane id
+/// is unique only per tmux SERVER, and a probe can come from a Claude on
+/// another one (a sandbox sharing `$HOME`): a pane with the same id there is
+/// not this Claude's. So the pane must agree with the probe on something
+/// besides the id — its session is the one the probe names, or its path is
+/// the probe's `cwd` — or the probe's `cwd` must be gone from disk, which is
+/// the moved folder this exists for (its session renamed too, by
+/// `adopt`). The stat runs only for a pane that agrees on neither.
+fn probe_pane<'a>(p: &ClaudeProbe, panes: &'a crate::tmux::PaneList) -> Option<&'a crate::tmux::Pane> {
+    let tmux = p.tmux.as_deref()?;
+    let pane = panes.pane(pane_id(tmux)?)?;
+    let agrees = session_name(tmux) == Some(pane.session.as_str()) || pane.path == p.cwd || !std::path::Path::new(&p.cwd).exists();
+    agrees.then_some(pane)
+}
+
+/// Locate every probe against `panes` (`ClaudeProbe::live`), from the one
+/// snapshot the caller already holds.
+pub fn locate(probes: &mut [ClaudeProbe], panes: &crate::tmux::PaneList) {
+    for p in probes {
+        p.live = probe_pane(p, panes).map(|pane| LivePane { dir: pane.path.clone(), session: pane.session.clone() });
+    }
+}
+
+/// [`live_probes`], located against `panes` when there is a pane list: what
+/// every reader that maps a probe to a place starts from.
+pub fn live_probes_in(panes: Option<&crate::tmux::PaneList>) -> Vec<ClaudeProbe> {
+    let mut probes = live_probes();
+    if let Some(pl) = panes {
+        locate(&mut probes, pl);
+    }
+    probes
 }
 
 /// True when this probe's `busy` is residue from PARKING rather than live work.
@@ -286,15 +358,15 @@ fn rank(state: &str) -> u8 {
 /// The agents running in the place at `path`, most active first. Pure: takes
 /// the probes so the ordering is testable without a filesystem.
 ///
-/// Matched on `cwd == path` — the same key the app's dots use. Paths are
-/// compared raw: a probe's cwd and a place's `path` both derive from the same
-/// realpath-normalized worktree dir. A subagent fork or a `claude` started by
-/// hand in the dock's shell shares the cwd and is listed too; `tmux` and `kind`
-/// tell them apart.
+/// Matched on `place_dir() == path` — the same key the app's dots use: the
+/// probe's live pane's cwd once `locate`d, else its `cwd`. Paths are compared
+/// raw: both derive from the same realpath-normalized worktree dir. A
+/// subagent fork or a `claude` started by hand in the dock's shell shares the
+/// dir and is listed too; `tmux` and `kind` tell them apart.
 pub fn agents_at(probes: &[ClaudeProbe], path: &str) -> Vec<Agent> {
     let mut out: Vec<Agent> = probes
         .iter()
-        .filter(|p| p.cwd == path)
+        .filter(|p| p.place_dir() == path)
         .map(|p| Agent {
             provider: "claude",
             state: effective_state(p),
@@ -769,6 +841,58 @@ mod tests {
         assert_eq!(agents[0].state, "idle");
         // A different place sees nothing.
         assert!(agents_at(&agents_at_probes(), "/w/elsewhere").is_empty());
+    }
+
+    /// A probe is placed by the live pane it names: a project whose folder was
+    /// renamed keeps its Claude's dot and `place_status`, though the probe
+    /// still names the old folder and the old session. And only by a pane
+    /// that vouches for it — a pane id is unique per tmux server, so a Claude
+    /// on another server whose id collides stays where its `cwd` says. A pane
+    /// that is gone, a row with no id and a probe outside tmux fall back to
+    /// `cwd`.
+    #[test]
+    fn a_probe_is_placed_by_its_live_pane_when_the_pane_vouches_for_it() {
+        use crate::tmux::{Pane, PaneList};
+        let probe = |tmux: Option<&str>, cwd: &str| -> ClaudeProbe {
+            serde_json::from_value(serde_json::json!({ "pid": 1, "cwd": cwd, "status": "busy", "tmux": tmux })).unwrap()
+        };
+        let row = |s: &str, path: &str, id: &str| Pane { session: s.into(), path: path.into(), cmd: "2.1.309".into(), id: Some(id.into()), ..Pane::default() };
+        let gone = "/no/such/old"; // the folder the Claude started in, renamed away
+        let elsewhere = std::env::temp_dir().to_string_lossy().into_owned(); // a cwd that exists
+        let panes = PaneList::from_panes(vec![row("new-(main)", "/u/new", "%115"), row("mine", "/w/mine", "%3"), row("same", &elsewhere, "%4")]);
+        let located = |p: ClaudeProbe| {
+            let mut v = vec![p];
+            locate(&mut v, &panes);
+            v.pop().unwrap()
+        };
+
+        // Moved and renamed: the pane is where it is.
+        let p = located(probe(Some("old-(main):@114.%115"), gone));
+        assert_eq!((p.place_dir(), p.session()), ("/u/new", Some("new-(main)")));
+        assert_eq!(probe_dir(&probe(Some("old-(main):@114.%115"), gone), &panes), "/u/new");
+        assert_eq!(agents_at(std::slice::from_ref(&p), "/u/new").len(), 1);
+        assert!(agents_at(&[p], gone).is_empty(), "not at the folder that is gone");
+
+        // The pane agrees on the session, or on the path: located.
+        assert_eq!(located(probe(Some("mine:@1.%3"), &elsewhere)).place_dir(), "/w/mine");
+        assert_eq!(located(probe(Some("other:@1.%4"), &elsewhere)).session(), Some("same"));
+
+        // Another server's Claude, its pane id colliding with ours: its
+        // session is not the pane's, its cwd exists and is not the pane's.
+        let p = located(probe(Some("sandbox-(main):@0.%3"), &elsewhere));
+        assert_eq!((p.place_dir(), p.session(), p.live.is_some()), (elsewhere.as_str(), Some("sandbox-(main)"), false));
+
+        // A pane that no longer exists, a probe outside tmux, and rows with no
+        // pane id at all (the bats fake): `cwd`, and the name the field gives.
+        let p = located(probe(Some("old-(main):@114.%999"), gone));
+        assert_eq!((p.place_dir(), p.session(), p.live.is_some()), (gone, Some("old-(main)"), false));
+        let p = located(probe(None, gone));
+        assert_eq!((p.place_dir(), p.session()), (gone, None));
+        let mut v = vec![probe(Some("old-(main):@114.%115"), gone)];
+        locate(&mut v, &PaneList::from_rows(vec![("new-(main)".into(), "/u/new".into(), "2.1.309".into())]));
+        assert_eq!(v[0].place_dir(), gone);
+        // Never located at all: `cwd`.
+        assert_eq!(probe(Some("old-(main):@114.%115"), gone).place_dir(), gone);
     }
 
     fn agents_at_probes() -> Vec<ClaudeProbe> {

@@ -396,16 +396,63 @@ fn exclude_for(project: &Project, slug: &str) -> Option<String> {
     (slug == "(main)").then(|| project.wt_root_dir().to_string())
 }
 
+/// The probe of the claude running in `lane`, found by its PANE first: the
+/// probe's `tmux` field is `<session>:@<window>.%<pane>`, and a pane id
+/// survives a session rename while the name in the field may not follow it
+/// (`add_project` renames a moved project's sessions). A pane id is unique
+/// only per tmux server, so a probe whose session name agrees as well wins
+/// over one that matches by pane alone; the session name alone is the last
+/// resort, for a probe that names no pane.
+///
+/// The transcript is then read under the probe's OWN `cwd`, never the place's
+/// path: Claude files it under the folder it started in, which is the old one
+/// for a project renamed since.
+pub fn lane_probe<'a>(probes: &'a [agent::ClaudeProbe], lane: &Lane) -> Option<&'a agent::ClaudeProbe> {
+    let pane = |p: &agent::ClaudeProbe| p.tmux.as_deref().and_then(agent::pane_id) == Some(lane.pane.as_str());
+    let named = |p: &agent::ClaudeProbe| p.tmux.as_deref().and_then(agent::session_name) == Some(lane.session.as_str());
+    probes
+        .iter()
+        .find(|p| pane(p) && named(p))
+        .or_else(|| probes.iter().find(|p| pane(p)))
+        .or_else(|| probes.iter().find(|p| named(p)))
+}
+
+/// The harness's reading of the place, for a send into `lane`. The harness
+/// finds its own session from the canonical name and the lane came from
+/// [`live_agent_sessions`]: the two must be the SAME session, or the line
+/// would go somewhere the client was not shown (a session that changed
+/// between the two lookups).
+fn reading_of_lane(reading: Option<activity::Activity>, lane: &Lane, label: &str) -> Result<activity::Activity, String> {
+    reading
+        .filter(|r| r.session.as_deref() == Some(lane.session.as_str()))
+        .ok_or_else(|| format!("{label} is not running in {}", lane.session))
+}
+
+/// The sessions of the place's LIVE agents, harness by harness, by the
+/// snapshot's own rule: the place's session is `Project::live_session_in`'s
+/// (the canonical name, else the session adopted by pane cwd, which is where a
+/// project whose folder was renamed keeps its agents until `add_project`
+/// renames them), and each harness's is `workspace::agent_session_names`'.
+/// The snapshot passes the same two, so a session the nav shows as a place's
+/// is the session these rows read and type into.
+pub fn live_agent_sessions(project: &Project, slug: &str, panes: &PaneList, ai_word: &str) -> Vec<(&'static dyn harness::Adapter, String)> {
+    let canonical = project.session_name(slug);
+    let primary = project.live_session_in(slug, &project.place_dir(slug), panes, ai_word);
+    crate::workspace::agent_session_names(Some(panes), &canonical, primary.as_deref().unwrap_or(&canonical), primary.is_some())
+        .into_iter()
+        .filter(|(_, _, up)| *up)
+        .map(|(a, session, _)| (a, session))
+        .collect()
+}
+
 impl AgentIo for Live {
     fn lanes(&self, project: &Project, slug: &str) -> Vec<Lane> {
         let Some(panes) = PaneList::fetch() else { return Vec::new() };
-        let canonical = project.session_name(slug);
         let path = project.place_dir(slug);
         let exclude = exclude_for(project, slug);
-        crate::workspace::agent_session_names(Some(&panes), &canonical, &canonical, panes.has_session(&canonical))
+        live_agent_sessions(project, slug, &panes, &worktrees_core::project::adopt_ai_word())
             .into_iter()
-            .filter(|(_, _, up)| *up)
-            .filter_map(|(a, session, _)| {
+            .filter_map(|(a, session)| {
                 let pane = tmux::agent_pane(&session, &path, exclude.as_deref(), a.provider().match_word)?;
                 Some(Lane { harness: a.provider().id, session, pane: pane.as_str().to_string() })
             })
@@ -446,14 +493,12 @@ impl AgentIo for Live {
         }
         let adapter = harness::by_id(lane.harness).ok_or_else(|| format!("unknown harness {}", lane.harness))?;
         let panes = PaneList::fetch().ok_or("tmux is not available")?;
-        let probes = agent::live_probes();
+        let probes = agent::live_probes_in(Some(&panes));
         let scan = harness::Scan { probes: &probes, panes: Some(&panes) };
         let canonical = project.session_name(slug);
         let path = project.place_dir(slug);
         let exclude = exclude_for(project, slug);
-        let reading = adapter
-            .activity(&scan, &canonical, &path)
-            .ok_or_else(|| format!("{} is not running in {}", adapter.provider().label, lane.session))?;
+        let reading = reading_of_lane(adapter.activity(&scan, &canonical, &path), lane, adapter.provider().label)?;
         let req = harness::SendRequest {
             panes: &panes,
             canonical: &canonical,
@@ -471,13 +516,10 @@ impl AgentIo for Live {
     fn transcript(&self, project: &Project, slug: &str, lane: &Lane) -> Result<Vec<String>, String> {
         let path: PathBuf = match lane.harness {
             h if h == provider::CLAUDE.id => {
-                // The probe of the claude in THIS session — the transcript the
+                // The probe of the claude in THIS lane — the transcript the
                 // nav's model label reads (`watch::claude_model`).
                 let scan = agent::scan_probes();
-                let p = scan
-                    .probes
-                    .iter()
-                    .find(|p| p.tmux.as_deref().and_then(agent::session_name) == Some(lane.session.as_str()))
+                let p = lane_probe(&scan.probes, lane)
                     .ok_or_else(|| no_probe(&lane.session, &scan.unreadable, || pids_on_pane(lane)))?;
                 let sid = p.session_id.as_deref().ok_or("claude's session file names no session id")?;
                 Path::new(&worktrees_core::project::claude_dir_in(&p.root, &p.cwd)).join(format!("{sid}.jsonl"))
@@ -901,5 +943,97 @@ mod tests {
         // Nothing unreadable: the old answer, and the pane is never asked.
         let err = no_probe("worktrees-(main)", &[], || panic!("no ps for a plain miss"));
         assert_eq!(err, "the claude in worktrees-(main) has written no session file yet");
+    }
+}
+
+#[cfg(test)]
+mod moved_tests {
+    use super::*;
+
+    /// A repo whose folder was renamed from `old` to `new`: its prefix is now
+    /// `new`, while the sessions it launched are still `old-(main)` and
+    /// `old-lane`, cwd'd in the NEW folder.
+    fn moved(tag: &str) -> (Project, String) {
+        let base = std::env::temp_dir().join(format!("wt-agents-moved-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = base.join("new");
+        std::fs::create_dir_all(repo.join(".worktrees/lane")).unwrap();
+        assert!(worktrees_core::git::git_ok(&repo.to_string_lossy(), &["init", "-q"]), "git init");
+        let repo = std::fs::canonicalize(&repo).unwrap().to_string_lossy().into_owned();
+        (Project::discover(Path::new(&repo)).unwrap(), repo)
+    }
+
+    /// The rows find a moved project's agents where the snapshot does: in the
+    /// session adopted by pane cwd. They looked up `new-(main)` alone, so a
+    /// live Claude showed in the nav while `agent_turns` answered "no agent
+    /// is running in this place".
+    #[test]
+    fn a_moved_projects_agents_are_found_in_the_sessions_they_still_run_in() {
+        let (project, repo) = moved("rows");
+        let lane = format!("{repo}/.worktrees/lane");
+        let panes = PaneList::from_rows(vec![
+            ("old-(main)".into(), repo.clone(), "2.1.309".into()),
+            ("old-lane".into(), lane.clone(), "2.1.309".into()),
+            ("stranger".into(), "/elsewhere".into(), "2.1.309".into()),
+        ]);
+        let found = |slug: &str| -> Vec<(&str, String)> {
+            live_agent_sessions(&project, slug, &panes, "claude").into_iter().map(|(a, s)| (a.provider().id, s)).collect()
+        };
+        assert_eq!(project.session_name("(main)"), "new-(main)", "the prefix moved with the folder");
+        assert_eq!(found("(main)"), vec![("claude", "old-(main)".to_string())], "(main) does not adopt the lane's session");
+        assert_eq!(found("lane"), vec![("claude", "old-lane".to_string())]);
+        // The snapshot's own rule names the same session.
+        assert_eq!(project.live_session_in("(main)", &repo, &panes, "claude").as_deref(), Some("old-(main)"));
+
+        // Once renamed to the canonical name, the canonical name wins.
+        let renamed = PaneList::from_rows(vec![("new-(main)".into(), repo.clone(), "2.1.309".into())]);
+        let ids: Vec<String> = live_agent_sessions(&project, "(main)", &renamed, "claude").into_iter().map(|(_, s)| s).collect();
+        assert_eq!(ids, ["new-(main)"]);
+        // And a place with nothing in it has no agents.
+        assert!(live_agent_sessions(&project, "lane", &renamed, "claude").is_empty());
+    }
+
+    /// A send types only into the session the lane named: a harness reading
+    /// that names another session (it changed between the two lookups) is a
+    /// refusal, never a send somewhere else.
+    #[test]
+    fn a_send_goes_only_to_the_session_the_lane_named() {
+        let lane = Lane { harness: "codex", session: "new-lane~agent~codex".into(), pane: "%9".into() };
+        let reading = |s: Option<&str>| activity::Activity { session: s.map(str::to_string), ..activity::Activity::none() };
+        assert!(reading_of_lane(Some(reading(Some("new-lane~agent~codex"))), &lane, "Codex").is_ok());
+        let err = reading_of_lane(Some(reading(Some("old-lane~agent~codex"))), &lane, "Codex").unwrap_err();
+        assert_eq!(err, "Codex is not running in new-lane~agent~codex");
+        assert!(reading_of_lane(Some(reading(None)), &lane, "Codex").is_err());
+        assert!(reading_of_lane(None, &lane, "Codex").is_err());
+    }
+
+    fn probe(tmux: &str, cwd: &str, sid: &str) -> agent::ClaudeProbe {
+        serde_json::from_value(json!({ "pid": 1, "cwd": cwd, "status": "idle", "tmux": tmux, "sessionId": sid })).unwrap()
+    }
+
+    /// A lane's probe is found by its PANE: after `add_project` renames
+    /// `old-(main)` to `new-(main)`, the probe still names the old session,
+    /// and only the pane id (`%115`) ties it to the lane.
+    #[test]
+    fn a_lanes_probe_is_found_by_its_pane_after_its_session_is_renamed() {
+        let lane = Lane { harness: "claude", session: "new-(main)".into(), pane: "%115".into() };
+        let sid = |p: Option<&agent::ClaudeProbe>| p.and_then(|p| p.session_id.clone());
+
+        let probes = vec![probe("other-(main):@1.%3", "/x", "other"), probe("old-(main):@114.%115", "/Users/u/old", "renamed")];
+        assert_eq!(sid(lane_probe(&probes, &lane)).as_deref(), Some("renamed"), "the pane id, through a rename");
+        assert_eq!(lane_probe(&probes, &lane).map(|p| p.cwd.as_str()), Some("/Users/u/old"), "the probe keeps the cwd its transcript is filed under");
+
+        // Pane ids are per SERVER: a probe that agrees on the session name too
+        // beats one that matches by pane alone.
+        let probes = vec![probe("elsewhere:@1.%115", "/y", "other-server"), probe("new-(main):@114.%115", "/z", "this-one")];
+        assert_eq!(sid(lane_probe(&probes, &lane)).as_deref(), Some("this-one"));
+
+        // A probe that names no pane is still found by its session.
+        let probes = vec![probe("new-(main):@114", "/z", "no-pane")];
+        assert_eq!(sid(lane_probe(&probes, &lane)).as_deref(), Some("no-pane"));
+
+        // And nothing else is.
+        let probes = vec![probe("new-(main)-x:@1.%1150", "/z", "prefix"), probe("old-(main):@1.%11", "/z", "near")];
+        assert_eq!(sid(lane_probe(&probes, &lane)), None);
     }
 }

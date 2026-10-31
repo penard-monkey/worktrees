@@ -142,8 +142,8 @@ pub fn drop_reference(
             // (tmux::paste_to_ai); that is not verified for Codex's or pi's
             // composer, so a paste there could read as the answer.
             if prov.id != worktrees_core::provider::CLAUDE.id {
-                let probes = worktrees_core::agent::live_probes();
                 let panes = tmux::PaneList::fetch();
+                let probes = worktrees_core::agent::live_probes_in(panes.as_ref());
                 let scan = worktrees_core::harness::Scan { probes: &probes, panes: panes.as_ref() };
                 let path = into.place_dir(&into_slug);
                 let waiting = worktrees_core::harness::place_activities(&into, &into_slug, &path, &scan)
@@ -982,37 +982,17 @@ pub struct Drafts {
 }
 
 /// Capture every live claude pane in one `tmux` call and parse the unsent text
-/// out of each. `sessions` is `tmux::session_fingerprint()`'s output (sorted
-/// names, one per line) — passed in rather than re-fetched so the pass costs a
-/// single spawn.
+/// out of each. `panes` is the snapshot the caller already holds (the poll's
+/// tick), and its fingerprint the live session list — passed in rather than
+/// re-fetched so the pass costs a single spawn. Each probe is `locate`d in
+/// it, so a Claude whose session a rename moved is still sampled, and its
+/// draft is keyed to the place it is in now.
 ///
 /// Panes whose session is not in that list are dropped BEFORE the call: a
 /// `capture-pane` on a dead pane makes tmux print an error and abandon the rest
 /// of the chain, which would silently blank every pane after it.
-pub fn scan_drafts(sessions: &str) -> Result<Vec<Draft>, String> {
-    let live: Vec<&str> = sessions.lines().filter(|l| !l.is_empty()).collect();
-    let probes = worktrees_core::agent::live_probes();
-    // (cwd, pane id, queued) for the panes worth capturing.
-    let mut targets: Vec<(String, String, bool)> = Vec::new();
-    for p in &probes {
-        let state = worktrees_core::agent::effective_state(p);
-        // `shell` is not a claude prompt at all; `delegated` is a session whose
-        // turn is somewhere else, and whose box is not the user's to answer.
-        if state == "shell" || state == "delegated" {
-            continue;
-        }
-        let Some(tmux) = p.tmux.as_deref() else { continue }; // started outside tmux → no screen
-        let (Some(pane), Some(sess)) = (
-            worktrees_core::agent::pane_id(tmux),
-            worktrees_core::agent::session_name(tmux),
-        ) else {
-            continue;
-        };
-        if !live.contains(&sess) {
-            continue;
-        }
-        targets.push((p.cwd.clone(), pane.to_string(), state == "busy"));
-    }
+pub fn scan_drafts(panes: &worktrees_core::tmux::PaneList) -> Result<Vec<Draft>, String> {
+    let targets = draft_targets(&worktrees_core::agent::live_probes_in(Some(panes)), &panes.fingerprint());
     if targets.is_empty() {
         return Ok(Vec::new());
     }
@@ -1058,12 +1038,38 @@ pub fn scan_drafts(sessions: &str) -> Result<Vec<Draft>, String> {
     Ok(drafts)
 }
 
+/// `(place dir, pane id, queued)` for the Claude panes worth capturing, from
+/// `locate`d probes and the live session list (`sessions`, one per line).
+/// PURE. By the session and place each Claude runs in NOW: a probe keeps
+/// naming the session and folder it started in, and a rename moves both.
+fn draft_targets(probes: &[worktrees_core::agent::ClaudeProbe], sessions: &str) -> Vec<(String, String, bool)> {
+    let live: Vec<&str> = sessions.lines().filter(|l| !l.is_empty()).collect();
+    let mut targets = Vec::new();
+    for p in probes {
+        let state = worktrees_core::agent::effective_state(p);
+        // `shell` is not a claude prompt at all; `delegated` is a session whose
+        // turn is somewhere else, and whose box is not the user's to answer.
+        if state == "shell" || state == "delegated" {
+            continue;
+        }
+        let Some(tmux) = p.tmux.as_deref() else { continue }; // started outside tmux → no screen
+        let (Some(pane), Some(sess)) = (worktrees_core::agent::pane_id(tmux), p.session()) else {
+            continue;
+        };
+        if !live.contains(&sess) {
+            continue;
+        }
+        targets.push((p.place_dir().to_string(), pane.to_string(), state == "busy"));
+    }
+    targets
+}
+
 /// Mount-time pull for `sessions:drafts`. The event is change-gated and only
 /// fires every 15s, so a frontend that mounts (or reloads) between two changes
 /// would otherwise show nothing until the user typed something.
 pub fn list_drafts() -> Result<Vec<Draft>, String> {
-    let fp = worktrees_core::tmux::session_fingerprint();
-    Ok(scan_drafts(&fp).unwrap_or_default())
+    let Some(panes) = worktrees_core::tmux::PaneList::fetch_unnamed() else { return Ok(Vec::new()) };
+    Ok(scan_drafts(&panes).unwrap_or_default())
 }
 
 /// Draft TEXT is something a person typed, so it never reaches the log — same
@@ -1141,6 +1147,26 @@ pub fn close_place(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A moved project's Claude is still sampled for its draft, under the
+    /// session it runs in now and the place it is in now — its probe names
+    /// the old session (no longer live) and the old folder.
+    #[test]
+    fn a_moved_claudes_draft_is_sampled_where_it_runs_now() {
+        let panes = tmux::PaneList::from_panes(vec![tmux::Pane {
+            session: "new-(main)".into(),
+            path: "/w/new".into(),
+            cmd: "2.1.309".into(),
+            id: Some("%115".into()),
+            ..tmux::Pane::default()
+        }]);
+        let mut probes: Vec<worktrees_core::agent::ClaudeProbe> = vec![
+            serde_json::from_value(serde_json::json!({"pid": 1, "cwd": "/no/such/old", "status": "busy", "tmux": "old-(main):@114.%115"})).unwrap(),
+            serde_json::from_value(serde_json::json!({"pid": 2, "cwd": "/w/gone", "status": "idle", "tmux": "dead:@1.%9"})).unwrap(),
+        ];
+        worktrees_core::agent::locate(&mut probes, &panes);
+        assert_eq!(draft_targets(&probes, &panes.fingerprint()), vec![("/w/new".to_string(), "%115".to_string(), true)]);
+    }
 
     /// The receiving session's server is looked up in the RECEIVING
     /// project's sidecar. Both repos have a place called `lane`; the dragged

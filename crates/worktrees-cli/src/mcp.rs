@@ -77,8 +77,8 @@ use worktrees_core::argv::{branch_arg, safe_arg};
 /// harness's `{provider, state, last_done}` — from the same derivation the
 /// app's nav dots use (`worktrees_core::activity`).
 fn add_agent_status(v: &mut serde_json::Value, project: &Project, slug: &str, path: &str) {
-    let probes = agent::live_probes();
     let panes = tmux::PaneList::fetch();
+    let probes = agent::live_probes_in(panes.as_ref());
     let scan = harness::Scan { probes: &probes, panes: panes.as_ref() };
     let readings = harness::place_activities(project, slug, path, &scan);
     let agents: Vec<serde_json::Value> = harness::ALL
@@ -2201,7 +2201,7 @@ impl Server {
         };
         let canonical = project.session_name(&slug);
         let exclude = (slug == "(main)").then(|| project.wt_root_dir().to_string());
-        let probes = agent::live_probes();
+        let probes = agent::live_probes_in(Some(&panes));
         let scan = harness::Scan { probes: &probes, panes: Some(&panes) };
         let typed = attributed(&from, text);
         // Every harness running here is asked in turn. One that takes typed
