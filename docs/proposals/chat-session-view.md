@@ -6,7 +6,8 @@ title: "Proposal — a chat view of a place's agent"
 
 **Status:** exploration, 2026-10-30. A prototype is on the branch
 `feat/chat-session-view`, behind a Settings switch that is off by default. It
-is not merged and not reviewed. No server change.
+is not merged and not reviewed. No server change. Its three open questions
+were decided by the user on 2026-10-30 (§9).
 
 **The ask.** "Some users find the terminal-style view too challenging to use.
 Early feedback on the worktrees-ios UI has been good, so its chat style is a
@@ -46,8 +47,9 @@ server asks are listed in §8. None of them blocks a first release.
 | Paths in a reply | **Links that open in the dock** (the Files viewer's `resolve_doc_paths`, as the Plan tab uses) | Plain text |
 | pi, kimi | A fallback card ("can't be shown here yet"). **The composer and the prompt card still work**: `agent_send` and `agent_prompt` cover every harness | Same fallback |
 
-Two of these choices belong to the user (§9): Enter sending, and two clicks
-for an answer.
+Three of these were the user's to make, and the user decided them on
+2026-10-30 (§9): Chat beside the terminal with Terminal the default, Enter
+sending, and two clicks for an answer.
 
 ## 2. Layout at the app's real widths
 
@@ -211,17 +213,21 @@ offers Open the terminal. **"Answer in the terminal"** is always on the card.
 | **pi and kimi transcript readers** | The fallback card goes | Same fallback |
 | **A slash-command allowlist** (`/compact`, `/clear`) as a row of its own, not typed text | The commonest reason to go back to the terminal | Not offered |
 
-## 9. For the user to decide
+## 9. Decided
 
-1. **Beside or instead.** This prototype sits beside the terminal, which stays
-   the default. Making Chat the default for new places, or for everyone, is a
-   product call. It would want the turns event (§8) first.
-2. **Enter sends.** It differs from iOS, where a stray Return should not
-   instruct an agent. A desktop keyboard's Enter is deliberate, and the
-   terminal sends on Enter too.
-3. **Two clicks to answer.** This is kept from iOS. A terminal answers with
-   one key, so one click would match it. The argument for two: an answer can
-   run a command.
+The user decided all three on 2026-10-30. The prototype at 5e2da63 already
+does each, so none of them changed code.
+
+1. **DECIDED: beside the terminal.** Chat is an opt-in view next to Terminal,
+   and Terminal stays the default for every place. Making Chat the default,
+   for new places or for everyone, would be a NEW decision, taken only once
+   the turns event (§8) exists.
+2. **DECIDED: Enter sends** on the desktop. This differs from iOS, where a
+   stray Return should not instruct an agent. A desktop keyboard's Enter is
+   deliberate, and the terminal sends on Enter too.
+3. **DECIDED: two clicks to answer a prompt**: select a choice, then "Send
+   answer". This is kept from iOS, because an answer can run a command. A
+   terminal answers with one key.
 
 ## 10. What only the real app can answer
 
