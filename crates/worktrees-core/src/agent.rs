@@ -196,11 +196,11 @@ fn not_yet_logged<'a>(seen: &mut std::collections::HashSet<LoggedKey>, now: &'a 
 
 /// The FIRST JSON value of a probe file, whatever follows it. A probe written
 /// shorter over a longer one without truncating keeps the longer one's tail:
-/// on 2026-10-30 (main)'s file was a whole object and one more `}` (Claude
-/// Code 2.1.314), and its live session was missing from every reader until
-/// Claude next rewrote the file. The first value IS the new write. Only this
-/// reader of a file worktrees does not own takes trailing bytes; nothing else
-/// should on its strength.
+/// (main)'s file, written 2026-10-28 by Claude Code 2.1.301 and found
+/// 2026-10-29, was a whole object and one more `}`, and its live session was
+/// missing from every reader until Claude next rewrote the file. The first
+/// value IS the new write. Only this reader of a file worktrees does not own
+/// takes trailing bytes; nothing else should on its strength.
 pub fn parse_probe(bytes: &[u8]) -> Result<ClaudeProbe, serde_json::Error> {
     match serde_json::Deserializer::from_slice(bytes).into_iter::<ClaudeProbe>().next() {
         Some(first) => first,
@@ -784,7 +784,7 @@ mod tests {
         d
     }
 
-    /// The (main) probe of 2026-10-30, field for field (values made up): a
+    /// The (main) probe written 2026-10-28, field for field (values made up): a
     /// whole object and then ONE more `}`, the tail of a longer file the
     /// shorter write did not truncate. serde_json called it "trailing
     /// characters", and the live session vanished from every reader.
