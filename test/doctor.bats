@@ -277,3 +277,32 @@ wt() { echo "$REPO/.worktrees/$1"; }
   [ "$status" -eq 0 ]
   [[ "$output" != *"google-services.json"* ]]
 }
+
+@test "doctor: a live Claude's unreadable session file is a warning; a dead one's is not" {
+  # Written raw: a probe cut short mid-object, for this shell's own pid (alive
+  # for the whole test) and for a pid that has exited.
+  local dead; dead=$(sh -c 'echo $$')
+  mkdir -p "$HOME/.claude/sessions"
+  printf '{"pid":%s,"cwd":"%s","sta' "$$" "$REPO" > "$HOME/.claude/sessions/$$.json"
+  printf '{"pid":%s,"cwd":"%s","sta' "$dead" "$REPO" > "$HOME/.claude/sessions/$dead.json"
+
+  run_wt doctor
+  [ "$status" -eq 0 ]                  # a warning, never a failed run
+  grep -qF "~/.claude/sessions/$$.json (pid $$)" <<<"$output"   # shown from HOME
+  grep -qF "EOF while parsing" <<<"$output"
+  grep -qF "/exit, then reopen it" <<<"$output"
+  grep -qF "never edit" <<<"$output"
+  ! grep -qF "$dead.json" <<<"$output" || false
+
+  # The app's per-project `--json` sweep does not carry it: a machine-wide
+  # fact would stand under every project at once.
+  run_wt doctor --json
+  [ "$status" -eq 0 ]
+  ! grep -qF "sessions/$$.json" <<<"$output" || false
+
+  # A whole probe followed by stray bytes is READ, so there is nothing to say.
+  printf '{"pid":%s,"cwd":"%s","status":"idle"}}' "$$" "$REPO" > "$HOME/.claude/sessions/$$.json"
+  run_wt doctor
+  [ "$status" -eq 0 ]
+  ! grep -qF "sessions/$$.json" <<<"$output" || false
+}

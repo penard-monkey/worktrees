@@ -367,6 +367,30 @@ impl Live {
     }
 }
 
+/// Why a Claude lane has no probe. Usually it has written none yet; but a
+/// live pid whose file does not parse is a Claude worktrees cannot SEE, and
+/// when that pid runs in the lane's pane the error names its file. The pane is
+/// asked (`pids_on_pane`, two spawns) only when some file is unreadable.
+fn no_probe(session: &str, unreadable: &[agent::UnreadableProbe], pids_on_pane: impl FnOnce() -> Vec<i32>) -> String {
+    if !unreadable.is_empty() {
+        let on_pane = pids_on_pane();
+        if let Some(u) = unreadable.iter().find(|u| on_pane.contains(&u.pid)) {
+            return format!(
+                "the claude in {session} has a session file worktrees can't read ({}): restart that Claude (/exit, then reopen it)",
+                u.shown()
+            );
+        }
+    }
+    format!("the claude in {session} has written no session file yet")
+}
+
+/// Every pid on the lane pane's tty. A probe file is `<pid>.json`, so a stem
+/// among these is a Claude running in that pane.
+fn pids_on_pane(lane: &Lane) -> Vec<i32> {
+    let Some(tty) = Live::pane(lane).ok().as_ref().and_then(tmux::pane_tty) else { return Vec::new() };
+    tmux::ps_foreground(&[&tty]).map(|ps| tmux::pids_on_tty(&ps, &tty)).unwrap_or_default()
+}
+
 /// `(main)` excludes its `.worktrees/` subtree: a pane there is another place's.
 fn exclude_for(project: &Project, slug: &str) -> Option<String> {
     (slug == "(main)").then(|| project.wt_root_dir().to_string())
@@ -449,11 +473,12 @@ impl AgentIo for Live {
             h if h == provider::CLAUDE.id => {
                 // The probe of the claude in THIS session — the transcript the
                 // nav's model label reads (`watch::claude_model`).
-                let probes = agent::live_probes();
-                let p = probes
+                let scan = agent::scan_probes();
+                let p = scan
+                    .probes
                     .iter()
                     .find(|p| p.tmux.as_deref().and_then(agent::session_name) == Some(lane.session.as_str()))
-                    .ok_or_else(|| format!("the claude in {} has written no session file yet", lane.session))?;
+                    .ok_or_else(|| no_probe(&lane.session, &scan.unreadable, || pids_on_pane(lane)))?;
                 let sid = p.session_id.as_deref().ok_or("claude's session file names no session id")?;
                 Path::new(&worktrees_core::project::claude_dir_in(&p.root, &p.cwd)).join(format!("{sid}.jsonl"))
             }
@@ -850,5 +875,31 @@ mod tests {
         let fake = Arc::new(Fake::with(vec![("pi", "repo-lane~agent~pi", pane(vec![""], ""))]));
         let (ctx, repo) = setup("turnspi", fake);
         assert!(agent_turns(&ctx, repo, "lane".into(), None, None).unwrap_err().contains("not read yet"));
+    }
+
+    /// A Claude whose session file worktrees cannot read is not one that has
+    /// "written no session file yet": the error names the file, when its pid
+    /// runs in the lane's pane. The pane is asked about only when some live
+    /// pid's file is unreadable, so the common miss costs no spawn.
+    #[test]
+    fn transcripts_error_names_an_unreadable_session_file() {
+        let unreadable = vec![agent::UnreadableProbe {
+            path: "/Users/u/.claude/sessions/5389.json".into(),
+            pid: 5389,
+            error: "EOF while parsing an object at line 1 column 200".into(),
+            mtime: None,
+        }];
+        let err = no_probe("worktrees-(main)", &unreadable, || vec![812, 5389, 5402]);
+        assert!(err.starts_with("the claude in worktrees-(main) has a session file worktrees can't read ("), "{err}");
+        assert!(err.contains("/.claude/sessions/5389.json)"), "{err}");
+        assert!(err.contains("/exit"), "the remedy is a restart: {err}");
+
+        // Another pane's Claude: not this lane's file.
+        let err = no_probe("worktrees-(main)", &unreadable, || vec![812]);
+        assert_eq!(err, "the claude in worktrees-(main) has written no session file yet");
+
+        // Nothing unreadable: the old answer, and the pane is never asked.
+        let err = no_probe("worktrees-(main)", &[], || panic!("no ps for a plain miss"));
+        assert_eq!(err, "the claude in worktrees-(main) has written no session file yet");
     }
 }

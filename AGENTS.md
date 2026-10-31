@@ -1794,6 +1794,19 @@ wait loop on it never ended and a sandbox app ran for two hours.
   substitute — a genuinely busy session can go minutes without a write, which is
   why the dot has no expiry. Anything new read out of that file needs the same
   question asked: which write set this field?
+- **That probe file can carry its predecessor's TAIL, and a reader that skips
+  quietly hides a live session from every surface at once.** On 2026-10-30
+  (main)'s probe (Claude Code 2.1.314) was a whole object plus one stray `}`, a
+  shorter write over a longer one that was never truncated. `serde_json` called
+  that "trailing characters", and the session left the agent rows, the dots and
+  `place_status` together, while `agent_turns` said it had "written no session
+  file yet". `agent::parse_probe` takes the FIRST JSON value, which is the new
+  write; that rule is for this one file we do not own, not a licence for
+  trailing bytes anywhere else. A live pid's file that still does not parse is
+  NAMED (`agent::scan_probes`: the transcript error, `doctor`, one serve.log
+  line per path and mtime), because an agent missing for no stated reason looks
+  exactly like one that never started. Never repair the file: restarting that
+  Claude rewrites it.
 - **A live Claude transcript's MTIME is not its last turn.** Claude Code keeps
   rewriting `~/.claude/projects/<mangled>/<sid>.jsonl` long after the session's
   last entry: measured across every transcript touched in a day, 24 of 28 had an

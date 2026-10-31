@@ -10,7 +10,9 @@
 //! `updatedAt` can be minutes old while genuinely still busy — so nothing here
 //! expires by age. Liveness is PID-alive (stale files for dead pids are never
 //! cleaned on crash). Everything degrades to "no agent": missing/unreadable dir
-//! → none; unparseable file → skipped; dead pid → skipped.
+//! → none; unparseable file → skipped; dead pid → skipped. A live pid's file
+//! that does not parse is skipped too, but NAMED (`scan_probes`), so a session
+//! worktrees cannot see can be explained rather than just missing.
 //!
 //! This used to live in the app (the nav's busy/waiting dots). It moved here so
 //! the MCP server's `place_status` and the app read ONE truth — an orchestrator
@@ -113,7 +115,8 @@ pub fn effective_state(p: &ClaudeProbe) -> String {
 }
 
 /// Scan `<config dir>/sessions/*.json` for EVERY config root and keep only
-/// LIVE-pid probes with a cwd. Any I/O or parse failure degrades to "skipped".
+/// LIVE-pid probes with a cwd. Every failure degrades to "skipped"; the ones a
+/// caller should be able to explain are in [`scan_probes`].
 ///
 /// Every root, not just `~/.claude`: a profiled session writes its probes under
 /// the profile's own dir, so a $HOME-only scan would leave profiled places
@@ -121,8 +124,94 @@ pub fn effective_state(p: &ClaudeProbe) -> String {
 /// Union is safe because each probe carries its own `cwd` and `pid`, so it is
 /// self-describing: nobody needs to know which profile a place is bound to.
 pub fn live_probes() -> Vec<ClaudeProbe> {
-    let mut out = Vec::new();
-    for root in crate::profile::claude_config_dirs_all() {
+    scan_probes().probes
+}
+
+/// A probe file of a LIVE pid that worktrees cannot read: its bytes are not a
+/// JSON value (a write cut short, garbage) or the read itself failed. Its
+/// session is alive and missing from every reader at once — the agent rows,
+/// the dots, `place_status` — so this is how one of them says why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnreadableProbe {
+    pub path: std::path::PathBuf,
+    /// The file's stem: Claude names a probe `<pid>.json`, and the bytes that
+    /// would say so are the ones that did not parse.
+    pub pid: i32,
+    pub error: String,
+    pub mtime: Option<std::time::SystemTime>,
+}
+
+impl UnreadableProbe {
+    /// The path as a person would type it: `~/.claude/sessions/5389.json`.
+    pub fn shown(&self) -> String {
+        shown_under(&self.path, &std::env::var("HOME").unwrap_or_default())
+    }
+}
+
+fn shown_under(path: &std::path::Path, home: &str) -> String {
+    match path.strip_prefix(home) {
+        Ok(rest) if !home.is_empty() => format!("~/{}", rest.display()),
+        _ => path.display().to_string(),
+    }
+}
+
+/// `live_probes`, and the live pids' files it had to skip.
+#[derive(Debug, Default)]
+pub struct ProbeScan {
+    pub probes: Vec<ClaudeProbe>,
+    pub unreadable: Vec<UnreadableProbe>,
+}
+
+/// [`live_probes`] with its unreadable files, each logged once per (path,
+/// mtime): the 3 s poll scans on every tick.
+pub fn scan_probes() -> ProbeScan {
+    let scan = scan_probes_in(&crate::profile::claude_config_dirs_all(), pid_alive);
+    let mut seen = UNREADABLE_LOGGED.lock().unwrap_or_else(|e| e.into_inner());
+    for u in not_yet_logged(seen.get_or_insert_with(Default::default), &scan.unreadable) {
+        crate::logsink::log(
+            "warn",
+            &format!(
+                "claude session file {} (pid {}) cannot be read: {} — that session is missing from the agent rows, \
+                 the dots and place_status until Claude rewrites the file",
+                u.path.display(),
+                u.pid,
+                u.error
+            ),
+        );
+    }
+    scan
+}
+
+type LoggedKey = (std::path::PathBuf, Option<std::time::SystemTime>);
+static UNREADABLE_LOGGED: std::sync::Mutex<Option<std::collections::HashSet<LoggedKey>>> = std::sync::Mutex::new(None);
+
+/// The files in `now` that `seen` has not logged at this mtime, which it then
+/// records. `seen` keeps only what is unreadable NOW, so it stays as small as
+/// the problem, and a file that heals and breaks again is said again.
+fn not_yet_logged<'a>(seen: &mut std::collections::HashSet<LoggedKey>, now: &'a [UnreadableProbe]) -> Vec<&'a UnreadableProbe> {
+    let key = |u: &UnreadableProbe| (u.path.clone(), u.mtime);
+    seen.retain(|k| now.iter().any(|u| key(u) == *k));
+    now.iter().filter(|u| seen.insert(key(u))).collect()
+}
+
+/// The FIRST JSON value of a probe file, whatever follows it. A probe written
+/// shorter over a longer one without truncating keeps the longer one's tail:
+/// on 2026-10-30 (main)'s file was a whole object and one more `}` (Claude
+/// Code 2.1.314), and its live session was missing from every reader until
+/// Claude next rewrote the file. The first value IS the new write. Only this
+/// reader of a file worktrees does not own takes trailing bytes; nothing else
+/// should on its strength.
+pub fn parse_probe(bytes: &[u8]) -> Result<ClaudeProbe, serde_json::Error> {
+    match serde_json::Deserializer::from_slice(bytes).into_iter::<ClaudeProbe>().next() {
+        Some(first) => first,
+        None => serde_json::from_slice(bytes), // empty: its own "EOF" error
+    }
+}
+
+/// `scan_probes` over `roots`, with liveness injected so a test owns both.
+pub fn scan_probes_in(roots: &[std::path::PathBuf], pid_alive: impl Fn(i32) -> bool) -> ProbeScan {
+    let mut out = ProbeScan::default();
+    for root in roots {
         let entries = match std::fs::read_dir(root.join("sessions")) {
             Ok(e) => e,
             Err(_) => continue, // dir missing/unreadable → nothing from this root
@@ -132,19 +221,29 @@ pub fn live_probes() -> Vec<ClaudeProbe> {
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
-            let bytes = match std::fs::read(&path) {
-                Ok(b) => b,
-                Err(_) => continue,
+            let error = match std::fs::read(&path) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue, // its session ended mid-scan
+                Err(e) => e.to_string(),
+                Ok(bytes) => match parse_probe(&bytes) {
+                    Ok(mut probe) => {
+                        probe.root = root.clone();
+                        // A dead pid (a crashed session's stale file) → skip.
+                        if !probe.cwd.is_empty() && pid_alive(probe.pid) {
+                            out.probes.push(probe);
+                        }
+                        continue;
+                    }
+                    // A whole JSON value without pid/cwd/status is not a probe
+                    // (nothing is unreadable about it): skipped, as always.
+                    Err(e) if e.is_data() => continue,
+                    Err(e) => e.to_string(),
+                },
             };
-            let mut probe: ClaudeProbe = match serde_json::from_slice(&bytes) {
-                Ok(p) => p, // missing pid/cwd/status → parse fails → skip
-                Err(_) => continue,
-            };
-            probe.root = root.clone();
-            if probe.cwd.is_empty() || !pid_alive(probe.pid) {
-                continue; // dead pid (or crashed-session stale file) → skip
+            let pid = path.file_stem().and_then(|s| s.to_str()).and_then(|s| s.parse::<i32>().ok());
+            if let Some(pid) = pid.filter(|p| pid_alive(*p)) {
+                let mtime = entry.metadata().ok().and_then(|m| m.modified().ok());
+                out.unreadable.push(UnreadableProbe { path, pid, error, mtime });
             }
-            out.push(probe);
         }
     }
     out
@@ -674,6 +773,115 @@ mod tests {
 
     fn agents_at_probes() -> Vec<ClaudeProbe> {
         vec![probe(r#"{"pid":1,"cwd":"/w/a","status":"idle"}"#)]
+    }
+
+    /// A config root with an empty `sessions/` under the temp dir. Fixtures go
+    /// in raw, with `fs::write`: never through the reader under test.
+    fn probe_root(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("wtprobe-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("sessions")).unwrap();
+        d
+    }
+
+    /// The (main) probe of 2026-10-30, field for field (values made up): a
+    /// whole object and then ONE more `}`, the tail of a longer file the
+    /// shorter write did not truncate. serde_json called it "trailing
+    /// characters", and the live session vanished from every reader.
+    const SHORT_OVER_LONG: &str = concat!(
+        r#"{"pid":5389,"sessionId":"0d3c5e2a-7f41-4b8e-9a52-6c1d2e3f4a5b","cwd":"/w/worktrees","#,
+        r#""startedAt":1793200000000,"procStart":"Mon Oct 26 09:00:00 2026","version":"2.1.314","#,
+        r#""peerProtocol":1,"peerFeatures":["messages"],"kind":"interactive","entrypoint":"cli","#,
+        r#""pidDomain":"local","asksForConvertedSkills":false,"tmux":"worktrees-(main):@1.%1","#,
+        r#""messagingSocketPath":"/tmp/claude-501/peer.sock","name":"worktrees-(main)","#,
+        r#""nameSource":"flag","nameSince":1793200000000,"updatedAt":1793207615286,"#,
+        r#""status":"idle","statusUpdatedAt":1793207615286}}"#,
+    );
+
+    #[test]
+    fn a_probe_followed_by_a_stray_brace_still_counts() {
+        assert!(serde_json::from_str::<serde_json::Value>(SHORT_OVER_LONG).is_err(), "the fixture is the bug: not one JSON value");
+        let root = probe_root("trailing");
+        std::fs::write(root.join("sessions/5389.json"), SHORT_OVER_LONG).unwrap();
+
+        let scan = scan_probes_in(std::slice::from_ref(&root), |pid| pid == 5389);
+        assert!(scan.unreadable.is_empty(), "{:?}", scan.unreadable);
+        assert_eq!(scan.probes.len(), 1, "a live session hidden by one stray byte");
+        let p = &scan.probes[0];
+        assert_eq!(p.pid, 5389);
+        assert_eq!(p.cwd, "/w/worktrees");
+        assert_eq!(p.status, "idle");
+        assert_eq!(p.name.as_deref(), Some("worktrees-(main)"));
+        assert_eq!(p.tmux.as_deref(), Some("worktrees-(main):@1.%1"));
+        assert_eq!(p.session_id.as_deref(), Some("0d3c5e2a-7f41-4b8e-9a52-6c1d2e3f4a5b"));
+        assert_eq!(p.kind.as_deref(), Some("interactive"));
+        assert_eq!(p.version.as_deref(), Some("2.1.314"));
+        assert_eq!(p.parked_job_id, None);
+        assert_eq!(p.updated_at, Some(1793207615286));
+        assert_eq!(p.status_updated_at, Some(1793207615286));
+        assert_eq!(p.root, root);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A file whose FIRST value does not parse is still skipped, but a live
+    /// pid's is named, so a session that cannot be seen can be said. A dead
+    /// pid's bad file is stale garbage (nothing cleans up after a crash), and a
+    /// whole JSON value that is not a probe is skipped silently as before.
+    #[test]
+    fn a_cut_short_probe_of_a_live_pid_is_reported_and_a_dead_ones_is_not() {
+        let root = probe_root("cut");
+        let s = root.join("sessions");
+        let cut = &SHORT_OVER_LONG[..200];
+        std::fs::write(s.join("5389.json"), cut).unwrap(); // live, cut short
+        std::fs::write(s.join("4242.json"), cut).unwrap(); // dead, cut short
+        std::fs::write(s.join("77.json"), "").unwrap(); // live, empty
+        std::fs::write(s.join("88.json"), r#"{"pid":88,"cwd":"/w/x"}"#).unwrap(); // live, no status: not a probe
+        std::fs::write(s.join("notes.json"), "garbage").unwrap(); // no pid in the name
+        std::fs::write(s.join("99.json"), r#"{"pid":99,"cwd":"/w/y","status":"busy"}"#).unwrap(); // whole, dead
+        let live = |pid: i32| [5389, 77, 88].contains(&pid);
+
+        let scan = scan_probes_in(std::slice::from_ref(&root), live);
+        assert!(scan.probes.is_empty(), "{:?}", scan.probes);
+        let mut got: Vec<(i32, std::path::PathBuf)> = scan.unreadable.iter().map(|u| (u.pid, u.path.clone())).collect();
+        got.sort();
+        assert_eq!(got, vec![(77, s.join("77.json")), (5389, s.join("5389.json"))]);
+        let main = scan.unreadable.iter().find(|u| u.pid == 5389).unwrap();
+        assert!(main.error.contains("EOF"), "the parse error is kept: {}", main.error);
+        assert!(main.mtime.is_some(), "the mtime is what a log line is keyed on");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_unreadable_path_is_shown_from_home() {
+        let p = std::path::Path::new("/Users/u/.claude/sessions/5389.json");
+        assert_eq!(shown_under(p, "/Users/u"), "~/.claude/sessions/5389.json");
+        assert_eq!(shown_under(p, "/Users/u2"), "/Users/u/.claude/sessions/5389.json", "a component, not a string prefix");
+        assert_eq!(shown_under(p, ""), "/Users/u/.claude/sessions/5389.json");
+    }
+
+    /// The poll scans every 3 s: one log line per (path, mtime), not per tick.
+    #[test]
+    fn an_unreadable_file_is_logged_once_per_mtime() {
+        let at = |secs: u64| Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs));
+        let u = |path: &str, mtime| UnreadableProbe { path: path.into(), pid: 1, error: "EOF".into(), mtime };
+        let pids = |v: Vec<&UnreadableProbe>| v.into_iter().map(|u| u.path.display().to_string()).collect::<Vec<_>>();
+        let mut seen = std::collections::HashSet::new();
+
+        let tick = vec![u("/s/1.json", at(10))];
+        assert_eq!(pids(not_yet_logged(&mut seen, &tick)), ["/s/1.json"]);
+        assert!(not_yet_logged(&mut seen, &tick).is_empty(), "the next tick says nothing");
+        assert!(not_yet_logged(&mut seen, &tick).is_empty());
+
+        // Rewritten and still bad: said again, once. A second file is its own.
+        let tick = vec![u("/s/1.json", at(20)), u("/s/2.json", at(20))];
+        assert_eq!(pids(not_yet_logged(&mut seen, &tick)), ["/s/1.json", "/s/2.json"]);
+        assert!(not_yet_logged(&mut seen, &tick).is_empty());
+
+        // Healed, then broken again at an mtime once seen: said again, and the
+        // set holds only what is unreadable now.
+        assert!(not_yet_logged(&mut seen, &[]).is_empty());
+        assert!(seen.is_empty());
+        assert_eq!(pids(not_yet_logged(&mut seen, &[u("/s/1.json", at(20))])), ["/s/1.json"]);
     }
 
     /// Most active first: the first entry is the one whose state answers "is
