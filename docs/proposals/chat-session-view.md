@@ -283,7 +283,11 @@ for each line), as a sent message's pending bubble does.
 - a drift check holding `chat.ts`'s copy of `agents.rs`'s strings and
   `typed_line_ok`'s rule (`agent-rows-check.mjs` is the place for it);
 - the iOS "New messages" announcement for VoiceOver;
-- keyboard answers (1/2/3);
+- keyboard answers: **built** (`feat/chat-answer-keys`). A digit is a click
+  on that choice (it selects, ticks, or selects and focuses the choice's
+  text), Enter is the card's Send, and a new prompt takes the keyboard from an
+  empty composer, once per prompt. Checked by `chat-keys-check.mjs`, and in
+  the mock harness in Chromium and WebKit, counting one answer per Enter;
 - a link's domain shown after its text.
 
 ## 8. Server asks (listed, not built)
