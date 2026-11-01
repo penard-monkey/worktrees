@@ -23,13 +23,15 @@ use crate::config::{self, SyncCfg};
 use crate::diag::{Code, Finding};
 use crate::git;
 use crate::project::Project;
+use crate::synchub;
 use crate::sysclock;
 use crate::ui::{CaptureUi, Ui};
 
 const SYNC_USAGE: &str = "\
 usage: worktrees sync push   [--hub PATH] [--dry-run|-n] [--yes|-y] [--with-sessions] [--json]
        worktrees sync pull   [name] [--hub PATH] [--dry-run|-n] [--yes|-y] [--with-sessions] [--install] [--json]
-       worktrees sync status [--hub PATH] [--json]";
+       worktrees sync status [--hub PATH] [--json]
+       worktrees sync hubs   [--choose NAME|ID]... [--clear] [--json]";
 
 /// The hub-side manifest a push leaves behind, so the other machine can adopt
 /// the project without registering it first.
@@ -71,11 +73,6 @@ const EXCLUDES: &[&str] = &[
     ".worktrees-sync/",
     "*.tar.gz",
 ];
-
-/// Volumes that are never the hub: the system disk, Time Machine's mounts, and
-/// the SMB share that is always up.
-const HUB_DENYLIST: &[&str] =
-    &["Macintosh HD", ".timemachine", "com.apple.TimeMachine.localsnapshots", "davidpena"];
 
 // ── rsync discovery ──────────────────────────────────────────────────────────
 
@@ -138,31 +135,12 @@ fn find_rsync() -> Result<Rsync, String> {
 
 // ── hub resolution ───────────────────────────────────────────────────────────
 
-/// Pure: `(basename, is_symlink, path)` → the volumes that could be a hub.
-fn hub_candidates_from(vols: &[(String, bool, PathBuf)]) -> Vec<PathBuf> {
-    vols.iter()
-        .filter(|(base, link, _)| !*link && !HUB_DENYLIST.contains(&base.as_str()))
-        .map(|(_, _, p)| p.clone())
-        .collect()
-}
-
-fn volumes() -> Vec<(String, bool, PathBuf)> {
-    let mut out: Vec<(String, bool, PathBuf)> = Vec::new();
-    let Ok(rd) = std::fs::read_dir("/Volumes") else { return out };
-    for e in rd.flatten() {
-        let p = e.path();
-        if !p.is_dir() {
-            continue; // follows the link, like `[ -d ]`
-        }
-        let link =
-            std::fs::symlink_metadata(&p).map(|m| m.file_type().is_symlink()).unwrap_or(false);
-        out.push((e.file_name().to_string_lossy().into_owned(), link, p));
-    }
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    out
-}
-
-/// flag > `$WORKTREES_SYNC_HUB` > `[sync] hub` > a single mounted volume.
+/// flag > `$WORKTREES_SYNC_HUB` > `[sync] hub` > the chosen hub
+/// (`sync-hubs.json`, `synchub`) > exactly one REMOVABLE volume.
+///
+/// A chosen hub that is not mounted is an error naming it: the user picked
+/// that drive, and quietly syncing to another one that happens to be plugged
+/// in is the one outcome a choice exists to prevent.
 fn resolve_hub(
     flag: Option<&str>,
     cfg: &SyncCfg,
@@ -172,29 +150,29 @@ fn resolve_hub(
     if let Some(f) = flag.filter(|s| !s.is_empty()) {
         return Ok(PathBuf::from(f));
     }
+    if let Some(p) = configured_hub(cfg) {
+        return Ok(p);
+    }
+    let vols = synchub::volumes();
+    if let Some(r) = synchub::primary(&synchub::read(), &vols) {
+        return r;
+    }
+    let p = synchub::auto_pick(&vols)?;
+    if !quiet {
+        ui.info(&format!("auto-detected SSD hub: {}", p.display()));
+    }
+    Ok(p)
+}
+
+/// `$WORKTREES_SYNC_HUB`, else `[sync] hub` — the two settings that outrank a
+/// choice made in the app.
+pub fn configured_hub(cfg: &SyncCfg) -> Option<PathBuf> {
     if let Ok(v) = std::env::var("WORKTREES_SYNC_HUB") {
         if !v.is_empty() {
-            return Ok(PathBuf::from(v));
+            return Some(PathBuf::from(v));
         }
     }
-    if let Some(h) = cfg.hub.as_deref().filter(|s| !s.is_empty()) {
-        return Ok(PathBuf::from(h));
-    }
-    let cands = hub_candidates_from(&volumes());
-    match cands.len() {
-        1 => {
-            if !quiet {
-                ui.info(&format!("auto-detected SSD hub: {}", cands[0].display()));
-            }
-            Ok(cands[0].clone())
-        }
-        0 => Err("no external volume mounted; plug in the SSD or pass --hub PATH".to_string()),
-        _ => {
-            let list =
-                cands.iter().map(|p| format!("  {}", p.display())).collect::<Vec<_>>().join("\n");
-            Err(format!("multiple external volumes:\n{list}\nambiguous — pass --hub PATH"))
-        }
-    }
+    cfg.hub.as_deref().filter(|s| !s.is_empty()).map(PathBuf::from)
 }
 
 // ── manifest (data only — ADR 0001) ──────────────────────────────────────────
@@ -365,6 +343,15 @@ fn live_sessions_in(root: &Path) -> Vec<String> {
         }
     }
     out
+}
+
+/// Every project the hub has a readable manifest for, name-sorted — the
+/// listing `sync status` prints and the hub dashboard shows.
+pub fn hub_projects(hub: &Path) -> Vec<ManifestBrief> {
+    hub_manifests(hub)
+        .into_iter()
+        .map(|(name, m)| ManifestBrief { name, local_root: m.local_root, pushed_at: m.pushed_at, host: m.host })
+        .collect()
 }
 
 /// Every project the hub has a readable manifest for, name-sorted.
@@ -1114,13 +1101,14 @@ pub fn cmd_sync(ui: &mut dyn Ui, args: &[String]) -> i32 {
         Some("push") => run_direction(ui, SyncDirection::Push, args.get(1..).unwrap_or(&[])),
         Some("pull") => run_direction(ui, SyncDirection::Pull, args.get(1..).unwrap_or(&[])),
         Some("status") => cmd_status(ui, args.get(1..).unwrap_or(&[])),
+        Some("hubs") => cmd_hubs(ui, args.get(1..).unwrap_or(&[])),
         Some(other) => {
             ui.error(&format!("Unknown sync command: {other}"));
             ui.plain(SYNC_USAGE);
             1
         }
         None => {
-            ui.error("sync needs a subcommand (push, pull or status).");
+            ui.error("sync needs a subcommand (push, pull, status or hubs).");
             ui.plain(SYNC_USAGE);
             1
         }
@@ -2162,7 +2150,7 @@ pub fn sync_apply(
 
 // ── status ───────────────────────────────────────────────────────────────────
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ManifestBrief {
     pub name: String,
     pub local_root: String,
@@ -2186,6 +2174,27 @@ pub struct StatusJson {
     pub pushed_host: Option<String>,
     pub hint: Option<String>,
     pub projects: Vec<ManifestBrief>,
+}
+
+/// What a project looks like HERE, for comparing against its last push: the
+/// branch, how many paths are dirty, and when HEAD was committed. Three git
+/// calls; `sync status` and the hub dashboard both read it from this one place.
+#[derive(Serialize, Debug, Clone, Default, PartialEq)]
+pub struct LocalState {
+    pub branch: Option<String>,
+    pub dirty: Option<u32>,
+    /// HEAD's committer time (epoch secs). A commit after the push's
+    /// `pushed_at` means the hub's copy is behind.
+    pub head_at: Option<i64>,
+}
+
+pub fn local_state(root: &str) -> LocalState {
+    LocalState {
+        branch: git::git_out(root, &["rev-parse", "--abbrev-ref", "HEAD"]),
+        dirty: git::git_out(root, &["status", "--porcelain"])
+            .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count() as u32),
+        head_at: git::git_out(root, &["log", "-1", "--format=%ct"]).and_then(|s| s.trim().parse().ok()),
+    }
 }
 
 /// The data half of `sync status`, for the CLI's printer and for the app.
@@ -2230,9 +2239,9 @@ pub fn sync_status_data(
         Some(p) => {
             let root = PathBuf::from(&p.main_root);
             let name = basename(&root);
-            out.branch = git::git_out(&p.main_root, &["rev-parse", "--abbrev-ref", "HEAD"]);
-            out.dirty = git::git_out(&p.main_root, &["status", "--porcelain"])
-                .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count() as u32);
+            let st = local_state(&p.main_root);
+            out.branch = st.branch;
+            out.dirty = st.dirty;
             if let Ok(h) = &hub {
                 if let Ok(m) = read_manifest(&h.join(&name).join(MANIFEST)) {
                     out.pushed_at = Some(m.pushed_at);
@@ -2245,15 +2254,7 @@ pub fn sync_status_data(
         }
         None => {
             if let Ok(h) = &hub {
-                out.projects = hub_manifests(h)
-                    .into_iter()
-                    .map(|(name, m)| ManifestBrief {
-                        name,
-                        local_root: m.local_root,
-                        pushed_at: m.pushed_at,
-                        host: m.host,
-                    })
-                    .collect();
+                out.projects = hub_projects(h);
             }
         }
     }
@@ -2333,6 +2334,110 @@ fn cmd_status(ui: &mut dyn Ui, args: &[String]) -> i32 {
                 }
             }
         }
+    }
+    0
+}
+
+/// `worktrees sync hubs` — every volume that can be a hub, its kind, and
+/// which are chosen. `--choose` replaces the chosen list (the first is the
+/// primary: the CLI's hub and a pull's default); `--clear` empties it, which
+/// returns the CLI to auto-detect. The same file the app's selector writes.
+fn cmd_hubs(ui: &mut dyn Ui, args: &[String]) -> i32 {
+    let (mut json, mut clear) = (false, false);
+    let mut choose: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json" => json = true,
+            "--clear" => clear = true,
+            "--choose" => {
+                let Some(v) = args.get(i + 1) else {
+                    ui.error("--choose needs a hub NAME or ID.");
+                    return 1;
+                };
+                choose.push(v.clone());
+                i += 1;
+            }
+            s if s.starts_with("--choose=") => choose.push(s["--choose=".len()..].to_string()),
+            s => {
+                ui.error(&format!("Unknown argument: {s}"));
+                return 1;
+            }
+        }
+        i += 1;
+    }
+    let json = json_mode(json);
+    if clear && !choose.is_empty() {
+        ui.error("--clear and --choose are exclusive.");
+        return 1;
+    }
+    let vols = synchub::volumes();
+    if clear {
+        if let Err(e) = synchub::edit(|f| {
+            f.chosen.clear();
+            Ok(())
+        }) {
+            ui.error(&e);
+            return 1;
+        }
+    } else if !choose.is_empty() {
+        match synchub::choose_in(&synchub::path(), &vols, &choose, sysclock::now_epoch()) {
+            Ok(ids) => {
+                if !json {
+                    ui.info(&format!("chosen: {}", ids.join(", ")));
+                }
+            }
+            Err(e) => {
+                ui.error(&e);
+                return 1;
+            }
+        }
+    }
+    let cfg = config::sync_cfg();
+    let configured = configured_hub(&cfg);
+    let rows = synchub::rows(&vols, &synchub::read(), configured.as_deref());
+    if json {
+        ui.plain(&serde_json::to_string(&serde_json::json!({ "schema_version": SCHEMA, "hubs": rows })).unwrap_or_default());
+        return 0;
+    }
+    ui.header("sync hubs");
+    if rows.is_empty() {
+        ui.info("  no volume mounted that could be a hub");
+    }
+    let clock = sysclock::SysClock::detect();
+    let now = sysclock::now_epoch();
+    for r in &rows {
+        let mark = match r.chosen {
+            Some(0) => "*",
+            Some(_) => "+",
+            None => " ",
+        };
+        let mut notes: Vec<String> = Vec::new();
+        match r.chosen {
+            Some(0) => notes.push("primary".into()),
+            Some(_) => notes.push("chosen".into()),
+            None => {}
+        }
+        if r.configured {
+            notes.push("configured".into());
+        }
+        if r.auto {
+            notes.push("auto".into());
+        }
+        let place = match (&r.path, r.last_seen) {
+            (Some(p), _) => p.clone(),
+            (None, Some(t)) => format!("not connected (seen {} ago)", clock.ago(t, now)),
+            (None, None) => "not connected".into(),
+        };
+        ui.plain(&format!(
+            "  {mark} {:<20} {:<9} {place}{}",
+            r.name,
+            r.kind.label(),
+            if notes.is_empty() { String::new() } else { format!("  ({})", notes.join(", ")) }
+        ));
+    }
+    if configured.is_some() {
+        ui.info("  [sync] hub / $WORKTREES_SYNC_HUB is set and outranks the chosen hub");
     }
     0
 }
@@ -2579,26 +2684,6 @@ building file list
         let old = Rsync { path: "/usr/bin/rsync".into(), v3: false };
         let job2 = Job { rsync: &old, ..job };
         assert_eq!(apply_argv(&job2, &stream_info(false)), plain);
-    }
-
-    #[test]
-    fn hub_candidates_skip_the_denylist_and_symlinks() {
-        let v = |n: &str, link: bool| (n.to_string(), link, PathBuf::from(format!("/Volumes/{n}")));
-        // the shape a stock Mac shows: system disk (a symlink), TM, the share
-        let only_system =
-            vec![v("Macintosh HD", true), v(".timemachine", false), v("davidpena", false)];
-        assert!(hub_candidates_from(&only_system).is_empty());
-
-        let one = vec![v("Macintosh HD", true), v("FastSSD", false)];
-        assert_eq!(hub_candidates_from(&one), vec![PathBuf::from("/Volumes/FastSSD")]);
-
-        let many = vec![v("FastSSD", false), v("Backup", false), v(".timemachine", false)];
-        assert_eq!(hub_candidates_from(&many).len(), 2);
-
-        // a non-denylisted SYMLINK is still skipped (the 'Macintosh HD' → / trap
-        // under a different name)
-        let linked = vec![v("Whatever", true)];
-        assert!(hub_candidates_from(&linked).is_empty());
     }
 
     #[test]

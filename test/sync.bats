@@ -14,6 +14,30 @@ setup() {
   RSYNC_LOG="$BATS_TEST_TMPDIR/rsync.log"
   NAME="$(basename "$REPO")"
   MF=".worktrees-sync.toml"
+  # No test reads the real /Volumes: the volume list is this file
+  # (synchub::volumes' seam), empty unless a test writes volumes into it.
+  export WORKTREES_SYNC_VOLUMES="$BATS_TEST_TMPDIR/volumes.json"
+  echo '[]' > "$WORKTREES_SYNC_VOLUMES"
+}
+
+# Fake volumes for synchub::volumes. Each arg: name|kind|path|id
+#   kind removable → apfs + MNT_REMOVABLE, network → smbfs, internal → apfs.
+fake_volumes() {
+  local first=1 spec name kind path id fs flags uuid from
+  { printf '['
+    for spec in "$@"; do
+      IFS='|' read -r name kind path id <<<"$spec"
+      case "$kind" in
+        removable) fs=apfs; flags=512; uuid="\"$id\""; from=/dev/disk9s1 ;;
+        network)   fs=smbfs; flags=0; uuid=null; from="//me@$id" ;;
+        *)         fs=apfs; flags=4096; uuid="\"$id\""; from=/dev/disk3s9 ;;
+      esac
+      [ $first = 1 ] || printf ','
+      first=0
+      printf '{"name":"%s","path":"%s","mount_point":true,"fstype":"%s","flags":%s,"from":"%s","uuid":%s}' \
+        "$name" "$path" "$fs" "$flags" "$from" "$uuid"
+    done
+    printf ']'; } > "$WORKTREES_SYNC_VOLUMES"
 }
 
 # The APPLY invocation is the only one carrying --backup-dir; the PREVIEW is the
@@ -418,7 +442,8 @@ EOF
   [ "$status" -eq 1 ]
   [[ "$output" == *"hub copy"* ]]
   # refused before rsync was even looked for — not so much as a --version probe
-  [ ! -s "$RSYNC_LOG" ]
+  ! has_preview || false
+  ! has_apply || false
 }
 
 @test "sync guard: a manifest about ANOTHER project leaves the tree alone" {
@@ -515,4 +540,87 @@ EOF
   [[ "$output" == *"never pushed"* ]]
   [[ "$output" == *"$REPO"* ]]
   [[ "$output" == *"main"* ]]
+}
+
+# ── choosing the hub (synchub) ───────────────────────────────────────────────
+
+@test "sync hubs: lists each volume with its kind and marks the auto pick" {
+  mkdir -p "$BATS_TEST_TMPDIR/ssd" "$BATS_TEST_TMPDIR/share"
+  fake_volumes "Extreme SSD|removable|$BATS_TEST_TMPDIR/ssd|AAAA" \
+               "home|network|$BATS_TEST_TMPDIR/share|nas/home"
+  run_wt sync hubs
+  [ "$status" -eq 0 ]
+  grep -qF "Extreme SSD" <<<"$output"
+  grep -qF "removable" <<<"$output"
+  grep -qF "network" <<<"$output"
+  grep -qE "removable +$BATS_TEST_TMPDIR/ssd +\(auto\)" <<<"$output"
+  run_wt sync hubs --json
+  [ "$status" -eq 0 ]
+  grep -qF '"id":"smb://nas/home"' <<<"$output"
+  grep -qF '"id":"uuid:AAAA"' <<<"$output"
+}
+
+@test "sync hubs --choose: a network share becomes the hub the CLI uses" {
+  mkdir -p "$BATS_TEST_TMPDIR/ssd" "$HUB"
+  fake_volumes "Extreme SSD|removable|$BATS_TEST_TMPDIR/ssd|AAAA" \
+               "home|network|$HUB|nas/home"
+  run_wt sync hubs --choose home
+  [ "$status" -eq 0 ]
+  grep -qF "chosen: smb://nas/home" <<<"$output"
+  grep -qF '"chosen": [' "$HOME/.config/worktrees/sync-hubs.json"
+  run_wt sync push --yes
+  [ "$status" -eq 0 ]
+  grep -qF -- " $REPO/ $HUB/$NAME/$NAME/" "$RSYNC_LOG"
+}
+
+@test "sync push: a chosen hub that is unplugged is named, never swapped for another drive" {
+  mkdir -p "$BATS_TEST_TMPDIR/ssd" "$BATS_TEST_TMPDIR/other"
+  fake_volumes "Extreme SSD|removable|$BATS_TEST_TMPDIR/ssd|AAAA"
+  run_wt sync hubs --choose "Extreme SSD"
+  [ "$status" -eq 0 ]
+  # The chosen drive leaves; a different one is plugged in.
+  fake_volumes "SanDisk|removable|$BATS_TEST_TMPDIR/other|BBBB"
+  run_wt sync push --yes
+  [ "$status" -eq 1 ]
+  grep -qF "'Extreme SSD' is not connected" <<<"$output"
+  ! has_preview || false
+  ! has_apply || false
+  [ ! -e "$BATS_TEST_TMPDIR/other/$NAME" ]
+  # The same drive remounted under a new name is still the chosen hub.
+  fake_volumes "Renamed|removable|$BATS_TEST_TMPDIR/ssd|AAAA"
+  run_wt sync push --yes
+  [ "$status" -eq 0 ]
+  grep -qF -- " $REPO/ $BATS_TEST_TMPDIR/ssd/$NAME/$NAME/" "$RSYNC_LOG"
+}
+
+@test "sync push: two removable drives and nothing chosen is ambiguous, and says how to choose" {
+  mkdir -p "$BATS_TEST_TMPDIR/a" "$BATS_TEST_TMPDIR/b"
+  fake_volumes "A|removable|$BATS_TEST_TMPDIR/a|AAAA" "B|removable|$BATS_TEST_TMPDIR/b|BBBB"
+  run_wt sync push --yes
+  [ "$status" -eq 1 ]
+  grep -qF "multiple removable drives" <<<"$output"
+  grep -qF "sync hubs --choose" <<<"$output"
+  ! has_preview || false
+  ! has_apply || false
+}
+
+@test "sync push: a network share alone is never auto-picked" {
+  mkdir -p "$HUB"
+  fake_volumes "home|network|$HUB|nas/home"
+  run_wt sync push --yes
+  [ "$status" -eq 1 ]
+  grep -qF "no removable drive" <<<"$output"
+  ! has_preview || false
+  ! has_apply || false
+}
+
+@test "sync hubs --clear: the CLI goes back to auto-detect" {
+  mkdir -p "$BATS_TEST_TMPDIR/ssd" "$HUB"
+  fake_volumes "Extreme SSD|removable|$BATS_TEST_TMPDIR/ssd|AAAA" "home|network|$HUB|nas/home"
+  run_wt sync hubs --choose home
+  run_wt sync hubs --clear
+  [ "$status" -eq 0 ]
+  run_wt sync push --yes
+  [ "$status" -eq 0 ]
+  grep -qF -- " $REPO/ $BATS_TEST_TMPDIR/ssd/$NAME/$NAME/" "$RSYNC_LOG"
 }

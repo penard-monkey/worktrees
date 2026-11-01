@@ -59,6 +59,7 @@ worktrees — one git worktree per branch, one active agent per worktree.
   worktrees clone <url> [--into <dir>] [--name <folder>]  clone a repo and register it (no repo needed)
   worktrees sync push|pull [name]       courier-sync this project to/from an SSD hub (rsync)
   worktrees sync status                 hub + project sync state (--json; no repo needed)
+  worktrees sync hubs [--choose NAME]   list hub volumes (kind, chosen); choose the hub
   worktrees run --slot <name> -- <cmd>  run a heavy job (gate, build, full tests) in one of N
                                         machine-wide slots; waits while all are held (--slots N --timeout S)
   worktrees slots [--json]              each slot's capacity and where it comes from, who holds
