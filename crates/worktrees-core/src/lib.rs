@@ -10,6 +10,7 @@ pub mod adopt;
 pub mod agent;
 pub mod agentfiles;
 pub mod argv;
+pub mod attach;
 pub mod authz;
 pub mod childenv;
 pub mod choice;
