@@ -22,6 +22,8 @@ import {
 } from "./chat";
 // What a screen reader is told (VoiceOver): its own line, so the lanes' imports merge apart.
 import { announcement, gather, hear, promptKeyOf, type Bundle, type ChatView, type Heard } from "./chat";
+// Attachments (docs/proposals/chat-attachments.md): their own line, for the same reason.
+import { addAttachments, attachProblem, removeAttachment, sizeWords, splitAttached, type Attachment } from "./chat";
 import { HARNESS_LABEL, type Harness } from "./harness";
 import * as Icons from "./icons";
 import { Markdown } from "./markdown";
@@ -402,15 +404,18 @@ function ChatItem(props: { it: Item; agent: string; root: string; onLink: (href:
       return <li className="chat-sep" title={new Date(it.at * 1000).toLocaleString()}>{dayLabel(it.at)}</li>;
     case "earlier":
       return <li className="chat-note">This turn began before the transcript window: its message isn’t shown.</li>;
-    case "user":
+    case "user": {
+      const sent = splitAttached(it.text);
       return (
         <li className="chat-row chat-row-user">
           <div className="chat-bubble chat-bubble-user" role="group"
             aria-label={`You${it.at ? `, ${clockOf(it.at)}` : ""}`} data-testid="chat-user">
-            <Markdown src={it.text} onLink={props.onLink} />
+            <Markdown src={sent.text} onLink={props.onLink} />
+            {sent.paths.length > 0 && <SentFiles paths={sent.paths} />}
           </div>
         </li>
       );
+    }
     case "reply":
       return (
         <li className="chat-row chat-row-agent">
@@ -446,16 +451,63 @@ function ChatItem(props: { it: Item; agent: string; root: string; onLink: (href:
           {" "}· {clockMs(it.a.at)}{it.a.confirmed ? "" : " · not confirmed"}
         </li>
       );
-    case "pending":
+    case "pending": {
+      const sent = splitAttached(it.p.text);
       return (
         <li className="chat-row chat-row-user">
           <div className="chat-bubble chat-bubble-user chat-bubble-pending" data-testid="chat-pending">
-            <p>{it.p.text}</p>
+            <p>{sent.text}</p>
+            {sent.paths.length > 0 && <SentFiles paths={sent.paths} />}
           </div>
           <p className="chat-status">{it.p.queued ? `Queued behind ${agent}’s running turn` : `Delivered · waiting for ${agent}`}</p>
         </li>
       );
+    }
   }
+}
+
+/** The kind a stored file's extension says (the host chose it from the bytes). */
+const kindOf = (path: string): "image" | "pdf" | "text" =>
+  /\.(png|jpg|gif|webp)$/.test(path) ? "image" : path.endsWith(".pdf") ? "pdf" : "text";
+const KIND_WORD = { image: "Image", pdf: "PDF", text: "Text file" } as const;
+
+/** The files a sent message named, under its text: the host's names, which
+ *  are all the transcript has. The full path is the title. */
+function SentFiles(props: { paths: string[] }) {
+  return (
+    <ul className="chat-sent-files" aria-label={props.paths.length === 1 ? "1 attached file" : `${props.paths.length} attached files`} data-testid="chat-sent-files">
+      {props.paths.map((p) => (
+        <li key={p} className="chat-sent-file" title={p}>
+          {kindOf(p) === "image" ? <Icons.Image size={12} className="chat-file-kind" /> : <Icons.FileText size={12} className="chat-file-kind" />}
+          <span className="sr-only">{KIND_WORD[kindOf(p)]}: </span>{p.split("/").pop()}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** The files the next message carries: a name, a size, where its upload is,
+ *  and a named ✕. Uploads run on Send, one by one. */
+function AttachChips(props: { attachments: Attachment[]; sending: boolean; path: string }) {
+  const n = props.attachments.length;
+  return (
+    <ul className="chat-chips" aria-label={n === 1 ? "1 file to send" : `${n} files to send`} data-testid="chat-chips">
+      {props.attachments.map((a) => (
+        <li key={a.id} className={"chat-chip" + (a.state === "failed" ? " failed" : "")} data-state={a.state} data-testid="chat-chip">
+          {a.state === "uploading" && <span className="chat-spin" aria-hidden="true" />}
+          <span className="chat-chip-name" title={a.name}>{a.name}</span>
+          <span className="chat-chip-size">
+            {sizeWords(a.size)}
+            {a.state === "uploading" ? " · uploading" : a.state === "attached" ? " · uploaded" : a.state === "failed" ? " · not attached" : ""}
+          </span>
+          <button className="chat-chip-x" onClick={() => removeAttachment(props.path, a.id)} disabled={props.sending}
+            aria-label={`Remove ${a.name}`} title={`Remove ${a.name}`} data-testid="chat-chip-remove">
+            <Icons.X size={11} />
+          </button>
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 /** What the agent asked, resolved: a question with the option picked
@@ -872,8 +924,12 @@ function Composer(props: {
   const field = props.fieldRef;
   const ids = useId();
   const text = v.draft;
-  const problem = draftProblem(text);
+  const files = v.attachments.length;
+  const problem = files ? attachProblem(text, files) : draftProblem(text);
   const n = bytes(text);
+  const picker = useRef<HTMLInputElement>(null);
+  const [dropping, setDropping] = useState(false);
+  const withFiles = (e: React.DragEvent) => Array.from(e.dataTransfer?.types ?? []).includes("Files");
 
   // Switching to Chat is switching to typing here: the hidden terminal has
   // just given the keyboard up (App's `setChatView`). Never over a prompt card
@@ -896,19 +952,22 @@ function Composer(props: {
     el.style.height = `${Math.min(el.scrollHeight, line * 6 + pad) + border}px`;
   }, [text]);
 
-  const canSend = !!text.trim() && !problem && !props.waiting && !v.sending;
+  const canSend = (!!text.trim() || files > 0) && !problem && !props.waiting && !v.sending;
   const send = () => { if (canSend) void sendDraft(target, agent); };
   // Only a line break or a tab is wrong: offer to join, by hand, never silently.
   const joinable = !!problem && /[\n\r\t]/.test(text) && !draftProblem(text.replace(/\s*[\r\n\t]+\s*/g, " ").trim());
 
   const stop = () => { if (!v.stopping) void stopTurn(target, agent); };
-  const said = v.sendWords ?? v.stopWords;
+  const said = v.sendWords ?? v.attachWords ?? v.stopWords;
 
   let line: React.ReactNode;
   let alert = false;
-  if (v.sending) line = "Sending…";
+  const up = v.attachments.findIndex((a) => a.state === "uploading");
+  if (v.sending && up >= 0) line = files === 1 ? "Uploading the file…" : `Uploading ${up + 1} of ${files}…`;
+  else if (v.sending) line = "Sending…";
   else if (v.stopping) line = `Stopping ${agent}’s turn…`;
   else if (v.sendWords) { line = v.sendWords.line; alert = true; }
+  else if (v.attachWords) { line = v.attachWords.line; alert = true; }
   // A stop's words: a refusal or an unconfirmed stop is an alert; "Stopped." is not.
   else if (v.stopWords) { line = v.stopWords.line; alert = !!(v.stopWords.terminal || v.stopWords.prompt); }
   else if (problem) { line = problem; alert = true; }
@@ -917,7 +976,21 @@ function Composer(props: {
   else line = n >= COUNT_FROM ? `One line · ${n.toLocaleString()} of ${SEND_MAX.toLocaleString()} bytes` : "One line · Enter sends";
 
   return (
-    <div className="chat-composer" data-testid="chat-composer">
+    <div className={"chat-composer" + (dropping ? " dropping" : "")} data-testid="chat-composer"
+      onDragOver={(e) => {
+        if (!withFiles(e) || v.attachOff) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "copy";
+        setDropping(true);
+      }}
+      onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDropping(false); }}
+      onDrop={(e) => {
+        setDropping(false);
+        if (!withFiles(e) || v.attachOff) return;
+        e.preventDefault();
+        addAttachments(target.path, Array.from(e.dataTransfer.files));
+        field.current?.focus({ preventScroll: true });
+      }}>
       {props.paneDraft && !props.waiting && (
         <p className="chat-paneDraft" data-testid="chat-pane-draft">
           The terminal’s input holds unsent text (“{props.paneDraft.text.length > 60 ? props.paneDraft.text.slice(0, 59) + "…" : props.paneDraft.text}”).
@@ -925,13 +998,35 @@ function Composer(props: {
           <button className="chat-linkbtn" onClick={props.onTerminal}>in the terminal</button>.
         </p>
       )}
+      {files > 0 && <AttachChips attachments={v.attachments} sending={v.sending} path={target.path} />}
       <div className="chat-composer-row">
+        {/* A plain file input: it reads bytes, never a path, so it works the
+            same through the remote door. */}
+        <input ref={picker} type="file" multiple hidden tabIndex={-1} aria-hidden="true" data-testid="chat-file-input"
+          onChange={(e) => {
+            addAttachments(target.path, Array.from(e.currentTarget.files ?? []));
+            e.currentTarget.value = "";
+            field.current?.focus({ preventScroll: true });
+          }} />
+        <button className="chat-attach" onClick={() => picker.current?.click()} disabled={v.sending || !!v.attachOff}
+          aria-label={v.attachOff ? `Attach files: ${v.attachOff}` : "Attach files"} title={v.attachOff ?? "Attach files (or paste or drop them here)"}
+          data-testid="chat-attach">
+          <Icons.Paperclip size={15} />
+        </button>
         <label htmlFor={`${ids}-f`} className="sr-only">Message {agent}</label>
         <textarea id={`${ids}-f`} ref={field} className="chat-field" rows={1} value={text}
-          placeholder={props.waiting ? "Answer the prompt to continue" : `Message ${agent}`}
+          placeholder={props.waiting ? "Answer the prompt to continue" : dropping ? "Drop to attach" : `Message ${agent}`}
           aria-describedby={`${ids}-l`} aria-invalid={problem ? true : undefined}
           autoCorrect="off" autoCapitalize="off" autoComplete="off" spellCheck={false}
           onChange={(e) => setDraft(target.path, e.currentTarget.value)}
+          onPaste={(e) => {
+            // An image or a file on the clipboard is an attachment; text
+            // pastes as it always has.
+            const pasted = Array.from(e.clipboardData?.files ?? []);
+            if (!pasted.length || v.attachOff) return;
+            e.preventDefault();
+            addAttachments(target.path, pasted);
+          }}
           onKeyDown={(e) => {
             if (e.key !== "Enter" || e.nativeEvent.isComposing) return;
             // A message is one line: Enter sends it, and no key adds a break.

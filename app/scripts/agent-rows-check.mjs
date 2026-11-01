@@ -1,6 +1,7 @@
 // The agent rows — `agent_prompt`, `agent_answer`, `agent_answer_text`,
-// `agent_answer_many`, `agent_send`, `agent_interrupt`, `agent_turns` (iOS
-// MVP §2.4, S6–S11, feat/actionable-prompts and feat/chat-interrupt) — say
+// `agent_answer_many`, `agent_send`, `agent_interrupt`, `agent_turns`,
+// `agent_attach` (iOS MVP §2.4, S6–S11, feat/actionable-prompts,
+// feat/chat-interrupt and feat/chat-attachments) — say
 // the same thing in the four places that state them:
 //
 //   node app/scripts/agent-rows-check.mjs      # exits non-zero on failure
@@ -49,6 +50,10 @@ const ROWS = {
   agent_send: "instruct, place(repo, slug), session_of(session, repo, slug)",
   // A stop is one key, Esc, but it drives the agent: `instruct`, like a line.
   agent_interrupt: "instruct, place(repo, slug)",
+  // A file for the agent (docs/proposals/chat-attachments.md): it leads to
+  // the agent reading it, so `instruct` — never `write`, which would drop the
+  // step-up and the drive-class audit budget.
+  agent_attach: "instruct, place(repo, slug)",
   agent_turns: "read, place(repo, slug), opt(session_of(session, repo, slug))",
 };
 const norm = (s) => s.replace(/\s+/g, " ").trim();
