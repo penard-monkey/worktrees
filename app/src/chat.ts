@@ -16,6 +16,9 @@
 // - `agent_answer_many` (answer): a multi-select's boxes, sent together;
 // - `agent_send` (instruct): ONE line, pasted into an EMPTY composer. The only
 //   path that types into Claude (AGENTS.md); the composer adds no second one.
+// - `agent_interrupt` (instruct): stop the running turn — ONE Esc, pressed
+//   only on a screen that shows the turn running, a key and never text. A
+//   stop not seen to land is `unconfirmed` and is never pressed again.
 //
 // Memory only: turns, prompts, drafts and pending messages live for the
 // window's life and are fetched again after a reload. Nothing is written.
@@ -67,6 +70,8 @@ export type AgentAnswer = { answered: true; confirmed: boolean; harness: string;
 /** A multi-select's free-text box, filled: nothing is sent yet. */
 export type AgentFilled = { answered: false; harness: string; session: string; choice: number; note: string };
 export type AgentAnsweredMany = { answered: true; confirmed: boolean; harness: string; session: string; choices: number[]; labels: string[] };
+/** `agent_interrupt`'s answer: stopped, or pressed and not seen to stop. */
+export type AgentStopped = { interrupted: boolean; unconfirmed?: boolean; harness: string; session: string; note: string };
 
 /** agents.rs's refusal strings, which the words below key on. */
 export const AGENT_ERR = {
@@ -83,6 +88,14 @@ export const AGENT_ERR = {
   noLanePrefix: "no agent this place launched is running in ",
   /** `agent_turns` for pi and kimi. */
   turnsUnsupportedPrefix: "agent_turns reads Claude's and Codex's transcripts;",
+  /** `agent_interrupt` with no turn running. */
+  notBusy: "the agent is not working on a turn: there is nothing to stop",
+  /** `agent_interrupt` while the terminal's input holds a draft. */
+  stopDraft: "the agent's prompt has unsent text in it (someone is typing there), which hides whether a turn is running: stop it at the host",
+  /** `agent_interrupt` for pi and kimi. */
+  stopUnsupportedPrefix: "agent_interrupt stops Claude's and Codex's turns;",
+  /** `agent_interrupt` in a place with no agent running. */
+  noAgent: "no agent is running in this place",
 } as const;
 
 /** `harness::LINE_MAX`. */
@@ -160,6 +173,24 @@ export function answerWords(err: string): Words {
 
 /** The words for a send that typed the line and could not see it submitted. */
 export const UNCONFIRMED = "Typed, but not confirmed. Look at the terminal before sending it again.";
+
+/** What a stop says under the field: done, refused, or pressed and not
+ *  seen to land. `terminal` offers the way back, where it can be stopped by
+ *  hand; `prompt` re-reads the prompt the refusal says is up. */
+export function stopWords(err: string, agent: string): SendWords {
+  if (err === AGENT_ERR.notBusy) return { line: `${agent} isn’t working on a turn, so there was nothing to stop.` };
+  if (err === AGENT_ERR.promptUp) return { line: `${agent} is waiting on the prompt above, and stopping would cancel it. Answer it instead.`, prompt: true };
+  if (err === AGENT_ERR.stopDraft) {
+    return { line: `${agent}’s input has text in it, typed in the terminal, which hides whether it is working. Stop it in the terminal.`, terminal: true };
+  }
+  if (err === AGENT_ERR.noComposer) return { line: `${agent} isn’t at its prompt (starting up, or a screen this app doesn’t know). Stop it in the terminal.`, terminal: true };
+  if (err.startsWith(AGENT_ERR.stopUnsupportedPrefix)) return { line: `${agent} can’t be stopped from here yet. Stop it in the terminal.`, terminal: true };
+  if (err === AGENT_ERR.noAgent) return { line: `No ${agent} is running in this place any more.` };
+  return { line: `Not stopped: ${err}`, terminal: true };
+}
+
+/** A stop that pressed Esc and could not see the turn end. Never retried. */
+export const STOP_UNCONFIRMED = (agent: string) => `Esc was sent once, but ${agent} wasn’t seen to stop. Look at the terminal before stopping it again.`;
 
 // ── the conversation ────────────────────────────────────────────────────────
 
@@ -465,6 +496,12 @@ export type ChatView = {
   boxText: string;
   answering: boolean;
   answerWords: Words | null;
+  /** A stop in flight, and what the last one said. */
+  stopping: boolean;
+  stopWords: SendWords | null;
+  /** A stop was SEEN to land: the turn is over, whatever the activity push
+   *  (a poll behind) still says, until it next moves. */
+  stopped: boolean;
 };
 
 const blank = (): ChatView => ({
@@ -472,6 +509,7 @@ const blank = (): ChatView => ({
   prompt: { data: null, error: null, loading: false, at: null },
   pending: [], answered: [], draft: "", sending: false, sendWords: null, followUp: null,
   selected: null, answerText: "", ticks: null, boxText: "", answering: false, answerWords: null,
+  stopping: false, stopWords: null, stopped: false,
 });
 const EMPTY = blank();
 let views = new Map<string, ChatView>();
@@ -547,7 +585,39 @@ export function loadPrompt(t: Target): Promise<void> {
 }
 
 export function setDraft(path: string, draft: string): void {
-  put(path, { draft, sendWords: null });
+  put(path, { draft, sendWords: null, stopWords: null });
+}
+
+/** The place's activity moved: a stop's "seen to land" has served its turn,
+ *  and once a new turn starts, so has "Stopped.". */
+export function activityMoved(path: string, busy: boolean): void {
+  const v = viewOf(path);
+  const done = busy && !!v.stopWords && !v.stopWords.terminal && !v.stopWords.prompt;
+  if (v.stopped || done) put(path, { stopped: false, ...(done ? { stopWords: null } : {}) });
+}
+
+/** Stop the running turn: ONE `agent_interrupt`, never repeated by itself.
+ *  A host from before the row answers `unknown command`, and the words say
+ *  this host can't stop a turn (`unsupportedFeature`). */
+export async function stopTurn(t: Target, agent: string): Promise<void> {
+  if (viewOf(t.path).stopping) return;
+  put(t.path, { stopping: true, stopWords: null, sendWords: null });
+  try {
+    const r = await invoke<AgentStopped>("agent_interrupt", { repo: t.repo, slug: t.slug });
+    put(t.path, {
+      stopping: false, stopped: r.interrupted,
+      stopWords: r.interrupted ? { line: `Stopped. ${agent} is waiting for your next message.` } : { line: STOP_UNCONFIRMED(agent), terminal: true },
+    });
+  } catch (e) {
+    // ipcws.ts is never imported statically (main.tsx's dynamic imports
+    // decide what a build carries); destructured, so the build tree-shakes it.
+    const { unsupportedFeature } = await import("./ipcws");
+    const old = unsupportedFeature(e, "stopping a turn");
+    const w = old ? { line: `${old}. Stop it in the terminal.`, terminal: true } : stopWords(String(e), agent);
+    put(t.path, { stopping: false, stopWords: w });
+    if (w.prompt) void loadPrompt(t);
+  }
+  void loadTurns(t);
 }
 
 let nextPending = 1;
@@ -557,7 +627,7 @@ export async function sendDraft(t: Target, agent: string): Promise<void> {
   const v = viewOf(t.path);
   const text = v.draft;
   if (v.sending || !text.trim() || draftProblem(text)) return;
-  put(t.path, { sending: true, sendWords: null });
+  put(t.path, { sending: true, sendWords: null, stopWords: null });
   try {
     const r = await invoke<AgentSent>("agent_send", { repo: t.repo, slug: t.slug, session: t.session, text });
     const cur = viewOf(t.path);

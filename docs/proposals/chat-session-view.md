@@ -294,7 +294,7 @@ for each line), as a sent message's pending bubble does.
 | **Paging:** `agent_turns` with `before` | A conversation longer than 20 turns, or 64 KiB | "Older turns are on the host" |
 | **Tool-call summaries:** each tool's one-line input (the Bash command, the file path) and outcome | Chips that say *what* ran, not only that something did; the most-wanted piece of the terminal. A call a person was ASKED about already carries its line (`steps`' `summary`) | Names only |
 | **A streaming partial turn**: the reply so far, marked incomplete | Only with the event above; until then the poll shows each finished message | Nothing mid-turn |
-| **`agent_interrupt`** (Esc into the lane's pane, `instruct`-class) | Stopping a runaway turn without the terminal | The terminal on the host |
+| **`agent_interrupt`** (Esc into the lane's pane, `instruct`-class). **Built** (`feat/chat-interrupt`): ONE Esc, only on a fresh capture that shows the turn running, proved or `unconfirmed`; the composer's Stop and Esc while the agent works; mock `?agentinterrupt=ok\|notbusy\|prompt\|draft\|unconfirmed\|unsupported\|old` | Stopping a runaway turn without the terminal | The terminal on the host |
 | **Multi-line sends**: `\n` allowed for harnesses verified to take one bracketed paste, confirmed by "[Pasted text +N lines]" | Pasting a stack trace or a list | One line (`view-session.md` "Why a message is one line" has the design) |
 | **Sent-from-chat marked in the transcript** | Telling a chat message from one another place sent | Matched by text and time |
 | **pi and kimi transcript readers** | The fallback card goes | Same fallback |

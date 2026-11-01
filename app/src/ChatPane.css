@@ -29,6 +29,7 @@
 }
 .chat-scrollwrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .chat-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
+.chat-scroll:focus { outline: none; }
 /* One reading column, centred, at every width: the bubbles keep a measure on
    a wide window and use the whole cell on a narrow one (the dock open). */
 .chat-col {
@@ -252,6 +253,15 @@
   background: var(--accent); color: var(--accent-ink); font-size: 15px; font-weight: var(--fw-bold); line-height: 30px; padding: 0;
 }
 .chat-send:disabled { background: var(--bg-elev); color: var(--txt-mute); cursor: default; }
+/* Stop: beside Send while the agent works. Its square is the words' colour on
+   a raised surface: an accent is a fill, never a glyph on a tint. */
+.chat-stop {
+  flex: none; width: 30px; height: 30px; margin-bottom: 1px; border: 1px solid var(--line); border-radius: 50%; cursor: pointer;
+  background: var(--bg-elev); color: var(--txt-hi); padding: 0; display: inline-flex; align-items: center; justify-content: center;
+}
+.chat-stop:hover:not(:disabled) { border-color: var(--txt-dim); }
+.chat-stop:disabled { color: var(--txt-mute); cursor: default; }
+.chat-stop-sq { display: block; width: 10px; height: 10px; border-radius: 2px; background: currentColor; }
 .chat-spin {
   display: inline-block; width: 12px; height: 12px; vertical-align: -1px; border-radius: 50%;
   border: 2px solid currentColor; border-right-color: transparent; animation: chat-spin 0.8s linear infinite;
