@@ -5,6 +5,53 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- **Hubs…: a dashboard for every drive and share you sync through.** It
+  replaces "Import from hub…" on Home and in the add-project menu, and the
+  ⇄ popover has an "All hubs…" line.
+  - **Hub list:** each hub with its kind (removable, internal, network share)
+    and free space. A hub you have used but is not plugged in stays listed,
+    dimmed, with when it was last seen.
+  - **Project grid:** for every project, how long ago it was pushed to each
+    hub and from which Mac, plus this Mac's branch, its uncommitted changes,
+    and whether it changed here since its newest push.
+  - **Importing:** a project that is only on a hub has an "import" link in
+    its row.
+- **Choose your hub when several are plugged in.** Tick the hubs you sync with
+  in the dashboard. A push goes to all of them by default. The first one is
+  the primary: the hub the CLI uses. The sync dialog has a hub selector: with
+  one hub it is just a label. A pull lists every hub that holds the project,
+  with each copy's age, and defaults to the newest connected copy. The CLI
+  uses the same choice:
+  `worktrees sync hubs` lists the hubs, `--choose NAME` picks one, and
+  `--clear` goes back to auto-detect.
+- **Sync many projects at once, and push to several hubs.** Select projects in
+  the dashboard, then Push or Pull. One combined preview lists what each
+  transfer would send and delete, per project and hub, and you confirm once.
+  Transfers run one at a time, each with its own progress bar and result. One
+  failure doesn't stop the rest. Every single-sync safety still applies to
+  each transfer. Three things a batch does not do:
+  - It doesn't import: a project that is only on a hub is imported from its
+    row, where the new folder is shown.
+  - It doesn't run a registered rebuild after a pull.
+  - It doesn't ask again: a transfer whose destination gained a live session
+    after the preview is reported as failed and named, and you run it again.
+- **A mounted network share (SMB, AFP, NFS, WebDAV) can be a hub.** Choose it
+  in the dashboard. A paired device can only sync with a hub chosen on the
+  host. A share that stops answering shows what it held last time instead of
+  holding up the dashboard. Syncing directly to another Mac over SSH is designed but
+  not built yet (`docs/sync-ssh-design.md`).
+
+### Changed
+- **A chosen hub that is unplugged is reported, never swapped.** If the drive
+  you chose is not connected, a sync says so by name instead of using another
+  drive that happens to be plugged in. A drive is recognised by its volume
+  UUID, so renaming or remounting it doesn't lose the choice. FAT and exFAT
+  sticks have no UUID and are recognised by their path, so renaming one
+  forgets it. With nothing chosen, auto-detect still takes exactly one
+  removable drive and never a network share. Two removable drives now point
+  you at `sync hubs --choose`.
+
 ### Fixed
 - **The chat's message box no longer shows scroll bars or overlaps the line
   under it.** With macOS set to always show scroll bars, an empty box at

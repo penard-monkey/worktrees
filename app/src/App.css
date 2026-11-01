@@ -2758,6 +2758,61 @@ body.dragging .menu-catch { pointer-events: none; }
 }
 .import-when { grid-column: 1 / -1; font-size: var(--fs-micro); color: var(--txt-mute); }
 
+/* ── hubs: the dashboard, the batch, the single sync's selector ── the sync
+   modal's shell, wider (a project × hub grid needs the room). Tokens only.
+   Hue lives in dots and tints; words take --txt-* (the status-chip rule). */
+.sync-modal.hubs-modal { width: min(860px, 94%); max-height: 84vh; }
+.hubs-list { display: flex; flex-direction: column; gap: var(--s1); }
+.hub-row {
+  display: grid; grid-template-columns: auto auto minmax(0, 1fr) 88px minmax(0, 1.2fr) 120px;
+  align-items: center; gap: var(--s2);
+  padding: var(--s1) var(--s2); border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--bg-elev); font-size: var(--fs-label); color: var(--txt);
+}
+.hub-row.off { opacity: 0.6; }
+.hub-name { font-weight: var(--fw-med); color: var(--txt-hi); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hub-kind {
+  justify-self: start;
+  font-size: var(--fs-micro); color: var(--txt-mute);
+  border: 1px solid var(--line); border-radius: var(--r-full); padding: 0 var(--s2);
+}
+.hub-where { font-size: var(--fs-meta); color: var(--txt-dim); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hub-tags { display: flex; gap: var(--s2); align-items: center; justify-content: flex-end; }
+.hub-link {
+  background: none; border: 0; padding: 0; font: inherit; font-size: var(--fs-meta);
+  color: var(--accent); cursor: pointer; text-decoration: underline; text-underline-offset: 2px;
+}
+.hubs-grid-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--r-sm); }
+.hubs-grid { border-collapse: collapse; width: 100%; font-size: var(--fs-label); }
+.hubs-grid th, .hubs-grid td {
+  padding: var(--s1) var(--s2); text-align: left; white-space: nowrap;
+  border-bottom: 1px solid var(--line);
+}
+.hubs-grid tbody tr:last-child td { border-bottom: 0; }
+.hubs-grid th { font-size: var(--fs-meta); font-weight: var(--fw-med); color: var(--txt-dim); background: var(--bg-elev); }
+.hubs-grid th.off, .hubs-grid td.off { opacity: 0.55; }
+.hubs-grid tr.sel td { background: color-mix(in srgb, var(--accent) 10%, var(--bg-panel)); }
+.hg-name { color: var(--txt-hi); font-weight: var(--fw-med); }
+.hg-host, .hg-none { color: var(--txt-mute); }
+.hg-dirty { color: var(--txt-dim); }
+.hg-changed { color: var(--txt-hi); }
+.hg-changed::before {
+  content: ""; display: inline-block; width: 6px; height: 6px; margin: 0 var(--s1) 1px 0;
+  border-radius: var(--r-full); background: var(--warn); vertical-align: middle;
+}
+.hubs-count { margin-right: auto; align-self: center; font-size: var(--fs-meta); color: var(--txt-mute); }
+.sync-hubpick, .batch-hubs { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2) var(--s3); font-size: var(--fs-label); }
+.sync-hubpick select, .batch-hubs select { max-width: 100%; }
+.batch-hubs { flex-direction: column; align-items: flex-start; }
+.batch-row {
+  display: flex; flex-direction: column; gap: var(--s2);
+  padding: var(--s2) var(--s3); border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--bg-elev);
+}
+.batch-row-h { display: flex; align-items: baseline; gap: var(--s3); flex-wrap: wrap; }
+.batch-label { color: var(--txt-hi); font-weight: var(--fw-med); }
+.batch-row-h .sync-counts { margin-left: auto; font-size: var(--fs-meta); color: var(--txt-dim); }
+.batch-ok { color: var(--ok); }
+
 .sync-foot {
   display: flex; justify-content: flex-end; gap: var(--s2);
   padding: var(--s3) var(--s4); border-top: 1px solid var(--line);

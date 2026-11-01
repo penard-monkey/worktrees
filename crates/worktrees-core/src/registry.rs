@@ -64,6 +64,13 @@ pub fn forbid_real_writes() {
     REAL_WRITES_FORBIDDEN.store(true, Ordering::SeqCst);
 }
 
+/// Whether `forbid_real_writes` has run in this process — for the OTHER
+/// user-owned files in the config dir that want the same guard
+/// (`synchub::write`).
+pub fn real_writes_forbidden() -> bool {
+    REAL_WRITES_FORBIDDEN.load(Ordering::SeqCst)
+}
+
 /// `Err` for a write to `p` when it is the real registry and real writes are
 /// forbidden: the rule `edit_at` applies, with its inputs given.
 fn refuse_real(p: &Path, real: &Path, forbidden: bool) -> Result<(), String> {

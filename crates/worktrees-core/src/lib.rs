@@ -76,6 +76,7 @@ pub mod skillstore;
 pub mod slots;
 pub mod store;
 pub mod sync;
+pub mod synchub;
 pub mod sysclock;
 pub mod tmux;
 pub mod turns;

@@ -260,7 +260,7 @@ Additional workflows (see `worktrees help` for options):
 | `plan`, `guide`, `rules`, `agent-setup` | Resolve plans and set up shared agent instructions. |
 | `skills` | Manage the skills used by Claude AI profiles. |
 | `mcp --install [--ai codex\|pi\|kimi]` | Connect Worktrees tools to an agent (Claude by default). |
-| `sync push`, `sync pull`, `sync status` | Transfer projects through a mounted hub. |
+| `sync push`, `sync pull`, `sync status`, `sync hubs` | Transfer projects through a mounted hub; list and choose hubs. |
 | `serve`, `serve remote`, `serve pair` | Run the host engine and manage remote access or pairing. |
 | `remote pair`, `remote hosts`, `remote use`, `remote call`, `remote readdress`, `remote forget` | Pair with, select, use, readdress, or forget another host. |
 
