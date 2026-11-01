@@ -2797,6 +2797,19 @@ body.dragging .menu-catch { pointer-events: none; }
    weight for the one combination here that can destroy commits. */
 .rm-opt-note.danger { color: var(--danger); }
 
+/* ── remove project ── RemoveDialog's shell, for a project whose places have
+   live sessions. The box keeps .sync-live's warn TINT and border, but its words
+   are --txt-hi: --warn as text on its own tint is 2.2–3.1:1 in the light themes
+   (AGENTS.md: an accent token is a fill), and this list is the thing to read.
+   The ⚠ keeps the hue. On that tint (12% warn over --bg-panel) --txt-hi
+   measures 6.1–11.5:1 in the six themes and --txt 4.9–8.5:1, which is why the
+   "Claude running" note is --txt: --txt-dim fell to 2.9:1 in nord. */
+.rmproj-live { color: var(--txt-hi); display: flex; flex-direction: column; gap: var(--s1); }
+.rmproj-live .rmproj-warn { color: var(--warn); }
+.rmproj-row { word-break: break-all; }
+.rmproj-row code { font-family: var(--font-mono); font-size: var(--fs-meta); }
+.rmproj-row .rm-opt-note { color: var(--txt); }
+
 .settings-sheet {
   width: min(560px, 92%); height: 100%; background: var(--bg-tree);
   border-left: 1px solid var(--line); box-shadow: var(--shadow-float);

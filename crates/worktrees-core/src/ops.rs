@@ -49,33 +49,23 @@ fn indent(s: &str) -> String {
 // started under the old one is adopted until it is closed, and `doctor` reports
 // the mismatch so the drift is visible rather than mysterious.
 
-/// The tmux session actually LIVING in `wt`, whatever it is named: the canonical
-/// name when it exists, else any session with a pane cwd'd there.
-///
-/// `slug == "(main)"` must exclude `.worktrees/` — worktree dirs nest under the
-/// main root, so without it main would adopt (and `close`/`rm` would kill) a
-/// worktree's session. Same exclusion `launch` and `place_json` apply.
+/// The tmux session actually LIVING in `wt`, whatever it is named:
+/// `Project::live_session_in`, the one rule the snapshot and serve's agent
+/// rows use too.
 ///
 /// `panes` is an optional PREFETCHED `list-panes -a`. Sweeps that ask about many
-/// places (`doctor`) pass one and pay a single tmux shell-out for the whole run
-/// instead of up to three per place; one-shot callers (`close`, `rm`) pass
-/// `None` and it fetches. One function either way, because a finding that
-/// resolved sessions by a different rule than `close` could name a session
-/// `close` would fail to find.
+/// places (`doctor`) pass one and pay a single tmux shell-out for the whole run;
+/// one-shot callers (`close`, `rm`) pass `None` and it fetches. One function
+/// either way, because a finding that resolved sessions by a different rule
+/// than `close` could name a session `close` would fail to find.
 fn live_session(p: &Project, slug: &str, wt: &str, panes: Option<&tmux::PaneList>) -> Option<String> {
-    let canonical = p.session_name(slug);
-    let exists = match panes {
-        Some(pl) => pl.has_session(&canonical),
-        None => tmux::session_exists(&canonical),
-    };
-    if exists {
-        return Some(canonical);
-    }
-    let exclude = if slug == "(main)" { Some(p.wt_root_dir()) } else { None };
     let ai_word = crate::project::adopt_ai_word();
     match panes {
-        Some(pl) => pl.session_in(wt, &ai_word, exclude),
-        None => tmux::worktree_session_excluding(wt, &ai_word, exclude),
+        Some(pl) => p.live_session_in(slug, wt, pl, &ai_word),
+        // The canonical name by its own `has-session` first, as it always was:
+        // a place whose session has the name pays no `list-panes` (and no `ps`).
+        None if tmux::session_exists(&p.session_name(slug)) => Some(p.session_name(slug)),
+        None => p.live_session_in(slug, wt, &tmux::PaneList::fetch()?, &ai_word),
     }
 }
 
@@ -1771,6 +1761,70 @@ pub fn place_session(p: &Project, slug: &str) -> Option<String> {
     live_session(p, slug, &p.place_dir(slug), None)
 }
 
+/// One live tmux session of a place, as `live_places` lists it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct LiveSession {
+    pub slug: String,
+    pub session: String,
+    /// The harness running in it (`claude`, `codex`, …), by `PaneList::
+    /// agents_in`'s rule; `None` when nothing but a shell is.
+    pub agent: Option<&'static str>,
+}
+
+/// Every live session of `p`'s places: each place's own (`live_session`, so
+/// one adopted by pane cwd counts) and its provider sidecars, with the agent
+/// each one runs. Removing the project leaves these running with nothing
+/// registered to show them, so `remove_project` and `projects rm` name them
+/// before the entry goes. Empty without tmux.
+pub fn live_places(p: &Project) -> Vec<LiveSession> {
+    let Some(panes) = tmux::PaneList::fetch() else { return Vec::new() };
+    let places: Vec<(String, String)> = p.place_index().into_iter().map(|r| (r.slug, r.path)).collect();
+    live_places_in(p, &places, &panes, &crate::project::adopt_ai_word())
+}
+
+/// `live_places` over a snapshot `panes`, for `(slug, dir)` places. PURE.
+pub fn live_places_in(p: &Project, places: &[(String, String)], panes: &tmux::PaneList, ai_word: &str) -> Vec<LiveSession> {
+    let mut out = Vec::new();
+    for (slug, dir) in places {
+        let canonical = p.session_name(slug);
+        let exclude = (slug == "(main)").then_some(p.wt_root_dir());
+        let agents = panes.agents_in(dir, exclude);
+        let mut names: Vec<String> = p.live_session_in(slug, dir, panes, ai_word).into_iter().collect();
+        for sidecar in crate::provider::PROVIDERS.iter().map(|pr| pr.sidecar_name(&canonical)) {
+            if panes.has_session(&sidecar) && !names.contains(&sidecar) {
+                names.push(sidecar);
+            }
+        }
+        for session in names {
+            let agent = agents.iter().find(|(s, _)| *s == session).map(|(_, id)| *id);
+            out.push(LiveSession { slug: slug.clone(), session, agent });
+        }
+    }
+    out
+}
+
+/// Close what `live_places` listed, place by place, through `close`'s own
+/// path: `-y` bound to the session that was SHOWN (`--session`), so a place
+/// whose session changed since is asked about again rather than killed, and
+/// its sidecars go with it as they do on any `close`. Returns `close`'s
+/// worst exit code.
+pub fn close_live_places(p: &Project, ui: &mut dyn Ui, live: &[LiveSession]) -> i32 {
+    let mut rc = 0;
+    let mut slugs: Vec<&str> = live.iter().map(|s| s.slug.as_str()).collect();
+    slugs.dedup();
+    for slug in slugs {
+        let mut args = vec!["-y".to_string()];
+        // The place's own session, when one was listed: the first row for the
+        // slug, since `live_places_in` lists it before any sidecar.
+        if let Some(own) = live.iter().find(|s| s.slug == slug && !crate::provider::is_sidecar(&s.session)) {
+            args.extend(["--session".to_string(), own.session.clone()]);
+        }
+        args.extend(["--".to_string(), slug.to_string()]);
+        rc = worse_rc(rc, cmd_close(p, ui, &args));
+    }
+    rc
+}
+
 /// `expect` is the session the CALLER already showed the user — the arm label in
 /// the app, and the only session its click consented to kill. It is checked
 /// against what resolves HERE, because those are two different moments: the app's
@@ -2833,8 +2887,18 @@ fn doctor_config(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         Err(code) => return code,
     };
     let Some((cfg, mut findings)) = cfg else {
-        // No config is a healthy repo, not a broken one.
-        let report = Report::new(hub_copy.into_iter().chain(skipped).chain(strays).chain(guidance).collect());
+        // No config is a healthy repo, not a broken one. Its sessions can
+        // still drift: a folder renamed outside worktrees changes the prefix
+        // with no config involved, and that is the commonest drift of all.
+        // Whole-project runs only, as with a config (below).
+        let sessions = if config_only || !names.is_empty() || hub_copy.is_some() {
+            Vec::new()
+        } else {
+            let mut scanned: Vec<(String, String)> = targets.iter().map(|d| (basename(d), d.clone())).collect();
+            scanned.insert(0, ("(main)".to_string(), p.main_root.clone()));
+            session_findings(p, &scanned)
+        };
+        let report = Report::new(hub_copy.into_iter().chain(skipped).chain(strays).chain(guidance).chain(sessions).collect());
         if json {
             emit_report(ui, &report);
         } else if report.is_empty() {
@@ -3129,8 +3193,16 @@ fn prefix_findings(p: &Project, cfg: &ProjectConfig) -> Vec<Finding> {
 ///
 /// `places` is `(slug, dir)` rather than dirs, because `(main)` is in this scan
 /// and its slug is not `basename(dir)`.
+///
+/// The remedy is a RENAME, never a close: `close X && open X` killed whatever
+/// was running in the session, an agent mid-turn included. Only a session the
+/// adoption rule proves is this place's (`adopt::moved_renames`) is offered
+/// one, through the command that applies that rule; any other session was
+/// adopted by pane cwd alone, and a session someone named by hand is not this
+/// tool's to rename.
 fn session_findings(p: &Project, places: &[(String, String)]) -> Vec<Finding> {
     let panes = tmux::PaneList::fetch();
+    let renames = panes.as_ref().map(|pl| crate::adopt::planned(p, pl)).unwrap_or_default();
     let mut out = Vec::new();
     for (slug, dir) in places {
         let slug = slug.clone();
@@ -3139,17 +3211,23 @@ fn session_findings(p: &Project, places: &[(String, String)]) -> Vec<Finding> {
         else {
             continue;
         };
-        // `(main)` is the app's slug for the checkout; the CLI spells it `main`,
-        // and the parens would not survive a shell anyway.
-        let arg = if slug == "(main)" { "main" } else { slug.as_str() };
+        let remedy = if renames.iter().any(|(from, to)| *from == live && *to == canonical) {
+            format!(
+                "Rename it, closing nothing, with: worktrees projects add {}",
+                crate::profile::shell_quote(&p.main_root)
+            )
+        } else {
+            "It is not named like one of this place's sessions (or its new name is taken, or a pane \
+             of it is elsewhere), so it is adopted by pane cwd and left as it is."
+                .to_string()
+        };
         out.push(
             Finding::warn(
                 Code::SessionDrift,
                 format!(
                     "live tmux session is `{live}`, but this repo's prefix now renders \
                      `{canonical}` — the running session is still found (by pane cwd), and the \
-                     new name applies the next time it is opened. Rename it now with: \
-                     worktrees close {arg} && worktrees open {arg}"
+                     new name applies the next time it is opened. {remedy}"
                 ),
             )
             .at_place(slug),
@@ -3862,6 +3940,35 @@ fn hint_init(p: &Project, ui: &mut dyn Ui) {
 
 #[cfg(test)]
 mod tests {
+    /// What removing a project would leave running: each place's own session
+    /// (an adopted one included), its provider sidecars, and the agent each
+    /// runs — and nothing of another place's or of no place's.
+    #[test]
+    fn live_places_names_every_session_of_every_place_with_its_agent() {
+        use super::{live_places_in, LiveSession, Project};
+        let p = Project::for_test("/u/proj");
+        let places: Vec<(String, String)> =
+            vec![("(main)".into(), "/u/proj".into()), ("lane".into(), "/u/proj/.worktrees/lane".into()), ("idle".into(), "/u/proj/.worktrees/idle".into())];
+        let panes = crate::tmux::PaneList::from_rows(
+            [
+                ("old-(main)", "/u/proj", "2.1.309"),
+                ("proj-lane", "/u/proj/.worktrees/lane", "zsh"),
+                ("proj-lane~agent~codex", "/u/proj/.worktrees/lane", "codex"),
+                ("proj-lane~term", "/u/proj/.worktrees/lane", "zsh"),
+                ("stranger", "/elsewhere", "2.1.309"),
+            ]
+            .iter()
+            .map(|(s, d, c)| (s.to_string(), d.to_string(), c.to_string()))
+            .collect(),
+        );
+        let row = |slug: &str, session: &str, agent: Option<&'static str>| LiveSession { slug: slug.into(), session: session.into(), agent };
+        assert_eq!(
+            live_places_in(&p, &places, &panes, "claude"),
+            vec![row("(main)", "old-(main)", Some("claude")), row("lane", "proj-lane", None), row("lane", "proj-lane~agent~codex", Some("codex"))]
+        );
+        assert!(live_places_in(&p, &places, &crate::tmux::PaneList::from_rows(Vec::new()), "claude").is_empty());
+    }
+
     /// `launched_by` follows the LAST launch: a device's stamp, then a launch
     /// with no serve caller clears it (a CLI relaunch must not keep counting as
     /// the device's lane, or keep its narrowed reach). And a launch with

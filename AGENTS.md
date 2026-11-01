@@ -66,6 +66,26 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   never the text, and a device's send stamps `last_remote_send`. Do not grow
   a second path that types into Claude.
 
+- **A place's session is `Project::live_session_in`'s, everywhere**: the
+  canonical name, else the session adopted by pane cwd. `close`/`rm`/`doctor`
+  (`ops::live_session`), the snapshot (`place_json`) and the agent rows
+  (`agents::live_agent_sessions`) all call it. The rows once looked up the
+  canonical name alone, so a project whose FOLDER was renamed (its prefix with
+  it) showed a live Claude in the nav while `agent_turns` answered "no agent
+  is running in this place" (2026-10-29). Find a lane's Claude probe by PANE
+  id first (`agents::lane_probe`): the probe keeps naming the session it
+  started in. `add_project`/`projects add` rename a moved project's sessions
+  (`worktrees_core::adopt`, the rule is in `moved_renames`' doc) and repair
+  its worktrees' git links. The rename is needed despite adoption because the
+  provider sidecars are found by the CANONICAL name only. **Never match a
+  Claude probe to a place by `cwd` or by the session named in its `tmux`
+  field**: Claude rewrites neither, so both still name the old folder after a
+  rename. Match by `ClaudeProbe::place_dir()`/`session()`, which come from the
+  probe's live pane (`agent::locate`, using the pane id `PaneList` carries as a
+  6th field, no extra spawn). A pane counts only when it vouches for the probe,
+  because pane ids are per tmux server. A transcript is still found under
+  `cwd`.
+
 - **The agent rows (`worktrees_api::agents`, `worktrees_core::prompt`) read
   Claude's screen, and Claude 2.1.309 has four traps** (fixtures and README:
   `crates/worktrees-core/tests/fixtures/claude-screen/2.1.309`). Its FOOTER
@@ -116,7 +136,7 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   do not align them). hyper parses the HTTP and tungstenite sees only frames,
   also ON PURPOSE: tungstenite's `accept_hdr_async` WRITES an HTTP error
   response when it refuses, while a hyper service that returns `Err` closes
-  with 0 bytes. The 181 commands sit in ONE macro table
+  with 0 bytes. The 182 commands sit in ONE macro table
   (`serve/dispatch.rs`) with an `Exposure` each; the six `ClientLocal` rows
   (clipboard, editor, terminal, zoom, the app bundle) are refused with
   `err: "client-local"`, never run on the host — the docs viewer is an
@@ -901,6 +921,31 @@ writes it, so the test process never holds a writable fd for a fork to inherit.
 Measured in `rust:1-bookworm`: 7 of 150 runs of the core suite failed this way
 before the fix, every one a fake's spawn, and 0 of 150 after. Reproduce it in
 docker, never on the Mac.
+
+**`ubuntu-latest` is Ubuntu 26.04, and its coreutils are ONE binary.** Since
+25.10, Ubuntu's coreutils are uutils: `/bin/sleep` links to a multi-call
+binary that picks its program by argv[0]. So a fake made by copying one under
+another name (`cp /bin/sleep claude`) prints "coreutils: unknown program
+'claude'" and exits 1. In a tmux pane, the session dies with it, and the test
+reads as the product missing a live agent. serve_bin's two moved-project tests
+failed that way, on that runner only: ubuntu:24.04, bookworm and macOS all
+pass. Copy `/bin/bash` (its own binary everywhere) and have it wait on a
+builtin. Reproduce runner-only failures in the runner's OS: its log prints it
+under "Operating System", and that image ships tmux preinstalled.
+
+**`tmux new-session -c <dir>` returns before the pane is in `<dir>`.** The
+server forks the pane and answers the client at once, and the child's
+`chdir` comes later. When it fails, because the folder has moved or gone,
+tmux puts the pane in `$HOME` and says nothing. On a systemd host the gap is
+a D-Bus round trip: a tmux built with systemd (Ubuntu's 3.6 is) has the child
+ask the user's systemd for a cgroup BEFORE its `chdir` (`spawn.c`,
+`systemd_move_to_new_cgroup`). So the same test, which renames its project a
+few lines after `new-session`, found its lane's pane in `/home/runner` on
+ubuntu-latest (#580). A container has no user bus and skips that wait, and
+passed every time. Pointing `DBUS_SESSION_BUS_ADDRESS` at a socket that
+accepts and says nothing for 50 ms reproduced CI's failure exactly. A test
+that moves a pane's folder waits for `#{pane_current_path}` first
+(`serve_bin.rs`'s `PrivateTmux::wait_for_cwd`).
 
 **A lane that uses Docker removes what it made before it reports done.** The
 Linux checks here run in Docker (`rust:1-bookworm`, `node:22-alpine`, the Linux

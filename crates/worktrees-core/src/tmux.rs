@@ -248,6 +248,11 @@ pub struct Pane {
     /// The program word of the tty's FOREGROUND process-group leader, from
     /// `ps` — resolved only for a pane `foreground_wanted` picks, else `None`.
     pub fg: Option<String>,
+    /// `#{pane_id}` (`%7`): what a Claude probe's `tmux` field names, so a
+    /// probe stays tied to the pane it runs in through a session rename
+    /// (`agent::locate`). `None` from a row with no sixth field — an older
+    /// row, or the bats fake's five.
+    pub id: Option<String>,
 }
 
 impl Pane {
@@ -284,13 +289,14 @@ pub fn normalize_tty(tty: &str) -> &str {
 pub fn parse_pane_rows(text: &str) -> Vec<Pane> {
     text.lines()
         .map(|line| {
-            let mut it = line.splitn(5, '\t');
+            let mut it = line.splitn(6, '\t');
             let mut field = || it.next().unwrap_or("").to_string();
             let (session, path, cmd) = (field(), field(), field());
             let some = |s: String| (!s.trim().is_empty()).then_some(s);
             let pid = some(field());
             let tty = some(field()).map(|t| normalize_tty(&t).to_string());
-            Pane { session, path, cmd, pid, tty, fg: None }
+            let id = some(field()).filter(|i| PaneId::parse(i).is_some());
+            Pane { session, path, cmd, pid, tty, fg: None, id }
         })
         .collect()
 }
@@ -418,7 +424,7 @@ impl PaneList {
             "list-panes",
             "-a",
             "-F",
-            "#{session_name}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_pid}\t#{pane_tty}",
+            "#{session_name}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_pid}\t#{pane_tty}\t#{pane_id}",
         ])
         .ok()?;
         if !o.status.success() {
@@ -471,6 +477,13 @@ impl PaneList {
     /// names them all and one shell-out replaces N `list-sessions` calls.
     pub fn has_session(&self, name: &str) -> bool {
         self.panes.iter().any(|p| p.session == name)
+    }
+
+    /// The pane whose id is `id` (`%7`), per this snapshot. Pane ids are
+    /// unique per tmux SERVER, which is why `agent::locate` asks more of a
+    /// match than the id.
+    pub fn pane(&self, id: &str) -> Option<&Pane> {
+        self.panes.iter().find(|p| p.id.as_deref() == Some(id))
     }
 
     /// Where each pane of the session named EXACTLY `name` is cwd'd: what
@@ -1631,6 +1644,7 @@ pts/5     3007   3007 npm exec x
             pid: pid.map(Into::into),
             tty: tty.map(Into::into),
             fg: None,
+            id: None,
         };
         assert_eq!(
             rows,
@@ -1704,6 +1718,21 @@ pts/5     3007   3007 npm exec x
     fn a_vanished_tty_falls_back_to_the_whole_table() {
         let rows = ps_foreground(&["ttys-gone-999"]).unwrap_or_default();
         assert!(rows.lines().count() > 1, "fell back to ps -A: {rows:?}");
+    }
+
+    /// `list-panes -a`'s sixth field is the pane id, which ties a Claude probe
+    /// to its pane through a session rename. A five-field row (the bats fake,
+    /// an older row) has none, and neither does a sixth field that is not one.
+    #[test]
+    fn pane_rows_carry_the_pane_id_tmux_gives() {
+        let rows = parse_pane_rows("a\t/w/a\tclaude\t42\t/dev/ttys001\t%7\nb\t/w/b\tzsh\t43\t/dev/ttys002\nc\t/w/c\tzsh\t44\t/dev/ttys003\tjunk\n");
+        assert_eq!(rows[0].id.as_deref(), Some("%7"));
+        assert_eq!(rows[0].tty.as_deref(), Some("ttys001"), "the tty is not glued to the id");
+        assert_eq!(rows[1].id, None, "five fields");
+        assert_eq!((rows[2].id.as_deref(), rows[2].tty.as_deref()), (None, Some("ttys003")), "not a pane id");
+        let list = PaneList::from_panes(rows);
+        assert_eq!(list.pane("%7").map(|p| p.session.as_str()), Some("a"));
+        assert!(list.pane("%70").is_none() && list.pane("%").is_none());
     }
 
     fn fg_pane(session: &str, path: &str, cmd: &str, fg: Option<&str>) -> Pane {

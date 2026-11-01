@@ -19,6 +19,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   says which file worktrees can't read, `worktrees doctor` lists it with the
   parse error, and the fix it gives is to restart that Claude (`/exit`, then
   reopen it), never to edit the file, which belongs to Claude Code.
+- **Renaming a project's folder no longer loses its running agents.** Rename
+  the folder outside worktrees while Claude is working in it, then remove the
+  old project and add the new one, and the agent kept running while the phone
+  showed no conversation and "no agent is running in this place", and the nav
+  and the agent rows disagreed about which session was the place's. Every row
+  now finds a place's session by the same rule the nav uses, and adding the
+  moved project renames its places' sessions to the new folder's names and
+  repairs its worktrees' broken git links. Nothing is closed, the conversation
+  carries on, and a session someone named by hand is left alone. The place's
+  busy dot, its model label, an agent's unsent-draft marker and `place_status`
+  follow the agent to the new folder too, where they had stayed dark until
+  the agent was restarted. Removing a
+  project now names the sessions it would leave running: the app asks whether
+  to close them or keep them, and `worktrees projects rm` asks too (`--close`
+  or `--keep` answers in advance). `worktrees doctor` now spots a renamed
+  folder's sessions even in a repo with no `.worktrees.toml`. It suggests the
+  rename (`worktrees projects add <root>`) instead of a close-and-reopen that
+  killed whatever was running.
 
 ## [0.44.2] - 2026-10-29
 

@@ -1408,6 +1408,18 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     case "remove_project":
       ws.projects = ws.projects.filter((p) => p.root !== args.root);
       return clone(ws);
+    // ops::live_places: each place's live sessions, with the agent in each.
+    // The mock's are its places' live `agent_sessions` (a Codex lane's is its
+    // `~agent~codex` sidecar), else a live `tmux_session` with a shell in it.
+    case "project_sessions": {
+      const pv = ws.projects.find((p) => p.root === args.root);
+      const sessions = (pv?.snapshot?.places ?? []).flatMap((p): { slug: string; session: string; agent: string | null }[] => {
+        const live = Object.entries(p.agent_sessions ?? {}).filter(([, s]) => s.up);
+        if (live.length) return live.map(([agent, s]) => ({ slug: p.slug, session: s.name, agent }));
+        return p.tmux_session.up ? [{ slug: p.slug, session: p.tmux_session.name, agent: null }] : [];
+      });
+      return { sessions };
+    }
     // Same contract as lib.rs: the incoming order is a preference over the
     // roots that actually exist — unknown roots are dropped, unmentioned ones
     // keep their place at the end, so a stale drag can never delete a project.
