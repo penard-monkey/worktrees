@@ -1922,6 +1922,9 @@ pub struct SyncRequest {
     pub hub: Option<String>,
     /// `None` = the user's `[sync] with_sessions` default.
     pub with_sessions: Option<bool>,
+    /// `None` = the user's `[sync]` config (`config.toml`). A test passes its
+    /// own, so it never reads the developer's real file.
+    pub cfg: Option<SyncCfg>,
 }
 
 impl SyncRequest {
@@ -2001,7 +2004,7 @@ pub struct SyncApplyOut {
 /// the live-session lookup a pull has to answer for.
 pub fn sync_preview(req: &SyncRequest) -> Result<SyncPreviewOut, String> {
     let mut ui = CaptureUi::default();
-    let cfg = config::sync_cfg();
+    let cfg = req.cfg.clone().unwrap_or_else(config::sync_cfg);
     let (from, name_arg) = req.locate()?;
     let ctx = resolve_ctx(
         &mut ui,
@@ -2056,7 +2059,7 @@ pub fn sync_apply(
     progress: Option<&mut dyn FnMut(SyncProgress)>,
 ) -> Result<SyncApplyOut, String> {
     let mut ui = CaptureUi::default();
-    let cfg = config::sync_cfg();
+    let cfg = req.cfg.clone().unwrap_or_else(config::sync_cfg);
     let (from, name_arg) = req.locate()?;
     let ctx = resolve_ctx(
         &mut ui,
@@ -2340,7 +2343,8 @@ fn cmd_status(ui: &mut dyn Ui, args: &[String]) -> i32 {
 
 /// `worktrees sync hubs` — every volume that can be a hub, its kind, and
 /// which are chosen. `--choose` replaces the chosen list (the first is the
-/// primary: the CLI's hub and a pull's default); `--clear` empties it, which
+/// primary: the CLI's hub; the app's pull takes the newest connected copy
+/// instead); `--clear` empties it, which
 /// returns the CLI to auto-detect. The same file the app's selector writes.
 fn cmd_hubs(ui: &mut dyn Ui, args: &[String]) -> i32 {
     let (mut json, mut clear) = (false, false);
@@ -3059,6 +3063,7 @@ building file list
             direction: SyncDirection::Pull,
             hub: Some(d.join("hub").to_string_lossy().into_owned()),
             with_sessions: Some(false),
+            cfg: Some(SyncCfg::default()),
         };
         let out = sync_apply(&req, false, false, None).expect("adoption apply");
         assert!(out.applied);
@@ -3200,6 +3205,7 @@ building file list
                 direction: dir,
                 hub: Some(d.join("hub").to_string_lossy().into_owned()),
                 with_sessions: Some(false),
+                cfg: Some(SyncCfg::default()),
             };
             let e = sync_preview(&req).err().expect("preview refused");
             assert!(e.contains("hub copy") && e.contains("/Users/dp/work/proj"), "{e}");
@@ -3243,6 +3249,7 @@ building file list
             direction: SyncDirection::Pull,
             hub: Some(hub.to_string_lossy().into_owned()),
             with_sessions: Some(false),
+            cfg: Some(SyncCfg::default()),
         };
         let out = sync_preview(&req).expect("adoption preview");
         assert!(out.adopting, "an adoption must say so");
@@ -3269,6 +3276,7 @@ building file list
             direction: SyncDirection::Pull,
             hub: Some(hub.to_string_lossy().into_owned()),
             with_sessions: Some(false),
+            cfg: Some(SyncCfg::default()),
         };
         let out = sync_apply(&req, false, false, None).expect("adoption apply");
         assert!(out.applied && !out.needs_confirm);
@@ -3292,6 +3300,7 @@ building file list
             direction: SyncDirection::Push,
             hub: Some(d.join("no-such-hub").to_string_lossy().into_owned()),
             with_sessions: Some(false),
+            cfg: Some(SyncCfg::default()),
         };
         let e = sync_preview(&req).err().expect("preview refused");
         assert!(e.contains("nothing here to push"), "{e}");

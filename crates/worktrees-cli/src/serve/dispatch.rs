@@ -930,10 +930,10 @@ commands! { cx, a;
     // The hub dashboard and the chosen hubs (`worktrees_core::synchub`). A hub
     // is named by ID on every row below; `project::hub_path` resolves it
     // against what is mounted, so no client value ever becomes an rsync path.
-    sync_hubs: Engine [admin, global] => project::sync_hubs(&cx.ctx),
+    sync_hubs: Engine [admin, global] => project::sync_hubs(&cx.ctx, a.get("lite")?),
     sync_hub_choose: Engine [admin, global] => project::sync_hub_choose(a.get("ids")?),
     sync_hub_forget: Engine [admin, global] => project::sync_hub_forget(a.get("hub")?),
-    sync_preview: Engine [read, opt_project(repo, AdminAll)] => project::sync_preview(a.get("repo")?, a.get("name")?, a.get("direction")?, a.get("with_sessions")?, a.get("hub")?),
+    sync_preview: Engine [read, opt_project(repo, AdminAll)] => project::sync_preview(&cx.ctx, a.get("repo")?, a.get("name")?, a.get("direction")?, a.get("with_sessions")?, a.get("hub")?),
     sync_apply: Engine [admin, opt_project(repo, Console)] => {
         let mut sink = cx.frames.typed::<worktrees_core::sync::SyncProgress>(a.channel("on_progress")?);
         project::sync_apply(
@@ -944,7 +944,7 @@ commands! { cx, a;
     // Many projects × many hubs. Console-only: a job list names projects the
     // row cannot declare one by one, and a drive plugged into the host is the
     // host's user's act.
-    sync_batch_preview: HostConsole => project::sync_batch_preview(a.get("jobs")?, a.get("direction")?, a.get("with_sessions")?),
+    sync_batch_preview: HostConsole => project::sync_batch_preview(&cx.ctx, a.get("jobs")?, a.get("direction")?, a.get("with_sessions")?),
     sync_batch_apply: HostConsole => {
         let mut sink = cx.frames.typed::<worktrees_api::project::BatchEvent>(a.channel("on_event")?);
         project::sync_batch_apply(&cx.ctx, a.get("jobs")?, a.get("direction")?, a.get("with_sessions")?, &mut sink)

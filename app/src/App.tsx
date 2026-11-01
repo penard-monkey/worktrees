@@ -3583,7 +3583,10 @@ function HubsDashboard({ dash, loading, error, sel, onSel, onChoose, onForget, o
   const names = projectNames(dash);
   const local = (n: string) => dash?.local.find((l) => l.name === n) ?? null;
   const canPush = (n: string) => { const l = local(n); return !!l && !l.hub_copy && conn.length > 0; };
-  const canPull = (n: string) => { const l = local(n); return (!l || !l.hub_copy) && holders(dash, n).length > 0; };
+  // Only a project that is HERE joins a batch pull. One that is only on a hub
+  // is an import, whose destination (a folder the hub's manifest names) is
+  // shown in the single import modal — the row's "import" link.
+  const canPull = (n: string) => { const l = local(n); return !!l && !l.hub_copy && holders(dash, n).length > 0; };
   const picked = names.filter((n) => sel.has(n));
   const items: SyncItem[] = picked.map((n) => ({ name: n, repo: local(n)?.root ?? null }));
   const pushOk = picked.length > 0 && picked.every(canPush);
@@ -3612,13 +3615,15 @@ function HubsDashboard({ dash, loading, error, sel, onSel, onChoose, onForget, o
                 <div key={h.id} className={"hub-row" + (h.connected ? "" : " off")} data-testid="hub-row" data-id={h.id}
                   data-connected={h.connected ? "1" : "0"} data-chosen={h.chosen ?? ""}>
                   <input type="checkbox" checked={h.chosen !== null} data-testid="hub-chosen"
-                    title="push to this hub by default — the first chosen is the primary (the CLI's hub, and a pull's default)"
+                    title="push to this hub by default — the first chosen is the primary, the hub the CLI uses (a pull here takes the newest copy)"
                     onChange={(e) => toggleChosen(h.id, e.currentTarget.checked)} />
                   <Icons.HardDrive size={14} />
                   <span className="hub-name">{h.name}</span>
                   <span className="hub-kind">{h.kind}</span>
                   <span className="hub-where" title={h.path ?? h.id}>
-                    {h.connected
+                    {h.connected && h.slow
+                      ? <span data-testid="hub-slow">not answering — showing what it held last time</span>
+                      : h.connected
                       ? <>{h.free_bytes != null ? `${bytes(h.free_bytes)} free` : h.path}</>
                       : <>not connected{h.last_seen ? ` · seen ${agoText(h.last_seen)}` : ""}</>}
                   </span>
@@ -3762,6 +3767,9 @@ function BatchSyncModal({ dir, items, dash, jobs, pushHubs, onPushHubs, pullFrom
             <div className="batch-hubs" data-testid="batch-hubs">
               <span className="sync-dest-l">to</span>
               {conn.length === 0 && <span className="sync-warn">no hub connected</span>}
+              {conn.length > 0 && pushHubs.length === 0 && dash?.default_error && (
+                <span className="sync-warn" data-testid="batch-hub-why">{dash.default_error} — tick a hub to push to</span>
+              )}
               {conn.map((h) => (
                 <label key={h.id} className="sync-opt">
                   <input type="checkbox" data-testid="batch-hub" data-id={h.id} disabled={locked} checked={pushHubs.includes(h.id)}
@@ -3839,6 +3847,11 @@ function BatchSyncModal({ dir, items, dash, jobs, pushHubs, onPushHubs, pullFrom
           {!locked && live.length > 0 && (
             <div className="sync-warn">A pull mirrors with --delete over the trees those sessions are using.</div>
           )}
+          {dir === "pull" && !done && (
+            <div className="sync-skipped" data-testid="batch-no-install">
+              A registered rebuild is not run in a batch — pull one project on its own to run it.
+            </div>
+          )}
           {!done && (
             <label className="sync-opt">
               <input type="checkbox" checked={sessions} disabled={locked} onChange={(e) => onSessions(e.currentTarget.checked)} />
@@ -3870,8 +3883,10 @@ function BatchSyncModal({ dir, items, dash, jobs, pushHubs, onPushHubs, pullFrom
  *  hands the push to the combined preview (one copy per hub). A pull picks ONE
  *  source among the hubs that hold the project, each with its age, newest
  *  first. A remembered hub that is not connected is never offered here. */
-function HubPick({ dir, name, dash, hubId, locked, onHub, onMulti }: {
+function HubPick({ dir, name, dash, hubId, locked, shown, onHub, onMulti }: {
   dir: SyncDir;
+  /** The modal's own error line: the reason is not said twice. */
+  shown: string;
   name: string;
   dash: HubDash | null;
   hubId: string | null;
@@ -3881,26 +3896,36 @@ function HubPick({ dir, name, dash, hubId, locked, onHub, onMulti }: {
 }) {
   if (!dash) return null;
   const conn = connectedHubs(dash);
+  const named = hubId ? dash.hubs.find((h) => h.id === hubId) : undefined;
+  // No hub picked: the chosen one is unplugged (or there is no default). Say
+  // why, and let the user tick a drive themselves — the app never picks a
+  // replacement on its own (hubs-check.mjs).
+  const why = !hubId && dash.default_error && dash.default_error !== shown
+    ? <div className="sync-warn" data-testid="sync-hub-why">{dash.default_error}</div>
+    : null;
   if (dir === "push") {
-    if (conn.length === 0) return null;
-    if (conn.length === 1) {
+    if (conn.length === 0) return why;
+    if (named && conn.length === 1) {
       return <div className="sync-hubpick" data-testid="sync-hubpick"><span className="sync-dest-l">to</span>
-        <span data-testid="sync-hub-label">{conn[0].name}</span></div>;
+        <span data-testid="sync-hub-label">{named.name}</span></div>;
     }
     return (
-      <div className="sync-hubpick" data-testid="sync-hubpick">
-        <span className="sync-dest-l">to</span>
-        {conn.map((h) => (
-          <label key={h.id} className="sync-opt">
-            <input type="checkbox" data-testid="sync-hub" data-id={h.id} disabled={locked} checked={h.id === hubId}
-              onChange={(e) => {
-                if (!e.currentTarget.checked) return; // the one ticked hub stays: untick it in the combined preview
-                if (hubId) onMulti([hubId, h.id]); else onHub(h.id);
-              }} />
-            {h.name} <span className="hub-kind">{h.kind}</span>
-          </label>
-        ))}
-      </div>
+      <>
+        {why}
+        <div className="sync-hubpick" data-testid="sync-hubpick">
+          <span className="sync-dest-l">to</span>
+          {conn.map((h) => (
+            <label key={h.id} className="sync-opt">
+              <input type="checkbox" data-testid="sync-hub" data-id={h.id} disabled={locked} checked={h.id === hubId}
+                onChange={(e) => {
+                  if (!e.currentTarget.checked) return; // the one ticked hub stays: untick it in the combined preview
+                  if (hubId) onMulti([hubId, h.id]); else onHub(h.id);
+                }} />
+              {h.name} <span className="hub-kind">{h.kind}</span>
+            </label>
+          ))}
+        </div>
+      </>
     );
   }
   const hs = holders(dash, name);
@@ -3979,7 +4004,7 @@ function SyncModal({ dir, project, adopt, dash, hubId, onHub, onMulti, preview, 
           {preview && <span className="sync-hub">{preview.hub}</span>}
         </header>
         <div className="sync-body">
-          <HubPick dir={dir} name={adopt ? adopt.name : project} dash={dash} hubId={hubId} locked={busy || !!done}
+          <HubPick dir={dir} name={adopt ? adopt.name : project} dash={dash} hubId={hubId} locked={busy || !!done} shown={error}
             onHub={onHub} onMulti={onMulti} />
           {/* The destination is the WHOLE of what an import asks consent for:
               a folder this Mac has never had, about to be created and filled
@@ -6540,15 +6565,17 @@ function App() {
   };
   /** The hub dashboard's data, also the single sync's selector. Re-read on
    *  every open: a hub is a drive someone plugs in and pulls out. */
-  const loadHubs = (): Promise<HubDash | null> => {
+  const loadHubs = (lite = false): Promise<HubDash | null> => {
     setHubLoading(true);
-    return invoke<HubDash>("sync_hubs")
+    return invoke<HubDash>("sync_hubs", { lite })
       .then((d) => { setHubDash(d); setHubErr(""); return d; })
       .catch((e) => { setHubErr(String((e as { message?: string })?.message ?? e)); fail(e); return null; })
       .finally(() => setHubLoading(false));
   };
   /** Previews race when the hub changes mid-flight; only the latest lands. */
   const syncSeq = useRef(0);
+  /** Opens race the same way: `openSyncFor`'s hub lookup is per open. */
+  const syncOpenSeq = useRef(0);
   const previewSync = (root: string, dir: SyncDir, adopt: Adopt | null, hub: string | null) => {
     const seq = ++syncSeq.current;
     setSyncPrev(null);
@@ -6591,7 +6618,13 @@ function App() {
     setSyncInstall(false);
     setSyncLoading(true);
     const name = adopt ? adopt.name : basename(root);
-    void loadHubs().then((d) => {
+    // A second open before this one's hubs answer must not have its modal
+    // previewed (or applied) with THIS open's project: only the latest lands.
+    const open = ++syncOpenSeq.current;
+    // `lite`: the selector needs the hubs and what they hold, not every
+    // project's git state — and a stalled share answers within its deadline.
+    void loadHubs(true).then((d) => {
+      if (open !== syncOpenSeq.current) return;
       const id = hub ?? (dir === "push" ? defaultPushHubs(d)[0] ?? null : newestHub(d, name));
       setSync((s) => (s ? { ...s, hub: id } : s));
       previewSync(root, dir, adopt, id);
@@ -6608,6 +6641,7 @@ function App() {
     // cancel is usually "wrong project", and the list is the answer to that.
     const back = !!sync?.back && !syncBusy;
     syncSeq.current++;
+    syncOpenSeq.current++;
     setSync(null);
     setSyncPrev(null);
     setSyncErr("");
@@ -6688,7 +6722,20 @@ function App() {
       setBatchStates((m) => ({ ...m, [at]: { ...e, index: at, progress: e.progress ?? (e.state === "running" ? m[at]?.progress : undefined) } }));
     };
     try {
-      await invoke<unknown>("sync_batch_apply", { jobs, direction: batch.dir, withSessions: settings.sync_with_sessions, onEvent });
+      const outs = await invoke<{ index: number; hub: string; result: CmdResult }[]>("sync_batch_apply", {
+        jobs, direction: batch.dir, withSessions: settings.sync_with_sessions, onEvent,
+      });
+      // The answer is authoritative: the Channel drops a frame when a slow
+      // client's outbox is full (progress is a sample), and a dropped `done`
+      // must not leave a row looking unfinished.
+      setBatchStates((m) => {
+        const next = { ...m };
+        for (const o of outs ?? []) {
+          const at = back[o.index];
+          if (at !== undefined) next[at] = { index: at, state: o.result.ok ? "done" : "failed", result: o.result };
+        }
+        return next;
+      });
     } catch (e) {
       setBatchErr(String((e as { message?: string })?.message ?? e));
       fail(e);

@@ -25,7 +25,9 @@ mirroring.
    drive and the share, it auto-picks the drive and never the share.
 5. In the app, open Hubs… and tick Extreme SSD. Then eject it and push from
    the ⇄ popover. The popover and the dialog say "'Extreme SSD' is not
-   connected". Nothing goes to SanDisk.
+   connected". In the dialog no drive is ticked, and nothing goes to SanDisk
+   unless you tick it yourself. Do the same from the dashboard's Push…: the
+   batch shows the same reason and no ticked hub.
 6. Tick the SMB share and press "make primary". `worktrees sync status`
    (CLI) names the share as the hub.
 
@@ -47,7 +49,9 @@ mirroring.
     a hub and the preview re-asks. Confirm: the rows run ONE AT A TIME, each
     with its own bar. Check Activity Monitor or `ps` for a single `rsync` at
     a time.
-11. Pull one project that sits on both a drive and the share. The source
+11. A project that is only on a hub cannot be selected for a batch pull
+    (its checkbox is off); its "import" link is the way in. Pull one project
+    that sits on both a drive and the share. The source
     menu lists both, newest first, labelled "(newest)", and the newest is
     picked by default.
 12. Unmount the share in the middle of a batch push. That row fails with

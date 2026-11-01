@@ -25,13 +25,35 @@ use crate::Ctx;
 /// pass). Exactly one is expected; `repo` wins if both arrive, since a caller
 /// that knows a root is not adopting.
 pub fn sync_request(
+    ctx: &Ctx,
     repo: Option<&str>,
     name: Option<&str>,
     direction: &str,
     with_sessions: bool,
     hub: Option<&str>,
 ) -> Result<sync::SyncRequest, String> {
-    sync_request_in(repo, name, direction, with_sessions, hub, &hub_path)
+    let console = ctx.is_console();
+    sync_request_in(repo, name, direction, with_sessions, hub, &|id| hub_path_for(id, console), None)
+}
+
+/// `hub_path`, for this caller. A paired device may name only a CHOSEN hub:
+/// before hubs could be named at all, the host's own chain picked the drive,
+/// and a device must not gain the reach to aim a `--delete` pull from any
+/// volume that happens to be mounted (a share with a planted manifest).
+fn hub_path_for(id: &str, console: bool) -> Result<String, String> {
+    if !console {
+        device_may_use(id, &synchub::read().chosen)?;
+    }
+    hub_path(id)
+}
+
+/// The device half of `hub_path_for`, pure.
+fn device_may_use(id: &str, chosen: &[String]) -> Result<(), String> {
+    if chosen.iter().any(|c| c == id) {
+        Ok(())
+    } else {
+        Err("a paired device can sync only with a hub chosen on the host (Hubs… there)".into())
+    }
 }
 
 /// `sync_request` with the hub-id resolver given — the seam a test drives
@@ -43,6 +65,7 @@ fn sync_request_in(
     with_sessions: bool,
     hub: Option<&str>,
     resolve: &dyn Fn(&str) -> Result<String, String>,
+    cfg: Option<worktrees_core::config::SyncCfg>,
 ) -> Result<sync::SyncRequest, String> {
     let source = match (repo, name) {
         (Some(r), _) => {
@@ -57,6 +80,7 @@ fn sync_request_in(
         direction: sync::SyncDirection::parse(direction)?,
         hub: hub.filter(|h| !h.is_empty()).map(resolve).transpose()?,
         with_sessions: Some(with_sessions),
+        cfg,
     })
 }
 
@@ -80,10 +104,14 @@ static SYNC_RUN: Mutex<()> = Mutex::new(());
 /// holds, and how this machine's projects compare. `sync status`'s pieces —
 /// `local_state`, `hub_projects`, `hub_copy_refusal` — assembled once per
 /// project rather than once per (project, hub).
-pub fn sync_hubs(ctx: &Ctx) -> Result<synchub::Dashboard, String> {
+///
+/// `lite` (a sync modal's hub selector): the hubs and what they hold, with no
+/// local project rows — no git call per registered project before a modal can
+/// open. Either way a hub's listing is bounded (`synchub::READ_DEADLINE`).
+pub fn sync_hubs(ctx: &Ctx, lite: Option<bool>) -> Result<synchub::Dashboard, String> {
     let cfg = worktrees_core::config::sync_cfg();
     let configured = sync::configured_hub(&cfg);
-    let roots = crate::projects::read_projects(ctx);
+    let roots = if lite.unwrap_or(false) { Vec::new() } else { crate::projects::read_projects(ctx) };
     Ok(synchub::dashboard_in(
         &synchub::volumes(),
         &synchub::path(),
@@ -157,13 +185,14 @@ pub fn sync_hub_list() -> Result<sync::StatusJson, String> {
 /// answer comes from the hub manifest, and it is the only thing telling the
 /// user where a tree they have never had is about to appear.
 pub fn sync_preview(
+    ctx: &Ctx,
     repo: Option<String>,
     name: Option<String>,
     direction: String,
     with_sessions: bool,
     hub: Option<String>,
 ) -> Result<sync::SyncPreviewOut, String> {
-    let req = sync_request(repo.as_deref(), name.as_deref(), &direction, with_sessions, hub.as_deref())?;
+    let req = sync_request(ctx, repo.as_deref(), name.as_deref(), &direction, with_sessions, hub.as_deref())?;
     sync::sync_preview(&req).inspect_err(|e| {
         let who = repo.clone().or_else(|| name.clone()).unwrap_or_default();
         applog("warn", &format!("sync_preview {direction} {who}: {e}"));
@@ -195,7 +224,7 @@ pub fn sync_apply(
     hub: Option<String>,
     on_progress: &mut dyn FnMut(sync::SyncProgress),
 ) -> Result<CmdResult, String> {
-    let req = sync_request(repo.as_deref(), name.as_deref(), &direction, with_sessions, hub.as_deref())?;
+    let req = sync_request(ctx, repo.as_deref(), name.as_deref(), &direction, with_sessions, hub.as_deref())?;
     let who = repo.or_else(|| name.clone()).unwrap_or_default();
     Ok(apply_one(ctx, &req, &who, confirmed, install, on_progress))
 }
@@ -347,13 +376,13 @@ pub struct BatchPreviewRow {
 /// Every job's preview, one after another (they are rsync dry runs against
 /// the same drives). A job that cannot be previewed is a row with its error,
 /// never a failure of the whole batch: the user decides with all of it in view.
-pub fn sync_batch_preview(jobs: Vec<SyncJob>, direction: String, with_sessions: bool) -> Result<Vec<BatchPreviewRow>, String> {
+pub fn sync_batch_preview(ctx: &Ctx, jobs: Vec<SyncJob>, direction: String, with_sessions: bool) -> Result<Vec<BatchPreviewRow>, String> {
     sync::SyncDirection::parse(&direction)?;
     Ok(jobs
         .iter()
         .enumerate()
         .map(|(index, j)| {
-            let r = sync_request(j.repo.as_deref(), j.name.as_deref(), &direction, with_sessions, Some(&j.hub))
+            let r = sync_request(ctx, j.repo.as_deref(), j.name.as_deref(), &direction, with_sessions, Some(&j.hub))
                 .and_then(|req| sync::sync_preview(&req));
             if let Err(e) = &r {
                 let who = j.repo.clone().or_else(|| j.name.clone()).unwrap_or_default();
@@ -399,7 +428,8 @@ pub fn sync_batch_apply(
     with_sessions: bool,
     on_event: &mut dyn FnMut(BatchEvent),
 ) -> Result<Vec<BatchOutcome>, String> {
-    batch_apply_in(ctx, jobs, direction, with_sessions, &hub_path, on_event)
+    let console = ctx.is_console();
+    batch_apply_in(ctx, jobs, direction, with_sessions, &|id| hub_path_for(id, console), None, on_event)
 }
 
 fn batch_apply_in(
@@ -408,6 +438,7 @@ fn batch_apply_in(
     direction: String,
     with_sessions: bool,
     resolve: &dyn Fn(&str) -> Result<String, String>,
+    cfg: Option<worktrees_core::config::SyncCfg>,
     on_event: &mut dyn FnMut(BatchEvent),
 ) -> Result<Vec<BatchOutcome>, String> {
     sync::SyncDirection::parse(&direction)?;
@@ -415,7 +446,7 @@ fn batch_apply_in(
     for (index, j) in jobs.iter().enumerate() {
         on_event(BatchEvent { index, state: "running", progress: None, result: None });
         let who = j.repo.clone().or_else(|| j.name.clone()).unwrap_or_default();
-        let result = match sync_request_in(j.repo.as_deref(), j.name.as_deref(), &direction, with_sessions, Some(&j.hub), resolve) {
+        let result = match sync_request_in(j.repo.as_deref(), j.name.as_deref(), &direction, with_sessions, Some(&j.hub), resolve, cfg.clone()) {
             Ok(req) => {
                 let mut fwd = |p: sync::SyncProgress| {
                     on_event(BatchEvent { index, state: "running", progress: Some(p), result: None })
@@ -1414,11 +1445,14 @@ mod tests {
         impl crate::Host for NoHost {
             fn emit(&self, _: &str, _: serde_json::Value) {}
         }
+        // Never the user's registry, nor their `[sync]` config: an extra
+        // exclude there would change what this test asserts.
+        worktrees_core::registry::forbid_real_writes();
         let ctx = crate::Ctx::new(d.join("cfg"), std::sync::Arc::new(NoHost));
         let root = repo.to_string_lossy().into_owned();
         let job = |hub: &str| SyncJob { repo: Some(root.clone()), name: None, hub: hub.into(), confirmed: false };
         let mut events: Vec<(usize, &'static str)> = Vec::new();
-        let out = batch_apply_in(&ctx, vec![job("A"), job("gone"), job("B")], "push".into(), false, &resolve, &mut |e| {
+        let out = batch_apply_in(&ctx, vec![job("A"), job("gone"), job("B")], "push".into(), false, &resolve, Some(Default::default()), &mut |e| {
             if e.progress.is_none() {
                 events.push((e.index, e.state));
             }
@@ -1438,12 +1472,22 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// A paired device may name only a CHOSEN hub; the console any connected one.
+    #[test]
+    fn a_device_may_name_only_a_chosen_hub() {
+        let chosen = vec!["uuid:A".to_string()];
+        assert!(device_may_use("uuid:A", &chosen).is_ok());
+        let e = device_may_use("smb://nas/share", &chosen).unwrap_err();
+        assert!(e.contains("chosen on the host"), "{e}");
+        assert!(device_may_use("uuid:A", &[]).is_err());
+    }
+
     /// A hub is named by id; a path a client invents is not one.
     #[test]
     fn a_client_cannot_name_a_hub_by_path() {
         let e = sync_request_in(None, Some("x"), "pull", false, Some("path:/etc"), &|id| {
             synchub::path_for_id(&[], &synchub::HubsFile::default(), None, id).map(|p| p.to_string_lossy().into_owned())
-        })
+        }, Some(Default::default()))
         .err()
         .unwrap();
         assert!(e.contains("unknown hub"), "{e}");

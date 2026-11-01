@@ -442,8 +442,7 @@ EOF
   [ "$status" -eq 1 ]
   [[ "$output" == *"hub copy"* ]]
   # refused before rsync was even looked for — not so much as a --version probe
-  ! has_preview || false
-  ! has_apply || false
+  [ ! -s "$RSYNC_LOG" ]
 }
 
 @test "sync guard: a manifest about ANOTHER project leaves the tree alone" {

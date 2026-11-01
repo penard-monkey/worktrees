@@ -537,7 +537,13 @@ const mockHubById = (id: string | null | undefined) => (id ? MOCK_HUBS.find((h) 
 /** `project::hub_path`: an id names a CONNECTED hub or nothing. */
 function mockHubPath(id: unknown): string {
   if (id == null || id === "") {
+    // The backend's chain: a chosen hub that is unplugged is an error naming
+    // it, never a fallback to another drive.
     if (mockNoHub) throw new Error(HUB_MISSING);
+    const primary = mockChosen[0];
+    if (primary && !mockHubById(primary)) {
+      throw new Error(`the chosen hub '${MOCK_OLD_HUB.name}' is not connected — plug it in, choose another with \`worktrees sync hubs --choose NAME\`, or pass --hub PATH`);
+    }
     return MOCK_HUB;
   }
   const h = mockHubById(id as string);
@@ -3509,7 +3515,7 @@ Phase 3: Frontend pane and mock harness
     // workspace's own projects with their local state.
     case "sync_hubs": {
       await sleep(mockSyncDelayMs);
-      const local = ws.projects.filter((p) => p.ok).map((p) => ({
+      const local = args.lite ? [] : ws.projects.filter((p) => p.ok).map((p) => ({
         name: syncName(p.root), root: p.root, branch: "main",
         dirty: p.root.endsWith("worktrees") ? 4 : 0,
         head_at: now() - (p.root.endsWith("worktrees") ? 600 : 86400 * 30),
@@ -3521,13 +3527,13 @@ Phase 3: Frontend pane and mock harness
       const rows = MOCK_HUBS.map((h) => ({
         row: { id: h.id, name: h.name, kind: h.kind, path: h.path, connected: true, chosen: rank(h.id), configured: false,
           auto: removable.length === 1 && removable[0].id === h.id, last_seen: now(), free_bytes: h.free, total_bytes: h.total },
-        projects: mockHubProjects(h.id), stale: false,
+        projects: mockHubProjects(h.id), stale: false, slow: false,
       }));
       if (!mockForgotOld) rows.push({
         row: { id: MOCK_OLD_HUB.id, name: MOCK_OLD_HUB.name, kind: MOCK_OLD_HUB.kind, path: null as unknown as string, connected: false,
           chosen: rank(MOCK_OLD_HUB.id), configured: false, auto: false, last_seen: MOCK_OLD_HUB.last_seen, free_bytes: null as unknown as number, total_bytes: null as unknown as number },
         projects: [{ name: "worktrees", local_root: "/Users/demo/workspace/worktrees", pushed_at: now() - 86400 * 40, host: "mock-mbp" }],
-        stale: true,
+        stale: true, slow: false,
       });
       rows.sort((a, b) => (a.row.chosen ?? 99) - (b.row.chosen ?? 99) || Number(!a.row.connected) - Number(!b.row.connected));
       const primary = mockChosen[0];
@@ -3535,7 +3541,7 @@ Phase 3: Frontend pane and mock harness
         : primary && !mockHubById(primary) ? `the chosen hub '${MOCK_OLD_HUB.name}' is not connected — plug it in, choose another with \`worktrees sync hubs --choose NAME\`, or pass --hub PATH`
           : null;
       return {
-        hubs: rows.map((r) => ({ ...r.row, projects: r.projects.map((p) => ({ ...p, here: here(p.name) })), stale: r.stale })),
+        hubs: rows.map((r) => ({ ...r.row, projects: r.projects.map((p) => ({ ...p, here: here(p.name) })), stale: r.stale, slow: r.slow })),
         local,
         default_error,
       };

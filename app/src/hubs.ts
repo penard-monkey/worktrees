@@ -26,8 +26,10 @@ export type Hub = {
   free_bytes: number | null;
   total_bytes: number | null;
   projects: HubProj[];
-  /** `projects` is the last-known list (not connected). */
+  /** `projects` is the last-known list (not connected, or too slow). */
   stale: boolean;
+  /** Connected, but its listing did not answer in time (a stalled share). */
+  slow: boolean;
 };
 export type LocalProj = {
   name: string;
@@ -55,13 +57,16 @@ export function chosenIds(d: HubDash | null): string[] {
     .map((h) => h.id);
 }
 
-/** A push's default targets: every CHOSEN hub that is connected; with none
- *  chosen, the one auto-detect would take, or the only connected hub. Never a
- *  guess between several unchosen ones — the user ticks those. */
+/** A push's default targets: every CHOSEN hub that is connected — possibly
+ *  NONE, when the chosen ones are all unplugged: then the app sends no hub and
+ *  the backend names the missing one. It must never fall back to another
+ *  drive that happens to be plugged in (hubs-check.mjs). Only with NOTHING
+ *  chosen: the one auto-detect would take, or the only connected hub — never a
+ *  guess between several unchosen ones. */
 export function defaultPushHubs(d: HubDash | null): string[] {
   const conn = connectedHubs(d);
-  const chosen = chosenIds(d).filter((id) => conn.some((h) => h.id === id));
-  if (chosen.length) return chosen;
+  const chosen = chosenIds(d);
+  if (chosen.length) return chosen.filter((id) => conn.some((h) => h.id === id));
   const auto = conn.find((h) => h.auto) ?? (conn.length === 1 ? conn[0] : undefined);
   return auto ? [auto.id] : [];
 }
@@ -111,11 +116,14 @@ export function bytes(n: number | null): string {
 }
 
 /** The batch's jobs. A push: every item × every ticked hub (an item with no
- *  root here cannot be pushed and is left out). A pull: every item from its
- *  picked hub (an item with none is left out). */
+ *  root here cannot be pushed and is left out). A pull: every item that is
+ *  here, from its picked hub. */
 export function batchJobs(dir: "push" | "pull", items: SyncItem[], pushHubs: string[], pullFrom: Record<string, string>): SyncJob[] {
   if (dir === "push") {
     return items.filter((i) => i.repo).flatMap((i) => pushHubs.map((hub) => ({ repo: i.repo, name: null, hub })));
   }
-  return items.filter((i) => pullFrom[i.name]).map((i) => ({ repo: i.repo, name: i.repo ? null : i.name, hub: pullFrom[i.name] }));
+  // Only projects that are HERE: pulling one that is not is an import into
+  // the path its manifest names, and that destination is shown (and consented
+  // to) only in the single import modal — the dashboard row's "import".
+  return items.filter((i) => i.repo && pullFrom[i.name]).map((i) => ({ repo: i.repo, name: null, hub: pullFrom[i.name] }));
 }

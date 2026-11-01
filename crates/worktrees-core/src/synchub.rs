@@ -105,6 +105,11 @@ pub struct Volume {
 /// A share's identity from `f_mntfromname`. The user part is dropped: the same
 /// share mounted by another account (or after a password change that put a
 /// `;AUTH=` in it) is the same hub.
+///
+/// SMB, NFS and WebDAV name the server and share there. AFP is best effort:
+/// older macOS reported `afp_<session>/<vol>` for an AFP mount (not
+/// re-measured here), which would make the id change per mount — the choice
+/// would then read "not connected" and need choosing again, never a swap.
 pub fn share_id(fstype: &str, from: &str) -> String {
     let scheme = match fstype {
         "smbfs" => "smb",
@@ -358,8 +363,9 @@ pub struct Remembered {
 pub struct HubsFile {
     #[serde(default)]
     pub version: u32,
-    /// Ordered ids. The FIRST is the primary hub — the CLI's, and a pull's
-    /// default; the app ticks all of them for a push.
+    /// Ordered ids. The FIRST is the primary hub — the one the CLI syncs
+    /// with. The app ticks all of them for a push, and defaults a pull to the
+    /// NEWEST connected copy of the project, whichever hub holds it.
     #[serde(default)]
     pub chosen: Vec<String>,
     #[serde(default)]
@@ -425,17 +431,6 @@ pub fn write_at(p: &Path, f: &HubsFile) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     }
     crate::fsx::write_atomic(p, &body, None).map_err(|e| format!("cannot write {}: {e}", p.display()))
-}
-
-/// The real file. Refused when a test forbade real writes (the registry's
-/// guard, `registry::forbid_real_writes`): a test engine must use `write_at`.
-fn write(f: &HubsFile) -> Result<(), String> {
-    if crate::registry::real_writes_forbidden() {
-        return Err(format!(
-            "refused: a test reached the user's real {FILE} — write a temp file with `write_at`"
-        ));
-    }
-    write_at(&path(), f)
 }
 
 /// Read-modify-write under one process-wide lock.
@@ -630,8 +625,11 @@ pub struct HubView {
     #[serde(flatten)]
     pub row: HubRow,
     pub projects: Vec<HubProjectView>,
-    /// `projects` is the LAST-KNOWN list (the hub is not connected).
+    /// `projects` is the LAST-KNOWN list (the hub is not connected, or did
+    /// not answer within `READ_DEADLINE`).
     pub stale: bool,
+    /// Connected, but its listing timed out (`READ_DEADLINE`).
+    pub slow: bool,
 }
 
 /// A registered project on this machine, as the dashboard compares it.
@@ -654,16 +652,53 @@ pub struct Dashboard {
     pub default_error: Option<String>,
 }
 
+/// How long one hub's manifest listing may take. A stalled network mount
+/// (an SMB share whose server went away) blocks `read_dir` in the kernel; past
+/// this the hub shows its last-known list and `slow`, and the dashboard — and
+/// every sync modal's selector, which reads it — still opens.
+pub const READ_DEADLINE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// A remembered hub's `last_seen` moves at most this often, so opening the
+/// dashboard does not rewrite `sync-hubs.json` every time.
+const SEEN_GRAIN: i64 = 3600;
+
+/// `sync::hub_projects` under `READ_DEADLINE`. `None` = it did not answer in
+/// time. The reader thread is left to finish on its own: a hung mount cannot
+/// be interrupted, only not waited for.
+fn hub_projects_bounded(path: &Path, deadline: std::time::Duration) -> Option<Vec<KnownProject>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let p = path.to_path_buf();
+    std::thread::spawn(move || {
+        let _ = tx.send(crate::sync::hub_projects(&p));
+    });
+    rx.recv_timeout(deadline).ok()
+}
+
 /// Assemble the dashboard. `roots` are the registered projects (the caller's
-/// scope); `file` is where the chosen/remembered hubs live. Every connected
-/// hub that is REMEMBERED has its project list snapshotted into the file, so
-/// it can be shown while unplugged; nothing else is written.
+/// scope; empty for the `lite` form a sync modal's selector asks for, which
+/// skips every git call); `file` is where the chosen/remembered hubs live.
+///
+/// The one write is the remembered hubs' snapshot (their project list, and
+/// `last_seen` at hour grain), done through `edit_at` — under its lock, so a
+/// `sync_hub_choose` landing meanwhile is never overwritten, and never
+/// touching `chosen` — and only when something actually changed.
 pub fn dashboard_in(
     vols: &[Volume],
     file: &Path,
     configured: Option<&Path>,
     roots: &[String],
     now: i64,
+) -> Dashboard {
+    dashboard_with(vols, file, configured, roots, now, READ_DEADLINE)
+}
+
+pub fn dashboard_with(
+    vols: &[Volume],
+    file: &Path,
+    configured: Option<&Path>,
+    roots: &[String],
+    now: i64,
+    deadline: std::time::Duration,
 ) -> Dashboard {
     let base = |r: &str| Path::new(r).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
     let local: Vec<LocalProject> = roots
@@ -677,34 +712,55 @@ pub fn dashboard_in(
         .collect();
     let here = |name: &str| local.iter().find(|l| l.name == name).map(|l| l.root.clone());
 
-    let mut hf = read_at(file);
-    let before = hf.clone();
+    let hf = read_at(file);
     let rows = rows(vols, &hf, configured);
     let mut hubs = Vec::new();
+    // Fresh lists of connected REMEMBERED hubs, applied to the file below.
+    let mut fresh: Vec<(Volume, Vec<KnownProject>)> = Vec::new();
     for row in rows {
-        let (projects, stale) = match &row.path {
-            Some(p) if row.connected => {
-                let list = crate::sync::hub_projects(Path::new(p));
-                if let Some(v) = vols.iter().find(|v| v.id == row.id) {
-                    if hf.remembered(&v.id).is_some() {
-                        hf.remember(v, now, Some(list.clone()));
+        let last = || hf.remembered(&row.id).map(|h| h.projects.clone()).unwrap_or_default();
+        let (projects, stale, slow) = match &row.path {
+            Some(p) if row.connected => match hub_projects_bounded(Path::new(p), deadline) {
+                Some(list) => {
+                    if let Some(v) = vols.iter().find(|v| v.id == row.id) {
+                        if hf.remembered(&v.id).is_some() {
+                            fresh.push((v.clone(), list.clone()));
+                        }
                     }
+                    (list, false, false)
                 }
-                (list, false)
-            }
-            _ => (hf.remembered(&row.id).map(|h| h.projects.clone()).unwrap_or_default(), true),
+                None => (last(), true, true),
+            },
+            _ => (last(), true, false),
         };
         let projects = projects
             .into_iter()
             .map(|m| HubProjectView { here: here(&m.name), name: m.name, local_root: m.local_root, pushed_at: m.pushed_at, host: m.host })
             .collect();
-        hubs.push(HubView { row, projects, stale });
+        hubs.push(HubView { row, projects, stale, slow });
     }
-    if hf != before {
+    if !fresh.is_empty() {
         // A cache: losing it costs a dimmed list, never a sync. Not fatal.
-        let _ = if file == path() { write(&hf) } else { write_at(file, &hf) };
+        let _ = edit_at(file, |f| {
+            for (v, list) in fresh {
+                let Some(h) = f.hubs.iter_mut().find(|h| h.id == v.id) else { continue };
+                if h.projects != list {
+                    h.projects = list;
+                    h.last_seen = now;
+                } else if now - h.last_seen >= SEEN_GRAIN {
+                    h.last_seen = now;
+                }
+                h.name = v.name.clone();
+                h.path = v.path.to_string_lossy().into_owned();
+            }
+            Ok(())
+        });
     }
     let default_error = match configured {
+        Some(c) if !c.is_dir() => Some(format!(
+            "the configured hub {} ([sync] hub / $WORKTREES_SYNC_HUB) is not there",
+            c.display()
+        )),
         Some(_) => None,
         None => match primary(&hf, vols) {
             Some(r) => r.err(),
@@ -866,5 +922,72 @@ mod tests {
         assert!(edit_at(&p, |f| Ok(f.forget("uuid:A"))).unwrap());
         assert_eq!(read_at(&p).hubs.len(), 0);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A dashboard read whose remembered hub still holds what it held writes
+    /// NOTHING (the file's bytes are untouched), and one whose contents moved
+    /// writes only the snapshot: a `chosen` list another writer set is kept.
+    #[test]
+    fn a_dashboard_read_rewrites_the_file_only_when_a_snapshot_moved() {
+        let d = std::env::temp_dir().join(format!("wt-synchub-dash-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let hub = d.join("hub");
+        std::fs::create_dir_all(hub.join("p")).unwrap();
+        std::fs::write(hub.join("p").join(crate::sync::MANIFEST), "schema = 1\nname = \"p\"\nlocal_root = \"/r/p\"\npushed_at = 7\nhost = \"h\"\n").unwrap();
+        let file = d.join(FILE);
+        let v = Volume { id: "uuid:H".into(), name: "H".into(), path: hub.clone(), kind: HubKind::Removable, free_bytes: None, total_bytes: None };
+        let p = KnownProject { name: "p".into(), local_root: "/r/p".into(), pushed_at: 7, host: "h".into() };
+        edit_at(&file, |f| {
+            f.remember(&v, 1000, Some(vec![p.clone()]));
+            f.chosen = vec!["uuid:H".into()];
+            Ok(())
+        })
+        .unwrap();
+        let before = std::fs::read(&file).unwrap();
+        let out = dashboard_in(std::slice::from_ref(&v), &file, None, &[], 1000 + 60);
+        assert_eq!(out.hubs[0].projects.len(), 1);
+        assert_eq!(std::fs::read(&file).unwrap(), before, "an unchanged hub must not rewrite the file");
+
+        // Another writer chooses a second hub; the hub's contents then move.
+        edit_at(&file, |f| {
+            f.chosen.push("uuid:OTHER".into());
+            Ok(())
+        })
+        .unwrap();
+        std::fs::create_dir_all(hub.join("q")).unwrap();
+        std::fs::write(hub.join("q").join(crate::sync::MANIFEST), "schema = 1\nname = \"q\"\nlocal_root = \"/r/q\"\n").unwrap();
+        dashboard_in(std::slice::from_ref(&v), &file, None, &[], 2000);
+        let f = read_at(&file);
+        assert_eq!(f.chosen, ["uuid:H", "uuid:OTHER"], "the snapshot never touches chosen");
+        assert_eq!(f.hubs[0].projects.len(), 2);
+        assert_eq!(f.hubs[0].last_seen, 2000);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A hub whose listing does not answer in time shows its last-known list,
+    /// flagged slow, instead of holding the dashboard (and every sync modal).
+    #[test]
+    fn a_hub_that_does_not_answer_in_time_shows_its_last_known_list() {
+        let d = std::env::temp_dir().join(format!("wt-synchub-slow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let file = d.join(FILE);
+        let v = Volume { id: "smb://nas/x".into(), name: "x".into(), path: d.clone(), kind: HubKind::Network, free_bytes: None, total_bytes: None };
+        let p = KnownProject { name: "old".into(), local_root: "/r/old".into(), pushed_at: 3, host: "h".into() };
+        edit_at(&file, |f| {
+            f.remember(&v, 1, Some(vec![p.clone()]));
+            Ok(())
+        })
+        .unwrap();
+        let out = dashboard_with(std::slice::from_ref(&v), &file, None, &[], 5, std::time::Duration::ZERO);
+        assert!(out.hubs[0].slow && out.hubs[0].stale, "{:?}", out.hubs[0]);
+        assert_eq!(out.hubs[0].projects[0].name, "old");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_configured_hub_that_is_not_there_is_the_default_error() {
+        let out = dashboard_in(&[], Path::new("/nonexistent/wt-sync-hubs.json"), Some(Path::new("/nonexistent/hub")), &[], 1);
+        assert!(out.default_error.unwrap().contains("is not there"));
     }
 }
