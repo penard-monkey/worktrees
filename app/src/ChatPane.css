@@ -30,10 +30,12 @@
 .chat-scrollwrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .chat-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; }
 .chat-scroll:focus { outline: none; }
-/* One reading column, centred, at every width: the bubbles keep a measure on
-   a wide window and use the whole cell on a narrow one (the dock open). */
+/* One reading column whose gutters are 7% of the chat's width on each side
+   (`cqi`: `.chat` is the container), so the bubbles grow with the window
+   instead of stopping at a fixed measure (the user's call, 2026-11-01). A
+   narrow cell (the dock open) gives the gutters back below. */
 .chat-col {
-  max-width: 46rem; margin: 0 auto; padding: var(--s4) var(--s4) var(--s3);
+  margin: 0; padding: var(--s4) 7cqi var(--s3);
   display: flex; flex-direction: column; gap: var(--s2);
 }
 .chat-top, .chat-note, .chat-sep {
@@ -59,7 +61,7 @@
 /* The person's message: a tint of the accent over the panel, words in
    --txt-hi — a fill, never accent-coloured text. */
 .chat-bubble-user {
-  max-width: min(80%, 36rem); color: var(--txt-hi);
+  max-width: 80%; color: var(--txt-hi);
   background: color-mix(in srgb, var(--accent) 22%, var(--bg-panel));
   border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--bg-panel));
   border-bottom-right-radius: var(--r-sm);
@@ -263,8 +265,8 @@
 }
 
 /* ── the composer ────────────────────────────────────────────────────────── */
-.chat-composer { flex: none; border-top: 1px solid var(--line); background: var(--bg-panel); padding: var(--s2) var(--s4) 6px; }
-.chat-composer > * { max-width: calc(46rem - 2 * var(--s4)); margin-left: auto; margin-right: auto; }
+/* Its gutters are the column's, so the box lines up with the bubbles. */
+.chat-composer { flex: none; border-top: 1px solid var(--line); background: var(--bg-panel); padding: var(--s2) 7cqi 6px; }
 .chat-composer-row { display: flex; align-items: flex-end; gap: var(--s2); }
 .chat-field {
   flex: 1; min-width: 0; resize: none; display: block;
