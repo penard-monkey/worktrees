@@ -48,6 +48,9 @@ pub const RATE: &str = "rate";
 /// `start-budget: <seconds>` (`Account::admit`), and the one its episode
 /// records: the start limit, told apart from the request rate.
 pub const START_BUDGET: &str = "start-budget";
+/// The same for a device past its upload bucket (`agent_attach`):
+/// `attach-budget: <seconds until this upload fits>`.
+pub const ATTACH_BUDGET: &str = "attach-budget";
 
 // ── counts ───────────────────────────────────────────────────────────────────
 
@@ -132,6 +135,10 @@ pub struct PerDevice {
     /// Agent launches (LLM10): a stolen or buggy device must not burn the
     /// user's plan. The quota gate (`set_quota_settings`) applies on top.
     pub launches: Rate,
+    /// Bytes uploaded for agents (`agent_attach`), decoded: what a device
+    /// may write to the host's disk through attachments, on top of each
+    /// place's own cap (`worktrees_core::attach`).
+    pub uploads: Rate,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -167,6 +174,14 @@ const MIB: usize = 1 << 20;
 ///   which is one maximal paste (a 16 MiB message holds about 4 MB of pasted
 ///   ASCII).
 /// - attaches 8 and shells 8 per device; launches 10 an hour, burst 10.
+/// - uploads (`agent_attach`): a burst of 64 MiB, then 256 MiB an hour
+///   (~73 KiB/s). The burst is eight files at the host's 8 MiB cap, or
+///   sixteen at the phone's own ~4 MiB, so a message with a handful of
+///   photos never waits; a Retina screenshot of a full app window measured
+///   ATTACH_MEASURED. Spent, a 4 MiB photo fits again in 56 s. The disk is
+///   bounded twice: a place holds at most 100 MiB and every file goes after
+///   seven days, so a device that keeps uploading adds at most ~6 GiB a day
+///   across every place in its scope, and never more than 100 MiB a place.
 pub const BUDGETS: Budgets = Budgets {
     loopback: LOOPBACK,
     remote: PerConnection { in_flight: 32, outbox: 8 * MIB, outbox_stream: 2 * MIB, lanes: 64 },
@@ -178,6 +193,7 @@ pub const BUDGETS: Budgets = Budgets {
         attaches: 8,
         shells: 8,
         launches: Rate { per_sec: 10.0 / 3600.0, burst: 10.0 },
+        uploads: Rate { per_sec: (256 * MIB) as f64 / 3600.0, burst: (64 * MIB) as f64 },
     },
     remote_bodies: 64,
 };
@@ -250,6 +266,7 @@ struct Share {
     shells: Arc<Counter>,
     requests: Mutex<Bucket>,
     launches: Mutex<Bucket>,
+    uploads: Mutex<Bucket>,
     inputs: Mutex<HashMap<String, Bucket>>,
 }
 
@@ -283,6 +300,7 @@ impl Budget {
                     shells: Counter::new(d.shells),
                     requests: Mutex::new(Bucket::full(d.requests, now)),
                     launches: Mutex::new(Bucket::full(d.launches, now)),
+                    uploads: Mutex::new(Bucket::full(d.uploads, now)),
                     inputs: Mutex::new(HashMap::new()),
                 })
             })
@@ -364,6 +382,17 @@ pub struct Ticket {
     pub attach: Option<Held>,
 }
 
+/// The bytes an upload will write: `data`'s base64 decoded, at most the
+/// host's per-file cap — a larger one is refused by the body, and charging
+/// it past the bucket's burst would refuse it here forever instead.
+fn upload_len(args: &Args) -> f64 {
+    let n = match args.0.get("data") {
+        Some(Value::String(s)) => s.len() / 4 * 3,
+        _ => 0,
+    };
+    n.min(worktrees_core::attach::MAX_BYTES) as f64
+}
+
 /// The bytes a write row carries: `data` as the frontend sends it, a JSON
 /// array of bytes, or a string from any other client.
 fn input_len(args: &Args) -> usize {
@@ -380,15 +409,19 @@ impl Account {
     /// caller none of its rate.
     pub fn admit(&self, cmd: &str, args: &Args, lane: Option<&str>) -> Result<Ticket, Value> {
         let now = Instant::now();
-        self.admit_at(cmd, args, lane, now).map_err(|e| self.answer(e, now))
+        self.admit_at(cmd, args, lane, now).map_err(|e| self.answer(e, args, now))
     }
 
     /// A refusal's word as the client is told it: [`START_BUDGET`] with the
-    /// seconds until the device's start bucket holds one again, every other
-    /// word as it is.
-    fn answer(&self, err: &'static str, now: Instant) -> Value {
+    /// seconds until the device's start bucket holds one again,
+    /// [`ATTACH_BUDGET`] with the seconds until it holds this upload, every
+    /// other word as it is.
+    fn answer(&self, err: &'static str, args: &Args, now: Instant) -> Value {
         match (err, &self.device) {
             (START_BUDGET, Some(d)) => Value::from(format!("{START_BUDGET}: {}", d.launches.lock().unwrap().wait(self.per_device.launches, 1.0, now))),
+            (ATTACH_BUDGET, Some(d)) => {
+                Value::from(format!("{ATTACH_BUDGET}: {}", d.uploads.lock().unwrap().wait(self.per_device.uploads, upload_len(args), now)))
+            }
             _ => Value::from(err),
         }
     }
@@ -417,6 +450,11 @@ impl Account {
         if LAUNCH_ROWS.contains(&cmd) {
             let ok = d.launches.lock().unwrap().take(p.launches, 1.0, now);
             self.check(t, "launch_rate", START_BUDGET, ok.then_some(()), now)?;
+        }
+        // Bytes for the host's disk (`agent_attach`), decoded, per device.
+        if cmd == "agent_attach" {
+            let ok = d.uploads.lock().unwrap().take(p.uploads, upload_len(args), now);
+            self.check(t, "upload_rate", ATTACH_BUDGET, ok.then_some(()), now)?;
         }
         if matches!(cmd, "term_write" | "shell_write") {
             let ok = take_input(&d.inputs, lane.unwrap_or(cmd), p.input, input_len(args), now);
@@ -773,15 +811,42 @@ mod tests {
         for row in LAUNCH_ROWS {
             assert_eq!(a.admit_at(row, &args(json!({})), None, t0).err(), Some(START_BUDGET), "{row}: every launch row shares it");
         }
-        assert_eq!(a.answer(START_BUDGET, t0), json!("start-budget: 360"));
+        assert_eq!(a.answer(START_BUDGET, &args(json!({})), t0), json!("start-budget: 360"));
         let later = t0 + Duration::from_secs(100);
         assert_eq!(a.admit_at("new_place", &args(json!({})), None, later).err(), Some(START_BUDGET));
-        assert_eq!(a.answer(START_BUDGET, later), json!("start-budget: 260"), "100 s of the 360 have refilled");
-        assert_eq!(a.answer(START_BUDGET, t0 + Duration::from_millis(359_500)), json!("start-budget: 1"), "never 0 while refused");
-        assert_eq!(a.answer(RATE, later), json!("rate"), "every other word as it is");
+        assert_eq!(a.answer(START_BUDGET, &args(json!({})), later), json!("start-budget: 260"), "100 s of the 360 have refilled");
+        assert_eq!(a.answer(START_BUDGET, &args(json!({})), t0 + Duration::from_millis(359_500)), json!("start-budget: 1"), "never 0 while refused");
+        assert_eq!(a.answer(RATE, &args(json!({})), later), json!("rate"), "every other word as it is");
         assert!(a.admit_at("open_place", &args(json!({})), None, t0 + Duration::from_secs(360)).is_ok(), "one back in six minutes");
         let desk = b.open(2, &Caller::console(), None).unwrap();
-        assert_eq!(desk.answer(START_BUDGET, t0), json!(START_BUDGET), "no device, no bucket to count");
+        assert_eq!(desk.answer(START_BUDGET, &args(json!({})), t0), json!(START_BUDGET), "no device, no bucket to count");
+    }
+
+    /// Uploads have a byte budget of their own, per device and on the
+    /// DECODED size, and its refusal says when this upload will fit —
+    /// `attach-budget: <s>` — so a person is told when, not "slow down". A
+    /// frame larger than the host's per-file cap is charged at the cap: the
+    /// body refuses it, and it must not be refused here forever. The
+    /// console has no upload budget.
+    #[test]
+    fn uploads_have_a_byte_budget_that_says_when() {
+        let mut budgets = BUDGETS;
+        budgets.device.uploads = Rate { per_sec: 1024.0 * 1024.0 / 60.0, burst: 4.0 * 1024.0 * 1024.0 };
+        let b = Budget::new(budgets);
+        let a = device(&b, "phone");
+        let t0 = Instant::now();
+        // `mib` MiB decoded, give or take the two bytes padding would add.
+        let up = |mib: usize| args(json!({ "repo": "/r", "slug": "x", "data": "A".repeat(mib * 1024 * 1024 / 3 * 4) }));
+        assert!(a.admit_at("agent_attach", &up(3), None, t0).is_ok(), "3 of 4 MiB");
+        assert_eq!(a.admit_at("agent_attach", &up(2), None, t0).err(), Some(ATTACH_BUDGET), "2 more do not fit");
+        assert_eq!(a.answer(ATTACH_BUDGET, &up(2), t0), json!("attach-budget: 60"), "1 MiB short, at 1 MiB a minute");
+        assert!(a.admit_at("agent_attach", &up(1), None, t0).is_ok(), "1 still does");
+        assert!(a.admit_at("get_settings", &args(json!({})), None, t0).is_ok(), "other rows are not charged bytes");
+        let huge = args(json!({ "data": "A".repeat(16 * 1024 * 1024) }));
+        assert_eq!(upload_len(&huge), worktrees_core::attach::MAX_BYTES as f64, "charged at the cap");
+        let desk = b.open(2, &Caller::console(), None).unwrap();
+        assert!((0..20).all(|_| desk.admit_at("agent_attach", &up(3), None, t0).is_ok()), "no upload budget at the desk");
+        assert_eq!(desk.answer(ATTACH_BUDGET, &up(3), t0), json!(ATTACH_BUDGET), "no device, no bucket to count");
     }
 
     /// A client sitting AT its cap is admitted and refused by turns, one each

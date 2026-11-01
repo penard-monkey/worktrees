@@ -67,6 +67,14 @@
 //! **Turns are read from the transcript, never the pane** (`worktrees_core::
 //! turns`), and are data.
 //!
+//! **A file for the agent is uploaded, never typed** (`agent_attach`,
+//! `docs/proposals/chat-attachments.md`): the host keeps the bytes in the
+//! place's own folder (`worktrees_core::attach`, which decides what they are
+//! from the bytes alone) and answers with a path relative to the place
+//! root, and the client names that path in a line it sends with
+//! `agent_send`. Nothing here types it: `agent_send` stays the one path that
+//! types into Claude.
+//!
 //! Every pane and file this touches goes through [`AgentIo`], so serve's
 //! tests drive the rows against scripted panes and never a tmux server.
 
@@ -79,9 +87,9 @@ use sha2::{Digest, Sha256};
 use worktrees_core::harness::{self, Delivery, SendOutcome};
 use worktrees_core::pending::{self, Asked, Forget};
 use worktrees_core::prompt::{self, HostOnly, Modal};
-use worktrees_core::store::{self, RemoteSend};
+use worktrees_core::store::{self, RemoteAttach, RemoteSend};
 use worktrees_core::tmux::{self, Key, PaneId, PaneList};
-use worktrees_core::{activity, agent, codex, provider, turns, Project};
+use worktrees_core::{activity, agent, attach, codex, provider, turns, Project};
 
 use crate::Ctx;
 
@@ -681,6 +689,46 @@ fn send_note(o: &SendOutcome) -> String {
         SendOutcome::Unconfirmed => "Typed, but the submission could not be confirmed; look before sending it again.".into(),
         SendOutcome::EnterFailed(e) => format!("Typed, but Enter failed ({e}); look before sending it again."),
     }
+}
+
+/// One attach at a time, host-wide: a place's count and bytes are read and
+/// then added to, and two uploads side by side could each see room for one
+/// more. Uploads are rare and a write is milliseconds; the place lock that
+/// answers and sends take is not held, so an upload never waits on a prompt.
+static ATTACH: Mutex<()> = Mutex::new(());
+
+/// `agent_attach`: keep `data` (base64) in this place's attachments folder —
+/// `{path, bytes, sha256, kind, name}`, `path` relative to the place root,
+/// `kind` `image`, `pdf` or `text`, `name` the display name cleaned. `name`
+/// is for display: it never reaches the filesystem. Refused with a stable
+/// token (`attach::ERR_*`): `attach-size: <max>` before anything is decoded,
+/// `attach-type: <what> (accepted: …)` by the bytes, `attach-files: <max>`
+/// and `attach-bytes: <max>` for a full place, `attach-unsafe` for a folder
+/// that is a link, or that git would show. A device's attach is stamped on
+/// the place (`last_remote_attach`). No agent need be running: the file is
+/// read when a line names it.
+pub fn agent_attach(ctx: &Ctx, repo: String, slug: String, name: String, data: String) -> Result<Value, String> {
+    let bytes = attach::decode(&data)?;
+    let project = discover(&repo)?;
+    let place = PathBuf::from(project.place_dir(&slug));
+    let stored = {
+        let _one = ATTACH.lock().unwrap_or_else(|e| e.into_inner());
+        attach::store(&place, Path::new(&project.git_common), &name, &bytes)?
+    };
+    if let Some(by) = ctx.by().filter(store::By::is_device) {
+        let stamp = RemoteAttach { by, path: stored.path.clone(), at: worktrees_core::sysclock::now_epoch() };
+        if let Err(e) = store::edit(&repo, &slug, |d| d.last_remote_attach = Some(stamp)) {
+            crate::log::log("warn", &format!("agent_attach: could not stamp {repo}:{slug}: {e}"));
+        }
+    }
+    let sha256: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+    Ok(json!({
+        "path": stored.path,
+        "bytes": stored.bytes,
+        "sha256": sha256,
+        "kind": stored.kind.as_str(),
+        "name": stored.name,
+    }))
 }
 
 /// `agent_interrupt`: stop the turn running in this place — `{interrupted:

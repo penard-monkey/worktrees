@@ -1083,6 +1083,13 @@ commands! { cx, a;
     agent_send: Engine [instruct, place(repo, slug), session_of(session, repo, slug)] => agents::agent_send(
         &cx.ctx, a.get("repo")?, a.get("slug")?, a.get("session")?, a.get("text")?,
     ),
+    // A file for the agent (docs/proposals/chat-attachments.md): uploaded,
+    // kept in the place, answered with its path, which the client's next
+    // `agent_send` names. `instruct`, because it leads to the agent reading
+    // it: drive-class, step-up, the audit's DRIVE budget.
+    agent_attach: Engine [instruct, place(repo, slug)] => agents::agent_attach(
+        &cx.ctx, a.get("repo")?, a.get("slug")?, a.get("name")?, a.get("data")?,
+    ),
     // Stopping a running turn is one KEY, Esc, never text: `instruct`
     // (drive-class, like a line), pressed only on a turn seen running.
     agent_interrupt: Engine [instruct, place(repo, slug)] => agents::agent_interrupt(&cx.ctx, a.get("repo")?, a.get("slug")?),
@@ -1222,7 +1229,7 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 185 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 186 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six, the slots pair and
     /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
@@ -1230,13 +1237,14 @@ mod tests {
     /// (`remote_candidates`, `device_rename`), the iOS MVP's four agent
     /// rows, the two that answer what one choice cannot
     /// (`agent_answer_text`, `agent_answer_many`) and the one that stops a
-    /// turn (`agent_interrupt`), and `project_sessions`; the check scripts
-    /// hold the page's commands against them.
+    /// turn (`agent_interrupt`), `project_sessions`, and the one that keeps
+    /// a file for the agent (`agent_attach`); the check scripts hold the
+    /// page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 185, "the table has 185 commands");
+        assert_eq!(TABLE.len(), 186, "the table has 186 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1618,8 +1626,9 @@ mod tests {
     /// `agent_answer` (`answer`, the capability's first row) and `agent_send`
     /// (`instruct`), then `agent_answer_many` (`answer`),
     /// `agent_answer_text` (`instruct`) and `agent_interrupt` (`instruct`:
-    /// one key, a stop); and `project_sessions` (`read`),
-    /// what removing a project would leave running. A row that moves group
+    /// one key, a stop); `project_sessions` (`read`), what removing a
+    /// project would leave running; and `agent_attach` (`instruct`: a file
+    /// the agent will read). A row that moves group
     /// fails here until the count (and the proposal's table) move with it.
     #[test]
     fn every_row_has_one_base_group_and_the_counts_are_section_3_4s() {
@@ -1636,7 +1645,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 60), ("write", 23), ("admin", 35), ("console", 39), ("stream", 10), ("instruct", 6), ("answer", 2),
+            ("read", 60), ("write", 23), ("admin", 35), ("console", 39), ("stream", 10), ("instruct", 7), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 3),
         ]
         .into();
