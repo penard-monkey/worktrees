@@ -205,7 +205,7 @@ function useAnnounce(target: Target, v: ChatView, items: Item[], agent: string) 
     bundle.current = gather(bundle.current, r.news, now);
     if (timer.current === undefined) timer.current = window.setTimeout(flush, bundle.current.due - now);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- a read landing, or an answer starting or ending, is the trigger
-  }, [v.turns.at, v.prompt.at, v.answering]);
+  }, [v.turns.data, v.turns.at, v.prompt.data, v.prompt.at, v.answering]);
   useEffect(() => {
     const f = () => {
       drop();
