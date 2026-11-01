@@ -9,10 +9,15 @@ title: "Proposal — a chat view of a place's agent"
 is not merged and not reviewed. Its three open questions were decided by the
 user on 2026-10-30 (§9). On 2026-10-31 it took in `feat/actionable-prompts`
 (two new rows, richer prompts, and the prompt hook; on main as #581), and the
-prompt card now answers every prompt those rows can read (§5). Its one server
-change is additive: `agent_turns` answers each turn's `steps` as well, so an
-answered prompt stays in the conversation (§5, "Answered prompts stay in the
-conversation"). It adds no row.
+prompt card now answers every prompt those rows can read (§5). On 2026-11-01
+it took in two of §8's asks. Its server changes:
+- `agent_turns` answers each turn's `steps`, so an answered prompt stays in
+  the conversation (§5, "Answered prompts stay in the conversation");
+- each tool step says what it ran and whether it failed (§8, tool-call
+  summaries);
+- one new row, `agent_interrupt`, which the chat's Stop and Esc press (§8).
+
+The first two are additive: an older client ignores them.
 
 **The ask.** "Some users find the terminal-style view too challenging to use.
 Early feedback on the worktrees-ios UI has been good, so its chat style is a
@@ -25,8 +30,8 @@ links.
 each agent cell**. The terminal stays the default and stays mounted under the
 chat, hidden, so going back takes one click and keeps its scrollback. The chat
 is the iOS design on the same serve rows (`agent_turns`, `agent_prompt`,
-`agent_answer`, `agent_answer_text`, `agent_answer_many`, `agent_send`),
-adjusted for a console:
+`agent_answer`, `agent_answer_text`, `agent_answer_many`, `agent_send`,
+`agent_interrupt`), adjusted for a console:
 - no step-up or grant;
 - the "always allow" choices are answerable here;
 - Enter sends;
@@ -242,7 +247,7 @@ for each line), as a sent message's pending bubble does.
 |---|---|---|
 | Tool output and diffs | `agent_turns` carries each call's name, one-line input and whether it failed (§8), never its output | A row per call under the reply; the top line names the terminal. A path in a reply opens the file in the dock |
 | Slash commands | `typed_line_ok` refuses a leading `/`, on purpose | The refusal says "run in the terminal" |
-| Esc / interrupt | No row presses Esc (§8) | Not offered |
+| Esc / interrupt | `agent_interrupt` (§8) presses ONE Esc, only while the pane shows a turn running, and refuses a prompt, an idle agent, a draft typed in the terminal, and pi and kimi | Stop beside Send, and Esc in the chat, while the agent works; a refusal that leaves a turn running names the terminal, where it can still be stopped |
 | Free text the rows cannot type (kimi's fields: `host_only: text`, no `text`) | No row fills them | The choice is disabled and names the terminal. Claude's and Codex's fields and notes are answered on the card (§5) |
 | Images, a pasted screenshot, a file drop | One line of text only | Not offered. The terminal's drag and drop is unchanged |
 | pi, kimi | No transcript reader (`agents.rs`) | A fallback card; sends and prompts still work |

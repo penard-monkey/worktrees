@@ -70,8 +70,9 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   approves, so `instruct` alone must not reach it), length and hash, stamp —
   and only into a field the
   prompt itself opened and shows empty, each step proved before Enter. Do not
-  grow a third path that types into Claude. `agent_interrupt` (the chat's
-  Stop, `feat/chat-interrupt`) is not one: it types no text, only ONE key,
+  grow a third path that types into Claude. `agent_interrupt`
+  (`agents::agent_interrupt`, the chat's Stop and its Esc, `stopTurn` in
+  `chat.ts`) is not one: it types no text, only ONE key,
   Escape, through `tmux::press` as `agent_answer`'s keys go, under the same
   place lock. It is `instruct` (step-up, the DRIVE budget, stamped like a
   send) and presses only on a fresh capture whose own status shows a turn
