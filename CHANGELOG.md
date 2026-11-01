@@ -17,11 +17,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
     the tools it used. While the agent works, the chat reads them again every
     10 seconds, so a reply appears shortly after its turn ends, not word by
     word as it is written.
+  - Each tool call says what it did (the command, the file, the search), and
+    a call that failed is marked "failed". A long turn shows its first few
+    calls, then "+N more", which opens the rest.
   - A one-line box sends the agent a message when you press Enter. A line the
     agent would refuse or run instead of reading is stopped where you type it,
     with the reason: a line break, a hidden formatting character, or a
     leading `/`, `@`, `!` or `#`. If the terminal's own input already holds
     unsent text, the chat says so and sends nothing over it.
+  - You can stop a running turn from the chat. While the agent works, a Stop
+    button sits beside Send, and Esc in the chat does the same. It presses
+    Esc once in the agent's terminal and tells you whether the turn stopped.
+    A prompt waiting for an answer is never cancelled this way.
   - A prompt the agent is waiting on becomes a card above the box: pick a
     choice, then send it. That covers permissions, questions (a multi-select
     one as checkboxes), plans, an answer of your own typed into the
@@ -34,9 +41,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
     holds for Claude's questions, permissions and plans and Codex's
     questions. A Codex approval shows only as the tool it ran, because Codex
     doesn't record the answer.
-  - Not yet: tool output, diffs, slash commands and Esc (stopping a turn) are
-    in the terminal only. pi's and Kimi's conversations aren't shown, though
-    you can still send them a line and answer their prompts.
+  - Not yet: tool output, diffs and slash commands are in the terminal only.
+    pi's and Kimi's conversations aren't shown and their turns can't be
+    stopped from the chat, though you can still send them a line and answer
+    their prompts.
 
 ### Fixed
 - **The phone opens a live agent's conversation again, or says why it
