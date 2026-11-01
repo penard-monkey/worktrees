@@ -3230,6 +3230,71 @@ function RemoveDialog({ place, busy, error, onConfirm, onClose }: {
   );
 }
 
+/** One live session of a project's places, as serve's `project_sessions`
+ *  (and `remove_project`'s `left_running`) lists it: `ops::live_places`. */
+type LiveSession = { slug: string; session: string; agent: Harness | null };
+
+/** Removing a project whose places have LIVE sessions. Unregistering closes
+ *  nothing, so without this the sessions — an agent mid-turn included — kept
+ *  running with nothing left to show them. Shown only when there are some
+ *  (the arm alone still removes a project with none); the list is core's
+ *  (`project_sessions`), never re-derived from the snapshot here.
+ *
+ *  "Close them" goes through `close_place`, place by place, bound to the
+ *  session shown (`session`): the existing close path, with its consent rule.
+ *  Module scope (CLAUDE.md): App re-renders on every refresh tick. */
+function RemoveProjectDialog({ name, root, sessions, busy, error, onClose, onKeep, onCloseAll }: {
+  name: string;
+  root: string;
+  sessions: LiveSession[];
+  busy: boolean;
+  /** Why closing stopped, verbatim. The project stays registered then. */
+  error: string;
+  onClose: () => void;
+  onKeep: () => void;
+  onCloseAll: () => void;
+}) {
+  useEscape(() => { if (!busy) onClose(); });
+  const agents = sessions.filter((s) => s.agent).length;
+  const n = sessions.length;
+  return (
+    <div className="scrim scrim-center" onClick={() => !busy && onClose()}>
+      <div className="sync-modal rm-modal" role="dialog" aria-label={`Remove project ${name}`}
+        data-testid="rmproj-dialog" onClick={(e) => e.stopPropagation()}>
+        <header className="sync-h"><b>Remove project</b></header>
+        <div className="sync-body">
+          <div className="rm-id">
+            <div className="rm-name">{name}</div>
+            <div className="rm-path">{root}</div>
+          </div>
+          <div className="sync-live rmproj-live" data-testid="rmproj-sessions">
+            <div>
+              <span className="rmproj-warn">⚠</span> {n} live {n === 1 ? "session" : "sessions"}
+              {agents > 0 && <>, {agents} running an agent</>}. Removing the project closes nothing, and
+              worktrees will no longer show {n === 1 ? "it" : "them"}:
+            </div>
+            {sessions.map((s) => (
+              <div key={s.session} className="rmproj-row">
+                <code>{s.session}</code> in {s.slug}
+                {s.agent && <span className="rm-opt-note"> · {HARNESS_LABEL[s.agent] ?? s.agent} running</span>}
+              </div>
+            ))}
+          </div>
+          <div className="rm-note">Nothing on disk changes either way: the repository and its worktrees stay.</div>
+          {error && <div className="sync-err" data-testid="rmproj-error">{error}</div>}
+        </div>
+        <footer className="sync-foot">
+          <button className="ctrl" data-testid="rmproj-cancel" onClick={onClose} disabled={busy}>Cancel</button>
+          <button className="ctrl" data-testid="rmproj-keep" onClick={onKeep} disabled={busy}>Keep them running</button>
+          <button className="enter-btn danger" data-testid="rmproj-close" onClick={onCloseAll} disabled={busy}>
+            {busy ? "Closing…" : `Close ${n === 1 ? "it" : "them"} + remove`}
+          </button>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
 /** The name rule, mirrored from `lib.rs::valid_project_name` for the inline
  *  hint. The BACKEND decides — it re-validates every field it is handed — so a
  *  drift here can only make this message worse, never let a bad name through. */
@@ -3854,6 +3919,11 @@ function App() {
   const [rm, setRm] = useState<{ repo: string; slug: string } | null>(null);
   const [rmBusy, setRmBusy] = useState(false);
   const [rmErr, setRmErr] = useState("");
+  /** Removing a PROJECT whose places have live sessions (RemoveProjectDialog):
+   *  the list core gave when the remove was confirmed. */
+  const [rmProj, setRmProj] = useState<{ root: string; name: string; sessions: LiveSession[] } | null>(null);
+  const [rmProjBusy, setRmProjBusy] = useState(false);
+  const [rmProjErr, setRmProjErr] = useState("");
   /** The import picker (workspace-level, no project). Its own small state: the
    *  hub listing is a different question from any project's sync status, and a
    *  machine with an empty workspace has no project to hang it off. */
@@ -5691,6 +5761,53 @@ function App() {
       if (sel?.repo === root) setSel(null);
     } catch (e) { fail(e); }
   };
+  /** The armed remove, confirmed: a project whose places have live sessions
+   *  asks what to do with them (RemoveProjectDialog); one with none is removed
+   *  at once, as it always was. An older host has no `project_sessions` and
+   *  answers `unknown command`, so any failure to ask removes the old way —
+   *  the arm was the confirmation then. */
+  const confirmRemoveProject = async (root: string) => {
+    let sessions: LiveSession[] = [];
+    try {
+      sessions = (await invoke<{ sessions?: LiveSession[] }>("project_sessions", { root })).sessions ?? [];
+    } catch (e) {
+      invoke("log_event", { level: "warn", msg: `project_sessions ${root}: ${String(e)}` }).catch(() => {});
+    }
+    if (sessions.length === 0) return removeProject(root);
+    const name = ws?.projects.find((p) => p.root === root)?.name ?? basename(root);
+    setRmProjErr("");
+    setRmProj({ root, name, sessions });
+  };
+  /** "Close them + remove": each place through `close_place`, bound to the
+   *  session the dialog showed, then the remove. A place that did not close
+   *  keeps the project registered — the user asked for both, and doing half
+   *  would hide what is still running. */
+  const closeAndRemoveProject = async () => {
+    if (!rmProj || rmProjBusy) return;
+    const { root, sessions } = rmProj;
+    setRmProjBusy(true);
+    try {
+      for (const slug of [...new Set(sessions.map((s) => s.slug))]) {
+        // The place's own session (not a `~agent~` sidecar), when one was
+        // listed: close takes the sidecars with it.
+        const own = sessions.find((s) => s.slug === slug && !s.session.includes("~agent~"));
+        const r = await invoke<CmdResult>("close_place", { repo: root, slug, yes: true, session: own?.session ?? null });
+        if (!r.ok) {
+          setRmProjErr(r.needs_confirm
+            ? `${own?.session ?? slug} is no longer the session in ${slug} — ${r.needs_confirm} is. Nothing was closed there, and the project is still registered.`
+            : (r.output || `closing ${slug} failed (exit ${r.code})`) + " The project is still registered.");
+          await refresh();
+          return;
+        }
+      }
+      setRmProj(null);
+      await removeProject(root);
+    } catch (e) {
+      setRmProjErr(String(e));
+    } finally {
+      setRmProjBusy(false);
+    }
+  };
   // Two-click arm for the project ctx-menu item (shares confirmRm with the two
   // Close-session arms; key namespaced "proj|" so it never collides). Removing a
   // PLACE holds no arm at all any more — that one is RemoveDialog.
@@ -5698,7 +5815,7 @@ function App() {
     const key = `proj|${root}`;
     if (confirmRm !== key) { setConfirmRm(key); return; } // arm; menu stays open
     closeCtx();
-    removeProject(root);
+    void confirmRemoveProject(root);
   };
   // Two-click arm for the project-header ✕ (key namespaced "hdr|"). Unlike the
   // popover surfaces there's no dismissal path to clear the arm, so it also
@@ -5707,7 +5824,7 @@ function App() {
     const key = `hdr|${root}`;
     if (confirmRm !== key) { setConfirmRm(key); return; }
     setConfirmRm(null);
-    removeProject(root);
+    void confirmRemoveProject(root);
   };
   // Auto-disarm the TIMED arms: the project-header ✕ ("hdr|") and both Close
   // arms ("close|" bare, "closectx|" in the menu). The first two have no popover
@@ -9385,6 +9502,18 @@ function App() {
           error={rmErr}
           onConfirm={doRemove}
           onClose={() => { setRm(null); setRmErr(""); }}
+        />
+      )}
+      {rmProj && (
+        <RemoveProjectDialog
+          name={rmProj.name}
+          root={rmProj.root}
+          sessions={rmProj.sessions}
+          busy={rmProjBusy}
+          error={rmProjErr}
+          onClose={() => { setRmProj(null); setRmProjErr(""); }}
+          onKeep={() => { const root = rmProj.root; setRmProj(null); void removeProject(root); }}
+          onCloseAll={() => void closeAndRemoveProject()}
         />
       )}
       {menu && <div className="menu-catch" onClick={closeMenu} />}

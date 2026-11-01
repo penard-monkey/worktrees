@@ -147,13 +147,19 @@ impl Sandbox {
         let ok = Command::new("git").args(["init", "-q"]).current_dir(&dir).status().unwrap().success();
         assert!(ok, "git init {}", dir.display());
         let root = std::fs::canonicalize(&dir).unwrap().to_string_lossy().into_owned();
+        self.register(&root, name);
+        root
+    }
+
+    /// `root` added to the sandbox's registry as `name`, by writing the file:
+    /// no `add_project`, so nothing is adopted.
+    fn register(&self, root: &str, name: &str) {
         let reg_dir = self.root.join("xdg/worktrees");
         std::fs::create_dir_all(&reg_dir).unwrap();
         let reg = reg_dir.join("projects.json");
         let mut v: Value = std::fs::read(&reg).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(json!({ "version": 1, "projects": [] }));
         v["projects"].as_array_mut().unwrap().push(json!({ "root": root, "name": name }));
         std::fs::write(&reg, serde_json::to_vec(&v).unwrap()).unwrap();
-        root
     }
 
     /// SIGTERM, then the exit status, within a bound.
@@ -457,12 +463,55 @@ impl PrivateTmux {
         let o = self.run(&["list-clients", "-F", "#{session_name}"]);
         String::from_utf8_lossy(&o.stdout).lines().map(str::to_string).collect()
     }
+    /// A config for the server's first `new-session -f`: a pane whose program
+    /// exits stays, dead, so a failing test can still read what ran there.
+    fn keep_dead_panes(&self) -> String {
+        let conf = self.sock.with_extension("conf");
+        std::fs::write(&conf, "set -g remain-on-exit on\n").unwrap();
+        conf.to_string_lossy().into_owned()
+    }
+    /// Where a fake Claude's stderr goes (`fake_claude_cmd`). Beside the
+    /// socket, not in the `Sandbox`.
+    fn err_file(&self) -> PathBuf {
+        self.sock.with_extension("err")
+    }
+    /// Waits until `target`'s pane is in `dir`. `new-session -c` returns
+    /// before the pane is there: tmux's forked child makes the `chdir`, and
+    /// one that fails, because the folder has moved since, puts the pane in
+    /// `$HOME` without a word. Ubuntu's tmux has that child ask the user's
+    /// systemd for a cgroup first, a D-Bus round trip, so on the ubuntu-latest
+    /// runner the moved test's rename came first (#580).
+    fn wait_for_cwd(&self, target: &str, dir: &str) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let o = self.run(&["display-message", "-p", "-t", target, "#{pane_current_path}"]);
+            let now = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if now == dir {
+                return;
+            }
+            assert!(Instant::now() < deadline, "{target}'s pane never reached {dir}: it is in {now:?}");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
 }
 
 impl Drop for PrivateTmux {
     fn drop(&mut self) {
+        // A failing test says what its server held: every pane (a dead one
+        // too, under `keep_dead_panes`) and what the fakes wrote to stderr.
+        if std::thread::panicking() {
+            let fmt = "#{session_name} #{pane_id} dead=#{pane_dead} status=#{pane_dead_status} cmd=#{pane_current_command} path=#{pane_current_path}";
+            match self.try_run(&["list-panes", "-a", "-F", fmt]) {
+                Ok(o) => eprintln!("private tmux panes:\n{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)),
+                Err(e) => eprintln!("private tmux panes: {e}"),
+            }
+            let err = std::fs::read_to_string(self.err_file()).unwrap_or_else(|e| format!("({e})"));
+            eprintln!("fake Claude stderr ({}):\n{err}", self.err_file().display());
+        }
         let _ = self.try_run(&["kill-server"]);
-        let _ = std::fs::remove_file(&self.sock);
+        for f in [self.sock.clone(), self.sock.with_extension("conf"), self.err_file()] {
+            let _ = std::fs::remove_file(f);
+        }
     }
 }
 
@@ -869,4 +918,213 @@ fn the_flags_are_checked_at_launch() {
     let out = Command::new(bin()).args(["serve", "--help"]).output().unwrap();
     assert!(out.status.success());
     assert!(String::from_utf8_lossy(&out.stdout).contains("--config-dir"));
+}
+
+fn git_in(dir: &Path, args: &[&str]) {
+    let o = Command::new("git").arg("-C").arg(dir).args(args).output().unwrap();
+    assert!(o.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&o.stderr));
+}
+
+/// A stand-in Claude: a copy of `bash` named `claude`, so tmux reports
+/// `claude` as the pane's command on both OSes. Not a copy of `sleep`: since
+/// 25.10, Ubuntu's coreutils is uutils, ONE binary that picks its program by
+/// argv[0], so a copy named `claude` prints "coreutils: unknown program
+/// 'claude'" and exits, taking its pane, its session and the tmux server
+/// with it (the ubuntu-26.04 runner; measured in ubuntu:26.04). bash is its
+/// own binary everywhere. Copied by `cp`, so this process never holds the
+/// file open for writing (the ETXTBSY trap, AGENTS.md), and ad-hoc signed on
+/// macOS, which kills an unsigned copy of a system binary.
+fn fake_claude(dir: &Path) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    let bin = dir.join("claude");
+    assert!(Command::new("cp").arg("/bin/bash").arg(&bin).status().unwrap().success(), "cp /bin/bash");
+    if cfg!(target_os = "macos") {
+        let _ = Command::new("codesign").args(["-s", "-", "-f"]).arg(&bin).output();
+    }
+    bin
+}
+
+/// The pane command that runs the fake Claude AS the pane's foreground
+/// process, as a real launch's Claude is. tmux hands a command string to
+/// `$SHELL -c` (or `/bin/sh -c`): bash and macOS's `sh` exec its one command,
+/// but Debian's and Ubuntu's `sh` is dash, which forks it and stays in front,
+/// so tmux reports the pane as `sh` and no Claude is seen. `exec` makes every
+/// shell replace itself. Measured on ubuntu:24.04 (dash 0.5.12, tmux 3.4).
+/// The fake then waits on its tty with `read`, a builtin, so no other program
+/// runs under it; its stderr goes to `err`, which a failing test prints.
+fn fake_claude_cmd(claude: &Path, err: &Path) -> String {
+    format!("exec {} -c 'read -t 600 _' 2>>{}", claude.display(), err.display())
+}
+
+/// The reported bug, end to end through the binary. A project's folder is
+/// renamed with Claude running in its (main) and in a lane; the user removes
+/// the old root and adds the new one. `agent_turns` must read the live
+/// Claude's turns both BEFORE adoption — its session still `old-(main)`, found
+/// by pane cwd, by the snapshot's rule — and AFTER `add_project` renamed it to
+/// `new-(main)`, while its probe still names `old-(main)` and only the pane id
+/// ties the two. Before the fix the first read answered "no agent is running
+/// in this place".
+#[test]
+fn a_moved_projects_agent_is_read_before_and_after_it_is_adopted() {
+    if !PrivateTmux::available() {
+        eprintln!("skipped: no tmux on PATH");
+        return;
+    }
+    let mut sb = Sandbox::new("moved");
+    // After `sb`, so it drops first: a failing test's dump shows the panes'
+    // folders before the sandbox removes them.
+    let tmux = PrivateTmux::new("moved");
+    let projects = sb.root.join("projects");
+    let old = projects.join("old");
+    std::fs::create_dir_all(&old).unwrap();
+    git_in(&old, &["init", "-q"]);
+    git_in(&old, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"]);
+    git_in(&old, &["worktree", "add", "-q", ".worktrees/lane", "-b", "lane"]);
+    let old_root = std::fs::canonicalize(&old).unwrap().to_string_lossy().into_owned();
+    let claude = fake_claude(&sb.root.join("fake"));
+    let conf = tmux.keep_dead_panes();
+    for (session, dir) in [("old-(main)", old_root.clone()), ("old-lane", format!("{old_root}/.worktrees/lane"))] {
+        let made = tmux.run(&["-f", &conf, "new-session", "-d", "-s", session, "-c", &dir, "-x", "80", "-y", "24", &fake_claude_cmd(&claude, &tmux.err_file())]);
+        assert!(made.status.success(), "private tmux: {}", String::from_utf8_lossy(&made.stderr));
+        tmux.wait_for_cwd(&format!("={session}:"), &dir);
+    }
+    // Claude's own files for the (main) one, as Claude writes them: its probe
+    // names the session and pane it started in, its transcript is filed under
+    // the folder it started in.
+    // `|`, not a tab: tmux 3.3a's `display-message -p` does not hand a tab back.
+    let shown = tmux.run(&["display-message", "-p", "-t", "=old-(main):", "#{pane_pid}|#{window_id}|#{pane_id}"]);
+    let shown = String::from_utf8_lossy(&shown.stdout).trim().to_string();
+    let mut it = shown.split('|');
+    let (pid, window, pane) = (it.next().unwrap().to_string(), it.next().unwrap().to_string(), it.next().unwrap().to_string());
+    let claude_home = sb.root.join("home/.claude");
+    std::fs::create_dir_all(claude_home.join("sessions")).unwrap();
+    std::fs::write(
+        claude_home.join(format!("sessions/{pid}.json")),
+        json!({ "pid": pid.parse::<i64>().unwrap(), "cwd": old_root, "status": "busy", "kind": "interactive",
+                "tmux": format!("old-(main):{window}.{pane}"), "sessionId": "sid-main" }).to_string(),
+    )
+    .unwrap();
+    let mangled: String = old_root.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
+    let tdir = claude_home.join("projects").join(mangled);
+    std::fs::create_dir_all(&tdir).unwrap();
+    std::fs::write(tdir.join("sid-main.jsonl"), include_str!("../../worktrees-core/tests/fixtures/transcripts/claude-2.1.309.jsonl")).unwrap();
+
+    // The rename, outside worktrees. Both registrations, as the user had them.
+    let new = projects.join("new");
+    std::fs::rename(&old, &new).unwrap();
+    let new_root = std::fs::canonicalize(&new).unwrap().to_string_lossy().into_owned();
+    sb.register(&old_root, "old");
+    sb.register(&new_root, "new");
+    let sf = sb.launch_env(&["--allow-origin", "http://localhost:1420"], &[("TMUX", &tmux.env())]);
+    let mut ws = connect(&sf, "http://localhost:1420");
+    listen(&mut ws, &["sessions:busy"]);
+
+    // Removing the old root: its folder is gone, so nothing of it runs there.
+    let r = rpc(&mut ws, 1, "remove_project", json!({ "root": old_root }));
+    assert!(r["ok"]["projects"].is_array() && r["ok"].get("left_running").is_none(), "{r}");
+
+    // A + B, no rename: the session found by pane cwd, the probe by name and pane.
+    let r = rpc(&mut ws, 2, "agent_turns", json!({ "repo": new_root, "slug": "(main)" }));
+    let before = &r["ok"];
+    assert_eq!(before["session"], json!("old-(main)"), "{r}");
+    assert_eq!(before["harness"], json!("claude"), "{r}");
+    let turns = before["turns"].as_array().unwrap_or_else(|| panic!("{r}")).clone();
+    assert!(!turns.is_empty(), "{r}");
+
+    // D: adding the new root adopts it — the lane's git links repaired, both
+    // sessions renamed, nothing closed.
+    let r = rpc(&mut ws, 3, "add_project", json!({ "dir": new_root }));
+    let adopted = &r["ok"]["adopted"];
+    assert_eq!(adopted["repaired"], json!([format!("{new_root}/.worktrees/lane")]), "{r}");
+    let renamed: Vec<(String, String)> = adopted["renamed"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{r}"))
+        .iter()
+        .map(|x| (x["from"].as_str().unwrap().to_string(), x["to"].as_str().unwrap().to_string()))
+        .collect();
+    assert!(renamed.contains(&("old-(main)".into(), "new-(main)".into())) && renamed.contains(&("old-lane".into(), "new-lane".into())), "{r}");
+    let live = String::from_utf8_lossy(&tmux.run(&["list-sessions", "-F", "#{session_name}"]).stdout).into_owned();
+    let mut live: Vec<&str> = live.lines().collect();
+    live.sort_unstable();
+    assert_eq!(live, ["new-(main)", "new-lane"]);
+    git_in(&new.join(".worktrees/lane"), &["status", "-s"]);
+
+    // B, after the rename: the probe still says `old-(main)`; its pane is the lane's.
+    let r = rpc(&mut ws, 4, "agent_turns", json!({ "repo": new_root, "slug": "(main)" }));
+    assert_eq!(r["ok"]["session"], json!("new-(main)"), "{r}");
+    assert_eq!(r["ok"]["turns"], json!(turns), "the same conversation: {r}");
+
+    // Adding it again finds nothing more to do.
+    let r = rpc(&mut ws, 5, "add_project", json!({ "dir": new_root }));
+    assert!(r["ok"]["projects"].is_array() && r["ok"].get("adopted").is_none(), "{r}");
+
+    // The nav follows the pane too: the model label (found by the session the
+    // Claude runs in now) and the busy dot (keyed by the place it is in now,
+    // never the folder it started in, which is gone).
+    let r = rpc(&mut ws, 6, "list_places", json!({ "repo": new_root }));
+    let main = r["ok"]["places"].as_array().and_then(|ps| ps.iter().find(|p| p["slug"] == json!("(main)"))).unwrap_or_else(|| panic!("{r}"));
+    assert_eq!(main["agent_sessions"]["claude"]["name"], json!("new-(main)"), "{main}");
+    assert!(main["agent_sessions"]["claude"]["model"].is_string(), "the model label after the rename: {main}");
+    let busy = busy_until(&mut ws, &json!([new_root]), Duration::from_secs(15));
+    assert_eq!(busy, json!([new_root]), "the busy dot names the new folder");
+    assert_eq!(sb.terminate().code(), Some(0));
+}
+
+/// Read `sessions:busy` events until one's `busy` is `want`, or `within` has
+/// passed; the last `busy` seen either way.
+fn busy_until(ws: &mut WebSocket<TcpStream>, want: &Value, within: Duration) -> Value {
+    ws.get_mut().set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+    let deadline = Instant::now() + within;
+    let mut last = Value::Null;
+    while Instant::now() < deadline && last != *want {
+        match ws.read() {
+            Ok(m) => {
+                let v: Value = serde_json::from_str(m.to_text().unwrap()).unwrap();
+                if v["event"] == json!("sessions:busy") {
+                    last = v["payload"]["busy"].clone();
+                }
+            }
+            Err(tokio_tungstenite::tungstenite::Error::Io(e))
+                if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {}
+            Err(e) => panic!("reading events: {e}"),
+        }
+    }
+    ws.get_mut().set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    last
+}
+
+/// C, through the binary: `project_sessions` lists a project's live sessions
+/// with the agent in each, and `remove_project` names what it leaves running
+/// — and adds nothing to its answer when nothing is.
+#[test]
+fn remove_project_names_the_sessions_it_leaves_running() {
+    if !PrivateTmux::available() {
+        eprintln!("skipped: no tmux on PATH");
+        return;
+    }
+    let mut sb = Sandbox::new("rmproj");
+    let tmux = PrivateTmux::new("rmproj"); // after `sb`: see the moved test
+    let busy = sb.project("busy");
+    let quiet = sb.project("quiet");
+    let claude = fake_claude(&sb.root.join("fake"));
+    let conf = tmux.keep_dead_panes();
+    let made = tmux.run(&["-f", &conf, "new-session", "-d", "-s", "busy-(main)", "-c", &busy, "-x", "80", "-y", "24", &fake_claude_cmd(&claude, &tmux.err_file())]);
+    assert!(made.status.success(), "private tmux: {}", String::from_utf8_lossy(&made.stderr));
+    let sf = sb.launch_env(&["--allow-origin", "http://localhost:1420"], &[("TMUX", &tmux.env())]);
+    let mut ws = connect(&sf, "http://localhost:1420");
+
+    let want = json!([{ "slug": "(main)", "session": "busy-(main)", "agent": "claude" }]);
+    let r = rpc(&mut ws, 1, "project_sessions", json!({ "root": busy }));
+    assert_eq!(r["ok"]["sessions"], want, "{r}");
+    let r = rpc(&mut ws, 2, "project_sessions", json!({ "root": quiet }));
+    assert_eq!(r["ok"]["sessions"], json!([]), "{r}");
+
+    let r = rpc(&mut ws, 3, "remove_project", json!({ "root": quiet }));
+    assert!(r["ok"]["projects"].is_array() && r["ok"].get("left_running").is_none(), "nothing new without sessions: {r}");
+    let r = rpc(&mut ws, 4, "remove_project", json!({ "root": busy }));
+    assert_eq!(r["ok"]["left_running"], want, "{r}");
+    assert_eq!(r["ok"]["projects"], json!([]), "removed all the same: {r}");
+    // Nothing was closed: removing a project only unregisters it.
+    assert!(tmux.run(&["has-session", "-t", "=busy-(main)"]).status.success());
+    assert_eq!(sb.terminate().code(), Some(0));
 }

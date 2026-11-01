@@ -96,6 +96,31 @@ impl Project {
         session_name_under(&self.prefix, slug)
     }
 
+    /// The tmux session actually LIVING in place `slug` (directory `dir`),
+    /// whatever it is named, per the snapshot `panes`: the canonical name when
+    /// it exists, else any session with a pane cwd'd there (`PaneList::
+    /// session_in`, preferring the AI pane `ai_word` names).
+    ///
+    /// THE rule, and the only copy: `ops::live_session` (`close`, `rm`,
+    /// `doctor`), the snapshot (`place_json`) and serve's agent rows all call
+    /// it, so a session the nav shows as a place's is the session `close`
+    /// kills and the one `agent_turns` reads. The rows once looked up the
+    /// canonical name alone, and a project whose folder was renamed (its
+    /// prefix with it) showed a live Claude in the nav while every row
+    /// answered "no agent is running in this place".
+    ///
+    /// `(main)` excludes `.worktrees/`: worktree dirs nest under the main
+    /// root, so without it main would adopt (and `close`/`rm` would kill) a
+    /// worktree's session.
+    pub fn live_session_in(&self, slug: &str, dir: &str, panes: &tmux::PaneList, ai_word: &str) -> Option<String> {
+        let canonical = self.session_name(slug);
+        if panes.has_session(&canonical) {
+            return Some(canonical);
+        }
+        let exclude = (slug == "(main)").then_some(self.wt_root.as_str());
+        panes.session_in(dir, ai_word, exclude)
+    }
+
     /// Gap 8's other half: a session an older binary named under `legacy`, the
     /// prefix the rule before gap 8 made (`config::legacy_prefix_from`), is
     /// renamed to the name the current prefix renders, once per process per
@@ -376,23 +401,18 @@ impl Project {
         let canonical = self.session_name(&slug);
         let sidecar = crate::provider::PROVIDERS.iter().map(|p| p.sidecar_name(&canonical))
             .find(|name| panes.is_some_and(|pl| pl.has_session(name)));
-        // Canonical name first (exact match). If it's down, adopt any session
-        // with a pane cwd'd in this dir — the SAME session `open` reuses. Without
-        // this an adopted (foreign-named) session read as "down", the app never
-        // mounted its terminal, and Enter looked dead. For MAIN, exclude
-        // `.worktrees/`: worktree dirs nest under the main root, so without the
-        // exclusion any live worktree session would falsely read as main's.
+        // Canonical name first, else any session with a pane cwd'd in this dir
+        // — the SAME session `open` reuses (`live_session_in`, the one rule).
+        // Without the adoption an adopted (foreign-named) session read as
+        // "down", the app never mounted its terminal, and Enter looked dead.
         //
-        // BOTH lookups answer from the prefetched pane list — zero per-place
-        // tmux shell-outs. The canonical check used `session_exists`, which is
-        // its own `list-sessions`, so an N-place snapshot paid N of them every
+        // Answered from the prefetched pane list — zero per-place tmux
+        // shell-outs. The canonical check used `session_exists`, which is its
+        // own `list-sessions`, so an N-place snapshot paid N of them every
         // poll. `has_session` is exact-match over the same snapshot and every
         // live session has at least one pane, so `list-panes -a` names them all.
-        let exclude = if is_main { Some(self.wt_root.as_str()) } else { None };
-        let (session, tmux_up) = if panes.is_some_and(|pl| pl.has_session(&canonical)) {
-            (canonical, true)
-        } else if let Some(adopted) = panes.and_then(|pl| pl.session_in(dir, ai_word, exclude)) {
-            (adopted, true)
+        let (session, tmux_up) = if let Some(live) = panes.and_then(|pl| self.live_session_in(&slug, dir, pl, ai_word)) {
+            (live, true)
         } else if let Some(sidecar) = sidecar {
             (sidecar, true)
         } else {
@@ -705,7 +725,7 @@ impl Project {
 /// which owns the order and the sanitization. Second: the prefix an older
 /// binary made of the same inputs, when gap 8 changed it
 /// (`config::legacy_prefix_from`).
-fn resolve_prefix(main_root: &str) -> (String, Option<String>) {
+pub(crate) fn resolve_prefix(main_root: &str) -> (String, Option<String>) {
     let env = std::env::var("WORKTREES_PREFIX").ok();
     let file = prefix_file(main_root);
     let project = projcfg::project_prefix(Path::new(main_root));
@@ -719,7 +739,7 @@ fn resolve_prefix(main_root: &str) -> (String, Option<String>) {
 }
 
 /// A place's session name under `prefix`: `<prefix>-<slug>`, `.` → `-`.
-fn session_name_under(prefix: &str, slug: &str) -> String {
+pub(crate) fn session_name_under(prefix: &str, slug: &str) -> String {
     format!("{prefix}-{slug}").replace('.', "-")
 }
 
@@ -772,7 +792,7 @@ pub(crate) fn prefix_file(main_root: &str) -> Option<String> {
 /// function is what keeps a profiled launch (which prefixes env onto the shell
 /// line) from quietly turning the match word into `CLAUDE_CONFIG_DIR=…` and
 /// degrading adoption to "first pane in the worktree".
-pub(crate) fn adopt_ai_word() -> String {
+pub fn adopt_ai_word() -> String {
     crate::profile::ai_word_of(&crate::config::resolve_ai_cmd(None))
 }
 

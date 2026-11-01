@@ -276,7 +276,7 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
             // `fp` is the session list this tick already paid for, so the whole
             // pass is ONE extra tmux spawn per 15s regardless of how many
             // sessions are open.
-            match scan_drafts(&fp) {
+            match scan_drafts(&panes) {
                 Ok(drafts) => {
                     last_draft_err.clear();
                     if trace_spawns() {

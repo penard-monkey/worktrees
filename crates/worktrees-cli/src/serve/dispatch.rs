@@ -1,4 +1,4 @@
-//! The 183 commands, each with its exposure, capability and objects, in ONE
+//! The 184 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -841,6 +841,7 @@ commands! { cx, a;
     init_repo: Engine [admin, new_path(dir), filtered(workspace)] => workspace::init_repo(&cx.ctx, a.get("dir")?),
     create_initial_commit: Engine [admin, project(repo), filtered(workspace)] => workspace::create_initial_commit(&cx.ctx, a.get("repo")?),
     remove_project: Engine [admin, project(root), filtered(workspace)] => workspace::remove_project(&cx.ctx, a.get("root")?),
+    project_sessions: Engine [read, project(root)] => workspace::project_sessions(a.get("root")?),
     reorder_projects: Engine [write, all, roots(roots), filtered(workspace)] => workspace::reorder_projects(&cx.ctx, a.get("roots")?),
 
     // ── settings, planning, and the mutating verbs (ops) ─────────────────
@@ -1218,19 +1219,20 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 183 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 184 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six, the slots pair and
     /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
     /// slice 6's four `remote_*` console rows, the host app's two
     /// (`remote_candidates`, `device_rename`), the iOS MVP's four agent
     /// rows and the two that answer what one choice cannot
-    /// (`agent_answer_text`, `agent_answer_many`); the check scripts hold the page's commands against them.
+    /// (`agent_answer_text`, `agent_answer_many`), and `project_sessions`;
+    /// the check scripts hold the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 183, "the table has 183 commands");
+        assert_eq!(TABLE.len(), 184, "the table has 184 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1496,8 +1498,9 @@ mod tests {
     /// A reply that carries places carries their provenance stamps, so the
     /// row that returns one declares a filter, or another device's id goes
     /// out with it (`scope::stamps`). The bodies that do are read off
-    /// workspace.rs: every `pub fn` there that answers a `Workspace`, a
-    /// `CloneDone` (which holds one) or a project's snapshot.
+    /// workspace.rs: every `pub fn` there that answers a `Workspace`, or a
+    /// `CloneDone`, `Added` or `Removed` (each holds one), or a project's
+    /// snapshot.
     #[test]
     fn every_row_that_answers_with_places_projects_their_stamps() {
         let src = include_str!("../../../worktrees-api/src/workspace.rs");
@@ -1511,7 +1514,9 @@ mod tests {
             if line.starts_with("pub fn ") || !sig.is_empty() {
                 sig.push_str(line);
                 if line.contains('{') {
-                    let places = ["-> Result<Workspace", "-> Result<CloneDone", "-> Result<serde_json::Value"].iter().any(|r| sig.contains(r));
+                    let places = ["-> Result<Workspace", "-> Result<CloneDone", "-> Result<Added", "-> Result<Removed", "-> Result<serde_json::Value"]
+                        .iter()
+                        .any(|r| sig.contains(r));
                     let name = sig["pub fn ".len()..].split(['(', '<']).next().unwrap().to_string();
                     if places && name != "snapshot" {
                         bodies.push(name);
@@ -1520,7 +1525,9 @@ mod tests {
                 }
             }
         }
-        assert!(bodies.contains(&"list_workspace".to_string()) && bodies.contains(&"clone_project".to_string()), "the scan found the bodies: {bodies:?}");
+        for b in ["list_workspace", "clone_project", "add_project", "remove_project"] {
+            assert!(bodies.contains(&b.to_string()), "the scan found {b}: {bodies:?}");
+        }
         let mut unfiltered = Vec::new();
         for (row, text) in row_sources() {
             if bodies.iter().any(|b| text.contains(&format!("workspace::{b}("))) && !text.contains("filtered(") {
@@ -1606,8 +1613,9 @@ mod tests {
     /// and the iOS MVP's agent rows: `agent_prompt` and `agent_turns` (`read`),
     /// `agent_answer` (`answer`, the capability's first row) and `agent_send`
     /// (`instruct`), then `agent_answer_many` (`answer`) and
-    /// `agent_answer_text` (`instruct`). A row that moves group fails here
-    /// until the count (and the proposal's table) move with it.
+    /// `agent_answer_text` (`instruct`); and `project_sessions` (`read`),
+    /// what removing a project would leave running. A row that moves group
+    /// fails here until the count (and the proposal's table) move with it.
     #[test]
     fn every_row_has_one_base_group_and_the_counts_are_section_3_4s() {
         let mut groups: BTreeMap<&str, usize> = BTreeMap::new();
@@ -1623,7 +1631,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 59), ("write", 23), ("admin", 35), ("console", 39), ("stream", 10), ("instruct", 5), ("answer", 2),
+            ("read", 60), ("write", 23), ("admin", 35), ("console", 39), ("stream", 10), ("instruct", 5), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 3),
         ]
         .into();
