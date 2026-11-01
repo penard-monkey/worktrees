@@ -222,6 +222,11 @@ impl Turn {
             + self.tools.iter().map(String::len).sum::<usize>()
             + self.steps.iter().map(Step::bytes).sum::<usize>()
     }
+
+    /// The part of [`Turn::bytes`] that is its tool calls' summaries.
+    fn summary_bytes(&self) -> usize {
+        self.steps.iter().map(|s| if let Step::Tool { summary: Some(s), .. } = s { s.len() } else { 0 }).sum()
+    }
 }
 
 /// The last `n` turns (at most [`MAX_TURNS`]) of a Claude transcript's `lines`,
@@ -897,11 +902,18 @@ impl Step {
 /// What a tool step's `failed` costs toward [`TOTAL_MAX`]: its JSON.
 const FAILED_BYTES: usize = r#","failed":true"#.len();
 
-/// `turns` cut to [`TOTAL_MAX`] bytes of text, newest kept. Tool calls'
-/// summaries go first, oldest first — each call keeps its name and its flag,
-/// and every turn its words — then whole turns, oldest first. The flag says
-/// whether any turn went. The newest turn always stays.
+/// `turns` cut to [`TOTAL_MAX`] bytes of text, newest kept. Whole turns go
+/// first, oldest first, counted WITHOUT their tool calls' summaries, so a
+/// summary never costs a turn; then the kept turns' summaries, oldest first,
+/// until the rest fits — each call keeping its name and its flag. The flag
+/// says whether any turn went. The newest turn always stays.
 pub fn within_budget(mut turns: Vec<Turn>) -> (Vec<Turn>, bool) {
+    let words = |t: &Turn| t.bytes() - t.summary_bytes();
+    let mut dropped = false;
+    while turns.len() > 1 && turns.iter().map(words).sum::<usize>() > TOTAL_MAX {
+        turns.remove(0);
+        dropped = true;
+    }
     let mut over = turns.iter().map(Turn::bytes).sum::<usize>().saturating_sub(TOTAL_MAX);
     for step in turns.iter_mut().flat_map(|t| t.steps.iter_mut()) {
         if over == 0 {
@@ -910,11 +922,6 @@ pub fn within_budget(mut turns: Vec<Turn>) -> (Vec<Turn>, bool) {
         if let Step::Tool { summary: summary @ Some(_), .. } = step {
             over = over.saturating_sub(summary.take().map_or(0, |s| s.len()));
         }
-    }
-    let mut dropped = false;
-    while turns.len() > 1 && turns.iter().map(Turn::bytes).sum::<usize>() > TOTAL_MAX {
-        turns.remove(0);
-        dropped = true;
     }
     (turns, dropped)
 }
@@ -1431,5 +1438,27 @@ mod tests {
         let c = calls(&kept[0]);
         assert_eq!(c.len(), 400);
         assert!(c.first().unwrap().1.is_none() && c.last().unwrap().1.is_some());
+
+        // Turns whose WORDS are over the budget: the oldest turns go, as many
+        // stay as their words allow, and the newest calls keep their lines —
+        // a summary never costs a turn, and a turn that went never costs a
+        // summary.
+        let long = "w".repeat(TEXT_MAX);
+        let mut fx = Vec::new();
+        for i in 0..MAX_TURNS {
+            fx.push(json!({"type": "user", "message": {"role": "user", "content": format!("{i} {long}")}}).to_string());
+            for j in 0..3 {
+                fx.extend(claude_call("Bash", json!({"command": cmd(i, j)}), None));
+            }
+            fx.push(json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": long}]}}).to_string());
+        }
+        let got = claude(&fx, MAX_TURNS);
+        let words = |t: &Turn| t.bytes() - t.summary_bytes();
+        let fit = got.iter().rev().scan(0, |sum, t| { *sum += words(t); Some(*sum) }).take_while(|&s| s <= TOTAL_MAX).count();
+        assert!(fit < MAX_TURNS, "the fixture's words must be over the budget");
+        let (kept, dropped) = within_budget(got);
+        assert!(dropped && kept.iter().map(Turn::bytes).sum::<usize>() <= TOTAL_MAX);
+        assert_eq!(kept.len(), fit, "as many turns as their words allow");
+        assert!(calls(kept.last().unwrap()).last().unwrap().1.is_some(), "the newest call keeps its line");
     }
 }
