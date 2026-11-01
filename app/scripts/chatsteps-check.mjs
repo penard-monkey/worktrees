@@ -4,6 +4,9 @@
 // permission and plan a person answered as what was asked and then the
 // answer. And the line this window adds for an answer it sent ("You
 // answered …") goes once the transcript carries an answer, whoever gave it.
+// A tool step's line and failure reach the reply's calls, which fold past a
+// few, and the place's root comes off their paths; ChatPane draws them as
+// text.
 //
 // Runs the REAL `itemsOf` and `settleAnswered` from app/src/chat.ts, with
 // only its two imports stubbed (React's store hook and the ipc door, neither
@@ -11,7 +14,8 @@
 // the Rust tests pin on a real Claude 2.1.316 transcript
 // (`claude_steps_carry_what_was_asked_and_answered`).
 //
-// CHATSTEPS_SRC points the check at another copy of chat.ts (to show it red).
+// CHATSTEPS_SRC points the check at another copy of chat.ts, CHATSTEPS_PANE
+// at another ChatPane.tsx (to show it red).
 
 import fs from "node:fs";
 import path from "node:path";
@@ -33,7 +37,7 @@ if (/^import /m.test(src)) fail("chat.ts gained an import this check does not st
 const js = (await transformWithEsbuild(src, "chat.ts", { loader: "ts", format: "esm" })).code;
 const C = await import("data:text/javascript;base64," + Buffer.from(js).toString("base64"));
 
-for (const name of ["itemsOf", "settleAnswered"]) {
+for (const name of ["itemsOf", "settleAnswered", "foldCalls", "callsWords", "callsSay", "underRoot"]) {
   if (typeof C[name] !== "function") fail(`chat.ts exports no ${name}`);
 }
 if (failed) {
@@ -122,6 +126,71 @@ const kinds = (items) => items.map((it) => it.k);
   const two = C.settleAnswered([sent(T0 + 5), sent(T0 + 7)], withStep(T0 + 8));
   if (two.length !== 1) fail(`two local answers and one recorded answer leave one line, got ${two.length}`);
   else ok("each recorded answer settles one local line");
+}
+
+// 7. A tool step's line and outcome reach the reply's calls; a host that
+//    sends neither leaves the bare names, drawn as chips.
+{
+  const items = C.itemsOf([turn(T0, "Go", [
+    { kind: "text", at: T0 + 1, text: "Running it." },
+    { kind: "tool", at: T0 + 2, name: "Bash", summary: "make test", failed: true },
+    { kind: "tool", at: T0 + 3, name: "mcp__github__get_issue" },
+  ])], [], []);
+  const r = items.find((it) => it.k === "reply");
+  if (!eq(r?.calls, [{ name: "Bash", summary: "make test", failed: true }, { name: "mcp__github__get_issue" }])) fail(`a tool step's summary and failure reach the reply — got ${JSON.stringify(r?.calls)}`);
+  else ok("a tool step's summary and failure reach the reply's calls");
+  if (!eq(r?.tools, ["Bash", "mcp__github__get_issue"])) fail("the reply's tool names are kept beside its calls");
+  if (!C.callsSay(r.calls)) fail("a call with a line is drawn as a row");
+  const old = C.itemsOf([{ at: T0, user: "Go", reply: "Done.", tools: ["Bash", "Read"], truncated: false }], [], []).find((it) => it.k === "reply");
+  if (!eq(old?.calls, [{ name: "Bash" }, { name: "Read" }]) || C.callsSay(old.calls)) fail("a host without steps gets name chips, as before");
+  else ok("a host without steps (or summaries) falls back to the name chips");
+}
+
+// 8. The fold: up to CALLS_SHOWN + 1 show whole; past it, the first few and
+//    a "+N more" that counts the failures it hides.
+{
+  const n = (k, failedAt = []) => Array.from({ length: k }, (_, i) => ({ name: "Bash", summary: `c${i}`, ...(failedAt.includes(i) ? { failed: true } : {}) }));
+  const four = C.foldCalls(n(C.CALLS_SHOWN + 1), false);
+  if (four.folds || four.shown.length !== C.CALLS_SHOWN + 1) fail(`${C.CALLS_SHOWN + 1} calls fold (a fold would hide one row)`);
+  else ok(`${C.CALLS_SHOWN + 1} calls show whole: a fold never hides a single row`);
+  const seven = C.foldCalls(n(7, [1, 5, 6]), false);
+  if (!seven.folds || seven.shown.length !== C.CALLS_SHOWN || seven.hidden !== 7 - C.CALLS_SHOWN || seven.hiddenFailed !== 2) fail(`seven calls fold to ${C.CALLS_SHOWN} and name the two failures hidden — got ${JSON.stringify({ ...seven, shown: seven.shown.length })}`);
+  else ok("seven calls fold to the first few, and the fold counts the failures it hides");
+  const open = C.foldCalls(n(7), true);
+  if (open.shown.length !== 7 || open.hidden !== 0) fail("an opened fold shows every call");
+  if (C.callsWords(n(3, [0, 2])) !== "Used Bash. 2 calls failed.") fail(`the group's label counts failures — got ${C.callsWords(n(3, [0, 2]))}`);
+  else if (C.callsWords([{ name: "Read" }, { name: "Bash", failed: true }]) !== "Used Read and Bash. One call failed.") fail("one failure is said as one");
+  else if (C.callsWords([{ name: "Read" }, { name: "Edit" }]) !== "Used Read and Edit.") fail("no failure says none");
+  else ok("the group's label names the tools and how many calls failed");
+}
+
+// 9. The place's root comes off a path where a path starts, and nowhere else.
+{
+  const root = "/Users/u/repo/.worktrees/feat-x";
+  const cases = [
+    [`${root}/app/src/App.css`, "app/src/App.css"],
+    [`nav-age in ${root}/app/src`, "nav-age in app/src"],
+    [`sed -n '1,80p' ${root}/src/a.ts`, "sed -n '1,80p' src/a.ts"],
+    [`edit ${root}/a.rs, ${root}/b.rs; delete ${root}/c.rs`, "edit a.rs, b.rs; delete c.rs"],
+    [`cat '${root}/x' --file=${root}/y`, "cat 'x' --file=y"],
+    [`/elsewhere${root}/a.rs`, `/elsewhere${root}/a.rs`],
+    [`${root}-next/a.rs`, `${root}-next/a.rs`],
+    [`cd ${root} && make`, `cd ${root} && make`],
+  ];
+  const bad = cases.filter(([a, want]) => C.underRoot(a, root) !== want || C.underRoot(a, root + "/") !== want);
+  if (bad.length) fail(`underRoot: ${JSON.stringify(bad.map(([a, want]) => [a, C.underRoot(a, root), want]))}`);
+  else ok("the place's root comes off each path that starts with it, and nothing else");
+}
+
+// 10. ChatPane draws a summary as TEXT: no markdown, no link, no raw HTML.
+{
+  const pane = fs.readFileSync(process.env.CHATSTEPS_PANE ?? here("../src/ChatPane.tsx"), "utf8");
+  const at = pane.indexOf("function ToolCalls(");
+  const body = at < 0 ? "" : pane.slice(at, pane.indexOf("\nfunction ", at + 1));
+  if (!body) fail("ChatPane.tsx has no ToolCalls component where this check looks");
+  else if (/<Markdown|dangerouslySetInnerHTML|<a[\s>]|href=|onLink|pathLinks/.test(body)) fail("ToolCalls renders a summary through markup or a link — a summary is transcript text");
+  else if (!/\{underRoot\(c\.summary, props\.root\)\}/.test(body) || !/title=\{c\.summary\}/.test(body)) fail("ToolCalls draws the line as text with the whole of it in the title");
+  else ok("a summary is drawn as text, the whole line in its title");
 }
 
 console.log(failed ? `\nchatsteps-check: ${failed} failure(s)` : "\nchatsteps-check: all good");

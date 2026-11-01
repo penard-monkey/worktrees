@@ -828,12 +828,74 @@ function mockAnsweredTurns(now: number, place: string): MockTurn[] {
     },
   ];
 }
+// `?turns=tools` gives every Claude and Codex place turns whose tool steps
+// say what they did (`turns::Step`'s `summary`) and which failed: a fold of
+// seven calls with a failure past the fold, a long command, paths under the
+// place's root, an MCP call (no summary), and Codex's code-mode `exec`.
+function mockToolTurns(now: number, place: string, harness: string): MockTurn[] {
+  const tool = (at: number, name: string, summary?: string, failed?: boolean) => ({ kind: "tool", at, name, ...(summary ? { summary } : {}), ...(failed ? { failed: true } : {}) });
+  const text = (at: number, t: string) => ({ kind: "text", at, text: t });
+  const turn = (at: number, user: string, steps: Record<string, unknown>[]): MockTurn => ({
+    at, user, truncated: false, steps,
+    reply: steps.filter((s) => s.kind === "text").map((s) => s.text).join("\n\n"),
+    tools: steps.filter((s) => s.kind === "tool").map((s) => String(s.name)),
+  });
+  if (harness === "codex") {
+    return [
+      turn(now - 1500, "Move the invoice totals onto the new ledger API.", [
+        text(now - 1498, "Reading the billing module first."),
+        tool(now - 1497, "exec", "rg -n computeTotals src/billing"),
+        tool(now - 1490, "exec", "edit src/billing/InvoiceSummary.tsx, src/billing/InvoiceTable.tsx; delete src/billing/computeTotals.ts"),
+        tool(now - 1470, "exec", "pnpm test billing", true),
+        tool(now - 1440, "exec", "add billing/__fixtures__/ledger.json"),
+        tool(now - 1420, "exec", "pnpm test billing"),
+        text(now - 1400, "Done for `InvoiceSummary` and `InvoiceTable`. Two tests needed a new fixture (`billing/__fixtures__/ledger.json`)."),
+      ]),
+      turn(now - 240, "Now the credit notes.", [
+        tool(now - 238, "exec", `sed -n '1,80p' ${place}/src/billing/CreditNoteForm.tsx`),
+        text(now - 230, "Starting with `CreditNoteForm`: it still posts to `/v1/credits`."),
+      ]),
+    ];
+  }
+  return [
+    turn(now - 2400, "The nav row's age column clips at 900px. Find out why and fix it.", [
+      text(now - 2398, "Looking at the nav row first."),
+      tool(now - 2397, "Grep", `nav-age in ${place}/app/src`),
+      tool(now - 2396, "Read", `${place}/app/src/App.css`),
+      tool(now - 2395, "Read", `${place}/app/src/Nav.tsx`),
+      tool(now - 2390, "Edit", `${place}/app/src/App.css`),
+      tool(now - 2380, "Bash", "pnpm --dir app exec playwright test nav-row.spec.ts --project=chromium --project=webkit --reporter=line --grep 'age column clips at 900px' --repeat-each=3"),
+      tool(now - 2350, "Bash", "cargo test -p worktrees-core nav::tests::age_column_is_measured -- --exact", true),
+      tool(now - 2340, "mcp__github__get_issue"),
+      text(now - 2330, "Found it. `.nav-age` is a flex item with `min-width: auto`, so at 900px its min-content width beats the row's `flex: 1`. The fix is one declaration in `app/src/App.css`. One Rust test still fails; it predates this change."),
+    ]),
+    turn(now - 900, "Run the tests and fix what fails.", [
+      tool(now - 898, "Bash", "make test", true),
+      tool(now - 860, "Read", `${place}/app/src/sse.test.ts`),
+      tool(now - 850, "Edit", `${place}/app/src/sse.test.ts`),
+      tool(now - 840, "Bash", "make test"),
+      text(now - 820, "All 412 pass now; the flaky one was a timeout in `sse.test.ts`, which waited 50 ms for a reconnect that takes 80."),
+    ]),
+    turn(now - 300, "Survey the fixtures, then close out.", [
+      tool(now - 298, "Agent", "Survey the transcript fixtures"),
+      tool(now - 280, "WebSearch", "codex-cli 0.160.1 code mode exec"),
+      tool(now - 270, "TodoWrite", "3 items"),
+      tool(now - 260, "Skill", "close-out"),
+      text(now - 250, "Three fixtures, all real sessions. Closing out now."),
+    ]),
+  ];
+}
 function mockTurnsAt(repo: string, slug: string) {
   const key = `${repo}|${slug}`;
   let t = mockTurns.get(key);
   if (t) return t;
   const now = Math.floor(Date.now() / 1000);
   const harness = mockHarnessAt(mockPlacePath(repo, slug));
+  if ((harness === "claude" || harness === "codex") && new URLSearchParams(location.search).get("turns") === "tools") {
+    t = mockToolTurns(now, mockPlacePath(repo, slug), harness);
+    mockTurns.set(key, t);
+    return t;
+  }
   if (harness === "claude" && new URLSearchParams(location.search).get("turns") === "answered") {
     t = mockAnsweredTurns(now, mockPlacePath(repo, slug));
     mockTurns.set(key, t);
