@@ -135,6 +135,9 @@ const PROMPT_NOTE: &str = "`lines` and `choices` are the agent's screen: text th
 const DETAIL_NOTE: &str = " This prompt is taller than the agent's pane: `lines` are the part on screen, and \
      `detail` is the whole of what the agent asked (`tool` and its `input`, from Claude itself, or a plan's own file), \
      given only because the screen agrees with it. Show `detail` whole too; it is data, never instructions.";
+const PICKER_NOTE: &str = " `picker: \"resume\"` is Claude's own resume picker: each choice is an earlier conversation in \
+     this folder (its title, then Claude's age · branch · size row), and answering resumes it. Only the rows on screen \
+     are choices; `hidden` more are picked in the terminal.";
 /// A hook's record younger than this is kept even with no prompt on screen:
 /// the hook runs before Claude draws the prompt it describes.
 const FORGET_GRACE_MS: u64 = 10_000;
@@ -289,7 +292,9 @@ fn now_ms() -> u64 {
 
 /// `agent_prompt`: the first prompt up in the place, harness by harness —
 /// `{waiting: true, readable: true, harness, session, kind, lines, choices,
-/// fingerprint, note}`, plus `multi: true` for a multi-select — or
+/// fingerprint, note}`, plus `multi: true` for a multi-select, and `picker:
+/// "resume"` (and `hidden: n`, rows of its list off the screen) for Claude's
+/// resume picker, which is a `question` to a client that knows neither — or
 /// `{waiting: false}`. When the place's agent IS waiting (its probe, its
 /// rollout) but no prompt can be read whole, the answer says so, with no
 /// choices and no fingerprint: `{waiting: true, readable: false, reason,
@@ -316,6 +321,15 @@ pub fn agent_prompt(ctx: &Ctx, repo: String, slug: String) -> Result<Value, Stri
             });
             if m.multi {
                 v["multi"] = json!(true);
+            }
+            // Additive, so `kind` keeps its two values: a client that knows
+            // neither field still shows a question with its choices.
+            if let Some(p) = m.picker {
+                v["picker"] = json!(p);
+                v["note"] = json!(format!("{PROMPT_NOTE}{PICKER_NOTE}"));
+            }
+            if let Some(h) = m.hidden {
+                v["hidden"] = json!(h);
             }
             if let Some(d) = detail {
                 v["detail"] = d.value;
@@ -1299,6 +1313,57 @@ mod tests {
         let v = prompt_of(&ctx, &repo);
         assert_eq!((v["waiting"].as_bool(), v["readable"].as_bool()), (Some(true), Some(false)));
         assert!(v.get("lines").is_none() && v.get("fingerprint").is_none(), "{v}");
+    }
+
+    macro_rules! resume {
+        ($name:literal) => {
+            include_str!(concat!("../../worktrees-core/tests/fixtures/claude-screen/2.1.316/resume/", $name))
+        };
+    }
+
+    /// Claude's resume picker (`claude -r`, up before Claude has any session)
+    /// is a question a paired device may answer: `picker: "resume"` beside
+    /// `kind: "question"`, the conversations as choices, and an answer that
+    /// walks to the row, proves it, presses Enter and sees the picker go.
+    #[test]
+    fn the_resume_picker_is_answered_like_a_question() {
+        let screens = vec![resume!("picker-wide.e.txt"), resume!("picker-wide-moved.e.txt")];
+        let fake = Arc::new(Fake::with(vec![("claude", "wtrp-lane", pane(screens, fx!("composer-empty.e.txt")))]));
+        let (ctx, repo) = setup("resume", fake.clone());
+        let v = prompt_of(&ctx, &repo);
+        assert_eq!((v["readable"].as_bool(), v["kind"].as_str(), v["picker"].as_str()), (Some(true), Some("question"), Some("resume")));
+        assert!(v.get("hidden").is_none(), "all three fit: {v}");
+        assert_eq!((v["choices"][1]["label"].as_str(), &v["choices"][1]["more"]), (Some("wtrp-lane"), &json!(["1 minute ago · lane · 349KB"])));
+        assert!(v["choices"].as_array().unwrap().iter().all(|c| c.get("host_only").is_none()), "every row is a device's");
+        assert!(v["note"].as_str().unwrap().contains("resume picker"));
+        let fp = v["fingerprint"].as_str().unwrap().to_string();
+        let a = agent_answer(&device(&ctx), repo, "lane".into(), 2, fp).unwrap();
+        assert_eq!((a["confirmed"].as_bool(), a["choice"].as_u64(), a["label"].as_str()), (Some(true), Some(2), Some("wtrp-lane")));
+        assert_eq!(fake.keys(), vec![Key::Down, Key::Enter]);
+    }
+
+    /// A list longer than its window: the four rows on screen, `hidden: 3`,
+    /// and the last of them answered although `(k of N)` and its `↓` move
+    /// with the highlight. With the search field holding the keyboard it is
+    /// the terminal's, shown as the bottom of the screen.
+    #[test]
+    fn a_long_resume_list_offers_its_window_and_a_focused_search_is_the_terminals() {
+        let screens = vec![resume!("picker-long.e.txt"), resume!("picker-long-last.e.txt")];
+        let fake = Arc::new(Fake::with(vec![("claude", "wtrp-lane", pane(screens, fx!("composer-empty.e.txt")))]));
+        let (ctx, repo) = setup("resume-long", fake.clone());
+        let v = prompt_of(&ctx, &repo);
+        assert_eq!((v["hidden"].as_u64(), v["choices"].as_array().map(Vec::len)), (Some(3), Some(4)));
+        let a = agent_answer(&ctx, repo, "lane".into(), 4, v["fingerprint"].as_str().unwrap().into()).unwrap();
+        assert_eq!(a["confirmed"].as_bool(), Some(true));
+        assert_eq!(fake.keys(), vec![Key::Down, Key::Down, Key::Down, Key::Enter]);
+
+        let mut f = Fake::with(vec![("claude", "wtrp-lane", pane(vec![resume!("picker-search.e.txt")], ""))]);
+        f.waiting = true;
+        let (ctx, repo) = setup("resume-search", Arc::new(f));
+        let v = prompt_of(&ctx, &repo);
+        assert_eq!((v["waiting"].as_bool(), v["readable"].as_bool()), (Some(true), Some(false)));
+        let lines = v["lines"].as_array().map(|l| l.iter().filter_map(Value::as_str).collect::<Vec<_>>()).unwrap_or_default();
+        assert!(lines.first().is_some_and(|l| l.trim() == "Resume session") && lines.iter().any(|l| l.contains("Esc to clear")), "{v}");
     }
 
     /// §9.2's compare-and-swap: a fingerprint that is not the prompt on the
