@@ -5,6 +5,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.45.1] - 2026-11-01
+
+### Changed
+- **The chat view's bubbles use the width.** The conversation and the
+  message box under it keep a gutter of 7% of the chat's width on each side,
+  instead of stopping at a fixed width that left most of a wide window
+  empty. Your own messages can take up to 80% of the column. A narrow chat,
+  such as with the dock open, keeps its small margins.
+
+### Fixed
+- **The chat view answers Claude's resume picker.** A place reopened with
+  resume showed only that its conversation couldn't be read: Claude was
+  waiting for you to choose which conversation to resume and had not started
+  one yet. The chat now says "Claude is asking which conversation to resume",
+  lists the conversations on screen as choices, says how many more are in
+  the terminal's list, and loads the one you pick. The place's dot shows it
+  waiting meanwhile.
+- **A place's chat could show another Claude's conversation.** When a
+  place's Claude had not started a session yet, worktrees could match it to
+  the Claude in the same-numbered pane of a different tmux server and show
+  that session's conversation. Only a machine running more than one tmux
+  server was affected, such as one with a sandbox on its own server. A place
+  now matches only a pane of its own server.
+
 ## [0.45.0] - 2026-11-01
 
 ### Added
