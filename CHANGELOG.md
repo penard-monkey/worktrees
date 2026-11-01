@@ -5,6 +5,39 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- **A chat view of a place's agent, beside its terminal (a preview, off by
+  default).** Turn it on in Settings → Behavior → Chat view. Each place's
+  agent then gets a **Chat | Terminal** switch on its label row. Every place
+  still opens on its terminal, and the app forgets the choice when it
+  restarts. The terminal stays underneath with its scrollback, one click
+  away.
+  - Chat shows the agent's latest turns, up to 20, read from Claude's or
+    Codex's own transcript: your messages, its replies with their times, and
+    the tools it used. While the agent works, the chat reads them again every
+    10 seconds, so a reply appears shortly after its turn ends, not word by
+    word as it is written.
+  - A one-line box sends the agent a message when you press Enter. A line the
+    agent would refuse or run instead of reading is stopped where you type it,
+    with the reason: a line break, a hidden formatting character, or a
+    leading `/`, `@`, `!` or `#`. If the terminal's own input already holds
+    unsent text, the chat says so and sends nothing over it.
+  - A prompt the agent is waiting on becomes a card above the box: pick a
+    choice, then send it. That covers permissions, questions (a multi-select
+    one as checkboxes), plans, an answer of your own typed into the
+    question's free-text choice, and a note added to Yes or No. A Claude
+    diff, command or plan too tall for the terminal is shown whole, before
+    its choices. A prompt the app can't read whole shows what the terminal
+    shows, and you answer it there.
+  - An answered prompt stays in the conversation as what was asked and the
+    answer given, whether you answered in the chat or in the terminal. That
+    holds for Claude's questions, permissions and plans and Codex's
+    questions. A Codex approval shows only as the tool it ran, because Codex
+    doesn't record the answer.
+  - Not yet: tool output, diffs, slash commands and Esc (stopping a turn) are
+    in the terminal only. pi's and Kimi's conversations aren't shown, though
+    you can still send them a line and answer their prompts.
+
 ### Fixed
 - **The phone opens a live agent's conversation again, or says why it
   can't.** The iPhone app answered "Couldn't load the conversation" for a
