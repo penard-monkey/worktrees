@@ -858,8 +858,9 @@ pub fn press_enter(pane: &PaneId) -> Result<(), String> {
     press(pane, Key::Enter)
 }
 
-/// A key that answering a prompt may press (`prompt::steps`). A CLOSED set:
-/// nothing a client sends becomes a tmux key name, and nothing here is text.
+/// A key that answering a prompt may press (`prompt::steps`), or that stops
+/// a running turn. A CLOSED set: nothing a client sends becomes a tmux key
+/// name, and nothing here is text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Key {
     Up,
@@ -868,6 +869,11 @@ pub enum Key {
     /// Opens a prompt's own text field (Claude's `Tab to amend`, Codex's
     /// `tab to add notes`).
     Tab,
+    /// Stops a running turn (`agent_interrupt`), pressed ONCE and only on a
+    /// screen that shows the turn running (`prompt::turn_shown`): on a
+    /// prompt it cancels it, on an idle Claude it arms `Esc again to clear`,
+    /// and twice it opens Claude's rewind menu.
+    Escape,
 }
 
 impl Key {
@@ -878,6 +884,7 @@ impl Key {
             Key::Down => "Down",
             Key::Enter => "Enter",
             Key::Tab => "Tab",
+            Key::Escape => "Escape",
         }
     }
 }
@@ -1079,6 +1086,9 @@ mod paste_tests {
         let enter = press_enter_args("%7");
         assert_eq!(enter[..5], leave, "{enter:?}");
         assert_eq!(enter[5..], ["send-keys", "-t", "%7", "Enter"]);
+        let esc = press_args("%7", Key::Escape);
+        assert_eq!(esc[..5], leave, "{esc:?}");
+        assert_eq!(esc[5..], ["send-keys", "-t", "%7", "Escape"]);
     }
 
     /// Pane 0 is NOT "the AI". `base-index 1` in a user's tmux.conf means there

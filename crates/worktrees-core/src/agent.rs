@@ -556,6 +556,19 @@ pub fn prompt_box_on_screen(screen: &str) -> bool {
     prompt_start(&stripped).is_some()
 }
 
+/// The rows of claude's input box on `screen` (`screen.lines()` indices):
+/// its top edge (the rule a named Claude sets its name into) and its closing
+/// edge, the first edge below the prompt line. What is under the closing
+/// edge is claude's status row — mode and key hints, where no history can
+/// reach (`prompt::turn_shown`). `None` with no box, or one cut off before
+/// it closes.
+pub fn prompt_box_edges(screen: &str) -> Option<(usize, usize)> {
+    let stripped: Vec<String> = screen.lines().map(strip_escapes).collect();
+    let start = prompt_start(&stripped)?;
+    let close = stripped[start + 1..].iter().position(|l| is_box_edge(l.trim()))? + start + 1;
+    Some((start - 1, close))
+}
+
 /// The LAST line that is the top row inside claude's input box: a prompt line
 /// whose line above is the box's own edge (see `draft_from_screen`).
 fn prompt_start(stripped: &[String]) -> Option<usize> {

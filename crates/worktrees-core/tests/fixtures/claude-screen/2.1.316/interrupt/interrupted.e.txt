@@ -1,0 +1,24 @@
+  1490
+  1491
+  1492
+  1493
+  1494
+  1495
+  1496
+  1497
+  1498
+  1499
+  1500
+
+[38;5;246m✻[39m [38;5;246mChurned for 11s · done 12:34 AM[39m
+
+[38;5;246m[48;5;237m❯ [38;5;231mUse the Bash tool to run exactly this command, in the foreground, and nothing[39m
+  [38;5;231melse: for i in $(seq 60); do echo $i; sleep 1; done[39m
+[49m
+  [38;5;246mRan [1m1[0m[38;5;246m shell command [39m
+[38;5;246m  ⎿  Interrupted · What should Claude do instead?[39m
+
+[38;5;244m────────────────────────────────────────────────────────────────── wtint-probe ─
+[39m❯ 
+[38;5;244m────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;246m⏸ manual mode on · ? for shortcuts · ← 1 agent[39m
