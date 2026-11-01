@@ -102,6 +102,10 @@ pub const ERR_NEEDS_ANSWER: &str = "denied: answering a prompt with text makes o
 pub const ERR_MULTI: &str = "a multi-select: tick its boxes with agent_answer_many";
 /// `agent_answer_many` on a prompt that is not one.
 pub const ERR_NOT_MULTI: &str = "not a multi-select: answer it with agent_answer";
+/// How `agent_turns` ends for a Claude that has written no session file yet
+/// (`the claude in <session> has written no session file yet`): starting, or
+/// still on its resume picker, when `agent_prompt` has the picker.
+pub const ERR_NO_SESSION_YET: &str = "has written no session file yet";
 /// `agent_send` when no composer can be seen.
 pub const ERR_NO_COMPOSER: &str = "the agent is not at its prompt (starting, or a screen this host does not recognise): try again shortly";
 /// `agent_interrupt` when no agent of the place shows a running turn: an Esc
@@ -843,6 +847,8 @@ fn no_probe(session: &str, unreadable: &[agent::UnreadableProbe], pids_on_pane: 
             );
         }
     }
+    // Spelled out, not `{ERR_NO_SESSION_YET}`: chatmirror-check reads this
+    // literal for the words the host gives; a test holds the two together.
     format!("the claude in {session} has written no session file yet")
 }
 
@@ -1786,6 +1792,7 @@ mod tests {
         // Nothing unreadable: the old answer, and the pane is never asked.
         let err = no_probe("worktrees-(main)", &[], || panic!("no ps for a plain miss"));
         assert_eq!(err, "the claude in worktrees-(main) has written no session file yet");
+        assert!(err.ends_with(ERR_NO_SESSION_YET), "what the chat keys on (chat.ts `noSessionYet`)");
     }
 
     /// A prompt taller than the pane (Claude 2.1.316's Edit): readable beside

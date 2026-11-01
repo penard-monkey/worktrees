@@ -62,6 +62,9 @@ export type AgentPrompt =
   | {
     waiting: true; readable: true; harness: string; session: string; kind: "permission" | "question";
     fingerprint: string; lines: string[]; choices: PromptChoice[]; note: string; multi?: boolean; detail?: PromptDetail;
+    /** Claude's own resume picker (`claude -r`): a question whose choices are
+     *  the conversations on screen; `hidden` more are in the terminal's list. */
+    picker?: "resume"; hidden?: number;
   }
   | { waiting: true; readable: false; harness: string | null; session: string | null; reason: string; lines?: string[]; note?: string };
 export type ReadablePrompt = Extract<AgentPrompt, { readable: true }>;
@@ -96,6 +99,10 @@ export const AGENT_ERR = {
   stopUnsupportedPrefix: "agent_interrupt stops Claude's and Codex's turns;",
   /** `agent_interrupt` in a place with no agent running. */
   noAgent: "no agent is running in this place",
+  /** How `agent_turns` ends for a Claude with no session yet (`the claude in
+   *  <session> has written no session file yet`): its resume picker is up,
+   *  or it is starting. */
+  noSessionYet: "has written no session file yet",
 } as const;
 
 /** `harness::LINE_MAX`. */
@@ -196,10 +203,11 @@ export const STOP_UNCONFIRMED = (agent: string) => `Esc was sent once, but ${age
 
 /** A message `agent_send` confirmed, held until the transcript has it. */
 export type Pending = { id: number; text: string; sentAt: number; queued: boolean };
-/** An answer this window sent. */
 /** An answer this window sent: the choice (a field's: its text), and the
- *  note that rode on it. */
-export type Answered = { label: string; note?: string; at: number; confirmed: boolean };
+ *  note that rode on it. `resumed`: a conversation picked in Claude's resume
+ *  picker, with the picker's row about it (age · branch · size) — no
+ *  transcript ever records that pick, so this line stays. */
+export type Answered = { label: string; note?: string; at: number; confirmed: boolean; resumed?: string };
 
 /** One tool call as the chat draws it: its name, what it did in a line
  *  (`turns::Step`'s `summary`: absent from an older host, for an MCP tool,
@@ -836,6 +844,13 @@ export function loadTurns(t: Target): Promise<void> {
 }
 
 export const turnsUnsupported = (err: string | null) => !!err && err.startsWith(AGENT_ERR.turnsUnsupportedPrefix);
+/** `agent_turns` failed only because the place's Claude has no session yet. */
+export const noSessionYet = (err: string | null) => !!err && err.endsWith(AGENT_ERR.noSessionYet);
+/** After a conversation is picked in the resume picker, Claude writes its
+ *  session file a moment later (measured: under a second, and not by the read
+ *  straight after the answer), so the turns are read again on these delays
+ *  while they still fail that way. */
+export const RESUME_REREAD_MS = [500, 1500, 3500] as const;
 
 export const CHANGED = "Not sent: the prompt changed before the answer reached it. Someone may have answered it in the terminal.";
 
@@ -986,10 +1001,16 @@ export async function sendAnswer(t: Target, agent: string): Promise<void> {
       : await invoke<AgentAnswer>("agent_answer", args);
     const cur = viewOf(t.path);
     const a: Answered = way.how === "field" ? { label: text, at: Date.now(), confirmed: r.confirmed } : { label: r.label, note: text.trim() ? text : undefined, at: Date.now(), confirmed: r.confirmed };
+    if (d.picker === "resume") a.resumed = (c.more ?? []).join(" · ");
     put(t.path, {
       ...NO_CHOICE, answering: false, answered: [...cur.answered, a],
       followUp: tellsAfter(c) ? `Now tell ${agent} what to do differently: type it here and press Enter.` : null,
     });
+    if (d.picker === "resume") {
+      for (const ms of RESUME_REREAD_MS) {
+        setTimeout(() => { if (noSessionYet(viewOf(t.path).turns.error)) void loadTurns(t); }, ms);
+      }
+    }
   } catch (e) {
     put(t.path, { answering: false, answerWords: answerWords(String(e)) });
   }
