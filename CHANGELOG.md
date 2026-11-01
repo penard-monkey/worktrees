@@ -37,6 +37,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
     diff, command or plan too tall for the terminal is shown whole, before
     its choices. A prompt the app can't read whole shows what the terminal
     shows, and you answer it there.
+  - The prompt card answers from the keyboard: a number picks that choice
+    (or ticks that box) and Enter sends it. A new prompt takes the keyboard
+    from an empty message box. Letters typed at the card go back to the box,
+    and so does every key in the first second after the prompt took the
+    keyboard, so a message never answers a prompt.
   - An answered prompt stays in the conversation as what was asked and the
     answer given, whether you answered in the chat or in the terminal. That
     holds for Claude's questions, permissions and plans and Codex's
