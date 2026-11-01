@@ -2070,6 +2070,14 @@ impl ConnAudit {
             Outcome::Panic => "panic",
         };
         let mut detail = p.detail;
+        // A stop says whether it was SEEN to stop: an unconfirmed one is
+        // `ok` on the wire too (`agents::agent_interrupt`). One of the fields
+        // only the end can fill, inside `RESERVE_SLACK`.
+        if let (true, Outcome::Ok(v)) = (p.cmd == "agent_interrupt", &outcome) {
+            if let Some(b) = v.get("interrupted").and_then(Value::as_bool) {
+                detail.insert("interrupted".into(), json!(b));
+            }
+        }
         let mut kind = "call";
         match &p.what {
             What::Call => {}
@@ -3743,6 +3751,34 @@ mod tests {
         assert!(m.is_err(), "the prompt changed");
         let rec = g.records("call", "agent_answer_many");
         assert_eq!((rec[0]["detail"]["choices"].clone(), rec[0]["cap"].clone()), (json!([1, 3]), json!("answer")));
+    }
+
+    /// A stop is recorded as an `instruct` act (drive-class: it spends
+    /// `DRIVE`) with whether it was SEEN to stop, since an unconfirmed stop
+    /// is `ok` on the wire too; a refused one (nothing running) is `err`.
+    #[test]
+    fn an_agent_stop_is_recorded_as_instruct_with_whether_it_stopped() {
+        let mut g = Gate::new("agentstop", phone_caller());
+        let (pane, _) = g.agent(super::super::tests::CLAUDE_BUSY);
+        let c = phone(&g.a, 9);
+        let place = json!({ "repo": g.root, "slug": "(main)" });
+        let r = through(&g.cx, &c, &g.w, "agent_interrupt", place.clone());
+        assert_eq!(r.map(|v| v["interrupted"].clone()), Ok(json!(true)));
+        assert!(through(&g.cx, &c, &g.w, "agent_interrupt", place.clone()).is_err(), "nothing running: refused");
+        assert_eq!(*pane.keys.lock().unwrap(), vec![worktrees_core::tmux::Key::Escape]);
+        // A turn that never stops: `ok` on the wire, and the record says so.
+        let session = worktrees_core::Project::discover(Path::new(&g.root)).unwrap().session_name("(main)");
+        let busy = super::super::tests::CLAUDE_BUSY;
+        g.cx.ctx = g.cx.ctx.clone().with_agents(worktrees_api::agents::Agents::new(super::super::tests::ScriptedAgent::new(&session, busy, busy)));
+        let r = through(&g.cx, &c, &g.w, "agent_interrupt", place);
+        assert_eq!(r.map(|v| v["unconfirmed"].clone()), Ok(json!(true)));
+        let rec = g.records("call", "agent_interrupt");
+        assert_eq!(rec.len(), 3, "{rec:#?}");
+        assert_eq!((rec[0]["outcome"].as_str(), rec[0]["cap"].as_str()), (Some("ok"), Some("instruct")));
+        assert_eq!(rec[0]["detail"]["interrupted"], json!(true));
+        assert_eq!(rec[1]["outcome"].as_str(), Some("err"));
+        assert!(rec[1]["detail"].get("interrupted").is_none());
+        assert_eq!((rec[2]["outcome"].as_str(), rec[2]["detail"]["interrupted"].clone()), (Some("ok"), json!(false)));
     }
 
     /// #559's gate reaches the agent rows through the normal chain: past its

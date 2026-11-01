@@ -1,0 +1,24 @@
+  one hundred thirty-three
+  one hundred thirty-four
+  one hundred thirty-five
+  one hundred thirty-six
+  one hundred thirty-seven
+  one hundred thirty-eight
+  one hundred thirty-nine
+  one hundred forty
+  one hundred forty-one
+  one hundred forty-two
+  one hundred forty-three
+  one hundred forty-four
+  one hundred forty-five
+  one hundred forty-six
+  one hundred forty-seven
+  one hundred forty-eight
+  one hundred forty-nine
+  one hundred fifty
+  one hundred fifty-one
+
+[38;5;244m────────────────────────────────────────────────────────────────── wtint-probe ─
+[38;5;246m❯ [39m
+[38;5;244m────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;246m⏸ manual mode on · esc to interrupt · ← 1 agent[39m

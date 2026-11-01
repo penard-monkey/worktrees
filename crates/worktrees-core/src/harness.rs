@@ -1176,7 +1176,9 @@ const INVISIBLE: &[(u32, u32)] = &[
     (0x1BCA0, 0x1BCA3), (0x1D173, 0x1D17A), (0xE0001, 0xE0001), (0xE0020, 0xE007F),
 ];
 
-fn invisible(c: char) -> bool {
+/// One of [`INVISIBLE`]'s characters. `turns`' tool-call summaries remove
+/// the same set, where a typed line refuses it.
+pub(crate) fn invisible(c: char) -> bool {
     let c = c as u32;
     INVISIBLE.iter().any(|&(lo, hi)| (lo..=hi).contains(&c))
 }

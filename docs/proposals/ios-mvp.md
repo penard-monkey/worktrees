@@ -260,7 +260,8 @@ capability, so `agent_answer` from the desktop is a legitimate feature too).
 #### As built (S6–S11, `feat/ios-agent-rows`)
 
 The rows, spelled as `serve/dispatch.rs` spells them (`agent_answer_text`
-and `agent_answer_many` came after, on `feat/actionable-prompts`).
+and `agent_answer_many` came after, on `feat/actionable-prompts`, and
+`agent_interrupt` on `feat/chat-interrupt`).
 `app/scripts/agent-rows-check.mjs` holds this table, the dispatch table, the
 mock (`app/src/mock/install.ts`) and the api's refusal strings
 (`worktrees-api/src/agents.rs`) to one another.
@@ -272,6 +273,7 @@ mock (`app/src/mock/install.ts`) and the api's refusal strings
 | `agent_answer_text` | `[instruct, place(repo, slug)]` (and `answer`, checked by the body: text with a choice answers the prompt) | `choice` (one with `text`), `fingerprint`, `text` | `{answered: true, confirmed, harness, session, choice, label}`; a `multi` prompt's text box is filled (and so ticked) but not sent: `{answered: false, …, note}` | a grant without `answer` (`denied: …needs the answer capability as well as instruct`); `agent_send`'s line rule; `the prompt changed`; `no such choice`; `choice N takes no text`; `that choice's text field holds someone's text …`; the field did not open, or the text could not be seen in it (nothing confirmed); `step-up required`; `audit-budget …` |
 | `agent_answer_many` | `[answer, place(repo, slug)]` | `choices` (boxes' `n`), `fingerprint` | `{answered: true, confirmed, harness, session, choices, labels}` — the review screen Claude shows next is a prompt of its own | `not a multi-select: answer it with agent_answer`; `the prompt changed` (also when the ticks moved under it); `no such choice`; `choice N is not one of the boxes`; an unfilled text box; `name at least one box to tick`; `step-up required`; `audit-budget …` |
 | `agent_send` | `[instruct, place(repo, slug), session_of(session, repo, slug)]` | `session` (from `agent_sessions`), `text` | `{delivered, queued, harness, session, note}` | one line ≤ 4 KB with no control character, no invisible format character (Unicode Cf — every bidi control, zero-width characters — and the line/paragraph separators) and not starting with `/ @ ! #`, the rule MCP `send` shares (`harness::typed_line_ok`); `the agent is waiting on a prompt: answer it with agent_answer`; a composer holding someone's text; no composer to see; `step-up required`; `audit-budget …` |
+| `agent_interrupt` | `[instruct, place(repo, slug)]` | — | ONE Escape, only on a fresh capture that shows a turn running: `{interrupted: true, harness, session, note}` once it is seen to stop, else `{interrupted: false, unconfirmed: true, harness, session, note}`, which a client never answers by pressing again | `the agent is not working on a turn: there is nothing to stop`; `the agent is waiting on a prompt: answer it with agent_answer` (Esc would cancel it); a composer holding someone's text (it hides whether a turn runs); no composer to see; pi and kimi (`agent_interrupt stops Claude's and Codex's turns; …`); `step-up required`; `audit-budget …` |
 | `agent_turns` | `[read, place(repo, slug), opt(session_of(session, repo, slug))]` | `n` (default 5, at most 20), `session` (optional: the first running agent) | `{harness, session, turns: [{at, user, reply, tools, truncated}], more, note}` — Claude and Codex | a harness whose transcript is not read yet (pi, kimi) |
 
 How each item of the spec was met, and what the lane decided:
@@ -892,7 +894,7 @@ Two loops, both needed:
 | A client that browses for a moved host, or adopts an address code (lane `feat/p2-remote-client-discovery`); the Linux advert | Phase 4 |
 | The host app's pairing sheet and device list (lane `feat/p2-remote-host-ui`); until then, `worktrees serve pair` | Phase 1 |
 | The phone app itself, in its own repository: crate, Swift key plugin, remote door, mobile UI | Phases 1–4 |
-| `agent_prompt`, `agent_answer`, `agent_answer_text`, `agent_answer_many`, `agent_send`, `agent_turns` | Phases 2–3 |
+| `agent_prompt`, `agent_answer`, `agent_answer_text`, `agent_answer_many`, `agent_send`, `agent_interrupt`, `agent_turns` | Phases 2–3 |
 | The hardware measurements A1–A6 | Phase 0 |
 | Any iOS CI step | Phase 4 |
 

@@ -5,6 +5,59 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+- **A chat view of a place's agent, beside its terminal (a preview, off by
+  default).** Turn it on in Settings → Behavior → Chat view. Each place's
+  agent then gets a **Chat | Terminal** switch on its label row. Each place
+  remembers whether it shows Chat or Terminal, across place switches and
+  relaunches, and a place you never switched opens on its terminal. Turning
+  Chat view off keeps every place's choice for when it is back on. The
+  terminal stays underneath with its scrollback, one click away.
+  - Chat shows the agent's latest turns, up to 20, read from Claude's or
+    Codex's own transcript: your messages, its replies with their times, and
+    the tools it used. While the agent works, the chat reads them again every
+    10 seconds, so a reply appears shortly after its turn ends, not word by
+    word as it is written.
+  - Each tool call says what it did (the command, the file, the search), and
+    a call that failed is marked "failed". A long turn shows its first few
+    calls, then "+N more", which opens the rest.
+  - A one-line box sends the agent a message when you press Enter. A line the
+    agent would refuse or run instead of reading is stopped where you type it,
+    with the reason: a line break, a hidden formatting character, or a
+    leading `/`, `@`, `!` or `#`. If the terminal's own input already holds
+    unsent text, the chat says so and sends nothing over it.
+  - You can stop a running turn from the chat. While the agent works, a Stop
+    button sits beside Send, and Esc in the chat does the same. It presses
+    Esc once in the agent's terminal and tells you whether the turn stopped.
+    A prompt waiting for an answer is never cancelled this way.
+  - A prompt the agent is waiting on becomes a card above the box: pick a
+    choice, then send it. That covers permissions, questions (a multi-select
+    one as checkboxes), plans, an answer of your own typed into the
+    question's free-text choice, and a note added to Yes or No. A Claude
+    diff, command or plan too tall for the terminal is shown whole, before
+    its choices. A prompt the app can't read whole shows what the terminal
+    shows, and you answer it there.
+  - The prompt card answers from the keyboard: a number picks that choice
+    (or ticks that box) and Enter sends it. A new prompt takes the keyboard
+    from an empty message box. Letters typed at the card go back to the box,
+    and so does every key in the first second after the prompt took the
+    keyboard, so a message never answers a prompt.
+  - An answered prompt stays in the conversation as what was asked and the
+    answer given, whether you answered in the chat or in the terminal. That
+    holds for Claude's questions, permissions and plans and Codex's
+    questions. A Codex approval shows only as the tool it ran, because Codex
+    doesn't record the answer.
+  - A screen reader is told what arrives while the chat is shown: "1 new
+    message" (or "3 new messages" for a burst) when the agent replies, and
+    the agent's name with "needs input", such as "Codex needs input", when
+    it stops on a prompt. It waits for what the screen reader is already
+    saying, never moves focus, and says nothing for your own messages and
+    answers, for tool calls, or for what was already there.
+  - Not yet: tool output, diffs and slash commands are in the terminal only.
+    pi's and Kimi's conversations aren't shown and their turns can't be
+    stopped from the chat, though you can still send them a line and answer
+    their prompts.
+
 ### Fixed
 - **The phone opens a live agent's conversation again, or says why it
   can't.** The iPhone app answered "Couldn't load the conversation" for a
@@ -22,10 +75,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 - **An agent's prompts can be read and answered without the terminal.**
   Every Claude that worktrees starts is named after its session, and a named
   Claude puts its name under the prompt's last line. Because of that, the
-  chat view and the phone could not read a single Claude prompt, and
-  answering went back to the terminal. A one-question pick was enough to
-  hit it. Questions and permissions now read, including multi-select
-  questions, two-question forms with their review, and plan approvals. You
+  phone could not read a single Claude prompt, and answering went back to
+  the terminal. A one-question pick was enough to hit it. Questions and
+  permissions now read, including multi-select questions, two-question
+  forms with their review, and plan approvals. You
   can now answer "Type something.", say "No, and tell Claude what to do
   differently" (or "Yes, and…"), give a plan feedback, or add a Codex note,
   all from a client. On a paired phone, typing needs the device's instruct

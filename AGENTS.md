@@ -70,7 +70,18 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   approves, so `instruct` alone must not reach it), length and hash, stamp —
   and only into a field the
   prompt itself opened and shows empty, each step proved before Enter. Do not
-  grow a third path that types into Claude.
+  grow a third path that types into Claude. `agent_interrupt`
+  (`agents::agent_interrupt`, the chat's Stop and its Esc, `stopTurn` in
+  `chat.ts`) is not one: it types no text, only ONE key,
+  Escape, through `tmux::press` as `agent_answer`'s keys go, under the same
+  place lock. It is `instruct` (step-up, the DRIVE budget, stamped like a
+  send) and presses only on a fresh capture whose own status shows a turn
+  running (`prompt::turn_shown`: Claude's `esc to interrupt` under its box,
+  Codex's busy row or, while a reply streams and hides it, its rollout).
+  It refuses a prompt (Esc cancels it), an idle agent (Esc arms Claude's
+  `Esc again to clear`; two open rewind) and a draft (Claude then hides
+  every hint). Proved on later captures, or `unconfirmed`, never pressed
+  twice.
 
 - **A place's session is `Project::live_session_in`'s, everywhere**: the
   canonical name, else the session adopted by pane cwd. `close`/`rm`/`doctor`
@@ -168,7 +179,7 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   do not align them). hyper parses the HTTP and tungstenite sees only frames,
   also ON PURPOSE: tungstenite's `accept_hdr_async` WRITES an HTTP error
   response when it refuses, while a hyper service that returns `Err` closes
-  with 0 bytes. The 184 commands sit in ONE macro table
+  with 0 bytes. The 185 commands sit in ONE macro table
   (`serve/dispatch.rs`) with an `Exposure` each; the six `ClientLocal` rows
   (clipboard, editor, terminal, zoom, the app bundle) are refused with
   `err: "client-local"`, never run on the host — the docs viewer is an

@@ -1,0 +1,21 @@
+╭───────────────────────────────────────────────────────────────╮
+│ ✨ Update available! 0.160.1 -> 0.166.0                       │
+│ See https://github.com/openai/codex for installation options. │
+│                                                               │
+│ See full release notes:                                       │
+│ https://github.com/openai/codex/releases/latest               │
+╰───────────────────────────────────────────────────────────────╯
+
+
+  >_ OpenAI Codex (v0.160.1)
+     /private/tmp/claude-501/wtint/crepo
+
+  This looks like the start of a perfectly reasonable rabbit hole.
+
+  Tip: Use the desktop app. Run codex app to open it. It installs automatically
+  if needed.
+
+
+› Ask Codex to do anything
+
+  GPT-6-Sol medium · /private/tmp/claude-501/wtint/c…  ⚠ 1 warning · f2 to view

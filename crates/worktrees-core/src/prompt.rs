@@ -1,7 +1,8 @@
 //! What an agent's pane is ASKING the user right now — a permission, a
-//! question, a trust prompt — read off its screen, per harness. serve's
-//! `agent_prompt`, `agent_answer` and `agent_send` rows (iOS MVP §2.4, S6–S8)
-//! are built on it; nothing here does I/O.
+//! question, a trust prompt — read off its screen, per harness, and whether
+//! a turn is running there ([`turn_shown`]). serve's `agent_prompt`,
+//! `agent_answer`, `agent_send` (iOS MVP §2.4, S6–S8) and `agent_interrupt`
+//! rows are built on it; nothing here does I/O.
 //!
 //! Three rules hold for every harness:
 //!
@@ -933,6 +934,117 @@ pub fn submit_claude(
         }
         sleep(SEND_POLL_MS);
     }
+}
+
+// ── a running turn ──────────────────────────────────────────────────────────
+
+/// What a harness's screen says about its turn, for `agent_interrupt`. The
+/// one key that stops a turn, Esc, also cancels a prompt, arms Claude's `Esc
+/// again to clear` on a draft and opens its rewind menu when pressed twice,
+/// so it is pressed only on [`TurnShown::Running`], and only once.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TurnShown {
+    /// The harness's own busy hint, where it draws it: Claude's `esc to
+    /// interrupt` on the status row under its input box, Codex's `• Working
+    /// (12s • esc to interrupt)` just above its composer.
+    Running,
+    /// Its composer is up and empty, with no busy hint: between turns — or,
+    /// for Codex, streaming a reply, which hides its busy row (measured on
+    /// 0.160.1). Only Codex's rollout tells those two apart.
+    Idle,
+    /// Someone's text is in the composer. Claude then draws no key hints at
+    /// all (2.1.314, 2.1.316), so the screen cannot say whether a turn runs.
+    Drafted,
+}
+
+/// Claude's busy hint, on its status row (2.1.314, 2.1.316).
+const CLAUDE_BUSY_HINT: &str = "esc to interrupt";
+/// The end of Codex's busy row: `• Working (12s • esc to interrupt)`.
+const CODEX_BUSY_HINT: &str = "s • esc to interrupt)";
+/// Under a turn Claude stopped, after its `⎿`: the whole phrase, so a reply
+/// that merely says "Interrupted" is no mark.
+const CLAUDE_STOPPED: &str = "Interrupted · What should Claude do instead?";
+/// Under a turn Codex stopped: `■ Conversation interrupted - use /feedback …`.
+const CODEX_STOPPED: &str = "■ Conversation interrupted";
+/// How many non-blank rows above the composer a busy row or a stop mark may
+/// be: Codex draws a background terminal's line between its mark and the
+/// composer, Claude its effort hint.
+const NEAR_COMPOSER: usize = 3;
+
+/// What `harness`'s `screen` says about its turn: [`TurnShown`], or `None`
+/// for a prompt (`read`, `clipped`: Esc would cancel it), a screen with no
+/// composer (startup, a modal this reader does not know) and a harness this
+/// does not read. Keyed on WHERE the hint is, never on the words alone:
+/// history can quote `esc to interrupt` (these fixtures, a diff of this
+/// file), but only the harness's own status puts it under Claude's input box
+/// or right above Codex's composer. Claude's needs a `capture-pane -e`
+/// screen, as [`composer_empty`] does: only the styling tells its dim
+/// placeholder from a draft.
+pub fn turn_shown(harness: &str, screen: &str) -> Option<TurnShown> {
+    if read(harness, screen).is_some() || clipped(harness, screen).is_some() {
+        return None;
+    }
+    let rows = rows(screen);
+    match harness {
+        h if h == provider::CLAUDE.id => {
+            let (_, close) = agent::prompt_box_edges(screen)?;
+            if agent::draft_from_screen(screen).is_some() {
+                return Some(TurnShown::Drafted);
+            }
+            let status: Vec<&String> = rows[close + 1..].iter().filter(|r| !r.trim().is_empty()).collect();
+            if status.is_empty() {
+                return None;
+            }
+            Some(if status.iter().any(|r| r.contains(CLAUDE_BUSY_HINT)) { TurnShown::Running } else { TurnShown::Idle })
+        }
+        h if h == provider::CODEX.id => {
+            if let codex::Composer::Text(_) = codex::composer_on_screen(&rows.join("\n"))? {
+                return Some(TurnShown::Drafted);
+            }
+            let at = codex_composer_row(&rows)?;
+            let busy = near_above(&rows, at).any(|r| r.trim_start().starts_with("• ") && r.contains(CODEX_BUSY_HINT));
+            Some(if busy { TurnShown::Running } else { TurnShown::Idle })
+        }
+        _ => None,
+    }
+}
+
+/// Whether `harness` shows the mark it leaves under a turn it STOPPED as one
+/// of the newest rows above its composer: Claude's `⎿  Interrupted · …`,
+/// Codex's `■ Conversation interrupted`. A mark from an earlier turn reads
+/// the same, so a caller proving its own Esc compares with the screen it
+/// pressed it on.
+pub fn interrupted_shown(harness: &str, screen: &str) -> bool {
+    if read(harness, screen).is_some() {
+        return false;
+    }
+    let rows = rows(screen);
+    let claude = harness == provider::CLAUDE.id;
+    let at = match harness {
+        _ if claude => agent::prompt_box_edges(screen).map(|(top, _)| top),
+        h if h == provider::CODEX.id => codex_composer_row(&rows),
+        _ => None,
+    };
+    let Some(at) = at else { return false };
+    let marked = near_above(&rows, at).any(|r| {
+        let t = r.trim_start();
+        if claude {
+            t.strip_prefix('⎿').is_some_and(|x| x.trim_start().starts_with(CLAUDE_STOPPED))
+        } else {
+            t.starts_with(CODEX_STOPPED)
+        }
+    });
+    marked
+}
+
+/// Codex's composer row: the last `› …` (`codex::composer_on_screen`'s).
+fn codex_composer_row(rows: &[String]) -> Option<usize> {
+    rows.iter().rposition(|l| l.starts_with("› ") || l == "›")
+}
+
+/// The [`NEAR_COMPOSER`] non-blank rows above row `at`, nearest first.
+fn near_above(rows: &[String], at: usize) -> impl Iterator<Item = &String> {
+    rows[..at].iter().rev().filter(|r| !r.trim().is_empty()).take(NEAR_COMPOSER)
 }
 
 // ── the readers' parts ──────────────────────────────────────────────────────
@@ -1921,5 +2033,128 @@ mod tests {
             assert!(clipped("claude", screen).is_none(), "{screen}");
         }
         assert!(clipped("codex", claude316!("permission-edit-tall.txt")).is_none());
+    }
+
+    macro_rules! stop316 {
+        ($name:literal) => {
+            include_str!(concat!("../tests/fixtures/claude-screen/2.1.316/interrupt/", $name))
+        };
+    }
+    macro_rules! codexstop {
+        ($name:literal) => {
+            include_str!(concat!("../tests/fixtures/codex-inline/0.160.1/interrupt/", $name))
+        };
+    }
+
+    /// A real Claude 2.1.316 (named, 80×24) mid-turn: running a Bash loop
+    /// and streaming a reply with no tool and no spinner on screen. The busy
+    /// hint is on its status row in both; idle and finished composers have
+    /// none. Claude 2.1.314's busy composer reads the same.
+    #[test]
+    fn a_running_claude_turn_is_its_status_rows_busy_hint() {
+        for screen in [stop316!("busy-bash.e.txt"), stop316!("busy-text.e.txt"), stop316!("busy-after-esc.e.txt"), claude314!("composer-busy-empty.e.txt")] {
+            assert_eq!(turn_shown("claude", screen), Some(TurnShown::Running), "{screen}");
+            assert!(!interrupted_shown("claude", screen), "{screen}");
+        }
+        for screen in [stop316!("idle.e.txt"), stop316!("after-turn.e.txt"), claude314!("composer-empty.e.txt")] {
+            assert_eq!(turn_shown("claude", screen), Some(TurnShown::Idle), "{screen}");
+            assert!(!interrupted_shown("claude", screen), "{screen}");
+        }
+        // Idle under an EARLIER turn's mark: it reads the same as a fresh
+        // one, which is why a caller proves its Esc against the screen it
+        // pressed it on.
+        assert_eq!(turn_shown("claude", stop316!("idle-esc.e.txt")), Some(TurnShown::Idle));
+        assert!(interrupted_shown("claude", stop316!("idle-esc.e.txt")));
+    }
+
+    /// A prompt mid-turn is no running turn to stop: Esc would cancel it.
+    /// Claude's permission, plan and question; Codex's approval and its
+    /// question, whose own footer says `esc to interrupt`.
+    #[test]
+    fn a_prompt_mid_turn_is_never_a_turn_to_stop() {
+        for screen in [stop316!("busy-permission.e.txt"), stop316!("busy-permission.txt"), claude314!("plan-approval.txt"), claude314!("question-named.txt")] {
+            assert!(read_any_for_test("claude", screen), "the prompt reads: {screen}");
+            assert_eq!(turn_shown("claude", screen), None, "{screen}");
+            assert!(!interrupted_shown("claude", screen));
+        }
+        assert_eq!(turn_shown("claude", include_str!("../tests/fixtures/claude-screen/2.1.316/permission-edit-tall.txt")), None, "a clipped prompt");
+        for screen in [codexstop!("busy-approval.txt"), include_str!("../tests/fixtures/codex-inline/0.160.1/question-two.txt")] {
+            assert!(read_any_for_test("codex", screen), "{screen}");
+            assert_eq!(turn_shown("codex", screen), None, "{screen}");
+        }
+        // The folder-trust prompt, before any composer: nothing to say.
+        assert_eq!(turn_shown("claude", claude314!("trust.txt")), None);
+    }
+
+    /// After the Esc: Claude's `⎿  Interrupted · …` above the box and its
+    /// status row idle again — text turn and tool turn alike.
+    #[test]
+    fn a_stopped_claude_turn_shows_its_mark_and_an_idle_status_row() {
+        for screen in [stop316!("interrupted.e.txt"), stop316!("interrupted-text.e.txt")] {
+            assert_eq!(turn_shown("claude", screen), Some(TurnShown::Idle), "{screen}");
+            assert!(interrupted_shown("claude", screen), "{screen}");
+        }
+    }
+
+    /// A draft in Claude's composer hides every key hint, busy or not, so
+    /// the screen cannot say a turn runs: `Drafted`, whatever the state.
+    /// Esc on it (measured) still interrupted and kept the draft, and the
+    /// mark is the proof there.
+    #[test]
+    fn a_draft_hides_whether_claude_is_working() {
+        for screen in [stop316!("busy-draft.e.txt"), stop316!("idle-draft.e.txt"), stop316!("idle-draft-esc.e.txt"), claude314!("composer-busy-typed.e.txt")] {
+            assert_eq!(turn_shown("claude", screen), Some(TurnShown::Drafted), "{screen}");
+        }
+        assert!(!interrupted_shown("claude", stop316!("busy-draft.e.txt")));
+        assert_eq!(turn_shown("claude", stop316!("busy-draft-esc.e.txt")), Some(TurnShown::Drafted));
+        assert!(interrupted_shown("claude", stop316!("busy-draft-esc.e.txt")));
+    }
+
+    /// Codex 0.160.1: the busy row above the composer while a command runs;
+    /// none while a reply streams (Idle — only the rollout knows); the mark
+    /// after the Esc; and a draft.
+    #[test]
+    fn codex_shows_its_busy_row_except_while_a_reply_streams() {
+        assert_eq!(turn_shown("codex", codexstop!("busy.txt")), Some(TurnShown::Running));
+        assert_eq!(turn_shown("codex", include_str!("../tests/fixtures/codex-send/probe-busy.txt")), Some(TurnShown::Running), "0.157.1's waiting row");
+        assert_eq!(turn_shown("codex", codexstop!("busy-streaming.txt")), Some(TurnShown::Idle));
+        assert_eq!(turn_shown("codex", codexstop!("idle.txt")), Some(TurnShown::Idle));
+        // An Esc pressed at the idle composer replaces the status row with
+        // `esc again to edit previous message`: no composer this reader can
+        // judge, so nothing to say (`codex::composer_on_screen`).
+        assert_eq!(turn_shown("codex", codexstop!("idle-esc.txt")), None);
+        assert!(!interrupted_shown("codex", codexstop!("busy.txt")) && !interrupted_shown("codex", codexstop!("idle.txt")));
+        assert_eq!(turn_shown("codex", codexstop!("interrupted.txt")), Some(TurnShown::Idle));
+        assert!(interrupted_shown("codex", codexstop!("interrupted.txt")));
+        assert_eq!(turn_shown("codex", codexstop!("busy-draft.txt")), Some(TurnShown::Drafted));
+        assert!(interrupted_shown("codex", codexstop!("busy-draft-esc.txt")));
+        assert_eq!(turn_shown("pi", codexstop!("busy.txt")), None, "a harness this does not read");
+    }
+
+    /// History can quote the hints: an idle Claude whose last reply is a
+    /// diff of this file, and a Codex reply ending on a quoted busy row,
+    /// are still idle. Only the status row and the row above the composer
+    /// count.
+    #[test]
+    fn a_quoted_busy_hint_in_history_is_not_a_running_turn() {
+        let idle = stop316!("idle.e.txt");
+        let (top, _) = agent::prompt_box_edges(idle).unwrap();
+        let mut rows: Vec<&str> = idle.lines().collect();
+        rows.splice(top..top, ["⏺ The status row reads `⏸ manual mode on · esc to interrupt · ← 1 agent`.", "  ⎿  Interrupted — the word in a reply", ""]);
+        let quoted = rows.join("\n");
+        assert_eq!(turn_shown("claude", &quoted), Some(TurnShown::Idle));
+        assert!(!interrupted_shown("claude", &quoted), "a ⎿ row that is not the mark's shape is not the mark");
+        let codex = codexstop!("idle.txt").replace("› Ask Codex", "• The busy row reads: Working (12s • esc to interrupt) — quoted.\n\n\n› Ask Codex");
+        // A reply whose first row is shaped exactly like the busy row, right
+        // above the composer, is the one case this cannot tell. Its cost is
+        // one Esc on an idle Codex, which only arms `esc again to edit
+        // previous message` (`idle-esc.txt`); nothing presses a second.
+        assert_eq!(turn_shown("codex", &codex), Some(TurnShown::Running));
+        let far = codexstop!("idle.txt").replace("  This looks like", "• Working (12s • esc to interrupt)\n  This looks like");
+        assert_eq!(turn_shown("codex", &far), Some(TurnShown::Idle), "far above the composer");
+    }
+
+    fn read_any_for_test(harness: &str, screen: &str) -> bool {
+        read(harness, screen).is_some() || clipped(harness, screen).is_some()
     }
 }

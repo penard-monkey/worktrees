@@ -49,6 +49,11 @@ pub(super) const CLAUDE_EMPTY: &str = include_str!("../../../worktrees-core/test
 pub(super) const CLAUDE_TYPE_SOMETHING: &str =
     include_str!("../../../worktrees-core/tests/fixtures/claude-screen/2.1.314/question-type-something.e.txt");
 pub(super) const CLAUDE_TYPED: &str = include_str!("../../../worktrees-core/tests/fixtures/claude-screen/2.1.314/question-typed.e.txt");
+/// A named Claude 2.1.316 mid-turn (a Bash loop running), and the same once
+/// its Esc has stopped the turn (`agent_interrupt`).
+pub(super) const CLAUDE_BUSY: &str = include_str!("../../../worktrees-core/tests/fixtures/claude-screen/2.1.316/interrupt/busy-bash.e.txt");
+pub(super) const CLAUDE_STOPPED: &str =
+    include_str!("../../../worktrees-core/tests/fixtures/claude-screen/2.1.316/interrupt/interrupted.e.txt");
 
 impl ScriptedAgent {
     pub(super) fn new(session: &str, screen: &'static str, after: &'static str) -> Arc<ScriptedAgent> {
@@ -80,7 +85,8 @@ impl worktrees_api::agents::AgentIo for ScriptedAgent {
     }
     fn press(&self, _: &worktrees_api::agents::Lane, key: worktrees_core::tmux::Key) -> Result<(), String> {
         self.keys.lock().unwrap().push(key);
-        if key == worktrees_core::tmux::Key::Enter {
+        // Enter answers the prompt; Escape stops the turn.
+        if matches!(key, worktrees_core::tmux::Key::Enter | worktrees_core::tmux::Key::Escape) {
             *self.screen.lock().unwrap() = self.after;
         }
         Ok(())
@@ -3317,6 +3323,43 @@ mod devices {
         assert_eq!((r["ok"]["answered"].clone(), r["ok"]["confirmed"].clone()), (json!(true), json!(true)), "{r}");
         assert_eq!(*pane.sent.lock().unwrap(), vec!["penguins".to_string()]);
         assert_eq!(*pane.keys.lock().unwrap(), vec![worktrees_core::tmux::Key::Enter]);
+    }
+
+    /// `agent_interrupt` through the real chain: it is `instruct` — a key,
+    /// but a stop, which drives the agent as a line does — never `answer`.
+    /// So a device holding `answer` and not `instruct` is denied it; one
+    /// holding `instruct` is asked for a step-up first, nothing reaching the
+    /// pane until one holds; then ONE Escape stops the turn.
+    #[test]
+    fn a_stop_needs_instruct_not_answer_and_a_step_up() {
+        let setup = |tag: &str, caps: &[Capability]| {
+            let mut e = engine(tag, vec![]);
+            let a = e.dir.join("a");
+            assert!(std::process::Command::new("git").args(["init", "-q"]).arg(&a).status().unwrap().success());
+            let session = worktrees_core::Project::discover(&a).unwrap().session_name("(main)");
+            let pane = super::ScriptedAgent::new(&session, super::CLAUDE_BUSY, super::CLAUDE_STOPPED);
+            e.ctx = e.ctx.clone().with_agents(worktrees_api::agents::Agents::new(pane.clone()));
+            let (rec, k) = iphone(&e.reg, caps);
+            let ex = [7u8; 32];
+            let c = e.connect_with(caller(&rec), Some(ex));
+            (e, c, k, ex, pane, json!({"repo": s(&a), "slug": "(main)"}))
+        };
+        let (e, mut c, k, ex, pane, place) = setup("agent-stop-a", &[Read, Answer]);
+        assert_eq!(e.rpc(&mut c, "agent_interrupt", place.clone())["err"], json!("denied"));
+        prove(&e, &mut c, &k, ex);
+        assert_eq!(e.rpc(&mut c, "agent_interrupt", place)["err"], json!("denied"), "a step-up is no grant");
+        assert!(pane.untouched());
+        let (e, mut c, k, ex, pane, place) = setup("agent-stop-i", &[Read, Instruct]);
+        assert_eq!(e.rpc(&mut c, "agent_interrupt", place.clone())["err"], json!("step-up required"));
+        assert!(pane.untouched(), "nothing reached the pane before the step-up");
+        prove(&e, &mut c, &k, ex);
+        let r = e.rpc(&mut c, "agent_interrupt", place.clone());
+        assert_eq!(r["ok"]["interrupted"], json!(true), "{r}");
+        assert_eq!(*pane.keys.lock().unwrap(), vec![worktrees_core::tmux::Key::Escape]);
+        // Stopped: a second stop finds nothing running and presses nothing.
+        let r = e.rpc(&mut c, "agent_interrupt", place);
+        assert_eq!(r["err"], json!(worktrees_api::agents::ERR_NOT_BUSY), "{r}");
+        assert_eq!(pane.keys.lock().unwrap().len(), 1);
     }
 
     /// The bypass a review found: dock shells are the process's, so a device
