@@ -42,7 +42,7 @@ import { installUsage, setSurface, trackChord } from "./usage";
 import { fileInfo } from "./filekind";
 import { fromDevice, instructionLine, instructionTitle, launchedTitle, deviceLabel, type By, type LaunchedBy, type RemoteInstruction } from "./provenance";
 import { canStep as canStepNav, empty as emptyHistory, goTo as goToNav, label as labelNav, locKey, prune as pruneNav, reachable as reachableNav, record as recordNav, type History as NavHistory, type Loc } from "./navHistory";
-import { applySettings, applyZoom, clampDock, clampMdZoom, clampNav, clampZoom, DEFAULTS, fitLayout, loadSettings, lowerFits, lowerFracFor, lowerRange, panelsFor, placeKey, RAIL_W, railsMerged, railsWidth, saveSettings, stepMdZoom, stepZoom, upperTab, viewportWidth, type PlacePanels, type Settings, type UpdateInfo } from "./settings";
+import { agentViewFor, applySettings, applyZoom, clampDock, clampMdZoom, clampNav, clampZoom, DEFAULTS, fitLayout, loadSettings, lowerFits, lowerFracFor, lowerRange, panelsFor, placeKey, RAIL_W, railsMerged, railsWidth, saveSettings, stepMdZoom, stepZoom, upperTab, viewportWidth, withAgentView, type PlacePanels, type Settings, type UpdateInfo } from "./settings";
 import {
   alphaIndex, dropIntent, landingNote, moveBefore, naturalTop, pointerIndex,
   predictTier, recentIndex, spliceOrder, TIER_LABEL, type DeclPatch, type Tier,
@@ -536,8 +536,11 @@ function NavButtons({ canBack, canForward, backTitle, forwardTitle, onStep, onLi
     </span>
   );
 }
+/** What `updatePanels` may write: a place's panels less `agent_view`, which
+ *  has no global and is written by `withAgentView` alone (see PlacePanels). */
+type DockPatch = Partial<Omit<PlacePanels, "agent_view">>;
 /** One entry of `DOCK_RAIL` (declared inside App, which owns the icons). */
-type DockRailItem = { key: Settings["dock_tab"]; track: string; icon: React.ReactNode; title: string };
+type DockRailItem ={ key: Settings["dock_tab"]; track: string; icon: React.ReactNode; title: string };
 
 /** The dock's tab buttons. Module scope because it renders in ONE of two hosts
  *  — its own `.rail-right`, or the Places rail when both halves share an edge
@@ -3838,15 +3841,16 @@ function App() {
   const [switchOpen, setSwitchOpen] = useState(false);
   const [termVersion, setTermVersion] = useState(0);
   const [termFocus, setTermFocus] = useState(0);
-  // The chat view (settings.chat_view, a preview): the places showing Chat
-  // over their agent's terminal, keyed `repo|slug`. Memory only, so every
-  // place opens on its terminal and a relaunch forgets the choice.
-  const [chatPlaces, setChatPlaces] = useState<ReadonlySet<string>>(new Set());
+  // The chat view (settings.chat_view, a preview): whether a place shows Chat
+  // over its agent's terminal is that place's `agent_view`, in `place_panels`
+  // (`agentViewFor`; absent = Terminal), so it survives a place switch and a
+  // relaunch. Only this writes it. Never through the pre-hydration stash: the
+  // switch is not drawn before hydration (`chat_view` defaults off), and that
+  // stash's shallow merge would replace the whole `place_panels` map.
   const setChatView = useCallback((key: string, on: boolean) => {
-    setChatPlaces((cur) => {
-      if (cur.has(key) === on) return cur;
-      const next = new Set(cur);
-      if (on) next.add(key); else next.delete(key);
+    setSettings((prev) => {
+      const next = withAgentView(prev, key, on ? "chat" : "terminal");
+      if (next !== prev && hydrated.current) saveSettings(next);
       return next;
     });
     // The hidden terminal must not keep the keyboard; the way back hands it over.
@@ -4939,7 +4943,7 @@ function App() {
    *
    *  Stable (refs only, functional setState) so `toggleDock` can stay
    *  dependency-free for the keydown effect. */
-  const updatePanels = useCallback((patch: Partial<PlacePanels> | ((cur: PlacePanels) => Partial<PlacePanels>)) => {
+  const updatePanels = useCallback((patch: DockPatch | ((cur: PlacePanels) => DockPatch)) => {
     setSettings((prev) => {
       const s = selRef.current;
       const key = s ? placeKey(s.repo, s.slug) : null;
@@ -4958,6 +4962,11 @@ function App() {
       // global into a place on the next dock toggle and then hand that value
       // back to the global for the next place to inherit.
       const dif = p.files_diff ?? stored?.files_diff;
+      // The chat view's `agent_view` is carried into THIS place's record and
+      // nowhere else: it has no global (PlacePanels), so it stays out of
+      // `panels`, which is spread over the globals below, and out of the patch
+      // type, which reaches the pre-hydration stash. `withAgentView` writes it.
+      const view = stored?.agent_view;
       const panels: PlacePanels = {
         dock_open: p.dock_open ?? cur.dock_open,
         dock_tab: p.dock_tab ?? cur.dock_tab,
@@ -4972,7 +4981,7 @@ function App() {
         // "last used" seed rather than an echo of wherever you last clicked.
         ...(p.files_md_zoom === undefined ? { files_md_zoom: prev.files_md_zoom } : null),
         ...(p.files_diff === undefined ? { files_diff: prev.files_diff } : null),
-        ...(key ? { place_panels: { ...(prev.place_panels ?? {}), [key]: panels } } : null),
+        ...(key ? { place_panels: { ...(prev.place_panels ?? {}), [key]: view !== undefined ? { ...panels, agent_view: view } : panels } } : null),
       };
       applySettings(next);
       if (hydrated.current) saveSettings(next);
@@ -8649,7 +8658,7 @@ function App() {
                   <div className="agent-grid">
                     {([planProvider] as const).filter((provider) => selectedAgents?.[provider].up).map((provider) => {
                       const viewKey = sel.repo + "|" + sel.slug;
-                      const chatOn = settings.chat_view && chatPlaces.has(viewKey);
+                      const chatOn = settings.chat_view && agentViewFor(settings, viewKey) === "chat";
                       return (
                       <div className="agent-cell" key={provider} onFocusCapture={() => setActiveProvider(provider)}>
                         <div className="agent-label">

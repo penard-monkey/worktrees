@@ -43,6 +43,9 @@ export function resolveTheme(s: Pick<Settings, "theme" | "theme_light" | "theme_
  *  Every key here must also exist as a global in `Settings` (`panelsFor`
  *  returns `{...s, ...p}`), which doubles as the seed for a place that has none
  *  — see `term_tab_active` for the case where that seeding is exactly wrong.
+ *  The ONE exception is `agent_view`, which has no global and must never get
+ *  one: `panelsFor` leaves it behind, and it is read only through
+ *  `agentViewFor` (see the field).
  *
  *  The open FILE is not here either, but it IS remembered now — as
  *  `files_open` below, for the same reason `term_tab_active` lives out here:
@@ -66,9 +69,14 @@ export type PlacePanels = {
    *
    *  This union is MIRRORED by `DOCK_RAIL` in App.tsx, and `dockrail-check.mjs`
    *  asserts the two sets are equal — in BOTH places below, since a tab added
-   *  to one and not the other type-checks perfectly and then cannot persist. */
-  dock_tab: "files" | "terminal" | "docs" | "plan" | "prs";
-  dock_width: number;
+   *  to one and not the other type-checks perfectly and then cannot persist.
+   *
+   *  OPTIONAL, with `dock_width`, since `agent_view`: a place whose only act
+   *  was the Chat | Terminal switch has a record with no dock tab or width in
+   *  it, and absent means what no record means, the global seed (`panelsFor`
+   *  spreads only the keys that are there). */
+  dock_tab?: "files" | "terminal" | "docs" | "plan" | "prs";
+  dock_width?: number;
   /** Markdown reading size for THIS place. Seeds from the flat last-used value
    *  (unlike `dock_open`, which deliberately does not seed — see `panelsFor`):
    *  a size you just chose is the best guess for the next place's docs, and
@@ -91,7 +99,26 @@ export type PlacePanels = {
    *  to the global) would freeze the seed into a place on the next dock toggle,
    *  and then spread that stale value back over the global. */
   files_diff?: boolean;
+  /** The agent cell's Chat | Terminal choice for THIS place (the chat view,
+   *  `chat_view`). Absent means Terminal.
+   *
+   *  OPTIONAL, and unlike the two above it has NO global twin, and must never
+   *  get one: a place you never switched opens on its Terminal, never on
+   *  whatever the last place used. So `panelsFor` leaves it out of what it
+   *  returns, `updatePanels` carries the stored value into the place's record
+   *  and never over the globals, and only `withAgentView` writes it.
+   *  `loadSettings` drops anything but the two words; an older build ignores
+   *  the key, and keeps it until it rewrites this place's record. Kept while
+   *  `chat_view` is off, so turning it back on restores each place's view.
+   *  `placeview-check.mjs` pins all of that. */
+  agent_view?: AgentView;
 };
+
+/** The agent cell's two views (`PlacePanels.agent_view`). */
+export const AGENT_VIEWS = ["chat", "terminal"] as const;
+export type AgentView = (typeof AGENT_VIEWS)[number];
+const isAgentView = (v: unknown): v is AgentView =>
+  typeof v === "string" && (AGENT_VIEWS as readonly string[]).includes(v);
 
 /** Every tab the dock can show, as a VALUE — the unions above are types and
  *  vanish at runtime. `dockrail-check.mjs` pins it to `DOCK_RAIL` and to both
@@ -112,7 +139,13 @@ export function panelsFor(s: Settings, key: string | null): Settings {
   // An entry written before `files_md_zoom` joined the record has no size in it,
   // and `{...s, ...p}` would spread `undefined` OVER the global — every place
   // set up by an older build would read as "no size" rather than inheriting one.
-  if (p) return { ...s, ...p, files_md_zoom: p.files_md_zoom ?? s.files_md_zoom, files_diff: p.files_diff ?? s.files_diff };
+  // `agent_view` stays behind: it has no global (see PlacePanels), and a
+  // Settings object carrying it would make one the first time it was spread
+  // back into `settings`.
+  if (p) {
+    const { agent_view: _view, ...dock } = p;
+    return { ...s, ...dock, files_md_zoom: p.files_md_zoom ?? s.files_md_zoom, files_diff: p.files_diff ?? s.files_diff };
+  }
   // A place you have never opened the dock in starts CLOSED — the global
   // `dock_open` is NOT a seed.
   //
@@ -128,6 +161,33 @@ export function panelsFor(s: Settings, key: string | null): Settings {
   // deliberate open looks like, which is exactly where a last-used value is
   // the right guess.
   return s.dock_open ? { ...s, dock_open: false } : s;
+}
+
+/** Which view THIS place's agent cell shows: its own `agent_view`, and
+ *  Terminal for a place that never chose. Read from the record alone, never
+ *  from a global (there is none) and never through `panelsFor` (which leaves
+ *  the field behind). Whether the chat shows at all is `chat_view`'s call;
+ *  this answer is kept while that is off. */
+export const agentViewFor = (s: Settings, key: string | null): AgentView =>
+  (key ? s.place_panels?.[key]?.agent_view : undefined) === "chat" ? "chat" : "terminal";
+
+/** `s` with THIS place's view set, and nothing else: no other place's record,
+ *  no global. `s` itself when the place already shows `view`, so a click on
+ *  the view already shown writes nothing and Terminal in a place that never
+ *  chose creates no record.
+ *
+ *  A place's FIRST record, made by this switch, holds a closed dock and no
+ *  other dock field: `dock_tab`/`dock_width` stay absent and keep inheriting
+ *  the global seed, as they do with no record. `dock_open: false` is what no
+ *  record means, written out because an older build spreads the record over
+ *  the globals in `panelsFor`, and an absent `dock_open` would open the dock
+ *  here on the global's word. Not the partial record `updatePanels` warns
+ *  about: that one held an OPEN dock whose tab then moved with the global.
+ *  This dock is closed, and opening it writes the full record. */
+export function withAgentView(s: Settings, key: string, view: AgentView): Settings {
+  const cur = s.place_panels?.[key];
+  if ((cur?.agent_view ?? "terminal") === view) return s;
+  return { ...s, place_panels: { ...(s.place_panels ?? {}), [key]: { ...(cur ?? { dock_open: false }), agent_view: view } } };
 }
 
 // Settings → Codex: how much a Worktrees-launched Codex may do without asking.
@@ -839,6 +899,9 @@ export async function loadSettings(): Promise<Settings> {
         // Only a value that IS there and is wrong: an absent one is left absent
         // rather than filled in (the seed trap on `place_panels`, CLAUDE.md).
         if (p && typeof p === "object" && p.dock_tab !== undefined && !isDockTab(p.dock_tab)) p.dock_tab = "files";
+        // The chat view's choice is one of its two words or nothing. Dropped
+        // rather than mapped, since absent already IS Terminal.
+        if (p && typeof p === "object" && p.agent_view !== undefined && !isAgentView(p.agent_view)) delete p.agent_view;
       }
     }
     // A hand-edited model string must still be data before it can reach argv.
