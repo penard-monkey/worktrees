@@ -48,9 +48,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   drive that happens to be plugged in. A drive is recognised by its volume
   UUID, so renaming or remounting it doesn't lose the choice. FAT and exFAT
   sticks have no UUID and are recognised by their path, so renaming one
-  forgets it. With nothing
-  chosen, auto-detect still takes exactly one removable drive and never a
-  network share. Two removable drives now point you at `sync hubs --choose`.
+  forgets it. With nothing chosen, auto-detect still takes exactly one
+  removable drive and never a network share. Two removable drives now point
+  you at `sync hubs --choose`.
+
+### Fixed
+- **The chat's message box no longer shows scroll bars or overlaps the line
+  under it.** With macOS set to always show scroll bars, an empty box at
+  some window sizes drew a horizontal and a vertical bar inside itself,
+  clipped "Message Claude", and covered the "One line · Enter sends" row.
+  The box now scrolls only once a message passes six lines, and it fits its
+  text again when the chat gets wider or narrower, such as when the window
+  is resized or the dock opens, and when the UI font size changes.
 
 ## [0.45.1] - 2026-11-01
 

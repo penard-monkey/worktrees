@@ -272,6 +272,8 @@
   flex: 1; min-width: 0; resize: none; display: block;
   background: var(--bg-input); color: var(--txt-hi); border: 1px solid var(--line); border-radius: var(--r-md);
   padding: 6px var(--s3); font: inherit; font-size: var(--fs-body); line-height: 1.45;
+  /* Wraps, never scrolls sideways; scrolls down only past six lines (ChatPane's fit sets overflow-y). */
+  overflow-x: hidden; overflow-y: hidden;
 }
 .chat-field::placeholder { color: var(--txt-dim); }
 .chat-field:focus { outline: none; border-color: var(--accent); }
