@@ -513,17 +513,7 @@ fn argv_summary(argv: &[serde_json::Value]) -> Option<String> {
 /// event ([`codex`]). A script calling more than one tool says how many
 /// more, so a chip never hides the rest.
 fn code_mode_summary(js: &str) -> Option<String> {
-    let mut calls = Vec::new();
-    let mut from = 0;
-    while let Some(i) = js[from..].find("tools.") {
-        let start = from + i + "tools.".len();
-        let name_len = js[start..].find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(js.len() - start);
-        let after = start + name_len;
-        if name_len > 0 && js[after..].trim_start().starts_with('(') {
-            calls.push((&js[start..after], after + js[after..].find('(').unwrap_or(0) + 1));
-        }
-        from = after.max(start);
-    }
+    let calls = code_calls(js);
     let &(name, args) = calls.first()?;
     let what = match name {
         "exec_command" => key_literal(&js[args..], "cmd").and_then(|c| one_line(&c)),
@@ -534,6 +524,32 @@ fn code_mode_summary(js: &str) -> Option<String> {
         0 => what,
         more => format!("{what} (+{more} more)"),
     })
+}
+
+/// Each `tools.<name>(` a code-mode script calls: the name, and where its
+/// arguments start. String literals are skipped whole, so a patch whose
+/// text calls `tools.…(` is one call, not two.
+fn code_calls(js: &str) -> Vec<(&str, usize)> {
+    let b = js.as_bytes();
+    let mut calls = Vec::new();
+    let mut i = 0;
+    // Only ASCII bytes are matched, so every slice starts on a char boundary.
+    while i < b.len() {
+        match b[i] {
+            b'"' | b'\'' | b'`' => i += js_literal(&js[i..]).map_or(1, |(_, n)| n),
+            b't' if js[i..].starts_with("tools.") && (i == 0 || !(b[i - 1].is_ascii_alphanumeric() || matches!(b[i - 1], b'_' | b'.' | b'$'))) => {
+                let start = i + "tools.".len();
+                let after = start + js[start..].find(|c: char| !(c.is_ascii_alphanumeric() || c == '_')).unwrap_or(js.len() - start);
+                let rest = js[after..].trim_start();
+                if after > start && rest.starts_with('(') {
+                    calls.push((&js[start..after], js.len() - rest.len() + 1));
+                }
+                i = after;
+            }
+            _ => i += 1,
+        }
+    }
+    calls
 }
 
 /// The string literal given for `key` in the object literal at the start of
@@ -1366,6 +1382,9 @@ mod tests {
             codex_output("f9", "TOOL-OUTPUT-MARKER"),
             codex_function("mcp__github__get_issue", "f10", json!({"owner": "o", "repo": "r", "issue_number": 7})),
             codex_output("f10", "TOOL-OUTPUT-MARKER"),
+            // A patch whose own text calls a tool is still one call.
+            codex_custom("exec", "f11", r#"const r = await tools.apply_patch("*** Begin Patch\n*** Add File: run.js\n+await tools.exec_command({cmd: 'make'});\n*** End Patch"); text(r);"#),
+            codex_output("f11", "TOOL-OUTPUT-MARKER"),
             // Two calls in flight: their event is nobody's.
             codex_custom("exec", "p1", "const r = await tools.exec_command({cmd:\"false\"}); text(r.output);\n"),
             codex_custom("exec", "p2", "const r = await tools.exec_command({cmd:\"true\"}); text(r.output);\n"),
@@ -1390,6 +1409,7 @@ mod tests {
                 call("exec", Some("view_image"), false),
                 call("exec", Some("wc -l a.txt"), false),
                 call("mcp__github__get_issue", None, false),
+                call("exec", Some("add run.js"), false),
                 call("exec", Some("false"), false),
                 call("exec", Some("true"), true),
             ]
