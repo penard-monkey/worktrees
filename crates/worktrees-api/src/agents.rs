@@ -1,9 +1,10 @@
 //! The agent rows: see what an agent is asking, answer it with one of its own
 //! choices, send it a line, read its recent turns — without a terminal (iOS
 //! MVP §2.4, S6–S9; serve's `agent_prompt`, `agent_answer`, `agent_send`,
-//! `agent_turns`) — and answer what one choice cannot: a choice with free
-//! text (`agent_answer_text`), a multi-select's boxes (`agent_answer_many`).
-//! Any client may call them; a paired phone is the reason they exist.
+//! `agent_turns`) — answer what one choice cannot: a choice with free text
+//! (`agent_answer_text`), a multi-select's boxes (`agent_answer_many`) — and
+//! stop a running turn (`agent_interrupt`). Any client may call them; a
+//! paired phone is the reason they exist.
 //!
 //! **The prompt** is read off the agent's pane by `worktrees_core::prompt`,
 //! per harness, and only its modal comes back. Its `fingerprint` is a hash of
@@ -56,6 +57,13 @@
 //! read from the file its footer names. The record goes once an answer used
 //! it, or once no prompt is up and the agent is not waiting.
 //!
+//! **A turn is stopped with ONE Escape**, a key like an answer's, never
+//! text, and only on a fresh capture that shows it running: Esc on a prompt
+//! cancels it, on an idle Claude it arms `Esc again to clear`, and twice it
+//! opens Claude's rewind menu. The stop is proved on later captures (the
+//! busy hint gone, or the mark the harness leaves under a stopped turn) and
+//! otherwise answered `unconfirmed`, never pressed again.
+//!
 //! **Turns are read from the transcript, never the pane** (`worktrees_core::
 //! turns`), and are data.
 //!
@@ -96,6 +104,16 @@ pub const ERR_MULTI: &str = "a multi-select: tick its boxes with agent_answer_ma
 pub const ERR_NOT_MULTI: &str = "not a multi-select: answer it with agent_answer";
 /// `agent_send` when no composer can be seen.
 pub const ERR_NO_COMPOSER: &str = "the agent is not at its prompt (starting, or a screen this host does not recognise): try again shortly";
+/// `agent_interrupt` when no agent of the place shows a running turn: an Esc
+/// into an idle Claude arms its `Esc again to clear`, and two open its
+/// rewind menu.
+pub const ERR_NOT_BUSY: &str = "the agent is not working on a turn: there is nothing to stop";
+/// `agent_interrupt` while the composer holds someone's text: Claude draws
+/// no key hints then, so whether a turn runs cannot be seen.
+pub const ERR_STOP_DRAFT: &str = "the agent's prompt has unsent text in it (someone is typing there), which hides whether a turn is running: stop it at the host";
+/// The head of `agent_interrupt`'s refusal for a harness it does not stop
+/// (pi, kimi), which names it after this.
+pub const ERR_STOP_UNSUPPORTED: &str = "agent_interrupt stops Claude's and Codex's turns;";
 
 /// The longest line `agent_send` types: MCP `send`'s bound.
 pub const SEND_MAX: usize = harness::LINE_MAX;
@@ -411,8 +429,8 @@ fn confirmed(io: &dyn AgentIo, lane: &Lane, gone: impl Fn(&Modal) -> bool) -> bo
     })
 }
 
-/// A device's text into an agent is stamped on the place: who, which session,
-/// when — never the text.
+/// A device's text or key into an agent (a send, a typed answer, a stop) is
+/// stamped on the place: who, which session, when — never the text.
 fn stamp_send(ctx: &Ctx, repo: &str, slug: &str, lane: &Lane) {
     if let Some(by) = ctx.by().filter(store::By::is_device) {
         let stamp = RemoteSend { by, session: lane.session.clone(), at: worktrees_core::sysclock::now_epoch() };
@@ -645,6 +663,117 @@ fn send_note(o: &SendOutcome) -> String {
         SendOutcome::Unconfirmed => "Typed, but the submission could not be confirmed; look before sending it again.".into(),
         SendOutcome::EnterFailed(e) => format!("Typed, but Enter failed ({e}); look before sending it again."),
     }
+}
+
+/// `agent_interrupt`: stop the turn running in this place — `{interrupted:
+/// true, harness, session, note}` once it is seen to stop, or `{interrupted:
+/// false, unconfirmed: true, …}` when it was not, which a client must never
+/// answer by pressing it again. ONE Escape, and only on a fresh capture that
+/// shows the turn running (`prompt::turn_shown`): Claude's busy hint on its
+/// status row, Codex's busy row — or, for a Codex that hides it while a
+/// reply streams, its rollout (`activity`, the nav dots' one derivation).
+/// Refused while a prompt is up (Esc would cancel it: answer it with
+/// `agent_answer`), while the composer holds someone's text (it hides the
+/// hints), on an idle agent (`ERR_NOT_BUSY`), and for pi and kimi. A key,
+/// never text: `agent_send` stays the one path that types into Claude. It is
+/// `instruct` (drive-class), under the place's lock like an answer, and a
+/// device's stop is stamped like its send.
+pub fn agent_interrupt(ctx: &Ctx, repo: String, slug: String) -> Result<Value, String> {
+    let project = discover(&repo)?;
+    let io = &*ctx.agents.io;
+    let lock = ctx.agents.lock(&project.place_dir(&slug));
+    let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
+    let lanes = io.lanes(&project, &slug);
+    if lanes.is_empty() {
+        return Err("no agent is running in this place".into());
+    }
+    let (mut up, mut drafted, mut unknown, mut stoppable) = (false, false, false, false);
+    let mut target: Option<(Lane, String)> = None;
+    for lane in &lanes {
+        if !stops(lane.harness) {
+            continue;
+        }
+        stoppable = true;
+        let Some(screen) = io.capture(lane) else {
+            unknown = true;
+            continue;
+        };
+        if read_any(lane.harness, &screen).is_some() {
+            up = true;
+            continue;
+        }
+        match prompt::turn_shown(lane.harness, &screen) {
+            Some(prompt::TurnShown::Running) => {}
+            Some(prompt::TurnShown::Idle) if lane.harness == provider::CODEX.id && codex_busy(io, &project, &slug, lane) => {}
+            Some(prompt::TurnShown::Idle) => continue,
+            Some(prompt::TurnShown::Drafted) => {
+                drafted = true;
+                continue;
+            }
+            None => {
+                unknown = true;
+                continue;
+            }
+        }
+        target = Some((lane.clone(), screen));
+        break;
+    }
+    let Some((lane, screen)) = target else {
+        if !stoppable {
+            let label = harness::by_id(lanes[0].harness).map_or(lanes[0].harness, |a| a.provider().label);
+            return Err(format!("agent_interrupt stops Claude's and Codex's turns; {label}'s cannot be stopped from here yet"));
+        }
+        // A screen with no composer whose agent waits is a prompt this host
+        // cannot read: Esc would cancel it all the same.
+        if up || (unknown && io.activity(&project, &slug).state == activity::State::Waiting) {
+            return Err(ERR_PROMPT_UP.into());
+        }
+        return Err(if drafted { ERR_STOP_DRAFT } else if unknown { ERR_NO_COMPOSER } else { ERR_NOT_BUSY }.into());
+    };
+    // A mark already on screen is an earlier turn's: only a new one proves.
+    let marked_before = prompt::interrupted_shown(lane.harness, &screen);
+    io.press(&lane, Key::Escape)?;
+    stamp_send(ctx, &repo, &slug, &lane);
+    let stopped = (0..GONE_TRIES).any(|i| {
+        if i > 0 {
+            io.sleep(POLL_MS);
+        }
+        let Some(now) = io.capture(&lane) else { return false };
+        if read_any(lane.harness, &now).is_some() {
+            return false;
+        }
+        if !marked_before && prompt::interrupted_shown(lane.harness, &now) {
+            return true;
+        }
+        match prompt::turn_shown(lane.harness, &now) {
+            // Claude always draws its hint while a turn runs and the box is
+            // empty, so an idle status row is the turn gone.
+            Some(prompt::TurnShown::Idle) if lane.harness == provider::CLAUDE.id => true,
+            // Codex hides its busy row while a reply streams: only its
+            // rollout says the turn ended. Asked twice a second, not per poll.
+            Some(prompt::TurnShown::Idle) => i % 10 == 9 && !codex_busy(io, &project, &slug, &lane),
+            _ => false,
+        }
+    });
+    let mut v = json!({ "interrupted": stopped, "harness": lane.harness, "session": lane.session });
+    if stopped {
+        v["note"] = json!("Stopped: the turn was interrupted.");
+    } else {
+        v["unconfirmed"] = json!(true);
+        v["note"] = json!("Esc was pressed once, but the turn could not be seen to stop: look at the agent before stopping it again.");
+    }
+    Ok(v)
+}
+
+/// The harnesses `agent_interrupt` stops: the two whose busy screen it reads.
+fn stops(harness: &str) -> bool {
+    harness == provider::CLAUDE.id || harness == provider::CODEX.id
+}
+
+/// The place's Codex in `lane` is mid-turn by its rollout.
+fn codex_busy(io: &dyn AgentIo, project: &Project, slug: &str, lane: &Lane) -> bool {
+    let a = io.activity(project, slug);
+    a.state == activity::State::Busy && a.provider == Some(provider::CODEX.id) && a.session.as_deref() == Some(lane.session.as_str())
 }
 
 /// `agent_turns`: the last `n` turns (default [`DEFAULT_TURNS`], at most
@@ -995,6 +1124,9 @@ mod tests {
         forgot: Mutex<Vec<Forget>>,
         /// Plan files by the name a footer shows.
         plans: HashMap<String, (String, String)>,
+        /// A rollout that says a turn runs: `(provider, session)` — until
+        /// an Escape, which ends it as Codex's `turn_aborted` does.
+        busy: Mutex<Option<(&'static str, String)>>,
     }
 
     impl Fake {
@@ -1021,6 +1153,9 @@ mod tests {
                 a.state = activity::State::Waiting;
                 a.provider = Some("claude");
             }
+            if let Some((provider, session)) = self.busy.lock().unwrap().clone() {
+                (a.state, a.provider, a.session) = (activity::State::Busy, Some(provider), Some(session));
+            }
             a
         }
         fn capture(&self, lane: &Lane) -> Option<String> {
@@ -1045,6 +1180,9 @@ mod tests {
         }
         fn press(&self, lane: &Lane, key: Key) -> Result<(), String> {
             self.keys.lock().unwrap().push(key);
+            if key == Key::Escape {
+                *self.busy.lock().unwrap() = None;
+            }
             let mut panes = self.panes.lock().unwrap();
             let p = panes.get_mut(&lane.session).unwrap();
             if let Some((now, next)) = &mut p.queue {
@@ -1054,7 +1192,7 @@ mod tests {
             match key {
                 Key::Down => p.hl += 1,
                 Key::Up => p.hl = p.hl.saturating_sub(1),
-                Key::Enter => p.answered = true,
+                Key::Enter | Key::Escape => p.answered = true,
                 Key::Tab => panic!("Tab on a pane with no script"),
             }
             p.moved |= key != Key::Enter;
@@ -1685,6 +1823,157 @@ mod tests {
         let (ctx, repo) = setup("tall-send", fake.clone());
         assert_eq!(agent_send(&ctx, repo, "lane".into(), "repo-lane".into(), "hello".into()), Err(ERR_PROMPT_UP.to_string()));
         assert!(fake.delivered.lock().unwrap().is_empty());
+    }
+
+    // ── agent_interrupt ──────────────────────────────────────────────────
+
+    macro_rules! stop316 {
+        ($name:literal) => {
+            include_str!(concat!("../../worktrees-core/tests/fixtures/claude-screen/2.1.316/interrupt/", $name))
+        };
+    }
+    macro_rules! codexstop {
+        ($name:literal) => {
+            include_str!(concat!("../../worktrees-core/tests/fixtures/codex-inline/0.160.1/interrupt/", $name))
+        };
+    }
+
+    /// A real Claude 2.1.316 mid-turn: ONE Escape, then the turn is seen to
+    /// stop (its mark, its idle status row) — `interrupted: true`. A device's
+    /// stop is stamped on the place like its send; the console's is not.
+    #[test]
+    fn a_running_turn_is_stopped_with_one_escape_and_seen_to_stop() {
+        let fake = Arc::new(Fake::with(vec![("claude", "repo-lane", pane(vec![stop316!("busy-bash.e.txt")], stop316!("interrupted.e.txt")))]));
+        let (ctx, repo) = setup("stop", fake.clone());
+        let v = agent_interrupt(&ctx, repo.clone(), "lane".into()).unwrap();
+        assert_eq!((v["interrupted"].as_bool(), v["harness"].as_str(), v["session"].as_str()), (Some(true), Some("claude"), Some("repo-lane")), "{v}");
+        assert!(v.get("unconfirmed").is_none());
+        assert_eq!(fake.keys(), vec![Key::Escape]);
+        assert!(store::read_lenient(&repo).places.get("lane").and_then(|d| d.last_remote_send.clone()).is_none(), "the console is not stamped");
+
+        let fake = Arc::new(Fake::with(vec![("claude", "repo-lane", pane(vec![stop316!("busy-text.e.txt")], stop316!("interrupted-text.e.txt")))]));
+        let (ctx, repo) = setup("stop-device", fake.clone());
+        let v = agent_interrupt(&device(&ctx), repo.clone(), "lane".into()).unwrap();
+        assert_eq!(v["interrupted"], json!(true), "{v}");
+        let s = store::read_lenient(&repo).places["lane"].last_remote_send.clone().expect("stamped");
+        assert_eq!((s.by.device, s.session.as_str()), (Device::Paired(DeviceId::new("phone")), "repo-lane"));
+    }
+
+    /// Every refusal presses nothing: an idle agent (an Esc there arms
+    /// Claude's `Esc again to clear`; two open its rewind menu), a prompt up
+    /// (Esc would cancel it), a draft that hides the hints, a screen with no
+    /// composer (unless its agent waits: then a prompt this host cannot
+    /// read), pi and kimi, and a place with no agent.
+    #[test]
+    fn a_stop_is_refused_unless_a_turn_is_seen_running_and_presses_nothing() {
+        let cases: Vec<(&str, &'static str, &'static str, bool, String)> = vec![
+            ("idle", "claude", stop316!("idle.e.txt"), false, ERR_NOT_BUSY.into()),
+            ("after", "claude", stop316!("after-turn.e.txt"), false, ERR_NOT_BUSY.into()),
+            ("stale", "claude", stop316!("idle-esc.e.txt"), false, ERR_NOT_BUSY.into()),
+            ("prompt", "claude", stop316!("busy-permission.e.txt"), false, ERR_PROMPT_UP.into()),
+            ("tall", "claude", fx316!("permission-edit-tall.txt"), false, ERR_PROMPT_UP.into()),
+            ("draft", "claude", stop316!("busy-draft.e.txt"), false, ERR_STOP_DRAFT.into()),
+            ("blank", "claude", "", false, ERR_NO_COMPOSER.into()),
+            ("unread", "claude", "", true, ERR_PROMPT_UP.into()),
+            ("cidle", "codex", codexstop!("idle.txt"), false, ERR_NOT_BUSY.into()),
+            ("cstream", "codex", codexstop!("busy-streaming.txt"), false, ERR_NOT_BUSY.into()),
+            ("capproval", "codex", codexstop!("busy-approval.txt"), false, ERR_PROMPT_UP.into()),
+            ("cdraft", "codex", codexstop!("busy-draft.txt"), false, ERR_STOP_DRAFT.into()),
+            ("pi", "pi", codexstop!("busy.txt"), false, format!("{ERR_STOP_UNSUPPORTED} pi's cannot be stopped from here yet")),
+            ("kimi", "kimi", codexstop!("busy.txt"), false, format!("{ERR_STOP_UNSUPPORTED} Kimi's cannot be stopped from here yet")),
+        ];
+        for (tag, harness, screen, waiting, want) in cases {
+            let mut f = Fake::with(vec![(harness, "repo-lane", pane(vec![screen], stop316!("interrupted.e.txt")))]);
+            f.waiting = waiting;
+            let fake = Arc::new(f);
+            let (ctx, repo) = setup(&format!("stop-{tag}"), fake.clone());
+            assert_eq!(agent_interrupt(&ctx, repo, "lane".into()), Err(want), "{tag}");
+            assert_eq!(fake.keys(), vec![], "{tag}: nothing pressed");
+        }
+        let (ctx, repo) = setup("stop-none", Arc::new(Fake::default()));
+        assert_eq!(agent_interrupt(&ctx, repo, "lane".into()), Err("no agent is running in this place".into()));
+    }
+
+    /// A turn that is not seen to stop is `unconfirmed` after a BOUNDED
+    /// wait, and is never pressed again: one Escape, one capture before it
+    /// and `GONE_TRIES` after.
+    #[test]
+    fn a_stop_not_seen_to_land_is_unconfirmed_after_a_bounded_wait_and_never_pressed_twice() {
+        let busy = stop316!("busy-bash.e.txt");
+        let fake = Arc::new(Fake::with(vec![("claude", "repo-lane", pane(vec![busy], busy))]));
+        let (ctx, repo) = setup("stop-unseen", fake.clone());
+        let v = agent_interrupt(&ctx, repo, "lane".into()).unwrap();
+        assert_eq!((v["interrupted"].as_bool(), v["unconfirmed"].as_bool()), (Some(false), Some(true)), "{v}");
+        assert!(v["note"].as_str().unwrap().contains("before stopping it again"), "{v}");
+        assert_eq!(fake.keys(), vec![Key::Escape], "one Esc, whatever the screen says after it");
+        assert_eq!(fake.captures.load(Ordering::SeqCst), 1 + GONE_TRIES);
+    }
+
+    /// A mark already on screen is an earlier turn's, not proof of this
+    /// Esc: a busy Claude sitting under one, still busy after the key, is
+    /// unconfirmed.
+    #[test]
+    fn an_earlier_turns_mark_does_not_prove_a_stop() {
+        let busy = stop316!("busy-bash.e.txt");
+        let (top, _) = worktrees_core::agent::prompt_box_edges(busy).unwrap();
+        let mut rows: Vec<&str> = busy.lines().collect();
+        rows.insert(top, "  ⎿  Interrupted · What should Claude do instead?");
+        let marked: &'static str = Box::leak(rows.join("\n").into_boxed_str());
+        assert!(prompt::interrupted_shown("claude", marked) && prompt::turn_shown("claude", marked) == Some(prompt::TurnShown::Running));
+        let fake = Arc::new(Fake::with(vec![("claude", "repo-lane", pane(vec![marked], marked))]));
+        let (ctx, repo) = setup("stop-stale", fake.clone());
+        let v = agent_interrupt(&ctx, repo, "lane".into()).unwrap();
+        assert_eq!(v["unconfirmed"], json!(true), "{v}");
+        assert_eq!(fake.keys(), vec![Key::Escape]);
+    }
+
+    /// Codex 0.160.1: its busy row, then its mark. While a reply streams it
+    /// hides the row, so the rollout is the witness both ways: busy before,
+    /// and ended (`turn_aborted`) after, with no mark on screen.
+    #[test]
+    fn codex_is_stopped_by_its_busy_row_or_while_streaming_by_its_rollout() {
+        let fake = Arc::new(Fake::with(vec![("codex", "repo-lane~agent~codex", pane(vec![codexstop!("busy.txt")], codexstop!("interrupted.txt")))]));
+        let (ctx, repo) = setup("stop-codex", fake.clone());
+        let v = agent_interrupt(&ctx, repo, "lane".into()).unwrap();
+        assert_eq!((v["interrupted"].as_bool(), v["harness"].as_str()), (Some(true), Some("codex")), "{v}");
+        assert_eq!(fake.keys(), vec![Key::Escape]);
+
+        let streaming = codexstop!("busy-streaming.txt");
+        let f = Fake::with(vec![("codex", "repo-lane~agent~codex", pane(vec![streaming], streaming))]);
+        *f.busy.lock().unwrap() = Some(("codex", "repo-lane~agent~codex".into()));
+        let fake = Arc::new(f);
+        let (ctx, repo) = setup("stop-codex-stream", fake.clone());
+        let v = agent_interrupt(&ctx, repo, "lane".into()).unwrap();
+        assert_eq!(v["interrupted"], json!(true), "{v}");
+        assert_eq!(fake.keys(), vec![Key::Escape]);
+        // A rollout busy in ANOTHER session is not this lane's turn.
+        let f = Fake::with(vec![("codex", "repo-lane~agent~codex", pane(vec![streaming], streaming))]);
+        *f.busy.lock().unwrap() = Some(("codex", "repo-other~agent~codex".into()));
+        let fake = Arc::new(f);
+        let (ctx, repo) = setup("stop-codex-other", fake.clone());
+        assert_eq!(agent_interrupt(&ctx, repo, "lane".into()), Err(ERR_NOT_BUSY.into()));
+        assert_eq!(fake.keys(), vec![]);
+    }
+
+    /// Two clients stop one turn at once: the place's lock makes it ONE
+    /// Escape, and the other finds the turn already stopped. Without the
+    /// lock both see it running and the second Esc lands on an idle Claude.
+    #[test]
+    fn two_stops_of_one_turn_press_escape_once() {
+        let mut f = Fake::with(vec![("claude", "repo-lane", pane(vec![stop316!("busy-bash.e.txt")], stop316!("interrupted.e.txt")))]);
+        f.meet = Some((Mutex::new(0), Condvar::new()));
+        let fake = Arc::new(f);
+        let (ctx, repo) = setup("stop-race", fake.clone());
+        let runs: Vec<_> = (0..2)
+            .map(|_| {
+                let (ctx, repo) = (ctx.clone(), repo.clone());
+                std::thread::spawn(move || agent_interrupt(&ctx, repo, "lane".into()))
+            })
+            .collect();
+        let outs: Vec<Result<Value, String>> = runs.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(outs.iter().filter(|o| o.as_ref().is_ok_and(|v| v["interrupted"] == json!(true))).count(), 1, "{outs:?}");
+        assert!(outs.contains(&Err(ERR_NOT_BUSY.to_string())), "{outs:?}");
+        assert_eq!(fake.keys(), vec![Key::Escape], "one key, once");
     }
 }
 
