@@ -1,4 +1,4 @@
-//! The 185 commands, each with its exposure, capability and objects, in ONE
+//! The 190 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -784,7 +784,8 @@ pub const GLOBAL_OK: &[&str] = &[
     "set_settings", "log_event",
     // admin
     "codex_mcp_status", "codex_mcp_uninstall", "codex_mcp_migration_plan", "pi_mcp_status", "pi_mcp_uninstall",
-    "kimi_mcp_status", "delete_profile", "skill_remove", "skill_preview_git", "sync_hub_list", "diagnostics",
+    "kimi_mcp_status", "delete_profile", "skill_remove", "skill_preview_git", "sync_hub_list", "sync_hubs",
+    "sync_hub_choose", "sync_hub_forget", "diagnostics",
     "log_tail", "term_history_info", "profiles_info", "devices_list",
 ];
 
@@ -926,13 +927,27 @@ commands! { cx, a;
     // ── sync, agent setup, diagnostics, pull requests (project) ──────────
     sync_status: Engine [read, project(repo)] => project::sync_status(a.get("repo")?),
     sync_hub_list: Engine [admin, global] => project::sync_hub_list(),
-    sync_preview: Engine [read, opt_project(repo, AdminAll)] => project::sync_preview(a.get("repo")?, a.get("name")?, a.get("direction")?, a.get("with_sessions")?),
+    // The hub dashboard and the chosen hubs (`worktrees_core::synchub`). A hub
+    // is named by ID on every row below; `project::hub_path` resolves it
+    // against what is mounted, so no client value ever becomes an rsync path.
+    sync_hubs: Engine [admin, global] => project::sync_hubs(&cx.ctx),
+    sync_hub_choose: Engine [admin, global] => project::sync_hub_choose(a.get("ids")?),
+    sync_hub_forget: Engine [admin, global] => project::sync_hub_forget(a.get("hub")?),
+    sync_preview: Engine [read, opt_project(repo, AdminAll)] => project::sync_preview(a.get("repo")?, a.get("name")?, a.get("direction")?, a.get("with_sessions")?, a.get("hub")?),
     sync_apply: Engine [admin, opt_project(repo, Console)] => {
         let mut sink = cx.frames.typed::<worktrees_core::sync::SyncProgress>(a.channel("on_progress")?);
         project::sync_apply(
             &cx.ctx, a.get("repo")?, a.get("name")?, a.get("direction")?, a.get("with_sessions")?,
-            a.get("confirmed")?, a.get("install")?, &mut sink,
+            a.get("confirmed")?, a.get("install")?, a.get("hub")?, &mut sink,
         )
+    },
+    // Many projects × many hubs. Console-only: a job list names projects the
+    // row cannot declare one by one, and a drive plugged into the host is the
+    // host's user's act.
+    sync_batch_preview: HostConsole => project::sync_batch_preview(a.get("jobs")?, a.get("direction")?, a.get("with_sessions")?),
+    sync_batch_apply: HostConsole => {
+        let mut sink = cx.frames.typed::<worktrees_api::project::BatchEvent>(a.channel("on_event")?);
+        project::sync_batch_apply(&cx.ctx, a.get("jobs")?, a.get("direction")?, a.get("with_sessions")?, &mut sink)
     },
     init_suggest: Engine [read, project(repo)] => project::init_suggest(a.get("repo")?),
     init_write: Engine [instruct, project(repo)] => project::init_write(a.get("repo")?),
@@ -1222,7 +1237,7 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 185 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 190 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six, the slots pair and
     /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
@@ -1230,13 +1245,14 @@ mod tests {
     /// (`remote_candidates`, `device_rename`), the iOS MVP's four agent
     /// rows, the two that answer what one choice cannot
     /// (`agent_answer_text`, `agent_answer_many`) and the one that stops a
-    /// turn (`agent_interrupt`), and `project_sessions`; the check scripts
+    /// turn (`agent_interrupt`), `project_sessions`, and sync's five hub
+    /// and batch rows; the check scripts
     /// hold the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 185, "the table has 185 commands");
+        assert_eq!(TABLE.len(), 190, "the table has 190 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1619,7 +1635,9 @@ mod tests {
     /// (`instruct`), then `agent_answer_many` (`answer`),
     /// `agent_answer_text` (`instruct`) and `agent_interrupt` (`instruct`:
     /// one key, a stop); and `project_sessions` (`read`),
-    /// what removing a project would leave running. A row that moves group
+    /// what removing a project would leave running; and sync's hub rows —
+    /// `sync_hubs`, `sync_hub_choose`, `sync_hub_forget` (`admin`) and the
+    /// batch pair `sync_batch_preview`/`sync_batch_apply` (console). A row that moves group
     /// fails here until the count (and the proposal's table) move with it.
     #[test]
     fn every_row_has_one_base_group_and_the_counts_are_section_3_4s() {
@@ -1636,7 +1654,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 60), ("write", 23), ("admin", 35), ("console", 39), ("stream", 10), ("instruct", 6), ("answer", 2),
+            ("read", 60), ("write", 23), ("admin", 38), ("console", 41), ("stream", 10), ("instruct", 6), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 3),
         ]
         .into();

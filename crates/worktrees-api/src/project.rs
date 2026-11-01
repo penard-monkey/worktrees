@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use serde::Serialize;
 use worktrees_core::proc::run_deadline;
 use worktrees_core::ui::CaptureUi;
-use worktrees_core::{ops, sync, Project};
+use worktrees_core::{ops, sync, synchub, Project};
 
 use crate::argv::Argv;
 use crate::log::log as applog;
@@ -29,6 +29,20 @@ pub fn sync_request(
     name: Option<&str>,
     direction: &str,
     with_sessions: bool,
+    hub: Option<&str>,
+) -> Result<sync::SyncRequest, String> {
+    sync_request_in(repo, name, direction, with_sessions, hub, &hub_path)
+}
+
+/// `sync_request` with the hub-id resolver given — the seam a test drives
+/// with its own temp hubs instead of the mounted volumes.
+fn sync_request_in(
+    repo: Option<&str>,
+    name: Option<&str>,
+    direction: &str,
+    with_sessions: bool,
+    hub: Option<&str>,
+    resolve: &dyn Fn(&str) -> Result<String, String>,
 ) -> Result<sync::SyncRequest, String> {
     let source = match (repo, name) {
         (Some(r), _) => {
@@ -41,9 +55,58 @@ pub fn sync_request(
     Ok(sync::SyncRequest {
         source,
         direction: sync::SyncDirection::parse(direction)?,
-        hub: None,
+        hub: hub.filter(|h| !h.is_empty()).map(resolve).transpose()?,
         with_sessions: Some(with_sessions),
     })
+}
+
+/// A hub a client named, by ID (`synchub`): a connected volume or the
+/// configured folder. Never a path the client chose — a remembered hub that is
+/// not mounted, or an id nobody listed, is refused with the reason, so a
+/// client cannot point an rsync `--delete` at a directory of its choosing.
+fn hub_path(id: &str) -> Result<String, String> {
+    let cfg = worktrees_core::config::sync_cfg();
+    let configured = sync::configured_hub(&cfg);
+    synchub::path_for_id(&synchub::volumes(), &synchub::read(), configured.as_deref(), id)
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// One sync at a time, whoever asks: two rsyncs onto one drive halve each
+/// other and interleave their backups, and the batch's "one at a time" must
+/// hold against a second window too, not only inside one request.
+static SYNC_RUN: Mutex<()> = Mutex::new(());
+
+/// The hub dashboard: every hub (connected, chosen, remembered), what each
+/// holds, and how this machine's projects compare. `sync status`'s pieces —
+/// `local_state`, `hub_projects`, `hub_copy_refusal` — assembled once per
+/// project rather than once per (project, hub).
+pub fn sync_hubs(ctx: &Ctx) -> Result<synchub::Dashboard, String> {
+    let cfg = worktrees_core::config::sync_cfg();
+    let configured = sync::configured_hub(&cfg);
+    let roots = crate::projects::read_projects(ctx);
+    Ok(synchub::dashboard_in(
+        &synchub::volumes(),
+        &synchub::path(),
+        configured.as_deref(),
+        &roots,
+        worktrees_core::sysclock::now_epoch(),
+    ))
+}
+
+/// Make `ids` the chosen hubs, in order (the first is the primary). The same
+/// file the CLI's `sync hubs --choose` writes.
+pub fn sync_hub_choose(ids: Vec<String>) -> Result<Vec<String>, String> {
+    let out = synchub::choose_in(&synchub::path(), &synchub::volumes(), &ids, worktrees_core::sysclock::now_epoch());
+    match &out {
+        Ok(ids) => applog("info", &format!("sync hubs chosen: {}", ids.join(", "))),
+        Err(e) => applog("warn", &format!("sync_hub_choose: {e}")),
+    }
+    out
+}
+
+/// Drop a remembered hub (and its choice). Its drive is untouched.
+pub fn sync_hub_forget(id: String) -> Result<bool, String> {
+    synchub::edit(|f| Ok(f.forget(&id)))
 }
 
 /// `sync status` for one project, plus whether this checkout IS a hub copy —
@@ -98,8 +161,9 @@ pub fn sync_preview(
     name: Option<String>,
     direction: String,
     with_sessions: bool,
+    hub: Option<String>,
 ) -> Result<sync::SyncPreviewOut, String> {
-    let req = sync_request(repo.as_deref(), name.as_deref(), &direction, with_sessions)?;
+    let req = sync_request(repo.as_deref(), name.as_deref(), &direction, with_sessions, hub.as_deref())?;
     sync::sync_preview(&req).inspect_err(|e| {
         let who = repo.clone().or_else(|| name.clone()).unwrap_or_default();
         applog("warn", &format!("sync_preview {direction} {who}: {e}"));
@@ -119,6 +183,7 @@ pub fn sync_preview(
 /// minutes long, and a button that says "Pushing…" for four minutes is
 /// indistinguishable from a hung one. Core throttles to ~15 events/sec and
 /// always sends the last one, so this end can simply forward.
+#[allow(clippy::too_many_arguments)]
 pub fn sync_apply(
     ctx: &Ctx,
     repo: Option<String>,
@@ -127,31 +192,50 @@ pub fn sync_apply(
     with_sessions: bool,
     confirmed: bool,
     install: bool,
+    hub: Option<String>,
     on_progress: &mut dyn FnMut(sync::SyncProgress),
 ) -> Result<CmdResult, String> {
-    let req = sync_request(repo.as_deref(), name.as_deref(), &direction, with_sessions)?;
-    let repo = repo.or_else(|| name.clone()).unwrap_or_default();
+    let req = sync_request(repo.as_deref(), name.as_deref(), &direction, with_sessions, hub.as_deref())?;
+    let who = repo.or_else(|| name.clone()).unwrap_or_default();
+    Ok(apply_one(ctx, &req, &who, confirmed, install, on_progress))
+}
+
+/// One transfer, as a `CmdResult`: the single sync's body and each step of a
+/// batch, so the two cannot report (or add an import to the workspace)
+/// differently. Holds `SYNC_RUN` for the transfer.
+fn apply_one(
+    ctx: &Ctx,
+    req: &sync::SyncRequest,
+    repo: &str,
+    confirmed: bool,
+    install: bool,
+    on_progress: &mut dyn FnMut(sync::SyncProgress),
+) -> CmdResult {
+    let direction = req.direction.label();
     let op = format!("sync {direction}");
     // A client that went away mid-sync is not a reason to stop the transfer or
     // to lose the result, and it is not swallowed either — but that is the
     // TRANSPORT's knowledge, so the Tauri shim owns it now and logs it once.
-    let outcome = sync::sync_apply(&req, confirmed, install, Some(on_progress));
+    let outcome = {
+        let _one = SYNC_RUN.lock().unwrap_or_else(|e| e.into_inner());
+        sync::sync_apply(req, confirmed, install, Some(on_progress))
+    };
     match outcome {
         Err(e) => {
             applog("warn", &format!("{op} rc=1 repo={repo}: {e}"));
-            Ok(CmdResult {
+            CmdResult {
                 ok: false,
                 code: 1,
                 output: e,
                 slug: None,
                 needs_confirm: None,
                 warnings: Vec::new(),
-            })
+            }
         }
         Ok(out) if out.needs_confirm => {
             let live = out.live_sessions.join(", ");
             applog("info", &format!("{op} needs confirm repo={repo}: {live}"));
-            Ok(CmdResult {
+            CmdResult {
                 ok: false,
                 code: worktrees_core::diag::EXIT_NEEDS_CONFIRM,
                 output: format!(
@@ -162,7 +246,7 @@ pub fn sync_apply(
                 slug: None,
                 needs_confirm: Some(out.live_sessions.join("\n")),
                 warnings: out.warnings,
-            })
+            }
         }
         Ok(out) => {
             applog(
@@ -200,7 +284,7 @@ pub fn sync_apply(
                             &format!("{op} transferred but add_project failed dst={}: {e}", out.dst),
                         );
                         ctx.emit("places:changed", serde_json::Value::Null);
-                        return Ok(CmdResult {
+                        return CmdResult {
                             ok: false,
                             code: 1,
                             output: format!(
@@ -211,7 +295,7 @@ pub fn sync_apply(
                             slug: None,
                             needs_confirm: None,
                             warnings: out.warnings,
-                        });
+                        };
                     }
                 }
             }
@@ -222,16 +306,134 @@ pub fn sync_apply(
             if req.direction == sync::SyncDirection::Pull {
                 ctx.emit("places:changed", serde_json::Value::Null);
             }
-            Ok(CmdResult {
+            CmdResult {
                 ok: true,
                 code: 0,
                 output: lines.join("\n"),
                 slug: None,
                 needs_confirm: None,
                 warnings: out.warnings,
-            })
+            }
         }
     }
+}
+
+// ── many projects × many hubs ───────────────────────────────────────────────
+
+/// One step of a batch: a project (here, by `repo`; or on the hub only, by
+/// `name` — an import) and the hub it goes to or comes from, by id.
+#[derive(serde::Deserialize, Clone, Debug)]
+pub struct SyncJob {
+    #[serde(default)]
+    pub repo: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+    pub hub: String,
+    /// The user was shown this job's live sessions in the batch preview and
+    /// went on. Core re-lists them at apply time, as for a single sync.
+    #[serde(default)]
+    pub confirmed: bool,
+}
+
+/// One row of the combined preview, in job order. `preview` or `error`.
+#[derive(Serialize)]
+pub struct BatchPreviewRow {
+    pub index: usize,
+    pub hub: String,
+    pub preview: Option<sync::SyncPreviewOut>,
+    pub error: Option<String>,
+}
+
+/// Every job's preview, one after another (they are rsync dry runs against
+/// the same drives). A job that cannot be previewed is a row with its error,
+/// never a failure of the whole batch: the user decides with all of it in view.
+pub fn sync_batch_preview(jobs: Vec<SyncJob>, direction: String, with_sessions: bool) -> Result<Vec<BatchPreviewRow>, String> {
+    sync::SyncDirection::parse(&direction)?;
+    Ok(jobs
+        .iter()
+        .enumerate()
+        .map(|(index, j)| {
+            let r = sync_request(j.repo.as_deref(), j.name.as_deref(), &direction, with_sessions, Some(&j.hub))
+                .and_then(|req| sync::sync_preview(&req));
+            if let Err(e) = &r {
+                let who = j.repo.clone().or_else(|| j.name.clone()).unwrap_or_default();
+                applog("warn", &format!("sync_batch_preview {direction} {who} hub={}: {e}", j.hub));
+            }
+            let (preview, error) = match r {
+                Ok(p) => (Some(p), None),
+                Err(e) => (None, Some(e)),
+            };
+            BatchPreviewRow { index, hub: j.hub.clone(), preview, error }
+        })
+        .collect())
+}
+
+/// What the batch's Channel carries: which job, and where it is.
+#[derive(Serialize, Debug, Clone)]
+pub struct BatchEvent {
+    pub index: usize,
+    /// `running` (with `progress` while rsync reports), then `done` or
+    /// `failed` with `result`.
+    pub state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<sync::SyncProgress>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<CmdResult>,
+}
+
+#[derive(Serialize, Debug, Clone)]
+pub struct BatchOutcome {
+    pub index: usize,
+    pub hub: String,
+    pub result: CmdResult,
+}
+
+/// Run every job, ONE AT A TIME, in order. Each is exactly a single sync
+/// (`apply_one`: the hub-copy refusal, the live-session re-check, the backup
+/// dir, the heal after a pull, an import's workspace add), and one that fails
+/// is reported and the batch goes on — every job gets an outcome.
+pub fn sync_batch_apply(
+    ctx: &Ctx,
+    jobs: Vec<SyncJob>,
+    direction: String,
+    with_sessions: bool,
+    on_event: &mut dyn FnMut(BatchEvent),
+) -> Result<Vec<BatchOutcome>, String> {
+    batch_apply_in(ctx, jobs, direction, with_sessions, &hub_path, on_event)
+}
+
+fn batch_apply_in(
+    ctx: &Ctx,
+    jobs: Vec<SyncJob>,
+    direction: String,
+    with_sessions: bool,
+    resolve: &dyn Fn(&str) -> Result<String, String>,
+    on_event: &mut dyn FnMut(BatchEvent),
+) -> Result<Vec<BatchOutcome>, String> {
+    sync::SyncDirection::parse(&direction)?;
+    let mut out = Vec::with_capacity(jobs.len());
+    for (index, j) in jobs.iter().enumerate() {
+        on_event(BatchEvent { index, state: "running", progress: None, result: None });
+        let who = j.repo.clone().or_else(|| j.name.clone()).unwrap_or_default();
+        let result = match sync_request_in(j.repo.as_deref(), j.name.as_deref(), &direction, with_sessions, Some(&j.hub), resolve) {
+            Ok(req) => {
+                let mut fwd = |p: sync::SyncProgress| {
+                    on_event(BatchEvent { index, state: "running", progress: Some(p), result: None })
+                };
+                apply_one(ctx, &req, &who, j.confirmed, false, &mut fwd)
+            }
+            Err(e) => {
+                applog("warn", &format!("sync {direction} rc=1 repo={who} hub={}: {e}", j.hub));
+                CmdResult { ok: false, code: 1, output: e, slug: None, needs_confirm: None, warnings: Vec::new() }
+            }
+        };
+        let state = if result.ok { "done" } else { "failed" };
+        on_event(BatchEvent { index, state, progress: None, result: Some(result.clone()) });
+        out.push(BatchOutcome { index, hub: j.hub.clone(), result });
+    }
+    let failed = out.iter().filter(|o| !o.result.ok).count();
+    applog("info", &format!("sync batch {direction}: {} job(s), {failed} failed", out.len()));
+    Ok(out)
 }
 
 #[derive(Serialize)]
@@ -1181,6 +1383,71 @@ pub fn launch_watched(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A batch runs every job in order and reports each one: a hub that cannot
+    /// be resolved fails ITS job, and the jobs after it still run. Real rsync
+    /// on temp dirs, like core's own sync tests; the hubs come from the
+    /// resolver seam, never from the mounted volumes.
+    #[test]
+    fn a_batch_push_reports_every_job_and_one_failure_hides_nothing() {
+        use std::process::Command;
+        let d = std::env::temp_dir().join(format!("wt-api-batch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let repo = d.join("proj");
+        std::fs::create_dir_all(&repo).unwrap();
+        let sh = |args: &[&str]| assert!(Command::new("git").args(args).current_dir(&repo).status().unwrap().success());
+        sh(&["init", "-q"]);
+        sh(&["config", "user.email", "t@t"]);
+        sh(&["config", "user.name", "t"]);
+        std::fs::write(repo.join("a.txt"), "a").unwrap();
+        sh(&["add", "-A"]);
+        sh(&["commit", "-qm", "init"]);
+        let (ha, hb) = (d.join("hubA"), d.join("hubB"));
+        let resolve = |id: &str| -> Result<String, String> {
+            match id {
+                "A" => Ok(ha.to_string_lossy().into_owned()),
+                "B" => Ok(hb.to_string_lossy().into_owned()),
+                other => Err(format!("hub '{other}' is not connected")),
+            }
+        };
+        struct NoHost;
+        impl crate::Host for NoHost {
+            fn emit(&self, _: &str, _: serde_json::Value) {}
+        }
+        let ctx = crate::Ctx::new(d.join("cfg"), std::sync::Arc::new(NoHost));
+        let root = repo.to_string_lossy().into_owned();
+        let job = |hub: &str| SyncJob { repo: Some(root.clone()), name: None, hub: hub.into(), confirmed: false };
+        let mut events: Vec<(usize, &'static str)> = Vec::new();
+        let out = batch_apply_in(&ctx, vec![job("A"), job("gone"), job("B")], "push".into(), false, &resolve, &mut |e| {
+            if e.progress.is_none() {
+                events.push((e.index, e.state));
+            }
+        })
+        .unwrap();
+        let ok: Vec<bool> = out.iter().map(|o| o.result.ok).collect();
+        assert_eq!(ok, [true, false, true], "{out:?}");
+        assert!(out[1].result.output.contains("'gone' is not connected"), "{:?}", out[1].result);
+        assert_eq!(
+            events,
+            [(0, "running"), (0, "done"), (1, "running"), (1, "failed"), (2, "running"), (2, "done")]
+        );
+        for h in [&ha, &hb] {
+            assert!(h.join("proj/proj/a.txt").is_file(), "{} got no copy", h.display());
+            assert!(h.join("proj").join(sync::MANIFEST).is_file());
+        }
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A hub is named by id; a path a client invents is not one.
+    #[test]
+    fn a_client_cannot_name_a_hub_by_path() {
+        let e = sync_request_in(None, Some("x"), "pull", false, Some("path:/etc"), &|id| {
+            synchub::path_for_id(&[], &synchub::HubsFile::default(), None, id).map(|p| p.to_string_lossy().into_owned())
+        })
+        .err()
+        .unwrap();
+        assert!(e.contains("unknown hub"), "{e}");
+    }
 
     /// A scripted clock: each call returns the next stamp, the last one
     /// repeating. The stamps are the input the rule is about, so they are
