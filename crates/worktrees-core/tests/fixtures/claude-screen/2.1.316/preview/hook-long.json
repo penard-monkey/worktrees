@@ -1,0 +1,30 @@
+{
+  "session_id": "c94da2a2-b3e7-48ff-8d95-8f25a1cd4f9a",
+  "hook_event_name": "PermissionRequest",
+  "tool_name": "AskUserQuestion",
+  "tool_input": {
+    "questions": [
+      {
+        "question": "Which layout for the status file?",
+        "header": "Layout",
+        "multiSelect": false,
+        "options": [
+          {
+            "label": "Twelve rows",
+            "description": "Long.",
+            "preview": "row 01: alpha\nrow 02: alpha\nrow 03: alpha\nrow 04: alpha\nrow 05: alpha\nrow 06: alpha\nrow 07: alpha\nrow 08: alpha\nrow 09: alpha\nrow 10: alpha\nrow 11: alpha\nrow 12: alpha"
+          },
+          {
+            "label": "Indented",
+            "description": "Spacing.",
+            "preview": "fn main() {\n    println!(\"hi\");\n}"
+          },
+          {
+            "label": "No preview here",
+            "description": "Has no preview."
+          }
+        ]
+      }
+    ]
+  }
+}

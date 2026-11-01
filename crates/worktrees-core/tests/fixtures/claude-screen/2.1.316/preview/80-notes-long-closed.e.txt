@@ -1,0 +1,24 @@
+[38;5;246m[48;5;237m❯ [38;5;231mAsk me the Banner copy question again with AskUserQuestion, exactly as the [39m
+  [38;5;231mfirst time (same header, question, options, descriptions, previews). Do [39m
+  [38;5;231mnothing else.[39m
+
+[38;5;246m[49m────────────────────────────────────────────────────────────────────────────────
+[38;5;16m[48;5;153m ☐ Banner copy [39m[49m
+
+[2m│[0m [1m[38;5;231mOn a place's screen the banner says 1 place needs input, which reads as if it
+[0;2m│[0m [1m[38;5;231mmeans this place. What should it say instead?[0m
+
+ [38;5;246m [39m  Another place        [38;5;246m┌────────────────────────────────────────────┐[39m
+ [38;5;246m1.[39mneeds input           [38;5;246m│ [39m(no banner on a place screen)[38;5;246m              │[39m
+   (Recommended)         [38;5;246m└────────────────────────────────────────────┘[39m
+ [38;5;246m 2.[39m Name first
+[38;5;153m❯[38;5;246m 3.[1m[38;5;153m Hide it on place[0m    [38;5;153mNotes:[39m [3m[38;5;246mkeep the place name bold, and say which project
+[0m    [1m[38;5;153mscreens[0m                     [3m[38;5;246mit belongs to when there are two[0m
+
+[38;5;246m────────────────────────────────────────────────────────────────────────────────
+[39m  Chat about this
+
+[38;5;246mEnter to select · ↑/↓ to navigate · n to add notes · Esc to cancel[39m
+
+
+[38;5;244m──────────────────────────────────────────────────────────────────── wtqp-lane ─

@@ -1,0 +1,24 @@
+[48;5;237m  [38;5;231mquestion: "Which layout for the status file?". Three options. Option 1 label [39m
+  [38;5;231m"Twelve rows", description "Long.", preview = twelve lines "row 01: alpha" [39m
+  [38;5;231mthrough "row 12: alpha" (row NN with two digits, one per line). Option 2 [39m
+  [38;5;231mlabel "Indented", description "Spacing.", preview = three lines: "fn main() [39m
+  [38;5;231m{", "    println!(\"hi\");", "}". Option 3 label "No preview here", [39m
+  [38;5;231mdescription "Has no preview.", and NO preview field at all. Do nothing else.[39m
+
+[38;5;246m[49m────────────────────────────────────────────────────────────────────────────────
+[38;5;16m[48;5;153m ☐ Layout [39m[49m
+
+[1m[38;5;231mWhich layout for the status file?[0m
+
+[38;5;153m❯[38;5;246m 1.[1m[38;5;153m Twelve rows[0m                  [38;5;246m┌──────────────────────────────────────────┐[39m
+ [38;5;246m 2.[39m Indented                     [38;5;246m│ [39mrow 01: alpha[38;5;246m                            │[39m
+ [38;5;246m 3.[39m No preview here              [38;5;220m├─── ✂ ─── 11 lines hidden ────────────────┤[39m
+                                  [38;5;246m└──────────────────────────────────────────┘[39m
+
+                                  [38;5;153mNotes:[39m [3m[38;5;246mpress n to add notes[0m
+
+[38;5;246m────────────────────────────────────────────────────────────────────────────────
+[39m  Chat about this
+
+[38;5;246mEnter to select · ↑/↓ to navigate · n to add notes · Esc to cancel[39m
+[38;5;244m──────────────────────────────────────────────────────────────────── wtqp-lane ─

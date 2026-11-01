@@ -1,0 +1,26 @@
+{
+  "session_id": "c94da2a2-b3e7-48ff-8d95-8f25a1cd4f9a",
+  "hook_event_name": "PermissionRequest",
+  "tool_name": "AskUserQuestion",
+  "tool_input": {
+    "questions": [
+      {
+        "question": "Which toppings?",
+        "header": "Toppings",
+        "multiSelect": true,
+        "options": [
+          {
+            "label": "Cheese",
+            "description": "C.",
+            "preview": "CHEESE\n  yellow"
+          },
+          {
+            "label": "Olives",
+            "description": "O.",
+            "preview": "OLIVES\n  black"
+          }
+        ]
+      }
+    ]
+  }
+}

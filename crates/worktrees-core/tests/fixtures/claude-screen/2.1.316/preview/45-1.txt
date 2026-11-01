@@ -1,0 +1,34 @@
+
+❯ Ask me the Banner copy question again with
+  AskUserQuestion, exactly as the first
+  time (same header, question, options,
+  descriptions, previews). Do nothing else.
+
+─────────────────────────────────────────────
+ ☐ Banner copy
+
+│ On a place's screen the banner says 1 place
+│ needs input, which reads as if it means
+│ this place. What should it say instead?
+
+❯ 1. Another place        ┌─────────┐
+    needs input           │ One:    │
+    (Recommended)         │         │
+  2. Name first           │ Another │
+  3. Hide it on place     │  place  │
+    screens               │ needs   │
+                          │ input:  │
+                          │ demo    │
+                          ├─── ✂ ─── 9 lines
+                          hidden ┤
+                          └─────────┘
+
+                          Notes: press n to
+                                 add notes
+
+─────────────────────────────────────────────
+  Chat about this
+
+Enter to select · ↑/↓ to navigate · n to add
+notes · Esc to cancel
+───────────────────────────────── wtqp-lane ─

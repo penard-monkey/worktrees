@@ -1,0 +1,45 @@
+
+[38;5;174m ▐[48;5;16m▛███▛█[39m[49m   [1mClaude Code[0m [38;5;246mv2.1.316[39m
+[38;5;174m▝▜[48;5;16m█████[49m█▀[39m  [38;5;246mHaiku 5.5 · Claude Max[39m
+[38;5;174m ▝▝   ▝▝ [39m  [38;5;246m/private/tmp/claude-501/wtqp/repo/.worktrees/lane[39m
+
+
+[38;5;246m[48;5;237m❯ [38;5;231mUse the AskUserQuestion tool once, with ONE single-select question. header: "Banner copy". question: "On a place's screen the banner says 1 place needs [39m
+  [38;5;231minput, which reads as if it means this place. What should it say instead?". Exactly three options, each with a description and a preview (a monospace mockup,[39m
+  [38;5;231mlines separated by newlines, keep the spacing exactly): option 1 label "Another place needs input (Recommended)", description "Says it is another place.", [39m
+  [38;5;231mpreview lines "One:      Another place needs input: demo (main)  Review" and "Several:  2 other places need input   Review". Option 2 label "Name first", [39m
+  [38;5;231mdescription "Leads with the name.", preview lines "One:      demo (main) needs input   Review" and "Several:  demo (main) and 1 more need input   Review". [39m
+  [38;5;231mOption 3 label "Hide it on place screens", description "Nothing on its own screen.", preview line "(no banner on a place screen)". Do nothing else.[39m
+
+[38;5;246m[49m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[38;5;16m[48;5;153m ☐ Banner copy [39m[49m
+
+[2m│[0m [1m[38;5;231mOn a place's screen the banner says 1 place needs input, which reads as if it means this place. What should it say instead?[0m
+
+[38;5;153m❯[38;5;246m 1.[1m[38;5;153m Another place needs input[0m    [38;5;246m┌──────────────────────────────────────────────────────────┐[39m
+    [1m[38;5;153m(Recommended)[0m                 [38;5;246m│ [39mOne:      Another place needs input: demo (main)  Review[38;5;246m │[39m
+ [38;5;246m 2.[39m Name first                   [38;5;246m│ [39mSeveral:  2 other places need input   Review[38;5;246m             │[39m
+ [38;5;246m 3.[39m Hide it on place screens     [38;5;246m└──────────────────────────────────────────────────────────┘[39m
+
+                                  [38;5;153mNotes:[39m [3m[38;5;246mpress n to add notes[0m
+
+[38;5;246m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  Chat about this
+
+[38;5;246mEnter to select · ↑/↓ to navigate · n to add notes · Esc to cancel[39m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[38;5;244m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── wtqp-lane ─

@@ -869,6 +869,10 @@ pub enum Key {
     /// Opens a prompt's own text field (Claude's `Tab to amend`, Codex's
     /// `tab to add notes`).
     Tab,
+    /// `n`: opens the notes field of Claude's preview question (`n to add
+    /// notes`). Pressed only on a fresh capture that shows that question with
+    /// its notes closed: anywhere else it is a letter typed.
+    Notes,
     /// Stops a running turn (`agent_interrupt`), pressed ONCE and only on a
     /// screen that shows the turn running (`prompt::turn_shown`): on a
     /// prompt it cancels it, on an idle Claude it arms `Esc again to clear`,
@@ -884,6 +888,7 @@ impl Key {
             Key::Down => "Down",
             Key::Enter => "Enter",
             Key::Tab => "Tab",
+            Key::Notes => "n",
             Key::Escape => "Escape",
         }
     }

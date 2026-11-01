@@ -1,0 +1,45 @@
+
+ ▐▛███▛█   Claude Code v2.1.316
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   /private/tmp/claude-501/wtqp/repo/.worktrees/lane
+
+
+❯ Use the AskUserQuestion tool once, with ONE single-select question. header: "Banner copy". question: "On a place's screen the banner says 1 place needs
+  input, which reads as if it means this place. What should it say instead?". Exactly three options, each with a description and a preview (a monospace mockup,
+  lines separated by newlines, keep the spacing exactly): option 1 label "Another place needs input (Recommended)", description "Says it is another place.",
+  preview lines "One:      Another place needs input: demo (main)  Review" and "Several:  2 other places need input   Review". Option 2 label "Name first",
+  description "Leads with the name.", preview lines "One:      demo (main) needs input   Review" and "Several:  demo (main) and 1 more need input   Review".
+  Option 3 label "Hide it on place screens", description "Nothing on its own screen.", preview line "(no banner on a place screen)". Do nothing else.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Banner copy
+
+│ On a place's screen the banner says 1 place needs input, which reads as if it means this place. What should it say instead?
+
+  1. Another place needs input    ┌──────────────────────────────────────────────────────────┐
+    (Recommended)                 │ One:      demo (main) needs input   Review               │
+❯ 2. Name first                   │ Several:  demo (main) and 1 more need input   Review     │
+  3. Hide it on place screens     └──────────────────────────────────────────────────────────┘
+
+                                  Notes: press n to add notes
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Chat about this
+
+Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── wtqp-lane ─

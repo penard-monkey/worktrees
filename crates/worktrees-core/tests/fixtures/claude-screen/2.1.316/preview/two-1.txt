@@ -1,0 +1,45 @@
+
+✻ Baked for 5s · done 12:49 PM
+
+❯ Ask me the exact same AskUserQuestion again: same header, question, three options, descriptions and previews. Do nothing else.
+
+⏺ User declined to answer questions
+  ⎿  · On a place's screen the banner says 1 place needs input, which reads as if it means this place. What should it say instead? (Another place needs input
+     (Recommended) / Name first / Hide it on place screens)
+
+⏺ The question was declined, and the note says you want to clarify something first. What would you like to clarify about the banner copy? Your earlier answer
+  was "Name first", but you can also reopen the options.
+
+✻ Sautéed for 3s · done 12:50 PM
+
+❯ Use AskUserQuestion once, ONE single-select question. header: "Layout". question: "Which layout for the status file?". Three options. Option 1 label "Twelve
+  rows", description "Long.", preview = twelve lines "row 01: alpha" through "row 12: alpha" (row NN with two digits, one per line). Option 2 label "Indented",
+  description "Spacing.", preview = three lines: "fn main() {", "    println!(\"hi\");", "}". Option 3 label "No preview here", description "Has no preview.",
+  and NO preview field at all. Do nothing else.
+
+⏺ User declined to answer questions
+  ⎿  · Which layout for the status file? (Twelve rows / Indented / No preview here)
+
+✻ Cooked for 4s · done 12:54 PM
+
+❯ Use AskUserQuestion once with TWO single-select questions. Question 1: header "Colour", question "Which colour?", options "Red" (description "Warm.", preview
+  "RED\n  #ff0000") and "Blue" (description "Cool.", preview "BLUE\n  #0000ff"). Question 2: header "Size", question "Which size?", options "Small"
+  (description "S.", preview "[ s ]") and "Large" (description "L.", preview "[    L    ]"). Do nothing else.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☐ Colour  ☐ Size  ✔ Submit  →
+
+Which colour?
+
+❯ 1. Red                          ┌──────────────────────────────────────────┐
+  2. Blue                         │ RED                                      │
+                                  │   #ff0000                                │
+                                  └──────────────────────────────────────────┘
+
+                                  Notes: press n to add notes
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Chat about this
+
+Enter to select · ↑/↓ to navigate · n to add notes · Tab to switch questions · Esc to cancel
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── wtqp-lane ─
