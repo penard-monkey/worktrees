@@ -498,6 +498,9 @@ const sleep = (ms: number) => (ms > 0 ? new Promise((r) => setTimeout(r, ms)) : 
 //                   skipped report — the modal's indeterminate state, which is
 //                   otherwise unreachable by clicking
 //   ?noinstall      no registered rebuild — the pull modal shows no checkbox
+//   ?onehub         one hub only (MockSSD): the selectors become labels
+// The default is TWO connected hubs (MockSSD, removable; `home`, an SMB
+// share) plus a remembered `Old SSD` that is not connected; ?nohub is zero.
 // plus `__mock.syncFail()` for an rsync error on the NEXT apply.
 const MOCK_HUB = "/Volumes/MockSSD";
 const mockNoHub = location.search.includes("nohub");
@@ -512,6 +515,43 @@ const mockSyncDelayMs = (() => {
   const m = /[?&]slowsync(?:=(\d+))?/.exec(location.search);
   return m ? Number(m[1] ?? 1500) : 0;
 })();
+const mockOneHub = location.search.includes("onehub");
+type MockHub = { id: string; name: string; kind: "removable" | "network" | "internal"; path: string; free: number; total: number };
+const MOCK_HUBS: MockHub[] = mockNoHub ? [] : [
+  { id: "uuid:F04C7580-MOCK-SSD", name: "MockSSD", kind: "removable", path: MOCK_HUB, free: 279e9, total: 2e12 },
+  ...(mockOneHub ? [] : [{ id: "smb://nas.local/home", name: "home", kind: "network" as const, path: "/Volumes/home", free: 1.2e12, total: 4e12 }]),
+];
+/** Remembered, not connected: shown dimmed with its last-known list. */
+const MOCK_OLD_HUB = { id: "uuid:0LD-SSD", name: "Old SSD", kind: "removable" as const, last_seen: now() - 86400 * 12 };
+let mockChosen: string[] = mockNoHub ? [] : [MOCK_HUBS[0].id];
+let mockForgotOld = mockNoHub || mockOneHub;
+/** Per hub id: project name → its push. MockSSD starts with the fixture list;
+ *  the share holds an OLDER copy of `worktrees`, so a pull has to choose. */
+const mockHubHolds: Record<string, Record<string, { local_root: string; pushed_at: number; host: string }>> = {
+  "uuid:F04C7580-MOCK-SSD": {},
+  "smb://nas.local/home": {
+    worktrees: { local_root: "/Users/demo/workspace/worktrees", pushed_at: now() - 86400 * 5, host: "imac" },
+  },
+};
+const mockHubById = (id: string | null | undefined) => (id ? MOCK_HUBS.find((h) => h.id === id) : MOCK_HUBS[0]) ?? null;
+/** `project::hub_path`: an id names a CONNECTED hub or nothing. */
+function mockHubPath(id: unknown): string {
+  if (id == null || id === "") {
+    if (mockNoHub) throw new Error(HUB_MISSING);
+    return MOCK_HUB;
+  }
+  const h = mockHubById(id as string);
+  if (h) return h.path;
+  if (id === MOCK_OLD_HUB.id && !mockForgotOld) throw new Error(`hub '${MOCK_OLD_HUB.name}' is not connected`);
+  throw new Error(`unknown hub: ${String(id)}`);
+}
+function mockHubProjects(id: string) {
+  const extra = mockHubHolds[id] ?? {};
+  const base = id === MOCK_HUBS[0]?.id ? MOCK_HUB_PROJECTS.filter((p) => !(p.name in extra)) : [];
+  return [...base.map((p) => ({ ...p })), ...Object.entries(extra).map(([name, v]) => ({ name, ...v }))]
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
 /** What a real `--info=progress2,name1` stream boils down to after core's
  *  parser and throttle: a rising percentage, rsync's own rate string, and the
  *  file it is on. The transfer the app has to survive is MINUTES long, so the
@@ -3463,23 +3503,114 @@ Phase 3: Frontend pane and mock harness
         projects: mockNoHub ? [] : clone(MOCK_HUB_PROJECTS),
       };
     }
+    // ── hubs (synchub) ─────────────────────────────────────────────────────
+    // `sync_hubs` mirrors core's Dashboard: rows (chosen first), each hub's
+    // projects with `here` = the workspace root of the same name, and the
+    // workspace's own projects with their local state.
+    case "sync_hubs": {
+      await sleep(mockSyncDelayMs);
+      const local = ws.projects.filter((p) => p.ok).map((p) => ({
+        name: syncName(p.root), root: p.root, branch: "main",
+        dirty: p.root.endsWith("worktrees") ? 4 : 0,
+        head_at: now() - (p.root.endsWith("worktrees") ? 600 : 86400 * 30),
+        hub_copy: mockHubCopy && p.root.endsWith("worktrees") ? "this is a hub copy (pushed from othermac) — run worktrees at the native path: /Users/other/workspace/demo" : null,
+      }));
+      const here = (n: string) => local.find((l) => l.name === n)?.root ?? null;
+      const rank = (id: string) => { const i = mockChosen.indexOf(id); return i < 0 ? null : i; };
+      const removable = MOCK_HUBS.filter((h) => h.kind === "removable");
+      const rows = MOCK_HUBS.map((h) => ({
+        row: { id: h.id, name: h.name, kind: h.kind, path: h.path, connected: true, chosen: rank(h.id), configured: false,
+          auto: removable.length === 1 && removable[0].id === h.id, last_seen: now(), free_bytes: h.free, total_bytes: h.total },
+        projects: mockHubProjects(h.id), stale: false,
+      }));
+      if (!mockForgotOld) rows.push({
+        row: { id: MOCK_OLD_HUB.id, name: MOCK_OLD_HUB.name, kind: MOCK_OLD_HUB.kind, path: null as unknown as string, connected: false,
+          chosen: rank(MOCK_OLD_HUB.id), configured: false, auto: false, last_seen: MOCK_OLD_HUB.last_seen, free_bytes: null as unknown as number, total_bytes: null as unknown as number },
+        projects: [{ name: "worktrees", local_root: "/Users/demo/workspace/worktrees", pushed_at: now() - 86400 * 40, host: "mock-mbp" }],
+        stale: true,
+      });
+      rows.sort((a, b) => (a.row.chosen ?? 99) - (b.row.chosen ?? 99) || Number(!a.row.connected) - Number(!b.row.connected));
+      const primary = mockChosen[0];
+      const default_error = MOCK_HUBS.length === 0 ? HUB_MISSING
+        : primary && !mockHubById(primary) ? `the chosen hub '${MOCK_OLD_HUB.name}' is not connected — plug it in, choose another with \`worktrees sync hubs --choose NAME\`, or pass --hub PATH`
+          : null;
+      return {
+        hubs: rows.map((r) => ({ ...r.row, projects: r.projects.map((p) => ({ ...p, here: here(p.name) })), stale: r.stale })),
+        local,
+        default_error,
+      };
+    }
+    case "sync_hub_choose": {
+      const ids = (args.ids as string[]) ?? [];
+      for (const id of ids) {
+        if (!mockHubById(id) && !(id === MOCK_OLD_HUB.id && !mockForgotOld)) throw new Error(`no such hub: ${id} (plug it in first — \`worktrees sync hubs\` lists them)`);
+      }
+      mockChosen = [...new Set(ids)];
+      return mockChosen;
+    }
+    case "sync_hub_forget": {
+      const id = args.hub as string;
+      if (id === MOCK_OLD_HUB.id) mockForgotOld = true;
+      const had = mockChosen.includes(id);
+      mockChosen = mockChosen.filter((c) => c !== id);
+      return had || id === MOCK_OLD_HUB.id;
+    }
+    case "sync_batch_preview": {
+      const jobs = (args.jobs as { repo?: string | null; name?: string | null; hub: string }[]) ?? [];
+      const out = [];
+      for (const [index, j] of jobs.entries()) {
+        try {
+          const preview = await mockInvoke("sync_preview", { repo: j.repo ?? null, name: j.name ?? null, direction: args.direction, withSessions: args.withSessions, hub: j.hub });
+          out.push({ index, hub: j.hub, preview, error: null });
+        } catch (e) {
+          out.push({ index, hub: j.hub, preview: null, error: String((e as Error)?.message ?? e) });
+        }
+      }
+      return out;
+    }
+    case "sync_batch_apply": {
+      // ONE AT A TIME, like `project::sync_batch_apply`: running → progress →
+      // done|failed per job, and a failure does not stop the rest.
+      const jobs = (args.jobs as { repo?: string | null; name?: string | null; hub: string; confirmed?: boolean }[]) ?? [];
+      const ch = args.onEvent as { onmessage?: (v: unknown) => void } | undefined;
+      const send = (v: unknown) => { try { ch?.onmessage?.(v); } catch { /* frontend gone */ } };
+      const out = [];
+      for (const [index, j] of jobs.entries()) {
+        send({ index, state: "running" });
+        let result: { ok: boolean; code: number; output: string; warnings: string[]; needs_confirm?: string };
+        try {
+          result = await mockInvoke("sync_apply", {
+            repo: j.repo ?? null, name: j.name ?? null, direction: args.direction, withSessions: args.withSessions,
+            confirmed: !!j.confirmed, install: false, hub: j.hub,
+            onProgress: { onmessage: (p: unknown) => send({ index, state: "running", progress: p }) },
+          }) as typeof result;
+        } catch (e) {
+          result = { ok: false, code: 1, warnings: [], output: String((e as Error)?.message ?? e) };
+        }
+        send({ index, state: result.ok ? "done" : "failed", result });
+        out.push({ index, hub: j.hub, result });
+      }
+      return out;
+    }
     case "sync_preview": {
       await sleep(mockSyncDelayMs);
       if (mockNoHub) throw new Error(HUB_MISSING);
+      const hubPath = mockHubPath(args.hub);
       // An IMPORT addresses the backend by hub name: there is no local root
       // yet, and the destination comes from the manifest (mocked as the
       // fixture's local_root) rather than from anything already on screen.
       const adoptName = args.repo ? null : (args.name as string | undefined) ?? null;
-      const adopted = adoptName ? MOCK_HUB_PROJECTS.find((p) => p.name === adoptName) : null;
+      const hubId = (args.hub as string | null | undefined) || MOCK_HUBS[0]?.id;
+      const adopted = adoptName ? mockHubProjects(hubId).find((p) => p.name === adoptName) : null;
       if (adoptName && !adopted) throw new Error(`hub has no push for '${adoptName}'`);
       const repo = adopted ? adopted.local_root : (args.repo as string);
       const dir = adopted ? "pull" : (args.direction as string);
       const name = adopted ? adopted.name : syncName(repo);
-      const hubTree = `${MOCK_HUB}/${name}/${name}`;
+      const hubTree = `${hubPath}/${name}/${name}`;
       return {
         name,
         direction: dir,
-        hub: MOCK_HUB,
+        hub: hubPath,
         src: dir === "push" ? repo : hubTree,
         dst: dir === "push" ? hubTree : repo,
         adopting: !!adopted,
@@ -3517,8 +3648,10 @@ Phase 3: Frontend pane and mock harness
           try { ch?.onmessage?.(p); } catch { /* frontend gone */ }
         }
       }
+      const hubPath = mockHubPath(args.hub);
+      const hubId = (args.hub as string | null | undefined) || MOCK_HUBS[0]?.id;
       const adoptName = args.repo ? null : (args.name as string | undefined) ?? null;
-      const adopted = adoptName ? MOCK_HUB_PROJECTS.find((p) => p.name === adoptName) : null;
+      const adopted = adoptName ? mockHubProjects(hubId).find((p) => p.name === adoptName) : null;
       const repo = adopted ? adopted.local_root : (args.repo as string);
       const dir = adopted ? "pull" : (args.direction as string);
       const name = adopted ? adopted.name : syncName(repo);
@@ -3526,7 +3659,7 @@ Phase 3: Frontend pane and mock harness
         mockSyncFailNext = false;
         return {
           ok: false, code: 1, warnings: [],
-          output: 'rsync failed (exit 23): rsync: [sender] send_files failed to open "/Volumes/MockSSD/.tmp": Permission denied (13)',
+          output: `rsync failed (exit 23): rsync: [sender] send_files failed to open "${hubPath}/.tmp": Permission denied (13)`,
         };
       }
       const live = dir === "pull" && mockSyncLive && !adopted ? ["wt-mock-a"] : [];
@@ -3537,7 +3670,10 @@ Phase 3: Frontend pane and mock harness
           output: `${live.length} live tmux session(s) in ${repo}: ${live.join(", ")} — a pull mirrors over the tree they are using.`,
         };
       }
-      if (dir === "push") mockPushed[repo] = { at: now(), host: "mock-mbp" };
+      if (dir === "push") {
+        if (hubId === MOCK_HUBS[0]?.id) mockPushed[repo] = { at: now(), host: "mock-mbp" };
+        (mockHubHolds[hubId] ??= {})[name] = { local_root: repo, pushed_at: now(), host: "mock-mbp" };
+      }
       // A pull rewrote the tree: same event lib.rs emits, so the nav re-pulls.
       else emitEvent("places:changed", {});
       const lines = [
