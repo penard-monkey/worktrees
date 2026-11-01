@@ -14,7 +14,8 @@ import {
   boxesOf, bytes, choiceOpen, clockMs, clockOf, dayLabel, draftProblem, fieldWords, itemsOf, lineDiff, loadPrompt,
   loadTurns, permissionAnswerWords, promptBody, questionAnswerWords, selectChoice, sendAnswer, sendDraft, sendMany,
   setAnswerText, setBoxText, setDraft, splitAtRule, ticksOf, toggleTick, turnsUnsupported, useChat, SEND_MAX,
-  type AskedStep, type Item, type PromptChoice, type PromptDetail, type ReadablePrompt, type Target,
+  callsSay, callsWords, foldCalls, underRoot,
+  type AskedStep, type Item, type PromptChoice, type PromptDetail, type ReadablePrompt, type Target, type ToolCall,
 } from "./chat";
 import { HARNESS_LABEL, type Harness } from "./harness";
 import * as Icons from "./icons";
@@ -234,11 +235,41 @@ function useStickToBottom(ref: RefObject<HTMLDivElement | null>, count: number, 
   return { toBottom, fresh, dismiss: () => setFresh(false) };
 }
 
-const toolsWords = (tools: string[]) => {
-  const names = [...new Set(tools)];
-  if (!names.length) return "";
-  return names.length === 1 ? `Used ${names[0]}.` : `Used ${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}.`;
-};
+/** A turn's tool calls. From a host that says what each did: a row per
+ *  call, its name, its line (the place's root taken off its paths, the whole
+ *  line in the title) and a failed call's dot AND word, the first few shown
+ *  and the rest behind "+N more", which names a failure it hides. From an
+ *  older host: the names, as chips. Text only: a summary is transcript text. */
+function ToolCalls(props: { calls: ToolCall[]; root: string }) {
+  const [open, setOpen] = useState(false);
+  const { calls } = props;
+  if (!callsSay(calls)) {
+    return (
+      <ul className="chat-tools" title="Tools it called. Their output is in the terminal.">
+        {calls.map((c, i) => <li key={i} className="chat-tool">{c.name}</li>)}
+      </ul>
+    );
+  }
+  const { shown, hidden, hiddenFailed, folds } = foldCalls(calls, open);
+  return (
+    <ul className="chat-calls" title="Tools it called. Their output is in the terminal." data-testid="chat-calls">
+      {shown.map((c, i) => (
+        <li key={i} className={"chat-call" + (c.failed ? " failed" : "")} data-testid="chat-call">
+          <span className="chat-tool chat-call-name">{c.name}</span>
+          {c.summary && <span className="chat-call-sum" title={c.summary}>{underRoot(c.summary, props.root)}</span>}
+          {c.failed && <span className="chat-call-failed"><span className="chat-call-dot" aria-hidden="true" />failed</span>}
+        </li>
+      ))}
+      {folds && (
+        <li className="chat-call-more">
+          <button className="chat-linkbtn" aria-expanded={open} onClick={() => setOpen(!open)} data-testid="chat-calls-more">
+            {open ? "Show fewer" : `+${hidden} more${hiddenFailed ? ` · ${hiddenFailed} failed` : ""}`}
+          </button>
+        </li>
+      )}
+    </ul>
+  );
+}
 
 function ChatItem(props: { it: Item; agent: string; root: string; onLink: (href: string) => void; pathLinks: ReturnType<typeof useDocPathLinks>["pathLinks"] }) {
   const { it, agent } = props;
@@ -261,7 +292,7 @@ function ChatItem(props: { it: Item; agent: string; root: string; onLink: (href:
         <li className="chat-row chat-row-agent">
           {it.label && <p className="chat-name" aria-hidden="true">{agent}{it.at ? <span className="chat-at"> · {clockOf(it.at)}</span> : null}</p>}
           <div className="chat-group" role="group"
-            aria-label={`${agent}${it.at ? `, ${clockOf(it.at)}` : ""}${it.tools.length ? `. ${toolsWords(it.tools)}` : ""}`}
+            aria-label={`${agent}${it.at ? `, ${clockOf(it.at)}` : ""}${it.calls.length ? `. ${callsWords(it.calls)}` : ""}`}
             data-testid="chat-agent">
             {(it.text || it.truncated) && (
               <div className="chat-bubble chat-bubble-agent">
@@ -269,11 +300,7 @@ function ChatItem(props: { it: Item; agent: string; root: string; onLink: (href:
                 {it.truncated && <p className="chat-bubble-note">Shortened by the host: the full reply is in the terminal.</p>}
               </div>
             )}
-            {it.tools.length > 0 && (
-              <ul className="chat-tools" title="Tools it called. Their output is in the terminal.">
-                {it.tools.map((tool, i) => <li key={i} className="chat-tool">{tool}</li>)}
-              </ul>
-            )}
+            {it.calls.length > 0 && <ToolCalls calls={it.calls} root={props.root} />}
           </div>
         </li>
       );

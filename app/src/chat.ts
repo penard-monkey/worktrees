@@ -35,7 +35,7 @@ export type Turn = {
  *  and answered on the way, each at its own time. */
 export type Step =
   | { kind: "text"; at: number | null; text: string }
-  | { kind: "tool"; at: number | null; name: string }
+  | { kind: "tool"; at: number | null; name: string; summary?: string; failed?: boolean }
   | { kind: "question"; at: number | null; answered_at?: number; questions: AskedQuestion[]; answer?: { how: "picked" | "chat" | "declined"; answers?: QuestionAnswer[] } }
   | { kind: "permission"; at: number | null; answered_at?: number; tool: string; summary?: string; allowed: boolean; scope?: string; note?: string }
   | { kind: "plan"; at: number | null; answered_at?: number; plan: string; plan_file?: string; approved?: boolean; note?: string };
@@ -170,11 +170,17 @@ export type Pending = { id: number; text: string; sentAt: number; queued: boolea
  *  note that rode on it. */
 export type Answered = { label: string; note?: string; at: number; confirmed: boolean };
 
+/** One tool call as the chat draws it: its name, what it did in a line
+ *  (`turns::Step`'s `summary`: absent from an older host, for an MCP tool,
+ *  and for a call whose line the host left out to stay in budget), and
+ *  whether its result says it failed. Text only, never markup. */
+export type ToolCall = { name: string; summary?: string; failed?: boolean };
+
 export type Item =
   | { k: "sep"; key: string; at: number }
   | { k: "earlier"; key: string }
   | { k: "user"; key: string; text: string; at: number | null }
-  | { k: "reply"; key: string; text: string; tools: string[]; truncated: boolean; at: number | null; label: boolean }
+  | { k: "reply"; key: string; text: string; tools: string[]; calls: ToolCall[]; truncated: boolean; at: number | null; label: boolean }
   | { k: "asked"; key: string; step: AskedStep; label: boolean }
   | { k: "answer"; key: string; step: AskedStep }
   | { k: "answered"; key: string; a: Answered }
@@ -216,7 +222,7 @@ export function itemsOf(turns: Turn[], answered: Answered[], pending: Pending[])
     }
     if (!t.steps?.length) {
       if (t.reply || t.tools.length || t.truncated) {
-        out.push({ k: "reply", key: `r${i}`, text: t.reply, tools: t.tools, truncated: t.truncated, at: t.at, label: !lastWasAgent });
+        out.push({ k: "reply", key: `r${i}`, text: t.reply, tools: t.tools, calls: t.tools.map((name) => ({ name })), truncated: t.truncated, at: t.at, label: !lastWasAgent });
         lastWasAgent = true;
       }
       return;
@@ -227,11 +233,14 @@ export function itemsOf(turns: Turn[], answered: Answered[], pending: Pending[])
       if (st.kind === "text" || st.kind === "tool") {
         if (st.kind === "text" || !reply) {
           if (st.at !== null) { flushAnswered(st.at); sep(st.at, `s${key}`); }
-          reply = { k: "reply", key: `r${key}`, text: st.kind === "text" ? st.text : "", tools: [], truncated: false, at: st.at, label: !lastWasAgent };
+          reply = { k: "reply", key: `r${key}`, text: st.kind === "text" ? st.text : "", tools: [], calls: [], truncated: false, at: st.at, label: !lastWasAgent };
           out.push(reply);
           lastWasAgent = true;
         }
-        if (st.kind === "tool") reply.tools.push(st.name);
+        if (st.kind === "tool") {
+          reply.tools.push(st.name);
+          reply.calls.push({ name: st.name, ...(st.summary ? { summary: st.summary } : {}), ...(st.failed ? { failed: true } : {}) });
+        }
         return;
       }
       reply = null;
@@ -284,6 +293,45 @@ export function questionAnswerWords(st: Extract<Step, { kind: "question" }>): st
 export function permissionAnswerWords(st: Extract<Step, { kind: "permission" }>): string {
   if (!st.allowed) return "No";
   return st.scope && st.scope !== "once" ? `Yes, for this ${st.scope === "session" ? "session" : st.scope}` : "Yes";
+}
+
+/** Whether a turn's calls are drawn as rows (a name and its line) rather
+ *  than the bare name chips an older host's turns get: any call says what
+ *  it did, or that it failed. */
+export const callsSay = (calls: ToolCall[]) => calls.some((c) => !!c.summary || !!c.failed);
+
+/** The rows a turn shows before "+N more". A fold never hides one row:
+ *  up to one more than this, every call shows. */
+export const CALLS_SHOWN = 3;
+
+/** The calls shown, folded or not, and what the fold hides: how many, and
+ *  how many of those failed, so a failure is never folded out of sight. */
+export function foldCalls(calls: ToolCall[], open: boolean): { shown: ToolCall[]; hidden: number; hiddenFailed: number; folds: boolean } {
+  const folds = calls.length > CALLS_SHOWN + 1;
+  const shown = folds && !open ? calls.slice(0, CALLS_SHOWN) : calls;
+  const rest = calls.slice(shown.length);
+  return { shown, hidden: rest.length, hiddenFailed: rest.filter((c) => c.failed).length, folds };
+}
+
+/** A turn's calls in words, for its group's label: "Used Bash, Read and
+ *  Edit." and, when any failed, how many. */
+export function callsWords(calls: ToolCall[]): string {
+  const names = [...new Set(calls.map((c) => c.name))];
+  if (!names.length) return "";
+  const used = names.length === 1 ? `Used ${names[0]}.` : `Used ${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}.`;
+  const failed = calls.filter((c) => c.failed).length;
+  return failed ? `${used} ${failed === 1 ? "One call" : `${failed} calls`} failed.` : used;
+}
+
+/** `text` with the place's root taken off each path that starts with it:
+ *  at the start, as the permission card shows its path, or after a space,
+ *  a quote, `=`, `(`, `,` or `;`, where a command, `<pattern> in <path>` or
+ *  a patch's file list puts one. The title keeps the line as sent. */
+export function underRoot(text: string, root: string): string {
+  const r = root.replace(/\/+$/, "");
+  if (!r) return text;
+  const esc = `${r}/`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return text.replace(new RegExp(`(^|[\\s"'=(,;])${esc}`, "g"), "$1");
 }
 
 /** How far the host's clock may run behind when a pending message is matched. */

@@ -87,6 +87,26 @@
   font-family: var(--font-mono); font-size: var(--fs-micro); color: var(--txt-dim); line-height: 1.6;
   border: 1px solid var(--line); border-radius: var(--r-full); padding: 0 7px; background: var(--bg-tree);
 }
+/* Calls a host says something about: a row each, the name's chip, the line
+   in monospace cut to one row (the whole of it in its title), and a failed
+   call's dot beside the word "failed" — the hue in the dot, the word in
+   --txt-hi. The list stretches so a long line ellipsises at the column. */
+.chat-calls {
+  list-style: none; margin: 4px 0 0 var(--s1); padding: 0; align-self: stretch; min-width: 0;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.chat-call { display: flex; align-items: baseline; gap: var(--s2); min-width: 0; line-height: 1.6; }
+.chat-call-name { flex: none; }
+.chat-call-sum {
+  flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--font-mono); font-size: var(--fs-meta); color: var(--txt);
+}
+.chat-call-failed {
+  flex: none; display: inline-flex; align-items: center; gap: 4px; align-self: center;
+  font-size: var(--fs-meta); font-weight: var(--fw-med); color: var(--txt-hi);
+}
+.chat-call-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--danger); }
+.chat-call-more { font-size: var(--fs-meta); padding-left: 2px; }
 
 /* "Claude is working": the dots are the app's busy colour, the words are not. */
 .chat-typing { display: flex; align-items: center; gap: var(--s2); margin: var(--s2) 0 0 var(--s1); font-size: var(--fs-meta); color: var(--txt-dim); }
