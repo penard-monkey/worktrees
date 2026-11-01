@@ -1,4 +1,4 @@
-//! The 182 commands, each with its exposure, capability and objects, in ONE
+//! The 184 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -1070,6 +1070,16 @@ commands! { cx, a;
     agent_answer: Engine [answer, place(repo, slug)] => agents::agent_answer(
         &cx.ctx, a.get("repo")?, a.get("slug")?, a.get("choice")?, a.get("fingerprint")?,
     ),
+    // Free text into a field the prompt opened is `instruct` (§9.2), like a
+    // line — and the body requires `answer` too, because the text rides on
+    // one of the prompt's choices; ticking a multi-select's boxes is `answer`. Their own rows, never
+    // new arguments on `agent_answer`, which an older host would ignore.
+    agent_answer_text: Engine [instruct, place(repo, slug)] => agents::agent_answer_text(
+        &cx.ctx, a.get("repo")?, a.get("slug")?, a.get("choice")?, a.get("fingerprint")?, a.get("text")?,
+    ),
+    agent_answer_many: Engine [answer, place(repo, slug)] => agents::agent_answer_many(
+        &cx.ctx, a.get("repo")?, a.get("slug")?, a.get("choices")?, a.get("fingerprint")?,
+    ),
     agent_send: Engine [instruct, place(repo, slug), session_of(session, repo, slug)] => agents::agent_send(
         &cx.ctx, a.get("repo")?, a.get("slug")?, a.get("session")?, a.get("text")?,
     ),
@@ -1209,19 +1219,20 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 182 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 184 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six, the slots pair and
     /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
     /// slice 6's four `remote_*` console rows, the host app's two
     /// (`remote_candidates`, `device_rename`), the iOS MVP's four agent
-    /// rows, and `project_sessions`; the check scripts hold the page's
-    /// commands against them.
+    /// rows and the two that answer what one choice cannot
+    /// (`agent_answer_text`, `agent_answer_many`), and `project_sessions`;
+    /// the check scripts hold the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 182, "the table has 182 commands");
+        assert_eq!(TABLE.len(), 184, "the table has 184 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1601,9 +1612,10 @@ mod tests {
     /// itself (`own`: `device_revoke`, `stepup_challenge`, `stepup_prove`);
     /// and the iOS MVP's agent rows: `agent_prompt` and `agent_turns` (`read`),
     /// `agent_answer` (`answer`, the capability's first row) and `agent_send`
-    /// (`instruct`); and `project_sessions` (`read`), what removing a project
-    /// would leave running. A row that moves group fails here until the count
-    /// (and the proposal's table) move with it.
+    /// (`instruct`), then `agent_answer_many` (`answer`) and
+    /// `agent_answer_text` (`instruct`); and `project_sessions` (`read`),
+    /// what removing a project would leave running. A row that moves group
+    /// fails here until the count (and the proposal's table) move with it.
     #[test]
     fn every_row_has_one_base_group_and_the_counts_are_section_3_4s() {
         let mut groups: BTreeMap<&str, usize> = BTreeMap::new();
@@ -1619,15 +1631,15 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 60), ("write", 23), ("admin", 35), ("console", 39), ("stream", 10), ("instruct", 4), ("answer", 1),
+            ("read", 60), ("write", 23), ("admin", 35), ("console", 39), ("stream", 10), ("instruct", 5), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 3),
         ]
         .into();
         assert_eq!(groups, want);
-        // `answer` (Phase 2 §9.2) is `agent_answer`'s alone: one of a prompt's
-        // own choices, never free text, which is `instruct`.
+        // `answer` (Phase 2 §9.2) is the prompt's own choices alone — one, or
+        // a multi-select's boxes — never free text, which is `instruct`.
         let answer: Vec<&str> = TABLE.iter().filter(|r| r.cap == Some(Capability::Answer)).map(|r| r.name).collect();
-        assert_eq!(answer, vec!["agent_answer"]);
+        assert_eq!(answer, vec!["agent_answer", "agent_answer_many"]);
     }
 
     /// Every event the api emits has a projection (`scope::EVENTS`); one

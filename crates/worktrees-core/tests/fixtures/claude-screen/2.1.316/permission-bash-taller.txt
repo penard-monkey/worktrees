@@ -1,0 +1,13 @@
+ │ 'bash row 26' 'bash row 27' 'bash row 28' 'bash row 29' 'bash row 30' 'bash row 31' 'bash row 32' 'bash row 33'
+ │ 'bash row 34' 'bash row 35' 'bash row 36' 'bash row 37' 'bash row 38' 'bash row 39' 'bash row 40' 'bash row 41'
+ │ 'bash row 42' 'bash row 43' 'bash row 44' 'bash row 45' 'bash row 46' 'bash row 47' 'bash row 48' 'bash row 49'
+ │ 'bash row 50' > rows.txt
+╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and always allow access to /private/tmp/claude-501/wtph/repo from this project
+   3. Yes, and switch to auto mode · auto mode handles these prompts for you
+   4. No
+
+ Esc to cancel · Tab to amend
+─────────────────────────────────────────────────────────────────────────────────────────────────────────── wtph-probe ─

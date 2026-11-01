@@ -9,7 +9,9 @@ setup() {
   unset WORKTREES_AGENT_GUIDANCE
 }
 
-agent_dir() { ls -d "$HOME"/.local/share/worktrees/agent/*/ | head -n1; }
+# The guidance plugin's directory (it holds `rules.md`); the prompt plugin
+# every Claude launch gets has a hash directory of its own beside it.
+agent_dir() { dirname "$(ls "$HOME"/.local/share/worktrees/agent/*/rules.md | head -n1)"; }
 
 @test "guidance: a claude lane gets the worktrees plugin; off in settings, it does not" {
   WORKTREES_AI_CMD=claude run_wt new feat-g
@@ -25,9 +27,61 @@ agent_dir() { ls -d "$HOME"/.local/share/worktrees/agent/*/ | head -n1; }
   mkdir -p "$HOME/.config/worktrees"
   echo '{"enabled": false}' > "$HOME/.config/worktrees/agent-guidance.json"
   WORKTREES_AI_CMD=claude run_wt new feat-h
-  [[ "$(tmux_pane0_cmd repo-feat-h)" != *"--plugin-dir"* ]]
+  # The guidance plugin's path ends `/claude'`; the prompt plugin, which
+  # every Claude launch gets, is `/claude-prompt'`.
+  ! grep -qF "/claude'" <<<"$(tmux_pane0_cmd repo-feat-h)" || false
   WORKTREES_AGENT_GUIDANCE=on WORKTREES_AI_CMD=claude run_wt new feat-i
-  [[ "$(tmux_pane0_cmd repo-feat-i)" == *"--plugin-dir"* ]]
+  grep -qF "/claude'" <<<"$(tmux_pane0_cmd repo-feat-i)"
+}
+
+file_mode() { if [ "$(uname)" = Darwin ]; then stat -f %Lp "$1"; else stat -c %a "$1"; fi; }
+
+@test "prompt hook: every claude lane gets the prompt plugin, guidance on or off" {
+  WORKTREES_AI_CMD=claude run_wt new feat-ph
+  [ "$status" -eq 0 ]
+  grep -qF "/claude-prompt" <<<"$(tmux_pane0_cmd repo-feat-ph)"
+  hooks="$(ls -d "$HOME"/.local/share/worktrees/agent/*/claude-prompt)/hooks/hooks.json"
+  grep -qF '"PermissionRequest"' "$hooks"
+  grep -qF "agent-hook permission-request >/dev/null 2>&1 || true" "$hooks"
+  grep -qF "agent-hook session-end >/dev/null 2>&1 || true" "$hooks"
+  mkdir -p "$HOME/.config/worktrees"
+  echo '{"enabled": false}' > "$HOME/.config/worktrees/agent-guidance.json"
+  WORKTREES_AI_CMD=claude run_wt new feat-pi
+  [ "$status" -eq 0 ]
+  grep -qF "/claude-prompt" <<<"$(tmux_pane0_cmd repo-feat-pi)"
+  ! grep -qF "/claude'" <<<"$(tmux_pane0_cmd repo-feat-pi)" || false
+}
+
+@test "prompt hook: agent-hook keeps a prompt privately and exits 0 with nothing printed, whatever it is given" {
+  run "$WT_BIN" agent-hook --version
+  [ "$status" -eq 0 ]
+  [ "$output" = "worktrees-agent-hook 1" ]
+  sid=0b0b0b0b-1111-2222-3333-444444444444
+  req="{\"session_id\":\"$sid\",\"hook_event_name\":\"PermissionRequest\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"ls\"}}"
+  hook() { run bash -c 'printf "%s" "$3" | "$1" agent-hook "$2"' _ "$WT_BIN" "$@"; }
+  hook permission-request "$req"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  f="$HOME/.local/state/worktrees/pending/$sid.json"
+  grep -qF '"command":"ls"' "$f"
+  [ "$(file_mode "$f")" = 600 ]
+  [ "$(file_mode "$(dirname "$f")")" = 700 ]
+  # Garbage, nothing, a session id that is a path: 0, silent, nothing kept.
+  for input in "not json" "" '{"session_id":"../x","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{}}'; do
+    hook permission-request "$input"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+  done
+  [ ! -e "$HOME/.local/state/worktrees/x.json" ]
+  # A state dir that cannot be made: 0 and silent.
+  run bash -c 'printf "%s" "$2" | XDG_STATE_HOME=/dev/null/x "$1" agent-hook permission-request' _ "$WT_BIN" "$req"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  # SessionEnd removes the session's file.
+  hook session-end "{\"session_id\":\"$sid\",\"hook_event_name\":\"SessionEnd\"}"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ ! -e "$f" ]
 }
 
 @test "guidance: the guard is off by default and, when on, hooks worktrees itself" {
@@ -149,7 +203,8 @@ SH
   WORKTREES_AI_CMD=claude run_wt new feat-edit
   [ "$status" -eq 0 ]
   # The lane's --plugin-dir is the directory holding the edit.
-  plugin="$(tmux_pane0_cmd repo-feat-edit | grep -o "$HOME/.local/share/worktrees/agent/[0-9a-f]*/claude")"
+  # (Up to its closing quote: the prompt plugin's `/claude-prompt` starts the same.)
+  plugin="$(tmux_pane0_cmd repo-feat-edit | grep -o "$HOME/.local/share/worktrees/agent/[0-9a-f]*/claude'" | tr -d "'")"
   grep -q 'EDITED BODY' "$plugin/skills/worktrees/SKILL.md"
 
   # A broken edit is never handed to an agent: guide falls back and says why.

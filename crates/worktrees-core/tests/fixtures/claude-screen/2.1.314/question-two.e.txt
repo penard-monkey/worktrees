@@ -1,0 +1,40 @@
+     [38;2;72;150;140m│[39m 45. Summarize the result in one short message.                                      [38;2;72;150;140m│[39m
+     [38;2;72;150;140m╰─────────────────────────────────────────────────────────────────────────────────────╯[39m
+
+[38;2;153;153;153m✻[39m [38;2;153;153;153mCooked for 15s · done 11:50 PM[39m
+
+[38;2;153;153;153m[48;2;55;55;55m❯ [38;2;255;255;255mCall the MCP tool mcp__worktrees__list_places once (load it with ToolSearch first if needed) and tell me how many [39m
+  [38;2;255;255;255mplaces it lists. Nothing else.[39m
+[49m
+  [38;2;153;153;153mCalled worktrees [39m
+[38;2;153;153;153m  ⎿  Interrupted · What should Claude do instead?[39m
+
+[38;2;153;153;153m✻[39m [38;2;153;153;153mBrewed for 2s · done 11:51 PM[39m
+
+[38;2;153;153;153m[48;2;55;55;55m❯ [38;2;255;255;255mUse AskUserQuestion once with multiSelect true: which toppings do I want on a pizza? Options Cheese, Olives, [39m
+  [38;2;255;255;255mMushrooms, each with a one-line description. Nothing else.[39m
+[49m
+[38;2;153;153;153m⏺ [39mUser answered Claude's questions:
+[38;2;153;153;153m  ⎿  · Which toppings do you want on a pizza? → Cheese, Mushrooms[39m
+
+[38;2;255;255;255m⏺[39m You picked Cheese and Mushrooms for the pizza toppings.
+
+[38;2;153;153;153m✻[39m [38;2;153;153;153mBaked for 2s · done 11:52 PM[39m
+
+[38;2;153;153;153m[48;2;55;55;55m❯ [38;2;255;255;255mUse AskUserQuestion once with TWO questions: (1) header Colour: Red or Blue; (2) header Size: Small or Large; each [39m
+  [38;2;255;255;255moption with a one-line description, single select. Nothing else.[39m
+[38;2;153;153;153m[49m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+← [38;2;0;0;0m[48;2;177;185;249m ☐ Colour [39m[49m ☐ Size  ✔ Submit  →
+
+[1m[38;2;255;255;255mWhich colour do you want?[0m
+
+[38;2;177;185;249m❯[39m [38;2;153;153;153m1.[39m [38;2;177;185;249mRed[39m
+     [38;2;153;153;153mA warm, bold red.[39m
+  [38;2;153;153;153m2.[39m Blue
+     [38;2;153;153;153mA cool, calm blue.[39m
+  [38;2;153;153;153m3. Type something.[39m
+[38;2;153;153;153m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  4. Chat about this
+
+[38;2;153;153;153mEnter to select · Tab/Arrow keys to navigate · Esc to cancel[39m
+[38;2;136;136;136m─────────────────────────────────────────────────────────────────────────────────────────────────────────── wtap-probe ─

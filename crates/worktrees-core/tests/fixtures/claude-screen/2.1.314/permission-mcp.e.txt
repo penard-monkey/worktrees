@@ -1,0 +1,40 @@
+     [38;2;72;150;140m│[39m 30. Write a short commit message.                                                   [38;2;72;150;140m│[39m
+     [38;2;72;150;140m│[39m 31. Keep the message to one line.                                                   [38;2;72;150;140m│[39m
+     [38;2;72;150;140m│[39m 32. Do not add any Claude attribution trailer.                                      [38;2;72;150;140m│[39m
+     [38;2;72;150;140m│[39m 33. Commit locally on the [38;2;177;185;249mprobe[39m branch.                                             [38;2;72;150;140m│[39m
+     [38;2;72;150;140m│[39m 34. Confirm the commit with [38;2;177;185;249mgit log -1[39m.                                             [38;2;72;150;140m│[39m
+     [38;2;72;150;140m│[39m 35. Do not push to any remote.                                                      [38;2;72;150;140m│[39m
+     [38;2;72;150;140m│[39m 36. Tell the user the commit is ready to push.                                      [38;2;72;150;140m│[39m
+     [38;2;72;150;140m│[39m 37. Leave the push decision to the user.                                            [38;2;72;150;140m│[39m
+     [38;2;72;150;140m│[39m 38. Re-run [38;2;177;185;249m./greet.sh[39m after the commit.                                             [38;2;72;150;140m│[39m
+     [38;2;72;150;140m│[39m 39. Confirm the working tree is clean.                                              [38;2;72;150;140m│[39m
+     [38;2;72;150;140m│[39m 40. Remove any temporary files created.                                             [38;2;72;150;140m│[39m
+     [38;2;72;150;140m│[39m 41. Check the scratchpad holds nothing needed.                                      [38;2;72;150;140m│[39m
+     [38;2;72;150;140m│[39m 42. Note that no other files were touched.                                          [38;2;72;150;140m│[39m
+     [38;2;72;150;140m│[39m 43. Report the final file path.                                                     [38;2;72;150;140m│[39m
+     [38;2;72;150;140m│[39m 44. Report the verification output.                                                 [38;2;72;150;140m│[39m
+     [38;2;72;150;140m│[39m 45. Summarize the result in one short message.                                      [38;2;72;150;140m│[39m
+     [38;2;72;150;140m╰─────────────────────────────────────────────────────────────────────────────────────╯[39m
+
+[38;2;153;153;153m✻[39m [38;2;153;153;153mCooked for 15s · done 11:50 PM[39m
+
+[38;2;153;153;153m[48;2;55;55;55m❯ [38;2;255;255;255mCall the MCP tool mcp__worktrees__list_places once (load it with ToolSearch first if needed) and tell me how many [39m
+  [38;2;255;255;255mplaces it lists. Nothing else.[39m
+[49m
+[38;2;153;153;153m [39m Calling worktrees…
+
+[38;2;177;185;249m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m [1m[38;2;177;185;249mTool use[0m
+ [1mworktrees — List Places Tool:[0m[38;2;153;153;153m (MCP)[39m
+
+ [3mAbout the [1mworktrees — List Places[0;3m Tool:[0m
+ [2m│[0m [3m[38;2;153;153;153mList every place (worktree) in this repository with its branch, git state, tmux session status and declared[0m
+ [2m│[0m [3m[38;2;153;153;153mlifecycle. Start here.[0m
+
+ Do you want to proceed?
+ [38;2;177;185;249m❯[39m [38;2;153;153;153m1. [38;2;177;185;249mYes[39m
+   [38;2;153;153;153m2. [39mYes, and don't ask again for worktrees — List Places commands in /private/tmp/claude-501/wtap/e2e/repo/.w…
+   [38;2;153;153;153m3. [39mNo
+
+ [38;2;153;153;153mEsc to cancel · Tab to amend[39m
+[38;2;136;136;136m─────────────────────────────────────────────────────────────────────────────────────────────────────────── wtap-probe ─

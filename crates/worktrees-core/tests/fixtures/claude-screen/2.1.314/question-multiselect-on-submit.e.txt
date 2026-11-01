@@ -1,0 +1,40 @@
+     [38;2;72;150;140m│[39m 38. Re-run [38;2;177;185;249m./greet.sh[39m after the commit.                                             [38;2;72;150;140m│[39m
+     [38;2;72;150;140m│[39m 39. Confirm the working tree is clean.                                              [38;2;72;150;140m│[39m
+     [38;2;72;150;140m│[39m 40. Remove any temporary files created.                                             [38;2;72;150;140m│[39m
+     [38;2;72;150;140m│[39m 41. Check the scratchpad holds nothing needed.                                      [38;2;72;150;140m│[39m
+     [38;2;72;150;140m│[39m 42. Note that no other files were touched.                                          [38;2;72;150;140m│[39m
+     [38;2;72;150;140m│[39m 43. Report the final file path.                                                     [38;2;72;150;140m│[39m
+     [38;2;72;150;140m│[39m 44. Report the verification output.                                                 [38;2;72;150;140m│[39m
+     [38;2;72;150;140m│[39m 45. Summarize the result in one short message.                                      [38;2;72;150;140m│[39m
+     [38;2;72;150;140m╰─────────────────────────────────────────────────────────────────────────────────────╯[39m
+
+[38;2;153;153;153m✻[39m [38;2;153;153;153mCooked for 15s · done 11:50 PM[39m
+
+[38;2;153;153;153m[48;2;55;55;55m❯ [38;2;255;255;255mCall the MCP tool mcp__worktrees__list_places once (load it with ToolSearch first if needed) and tell me how many [39m
+  [38;2;255;255;255mplaces it lists. Nothing else.[39m
+[49m
+  [38;2;153;153;153mCalled worktrees [39m
+[38;2;153;153;153m  ⎿  Interrupted · What should Claude do instead?[39m
+
+[38;2;153;153;153m✻[39m [38;2;153;153;153mBrewed for 2s · done 11:51 PM[39m
+
+[38;2;153;153;153m[48;2;55;55;55m❯ [38;2;255;255;255mUse AskUserQuestion once with multiSelect true: which toppings do I want on a pizza? Options Cheese, Olives, [39m
+  [38;2;255;255;255mMushrooms, each with a one-line description. Nothing else.[39m
+[38;2;153;153;153m[49m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+← [38;2;0;0;0m[48;2;177;185;249m ☒ Toppings [39m[49m ✔ Submit  →
+
+[1m[38;2;255;255;255mWhich toppings do you want on a pizza?[0m
+
+  [38;2;153;153;153m1.[39m [38;2;78;186;101m[✔][39m Cheese
+         [38;2;153;153;153mA classic layer of melted cheese.[39m
+  [38;2;153;153;153m2.[39m [ ] Olives
+         [38;2;153;153;153mSliced black or green olives.[39m
+  [38;2;153;153;153m3.[39m [38;2;78;186;101m[✔][39m Mushrooms
+         [38;2;153;153;153mSliced fresh or sautéed mushrooms.[39m
+  [38;2;153;153;153m4. [39m[ ] [38;2;153;153;153mType something[39m
+[38;2;177;185;249m❯[39m    [1m[38;2;177;185;249mSubmit[0m
+[38;2;153;153;153m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  5. Chat about this
+
+[38;2;153;153;153mEnter to select · ↑/↓ to navigate · ctrl+g to edit in Vim · Esc to cancel[39m
+[38;2;136;136;136m─────────────────────────────────────────────────────────────────────────────────────────────────────────── wtap-probe ─

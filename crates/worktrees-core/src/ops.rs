@@ -85,6 +85,7 @@ pub fn ai_launch_for(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> cr
     let mut launch = ai_launch_inner(p, ui, wt, ai_cmd);
     launch.guidance = guidance_for(p, ui, wt, &launch);
     launch.planning = planning_for(p, ui, wt, &launch);
+    launch.prompt_hook = prompt_hook_for(&launch);
     kimi_place_files(p, ui, wt, &launch);
     // AFTER the place files: kimi's trust depends on whether OUR `mcp.json`
     // is written (`trust::kimi_mcp_shadowed`), and deciding it before the
@@ -199,6 +200,27 @@ fn planning_for(p: &Project, ui: &mut dyn Ui, wt: &str, launch: &crate::profile:
     }
 }
 
+/// The prompt plugin for one launch (`guidance::materialize_prompt_in`):
+/// every Claude launch, keyed on nothing but the harness — not on guidance's
+/// gate or planning's level, which a user may turn off for reasons that have
+/// nothing to do with answering a prompt from a phone — and never the
+/// fail-closed launch. Without a CLI that has the hook (`pending::hook_bin`)
+/// it is left out, quietly: a prompt taller than its pane is then
+/// `readable: false`, as it was before the hook.
+fn prompt_hook_for(launch: &crate::profile::AiLaunch) -> Vec<String> {
+    let Some(adapter) = crate::harness::for_cmd(&launch.cmd).filter(|_| !launch.cmd.is_empty()) else {
+        return Vec::new();
+    };
+    if adapter.provider().id != crate::provider::CLAUDE.id {
+        return Vec::new();
+    }
+    let Some(bin) = crate::pending::hook_bin() else { return Vec::new() };
+    match crate::guidance::materialize_prompt_in(&crate::guidance::data_root(), &bin) {
+        Ok(dir) => vec!["--plugin-dir".into(), crate::profile::shell_quote(&dir.to_string_lossy())],
+        Err(_) => Vec::new(),
+    }
+}
+
 /// Agent guidance for one launch (agent-guidance §4.2): only in a
 /// worktrees-managed repo, only for a harness worktrees knows, and never on
 /// the fail-closed launch (its `cmd` is not the harness, so `launch_cmd` would
@@ -298,6 +320,7 @@ fn ai_launch_inner(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> crat
                 place_flags: Vec::new(),
                 guidance: Vec::new(),
                 planning: Vec::new(),
+                prompt_hook: Vec::new(),
                 model: None,
                 resume: false,
                 resume_id: None,
@@ -4081,6 +4104,16 @@ mod tests {
         std::fs::write(base.join(".worktrees.toml"), "# setup\n").unwrap();
         assert!(crate::guidance::is_managed(&p));
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The prompt plugin is Claude's alone: no other harness, no plain
+    /// shell, and never the fail-closed launch, whose command is not the
+    /// harness — each returns before any probe.
+    #[test]
+    fn only_a_claude_launch_gets_the_prompt_plugin() {
+        for cmd in ["codex", "pi", "kimi", "", "printf 'profile x is broken' >&2"] {
+            assert!(prompt_hook_for(&crate::profile::AiLaunch::plain(cmd)).is_empty(), "{cmd:?}");
+        }
     }
 
     /// The prompt names no directory: the planning-with-files skill decides

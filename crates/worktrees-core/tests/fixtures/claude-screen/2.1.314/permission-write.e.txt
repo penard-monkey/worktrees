@@ -1,0 +1,40 @@
+
+[38;2;215;119;87m ▐[48;2;0;0;0m▛███▛█[39m[49m   [1mClaude Code[0m [38;2;153;153;153mv2.1.314[39m
+[38;2;215;119;87m▝▜[48;2;0;0;0m█████[49m█▀[39m  [38;2;153;153;153mHaiku 5.5 · Claude Max[39m
+[38;2;215;119;87m ▝▝   ▝▝ [39m  [38;2;153;153;153m/private/tmp/claude-501/wtap/e2e/repo/.worktrees/probe[39m
+
+
+[38;2;153;153;153m[48;2;55;55;55m❯ [38;2;255;255;255mRun the shell command: touch probe-a.txt[39m
+
+[49m  [38;2;153;153;153mRan [1m1[0m[38;2;153;153;153m shell command [39m
+
+[38;2;153;153;153m[48;2;55;55;55m❯ [38;2;255;255;255mthen list the directory[39m
+
+[49m  [38;2;153;153;153mListed [1m1[0m[38;2;153;153;153m directory [39m
+
+[38;2;255;255;255m⏺[39m I created [38;2;177;185;249mprobe-a.txt[39m with [38;2;177;185;249mtouch[39m, and it's now in the worktree (0 bytes). The directory also contains [38;2;177;185;249m.git[39m (a worktree
+  pointer file), and [38;2;177;185;249mREADME.md[39m.
+
+[38;2;153;153;153m✻[39m [38;2;153;153;153mSautéed for 4s · done 11:41 PM[39m
+
+[38;2;153;153;153m[48;2;55;55;55m❯ [38;2;255;255;255mUse the Write tool to create notes.txt containing exactly one line: hello from the probe[39m
+[49m
+[38;2;153;153;153m⏺[39m [1mWrite[0m(]8;id=kkcs2p;file:///private/tmp/claude-501/wtap/e2e/repo/.worktrees/probe/notes.txt\notes.txt]8;;\)
+
+[38;2;177;185;249m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m [1m[38;2;177;185;249mCreate file[0m
+ [38;2;153;153;153mnotes.txt[39m
+[38;2;80;80;80m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+[39m [2m[38;2;248;248;242m 1 [0m[38;2;248;248;242mhello from the probe[39m
+[38;2;80;80;80m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+[39m Do you want to create [1mnotes.txt[0m?
+ [38;2;177;185;249m❯[39m [38;2;153;153;153m1. [38;2;177;185;249mYes[39m
+   [38;2;153;153;153m2. [39mYes, and switch to [1maccept edits (auto-approve file edits and common file commands)[0m for this session [1m(shift+tab)[0m
+   [38;2;153;153;153m3. [39mNo
+
+ [38;2;153;153;153mEsc to cancel · Tab to amend[39m
+
+
+
+
+[38;2;136;136;136m─────────────────────────────────────────────────────────────────────────────────────────────────────────── wtap-probe ─

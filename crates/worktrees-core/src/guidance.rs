@@ -596,6 +596,46 @@ pub fn materialize_plan_in(data_root: &Path, bin: &Path) -> Result<PathBuf, Stri
     Ok(write_hashed(data_root, &files)?.join("claude-plan"))
 }
 
+/// The prompt plugin for Claude (`feat/actionable-prompts`): a THIRD
+/// `--plugin-dir`, its own hash directory, on every Claude launch whatever
+/// guidance and planning say — it teaches the agent nothing; it lets serve
+/// show a prompt taller than its pane whole (`pending`).
+///
+/// PermissionRequest saves what a permission prompt asks; SessionEnd removes
+/// it. Neither ever decides: each command discards its output and ends `||
+/// true`, so a missing or broken `bin` still exits 0 with nothing on stdout,
+/// and Claude draws the prompt as it would have. `bin` is an absolute path to
+/// a CLI that has the hook (`pending::hook_bin`).
+pub fn materialize_prompt_in(data_root: &Path, bin: &Path) -> Result<PathBuf, String> {
+    let files = prompt_plugin_files(bin)?;
+    Ok(write_hashed(data_root, &files)?.join("claude-prompt"))
+}
+
+fn prompt_plugin_files(bin: &Path) -> Result<Vec<(String, String)>, String> {
+    let q = crate::profile::shell_quote(&bin.to_string_lossy());
+    let plugin_json = serde_json::to_string_pretty(&serde_json::json!({
+        "name": "worktrees-prompts",
+        "description": "Keeps what a permission prompt asks while it is up, so worktrees can show a prompt taller than its pane whole. It never decides.",
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
+    .map_err(|e| e.to_string())?;
+    let hook = |event: &str| {
+        serde_json::json!([{ "hooks": [{
+            "type": "command",
+            "command": format!("{q} agent-hook {event} >/dev/null 2>&1 || true"),
+            "timeout": 10,
+        }] }])
+    };
+    let hooks = serde_json::to_string_pretty(&serde_json::json!({
+        "hooks": { "PermissionRequest": hook("permission-request"), "SessionEnd": hook("session-end") }
+    }))
+    .map_err(|e| e.to_string())?;
+    Ok(vec![
+        ("claude-prompt/.claude-plugin/plugin.json".into(), plugin_json),
+        ("claude-prompt/hooks/hooks.json".into(), hooks),
+    ])
+}
+
 /// FNV-1a over every (path, content): stable across Rust versions, which
 /// `DefaultHasher` does not promise, and a directory name must be.
 fn fnv1a(files: &[(String, String)]) -> u64 {
@@ -1279,6 +1319,42 @@ mod tests {
         let d = std::env::temp_dir().join(format!("wt-guidance-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
+    }
+
+    /// The prompt plugin's hooks never decide: whatever the binary does —
+    /// missing, failing with exit 2 (which Claude would read as a denial),
+    /// printing a decision — each command exits 0 and prints nothing.
+    #[test]
+    fn the_prompt_hook_commands_exit_0_silently_whatever_the_binary_does() {
+        let root = tmp("prompt");
+        let dir = materialize_prompt_in(&root, Path::new("/opt/wt bin/worktrees")).expect("materialised");
+        assert!(dir.ends_with("claude-prompt") && dir.starts_with(root.join("agent")), "{}", dir.display());
+        let hooks: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("hooks/hooks.json")).unwrap()).unwrap();
+        let events: Vec<&String> = hooks["hooks"].as_object().unwrap().keys().collect();
+        assert_eq!(events, ["PermissionRequest", "SessionEnd"]);
+        let command = |event: &str| hooks["hooks"][event][0]["hooks"][0]["command"].as_str().unwrap().to_string();
+        assert!(hooks["hooks"]["PermissionRequest"][0].get("matcher").is_none(), "every tool's prompt");
+        assert_eq!(command("PermissionRequest"), "'/opt/wt bin/worktrees' agent-hook permission-request >/dev/null 2>&1 || true");
+        assert!(std::fs::read_to_string(dir.join(".claude-plugin/plugin.json")).unwrap().contains("\"worktrees-prompts\""));
+
+        let bad = root.join("bad-worktrees");
+        crate::fsx::exec_fixture(&bad, "#!/bin/sh\necho '{\"hookSpecificOutput\":{\"decision\":{\"behavior\":\"deny\"}}}'\necho oops >&2\nexit 2\n");
+        for bin in [root.join("missing/worktrees"), bad] {
+            let dir = materialize_prompt_in(&root, &bin).unwrap();
+            let hooks: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("hooks/hooks.json")).unwrap()).unwrap();
+            for event in ["PermissionRequest", "SessionEnd"] {
+                let cmd = hooks["hooks"][event][0]["hooks"][0]["command"].as_str().unwrap();
+                let out = crate::proc::run_deadline_stdin(
+                    { let mut c = crate::childenv::command("/bin/sh"); c.args(["-c", cmd]); c },
+                    b"{\"session_id\":\"x\"}".to_vec(),
+                    10,
+                )
+                .unwrap();
+                assert_eq!(out.status.code(), Some(0), "{event} with {}", bin.display());
+                assert!(out.stdout.is_empty(), "{event}: {}", String::from_utf8_lossy(&out.stdout));
+            }
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

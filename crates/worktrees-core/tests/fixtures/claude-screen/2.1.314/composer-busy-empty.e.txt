@@ -1,0 +1,40 @@
+
+
+[38;2;153;153;153m⏺ [39mUser answered Claude's questions:
+[38;2;153;153;153m  ⎿  · Which colour do you want? → Blue[39m
+     [38;2;153;153;153m· Which size do you want? → Large[39m
+
+[38;2;255;255;255m⏺[39m You chose Blue for colour and Large for size.
+
+[38;2;153;153;153m✻[39m [38;2;153;153;153mChurned for 2s · done 11:53 PM[39m
+
+[38;2;153;153;153m[48;2;55;55;55m❯ [38;2;255;255;255mUse AskUserQuestion once with multiSelect true: which toppings? Options Cheese, Olives, each with a one-line [39m
+  [38;2;255;255;255mdescription. Nothing else.[39m
+
+[38;2;153;153;153m[49m⏺ [39mUser declined to answer questions
+[38;2;153;153;153m  ⎿  · Which toppings? (Cheese / Olives)[39m
+
+[38;2;153;153;153m✻[39m [38;2;153;153;153mWorked for 1s · done 11:54 PM[39m
+
+[38;2;153;153;153m[48;2;55;55;55m❯ [38;2;255;255;255mRun the shell command: sleep 25[39m
+
+[49m  [38;2;153;153;153mRan [1m1[0m[38;2;153;153;153m shell command [39m
+
+[38;2;255;255;255m⏺[39m The shell blocked [38;2;177;185;249msleep 25[39m as a standalone wait. The harness only allows waiting through Monitor with a condition
+  check, or through a background command, so I didn't run it. If you want the pause anyway, tell me and I'll run it
+  through one of those routes instead.
+
+[38;2;153;153;153m✻[39m [38;2;153;153;153mCooked for 2s · done 11:54 PM[39m
+
+[38;2;153;153;153m[48;2;55;55;55m❯ [38;2;255;255;255mWrite the numbers from 1 to 600, one per line, no other text.[39m
+
+[38;2;153;153;153m[49m [39m Printing numbers 1 to 600, one per line
+[38;2;153;153;153m  ⎿  $ seq 1 600[39m
+
+[38;2;215;119;87m✽[39m [38;2;215;119;87mSpinning… [38;2;153;153;153m(3s · ↓[39m [38;2;153;153;153m242 tokens · thought for 1s)[39m
+[38;2;153;153;153m  ⎿  Tip: Share Claude Code and earn [38;2;215;119;87m$10[38;2;153;153;153m in usage credits · [38;2;215;119;87m/passes[39m
+
+[38;2;136;136;136m─────────────────────────────────────────────────────────────────────────────────────────────────────────── wtap-probe ─
+[38;2;153;153;153m❯ [39m
+[38;2;136;136;136m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  [38;2;153;153;153m⏸ manual mode on · esc to interrupt · ← 1 agent[39m

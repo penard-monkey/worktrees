@@ -1,0 +1,40 @@
+
+  ⎿  /plan to preview
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   Ready to code?
+
+   Here is Claude's plan:
+  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+   Plan: add greet.sh that prints hello
+
+   Context
+
+   The user wants a small shell script, greet.sh, at the repo root that prints "hello". The task is trivial, so no
+   exploration or design agents are needed.
+
+   Steps
+
+   1. Confirm the repo root is /private/tmp/claude-501/wtph/repo.
+   2. Check that no greet.sh exists there yet.
+   3. Decide the file lives at the repo root.
+   4. Pick #!/usr/bin/env bash as the shebang.
+   5. Start the file with that shebang line.
+   6. Add a one-line comment saying what the script does.
+   7. Add set -euo pipefail for safe defaults.
+   8. Add the line echo "hello".
+   9. End the file with a trailing newline.
+   10. Keep the script free of arguments and options.
+   11. Keep the script free of external dependencies.
+   12. Write the file with the Write tool.                                                                            ↓
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+   Claude has written up a plan and is ready to execute. Would you like to proceed?
+
+   ❯ 1. Yes, and use auto mode
+     2. Yes, manually approve edits
+     3. Tell Claude what to change
+        shift+tab to approve with this feedback
+
+   ctrl+g to edit in Vim · ~/.claude/plans/plan-adding-a-script-shimmying-glade.md
+─────────────────────────────────────────────────────────────────────────────────────────────────────────── wtph-probe ─

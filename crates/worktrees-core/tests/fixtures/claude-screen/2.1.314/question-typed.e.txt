@@ -1,0 +1,24 @@
+
+[38;2;215;119;87m ▐[48;2;0;0;0m▛███▛█[39m[49m   [1mClaude Code[0m [38;2;153;153;153mv2.1.314[39m
+[38;2;215;119;87m▝▜[48;2;0;0;0m█████[49m█▀[39m  [38;2;153;153;153mHaiku 5.5 · Claude Max[39m
+[38;2;215;119;87m ▝▝   ▝▝ [39m  [38;2;153;153;153m/private/tmp/claude-501/wtap/repo[39m
+
+
+[38;2;153;153;153m[48;2;55;55;55m❯ [38;2;255;255;255mUse the AskUserQuestion tool to ask me ONE question: which topic should you write a joke about. Give [39m
+  [38;2;255;255;255mexactly three options, each with a one-sentence description: Programming, Cats, Coffee. Do nothing else.[39m
+[38;2;153;153;153m[49m──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[38;2;0;0;0m[48;2;177;185;249m ☐ Joke topic [39m[49m
+
+[1m[38;2;255;255;255mWhich topic should I write a joke about?[0m
+
+  [38;2;153;153;153m1.[39m Programming
+     [38;2;153;153;153mA joke about software, code, bugs, or developers.[39m
+  [38;2;153;153;153m2.[39m Cats
+     [38;2;153;153;153mA joke about cats and their famously independent behavior.[39m
+  [38;2;153;153;153m3.[39m Coffee
+     [38;2;153;153;153mA joke about coffee, caffeine, and morning routines.[39m
+[38;2;177;185;249m❯[39m [38;2;153;153;153m4. [39mpenguins
+[38;2;153;153;153m──────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  5. Chat about this
+
+[38;2;153;153;153mEnter to select · ↑/↓ to navigate · ctrl+g to edit in Vim · Esc to cancel[39m
