@@ -84,14 +84,24 @@ type:
   are what Claude reads as images. HEIC is refused by name, so the phone
   converts it to JPEG first.
 - **PDF** (`.pdf`).
-- **UTF-8 text**: valid UTF-8 with no NUL byte. It is stored as `.txt`, or as
-  `.md`, `.json`, `.csv` or `.diff` when `name`'s extension says so (`.markdown`
-  counts as `.md` and `.patch` as `.diff`). The name chooses among text
-  extensions only; it never makes bytes into another kind.
+- **UTF-8 text**: valid UTF-8 with no NUL byte. Since the OWASP review (M1,
+  §4.5), it also holds none of these:
+  - a control character (C0, DEL, C1) other than tab, line feed and carriage
+    return;
+  - a bidi embedding, override or isolate (U+202A–U+202E, U+2066–U+2069);
+  - a Unicode tag (U+E0000–U+E007F).
+
+  It is stored as `.txt`, or as `.md`, `.json`, `.csv` or `.diff` when
+  `name`'s extension says so (`.markdown` counts as `.md` and `.patch` as
+  `.diff`). The name chooses among text extensions only; it never makes bytes
+  into another kind.
 
 Anything else is refused with what it was: `empty`, `HEIC`, `HEIF`, `AVIF`,
 `MP4 or QuickTime media`, `TIFF`, `BMP`, `ICO`, `ZIP (or a Word, Excel or
-other Office file)`, `gzip`, `a program`, `UTF-16 text`, or `binary data`.
+other Office file)`, `gzip`, `a program`, `UTF-16 text`, `binary data`, or
+`text with a hidden or control character, U+XXXX` (the first offender), e.g.
+`attach-type: text with a hidden or control character, U+202E (accepted: PNG,
+JPEG, GIF, WebP, PDF, UTF-8 text)`.
 
 ### 2.4 Refusals
 
@@ -230,8 +240,8 @@ a committed `120000` blob out with no check. So:
   shape (`<8 digits>-<16 hex>.<ext>`). Then the 7-day sweep would remove it
   from the working tree, which git restores. Accepted: committing into a
   folder our exclude hides gains nothing.
-- **Accepted — a race.** Between the folder's check and the rename, a process
-  running as the same user could swap the folder for a link. Only something
+- **Accepted — a race** (L1 in §4.9). Between the folder's check and the
+  rename, a process running as the same user could swap the folder for a link. Only something
   already running as the user can do that, the agent included, and it can
   already write anywhere the user can. A repo cannot: its content is fixed
   at checkout.
@@ -270,8 +280,30 @@ weakest link here.
 
 ### 4.5 Prompt injection through a file's contents
 
-**Accepted, as it is for any file a person asks an agent to read.** An
-attachment is data the user chose to hand the agent, like a paste.
+**Closed for what a person cannot see** (OWASP review M1, 2026-11-01). A text
+attachment is refused when it holds any of:
+- a control character other than tab and line ends. ESC above all: an agent
+  or a dock shell that `cat`s the file would let it drive the terminal, with
+  OSC 52 clipboard writes, the title, the cursor;
+- a bidi embedding, override or isolate: the agent would read something other
+  than what the person saw (Trojan Source);
+- a Unicode tag: tags render as nothing and a model reads them as the ASCII
+  they shadow ("ASCII smuggling"), so a third-party file could carry hidden
+  instructions to an agent with tool access.
+
+The set (`attach::HIDDEN`, plus the control characters) is deliberately
+NARROWER than `harness::invisible`, the typed-line rule. A file legitimately
+holds a BOM, the ZWJ and ZWNJ that emoji and Indic text need, the LRM and RLM
+of Arabic and Hebrew text, and soft hyphens, and those stay accepted. Tested
+by `a_text_file_with_a_hidden_or_control_character_is_refused` and
+`ordinary_text_keeps_its_tabs_line_ends_bom_joiners_and_marks`. A mutation
+that drops each class, or one that reuses `harness::invisible` whole, turns
+one of them red. The host alone decides this: the client keeps no copy of the
+set and shows the refusal in the `attach-type` words.
+
+**Accepted for what a person CAN see, as it is for any file they ask an agent
+to read.** An attachment is data the user chose to hand the agent, like a
+paste.
 - A file can carry text that tries to instruct the agent: a screenshot of
   instructions, a PDF with hidden text.
 - The host does not filter contents and could not: the agent sees what the
@@ -311,10 +343,34 @@ The guidance to users is the paste rule: attach only what you would paste.
 host cannot read them. Anything running as the user can: other places'
 agents, the user's tools. The same holds for any file in a checkout.
 
+### 4.9 Accepted after the OWASP review (2026-11-01)
+
+The review's Low findings, each accepted for the reason given.
+
+- **L1, a race between `open_dir`'s checks and the path-based
+  `write_atomic`.** Exploiting it needs a same-user local process, or a
+  compromised agent, racing a write. The random name and the fixed extensions
+  limit what lands. An `openat`-style write, relative to the folder's own
+  handle, is the follow-up.
+- **L2, contents outlive the 7-day sweep** in the agent's own transcript
+  (Claude keeps what its Read returned) and in backups of the worktree. The
+  sweep bounds the host's folder, not every copy an agent or a backup makes;
+  that holds for any file an agent reads.
+- **L3, a device's disk use scales with the places in its scope** (100 MiB
+  each), with no host-wide cap. Scope is the owner's grant, the device rate
+  bounds the pace, and the 7-day sweep bounds the total.
+- **L4, an I/O refusal can name the place's host path** ("could not open the
+  attachments folder: …"). A device in scope already sees its places' paths
+  in `list_workspace`.
+- **L5, images and PDFs can carry VISIBLE prompt injection.** The user chose
+  the file, the person can see what it says, and an image or a PDF cannot be
+  sanitized without changing what the user meant to show.
+
 ## 5. What changed, file by file
 
-- `crates/worktrees-core/src/attach.rs`: new. Decode, sniff, display name,
-  store, sweep, exclude, and 12 tests.
+- `crates/worktrees-core/src/attach.rs`: new. Decode, sniff (with the hidden
+  and control characters a text file may not carry), display name, store,
+  sweep, exclude, and 14 tests.
 - `crates/worktrees-core/src/fsx.rs`: `random_u64` and `atomic_temp_target`
   (so the sweep recognises a killed write's temp without spelling its
   pattern twice).
