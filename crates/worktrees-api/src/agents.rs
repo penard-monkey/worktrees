@@ -848,9 +848,16 @@ fn exclude_for(project: &Project, slug: &str) -> Option<String> {
 /// probe's `tmux` field is `<session>:@<window>.%<pane>`, and a pane id
 /// survives a session rename while the name in the field may not follow it
 /// (`add_project` renames a moved project's sessions). A pane id is unique
-/// only per tmux server, so a probe whose session name agrees as well wins
-/// over one that matches by pane alone; the session name alone is the last
-/// resort, for a probe that names no pane.
+/// only per tmux SERVER, and every Claude on the machine, whichever server it
+/// runs under, writes its probe into the one `~/.claude/sessions`. So a probe
+/// whose session name agrees as well wins over one that matches by pane
+/// alone, and one that matches by pane alone counts only once
+/// `agent::locate` has seen this server's pane vouch for it
+/// (`ClaudeProbe::live`, `agent::probe_pane`'s rule); the session name alone
+/// is the last resort, for a probe that names no pane. Unvouched, a lane
+/// whose own Claude has no probe yet (Claude's resume picker writes one
+/// without a `status`, which is no probe) was handed the transcript of
+/// whatever Claude sat in the same-numbered pane of ANOTHER server.
 ///
 /// The transcript is then read under the probe's OWN `cwd`, never the place's
 /// path: Claude files it under the folder it started in, which is the old one
@@ -861,7 +868,7 @@ pub fn lane_probe<'a>(probes: &'a [agent::ClaudeProbe], lane: &Lane) -> Option<&
     probes
         .iter()
         .find(|p| pane(p) && named(p))
-        .or_else(|| probes.iter().find(|p| pane(p)))
+        .or_else(|| probes.iter().find(|p| pane(p) && p.live.is_some()))
         .or_else(|| probes.iter().find(|p| named(p)))
 }
 
@@ -970,7 +977,7 @@ impl AgentIo for Live {
             h if h == provider::CLAUDE.id => {
                 // The probe of the claude in THIS lane — the transcript the
                 // nav's model label reads (`watch::claude_model`).
-                let scan = agent::scan_probes();
+                let scan = located(agent::scan_probes());
                 let p = lane_probe(&scan.probes, lane)
                     .ok_or_else(|| no_probe(&lane.session, &scan.unreadable, || pids_on_pane(lane)))?;
                 let sid = p.session_id.as_deref().ok_or("claude's session file names no session id")?;
@@ -1015,8 +1022,17 @@ fn hooked_session(lane: &Lane) -> Option<(PathBuf, String)> {
         return None;
     }
     let dir = pending::dir().filter(|d| pending::any_in(d))?;
-    let probes = agent::scan_probes().probes;
+    let probes = located(agent::scan_probes()).probes;
     Some((dir, lane_probe(&probes, lane)?.session_id.clone()?))
+}
+
+/// `scan`'s probes located against this server's panes (`agent::locate`),
+/// which is what lets [`lane_probe`] trust a match by pane id.
+fn located(mut scan: agent::ProbeScan) -> agent::ProbeScan {
+    if let Some(panes) = PaneList::fetch() {
+        agent::locate(&mut scan.probes, &panes);
+    }
+    scan
 }
 
 #[cfg(test)]
@@ -2050,7 +2066,13 @@ mod moved_tests {
         let lane = Lane { harness: "claude", session: "new-(main)".into(), pane: "%115".into() };
         let sid = |p: Option<&agent::ClaudeProbe>| p.and_then(|p| p.session_id.clone());
 
-        let probes = vec![probe("other-(main):@1.%3", "/x", "other"), probe("old-(main):@114.%115", "/Users/u/old", "renamed")];
+        // This server: the lane's pane, in the renamed session, in the moved folder.
+        let here = PaneList::from_panes(worktrees_core::tmux::parse_pane_rows("new-(main)\t/Users/u/new\t2.1.316\t\t\t%115"));
+        let located = |mut v: Vec<agent::ClaudeProbe>| {
+            agent::locate(&mut v, &here);
+            v
+        };
+        let probes = located(vec![probe("other-(main):@1.%3", "/x", "other"), probe("old-(main):@114.%115", "/Users/u/old", "renamed")]);
         assert_eq!(sid(lane_probe(&probes, &lane)).as_deref(), Some("renamed"), "the pane id, through a rename");
         assert_eq!(lane_probe(&probes, &lane).map(|p| p.cwd.as_str()), Some("/Users/u/old"), "the probe keeps the cwd its transcript is filed under");
 
@@ -2066,5 +2088,23 @@ mod moved_tests {
         // And nothing else is.
         let probes = vec![probe("new-(main)-x:@1.%1150", "/z", "prefix"), probe("old-(main):@1.%11", "/z", "near")];
         assert_eq!(sid(lane_probe(&probes, &lane)), None);
+    }
+
+    /// Every Claude on the machine writes its probe into the one
+    /// `~/.claude/sessions`, whichever tmux server it runs under, and pane
+    /// ids restart at `%0` on each server. A lane whose own Claude has no
+    /// probe (its resume picker writes one without a `status`) must not be
+    /// handed the Claude in the same-numbered pane of another server: that
+    /// is someone else's conversation. Found end to end: a private server's
+    /// `%0` lane read the main server's `%0` session's transcript.
+    #[test]
+    fn a_pane_id_from_another_tmux_server_is_not_the_lanes_probe() {
+        let lane = Lane { harness: "claude", session: "wtrp-lane".into(), pane: "%0".into() };
+        let here = PaneList::from_panes(worktrees_core::tmux::parse_pane_rows("wtrp-lane\t/tmp/wtrp/repo/.worktrees/lane\t2.1.316\t\t\t%0"));
+        let elsewhere = std::env::temp_dir().to_string_lossy().into_owned(); // a folder that exists
+        let mut probes = vec![probe("main-session:@0.%0", &elsewhere, "the-users-own")];
+        agent::locate(&mut probes, &here);
+        assert!(probes[0].live.is_none(), "this server's %0 does not vouch for it");
+        assert_eq!(lane_probe(&probes, &lane).and_then(|p| p.session_id.clone()), None);
     }
 }
