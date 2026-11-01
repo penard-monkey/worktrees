@@ -6,7 +6,8 @@
 // a modifier is held (⌘1–9 is App's nav chord), an IME is composing, or the
 // keyboard is in a text field or a terminal (the dock shell keeps its digits).
 // And a card that appears takes the keyboard from an EMPTY composer, once per
-// prompt, and from nothing else.
+// prompt, and from nothing else; typing at the card (a letter, or any key in
+// the first second after it took the keyboard) gives it back to the composer.
 //
 // Runs the REAL `cardKey`, `keyFocusOf`, `cardTakesFocus` and `cardDigits`
 // from app/src/chat.ts, with only its two imports stubbed (React's store hook,
@@ -79,7 +80,7 @@ const KIMI = prompt([
 ]);
 
 const key = (k, mods = {}) => ({ key: k, metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, isComposing: false, repeat: false, ...mods });
-const BASE = { focus: "none", escapeDepth: 0, shown: true, answering: false, selected: null, canSend: false };
+const BASE = { focus: "none", sinceTook: null, escapeDepth: 0, shown: true, answering: false, selected: null, canSend: false };
 const at = (over = {}) => ({ ...BASE, ...over });
 
 // ── 1. a digit does what a click does ───────────────────────────────────────
@@ -135,6 +136,34 @@ expect("Enter while answering does nothing (no second answer)", C.cardKey(key("E
 expect("a digit while answering does nothing", C.cardKey(key("3"), at({ answering: true }), PERM), null);
 expect("Enter sends a multi-select's ticks when its Send is enabled", C.cardKey(key("Enter"), at({ canSend: true }), MULTI), { act: "send" });
 
+// ── 4b. typing at the card is typing a message ──────────────────────────────
+// The card takes the keyboard from an EMPTY composer: a person who starts a
+// message then must not answer the prompt with it.
+const GRACE = C.CARD_GRACE_MS;
+if (!(GRACE >= 500)) fail(`CARD_GRACE_MS is ${GRACE}: a key that soon after the card took the keyboard was aimed at the composer`);
+const card = (over = {}) => at({ focus: "card", ...over });
+expect("a letter at the card goes to the composer, with the keyboard", C.cardKey(key("t"), card(), PERM), { act: "composer" });
+expect("a capital (shift) at the card goes to the composer", C.cardKey(key("T", { shiftKey: true }), card(), PERM), { act: "composer" });
+expect("punctuation (shift+1 is !) at the card goes to the composer", C.cardKey(key("!", { shiftKey: true }), card(), PERM), { act: "composer" });
+expect("…even while an answer is in flight (typing a message is always allowed)", C.cardKey(key("t"), card({ answering: true }), PERM), { act: "composer" });
+expect("a digit just after the card took the keyboard goes to the composer", C.cardKey(key("2"), card({ sinceTook: 120 }), PERM), { act: "composer" });
+expect("Enter just after the card took the keyboard goes to the composer", C.cardKey(key("Enter"), card({ sinceTook: 120, canSend: true, selected: 2 }), PERM), { act: "composer" });
+expect("a digit once the grace is over is the card's again", C.cardKey(key("2"), card({ sinceTook: GRACE + 1 }), PERM), { act: "select", n: 2, choice: 2, field: false });
+expect("a digit on a card the person focused (no take) is the card's at once", C.cardKey(key("2"), card({ sinceTook: null }), PERM), { act: "select", n: 2, choice: 2, field: false });
+expect("Space at the card is not typing (it activates a focused choice)", C.cardKey(key(" "), card(), PERM), null);
+expect("a digit with no choice at the card still does nothing", C.cardKey(key("0"), card(), PERM), null);
+expect("a letter with focus on nothing is not the card's (nothing took the composer's keyboard)", C.cardKey(key("t"), at(), PERM), null);
+expect("a letter on another control is that control's", C.cardKey(key("t"), at({ focus: "control" }), PERM), null);
+expect("⌘+letter at the card is not typing (App's chords)", C.cardKey(key("k", { metaKey: true }), card(), PERM), null);
+// The hijack, end to end: the card took the keyboard 3 s ago; "2 things⏎".
+{
+  const first = C.cardKey(key("2"), card({ sinceTook: 3000 }), PERM);
+  const second = C.cardKey(key("t"), card({ sinceTook: 3000, selected: 2, canSend: true }), PERM);
+  const enter = C.cardKey(key("Enter"), at({ focus: "composer", selected: 2, canSend: true }), PERM);
+  if (first?.act !== "select" || second?.act !== "composer" || enter !== null) fail(`"2 things⏎" typed at the card must not send choice 2: got ${JSON.stringify([first, second, enter])}`);
+  else ok(`"2 things⏎" selects 2, then hands the words AND the Enter to the composer, which cannot send while a prompt waits`);
+}
+
 // ── 5. where the keyboard is ────────────────────────────────────────────────
 // Just enough of an Element for keyFocusOf: tag, classes, attributes, a parent.
 function el(tag, { cls = [], attrs = {}, parent = null, editable = false } = {}) {
@@ -154,15 +183,15 @@ function el(tag, { cls = [], attrs = {}, parent = null, editable = false } = {})
 }
 const body = el("body");
 const chat = el("div", { cls: ["chat"], parent: body });
-const card = el("div", { cls: ["chat-card", "chat-prompt"], attrs: { tabindex: -1, role: "group" }, parent: chat });
-const choiceBtn = el("button", { cls: ["chat-choice"], parent: card });
-const boxLabel = el("label", { cls: ["chat-box"], parent: card });
+const cardEl = el("div", { cls: ["chat-card", "chat-prompt"], attrs: { tabindex: -1, role: "group" }, parent: chat });
+const choiceBtn = el("button", { cls: ["chat-choice"], parent: cardEl });
+const boxLabel = el("label", { cls: ["chat-box"], parent: cardEl });
 const boxInput = el("input", { attrs: { type: "checkbox" }, parent: boxLabel });
-const freeBox = el("div", { cls: ["chat-box", "chat-box-free"], parent: card });
+const freeBox = el("div", { cls: ["chat-box", "chat-box-free"], parent: cardEl });
 const freeText = el("input", { cls: ["chat-answer-field"], attrs: { type: "text" }, parent: freeBox });
-const noteField = el("input", { cls: ["chat-answer-field"], attrs: { type: "text" }, parent: card });
-const cancel = el("button", { cls: ["ctrl"], parent: card });
-const summary = el("summary", { parent: card });
+const noteField = el("input", { cls: ["chat-answer-field"], attrs: { type: "text" }, parent: cardEl });
+const cancel = el("button", { cls: ["ctrl"], parent: cardEl });
+const summary = el("summary", { parent: cardEl });
 const composer = el("textarea", { cls: ["chat-field"], parent: chat });
 const dock = el("div", { cls: ["dock"], parent: body });
 const xtermRoot = el("div", { cls: ["xterm"], parent: dock });
@@ -172,7 +201,7 @@ const otherCardChoice = el("button", { cls: ["chat-choice"], parent: el("div", {
 for (const [what, e, want] of [
   ["nothing focused", null, "none"],
   ["the body", body, "none"],
-  ["the card itself (where a new prompt puts the keyboard)", card, "card"],
+  ["the card itself (where a new prompt puts the keyboard)", cardEl, "card"],
   ["one of the card's choices", choiceBtn, "card"],
   ["one of the card's boxes", boxInput, "card"],
   ["the free-text box's checkbox", el("input", { attrs: { type: "checkbox" }, parent: freeBox }), "card"],
@@ -190,7 +219,7 @@ for (const [what, e, want] of [
   ["a tabindex=0 widget (the Files divider)", el("div", { attrs: { tabindex: 0, role: "separator" }, parent: body }), "control"],
   ["a choice of some OTHER card", otherCardChoice, "control"],
   ["a tabindex=-1 box outside the card", el("div", { attrs: { tabindex: -1 }, parent: body }), "none"],
-]) expect(`focus on ${what} is "${want}"`, C.keyFocusOf(e, card), want);
+]) expect(`focus on ${what} is "${want}"`, C.keyFocusOf(e, cardEl), want);
 
 // ── 6. a new prompt takes the keyboard from an empty composer, once ─────────
 const arrive = (over = {}) => C.cardTakesFocus({ fingerprint: "fp1", seen: null, focus: "composer", draft: "", escapeDepth: 0, shown: true, ...over });
@@ -220,6 +249,11 @@ expect("…none when no choice is open", C.cardDigits(prompt([{ n: 1, label: "x"
   // (a focused choice's native Enter), and before App's bubble-phase chords.
   if (!/addEventListener\("keydown", \w+, true\)/.test(pane) || !/cardKey\(/.test(pane)) fail("ChatPane registers no capture-phase keydown listener that asks cardKey");
   else ok("the card's keys are one capture-phase listener that asks cardKey");
+  // A key handed back to the composer must go on to it: moved before, never prevented.
+  const handBack = pane.indexOf('if (k.act === "composer")');
+  const prevent = pane.indexOf("e.preventDefault();", pane.indexOf("cardKey(e,"));
+  if (handBack < 0 || prevent < 0 || handBack > prevent) fail("the `composer` act is prevented before it moves the keyboard: the typed key would be lost");
+  else ok("a key handed back to the composer moves the keyboard and is not prevented");
   // Enter's send is the Send button's: the same function, behind the same predicate.
   const pair = pane.match(/const send = selected && way \? \{ on: (\w+), run: (\w+) \} : p\.multi \? \{ on: (\w+), run: (\w+) \} : null;/);
   if (!pair) fail("ChatPane names no `send` pairing (selected ? answer : multi ? many) for Enter");

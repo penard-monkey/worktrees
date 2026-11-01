@@ -113,6 +113,8 @@ export function ChatPane(props: ChatPaneProps) {
   const fp = prompt?.readable ? prompt.fingerprint : null;
   const seenFp = useRef<string | null>(null);
   const tookFocus = useRef(false);
+  /** When the card took it (`performance.now()`): `cardKey`'s grace. */
+  const tookAt = useRef<number | null>(null);
   useEffect(() => {
     if (fp) {
       const take = cardTakesFocus({
@@ -123,9 +125,11 @@ export function ChatPane(props: ChatPaneProps) {
       if (take && cardRef.current) {
         cardRef.current.focus({ preventScroll: true });
         tookFocus.current = true;
+        tookAt.current = performance.now();
       }
     } else if (tookFocus.current) {
       tookFocus.current = false;
+      tookAt.current = null;
       const a = focused();
       if ((!a || a === document.body) && escapeDepth() === 0) fieldRef.current?.focus({ preventScroll: true });
     }
@@ -182,7 +186,7 @@ export function ChatPane(props: ChatPaneProps) {
           )}
           {prompt && (
             prompt.readable
-              ? <PromptCard p={prompt} target={target} agent={agent} cardRef={cardRef} onTerminal={props.onTerminal} onLink={onLink} />
+              ? <PromptCard p={prompt} target={target} agent={agent} keyboard={{ card: cardRef, field: fieldRef, tookAt }} onTerminal={props.onTerminal} onLink={onLink} />
               : (
                 <div className="chat-card" data-testid="chat-prompt-unreadable">
                   <div className="chat-card-head"><span className="chat-card-dot" aria-hidden="true" /><b>{agent} needs your answer in the terminal</b></div>
@@ -435,7 +439,9 @@ function AnswerBubble(props: { step: AskedStep }) {
  *  is "Send" (`cardKey`). What it asks comes first, whole: `detail` when the
  *  terminal shows only part of it, then the question rows. */
 function PromptCard(props: {
-  p: ReadablePrompt; target: Target; agent: string; cardRef: RefObject<HTMLDivElement | null>;
+  p: ReadablePrompt; target: Target; agent: string;
+  /** ChatPane's: the card, the composer's field, and when the card took the keyboard from it. */
+  keyboard: { card: RefObject<HTMLDivElement | null>; field: RefObject<HTMLTextAreaElement | null>; tookAt: RefObject<number | null> };
   onTerminal: () => void; onLink: (href: string) => void;
 }) {
   const { p, target, agent } = props;
@@ -482,13 +488,17 @@ function PromptCard(props: {
   live.current = { p, path: target.path, selected: v.selected, answering: v.answering, send };
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const card = props.cardRef.current;
+      const { card: cardEl, field, tookAt } = props.keyboard;
+      const card = cardEl.current;
       const L = live.current;
       const k = cardKey(e, {
-        focus: keyFocusOf(focused(), card), escapeDepth: escapeDepth(), shown: onScreen(card),
-        answering: L.answering, selected: L.selected, canSend: !!L.send?.on,
+        focus: keyFocusOf(focused(), card), sinceTook: tookAt.current === null ? null : performance.now() - tookAt.current,
+        escapeDepth: escapeDepth(), shown: onScreen(card), answering: L.answering, selected: L.selected, canSend: !!L.send?.on,
       }, L.p);
       if (!k) return;
+      // Typing a message: moved now, inside keydown, the key's text lands in
+      // the composer, so nothing is prevented.
+      if (k.act === "composer") { field.current?.focus({ preventScroll: true }); return; }
       e.preventDefault();
       e.stopPropagation();
       if (k.act === "send") L.send?.run();
@@ -504,7 +514,9 @@ function PromptCard(props: {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- reads `live`
   }, []);
   return (
-    <div ref={props.cardRef} className="chat-card chat-prompt" role="group" aria-labelledby={`${ids}-h`} tabIndex={-1} data-testid="chat-prompt">
+    <div ref={props.keyboard.card} className="chat-card chat-prompt" role="group" aria-labelledby={`${ids}-h`} tabIndex={-1} data-testid="chat-prompt"
+      // A pointer on the card is a person who has seen it: its keys are theirs at once.
+      onPointerDown={() => { props.keyboard.tookAt.current = null; }}>
       <div className="chat-card-head">
         <span className="chat-card-dot" aria-hidden="true" />
         <b id={`${ids}-h`}>{agent} needs your answer</b>

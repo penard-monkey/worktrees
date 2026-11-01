@@ -425,10 +425,18 @@ export function keyFocusOf(el: Element | null, card: Element | null): KeyFocus {
   return "none";
 }
 
+/** How long after a card takes the keyboard on its own every key stays the
+ *  composer's: a key pressed that soon was aimed before the card was seen
+ *  (Firefox holds its security dialogs' buttons the same way, for 1 s). */
+export const CARD_GRACE_MS = 1000;
+
 /** The parts of a `KeyboardEvent` the card's keys read. */
 export type CardKeyEvent = { key: string; metaKey: boolean; ctrlKey: boolean; altKey: boolean; shiftKey: boolean; isComposing: boolean; repeat: boolean };
 export type CardKeyState = {
   focus: KeyFocus;
+  /** ms since this card took the keyboard from the composer on its own
+   *  (`cardTakesFocus`); null when it did not. */
+  sinceTook: number | null;
   /** `escapeDepth()`: a modal, menu, sheet or popover is up. */
   escapeDepth: number;
   /** The card is on screen: mounted, laid out, not inert, not under the reader. */
@@ -446,22 +454,36 @@ export type CardKeyState = {
  *    `field` focuses the text the newly selected choice takes;
  *  - `tick`: `toggleTick(path, n)`, as a click on box `n` does;
  *  - `send`: what the Send button does;
- *  - `hold`: an Enter with nothing to send, kept from clicking a focused choice. */
+ *  - `hold`: an Enter with nothing to send, kept from clicking a focused choice;
+ *  - `composer`: the person was typing a message: the composer gets the
+ *    keyboard back, and the key goes on to it, unprevented. */
 export type CardKeyAct =
   | { act: "select"; n: number; choice: number | null; field: boolean }
   | { act: "tick"; n: number }
   | { act: "send" }
-  | { act: "hold" };
+  | { act: "hold" }
+  | { act: "composer" };
 
 /** The card's answer to a key, or null when the key is not the card's (and
- *  must not be prevented). Never while an answer is in flight, a modal is up,
- *  a modifier is held, an IME is composing, or the keyboard is in a text field
- *  or a terminal. Enter only from the card or from nowhere: another control's
- *  Enter is its own. */
+ *  must not be prevented). Never while a modal is up, a modifier is held, an
+ *  IME is composing, or the keyboard is in a text field or a terminal; no
+ *  answer while one is in flight. Enter only from the card or from nowhere:
+ *  another control's Enter is its own.
+ *
+ *  Typing at the card is typing a message, so the composer gets it: a letter
+ *  (or any key in the first `CARD_GRACE_MS` after the card took the keyboard
+ *  on its own). Without that, "2 things⏎" begun in an empty composer as a
+ *  prompt arrived would select choice 2, drop the words, and SEND it. */
 export function cardKey(e: CardKeyEvent, s: CardKeyState, p: ReadablePrompt): CardKeyAct | null {
-  if (e.metaKey || e.ctrlKey || e.altKey || e.shiftKey || e.isComposing || e.repeat) return null;
-  if (!s.shown || s.escapeDepth > 0 || s.answering) return null;
+  if (e.metaKey || e.ctrlKey || e.altKey || e.isComposing || e.repeat) return null;
+  if (!s.shown || s.escapeDepth > 0) return null;
   if (s.focus === "composer" || s.focus === "editable" || s.focus === "xterm") return null;
+  if (s.focus === "card") {
+    const typed = e.key.length === 1 && e.key !== " ";
+    if (s.sinceTook !== null && s.sinceTook < CARD_GRACE_MS && (typed || e.key === "Enter")) return { act: "composer" };
+    if (typed && !/^[0-9]$/.test(e.key)) return { act: "composer" };
+  }
+  if (e.shiftKey || s.answering) return null;
   if (e.key === "Enter") {
     if (s.focus !== "card" && s.focus !== "none") return null;
     return s.canSend ? { act: "send" } : { act: "hold" };
