@@ -540,7 +540,7 @@ function NavButtons({ canBack, canForward, backTitle, forwardTitle, onStep, onLi
  *  has no global and is written by `withAgentView` alone (see PlacePanels). */
 type DockPatch = Partial<Omit<PlacePanels, "agent_view">>;
 /** One entry of `DOCK_RAIL` (declared inside App, which owns the icons). */
-type DockRailItem ={ key: Settings["dock_tab"]; track: string; icon: React.ReactNode; title: string };
+type DockRailItem = { key: Settings["dock_tab"]; track: string; icon: React.ReactNode; title: string };
 
 /** The dock's tab buttons. Module scope because it renders in ONE of two hosts
  *  — its own `.rail-right`, or the Places rail when both halves share an edge
