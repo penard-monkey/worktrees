@@ -177,8 +177,10 @@ const MIB: usize = 1 << 20;
 /// - uploads (`agent_attach`): a burst of 64 MiB, then 256 MiB an hour
 ///   (~73 KiB/s). The burst is eight files at the host's 8 MiB cap, or
 ///   sixteen at the phone's own ~4 MiB, so a message with a handful of
-///   photos never waits; a Retina screenshot of a full app window measured
-///   ATTACH_MEASURED. Spent, a 4 MiB photo fits again in 56 s. The disk is
+///   photos never waits; a Retina screenshot of the whole app window
+///   (2560×1720 PNG, ten of them, Chromium and WebKit) measured 0.30–0.44
+///   MB, so the burst holds ~150 of those. Spent, a 4 MiB photo fits again
+///   in 56 s. The disk is
 ///   bounded twice: a place holds at most 100 MiB and every file goes after
 ///   seven days, so a device that keeps uploading adds at most ~6 GiB a day
 ///   across every place in its scope, and never more than 100 MiB a place.
