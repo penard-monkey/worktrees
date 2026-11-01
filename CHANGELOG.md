@@ -5,7 +5,27 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.46.0] - 2026-11-01
+
+v0.45.1 was prepared but never published; its changes are in this release.
+
 ### Added
+- **Attach files and paste images in the chat view.** Use the paperclip,
+  paste an image or file, or drop one onto the message box. Each attachment
+  shows as a chip with its progress or error. The host keeps the file inside
+  the place, in a hidden `.worktrees-attachments` folder that git ignores, and
+  your message reaches the agent with the file's path in it, so the agent
+  reads it like any other file.
+  - **Allowed types:** PNG, JPEG, GIF, WebP, PDF and plain text, judged by the
+    file's contents, not its name. Text holding terminal control characters
+    or hidden Unicode (bidi overrides, tag characters) is refused, with the
+    first offending character named.
+  - **Limits:** 8 MiB a file, and 50 files or 100 MiB a place. Attachments
+    are removed after 7 days.
+  - **Paired iPhone:** it uses the same path, with step-up and an hourly byte
+    budget.
+  - **Older hosts:** connected to a host without this feature, the paperclip
+    is turned off and says why.
 - **Hubs…: a dashboard for every drive and share you sync through.** It
   replaces "Import from hub…" on Home and in the add-project menu, and the
   ⇄ popover has an "All hubs…" line.
@@ -43,6 +63,18 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   not built yet (`docs/sync-ssh-design.md`).
 
 ### Changed
+- **The chat view is on by default.** New installs start with it on, and an
+  update turns it on once. That includes installs where it was saved as
+  off, because the app saved that value without anyone choosing it. After
+  that, turning it off in Settings › Behavior stays off. A place you haven't
+  set opens on Chat for Claude and Codex and on Terminal for pi and kimi,
+  whose conversations the chat can't show yet. A place where you chose a
+  view keeps it.
+- **The chat view's bubbles use the width.** The conversation and the
+  message box under it keep a gutter of 7% of the chat's width on each side,
+  instead of stopping at a fixed width that left most of a wide window
+  empty. Your own messages can take up to 80% of the column. A narrow chat,
+  such as with the dock open, keeps its small margins.
 - **A chosen hub that is unplugged is reported, never swapped.** If the drive
   you chose is not connected, a sync says so by name instead of using another
   drive that happens to be plugged in. A drive is recognised by its volume
@@ -53,6 +85,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   you at `sync hubs --choose`.
 
 ### Fixed
+- **The chat answers Claude's questions that come with a preview.** When
+  Claude asked a question whose options each carry a preview, the chat (and
+  the iPhone app) could only say the prompt was unreadable. The card now
+  shows the highlighted option's preview beside the choices, or under the
+  selected one in a narrow chat. Each option can take a note, which is sent
+  with it. "Chat about this" is offered as a choice too.
 - **The chat's message box no longer shows scroll bars or overlaps the line
   under it.** With macOS set to always show scroll bars, an empty box at
   some window sizes drew a horizontal and a vertical bar inside itself,
@@ -61,16 +99,6 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   text again when the chat gets wider or narrower, such as when the window
   is resized or the dock opens, and when the UI font size changes.
 
-## [0.45.1] - 2026-11-01
-
-### Changed
-- **The chat view's bubbles use the width.** The conversation and the
-  message box under it keep a gutter of 7% of the chat's width on each side,
-  instead of stopping at a fixed width that left most of a wide window
-  empty. Your own messages can take up to 80% of the column. A narrow chat,
-  such as with the dock open, keeps its small margins.
-
-### Fixed
 - **The chat view answers Claude's resume picker.** A place reopened with
   resume showed only that its conversation couldn't be read: Claude was
   waiting for you to choose which conversation to resume and had not started
