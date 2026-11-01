@@ -406,11 +406,33 @@ The page logs one xterm `Viewport` error ("dimensions") whenever the chat
 opens with its terminal hidden. It happens with nothing attached, so it is
 not from this branch.
 
+**Checked end to end, 2026-11-01**, with a real Claude (2.1.316):
+- an isolated serve from the release build, in a scratch repo, with a
+  private tmux server and a scratch registry;
+- Claude launched by serve's `open_place` with the shipped argv. The user ran
+  that one launch, forcing the quota gate at 77% of the weekly window;
+- the folder-trust prompt answered through `agent_answer`, and the mode set
+  to manual (shift+tab).
+
+Then:
+- `agent_attach` kept a 64×64 PNG and a two-line text file;
+- `agent_send` sent `What colour is the image, and what passphrase is in the
+  text file? Answer in one line. [attached: <png>, <txt>]`;
+- Claude ran Read on both paths with no permission prompt and answered "The
+  image is solid red, and the passphrase in the text file is
+  **PELICAN-7741**."
+
+The same serve gave:
+- `git status` clean;
+- the folder 0700 and its files 0600;
+- the exclude line written;
+- audit records of `{bytes, sha256, kind}` only, with no file name in the
+  audit log or in serve.log;
+- an 8 MiB upload round trip of 88–101 ms on loopback, and 8 MiB + 1 byte
+  refused in 40 ms.
+
 ## 8. Not done
 
-- **A live end-to-end run with a real Claude.** It waits on the user's call,
-  because the quota gate refused to start Claude at 75% of its weekly window
-  and asks the user before overriding (see the lane's report).
 - **A drop from Finder into the real app.** WKWebView should deliver `File`s
   to the page, since `dragDropEnabled` is off, but no one has dropped a file
   onto the running app yet. Neither has a paste from Preview been tried there.
