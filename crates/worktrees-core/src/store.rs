@@ -123,6 +123,13 @@ pub struct Declared {
     /// instructed this lane from off the host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_remote_send: Option<RemoteSend>,
+    /// The last file a paired DEVICE attached for this place's agent through
+    /// serve's `agent_attach` (`docs/proposals/chat-attachments.md`): who,
+    /// which stored file (relative to the place root), and when — never the
+    /// user's name for it, nor its bytes, which the audit log holds as a
+    /// size and a hash. The line that names the file is stamped as a send.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_remote_attach: Option<RemoteAttach>,
     /// Who last set `note` / `title` through serve (§7.3). Absent when it was
     /// set anywhere else (the CLI, an agent's MCP `set_note`), so it cannot
     /// name a device for text the device did not write.
@@ -179,6 +186,16 @@ impl LaunchedBy {
 /// path relative to the place's root.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 pub struct RemoteInstruction {
+    #[serde(flatten)]
+    pub by: By,
+    pub path: String,
+    pub at: i64,
+}
+
+/// `Declared::last_remote_attach`: `{principal, device, path, at}`, the path
+/// the host chose, relative to the place's root.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct RemoteAttach {
     #[serde(flatten)]
     pub by: By,
     pub path: String,
@@ -549,7 +566,7 @@ mod tests {
         fs::write(t.0.join(STORE_FILE), r#"{"version":1,"places":{"alpha":{"note":"n","from_the_future":42}}}"#).unwrap();
         let d = read_lenient(&repo).places["alpha"].clone();
         assert!(d.launched_by.is_none() && d.last_remote_instruction.is_none() && d.note_by.is_none() && d.title_by.is_none());
-        assert!(d.last_remote_send.is_none());
+        assert!(d.last_remote_send.is_none() && d.last_remote_attach.is_none());
 
         let bob = By { principal: PrincipalId::new("bob"), device: Device::Paired(DeviceId::new("bob-phone")) };
         edit(&repo, "alpha", |d| {
@@ -557,6 +574,7 @@ mod tests {
             d.last_remote_instruction = Some(RemoteInstruction { by: bob.clone(), path: "AGENTS.md".into(), at: 1_700_000_000 });
             d.note_by = Some(By::of(&Caller::console()));
             d.last_remote_send = Some(RemoteSend { by: bob.clone(), session: "wt-alpha".into(), at: 1_700_000_100 });
+            d.last_remote_attach = Some(RemoteAttach { by: bob.clone(), path: ".worktrees-attachments/20261101-1f3a9c2e5b7d0a46.png".into(), at: 1_700_000_090 });
         })
         .unwrap();
         let raw: serde_json::Value = serde_json::from_str(&fs::read_to_string(t.0.join(STORE_FILE)).unwrap()).unwrap();
@@ -573,6 +591,10 @@ mod tests {
         assert_eq!(
             alpha["last_remote_send"],
             serde_json::json!({"principal": "bob", "device": {"kind": "paired", "id": "bob-phone"}, "session": "wt-alpha", "at": 1_700_000_100})
+        );
+        assert_eq!(
+            alpha["last_remote_attach"],
+            serde_json::json!({"principal": "bob", "device": {"kind": "paired", "id": "bob-phone"}, "path": ".worktrees-attachments/20261101-1f3a9c2e5b7d0a46.png", "at": 1_700_000_090})
         );
         assert!(alpha.get("title_by").is_none(), "an absent stamp is not serialized: {alpha}");
         assert_eq!(alpha["note"], "n");

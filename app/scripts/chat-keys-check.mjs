@@ -79,6 +79,20 @@ const KIMI = prompt([
   { n: 2, label: "Reject with a reason", highlighted: false, host_only: "text" },
 ]);
 
+// Claude's question with previews (claude-screen/2.1.316/preview): every
+// option takes a note in the question's ONE notes field; "Chat about this"
+// none. Someone typing a note in the terminal closes the card's choices;
+// their note held there leaves the options plain.
+const PREVIEW_CHOICES = [
+  { n: 1, label: "Another place needs input (Recommended)", highlighted: true, text: "amend", preview: "One: …" },
+  { n: 2, label: "Name first", highlighted: false, text: "amend", preview: "One: …" },
+  { n: 3, label: "Hide it on place screens", highlighted: false, text: "amend", preview: "(no banner)" },
+  { n: 4, label: "Chat about this", highlighted: false },
+];
+const PREVIEW = prompt(PREVIEW_CHOICES, { kind: "question", previews: "all", notes: { open: false } });
+const PREVIEW_OPEN = prompt(PREVIEW_CHOICES, { kind: "question", previews: "all", notes: { open: true } });
+const PREVIEW_HELD = prompt(PREVIEW_CHOICES, { kind: "question", previews: "all", notes: { open: false, text: "keep it short" } });
+
 const key = (k, mods = {}) => ({ key: k, metaKey: false, ctrlKey: false, altKey: false, shiftKey: false, isComposing: false, repeat: false, ...mods });
 const BASE = { focus: "none", sinceTook: null, escapeDepth: 0, shown: true, answering: false, selected: null, canSend: false };
 const at = (over = {}) => ({ ...BASE, ...over });
@@ -108,6 +122,10 @@ expect("a `widens` choice in a window driving a paired host is disabled, so not 
 expect("…while its neighbours still are", C.cardKey(key("3"), at(), PERM), { act: "select", n: 3, choice: 3, field: true });
 globalThis.__onHost = true;
 expect("a `widens` choice on the console is keyed, as it is clickable", C.cardKey(key("2"), at(), PERM), { act: "select", n: 2, choice: 2, field: false });
+expect("a preview question's option is selected and its note focused", C.cardKey(key("2"), at(), PREVIEW), { act: "select", n: 2, choice: 2, field: true });
+expect("…its Chat about this is a plain choice", C.cardKey(key("4"), at(), PREVIEW), { act: "select", n: 4, choice: 4, field: false });
+expect("…a note held in the terminal leaves the options plain", C.cardKey(key("2"), at(), PREVIEW_HELD), { act: "select", n: 2, choice: 2, field: false });
+expect("…and notes open in the terminal close every choice", [1, 2, 4].map((n) => C.cardKey(key(String(n)), at(), PREVIEW_OPEN)), [null, null, null]);
 
 // ── 3. a modifier, a text field, a terminal, a modal, an IME ────────────────
 for (const [mod, name] of [["metaKey", "⌘ (App's ⌘1–9 nav chord)"], ["ctrlKey", "ctrl"], ["altKey", "⌥"], ["shiftKey", "shift"]]) {
@@ -240,6 +258,8 @@ expect("the hint names the card's digits", C.cardDigits(PERM), "1–3");
 expect("…every choice of a question", C.cardDigits(QUESTION), "1–5");
 expect("…a multi-select's boxes and its choice below", C.cardDigits(MULTI), "1–5");
 expect("…one digit for one open choice", C.cardDigits(KIMI), "1");
+expect("…a preview question's options and Chat about this", C.cardDigits(PREVIEW), "1–4");
+expect("…none while its notes are open in the terminal", C.cardDigits(PREVIEW_OPEN), null);
 expect("…none when no choice is open", C.cardDigits(prompt([{ n: 1, label: "x", highlighted: true, host_only: "text" }])), null);
 
 // ── 8. the wiring in ChatPane.tsx ───────────────────────────────────────────

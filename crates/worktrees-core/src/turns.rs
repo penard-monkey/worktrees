@@ -319,11 +319,29 @@ fn answered(turn: &mut Turn, v: &serde_json::Value, blocks: &[serde_json::Value]
                     let chat = feedback.as_deref().is_some_and(|f| f.starts_with("The user wants to clarify"));
                     Some(Answer { how: if chat { "chat" } else { "declined" }, answers: Vec::new() })
                 } else {
+                    // A preview question's note is beside its answer, in
+                    // `annotations.<question>.notes` (2.1.316).
+                    let notes = result.and_then(|r| r.get("annotations")).and_then(|a| a.as_object());
+                    let note = |q: &Question| {
+                        let n = notes?.get(&q.question)?.get("notes")?.as_str()?.trim();
+                        (!n.is_empty()).then(|| n.to_string())
+                    };
                     result.and_then(|r| r.get("answers")).and_then(|a| a.as_object()).map(|given| Answer {
                         how: "picked",
                         answers: questions
                             .iter()
-                            .filter_map(|q| given.get(&q.question).and_then(|a| a.as_str()).map(|a| picked(q, a)))
+                            .filter_map(|q| {
+                                let a = given.get(&q.question)?.as_str()?;
+                                let note = note(q);
+                                // Enter in the notes field before the highlight
+                                // ever moved sends no option at all.
+                                let mut qa = match a {
+                                    NOTES_ONLY if note.is_some() => QuestionAnswer { question: q.question.clone(), picked: Vec::new(), typed: None, note: None },
+                                    _ => picked(q, a),
+                                };
+                                qa.note = note;
+                                Some(qa)
+                            })
                             .collect(),
                     })
                 };
@@ -357,6 +375,10 @@ fn answered(turn: &mut Turn, v: &serde_json::Value, blocks: &[serde_json::Value]
         }
     }
 }
+
+/// What Claude writes as the answer to a preview question sent from its
+/// notes field before any option was moved to: no option, only the note.
+const NOTES_ONLY: &str = "(notes only)";
 
 /// A question's answer as Claude wrote it (`"Banana"`, `"Cheese, Mushrooms"`,
 /// or the text typed instead) as options picked and text typed. A
@@ -1044,6 +1066,40 @@ mod tests {
         assert_eq!((plan[4]["approved"].clone(), plan[4]["plan_file"].clone()), (json!(true), json!("/Users/u/.claude/plans/validated-napping-dream.md")));
         assert_eq!((plan[5]["tool"].clone(), plan[5]["allowed"].clone(), plan[5]["summary"].clone()), (json!("Write"), json!(false), json!("/private/tmp/claude-501/wtask/repo/greet.sh")));
         assert!(plan[5].get("note").is_none());
+    }
+
+    /// A real 2.1.316 session of questions with previews (README): a note
+    /// typed in the question's notes field rides with the option picked, and
+    /// one sent before any option was moved to is the note alone — never the
+    /// words `(notes only)` as if typed. "Chat about this" is the chat still.
+    #[test]
+    fn a_preview_questions_note_comes_back_with_its_answer() {
+        use serde_json::json;
+        let fx = lines(include_str!("../tests/fixtures/transcripts/claude-2.1.316-preview-answers.jsonl"));
+        let got = claude(&fx, 20);
+        let all = serde_json::to_string(&got).unwrap();
+        for secret in ["SYSTEM-PROMPT-MARKER", "THINKING-MARKER", "toolu_"] {
+            assert!(!all.contains(secret), "{secret} leaked");
+        }
+        let asked: Vec<serde_json::Value> = got
+            .iter()
+            .flat_map(|t| serde_json::to_value(&t.steps).unwrap().as_array().unwrap().clone())
+            .filter(|s| s["kind"] == "question")
+            .collect();
+        let banner = "On a place's screen the banner says 1 place needs input, which reads as if it means this place. What should it say instead?";
+        assert_eq!(asked[0]["answer"], json!({"how": "picked", "answers": [{"question": banner, "picked": ["Name first"], "note": "keep the place name bold"}]}));
+        assert_eq!(asked[1]["answer"], json!({"how": "chat"}));
+        assert_eq!(asked[2]["answer"], json!({"how": "declined"}));
+        assert_eq!(
+            asked[3]["answer"]["answers"],
+            json!([{"question": "Which colour?", "picked": [], "note": "q1 note"}, {"question": "Which size?", "picked": ["Large"]}])
+        );
+        assert_eq!(asked[5]["answer"]["answers"][0], json!({"question": banner, "picked": [], "note": "t1 note"}));
+        assert_eq!(asked[6]["answer"]["answers"][0], json!({"question": banner, "picked": ["Another place needs input (Recommended)"], "note": "t2 note"}));
+        // Moved away and back first, then the note: the option and the note.
+        assert_eq!(asked[9]["answer"]["answers"][0], json!({"question": banner, "picked": ["Another place needs input (Recommended)"], "note": "t4 note"}));
+        assert_eq!(asked[10]["answer"]["answers"][0], json!({"question": banner, "picked": ["Another place needs input (Recommended)"]}), "no note, none given");
+        assert!(asked[11].get("answer").is_none(), "the last one was still up");
     }
 
     /// Codex's rollout: the reply's blocks and the tools, in order, each at

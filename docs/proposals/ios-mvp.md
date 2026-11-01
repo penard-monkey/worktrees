@@ -260,8 +260,9 @@ capability, so `agent_answer` from the desktop is a legitimate feature too).
 #### As built (S6–S11, `feat/ios-agent-rows`)
 
 The rows, spelled as `serve/dispatch.rs` spells them (`agent_answer_text`
-and `agent_answer_many` came after, on `feat/actionable-prompts`, and
-`agent_interrupt` on `feat/chat-interrupt`).
+and `agent_answer_many` came after, on `feat/actionable-prompts`,
+`agent_interrupt` on `feat/chat-interrupt`, and `agent_attach` on
+`feat/chat-attachments`).
 `app/scripts/agent-rows-check.mjs` holds this table, the dispatch table, the
 mock (`app/src/mock/install.ts`) and the api's refusal strings
 (`worktrees-api/src/agents.rs`) to one another.
@@ -274,6 +275,7 @@ mock (`app/src/mock/install.ts`) and the api's refusal strings
 | `agent_answer_many` | `[answer, place(repo, slug)]` | `choices` (boxes' `n`), `fingerprint` | `{answered: true, confirmed, harness, session, choices, labels}` — the review screen Claude shows next is a prompt of its own | `not a multi-select: answer it with agent_answer`; `the prompt changed` (also when the ticks moved under it); `no such choice`; `choice N is not one of the boxes`; an unfilled text box; `name at least one box to tick`; `step-up required`; `audit-budget …` |
 | `agent_send` | `[instruct, place(repo, slug), session_of(session, repo, slug)]` | `session` (from `agent_sessions`), `text` | `{delivered, queued, harness, session, note}` | one line ≤ 4 KB with no control character, no invisible format character (Unicode Cf — every bidi control, zero-width characters — and the line/paragraph separators) and not starting with `/ @ ! #`, the rule MCP `send` shares (`harness::typed_line_ok`); `the agent is waiting on a prompt: answer it with agent_answer`; a composer holding someone's text; no composer to see; `step-up required`; `audit-budget …` |
 | `agent_interrupt` | `[instruct, place(repo, slug)]` | — | ONE Escape, only on a fresh capture that shows a turn running: `{interrupted: true, harness, session, note}` once it is seen to stop, else `{interrupted: false, unconfirmed: true, harness, session, note}`, which a client never answers by pressing again | `the agent is not working on a turn: there is nothing to stop`; `the agent is waiting on a prompt: answer it with agent_answer` (Esc would cancel it); a composer holding someone's text (it hides whether a turn runs); no composer to see; pi and kimi (`agent_interrupt stops Claude's and Codex's turns; …`); `step-up required`; `audit-budget …` |
+| `agent_attach` | `[instruct, place(repo, slug)]` | `name` (display only, never a file name), `data` (base64, at most 8 MiB decoded) | `{path, bytes, sha256, kind: "image"\|"pdf"\|"text", name}` — `path` relative to the place root (`.worktrees-attachments/<yyyymmdd>-<16 hex>.<ext>`), which the next `agent_send` names as `<text> [attached: <path>, …]` (`docs/proposals/chat-attachments.md`) | `attach-type: <what> (accepted: PNG, JPEG, GIF, WebP, PDF, UTF-8 text)` (decided by the bytes); `attach-size: <max>`; `attach-files: <max>` and `attach-bytes: <max>` (the place is full); `attach-unsafe` (the folder is a link, or git would show it); `attach-budget: <s>` (the device's upload budget); `step-up required`; `audit-budget …` |
 | `agent_turns` | `[read, place(repo, slug), opt(session_of(session, repo, slug))]` | `n` (default 5, at most 20), `session` (optional: the first running agent) | `{harness, session, turns: [{at, user, reply, tools, truncated}], more, note}` — Claude and Codex | a harness whose transcript is not read yet (pi, kimi) |
 
 How each item of the spec was met, and what the lane decided:

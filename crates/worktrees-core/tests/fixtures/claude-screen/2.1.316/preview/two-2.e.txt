@@ -1,0 +1,45 @@
+
+[38;5;246m✻[39m [38;5;246mBaked for 5s · done 12:49 PM[39m
+
+[38;5;246m[48;5;237m❯ [38;5;231mAsk me the exact same AskUserQuestion again: same header, question, three options, descriptions and previews. Do nothing else.[39m
+
+[38;5;246m[49m⏺ [39mUser declined to answer questions
+[38;5;246m  ⎿  · On a place's screen the banner says 1 place needs input, which reads as if it means this place. What should it say instead? (Another place needs input [39m
+     [38;5;246m(Recommended) / Name first / Hide it on place screens)[39m
+
+[38;5;231m⏺[39m The question was declined, and the note says you want to clarify something first. What would you like to clarify about the banner copy? Your earlier answer
+  was "Name first", but you can also reopen the options.
+
+[38;5;246m✻[39m [38;5;246mSautéed for 3s · done 12:50 PM[39m
+
+[38;5;246m[48;5;237m❯ [38;5;231mUse AskUserQuestion once, ONE single-select question. header: "Layout". question: "Which layout for the status file?". Three options. Option 1 label "Twelve [39m
+  [38;5;231mrows", description "Long.", preview = twelve lines "row 01: alpha" through "row 12: alpha" (row NN with two digits, one per line). Option 2 label "Indented",[39m
+  [38;5;231mdescription "Spacing.", preview = three lines: "fn main() {", "    println!(\"hi\");", "}". Option 3 label "No preview here", description "Has no preview.",[39m
+  [38;5;231mand NO preview field at all. Do nothing else.[39m
+
+[38;5;246m[49m⏺ [39mUser declined to answer questions
+[38;5;246m  ⎿  · Which layout for the status file? (Twelve rows / Indented / No preview here)[39m
+
+[38;5;246m✻[39m [38;5;246mCooked for 4s · done 12:54 PM[39m
+
+[38;5;246m[48;5;237m❯ [38;5;231mUse AskUserQuestion once with TWO single-select questions. Question 1: header "Colour", question "Which colour?", options "Red" (description "Warm.", preview[39m
+  [38;5;231m"RED\n  #ff0000") and "Blue" (description "Cool.", preview "BLUE\n  #0000ff"). Question 2: header "Size", question "Which size?", options "Small" [39m
+  [38;5;231m(description "S.", preview "[ s ]") and "Large" (description "L.", preview "[    L    ]"). Do nothing else.[39m
+
+[38;5;246m[49m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m←  ☒ Colour [38;5;16m[48;5;153m ☐ Size [39m[49m ✔ Submit  →
+
+[1m[38;5;231mWhich size?[0m
+
+[38;5;153m❯[38;5;246m 1.[1m[38;5;153m Small[0m                        [38;5;246m┌──────────────────────────────────────────┐[39m
+ [38;5;246m 2.[39m Large                        [38;5;246m│ [39m[ s ][38;5;246m                                    │[39m
+                                  [38;5;246m└──────────────────────────────────────────┘[39m
+
+                                  [38;5;153mNotes:[39m [3m[38;5;246mpress n to add notes[0m
+
+[38;5;246m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  Chat about this
+
+[38;5;246mEnter to select · ↑/↓ to navigate · n to add notes · Tab to switch questions · Esc to cancel[39m
+
+[38;5;244m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── wtqp-lane ─

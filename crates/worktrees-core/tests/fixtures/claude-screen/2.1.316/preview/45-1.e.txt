@@ -1,0 +1,34 @@
+
+[38;5;246m[48;5;237m❯ [38;5;231mAsk me the Banner copy question again with[39m
+  [38;5;231mAskUserQuestion, exactly as the first [39m
+  [38;5;231mtime (same header, question, options, [39m
+  [38;5;231mdescriptions, previews). Do nothing else.[39m
+
+[38;5;246m[49m─────────────────────────────────────────────
+[38;5;16m[48;5;153m ☐ Banner copy [39m[49m
+
+[2m│[0m [1m[38;5;231mOn a place's screen the banner says 1 place
+[0;2m│[0m [1m[38;5;231mneeds input, which reads as if it means [0m
+[2m│[0m [1m[38;5;231mthis place. What should it say instead?[0m
+
+[38;5;153m❯[38;5;246m 1.[1m[38;5;153m Another place [0m       [38;5;246m┌─────────┐[39m
+    [1m[38;5;153mneeds input [0m          [38;5;246m│ [39mOne:   [38;5;246m │[39m
+    [1m[38;5;153m(Recommended)[0m         [38;5;246m│ [39m   [38;5;246m     │[39m
+ [38;5;246m 2.[39m Name first           [38;5;246m│ [39mAnother[38;5;246m │[39m
+ [38;5;246m 3.[39m Hide it on place     [38;5;246m│ [39m place [38;5;246m │[39m
+    screens               [38;5;246m│ [39mneeds [38;5;246m  │[39m
+                          [38;5;246m│ [39minput: [38;5;246m │[39m
+                          [38;5;246m│ [39mdemo [38;5;246m   │[39m
+                          [38;5;220m├─── ✂ ─── 9 lines
+[39m                          [38;5;220mhidden ┤[39m
+                          [38;5;246m└─────────┘[39m
+
+                          [38;5;153mNotes:[39m [3m[38;5;246mpress n to [0m
+                                 [3m[38;5;246madd notes[0m
+
+[38;5;246m─────────────────────────────────────────────
+[39m  Chat about this
+
+[38;5;246mEnter to select · ↑/↓ to navigate · n to add
+notes · Esc to cancel[39m
+[38;5;244m───────────────────────────────── wtqp-lane ─

@@ -1,0 +1,43 @@
+{
+  "session_id": "c94da2a2-b3e7-48ff-8d95-8f25a1cd4f9a",
+  "hook_event_name": "PermissionRequest",
+  "tool_name": "AskUserQuestion",
+  "tool_input": {
+    "questions": [
+      {
+        "question": "Which colour?",
+        "header": "Colour",
+        "multiSelect": false,
+        "options": [
+          {
+            "label": "Red",
+            "description": "Warm.",
+            "preview": "RED\n  #ff0000"
+          },
+          {
+            "label": "Blue",
+            "description": "Cool.",
+            "preview": "BLUE\n  #0000ff"
+          }
+        ]
+      },
+      {
+        "question": "Which size?",
+        "header": "Size",
+        "multiSelect": false,
+        "options": [
+          {
+            "label": "Small",
+            "description": "S.",
+            "preview": "[ s ]"
+          },
+          {
+            "label": "Large",
+            "description": "L.",
+            "preview": "[    L    ]"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -62,3 +62,15 @@ directory by `/private/tmp/claude-501/wtts/repo`, and the home directory by
   would show it twice.
 - `codex-0.160.1-exec.jsonl`: the same version through `codex exec`, whose
   first patch does not apply: its script's output starts `Script failed`.
+
+`claude-2.1.316-preview-answers.jsonl` is a REAL transcript too, trimmed the
+same way (only `user` and `assistant` entries, thinking replaced, the home
+directory rewritten, an `api-request-blob` added back). A scratch Claude Code
+2.1.316 session (Haiku, launched as a worktrees lane, 2026-11-01:
+`claude-screen/2.1.316/preview/README.md`) asked AskUserQuestion with
+`preview`s, answered at its own prompt: "Name first" with a note typed in the
+question's notes field; "Chat about this" with a note; Esc; a form of two
+whose first question was sent from its notes field before the highlight ever
+moved (`answers` = `(notes only)`); the same again on one question; a note
+after moving away and back; a plain Enter. The note is
+`toolUseResult.annotations.<question>.notes`.

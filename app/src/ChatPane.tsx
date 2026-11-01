@@ -14,14 +14,17 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import {
-  activityMoved, boxesOf, bytes, callsSay, callsWords, cardDigits, cardKey, cardTakesFocus, choiceOpen, clockMs, clockOf,
+  activityMoved, boxesOf, bytes, callsSay, callsWords, cardDigits, cardKey, cardTakesFocus, choiceOpen, choiceWay, clockMs, clockOf,
   dayLabel, draftProblem, fieldWords, foldCalls, itemsOf, keyFocusOf, lineDiff, loadPrompt, loadTurns, noSessionYet, permissionAnswerWords,
   promptBody, questionAnswerWords, selectChoice, sendAnswer, sendDraft, sendMany, setAnswerText, setBoxText, setDraft,
   splitAtRule, stopTurn, ticksOf, toggleTick, turnsUnsupported, underRoot, useChat, SEND_MAX,
   type AskedStep, type Item, type PromptChoice, type PromptDetail, type ReadablePrompt, type Target, type ToolCall,
 } from "./chat";
+import { previewOf, type ChoiceWay } from "./chat";
 // What a screen reader is told (VoiceOver): its own line, so the lanes' imports merge apart.
 import { announcement, gather, hear, promptKeyOf, type Bundle, type ChatView, type Heard } from "./chat";
+// Attachments (docs/proposals/chat-attachments.md): their own line, for the same reason.
+import { addAttachments, attachProblem, removeAttachment, sizeWords, splitAttached, type Attachment } from "./chat";
 import { HARNESS_LABEL, type Harness } from "./harness";
 import * as Icons from "./icons";
 import { Markdown } from "./markdown";
@@ -402,15 +405,18 @@ function ChatItem(props: { it: Item; agent: string; root: string; onLink: (href:
       return <li className="chat-sep" title={new Date(it.at * 1000).toLocaleString()}>{dayLabel(it.at)}</li>;
     case "earlier":
       return <li className="chat-note">This turn began before the transcript window: its message isn’t shown.</li>;
-    case "user":
+    case "user": {
+      const sent = splitAttached(it.text);
       return (
         <li className="chat-row chat-row-user">
           <div className="chat-bubble chat-bubble-user" role="group"
             aria-label={`You${it.at ? `, ${clockOf(it.at)}` : ""}`} data-testid="chat-user">
-            <Markdown src={it.text} onLink={props.onLink} />
+            <Markdown src={sent.text} onLink={props.onLink} />
+            {sent.paths.length > 0 && <SentFiles paths={sent.paths} />}
           </div>
         </li>
       );
+    }
     case "reply":
       return (
         <li className="chat-row chat-row-agent">
@@ -446,16 +452,63 @@ function ChatItem(props: { it: Item; agent: string; root: string; onLink: (href:
           {" "}· {clockMs(it.a.at)}{it.a.confirmed ? "" : " · not confirmed"}
         </li>
       );
-    case "pending":
+    case "pending": {
+      const sent = splitAttached(it.p.text);
       return (
         <li className="chat-row chat-row-user">
           <div className="chat-bubble chat-bubble-user chat-bubble-pending" data-testid="chat-pending">
-            <p>{it.p.text}</p>
+            <p>{sent.text}</p>
+            {sent.paths.length > 0 && <SentFiles paths={sent.paths} />}
           </div>
           <p className="chat-status">{it.p.queued ? `Queued behind ${agent}’s running turn` : `Delivered · waiting for ${agent}`}</p>
         </li>
       );
+    }
   }
+}
+
+/** The kind a stored file's extension says (the host chose it from the bytes). */
+const kindOf = (path: string): "image" | "pdf" | "text" =>
+  /\.(png|jpg|gif|webp)$/.test(path) ? "image" : path.endsWith(".pdf") ? "pdf" : "text";
+const KIND_WORD = { image: "Image", pdf: "PDF", text: "Text file" } as const;
+
+/** The files a sent message named, under its text: the host's names, which
+ *  are all the transcript has. The full path is the title. */
+function SentFiles(props: { paths: string[] }) {
+  return (
+    <ul className="chat-sent-files" aria-label={props.paths.length === 1 ? "1 attached file" : `${props.paths.length} attached files`} data-testid="chat-sent-files">
+      {props.paths.map((p) => (
+        <li key={p} className="chat-sent-file" title={p}>
+          {kindOf(p) === "image" ? <Icons.Image size={12} className="chat-file-kind" /> : <Icons.FileText size={12} className="chat-file-kind" />}
+          <span className="sr-only">{KIND_WORD[kindOf(p)]}: </span>{p.split("/").pop()}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** The files the next message carries: a name, a size, where its upload is,
+ *  and a named ✕. Uploads run on Send, one by one. */
+function AttachChips(props: { attachments: Attachment[]; sending: boolean; path: string }) {
+  const n = props.attachments.length;
+  return (
+    <ul className="chat-chips" aria-label={n === 1 ? "1 file to send" : `${n} files to send`} data-testid="chat-chips">
+      {props.attachments.map((a) => (
+        <li key={a.id} className={"chat-chip" + (a.state === "failed" ? " failed" : "")} data-state={a.state} data-testid="chat-chip">
+          {a.state === "uploading" && <span className="chat-spin" aria-hidden="true" />}
+          <span className="chat-chip-name" title={a.name}>{a.name}</span>
+          <span className="chat-chip-size">
+            {sizeWords(a.size)}
+            {a.state === "uploading" ? " · uploading" : a.state === "attached" ? " · uploaded" : a.state === "failed" ? " · not attached" : ""}
+          </span>
+          <button className="chat-chip-x" onClick={() => removeAttachment(props.path, a.id)} disabled={props.sending}
+            aria-label={`Remove ${a.name}`} title={`Remove ${a.name}`} data-testid="chat-chip-remove">
+            <Icons.X size={11} />
+          </button>
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 /** What the agent asked, resolved: a question with the option picked
@@ -561,7 +614,7 @@ function PromptCard(props: {
   const others = p.multi ? p.choices.filter((c) => c.checked === undefined) : p.choices;
   const ticks = p.multi ? ticksOf(v, p) : [];
   const selected = p.choices.find((c) => c.n === v.selected) ?? null;
-  const way = selected ? choiceOpen(selected) : null;
+  const way = selected ? choiceWay(p, selected) : null;
   const typed = way && way.how !== "plain" ? v.answerText : "";
   const typedProblem = way && way.how !== "plain" ? draftProblem(typed, way.how === "field" ? "answer" : "note") : null;
   const canAnswer = !!selected && !!way?.open && !typedProblem && !(way.how === "field" && !typed.trim()) && !v.answering;
@@ -578,6 +631,9 @@ function PromptCard(props: {
   const send = selected && way ? { on: canAnswer, run: answer } : p.multi ? { on: canSendMany, run: many } : null;
   const digits = cardDigits(p);
   const quote = (s: string) => `“${s.length > 40 ? s.slice(0, 39) + "…" : s}”`;
+  // Claude's question with previews: the selected option's beside the
+  // choices on a wide card, under it on a narrow one (`.chat-pv-wrap`).
+  const pv = previewOf(p, v.selected);
 
   // The keys. ONE capture-phase listener on `window`, the card's while it is
   // mounted (it is mounted only while a readable prompt is shown). Not the
@@ -686,13 +742,27 @@ function PromptCard(props: {
         </div>
       )}
       {others.length > 0 && (
-        <div className="chat-choices" role="group" aria-label={p.multi ? "Or instead" : "Choices"}>
-          {others.map((c) => (
-            <ChoiceRow key={c.n} c={c} on={v.selected === c.n} busy={v.answering} path={target.path}
-              harness={p.harness} agent={agent} text={v.answerText} problem={v.selected === c.n ? typedProblem : null} onEnter={answer}
-              focusToken={keyPick?.n === c.n ? keyPick.t : 0} />
-          ))}
+        <div className={p.previews ? "chat-pv-wrap" : undefined}>
+          <div className={p.previews ? "chat-pv" : undefined} data-testid={p.previews ? "chat-preview-grid" : undefined}>
+            <div className="chat-choices" role="group" aria-label={p.multi ? "Or instead" : "Choices"}>
+              {others.map((c) => (
+                <ChoiceRow key={c.n} c={c} way={choiceWay(p, c)} on={v.selected === c.n} busy={v.answering} path={target.path}
+                  harness={p.harness} agent={agent} text={v.answerText} problem={v.selected === c.n ? typedProblem : null} onEnter={answer}
+                  focusToken={keyPick?.n === c.n ? keyPick.t : 0}
+                  under={pv?.c.n === c.n ? <ChoicePreview c={c} known={pv.known} where="inline" /> : null} />
+              ))}
+            </div>
+            {pv && <ChoicePreview c={pv.c} known={pv.known} where="side" />}
+          </div>
         </div>
+      )}
+      {p.notes?.text && (
+        <p className="chat-hint chat-notes" data-testid="chat-notes-held">
+          A note typed in the terminal goes with whichever answer is sent: {quote(p.notes.text)}
+        </p>
+      )}
+      {p.notes?.open && !p.notes.text && (
+        <p className="chat-hint chat-notes" data-testid="chat-notes-open">Someone is typing a note into this question in the terminal.</p>
       )}
       {v.answerWords && (
         <p className="chat-alert" role="alert" data-testid="chat-answer-line">
@@ -729,17 +799,39 @@ function PromptCard(props: {
   );
 }
 
+/** What Claude shows beside an option of a `previews` question: its preview,
+ *  monospaced with its spacing kept, never wrapped (a mockup's columns would
+ *  move). `known: "shown"` is the terminal's one preview, all this host can
+ *  see without pressing a key. */
+function ChoicePreview(props: { c: PromptChoice; known: "all" | "shown"; where: "side" | "inline" }) {
+  const { c } = props;
+  const rows = c.preview_hidden ?? 0;
+  return (
+    <figure className={`chat-pv-box chat-pv-${props.where}`} data-testid={`chat-preview-${props.where}`}>
+      <figcaption className="chat-pv-cap">
+        {c.preview === undefined ? <>“<span className="chat-pv-label">{c.label}</span>” has no preview</> : <>Preview of “<span className="chat-pv-label">{c.label}</span>”</>}
+      </figcaption>
+      {c.preview !== undefined && <pre className="chat-pv-text" tabIndex={0}>{c.preview}</pre>}
+      {rows > 0 && <p className="chat-pv-more">{rows === 1 ? "1 more row is" : `${rows} more rows are`} cut off in the terminal.</p>}
+      {props.known === "shown" && <p className="chat-pv-more">The terminal shows one preview at a time: this is the one it shows now.</p>}
+    </figure>
+  );
+}
+
 /** One choice of a prompt: a button that selects it and, once selected, the
- *  text it takes — a field's answer, required, or an optional note. */
+ *  text it takes — a field's answer, required, or an optional note. `way` is
+ *  `choiceWay`'s, in its prompt. */
 function ChoiceRow(props: {
-  c: PromptChoice; on: boolean; busy: boolean; path: string; harness: string; agent: string;
+  c: PromptChoice; way: ChoiceWay; on: boolean; busy: boolean; path: string; harness: string; agent: string;
+  /** Shown right under the choice, above its text: its preview on a narrow card. */
+  under?: React.ReactNode;
   text: string; problem: string | null; onEnter: () => void;
   /** Moves when a DIGIT selects this choice: its text takes the keyboard,
    *  a note's too, since the next keys are typed there (Enter sends). */
   focusToken: number;
 }) {
   const { c, on } = props;
-  const { open, how, note } = choiceOpen(c);
+  const { open, how, note } = props.way;
   const field = useRef<HTMLInputElement>(null);
   const ids = useId();
   // A field IS the answer: selecting it is starting to type. A note is
@@ -768,6 +860,7 @@ function ChoiceRow(props: {
           </span>
         </span>
       </button>
+      {props.under}
       {on && how !== "plain" && (
         <div className="chat-answer">
           <label htmlFor={`${ids}-t`} className="sr-only">{how === "field" ? `Your answer for “${c.label}”` : `A note with “${c.label}”`}</label>
@@ -872,8 +965,12 @@ function Composer(props: {
   const field = props.fieldRef;
   const ids = useId();
   const text = v.draft;
-  const problem = draftProblem(text);
+  const files = v.attachments.length;
+  const problem = files ? attachProblem(text, files) : draftProblem(text);
   const n = bytes(text);
+  const picker = useRef<HTMLInputElement>(null);
+  const [dropping, setDropping] = useState(false);
+  const withFiles = (e: React.DragEvent) => Array.from(e.dataTransfer?.types ?? []).includes("Files");
 
   // Switching to Chat is switching to typing here: the hidden terminal has
   // just given the keyboard up (App's `setChatView`). Never over a prompt card
@@ -896,19 +993,22 @@ function Composer(props: {
     el.style.height = `${Math.min(el.scrollHeight, line * 6 + pad) + border}px`;
   }, [text]);
 
-  const canSend = !!text.trim() && !problem && !props.waiting && !v.sending;
+  const canSend = (!!text.trim() || files > 0) && !problem && !props.waiting && !v.sending;
   const send = () => { if (canSend) void sendDraft(target, agent); };
   // Only a line break or a tab is wrong: offer to join, by hand, never silently.
   const joinable = !!problem && /[\n\r\t]/.test(text) && !draftProblem(text.replace(/\s*[\r\n\t]+\s*/g, " ").trim());
 
   const stop = () => { if (!v.stopping) void stopTurn(target, agent); };
-  const said = v.sendWords ?? v.stopWords;
+  const said = v.sendWords ?? v.attachWords ?? v.stopWords;
 
   let line: React.ReactNode;
   let alert = false;
-  if (v.sending) line = "Sending…";
+  const up = v.attachments.findIndex((a) => a.state === "uploading");
+  if (v.sending && up >= 0) line = files === 1 ? "Uploading the file…" : `Uploading ${up + 1} of ${files}…`;
+  else if (v.sending) line = "Sending…";
   else if (v.stopping) line = `Stopping ${agent}’s turn…`;
   else if (v.sendWords) { line = v.sendWords.line; alert = true; }
+  else if (v.attachWords) { line = v.attachWords.line; alert = true; }
   // A stop's words: a refusal or an unconfirmed stop is an alert; "Stopped." is not.
   else if (v.stopWords) { line = v.stopWords.line; alert = !!(v.stopWords.terminal || v.stopWords.prompt); }
   else if (problem) { line = problem; alert = true; }
@@ -917,7 +1017,21 @@ function Composer(props: {
   else line = n >= COUNT_FROM ? `One line · ${n.toLocaleString()} of ${SEND_MAX.toLocaleString()} bytes` : "One line · Enter sends";
 
   return (
-    <div className="chat-composer" data-testid="chat-composer">
+    <div className={"chat-composer" + (dropping ? " dropping" : "")} data-testid="chat-composer"
+      onDragOver={(e) => {
+        if (!withFiles(e) || v.attachOff) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = "copy";
+        setDropping(true);
+      }}
+      onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDropping(false); }}
+      onDrop={(e) => {
+        setDropping(false);
+        if (!withFiles(e) || v.attachOff) return;
+        e.preventDefault();
+        addAttachments(target.path, Array.from(e.dataTransfer.files));
+        field.current?.focus({ preventScroll: true });
+      }}>
       {props.paneDraft && !props.waiting && (
         <p className="chat-paneDraft" data-testid="chat-pane-draft">
           The terminal’s input holds unsent text (“{props.paneDraft.text.length > 60 ? props.paneDraft.text.slice(0, 59) + "…" : props.paneDraft.text}”).
@@ -925,13 +1039,35 @@ function Composer(props: {
           <button className="chat-linkbtn" onClick={props.onTerminal}>in the terminal</button>.
         </p>
       )}
+      {files > 0 && <AttachChips attachments={v.attachments} sending={v.sending} path={target.path} />}
       <div className="chat-composer-row">
+        {/* A plain file input: it reads bytes, never a path, so it works the
+            same through the remote door. */}
+        <input ref={picker} type="file" multiple hidden tabIndex={-1} aria-hidden="true" data-testid="chat-file-input"
+          onChange={(e) => {
+            addAttachments(target.path, Array.from(e.currentTarget.files ?? []));
+            e.currentTarget.value = "";
+            field.current?.focus({ preventScroll: true });
+          }} />
+        <button className="chat-attach" onClick={() => picker.current?.click()} disabled={v.sending || !!v.attachOff}
+          aria-label={v.attachOff ? `Attach files: ${v.attachOff}` : "Attach files"} title={v.attachOff ?? "Attach files (or paste or drop them here)"}
+          data-testid="chat-attach">
+          <Icons.Paperclip size={15} />
+        </button>
         <label htmlFor={`${ids}-f`} className="sr-only">Message {agent}</label>
         <textarea id={`${ids}-f`} ref={field} className="chat-field" rows={1} value={text}
-          placeholder={props.waiting ? "Answer the prompt to continue" : `Message ${agent}`}
+          placeholder={props.waiting ? "Answer the prompt to continue" : dropping ? "Drop to attach" : `Message ${agent}`}
           aria-describedby={`${ids}-l`} aria-invalid={problem ? true : undefined}
           autoCorrect="off" autoCapitalize="off" autoComplete="off" spellCheck={false}
           onChange={(e) => setDraft(target.path, e.currentTarget.value)}
+          onPaste={(e) => {
+            // An image or a file on the clipboard is an attachment; text
+            // pastes as it always has.
+            const pasted = Array.from(e.clipboardData?.files ?? []);
+            if (!pasted.length || v.attachOff) return;
+            e.preventDefault();
+            addAttachments(target.path, pasted);
+          }}
           onKeyDown={(e) => {
             if (e.key !== "Enter" || e.nativeEvent.isComposing) return;
             // A message is one line: Enter sends it, and no key adds a break.

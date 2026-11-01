@@ -122,6 +122,21 @@ pub fn make_dir(d: &Path) -> io::Result<()> {
     }
 }
 
+/// The target name a temp of [`write_atomic`]'s stands for, when `name` is
+/// one (`.<target>.<16 hex>.tmp`): how a sweep finds the temp a killed write
+/// left behind without spelling the pattern a second time.
+pub fn atomic_temp_target(name: &str) -> Option<&str> {
+    let rest = name.strip_prefix('.')?.strip_suffix(".tmp")?;
+    let (target, hex) = rest.rsplit_once('.')?;
+    (hex.len() == 16 && hex.bytes().all(|b| b.is_ascii_hexdigit()) && !target.is_empty()).then_some(target)
+}
+
+/// 64 bits nobody else can predict, for a name that must not be guessed
+/// ahead of time (the temp's, a chat attachment's).
+pub fn random_u64() -> u64 {
+    random_suffix()
+}
+
 /// 64 bits a repo author cannot predict: `RandomState`'s keys come from the
 /// OS generator, and the counter keeps two calls in one process apart.
 fn random_suffix() -> u64 {
@@ -496,6 +511,7 @@ mod tests {
     /// `(file, text on the line, reason)`.
     const OWN_TEMP_NAMES: &[(&str, &str, &str)] = &[
         ("worktrees-core/src/fsx.rs", "tmp.push(format!", "the helper itself"),
+        ("worktrees-core/src/fsx.rs", "strip_suffix(\".tmp\")", "recognises the helper's own temps for a sweep; builds nothing"),
         ("worktrees-core/src/materialize.rs", ".wt-tmp-", "links only: symlink(2) makes the link and refuses an existing name"),
         ("worktrees-core/src/tmux_server.rs", "with_extension(format!(\"{}.{}.tmp\"", "already create_new, mode 0600"),
         ("worktrees-core/src/slots.rs", "format!(\".{}.tmp\", me.pid)", "$XDG_STATE_HOME, and the fd must stay locked across the rename"),

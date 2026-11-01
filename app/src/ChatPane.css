@@ -304,6 +304,45 @@
   background: color-mix(in srgb, var(--warn) 14%, var(--bg-panel)); border-left: 2px solid var(--warn); border-radius: var(--r-sm);
 }
 
+/* ── attachments (docs/proposals/chat-attachments.md) ──────────────────── */
+/* The paperclip: Stop's shape on the field's other side; its glyph is the
+   words' colour, never the accent. */
+.chat-attach {
+  flex: none; width: 30px; height: 30px; margin-bottom: 1px; border: 1px solid var(--line); border-radius: 50%; cursor: pointer;
+  background: var(--bg-elev); color: var(--txt-dim); padding: 0; display: inline-flex; align-items: center; justify-content: center;
+}
+.chat-attach:hover:not(:disabled) { color: var(--txt-hi); border-color: var(--txt-dim); }
+.chat-attach:disabled { color: var(--txt-mute); cursor: default; }
+/* A file held over the composer: the field says where it lands. */
+.chat-composer.dropping .chat-field { border-color: var(--accent); border-style: dashed; }
+/* The files the next message carries, above the field. A name is clipped,
+   never the size or the ✕. */
+.chat-chips { list-style: none; margin: 0 0 var(--s2); padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.chat-chip {
+  display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-width: 0;
+  padding: 2px 2px 2px var(--s2); border: 1px solid var(--line); border-radius: var(--r-md);
+  background: var(--bg-elev); color: var(--txt-hi); font-size: var(--fs-meta); line-height: 20px;
+}
+.chat-chip.failed { border-color: var(--danger); }
+.chat-chip-name { min-width: 0; max-width: 28ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chat-chip-size { flex: none; color: var(--txt-dim); }
+.chat-chip-x {
+  flex: none; width: 20px; height: 20px; border: 0; border-radius: 50%; background: transparent; color: var(--txt-dim);
+  cursor: pointer; padding: 0; display: inline-flex; align-items: center; justify-content: center;
+}
+.chat-chip-x:hover:not(:disabled) { background: var(--bg-input); color: var(--txt-hi); }
+.chat-chip-x:disabled { color: var(--txt-mute); cursor: default; }
+/* The files a sent message named, under its text, inside the bubble. */
+.chat-sent-files { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 4px; }
+.chat-bubble-pending .chat-sent-files { margin-top: 4px; }
+.chat-sent-file {
+  display: inline-flex; align-items: center; gap: 4px; max-width: 100%; min-width: 0;
+  padding: 1px 6px; border-radius: var(--r-sm); background: color-mix(in srgb, var(--accent) 12%, var(--bg-input));
+  font-family: var(--font-mono); font-size: var(--fs-micro); color: var(--txt-hi); line-height: 1.6;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.chat-file-kind { flex: none; color: var(--txt-dim); }
+
 /* A narrow cell (a small window, or the dock open beside it): the bubbles
    take the width, the margins give it back. */
 @container (max-width: 560px) {
@@ -311,4 +350,31 @@
   .chat-bubble-user { max-width: 92%; }
   .chat-composer { padding-left: var(--s2); padding-right: var(--s2); }
   .chat-foot-end { margin-left: 0; }
+}
+
+/* Claude's question with previews (`previews`): the selected option's preview
+   beside the choices on a wide card, under that choice on a narrow one. The
+   wrapper is the container: a query cannot style its own container, and
+   the card's other rules keep asking `.chat`. The preview keeps its spacing
+   and never wraps — a mockup's columns would move — so a wide one scrolls. */
+.chat-pv-wrap { container: chat-pv / inline-size; }
+.chat-pv { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); gap: var(--s3); align-items: start; }
+.chat-pv-box {
+  margin: 0; min-width: 0; padding: var(--s2) var(--s3);
+  background: var(--bg-input); border: 1px solid var(--line); border-radius: var(--r-sm);
+}
+.chat-pv-cap { margin: 0 0 4px; font-size: var(--fs-meta); color: var(--txt-dim); overflow-wrap: anywhere; }
+.chat-pv-label { color: var(--txt-hi); }
+.chat-pv-text {
+  margin: 0; font-family: var(--term-family); font-size: var(--fs-label); line-height: 1.5; color: var(--txt-hi);
+  white-space: pre; overflow-x: auto;
+}
+.chat-pv-text:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+.chat-pv-more { margin: 4px 0 0; font-size: var(--fs-meta); color: var(--txt-dim); }
+.chat-pv-inline { display: none; margin: 0 0 4px calc(var(--s2) + 1.2ch + var(--s2)); }
+.chat-notes { margin: var(--s2) 0 0; overflow-wrap: anywhere; }
+@container chat-pv (max-width: 620px) {
+  .chat-pv { display: block; }
+  .chat-pv-side { display: none; }
+  .chat-pv-inline { display: block; }
 }

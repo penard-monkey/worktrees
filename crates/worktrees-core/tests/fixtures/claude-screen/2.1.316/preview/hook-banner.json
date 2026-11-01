@@ -1,0 +1,31 @@
+{
+  "session_id": "c94da2a2-b3e7-48ff-8d95-8f25a1cd4f9a",
+  "hook_event_name": "PermissionRequest",
+  "tool_name": "AskUserQuestion",
+  "tool_input": {
+    "questions": [
+      {
+        "question": "On a place's screen the banner says 1 place needs input, which reads as if it means this place. What should it say instead?",
+        "header": "Banner copy",
+        "multiSelect": false,
+        "options": [
+          {
+            "label": "Another place needs input (Recommended)",
+            "description": "Says it is another place.",
+            "preview": "One:      Another place needs input: demo (main)  Review\nSeveral:  2 other places need input   Review"
+          },
+          {
+            "label": "Name first",
+            "description": "Leads with the name.",
+            "preview": "One:      demo (main) needs input   Review\nSeveral:  demo (main) and 1 more need input   Review"
+          },
+          {
+            "label": "Hide it on place screens",
+            "description": "Nothing on its own screen.",
+            "preview": "(no banner on a place screen)"
+          }
+        ]
+      }
+    ]
+  }
+}

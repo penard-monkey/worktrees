@@ -15,12 +15,18 @@
 //    its `INVISIBLE` table, its leading characters and `LINE_MAX`. A client
 //    laxer than the host sends lines it refuses; a stricter one stops lines
 //    the host would take.
+// 3. The attachments (docs/proposals/chat-attachments.md): `ATTACH_ERR`'s
+//    tokens against `worktrees_core::attach` and `budget::ATTACH_BUDGET`,
+//    `ATTACH_MAX` and `ATTACH_PATH_MAX` against the host's cap and path
+//    shape, and the line `attachLine` composes — the iOS app's shape too —
+//    run through the model of `typed_line_ok` below at its longest.
 // And the mock's agent rows (app/src/mock/install.ts) refuse only with
 // strings the host can give, so a card driven in the harness meets the
 // host's words. agent-rows-check.mjs holds the rows' capabilities.
 //
 // Like chatsteps-check, chat.ts runs with only its two imports stubbed.
-// CHATMIRROR_{CHAT,API,HARNESS,TURNS,MOCK} point the check at a mutated copy.
+// CHATMIRROR_{CHAT,API,HARNESS,TURNS,MOCK,ATTACH,BUDGET} point the check at a
+// mutated copy.
 
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -33,6 +39,8 @@ const SRC = {
   harness: process.env.CHATMIRROR_HARNESS ?? here("../../crates/worktrees-core/src/harness.rs"),
   turns: process.env.CHATMIRROR_TURNS ?? here("../../crates/worktrees-core/src/turns.rs"),
   mock: process.env.CHATMIRROR_MOCK ?? here("../src/mock/install.ts"),
+  attach: process.env.CHATMIRROR_ATTACH ?? here("../../crates/worktrees-core/src/attach.rs"),
+  budget: process.env.CHATMIRROR_BUDGET ?? here("../../crates/worktrees-cli/src/serve/budget.rs"),
 };
 
 let failed = 0;
@@ -53,7 +61,10 @@ const stubbed = chatSrc
 if (/^import /m.test(stubbed)) { fail("chat.ts gained an import this check does not stub — extend the stubs above"); done(); }
 const js = (await transformWithEsbuild(stubbed, "chat.ts", { loader: "ts", format: "esm" })).code;
 const C = await import("data:text/javascript;base64," + Buffer.from(js).toString("base64"));
-for (const name of ["AGENT_ERR", "draftProblem", "answerWords", "sendWords", "stopWords", "SEND_MAX", "TURNS_MAX"]) {
+for (const name of [
+  "AGENT_ERR", "draftProblem", "answerWords", "sendWords", "stopWords", "SEND_MAX", "TURNS_MAX",
+  "ATTACH_ERR", "ATTACH_MAX", "ATTACH_PATH_MAX", "ATTACH_PER_MESSAGE", "attachLine", "attachLead", "attachProblem", "attachWords", "splitAttached",
+]) {
   if (C[name] === undefined) fail(`chat.ts exports no ${name}`);
 }
 if (failed) done();
@@ -131,7 +142,7 @@ const hostSaid = new Set([...apiSaid, ...typedSaid]);
 // AGENT_ERR's keys with a const in agents.rs, the rest by where they are said.
 const CONSTS = {
   changed: "ERR_CHANGED", noChoice: "ERR_NO_CHOICE", promptUp: "ERR_PROMPT_UP", midInput: "ERR_MID_INPUT",
-  noComposer: "ERR_NO_COMPOSER", fieldHeld: "ERR_FIELD_HELD", multi: "ERR_MULTI", notMulti: "ERR_NOT_MULTI",
+  noComposer: "ERR_NO_COMPOSER", fieldHeld: "ERR_FIELD_HELD", multi: "ERR_MULTI", notMulti: "ERR_NOT_MULTI", notesOpen: "ERR_NOTES_OPEN",
   notBusy: "ERR_NOT_BUSY", stopDraft: "ERR_STOP_DRAFT", noSessionYet: "ERR_NO_SESSION_YET",
 };
 const WHOLE = ["noBox", "noAgent"];
@@ -265,7 +276,91 @@ if (shapeOk) {
   }
 }
 
-// ── 3. the mock's agent rows ─────────────────────────────────────────────────
+// ── 3. attachments ───────────────────────────────────────────────────────────
+
+const attach = live(read(SRC.attach));
+const budget = live(read(SRC.budget));
+const strConst = (src, name) => {
+  const m = new RegExp(`pub const ${name}: &str = ("(?:[^"\\\\]|\\\\.)*");`).exec(src);
+  return m ? rustStrings(m[1])[0] : undefined;
+};
+const TOKENS = { type: "ERR_TYPE", size: "ERR_SIZE", files: "ERR_FILES", bytes: "ERR_BYTES", unsafe: "ERR_UNSAFE" };
+const hostTokens = [];
+for (const [key, value] of Object.entries(C.ATTACH_ERR)) {
+  const want = key === "budget" ? strConst(budget, "ATTACH_BUDGET") : strConst(attach, TOKENS[key] ?? "?");
+  hostTokens.push(want);
+  if (want === undefined) fail(`ATTACH_ERR.${key} mirrors ${key === "budget" ? "budget.rs's ATTACH_BUDGET" : `attach.rs's ${TOKENS[key] ?? "(no const)"}`}, which is gone`);
+  else if (value !== want) fail(`ATTACH_ERR.${key} is ${JSON.stringify(value)}; the host's is ${JSON.stringify(want)}`);
+  else ok(`ATTACH_ERR.${key} is the host's ${JSON.stringify(want)}`);
+}
+const shifted = /pub const MAX_BYTES: usize = (\d+) << (\d+);/.exec(attach);
+const maxBytes = shifted ? Number(shifted[1]) * 2 ** Number(shifted[2]) : NaN;
+if (C.ATTACH_MAX !== maxBytes) fail(`chat.ts's ATTACH_MAX is ${C.ATTACH_MAX}; attach::MAX_BYTES is ${maxBytes}`);
+else ok(`ATTACH_MAX is attach::MAX_BYTES (${maxBytes})`);
+// `<DIR>/<yyyymmdd>-<16 hex>.<ext>`, at its longest extension.
+const dir = strConst(attach, "DIR");
+const exts = /const EXTS: &\[&str\] = &\[([^\]]*)\];/.exec(attach);
+const longest = exts ? Math.max(...[...exts[1].matchAll(/"([a-z]+)"/g)].map((m) => m[1].length)) : NaN;
+const nameShape = /format!\("\{day\}-\{:016x\}\.\{ext\}"/.test(attach);
+const pathMax = dir ? dir.length + 1 + 8 + 1 + 16 + 1 + longest : NaN;
+if (!nameShape) fail("attach.rs no longer names a file `{day}-{:016x}.{ext}` — update ATTACH_PATH_MAX and the path shape in splitAttached");
+else if (C.ATTACH_PATH_MAX !== pathMax) fail(`chat.ts's ATTACH_PATH_MAX is ${C.ATTACH_PATH_MAX}; the host's longest path is ${pathMax}`);
+else ok(`ATTACH_PATH_MAX is the host's longest path (${pathMax})`);
+const accepted = strConst(attach, "ACCEPTED");
+if (!accepted?.startsWith("accepted: ")) fail(`attach::ACCEPTED (${JSON.stringify(accepted)}) no longer starts "accepted: ", which attachWords cuts off`);
+// Each token's words are the chat's own, never the bare token.
+const samples = {
+  type: `${C.ATTACH_ERR.type}: HEIC (${accepted})`, size: `${C.ATTACH_ERR.size}: ${maxBytes}`, files: `${C.ATTACH_ERR.files}: 50`,
+  bytes: `${C.ATTACH_ERR.bytes}: ${100 * 2 ** 20}`, budget: `${C.ATTACH_ERR.budget}: 42`, unsafe: C.ATTACH_ERR.unsafe,
+};
+const generic = Object.entries(samples).filter(([, err]) => C.attachWords(err, "x.heic").line === `Not attached: ${err}`).map(([k]) => k);
+if (generic.length) fail(`attachWords has no words of its own for ${generic.join(", ")}`);
+else ok(`attachWords has words for every token (${Object.keys(samples).length})`);
+if (!C.attachWords(samples.type, "x.heic").line.includes("HEIC") || C.attachWords(samples.type, "x").line.includes("accepted:")) fail("attachWords does not name what the bytes were, or keeps the host's `(accepted: …)`");
+// OWASP M1: a text file with a hidden or control character is refused by the
+// host alone (no client copy of the set), and the words keep its code point.
+const hiddenWhat = /err_type\(&format!\("(text with a hidden or control character, U\+)\{:04X\}"/.exec(attach)?.[1];
+if (!hiddenWhat) fail("attach.rs no longer refuses `text with a hidden or control character, U+…` as an attach-type");
+else {
+  const w = C.attachWords(`${C.ATTACH_ERR.type}: ${hiddenWhat}202E (${accepted})`, "notes.txt").line;
+  if (!w.includes("text with a hidden or control character, U+202E") || w.includes("accepted:")) fail(`attachWords loses the hidden character's words: ${JSON.stringify(w)}`);
+  else ok("a text file's hidden or control character is refused by the host, and the words name it");
+}
+// The line, as (main) fixed it for both clients.
+const P1 = ".worktrees-attachments/20261101-1f3a9c2e5b7d0a46.png";
+const P2 = ".worktrees-attachments/20261101-77b0d4e1aa000000.pdf";
+const shapes = [
+  [C.attachLine("Look at this.", [P1]), `Look at this. [attached: ${P1}]`],
+  [C.attachLine("Compare", [P1, P2]), `Compare [attached: ${P1}, ${P2}]`],
+  [C.attachLine("", [P1]), `Look at the attached file. [attached: ${P1}]`],
+  [C.attachLine("  ", [P1, P2]), `Look at the attached files. [attached: ${P1}, ${P2}]`],
+  [C.attachLine("fix it", []), "fix it"],
+];
+const bad = shapes.filter(([got, want]) => got !== want);
+if (bad.length) fail(`attachLine's shape: ${bad.map(([g, w]) => `${JSON.stringify(g)} should be ${JSON.stringify(w)}`).join("; ")}`);
+else ok("attachLine writes `<text> [attached: <path>, <path>]`, and the lead-in when there is no text");
+const split = C.splitAttached(C.attachLine("Compare", [P1, P2]));
+if (split.text !== "Compare" || split.paths.join("|") !== `${P1}|${P2}`) fail(`splitAttached does not undo attachLine: ${JSON.stringify(split)}`);
+else ok("splitAttached undoes attachLine");
+if (C.splitAttached("see [attached: /etc/passwd]").paths.length) fail("splitAttached takes a path the host never writes");
+// At its longest, every line attachProblem lets through passes typed_line_ok.
+if (shapeOk) {
+  const longPath = (i) => `${dir}/20261101-${i.toString(16).padStart(16, "0")}.${"x".repeat(longest)}`;
+  const worst = (text, n) => C.attachLine(text, Array.from({ length: n }, (_, i) => longPath(i)));
+  const wrong = [];
+  for (let n = 1; n <= C.ATTACH_PER_MESSAGE; n++) {
+    for (const text of ["", "x".repeat(200), "x".repeat(LINE_MAX - 12 - n * (pathMax + 2) + 1), "x".repeat(LINE_MAX - 12 - n * (pathMax + 2)), "x".repeat(LINE_MAX)]) {
+      const allowed = C.attachProblem(text, n) === null;
+      if (allowed && host(worst(text, n)) !== null) wrong.push(`${n} file(s), ${text.length} chars: let through, the host refuses it (${host(worst(text, n))})`);
+      if (!allowed && host(worst(text, n)) === null && C.draftProblem(text) === null) wrong.push(`${n} file(s), ${text.length} chars: refused, the host takes it`);
+    }
+  }
+  if (wrong.length) fail(`attachProblem and typed_line_ok disagree about a line with attachments:\n       ${wrong.slice(0, 6).join("\n       ")}`);
+  else ok(`attachProblem refuses before upload exactly the lines typed_line_ok would, 1–${C.ATTACH_PER_MESSAGE} files at the longest path`);
+  if (C.attachProblem("/clear", 1) === null || C.attachProblem("", 1) !== null) fail("attachProblem does not check the text by today's rule, or refuses a message of attachments alone");
+}
+
+// ── 4. the mock's agent rows ─────────────────────────────────────────────────
 
 const mock = read(SRC.mock);
 const from = mock.indexOf('case "agent_prompt"');
@@ -280,6 +375,18 @@ else {
   if (!thrown.length) fail("the mock's agent rows throw nothing — the pattern this check reads no longer matches");
   else if (invented.length) fail(`the mock's agent rows refuse with words the host never gives: ${invented.map((s) => JSON.stringify(s)).join(", ")}`);
   else ok(`the mock's agent rows refuse only as the host does (${thrown.length} throws)`);
+}
+// The mock's agent_attach refuses only with the host's tokens.
+const ma = mock.indexOf('case "agent_attach"');
+const mb = ma < 0 ? -1 : mock.indexOf('\n    case "', ma + 1);
+if (ma < 0 || mb < 0) fail("the mock has no `case \"agent_attach\"` for this check to read");
+else {
+  const throws = [...mock.slice(ma, mb).matchAll(/throw ("(?:[^"\\]|\\.)*"|`(?:[^`\\]|\\.)*`)/g)].map((m) => (m[1][0] === '"' ? JSON.parse(m[1]) : m[1].slice(1, -1)));
+  const stray = throws.filter((t) => !hostTokens.some((tok) => tok && (t === tok || t.startsWith(`${tok}: `))));
+  const typeWords = throws.filter((t) => t.startsWith(`${C.ATTACH_ERR.type}: `)).filter((t) => !t.endsWith(` (${accepted})`));
+  if (!throws.length) fail("the mock's agent_attach throws nothing — the pattern this check reads no longer matches");
+  else if (stray.length || typeWords.length) fail(`the mock's agent_attach refuses as the host never does: ${[...stray, ...typeWords].map((x) => JSON.stringify(x)).join(", ")}`);
+  else ok(`the mock's agent_attach refuses only with the host's tokens (${throws.length} throws)`);
 }
 
 done();

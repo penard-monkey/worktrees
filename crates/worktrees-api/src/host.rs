@@ -158,6 +158,7 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
     // hook is the accurate capture, this one only has to bound how much a crash
     // or a force-quit can lose.
     let mut cwd_ticks: u32 = 0;
+    let mut attach_ticks: u32 = 0;
     // The unsent-prompt sample, on the same 15s beat and for the same reason:
     // it costs a subprocess, and a draft is a thing a human is typing — 15s is
     // faster than anyone notices.
@@ -192,6 +193,9 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
     // Same cold-start slot, same reasoning one level out: drop saved scrollback
     // for places that are gone, and anything past the age horizon.
     term::sweep_term_history(&pollctx);
+    // And chat attachments past their seven days, in every place: at start
+    // and then hourly, so a place nobody attaches to again still loses them.
+    crate::agents::sweep_attachments(&pollctx);
     loop {
         std::thread::sleep(Duration::from_secs(3));
         let interval = FETCH_INTERVAL_SECS.load(Ordering::Relaxed);
@@ -251,6 +255,11 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
             if said_viewer.insert(n.msg.clone()) {
                 log::log(n.level, &format!("viewer refresh: {}", n.msg));
             }
+        }
+        attach_ticks += 1;
+        if attach_ticks >= 1200 {
+            attach_ticks = 0;
+            crate::agents::sweep_attachments(&pollctx);
         }
         cwd_ticks += 1;
         if cwd_ticks >= 5 {
