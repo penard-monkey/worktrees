@@ -286,8 +286,9 @@ for each line), as a sent message's pending bubble does.
 - keyboard answers: **built** (`feat/chat-answer-keys`). A digit is a click
   on that choice (it selects, ticks, or selects and focuses the choice's
   text), Enter is the card's Send, and a new prompt takes the keyboard from an
-  empty composer, once per prompt. Checked by `chat-keys-check.mjs`, and in
-  the mock harness in Chromium and WebKit, counting one answer per Enter;
+  empty composer, once per prompt; a word typed at the card goes back to the
+  composer, so a message never answers. Checked by `chat-keys-check.mjs`, and
+  in the mock harness in Chromium and WebKit, counting one answer per Enter;
 - a link's domain shown after its text.
 
 ## 8. Server asks (listed, not built)
