@@ -3706,7 +3706,7 @@ Phase 3: Frontend pane and mock harness
     case "agent_send": {
       const text = String(args.text ?? "");
       if (!text.trim()) throw "text is empty";
-      if (/\p{Cc}/u.test(text)) throw "text contains a control character (newline, tab, escape…); agent_send types ONE line";
+      if (/\p{Cc}/u.test(text)) throw "text contains a control character (newline, tab, escape…); only ONE line is typed";
       if (mockPromptUp(args.repo, args.slug)) throw "the agent is waiting on a prompt: answer it with agent_answer";
       const mode = new URLSearchParams(location.search).get("agentsend");
       if (mode === "mid") throw "the agent's prompt has unsent text in it (someone is typing there): send nothing until it is empty";
@@ -3726,7 +3726,7 @@ Phase 3: Frontend pane and mock harness
     case "agent_answer_text": {
       const text = String(args.text ?? "");
       if (!text.trim()) throw "text is empty";
-      if (/\p{Cc}/u.test(text)) throw "text contains a control character (newline, tab, escape…); agent_send types ONE line";
+      if (/\p{Cc}/u.test(text)) throw "text contains a control character (newline, tab, escape…); only ONE line is typed";
       const st = mockPromptState(args.repo, args.slug);
       const sc = st.screen;
       if (!mockPromptUp(args.repo, args.slug) || !sc || "unreadable" in sc || args.fingerprint !== mockPromptFp(st)) throw "the prompt changed";
