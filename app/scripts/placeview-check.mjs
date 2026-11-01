@@ -214,6 +214,31 @@ const stray = lines
     && !l.includes('Omit<PlacePanels, "agent_view">'));
 eq("App.tsx names agent_view in code only inside updatePanels", stray.map(({ l, i }) => `${i + 1}: ${l.trim()}`), []);
 
+// ── 6. the setting itself: ON unless the user CHOSE off ─────────────────────
+// Every 0.45.x install saved `chat_view: false` whole-blob without anyone
+// choosing it, so a stored `false` counts only beside `chat_view_chosen`.
+for (const [name, blob, want] of [
+  ["absent loads on", {}, true],
+  ["a stored false nobody chose loads on", { chat_view: false }, true],
+  ["a stored false the user chose loads off", { chat_view: false, chat_view_chosen: true }, false],
+  ["a stored true the user chose loads on", { chat_view: true, chat_view_chosen: true }, true],
+  ["a marker that is not `true` is no choice", { chat_view: false, chat_view_chosen: "yes" }, true],
+]) {
+  globalThis.__blob = { settings_rev: 999, ...blob };
+  const l = await S.loadSettings();
+  eq(`chat_view: ${name}`, l.chat_view, want);
+  eq(`chat_view_chosen is a boolean after load (${name})`, typeof l.chat_view_chosen, "boolean");
+}
+const sheet = read("../src/SettingsSheet.tsx");
+const toggles = [...sheet.matchAll(/onChange\(\{[^}]*\bchat_view:[^}]*\}\)/g)].map((m) => m[0]);
+eq("one Settings control writes chat_view", toggles.length, 1);
+ok("the Settings toggle sets chat_view_chosen: true with it",
+  toggles.length === 1 && /\bchat_view_chosen: true\b/.test(toggles[0]), `found: ${toggles[0]}`);
+// Under DEFAULTS (now on) the switch would be drawn before hydration, and
+// setChatView keeps its write out of the pre-hydration stash on that premise.
+ok("the Chat | Terminal switch waits for settingsReady",
+  /\{settingsReady && settings\.chat_view && <AgentViewSwitch /.test(app));
+
 if (failed) {
   console.log(`\n${failed} failure(s)`);
   process.exit(1);

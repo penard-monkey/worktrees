@@ -47,7 +47,7 @@ server asks are listed in §8. None of them blocks a first release.
 | Question | Decision | iOS does |
 |---|---|---|
 | Where | A per-place **Chat \| Terminal** switch in the agent cell's label row | A separate screen |
-| Default | **Terminal**, for every place. The switch shows only while Settings → Behavior → "Chat view" is on (a preview, off) | — |
+| Default | **Terminal**, for every place. The switch shows only while Settings → Behavior → "Chat view" is on (on by default since 2026-11-01; only a value the user chose counts, `chat_view_chosen`) | — |
 | The terminal under the chat | **Mounted, hidden at its own size, and `inert`**. No resize reaches the pty, and the way back keeps the scrollback (the same rule as reading mode) | No terminal |
 | Remembered | **Per place** (2026-11-01): an optional `place_panels[*].agent_view`, absent = Terminal and with no global, kept across place switches and relaunches and while Chat view is off | — |
 | Live | Refetch on this place's `sessions:busy` / `sessions:done` change, on a send or an answer, and on Refresh. **While busy, re-read the turns every 10 s** if the chat is visible and the window is not hidden | Events only, no polling |
@@ -300,7 +300,7 @@ for each line), as a sent message's pending bubble does.
 | `app/src/ChatPane.tsx` | The chat, the prompt card, the composer, and the `AgentViewSwitch` |
 | `app/src/ChatPane.css` | Plain CSS on `tokens.css` |
 | `app/src/App.tsx` | The switch in `.agent-label`, the terminal wrapped in a hidden, `inert` `.agent-term`, and the activity, done stamp and pane draft passed in |
-| `app/src/settings.ts`, `SettingsSheet.tsx` | `chat_view` (default off), Behavior → Chat view; each place's `agent_view` (`agentViewFor`, `withAgentView`) |
+| `app/src/settings.ts`, `SettingsSheet.tsx` | `chat_view` (default on; `chat_view_chosen` marks a user's choice), Behavior → Chat view; each place's `agent_view` (`agentViewFor`, `withAgentView`) |
 | `app/src/mock/install.ts` | `?turns=answered` (a transcript whose prompts were answered, as `steps`; a mock answer lands in the transcript 1.5 s later), per-harness turns, the pi/kimi refusal, `?agentsend=mid\|nocomposer\|unconfirmed`, `?agentprompt=permission\|question\|multi\|plan\|tall\|unreadable\|resume\|preview\|preview-shown\|preview-note\|off` (`,waiting` for waiting places only; a Codex place gets Codex's approval; `resume` is Claude's resume picker, four conversations shown and three more in the terminal, with `agent_turns` failing as before a session exists until a pick, and for half a second after it; `preview` is Claude's question with a preview per option, every one known, `preview-shown` the same at 80×24 with only the terminal's one, cut, and `preview-note` one with a note typed in the terminal), `?agentanswer=unseen`, `?activity=<n>` |
 
 **Checked:**
@@ -379,8 +379,8 @@ The mock answers instantly, so these need a hand test (below):
 - whether `sessions:drafts`' 15 s beat is too slow to warn before a refusal.
 
 **Hand test** (`app/scripts/sandbox.sh --app`, the user drives it):
-1. Settings → Behavior → Chat view: tick **Show a Chat | Terminal switch on
-   each agent**.
+1. Settings → Behavior → Chat view: check **Show a Chat | Terminal switch on
+   each agent** is ticked (it is by default).
 2. Open a place with a running Claude. Press **Chat** on the agent's label row.
    The composer should take the keyboard.
 3. Send "say hello in one word". Expect a dashed bubble, then the real turn

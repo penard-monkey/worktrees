@@ -4174,12 +4174,13 @@ function App() {
   const [switchOpen, setSwitchOpen] = useState(false);
   const [termVersion, setTermVersion] = useState(0);
   const [termFocus, setTermFocus] = useState(0);
-  // The chat view (settings.chat_view, a preview): whether a place shows Chat
+  // The chat view (settings.chat_view): whether a place shows Chat
   // over its agent's terminal is that place's `agent_view`, in `place_panels`
   // (`agentViewFor`; absent = Terminal), so it survives a place switch and a
   // relaunch. Only this writes it. Never through the pre-hydration stash: the
-  // switch is not drawn before hydration (`chat_view` defaults off), and that
-  // stash's shallow merge would replace the whole `place_panels` map.
+  // switch is not drawn before hydration (it waits for `settingsReady`, since
+  // `chat_view` now defaults ON), and that stash's shallow merge would replace
+  // the whole `place_panels` map.
   const setChatView = useCallback((key: string, on: boolean) => {
     setSettings((prev) => {
       const next = withAgentView(prev, key, on ? "chat" : "terminal");
@@ -9141,7 +9142,7 @@ function App() {
                               </span>
                             )}
                           </span>
-                          {settings.chat_view && <AgentViewSwitch chat={chatOn} onChat={(on) => setChatView(viewKey, on)} />}
+                          {settingsReady && settings.chat_view && <AgentViewSwitch chat={chatOn} onChat={(on) => setChatView(viewKey, on)} />}
                         </div>
                         {/* The terminal stays mounted under the chat — hidden and
                             inert, at its own size — so no resize reaches the pty

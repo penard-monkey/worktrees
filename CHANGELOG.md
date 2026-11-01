@@ -51,6 +51,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   forgets it. With nothing chosen, auto-detect still takes exactly one
   removable drive and never a network share. Two removable drives now point
   you at `sync hubs --choose`.
+- **Chat view is on by default.** Each agent now shows its Chat | Terminal
+  switch unless you turned the setting off yourself (Settings → Behavior →
+  Chat view); the "(preview)" label is gone. Every place still opens on its
+  Terminal. Earlier versions could not tell a chosen off from the default
+  one, so the setting turns on after this update either way; switch it off
+  once more and it stays off.
 
 ### Fixed
 - **The chat's message box no longer shows scroll bars or overlaps the line

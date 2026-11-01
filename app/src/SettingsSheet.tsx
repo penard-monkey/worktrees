@@ -1297,10 +1297,10 @@ export function SettingsSheet({
               <input
                 type="checkbox"
                 checked={settings.chat_view}
-                onChange={(e) => onChange({ chat_view: e.currentTarget.checked })}
+                onChange={(e) => onChange({ chat_view: e.currentTarget.checked, chat_view_chosen: true })}
                 data-testid="setting-chat-view"
               />
-              Show a Chat | Terminal switch on each agent (preview)
+              Show a Chat | Terminal switch on each agent
             </label>
             <div className="hint">
               Chat shows the agent’s recent turns as messages, its waiting prompt as buttons, and a
