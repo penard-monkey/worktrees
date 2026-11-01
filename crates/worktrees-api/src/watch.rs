@@ -114,7 +114,7 @@ impl Watch {
 /// claude has no probe yet (`claude_startup_tick`) — and none otherwise.
 /// `panes` is the tick's `list-panes -a` and `sessions` its fingerprint.
 pub fn claude_activity(w: &Watch, panes: &mut tmux::PaneList, sessions: &str) -> ClaudeTick {
-    claude_activity_in(w, &worktrees_core::agent::live_probes(), panes, tmux::ps_foreground, |targets| {
+    claude_activity_in(w, &worktrees_core::agent::live_probes_in(Some(&*panes)), panes, tmux::ps_foreground, |targets| {
         activity::capture_chain(sessions, targets)
     })
 }
@@ -141,9 +141,12 @@ fn claude_activity_in(
         // The mapping is core's (`activity::claude_state`), shared with the
         // MCP server's `place_status` / `wait`, so the dot and an orchestrator
         // cannot disagree about what "busy" means.
+        // Keyed by the place the Claude is in NOW (`ClaudeProbe::place_dir`),
+        // never the `cwd` it started in: a folder renamed since would hold its
+        // dot on a path no place has.
         match activity::claude_state(&worktrees_core::agent::effective_state(probe)) {
-            activity::State::Busy => busy.push(probe.cwd.clone()),
-            activity::State::Waiting => waiting.push(probe.cwd.clone()),
+            activity::State::Busy => busy.push(probe.place_dir().to_string()),
+            activity::State::Waiting => waiting.push(probe.place_dir().to_string()),
             _ => {} // idle / shell / parked-away busy (`delegated`) → no dot
         }
     }
@@ -529,10 +532,11 @@ pub fn cached_model(w: &Watch, path: &Path, parse: fn(&[String]) -> Option<Strin
 /// display-named (`Opus 5.5`). Found by the probe whose `tmux` names that
 /// session — the same session the label sits over, not merely a claude with
 /// the same cwd (a dock shell may be running another).
+/// The model of the Claude running in `session`, by the session it runs in
+/// NOW (`ClaudeProbe::session`): a probe keeps naming the session it started
+/// in, and `add_project` renames a moved project's sessions.
 pub fn claude_model(w: &Watch, probes: &[worktrees_core::agent::ClaudeProbe], session: &str) -> Option<String> {
-    probe_model(w, probes.iter().find(|p| {
-        p.tmux.as_deref().and_then(worktrees_core::agent::session_name) == Some(session)
-    })?)
+    probe_model(w, probes.iter().find(|p| p.session() == Some(session))?)
 }
 
 pub fn probe_model(w: &Watch, p: &worktrees_core::agent::ClaudeProbe) -> Option<String> {
@@ -1106,6 +1110,25 @@ mod tests {
         assert!(claude_startup_tick(&mut panes(), &[probe], no_ps, |_| panic!("a probed idle session must not be captured")).is_empty());
         let waiting = claude_startup_tick(&mut panes(), &[], no_ps, |_| vec![("/fresh".into(), "zsh".into(), TRUST.into())]);
         assert!(waiting.is_empty(), "a shell retaining a modal is not a waiting agent");
+    }
+
+    /// A project whose folder was renamed: its Claude's probe still names the
+    /// old folder and session, its pane is in the new ones. The dot follows
+    /// the pane, and the pane is NOT captured: keyed on `cwd`, the startup
+    /// tick read it as a probe-less Claude and paid a capture every tick.
+    #[test]
+    fn a_moved_claude_keeps_its_dot_and_costs_no_capture() {
+        let w = Watch::default();
+        let mut panes = tmux::PaneList::from_panes(vec![tmux::Pane {
+            id: Some("%115".into()),
+            ..pane("new-(main)", "/w/new", "2.1.309", Some("ttys001"))
+        }]);
+        let mut probes: Vec<worktrees_core::agent::ClaudeProbe> =
+            vec![serde_json::from_value(serde_json::json!({"pid": 1, "cwd": "/no/such/old", "status": "busy", "tmux": "old-(main):@114.%115"})).unwrap()];
+        worktrees_core::agent::locate(&mut probes, &panes);
+        let (busy, waiting, _) = claude_activity_in(&w, &probes, &mut panes, no_ps, |_| panic!("a moved Claude with a probe was captured"));
+        assert_eq!(busy, ["/w/new"]);
+        assert!(waiting.is_empty());
     }
 
     const TRUST: &str = include_str!("../../worktrees-core/tests/fixtures/claude-screen/2.1.309/trust.txt");
