@@ -6,10 +6,13 @@ title: "Proposal — a chat view of a place's agent"
 
 **Status:** exploration, 2026-10-30. A prototype is on the branch
 `feat/chat-session-view`, behind a Settings switch that is off by default. It
-is not merged and not reviewed. No server change of its own. Its three open
-questions were decided by the user on 2026-10-30 (§9). On 2026-10-31 it took
-in `feat/actionable-prompts` (two new rows, richer prompts, and the prompt
-hook), and the prompt card now answers every prompt those rows can read (§5).
+is not merged and not reviewed. Its three open questions were decided by the
+user on 2026-10-30 (§9). On 2026-10-31 it took in `feat/actionable-prompts`
+(two new rows, richer prompts, and the prompt hook; on main as #581), and the
+prompt card now answers every prompt those rows can read (§5). Its one server
+change is additive: `agent_turns` answers each turn's `steps` as well, so an
+answered prompt stays in the conversation (§5, "Answered prompts stay in the
+conversation"). It adds no row.
 
 **The ask.** "Some users find the terminal-style view too challenging to use.
 Early feedback on the worktrees-ios UI has been good, so its chat style is a
