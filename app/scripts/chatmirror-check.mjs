@@ -317,6 +317,15 @@ const generic = Object.entries(samples).filter(([, err]) => C.attachWords(err, "
 if (generic.length) fail(`attachWords has no words of its own for ${generic.join(", ")}`);
 else ok(`attachWords has words for every token (${Object.keys(samples).length})`);
 if (!C.attachWords(samples.type, "x.heic").line.includes("HEIC") || C.attachWords(samples.type, "x").line.includes("accepted:")) fail("attachWords does not name what the bytes were, or keeps the host's `(accepted: …)`");
+// OWASP M1: a text file with a hidden or control character is refused by the
+// host alone (no client copy of the set), and the words keep its code point.
+const hiddenWhat = /err_type\(&format!\("(text with a hidden or control character, U\+)\{:04X\}"/.exec(attach)?.[1];
+if (!hiddenWhat) fail("attach.rs no longer refuses `text with a hidden or control character, U+…` as an attach-type");
+else {
+  const w = C.attachWords(`${C.ATTACH_ERR.type}: ${hiddenWhat}202E (${accepted})`, "notes.txt").line;
+  if (!w.includes("text with a hidden or control character, U+202E") || w.includes("accepted:")) fail(`attachWords loses the hidden character's words: ${JSON.stringify(w)}`);
+  else ok("a text file's hidden or control character is refused by the host, and the words name it");
+}
 // The line, as (main) fixed it for both clients.
 const P1 = ".worktrees-attachments/20261101-1f3a9c2e5b7d0a46.png";
 const P2 = ".worktrees-attachments/20261101-77b0d4e1aa000000.pdf";
