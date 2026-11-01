@@ -1609,6 +1609,9 @@ function mockFacts(p: any) {
 
 type Args = Record<string, any>;
 async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
+  // `?agentinterrupt=old`: a host from before the row, which serve's dispatch
+  // answers `unknown command: <cmd>` (the remote door passes it on unchanged).
+  if (cmd === "agent_interrupt" && new URLSearchParams(location.search).get("agentinterrupt") === "old") throw `unknown command: ${cmd}`;
   switch (cmd) {
     case "list_workspace":
       await sleep(mockListDelayMs);
@@ -3829,6 +3832,35 @@ Phase 3: Frontend pane and mock harness
       st.screen = sc.review ? sc.review(labels) : null;
       st.gen++;
       return { answered: true, confirmed: true, harness: mockHarnessAt(mockPlacePath(args.repo, args.slug)), session: mockAgentSession(args.slug), choices: want, labels };
+    }
+    // A stop (`agents::agent_interrupt`): ONE Esc into a place the activity
+    // push shows busy, refused as the host refuses. `?agentinterrupt=` forces
+    // an answer: `ok` (stopped; the place leaves the busy set until the
+    // cycle moves), `notbusy`, `prompt`, `draft`, `unconfirmed` (pressed, not
+    // seen to stop), `unsupported` (pi's refusal); `old` is a host without
+    // the row (`mockInvoke`'s head).
+    case "agent_interrupt": {
+      const path = mockPlacePath(args.repo, args.slug);
+      const harness = mockHarnessAt(path);
+      const mode = new URLSearchParams(location.search).get("agentinterrupt");
+      if (mode === "unsupported" || (!mode && (harness === "pi" || harness === "kimi"))) {
+        throw `agent_interrupt stops Claude's and Codex's turns; ${harness === "kimi" ? "Kimi" : "pi"}'s cannot be stopped from here yet`;
+      }
+      if (mode === "prompt" || (!mode && mockPromptUp(args.repo, args.slug))) throw "the agent is waiting on a prompt: answer it with agent_answer";
+      if (mode === "draft") throw "the agent's prompt has unsent text in it (someone is typing there), which hides whether a turn is running: stop it at the host";
+      const busy = ACTIVITY_CYCLE[actIdx].busy;
+      if (mode === "notbusy" || (!mode && !busy.includes(path))) throw "the agent is not working on a turn: there is nothing to stop";
+      const session = mockAgentSession(args.slug);
+      if (mode === "unconfirmed") {
+        return { interrupted: false, unconfirmed: true, harness, session, note: "Esc was pressed once, but the turn could not be seen to stop: look at the agent before stopping it again." };
+      }
+      // The turn ends as Claude's does: out of the busy set (the next cycle
+      // step puts back whatever it says), and a done stamp for the chat.
+      setTimeout(() => {
+        emitEvent("sessions:busy", withWaitingBy({ ...ACTIVITY_CYCLE[actIdx], busy: ACTIVITY_CYCLE[actIdx].busy.filter((p) => p !== path) }));
+        emitEvent("sessions:done", { path, epoch: nowSec() });
+      }, 300);
+      return { interrupted: true, harness, session, note: "Stopped: the turn was interrupted." };
     }
     case "agent_turns": {
       const harness = mockHarnessAt(mockPlacePath(args.repo, args.slug));

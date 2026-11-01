@@ -1,0 +1,24 @@
+
+ ▐▛███▛█   Claude Code v2.1.316
+▝▜██████▀  Haiku 5.5 · Claude Max
+ ▝▝   ▝▝   /private/tmp/claude-501/wtint/repo
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+  tmux focus-events off · add 'set -g focus-events on' to ~/.tmux.conf and re…
+────────────────────────────────────────────────────────────────── wtint-probe ─
+❯ Try "refactor <filepath>"
+────────────────────────────────────────────────────────────────────────────────
+  ⏸ manual mode on · ? for shortcuts · ← 1 agent

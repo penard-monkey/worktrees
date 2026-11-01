@@ -7,6 +7,7 @@
 //    `answerWords` and `sendWords`), against `worktrees-api/src/agents.rs`.
 //    A reworded refusal there drops the card's words to the generic "Not
 //    confirmed: …" line, with every Rust test and every tsc run still green.
+//    `stopWords` (the Stop button's, `agent_interrupt`) is held the same way.
 // 2. The composer's line rule (`draftProblem`), against
 //    `harness::typed_line_ok`, the one rule `agent_send`, `agent_answer_text`
 //    and MCP `send` share. The REAL `draftProblem` runs over every code point
@@ -52,7 +53,7 @@ const stubbed = chatSrc
 if (/^import /m.test(stubbed)) { fail("chat.ts gained an import this check does not stub — extend the stubs above"); done(); }
 const js = (await transformWithEsbuild(stubbed, "chat.ts", { loader: "ts", format: "esm" })).code;
 const C = await import("data:text/javascript;base64," + Buffer.from(js).toString("base64"));
-for (const name of ["AGENT_ERR", "draftProblem", "answerWords", "sendWords", "SEND_MAX", "TURNS_MAX"]) {
+for (const name of ["AGENT_ERR", "draftProblem", "answerWords", "sendWords", "stopWords", "SEND_MAX", "TURNS_MAX"]) {
   if (C[name] === undefined) fail(`chat.ts exports no ${name}`);
 }
 if (failed) done();
@@ -131,9 +132,10 @@ const hostSaid = new Set([...apiSaid, ...typedSaid]);
 const CONSTS = {
   changed: "ERR_CHANGED", noChoice: "ERR_NO_CHOICE", promptUp: "ERR_PROMPT_UP", midInput: "ERR_MID_INPUT",
   noComposer: "ERR_NO_COMPOSER", fieldHeld: "ERR_FIELD_HELD", multi: "ERR_MULTI", notMulti: "ERR_NOT_MULTI",
+  notBusy: "ERR_NOT_BUSY", stopDraft: "ERR_STOP_DRAFT",
 };
-const WHOLE = ["noBox"];
-const PREFIXES = ["noLanePrefix", "turnsUnsupportedPrefix"];
+const WHOLE = ["noBox", "noAgent"];
+const PREFIXES = ["noLanePrefix", "turnsUnsupportedPrefix", "stopUnsupportedPrefix"];
 const constOf = (name) => {
   const m = new RegExp(`pub const ${name}: &str = ("(?:[^"\\\\]|\\\\.)*");`).exec(api);
   return m ? rustStrings(m[1])[0] : undefined;
@@ -157,7 +159,7 @@ for (const [key, value] of Object.entries(C.AGENT_ERR)) {
 
 // The patterns the words key on: each `/…/.test(err)` must still match
 // something agents.rs says, and each `err.startsWith("…")` head one.
-for (const fn of ["answerWords", "sendWords"]) {
+for (const fn of ["answerWords", "sendWords", "stopWords"]) {
   const src = body(chatSrc, `export function ${fn}(`);
   if (!src) { fail(`chat.ts has no \`export function ${fn}(\` for this check to read`); continue; }
   const patterns = [...src.matchAll(/\/((?:\\.|[^/\n\\])+)\/([a-z]*)\.test\(err\)/g)].map((m) => new RegExp(m[1], m[2]));

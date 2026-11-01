@@ -4,23 +4,27 @@
 // way back is one click with its scrollback intact (the reading overlay's
 // rule). State and rules are chat.ts; this file draws them.
 //
-// What it is NOT: a terminal. No tool output, no diffs, no slash commands, no
-// Esc. Each of those says so where it would be wanted, and the terminal is
-// named as the place to do it.
+// What it is NOT: a terminal. No tool output, no diffs, no slash commands.
+// Each of those says so where it would be wanted, and the terminal is named
+// as the place to do it. Esc does one terminal thing here, and only that:
+// while the agent works, it stops the turn, as the Stop button beside Send
+// does (`agent_interrupt`, ONE Esc into the agent's pane) — only with focus
+// inside the chat and no dialog, sheet or menu owning the key (useEscape).
 
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import {
   boxesOf, bytes, choiceOpen, clockMs, clockOf, dayLabel, draftProblem, fieldWords, itemsOf, lineDiff, loadPrompt,
   loadTurns, permissionAnswerWords, promptBody, questionAnswerWords, selectChoice, sendAnswer, sendDraft, sendMany,
-  setAnswerText, setBoxText, setDraft, splitAtRule, ticksOf, toggleTick, turnsUnsupported, useChat, SEND_MAX,
-  callsSay, callsWords, foldCalls, underRoot,
+  activityMoved, setAnswerText, setBoxText, setDraft, splitAtRule, stopTurn, ticksOf, toggleTick, turnsUnsupported, useChat,
+  SEND_MAX, callsSay, callsWords, foldCalls, underRoot,
   type AskedStep, type Item, type PromptChoice, type PromptDetail, type ReadablePrompt, type Target, type ToolCall,
 } from "./chat";
 import { HARNESS_LABEL, type Harness } from "./harness";
 import * as Icons from "./icons";
 import { Markdown } from "./markdown";
 import { useDocPathLinks } from "./useDocPathLinks";
+import { escapeDepth } from "./useEscape";
 import "./ChatPane.css";
 
 /** While the agent works, the one visible chat re-reads its turns this often:
@@ -60,7 +64,9 @@ export function ChatPane(props: ChatPaneProps) {
   const agent = HARNESS_LABEL[provider];
   const scrollRef = useRef<HTMLDivElement>(null);
   const prompt = v.prompt.data?.waiting ? v.prompt.data : null;
-  const working = activity === "busy" && !prompt;
+  // Busy by the push, unless a stop was seen to land since it last moved.
+  const busy = activity === "busy" && !v.stopped;
+  const working = busy && !prompt;
 
   // Live: on open, and on every change of this place's state or its finish.
   const liveKey = `${session}|${activity}|${props.doneAt}`;
@@ -78,6 +84,7 @@ export function ChatPane(props: ChatPaneProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [liveKey]);
   const refresh = () => { void loadTurns(target); void loadPrompt(target); };
+  useEffect(() => { activityMoved(path, activity === "busy"); }, [path, activity]);
 
   const { pathLinks, menu } = useDocPathLinks(path, null, props.reloadToken, props.onOpenPath);
   const onLink = useCallback((href: string) => {
@@ -127,10 +134,24 @@ export function ChatPane(props: ChatPaneProps) {
     );
   }
 
+  // Esc stops a running turn, from anywhere in the chat — its field, a
+  // choice, the transcript — and only then: no surface owns the key
+  // (useEscape's stack), the agent is busy, no stop is already in flight.
+  // It then owns the key, so App's own Escape chain does not act on it too.
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key !== "Escape" || e.repeat || e.nativeEvent.isComposing || e.defaultPrevented) return;
+    if (escapeDepth() > 0 || !busy || v.stopping) return;
+    e.preventDefault();
+    e.stopPropagation();
+    void stopTurn(target, agent);
+  };
+
   return (
-    <div className="chat" data-testid="chat">
+    <div className="chat" data-testid="chat" onKeyDown={onKeyDown}>
       <div className="chat-scrollwrap">
-      <div className="chat-scroll" ref={scrollRef}>
+      {/* Focusable by a click (not by Tab): a click in the transcript keeps
+          the keyboard in the chat, so Esc still stops a turn after it. */}
+      <div className="chat-scroll" ref={scrollRef} tabIndex={-1}>
         <div className="chat-col">
           {body}
           {working && (
@@ -164,7 +185,7 @@ export function ChatPane(props: ChatPaneProps) {
       )}
       </div>
       <Composer target={target} agent={agent} waiting={prompt ? (prompt.readable ? "above" : "terminal") : null} paneDraft={props.paneDraft} followUp={v.followUp}
-        onTerminal={props.onTerminal} onRefresh={refresh} loading={v.turns.loading || v.prompt.loading} />
+        busy={busy} onTerminal={props.onTerminal} onRefresh={refresh} loading={v.turns.loading || v.prompt.loading} />
       {menu}
     </div>
   );
@@ -652,6 +673,8 @@ function Composer(props: {
   target: Target; agent: string; waiting: "above" | "terminal" | null; paneDraft: { text: string; queued: boolean } | null;
   /** What to type next, after an answer that hands over to the composer. */
   followUp: string | null;
+  /** The agent is mid-turn (`sessions:busy`): Stop is offered. */
+  busy: boolean;
   onTerminal: () => void; onRefresh: () => void; loading: boolean;
 }) {
   const { target, agent } = props;
@@ -684,10 +707,16 @@ function Composer(props: {
   // Only a line break or a tab is wrong: offer to join, by hand, never silently.
   const joinable = !!problem && /[\n\r\t]/.test(text) && !draftProblem(text.replace(/\s*[\r\n\t]+\s*/g, " ").trim());
 
+  const stop = () => { if (!v.stopping) void stopTurn(target, agent); };
+  const said = v.sendWords ?? v.stopWords;
+
   let line: React.ReactNode;
   let alert = false;
   if (v.sending) line = "Sending…";
+  else if (v.stopping) line = `Stopping ${agent}’s turn…`;
   else if (v.sendWords) { line = v.sendWords.line; alert = true; }
+  // A stop's words: a refusal or an unconfirmed stop is an alert; "Stopped." is not.
+  else if (v.stopWords) { line = v.stopWords.line; alert = !!(v.stopWords.terminal || v.stopWords.prompt); }
   else if (problem) { line = problem; alert = true; }
   else if (props.waiting) line = `Messages can’t be sent while a prompt is waiting. Answer it ${props.waiting === "above" ? "above" : "in the terminal"}.`;
   else if (props.followUp && !text.trim()) line = props.followUp;
@@ -716,6 +745,12 @@ function Composer(props: {
             if (!e.shiftKey && !e.altKey) send();
           }}
           data-testid="chat-field" />
+        {props.busy && (
+          <button className="chat-stop" onClick={stop} disabled={v.stopping} aria-keyshortcuts="Escape"
+            aria-label={`Stop ${agent}’s turn`} title={`Stop ${agent}’s turn (Esc)`} data-testid="chat-stop">
+            {v.stopping ? <span className="chat-spin" aria-hidden="true" /> : <span className="chat-stop-sq" aria-hidden="true" />}
+          </button>
+        )}
         <button className="chat-send" onClick={send} disabled={!canSend} aria-label={`Send to ${agent}`} title={`Send to ${agent}`} data-testid="chat-send">
           {v.sending ? <span className="chat-spin" aria-hidden="true" /> : <span aria-hidden="true">↑</span>}
         </button>
@@ -724,7 +759,7 @@ function Composer(props: {
         <p id={`${ids}-l`} className={"chat-line" + (alert ? " alert" : "")} role={alert ? "alert" : undefined} data-testid="chat-line">
           {line}
           {joinable && !v.sendWords && <> <button className="chat-linkbtn" onClick={() => setDraft(target.path, text.replace(/\s*[\r\n\t]+\s*/g, " ").trim())}>Join into one line</button></>}
-          {v.sendWords?.terminal && <> <button className="chat-linkbtn" onClick={props.onTerminal}>Open the terminal</button></>}
+          {said?.terminal && !v.sending && !v.stopping && <> <button className="chat-linkbtn" onClick={props.onTerminal}>Open the terminal</button></>}
         </p>
         <button className="chat-linkbtn chat-refresh" onClick={props.onRefresh} disabled={props.loading} title="Read the transcript and the prompt again">
           {props.loading ? "Reading…" : "Refresh"}

@@ -1,7 +1,7 @@
 // The agent rows — `agent_prompt`, `agent_answer`, `agent_answer_text`,
-// `agent_answer_many`, `agent_send`, `agent_turns` (iOS MVP §2.4, S6–S11, and
-// feat/actionable-prompts) — say the same thing in the four places that
-// state them:
+// `agent_answer_many`, `agent_send`, `agent_interrupt`, `agent_turns` (iOS
+// MVP §2.4, S6–S11, feat/actionable-prompts and feat/chat-interrupt) — say
+// the same thing in the four places that state them:
 //
 //   node app/scripts/agent-rows-check.mjs      # exits non-zero on failure
 //
@@ -47,6 +47,8 @@ const ROWS = {
   agent_answer_text: "instruct, place(repo, slug)",
   agent_answer_many: "answer, place(repo, slug)",
   agent_send: "instruct, place(repo, slug), session_of(session, repo, slug)",
+  // A stop is one key, Esc, but it drives the agent: `instruct`, like a line.
+  agent_interrupt: "instruct, place(repo, slug)",
   agent_turns: "read, place(repo, slug), opt(session_of(session, repo, slug))",
 };
 const norm = (s) => s.replace(/\s+/g, " ").trim();
