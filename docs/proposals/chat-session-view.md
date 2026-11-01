@@ -240,7 +240,7 @@ for each line), as a sent message's pending bubble does.
 
 | Thing | Why | What the chat does |
 |---|---|---|
-| Tool output and diffs | `agent_turns` carries tool **names** only | Chips under the reply; the top line names the terminal. A path in a reply opens the file in the dock |
+| Tool output and diffs | `agent_turns` carries each call's name, one-line input and whether it failed (§8), never its output | A row per call under the reply; the top line names the terminal. A path in a reply opens the file in the dock |
 | Slash commands | `typed_line_ok` refuses a leading `/`, on purpose | The refusal says "run in the terminal" |
 | Esc / interrupt | No row presses Esc (§8) | Not offered |
 | Free text the rows cannot type (kimi's fields: `host_only: text`, no `text`) | No row fills them | The choice is disabled and names the terminal. Claude's and Codex's fields and notes are answered on the card (§5) |
@@ -292,7 +292,7 @@ for each line), as a sent message's pending bubble does.
 |---|---|---|
 | **A `turns:changed` event** per place (or `agent_turns` with `since`) | Removes the busy poll; a running turn shows as it happens | No updates mid-turn |
 | **Paging:** `agent_turns` with `before` | A conversation longer than 20 turns, or 64 KiB | "Older turns are on the host" |
-| **Tool-call summaries:** each tool's one-line input (the Bash command, the file path) and outcome | Chips that say *what* ran, not only that something did; the most-wanted piece of the terminal. A call a person was ASKED about already carries its line (`steps`' `summary`) | Names only |
+| **Tool-call summaries — BUILT** (`feat/chat-tool-summaries`, 2026-11-01): a `tool` step carries `summary` (Claude: the command, the file, Grep's `<pattern> in <path>`, Glob, WebSearch, Agent/Task's description, the Skill, "N items"; Codex 0.160.1's code-mode `exec`: its `cmd` literal or its patch's files, else the `CommandExecution` event's argv; never an MCP tool's) and `failed: true` (Claude's `is_error`; Codex's `Script failed`, `aborted by user`, or a failed `CommandExecution`), control and invisible characters removed, the oldest summaries shed first to keep 64 KiB. The chat draws a row per call (the line in monospace, cut to one row, root stripped, whole in the title; a failure as a dot AND "failed"), three then "+N more · M failed"; an older host keeps the name chips. Mock: `?turns=tools` | Chips that say *what* ran, not only that something did; the most-wanted piece of the terminal | Names only |
 | **A streaming partial turn**: the reply so far, marked incomplete | Only with the event above; until then the poll shows each finished message | Nothing mid-turn |
 | **`agent_interrupt`** (Esc into the lane's pane, `instruct`-class) | Stopping a runaway turn without the terminal | The terminal on the host |
 | **Multi-line sends**: `\n` allowed for harnesses verified to take one bracketed paste, confirmed by "[Pasted text +N lines]" | Pasting a stack trace or a list | One line (`view-session.md` "Why a message is one line" has the design) |
