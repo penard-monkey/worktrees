@@ -61,6 +61,9 @@ export type ChatPaneProps = {
   doneAt: number;
   /** `sessions:drafts`: text typed in the terminal and never sent. */
   paneDraft: { text: string; queued: boolean } | null;
+  /** Settings' `ui_rem`: it moves the message box's font and not its width,
+   *  so no resize tells the box to fit its text again; this does. */
+  uiRem: number;
   /** The way back. */
   onTerminal: () => void;
   /** A path in a reply opens in the dock. */
@@ -239,7 +242,7 @@ export function ChatPane(props: ChatPaneProps) {
       )}
       </div>
       <Composer target={target} agent={agent} fieldRef={fieldRef} waiting={prompt ? (prompt.readable ? "above" : "terminal") : null} paneDraft={props.paneDraft} followUp={v.followUp}
-        busy={busy} onTerminal={props.onTerminal} onRefresh={refresh} loading={v.turns.loading || v.prompt.loading} />
+        busy={busy} uiRem={props.uiRem} onTerminal={props.onTerminal} onRefresh={refresh} loading={v.turns.loading || v.prompt.loading} />
       {menu}
     </div>
   );
@@ -865,6 +868,8 @@ function Composer(props: {
   followUp: string | null;
   /** The agent is mid-turn (`sessions:busy`): Stop is offered. */
   busy: boolean;
+  /** Settings' `ui_rem` (ChatPane's): a fit trigger that moves with the font. */
+  uiRem: number;
   onTerminal: () => void; onRefresh: () => void; loading: boolean;
 }) {
   const { target, agent } = props;
@@ -892,6 +897,9 @@ function Composer(props: {
     const el = field.current;
     // Hidden (display: none): nothing to measure; the observer refits it on show.
     if (!el || el.clientWidth === 0) return;
+    // Measured with no scroll bar, so the over-the-cap call is made at the
+    // full width whatever the last fit decided (a classic bar narrows it).
+    el.style.overflowY = "hidden";
     el.style.height = "auto";
     const cs = getComputedStyle(el);
     const line = parseFloat(cs.lineHeight) || 20;
@@ -902,7 +910,9 @@ function Composer(props: {
     el.style.overflowY = over ? "auto" : "hidden";
     el.style.height = `${Math.ceil(Math.min(el.scrollHeight, cap) + border)}px`;
   }, [field]);
-  useLayoutEffect(fit, [text, fit]);
+  // The UI size moves the font, not the width (App writes `--ui-rem` before
+  // this render), so it is a trigger of its own.
+  useLayoutEffect(fit, [text, props.uiRem, fit]);
   // A width change rewraps the text without touching it: the window, the dock,
   // the 560px gutter switch. Refit then, and only then (a height change is ours).
   useEffect(() => {

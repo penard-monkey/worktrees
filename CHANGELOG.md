@@ -12,7 +12,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   clipped "Message Claude", and covered the "One line · Enter sends" row.
   The box now scrolls only once a message passes six lines, and it fits its
   text again when the chat gets wider or narrower, such as when the window
-  is resized or the dock opens.
+  is resized or the dock opens, and when the UI font size changes.
 
 ## [0.45.1] - 2026-11-01
 
