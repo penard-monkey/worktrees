@@ -287,7 +287,11 @@ for each line), as a sent message's pending bubble does.
 - ~~persisting the choice~~: done. Each place keeps its view in `place_panels` (`agent_view`, absent = Terminal, no global), across switches and relaunches, and keeps it while Chat view is off (`placeview-check.mjs`);
 - ~~a drift check holding `chat.ts`'s copy of `agents.rs`'s strings and
   `typed_line_ok`'s rule~~: done, in its own `chatmirror-check.mjs`;
-- the iOS "New messages" announcement for VoiceOver;
+- ~~the iOS "New messages" announcement for VoiceOver~~: done on
+  `feat/chat-voiceover`. One polite, atomic `.sr-only` region says "1 new
+  message" / "N new messages" and "Claude needs input" (`chat.ts` `hear`,
+  held by `chat-announce-check.mjs`; `__mock.agentReply` drives it). Checked
+  at the DOM in Chromium and WebKit, not yet heard with VoiceOver;
 - keyboard answers (1/2/3);
 - a link's domain shown after its text.
 

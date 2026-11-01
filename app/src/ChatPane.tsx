@@ -20,6 +20,8 @@ import {
   SEND_MAX, callsSay, callsWords, foldCalls, underRoot,
   type AskedStep, type Item, type PromptChoice, type PromptDetail, type ReadablePrompt, type Target, type ToolCall,
 } from "./chat";
+// What a screen reader is told (VoiceOver): its own line, so the lanes' imports merge apart.
+import { announcement, gather, hear, promptKeyOf, type Bundle, type ChatView, type Heard } from "./chat";
 import { HARNESS_LABEL, type Harness } from "./harness";
 import * as Icons from "./icons";
 import { Markdown } from "./markdown";
@@ -95,8 +97,9 @@ export function ChatPane(props: ChatPaneProps) {
   const data = v.turns.data;
   const items = data ? itemsOf(data.turns, v.answered, v.pending) : [];
   const replies = items.filter((it) => it.k === "reply").length;
-  const promptKey = prompt ? (prompt.readable ? prompt.fingerprint : `unreadable|${(prompt.lines ?? []).join("\n")}`) : null;
+  const promptKey = promptKeyOf(prompt);
   const { toBottom, fresh, dismiss } = useStickToBottom(scrollRef, items.length, replies, !!data, promptKey);
+  const said = useAnnounce(target, v, items, agent);
 
   let body: React.ReactNode;
   if (!data) {
@@ -148,6 +151,7 @@ export function ChatPane(props: ChatPaneProps) {
 
   return (
     <div className="chat" data-testid="chat" onKeyDown={onKeyDown}>
+      <div className="sr-only" aria-live="polite" aria-atomic="true" data-testid="chat-announce"><span key={said.n}>{said.text}</span></div>
       <div className="chat-scrollwrap">
       {/* Focusable by a click (not by Tab): a click in the transcript keeps
           the keyboard in the chat, so Esc still stops a turn after it. */}
@@ -189,6 +193,55 @@ export function ChatPane(props: ChatPaneProps) {
       {menu}
     </div>
   );
+}
+
+/** What a screen reader is told while this chat is shown (chat.ts `hear`):
+ *  new replies and a prompt appearing, gathered for `ANNOUNCE_MS` and said
+ *  once into the one polite region, which is keyed so the same words twice
+ *  are said twice. The chat is mounted only while it is shown, so mounting is
+ *  being shown; the window hiding drops what is gathered, and coming back
+ *  reads the place again and counts from that read, as a place switch does. */
+function useAnnounce(target: Target, v: ChatView, items: Item[], agent: string) {
+  const shownAt = useRef(Date.now());
+  const heard = useRef<Heard | null>(null);
+  const bundle = useRef<Bundle | null>(null);
+  const timer = useRef<number | undefined>(undefined);
+  // Read when the timer fires or the window comes back, not when they were set.
+  const latest = useRef({ target, agent });
+  latest.current = { target, agent };
+  const [said, setSaid] = useState({ text: "", n: 0 });
+  const visible = () => document.visibilityState === "visible";
+  const drop = () => { window.clearTimeout(timer.current); timer.current = undefined; bundle.current = null; };
+  const flush = () => {
+    timer.current = undefined;
+    const b = bundle.current;
+    bundle.current = null;
+    const text = b && announcement(b, latest.current.agent, heard.current?.prompt?.key ?? null, visible());
+    if (text) setSaid((s) => ({ text, n: s.n + 1 }));
+  };
+  useEffect(() => {
+    const r = hear(heard.current, { items, turnsAt: v.turns.at, prompt: v.prompt.data, promptAt: v.prompt.at, answering: v.answering }, shownAt.current, visible());
+    heard.current = r.heard;
+    if (!r.news) return;
+    const now = Date.now();
+    bundle.current = gather(bundle.current, r.news, now);
+    if (timer.current === undefined) timer.current = window.setTimeout(flush, bundle.current.due - now);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- a read landing, or an answer starting or ending, is the trigger
+  }, [v.turns.data, v.turns.at, v.prompt.data, v.prompt.at, v.answering]);
+  useEffect(() => {
+    const f = () => {
+      drop();
+      if (!visible()) return;
+      shownAt.current = Date.now();
+      heard.current = null;
+      void loadTurns(latest.current.target);
+      void loadPrompt(latest.current.target);
+    };
+    document.addEventListener("visibilitychange", f);
+    return () => { document.removeEventListener("visibilitychange", f); drop(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  return said;
 }
 
 /** Open at the newest; follow new content only when already at the bottom,

@@ -517,6 +517,108 @@ export function lineDiff(a: string, b: string): DiffLine[] {
   return out;
 }
 
+// ── what a screen reader is told (VoiceOver) ────────────────────────────────
+//
+// The iOS app's View session announces the agent's new replies politely,
+// never by moving focus ("1 new message", `ViewSession.tsx`). This chat does
+// the same, and also says when the agent starts waiting on a prompt, in the
+// iOS status's spoken words ("Claude needs input"). Never announced: what was
+// there when the chat was shown, the person's own sends and answers and the
+// transcript's echo of them, tool calls, and a re-read that changes nothing.
+// The reply's own text is never said: the conversation is one move away.
+
+/** How the card tells one prompt from the next: a readable one by its
+ *  fingerprint, an unreadable one (which has none) by the rows it shows. */
+export function promptKeyOf(p: AgentPrompt | null): string | null {
+  if (!p || !p.waiting) return null;
+  return p.readable ? p.fingerprint : `unreadable|${(p.lines ?? []).join("\n")}`;
+}
+
+/** What the chat holds now, as far as a screen reader is concerned. */
+export type ChatNow = {
+  items: Item[];
+  /** When the turns shown were read (`turns.at`), null before any. */
+  turnsAt: number | null;
+  /** The prompt read (`prompt.data`), and when (`prompt.at`). */
+  prompt: AgentPrompt | null;
+  promptAt: number | null;
+  /** An answer of this window's is in flight: a prompt that moves under it
+   *  (a multi-select's box filled) is the person's own doing. */
+  answering: boolean;
+};
+/** What has been accounted for: each reply by its time and words, counted (two
+ *  alike are two), and the prompt's key. A part is null until a read that
+ *  landed after the chat was shown: what the store held before is history. */
+export type Heard = { replies: Map<string, number> | null; prompt: { key: string | null } | null };
+/** What is new since the last `Heard`. */
+export type News = { replies: number; prompt: { key: string; readable: boolean } | null };
+
+/** The agent's replies that say something: a tool call drawn on its own (a
+ *  reply item with no words) is a chip, never a message. */
+function repliesOf(items: Item[]): Map<string, number> {
+  const m = new Map<string, number>();
+  for (const it of items) {
+    if (it.k !== "reply" || !it.text.trim()) continue;
+    const id = `${it.at ?? ""}\n${it.text}`;
+    m.set(id, (m.get(id) ?? 0) + 1);
+  }
+  return m;
+}
+
+/** The decision: given what was heard, the chat now, when it was shown, and
+ *  whether the window is visible, what is new (null for nothing) and what is
+ *  heard from here. Replies are compared as a count per reply, so the window
+ *  sliding past its oldest turn, a pending message settling into the
+ *  transcript, an answer's echo, a tool joining a reply or the same transcript
+ *  read again add nothing; a prompt is news when its key differs from the last
+ *  one read, as the card scrolls to it, unless an answer from here is in
+ *  flight. Hidden, nothing is news, and what was read is heard all the same,
+ *  so nothing is said for it later. */
+export function hear(prev: Heard | null, now: ChatNow, shownAt: number, visible: boolean): { heard: Heard; news: News | null } {
+  const turnsFresh = now.turnsAt !== null && now.turnsAt >= shownAt;
+  const promptFresh = now.promptAt !== null && now.promptAt >= shownAt;
+  const replies = turnsFresh ? repliesOf(now.items) : null;
+  const key = promptKeyOf(now.prompt);
+  const heard: Heard = { replies, prompt: promptFresh ? { key } : null };
+  let fresh = 0;
+  if (replies && prev?.replies) {
+    for (const [id, n] of replies) fresh += Math.max(0, n - (prev.replies.get(id) ?? 0));
+  }
+  const p = promptFresh && prev?.prompt && key !== null && key !== prev.prompt.key && !now.answering && now.prompt?.waiting
+    ? { key, readable: now.prompt.readable }
+    : null;
+  if (!visible || (!fresh && !p)) return { heard, news: null };
+  return { heard, news: { replies: fresh, prompt: p } };
+}
+
+/** News inside this long of the first is said once, when it ends. A change
+ *  of the place's state reads the turns and the prompt together, and the two
+ *  land apart (a reply written just before a prompt, then the prompt); a send
+ *  or an answer reads both again. 1.5 s takes those in, slow reads over a
+ *  paired host included, and stays under the host's 3 s activity poll, so
+ *  news from two of its ticks is two announcements. The window opens with the
+ *  first news and never slides, so a steady trickle cannot hold it open. */
+export const ANNOUNCE_MS = 1500;
+
+/** News waiting to be said, due when its window ends. */
+export type Bundle = { due: number; replies: number; prompt: { key: string; readable: boolean } | null };
+
+/** Add news to the bundle (a new one opens at `now`). */
+export function gather(b: Bundle | null, news: News, now: number): Bundle {
+  return { due: b ? b.due : now + ANNOUNCE_MS, replies: (b?.replies ?? 0) + news.replies, prompt: news.prompt ?? b?.prompt ?? null };
+}
+
+/** What is said when a bundle falls due: the iOS app's words for replies, and
+ *  for a prompt its spoken status, only if that prompt is still the one up
+ *  (`promptNow`). Null for nothing, and always when the window is hidden. */
+export function announcement(b: Bundle, agent: string, promptNow: string | null, visible: boolean): string | null {
+  if (!visible) return null;
+  const parts: string[] = [];
+  if (b.replies > 0) parts.push(b.replies === 1 ? "1 new message" : `${b.replies} new messages`);
+  if (b.prompt && b.prompt.key === promptNow) parts.push(b.prompt.readable ? `${agent} needs input` : `${agent} needs input in the terminal`);
+  return parts.length ? parts.join(". ") : null;
+}
+
 // ── the store: one view per place, keyed by its path ────────────────────────
 
 export type Target = { repo: string; slug: string; path: string; session: string };
