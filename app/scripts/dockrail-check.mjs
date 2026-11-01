@@ -79,7 +79,9 @@ const settings = fs.readFileSync(SETTINGS, "utf8");
 // `[^;\n]` and not `[^;]`: the DEFAULTS object further down has a `dock_tab:`
 // line of its own, and a class that can cross newlines runs past it to the next
 // `;` dozens of lines below, swallowing the whole literal as a third "union".
-const unions = [...settings.matchAll(/^\s*dock_tab:\s*([^;\n]+);/gm)].map((m) =>
+// `\??` because `PlacePanels`' copy is optional (a record made by the chat
+// view's switch alone has no dock tab): without it that copy stops matching.
+const unions = [...settings.matchAll(/^\s*dock_tab\??:\s*([^;\n]+);/gm)].map((m) =>
   m[1].split("|").map((s) => s.trim().replace(/"/g, "")).sort());
 // TWO: `PlacePanels` and `Settings`. Not "at least two" — a third copy is a
 // third place to forget, and this check is where that is noticed.

@@ -284,7 +284,7 @@ for each line), as a sent message's pending bubble does.
   tint that carries the same meaning.
 
 **Not done:**
-- persisting the choice;
+- ~~persisting the choice~~: done. Each place keeps its view in `place_panels` (`agent_view`, absent = Terminal, no global), across switches and relaunches, and keeps it while Chat view is off (`placeview-check.mjs`);
 - a drift check holding `chat.ts`'s copy of `agents.rs`'s strings and
   `typed_line_ok`'s rule (`agent-rows-check.mjs` is the place for it);
 - the iOS "New messages" announcement for VoiceOver;
