@@ -1,0 +1,45 @@
+
+[38;5;246m⏺ [39mUser answered Claude's questions:
+[38;5;246m  ⎿  · On a place's screen the banner says 1 place needs input, which reads as if it means this place. What should it say instead? → (notes only)[39m
+
+[38;5;231m⏺[39m No option was selected this time. You left a note, "t1 note", but its text didn't come through, so I don't know what it says. If it matters, please send the
+  note text again. I haven't changed anything.
+
+[38;5;246m✻[39m [38;5;246mCooked for 3s · done 12:56 PM[39m
+
+[38;5;246m[48;5;237m❯ [38;5;231mAsk me the Banner copy question again with AskUserQuestion, exactly as the first time (same header, question, options, descriptions, previews). Do nothing [39m
+  [38;5;231melse.[39m
+
+[38;5;246m[49m⏺ [39mUser answered Claude's questions:
+[38;5;246m  ⎿  · On a place's screen the banner says 1 place needs input, which reads as if it means this place. What should it say instead? → Another place needs input [39m
+     [38;5;246m(Recommended)[39m
+
+[38;5;231m⏺[39m You picked [1m"Another place needs input (Recommended)"[0m. The note "t2 note" came through without its text, so I'm not sure what it changes.
+
+  The copy would be:
+
+  - One place: Another place needs input: [1mdemo (main)[0m
+  - Several places: 2 other places need input
+
+  I haven't changed any code. Say the word and I'll apply it, and send the note text if it matters.
+
+[38;5;246m✻[39m [38;5;246mWorked for 4s · done 12:57 PM[39m
+
+[38;5;246m[48;5;237m❯ [38;5;231mUse AskUserQuestion once, ONE question with multiSelect true. header "Toppings", question "Which toppings?", options "Cheese" (description "C.", preview [39m
+  [38;5;231m"CHEESE\n  yellow"), "Olives" (description "O.", preview "OLIVES\n  black"). Do nothing else.[39m
+[38;5;246m[49m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+← [38;5;16m[48;5;153m ☐ Toppings [39m[49m ✔ Submit  →
+
+[1m[38;5;231mWhich toppings?[0m
+
+[38;5;153m❯[39m [38;5;246m1.[39m [ ] [38;5;153mCheese[39m
+         [38;5;246mC.[39m
+  [38;5;246m2.[39m [ ] Olives
+         [38;5;246mO.[39m
+  [38;5;246m3. [39m[ ] [38;5;246mType something[39m
+     [1mSubmit[0m
+[38;5;246m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  4. Chat about this
+
+[38;5;246mEnter to select · ↑/↓ to navigate · Esc to cancel[39m
+[38;5;244m──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── wtqp-lane ─

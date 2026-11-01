@@ -201,6 +201,7 @@ After the answer:
 | `…did not open…` | The choice’s text field didn’t open, so nothing was typed. Answer it in the terminal. |
 | `…could not be seen there…` | The text was typed into the field but couldn’t be seen there, so nothing was sent. Look at the terminal before answering again. |
 | `name at least one box…` / `choice N is the free-text box…` | Tick at least one box. / Type your own answer in its box before sending it. |
+| `someone has this question's notes field open…` | Someone is typing a note into this question in the terminal. Answer it there. |
 | any other `… — answer it at the host` | Nothing was answered: <what serve said>. Answer it in the terminal. |
 
 A choice never carries over to a new prompt: a fingerprint that moves clears
@@ -222,6 +223,26 @@ resumed “…” (2 hours ago · main · 1.2MB)", which stays, since no transcr
 records the pick, and the turns are read again after 0.5, 1.5 and 3.5 s
 until Claude has written its session. Digits and Enter work as on every
 card, and the announcer says "Claude needs input".
+
+**Claude's question with previews** (`previews`, fix/chat-question-preview):
+an AskUserQuestion whose options carry a `preview` is drawn by Claude as
+two columns, the options on the left and ONE option's preview in a box
+beside them, and serve reads it as a question whose options each carry
+`preview`. `previews: "all"` means every option's came from Claude's own
+call (its PermissionRequest hook fires for AskUserQuestion) and agrees with
+the screen; `"shown"` means only the one the terminal shows is known, its
+`preview_hidden` rows cut off there. The card shows the selected option's
+preview in a monospace block that keeps its spacing and scrolls rather than
+wraps, beside the choices on a wide card and right under the selected
+choice on a narrow one (`.chat-pv-wrap` is the container, 620 px); with
+nothing selected, the highlighted option's. With `"shown"` it shows the one
+it has, named, and says the terminal shows one at a time. The question has
+ONE notes field (`notes`), which every option takes as an amend: "Takes a
+note", sent with `agent_answer_text`, which moves onto the option, opens
+the field with `n`, pastes, and sends it from there. A note someone typed in
+the terminal (`notes.text`) goes with whichever answer is sent, and the card
+says so; while the field is open there (`notes.open`) every choice is
+disabled. "Chat about this" is the last choice, plain.
 
 **An unreadable prompt** (`readable: false`) shows the bottom of the agent's
 screen that serve sends with it (`lines`), says this app can’t answer it, and
@@ -280,7 +301,7 @@ for each line), as a sent message's pending bubble does.
 | `app/src/ChatPane.css` | Plain CSS on `tokens.css` |
 | `app/src/App.tsx` | The switch in `.agent-label`, the terminal wrapped in a hidden, `inert` `.agent-term`, and the activity, done stamp and pane draft passed in |
 | `app/src/settings.ts`, `SettingsSheet.tsx` | `chat_view` (default off), Behavior → Chat view; each place's `agent_view` (`agentViewFor`, `withAgentView`) |
-| `app/src/mock/install.ts` | `?turns=answered` (a transcript whose prompts were answered, as `steps`; a mock answer lands in the transcript 1.5 s later), per-harness turns, the pi/kimi refusal, `?agentsend=mid\|nocomposer\|unconfirmed`, `?agentprompt=permission\|question\|multi\|plan\|tall\|unreadable\|resume\|off` (`,waiting` for waiting places only; a Codex place gets Codex's approval; `resume` is Claude's resume picker, four conversations shown and three more in the terminal, with `agent_turns` failing as before a session exists until a pick, and for half a second after it), `?agentanswer=unseen`, `?activity=<n>` |
+| `app/src/mock/install.ts` | `?turns=answered` (a transcript whose prompts were answered, as `steps`; a mock answer lands in the transcript 1.5 s later), per-harness turns, the pi/kimi refusal, `?agentsend=mid\|nocomposer\|unconfirmed`, `?agentprompt=permission\|question\|multi\|plan\|tall\|unreadable\|resume\|preview\|preview-shown\|preview-note\|off` (`,waiting` for waiting places only; a Codex place gets Codex's approval; `resume` is Claude's resume picker, four conversations shown and three more in the terminal, with `agent_turns` failing as before a session exists until a pick, and for half a second after it; `preview` is Claude's question with a preview per option, every one known, `preview-shown` the same at 80×24 with only the terminal's one, cut, and `preview-note` one with a note typed in the terminal), `?agentanswer=unseen`, `?activity=<n>` |
 
 **Checked:**
 - **Contrast**, in all six themes, by the browser's resolved colours. Body

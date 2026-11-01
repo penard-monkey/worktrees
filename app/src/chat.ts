@@ -49,11 +49,17 @@ export type AskedStep = Extract<Step, { kind: "question" | "permission" | "plan"
 export type AgentTurns = { harness?: string; session?: string; turns: Turn[]; more: boolean; note: string; reason?: string };
 /** `prompt::Choice`. `checked` marks a multi-select's box; `text` a choice
  *  that takes free text: `field` IS a text field, `amend` takes an optional
- *  note. `host_only: "text"` on a field means it is empty. */
+ *  note. `host_only: "text"` on a field means it is empty. `preview` is what
+ *  Claude shows beside an option of a `previews` question, its lines and
+ *  spacing kept; `preview_hidden` rows of it are cut off in the terminal. */
 export type PromptChoice = {
   n: number; label: string; more?: string[]; highlighted: boolean;
   host_only?: "widens" | "text"; checked?: boolean; text?: "field" | "amend";
+  preview?: string; preview_hidden?: number;
 };
+/** A `previews` question's ONE notes field (`prompt::Notes`): `open` while
+ *  it has the keyboard in the terminal, `text` once someone typed there. */
+export type PromptNotes = { open: boolean; text?: string };
 /** What a prompt taller than the pane asks, whole: Claude's own tool call
  *  (its PermissionRequest hook) or a plan's own file. */
 export type PromptDetail = { tool: string; input: Record<string, unknown>; from: "hook" | "plan-file" };
@@ -65,6 +71,9 @@ export type AgentPrompt =
     /** Claude's own resume picker (`claude -r`): a question whose choices are
      *  the conversations on screen; `hidden` more are in the terminal's list. */
     picker?: "resume"; hidden?: number;
+    /** Claude's question with a preview per option: `all` (every option's,
+     *  from Claude's own call) or `shown` (only the one the terminal shows). */
+    previews?: "all" | "shown"; notes?: PromptNotes;
   }
   | { waiting: true; readable: false; harness: string | null; session: string | null; reason: string; lines?: string[]; note?: string };
 export type ReadablePrompt = Extract<AgentPrompt, { readable: true }>;
@@ -86,6 +95,7 @@ export const AGENT_ERR = {
   fieldHeld: "that choice's text field holds someone's text: answer it at the host, or choose it as it reads with agent_answer",
   multi: "a multi-select: tick its boxes with agent_answer_many",
   notMulti: "not a multi-select: answer it with agent_answer",
+  notesOpen: "someone has this question's notes field open in the terminal: answer it at the host",
   noBox: "name at least one box to tick",
   /** `agent_send` / `agent_turns` naming a session no agent of the place runs in. */
   noLanePrefix: "no agent this place launched is running in ",
@@ -162,6 +172,7 @@ export function answerWords(err: string): Words {
   }
   if (err === AGENT_ERR.multi) return { line: "This prompt is a multi-select: tick its boxes, then send them.", prompt: true };
   if (err === AGENT_ERR.notMulti) return { line: "This prompt is no longer a multi-select. It has been read again.", prompt: true };
+  if (err === AGENT_ERR.notesOpen) return { line: "Someone is typing a note into this question in the terminal. Answer it there.", terminal: true, prompt: true };
   if (err === AGENT_ERR.noBox) return { line: "Tick at least one box." };
   if (/ takes no text: /.test(err)) return { line: "This choice takes no note. Send it without one.", prompt: true };
   if (/ is the free-text box: /.test(err)) return { line: "Type your own answer in its box before sending it." };
@@ -452,6 +463,32 @@ export function choiceOpen(c: PromptChoice): ChoiceWay {
   return { open: true, how };
 }
 
+/** `choiceOpen`, in its prompt: a `previews` question's ONE notes field
+ *  decides for every option. Open in the terminal, someone is typing there
+ *  and the rows refuse every answer; holding their note, it goes with
+ *  whichever choice is sent, and no other note can be added. */
+export function choiceWay(p: ReadablePrompt, c: PromptChoice): ChoiceWay {
+  const way = choiceOpen(c);
+  if (!p.notes) return way;
+  if (p.notes.open) return { open: false, how: "plain", note: "Someone is typing a note in the terminal: answer it there" };
+  return p.notes.text && way.how === "amend" ? { ...way, how: "plain" } : way;
+}
+
+/** The preview a `previews` card shows, and for which choice: the selected
+ *  option's when every one is known (none when it has none), else the
+ *  highlighted option's, else the first's; with the screen's alone, the one
+ *  the terminal shows, whichever is selected. */
+export function previewOf(p: ReadablePrompt, selected: number | null): { c: PromptChoice; known: "all" | "shown" } | null {
+  if (!p.previews) return null;
+  const options = p.choices.filter((c) => c.text === "amend" || c.preview !== undefined);
+  if (p.previews === "shown") {
+    const c = options.find((x) => x.preview !== undefined);
+    return c ? { c, known: "shown" } : null;
+  }
+  const c = options.find((x) => x.n === selected) ?? (selected === null ? options.find((x) => x.highlighted) ?? options[0] : undefined);
+  return c ? { c, known: "all" } : null;
+}
+
 /** What a text field or a note on choice `c` asks for, as a placeholder. */
 export function fieldWords(c: PromptChoice, harness: string, agent: string): string {
   if (c.text === "amend") {
@@ -579,10 +616,10 @@ export function cardKey(e: CardKeyEvent, s: CardKeyState, p: ReadablePrompt): Ca
   const n = Number(e.key);
   const c = p.choices.find((x) => x.n === n);
   // A choice the card draws disabled is not there for a key either.
-  if (!c || !choiceOpen(c).open) return null;
+  if (!c || !choiceWay(p, c).open) return null;
   if (p.multi && c.checked !== undefined) return { act: "tick", n };
   const on = s.selected !== n;
-  return { act: "select", n, choice: on ? n : null, field: on && choiceOpen(c).how !== "plain" };
+  return { act: "select", n, choice: on ? n : null, field: on && choiceWay(p, c).how !== "plain" };
 }
 
 /** Whether a card takes the keyboard as it appears: from the chat's own
@@ -598,7 +635,7 @@ export function cardTakesFocus(a: { fingerprint: string | null; seen: string | n
 /** The digits that choose on this card, as its hint says them: "1–3", "1", or
  *  null when no choice is open. */
 export function cardDigits(p: ReadablePrompt): string | null {
-  const ns = p.choices.filter((c) => c.n >= 1 && c.n <= 9 && choiceOpen(c).open).map((c) => c.n);
+  const ns = p.choices.filter((c) => c.n >= 1 && c.n <= 9 && choiceWay(p, c).open).map((c) => c.n);
   if (!ns.length) return null;
   const lo = Math.min(...ns);
   const hi = Math.max(...ns);
@@ -990,7 +1027,7 @@ export async function sendAnswer(t: Target, agent: string): Promise<void> {
   if (v.answering || v.selected === null || !d || !d.waiting || !d.readable) return;
   const c = d.choices.find((x) => x.n === v.selected);
   if (!c) return;
-  const way = choiceOpen(c);
+  const way = choiceWay(d, c);
   const text = way.how === "plain" ? "" : v.answerText;
   if (!way.open || (way.how === "field" && !text.trim()) || draftProblem(text, way.how === "field" ? "answer" : "note")) return;
   put(t.path, { answering: true, answerWords: null });

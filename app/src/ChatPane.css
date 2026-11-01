@@ -312,3 +312,30 @@
   .chat-composer { padding-left: var(--s2); padding-right: var(--s2); }
   .chat-foot-end { margin-left: 0; }
 }
+
+/* Claude's question with previews (`previews`): the selected option's preview
+   beside the choices on a wide card, under that choice on a narrow one. The
+   wrapper is the container: a query cannot style its own container, and
+   the card's other rules keep asking `.chat`. The preview keeps its spacing
+   and never wraps — a mockup's columns would move — so a wide one scrolls. */
+.chat-pv-wrap { container: chat-pv / inline-size; }
+.chat-pv { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); gap: var(--s3); align-items: start; }
+.chat-pv-box {
+  margin: 0; min-width: 0; padding: var(--s2) var(--s3);
+  background: var(--bg-input); border: 1px solid var(--line); border-radius: var(--r-sm);
+}
+.chat-pv-cap { margin: 0 0 4px; font-size: var(--fs-meta); color: var(--txt-dim); overflow-wrap: anywhere; }
+.chat-pv-label { color: var(--txt-hi); }
+.chat-pv-text {
+  margin: 0; font-family: var(--term-family); font-size: var(--fs-label); line-height: 1.5; color: var(--txt-hi);
+  white-space: pre; overflow-x: auto;
+}
+.chat-pv-text:focus-visible { outline: 1px solid var(--accent); outline-offset: 2px; }
+.chat-pv-more { margin: 4px 0 0; font-size: var(--fs-meta); color: var(--txt-dim); }
+.chat-pv-inline { display: none; margin: 0 0 4px calc(var(--s2) + 1.2ch + var(--s2)); }
+.chat-notes { margin: var(--s2) 0 0; overflow-wrap: anywhere; }
+@container chat-pv (max-width: 620px) {
+  .chat-pv { display: block; }
+  .chat-pv-side { display: none; }
+  .chat-pv-inline { display: block; }
+}

@@ -47,6 +47,15 @@
 //! (`Modal::multi`) ticks a box per Enter and sends them from a `Submit`
 //! row that is no choice. [`field`], [`shows`], [`same_but`] and
 //! [`same_form`] are what the answering rows prove each step with.
+//!
+//! **A question with previews** (Claude's AskUserQuestion whose options carry
+//! a `preview`) draws its choices in a left column and ONE option's preview
+//! in a box beside them ([`claude_preview`]): the choices are the left column
+//! alone, the box is that option's [`Choice::preview`], and the question's
+//! one notes field ([`Notes`], opened with `n`) is each option's amend.
+//! Reading presses no key, so the screen gives only the shown preview; Claude's
+//! own call, from its PermissionRequest hook, gives every option's when it
+//! agrees with the screen ([`with_previews`]).
 
 use serde::Serialize;
 
@@ -125,6 +134,63 @@ pub struct Choice {
     /// It takes free text, and how.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<Typing>,
+    /// What Claude shows beside it while it is highlighted, in a box: its
+    /// AskUserQuestion option's `preview`, its lines and inner spacing kept
+    /// (a [`Modal::previews`] question). Read off the screen, its lines are
+    /// the box's rows, which wrap a line wider than the box.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+    /// How many of the box's rows the pane is too short to show (Claude's
+    /// `✂ N lines hidden`): set only on a preview read off the screen, which
+    /// is then the box's head.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview_hidden: Option<u32>,
+}
+
+/// Where a preview question's [`Choice::preview`]s come from.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Previews {
+    /// Every option's, from Claude's own tool call (its PermissionRequest
+    /// hook), which agrees with the screen ([`with_previews`]).
+    All,
+    /// The screen's alone: the box shows ONE option's preview, the one its
+    /// `❯` marks (the highlighted option, or the last one highlighted while
+    /// "Chat about this" has the highlight), and no key is pressed to see
+    /// the others.
+    Shown,
+}
+
+/// The notes field of a Claude preview question: ONE for the question, sent
+/// with whichever choice answers it (`annotations.<question>.notes` in the
+/// transcript), "Chat about this" included.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct Notes {
+    /// It has the keyboard in the terminal (`n` opened it): the arrows do not
+    /// move the highlight then, and Enter sends the question.
+    pub open: bool,
+    /// What it holds; absent while it shows its placeholder.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+/// The preview box as the screen shows it, and what [`with_previews`]
+/// compares Claude's tool call against.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Shown {
+    /// The option whose preview the box shows (its `❯`).
+    of: u32,
+    /// The box's rows, inside its edges; `["No preview available"]` for an
+    /// option with none.
+    rows: Vec<String>,
+    /// `✂ N lines hidden`.
+    hidden: Option<u32>,
+    /// How many options there are ("Chat about this" is the next choice).
+    options: u32,
+    /// The question's header row (`☐ Banner copy`, or the tab bar) and its
+    /// text, the rows joined and Claude's `│` bar left out.
+    header: String,
+    question: String,
 }
 
 /// A prompt on an agent's screen.
@@ -148,6 +214,17 @@ pub struct Modal {
     /// choices; the rest are picked in the terminal.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hidden: Option<u32>,
+    /// A question that shows each option's preview in a box beside its
+    /// choices (Claude's AskUserQuestion with `preview`s), and where its
+    /// choices' `preview`s come from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previews: Option<Previews>,
+    /// That question's notes field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notes: Option<Notes>,
+    /// What the preview box shows.
+    #[serde(skip)]
+    shown: Option<Shown>,
     /// `lines` without the footer, highlight marks blanked — what stays the
     /// same while the highlight moves ([`same_prompt`]). Claude's footer
     /// changes with the highlight (`Esc to cancel · Tab to amend` on "Yes",
@@ -228,6 +305,17 @@ const RESUME_HEAD: &str = "Resume session";
 /// its search field has it.
 const RESUME_FOOT: &str = "Esc to cancel";
 const RESUME_SEARCH_FOOT: &str = "Esc to clear";
+/// The head of a Claude question's key hints, which wrap in a narrow pane.
+const SELECT_FOOT: &str = "Enter to select";
+/// What a preview question's notes row says while its field is closed and
+/// empty, and while it is open and empty (2.1.316).
+const NOTES_ROW: &str = "Notes: ";
+const NOTES_CLOSED: &str = "press n to add notes";
+const NOTES_EMPTY: &str = "Add notes on this design…";
+/// In a preview question's key hints only while its notes field is open.
+const NOTES_OPEN_HINT: &str = "ctrl+g to edit in Vim";
+/// What Claude's preview box says for an option with no preview.
+const NO_PREVIEW: &str = "No preview available";
 /// The most rows [`visible`] returns.
 pub const VISIBLE_MAX: usize = 24;
 
@@ -271,8 +359,8 @@ pub fn claude(screen: &str) -> Option<Modal> {
         return claude_plan(&rows, foot, last, width);
     }
     let foot = rows[last].trim();
-    let (kind, end) = if foot.starts_with("Enter to select") {
-        (Kind::Question, last)
+    let (kind, end) = if let Some(at) = select_footer(&rows, last) {
+        (Kind::Question, at)
     } else if foot.starts_with("Esc to cancel") || foot.starts_with("Enter to confirm") {
         (Kind::Permission, last)
     } else if numbered(&rows[last]).is_some() {
@@ -280,6 +368,16 @@ pub fn claude(screen: &str) -> Option<Modal> {
     } else {
         return None;
     };
+    if kind == Kind::Question && end <= last {
+        // A question with previews: a box beside its choices. Read whole or
+        // not at all — never by the reader below, which would take the box's
+        // rows for the choices' own.
+        match claude_preview(&rows, end, last, width) {
+            Layout::Preview(m) => return Some(*m),
+            Layout::Broken => return None,
+            Layout::Plain => {}
+        }
+    }
     let top = (0..end).rev().find(|&i| full_rule(&rows[i], width) && !next_is_choice(&rows, i, end))?;
     // A question's choices are all a device's, so "question" is decided by
     // what CLAUDE draws, never by the footer alone: AskUserQuestion heads its
@@ -384,6 +482,286 @@ fn plan_footer(rows: &[String], last: usize) -> Option<(usize, String)> {
     }
     let first = rows[at].trim()[head.len()..].trim();
     Some((at, std::iter::once(first).chain(rows[at + 1..=last].iter().map(|r| r.trim())).collect()))
+}
+
+/// A Claude question's key hints, `Enter to select · … · Esc to cancel`,
+/// ending on row `last`: the row they start on. A pane narrower than the
+/// hints wraps them — a preview question's carry `n to add notes`, and
+/// `ctrl+g to edit in Vim` too while its notes are open, which 80 columns
+/// wrap — so they are looked for up to two rows above, with no blank row
+/// inside them.
+fn select_footer(rows: &[String], last: usize) -> Option<usize> {
+    let at = (last.saturating_sub(2)..=last).rev().find(|&i| rows[i].trim().starts_with(SELECT_FOOT))?;
+    rows[at + 1..=last].iter().all(|r| !r.trim().is_empty()).then_some(at)
+}
+
+/// What [`claude_preview`] finds between a question's top and its footer.
+enum Layout {
+    /// No preview box: the question reader of [`claude`] reads it.
+    Plain,
+    Preview(Box<Modal>),
+    /// A preview box this reader cannot take apart — a pane too narrow,
+    /// which breaks the box's own rows, or a layout Claude drew askew: no
+    /// prompt, rather than a guess at which text is whose.
+    Broken,
+}
+
+/// Claude's AskUserQuestion when its options carry a `preview` (2.1.316,
+/// fixtures `2.1.316/preview/`). Under the `☐ <header>` row (or a form's tab
+/// bar) and the question (behind a dim `│` when it is long), the options sit
+/// in a LEFT column: numbered, a label that wraps onto rows of its own, no
+/// description. The RIGHT column is a box with ONE option's preview — the
+/// one the `❯` marks — its rows wrapped at the box's width and its tail cut
+/// (`├─── ✂ ─── N lines hidden ───┤`) in a short pane, then `Notes: press n
+/// to add notes`. Under both, the list's rule and `Chat about this`,
+/// unnumbered, which takes the highlight with a `❯` of its own while the
+/// option's stays. A multi-select draws none of this (Claude ignores its
+/// previews), nor does an option list with no preview anywhere.
+///
+/// Every row beside the box is cut at the column its top edge starts in: the
+/// left part is the choices', the right part the box's and the notes'. A
+/// right part that is neither, or a left part that runs into the box, is
+/// [`Layout::Broken`], so no preview text can reach a label.
+fn claude_preview(rows: &[String], foot: usize, last: usize, width: usize) -> Layout {
+    let Some(inner) = (0..foot).rev().find(|&i| full_rule(&rows[i], width)) else { return Layout::Plain };
+    let Some(chat) = (inner + 1..foot).find(|&i| !rows[i].trim().is_empty()) else { return Layout::Plain };
+    if numbered(&rows[chat]).is_some() || (chat + 1..foot).any(|i| !rows[i].trim().is_empty()) {
+        return Layout::Plain;
+    }
+    let Some(top) = (0..inner).rev().find(|&i| full_rule(&rows[i], width)) else { return Layout::Plain };
+    let Some((first, col)) = (top + 1..inner).find_map(|i| box_top(&rows[i]).map(|c| (i, c))) else { return Layout::Plain };
+    preview_modal(rows, Rows { top, first, col, inner, chat, foot, last }).map_or(Layout::Broken, |m| Layout::Preview(Box::new(m)))
+}
+
+/// Where [`claude_preview`] found a preview question's parts: its top rule,
+/// the row the box starts on and its column, the list's rule, the `Chat
+/// about this` row, the footer's first row and the screen's last.
+struct Rows {
+    top: usize,
+    first: usize,
+    col: usize,
+    inner: usize,
+    chat: usize,
+    foot: usize,
+    last: usize,
+}
+
+/// The column (in characters) a preview box's top edge starts in on `row`,
+/// which it ends: `┌──…──┐`, a space before it.
+fn box_top(row: &str) -> Option<usize> {
+    let cs: Vec<char> = row.chars().collect();
+    let c = cs.iter().position(|&x| x == '┌')?;
+    let edge = &cs[c..];
+    let ok = c >= 2 && cs[c - 1] == ' ' && edge.len() >= 4 && edge.last() == Some(&'┐') && edge[1..edge.len() - 1].iter().all(|&x| x == '─');
+    ok.then_some(c)
+}
+
+fn preview_modal(rows: &[String], at: Rows) -> Option<Modal> {
+    let Rows { top, first, col, inner, chat, foot, last } = at;
+    let mut lefts = Vec::new();
+    let mut rights = Vec::new();
+    for r in &rows[first..inner] {
+        let cs: Vec<char> = r.chars().collect();
+        if cs.len() > col && cs[col - 1] != ' ' {
+            return None;
+        }
+        let cut = cs.len().min(col);
+        lefts.push(cs[..cut].iter().collect::<String>().trim_end().to_string());
+        rights.push(cs[cut..].iter().collect::<String>().trim_end().to_string());
+    }
+    let (boxed, hidden, said) = preview_column(&rights)?;
+    // The options: the box's top edge is on the first one's row, and a row
+    // under an option's is the rest of its label.
+    let at = numbered_at(&lefts, 0, lefts.len())?;
+    if at.first()?.0 != 0 {
+        return None;
+    }
+    let mut choices: Vec<Choice> = at
+        .into_iter()
+        .map(|(_, mut c)| {
+            c.label = std::iter::once(c.label).chain(c.more.drain(..)).collect::<Vec<_>>().join(" ");
+            c.text = Some(Typing::Amend);
+            c
+        })
+        .collect();
+    let lit: Vec<u32> = choices.iter().filter(|c| c.highlighted).map(|c| c.n).collect();
+    let [of] = lit[..] else { return None };
+    let options = choices.len() as u32;
+    let on_chat = rows[chat].trim_start().starts_with(MARKS);
+    if on_chat {
+        for c in &mut choices {
+            c.highlighted = false;
+        }
+    }
+    let label = unmarked(&rows[chat]).to_string();
+    choices.push(Choice { n: options + 1, label, more: Vec::new(), highlighted: on_chat, host_only: None, checked: None, text: None, preview: None, preview_hidden: None });
+    // What the box shows is that option's preview — or Claude's word that it
+    // has none.
+    if boxed != [NO_PREVIEW] || hidden.is_some() {
+        let c = &mut choices[of as usize - 1];
+        c.preview = Some(boxed.join("\n")).filter(|p| !p.trim().is_empty());
+        c.preview_hidden = hidden;
+    }
+    // The question, by Claude's own drawing: its header row, then its text.
+    let head: Vec<&str> = rows[top + 1..first].iter().map(|r| r.trim()).filter(|t| !t.is_empty()).collect();
+    let (header, question) = head.split_first()?;
+    let tab_bar = header.starts_with('←') && header.ends_with('→');
+    if !(tab_bar || header.starts_with(['☐', '☒', '✔'])) || question.is_empty() {
+        return None;
+    }
+    let question = question.iter().map(|q| q.strip_prefix('│').unwrap_or(q).trim()).collect::<Vec<_>>().join(" ");
+    let hints = rows[foot..=last].iter().map(|r| r.trim()).collect::<Vec<_>>().join(" ");
+    let open = hints.contains(NOTES_OPEN_HINT);
+    let placeholder = if open { NOTES_EMPTY } else { NOTES_CLOSED };
+    let notes = Notes { open, text: Some(said).filter(|t| t != placeholder && !t.is_empty()) };
+    let mut m = modal(provider::CLAUDE.id, Kind::Question, rows, top + 1, last, foot, choices);
+    // The rows that stay while the highlight moves: the question, the left
+    // column without its blank rows, the rule and `Chat about this`.
+    let start = (top + 1..=last).find(|&i| !rows[i].trim().is_empty()).unwrap_or(top + 1);
+    let kept = rows[start..first].iter().chain(lefts.iter().filter(|l| !l.is_empty())).chain(rows[inner..foot].iter());
+    m.body = kept
+        .map(|r| match r.trim_start().chars().next() {
+            Some(c) if MARKS.contains(&c) => r.replacen(c, " ", 1),
+            _ => r.clone(),
+        })
+        .collect();
+    m.previews = Some(Previews::Shown);
+    m.notes = Some(notes);
+    m.shown = Some(Shown { of, rows: boxed, hidden, options, header: header.to_string(), question });
+    Some(m)
+}
+
+/// A preview question's right column, top edge first: the box's rows (the
+/// text inside its edges, trailing blanks off), the `✂ N lines hidden` it
+/// ends on in a short pane, and what its notes row says — the row under the
+/// box, joined with the rows it wraps onto, indented past `Notes: `. Blank
+/// rows may sit between them and after them; anything else is `None`.
+fn preview_column(rights: &[String]) -> Option<(Vec<String>, Option<u32>, String)> {
+    let w = rights.first()?.chars().count();
+    let mut boxed = Vec::new();
+    let mut hidden = None;
+    let mut i = 1;
+    loop {
+        let cs: Vec<char> = rights.get(i)?.chars().collect();
+        if cs.len() != w {
+            return None;
+        }
+        match (cs[0], cs[w - 1]) {
+            ('└', '┘') if cs[1..w - 1].iter().all(|&c| c == '─') => break,
+            ('│', '│') if hidden.is_none() && cs[1] == ' ' && cs[w - 2] == ' ' => {
+                boxed.push(cs[2..w - 2].iter().collect::<String>().trim_end().to_string());
+            }
+            ('├', '┤') if hidden.is_none() => hidden = Some(cut_rows(&rights[i])?),
+            _ => return None,
+        }
+        i += 1;
+    }
+    let rest = &rights[i + 1..];
+    let at = rest.iter().position(|r| !r.is_empty())?;
+    let mut said = vec![rest[at].strip_prefix(NOTES_ROW.trim_end())?.trim().to_string()];
+    let indent = " ".repeat(NOTES_ROW.chars().count());
+    let mut j = at + 1;
+    while let Some(r) = rest.get(j).filter(|r| !r.is_empty()) {
+        said.push(r.strip_prefix(&indent)?.trim().to_string());
+        j += 1;
+    }
+    if rest[j..].iter().any(|r| !r.is_empty()) {
+        return None;
+    }
+    Some((boxed, hidden, said.join(" ")))
+}
+
+/// `├─── ✂ ─── 3 lines hidden ───┤`: 3.
+fn cut_rows(row: &str) -> Option<u32> {
+    if !row.contains('✂') {
+        return None;
+    }
+    let words: Vec<&str> = row.split_whitespace().collect();
+    words.windows(3).find(|w| matches!(w[1], "lines" | "line") && w[2] == "hidden")?[0].parse().ok()
+}
+
+/// Claude's own AskUserQuestion call (`tool` and `input`, as its
+/// PermissionRequest hook kept them) is the preview question `m` shows: one
+/// of its questions — single-select, as every preview question is — has the
+/// header shown and the question's text, its options are the choices shown
+/// in their order, and the box shows that option's own preview, whole, or
+/// its head when the box is cut (Claude's "No preview available" for an
+/// option with none). Whitespace is not compared: Claude wraps all of it.
+/// Then every option takes its own preview from the call, exactly, and
+/// `previews` is `all`. Anything else, or a doubt, leaves `m` as it was and
+/// is `false`.
+pub fn with_previews(m: &mut Modal, tool: &str, input: &serde_json::Value) -> bool {
+    let Some(s) = m.shown.clone() else { return false };
+    if tool != "AskUserQuestion" || m.previews != Some(Previews::Shown) {
+        return false;
+    }
+    let squash = |t: &str| t.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+    let text = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    let Some(qs) = input.get("questions").and_then(|q| q.as_array()) else { return false };
+    // The header row's names: `☐ Banner copy` has one, a form's tab bar
+    // (`←  ☒ Colour  ☐ Size  ✔ Submit  →`) one per tab.
+    let tabs: Vec<String> = s.header.split(['☐', '☒', '✔']).skip(1).map(|t| squash(t.trim_end_matches('→'))).collect();
+    let found = qs.iter().find_map(|q| {
+        let opts = q.get("options")?.as_array()?;
+        let header = squash(&text(q, "header")?);
+        let same = q.get("multiSelect").and_then(|b| b.as_bool()) != Some(true)
+            && !header.is_empty()
+            && tabs.contains(&header)
+            && squash(&text(q, "question")?) == squash(&s.question)
+            && opts.len() == s.options as usize
+            && opts.iter().zip(&m.choices).all(|(o, c)| text(o, "label").is_some_and(|l| squash(&l) == squash(&c.label)));
+        if !same {
+            return None;
+        }
+        let previews: Vec<Option<String>> = opts.iter().map(|o| text(o, "preview").filter(|p| !p.trim().is_empty())).collect();
+        let seen = squash(&s.rows.concat());
+        let agrees = match previews.get(s.of as usize - 1)? {
+            None => s.rows == [NO_PREVIEW] && s.hidden.is_none(),
+            Some(p) if s.hidden.is_some() => !seen.is_empty() && squash(p).starts_with(&seen),
+            Some(p) => squash(p) == seen,
+        };
+        agrees.then_some(previews)
+    });
+    let Some(previews) = found else { return false };
+    for (c, p) in m.choices.iter_mut().zip(previews) {
+        c.preview = p;
+        c.preview_hidden = None;
+    }
+    m.previews = Some(Previews::All);
+    true
+}
+
+/// Whether `m`'s notes field has the keyboard in the terminal: its arrows
+/// type there and Enter sends the question, so no row answers it then.
+pub fn notes_open(m: &Modal) -> bool {
+    m.notes.as_ref().is_some_and(|n| n.open)
+}
+
+/// A preview question's option next to option `n`, to move to and back from
+/// before a note is typed (`agent_answer_text`): Enter in the open notes
+/// field sends the option the highlight was last MOVED to, and none at all
+/// — `(notes only)` — when it never moved (measured on 2.1.316).
+pub fn neighbour(m: &Modal, n: u32) -> Option<u32> {
+    let options = m.shown.as_ref()?.options;
+    if n == 0 || n > options || options < 2 {
+        return None;
+    }
+    Some(if n < options { n + 1 } else { n - 1 })
+}
+
+/// What a prompt's fingerprint covers (serve's `agent_prompt`): the rows the
+/// user saw and its choices, as JSON. A preview question's box and `❯`s
+/// follow the highlight, so its rows are those without the box, its choices
+/// carry no highlight, and its notes and where its previews come from are
+/// added: moving the highlight is not another prompt, while a changed
+/// choice, preview or note is.
+pub fn seen(m: &Modal) -> (Vec<String>, String) {
+    if m.previews.is_none() {
+        return (m.lines.clone(), serde_json::to_string(&m.choices).unwrap_or_default());
+    }
+    let choices: Vec<Choice> = m.choices.iter().map(|c| Choice { highlighted: false, ..c.clone() }).collect();
+    let rest = serde_json::json!({ "choices": choices, "notes": m.notes, "previews": m.previews });
+    (m.body.clone(), rest.to_string())
 }
 
 /// Claude's resume picker on screen, as [`resume_list`] finds it.
@@ -521,7 +899,7 @@ fn claude_resume(rows: &[String], last: usize, list: &ResumeList) -> Option<Moda
         .enumerate()
         .map(|(j, (&(s, e), (_, title)))| {
             let more = rows[s + 1..e].iter().map(|r| r.trim().to_string()).collect();
-            Choice { n: j as u32 + 1, label: title.to_string(), more, highlighted: j == hl, host_only: None, checked: None, text: None }
+            Choice { n: j as u32 + 1, label: title.to_string(), more, highlighted: j == hl, host_only: None, checked: None, text: None, preview: None, preview_hidden: None }
         })
         .collect();
     let mut m = modal(provider::CLAUDE.id, Kind::Question, rows, list.head, last, list.foot, choices);
@@ -688,6 +1066,7 @@ pub fn same_prompt(a: &Modal, b: &Modal) -> bool {
     a.kind == b.kind
         && a.multi == b.multi
         && (a.picker, a.hidden, a.window) == (b.picker, b.hidden, b.window)
+        && a.notes == b.notes
         && a.body == b.body
         && unmarked(a) == unmarked(b)
 }
@@ -728,6 +1107,14 @@ pub enum Field {
 pub fn field(m: &Modal, n: u32) -> Option<Field> {
     let c = m.choices.iter().find(|c| c.n == n)?;
     let typing = c.text?;
+    // A preview question's ONE notes field, whichever option it goes with.
+    if let Some(notes) = &m.notes {
+        return Some(match (&notes.text, notes.open) {
+            (Some(t), _) => Field::Holds(t.clone()),
+            (None, true) => Field::Empty,
+            (None, false) => Field::Closed,
+        });
+    }
     if m.harness == provider::CODEX.id {
         return Some(match c.more.iter().rev().find(|r| r.starts_with(MARKS)) {
             None => Field::Closed,
@@ -745,9 +1132,11 @@ pub fn field(m: &Modal, n: u32) -> Option<Field> {
 }
 
 /// The keys that open choice `n`'s field once it is highlighted: none for a
-/// field that is open, Tab for one that is closed.
+/// field that is open, Tab for one that is closed — `n` for a preview
+/// question's notes.
 pub fn open_keys(m: &Modal, n: u32) -> Option<Vec<Key>> {
     match field(m, n)? {
+        Field::Closed if m.notes.is_some() => Some(vec![Key::Notes]),
         Field::Closed => Some(vec![Key::Tab]),
         Field::Empty | Field::Holds(_) => Some(Vec::new()),
     }
@@ -762,6 +1151,10 @@ pub fn shows(m: &Modal, n: u32, how: Typing, text: &str) -> bool {
     let Some(c) = m.choices.iter().find(|c| c.n == n) else { return false };
     let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
     let want = squash(text);
+    if let Some(notes) = &m.notes {
+        // Open: the field still has the keyboard, so Enter sends the note.
+        return how == Typing::Amend && notes.open && notes.text.as_deref().is_some_and(|t| squash(t) == want);
+    }
     if m.harness == provider::CODEX.id {
         let notes: Vec<&str> = c.more.iter().skip_while(|r| !r.starts_with(MARKS)).map(|r| unmarked(r)).collect();
         return !notes.is_empty() && squash(&notes.join(" ")) == want;
@@ -796,7 +1189,17 @@ pub fn visible(screen: &str) -> Vec<String> {
     }
     let floor = (last + 1).saturating_sub(VISIBLE_MAX);
     let edge = |r: &str| full_rule(r, width) || (r.starts_with('▔') && r.chars().all(|c| c == '▔'));
-    let start = (floor..=last).rev().find(|&i| i < last && edge(&rows[i])).map_or(floor, |i| i + 1);
+    let edges: Vec<usize> = (floor..last).rev().filter(|&i| edge(&rows[i])).collect();
+    // A question's own list rule has only `Chat about this` and the key hints
+    // under it: what it asks is above, under the rule before (or as far up as
+    // the rows allowed go).
+    let start = match edges[..] {
+        [near, ref above @ ..] if rows[near + 1..=last].iter().filter(|r| !r.trim().is_empty()).count() <= 3 => {
+            above.first().map_or(floor, |&a| a + 1)
+        }
+        [near, ..] => near + 1,
+        [] => floor,
+    };
     let start = (start..=last).find(|&i| !rows[i].trim().is_empty()).unwrap_or(start);
     rows[start..=last].to_vec()
 }
@@ -1443,7 +1846,7 @@ fn choice(n: u32, highlighted: bool, text: &str, mut more: Vec<String>) -> Choic
     if let Some(b) = beside.filter(|b| !b.is_empty()) {
         more.insert(0, b.to_string());
     }
-    Choice { n, label: label.to_string(), more, highlighted, host_only: None, checked: None, text: None }
+    Choice { n, label: label.to_string(), more, highlighted, host_only: None, checked: None, text: None, preview: None, preview_hidden: None }
 }
 
 /// The modal: rows `start..=last` (leading blanks dropped), its footer being
@@ -1463,7 +1866,7 @@ fn modal(harness: &'static str, kind: Kind, rows: &[String], start: usize, last:
     }
     let edge = rows.iter().filter(|r| is_rule(r)).map(|r| r.chars().count()).max();
     let order = choices.iter().map(|c| Some(c.n)).collect();
-    Modal { kind, lines, choices, multi: false, picker: None, hidden: None, body, edge, order, on_submit: false, window: None, harness }
+    Modal { kind, lines, choices, multi: false, picker: None, hidden: None, previews: None, notes: None, shown: None, body, edge, order, on_submit: false, window: None, harness }
 }
 
 fn classify(kind: Kind, c: &Choice) -> Option<HostOnly> {
@@ -2522,5 +2925,285 @@ mod tests {
         assert!(claude(&stray).is_none(), "a `↓` that is not on the window's last row");
         let uncounted = resume!("picker-long.txt").replacen(" (1 of 7)", "", 1);
         assert!(claude(&uncounted).is_none(), "a scrolled window with no count");
+    }
+
+    macro_rules! preview {
+        ($name:literal) => {
+            include_str!(concat!("../tests/fixtures/claude-screen/2.1.316/preview/", $name))
+        };
+    }
+
+    const BANNER_1: &str = "One:      Another place needs input: demo (main)  Review\nSeveral:  2 other places need input   Review";
+    const BANNER_2: &str = "One:      demo (main) needs input   Review\nSeveral:  demo (main) and 1 more need input   Review";
+    const BANNER_3: &str = "(no banner on a place screen)";
+
+    fn hook(json: &str) -> serde_json::Value {
+        serde_json::from_str::<serde_json::Value>(json).unwrap()["tool_input"].clone()
+    }
+
+    fn shown_previews(m: &Modal) -> Vec<(u32, Option<&str>, Option<u32>)> {
+        m.choices.iter().map(|c| (c.n, c.preview.as_deref(), c.preview_hidden)).collect()
+    }
+
+    /// Claude 2.1.316's AskUserQuestion with previews, as the user saw it: the
+    /// options in a LEFT column, a label wrapped onto its own row, a box
+    /// beside them with the highlighted option's preview, a notes row, and
+    /// `Chat about this` under the list's rule. The choices are the left
+    /// column alone: no box row reaches a label, and the wrapped
+    /// "(Recommended)" is the label's own word, as Claude's tool call has it.
+    #[test]
+    fn a_preview_question_is_its_left_column_and_the_box_is_the_highlighted_options_preview() {
+        let m = claude(preview!("wide-1.txt")).expect("the preview question reads");
+        assert_eq!((m.kind, m.previews, m.multi), (Kind::Question, Some(Previews::Shown), false));
+        assert_eq!(m.lines.first().map(String::as_str), Some(" ☐ Banner copy"));
+        assert_eq!(m.lines.last().map(String::as_str), Some("Enter to select · ↑/↓ to navigate · n to add notes · Esc to cancel"));
+        assert_eq!(
+            m.choices.iter().map(|c| (c.label.as_str(), c.highlighted, c.text, c.host_only)).collect::<Vec<_>>(),
+            vec![
+                ("Another place needs input (Recommended)", true, Some(Typing::Amend), None),
+                ("Name first", false, Some(Typing::Amend), None),
+                ("Hide it on place screens", false, Some(Typing::Amend), None),
+                ("Chat about this", false, None, None),
+            ]
+        );
+        assert!(m.choices.iter().all(|c| c.more.is_empty()), "no box row is a choice's: {:#?}", m.choices);
+        assert_eq!(shown_previews(&m), vec![(1, Some(BANNER_1), None), (2, None, None), (3, None, None), (4, None, None)]);
+        assert_eq!(m.notes, Some(Notes { open: false, text: None }));
+        assert!(m.summary().starts_with("☐ Banner copy") && m.summary().ends_with("What should it say instead?"), "{}", m.summary());
+        let styled = claude(preview!("wide-1.e.txt")).unwrap();
+        assert_eq!((&styled.lines, &styled.choices, &styled.notes), (&m.lines, &m.choices, &m.notes));
+    }
+
+    /// Each option highlighted in turn, and then "Chat about this", which
+    /// takes the highlight with a `❯` of its own while the last option keeps
+    /// its `❯` — and the box keeps that option's preview. One prompt
+    /// throughout ([`same_prompt`]); only the preview the screen shows moves.
+    #[test]
+    fn the_box_follows_the_highlight_and_chat_about_this_takes_it_from_the_options() {
+        let screens = [preview!("wide-1.txt"), preview!("wide-2.txt"), preview!("wide-3.txt"), preview!("wide-chat.txt")];
+        let ms: Vec<Modal> = screens.iter().map(|s| claude(s).unwrap()).collect();
+        let lit = |m: &Modal| m.choices.iter().find(|c| c.highlighted).map(|c| c.n);
+        assert_eq!(ms.iter().map(lit).collect::<Vec<_>>(), vec![Some(1), Some(2), Some(3), Some(4)]);
+        assert_eq!(shown_previews(&ms[1])[1], (2, Some(BANNER_2), None));
+        assert_eq!(shown_previews(&ms[2])[2], (3, Some(BANNER_3), None));
+        assert_eq!(shown_previews(&ms[3])[2], (3, Some(BANNER_3), None), "Chat about this shows the last option's preview");
+        for m in &ms[1..] {
+            assert!(same_prompt(&ms[0], m), "the same prompt wherever the highlight is");
+        }
+        assert_eq!(steps(&ms[0], 4), Some(vec![Key::Down; 3]), "Chat about this is under the options");
+        assert_eq!(steps(&ms[3], 3), Some(vec![Key::Up]));
+        assert_eq!(steps(&ms[3], 1), Some(vec![Key::Up; 3]));
+        assert_eq!(field(&ms[3], 4), None, "Chat about this takes no note of its own");
+        assert_eq!((neighbour(&ms[0], 1), neighbour(&ms[0], 3), neighbour(&ms[0], 4)), (Some(2), Some(2), None));
+    }
+
+    /// An 80×24 lane (the size a detached lane gets) has no room for the box:
+    /// Claude cuts its tail (`✂ N lines hidden`), so the preview read off the
+    /// screen is its head and says how many rows are hidden. A taller pane
+    /// shows it whole, wrapped at the box's width.
+    #[test]
+    fn a_short_pane_cuts_the_box_and_a_narrow_one_wraps_it() {
+        let m = claude(preview!("80-1.txt")).unwrap();
+        assert_eq!(shown_previews(&m)[0], (1, Some("One:      Another place needs input: demo"), Some(3)));
+        assert_eq!(m.choices[0].label, "Another place needs input (Recommended)");
+        let two = claude(preview!("80-2.txt")).unwrap();
+        assert_eq!(shown_previews(&two)[1], (2, Some("One:      demo (main) needs input   Review"), Some(2)));
+        let three = claude(preview!("80-3.txt")).unwrap();
+        assert_eq!(shown_previews(&three)[2], (3, Some(BANNER_3), None));
+        let chat = claude(preview!("80-chat.txt")).unwrap();
+        assert!(chat.choices[3].highlighted && !chat.choices[2].highlighted);
+        for other in [&two, &three, &chat] {
+            assert!(same_prompt(&m, other));
+        }
+        let tall = claude(preview!("80x40-1.txt")).unwrap();
+        assert_eq!(
+            shown_previews(&tall)[0],
+            (1, Some("One:      Another place needs input: demo\n(main)  Review\nSeveral:  2 other places need input\nReview"), None)
+        );
+        // 60 columns: the key hints wrap onto a second row, and the label wraps
+        // at another word.
+        let narrow = claude(preview!("60-1.txt")).expect("a wrapped footer still ends the question");
+        assert_eq!(narrow.choices[0].label, "Another place needs input (Recommended)");
+        assert_eq!(narrow.choices.len(), 4);
+        assert_eq!(narrow.lines.last().map(String::as_str), Some("cancel"));
+        // 45 columns break the box's own rows: never a guess at whose text is
+        // whose. What can be seen of it is the question, not only the rows
+        // under the list's own rule.
+        assert_eq!(claude(preview!("45-1.txt")), None);
+        let seen = visible(preview!("45-1.txt"));
+        assert!(seen.iter().any(|l| l.starts_with("❯ 1. Another place")), "{seen:#?}");
+        assert_eq!(seen.last().map(String::as_str), Some("notes · Esc to cancel"));
+        let askew = visible(preview!("80-notes-long-closed.txt"));
+        assert_eq!(askew.first().map(String::as_str), Some(" ☐ Banner copy"), "{askew:#?}");
+    }
+
+    /// The question's ONE notes field: `n` opens it (the footer gains `ctrl+g
+    /// to edit in Vim`), text shows in it, Esc closes it and keeps the text,
+    /// which then rides with whichever option is highlighted. Each option
+    /// takes it as an amend, like Claude's "Yes"/"No" — but `n`, not Tab.
+    #[test]
+    fn the_notes_field_is_the_questions_and_n_opens_it() {
+        let closed = claude(preview!("wide-2.txt")).unwrap();
+        assert_eq!((field(&closed, 2), open_keys(&closed, 2)), (Some(Field::Closed), Some(vec![Key::Notes])));
+        assert!(!notes_open(&closed));
+        let open = claude(preview!("wide-2-notes-open.txt")).unwrap();
+        assert_eq!(open.notes, Some(Notes { open: true, text: None }));
+        assert_eq!((field(&open, 2), open_keys(&open, 2), notes_open(&open)), (Some(Field::Empty), Some(vec![]), true));
+        assert!(same_but(&closed, &open, 2) && !same_prompt(&closed, &open), "opening the notes is the same prompt but for its field");
+        let typed = claude(preview!("wide-2-notes-typed.txt")).unwrap();
+        assert_eq!(typed.notes, Some(Notes { open: true, text: Some("keep the place name bold".into()) }));
+        assert!(shows(&typed, 2, Typing::Amend, "keep the place name bold") && !shows(&typed, 2, Typing::Amend, "keep the place"));
+        assert!(same_but(&closed, &typed, 2));
+        let kept = claude(preview!("wide-notes-closed.txt")).unwrap();
+        assert_eq!(kept.notes, Some(Notes { open: false, text: Some("first option note".into()) }));
+        assert_eq!(field(&kept, 1), Some(Field::Holds("first option note".into())));
+        assert!(!shows(&kept, 1, Typing::Amend, "first option note"), "closed, Enter would not send it from the field");
+        let moved = claude(preview!("wide-notes-closed-2.txt")).unwrap();
+        assert_eq!((field(&moved, 2), moved.choices[1].highlighted), (Some(Field::Holds("first option note".into())), true));
+        // 80 columns: an open field wraps the key hints, and a long note wraps
+        // past `Notes: `.
+        let wrapped = claude(preview!("80-3-notes-open.txt")).unwrap();
+        assert_eq!(wrapped.notes, Some(Notes { open: true, text: None }));
+        let long = claude(preview!("80-3-notes-long.txt")).unwrap();
+        assert_eq!(long.notes.and_then(|n| n.text).as_deref(), Some("keep the place name bold, and say which project it belongs to when there are two"));
+        // Closed, that long note made Claude re-lay the columns out and draw
+        // option 1 askew (` 1.needs input`): no prompt, not a misread one.
+        assert_eq!(claude(preview!("80-notes-long-closed.txt")), None);
+        assert_eq!(claude(preview!("80-notes-long-closed-2.txt")), None);
+        // Notes are part of the prompt: someone's note is not the same prompt.
+        assert!(!same_prompt(&claude(preview!("wide-1.txt")).unwrap(), &kept));
+    }
+
+    /// A preview keeps its inner spacing; an option with none shows Claude's
+    /// "No preview available", which is no preview; twelve rows are cut to
+    /// one in an 80×24 pane.
+    #[test]
+    fn a_preview_keeps_its_spacing_and_no_preview_is_none() {
+        let rows: Vec<String> = (1..=12).map(|i| format!("row {i:02}: alpha")).collect();
+        let long = claude(preview!("long-1.txt")).unwrap();
+        assert_eq!(long.choices[0].preview.as_deref(), Some(rows.join("\n").as_str()));
+        let code = claude(preview!("long-2.txt")).unwrap();
+        assert_eq!(code.choices[1].preview.as_deref(), Some("fn main() {\n    println!(\"hi\");\n}"));
+        let none = claude(preview!("long-3.txt")).unwrap();
+        assert!(none.choices.iter().all(|c| c.preview.is_none()) && none.choices[2].highlighted);
+        assert_eq!(none.lines[2], "Which layout for the status file?", "a short question has no bar");
+        let cut = claude(preview!("long-80-1.txt")).unwrap();
+        assert_eq!(shown_previews(&cut)[0], (1, Some("row 01: alpha"), Some(11)));
+    }
+
+    /// A form of two preview questions: one screen per question under the
+    /// tab bar, its key hints adding `Tab to switch questions`; then the
+    /// review, which is no preview question. A multi-select ignores its
+    /// options' previews and is read as every multi-select is.
+    #[test]
+    fn a_form_of_preview_questions_and_a_multi_select_with_previews() {
+        let first = claude(preview!("two-1.txt")).unwrap();
+        assert!(first.lines[0].starts_with('←') && first.previews.is_some());
+        assert_eq!(first.choices.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(), ["Red", "Blue", "Chat about this"]);
+        assert_eq!(first.choices[0].preview.as_deref(), Some("RED\n  #ff0000"));
+        let second = claude(preview!("two-2.txt")).unwrap();
+        assert_eq!((second.choices[0].label.as_str(), second.choices[0].preview.as_deref()), ("Small", Some("[ s ]")));
+        let large = claude(preview!("two-2-large.txt")).unwrap();
+        assert_eq!(large.choices[1].preview.as_deref(), Some("[    L    ]"));
+        assert!(!same_prompt(&first, &second));
+        let review = claude(preview!("two-review.txt")).unwrap();
+        assert_eq!((review.previews, review.choices[0].label.as_str()), (None, "Submit answers"));
+        let multi = claude(preview!("multi.txt")).unwrap();
+        assert!(multi.multi && multi.previews.is_none() && multi.notes.is_none());
+        assert_eq!(multi.choices.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(), ["Cheese", "Olives", "Type something", "Chat about this"]);
+    }
+
+    /// Claude's PermissionRequest hook fires for AskUserQuestion with the
+    /// whole call, every option's `preview` in it. Agreeing with the screen,
+    /// it gives every option its own preview, exactly; then the fingerprint's
+    /// material is the same wherever the highlight is.
+    #[test]
+    fn the_hooks_call_gives_every_preview_when_it_agrees_with_the_screen() {
+        let call = hook(preview!("hook-banner.json"));
+        let mut ms: Vec<Modal> =
+            [preview!("wide-1.txt"), preview!("wide-2.txt"), preview!("wide-3.txt"), preview!("wide-chat.txt")].iter().map(|s| claude(s).unwrap()).collect();
+        let screen_only: Vec<_> = ms.iter().map(seen).collect();
+        assert_ne!(screen_only[0], screen_only[1], "from the screen alone, what is known moves with the highlight");
+        assert_eq!(screen_only[2], screen_only[3], "Chat about this keeps the last option's preview");
+        for m in &mut ms {
+            assert!(with_previews(m, "AskUserQuestion", &call));
+            assert_eq!(m.previews, Some(Previews::All));
+            assert_eq!(shown_previews(m), vec![(1, Some(BANNER_1), None), (2, Some(BANNER_2), None), (3, Some(BANNER_3), None), (4, None, None)]);
+        }
+        let all: Vec<_> = ms.iter().map(seen).collect();
+        assert!(all.iter().all(|s| *s == all[0]), "the highlight moved and nothing else did");
+        // A cut box agrees by its head, a wrapped one whatever its wraps.
+        for screen in [preview!("80-1.txt"), preview!("80-2.txt"), preview!("80x40-1.txt"), preview!("60-1.txt")] {
+            let mut m = claude(screen).unwrap();
+            assert!(with_previews(&mut m, "AskUserQuestion", &call));
+            assert_eq!(m.choices[0].preview.as_deref(), Some(BANNER_1));
+            assert!(m.choices.iter().all(|c| c.preview_hidden.is_none()));
+        }
+        // "No preview available" is an option with none; the second of a form's questions.
+        let mut none = claude(preview!("long-3.txt")).unwrap();
+        assert!(with_previews(&mut none, "AskUserQuestion", &hook(preview!("hook-long.json"))));
+        assert_eq!(none.choices[1].preview.as_deref(), Some("fn main() {\n    println!(\"hi\");\n}"));
+        assert_eq!(none.choices[2].preview, None);
+        let mut second = claude(preview!("two-2-large.txt")).unwrap();
+        assert!(with_previews(&mut second, "AskUserQuestion", &hook(preview!("hook-two.json"))));
+        assert_eq!(second.choices[0].preview.as_deref(), Some("[ s ]"));
+    }
+
+    /// Anything the screen does not show as the call has it is no agreement,
+    /// and the screen's own reading stays: another question, another label,
+    /// another preview, another tool, a cut box whose head is not the call's.
+    #[test]
+    fn a_call_that_does_not_agree_changes_nothing() {
+        let call = hook(preview!("hook-banner.json"));
+        let fresh = || claude(preview!("wide-2.txt")).unwrap();
+        let tamper = |path: &str, to: &str| {
+            let mut c = call.clone();
+            *c.pointer_mut(path).unwrap() = serde_json::json!(to);
+            c
+        };
+        for (why, input, tool) in [
+            ("another tool", call.clone(), "ExitPlanMode"),
+            ("another question", hook(preview!("hook-long.json")), "AskUserQuestion"),
+            ("another label", tamper("/questions/0/options/2/label", "Hide it"), "AskUserQuestion"),
+            ("another preview for the one shown", tamper("/questions/0/options/1/preview", "One: demo needs input"), "AskUserQuestion"),
+            ("another question text", tamper("/questions/0/question", "What should it say?"), "AskUserQuestion"),
+            ("another header", tamper("/questions/0/header", "Banner"), "AskUserQuestion"),
+        ] {
+            let mut m = fresh();
+            let before = m.clone();
+            assert!(!with_previews(&mut m, tool, &input), "{why}");
+            assert_eq!(m, before, "{why}: nothing changed");
+        }
+        // The SHOWN option is the one compared: another option's preview may
+        // be anything (only the call has it).
+        let mut m = fresh();
+        assert!(with_previews(&mut m, "AskUserQuestion", &tamper("/questions/0/options/0/preview", "anything")));
+        let mut cut = claude(preview!("80-1.txt")).unwrap();
+        assert!(!with_previews(&mut cut, "AskUserQuestion", &tamper("/questions/0/options/0/preview", "One: Another")));
+        // A multi-select's call never fills a preview question.
+        let mut multi = tamper("/questions/0/question", "x");
+        multi["questions"][0]["multiSelect"] = serde_json::json!(true);
+        multi["questions"][0]["question"] = call["questions"][0]["question"].clone();
+        assert!(!with_previews(&mut fresh(), "AskUserQuestion", &multi));
+    }
+
+    /// Text beside the box that is neither box nor notes, or a label that
+    /// runs into the box's column, is no prompt: the reader never guesses
+    /// whose text a row is.
+    #[test]
+    fn a_box_beside_anything_else_is_no_prompt() {
+        let real = preview!("wide-2.txt");
+        let row = "  3. Hide it on place screens     └──────────────────────────────────────────────────────────┘";
+        assert_eq!(real.matches(row).count(), 1);
+        let stray = real.replacen(row, "  3. Hide it on place screens     │ Several:  stray row                                      │", 1);
+        assert_eq!(claude(&stray), None, "a box with no bottom edge");
+        // The box's column kept, so only the gap before it tells.
+        let into = real.replacen("❯ 2. Name first                   │", "❯ 2. Name first and a long label!!│", 1);
+        assert_eq!(into.lines().find(|l| l.contains("long label")).and_then(|l| l.chars().position(|c| c == '│')), Some(34));
+        assert_eq!(claude(&into), None, "a label that reaches the box");
+        let beside = real.replacen("                                  Notes: press n to add notes", "                                  Hello: press n to add notes", 1);
+        assert_eq!(claude(&beside), None, "a row beside the choices that is no notes row");
+        let two = real.replacen("  1. Another place needs input", "❯ 1. Another place needs input", 1);
+        assert_eq!(claude(&two), None, "two highlighted options");
     }
 }

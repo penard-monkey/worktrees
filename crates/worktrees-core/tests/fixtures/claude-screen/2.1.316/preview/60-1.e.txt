@@ -1,0 +1,34 @@
+[38;5;246m⏺ [39mUser declined to answer questions
+[38;5;246m  ⎿  · Which toppings? (Cheese / Olives)[39m
+
+[38;5;246m✻[39m [38;5;246mSautéed for 1s · done 12:57 PM[39m
+
+[38;5;246m[48;5;237m❯ [38;5;231mAsk me the Banner copy question again with [39m
+  [38;5;231mAskUserQuestion, exactly as the first time (same header, [39m
+  [38;5;231mquestion, options, descriptions, previews). Do nothing [39m
+  [38;5;231melse.[39m
+
+[38;5;246m[49m────────────────────────────────────────────────────────────
+[38;5;16m[48;5;153m ☐ Banner copy
+
+[2m[39m[49m│[0m [1m[38;5;231mOn a place's screen the banner says 1 place needs input, [0m
+[2m│[0m [1m[38;5;231mwhich reads as if it means this place. What should it say
+[0;2m│[0m [1m[38;5;231minstead?[0m
+
+[38;5;153m❯[38;5;246m 1.[1m[38;5;153m Another place needs [0m        [38;5;246m┌────────────────────────┐[39m
+    [1m[38;5;153minput (Recommended)[0m          [38;5;246m│ [39mOne:      Another [38;5;246m     │[39m
+ [38;5;246m 2.[39m Name first                  [38;5;246m│ [39mplace needs input: [38;5;246m    │[39m
+ [38;5;246m 3.[39m Hide it on place screens    [38;5;246m│ [39mdemo (main)  Review[38;5;246m    │[39m
+                                 [38;5;246m│ [39mSeveral:  2 other [38;5;246m     │[39m
+                                 [38;5;246m│ [39mplaces need input   [38;5;246m   │[39m
+                                 [38;5;246m│ [39mReview[38;5;246m                 │[39m
+                                 [38;5;246m└────────────────────────┘[39m
+
+                                 [38;5;153mNotes:[39m [3m[38;5;246mpress n to add notes
+
+[0m[38;5;246m────────────────────────────────────────────────────────────
+[39m  Chat about this
+
+[38;5;246mEnter to select · ↑/↓ to navigate · n to add notes · Esc to
+cancel[39m
+[38;5;244m──────────────────────────────────────────────── wtqp-lane ─

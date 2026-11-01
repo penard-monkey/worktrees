@@ -14,12 +14,13 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import {
-  activityMoved, boxesOf, bytes, callsSay, callsWords, cardDigits, cardKey, cardTakesFocus, choiceOpen, clockMs, clockOf,
+  activityMoved, boxesOf, bytes, callsSay, callsWords, cardDigits, cardKey, cardTakesFocus, choiceOpen, choiceWay, clockMs, clockOf,
   dayLabel, draftProblem, fieldWords, foldCalls, itemsOf, keyFocusOf, lineDiff, loadPrompt, loadTurns, noSessionYet, permissionAnswerWords,
   promptBody, questionAnswerWords, selectChoice, sendAnswer, sendDraft, sendMany, setAnswerText, setBoxText, setDraft,
   splitAtRule, stopTurn, ticksOf, toggleTick, turnsUnsupported, underRoot, useChat, SEND_MAX,
   type AskedStep, type Item, type PromptChoice, type PromptDetail, type ReadablePrompt, type Target, type ToolCall,
 } from "./chat";
+import { previewOf, type ChoiceWay } from "./chat";
 // What a screen reader is told (VoiceOver): its own line, so the lanes' imports merge apart.
 import { announcement, gather, hear, promptKeyOf, type Bundle, type ChatView, type Heard } from "./chat";
 import { HARNESS_LABEL, type Harness } from "./harness";
@@ -561,7 +562,7 @@ function PromptCard(props: {
   const others = p.multi ? p.choices.filter((c) => c.checked === undefined) : p.choices;
   const ticks = p.multi ? ticksOf(v, p) : [];
   const selected = p.choices.find((c) => c.n === v.selected) ?? null;
-  const way = selected ? choiceOpen(selected) : null;
+  const way = selected ? choiceWay(p, selected) : null;
   const typed = way && way.how !== "plain" ? v.answerText : "";
   const typedProblem = way && way.how !== "plain" ? draftProblem(typed, way.how === "field" ? "answer" : "note") : null;
   const canAnswer = !!selected && !!way?.open && !typedProblem && !(way.how === "field" && !typed.trim()) && !v.answering;
@@ -578,6 +579,9 @@ function PromptCard(props: {
   const send = selected && way ? { on: canAnswer, run: answer } : p.multi ? { on: canSendMany, run: many } : null;
   const digits = cardDigits(p);
   const quote = (s: string) => `“${s.length > 40 ? s.slice(0, 39) + "…" : s}”`;
+  // Claude's question with previews: the selected option's beside the
+  // choices on a wide card, under it on a narrow one (`.chat-pv-wrap`).
+  const pv = previewOf(p, v.selected);
 
   // The keys. ONE capture-phase listener on `window`, the card's while it is
   // mounted (it is mounted only while a readable prompt is shown). Not the
@@ -686,13 +690,27 @@ function PromptCard(props: {
         </div>
       )}
       {others.length > 0 && (
-        <div className="chat-choices" role="group" aria-label={p.multi ? "Or instead" : "Choices"}>
-          {others.map((c) => (
-            <ChoiceRow key={c.n} c={c} on={v.selected === c.n} busy={v.answering} path={target.path}
-              harness={p.harness} agent={agent} text={v.answerText} problem={v.selected === c.n ? typedProblem : null} onEnter={answer}
-              focusToken={keyPick?.n === c.n ? keyPick.t : 0} />
-          ))}
+        <div className={p.previews ? "chat-pv-wrap" : undefined}>
+          <div className={p.previews ? "chat-pv" : undefined} data-testid={p.previews ? "chat-preview-grid" : undefined}>
+            <div className="chat-choices" role="group" aria-label={p.multi ? "Or instead" : "Choices"}>
+              {others.map((c) => (
+                <ChoiceRow key={c.n} c={c} way={choiceWay(p, c)} on={v.selected === c.n} busy={v.answering} path={target.path}
+                  harness={p.harness} agent={agent} text={v.answerText} problem={v.selected === c.n ? typedProblem : null} onEnter={answer}
+                  focusToken={keyPick?.n === c.n ? keyPick.t : 0}
+                  under={pv?.c.n === c.n ? <ChoicePreview c={c} known={pv.known} where="inline" /> : null} />
+              ))}
+            </div>
+            {pv && <ChoicePreview c={pv.c} known={pv.known} where="side" />}
+          </div>
         </div>
+      )}
+      {p.notes?.text && (
+        <p className="chat-hint chat-notes" data-testid="chat-notes-held">
+          A note typed in the terminal goes with whichever answer is sent: {quote(p.notes.text)}
+        </p>
+      )}
+      {p.notes?.open && !p.notes.text && (
+        <p className="chat-hint chat-notes" data-testid="chat-notes-open">Someone is typing a note into this question in the terminal.</p>
       )}
       {v.answerWords && (
         <p className="chat-alert" role="alert" data-testid="chat-answer-line">
@@ -729,17 +747,39 @@ function PromptCard(props: {
   );
 }
 
+/** What Claude shows beside an option of a `previews` question: its preview,
+ *  monospaced with its spacing kept, never wrapped (a mockup's columns would
+ *  move). `known: "shown"` is the terminal's one preview, all this host can
+ *  see without pressing a key. */
+function ChoicePreview(props: { c: PromptChoice; known: "all" | "shown"; where: "side" | "inline" }) {
+  const { c } = props;
+  const rows = c.preview_hidden ?? 0;
+  return (
+    <figure className={`chat-pv-box chat-pv-${props.where}`} data-testid={`chat-preview-${props.where}`}>
+      <figcaption className="chat-pv-cap">
+        {c.preview === undefined ? <>“<span className="chat-pv-label">{c.label}</span>” has no preview</> : <>Preview of “<span className="chat-pv-label">{c.label}</span>”</>}
+      </figcaption>
+      {c.preview !== undefined && <pre className="chat-pv-text" tabIndex={0}>{c.preview}</pre>}
+      {rows > 0 && <p className="chat-pv-more">{rows === 1 ? "1 more row is" : `${rows} more rows are`} cut off in the terminal.</p>}
+      {props.known === "shown" && <p className="chat-pv-more">The terminal shows one preview at a time: this is the one it shows now.</p>}
+    </figure>
+  );
+}
+
 /** One choice of a prompt: a button that selects it and, once selected, the
- *  text it takes — a field's answer, required, or an optional note. */
+ *  text it takes — a field's answer, required, or an optional note. `way` is
+ *  `choiceWay`'s, in its prompt. */
 function ChoiceRow(props: {
-  c: PromptChoice; on: boolean; busy: boolean; path: string; harness: string; agent: string;
+  c: PromptChoice; way: ChoiceWay; on: boolean; busy: boolean; path: string; harness: string; agent: string;
+  /** Shown right under the choice, above its text: its preview on a narrow card. */
+  under?: React.ReactNode;
   text: string; problem: string | null; onEnter: () => void;
   /** Moves when a DIGIT selects this choice: its text takes the keyboard,
    *  a note's too, since the next keys are typed there (Enter sends). */
   focusToken: number;
 }) {
   const { c, on } = props;
-  const { open, how, note } = choiceOpen(c);
+  const { open, how, note } = props.way;
   const field = useRef<HTMLInputElement>(null);
   const ids = useId();
   // A field IS the answer: selecting it is starting to type. A note is
@@ -768,6 +808,7 @@ function ChoiceRow(props: {
           </span>
         </span>
       </button>
+      {props.under}
       {on && how !== "plain" && (
         <div className="chat-answer">
           <label htmlFor={`${ids}-t`} className="sr-only">{how === "field" ? `Your answer for “${c.label}”` : `A note with “${c.label}”`}</label>

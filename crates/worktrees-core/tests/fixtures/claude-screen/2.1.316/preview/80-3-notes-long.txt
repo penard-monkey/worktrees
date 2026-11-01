@@ -1,0 +1,24 @@
+❯ Ask me the Banner copy question again with AskUserQuestion, exactly as the
+  first time (same header, question, options, descriptions, previews). Do
+  nothing else.
+
+────────────────────────────────────────────────────────────────────────────────
+ ☐ Banner copy
+
+│ On a place's screen the banner says 1 place needs input, which reads as if it
+│ means this place. What should it say instead?
+
+  1. Another place needs input    ┌────────────────────────────────────────────┐
+    (Recommended)                 │ (no banner on a place screen)              │
+  2. Name first                   └────────────────────────────────────────────┘
+❯ 3. Hide it on place screens
+                                  Notes: keep the place name bold, and say
+                                         which project it belongs to when there
+                                         are two
+
+────────────────────────────────────────────────────────────────────────────────
+  Chat about this
+
+Enter to select · ↑/↓ to navigate · n to add notes · ctrl+g to edit in Vim · Esc
+to cancel
+──────────────────────────────────────────────────────────────────── wtqp-lane ─
