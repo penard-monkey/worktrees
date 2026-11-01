@@ -19,6 +19,10 @@
 // - `agent_interrupt` (instruct): stop the running turn — ONE Esc, pressed
 //   only on a screen that shows the turn running, a key and never text. A
 //   stop not seen to land is `unconfirmed` and is never pressed again.
+// - `agent_attach` (instruct): a file for the agent, uploaded and kept in the
+//   place; its answer is a path, which the message then names. Nothing types
+//   it: the line still goes through `agent_send`
+//   (docs/proposals/chat-attachments.md).
 //
 // Memory only: turns, prompts, drafts and pending messages live for the
 // window's life and are fetched again after a reload. Nothing is written.
@@ -84,6 +88,9 @@ export type AgentFilled = { answered: false; harness: string; session: string; c
 export type AgentAnsweredMany = { answered: true; confirmed: boolean; harness: string; session: string; choices: number[]; labels: string[] };
 /** `agent_interrupt`'s answer: stopped, or pressed and not seen to stop. */
 export type AgentStopped = { interrupted: boolean; unconfirmed?: boolean; harness: string; session: string; note: string };
+/** `agent_attach`'s answer: where the host kept the file, relative to the
+ *  place root, and what its bytes are. `name` is the display name, cleaned. */
+export type AgentAttached = { path: string; bytes: number; sha256: string; kind: "image" | "pdf" | "text"; name?: string };
 
 /** agents.rs's refusal strings, which the words below key on. */
 export const AGENT_ERR = {
@@ -119,6 +126,95 @@ export const AGENT_ERR = {
 export const SEND_MAX = 4 * 1024;
 /** `turns::MAX_TURNS`: the most one `agent_turns` answers. */
 export const TURNS_MAX = 20;
+
+// ── attachments (docs/proposals/chat-attachments.md) ────────────────────────
+
+/** `attach::MAX_BYTES`: the most one file may hold, checked before a byte of
+ *  it is read. Its base64 (~10.7 MiB) stays under serve's 16 MiB message. */
+export const ATTACH_MAX = 8 * 1024 * 1024;
+/** The longest `path` `agent_attach` answers:
+ *  `.worktrees-attachments/<yyyymmdd>-<16 hex>.<ext>`, `webp` the longest
+ *  extension. A message is measured with every path this long BEFORE any
+ *  upload, so a line the host would refuse never leaves files behind. */
+export const ATTACH_PATH_MAX = 53;
+/** The most files one message carries. A place holds 50. */
+export const ATTACH_PER_MESSAGE = 10;
+/** `agent_attach`'s refusal tokens (`attach::ERR_*`, `budget::ATTACH_BUDGET`):
+ *  each is followed by `: <detail>`, except `unsafe`, which stands alone. */
+export const ATTACH_ERR = {
+  type: "attach-type", size: "attach-size", files: "attach-files", bytes: "attach-bytes",
+  budget: "attach-budget", unsafe: "attach-unsafe",
+} as const;
+
+/** The lead-in of a message that is only attachments. */
+export const attachLead = (n: number) => (n === 1 ? "Look at the attached file." : "Look at the attached files.");
+
+/** The ONE line a message with attachments is sent as (the iOS app's shape
+ *  too): the text, or the lead-in when there is none, then
+ *  ` [attached: <path>, <path>]`, the paths in upload order. */
+export function attachLine(text: string, paths: string[]): string {
+  if (!paths.length) return text;
+  const lead = text.trim() ? text.replace(/\s+$/u, "") : attachLead(paths.length);
+  return `${lead} [attached: ${paths.join(", ")}]`;
+}
+
+const ATTACHED = /^(.*) \[attached: (\.worktrees-attachments\/\d{8}-[0-9a-f]{16}\.[a-z]{2,4}(?:, \.worktrees-attachments\/\d{8}-[0-9a-f]{16}\.[a-z]{2,4})*)\]$/su;
+
+/** A sent line's attachments, split off its end so they can be drawn as
+ *  files: what came before ` [attached: …]`, and the paths. Only the host's
+ *  own path shape counts; anything else is all text. */
+export function splitAttached(line: string): { text: string; paths: string[] } {
+  const m = ATTACHED.exec(line);
+  return m ? { text: m[1], paths: m[2].split(", ") } : { text: line, paths: [] };
+}
+
+/** Why the message would be refused, checked BEFORE anything is uploaded:
+ *  the text by today's rule, then the line it becomes with `n` attachments,
+ *  every path at its longest. */
+export function attachProblem(text: string, n: number): string | null {
+  const own = draftProblem(text);
+  if (own || !n) return own;
+  if (n > ATTACH_PER_MESSAGE) return `At most ${ATTACH_PER_MESSAGE} files in one message.`;
+  const line = attachLine(text, Array.from({ length: n }, () => "x".repeat(ATTACH_PATH_MAX)));
+  if (bytes(line) > SEND_MAX) {
+    return `Too long with ${n === 1 ? "the attachment" : `${n} attachments`}: ${bytes(line).toLocaleString()} of ${SEND_MAX.toLocaleString()} bytes.`;
+  }
+  return draftProblem(line);
+}
+
+/** A size in words: `512 B`, `34 KB`, `2.4 MB`. */
+export function sizeWords(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(n < 10 * 1024 * 1024 ? 1 : 0).replace(/\.0$/, "")} MB`;
+}
+
+/** What a refused upload says under the field: `name` is the file's. */
+export function attachWords(err: string, name: string): SendWords {
+  const detail = (tok: string) => err.slice(tok.length + 2);
+  const shown = `“${name}”`;
+  if (err.startsWith(`${ATTACH_ERR.type}: `)) {
+    const what = detail(ATTACH_ERR.type).replace(/ \(accepted: [^)]*\)$/, "");
+    const convert = /^(HEIC|HEIF|AVIF)$/.test(what) ? " Export it as JPEG or PNG first." : "";
+    return { line: `Not attached: ${shown} is ${what}. Attach PNG, JPEG, GIF, WebP, PDF or text.${convert}` };
+  }
+  if (err.startsWith(`${ATTACH_ERR.size}: `)) return { line: `Not attached: ${shown} is over the ${sizeWords(Number(detail(ATTACH_ERR.size)))} limit.` };
+  if (err.startsWith(`${ATTACH_ERR.files}: `)) {
+    return { line: `Not attached: this place already holds ${detail(ATTACH_ERR.files)} attachments. Each is removed after 7 days.` };
+  }
+  if (err.startsWith(`${ATTACH_ERR.bytes}: `)) {
+    return { line: `Not attached: this place’s attachments already take ${sizeWords(Number(detail(ATTACH_ERR.bytes)))}. Each is removed after 7 days.` };
+  }
+  if (err.startsWith(`${ATTACH_ERR.budget}: `)) return { line: `Not attached: too much was uploaded too quickly. Try again in ${detail(ATTACH_ERR.budget)} s.` };
+  if (err === ATTACH_ERR.unsafe) {
+    return { line: "Not attached: this place’s .worktrees-attachments folder isn’t safe to write to (a link, or a folder git would show).", terminal: true };
+  }
+  return { line: `Not attached: ${err}` };
+}
+
+/** A file picked, pasted or dropped, until its message is sent. `path` once
+ *  the host has it: a retry after a failed send does not upload it again. */
+export type Attachment = { id: number; name: string; size: number; file: Blob; state: "ready" | "uploading" | "attached" | "failed"; path?: string };
 
 // ── the composer's rule ─────────────────────────────────────────────────────
 
@@ -828,19 +924,32 @@ export type ChatView = {
   /** A stop was SEEN to land: the turn is over, whatever the activity push
    *  (a poll behind) still says, until it next moves. */
   stopped: boolean;
+  /** The files the next message carries, in order. */
+  attachments: Attachment[];
+  /** What the last refused upload or pick said. */
+  attachWords: SendWords | null;
+  /** Words when this host has no `agent_attach` (an older one): the
+   *  paperclip is off, with them as its reason. The host's, so every place's. */
+  attachOff: string | null;
 };
 
+/** Set once a host answers `unknown command: agent_attach`. */
+let attachOff: string | null = null;
 const blank = (): ChatView => ({
   turns: { data: null, error: null, loading: false, at: null },
   prompt: { data: null, error: null, loading: false, at: null },
   pending: [], answered: [], draft: "", sending: false, sendWords: null, followUp: null,
   selected: null, answerText: "", ticks: null, boxText: "", answering: false, answerWords: null,
   stopping: false, stopWords: null, stopped: false,
+  attachments: [], attachWords: null, attachOff,
 });
 const EMPTY = blank();
 let views = new Map<string, ChatView>();
 const subs = new Set<() => void>();
-const viewOf = (path: string) => views.get(path) ?? EMPTY;
+/** EMPTY once the host is known to lack `agent_attach`: one object, as
+ *  `useSyncExternalStore` needs the same snapshot until something changes. */
+let emptyOff: ChatView | null = null;
+const viewOf = (path: string) => views.get(path) ?? (attachOff ? (emptyOff ??= { ...EMPTY, attachOff }) : EMPTY);
 function put(path: string, patch: Partial<ChatView>) {
   views = new Map(views).set(path, { ...viewOf(path), ...patch });
   for (const f of [...subs]) f();
@@ -921,6 +1030,84 @@ export function setDraft(path: string, draft: string): void {
   put(path, { draft, sendWords: null, stopWords: null });
 }
 
+let nextAttachment = 1;
+
+/** Add picked, pasted or dropped files to the next message. A file over
+ *  `ATTACH_MAX`, or an empty one, is refused here, before a byte of it is
+ *  read; past `ATTACH_PER_MESSAGE` the rest are left out. Allowed while the
+ *  agent works or a prompt waits: Send keeps its own rules. */
+export function addAttachments(path: string, files: Blob[]): void {
+  const v = viewOf(path);
+  if (v.sending || v.attachOff || !files.length) return;
+  const nameOf = (f: Blob) => ("name" in f && typeof f.name === "string" && f.name) || (f.type.startsWith("image/") ? "pasted image" : "pasted file");
+  const add: Attachment[] = [];
+  const big: string[] = [];
+  const empty: string[] = [];
+  let over = 0;
+  for (const f of files) {
+    const name = nameOf(f);
+    if (f.size > ATTACH_MAX) big.push(name);
+    else if (f.size === 0) empty.push(name);
+    else if (v.attachments.length + add.length >= ATTACH_PER_MESSAGE) over++;
+    else add.push({ id: nextAttachment++, name, size: f.size, file: f, state: "ready" });
+  }
+  const said: string[] = [];
+  const quote = (ns: string[]) => ns.map((n) => `“${n}”`).join(", ");
+  if (big.length) said.push(`${quote(big)} ${big.length === 1 ? "is" : "are"} over the ${sizeWords(ATTACH_MAX)} limit.`);
+  if (empty.length) said.push(`${quote(empty)} ${empty.length === 1 ? "is" : "are"} empty.`);
+  if (over) said.push(`At most ${ATTACH_PER_MESSAGE} files in one message: ${over} left out.`);
+  put(path, {
+    attachments: [...v.attachments, ...add], sendWords: null,
+    attachWords: said.length ? { line: `Not attached: ${said.join(" ")}` } : null,
+  });
+}
+
+/** Take a file off the next message. Not while it is being sent. */
+export function removeAttachment(path: string, id: number): void {
+  const v = viewOf(path);
+  if (v.sending) return;
+  put(path, { attachments: v.attachments.filter((a) => a.id !== id), attachWords: null });
+}
+
+function setAttachment(path: string, id: number, patch: Partial<Attachment>): void {
+  put(path, { attachments: viewOf(path).attachments.map((a) => (a.id === id ? { ...a, ...patch } : a)) });
+}
+
+/** A file's bytes as base64, read in 32 KiB slices (`fromCharCode` takes
+ *  them as arguments). */
+async function base64Of(f: Blob): Promise<string> {
+  const b = new Uint8Array(await f.arrayBuffer());
+  let s = "";
+  for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode(...b.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+
+/** Upload each file the host does not have yet, in order. The paths, or
+ *  null when one was refused: then nothing is sent, and the chips say which. */
+async function uploadAll(t: Target): Promise<string[] | null> {
+  const paths: string[] = [];
+  for (const a of viewOf(t.path).attachments) {
+    if (a.path) { paths.push(a.path); continue; }
+    setAttachment(t.path, a.id, { state: "uploading" });
+    try {
+      const r = await invoke<AgentAttached>("agent_attach", { repo: t.repo, slug: t.slug, name: a.name, data: await base64Of(a.file) });
+      setAttachment(t.path, a.id, { state: "attached", path: r.path });
+      paths.push(r.path);
+    } catch (e) {
+      setAttachment(t.path, a.id, { state: "failed" });
+      const { unsupportedFeature } = await import("./ipcws");
+      const old = unsupportedFeature(e, "attachments");
+      if (old) {
+        attachOff = `${old}: update Worktrees on it to attach files`;
+        views = new Map([...views].map(([k, w]) => [k, { ...w, attachOff }]));
+      }
+      put(t.path, { sending: false, attachWords: old ? { line: `${old}. Nothing was sent.` } : attachWords(String(e), a.name) });
+      return null;
+    }
+  }
+  return paths;
+}
+
 /** The place's activity moved: a stop's "seen to land" has served its turn,
  *  and once a new turn starts, so has "Stopped.". */
 export function activityMoved(path: string, busy: boolean): void {
@@ -955,12 +1142,20 @@ export async function stopTurn(t: Target, agent: string): Promise<void> {
 
 let nextPending = 1;
 
-/** Send the draft. It clears only on a confirmed delivery. */
+/** Send the draft, and its attachments: each file is uploaded first, in
+ *  order, and only once every one is kept is the line sent, naming them
+ *  (`attachLine`). A refused upload sends nothing. The draft and the files
+ *  clear only on a confirmed delivery. */
 export async function sendDraft(t: Target, agent: string): Promise<void> {
   const v = viewOf(t.path);
-  const text = v.draft;
-  if (v.sending || !text.trim() || draftProblem(text)) return;
-  put(t.path, { sending: true, sendWords: null, stopWords: null });
+  const draft = v.draft;
+  const n = v.attachments.length;
+  if (v.sending || (!draft.trim() && !n) || attachProblem(draft, n)) return;
+  put(t.path, { sending: true, sendWords: null, stopWords: null, attachWords: null });
+  const paths = n ? await uploadAll(t) : [];
+  if (!paths) return;
+  const text = attachLine(draft, paths);
+  const sent = new Set(viewOf(t.path).attachments.map((a) => a.id));
   try {
     const r = await invoke<AgentSent>("agent_send", { repo: t.repo, slug: t.slug, session: t.session, text });
     const cur = viewOf(t.path);
@@ -970,7 +1165,8 @@ export async function sendDraft(t: Target, agent: string): Promise<void> {
       put(t.path, {
         sending: false, followUp: null,
         // Only if nothing new was typed meanwhile.
-        draft: cur.draft === text ? "" : cur.draft,
+        draft: cur.draft === draft ? "" : cur.draft,
+        attachments: cur.attachments.filter((a) => !sent.has(a.id)),
         pending: [...cur.pending, { id: nextPending++, text, sentAt: Date.now(), queued: r.queued }],
       });
     }

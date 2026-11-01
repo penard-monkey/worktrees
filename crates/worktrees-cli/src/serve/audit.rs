@@ -2009,6 +2009,23 @@ impl ConnAudit {
                     detail.insert("fingerprint".into(), json!(ident(f)));
                 }
             }
+            // A file for the agent: the size and a SHA-256 of its BYTES (the
+            // decoded upload), never the bytes and never the user's name for
+            // it, which can say what it holds (`payslip.pdf`). An upload that
+            // does not decode — too big, not base64 — is recorded by the size
+            // of what was sent. `kind` is the end's, from the answer.
+            "agent_attach" => match arg(args, "data") {
+                Some(Value::String(d)) => match worktrees_core::attach::decode(d) {
+                    Ok(b) => {
+                        detail.insert("bytes".into(), json!(b.len()));
+                        detail.insert("sha256".into(), json!(sha256_hex(&b)));
+                    }
+                    Err(_) => {
+                        detail.insert("encoded_bytes".into(), json!(d.len()));
+                    }
+                },
+                _ => {}
+            },
             // A multi-select's boxes: which, to which prompt.
             "agent_answer_many" => {
                 if let Some(Value::Array(cs)) = arg(args, "choices") {
@@ -2076,6 +2093,13 @@ impl ConnAudit {
         if let (true, Outcome::Ok(v)) = (p.cmd == "agent_interrupt", &outcome) {
             if let Some(b) = v.get("interrupted").and_then(Value::as_bool) {
                 detail.insert("interrupted".into(), json!(b));
+            }
+        }
+        // An attach's kind, the sniff's word — only one of its three, never
+        // anything else the answer carries (its `name` is the user's).
+        if let (true, Outcome::Ok(v)) = (p.cmd == "agent_attach", &outcome) {
+            if let Some(k) = v.get("kind").and_then(Value::as_str).filter(|k| ["image", "pdf", "text"].contains(k)) {
+                detail.insert("kind".into(), json!(k));
             }
         }
         let mut kind = "call";
@@ -3721,6 +3745,40 @@ mod tests {
         let answered = g.records("call", "agent_answer");
         assert_eq!((answered[0]["detail"]["choice"].as_u64(), answered[0]["detail"]["fingerprint"].as_str()), (Some(1), Some(fp.as_str())));
         assert_eq!(answered[0]["cap"], json!("answer"));
+    }
+
+    /// A file for the agent is recorded by its size, the SHA-256 of its
+    /// bytes and the kind the host found — never the bytes (nor their
+    /// base64) and never the user's name for it: not when it is kept, not
+    /// when the body refuses it, and a resolver's refusal once. It is
+    /// `instruct`, so a device's attach spends `DRIVE`.
+    #[test]
+    fn an_attach_is_recorded_by_size_hash_and_kind_never_its_bytes_or_name() {
+        let g = Gate::new("attach", phone_caller());
+        let c = phone(&g.a, 9);
+        let png: &[u8] = b"\x89PNG\r\n\x1a\nSECRET-BYTES-1";
+        let attach = |name: &str, bytes: &[u8], slug: &str| {
+            let data = worktrees_api::files::b64_encode(bytes);
+            through(&g.cx, &c, &g.w, "agent_attach", json!({ "repo": g.root, "slug": slug, "name": name, "data": data }))
+        };
+        let r = attach("SECRET-NAME-payslip.png", png, "(main)").unwrap();
+        assert_eq!((r["kind"].as_str(), r["bytes"].as_u64()), (Some("image"), Some(png.len() as u64)), "{r}");
+        let text_with_nul: &[u8] = b"SECRET-BYTES-2\0";
+        let refused = attach("SECRET-NAME-2.txt", text_with_nul, "(main)");
+        assert!(refused.as_ref().is_err_and(|e| e.as_str().is_some_and(|e| e.starts_with("attach-type: "))), "{refused:?}");
+        assert!(attach("SECRET-NAME-3.png", png, "no-such-place").is_err(), "the resolver refuses a place that is not one");
+        let raw = std::fs::read_to_string(g.d.join(FILE)).unwrap();
+        for secret in ["SECRET-NAME", "SECRET-BYTES", "payslip", &worktrees_api::files::b64_encode(png)[..12]] {
+            assert!(!raw.contains(secret), "{secret:?} reached the log:\n{raw}");
+        }
+        let rec = g.records("call", "agent_attach");
+        assert_eq!(rec.len(), 2, "{rec:#?}");
+        assert_eq!(rec[0]["detail"], json!({ "bytes": png.len(), "sha256": sha256_hex(png), "kind": "image" }), "exactly these");
+        assert_eq!(rec[0]["detail"]["sha256"], json!(r["sha256"]), "the hash the device was answered");
+        assert_eq!((rec[0]["cap"].as_str(), rec[0]["outcome"].as_str()), (Some("instruct"), Some("ok")));
+        assert_eq!(rec[1]["detail"], json!({ "bytes": text_with_nul.len(), "sha256": sha256_hex(text_with_nul) }), "no kind on a refusal");
+        assert_eq!(rec[1]["outcome"], json!("err"));
+        assert_eq!(g.records("refused", "agent_attach").len(), 1, "recorded once");
     }
 
     /// Free text into a prompt's field is recorded like a line — length,

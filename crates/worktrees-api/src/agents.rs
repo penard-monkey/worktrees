@@ -67,6 +67,14 @@
 //! **Turns are read from the transcript, never the pane** (`worktrees_core::
 //! turns`), and are data.
 //!
+//! **A file for the agent is uploaded, never typed** (`agent_attach`,
+//! `docs/proposals/chat-attachments.md`): the host keeps the bytes in the
+//! place's own folder (`worktrees_core::attach`, which decides what they are
+//! from the bytes alone) and answers with a path relative to the place
+//! root, and the client names that path in a line it sends with
+//! `agent_send`. Nothing here types it: `agent_send` stays the one path that
+//! types into Claude.
+//!
 //! Every pane and file this touches goes through [`AgentIo`], so serve's
 //! tests drive the rows against scripted panes and never a tmux server.
 
@@ -79,9 +87,9 @@ use sha2::{Digest, Sha256};
 use worktrees_core::harness::{self, Delivery, SendOutcome};
 use worktrees_core::pending::{self, Asked, Forget};
 use worktrees_core::prompt::{self, HostOnly, Modal};
-use worktrees_core::store::{self, RemoteSend};
+use worktrees_core::store::{self, RemoteAttach, RemoteSend};
 use worktrees_core::tmux::{self, Key, PaneId, PaneList};
-use worktrees_core::{activity, agent, codex, provider, turns, Project};
+use worktrees_core::{activity, agent, attach, codex, provider, turns, Project};
 
 use crate::Ctx;
 
@@ -736,6 +744,75 @@ fn send_note(o: &SendOutcome) -> String {
         SendOutcome::Unconfirmed => "Typed, but the submission could not be confirmed; look before sending it again.".into(),
         SendOutcome::EnterFailed(e) => format!("Typed, but Enter failed ({e}); look before sending it again."),
     }
+}
+
+/// One attach at a time, host-wide: a place's count and bytes are read and
+/// then added to, and two uploads side by side could each see room for one
+/// more. Uploads are rare and a write is milliseconds; the place lock that
+/// answers and sends take is not held, so an upload never waits on a prompt.
+static ATTACH: Mutex<()> = Mutex::new(());
+
+/// `agent_attach`: keep `data` (base64) in this place's attachments folder —
+/// `{path, bytes, sha256, kind, name}`, `path` relative to the place root,
+/// `kind` `image`, `pdf` or `text`, `name` the display name cleaned. `name`
+/// is for display: it never reaches the filesystem. Refused with a stable
+/// token (`attach::ERR_*`): `attach-size: <max>` before anything is decoded,
+/// `attach-type: <what> (accepted: …)` by the bytes, `attach-files: <max>`
+/// and `attach-bytes: <max>` for a full place, `attach-unsafe` for a folder
+/// that is a link, or that git would show. A device's attach is stamped on
+/// the place (`last_remote_attach`). No agent need be running: the file is
+/// read when a line names it.
+pub fn agent_attach(ctx: &Ctx, repo: String, slug: String, name: String, data: String) -> Result<Value, String> {
+    let bytes = attach::decode(&data)?;
+    let project = discover(&repo)?;
+    let place = PathBuf::from(project.place_dir(&slug));
+    let stored = {
+        let _one = ATTACH.lock().unwrap_or_else(|e| e.into_inner());
+        attach::store(&place, Path::new(&project.git_common), &name, &bytes)?
+    };
+    if let Some(by) = ctx.by().filter(store::By::is_device) {
+        let stamp = RemoteAttach { by, path: stored.path.clone(), at: worktrees_core::sysclock::now_epoch() };
+        if let Err(e) = store::edit(&repo, &slug, |d| d.last_remote_attach = Some(stamp)) {
+            crate::log::log("warn", &format!("agent_attach: could not stamp {repo}:{slug}: {e}"));
+        }
+    }
+    let sha256: String = Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
+    Ok(json!({
+        "path": stored.path,
+        "bytes": stored.bytes,
+        "sha256": sha256,
+        "kind": stored.kind.as_str(),
+        "name": stored.name,
+    }))
+}
+
+/// The poll's half of the seven-day cleanup (`attach::sweep`, the other half
+/// being the next attach in a place): every place of every registered
+/// project — the root, and each real directory under its `.worktrees/` — at
+/// serve's start and then hourly. A `read_dir` per project and an `lstat` per
+/// place; no git, and nothing made where no folder is.
+pub fn sweep_attachments(ctx: &Ctx) {
+    let roots = crate::projects::read_projects(ctx);
+    let gone = sweep_attachments_in(&roots, std::time::SystemTime::now());
+    if gone > 0 {
+        crate::log::info(&format!("attachments: removed {gone} file(s) older than seven days"));
+    }
+}
+
+/// [`sweep_attachments`] over `roots` at `now`: how many files went.
+pub fn sweep_attachments_in(roots: &[String], now: std::time::SystemTime) -> usize {
+    let mut gone = 0;
+    for root in roots {
+        let root = Path::new(root);
+        gone += attach::sweep(root, now);
+        let Ok(rd) = std::fs::read_dir(root.join(".worktrees")) else { continue };
+        for e in rd.flatten() {
+            if e.file_type().is_ok_and(|t| t.is_dir()) {
+                gone += attach::sweep(&e.path(), now);
+            }
+        }
+    }
+    gone
 }
 
 /// `agent_interrupt`: stop the turn running in this place — `{interrupted:
@@ -2385,5 +2462,41 @@ mod moved_tests {
         agent::locate(&mut probes, &here);
         assert!(probes[0].live.is_none(), "this server's %0 does not vouch for it");
         assert_eq!(lane_probe(&probes, &lane).and_then(|p| p.session_id.clone()), None);
+    }
+}
+
+#[cfg(test)]
+mod attach_sweep_tests {
+    use std::path::Path;
+    use std::time::{Duration, SystemTime};
+
+    /// The poll's sweep reaches every place of a registered project — the
+    /// root and each real directory under `.worktrees/` — removes only files
+    /// past seven days, and never walks into a place that is a symlink.
+    #[test]
+    fn the_poll_sweeps_old_attachments_in_every_real_place() {
+        let base = std::env::temp_dir().join(format!("wt-agents-attach-sweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (root, elsewhere) = (base.join("repo"), base.join("elsewhere"));
+        let now = SystemTime::now();
+        let put = |place: &Path, name: &str, days: u64| {
+            let dir = place.join(worktrees_core::attach::DIR);
+            std::fs::create_dir_all(&dir).unwrap();
+            let f = dir.join(name);
+            std::fs::write(&f, "x").unwrap();
+            std::fs::File::options().write(true).open(&f).unwrap().set_modified(now - Duration::from_secs(days * 86_400)).unwrap();
+            f
+        };
+        let old_main = put(&root, "20261001-0000000000000001.png", 8);
+        let new_main = put(&root, "20261031-0000000000000002.png", 1);
+        let old_lane = put(&root.join(".worktrees/lane"), "20261001-0000000000000003.txt", 9);
+        let old_far = put(&elsewhere, "20261001-0000000000000004.pdf", 30);
+        std::os::unix::fs::symlink(&elsewhere, root.join(".worktrees/linked")).unwrap();
+        let gone = super::sweep_attachments_in(&[root.to_string_lossy().into_owned()], now);
+        assert_eq!(gone, 2);
+        assert!(!old_main.exists() && !old_lane.exists(), "past seven days, in the root and in a place: gone");
+        assert!(new_main.exists(), "a day old: kept");
+        assert!(old_far.exists(), "a place that is a link is not walked into");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

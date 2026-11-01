@@ -3362,6 +3362,53 @@ mod devices {
         assert_eq!(pane.keys.lock().unwrap().len(), 1);
     }
 
+    /// `agent_attach` through the real chain: `instruct` (it leads to the
+    /// agent reading the file), so a device holding `write` and `answer` but
+    /// not `instruct` is denied it, step-up or not; one holding it is asked
+    /// for a step-up first, and nothing is written into the place until one
+    /// holds. Then the file is kept, answered by its path, and the place is
+    /// stamped with who attached what (`last_remote_attach`), never the
+    /// user's name for it. The body's refusals are its stable tokens.
+    #[test]
+    fn an_attach_needs_instruct_and_a_step_up_and_is_stamped() {
+        let png: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR";
+        let setup = |tag: &str, caps: &[Capability]| {
+            let e = engine(tag, vec![]);
+            let a = e.dir.join("a");
+            assert!(std::process::Command::new("git").args(["init", "-q"]).arg(&a).status().unwrap().success());
+            let (rec, k) = iphone(&e.reg, caps);
+            let ex = [9u8; 32];
+            let c = e.connect_with(caller(&rec), Some(ex));
+            let repo = s(&a);
+            let up = move |name: &str, bytes: &[u8]| json!({"repo": repo, "slug": "(main)", "name": name, "data": worktrees_api::files::b64_encode(bytes)});
+            (e, c, k, ex, a, up, rec.id)
+        };
+        let folder = |a: &std::path::Path| a.join(worktrees_core::attach::DIR);
+        let (e, mut c, k, ex, a, up, _) = setup("attach-w", &[Read, Write, Answer]);
+        assert_eq!(e.rpc(&mut c, "agent_attach", up("shot.png", png))["err"], json!("denied"));
+        prove(&e, &mut c, &k, ex);
+        assert_eq!(e.rpc(&mut c, "agent_attach", up("shot.png", png))["err"], json!("denied"), "a step-up is no grant");
+        assert!(!folder(&a).exists(), "nothing written");
+        let (e, mut c, k, ex, a, up, id) = setup("attach-i", &[Read, Instruct]);
+        assert_eq!(e.rpc(&mut c, "agent_attach", up("shot.png", png))["err"], json!("step-up required"));
+        assert!(!folder(&a).exists(), "nothing written before the step-up");
+        prove(&e, &mut c, &k, ex);
+        let r = e.rpc(&mut c, "agent_attach", up("my secret shot.png", png));
+        let path = r["ok"]["path"].as_str().unwrap_or_else(|| panic!("{r}")).to_string();
+        assert!(path.starts_with(".worktrees-attachments/") && path.ends_with(".png"), "{path}");
+        assert_eq!((r["ok"]["kind"].as_str(), r["ok"]["bytes"].as_u64(), r["ok"]["name"].as_str()), (Some("image"), Some(png.len() as u64), Some("my secret shot.png")));
+        assert_eq!(std::fs::read(a.join(&path)).unwrap(), png);
+        let stamp = worktrees_core::store::read_lenient(&s(&a)).places["(main)"].last_remote_attach.clone().expect("stamped");
+        assert_eq!((stamp.path.as_str(), stamp.by.device.clone()), (path.as_str(), worktrees_core::authz::Device::Paired(id)));
+        let declared = std::fs::read_to_string(a.join(".worktrees.places.json")).unwrap();
+        assert!(!declared.contains("secret"), "the user's name for it is never stored: {declared}");
+        // The body's refusals: the bytes decide, and each limit has its token.
+        let r = e.rpc(&mut c, "agent_attach", up("x.png", b"\0\0\0\x18ftypheic"));
+        assert_eq!(r["err"], json!(format!("attach-type: HEIC ({})", worktrees_core::attach::ACCEPTED)));
+        let big = json!({"repo": s(&a), "slug": "(main)", "name": "big", "data": "A".repeat((worktrees_core::attach::MAX_BYTES / 3 + 1) * 4)});
+        assert_eq!(e.rpc(&mut c, "agent_attach", big)["err"], json!(format!("attach-size: {}", worktrees_core::attach::MAX_BYTES)));
+    }
+
     /// The bypass a review found: dock shells are the process's, so a device
     /// with `stream` could type into the shell the DESKTOP opened without ever
     /// opening one itself — and only opening was gated. Typing into a shell
@@ -3862,6 +3909,81 @@ fn a_device_past_its_start_budget_is_told_when_it_may_start_again() {
     }
     let r = audit_record(&l, |r| r["detail"]["limit"] == "launch_rate");
     assert_eq!((r["detail"]["episode"].as_str(), r["detail"]["answered"].as_str()), (Some("began"), Some("start-budget")), "{r}");
+}
+
+/// **Uploads have a budget with a word of its own.** A device past its
+/// upload bucket (`agent_attach`, decoded bytes) is told `attach-budget:
+/// <seconds until this upload fits>`; the bucket is the DEVICE's, across its
+/// connections; the desk has none; and the audit has it as ONE episode of
+/// `upload_rate`, answered by that word, as `start-budget` is.
+#[test]
+fn a_device_past_its_upload_budget_is_told_when_it_may_attach_again() {
+    let mut b = BUDGETS;
+    b.device.uploads = Rate { per_sec: 1024.0 * 1024.0 / 60.0, burst: 2.0 * 1024.0 * 1024.0 };
+    let l = live_budgeted("uploadbudget", b);
+    // 1.5 MiB decoded, exactly.
+    let up = || json!({ "repo": "/nowhere", "slug": "x", "name": "a.png", "data": "A".repeat(1536 * 1024 / 3 * 4) });
+    as_device(&l, "phone");
+    let mut phone = client(&l);
+    let first = rpc(&mut phone, json!(1), "agent_attach", up());
+    assert!(!first["err"].as_str().unwrap_or("").starts_with("attach-budget"), "the burst holds one: {first}");
+    assert_eq!(rpc(&mut phone, json!(2), "agent_attach", up())["err"], json!("attach-budget: 60"), "1 MiB short, at 1 MiB a minute");
+    as_device(&l, "phone");
+    let mut again = client(&l);
+    assert_eq!(rpc(&mut again, json!(3), "agent_attach", up())["err"], json!("attach-budget: 60"), "the device's, across its connections");
+    assert!(rpc(&mut phone, json!(4), "get_settings", json!({})).get("ok").is_some(), "other rows are another limit");
+    let mut desk = client(&l);
+    for i in 0..4 {
+        let r = rpc(&mut desk, json!(i), "agent_attach", up());
+        assert!(!r["err"].as_str().unwrap_or("").starts_with("attach-budget"), "the desk has no upload budget: {r}");
+    }
+    let r = audit_record(&l, |r| r["detail"]["limit"] == "upload_rate");
+    assert_eq!((r["detail"]["episode"].as_str(), r["detail"]["answered"].as_str()), (Some("began"), Some("attach-budget")), "{r}");
+    let refusals = audit_lines(&l).into_iter().filter(|r| r["detail"]["limit"] == "upload_rate").count();
+    assert_eq!(refusals, 1, "one record as the episode begins, never one per refusal");
+}
+
+/// **A large upload does not hold up what serve SENDS on its connection**
+/// ((main)'s question for the phone, 2026-11-01). The connection's halves
+/// are split (`conn.rs`: `ws.split()`, and ONE writer task drains the
+/// outbox), so while the reader is still taking in an 8 MiB attachment's
+/// frame — ~11 MB of base64, trickled here over ~3 s — a reply queued in the
+/// meantime goes out at once: request 1 sleeps 500 ms and is answered long
+/// before the upload has finished arriving. Events take the same outbox.
+/// What a big frame DOES hold up is the requests behind it on the same
+/// socket, which arrive after it; a client that must keep asking while it
+/// uploads can use a second connection.
+#[test]
+fn a_reply_goes_out_while_a_large_upload_is_still_arriving() {
+    let l = live("bigframe");
+    let mut ws = client(&l);
+    let data = "A".repeat(worktrees_core::attach::MAX_BYTES / 3 * 4);
+    let req = json!({ "id": 2, "cmd": "agent_attach", "args": { "repo": "/nowhere", "slug": "x", "name": "big.png", "data": data } }).to_string();
+    let mut raw = ws.get_ref().try_clone().unwrap();
+    let t0 = std::time::Instant::now();
+    send(&mut ws, json!(1), TEST_SHARED, json!({ "ms": 500, "tag": "bigframe" }));
+    let writer = std::thread::spawn(move || {
+        // ONE masked text frame, as a browser or the phone sends it.
+        let payload = req.as_bytes();
+        let mask = [3u8, 1, 4, 1];
+        let mut f = vec![0x81, 0x80 | 127];
+        f.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+        f.extend_from_slice(&mask);
+        f.extend(payload.iter().enumerate().map(|(j, b)| b ^ mask[j % 4]));
+        for part in f.chunks(f.len() / 60 + 1) {
+            raw.write_all(part).unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        (t0.elapsed(), payload.len())
+    });
+    let first = frame(&mut ws, Duration::from_secs(20)).expect("a reply");
+    let replied = t0.elapsed();
+    let (sent, size) = writer.join().unwrap();
+    assert_eq!(first["id"], json!(1), "{first}");
+    eprintln!("measured: request 1 answered at {replied:?}; the {size}-byte upload frame took {sent:?} to arrive");
+    assert!(replied + Duration::from_millis(1000) < sent, "the reply waited for the upload: answered at {replied:?}, upload done at {sent:?}");
+    let second = frame(&mut ws, Duration::from_secs(20)).expect("the upload's own answer");
+    assert_eq!(second["id"], json!(2), "{second}");
 }
 
 /// **Devices cannot take the bodies the desk needs.** Remote bodies have a

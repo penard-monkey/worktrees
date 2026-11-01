@@ -119,7 +119,7 @@ fn places_stamps(view: &View, snapshot: &mut Value) {
 
 /// The declared fields that say which caller did something there: each is a
 /// `store::By` (`{principal, device}`) flattened with what it did.
-pub const STAMPS: &[&str] = &["launched_by", "last_remote_instruction", "last_remote_send", "note_by", "title_by"];
+pub const STAMPS: &[&str] = &["launched_by", "last_remote_instruction", "last_remote_send", "last_remote_attach", "note_by", "title_by"];
 
 /// What another device's stamp keeps: who (the principal, and the device by
 /// KIND and name) and what (the file, the session, when). Named rather than
