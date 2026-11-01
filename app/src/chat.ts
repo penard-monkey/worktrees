@@ -466,6 +466,137 @@ export function boxesOf(p: ReadablePrompt): { boxes: PromptChoice[]; freeBox: Pr
   return { boxes, freeBox: boxes.find((c) => c.text === "field" && c.host_only === "text") ?? null };
 }
 
+// ── the card's keys ─────────────────────────────────────────────────────────
+// A digit does what a click on that choice does, and Enter is the card's Send
+// button: two keys, as two clicks, because an answer can run a command. Claude's
+// own terminal answers on the digit alone; this card never does.
+
+/** Where the keyboard is, as the card's keys see it:
+ *  - `composer`: the chat's own message field. A text field like any other,
+ *    named so that an EMPTY one can hand the keyboard to a new prompt;
+ *  - `editable`: any other text input, textarea, select or contenteditable;
+ *  - `xterm`: a terminal's helper textarea (the dock shell): its digits are
+ *    the shell's;
+ *  - `card`: the prompt card itself, or one of its choices or boxes, where a
+ *    native Enter would click the focused choice AGAIN (Chromium focuses a
+ *    clicked button; WebKit focuses the card around it);
+ *  - `control`: any other button, link or widget, whose Enter is its own;
+ *  - `none`: nothing that takes keys (the body, text). */
+export type KeyFocus = "composer" | "editable" | "xterm" | "card" | "control" | "none";
+
+const NOT_TEXT = new Set(["button", "checkbox", "color", "file", "image", "radio", "range", "reset", "submit"]);
+const TEXT_ROLES = new Set(["textbox", "searchbox", "combobox", "spinbutton"]);
+const CONTROL_ROLES = new Set(["button", "link", "checkbox", "radio", "switch", "tab", "menuitem", "menuitemcheckbox", "menuitemradio", "option", "treeitem", "slider", "separator", "gridcell", "row"]);
+
+/** What `el` (the focused element, read through any shadow root) is to the
+ *  card's keys. `card` is the card's root element. */
+export function keyFocusOf(el: Element | null, card: Element | null): KeyFocus {
+  if (!el || el.tagName === "BODY" || el.tagName === "HTML") return "none";
+  if (el.classList.contains("xterm-helper-textarea") || el.closest(".xterm")) return "xterm";
+  if (el.classList.contains("chat-field")) return "composer";
+  const tag = el.tagName;
+  const type = tag === "INPUT" ? (el.getAttribute("type") ?? "text").toLowerCase() : "";
+  const role = el.getAttribute("role") ?? "";
+  if (tag === "TEXTAREA" || tag === "SELECT" || (tag === "INPUT" && !NOT_TEXT.has(type)) || TEXT_ROLES.has(role) || (el as HTMLElement).isContentEditable) return "editable";
+  if (card && (el === card || (card.contains(el) && (el.classList.contains("chat-choice") || (type === "checkbox" && !!el.closest(".chat-box")))))) return "card";
+  if (tag === "BUTTON" || tag === "SUMMARY" || tag === "INPUT" || (tag === "A" && el.hasAttribute("href")) || CONTROL_ROLES.has(role)) return "control";
+  if (el.hasAttribute("tabindex") && Number(el.getAttribute("tabindex")) >= 0) return "control";
+  return "none";
+}
+
+/** How long after a card takes the keyboard on its own every key stays the
+ *  composer's: a key pressed that soon was aimed before the card was seen
+ *  (Firefox holds its security dialogs' buttons the same way, for 1 s). */
+export const CARD_GRACE_MS = 1000;
+
+/** The parts of a `KeyboardEvent` the card's keys read. */
+export type CardKeyEvent = { key: string; metaKey: boolean; ctrlKey: boolean; altKey: boolean; shiftKey: boolean; isComposing: boolean; repeat: boolean };
+export type CardKeyState = {
+  focus: KeyFocus;
+  /** ms since this card took the keyboard from the composer on its own
+   *  (`cardTakesFocus`); null when it did not. */
+  sinceTook: number | null;
+  /** `escapeDepth()`: a modal, menu, sheet or popover is up. */
+  escapeDepth: number;
+  /** The card is on screen: mounted, laid out, not inert, not under the reader. */
+  shown: boolean;
+  /** `ChatView.answering`. */
+  answering: boolean;
+  /** `ChatView.selected`. */
+  selected: number | null;
+  /** The card's Send button is there and enabled. */
+  canSend: boolean;
+};
+/** What a key does on the card:
+ *  - `select`: `selectChoice(path, choice)`, as a click on choice `n` does
+ *    (a click on the selected choice unselects it, so `choice` is null), and
+ *    `field` focuses the text the newly selected choice takes;
+ *  - `tick`: `toggleTick(path, n)`, as a click on box `n` does;
+ *  - `send`: what the Send button does;
+ *  - `hold`: an Enter with nothing to send, kept from clicking a focused choice;
+ *  - `composer`: the person was typing a message: the composer gets the
+ *    keyboard back, and the key goes on to it, unprevented. */
+export type CardKeyAct =
+  | { act: "select"; n: number; choice: number | null; field: boolean }
+  | { act: "tick"; n: number }
+  | { act: "send" }
+  | { act: "hold" }
+  | { act: "composer" };
+
+/** The card's answer to a key, or null when the key is not the card's (and
+ *  must not be prevented). Never while a modal is up, a modifier is held, an
+ *  IME is composing, or the keyboard is in a text field or a terminal; no
+ *  answer while one is in flight. Enter only from the card or from nowhere:
+ *  another control's Enter is its own.
+ *
+ *  Typing at the card is typing a message, so the composer gets it: a letter
+ *  (or any key in the first `CARD_GRACE_MS` after the card took the keyboard
+ *  on its own). Without that, "2 things⏎" begun in an empty composer as a
+ *  prompt arrived would select choice 2, drop the words, and SEND it. */
+export function cardKey(e: CardKeyEvent, s: CardKeyState, p: ReadablePrompt): CardKeyAct | null {
+  if (e.metaKey || e.ctrlKey || e.altKey || e.isComposing || e.repeat) return null;
+  if (!s.shown || s.escapeDepth > 0) return null;
+  if (s.focus === "composer" || s.focus === "editable" || s.focus === "xterm") return null;
+  if (s.focus === "card") {
+    const typed = e.key.length === 1 && e.key !== " ";
+    if (s.sinceTook !== null && s.sinceTook < CARD_GRACE_MS && (typed || e.key === "Enter")) return { act: "composer" };
+    if (typed && !/^[0-9]$/.test(e.key)) return { act: "composer" };
+  }
+  if (e.shiftKey || s.answering) return null;
+  if (e.key === "Enter") {
+    if (s.focus !== "card" && s.focus !== "none") return null;
+    return s.canSend ? { act: "send" } : { act: "hold" };
+  }
+  if (!/^[1-9]$/.test(e.key)) return null;
+  const n = Number(e.key);
+  const c = p.choices.find((x) => x.n === n);
+  // A choice the card draws disabled is not there for a key either.
+  if (!c || !choiceOpen(c).open) return null;
+  if (p.multi && c.checked !== undefined) return { act: "tick", n };
+  const on = s.selected !== n;
+  return { act: "select", n, choice: on ? n : null, field: on && choiceOpen(c).how !== "plain" };
+}
+
+/** Whether a card takes the keyboard as it appears: from the chat's own
+ *  composer while it is EMPTY, never from anywhere else (the dock shell, a
+ *  find field, a sheet), and once per prompt, so a person who clicks back into
+ *  the composer is not pulled out again by the next read of the same prompt.
+ *  The composer cannot send while a prompt waits, so an empty one loses
+ *  nothing; one holding text keeps the keyboard. */
+export function cardTakesFocus(a: { fingerprint: string | null; seen: string | null; focus: KeyFocus; draft: string; escapeDepth: number; shown: boolean }): boolean {
+  return !!a.fingerprint && a.fingerprint !== a.seen && a.focus === "composer" && a.draft === "" && a.escapeDepth === 0 && a.shown;
+}
+
+/** The digits that choose on this card, as its hint says them: "1–3", "1", or
+ *  null when no choice is open. */
+export function cardDigits(p: ReadablePrompt): string | null {
+  const ns = p.choices.filter((c) => c.n >= 1 && c.n <= 9 && choiceOpen(c).open).map((c) => c.n);
+  if (!ns.length) return null;
+  const lo = Math.min(...ns);
+  const hi = Math.max(...ns);
+  return lo === hi ? String(lo) : `${lo}–${hi}`;
+}
+
 /** One row of a diff between two texts. */
 export type DiffLine = { k: " " | "-" | "+"; text: string };
 /** The most cells the line LCS may fill before it gives up on alignment. */

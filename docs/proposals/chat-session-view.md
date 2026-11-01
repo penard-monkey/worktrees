@@ -292,7 +292,12 @@ for each line), as a sent message's pending bubble does.
   message" / "N new messages" and "Claude needs input" (`chat.ts` `hear`,
   held by `chat-announce-check.mjs`; `__mock.agentReply` drives it). Checked
   at the DOM in Chromium and WebKit, not yet heard with VoiceOver;
-- keyboard answers (1/2/3);
+- keyboard answers: **built** (`feat/chat-answer-keys`). A digit is a click
+  on that choice (it selects, ticks, or selects and focuses the choice's
+  text), Enter is the card's Send, and a new prompt takes the keyboard from an
+  empty composer, once per prompt; a word typed at the card goes back to the
+  composer, so a message never answers. Checked by `chat-keys-check.mjs`, and
+  in the mock harness in Chromium and WebKit, counting one answer per Enter;
 - a link's domain shown after its text.
 
 ## 8. Server asks (listed, not built)
