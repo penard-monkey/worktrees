@@ -884,17 +884,40 @@ function Composer(props: {
   }, []);
   useEffect(() => { if (props.followUp) field.current?.focus({ preventScroll: true }); }, [props.followUp]);
 
-  // Grow with the text, to six lines; a long line wraps, it never scrolls sideways.
-  useLayoutEffect(() => {
+  // Grow with the text, to six lines; a long line wraps, it never scrolls
+  // sideways. The field scrolls only past the cap: with "always show scroll
+  // bars" a sub-pixel shortfall (a 1.45 line height against an integer
+  // scrollHeight) drew a vertical bar, whose width then drew a horizontal one.
+  const fit = useCallback(() => {
     const el = field.current;
-    if (!el) return;
+    // Hidden (display: none): nothing to measure; the observer refits it on show.
+    if (!el || el.clientWidth === 0) return;
     el.style.height = "auto";
     const cs = getComputedStyle(el);
     const line = parseFloat(cs.lineHeight) || 20;
     const pad = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
     const border = parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth);
-    el.style.height = `${Math.min(el.scrollHeight, line * 6 + pad) + border}px`;
-  }, [text]);
+    const cap = Math.ceil(line * 6 + pad);
+    const over = el.scrollHeight > cap;
+    el.style.overflowY = over ? "auto" : "hidden";
+    el.style.height = `${Math.ceil(Math.min(el.scrollHeight, cap) + border)}px`;
+  }, [field]);
+  useLayoutEffect(fit, [text, fit]);
+  // A width change rewraps the text without touching it: the window, the dock,
+  // the 560px gutter switch. Refit then, and only then (a height change is ours).
+  useEffect(() => {
+    const el = field.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    let w = -1;
+    const ro = new ResizeObserver((es) => {
+      const cw = es[es.length - 1].contentRect.width;
+      if (cw === w) return;
+      w = cw;
+      fit();
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [field, fit]);
 
   const canSend = !!text.trim() && !problem && !props.waiting && !v.sending;
   const send = () => { if (canSend) void sendDraft(target, agent); };

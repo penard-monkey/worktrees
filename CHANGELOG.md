@@ -5,6 +5,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Fixed
+- **The chat's message box no longer shows scroll bars or overlaps the line
+  under it.** With macOS set to always show scroll bars, an empty box at
+  some window sizes drew a horizontal and a vertical bar inside itself,
+  clipped "Message Claude", and covered the "One line · Enter sends" row.
+  The box now scrolls only once a message passes six lines, and it fits its
+  text again when the chat gets wider or narrower, such as when the window
+  is resized or the dock opens.
+
 ## [0.45.1] - 2026-11-01
 
 ### Changed
