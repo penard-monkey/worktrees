@@ -731,6 +731,35 @@ pub fn agent_attach(ctx: &Ctx, repo: String, slug: String, name: String, data: S
     }))
 }
 
+/// The poll's half of the seven-day cleanup (`attach::sweep`, the other half
+/// being the next attach in a place): every place of every registered
+/// project — the root, and each real directory under its `.worktrees/` — at
+/// serve's start and then hourly. A `read_dir` per project and an `lstat` per
+/// place; no git, and nothing made where no folder is.
+pub fn sweep_attachments(ctx: &Ctx) {
+    let roots = crate::projects::read_projects(ctx);
+    let gone = sweep_attachments_in(&roots, std::time::SystemTime::now());
+    if gone > 0 {
+        crate::log::info(&format!("attachments: removed {gone} file(s) older than seven days"));
+    }
+}
+
+/// [`sweep_attachments`] over `roots` at `now`: how many files went.
+pub fn sweep_attachments_in(roots: &[String], now: std::time::SystemTime) -> usize {
+    let mut gone = 0;
+    for root in roots {
+        let root = Path::new(root);
+        gone += attach::sweep(root, now);
+        let Ok(rd) = std::fs::read_dir(root.join(".worktrees")) else { continue };
+        for e in rd.flatten() {
+            if e.file_type().is_ok_and(|t| t.is_dir()) {
+                gone += attach::sweep(&e.path(), now);
+            }
+        }
+    }
+    gone
+}
+
 /// `agent_interrupt`: stop the turn running in this place — `{interrupted:
 /// true, harness, session, note}` once it is seen to stop, or `{interrupted:
 /// false, unconfirmed: true, …}` when it was not, which a client must never
@@ -2226,5 +2255,41 @@ mod moved_tests {
         agent::locate(&mut probes, &here);
         assert!(probes[0].live.is_none(), "this server's %0 does not vouch for it");
         assert_eq!(lane_probe(&probes, &lane).and_then(|p| p.session_id.clone()), None);
+    }
+}
+
+#[cfg(test)]
+mod attach_sweep_tests {
+    use std::path::Path;
+    use std::time::{Duration, SystemTime};
+
+    /// The poll's sweep reaches every place of a registered project — the
+    /// root and each real directory under `.worktrees/` — removes only files
+    /// past seven days, and never walks into a place that is a symlink.
+    #[test]
+    fn the_poll_sweeps_old_attachments_in_every_real_place() {
+        let base = std::env::temp_dir().join(format!("wt-agents-attach-sweep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (root, elsewhere) = (base.join("repo"), base.join("elsewhere"));
+        let now = SystemTime::now();
+        let put = |place: &Path, name: &str, days: u64| {
+            let dir = place.join(worktrees_core::attach::DIR);
+            std::fs::create_dir_all(&dir).unwrap();
+            let f = dir.join(name);
+            std::fs::write(&f, "x").unwrap();
+            std::fs::File::options().write(true).open(&f).unwrap().set_modified(now - Duration::from_secs(days * 86_400)).unwrap();
+            f
+        };
+        let old_main = put(&root, "20261001-0000000000000001.png", 8);
+        let new_main = put(&root, "20261031-0000000000000002.png", 1);
+        let old_lane = put(&root.join(".worktrees/lane"), "20261001-0000000000000003.txt", 9);
+        let old_far = put(&elsewhere, "20261001-0000000000000004.pdf", 30);
+        std::os::unix::fs::symlink(&elsewhere, root.join(".worktrees/linked")).unwrap();
+        let gone = super::sweep_attachments_in(&[root.to_string_lossy().into_owned()], now);
+        assert_eq!(gone, 2);
+        assert!(!old_main.exists() && !old_lane.exists(), "past seven days, in the root and in a place: gone");
+        assert!(new_main.exists(), "a day old: kept");
+        assert!(old_far.exists(), "a place that is a link is not walked into");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
