@@ -49,7 +49,7 @@ server asks are listed in §8. None of them blocks a first release.
 | Where | A per-place **Chat \| Terminal** switch in the agent cell's label row | A separate screen |
 | Default | **Terminal**, for every place. The switch shows only while Settings → Behavior → "Chat view" is on (a preview, off) | — |
 | The terminal under the chat | **Mounted, hidden at its own size, and `inert`**. No resize reaches the pty, and the way back keeps the scrollback (the same rule as reading mode) | No terminal |
-| Remembered | **No** (prototype). Every place opens on its terminal. The proposal for a release is an optional `place_panels[*].agent_view` | — |
+| Remembered | **Per place** (2026-11-01): an optional `place_panels[*].agent_view`, absent = Terminal and with no global, kept across place switches and relaunches and while Chat view is off | — |
 | Live | Refetch on this place's `sessions:busy` / `sessions:done` change, on a send or an answer, and on Refresh. **While busy, re-read the turns every 10 s** if the chat is visible and the window is not hidden | Events only, no polling |
 | Enter | **Sends.** No key adds a line break | Return does nothing; only the button sends |
 | A prompt's choice | **Two clicks:** select, then "Send answer: “Yes”" | Two taps |
@@ -262,7 +262,7 @@ for each line), as a sent message's pending bubble does.
 | `app/src/ChatPane.tsx` | The chat, the prompt card, the composer, and the `AgentViewSwitch` |
 | `app/src/ChatPane.css` | Plain CSS on `tokens.css` |
 | `app/src/App.tsx` | The switch in `.agent-label`, the terminal wrapped in a hidden, `inert` `.agent-term`, and the activity, done stamp and pane draft passed in |
-| `app/src/settings.ts`, `SettingsSheet.tsx` | `chat_view` (default off), Behavior → Chat view |
+| `app/src/settings.ts`, `SettingsSheet.tsx` | `chat_view` (default off), Behavior → Chat view; each place's `agent_view` (`agentViewFor`, `withAgentView`) |
 | `app/src/mock/install.ts` | `?turns=answered` (a transcript whose prompts were answered, as `steps`; a mock answer lands in the transcript 1.5 s later), per-harness turns, the pi/kimi refusal, `?agentsend=mid\|nocomposer\|unconfirmed`, `?agentprompt=permission\|question\|multi\|plan\|tall\|unreadable\|off` (`,waiting` for waiting places only; a Codex place gets Codex's approval), `?agentanswer=unseen`, `?activity=<n>` |
 
 **Checked:**
@@ -285,8 +285,8 @@ for each line), as a sent message's pending bubble does.
 
 **Not done:**
 - ~~persisting the choice~~: done. Each place keeps its view in `place_panels` (`agent_view`, absent = Terminal, no global), across switches and relaunches, and keeps it while Chat view is off (`placeview-check.mjs`);
-- a drift check holding `chat.ts`'s copy of `agents.rs`'s strings and
-  `typed_line_ok`'s rule (`agent-rows-check.mjs` is the place for it);
+- ~~a drift check holding `chat.ts`'s copy of `agents.rs`'s strings and
+  `typed_line_ok`'s rule~~: done, in its own `chatmirror-check.mjs`;
 - the iOS "New messages" announcement for VoiceOver;
 - keyboard answers (1/2/3);
 - a link's domain shown after its text.

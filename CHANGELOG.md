@@ -8,10 +8,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ### Added
 - **A chat view of a place's agent, beside its terminal (a preview, off by
   default).** Turn it on in Settings → Behavior → Chat view. Each place's
-  agent then gets a **Chat | Terminal** switch on its label row. Every place
-  still opens on its terminal, and the app forgets the choice when it
-  restarts. The terminal stays underneath with its scrollback, one click
-  away.
+  agent then gets a **Chat | Terminal** switch on its label row. Each place
+  remembers whether it shows Chat or Terminal, across place switches and
+  relaunches, and a place you never switched opens on its terminal. Turning
+  Chat view off keeps every place's choice for when it is back on. The
+  terminal stays underneath with its scrollback, one click away.
   - Chat shows the agent's latest turns, up to 20, read from Claude's or
     Codex's own transcript: your messages, its replies with their times, and
     the tools it used. While the agent works, the chat reads them again every
