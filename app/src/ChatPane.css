@@ -103,6 +103,12 @@
   padding: var(--s3); font-size: var(--fs-body); line-height: var(--lh-row);
 }
 .chat-card { border-left: 3px solid var(--warn); margin-top: var(--s2); }
+/* A prompt that arrives takes the keyboard from an empty composer (ChatPane),
+   so its digits and Enter work: the card says it holds it, as the field did.
+   `:focus`, not `:focus-visible`: the move follows a click (on Chat, on a
+   place), so neither engine counts it as keyboard focus, and a ring that
+   hides then is a keyboard whose whereabouts nobody can see. */
+.chat-prompt:focus { outline: 1px solid var(--accent); outline-offset: 2px; }
 .chat-card p, .chat-fallback p { margin: 0 0 var(--s2); }
 .chat-card-head { display: flex; align-items: center; gap: var(--s2); color: var(--txt-hi); }
 .chat-card-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--warn); }
@@ -165,7 +171,7 @@
 /* A multi-select's boxes: a row each, the box beside its words. */
 .chat-boxes { display: flex; flex-direction: column; gap: 4px; margin-bottom: var(--s2); }
 .chat-box {
-  display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--s2); align-items: baseline; cursor: pointer;
+  display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: var(--s2); align-items: baseline; cursor: pointer;
   background: var(--bg-elev); border: 1px solid var(--line); border-radius: var(--r-sm);
   padding: 6px var(--s2); font-size: var(--fs-body);
 }

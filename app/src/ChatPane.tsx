@@ -11,15 +11,16 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import {
-  boxesOf, bytes, choiceOpen, clockMs, clockOf, dayLabel, draftProblem, fieldWords, itemsOf, lineDiff, loadPrompt,
-  loadTurns, permissionAnswerWords, promptBody, questionAnswerWords, selectChoice, sendAnswer, sendDraft, sendMany,
-  setAnswerText, setBoxText, setDraft, splitAtRule, ticksOf, toggleTick, turnsUnsupported, useChat, SEND_MAX,
-  type AskedStep, type Item, type PromptChoice, type PromptDetail, type ReadablePrompt, type Target,
+  boxesOf, bytes, cardDigits, cardKey, cardTakesFocus, choiceOpen, clockMs, clockOf, dayLabel, draftProblem, fieldWords,
+  itemsOf, keyFocusOf, lineDiff, loadPrompt, loadTurns, permissionAnswerWords, promptBody, questionAnswerWords, selectChoice,
+  sendAnswer, sendDraft, sendMany, setAnswerText, setBoxText, setDraft, splitAtRule, ticksOf, toggleTick, turnsUnsupported,
+  useChat, SEND_MAX, type AskedStep, type Item, type PromptChoice, type PromptDetail, type ReadablePrompt, type Target,
 } from "./chat";
 import { HARNESS_LABEL, type Harness } from "./harness";
 import * as Icons from "./icons";
 import { Markdown } from "./markdown";
 import { useDocPathLinks } from "./useDocPathLinks";
+import { escapeDepth } from "./useEscape";
 import "./ChatPane.css";
 
 /** While the agent works, the one visible chat re-reads its turns this often:
@@ -28,6 +29,17 @@ import "./ChatPane.css";
 const BUSY_POLL_MS = 10_000;
 /** The byte count appears under the field from here. */
 const COUNT_FROM = 3500;
+
+/** The focused element, read through shadow roots (the feedback dialog is one). */
+function focused(): Element | null {
+  let a: Element | null = document.activeElement;
+  while (a?.shadowRoot?.activeElement) a = a.shadowRoot.activeElement;
+  return a;
+}
+/** The prompt card is on screen: laid out, not in an inert subtree, and not
+ *  under the reader (⌘⇧E covers the whole space body, and is no modal). */
+const onScreen = (card: HTMLElement | null) =>
+  !!card && card.isConnected && card.getClientRects().length > 0 && !card.closest("[inert]") && !document.querySelector(".reading");
 
 export type ChatPaneProps = {
   repo: string;
@@ -90,6 +102,36 @@ export function ChatPane(props: ChatPaneProps) {
   const promptKey = prompt ? (prompt.readable ? prompt.fingerprint : `unreadable|${(prompt.lines ?? []).join("\n")}`) : null;
   const { toBottom, fresh, dismiss } = useStickToBottom(scrollRef, items.length, replies, !!data, promptKey);
 
+  // A prompt takes the keyboard from an EMPTY composer as it appears, once
+  // per prompt (`cardTakesFocus`), so its keys work without a click first;
+  // the composer cannot send while a prompt waits. When the card that took it
+  // goes and left the keyboard on nothing, the composer gets it back. The
+  // parent's effect runs after the composer's own mount focus, which is the
+  // "Chat opens on a prompt" case.
+  const cardRef = useRef<HTMLDivElement>(null);
+  const fieldRef = useRef<HTMLTextAreaElement>(null);
+  const fp = prompt?.readable ? prompt.fingerprint : null;
+  const seenFp = useRef<string | null>(null);
+  const tookFocus = useRef(false);
+  useEffect(() => {
+    if (fp) {
+      const take = cardTakesFocus({
+        fingerprint: fp, seen: seenFp.current, focus: keyFocusOf(focused(), cardRef.current),
+        draft: v.draft, escapeDepth: escapeDepth(), shown: onScreen(cardRef.current),
+      });
+      seenFp.current = fp;
+      if (take && cardRef.current) {
+        cardRef.current.focus({ preventScroll: true });
+        tookFocus.current = true;
+      }
+    } else if (tookFocus.current) {
+      tookFocus.current = false;
+      const a = focused();
+      if ((!a || a === document.body) && escapeDepth() === 0) fieldRef.current?.focus({ preventScroll: true });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once per prompt
+  }, [fp]);
+
   let body: React.ReactNode;
   if (!data) {
     if (turnsUnsupported(v.turns.error)) {
@@ -140,7 +182,7 @@ export function ChatPane(props: ChatPaneProps) {
           )}
           {prompt && (
             prompt.readable
-              ? <PromptCard p={prompt} target={target} agent={agent} onTerminal={props.onTerminal} onLink={onLink} />
+              ? <PromptCard p={prompt} target={target} agent={agent} cardRef={cardRef} onTerminal={props.onTerminal} onLink={onLink} />
               : (
                 <div className="chat-card" data-testid="chat-prompt-unreadable">
                   <div className="chat-card-head"><span className="chat-card-dot" aria-hidden="true" /><b>{agent} needs your answer in the terminal</b></div>
@@ -162,7 +204,7 @@ export function ChatPane(props: ChatPaneProps) {
         <button className="chat-new" onClick={() => { dismiss(); toBottom(); }} data-testid="chat-new">New messages ↓</button>
       )}
       </div>
-      <Composer target={target} agent={agent} waiting={prompt ? (prompt.readable ? "above" : "terminal") : null} paneDraft={props.paneDraft} followUp={v.followUp}
+      <Composer target={target} agent={agent} fieldRef={fieldRef} waiting={prompt ? (prompt.readable ? "above" : "terminal") : null} paneDraft={props.paneDraft} followUp={v.followUp}
         onTerminal={props.onTerminal} onRefresh={refresh} loading={v.turns.loading || v.prompt.loading} />
       {menu}
     </div>
@@ -389,9 +431,13 @@ function AnswerBubble(props: { step: AskedStep }) {
 
 /** A waiting prompt, whole, with its own choices. A click selects (or
  *  ticks); "Send" sends — two acts, because an answer can run a command.
- *  What it asks comes first, whole: `detail` when the terminal shows only
- *  part of it, then the question rows. */
-function PromptCard(props: { p: ReadablePrompt; target: Target; agent: string; onTerminal: () => void; onLink: (href: string) => void }) {
+ *  The keys are the same two acts: a digit is a click on that choice, Enter
+ *  is "Send" (`cardKey`). What it asks comes first, whole: `detail` when the
+ *  terminal shows only part of it, then the question rows. */
+function PromptCard(props: {
+  p: ReadablePrompt; target: Target; agent: string; cardRef: RefObject<HTMLDivElement | null>;
+  onTerminal: () => void; onLink: (href: string) => void;
+}) {
   const { p, target, agent } = props;
   const v = useChat(target.path);
   const ids = useId();
@@ -411,9 +457,54 @@ function PromptCard(props: { p: ReadablePrompt; target: Target; agent: string; o
   const kind = p.detail?.tool === "ExitPlanMode" ? "Plan" : p.kind === "question" ? "Question" : "Permission";
   const answer = () => { if (canAnswer) void sendAnswer(target, agent); };
   const many = () => { if (canSendMany) void sendMany(target); };
+  // Enter's send: what the Send button on screen runs, behind its own enabled state.
+  const send = selected && way ? { on: canAnswer, run: answer } : p.multi ? { on: canSendMany, run: many } : null;
+  const digits = cardDigits(p);
   const quote = (s: string) => `“${s.length > 40 ? s.slice(0, 39) + "…" : s}”`;
+
+  // The keys. ONE capture-phase listener on `window`, the card's while it is
+  // mounted (it is mounted only while a readable prompt is shown). Not the
+  // card's own `onKeyDown`: the keyboard is often NOT inside the card — on
+  // the body after a click on the conversation, on the Chat switch or a rail
+  // button Chromium focused on its click — and a container's handler would
+  // hear nothing. Capture, so the key is decided before anything under the
+  // focus acts on it: Chromium focuses a clicked choice, and a native Enter
+  // there is a SECOND click (unselecting it), while WebKit focuses the card
+  // around it (its nearest focusable), where Enter does nothing; held here,
+  // Enter sends, once, in both. Not `useEscape`: that is Escape for modal
+  // surfaces, and this card is not one — it steps aside for every one of
+  // them (`escapeDepth`). The dock shell keeps its digits: a terminal, like
+  // any text field, is never the card's (`keyFocusOf`). A key the card does
+  // not take is left alone, undefaulted, for whoever comes next (App's ⌘1–9
+  // needs ⌘, which this never takes).
+  const [keyPick, setKeyPick] = useState<{ n: number; t: number } | null>(null);
+  const live = useRef({ p, path: target.path, selected: v.selected, answering: v.answering, send });
+  live.current = { p, path: target.path, selected: v.selected, answering: v.answering, send };
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const card = props.cardRef.current;
+      const L = live.current;
+      const k = cardKey(e, {
+        focus: keyFocusOf(focused(), card), escapeDepth: escapeDepth(), shown: onScreen(card),
+        answering: L.answering, selected: L.selected, canSend: !!L.send?.on,
+      }, L.p);
+      if (!k) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (k.act === "send") L.send?.run();
+      else if (k.act === "tick") toggleTick(L.path, k.n);
+      else if (k.act === "select") {
+        selectChoice(L.path, k.choice);
+        // ChoiceRow puts the keyboard in the text the choice takes.
+        if (k.field) setKeyPick((cur) => ({ n: k.n, t: (cur?.t ?? 0) + 1 }));
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- reads `live`
+  }, []);
   return (
-    <div className="chat-card chat-prompt" role="group" aria-labelledby={`${ids}-h`} data-testid="chat-prompt">
+    <div ref={props.cardRef} className="chat-card chat-prompt" role="group" aria-labelledby={`${ids}-h`} tabIndex={-1} data-testid="chat-prompt">
       <div className="chat-card-head">
         <span className="chat-card-dot" aria-hidden="true" />
         <b id={`${ids}-h`}>{agent} needs your answer</b>
@@ -436,7 +527,9 @@ function PromptCard(props: { p: ReadablePrompt; target: Target; agent: string; o
             if (c === freeBox) {
               return (
                 <div key={c.n} className={"chat-box chat-box-free" + (on ? " on" : "")}>
+                  <span className="chat-choice-n" aria-hidden="true">{c.n}</span>
                   <input id={id} type="checkbox" checked={on} disabled={v.answering}
+                    aria-keyshortcuts={c.n <= 9 ? String(c.n) : undefined}
                     onChange={() => toggleTick(target.path, c.n)} aria-label={`${c.label}: your own answer`} data-testid={`chat-box-${c.n}`} />
                   <input type="text" className="chat-answer-field" value={v.boxText} placeholder="Type your own answer"
                     aria-label="Your own answer" aria-invalid={on && boxProblem ? true : undefined} disabled={v.answering}
@@ -449,7 +542,9 @@ function PromptCard(props: { p: ReadablePrompt; target: Target; agent: string; o
             }
             return (
               <label key={c.n} htmlFor={id} className={"chat-box" + (on ? " on" : "") + (open ? "" : " closed")}>
+                <span className="chat-choice-n" aria-hidden="true">{c.n}</span>
                 <input id={id} type="checkbox" checked={on} disabled={!open || v.answering}
+                  aria-keyshortcuts={c.n <= 9 ? String(c.n) : undefined}
                   onChange={() => toggleTick(target.path, c.n)} data-testid={`chat-box-${c.n}`} />
                 <span className="chat-choice-text">
                   <span className="chat-choice-label">{c.label}</span>
@@ -465,7 +560,8 @@ function PromptCard(props: { p: ReadablePrompt; target: Target; agent: string; o
         <div className="chat-choices" role="group" aria-label={p.multi ? "Or instead" : "Choices"}>
           {others.map((c) => (
             <ChoiceRow key={c.n} c={c} on={v.selected === c.n} busy={v.answering} path={target.path}
-              harness={p.harness} agent={agent} text={v.answerText} problem={v.selected === c.n ? typedProblem : null} onEnter={answer} />
+              harness={p.harness} agent={agent} text={v.answerText} problem={v.selected === c.n ? typedProblem : null} onEnter={answer}
+              focusToken={keyPick?.n === c.n ? keyPick.t : 0} />
           ))}
         </div>
       )}
@@ -479,7 +575,7 @@ function PromptCard(props: { p: ReadablePrompt; target: Target; agent: string; o
       <div className="chat-card-foot">
         {selected && way ? (
           <>
-            <button className="enter-btn sm" disabled={!canAnswer} onClick={answer} data-testid="chat-send-answer">
+            <button className="enter-btn sm" disabled={!canAnswer} onClick={answer} aria-keyshortcuts="Enter" data-testid="chat-send-answer">
               {v.answering ? "Answering…"
                 : way.how === "field" ? (typed.trim() ? `Send answer: ${quote(typed)}` : "Type an answer to send")
                 : way.how === "amend" && typed.trim() ? `Send ${quote(selected.label)} with the note`
@@ -489,13 +585,14 @@ function PromptCard(props: { p: ReadablePrompt; target: Target; agent: string; o
           </>
         ) : p.multi ? (
           <>
-            <button className="enter-btn sm" disabled={!canSendMany} onClick={many} data-testid="chat-send-many">
+            <button className="enter-btn sm" disabled={!canSendMany} onClick={many} aria-keyshortcuts="Enter" data-testid="chat-send-many">
               {v.answering ? "Sending…" : ticks.length ? `Send ${ticks.length} ${ticks.length === 1 ? "choice" : "choices"}` : "Tick one or more to send"}
             </button>
           </>
         ) : (
           <span className="chat-hint">Pick a choice, then send it.</span>
         )}
+        {digits && !v.answering && <span className="chat-hint" data-testid="chat-keys-hint">Press {digits}, then Enter.</span>}
         <button className="chat-linkbtn chat-foot-end" onClick={props.onTerminal}>Answer in the terminal</button>
       </div>
     </div>
@@ -507,18 +604,27 @@ function PromptCard(props: { p: ReadablePrompt; target: Target; agent: string; o
 function ChoiceRow(props: {
   c: PromptChoice; on: boolean; busy: boolean; path: string; harness: string; agent: string;
   text: string; problem: string | null; onEnter: () => void;
+  /** Moves when a DIGIT selects this choice: its text takes the keyboard,
+   *  a note's too, since the next keys are typed there (Enter sends). */
+  focusToken: number;
 }) {
   const { c, on } = props;
   const { open, how, note } = choiceOpen(c);
   const field = useRef<HTMLInputElement>(null);
   const ids = useId();
   // A field IS the answer: selecting it is starting to type. A note is
-  // optional, and focus stays where the click left it.
+  // optional, and a click leaves focus where it was.
   useEffect(() => { if (on && how === "field") field.current?.focus({ preventScroll: true }); }, [on, how]);
+  const usedToken = useRef(0);
+  useEffect(() => {
+    if (!on || how === "plain" || props.focusToken <= usedToken.current) return;
+    usedToken.current = props.focusToken;
+    field.current?.focus({ preventScroll: true });
+  }, [on, how, props.focusToken]);
   return (
     <>
       <button className={"chat-choice" + (on ? " on" : "") + (open ? "" : " closed")}
-        aria-pressed={open ? on : undefined} disabled={!open || props.busy}
+        aria-pressed={open ? on : undefined} disabled={!open || props.busy} aria-keyshortcuts={c.n <= 9 ? String(c.n) : undefined}
         onClick={() => selectChoice(props.path, on ? null : c.n)} data-testid={`chat-choice-${c.n}`}>
         {/* The grid is an inner span: WebKit shrink-wraps a <button>
             that is itself the container (AGENTS.md, WebKit probe). */}
@@ -623,21 +729,27 @@ function DiffRows(props: { a: string; b: string }) {
 function Composer(props: {
   /** Where a waiting prompt is answered: on the card above, or in the terminal. */
   target: Target; agent: string; waiting: "above" | "terminal" | null; paneDraft: { text: string; queued: boolean } | null;
+  /** The field, ChatPane's: a prompt card takes the keyboard from it and gives it back. */
+  fieldRef: RefObject<HTMLTextAreaElement | null>;
   /** What to type next, after an answer that hands over to the composer. */
   followUp: string | null;
   onTerminal: () => void; onRefresh: () => void; loading: boolean;
 }) {
   const { target, agent } = props;
   const v = useChat(target.path);
-  const field = useRef<HTMLTextAreaElement>(null);
+  const field = props.fieldRef;
   const ids = useId();
   const text = v.draft;
   const problem = draftProblem(text);
   const n = bytes(text);
 
   // Switching to Chat is switching to typing here: the hidden terminal has
-  // just given the keyboard up (App's `setChatView`).
-  useEffect(() => { field.current?.focus({ preventScroll: true }); }, []);
+  // just given the keyboard up (App's `setChatView`). Never over a prompt card
+  // that has taken it (ChatPane): StrictMode runs this twice.
+  useEffect(() => {
+    if (!document.activeElement?.closest(".chat-prompt")) field.current?.focus({ preventScroll: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   useEffect(() => { if (props.followUp) field.current?.focus({ preventScroll: true }); }, [props.followUp]);
 
   // Grow with the text, to six lines; a long line wraps, it never scrolls sideways.
