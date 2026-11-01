@@ -358,6 +358,17 @@ this repo's settings in `.claude/close-out.md`).
   origin, land → PR → merge → To do "Remove the place".
   _From: [2026-10-15 rules-review-lane](docs/sessions/2026-10-15-rules-review-lane/summary.md)_
 
+- **`engine::tests::a_closed_port_under_a_pid_that_never_goes_falls_through_to_a_start_after_the_bound` flaked once on macos-latest.**
+  `app (macos-latest)` failed it at `app/src-tauri/src/engine.rs:1058` with
+  "gave up before the bound (16.584µs)" on #590's first head (run
+  41354989908), and it passed on the next run. `settle` returned at once
+  instead of waiting 300ms, so the closed port the test got from
+  `TcpListener::bind("127.0.0.1:0")` and then dropped was probably taken by a
+  parallel test, which made `settle` see an open port. Make the port probe
+  injectable (the `_in` seam, as `answer_with` takes the clock) so the test
+  scripts "closed" instead of borrowing a real port.
+  _From: [2026-11-01 chat-composer-scrollbars](docs/sessions/2026-11-01-chat-composer-scrollbars/summary.md)_
+
 - **`a_real_size_change_still_reaches_the_shell` (app pty test) flaked once.**
   It failed in one full `cargo test -p app --lib` run with "the trap shell never
   came up" (lib.rs ~10608) and then passed on rerun. It spawns a real shell on a
