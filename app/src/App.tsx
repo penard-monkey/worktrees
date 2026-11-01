@@ -3841,15 +3841,14 @@ function App() {
   const [switchOpen, setSwitchOpen] = useState(false);
   const [termVersion, setTermVersion] = useState(0);
   const [termFocus, setTermFocus] = useState(0);
-  // The chat view (settings.chat_view, a preview): whether a place shows Chat
-  // over its agent's terminal is that place's `agent_view`, in `place_panels`
-  // (`agentViewFor`; absent = Terminal), so it survives a place switch and a
-  // relaunch. Only this writes it. Never through the pre-hydration stash: the
-  // switch is not drawn before hydration (`chat_view` defaults off), and that
-  // stash's shallow merge would replace the whole `place_panels` map.
-  const setChatView = useCallback((key: string, on: boolean) => {
+  // The chat view (settings.chat_view, a preview): a stored `agent_view` wins;
+  // otherwise Claude/Codex start on Chat and pi/kimi on Terminal. Only this
+  // writes a choice. Gate the switch on `settingsReady`: before hydration the
+  // default is only a guess, and its shallow stash would replace the whole
+  // `place_panels` map.
+  const setChatView = useCallback((key: string, provider: Harness, on: boolean) => {
     setSettings((prev) => {
-      const next = withAgentView(prev, key, on ? "chat" : "terminal");
+      const next = withAgentView(prev, key, on ? "chat" : "terminal", provider);
       if (next !== prev && hydrated.current) saveSettings(next);
       return next;
     });
@@ -8658,7 +8657,7 @@ function App() {
                   <div className="agent-grid">
                     {([planProvider] as const).filter((provider) => selectedAgents?.[provider].up).map((provider) => {
                       const viewKey = sel.repo + "|" + sel.slug;
-                      const chatOn = settings.chat_view && agentViewFor(settings, viewKey) === "chat";
+                      const chatOn = settingsReady && settings.chat_view && agentViewFor(settings, viewKey, provider) === "chat";
                       return (
                       <div className="agent-cell" key={provider} onFocusCapture={() => setActiveProvider(provider)}>
                         <div className="agent-label">
@@ -8674,7 +8673,7 @@ function App() {
                               </span>
                             )}
                           </span>
-                          {settings.chat_view && <AgentViewSwitch chat={chatOn} onChat={(on) => setChatView(viewKey, on)} />}
+                          {settingsReady && settings.chat_view && <AgentViewSwitch chat={chatOn} onChat={(on) => setChatView(viewKey, provider, on)} />}
                         </div>
                         {/* The terminal stays mounted under the chat — hidden and
                             inert, at its own size — so no resize reaches the pty
@@ -8693,7 +8692,7 @@ function App() {
                                 : (waitingBy ? !!waitingBy[provider]?.has(selected.path) : waitingPaths.has(selected.path)) ? "waiting" : ""}
                               doneAt={donePaths.get(selected.path) ?? 0}
                               paneDraft={draftPaths.get(selected.path) ?? null}
-                              onTerminal={() => setChatView(viewKey, false)}
+                              onTerminal={() => setChatView(viewKey, provider, false)}
                               onOpenPath={(path, at) => openPathFromTerm(path, at.line, at.col)}
                               reloadToken={placesToken} onError={fail} />
                           )}
