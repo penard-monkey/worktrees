@@ -206,6 +206,23 @@ After the answer:
 A choice never carries over to a new prompt: a fingerprint that moves clears
 it, except while an answer is in flight (filling a box moves it on purpose).
 
+**Claude's resume picker** (`picker: "resume"`, fix/chat-resume-picker): a
+worktrees resume runs `claude -r`, which asks which earlier conversation to
+resume before Claude has any session, so `agent_turns` fails ("…has written
+no session file yet"). While a prompt is up that failure is no failure: the
+conversation area says "Claude has no conversation open yet", and the card
+says "Claude is asking which conversation to resume" (kind **Resume**). Its
+choices are the conversations on Claude's screen, each its title (a lane's
+are all its session name) over Claude's `age · branch · size` row; there are
+no screen rows above them, since those are the picker's search box and key
+hints. A list longer than the pane's window offers only the rows on screen
+and says "4 of 7 shown. The other 3 are in the terminal's list", with **Open
+the terminal**. Send reads **Resume “…”**; the conversation then gets "You
+resumed “…” (2 hours ago · main · 1.2MB)", which stays, since no transcript
+records the pick, and the turns are read again after 0.5, 1.5 and 3.5 s
+until Claude has written its session. Digits and Enter work as on every
+card, and the announcer says "Claude needs input".
+
 **An unreadable prompt** (`readable: false`) shows the bottom of the agent's
 screen that serve sends with it (`lines`), says this app can’t answer it, and
 offers **Answer it in the terminal**. A prompt is unreadable when the agent
@@ -263,7 +280,7 @@ for each line), as a sent message's pending bubble does.
 | `app/src/ChatPane.css` | Plain CSS on `tokens.css` |
 | `app/src/App.tsx` | The switch in `.agent-label`, the terminal wrapped in a hidden, `inert` `.agent-term`, and the activity, done stamp and pane draft passed in |
 | `app/src/settings.ts`, `SettingsSheet.tsx` | `chat_view` (default off), Behavior → Chat view; each place's `agent_view` (`agentViewFor`, `withAgentView`) |
-| `app/src/mock/install.ts` | `?turns=answered` (a transcript whose prompts were answered, as `steps`; a mock answer lands in the transcript 1.5 s later), per-harness turns, the pi/kimi refusal, `?agentsend=mid\|nocomposer\|unconfirmed`, `?agentprompt=permission\|question\|multi\|plan\|tall\|unreadable\|off` (`,waiting` for waiting places only; a Codex place gets Codex's approval), `?agentanswer=unseen`, `?activity=<n>` |
+| `app/src/mock/install.ts` | `?turns=answered` (a transcript whose prompts were answered, as `steps`; a mock answer lands in the transcript 1.5 s later), per-harness turns, the pi/kimi refusal, `?agentsend=mid\|nocomposer\|unconfirmed`, `?agentprompt=permission\|question\|multi\|plan\|tall\|unreadable\|resume\|off` (`,waiting` for waiting places only; a Codex place gets Codex's approval; `resume` is Claude's resume picker, four conversations shown and three more in the terminal, with `agent_turns` failing as before a session exists until a pick, and for half a second after it), `?agentanswer=unseen`, `?activity=<n>` |
 
 **Checked:**
 - **Contrast**, in all six themes, by the browser's resolved colours. Body

@@ -1,0 +1,23 @@
+
+────────────────────────────────────────────────────────────────────────────────
+  Resume session (1 of 8)
+  ╭──────────────────────────────────────────────────────────────────────────╮
+  │ ⌕ Search…                                                                │
+  ╰──────────────────────────────────────────────────────────────────────────╯
+    repo · lane
+
+  ❯ Resume picker title wrapping test
+    10 seconds ago · lane · 349.5KB
+
+    wtrp-lane
+    1 minute ago · lane · 349KB
+
+    wtrp-lane
+    1 minute ago · lane · 349KB
+
+  ↓ wtrp-lane
+    1 minute ago · lane · 349KB
+
+    Ctrl+A to show all projects · Ctrl+B to only show current branch · Ctrl+W
+    to show all worktrees · Space to preview · Ctrl+R to rename · Type to
+    search · Esc to cancel

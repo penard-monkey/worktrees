@@ -15,7 +15,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import {
   activityMoved, boxesOf, bytes, callsSay, callsWords, cardDigits, cardKey, cardTakesFocus, choiceOpen, clockMs, clockOf,
-  dayLabel, draftProblem, fieldWords, foldCalls, itemsOf, keyFocusOf, lineDiff, loadPrompt, loadTurns, permissionAnswerWords,
+  dayLabel, draftProblem, fieldWords, foldCalls, itemsOf, keyFocusOf, lineDiff, loadPrompt, loadTurns, noSessionYet, permissionAnswerWords,
   promptBody, questionAnswerWords, selectChoice, sendAnswer, sendDraft, sendMany, setAnswerText, setBoxText, setDraft,
   splitAtRule, stopTurn, ticksOf, toggleTick, turnsUnsupported, underRoot, useChat, SEND_MAX,
   type AskedStep, type Item, type PromptChoice, type PromptDetail, type ReadablePrompt, type Target, type ToolCall,
@@ -157,6 +157,10 @@ export function ChatPane(props: ChatPaneProps) {
           <button className="ctrl sm with-icon" onClick={props.onTerminal}><Icons.SquareTerminal size={13} /> Open the terminal</button>
         </div>
       );
+    } else if (v.turns.error && prompt && noSessionYet(v.turns.error)) {
+      // Not a failure: Claude has no conversation until the prompt below is
+      // answered (its resume picker, its folder-trust question).
+      body = <p className="chat-note" data-testid="chat-no-session">{agent} has no conversation open yet.</p>;
     } else if (v.turns.error) {
       body = (
         <div className="chat-fallback" role="alert" data-testid="chat-failed">
@@ -436,7 +440,10 @@ function ChatItem(props: { it: Item; agent: string; root: string; onLink: (href:
     case "answered":
       return (
         <li className="chat-note chat-answered" data-testid="chat-answered">
-          You answered “{it.a.label}”{it.a.note ? <> with a note: “{it.a.note}”</> : null} · {clockMs(it.a.at)}{it.a.confirmed ? "" : " · not confirmed"}
+          {it.a.resumed !== undefined
+            ? <>You resumed “{it.a.label}”{it.a.resumed ? ` (${it.a.resumed})` : ""}</>
+            : <>You answered “{it.a.label}”{it.a.note ? <> with a note: “{it.a.note}”</> : null}</>}
+          {" "}· {clockMs(it.a.at)}{it.a.confirmed ? "" : " · not confirmed"}
         </li>
       );
     case "pending":
@@ -561,7 +568,10 @@ function PromptCard(props: {
   const freeOn = !!freeBox && ticks.includes(freeBox.n);
   const boxProblem = freeOn ? (v.boxText.trim() ? draftProblem(v.boxText, "answer") : "Type your own answer in its box, or untick it.") : null;
   const canSendMany = !!p.multi && !selected && ticks.length > 0 && !boxProblem && !v.answering;
-  const kind = p.detail?.tool === "ExitPlanMode" ? "Plan" : p.kind === "question" ? "Question" : "Permission";
+  // Claude's resume picker: its rows ARE the choices (the screen above them
+  // is its search box and key hints), and only those on screen are offered.
+  const resume = p.picker === "resume";
+  const kind = resume ? "Resume" : p.detail?.tool === "ExitPlanMode" ? "Plan" : p.kind === "question" ? "Question" : "Permission";
   const answer = () => { if (canAnswer) void sendAnswer(target, agent); };
   const many = () => { if (canSendMany) void sendMany(target); };
   // Enter's send: what the Send button on screen runs, behind its own enabled state.
@@ -620,7 +630,7 @@ function PromptCard(props: {
       onPointerDown={() => { props.keyboard.tookAt.current = null; }}>
       <div className="chat-card-head">
         <span className="chat-card-dot" aria-hidden="true" />
-        <b id={`${ids}-h`}>{agent} needs your answer</b>
+        <b id={`${ids}-h`}>{resume ? `${agent} is asking which conversation to resume` : `${agent} needs your answer`}</b>
         <span className="chat-kind">{kind}</span>
       </div>
       {p.detail && <PromptDetail d={p.detail} root={target.path} agent={agent} onLink={props.onLink} />}
@@ -630,7 +640,13 @@ function PromptCard(props: {
           <pre className="chat-prompt-lines">{above.join("\n")}</pre>
         </details>
       )}
-      <pre className="chat-prompt-lines" data-testid="chat-prompt-lines">{question.join("\n")}</pre>
+      {!resume && <pre className="chat-prompt-lines" data-testid="chat-prompt-lines">{question.join("\n")}</pre>}
+      {resume && !!p.hidden && (
+        <p className="chat-hint" data-testid="chat-resume-hidden">
+          {p.choices.length} of {p.choices.length + p.hidden} shown. {p.hidden === 1 ? "The other one is" : `The other ${p.hidden} are`} in the terminal’s list.
+          {" "}<button className="chat-linkbtn" onClick={props.onTerminal}>Open the terminal</button>
+        </p>
+      )}
       {boxes.length > 0 && (
         <div className="chat-boxes" role="group" aria-label="Tick any, then send them" data-testid="chat-boxes">
           {boxes.map((c) => {
@@ -689,9 +705,10 @@ function PromptCard(props: {
         {selected && way ? (
           <>
             <button className="enter-btn sm" disabled={!canAnswer} onClick={answer} aria-keyshortcuts="Enter" data-testid="chat-send-answer">
-              {v.answering ? "Answering…"
+              {v.answering ? (resume ? "Resuming…" : "Answering…")
                 : way.how === "field" ? (typed.trim() ? `Send answer: ${quote(typed)}` : "Type an answer to send")
                 : way.how === "amend" && typed.trim() ? `Send ${quote(selected.label)} with the note`
+                : resume ? `Resume ${quote(selected.label)}`
                 : `Send answer: ${quote(selected.label)}`}
             </button>
             <button className="ctrl sm" disabled={v.answering} onClick={() => selectChoice(target.path, null)}>Cancel</button>
@@ -703,7 +720,7 @@ function PromptCard(props: {
             </button>
           </>
         ) : (
-          <span className="chat-hint">Pick a choice, then send it.</span>
+          <span className="chat-hint">{resume ? "Pick a conversation, then resume it." : "Pick a choice, then send it."}</span>
         )}
         {digits && !v.answering && <span className="chat-hint" data-testid="chat-keys-hint">Press {digits}, then Enter.</span>}
         <button className="chat-linkbtn chat-foot-end" onClick={props.onTerminal}>Answer in the terminal</button>

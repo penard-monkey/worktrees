@@ -1,0 +1,23 @@
+
+[38;5;153m────────────────────────────────────────────────────────────────────────────────
+[39m  [1m[38;5;153mResume session[38;5;246m (4 of 7)[0m
+  [2m╭──────────────────────────────────────────────────────────────────────────╮[0m
+  [2m│[0m [38;5;246m⌕ Search…[39m                                                                [2m│[0m
+  [2m╰──────────────────────────────────────────────────────────────────────────╯[0m
+    [38;5;246mrepo · lane[39m
+
+    wtrp-lane
+    [38;5;246m2 seconds ago · lane · 349KB[39m
+
+    wtrp-lane
+    [38;5;246m10 seconds ago · lane · 349KB[39m
+
+    wtrp-lane
+    [38;5;246m15 seconds ago · lane · 349KB[39m
+
+  [38;5;153m❯[39m [38;5;153mwtrp-lane[39m
+    [38;5;246m21 seconds ago · lane · 346.9KB[39m
+
+    [38;5;246mCtrl+A to show all projects · Ctrl+B to only show current branch · Ctrl+W [39m
+    [38;5;246mto show all worktrees · Space to preview · Ctrl+R to rename · Type to [39m
+    [38;5;246msearch · Esc to cancel[39m
