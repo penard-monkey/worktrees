@@ -8692,6 +8692,7 @@ function App() {
                                 : (waitingBy ? !!waitingBy[provider]?.has(selected.path) : waitingPaths.has(selected.path)) ? "waiting" : ""}
                               doneAt={donePaths.get(selected.path) ?? 0}
                               paneDraft={draftPaths.get(selected.path) ?? null}
+                              uiRem={settings.ui_rem}
                               onTerminal={() => setChatView(viewKey, provider, false)}
                               onOpenPath={(path, at) => openPathFromTerm(path, at.line, at.col)}
                               reloadToken={placesToken} onError={fail} />
