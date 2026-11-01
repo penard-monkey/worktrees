@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.45.0] - 2026-11-01
+
 ### Added
 - **A chat view of a place's agent, beside its terminal (a preview, off by
   default).** Turn it on in Settings → Behavior → Chat view. Each place's
@@ -51,8 +53,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
     message" (or "3 new messages" for a burst) when the agent replies, and
     the agent's name with "needs input", such as "Codex needs input", when
     it stops on a prompt. It waits for what the screen reader is already
-    saying, never moves focus, and says nothing for your own messages and
-    answers, for tool calls, or for what was already there.
+    saying, and says nothing for your own messages and answers, for tool
+    calls, or for what was already there.
   - Not yet: tool output, diffs and slash commands are in the terminal only.
     pi's and Kimi's conversations aren't shown and their turns can't be
     stopped from the chat, though you can still send them a line and answer
