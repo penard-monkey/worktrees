@@ -93,6 +93,19 @@ pub enum Typing {
     Amend,
 }
 
+/// A list the HARNESS draws for the user to pick from, rather than one its
+/// agent asked: a [`Kind::Question`] whose choices are its rows.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Picker {
+    /// Claude's resume picker (`claude -r`, which a worktrees resume
+    /// launches): which earlier conversation in this folder to resume. Its
+    /// choices are the conversations on screen, each a title (a worktrees
+    /// lane's are all its session name) and Claude's row under it, `<age> ·
+    /// <branch> · <size>`.
+    Resume,
+}
+
 /// One of a prompt's own choices.
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct Choice {
@@ -127,6 +140,14 @@ pub struct Modal {
     /// the boxes sends them (`agent_answer_many`).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub multi: bool,
+    /// The harness's own list ([`Picker`]), not its agent's question.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub picker: Option<Picker>,
+    /// How many rows of a [`Picker`]'s list are OFF the screen: the ones the
+    /// harness says it holds beyond those shown. Only the rows on screen are
+    /// choices; the rest are picked in the terminal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<u32>,
     /// `lines` without the footer, highlight marks blanked — what stays the
     /// same while the highlight moves ([`same_prompt`]). Claude's footer
     /// changes with the highlight (`Esc to cancel · Tab to amend` on "Yes",
@@ -144,6 +165,12 @@ pub struct Modal {
     /// The highlight is on that `Submit` row.
     #[serde(skip)]
     on_submit: bool,
+    /// A scrolled list's first row on screen, counted in the whole list from
+    /// 1 (Claude's resume picker: its `(k of N)` less the highlight's row).
+    /// The highlight moving inside the window keeps it; the window scrolling
+    /// moves it, and then the rows are other rows however alike they read.
+    #[serde(skip)]
+    window: Option<u32>,
     /// The harness that drew it (a provider id): how its fields read.
     #[serde(skip)]
     harness: &'static str,
@@ -194,6 +221,13 @@ const PLAN_FEEDBACK_HINT: &str = "shift+tab to approve with this feedback";
 const PLAN_FOOTER: &str = "ctrl+g to edit in Vim · ";
 /// What a Codex question's notes row says while it is open and empty.
 const CODEX_EMPTY_NOTES: &str = "Add notes";
+/// The head of Claude's resume picker, which adds ` (k of N)` while its list
+/// is longer than the window it shows.
+const RESUME_HEAD: &str = "Resume session";
+/// How the picker's key hints end while its list has the keyboard, and while
+/// its search field has it.
+const RESUME_FOOT: &str = "Esc to cancel";
+const RESUME_SEARCH_FOOT: &str = "Esc to clear";
 /// The most rows [`visible`] returns.
 pub const VISIBLE_MAX: usize = 24;
 
@@ -227,6 +261,11 @@ pub fn claude(screen: &str) -> Option<Modal> {
     let mut last = last_nonblank(&rows, rows.len())?;
     if name_tag(&rows[last], width) {
         last = last_nonblank(&rows, last)?;
+    }
+    // First: in a wide pane the picker's footer wraps onto a row of its own,
+    // `Esc to cancel`, which read below as a permission of its first two rows.
+    if let Some(list) = resume_list(&rows, last, width) {
+        return claude_resume(&rows, last, &list);
     }
     if let Some((foot, _)) = plan_footer(&rows, last) {
         return claude_plan(&rows, foot, last, width);
@@ -345,6 +384,179 @@ fn plan_footer(rows: &[String], last: usize) -> Option<(usize, String)> {
     }
     let first = rows[at].trim()[head.len()..].trim();
     Some((at, std::iter::once(first).chain(rows[at + 1..=last].iter().map(|r| r.trim())).collect()))
+}
+
+/// Claude's resume picker on screen, as [`resume_list`] finds it.
+struct ResumeList {
+    /// The `Resume session` row.
+    head: usize,
+    /// Its `(k of N)`: the highlighted row and the list's length, drawn only
+    /// while the list is longer than its window.
+    counter: Option<(u32, u32)>,
+    /// The key hints' first row, and the hints joined (they wrap).
+    foot: usize,
+    hints: String,
+    /// Each conversation's rows, `start..end`: its title row, then Claude's
+    /// rows about it.
+    items: Vec<(usize, usize)>,
+}
+
+/// Claude's resume picker (`claude -r`; fixtures `2.1.316/resume/`), from
+/// its drawing alone — no session's title is ever matched, being the user's
+/// words. Under the screen's column-0 full rule, `Resume session` (with
+/// ` (k of N)` while the list overflows its window), Claude's rounded search
+/// box, a scope row (`repo · lane`) while the list has the keyboard, then one
+/// block per conversation — its title row, the highlight `❯` (or `↑`/`↓` for
+/// more above or below) in column 2 and the title from column 4, and its own
+/// rows from column 4 (`10 seconds ago · lane · 355.6KB`) — and the key
+/// hints, which wrap, last. Blank rows part them all. A worktrees-launched
+/// Claude draws no name tag under it: the picker comes before the composer.
+fn resume_list(rows: &[String], last: usize, width: usize) -> Option<ResumeList> {
+    let foot = (0..last).rev().find(|&i| rows[i].trim().is_empty())? + 1;
+    let hints = rows[foot..=last].iter().map(|r| r.trim()).collect::<Vec<_>>().join(" ");
+    let top = (0..foot).rev().find(|&i| full_rule(&rows[i], width))?;
+    let head = (top + 1..foot).find(|&i| !rows[i].trim().is_empty())?;
+    let counter = resume_counter(rows[head].trim())?;
+    // The search box: its top edge right under the head, its field rows, its
+    // bottom edge.
+    let edge = |i: usize, c: char| rows.get(i).is_some_and(|r| r.trim_start().starts_with(c));
+    if !edge(head + 1, '╭') {
+        return None;
+    }
+    let bottom = (head + 2..foot).find(|&i| edge(i, '╰'))?;
+    if !(head + 2..bottom).all(|i| edge(i, '│') && rows[i].trim_end().ends_with('│')) || bottom == head + 2 {
+        return None;
+    }
+    let mut groups: Vec<(usize, usize)> = Vec::new();
+    let mut open = None;
+    for i in bottom + 1..foot {
+        match (rows[i].trim().is_empty(), open) {
+            (false, None) => open = Some(i),
+            (true, Some(s)) => {
+                groups.push((s, i));
+                open = None;
+            }
+            _ => {}
+        }
+    }
+    // The scope row stands alone; every conversation has rows under its title.
+    let items = match groups.first() {
+        Some(&(s, e)) if e - s == 1 => groups.split_off(1),
+        _ => groups,
+    };
+    let shaped = |&(s, e): &(usize, usize)| {
+        e - s >= 2 && resume_title(&rows[s]).is_some() && rows[s + 1..e].iter().all(|r| r.starts_with("    "))
+    };
+    (!items.is_empty() && items.iter().all(shaped)).then_some(ResumeList { head, counter, foot, hints, items })
+}
+
+/// The picker's head, `Resume session` or `Resume session (k of N)`:
+/// `Some(None)`, or `Some(Some((k, N)))`.
+fn resume_counter(head: &str) -> Option<Option<(u32, u32)>> {
+    let rest = head.strip_prefix(RESUME_HEAD)?;
+    if rest.is_empty() {
+        return Some(None);
+    }
+    let (k, n) = rest.strip_prefix(" (")?.strip_suffix(')')?.split_once(" of ")?;
+    Some(Some((k.parse().ok()?, n.parse().ok()?)))
+}
+
+/// A conversation's title row, `  ❯ wtrp-lane`: its mark in column 2 (`❯`
+/// the highlight, `↑`/`↓` more rows above/below the window, or none) and the
+/// title, which starts in column 4.
+fn resume_title(row: &str) -> Option<(Option<char>, &str)> {
+    let mut cs = row.strip_prefix("  ")?.chars();
+    let mark = match cs.next()? {
+        ' ' => None,
+        c @ ('❯' | '↑' | '↓') => Some(c),
+        _ => return None,
+    };
+    let title = cs.as_str().strip_prefix(' ')?;
+    (!title.is_empty() && !title.starts_with(' ')).then_some((mark, title.trim_end()))
+}
+
+/// The picker while its LIST has the keyboard (`… · Esc to cancel`), as a
+/// question whose choices are the conversations on screen. The window shows
+/// part of a long list: only those rows are choices, `hidden` counts the
+/// rest, and `window` pins where the window stands, so that rows which read
+/// alike (a lane's titles are all its session name) are still told apart
+/// when it scrolls. Its `(k of N)` and its `↑`/`↓` follow the highlight, so
+/// the body that [`same_prompt`] compares has neither. With the search field
+/// holding the keyboard (`… · Esc to clear`) nothing is highlighted, and it
+/// is no prompt to answer: arrows would leave the field, and keys typed
+/// there search. Esc, the other key it names, ends Claude.
+fn claude_resume(rows: &[String], last: usize, list: &ResumeList) -> Option<Modal> {
+    if !list.hints.ends_with(RESUME_FOOT) {
+        return None;
+    }
+    let titles: Vec<(Option<char>, &str)> = list.items.iter().map(|&(s, _)| resume_title(&rows[s])).collect::<Option<_>>()?;
+    let lit: Vec<usize> = (0..titles.len()).filter(|&i| titles[i].0 == Some('❯')).collect();
+    let [hl] = lit[..] else { return None };
+    let shown = titles.len() as u32;
+    let edges_ok = titles.iter().enumerate().all(|(i, (mark, _))| match mark {
+        Some('↑') => i == 0,
+        Some('↓') => i + 1 == titles.len(),
+        _ => true,
+    });
+    if !edges_ok {
+        return None;
+    }
+    let marked = |c: char| titles.iter().any(|(m, _)| *m == Some(c));
+    let (window, hidden) = match list.counter {
+        None if marked('↑') || marked('↓') => return None,
+        None => (1, 0),
+        Some((k, n)) => {
+            let first = k.checked_sub(hl as u32).filter(|&f| f >= 1 && f + shown - 1 <= n)?;
+            let (above, below) = (first > 1, first + shown - 1 < n);
+            if (marked('↑') && !above) || (marked('↓') && !below) {
+                return None;
+            }
+            (first, n - shown)
+        }
+    };
+    let choices = list
+        .items
+        .iter()
+        .zip(&titles)
+        .enumerate()
+        .map(|(j, (&(s, e), (_, title)))| {
+            let more = rows[s + 1..e].iter().map(|r| r.trim().to_string()).collect();
+            Choice { n: j as u32 + 1, label: title.to_string(), more, highlighted: j == hl, host_only: None, checked: None, text: None }
+        })
+        .collect();
+    let mut m = modal(provider::CLAUDE.id, Kind::Question, rows, list.head, last, list.foot, choices);
+    for r in &mut m.body {
+        if let Some(Some((_, n))) = resume_counter(r.trim()) {
+            *r = format!("{RESUME_HEAD} (of {n})");
+        } else if let Some((Some('↑' | '↓'), title)) = resume_title(r) {
+            *r = format!("    {title}");
+        }
+    }
+    m.picker = Some(Picker::Resume);
+    m.hidden = (hidden > 0).then_some(hidden);
+    m.window = Some(window);
+    Some(m)
+}
+
+/// Claude's resume picker is on `screen`, whichever part has the keyboard.
+fn claude_resume_shown(screen: &str) -> bool {
+    let rows = rows(screen);
+    let Some(width) = rows.iter().map(|r| r.chars().count()).max() else { return false };
+    let Some(last) = last_nonblank(&rows, rows.len()) else { return false };
+    resume_list(&rows, last, width).is_some_and(|l| l.hints.ends_with(RESUME_FOOT) || l.hints.ends_with(RESUME_SEARCH_FOOT))
+}
+
+/// What `harness`'s screen asks the user, on one line: a readable prompt's
+/// [`Modal::summary`] — or Claude's resume picker while its search field has
+/// the keyboard, which is no prompt to answer from here but a Claude that
+/// waits on the user all the same. `None` for anything else. The waiting
+/// reason (`activity::waiting_reason`), and so the amber dot of a Claude that
+/// has no session yet, are this.
+pub fn asking(harness: &str, screen: &str) -> Option<String> {
+    if let Some(m) = read(harness, screen) {
+        return Some(m.summary());
+    }
+    (harness == provider::CLAUDE.id && claude_resume_shown(screen)).then(|| RESUME_HEAD.to_string())
 }
 
 /// Codex (fixtures `codex-inline/`, `codex-send/probe-*`): the footer is
@@ -473,7 +685,11 @@ pub fn on_submit(m: &Modal) -> bool {
 /// the same rows but the footer, the same choices.
 pub fn same_prompt(a: &Modal, b: &Modal) -> bool {
     let unmarked = |m: &Modal| m.choices.iter().map(|c| (c.n, c.label.clone(), c.more.clone(), c.host_only, c.checked, c.text)).collect::<Vec<_>>();
-    a.kind == b.kind && a.multi == b.multi && a.body == b.body && unmarked(a) == unmarked(b)
+    a.kind == b.kind
+        && a.multi == b.multi
+        && (a.picker, a.hidden, a.window) == (b.picker, b.hidden, b.window)
+        && a.body == b.body
+        && unmarked(a) == unmarked(b)
 }
 
 /// `a` and `b` are the same multi-select, whichever boxes are ticked: what
@@ -829,6 +1045,10 @@ impl Modal {
     /// space in it as wide as the screen's rule (or, where the harness draws
     /// none, Codex, as the modal's widest row) joins the next with no space.
     pub fn summary(&self) -> String {
+        // Above the picker's rows are its search box and scope, not words.
+        if self.picker == Some(Picker::Resume) {
+            return RESUME_HEAD.to_string();
+        }
         let is_choice = |r: &str| {
             let t = r.trim_start();
             let t = t.strip_prefix(&MARKS[..]).map_or(t, str::trim_start).trim_end();
@@ -1243,7 +1463,7 @@ fn modal(harness: &'static str, kind: Kind, rows: &[String], start: usize, last:
     }
     let edge = rows.iter().filter(|r| is_rule(r)).map(|r| r.chars().count()).max();
     let order = choices.iter().map(|c| Some(c.n)).collect();
-    Modal { kind, lines, choices, multi: false, body, edge, order, on_submit: false, harness }
+    Modal { kind, lines, choices, multi: false, picker: None, hidden: None, body, edge, order, on_submit: false, window: None, harness }
 }
 
 fn classify(kind: Kind, c: &Choice) -> Option<HostOnly> {
@@ -2156,5 +2376,151 @@ mod tests {
 
     fn read_any_for_test(harness: &str, screen: &str) -> bool {
         read(harness, screen).is_some() || clipped(harness, screen).is_some()
+    }
+
+    macro_rules! resume {
+        ($name:literal) => {
+            include_str!(concat!("../tests/fixtures/claude-screen/2.1.316/resume/", $name))
+        };
+    }
+
+    fn rows_of(m: &Modal) -> Vec<(u32, &str, Vec<&str>, bool)> {
+        m.choices.iter().map(|c| (c.n, c.label.as_str(), c.more.iter().map(String::as_str).collect(), c.highlighted)).collect()
+    }
+
+    /// The picker a worktrees resume opens (`claude … -r --name wtrp-lane`,
+    /// 80×24, three conversations): a question whose choices are the
+    /// conversations, each its title and Claude's row under it, every one a
+    /// device's — and nothing of it read as a permission. A lane's sessions
+    /// are all titled by its `--name`, so the age and size are what tell
+    /// them apart, and they are kept.
+    #[test]
+    fn claude_resume_picker_is_a_question_of_its_conversations() {
+        let m = claude(resume!("picker.txt")).expect("the resume picker");
+        assert_eq!((m.kind, m.picker, m.hidden, m.multi), (Kind::Question, Some(Picker::Resume), None, false));
+        assert_eq!(
+            rows_of(&m),
+            vec![
+                (1, "wtrp-lane", vec!["10 seconds ago · lane · 355.6KB"], true),
+                (2, "wtrp-lane", vec!["23 seconds ago · lane · 349KB"], false),
+                (3, "wtrp-lane", vec!["28 seconds ago · lane · 348.3KB"], false),
+            ]
+        );
+        assert!(m.choices.iter().all(|c| c.host_only.is_none() && c.text.is_none() && c.checked.is_none()));
+        assert_eq!(m.lines.first().map(String::as_str), Some("  Resume session"));
+        assert_eq!(m.lines.last().map(String::as_str), Some("    search · Esc to cancel"), "the hints wrap, and are all shown");
+        assert_eq!(m.summary(), "Resume session");
+        assert_eq!(steps(&m, 3), Some(vec![Key::Down, Key::Down]));
+        let j = serde_json::to_value(&m).unwrap();
+        let styled = claude(resume!("picker.e.txt")).unwrap();
+        assert_eq!((styled.lines, styled.choices), (m.lines, m.choices));
+        assert_eq!((j["kind"].as_str(), j["picker"].as_str(), j.get("hidden")), (Some("question"), Some("resume"), None));
+    }
+
+    /// Wide panes. At 160 columns the hints wrap onto a last row of their
+    /// own, `Esc to cancel`, which the permission reader below took for its
+    /// footer: a "permission" of the first conversation's two rows, both
+    /// host-only. A summary title (an unnamed session) is a title like any.
+    #[test]
+    fn claude_resume_picker_reads_wide_and_never_as_a_permission() {
+        let m = claude(resume!("picker-titled-wide.txt")).expect("the picker at 160×40");
+        assert_eq!((m.kind, m.picker, m.hidden), (Kind::Question, Some(Picker::Resume), None), "all 8 fit, and no counter is drawn");
+        assert_eq!(m.choices.len(), 8);
+        assert_eq!(rows_of(&m)[0], (1, "Resume picker title wrapping test", vec!["15 seconds ago · lane · 349.5KB"], true));
+        assert_eq!(m.lines.last().map(String::as_str), Some("    Esc to cancel"));
+        let w = claude(resume!("picker-wide.txt")).unwrap();
+        assert_eq!(w.choices.len(), 3);
+        assert_eq!(w.choices[1].more, vec!["1 minute ago · lane · 349KB".to_string()]);
+        for name in ["picker-wide.e.txt", "picker-titled-wide.e.txt"] {
+            let s = match name {
+                "picker-wide.e.txt" => resume!("picker-wide.e.txt"),
+                _ => resume!("picker-titled-wide.e.txt"),
+            };
+            assert_eq!(claude(s).map(|m| m.picker), Some(Some(Picker::Resume)), "{name}");
+        }
+    }
+
+    /// The highlight moving is the same prompt; arrows walk it.
+    #[test]
+    fn claude_resume_highlight_moves_inside_the_same_prompt() {
+        let a = claude(resume!("picker-wide.txt")).unwrap();
+        let b = claude(resume!("picker-wide-moved.txt")).unwrap();
+        assert_eq!(b.choices.iter().find(|c| c.highlighted).map(|c| c.n), Some(2));
+        assert!(same_prompt(&a, &b));
+        assert_eq!(steps(&b, 1), Some(vec![Key::Up]));
+        assert_eq!(steps(&a, 2), Some(vec![Key::Down]));
+        let other = claude(resume!("picker.txt")).unwrap();
+        assert!(!same_prompt(&a, &other), "other ages are other rows: the screen was redrawn (a resize recomputes them)");
+    }
+
+    /// Seven conversations in an 80×24 pane: a window of four. Only those are
+    /// choices; `hidden` counts the rest. `(k of N)` follows the highlight and
+    /// `↓` gives way to `❯` on the window's last row, and that is still the
+    /// same prompt; the window SCROLLING is not, though its rows read alike.
+    #[test]
+    fn claude_resume_long_list_offers_its_window_and_counts_the_rest() {
+        let top = claude(resume!("picker-long.txt")).expect("a long list");
+        assert_eq!((top.hidden, top.window), (Some(3), Some(1)));
+        assert_eq!(top.choices.len(), 4);
+        assert_eq!(rows_of(&top)[3], (4, "wtrp-lane", vec!["21 seconds ago · lane · 346.9KB"], false), "the `↓` is no part of the title");
+        assert_eq!(top.lines.first().map(String::as_str), Some("  Resume session (1 of 7)"));
+
+        let last = claude(resume!("picker-long-last.txt")).unwrap();
+        assert_eq!(last.choices.iter().find(|c| c.highlighted).map(|c| c.n), Some(4));
+        assert!(same_prompt(&top, &last), "(4 of 7) and a `❯` where the `↓` was: the highlight moved, nothing else");
+        assert_eq!(steps(&top, 4), Some(vec![Key::Down; 3]));
+
+        let scrolled = claude(resume!("picker-long-scrolled.txt")).unwrap();
+        assert_eq!((scrolled.hidden, scrolled.window), (Some(3), Some(2)));
+        assert_eq!(scrolled.choices[0].label, "wtrp-lane", "the `↑` is no part of the title");
+        assert!(!same_prompt(&last, &scrolled), "the window moved: these are other conversations");
+        // A lane's rows can read alike to the byte (three of these are
+        // `wtrp-lane` · 349KB; `picker-titled` has three `1 minute ago`
+        // ones): the same rows one window further down are still others.
+        let alike = claude(&resume!("picker-long.txt").replacen(" (1 of 7)", " (2 of 7)", 1)).unwrap();
+        assert_eq!((alike.window, &alike.choices), (Some(2), &top.choices));
+        assert!(!same_prompt(&top, &alike), "rows that read alike in another window are other conversations");
+
+        let end = claude(resume!("picker-long-end.txt")).unwrap();
+        assert_eq!((end.window, end.choices.iter().find(|c| c.highlighted).map(|c| c.n)), (Some(4), Some(4)));
+
+        let titled = claude(resume!("picker-titled.txt")).unwrap();
+        assert_eq!((titled.hidden, titled.choices.len()), (Some(4), 4));
+        assert_eq!(serde_json::to_value(&titled).unwrap()["hidden"], serde_json::json!(4));
+        for s in [resume!("picker-long.e.txt"), resume!("picker-long-scrolled.e.txt"), resume!("picker-titled.e.txt")] {
+            assert!(claude(s).is_some_and(|m| m.picker == Some(Picker::Resume) && m.hidden.is_some()));
+        }
+    }
+
+    /// Up from the first row puts the keyboard in the search field: nothing
+    /// is highlighted and keys typed there search, so it is no prompt to
+    /// answer — but the Claude is waiting on the user, and says so.
+    #[test]
+    fn claude_resume_with_the_search_field_focused_waits_and_is_not_answered() {
+        assert!(claude(resume!("picker-search.txt")).is_none());
+        assert!(claude(resume!("picker-search.e.txt")).is_none());
+        assert_eq!(asking("claude", resume!("picker-search.txt")).as_deref(), Some("Resume session"));
+        assert_eq!(asking("claude", resume!("picker.e.txt")).as_deref(), Some("Resume session"));
+        assert_eq!(asking("codex", resume!("picker.txt")), None, "Claude's drawing, read for Claude");
+        assert_eq!(crate::activity::waiting_reason("claude", resume!("picker-search.e.txt")).as_deref(), Some("waiting: Resume session"));
+    }
+
+    /// Structure, never the user's words: a title that reads like a choice
+    /// or a footer is a title, and Claude's words without its drawing (a
+    /// reply quoting `Resume session`, no search box) are no picker.
+    #[test]
+    fn claude_resume_is_read_from_its_drawing_not_from_titles() {
+        let screen = resume!("picker.txt");
+        let odd = screen.replacen("  ❯ wtrp-lane", "  ❯ 1. Yes · Esc to cancel", 1);
+        let m = claude(&odd).unwrap();
+        assert_eq!((m.picker, m.choices[0].label.as_str()), (Some(Picker::Resume), "1. Yes · Esc to cancel"));
+        let boxless: String = screen.lines().filter(|l| !l.trim_start().starts_with(['╭', '│', '╰'])).collect::<Vec<_>>().join("\n");
+        assert!(claude(&boxless).is_none() && asking("claude", &boxless).is_none(), "no search box, no picker");
+        let two = screen.replacen("    wtrp-lane\n    23", "  ❯ wtrp-lane\n    23", 1);
+        assert!(claude(&two).is_none(), "two highlights: never a guess");
+        let stray = resume!("picker-long.txt").replacen("  ↓ wtrp-lane", "    wtrp-lane", 1).replacen("    wtrp-lane\n    10", "  ↓ wtrp-lane\n    10", 1);
+        assert!(claude(&stray).is_none(), "a `↓` that is not on the window's last row");
+        let uncounted = resume!("picker-long.txt").replacen(" (1 of 7)", "", 1);
+        assert!(claude(&uncounted).is_none(), "a scrolled window with no count");
     }
 }

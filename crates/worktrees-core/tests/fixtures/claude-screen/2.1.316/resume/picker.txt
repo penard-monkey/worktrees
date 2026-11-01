@@ -1,0 +1,20 @@
+
+────────────────────────────────────────────────────────────────────────────────
+  Resume session
+  ╭──────────────────────────────────────────────────────────────────────────╮
+  │ ⌕ Search…                                                                │
+  ╰──────────────────────────────────────────────────────────────────────────╯
+    repo · lane
+
+  ❯ wtrp-lane
+    10 seconds ago · lane · 355.6KB
+
+    wtrp-lane
+    23 seconds ago · lane · 349KB
+
+    wtrp-lane
+    28 seconds ago · lane · 348.3KB
+
+    Ctrl+A to show all projects · Ctrl+B to only show current branch · Ctrl+W
+    to show all worktrees · Space to preview · Ctrl+R to rename · Type to
+    search · Esc to cancel

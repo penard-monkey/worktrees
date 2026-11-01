@@ -1,0 +1,34 @@
+
+[38;5;153m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  [1m[38;5;153mResume session[0m
+  [2m╭──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮[0m
+  [2m│[0m [38;5;246m⌕ Search…[39m                                                                                                                                                [2m│[0m
+  [2m╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯[0m
+    [38;5;246mrepo · lane[39m
+
+  [38;5;153m❯[39m [38;5;153mResume picker title wrapping test[39m
+    [38;5;246m15 seconds ago · lane · 349.5KB[39m
+
+    wtrp-lane
+    [38;5;246m1 minute ago · lane · 349KB[39m
+
+    wtrp-lane
+    [38;5;246m1 minute ago · lane · 349KB[39m
+
+    wtrp-lane
+    [38;5;246m1 minute ago · lane · 349KB[39m
+
+    wtrp-lane
+    [38;5;246m2 minutes ago · lane · 346.9KB[39m
+
+    wtrp-lane
+    [38;5;246m5 minutes ago · lane · 355.6KB[39m
+
+    wtrp-lane
+    [38;5;246m5 minutes ago · lane · 349KB[39m
+
+    wtrp-lane
+    [38;5;246m5 minutes ago · lane · 348.3KB[39m
+
+    [38;5;246mCtrl+A to show all projects · Ctrl+B to only show current branch · Ctrl+W to show all worktrees · Space to preview · Ctrl+R to rename · Type to search · [39m
+    [38;5;246mEsc to cancel[39m

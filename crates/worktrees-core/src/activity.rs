@@ -173,9 +173,10 @@ pub fn codex_needs_pane(turn: Option<&Turn>) -> bool {
 const REASON_CHARS: usize = 240;
 
 /// Why a lane is `waiting`, from the same reader the agent rows answer with
-/// (`prompt::read`): `waiting: ` and what the prompt says, cut short.
+/// (`prompt::asking`, `prompt::read` and Claude's resume picker): `waiting: `
+/// and what the prompt says, cut short.
 pub fn waiting_reason(provider: &str, screen: &str) -> Option<String> {
-    let said = crate::prompt::read(provider, screen)?.summary();
+    let said = crate::prompt::asking(provider, screen)?;
     let cut = match said.char_indices().nth(REASON_CHARS) {
         Some((i, _)) => format!("{}…", said[..i].trim_end()),
         None => said,
