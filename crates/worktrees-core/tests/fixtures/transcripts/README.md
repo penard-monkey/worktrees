@@ -104,3 +104,14 @@ Claude 2.1.316 wrote the injected kinds this way:
 
 The user's own transcripts were not opened. The scratch session's real
 system-prompt `api-request-blob` entries are absent from the fixture.
+
+`claude-2.1.316-queued-synthetic.jsonl` is SYNTHESIZED from the field shape
+Claude Code 2.1.316 wrote in a user's transcript on 2026-11-01. Its contents
+are invented, and no private transcript was read by this lane. It has a
+running turn, a human `attachment`/`queued_command` with attachment paths and
+matching `queue-operation` removal (`absorbed_mid_turn`), then one queued
+command whose removal says `delivered_to_agent` and whose text appears in a normal
+`user` turn. The `rendered` reminder has a marker that must never reach the
+reader. The absorbed removal precedes its attachment in file order, while
+the attachment carries its own earlier timestamp. Replace this fixture when
+a scratch capture is available.

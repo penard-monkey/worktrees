@@ -112,7 +112,7 @@ export function ChatPane(props: ChatPaneProps) {
   }, []);
 
   const data = v.turns.data;
-  const items = data ? itemsOf(data.turns, v.answered, v.pending) : [];
+  const items = data ? itemsOf(data.turns, v.answered, v.pending, working) : [];
   const replies = items.filter((it) => it.k === "reply").length;
   const promptKey = promptKeyOf(prompt);
   const { toBottom, fresh, dismiss } = useStickToBottom(scrollRef, items.length, replies, !!data, promptKey);
@@ -416,6 +416,7 @@ function ChatItem(props: { it: Item; agent: string; root: string; onLink: (href:
             aria-label={`You${it.at ? `, ${clockOf(it.at)}` : ""}`} data-testid="chat-user">
             <Markdown src={sent.text} onLink={props.onLink} />
             {sent.paths.length > 0 && <SentFiles paths={sent.paths} />}
+            {it.midTurn && <p className="chat-bubble-note chat-midturn-caption">Sent while {agent} was working</p>}
           </div>
         </li>
       );
@@ -465,7 +466,7 @@ function ChatItem(props: { it: Item; agent: string; root: string; onLink: (href:
             <p>{sent.text}</p>
             {sent.paths.length > 0 && <SentFiles paths={sent.paths} />}
           </div>
-          <p className="chat-status">{it.p.queued ? `Queued behind ${agent}’s running turn` : `Delivered · waiting for ${agent}`}</p>
+          <p className="chat-status">{it.caughtUp ? "Delivered · check the terminal" : it.p.queued ? `Queued behind ${agent}’s running turn` : `Delivered · waiting for ${agent}`}</p>
         </li>
       );
     }

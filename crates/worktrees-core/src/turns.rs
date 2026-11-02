@@ -6,11 +6,14 @@
 //! the names of the tools it called. Everything else in a transcript is left
 //! where it is, and some of it must be. Claude's `.jsonl` carries
 //! `api-request-blob` entries holding the whole system prompt and every
-//! `CLAUDE.md` it loaded, `attachment`s, hook summaries and sidechains; Codex's
+//! `CLAUDE.md` it loaded, hook summaries and sidechains; Codex's
 //! rollout opens on `session_meta.base_instructions` and `developer` messages,
 //! and wraps AGENTS.md and the environment as `<…>` user messages. None of
 //! that is a turn, so only user and assistant entries are considered, and
-//! Claude's own user entries are classified before they reach a client.
+//! Claude's own user entries are classified before they reach a client. A
+//! human `queued_command` attachment absorbed mid-turn is the exception: it is
+//! a person's message inside that turn, not a new `user` entry. Its `rendered`
+//! reminder is never read.
 //! Thinking and reasoning are left out as well.
 //!
 //! Text is DATA. The reply is what the agent wrote, and what the user typed
@@ -39,6 +42,7 @@
 //! `tools` are as they were, for older clients.
 
 use serde::Serialize;
+use std::collections::{HashMap, HashSet};
 
 /// The most turns one answer carries.
 pub const MAX_TURNS: usize = 20;
@@ -96,6 +100,8 @@ pub enum Notice {
 pub enum Step {
     /// A block of the reply.
     Text { at: Option<i64>, text: String },
+    /// A person's message Claude absorbed while working on this turn.
+    User { at: Option<i64>, text: String },
     /// A tool it called that nobody was asked about.
     Tool {
         at: Option<i64>,
@@ -270,14 +276,29 @@ impl Notice {
 }
 
 /// The last `n` turns (at most [`MAX_TURNS`]) of a Claude transcript's `lines`,
-/// oldest first. Only `user` and `assistant` entries off the main thread
-/// count: a user entry whose content is text starts a turn, unless it is
-/// Claude's own injected entry (a structured notice, or a pure reminder to
-/// drop); a tool result does not.
+/// oldest first. A `user` entry whose content is text starts a turn, unless it is
+/// Claude's own injected entry (a structured notice, pure reminder, or local
+/// command caveat) is classified or dropped; a tool result does not start a
+/// turn. A human `queued_command` attachment belongs inside the current turn
+/// only when its queue removal says `absorbed_mid_turn`. Other 2.1.316
+/// consumption reasons are `delivered_to_agent`, `delivered_as_tool_result`
+/// and `carried_to_background`; none is a mid-turn human message for this row.
 pub fn claude(lines: &[String], n: usize) -> Vec<Turn> {
     let mut turns: Vec<Turn> = Vec::new();
+    struct Queued {
+        turn: usize,
+        step: usize,
+        source: String,
+        delivery: String,
+        at: Option<i64>,
+        text: String,
+    }
+    let mut queued: Vec<Queued> = Vec::new();
+    // Claude may append the removal before the attachment it describes.
+    // Match after scanning both, using their IDs rather than line order.
+    let mut absorbed: HashMap<String, HashSet<String>> = HashMap::new();
     for l in lines {
-        if !(l.contains("\"type\":\"user\"") || l.contains("\"type\":\"assistant\"")) {
+        if !(l.contains("\"type\":\"user\"") || l.contains("\"type\":\"assistant\"") || l.contains("\"type\":\"attachment\"") || l.contains("\"type\":\"queue-operation\"")) {
             continue;
         }
         let Ok(v) = serde_json::from_str::<serde_json::Value>(l) else { continue };
@@ -287,6 +308,36 @@ pub fn claude(lines: &[String], n: usize) -> Vec<Turn> {
         let at = v.get("timestamp").and_then(|t| t.as_str()).and_then(crate::sysclock::parse_iso8601);
         let content = v.pointer("/message/content");
         match v.get("type").and_then(|t| t.as_str()) {
+            Some("attachment") => {
+                let Some(a) = v.get("attachment") else { continue };
+                let human = a.pointer("/origin/kind").and_then(|k| k.as_str()) == Some("human")
+                    || a.get("humanTurn").and_then(|h| h.as_bool()) == Some(true);
+                if !human || a.get("type").and_then(|t| t.as_str()) != Some("queued_command")
+                    || a.get("commandMode").and_then(|m| m.as_str()) != Some("prompt")
+                {
+                    continue;
+                }
+                let (Some(source), Some(delivery), Some(raw), Some(turn)) = (
+                    a.get("source_uuid").and_then(|s| s.as_str()),
+                    a.get("delivery_id").and_then(|s| s.as_str()),
+                    a.get("prompt").and_then(|s| s.as_str()),
+                    turns.last(),
+                ) else { continue };
+                let text: String = raw.chars().filter(|c| !c.is_control() && !crate::harness::invisible(*c)).collect();
+                if !text.is_empty() {
+                    queued.push(Queued { turn: turns.len() - 1, step: turn.steps.len(), source: source.to_string(), delivery: delivery.to_string(), at, text });
+                }
+            }
+            Some("queue-operation") if v.get("operation").and_then(|o| o.as_str()) == Some("remove") => {
+                if v.get("reason").and_then(|r| r.as_str()) != Some("absorbed_mid_turn") {
+                    continue;
+                }
+                let (Some(source), Some(delivery)) = (
+                    v.get("commandUuid").and_then(|s| s.as_str()),
+                    v.get("deliveryId").and_then(|s| s.as_str()),
+                ) else { continue };
+                absorbed.entry(source.to_string()).or_default().insert(delivery.to_string());
+            }
             Some("user") => {
                 let text = match content {
                     Some(serde_json::Value::String(s)) => Some(s.clone()),
@@ -352,6 +403,13 @@ pub fn claude(lines: &[String], n: usize) -> Vec<Turn> {
             }
             _ => {}
         }
+    }
+    let mut inserted = vec![0; turns.len()];
+    for q in queued.into_iter().filter(|q| {
+        absorbed.get(&q.source).is_some_and(|ids| ids.contains(&q.delivery))
+    }) {
+        turns[q.turn].steps.insert(q.step + inserted[q.turn], Step::User { at: q.at, text: q.text });
+        inserted[q.turn] += 1;
     }
     finish(turns, n)
 }
@@ -1028,6 +1086,7 @@ fn clip_steps(steps: &mut Vec<Step>) -> bool {
     };
     for step in steps.iter_mut() {
         match step {
+            Step::User { text, .. } => c(text),
             Step::Question { questions, answer, .. } => {
                 for q in questions {
                     c(&mut q.header);
@@ -1085,7 +1144,7 @@ impl Step {
     fn bytes(&self) -> usize {
         let opt = |s: &Option<String>| s.as_ref().map_or(0, String::len);
         match self {
-            Step::Text { text, .. } => text.len(),
+            Step::Text { text, .. } | Step::User { text, .. } => text.len(),
             Step::Tool { name, summary, failed, .. } => name.len() + opt(summary) + if *failed { FAILED_BYTES } else { 0 },
             Step::Question { questions, answer, .. } => {
                 questions.iter().map(|q| q.header.len() + q.question.len() + q.options.iter().map(|o| o.label.len() + o.description.len()).sum::<usize>()).sum::<usize>()
@@ -1188,6 +1247,45 @@ mod tests {
 
     fn ts(s: &str) -> i64 {
         crate::sysclock::parse_iso8601(s).unwrap()
+    }
+
+    #[test]
+    fn claude_queued_message_is_a_step_only_when_absorbed() {
+        use serde_json::json;
+        let fx = lines(include_str!("../tests/fixtures/transcripts/claude-2.1.316-queued-synthetic.jsonl"));
+        let got = claude(&fx, 20);
+        assert_eq!(got.len(), 3, "{got:#?}");
+        assert_eq!(got[0].at, Some(ts("2026-11-01T00:44:50.000Z")));
+        assert_eq!(got[0].user.as_deref(), Some("Start the tile."));
+        assert_eq!(
+            serde_json::to_value(&got[0].steps).unwrap(),
+            json!([
+                {"kind":"text", "at":ts("2026-11-01T00:45:00.000Z"), "text":"Working on the tile."},
+                {"kind":"user", "at":ts("2026-11-01T00:45:10.916Z"), "text":"Layer these images [attached: .worktrees-attachments/20261102-aaaaaaaaaaaaaaaa.png, .worktrees-attachments/20261102-bbbbbbbbbbbbbbbb.png]"},
+                {"kind":"text", "at":ts("2026-11-01T00:45:20.000Z"), "text":"I layered them."}
+            ])
+        );
+        assert_eq!(got[1].user.as_deref(), Some("Next, inspect the colors."));
+        assert!(serde_json::to_string(&got[1].steps).unwrap().find("\"kind\":\"user\"").is_none(), "delivered queue has one normal turn");
+        assert_eq!(got[2].at, Some(ts("2026-11-01T05:00:47.606Z")), "an unfinished normal turn keeps its prompt time");
+        assert_eq!(got[2].user.as_deref(), Some("Give me more options."));
+        assert!(!serde_json::to_string(&got).unwrap().contains("RENDERED-REMINDER-MARKER"));
+    }
+
+    #[test]
+    fn a_queued_human_step_removes_invisible_and_control_characters() {
+        use serde_json::json;
+        let fx = [
+            json!({"type":"user", "message":{"content":"Start"}}),
+            json!({"type":"attachment", "attachment":{"type":"queued_command", "prompt":"one\u{202e}two\u{1b}three", "source_uuid":"s1", "delivery_id":"d1", "commandMode":"prompt", "humanTurn":true}}),
+            json!({"type":"queue-operation", "operation":"remove", "reason":"absorbed_mid_turn", "commandUuid":"s1", "deliveryId":"d1"}),
+            json!({"type":"attachment", "attachment":{"type":"queued_command", "prompt":"SYSTEM-MARKER", "source_uuid":"s2", "delivery_id":"d2", "commandMode":"prompt", "origin":{"kind":"system"}}}),
+            json!({"type":"queue-operation", "operation":"remove", "reason":"absorbed_mid_turn", "commandUuid":"s2", "deliveryId":"d2"}),
+        ];
+        let lines: Vec<String> = fx.iter().map(serde_json::Value::to_string).collect();
+        let got = claude(&lines, 1);
+        assert_eq!(serde_json::to_value(&got[0].steps).unwrap(), json!([{"kind":"user", "at":null, "text":"onetwothree"}]));
+        assert!(!serde_json::to_string(&got).unwrap().contains("SYSTEM-MARKER"));
     }
 
     /// A real Claude 2.1.316 session, trimmed (README): every question,

@@ -94,6 +94,7 @@
 .chat-notice-details pre { max-height: 10em; overflow: auto; margin: var(--s1) 0 0; padding: var(--s1); border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--bg-panel); white-space: pre-wrap; color: var(--txt-dim); }
 .chat-status { margin: 2px var(--s1) 0 0; font-size: var(--fs-micro); color: var(--txt-dim); }
 .chat-bubble-note { margin: var(--s2) 0 0; font-size: var(--fs-meta); color: var(--txt-dim); }
+.chat-midturn-caption { color: var(--txt); }
 
 /* Markdown inside a bubble: the bubble is the box, so the document's own
    padding, measure and outer margins go. Fences keep the terminal's size. */

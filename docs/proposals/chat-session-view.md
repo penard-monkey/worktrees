@@ -139,10 +139,19 @@ changed silently. When the only problem is line breaks, the line offers
 | Its session has gone | "No Claude is running in this place any more." |
 
 After a confirmed send, the message shows as a dashed bubble ("Delivered ·
-waiting for Claude", or "Queued behind Claude's running turn"). It is
-replaced by the real turn once the transcript has it, matched by text and
-time as on iOS (`settlePending`). The draft clears only on a confirmed
-delivery.
+waiting for Claude", or "Queued behind Claude's running turn"). Its send time
+is taken before `agent_send` begins: Claude can write the transcript entry
+before the host confirms delivery. It is replaced by the transcript's normal
+user turn or by a `user` step Claude absorbed mid-turn, matched by exact text
+and time, one record per pending copy (`settlePending`). A pending fallback
+stays at its send time among the conversation's items. Once a later turn is
+known to have ended (another turn started, or the agent is idle), its caption
+says "Delivered · check the terminal" instead of promising Claude is still
+waiting. A partial reply while the agent is busy does not count as ended.
+The draft clears only on a confirmed delivery.
+The post-send read may join a `loadTurns` already in flight from before the
+send. If that read leaves this message pending, the chat starts one fresh read
+after it completes; an idle place has no busy poll to rescue that race.
 
 ## 5. A waiting prompt
 
@@ -262,6 +271,18 @@ they are the same whoever answered: this card, the terminal or a phone.
 time, so a reply after a 12:22 answer is labelled 12:22, not with the time of
 the turn's prompt.
 
+Claude 2.1.316 can absorb a human message sent while it works into its active
+turn. That message is an `attachment` with `attachment.type: queued_command`,
+`commandMode: prompt` and a matching `queue-operation` removal whose reason is
+`absorbed_mid_turn`; it is never a top-level `user` entry. `agent_turns` adds
+`{kind: "user", text, at}` inside that turn's `steps`, at the attachment's
+position. The chat draws it as the person's bubble with "Sent while Claude
+was working" below. A queued command removed for another reason and then
+written as a normal `user` entry stays one normal turn. The attachment's
+`rendered` system reminder is never shown.
+The caption uses `--txt` on the user bubble, so the small text follows §7's
+body-text contrast rule in every theme.
+
 | Asked | Drawn as | From (measured: Claude 2.1.316, codex-cli 0.160.1 scratch sessions) |
 |---|---|---|
 | A Claude question | The header and question; the picked option marked with its description, the others muted; typed text as a marked row | `AskUserQuestion`'s `input.questions`; `toolUseResult.answers` (a multi-select's labels joined by ", "; typed text is the value itself); "Chat about this" is a refusal whose `userFeedback` starts "The user wants to clarify" |
@@ -311,7 +332,7 @@ one of these wrappers remains a person message.
 | `app/src/ChatPane.css` | Plain CSS on `tokens.css` |
 | `app/src/App.tsx` | The switch in `.agent-label`, the terminal wrapped in a hidden, `inert` `.agent-term`, and the activity, done stamp and pane draft passed in |
 | `app/src/settings.ts`, `SettingsSheet.tsx` | `chat_view` (default on, migrated once on upgrade), Behavior → Chat view; each place's optional `agent_view` (`agentViewFor`, `withAgentView`) |
-| `app/src/mock/install.ts` | `?turns=answered` (a transcript whose prompts were answered, as `steps`; a mock answer lands in the transcript 1.5 s later), per-harness turns, the pi/kimi refusal, `?agentsend=mid\|nocomposer\|unconfirmed`, `?agentprompt=permission\|question\|multi\|plan\|tall\|unreadable\|resume\|preview\|preview-shown\|preview-note\|off` (`,waiting` for waiting places only; a Codex place gets Codex's approval; `resume` is Claude's resume picker, four conversations shown and three more in the terminal, with `agent_turns` failing as before a session exists until a pick, and for half a second after it; `preview` is Claude's question with a preview per option, every one known, `preview-shown` the same at 80×24 with only the terminal's one, cut, and `preview-note` one with a note typed in the terminal), `?agentanswer=unseen`, `?activity=<n>` |
+| `app/src/mock/install.ts` | `?turns=answered` (a transcript whose prompts were answered, as `steps`; a mock answer lands in the transcript 1.5 s later), `?turns=queued` (a busy Claude absorbs the first send mid-turn; the next send is a normal turn), per-harness turns, the pi/kimi refusal, `?agentsend=mid\|nocomposer\|unconfirmed`, `?agentprompt=permission\|question\|multi\|plan\|tall\|unreadable\|resume\|preview\|preview-shown\|preview-note\|off` (`,waiting` for waiting places only; a Codex place gets Codex's approval; `resume` is Claude's resume picker, four conversations shown and three more in the terminal, with `agent_turns` failing as before a session exists until a pick, and for half a second after it; `preview` is Claude's question with a preview per option, every one known, `preview-shown` the same at 80×24 with only the terminal's one, cut, and `preview-note` one with a note typed in the terminal), `?agentanswer=unseen`, `?activity=<n>` |
 
 `?turns=notices` shows all six injected-entry kinds, including long peer text,
 shell output, and a compact summary. They use neutral notes, cards, or chips,
