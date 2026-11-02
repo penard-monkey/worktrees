@@ -610,6 +610,7 @@ export function choiceOpen(c: PromptChoice): ChoiceWay {
  *  and the rows refuse every answer; holding their note, it goes with
  *  whichever choice is sent, and no other note can be added. */
 export function choiceWay(p: ReadablePrompt, c: PromptChoice): ChoiceWay {
+  if (c.checked !== undefined) return { open: false, how: "plain", note: "Tick this box, then send the choices together" };
   const way = choiceOpen(c);
   if (!p.notes) return way;
   if (p.notes.open) return { open: false, how: "plain", note: "Someone is typing a note in the terminal: answer it there" };
@@ -758,8 +759,9 @@ export function cardKey(e: CardKeyEvent, s: CardKeyState, p: ReadablePrompt): Ca
   const n = Number(e.key);
   const c = p.choices.find((x) => x.n === n);
   // A choice the card draws disabled is not there for a key either.
-  if (!c || !choiceWay(p, c).open) return null;
-  if (p.multi && c.checked !== undefined) return { act: "tick", n };
+  if (!c) return null;
+  if (p.multi && c.checked !== undefined) return choiceOpen(c).open ? { act: "tick", n } : null;
+  if (!choiceWay(p, c).open) return null;
   const on = s.selected !== n;
   return { act: "select", n, choice: on ? n : null, field: on && choiceWay(p, c).how !== "plain" };
 }
@@ -777,7 +779,7 @@ export function cardTakesFocus(a: { fingerprint: string | null; seen: string | n
 /** The digits that choose on this card, as its hint says them: "1–3", "1", or
  *  null when no choice is open. */
 export function cardDigits(p: ReadablePrompt): string | null {
-  const ns = p.choices.filter((c) => c.n >= 1 && c.n <= 9 && choiceWay(p, c).open).map((c) => c.n);
+  const ns = p.choices.filter((c) => c.n >= 1 && c.n <= 9 && (p.multi && c.checked !== undefined ? choiceOpen(c).open : choiceWay(p, c).open)).map((c) => c.n);
   if (!ns.length) return null;
   const lo = Math.min(...ns);
   const hi = Math.max(...ns);
@@ -1279,7 +1281,7 @@ export async function sendAnswer(t: Target, agent: string): Promise<void> {
   const d = v.prompt.data;
   if (v.answering || v.selected === null || !d || !d.waiting || !d.readable) return;
   const c = d.choices.find((x) => x.n === v.selected);
-  if (!c) return;
+  if (!c || c.checked !== undefined) return;
   const way = choiceWay(d, c);
   const text = way.how === "plain" ? "" : v.answerText;
   if (!way.open || (way.how === "field" && !text.trim()) || draftProblem(text, way.how === "field" ? "answer" : "note")) return;

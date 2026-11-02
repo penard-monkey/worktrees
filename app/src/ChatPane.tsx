@@ -644,7 +644,7 @@ function PromptCard(props: {
   const { boxes, freeBox } = p.multi ? boxesOf(p) : { boxes: [] as PromptChoice[], freeBox: null };
   const others = p.multi ? p.choices.filter((c) => c.checked === undefined) : p.choices;
   const ticks = p.multi ? ticksOf(v, p) : [];
-  const selected = p.choices.find((c) => c.n === v.selected) ?? null;
+  const selected = others.find((c) => c.n === v.selected) ?? null;
   const way = selected ? choiceWay(p, selected) : null;
   const typed = way && way.how !== "plain" ? v.answerText : "";
   const typedProblem = way && way.how !== "plain" ? draftProblem(typed, way.how === "field" ? "answer" : "note") : null;
