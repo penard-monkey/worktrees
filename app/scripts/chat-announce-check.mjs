@@ -12,8 +12,8 @@
 // chat is shown and the window is not hidden.
 //
 // Runs the REAL `hear`, `gather`, `announcement`, `promptKeyOf` and `itemsOf`
-// from app/src/chat.ts, with only its two imports stubbed (React's store hook
-// and the ipc door, which none of them touch), then reads ChatPane.tsx for the
+// from app/src/chat.ts, with its imports stubbed (React's store hook, the ipc
+// door and photo conversion, which none of them touch), then reads ChatPane.tsx for the
 // one live region and its wiring.
 //
 // CHATANNOUNCE_SRC / CHATANNOUNCE_PANE point the check at other copies of
@@ -39,7 +39,8 @@ const done = () => {
 
 const src = fs.readFileSync(SRC, "utf8")
   .replace(/^import \{ useSyncExternalStore \} from "react";$/m, "const useSyncExternalStore = () => undefined;")
-  .replace(/^import \{ invoke, windowOnHost \} from "\.\/ipc";$/m, "const invoke = async () => { throw new Error(\"no ipc here\"); }; const windowOnHost = () => true;");
+  .replace(/^import \{ invoke, windowOnHost \} from "\.\/ipc";$/m, "const invoke = async () => { throw new Error(\"no ipc here\"); }; const windowOnHost = () => true;")
+  .replace(/^import \{ convertPhoto, jpegName, photoDecision, photoKind, INPUT_MAX \} from "\.\/chat-image";$/m, "const INPUT_MAX = 40 * 1024 * 1024; const convertPhoto = () => undefined; const jpegName = () => undefined; const photoDecision = () => undefined; const photoKind = () => undefined;");
 if (/^import /m.test(src)) fail("chat.ts gained an import this check does not stub — extend the stubs above");
 const js = (await transformWithEsbuild(src, "chat.ts", { loader: "ts", format: "esm" })).code;
 const C = await import("data:text/javascript;base64," + Buffer.from(js).toString("base64"));

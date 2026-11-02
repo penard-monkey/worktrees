@@ -9,8 +9,8 @@
 // text.
 //
 // Runs the REAL `itemsOf` and `settleAnswered` from app/src/chat.ts, with
-// only its two imports stubbed (React's store hook and the ipc door, neither
-// of which these two functions touch). The steps below use the field names
+// its imports stubbed (React's store hook, the ipc door and photo conversion,
+// none of which these functions touch). The steps below use the field names
 // the Rust tests pin on a real Claude 2.1.316 transcript
 // (`claude_steps_carry_what_was_asked_and_answered`).
 //
@@ -32,7 +32,8 @@ const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
 const src = fs.readFileSync(SRC, "utf8")
   .replace(/^import \{ useSyncExternalStore \} from "react";$/m, "const useSyncExternalStore = (_subscribe, snapshot) => snapshot();")
-  .replace(/^import \{ invoke, windowOnHost \} from "\.\/ipc";$/m, "const invoke = (...args) => globalThis.__chatStepsInvoke(...args); const windowOnHost = () => true;");
+  .replace(/^import \{ invoke, windowOnHost \} from "\.\/ipc";$/m, "const invoke = (...args) => globalThis.__chatStepsInvoke(...args); const windowOnHost = () => true;")
+  .replace(/^import \{ convertPhoto, jpegName, photoDecision, photoKind, INPUT_MAX \} from "\.\/chat-image";$/m, "const INPUT_MAX = 40 * 1024 * 1024; const convertPhoto = () => undefined; const jpegName = () => undefined; const photoDecision = () => undefined; const photoKind = () => undefined;");
 if (/^import /m.test(src)) fail("chat.ts gained an import this check does not stub — extend the stubs above");
 const js = (await transformWithEsbuild(src, "chat.ts", { loader: "ts", format: "esm" })).code;
 const C = await import("data:text/javascript;base64," + Buffer.from(js).toString("base64"));
