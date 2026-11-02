@@ -29,6 +29,7 @@
 
 import { useSyncExternalStore } from "react";
 import { invoke, windowOnHost } from "./ipc";
+import { convertPhoto, jpegName, photoDecision, photoKind, INPUT_MAX } from "./chat-image";
 
 // ── the rows' shapes ────────────────────────────────────────────────────────
 
@@ -139,8 +140,8 @@ export const TURNS_MAX = 20;
 
 // ── attachments (docs/proposals/chat-attachments.md) ────────────────────────
 
-/** `attach::MAX_BYTES`: the most one file may hold, checked before a byte of
- *  it is read. Its base64 (~10.7 MiB) stays under serve's 16 MiB message. */
+/** `attach::MAX_BYTES`: the most one uploaded file may hold. HEIC inputs may
+ *  be larger; their converted JPEG must fit this cap before upload. */
 export const ATTACH_MAX = 8 * 1024 * 1024;
 /** The longest `path` `agent_attach` answers:
  *  `.worktrees-attachments/<yyyymmdd>-<16 hex>.<ext>`, `webp` the longest
@@ -224,7 +225,7 @@ export function attachWords(err: string, name: string): SendWords {
 
 /** A file picked, pasted or dropped, until its message is sent. `path` once
  *  the host has it: a retry after a failed send does not upload it again. */
-export type Attachment = { id: number; name: string; size: number; file: Blob; state: "ready" | "uploading" | "attached" | "failed"; path?: string };
+export type Attachment = { id: number; name: string; size: number; file: Blob; state: "preparing" | "ready" | "uploading" | "attached" | "failed"; path?: string; converted?: boolean };
 
 // ── the composer's rule ─────────────────────────────────────────────────────
 
@@ -1080,10 +1081,8 @@ export function setDraft(path: string, draft: string): void {
 
 let nextAttachment = 1;
 
-/** Add picked, pasted or dropped files to the next message. A file over
- *  `ATTACH_MAX`, or an empty one, is refused here, before a byte of it is
- *  read; past `ATTACH_PER_MESSAGE` the rest are left out. Allowed while the
- *  agent works or a prompt waits: Send keeps its own rules. */
+/** Add picked, pasted or dropped files to the next message. All three paths
+ *  go through the same byte sniff and photo preparation before Send can run. */
 export function addAttachments(path: string, files: Blob[]): void {
   const v = viewOf(path);
   if (v.sending || v.attachOff || !files.length) return;
@@ -1094,20 +1093,45 @@ export function addAttachments(path: string, files: Blob[]): void {
   let over = 0;
   for (const f of files) {
     const name = nameOf(f);
-    if (f.size > ATTACH_MAX) big.push(name);
+    if (f.size > INPUT_MAX) big.push(name);
     else if (f.size === 0) empty.push(name);
     else if (v.attachments.length + add.length >= ATTACH_PER_MESSAGE) over++;
-    else add.push({ id: nextAttachment++, name, size: f.size, file: f, state: "ready" });
+    else add.push({ id: nextAttachment++, name, size: f.size, file: f, state: "preparing" });
   }
   const said: string[] = [];
   const quote = (ns: string[]) => ns.map((n) => `“${n}”`).join(", ");
-  if (big.length) said.push(`${quote(big)} ${big.length === 1 ? "is" : "are"} over the ${sizeWords(ATTACH_MAX)} limit.`);
+  if (big.length) said.push(`${quote(big)} ${big.length === 1 ? "is" : "are"} over the ${sizeWords(INPUT_MAX)} input limit.`);
   if (empty.length) said.push(`${quote(empty)} ${empty.length === 1 ? "is" : "are"} empty.`);
   if (over) said.push(`At most ${ATTACH_PER_MESSAGE} files in one message: ${over} left out.`);
   put(path, {
     attachments: [...v.attachments, ...add], sendWords: null,
     attachWords: said.length ? { line: `Not attached: ${said.join(" ")}` } : null,
   });
+  for (const a of add) void prepareAttachment(path, a);
+}
+
+async function prepareAttachment(path: string, a: Attachment): Promise<void> {
+  try {
+    const header = new Uint8Array(await a.file.slice(0, 12).arrayBuffer());
+    const kind = photoKind(header);
+    const decision = photoDecision(kind, a.file.size, ATTACH_MAX);
+    if (decision === "input-large") throw new Error(`is over the ${sizeWords(INPUT_MAX)} input limit.`);
+    if (decision === "upload-large") throw new Error(`is over the ${sizeWords(ATTACH_MAX)} attachment limit.`);
+    if (decision === "convert" && kind) {
+      const jpeg = await convertPhoto(a.file, ATTACH_MAX, kind);
+      setAttachment(path, a.id, { name: jpegName(a.name), size: jpeg.size, file: jpeg, converted: true, state: "ready" });
+    } else {
+      setAttachment(path, a.id, { state: "ready" });
+    }
+  } catch (error) {
+    const v = viewOf(path);
+    if (!v.attachments.some((item) => item.id === a.id)) return;
+    const detail = String(error).replace(/^Error: /, "");
+    put(path, {
+      attachments: v.attachments.filter((item) => item.id !== a.id),
+      attachWords: { line: `Not attached: “${a.name}”${detail.startsWith("is ") ? " " : ": "}${detail}` },
+    });
+  }
 }
 
 /** Take a file off the next message. Not while it is being sent. */
@@ -1198,7 +1222,7 @@ export async function sendDraft(t: Target, agent: string): Promise<void> {
   const v = viewOf(t.path);
   const draft = v.draft;
   const n = v.attachments.length;
-  if (v.sending || (!draft.trim() && !n) || attachProblem(draft, n)) return;
+  if (v.sending || v.attachments.some((a) => a.state === "preparing") || (!draft.trim() && !n) || attachProblem(draft, n)) return;
   put(t.path, { sending: true, sendWords: null, stopWords: null, attachWords: null });
   const paths = n ? await uploadAll(t) : [];
   if (!paths) return;

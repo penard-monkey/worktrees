@@ -523,10 +523,11 @@ function AttachChips(props: { attachments: Attachment[]; sending: boolean; path:
       {props.attachments.map((a) => (
         <li key={a.id} className={"chat-chip" + (a.state === "failed" ? " failed" : "")} data-state={a.state} data-testid="chat-chip">
           {a.state === "uploading" && <span className="chat-spin" aria-hidden="true" />}
-          <span className="chat-chip-name" title={a.name}>{a.name}</span>
+          <span className="chat-chip-name" title={a.converted ? `${a.name} · converted to JPEG; photo metadata, including location, removed` : a.name}>{a.name}</span>
           <span className="chat-chip-size">
             {sizeWords(a.size)}
-            {a.state === "uploading" ? " · uploading" : a.state === "attached" ? " · uploaded" : a.state === "failed" ? " · not attached" : ""}
+            {a.state === "preparing" ? " · preparing" : a.state === "uploading" ? " · uploading" : a.state === "attached" ? " · uploaded" : a.state === "failed" ? " · not attached" : ""}
+            {a.converted ? " · converted" : ""}
           </span>
           <button className="chat-chip-x" onClick={() => removeAttachment(props.path, a.id)} disabled={props.sending}
             aria-label={`Remove ${a.name}`} title={`Remove ${a.name}`} data-testid="chat-chip-remove">
@@ -1050,7 +1051,8 @@ function Composer(props: {
     return () => ro.disconnect();
   }, [field, fit]);
 
-  const canSend = (!!text.trim() || files > 0) && !problem && !props.waiting && !v.sending;
+  const preparing = v.attachments.some((a) => a.state === "preparing");
+  const canSend = (!!text.trim() || files > 0) && !problem && !props.waiting && !v.sending && !preparing;
   const send = () => { if (canSend) void sendDraft(target, agent); };
   // Only a line break or a tab is wrong: offer to join, by hand, never silently.
   const joinable = !!problem && /[\n\r\t]/.test(text) && !draftProblem(text.replace(/\s*[\r\n\t]+\s*/g, " ").trim());
@@ -1061,7 +1063,8 @@ function Composer(props: {
   let line: React.ReactNode;
   let alert = false;
   const up = v.attachments.findIndex((a) => a.state === "uploading");
-  if (v.sending && up >= 0) line = files === 1 ? "Uploading the file…" : `Uploading ${up + 1} of ${files}…`;
+  if (preparing) line = "Preparing the file…";
+  else if (v.sending && up >= 0) line = files === 1 ? "Uploading the file…" : `Uploading ${up + 1} of ${files}…`;
   else if (v.sending) line = "Sending…";
   else if (v.stopping) line = `Stopping ${agent}’s turn…`;
   else if (v.sendWords) { line = v.sendWords.line; alert = true; }

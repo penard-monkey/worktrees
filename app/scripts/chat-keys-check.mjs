@@ -10,8 +10,8 @@
 // the first second after it took the keyboard) gives it back to the composer.
 //
 // Runs the REAL `cardKey`, `keyFocusOf`, `cardTakesFocus` and `cardDigits`
-// from app/src/chat.ts, with only its two imports stubbed (React's store hook,
-// and the ipc door, whose `windowOnHost` decides whether a `widens` choice is
+// from app/src/chat.ts, with its imports stubbed (React's store hook, the ipc
+// door and photo conversion; `windowOnHost` decides whether a `widens` choice is
 // open), then reads ChatPane.tsx for the wiring a pure function cannot show:
 // the listener is a capture-phase one, and Enter's send is the Send button's
 // own function and predicate.
@@ -36,7 +36,8 @@ const expect = (what, got, want) => (eq(got, want) ? ok(what) : fail(`${what}: w
 
 const src = fs.readFileSync(SRC, "utf8")
   .replace(/^import \{ useSyncExternalStore \} from "react";$/m, "const useSyncExternalStore = () => undefined;")
-  .replace(/^import \{ invoke, windowOnHost \} from "\.\/ipc";$/m, "const invoke = async () => { throw new Error(\"no ipc here\"); }; const windowOnHost = () => globalThis.__onHost !== false;");
+  .replace(/^import \{ invoke, windowOnHost \} from "\.\/ipc";$/m, "const invoke = async () => { throw new Error(\"no ipc here\"); }; const windowOnHost = () => globalThis.__onHost !== false;")
+  .replace(/^import \{ convertPhoto, jpegName, photoDecision, photoKind, INPUT_MAX \} from "\.\/chat-image";$/m, "const INPUT_MAX = 40 * 1024 * 1024; const convertPhoto = () => undefined; const jpegName = () => undefined; const photoDecision = () => undefined; const photoKind = () => undefined;");
 if (/^import /m.test(src)) fail("chat.ts gained an import this check does not stub — extend the stubs above");
 const js = (await transformWithEsbuild(src, "chat.ts", { loader: "ts", format: "esm" })).code;
 const C = await import("data:text/javascript;base64," + Buffer.from(js).toString("base64"));

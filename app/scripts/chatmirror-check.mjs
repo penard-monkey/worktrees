@@ -57,7 +57,8 @@ const done = () => {
 const chatSrc = read(SRC.chat);
 const stubbed = chatSrc
   .replace(/^import \{ useSyncExternalStore \} from "react";$/m, "const useSyncExternalStore = () => undefined;")
-  .replace(/^import \{ invoke, windowOnHost \} from "\.\/ipc";$/m, "const invoke = async () => { throw new Error(\"no ipc here\"); }; const windowOnHost = () => true;");
+  .replace(/^import \{ invoke, windowOnHost \} from "\.\/ipc";$/m, "const invoke = async () => { throw new Error(\"no ipc here\"); }; const windowOnHost = () => true;")
+  .replace(/^import \{ convertPhoto, jpegName, photoDecision, photoKind, INPUT_MAX \} from "\.\/chat-image";$/m, "const INPUT_MAX = 40 * 1024 * 1024; const convertPhoto = () => undefined; const jpegName = () => undefined; const photoDecision = () => undefined; const photoKind = () => undefined;");
 if (/^import /m.test(stubbed)) { fail("chat.ts gained an import this check does not stub — extend the stubs above"); done(); }
 const js = (await transformWithEsbuild(stubbed, "chat.ts", { loader: "ts", format: "esm" })).code;
 const C = await import("data:text/javascript;base64," + Buffer.from(js).toString("base64"));
