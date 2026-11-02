@@ -9,7 +9,8 @@
 //! `CLAUDE.md` it loaded, `attachment`s, hook summaries and sidechains; Codex's
 //! rollout opens on `session_meta.base_instructions` and `developer` messages,
 //! and wraps AGENTS.md and the environment as `<…>` user messages. None of
-//! that is a turn, so only plain user and assistant messages are read.
+//! that is a turn, so only user and assistant entries are considered, and
+//! Claude's own user entries are classified before they reach a client.
 //! Thinking and reasoning are left out as well.
 //!
 //! Text is DATA. The reply is what the agent wrote, and what the user typed
@@ -59,6 +60,10 @@ pub struct Turn {
     pub at: Option<i64>,
     /// The prompt. `None` when the window starts inside the turn.
     pub user: Option<String>,
+    /// Claude's transcript injected this entry; clients draw it outside the
+    /// person's message bubble. Absent on older hosts and ordinary turns.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<Notice>,
     /// The agent's reply text, in order, blocks joined by a blank line.
     pub reply: String,
     /// The tools it called, by name, in order.
@@ -69,6 +74,20 @@ pub struct Turn {
     /// answered between them, each step with its own time.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<Step>,
+}
+
+/// A Claude-generated user entry, classified from flags, origin, or a whole
+/// wrapper. All fields are display text: controls and invisible format
+/// characters are removed, and long values are clipped.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Notice {
+    Task { status: String, summary: String },
+    PeerMessage { from_name: String, text: String },
+    Command { name: String, args: String, #[serde(skip_serializing_if = "Option::is_none")] output: Option<String> },
+    Shell { command: String, #[serde(skip_serializing_if = "Option::is_none")] output: Option<String>, #[serde(skip_serializing_if = "Option::is_none")] stderr: Option<String> },
+    Interrupt,
+    Summary { text: String },
 }
 
 /// One thing that happened in a turn.
@@ -187,7 +206,14 @@ pub struct QuestionAnswer {
 
 impl Turn {
     fn new(at: Option<i64>, user: Option<String>) -> Turn {
-        Turn { at, user, reply: String::new(), tools: Vec::new(), truncated: false, steps: Vec::new() }
+        Turn { at, user, notice: None, reply: String::new(), tools: Vec::new(), truncated: false, steps: Vec::new() }
+    }
+
+    fn notice(at: Option<i64>, notice: Notice) -> Turn {
+        // Keep a cleaned text fallback for clients that predate `notice`.
+        let mut turn = Turn::new(at, Some(notice.fallback()));
+        turn.notice = Some(notice);
+        turn
     }
 
     fn say(&mut self, at: Option<i64>, text: &str) {
@@ -218,6 +244,7 @@ impl Turn {
 
     fn bytes(&self) -> usize {
         self.user.as_ref().map_or(0, String::len)
+            + self.notice.as_ref().map_or(0, |n| serde_json::to_string(n).map_or(0, |s| s.len()))
             + self.reply.len()
             + self.tools.iter().map(String::len).sum::<usize>()
             + self.steps.iter().map(Step::bytes).sum::<usize>()
@@ -229,11 +256,24 @@ impl Turn {
     }
 }
 
+impl Notice {
+    fn fallback(&self) -> String {
+        match self {
+            Notice::Task { status, summary } => format!("Background task {status}: {summary}"),
+            Notice::PeerMessage { from_name, text } => format!("Message from {from_name}: {text}"),
+            Notice::Command { name, args, output } => format!("/{name}{}{}{}", if args.is_empty() { "" } else { " " }, args, output.as_ref().map(|s| format!("\n{s}")).unwrap_or_default()),
+            Notice::Shell { command, output, stderr } => format!("! {command}{}{}", output.as_ref().map(|s| format!("\n{s}")).unwrap_or_default(), stderr.as_ref().map(|s| format!("\n{s}")).unwrap_or_default()),
+            Notice::Interrupt => "You stopped the turn".into(),
+            Notice::Summary { text } => format!("Earlier conversation summarised\n{text}"),
+        }
+    }
+}
+
 /// The last `n` turns (at most [`MAX_TURNS`]) of a Claude transcript's `lines`,
 /// oldest first. Only `user` and `assistant` entries off the main thread
 /// count: a user entry whose content is text starts a turn, unless it is
-/// claude's own bookkeeping (`isMeta`, a `<command-…>` / `<local-command-…>`
-/// wrapper, an interruption marker); a tool result does not.
+/// Claude's own injected entry (a structured notice, or a pure reminder to
+/// drop); a tool result does not.
 pub fn claude(lines: &[String], n: usize) -> Vec<Turn> {
     let mut turns: Vec<Turn> = Vec::new();
     for l in lines {
@@ -241,7 +281,7 @@ pub fn claude(lines: &[String], n: usize) -> Vec<Turn> {
             continue;
         }
         let Ok(v) = serde_json::from_str::<serde_json::Value>(l) else { continue };
-        if v.get("isSidechain").and_then(|s| s.as_bool()) == Some(true) || v.get("isMeta").and_then(|s| s.as_bool()) == Some(true) {
+        if v.get("isSidechain").and_then(|s| s.as_bool()) == Some(true) {
             continue;
         }
         let at = v.get("timestamp").and_then(|t| t.as_str()).and_then(crate::sysclock::parse_iso8601);
@@ -256,8 +296,41 @@ pub fn claude(lines: &[String], n: usize) -> Vec<Turn> {
                     }
                     _ => None,
                 };
-                if let Some(text) = text.filter(|t| is_prompt(t)) {
-                    turns.push(Turn::new(at, Some(text)));
+                if let Some(text) = text {
+                    match claude_entry(&v, &text) {
+                        ClaudeEntry::Person => turns.push(Turn::new(at, Some(text))),
+                        ClaudeEntry::Notice(Notice::Command { name, args, output: Some(out) }) if name.is_empty() => {
+                            if let Some(t) = turns.iter_mut().rev().find(|t| matches!(t.notice, Some(Notice::Command { .. }))) {
+                                if let Some(Notice::Command { output, .. }) = t.notice.as_mut() { *output = Some(out); }
+                                t.user = t.notice.as_ref().map(Notice::fallback);
+                            } else {
+                                turns.push(Turn::notice(at, Notice::Command { name, args, output: Some(out) }));
+                            }
+                        }
+                        ClaudeEntry::Notice(Notice::Command { name, args, output }) => {
+                            // /compact writes the person's literal command before
+                            // the confirming wrapper, sometimes with a summary
+                            // between them. The wrapper proves what that line was.
+                            let typed = format!("/{name}{}{}", if args.is_empty() { "" } else { " " }, args);
+                            if let Some(t) = turns.iter_mut().rev().find(|t| t.user.as_deref() == Some(&typed)) {
+                                let notice = Notice::Command { name, args, output };
+                                t.user = Some(notice.fallback());
+                                t.notice = Some(notice);
+                            } else {
+                                turns.push(Turn::notice(at, Notice::Command { name, args, output }));
+                            }
+                        }
+                        ClaudeEntry::Notice(Notice::Shell { command, output, stderr }) if command.is_empty() => {
+                            if let Some(t) = turns.iter_mut().rev().find(|t| matches!(t.notice, Some(Notice::Shell { .. }))) {
+                                if let Some(Notice::Shell { output: o, stderr: e, .. }) = t.notice.as_mut() { *o = output; *e = stderr; }
+                                t.user = t.notice.as_ref().map(Notice::fallback);
+                            } else {
+                                turns.push(Turn::notice(at, Notice::Shell { command, output, stderr }));
+                            }
+                        }
+                        ClaudeEntry::Notice(notice) => turns.push(Turn::notice(at, notice)),
+                        ClaudeEntry::Skip => {}
+                    }
                 } else if let (Some(serde_json::Value::Array(blocks)), Some(turn)) = (content, turns.last_mut()) {
                     answered(turn, &v, blocks, at);
                 }
@@ -283,14 +356,101 @@ pub fn claude(lines: &[String], n: usize) -> Vec<Turn> {
     finish(turns, n)
 }
 
-/// A user text that is a prompt somebody wrote, not claude's own wrapper.
-fn is_prompt(text: &str) -> bool {
-    let t = text.trim_start();
-    !t.is_empty()
-        && !t.starts_with("<command-")
-        && !t.starts_with("<local-command-")
-        && !t.starts_with("<system-reminder>")
-        && !t.starts_with("[Request interrupted")
+enum ClaudeEntry { Person, Notice(Notice), Skip }
+
+/// Whole-wrapper parser for Claude's injected user entries. The human origin
+/// wins even when a person types XML verbatim. The peer origin is checked
+/// before `isMeta`, since 2.1.316 marks peer messages as meta.
+fn claude_entry(v: &serde_json::Value, text: &str) -> ClaudeEntry {
+    let origin = v.get("origin");
+    let kind = origin.and_then(|o| o.get("kind")).and_then(|k| k.as_str());
+    if kind == Some("human") { return ClaudeEntry::Person; }
+    if kind == Some("peer") {
+        let from_name = origin.and_then(|o| o.get("name")).and_then(|s| s.as_str()).and_then(one_line).unwrap_or_else(|| "another session".into());
+        let body = origin.and_then(|o| o.get("body")).and_then(|s| s.as_str()).unwrap_or("");
+        return ClaudeEntry::Notice(Notice::PeerMessage { from_name, text: safe_text(body) });
+    }
+    if v.get("isCompactSummary").and_then(|s| s.as_bool()) == Some(true) {
+        return ClaudeEntry::Notice(Notice::Summary { text: safe_text(&without_reminders(text)) });
+    }
+    if kind == Some("task-notification") || whole_tag(text, "task-notification").is_some() {
+        if let Some(body) = whole_tag(text, "task-notification") {
+            return ClaudeEntry::Notice(Notice::Task {
+                status: tag(body, "status").and_then(one_line).unwrap_or_else(|| "updated".into()),
+                summary: tag(body, "summary").and_then(one_line).unwrap_or_else(|| "Background task".into()),
+            });
+        }
+        return ClaudeEntry::Skip;
+    }
+    if v.get("isMeta").and_then(|s| s.as_bool()) == Some(true) { return ClaudeEntry::Skip; }
+    let t = text.trim();
+    if t == "[Request interrupted by user]" || t == "[Request interrupted by user for tool use]" {
+        return ClaudeEntry::Notice(Notice::Interrupt);
+    }
+    if let Some(command) = whole_tag(t, "bash-input") {
+        return ClaudeEntry::Notice(Notice::Shell { command: one_line(command).unwrap_or_default(), output: None, stderr: None });
+    }
+    if let Some(output) = tag(t, "bash-stdout") {
+        if let Some(rest) = t.strip_prefix(&format!("<bash-stdout>{output}</bash-stdout>")) {
+            if let Some(stderr) = whole_tag(rest, "bash-stderr") {
+                return ClaudeEntry::Notice(Notice::Shell { command: String::new(), output: Some(safe_text(output)), stderr: Some(safe_text(stderr)) });
+            }
+        }
+    }
+    if let Some((name, args)) = command_wrapper(t) {
+        return ClaudeEntry::Notice(Notice::Command { name: one_line(name.trim_start_matches('/')).unwrap_or_default(), args: one_line(args).unwrap_or_default(), output: None });
+    }
+    if let Some(name) = whole_tag(t, "command-name") {
+        return ClaudeEntry::Notice(Notice::Command { name: one_line(name.trim_start_matches('/')).unwrap_or_default(), args: String::new(), output: None });
+    }
+    if let Some(output) = whole_tag(t, "local-command-stdout") {
+        return ClaudeEntry::Notice(Notice::Command { name: String::new(), args: String::new(), output: Some(safe_text(output)) });
+    }
+    if whole_tag(t, "system-reminder").is_some() || whole_tag(t, "local-command-caveat").is_some() { return ClaudeEntry::Skip; }
+    if t.is_empty() { ClaudeEntry::Skip } else { ClaudeEntry::Person }
+}
+
+fn tag<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    let open = format!("<{name}>");
+    let close = format!("</{name}>");
+    let start = text.find(&open)? + open.len();
+    let end = text[start..].find(&close)? + start;
+    Some(&text[start..end])
+}
+
+fn whole_tag<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    let t = text.trim();
+    let body = tag(t, name)?;
+    (t == format!("<{name}>{body}</{name}>")).then_some(body)
+}
+
+fn command_wrapper(text: &str) -> Option<(&str, &str)> {
+    let (name, rest) = text.strip_prefix("<command-name>")?.split_once("</command-name>")?;
+    let (message, rest) = rest.trim_start().strip_prefix("<command-message>")?.split_once("</command-message>")?;
+    let (args, rest) = rest.trim_start().strip_prefix("<command-args>")?.split_once("</command-args>")?;
+    (rest.trim().is_empty() && message.trim() == name.trim_start_matches('/')).then_some((name, args))
+}
+
+fn without_reminders(text: &str) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("<system-reminder>") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + "<system-reminder>".len()..];
+        let Some(end) = after.find("</system-reminder>") else { return out };
+        rest = &after[end + "</system-reminder>".len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
+fn safe_text(text: &str) -> String {
+    let clean: String = text.chars().filter_map(|c| match c {
+        '\n' | '\r' | '\t' => Some(' '),
+        c if c.is_control() || crate::harness::invisible(c) => None,
+        c => Some(c),
+    }).collect();
+    clip(clean.trim()).0
 }
 
 /// A user entry carrying tool results: each answers the step its
@@ -972,11 +1132,34 @@ mod tests {
         s.lines().map(str::to_string).collect()
     }
 
+    #[test]
+    fn claude_injected_entries_are_not_person_messages() {
+        use serde_json::json;
+        let mut fx = lines(include_str!("../tests/fixtures/transcripts/claude-2.1.316-injected.jsonl"));
+        fx.push(json!({"type":"user","isMeta":true,"message":{"role":"user","content":"META-ONLY-MARKER"}}).to_string());
+        fx.push(json!({"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"<task-notification><status>completed</status></task-notification>"}}).to_string());
+        fx.push(json!({"type":"user","message":{"role":"user","content":"I saw <task-notification><status>completed</status></task-notification> in the log; what is it?"}}).to_string());
+        let got = claude(&fx, 20);
+        let values: Vec<serde_json::Value> = got.iter().map(|t| serde_json::to_value(t).unwrap()).collect();
+        let kinds: Vec<&str> = values.iter().filter_map(|t| t.pointer("/notice/kind").and_then(|v| v.as_str())).collect();
+        for kind in ["task", "peer_message", "command", "shell", "interrupt", "summary"] {
+            assert!(kinds.contains(&kind), "missing {kind}: {kinds:?}");
+        }
+        assert!(values.iter().filter(|t| t.get("notice").is_some()).all(|t| t["user"].as_str().is_some_and(|s| !s.contains("<task-notification>"))));
+        assert_eq!(values[values.len() - 2]["user"], "<task-notification><status>completed</status></task-notification>");
+        assert!(values[values.len() - 2].get("notice").is_none(), "human origin must win");
+        assert_eq!(values.last().unwrap()["user"], "I saw <task-notification><status>completed</status></task-notification> in the log; what is it?");
+        assert!(values.last().unwrap().get("notice").is_none(), "prose mentioning a wrapper stays a user message");
+        let all = serde_json::to_string(&values).unwrap();
+        assert!(!all.contains("META-ONLY-MARKER"), "isMeta entry leaked");
+        assert!(!all.contains("SYSTEM-PROMPT-MARKER"), "system reminder leaked");
+        assert!(!all.contains("<task-notification>\\n"), "raw wrapper leaked");
+    }
+
     /// A Claude transcript shaped like 2.1.309's (the entry types and fields a
-    /// real session wrote, the content invented): the turns are the user's
-    /// prompts and the replies, and NOTHING of the system prompt, the
-    /// attachments, the hook summaries, a sidechain or claude's own command
-    /// wrappers comes back.
+    /// real session wrote, the content invented): user prompts, replies and
+    /// structured local-command and interrupt notices come back, without
+    /// system, attachment, sidechain or raw wrapper content.
     #[test]
     fn claude_turns_are_prompts_and_replies_only() {
         let fx = lines(include_str!("../tests/fixtures/transcripts/claude-2.1.309.jsonl"));
@@ -985,16 +1168,18 @@ mod tests {
         for secret in ["SYSTEM-PROMPT-MARKER", "CLAUDE-MD-MARKER", "ATTACHMENT-MARKER", "SIDECHAIN-MARKER", "THINKING-MARKER", "TOOL-OUTPUT-MARKER", "local-command"] {
             assert!(!all.contains(secret), "{secret} leaked: {all}");
         }
-        assert_eq!(got.len(), 3, "{got:#?}");
+        assert_eq!(got.len(), 5, "{got:#?}");
         assert_eq!(got[0].user.as_deref(), Some("Use the Bash tool to run exactly: touch probe-a.txt"));
         assert_eq!(got[0].tools, vec!["Bash".to_string()]);
         assert_eq!(got[0].reply, "Done.");
         assert_eq!(got[0].at, crate::sysclock::parse_iso8601("2026-10-23T18:48:01.000Z"));
-        assert_eq!(got[1].tools, vec!["AskUserQuestion".to_string()]);
-        assert_eq!(got[1].reply, "Blue");
-        assert_eq!(got[2].reply, "", "a rejected tool call answers nothing");
+        assert!(matches!(got[1].notice, Some(Notice::Command { .. })));
+        assert_eq!(got[2].tools, vec!["AskUserQuestion".to_string()]);
+        assert_eq!(got[2].reply, "Blue");
+        assert_eq!(got[3].reply, "", "a rejected tool call answers nothing");
+        assert!(matches!(got[4].notice, Some(Notice::Interrupt)));
         assert_eq!(claude(&fx, 1).len(), 1);
-        assert_eq!(claude(&fx, 1)[0].user.as_deref(), got[2].user.as_deref(), "the LAST turns");
+        assert_eq!(claude(&fx, 1)[0].notice, got[4].notice, "the LAST turns");
         // A window that starts mid-turn has a reply with no prompt.
         let tail: Vec<String> = fx.iter().skip_while(|l| !l.contains("\"Done.\"")).cloned().collect();
         let got = claude(&tail, 10);
@@ -1018,7 +1203,8 @@ mod tests {
         for secret in ["SYSTEM-PROMPT-MARKER", "THINKING-MARKER", "noOutputExpected", "drwxr-xr-x", "permissionDecision", "toolu_"] {
             assert!(!all.contains(secret), "{secret} leaked: {all}");
         }
-        assert_eq!(got.len(), 7, "{got:#?}");
+        assert_eq!(got.len(), 8, "{got:#?}");
+        assert!(matches!(got[7].notice, Some(Notice::Interrupt)));
         let steps = |i: usize| serde_json::to_value(&got[i].steps).unwrap();
 
         // Picked from its options; the reply after it has the reply's time.
