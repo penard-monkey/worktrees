@@ -123,7 +123,12 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   filled was empty on a serve nobody had listed
   (`watch::claude_startup_tick`). And a transcript holds the whole system
   prompt and every CLAUDE.md in `api-request-blob` entries, so anything that
-  returns transcript text reads `user`/`assistant` messages only (`turns`);
+  returns transcript text reads `user`/`assistant` messages only (`turns`),
+  except a message sent while Claude works: Claude writes an
+  `attachment`/`queued_command` entry rather than a `user` entry when it
+  absorbs that message mid-turn; `turns` takes its `prompt` as a user step
+  only beside a matching `queue-operation` removal with
+  `reason: absorbed_mid_turn`, never its `rendered` system reminder;
   it does NOT hold a tool call whose permission is pending (2.1.314 and
   2.1.316 write it once answered). So a diff, command or plan taller than the
   pane comes from Claude's PermissionRequest hook instead: a THIRD
