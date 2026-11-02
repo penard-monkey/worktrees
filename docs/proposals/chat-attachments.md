@@ -25,9 +25,11 @@ Claude: `agent_send` is still the one path that does (AGENTS.md).
 
 ## 1. The flow
 
-1. The person picks, pastes or drops files. The client refuses a file over
-   8 MiB before reading it, and measures the line the message will become
-   (§2.6) before uploading anything.
+1. The person picks, pastes or drops files. The desktop client refuses an
+   empty file or one over 40 MiB before reading it, sniffs the first 12
+   bytes, converts supported HEIC/HEIF/AVIF photos, and refuses other files
+   over 8 MiB. It measures the line the message will become (§2.6) before
+   uploading anything.
 2. On Send, the client uploads each file with `agent_attach`, one after
    another, in order.
 3. Only once every upload has succeeded does it send ONE line with
@@ -81,8 +83,8 @@ drop the step-up and the budget with every body test still green.
 The BYTES decide (`attach::sniff`), never `name` and never a client's MIME
 type:
 - **PNG, JPEG, GIF, WebP** (stored as `.png`, `.jpg`, `.gif`, `.webp`). These
-  are what Claude reads as images. HEIC is refused by name, so the phone
-  converts it to JPEG first.
+  are what Claude reads as images. The host refuses raw HEIC bytes, so the
+  phone and desktop convert them to JPEG first when their decoders can.
 - **PDF** (`.pdf`).
 - **UTF-8 text**: valid UTF-8 with no NUL byte. Since the OWASP review (M1,
   §4.5), it also holds none of these:
@@ -102,6 +104,28 @@ other Office file)`, `gzip`, `a program`, `UTF-16 text`, `binary data`, or
 `text with a hidden or control character, U+XXXX` (the first offender), e.g.
 `attach-type: text with a hidden or control character, U+202E (accepted: PNG,
 JPEG, GIF, WebP, PDF, UTF-8 text)`.
+
+### Desktop HEIC, HEIF and AVIF photos
+
+The desktop chat reads the first 12 bytes when a file is picked, pasted or
+dropped. An `ftyp` major brand that the host names HEIC, HEIF or AVIF is
+decoded in the WebView, oriented from its image metadata, drawn at no more
+than 2048 px on the long edge, and encoded as JPEG at quality 0.85. Its chip
+gets a `.jpg` name and a “converted” note. The chip tooltip says photo
+metadata, including location, is removed. The host contract remains the
+same: it still refuses raw HEIC/HEIF/AVIF, and iOS continues its own
+conversion.
+
+The WebKit canvas encoder on macOS adds EXIF dimensions and an APP13 block
+even after drawing. The client strips all JPEG application and comment
+segments from the encoded output before upload; no EXIF or GPS is sent. The
+original is never uploaded. The input is capped at 40 MiB before decode and
+at 64 megapixels after decode; the JPEG must fit the host's 8 MiB file cap.
+An undecodable photo is refused locally, with instructions to export as JPEG
+or PNG. This includes Linux WebKitGTK builds without a HEIC decoder and
+corrupt photos. Playwright WebKit on macOS decoded an EXIF-rotated HEIC as
+80 × 120; Chromium refused the same file. The app's WKWebView uses macOS's
+ImageIO path, so a real iPhone photo still merits a hand test in the app.
 
 ### 2.4 Refusals
 
@@ -410,14 +434,15 @@ The review's Low findings, each accepted for the reason given.
   state (`uploading`, `uploaded`, `not attached`), and a ✕. The ✕ is a button
   named `Remove <name>`, and Tab and Enter reach it. The list is labelled "N
   files to send".
-- **Before any read**, a file over 8 MB or an empty one is refused with
-  words, and so is an 11th file.
+- **Before any read**, an empty file, a file over 40 MiB, or an 11th file is
+  refused. After the 12-byte sniff, an ordinary file over 8 MiB is refused;
+  a HEIC/HEIF/AVIF file can be larger if its converted JPEG fits 8 MiB.
 - **On Send** the line under the field says `Uploading 2 of 3…`, then
   `Sending…`. While the agent works or a prompt waits, attaching is allowed;
   Send keeps its existing rules.
-- **A refusal sends nothing** and says why in the words of its token. Example:
-  "Not attached: “IMG_0001.heic” is HEIC. Attach PNG, JPEG, GIF, WebP, PDF or
-  text. Export it as JPEG or PNG first." The text and the chips stay.
+- **A refusal sends nothing** and says why. A photo the WebView cannot decode
+  says to export it as JPEG or PNG. Host refusals still use the token words;
+  the text and any chips already uploaded stay.
   Uploaded chips keep their path, so a retry does not upload them again.
 - **An older host** answers `unknown command: agent_attach`. Then the
   paperclip turns off, titled "This host doesn't support attachments yet:
@@ -453,7 +478,8 @@ at 1280×860, 34 assertions each, all passing):
 - `Uploading 1 of 3…` shows, and the ✕ is disabled while sending;
 - the sent bubble shows the text with the files apart;
 - attachments alone are sent with the lead-in;
-- a HEIC refusal sends nothing and keeps the text;
+- a raw HEIC host refusal sends nothing and keeps the text (the original
+  attachment feature check, before desktop conversion);
 - an older host turns the paperclip off with words;
 - a line one byte too long is refused before upload, and one byte shorter is
   not.
@@ -498,8 +524,9 @@ The same serve gave:
   file through `read_file_base64`, which is a separate decision.
 - **No per-message progress within one file.** An upload is one frame, so
   there is no byte-level progress, only "uploading N of M".
-- **No HEIC conversion on the host.** The phone converts; on the desktop a
-  HEIC is refused with words saying to export it as JPEG or PNG.
+- **No HEIC conversion on the host.** The phone and desktop each convert
+  before upload; a desktop WebView that cannot decode the photo refuses it
+  with words saying to export it as JPEG or PNG.
 - **`agent_attach` from MCP.** Agents can already read and write files; the
   row is for clients.
 - **A client-side sniff.** A file the host will refuse (a video, say) is
