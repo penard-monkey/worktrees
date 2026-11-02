@@ -72,6 +72,26 @@
 }
 .chat-bubble-pending { opacity: 0.85; border-style: dashed; }
 .chat-bubble-pending p { margin: 0; white-space: pre-wrap; }
+.chat-notice {
+  min-width: 0; max-width: 85%; margin: var(--s2) 0; padding: var(--s1) var(--s2);
+  color: var(--txt-dim); font-size: var(--fs-meta); line-height: var(--lh-prose);
+  overflow-wrap: anywhere;
+}
+.chat-notice-center { align-self: center; text-align: center; }
+.chat-notice-peer {
+  align-self: flex-start; border: 1px solid var(--line); border-radius: var(--r-lg);
+  background: var(--bg-panel); color: var(--txt-hi); text-align: left;
+}
+.chat-notice-peer strong { color: var(--txt-hi); }
+.chat-notice-peer p, .chat-notice-details p { margin: var(--s1) 0 0; white-space: pre-wrap; }
+.chat-notice-compact { align-self: center; display: flex; flex-direction: column; align-items: center; gap: 3px; }
+.chat-notice-chip { max-width: 100%; padding: 2px var(--s2); border: 1px solid var(--line); border-radius: var(--r-full); background: var(--bg-tree); color: var(--txt-hi); overflow-wrap: anywhere; }
+.chat-notice-dot { display: inline-block; width: 7px; height: 7px; margin-right: 6px; border-radius: 50%; background: var(--warn); vertical-align: middle; }
+.chat-notice-dot.done { background: var(--ok); }
+.chat-notice-dot.failed { background: var(--danger); }
+.chat-notice-details { max-width: 100%; text-align: left; }
+.chat-notice-details summary { cursor: pointer; color: var(--txt-hi); }
+.chat-notice-details pre { max-height: 10em; overflow: auto; margin: var(--s1) 0 0; padding: var(--s1); border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--bg-panel); white-space: pre-wrap; color: var(--txt-dim); }
 .chat-status { margin: 2px var(--s1) 0 0; font-size: var(--fs-micro); color: var(--txt-dim); }
 .chat-bubble-note { margin: var(--s2) 0 0; font-size: var(--fs-meta); color: var(--txt-dim); }
 
