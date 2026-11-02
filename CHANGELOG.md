@@ -5,6 +5,38 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.47.0] - 2026-11-02
+
+### Added
+- **Attach HEIC, HEIF and AVIF photos in the chat view.** The chat turns
+  them into JPEG on your Mac before sending, at most 2048 px on the long
+  side, and strips the photo's metadata, its location included. A photo the
+  app can't read, such as on Linux, is refused before anything is uploaded.
+
+### Fixed
+- **Messages you send while Claude is working appear once, in order.**
+  Claude takes such a message into the turn it is working on. The chat now
+  shows it there, marked "Sent while Claude was working", instead of a
+  duplicate or a "waiting for Claude" bubble after the newest turn.
+- **What Claude writes into the conversation that you didn't type shows as
+  a note.** Background-task notices, messages from other sessions, slash and
+  `!` commands, stopped turns and the summary written after `/compact` no
+  longer appear as messages you sent.
+- **A Codex place is shown as Codex's.** A place whose Claude had exited,
+  leaving its tmux session at a shell, showed a Claude logo, labelled
+  Codex's replies "Claude" and said "No Claude is running in this place any
+  more". The app now counts only an agent that is running, labels each turn
+  by the agent that wrote it, and says "No agent is running in this place."
+  when none is.
+- **A multi-select question inside one of Claude's multi-question forms can
+  be answered from the chat.** The card showed it as single choices with a
+  stray "Next" and then refused the answer. It now shows checkboxes, sends
+  the ticked choices and moves on to the form's next question.
+- **The chat view no longer jumps up a few messages when a reply arrives.**
+  At the bottom it follows every reply, including when the oldest turn
+  leaves the 20-turn window. Scrolled up, the message you are reading stays
+  put, and "New messages" appears for what arrived below.
+
 ## [0.46.0] - 2026-11-01
 
 v0.45.1 was prepared but never published; its changes are in this release.
