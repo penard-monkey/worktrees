@@ -24,7 +24,9 @@ use crate::watch::Watch;
 use crate::Ctx;
 
 
-/// One harness's session in one place, as the snapshot reports it.
+/// One harness's session in one place, as the snapshot reports it. `up` means
+/// the harness itself is running; a tmux session left at a shell is still a
+/// place session, but not a live agent.
 pub struct AgentSession {
     pub id: &'static str,
     pub name: String,
@@ -38,7 +40,9 @@ pub struct AgentSession {
 /// session launched before sidecars — in the canonical session when that
 /// session is running it. The default harness (Claude) owns the canonical
 /// session historically: it is up in its sidecar, or in the place's primary
-/// session when no other harness claims that one.
+/// session when no other harness claims that one. A shell in either session
+/// never claims a harness, even though the session remains for lifecycle and
+/// close operations.
 pub fn agent_sessions_for(
     w: &Watch,
     panes: Option<&tmux::PaneList>,
@@ -47,8 +51,9 @@ pub fn agent_sessions_for(
     primary_name: &str,
     primary_up: bool,
     place_path: &str,
+    exclude_under: Option<&str>,
 ) -> Vec<AgentSession> {
-    agent_session_names(panes, canonical, primary_name, primary_up)
+    agent_session_names(panes, canonical, primary_name, primary_up, place_path, exclude_under)
         .into_iter()
         .map(|(a, name, up)| {
             let p = a.provider();
@@ -61,7 +66,7 @@ pub fn agent_sessions_for(
 }
 
 /// [`agent_sessions_for`]'s rule without the models: every harness, its
-/// session name for the place, and whether that session is up. The agent rows
+/// session name for the place, and whether that agent is running. The agent rows
 /// (`agents`) find a place's agents by it, so the snapshot and the rows can
 /// never disagree about which session is whose.
 pub fn agent_session_names(
@@ -69,9 +74,16 @@ pub fn agent_session_names(
     canonical: &str,
     primary_name: &str,
     primary_up: bool,
+    place_path: &str,
+    exclude_under: Option<&str>,
 ) -> Vec<(&'static dyn harness::Adapter, String, bool)> {
     let owner = panes.map_or(provider::CLAUDE.id, |p| p.canonical_provider(canonical).id);
     let has = |name: &str| panes.is_some_and(|p| p.has_session(name));
+    // `agents_in` reads the prefetched pane list, including the foreground
+    // leader of a node wrapper. It also checks the pane's cwd, so a session
+    // with this name in another clone cannot lend this place its provider.
+    let live = panes.map(|p| p.agents_in(place_path, exclude_under)).unwrap_or_default();
+    let runs = |name: &str, id: &str| live.iter().any(|(session, provider)| session == name && *provider == id);
     let others: Vec<String> = provider::PROVIDERS
         .iter()
         .filter(|p| !p.canonical_default)
@@ -83,13 +95,14 @@ pub fn agent_session_names(
             let p = a.provider();
             let (name, up) = if p.canonical_default {
                 let sidecar = p.sidecar_name(canonical);
-                let sidecar_up = has(&sidecar);
-                let up = sidecar_up || (primary_up && owner == p.id && !others.iter().any(|n| n == primary_name));
-                let name = if sidecar_up { sidecar } else if up { primary_name.to_string() } else { canonical.to_string() };
+                let sidecar_up = runs(&sidecar, p.id);
+                let primary_live = primary_up && owner == p.id && !others.iter().any(|n| n == primary_name) && runs(primary_name, p.id);
+                let up = sidecar_up || primary_live;
+                let name = if sidecar_up { sidecar } else if primary_live { primary_name.to_string() } else { canonical.to_string() };
                 (name, up)
             } else {
                 let name = p.session_name(canonical, owner, false);
-                let up = has(&name);
+                let up = has(&name) && runs(&name, p.id);
                 (name, up)
             };
             (*a, name, up)
@@ -128,7 +141,8 @@ pub fn snapshot(w: &Watch, repo: &str) -> Result<serde_json::Value, String> {
             let primary_up = place.pointer("/tmux_session/up").and_then(|b| b.as_bool()).unwrap_or(false);
             let primary_name = place.pointer("/tmux_session/name").and_then(|s| s.as_str()).unwrap_or(&canonical).to_string();
             let place_path = place.get("path").and_then(|s| s.as_str()).unwrap_or("").to_string();
-            let sessions = agent_sessions_for(w, agent_panes.as_ref(), &probes, &canonical, &primary_name, primary_up, &place_path);
+            let exclude = (slug == "(main)").then_some(project.wt_root.as_str());
+            let sessions = agent_sessions_for(w, agent_panes.as_ref(), &probes, &canonical, &primary_name, primary_up, &place_path, exclude);
             // Watched only while the harness itself runs in the session: the
             // pane is `<cli> …; exec "$SHELL"`, so an agent that exited or was
             // killed leaves the session up with a shell in it, and a file
@@ -140,7 +154,9 @@ pub fn snapshot(w: &Watch, repo: &str) -> Result<serde_json::Value, String> {
                 let launch = agent_panes.as_ref().and_then(|panes| panes.session_launch(&s.name));
                 crate::watch::watch_lane(w, s.id, &place_path, running.then_some(&s.name), launch, &s.model);
             }
-            let tmux_up = sessions.iter().any(|s| s.up);
+            // A bare shell still keeps the place open and closeable. Agent
+            // presence and tmux existence are different questions.
+            let tmux_up = primary_up || sessions.iter().any(|s| agent_panes.as_ref().is_some_and(|p| p.has_session(&s.name)));
             // Profiles are claude's recipe, so only a live Claude can be stale.
             let claude_up = sessions.iter().any(|s| s.up && s.id == provider::CLAUDE.id);
             // `tmux_session` stays on the default harness's session when it is
@@ -724,6 +740,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn agent_presence_requires_a_matching_live_pane() {
+        let rows = |rows: &[(&str, &str)]| {
+            tmux::PaneList::from_rows(rows.iter().map(|(name, command)| (name.to_string(), "/w".to_string(), command.to_string())).collect())
+        };
+        let cases: &[(&str, &[(&str, &str)], [bool; 2])] = &[
+            ("codex with canonical shell", &[("p-feat", "zsh"), ("p-feat~agent~codex", "codex")], [false, true]),
+            ("canonical shell alone", &[("p-feat", "zsh")], [false, false]),
+            ("Claude with codex shell", &[("p-feat", "claude"), ("p-feat~agent~codex", "zsh")], [true, false]),
+            ("both agents truly running", &[("p-feat", "claude"), ("p-feat~agent~codex", "codex")], [true, true]),
+        ];
+        for (case, panes, want) in cases {
+            let got = agent_session_names(Some(&rows(panes)), "p-feat", "p-feat", true, "/w", None);
+            assert_eq!([got[0].2, got[1].2], *want, "{case}");
+        }
+    }
+
+    #[test]
     fn clone_cancel_reaches_a_running_clone_and_only_while_it_runs() {
         let jobs = CloneJobs::default();
         assert!(!jobs.cancel("a"), "nothing running yet");
@@ -752,59 +785,37 @@ mod tests {
         assert!(jobs.is_idle());
     }
 
-    /// The snapshot's per-harness sessions, pinned against the two-provider
-    /// formula they replaced (kept here verbatim as the reference), across a
-    /// legacy canonical Codex, both sidecars, a primary Claude, a shell, and
-    /// no tmux at all.
+    /// The snapshot names legacy canonical agents and provider sidecars from
+    /// their live panes. Shells stay visible as tmux sessions, not agents.
     #[test]
-    fn agent_sessions_match_the_two_provider_rule_they_replaced() {
-        fn old(panes: Option<&tmux::PaneList>, canonical: &str, primary: &str, primary_up: bool) -> Vec<(String, bool)> {
-            let legacy_codex = panes.is_some_and(|p| p.canonical_provider(canonical).id == "codex");
-            let codex_name = if legacy_codex { canonical.to_string() } else { format!("{canonical}~agent~codex") };
-            let codex_up = panes.is_some_and(|p| p.has_session(&codex_name));
-            let sidecar = format!("{canonical}~agent~claude");
-            let sidecar_up = panes.is_some_and(|p| p.has_session(&sidecar));
-            let claude_up = sidecar_up || (primary_up && !legacy_codex && primary != codex_name);
-            let claude_name = if sidecar_up { sidecar } else if claude_up { primary.to_string() } else { canonical.to_string() };
-            vec![(claude_name, claude_up), (codex_name, codex_up)]
-        }
+    fn agent_sessions_name_the_live_provider() {
         let rows = |r: &[(&str, &str)]| {
             tmux::PaneList::from_rows(r.iter().map(|(s, c)| (s.to_string(), "/w".to_string(), c.to_string())).collect())
         };
         let c = "p-feat";
-        let cases: Vec<(Option<tmux::PaneList>, &str, bool)> = vec![
-            (None, c, false),
-            (None, c, true),
-            (Some(rows(&[])), c, false),
-            (Some(rows(&[(c, "claude")])), c, true),
-            (Some(rows(&[(c, "node")])), c, true),
-            (Some(rows(&[(c, "zsh")])), c, true),
-            (Some(rows(&[(c, "codex")])), c, true),
-            (Some(rows(&[("p-feat~agent~codex", "codex")])), c, false),
-            (Some(rows(&[("p-feat~agent~codex", "node")])), c, false),
-            (Some(rows(&[("p-feat~agent~claude", "claude")])), c, false),
-            (Some(rows(&[("p-feat~agent~claude", "claude"), (c, "zsh")])), c, true),
-            (Some(rows(&[("adopted", "claude")])), "adopted", true),
-            (Some(rows(&[("p-feat~agent~codex", "codex")])), "p-feat~agent~codex", true),
+        let cases: Vec<(Option<tmux::PaneList>, &str, bool, (&str, bool), (&str, bool))> = vec![
+            (None, c, false, (c, false), ("p-feat~agent~codex", false)),
+            (Some(rows(&[(c, "claude")])), c, true, (c, true), ("p-feat~agent~codex", false)),
+            (Some(rows(&[(c, "node")])), c, true, (c, true), ("p-feat~agent~codex", false)),
+            (Some(rows(&[(c, "zsh")])), c, true, (c, false), ("p-feat~agent~codex", false)),
+            (Some(rows(&[(c, "codex")])), c, true, (c, false), (c, true)),
+            (Some(rows(&[("p-feat~agent~codex", "node")])), c, false, (c, false), ("p-feat~agent~codex", true)),
+            (Some(rows(&[("p-feat~agent~claude", "claude"), (c, "zsh")])), c, true, ("p-feat~agent~claude", true), ("p-feat~agent~codex", false)),
+            (Some(rows(&[("adopted", "claude")])), "adopted", true, ("adopted", true), ("p-feat~agent~codex", false)),
         ];
-        for (panes, primary, up) in &cases {
-            let got: Vec<(String, bool)> = agent_sessions_for(&Watch::default(), panes.as_ref(), &[], c, primary, *up, "/nonexistent")
+        for (panes, primary, up, claude, codex) in &cases {
+            let got: Vec<(String, bool)> = agent_sessions_for(&Watch::default(), panes.as_ref(), &[], c, primary, *up, "/w", None)
                 .into_iter()
                 .map(|s| (s.name, s.up))
                 .collect();
-            // Claude and Codex exactly as the formula had them; pi, which the
-            // formula predates, is its sidecar and nothing else.
-            assert_eq!(&got[..2], &old(panes.as_ref(), c, primary, *up)[..], "primary {primary} up={up}");
-            let pi_up = panes.as_ref().is_some_and(|p| p.has_session("p-feat~agent~pi"));
-            assert_eq!(got[2], ("p-feat~agent~pi".to_string(), pi_up), "primary {primary} up={up}");
-            let kimi_up = panes.as_ref().is_some_and(|p| p.has_session("p-feat~agent~kimi"));
-            assert_eq!(got[3], ("p-feat~agent~kimi".to_string(), kimi_up), "primary {primary} up={up}");
+            assert_eq!(got[0], (claude.0.to_string(), claude.1), "primary {primary} up={up}");
+            assert_eq!(got[1], (codex.0.to_string(), codex.1), "primary {primary} up={up}");
         }
         let kimi = rows(&[("p-feat~agent~kimi", "kimi")]);
-        let got = agent_sessions_for(&Watch::default(), Some(&kimi), &[], c, c, false, "/nonexistent");
+        let got = agent_sessions_for(&Watch::default(), Some(&kimi), &[], c, c, false, "/w", None);
         assert!(got[3].up && !got[0].up && !got[1].up && !got[2].up, "kimi's sidecar is kimi's");
         let pi = rows(&[("p-feat~agent~pi", "node")]);
-        let got = agent_sessions_for(&Watch::default(), Some(&pi), &[], c, c, false, "/nonexistent");
+        let got = agent_sessions_for(&Watch::default(), Some(&pi), &[], c, c, false, "/w", None);
         assert!(got[2].up && !got[0].up && !got[1].up, "a node pane in pi's sidecar is pi, not Claude");
         // pi typed into the place's OWN session: tmux says `node`, the tty's
         // foreground leader says `pi`. The nav dot's lane is pi's, at the
@@ -816,13 +827,13 @@ mod tests {
             fg: Some("pi".to_string()),
             ..tmux::Pane::default()
         }]);
-        let got = agent_sessions_for(&Watch::default(), Some(&typed), &[], c, c, true, "/nonexistent");
+        let got = agent_sessions_for(&Watch::default(), Some(&typed), &[], c, c, true, "/w", None);
         let up: Vec<(&str, &str, bool)> = got.iter().map(|s| (s.id, s.name.as_str(), s.up)).collect();
         assert_eq!(
             up,
             [("claude", c, false), ("codex", "p-feat~agent~codex", false), ("pi", c, true), ("kimi", "p-feat~agent~kimi", false)]
         );
-        let ids: Vec<&str> = agent_sessions_for(&Watch::default(), None, &[], c, c, false, "").iter().map(|s| s.id).collect();
+        let ids: Vec<&str> = agent_sessions_for(&Watch::default(), None, &[], c, c, false, "", None).iter().map(|s| s.id).collect();
         assert_eq!(ids, ["claude", "codex", "pi", "kimi"], "one entry per harness, registry order");
     }
 

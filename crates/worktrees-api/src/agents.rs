@@ -1043,8 +1043,10 @@ fn reading_of_lane(reading: Option<activity::Activity>, lane: &Lane, label: &str
 /// is the session these rows read and type into.
 pub fn live_agent_sessions(project: &Project, slug: &str, panes: &PaneList, ai_word: &str) -> Vec<(&'static dyn harness::Adapter, String)> {
     let canonical = project.session_name(slug);
-    let primary = project.live_session_in(slug, &project.place_dir(slug), panes, ai_word);
-    crate::workspace::agent_session_names(Some(panes), &canonical, primary.as_deref().unwrap_or(&canonical), primary.is_some())
+    let path = project.place_dir(slug);
+    let primary = project.live_session_in(slug, &path, panes, ai_word);
+    let exclude = (slug == "(main)").then_some(project.wt_root.as_str());
+    crate::workspace::agent_session_names(Some(panes), &canonical, primary.as_deref().unwrap_or(&canonical), primary.is_some(), &path, exclude)
         .into_iter()
         .filter(|(_, _, up)| *up)
         .map(|(a, session, _)| (a, session))

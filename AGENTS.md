@@ -1980,6 +1980,11 @@ wait loop on it never ended and a sandbox app ran for two hours.
   re-lists on a tmux fingerprint change or every 30s, and neither a finished
   turn nor a `/model` moves tmux; `claude_activity` + `codex_models_moved`
   exist for that.
+  **`agent_sessions.*.up` means a matching agent pane, not a tmux session.**
+  A canonical shell can survive beside a live Codex sidecar; counting that
+  shell as Claude makes the nav, agent cell and chat label lie. The snapshot
+  keeps session existence in `tmux_session.up` and lifecycle so the place
+  remains open and closeable (`workspace::agent_session_names`).
   **Codex 0.15x runs on the ALTERNATE screen and never asks for the mouse**, so
   tmux holds no history and the wheel had nothing to scroll: `term_wheel` could
   only send ↑/↓, which Codex reads as composer history. We launch it inline
