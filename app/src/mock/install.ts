@@ -835,6 +835,7 @@ const mockHarnessAt = (path: string) =>
 // then approved, as `turns::Step`s shaped like claude-2.1.316-answers.jsonl.
 type MockTurn = { at: number | null; user: string | null; reply: string; tools: string[]; truncated: boolean; steps?: Record<string, unknown>[] };
 const mockTurns = new Map<string, MockTurn[]>();
+const mockAbsorbedSend = new Set<string>();
 function mockAnsweredTurns(now: number, place: string): MockTurn[] {
   const q = (header: string, question: string, multi: boolean, options: [string, string][]) => ({ header, question, multi, options: options.map(([label, description]) => ({ label, description })) });
   const plan = "# Plan: add greet.sh\n\n## Context\nA small script at the repo root that prints hello.\n\n## Steps\n1. Create `greet.sh` with a `#!/bin/sh` shebang and `echo hello`.\n2. Make it executable.\n3. Run `./greet.sh` and confirm it prints hello.\n";
@@ -4016,14 +4017,35 @@ Phase 3: Frontend pane and mock harness
       if (mode === "mid") throw "the agent's prompt has unsent text in it (someone is typing there): send nothing until it is empty";
       if (mode === "nocomposer") throw "the agent is not at its prompt (starting, or a screen this host does not recognise): try again shortly";
       const path = mockPlacePath(args.repo, args.slug);
-      const queued = ACTIVITY_CYCLE[actIdx].busy.includes(path);
-      const turn = { at: Math.floor(Date.now() / 1000), user: text, reply: "", tools: [] as string[], truncated: false };
-      mockTurnsAt(args.repo, args.slug).push(turn);
+      // ?turns=queued demonstrates Claude absorbing the first busy send as
+      // a person step inside the running turn. The next send becomes a
+      // normal user turn, as when the queue is delivered after that turn.
+      const queueDemo = new URLSearchParams(location.search).get("turns") === "queued" && mockHarnessAt(path) === "claude";
+      const queued = ACTIVITY_CYCLE[actIdx].busy.includes(path) && (!queueDemo || !mockAbsorbedSend.has(path));
+      const absorb = queueDemo && queued;
+      const at = Math.floor(Date.now() / 1000);
+      const turns = mockTurnsAt(args.repo, args.slug);
+      let turn: MockTurn;
+      if (absorb) {
+        mockAbsorbedSend.add(path);
+        turn = turns[turns.length - 1];
+        if (!turn.steps) turn.steps = [...(turn.reply ? [{ kind: "text", at: turn.at, text: turn.reply }] : []), ...turn.tools.map((name) => ({ kind: "tool", at: turn.at, name }))];
+        turn.steps.push({ kind: "user", at, text });
+      } else {
+        turn = { at, user: text, reply: "", tools: [], truncated: false };
+        turns.push(turn);
+      }
       setTimeout(() => {
-        turn.reply = text.includes(" [attached: ")
+        const said = text.includes(" [attached: ")
           ? "I read the attached file. (A scripted reply: the mock harness has no agent.)"
           : "On it. (A scripted reply: the mock harness has no agent.)";
-        turn.tools = ["Read"];
+        const repliedAt = Math.floor(Date.now() / 1000);
+        turn.tools.push("Read");
+        if (!turn.steps) turn.steps = [];
+        turn.steps.push({ kind: "tool", at: repliedAt, name: "Read" }, { kind: "text", at: repliedAt, text: said });
+        turn.reply = [turn.reply, said].filter(Boolean).join("\n\n");
+        mockReplyEpoch = Math.max(repliedAt, mockReplyEpoch + 1);
+        emitEvent("sessions:done", { path, epoch: mockReplyEpoch });
       }, 3000);
       return {
         delivered: mode !== "unconfirmed", queued, harness: mockHarnessAt(path), session: args.session,

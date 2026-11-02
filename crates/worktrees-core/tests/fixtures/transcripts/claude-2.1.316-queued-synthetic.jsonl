@@ -1,0 +1,11 @@
+{"type":"user","timestamp":"2026-11-01T00:44:50.000Z","message":{"content":"Start the tile."}}
+{"type":"assistant","timestamp":"2026-11-01T00:45:00.000Z","message":{"content":[{"type":"text","text":"Working on the tile."}]}}
+{"type":"queue-operation","operation":"remove","timestamp":"2026-11-01T00:45:11.615Z","reason":"absorbed_mid_turn","commandUuid":"absorbed-1","deliveryId":"delivery-1"}
+{"type":"queue-operation","operation":"enqueue","timestamp":"2026-11-01T00:45:11.058Z","content":"Layer these images [attached: .worktrees-attachments/20261102-aaaaaaaaaaaaaaaa.png, .worktrees-attachments/20261102-bbbbbbbbbbbbbbbb.png]"}
+{"type":"attachment","timestamp":"2026-11-01T00:45:10.916Z","rendered":[{"content":"<system-reminder>RENDERED-REMINDER-MARKER</system-reminder>"}],"attachment":{"type":"queued_command","prompt":"Layer these images [attached: .worktrees-attachments/20261102-aaaaaaaaaaaaaaaa.png, .worktrees-attachments/20261102-bbbbbbbbbbbbbbbb.png]","source_uuid":"absorbed-1","delivery_id":"delivery-1","commandMode":"prompt","origin":{"kind":"human"},"humanTurn":true}}
+{"type":"assistant","timestamp":"2026-11-01T00:45:20.000Z","message":{"content":[{"type":"text","text":"I layered them."}]}}
+{"type":"attachment","timestamp":"2026-11-01T00:45:30.000Z","attachment":{"type":"queued_command","prompt":"Next, inspect the colors.","source_uuid":"delivered-1","delivery_id":"delivery-2","commandMode":"prompt","origin":{"kind":"human"},"humanTurn":true}}
+{"type":"queue-operation","operation":"remove","timestamp":"2026-11-01T00:45:31.000Z","reason":"delivered_to_agent","commandUuid":"delivered-1","deliveryId":"delivery-2"}
+{"type":"user","timestamp":"2026-11-01T00:45:32.000Z","message":{"content":"Next, inspect the colors."}}
+{"type":"assistant","timestamp":"2026-11-01T00:45:40.000Z","message":{"content":[{"type":"text","text":"The colors work."}]}}
+{"type":"user","timestamp":"2026-11-01T05:00:47.606Z","message":{"content":"Give me more options."}}

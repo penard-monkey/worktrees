@@ -74,3 +74,14 @@ whose first question was sent from its notes field before the highlight ever
 moved (`answers` = `(notes only)`); the same again on one question; a note
 after moving away and back; a plain Enter. The note is
 `toolUseResult.annotations.<question>.notes`.
+
+`claude-2.1.316-queued-synthetic.jsonl` is SYNTHESIZED from the field shape
+Claude Code 2.1.316 wrote in a user's transcript on 2026-11-01. Its contents
+are invented, and no private transcript was read by this lane. It has a
+running turn, a human `attachment`/`queued_command` with attachment paths and
+matching `queue-operation` removal (`absorbed_mid_turn`), then one queued
+command whose removal says `delivered_to_agent` and whose text appears in a normal
+`user` turn. The `rendered` reminder has a marker that must never reach the
+reader. The absorbed removal precedes its attachment in file order, while
+the attachment carries its own earlier timestamp. Replace this fixture when
+a scratch capture is available.

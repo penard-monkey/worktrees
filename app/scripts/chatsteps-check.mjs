@@ -31,13 +31,13 @@ const ok = (m) => console.log(`ok   ${m}`);
 const eq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 
 const src = fs.readFileSync(SRC, "utf8")
-  .replace(/^import \{ useSyncExternalStore \} from "react";$/m, "const useSyncExternalStore = () => undefined;")
-  .replace(/^import \{ invoke, windowOnHost \} from "\.\/ipc";$/m, "const invoke = async () => { throw new Error(\"no ipc here\"); }; const windowOnHost = () => true;");
+  .replace(/^import \{ useSyncExternalStore \} from "react";$/m, "const useSyncExternalStore = (_subscribe, snapshot) => snapshot();")
+  .replace(/^import \{ invoke, windowOnHost \} from "\.\/ipc";$/m, "const invoke = (...args) => globalThis.__chatStepsInvoke(...args); const windowOnHost = () => true;");
 if (/^import /m.test(src)) fail("chat.ts gained an import this check does not stub — extend the stubs above");
 const js = (await transformWithEsbuild(src, "chat.ts", { loader: "ts", format: "esm" })).code;
 const C = await import("data:text/javascript;base64," + Buffer.from(js).toString("base64"));
 
-for (const name of ["itemsOf", "settleAnswered", "foldCalls", "callsWords", "callsSay", "underRoot"]) {
+for (const name of ["itemsOf", "settlePending", "settleAnswered", "foldCalls", "callsWords", "callsSay", "underRoot"]) {
   if (typeof C[name] !== "function") fail(`chat.ts exports no ${name}`);
 }
 if (failed) {
@@ -191,6 +191,87 @@ const kinds = (items) => items.map((it) => it.k);
   else if (/<Markdown|dangerouslySetInnerHTML|<a[\s>]|href=|onLink|pathLinks/.test(body)) fail("ToolCalls renders a summary through markup or a link — a summary is transcript text");
   else if (!/\{underRoot\(c\.summary, props\.root\)\}/.test(body) || !/title=\{c\.summary\}/.test(body)) fail("ToolCalls draws the line as text with the whole of it in the title");
   else ok("a summary is drawn as text, the whole line in its title");
+}
+
+// 11. A message absorbed by Claude is a user step in the running turn. It
+// settles one pending copy, and a later normally delivered message settles
+// the other. A pending fallback stays where it was sent in time.
+{
+  const absorbed = "Layer these images [attached: .worktrees-attachments/a.png, .worktrees-attachments/b.png]";
+  const normal = "Give me more options.";
+  const history = [
+    turn(T0, "Start", [{ kind: "text", at: T0 + 1, text: "Working." }, { kind: "user", at: T0 + 10, text: absorbed }, { kind: "text", at: T0 + 20, text: "Layered." }]),
+    turn(T0 + 30, normal, [{ kind: "text", at: T0 + 35, text: "Here are options." }]),
+  ];
+  const pending = [
+    { id: 1, text: absorbed, sentAt: (T0 + 9) * 1000, queued: true },
+    { id: 2, text: normal, sentAt: (T0 + 29) * 1000, queued: false },
+  ];
+  if (C.settlePending(pending, history).length !== 0) fail("absorbed and normal messages each settle their pending copy");
+  else ok("absorbed and normal messages each settle their pending copy");
+  const fallback = [{ id: 3, text: "Unrecorded", sentAt: (T0 + 12) * 1000, queued: true }];
+  const items = C.itemsOf(history, [], fallback, false);
+  const shape = kinds(items).filter((k) => k !== "sep");
+  if (!eq(shape, ["user", "reply", "user", "pending", "reply", "user", "reply"])) fail(`a fallback is not in time order among steps: ${JSON.stringify(shape)}`);
+  else ok("an unmatched message stays at its send time among transcript steps");
+  if (!items.find((it) => it.k === "pending")?.caughtUp) fail("a fallback still says waiting after a later turn finished");
+  else ok("a fallback stops saying waiting after a later turn finished");
+}
+
+// 12. The pending clock starts when Send begins, before an agent_send that
+// may take over two minutes to confirm. The transcript's user entry may be
+// stamped while that request is still in flight.
+{
+  const oldNow = Date.now;
+  let confirm;
+  const gate = new Promise((resolve) => { confirm = resolve; });
+  globalThis.__chatStepsInvoke = (cmd) => cmd === "agent_send"
+    ? gate
+    : Promise.resolve({ turns: [], more: false, note: "" });
+  const target = { repo: "/r", slug: "s", path: "/r/s", session: "s" };
+  Date.now = () => T0 * 1000;
+  C.setDraft(target.path, "Give me more options.");
+  const sent = C.sendDraft(target, "Claude");
+  await Promise.resolve();
+  Date.now = () => (T0 + 180) * 1000;
+  confirm({ delivered: true, queued: false, harness: "claude", session: "s", note: "Sent" });
+  await sent;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const stamped = C.useChat(target.path).pending[0]?.sentAt;
+  Date.now = oldNow;
+  delete globalThis.__chatStepsInvoke;
+  if (stamped !== T0 * 1000) fail(`send time is ${stamped}, after the host confirmation instead of before it`);
+  else ok("a slow agent_send cannot make its normal user entry too old to settle");
+}
+
+// 13. A send must not let its refresh join an old read and then stop. That
+// old read may have captured the transcript before Claude received the line;
+// when it finishes, a fresh read must settle the pending copy even if the
+// place is now idle and will not be polled again.
+{
+  const target = { repo: "/r", slug: "race", path: "/r/race", session: "race" };
+  const text = "A normal follow-up.";
+  let finishOldRead;
+  const oldRead = new Promise((resolve) => { finishOldRead = resolve; });
+  let reads = 0;
+  globalThis.__chatStepsInvoke = (cmd) => {
+    if (cmd === "agent_send") return Promise.resolve({ delivered: true, queued: false, harness: "claude", session: "race", note: "Sent" });
+    if (cmd === "agent_turns") {
+      reads++;
+      return reads === 1 ? oldRead : Promise.resolve({ turns: [turn(Math.floor(Date.now() / 1000), text, [])], more: false, note: "" });
+    }
+    throw new Error(`unexpected ${cmd}`);
+  };
+  const loading = C.loadTurns(target);
+  C.setDraft(target.path, text);
+  await C.sendDraft(target, "Claude");
+  finishOldRead({ turns: [], more: false, note: "" });
+  await loading;
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const left = C.useChat(target.path).pending.length;
+  delete globalThis.__chatStepsInvoke;
+  if (reads !== 2 || left !== 0) fail(`a send joined an old read and left ${left} pending copy (reads: ${reads})`);
+  else ok("a send refreshes again after joining a stale in-flight read");
 }
 
 console.log(failed ? `\nchatsteps-check: ${failed} failure(s)` : "\nchatsteps-check: all good");
