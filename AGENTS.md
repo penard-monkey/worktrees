@@ -131,7 +131,16 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   `reason: absorbed_mid_turn`, never its `rendered` system reminder;
   it does NOT hold a tool call whose permission is pending (2.1.314 and
   2.1.316 write it once answered). So a diff, command or plan taller than the
-  pane comes from Claude's PermissionRequest hook instead: a THIRD
+  pane comes from Claude's PermissionRequest hook instead. **A Claude 2.1.316
+  transcript also writes background tasks, peer messages, commands, shell
+  input/output, interrupts and compact summaries as `type: "user"`**
+  (`turns::Notice`, `claude-2.1.316-injected.jsonl`). A peer message is
+  `isMeta: true` but has `origin.kind: peer`, so classify the origin before
+  dropping meta; a task has `origin.kind: task-notification`. A compact
+  summary is `isCompactSummary: true` and embeds a `<system-reminder>` whose
+  body must never reach a client. Whole wrappers classify the other entries;
+  a person's prose mentioning one stays a person message. A tall prompt's
+  detail comes from a THIRD
   `--plugin-dir` (`claude-prompt`, `guidance::materialize_prompt_in`) on
   every Claude launch, whatever guidance and planning say, set in
   `ops::ai_launch_for` (so `new`, `open`, `open --brief`, MCP

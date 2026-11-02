@@ -35,9 +35,18 @@ import { invoke, windowOnHost } from "./ipc";
 /** `turns::Turn`. `user: null` when the window starts inside the turn. */
 export type Turn = {
   at: number | null; user: string | null; reply: string; tools: string[]; truncated: boolean;
+  /** Claude's own entry, never the person's message. Older hosts omit it. */
+  notice?: Notice;
   /** The turn in order (`turns::Step`): absent from a host that predates it. */
   steps?: Step[];
 };
+export type Notice =
+  | { kind: "task"; status: string; summary: string }
+  | { kind: "peer_message"; from_name: string; text: string }
+  | { kind: "command"; name: string; args: string; output?: string }
+  | { kind: "shell"; command: string; output?: string; stderr?: string }
+  | { kind: "interrupt" }
+  | { kind: "summary"; text: string };
 /** `turns::Step`: the reply's blocks, the tools, and what a person was asked
  *  and answered on the way, each at its own time. */
 export type Step =
@@ -327,6 +336,7 @@ export type Item =
   | { k: "sep"; key: string; at: number }
   | { k: "earlier"; key: string }
   | { k: "user"; key: string; text: string; at: number | null; midTurn?: boolean }
+  | { k: "notice"; key: string; notice: Notice; at: number | null }
   | { k: "reply"; key: string; text: string; tools: string[]; calls: ToolCall[]; truncated: boolean; at: number | null; label: boolean }
   | { k: "asked"; key: string; step: AskedStep; label: boolean }
   | { k: "answer"; key: string; step: AskedStep }
@@ -362,7 +372,10 @@ export function itemsOf(turns: Turn[], answered: Answered[], pending: Pending[],
   turns.forEach((t, i) => {
     if (t.at !== null) flushAnswered(t.at);
     sep(t.at, `s${i}`);
-    if (t.user === null) out.push({ k: "earlier", key: `e${i}` });
+    if (t.notice) {
+      out.push({ k: "notice", key: `n${i}`, notice: t.notice, at: t.at });
+      lastWasAgent = t.notice.kind === "peer_message";
+    } else if (t.user === null) out.push({ k: "earlier", key: `e${i}` });
     else {
       out.push({ k: "user", key: `u${i}`, text: t.user, at: t.at });
       lastWasAgent = false;
@@ -416,7 +429,7 @@ export function itemsOf(turns: Turn[], answered: Answered[], pending: Pending[],
   // that never records it cannot push it below hours of later conversation.
   const itemAt = (it: Item): number | null => {
     switch (it.k) {
-      case "sep": case "user": case "reply": return it.at;
+      case "sep": case "user": case "reply": case "notice": return it.at;
       case "asked": return it.step.at;
       case "answer": return it.step.answered_at ?? it.step.at;
       case "answered": return it.a.at / 1000;
@@ -863,8 +876,10 @@ export type News = { replies: number; prompt: { key: string; readable: boolean }
 function repliesOf(items: Item[]): Map<string, number> {
   const m = new Map<string, number>();
   for (const it of items) {
-    if (it.k !== "reply" || !it.text.trim()) continue;
-    const id = `${it.at ?? ""}\n${it.text}`;
+    let id: string;
+    if (it.k === "reply" && it.text.trim()) id = `${it.at ?? ""}\n${it.text}`;
+    else if (it.k === "notice" && it.notice.kind === "peer_message") id = `peer\n${it.at ?? ""}\n${it.notice.from_name}\n${it.notice.text}`;
+    else continue;
     m.set(id, (m.get(id) ?? 0) + 1);
   }
   return m;

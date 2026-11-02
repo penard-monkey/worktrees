@@ -421,6 +421,8 @@ function ChatItem(props: { it: Item; agent: string; root: string; onLink: (href:
         </li>
       );
     }
+    case "notice":
+      return <NoticeItem it={it} />;
     case "reply":
       return (
         <li className="chat-row chat-row-agent">
@@ -468,6 +470,27 @@ function ChatItem(props: { it: Item; agent: string; root: string; onLink: (href:
         </li>
       );
     }
+  }
+}
+
+/** Claude's transcript bookkeeping has its own visual place. The host gives
+ *  us display text, never XML, and these rows never use the person's tint. */
+function NoticeItem({ it }: { it: Extract<Item, { k: "notice" }> }) {
+  const n = it.notice;
+  const output = (text: string | undefined, label: string) => text ? <details className="chat-notice-details"><summary>{label}</summary><pre>{text}</pre></details> : null;
+  switch (n.kind) {
+    case "task":
+      return <li className="chat-notice chat-notice-center" data-testid="chat-notice-task"><span className={`chat-notice-dot ${n.status === "completed" ? "done" : n.status === "failed" ? "failed" : ""}`} aria-hidden="true" />Background task {n.status}: {n.summary}</li>;
+    case "peer_message":
+      return <li className="chat-notice chat-notice-peer" data-testid="chat-notice-peer_message"><strong>Message from {n.from_name}</strong>{n.text.length > 220 ? <details className="chat-notice-details"><summary>Read message</summary><p>{n.text}</p></details> : <p>{n.text}</p>}</li>;
+    case "command":
+      return <li className="chat-notice chat-notice-compact" data-testid="chat-notice-command"><code className="chat-notice-chip">/{n.name}{n.args ? ` ${n.args}` : ""}</code>{output(n.output, "Show command output")}</li>;
+    case "shell":
+      return <li className="chat-notice chat-notice-compact" data-testid="chat-notice-shell"><code className="chat-notice-chip">! {n.command}</code>{output(n.output, "Show output")}{output(n.stderr, "Show errors")}</li>;
+    case "interrupt":
+      return <li className="chat-notice chat-notice-center" data-testid="chat-notice-interrupt">You stopped the turn</li>;
+    case "summary":
+      return <li className="chat-notice chat-notice-center" data-testid="chat-notice-summary"><details className="chat-notice-details"><summary>Earlier conversation summarised</summary><p>{n.text}</p></details></li>;
   }
 }
 

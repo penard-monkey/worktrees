@@ -301,6 +301,15 @@ which of the offered options it was.
 given after it was sent** (allowing 120 s of clock skew, one recorded answer
 for each line), as a sent message's pending bubble does.
 
+**Claude's injected transcript entries** can have `type: "user"` even though
+no person typed them. `turns::claude` classifies them before the chat lays out
+turns: a task notification, a message from another Claude session, a slash
+command and its output, a `!` shell command and its output, an interrupt, or
+a compact summary. A `Turn` then has cleaned fallback text in `user` and an additive `notice`
+(§7). Pure reminders and local-command caveats are dropped; a compact
+summary's `<system-reminder>` body is removed. A person's message that mentions
+one of these wrappers remains a person message.
+
 ## 6. What does not fit a chat, so the terminal stays one click away
 
 | Thing | Why | What the chat does |
@@ -324,6 +333,19 @@ for each line), as a sent message's pending bubble does.
 | `app/src/App.tsx` | The switch in `.agent-label`, the terminal wrapped in a hidden, `inert` `.agent-term`, and the activity, done stamp and pane draft passed in |
 | `app/src/settings.ts`, `SettingsSheet.tsx` | `chat_view` (default on, migrated once on upgrade), Behavior → Chat view; each place's optional `agent_view` (`agentViewFor`, `withAgentView`) |
 | `app/src/mock/install.ts` | `?turns=answered` (a transcript whose prompts were answered, as `steps`; a mock answer lands in the transcript 1.5 s later), `?turns=queued` (a busy Claude absorbs the first send mid-turn; the next send is a normal turn), per-harness turns, the pi/kimi refusal, `?agentsend=mid\|nocomposer\|unconfirmed`, `?agentprompt=permission\|question\|multi\|plan\|tall\|unreadable\|resume\|preview\|preview-shown\|preview-note\|off` (`,waiting` for waiting places only; a Codex place gets Codex's approval; `resume` is Claude's resume picker, four conversations shown and three more in the terminal, with `agent_turns` failing as before a session exists until a pick, and for half a second after it; `preview` is Claude's question with a preview per option, every one known, `preview-shown` the same at 80×24 with only the terminal's one, cut, and `preview-note` one with a note typed in the terminal), `?agentanswer=unseen`, `?activity=<n>` |
+
+`?turns=notices` shows all six injected-entry kinds, including long peer text,
+shell output, and a compact summary. They use neutral notes, cards, or chips,
+never the person's accent bubble. Only a new peer message enters the polite
+screen-reader announcement; other notices are already visible in the list.
+
+`agent_turns.turns[]` adds `notice` only on an injected entry; `user` holds
+cleaned fallback text for older clients. Its exact shape is `task {status, summary}`, `peer_message
+{from_name, text}`, `command {name, args, output?}`, `shell {command,
+output?, stderr?}`, `interrupt {}`, or `summary {text}`, each with a `kind`
+discriminator. The existing `reply`, `tools`, and `steps` fields remain; an
+older client can ignore `notice`. All notice values are display text, cleaned
+of control and invisible format characters and clipped by the host.
 
 **Checked:**
 - **Contrast**, in all six themes, by the browser's resolved colours. Body

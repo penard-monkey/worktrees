@@ -75,6 +75,36 @@ moved (`answers` = `(notes only)`); the same again on one question; a note
 after moving away and back; a plain Enter. The note is
 `toolUseResult.annotations.<question>.notes`.
 
+`claude-2.1.316-injected.jsonl` is a REAL scratch session (Haiku, manual mode,
+`claude --model haiku --name wt-chat-probe`, 2026-11-01) in a scratch git repo.
+Only its `user` and `assistant` entries are kept. Thinking and tool output
+are markers, the scratch path and home directory are rewritten, and the
+compact summary's embedded `<system-reminder>` body is replaced by
+`SYSTEM-PROMPT-MARKER`, and one line quoting project guidance is omitted.
+The extra `system` line is a placeholder, not data.
+
+Claude 2.1.316 wrote the injected kinds this way:
+
+- Background completion: a string `<task-notification>` entry with
+  `origin.kind: task-notification`, no `isMeta`; status and summary are tags.
+- Peer message: a string with a `<cross-session-message>` amid Claude's own
+  prose, `origin.kind: peer`, `origin.name` and `origin.body`, **and
+  `isMeta: true`**. The origin is the safe structure to classify from.
+- `/model` appeared in an `api-request-blob` only (not a turn); `/compact`
+  wrote a plain `/compact` user entry, later a full `<command-name>` wrapper
+  and a separate `<local-command-stdout>` entry. The `<local-command-caveat>`
+  was `isMeta: true`.
+- `!echo shell-probe`: separate whole `<bash-input>` and
+  `<bash-stdout>…</bash-stdout><bash-stderr>…</bash-stderr>` user strings.
+- Esc during Bash: a user content array with one text block,
+  `[Request interrupted by user for tool use]`.
+- `/compact`: `isCompactSummary: true` on a user string beginning “This
+  session is being continued…”; it embeds a `<system-reminder>` that must be
+  removed before a client sees the summary.
+
+The user's own transcripts were not opened. The scratch session's real
+system-prompt `api-request-blob` entries are absent from the fixture.
+
 `claude-2.1.316-queued-synthetic.jsonl` is SYNTHESIZED from the field shape
 Claude Code 2.1.316 wrote in a user's transcript on 2026-11-01. Its contents
 are invented, and no private transcript was read by this lane. It has a
