@@ -21,3 +21,10 @@ export const HARNESS_LABEL: Record<Harness, string> = { claude: "Claude", codex:
 export const NEEDS_MODEL: Record<Harness, boolean> = { claude: false, codex: false, pi: true, kimi: false };
 
 export const isHarness = (v: unknown): v is Harness => HARNESSES.includes(v as Harness);
+
+/** The provider whose agent is running in a host snapshot. `up` is the
+ * agent's pane, not the existence of its tmux session: a session can fall back
+ * to a shell. Registry order breaks a legacy tie consistently in the nav and
+ * the agent cell until the app reconciles two live agents. */
+export const liveHarness = (sessions: Partial<Record<Harness, { up: boolean }>> | null | undefined): Harness | null =>
+  HARNESSES.find((h) => sessions?.[h]?.up) ?? null;
