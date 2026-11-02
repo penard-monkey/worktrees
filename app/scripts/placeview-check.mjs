@@ -1,11 +1,11 @@
 // Pins the chat view's per-place choice, `PlacePanels.agent_view`: ABSENT
-// MEANS TERMINAL, and nothing ever seeds it.
+// MEANS CHAT for Claude/Codex and Terminal for pi/kimi, without seeding it.
 //
 //   node app/scripts/placeview-check.mjs        # exits non-zero on failure
 //
 // Every other key in `place_panels` has a global twin that doubles as the
 // seed for a place with no record (`panelsFor` returns `{...s, ...p}`). This
-// one must not: a place you never switched opens on its Terminal, never on
+// one must not: a place you never switched uses its provider's default, never
 // whatever the last place used. Four ways to break that, each of which
 // type-checks and draws a perfectly good screen in the place you are looking
 // at:
@@ -16,7 +16,7 @@
 //     `panelsFor` spread) hands one place's choice to every other.
 //  2. **It is dropped.** `updatePanels` rebuilds the record field by field, so
 //     a field it does not name vanishes on the next dock toggle: Chat, then ⌘J,
-//     and the place is back on its Terminal.
+//     and the place is back on its provider's default.
 //  3. **It is filled in.** Writing `"terminal"` into every record a dock act
 //     touches looks harmless and is the seed trap's first half: absent stops
 //     meaning "never chose".
@@ -106,11 +106,38 @@ function world(state, slug, isHydrated = true) {
 
 const A = "/r|a", B = "/r|b", C = "/r|c", BAD = "/r|bad", NUM = "/r|num", BARE = "/r|bare";
 const flat = (s) => { const { place_panels: _p, ...rest } = s; return rest; };
+const settled = () => new Promise((r) => setTimeout(r, 400)); // saveSettings debounces 250 ms
+
+// ── 0. default and one-time upgrade; explicit off remains the user's call ──
+eq("new installs default Chat view on", S.DEFAULTS.chat_view, true);
+globalThis.__blob = null;
+globalThis.__saved = null;
+const fresh = await S.loadSettings();
+eq("new install loads Chat view on", fresh.chat_view, true);
+eq("new install carries the migration marker", fresh.chat_default_v1, true);
+await settled();
+eq("new install persists the marker", globalThis.__saved?.chat_default_v1, true);
+
+globalThis.__blob = { settings_rev: 999, chat_view: false, a_newer_builds_key: "kept" };
+globalThis.__saved = null;
+const upgraded = await S.loadSettings();
+eq("upgrade turns Chat view on once", upgraded.chat_view, true);
+eq("upgrade sets the marker", upgraded.chat_default_v1, true);
+await settled();
+eq("upgrade saves the new value", globalThis.__saved?.chat_view, true);
+eq("upgrade keeps unknown keys", globalThis.__saved?.a_newer_builds_key, "kept");
+globalThis.__blob = { ...globalThis.__saved, chat_view: false };
+globalThis.__saved = null;
+const optedOut = await S.loadSettings();
+eq("a marked explicit off survives reload", optedOut.chat_view, false);
+await settled();
+eq("a marked load does not save again", globalThis.__saved, null);
 
 // ── 1. load: the two words survive, anything else is dropped, absent stays ──
 globalThis.__blob = {
   settings_rev: 999, // current: `migrate` has nothing to do and saves nothing
   chat_view: true,
+  chat_default_v1: true,
   dock_tab: "plan",
   dock_width: 520,
   a_newer_builds_key: "kept",
@@ -133,7 +160,7 @@ eq("no global agent_view comes out of a load", "agent_view" in s, false);
 // A save must not erase what it does not understand (AGENTS.md, "Retiring a
 // key from ui-state.json breaks a DOWNGRADE"), nor the view itself.
 S.saveSettings(s);
-await new Promise((r) => setTimeout(r, 400)); // saveSettings debounces 250 ms
+await settled();
 ok("saveSettings reached set_settings", !!globalThis.__saved);
 globalThis.__blob = globalThis.__saved ?? {};
 const s2 = await S.loadSettings();
@@ -142,21 +169,24 @@ eq("Terminal survives a save and a reload", s2.place_panels?.[B]?.agent_view, "t
 eq("an unknown per-place field survives a save", s2.place_panels?.[A]?.a_newer_builds_field, 7);
 eq("an unknown global survives a save", s2.a_newer_builds_key, "kept");
 
-// ── 2. read: the record alone, Terminal when absent ─────────────────────────
-eq("agentViewFor: Chat", S.agentViewFor(s, A), "chat");
-eq("agentViewFor: Terminal", S.agentViewFor(s, B), "terminal");
-eq("agentViewFor: no record is Terminal", S.agentViewFor(s, C), "terminal");
-eq("agentViewFor: a record with no view is Terminal", S.agentViewFor(s, BARE), "terminal");
-eq("agentViewFor: no place is Terminal", S.agentViewFor(s, null), "terminal");
+// ── 2. read: stored choice wins, else provider rule, never a global ─────────
+eq("agentViewFor: stored Chat wins for pi", S.agentViewFor(s, A, "pi"), "chat");
+eq("agentViewFor: stored Terminal wins for Claude", S.agentViewFor(s, B, "claude"), "terminal");
+for (const provider of ["claude", "codex"])
+  eq(`agentViewFor: absent is Chat for ${provider}`, S.agentViewFor(s, C, provider), "chat");
+for (const provider of ["pi", "kimi"])
+  eq(`agentViewFor: absent is Terminal for ${provider}`, S.agentViewFor(s, C, provider), "terminal");
+eq("agentViewFor: an existing record with no view uses provider default", S.agentViewFor(s, BARE, "codex"), "chat");
+eq("agentViewFor: no place is Terminal", S.agentViewFor(s, null, "claude"), "terminal");
 eq("agentViewFor: a global cannot seed a place that never chose",
-  S.agentViewFor({ ...s, agent_view: "chat" }, C), "terminal");
+  S.agentViewFor({ ...s, agent_view: "terminal" }, C, "claude"), "chat");
 eq("agentViewFor does not depend on chat_view (the choice is KEPT while it is off)",
-  S.agentViewFor({ ...s, chat_view: false }, A), "chat");
+  S.agentViewFor({ ...s, chat_view: false }, A, "claude"), "chat");
 eq("panelsFor leaves agent_view behind (a record that has one)", "agent_view" in S.panelsFor(s, A), false);
 eq("panelsFor leaves agent_view behind (no record)", "agent_view" in S.panelsFor(s, C), false);
 
 // ── 3. write: withAgentView touches one place's view and nothing else ──────
-const n1 = S.withAgentView(s, C, "chat");
+const n1 = S.withAgentView(s, C, "chat", "pi");
 eq("a first switch makes a record with a closed dock and the view, nothing else",
   n1.place_panels[C], { dock_open: false, agent_view: "chat" });
 eq("…so that place still inherits the dock tab", S.panelsFor(n1, C).dock_tab, s.dock_tab);
@@ -165,10 +195,13 @@ eq("…and its dock is still closed", S.panelsFor(n1, C).dock_open, false);
 ok("every other place's record is the same object",
   Object.keys(s.place_panels).every((k) => n1.place_panels[k] === s.place_panels[k]));
 eq("no global changes", flat(n1), flat(s));
-eq("a switch in one place leaves a never-touched place on Terminal", S.agentViewFor(n1, "/r|d"), "terminal");
-ok("Terminal in a place that never chose writes nothing", S.withAgentView(s, C, "terminal") === s);
-ok("Chat in a place already on Chat writes nothing", S.withAgentView(s, A, "chat") === s);
-const n2 = S.withAgentView(s, A, "terminal");
+eq("a switch in one place leaves a never-touched Claude place on Chat", S.agentViewFor(n1, "/r|d", "claude"), "chat");
+ok("Chat in a Claude place that never chose writes nothing", S.withAgentView(s, C, "chat", "claude") === s);
+ok("Terminal in a pi place that never chose writes nothing", S.withAgentView(s, C, "terminal", "pi") === s);
+eq("switching default Claude Chat to Terminal writes an explicit choice",
+  S.withAgentView(s, C, "terminal", "claude").place_panels[C]?.agent_view, "terminal");
+ok("Chat in a place already on Chat writes nothing", S.withAgentView(s, A, "chat", "claude") === s);
+const n2 = S.withAgentView(s, A, "terminal", "claude");
 eq("back to Terminal keeps the rest of the record", n2.place_panels[A], { ...s.place_panels[A], agent_view: "terminal" });
 
 // ── 4. updatePanels carries it, never invents it, never globalises it ──────
@@ -185,7 +218,7 @@ eq("a place on Terminal stays on Terminal", wb.state.place_panels[B].agent_view,
 const wc = world(wa.state, "c");
 wc.update({ dock_open: true, dock_tab: "docs" });
 eq("a dock act in a place that never chose writes no view", "agent_view" in wc.state.place_panels[C], false);
-eq("…so it reads Terminal after a place on Chat was written", S.agentViewFor(wc.state, C), "terminal");
+eq("…so it reads Claude's Chat default after a place on Chat was written", S.agentViewFor(wc.state, C, "claude"), "chat");
 eq("…and still no global agent_view", "agent_view" in wc.state, false);
 const wn = world(n1, "c");
 wn.update({ dock_open: true });
@@ -198,13 +231,15 @@ eq("pre-hydration, the stash never holds a view", "agent_view" in wp.preHydratio
 // ── 5. App.tsx reads it in one place and writes it in one place ────────────
 const chatOn = [...app.matchAll(/const chatOn = ([^;\n]+);/g)];
 eq("one `const chatOn =` in App.tsx", chatOn.length, 1);
-ok("chatOn is chat_view AND the place's own view",
-  chatOn.length === 1 && /^settings\.chat_view && agentViewFor\(settings, viewKey\) === "chat"$/.test(chatOn[0][1]),
+ok("chatOn waits for hydration, then reads chat_view and the place's own view",
+  chatOn.length === 1 && /^settingsReady && settings\.chat_view && agentViewFor\(settings, viewKey, provider\) === "chat"$/.test(chatOn[0][1]),
   `found: ${chatOn[0]?.[1]}`);
+ok("the switch waits for settings hydration",
+  app.includes('{settingsReady && settings.chat_view && <AgentViewSwitch chat={chatOn}'));
 const sv = lines.findIndex((l) => l.includes("const setChatView = useCallback("));
 const svEnd = lines.findIndex((l, i) => i > sv && /^\s*\}, \[\]\);\s*$/.test(l));
 ok("App.tsx still declares `const setChatView = useCallback(`", sv >= 0 && svEnd > sv);
-ok("setChatView writes through withAgentView", lines.slice(sv, svEnd).join("\n").includes("withAgentView(prev, key,"));
+ok("setChatView writes through provider-aware withAgentView", lines.slice(sv, svEnd).join("\n").includes('withAgentView(prev, key, on ? "chat" : "terminal", provider)'));
 // Any other CODE line naming the field is a second reader or writer, which is
 // where a fallback to a global would come back in.
 const isComment = (l) => /^\s*(\/\/|\*|\/\*)/.test(l);
@@ -218,4 +253,4 @@ if (failed) {
   console.log(`\n${failed} failure(s)`);
   process.exit(1);
 }
-console.log("ok — agent_view: absent is Terminal, never seeded, carried by updatePanels, survives load/save");
+console.log("ok — Chat defaults on once; agent_view: provider-aware absent, never seeded, carried by updatePanels, survives load/save");

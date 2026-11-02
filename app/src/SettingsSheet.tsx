@@ -1303,9 +1303,9 @@ export function SettingsSheet({
               Show a Chat | Terminal switch on each agent (preview)
             </label>
             <div className="hint">
-              Chat shows the agent’s recent turns as messages, its waiting prompt as buttons, and a
-              one-line message box. The terminal stays every place’s default, and one click away:
-              tool output, diffs, slash commands and Esc are only there.
+              Chat is the default for Claude and Codex; pi and kimi open on Terminal. Each place
+              remembers your choice. Chat shows recent turns, waiting prompts, and a message box.
+              Terminal is one click away for tool output, diffs, and slash commands.
             </div>
           </section>
 

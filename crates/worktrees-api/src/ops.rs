@@ -584,7 +584,7 @@ pub fn mark_seen(repo: String, slug: String, epoch: i64) -> Result<(), String> {
 
 /// Outcome of a core op: exit code + the op's own messages (the loud guards),
 /// surfaced to the UI verbatim.
-#[derive(Serialize)]
+#[derive(Serialize, Clone, Debug)]
 pub struct CmdResult {
     pub ok: bool,
     pub code: i32,

@@ -100,10 +100,11 @@ export type PlacePanels = {
    *  and then spread that stale value back over the global. */
   files_diff?: boolean;
   /** The agent cell's Chat | Terminal choice for THIS place (the chat view,
-   *  `chat_view`). Absent means Terminal.
+   *  `chat_view`). Absent uses the agent's default: Chat for Claude/Codex,
+   *  Terminal for pi/kimi.
    *
    *  OPTIONAL, and unlike the two above it has NO global twin, and must never
-   *  get one: a place you never switched opens on its Terminal, never on
+   *  get one: a place you never switched uses its provider's default, never
    *  whatever the last place used. So `panelsFor` leaves it out of what it
    *  returns, `updatePanels` carries the stored value into the place's record
    *  and never over the globals, and only `withAgentView` writes it.
@@ -163,18 +164,20 @@ export function panelsFor(s: Settings, key: string | null): Settings {
   return s.dock_open ? { ...s, dock_open: false } : s;
 }
 
-/** Which view THIS place's agent cell shows: its own `agent_view`, and
- *  Terminal for a place that never chose. Read from the record alone, never
- *  from a global (there is none) and never through `panelsFor` (which leaves
+/** Which view THIS place's agent cell shows: its own `agent_view`, or the
+ *  provider's default for a place that never chose. Read from the record alone,
+ *  never from a global (there is none) or through `panelsFor` (which leaves
  *  the field behind). Whether the chat shows at all is `chat_view`'s call;
  *  this answer is kept while that is off. */
-export const agentViewFor = (s: Settings, key: string | null): AgentView =>
-  (key ? s.place_panels?.[key]?.agent_view : undefined) === "chat" ? "chat" : "terminal";
+export const agentViewFor = (s: Settings, key: string | null, provider: Harness): AgentView => {
+  if (!key) return "terminal";
+  return s.place_panels?.[key]?.agent_view ?? (provider === "claude" || provider === "codex" ? "chat" : "terminal");
+};
 
 /** `s` with THIS place's view set, and nothing else: no other place's record,
  *  no global. `s` itself when the place already shows `view`, so a click on
- *  the view already shown writes nothing and Terminal in a place that never
- *  chose creates no record.
+ *  the view already shown writes nothing and the provider's default in a
+ *  place that never chose creates no record.
  *
  *  A place's FIRST record, made by this switch, holds a closed dock and no
  *  other dock field: `dock_tab`/`dock_width` stay absent and keep inheriting
@@ -184,9 +187,9 @@ export const agentViewFor = (s: Settings, key: string | null): AgentView =>
  *  here on the global's word. Not the partial record `updatePanels` warns
  *  about: that one held an OPEN dock whose tab then moved with the global.
  *  This dock is closed, and opening it writes the full record. */
-export function withAgentView(s: Settings, key: string, view: AgentView): Settings {
+export function withAgentView(s: Settings, key: string, view: AgentView, provider: Harness): Settings {
   const cur = s.place_panels?.[key];
-  if ((cur?.agent_view ?? "terminal") === view) return s;
+  if (agentViewFor(s, key, provider) === view) return s;
   return { ...s, place_panels: { ...(s.place_panels ?? {}), [key]: { ...(cur ?? { dock_open: false }), agent_view: view } } };
 }
 
@@ -281,9 +284,12 @@ export type Settings = {
   // either way, so there is no per-project switch.
   pull_requests: boolean;
   // The chat view of a place's agent (docs/proposals/chat-session-view.md), a
-  // PREVIEW: on, each agent cell grows a Chat | Terminal switch; the terminal
-  // stays the default view of every place. Off, nothing of it is drawn.
+  // PREVIEW: on by default, each agent cell has a Chat | Terminal switch;
+  // Claude/Codex start on Chat, pi/kimi on Terminal. Off, the terminal shows.
   chat_view: boolean;
+  // One-time rollout to existing installs. Once present, a user's `chat_view`
+  // choice is kept across reloads and relaunches.
+  chat_default_v1: boolean;
   dock_open: boolean; // right dock (Files / Terminal) visible for the selected place
   dock_width: number; // ≥240, ceiling is viewport-derived (see dockCeiling)
   dock_tab: "files" | "terminal" | "docs" | "plan" | "prs"; // last-used dock tab
@@ -531,7 +537,8 @@ export const DEFAULTS: Settings = {
   usage_codex: true,
   usage_kimi: true,
   pull_requests: true,
-  chat_view: false,
+  chat_view: true,
+  chat_default_v1: true,
   dock_open: false,
   dock_width: 360,
   dock_tab: "files",
@@ -869,7 +876,12 @@ export async function loadSettings(): Promise<Settings> {
     s.usage_codex = typeof s.usage_codex === "boolean" ? s.usage_codex : true;
     s.usage_kimi = typeof s.usage_kimi === "boolean" ? s.usage_kimi : true;
     s.pull_requests = typeof s.pull_requests === "boolean" ? s.pull_requests : true;
-    s.chat_view = typeof s.chat_view === "boolean" ? s.chat_view : false;
+    // Whole-blob settings give every existing install an explicit false. The
+    // marker applies the new default once, then leaves later user choices alone.
+    const needsChatDefaultMigration = raw?.chat_default_v1 !== true;
+    if (needsChatDefaultMigration) s.chat_view = true;
+    else if (typeof s.chat_view !== "boolean") s.chat_view = DEFAULTS.chat_view;
+    s.chat_default_v1 = true;
     s.theme = normalizeTheme(s.theme);
     s.theme_light = normalizePair(s.theme_light, "light", DEFAULTS.theme_light);
     s.theme_dark = normalizePair(s.theme_dark, "dark", DEFAULTS.theme_dark);
@@ -900,7 +912,7 @@ export async function loadSettings(): Promise<Settings> {
         // rather than filled in (the seed trap on `place_panels`, CLAUDE.md).
         if (p && typeof p === "object" && p.dock_tab !== undefined && !isDockTab(p.dock_tab)) p.dock_tab = "files";
         // The chat view's choice is one of its two words or nothing. Dropped
-        // rather than mapped, since absent already IS Terminal.
+        // rather than mapped, since absent uses the provider's default.
         if (p && typeof p === "object" && p.agent_view !== undefined && !isAgentView(p.agent_view)) delete p.agent_view;
       }
     }
@@ -910,7 +922,8 @@ export async function loadSettings(): Promise<Settings> {
       .filter(([, v]) => !!v && Number.isInteger(v.line) && v.line >= 1 && (v.col == null || (Number.isInteger(v.col) && v.col >= 1))));
     s.default_models = Object.fromEntries(Object.entries(s.default_models && typeof s.default_models === "object" ? s.default_models : {})
       .filter(([h, m]) => isHarness(h) && typeof m === "string" && /^[A-Za-z0-9._/:-]{1,200}$/.test(m) && !m.startsWith("-")));
-    if (migrate(s, typeof raw?.settings_rev === "number" ? raw.settings_rev : 0)) saveSettings(s);
+    const migratedRevision = migrate(s, typeof raw?.settings_rev === "number" ? raw.settings_rev : 0);
+    if (needsChatDefaultMigration || migratedRevision) saveSettings(s);
     return s;
   } catch {
     return { ...DEFAULTS };

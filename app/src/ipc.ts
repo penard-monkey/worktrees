@@ -463,7 +463,7 @@ export const ADMIN_ROWS: readonly string[] = [
   "create_initial_commit", "remove_project", "set_planning_default", "set_project_planning",
   "set_quota_settings", "set_fetch_interval", "mcp_status", "mcp_uninstall", "codex_mcp_status",
   "codex_mcp_uninstall", "codex_mcp_migration_plan", "pi_mcp_status", "pi_mcp_uninstall", "kimi_mcp_status",
-  "sync_hub_list", "sync_apply", "diagnostics", "log_tail", "set_term_history_opts", "term_history_info",
+  "sync_hub_list", "sync_hubs", "sync_hub_choose", "sync_hub_forget", "sync_apply", "diagnostics", "log_tail", "set_term_history_opts", "term_history_info",
   "term_history_clear", "ui_events_clear", "profiles_info", "delete_profile", "skill_inspect",
   "skill_preview_git", "skill_remove", "devices_list", "device_narrow",
 ];
@@ -475,7 +475,7 @@ export const CONSOLE_ROWS: readonly string[] = [
   "set_cross_project", "set_project_private", "update_cli", "mcp_install", "codex_mcp_install",
   "pi_mcp_install", "kimi_mcp_set", "codex_mcp_migrate", "agent_link_skills", "set_codex_permissions",
   "set_agent_guidance", "set_agent_guidance_skill", "agent_guidance_merge", "set_pi_trust", "set_pi_allowed",
-  "set_kimi_allowed", "ui_events_append", "save_profile", "set_project_profile", "set_default_profile",
+  "set_kimi_allowed", "sync_batch_preview", "sync_batch_apply", "ui_events_append", "save_profile", "set_project_profile", "set_default_profile",
   "skill_install_local", "skill_install_git", "device_set_scope", "device_disable", "device_enable",
   "device_set_expiry", "device_set_stepup", "devices_revoke_all_others", "pair_begin", "pair_decide",
   "pair_cancel", "pair_status", "identity_rotate", "set_slot_capacity", "remote_enable", "remote_disable",

@@ -4,10 +4,10 @@ title: "Proposal — a chat view of a place's agent"
 
 # Proposal — a chat view of a place's agent, beside its terminal
 
-**Status:** exploration, 2026-10-30. A prototype is on the branch
-`feat/chat-session-view`, behind a Settings switch that is off by default. It
-is not merged and not reviewed. Its three open questions were decided by the
-user on 2026-10-30 (§9). On 2026-10-31 it took in `feat/actionable-prompts`
+**Status:** exploration begun 2026-10-30 on `feat/chat-session-view`. The
+Settings switch is on by default since `feat/chat-default-on`. The three
+original open questions were decided by the user on 2026-10-30 (§9). On
+2026-10-31 it took in `feat/actionable-prompts`
 (two new rows, richer prompts, and the prompt hook; on main as #581), and the
 prompt card now answers every prompt those rows can read (§5). On 2026-11-01
 it took in two of §8's asks. Its server changes:
@@ -27,9 +27,10 @@ asked for "a real chat interface", answer buttons in the chat, and tappable
 links.
 
 **The recommendation in one paragraph.** Put a **Chat | Terminal switch on
-each agent cell**. The terminal stays the default and stays mounted under the
-chat, hidden, so going back takes one click and keeps its scrollback. The chat
-is the iOS design on the same serve rows (`agent_turns`, `agent_prompt`,
+each agent cell**. Claude and Codex start on Chat; pi and kimi start on
+Terminal. The terminal stays mounted under Chat, hidden, so going back takes
+one click and keeps its scrollback. The chat is the iOS design on the same
+serve rows (`agent_turns`, `agent_prompt`,
 `agent_answer`, `agent_answer_text`, `agent_answer_many`, `agent_send`,
 `agent_interrupt`), adjusted for a console:
 - no step-up or grant;
@@ -47,9 +48,9 @@ server asks are listed in §8. None of them blocks a first release.
 | Question | Decision | iOS does |
 |---|---|---|
 | Where | A per-place **Chat \| Terminal** switch in the agent cell's label row | A separate screen |
-| Default | **Terminal**, for every place. The switch shows only while Settings → Behavior → "Chat view" is on (a preview, off) | — |
+| Default | **Chat** for Claude/Codex; **Terminal** for pi/kimi. Settings → Behavior → "Chat view" starts on for new and upgraded installs; a later off choice sticks | — |
 | The terminal under the chat | **Mounted, hidden at its own size, and `inert`**. No resize reaches the pty, and the way back keeps the scrollback (the same rule as reading mode) | No terminal |
-| Remembered | **Per place** (2026-11-01): an optional `place_panels[*].agent_view`, absent = Terminal and with no global, kept across place switches and relaunches and while Chat view is off | — |
+| Remembered | **Per place** (2026-11-01): an optional `place_panels[*].agent_view`; absent follows the provider default without writing a record or adding a global. An explicit choice wins across place switches and relaunches, even while Chat view is off | — |
 | Live | Refetch on this place's `sessions:busy` / `sessions:done` change, on a send or an answer, and on Refresh. **While busy, re-read the turns every 10 s** if the chat is visible and the window is not hidden | Events only, no polling |
 | Enter | **Sends.** No key adds a line break | Return does nothing; only the button sends |
 | A prompt's choice | **Two clicks:** select, then "Send answer: “Yes”" | Two taps |
@@ -59,8 +60,8 @@ server asks are listed in §8. None of them blocks a first release.
 | pi, kimi | A fallback card ("can't be shown here yet"). **The composer and the prompt card still work**: `agent_send` and `agent_prompt` cover every harness | Same fallback |
 
 Three of these were the user's to make, and the user decided them on
-2026-10-30 (§9): Chat beside the terminal with Terminal the default, Enter
-sending, and two clicks for an answer.
+2026-10-30 (§9): Chat beside the terminal, Enter sending, and two clicks for
+an answer. The Terminal default changed on 2026-11-01.
 
 ## 2. Layout at the app's real widths
 
@@ -309,7 +310,7 @@ one of these wrappers remains a person message.
 | `app/src/ChatPane.tsx` | The chat, the prompt card, the composer, and the `AgentViewSwitch` |
 | `app/src/ChatPane.css` | Plain CSS on `tokens.css` |
 | `app/src/App.tsx` | The switch in `.agent-label`, the terminal wrapped in a hidden, `inert` `.agent-term`, and the activity, done stamp and pane draft passed in |
-| `app/src/settings.ts`, `SettingsSheet.tsx` | `chat_view` (default off), Behavior → Chat view; each place's `agent_view` (`agentViewFor`, `withAgentView`) |
+| `app/src/settings.ts`, `SettingsSheet.tsx` | `chat_view` (default on, migrated once on upgrade), Behavior → Chat view; each place's optional `agent_view` (`agentViewFor`, `withAgentView`) |
 | `app/src/mock/install.ts` | `?turns=answered` (a transcript whose prompts were answered, as `steps`; a mock answer lands in the transcript 1.5 s later), per-harness turns, the pi/kimi refusal, `?agentsend=mid\|nocomposer\|unconfirmed`, `?agentprompt=permission\|question\|multi\|plan\|tall\|unreadable\|resume\|preview\|preview-shown\|preview-note\|off` (`,waiting` for waiting places only; a Codex place gets Codex's approval; `resume` is Claude's resume picker, four conversations shown and three more in the terminal, with `agent_turns` failing as before a session exists until a pick, and for half a second after it; `preview` is Claude's question with a preview per option, every one known, `preview-shown` the same at 80×24 with only the terminal's one, cut, and `preview-note` one with a note typed in the terminal), `?agentanswer=unseen`, `?activity=<n>` |
 
 `?turns=notices` shows all six injected-entry kinds, including long peer text,
@@ -344,7 +345,7 @@ of control and invisible format characters and clipped by the host.
   tint that carries the same meaning.
 
 **Not done:**
-- ~~persisting the choice~~: done. Each place keeps its view in `place_panels` (`agent_view`, absent = Terminal, no global), across switches and relaunches, and keeps it while Chat view is off (`placeview-check.mjs`);
+- ~~persisting the choice~~: done. Each place keeps its explicit view in `place_panels` (`agent_view`, absent uses the provider default, no global), across switches and relaunches, and keeps it while Chat view is off (`placeview-check.mjs`);
 - ~~a drift check holding `chat.ts`'s copy of `agents.rs`'s strings and
   `typed_line_ok`'s rule~~: done, in its own `chatmirror-check.mjs`;
 - ~~the iOS "New messages" announcement for VoiceOver~~: done on
@@ -377,12 +378,13 @@ of control and invisible format characters and clipped by the host.
 ## 9. Decided
 
 The user decided all three on 2026-10-30. The prototype at 5e2da63 already
-does each, so none of them changed code.
+did each, so none of those decisions changed code at the time. The first
+decision's default was superseded on 2026-11-01.
 
-1. **DECIDED: beside the terminal.** Chat is an opt-in view next to Terminal,
-   and Terminal stays the default for every place. Making Chat the default,
-   for new places or for everyone, would be a NEW decision, taken only once
-   the turns event (§8) exists.
+1. **DECIDED: beside the terminal.** The 2026-10-30 decision kept Terminal as
+   every place's default. The 2026-11-01 decision supersedes that default:
+   Claude/Codex places open on Chat, pi/kimi places on Terminal, and existing
+   installs get Chat view enabled once. A later explicit off choice persists.
 2. **DECIDED: Enter sends** on the desktop. This differs from iOS, where a
    stray Return should not instruct an agent. A desktop keyboard's Enter is
    deliberate, and the terminal sends on Enter too.
@@ -401,10 +403,9 @@ The mock answers instantly, so these need a hand test (below):
 - whether `sessions:drafts`' 15 s beat is too slow to warn before a refusal.
 
 **Hand test** (`app/scripts/sandbox.sh --app`, the user drives it):
-1. Settings → Behavior → Chat view: tick **Show a Chat | Terminal switch on
-   each agent**.
-2. Open a place with a running Claude. Press **Chat** on the agent's label row.
-   The composer should take the keyboard.
+1. Settings → Behavior → Chat view is on by default. Leave it on.
+2. Open a place with a running Claude. Chat should already show, with focus in
+   the composer.
 3. Send "say hello in one word". Expect a dashed bubble, then the real turn
    and Claude's reply within about 10 s of the turn ending.
 4. Ask for something that needs a permission (`touch probe.txt`). Expect the
@@ -413,5 +414,5 @@ The mock answers instantly, so these need a hand test (below):
    "Claude's input already has text in it…".
 6. Switch back with **Terminal**. Expect the scrollback intact, the keyboard in
    the terminal, and no reflow of the pane.
-7. Repeat steps 2–4 in a Codex place. Then open a pi or kimi place, and expect
-   the fallback card with a working composer.
+7. Repeat steps 2–4 in a Codex place. Then open a pi or kimi place: Terminal
+   should be selected. Press Chat to see the fallback card and working composer.

@@ -367,7 +367,35 @@ this repo's settings in `.claude/close-out.md`).
   parallel test, which made `settle` see an open port. Make the port probe
   injectable (the `_in` seam, as `answer_with` takes the clock) so the test
   scripts "closed" instead of borrowing a real port.
-  _From: [2026-11-01 chat-composer-scrollbars](docs/sessions/2026-11-01-chat-composer-scrollbars/summary.md)_
+  Second sighting: #587's head `e91c049` (run 41357933313, "gave up before the
+  bound (41.25µs)"), a branch that does not touch `app/src-tauri`; it passed
+  on a re-run of the failed job.
+  _From: [2026-11-01 chat-composer-scrollbars](docs/sessions/2026-11-01-chat-composer-scrollbars/summary.md),
+  [2026-11-01 sync-hubs](docs/sessions/2026-11-01-sync-hubs/summary.md)_
+
+- **Sync hubs: what #587 left out.**
+  - A batch does not re-ask when a live session appears between preview and
+    apply. That transfer is reported as failed, with the sessions named.
+    Offer a confirm on that row, as the single modal does.
+  - A batch never runs a registered `install` after a pull.
+  - AFP share ids are not measured. Older macOS reported `afp_<session>/<vol>`,
+    which would make the id change per mount (the hub would read "not
+    connected", never be swapped).
+  - `volumes()` `statfs`es every `/Volumes` entry with no deadline. Only the
+    manifest listing is bounded, so a share whose server vanished can still
+    stall a hub list.
+  - `sync_hub_list` is kept for older clients and no longer called by the app.
+  - SSH hubs are designed (`docs/sync-ssh-design.md`) and deliberately not
+    scheduled.
+  _From: [2026-11-01 sync-hubs](docs/sessions/2026-11-01-sync-hubs/summary.md)_
+
+- **`agents::tests::an_earlier_turns_mark_does_not_prove_a_stop` fails in full
+  local `cargo test -p worktrees-api` runs on David's Mac** ("Not inside a git
+  repository", `agents.rs:2013`). It failed 4 of 5 full runs on 2026-11-01,
+  including with the session's new tests skipped. It passes alone and in CI on
+  both OSes. Not investigated: find which parallel test makes its temp repo
+  undiscoverable.
+  _From: [2026-11-01 sync-hubs](docs/sessions/2026-11-01-sync-hubs/summary.md)_
 
 - **`a_real_size_change_still_reaches_the_shell` (app pty test) flaked once.**
   It failed in one full `cargo test -p app --lib` run with "the trap shell never
