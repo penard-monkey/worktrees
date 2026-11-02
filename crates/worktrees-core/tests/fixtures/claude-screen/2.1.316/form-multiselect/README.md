@@ -3,7 +3,7 @@ Derived fixtures, **not live captures**. On 2026-11-02, `worktrees new lane
 launch: 19 agents were live and `[limits] max_live_agents` was 18. No
 `--force` was used, and no owner pane or transcript was read.
 
-`first`, `toggled`, `on-next`, and `text-typed` start from the corresponding
+`first`, `toggled`, `on-next`, `text-row`, and `text-typed` start from the corresponding
 2.1.314 `question-multiselect*.txt` captures. The tab bar gains `☐ Size`
 after Toppings, and the row below the free-text box changes from `Submit` to
 `Next`. `on-next` leaves only Cheese ticked, matching the scripted answer.

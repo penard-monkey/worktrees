@@ -497,6 +497,19 @@ fn confirmed(io: &dyn AgentIo, lane: &Lane, gone: impl Fn(&Modal) -> bool) -> bo
     })
 }
 
+/// Next in a form must reveal another question or its review screen. A blank
+/// capture proves only that the old screen went away, not where it went.
+fn confirmed_form(io: &dyn AgentIo, lane: &Lane, before: &Modal) -> bool {
+    (0..GONE_TRIES).any(|i| {
+        if i > 0 {
+            io.sleep(POLL_MS);
+        }
+        io.capture(lane)
+            .and_then(|s| read_any(lane.harness, &s))
+            .is_some_and(|now| prompt::form_advanced(before, &now))
+    })
+}
+
 /// A device's text or key into an agent (a send, a typed answer, a stop) is
 /// stamped on the place: who, which session, when — never the text.
 fn stamp_send(ctx: &Ctx, repo: &str, slug: &str, lane: &Lane) {
@@ -674,9 +687,11 @@ pub fn agent_answer_many(ctx: &Ctx, repo: String, slug: String, choices: Vec<u32
         None => return Err("could not move to Next or Submit; nothing was sent — answer it at the host".into()),
     }
     io.press(&lane, Key::Enter)?;
-    let confirmed = confirmed(io, &lane, |now| {
-        if prompt::form_question(&m) { prompt::form_advanced(&m, now) } else { !prompt::same_form(&m, now) }
-    });
+    let confirmed = if prompt::form_question(&m) {
+        confirmed_form(io, &lane, &m)
+    } else {
+        confirmed(io, &lane, |now| !prompt::same_form(&m, now))
+    };
     let labels: Vec<&str> = m.choices.iter().filter(|c| want.contains(&c.n)).map(|c| c.label.as_str()).collect();
     Ok(json!({
         "answered": true,
@@ -1945,6 +1960,37 @@ mod tests {
         let v = result.unwrap();
         assert_eq!(fake.keys(), vec![Key::Enter, Key::Down, Key::Down, Key::Down, Key::Down, Key::Enter]);
         assert_eq!(v["confirmed"], true);
+    }
+
+    #[test]
+    fn a_form_multi_select_can_fill_its_text_box_before_sending() {
+        let first = fx316!("form-multiselect/text-row.txt");
+        let typed = fx316!("form-multiselect/text-typed.txt");
+        let fake = Arc::new(Fake::with(vec![("claude", "repo-lane", script(first, vec![typed.to_string()]))]));
+        let (ctx, repo) = setup("formtext", fake.clone());
+        let p = prompt_of(&ctx, &repo);
+        assert_eq!(p["multi"], true);
+        assert_eq!(p["choices"][2]["text"], "field");
+        let fp = p["fingerprint"].as_str().unwrap().to_string();
+        let v = agent_answer_text(&ctx, repo, "lane".into(), 3, fp, "pineapple".into()).unwrap();
+        assert_eq!(v["answered"], false);
+        assert!(fake.keys().is_empty(), "filling the box only; no Enter");
+    }
+
+    #[test]
+    fn a_form_multi_select_needs_the_next_form_screen_to_confirm() {
+        let start = fx316!("form-multiselect/first.txt");
+        let ticked = fx316!("form-multiselect/toggled.txt");
+        let next = fx316!("form-multiselect/on-next.txt");
+        let screens = vec![
+            ticked.to_string(), moved(ticked, "2. [ ] Olives"), moved(ticked, "3. [ ] Mushrooms"),
+            moved(ticked, "4. [ ] Type something"), next.to_string(), String::new(),
+        ];
+        let fake = Arc::new(Fake::with(vec![("claude", "repo-lane", script(start, screens))]));
+        let (ctx, repo) = setup("formunseen", fake);
+        let fp = prompt_of(&ctx, &repo)["fingerprint"].as_str().unwrap().to_string();
+        let v = agent_answer_many(&ctx, repo, "lane".into(), vec![1], fp).unwrap();
+        assert_eq!(v["confirmed"], false, "a blank pane does not prove Next reached the next tab");
     }
 
     /// The ticks moved under the answer (another hand on the keyboard): the
