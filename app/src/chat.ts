@@ -429,7 +429,7 @@ export function itemsOf(turns: Turn[], answered: Answered[], pending: Pending[],
   // that never records it cannot push it below hours of later conversation.
   const itemAt = (it: Item): number | null => {
     switch (it.k) {
-      case "sep": case "user": case "reply": return it.at;
+      case "sep": case "user": case "reply": case "notice": return it.at;
       case "asked": return it.step.at;
       case "answer": return it.step.answered_at ?? it.step.at;
       case "answered": return it.a.at / 1000;
