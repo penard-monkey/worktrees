@@ -262,7 +262,7 @@ export function sendWords(err: string, agent: string): SendWords {
     return { line: `${agent}’s input already has text in it, typed in the terminal. Send it or clear it there, then try again.`, terminal: true };
   }
   if (err === AGENT_ERR.noComposer) return { line: `${agent} isn’t at its prompt yet (starting up, or a screen this app doesn’t know). Try again in a moment.`, terminal: true };
-  if (err.startsWith(AGENT_ERR.noLanePrefix)) return { line: `No ${agent} is running in this place any more.` };
+  if (err.startsWith(AGENT_ERR.noLanePrefix)) return { line: "No agent is running in this place." };
   // typed_line_ok's own words, should the client's check ever drift from it.
   if (err.startsWith("text ")) return { line: `Not sent: ${err}.` };
   return { line: `Not sent: ${err}`, terminal: true };
@@ -309,7 +309,7 @@ export function stopWords(err: string, agent: string): SendWords {
   }
   if (err === AGENT_ERR.noComposer) return { line: `${agent} isn’t at its prompt (starting up, or a screen this app doesn’t know). Stop it in the terminal.`, terminal: true };
   if (err.startsWith(AGENT_ERR.stopUnsupportedPrefix)) return { line: `${agent} can’t be stopped from here yet. Stop it in the terminal.`, terminal: true };
-  if (err === AGENT_ERR.noAgent) return { line: `No ${agent} is running in this place any more.` };
+  if (err === AGENT_ERR.noAgent) return { line: "No agent is running in this place." };
   return { line: `Not stopped: ${err}`, terminal: true };
 }
 

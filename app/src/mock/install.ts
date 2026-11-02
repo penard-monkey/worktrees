@@ -827,6 +827,12 @@ const mockPromptFp = (st: { gen: number }) => `9c1f0d6e3b8a4c2e7f51a0b6d4c3e2f1a
 const mockPlacePath = (repo: string, slug: string) => (slug === "(main)" ? repo : `${repo}/.worktrees/${slug}`);
 const mockHarnessAt = (path: string) =>
   CODEX_PLACES.has(path) ? "codex" : PI_PLACES.has(path) ? "pi" : KIMI_PLACES.has(path) ? "kimi" : "claude";
+// `?turnsharness=codex`: the transcript reader has found the new provider
+// before a delayed workspace snapshot has moved the agent cell off Claude.
+const mockTurnHarnessAt = (path: string) => {
+  const reported = new URLSearchParams(location.search).get("turnsharness");
+  return isHarness(reported) ? reported : mockHarnessAt(path);
+};
 // The chat view's transcripts, per place, made on first read: a send appends
 // its line as a turn, and a scripted reply lands a few seconds later.
 // `?turns=answered` gives every Claude place a transcript whose prompts were
@@ -946,7 +952,7 @@ function mockTurnsAt(repo: string, slug: string) {
   let t = mockTurns.get(key);
   if (t) return t;
   const now = Math.floor(Date.now() / 1000);
-  const harness = mockHarnessAt(mockPlacePath(repo, slug));
+  const harness = mockTurnHarnessAt(mockPlacePath(repo, slug));
   if (harness === "claude" && new URLSearchParams(location.search).get("turns") === "notices") {
     const notice = (at: number, value: import("../chat").Notice): MockTurn => ({
       at, notice: value, reply: "", tools: [], truncated: false,
@@ -2131,6 +2137,8 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
         p.declared = { ...(p.declared ?? {}), last_opened_epoch: now() };
         reconcile(p);
       });
+      mockSetHarness(mockPlacePath(args.repo, args.slug), provider);
+      mockTurns.delete(`${args.repo}|${args.slug}`);
       return { ok: true, code: 0, output: `Opened ${args.slug}` };
     }
     case "close_place": {
@@ -4027,13 +4035,15 @@ Phase 3: Frontend pane and mock harness
       return { answered: true, confirmed: true, harness: mockHarnessAt(mockPlacePath(args.repo, args.slug)), session: mockAgentSession(args.slug), choice: c.n, label: c.label };
     }
     // `?agentsend=` scripts a refusal: `mid` (someone's draft in the pane),
-    // `nocomposer` (not at its prompt), `unconfirmed` (typed, not seen).
+    // `nocomposer` (not at its prompt), `gone` (the named agent exited),
+    // `unconfirmed` (typed, not seen).
     case "agent_send": {
       const text = String(args.text ?? "");
       if (!text.trim()) throw "text is empty";
       if (/\p{Cc}/u.test(text)) throw "text contains a control character (newline, tab, escape…); only ONE line is typed";
       if (mockPromptUp(args.repo, args.slug)) throw "the agent is waiting on a prompt: answer it with agent_answer";
       const mode = new URLSearchParams(location.search).get("agentsend");
+      if (mode === "gone") throw `no agent this place launched is running in ${args.session}`;
       if (mode === "mid") throw "the agent's prompt has unsent text in it (someone is typing there): send nothing until it is empty";
       if (mode === "nocomposer") throw "the agent is not at its prompt (starting, or a screen this host does not recognise): try again shortly";
       const path = mockPlacePath(args.repo, args.slug);
@@ -4131,6 +4141,7 @@ Phase 3: Frontend pane and mock harness
       const path = mockPlacePath(args.repo, args.slug);
       const harness = mockHarnessAt(path);
       const mode = new URLSearchParams(location.search).get("agentinterrupt");
+      if (mode === "gone") throw "no agent is running in this place";
       if (mode === "unsupported" || (!mode && (harness === "pi" || harness === "kimi"))) {
         throw `agent_interrupt stops Claude's and Codex's turns; ${harness === "kimi" ? "Kimi" : "pi"}'s cannot be stopped from here yet`;
       }
@@ -4151,7 +4162,7 @@ Phase 3: Frontend pane and mock harness
       return { interrupted: true, harness, session, note: "Stopped: the turn was interrupted." };
     }
     case "agent_turns": {
-      const harness = mockHarnessAt(mockPlacePath(args.repo, args.slug));
+      const harness = mockTurnHarnessAt(mockPlacePath(args.repo, args.slug));
       if (harness === "pi" || harness === "kimi") throw `agent_turns reads Claude's and Codex's transcripts; ${harness}'s is not read yet`;
       // Claude on its resume picker has no session yet, and writes one about
       // half a second after a pick (measured on 2.1.316).
@@ -4805,6 +4816,14 @@ const ACTIVITY_CYCLE: { busy: string[]; waiting: string[] }[] = [
 const CODEX_PLACES = new Set([`${CDV}/billing-refactor`]);
 const PI_PLACES = new Set([`${CDV}/catalog-import`]);
 const KIMI_PLACES = new Set([`${CDV}/ledger-sync`]);
+function mockSetHarness(path: string, provider: Harness) {
+  CODEX_PLACES.delete(path);
+  PI_PLACES.delete(path);
+  KIMI_PLACES.delete(path);
+  if (provider === "codex") CODEX_PLACES.add(path);
+  if (provider === "pi") PI_PLACES.add(path);
+  if (provider === "kimi") KIMI_PLACES.add(path);
+}
 // `waiting_by` (lib.rs `ClaudeActivity`): the waiting set split by the harness
 // that is waiting, which is what the nav drag's refusal keys on.
 const withWaitingBy = (a: { busy: string[]; waiting: string[] }) => ({
@@ -4886,6 +4905,17 @@ const mockAskMain: { slug: string; session: string; provider: string | null }[] 
 
 const healthyConfigs: Record<string, MockCfg> = {};
 (window as any).__mock = {
+  /** A backend provider switch, followed by its workspace push. `canonicalShell`
+   * leaves the old tmux session up as a bare shell while Codex runs. */
+  async switchAgent(repo: string, slug: string, provider: Harness, canonicalShell = false) {
+    const result = await mockInvoke("open_place", { repo, slug, provider });
+    if (!(result as { ok: boolean }).ok) return result;
+    if (canonicalShell) editPlace(repo, slug, (p) => {
+      p.tmux_session = { name: sessionName(findProject(repo)?.snapshot?.prefix ?? "repo", slug), up: true };
+    });
+    emitEvent("places:changed", {});
+    return result;
+  },
   /** The remote-access and device rows the page has asked for so far. */
   accessCalls: () => [...accessCalls],
   /** A device scans the open pairing window and proves its secret: the

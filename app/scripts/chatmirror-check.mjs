@@ -189,6 +189,16 @@ for (const fn of ["answerWords", "sendWords", "stopWords"]) {
   if (!patterns.length && !heads.length && fn === "answerWords") fail("answerWords keys on no pattern — the pattern this check reads no longer matches");
 }
 
+// A stale provider must not survive into the red composer line once the host
+// says no agent is there. The host cannot say which provider ran last.
+const noAgentLine = "No agent is running in this place.";
+for (const name of ["Claude", "Codex"]) {
+  const send = C.sendWords(C.AGENT_ERR.noLanePrefix + "old-session", name).line;
+  const stop = C.stopWords(C.AGENT_ERR.noAgent, name).line;
+  if (send !== noAgentLine || stop !== noAgentLine) fail(`no-agent words for ${name}: ${JSON.stringify({ send, stop })}`);
+  else ok(`no-agent words do not guess ${name}`);
+}
+
 // ── 2. the line rule ─────────────────────────────────────────────────────────
 
 const LINE_MAX = (() => {

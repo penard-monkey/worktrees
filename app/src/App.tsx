@@ -1,5 +1,5 @@
 import { adaptClaude, adaptCodex, adaptKimi, checking, compactUsage, detailMessage, expired, stateLabel, stripLimits, summaryLimit, viewUsage, type ClaudeUsage, type CodexUsage, type KimiUsage, type PlanUsage } from "./planUsage";
-import { HARNESSES, HARNESS_LABEL, NEEDS_MODEL, type Harness } from "./harness";
+import { HARNESSES, HARNESS_LABEL, NEEDS_MODEL, liveHarness, type Harness } from "./harness";
 import { ModelPicker, defaultModel, modelOk, useAgentModels, type PiStatus } from "./ModelPicker";
 import { Fragment, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ComponentType } from "react";
 import { Channel, engineState, grantHas, invoke, listen } from "./ipc";
@@ -1138,7 +1138,7 @@ const draftLead = (d: Draft) =>
  *  (Claude) is named, matching the snapshot, which keeps `tmux_session` on
  *  Claude's in that case. */
 function liveAgent(p: Place): Harness | null {
-  return liveAgents(p.agent_sessions)[0] ?? null;
+  return liveHarness(p.agent_sessions);
 }
 
 /** Every harness live in `a`, in registry order. */
@@ -5584,7 +5584,7 @@ function App() {
       .catch((e) => setErr(String(e)));
   }, [sel?.repo, sel?.slug, liveHere.join(","), settings.default_provider, refresh]);
   // With nothing live, `agentSession` is null and this names nobody.
-  const planProvider: Harness = selectedAgents?.[activeProvider].up ? activeProvider : liveHere[0] ?? activeProvider;
+  const planProvider: Harness = liveHarness(selectedAgents) ?? activeProvider;
   // The Plan tab's "Ask (main)": the orchestrator of the selected place's OWN
   // project, and the agent live in it. A snapshot from before
   // `agent_sessions` existed is the default harness on `tmux_session`, as

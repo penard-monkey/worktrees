@@ -25,7 +25,7 @@ import { previewOf, type ChoiceWay } from "./chat";
 import { announcement, gather, hear, promptKeyOf, type Bundle, type ChatView, type Heard } from "./chat";
 // Attachments (docs/proposals/chat-attachments.md): their own line, for the same reason.
 import { addAttachments, attachProblem, removeAttachment, sizeWords, splitAttached, type Attachment } from "./chat";
-import { HARNESS_LABEL, type Harness } from "./harness";
+import { HARNESS_LABEL, isHarness, type Harness } from "./harness";
 import * as Icons from "./icons";
 import { Markdown } from "./markdown";
 import { useDocPathLinks } from "./useDocPathLinks";
@@ -80,7 +80,11 @@ export function ChatPane(props: ChatPaneProps) {
   const { repo, slug, path, provider, session, activity } = props;
   const target: Target = { repo, slug, path, session };
   const v = useChat(path);
-  const agent = HARNESS_LABEL[provider];
+  // The transcript's reader names the provider that wrote these turns. A
+  // snapshot can race a provider switch; its label must not rename a Codex
+  // rollout as Claude's while the new snapshot is on its way.
+  const reported = isHarness(v.turns.data?.harness) ? v.turns.data.harness : null;
+  const agent = HARNESS_LABEL[reported ?? provider];
   const scrollRef = useRef<HTMLDivElement>(null);
   const prompt = v.prompt.data?.waiting ? v.prompt.data : null;
   // Busy by the push, unless a stop was seen to land since it last moved.
