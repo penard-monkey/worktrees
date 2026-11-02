@@ -2293,7 +2293,7 @@ mod tests {
         let marked: &'static str = Box::leak(rows.join("\n").into_boxed_str());
         assert!(prompt::interrupted_shown("claude", marked) && prompt::turn_shown("claude", marked) == Some(prompt::TurnShown::Running));
         let fake = Arc::new(Fake::with(vec![("claude", "repo-lane", pane(vec![marked], marked))]));
-        let (ctx, repo) = setup("stop-stale", fake.clone());
+        let (ctx, repo) = setup("stop-earlier", fake.clone());
         let v = agent_interrupt(&ctx, repo, "lane".into()).unwrap();
         assert_eq!(v["unconfirmed"], json!(true), "{v}");
         assert_eq!(fake.keys(), vec![Key::Escape]);
