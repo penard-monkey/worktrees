@@ -521,7 +521,7 @@ pub fn agent_answer(ctx: &Ctx, repo: String, slug: String, choice: u32, fingerpr
     if let (Some(why), false) = (c.host_only, ctx.is_console()) {
         return Err(host_only(c.n, why));
     }
-    if c.checked.is_some() {
+    if prompt::multi_box(c) {
         return Err(ERR_MULTI.into());
     }
     if prompt::notes_open(&m) {
@@ -665,16 +665,18 @@ pub fn agent_answer_many(ctx: &Ctx, repo: String, slug: String, choices: Vec<u32
         cur = prove(io, &lane, same, |now| now.choices.iter().any(|x| x.n == c.n && x.checked == Some(tick)))?
             .ok_or_else(|| format!("choice {} did not tick; nothing was sent — answer it at the host", c.n))?;
     }
-    let keys = prompt::steps_to_submit(&cur).ok_or("this prompt shows no Submit row to move to — answer it at the host")?;
+    let keys = prompt::steps_to_submit(&cur).ok_or("this prompt shows no Next or Submit row to move to — answer it at the host")?;
     press_all(io, &lane, &keys)?;
     let ticks = |now: &Modal| now.choices.iter().filter(|x| x.checked == Some(true)).map(|x| x.n).collect::<std::collections::BTreeSet<_>>();
     match prove(io, &lane, same, |now| prompt::on_submit(now))? {
         Some(now) if ticks(&now) == want => {}
         Some(_) => return Err(ERR_CHANGED.into()),
-        None => return Err("could not move to Submit; nothing was sent — answer it at the host".into()),
+        None => return Err("could not move to Next or Submit; nothing was sent — answer it at the host".into()),
     }
     io.press(&lane, Key::Enter)?;
-    let confirmed = confirmed(io, &lane, |now| !prompt::same_form(&m, now));
+    let confirmed = confirmed(io, &lane, |now| {
+        if prompt::form_question(&m) { prompt::form_advanced(&m, now) } else { !prompt::same_form(&m, now) }
+    });
     let labels: Vec<&str> = m.choices.iter().filter(|c| want.contains(&c.n)).map(|c| c.label.as_str()).collect();
     Ok(json!({
         "answered": true,
@@ -1912,6 +1914,37 @@ mod tests {
         let (ctx, repo) = setup("notmany", fake.clone());
         let fp = prompt_of(&ctx, &repo)["fingerprint"].as_str().unwrap().to_string();
         assert_eq!(agent_answer_many(&ctx, repo, "lane".into(), vec![1], fp), Err(ERR_NOT_MULTI.to_string()));
+    }
+
+    #[test]
+    fn a_form_multi_select_ticks_then_advances_to_the_next_tab() {
+        let start = fx316!("form-multiselect/first.txt");
+        let ticked = fx316!("form-multiselect/toggled.txt");
+        let next = fx316!("form-multiselect/on-next.txt");
+        let screens = vec![
+            ticked.to_string(),
+            moved(ticked, "2. [ ] Olives"),
+            moved(ticked, "3. [ ] Mushrooms"),
+            moved(ticked, "4. [ ] Type something"),
+            next.to_string(),
+            fx316!("form-multiselect/second.txt").to_string(),
+        ];
+        let first_modal = prompt::claude(start).unwrap();
+        for screen in &screens[..5] {
+            let now = prompt::claude(screen).unwrap();
+            assert!(prompt::same_form(&first_modal, &now), "not the same form: {screen}");
+        }
+        let fake = Arc::new(Fake::with(vec![("claude", "repo-lane", script(start, screens))]));
+        let (ctx, repo) = setup("formmany", fake.clone());
+        let p = prompt_of(&ctx, &repo);
+        assert_eq!(p["multi"], json!(true));
+        let fp = p["fingerprint"].as_str().unwrap().to_string();
+        assert_eq!(agent_answer(&ctx, repo.clone(), "lane".into(), 1, fp.clone()), Err(ERR_MULTI.to_string()));
+        let result = agent_answer_many(&ctx, repo, "lane".into(), vec![1], fp);
+        assert!(result.is_ok(), "{result:?}; keys: {:?}", fake.keys());
+        let v = result.unwrap();
+        assert_eq!(fake.keys(), vec![Key::Enter, Key::Down, Key::Down, Key::Down, Key::Down, Key::Enter]);
+        assert_eq!(v["confirmed"], true);
     }
 
     /// The ticks moved under the answer (another hand on the keyboard): the
