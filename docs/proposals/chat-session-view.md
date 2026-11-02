@@ -184,7 +184,11 @@ answer goes depends on the choice:
 | A multi-select's boxes (`multi`, `checked`) | Checkboxes from `checked`. The free-text box is a checkbox and a field; typing ticks it. **Send 3 choices** | The free-text box first with `agent_answer_text` (which ticks it and sends nothing), then the prompt read again, then `agent_answer_many` against the new fingerprint, only if it still shows that box ticked |
 
 A multi-select's other choices ("Chat about this") are plain buttons below the
-boxes. Claude's review screen after a multi-select is an ordinary question,
+boxes. In a multi-question form, a multi-select's advance row reads `Next`;
+the card still shows boxes, a free-text field, and **Send N choices**. The
+host ticks and proves each box, moves to and proves `Next`, then confirms the
+form advanced on a fresh capture. In a lone multi-select that row reads
+`Submit`. Claude's review screen after a multi-select is an ordinary question,
 and gets an ordinary card. A two-question form is one card per screen, with
 its tab bar in the first row. Codex's "No, and tell Codex what to do
 differently" has no field: it is answered plainly, and the composer then takes
@@ -332,7 +336,7 @@ one of these wrappers remains a person message.
 | `app/src/ChatPane.css` | Plain CSS on `tokens.css` |
 | `app/src/App.tsx` | The switch in `.agent-label`, the terminal wrapped in a hidden, `inert` `.agent-term`, and the activity, done stamp and pane draft passed in |
 | `app/src/settings.ts`, `SettingsSheet.tsx` | `chat_view` (default on, migrated once on upgrade), Behavior → Chat view; each place's optional `agent_view` (`agentViewFor`, `withAgentView`) |
-| `app/src/mock/install.ts` | `?turns=answered` (a transcript whose prompts were answered, as `steps`; a mock answer lands in the transcript 1.5 s later), `?turns=queued` (a busy Claude absorbs the first send mid-turn; the next send is a normal turn), per-harness turns, the pi/kimi refusal, `?agentsend=mid\|nocomposer\|unconfirmed`, `?agentprompt=permission\|question\|multi\|plan\|tall\|unreadable\|resume\|preview\|preview-shown\|preview-note\|off` (`,waiting` for waiting places only; a Codex place gets Codex's approval; `resume` is Claude's resume picker, four conversations shown and three more in the terminal, with `agent_turns` failing as before a session exists until a pick, and for half a second after it; `preview` is Claude's question with a preview per option, every one known, `preview-shown` the same at 80×24 with only the terminal's one, cut, and `preview-note` one with a note typed in the terminal), `?agentanswer=unseen`, `?activity=<n>` |
+| `app/src/mock/install.ts` | `?turns=answered` (a transcript whose prompts were answered, as `steps`; a mock answer lands in the transcript 1.5 s later), `?turns=queued` (a busy Claude absorbs the first send mid-turn; the next send is a normal turn), per-harness turns, the pi/kimi refusal, `?agentsend=mid\|nocomposer\|unconfirmed`, `?agentprompt=permission\|question\|multi\|multi-form\|multi-form-typed\|plan\|tall\|unreadable\|resume\|preview\|preview-shown\|preview-note\|off` (`,waiting` for waiting places only; a Codex place gets Codex's approval; `multi-form` shows a current multi-select with `Next` and an empty field, then the next question and the review; `multi-form-typed` shows its field already holding text; `resume` is Claude's resume picker, four conversations shown and three more in the terminal, with `agent_turns` failing as before a session exists until a pick, and for half a second after it; `preview` is Claude's question with a preview per option, every one known, `preview-shown` the same at 80×24 with only the terminal's one, cut, and `preview-note` one with a note typed in the terminal), `?agentanswer=unseen`, `?activity=<n>` |
 
 `?turns=notices` shows all six injected-entry kinds, including long peer text,
 shell output, and a compact summary. They use neutral notes, cards, or chips,

@@ -1,0 +1,40 @@
+
+❯ Use AskUserQuestion once with multiSelect true: which toppings do I want on a pizza? Options Cheese, Olives,
+  Mushrooms, each with a one-line description. Nothing else.
+
+⏺ User answered Claude's questions:
+  ⎿  · Which toppings do you want on a pizza? → Cheese, Mushrooms
+
+⏺ You picked Cheese and Mushrooms for the pizza toppings.
+
+✻ Baked for 2s · done 11:52 PM
+
+❯ Use AskUserQuestion once with TWO questions: (1) header Colour: Red or Blue; (2) header Size: Small or Large; each
+  option with a one-line description, single select. Nothing else.
+
+⏺ User answered Claude's questions:
+  ⎿  · Which colour do you want? → Blue
+     · Which size do you want? → Large
+
+⏺ You chose Blue for colour and Large for size.
+
+✻ Churned for 2s · done 11:53 PM
+
+❯ Use AskUserQuestion once with multiSelect true: which toppings? Options Cheese, Olives, each with a one-line
+  description. Nothing else.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+←  ☒ Toppings  ☐ Size  ✔ Submit  →
+
+Which toppings?
+
+  1. [ ] Cheese
+         A classic layer of melted cheese.
+  2. [ ] Olives
+         Sliced black or green olives.
+❯ 3. [✔] pineapple
+     Next
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · ctrl+g to edit in Vim · Esc to cancel
+─────────────────────────────────────────────────────────────────────────────────────────────────────────── wtap-probe ─

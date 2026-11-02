@@ -396,7 +396,7 @@ pub fn claude(screen: &str) -> Option<Modal> {
         Some(at) => at,
         None => marked_run(&rows, top + 1, end, |_| false)?.into_iter().map(|c| (0, c)).collect(),
     };
-    let mut submit = None;
+    let mut advance = None;
     if kind == Kind::Question {
         // A multi-select draws a box on each of its options.
         for (_, c) in &mut at {
@@ -413,13 +413,13 @@ pub fn claude(screen: &str) -> Option<Modal> {
             if let Some((_, c)) = at.iter_mut().rev().find(|(i, _)| *i < inner) {
                 c.text = Some(Typing::Field);
             }
-            // Among boxes, `Submit` is a row of its own between the last box
-            // and that rule: no choice, but one the highlight walks over.
-            if let Some(j) = at.iter().rposition(|(_, c)| c.checked.is_some()) {
-                let row = (at[j].0 + 1..inner).find(|&i| unmarked(&rows[i]) == "Submit");
+            // A multi-select's Next or Submit sits between its text box and
+            // the rule. It is a highlight stop, never the box's description.
+            if let Some(j) = at.iter().rposition(|(_, c)| multi_box(c)) {
+                let row = (at[j].0 + 1..inner).find(|&i| matches!(unmarked(&rows[i]), "Next" | "Submit"));
                 if let Some(row) = row {
-                    at[j].1.more.retain(|m| unmarked(m) != "Submit");
-                    submit = Some((at[j].1.n, rows[row].trim_start().starts_with(MARKS)));
+                    at[j].1.more.retain(|m| !matches!(unmarked(m), "Next" | "Submit"));
+                    advance = Some((at[j].1.n, rows[row].trim_start().starts_with(MARKS)));
                 }
             }
         }
@@ -431,13 +431,18 @@ pub fn claude(screen: &str) -> Option<Modal> {
         }
     }
     let mut m = modal(provider::CLAUDE.id, kind, &rows, top + 1, last, end, at.into_iter().map(|(_, c)| c).collect());
-    if let Some((after, on)) = submit {
-        m.multi = true;
+    m.multi = kind == Kind::Question && m.choices.iter().any(multi_box);
+    if let Some((after, on)) = advance {
         let i = m.order.iter().position(|o| *o == Some(after)).map_or(m.order.len(), |i| i + 1);
         m.order.insert(i, None);
         m.on_submit = on;
     }
     Some(m)
+}
+
+/// One source for the reader's `multi` and the answer path's box refusal.
+pub fn multi_box(c: &Choice) -> bool {
+    c.checked.is_some()
 }
 
 /// Claude's plan approval (ExitPlanMode, fixtures `2.1.314/plan-approval*`):
@@ -1036,7 +1041,7 @@ pub fn steps(m: &Modal, n: u32) -> Option<Vec<Key>> {
     walk(m, Some(n))
 }
 
-/// The keys that move a multi-select's highlight to its `Submit` row.
+/// The keys that move a multi-select's highlight to its `Next` or `Submit` row.
 pub fn steps_to_submit(m: &Modal) -> Option<Vec<Key>> {
     walk(m, None).filter(|_| m.multi)
 }
@@ -1054,9 +1059,23 @@ fn walk(m: &Modal, to: Option<u32>) -> Option<Vec<Key>> {
     Some(vec![key; cur.abs_diff(target)])
 }
 
-/// Whether `m`'s highlight is on its `Submit` row.
+/// Whether `m`'s highlight is on its `Next` or `Submit` row.
 pub fn on_submit(m: &Modal) -> bool {
     m.on_submit
+}
+
+/// A multi-question form has at least two question tabs before its review tab.
+pub fn form_question(m: &Modal) -> bool {
+    m.lines.first().is_some_and(|bar| bar.starts_with('←') && bar.chars().filter(|c| matches!(c, '☐' | '☒')).count() > 1)
+}
+
+/// After Enter on Next, a fresh capture must show another screen of this form.
+/// The tab labels stay put as their checkmarks change; a tick or highlight on
+/// the original question alone is not proof of advancing.
+pub fn form_advanced(before: &Modal, after: &Modal) -> bool {
+    let bar = |m: &Modal| m.lines.first().map(|s| s.replace('☒', "☐"));
+    form_question(before) && after.kind == Kind::Question && bar(before) == bar(after)
+        && before.body != after.body && !same_form(before, after)
 }
 
 /// `a` and `b` are the same prompt, wherever its highlight is: the same kind,
@@ -2122,6 +2141,30 @@ mod tests {
         assert_eq!(steps_to_submit(&claude(claude314!("question.txt")).unwrap()), None);
         // And neither is the review that follows a multi-select.
         assert!(!claude(claude314!("question-multiselect-review.txt")).unwrap().multi);
+    }
+
+    /// Derived 2.1.316 form fixtures: a multi-select advances with Next.
+    #[test]
+    fn a_multi_select_inside_a_form_reads_boxes_and_next() {
+        let first = claude(include_str!("../tests/fixtures/claude-screen/2.1.316/form-multiselect/first.txt")).unwrap();
+        assert!(first.multi);
+        assert!(first.lines[0].starts_with("←  ☐ Toppings  ☐ Size"));
+        assert_eq!(first.choices.iter().map(|c| c.checked).collect::<Vec<_>>(), vec![Some(false), Some(false), Some(false), Some(false), None]);
+        assert_eq!(first.choices[3].text, Some(Typing::Field));
+        assert!(first.choices.iter().all(|c| !c.more.iter().any(|r| r == "Next")));
+        assert_eq!(steps_to_submit(&first), Some(vec![Key::Down; 4]));
+        let ticked = claude(include_str!("../tests/fixtures/claude-screen/2.1.316/form-multiselect/toggled.txt")).unwrap();
+        assert_eq!(ticked.choices[0].checked, Some(true));
+        assert!(same_form(&first, &ticked));
+        let on = claude(include_str!("../tests/fixtures/claude-screen/2.1.316/form-multiselect/on-next.txt")).unwrap();
+        assert!(on_submit(&on));
+        assert!(same_form(&first, &on), "Next stays in the same form");
+        let typed = claude(include_str!("../tests/fixtures/claude-screen/2.1.316/form-multiselect/text-typed.txt")).unwrap();
+        assert_eq!((typed.choices[2].label.as_str(), typed.choices[2].checked, typed.choices[2].text), ("pineapple", Some(true), Some(Typing::Field)));
+        let second = claude(include_str!("../tests/fixtures/claude-screen/2.1.316/form-multiselect/second.txt")).unwrap();
+        assert!(!second.multi && !same_form(&first, &second));
+        let review = claude(include_str!("../tests/fixtures/claude-screen/2.1.316/form-multiselect/review.txt")).unwrap();
+        assert!(!review.multi && review.choices[0].label == "Submit answers");
     }
 
     /// A plan approval is a sheet under a `▔` edge, its plan in a dashed box,

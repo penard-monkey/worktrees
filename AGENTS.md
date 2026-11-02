@@ -160,7 +160,13 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   compare-and-swap atomic; drop it and two clients answer one prompt twice.
   Free text (`agent_answer_text`) and a multi-select's boxes
   (`agent_answer_many`, where Enter only TICKS) are their own rows: an older
-  host ignores an unknown argument and would half answer.
+  host ignores an unknown argument and would half answer. In a multi-question
+  form a multi-select's advance row says `Next`, where a lone one says
+  `Submit`; neither is the free-text box's description. Detect `multi` from
+  the same `checked` boxes that `agent_answer` refuses to answer singly, then
+  prove the advance row and the next form screen before confirming the send.
+  The `2.1.316/form-multiselect/` fixtures are derived because the scratch
+  Claude launch was refused by the worktrees live-agent limit.
   **A question whose options carry a `preview` is two columns**
   (`prompt::claude_preview`, fixtures `2.1.316/preview/`): every row beside
   the box is CUT at the box's column, or the preview's text reads as the

@@ -751,7 +751,9 @@ const mockLaunched = new Set<string>(["work"]);
 // in every place until answered there. `?agentprompt=` picks the prompt:
 // `permission` (the default; a Codex place gets Codex's approval),
 // `question` (Claude's AskUserQuestion with "Type something."), `multi` (a
-// multi-select, then its review screen), `plan` and `tall` (taller than the
+// multi-select, then its review screen), `multi-form` (the same inside a form,
+// advancing with Next), `multi-form-typed` (its field already holds text),
+// `plan` and `tall` (taller than the
 // pane, so `lines` are clipped and `detail` carries the whole plan or edit),
 // `unreadable` (`readable: false` with the screen's bottom rows), `resume`
 // (Claude's resume picker, `claude -r`: four conversations on screen and
@@ -1073,6 +1075,33 @@ function mockScreen(variant: string, harness: string, place: string): MockScreen
       choices: [{ n: 1, label: "Submit answers", highlighted: true }, { n: 2, label: "Cancel", highlighted: false }],
     }),
   };
+  if (variant === "multi-form" || variant === "multi-form-typed") {
+    const base = mockScreen("multi", harness, place);
+    if ("unreadable" in base) throw new Error("multi mock must be readable");
+    const typed = variant === "multi-form-typed";
+    const lines = base.lines.map((line) => line
+      .replace("☐ Toppings  ✔ Submit", "☐ Toppings  ☐ Size  ✔ Submit")
+      .replace("4. [ ] Type something", typed ? "4. [✔] 1, 2, and 3." : "4. [ ] Type something")
+      .replace(/^     Submit$/, "     Next"));
+    const choices = base.choices.map((c) => c.n === 4 && typed
+      ? { ...c, label: "1, 2, and 3.", checked: true, host_only: undefined }
+      : { ...c });
+    const review = (labels: string[]): MockScreen => ({
+      kind: "question",
+      lines: ["←  ☒ Toppings  ☐ Size  ✔ Submit  →", "", "Which size do you want?", "", "❯ 1. Small", "  2. Large", "  3. Type something.", "────────────────────────────────────────", "  4. Chat about this", "", "Enter to select · Tab/Arrow keys to navigate · Esc to cancel"],
+      choices: [
+        { n: 1, label: "Small", highlighted: true }, { n: 2, label: "Large", highlighted: false },
+        { n: 3, label: "Type something.", highlighted: false, host_only: "text", text: "field" },
+        { n: 4, label: "Chat about this", highlighted: false },
+      ],
+      review: (size) => ({
+        kind: "question",
+        lines: ["←  ☒ Toppings  ☒ Size  ✔ Submit  →", "", "Review your answers", "", " ● Which toppings do you want on a pizza?", `   → ${labels.join(", ")}`, " ● Which size do you want?", `   → ${size.join(", ")}`, "", "Ready to submit your answers?", "", "❯ 1. Submit answers", "  2. Cancel"],
+        choices: [{ n: 1, label: "Submit answers", highlighted: true }, { n: 2, label: "Cancel", highlighted: false }],
+      }),
+    });
+    return { ...base, lines, choices, review };
+  }
   if (variant === "plan") {
     const plan = "# Plan: add greet.sh that prints hello\n\n## Context\nThe user wants a small shell script, `greet.sh`, at the repo root that prints \"hello\". The task is trivial, so no exploration or design agents are needed.\n\n## Steps\n" +
       mockBig(14, (i) => `${i}. ${["Confirm the repo root.", "Check that no `greet.sh` exists there yet.", "Decide the file lives at the repo root.", "Pick `#!/usr/bin/env bash` as the shebang.", "Start the file with that shebang line.", "Add a one-line comment saying what the script does.", "Add `set -euo pipefail` for safe defaults.", "Add the line `echo \"hello\"`.", "End the file with a trailing newline.", "Keep the script free of arguments and options.", "Keep the script free of external dependencies.", "Write the file with the Write tool.", "Make it executable with `chmod +x greet.sh`.", "Run `./greet.sh` and confirm it prints hello."][i - 1]}`) +
@@ -4030,7 +4059,7 @@ Phase 3: Frontend pane and mock harness
       if (sc.notes?.open) throw "someone has this question's notes field open in the terminal: answer it at the host";
       mockRecordAnswer(args.repo, args.slug, sc, sc.notes?.text ? { label: c.label, note: sc.notes.text } : c);
       if (sc.picker) st.resumedAt = Date.now();
-      st.screen = null;
+      st.screen = sc.review ? sc.review([c.label]) : null;
       st.gen++;
       return { answered: true, confirmed: true, harness: mockHarnessAt(mockPlacePath(args.repo, args.slug)), session: mockAgentSession(args.slug), choice: c.n, label: c.label };
     }
