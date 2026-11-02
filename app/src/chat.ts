@@ -42,6 +42,7 @@ export type Turn = {
  *  and answered on the way, each at its own time. */
 export type Step =
   | { kind: "text"; at: number | null; text: string }
+  | { kind: "user"; at: number | null; text: string }
   | { kind: "tool"; at: number | null; name: string; summary?: string; failed?: boolean }
   | { kind: "question"; at: number | null; answered_at?: number; questions: AskedQuestion[]; answer?: { how: "picked" | "chat" | "declined"; answers?: QuestionAnswer[] } }
   | { kind: "permission"; at: number | null; answered_at?: number; tool: string; summary?: string; allowed: boolean; scope?: string; note?: string }
@@ -325,23 +326,23 @@ export type ToolCall = { name: string; summary?: string; failed?: boolean };
 export type Item =
   | { k: "sep"; key: string; at: number }
   | { k: "earlier"; key: string }
-  | { k: "user"; key: string; text: string; at: number | null }
+  | { k: "user"; key: string; text: string; at: number | null; midTurn?: boolean }
   | { k: "reply"; key: string; text: string; tools: string[]; calls: ToolCall[]; truncated: boolean; at: number | null; label: boolean }
   | { k: "asked"; key: string; step: AskedStep; label: boolean }
   | { k: "answer"; key: string; step: AskedStep }
   | { k: "answered"; key: string; a: Answered }
-  | { k: "pending"; key: string; p: Pending };
+  | { k: "pending"; key: string; p: Pending; caughtUp: boolean };
 
 const GAP_S = 5 * 60;
 const sameDay = (a: number, b: number) => new Date(a * 1000).toDateString() === new Date(b * 1000).toDateString();
 
 /** Turns oldest first, with a time separator at a gap of more than five
  *  minutes or a new day, this window's answers where they fall in time, and
- *  the messages the transcript has not shown yet at the end. A turn with
+ *  the messages the transcript has not shown yet at their send time. A turn with
  *  `steps` is drawn in their order: each reply block at its own time, the
  *  tools after the block they followed, and every question, permission and
  *  plan a person answered as what was asked and then the answer. */
-export function itemsOf(turns: Turn[], answered: Answered[], pending: Pending[]): Item[] {
+export function itemsOf(turns: Turn[], answered: Answered[], pending: Pending[], busy = false): Item[] {
   const out: Item[] = [];
   let prevAt: number | null = null;
   let lastWasAgent = false;
@@ -389,6 +390,13 @@ export function itemsOf(turns: Turn[], answered: Answered[], pending: Pending[])
         }
         return;
       }
+      if (st.kind === "user") {
+        reply = null;
+        if (st.at !== null) { flushAnswered(st.at); sep(st.at, `s${key}`); }
+        out.push({ k: "user", key: `u${key}`, text: st.text, at: st.at, midTurn: true });
+        lastWasAgent = false;
+        return;
+      }
       reply = null;
       // Not answered yet: the live card is where it is shown.
       if (st.answered_at === undefined) return;
@@ -403,7 +411,28 @@ export function itemsOf(turns: Turn[], answered: Answered[], pending: Pending[])
     }
   });
   flushAnswered(null);
-  for (const p of pending) out.push({ k: "pending", key: `p${p.id}`, p });
+  // A pending fallback is still a message at its send time. Insert it before
+  // the next timed item, including that item's day separator, so a transcript
+  // that never records it cannot push it below hours of later conversation.
+  const itemAt = (it: Item): number | null => {
+    switch (it.k) {
+      case "sep": case "user": case "reply": return it.at;
+      case "asked": return it.step.at;
+      case "answer": return it.step.answered_at ?? it.step.at;
+      case "answered": return it.a.at / 1000;
+      case "pending": return it.p.sentAt / 1000;
+      case "earlier": return null;
+    }
+  };
+  for (const p of [...pending].sort((a, b) => a.sentAt - b.sentAt)) {
+    // A later turn is known to have ended once another turn starts, or once
+    // the agent is idle. A partial reply on a busy turn proves neither.
+    const caughtUp = turns.some((t, i) => t.at !== null && t.at >= Math.floor(p.sentAt / 1000)
+      && (i < turns.length - 1 || !busy));
+    const at = p.sentAt / 1000;
+    const next = out.findIndex((it) => { const time = itemAt(it); return time !== null && time > at; });
+    out.splice(next < 0 ? out.length : next, 0, { k: "pending", key: `p${p.id}`, p, caughtUp });
+  }
   return out;
 }
 
@@ -484,17 +513,21 @@ export function underRoot(text: string, root: string): string {
 const SKEW_S = 120;
 
 /** Drop the pending messages the transcript now holds: newest first, each
- *  taking the newest unmatched user turn with its text written after it was
- *  sent, so two identical messages resolve to two turns. */
+ *  taking the newest unmatched normal user turn or absorbed mid-turn message
+ *  with its text written after the send began. One record settles one copy. */
 export function settlePending(pending: Pending[], turns: Turn[]): Pending[] {
+  const messages = turns.flatMap((t) => [
+    ...(t.user === null ? [] : [{ text: t.user, at: t.at }]),
+    ...(t.steps ?? []).flatMap((s) => s.kind === "user" ? [{ text: s.text, at: s.at }] : []),
+  ]);
   const taken = new Set<number>();
   const keep: Pending[] = [];
   for (const p of [...pending].sort((a, b) => b.sentAt - a.sentAt)) {
     const after = Math.floor(p.sentAt / 1000) - SKEW_S;
     let hit = -1;
-    for (let i = turns.length - 1; i >= 0; i--) {
-      const t = turns[i];
-      if (!taken.has(i) && t.user === p.text && (t.at ?? 0) >= after) { hit = i; break; }
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (!taken.has(i) && m.text === p.text && (m.at ?? 0) >= after) { hit = i; break; }
     }
     if (hit >= 0) taken.add(hit);
     else keep.push(p);
@@ -1157,20 +1190,29 @@ export async function sendDraft(t: Target, agent: string): Promise<void> {
   const text = attachLine(draft, paths);
   const sent = new Set(viewOf(t.path).attachments.map((a) => a.id));
   try {
+    // Claude stamps the transcript before agent_send's confirmation returns.
+    const sentAt = Date.now();
     const r = await invoke<AgentSent>("agent_send", { repo: t.repo, slug: t.slug, session: t.session, text });
     const cur = viewOf(t.path);
+    let sentId: number | null = null;
     if (!r.delivered) {
       put(t.path, { sending: false, sendWords: { line: UNCONFIRMED, terminal: true } });
     } else {
+      sentId = nextPending++;
       put(t.path, {
         sending: false, followUp: null,
         // Only if nothing new was typed meanwhile.
         draft: cur.draft === draft ? "" : cur.draft,
         attachments: cur.attachments.filter((a) => !sent.has(a.id)),
-        pending: [...cur.pending, { id: nextPending++, text, sentAt: Date.now(), queued: r.queued }],
+        pending: [...cur.pending, { id: sentId, text, sentAt, queued: r.queued }],
       });
     }
-    void loadTurns(t);
+    // This call can join a read started before the send. If that response
+    // still leaves this message pending, start one fresh read after the
+    // joined flight ends; an idle place will not get a busy poll to do it.
+    void loadTurns(t).then(() => {
+      if (sentId !== null && viewOf(t.path).pending.some((p) => p.id === sentId)) return loadTurns(t);
+    });
   } catch (e) {
     const w = sendWords(String(e), agent);
     put(t.path, { sending: false, sendWords: w });
