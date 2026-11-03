@@ -33,6 +33,10 @@ import { clampNav, clampRem, clampTerm, clampZoom, DEFAULTS, LAYOUT_TILES, rails
 import { clampSteps, doneBounds, DONE_FIRST_SECS, DONE_HORIZONS, DONE_STEPS_MAX, DONE_STEPS_MIN, fmtSecs, snapHorizon } from "./afterglow";
 import { humanSize } from "./filekind";
 import { HARNESSES, HARNESS_LABEL } from "./harness";
+import {
+  forceConfirm, forceLabel, inactiveConfirm, inactiveLabel, outsideLine, restartPlan, resultLine, showForce, showInactive,
+  summaryLine, tallyLine, type HarnessRestarted, type HarnessSessions,
+} from "./harnessrestart";
 
 type CmdResult = { ok: boolean; code: number; output: string; slug?: string | null; warnings?: string[] };
 type AiConfig = { ai_cmd: string; ai_resume_arg: string; path: string; exists: boolean };
@@ -102,6 +106,104 @@ function HarnessSteps({ tool, manual, open }: { tool: string; manual: HarnessMan
         ))}
       </ol>
     </details>
+  );
+}
+
+/** How long a restart button stays armed: short, so an arm forgotten does not
+ *  restart anything on a stray click (AgentSetup's rule). */
+const RESTART_ARM_MS = 4000;
+
+/** Under a tool's Agent CLIs row: the sessions in worktrees places that run an
+ *  older build than the one installed, and the two restarts the owner asked
+ *  for (2026-11-03) — the inactive ones, or all of them, each a two-click
+ *  confirm (docs/proposals/harness-restart.md). Shown only while some are
+ *  older. Re-read when the installed version moves (after an Update) and
+ *  after a restart; `harness_sessions` is live on the host, not cached. */
+function HarnessRestartPanel({ tool, label, installed }: { tool: "claude" | "codex"; label: string; installed: string | null }) {
+  const [list, setList] = useState<HarnessSessions | null>(null);
+  const [armed, setArmed] = useState<"inactive" | "force" | null>(null);
+  const [running, setRunning] = useState<"inactive" | "force" | null>(null);
+  const [done, setDone] = useState<HarnessRestarted | null>(null);
+  const [err, setErr] = useState("");
+  const load = useCallback(async () => {
+    try {
+      setList(await invoke<HarnessSessions>("harness_sessions", { tool }));
+      setErr("");
+    } catch (e) {
+      setList(null);
+      setErr(String(e));
+    }
+  }, [tool]);
+  // A remote window paired without admin cannot restart: it says why
+  // instead of offering buttons the host would refuse.
+  const denied = notGranted("restart_harness_sessions");
+  useEffect(() => { void load(); }, [load, installed]);
+  useEffect(() => {
+    if (!armed) return;
+    const t = setTimeout(() => setArmed(null), RESTART_ARM_MS);
+    return () => clearTimeout(t);
+  }, [armed]);
+  const plan = restartPlan(list);
+  const go = async (which: "inactive" | "force") => {
+    if (running) return;
+    if (armed !== which) { setArmed(which); return; }
+    setArmed(null);
+    setRunning(which);
+    setDone(null);
+    setErr("");
+    try {
+      setDone(await invoke<HarnessRestarted>("restart_harness_sessions", { tool, force: which === "force" }));
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setRunning(null);
+      await load();
+    }
+  };
+  const summary = summaryLine(label, list);
+  const outside = outsideLine(label, list);
+  if (!summary && !outside && !done && !err) return null;
+  return (
+    <div className="harness-restart" data-testid={`harness-restart-${tool}`}>
+      {summary && <div className="harness-restart-summary">{summary}</div>}
+      {denied && (showInactive(plan) || showForce(plan)) && <div className="harness-update-meta">{denied}</div>}
+      {!denied && (showInactive(plan) || showForce(plan)) && (
+        <div className="harness-restart-actions">
+          {showInactive(plan) && (
+            <button className={`ctrl sm${armed === "inactive" ? " armed" : ""}`} data-testid={`restart-inactive-${tool}`}
+              disabled={!!running} onClick={() => void go("inactive")}>
+              {running === "inactive" ? "Restarting…" : armed === "inactive" ? "Confirm restart" : inactiveLabel(plan)}
+            </button>
+          )}
+          {showForce(plan) && (
+            <button className={`ctrl sm restart-force${armed === "force" ? " armed" : ""}`} data-testid={`restart-force-${tool}`}
+              disabled={!!running} onClick={() => void go("force")}>
+              {running === "force" ? "Restarting…" : armed === "force" ? "Confirm force restart" : forceLabel(plan)}
+            </button>
+          )}
+        </div>
+      )}
+      {armed && (
+        <div className={`harness-restart-confirm${armed === "force" ? " force" : ""}`} data-testid={`restart-confirm-${tool}`}>
+          {armed === "force" ? forceConfirm(label, plan) : inactiveConfirm(label, plan)} Click again to confirm.
+        </div>
+      )}
+      {plan.unresumable > 0 && (
+        <div className="harness-update-meta">
+          {plan.unresumable === 1 ? "1 of them" : `${plan.unresumable} of them`} can't be resumed exactly, so Worktrees leaves {plan.unresumable === 1 ? "it" : "them"} running.
+        </div>
+      )}
+      {outside && <div className="harness-update-meta" data-testid={`restart-outside-${tool}`}>{outside}</div>}
+      {done && (
+        <div className="harness-restart-results" data-testid={`restart-results-${tool}`}>
+          <div className="harness-restart-tally">{tallyLine(done)}</div>
+          {done.results.map((r) => (
+            <div key={`${r.project}|${r.session}`} className={`harness-restart-result ${r.outcome}`}>{resultLine(r)}</div>
+          ))}
+        </div>
+      )}
+      {err && <div className="harness-update-meta" data-testid={`restart-error-${tool}`}>✗ {err}</div>}
+    </div>
   );
 }
 
@@ -1411,7 +1513,7 @@ export function SettingsSheet({
 
           <section className="setting" data-testid="harness-updates">
             <label>Agent CLIs{update?.harnesses?.some((h) => h.update_available) ? <span className="upd-tag">update available</span> : null}</label>
-            <div className="hint">Check for updates includes these tools. Restart running agent sessions after an update; npm may replace files they still read.</div>
+            <div className="hint">Check for updates includes these tools. A running agent keeps the version it started with: after an update, restart the Claude and Codex sessions listed under each tool, or restart the others yourself.</div>
             <div className="harness-updates">
               {(update?.harnesses ?? [
                 { tool: "claude" }, { tool: "codex" }, { tool: "kimi" }, { tool: "pi" },
@@ -1444,6 +1546,9 @@ export function SettingsSheet({
                     <HarnessSteps tool={h.tool} manual={h.manual} open={h.update_available} />
                   )}
                   {log?.output && <pre className="update-log" data-testid={`update-output-${h.tool}`}>{log.output}</pre>}
+                  {known && (h.tool === "claude" || h.tool === "codex") && (
+                    <HarnessRestartPanel tool={h.tool} label={name} installed={h.installed_version ?? null} />
+                  )}
                 </div>;
               })}
             </div>
