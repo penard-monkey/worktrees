@@ -196,6 +196,15 @@ impl Project {
         strays_from(&self.worktree_list(), &self.main_root, &self.wt_root)
     }
 
+    /// Every place as `(slug, path)`: `(main)` first, then each directory of
+    /// `.worktrees/` — `place_index`'s places without its `git worktree list`,
+    /// for a caller that only needs to know where agents can run.
+    pub fn place_dirs(&self) -> Vec<(String, String)> {
+        std::iter::once(("(main)".to_string(), self.main_root.clone()))
+            .chain(self.worktree_dirs().into_iter().map(|d| (basename(&d), d)))
+            .collect()
+    }
+
     /// Sorted (glob-order) worktree subdirs of `.worktrees/`.
     fn worktree_dirs(&self) -> Vec<String> {
         let mut dirs: Vec<String> = match std::fs::read_dir(&self.wt_root) {

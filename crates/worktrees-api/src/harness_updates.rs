@@ -277,6 +277,12 @@ fn find_bin_in(name: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
 fn find_bin(name: &str) -> Option<PathBuf> {
     find_bin_in(name, &std::env::var_os("PATH")?)
 }
+/// The executable worktrees would launch for `name` (`claude`, `codex`, …):
+/// the same lookup the update rows report on.
+pub(crate) fn tool_bin(name: &str) -> Option<PathBuf> {
+    find_tool_bin(Tool::parse(name)?)
+}
+
 fn find_tool_bin(tool: Tool) -> Option<PathBuf> {
     match tool {
         Tool::Kimi => worktrees_core::kimi::kimi_bin(),
@@ -406,7 +412,7 @@ fn origin(tool: Tool, path: &Path, real: &Path, p: &Probe) -> Origin {
 
 /// First dotted numeric version in a CLI's version line. Never display raw
 /// output from a tool here: a broken executable might print credentials.
-fn version(text: &str) -> Option<String> {
+pub(crate) fn version(text: &str) -> Option<String> {
     for token in text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '+')) {
         let v = token.strip_prefix('v').unwrap_or(token);
         let core = v.split(['-', '+']).next().unwrap_or(v);
@@ -424,7 +430,7 @@ fn numeric(v: &str) -> Option<Vec<u64>> {
     (parts.len() >= 2 && parts.len() <= 4).then_some(parts)
 }
 
-fn newer(latest: &str, installed: &str) -> bool {
+pub(crate) fn newer(latest: &str, installed: &str) -> bool {
     match (numeric(latest), numeric(installed)) {
         (Some(mut a), Some(mut b)) => {
             a.resize(4, 0); b.resize(4, 0);

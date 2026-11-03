@@ -87,6 +87,46 @@ fn linux_start(stat: &str, proc_stat: &str, ticks: i64) -> Option<i64> {
     Some(btime + start / ticks)
 }
 
+/// `pid`'s parent.
+#[cfg(target_os = "macos")]
+pub fn parent(pid: i32) -> Option<i32> {
+    if pid <= 0 {
+        return None;
+    }
+    // SAFETY: as `start_epoch`.
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let n = unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTBSDINFO, 0, (&mut info as *mut libc::proc_bsdinfo).cast(), size) };
+    (n == size).then_some(info.pbi_ppid as i32)
+}
+
+#[cfg(target_os = "linux")]
+pub fn parent(pid: i32) -> Option<i32> {
+    if pid <= 0 {
+        return None;
+    }
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat[stat.rfind(')')? + 1..].split_whitespace().nth(1)?.parse().ok()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn parent(_pid: i32) -> Option<i32> {
+    None
+}
+
+/// `pid` and every ancestor up to init, nearest first (bounded, so a cycle
+/// read mid-reparent cannot spin).
+pub fn lineage(pid: i32) -> Vec<i32> {
+    let mut out = vec![pid];
+    while let Some(p) = out.last().copied().and_then(parent).filter(|p| *p > 1 && !out.contains(p)) {
+        out.push(p);
+        if out.len() >= 64 {
+            break;
+        }
+    }
+    out
+}
+
 /// The paths of the regular files and directories `pid` holds open.
 #[cfg(target_os = "macos")]
 pub fn open_paths(pid: i32) -> Vec<PathBuf> {
@@ -189,6 +229,9 @@ mod tests {
         assert!(open.contains(&canon), "{canon:?} not in {open:?}");
         drop(held);
         let _ = std::fs::remove_dir_all(&dir);
+        let line = lineage(me);
+        assert_eq!(line[0], me);
+        assert_eq!(line.get(1).copied(), parent(me).filter(|p| *p > 1), "the parent comes next");
         assert_eq!(exe(-1), None);
         assert_eq!(start_epoch(0), None);
         assert!(open_paths(-5).is_empty());

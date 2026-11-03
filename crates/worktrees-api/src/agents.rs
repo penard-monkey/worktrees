@@ -220,6 +220,12 @@ impl Agents {
         Agents { io, locks: Mutex::new(HashMap::new()) }
     }
 
+    /// The lock of the place at `path` — the one answers and sends hold —
+    /// for another row that acts on the place's agent (`harness_restart`).
+    pub fn place_lock(&self, path: &str) -> Arc<Mutex<()>> {
+        self.lock(path)
+    }
+
     /// The lock of the place at `path`, made on first use.
     fn lock(&self, path: &str) -> Arc<Mutex<()>> {
         let mut m = self.locks.lock().unwrap_or_else(|e| e.into_inner());
