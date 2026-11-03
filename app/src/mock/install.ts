@@ -949,6 +949,25 @@ function mockToolTurns(now: number, place: string, harness: string): MockTurn[] 
     ]),
   ];
 }
+// `?turns=long` gives every Claude and Codex place 24 turns, more than one
+// `agent_turns` answers (`TURNS_MAX`, 20), with replies of every height: a
+// line, a few paragraphs, a list with a code fence. Each new turn then slides
+// the window, the oldest turn leaving the top as the newest arrives
+// (`chat-scroll-browser.mjs` measures the chat's scroll through that).
+function mockLongTurns(now: number): MockTurn[] {
+  const para = (i: number) =>
+    `Paragraph ${i}: the reader keeps the place it was reading while the transcript's window moves, and the newest reply is followed only from the bottom.`;
+  return Array.from({ length: 24 }, (_, i) => {
+    const at = now - (24 - i) * 120;
+    const shape = i % 3;
+    const reply = shape === 0
+      ? `Short reply ${i + 1}.`
+      : shape === 1
+        ? [1, 2, 3].map(para).join("\n\n")
+        : `Reply ${i + 1}, with a list and a fence:\n\n1. first\n2. second\n3. third\n\n\`\`\`ts\nconst turn = ${i + 1};\nconsole.log(turn);\n\`\`\``;
+    return { at, user: `Message ${i + 1}: do step ${i + 1}.`, reply, tools: shape === 2 ? ["Read", "Edit"] : [], truncated: false };
+  });
+}
 function mockTurnsAt(repo: string, slug: string) {
   const key = `${repo}|${slug}`;
   let t = mockTurns.get(key);
@@ -982,6 +1001,11 @@ function mockTurnsAt(repo: string, slug: string) {
   }
   if (harness === "claude" && new URLSearchParams(location.search).get("turns") === "answered") {
     t = mockAnsweredTurns(now, mockPlacePath(repo, slug));
+    mockTurns.set(key, t);
+    return t;
+  }
+  if ((harness === "claude" || harness === "codex") && new URLSearchParams(location.search).get("turns") === "long") {
+    t = mockLongTurns(now);
     mockTurns.set(key, t);
     return t;
   }
@@ -5106,6 +5130,21 @@ const healthyConfigs: Record<string, MockCfg> = {};
    *  Returns the texts, or null when that place has no transcript yet. */
   agentReply(path: string, ...texts: string[]) {
     return mockAgentReply(path, texts);
+  },
+  /** A prompt comes up in a place whose chat has been read, as one of
+   *  `?agentprompt=`'s variants, and the turn is stamped done so the chat
+   *  reads it (a prompt in mid-session, which `?agentprompt=` cannot do).
+   *  Returns false when that place has no transcript yet. */
+  agentPrompt(path: string, variant = "permission") {
+    const key = [...mockTurns.keys()].find((k) => { const [repo, slug] = k.split("|"); return mockPlacePath(repo, slug) === path; });
+    if (!key) return false;
+    const [repo, slug] = key.split("|");
+    const st = mockPromptState(repo, slug);
+    st.screen = mockScreen(variant, mockHarnessAt(path), path);
+    st.gen++;
+    mockReplyEpoch = Math.max(nowSec(), mockReplyEpoch + 1);
+    emitEvent("sessions:done", { path, epoch: mockReplyEpoch });
+    return true;
   },
   finishTask(path: string, minsAgo = 0) {
     const epoch = nowSec() - Math.round(minsAgo * 60);
