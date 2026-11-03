@@ -212,7 +212,6 @@ export function ChatPane(props: ChatPaneProps) {
 
   return (
     <div className="chat" data-testid="chat" onKeyDown={onKeyDown}>
-      <BeforeCommit take={take} />
       <div className="sr-only" aria-live="polite" aria-atomic="true" data-testid="chat-announce"><span key={said.n}>{said.text}</span></div>
       <div className="chat-scrollwrap">
       {/* Focusable by a click (not by Tab): a click in the transcript keeps
@@ -253,6 +252,8 @@ export function ChatPane(props: ChatPaneProps) {
       <Composer target={target} agent={agent} fieldRef={fieldRef} waiting={prompt ? (prompt.readable ? "above" : "terminal") : null} paneDraft={props.paneDraft} followUp={v.followUp}
         busy={busy} uiRem={props.uiRem} onTerminal={props.onTerminal} onRefresh={refresh} loading={v.turns.loading || v.prompt.loading} />
       {menu}
+      {/* Renders nothing: it reads the scroll before each commit (stickToBottom.ts). */}
+      <BeforeCommit take={take} />
     </div>
   );
 }
