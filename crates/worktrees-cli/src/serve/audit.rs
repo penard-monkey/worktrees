@@ -1982,6 +1982,15 @@ impl ConnAudit {
                     detail.insert("tool".into(), json!(ident(tool)));
                 }
             }
+            // The tool and whether busy agents were interrupted too; the end
+            // adds how many were restarted, skipped and failed. Never which
+            // sessions or projects, nor a conversation id.
+            "restart_harness_sessions" => {
+                if let Some(Value::String(tool)) = arg(args, "tool") {
+                    detail.insert("tool".into(), json!(ident(tool)));
+                }
+                detail.insert("force".into(), json!(arg(args, "force") == Some(&Value::Bool(true))));
+            }
             // The path, the size and a SHA-256 of the content: a write can be
             // matched against a file later without the log holding the file.
             "write_file" => {
@@ -2097,6 +2106,13 @@ impl ConnAudit {
         if let (true, Outcome::Ok(v)) = (p.cmd == "update_harness", &outcome) {
             if let Some(code) = v.get("code").and_then(Value::as_i64) {
                 detail.insert("exit_code".into(), json!(code));
+            }
+        }
+        if let (true, Outcome::Ok(v)) = (p.cmd == "restart_harness_sessions", &outcome) {
+            for k in ["restarted", "skipped", "failed"] {
+                if let Some(n) = v.get(k).and_then(Value::as_u64) {
+                    detail.insert(k.into(), json!(n));
+                }
             }
         }
         // A stop says whether it was SEEN to stop: an unconfirmed one is
@@ -2786,6 +2802,30 @@ mod tests {
         assert_eq!(record["detail"], json!({ "tool": "pi", "exit_code": 42 }));
         assert_eq!(record["outcome"], json!("err"));
         assert!(!std::fs::read_to_string(d.join(FILE)).unwrap().contains("SECRET-PAYLOAD"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_harness_restart_records_tool_force_and_counts_only() {
+        let d = dir("harness-restart");
+        let (a, _) = Audit::open(&d, None, Fleet::none());
+        let c = console(&a);
+        let p = begin(&c, "restart_harness_sessions", &args(json!({ "tool": "claude", "force": true }))).unwrap();
+        let answer = json!({
+            "tool": "claude", "force": true, "restarted": 2, "skipped": 1, "failed": 0, "mains": ["SECRET-PROJECT"],
+            "results": [{ "project": "/x/SECRET-PROJECT", "slug": "(main)", "session": "SECRET-SESSION", "outcome": "restarted" }],
+        });
+        c.end(p, Outcome::Ok(&answer));
+        let record = live(&d).last().unwrap().clone();
+        assert_eq!(record["cmd"], json!("restart_harness_sessions"));
+        assert_eq!(record["cap"], json!("admin"));
+        assert_eq!(record["detail"], json!({ "tool": "claude", "force": true, "restarted": 2, "skipped": 1, "failed": 0 }));
+        assert_eq!(record["outcome"], json!("ok"));
+        let text = std::fs::read_to_string(d.join(FILE)).unwrap();
+        assert!(!text.contains("SECRET"), "{text}");
+        let p = begin(&c, "restart_harness_sessions", &args(json!({ "tool": "codex" }))).unwrap();
+        c.end(p, Outcome::Err);
+        assert_eq!(live(&d).last().unwrap()["detail"], json!({ "tool": "codex", "force": false }));
         let _ = std::fs::remove_dir_all(&d);
     }
 

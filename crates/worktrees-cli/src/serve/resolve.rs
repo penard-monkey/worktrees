@@ -1605,6 +1605,20 @@ mod tests {
         assert!(try_row("update_harness", &admin, &ag, json!({ "tool": "pi" }), &w).is_ok());
     }
 
+    /// Restarting every agent on the host is admin, as the update is; seeing
+    /// which sessions are older is a read.
+    #[test]
+    fn restarting_agent_sessions_requires_admin_and_listing_them_does_not() {
+        let t = two("harness-restart");
+        let w = t.world();
+        let (reader, rg) = phone(&[Read, Write, Instruct], &[&t.a]);
+        let restart = json!({ "tool": "claude", "force": true });
+        assert_eq!(try_row("restart_harness_sessions", &reader, &rg, restart.clone(), &w).unwrap_err().wire(), json!(ERR_DENIED));
+        assert!(try_row("harness_sessions", &reader, &rg, json!({ "tool": "claude" }), &w).is_ok());
+        let (admin, ag) = phone(&[Read, Admin], &[&t.a]);
+        assert!(try_row("restart_harness_sessions", &admin, &ag, restart, &w).is_ok());
+    }
+
     /// §2.8's second-principal fixtures, through the resolver: a device grant
     /// wider than its principal's acts as the principal's, and a device of
     /// another principal is not an object, exactly as a missing one is not.
