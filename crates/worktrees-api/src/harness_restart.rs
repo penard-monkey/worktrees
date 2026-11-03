@@ -371,9 +371,10 @@ pub fn sessions(ctx: &Ctx, tool: String) -> Result<Sessions, String> {
 /// `restart_harness_sessions {tool, force}`, in the caller's projects only:
 /// `read_projects` answers with the caller's scope (serve's `Ctx::scoped`),
 /// so a device granted one project restarts that project's agents and no
-/// other's.
-pub fn restart(ctx: &Ctx, tool: String, force: bool) -> Result<Restarted, String> {
+/// other's. A `force` left out is `false`: the inactive sessions only.
+pub fn restart(ctx: &Ctx, tool: String, force: Option<bool>) -> Result<Restarted, String> {
     let tool = Tool::parse(&tool)?;
+    let force = force.unwrap_or(false);
     let agents = ctx.agents.clone();
     let out = restart_with(&Live, &crate::projects::read_projects(ctx), &|path| agents.place_lock(path), tool, force)?;
     crate::log::log(
