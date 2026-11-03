@@ -149,6 +149,17 @@ let dialogCount = 0;
 const mockReleaseQ = new URLSearchParams(location.search);
 let mockLatest: string | null = mockReleaseQ.has("offline") ? null : (mockReleaseQ.get("latest") ?? "v0.2.1");
 let mockCliVersion: string | null = mockReleaseQ.get("cli") === "none" ? null : (mockReleaseQ.get("cli") ?? "0.2.1"); // bumped by update_cli
+// `?harnessupdates=1` exposes an update, a current install and an unknown
+// method. `?harnessfail=pi&harnessslow=claude` exercises both update outcomes.
+const mockHarnessLatest: Record<string, string> = { claude: "2.1.320", codex: "0.166.0", kimi: "0.44.0", pi: "0.100.0" };
+const mockHarnessVersions: Record<string, string> = mockReleaseQ.has("harnessupdates")
+  ? { claude: "2.1.317", codex: "0.166.0", kimi: "0.43.1", pi: "0.99.1" }
+  : { ...mockHarnessLatest };
+const mockHarnessMethods: Record<string, string> = { claude: "native", codex: "npm", kimi: "unknown", pi: "npm" };
+const mockHarnessCommands: Record<string, string | null> = {
+  claude: "claude update", codex: "npm install -g @openai/codex@latest",
+  kimi: null, pi: "npm install -g --ignore-scripts @earendil-works/pi-coding-agent@latest",
+};
 // Claude MCP wiring, stateful so the install transition is drivable: the Home
 // card must actually GO AWAY when the button works, and Settings must flip to
 // the connected verdict, neither of which a constant can exercise.
@@ -3352,7 +3363,22 @@ Phase 3: Frontend pane and mock harness
         cli_version: mockCliVersion,
         cli_path: mockCliVersion ? "/Users/demo/.local/bin/worktrees" : null,
         latest: mockLatest,
+        harnesses: ["claude", "codex", "kimi", "pi"].map((tool) => ({
+          tool, installed_version: mockHarnessVersions[tool],
+          latest_version: mockReleaseQ.has("offline") ? null : mockHarnessLatest[tool],
+          install_method: mockHarnessMethods[tool],
+          update_available: !mockReleaseQ.has("offline") && mockHarnessVersions[tool] !== mockHarnessLatest[tool],
+          update_command: mockHarnessCommands[tool],
+        })),
       };
+    case "update_harness": {
+      const tool = String(args.tool);
+      if (!(tool in mockHarnessVersions) || !mockHarnessCommands[tool]) throw "update it the way you installed it";
+      if (mockReleaseQ.get("harnessslow") === tool) await sleep(2200);
+      if (mockReleaseQ.get("harnessfail") === tool) return { ok: false, code: 42, output: `${tool} update failed: network unavailable`, warnings: [] };
+      mockHarnessVersions[tool] = mockHarnessLatest[tool];
+      return { ok: true, code: 0, output: `${tool} now reports ${mockHarnessVersions[tool]}`, warnings: [] };
+    }
     case "list_releases":
       return [
         ...(mockLatest && mockLatest !== "v0.2.1" ? [{ tag: mockLatest, published: "2026-10-02" }] : []),

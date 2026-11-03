@@ -465,7 +465,7 @@ export const ADMIN_ROWS: readonly string[] = [
   "codex_mcp_uninstall", "codex_mcp_migration_plan", "pi_mcp_status", "pi_mcp_uninstall", "kimi_mcp_status",
   "sync_hub_list", "sync_hubs", "sync_hub_choose", "sync_hub_forget", "sync_apply", "diagnostics", "log_tail", "set_term_history_opts", "term_history_info",
   "term_history_clear", "ui_events_clear", "profiles_info", "delete_profile", "skill_inspect",
-  "skill_preview_git", "skill_remove", "devices_list", "device_narrow",
+  "skill_preview_git", "skill_remove", "devices_list", "device_narrow", "update_harness",
 ];
 
 /** serve's rows no device ever reaches (`HostConsole`, `Loopback`): pairing

@@ -115,3 +115,42 @@ export function bubbleTag(a: { latest: string | null | undefined; newer: boolean
   if (!a.latest || !a.newer) return null;
   return a.latest === a.dismissed ? null : a.latest;
 }
+
+/** The announcement the gear bubble shows. Its key names the exact set of
+ * available versions, so dismissing one release does not hide a later one. */
+export function updateNews(a: {
+  release: string | null | undefined;
+  worktreesNewer: boolean;
+  harnesses: { tool: string; latest_version: string | null; update_available: boolean }[];
+  dismissed?: string;
+}): { key: string; items: string[]; releaseTag: string | null } | null {
+  const releaseTag = a.worktreesNewer && a.release ? a.release : null;
+  const items: string[] = [];
+  if (releaseTag) items.push(`Worktrees ${releaseTag.replace(/^v/, "")}`);
+  for (const tool of ["claude", "codex", "kimi", "pi"]) {
+    const row = a.harnesses.find((h) => h.tool === tool);
+    if (row?.update_available && row.latest_version) {
+      items.push(`${tool[0].toUpperCase()}${tool.slice(1)} ${row.latest_version}`);
+    }
+  }
+  if (items.length === 0) return null;
+  const key = JSON.stringify(items);
+  // Keep a dismissed Worktrees-only release dismissed across this format change.
+  return key === a.dismissed || (items.length === 1 && releaseTag === a.dismissed)
+    ? null : { key, items, releaseTag };
+}
+
+/** The Updates pane's action for one row. An unreachable feed is unknown,
+ * and a recognised version with no fixed host command is a manual update. */
+export function harnessPaneAction(h: {
+  installed_version: string | null;
+  latest_version: string | null;
+  update_available: boolean;
+  update_command: string | null;
+  install_method?: string;
+}): "missing" | "manual" | "update" | "current" | "unknown" {
+  if (!h.installed_version) return "missing";
+  if (h.install_method === "unknown" || h.install_method === "legacy-python") return "manual";
+  if (h.update_available) return h.update_command ? "update" : "manual";
+  return h.latest_version ? "current" : "unknown";
+}

@@ -27,6 +27,7 @@ import { dismissCat, useRemote } from "./remoteStore";
 import type { PiMcpStatus } from "./PiMcpPanel";
 import KimiPanel, { type KimiMcpStatus } from "./KimiPanel";
 import type { CodexPermissions, LayoutTile, Settings, ThemeId, ThemeSetting, UpdateInfo } from "./settings";
+import { harnessPaneAction } from "./updatepoll";
 import { LAYOUT_KEYS } from "./arrange";
 import { clampNav, clampRem, clampTerm, clampZoom, DEFAULTS, LAYOUT_TILES, railsMerged, railsWidth, THEMES, ZOOM_STEPS } from "./settings";
 import { clampSteps, doneBounds, DONE_FIRST_SECS, DONE_HORIZONS, DONE_STEPS_MAX, DONE_STEPS_MIN, fmtSecs, snapHorizon } from "./afterglow";
@@ -685,6 +686,21 @@ export function SettingsSheet({
 
   const [updating, setUpdating] = useState(false);
   const [updateLog, setUpdateLog] = useState("");
+  const [harnessLogs, setHarnessLogs] = useState<Record<string, { running: boolean; output: string }>>({});
+  const doHarnessUpdate = async (tool: string, command: string) => {
+    if (harnessLogs[tool]?.running) return;
+    setHarnessLogs((prev) => ({ ...prev, [tool]: { running: true, output: `$ ${command}\n` } }));
+    try {
+      const r = await invoke<CmdResult>("update_harness", { tool });
+      setHarnessLogs((prev) => ({ ...prev, [tool]: {
+        running: false, output: `$ ${command}\n${r.output}\n${r.ok ? "✓ done" : `✗ failed (exit ${r.code})`}`,
+      } }));
+    } catch (e) {
+      setHarnessLogs((prev) => ({ ...prev, [tool]: { running: false, output: `$ ${command}\n✗ ${String(e)}` } }));
+    } finally {
+      await onCheckUpdate();
+    }
+  };
   const [checkState, setCheckState] = useState<"" | "checking" | "done">("");
   const doCheck = async () => {
     setCheckState("checking");
@@ -960,7 +976,7 @@ export function SettingsSheet({
               onClick={() => setCat(c.id)}
             >
               {c.label}
-              {c.id === "updates" && actionable ? <span className="upd-tag">upd</span> : null}
+              {c.id === "updates" && (actionable || appStale || !!update?.harnesses?.some((h) => h.update_available)) ? <span className="upd-tag">upd</span> : null}
               {/* `stale` only, still. An OFFER already has its mark — the dock
                   rail's sparkles button, which opens the list — so badging this
                   category too would say the same thing twice, and the panel it
@@ -1356,14 +1372,51 @@ export function SettingsSheet({
             </div>
             {checkState === "done" && (
               <div className="hint">
-                {update?.latest
-                  ? actionable || appStale
-                    ? `updates available (latest ${update.latest})`
-                    : `✓ up to date (latest ${update.latest})`
-                  : "✗ couldn't reach the release feed (offline?)"}
+                {update?.latest || update?.harnesses?.some((h) => h.latest_version)
+                  ? actionable || appStale || update?.harnesses?.some((h) => h.update_available)
+                    ? "updates available"
+                    : "✓ up to date"
+                  : "✗ couldn't reach the release feeds (offline?)"}
               </div>
             )}
             {updateLog && <pre className="update-log">{updateLog}</pre>}
+          </section>
+
+          <section className="setting" data-testid="harness-updates">
+            <label>Agent CLIs{update?.harnesses?.some((h) => h.update_available) ? <span className="upd-tag">update available</span> : null}</label>
+            <div className="hint">Check for updates includes these tools. Restart running agent sessions after an update; npm may replace files they still read.</div>
+            <div className="harness-updates">
+              {(update?.harnesses ?? [
+                { tool: "claude" }, { tool: "codex" }, { tool: "kimi" }, { tool: "pi" },
+              ]).map((h) => {
+                const known = "install_method" in h;
+                const method = known ? h.install_method : "";
+                const action = known ? harnessPaneAction(h) : "unknown";
+                const canUpdate = action === "update";
+                const name = h.tool === "pi" ? "Pi" : h.tool[0].toUpperCase() + h.tool.slice(1);
+                const log = harnessLogs[h.tool];
+                return <div className="harness-update" key={h.tool} data-testid={`harness-update-${h.tool}`}>
+                  <div className="harness-update-main">
+                    <b>{name}</b>
+                    <span className="harness-update-versions">
+                      {known && h.installed_version ? h.installed_version : "not installed"}
+                      {known && h.latest_version ? ` → ${h.latest_version}` : " · latest unknown"}
+                    </span>
+                    {canUpdate && <button className="ctrl sm" data-testid={`update-${h.tool}`}
+                      disabled={!!log?.running} onClick={() => void doHarnessUpdate(h.tool, "update_command" in h ? h.update_command! : "")}>
+                      {log?.running ? "Updating…" : "Update"}
+                    </button>}
+                  </div>
+                  {known && h.installed_version && <div className="harness-update-meta">
+                    {method === "unknown" || method === "legacy-python"
+                      ? "Update it the way you installed it."
+                      : method === "not-installed" ? "Not installed"
+                      : `Installed with ${method}${h.update_command ? ` · ${h.update_command}` : ""}`}
+                  </div>}
+                  {log?.output && <pre className="update-log" data-testid={`update-output-${h.tool}`}>{log.output}</pre>}
+                </div>;
+              })}
+            </div>
           </section>
 
           <section className="setting">

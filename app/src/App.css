@@ -1177,7 +1177,7 @@ html[data-guides="off"] .kids > .places::after { display: none; }
 }
 .upd-bubble-title {
   flex: 1; min-width: 0; font-size: var(--fs-label); font-weight: var(--fw-bold); color: var(--txt-hi);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 .upd-bubble-x {
   flex: none; display: grid; place-items: center; width: 22px; height: 22px; margin-right: -6px;
@@ -1206,6 +1206,12 @@ html[data-guides="off"] .kids > .places::after { display: none; }
 }
 .ver-rows { display: flex; flex-direction: column; gap: 2px; font-size: var(--fs-label); color: var(--txt); }
 .ver-row b { color: var(--txt-hi); }
+.harness-updates { display: flex; flex-direction: column; gap: var(--s2); margin-top: var(--s2); }
+.harness-update { padding: var(--s2); border: 1px solid var(--line); border-radius: var(--r-sm); }
+.harness-update-main { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); }
+.harness-update-main b { color: var(--txt-hi); min-width: 4rem; }
+.harness-update-versions { flex: 1; min-width: 8rem; color: var(--txt-dim); font-size: var(--fs-label); }
+.harness-update-meta { color: var(--txt-dim); font-size: var(--fs-micro); margin-top: var(--s1); overflow-wrap: anywhere; }
 .ver-path {
   margin-left: var(--s1); font-family: var(--term-family); font-size: var(--fs-micro);
   color: var(--txt-mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
