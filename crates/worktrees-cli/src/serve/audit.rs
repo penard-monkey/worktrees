@@ -1975,6 +1975,13 @@ impl ConnAudit {
             }
         }
         match name {
+            "update_harness" => {
+                // A fixed enum is the whole requested action. Never log the
+                // command's output, which belongs only in the reply.
+                if let Some(Value::String(tool)) = arg(args, "tool") {
+                    detail.insert("tool".into(), json!(ident(tool)));
+                }
+            }
             // The path, the size and a SHA-256 of the content: a write can be
             // matched against a file later without the log holding the file.
             "write_file" => {
@@ -2087,6 +2094,11 @@ impl ConnAudit {
             Outcome::Panic => "panic",
         };
         let mut detail = p.detail;
+        if let (true, Outcome::Ok(v)) = (p.cmd == "update_harness", &outcome) {
+            if let Some(code) = v.get("code").and_then(Value::as_i64) {
+                detail.insert("exit_code".into(), json!(code));
+            }
+        }
         // A stop says whether it was SEEN to stop: an unconfirmed one is
         // `ok` on the wire too (`agents::agent_interrupt`). One of the fields
         // only the end can fill, inside `RESERVE_SLACK`.
@@ -2758,6 +2770,22 @@ mod tests {
             vec![(Some("call"), Some("set_lifecycle"), Some("write"), Some("err")), (Some("call"), Some("update_cli"), None, Some("ok"))]
         );
         assert!(l[1]["ms"].as_u64().is_some());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_harness_update_records_tool_and_result_without_output() {
+        let d = dir("harness-update");
+        let (a, _) = Audit::open(&d, None, Fleet::none());
+        let c = console(&a);
+        let p = begin(&c, "update_harness", &args(json!({ "tool": "pi" }))).unwrap();
+        c.end(p, Outcome::Ok(&json!({ "ok": false, "code": 42, "output": "SECRET-PAYLOAD" })));
+        let record = live(&d).last().unwrap().clone();
+        assert_eq!(record["cmd"], json!("update_harness"));
+        assert_eq!(record["cap"], json!("admin"));
+        assert_eq!(record["detail"], json!({ "tool": "pi", "exit_code": 42 }));
+        assert_eq!(record["outcome"], json!("err"));
+        assert!(!std::fs::read_to_string(d.join(FILE)).unwrap().contains("SECRET-PAYLOAD"));
         let _ = std::fs::remove_dir_all(&d);
     }
 

@@ -1,4 +1,4 @@
-//! The 191 commands, each with its exposure, capability and objects, in ONE
+//! The 192 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -786,7 +786,7 @@ pub const GLOBAL_OK: &[&str] = &[
     "codex_mcp_status", "codex_mcp_uninstall", "codex_mcp_migration_plan", "pi_mcp_status", "pi_mcp_uninstall",
     "kimi_mcp_status", "delete_profile", "skill_remove", "skill_preview_git", "sync_hub_list", "sync_hubs",
     "sync_hub_choose", "sync_hub_forget", "diagnostics",
-    "log_tail", "term_history_info", "profiles_info", "devices_list",
+    "log_tail", "term_history_info", "profiles_info", "devices_list", "update_harness",
 ];
 
 /// The lane a request runs on, or `None` for the concurrent pool.
@@ -898,6 +898,7 @@ commands! { cx, a;
     kimi_usage: Engine [read, global] => status::kimi_usage(),
     claude_status: Engine [read, global] => status::claude_status(),
     check_update: Engine [read, global] => status::check_update(),
+    update_harness: Engine [admin, global] => worktrees_api::harness_updates::update(a.get("tool")?),
     update_cli: HostConsole => status::update_cli(a.get("tag")?),
     list_releases: Engine [read, global] => status::list_releases(),
     install_app_version: ClientLocal => refused(),
@@ -1244,7 +1245,7 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 191 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 192 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six, the slots pair and
     /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
@@ -1254,12 +1255,12 @@ mod tests {
     /// (`agent_answer_text`, `agent_answer_many`) and the one that stops a
     /// turn (`agent_interrupt`), `project_sessions`, the one that keeps
     /// a file for the agent (`agent_attach`), and sync's five hub and batch
-    /// rows; the check scripts hold the page's commands against them.
+    /// rows, plus `update_harness`; the check scripts hold the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 191, "the table has 191 commands");
+        assert_eq!(TABLE.len(), 192, "the table has 192 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1662,7 +1663,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 60), ("write", 23), ("admin", 38), ("console", 41), ("stream", 10), ("instruct", 7), ("answer", 2),
+            ("read", 60), ("write", 23), ("admin", 39), ("console", 41), ("stream", 10), ("instruct", 7), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 3),
         ]
         .into();

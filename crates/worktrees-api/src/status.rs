@@ -348,6 +348,10 @@ pub fn cli_binary() -> Option<(String, String)> {
 }
 
 pub fn check_update() -> Result<UpdateInfo, String> {
+    // The release probe and the four harness probes form one check. Two
+    // clients asking at once share the harness cache and never overlap here.
+    static CHECK_LOCK: Mutex<()> = Mutex::new(());
+    let _check = CHECK_LOCK.lock().unwrap();
     let (cli_path, cli_version) = match cli_binary() {
         Some((p, v)) => (Some(p), Some(v)),
         None => (None, None),
@@ -357,6 +361,7 @@ pub fn check_update() -> Result<UpdateInfo, String> {
         cli_version,
         cli_path,
         latest: latest_release_tag(),
+        harnesses: crate::harness_updates::check_all(),
     })
 }
 

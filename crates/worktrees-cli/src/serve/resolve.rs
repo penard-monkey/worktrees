@@ -1595,6 +1595,16 @@ mod tests {
         assert!(try_row("diagnostics", &adm, &ag, json!({}), &w).is_ok(), "a global admin row needs no scope");
     }
 
+    #[test]
+    fn updating_a_harness_requires_admin_even_without_a_project() {
+        let t = two("harness-update");
+        let w = t.world();
+        let (reader, rg) = phone(&[Read], &[&t.a]);
+        assert_eq!(try_row("update_harness", &reader, &rg, json!({ "tool": "pi" }), &w).unwrap_err().wire(), json!(ERR_DENIED));
+        let (admin, ag) = phone(&[Read, Admin], &[&t.a]);
+        assert!(try_row("update_harness", &admin, &ag, json!({ "tool": "pi" }), &w).is_ok());
+    }
+
     /// §2.8's second-principal fixtures, through the resolver: a device grant
     /// wider than its principal's acts as the principal's, and a device of
     /// another principal is not an object, exactly as a missing one is not.

@@ -23,7 +23,7 @@ import { FeedbackRailButton } from "./FeedbackSection";
 import { RELEASES_URL, SettingsSheet } from "./SettingsSheet";
 import { type McpStatus } from "./McpPanel";
 import { dismissPatch, offersTitle, pendingOffers, type Offer } from "./offers";
-import { bubbleTag, browserPollEnv, startUpdatePoll } from "./updatepoll";
+import { browserPollEnv, startUpdatePoll, updateNews } from "./updatepoll";
 import { UpdateBubble } from "./UpdateBubble";
 import type { CatId } from "./SettingsSheet";
 import {
@@ -4320,7 +4320,7 @@ function App() {
   const cliStale = !!(upd?.latest && upd.cli_version && vnewer(upd.latest, upd.cli_version));
   const cliMissing = !!(upd?.latest && !upd.cli_version);
   const appStale = !!(upd?.latest && vnewer(upd.latest, upd.app_version));
-  const updateAvail = cliStale || cliMissing || appStale;
+  const updateAvail = cliStale || cliMissing || appStale || !!upd?.harnesses?.some((h) => h.update_available);
   const searchRef = useRef<HTMLInputElement | null>(null);
   const navRef = useRef<HTMLElement | null>(null);
 
@@ -4771,12 +4771,13 @@ function App() {
   // news would be the nag this is built not to be.
   const [gearEl, setGearEl] = useState<HTMLButtonElement | null>(null);
   const [bubbleLift, setBubbleLift] = useState<number | null>(null);
-  const bubble = bubbleTag({ latest: upd?.latest, newer: appStale || cliStale, dismissed: settings.update_dismissed || undefined });
-  const dismissBubble = useCallback((tag: string) => {
-    updateSettings({ update_dismissed: tag });
+  const bubble = updateNews({ release: upd?.latest, worktreesNewer: appStale || cliStale,
+    harnesses: upd?.harnesses ?? [], dismissed: settings.update_dismissed || undefined });
+  const dismissBubble = useCallback((key: string) => {
+    updateSettings({ update_dismissed: key });
   }, []);
   const onSettingsCat = useCallback((c: CatId) => {
-    if (c === "updates" && bubble) dismissBubble(bubble);
+    if (c === "updates" && bubble) dismissBubble(bubble.key);
   }, [bubble, dismissBubble]);
   const recheckTmux = useCallback(async () => {
     try {
@@ -5183,14 +5184,30 @@ function App() {
   // (and the bubble) out and back. The manual check replaces it — Settings says
   // "couldn't reach the release feed" from a null `latest`, and that has to stay
   // true of the check you just pressed.
+  const updateCheckInFlight = useRef<Promise<UpdateInfo | null> | null>(null);
   const checkUpdate = useCallback(async (keepLatest = false) => {
-    try {
-      const u = await invoke<UpdateInfo>("check_update");
-      setUpd((prev) => (keepLatest && !u.latest && prev?.latest ? { ...u, latest: prev.latest } : u));
-      return !!u.latest;
-    } catch {
-      return false;
+    let pending = updateCheckInFlight.current;
+    if (!pending) {
+      pending = invoke<UpdateInfo>("check_update").catch(() => null);
+      updateCheckInFlight.current = pending;
+      void pending.finally(() => { if (updateCheckInFlight.current === pending) updateCheckInFlight.current = null; });
     }
+    const u = await pending;
+    if (!u) return false;
+    // Each caller applies its own policy to the shared answer. A manual click
+    // that joined the hourly check must still show an unreachable feed as such.
+    setUpd((prev) => {
+      if (!keepLatest || !prev) return u;
+      const harnesses = (u.harnesses ?? []).map((h) => {
+        const old = prev.harnesses?.find((v) => v.tool === h.tool);
+        return !h.latest_version && old?.latest_version
+          ? { ...h, latest_version: old.latest_version,
+              update_available: !!h.installed_version && vnewer(old.latest_version, h.installed_version) }
+          : h;
+      });
+      return { ...u, latest: u.latest ?? prev.latest, harnesses };
+    });
+    return !!u.latest;
   }, []);
   // Gate on the setting AND keep it in the deps: a poll started pre-hydration
   // (under DEFAULTS, update_auto_check=true) is STOPPED by this effect's cleanup
@@ -10277,11 +10294,11 @@ function App() {
         carry, no row — an empty 26px band would be worse than no band. */}
     {bubble && !settingsOpen && (
       <UpdateBubble
-        tag={bubble} appVersion={upd?.app_version} cliVersion={upd?.cli_version}
+        items={bubble.items} releaseTag={bubble.releaseTag} appVersion={upd?.app_version} cliVersion={upd?.cli_version}
         appStale={appStale} cliStale={cliStale} anchor={gearEl} side={mirrored ? "right" : "left"}
         onUpdate={() => openSettings({ cat: "updates" })}
-        onNotes={() => { openUrl(`${RELEASES_URL}/tag/${bubble}`).catch(fail); }}
-        onDismiss={() => dismissBubble(bubble)} onLift={setBubbleLift}
+        onNotes={() => { if (bubble.releaseTag) openUrl(`${RELEASES_URL}/tag/${bubble.releaseTag}`).catch(fail); }}
+        onDismiss={() => dismissBubble(bubble.key)} onLift={setBubbleLift}
       />
     )}
     {((settings.usage_place === "strip" && usage.info) || statusChipHost === "strip" || remoteNoticeHost === "strip") && (

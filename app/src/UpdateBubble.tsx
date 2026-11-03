@@ -20,8 +20,9 @@ import * as Icons from "./icons";
 
 const GAP = 10; // px between the gear's edge and the bubble's tail tip
 
-export function UpdateBubble({ tag, appVersion, cliVersion, appStale, cliStale, anchor, side, onUpdate, onNotes, onDismiss, onLift }: {
-  tag: string;
+export function UpdateBubble({ items, releaseTag, appVersion, cliVersion, appStale, cliStale, anchor, side, onUpdate, onNotes, onDismiss, onLift }: {
+  items: string[];
+  releaseTag: string | null;
   appVersion: string | undefined;
   cliVersion: string | null | undefined;
   appStale: boolean;
@@ -80,15 +81,15 @@ export function UpdateBubble({ tag, appVersion, cliVersion, appStale, cliStale, 
     >
       <div className="upd-bubble-head">
         <span className="upd-bubble-dot" aria-hidden />
-        <span className="upd-bubble-title">worktrees {tag} is out</span>
+        <span className="upd-bubble-title">Updates: {items.join(", ")}</span>
         <button className="upd-bubble-x" title="dismiss — the gear keeps its dot until you update" aria-label="dismiss" onClick={onDismiss}>
           <Icons.X size={13} />
         </button>
       </div>
-      {behind.length > 0 && <div className="upd-bubble-body">You have {behind.join(" and ")}.</div>}
+      {releaseTag && behind.length > 0 && <div className="upd-bubble-body">You have {behind.join(" and ")}.</div>}
       <div className="upd-bubble-actions">
         <button className="enter-btn sm" onClick={onUpdate}>Update…</button>
-        <button className="upd-bubble-link" onClick={onNotes}>What’s new <Icons.ExternalLink size={11} /></button>
+        {releaseTag && <button className="upd-bubble-link" onClick={onNotes}>What’s new <Icons.ExternalLink size={11} /></button>}
       </div>
     </div>
   );

@@ -62,6 +62,7 @@ pub mod files;
 pub mod host;
 pub mod hostenv;
 pub mod hostpolicy;
+pub mod harness_updates;
 pub mod log;
 pub mod macprivacy;
 pub mod meta;

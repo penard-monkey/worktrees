@@ -858,6 +858,7 @@ pub struct UpdateInfo {
     pub cli_version: Option<String>,
     pub cli_path: Option<String>,
     pub latest: Option<String>, // release tag, e.g. "v0.2.0"
+    pub harnesses: Vec<crate::harness_updates::HarnessUpdate>,
 }
 
 /// Latest release tag via the releases/latest REDIRECT (install.sh's trick —

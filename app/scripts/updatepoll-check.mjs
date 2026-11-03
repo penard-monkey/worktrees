@@ -217,6 +217,31 @@ function rig({ visible = true } = {}) {
   ok(t({ latest: null, newer: false, dismissed: undefined }) === null, "offline → no bubble");
 }
 
+// A harness release alone can announce an update. Dismissal covers the exact
+// set of versions; a later version announces itself again.
+{
+  const rows = [
+    { tool: "claude", latest_version: "2.1.320", update_available: true },
+    { tool: "codex", latest_version: "0.166.0", update_available: false },
+  ];
+  const a = M.updateNews({ release: "v0.47.1", worktreesNewer: false, harnesses: rows });
+  ok(a?.items.join(", ") === "Claude 2.1.320", "harness-only update names the tool and version");
+  ok(M.updateNews({ release: "v0.47.1", worktreesNewer: false, harnesses: rows, dismissed: a?.key }) === null,
+    "a dismissed harness version stays dismissed");
+  const both = M.updateNews({ release: "v0.47.1", worktreesNewer: true, harnesses: rows });
+  ok(both?.items.join(", ") === "Worktrees 0.47.1, Claude 2.1.320", "bubble lists worktrees and harness releases");
+  ok(both?.releaseTag === "v0.47.1", "release notes link uses only the worktrees tag");
+  const action = M.harnessPaneAction;
+  ok(action({ installed_version: "1.0.0", latest_version: "1.1.0", update_available: true, update_command: "fixed" }) === "update",
+    "pane enables a known fixed update");
+  ok(action({ installed_version: "1.0.0", latest_version: "1.1.0", update_available: true, update_command: null }) === "manual",
+    "pane keeps an unknown install method manual");
+  ok(action({ installed_version: null, latest_version: "1.1.0", update_available: false, update_command: null }) === "missing",
+    "pane calls a missing tool missing");
+  ok(action({ installed_version: "1.0.0", latest_version: null, update_available: false, update_command: "fixed" }) === "unknown",
+    "pane does not call an unreachable feed current");
+}
+
 // 10. The wiring: App drives the poll through this module, gated on the
 //     setting, and the old launch-only timer is gone.
 {

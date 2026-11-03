@@ -584,11 +584,27 @@ export const DEFAULTS: Settings = {
 };
 
 /** check_update result — versions the Settings "Version" section renders. */
+export type HarnessUpdate = {
+  tool: "claude" | "codex" | "kimi" | "pi";
+  installed_version: string | null;
+  latest_version: string | null;
+  install_method: string;
+  update_available: boolean;
+  update_command: string | null;
+  /** The host's by-hand steps for an install it won't update itself. Absent
+   *  when the row has an Update button, or the tool is not installed. */
+  manual?: HarnessManual;
+};
+
+/** Every string here is fixed on the host, never a path from the machine. */
+export type HarnessManual = { why: string; steps: { text: string; command?: string }[] };
+
 export type UpdateInfo = {
   app_version: string;
   cli_version: string | null;
   cli_path: string | null;
   latest: string | null; // release tag, e.g. "v0.2.0"; null offline / no releases
+  harnesses: HarnessUpdate[];
 };
 
 export const clampRem = (v: number) => Math.max(13, Math.min(22, v));
