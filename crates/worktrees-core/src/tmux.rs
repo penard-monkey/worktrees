@@ -538,6 +538,20 @@ impl PaneList {
         found
     }
 
+    /// `agent_pane`'s rule over this snapshot: the pane of session `session`
+    /// that is in the place (never under `exclude_under`) and runs the agent.
+    /// No spawn, for a caller that walks every place (the agent restart).
+    pub fn agent_pane_of(&self, session: &str, place_path: &str, exclude_under: Option<&str>, ai_word: &str) -> Option<&Pane> {
+        let rows: Vec<(&str, &str, &str)> = self
+            .panes
+            .iter()
+            .filter(|p| p.session == session)
+            .filter_map(|p| Some((p.id.as_deref()?, p.path.as_str(), p.cmd.as_str())))
+            .collect();
+        let id = pick_agent_pane(&rows, place_path, exclude_under, ai_word)?;
+        self.pane(id)
+    }
+
     /// Every session with a pane cwd'd in `wt` — `agents_in`'s path test, and
     /// its dock-shell exclusion, WITHOUT asking what the pane runs. What serve's
     /// device-lane cap counts (Server Edition Phase 2, §6): a lane's session is
@@ -1198,6 +1212,62 @@ pub fn new_session(session: &str, wt: &str, pane0: &str) -> Result<String, Strin
     }
 }
 
+/// Restart pane `pane` with `cmd` in `dir`: tmux kills the pane's processes
+/// (`-k`) and runs `cmd` in the SAME pane, so its id, its session, the
+/// session's other panes and windows and every attached client stay as they
+/// are (measured, `docs/proposals/harness-restart.md`). Through `tmux()`, so
+/// it never starts a server.
+pub fn respawn_pane(pane: &PaneId, dir: &str, cmd: &str) -> Result<(), String> {
+    let o = tmux(&["respawn-pane", "-k", "-t", pane.as_str(), "-c", dir, cmd]).map_err(|e| e.to_string())?;
+    if o.status.success() {
+        Ok(())
+    } else {
+        let err = String::from_utf8_lossy(&o.stderr).trim().to_string();
+        Err(if err.is_empty() { format!("tmux respawn-pane exited {}", o.status.code().unwrap_or(-1)) } else { err })
+    }
+}
+
+/// The foreground job of a terminal: its process-group leader and every
+/// process in that group (an npm Codex's leader is `node`; the native codex
+/// that holds the rollout is its child, in the same group).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Job {
+    pub leader: i32,
+    pub members: Vec<i32>,
+}
+
+/// The foreground job of each of `ttys`, from ONE `ps -o tty=,pid=,pgid=,tpgid=`
+/// (`-t` over just those ttys, `-A` when one has gone, as `ps_foreground`).
+pub fn foreground_jobs(ttys: &[&str]) -> HashMap<String, Job> {
+    if ttys.is_empty() {
+        return HashMap::new();
+    }
+    let run = |sel: &[&str]| {
+        let o = crate::childenv::command("ps").args(sel).args(["-o", "tty=,pid=,pgid=,tpgid="]).output().ok()?;
+        o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
+    };
+    run(&["-t", &ttys.join(",")]).or_else(|| run(&["-A"])).map(|t| parse_jobs(&t)).unwrap_or_default()
+}
+
+/// `foreground_jobs`' parse, pure: rows `tty pid pgid tpgid`, keyed by the
+/// normalised tty. A group is the foreground one when its id is the tty's
+/// `tpgid`; its leader is the process whose pid is that id.
+pub fn parse_jobs(ps: &str) -> HashMap<String, Job> {
+    let mut out: HashMap<String, Job> = HashMap::new();
+    for line in ps.lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        let [tty, pid, pgid, tpgid] = f[..] else { continue };
+        let (Ok(pid), Ok(pgid), Ok(tpgid)) = (pid.parse::<i32>(), pgid.parse::<i32>(), tpgid.parse::<i32>()) else { continue };
+        if pgid != tpgid || tpgid <= 0 {
+            continue;
+        }
+        let job = out.entry(normalize_tty(tty).to_string()).or_default();
+        job.leader = tpgid;
+        job.members.push(pid);
+    }
+    out
+}
+
 pub fn split_window(pane_id: &str, wt: &str, pane1: &str) {
     let _ = tmux(&["split-window", "-h", "-t", pane_id, "-c", wt, pane1]);
 }
@@ -1386,6 +1456,36 @@ mod tests {
         // The main checkout does not own panes in its worktrees.
         assert_eq!(pick_agent_pane(&[("%1", w, "codex")], "/r", Some("/r/.worktrees"), "codex"), None);
         assert_eq!(pick_agent_pane(&[("0", w, "codex")], w, None, "codex"), None, "only %N ids enter a PaneId");
+    }
+
+    /// The restart walks every place over ONE snapshot: the same rule as
+    /// `agent_pane`, with the session's panes taken from the list.
+    #[test]
+    fn the_snapshot_finds_the_agent_pane_by_the_same_rule() {
+        let w = "/r/.worktrees/feat";
+        let pane = |s: &str, id: &str, path: &str, cmd: &str| Pane {
+            session: s.into(), path: path.into(), cmd: cmd.into(), id: Some(id.into()), ..Pane::default()
+        };
+        let pl = PaneList::from_panes(vec![
+            pane("r-feat", "%1", w, "zsh"),
+            pane("r-other", "%2", w, "codex"),
+            pane("r-feat", "%3", w, "codex"),
+        ]);
+        assert_eq!(pl.agent_pane_of("r-feat", w, None, "codex").and_then(|p| p.id.as_deref()), Some("%3"));
+        assert!(pl.agent_pane_of("r-feat", w, None, "claude").is_none());
+        assert!(pl.agent_pane_of("r-feat", "/r", Some("/r/.worktrees"), "codex").is_none());
+    }
+
+    /// The foreground job of each tty: the group whose id is the tty's
+    /// `tpgid`, its leader that pid. A background job and a bad row are not.
+    #[test]
+    fn foreground_jobs_keep_the_tty_group_and_its_leader() {
+        let ps = "ttys009 100 100 200\nttys009 200 200 200\nttys009 201 200 200\nttys009 300 300 200\n\
+                  /dev/pts/3 50 50 50\nttys010 x 1 1\nttys011 7 7\n";
+        let jobs = parse_jobs(ps);
+        assert_eq!(jobs.get("ttys009"), Some(&Job { leader: 200, members: vec![200, 201] }));
+        assert_eq!(jobs.get("pts/3"), Some(&Job { leader: 50, members: vec![50] }));
+        assert_eq!(jobs.len(), 2, "{jobs:?}");
     }
 
     #[test]

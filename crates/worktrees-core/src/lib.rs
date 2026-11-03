@@ -59,6 +59,7 @@ pub mod plan;
 pub mod plancmd;
 pub mod planning;
 pub mod proc;
+pub mod procinfo;
 pub mod profile;
 pub mod provider;
 pub mod projcfg;
