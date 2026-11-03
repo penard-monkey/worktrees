@@ -591,7 +591,13 @@ export type HarnessUpdate = {
   install_method: string;
   update_available: boolean;
   update_command: string | null;
+  /** The host's by-hand steps for an install it won't update itself. Absent
+   *  when the row has an Update button, or the tool is not installed. */
+  manual?: HarnessManual;
 };
+
+/** Every string here is fixed on the host, never a path from the machine. */
+export type HarnessManual = { why: string; steps: { text: string; command?: string }[] };
 
 export type UpdateInfo = {
   app_version: string;

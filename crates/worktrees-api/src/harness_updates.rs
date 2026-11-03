@@ -19,7 +19,7 @@ const CLAUDE_NPM: &str = "https://registry.npmjs.org/@anthropic-ai%2fclaude-code
 const CODEX_NPM: &str = "https://registry.npmjs.org/@openai%2fcodex/latest";
 const KIMI_NPM: &str = "https://registry.npmjs.org/@moonshot-ai%2fkimi-code/latest";
 const PI_NPM: &str = "https://registry.npmjs.org/@earendil-works%2fpi-coding-agent/latest";
-const CODEX_BREW: &str = "https://formulae.brew.sh/api/cask/codex.json";
+const CODEX_CASK_API: &str = "https://formulae.brew.sh/api/cask/codex.json";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Tool { Claude, Codex, Kimi, Pi }
@@ -74,6 +74,162 @@ impl Method {
     }
 }
 
+/// What the update row answers when the install has no fixed command here.
+const NO_FIXED_UPDATE: &str =
+    "Worktrees can't update this install itself; follow the steps shown for it in Settings → Updates";
+
+/// Where an install Worktrees will not update came from, judged from its
+/// paths alone. It only picks which steps a person is shown, never a command
+/// the host runs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Origin { Override, Editor, PiCustomUpdate, Homebrew, OtherNode, Other }
+
+/// Folders under HOME where editors keep extensions, each version in its own
+/// folder (`publisher.name-<version>`).
+const EDITOR_EXTENSIONS: [&str; 5] = [
+    ".vscode/extensions", ".vscode-insiders/extensions", ".vscode-server/extensions",
+    ".cursor/extensions", ".windsurf/extensions",
+];
+
+/// One thing a person does by hand. Every string is fixed in this file, never
+/// a path or anything read from the machine: a paired device can read it.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct ManualStep {
+    pub text: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<&'static str>,
+}
+
+/// Why Worktrees leaves an install alone, and how to update it instead.
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct Manual {
+    pub why: &'static str,
+    pub steps: &'static [ManualStep],
+}
+
+const fn say(text: &'static str) -> ManualStep { ManualStep { text, command: None } }
+const fn run(text: &'static str, command: &'static str) -> ManualStep { ManualStep { text, command: Some(command) } }
+
+const OTHER_NODE: &str = "This copy belongs to a different Node.js (another nvm version, pnpm, yarn or bun) \
+    than the npm Worktrees finds, so Worktrees leaves it alone.";
+const OTHER_NODE_TAIL: ManualStep = say("With pnpm, yarn or bun, use that tool's global upgrade instead.");
+
+const CLAUDE_EDITOR: Manual = Manual {
+    why: "This Claude Code came with an editor extension, which keeps its own copy.",
+    steps: &[
+        run("Install Claude Code for the terminal:", "curl -fsSL https://claude.ai/install.sh | bash"),
+        say("Then press Check for updates. Worktrees can update that copy itself."),
+    ],
+};
+const CLAUDE_BREW: Manual = Manual {
+    why: "Homebrew installed this Claude Code, so Homebrew updates it.",
+    steps: &[run("In a terminal, run:", "brew upgrade --cask claude-code")],
+};
+const CLAUDE_NODE: Manual = Manual {
+    why: OTHER_NODE,
+    steps: &[run("Switch to that Node.js, then run:", "npm install -g @anthropic-ai/claude-code@latest"), OTHER_NODE_TAIL],
+};
+const CLAUDE_OTHER: Manual = Manual {
+    why: "Worktrees can't tell how this Claude Code was installed.",
+    steps: &[
+        run("Let Claude Code update itself:", "claude update"),
+        run("If that fails, reinstall it with Anthropic's installer:", "curl -fsSL https://claude.ai/install.sh | bash"),
+    ],
+};
+const CODEX_EDITOR: Manual = Manual {
+    why: "This Codex came with the Codex extension in your editor. Each extension update lands in a new \
+        folder while PATH keeps naming this one, so updating the extension won't change it.",
+    steps: &[
+        run("Install the standalone Codex CLI:", "npm install -g @openai/codex"),
+        run("Or with Homebrew:", "brew install --cask codex"),
+        run("In a new terminal, check that codex now resolves outside the extension's folder:", "which codex"),
+        say("If it still points into the extension, put npm's or Homebrew's bin directory before it in PATH. \
+            Then press Check for updates: Worktrees can update the standalone copy itself."),
+    ],
+};
+const CODEX_BREW: Manual = Manual {
+    why: "Homebrew installed this Codex, but not as the linked codex cask Worktrees updates.",
+    steps: &[run("In a terminal, run:", "brew upgrade --cask codex")],
+};
+const CODEX_NODE: Manual = Manual {
+    why: OTHER_NODE,
+    steps: &[run("Switch to that Node.js, then run:", "npm install -g @openai/codex@latest"), OTHER_NODE_TAIL],
+};
+const CODEX_OTHER: Manual = Manual {
+    why: "Worktrees can't tell how this Codex was installed, for example a binary downloaded from GitHub.",
+    steps: &[
+        run("Installed with npm:", "npm install -g @openai/codex@latest"),
+        run("Installed with Homebrew:", "brew upgrade --cask codex"),
+        say("Downloaded from GitHub: replace it with the latest release from github.com/openai/codex/releases."),
+    ],
+};
+const KIMI_LEGACY: Manual = Manual {
+    why: "This is the old Python kimi-cli, which Kimi Code replaces.",
+    steps: &[
+        run("Install Kimi Code:", "curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash"),
+        run("Remove the old kimi-cli so it stops shadowing the new one (if uv installed it):", "uv tool uninstall kimi-cli"),
+        run("In a new terminal, bring your config, MCP servers and sessions across:", "kimi migrate"),
+    ],
+};
+const KIMI_OVERRIDE: Manual = Manual {
+    why: "WORKTREES_KIMI_BIN points Worktrees at this Kimi, so updating it is up to you.",
+    steps: &[say("Update the copy it names, or unset WORKTREES_KIMI_BIN to use your installed Kimi Code.")],
+};
+const KIMI_NODE: Manual = Manual {
+    why: OTHER_NODE,
+    steps: &[run("Switch to that Node.js, then run:", "npm install -g @moonshot-ai/kimi-code@latest"), OTHER_NODE_TAIL],
+};
+const KIMI_OTHER: Manual = Manual {
+    why: "Worktrees can't tell how this Kimi Code was installed, for example the install script with a custom KIMI_INSTALL_DIR.",
+    steps: &[
+        run("Let Kimi Code update itself:", "kimi upgrade"),
+        run("Installed with npm:", "npm install -g @moonshot-ai/kimi-code@latest"),
+    ],
+};
+const PI_CUSTOM: Manual = Manual {
+    why: "Your Pi settings or environment change what pi update runs, so Worktrees won't run it for you.",
+    steps: &[run("In a terminal, run:", "pi update")],
+};
+const PI_OVERRIDE: Manual = Manual {
+    why: "WORKTREES_PI_BIN points Worktrees at this Pi, so updating it is up to you.",
+    steps: &[say("Update the copy it names, or unset WORKTREES_PI_BIN to use your installed Pi.")],
+};
+const PI_NODE: Manual = Manual {
+    why: OTHER_NODE,
+    steps: &[run("Switch to that Node.js, then run:", "npm install -g @earendil-works/pi-coding-agent@latest"), OTHER_NODE_TAIL],
+};
+const PI_OTHER: Manual = Manual {
+    why: "Worktrees can't tell how this Pi was installed.",
+    steps: &[
+        run("Installed with Pi's installer:", "pi update"),
+        run("Installed with npm:", "npm install -g @earendil-works/pi-coding-agent@latest"),
+    ],
+};
+
+/// The steps for an install that has no Update button. None when Worktrees
+/// can update it, or when there is nothing installed to update.
+fn manual(tool: Tool, method: Method, origin: Origin) -> Option<Manual> {
+    if method == Method::NotInstalled || method.command(tool).is_some() { return None; }
+    Some(match (tool, method, origin) {
+        (Tool::Kimi, Method::LegacyPython, _) => KIMI_LEGACY,
+        (Tool::Kimi, _, Origin::Override) => KIMI_OVERRIDE,
+        (Tool::Pi, _, Origin::Override) => PI_OVERRIDE,
+        (Tool::Pi, _, Origin::PiCustomUpdate) => PI_CUSTOM,
+        (Tool::Claude, _, Origin::Editor) => CLAUDE_EDITOR,
+        (Tool::Codex, _, Origin::Editor) => CODEX_EDITOR,
+        (Tool::Claude, _, Origin::Homebrew) => CLAUDE_BREW,
+        (Tool::Codex, _, Origin::Homebrew) => CODEX_BREW,
+        (Tool::Claude, _, Origin::OtherNode) => CLAUDE_NODE,
+        (Tool::Codex, _, Origin::OtherNode) => CODEX_NODE,
+        (Tool::Kimi, _, Origin::OtherNode) => KIMI_NODE,
+        (Tool::Pi, _, Origin::OtherNode) => PI_NODE,
+        (Tool::Claude, _, _) => CLAUDE_OTHER,
+        (Tool::Codex, _, _) => CODEX_OTHER,
+        (Tool::Kimi, _, _) => KIMI_OTHER,
+        (Tool::Pi, _, _) => PI_OTHER,
+    })
+}
+
 #[derive(Clone, Serialize)]
 pub struct HarnessUpdate {
     pub tool: &'static str,
@@ -82,6 +238,10 @@ pub struct HarnessUpdate {
     pub install_method: &'static str,
     pub update_available: bool,
     pub update_command: Option<&'static str>,
+    /// How a person updates an install Worktrees won't touch. Absent when the
+    /// row has an Update button or the tool is not installed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manual: Option<Manual>,
 }
 
 struct Probe {
@@ -213,6 +373,37 @@ fn method(tool: Tool, path: &Path, real: &Path, p: &Probe) -> Method {
     Method::Unknown
 }
 
+/// Pure origin rule, consulted only for an install `method` left without a
+/// fixed command: which by-hand steps fit where this executable lives.
+fn origin(tool: Tool, path: &Path, real: &Path, p: &Probe) -> Origin {
+    if (tool == Tool::Kimi && std::env::var_os("WORKTREES_KIMI_BIN").is_some())
+        || (tool == Tool::Pi && std::env::var_os("WORKTREES_PI_BIN").is_some()) {
+        return Origin::Override;
+    }
+    if EDITOR_EXTENSIONS.iter().any(|d| {
+        let dir = p.home.join(d);
+        under(path, &dir) || under(real, &dir) || under(real, &canonical(&dir))
+    }) {
+        return Origin::Editor;
+    }
+    if tool == Tool::Pi && !pi_update_is_fixed(&p.home)
+        && real == canonical(&p.home.join(".pi/agent/bin/pi")) && pi_managed_launcher(real) {
+        return Origin::PiCustomUpdate;
+    }
+    if let Some(prefix) = &p.brew_prefix {
+        if ["Caskroom", "Cellar"].iter().any(|d| under(real, &canonical(&prefix.join(d)))) {
+            return Origin::Homebrew;
+        }
+    }
+    let package = Path::new("node_modules").join(tool.package());
+    let parts: Vec<_> = real.components().collect();
+    let want: Vec<_> = package.components().collect();
+    if parts.windows(want.len()).any(|w| w == want.as_slice()) {
+        return Origin::OtherNode;
+    }
+    Origin::Other
+}
+
 /// First dotted numeric version in a CLI's version line. Never display raw
 /// output from a tool here: a broken executable might print credentials.
 fn version(text: &str) -> Option<String> {
@@ -276,11 +467,12 @@ fn installed(tool: Tool, p: &Probe) -> (Option<PathBuf>, Option<String>, Method)
 }
 
 fn check_one(tool: Tool, p: &Probe) -> HarnessUpdate {
-    let (_path, installed_version, method) = installed(tool, p);
+    let (path, installed_version, method) = installed(tool, p);
+    let manual = path.as_deref().and_then(|path| manual(tool, method, origin(tool, path, &canonical(path), p)));
     let latest_version = if method == Method::LegacyPython {
         None
     } else if tool == Tool::Codex && method == Method::Homebrew {
-        fetch_version(CODEX_BREW, "version")
+        fetch_version(CODEX_CASK_API, "version")
     } else {
         fetch_version(tool.npm_url(), "version")
     };
@@ -292,6 +484,7 @@ fn check_one(tool: Tool, p: &Probe) -> HarnessUpdate {
         tool: tool.name(), installed_version, latest_version,
         install_method: method.name(), update_available,
         update_command: method.command(tool),
+        manual,
     }
 }
 
@@ -331,12 +524,12 @@ pub fn update(tool_name: String) -> Result<CmdResult, String> {
     let p = Probe::current();
     let (path, _before, method) = installed(tool, &p);
     let path = path.ok_or("harness is not installed")?;
-    let label = method.command(tool).ok_or("update it the way you installed it")?;
+    let label = method.command(tool).ok_or(NO_FIXED_UPDATE)?;
     let mut c = match method {
         Method::Native | Method::Managed => childenv::command(&path),
         Method::Npm => childenv::command("npm"),
         Method::Homebrew => childenv::command("brew"),
-        _ => return Err("update it the way you installed it".into()),
+        _ => return Err(NO_FIXED_UPDATE.into()),
     };
     // A serve started from a checkout must not let that checkout's npm config
     // or Pi project settings influence a host-global update.
@@ -348,7 +541,7 @@ pub fn update(tool_name: String) -> Result<CmdResult, String> {
         (Tool::Codex, Method::Homebrew) => { c.args(["upgrade", "--cask", "codex"]); }
         (Tool::Pi, Method::Npm) => { c.args(["install", "-g", "--ignore-scripts", "@earendil-works/pi-coding-agent@latest"]); }
         (_, Method::Npm) => { c.args(["install", "-g", &format!("{}@latest", tool.package())]); }
-        _ => return Err("update it the way you installed it".into()),
+        _ => return Err(NO_FIXED_UPDATE.into()),
     }
     let out = run_deadline(c, 180).map_err(|e| format!("{label}: {e}"))?;
     *CACHE.lock().unwrap() = None;
@@ -435,6 +628,88 @@ mod tests {
         assert_eq!(installed_at(Tool::Pi, pi_bin.clone(), &p).2, Method::Managed);
         std::fs::write(home.join(".pi/agent/settings.json"), r#"{"selfUpdateCommand":["sh","-c","echo override"]}"#).unwrap();
         assert_eq!(installed_at(Tool::Pi, pi_bin, &p).2, Method::Unknown);
+    }
+
+    #[test]
+    fn an_install_without_an_update_button_gets_steps_for_where_it_came_from() {
+        let scratch = worktrees_core::fsx::PrivateDir::new(&std::env::temp_dir(), "harness-manual").unwrap();
+        let home = scratch.path();
+        let brew = home.join("brew");
+        let p = Probe { home: home.to_owned(), npm_prefix: Some(home.join("npm")), brew_prefix: Some(brew.clone()), brew_codex: false };
+        let steps_for = |tool, path: &Path| {
+            let real = canonical(path);
+            manual(tool, method(tool, path, &real, &p), origin(tool, path, &real, &p))
+        };
+        let commands = |m: Option<Manual>| m.expect("steps").steps.iter().filter_map(|s| s.command).collect::<Vec<_>>();
+
+        // This host's Codex: the editor extension's own binary, on PATH by its
+        // versioned folder. Updating the extension writes a NEW folder.
+        let ext = home.join(".vscode/extensions/openai.chatgpt-26.930.61225-darwin-arm64/bin/macos-aarch64/codex");
+        script(&ext, "#!/bin/sh\necho 'codex-cli 0.160.1'\n");
+        let c = commands(steps_for(Tool::Codex, &ext));
+        assert_eq!(c.first(), Some(&"npm install -g @openai/codex"));
+        assert!(c.contains(&"which codex"), "{c:?}");
+
+        // Homebrew holds it, but not as the linked, registered codex cask.
+        let cask = brew.join("Caskroom/codex/0.166.0/codex");
+        script(&cask, "#!/bin/sh\necho 'codex-cli 0.166.0'\n");
+        assert_eq!(commands(steps_for(Tool::Codex, &cask)), ["brew upgrade --cask codex"]);
+        let claude_cask = brew.join("Caskroom/claude-code/2.1.311/claude");
+        script(&claude_cask, "#!/bin/sh\necho '2.1.311 (Claude Code)'\n");
+        assert_eq!(commands(steps_for(Tool::Claude, &claude_cask)), ["brew upgrade --cask claude-code"]);
+
+        // A global package of another Node than the npm on PATH.
+        let other = home.join(".nvm/versions/node/v20.0.0");
+        let pi_js = other.join("lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js");
+        script(&pi_js, "#!/bin/sh\necho 'pi 0.99.1'\n");
+        let pi_link = other.join("bin/pi");
+        std::fs::create_dir_all(pi_link.parent().unwrap()).unwrap();
+        symlink(&pi_js, &pi_link).unwrap();
+        assert_eq!(steps_for(Tool::Pi, &pi_link).unwrap().why, OTHER_NODE);
+
+        // The archived Python kimi-cli: install Kimi Code, then migrate.
+        let legacy = home.join("uv/bin/kimi");
+        script(&legacy, "#!/bin/sh\n# kimi_cli\necho 'kimi 1.52.0'\n");
+        let c = commands(steps_for(Tool::Kimi, &legacy));
+        assert!(c[0].contains("code.kimi.com/kimi-code/install.sh") && c.contains(&"kimi migrate"), "{c:?}");
+
+        // Pi's own launcher whose update a setting replaced: run it by hand.
+        let pi_root = home.join(".pi/agent/install");
+        std::fs::create_dir_all(&pi_root).unwrap();
+        std::fs::write(pi_root.join("managed-install.json"), r#"{"kind":"pi-managed-install","schemaVersion":1,"layout":"releases-v1"}"#).unwrap();
+        std::fs::write(pi_root.join("current-version"), "0.99.1\n").unwrap();
+        let launcher = home.join(".pi/agent/bin/pi");
+        script(&launcher, "#!/bin/sh\n# pi_current_file=$pi_agent_dir/install/current-version\n# PI_MANAGED_INSTALL_ROOT=$pi_agent_dir/install\n# exec \"$pi_release_bin\" \"$@\"\necho 'pi 0.99.1'\n");
+        std::fs::write(home.join(".pi/agent/settings.json"), r#"{"selfUpdateCommand":["sh","-c","echo override"]}"#).unwrap();
+        assert_eq!(steps_for(Tool::Pi, &launcher).unwrap().why, PI_CUSTOM.why);
+        assert_eq!(commands(steps_for(Tool::Pi, &launcher)), ["pi update"]);
+
+        // Nothing to go on: the tool's own updater first.
+        let lone = home.join("opt/claude");
+        script(&lone, "#!/bin/sh\necho '2.1.300 (Claude Code)'\n");
+        assert_eq!(commands(steps_for(Tool::Claude, &lone)), ["claude update", "curl -fsSL https://claude.ai/install.sh | bash"]);
+
+        // A row with an Update button, or nothing installed, has no steps;
+        // every other row has at least one, and serializes without paths.
+        let origins = [Origin::Override, Origin::Editor, Origin::PiCustomUpdate, Origin::Homebrew, Origin::OtherNode, Origin::Other];
+        for tool in Tool::ALL {
+            for o in origins {
+                for m in [Method::Native, Method::Npm, Method::Homebrew, Method::Managed, Method::LegacyPython, Method::Unknown, Method::NotInstalled] {
+                    let steps = manual(tool, m, o);
+                    assert_eq!(steps.is_none(), m == Method::NotInstalled || m.command(tool).is_some(), "{tool:?} {m:?} {o:?}");
+                    if let Some(s) = steps { assert!(!s.steps.is_empty()); }
+                }
+            }
+        }
+        let row = |manual| serde_json::to_value(HarnessUpdate {
+            tool: "codex", installed_version: Some("0.160.1".into()), latest_version: None,
+            install_method: "unknown", update_available: false, update_command: None, manual,
+        }).unwrap();
+        assert!(row(None).get("manual").is_none());
+        let json = row(Some(CODEX_EDITOR));
+        assert_eq!(json["manual"]["steps"][0]["command"], "npm install -g @openai/codex");
+        assert!(json["manual"]["steps"][3].get("command").is_none());
+        assert!(!json.to_string().contains(&*home.to_string_lossy()));
     }
 
     #[test]

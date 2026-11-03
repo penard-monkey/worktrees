@@ -26,7 +26,7 @@ import { DevicesSection } from "./DevicesPanel";
 import { dismissCat, useRemote } from "./remoteStore";
 import type { PiMcpStatus } from "./PiMcpPanel";
 import KimiPanel, { type KimiMcpStatus } from "./KimiPanel";
-import type { CodexPermissions, LayoutTile, Settings, ThemeId, ThemeSetting, UpdateInfo } from "./settings";
+import type { CodexPermissions, HarnessManual, LayoutTile, Settings, ThemeId, ThemeSetting, UpdateInfo } from "./settings";
 import { harnessPaneAction } from "./updatepoll";
 import { LAYOUT_KEYS } from "./arrange";
 import { clampNav, clampRem, clampTerm, clampZoom, DEFAULTS, LAYOUT_TILES, railsMerged, railsWidth, THEMES, ZOOM_STEPS } from "./settings";
@@ -74,6 +74,33 @@ function ManualInstall({ tag, cliDir }: { tag: string; cliDir: string | null }) 
         <a href="#" onClick={(e) => { e.preventDefault(); openUrl(`${RELEASES_URL}/tag/${tag}`).catch(() => {}); }}>{tag} release page</a>, unpack it into
         /Applications and run <code>xattr -cr /Applications/worktrees.app</code>.
       </div>
+    </details>
+  );
+}
+
+/** The host's by-hand steps for an agent CLI it won't update itself. Each
+ *  command is fixed on the host; this copies it and never runs it. Open by
+ *  default only while a newer version is out. */
+function HarnessSteps({ tool, manual, open }: { tool: string; manual: HarnessManual; open: boolean }) {
+  const [copied, setCopied] = useState(-1);
+  const copy = (i: number, cmd: string) =>
+    copyToClipboard(cmd).then(() => { setCopied(i); setTimeout(() => setCopied(-1), 2000); }).catch(() => {});
+  return (
+    <details className="manual-install harness-steps" open={open} data-testid={`harness-steps-${tool}`}>
+      <summary>How to update</summary>
+      <ol>
+        {manual.steps.map((s, i) => (
+          <li key={i} className="manual-row">
+            <div className="manual-head">
+              <span className="sub">{s.text}</span>
+              {s.command && (
+                <button className="ctrl sm" onClick={() => copy(i, s.command!)}>{copied === i ? "Copied" : "Copy"}</button>
+              )}
+            </div>
+            {s.command && <pre className="update-log">{s.command}</pre>}
+          </li>
+        ))}
+      </ol>
     </details>
   );
 }
@@ -1408,11 +1435,14 @@ export function SettingsSheet({
                     </button>}
                   </div>
                   {known && h.installed_version && <div className="harness-update-meta">
-                    {method === "unknown" || method === "legacy-python"
-                      ? "Update it the way you installed it."
+                    {h.manual ? h.manual.why
+                      : method === "unknown" || method === "legacy-python" ? "Worktrees can't update this install itself."
                       : method === "not-installed" ? "Not installed"
                       : `Installed with ${method}${h.update_command ? ` · ${h.update_command}` : ""}`}
                   </div>}
+                  {known && h.installed_version && h.manual && (
+                    <HarnessSteps tool={h.tool} manual={h.manual} open={h.update_available} />
+                  )}
                   {log?.output && <pre className="update-log" data-testid={`update-output-${h.tool}`}>{log.output}</pre>}
                 </div>;
               })}

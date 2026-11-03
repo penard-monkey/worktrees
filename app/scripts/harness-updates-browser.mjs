@@ -32,8 +32,15 @@ for (const [engine, type] of Object.entries({ chromium, webkit })) {
   ok((await claude.textContent()).includes("2.1.317 → 2.1.320"), `${engine}: installed and latest Claude versions`);
   ok((await codex.textContent()).includes("0.166.0 → 0.166.0"), `${engine}: current Codex version`);
   ok(await codex.locator("button").count() === 0, `${engine}: current Codex has no update button`);
-  ok((await kimi.textContent()).includes("Update it the way you installed it"), `${engine}: unknown Kimi method explains manual update`);
-  ok(await kimi.locator("button").count() === 0, `${engine}: unknown Kimi method has no update button`);
+  ok((await kimi.textContent()).includes("can't tell how this Kimi Code was installed"), `${engine}: unknown Kimi method says why it is manual`);
+  ok(await kimi.getByRole("button", { name: "Update", exact: true }).count() === 0, `${engine}: unknown Kimi method has no update button`);
+  const steps = kimi.locator("[data-testid=harness-steps-kimi]");
+  ok(await steps.evaluate((d) => d.open), `${engine}: steps are open while a newer Kimi is out`);
+  ok(await steps.locator("pre").first().textContent() === "kimi upgrade", `${engine}: the first step is Kimi's own updater`);
+  await steps.getByRole("button", { name: "Copy" }).first().click();
+  await steps.getByRole("button", { name: "Copied" }).waitFor();
+  ok(true, `${engine}: a step's command copies`);
+  ok(await codex.locator("[data-testid=harness-steps-codex]").count() === 0, `${engine}: an updatable Codex shows no steps`);
   ok(await claude.locator("button").count() === 1, `${engine}: available Claude has an Update button`);
 
   await page.getByRole("button", { name: "Check for updates", exact: true }).click();

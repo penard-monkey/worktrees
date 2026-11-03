@@ -160,6 +160,16 @@ const mockHarnessCommands: Record<string, string | null> = {
   claude: "claude update", codex: "npm install -g @openai/codex@latest",
   kimi: null, pi: "npm install -g --ignore-scripts @earendil-works/pi-coding-agent@latest",
 };
+// The host's steps for its "unknown" Kimi (harness_updates.rs, KIMI_OTHER).
+const mockHarnessManual: Record<string, { why: string; steps: { text: string; command?: string }[] }> = {
+  kimi: {
+    why: "Worktrees can't tell how this Kimi Code was installed, for example the install script with a custom KIMI_INSTALL_DIR.",
+    steps: [
+      { text: "Let Kimi Code update itself:", command: "kimi upgrade" },
+      { text: "Installed with npm:", command: "npm install -g @moonshot-ai/kimi-code@latest" },
+    ],
+  },
+};
 // Claude MCP wiring, stateful so the install transition is drivable: the Home
 // card must actually GO AWAY when the button works, and Settings must flip to
 // the connected verdict, neither of which a constant can exercise.
@@ -3369,11 +3379,14 @@ Phase 3: Frontend pane and mock harness
           install_method: mockHarnessMethods[tool],
           update_available: !mockReleaseQ.has("offline") && mockHarnessVersions[tool] !== mockHarnessLatest[tool],
           update_command: mockHarnessCommands[tool],
+          ...(mockHarnessCommands[tool] ? {} : { manual: mockHarnessManual[tool] }),
         })),
       };
     case "update_harness": {
       const tool = String(args.tool);
-      if (!(tool in mockHarnessVersions) || !mockHarnessCommands[tool]) throw "update it the way you installed it";
+      if (!(tool in mockHarnessVersions) || !mockHarnessCommands[tool]) {
+        throw "Worktrees can't update this install itself; follow the steps shown for it in Settings → Updates";
+      }
       if (mockReleaseQ.get("harnessslow") === tool) await sleep(2200);
       if (mockReleaseQ.get("harnessfail") === tool) return { ok: false, code: 42, output: `${tool} update failed: network unavailable`, warnings: [] };
       mockHarnessVersions[tool] = mockHarnessLatest[tool];

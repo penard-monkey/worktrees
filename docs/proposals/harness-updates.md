@@ -21,13 +21,13 @@ behind the public release, but must be updated through its extension.
 | Claude global npm | Executable links into `@anthropic-ai/claude-code`, and its `prefix/bin` agrees with `npm prefix -g` | npm latest | `npm install -g @anthropic-ai/claude-code@latest` |
 | Codex global npm | Executable links into `@openai/codex`, with the same prefix check | npm latest | `npm install -g @openai/codex@latest` |
 | Codex Homebrew cask | `bin/codex` resolves inside `Caskroom/codex`, and the prefix/cask registration agree | `formulae.brew.sh/api/cask/codex.json` | `brew upgrade --cask codex` |
-| Codex standalone or editor bundle | Any other binary, including this host's VS Code copy | npm latest for a version hint | none: update it the way it was installed |
+| Codex standalone or editor bundle | Any other binary, including this host's VS Code copy | npm latest for a version hint | none: by-hand steps (below) |
 | Kimi Code native | Executable is `~/.kimi-code/bin/kimi`, the official install script's default | `@moonshot-ai/kimi-code` npm latest | `kimi upgrade -y` (the resolved binary) |
 | Kimi Code global npm | Executable links into `@moonshot-ai/kimi-code`, with the prefix check | npm latest | `npm install -g @moonshot-ai/kimi-code@latest` |
-| Legacy Python Kimi (`kimi-cli`) | Python/uv shim identifying `kimi_cli` | no maintained latest; identify version only | none: migrate through Kimi's instructions |
+| Legacy Python Kimi (`kimi-cli`) | Python/uv shim identifying `kimi_cli` | no maintained latest; identify version only | none: by-hand steps to install Kimi Code and migrate (below) |
 | Pi global npm | Executable links into `@earendil-works/pi-coding-agent`, with the prefix check | npm latest | `npm install -g --ignore-scripts @earendil-works/pi-coding-agent@latest` |
 | Pi official managed install | Executable resolves to the official `~/.pi/agent/bin/pi` launcher, with `install/managed-install.json` and `install/current-version`; no custom self-update override | npm latest | `pi update` (the resolved launcher) |
-| Other Pi installs | Any unrecognised executable, including a standalone binary or another package manager | npm latest for a version hint | none: update it the way it was installed |
+| Other Pi installs | Any unrecognised executable, including a standalone binary or another package manager | npm latest for a version hint | none: by-hand steps (below) |
 
 The npm prefix check is essential: an arbitrary `node_modules` segment (or a
 different Node installation's global bin) is not authority to mutate the
@@ -51,6 +51,36 @@ The Kimi installer was also inspected read only: it defaults to
 `$HOME/.kimi-code/bin/kimi`. Pi's installer marks managed installs with
 `managed-install.json`; its PATH entry is a link to `~/.pi/agent/bin/pi`,
 not directly into `install/releases`.
+
+## By-hand steps (2026-11-03)
+
+A row with no Update button carries `manual`: a `why` line and numbered
+steps, each with an optional command the app shows with a Copy button and
+never runs. The host picks them from the tool, the method and where the
+executable lives (`Origin` in `harness_updates.rs`), so the iOS app renders
+the same steps without a copy of the rule. Every string is a constant in
+that file; no path or machine output reaches a client.
+
+| Where the executable lives | Steps |
+| --- | --- |
+| An editor's extension folder (`.vscode`, `.vscode-insiders`, `.vscode-server`, `.cursor`, `.windsurf`) | Codex: install the standalone CLI (`npm install -g @openai/codex` or `brew install --cask codex`), check `which codex` no longer names the extension, then Check for updates. Claude: Anthropic's installer. |
+| Homebrew's `Caskroom` or `Cellar`, not as the cask Worktrees updates | `brew upgrade --cask claude-code` / `brew upgrade --cask codex` |
+| Another Node's global `node_modules/<package>` (an nvm version, pnpm, yarn, bun) | switch to that Node, then the package's `npm install -g …@latest` |
+| Pi's managed launcher with a custom update command | `pi update`, run by the person |
+| `WORKTREES_KIMI_BIN` / `WORKTREES_PI_BIN` | update the copy it names, or unset it |
+| The archived Python `kimi-cli` | Kimi's install script, `uv tool uninstall kimi-cli`, then `kimi migrate` |
+| Anything else | the tool's own updater first (`claude update`, `kimi upgrade`, `pi update`), then the npm or Homebrew command |
+
+Measured on this Mac the same day: the `codex` on PATH is
+`~/.vscode/extensions/openai.chatgpt-26.930.61225-…/bin/macos-aarch64/codex`
+while nine other extension folders, newer ones included, sit beside it. No
+shell profile adds that entry (a fresh login shell has none); it is inherited
+from the environment the tmux server and the app started in. npm's global bin
+and `/opt/homebrew/bin` both come before it, in serve's PATH and in a pane's,
+so a standalone install takes over. Homebrew has a `codex` cask and a
+`claude-code` cask, and no `codex` formula. Kimi Code's docs give the
+install script `https://code.kimi.com/kimi-code/install.sh`, the npm package,
+and `kimi migrate` for the old CLI's config, MCP servers and sessions.
 
 ## Design
 

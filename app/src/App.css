@@ -1212,6 +1212,10 @@ html[data-guides="off"] .kids > .places::after { display: none; }
 .harness-update-main b { color: var(--txt-hi); min-width: 4rem; }
 .harness-update-versions { flex: 1; min-width: 8rem; color: var(--txt-dim); font-size: var(--fs-label); }
 .harness-update-meta { color: var(--txt-dim); font-size: var(--fs-micro); margin-top: var(--s1); overflow-wrap: anywhere; }
+.harness-steps { margin-top: var(--s2); }
+.harness-steps ol { margin: 0; padding-left: 1.25em; }
+.harness-steps li::marker { color: var(--txt-dim); font-size: var(--fs-label); }
+.harness-steps .manual-row { margin-top: var(--s2); }
 .ver-path {
   margin-left: var(--s1); font-family: var(--term-family); font-size: var(--fs-micro);
   color: var(--txt-mute); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
