@@ -10,17 +10,22 @@
 //     20 turns, so a new turn pushes the oldest off the top, and a pending
 //     message is SWAPPED for the transcript's copy. So this follows on ANY
 //     commit while the reader is at the bottom, not on a count.
-//   - WebKit anchors scrolling as Chromium does (the system WKWebView on
-//     macOS 27.0 included): content removed above the view moves `scrollTop`,
-//     and the `scroll` event that move fires arrives BEFORE the
-//     ResizeObserver's follow. The old hook took that event for the reader
-//     scrolling up and stopped following, 704 px from the bottom. Here native
-//     anchoring is off (`overflow-anchor: none` on `.chat-scroll`), this file
-//     does the anchoring itself, and a scroll event counts only when the
-//     position moved since this file last saw it, so a scroll it made itself
-//     never reads as the reader's.
-//   - "Was the reader at the bottom?" is decided before the commit changes
-//     the DOM (`take`, from `BeforeCommit`), never from what the commit did.
+//   - WebKit moves `scrollTop` INSIDE a commit that churns the list: it lays
+//     out once with the rows half rewritten and clamps to that shorter
+//     column (4143 → 2010 when every row was rewritten, 4143 → 3836 with
+//     stable keys; no script wrote it, and `overflow-anchor: none` did not
+//     change it). The `scroll` event that clamp fires is dispatched BEFORE
+//     the ResizeObserver's follow, and the old hook took it for the reader
+//     scrolling up. So "was the reader at the bottom?" is decided before the
+//     commit (`take`, from `BeforeCommit`), a scroll event counts only when
+//     the position moved since this file last looked (a clamp inside a
+//     commit is looked at, and undone, by the commit's own effect), and a
+//     held row is restored against where the scroller WAS, not where the
+//     clamp left it.
+//   - Scroll anchoring is real in every engine here (the system WKWebView on
+//     macOS 27.0 included), but each engine picks its own anchor, and none
+//     held the view through that clamp. It is off for `.chat-scroll`
+//     (`overflow-anchor: none`): this file is the one thing that moves it.
 import { Component, useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 
 /** This close to the bottom counts as at it: a reader a line up still follows. */
@@ -61,15 +66,15 @@ function look(el: HTMLElement): Seen {
 }
 
 /** Put the first row in view that is still there back where it was, so
- *  rows leaving the top or growing above it do not move what is read. */
+ *  rows leaving the top or growing above it do not move what is read. The
+ *  scroll it lands on is counted from where the scroller WAS (`seen.st`),
+ *  since a clamp inside the commit may have moved it since; with no row
+ *  left, the scroller goes back there. */
 function hold(el: HTMLElement, seen: Seen) {
   const box = el.getBoundingClientRect();
-  for (const m of seen.marks) {
-    if (!m.node.isConnected) continue;
-    const d = m.node.getBoundingClientRect().top - box.top + el.scrollTop - m.pos;
-    if (Math.abs(d) >= 1) el.scrollTop = el.scrollTop + d;
-    return;
-  }
+  const m = seen.marks.find((m) => m.node.isConnected);
+  const want = m ? seen.st + m.node.getBoundingClientRect().top - box.top + el.scrollTop - m.pos : seen.st;
+  if (Math.abs(el.scrollTop - want) >= 1) el.scrollTop = want;
 }
 
 /** Calls `take` as React is about to change the DOM, in every commit it is

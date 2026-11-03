@@ -28,9 +28,9 @@
   background: var(--bg-abyss); color: var(--txt); container-type: inline-size;
 }
 .chat-scrollwrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
-/* No native scroll anchoring: stickToBottom.ts anchors on the rows itself,
-   and the scroll events the browser's own adjustments fire read as the
-   reader scrolling (the jump of 2026-11-02, chat-session-view.md §7). */
+/* No native scroll anchoring: stickToBottom.ts holds the rows in view itself,
+   and is the one thing that moves this view (each engine anchors on a node of
+   its own choosing; the jump of 2026-11-02, chat-session-view.md §7). */
 .chat-scroll { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; overflow-anchor: none; }
 .chat-scroll:focus { outline: none; }
 /* One reading column whose gutters are 7% of the chat's width on each side
