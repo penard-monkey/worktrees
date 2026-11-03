@@ -226,8 +226,10 @@ pub fn bucket(state: State) -> &'static str {
     }
 }
 
-/// The read row, from what `io` finds.
-pub fn sessions_with(io: &dyn RestartIo, roots: &[String], tool: Tool) -> Sessions {
+/// The read row, from what `io` finds in `roots`. `everyone` is a caller who
+/// sees every project: only it is told about sessions outside worktrees,
+/// which belong to no project and so to none a scoped device was granted.
+pub fn sessions_with(io: &dyn RestartIo, roots: &[String], tool: Tool, everyone: bool) -> Sessions {
     let Some(installed) = io.installed(tool) else {
         return Sessions { tool: tool.id(), installed_version: None, sessions: Vec::new(), outside: Vec::new() };
     };
@@ -236,7 +238,7 @@ pub fn sessions_with(io: &dyn RestartIo, roots: &[String], tool: Tool) -> Sessio
         tool: tool.id(),
         installed_version: installed.version.clone(),
         sessions: found.sessions.into_iter().filter(|s| s.older).collect(),
-        outside: found.outside,
+        outside: if everyone { found.outside } else { Vec::new() },
     }
 }
 
@@ -356,13 +358,20 @@ pub fn restart_with(io: &dyn RestartIo, roots: &[String], lock: &dyn Fn(&str) ->
 
 // ── the rows ─────────────────────────────────────────────────────────────────
 
-/// `harness_sessions {tool}`: older sessions of `tool`, live.
+/// `harness_sessions {tool}`: older sessions of `tool`, live, in the
+/// caller's projects (`read_projects` is the caller's scope). The ones
+/// outside worktrees belong to no project, so only a caller who sees every
+/// project is told about them: to a scoped device they would be sessions of
+/// projects it was not granted.
 pub fn sessions(ctx: &Ctx, tool: String) -> Result<Sessions, String> {
     let tool = Tool::parse(&tool)?;
-    Ok(sessions_with(&Live, &crate::projects::read_projects(ctx), tool))
+    Ok(sessions_with(&Live, &crate::projects::read_projects(ctx), tool, ctx.scope().is_all()))
 }
 
-/// `restart_harness_sessions {tool, force}`.
+/// `restart_harness_sessions {tool, force}`, in the caller's projects only:
+/// `read_projects` answers with the caller's scope (serve's `Ctx::scoped`),
+/// so a device granted one project restarts that project's agents and no
+/// other's.
 pub fn restart(ctx: &Ctx, tool: String, force: bool) -> Result<Restarted, String> {
     let tool = Tool::parse(&tool)?;
     let agents = ctx.agents.clone();
@@ -674,13 +683,17 @@ mod tests {
             outside: vec![Outside { version: Some("2.1.310".into()) }],
             ..Script::default()
         };
-        let got = sessions_with(&s, &["/r".into()], Tool::Claude);
+        let got = sessions_with(&s, &["/r".into()], Tool::Claude, true);
         assert_eq!(got.installed_version.as_deref(), Some("2.1.317"));
         let rows: Vec<(&str, &str)> = got.sessions.iter().map(|x| (x.slug.as_str(), x.state)).collect();
         assert_eq!(rows, [("a", "idle"), ("bb", "busy"), ("ccc", "waiting")]);
         assert_eq!(got.outside, [Outside { version: Some("2.1.310".into()) }]);
         let wire = serde_json::to_value(&got).unwrap();
         assert!(wire["sessions"][0].get("pane").is_none() && wire["sessions"][0].get("resume_id").is_none(), "{wire}");
+        // A scoped device: its projects' sessions, and none outside them.
+        let scoped = sessions_with(&s, &["/r".into()], Tool::Claude, false);
+        assert_eq!(scoped.sessions.len(), 3);
+        assert!(scoped.outside.is_empty(), "sessions outside worktrees belong to no project a device was granted");
     }
 
     #[test]
