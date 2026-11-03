@@ -98,10 +98,19 @@ refuses the other two by name.
 
 One read row call: one `list-panes -a`, one Claude probe scan, one
 `ps -t <codex ttys> -o tty=,pid=,pgid=,tpgid=` (only when a Codex lane is up),
-and per Codex lane a few `proc_pidinfo`/`/proc` reads. The installed
+and per Codex lane a few `proc_pidinfo`/`/proc` reads. A project is
+discovered (its git calls) only when some pane runs under it. The installed
 version is `--version` of the PATH executable, cached by (canonical path,
 ctime, size), so it is spawned once per install. Activity is read only for
-the sessions found older. Measured in the implementation notes below.
+the sessions found older.
+
+Measured read-only on this Mac (11 registered projects, ~30 panes), the
+implementation's read row: Claude 273 ms cold (the one `claude --version`),
+89 ms warm; Codex 242 ms cold, 96 ms warm. It found 13 worktrees Claude
+sessions older than the installed 2.1.318 (11 idle, 1 waiting, 1 busy), 2
+more outside worktrees, and 2 Codex lanes on the installed build — one of
+them holding no rollout open (a Codex with no turn yet), which is listed as
+not resumable.
 
 ## Design
 
@@ -180,9 +189,15 @@ an untrusted folder) is `failed` with its reason; nothing was respawned.
 **It never restarts the session it runs inside.** A lane's MCP server has no
 such tool; a lane could still reach the row by connecting to serve as the
 console with serve.json's token. So a pane whose process tree contains serve
-itself is skipped (`serve runs in this session`). The caller's own pane is
-not known to serve (no peer pid on the socket) — the proposal records that
-gap rather than claiming more.
+itself is skipped ("Worktrees' own server runs in this session"). The
+caller's own pane is not known to serve (no peer pid on the socket) — the
+proposal records that gap rather than claiming more.
+
+**Scope.** Both rows enumerate projects through `projects::read_projects`,
+which serve narrows to the caller's grant, so a device granted one project
+lists and restarts that project's agents only. Sessions outside worktrees
+belong to no project, so only a caller who sees every project is told about
+them.
 
 The audit records `tool`, `force` and the counts (restarted, skipped,
 failed). Never a session id, a path or any conversation text.
@@ -201,6 +216,28 @@ sessions exist:
   `(main)` among them.
 - a result line per session, and "restart by hand" for the outside count;
 - refreshed after an Update and after a restart.
+
+## Verification
+
+- Unit: the selection rules (`claude_older`, `codex_older`), the list (older
+  only, with activity; nothing outside for a scoped caller), the
+  inactive/force split, the re-read under the place lock (turned busy,
+  restarted, already current, gone), failures, unproved restarts and serve's
+  own session (`harness_restart.rs`); the exact resume words
+  (`harness::claude_resume_with_an_id_names_the_exact_session`); the held
+  thread (`codex::the_held_thread_is_the_open_user_rollout_of_this_place`);
+  the admin refusal (`resolve.rs`) and the audit record (`audit.rs`). Each
+  was shown red by breaking the rule it guards.
+- End to end (`crates/worktrees-api/tests/restart_e2e.rs`, ignored, guarded
+  to a private socket): a scratch Claude 2.1.317 and a scratch Codex on the
+  older 0.159.2 binary in a scratch repo's `(main)`, on a private tmux
+  server, restarted through the real path. Claude came back in pane `%0`
+  with the same `sessionId`, `--name` and conversation, its probe on 2.1.318,
+  launched as `claude --name … --resume <uuid> --plugin-dir …/claude-prompt`;
+  Codex in pane `%1` on 0.160.1 with the same conversation, holding the same
+  rollout open. Both proved in 2.6 s.
+- Frontend: `harnessrestart-check.mjs` (wording and counts) and
+  `harness-restart-browser.mjs` against the mock, in Chromium and WebKit.
 
 ## Threat model
 
