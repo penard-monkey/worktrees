@@ -1269,6 +1269,25 @@ wait loop on it never ended and a sandbox app ran for two hours.
   clamps scrollTop, the clamp fires its own `scroll` event, and a hook that
   trusts every scroll event records 0. Reproduce with `?slowread[=ms]` and
   `__mock.editFile(path, content?)`; `scrollkeep-check.mjs` pins it.
+- **WebKit anchors scrolling, and it CLAMPS inside a React commit.** Measured
+  2026-11-02 (the chat's "jumps up three messages"). Both Playwright WebKit
+  27.2 and the system WKWebView on macOS 27.0 anchor (a standalone `swiftc`
+  probe; an off-screen WKWebView never fires rAF, so wait on timers), so
+  "WebKit doesn't anchor" is false here. The jump was not anchoring, though.
+  A commit that rewrote every row (rows keyed by window index) moved
+  `scrollTop` 4143 → 2010. No script wrote it, and `overflow-anchor: none`
+  changed nothing: WebKit laid out once with the rows torn and clamped, where
+  Chromium only clamps to the final height. The clamp's `scroll` event is
+  dispatched BEFORE the next ResizeObserver delivery, so a hook that reads
+  "at the bottom" from scroll events stops following. The fix has three
+  parts:
+  - key list rows by what they are;
+  - decide from geometry read before the commit (`getSnapshotBeforeUpdate`:
+    `stickToBottom.ts`'s `BeforeCommit`);
+  - count a scroll event only if the position moved since you last looked.
+
+  To tell an engine's scroll from a script's, wrap the element's `scrollTop`
+  setter: a move with no write is the engine's.
 - **xterm's search addon fails only once you SEARCH.** Its decorations need
   `allowProposedApi: true` on the `Terminal` — without it `registerDecoration`
   throws on the first ⌘F, from inside an effect, taking the pane down with it;
