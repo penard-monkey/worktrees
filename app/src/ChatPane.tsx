@@ -29,6 +29,7 @@ import { HARNESS_LABEL, isHarness, type Harness } from "./harness";
 import * as Icons from "./icons";
 import { Markdown } from "./markdown";
 import { useDocPathLinks } from "./useDocPathLinks";
+import { BeforeCommit, useStickToBottom } from "./stickToBottom";
 import { escapeDepth } from "./useEscape";
 import "./ChatPane.css";
 
@@ -117,9 +118,9 @@ export function ChatPane(props: ChatPaneProps) {
 
   const data = v.turns.data;
   const items = data ? itemsOf(data.turns, v.answered, v.pending, working) : [];
-  const replies = items.filter((it) => it.k === "reply").length;
+  const lastReply = [...items].reverse().find((it) => it.k === "reply")?.key ?? null;
   const promptKey = promptKeyOf(prompt);
-  const { toBottom, fresh, dismiss } = useStickToBottom(scrollRef, items.length, replies, !!data, promptKey);
+  const { toBottom, fresh, dismiss, take } = useStickToBottom(scrollRef, !!data, promptKey, lastReply);
   const said = useAnnounce(target, v, items, agent);
 
   // A prompt takes the keyboard from an EMPTY composer as it appears, once
@@ -211,6 +212,7 @@ export function ChatPane(props: ChatPaneProps) {
 
   return (
     <div className="chat" data-testid="chat" onKeyDown={onKeyDown}>
+      <BeforeCommit take={take} />
       <div className="sr-only" aria-live="polite" aria-atomic="true" data-testid="chat-announce"><span key={said.n}>{said.text}</span></div>
       <div className="chat-scrollwrap">
       {/* Focusable by a click (not by Tab): a click in the transcript keeps
@@ -302,71 +304,6 @@ function useAnnounce(target: Target, v: ChatView, items: Item[], agent: string) 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   return said;
-}
-
-/** Open at the newest; follow new content only when already at the bottom,
- *  else offer "New messages". A NEW prompt is always brought into view, and
- *  one taller than the view opens at its top: what it asks is read before
- *  its choices, never scrolled past to reach them. */
-function useStickToBottom(ref: RefObject<HTMLDivElement | null>, count: number, replies: number, loaded: boolean, promptKey: string | null) {
-  const atBottom = useRef(true);
-  const seen = useRef<number | null>(null);
-  const seenReplies = useRef(0);
-  const seenPrompt = useRef<string | null>(null);
-  const [fresh, setFresh] = useState(false);
-  const toBottom = () => { const el = ref.current; if (el) el.scrollTop = el.scrollHeight; };
-  const toPrompt = () => {
-    const el = ref.current;
-    const card = el?.querySelector<HTMLElement>(".chat-card");
-    if (!el || !card) return toBottom();
-    if (card.offsetHeight <= el.clientHeight - 16) return toBottom();
-    el.scrollTop += card.getBoundingClientRect().top - el.getBoundingClientRect().top - 8;
-    atBottom.current = false;
-  };
-  useLayoutEffect(() => {
-    if (!loaded || promptKey === seenPrompt.current) return;
-    seenPrompt.current = promptKey;
-    if (promptKey !== null) toPrompt();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [promptKey, loaded]);
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const f = () => {
-      atBottom.current = el.scrollHeight - el.clientHeight - el.scrollTop <= 48;
-      if (atBottom.current) setFresh(false);
-    };
-    el.addEventListener("scroll", f, { passive: true });
-    return () => el.removeEventListener("scroll", f);
-  }, [ref]);
-  useLayoutEffect(() => {
-    if (!loaded) return;
-    if (seen.current === null) {
-      seen.current = count;
-      seenReplies.current = replies;
-      if (promptKey !== null) toPrompt();
-      else toBottom();
-      return;
-    }
-    if (count > seen.current) {
-      if (atBottom.current) toBottom();
-      else if (replies > seenReplies.current) setFresh(true);
-    }
-    seen.current = count;
-    seenReplies.current = replies;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [count, replies, loaded]);
-  // The column growing (a card, a wrapped composer) keeps the bottom in view.
-  useEffect(() => {
-    const el = ref.current;
-    if (!el || typeof ResizeObserver === "undefined") return;
-    const ro = new ResizeObserver(() => { if (atBottom.current && seen.current !== null) toBottom(); });
-    ro.observe(el);
-    if (el.firstElementChild) ro.observe(el.firstElementChild);
-    return () => ro.disconnect();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [loaded]);
-  return { toBottom, fresh, dismiss: () => setFresh(false) };
 }
 
 /** A turn's tool calls. From a host that says what each did: a row per
