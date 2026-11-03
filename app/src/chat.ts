@@ -352,9 +352,23 @@ const sameDay = (a: number, b: number) => new Date(a * 1000).toDateString() === 
  *  the messages the transcript has not shown yet at their send time. A turn with
  *  `steps` is drawn in their order: each reply block at its own time, the
  *  tools after the block they followed, and every question, permission and
- *  plan a person answered as what was asked and then the answer. */
+ *  plan a person answered as what was asked and then the answer.
+ *
+ *  Keys name what an item IS (its turn's time, its step's time), never where
+ *  it sits in the window: `agent_turns` answers the latest `TURNS_MAX`, so a
+ *  new turn pushes the oldest off the top, and a key by position handed every
+ *  row the next turn's content. React rewrote the whole list in place, and
+ *  the browser's scroll anchoring held a row that now said something else
+ *  (docs/proposals/chat-session-view.md §7). A second thing at the same
+ *  second gets `~1`, `~2`. */
 export function itemsOf(turns: Turn[], answered: Answered[], pending: Pending[], busy = false): Item[] {
   const out: Item[] = [];
+  const taken = new Map<string, number>();
+  const idOf = (base: string) => {
+    const n = taken.get(base) ?? 0;
+    taken.set(base, n + 1);
+    return n ? `${base}~${n}` : base;
+  };
   let prevAt: number | null = null;
   let lastWasAgent = false;
   const queue = [...answered];
@@ -370,7 +384,8 @@ export function itemsOf(turns: Turn[], answered: Answered[], pending: Pending[],
     if (prevAt === null || at - prevAt > GAP_S || !sameDay(at, prevAt)) out.push({ k: "sep", key, at });
     prevAt = at;
   };
-  turns.forEach((t, i) => {
+  turns.forEach((t) => {
+    const i = idOf(`${t.at ?? "-"}`);
     if (t.at !== null) flushAnswered(t.at);
     sep(t.at, `s${i}`);
     if (t.notice) {
@@ -389,8 +404,10 @@ export function itemsOf(turns: Turn[], answered: Answered[], pending: Pending[],
       return;
     }
     let reply: Extract<Item, { k: "reply" }> | null = null;
-    t.steps.forEach((st, j) => {
-      const key = `${i}.${j}`;
+    t.steps.forEach((st) => {
+      // By the step's time, not its index: a turn the host's byte window
+      // starts inside loses its first steps as the transcript grows.
+      const key = idOf(`${i}.${st.at ?? "-"}`);
       if (st.kind === "text" || st.kind === "tool") {
         if (st.kind === "text" || !reply) {
           if (st.at !== null) { flushAnswered(st.at); sep(st.at, `s${key}`); }

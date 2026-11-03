@@ -334,9 +334,10 @@ one of these wrappers remains a person message.
 | `app/src/chat.ts` | The rows' shapes, `agents.rs`'s refusal strings, the composer's rule, the refusal words, the conversation's items (ported from iOS `ViewSession.itemsOf` / `session.settlePending`), and a per-place store (memory only) |
 | `app/src/ChatPane.tsx` | The chat, the prompt card, the composer, and the `AgentViewSwitch` |
 | `app/src/ChatPane.css` | Plain CSS on `tokens.css` |
+| `app/src/stickToBottom.ts` | The scroll: follow at the bottom, hold the rows in view above it, "New messages" (below) |
 | `app/src/App.tsx` | The switch in `.agent-label`, the terminal wrapped in a hidden, `inert` `.agent-term`, and the activity, done stamp and pane draft passed in |
 | `app/src/settings.ts`, `SettingsSheet.tsx` | `chat_view` (default on, migrated once on upgrade), Behavior → Chat view; each place's optional `agent_view` (`agentViewFor`, `withAgentView`) |
-| `app/src/mock/install.ts` | `?turns=answered` (a transcript whose prompts were answered, as `steps`; a mock answer lands in the transcript 1.5 s later), `?turns=queued` (a busy Claude absorbs the first send mid-turn; the next send is a normal turn), per-harness turns, the pi/kimi refusal, `?agentsend=mid\|nocomposer\|unconfirmed`, `?agentprompt=permission\|question\|multi\|multi-form\|multi-form-typed\|plan\|tall\|unreadable\|resume\|preview\|preview-shown\|preview-note\|off` (`,waiting` for waiting places only; a Codex place gets Codex's approval; `multi-form` shows a current multi-select with `Next` and an empty field, then the next question and the review; `multi-form-typed` shows its field already holding text; `resume` is Claude's resume picker, four conversations shown and three more in the terminal, with `agent_turns` failing as before a session exists until a pick, and for half a second after it; `preview` is Claude's question with a preview per option, every one known, `preview-shown` the same at 80×24 with only the terminal's one, cut, and `preview-note` one with a note typed in the terminal), `?agentanswer=unseen`, `?activity=<n>` |
+| `app/src/mock/install.ts` | `?turns=answered` (a transcript whose prompts were answered, as `steps`; a mock answer lands in the transcript 1.5 s later), `?turns=queued` (a busy Claude absorbs the first send mid-turn; the next send is a normal turn), per-harness turns, the pi/kimi refusal, `?agentsend=mid\|nocomposer\|unconfirmed`, `?agentprompt=permission\|question\|multi\|multi-form\|multi-form-typed\|plan\|tall\|unreadable\|resume\|preview\|preview-shown\|preview-note\|off` (`,waiting` for waiting places only; a Codex place gets Codex's approval; `multi-form` shows a current multi-select with `Next` and an empty field, then the next question and the review; `multi-form-typed` shows its field already holding text; `resume` is Claude's resume picker, four conversations shown and three more in the terminal, with `agent_turns` failing as before a session exists until a pick, and for half a second after it; `preview` is Claude's question with a preview per option, every one known, `preview-shown` the same at 80×24 with only the terminal's one, cut, and `preview-note` one with a note typed in the terminal), `?agentanswer=unseen`, `?activity=<n>`, `?turns=long` (24 turns, so each new turn slides the 20-turn window), `__mock.agentReply(path, …texts)` and `__mock.agentPrompt(path, variant)` (a reply or a prompt in mid-session) |
 
 `?turns=notices` shows all six injected-entry kinds, including long peer text,
 shell output, and a compact summary. They use neutral notes, cards, or chips,
@@ -368,6 +369,28 @@ of control and invisible format characters and clipped by the host.
   its tints in all six themes, and the tints sit 23–37 RGB units off the
   field. Its `+`/`−` marks are `--txt-dim` (2.5:1 in tokyo-day), beside the
   tint that carries the same meaning.
+- **The scroll** (2026-11-02: "when I get a response the view jumps up to
+  roughly 3 messages ago"). A reply rarely grew the item count the old
+  follow keyed on, because `agent_turns`' 20-turn window slides and a pending
+  message is swapped for the transcript's copy. Rows were keyed by window
+  position, so a slide rewrote every row in place, and WebKit, laying out
+  once inside that commit with the rows torn, clamped `scrollTop` 4143 →
+  2010. No script wrote it, and `overflow-anchor: none` changed nothing. The
+  clamp's scroll event reached the hook before its ResizeObserver, and the
+  hook read it as the reader scrolling up. Now rows are keyed by turn and step
+  time. `stickToBottom.ts` decides from the DOM before each commit
+  (`BeforeCommit`), follows any commit at the bottom, and puts the first row
+  in view back where it was otherwise. Native anchoring is off for
+  `.chat-scroll`. `chat-scroll-browser.mjs` measured the mock (`?turns=long`)
+  in WebKit and Chromium:
+  - Before, in WebKit: 805 px up after a send at the bottom, 1974 px up on a
+    busy place. Scrolled up, the top row changed under the reader in both
+    engines.
+  - After: `fromBottom` 0 on every frame at the bottom, and the top row held
+    to 1 px through slides, a reflow and a reply below.
+
+  `chatscroll-check.mjs` holds it: 20 checks, 11 of which fail on the old
+  code.
 
 **Not done:**
 - ~~persisting the choice~~: done. Each place keeps its explicit view in `place_panels` (`agent_view`, absent uses the provider default, no global), across switches and relaunches, and keeps it while Chat view is off (`placeview-check.mjs`);
