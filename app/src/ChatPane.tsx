@@ -1034,7 +1034,7 @@ function Composer(props: {
         addAttachments(target.path, Array.from(e.dataTransfer.files));
         field.current?.focus({ preventScroll: true });
       }}>
-      {props.paneDraft && !props.waiting && !draftIsOwnSend(props.paneDraft.text, v, Date.now()) && (
+      {props.paneDraft && !props.waiting && !draftIsOwnSend(props.paneDraft.text, v) && (
         <p className="chat-paneDraft" data-testid="chat-pane-draft">
           The terminal’s input holds unsent text (“{props.paneDraft.text.length > 60 ? props.paneDraft.text.slice(0, 59) + "…" : props.paneDraft.text}”).
           {" "}{agent} takes no message until it is sent or cleared{" "}

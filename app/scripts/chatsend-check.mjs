@@ -25,6 +25,7 @@ import { transformWithEsbuild } from "vite";
 const here = (p) => path.join(path.dirname(fileURLToPath(import.meta.url)), p);
 const SRC = process.env.CHATSEND_SRC ?? here("../src/chat.ts");
 const PANE = process.env.CHATSEND_PANE ?? here("../src/ChatPane.tsx");
+const TURNS_RS = here("../../crates/worktrees-core/src/turns.rs");
 
 let failed = 0;
 const fail = (m) => { failed++; console.log(`not ok ${m}`); };
@@ -34,7 +35,10 @@ const check = (cond, m, said = "") => (cond ? ok(m) : fail(said ? `${m}: ${said}
 const src = fs.readFileSync(SRC, "utf8")
   .replace(/^import \{ useSyncExternalStore \} from "react";$/m, "const useSyncExternalStore = (_subscribe, snapshot) => snapshot();")
   .replace(/^import \{ invoke, windowOnHost \} from "\.\/ipc";$/m, "const invoke = (...args) => globalThis.__chatSendInvoke(...args); const windowOnHost = () => true;")
-  .replace(/^import \{ convertPhoto, jpegName, photoDecision, photoKind, INPUT_MAX \} from "\.\/chat-image";$/m, "const INPUT_MAX = 40 * 1024 * 1024; const convertPhoto = () => undefined; const jpegName = () => undefined; const photoDecision = () => undefined; const photoKind = () => undefined;");
+  .replace(/^import \{ convertPhoto, jpegName, photoDecision, photoKind, INPUT_MAX \} from "\.\/chat-image";$/m, "const INPUT_MAX = 40 * 1024 * 1024; const convertPhoto = () => undefined; const jpegName = () => undefined; const photoDecision = () => undefined; const photoKind = () => undefined;")
+  // A `data:` module cannot resolve a relative import, and this one only names
+  // an old host's refusal, which no case here is.
+  .replaceAll('await import("./ipcws")', "({ unsupportedFeature: () => null })");
 if (/^import /m.test(src)) {
   console.log("not ok chat.ts gained an import this check does not stub: extend the stubs above");
   process.exit(1);
@@ -50,6 +54,15 @@ setTimeout(() => {
   console.log(`not ok chatsend-check stuck, ${failed} failure(s) before it`);
   process.exit(1);
 }, 20_000);
+
+// The own-send window is a real 20 s timer: this run holds such timers to fire
+// by hand. `settle` and the rest pass through.
+const realSetTimeout = globalThis.setTimeout;
+const held = [];
+globalThis.setTimeout = (f, ms, ...rest) => {
+  if (ms >= 1000) { held.push({ f, ms }); return 0; }
+  return realSetTimeout(f, ms, ...rest);
+};
 
 const T0 = 1_793_470_000;
 const realNow = Date.now;
@@ -303,12 +316,26 @@ async function sendAndEcho(t, text, at, ...before) {
 // `turns::finish` cuts a user message at TEXT_MAX characters with an ellipsis,
 // and `clip_steps` a mid-turn one the same way.
 {
-  const long = "x".repeat(4100);
-  const clipped = `${"x".repeat(4000)}…`;
+  const product = /pub const TEXT_MAX: usize = (\d+);/.exec(fs.readFileSync(TURNS_RS, "utf8"));
+  check(!!product, "turns.rs still names TEXT_MAX");
+  const MAX = Number(product?.[1]);
+  check(C.HOST_TEXT_MAX === MAX, "HOST_TEXT_MAX mirrors turns.rs", `${C.HOST_TEXT_MAX} against ${MAX}`);
+  const long = "x".repeat(MAX + 100);
+  const clipped = `${"x".repeat(MAX)}…`;
   const p = { id: 1, text: long, sentAt: T0 * 1000, queued: false };
   check(C.settlePending([p], [turn(T0, clipped)]).length === 0, "a message over the host's clip settles against its clipped record");
   check(C.settlePending([p], [turn(T0 - 5, "start", [{ kind: "user", at: T0, text: clipped }])]).length === 0, "… as a mid-turn step too");
-  check(C.settlePending([p], [turn(T0, `${"y".repeat(4000)}…`)]).length === 1, "another message clipped at the same length does not");
+  check(C.settlePending([p], [turn(T0, `${"y".repeat(MAX)}…`)]).length === 1, "another message clipped at the same length does not");
+  // The host counts `chars()`: code points, where JS's length counts UTF-16.
+  const astral = "😀".repeat(MAX + 10);
+  check(C.settlePending([{ ...p, text: astral }], [turn(T0, `${"😀".repeat(MAX)}…`)]).length === 0, "the clip is counted in code points, as the host counts");
+  // A person's own ellipsis is not the host's cut. A read holding it must not
+  // settle a later line that merely starts the same way.
+  const kept = (sent, record, m) => check(C.settlePending([{ id: 3, text: sent, sentAt: T0 * 1000, queued: false }], [turn(T0, record)]).length === 1, m);
+  kept("ok, go ahead", "ok…", "a typed “ok…” does not settle “ok, go ahead”");
+  kept("wait for it", "wait…", "a typed “wait…” does not settle “wait for it”");
+  kept(long, `${"x".repeat(MAX - 1)}…`, "a record one short of the cut is not a clip");
+  kept(long, `${"x".repeat(MAX + 1)}…`, "nor one past it");
   const short = { id: 2, text: "wait", sentAt: T0 * 1000, queued: false };
   check(C.settlePending([short], [turn(T0, "wait…")]).length === 1, "a sent line is no copy of a longer one that ends in an ellipsis");
   check(C.settlePending([{ ...short, text: "wait for it" }], [turn(T0, "wait")]).length === 1, "nor is a prefix without the ellipsis");
@@ -347,17 +374,67 @@ if (typeof C.draftIsOwnSend !== "function") {
   const own = C.draftIsOwnSend;
   const t = place();
   const text = "make it a PR ";
+  held.length = 0;
   const { done } = await startSend(t, text);
   const during = C.useChat(t.path);
-  check(own("make it a PR", during, Date.now()), "a sample of the line being sent is no draft");
-  check(!own("something else", during, Date.now()), "… other text in the composer still is");
+  check(own("make it a PR", during), "a sample of the line being sent is no draft");
+  check(!own("something else", during), "… other text in the composer still is");
+  check(held.length === 0, "… and its window does not start until the send lands");
   await answer("agent_send", SENT);
   await done;
   const after = C.useChat(t.path);
-  check(own("make it a PR", after, Date.now()), "the same sample after the send landed is none either");
-  check(own("make it a PR", after, Date.now() + 15_000), "… for the whole 15 s until the next sample");
-  check(!own("make it a PR", after, Date.now() + 60_000), "… but the same words a minute later are someone's draft");
+  check(own("make it a PR", after), "the same sample after the send landed is none either");
+  // The push is change-gated (host.rs), so if the person really typed these
+  // words, nothing would redraw a hidden notice. The window ends in the STORE,
+  // which is what redraws the composer.
+  check(held.length === 1 && held[0].ms > 15_000, "… and one timer outlasts the 15 s sample", JSON.stringify(held.map((h) => h.ms)));
+  held.splice(0).forEach((h) => h.f());
+  const expired = C.useChat(t.path);
+  check(expired !== after, "the window's end moves the store, so the composer redraws");
+  check(!own("make it a PR", expired), "… and the same words after it are someone's draft");
   await drain();
+
+  // A later send of the same words gets its whole window: the first's timer
+  // belongs to the first.
+  {
+    const r = place();
+    const one = await startSend(r, "same");
+    await answer("agent_send", SENT);
+    await one.done;
+    const two = await startSend(r, "same");
+    await answer("agent_send", SENT);
+    await two.done;
+    const timers = held.splice(0);
+    check(timers.length === 2, "two landed sends, two timers", String(timers.length));
+    timers[0]?.f();
+    check(own("same", C.useChat(r.path)), "the first send's timer does not end the second's window");
+    timers[1]?.f();
+    check(!own("same", C.useChat(r.path)), "… its own does");
+    await drain();
+  }
+
+  // A window still open when a later send begins vouches only for the later
+  // line, from its first step: an upload can take a while, and may be refused.
+  {
+    const r = place();
+    const one = await startSend(r, "stale");
+    await answer("agent_send", SENT);
+    await one.done;
+    await drain();
+    held.length = 0;
+    C.setDraft(r.path, "stale");
+    C.addAttachments(r.path, [new Blob(["hello"], { type: "text/plain" })]);
+    await settle();
+    const sending = C.sendDraft(r, "Claude");
+    await settle();
+    check(C.useChat(r.path).sending === true, "a send with a file is uploading");
+    check(!own("stale", C.useChat(r.path)), "an earlier line is not vouched for while a later send uploads");
+    take("agent_attach")?.reject("attach-unsafe");
+    await sending;
+    check(!own("stale", C.useChat(r.path)), "… nor after that upload is refused");
+    await drain();
+    held.length = 0;
+  }
 
   for (const [name, reply] of [["unconfirmed", { ...SENT, delivered: false }], ["refused", null]]) {
     const r = place();
@@ -365,7 +442,7 @@ if (typeof C.draftIsOwnSend !== "function") {
     if (reply) await answer("agent_send", reply);
     else { take("agent_send")?.reject("the agent's prompt has unsent text in it"); await settle(); }
     await sending;
-    check(!own("stuck", C.useChat(r.path), Date.now()), `a send ${name}: the notice stays, the text may really be there`);
+    check(!own("stuck", C.useChat(r.path)), `a send ${name}: the notice stays, the text may really be there`);
     await drain();
   }
 
@@ -376,20 +453,21 @@ if (typeof C.draftIsOwnSend !== "function") {
   const { done: sendingW } = await startSend(w, wrapped);
   const v = C.useChat(w.path);
   const shown = `${wrapped.split(/\s+/).join(" ").slice(0, 160)}…`;
-  check(own(shown, v, Date.now()), "a long line, as the sample cuts it, is still this send");
-  check(own("word word wo rd word", { ...v, sentLine: { text: "word word word word", at: Date.now() } }, Date.now()), "a row break inside a word does not hide it");
+  check(own(shown, v), "a long line, as the sample cuts it, is still this send");
+  check(own("word word wo rd word", { ...v, sentLine: { text: "word word word word" } }), "a row break inside a word does not hide it");
   await answer("agent_send", SENT);
   await sendingW;
   await drain();
 
-  check(!own("anything", { sending: false, sentLine: null }, Date.now()), "nothing sent, nothing to discount");
+  check(!own("anything", { sentLine: null }), "nothing sent, nothing to discount");
 }
 
 const pane = fs.readFileSync(PANE, "utf8");
-check(/props\.paneDraft && !props\.waiting && !draftIsOwnSend\(props\.paneDraft\.text, v, Date\.now\(\)\)/.test(pane),
+check(/props\.paneDraft && !props\.waiting && !draftIsOwnSend\(props\.paneDraft\.text, v\)/.test(pane),
   "the composer's notice goes through draftIsOwnSend");
 
 Date.now = realNow;
+globalThis.setTimeout = realSetTimeout;
 delete globalThis.__chatSendInvoke;
 if (failed) {
   console.log(`\nchatsend-check: ${failed} failure(s)`);

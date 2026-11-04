@@ -552,15 +552,20 @@ const messagesOf = (turns: Turn[]) => turns.flatMap((t) => [
   ...(t.steps ?? []).flatMap((s) => s.kind === "user" ? [{ text: s.text, at: s.at }] : []),
 ]);
 
+/** `turns::TEXT_MAX`, which `chatsend-check` holds to turns.rs: the code points
+ *  the host keeps of a long message, before its ellipsis. */
+export const HOST_TEXT_MAX = 4000;
+
 /** Whether a transcript's message is this sent line. The record is not the
  *  line as sent: Claude trims it (14 of 50 sends measured ended in a space, each
- *  recorded without it), and the host cuts a long one to `turns::TEXT_MAX`
- *  characters and an ellipsis. Compared exactly, those never settled. */
+ *  recorded without it), and the host cuts a long one to `HOST_TEXT_MAX` code
+ *  points and an ellipsis. Compared exactly, those never settled. Only that
+ *  exact shape counts as a cut: a person can end a message in `…` too. */
 function isRecordOf(sent: string, record: string): boolean {
   const s = sent.trim();
   const r = record.trim();
   if (s === r) return true;
-  return r.length > 1 && r.endsWith("…") && s.length >= r.length && s.startsWith(r.slice(0, -1));
+  return r.endsWith("…") && [...r].length === HOST_TEXT_MAX + 1 && s.startsWith(r.slice(0, -1));
 }
 
 /** Drop the pending messages the transcript now holds: newest first, each
@@ -995,9 +1000,12 @@ export type ChatView = {
   draft: string;
   sending: boolean;
   sendWords: SendWords | null;
-  /** The line last pasted into the agent's composer, and when: set as a send
-   *  starts, stamped again as it lands, and null once one did not land. */
-  sentLine: { text: string; at: number } | null;
+  /** The line this window is pasting into the agent's composer, or pasted
+   *  moments ago: a composer sample of it is no draft (`draftIsOwnSend`). Null
+   *  from the start of the next send, once a send did not land, and when a
+   *  landed one's `OWN_SEND_SAMPLE_MS` is up. An object, so a timer knows
+   *  its own send from a later one with the same words. */
+  sentLine: { text: string } | null;
   /** What the composer asks for next: Codex's "No, and tell Codex what to
    *  do differently" ends the turn and the line is a message. */
   followUp: string | null;
@@ -1125,19 +1133,18 @@ export function loadPrompt(t: Target): Promise<void> {
  *  between the paste and Enter stays up until the next one, plus a margin. */
 const OWN_SEND_SAMPLE_MS = 20_000;
 
-/** Whether the `sessions:drafts` text is only this window's own send, seen
+/** Whether the `sessions:drafts` text is only `sentLine`, this window's own send, seen
  *  in the moment between the paste and Enter (serve.log: `drafts: 1` as the
  *  line went in, `drafts: 0` 15 s later). A send that did not land clears
  *  `sentLine`: there the text may really be in the composer, and the notice is
  *  true. The sample's rows are joined by spaces wherever the pane wrapped and
  *  it is cut with an ellipsis, so spacing does not count and a cut compares
  *  as a prefix. */
-export function draftIsOwnSend(draft: string, v: Pick<ChatView, "sending" | "sentLine">, now: number): boolean {
-  const sent = v.sentLine;
-  if (!sent || (!v.sending && now - sent.at > OWN_SEND_SAMPLE_MS)) return false;
+export function draftIsOwnSend(draft: string, v: Pick<ChatView, "sentLine">): boolean {
+  if (!v.sentLine) return false;
   const bare = (s: string) => s.replace(/\s+/gu, "");
   const d = bare(draft);
-  const line = bare(sent.text);
+  const line = bare(v.sentLine.text);
   return d === line || (d.endsWith("…") && line.startsWith(d.slice(0, -1)));
 }
 
@@ -1289,7 +1296,7 @@ export async function sendDraft(t: Target, agent: string): Promise<void> {
   const draft = v.draft;
   const n = v.attachments.length;
   if (v.sending || v.attachments.some((a) => a.state === "preparing") || (!draft.trim() && !n) || attachProblem(draft, n)) return;
-  put(t.path, { sending: true, sendWords: null, stopWords: null, attachWords: null });
+  put(t.path, { sending: true, sentLine: null, sendWords: null, stopWords: null, attachWords: null });
   const paths = n ? await uploadAll(t) : [];
   if (!paths) return;
   const text = attachLine(draft, paths);
@@ -1298,7 +1305,8 @@ export async function sendDraft(t: Target, agent: string): Promise<void> {
     // Claude stamps the transcript before agent_send's confirmation returns.
     const sentAt = Date.now();
     const held = messagesOf(viewOf(t.path).turns.data?.turns ?? []).flatMap((m) => (m.at !== null && isRecordOf(text, m.text) ? [m.at] : []));
-    put(t.path, { sentLine: { text, at: sentAt } });
+    const line = { text };
+    put(t.path, { sentLine: line });
     const r = await invoke<AgentSent>("agent_send", { repo: t.repo, slug: t.slug, session: t.session, text });
     const cur = viewOf(t.path);
     let sentId: number | null = null;
@@ -1306,8 +1314,11 @@ export async function sendDraft(t: Target, agent: string): Promise<void> {
       put(t.path, { sending: false, sentLine: null, sendWords: { line: UNCONFIRMED, terminal: true } });
     } else {
       sentId = nextPending++;
+      // In the store, not at render: the drafts push is change-gated, so if
+      // the person really types these words nothing else redraws the notice.
+      setTimeout(() => { if (viewOf(t.path).sentLine === line) put(t.path, { sentLine: null }); }, OWN_SEND_SAMPLE_MS);
       put(t.path, {
-        sending: false, followUp: null, sentLine: { text, at: Date.now() },
+        sending: false, followUp: null,
         // Only if nothing new was typed meanwhile.
         draft: cur.draft === draft ? "" : cur.draft,
         attachments: cur.attachments.filter((a) => !sent.has(a.id)),
