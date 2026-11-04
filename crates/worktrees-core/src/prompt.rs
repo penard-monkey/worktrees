@@ -657,6 +657,12 @@ const CODEX_PICKERS: &[(&str, &str, Picker)] = &[
     ("Where should the new conversation run?", "enter select · esc back", Picker::Menu),
     ("Usage", "enter open · esc back", Picker::Menu),
 ];
+/// Codex's effort list with its highlight on `More reasoning…`, which opens
+/// another list: its hints follow the highlight there (fixture
+/// `effort-picker-on-more`), so this pair is that list only while that row
+/// is lit. A row the highlight moves to shows the effort list's own hints
+/// again, and `s` is pressed only on a capture that does.
+const CODEX_EFFORT_ON_MORE: (&str, &str) = ("Select Reasoning Level for ", "enter select · esc back");
 
 /// A Codex list row: `› 4. GPT-6-Sol (current)    Previous generation…`.
 fn codex_list_row(row: &str) -> Option<(bool, u32, &str, &str)> {
@@ -679,7 +685,9 @@ fn codex_picker(rows: &[String]) -> Option<Modal> {
     let lead = last_nonblank(rows, first)?;
     let start = (0..=lead).rev().take_while(|&i| !rows[i].trim().is_empty()).last()?;
     let head = rows[start].trim();
-    let &(_, _, picker) = CODEX_PICKERS.iter().find(|(h, f, _)| (head == *h || (h.ends_with(' ') && head.starts_with(h))) && hints == *f)?;
+    let known = CODEX_PICKERS.iter().find(|(h, f, _)| (head == *h || (h.ends_with(' ') && head.starts_with(h))) && hints == *f).map(|&(_, _, p)| (p, false));
+    let on_more = || (head.starts_with(CODEX_EFFORT_ON_MORE.0) && hints == CODEX_EFFORT_ON_MORE.1).then_some((Picker::Effort, true));
+    let (picker, on_more) = known.or_else(on_more)?;
     let mut choices = Vec::new();
     for r in &rows[first..end] {
         let (hl, n, label, desc) = codex_list_row(r)?;
@@ -692,7 +700,7 @@ fn codex_picker(rows: &[String]) -> Option<Modal> {
         let more = if desc.is_empty() { Vec::new() } else { vec![desc.to_string()] };
         choices.push(Choice { n, label: label.to_string(), more, highlighted: hl, host_only, checked: None, text: None, preview: None, preview_hidden: None });
     }
-    if choices.iter().filter(|c| c.highlighted).count() != 1 {
+    if choices.iter().filter(|c| c.highlighted).count() != 1 || (on_more && !choices.iter().any(|c| c.highlighted && c.label.ends_with('…'))) {
         return None;
     }
     // After `modal`, which classifies every choice afresh.
@@ -2673,6 +2681,38 @@ mod tests {
         let (before, after) = (claude(&before).expect("before"), claude(after).expect("after"));
         assert_eq!((lit(&before), lit(&after), after.choices.len()), (Some(2), Some(4), 5));
         assert!(same_prompt(&before, &after), "the owner's Sonnet pick is the same list");
+    }
+
+    /// Codex's effort list depends on the model picked, but it is a prompt of
+    /// its own, read after the model list's Enter: the chat shows THAT
+    /// model's levels (`effort-picker-other`: GPT-6-Astra's, `Low (default)`
+    /// lit and no `(current)`). In both lists only the `›` follows the
+    /// highlight — but for the effort list's hints, which read `enter select
+    /// · esc back` while `More reasoning…` is lit (fixtures
+    /// `codex-inline/0.160.1/slash/`).
+    #[test]
+    fn codex_effort_list_is_the_same_list_wherever_its_highlight_is() {
+        macro_rules! cx {
+            ($f:literal) => {
+                include_str!(concat!("../tests/fixtures/codex-inline/0.160.1/slash/", $f))
+            };
+        }
+        let lit = |m: &Modal| m.choices.iter().find(|c| c.highlighted).map(|c| (c.n, c.label.clone()));
+        let other = codex(cx!("effort-picker-other.txt")).expect("GPT-6-Astra's effort list");
+        assert_eq!((other.picker, lit(&other), other.choices.len()), (Some(Picker::Effort), Some((1, "Low (default)".into())), 5));
+        let on4 = codex(cx!("effort-picker-other-on-4.txt")).unwrap();
+        assert!(same_prompt(&other, &codex(cx!("effort-picker-other-moved.txt")).unwrap()) && same_prompt(&other, &on4));
+        let more = codex(cx!("effort-picker-on-more.txt")).expect("the effort list, More reasoning… lit");
+        assert_eq!((more.picker, lit(&more)), (Some(Picker::Effort), Some((5, "More reasoning…".into()))));
+        assert_eq!(more.choices[4].host_only, Some(HostOnly::Elsewhere), "and still the terminal's");
+        assert!(more.lines.last().unwrap().trim() == "enter select · esc back");
+        assert!(same_prompt(&more, &other), "the same list, its hints aside");
+        assert_eq!(steps(&more, 3), Some(vec![Key::Up, Key::Up]));
+        assert_eq!(answer_key(&on4), Key::SessionOnly);
+        let hints = "enter default · s session · esc back";
+        assert!(cx!("effort-picker-other.txt").contains(hints));
+        let odd = cx!("effort-picker-other.txt").replace(hints, "enter select · esc back");
+        assert!(codex(&odd).is_none(), "those hints on any other row: no list this reader knows");
     }
 
     /// Before the Enter that runs a command, the composer must hold exactly

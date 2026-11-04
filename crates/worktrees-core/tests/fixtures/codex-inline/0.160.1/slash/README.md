@@ -28,3 +28,17 @@ are kept as tmux printed them.
 
 While a reply streamed: `/model` opened at once; `/compact` printed "■
 '/compact' is disabled while a task is in progress." and ran nothing.
+
+Added 2026-11-04 (same launch, 120×40, `-L wtmp1`, trailing blank rows
+trimmed), for the model list → effort list path with a model NOT in effect:
+- `effort-picker-other`: `agent_answer 2` (GPT-6-Astra) on the model list,
+  whose Enter opened "Select Reasoning Level for GPT-6-Astra" with `› 1. Low
+  (default)` lit and no `(current)`: the effort list depends on the model
+  picked, and is read as a prompt of its own after that Enter. On the model
+  list only the `›` followed the highlight (all eight rows compared).
+- `effort-picker-other-moved` (3 lit), `effort-picker-other-on-4` (4 lit):
+  only the `›` moved.
+- `effort-picker-on-more`: `› 5. More reasoning…` lit — the HINTS change to
+  `enter select · esc back` there. `agent_answer 3` from there moved Up
+  twice and pressed `s`: "Model changed to gpt-6-astra high for this session
+  only". `~/.codex/config.toml` kept its SHA-256 and mtime.

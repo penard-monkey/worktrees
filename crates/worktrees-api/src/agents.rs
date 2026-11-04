@@ -1818,6 +1818,13 @@ mod tests {
         assert_eq!((r.is_ok(), keys), (true, vec![Key::SessionOnly]));
         let (r, keys, _) = answer_on(Arc::new(Fake::with(vec![("codex", "repo-lane", effort())])), "cx-more", 5, false);
         assert!(r.unwrap_err().contains("does not follow") && keys.is_empty());
+        // Left on `More reasoning…`, whose hints are `enter select · esc
+        // back`: still the effort list, and `s` only once a fresh capture
+        // shows the row moved to with the list's own `s session`.
+        let on_more = || script(slash_codex!("effort-picker-on-more.txt"), vec![slash_codex!("effort-picker-other-on-4.txt").into(), slash_codex!("model-session-only.txt").into()]);
+        let (r, keys, v) = answer_on(Arc::new(Fake::with(vec![("codex", "repo-lane", on_more())])), "cx-on-more", 4, true);
+        assert_eq!((v["picker"].as_str(), v["choices"][4]["host_only"].as_str()), (Some("effort"), Some("elsewhere")));
+        assert_eq!((r.unwrap()["label"].as_str().map(str::to_string), keys), (Some("Extra high".into()), vec![Key::Up, Key::SessionOnly]));
         let new = || pane(vec![slash_codex!("new-picker.txt")], slash_codex!("new-cancelled.txt"));
         let (r, keys, _) = answer_on(Arc::new(Fake::with(vec![("codex", "repo-lane", new())])), "cx-new2", 2, false);
         assert!(r.unwrap_err().contains("does not follow") && keys.is_empty(), "New worktree: not from here, console included");
