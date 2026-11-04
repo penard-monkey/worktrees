@@ -9,6 +9,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 - The chat's tool calls open on click to show what each was given: a whole multi-line command, a sub-agent's prompt, or an MCP tool's input as JSON. Rows and pills look as they did and stay closed until clicked, including a failed call. File contents and tool output stay in the terminal.
 
+### Fixed
+- **A message you send in the chat shows once.** A message that ended in a
+  space, or ran past 4000 characters, stayed as a "waiting for Claude" bubble
+  beside the real one, because Claude's record of it never matched exactly. A
+  reply read at the moment of sending could double one briefly too, and sending
+  the same words twice could hide the second until Claude recorded it.
+- **The chat no longer says the terminal holds unsent text when it only caught
+  your own message on its way in.** That notice could stay for 15 seconds after
+  Claude had taken the message.
+
 ## [0.47.0] - 2026-11-02
 
 ### Added

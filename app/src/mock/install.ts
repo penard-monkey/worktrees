@@ -4235,9 +4235,11 @@ Phase 3: Frontend pane and mock harness
         mockAbsorbedSend.add(path);
         turn = turns[turns.length - 1];
         if (!turn.steps) turn.steps = [...(turn.reply ? [{ kind: "text", at: turn.at, text: turn.reply }] : []), ...turn.tools.map((name) => ({ kind: "tool", at: turn.at, name }))];
-        turn.steps.push({ kind: "user", at, text });
+        turn.steps.push({ kind: "user", at, text: text.trim() });
       } else {
-        turn = { at, user: text, reply: "", tools: [], truncated: false };
+        // Claude records the line trimmed: a draft ending in a space never
+        // matched its own record (chatsend-check).
+        turn = { at, user: text.trim(), reply: "", tools: [], truncated: false };
         turns.push(turn);
       }
       setTimeout(() => {
