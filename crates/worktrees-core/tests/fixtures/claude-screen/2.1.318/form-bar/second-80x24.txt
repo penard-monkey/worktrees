@@ -1,0 +1,24 @@
+←  ☒ /model  ☐ MCP prompts  ✔ Submit  →
+
+│ Claude's MCP prompts (e.g. /mcp__kicad__routing_strategy) are known only
+│ inside the running Claude process: no file lists them, and the one listing API
+│ (a `claude -p` initialize sidecar) ran an UNTRUSTED repo's SessionStart hook
+│ in my test (ADR 0001). How should the chat's command list treat MCP prompts?
+
+❯ 1. Leave them out (Recommended)
+     The menu lists built-ins, your commands and skills, project commands/skills
+     and plugin commands; MCP prompts stay a terminal feature for now, and the
+     proposal records why.
+  2. Allow by server name
+     Accept a typed /mcp__<server>__<prompt> when <server> is an MCP server
+     configured for Claude (read from ~/.claude.json and the plugins), without a
+     description and unvalidated beyond that.
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+
+
+
+───────────────────────────────────────────────────────────────────── scA-main ─

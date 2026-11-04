@@ -1,0 +1,20 @@
+[2m│[0m [1m[38;5;231m~/.codex/config.toml); only the picker's `s` key is "this session only". [0m
+[2m│[0m [1m[38;5;231mClaude's `/model <name>` with an argument also saves the default. What should
+[0;2m│[0m [1m[38;5;231mchoosing a model from the chat do?[0m
+
+[38;5;153m❯[39m [38;5;246m1.[39m [38;5;153mSession only (Recommended)[39m
+     [38;5;246mThe chat answers the picker with `s`: this session only, never writes your
+[39m     [38;5;246mconfig. `/model <name>` with an argument is refused in the chat (pick from
+[39m     [38;5;246mthe list instead). Defaults stay a terminal act.[39m
+  [38;5;246m2.[39m Save as default
+     [38;5;246mFaithful to the terminal's Enter: the pick becomes the default for new [39m
+     [38;5;246msessions (writes your settings). The chat's confirm would say so.[39m
+  [38;5;246m3.[39m Offer both
+     [38;5;246mEach model choice shows two actions in the chat: "This session" and "Make [39m
+     [38;5;246mdefault" (the second needs a confirm, and admin on the phone).[39m
+  [38;5;246m4. Type something.[39m
+[38;5;246m────────────────────────────────────────────────────────────────────────────────
+[39m  5. Chat about this
+
+[38;5;246mEnter to select · Tab/Arrow keys to navigate · Esc to cancel[39m
+[38;5;244m───────────────────────────────────────────────────────────────────── scA-main ─

@@ -1,0 +1,24 @@
+←  ☐ /model  ☐ MCP prompts  ✔ Submit  →
+
+│ Measured on Claude 2.1.318 and Codex 0.160.1: in both /model pickers, Enter
+│ SAVES the pick as your default for new sessions (~/.claude/settings.json,
+│ ~/.codex/config.toml); only the picker's `s` key is "this session only".
+│ Claude's `/model <name>` with an argument also saves the default. What should
+│ choosing a model from the chat do?
+
+❯ 1. Session only (Recommended)
+     The chat answers the picker with `s`: this session only, never writes your
+     config. `/model <name>` with an argument is refused in the chat (pick from
+     the list instead). Defaults stay a terminal act.
+  2. Save as default
+     Faithful to the terminal's Enter: the pick becomes the default for new
+     sessions (writes your settings). The chat's confirm would say so.
+  3. Offer both
+     Each model choice shows two actions in the chat: "This session" and "Make
+     default" (the second needs a confirm, and admin on the phone).
+  4. Type something.
+────────────────────────────────────────────────────────────────────────────────
+  5. Chat about this
+
+Enter to select · Tab/Arrow keys to navigate · Esc to cancel
+───────────────────────────────────────────────────────────────────── scA-main ─
