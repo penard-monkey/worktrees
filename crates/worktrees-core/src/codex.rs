@@ -12,6 +12,31 @@ fn sessions_dir() -> PathBuf {
         .join("sessions")
 }
 
+/// Codex's model cache (`$CODEX_HOME/models_cache.json`, which Codex writes
+/// from its server's list): each model's `display_name` and how many effort
+/// levels (`supported_reasoning_levels`) it offers. Read-only; empty when
+/// there is no cache. A model with fewer than two skips Codex's effort list,
+/// so Enter on it in `/model`'s first step applies it and SAVES it.
+pub fn model_efforts() -> Vec<(String, usize)> {
+    let path = sessions_dir().with_file_name("models_cache.json");
+    let Ok(text) = std::fs::read_to_string(path) else { return Vec::new() };
+    model_efforts_in(&text)
+}
+
+pub fn model_efforts_in(text: &str) -> Vec<(String, usize)> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else { return Vec::new() };
+    v.get("models")
+        .and_then(|m| m.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|m| {
+            let name = m.get("display_name")?.as_str()?.to_string();
+            let n = m.get("supported_reasoning_levels").and_then(|l| l.as_array()).map_or(0, Vec::len);
+            Some((name, n))
+        })
+        .collect()
+}
+
 /// An eligible conversation in this exact place. Use the same selection rule
 /// for auto-resume and the actual launch, including subagent/exec exclusions.
 pub fn session_present(cwd: &str) -> bool {

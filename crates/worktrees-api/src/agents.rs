@@ -210,6 +210,9 @@ pub trait AgentIo: Send + Sync {
     /// The plan file a plan approval's footer names (`~/.claude/plans/…`),
     /// read-only and bounded (`pending::plan_file`): `(its path, its text)`.
     fn plan_file(&self, shown: &str) -> Option<(String, String)>;
+    /// Codex's model cache (`$CODEX_HOME/models_cache.json`): each model's
+    /// display name and how many effort levels it offers.
+    fn codex_models(&self) -> Vec<(String, usize)>;
     fn sleep(&self, ms: u64);
 }
 
@@ -385,6 +388,13 @@ pub fn agent_prompt(ctx: &Ctx, repo: String, slug: String) -> Result<Value, Stri
                 v["detail"] = d.value;
                 v["note"] = json!(format!("{PROMPT_NOTE}{DETAIL_NOTE}"));
             }
+            // After the fingerprint, which is of the screen: what Codex's
+            // model cache says about a choice is the answer's to refuse.
+            for (i, c) in m.choices.iter().enumerate() {
+                if saves_codex_default(io, &lane, &m, c) {
+                    v["choices"][i]["host_only"] = json!(HostOnly::Saves);
+                }
+            }
             return Ok(v);
         }
         seen.push((lane, screen));
@@ -542,8 +552,8 @@ pub fn agent_answer(ctx: &Ctx, repo: String, slug: String, choice: u32, fingerpr
     let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
     let (lane, m, detail) = find_prompt(io, &project, &slug, &fingerprint)?;
     let c = m.choices.iter().find(|c| c.n == choice).ok_or(ERR_NO_CHOICE)?;
-    if let (Some(why), false) = (c.host_only, ctx.is_console()) {
-        return Err(host_only(c.n, why));
+    if let Some(why) = refused(io, ctx, &lane, &m, c) {
+        return Err(why);
     }
     if prompt::multi_box(c) {
         return Err(ERR_MULTI.into());
@@ -551,8 +561,11 @@ pub fn agent_answer(ctx: &Ctx, repo: String, slug: String, choice: u32, fingerpr
     if prompt::notes_open(&m) {
         return Err(ERR_NOTES_OPEN.into());
     }
-    move_to(io, &lane, &m, choice, |now| prompt::same_prompt(&m, now))?;
-    io.press(&lane, Key::Enter)?;
+    let now = move_to(io, &lane, &m, choice, |now| prompt::same_prompt(&m, now))?;
+    // The key the list itself names for this: `s` on a model or effort
+    // list (this session only; Enter would save the default), Escape for a
+    // dialog's Close, else Enter — read off `now`, a fresh capture.
+    io.press(&lane, prompt::answer_key(&now))?;
     let confirmed = confirmed(io, &lane, |now| !prompt::same_prompt(&m, now));
     forget_used(io, &lane, detail, confirmed);
     Ok(json!({
@@ -590,8 +603,8 @@ pub fn agent_answer_text(ctx: &Ctx, repo: String, slug: String, choice: u32, fin
     let (lane, m, detail) = find_prompt(io, &project, &slug, &fingerprint)?;
     let c = m.choices.iter().find(|c| c.n == choice).ok_or(ERR_NO_CHOICE)?;
     let how = c.text.ok_or_else(|| format!("choice {choice} takes no text: answer it with agent_answer"))?;
-    if let (Some(HostOnly::Widens), false) = (c.host_only, ctx.is_console()) {
-        return Err(host_only(c.n, HostOnly::Widens));
+    if let Some(why) = c.host_only.filter(|w| w.terminal_only() || (*w == HostOnly::Widens && !ctx.is_console())) {
+        return Err(host_only(c.n, why));
     }
     if prompt::notes_open(&m) {
         return Err(ERR_NOTES_OPEN.into());
@@ -673,7 +686,7 @@ pub fn agent_answer_many(ctx: &Ctx, repo: String, slug: String, choices: Vec<u32
             }
             _ => {}
         }
-        if let (Some(why), false) = (c.host_only, ctx.is_console()) {
+        if let Some(why) = c.host_only.filter(|w| w.terminal_only() || !ctx.is_console()) {
             return Err(host_only(n, why));
         }
     }
@@ -718,7 +731,35 @@ fn host_only(n: u32, why: HostOnly) -> String {
     match why {
         HostOnly::Widens => format!("choice {n} can change what the agent may do from now on, so only the host can make it"),
         HostOnly::Text => format!("choice {n} opens a text field in the prompt — answer it at the host"),
+        HostOnly::Saves => format!("choice {n} would be saved as the default for new sessions: defaults are set in the terminal"),
+        HostOnly::Spends => format!("choice {n} spends something of the account's: choose it in the terminal"),
+        HostOnly::Elsewhere => format!("choice {n} opens something this host does not follow: choose it in the terminal"),
     }
+}
+
+/// Why choice `c` of `m` may not be made by this caller: its own
+/// `host_only` (the terminal-only ones refused to everyone, the rest to
+/// devices), or — for Codex's model list, whose Enter applies AND SAVES a
+/// model with one effort level — `Saves`, from Codex's own model cache.
+fn refused(io: &dyn AgentIo, ctx: &Ctx, lane: &Lane, m: &Modal, c: &prompt::Choice) -> Option<String> {
+    if let Some(why) = c.host_only.filter(|w| w.terminal_only() || !ctx.is_console()) {
+        return Some(host_only(c.n, why));
+    }
+    saves_codex_default(io, lane, m, c).then(|| host_only(c.n, HostOnly::Saves))
+}
+
+/// Choice `c` on Codex's model list names a model whose effort list would
+/// not open — fewer than two effort levels in `models_cache.json`, or a model
+/// not there at all — so Enter on it would set and save it at once.
+fn saves_codex_default(io: &dyn AgentIo, lane: &Lane, m: &Modal, c: &prompt::Choice) -> bool {
+    if lane.harness != provider::CODEX.id || m.picker != Some(prompt::Picker::Model) {
+        return false;
+    }
+    let mut name = c.label.trim();
+    while let Some(rest) = name.strip_suffix(" (current)").or_else(|| name.strip_suffix(" (default)")) {
+        name = rest.trim_end();
+    }
+    !io.codex_models().iter().any(|(n, efforts)| n == name && *efforts >= 2)
 }
 
 /// What `agent_send` will type: `harness::typed_line_ok`, MCP `send`'s rule
@@ -1223,6 +1264,10 @@ impl AgentIo for Live {
         pending::plan_file(shown)
     }
 
+    fn codex_models(&self) -> Vec<(String, usize)> {
+        codex::model_efforts()
+    }
+
     fn sleep(&self, ms: u64) {
         std::thread::sleep(std::time::Duration::from_millis(ms));
     }
@@ -1358,6 +1403,8 @@ mod tests {
         /// A rollout that says a turn runs: `(provider, session)` — until
         /// an Escape, which ends it as Codex's `turn_aborted` does.
         busy: Mutex<Option<(&'static str, String)>>,
+        /// Codex's model cache: display name, effort levels.
+        codex_models: Vec<(String, usize)>,
     }
 
     impl Fake {
@@ -1423,7 +1470,7 @@ mod tests {
             match key {
                 Key::Down => p.hl += 1,
                 Key::Up => p.hl = p.hl.saturating_sub(1),
-                Key::Enter | Key::Escape => p.answered = true,
+                Key::Enter | Key::Escape | Key::SessionOnly => p.answered = true,
                 Key::Tab | Key::Notes => panic!("{key:?} on a pane with no script"),
             }
             p.moved |= key != Key::Enter;
@@ -1457,6 +1504,9 @@ mod tests {
         fn plan_file(&self, shown: &str) -> Option<(String, String)> {
             self.plans.get(shown).cloned()
         }
+        fn codex_models(&self) -> Vec<(String, usize)> {
+            self.codex_models.clone()
+        }
         fn sleep(&self, _: u64) {}
     }
 
@@ -1480,6 +1530,85 @@ mod tests {
 
     fn prompt_of(ctx: &Ctx, repo: &str) -> Value {
         agent_prompt(ctx, repo.into(), "lane".into()).unwrap()
+    }
+
+    macro_rules! slash_claude {
+        ($name:literal) => {
+            include_str!(concat!("../../worktrees-core/tests/fixtures/claude-screen/2.1.318/slash/", $name))
+        };
+    }
+    macro_rules! slash_codex {
+        ($name:literal) => {
+            include_str!(concat!("../../worktrees-core/tests/fixtures/codex-inline/0.160.1/slash/", $name))
+        };
+    }
+
+    fn answer_on(fake: Arc<Fake>, tag: &str, n: u32, device_too: bool) -> (Result<Value, String>, Vec<Key>, Value) {
+        let (ctx, repo) = setup(tag, fake.clone());
+        let v = prompt_of(&ctx, &repo);
+        let fp = v["fingerprint"].as_str().unwrap_or_default().to_string();
+        let ctx = if device_too { device(&ctx) } else { ctx };
+        let r = agent_answer(&ctx, repo, "lane".into(), n, fp);
+        (r, fake.keys(), v)
+    }
+
+    /// A model list a `/model` opened is answered with `s` — this session
+    /// only — and never with the Enter that saves the default, after any move
+    /// is proved; a dialog's one choice, Close, is Escape (fixtures
+    /// `2.1.318/slash/`).
+    #[test]
+    fn a_model_list_is_answered_for_this_session_and_a_dialog_is_closed() {
+        let models = || pane(vec![slash_claude!("model-picker.e.txt"), slash_claude!("model-picker-moved.txt")], slash_claude!("model-session-only.e.txt"));
+        let (r, keys, v) = answer_on(Arc::new(Fake::with(vec![("claude", "repo-lane", models())])), "model-now", 2, false);
+        assert_eq!((v["picker"].as_str(), v["hidden"].as_u64()), (Some("model"), Some(3)));
+        assert_eq!(r.unwrap()["label"], "Opus 5.5 ✔");
+        assert_eq!(keys, vec![Key::SessionOnly], "the model in effect: no move, then s");
+        let (r, keys, _) = answer_on(Arc::new(Fake::with(vec![("claude", "repo-lane", models())])), "model-moved", 3, true);
+        assert_eq!(r.unwrap()["confirmed"], true);
+        assert_eq!(keys, vec![Key::Down, Key::SessionOnly], "a device too, and never Enter");
+        let view = || pane(vec![slash_claude!("status-view.e.txt")], slash_claude!("status-dismissed.e.txt"));
+        let (r, keys, v) = answer_on(Arc::new(Fake::with(vec![("claude", "repo-lane", view())])), "view", 1, true);
+        assert_eq!((v["picker"].as_str(), v["choices"][0]["label"].as_str()), (Some("view"), Some("Close")));
+        assert_eq!((r.unwrap()["label"].as_str().map(str::to_string), keys), (Some("Close".into()), vec![Key::Escape]));
+    }
+
+    /// Codex's model list opens its effort list with Enter — but only for a
+    /// model its cache says has several effort levels: one with fewer, or
+    /// one not in the cache, would be applied AND SAVED by that Enter, so it
+    /// is the terminal's (`host_only: saves`), for the console too. The
+    /// effort list is answered with `s`; `More reasoning…`, `/new`'s `New
+    /// worktree` and `/usage`'s `Redeem reset` are the terminal's alone.
+    #[test]
+    fn codex_lists_never_save_a_default_or_act_elsewhere() {
+        let models = || pane(vec![slash_codex!("model-picker.txt")], slash_codex!("effort-picker.txt"));
+        let mut f = Fake::with(vec![("codex", "repo-lane", models())]);
+        f.codex_models = vec![("GPT-6-Sol".into(), 6), ("GPT-6-Luna".into(), 1)];
+        let f = Arc::new(f);
+        let (r, keys, v) = answer_on(f.clone(), "cx-model", 4, true);
+        assert_eq!((r.unwrap()["confirmed"].as_bool(), keys), (Some(true), vec![Key::Enter]));
+        assert!(v["choices"][3].get("host_only").is_none(), "{v}");
+        assert_eq!(v["choices"][4]["host_only"], "saves", "one effort level: Enter would save it");
+        assert_eq!(v["choices"][0]["host_only"], "saves", "not in the cache: not guessed at");
+        for (n, tag) in [(5, "cx-luna"), (1, "cx-unknown")] {
+            let mut f = Fake::with(vec![("codex", "repo-lane", models())]);
+            f.codex_models = vec![("GPT-6-Sol".into(), 6), ("GPT-6-Luna".into(), 1)];
+            let (r, keys, _) = answer_on(Arc::new(f), tag, n, false);
+            assert!(r.unwrap_err().contains("default"), "the console too");
+            assert!(keys.is_empty(), "{tag}: nothing pressed");
+        }
+        let effort = || pane(vec![slash_codex!("effort-picker.txt")], slash_codex!("model-session-only.txt"));
+        let (r, keys, _) = answer_on(Arc::new(Fake::with(vec![("codex", "repo-lane", effort())])), "cx-effort", 2, true);
+        assert_eq!((r.is_ok(), keys), (true, vec![Key::SessionOnly]));
+        let (r, keys, _) = answer_on(Arc::new(Fake::with(vec![("codex", "repo-lane", effort())])), "cx-more", 5, false);
+        assert!(r.unwrap_err().contains("does not follow") && keys.is_empty());
+        let new = || pane(vec![slash_codex!("new-picker.txt")], slash_codex!("new-cancelled.txt"));
+        let (r, keys, _) = answer_on(Arc::new(Fake::with(vec![("codex", "repo-lane", new())])), "cx-new2", 2, false);
+        assert!(r.unwrap_err().contains("does not follow") && keys.is_empty(), "New worktree: not from here, console included");
+        let (r, keys, _) = answer_on(Arc::new(Fake::with(vec![("codex", "repo-lane", new())])), "cx-new1", 1, true);
+        assert_eq!((r.is_ok(), keys), (true, vec![Key::Enter]));
+        let usage = || pane(vec![slash_codex!("usage-picker.txt")], slash_codex!("usage-cancelled.txt"));
+        let (r, keys, _) = answer_on(Arc::new(Fake::with(vec![("codex", "repo-lane", usage())])), "cx-usage", 2, false);
+        assert!(r.unwrap_err().contains("account") && keys.is_empty());
     }
 
     #[test]

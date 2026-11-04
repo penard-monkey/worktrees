@@ -119,6 +119,9 @@ impl worktrees_api::agents::AgentIo for ScriptedAgent {
     fn plan_file(&self, _: &str) -> Option<(String, String)> {
         None
     }
+    fn codex_models(&self) -> Vec<(String, usize)> {
+        Vec::new()
+    }
     fn sleep(&self, _: u64) {}
 }
 

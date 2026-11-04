@@ -892,6 +892,11 @@ pub enum Key {
     /// prompt it cancels it, on an idle Claude it arms `Esc again to clear`,
     /// and twice it opens Claude's rewind menu.
     Escape,
+    /// `s`: a model or effort list's "this session only" (Claude's `s to use
+    /// this session only`, Codex's `s session`), whose Enter would SAVE the
+    /// pick as the default (`prompt::answer_key`). Pressed only on a fresh
+    /// capture of that list: anywhere else it is a letter typed.
+    SessionOnly,
 }
 
 impl Key {
@@ -904,6 +909,7 @@ impl Key {
             Key::Tab => "Tab",
             Key::Notes => "n",
             Key::Escape => "Escape",
+            Key::SessionOnly => "s",
         }
     }
 }
