@@ -319,8 +319,10 @@ export const STOP_UNCONFIRMED = (agent: string) => `Esc was sent once, but ${age
 
 // ── the conversation ────────────────────────────────────────────────────────
 
-/** A message `agent_send` confirmed, held until the transcript has it. */
-export type Pending = { id: number; text: string; sentAt: number; queued: boolean };
+/** A message `agent_send` confirmed, held until the transcript has it.
+ *  `held`: when each copy of this text the window already held was written,
+ *  taken as the send began. Those are earlier messages, never this one's echo. */
+export type Pending = { id: number; text: string; sentAt: number; queued: boolean; held?: number[] };
 /** An answer this window sent: the choice (a field's: its text), and the
  *  note that rode on it. `resumed`: a conversation picked in Claude's resume
  *  picker, with the picker's row about it (age · branch · size) — no
@@ -543,22 +545,48 @@ export function underRoot(text: string, root: string): string {
 /** How far the host's clock may run behind when a pending message is matched. */
 const SKEW_S = 120;
 
+/** The person's messages a transcript holds: normal user turns, and those
+ *  absorbed mid-turn. */
+const messagesOf = (turns: Turn[]) => turns.flatMap((t) => [
+  ...(t.user === null ? [] : [{ text: t.user, at: t.at }]),
+  ...(t.steps ?? []).flatMap((s) => s.kind === "user" ? [{ text: s.text, at: s.at }] : []),
+]);
+
+/** `turns::TEXT_MAX`, which `chatsend-check` holds to turns.rs: the code points
+ *  the host keeps of a long message, before its ellipsis. */
+export const HOST_TEXT_MAX = 4000;
+
+/** Whether a transcript's message is this sent line. The record is not the
+ *  line as sent: Claude trims it (14 of 50 sends measured ended in a space, each
+ *  recorded without it), and the host cuts a long one to `HOST_TEXT_MAX` code
+ *  points and an ellipsis. Compared exactly, those never settled. Only that
+ *  exact shape counts as a cut: a person can end a message in `…` too. */
+function isRecordOf(sent: string, record: string): boolean {
+  const s = sent.trim();
+  const r = record.trim();
+  if (s === r) return true;
+  return r.endsWith("…") && [...r].length === HOST_TEXT_MAX + 1 && s.startsWith(r.slice(0, -1));
+}
+
 /** Drop the pending messages the transcript now holds: newest first, each
  *  taking the newest unmatched normal user turn or absorbed mid-turn message
- *  with its text written after the send began. One record settles one copy. */
+ *  with its text written after the send began and not already held when it
+ *  began. One record settles one copy. */
 export function settlePending(pending: Pending[], turns: Turn[]): Pending[] {
-  const messages = turns.flatMap((t) => [
-    ...(t.user === null ? [] : [{ text: t.user, at: t.at }]),
-    ...(t.steps ?? []).flatMap((s) => s.kind === "user" ? [{ text: s.text, at: s.at }] : []),
-  ]);
+  const messages = messagesOf(turns);
   const taken = new Set<number>();
   const keep: Pending[] = [];
   for (const p of [...pending].sort((a, b) => b.sentAt - a.sentAt)) {
     const after = Math.floor(p.sentAt / 1000) - SKEW_S;
+    const held = [...(p.held ?? [])];
     let hit = -1;
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i];
-      if (!taken.has(i) && m.text === p.text && (m.at ?? 0) >= after) { hit = i; break; }
+      if (taken.has(i) || !isRecordOf(p.text, m.text) || (m.at ?? 0) < after) continue;
+      const earlier = held.indexOf(m.at as number);
+      if (earlier >= 0) { held.splice(earlier, 1); continue; }
+      hit = i;
+      break;
     }
     if (hit >= 0) taken.add(hit);
     else keep.push(p);
@@ -972,6 +1000,12 @@ export type ChatView = {
   draft: string;
   sending: boolean;
   sendWords: SendWords | null;
+  /** The line this window is pasting into the agent's composer, or pasted
+   *  moments ago: a composer sample of it is no draft (`draftIsOwnSend`). Null
+   *  from the start of the next send, once a send did not land, and when a
+   *  landed one's `OWN_SEND_SAMPLE_MS` is up. An object, so a timer knows
+   *  its own send from a later one with the same words. */
+  sentLine: { text: string } | null;
   /** What the composer asks for next: Codex's "No, and tell Codex what to
    *  do differently" ends the turn and the line is a message. */
   followUp: string | null;
@@ -1006,7 +1040,7 @@ let attachOff: string | null = null;
 const blank = (): ChatView => ({
   turns: { data: null, error: null, loading: false, at: null },
   prompt: { data: null, error: null, loading: false, at: null },
-  pending: [], answered: [], draft: "", sending: false, sendWords: null, followUp: null,
+  pending: [], answered: [], draft: "", sending: false, sendWords: null, sentLine: null, followUp: null,
   selected: null, answerText: "", ticks: null, boxText: "", answering: false, answerWords: null,
   stopping: false, stopWords: null, stopped: false,
   attachments: [], attachWords: null, attachOff,
@@ -1092,6 +1126,26 @@ export function loadPrompt(t: Target): Promise<void> {
       put(t.path, { prompt: { ...viewOf(t.path).prompt, loading: false, error: String(e) } });
     }
   });
+}
+
+/** How long after a send the composer's sample may still be its own line:
+ *  serve samples every 15 s (`host.rs`, five 3 s ticks), so a sample caught
+ *  between the paste and Enter stays up until the next one, plus a margin. */
+const OWN_SEND_SAMPLE_MS = 20_000;
+
+/** Whether the `sessions:drafts` text is only `sentLine`, this window's own send, seen
+ *  in the moment between the paste and Enter (serve.log: `drafts: 1` as the
+ *  line went in, `drafts: 0` 15 s later). A send that did not land clears
+ *  `sentLine`: there the text may really be in the composer, and the notice is
+ *  true. The sample's rows are joined by spaces wherever the pane wrapped and
+ *  it is cut with an ellipsis, so spacing does not count and a cut compares
+ *  as a prefix. */
+export function draftIsOwnSend(draft: string, v: Pick<ChatView, "sentLine">): boolean {
+  if (!v.sentLine) return false;
+  const bare = (s: string) => s.replace(/\s+/gu, "");
+  const d = bare(draft);
+  const line = bare(v.sentLine.text);
+  return d === line || (d.endsWith("…") && line.startsWith(d.slice(0, -1)));
 }
 
 export function setDraft(path: string, draft: string): void {
@@ -1242,7 +1296,7 @@ export async function sendDraft(t: Target, agent: string): Promise<void> {
   const draft = v.draft;
   const n = v.attachments.length;
   if (v.sending || v.attachments.some((a) => a.state === "preparing") || (!draft.trim() && !n) || attachProblem(draft, n)) return;
-  put(t.path, { sending: true, sendWords: null, stopWords: null, attachWords: null });
+  put(t.path, { sending: true, sentLine: null, sendWords: null, stopWords: null, attachWords: null });
   const paths = n ? await uploadAll(t) : [];
   if (!paths) return;
   const text = attachLine(draft, paths);
@@ -1250,19 +1304,27 @@ export async function sendDraft(t: Target, agent: string): Promise<void> {
   try {
     // Claude stamps the transcript before agent_send's confirmation returns.
     const sentAt = Date.now();
+    const held = messagesOf(viewOf(t.path).turns.data?.turns ?? []).flatMap((m) => (m.at !== null && isRecordOf(text, m.text) ? [m.at] : []));
+    const line = { text };
+    put(t.path, { sentLine: line });
     const r = await invoke<AgentSent>("agent_send", { repo: t.repo, slug: t.slug, session: t.session, text });
     const cur = viewOf(t.path);
     let sentId: number | null = null;
     if (!r.delivered) {
-      put(t.path, { sending: false, sendWords: { line: UNCONFIRMED, terminal: true } });
+      put(t.path, { sending: false, sentLine: null, sendWords: { line: UNCONFIRMED, terminal: true } });
     } else {
       sentId = nextPending++;
+      // In the store, not at render: the drafts push is change-gated, so if
+      // the person really types these words nothing else redraws the notice.
+      setTimeout(() => { if (viewOf(t.path).sentLine === line) put(t.path, { sentLine: null }); }, OWN_SEND_SAMPLE_MS);
       put(t.path, {
         sending: false, followUp: null,
         // Only if nothing new was typed meanwhile.
         draft: cur.draft === draft ? "" : cur.draft,
         attachments: cur.attachments.filter((a) => !sent.has(a.id)),
-        pending: [...cur.pending, { id: sentId, text, sentAt, queued: r.queued }],
+        // A read that landed during the send may already hold its echo, and
+        // no read is due to settle against what is already here.
+        pending: settlePending([...cur.pending, { id: sentId, text, sentAt, queued: r.queued, held }], cur.turns.data?.turns ?? []),
       });
     }
     // This call can join a read started before the send. If that response
@@ -1273,7 +1335,7 @@ export async function sendDraft(t: Target, agent: string): Promise<void> {
     });
   } catch (e) {
     const w = sendWords(String(e), agent);
-    put(t.path, { sending: false, sendWords: w });
+    put(t.path, { sending: false, sentLine: null, sendWords: w });
     if (w.prompt) void loadPrompt(t);
   }
 }
