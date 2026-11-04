@@ -14,11 +14,11 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import {
-  activityMoved, boxesOf, bytes, callsSay, callsWords, cardDigits, cardKey, cardTakesFocus, choiceOpen, choiceWay, clockMs, clockOf,
+  activityMoved, boxesOf, bytes, callFetches, callKeys, callsSay, callsWords, cardDigits, cardKey, cardTakesFocus, choiceOpen, choiceWay, clockMs, clockOf,
   dayLabel, draftIsOwnSend, draftProblem, fieldWords, foldCalls, itemsOf, keyFocusOf, lineDiff, loadPrompt, loadTurns, noSessionYet, permissionAnswerWords,
   promptBody, questionAnswerWords, selectChoice, sendAnswer, sendDraft, sendMany, setAnswerText, setBoxText, setDraft,
-  splitAtRule, stopTurn, ticksOf, toggleTick, turnsUnsupported, underRoot, useChat, SEND_MAX,
-  type AskedStep, type Item, type PromptChoice, type PromptDetail, type ReadablePrompt, type Target, type ToolCall,
+  splitAtRule, stopTurn, ticksOf, toggleCall, toggleTick, turnsUnsupported, underRoot, useChat, SEND_MAX,
+  type AskedStep, type CallRead, type Item, type PromptChoice, type PromptDetail, type ReadablePrompt, type Target, type ToolCall,
 } from "./chat";
 import { previewOf, type ChoiceWay } from "./chat";
 // What a screen reader is told (VoiceOver): its own line, so the lanes' imports merge apart.
@@ -120,7 +120,7 @@ export function ChatPane(props: ChatPaneProps) {
   const items = data ? itemsOf(data.turns, v.answered, v.pending, working) : [];
   const lastReply = [...items].reverse().find((it) => it.k === "reply")?.key ?? null;
   const promptKey = promptKeyOf(prompt);
-  const { toBottom, fresh, dismiss, take } = useStickToBottom(scrollRef, !!data, promptKey, lastReply);
+  const { toBottom, fresh, dismiss, take, reveal } = useStickToBottom(scrollRef, !!data, promptKey, lastReply);
   const said = useAnnounce(target, v, items, agent);
 
   // A prompt takes the keyboard from an EMPTY composer as it appears, once
@@ -192,7 +192,7 @@ export function ChatPane(props: ChatPaneProps) {
         </p>
         {items.length === 0 && !prompt && <p className="chat-note" data-testid="chat-empty">No messages in this session yet.</p>}
         <ol className="chat-list" data-testid="chat-list">
-          {items.map((it) => <ChatItem key={it.key} it={it} agent={agent} root={path} onLink={onLink} pathLinks={pathLinks} />)}
+          {items.map((it) => <ChatItem key={it.key} it={it} agent={agent} target={target} root={path} reveal={reveal} onLink={onLink} pathLinks={pathLinks} />)}
         </ol>
       </>
     );
@@ -307,31 +307,144 @@ function useAnnounce(target: Target, v: ChatView, items: Item[], agent: string) 
   return said;
 }
 
+type Reveal = (top: HTMLElement, bottom: HTMLElement) => void;
+
+/** A row's line is cut by the width it has now. Only the width says so, and
+ *  it moves with the window, the dock and the zoom. */
+function useClipped(ref: RefObject<HTMLElement | null>, watch: boolean): boolean {
+  const [clipped, setClipped] = useState(false);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!watch || !el) { setClipped(false); return; }
+    const look = () => setClipped(el.scrollWidth > el.clientWidth);
+    look();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(look);
+    ro.observe(el);
+    return () => ro.disconnect();
+    // `.chat-call-sum` is a new element when the row becomes a button.
+  }, [ref, watch, ref.current]);
+  return clipped;
+}
+
+/** Tells the scroll a row was opened or closed, or that what it shows landed:
+ *  on a change only, never on mounting (a fold opened over an open row, or
+ *  StrictMode's second run). */
+function useRevealOnChange(reveal: Reveal, open: boolean, read: CallRead | undefined, top: RefObject<HTMLElement | null>, panel: RefObject<HTMLElement | null>) {
+  const last = useRef({ open, read });
+  useLayoutEffect(() => {
+    if (last.current.open === open && last.current.read === read) return;
+    last.current = { open, read };
+    if (top.current) reveal(top.current, panel.current ?? top.current);
+  });
+}
+
+/** What an opened call shows: plain text in a monospace block, never markup,
+ *  its line breaks kept. The whole line when the row was only cut by its width;
+ *  otherwise what the host answers, with the line it already had while it asks
+ *  or if it no longer can, and always saying which. `title` is empty so the
+ *  list's own tooltip does not sit on top of what is being read. */
+function CallFull(props: { c: ToolCall; read: CallRead | undefined; id: string; panel: RefObject<HTMLDivElement | null> }) {
+  const { c, read } = props;
+  const fetches = callFetches(c);
+  const text = fetches && read?.state === "done" ? read.text : c.summary;
+  return (
+    <div ref={props.panel} id={props.id} className="chat-call-full" title="" data-testid="chat-call-full">
+      {text && <pre className="chat-call-text" data-testid="chat-call-text">{text}</pre>}
+      {fetches && (!read || read.state === "loading") && <p className="chat-call-note" role="status">Reading the whole call…</p>}
+      {read?.state === "done" && read.truncated && (
+        <p className="chat-call-note" data-testid="chat-call-cut">Cut here: this is the first 64 KB of {Math.ceil(read.bytes / 1024)} KB.</p>
+      )}
+      {read?.state === "gone" && <p className="chat-call-note" data-testid="chat-call-gone">No longer available: this call has left the part of the transcript this app reads.</p>}
+      {read?.state === "old" && <p className="chat-call-note" data-testid="chat-call-old">{read.words}.</p>}
+      {read?.state === "failed" && <p className="chat-call-note" role="alert" data-testid="chat-call-failed">Couldn’t read this call: {read.words}. Close it and open it again to retry.</p>}
+    </div>
+  );
+}
+
+/** One call with a line: as it always was until it has more to show, and then
+ *  a button that opens under itself. What is open is the store's, by `key`, so
+ *  a re-read, the fold and a place switch all leave it open. Only a click does:
+ *  a failed call stays closed. The text sits outside the button, so selecting
+ *  it never closes it. */
+function CallRow(props: { c: ToolCall; k: string; target: Target; root: string; reveal: Reveal }) {
+  const { c, k, target } = props;
+  const v = useChat(target.path);
+  const id = useId();
+  const li = useRef<HTMLLIElement>(null);
+  const panel = useRef<HTMLDivElement>(null);
+  const sum = useRef<HTMLSpanElement>(null);
+  const fetches = callFetches(c);
+  const clipped = useClipped(sum, !fetches && !!c.summary);
+  const open = !!v.calls.open[k];
+  const read = c.call_id ? v.calls.read[c.call_id] : undefined;
+  useRevealOnChange(props.reveal, open, read, li, panel);
+  const head = (
+    <>
+      <span className="chat-tool chat-call-name">{c.name}</span>
+      {c.summary && <span ref={sum} className="chat-call-sum" title={c.summary}>{underRoot(c.summary, props.root)}</span>}
+      {c.failed && <span className="chat-call-failed"><span className="chat-call-dot" aria-hidden="true" />failed</span>}
+    </>
+  );
+  return (
+    <li ref={li} className={"chat-call-row" + (c.failed ? " failed" : "")} data-testid="chat-call">
+      {fetches || clipped || open ? (
+        // The row is an inner span: WebKit shrink-wraps a <button> that is
+        // itself the flex container (AGENTS.md, WebKit probe).
+        <button type="button" className="chat-call-btn" aria-expanded={open} aria-controls={open ? id : undefined}
+          onClick={() => void toggleCall(target, k, c)} data-testid="chat-call-open">
+          <span className="chat-call">{head}</span>
+        </button>
+      ) : <div className="chat-call">{head}</div>}
+      {open && <CallFull c={c} read={read} id={id} panel={panel} />}
+    </li>
+  );
+}
+
+/** A call with no line, as a name's pill: a button when the host can say what
+ *  it was given (an MCP tool's input). What opens takes the whole row under it. */
+function CallChip(props: { c: ToolCall; k: string; target: Target; reveal: Reveal }) {
+  const { c, k, target } = props;
+  const v = useChat(target.path);
+  const id = useId();
+  const li = useRef<HTMLLIElement>(null);
+  const panel = useRef<HTMLDivElement>(null);
+  const open = !!v.calls.open[k];
+  const read = c.call_id ? v.calls.read[c.call_id] : undefined;
+  useRevealOnChange(props.reveal, open, read, li, panel);
+  if (!callFetches(c)) return <li className="chat-tool">{c.name}</li>;
+  return (
+    <>
+      <li ref={li} className="chat-tool-cell">
+        <button type="button" className="chat-tool chat-tool-btn" aria-expanded={open} aria-controls={open ? id : undefined}
+          onClick={() => void toggleCall(target, k, c)} data-testid="chat-call-open">{c.name}</button>
+      </li>
+      {open && <li className="chat-tool-open"><CallFull c={c} read={read} id={id} panel={panel} /></li>}
+    </>
+  );
+}
+
 /** A turn's tool calls. From a host that says what each did: a row per
  *  call, its name, its line (the place's root taken off its paths, the whole
  *  line in the title) and a failed call's dot AND word, the first few shown
- *  and the rest behind "+N more", which names a failure it hides. From an
- *  older host: the names, as chips. Text only: a summary is transcript text. */
-function ToolCalls(props: { calls: ToolCall[]; root: string }) {
+ *  and the rest behind "+N more", which names a failure it hides. With no
+ *  line to show: the names, as chips. A call opens under itself to what it was
+ *  given when there is more to see. Text only: all of it is transcript text. */
+function ToolCalls(props: { calls: ToolCall[]; itemKey: string; target: Target; root: string; reveal: Reveal }) {
   const [open, setOpen] = useState(false);
-  const { calls } = props;
+  const { calls, target, reveal } = props;
+  const keys = callKeys(calls, props.itemKey);
   if (!callsSay(calls)) {
     return (
       <ul className="chat-tools" title="Tools it called. Their output is in the terminal.">
-        {calls.map((c, i) => <li key={i} className="chat-tool">{c.name}</li>)}
+        {calls.map((c, i) => <CallChip key={keys[i]} c={c} k={keys[i]} target={target} reveal={reveal} />)}
       </ul>
     );
   }
   const { shown, hidden, hiddenFailed, folds } = foldCalls(calls, open);
   return (
     <ul className="chat-calls" title="Tools it called. Their output is in the terminal." data-testid="chat-calls">
-      {shown.map((c, i) => (
-        <li key={i} className={"chat-call" + (c.failed ? " failed" : "")} data-testid="chat-call">
-          <span className="chat-tool chat-call-name">{c.name}</span>
-          {c.summary && <span className="chat-call-sum" title={c.summary}>{underRoot(c.summary, props.root)}</span>}
-          {c.failed && <span className="chat-call-failed"><span className="chat-call-dot" aria-hidden="true" />failed</span>}
-        </li>
-      ))}
+      {shown.map((c, i) => <CallRow key={keys[i]} c={c} k={keys[i]} target={target} root={props.root} reveal={reveal} />)}
       {folds && (
         <li className="chat-call-more">
           <button className="chat-linkbtn" aria-expanded={open} onClick={() => setOpen(!open)} data-testid="chat-calls-more">
@@ -343,7 +456,7 @@ function ToolCalls(props: { calls: ToolCall[]; root: string }) {
   );
 }
 
-function ChatItem(props: { it: Item; agent: string; root: string; onLink: (href: string) => void; pathLinks: ReturnType<typeof useDocPathLinks>["pathLinks"] }) {
+function ChatItem(props: { it: Item; agent: string; target: Target; root: string; reveal: Reveal; onLink: (href: string) => void; pathLinks: ReturnType<typeof useDocPathLinks>["pathLinks"] }) {
   const { it, agent } = props;
   switch (it.k) {
     case "sep":
@@ -378,7 +491,7 @@ function ChatItem(props: { it: Item; agent: string; root: string; onLink: (href:
                 {it.truncated && <p className="chat-bubble-note">Shortened by the host: the full reply is in the terminal.</p>}
               </div>
             )}
-            {it.calls.length > 0 && <ToolCalls calls={it.calls} root={props.root} />}
+            {it.calls.length > 0 && <ToolCalls calls={it.calls} itemKey={it.key} target={props.target} root={props.root} reveal={props.reveal} />}
           </div>
         </li>
       );

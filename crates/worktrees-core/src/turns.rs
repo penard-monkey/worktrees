@@ -19,6 +19,11 @@
 //! Text is DATA. The reply is what the agent wrote, and what the user typed
 //! may itself be a message another place sent; the row says so on its answer.
 //!
+//! **What a tool call was given stays off the turns** (a step says `detail`
+//! when there is more than its line), and is read one call at a time:
+//! [`claude_tool_call`], [`codex_tool_call`], serve's `agent_tool_call`. Files'
+//! contents ([`PATH_ONLY`]) and output never leave through it.
+//!
 //! **A turn's `steps` are the same turn in order**, each with its own time:
 //! the reply's blocks, the tools it called (each with what it did, in a line,
 //! and whether its result says it failed — never the output itself), and
@@ -56,6 +61,10 @@ pub const TOTAL_MAX: usize = 64 * 1024;
 /// window is wide; a turn that started before it is returned without its
 /// prompt (`user: null`).
 pub const TAIL_BYTES: u64 = 2 * 1024 * 1024;
+/// Bytes kept of one call's input ([`claude_tool_call`], [`codex_tool_call`]).
+/// The longest measured across this machine's recent transcripts on
+/// 2026-11-04: a 15,015-character Bash command, a 6,654-character MCP input.
+pub const CALL_INPUT_MAX: usize = 64 * 1024;
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct Turn {
@@ -106,7 +115,10 @@ pub enum Step {
     Tool {
         at: Option<i64>,
         name: String,
-        #[serde(skip)]
+        /// The call's own id in the transcript (Claude's `tool_use` id,
+        /// Codex's `call_id`), the same on every read. Absent from an older
+        /// host.
+        #[serde(rename = "call_id", skip_serializing_if = "String::is_empty")]
         id: String,
         /// What it did, in a line: a command, the file it read or wrote, a
         /// search's pattern ([`summary_of`], [`codex_summary`]). None for a
@@ -120,6 +132,14 @@ pub enum Step {
         /// command or script, or an interrupt. Only the flag: no output.
         #[serde(skip_serializing_if = "std::ops::Not::not")]
         failed: bool,
+        /// What it was given. Never sent with the turns: that would spend the
+        /// poll's budget on text nobody opened ([`CallDetail`] is how it leaves).
+        #[serde(skip)]
+        ran: Ran,
+        /// `agent_tool_call` has more to say about this call than `summary`
+        /// does. Absent from an older host, and for a [`PATH_ONLY`] tool.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        detail: bool,
     },
     /// `AskUserQuestion`: what it asked and, once given, the answer.
     Question {
@@ -165,6 +185,18 @@ pub enum Step {
         #[serde(skip)]
         id: String,
     },
+}
+
+/// What a tool call was given, read when its step is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Ran {
+    /// Nothing to show: a [`PATH_ONLY`] tool, or an input that says nothing.
+    Nothing,
+    /// A command: a script's parts in order, `None` for a command it builds
+    /// that no event has named.
+    Parts(Vec<Option<String>>),
+    /// Any other tool's input, an MCP tool's included.
+    Json(serde_json::Value),
 }
 
 /// One question of an `AskUserQuestion`.
@@ -244,7 +276,7 @@ impl Turn {
         self.steps.push(match name {
             "AskUserQuestion" => Step::Question { at, answered_at: None, questions: questions_of(input), answer: None, id },
             "ExitPlanMode" => Step::Plan { at, answered_at: None, plan: str_of("plan").unwrap_or_default(), plan_file: str_of("planFilePath"), approved: None, note: None, id },
-            _ => Step::Tool { at, name: name.to_string(), id, summary: summary_of(name, input), failed: false },
+            _ => Step::Tool { at, name: name.to_string(), id, summary: summary_of(name, input), failed: false, ran: ran_of(name, input), detail: false },
         });
     }
 
@@ -284,6 +316,11 @@ impl Notice {
 /// consumption reasons are `delivered_to_agent`, `delivered_as_tool_result`
 /// and `carried_to_background`; none is a mid-turn human message for this row.
 pub fn claude(lines: &[String], n: usize) -> Vec<Turn> {
+    finish(claude_turns(lines), n)
+}
+
+/// Every turn in a Claude transcript's `lines`, as [`claude`] reads them.
+fn claude_turns(lines: &[String]) -> Vec<Turn> {
     let mut turns: Vec<Turn> = Vec::new();
     struct Queued {
         turn: usize,
@@ -411,7 +448,7 @@ pub fn claude(lines: &[String], n: usize) -> Vec<Turn> {
         turns[q.turn].steps.insert(q.step + inserted[q.turn], Step::User { at: q.at, text: q.text });
         inserted[q.turn] += 1;
     }
-    finish(turns, n)
+    turns
 }
 
 enum ClaudeEntry { Person, Notice(Notice), Skip }
@@ -688,6 +725,200 @@ fn summary_of(name: &str, input: Option<&serde_json::Value>) -> Option<String> {
     }
 }
 
+/// Tools whose input holds a file's contents (`content`, `old_string`,
+/// `new_string`, `new_source`, `edits`), each with the one field of it that is
+/// kept: the path. [`ran_of`] keeps nothing else, as the contents stay in the
+/// terminal. Without this list the generic input below would send them by
+/// default. It goes by Claude's own tool names and not by an input's shape: an
+/// MCP tool handed a file's contents shows them as it shows any input.
+const PATH_ONLY: [(&str, &str); 4] = [("Edit", "file_path"), ("MultiEdit", "file_path"), ("Write", "file_path"), ("NotebookEdit", "notebook_path")];
+
+/// What a Claude tool call was given: the text [`summary_of`] shows a line of
+/// for a tool it knows (a sub-agent's being the prompt it was given, its
+/// command), only the path of a [`PATH_ONLY`] tool, and for any other tool, an
+/// MCP tool's included, its input.
+fn ran_of(name: &str, input: Option<&serde_json::Value>) -> Ran {
+    let Some(input) = input else { return Ran::Nothing };
+    let s = |k: &str| input.get(k).and_then(|v| v.as_str()).map(str::to_string);
+    if let Some((_, key)) = PATH_ONLY.iter().find(|(tool, _)| *tool == name) {
+        return s(key).map_or(Ran::Nothing, |path| Ran::Parts(vec![Some(path)]));
+    }
+    let text = match name {
+        "Bash" => s("command"),
+        "Read" => s("file_path"),
+        "WebFetch" => s("url"),
+        "Grep" => s("pattern").map(|pattern| match s("path") {
+            Some(path) => format!("{pattern} in {path}"),
+            None => pattern,
+        }),
+        "Glob" => s("pattern"),
+        "WebSearch" => s("query"),
+        "Task" | "Agent" => s("prompt"),
+        _ => return ran_json(input),
+    };
+    text.map_or(Ran::Nothing, |t| Ran::Parts(vec![Some(t)]))
+}
+
+/// An input as [`Ran::Json`], or nothing when it says nothing (`{}`, `null`).
+fn ran_json(input: &serde_json::Value) -> Ran {
+    use serde_json::Value;
+    let empty = match input {
+        Value::Null => true,
+        Value::Object(o) => o.is_empty(),
+        Value::Array(a) => a.is_empty(),
+        Value::String(s) => s.is_empty(),
+        _ => false,
+    };
+    if empty { Ran::Nothing } else { Ran::Json(input.clone()) }
+}
+
+/// `v` with every string in it, keys too, [`clean_text`]ed. Keys that clean
+/// alike keep both values, the later as `<key> (2)`: a hidden character must
+/// not be able to take a value out of what a person reads. A key the input
+/// really has is placed first, so it is never the one renamed.
+fn clean_json(v: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    match v {
+        Value::String(s) => Value::String(clean_text(s)),
+        Value::Array(a) => Value::Array(a.iter().map(clean_json).collect()),
+        Value::Object(o) => {
+            let mut out = serde_json::Map::with_capacity(o.len());
+            let (plain, hidden): (Vec<_>, Vec<_>) = o.iter().partition(|(k, _)| clean_text(k) == **k);
+            for (k, v) in plain.into_iter().chain(hidden) {
+                let key = clean_text(k);
+                let mut free = key.clone();
+                let mut n = 2;
+                while out.contains_key(&free) {
+                    free = format!("{key} ({n})");
+                    n += 1;
+                }
+                out.insert(free, clean_json(v));
+            }
+            Value::Object(out)
+        }
+        other => other.clone(),
+    }
+}
+
+/// Line breaks and tabs stay, a carriage return is a line break (alone, it
+/// would draw over the line it ends), and every other control character and
+/// invisible format character goes, so what a person reads is what ran. This
+/// removes characters and redacts nothing: a token in a command stays in it.
+fn clean_text(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .chars()
+        .filter_map(|c| match c {
+            '\r' => Some('\n'),
+            '\n' | '\t' => Some(c),
+            c if c.is_control() || crate::harness::invisible(c) => None,
+            c => Some(c),
+        })
+        .collect()
+}
+
+/// A command's whole text, its parts joined and [`clean_text`]ed, keeping its
+/// shape where `one_line` keeps a line.
+fn parts_text(parts: &[Option<String>]) -> Option<String> {
+    if !parts.iter().any(Option::is_some) {
+        return None;
+    }
+    let joined = parts.iter().map(|p| p.as_deref().unwrap_or(BUILT_COMMAND)).collect::<Vec<_>>().join("\n\n");
+    let clean = clean_text(&joined);
+    let text = clean.trim_matches('\n').trim_end();
+    (!text.trim().is_empty()).then(|| text.to_string())
+}
+
+/// What stands for a command a script builds and no event has named.
+const BUILT_COMMAND: &str = "(a command this script builds)";
+
+/// `agent_tool_call` would say more about this call than `summary` does.
+fn says_more(ran: &Ran, summary: Option<&str>) -> bool {
+    match ran {
+        Ran::Nothing => false,
+        Ran::Json(input) => !repeats_line(input, summary),
+        Ran::Parts(parts) => parts_text(parts).is_some_and(|text| {
+            text.lines().filter(|l| !l.trim().is_empty()).count() > 1 || text.trim().chars().count() > SUMMARY_MAX || one_line(&text).as_deref() != summary
+        }),
+    }
+}
+
+/// An input with no values at all, or whose one value is the line already
+/// shown (`Skill`'s `{"skill": "x"}`), which opening would only say again.
+fn repeats_line(input: &serde_json::Value, summary: Option<&str>) -> bool {
+    use serde_json::Value;
+    fn leaves<'a>(v: &'a Value, out: &mut Vec<&'a Value>) {
+        match v {
+            Value::Array(a) => a.iter().for_each(|x| leaves(x, out)),
+            Value::Object(o) => o.values().for_each(|x| leaves(x, out)),
+            other => out.push(other),
+        }
+    }
+    let mut all = Vec::new();
+    leaves(input, &mut all);
+    match (all.as_slice(), summary) {
+        ([], _) => true,
+        ([Value::String(s)], Some(line)) => one_line(s).as_deref() == Some(line) && s.trim().chars().count() <= SUMMARY_MAX && s.trim().lines().count() <= 1,
+        _ => false,
+    }
+}
+
+/// One call's input, `agent_tool_call`'s answer. `input` is the whole text
+/// for a command, a path, a query or a sub-agent's prompt, and the structured
+/// value for any other tool. Past [`CALL_INPUT_MAX`] it is a string either
+/// way, cut on a character: a value cut there would not parse, so it comes
+/// back as its pretty-printed text, and `truncated` says so.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+pub struct CallDetail {
+    pub tool: String,
+    pub input: serde_json::Value,
+    pub truncated: bool,
+    /// The input's whole length in bytes, as text, cut or not.
+    pub bytes: usize,
+}
+
+/// The input of the Claude call `id`, from the user and assistant entries
+/// [`claude`] reads, or None when it has none or has left `lines`.
+pub fn claude_tool_call(lines: &[String], id: &str) -> Option<CallDetail> {
+    detail_in(claude_turns(lines), id)
+}
+
+/// The input of the Codex call `id`, as [`claude_tool_call`].
+pub fn codex_tool_call(lines: &[String], id: &str) -> Option<CallDetail> {
+    detail_in(codex_turns(lines), id)
+}
+
+fn detail_in(turns: Vec<Turn>, id: &str) -> Option<CallDetail> {
+    if id.is_empty() {
+        return None;
+    }
+    let (tool, ran) = turns.iter().flat_map(|t| &t.steps).find_map(|s| match s {
+        Step::Tool { id: i, name, ran, .. } if i == id => Some((name, ran)),
+        _ => None,
+    })?;
+    use serde_json::Value;
+    let (whole, value) = match ran {
+        Ran::Nothing => return None,
+        Ran::Parts(parts) => (parts_text(parts)?, None),
+        Ran::Json(input) => {
+            let clean = clean_json(input);
+            (serde_json::to_string_pretty(&clean).ok()?, Some(clean))
+        }
+    };
+    let bytes = whole.len();
+    let truncated = bytes > CALL_INPUT_MAX;
+    let input = match value {
+        Some(v) if !truncated => v,
+        _ => {
+            let mut end = bytes.min(CALL_INPUT_MAX);
+            while !whole.is_char_boundary(end) {
+                end -= 1;
+            }
+            Value::String(whole[..end].to_string())
+        }
+    };
+    Some(CallDetail { tool: tool.clone(), input, truncated, bytes })
+}
+
 /// `text`'s first line that holds anything, as a summary: every control
 /// character removed (a tab becomes a space) and every invisible format
 /// character too — `harness::invisible`, the set a typed line refuses (bidi
@@ -737,14 +968,47 @@ fn codex_summary(name: &str, p: &serde_json::Value) -> Option<String> {
     }
 }
 
-/// A command's argv as the line a person typed: `["/bin/zsh", "-lc",
-/// "<cmd>"]` (what Codex 0.160.1 runs) is `<cmd>`; anything else, its words.
-fn argv_summary(argv: &[serde_json::Value]) -> Option<String> {
+/// What a Codex tool call was given, in the shapes [`codex_summary`] reads (a
+/// patch is the files it touches and never its text), or any other tool's
+/// input: a function call's arguments, a custom tool's own text.
+fn codex_ran(name: &str, p: &serde_json::Value) -> Ran {
+    let args = || p.get("arguments").and_then(|a| a.as_str()).and_then(|a| serde_json::from_str::<serde_json::Value>(a).ok());
+    let text = match name {
+        "exec" => return p.get("input").and_then(|i| i.as_str()).map_or(Ran::Nothing, |js| Ran::Parts(code_mode_ran(js))),
+        "apply_patch" => match p.get("input").and_then(|i| i.as_str()) {
+            Some(patch) => patch_files(patch),
+            None => args().and_then(|a| a.get("input").and_then(|i| i.as_str()).and_then(patch_files)),
+        },
+        "exec_command" | "shell_command" | "shell" => args().and_then(|a| match a.get("cmd").or_else(|| a.get("command")) {
+            Some(serde_json::Value::String(c)) => Some(c.clone()),
+            Some(serde_json::Value::Array(argv)) => argv_text(argv),
+            _ => None,
+        }),
+        _ => match (p.get("input").and_then(|i| i.as_str()), args()) {
+            (Some(input), _) => Some(input.to_string()),
+            (None, Some(a)) => return ran_json(&a),
+            (None, None) => p.get("arguments").and_then(|a| a.as_str()).map(str::to_string),
+        },
+    };
+    text.map_or(Ran::Nothing, |t| Ran::Parts(vec![Some(t)]))
+}
+
+/// A command's argv as a person typed it: `["/bin/zsh", "-lc", "<cmd>"]`
+/// (what Codex 0.160.1 runs) is `<cmd>`; anything else, its words.
+fn argv_text(argv: &[serde_json::Value]) -> Option<String> {
     let words: Vec<&str> = argv.iter().filter_map(|w| w.as_str()).collect();
-    match words.as_slice() {
-        [sh, "-lc" | "-c", cmd] if matches!(sh.rsplit('/').next(), Some("bash" | "zsh" | "sh")) => one_line(cmd),
-        _ => one_line(&words.join(" ")),
+    if words.is_empty() {
+        return None;
     }
+    Some(match words.as_slice() {
+        [sh, "-lc" | "-c", cmd] if matches!(sh.rsplit('/').next(), Some("bash" | "zsh" | "sh")) => cmd.to_string(),
+        _ => words.join(" "),
+    })
+}
+
+/// [`argv_text`]'s line.
+fn argv_summary(argv: &[serde_json::Value]) -> Option<String> {
+    one_line(&argv_text(argv)?)
 }
 
 /// A code-mode script, by the first tool it calls: `exec_command`'s `cmd`,
@@ -764,6 +1028,41 @@ fn code_mode_summary(js: &str) -> Option<String> {
         0 => what,
         more => format!("{what} (+{more} more)"),
     })
+}
+
+/// Each tool a code-mode script calls, in order: `exec_command`'s `cmd`
+/// (None when the script builds it), the files of an `apply_patch`, or any
+/// other tool's call as the script wrote it, its arguments' source included.
+fn code_mode_ran(js: &str) -> Vec<Option<String>> {
+    code_calls(js)
+        .into_iter()
+        .map(|(name, args)| match name {
+            "exec_command" => key_literal(&js[args..], "cmd"),
+            "apply_patch" => js_literal(js[args..].trim_start()).and_then(|(patch, _)| patch_files(&patch)),
+            other => Some(format!("{other}({})", call_args(&js[args..]).trim())),
+        })
+        .collect()
+}
+
+/// The source of a call's arguments: `s` up to the `)` that closes it, string
+/// literals skipped whole. All of `s` when it never closes.
+fn call_args(s: &str) -> &str {
+    let b = s.as_bytes();
+    let (mut i, mut depth) = (0, 0usize);
+    while i < b.len() {
+        match b[i] {
+            b'"' | b'\'' | b'`' => {
+                i += js_literal(&s[i..]).map_or(1, |(_, n)| n);
+                continue;
+            }
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' if depth == 0 => return &s[..i],
+            b')' | b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        i += 1;
+    }
+    s
 }
 
 /// Each `tools.<name>(` a code-mode script calls: the name, and where its
@@ -860,9 +1159,14 @@ fn js_literal(s: &str) -> Option<(String, usize)> {
     None
 }
 
+/// [`patch_files`]' line.
+fn patch_summary(patch: &str) -> Option<String> {
+    one_line(&patch_files(patch)?)
+}
+
 /// The files a patch touches, from its `*** Update File:` / `*** Add File:`
 /// / `*** Delete File:` headers: `edit a.rs, b.rs; add c.rs`.
-fn patch_summary(patch: &str) -> Option<String> {
+fn patch_files(patch: &str) -> Option<String> {
     let mut groups: Vec<(&str, Vec<&str>)> = Vec::new();
     for l in patch.lines() {
         let Some((verb, path)) = [("*** Update File: ", "edit"), ("*** Add File: ", "add"), ("*** Delete File: ", "delete")]
@@ -882,7 +1186,7 @@ fn patch_summary(patch: &str) -> Option<String> {
     if groups.is_empty() {
         return None;
     }
-    one_line(&groups.iter().map(|(v, paths)| format!("{v} {}", paths.join(", "))).collect::<Vec<_>>().join("; "))
+    Some(groups.iter().map(|(v, paths)| format!("{v} {}", paths.join(", "))).collect::<Vec<_>>().join("; "))
 }
 
 /// A Codex tool's output that says the call did not do its work: a
@@ -918,6 +1222,11 @@ fn codex_output_failed(output: Option<&serde_json::Value>) -> bool {
 /// argv fills a summary the call's own input did not give. Its output
 /// (`stdout`, `formatted_output`…) is never read.
 pub fn codex(lines: &[String], n: usize) -> Vec<Turn> {
+    finish(codex_turns(lines), n)
+}
+
+/// Every turn in a Codex rollout's `lines`, as [`codex`] reads them.
+fn codex_turns(lines: &[String]) -> Vec<Turn> {
     let mut turns: Vec<Turn> = Vec::new();
     // The calls awaiting their output, by `call_id`, in the last turn.
     let mut open: Vec<String> = Vec::new();
@@ -933,10 +1242,20 @@ pub fn codex(lines: &[String], n: usize) -> Vec<Turn> {
             Some("event_msg") if event && p.get("type").and_then(|t| t.as_str()) == Some("item_completed") => {
                 let Some(item) = p.get("item").filter(|i| i.get("type").and_then(|t| t.as_str()) == Some("CommandExecution")) else { continue };
                 let [id] = open.as_slice() else { continue };
-                if let Some(Step::Tool { failed, summary, .. }) = turns.last_mut().and_then(|t| t.steps.iter_mut().find(|s| s.id() == Some(id.as_str()))) {
+                if let Some(Step::Tool { failed, summary, ran, .. }) = turns.last_mut().and_then(|t| t.steps.iter_mut().find(|s| s.id() == Some(id.as_str()))) {
                     *failed |= item.get("status").and_then(|s| s.as_str()) == Some("failed") || item.get("exit_code").and_then(|c| c.as_i64()).is_some_and(|c| c != 0);
+                    let argv = item.get("command").and_then(|c| c.as_array());
                     if summary.is_none() {
-                        *summary = item.get("command").and_then(|c| c.as_array()).and_then(|argv| argv_summary(argv));
+                        *summary = argv.and_then(|argv| argv_summary(argv));
+                    }
+                    // A built command's text: the next event not already a
+                    // literal of the script's, for the next part it builds.
+                    if let (Ran::Parts(parts), Some(cmd)) = (ran, argv.and_then(|argv| argv_text(argv))) {
+                        if !parts.iter().flatten().any(|c| *c == cmd) {
+                            if let Some(part) = parts.iter_mut().find(|p| p.is_none()) {
+                                *part = Some(cmd);
+                            }
+                        }
                     }
                 }
                 continue;
@@ -981,7 +1300,7 @@ pub fn codex(lines: &[String], n: usize) -> Vec<Turn> {
                         let args = p.get("arguments").and_then(|a| a.as_str()).and_then(|a| serde_json::from_str::<serde_json::Value>(a).ok());
                         Step::Question { at, answered_at: None, questions: questions_of(args.as_ref()), answer: None, id }
                     } else {
-                        Step::Tool { at, name: name.to_string(), id, summary: codex_summary(name, p), failed: false }
+                        Step::Tool { at, name: name.to_string(), id, summary: codex_summary(name, p), failed: false, ran: codex_ran(name, p), detail: false }
                     });
                 }
             }
@@ -1004,7 +1323,7 @@ pub fn codex(lines: &[String], n: usize) -> Vec<Turn> {
             _ => {}
         }
     }
-    finish(turns, n)
+    turns
 }
 
 /// One question's answer in a Codex `request_user_input` output: its
@@ -1056,6 +1375,11 @@ fn finish(mut turns: Vec<Turn>, n: usize) -> Vec<Turn> {
             t.reply = r;
             t.truncated |= cut;
             t.truncated |= clip_steps(&mut t.steps);
+            for step in &mut t.steps {
+                if let Step::Tool { summary, ran, detail, .. } = step {
+                    *detail = says_more(ran, summary.as_deref());
+                }
+            }
             t
         })
         .collect()
@@ -1145,7 +1469,9 @@ impl Step {
         let opt = |s: &Option<String>| s.as_ref().map_or(0, String::len);
         match self {
             Step::Text { text, .. } | Step::User { text, .. } => text.len(),
-            Step::Tool { name, summary, failed, .. } => name.len() + opt(summary) + if *failed { FAILED_BYTES } else { 0 },
+            Step::Tool { name, id, summary, failed, detail, .. } => {
+                name.len() + opt(summary) + if id.is_empty() { 0 } else { CALL_ID_BYTES + id.len() } + if *failed { FAILED_BYTES } else { 0 } + if *detail { DETAIL_BYTES } else { 0 }
+            }
             Step::Question { questions, answer, .. } => {
                 questions.iter().map(|q| q.header.len() + q.question.len() + q.options.iter().map(|o| o.label.len() + o.description.len()).sum::<usize>()).sum::<usize>()
                     + answer.iter().flat_map(|a| &a.answers).map(|a| a.question.len() + a.picked.iter().map(String::len).sum::<usize>() + opt(&a.typed) + opt(&a.note)).sum::<usize>()
@@ -1158,12 +1484,17 @@ impl Step {
 
 /// What a tool step's `failed` costs toward [`TOTAL_MAX`]: its JSON.
 const FAILED_BYTES: usize = r#","failed":true"#.len();
+/// What a tool step's `detail` costs, as `failed` does.
+const DETAIL_BYTES: usize = r#","detail":true"#.len();
+/// What a tool step's `call_id` costs beyond the id itself.
+const CALL_ID_BYTES: usize = r#","call_id":"""#.len();
 
 /// `turns` cut to [`TOTAL_MAX`] bytes of text, newest kept. Whole turns go
 /// first, oldest first, counted WITHOUT their tool calls' summaries, so a
 /// summary never costs a turn; then the kept turns' summaries, oldest first,
-/// until the rest fits — each call keeping its name and its flag. The flag
-/// says whether any turn went. The newest turn always stays.
+/// until the rest fits — each call keeping its name, its flags and its id, so
+/// a call with no line left can still be opened.
+/// The flag says whether any turn went. The newest turn always stays.
 pub fn within_budget(mut turns: Vec<Turn>) -> (Vec<Turn>, bool) {
     let words = |t: &Turn| t.bytes() - t.summary_bytes();
     let mut dropped = false;
@@ -1189,6 +1520,24 @@ mod tests {
 
     fn lines(s: &str) -> Vec<String> {
         s.lines().map(str::to_string).collect()
+    }
+
+    /// The turns as the wire has them, less each tool step's `call_id`: the
+    /// one place a call's id may appear, so a test can look for it elsewhere.
+    fn without_call_ids(turns: &[Turn]) -> String {
+        fn strip(v: &mut serde_json::Value) {
+            match v {
+                serde_json::Value::Object(o) => {
+                    o.remove("call_id");
+                    o.values_mut().for_each(strip);
+                }
+                serde_json::Value::Array(a) => a.iter_mut().for_each(strip),
+                _ => {}
+            }
+        }
+        let mut v = serde_json::to_value(turns).unwrap();
+        strip(&mut v);
+        v.to_string()
     }
 
     #[test]
@@ -1249,6 +1598,301 @@ mod tests {
         crate::sysclock::parse_iso8601(s).unwrap()
     }
 
+    fn claude_bash(id: &str, command: &str) -> Vec<String> {
+        use serde_json::json;
+        vec![
+            json!({"type":"user","message":{"role":"user","content":"Run it."}}).to_string(),
+            tool_use(id, "Bash", json!({"command":command})),
+        ]
+    }
+
+    fn tool_use(id: &str, name: &str, input: serde_json::Value) -> String {
+        serde_json::json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":id,"name":name,"input":input}]}}).to_string()
+    }
+
+    /// (summary, call_id, detail) of each tool step, as the wire has them.
+    fn rows(turns: &[Turn]) -> Vec<(Option<String>, Option<String>, bool)> {
+        let v = serde_json::to_value(turns).unwrap();
+        v.as_array().unwrap().iter().flat_map(|t| t["steps"].as_array().cloned().unwrap_or_default()).filter(|s| s["kind"] == "tool").map(|s| {
+            (s["summary"].as_str().map(str::to_string), s["call_id"].as_str().map(str::to_string), s["detail"] == true)
+        }).collect()
+    }
+
+    fn input_of(c: Option<CallDetail>) -> Option<String> {
+        c.map(|c| c.input.as_str().expect("a string input").to_string())
+    }
+
+    /// A multi-line command comes back whole, its shape kept and its summary
+    /// the one line it always was; `detail` says only when there is more.
+    #[test]
+    fn claude_call_is_the_whole_command_and_the_summary_is_unchanged() {
+        let command = "set -e\n\tcargo test \\\n  -p core\r\necho done\rtail";
+        let fx = claude_bash("toolu_a", command);
+        assert_eq!(rows(&claude(&fx, 5)), vec![(Some("set -e".to_string()), Some("toolu_a".to_string()), true)]);
+        let got = claude_tool_call(&fx, "toolu_a").unwrap();
+        assert_eq!(got.tool, "Bash");
+        assert_eq!(got.input, "set -e\n\tcargo test \\\n  -p core\necho done\ntail");
+        assert!(!got.truncated);
+        assert_eq!(claude_tool_call(&fx, "toolu_other"), None, "a call that left the window is nothing");
+        assert_eq!(claude_tool_call(&fx, ""), None);
+        // One short line: nothing more to show, tab or not. Its id still rides.
+        for short in ["ls -la", "ls\t-la", "\n  ls -la\n\n"] {
+            let got = rows(&claude(&claude_bash("toolu_b", short), 5));
+            assert_eq!(got[0].1.as_deref(), Some("toolu_b"), "{short:?}");
+            assert!(!got[0].2, "{short:?}");
+        }
+        // A line past the summary's clip does have more.
+        let long = "x".repeat(SUMMARY_MAX + 1);
+        let fx = claude_bash("toolu_c", &long);
+        assert!(rows(&claude(&fx, 5))[0].2);
+        assert_eq!(input_of(claude_tool_call(&fx, "toolu_c")).unwrap(), long);
+    }
+
+    /// What a person reads is what ran: an escape's byte and a bidi override
+    /// are gone, from a command and inside a structured input's strings, on
+    /// both harnesses. Nothing is redacted: the token stays.
+    #[test]
+    fn a_call_input_loses_control_and_invisible_characters_only() {
+        use serde_json::json;
+        let raw = "printf '\u{1b}[31mred'\nrm \u{202e}txt.\u{202c} a\u{200b}b\u{7} TOKEN=abc123";
+        let want = "printf '[31mred'\nrm txt. ab TOKEN=abc123";
+        assert_eq!(input_of(claude_tool_call(&claude_bash("c", raw), "c")).unwrap(), want);
+        let script = format!("await tools.exec_command({{cmd: {}}});", serde_json::to_string(raw).unwrap());
+        let fx = vec![
+            json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"go"}]}}).to_string(),
+            json!({"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":"x","input":script}}).to_string(),
+        ];
+        assert_eq!(input_of(codex_tool_call(&fx, "x")).unwrap(), want);
+        let fx = vec![tool_use("m", "mcp__a__b", json!({"q\u{200b}":[{"k":raw}],"n":1}))];
+        assert_eq!(claude_tool_call(&fx, "m").unwrap().input, json!({"q":[{"k":want}],"n":1}));
+    }
+
+    /// Past the cap a command is cut on a character, and a structured input
+    /// comes back as text rather than as JSON that does not parse.
+    #[test]
+    fn a_call_input_is_capped_and_says_so() {
+        use serde_json::json;
+        let long = "é".repeat(CALL_INPUT_MAX); // two bytes each
+        let got = claude_tool_call(&claude_bash("c", &long), "c").unwrap();
+        assert!(got.truncated);
+        assert_eq!(got.bytes, CALL_INPUT_MAX * 2);
+        assert_eq!(got.input.as_str().unwrap().len(), CALL_INPUT_MAX);
+        let at_cap = claude_tool_call(&claude_bash("c", &"a".repeat(CALL_INPUT_MAX)), "c").unwrap();
+        assert!(!at_cap.truncated);
+
+        let got = claude_tool_call(&[tool_use("m", "mcp__a__b", json!({"body":"x".repeat(CALL_INPUT_MAX)}))], "m").unwrap();
+        assert!(got.truncated);
+        assert!(got.bytes > CALL_INPUT_MAX);
+        let text = got.input.as_str().expect("a cut value is a string");
+        assert_eq!(text.len(), CALL_INPUT_MAX);
+        assert!(text.starts_with("{\n  \"body\": \"xxx"), "the value's own text");
+        assert!(serde_json::from_str::<serde_json::Value>(text).is_err());
+    }
+
+    /// Only a `tool_use` in an assistant entry is ever read: a request blob
+    /// and a sidechain naming the same id hand back nothing.
+    #[test]
+    fn a_claude_call_reads_only_assistant_tool_use() {
+        use serde_json::json;
+        let mut sidechain: serde_json::Value = serde_json::from_str(&tool_use("side", "Bash", json!({"command":"SIDECHAIN-MARKER\nb"}))).unwrap();
+        sidechain["isSidechain"] = json!(true);
+        let fx = vec![
+            json!({"type":"user","message":{"role":"user","content":"Go."}}).to_string(),
+            json!({"type":"api-request-blob","message":{"role":"assistant","content":[{"type":"tool_use","id":"blob","name":"Bash","input":{"command":"SYSTEM-PROMPT-MARKER\nb"}}]}}).to_string(),
+            sidechain.to_string(),
+            tool_use("agent", "Agent", json!({"description":"Look around","prompt":"Read the tree.\nReport back."})),
+            tool_use("grep", "Grep", json!({"pattern":"a\nb","path":"/r"})),
+        ];
+        assert_eq!(claude_tool_call(&fx, "blob"), None);
+        assert_eq!(claude_tool_call(&fx, "side"), None);
+        assert_eq!(input_of(claude_tool_call(&fx, "agent")).unwrap(), "Read the tree.\nReport back.");
+        assert_eq!(input_of(claude_tool_call(&fx, "grep")).unwrap(), "a\nb in /r");
+        let sent = serde_json::to_string(&claude(&fx, 5)).unwrap();
+        assert!(!sent.contains("Report back"), "the input never rides on the turns: {sent}");
+        assert!(!sent.contains("\"ran\""), "{sent}");
+    }
+
+    /// The named exclusion: however a file-writing tool's input is shaped,
+    /// only its path leaves, and `detail` says so only for a path its line
+    /// cut. The generic input path would hand back every one of these strings.
+    #[test]
+    fn a_file_writing_tools_contents_never_come_back() {
+        use serde_json::json;
+        let path = format!("/r/{}", "d/".repeat(SUMMARY_MAX));
+        let fx = vec![
+            tool_use("edit", "Edit", json!({"file_path":path,"old_string":"LEAK","new_string":"LEAK","replace_all":true})),
+            tool_use("multi", "MultiEdit", json!({"file_path":path,"edits":[{"old_string":"LEAK","new_string":"LEAK"}]})),
+            tool_use("write", "Write", json!({"file_path":path,"content":"LEAK"})),
+            tool_use("note", "NotebookEdit", json!({"notebook_path":path,"new_source":"LEAK","cell_id":"LEAK"})),
+        ];
+        for id in ["edit", "multi", "write", "note"] {
+            let got = claude_tool_call(&fx, id).unwrap();
+            assert_eq!(got.input, json!(path), "{id}");
+            assert!(!serde_json::to_string(&got).unwrap().contains("LEAK"), "{id}");
+        }
+        let got = claude(&fx, 5);
+        assert!(rows(&got).iter().all(|r| r.2 && r.1.is_some() && r.0.is_some()), "a long path has more than its line: {got:#?}");
+        assert!(!serde_json::to_string(&got).unwrap().contains("LEAK"));
+        assert_eq!(PATH_ONLY.map(|(tool, _)| tool), ["Edit", "MultiEdit", "Write", "NotebookEdit"]);
+        // A path that fits has nothing more to show; no path, nothing at all.
+        let fx = vec![
+            tool_use("short", "Write", json!({"file_path":"/r/a.rs","content":"LEAK"})),
+            tool_use("none", "Write", json!({"content":"LEAK"})),
+        ];
+        assert!(rows(&claude(&fx, 5)).iter().all(|r| !r.2));
+        assert_eq!(claude_tool_call(&fx, "none"), None);
+    }
+
+    /// Any other tool, MCP's and an unknown one's, answers with its input as
+    /// the structured value it is. An empty one has nothing to open.
+    #[test]
+    fn an_mcp_call_is_its_structured_input() {
+        use serde_json::json;
+        let fx = vec![
+            tool_use("m", "mcp__tavily__search", json!({"query":"a\nb","opts":[{"key":1}]})),
+            tool_use("empty", "mcp__x__ping", json!({})),
+            tool_use("todo", "TodoWrite", json!({"todos":[{"content":"one"}]})),
+        ];
+        let got = claude_tool_call(&fx, "m").unwrap();
+        assert_eq!(got.tool, "mcp__tavily__search");
+        assert_eq!(got.input, json!({"query":"a\nb","opts":[{"key":1}]}));
+        assert_eq!(claude_tool_call(&fx, "empty"), None);
+        let turns = claude(&fx, 5);
+        let got = rows(&turns);
+        assert_eq!(got[0], (None, Some("m".to_string()), true));
+        assert_eq!(got[1], (None, Some("empty".to_string()), false));
+        assert_eq!(got[2], (Some("1 item".to_string()), Some("todo".to_string()), true));
+        assert!(!serde_json::to_string(&turns).unwrap().contains("tavily__search\",\"input"));
+        // Codex: a function call's JSON arguments, or a custom tool's text.
+        let cx = vec![
+            json!({"type":"response_item","payload":{"type":"function_call","name":"mcp__x__y","call_id":"f","arguments":"{\"q\":\"a\\u001bb\"}"}}).to_string(),
+            json!({"type":"response_item","payload":{"type":"custom_tool_call","name":"mine","call_id":"t","input":"raw\ntext"}}).to_string(),
+            json!({"type":"response_item","payload":{"type":"function_call","name":"bad","call_id":"b","arguments":"not json"}}).to_string(),
+        ];
+        assert_eq!(codex_tool_call(&cx, "f").unwrap().input, json!({"q":"ab"}));
+        assert_eq!(codex_tool_call(&cx, "t").unwrap().input, "raw\ntext");
+        assert_eq!(codex_tool_call(&cx, "b").unwrap().input, "not json");
+    }
+
+    /// An input that says only what its line says has nothing to open.
+    #[test]
+    fn an_input_that_repeats_its_line_has_no_detail() {
+        use serde_json::json;
+        let fx = vec![
+            tool_use("same", "Skill", json!({"skill":"close-out"})),
+            tool_use("more", "Skill", json!({"skill":"close-out","args":"--dry-run"})),
+            tool_use("todo", "TodoWrite", json!({"todos":[]})),
+            tool_use("one", "mcp__a__b", json!({"q":"x"})),
+        ];
+        let got = rows(&claude(&fx, 5));
+        assert_eq!(got[0], (Some("close-out".to_string()), Some("same".to_string()), false));
+        assert!(got[1].2, "{got:?}");
+        assert!(!got[2].2, "an input with no values says nothing: {got:?}");
+        assert!(got[3].2, "no line to repeat: {got:?}");
+    }
+
+    /// Two keys that differ only by what cleaning removes must not lose a
+    /// value: a hidden character could otherwise hide one from the reader.
+    #[test]
+    fn keys_that_clean_alike_keep_both_values() {
+        use serde_json::json;
+        let fx = vec![tool_use("m", "mcp__a__b", json!({"a":1,"a\u{200b}":2,"a\u{202e}":3,"a (2)":4}))];
+        let got = claude_tool_call(&fx, "m").unwrap().input;
+        let o = got.as_object().unwrap();
+        assert_eq!(o.len(), 4, "{got}");
+        let mut values: Vec<i64> = o.values().map(|v| v.as_i64().unwrap()).collect();
+        values.sort();
+        assert_eq!(values, [1, 2, 3, 4], "{got}");
+        assert_eq!(o["a"], 1);
+        assert_eq!(o["a (2)"], 4, "a key the input really has keeps its value: {got}");
+    }
+
+    /// The budget counts what a step's id and flags cost on the wire.
+    #[test]
+    fn a_tool_steps_bytes_count_its_id_and_detail() {
+        use serde_json::json;
+        let got = claude(&[tool_use("id1", "mcp__a__b", json!({"q":"x"}))], 5);
+        let step = &got[0].steps[0];
+        let wire = serde_json::to_string(step).unwrap();
+        assert!(wire.contains(r#","call_id":"id1""#) && wire.contains(r#","detail":true"#), "{wire}");
+        assert_eq!(step.bytes(), "mcp__a__b".len() + r#","call_id":"id1""#.len() + r#","detail":true"#.len());
+    }
+
+    /// Every shape Codex's summary reads gives its whole text too: a script's
+    /// commands in order, a patch's files and never its text, both argv forms
+    /// and a command only an event names.
+    #[test]
+    fn codex_call_is_every_command_in_each_shape() {
+        use serde_json::json;
+        let user = json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"go"}]}}).to_string();
+        let exec = |id: &str, js: &str| json!({"type":"response_item","payload":{"type":"custom_tool_call","name":"exec","call_id":id,"input":js}}).to_string();
+        let func = |id: &str, name: &str, args: serde_json::Value| json!({"type":"response_item","payload":{"type":"function_call","name":name,"call_id":id,"arguments":args.to_string()}}).to_string();
+        let done = |id: &str| json!({"type":"response_item","payload":{"type":"custom_tool_call_output","call_id":id,"output":"OUTPUT-MARKER"}}).to_string();
+        let event = |cmd: &str| json!({"type":"event_msg","payload":{"type":"item_completed","item":{"type":"CommandExecution","command":["/bin/zsh","-lc",cmd],"status":"completed","exit_code":0}}}).to_string();
+        let patch = "*** Begin Patch\n*** Update File: a.rs\n+PATCH-MARKER\n*** Add File: b.rs\n+PATCH-MARKER\n*** End Patch";
+        let fx = vec![
+            user,
+            exec("two", "await tools.exec_command({cmd: \"set -e\\nls\"}); await tools.exec_command({cmd: 'make test'});"),
+            done("two"),
+            exec("mix", &format!("await tools.apply_patch({}); await tools.exec_command({{cmd: \"cat a.rs\"}}); await tools.view_image({{path: \"a).png\"}});", serde_json::to_string(patch).unwrap())),
+            done("mix"),
+            func("cmd", "exec_command", json!({"cmd":"git status\ngit diff"})),
+            done("cmd"),
+            func("argv", "shell", json!({"command":["/bin/bash","-lc","cd x\nmake"]})),
+            done("argv"),
+            func("words", "shell", json!({"command":["ls","-l","src"]})),
+            done("words"),
+            func("legacy", "apply_patch", json!({"input":patch})),
+            done("legacy"),
+            exec("built", "const c = ['ls'].join(' '); await tools.exec_command({cmd: c}); await tools.exec_command({cmd: \"pwd\"}); await tools.exec_command({cmd: `a${c}`});"),
+            event("pwd"),
+            event("ls -la\nwc -l"),
+            done("built"),
+            exec("nobody", "const c = 'x'; await tools.exec_command({cmd: c});"),
+            done("nobody"),
+        ];
+        let text = |id: &str| input_of(codex_tool_call(&fx, id));
+        assert_eq!(text("two").as_deref(), Some("set -e\nls\n\nmake test"));
+        assert_eq!(text("mix").as_deref(), Some("edit a.rs; add b.rs\n\ncat a.rs\n\nview_image({path: \"a).png\"})"));
+        assert_eq!(text("cmd").as_deref(), Some("git status\ngit diff"));
+        assert_eq!(text("argv").as_deref(), Some("cd x\nmake"));
+        assert_eq!(text("words").as_deref(), Some("ls -l src"));
+        assert_eq!(text("legacy").as_deref(), Some("edit a.rs; add b.rs"));
+        assert_eq!(text("built").as_deref(), Some("ls -la\nwc -l\n\npwd\n\n(a command this script builds)"));
+        assert_eq!(text("nobody"), None, "nothing is known of it: no click");
+        let turns = codex(&fx, 5);
+        let sent = serde_json::to_string(&turns).unwrap();
+        for leak in ["PATCH-MARKER", "OUTPUT-MARKER", "make test"] {
+            assert!(!sent.contains(leak), "{leak}: {sent}");
+        }
+        let got = rows(&turns);
+        let row = |sum: Option<&str>, id: &str, more: bool| (sum.map(str::to_string), Some(id.to_string()), more);
+        assert_eq!(got[0], row(Some("set -e (+1 more)"), "two", true));
+        assert_eq!(got[2], row(Some("git status"), "cmd", true));
+        assert_eq!(got[4], row(Some("ls -l src"), "words", false), "one short line");
+        assert_eq!(got[5], row(Some("edit a.rs; add b.rs"), "legacy", false), "a patch's list that fits");
+        assert!(got[6].2);
+        assert_eq!(got[7], row(None, "nobody", false));
+    }
+
+    /// The budget takes a call's line and leaves its id and `detail`: the call
+    /// can still be opened, which is when its text is worth anything.
+    #[test]
+    fn the_budget_leaves_a_call_its_id_and_detail() {
+        use serde_json::json;
+        let long = format!("{}\nsecond", "c".repeat(190));
+        let mut fx = vec![json!({"type":"user","message":{"role":"user","content":"Go."}}).to_string()];
+        for i in 0..400 {
+            fx.push(claude_bash(&format!("toolu_{i:03}"), &long).remove(1));
+        }
+        let (kept, dropped) = within_budget(claude(&fx, 1));
+        assert!(!dropped);
+        let got = rows(&kept);
+        assert!(got.iter().any(|r| r.0.is_none()), "the fixture must be over budget");
+        assert!(got.iter().all(|r| r.1.is_some() && r.2), "{:?}", got.iter().find(|r| r.1.is_none() || !r.2));
+        assert!(kept[0].bytes() <= TOTAL_MAX);
+    }
+
     #[test]
     fn claude_queued_message_is_a_step_only_when_absorbed() {
         use serde_json::json;
@@ -1297,7 +1941,7 @@ mod tests {
         use serde_json::json;
         let fx = lines(include_str!("../tests/fixtures/transcripts/claude-2.1.316-answers.jsonl"));
         let got = claude(&fx, 20);
-        let all = serde_json::to_string(&got).unwrap();
+        let all = without_call_ids(&got);
         for secret in ["SYSTEM-PROMPT-MARKER", "THINKING-MARKER", "noOutputExpected", "drwxr-xr-x", "permissionDecision", "toolu_"] {
             assert!(!all.contains(secret), "{secret} leaked: {all}");
         }
@@ -1336,7 +1980,7 @@ mod tests {
         let b = steps(5);
         assert_eq!((b[0]["allowed"].clone(), b[0]["note"].clone(), b[0]["summary"].clone()), (json!(false), json!("name it probe-c.txt instead"), json!("touch probe-b.txt")));
         assert_eq!((b[1]["allowed"].clone(), b[1]["note"].clone()), (json!(true), json!("then list the directory")));
-        assert_eq!(b[2], json!({"kind": "tool", "at": ts("2026-10-31T18:28:15.685Z"), "name": "Bash", "summary": "ls -la"}));
+        assert_eq!(b[2], json!({"kind": "tool", "at": ts("2026-10-31T18:28:15.685Z"), "name": "Bash", "call_id": "toolu_01KBZkB4A27Gdj3XiCrtEXEU", "summary": "ls -la"}));
         assert_eq!(b[3]["kind"], "text");
         assert_eq!(got[5].tools, vec!["Bash"; 3]);
 
@@ -1397,8 +2041,8 @@ mod tests {
             serde_json::to_value(&got[0].steps).unwrap(),
             json!([
                 {"kind": "text", "at": ts("2026-10-23T18:01:02.000Z"), "text": "Running them."},
-                {"kind": "tool", "at": ts("2026-10-23T18:01:02.000Z"), "name": "exec_command", "summary": "make test"},
-                {"kind": "tool", "at": ts("2026-10-23T18:01:10.000Z"), "name": "apply_patch"},
+                {"kind": "tool", "at": ts("2026-10-23T18:01:02.000Z"), "name": "exec_command", "call_id": "c1", "summary": "make test"},
+                {"kind": "tool", "at": ts("2026-10-23T18:01:10.000Z"), "name": "apply_patch", "call_id": "c2"},
                 {"kind": "text", "at": ts("2026-10-23T18:01:12.000Z"), "text": "All green."},
             ])
         );
@@ -1500,7 +2144,7 @@ mod tests {
     fn claude_tool_steps_say_what_ran_and_whether_it_failed() {
         let fx = lines(include_str!("../tests/fixtures/transcripts/claude-2.1.316-tools.jsonl"));
         let got = claude(&fx, 10);
-        let all = serde_json::to_string(&got).unwrap();
+        let all = without_call_ids(&got);
         for secret in ["SYSTEM-PROMPT-MARKER", "TOOL-OUTPUT-MARKER", "toolu_", "is_error"] {
             assert!(!all.contains(secret), "{secret} leaked: {all}");
         }
@@ -1626,7 +2270,7 @@ mod tests {
     fn codex_tool_steps_say_what_ran_and_whether_it_failed() {
         let fx = lines(include_str!("../tests/fixtures/transcripts/codex-0.160.1-tools.jsonl"));
         let got = codex(&fx, 10);
-        let all = serde_json::to_string(&got).unwrap();
+        let all = without_call_ids(&got);
         for secret in ["BASE-INSTRUCTIONS-MARKER", "TOOL-OUTPUT-MARKER", "REASONING-MARKER", "call_", "exit_code"] {
             assert!(!all.contains(secret), "{secret} leaked: {all}");
         }
@@ -1776,8 +2420,10 @@ mod tests {
         let got = claude(&fx, MAX_TURNS);
         let full: usize = got.iter().map(Turn::bytes).sum();
         assert!(full > TOTAL_MAX, "the fixture must be over the budget to test it: {full}");
-        let one = got[0].steps.iter().find(|s| matches!(s, Step::Tool { failed: true, .. })).unwrap().bytes();
-        assert_eq!(one, "Bash".len() + cmd(0, 0).chars().take(SUMMARY_MAX).collect::<String>().len() + "…".len() + FAILED_BYTES, "a summary and its flag count");
+        let first = got[0].steps.iter().find(|s| matches!(s, Step::Tool { failed: true, .. })).unwrap();
+        let id_len = first.id().unwrap().len();
+        let one = first.bytes();
+        assert_eq!(one, "Bash".len() + r#","call_id":"""#.len() + id_len + r#","detail":true"#.len() + cmd(0, 0).chars().take(SUMMARY_MAX).collect::<String>().len() + "…".len() + FAILED_BYTES, "a summary, its id and its flag count");
 
         let (kept, dropped) = within_budget(got);
         assert!(kept.iter().map(Turn::bytes).sum::<usize>() <= TOTAL_MAX);

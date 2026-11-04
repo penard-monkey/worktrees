@@ -99,6 +99,8 @@ export function useStickToBottom(ref: RefObject<HTMLDivElement | null>, loaded: 
   const opened = useRef(false);
   const seenPrompt = useRef<string | null>(null);
   const seenReply = useRef<string | null>(null);
+  /** A row the reader opened or closed, for the commit it lands in. */
+  const revealing = useRef<{ top: HTMLElement; bottom: HTMLElement } | null>(null);
   const freshNow = useRef(false);
   const [fresh, setFreshState] = useState(false);
   const setFresh = (v: boolean) => {
@@ -143,6 +145,21 @@ export function useStickToBottom(ref: RefObject<HTMLDivElement | null>, loaded: 
     return true;
   };
 
+  /** The reader's own act on a row, so it is not a change to follow: the rows
+   *  hold still, then what opened comes into view as far as its top allows, so
+   *  a command taller than the view is read from its start and its row is never
+   *  pushed off the top. Following resumes only from the bottom. */
+  const settle = (el: HTMLElement, r: { top: HTMLElement; bottom: HTMLElement }, before: Seen | null) => {
+    if (before) hold(el, before);
+    const box = el.getBoundingClientRect();
+    const over = r.bottom.getBoundingClientRect().bottom - box.bottom;
+    const room = r.top.getBoundingClientRect().top - box.top - 8;
+    if (over > 0 && room > 0) el.scrollTop += Math.min(over, room);
+    pinned.current = fromBottom(el) <= NEAR;
+    if (pinned.current) setFresh(false);
+    note(el);
+  };
+
   // Before the commit: a scroll whose event is still on its way counts, and
   // the rows in view are where the reader left them.
   const take = () => {
@@ -180,7 +197,11 @@ export function useStickToBottom(ref: RefObject<HTMLDivElement | null>, loaded: 
       return;
     }
     const before = seen.current;
-    if (pinned.current) toBottom();
+    // Set by the row's own layout effect, which runs before this one.
+    const asked = revealing.current;
+    revealing.current = null;
+    if (asked?.top.isConnected) settle(el, asked, before);
+    else if (pinned.current) toBottom();
     else {
       if (lastReply !== null && lastReply !== seenReply.current) setFresh(true);
       if (before) stay(el, before);
@@ -209,5 +230,6 @@ export function useStickToBottom(ref: RefObject<HTMLDivElement | null>, loaded: 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ref]);
 
-  return { toBottom, fresh, dismiss: () => setFresh(false), take };
+  const reveal = (top: HTMLElement, bottom: HTMLElement) => { revealing.current = { top, bottom }; };
+  return { toBottom, fresh, dismiss: () => setFresh(false), take, reveal };
 }

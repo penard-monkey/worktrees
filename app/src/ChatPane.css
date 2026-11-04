@@ -134,6 +134,30 @@
 }
 .chat-call-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--danger); }
 .chat-call-more { font-size: var(--fs-meta); padding-left: 2px; }
+/* A call with more to show: the same row in a button, block with the flex in
+   an inner span (WebKit), told apart only under the pointer and the keyboard.
+   What it opens to is plain text at its full height, with no scroller of its
+   own: the chat's is the one scroller, and stickToBottom keeps the row in view. */
+.chat-call-row { min-width: 0; }
+.chat-call-btn {
+  display: block; width: 100%; padding: 0; border: 0; background: transparent; font: inherit; color: inherit;
+  text-align: left; border-radius: var(--r-sm);
+}
+.chat-call-btn:hover, .chat-tool-btn:hover { background: var(--bg-elev); }
+.chat-call-btn:focus-visible, .chat-tool-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.chat-tool-cell { display: flex; min-width: 0; }
+.chat-tool-btn { display: block; }
+.chat-tool-open { flex: 0 0 100%; min-width: 0; }
+.chat-call-full {
+  margin: 3px 0 var(--s1); padding: var(--s1) var(--s2); min-width: 0; cursor: text;
+  background: var(--bg-panel); border: 1px solid var(--line); border-radius: var(--r-sm);
+}
+.chat-call-text {
+  margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text;
+  font-family: var(--font-mono); font-size: var(--fs-meta); line-height: 1.5; color: var(--txt);
+}
+.chat-call-note { margin: 0; font-size: var(--fs-meta); color: var(--txt-dim); }
+.chat-call-text + .chat-call-note { margin-top: var(--s1); padding-top: var(--s1); border-top: 1px solid var(--line); }
 
 /* "Claude is working": the dots are the app's busy colour, the words are not. */
 .chat-typing { display: flex; align-items: center; gap: var(--s2); margin: var(--s2) 0 0 var(--s1); font-size: var(--fs-meta); color: var(--txt-dim); }

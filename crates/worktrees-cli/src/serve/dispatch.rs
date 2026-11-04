@@ -1,4 +1,4 @@
-//! The 194 commands, each with its exposure, capability and objects, in ONE
+//! The 195 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -1119,6 +1119,12 @@ commands! { cx, a;
     agent_turns: Engine [read, place(repo, slug), opt(session_of(session, repo, slug))] => agents::agent_turns(
         &cx.ctx, a.get("repo")?, a.get("slug")?, a.get("session")?, a.get("n")?,
     ),
+    // One tool call's input, for a row opened: fetched then, so the poll above
+    // never carries it. `read`, like the turns it details: no step-up, and a
+    // paired device's Observe grant reaches it, scoped to its places.
+    agent_tool_call: Engine [read, place(repo, slug)] => agents::agent_tool_call(
+        &cx.ctx, a.get("repo")?, a.get("slug")?, a.get("call_id")?,
+    ),
 
     // ── backend preferences, the Data pane, local usage metrics (prefs) ──
     // Host policy (`worktrees_api::hostpolicy`): `admin`, not console-only, as it widens no agent (decision 6).
@@ -1252,7 +1258,7 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 194 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 195 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six, the slots pair and
     /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
@@ -1269,7 +1275,7 @@ mod tests {
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 194, "the table has 194 commands");
+        assert_eq!(TABLE.len(), 195, "the table has 195 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1674,7 +1680,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 61), ("write", 23), ("admin", 40), ("console", 41), ("stream", 10), ("instruct", 7), ("answer", 2),
+            ("read", 62), ("write", 23), ("admin", 40), ("console", 41), ("stream", 10), ("instruct", 7), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 3),
         ]
         .into();

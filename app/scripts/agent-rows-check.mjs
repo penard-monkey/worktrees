@@ -55,6 +55,7 @@ const ROWS = {
   // step-up and the drive-class audit budget.
   agent_attach: "instruct, place(repo, slug)",
   agent_turns: "read, place(repo, slug), opt(session_of(session, repo, slug))",
+  agent_tool_call: "read, place(repo, slug)",
 };
 const norm = (s) => s.replace(/\s+/g, " ").trim();
 
