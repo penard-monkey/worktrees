@@ -362,6 +362,283 @@ pub fn admit(provider: Option<&str>, force: bool, exclude: &[String]) -> Result<
     }
 }
 
+// ── writing [limits] (Settings → Agent policy → Limits) ─────────────────────
+
+/// A `[limits]` key Settings sets, each with the range `limits_from` accepts
+/// for it. The setter REFUSES whatever the reader would ignore (a value out of
+/// range, a provider that does not exist), with the reader's own words, so a
+/// write can never be a value the guard then reports as a problem and drops.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LimitKey {
+    MaxLiveAgents,
+    MaxLive(String),
+    MinFreeMemoryPct,
+    MaxSwapUsedPct,
+}
+
+fn provider_ids() -> String {
+    crate::provider::PROVIDERS.iter().map(|p| p.id).collect::<Vec<_>>().join(", ")
+}
+
+impl LimitKey {
+    /// `max_live_agents`, `max_live.<provider>`, `min_free_memory_pct` or
+    /// `max_swap_used_pct`: the name Settings sends, which is data (it names a
+    /// key in a file, never argv) and is checked against this fixed set.
+    pub fn parse(s: &str) -> Result<LimitKey, String> {
+        match s {
+            "max_live_agents" => Ok(LimitKey::MaxLiveAgents),
+            "min_free_memory_pct" => Ok(LimitKey::MinFreeMemoryPct),
+            "max_swap_used_pct" => Ok(LimitKey::MaxSwapUsedPct),
+            _ => match s.strip_prefix("max_live.") {
+                Some(p) if crate::provider::PROVIDERS.iter().any(|x| x.id == p) => Ok(LimitKey::MaxLive(p.to_string())),
+                Some(p) => Err(format!("[limits] max_live.{p}: no such provider ({})", provider_ids())),
+                None => Err(format!("[limits] has no key `{s}`")),
+            },
+        }
+    }
+
+    /// The key as the file spells it.
+    pub fn name(&self) -> String {
+        match self {
+            LimitKey::MaxLiveAgents => "max_live_agents".into(),
+            LimitKey::MaxLive(p) => format!("max_live.{p}"),
+            LimitKey::MinFreeMemoryPct => "min_free_memory_pct".into(),
+            LimitKey::MaxSwapUsedPct => "max_swap_used_pct".into(),
+        }
+    }
+
+    /// The inclusive range `limits_from` accepts — the same numbers, so the
+    /// two cannot disagree (`a_written_limit_is_one_the_guard_reads`).
+    pub fn range(&self) -> (u32, u32) {
+        match self {
+            LimitKey::MaxLiveAgents | LimitKey::MaxLive(_) => (0, 1000),
+            LimitKey::MinFreeMemoryPct => (0, 90),
+            LimitKey::MaxSwapUsedPct => (0, 100),
+        }
+    }
+
+    /// `n` is one the guard would apply, or the reason it would not.
+    pub fn check(&self, n: u32) -> Result<(), String> {
+        let (lo, hi) = self.range();
+        if (lo..=hi).contains(&n) {
+            Ok(())
+        } else {
+            Err(format!("[limits] {} must be a whole number from {lo} to {hi} (got {n})", self.name()))
+        }
+    }
+}
+
+/// The `[limits]` keys the file sets, as the guard would read them (a value it
+/// ignores is not here; it is in `limits_from`'s problems).
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct ExplicitLimits {
+    pub max_live_agents: Option<u32>,
+    pub max_live: BTreeMap<String, u32>,
+    pub min_free_memory_pct: Option<u32>,
+    pub max_swap_used_pct: Option<u32>,
+}
+
+/// What the file says about each key, unfilled — for Settings to tell a
+/// default from a choice, and for Reset to have something to remove.
+pub fn explicit_from(text: &str) -> ExplicitLimits {
+    let mut e = ExplicitLimits::default();
+    let Ok(root) = toml::from_str::<toml::Table>(text) else { return e };
+    let Some(t) = root.get(TABLE).and_then(|v| v.as_table()) else { return e };
+    let get = |k: &LimitKey, v: Option<&toml::Value>| {
+        v.and_then(|v| v.as_integer()).and_then(|n| u32::try_from(n).ok()).filter(|n| k.check(*n).is_ok())
+    };
+    e.max_live_agents = get(&LimitKey::MaxLiveAgents, t.get("max_live_agents"));
+    e.min_free_memory_pct = get(&LimitKey::MinFreeMemoryPct, t.get("min_free_memory_pct"));
+    e.max_swap_used_pct = get(&LimitKey::MaxSwapUsedPct, t.get("max_swap_used_pct"));
+    if let Some(pt) = t.get("max_live").and_then(|v| v.as_table()) {
+        for (p, v) in pt {
+            if let Ok(k) = LimitKey::parse(&format!("max_live.{p}")) {
+                if let Some(n) = get(&k, Some(v)) {
+                    e.max_live.insert(p.clone(), n);
+                }
+            }
+        }
+    }
+    e
+}
+
+/// Set (`Some`) or remove (`None`) one `[limits]` key in the user's
+/// config.toml — the user's act only: Settings, and a policy preset applied
+/// from it; the MCP server never calls it. Returns whether anything changed.
+pub fn set_limit(key: &LimitKey, n: Option<u32>) -> Result<bool, String> {
+    set_limit_at(&crate::config::config_toml_path(), key, n)
+}
+
+pub fn set_limit_at(path: &std::path::Path, key: &LimitKey, n: Option<u32>) -> Result<bool, String> {
+    if let Some(n) = n {
+        key.check(n)?;
+    }
+    crate::config::edit_user_config(path, |text| {
+        let root: toml::Table = toml::from_str(text).map_err(|_| limits_unparsable())?;
+        let t = root.get(TABLE).and_then(|v| v.as_table());
+        let cur = match key {
+            LimitKey::MaxLive(p) => t.and_then(|t| t.get("max_live")).and_then(|v| v.as_table()).and_then(|m| m.get(p)),
+            _ => t.and_then(|t| t.get(&key.name())),
+        };
+        let same = match (cur, n) {
+            (None, None) => true,
+            (Some(v), Some(n)) => v.as_integer() == Some(i64::from(n)),
+            _ => false,
+        };
+        if same {
+            return Ok(None);
+        }
+        with_limit(text, key, n).map(Some)
+    })
+}
+
+fn limits_unparsable() -> String {
+    "config.toml does not parse — fix it by hand before changing [limits]".into()
+}
+
+/// `text` with one `[limits]` key set to `n`, or removed for `None`. Pure, for
+/// the tests.
+///
+/// `slots::with_slot`'s rules: the key's VALUE is edited in place, so its
+/// inline comment and indentation survive; the file's line ending is kept; a
+/// missing key goes after the table's last key (or under its header), or the
+/// table at the end. A provider's cap is written as a dotted key
+/// (`max_live.claude = 12`), unless the file already holds an inline
+/// `max_live = { … }`, which is rewritten whole. The result must re-parse to
+/// exactly the old document with this one key changed, or nothing is written
+/// — a `[limits.max_live]` sub-table, say, refuses rather than guess.
+pub fn with_limit(text: &str, key: &LimitKey, n: Option<u32>) -> Result<String, String> {
+    if let Some(n) = n {
+        key.check(n)?;
+    }
+    let before: toml::Table = toml::from_str(text).map_err(|_| limits_unparsable())?;
+    let refuse = || format!("could not set [limits] {} in your config.toml safely (an unusual layout?) — edit it by hand", key.name());
+    let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let starts = |l: &str, name: &str| l.trim_start().strip_prefix(name).is_some_and(|r| r.trim_start().starts_with('='));
+    // An inline `max_live = { … }` already in [limits]: that line is rewritten
+    // with the new map, rather than a dotted key added that TOML would refuse.
+    let inline_map: Option<BTreeMap<String, i64>> = match key {
+        LimitKey::MaxLive(_) => before
+            .get(TABLE)
+            .and_then(|v| v.as_table())
+            .and_then(|t| t.get("max_live"))
+            .and_then(|v| v.as_table())
+            .map(|m| m.iter().filter_map(|(k, v)| v.as_integer().map(|n| (k.clone(), n))).collect()),
+        _ => None,
+    };
+    let comment_of = |t: &str| -> String {
+        let after_eq = &t[t.find('=').map_or(t.len(), |i| i + 1)..];
+        // A `#` inside the inline table's braces is not a comment; only look
+        // past the closing brace when there is one.
+        let tail_from = if after_eq.trim_start().starts_with('{') { after_eq.rfind('}').map_or(0, |i| i + 1) } else { 0 };
+        let tail = &after_eq[tail_from..];
+        tail.find(" #").or_else(|| tail.find("\t#")).map_or(String::new(), |i| {
+            let start = tail[..i].trim_end_matches([' ', '\t']).len();
+            tail[start..].to_string()
+        })
+    };
+    let name = key.name();
+    let mut out: Vec<String> = Vec::new();
+    let mut in_limits = false;
+    let mut header: Option<usize> = None;
+    let mut last_key: Option<usize> = None;
+    let mut handled = false;
+    for l in text.lines() {
+        let t = l.trim_start();
+        let indent = &l[..l.len() - t.len()];
+        if t.starts_with('[') {
+            // `[limits]  # note` is ours; `[limits.x]` and `[[limits]]` are not.
+            in_limits = t.split('#').next().unwrap_or("").trim_end() == format!("[{TABLE}]");
+            out.push(l.to_string());
+            if in_limits && header.is_none() {
+                header = Some(out.len());
+            }
+            continue;
+        }
+        if in_limits {
+            // `max_live = { … }` (inline) is rewritten whole; a dotted
+            // `max_live.<p> = n` is an ordinary key, handled below.
+            if let (LimitKey::MaxLive(p), Some(map)) = (key, inline_map.as_ref()) {
+                if starts(l, "max_live") {
+                    handled = true;
+                    let mut m = map.clone();
+                    match n {
+                        Some(n) => {
+                            m.insert(p.clone(), i64::from(n));
+                        }
+                        None => {
+                            m.remove(p);
+                        }
+                    }
+                    if !m.is_empty() {
+                        let body: Vec<String> = m.iter().map(|(k, v)| format!("{k} = {v}")).collect();
+                        out.push(format!("{indent}max_live = {{ {} }}{}", body.join(", "), comment_of(t)));
+                        last_key = Some(out.len());
+                    }
+                    continue;
+                }
+            }
+            if starts(l, &name) {
+                handled = true;
+                if let Some(n) = n {
+                    out.push(format!("{indent}{name} = {n}{}", comment_of(t)));
+                    last_key = Some(out.len());
+                }
+                continue;
+            }
+        }
+        out.push(l.to_string());
+        if in_limits && !t.is_empty() && !t.starts_with('#') {
+            last_key = Some(out.len());
+        }
+    }
+    if let (Some(n), false) = (n, handled) {
+        let line = format!("{name} = {n}");
+        match last_key.or(header) {
+            Some(at) => out.insert(at, line),
+            None => {
+                if out.last().is_some_and(|l| !l.trim().is_empty()) {
+                    out.push(String::new());
+                }
+                out.push(format!("[{TABLE}]"));
+                out.push(line);
+            }
+        }
+    }
+    let mut new = out.join(eol);
+    new.push_str(eol);
+    let after: toml::Table = toml::from_str(&new).map_err(|_| refuse())?;
+    // What the document must be: the old one with exactly this key changed.
+    let mut want = before;
+    let limits = want.entry(TABLE).or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    let Some(limits) = limits.as_table_mut() else { return Err(refuse()) };
+    match (key, n) {
+        (LimitKey::MaxLive(p), Some(n)) => {
+            let m = limits.entry("max_live").or_insert_with(|| toml::Value::Table(toml::Table::new()));
+            let Some(m) = m.as_table_mut() else { return Err(refuse()) };
+            m.insert(p.clone(), toml::Value::Integer(i64::from(n)));
+        }
+        (LimitKey::MaxLive(p), None) => {
+            if let Some(m) = limits.get_mut("max_live").and_then(|v| v.as_table_mut()) {
+                m.remove(p);
+                if m.is_empty() {
+                    limits.remove("max_live");
+                }
+            }
+        }
+        (k, Some(n)) => {
+            limits.insert(k.name(), toml::Value::Integer(i64::from(n)));
+        }
+        (k, None) => {
+            limits.remove(&k.name());
+        }
+    }
+    if after != want {
+        return Err(refuse());
+    }
+    Ok(new)
+}
+
 /// The machine-wide launch lock: an exclusive flock on
 /// `$XDG_STATE_HOME/worktrees/launch.lock`, held by the caller from the count
 /// that decides until its session exists — never across a network probe.
@@ -533,5 +810,107 @@ mod tests {
         let got = live_agents(Some(&panes), &[probe], &[]);
         let labels: Vec<&str> = got.iter().map(|l| l.label.as_str()).collect();
         assert_eq!(labels, ["lane", "repo-x~agent~codex"], "dev-vite is a dev server, lane is claude once, a sidecar is ours");
+    }
+    // ── the [limits] writer ────────────────────────────────────────────────
+
+    #[test]
+    fn a_limit_key_is_one_of_the_four_or_refused() {
+        assert_eq!(LimitKey::parse("max_live_agents"), Ok(LimitKey::MaxLiveAgents));
+        assert_eq!(LimitKey::parse("max_live.claude"), Ok(LimitKey::MaxLive("claude".into())));
+        assert!(LimitKey::parse("max_live.cluade").unwrap_err().contains("no such provider"));
+        assert!(LimitKey::parse("--force").is_err());
+        assert!(LimitKey::parse("max_live").is_err());
+    }
+
+    #[test]
+    fn a_written_limit_is_one_the_guard_reads() {
+        // For every key, every value the setter accepts reads back with no
+        // problem and is applied; every value just outside is refused, and is
+        // one the reader would also have ignored.
+        let keys = [LimitKey::MaxLiveAgents, LimitKey::MaxLive("codex".into()), LimitKey::MinFreeMemoryPct, LimitKey::MaxSwapUsedPct];
+        for k in &keys {
+            let (lo, hi) = k.range();
+            for n in [lo, lo + 1, hi / 2, hi] {
+                let text = with_limit("", k, Some(n)).unwrap_or_else(|e| panic!("{} = {n}: {e}", k.name()));
+                let (l, problems) = limits_from(&text, Some(32 * GIB));
+                assert!(problems.is_empty(), "{} = {n} written, then read with {problems:?}", k.name());
+                match k {
+                    LimitKey::MaxLiveAgents => assert_eq!(l.max_live, if n == 0 { None } else { Some(n) }),
+                    LimitKey::MaxLive(p) => assert_eq!(l.per_provider.get(p).copied(), if n == 0 { None } else { Some(n) }),
+                    LimitKey::MinFreeMemoryPct => assert_eq!(u32::from(l.min_free_pct), n),
+                    LimitKey::MaxSwapUsedPct => assert_eq!(u32::from(l.max_swap_pct), n),
+                }
+                assert_eq!(explicit_from(&text), {
+                    let mut e = ExplicitLimits::default();
+                    match k {
+                        LimitKey::MaxLiveAgents => e.max_live_agents = Some(n),
+                        LimitKey::MaxLive(p) => {
+                            e.max_live.insert(p.clone(), n);
+                        }
+                        LimitKey::MinFreeMemoryPct => e.min_free_memory_pct = Some(n),
+                        LimitKey::MaxSwapUsedPct => e.max_swap_used_pct = Some(n),
+                    }
+                    e
+                });
+            }
+            let over = hi + 1;
+            assert!(with_limit("", k, Some(over)).unwrap_err().contains("must be a whole number"), "{} = {over}", k.name());
+            let by_hand = match k {
+                LimitKey::MaxLive(p) => format!("[limits]\nmax_live = {{ {p} = {over} }}\n"),
+                _ => format!("[limits]\n{} = {over}\n", k.name()),
+            };
+            assert!(!limits_from(&by_hand, Some(32 * GIB)).1.is_empty(), "the reader ignores {} = {over} too", k.name());
+        }
+    }
+
+    #[test]
+    fn with_limit_edits_one_key_and_keeps_every_other_line() {
+        let text = "# mine\nai_cmd = \"claude\"\n\n[limits]\nmax_live_agents = 8   # tight\nmin_free_memory_pct = 15\n\n[quota]\ngate = true\n";
+        let set = with_limit(text, &LimitKey::MaxLiveAgents, Some(12)).unwrap();
+        assert_eq!(set, text.replace("max_live_agents = 8   # tight", "max_live_agents = 12   # tight"));
+        let removed = with_limit(text, &LimitKey::MinFreeMemoryPct, None).unwrap();
+        assert_eq!(removed, text.replace("min_free_memory_pct = 15\n", ""));
+        let added = with_limit(text, &LimitKey::MaxSwapUsedPct, Some(50)).unwrap();
+        assert_eq!(added, text.replace("min_free_memory_pct = 15\n", "min_free_memory_pct = 15\nmax_swap_used_pct = 50\n"));
+        let fresh = with_limit("ai_cmd = \"claude\"\n", &LimitKey::MaxLiveAgents, Some(2)).unwrap();
+        assert_eq!(fresh, "ai_cmd = \"claude\"\n\n[limits]\nmax_live_agents = 2\n");
+        // CRLF stays CRLF.
+        let crlf = with_limit("[limits]\r\nmax_live_agents = 3\r\n", &LimitKey::MaxLiveAgents, Some(4)).unwrap();
+        assert_eq!(crlf, "[limits]\r\nmax_live_agents = 4\r\n");
+    }
+
+    #[test]
+    fn a_providers_cap_is_dotted_or_rewrites_an_inline_table() {
+        let dotted = with_limit("[limits]\nmax_live_agents = 8\n", &LimitKey::MaxLive("claude".into()), Some(5)).unwrap();
+        assert_eq!(dotted, "[limits]\nmax_live_agents = 8\nmax_live.claude = 5\n");
+        assert_eq!(limits_from(&dotted, Some(32 * GIB)).0.per_provider.get("claude"), Some(&5));
+        let again = with_limit(&dotted, &LimitKey::MaxLive("claude".into()), Some(7)).unwrap();
+        assert_eq!(again, "[limits]\nmax_live_agents = 8\nmax_live.claude = 7\n");
+        let dropped = with_limit(&again, &LimitKey::MaxLive("claude".into()), None).unwrap();
+        assert_eq!(dropped, "[limits]\nmax_live_agents = 8\n");
+        let inline = "[limits]\nmax_live = { claude = 12 }  # cap claude\n";
+        let both = with_limit(inline, &LimitKey::MaxLive("codex".into()), Some(3)).unwrap();
+        assert_eq!(both, "[limits]\nmax_live = { claude = 12, codex = 3 }  # cap claude\n");
+        let gone = with_limit("[limits]\nmax_live = { claude = 12 }\nmin_free_memory_pct = 10\n", &LimitKey::MaxLive("claude".into()), None).unwrap();
+        assert_eq!(gone, "[limits]\nmin_free_memory_pct = 10\n");
+        // A layout it cannot edit safely is refused, never guessed at.
+        let sub = "[limits]\nmax_live_agents = 8\n\n[limits.max_live]\nclaude = 2\n";
+        assert!(with_limit(sub, &LimitKey::MaxLive("codex".into()), Some(3)).unwrap_err().contains("edit it by hand"));
+        assert!(with_limit("not [ toml", &LimitKey::MaxLiveAgents, Some(3)).unwrap_err().contains("does not parse"));
+    }
+
+    #[test]
+    fn set_limit_writes_only_a_change() {
+        let dir = std::env::temp_dir().join(format!("wt-limits-set-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        assert!(set_limit_at(&path, &LimitKey::MaxLiveAgents, Some(6)).unwrap());
+        assert!(!set_limit_at(&path, &LimitKey::MaxLiveAgents, Some(6)).unwrap(), "the same value is no write");
+        assert_eq!(explicit_from(&std::fs::read_to_string(&path).unwrap()).max_live_agents, Some(6));
+        assert!(set_limit_at(&path, &LimitKey::MaxLiveAgents, None).unwrap());
+        assert!(!set_limit_at(&path, &LimitKey::MaxLiveAgents, None).unwrap(), "removing an absent key is no write");
+        assert!(set_limit_at(&path, &LimitKey::MinFreeMemoryPct, Some(91)).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

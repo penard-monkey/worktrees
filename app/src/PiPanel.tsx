@@ -12,6 +12,7 @@ import { invoke } from "./ipc";
 import type { PiProjectTrust, Settings } from "./settings";
 import { ModelPicker, REASON_TEXT, modelArg, type ModelOption, type PiLaunchTrust, type PiStatus } from "./ModelPicker";
 import { useArmed } from "./useArmed";
+import { EnvLine } from "./EnvLine";
 
 /** What decided the trust of a pi lane in the repo in focus, in words. */
 export function launchTrustText(t: PiLaunchTrust, trustPath: string): string {
@@ -156,6 +157,7 @@ export function PiTrustSection({ pi }: { pi: PiState }) {
       <div className="hint">{status?.trust === "never" ? <b>Skip:</b> : "Skip:"} pi launches with --no-approve, so a repo's .pi/ extensions, settings and .agents/skills do not load. AGENTS.md and CLAUDE.md still do.</div>
       <div className="hint">{status?.trust === "ask" ? <b>Ask:</b> : "Ask:"} pi shows its own trust prompt, whose highlighted choice is Trust. The place's dot shows it as waiting, and nothing is typed into it for you.</div>
       <div className="hint">Either way, a folder pi itself already trusts (its own trust.json, e.g. from "Trust parent folder") launches with --approve, and one pi marks as not trusted with --no-approve.</div>
+      <EnvLine origin={status?.trust_origin} outranks="control" />
       {status?.launch && <div className="hint" data-testid="pi-trust-source"><b>This repo:</b> {launchTrustText(status.launch, status.pi_trust_path ?? "trust.json")}</div>}
       <label className="sub">Allowed repos</label>
       {status?.allowed.length ? <div className="ver-rows">{status.allowed.map((r) => (

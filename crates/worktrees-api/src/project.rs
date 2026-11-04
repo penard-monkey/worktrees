@@ -813,9 +813,19 @@ pub fn set_codex_permissions(ctx: &Ctx, mode: String) -> Result<(), String> {
 }
 
 /// What the next Codex launch on this host will use, for Settings to render:
-/// the host's own value, else whatever env or user config decide.
-pub fn get_codex_permissions() -> Result<String, String> {
-    Ok(worktrees_core::codex::permissions().as_str().to_string())
+/// the host's own value, else whatever env or user config decide. With
+/// `detail`, also what decided it (settings-reorg §6 item 4) —
+/// `{value, source, env}` — so Settings can say "set by the environment"
+/// rather than draw a control that looks stuck. Without it, the plain string
+/// every client before `detail` reads (an older host ignores the argument and
+/// answers the string, which the client takes as "source unknown").
+pub fn get_codex_permissions(detail: Option<bool>) -> Result<serde_json::Value, String> {
+    let (p, origin) = worktrees_core::codex::permissions_origin();
+    if detail.unwrap_or(false) {
+        Ok(serde_json::json!({ "value": p.as_str(), "source": origin.source, "env": origin.env }))
+    } else {
+        Ok(serde_json::Value::String(p.as_str().to_string()))
+    }
 }
 
 /// What a model picker lists for `harness` (`choice::options_for`): Claude's
@@ -833,6 +843,8 @@ pub fn agent_models(harness: String) -> Result<Vec<worktrees_core::choice::Model
 pub struct PiStatus {
     pub preflight: worktrees_core::pimodels::Preflight,
     pub trust: worktrees_core::trust::PiTrust,
+    /// What decided `trust` (settings-reorg §6 item 4).
+    pub trust_origin: worktrees_core::config::Origin,
     pub allowed: Vec<String>,
     pub repo_root: Option<String>,
     pub repo_allowed: bool,
@@ -851,6 +863,7 @@ pub fn pi_status(repo: Option<String>) -> Result<PiStatus, String> {
     Ok(PiStatus {
         preflight: worktrees_core::pimodels::preflight(),
         trust: worktrees_core::trust::pi_trust(),
+        trust_origin: worktrees_core::trust::pi_trust_origin().1,
         allowed,
         repo_root,
         repo_allowed,

@@ -12,13 +12,18 @@ import { PairSheet } from "./PairSheet";
 import { GrantNote } from "./GrantNote";
 import {
   capsWords, deviceState, expiryWords, hasPresenceKey, MAX_DEVICES, pairingBlock, PLATFORM_LABEL, scopeWords, seenWords, stepupWords,
-  type DeviceRecord, type Expiry,
+  type DeviceRecord, type Expiry, type Preset,
 } from "./devices";
 import "./RemoteAccess.css";
 
 /** `stepup`: draw the step-up switch (an Expert control, settings-reorg §4.3);
  *  the device's step-up state is said either way. */
-export function DevicesSection({ onRemote, stepup = true }: { onRemote: () => void; stepup?: boolean }) {
+export function DevicesSection({ onRemote, stepup = true, pairScope = "observe" }: {
+  onRemote: () => void;
+  stepup?: boolean;
+  /** Where Pair a device… starts (the policy preset's suggestion). */
+  pairScope?: Preset;
+}) {
   const r = useRemote();
   // Pairing and managing devices are the host console's (ipc.ts
   // CONSOLE_ROWS); serve's `console-only` is the backstop, in the same words.
@@ -26,10 +31,10 @@ export function DevicesSection({ onRemote, stepup = true }: { onRemote: () => vo
   if (notGranted("pair_begin") || notConsole(r)) {
     return <GrantNote cmd="pair_begin" label="Paired devices" refused />;
   }
-  return <DevicesList r={r} onRemote={onRemote} stepup={stepup} />;
+  return <DevicesList r={r} onRemote={onRemote} stepup={stepup} pairScope={pairScope} />;
 }
 
-function DevicesList({ r, onRemote, stepup }: { r: RemoteState; onRemote: () => void; stepup: boolean }) {
+function DevicesList({ r, onRemote, stepup, pairScope }: { r: RemoteState; onRemote: () => void; stepup: boolean; pairScope: Preset }) {
   const [pairing, setPairing] = useState(false);
   const [showRevoked, setShowRevoked] = useState(false);
   const unprompted = useUnprompted();
@@ -93,7 +98,7 @@ function DevicesList({ r, onRemote, stepup }: { r: RemoteState; onRemote: () => 
           )}
         </section>
       )}
-      {pairing && <PairSheet onClose={() => { setPairing(false); void readDevices(); }} onRemote={onRemote} />}
+      {pairing && <PairSheet onClose={() => { setPairing(false); void readDevices(); }} onRemote={onRemote} startScope={pairScope} />}
     </>
   );
 }

@@ -4,6 +4,7 @@
 import { useState } from "react";
 import { UserSkillsSection } from "../AgentSetup";
 import { CodexMcpSection, type CodexMcpStatus } from "../CodexMcpPanel";
+import { presetDefaults } from "../presets";
 import { Page, Pointer, Sec, useSheet } from "./kit";
 
 export const CODEX_PERMISSION_WORDS = { ask: "Ask", "auto-review": "Auto-review", full: "Full access" } as const;
@@ -27,7 +28,7 @@ export function CodexPage() {
     </Sec>
     <Sec id="codex-mcp" problem={mcp?.state === "stale"}>
       <CodexMcpSection onReport={onReport} onStatus={(s) => { setMcp(s); onCodexMcpChanged(s); }}
-        offerPending={codexMcpOfferPending} onSilenceOffer={onSilenceCodexMcpOffer} />
+        offerPending={codexMcpOfferPending} onSilenceOffer={onSilenceCodexMcpOffer} mutationsDefault={presetDefaults(snap.preset).mutations} />
     </Sec>
     <Sec id="codex-policy">
       <Pointer to="codex-permissions" label="Agent policy">

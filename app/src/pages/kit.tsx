@@ -20,6 +20,8 @@ import type { CrossProjectStatus } from "../CrossProjectPanel";
 import type { PlanningStatus } from "../PlanningPanel";
 import type { QuotaSettings } from "../QuotaPanel";
 import type { SlotsSettings } from "../SlotsPanel";
+import type { LimitsSettings } from "../LimitsPanel";
+import type { PresetStatus } from "../presets";
 import type { PiStatus } from "../ModelPicker";
 import type { ResetScope } from "../settingsMap";
 import type { UpdateRuns } from "./updates";
@@ -102,6 +104,8 @@ export type HostSnap = {
   termHistory?: { persist_scrollback: boolean; per_tab_history: boolean };
   quota?: QuotaSettings;
   slots?: SlotsSettings;
+  limits?: LimitsSettings;
+  preset?: PresetStatus;
   pi?: PiStatus;
   kimi?: KimiStatus;
   profiles?: { count: number; hasDefault: boolean };

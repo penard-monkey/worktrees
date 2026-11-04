@@ -58,8 +58,10 @@ export function kimiTrustText(t: KimiLaunchTrust): string {
   }
 }
 
-export function KimiMcpSection({ onReport, onStatus, offerPending = false, onSilenceOffer, "data-focus": focusId }: {
+export function KimiMcpSection({ onReport, onStatus, offerPending = false, onSilenceOffer, mutationsDefault = true, "data-focus": focusId }: {
   onReport: (text: string) => void;
+  /** "Allow create and close tools" before the user ticks it. */
+  mutationsDefault?: boolean;
   "data-focus"?: string;
   /** Every status read or handed back — App keeps the `kimi-mcp` offer in step. */
   onStatus?: (s: KimiMcpStatus) => void;
@@ -69,7 +71,10 @@ export function KimiMcpSection({ onReport, onStatus, offerPending = false, onSil
   const [status, setStatusRaw] = useState<KimiMcpStatus | null>(null);
   const setStatus = (s: KimiMcpStatus) => { setStatusRaw(s); onStatus?.(s); };
   const [busy, setBusy] = useState(false);
-  const [mutations, setMutations] = useState(true);
+  // The box's starting value is the policy preset's suggestion
+  // (settings-reorg §5.2: unticked under Cautious); the user's tick wins.
+  const [picked, setMutations] = useState<boolean | null>(null);
+  const mutations = picked ?? mutationsDefault;
   // Disconnect is two clicks (settings-reorg §6 item 3): every kimi lane loses
   // its tools at its next launch.
   const arm = useArmed<"off">();

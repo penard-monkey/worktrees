@@ -34,6 +34,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+# Settings → Agents → Notifications (settings-reorg §6 item 9): a system
+# notification while the window is hidden. The decision is the page's
+# (notify.ts); this only delivers it, on the machine the window runs on.
+tauri-plugin-notification = "2"
 # The PTY host, the documentation server and its viewer moved to
 # `worktrees-api` with the handlers that drive them, and took portable-pty,
 # hyper, hyper-util, http-body-util and tokio with them.

@@ -495,6 +495,10 @@ export type Settings = {
   // is never cut short whatever is chosen; `termresize-check.mjs` pins the
   // floor to the backend's ring.
   term_scrollback: number;
+  // Notify while the window is hidden (settings-reorg §6 item 9): "waiting"
+  // announces an agent that starts waiting on you; "both" also one that
+  // finishes after the window has been away a while (notify.ts). Per window.
+  notify_hidden: "off" | "waiting" | "both";
   // NOT settings of this build: a copy of the host's policy (`hostpolicy` in
   // worktrees-api, kept in host-policy.json) for an OLDER one. v0.42.0 and
   // earlier read only this file for Codex permissions and pi project trust,
@@ -608,6 +612,7 @@ export const DEFAULTS: Settings = {
   settings_rev: SETTINGS_REV,
   settings_mode: "beginner",
   term_scrollback: 5000,
+  notify_hidden: "waiting",
 };
 
 /** check_update result — versions the Settings "Version" section renders. */
@@ -981,6 +986,7 @@ export async function loadSettings(): Promise<Settings> {
     // not one of the three draws as Expert, the mode that hides nothing.
     if (s.settings_mode !== "beginner" && s.settings_mode !== "advanced" && s.settings_mode !== "expert") s.settings_mode = "expert";
     s.term_scrollback = clampScrollback(s.term_scrollback);
+    if (s.notify_hidden !== "off" && s.notify_hidden !== "waiting" && s.notify_hidden !== "both") s.notify_hidden = DEFAULTS.notify_hidden;
     if (needsChatDefaultMigration || migratedRevision) saveSettings(s);
     return s;
   } catch {

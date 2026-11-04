@@ -7,10 +7,11 @@ import { useRemote } from "../remoteStore";
 import { HostsPanel } from "../HostsPanel";
 import { RemoteAccessSection } from "../RemoteAccessPanel";
 import { DevicesSection } from "../DevicesPanel";
+import { presetDefaults } from "../presets";
 import { Page, Sec, useSheet } from "./kit";
 
 export function RemotePage() {
-  const { onReport, onFail, mode, goto } = useSheet();
+  const { onReport, onFail, mode, goto, snap } = useSheet();
   const r = useRemote();
   const listenerProblem = r.status?.state === "unreadable" || r.status?.state === "error" || r.status?.state === "paused"
     || r.alerts.some((a) => a.cat === "remote");
@@ -22,7 +23,8 @@ export function RemotePage() {
       <RemoteAccessSection onReport={onReport} advertise={mode === "expert" || r.status?.advertise === false} />
     </Sec>
     <Sec id="devices" problem={r.alerts.some((a) => a.cat === "devices")}>
-      <DevicesSection onRemote={() => goto("remote", "remote-access")} stepup={mode === "expert"} />
+      <DevicesSection onRemote={() => goto("remote", "remote-access")} stepup={mode === "expert"}
+        pairScope={presetDefaults(snap.preset).pairScope} />
     </Sec>
   </Page>;
 }

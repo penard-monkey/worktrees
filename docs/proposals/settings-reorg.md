@@ -4,8 +4,18 @@ title: "Proposal — reorganising Settings"
 
 # Proposal — reorganising Settings
 
-**Status:** plan for the owner to decide from, 2026-11-04. Nothing here is
-built. Written from the code on `main` at 81a64fc0 (v0.47.0 plus #603/#604),
+**Status:** built on `feat/settings-reorg` (2026-11-04): phases 0, 1 and 3
+and every §6.1 option; §6.2 (Maybe) and phase 4 are not. The owner kept the
+(main) guard OFF in Balanced (§5.2's table said on; "Balanced is exactly
+today's defaults" won), and §9's questions took this plan's defaults. Two
+places the build differs from the text, because the code's order differs
+from the plan's premise: Codex permissions and pi trust are host policy >
+environment, so a control the environment decides is NOT drawn disabled
+(a choice there wins from then on, and the page says so); only agent
+guidance's switch, where the environment wins, is. And the getters report
+their source additively (`get_codex_permissions {detail}`, `pi_status
+.trust_origin`, `agent_guidance_status.enabled_origin`), so no older client
+gets a shape it does not read. The plan was written from the code on `main` at 81a64fc0 (v0.47.0 plus #603/#604),
 the mock harness (every category screenshotted), the proposals under
 `docs/proposals/`, ROADMAP.md, and PrusaSlicer's knowledge base.
 **The ask:** "plan a reorg of the Settings pane. suggest new categories to

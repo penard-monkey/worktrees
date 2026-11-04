@@ -216,6 +216,91 @@ async function run(engine, name) {
   }
   await ctx.close();
 
+  // ── presets (§5): status, apply, the marker, back to preset, Compare ───────
+  const pctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const pp = await pctx.newPage();
+  pp.on("pageerror", (e) => ok(false, `[${name}] preset page error: ${e.message}`));
+  await openSheet(pp);
+  await go(pp, "policy");
+  await pp.waitForSelector("[data-testid=preset-seg] button.on");
+  const onPreset = () => pp.evaluate(() => document.querySelector("[data-testid=preset-seg] button.on")?.dataset.preset);
+  const codexOn = () => pp.evaluate(() => document.querySelector("[data-testid=codex-permissions] button.on")?.dataset.testid);
+  ok(await onPreset() === "balanced", `[${name}] a fresh host reads as Balanced (today's defaults)`);
+  ok(await pp.locator("[data-testid=preset-modified]").count() === 0, `[${name}] …unmodified`);
+  await pp.click("[data-testid=preset-compare]");
+  const cols = await pp.evaluate(() => [...document.querySelectorAll("[data-testid=preset-table] thead th")].map((t) => [t.textContent, t.className]));
+  ok(cols.map((c) => c[0]).join("|") === "|Cautious|Balanced|Autonomous" && cols[2][1] === "cur", `[${name}] Compare shows all three, Balanced highlighted`);
+  await pp.click("[data-preset=cautious]");
+  await pp.waitForTimeout(500);
+  ok(await onPreset() === "cautious", `[${name}] Cautious applies in one click`);
+  ok(await codexOn() === "codex-permissions-ask", `[${name}] …and the section below re-reads what it wrote (Codex: Ask)`);
+  await pp.click("[data-testid=codex-permissions-auto-review]");
+  await pp.waitForTimeout(500);
+  await go(pp, "general"); await go(pp, "policy");
+  await pp.waitForSelector("[data-testid=preset-modified]");
+  const marker = await pp.locator("[data-testid=preset-modified]").textContent();
+  ok(marker.includes("Cautious (modified:") && marker.includes("Codex permissions"), `[${name}] a changed value marks the preset modified: "${marker.slice(0, 60)}"`);
+  ok(await pp.locator("[data-testid=preset-back-codex_access]").count() === 1, `[${name}] …and its control offers the way back`);
+  await pp.click("[data-testid=preset-back-codex_access] button");
+  await pp.waitForTimeout(500);
+  ok(await codexOn() === "codex-permissions-ask" && await pp.locator("[data-testid=preset-modified]").count() === 0, `[${name}] back to preset restores that one value and clears the marker`);
+  await pp.click("[data-preset=autonomous]");
+  await pp.waitForTimeout(150);
+  ok(await pp.locator("[data-testid=preset-full-confirm]").count() === 1 && await onPreset() === "cautious", `[${name}] Autonomous asks first, because it sets Full access`);
+  await pp.click("[data-preset=autonomous]");
+  await pp.waitForTimeout(500);
+  ok(await onPreset() === "autonomous" && await codexOn() === "codex-permissions-full", `[${name}] …and a second click applies it`);
+  if (SHOTS) await pp.locator(".settings-modal").screenshot({ path: `${SHOTS}/${name}-preset.png` });
+
+  // ── Limits (§6 item 1) ───────────────────────────────────────────────────
+  await setMode(pp, "advanced");
+  await pp.locator("[data-testid=limit-cap-all]").scrollIntoViewIfNeeded();
+  const capBefore = await pp.locator("[data-testid=limit-cap-all]").textContent();
+  await pp.click("[data-testid=limit-inc-all]");
+  await pp.waitForTimeout(300);
+  ok(Number(await pp.locator("[data-testid=limit-cap-all]").textContent()) === Number(capBefore) + 1, `[${name}] Limits: + raises the live-agent cap (${capBefore} → ${await pp.locator("[data-testid=limit-cap-all]").textContent()})`);
+  ok(await pp.locator("[data-testid=limit-reset-all]").count() === 1, `[${name}] …and offers the way back to the machine default`);
+  await pp.click("[data-testid=limit-reset-all]");
+  await pp.waitForTimeout(300);
+  ok(await pp.locator("[data-testid=limit-reset-all]").count() === 0, `[${name}] …which removes the key`);
+  await pctx.close();
+
+  // ── Notifications (§6 item 9): drawn in Beginner; permission only on a click
+  {
+    const nctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+    const np = await nctx.newPage();
+    await openSheet(np);
+    await go(np, "agents");
+    const on = await np.evaluate(() => document.querySelector("[data-testid=notify-mode] button.on")?.dataset.mode);
+    ok(on === "waiting", `[${name}] Notifications is a Beginner section, on "when an agent waits" by default (${on})`);
+    ok(await np.locator("[data-testid=notify-allow]").count() === 1, `[${name}] …and offers to ask the system, rather than asking on load`);
+    await np.click("[data-testid=notify-allow]");
+    await np.waitForTimeout(200);
+    ok(await np.locator("[data-testid=notify-allow]").count() === 0, `[${name}] …and the button goes once allowed`);
+    ok((await np.evaluate(() => window.__mock.notifications().length)) === 0, `[${name}] nothing was sent while the window is visible`);
+    await nctx.close();
+  }
+
+  // ── "set by the environment" (§6 item 4) ─────────────────────────────────
+  const ectx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const ep = await ectx.newPage();
+  await openSheet(ep, "?env=codex,pi,guidance");
+  await setMode(ep, "expert");
+  await go(ep, "policy");
+  await ep.waitForSelector(".sec[data-sec=codex-permissions] [data-testid=env-origin]");
+  const codexEnv = await ep.locator(".sec[data-sec=codex-permissions] [data-testid=env-origin]").textContent();
+  ok(codexEnv.includes("WORKTREES_CODEX_PERMISSIONS=full") && codexEnv.includes("wins over it from then on"), `[${name}] Codex: the environment is named, and a choice here is said to win`);
+  ok(await ep.evaluate(() => !document.querySelector("[data-testid=codex-permissions-ask]").disabled), `[${name}] …so the control stays usable`);
+  ok(await ep.locator(".sec[data-sec=pi-trust] [data-testid=env-origin]").count() === 1, `[${name}] pi trust names its variable too`);
+  await ep.click("[data-testid=codex-permissions-ask]");
+  await ep.waitForTimeout(400);
+  ok(await ep.evaluate(() => document.querySelector(".sec[data-sec=codex-permissions] [data-testid=env-origin]")?.dataset.source) === "host", `[${name}] after a choice, the host's own setting is said to win over the variable`);
+  await go(ep, "guidance");
+  const gEnv = await ep.locator(".sec[data-sec=agent-guidance] [data-testid=env-origin]").textContent();
+  ok(gEnv.includes("WORKTREES_AGENT_GUIDANCE=off") && gEnv.includes("wins over this switch"), `[${name}] Guidance: the variable wins over the switch, and says so`);
+  ok(await ep.evaluate(() => document.querySelector("[data-testid=guidance-enabled]").disabled), `[${name}] …and the switch it outranks is disabled`);
+  await ectx.close();
+
   // ── a remote window ──────────────────────────────────────────────────────
   const rctx = await browser.newContext({ viewport: { width: 1280, height: 860 } });
   const rp = await rctx.newPage();
@@ -237,6 +322,11 @@ async function run(engine, name) {
     return { disabled: s?.disabled, line: !!s?.querySelector("[data-testid=grant-line]"), btn: s?.querySelector("button")?.matches(":disabled") };
   });
   ok(codex.disabled && codex.line && codex.btn, `[${name}] Codex permissions: read-only, controls disabled, and says why`);
+  const presetRemote = await rp.evaluate(() => {
+    const s = document.querySelector(".sec[data-sec=policy-preset]");
+    return { disabled: s?.disabled, line: !!s?.querySelector("[data-testid=grant-line]"), named: !!s?.querySelector("[data-testid=preset-seg] button.on") };
+  });
+  ok(presetRemote.disabled && presetRemote.line && presetRemote.named, `[${name}] the preset is read on a remote window, and applied only at the host`);
   await go(rp, "profiles");
   ok(await rp.locator(".sec[data-sec=profiles] [data-testid=grant-note]").count() === 1, `[${name}] Profiles (an admin read) is a GrantNote for a device without admin`);
   await go(rp, "general");

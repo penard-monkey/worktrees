@@ -54,6 +54,10 @@ pub const PI_PROJECT_TRUST: &str = "pi_project_trust";
 pub const FETCH_INTERVAL_MIN: &str = "fetch_interval_min";
 pub const TERM_PERSIST_SCROLLBACK: &str = "term_persist_scrollback";
 pub const TERM_PER_TAB_HISTORY: &str = "term_per_tab_history";
+/// The policy preset last applied (`presets`): `{name, version}`. Not a
+/// policy itself — the values it set live in their own homes — and an older
+/// build keeps it untouched (a key this build does not know survives a write).
+pub const POLICY_PRESET: &str = "policy_preset";
 
 /// The auto-fetch cadences Settings → Behavior offers, in minutes; 0 is off.
 /// The setter refuses anything else, and the file's value is ignored if it
@@ -122,6 +126,11 @@ pub fn set_many(config_dir: &Path, kv: &[(&str, Value)]) -> Result<(), String> {
         changed
     })
     .map(|_| ())
+}
+
+/// Remove one key (a preset name that no longer describes the host).
+pub fn remove(config_dir: &Path, key: &str) -> Result<(), String> {
+    edit(config_dir, |m| m.remove(key).is_some()).map(|_| ())
 }
 
 /// The three policies only the engine's own loops read: the poll's

@@ -15,6 +15,8 @@ import { batchJobs, bytes, changedSincePush, chosenIds, connectedHubs, defaultPu
 import { destAt, destinations, GRIP_LABEL, isCurrent, resetPatch, undoOf, zoneOf, type Dest, type Geometry, type Grip, type LayoutPatch } from "./arrange";
 import { cloneSource, dirNameProblem, isCloneError, type CloneProgress } from "./clone";
 import { setTermScrollback, ShellPane, TerminalPane } from "./TerminalPane";
+import { newNotifier, onDone, onVisibility, onWaitingSnapshot, type NotifyMode } from "./notify";
+import { notify } from "./notifyhost";
 import { AgentViewSwitch, ChatPane } from "./ChatPane";
 import { insertReference } from "./chat";
 import { DocsPane } from "./DocsPane";
@@ -4854,8 +4856,25 @@ function App() {
   // person, which is how `drop_reference` decides. Absent from an older
   // backend's payload, in which case the merged set stands in.
   const [waitingBy, setWaitingBy] = useState<Record<string, Set<string>> | null>(null);
+  // Notify while the window is hidden (settings-reorg §6 item 9). notify.ts
+  // decides — once per thing, never from a baseline or a replayed snapshot —
+  // and the notification plugin sends (notifyhost.ts). Refs, so the
+  // listeners below are registered once and read the CURRENT mode and names.
+  const notifier = useRef(newNotifier());
+  const notifyMode = useRef<NotifyMode>(DEFAULTS.notify_hidden);
+  notifyMode.current = settings.notify_hidden;
+  const placeLabel = useRef<(path: string) => string>((path) => path.split("/").pop() ?? path);
+  useEffect(() => {
+    const seen = () => onVisibility(notifier.current, document.visibilityState === "hidden", Date.now());
+    seen();
+    document.addEventListener("visibilitychange", seen);
+    return () => document.removeEventListener("visibilitychange", seen);
+  }, []);
   useEffect(() => {
     const un = listen<{ busy: string[]; waiting: string[]; waiting_by?: Record<string, string[]> }>("sessions:busy", (e) => {
+      for (const path of onWaitingSnapshot(notifier.current, e.payload.waiting, Date.now(), notifyMode.current, document.visibilityState === "hidden")) {
+        notify("An agent is waiting for you", `${placeLabel.current(path)} stopped on a question.`);
+      }
       setBusyPaths(new Set(e.payload.busy));
       setWaitingPaths(new Set(e.payload.waiting));
       setWaitingBy(e.payload.waiting_by
@@ -4895,6 +4914,9 @@ function App() {
   const [donePaths, setDonePaths] = useState<Map<string, number>>(new Map());
   useEffect(() => {
     const un = listen<{ path: string; epoch: number }>("sessions:done", (e) => {
+      if (onDone(notifier.current, e.payload.path, Date.now(), notifyMode.current, document.visibilityState === "hidden")) {
+        notify("An agent finished", `${placeLabel.current(e.payload.path)} finished its turn.`);
+      }
       setDonePaths((m) => {
         const next = new Map(m);
         next.set(e.payload.path, Math.max(next.get(e.payload.path) ?? 0, e.payload.epoch));
@@ -7804,6 +7826,11 @@ function App() {
     () => (ws?.projects ?? []).flatMap((pv) => (pv.snapshot?.places ?? []).map((p) => ({ pv, p }))),
     [ws],
   );
+  // A notification names the place as the nav does: project / place.
+  placeLabel.current = (path: string) => {
+    const hit = allPlaces.find(({ p }) => p.path === path);
+    return hit ? `${hit.pv.name ?? hit.pv.root.split("/").pop()} / ${hit.p.slug}` : path.split("/").pop() ?? path;
+  };
   const stats = useMemo(() => {
     let live = 0, dirty = 0;
     for (const { p } of allPlaces) { if (p.tmux_session.up) live++; if (p.dirty) dirty++; }

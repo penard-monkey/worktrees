@@ -39,6 +39,8 @@ import { DataPage } from "./pages/data";
 import { ShortcutsPage } from "./pages/shortcuts";
 import type { QuotaSettings } from "./QuotaPanel";
 import type { SlotsSettings } from "./SlotsPanel";
+import type { LimitsSettings } from "./LimitsPanel";
+import type { PresetStatus } from "./presets";
 import type { PiStatus } from "./ModelPicker";
 import type { KimiStatus } from "./KimiPanel";
 import type { ProfilesInfo } from "./ProfilesPanel";
@@ -89,13 +91,15 @@ function useHostSnap(open: boolean, cat: PageId, installed: VisCtx["installed"])
       read<HostSnap["termHistory"]>("get_term_history_opts"),
       read<QuotaSettings>("quota_settings"),
       read<SlotsSettings>("slots_settings"),
+      read<LimitsSettings>("limits_settings"),
+      read<PresetStatus>("policy_preset_status"),
       installed.pi === false ? undefined : read<PiStatus>("pi_status", { repo: null }),
       installed.kimi === false ? undefined : read<KimiStatus>("kimi_status", { repo: null }),
       read<ProfilesInfo | null>("profiles_info", { repo: null }),
-    ]).then(([codexPermissions, fetchInterval, termHistory, quota, slots, pi, kimi, profiles]) => {
+    ]).then(([codexPermissions, fetchInterval, termHistory, quota, slots, limits, preset, pi, kimi, profiles]) => {
       if (!alive) return;
       setSnap({
-        codexPermissions, fetchInterval, termHistory, quota, slots, pi, kimi,
+        codexPermissions, fetchInterval, termHistory, quota, slots, limits, preset, pi, kimi,
         profiles: profiles ? { count: profiles.profiles.length, hasDefault: !!profiles.default_id } : undefined,
       });
     });
@@ -158,6 +162,7 @@ export function SettingsSheet(props: SheetProps) {
     if (guidance?.error) p.add("agent-guidance");
     if ((snap.quota?.problems.length ?? 0) > 0) p.add("plan-limits");
     if ((snap.slots?.problems.length ?? 0) > 0) p.add("heavy-jobs");
+    if ((snap.limits?.problems.length ?? 0) > 0) p.add("limits");
     if (snap.pi?.preflight.problem) p.add("pi-install");
     const st = remote.status?.state;
     if (st === "unreadable" || st === "error" || st === "paused" || remote.alerts.some((a) => a.cat === "remote")) p.add("remote-access");
@@ -173,9 +178,14 @@ export function SettingsSheet(props: SheetProps) {
     if (snap.termHistory) h.term_history = !snap.termHistory.persist_scrollback || !snap.termHistory.per_tab_history;
     if (snap.quota) { h.quota_gate = !snap.quota.gate; h.quota_pct = snap.quota.weekly_warn_pct !== null; }
     if (snap.slots) h.slots = snap.slots.slots.some((s) => s.explicit);
+    if (snap.limits) {
+      const e = snap.limits.explicit;
+      h.limits = e.max_live_agents !== null || e.min_free_memory_pct !== null || e.max_swap_used_pct !== null || Object.keys(e.max_live).length > 0;
+    }
     if (snap.pi) { h.pi_trust = snap.pi.trust !== "never"; h.pi_allowed = snap.pi.allowed.length > 0; }
     if (snap.kimi) h.kimi_allowed = snap.kimi.allowed.length > 0;
     if (snap.profiles) h.profiles = snap.profiles.count > 0;
+    if (snap.preset) h.policy_preset = snap.preset.name !== "balanced" || snap.preset.modified.length > 0;
     if (guidance) {
       h.main_guard = guidance.settings.guard;
       h.guidance_enabled = !guidance.settings.enabled;

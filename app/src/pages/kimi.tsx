@@ -2,10 +2,11 @@
 // kimi's models — and a pointer to its folder trust, which moved to Agent
 // policy (settings-reorg §3.2).
 import { KimiInstallSection, KimiMcpSection, KimiModelsSection, useKimiStatus } from "../KimiPanel";
+import { presetDefaults } from "../presets";
 import { Page, Pointer, Sec, useSheet } from "./kit";
 
 export function KimiPage() {
-  const { settings, repo, onChange, onReport, onKimiMcpChanged, kimiMcpOfferPending, onSilenceKimiMcpOffer } = useSheet();
+  const { settings, repo, onChange, onReport, onKimiMcpChanged, kimiMcpOfferPending, onSilenceKimiMcpOffer, snap } = useSheet();
   const kimi = useKimiStatus(repo || null, onReport);
   const allowed = kimi.status?.allowed.length ?? 0;
   return <Page page="kimi">
@@ -13,7 +14,7 @@ export function KimiPage() {
         fill in asynchronously and would push it off screen. */}
     <Sec id="kimi-mcp">
       <KimiMcpSection onReport={onReport} onStatus={onKimiMcpChanged}
-        offerPending={kimiMcpOfferPending} onSilenceOffer={onSilenceKimiMcpOffer} />
+        offerPending={kimiMcpOfferPending} onSilenceOffer={onSilenceKimiMcpOffer} mutationsDefault={presetDefaults(snap.preset).mutations} />
     </Sec>
     <Sec id="kimi-install">
       <KimiInstallSection status={kimi.status} />

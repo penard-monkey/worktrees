@@ -96,6 +96,8 @@ export const HOST_KEYS = [
   "quota_gate", // quota_settings .gate off
   "quota_pct", // quota_settings .weekly_warn_pct set
   "slots", // slots_settings, any [slots] entry
+  "limits", // limits_settings, any [limits] entry
+  "policy_preset", // policy_preset_status, a preset other than Balanced, or modified
   "fetch_interval", // get_fetch_interval ≠ 0
   "term_history", // get_term_history_opts, either switch off
   "planning_default", // planning_status .default set
@@ -121,6 +123,8 @@ export const HOST_GETTERS: Record<HostKey, string> = {
   quota_gate: "quota_settings",
   quota_pct: "quota_settings",
   slots: "slots_settings",
+  limits: "limits_settings",
+  policy_preset: "policy_preset_status",
   fetch_interval: "get_fetch_interval",
   term_history: "get_term_history_opts",
   planning_default: "planning_status",
@@ -219,6 +223,7 @@ export const SECTIONS: readonly SectionDef[] = [
   { id: "default-models", page: "agents", tier: "beginner", label: "Default model", keys: ["default_models"] },
   { id: "auto-resume", page: "agents", tier: "beginner", label: "Resume on open", keys: ["ai_auto_resume"] },
   { id: "chat-view", page: "agents", tier: "beginner", label: "Chat view", keys: ["chat_view"] },
+  { id: "notifications", page: "agents", tier: "beginner", label: "Notifications", keys: ["notify_hidden"] },
   { id: "connections", page: "agents", tier: "beginner", label: "Worktrees tools for agents", scope: "computer" },
   { id: "plan-usage", page: "agents", tier: "advanced", label: "Plan usage", keys: ["usage_claude", "usage_codex", "usage_kimi"] },
   { id: "ai-command", page: "agents", tier: "expert", label: "AI command (CLI)", scope: "computer" },
@@ -246,6 +251,7 @@ export const SECTIONS: readonly SectionDef[] = [
   { id: "guidance-policy", page: "guidance", tier: "advanced", label: "Agent policy" },
   { id: "guidance-skill", page: "guidance", tier: "expert", label: "The skill", host: ["guidance_skill"], write: "set_agent_guidance_skill" },
   // ── Agent policy
+  { id: "policy-preset", page: "policy", tier: "beginner", label: "Preset", host: ["policy_preset"], write: "apply_policy_preset" },
   { id: "codex-permissions", page: "policy", tier: "beginner", label: "Codex permissions", host: ["codex_access"], write: "set_codex_permissions" },
   { id: "main-guard", page: "policy", tier: "beginner", label: "Claude in (main)", host: ["main_guard"], write: "set_agent_guidance" },
   { id: "plan-limits", page: "policy", tier: "beginner", label: "Plan limits", host: ["quota_gate"], write: "set_quota_settings" },
@@ -253,6 +259,7 @@ export const SECTIONS: readonly SectionDef[] = [
   { id: "pi-trust", page: "policy", tier: "advanced", label: "pi", host: ["pi_trust", "pi_allowed"], write: "set_pi_trust" },
   { id: "kimi-trust", page: "policy", tier: "advanced", label: "Kimi", host: ["kimi_allowed"], write: "set_kimi_allowed" },
   { id: "cross-project", page: "policy", tier: "advanced", label: "Other projects", host: ["cross_project", "private_projects"], write: "set_cross_project" },
+  { id: "limits", page: "policy", tier: "advanced", label: "Limits", host: ["limits"], write: "set_limits" },
   { id: "heavy-jobs", page: "policy", tier: "advanced", label: "Heavy jobs", host: ["slots"], write: "set_slot_capacity" },
   // ── Projects
   { id: "planning", page: "projects", tier: "beginner", label: "Planning", host: ["planning_default"], write: "set_planning_default" },
@@ -426,7 +433,7 @@ export function pageFooter(page: PageId, ctx: VisCtx): { count: number; next: Mo
 
 export const RESET_SCOPES = [
   { id: "look", label: "Appearance & layout", hint: "Theme, sizes, fonts, the sidebar, the layout, the dock's width and tab, and the nav's sort." },
-  { id: "behavior", label: "Window behaviour", hint: "Startup, commands, the default agent and models, chat view, notifications, pull requests, the file viewer's preferences and the update check." },
+  { id: "behavior", label: "Window behaviour", hint: "Startup, commands, the default agent and models, chat view, notifications, pull requests, the file viewer's preferences, scrollback and the update check." },
   { id: "memory", label: "Per-place memory", hint: "Each place's panels, terminal tabs and their names, open files, collapsed docs, and each project's order and folding." },
   { id: "silenced", label: "Silenced suggestions", hint: "Every \"Stop suggesting this\", every dismissed init banner, and the dismissed update bubble — they can ask again." },
   { id: "above", label: "Settings above my mode", hint: "Every window setting this mode does not show, so nothing hidden keeps acting." },

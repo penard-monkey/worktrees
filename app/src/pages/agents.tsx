@@ -13,6 +13,8 @@ import { ModelPicker, useAgentModels } from "../ModelPicker";
 import type { CodexMcpStatus } from "../CodexMcpPanel";
 import type { PiMcpStatus } from "../PiMcpPanel";
 import type { KimiMcpStatus } from "../KimiPanel";
+import { askNotifications, notificationsAllowed } from "../notifyhost";
+import { DONE_AFTER_HIDDEN_MS } from "../notify";
 import { Page, Sec, useSheet } from "./kit";
 
 type AiConfig = { ai_cmd: string; ai_resume_arg: string; path: string; exists: boolean };
@@ -63,6 +65,37 @@ function ModelRow({ harness }: { harness: Harness }) {
         onChange={(m) => onChange({ default_models: { ...settings.default_models, [harness]: m || undefined } })} />
       <span className="hint model-row-cli">{cliLine(harness)}</span>
     </div>
+  );
+}
+
+/** Settings → Agents → Notifications (settings-reorg §6 item 9). The system
+ *  is asked for permission only from here, by the button — never on load. */
+function NotificationsSection() {
+  const { settings, onChange, host } = useSheet();
+  const [allowed, setAllowed] = useState<boolean | null | undefined>(undefined);
+  useEffect(() => { void notificationsAllowed().then(setAllowed); }, []);
+  const mode = settings.notify_hidden;
+  return (
+    <section className="setting">
+      <label>Notifications</label>
+      <div className="seg seg-plain" data-testid="notify-mode">
+        {([["off", "Off"], ["waiting", "When an agent waits"], ["both", "When one waits or finishes"]] as const).map(([v, label]) => (
+          <button key={v} className={mode === v ? "on" : ""} data-mode={v} onClick={() => onChange({ notify_hidden: v })}>{label}</button>
+        ))}
+      </div>
+      <div className="hint">
+        Only while this window is hidden — minimised, on another Space, or fully covered: an agent stopped on a question, and — with the
+        second — one that finishes after you have been away {Math.round(DONE_AFTER_HIDDEN_MS / 60_000)} minutes.
+        {host ? ` This window shows ${host}'s agents, on this computer.` : ""}
+      </div>
+      {mode !== "off" && allowed === false && (
+        <div className="ver-actions">
+          <span className="hint">This computer has not allowed the app's notifications yet.</span>
+          <button type="button" className="ctrl sm" data-testid="notify-allow" onClick={() => void askNotifications().then(setAllowed)}>Allow notifications</button>
+        </div>
+      )}
+      {mode !== "off" && allowed === null && <div className="hint">Notifications are not available in this window.</div>}
+    </section>
   );
 }
 
@@ -160,6 +193,10 @@ export function AgentsPage() {
           Terminal is one click away for tool output, diffs, and slash commands.
         </div>
       </section>
+    </Sec>
+
+    <Sec id="notifications">
+      <NotificationsSection />
     </Sec>
 
     <Sec id="connections">

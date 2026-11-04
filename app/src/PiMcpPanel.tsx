@@ -30,8 +30,10 @@ const VERDICT: Record<PiMcpStatus["state"], string> = {
   "pi-missing": "pi is not installed.",
 };
 
-export function PiMcpSection({ onReport, onStatus, offerPending = false, onSilenceOffer, "data-focus": focusId }: {
+export function PiMcpSection({ onReport, onStatus, offerPending = false, onSilenceOffer, mutationsDefault = true, "data-focus": focusId }: {
   onReport: (text: string) => void;
+  /** "Allow create and close tools" before the user ticks it. */
+  mutationsDefault?: boolean;
   "data-focus"?: string;
   /** Every status read or handed back — App keeps the `pi-mcp` offer in step. */
   onStatus?: (s: PiMcpStatus) => void;
@@ -44,7 +46,10 @@ export function PiMcpSection({ onReport, onStatus, offerPending = false, onSilen
   // Two clicks (settings-reorg §6 item 3): removing drops the server entry
   // from pi's own config, and every lane loses the tools at its next start.
   const arm = useArmed<"remove">();
-  const [mutations, setMutations] = useState(true);
+  // The box's starting value is the policy preset's suggestion
+  // (settings-reorg §5.2: unticked under Cautious); the user's tick wins.
+  const [picked, setMutations] = useState<boolean | null>(null);
+  const mutations = picked ?? mutationsDefault;
   const [output, setOutput] = useState("");
   useEffect(() => { invoke<PiMcpStatus>("pi_mcp_status").then(setStatus).catch((e) => onReport(String(e))); }, []);
   const act = async (remove: boolean) => {

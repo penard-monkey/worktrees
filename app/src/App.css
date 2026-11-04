@@ -3111,6 +3111,25 @@ body.dragging .menu-catch { pointer-events: none; }
 .reset-scopes .setting-check { margin-top: var(--s1); }
 .usage-record > summary { cursor: pointer; font-size: var(--fs-label); color: var(--txt); font-weight: var(--fw-med); }
 .usage-record[open] > summary { margin-bottom: var(--s3); }
+/* Settings → Agent policy → Preset (settings-reorg §5). */
+.preset-compare-toggle { align-self: flex-start; color: var(--txt-hi); }
+.preset-modified {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px var(--s1);
+  font-size: var(--fs-meta); color: var(--txt);
+}
+.preset-modified .mcp-dismiss { color: var(--txt-hi); text-decoration: underline; padding: 0; }
+.preset-acts { display: inline-flex; gap: var(--s2); margin-left: var(--s2); }
+.preset-back .mcp-dismiss { color: var(--txt-hi); padding: 0; }
+.preset-compare { border-collapse: collapse; font-size: var(--fs-meta); color: var(--txt); width: 100%; }
+.preset-compare th, .preset-compare td { text-align: left; padding: var(--s1) var(--s2); border-bottom: 1px solid var(--line); vertical-align: top; }
+.preset-compare thead th { color: var(--txt-hi); font-weight: var(--fw-bold); }
+.preset-compare tbody th { color: var(--txt-dim); font-weight: var(--fw-body); }
+/* The current preset's column: a tint, never a coloured word. */
+.preset-compare .cur { background: var(--bg-panel); color: var(--txt-hi); }
+.preset-now { color: var(--txt-dim); }
+/* "Set by the environment" (§6 item 4). */
+.setting .hint.env-line { color: var(--txt-dim); }
+.env-line code { color: var(--txt-hi); }
 /* The line a Full access click is confirmed against. */
 .confirm-line { color: var(--txt-hi); }
 .seg button.armed { background: var(--danger); color: var(--accent-ink); }

@@ -92,8 +92,11 @@ function verdict(s: McpStatus): { tone: "ok" | "warn" | "off"; line: string } {
 
 /** Settings → Claude. The permanent home: the real state, the actions, and the
  *  command spelled out for anyone who would rather run it themselves. */
-export function McpSection({ status, repo, offerPending, onSilenceOffer, onChanged, onReport }: {
+export function McpSection({ status, repo, offerPending, onSilenceOffer, onChanged, onReport, mutationsDefault = true }: {
   status: McpStatus | null;
+  /** "Let Claude create and close worktrees" before the user ticks it: the
+   *  policy preset's suggestion (settings-reorg §5.2). */
+  mutationsDefault?: boolean;
   /** The project in focus, or "" — only used to check the local/project scopes. */
   repo: string;
   /** Is this still an un-taken, un-silenced offer (`offers.ts`)? If so this
@@ -120,7 +123,8 @@ export function McpSection({ status, repo, offerPending, onSilenceOffer, onChang
 
   const [busy, setBusy] = useState<"" | "install" | "remove">("");
   const [log, setLog] = useState("");
-  const [mutations, setMutations] = useState(true);
+  const [picked, setMutations] = useState<boolean | null>(null);
+  const mutations = picked ?? mutationsDefault;
   const [copied, setCopied] = useState(false);
   // Two clicks, and the arm expires (useArmed): an arm forgotten must not
   // remove the server on a stray click minutes later.

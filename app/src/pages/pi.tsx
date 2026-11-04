@@ -3,10 +3,11 @@
 // Agent policy (settings-reorg §3.2).
 import { PiMcpSection } from "../PiMcpPanel";
 import { PiInstallSection, PiModelsSection, usePiModels, usePiStatus } from "../PiPanel";
+import { presetDefaults } from "../presets";
 import { Page, Pointer, Sec, useSheet } from "./kit";
 
 export function PiPage() {
-  const { settings, repo, onChange, onReport, onFail, onPiMcpChanged, piMcpOfferPending, onSilencePiMcpOffer } = useSheet();
+  const { settings, repo, onChange, onReport, onFail, onPiMcpChanged, piMcpOfferPending, onSilencePiMcpOffer, snap } = useSheet();
   const pi = usePiStatus({ settings, repo: repo || null, onChange, onReport, onFail });
   const models = usePiModels(onReport);
   const allowed = pi.status?.allowed.length ?? 0;
@@ -16,7 +17,7 @@ export function PiPage() {
         the focus scroll lands (the Codex page's note). */}
     <Sec id="pi-mcp">
       <PiMcpSection onReport={onReport} onStatus={onPiMcpChanged}
-        offerPending={piMcpOfferPending} onSilenceOffer={onSilencePiMcpOffer} />
+        offerPending={piMcpOfferPending} onSilenceOffer={onSilencePiMcpOffer} mutationsDefault={presetDefaults(snap.preset).mutations} />
     </Sec>
     <Sec id="pi-install" problem={!!pi.status?.preflight.problem}>
       <PiInstallSection status={pi.status} />

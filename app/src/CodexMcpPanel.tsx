@@ -15,8 +15,10 @@ export type CodexMcpStatus = {
 };
 type Outcome = { ok: boolean; output: string; status: CodexMcpStatus };
 
-export function CodexMcpSection({ onReport, onStatus, offerPending = false, onSilenceOffer, "data-focus": focusId }: {
+export function CodexMcpSection({ onReport, onStatus, offerPending = false, onSilenceOffer, mutationsDefault = true, "data-focus": focusId }: {
   onReport: (text: string) => void;
+  /** "Allow create and close tools" before the user ticks it. */
+  mutationsDefault?: boolean;
   /** The deep-link target, named at the call site (see UserSkillsSection). */
   "data-focus"?: string;
   /** Every status this panel reads or is handed back — App keeps the
@@ -33,7 +35,10 @@ export function CodexMcpSection({ onReport, onStatus, offerPending = false, onSi
   // Two clicks (settings-reorg §6 item 3): removing drops the server entry
   // from Codex's own config, and every lane loses the tools at its next start.
   const arm = useArmed<"remove">();
-  const [mutations, setMutations] = useState(true);
+  // The box's starting value is the policy preset's suggestion
+  // (settings-reorg §5.2: unticked under Cautious); the user's tick wins.
+  const [picked, setMutations] = useState<boolean | null>(null);
+  const mutations = picked ?? mutationsDefault;
   const [output, setOutput] = useState("");
   useEffect(() => { invoke<CodexMcpStatus>("codex_mcp_status").then(setStatus).catch((e) => onReport(String(e))); }, []);
   const act = async (remove: boolean) => {

@@ -3,6 +3,7 @@ import { invoke } from "./ipc";
 import { DiffView, type FileDiffDto } from "./DiffView";
 import { useEscape } from "./useEscape";
 import { useArmed } from "./useArmed";
+import { EnvLine, type Origin } from "./EnvLine";
 
 /** `guidance::Status` (core), as `agent_guidance_status` returns it. */
 export type GuidanceDelivery =
@@ -28,6 +29,9 @@ export type GuidanceStatus = {
   /** Bumped when what agents are told changes enough to ask again (the offer's fingerprint). */
   version: number;
   settings: { enabled: boolean; guard: boolean };
+  /** What decided `settings.enabled` (settings-reorg §6 item 4); absent
+   *  from an older host. `env` here OUTRANKS the switch. */
+  enabled_origin?: Origin;
   /** A `worktrees` CLI that HAS the guard is on PATH. Without one, Claude gets
    *  the plain plugin even with the guard switched on. */
   guard_available: boolean;
@@ -201,8 +205,10 @@ export function GuidanceSection({ status, onStatus, onReport, offerPending = fal
     <label>Agent guidance</label>
     <div className="hint">In a worktrees-managed repo, agents launched from Worktrees are told to do their branch work in a place, and get a <code>worktrees</code> skill for the rest: handing work to another agent, messaging between places, finishing and releasing. The text ships with Worktrees and you can edit the skill; nothing is written to any agent's own settings.</div>
     {!status ? <div className="hint">Checking…</div> : <>
-      <label className="tier-toggle setting-check"><input type="checkbox" checked={status.settings.enabled} disabled={busy}
+      <label className="tier-toggle setting-check"><input type="checkbox" checked={status.settings.enabled}
+        disabled={busy || status.enabled_origin?.source === "env"} data-testid="guidance-enabled"
         onChange={(e) => set({ enabled: e.currentTarget.checked })} />Give agents the guidance at launch</label>
+      <EnvLine origin={status.enabled_origin} outranks="env" />
       <div className="guidance-rows">
         {status.harnesses.map((h) => (
           <div className="hint" key={h.id} data-harness={h.id}><b>{h.label}:</b> {status.settings.enabled ? deliveryLine(h) : "off"}</div>

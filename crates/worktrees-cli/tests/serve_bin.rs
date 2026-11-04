@@ -108,6 +108,7 @@ impl Sandbox {
             // Host policy's env tier would outrank a test's file; hermetic.
             .env_remove("WORKTREES_CODEX_PERMISSIONS")
             .env_remove("WORKTREES_PI_PROJECT_TRUST")
+            .env_remove("WORKTREES_AGENT_GUIDANCE")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -338,6 +339,66 @@ fn serve_loads_host_policy_at_boot() {
     let r = rpc(&mut ws, 6, "set_fetch_interval", json!({"mins": 7}));
     assert!(r["err"].as_str().is_some_and(|e| e.contains("unknown auto-fetch interval 7")), "{r}");
     assert_eq!(on_disk()["fetch_interval_min"], json!(60), "a refused cadence was written");
+    assert_eq!(sb.terminate().code(), Some(0));
+}
+
+/// Settings → Agent policy → Preset and Limits (docs/proposals/
+/// settings-reorg.md §5, §6 item 1), end to end over the socket, in this
+/// sandbox's own HOME and XDG_CONFIG_HOME: a fresh host reads as Balanced
+/// (the shipped defaults); applying Cautious sends each value to its own home
+/// through its own setter and records the name; a hand change is "modified"
+/// and a one-key "back to preset" clears it; an unknown name or key is
+/// refused before anything is set; the limits setter refuses what the guard
+/// would ignore; and Balanced puts every value back.
+#[test]
+fn a_policy_preset_applies_through_each_setter_and_says_what_moved() {
+    let mut sb = Sandbox::new("presets");
+    let sf = sb.launch(&["--allow-origin", "http://localhost:1420"]);
+    let mut ws = connect(&sf, "http://localhost:1420");
+    let st = rpc(&mut ws, 1, "policy_preset_status", json!({}));
+    assert_eq!((st["ok"]["name"].clone(), st["ok"]["modified"].clone()), (json!("balanced"), json!([])), "a fresh host is Balanced: {st}");
+
+    let r = rpc(&mut ws, 2, "apply_policy_preset", json!({"name": "cautious"}));
+    assert_eq!((r["ok"]["name"].clone(), r["ok"]["applied"]["name"].clone()), (json!("cautious"), json!("cautious")), "{r}");
+    let policy: Value = serde_json::from_slice(&std::fs::read(sb.cfg().join("host-policy.json")).unwrap()).unwrap();
+    assert_eq!((policy["codex_permissions"].clone(), policy["policy_preset"]["name"].clone()), (json!("ask"), json!("cautious")), "{policy}");
+    let toml = std::fs::read_to_string(sb.root.join("xdg/worktrees/config.toml")).unwrap();
+    assert!(toml.contains("weekly_warn_pct = 80") && toml.contains("max_live_agents = 2"), "{toml}");
+    let guidance: Value = serde_json::from_slice(&std::fs::read(sb.root.join("xdg/worktrees/agent-guidance.json")).unwrap()).unwrap();
+    assert_eq!(guidance["guard"], json!(true), "Cautious turns the guard on: {guidance}");
+    let r = rpc(&mut ws, 3, "get_codex_permissions", json!({"detail": true}));
+    assert_eq!((r["ok"]["value"].clone(), r["ok"]["source"].clone()), (json!("ask"), json!("host")), "{r}");
+    let r = rpc(&mut ws, 4, "get_codex_permissions", json!({}));
+    assert_eq!(r["ok"], json!("ask"), "without `detail`, the plain string older clients read: {r}");
+
+    let r = rpc(&mut ws, 5, "set_codex_permissions", json!({"mode": "full"}));
+    assert_eq!(r["ok"], Value::Null, "{r}");
+    let st = rpc(&mut ws, 6, "policy_preset_status", json!({}));
+    assert_eq!((st["ok"]["name"].clone(), st["ok"]["modified"].clone()), (json!("cautious"), json!(["codex_access"])), "{st}");
+    let r = rpc(&mut ws, 7, "apply_policy_preset", json!({"name": "cautious", "keys": ["codex_access"]}));
+    assert_eq!((r["ok"]["modified"].clone(), r["ok"]["current"]["codex_access"].clone()), (json!([]), json!("ask")), "{r}");
+
+    let r = rpc(&mut ws, 8, "apply_policy_preset", json!({"name": "cautious", "keys": ["theme"]}));
+    assert!(r["err"].as_str().is_some_and(|e| e.contains("sets no 'theme'")), "{r}");
+    let r = rpc(&mut ws, 9, "apply_policy_preset", json!({"name": "yolo"}));
+    assert!(r["err"].as_str().is_some_and(|e| e.contains("unknown policy preset")), "{r}");
+    let r = rpc(&mut ws, 10, "policy_preset_status", json!({}));
+    assert_eq!(r["ok"]["name"], json!("cautious"), "a refused apply set nothing: {r}");
+
+    let r = rpc(&mut ws, 11, "set_limits", json!({"key": "max_live_agents", "value": 1001}));
+    assert!(r["err"].as_str().is_some_and(|e| e.contains("from 0 to 1000")), "{r}");
+    let r = rpc(&mut ws, 12, "set_limits", json!({"key": "max_live.nobody", "value": 3}));
+    assert!(r["err"].as_str().is_some_and(|e| e.contains("no such provider")), "{r}");
+    let r = rpc(&mut ws, 13, "set_limits", json!({"key": "max_live.claude", "value": 3}));
+    assert_eq!((r["ok"]["explicit"]["max_live"]["claude"].clone(), r["ok"]["problems"].clone()), (json!(3), json!([])), "{r}");
+    let r = rpc(&mut ws, 14, "limits_settings", json!({}));
+    assert_eq!(r["ok"]["explicit"]["max_live_agents"], json!(2), "{r}");
+
+    let r = rpc(&mut ws, 15, "apply_policy_preset", json!({"name": "balanced"}));
+    let cur = &r["ok"]["current"];
+    assert_eq!((cur["codex_access"].clone(), cur["main_guard"].clone(), cur["max_live_agents"].clone()), (json!("auto-review"), json!(false), Value::Null), "{r}");
+    let r = rpc(&mut ws, 16, "apply_policy_preset", json!({"name": "custom"}));
+    assert_eq!((r["ok"]["applied"].clone(), r["ok"]["name"].clone()), (Value::Null, json!("balanced")), "Keep as custom forgets the name; the values still read as Balanced: {r}");
     assert_eq!(sb.terminate().code(), Some(0));
 }
 

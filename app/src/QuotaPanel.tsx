@@ -23,17 +23,16 @@ export const QUOTA_PCTS = [50, 60, 70, 75, 80, 85, 90, 95, 100];
 export function useQuota(onReport: (text: string) => void) {
   const [s, setS] = useState<QuotaSettings | null>(null);
   const [busy, setBusy] = useState(false);
-  useEffect(() => {
-    invoke<QuotaSettings>("quota_settings").then(setS).catch((e) => onReport(`quota_settings: ${String(e)}`));
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- one read per mount
-  }, []);
+  const reload = () => { invoke<QuotaSettings>("quota_settings").then(setS).catch((e) => onReport(`quota_settings: ${String(e)}`)); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- one read per mount
+  useEffect(reload, []);
   const save = async (gate: boolean, pct: number | null) => {
     setBusy(true);
     try { setS(await invoke<QuotaSettings>("set_quota_settings", { gate, weeklyWarnPct: pct })); }
     catch (e) { onReport(`set_quota_settings: ${String(e)}`); }
     finally { setBusy(false); }
   };
-  return { s, busy, save };
+  return { s, busy, save, reload };
 }
 export type Quota = ReturnType<typeof useQuota>;
 
