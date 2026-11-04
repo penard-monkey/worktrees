@@ -4,8 +4,10 @@ title: "Proposal — slash commands in the chat view"
 
 # Proposal — slash commands in the chat view
 
-**Status:** measured 2026-11-04 on `feat/chat-slash-commands`; built on the
-same branch. Not merged, not reviewed.
+**Status:** measured and built 2026-11-04 on `feat/chat-slash-commands`,
+verified end to end on a private tmux server (§5). Not merged, not
+reviewed; an automated security review of each commit found four fail-open
+spots in the tiering, all closed (§2.5).
 
 **The ask** (the owner, 2026-11-04): "I want to enable slash commands in the
 chat view (e.g. /model)" — every slash command the session actually has,
@@ -150,8 +152,9 @@ prompt, permitted by the file's own `allowed-tools` front matter (measured:
 `allowed-tools: Bash(date:*)` and `` !`date +%Y` `` ran with no question
 asked); and `allowed-tools` widens what the model may do for that turn. So
 any custom command — project, user or plugin — that has a `` !` `` line or
-`allowed-tools` is in the **sensitive** tier, whatever its source, and its
-row says why. worktrees never runs one by itself: listing READS files, and a
+grants tools that act (`allowed-tools` beyond Read, Grep, Glob, LS) is in
+the **sensitive** tier, whatever its source, and its row says why (§2.5 has
+the rest of the rule, which fails closed). worktrees never runs one by itself: listing READS files, and a
 person picks the command (ADR 0001 is about argv worktrees runs; this is a
 person's choice, gated like one).
 
@@ -190,16 +193,21 @@ untouched and still refuses `/`.
 
 1. The name must be in `agent_commands`' list for that session; `!` and `#`
    lines are refused as what they are (shell, memory), not as unknown names.
-2. `sensitive` needs `admin` (a phone: admin + step-up); `/model <args>` is
-   refused (decision 1).
+2. `sensitive` needs `admin` (a phone: admin + step-up), and so does an
+   argument naming a sensitive command of the session (`/loop 5m /login`
+   would otherwise run `/login` through a normal command; `/loop` is itself
+   sensitive, as it repeats work unattended); `/model <args>` is refused
+   (decision 1).
 3. Under the place's lock: a fresh capture with no prompt up and an empty
    composer.
 4. Claude: paste the line; prove the composer holds exactly it and the menu,
    if up, highlights exactly `/<name>`; Enter; confirmed when the box is back
    (run, or queued behind the turn) or a prompt or dialog is up (`opened`).
-   Codex: its adapter types and submits as `agent_send` does; then the
-   history rows under the echoed command are read once (`output`, ≤ 40
-   rows): `/status`'s cell, or Codex's refusal.
+   Codex: typed as `agent_send` types it, the same proof, then ONE Enter
+   and a watch for the list it opened or its composer back empty (its usual
+   submit waits for the composer, which a list hides); the history rows
+   under the echoed command are read once (`output`, ≤ 40 rows): `/status`'s
+   cell, or Codex's refusal.
 5. Audit: the NAME, and the arguments' length and SHA-256, never their text;
    a device's command stamps `last_remote_send`.
 
@@ -235,6 +243,24 @@ command asks twice: the button turns into "Run /clear — starts a new
 conversation" for four seconds. A picker or dialog shows as the prompt card;
 output shows as a Command notice; a refusal says why on the composer's line.
 
+### 2.5 Tiers fail closed
+
+The front matter is read by a small reader, not a YAML parser, so whatever
+it cannot read makes a command sensitive, never normal: a file past the 32
+KiB the host reads, front matter that never closes (only a column-0 `---`
+closes it), rows that are no `key: value`, a nested block, a key given
+twice, an indented `---` inside, `allowed-tools` in any form but a list of
+readers, and any key outside `name`, `description`, `argument-hint`,
+`user-invocable`, `disable-model-invocation`, `when_to_use`, `license`,
+`version` (`hooks`, `model`, `context`, `agent`, … alike). The shell scan
+reads the whole file, `` !` `` and a fenced ` ```! ` block alike. A name two
+sources give (the user's and the repository's, or a file and a built-in) is
+listed once, with the MOST sensitive tier any of them has: which one the
+harness runs is its rule, and a guess here must not lower the bar. A place's
+folders are read with no link followed at any component (a planted
+`.claude/commands/x.md -> ~/.ssh/id_ed25519` would otherwise send the key's
+first line to a phone as a description).
+
 ## 3. Threat model: what a paired phone can now do
 
 With `instruct` (and step-up per connection, and the DRIVE budget): run a
@@ -263,3 +289,26 @@ an MCP `send` of `/`; a default model written from the chat; Codex's
   reload of the chat does not bring it back.
 - Built-in tables are per measured version; a newer Claude's new built-ins
   are missing until measured, and a removed one is refused by Claude itself.
+- Dialogs other than Claude's Settings and help (`/mcp`, `/hooks`,
+  `/permissions`, `/agents`, …) are prompts this host cannot read: the chat
+  shows their rows and they are closed at the host.
+
+## 5. How it was verified
+
+- Rust, each shown red first (a mutation, then restored): the tables and
+  the name rule, the argument rule, the file enumeration and its link
+  refusal, the fail-closed tiers, the readers against every fixture, the
+  answer keys (`s`, Escape, Enter), the terminal-only choices, the rows'
+  refusals before anything is typed, the admin split, the audit record,
+  `agent_send` and MCP `send` still refusing `/`.
+- End to end through the real rows on a private tmux server
+  (`crates/worktrees-api/tests/agents_e2e.rs`): Claude 2.1.318 `/model`
+  (picker → the model in effect with `s` → "for this session only",
+  `~/.claude/settings.json` unchanged), `/context`, `/status` (opened, then
+  Close), `/compact keep only the bee facts`; Codex 0.160.1 `/model` (model
+  → effort with `s` → "for this session only", `~/.codex/config.toml`
+  unchanged), `/status` (its output), `/compact`, and `/context` refused as
+  not Codex's.
+- The app: `app/scripts/slashmenu-check.mjs` (pure), and
+  `app/scripts/chat-slash-browser.mjs` against the mock in Chromium and
+  WebKit (22 checks each).
