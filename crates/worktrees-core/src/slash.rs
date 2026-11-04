@@ -138,17 +138,39 @@ fn version_key(v: &str) -> (u64, u64, u64) {
     (it.next().unwrap_or(0), it.next().unwrap_or(0), it.next().unwrap_or(0))
 }
 
-/// The session's commands: the built-ins, then `custom` (a name a built-in
-/// has, or one listed earlier, is dropped: the first wins), sorted by name.
+/// The session's commands: the built-ins, then `custom`, sorted by name. A
+/// name given twice is listed once, as the first gave it — but with the
+/// most sensitive tier any of them has: which one the harness runs is its
+/// own rule, and a guess here must not lower the bar.
 pub fn list(table: &Table, custom: Vec<Command>) -> Vec<Command> {
     let mut out: Vec<Command> = table.commands.iter().map(Command::builtin).collect();
     for c in custom {
-        if !out.iter().any(|o| o.name == c.name) {
-            out.push(c);
-        }
+        merge(&mut out, c);
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     out
+}
+
+/// `c` into `out`: new, or folded into the entry of its name, raising that
+/// entry's tier to `c`'s.
+fn merge(out: &mut Vec<Command>, c: Command) {
+    match out.iter_mut().find(|o| o.name == c.name) {
+        None => out.push(c),
+        Some(o) if o.tier == Tier::Normal && c.tier == Tier::Sensitive => {
+            o.tier = Tier::Sensitive;
+            o.why = Some(format!("another command of this name: {}", c.why.as_deref().unwrap_or("sensitive")));
+            o.confirm = Some(sensitive_words(o.why.as_deref()));
+        }
+        Some(_) => {}
+    }
+}
+
+/// `cmd` with `args` needs `admin`: it is sensitive, or its arguments name a
+/// sensitive command of `list` (`/loop 5m /login`, any command that runs
+/// another).
+pub fn needs_admin(list: &[Command], cmd: &Command, args: &str) -> bool {
+    cmd.tier == Tier::Sensitive
+        || args.split_whitespace().filter_map(|t| t.strip_prefix('/')).any(|n| list.iter().any(|c| c.name == n && c.tier == Tier::Sensitive))
 }
 
 /// `agent_command` with a line that is no command: `!` is Claude's shell.
@@ -247,9 +269,11 @@ pub fn claude_custom(src: &ClaudeSources) -> Vec<Command> {
         commands_in(&dir.join("commands"), Source::Plugin, Some(&name), true, &mut out);
         skills_in(&dir.join("skills"), Source::Plugin, Some(&name), true, &mut out);
     }
-    let mut seen = std::collections::HashSet::new();
-    out.retain(|c| seen.insert(c.name.clone()));
-    out
+    let mut merged = Vec::new();
+    for c in out {
+        merge(&mut merged, c);
+    }
+    merged
 }
 
 /// The installed plugins `~/.claude/settings.json` enables: each one's
@@ -686,6 +710,20 @@ mod tests {
         }
     }
 
+    /// A command whose argument names a sensitive command needs what that
+    /// one needs: `/loop 5m /login` is `/login`, every five minutes.
+    #[test]
+    fn an_argument_naming_a_sensitive_command_needs_admin() {
+        let c = claude();
+        let get = |n: &str| c.iter().find(|x| x.name == n).unwrap();
+        assert_eq!(get("loop").tier, Tier::Sensitive);
+        assert!(!needs_admin(&c, get("compact"), "keep the facts"));
+        assert!(needs_admin(&c, get("compact"), "then /login please"));
+        assert!(!needs_admin(&c, get("btw"), "what does /status show"));
+        assert!(needs_admin(&c, get("btw"), "run /permissions"));
+        assert!(needs_admin(&c, get("login"), ""));
+    }
+
     /// The arguments are one line under `typed_line_ok`'s rules, with no `@`
     /// (Claude's file menu would take Enter), and `/model` takes none.
     #[test]
@@ -810,12 +848,23 @@ mod tests {
         std::os::unix::fs::symlink(place.join(".claude"), place2.join(".claude")).unwrap();
         let got2 = claude_custom(&ClaudeSources { home: &home, place: &place2, plugin_dirs: &[] });
         assert!(got2.iter().all(|c| c.source != Source::Project), "{got2:?}");
+        // A name two sources give keeps the most sensitive tier.
+        put(&home.join(".claude/commands/shady.md"), "---\ndescription: mine\n---\nplain\n");
+        put(&pc.join("shady.md"), "---\ndescription: the repo's\n---\nrun !`id`\n");
+        let got3 = claude_custom(&ClaudeSources { home: &home, place: &place, plugin_dirs: &[] });
+        let shady = got3.iter().find(|c| c.name == "shady").unwrap();
+        assert_eq!((shady.tier, shady.description.as_str(), shady.source), (Tier::Sensitive, "mine", Source::User), "the user's, at the repository's tier");
         // A custom command never shadows a built-in.
         let mut clash = got.clone();
         clash.push(Command { name: "status".into(), description: "MINE".into(), ..get("mine").clone() });
         let l = list(table("claude", None).unwrap(), clash);
         assert_eq!(l.iter().filter(|c| c.name == "status").count(), 1);
         assert_eq!(l.iter().find(|c| c.name == "status").unwrap().source, Source::BuiltIn);
+        let mut risky = get("mine").clone();
+        risky.name = "context".into();
+        risky.tier = Tier::Sensitive;
+        let l = list(table("claude", None).unwrap(), vec![risky]);
+        assert_eq!(l.iter().find(|c| c.name == "context").unwrap().tier, Tier::Sensitive, "a sensitive file of a built-in's name raises it");
         let _ = fs::remove_dir_all(&root);
     }
 }
@@ -877,7 +926,7 @@ pub const CLAUDE_2_1_318: &[Builtin] = &[
     b("list-agents", "List subagents, teammates, and other Claude sessions you can message", Normal, None, None, true),
     b("login", "Sign in with your Anthropic account", Sensitive, Some("account"), None, true),
     b("logout", "Sign out from your Anthropic account", Sensitive, Some("account"), None, true),
-    b("loop", "Repeat a prompt or command on an interval (e.g. /loop 5m /foo)", Normal, None, None, true),
+    b("loop", "Repeat a prompt or command on an interval (e.g. /loop 5m /foo)", Sensitive, Some("repeats a prompt or a command unattended"), None, true),
     b("mcp", "Manage MCP servers", Sensitive, Some("MCP"), None, true),
     b("memory", "Edit CLAUDE.md files and memory settings", Sensitive, Some("memory files"), None, true),
     b("mobile", "Show QR code to download the Claude mobile app", Normal, None, None, true),

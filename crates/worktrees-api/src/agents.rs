@@ -883,7 +883,7 @@ pub fn agent_command(ctx: &Ctx, repo: String, slug: String, session: String, nam
     let lane = lane_of(io.lanes(&project, &slug), Some(session.clone()))?;
     let (_, _, list) = commands_for(io, &project, &slug, &lane)?;
     let cmd = slash::resolve(&list, &name)?;
-    if cmd.tier == Tier::Sensitive && !ctx.holds(worktrees_core::authz::Capability::Admin) {
+    if slash::needs_admin(&list, cmd, args.as_deref().unwrap_or("")) && !ctx.holds(worktrees_core::authz::Capability::Admin) {
         return Err(ERR_NEEDS_ADMIN.into());
     }
     let line = slash::line(cmd, args.as_deref().unwrap_or(""))?;
@@ -1878,6 +1878,7 @@ mod tests {
         assert!(r.unwrap_err().contains("'@'") && n == 0);
         assert_eq!(run(mk(empty), "sens-device", "/login", None, device), (Err(ERR_NEEDS_ADMIN.to_string()), 0));
         assert_eq!(run(mk(empty), "sens-file", "/preexec", None, device), (Err(ERR_NEEDS_ADMIN.to_string()), 0), "a project command that runs a shell");
+        assert_eq!(run(mk(empty), "sens-arg", "/btw", Some("run /login now"), device), (Err(ERR_NEEDS_ADMIN.to_string()), 0), "an argument naming one");
         assert_eq!(run(mk(slash_claude!("model-picker.e.txt")), "prompt-up", "/status", None, me), (Err(ERR_PROMPT_UP.to_string()), 0));
         assert_eq!(run(mk(slash_claude!("menu-status.e.txt")), "draft", "/status", None, me), (Err(ERR_MID_INPUT.to_string()), 0));
         // With admin, the sensitive one is typed.
