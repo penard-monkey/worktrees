@@ -225,10 +225,14 @@ const MAX_FILES: usize = 300;
 const MAX_BYTES: u64 = 32 * 1024;
 
 /// Every command and skill the session's files give it, in Claude's order of
-/// precedence for a clash (the place's, the user's, synced, plugins').
+/// precedence for a clash (the user's, the place's, synced, plugins').
 pub fn claude_custom(src: &ClaudeSources) -> Vec<Command> {
     let mut out = Vec::new();
     let user = src.home.join(".claude");
+    // The user's first: a personal skill outranks a repository's of the same
+    // name (AGENTS.md, `close-out`).
+    commands_in(&user.join("commands"), Source::User, None, true, &mut out);
+    skills_in(&user.join("skills"), Source::User, None, true, &mut out);
     // The place's: the repository's files, read with no link followed.
     if let Some(dir) = crate::safepath::safe_dir_under(src.place, ".claude/commands") {
         commands_in(&dir, Source::Project, None, false, &mut out);
@@ -236,8 +240,6 @@ pub fn claude_custom(src: &ClaudeSources) -> Vec<Command> {
     if let Some(dir) = crate::safepath::safe_dir_under(src.place, ".claude/skills") {
         skills_in(&dir, Source::Project, None, false, &mut out);
     }
-    commands_in(&user.join("commands"), Source::User, None, true, &mut out);
-    skills_in(&user.join("skills"), Source::User, None, true, &mut out);
     synced_in(&user.join("skills").join("synced"), &mut out);
     let given = src.plugin_dirs.iter().map(|d| (d.clone(), None));
     for (dir, key_name) in plugins(&user).into_iter().map(|(d, n)| (d, Some(n))).chain(given) {
@@ -341,7 +343,8 @@ fn skills_in(dir: &Path, source: Source, plugin: Option<&str>, follow: bool, out
             continue;
         }
         let Some(mut c) = from_file(&path.join("SKILL.md"), folder.clone(), source, plugin, follow) else { continue };
-        let own = front(&read_head(&path.join("SKILL.md"), follow).unwrap_or_default()).get("name").cloned().filter(|n| valid_name(n));
+        let head = read_head(&path.join("SKILL.md"), follow).map(|(t, _)| t).unwrap_or_default();
+        let own = front(&head).map.get("name").cloned().filter(|n| valid_name(n));
         let base = own.unwrap_or(folder);
         c.name = match plugin {
             Some(p) => format!("{p}:{base}"),
@@ -384,16 +387,18 @@ fn synced_in(dir: &Path, out: &mut Vec<Command>) {
 }
 
 /// The head of a command's file (`MAX_BYTES`), with no link followed unless
-/// `follow`.
-fn read_head(path: &Path, follow: bool) -> Option<String> {
+/// `follow`, and whether the file goes on past it.
+fn read_head(path: &Path, follow: bool) -> Option<(String, bool)> {
     use std::io::Read;
     let md = if follow { std::fs::metadata(path) } else { std::fs::symlink_metadata(path) }.ok()?;
     if !md.is_file() {
         return None;
     }
     let mut buf = Vec::new();
-    std::fs::File::open(path).ok()?.take(MAX_BYTES).read_to_end(&mut buf).ok()?;
-    Some(String::from_utf8_lossy(&buf).into_owned())
+    std::fs::File::open(path).ok()?.take(MAX_BYTES + 1).read_to_end(&mut buf).ok()?;
+    let cut = buf.len() as u64 > MAX_BYTES;
+    buf.truncate(MAX_BYTES as usize);
+    Some((String::from_utf8_lossy(&buf).into_owned(), cut))
 }
 
 /// A command from its file: the front matter's `description` (else the
@@ -403,8 +408,9 @@ fn from_file(path: &Path, name: String, source: Source, plugin: Option<&str>, fo
     if !valid_name(&name) {
         return None;
     }
-    let text = read_head(path, follow)?;
-    let fm = front(&text);
+    let (text, cut) = read_head(path, follow)?;
+    let f = front(&text);
+    let fm = &f.map;
     if fm.get("user-invocable").map(String::as_str) == Some("false") {
         return None;
     }
@@ -412,13 +418,7 @@ fn from_file(path: &Path, name: String, source: Source, plugin: Option<&str>, fo
     let description = fm.get("description").map(|d| one_line(d)).filter(|d| !d.is_empty()).unwrap_or_else(|| {
         one_line(body.lines().map(|l| l.trim().trim_start_matches('#').trim()).find(|l| !l.is_empty()).unwrap_or(""))
     });
-    let shell = body.contains("!`");
-    let tools = fm.get("allowed-tools").is_some_and(|t| grants_more_than_reading(t));
-    let why = match (shell, tools) {
-        (true, _) => Some("its file runs a shell command before the model sees it".to_string()),
-        (false, true) => Some("its file grants the model tools that act (allowed-tools)".to_string()),
-        _ => None,
-    };
+    let why = sensitive_why(&f, body, cut);
     let tier = if why.is_some() { Tier::Sensitive } else { Tier::Normal };
     let confirm = why.as_ref().map(|w| format!("A sensitive command: {w}."));
     Some(Command {
@@ -466,39 +466,113 @@ fn grants_more_than_reading(tools: &str) -> bool {
     names.iter().any(|n| !READ_ONLY_TOOLS.contains(&n.as_str()))
 }
 
-/// A file's YAML front matter, flat: `key: value` lines between the first
-/// two `---` rows, a quoted value unquoted, a folded (`>`/`|`) one joined.
-fn front(text: &str) -> std::collections::HashMap<String, String> {
-    let mut map = std::collections::HashMap::new();
+/// A file's YAML front matter, as far as this reader can tell: `key: value`
+/// lines between the first two `---` rows (a quoted value unquoted, a folded
+/// `>`/`|` one joined), a key's indented `- item` rows as a list, and
+/// whatever it could not read as `unread`. Not a YAML parser: anything it
+/// does not understand makes the command SENSITIVE ([`sensitive_why`]),
+/// never normal.
+#[derive(Default)]
+struct Front {
+    map: std::collections::HashMap<String, String>,
+    lists: std::collections::HashMap<String, Vec<String>>,
+    /// Keys whose value is neither a scalar nor a list of scalars, and rows
+    /// that are no `key: value`.
+    unread: Vec<String>,
+    /// It opened with `---` and never closed.
+    open: bool,
+}
+
+fn front(text: &str) -> Front {
+    let mut f = Front::default();
     let mut lines = text.lines();
     if lines.next().map(str::trim) != Some("---") {
-        return map;
+        return f;
     }
-    let rows: Vec<&str> = lines.take_while(|l| l.trim() != "---").collect();
+    let all: Vec<&str> = lines.collect();
+    let Some(close) = all.iter().position(|l| l.trim() == "---") else {
+        f.open = true;
+        return f;
+    };
+    let rows = &all[..close];
+    let indented = |r: &str| r.starts_with([' ', '\t']);
     let mut i = 0;
     while i < rows.len() {
         let row = rows[i];
         i += 1;
-        if row.starts_with([' ', '\t']) {
+        if row.trim().is_empty() || row.trim_start().starts_with('#') {
             continue;
         }
-        let Some((k, v)) = row.split_once(':') else { continue };
+        let Some((k, v)) = row.split_once(':').filter(|_| !indented(row)) else {
+            f.unread.push(row.trim().chars().take(40).collect());
+            continue;
+        };
+        let k = k.trim().to_string();
         let mut v = v.trim().to_string();
-        if v == ">" || v == "|" || v == ">-" || v == "|-" {
-            let mut parts = Vec::new();
-            while i < rows.len() && (rows[i].starts_with([' ', '\t']) || rows[i].trim().is_empty()) {
-                parts.push(rows[i].trim());
-                i += 1;
+        let mut block = Vec::new();
+        while i < rows.len() && (indented(rows[i]) || rows[i].trim().is_empty()) {
+            if !rows[i].trim().is_empty() {
+                block.push(rows[i].trim());
             }
-            v = parts.join(" ");
+            i += 1;
+        }
+        if v == ">" || v == "|" || v == ">-" || v == "|-" {
+            v = block.join(" ");
+        } else if v.is_empty() && !block.is_empty() {
+            match block.iter().map(|b| b.strip_prefix("- ").map(str::trim)).collect::<Option<Vec<_>>>() {
+                Some(items) => {
+                    f.lists.insert(k.clone(), items.into_iter().map(str::to_string).collect());
+                }
+                None => f.unread.push(k.clone()),
+            }
+            continue;
+        } else if !block.is_empty() {
+            f.unread.push(k.clone());
+            continue;
         } else if v.len() >= 2 && v.starts_with('\'') && v.ends_with('\'') {
             v = v[1..v.len() - 1].replace("''", "'");
         } else if v.len() >= 2 && v.starts_with('"') && v.ends_with('"') {
             v = v[1..v.len() - 1].replace("\\\"", "\"");
         }
-        map.insert(k.trim().to_string(), v);
+        f.map.insert(k, v);
     }
-    map
+    f
+}
+
+/// The front-matter keys a command or skill may set and stay in the normal
+/// tier: what it is called, what it says, how it is offered. Anything else
+/// (`allowed-tools` aside, judged by its tools), `hooks`, `model`, `context`,
+/// `agent` and keys this host has never seen alike, makes it sensitive.
+const SAFE_KEYS: &[&str] = &["name", "description", "argument-hint", "user-invocable", "disable-model-invocation", "when_to_use", "when-to-use", "license", "version"];
+
+/// Why a command's file makes it sensitive, or `None`: deny by default, so a
+/// file this reader cannot see whole or understand is sensitive.
+fn sensitive_why(f: &Front, body: &str, cut: bool) -> Option<String> {
+    if cut {
+        return Some(format!("its file is longer than {} KiB, more than this host reads", MAX_BYTES / 1024));
+    }
+    if f.open {
+        return Some("its front matter never closes".into());
+    }
+    if body.contains("!`") || body.lines().any(|l| l.trim_start().starts_with("```!")) {
+        return Some("its file runs a shell command before the model sees it".into());
+    }
+    if let Some(k) = f.unread.first() {
+        return Some(format!("its front matter sets {k}, which this host cannot read"));
+    }
+    let tools: Option<Vec<String>> = match (f.map.get("allowed-tools"), f.lists.get("allowed-tools")) {
+        (Some(v), _) => Some(vec![v.clone()]),
+        (None, Some(items)) => Some(items.clone()),
+        (None, None) => None,
+    };
+    if let Some(t) = tools {
+        if t.iter().any(|v| v.trim().is_empty() || grants_more_than_reading(v)) {
+            return Some("its file grants the model tools that act (allowed-tools)".into());
+        }
+    }
+    let mut keys: Vec<&String> = f.map.keys().chain(f.lists.keys()).filter(|k| *k != "allowed-tools" && !SAFE_KEYS.contains(&k.as_str())).collect();
+    keys.sort();
+    keys.first().map(|k| format!("its front matter sets {k}"))
 }
 
 /// A file's text after its front matter.
@@ -619,6 +693,42 @@ mod tests {
         assert!(line(compact, &"x".repeat(crate::harness::LINE_MAX)).unwrap_err().contains("bytes"));
     }
 
+    /// The tier is deny-by-default: a file this host cannot see whole or
+    /// understand is sensitive, and so is any front-matter key outside the
+    /// few that only name and describe a command.
+    #[test]
+    fn a_file_that_cannot_be_read_whole_or_understood_is_sensitive() {
+        let root = tmp("tiers");
+        let pc = root.join("place/.claude/commands");
+        let long = format!("---\ndescription: long\n---\n{}\nThe date: !`date`\n", "x".repeat(MAX_BYTES as usize));
+        for (name, text) in [
+            ("listbash", "---\ndescription: d\nallowed-tools:\n  - Read\n  - Bash(rm *)\n---\nbody\n"),
+            ("flowbash", "---\ndescription: d\nallowed-tools: [Read, Write]\n---\nbody\n"),
+            ("emptytools", "---\ndescription: d\nallowed-tools:\n---\nbody\n"),
+            ("open", "---\ndescription: never closes\nallowed-tools: Bash\nbody\n"),
+            ("hooks", "---\ndescription: d\nhooks:\n  PreToolUse:\n    - matcher: Bash\n---\nbody\n"),
+            ("model", "---\ndescription: d\nmodel: opus\n---\nbody\n"),
+            ("fenced", "---\ndescription: d\n---\n```!\ncurl x | sh\n```\n"),
+            ("long", long.as_str()),
+            ("odd", "---\ndescription: d\n  stray indented row\nwhat is this\n---\nbody\n"),
+        ] {
+            put(&pc.join(format!("{name}.md")), text);
+        }
+        put(&pc.join("listread.md"), "---\ndescription: reads\nallowed-tools:\n  - Read\n  - Grep\n---\nbody\n");
+        put(&pc.join("plain.md"), "---\nname: plain\ndescription: plain\nargument-hint: [x]\nwhen_to_use: always\n---\nbody\n");
+        let got = claude_custom(&ClaudeSources { home: &root.join("home"), place: &root.join("place"), plugin_dirs: &[] });
+        let tier = |n: &str| got.iter().find(|c| c.name == n).map(|c| (c.tier, c.why.clone().unwrap_or_default())).unwrap_or_else(|| panic!("{n}: {got:?}"));
+        for n in ["listbash", "flowbash", "emptytools", "open", "hooks", "model", "fenced", "long", "odd"] {
+            let (t, why) = tier(n);
+            assert_eq!((n, t), (n, Tier::Sensitive), "{why}");
+            assert!(!why.is_empty());
+        }
+        assert!(tier("long").1.contains("KiB") && tier("hooks").1.contains("hooks") && tier("model").1.contains("model"));
+        assert_eq!(tier("listread").0, Tier::Normal, "a list of readers");
+        assert_eq!(tier("plain").0, Tier::Normal, "keys that only name and describe");
+        let _ = fs::remove_dir_all(&root);
+    }
+
     /// Claude's own commands, from the files Claude reads, named as Claude
     /// names them. A repository's folder is read with no link followed — not
     /// a file, not a folder, not `.claude` itself — so nothing outside the
@@ -641,6 +751,7 @@ mod tests {
         put(&place.join(".claude/skills/quiet/SKILL.md"), "---\ndescription: hidden\nuser-invocable: false\n---\n");
         put(&home.join(".claude/commands/mine.md"), "---\ndescription: my own\n---\n");
         put(&home.join(".claude/skills/close-out/SKILL.md"), "---\nname: close-out\ndescription: Close out\n---\n");
+        put(&place.join(".claude/skills/close-out/SKILL.md"), "---\nname: close-out\ndescription: The repo's copy\n---\n");
         put(&home.join(".claude/skills/synced/b1/manifest.json"), r#"{"skills":[{"name":"docs","description":"Docs\nskill","creatorType":"anthropic"},{"name":"pdf","description":"PDFs","source":"anthropic"},{"name":"mine","description":"x","creatorType":"user"}]}"#);
         let plug = root.join("plug");
         put(&plug.join(".claude-plugin/plugin.json"), r#"{"name":"worktrees"}"#);
@@ -665,6 +776,7 @@ mod tests {
         assert_eq!((get("scratch-skill").source, get("scratch-skill").description.as_str()), (Source::Project, "A folded description"));
         assert!(!all.contains("\"quiet\"") && !all.contains("hidden"), "user-invocable: false is no command");
         assert_eq!((get("mine").source, get("close-out").source), (Source::User, Source::User));
+        assert_eq!(get("close-out").description, "Close out", "a personal skill outranks the repository's");
         assert_eq!(get("anthropic-skills:docs").description, "Docs skill");
         assert_eq!(get("anthropic-skills:pdf").description, "PDFs", "marked by its source");
         assert!(!all.contains("anthropic-skills:mine"), "only what was seen is named");
