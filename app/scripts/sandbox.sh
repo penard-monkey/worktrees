@@ -138,7 +138,7 @@ if [ "$MODE" = app ]; then
   fi
   echo "   add the repo inside the app: $REPO" >&2
   echo >&2
-  echo "   VERIFY the config dir really moved: Settings → Data & Logs should" >&2
+  echo "   VERIFY the config dir really moved: Settings → Data & privacy should" >&2
   echo "   show a path under 'net.casadelvalle.worktrees.sbx', NOT the plain" >&2
   echo "   identifier. If it shows the plain one, the override did not take and" >&2
   echo "   this app shares ui-state.json with your installed one — quit your" >&2

@@ -1,4 +1,4 @@
-// Optional browser gate for Settings → Behavior → Heavy jobs (SlotsPanel.tsx),
+// Optional browser gate for Settings → Agent policy → Heavy jobs (SlotsPanel.tsx),
 // in Chromium AND WebKit (the app is WKWebView; the harness is Chrome — AGENTS.md).
 //
 // Install Playwright in scratch space with both engines, then run against the
@@ -34,7 +34,9 @@ async function open(page, query = "") {
   await page.goto(`${BASE}/${query}`);
   await page.waitForSelector("[data-track=settings]");
   await page.click("[data-track=settings]");
-  await page.locator(".settings-cat", { hasText: "Behavior" }).click();
+  // Heavy jobs is Agent policy's, at Advanced (settings-reorg §3.2).
+  await page.locator("[data-testid=settings-mode] [data-mode=expert]").click();
+  await page.locator(".settings-cat[data-cat=policy]").click();
   await page.waitForSelector(`${SECTION} [data-testid=slot-gate]`);
   await page.locator(SECTION).scrollIntoViewIfNeeded();
 }

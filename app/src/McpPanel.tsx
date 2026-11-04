@@ -16,6 +16,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "./ipc";
 import { copyToClipboard } from "./clipboard";
 import * as Icons from "./icons";
+import { useArmed } from "./useArmed";
 
 /** Mirrors `mcpsetup::Entry`. */
 export type McpEntry = {
@@ -121,7 +122,9 @@ export function McpSection({ status, repo, offerPending, onSilenceOffer, onChang
   const [log, setLog] = useState("");
   const [mutations, setMutations] = useState(true);
   const [copied, setCopied] = useState(false);
-  const [removeArmed, setRemoveArmed] = useState(false);
+  // Two clicks, and the arm expires (useArmed): an arm forgotten must not
+  // remove the server on a stray click minutes later.
+  const arm = useArmed<"remove">();
 
   const run = async (kind: "install" | "remove") => {
     if (busy) return;
@@ -140,7 +143,7 @@ export function McpSection({ status, repo, offerPending, onSilenceOffer, onChang
       onReport(String(e));
     } finally {
       setBusy("");
-      setRemoveArmed(false);
+      arm.disarm();
     }
   };
 
@@ -160,7 +163,7 @@ export function McpSection({ status, repo, offerPending, onSilenceOffer, onChang
   const verb = status.state === "stale" ? "Repair" : status.state === "read-only" ? "Re-install" : "Set up";
 
   return (
-    <section className="setting" data-focus="mcp-server">
+    <section className="setting" data-testid="mcp-server">
       <label>
         Claude MCP server
         {status.state === "stale" && <span className="upd-tag">broken</span>}
@@ -223,11 +226,11 @@ export function McpSection({ status, repo, offerPending, onSilenceOffer, onChang
         )}
         {installed && status.state !== "foreign" && (
           <button
-            className={"ctrl sm danger" + (removeArmed ? " armed" : "")}
+            className={"ctrl sm danger" + (arm.armed ? " armed" : "")}
             disabled={!!busy || !status.claude_bin}
-            onClick={() => (removeArmed ? run("remove") : setRemoveArmed(true))}
+            onClick={() => arm.confirm("remove", () => void run("remove"))}
           >
-            {busy === "remove" ? "Removing…" : removeArmed ? "Remove?" : "Remove"}
+            {busy === "remove" ? "Removing…" : arm.armed ? "Remove?" : "Remove"}
           </button>
         )}
       </div>

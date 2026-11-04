@@ -932,7 +932,7 @@ fn refusal(why: &str) -> String {
     format!(
         "Refused by the worktrees guard: {why} This repository is managed by worktrees. Create a place \
          with the create_worktree tool (or `worktrees new <branch>`) and work in its directory. The guard \
-         is optional: Settings → Agent guidance turns it off."
+         is optional: Settings → Agent policy turns it off."
     )
 }
 
@@ -1162,7 +1162,7 @@ fn skill_line(edit: Option<&SkillEdit>, path: &str) -> String {
         None => "the default".into(),
         Some(SkillEdit { invalid: Some(why), .. }) => format!("the default — your edit at {path} is not used: {why}"),
         Some(SkillEdit { stale: true, base: Some(b), .. }) => format!(
-            "your edit ({path}); the default has changed since you edited v{} — compare in Settings → Agent guidance, or `worktrees guide --default`",
+            "your edit ({path}); the default has changed since you edited v{} — compare in Settings → Guidance, or `worktrees guide --default`",
             b.version
         ),
         Some(SkillEdit { stale: true, .. }) => {

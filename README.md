@@ -119,10 +119,11 @@ answer the installer prompt; from a clone, `make install-app`) — see
 
 ### Remote hosts and devices
 
-Remote access is off until you enable it in Settings → Remote access and choose
-one of the host's private addresses. Settings → Devices → Pair a device asks
+Remote access is off until you enable it in Settings → Remote and choose
+one of the host's private addresses. Settings → Remote → Pair a device asks
 which projects and capabilities to grant, then shows a QR code and pairing
-link. On the other computer, paste the link into Settings → Hosts, compare
+link. On the other computer, paste the link into Settings → Remote (This window
+drives), compare
 the six-digit code on both screens, and allow the pairing at the host.
 
 A paired window can browse the granted projects and files and attach to their
@@ -286,7 +287,7 @@ Flags:
 until one of the machine's gate slots is free, across every project, so lanes
 that start their gates together do not run them all at once. How many slots
 there are is yours to set in `~/.config/worktrees/config.toml` (`worktrees
-slots set gate 3`, or Settings → Behavior → Heavy jobs). With nothing set it is
+slots set gate 3`, or Settings → Agent policy → Heavy jobs). With nothing set it is
 sized from the machine: the lower of its performance cores divided by three and
 its memory in GiB divided by ten, from 1 to 4. `worktrees slots` says which.
 
@@ -299,7 +300,7 @@ waits, so nothing has to be re-typed once the window rolls over. `--force`
 launches anyway (the app: **Launch anyway**; MCP: `force: true`), and
 `worktrees open <slug> --force` is the retry it prints.
 
-It is yours to tune, in Settings → Behavior → Plan limits or in
+It is yours to tune, in Settings → Agent policy → Plan limits or in
 `~/.config/worktrees/config.toml` (a repo's `.worktrees.toml` cannot set it):
 
 ```toml
@@ -408,8 +409,8 @@ Examples: `--ai claude`, `--ai "claude --model opus"`, `--ai codex`,
 Claude, Codex, pi, and Kimi can all be configured, but each worktree runs one
 provider session at a time. Switching providers closes the current managed
 tmux session before opening the other; each provider keeps its own saved
-conversation. Configure them in their own Settings categories. The New worktree
-dialog offers the available agents and preselects Settings → Commands →
+conversation. Configure them in their own Settings pages. The New worktree
+dialog offers the available agents and preselects Settings → Agents →
 Default agent. Entering an existing place keeps its running provider;
 the default is used when no agent is running. Changing the default does not
 stop a running session. The CLI keeps its

@@ -1,17 +1,17 @@
 // Settings → pi (pi-harness §5, §8, §9.4): which pi and node a pane will get,
-// each model pi offers and why an unusable one is unusable, the trust mode, and
-// the repos the user has allowed to load their own pi resources.
+// each model pi offers and why an unusable one is unusable — and, under
+// Settings → Agent policy since the regroup (settings-reorg §3.2), the trust
+// mode and the repos the user has allowed to load their own pi resources.
 //
 // The allowance is written only from here (and `worktrees trust pi`): it is the
 // user's act. It lives in ~/.config/worktrees/config.toml, never in pi's own
 // trust.json, and never in a repo.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { invoke, notGranted } from "./ipc";
-import { GrantNote } from "./GrantNote";
+import { invoke } from "./ipc";
 import type { PiProjectTrust, Settings } from "./settings";
 import { ModelPicker, REASON_TEXT, modelArg, type ModelOption, type PiLaunchTrust, type PiStatus } from "./ModelPicker";
-import { PiMcpSection, type PiMcpStatus } from "./PiMcpPanel";
+import { useArmed } from "./useArmed";
 
 /** What decided the trust of a pi lane in the repo in focus, in words. */
 export function launchTrustText(t: PiLaunchTrust, trustPath: string): string {
@@ -26,27 +26,24 @@ export function launchTrustText(t: PiLaunchTrust, trustPath: string): string {
   }
 }
 
-export default function PiPanel({ settings, repo, onChange, onReport, onFail, onMcpStatus, mcpOfferPending, onSilenceMcpOffer }: {
+/** `pi_status` for `repo`, and the allowance write. Only the newest read may
+ *  land: a trust click (`PiTrustSection`) invalidates any read already in
+ *  flight, so the panel ends on what the host stored after the last click.
+ *  Once a trust click has succeeded (`held`), each landed read's trust is also
+ *  copied into `Settings.pi_project_trust` for an older build (`settings.ts`)
+ *  — not before, while `trust` may still be env or user config speaking. */
+export function usePiStatus({ settings, repo, onChange, onReport, onFail }: {
   settings: Settings;
   repo: string | null;
   onChange: (patch: Partial<Settings>) => void;
   onReport: (msg: string) => void;
   /** A refused trust change: App's `fail`, so it is never swallowed. */
   onFail: (e: unknown) => void;
-  onMcpStatus?: (s: PiMcpStatus) => void;
-  mcpOfferPending?: boolean;
-  onSilenceMcpOffer?: () => void;
 }) {
   const [status, setStatus] = useState<PiStatus | null>(null);
-  const [models, setModels] = useState<ModelOption[] | null>(null);
-  // Only the newest read may land: a trust click invalidates any read already
-  // in flight, so the panel ends on what the host stored after the last click.
-  // Once a trust click has succeeded, each landed read's trust is also copied
-  // into `Settings.pi_project_trust` for an older build (`settings.ts`) — not
-  // before, while `trust` may still be env or user config speaking. A ref, so
-  // App's per-render `onChange` does not re-read the panel on every render.
   const seq = useRef(0);
   const held = useRef(false);
+  // A ref, so App's per-render `onChange` does not re-read on every render.
   const mirror = useRef<(t: PiProjectTrust) => void>(() => {});
   mirror.current = (t) => { if (settings.pi_project_trust !== t) onChange({ pi_project_trust: t }); };
   const readStatus = useCallback(() => {
@@ -59,45 +56,31 @@ export default function PiPanel({ settings, repo, onChange, onReport, onFail, on
       })
       .catch((e) => onReport(`pi: ${String(e)}`));
   }, [repo, onReport]);
-  const reload = useCallback(() => {
-    readStatus();
-    setModels(null);
-    invoke<ModelOption[]>("agent_models", { harness: "pi" }).then(setModels).catch((e) => { setModels([]); onReport(`pi models: ${String(e)}`); });
-  }, [readStatus, onReport]);
-  useEffect(() => { reload(); }, [reload]);
-
-  // Project trust is HOST policy (`host-policy.json`), read back through
-  // `pi_status.trust` and changed only by the click below — never by this
-  // panel or the app loading. Optimistic, rolled back on a refusal; the re-read
-  // after it also refreshes "This repo", which the trust mode decides.
-  const setTrust = (mode: PiProjectTrust) => {
-    if (!status || status.trust === mode) return;
-    const prev = status.trust;
-    const n = ++seq.current;
-    setStatus({ ...status, trust: mode });
-    invoke("set_pi_trust", { mode }).then(() => { held.current = true; readStatus(); }, (e) => {
-      if (seq.current === n) setStatus((s) => (s ? { ...s, trust: prev } : s));
-      onFail(`pi trust: ${String(e)}`);
-      readStatus();
-    });
-  };
-
+  useEffect(() => { readStatus(); }, [readStatus]);
   const allow = async (root: string, on: boolean) => {
     try {
       await invoke("set_pi_allowed", { repo: root, allow: on });
-      reload();
+      readStatus();
     } catch (e) { onReport(`pi allowance: ${String(e)}`); }
   };
+  return { status, setStatus, readStatus, seq, held, allow, onFail };
+}
+export type PiState = ReturnType<typeof usePiStatus>;
 
+/** pi's catalog, read once per mount. */
+export function usePiModels(onReport: (msg: string) => void): ModelOption[] | null {
+  const [models, setModels] = useState<ModelOption[] | null>(null);
+  useEffect(() => {
+    invoke<ModelOption[]>("agent_models", { harness: "pi" }).then(setModels).catch((e) => { setModels([]); onReport(`pi models: ${String(e)}`); });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one read per mount
+  }, []);
+  return models;
+}
+
+/** Settings → pi → pi: which pi and node a pane gets. */
+export function PiInstallSection({ status }: { status: PiStatus | null }) {
   const pf = status?.preflight;
-  return <>
-    {/* FIRST: a deep-link target (offers.ts `pi-mcp`), and the sections below
-        fill in asynchronously — anything under them is pushed off screen after
-        the focus scroll lands (SettingsSheet's Codex note). */}
-    {notGranted("pi_mcp_status") ? <GrantNote cmd="pi_mcp_status" label="pi MCP server" focus="pi-mcp" /> :
-    <PiMcpSection data-focus="pi-mcp" onReport={onReport} onStatus={onMcpStatus}
-      offerPending={mcpOfferPending} onSilenceOffer={onSilenceMcpOffer} />}
-
+  return (
     <section className="setting" data-testid="pi-install">
       <label>pi</label>
       {!status ? <div className="hint">reading…</div> : pf?.pi_path ? <div className="ver-rows">
@@ -108,7 +91,17 @@ export default function PiPanel({ settings, repo, onChange, onReport, onFail, on
       {pf?.problem && <div className="hint warn" data-testid="pi-problem">{pf.problem}</div>}
       <div className="hint">Measured the way a pane runs it (your login shell), since the node pi runs on is whatever that shell finds first.</div>
     </section>
+  );
+}
 
+/** Settings → pi → Models: the catalog with each unusable model's reason, and
+ *  the default (the same `default_models.pi` Settings → Agents shows). */
+export function PiModelsSection({ settings, models, onChange }: {
+  settings: Settings;
+  models: ModelOption[] | null;
+  onChange: (patch: Partial<Settings>) => void;
+}) {
+  return (
     <section className="setting" data-testid="pi-models">
       <label>Models</label>
       {models === null ? <div className="hint">reading pi's models…</div>
@@ -122,11 +115,38 @@ export default function PiPanel({ settings, repo, onChange, onReport, onFail, on
       <label className="sub">Default model</label>
       <ModelPicker harness="pi" value={settings.default_models.pi ?? ""} options={models} testid="pi-default-model"
         onChange={(m) => onChange({ default_models: { ...settings.default_models, pi: m || undefined } })} />
-      <div className="hint">Preselected when you start pi. pi's own default is never used: it may be a provider nobody signed in to. A model LM Studio serves but pi's models.json does not declare is not offered — pi cannot use it.</div>
+      <div className="hint">Preselected when you start pi, in this window. pi's own default is never used: it may be a provider nobody signed in to. A model LM Studio serves but pi's models.json does not declare is not offered — pi cannot use it.</div>
     </section>
+  );
+}
 
+/** Settings → Agent policy → pi: the trust mode and the allowed repos. A
+ *  Revoke is two clicks (settings-reorg §6 item 3): a lane may be relying on
+ *  the allowance it removes. */
+export function PiTrustSection({ pi }: { pi: PiState }) {
+  const { status, setStatus, readStatus, seq, held, onFail } = pi;
+  const allow = (root: string, on: boolean) => void pi.allow(root, on);
+  const arm = useArmed<string>();
+  // Project trust is HOST policy (`host-policy.json`), read back through
+  // `pi_status.trust` and changed only by the click below — never by this
+  // panel or the app loading (hostpolicy-check.mjs). Optimistic, rolled back
+  // on a refusal; the re-read after it also refreshes "This repo", which the
+  // trust mode decides.
+  const setTrust = (mode: PiProjectTrust) => {
+    if (!status || status.trust === mode) return;
+    const prev = status.trust;
+    const n = ++seq.current;
+    setStatus({ ...status, trust: mode });
+    invoke("set_pi_trust", { mode }).then(() => { held.current = true; readStatus(); }, (e) => {
+      if (seq.current === n) setStatus((s) => (s ? { ...s, trust: prev } : s));
+      onFail(`pi trust: ${String(e)}`);
+      readStatus();
+    });
+  };
+  return (
     <section className="setting" data-testid="pi-trust">
-      <label>Project trust</label>
+      <label>pi</label>
+      <label className="sub">Project trust</label>
       <div className="seg seg-plain">
         {([["never", "Skip repo resources"], ["ask", "Let pi ask"]] as const).map(([mode, label]) => (
           <button key={mode} className={status?.trust === mode ? "on" : ""} disabled={!status}
@@ -140,8 +160,10 @@ export default function PiPanel({ settings, repo, onChange, onReport, onFail, on
       <label className="sub">Allowed repos</label>
       {status?.allowed.length ? <div className="ver-rows">{status.allowed.map((r) => (
         <div className="ver-row" key={r}><code>{r}</code>
-          <button className="ctrl sm" data-testid="pi-revoke" onClick={() => allow(r, false)}>Revoke</button></div>
+          <button className={"ctrl sm danger" + (arm.armed === r ? " armed" : "")} data-testid="pi-revoke"
+            onClick={() => arm.confirm(r, () => allow(r, false))}>{arm.armed === r ? "Revoke — sure?" : "Revoke"}</button></div>
       ))}</div> : <div className="hint">None. pi lanes in an allowed repo launch with --approve and load its own resources — code from that repo runs inside pi.</div>}
+      {arm.armed && <div className="hint">A pi lane in that repo launches with --no-approve from its next start.</div>}
       <div className="hint">Allowed means: the repo's pi extensions, skills and .pi/mcp.json servers run with no prompt when a lane starts. .pi/mcp.json comes with each BRANCH while the allowance covers the whole repo, so a branch you check out — a fork's PR included — brings its own. One that defines a worktrees server is never approved.</div>
       {status?.repo_root && !status.repo_allowed && (
         <div className="ver-actions">
@@ -152,5 +174,5 @@ export default function PiPanel({ settings, repo, onChange, onReport, onFail, on
       )}
       <div className="hint">Kept in ~/.config/worktrees/config.toml as [trust] pi. pi's own trust.json is read, never written, so this does not reach a pi you run by hand. Also: <code>worktrees trust pi [--revoke]</code>.</div>
     </section>
-  </>;
+  );
 }

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { invoke } from "./ipc";
 
 /** A project's planning level (`planning::Level`). */
@@ -146,16 +146,19 @@ export function ProjectRow({ p, dflt, busy, onSet, label = p.name }: {
   </div>;
 }
 
-/** Settings → Planning (owned-planning §2.2). The explanation lives HERE, not
- *  in the offer row: the offer only carries you to it. Everything is user
- *  tier — a repo cannot set any of it. */
-export function PlanningSection({ status, onStatus, onReport, offerPending = false, onSilenceOffer, "data-focus": focusId }: {
+/** Settings → Projects → Planning (owned-planning §2.2; settings-reorg §3.2).
+ *  The explanation lives HERE, not in the offer row: the offer only carries
+ *  you to it. Everything is user tier — a repo cannot set any of it. */
+export function PlanningSection({ status, onStatus, onReport, offerPending = false, onSilenceOffer, rowExtra, "data-focus": focusId }: {
   status: PlanningStatus | null;
   /** Every read or write goes back to App: the offer follows it. */
   onStatus: (s: PlanningStatus) => void;
   onReport: (text: string) => void;
   offerPending?: boolean;
   onSilenceOffer?: () => void;
+  /** More about each project, under its row (Settings → Projects: its
+   *  profile, whether it is private, and a link to its own sheet). */
+  rowExtra?: (root: string) => ReactNode;
   "data-focus"?: string;
 }) {
   const [busy, setBusy] = useState(false);
@@ -202,8 +205,11 @@ export function PlanningSection({ status, onStatus, onReport, offerPending = fal
       {status.projects.length === 0
         ? <div className="hint">No registered projects yet. Projects you add use your default, and the Add dialogs let you choose.</div>
         : <div className="planning-rows">{status.projects.map((p) => (
-          <ProjectRow key={p.root} p={p} dflt={dflt} busy={busy}
-            onSet={(level, path, scope) => setProject(p.root, level, path, scope)} />
+          <div className="planning-project" key={p.root}>
+            <ProjectRow p={p} dflt={dflt} busy={busy}
+              onSet={(level, path, scope) => setProject(p.root, level, path, scope)} />
+            {rowExtra?.(p.root)}
+          </div>
         ))}</div>}
       <div className="hint"><b>Turning it off later</b> is a toggle: nothing is deleted. Plan folders and <code>.active_plan</code> stay and are read as before, and the exclude line stays. Running agents stop getting plan reminders on their next prompt; new launches carry no planning plugin.</div>
       <div className="hint" data-testid="planning-restart">A Claude session picks up the plan hooks when it is launched — restart running sessions to give them the hooks. Sessions created through an orchestrator&apos;s MCP server need that orchestrator restarted after an update.</div>
@@ -262,6 +268,6 @@ export function PlanningChoice({ value, onChange, dflt, suggested = false, disab
         ))}
       </div>
     </div>}
-    <span className="hint">({why}) — see Settings → Planning</span>
+    <span className="hint">({why}) — see Settings → Projects</span>
   </div>;
 }

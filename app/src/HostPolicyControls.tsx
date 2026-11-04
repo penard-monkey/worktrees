@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "./ipc";
 import type { Settings } from "./settings";
 
-// Settings → Behavior → Auto-fetch origin and Settings → Terminal → "What a
+// Settings → General → Auto-fetch origin and Settings → Terminal → "What a
 // shell tab remembers": HOST policy (`hostpolicy` in worktrees-api), like
 // Codex permissions and pi trust. The host keeps them in host-policy.json and
 // applies them to objects only it has — the one loop that fetches for the
@@ -76,7 +76,6 @@ export function FetchIntervalSection({ settings, onChange, onFail }: Props) {
       </select>
       <div className="hint">
         Keeps the divergence counts fresh. Fetches each project's origin in the background.
-        Kept by this machine rather than this window.
       </div>
     </section>
   );
@@ -145,7 +144,7 @@ export function TermHistorySection({ settings, onChange, onFail }: Props) {
         A dock shell dies with the app, so its tab used to reopen blank. Its last
         256K of output is saved and replayed instead. This is the only thing that
         writes a terminal's output to disk — whatever a command printed, secrets
-        included — under Application Support. Clear it under Data &amp; Logs.
+        included — under Application Support. Clear it below.
       </div>
       <label className="tier-toggle setting-check">
         <input
@@ -162,10 +161,7 @@ export function TermHistorySection({ settings, onChange, onFail }: Props) {
         as usual and never modified. Turn it off if a shell setup of yours depends
         on $ZDOTDIR.
       </div>
-      <div className="hint">
-        Both are kept by this machine rather than this window: every window that
-        opens a tab shares its shell.
-      </div>
+      <div className="hint">Every window that opens a tab shares its shell.</div>
     </section>
   );
 }

@@ -28,12 +28,12 @@ ok(block({ state: "listening" }, true)?.message.includes("16 devices"), "device 
 
 const devices = source("DevicesPanel.tsx");
 const sheet = source("PairSheet.tsx");
-const settings = source("SettingsSheet.tsx");
+const settings = source("pages/remote.tsx");
 const css = source("RemoteAccess.css");
 ok(devices.includes("pairingBlock(r.status, full, r.statusErr)"), "Devices uses the status rule");
 ok(devices.includes("onRemote={onRemote}") && devices.includes("data-testid=\"pair-open-remote\""), "Devices offers a direct Remote access action");
 ok(sheet.includes("pairingBlock(r.status") && sheet.includes('data-testid={remoteProblem.kind === "paused" ? "pair-paused"'), "an open sheet sees a later pause");
-ok(settings.includes("<DevicesSection onRemote={() => setCat(\"remote\")} />"), "the action opens Remote access");
+ok(settings.includes("<DevicesSection onRemote={() => goto(\"remote\", \"remote-access\")}"), "the action opens Remote access");
 ok(/\.ra \.enter-btn:disabled\s*\{[^}]*opacity:\s*0?\.\d+[^}]*cursor:\s*default/.test(css), "a disabled Pair a device looks disabled (.enter-btn has no disabled style of its own)");
 
 if (failed) process.exit(1);

@@ -5241,7 +5241,7 @@ function mockReference(args: Record<string, unknown>): string {
       ? `@worktrees:place://${String(args.slug).replace(/[^\p{L}\p{N}_.-]/gu, "-").replace(/^[-.]+|[-.]+$/g, "") || "place"}`
       : `place ${from}:${args.slug}`;
   } else {
-    if (mockReach === "off") throw "cross-project reach is off — turn it on in Settings → Agent guidance";
+    if (mockReach === "off") throw "cross-project reach is off — turn it on in Settings → Agent policy";
     if (mockPrivate.has(from)) throw `'${from}' is private; its places cannot be referenced from other projects`;
     if (mockPrivate.has(into)) throw `this session's project ('${into}') is private, so it reaches no other project`;
     token = `place ${from}:${args.slug}`;

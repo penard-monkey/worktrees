@@ -3030,6 +3030,92 @@ body.dragging .menu-catch { pointer-events: none; }
    shows what the app has recorded about itself. */
 .settings-cat.sep { margin-top: var(--s2); padding-top: calc(var(--row-pad-v) + var(--s2)); border-top: 1px solid var(--line); border-radius: 0 0 var(--r-md) var(--r-md); }
 
+/* ── the regrouped sheet (docs/proposals/settings-reorg.md) ─────────────────
+   Words are --txt-hi / --txt-dim everywhere here; the one hue is the tier DOT
+   (an accent is a fill, not text). */
+/* The mode switch sits right of the title (§4.6); the title stops growing so
+   the switch stays beside it rather than at the far edge. */
+.settings-h b { flex: 0 1 auto; }
+.settings-mode { margin-left: var(--s4); margin-right: auto; }
+.settings-mode button { padding: var(--s1) var(--s3); font-size: var(--fs-meta); }
+/* Six groups with a header each: what lets the page rows read as six things. */
+.settings-group { display: flex; flex-direction: column; gap: 2px; }
+.settings-group + .settings-group { margin-top: var(--s2); }
+.settings-group-h {
+  padding: var(--s1) var(--s3) 2px; font-size: var(--fs-micro); font-weight: var(--fw-bold);
+  letter-spacing: 0.06em; text-transform: uppercase; color: var(--txt);
+}
+/* A page: its title, the one sentence saying whose its settings are, its
+   sections, and the "N more settings" line. */
+.page-head { display: flex; flex-direction: column; gap: 2px; margin-bottom: calc(-1 * var(--s2)); }
+.page-title { margin: 0; font-size: var(--fs-title); font-weight: var(--fw-bold); color: var(--txt-hi); }
+.page-scope { font-size: var(--fs-meta); color: var(--txt); }
+.page-note { font-size: var(--fs-micro); color: var(--txt-dim); }
+.page-foot { border-top: 1px solid var(--line); padding-top: var(--s3); }
+.page-more {
+  background: none; border: 0; padding: 0; cursor: pointer; font: inherit;
+  font-size: var(--fs-label); color: var(--txt-hi);
+}
+.page-more:hover { text-decoration: underline; }
+/* One section: a fieldset, so a remote window that may read but not change it
+   can disable every control in it at once. Its defaults are taken off. */
+.sec {
+  position: relative; border: 0; margin: 0; padding: 0; min-width: 0;
+  display: flex; flex-direction: column; gap: var(--s5);
+}
+/* The tier, as a dot in the body's left gutter beside the section's first
+   line: Beginner, Advanced, Expert. */
+.sec-dot {
+  position: absolute; left: calc(-1 * var(--s3)); top: 0.45em; width: 6px; height: 6px;
+  border-radius: 50%; background: var(--ok); opacity: 0.85;
+}
+.sec[data-tier="advanced"] > .sec-dot { background: var(--warn); }
+.sec[data-tier="expert"] > .sec-dot { background: var(--danger); }
+/* Above the section: its scope when that is not its page's, and why a
+   section above the mode is drawn anyway (rules 2 and 3, a deep link). */
+.sec-eyebrow { display: flex; flex-wrap: wrap; gap: var(--s1); margin-bottom: calc(-1 * var(--s3)); }
+.sec-chip {
+  padding: 1px var(--s2); border-radius: var(--r-sm); border: 1px solid var(--line);
+  background: var(--bg-panel); font-size: var(--fs-micro); color: var(--txt);
+}
+.sec-why { color: var(--txt-hi); }
+.sec-reveal {
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2);
+  margin-top: calc(-1 * var(--s3)); font-size: var(--fs-micro); color: var(--txt-dim);
+}
+.sec-reveal .mcp-dismiss { color: var(--txt-hi); text-decoration: underline; }
+.grant-line { color: var(--txt-dim); }
+/* A section that moved pages leaves one line behind (§3.2). */
+.pointer-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s2); }
+.pointer-line .hint b { color: var(--txt-hi); }
+.pointer-line .mcp-dismiss { color: var(--txt-hi); }
+/* Settings → Agents: a default model per agent, and the connection table. */
+.model-rows, .conn-rows { display: flex; flex-direction: column; gap: var(--s2); }
+.model-row {
+  display: grid; grid-template-columns: 5.5em minmax(0, 1fr); align-items: center;
+  column-gap: var(--s3); row-gap: 2px;
+}
+.model-row-name, .conn-name { font-size: var(--fs-label); color: var(--txt-hi); }
+.model-row-cli { grid-column: 2; }
+.conn-row {
+  display: grid; grid-template-columns: 5.5em minmax(0, 1fr) auto; align-items: center;
+  column-gap: var(--s3); padding: var(--s1) var(--s3); background: var(--bg-panel); border-radius: var(--r-sm);
+}
+.conn-state { font-size: var(--fs-label); color: var(--txt-dim); }
+/* Settings → Projects: a project's profile, privacy, and its own sheet. */
+.planning-project { display: flex; flex-direction: column; gap: 2px; }
+.project-extra { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s1) var(--s2); }
+.project-extra .mcp-dismiss { color: var(--txt-hi); }
+/* Settings → Data & privacy → Reset: the scopes, one per line. */
+.reset-scopes { display: flex; flex-direction: column; gap: 0; }
+.reset-scopes .setting-check { margin-top: var(--s1); }
+.usage-record > summary { cursor: pointer; font-size: var(--fs-label); color: var(--txt); font-weight: var(--fw-med); }
+.usage-record[open] > summary { margin-bottom: var(--s3); }
+/* The line a Full access click is confirmed against. */
+.confirm-line { color: var(--txt-hi); }
+.seg button.armed { background: var(--danger); color: var(--accent-ink); }
+
+
 .um-head { display: flex; align-items: center; gap: var(--s3); }
 .um-head .hint { margin-top: 0; }
 .um-head select { margin-left: auto; width: auto; }

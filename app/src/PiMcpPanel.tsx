@@ -6,6 +6,7 @@
 
 import { useEffect, useState } from "react";
 import { invoke } from "./ipc";
+import { useArmed } from "./useArmed";
 
 export type PiMcpStatus = {
   state: "installed" | "read-only" | "disabled" | "stale" | "foreign" | "unreadable" | "absent" | "cli-missing" | "pi-missing";
@@ -40,6 +41,9 @@ export function PiMcpSection({ onReport, onStatus, offerPending = false, onSilen
   const [status, setStatusRaw] = useState<PiMcpStatus | null>(null);
   const setStatus = (s: PiMcpStatus) => { setStatusRaw(s); onStatus?.(s); };
   const [busy, setBusy] = useState(false);
+  // Two clicks (settings-reorg §6 item 3): removing drops the server entry
+  // from pi's own config, and every lane loses the tools at its next start.
+  const arm = useArmed<"remove">();
   const [mutations, setMutations] = useState(true);
   const [output, setOutput] = useState("");
   useEffect(() => { invoke<PiMcpStatus>("pi_mcp_status").then(setStatus).catch((e) => onReport(String(e))); }, []);
@@ -66,7 +70,8 @@ export function PiMcpSection({ onReport, onStatus, offerPending = false, onSilen
       <div className="ver-actions">
         <button className="ctrl sm" data-testid="pi-mcp-install" disabled={busy || !status.worktrees_bin}
           onClick={() => act(false)}>{busy ? "Working…" : status.entry ? "Repair or update" : "Set up pi"}</button>
-        {status.entry && <button className="ctrl sm danger" disabled={busy} onClick={() => act(true)}>Remove from pi</button>}
+        {status.entry && <button className={"ctrl sm danger" + (arm.armed ? " armed" : "")} disabled={busy} data-testid="pi-mcp-remove"
+          onClick={() => arm.confirm("remove", () => void act(true))}>{arm.armed ? "Remove from pi — sure?" : "Remove from pi"}</button>}
         {offerPending && onSilenceOffer && <button className="mcp-dismiss" onClick={onSilenceOffer}>Stop suggesting this</button>}
       </div>
       {status.entry && <div className="hint">Repair replaces the whole entry, including any per-tool exposure or timeout you added to it by hand.</div>}

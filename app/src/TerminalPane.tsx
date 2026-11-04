@@ -168,17 +168,34 @@ const ATTACH_WAIT_MS = 1000;
  *  at the edge that closes when the drag stops. */
 const RESIZE_SETTLE_MS = 80;
 
-/** How many lines of scrollback xterm keeps.
+/** How many lines of scrollback xterm keeps by default
+ *  (`DEFAULTS.term_scrollback`; Settings → Terminal → Scrollback changes it).
  *
- *  Not a preference — a floor. The backend replays up to `SHELL_RING` (256K) of
+ *  `TERM_SCROLLBACK_MIN` is not a preference — a floor. The backend replays up to `SHELL_RING` (256K) of
  *  recorded output in one write, and xterm's default of 1000 lines silently
  *  drops whatever does not fit: ~3200 lines at 80 columns were being pushed into
  *  a buffer a third that size, so the OLDEST part of every replay — the build
  *  that failed, the error you flipped back to read — was gone before it could be
  *  scrolled to or found with ⌘F. `termresize-check.mjs` compares this against
  *  `SHELL_RING` in lib.rs, so raising the ring without raising this fails a gate
- *  rather than quietly truncating again. */
+ *  rather than quietly truncating again. The SETTING can only move the number
+ *  up from that floor: `setTermScrollback` clamps to it, whatever it is
+ *  handed, and settings.ts's `TERM_SCROLLBACK_STEPS` starts at it. */
 const TERM_SCROLLBACK = 5000;
+const TERM_SCROLLBACK_MIN = 3500;
+/** What a terminal opens with, and what every live one is moved to when the
+ *  setting changes (`setTermScrollback`). */
+let scrollbackLines = TERM_SCROLLBACK;
+
+/** Settings → Terminal → Scrollback: every live terminal now, and every new
+ *  one from here on. Never below `TERM_SCROLLBACK_MIN`, so no setting can cut
+ *  a replay short. */
+export function setTermScrollback(lines: number): void {
+  const n = Number.isFinite(lines) ? Math.max(TERM_SCROLLBACK_MIN, Math.round(lines)) : TERM_SCROLLBACK;
+  if (n === scrollbackLines) return;
+  scrollbackLines = n;
+  liveTerms.forEach((t) => { t.options.scrollback = n; });
+}
 
 /** Does this wheel event belong to tmux rather than to xterm?
  *
@@ -489,8 +506,9 @@ function useTerm(makeTransport: () => Transport, key: string, termVersion: numbe
       // floor before it could be scrolled to or searched. `TERM_SCROLLBACK` is
       // checked against the backend's `SHELL_RING` by termresize-check.mjs, so
       // raising one without the other fails a gate instead of silently
-      // truncating again.
-      scrollback: TERM_SCROLLBACK,
+      // truncating again. `scrollbackLines` is the setting, never below the
+      // floor (`setTermScrollback`).
+      scrollback: scrollbackLines,
     });
     liveTerms.add(term);
     const fit = new FitAddon();

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { invoke } from "./ipc";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { useArmed } from "./useArmed";
 
 const INSTALL_URL = "https://developers.openai.com/codex/cli/";
 
@@ -29,6 +30,9 @@ export function CodexMcpSection({ onReport, onStatus, offerPending = false, onSi
   const [status, setStatusRaw] = useState<CodexMcpStatus | null>(null);
   const setStatus = (s: CodexMcpStatus) => { setStatusRaw(s); onStatus?.(s); };
   const [busy, setBusy] = useState(false);
+  // Two clicks (settings-reorg §6 item 3): removing drops the server entry
+  // from Codex's own config, and every lane loses the tools at its next start.
+  const arm = useArmed<"remove">();
   const [mutations, setMutations] = useState(true);
   const [output, setOutput] = useState("");
   useEffect(() => { invoke<CodexMcpStatus>("codex_mcp_status").then(setStatus).catch((e) => onReport(String(e))); }, []);
@@ -63,7 +67,8 @@ export function CodexMcpSection({ onReport, onStatus, offerPending = false, onSi
         {!status.codex_bin ? <button className="ctrl sm" onClick={() => openUrl(INSTALL_URL).catch((e) => onReport(String(e)))}>Install Codex CLI</button>
           : <button className="ctrl sm" disabled={busy || !status.worktrees_bin}
             onClick={() => act(false)}>{busy ? "Working…" : status.entry ? "Repair or update" : "Set up Codex"}</button>}
-        {status.entry && <button className="ctrl sm danger" disabled={busy} onClick={() => act(true)}>Remove from Codex</button>}
+        {status.entry && <button className={"ctrl sm danger" + (arm.armed ? " armed" : "")} disabled={busy} data-testid="codex-mcp-remove"
+          onClick={() => arm.confirm("remove", () => void act(true))}>{arm.armed ? "Remove from Codex — sure?" : "Remove from Codex"}</button>}
         {offerPending && onSilenceOffer && <button className="mcp-dismiss" onClick={onSilenceOffer}>Stop suggesting this</button>}
       </div>
       {status.command && <div className="hint"><code>{status.command}</code></div>}

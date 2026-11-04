@@ -372,7 +372,7 @@ pub fn planning_suggested(root: String) -> Result<bool, String> {
     Ok(worktrees_core::planning::repo_suggests(Path::new(&root)))
 }
 
-/// Settings → Behavior → Plan limits: the user's `[quota]` launch-gate policy
+/// Settings → Agent policy → Plan limits: the user's `[quota]` launch-gate policy
 /// (`worktrees_core::quota`), and what was wrong with a hand-edited one.
 /// Machine-level, and read by the gate at launch time — a change reaches the
 /// next launch everywhere, running MCP servers included.

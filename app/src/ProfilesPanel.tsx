@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "./ipc";
 import { hostOnly, pickDirForHost, revealOnHost } from "./onhost";
+import { useArmed } from "./useArmed";
 
 // AI profiles: the rules / skills / MCP / model a worktrees-launched `claude`
 // runs with, instead of the user's global ~/.claude setup.
@@ -64,7 +65,9 @@ export default function ProfilesPanel({ repo, onReport }: { repo: string; onRepo
   const [clean, setClean] = useState<string>("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
-  const [armed, setArmed] = useState("");
+  // Delete and Remove are two clicks, and the arm expires (useArmed).
+  const arm = useArmed<string>();
+  const armed = arm.armed ?? "";
   const [gitUrl, setGitUrl] = useState("");
   const [preview, setPreview] = useState<GitPreview | null>(null);
 
@@ -102,7 +105,7 @@ export default function ProfilesPanel({ repo, onReport }: { repo: string; onRepo
     setErr("");
     // Otherwise an armed Delete on one profile is still armed when you come
     // back to it, and the next single click deletes.
-    setArmed("");
+    arm.disarm();
   };
 
   /// Blur fires whether or not anything changed, and `save` bumps
@@ -178,7 +181,7 @@ export default function ProfilesPanel({ repo, onReport }: { repo: string; onRepo
       fail(e, "delete profile");
     } finally {
       setBusy(false);
-      setArmed("");
+      arm.disarm();
     }
   };
 
@@ -249,7 +252,7 @@ export default function ProfilesPanel({ repo, onReport }: { repo: string; onRepo
     } catch (e) {
       fail(e, "remove skill");
     } finally {
-      setArmed("");
+      arm.disarm();
     }
   };
 
@@ -413,7 +416,7 @@ export default function ProfilesPanel({ repo, onReport }: { repo: string; onRepo
                   ) : null}
                   <button
                     className={"ctrl sm danger" + (armed === "skill:" + s.name ? " armed" : "")}
-                    onClick={() => (armed === "skill:" + s.name ? removeSkill(s.name) : setArmed("skill:" + s.name))}
+                    onClick={() => arm.confirm("skill:" + s.name, () => void removeSkill(s.name))}
                   >
                     {armed === "skill:" + s.name ? "Really remove?" : "Remove"}
                   </button>
@@ -530,7 +533,7 @@ export default function ProfilesPanel({ repo, onReport }: { repo: string; onRepo
               </button>
               <button
                 className={"ctrl sm danger" + (armed === "profile:" + draft.id ? " armed" : "")}
-                onClick={() => (armed === "profile:" + draft.id ? remove(draft.id) : setArmed("profile:" + draft.id))}
+                onClick={() => arm.confirm("profile:" + draft.id, () => void remove(draft.id))}
               >
                 {armed === "profile:" + draft.id ? "Really delete?" : "Delete"}
               </button>

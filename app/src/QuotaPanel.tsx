@@ -17,16 +17,15 @@ export type QuotaSettings = {
  *  set by hand that is not listed is still shown (see `options`). */
 export const QUOTA_PCTS = [50, 60, 70, 75, 80, 85, 90, 95, 100];
 
-/** Settings → Behavior → Plan limits. The refusal message names this path, so
- *  renaming the section means changing `quota::SETTINGS_PATH` too (quota-check.mjs). */
-export function QuotaSection({ onReport, "data-focus": focusId }: {
-  onReport: (text: string) => void;
-  "data-focus"?: string;
-}) {
+/** The page's one read of `[quota]` and its one write, shared by the two
+ *  sections: the gate (Beginner) and the weekly threshold (Advanced) are one
+ *  setter, so each sends the other as the host last reported it. */
+export function useQuota(onReport: (text: string) => void) {
   const [s, setS] = useState<QuotaSettings | null>(null);
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     invoke<QuotaSettings>("quota_settings").then(setS).catch((e) => onReport(`quota_settings: ${String(e)}`));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one read per mount
   }, []);
   const save = async (gate: boolean, pct: number | null) => {
     setBusy(true);
@@ -34,9 +33,16 @@ export function QuotaSection({ onReport, "data-focus": focusId }: {
     catch (e) { onReport(`set_quota_settings: ${String(e)}`); }
     finally { setBusy(false); }
   };
+  return { s, busy, save };
+}
+export type Quota = ReturnType<typeof useQuota>;
+
+/** Settings → Agent policy → Plan limits. The refusal message names this path, so
+ *  renaming the section means changing `quota::SETTINGS_PATH` too (quota-check.mjs). */
+export function QuotaSection({ q }: { q: Quota }) {
+  const { s, busy, save } = q;
   const pct = s?.weekly_warn_pct ?? null;
-  const options = pct !== null && !QUOTA_PCTS.includes(pct) ? [...QUOTA_PCTS, pct].sort((a, b) => a - b) : QUOTA_PCTS;
-  return <section className="setting" data-focus={focusId} data-testid="quota-settings">
+  return <section className="setting" data-testid="quota-settings">
     <label>Plan limits</label>
     {!s ? <div className="hint">Checking…</div> : <>
       <label className="tier-toggle setting-check">
@@ -48,16 +54,6 @@ export function QuotaSection({ onReport, "data-focus": focusId }: {
         Before starting Claude or Codex, worktrees reads the plan's usage and refuses the launch when a
         window is nearly spent. The worktree and its brief are still created, and Launch anyway overrides it once.
       </div>
-      <label className="sub">Weekly window: refuse at</label>
-      <select data-testid="quota-pct" value={pct === null ? "" : String(pct)} disabled={busy || !s.gate}
-        onChange={(e) => save(s.gate, e.currentTarget.value === "" ? null : +e.currentTarget.value)}>
-        <option value="">The provider's warning (default)</option>
-        {options.map((n) => <option key={n} value={String(n)}>{n}% used</option>)}
-      </select>
-      <div className="hint">
-        Applies to weekly windows. The 5-hour window always uses the provider's own warning; turn the check
-        off to launch past it. The usage meter's colours always show the provider's reading.
-      </div>
       {/* Hue in the glyph only, words in --txt-dim: `.hint`'s --txt-mute is
           2.2:1 in tokyo-day, too faint for the one line saying an edit did nothing. */}
       {s.problems.length > 0 && <div className="quota-problems" data-testid="quota-problems">
@@ -65,6 +61,29 @@ export function QuotaSection({ onReport, "data-focus": focusId }: {
       </div>}
       <div className="hint">Takes effect at the next launch — agents already running are not affected.</div>
       <div className="hint">Settings file: {s.config_path} (<code>[quota]</code>)</div>
+    </>}
+  </section>;
+}
+
+/** Settings → Agent policy → Weekly threshold: where in a weekly window the
+ *  gate refuses. */
+export function QuotaThresholdSection({ q }: { q: Quota }) {
+  const { s, busy, save } = q;
+  const pct = s?.weekly_warn_pct ?? null;
+  const options = pct !== null && !QUOTA_PCTS.includes(pct) ? [...QUOTA_PCTS, pct].sort((a, b) => a - b) : QUOTA_PCTS;
+  return <section className="setting" data-testid="quota-threshold">
+    <label>Weekly window: refuse at</label>
+    {!s ? <div className="hint">Checking…</div> : <>
+      <select data-testid="quota-pct" value={pct === null ? "" : String(pct)} disabled={busy || !s.gate}
+        onChange={(e) => save(s.gate, e.currentTarget.value === "" ? null : +e.currentTarget.value)}>
+        <option value="">The provider's warning (default)</option>
+        {options.map((n) => <option key={n} value={String(n)}>{n}% used</option>)}
+      </select>
+      <div className="hint">
+        Applies to weekly windows while the plan-limits check is on. The 5-hour window always uses the
+        provider's own warning; turn the check off to launch past it. The usage meter's colours always show
+        the provider's reading.
+      </div>
     </>}
   </section>;
 }

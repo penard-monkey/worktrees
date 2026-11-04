@@ -16,18 +16,20 @@ import {
 } from "./devices";
 import "./RemoteAccess.css";
 
-export function DevicesSection({ onRemote }: { onRemote: () => void }) {
+/** `stepup`: draw the step-up switch (an Expert control, settings-reorg §4.3);
+ *  the device's step-up state is said either way. */
+export function DevicesSection({ onRemote, stepup = true }: { onRemote: () => void; stepup?: boolean }) {
   const r = useRemote();
   // Pairing and managing devices are the host console's (ipc.ts
   // CONSOLE_ROWS); serve's `console-only` is the backstop, in the same words.
   // Gated before the list's own reads (the projects, Codex's permissions).
   if (notGranted("pair_begin") || notConsole(r)) {
-    return <GrantNote cmd="pair_begin" label="Paired devices" focus="devices" refused />;
+    return <GrantNote cmd="pair_begin" label="Paired devices" refused />;
   }
-  return <DevicesList r={r} onRemote={onRemote} />;
+  return <DevicesList r={r} onRemote={onRemote} stepup={stepup} />;
 }
 
-function DevicesList({ r, onRemote }: { r: RemoteState; onRemote: () => void }) {
+function DevicesList({ r, onRemote, stepup }: { r: RemoteState; onRemote: () => void; stepup: boolean }) {
   const [pairing, setPairing] = useState(false);
   const [showRevoked, setShowRevoked] = useState(false);
   const unprompted = useUnprompted();
@@ -41,7 +43,7 @@ function DevicesList({ r, onRemote }: { r: RemoteState; onRemote: () => void }) 
   const why = pairingBlock(r.status, full, r.statusErr);
   return (
     <>
-      <section className="setting ra" data-focus="devices">
+      <section className="setting ra" data-testid="devices">
         <label>Paired devices</label>
         <div className="ra-line">
           {current.length === 0 ? "No device is paired with this computer." : `${current.length} of ${MAX_DEVICES} devices.`} A device
@@ -67,7 +69,7 @@ function DevicesList({ r, onRemote }: { r: RemoteState; onRemote: () => void }) 
       </section>
       {current.length > 0 && (
         <section className="setting ra ra-devices">
-          {current.map((d) => <DeviceRow key={d.id} d={d} unprompted={unprompted} host={r.status?.host} projects={projects} now={now} />)}
+          {current.map((d) => <DeviceRow key={d.id} d={d} unprompted={unprompted} host={r.status?.host} projects={projects} now={now} stepup={stepup} />)}
         </section>
       )}
       {revoked.length > 0 && (
@@ -98,12 +100,13 @@ function DevicesList({ r, onRemote }: { r: RemoteState; onRemote: () => void }) 
 
 type Editing = null | "rename" | "expiry" | "scope" | "revoke";
 
-function DeviceRow({ d, unprompted, host, projects, now }: {
+function DeviceRow({ d, unprompted, host, projects, now, stepup }: {
   d: DeviceRecord;
   unprompted: boolean;
   host?: string;
   projects: ProjectRef[] | null;
   now: number;
+  stepup: boolean;
 }) {
   const [editing, setEditing] = useState<Editing>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -163,7 +166,7 @@ function DeviceRow({ d, unprompted, host, projects, now }: {
           : <button className="ctrl sm" disabled={busy} onClick={() => act("device_enable", {})}>Enable</button>}
         <button className="ctrl sm" disabled={busy} onClick={() => open("expiry")}>Expiry…</button>
         <button className="ctrl sm" disabled={busy} onClick={() => open("scope")}>Scope…</button>
-        {hasPresenceKey(d.platform) && (
+        {stepup && hasPresenceKey(d.platform) && (
           <button className="ctrl sm" disabled={busy} onClick={() => act("device_set_stepup", { required: !d.stepup_required })}>
             {d.stepup_required ? "Turn step-up off" : "Turn step-up on"}
           </button>

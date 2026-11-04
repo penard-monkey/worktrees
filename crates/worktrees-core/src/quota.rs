@@ -171,7 +171,7 @@ pub const PCT_MAX: u8 = 100;
 /// Where in the app the user changes it. Named in every refusal, so the
 /// remedy is one the reader can follow — `app/scripts/quota-check.mjs` checks
 /// that the Settings panel really lives here.
-pub const SETTINGS_PATH: &str = "Settings → Behavior → Plan limits";
+pub const SETTINGS_PATH: &str = "Settings → Agent policy → Plan limits";
 
 /// The refusal's remedy sentence, naming the config file the binary actually
 /// reads (`$XDG_CONFIG_HOME` honoured), `~`-abbreviated under `$HOME`.
@@ -640,7 +640,7 @@ mod tests {
         Policy { gate: true, weekly_warn_pct: Some(pct) }
     }
     const OFF: Policy = Policy { gate: false, weekly_warn_pct: None };
-    const HOW: &str = "The user can change when this applies in Settings → Behavior → Plan limits, or `[quota]` in ~/.config/worktrees/config.toml";
+    const HOW: &str = "The user can change when this applies in Settings → Agent policy → Plan limits, or `[quota]` in ~/.config/worktrees/config.toml";
 
     #[test]
     fn no_data_fails_open() {
@@ -868,7 +868,7 @@ mod tests {
         let msg = refusal("Claude", &weekly(92.0, "normal"), 0, &[], &at(90), HOW);
         assert!(msg.contains("Claude is at 92% of its Weekly window"), "{msg}");
         assert!(msg.contains("the user's limit: 90% of a weekly window"), "{msg}");
-        assert!(msg.contains("Settings → Behavior → Plan limits"), "{msg}");
+        assert!(msg.contains("Settings → Agent policy → Plan limits"), "{msg}");
         assert!(msg.contains("`[quota]` in ~/.config/worktrees/config.toml"), "{msg}");
         let msg = refusal("Codex", &w("5h", 85.0, "warning"), 0, &[], &at(90), HOW);
         assert!(msg.contains("Codex graded it nearly spent"), "{msg}");
@@ -877,7 +877,7 @@ mod tests {
         let msg = refusal("Kimi", &ours, 0, &[], &D, HOW);
         assert!(!msg.contains("graded it"), "{msg}");
         assert!(msg.contains("80% or more used: Kimi reports only the percentage, and 80% is worktrees' line"), "{msg}");
-        assert!(msg.contains("Settings → Behavior → Plan limits"), "{msg}");
+        assert!(msg.contains("Settings → Agent policy → Plan limits"), "{msg}");
     }
 
     #[test]

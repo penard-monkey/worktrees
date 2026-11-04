@@ -71,7 +71,7 @@ test("the cadence the app and CHANGELOG promise (\"two minutes\") is kimi_usage'
   assert.equal(floor.length, 1, "expected exactly one FAILURE_FLOOR in kimi_usage.rs");
   assert.equal(Number(ttl[0][1]), 120, "the Settings hint and CHANGELOG say two minutes");
   assert.equal(Number(floor[0][1]), 120, "…failures included");
-  const sheet = fs.readFileSync(new URL("../src/SettingsSheet.tsx", import.meta.url), "utf8");
+  const sheet = fs.readFileSync(new URL("../src/pages/agents.tsx", import.meta.url), "utf8");
   assert.match(sheet, /for one request, at most every two minutes/);
 });
 test("kimi rows are labelled by their window and summarised from kimi's own bucket", () => {

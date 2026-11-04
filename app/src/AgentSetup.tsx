@@ -3,6 +3,7 @@ import { invoke } from "./ipc";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import * as Icons from "./icons";
 import { projectTodos, todoCount } from "./projectTodos";
+import { useArmed } from "./useArmed";
 
 // Agent instructions for every agent: AGENTS.md is the real file, CLAUDE.md a
 // one-line `@AGENTS.md` stub, and repo skills linked into `.agents/skills`
@@ -84,9 +85,9 @@ function dirLine(k: AgentDirKind): { sev: "info" | "warn" | "error"; glyph: stri
 }
 
 
-// How long the Fix / Apply buttons stay armed. Short on purpose: an arm that
-// outlives the reader's attention is a one-click commit (or push).
-const ARM_MS = 4000;
+// The Fix / Apply buttons are two clicks, and the arm expires (`useArmed`,
+// ARM_MS): an arm that outlives the reader's attention is a one-click commit
+// (or push).
 
 /** Everything the Fix needs, owned ONCE per open ProjectSheet. Two surfaces
  *  press it — the To do row at the top of the sheet and the Agent setup
@@ -112,9 +113,9 @@ export type AgentSetupCtl = {
   log: string;
   load: () => Promise<void>;
   /** First call arms, second call (within ARM_MS) commits. */
-  fix: () => Promise<void>;
+  fix: () => void;
   /** The same for the worktrees rules; `force` replaces hand-edited text. */
-  applyRules: (force: boolean) => Promise<void>;
+  applyRules: (force: boolean) => void;
 };
 
 /** `onLoaded` gets EVERY successful read, not only the one after a Fix: the
@@ -135,7 +136,8 @@ export function useAgentSetup(
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [busy, setBusy] = useState<"fix" | "rules" | null>(null);
   const running = busy !== null;
-  const [armed, setArmed] = useState<"fix" | "rules" | null>(null);
+  const arm = useArmed<"fix" | "rules">();
+  const { armed } = arm;
   const [push, setPushState] = useState({ fix: false, rules: false });
   const setPush = (which: "fix" | "rules", v: boolean) => setPushState((p) => ({ ...p, [which]: v }));
   const [outcome, setOutcome] = useState<AgentFixOutcome | null>(null);
@@ -148,8 +150,9 @@ export function useAgentSetup(
   const committed = useRef(onCommitted);
   committed.current = onCommitted;
 
+  const disarm = arm.disarm;
   const load = useCallback(async () => {
-    setArmed(null);
+    disarm();
     try {
       const s = await invoke<AgentSetupStatus | null>("agent_setup_status", { repo: root });
       setStatus(s ?? null);
@@ -161,7 +164,7 @@ export function useAgentSetup(
       setLoadErr(String(e));
       onError(`agent setup ${root}: ${String(e)}`);
     }
-  }, [root, onError]);
+  }, [root, onError, disarm]);
 
   useEffect(() => {
     if (!open) return;
@@ -170,17 +173,11 @@ export function useAgentSetup(
     load();
   }, [open, load]);
 
-  // The arm expires: a Fix armed and forgotten must not fire on a stray click.
-  useEffect(() => {
-    if (!armed) return;
-    const t = setTimeout(() => setArmed(null), ARM_MS);
-    return () => clearTimeout(t);
-  }, [armed]);
-
-  const commit = async (which: "fix" | "rules", cmd: string, args: Record<string, unknown>) => {
+  const commit = (which: "fix" | "rules", cmd: string, args: Record<string, unknown>) => {
     if (running) return;
-    if (armed !== which) { setArmed(which); return; }
-    setArmed(null);
+    arm.confirm(which, () => void run(which, cmd, args));
+  };
+  const run = async (which: "fix" | "rules", cmd: string, args: Record<string, unknown>) => {
     setBusy(which);
     setRan(which);
     setOutcome(null);
@@ -416,7 +413,7 @@ export function RulesSection({ ctl, onError }: { ctl: AgentSetupCtl; onError: (m
       ) : !ctl.status ? (
         <div className="hint">Checking…</div>
       ) : !rules ? (
-        <div className="hint">Could not read the rules on the default branch — see Settings → Logs.</div>
+        <div className="hint">Could not read the rules on the default branch — see Settings → Data & privacy → Logs.</div>
       ) : (
         <div className="dx-list">
           {lines.map((l) => (
@@ -479,9 +476,9 @@ export function RulesSection({ ctl, onError }: { ctl: AgentSetupCtl; onError: (m
  *  is why the `codex-skills` offer can land here on a fresh install with no
  *  project at all (a suggestion's surface may not add preconditions). */
 export function UserSkillsSection({ skills, onChanged, offerPending, onSilenceOffer, onReport, "data-focus": focusId }: {
-  /** The deep-link target, named at the CALL site (SettingsSheet's Codex
-   *  category), where offers-check can see it beside the category it opens. */
-  "data-focus": string;
+  /** Unused since the regroup: the page's `Sec` carries the deep-link target
+   *  (`codex-skills`), where settingsmap-check can see it. */
+  "data-focus"?: string;
   /** App's probe (`agent_user_skills`); null = not read yet or failed. */
   skills: UserSkill[] | null;
   /** The re-read after a link — App keeps the offer in step with it. */

@@ -483,6 +483,18 @@ export type Settings = {
   // already persisted the old value. Without it a default flip is invisible to
   // exactly the people who have been running the app — see `migrate`.
   settings_rev: number;
+  // The Settings sheet's mode (settings-reorg §4): which sections it DRAWS.
+  // Nothing else reads it — a mode hides, it never turns anything off
+  // (`settingsMap.ts`, `settingsmap-check.mjs`). Per window, so a phone and a
+  // Mac may differ. A fresh install starts in Beginner; a blob from before the
+  // key gets Expert (`migrate` rev 5), so nobody who has used the sheet finds a
+  // row gone the morning of the release. An older build ignores the key.
+  settings_mode: "beginner" | "advanced" | "expert";
+  // Lines of scrollback each terminal keeps (xterm's `scrollback`). Floored at
+  // what a dock shell's replay needs (`TERM_SCROLLBACK_STEPS[0]`), so a replay
+  // is never cut short whatever is chosen; `termresize-check.mjs` pins the
+  // floor to the backend's ring.
+  term_scrollback: number;
   // NOT settings of this build: a copy of the host's policy (`hostpolicy` in
   // worktrees-api, kept in host-policy.json) for an OLDER one. v0.42.0 and
   // earlier read only this file for Codex permissions and pi project trust,
@@ -513,7 +525,20 @@ export type Settings = {
 };
 
 /** Current settings revision. Bump ONLY together with a step in `migrate`. */
-export const SETTINGS_REV = 4;
+export const SETTINGS_REV = 5;
+
+/** The scrollback sizes Settings → Terminal offers. The FIRST is the floor:
+ *  a dock shell replays up to 256K (`SHELL_RING`), ~3300 lines at 80 columns,
+ *  and fewer lines would drop the oldest part of every replay. */
+export const TERM_SCROLLBACK_STEPS = [3500, 5000, 10000, 20000, 30000] as const;
+/** The nearest offered size; a hand-edited or junk value lands on the default. */
+export const clampScrollback = (v: unknown): number => {
+  if (typeof v !== "number" || !Number.isFinite(v)) return 5000;
+  const min = TERM_SCROLLBACK_STEPS[0];
+  const max = TERM_SCROLLBACK_STEPS[TERM_SCROLLBACK_STEPS.length - 1];
+  const bound = Math.max(min, Math.min(max, v));
+  return TERM_SCROLLBACK_STEPS.reduce((best, s) => (Math.abs(s - bound) < Math.abs(best - bound) ? s : best), min as number);
+};
 
 export const DEFAULTS: Settings = {
   ui_rem: 15,
@@ -581,6 +606,8 @@ export const DEFAULTS: Settings = {
   init_dismissed: {},
   offers_dismissed: {},
   settings_rev: SETTINGS_REV,
+  settings_mode: "beginner",
+  term_scrollback: 5000,
 };
 
 /** check_update result — versions the Settings "Version" section renders. */
@@ -847,8 +874,15 @@ function normalizePair(t: unknown, appearance: "light" | "dark", fallback: Theme
  *  stored blob is merged over DEFAULTS before this runs, so `dock_side` is
  *  always present here — a presence test would hand every mirrored install
  *  the default "right", put its dock beside its nav and merge its rails.
- *  `layout-check.mjs` pins that. */
-function migrate(s: Settings, from: number): boolean {
+ *  `layout-check.mjs` pins that.
+ *
+ *  rev 5 — Settings gained modes (Beginner / Advanced / Expert). A blob that
+ *  existed before the key gets EXPERT, so nobody who has been using the sheet
+ *  finds a row gone; a fresh install (no blob at all) keeps the default,
+ *  Beginner. The opposite of rev 2, on purpose: hiding is a convenience, not a
+ *  shape the app is built around. Keyed on the revision and on `fresh`, never
+ *  on the key being absent (it is always present after the DEFAULTS merge). */
+function migrate(s: Settings, from: number, fresh: boolean): boolean {
   if (from >= SETTINGS_REV) return false;
   if (from < 1) s.files_show_ignored = DEFAULTS.files_show_ignored;
   if (from < 2) {
@@ -868,6 +902,7 @@ function migrate(s: Settings, from: number): boolean {
     delete (s as Partial<Settings> & { mcp_nudge_dismissed?: unknown }).mcp_nudge_dismissed;
   }
   if (from < 4) s.dock_side = s.places_side === "right" ? "left" : "right";
+  if (from < 5) s.settings_mode = fresh ? DEFAULTS.settings_mode : "expert";
   s.settings_rev = SETTINGS_REV;
   return true;
 }
@@ -875,6 +910,9 @@ function migrate(s: Settings, from: number): boolean {
 export async function loadSettings(): Promise<Settings> {
   try {
     const raw = await invoke<Partial<Settings> | null>("get_settings");
+    // No blob at all: a fresh install (or a remote window's first visit to
+    // this client). Only `migrate`'s rev 5 asks.
+    const fresh = raw === null || raw === undefined || typeof raw !== "object" || Object.keys(raw).length === 0;
     const s = { ...DEFAULTS, ...(raw ?? {}) };
     // Retired key: the per-project "Agent setup" nav banner's dismissals. The
     // banner became the project's to-do badge (`projectTodos.ts`), which is
@@ -938,7 +976,11 @@ export async function loadSettings(): Promise<Settings> {
       .filter(([, v]) => !!v && Number.isInteger(v.line) && v.line >= 1 && (v.col == null || (Number.isInteger(v.col) && v.col >= 1))));
     s.default_models = Object.fromEntries(Object.entries(s.default_models && typeof s.default_models === "object" ? s.default_models : {})
       .filter(([h, m]) => isHarness(h) && typeof m === "string" && /^[A-Za-z0-9._/:-]{1,200}$/.test(m) && !m.startsWith("-")));
-    const migratedRevision = migrate(s, typeof raw?.settings_rev === "number" ? raw.settings_rev : 0);
+    const migratedRevision = migrate(s, typeof raw?.settings_rev === "number" ? raw.settings_rev : 0, fresh);
+    // After `migrate`, which sets it: a hand-edited or newer-build value that is
+    // not one of the three draws as Expert, the mode that hides nothing.
+    if (s.settings_mode !== "beginner" && s.settings_mode !== "advanced" && s.settings_mode !== "expert") s.settings_mode = "expert";
+    s.term_scrollback = clampScrollback(s.term_scrollback);
     if (needsChatDefaultMigration || migratedRevision) saveSettings(s);
     return s;
   } catch {

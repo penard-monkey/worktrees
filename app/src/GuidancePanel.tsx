@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "./ipc";
 import { DiffView, type FileDiffDto } from "./DiffView";
 import { useEscape } from "./useEscape";
+import { useArmed } from "./useArmed";
 
 /** `guidance::Status` (core), as `agent_guidance_status` returns it. */
 export type GuidanceDelivery =
@@ -153,24 +154,100 @@ function SkillChanged({ status, edit, busy, editing, onKeep, onTake, onMerge, of
  *  skill is not something to lose to a stray click. */
 let keptDraft: string | null = null;
 
-/** How long "Reset to default" stays armed. */
-const ARM_MS = 4000;
+/** The one write of the two switches. `set_agent_guidance` takes both, so
+ *  each caller sends the other as the host last reported it. */
+async function writeGuidance(status: GuidanceStatus, patch: Partial<GuidanceStatus["settings"]>,
+  onStatus: (s: GuidanceStatus) => void, onReport: (t: string) => void): Promise<void> {
+  const next = { ...status.settings, ...patch };
+  try {
+    onStatus(await invoke<GuidanceStatus>("set_agent_guidance", { enabled: next.enabled, guard: next.guard }));
+  } catch (e) { onReport(`set_agent_guidance: ${String(e)}`); }
+}
 
-/** Settings → Agent guidance (agent-guidance proposal §4.5, decisions Q2/Q8;
- *  the editable skill, §11). Machine-level: nothing here is about the project
- *  in focus. */
-export function GuidanceSection({ status, onStatus, onReport, offerPending = false, onSilenceOffer, changeOfferPending = false, onSilenceChangeOffer, "data-focus": focusId }: {
+type GuidanceProps = {
   /** App's startup probe; null = not read yet or failed. */
   status: GuidanceStatus | null;
   /** Every status read or written here goes back to App, so the offer follows it. */
   onStatus: (s: GuidanceStatus) => void;
   onReport: (text: string) => void;
+};
+
+/** Re-read on open: cheap (no Codex probe), and a Codex launch since app
+ *  start may have settled Codex's line. */
+function useGuidanceRead(onStatus: (s: GuidanceStatus) => void, onReport: (t: string) => void) {
+  useEffect(() => {
+    invoke<GuidanceStatus>("agent_guidance_status").then(onStatus).catch((e) => onReport(`agent_guidance_status: ${String(e)}`));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one read per mount
+  }, []);
+}
+
+/** Settings → Guidance → Agent guidance (agent-guidance proposal §4.5,
+ *  decisions Q2/Q8): whether agents get it, and what each harness gets.
+ *  Machine-level: nothing here is about the project in focus. The guard moved
+ *  to Agent policy and the skill to its own (Expert) section in the regroup
+ *  (settings-reorg §3.2). */
+export function GuidanceSection({ status, onStatus, onReport, offerPending = false, onSilenceOffer }: GuidanceProps & {
   offerPending?: boolean;
   onSilenceOffer?: () => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  useGuidanceRead(onStatus, onReport);
+  const set = async (patch: Partial<GuidanceStatus["settings"]>) => {
+    if (!status) return;
+    setBusy(true);
+    try { await writeGuidance(status, patch, onStatus, onReport); } finally { setBusy(false); }
+  };
+  return <section className="setting" data-testid="agent-guidance">
+    <label>Agent guidance</label>
+    <div className="hint">In a worktrees-managed repo, agents launched from Worktrees are told to do their branch work in a place, and get a <code>worktrees</code> skill for the rest: handing work to another agent, messaging between places, finishing and releasing. The text ships with Worktrees and you can edit the skill; nothing is written to any agent's own settings.</div>
+    {!status ? <div className="hint">Checking…</div> : <>
+      <label className="tier-toggle setting-check"><input type="checkbox" checked={status.settings.enabled} disabled={busy}
+        onChange={(e) => set({ enabled: e.currentTarget.checked })} />Give agents the guidance at launch</label>
+      <div className="guidance-rows">
+        {status.harnesses.map((h) => (
+          <div className="hint" key={h.id} data-harness={h.id}><b>{h.label}:</b> {status.settings.enabled ? deliveryLine(h) : "off"}</div>
+        ))}
+      </div>
+      {status.error && <div className="hint">The guidance files could not be written: {status.error}</div>}
+      <div className="hint">Applies to agents launched from now on; a session already running keeps what it started with. Every connected session also reads the rule through the Worktrees MCP server.</div>
+      <div className="hint">Settings file: {status.settings_path}</div>
+      {offerPending && onSilenceOffer && <div className="ver-actions"><button className="mcp-dismiss" onClick={onSilenceOffer}>Stop suggesting this</button></div>}
+    </>}
+  </section>;
+}
+
+/** Settings → Agent policy → Claude in (main): the guard, which needs the
+ *  guidance on (it rides in the same plugin). */
+export function GuardSection({ status, onStatus, onReport }: GuidanceProps) {
+  const [busy, setBusy] = useState(false);
+  useGuidanceRead(onStatus, onReport);
+  const set = async (guard: boolean) => {
+    if (!status) return;
+    setBusy(true);
+    try { await writeGuidance(status, { guard }, onStatus, onReport); } finally { setBusy(false); }
+  };
+  return <section className="setting" data-testid="main-guard">
+    <label>Claude in (main)</label>
+    {!status ? <div className="hint">Checking…</div> : <>
+      <label className="tier-toggle setting-check"><input type="checkbox" checked={status.settings.guard} disabled={busy || !status.settings.enabled}
+        data-testid="guard-toggle" onChange={(e) => void set(e.currentTarget.checked)} />Stop Claude from <code>git worktree add</code> and new branches in (main)</label>
+      <div className="hint">The guard refuses those two commands and tells Claude to use a place. An agent moving its own place to another branch is never refused. Switching it off applies to the next command. Off by default.</div>
+      {!status.settings.enabled && <div className="hint" data-testid="guard-needs-guidance">The guard rides in the agent guidance, which is off: turn it on under Guidance first.</div>}
+      {status.settings.guard && !status.guard_available && <div className="hint" data-testid="guard-unavailable">
+        The guard needs the Worktrees CLI, and none on your PATH has it (missing, or older than this app). Until you install or update it under Updates, Claude gets the skill without the guard.</div>}
+    </>}
+  </section>;
+}
+
+/** Settings → Guidance → The skill (§11): what agents are told, the editor,
+ *  and the two bands that need a choice — an edit that is not being used, and
+ *  an edit whose default moved under it. Expert, unless one of those is up
+ *  (the page reports the first as a problem; the second's offer deep-links
+ *  here). Both Resets are two clicks with an arm that expires. */
+export function GuidanceSkillSection({ status, onStatus, onReport, changeOfferPending = false, onSilenceChangeOffer }: GuidanceProps & {
   /** The `agent-guidance-changed` offer (offers.ts) is pending. */
   changeOfferPending?: boolean;
   onSilenceChangeOffer?: () => void;
-  "data-focus"?: string;
 }) {
   const [busy, setBusy] = useState(false);
   const [draft, setDraftState] = useState<string | null>(keptDraft);
@@ -178,32 +255,13 @@ export function GuidanceSection({ status, onStatus, onReport, offerPending = fal
   const [saveErr, setSaveErr] = useState<string | null>(null);
   const [mergeNote, setMergeNote] = useState<string | null>(null);
   const [showDraftDiff, setShowDraftDiff] = useState(false);
-  const [armed, setArmed] = useState(false);
+  const arm = useArmed<"reset" | "reset-invalid">();
   const [open, setOpen] = useState(keptDraft !== null);
-  // Re-read on open: cheap (no Codex probe), and a Codex launch since app
-  // start may have settled Codex's line.
-  useEffect(() => {
-    invoke<GuidanceStatus>("agent_guidance_status").then(onStatus).catch((e) => onReport(`agent_guidance_status: ${String(e)}`));
-  }, []);
-  useEffect(() => {
-    if (!armed) return;
-    const t = setTimeout(() => setArmed(false), ARM_MS);
-    return () => clearTimeout(t);
-  }, [armed]);
   const dirty = draft !== null && draft !== status?.skill;
   // Escape would close the sheet; with unsaved text it does nothing instead —
   // the sheet's own entry is below this one, so the key stops here.
   useEscape(() => {}, dirty);
 
-  const set = async (patch: Partial<GuidanceStatus["settings"]>) => {
-    if (!status) return;
-    setBusy(true);
-    try {
-      const next = { ...status.settings, ...patch };
-      onStatus(await invoke<GuidanceStatus>("set_agent_guidance", { enabled: next.enabled, guard: next.guard }));
-    } catch (e) { onReport(`set_agent_guidance: ${String(e)}`); }
-    finally { setBusy(false); }
-  };
   /** Save `text` as the skill, or reset with null. Errors that are the user's
    *  to fix (a broken frontmatter, a merge marker) show beside the editor. */
   const saveSkill = async (text: string | null): Promise<boolean> => {
@@ -234,30 +292,17 @@ export function GuidanceSection({ status, onStatus, onReport, offerPending = fal
   const edit = status?.skill_edit ?? null;
   const editing = draft !== null;
   const usable = !!edit && !edit.invalid;
-  return <section className="setting" data-focus={focusId} data-testid="agent-guidance">
-    <label>Agent guidance</label>
-    <div className="hint">In a worktrees-managed repo, agents launched from Worktrees are told to do their branch work in a place, and get a <code>worktrees</code> skill for the rest: handing work to another agent, messaging between places, finishing and releasing. The text ships with Worktrees and you can edit the skill; nothing is written to any agent's own settings.</div>
+  return <section className="setting" data-testid="guidance-skill">
+    <label>The skill</label>
     {!status ? <div className="hint">Checking…</div> : <>
-      <label className="tier-toggle setting-check"><input type="checkbox" checked={status.settings.enabled} disabled={busy}
-        onChange={(e) => set({ enabled: e.currentTarget.checked })} />Give agents the guidance at launch</label>
-      <label className="tier-toggle setting-check"><input type="checkbox" checked={status.settings.guard} disabled={busy || !status.settings.enabled}
-        onChange={(e) => set({ guard: e.currentTarget.checked })} />Stop Claude from <code>git worktree add</code> and new branches in (main)</label>
-      <div className="hint">The guard refuses those two commands and tells Claude to use a place. An agent moving its own place to another branch is never refused. Switching it off applies to the next command. Off by default.</div>
-      {status.settings.guard && !status.guard_available && <div className="hint" data-testid="guard-unavailable">
-        The guard needs the Worktrees CLI, and none on your PATH has it (missing, or older than this app). Until you install or update it under Updates, Claude gets the skill without the guard.</div>}
-      <div className="guidance-rows">
-        {status.harnesses.map((h) => (
-          <div className="hint" key={h.id} data-harness={h.id}><b>{h.label}:</b> {status.settings.enabled ? deliveryLine(h) : "off"}</div>
-        ))}
-      </div>
-      {status.error && <div className="hint">The guidance files could not be written: {status.error}</div>}
-      <div className="hint">Applies to agents launched from now on; a session already running keeps what it started with. Every connected session also reads the rule through the Worktrees MCP server.</div>
       {edit?.invalid && <div className="guidance-changed" data-testid="guidance-invalid">
         <div className="guidance-changed-title">Your edited skill is not being used</div>
         <div className="hint">{edit.invalid[0].toUpperCase() + edit.invalid.slice(1)}. Agents get the default until you fix it or reset. The file is {status.edit_path}.</div>
         <div className="ver-actions">
           <button className="ctrl sm" disabled={busy || editing} onClick={() => { setDraft(edit.text); setOpen(true); }}>Fix it…</button>
-          <button className="ctrl sm" disabled={busy} onClick={() => saveSkill(null)}>Reset to default</button>
+          <button className={"ctrl sm" + (arm.armed === "reset-invalid" ? " danger armed" : "")} disabled={busy} data-testid="guidance-invalid-reset"
+            onClick={() => arm.confirm("reset-invalid", () => void saveSkill(null))}>
+            {arm.armed === "reset-invalid" ? "Discard your edit?" : "Reset to default"}</button>
         </div>
       </div>}
       {usable && edit.stale && <SkillChanged status={status} edit={edit} busy={busy} editing={editing}
@@ -271,8 +316,9 @@ export function GuidanceSection({ status, onStatus, onReport, offerPending = fal
           <div className="hint">The skill (Claude and pi){usable ? <> — <b data-testid="skill-source">your edit</b>{edit.base ? `, based on guidance v${edit.base.version}` : ""}</> : <> — <span data-testid="skill-source">the default</span></>}:</div>
           {!editing && <div className="ver-actions">
             <button className="ctrl sm" disabled={busy} onClick={() => { setDraft(usable ? edit.text : status.skill_default); setSaveErr(null); setMergeNote(null); }}>Edit…</button>
-            {usable && <button className="ctrl sm" disabled={busy} onClick={() => { if (!armed) { setArmed(true); return; } setArmed(false); saveSkill(null); }}>
-              {armed ? "Discard your edit?" : "Reset to default"}</button>}
+            {usable && <button className={"ctrl sm" + (arm.armed === "reset" ? " danger armed" : "")} disabled={busy}
+              onClick={() => arm.confirm("reset", () => void saveSkill(null))}>
+              {arm.armed === "reset" ? "Discard your edit?" : "Reset to default"}</button>}
           </div>}
         </div>
         {!editing ? <pre className="update-log">{status.skill}</pre> : <div className="guidance-editor">
@@ -289,8 +335,6 @@ export function GuidanceSection({ status, onStatus, onReport, offerPending = fal
           <div className="hint">Saved to {status.edit_path}, with a copy of the default it was based on, so an update that changes the default can show you what moved. Saving the default unchanged is the same as Reset.</div>
         </div>}
       </details>
-      <div className="hint">Settings file: {status.settings_path}</div>
-      {offerPending && onSilenceOffer && <div className="ver-actions"><button className="mcp-dismiss" onClick={onSilenceOffer}>Stop suggesting this</button></div>}
     </>}
   </section>;
 }

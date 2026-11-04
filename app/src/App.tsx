@@ -14,7 +14,7 @@ import { useEscape } from "./useEscape";
 import { batchJobs, bytes, changedSincePush, chosenIds, connectedHubs, defaultPushHubs, holders, newestHub, projectNames, type HubDash, type SyncItem, type SyncJob } from "./hubs";
 import { destAt, destinations, GRIP_LABEL, isCurrent, resetPatch, undoOf, zoneOf, type Dest, type Geometry, type Grip, type LayoutPatch } from "./arrange";
 import { cloneSource, dirNameProblem, isCloneError, type CloneProgress } from "./clone";
-import { ShellPane, TerminalPane } from "./TerminalPane";
+import { setTermScrollback, ShellPane, TerminalPane } from "./TerminalPane";
 import { AgentViewSwitch, ChatPane } from "./ChatPane";
 import { insertReference } from "./chat";
 import { DocsPane } from "./DocsPane";
@@ -4161,7 +4161,7 @@ function App() {
   const [settingsAt, setSettingsAt] = useState<{ cat: CatId; focus?: string } | null>(null);
   const settingsOpen = settingsAt !== null;
   const openSettings = useCallback((at?: { cat: CatId; focus?: string }) => {
-    setSettingsAt(at ?? { cat: "appearance" });
+    setSettingsAt(at ?? { cat: "general" });
   }, []);
   // The remote-access notice and the device alerts live outside App
   // (EngineGate) and open Settings through this.
@@ -5562,6 +5562,9 @@ function App() {
   // the factor is unchanged, so this covers hydration and every later step with
   // one invoke each.
   useEffect(() => { applyZoom(settings.app_zoom); }, [settings.app_zoom]);
+  // Settings → Terminal → Scrollback: every live terminal now, and every new
+  // one (TerminalPane clamps it to the replay floor whatever it is handed).
+  useEffect(() => { setTermScrollback(settings.term_scrollback); }, [settings.term_scrollback]);
 
   // theme "system": re-apply when macOS appearance flips
   useEffect(() => {
@@ -6472,23 +6475,29 @@ function App() {
     setProjSheetTodo(true);
     setProjSheet(root);
   };
-  // Settings → Data → "Reset to defaults". Preserve last_seen_version so the
-  // What's-new sheet doesn't re-fire, push through the same apply/persist/refit
-  // path as every other change, and reset the React state that MIRRORS settings
-  // (the revealed overlay + per-project collapsed) so the UI doesn't show stale
-  // nav state.
+  // Settings → Data & privacy → Reset, with a scope (settings-reorg §6 item
+  // 7). The sheet builds the patch (`settingsMap.resetPatch`: each key of the
+  // scope back to its default; never `last_seen_version`, the migration
+  // markers or the mode) and it goes through the same apply/persist/refit
+  // path as every other change. The React state that MIRRORS settings resets
+  // with it: the revealed overlay when the sidebar's keys moved, the
+  // per-project folding when `collapsed` did.
   //
-  // ⚠ This DOES clear `init_dismissed`, so every dismissed init banner comes
-  // back. That is the right behavior and is deliberate: "reset to defaults" is
-  // asked for when the UI is in an unknown state, the banner is a suggestion
-  // rather than a destructive action, and each one is one click to dismiss
-  // again. `last_seen_version` is the only exception because re-showing What's
-  // new for a version you already read is noise with no corresponding signal.
-  const onReset = () => {
-    const next = { ...DEFAULTS, last_seen_version: settings.last_seen_version };
-    updateSettings(next);
-    setNavRevealed(false);
-    setCollapsed(next.collapsed);
+  // "Silenced suggestions" (and Everything) clears `init_dismissed` and
+  // `offers_dismissed`, so every dismissed banner and offer comes back. That
+  // is what the scope says; the default scope (Appearance & layout) no longer
+  // takes them, or forty places' memory, with a theme.
+  const onReset = (patch: Partial<Settings>) => {
+    updateSettings(patch);
+    if ("nav_pinned" in patch || "nav_hover_reveal" in patch) setNavRevealed(false);
+    if (patch.collapsed) setCollapsed(patch.collapsed);
+  };
+  // Settings → Projects → "Project settings…": the project's own sheet stays
+  // the editor for its file; Settings closes so the sheet is not under it.
+  const openProjectFromSettings = (root: string) => {
+    setSettingsAt(null);
+    setProjSheetTodo(false);
+    setProjSheet(root);
   };
   // A dialog, so there is no nav to bring back — but the draft MUST be cleared:
   // it belongs to the create that was rejected, and reopening for a different
@@ -6806,7 +6815,7 @@ function App() {
       onProgress,
     });
     setSyncBusy(false);
-    if (!r) { setSyncErr("sync could not start — see Settings → Logs."); return; }
+    if (!r) { setSyncErr("sync could not start — see Settings → Data & privacy → Logs."); return; }
     if (r.code === EXIT_NEEDS_CONFIRM) {
       // Sessions appeared between preview and apply: re-render the warning with
       // the list core actually saw, and let the user answer THAT one.
@@ -7716,7 +7725,7 @@ function App() {
         // ⌘, opens Settings (macOS convention) — a meta chord is safe past the
         // term-host (its passthrough concerns are ctrl-only). Esc already closes.
         e.preventDefault();
-        setSettingsAt((v) => (v ? null : { cat: "appearance" }));
+        setSettingsAt((v) => (v ? null : { cat: "general" }));
       } else if (e.metaKey && k === "f") {
         // ⌘F — find. Which surface depends on where the user is (see findTarget);
         // a second press re-selects the field rather than toggling the bar shut,
@@ -9842,7 +9851,7 @@ function App() {
         onAgentLoaded={(root, st) => setAgentSetup((m) => ({ ...m, [root]: st }))}
         planning={planning}
         onPlanningChanged={setPlanning}
-        onOpenPlanningSettings={() => { setProjSheet(null); setProjSheetTodo(false); openSettings({ cat: "planning", focus: "planning" }); }}
+        onOpenPlanningSettings={() => { setProjSheet(null); setProjSheetTodo(false); openSettings({ cat: "projects", focus: "planning" }); }}
         onReviewLane={(root) => { void reviewLane(root); }}
         onOpenLane={openLane}
         onRemoveLane={removeLane}
@@ -9901,7 +9910,7 @@ function App() {
         if (patch.default_provider === "codex") void ensureCodexCli("codex");
       }} onClose={() => setSettingsAt(null)}
         update={upd} cliStale={cliStale} cliMissing={cliMissing} appStale={appStale} onCheckUpdate={checkUpdate} onCatShown={onSettingsCat}
-        onShowNotes={showReleaseNotes} onReset={onReset}
+        onShowNotes={showReleaseNotes} onReset={onReset} onOpenProject={openProjectFromSettings}
         repo={sel?.repo ?? ""} onReport={(m) => setNotice(m)} onFail={fail}
         mcpStatus={mcpStatus} onMcpChanged={setMcpStatus}
         mcpOfferPending={!!mcpOffer} onSilenceMcpOffer={() => mcpOffer && silenceOffer(mcpOffer)}

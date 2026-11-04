@@ -204,43 +204,42 @@ else ok("planning: an unknown status offers nothing");
 // nowhere is the same bug as the old one.
 const every = pendingOffers(
   { mcp: status("absent"), codexMcp: codex("absent"), piMcp: pi("absent"), kimiMcp: kimi("off"), userSkills: skills("missing"), guidance: guidance(true, true, 1, edited(true)), crossProject: xp("off"), planning: pl("unset") }, {});
-const sheetSrc = read("../src/SettingsSheet.tsx");
-// The render of ONE category: from its `{cat === "x" && <>` to the next
-// category's. A data-focus found anywhere in src/ proves nothing about where
-// the deep link lands — it could sit in a section another category renders,
-// or in a component nothing mounts.
-const catSlice = (cat) => {
-  const at = sheetSrc.indexOf(`{cat === "${cat}" && <>`);
-  if (at < 0) return "";
-  const next = sheetSrc.indexOf("{cat === \"", at + 1);
-  return sheetSrc.slice(at, next < 0 ? undefined : next);
+// Since the Settings regroup (settings-reorg §3) a page is a file,
+// `pages/<id>.tsx`, and a section is a `<Sec id="…">` in it, which carries the
+// `data-focus` (pages/kit.tsx). So a deep link lands when: the page exists in
+// settingsMap.ts's PAGES; the map puts the target's section on THAT page; and
+// that page's FILE renders the section. A data-focus found anywhere in src/
+// proves nothing about where the link lands — it could sit in a section
+// another page renders, or in a component nothing mounts.
+const mapSrc = read("../src/settingsMap.ts");
+const kitSrc = read("../src/pages/kit.tsx");
+const isPageId = (cat) => new RegExp(`\\{ id: "${cat}", label: "[^"]+", group: `).test(mapSrc);
+const pageOf = (id) => mapSrc.match(new RegExp(`\\{ id: "${id}", page: "([a-z-]+)"`))?.[1];
+const subFocus = Object.fromEntries([...(mapSrc.match(/export const SUB_FOCUS[^{]*\{([\s\S]*?)\};/)?.[1] ?? "")
+  .matchAll(/"([a-z-]+)":\s*"([a-z-]+)"/g)].map((m) => [m[1], m[2]]));
+const pageSrc = (cat) => { try { return read(`../src/pages/${cat}.tsx`); } catch { return ""; } };
+/** One section's render in a page file: `<Sec id="x"` up to its `</Sec>`. */
+const secBlock = (cat, id) => {
+  const src = pageSrc(cat);
+  const at = src.indexOf(`<Sec id="${id}"`);
+  return at < 0 ? "" : src.slice(at, src.indexOf("</Sec>", at));
 };
+if (!/<fieldset className="sec" data-focus=\{id\}/.test(kitSrc)) fail("pages/kit.tsx: Sec no longer puts data-focus={id} on the section — no deep link highlights anything");
+else ok("a Sec carries its id as data-focus");
 for (const o of every) {
+  const section = subFocus[o.to?.focus] ?? o.to?.focus;
+  const block = secBlock(o.to?.cat, section);
   if (typeof o.to?.cat !== "string" || typeof o.to?.focus !== "string") fail(`${o.id}: offer.to must name a category AND a section`);
-  else if (!new RegExp(`id:\\s*"${o.to.cat}"`).test(sheetSrc)) fail(`${o.id}: SettingsSheet has no category "${o.to.cat}"`);
-  else if (!catSlice(o.to.cat).includes(`data-focus="${o.to.focus}"`)
-    // mcp-server's section predates the call-site convention; section 2 below
-    // pins it in McpPanel, which only the claude category mounts.
-    && !(o.id === "mcp-server" && read("../src/McpPanel.tsx").includes(`data-focus="${o.to.focus}"`))
-    // The pi category mounts PiPanel whole (`{cat === "pi" && <PiPanel`), and
-    // PiPanel renders the section: both halves, or the link lands nowhere.
-    // …and PiMcpSection must PUT the prop on its section: a literal in
-    // PiPanel alone passes even if the component drops it on the floor.
-    && !(o.id === "pi-mcp" && sheetSrc.includes(`{cat === "pi" && <PiPanel`)
-      && read("../src/PiPanel.tsx").includes(`data-focus="${o.to.focus}"`)
-      && /<section[^>]*data-focus=\{focusId\}/.test(read("../src/PiMcpPanel.tsx")))
-    // kimi's the same shape: the category mounts KimiPanel, which renders
-    // KimiMcpSection with the target, which puts it on its section.
-    && !(o.id === "kimi-mcp" && sheetSrc.includes(`{cat === "kimi" && <KimiPanel`)
-      && read("../src/KimiPanel.tsx").includes(`data-focus="${o.to.focus}"`)
-      && /<section[^>]*data-focus=\{focusId\}/.test(read("../src/KimiPanel.tsx")))
-    // The guidance category mounts GuidanceSection, whose "default changed"
-    // band carries this target — rendered for exactly the state that offers it.
-    && !(o.id === "agent-guidance-changed" && catSlice("guidance").includes("<GuidanceSection")
+  else if (!isPageId(o.to.cat)) fail(`${o.id}: settingsMap.ts has no page "${o.to.cat}"`);
+  else if (pageOf(section) !== o.to.cat) fail(`${o.id}: settingsMap.ts puts "${section}" on "${pageOf(section)}", not "${o.to.cat}" — the link opens one page and the section is on another`);
+  else if (!block) fail(`${o.id}: pages/${o.to.cat}.tsx renders no <Sec id="${section}"> — the deep link opens the page and highlights nothing`);
+  // A band INSIDE a section (SUB_FOCUS): the section's component must render
+  // the band with the target, for exactly the state that offers it.
+  else if (o.id === "agent-guidance-changed" && !(block.includes("<GuidanceSkillSection")
       && /<div className="guidance-changed" data-focus="agent-guidance-changed"/.test(read("../src/GuidancePanel.tsx"))
       && /\{usable && edit\.stale && <SkillChanged/.test(read("../src/GuidancePanel.tsx")))) {
-    fail(`${o.id}: the "${o.to.cat}" category's render carries no data-focus="${o.to.focus}" — the deep link opens the category and highlights nothing`);
-  } else ok(`${o.id} → ${o.to.cat}/${o.to.focus}, rendered by that category`);
+    fail(`${o.id}: the guidance-skill section does not render the "default changed" band that carries data-focus="${o.to.focus}"`);
+  } else ok(`${o.id} → ${o.to.cat}/${o.to.focus}, rendered by that page`);
   if (Object.values(o).some((v) => typeof v === "function")) fail(`${o.id}: an offer carries no functions`);
   // dismissal, per offer
   if (pendingOffers({ mcp: status("absent"), codexMcp: codex("absent"), piMcp: pi("absent"), kimiMcp: kimi("off"), userSkills: skills("missing"), guidance: guidance(true, true, 1, edited(true)), crossProject: xp("off"), planning: pl("unset") },
@@ -280,14 +279,12 @@ if (!offer) {
   } else ok("the offer is data, with no action to invoke");
 
   // the destination must actually exist on the other side
-  const sheet = read("../src/SettingsSheet.tsx");
-  if (!new RegExp(`id:\\s*"${offer.to.cat}"`).test(sheet)) {
-    fail(`SettingsSheet has no category "${offer.to.cat}" — the deep link lands nowhere`);
-  } else ok(`SettingsSheet has the "${offer.to.cat}" category`);
-  const panels = read("../src/McpPanel.tsx");
-  if (!panels.includes(`data-focus="${offer.to.focus}"`)) {
-    fail(`nothing carries data-focus="${offer.to.focus}" — the sheet opens but highlights nothing`);
-  } else ok(`data-focus="${offer.to.focus}" is on the section`);
+  if (!isPageId(offer.to.cat)) {
+    fail(`settingsMap.ts has no page "${offer.to.cat}" — the deep link lands nowhere`);
+  } else ok(`Settings has the "${offer.to.cat}" page`);
+  if (!secBlock(offer.to.cat, offer.to.focus).includes("<McpSection")) {
+    fail(`pages/${offer.to.cat}.tsx does not render McpSection in <Sec id="${offer.to.focus}"> — the sheet opens but highlights nothing`);
+  } else ok(`<Sec id="${offer.to.focus}"> holds the Claude MCP section`);
 }
 
 // ── 3. dismissal is per-id AND per-fingerprint ─────────────────────────────
@@ -411,9 +408,9 @@ if (!/invoke<PlanningStatus>\("planning_status"\)\.then\(setPlanning\)/.test(app
 } else ok("the planning offer input comes from a machine-level probe");
 {
   const plSrc = read("../src/PlanningPanel.tsx");
-  if (!/offerPending/.test(plSrc) || !/onSilenceOffer/.test(plSrc) || !/<section[^>]*data-focus=\{focusId\}/.test(plSrc)) {
-    fail("PlanningSection must carry offerPending/onSilenceOffer and put data-focus on its section");
-  } else ok("Settings → Planning can end its suggestion on demand, and is a deep-link target");
+  if (!/offerPending/.test(plSrc) || !/onSilenceOffer/.test(plSrc) || !secBlock("projects", "planning").includes("<PlanningSection")) {
+    fail("PlanningSection must carry offerPending/onSilenceOffer, inside <Sec id=\"planning\"> on the Projects page");
+  } else ok("Settings → Projects → Planning can end its suggestion on demand, and is a deep-link target");
   if (!/planningOfferPending=\{!!planningOffer\}/.test(app)) fail("App.tsx does not tell Settings whether the planning offer is pending");
   else ok("Settings is told whether the planning offer is pending");
 }
@@ -422,9 +419,9 @@ if (!/invoke<CrossProjectStatus>\("cross_project_status"\)\.then\(setCrossProjec
 } else ok("the cross-project offer input comes from a machine-level probe");
 {
   const xpSrc = read("../src/CrossProjectPanel.tsx");
-  if (!/offerPending/.test(xpSrc) || !/onSilenceOffer/.test(xpSrc) || !/<section[^>]*data-focus=\{focusId\}/.test(xpSrc)) {
-    fail("CrossProjectSection must carry offerPending/onSilenceOffer and put data-focus on its section");
-  } else ok("Settings → Agent guidance → Other projects can end its suggestion on demand, and is a deep-link target");
+  if (!/offerPending/.test(xpSrc) || !/onSilenceOffer/.test(xpSrc) || !secBlock("policy", "cross-project").includes("<CrossProjectSection")) {
+    fail("CrossProjectSection must carry offerPending/onSilenceOffer, inside <Sec id=\"cross-project\"> on the Agent policy page");
+  } else ok("Settings → Agent policy → Other projects can end its suggestion on demand, and is a deep-link target");
   if (!/crossProjectOfferPending=\{!!crossProjectOffer\}/.test(app)) fail("App.tsx does not tell Settings whether the cross-project offer is pending");
   else ok("Settings is told whether the cross-project offer is pending");
 }
@@ -433,9 +430,9 @@ if (!/invoke<GuidanceStatus>\("agent_guidance_status"\)\.then\(setGuidance\)/.te
 } else ok("the agent-guidance offer input comes from a machine-level probe");
 {
   const gp = read("../src/GuidancePanel.tsx");
-  if (!/offerPending/.test(gp) || !/onSilenceOffer/.test(gp) || !/<section[^>]*data-focus=\{focusId\}/.test(gp)) {
-    fail("GuidanceSection must carry offerPending/onSilenceOffer and put data-focus on its section");
-  } else ok("Settings → Agent guidance can end its suggestion on demand, and is a deep-link target");
+  if (!/offerPending/.test(gp) || !/onSilenceOffer/.test(gp) || !secBlock("guidance", "agent-guidance").includes("<GuidanceSection")) {
+    fail("GuidanceSection must carry offerPending/onSilenceOffer, inside <Sec id=\"agent-guidance\"> on the Guidance page");
+  } else ok("Settings → Guidance can end its suggestion on demand, and is a deep-link target");
   if (!/changeOfferPending/.test(gp) || !/onSilenceOffer=\{onSilenceChangeOffer\}/.test(gp)) fail("the \"default changed\" band must be able to end its own suggestion");
   else ok("the \"default changed\" band can end its suggestion on demand");
   if (!/guidanceChangeOfferPending=\{!!guidanceChangeOffer\}/.test(app)) fail("App.tsx does not tell Settings whether the agent-guidance-changed offer is pending");

@@ -134,7 +134,7 @@ export function useRemoteNotice(): RemoteStatus | null {
  *  remoteStore.ts, re-read on every `remote:changed` (the console's alone). */
 export function RemoteNotice({ st }: { st: RemoteStatus }) {
   return (
-    <button className="remote-notice" title="Settings → Remote access" onClick={() => openRemoteSettings("remote")}>
+    <button className="remote-notice" title="Settings → Remote" onClick={() => openRemoteSettings("remote")}>
       <span className="remote-notice-in">
         <span className={`engine-dot remote${st.state === "listening" ? "" : " starting"}`} aria-hidden />
         <span className="remote-notice-txt">{remoteNoticeWords(st)}</span>

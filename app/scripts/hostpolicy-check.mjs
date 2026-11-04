@@ -95,7 +95,9 @@ const KEYS = [
   ["term_per_tab_history", "set_term_history_opts", false],
 ];
 const HOST_KEYS = new Set(KEYS.map(([k]) => k));
-const ALLOWED = new Set(["SettingsSheet.tsx", "PiPanel.tsx", "HostPolicyControls.tsx"]);
+// pages/policy.tsx holds Codex's Permissions since the Settings regroup
+// (settings-reorg §3.2); PiPanel.tsx still holds pi's trust control.
+const ALLOWED = new Set(["policy.tsx", "PiPanel.tsx", "HostPolicyControls.tsx"]);
 const EFFECTS = new Set(["useEffect", "useLayoutEffect", "useInsertionEffect"]);
 /** The intrinsic elements whose `onChange` only the user's own edit fires. */
 const FORM_CONTROLS = new Set(["input", "select", "textarea"]);
@@ -134,7 +136,17 @@ const inRouteTable = (n) => {
   return !!arr && ts.isArrayLiteralExpression(arr) && !!decl && ts.isVariableDeclaration(decl) &&
     ROUTE_TABLES.includes(decl.name.getText()) && path.basename(decl.getSourceFile().fileName) === "ipc.ts";
 };
-const isSetter = (n) => (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) && SETTERS.includes(n.text) && !inRouteTable(n);
+/** A `read:` / `write:` field of a section in settingsMap.ts's SECTIONS: the
+ *  row a remote window may lack, named so the sheet can say so — a list,
+ *  never a call, like the route tables above. Exactly that file and those two
+ *  property names; anything else naming a setter counts. */
+const inSectionMap = (n) => {
+  const prop = n.parent;
+  return !!prop && ts.isPropertyAssignment(prop) && prop.initializer === n && ["read", "write"].includes(prop.name.getText())
+    && path.basename(n.getSourceFile().fileName) === "settingsMap.ts";
+};
+const isSetter = (n) => (ts.isStringLiteral(n) || ts.isNoSubstitutionTemplateLiteral(n)) && SETTERS.includes(n.text)
+  && !inRouteTable(n) && !inSectionMap(n);
 const isFn = (n) => ts.isFunctionDeclaration(n) || ts.isFunctionExpression(n) || ts.isArrowFunction(n) || ts.isMethodDeclaration(n);
 /** `{ key: … }` (or `{ key }`) handed to a call: a write of `key` into Settings. */
 const isKeyWrite = (n, key) => ts.isObjectLiteralExpression(n) && n.parent && ts.isCallExpression(n.parent)

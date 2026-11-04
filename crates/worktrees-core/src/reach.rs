@@ -265,7 +265,7 @@ pub fn plan_drop(reg: &Registry, level: Level, from_root: &str, slug: &str, into
         return Ok(Drop::Address(crate::mention::address(from.map(|e| e.name.as_str()), slug)));
     }
     if level == Level::Off {
-        return Err("cross-project reach is off — turn it on in Settings → Agent guidance".into());
+        return Err("cross-project reach is off — turn it on in Settings → Agent policy".into());
     }
     let Some(from) = from else {
         return Err("that place's project is not registered, so it has no name to address it by".into());

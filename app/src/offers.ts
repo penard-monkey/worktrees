@@ -242,7 +242,7 @@ export function pendingOffers(ctx: OfferCtx, dismissed: Record<string, string>):
       title: "Let agents see your other projects",
       body: "An orchestrator in one repo can check on lanes in your other projects and message their agents, addressed as project:place. Private projects stay out.",
       cta: "Review…",
-      to: { cat: "guidance", focus: "cross-project" },
+      to: { cat: "policy", focus: "cross-project" },
       fingerprint: "off",
     });
   }
@@ -259,7 +259,7 @@ export function pendingOffers(ctx: OfferCtx, dismissed: Record<string, string>):
       title: "Let Worktrees keep your agents' plans",
       body: "One plan folder per place, the active plan always the one you see in the Plan tab, and agents reminded of it as they work.",
       cta: "Review…",
-      to: { cat: "planning", focus: "planning" },
+      to: { cat: "projects", focus: "planning" },
       fingerprint: `v${pl.version}`,
     });
   }

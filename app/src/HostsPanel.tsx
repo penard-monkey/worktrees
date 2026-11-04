@@ -21,6 +21,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Channel, invoke, remoteHost } from "./ipc";
 import type { HostSummary } from "./ipcremote";
+import { useArmed } from "./useArmed";
 
 type HostList = { chosen: string | null; hosts: HostSummary[]; this_name: string };
 type PairEv = { dialling?: { host: string; addr: string }; code?: string };
@@ -34,14 +35,18 @@ function when(epoch: number): string {
   return new Date(epoch * 1000).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }
 
-export function HostsPanel({ onReport, onFail }: { onReport: (m: string) => void; onFail: (e: unknown) => void }) {
+/** `manage`: draw Paste a new address and Forget (Advanced, settings-reorg
+ *  §4.3); Drive and Pair are always there. */
+export function HostsPanel({ onReport, onFail, manage = true }: { onReport: (m: string) => void; onFail: (e: unknown) => void; manage?: boolean }) {
   const [list, setList] = useState<HostList | null>(null);
   const [listErr, setListErr] = useState<string | null>(null);
   const [link, setLink] = useState("");
   const [name, setName] = useState("");
   const [pairing, setPairing] = useState<{ host?: string; addr?: string; code?: string } | null>(null);
   const [pairErr, setPairErr] = useState<string | null>(null);
-  const [armed, setArmed] = useState<string | null>(null);
+  // Forget is two clicks, and the arm expires (useArmed).
+  const arm = useArmed<string>();
+  const armed = arm.armed;
   // The host whose "Paste a new address" form is open, what is typed there,
   // whether it is being tried, and the refusal in the shim's words.
   const [moving, setMoving] = useState<{ id: string; code: string; busy: boolean; err: string | null } | null>(null);
@@ -66,15 +71,13 @@ export function HostsPanel({ onReport, onFail }: { onReport: (m: string) => void
       window.location.reload();
     } catch (e) { onFail(e); }
   };
-  const forget = async (h: HostSummary) => {
-    if (armed !== h.id) { setArmed(h.id); return; }
-    setArmed(null);
+  const forget = (h: HostSummary) => arm.confirm(h.id, async () => {
     try {
       await invoke("remote_forget", { hostId: h.id });
       onReport(`Forgot ${h.name}. It still lists this machine until it is revoked there.`);
       await reload();
     } catch (e) { onFail(e); }
-  };
+  });
   const readdress = async (h: HostSummary, code: string) => {
     setMoving({ id: h.id, code, busy: true, err: null });
     try {
@@ -139,13 +142,13 @@ export function HostsPanel({ onReport, onFail }: { onReport: (m: string) => void
               <button className="ctrl sm" disabled={chosen === h.id} onClick={() => void choose(h.id)}>
                 {chosen === h.id ? "Driving" : "Drive"}
               </button>
-              <button className="ctrl sm" data-testid="hosts-move" disabled={moving?.id === h.id}
+              {manage && <button className="ctrl sm" data-testid="hosts-move" disabled={moving?.id === h.id}
                 onClick={() => setMoving({ id: h.id, code: "", busy: false, err: null })}>
                 Paste a new address
-              </button>
-              <button className={"ctrl sm danger" + (armed === h.id ? " armed" : "")} onClick={() => void forget(h)}>
+              </button>}
+              {manage && <button className={"ctrl sm danger" + (armed === h.id ? " armed" : "")} onClick={() => void forget(h)}>
                 {armed === h.id ? "Really forget?" : "Forget"}
-              </button>
+              </button>}
               {moving?.id === h.id && (
                 <div className="hosts-move" data-testid="hosts-move-form">
                   <div className="hint">
@@ -172,7 +175,7 @@ export function HostsPanel({ onReport, onFail }: { onReport: (m: string) => void
       <section className="setting" data-testid="hosts-pair">
         <label>Pair with a host</label>
         <div className="hint">
-          On the host, open a pairing window (Settings → Devices → Pair a device, or <code>worktrees serve pair</code>) and
+          On the host, open a pairing window (Settings → Remote → Pair a device, or <code>worktrees serve pair</code>) and
           copy the <code>worktrees-pair:v1?…</code> link it shows beside the QR — Universal Clipboard, AirDrop or a password
           manager. Only a private address (a LAN, Tailscale, a cable) is accepted, and it is checked before anything is dialled.
         </div>

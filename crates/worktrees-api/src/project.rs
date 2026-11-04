@@ -986,7 +986,7 @@ pub fn diagnostics(_ctx: &Ctx, gh: Option<bool>, viewer_path: String) -> Result<
     // validates tokens against the API, so with Pull requests switched off it
     // is not made at all: "off stops every gh call" includes this button.
     let gh_line = if gh == Some(false) {
-        "(not checked — Pull requests is off in Settings → Behavior)".to_string()
+        "(not checked — Pull requests is off in Settings → General)".to_string()
     } else {
         let gh = worktrees_core::github::gh_bin();
         let mut which = worktrees_core::childenv::command("which");
@@ -1279,7 +1279,7 @@ pub fn project_prs(
 /// quoting inside the command string.
 pub fn open_editor(path: String, cmd: String) -> Result<(), String> {
     if cmd.trim().is_empty() {
-        return Err("no editor configured (Settings → Editor command)".into());
+        return Err("no editor configured (Settings → General → Editor)".into());
     }
     let line = format!("{cmd} \"$0\"");
     launch_watched(&line, Some(&path), "Editor command", &cmd, LAUNCH_GRACE)
@@ -1298,7 +1298,7 @@ pub fn detect_editors() -> Result<Vec<editors::Editor>, String> {
 /// the whole command runs via `/bin/sh -c`. Same trust model as editor_cmd.
 pub fn open_terminal(cmd: String, session: String) -> Result<(), String> {
     if cmd.trim().is_empty() {
-        return Err("no terminal command configured (Settings → Terminal command)".into());
+        return Err("no terminal command configured (Settings → General → Terminal command)".into());
     }
     let quoted = worktrees_core::tmux::sq(&session);
     let line = cmd.replace("{session}", &quoted);
@@ -1397,13 +1397,13 @@ pub fn launch_watched(
         Some(127) => format!(
             "{setting} `{first}` was not found — {}",
             if setting == "Editor command" {
-                "choose an installed editor in Settings → Commands"
+                "choose an installed editor in Settings → General"
             } else {
-                "install it, or change it in Settings → Commands"
+                "install it, or change it in Settings → General"
             }
         ),
         Some(126) => format!(
-            "{setting} `{first}` is not executable — change it in Settings → Commands"
+            "{setting} `{first}` is not executable — change it in Settings → General"
         ),
         Some(n) if said.is_empty() => format!("{setting} `{cmd}` failed (exit {n})"),
         Some(n) => format!("{setting} `{cmd}` failed (exit {n}): {said}"),
@@ -1577,7 +1577,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains("`wt-no-such-editor-xyz` was not found"), "{e}");
-        assert!(e.contains("choose an installed editor in Settings → Commands"), "{e}");
+        assert!(e.contains("choose an installed editor in Settings → General"), "{e}");
     }
 
     /// Any other quick non-zero exit is an error too, carrying the last line
