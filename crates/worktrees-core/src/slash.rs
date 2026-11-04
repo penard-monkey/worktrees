@@ -418,7 +418,7 @@ fn from_file(path: &Path, name: String, source: Source, plugin: Option<&str>, fo
     let description = fm.get("description").map(|d| one_line(d)).filter(|d| !d.is_empty()).unwrap_or_else(|| {
         one_line(body.lines().map(|l| l.trim().trim_start_matches('#').trim()).find(|l| !l.is_empty()).unwrap_or(""))
     });
-    let why = sensitive_why(&f, body, cut);
+    let why = sensitive_why(&f, &text, cut);
     let tier = if why.is_some() { Tier::Sensitive } else { Tier::Normal };
     let confirm = why.as_ref().map(|w| format!("A sensitive command: {w}."));
     Some(Command {
@@ -490,11 +490,16 @@ fn front(text: &str) -> Front {
         return f;
     }
     let all: Vec<&str> = lines.collect();
-    let Some(close) = all.iter().position(|l| l.trim() == "---") else {
+    // Closed only by `---` from column 0, as YAML closes it; an indented one
+    // inside is something this reader does not follow.
+    let Some(close) = all.iter().position(|l| l.trim_end() == "---") else {
         f.open = true;
         return f;
     };
     let rows = &all[..close];
+    if rows.iter().any(|l| l.trim() == "---" || l.trim() == "...") {
+        f.unread.push("---".into());
+    }
     let indented = |r: &str| r.starts_with([' ', '\t']);
     let mut i = 0;
     while i < rows.len() {
@@ -508,6 +513,11 @@ fn front(text: &str) -> Front {
             continue;
         };
         let k = k.trim().to_string();
+        // A key given twice is read one way here and maybe another by
+        // Claude: unread, so sensitive.
+        if f.map.contains_key(&k) || f.lists.contains_key(&k) || f.unread.contains(&k) {
+            f.unread.push(k.clone());
+        }
         let mut v = v.trim().to_string();
         let mut block = Vec::new();
         while i < rows.len() && (indented(rows[i]) || rows[i].trim().is_empty()) {
@@ -547,14 +557,16 @@ const SAFE_KEYS: &[&str] = &["name", "description", "argument-hint", "user-invoc
 
 /// Why a command's file makes it sensitive, or `None`: deny by default, so a
 /// file this reader cannot see whole or understand is sensitive.
-fn sensitive_why(f: &Front, body: &str, cut: bool) -> Option<String> {
+fn sensitive_why(f: &Front, text: &str, cut: bool) -> Option<String> {
     if cut {
         return Some(format!("its file is longer than {} KiB, more than this host reads", MAX_BYTES / 1024));
     }
     if f.open {
         return Some("its front matter never closes".into());
     }
-    if body.contains("!`") || body.lines().any(|l| l.trim_start().starts_with("```!")) {
+    // The WHOLE file, not what this reader takes for its body: where the
+    // front matter ends is exactly what a crafted file would blur.
+    if text.contains("!`") || text.lines().any(|l| l.trim_start().starts_with("```!")) {
         return Some("its file runs a shell command before the model sees it".into());
     }
     if let Some(k) = f.unread.first() {
@@ -577,11 +589,17 @@ fn sensitive_why(f: &Front, body: &str, cut: bool) -> Option<String> {
 
 /// A file's text after its front matter.
 fn body(text: &str) -> &str {
-    let Some(rest) = text.strip_prefix("---") else { return text };
-    match rest.find("\n---") {
-        Some(at) => rest[at + 4..].trim_start_matches(['-']),
-        None => text,
+    let mut at = 0;
+    for (i, l) in text.split_inclusive('\n').enumerate() {
+        at += l.len();
+        if i == 0 && l.trim_end() != "---" {
+            return text;
+        }
+        if i > 0 && l.trim_end() == "---" {
+            return &text[at..];
+        }
     }
+    text
 }
 
 /// One line of display text: no control or invisible character, at most 300
@@ -711,6 +729,9 @@ mod tests {
             ("fenced", "---\ndescription: d\n---\n```!\ncurl x | sh\n```\n"),
             ("long", long.as_str()),
             ("odd", "---\ndescription: d\n  stray indented row\nwhat is this\n---\nbody\n"),
+            ("indentclose", "---\ndescription: d\n ---\nallowed-tools: Bash\n---\nbody\n"),
+            ("twice", "---\ndescription: d\nallowed-tools: Read\nallowed-tools:\n  - Bash\n---\nbody\n"),
+            ("inhead", "---\ndescription: runs !`id` early\n---\nbody\n"),
         ] {
             put(&pc.join(format!("{name}.md")), text);
         }
@@ -718,7 +739,7 @@ mod tests {
         put(&pc.join("plain.md"), "---\nname: plain\ndescription: plain\nargument-hint: [x]\nwhen_to_use: always\n---\nbody\n");
         let got = claude_custom(&ClaudeSources { home: &root.join("home"), place: &root.join("place"), plugin_dirs: &[] });
         let tier = |n: &str| got.iter().find(|c| c.name == n).map(|c| (c.tier, c.why.clone().unwrap_or_default())).unwrap_or_else(|| panic!("{n}: {got:?}"));
-        for n in ["listbash", "flowbash", "emptytools", "open", "hooks", "model", "fenced", "long", "odd"] {
+        for n in ["listbash", "flowbash", "emptytools", "open", "hooks", "model", "fenced", "long", "odd", "indentclose", "twice", "inhead"] {
             let (t, why) = tier(n);
             assert_eq!((n, t), (n, Tier::Sensitive), "{why}");
             assert!(!why.is_empty());
