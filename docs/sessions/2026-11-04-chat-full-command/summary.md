@@ -96,7 +96,7 @@ the rest.
 - **A local `cargo test -p worktrees-cli` hung** for about 30 minutes in
   `serve::remote::tests::a_proven_client_below_the_protocol_floor_is_told_to_update_and_never_served`.
   I killed it and did not find the cause. The same test passed in CI's
-  `rust (macos-latest)` on all three heads I checked.
+  `rust (macos-latest)` on both heads whose logs I read (`ef8125a`, `c29d187`).
 - **A flex-button mutation failed by a timeout I did not trace**, so it proves
   little. The WebKit evidence is the direct measurement: button and plain rows
   match on height, left edge and line styling.
