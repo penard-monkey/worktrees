@@ -545,11 +545,10 @@ export function foldCalls(calls: ToolCall[], open: boolean): { shown: ToolCall[]
 export function callKeys(calls: ToolCall[], itemKey: string): string[] {
   const taken = new Map<string, number>();
   return calls.map((c) => {
-    if (c.call_id) return c.call_id;
-    const base = `${itemKey}|${c.name}|${c.summary ?? ""}`;
+    const base = c.call_id ?? `${itemKey}|${c.name}|${c.summary ?? ""}`;
     const n = taken.get(base) ?? 0;
     taken.set(base, n + 1);
-    return `${base}|${n}`;
+    return n === 0 && c.call_id ? base : `${base}|${n}`;
   });
 }
 

@@ -169,6 +169,9 @@ const kinds = (items) => items.map((it) => it.k);
   const k2 = C.callKeys(r.calls.slice(1), "r1");
   if (k1[1] !== k2[0] || k1[2] !== k2[1] || k1[0] !== "a") fail(`a call's key survives the window losing the steps before it — ${k1} / ${k2}`);
   else ok("a call's key is its id, whatever is above it");
+  const dup = C.callKeys([{ name: "Bash", call_id: "x" }, { name: "Read", call_id: "x" }, { name: "Grep", call_id: "y" }], "r1");
+  if (new Set(dup).size !== 3 || dup[0] !== "x" || dup[2] !== "y") fail(`an id seen twice in a reply gets two keys — ${dup}`);
+  else ok("an id seen twice in a reply gets two keys");
   const twice = C.callKeys([{ name: "Bash", summary: "ls" }, { name: "Bash", summary: "ls" }, { name: "Read" }], "r1");
   const sliced = C.callKeys([{ name: "Bash", summary: "ls" }, { name: "Bash", summary: "ls" }, { name: "Read" }, { name: "Grep" }], "r1");
   if (new Set(twice).size !== 3 || twice[2] !== sliced[2]) fail(`an older host's keys are unique and survive an append — ${twice}`);
@@ -214,7 +217,14 @@ const kinds = (items) => items.map((it) => it.k);
   await C.toggleCall(target, "f", { name: "x", call_id: "f", detail: true });
   await C.toggleCall(target, "f", { name: "x", call_id: "f", detail: true });
   if (asked.length !== 1 || !calls().read.f?.truncated) fail(`a failure is asked again on reopening — asked ${asked.length}, ${JSON.stringify(calls().read.f)}`);
-  else ok("a failure is asked again on reopening; `gone` and an older host are not");
+  else ok("a failure is asked again on reopening");
+  asked = [];
+  for (const id of ["g", "o"]) {
+    await C.toggleCall(target, id, { name: "x", call_id: id, detail: true });
+    await C.toggleCall(target, id, { name: "x", call_id: id, detail: true });
+  }
+  if (asked.length) fail(`\`gone\` and an older host are not asked again — asked ${asked.length}`);
+  else ok("`gone` and an older host are not asked again");
   delete globalThis.__chatStepsInvoke;
 }
 
@@ -267,7 +277,10 @@ const kinds = (items) => items.map((it) => it.k);
   else ok("a summary is drawn as text, the whole line in its title");
   if (!/<pre className="chat-call-text"[^>]*>\{text\}<\/pre>/.test(body)) fail("an opened call is plain text in a <pre>");
   else ok("an opened call is plain text in a <pre>");
-  if (/<button[^>]*>[^]*?chat-call-text[^]*?<\/button>/.test(body.slice(body.indexOf("function CallRow(")))) fail("an opened call's text sits outside its button, so selecting it cannot close it");
+  const buttons = [...body.matchAll(/<button\b[^]*?<\/button>/g)].map((m) => m[0]);
+  if (buttons.length < 2) fail(`CallRow and CallChip draw their buttons where this check looks — found ${buttons.length}`);
+  else if (buttons.some((b) => /<CallFull\b|chat-call-text/.test(b))) fail("an opened call's text sits outside its button, so selecting it cannot close it");
+  else ok("an opened call's text sits outside its button");
 }
 
 // 11. A message absorbed by Claude is a user step in the running turn. It

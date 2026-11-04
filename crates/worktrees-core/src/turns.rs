@@ -726,21 +726,23 @@ fn summary_of(name: &str, input: Option<&serde_json::Value>) -> Option<String> {
 }
 
 /// Tools whose input holds a file's contents (`content`, `old_string`,
-/// `new_string`, `new_source`, `edits`). [`ran_of`] keeps nothing of them: the
-/// contents stay in the terminal, and the row's line is the path they name.
-/// Without this list the generic input below would send them by default.
-const PATH_ONLY: [&str; 4] = ["Edit", "MultiEdit", "Write", "NotebookEdit"];
+/// `new_string`, `new_source`, `edits`), each with the one field of it that is
+/// kept: the path. [`ran_of`] keeps nothing else, as the contents stay in the
+/// terminal. Without this list the generic input below would send them by
+/// default. It goes by Claude's own tool names and not by an input's shape: an
+/// MCP tool handed a file's contents shows them as it shows any input.
+const PATH_ONLY: [(&str, &str); 4] = [("Edit", "file_path"), ("MultiEdit", "file_path"), ("Write", "file_path"), ("NotebookEdit", "notebook_path")];
 
 /// What a Claude tool call was given: the text [`summary_of`] shows a line of
 /// for a tool it knows (a sub-agent's being the prompt it was given, its
-/// command), nothing of a [`PATH_ONLY`] tool, and for any other tool, an MCP
-/// tool's included, its input.
+/// command), only the path of a [`PATH_ONLY`] tool, and for any other tool, an
+/// MCP tool's included, its input.
 fn ran_of(name: &str, input: Option<&serde_json::Value>) -> Ran {
     let Some(input) = input else { return Ran::Nothing };
-    if PATH_ONLY.contains(&name) {
-        return Ran::Nothing;
-    }
     let s = |k: &str| input.get(k).and_then(|v| v.as_str()).map(str::to_string);
+    if let Some((_, key)) = PATH_ONLY.iter().find(|(tool, _)| *tool == name) {
+        return s(key).map_or(Ran::Nothing, |path| Ran::Parts(vec![Some(path)]));
+    }
     let text = match name {
         "Bash" => s("command"),
         "Read" => s("file_path"),
@@ -770,13 +772,30 @@ fn ran_json(input: &serde_json::Value) -> Ran {
     if empty { Ran::Nothing } else { Ran::Json(input.clone()) }
 }
 
-/// `v` with every string in it, keys too, [`clean_text`]ed.
+/// `v` with every string in it, keys too, [`clean_text`]ed. Keys that clean
+/// alike keep both values, the later as `<key> (2)`: a hidden character must
+/// not be able to take a value out of what a person reads. A key the input
+/// really has is placed first, so it is never the one renamed.
 fn clean_json(v: &serde_json::Value) -> serde_json::Value {
     use serde_json::Value;
     match v {
         Value::String(s) => Value::String(clean_text(s)),
         Value::Array(a) => Value::Array(a.iter().map(clean_json).collect()),
-        Value::Object(o) => Value::Object(o.iter().map(|(k, v)| (clean_text(k), clean_json(v))).collect()),
+        Value::Object(o) => {
+            let mut out = serde_json::Map::with_capacity(o.len());
+            let (plain, hidden): (Vec<_>, Vec<_>) = o.iter().partition(|(k, _)| clean_text(k) == **k);
+            for (k, v) in plain.into_iter().chain(hidden) {
+                let key = clean_text(k);
+                let mut free = key.clone();
+                let mut n = 2;
+                while out.contains_key(&free) {
+                    free = format!("{key} ({n})");
+                    n += 1;
+                }
+                out.insert(free, clean_json(v));
+            }
+            Value::Object(out)
+        }
         other => other.clone(),
     }
 }
@@ -816,10 +835,30 @@ const BUILT_COMMAND: &str = "(a command this script builds)";
 fn says_more(ran: &Ran, summary: Option<&str>) -> bool {
     match ran {
         Ran::Nothing => false,
-        Ran::Json(_) => true,
+        Ran::Json(input) => !repeats_line(input, summary),
         Ran::Parts(parts) => parts_text(parts).is_some_and(|text| {
             text.lines().filter(|l| !l.trim().is_empty()).count() > 1 || text.trim().chars().count() > SUMMARY_MAX || one_line(&text).as_deref() != summary
         }),
+    }
+}
+
+/// An input with no values at all, or whose one value is the line already
+/// shown (`Skill`'s `{"skill": "x"}`), which opening would only say again.
+fn repeats_line(input: &serde_json::Value, summary: Option<&str>) -> bool {
+    use serde_json::Value;
+    fn leaves<'a>(v: &'a Value, out: &mut Vec<&'a Value>) {
+        match v {
+            Value::Array(a) => a.iter().for_each(|x| leaves(x, out)),
+            Value::Object(o) => o.values().for_each(|x| leaves(x, out)),
+            other => out.push(other),
+        }
+    }
+    let mut all = Vec::new();
+    leaves(input, &mut all);
+    match (all.as_slice(), summary) {
+        ([], _) => true,
+        ([Value::String(s)], Some(line)) => one_line(s).as_deref() == Some(line) && s.trim().chars().count() <= SUMMARY_MAX && s.trim().lines().count() <= 1,
+        _ => false,
     }
 }
 
@@ -1430,7 +1469,9 @@ impl Step {
         let opt = |s: &Option<String>| s.as_ref().map_or(0, String::len);
         match self {
             Step::Text { text, .. } | Step::User { text, .. } => text.len(),
-            Step::Tool { name, id, summary, failed, .. } => name.len() + id.len() + opt(summary) + if *failed { FAILED_BYTES } else { 0 },
+            Step::Tool { name, id, summary, failed, detail, .. } => {
+                name.len() + opt(summary) + if id.is_empty() { 0 } else { CALL_ID_BYTES + id.len() } + if *failed { FAILED_BYTES } else { 0 } + if *detail { DETAIL_BYTES } else { 0 }
+            }
             Step::Question { questions, answer, .. } => {
                 questions.iter().map(|q| q.header.len() + q.question.len() + q.options.iter().map(|o| o.label.len() + o.description.len()).sum::<usize>()).sum::<usize>()
                     + answer.iter().flat_map(|a| &a.answers).map(|a| a.question.len() + a.picked.iter().map(String::len).sum::<usize>() + opt(&a.typed) + opt(&a.note)).sum::<usize>()
@@ -1443,6 +1484,10 @@ impl Step {
 
 /// What a tool step's `failed` costs toward [`TOTAL_MAX`]: its JSON.
 const FAILED_BYTES: usize = r#","failed":true"#.len();
+/// What a tool step's `detail` costs, as `failed` does.
+const DETAIL_BYTES: usize = r#","detail":true"#.len();
+/// What a tool step's `call_id` costs beyond the id itself.
+const CALL_ID_BYTES: usize = r#","call_id":"""#.len();
 
 /// `turns` cut to [`TOTAL_MAX`] bytes of text, newest kept. Whole turns go
 /// first, oldest first, counted WITHOUT their tool calls' summaries, so a
@@ -1668,8 +1713,8 @@ mod tests {
     }
 
     /// The named exclusion: however a file-writing tool's input is shaped,
-    /// nothing of it leaves and `detail` says so, whatever its path's length.
-    /// The generic input path would hand back every one of these strings.
+    /// only its path leaves, and `detail` says so only for a path its line
+    /// cut. The generic input path would hand back every one of these strings.
     #[test]
     fn a_file_writing_tools_contents_never_come_back() {
         use serde_json::json;
@@ -1681,12 +1726,21 @@ mod tests {
             tool_use("note", "NotebookEdit", json!({"notebook_path":path,"new_source":"LEAK","cell_id":"LEAK"})),
         ];
         for id in ["edit", "multi", "write", "note"] {
-            assert_eq!(claude_tool_call(&fx, id), None, "{id}");
+            let got = claude_tool_call(&fx, id).unwrap();
+            assert_eq!(got.input, json!(path), "{id}");
+            assert!(!serde_json::to_string(&got).unwrap().contains("LEAK"), "{id}");
         }
         let got = claude(&fx, 5);
-        assert!(rows(&got).iter().all(|r| !r.2 && r.1.is_some() && r.0.is_some()), "{got:#?}");
+        assert!(rows(&got).iter().all(|r| r.2 && r.1.is_some() && r.0.is_some()), "a long path has more than its line: {got:#?}");
         assert!(!serde_json::to_string(&got).unwrap().contains("LEAK"));
-        assert_eq!(PATH_ONLY, ["Edit", "MultiEdit", "Write", "NotebookEdit"]);
+        assert_eq!(PATH_ONLY.map(|(tool, _)| tool), ["Edit", "MultiEdit", "Write", "NotebookEdit"]);
+        // A path that fits has nothing more to show; no path, nothing at all.
+        let fx = vec![
+            tool_use("short", "Write", json!({"file_path":"/r/a.rs","content":"LEAK"})),
+            tool_use("none", "Write", json!({"content":"LEAK"})),
+        ];
+        assert!(rows(&claude(&fx, 5)).iter().all(|r| !r.2));
+        assert_eq!(claude_tool_call(&fx, "none"), None);
     }
 
     /// Any other tool, MCP's and an unknown one's, answers with its input as
@@ -1718,6 +1772,50 @@ mod tests {
         assert_eq!(codex_tool_call(&cx, "f").unwrap().input, json!({"q":"ab"}));
         assert_eq!(codex_tool_call(&cx, "t").unwrap().input, "raw\ntext");
         assert_eq!(codex_tool_call(&cx, "b").unwrap().input, "not json");
+    }
+
+    /// An input that says only what its line says has nothing to open.
+    #[test]
+    fn an_input_that_repeats_its_line_has_no_detail() {
+        use serde_json::json;
+        let fx = vec![
+            tool_use("same", "Skill", json!({"skill":"close-out"})),
+            tool_use("more", "Skill", json!({"skill":"close-out","args":"--dry-run"})),
+            tool_use("todo", "TodoWrite", json!({"todos":[]})),
+            tool_use("one", "mcp__a__b", json!({"q":"x"})),
+        ];
+        let got = rows(&claude(&fx, 5));
+        assert_eq!(got[0], (Some("close-out".to_string()), Some("same".to_string()), false));
+        assert!(got[1].2, "{got:?}");
+        assert!(!got[2].2, "an input with no values says nothing: {got:?}");
+        assert!(got[3].2, "no line to repeat: {got:?}");
+    }
+
+    /// Two keys that differ only by what cleaning removes must not lose a
+    /// value: a hidden character could otherwise hide one from the reader.
+    #[test]
+    fn keys_that_clean_alike_keep_both_values() {
+        use serde_json::json;
+        let fx = vec![tool_use("m", "mcp__a__b", json!({"a":1,"a\u{200b}":2,"a\u{202e}":3,"a (2)":4}))];
+        let got = claude_tool_call(&fx, "m").unwrap().input;
+        let o = got.as_object().unwrap();
+        assert_eq!(o.len(), 4, "{got}");
+        let mut values: Vec<i64> = o.values().map(|v| v.as_i64().unwrap()).collect();
+        values.sort();
+        assert_eq!(values, [1, 2, 3, 4], "{got}");
+        assert_eq!(o["a"], 1);
+        assert_eq!(o["a (2)"], 4, "a key the input really has keeps its value: {got}");
+    }
+
+    /// The budget counts what a step's id and flags cost on the wire.
+    #[test]
+    fn a_tool_steps_bytes_count_its_id_and_detail() {
+        use serde_json::json;
+        let got = claude(&[tool_use("id1", "mcp__a__b", json!({"q":"x"}))], 5);
+        let step = &got[0].steps[0];
+        let wire = serde_json::to_string(step).unwrap();
+        assert!(wire.contains(r#","call_id":"id1""#) && wire.contains(r#","detail":true"#), "{wire}");
+        assert_eq!(step.bytes(), "mcp__a__b".len() + r#","call_id":"id1""#.len() + r#","detail":true"#.len());
     }
 
     /// Every shape Codex's summary reads gives its whole text too: a script's
@@ -2325,7 +2423,7 @@ mod tests {
         let first = got[0].steps.iter().find(|s| matches!(s, Step::Tool { failed: true, .. })).unwrap();
         let id_len = first.id().unwrap().len();
         let one = first.bytes();
-        assert_eq!(one, "Bash".len() + id_len + cmd(0, 0).chars().take(SUMMARY_MAX).collect::<String>().len() + "…".len() + FAILED_BYTES, "a summary, its id and its flag count");
+        assert_eq!(one, "Bash".len() + r#","call_id":"""#.len() + id_len + r#","detail":true"#.len() + cmd(0, 0).chars().take(SUMMARY_MAX).collect::<String>().len() + "…".len() + FAILED_BYTES, "a summary, its id and its flag count");
 
         let (kept, dropped) = within_budget(got);
         assert!(kept.iter().map(Turn::bytes).sum::<usize>() <= TOTAL_MAX);
