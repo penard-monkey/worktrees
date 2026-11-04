@@ -1,0 +1,40 @@
+
+  >_ OpenAI Codex (v0.160.1)
+     /private/tmp/claude-501/wtcx/repo
+
+  Speak, friend, and enter a prompt.
+
+  Tip: Use the desktop app. Run codex app to open it. It installs automatically if needed.
+
+› /model         choose what model and reasoning effort to use
+  /fast          1.5x speed
+  /ide           include current selection, open files, and other context from your IDE
+  /permissions   choose what Codex is allowed to do
+  /keymap        remap TUI shortcuts
+  /vim           toggle Vim mode for the composer
+  /experimental  toggle experimental features
+  /approve       approve one retry of a recent auto-review denial
+
+› /
+
+  GPT-6-Sol medium · /private/tmp/claude-501/wtcx/repo
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

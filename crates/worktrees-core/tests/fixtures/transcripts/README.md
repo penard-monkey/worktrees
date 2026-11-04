@@ -115,3 +115,18 @@ command whose removal says `delivered_to_agent` and whose text appears in a norm
 reader. The absorbed removal precedes its attachment in file order, while
 the attachment carries its own earlier timestamp. Replace this fixture when
 a scratch capture is available.
+
+`claude-2.1.318-commands.jsonl` is a REAL transcript, trimmed: the two
+scratch sessions behind `claude-screen/2.1.318/slash/` (2026-11-04), in
+order — `/context`, `/model` (`s`), two messages, a queued `/context`,
+`/compact keep only that we listed animal facts`, then (after `/clear`, a new
+session id) `/hello world` and `/preexec` (project commands) and an
+AskUserQuestion. Kept: `user`, `assistant`, and `system` entries of subtype
+`local_command` and `compact_boundary`, with the fields the reader looks at.
+Thinking is `THINKING-MARKER`, a tool's output `TOOL-OUTPUT-MARKER`, the
+compact summary `SUMMARY-MARKER` (with a `<system-reminder>`), `/context`'s
+markdown copy for the model `CONTEXT-META-MARKER`, a command's expansion
+`COMMAND-EXPANSION-MARKER`; the home directory is `/Users/u`. New in 2.1.318:
+a local command's name and output are `type: "system", subtype:
+"local_command"` entries (with ANSI in the output), and a prompt command's
+`human`-origin entry puts `<command-message>` before `<command-name>`.

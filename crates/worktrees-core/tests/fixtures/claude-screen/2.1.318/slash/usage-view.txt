@@ -1,0 +1,40 @@
+
+  ⎿  Set model to Opus 5.5 for this session only
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔ ◉ xhigh · /effort ▔
+   Settings  Status   Config   Usage   Stats
+
+   Session
+
+   Total cost:            $0.3522
+   Total duration (API):  24s
+   Total duration (wall): 23m 56s
+   Total code changes:    0 lines added, 0 lines removed
+   Usage by model:
+        claude-opus-5-5:  10 input, 1.3k output, 133.9k cache read, 37.4k cache write ($0.3522)
+   Prompt cache (main):   4 requests · 78% of input tokens from cache · 1 miss (last 23m 34s ago, 16.9k tokens
+   re-cached) · warm (1h TTL, last activity 4m 53s ago)
+
+   Current session
+   ██████████████████▌                                37% used
+   Resets 4:50pm (America/Denver)
+
+   Current week (all models)
+   ██▌                                                5% used
+   Resets Nov 10 at 11pm (America/Denver)
+
+   Current week (Fable)
+   ██                                                 4% used
+   Resets Nov 10 at 11pm (America/Denver)
+
+   What's contributing to your usage?
+   Approximate · sessions on this machine only
+
+   Last 24h · shares overlap
+
+   90%  Start fresh when you switch tasks · run /clear
+   29%  Give "Explore" subagents a cheaper model
+   26%  Run fewer sessions at once · up to 7 at once
+   20%  Trim ~/Projects/worktrees/.worktrees/feat-harness-updates/AGENTS.md · 41k
+        tokens per request
+
+   Subagents               % of usage                                                                                 ↓

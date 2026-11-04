@@ -1,0 +1,432 @@
+   Browse default commands
+
+   ❯ /add-dir
+     Add a new working directory
+     /advisor
+     Let Claude consult a stronger model at key moments
+     /artifacts
+     Browse your published and shared artifacts
+     /auto-mode-setup
+     Teach auto mode about your environment, plus optional rule tweaks
+     /autocompact
+     Set how full the context gets before auto-summarizing
+     /autofix-pr
+     Monitor and autofix any issues with the current PR
+     /background
+     Send this session to the background and free the terminal
+     /batch
+     Plan a large change; background agents each open a PR
+     /branch
+     Create a branch of the current conversation at this point
+     /btw
+     Ask a quick side question without interrupting the main conversation
+     /bug
+     Report a bug or share your conversation
+     /cd
+     Move this session to a new working directory
+     /chrome
+     Open Claude in Chrome settings
+     /claude-api
+     Build and debug apps that use the Claude API
+     /claude-in-chrome
+     Let Claude browse and interact with pages in your Chrome
+     /clear
+     Start a new session with empty context; previous session stays on disk (resumable with /resume)
+     /code-review
+     Review the current diff or a PR for bugs and cleanups
+     /color
+     Set the prompt bar color for this session
+     /compact
+     Free up context by summarizing the conversation so far
+     /config
+     Open settings
+     /context
+     Visualize current context usage as a colored grid
+     /copy
+     Copy Claude's last response to clipboard (or /copy N for the Nth-latest)
+
+     ↓ 86 more
+
+
+   For more help: https://code.claude.com/docs/en/overview
+
+   Something else? Use /feedback to report bugs or request features.
+=====PAGE
+   Browse default commands
+
+     /add-dir
+     Add a new working directory
+     /advisor
+     Let Claude consult a stronger model at key moments
+     /artifacts
+     Browse your published and shared artifacts
+     /auto-mode-setup
+     Teach auto mode about your environment, plus optional rule tweaks
+     /autocompact
+     Set how full the context gets before auto-summarizing
+     /autofix-pr
+     Monitor and autofix any issues with the current PR
+     /background
+     Send this session to the background and free the terminal
+     /batch
+     Plan a large change; background agents each open a PR
+     /branch
+     Create a branch of the current conversation at this point
+     /btw
+     Ask a quick side question without interrupting the main conversation
+     /bug
+     Report a bug or share your conversation
+     /cd
+     Move this session to a new working directory
+     /chrome
+     Open Claude in Chrome settings
+     /claude-api
+     Build and debug apps that use the Claude API
+     /claude-in-chrome
+     Let Claude browse and interact with pages in your Chrome
+     /clear
+     Start a new session with empty context; previous session stays on disk (resumable with /resume)
+     /code-review
+     Review the current diff or a PR for bugs and cleanups
+     /color
+     Set the prompt bar color for this session
+     /compact
+     Free up context by summarizing the conversation so far
+     /config
+     Open settings
+     /context
+     Visualize current context usage as a colored grid
+   ❯ /copy
+     Copy Claude's last response to clipboard (or /copy N for the Nth-latest)
+
+     ↓ 86 more
+
+
+   For more help: https://code.claude.com/docs/en/overview
+
+   Something else? Use /feedback to report bugs or request features.
+=====PAGE
+   Browse default commands
+
+     ↑ 22 more
+     /dataviz
+     Chart and dashboard design guidance
+     /debug
+     Turn on debug logging and investigate problems
+     /deep-research
+     Deep research harness — fan-out web searches, fetch sources, adversarially verify claims, synthesize a cited …
+     /design
+     Make a new Design artifact from a brief
+     /design-login
+     Authorize design-system access for /design-sync with your claude.ai account
+     /design-sync
+     Push your design system components to claude.ai/design
+     /desktop
+     Continue the current session in Claude Desktop
+     /diff
+     Toggle the diff panel showing uncommitted changes
+     /doctor
+     Health-check your setup and fix issues: installation, unused extensions, duplicated or bloated memory files, …
+     /effort
+     Set effort level for model usage
+     /exit
+     Exit the CLI
+     /export
+     Export the current conversation to a file or clipboard
+     /fast
+     Toggle fast mode (Opus 5.5)
+     /feedback
+     Send feedback to Anthropic or report a bug
+     /fewer-permission-prompts
+     Pre-approve safe read-only commands based on your usage
+     /focus
+     Toggle focus view: just your prompt, summary, and response
+     /fork
+     Copy this conversation into a new background session and keep working here
+     /goal
+     Set a goal Claude checks before stopping
+     /help
+     Show help and available commands
+     /hooks
+     View hook configurations for tool events
+     /ide
+     Manage IDE integrations and show status
+   ❯ /import
+     Import config from another AI coding agent
+     ↓ 64 more
+
+
+   For more help: https://code.claude.com/docs/en/overview
+
+   Something else? Use /feedback to report bugs or request features.
+=====PAGE
+   Browse default commands
+
+     ↑ 44 more
+     /init
+     Initialize a new CLAUDE.md file with codebase documentation
+     /insights
+     Generate a report analyzing your Claude Code sessions
+     /install-github-app
+     Set up Claude GitHub Actions for a repository
+     /install-slack-app
+     Install the Claude Slack app
+     /keybindings
+     Open your keyboard shortcuts file
+     /list-agents
+     List subagents, teammates, and other Claude sessions you can message
+     /login
+     Sign in with your Anthropic account
+     /logout
+     Sign out from your Anthropic account
+     /loop
+     Repeat a prompt or command on an interval (e.g. /loop 5m /foo)
+     /mcp
+     Manage MCP servers
+     /memory
+     Edit CLAUDE.md files and memory settings
+     /mobile
+     Show QR code to download the Claude mobile app
+     /model
+     Set the AI model for Claude Code (currently Opus 5.5)
+     /output-style
+     List output styles or switch to one
+     /passes
+     Share a free week of Claude Code with friends and earn usage credits
+     /permissions
+     Manage allow and deny tool permission rules
+     /plan
+     Enable plan mode or view the current session plan
+     /plugin
+     Manage Claude Code plugins
+     /plugin-authoring
+     Write a mod: a live pane, view or behaviour change in Claude Code
+     /powerup
+     Discover Claude Code features through quick interactive lessons
+     /privacy-settings
+     View and update your privacy settings
+   ❯ /radio
+     Listen to Claude FM lo-fi radio
+     ↓ 42 more
+
+
+   For more help: https://code.claude.com/docs/en/overview
+
+   Something else? Use /feedback to report bugs or request features.
+=====PAGE
+   Browse default commands
+
+     ↑ 66 more
+     /rate-limit-options
+     Manage usage limits and upgrade options
+     /recap
+     Generate a one-line session recap now
+     /release-notes
+     View release notes
+     /reload-plugins
+     Activate pending plugin changes in the current session
+     /reload-skills
+     Pick up skills added or changed on disk during this session
+     /remote-control
+     Control this session from your phone or claude.ai/code
+     /remote-env
+     Choose the default environment for cloud agents
+     /rename
+     Rename the current conversation
+     /restart
+     Restart Claude Code and keep this session
+     /resume
+     Resume a previous conversation
+     /rewind
+     Restore the code and/or conversation to a previous point
+     /run
+     Launch this project’s app to see your change working
+     /run-skill-generator
+     Create a skill that knows how to run this project’s app
+     /sandbox
+     ◯ sandbox disabled (⏎ to configure)
+     /schedule
+     Create and manage routines: cloud agents on a schedule
+     /scroll-speed
+     Adjust mouse wheel scroll speed
+     /security-review
+     Complete a security review of the pending changes on the current branch
+     /send-to-project
+     Send this session's work to a Claude Project
+     /simplify
+     Clean up the changed code without changing behavior
+     /skill-doctor
+     Show which loaded skills are unused and costing context
+     /skills
+     List available skills
+   ❯ /slides
+     Make a new Slides deck artifact from a brief
+     ↓ 20 more
+
+
+   For more help: https://code.claude.com/docs/en/overview
+
+   Something else? Use /feedback to report bugs or request features.
+=====PAGE
+   Browse default commands
+
+     ↑ 86 more
+     /skills
+     List available skills
+     /slides
+     Make a new Slides deck artifact from a brief
+     /status
+     Show Claude Code status including version, model, account, API connectivity, and tool statuses
+     /statusline
+     Set up Claude Code's status line UI
+     /stickers
+     Order Claude Code stickers
+     /subtask
+     Send a subagent off with your full context; its result comes back here
+     /tasks
+     View and manage everything running in the background
+     /team-onboarding
+     Help teammates ramp on Claude Code with a guide from your usage
+     /teleport
+     Send this session to the cloud, or resume one from claude.ai
+     /terminal-setup
+     Install Shift+Enter key binding for newlines
+     /theme
+     Change the theme
+     /tui
+     Set the terminal UI renderer (default | fullscreen)
+     /ultrareview
+     Start a cloud agent that finds and verifies bugs in your branch (~5-15 min, $5-$25 USD) · Runs in a cloud ses…
+     /update-config
+     Change settings: hooks, permissions, environment variables
+     /upgrade
+     Upgrade your plan for higher rate limits and more Opus
+     /usage
+     Show session cost, plan usage, and activity stats
+     /usage-credits
+     Configure usage credits or request them from your admin when you hit a limit
+     /verify
+     Try your change and report if it works
+     /voice
+     Toggle voice mode
+     /web-setup
+     Set up cloud sessions with your GitHub account
+     /workflow-authoring
+     Load the reference for writing Workflow tool scripts
+   ❯ /workflows
+     Browse running and completed workflows
+
+
+
+   For more help: https://code.claude.com/docs/en/overview
+
+   Something else? Use /feedback to report bugs or request features.
+=====PAGE
+   Browse default commands
+
+     ↑ 86 more
+     /skills
+     List available skills
+     /slides
+     Make a new Slides deck artifact from a brief
+     /status
+     Show Claude Code status including version, model, account, API connectivity, and tool statuses
+     /statusline
+     Set up Claude Code's status line UI
+     /stickers
+     Order Claude Code stickers
+     /subtask
+     Send a subagent off with your full context; its result comes back here
+     /tasks
+     View and manage everything running in the background
+     /team-onboarding
+     Help teammates ramp on Claude Code with a guide from your usage
+     /teleport
+     Send this session to the cloud, or resume one from claude.ai
+     /terminal-setup
+     Install Shift+Enter key binding for newlines
+     /theme
+     Change the theme
+     /tui
+     Set the terminal UI renderer (default | fullscreen)
+     /ultrareview
+     Start a cloud agent that finds and verifies bugs in your branch (~5-15 min, $5-$25 USD) · Runs in a cloud ses…
+     /update-config
+     Change settings: hooks, permissions, environment variables
+     /upgrade
+     Upgrade your plan for higher rate limits and more Opus
+     /usage
+     Show session cost, plan usage, and activity stats
+     /usage-credits
+     Configure usage credits or request them from your admin when you hit a limit
+     /verify
+     Try your change and report if it works
+     /voice
+     Toggle voice mode
+     /web-setup
+     Set up cloud sessions with your GitHub account
+     /workflow-authoring
+     Load the reference for writing Workflow tool scripts
+   ❯ /workflows
+     Browse running and completed workflows
+
+
+
+   For more help: https://code.claude.com/docs/en/overview
+
+   Something else? Use /feedback to report bugs or request features.
+=====PAGE
+   Browse default commands
+
+     ↑ 86 more
+     /skills
+     List available skills
+     /slides
+     Make a new Slides deck artifact from a brief
+     /status
+     Show Claude Code status including version, model, account, API connectivity, and tool statuses
+     /statusline
+     Set up Claude Code's status line UI
+     /stickers
+     Order Claude Code stickers
+     /subtask
+     Send a subagent off with your full context; its result comes back here
+     /tasks
+     View and manage everything running in the background
+     /team-onboarding
+     Help teammates ramp on Claude Code with a guide from your usage
+     /teleport
+     Send this session to the cloud, or resume one from claude.ai
+     /terminal-setup
+     Install Shift+Enter key binding for newlines
+     /theme
+     Change the theme
+     /tui
+     Set the terminal UI renderer (default | fullscreen)
+     /ultrareview
+     Start a cloud agent that finds and verifies bugs in your branch (~5-15 min, $5-$25 USD) · Runs in a cloud ses…
+     /update-config
+     Change settings: hooks, permissions, environment variables
+     /upgrade
+     Upgrade your plan for higher rate limits and more Opus
+     /usage
+     Show session cost, plan usage, and activity stats
+     /usage-credits
+     Configure usage credits or request them from your admin when you hit a limit
+     /verify
+     Try your change and report if it works
+     /voice
+     Toggle voice mode
+     /web-setup
+     Set up cloud sessions with your GitHub account
+     /workflow-authoring
+     Load the reference for writing Workflow tool scripts
+   ❯ /workflows
+     Browse running and completed workflows
+
+
+
+   For more help: https://code.claude.com/docs/en/overview
+
+   Something else? Use /feedback to report bugs or request features.
+=====PAGE

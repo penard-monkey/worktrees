@@ -1,0 +1,171 @@
+   Help  General   Commands   Custom commands
+
+
+   Browse custom commands
+
+   ❯ /anthropic-skills:docs
+     docs (editable docs people share and comment on; the default for any document, named as a doc or not: a docum…
+     /anthropic-skills:docx
+     Use this skill whenever the user wants to create, read, edit, or manipulate Word documents (.docx) or Word te…
+     /anthropic-skills:google-workspace
+     Read this before the first Google Drive, Docs, Sheets or Slides connector call whenever the task creates or c…
+     /anthropic-skills:import-memory
+     Import a memory export from another AI assistant into Claude's memory — conversationally, additively, and wit…
+     /anthropic-skills:morning
+     Render the user's morning brief as a styled HTML artifact, or set it up as a recurring weekday task. Use only…
+     /anthropic-skills:pdf
+     Use this skill whenever the user wants to do anything with PDF files. This includes reading or extracting tex…
+     /anthropic-skills:pptx
+     Use this skill any time a .pptx or .potx file is involved in any way — as input, output, or both. This includ…
+     /anthropic-skills:skill-creator
+     Create new skills, modify and improve existing skills, and measure skill performance. Use when users want to …
+     /anthropic-skills:xlsx
+     Use this skill any time a spreadsheet file is the primary input or output. This means any task where the user…
+     /architecture-diagram
+     Build interactive, click-through architecture diagrams for software systems — a self-contained single HTML fi…
+     /close-out
+     Session close-out ritual before /clear — archive the session (summary + planning tarball), sweep stragglers i…
+     /hello
+     Say hello from a project command (scratch) (project)
+     /mcp__kicad__component_placement_strategy
+     /mcp__kicad__component_replacement_analysis
+     /mcp__kicad__component_selection
+     /mcp__kicad__component_selection_guidance
+     /mcp__kicad__component_sourcing_properties
+     /mcp__kicad__component_troubleshooting
+     /mcp__kicad__component_value_calculation
+     /mcp__kicad__create_footprint_guide
+     /mcp__kicad__design_rule_development
+     /mcp__kicad__differential_pair_routing
+     /mcp__kicad__footprint_ipc_checklist
+     /mcp__kicad__high_speed_routing
+     /mcp__kicad__layer_stackup_planning
+     /mcp__kicad__pcb_design_optimization
+     /mcp__kicad__pcb_layout_review
+     /mcp__kicad__power_distribution
+     /mcp__kicad__routing_strategy
+     /mcp__kicad__via_usage
+     /owasp-security
+     Use when reviewing code for security vulnerabilities, implementing authentication/authorization, handling use…
+
+     ↓ 4 more
+
+
+   For more help: https://code.claude.com/docs/en/overview
+
+   Something else? Use /feedback to report bugs or request features.
+=====PAGE
+   Help  General   Commands   Custom commands
+
+
+   Browse custom commands
+
+     /anthropic-skills:docs
+     docs (editable docs people share and comment on; the default for any document, named as a doc or not: a docum…
+     /anthropic-skills:docx
+     Use this skill whenever the user wants to create, read, edit, or manipulate Word documents (.docx) or Word te…
+     /anthropic-skills:google-workspace
+     Read this before the first Google Drive, Docs, Sheets or Slides connector call whenever the task creates or c…
+     /anthropic-skills:import-memory
+     Import a memory export from another AI assistant into Claude's memory — conversationally, additively, and wit…
+     /anthropic-skills:morning
+     Render the user's morning brief as a styled HTML artifact, or set it up as a recurring weekday task. Use only…
+     /anthropic-skills:pdf
+     Use this skill whenever the user wants to do anything with PDF files. This includes reading or extracting tex…
+     /anthropic-skills:pptx
+     Use this skill any time a .pptx or .potx file is involved in any way — as input, output, or both. This includ…
+     /anthropic-skills:skill-creator
+     Create new skills, modify and improve existing skills, and measure skill performance. Use when users want to …
+     /anthropic-skills:xlsx
+     Use this skill any time a spreadsheet file is the primary input or output. This means any task where the user…
+     /architecture-diagram
+     Build interactive, click-through architecture diagrams for software systems — a self-contained single HTML fi…
+     /close-out
+     Session close-out ritual before /clear — archive the session (summary + planning tarball), sweep stragglers i…
+     /hello
+     Say hello from a project command (scratch) (project)
+     /mcp__kicad__component_placement_strategy
+     /mcp__kicad__component_replacement_analysis
+     /mcp__kicad__component_selection
+     /mcp__kicad__component_selection_guidance
+     /mcp__kicad__component_sourcing_properties
+     /mcp__kicad__component_troubleshooting
+     /mcp__kicad__component_value_calculation
+     /mcp__kicad__create_footprint_guide
+     /mcp__kicad__design_rule_development
+     /mcp__kicad__differential_pair_routing
+   ❯ /mcp__kicad__footprint_ipc_checklist
+     /mcp__kicad__high_speed_routing
+     /mcp__kicad__layer_stackup_planning
+     /mcp__kicad__pcb_design_optimization
+     /mcp__kicad__pcb_layout_review
+     /mcp__kicad__power_distribution
+     /mcp__kicad__routing_strategy
+     /mcp__kicad__via_usage
+     /owasp-security
+     Use when reviewing code for security vulnerabilities, implementing authentication/authorization, handling use…
+
+     ↓ 4 more
+
+
+   For more help: https://code.claude.com/docs/en/overview
+
+   Something else? Use /feedback to report bugs or request features.
+=====PAGE
+   Help  General   Commands   Custom commands
+
+
+   Browse custom commands
+
+     ↑ 4 more
+     /anthropic-skills:morning
+     Render the user's morning brief as a styled HTML artifact, or set it up as a recurring weekday task. Use only…
+     /anthropic-skills:pdf
+     Use this skill whenever the user wants to do anything with PDF files. This includes reading or extracting tex…
+     /anthropic-skills:pptx
+     Use this skill any time a .pptx or .potx file is involved in any way — as input, output, or both. This includ…
+     /anthropic-skills:skill-creator
+     Create new skills, modify and improve existing skills, and measure skill performance. Use when users want to …
+     /anthropic-skills:xlsx
+     Use this skill any time a spreadsheet file is the primary input or output. This means any task where the user…
+     /architecture-diagram
+     Build interactive, click-through architecture diagrams for software systems — a self-contained single HTML fi…
+     /close-out
+     Session close-out ritual before /clear — archive the session (summary + planning tarball), sweep stragglers i…
+     /hello
+     Say hello from a project command (scratch) (project)
+     /mcp__kicad__component_placement_strategy
+     /mcp__kicad__component_replacement_analysis
+     /mcp__kicad__component_selection
+     /mcp__kicad__component_selection_guidance
+     /mcp__kicad__component_sourcing_properties
+     /mcp__kicad__component_troubleshooting
+     /mcp__kicad__component_value_calculation
+     /mcp__kicad__create_footprint_guide
+     /mcp__kicad__design_rule_development
+     /mcp__kicad__differential_pair_routing
+     /mcp__kicad__footprint_ipc_checklist
+     /mcp__kicad__high_speed_routing
+     /mcp__kicad__layer_stackup_planning
+     /mcp__kicad__pcb_design_optimization
+     /mcp__kicad__pcb_layout_review
+     /mcp__kicad__power_distribution
+     /mcp__kicad__routing_strategy
+     /mcp__kicad__via_usage
+     /owasp-security
+     Use when reviewing code for security vulnerabilities, implementing authentication/authorization, handling use…
+     /preexec
+     A project command that runs a shell line before the prompt (scratch) (project)
+     /scratch-skill
+     A scratch project skill used to measure slash-command listing (project)
+     /threejs
+     Build immersive 3D web experiences with Three.js - WebGL/WebGPU library for scenes, cameras, geometries, mate…
+   ❯ /worktrees:worktrees
+     (worktrees) Use BEFORE any branch work in a repository managed by worktrees (it has places under .worktrees/ …
+
+
+
+   For more help: https://code.claude.com/docs/en/overview
+
+   Something else? Use /feedback to report bugs or request features.
+=====PAGE

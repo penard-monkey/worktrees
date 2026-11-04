@@ -1,0 +1,40 @@
+
+  ⎿  Set model to Opus 5.5 for this session only
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔ ◉ xhigh · /effort ▔
+   Settings  Status   Config   Usage   Stats
+
+   Version:           2.1.318
+   Session name:      scA-main
+   Session ID:        21666f49-fcb0-444a-9d2e-cdd67d558278
+   Session kind:      interactive
+   Peer address:      uds:/tmp/cc-socks/10040.sock
+   cwd:               /private/tmp/claude-501/-Users-u-Projects-worktrees--worktrees-feat-harness-updates/672ce622
+                      -3c10-4f81-89b9-5cf671be1499/scratchpad/repos/scA
+   Login method:      Claude Max account
+   Organization:      u@example.com's Organization
+   Email:             u@example.com
+   Cloud sessions:    Not set up · /web-setup to connect GitHub
+
+   Model:             opus (claude-opus-5-5)
+   MCP servers:       6 connected, 1 disabled · /mcp
+   Setting sources:   User settings
+   Auto mode server:  Enabled
+
+   Esc to cancel
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

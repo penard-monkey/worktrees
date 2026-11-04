@@ -1,0 +1,40 @@
+
+  >_ OpenAI Codex (v0.160.1)
+     /private/tmp/claude-501/wtcx/repo
+
+  Speak, friend, and enter a prompt.
+
+  Tip: Use the desktop app. Run codex app to open it. It installs automatically if needed.
+
+
+  Select Reasoning Level for GPT-6-Sol
+
+
+  1. Low                         Fast responses with lighter reasoning
+› 2. Medium (default) (current)  Balances speed and reasoning depth for everyday tasks
+  3. High                        Greater reasoning depth for complex problems
+  4. Extra high                  Extra high reasoning depth for complex problems
+  5. More reasoning…             Max and Ultra consume usage limits faster
+
+  enter default · s session · esc back
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

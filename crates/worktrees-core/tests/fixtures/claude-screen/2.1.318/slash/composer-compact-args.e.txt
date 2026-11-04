@@ -1,0 +1,40 @@
+[48;5;237m  [38;5;231mmodel from the chat do?", "header": "/model", "options": [{"label": "Session only (Recommended)", "description": "The[39m
+  [38;5;231mchat answers the picker with [38;5;153ms[38;5;231m: this session only, never writes your config. [38;5;153m/model <name>[38;5;231m with an argument is [39m
+  [38;5;231mrefused in the chat (pick from the list instead). Defaults stay a terminal act."}, {"label": "Save as default", [39m
+  [38;5;231m"description": "Faithful to the terminal's Enter: the pick becomes the default for new sessions (writes your [39m
+  [38;5;231msettings). The chat's confirm would say so."}, {"label": "Offer both", "description": "Each model choice shows two [39m
+  [38;5;231mactions in the chat: \"This session\" and \"Make default\" (the second needs a confirm, and admin on the phone)."}], [39m
+  [38;5;231m"multiSelect": false}, {"question": "Claude's MCP prompts (e.g. /mcp__kicad__routing_strategy) are known only inside [39m
+  [38;5;231mthe running Claude process: no file lists them, and the one listing API (a [38;5;153mclaude -p[38;5;231m initialize sidecar) ran an [39m
+  [38;5;231mUNTRUSTED repo's SessionStart hook in my test (ADR 0001). How should the chat's command list treat MCP prompts?", [39m
+  [38;5;231m"header": "MCP prompts", "options": [{"label": "Leave them out (Recommended)", "description": "The menu lists [39m
+  [38;5;231mbuilt-ins, your commands and skills, project commands/skills and plugin commands; MCP prompts stay a terminal feature[39m
+  [38;5;231mfor now, and the proposal records why."}, {"label": "Allow by server name", "description": "Accept a typed [39m
+  [38;5;231m/mcp__<server>__<prompt> when <server> is an MCP server configured for Claude (read from ~/.claude.json and the [39m
+  [38;5;231mplugins), without a description and unvalidated beyond that."}], "multiSelect": false}]}[39m
+[38;5;246m[49m  ⎿  [1m1[0m[38;5;246m skill available[39m
+
+[38;5;246m⏺ [39mUser answered Claude's questions:
+[38;5;246m  ⎿  · Measured on Claude 2.1.318 and Codex 0.160.1: in both /model pickers, Enter SAVES the pick as your default for [39m
+     [38;5;246mnew sessions (~/.claude/settings.json, ~/.codex/config.toml); only the picker's `s` key is "this session only". [39m
+     [38;5;246mClaude's `/model <name>` with an argument also saves the default. What should choosing a model from the chat do? →
+[39m     [38;5;246mSave as default[39m
+     [38;5;246m· Claude's MCP prompts (e.g. /mcp__kicad__routing_strategy) are known only inside the running Claude process: no [39m
+     [38;5;246mfile lists them, and the one listing API (a `claude -p` initialize sidecar) ran an UNTRUSTED repo's SessionStart [39m
+     [38;5;246mhook in my test (ADR 0001). How should the chat's command list treat MCP prompts? → leave them out for now[39m
+
+[38;5;231m⏺[39m You answered both questions:
+
+  - [1m/model:[0m [1mSave as default[0m, which is not the recommended option. Picking a model from the chat will work like pressing
+    Enter in the terminal: it becomes the default for new sessions and gets written to [38;5;153m~/.claude/settings.json[39m or
+    [38;5;153m~/.codex/config.toml[39m. The chat's confirmation should say that it saves a default.
+  - [1mMCP prompts:[0m [1mLeave them out for now.[0m The chat's command list will show built-ins, your own and project commands and
+    skills, and plugin commands. MCP prompts stay terminal-only, and the proposal will record why: the only way to list
+    them ran an untrusted repo's SessionStart hook (ADR 0001).
+
+[38;5;246m✻[39m [38;5;246mCooked for 16s · done 1:08 PM[39m
+
+[38;5;244m───────────────────────────────────────────────────────────────────────────────────────────────────────────── scA-main ─
+[39m❯ [38;5;153m/compact[39m keep only the facts
+[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;220m⏵⏵ auto mode on[38;5;246m (shift+tab to cycle)[39m
