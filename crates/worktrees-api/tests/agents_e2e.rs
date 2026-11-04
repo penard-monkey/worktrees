@@ -11,8 +11,9 @@
 //! ```
 //!
 //! `WT_E2E_STEP` is `prompt`, `answer <n>` (the prompt's own fingerprint is
-//! read first, as a client would), or `text <n> <text…>`. `WT_E2E_SLUG`
-//! defaults to `(main)`. The answer is printed as JSON.
+//! read first, as a client would), `text <n> <text…>`, `commands`, `command
+//! <name> [args…]` (the session `agent_commands` names), or `turns <n>`.
+//! `WT_E2E_SLUG` defaults to `(main)`. The answer is printed as JSON.
 
 use std::sync::Arc;
 
@@ -49,8 +50,21 @@ fn drive_one_step() {
         let p = agents::agent_prompt(&ctx, repo.clone(), slug.clone()).expect("agent_prompt");
         p["fingerprint"].as_str().map(str::to_string).unwrap_or_else(|| panic!("no readable prompt: {p}"))
     };
+    let session = || {
+        let c = agents::agent_commands(&ctx, repo.clone(), slug.clone(), None).expect("agent_commands");
+        c["session"].as_str().unwrap_or_default().to_string()
+    };
     let out = match words[..] {
         ["prompt"] => agents::agent_prompt(&ctx, repo.clone(), slug.clone()),
+        ["commands"] => agents::agent_commands(&ctx, repo.clone(), slug.clone(), None).map(|mut v| {
+            let n = v["commands"].as_array().map_or(0, Vec::len);
+            let own: Vec<serde_json::Value> = v["commands"].as_array().into_iter().flatten().filter(|c| c["source"] != "built-in").cloned().collect();
+            v["commands"] = serde_json::json!({ "count": n, "not_built_in": own });
+            v
+        }),
+        ["command", name] => agents::agent_command(&ctx, repo.clone(), slug.clone(), session(), name.into(), None),
+        ["command", name, args] => agents::agent_command(&ctx, repo.clone(), slug.clone(), session(), name.into(), Some(args.into())),
+        ["turns", n] => agents::agent_turns(&ctx, repo.clone(), slug.clone(), None, Some(n.parse().unwrap())),
         ["answer", n] => agents::agent_answer(&ctx, repo.clone(), slug.clone(), n.parse().unwrap(), fingerprint()),
         ["text", n, text] => agents::agent_answer_text(&ctx, repo.clone(), slug.clone(), n.parse().unwrap(), fingerprint(), text.into()),
         _ => panic!("unknown step {step:?}"),

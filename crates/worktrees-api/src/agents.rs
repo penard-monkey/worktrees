@@ -89,7 +89,7 @@ use worktrees_core::pending::{self, Asked, Forget};
 use worktrees_core::prompt::{self, HostOnly, Modal};
 use worktrees_core::store::{self, RemoteAttach, RemoteSend};
 use worktrees_core::tmux::{self, Key, PaneId, PaneList};
-use worktrees_core::slash::{self, Tier};
+use worktrees_core::slash;
 use worktrees_core::{activity, agent, attach, codex, provider, turns, Project};
 
 use crate::Ctx;
@@ -901,7 +901,7 @@ pub fn agent_command(ctx: &Ctx, repo: String, slug: String, session: String, nam
     let after = io.capture(&lane);
     let opened = after.as_deref().and_then(|s| read_any(lane.harness, s));
     let mut v = json!({
-        "delivered": outcome.confirmed() || outcome == SendOutcome::Modal,
+        "delivered": outcome.confirmed() || outcome == SendOutcome::Modal || opened.is_some(),
         "queued": outcome == SendOutcome::Queued,
         "harness": lane.harness,
         "session": lane.session,
@@ -1434,13 +1434,26 @@ impl AgentIo for Live {
         if !ready {
             return Err(format!("/{name} was typed but could not be seen in the agent's prompt: nothing was submitted — look at the host"));
         }
-        let t0 = std::time::Instant::now();
-        let elapsed = || t0.elapsed().as_millis() as u64;
-        Ok(if claude {
-            prompt::submit_claude(capture, || tmux::press_enter(&pane), elapsed, sleep)
-        } else {
-            harness::submit_codex(capture, || tmux::press_enter(&pane), elapsed, sleep)
-        })
+        if claude {
+            let t0 = std::time::Instant::now();
+            return Ok(prompt::submit_claude(capture, || tmux::press_enter(&pane), || t0.elapsed().as_millis() as u64, sleep));
+        }
+        // Codex: ONE Enter on the proved line, then what follows — a list it
+        // opened, or its composer back empty (run, or refused in its own
+        // words). `submit_codex` waits for the composer alone, which a list
+        // hides.
+        tmux::press_enter(&pane)?;
+        for _ in 0..GONE_TRIES {
+            sleep(POLL_MS);
+            let Some(s) = capture() else { continue };
+            if prompt::read(lane.harness, &s).is_some() {
+                return Ok(SendOutcome::Modal);
+            }
+            if prompt::composer_empty(lane.harness, &s) == Some(true) {
+                return Ok(SendOutcome::Submitted);
+            }
+        }
+        Ok(SendOutcome::Unconfirmed)
     }
 
     fn sleep(&self, ms: u64) {
