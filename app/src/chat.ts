@@ -53,7 +53,7 @@ export type Notice =
 export type Step =
   | { kind: "text"; at: number | null; text: string }
   | { kind: "user"; at: number | null; text: string }
-  | { kind: "tool"; at: number | null; name: string; summary?: string; failed?: boolean }
+  | { kind: "tool"; at: number | null; name: string; call_id?: string; summary?: string; failed?: boolean; detail?: boolean }
   | { kind: "question"; at: number | null; answered_at?: number; questions: AskedQuestion[]; answer?: { how: "picked" | "chat" | "declined"; answers?: QuestionAnswer[] } }
   | { kind: "permission"; at: number | null; answered_at?: number; tool: string; summary?: string; allowed: boolean; scope?: string; note?: string }
   | { kind: "plan"; at: number | null; answered_at?: number; plan: string; plan_file?: string; approved?: boolean; note?: string };
@@ -103,8 +103,22 @@ export type AgentStopped = { interrupted: boolean; unconfirmed?: boolean; harnes
  *  place root, and what its bytes are. `name` is the display name, cleaned. */
 export type AgentAttached = { path: string; bytes: number; sha256: string; kind: "image" | "pdf" | "text"; name?: string };
 
+/** `agent_tool_call`'s answer (`turns::CallDetail`): `input` is a string for a
+ *  command and always once `truncated`; `bytes` is its whole length as text. */
+export type AgentToolCall = { tool: string; input: unknown; truncated: boolean; bytes: number; call_id: string; harness: string; session: string; note: string };
+/** One call's input, as far as this window has asked for it. */
+export type CallRead =
+  | { state: "loading" }
+  | { state: "done"; text: string; truncated: boolean; bytes: number }
+  /** The host no longer has it (`gone`), or has no such row (`words`). */
+  | { state: "gone" }
+  | { state: "old"; words: string }
+  | { state: "failed"; words: string };
+
 /** agents.rs's refusal strings, which the words below key on. */
 export const AGENT_ERR = {
+  /** `agent_tool_call`: the call has left what is read of the transcript. */
+  gone: "gone",
   changed: "the prompt changed",
   noChoice: "no such choice",
   promptUp: "the agent is waiting on a prompt: answer it with agent_answer",
@@ -330,8 +344,10 @@ export type Answered = { label: string; note?: string; at: number; confirmed: bo
 /** One tool call as the chat draws it: its name, what it did in a line
  *  (`turns::Step`'s `summary`: absent from an older host, for an MCP tool,
  *  and for a call whose line the host left out to stay in budget), and
- *  whether its result says it failed. Text only, never markup. */
-export type ToolCall = { name: string; summary?: string; failed?: boolean };
+ *  whether its result says it failed. `call_id` is the call's own id, the
+ *  same on every read, and `detail` says `agent_tool_call` has more to show
+ *  for it. Text only, never markup. */
+export type ToolCall = { name: string; call_id?: string; summary?: string; failed?: boolean; detail?: boolean };
 
 export type Item =
   | { k: "sep"; key: string; at: number }
@@ -417,7 +433,10 @@ export function itemsOf(turns: Turn[], answered: Answered[], pending: Pending[],
         }
         if (st.kind === "tool") {
           reply.tools.push(st.name);
-          reply.calls.push({ name: st.name, ...(st.summary ? { summary: st.summary } : {}), ...(st.failed ? { failed: true } : {}) });
+          reply.calls.push({
+            name: st.name, ...(st.call_id ? { call_id: st.call_id } : {}), ...(st.summary ? { summary: st.summary } : {}),
+            ...(st.failed ? { failed: true } : {}), ...(st.detail ? { detail: true } : {}),
+          });
         }
         return;
       }
@@ -518,6 +537,28 @@ export function foldCalls(calls: ToolCall[], open: boolean): { shown: ToolCall[]
   const rest = calls.slice(shown.length);
   return { shown, hidden: rest.length, hiddenFailed: rest.filter((c) => c.failed).length, folds };
 }
+
+/** What names each call while it is open, the same whatever a re-read does
+ *  to the list around it: its own id, or on a host that sends none, what it
+ *  says within its reply. An index would hand an open row to its neighbour
+ *  when a turn the host's byte window starts inside loses its first steps. */
+export function callKeys(calls: ToolCall[], itemKey: string): string[] {
+  const taken = new Map<string, number>();
+  return calls.map((c) => {
+    if (c.call_id) return c.call_id;
+    const base = `${itemKey}|${c.name}|${c.summary ?? ""}`;
+    const n = taken.get(base) ?? 0;
+    taken.set(base, n + 1);
+    return `${base}|${n}`;
+  });
+}
+
+/** A call the host can say more about. Without both, there is nothing to ask for. */
+export const callFetches = (c: ToolCall) => !!c.detail && !!c.call_id;
+
+/** A call's input as it is drawn: a command as itself, and the structured
+ *  input of any other tool pretty-printed. Plain text either way. */
+export const inputText = (input: unknown) => (typeof input === "string" ? input : JSON.stringify(input, null, 2));
 
 /** A turn's calls in words, for its group's label: "Used Bash, Read and
  *  Edit." and, when any failed, how many. */
@@ -996,6 +1037,10 @@ export type ChatView = {
   attachments: Attachment[];
   /** What the last refused upload or pick said. */
   attachWords: SendWords | null;
+  /** The tool calls a person opened, by `callKeys`, and what the host said
+   *  about each it was asked for. Only a click opens one, and it stays open
+   *  through every re-read. */
+  calls: { open: Record<string, true>; read: Record<string, CallRead> };
   /** Words when this host has no `agent_attach` (an older one): the
    *  paperclip is off, with them as its reason. The host's, so every place's. */
   attachOff: string | null;
@@ -1009,6 +1054,7 @@ const blank = (): ChatView => ({
   pending: [], answered: [], draft: "", sending: false, sendWords: null, followUp: null,
   selected: null, answerText: "", ticks: null, boxText: "", answering: false, answerWords: null,
   stopping: false, stopWords: null, stopped: false,
+  calls: { open: {}, read: {} },
   attachments: [], attachWords: null, attachOff,
 });
 const EMPTY = blank();
@@ -1053,6 +1099,41 @@ export function loadTurns(t: Target): Promise<void> {
       });
     } catch (e) {
       put(t.path, { turns: { ...viewOf(t.path).turns, loading: false, error: String(e) } });
+    }
+  });
+}
+
+/** Open a tool call, or close it. The first opening of one the host can say
+ *  more about asks for it, once; what it answered is kept, as a call's input
+ *  never changes, except a failure, which the next opening asks again. */
+export function toggleCall(t: Target, key: string, call: ToolCall): Promise<void> {
+  const { open, read } = viewOf(t.path).calls;
+  const id = call.call_id ?? "";
+  if (open[key]) {
+    const { [key]: _closed, ...rest } = open;
+    const { [id]: last, ...others } = read;
+    put(t.path, { calls: { open: rest, read: last?.state === "failed" ? others : read } });
+    return Promise.resolve();
+  }
+  put(t.path, { calls: { open: { ...open, [key]: true }, read } });
+  return callFetches(call) && !read[id] ? readCall(t, id) : Promise.resolve();
+}
+
+function readCall(t: Target, id: string): Promise<void> {
+  const land = (r: CallRead) => {
+    const { calls } = viewOf(t.path);
+    put(t.path, { calls: { ...calls, read: { ...calls.read, [id]: r } } });
+  };
+  return once(`c|${t.path}|${id}`, async () => {
+    land({ state: "loading" });
+    try {
+      const r = await invoke<AgentToolCall>("agent_tool_call", { repo: t.repo, slug: t.slug, call_id: id });
+      land({ state: "done", text: inputText(r.input), truncated: r.truncated, bytes: r.bytes });
+    } catch (e) {
+      if (e === AGENT_ERR.gone) return land({ state: "gone" });
+      const { unsupportedFeature } = await import("./ipcws");
+      const old = unsupportedFeature(e, "showing a whole tool call");
+      land(old ? { state: "old", words: old } : { state: "failed", words: String(e) });
     }
   });
 }

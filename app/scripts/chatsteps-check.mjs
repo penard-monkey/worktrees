@@ -35,7 +35,10 @@ const src = fs.readFileSync(SRC, "utf8")
   .replace(/^import \{ invoke, windowOnHost \} from "\.\/ipc";$/m, "const invoke = (...args) => globalThis.__chatStepsInvoke(...args); const windowOnHost = () => true;")
   .replace(/^import \{ convertPhoto, jpegName, photoDecision, photoKind, INPUT_MAX \} from "\.\/chat-image";$/m, "const INPUT_MAX = 40 * 1024 * 1024; const convertPhoto = () => undefined; const jpegName = () => undefined; const photoDecision = () => undefined; const photoKind = () => undefined;");
 if (/^import /m.test(src)) fail("chat.ts gained an import this check does not stub — extend the stubs above");
-const js = (await transformWithEsbuild(src, "chat.ts", { loader: "ts", format: "esm" })).code;
+// ipcws.ts has no runtime import by rule, so the real module loads here too.
+const ipcws = (await transformWithEsbuild(fs.readFileSync(here("../src/ipcws.ts"), "utf8"), "ipcws.ts", { loader: "ts", format: "esm" })).code;
+globalThis.__ipcws = await import("data:text/javascript;base64," + Buffer.from(ipcws).toString("base64"));
+const js = (await transformWithEsbuild(src.replaceAll('await import("./ipcws")', "globalThis.__ipcws"), "chat.ts", { loader: "ts", format: "esm" })).code;
 const C = await import("data:text/javascript;base64," + Buffer.from(js).toString("base64"));
 
 for (const name of ["itemsOf", "settlePending", "settleAnswered", "foldCalls", "callsWords", "callsSay", "underRoot"]) {
@@ -147,6 +150,74 @@ const kinds = (items) => items.map((it) => it.k);
   else ok("a host without steps (or summaries) falls back to the name chips");
 }
 
+// 7b. A call's id and `detail` reach the row. Only a click opens one, the host
+//     is asked once and only for a call that says `detail`, and each answer it
+//     can give has its own state.
+{
+  const steps = [
+    { kind: "tool", at: T0 + 2, name: "Bash", call_id: "a", summary: "set -e", failed: true, detail: true },
+    { kind: "tool", at: T0 + 3, name: "Write", call_id: "w", summary: "/r/a" },
+    { kind: "tool", at: T0 + 4, name: "mcp__x__y", call_id: "m", detail: true },
+  ];
+  const r = C.itemsOf([turn(T0, "Go", steps)], [], []).find((it) => it.k === "reply");
+  if (!eq(r.calls, [{ name: "Bash", call_id: "a", summary: "set -e", failed: true, detail: true }, { name: "Write", call_id: "w", summary: "/r/a" }, { name: "mcp__x__y", call_id: "m", detail: true }])) fail(`a call's id and detail reach the row — got ${JSON.stringify(r.calls)}`);
+  else ok("a call's id and detail reach the row");
+  if (!C.callFetches(r.calls[0]) || C.callFetches(r.calls[1]) || C.callFetches({ name: "Bash", detail: true })) fail("only a call with `detail` and an id asks the host");
+  else ok("only a call with `detail` and an id asks the host");
+
+  const k1 = C.callKeys(r.calls, "r1");
+  const k2 = C.callKeys(r.calls.slice(1), "r1");
+  if (k1[1] !== k2[0] || k1[2] !== k2[1] || k1[0] !== "a") fail(`a call's key survives the window losing the steps before it — ${k1} / ${k2}`);
+  else ok("a call's key is its id, whatever is above it");
+  const twice = C.callKeys([{ name: "Bash", summary: "ls" }, { name: "Bash", summary: "ls" }, { name: "Read" }], "r1");
+  const sliced = C.callKeys([{ name: "Bash", summary: "ls" }, { name: "Bash", summary: "ls" }, { name: "Read" }, { name: "Grep" }], "r1");
+  if (new Set(twice).size !== 3 || twice[2] !== sliced[2]) fail(`an older host's keys are unique and survive an append — ${twice}`);
+  else ok("an older host's keys are unique and survive an append");
+
+  if (C.inputText({ a: [1] }) !== '{\n  "a": [\n    1\n  ]\n}' || C.inputText("x\ny") !== "x\ny") fail("a structured input is pretty-printed and a command is itself");
+  else ok("a structured input is pretty-printed and a command is itself");
+
+  const target = { repo: "/r", slug: "calls", path: "/r/calls", session: "calls" };
+  const calls = () => C.useChat(target.path).calls;
+  let asked = [];
+  let answer = () => Promise.resolve({ tool: "Bash", input: "set -e\nmake", truncated: false, bytes: 11, call_id: "a", harness: "claude", session: "calls", note: "" });
+  globalThis.__chatStepsInvoke = (cmd, args) => { asked.push([cmd, args]); return answer(); };
+  if (Object.keys(calls().open).length) fail("a place opens with no call open, a failed one included");
+  await C.toggleCall(target, "a", r.calls[0]);
+  if (!eq(asked, [["agent_tool_call", { repo: "/r", slug: "calls", call_id: "a" }]])) fail(`opening asks for that call — ${JSON.stringify(asked)}`);
+  else if (!calls().open.a || calls().read.a?.state !== "done" || calls().read.a.text !== "set -e\nmake") fail(`the answer lands on the row — ${JSON.stringify(calls())}`);
+  else ok("opening a call asks the host for it, and it lands");
+  await C.toggleCall(target, "a", r.calls[0]);
+  if (calls().open.a) fail("a second click closes it");
+  await C.toggleCall(target, "a", r.calls[0]);
+  if (asked.length !== 1 || !calls().open.a) fail(`reopening does not ask again — asked ${asked.length}`);
+  else ok("closing and reopening keeps what it read");
+  asked = [];
+  await C.toggleCall(target, "w", r.calls[1]);
+  if (asked.length || !calls().open.w) fail("a call with no `detail` opens to its own line and asks nothing");
+  else ok("a call with no `detail` opens to its own line and asks nothing");
+
+  const outcome = async (id, error, state) => {
+    answer = () => Promise.reject(error);
+    await C.toggleCall(target, id, { name: "x", call_id: id, detail: true });
+    const got = calls().read[id];
+    if (got?.state !== state) fail(`${JSON.stringify(error)} reads as ${state} — got ${JSON.stringify(got)}`);
+    else ok(`${JSON.stringify(error)} reads as ${state}`);
+    return got;
+  };
+  await outcome("g", "gone", "gone");
+  const old = await outcome("o", "unknown command: agent_tool_call", "old");
+  if (!/This host doesn't support/.test(old.words)) fail(`an older host is named — ${old.words}`);
+  await outcome("f", "the file is unreadable", "failed");
+  asked = [];
+  answer = () => Promise.resolve({ tool: "x", input: { q: 1 }, truncated: true, bytes: 70000, call_id: "f", harness: "claude", session: "calls", note: "" });
+  await C.toggleCall(target, "f", { name: "x", call_id: "f", detail: true });
+  await C.toggleCall(target, "f", { name: "x", call_id: "f", detail: true });
+  if (asked.length !== 1 || !calls().read.f?.truncated) fail(`a failure is asked again on reopening — asked ${asked.length}, ${JSON.stringify(calls().read.f)}`);
+  else ok("a failure is asked again on reopening; `gone` and an older host are not");
+  delete globalThis.__chatStepsInvoke;
+}
+
 // 8. The fold: up to CALLS_SHOWN + 1 show whole; past it, the first few and
 //    a "+N more" that counts the failures it hides.
 {
@@ -186,12 +257,17 @@ const kinds = (items) => items.map((it) => it.k);
 // 10. ChatPane draws a summary as TEXT: no markdown, no link, no raw HTML.
 {
   const pane = fs.readFileSync(process.env.CHATSTEPS_PANE ?? here("../src/ChatPane.tsx"), "utf8");
-  const at = pane.indexOf("function ToolCalls(");
-  const body = at < 0 ? "" : pane.slice(at, pane.indexOf("\nfunction ", at + 1));
-  if (!body) fail("ChatPane.tsx has no ToolCalls component where this check looks");
+  // Everything from the row's text down to the list: CallFull, CallRow, CallChip, ToolCalls.
+  const at = pane.indexOf("function CallFull(");
+  const end = pane.indexOf("function ChatItem(");
+  const body = at < 0 || end < at ? "" : pane.slice(at, end);
+  if (!body) fail("ChatPane.tsx has no CallFull … ToolCalls components where this check looks");
   else if (/<Markdown|dangerouslySetInnerHTML|<a[\s>]|href=|onLink|pathLinks/.test(body)) fail("ToolCalls renders a summary through markup or a link — a summary is transcript text");
   else if (!/\{underRoot\(c\.summary, props\.root\)\}/.test(body) || !/title=\{c\.summary\}/.test(body)) fail("ToolCalls draws the line as text with the whole of it in the title");
   else ok("a summary is drawn as text, the whole line in its title");
+  if (!/<pre className="chat-call-text"[^>]*>\{text\}<\/pre>/.test(body)) fail("an opened call is plain text in a <pre>");
+  else ok("an opened call is plain text in a <pre>");
+  if (/<button[^>]*>[^]*?chat-call-text[^]*?<\/button>/.test(body.slice(body.indexOf("function CallRow(")))) fail("an opened call's text sits outside its button, so selecting it cannot close it");
 }
 
 // 11. A message absorbed by Claude is a user step in the running turn. It

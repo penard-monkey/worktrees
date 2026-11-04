@@ -144,7 +144,7 @@ const hostSaid = new Set([...apiSaid, ...typedSaid]);
 const CONSTS = {
   changed: "ERR_CHANGED", noChoice: "ERR_NO_CHOICE", promptUp: "ERR_PROMPT_UP", midInput: "ERR_MID_INPUT",
   noComposer: "ERR_NO_COMPOSER", fieldHeld: "ERR_FIELD_HELD", multi: "ERR_MULTI", notMulti: "ERR_NOT_MULTI", notesOpen: "ERR_NOTES_OPEN",
-  notBusy: "ERR_NOT_BUSY", stopDraft: "ERR_STOP_DRAFT", noSessionYet: "ERR_NO_SESSION_YET",
+  notBusy: "ERR_NOT_BUSY", stopDraft: "ERR_STOP_DRAFT", noSessionYet: "ERR_NO_SESSION_YET", gone: "ERR_GONE",
 };
 const WHOLE = ["noBox", "noAgent"];
 const PREFIXES = ["noLanePrefix", "turnsUnsupportedPrefix", "stopUnsupportedPrefix"];

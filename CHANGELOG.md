@@ -5,6 +5,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+
+- The chat's tool calls open on click to show what each was given: a whole multi-line command, a sub-agent's prompt, or an MCP tool's input as JSON. Rows and pills look as they did and stay closed until clicked, including a failed call. File contents and tool output stay in the terminal.
+
 ## [0.47.0] - 2026-11-02
 
 ### Added
