@@ -82,6 +82,32 @@ step, so Enter on it in the FIRST step would apply it and save it. The levels
 are in `~/.codex/models_cache.json` (every listed model has five or six
 today); a model there with fewer than two, or missing, is host-only.
 
+**Claude's effort row follows the highlight** (found by the owner,
+2026-11-04: picking Sonnet from the chat said "the prompt changed"; fixtures
+`claude-screen/2.1.318/model-effort/`). The row under the list —
+`◉ xHigh effort ←/→ to adjust` — is the HIGHLIGHTED model's effort: `◐
+Medium effort (default)` on Sonnet 5.5, `○ Effort not supported for Haiku
+4.5`, and a `◈ Max` row carries a warning row under it. The first e2e picked
+the model in effect, where the row stays put, which is why it passed. `s`
+passes an effort only when ←/→ toggled it, so a pick from the chat runs the
+new model at the effort Claude gives it (Sonnet 5.5: `medium`, its default)
+and says only "Set model to Sonnet 5.5 for this session only"; nothing the
+chat sends can toggle it (`tmux::Key` has no ←/→). ←/→ and Esc write nothing
+(settings hash and mtime kept).
+
+**In a conversation the prompt cache holds, `s` on another model is not the
+end.** Claude asks "Switch model? Your next response will be slower and use
+more tokens … `1. Yes, switch to <model>` / `2. No, go back`". Its rows are
+the same whether the list was answered with `s` or with the Enter that saves
+the default, Claude keeping which in its own state, so the chat does not read
+it (`readable: false`, answer at the host). Yes at the host after the chat's
+`s`: "Set model to Opus 5.5 for this session only", settings unchanged.
+
+Codex's effort list depends on the model picked, but it is a prompt of its
+own, read after the model list's Enter, so the chat shows that model's
+levels. Only its hints follow the highlight: `enter select · esc back` on
+`More reasoning…`.
+
 ### 1.4 What the transcript or rollout records
 
 Claude 2.1.318 (`transcripts/claude-2.1.318-commands.jsonl`):
@@ -220,8 +246,14 @@ answers):
 - `picker: "model"` — Claude's "Select model", Codex's first step. Claude's
   answer key is `s` (session only), pressed only while its footer shows `s to
   use this session only`; Codex's first step is Enter (it opens the effort
-  step), and a model without several effort levels is host-only.
-- `picker: "effort"` — Codex's second step, answered with `s`.
+  step), and a model without several effort levels is host-only. What
+  follows Claude's highlight — a row's `↓`/`↑` and the effort row, with a
+  Max row's warning and the blank rows under it — is compared by its shape
+  alone in the proof before `s`, as a permission's footer is; every other
+  row (the head, the `/fast` row) is compared as drawn.
+- `picker: "effort"` — Codex's second step, answered with `s`; read with
+  its `enter select · esc back` hints only while `More reasoning…` (the
+  terminal's) is lit.
 - `picker: "view"` — Claude's Settings dialog (`/status`, `/usage`,
   `/config`, `/stats`) and `/help`: its visible rows and ONE choice, Close,
   which is Escape.
@@ -309,6 +341,14 @@ an MCP `send` of `/`; a default model written from the chat; Codex's
   → effort with `s` → "for this session only", `~/.codex/config.toml`
   unchanged), `/status` (its output), `/compact`, and `/context` refused as
   not Codex's.
+- After the owner's bug (2026-11-04), on `-L wtmp1` at 139×52 with the
+  user's `xhigh`: `agent_answer 4` on Claude's list said "the prompt
+  changed" before the fix and, after it, Down, Down, `s` → "Set model to
+  Sonnet 5.5 for this session only"; then, after one exchange, `agent_answer
+  2` → `s` → "Switch model?" (unread, answered at the host). Codex: model 2
+  (GPT-6-Astra) → its effort list, left on `More reasoning…`, `agent_answer
+  3` → Up, Up, `s` → "gpt-6-astra high for this session only". Both config
+  files kept their SHA-256 and mtime.
 - The app: `app/scripts/slashmenu-check.mjs` (pure), and
   `app/scripts/chat-slash-browser.mjs` against the mock in Chromium and
   WebKit (22 checks each).

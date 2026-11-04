@@ -92,7 +92,14 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   (`Key::SessionOnly`), `/model` takes no argument from the chat, and a Codex
   model with fewer than two effort levels (`models_cache.json`), which its
   first step would apply and save, is `host_only: saves` — refused to the
-  console too, like `spends` and `elsewhere`. Do not grow a fourth path that
+  console too, like `spends` and `elsewhere`. **Claude's model list draws the
+  HIGHLIGHTED model's effort** under it (`◉ xHigh effort` on Opus, `◐ Medium
+  effort (default)` on Sonnet 5.5), so the proof before `s` compares that
+  row by shape (`prompt::model_body`); an e2e that picks the model in effect
+  never moves it, which is how the owner's Sonnet pick reached "the prompt
+  changed" (2026-11-04, `2.1.318/model-effort/`). In a warm conversation `s`
+  on another model brings Claude's "Switch model?", whose Yes reads the same
+  after the saving Enter: it is the terminal's. Do not grow a fourth path that
   types into Claude. `agent_interrupt`
   (`agents::agent_interrupt`, the chat's Stop and its Esc, `stopTurn` in
   `chat.ts`) is not one: it types no text, only ONE key,
