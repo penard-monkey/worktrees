@@ -52,6 +52,7 @@ check("then names that contain it, then descriptions", names(S.filterCommands(LI
 check("case does not matter", names(S.filterCommands(LIST, "COMP")), ["compact"]);
 check("a namespace's part matches", names(S.filterCommands(LIST, "nest")), ["sub:nested"]);
 check("a description matches", names(S.filterCommands(LIST, "plan usage")), ["usage"]);
+check("not from fewer than three letters: `co` lists only names", names(S.filterCommands(LIST, "co")), ["compact", "context"]);
 check("`/` alone lists them all, shortest first", S.filterCommands(LIST, "").length, LIST.length);
 check("nothing matches nothing", S.filterCommands(LIST, "zzz"), []);
 const many = Array.from({ length: 80 }, (_, i) => cmd(`c${String(i).padStart(2, "0")}`));

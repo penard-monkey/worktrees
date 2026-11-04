@@ -29,13 +29,16 @@ export const MENU_MAX = 50;
 
 /** The menu's rows for `query` (the name typed so far, no `/`), case-
  *  insensitively: names that start with it (shortest first, so an exact name
- *  is on top), then names that contain it, then descriptions that do. */
+ *  is on top), then names that contain it, then — from three letters on —
+ *  descriptions that do. */
 export function filterCommands(list: SlashCommand[], query: string): SlashCommand[] {
   const q = query.toLowerCase();
   const by = (a: SlashCommand, b: SlashCommand) => a.name.length - b.name.length || a.name.localeCompare(b.name);
   const starts = list.filter((c) => c.name.toLowerCase().startsWith(q)).sort(by);
   const inName = list.filter((c) => !c.name.toLowerCase().startsWith(q) && c.name.toLowerCase().includes(q)).sort(by);
-  const inText = q ? list.filter((c) => !c.name.toLowerCase().includes(q) && c.description.toLowerCase().includes(q)) : [];
+  // A description is searched from three letters on: before that nearly
+  // every description holds the query, and the menu would list them all.
+  const inText = q.length >= 3 ? list.filter((c) => !c.name.toLowerCase().includes(q) && c.description.toLowerCase().includes(q)) : [];
   return [...starts, ...inName, ...inText].slice(0, MENU_MAX);
 }
 

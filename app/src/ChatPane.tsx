@@ -190,7 +190,7 @@ export function ChatPane(props: ChatPaneProps) {
       <>
         <p className="chat-top">
           {data.more ? `The latest ${data.turns.length} turns` : "The session’s turns"}, from its transcript.
-          {" "}Tool output, diffs and slash commands are in the{" "}
+          {" "}Type / for the agent’s commands. Tool output and diffs are in the{" "}
           <button className="chat-linkbtn" onClick={props.onTerminal}>terminal</button>.
         </p>
         {items.length === 0 && !prompt && <p className="chat-note" data-testid="chat-empty">No messages in this session yet.</p>}
@@ -1077,6 +1077,8 @@ function Composer(props: {
   useEffect(() => { if (slash) void loadCommands(target); }, [!!slash, target.session]); // eslint-disable-line react-hooks/exhaustive-deps
   // The menu: while a name is typed, until Esc closes it for this draft.
   const [closedAt, setClosedAt] = useState<string | null>(null);
+  // Closed for THAT draft: any change to it opens the menu again.
+  useEffect(() => { if (closedAt !== null && text !== closedAt) setClosedAt(null); }, [text, closedAt]);
   const query = menuFor(text);
   const menuOn = query !== null && closedAt !== text && !props.waiting;
   const rows = menuOn && cmds ? filterCommands(cmds, query) : [];
@@ -1179,6 +1181,8 @@ function Composer(props: {
   // A stop's words: a refusal or an unconfirmed stop is an alert; "Stopped." is not.
   else if (v.stopWords) { line = v.stopWords.line; alert = !!(v.stopWords.terminal || v.stopWords.prompt); }
   else if (armed && cmd) { line = `Press Enter again to run /${cmd.name}. ${confirmWords(cmd) ?? ""}`; alert = true; }
+  // Still choosing from the menu: how to pick, not what is wrong.
+  else if (menuOn && rows.length && !cmd) line = "↑↓ to choose · Enter or Tab to pick · Esc to close";
   else if (problem) { line = problem; alert = true; }
   else if (props.waiting) line = `Messages can’t be sent while a prompt is waiting. Answer it ${props.waiting === "above" ? "above" : "in the terminal"}.`;
   else if (props.followUp && !text.trim()) line = props.followUp;
