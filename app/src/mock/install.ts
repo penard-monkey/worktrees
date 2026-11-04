@@ -160,6 +160,32 @@ const mockHarnessCommands: Record<string, string | null> = {
   claude: "claude update", codex: "npm install -g @openai/codex@latest",
   kimi: null, pi: "npm install -g --ignore-scripts @earendil-works/pi-coding-agent@latest",
 };
+// Older agent sessions (harness_restart.rs), for Settings → Agent CLIs.
+// `?harnessrestart=1` puts older Claude sessions in places — idle, busy and
+// waiting, two (main)s among them, one that cannot be resumed — plus two
+// outside worktrees and one older Codex; `?restartfail=<slug>` fails that
+// session's restart and `?restartslow=1` makes a restart take 2.2 s. What a
+// restart restarted leaves the list, as it does on the host.
+type MockOlder = { project: string; project_name: string; slug: string; session: string; version: string | null; state: "idle" | "busy" | "waiting"; why?: string };
+const mockOlder: Record<string, MockOlder[]> = mockReleaseQ.has("harnessrestart")
+  ? {
+      claude: [
+        { project: "/Users/demo/code/worktrees", project_name: "worktrees", slug: "(main)", session: "worktrees-main", version: "2.1.316", state: "busy" },
+        { project: "/Users/demo/code/orfis", project_name: "orfis", slug: "(main)", session: "orfis-main", version: "2.1.316", state: "waiting" },
+        { project: "/Users/demo/code/worktrees", project_name: "worktrees", slug: "fix-login", session: "worktrees-fix-login", version: "2.1.316", state: "idle" },
+        { project: "/Users/demo/code/api", project_name: "api", slug: "(main)", session: "api-main", version: "2.1.314", state: "idle" },
+        { project: "/Users/demo/code/api", project_name: "api", slug: "docs", session: "api-docs", version: "2.1.316", state: "idle",
+          why: "its session file names no conversation, so it cannot be resumed exactly" },
+      ],
+      codex: [
+        { project: "/Users/demo/code/api", project_name: "api", slug: "codex-lane", session: "api-codex-lane~agent~codex", version: null, state: "idle" },
+      ],
+    }
+  : { claude: [], codex: [] };
+const mockOutside: Record<string, { version: string | null }[]> = mockReleaseQ.has("harnessrestart")
+  ? { claude: [{ version: "2.1.310" }, { version: "2.1.316" }], codex: [] }
+  : { claude: [], codex: [] };
+
 // The host's steps for its "unknown" Kimi (harness_updates.rs, KIMI_OTHER).
 const mockHarnessManual: Record<string, { why: string; steps: { text: string; command?: string }[] }> = {
   kimi: {
@@ -3391,6 +3417,41 @@ Phase 3: Frontend pane and mock harness
       if (mockReleaseQ.get("harnessfail") === tool) return { ok: false, code: 42, output: `${tool} update failed: network unavailable`, warnings: [] };
       mockHarnessVersions[tool] = mockHarnessLatest[tool];
       return { ok: true, code: 0, output: `${tool} now reports ${mockHarnessVersions[tool]}`, warnings: [] };
+    }
+    case "harness_sessions": {
+      const tool = String(args.tool);
+      if (tool !== "claude" && tool !== "codex") throw "restarting sessions is supported for Claude and Codex only";
+      return { tool, installed_version: mockHarnessVersions[tool], sessions: clone(mockOlder[tool]), outside: clone(mockOutside[tool]) };
+    }
+    case "restart_harness_sessions": {
+      const tool = String(args.tool);
+      if (tool !== "claude" && tool !== "codex") throw "restarting sessions is supported for Claude and Codex only";
+      const force = args.force === true;
+      if (mockReleaseQ.has("restartslow")) await sleep(2200);
+      const results: Record<string, unknown>[] = [];
+      const keep: MockOlder[] = [];
+      for (const r of mockOlder[tool]) {
+        const head = { project: r.project, project_name: r.project_name, slug: r.slug, session: r.session };
+        if (r.why) { results.push({ ...head, outcome: "skipped", why: r.why }); keep.push(r); continue; }
+        if (!force && r.state !== "idle") {
+          results.push({ ...head, outcome: "skipped", why: r.state === "waiting" ? "it is waiting on a prompt" : "it is busy" });
+          keep.push(r);
+          continue;
+        }
+        if (mockReleaseQ.get("restartfail") === r.slug) {
+          results.push({ ...head, outcome: "failed", why: "tmux respawn-pane exited 1: can't find pane: %42" });
+          keep.push(r);
+          continue;
+        }
+        results.push({ ...head, outcome: "restarted", version: mockHarnessVersions[tool] });
+      }
+      mockOlder[tool] = keep;
+      const count = (o: string) => results.filter((x) => x.outcome === o).length;
+      const mains = [...new Set(results.filter((x) => x.outcome === "restarted" && x.slug === "(main)").map((x) => x.project_name as string))];
+      return {
+        tool, force, installed_version: mockHarnessVersions[tool], results,
+        restarted: count("restarted"), skipped: count("skipped"), failed: count("failed"), mains,
+      };
     }
     case "list_releases":
       return [

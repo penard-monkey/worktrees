@@ -1,4 +1,4 @@
-//! The 192 commands, each with its exposure, capability and objects, in ONE
+//! The 194 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -777,7 +777,7 @@ pub fn cap_of(cmd: &str) -> Option<Capability> {
 pub const GLOBAL_OK: &[&str] = &[
     // read
     "settings_info", "get_settings", "quota_settings", "slots_settings", "claude_usage", "codex_usage", "kimi_usage", "claude_status",
-    "check_update", "list_releases", "get_ai_config", "get_codex_permissions", "get_fetch_interval",
+    "check_update", "harness_sessions", "list_releases", "get_ai_config", "get_codex_permissions", "get_fetch_interval",
     "get_term_history_opts", "agent_guidance_status", "agent_guidance_diff", "agent_models", "agent_user_skills",
     "kimi_version", "tmux_check", "log_info", "get_changelog", "new_profile_id", "skills_list", "ui_usage",
     // write
@@ -786,7 +786,7 @@ pub const GLOBAL_OK: &[&str] = &[
     "codex_mcp_status", "codex_mcp_uninstall", "codex_mcp_migration_plan", "pi_mcp_status", "pi_mcp_uninstall",
     "kimi_mcp_status", "delete_profile", "skill_remove", "skill_preview_git", "sync_hub_list", "sync_hubs",
     "sync_hub_choose", "sync_hub_forget", "diagnostics",
-    "log_tail", "term_history_info", "profiles_info", "devices_list", "update_harness",
+    "log_tail", "term_history_info", "profiles_info", "devices_list", "update_harness", "restart_harness_sessions",
 ];
 
 /// The lane a request runs on, or `None` for the concurrent pool.
@@ -899,6 +899,13 @@ commands! { cx, a;
     claude_status: Engine [read, global] => status::claude_status(),
     check_update: Engine [read, global] => status::check_update(),
     update_harness: Engine [admin, global] => worktrees_api::harness_updates::update(a.get("tool")?),
+    // The agent sessions that run an older Claude or Codex than the one
+    // installed, and restarting them (docs/proposals/harness-restart.md).
+    // Restarting is admin like the update itself: it can interrupt every
+    // agent on the host, (main)s included.
+    harness_sessions: Engine [read, global] => worktrees_api::harness_restart::sessions(&cx.ctx, a.get("tool")?),
+    restart_harness_sessions: Engine [admin, global] =>
+        worktrees_api::harness_restart::restart(&cx.ctx, a.get("tool")?, a.get("force")?),
     update_cli: HostConsole => status::update_cli(a.get("tag")?),
     list_releases: Engine [read, global] => status::list_releases(),
     install_app_version: ClientLocal => refused(),
@@ -1245,7 +1252,7 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 192 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 194 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six, the slots pair and
     /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
@@ -1255,12 +1262,14 @@ mod tests {
     /// (`agent_answer_text`, `agent_answer_many`) and the one that stops a
     /// turn (`agent_interrupt`), `project_sessions`, the one that keeps
     /// a file for the agent (`agent_attach`), and sync's five hub and batch
-    /// rows, plus `update_harness`; the check scripts hold the page's commands against them.
+    /// rows, plus `update_harness` and the agent restart's two
+    /// (`harness_sessions`, `restart_harness_sessions`); the check scripts
+    /// hold the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 192, "the table has 192 commands");
+        assert_eq!(TABLE.len(), 194, "the table has 194 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1646,7 +1655,9 @@ mod tests {
     /// project would leave running; `agent_attach` (`instruct`: a file
     /// the agent will read); and sync's hub rows — `sync_hubs`,
     /// `sync_hub_choose`, `sync_hub_forget` (`admin`) and the batch pair
-    /// `sync_batch_preview`/`sync_batch_apply` (console). A row that moves group
+    /// `sync_batch_preview`/`sync_batch_apply` (console); `update_harness`
+    /// (`admin`) and the agent restart's `harness_sessions` (`read`) and
+    /// `restart_harness_sessions` (`admin`). A row that moves group
     /// fails here until the count (and the proposal's table) move with it.
     #[test]
     fn every_row_has_one_base_group_and_the_counts_are_section_3_4s() {
@@ -1663,7 +1674,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 60), ("write", 23), ("admin", 39), ("console", 41), ("stream", 10), ("instruct", 7), ("answer", 2),
+            ("read", 61), ("write", 23), ("admin", 40), ("console", 41), ("stream", 10), ("instruct", 7), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 3),
         ]
         .into();

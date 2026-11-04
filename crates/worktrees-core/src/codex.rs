@@ -53,14 +53,40 @@ fn resume_id_in(root: &Path, cwd: &str) -> Option<String> {
                 let Some(id) = meta.get("id").and_then(|v| v.as_str()) else { continue };
                 // Only UUIDs: Codex also accepts names, whose lookup need not
                 // identify this rollout. Never pass arbitrary metadata as argv.
-                if id.len() == 36 && id.bytes().enumerate().all(|(i, b)| {
-                    if [8, 13, 18, 23].contains(&i) { b == b'-' } else { b.is_ascii_hexdigit() }
-                }) { return Some(id.to_string()); }
+                if is_uuid(id) { return Some(id.to_string()); }
             }
         }
         None
     }
     walk(root, 0, cwd)
+}
+
+/// A canonical 8-4-4-4-12 hex UUID: the only session id that may reach argv.
+pub fn is_uuid(id: &str) -> bool {
+    id.len() == 36
+        && id.bytes().enumerate().all(|(i, b)| if [8, 13, 18, 23].contains(&i) { b == b'-' } else { b.is_ascii_hexdigit() })
+}
+
+/// The rollout among `open` (paths a Codex process holds open) that records a
+/// user thread in `cwd`, as that thread's UUID. A resumed Codex keeps the
+/// thread's rollout open and appends to it, so this is the conversation the
+/// process runs — exactly, where `resume_id` is only the newest one started
+/// in the place. Sub-agent and `exec` rollouts never match (`is_user_thread`).
+pub fn held_thread(open: &[PathBuf], cwd: &str) -> Option<String> {
+    held_thread_in(&sessions_dir(), open, cwd)
+}
+
+fn held_thread_in(sessions: &Path, open: &[PathBuf], cwd: &str) -> Option<String> {
+    let root = std::fs::canonicalize(sessions).unwrap_or_else(|_| sessions.to_path_buf());
+    let cwd = physical(cwd);
+    open.iter()
+        .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
+        .filter(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()).starts_with(&root))
+        .find_map(|p| {
+            let meta = session_meta(p)?;
+            let id = meta.get("id")?.as_str()?;
+            (is_user_thread(&meta, &cwd) && is_uuid(id)).then(|| id.to_string())
+        })
 }
 
 fn sorted_desc(dir: &Path, dirs: bool) -> Vec<PathBuf> {
@@ -643,6 +669,34 @@ mod tests {
         std::fs::remove_file(day.join("rollout-a.jsonl")).unwrap();
         std::fs::remove_file(day.join("rollout-b.jsonl")).unwrap();
         assert_eq!(resume_id_in(&root, "/repo/.worktrees/a"), None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_held_thread_is_the_open_user_rollout_of_this_place() {
+        let root = std::env::temp_dir().join(format!("wt-held-{}", std::process::id()));
+        let day = root.join("sessions/2026/11/03");
+        std::fs::create_dir_all(&day).unwrap();
+        let place = root.join("place");
+        std::fs::create_dir_all(&place).unwrap();
+        let place_s = std::fs::canonicalize(&place).unwrap().to_string_lossy().into_owned();
+        let write = |name: &str, meta: serde_json::Value| {
+            let p = day.join(name);
+            std::fs::write(&p, format!("{}\n", serde_json::json!({"type":"session_meta","payload":meta}))).unwrap();
+            p
+        };
+        let user = write("rollout-1.jsonl", serde_json::json!({"id":"11111111-1111-4111-8111-111111111111","cwd":place_s,"source":"cli"}));
+        let guard = write("rollout-2.jsonl", serde_json::json!({"id":"22222222-2222-4222-8222-222222222222","cwd":place_s,"source":{"subagent":"guardian"}}));
+        let other = write("rollout-3.jsonl", serde_json::json!({"id":"33333333-3333-4333-8333-333333333333","cwd":"/elsewhere","source":"cli"}));
+        let named = write("rollout-4.jsonl", serde_json::json!({"id":"not-a-uuid","cwd":place_s,"source":"cli"}));
+        // Outside the sessions dir: a file shaped like a rollout is not one.
+        let stray = root.join("rollout-5.jsonl");
+        std::fs::write(&stray, format!("{}\n", serde_json::json!({"type":"session_meta","payload":{"id":"55555555-5555-4555-8555-555555555555","cwd":place_s}}))).unwrap();
+        let sessions = root.join("sessions");
+        let held = |open: &[PathBuf]| held_thread_in(&sessions, open, &place_s);
+        assert_eq!(held(&[guard.clone(), other.clone(), user.clone()]).as_deref(), Some("11111111-1111-4111-8111-111111111111"));
+        assert_eq!(held(&[guard, other, named, stray]), None);
+        assert_eq!(held(&[]), None);
         std::fs::remove_dir_all(root).unwrap();
     }
 

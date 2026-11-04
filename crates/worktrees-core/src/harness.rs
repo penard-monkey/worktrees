@@ -363,11 +363,19 @@ impl Adapter for Claude {
     /// A chosen model goes in `head`; a profile's own `--model` is on the END
     /// of `cmd` (`profile::claude_launch`), and claude takes the last one — so
     /// `Profile.model` keeps winning, as §2.3.6 decided.
+    ///
+    /// A resume that names its conversation (`resume_id`: the agent restart,
+    /// from the session's own probe) is `--resume '<id>'` after `--name`, never
+    /// the bare `-r` that opens Claude's picker. `open` names none and keeps
+    /// `-r` in `cmd`. Only a UUID is taken, since it becomes argv.
     fn launch_args(&self, launch: &AiLaunch, session: &str) -> LaunchArgs {
-        let tail = match self.provider().name_arg {
+        let mut tail = match self.provider().name_arg {
             Some(arg) if !session.is_empty() => vec![arg.to_string(), shell_quote(session)],
             _ => Vec::new(),
         };
+        if let Some(id) = launch.resume_id.as_deref().filter(|id| launch.resume && crate::codex::is_uuid(id)) {
+            tail.extend(["--resume".to_string(), shell_quote(id)]);
+        }
         LaunchArgs { head: model_words(self.provider(), launch), tail }
     }
 
@@ -1439,6 +1447,26 @@ mod tests {
         CODEX.prepare(&p, "feat", "/repo/.worktrees/feat", &mut l).unwrap();
         assert_eq!(l.cmd, "codex resume '019699ff-7c1a-7a30-9f0e-2b4e8d1c5a77'");
         assert!(l.resume, "still a resume");
+    }
+
+    /// The agent restart resumes the probe's own conversation: `--resume
+    /// '<sessionId>'` after `--name`, never bare `-r` (Claude's picker), and
+    /// never a value that is not a UUID.
+    #[test]
+    fn claude_resume_with_an_id_names_the_exact_session() {
+        let mut l = AiLaunch::plain("claude");
+        l.resume = true;
+        l.resume_id = Some("beba5e74-3ece-4f92-b5c6-72da058fca41".into());
+        assert_eq!(
+            l.launch_cmd("wt-restart-claude"),
+            "claude --name 'wt-restart-claude' --resume 'beba5e74-3ece-4f92-b5c6-72da058fca41'"
+        );
+        assert!(!l.launch_cmd("s").contains(" -r"), "never the picker");
+        l.resume_id = Some("x'; touch /tmp/PWNED".into());
+        assert_eq!(l.launch_cmd("s"), "claude --name 's'", "a non-UUID id is dropped, not quoted in");
+        l.resume_id = Some("beba5e74-3ece-4f92-b5c6-72da058fca41".into());
+        l.resume = false;
+        assert_eq!(l.launch_cmd("s"), "claude --name 's'", "an id without resume is a fresh launch");
     }
 
     #[test]

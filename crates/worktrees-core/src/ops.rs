@@ -564,12 +564,7 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
         // claude is a symlink to `versions/<x.y.z>`, and macOS takes the
         // process name from the resolved target, so `pane_current_command`
         // reads `2.1.277`. See `tmux::is_version_like`.
-        let pane0 = if !ai_cmd.is_empty() {
-            let helper = deferred_opener(ui, wt, ai);
-            format!("exec \"${{SHELL:-/bin/sh}}\" -ic {}", tmux::sq(&format!("{helper}{}", ai.pane0_body_for(keep, &session))))
-        } else {
-            keep.to_string()
-        };
+        let pane0 = if !ai_cmd.is_empty() { pane0_command(ui, wt, ai, &session) } else { keep.to_string() };
         // The spare shell is an opt-in SECOND pane next to pane0 (AI): `new`
         // and `open` split only with `--spare`, and that pane is where `new`
         // runs the detected install. Everything else — the CLI's default, the
@@ -676,6 +671,52 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
         ui.info(&format!("Session ready (detached). Attach with: tmux attach -t {session}"));
     }
     0
+}
+
+/// Pane 0's whole command for an agent launch in `session`: the inner shell
+/// running the agent, then the keep-alive shell. `launch` creates a session
+/// with it and the agent restart respawns a pane with it, so the two cannot
+/// drift (`docs/proposals/harness-restart.md`).
+fn pane0_command(ui: &mut dyn Ui, wt: &str, ai: &crate::profile::AiLaunch, session: &str) -> String {
+    let keep = "exec \"${SHELL:-/bin/sh}\"";
+    let helper = deferred_opener(ui, wt, ai);
+    format!("exec \"${{SHELL:-/bin/sh}}\" -ic {}", tmux::sq(&format!("{helper}{}", ai.pane0_body_for(keep, session))))
+}
+
+/// The command that relaunches the `harness` agent of the place at `wt`
+/// (slug `slug`) in tmux session `session`, resuming EXACTLY the
+/// conversation `resume_id` names: `open`'s own composition
+/// (`ai_launch_for`, the adapter's `prepare`, `pane0_command`), with the
+/// resume carried as an id — Claude's `--resume '<id>'`, Codex's
+/// `resume '<id>'` — never a picker. The configured command when it is this
+/// harness's, else the harness's own word, as `open --ai <harness>` picks.
+///
+/// A restart is not a new session: the one it replaces already ran in this
+/// folder, under this window. So it is `force`d past the gates that keep
+/// `open` from starting one that cannot work (a spent usage window, Codex's
+/// folder trust); a harness that cannot run at all still refuses.
+pub fn restart_command(p: &Project, ui: &mut dyn Ui, wt: &str, slug: &str, harness: &str, resume_id: &str, session: &str) -> Result<String, String> {
+    let adapter = crate::harness::by_id(harness).ok_or_else(|| format!("unknown harness {harness}"))?;
+    if !crate::codex::is_uuid(resume_id) {
+        return Err("the session's id is not a UUID, so it cannot be resumed exactly".into());
+    }
+    let mut cmd = crate::config::resolve_ai_cmd(None);
+    if crate::harness::for_cmd(&cmd).filter(|_| !cmd.is_empty()).map(|a| a.provider().id) != Some(harness) {
+        cmd = crate::config::resolve_ai_cmd(Some(harness));
+    }
+    let mut ai = ai_launch_for(p, ui, wt, &cmd);
+    if crate::harness::for_cmd(&ai.cmd).filter(|_| !ai.cmd.is_empty()).map(|a| a.provider().id) != Some(harness) {
+        return Err(format!("the place's {} launch could not be prepared (its AI profile?) — see the log", adapter.provider().label));
+    }
+    (ai.resume, ai.resume_id, ai.force) = (true, Some(resume_id.to_string()), true);
+    match adapter.prepare(p, slug, wt, &mut ai) {
+        Ok(()) => {}
+        Err(crate::harness::Refusal::Hard(why) | crate::harness::Refusal::Soft(why)) => return Err(why),
+    }
+    if !ai.resume {
+        return Err("the harness would not resume this session".into());
+    }
+    Ok(pane0_command(ui, wt, &ai, session))
 }
 
 // ── do_switch — move a registered worktree to another branch (DWIM) ──────────

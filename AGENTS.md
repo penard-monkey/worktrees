@@ -209,7 +209,7 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   do not align them). hyper parses the HTTP and tungstenite sees only frames,
   also ON PURPOSE: tungstenite's `accept_hdr_async` WRITES an HTTP error
   response when it refuses, while a hyper service that returns `Err` closes
-  with 0 bytes. The 192 commands sit in ONE macro table
+  with 0 bytes. The 194 commands sit in ONE macro table
   (`serve/dispatch.rs`) with an `Exposure` each; the six `ClientLocal` rows
   (clipboard, editor, terminal, zoom, the app bundle) are refused with
   `err: "client-local"`, never run on the host — the docs viewer is an
@@ -1984,7 +1984,15 @@ wait loop on it never ended and a sandbox app ran for two hours.
   `parent_thread_id`) write rollouts with the SAME cwd that start LATER, so
   "newest rollout for this cwd" is routinely not the user's session. And the
   file exists seconds before its 20KB `session_meta` first line does, so never
-  cache a miss on a line with no trailing newline.
+  cache a miss on a line with no trailing newline. **Its `cli_version` is the
+  version that STARTED the thread, not the one running it**: `codex resume
+  <id>` appends to the same rollout and writes no new `session_meta`
+  (measured 0.159.2 → 0.160.1, 2026-11-03), and every worktrees `open`
+  resumes. So a running Codex's build comes from its PROCESS (start time
+  against the installed file's ctime — npm stamps every extracted file
+  1985-10-26, so never mtime — and its executable), and its exact thread
+  from the rollout that process holds open (`harness_restart`,
+  `codex::held_thread`). Claude's probe `version` IS the running process's.
   Turn STATE is in the rollout too, since 0.15x: `task_started`, then
   `task_complete` (`completed_at`, epoch secs) or `turn_aborted` on Esc —
   `codex::rollout_turn`. A count over live sessions reads as "no completion
