@@ -1,0 +1,24 @@
+────────────────────────────────────────────────────────────────────────────────
+←  ☒ /model  ☒ MCP prompts  ✔ Submit  →
+
+Review your answers
+
+ │ ● Measured on Claude 2.1.318 and Codex 0.160.1: in both /model pickers, Enter
+ │   SAVES the pick as your default for new sessions (~/.claude/settings.json,
+ │   ~/.codex/config.toml); only the picker's `s` key is "this session only".
+ │   Claude's `/model <name>` with an argument also saves the default. What
+ │   should choosing a model from the chat do?
+   → Save as default
+ │ ● Claude's MCP prompts (e.g. /mcp__kicad__routing_strategy) are known only
+ │   inside the running Claude process: no file lists them, and the one listing
+ │   API (a `claude -p` initialize sidecar) ran an UNTRUSTED repo's SessionStart
+ │   hook in my test (ADR 0001). How should the chat's command list treat MCP
+ │   prompts?
+   → leave them out for now
+
+Ready to submit your answers?
+
+❯ 1. Submit answers
+  2. Cancel
+
+───────────────────────────────────────────────────────────────────── scA-main ─

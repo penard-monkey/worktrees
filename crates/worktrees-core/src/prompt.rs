@@ -378,13 +378,26 @@ pub fn claude(screen: &str) -> Option<Modal> {
             Layout::Plain => {}
         }
     }
-    let top = (0..end).rev().find(|&i| full_rule(&rows[i], width) && !next_is_choice(&rows, i, end))?;
+    // The modal's first row: under its top rule — or row 0 when the rule is
+    // off the screen and row 0 is a form's own tab bar under a question's
+    // footer. A form exactly as tall as its pane (2.1.318's two questions in
+    // 80×24, fixtures `2.1.318/form-bar/`) scrolls only its rule away; with
+    // its tab bar on row 0 nothing of it is cut. Only Claude's own drawing
+    // counts — from column 0, every tab a box, the last `✔ Submit` — because
+    // agent text (a command, a question) can start with anything once it is
+    // trimmed; under a permission's footer the rule is always required, or a
+    // clipped command could read as whole.
+    let start = match (0..end).rev().find(|&i| full_rule(&rows[i], width) && !next_is_choice(&rows, i, end)) {
+        Some(top) => top + 1,
+        None if kind == Kind::Question && drawn_tab_bar(&rows[0]) => 0,
+        None => return None,
+    };
     // A question's choices are all a device's, so "question" is decided by
     // what CLAUDE draws, never by the footer alone: AskUserQuestion heads its
     // modal with a checkbox (`☐ Colour`) or, for several questions or boxes,
     // the `← ☐ Colour ☐ Size ✔ Submit →` tab bar. Another dialog with the
     // same footer is a permission, its unknown choices the host's.
-    let head = rows[top + 1..end].iter().map(|r| r.trim()).find(|t| !t.is_empty())?;
+    let head = rows[start..end].iter().map(|r| r.trim()).find(|t| !t.is_empty())?;
     let tab_bar = head.starts_with('←') && head.ends_with('→');
     let asked = tab_bar || head.starts_with(['☐', '☒', '✔']);
     if end > last && !tab_bar {
@@ -392,9 +405,9 @@ pub fn claude(screen: &str) -> Option<Modal> {
         return None;
     }
     let kind = if kind == Kind::Question && !asked { Kind::Permission } else { kind };
-    let mut at = match numbered_at(&rows, top + 1, end) {
+    let mut at = match numbered_at(&rows, start, end) {
         Some(at) => at,
-        None => marked_run(&rows, top + 1, end, |_| false)?.into_iter().map(|c| (0, c)).collect(),
+        None => marked_run(&rows, start, end, |_| false)?.into_iter().map(|c| (0, c)).collect(),
     };
     let mut advance = None;
     if kind == Kind::Question {
@@ -408,7 +421,7 @@ pub fn claude(screen: &str) -> Option<Modal> {
         // AskUserQuestion's own free-text row is the last option, just above
         // the rule inside the list — by where Claude puts it, so a typed
         // answer (which replaces "Type something.") is still that row.
-        let inner = (top + 1..end).find(|&i| full_rule(&rows[i], width) && next_is_choice(&rows, i, end));
+        let inner = (start..end).find(|&i| full_rule(&rows[i], width) && next_is_choice(&rows, i, end));
         if let Some(inner) = inner {
             if let Some((_, c)) = at.iter_mut().rev().find(|(i, _)| *i < inner) {
                 c.text = Some(Typing::Field);
@@ -430,7 +443,7 @@ pub fn claude(screen: &str) -> Option<Modal> {
             }
         }
     }
-    let mut m = modal(provider::CLAUDE.id, kind, &rows, top + 1, last, end, at.into_iter().map(|(_, c)| c).collect());
+    let mut m = modal(provider::CLAUDE.id, kind, &rows, start, last, end, at.into_iter().map(|(_, c)| c).collect());
     m.multi = kind == Kind::Question && m.choices.iter().any(multi_box);
     if let Some((after, on)) = advance {
         let i = m.order.iter().position(|o| *o == Some(after)).map_or(m.order.len(), |i| i + 1);
@@ -438,6 +451,17 @@ pub fn claude(screen: &str) -> Option<Modal> {
         m.on_submit = on;
     }
     Some(m)
+}
+
+/// AskUserQuestion's tab bar exactly as Claude draws it (every fixture from
+/// 2.1.309 to 2.1.318): from column 0, `←`, then two-space-separated tabs —
+/// each question's box and header (`☐ Colour`, `☒ Size`) — then `✔ Submit`
+/// and `→`.
+fn drawn_tab_bar(row: &str) -> bool {
+    let Some(inner) = row.strip_prefix("←  ").and_then(|r| r.strip_suffix("  →")) else { return false };
+    let tabs: Vec<&str> = inner.split("  ").collect();
+    let Some((last, boxes)) = tabs.split_last() else { return false };
+    *last == "✔ Submit" && !boxes.is_empty() && boxes.iter().all(|t| t.strip_prefix(['☐', '☒']).is_some_and(|h| h.starts_with(' ') && !h.trim().is_empty()))
 }
 
 /// One source for the reader's `multi` and the answer path's box refusal.
@@ -2165,6 +2189,68 @@ mod tests {
         assert!(!second.multi && !same_form(&first, &second));
         let review = claude(include_str!("../tests/fixtures/claude-screen/2.1.316/form-multiselect/review.txt")).unwrap();
         assert!(!review.multi && review.choices[0].label == "Submit answers");
+    }
+
+    /// Claude 2.1.318's two-question form in an 80×24 pane is exactly as
+    /// tall as the pane, so its top rule scrolls off and its tab bar is row 0
+    /// (fixtures `2.1.318/form-bar/`, the owner's form of 2026-11-04). The
+    /// head on row 0 is the proof nothing of it is cut: it reads as it does
+    /// with the rule on screen. The same form in 80×20 has lost its head and
+    /// is still no modal.
+    #[test]
+    fn a_form_whose_top_rule_is_off_the_screen_reads_from_its_tab_bar() {
+        macro_rules! bar {
+            ($f:literal) => {
+                include_str!(concat!("../tests/fixtures/claude-screen/2.1.318/form-bar/", $f))
+            };
+        }
+        let want = vec![
+            ("Session only (Recommended)", true),
+            ("Save as default", false),
+            ("Offer both", false),
+            ("Type something.", false),
+            ("Chat about this", false),
+        ];
+        let whole = claude(bar!("first-80.e.txt")).unwrap();
+        for screen in [bar!("first-80x24.txt"), bar!("first-80x24.e.txt")] {
+            let m = read(provider::CLAUDE.id, screen).expect("the form's head is on row 0");
+            assert_eq!(m.kind, Kind::Question);
+            assert!(m.lines[0].starts_with("←  ☐ /model  ☐ MCP prompts  ✔ Submit  →"), "{:?}", m.lines.first());
+            assert!(m.lines.iter().any(|l| l.contains("What should")));
+            assert_eq!(m.choices.iter().map(|c| (c.label.as_str(), c.highlighted)).collect::<Vec<_>>(), want);
+            assert_eq!(m.choices[3].text, Some(Typing::Field));
+            assert_eq!(m.choices[0].more.len(), 3, "a description's three rows");
+            assert!(same_prompt(&whole, &m), "the same form as with its rule on screen");
+        }
+        for screen in [bar!("first.txt"), bar!("first-80.txt")] {
+            let m = claude(screen).unwrap();
+            assert_eq!(m.choices.iter().map(|c| (c.label.as_str(), c.highlighted)).collect::<Vec<_>>(), want);
+        }
+        assert!(claude(bar!("first-80x20.txt")).is_none(), "its head is cut: not whole");
+        assert!(claude(bar!("first-80x20.e.txt")).is_none());
+        // Answered from the chat's rows on a private tmux server: the second
+        // question (its rule on screen again), then the review.
+        let second = claude(bar!("second-80x24.e.txt")).unwrap();
+        assert!(second.lines[0].starts_with("←  ☒ /model  ☐ MCP prompts"));
+        assert_eq!(second.choices.len(), 4);
+        assert_eq!(second.choices[2].text, Some(Typing::Field));
+        assert!(!same_prompt(&whole, &second));
+        let review = claude(bar!("review-80x24.e.txt")).unwrap();
+        assert_eq!(review.choices.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(), vec!["Submit answers", "Cancel"]);
+        // Only Claude's own tab bar on row 0 stands in for the rule: not one
+        // indented (agent text is), not one that lost its Submit tab.
+        let first = bar!("first-80x24.txt");
+        let (bar, rest) = first.split_once('\n').unwrap();
+        assert!(claude(&format!("  {bar}\n{rest}")).is_none(), "indented");
+        assert!(claude(&format!("{}\n{rest}", bar.replace("✔ Submit", "Submit"))).is_none(), "no Submit tab");
+        assert!(claude(&format!("←  ☐ x  →\n{rest}")).is_none(), "no Submit tab");
+        // And never under a permission's footer: a command clipped at the top
+        // whose row 0 reads like a tab bar is still not whole.
+        let clipped = include_str!("../tests/fixtures/claude-screen/2.1.316/permission-bash-taller.txt");
+        let (_, below) = clipped.split_once('\n').unwrap();
+        let faked = format!("←  ☐ /model  ✔ Submit  →\n{below}");
+        assert!(drawn_tab_bar(faked.lines().next().unwrap()), "the fake is a perfect tab bar");
+        assert!(claude(&faked).is_none(), "a permission needs its rule on screen");
     }
 
     /// A plan approval is a sheet under a `▔` edge, its plan in a dashed box,
