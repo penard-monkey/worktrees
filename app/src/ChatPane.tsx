@@ -15,7 +15,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import {
   activityMoved, boxesOf, bytes, callsSay, callsWords, cardDigits, cardKey, cardTakesFocus, choiceOpen, choiceWay, clockMs, clockOf,
-  dayLabel, draftProblem, fieldWords, foldCalls, itemsOf, keyFocusOf, lineDiff, loadPrompt, loadTurns, noSessionYet, permissionAnswerWords,
+  dayLabel, draftIsOwnSend, draftProblem, fieldWords, foldCalls, itemsOf, keyFocusOf, lineDiff, loadPrompt, loadTurns, noSessionYet, permissionAnswerWords,
   promptBody, questionAnswerWords, selectChoice, sendAnswer, sendDraft, sendMany, setAnswerText, setBoxText, setDraft,
   splitAtRule, stopTurn, ticksOf, toggleTick, turnsUnsupported, underRoot, useChat, SEND_MAX,
   type AskedStep, type Item, type PromptChoice, type PromptDetail, type ReadablePrompt, type Target, type ToolCall,
@@ -1034,7 +1034,7 @@ function Composer(props: {
         addAttachments(target.path, Array.from(e.dataTransfer.files));
         field.current?.focus({ preventScroll: true });
       }}>
-      {props.paneDraft && !props.waiting && (
+      {props.paneDraft && !props.waiting && !draftIsOwnSend(props.paneDraft.text, v, Date.now()) && (
         <p className="chat-paneDraft" data-testid="chat-pane-draft">
           The terminal’s input holds unsent text (“{props.paneDraft.text.length > 60 ? props.paneDraft.text.slice(0, 59) + "…" : props.paneDraft.text}”).
           {" "}{agent} takes no message until it is sent or cleared{" "}

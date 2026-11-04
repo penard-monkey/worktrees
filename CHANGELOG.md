@@ -5,6 +5,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Fixed
+- **A message you send in the chat shows once.** A message that ended in a
+  space, or ran past 4000 characters, stayed as a "waiting for Claude" bubble
+  beside the real one, because Claude's record of it never matched exactly. A
+  reply read at the moment of sending could double one briefly too, and sending
+  the same words twice could hide the second until Claude recorded it.
+- **The chat no longer says the terminal holds unsent text when it only caught
+  your own message on its way in.** That notice could stay for 15 seconds after
+  Claude had taken the message.
+
 ## [0.47.0] - 2026-11-02
 
 ### Added
