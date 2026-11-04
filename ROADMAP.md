@@ -5,6 +5,18 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (the repo's `/close-out` skill, `.claude/skills/close-out`;
 this repo's settings in `.claude/close-out.md`).
 
+- **Chat double send (#606): what it leaves open.**
+  - **The nav ✎ and ⌘K read the same stale sample.** A composer sample caught
+    between a send's paste and Enter still shows there for up to 15 s. Only the
+    chat's notice ignores it (`draftIsOwnSend`).
+  - **A 4001–4096 character line is unmeasured against a live Claude.** The clip
+    rule follows `turns::finish`'s shape, but how Claude records a line that long
+    was not seen. `LINE_MAX` is 4096 bytes, so only that range depends on it.
+  - **Codex, pi and kimi are unsurveyed.** All 50 audited sends matched Claude
+    transcripts, as exact text or with one trailing space. A harness that changes
+    a line's interior would still leave a pending bubble.
+  _From: [2026-11-04 chat-double-send](docs/sessions/2026-11-04-chat-double-send/summary.md)._
+
 - **Remote access (Phase 2 slice 6): what the host side leaves open.**
   - **A host UI for remote access.** Turning it on, the pairing dialog (scope
     first, the QR, the code, Allow/Deny), the device list, the kill switch,
