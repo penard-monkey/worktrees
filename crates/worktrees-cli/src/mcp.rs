@@ -4393,7 +4393,10 @@ mod tests {
         let t = attributed("feat", "/logout please");
         assert_eq!(t, "[worktrees: message from place \"feat\", not from the user] /logout please");
         assert!(t.starts_with('['));
-        for lead in ["/clear", "@file", "!ls", "  /quit"] {
+        // The chat's `agent_command` (its own row, a person's) runs slash
+        // commands; an agent's `send` never does: agents do not drive each
+        // other's commands.
+        for lead in ["/clear", "@file", "!ls", "  /quit", "/model", "/compact keep the facts", "/status", "#note"] {
             assert!(send_text_ok(lead).is_err(), "{lead:?} must be refused as well");
         }
         assert!(send_text_ok("run the tests; then report").is_ok());

@@ -122,6 +122,12 @@ impl worktrees_api::agents::AgentIo for ScriptedAgent {
     fn codex_models(&self) -> Vec<(String, usize)> {
         Vec::new()
     }
+    fn commands_of(&self, _: &worktrees_core::Project, _: &str, _: &worktrees_api::agents::Lane) -> (Option<String>, Vec<worktrees_core::slash::Command>) {
+        (None, Vec::new())
+    }
+    fn command(&self, _: &worktrees_api::agents::Lane, _: &str, _: &str) -> Result<worktrees_core::harness::SendOutcome, String> {
+        Err("scripted agents run no commands".into())
+    }
     fn sleep(&self, _: u64) {}
 }
 

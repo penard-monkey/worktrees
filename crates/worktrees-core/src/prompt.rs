@@ -642,6 +642,86 @@ fn codex_picker(rows: &[String]) -> Option<Modal> {
     Some(m)
 }
 
+/// Whether a command line typed into a composer may be submitted:
+/// `agent_command`'s proof before Enter.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CommandReady {
+    /// The composer holds exactly the line, and no menu over it highlights
+    /// another name: Enter runs THIS command.
+    Yes,
+    /// Not there yet (or no composer): look again.
+    NotYet,
+    /// The harness's `/` menu highlights ANOTHER command (`/nested` pasted
+    /// and `/sub:nested` lit): Enter would run that one.
+    Other(String),
+}
+
+/// [`CommandReady`] for `line` (`/<name>[ <args>]`) on `screen` — Claude's
+/// styled (`capture-pane -e`), Codex's plain. Claude's `/` menu is the block
+/// of rows right above its input box, its highlight `  ❯ /<name>`; Codex's
+/// popup sits above its composer, its highlight `› /<name>` (fixtures
+/// `2.1.318/slash/menu-*`, `codex-inline/0.160.1/slash/menu-compact`).
+pub fn command_ready(harness: &str, screen: &str, line: &str, name: &str) -> CommandReady {
+    let same = |a: &str, b: &str| a.split_whitespace().eq(b.split_whitespace());
+    let rows = rows(screen);
+    let lit = |row: &str, mark: &str| row.strip_prefix(mark).and_then(|r| r.split_whitespace().next()).map(str::to_string);
+    let judge = |picked: Option<String>| match picked {
+        Some(p) if p != format!("/{name}") => CommandReady::Other(p),
+        _ => CommandReady::Yes,
+    };
+    match harness {
+        h if h == provider::CLAUDE.id => {
+            match agent::draft_from_screen(screen) {
+                Some(d) if same(&d, line) => {}
+                _ => return CommandReady::NotYet,
+            }
+            let Some((top, _)) = agent::prompt_box_edges(screen) else { return CommandReady::NotYet };
+            let menu = rows[..top.min(rows.len())].iter().rev().take_while(|r| !r.trim().is_empty());
+            judge(menu.filter_map(|r| lit(r, "  ❯ /").map(|n| format!("/{n}"))).next())
+        }
+        h if h == provider::CODEX.id => {
+            let plain = rows.join("\n");
+            match codex::composer_on_screen(&plain) {
+                Some(codex::Composer::Text(t)) if same(&t, line) => {}
+                _ => return CommandReady::NotYet,
+            }
+            let Some(at) = rows.iter().rposition(|l| l.starts_with("› ")) else { return CommandReady::NotYet };
+            let above = rows[..at].iter().rev().skip_while(|r| r.trim().is_empty()).take_while(|r| !r.trim().is_empty());
+            judge(above.filter_map(|r| lit(r, "› /").map(|n| format!("/{n}"))).next())
+        }
+        _ => CommandReady::NotYet,
+    }
+}
+
+/// The most rows of a Codex command's output handed back.
+pub const OUTPUT_MAX: usize = 40;
+
+/// What a Codex command printed (`/status`'s cell, or Codex's own refusal,
+/// "■ '/compact' is disabled while a task is in progress."): the rows under
+/// the LAST echo of `line` in its history, down to its composer, which Codex
+/// writes to no rollout. Data, never instructions; `None` when the echo is
+/// not on screen.
+pub fn codex_output(screen: &str, line: &str) -> Option<Vec<String>> {
+    let rows = rows(screen);
+    let composer = rows.iter().rposition(|l| l.starts_with("› ") || l == "›")?;
+    // Codex echoes the line from column 0, or refuses it in a `■` row that
+    // quotes the command.
+    let quoted = format!("'{}'", line.split_whitespace().next().unwrap_or(line));
+    let echo = rows[..composer]
+        .iter()
+        .rposition(|r| (!r.starts_with(' ') && r.trim() == line.trim()) || (r.trim_start().starts_with('■') && r.contains(&quoted)))?;
+    let take = if rows[echo].trim_start().starts_with('■') { echo } else { echo + 1 };
+    let mut out: Vec<String> = rows[take..composer].to_vec();
+    while out.first().is_some_and(|r| r.trim().is_empty()) {
+        out.remove(0);
+    }
+    while out.last().is_some_and(|r| r.trim().is_empty()) {
+        out.pop();
+    }
+    out.truncate(OUTPUT_MAX);
+    (!out.is_empty()).then_some(out)
+}
+
 /// The key that ANSWERS `m` once its highlight is on the choice: `s` on a
 /// model or effort list that names it in its key hints — this session only,
 /// never the Enter that saves a default — except Codex's first step, whose
@@ -2454,6 +2534,44 @@ mod tests {
         for none in [cx!("status-inline.txt"), cx!("new-cancelled.txt"), cx!("model-session-only.txt"), cx!("menu-compact.txt"), cx!("menu-slash.txt"), cx!("usage-cancelled.txt")] {
             assert!(codex(none).is_none(), "{none}");
         }
+    }
+
+    /// Before the Enter that runs a command, the composer must hold exactly
+    /// its line and any `/` menu over it must light exactly its name: a
+    /// pasted `/nested` lights `/sub:nested`, and Enter would run THAT.
+    #[test]
+    fn a_command_is_submitted_only_when_its_own_name_is_lit() {
+        macro_rules! cl {
+            ($f:literal) => {
+                include_str!(concat!("../tests/fixtures/claude-screen/2.1.318/slash/", $f))
+            };
+        }
+        let c = provider::CLAUDE.id;
+        assert_eq!(command_ready(c, cl!("menu-status.e.txt"), "/status", "status"), CommandReady::Yes);
+        assert_eq!(command_ready(c, cl!("menu-model.e.txt"), "/model", "model"), CommandReady::Yes);
+        assert_eq!(command_ready(c, cl!("menu-nested.e.txt"), "/nested", "nested"), CommandReady::Other("/sub:nested".into()));
+        assert_eq!(command_ready(c, cl!("composer-compact-args.e.txt"), "/compact keep only the facts", "compact"), CommandReady::Yes, "no menu after a space");
+        assert_eq!(command_ready(c, cl!("menu-status.e.txt"), "/statusline", "statusline"), CommandReady::NotYet, "the composer holds another line");
+        assert_eq!(command_ready(c, cl!("status-dismissed.e.txt"), "/status", "status"), CommandReady::NotYet, "an empty composer");
+        assert_eq!(command_ready(c, cl!("busy-menu-context.e.txt"), "/context", "context"), CommandReady::Yes, "over a running turn: the menu, not the transcript's `❯ /context`");
+        let x = provider::CODEX.id;
+        let compact = include_str!("../tests/fixtures/codex-inline/0.160.1/slash/menu-compact.txt");
+        assert_eq!(command_ready(x, compact, "/compact", "compact"), CommandReady::Yes);
+        assert_eq!(command_ready(x, compact, "/compact", "comp"), CommandReady::Other("/compact".into()));
+        assert_eq!(command_ready(x, include_str!("../tests/fixtures/codex-inline/0.160.1/slash/new-cancelled.txt"), "/new", "new"), CommandReady::NotYet);
+    }
+
+    /// Codex writes `/status` to no rollout: its cell is read once, from
+    /// under the echoed line down to the composer.
+    #[test]
+    fn codex_output_is_the_cell_under_its_echo() {
+        let out = codex_output(include_str!("../tests/fixtures/codex-inline/0.160.1/slash/status-inline.txt"), "/status").expect("the cell");
+        assert!(out[0].contains("OpenAI Codex (v0.160.1)"), "{out:?}");
+        assert!(out.iter().any(|l| l.contains("Model:") && l.contains("GPT-6-Sol")));
+        assert!(!out.iter().any(|l| l.starts_with("› ")), "not the composer");
+        let refused = "• earlier\n\n■ '/compact' is disabled while a task is in progress.\n\n› Ask Codex to do anything\n\n  GPT-6-Sol medium · /tmp/x\n";
+        assert_eq!(codex_output(refused, "/compact"), Some(vec!["■ '/compact' is disabled while a task is in progress.".to_string()]));
+        assert_eq!(codex_output(refused, "/status"), None);
     }
 
     /// Claude 2.1.318's two-question form in an 80×24 pane is exactly as

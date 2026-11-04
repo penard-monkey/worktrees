@@ -42,6 +42,71 @@ pub fn exe(_pid: i32) -> Option<PathBuf> {
     None
 }
 
+/// `pid`'s argument vector as the kernel holds it (`KERN_PROCARGS2` on
+/// macOS, `/proc/<pid>/cmdline` on Linux) — what a Claude was started with
+/// (its `--plugin-dir`s, for the slash commands its plugins give it).
+#[cfg(target_os = "macos")]
+pub fn args(pid: i32) -> Option<Vec<String>> {
+    if pid <= 0 {
+        return None;
+    }
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+    let mut size: libc::size_t = 0;
+    // SAFETY: a size query (null buffer), then a buffer of the size answered.
+    if unsafe { libc::sysctl(mib.as_mut_ptr(), 3, std::ptr::null_mut(), &mut size, std::ptr::null_mut(), 0) } != 0 || size < 4 {
+        return None;
+    }
+    let mut buf = vec![0u8; size];
+    if unsafe { libc::sysctl(mib.as_mut_ptr(), 3, buf.as_mut_ptr().cast(), &mut size, std::ptr::null_mut(), 0) } != 0 {
+        return None;
+    }
+    buf.truncate(size);
+    let argc = i32::from_ne_bytes(buf.get(..4)?.try_into().ok()?);
+    let rest = &buf[4..];
+    // The executable's path, NUL padding, then argc NUL-ended strings.
+    let mut at = rest.iter().position(|&b| b == 0)?;
+    while rest.get(at) == Some(&0) {
+        at += 1;
+    }
+    let out: Vec<String> = rest[at..].split(|&b| b == 0).take(argc.max(0) as usize).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
+    (out.len() == argc as usize).then_some(out)
+}
+
+#[cfg(target_os = "linux")]
+pub fn args(pid: i32) -> Option<Vec<String>> {
+    if pid <= 0 {
+        return None;
+    }
+    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    let mut out: Vec<String> = raw.split(|&b| b == 0).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
+    if out.last().is_some_and(String::is_empty) {
+        out.pop();
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn args(_pid: i32) -> Option<Vec<String>> {
+    None
+}
+
+/// The values of `--plugin-dir` (as `--plugin-dir <d>` or `--plugin-dir=<d>`)
+/// in `args`.
+pub fn plugin_dirs(args: &[String]) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        if a == "--plugin-dir" {
+            if let Some(d) = it.next() {
+                out.push(PathBuf::from(d));
+            }
+        } else if let Some(d) = a.strip_prefix("--plugin-dir=") {
+            out.push(PathBuf::from(d));
+        }
+    }
+    out
+}
+
 /// When `pid` started, in epoch seconds.
 #[cfg(target_os = "macos")]
 pub fn start_epoch(pid: i32) -> Option<i64> {
@@ -209,6 +274,18 @@ pub fn ctime(path: &std::path::Path) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
+    /// This test's own process: its argv as the kernel holds it, and
+    /// `--plugin-dir` read in both its spellings.
+    #[test]
+    fn a_process_args_and_its_plugin_dirs() {
+        let me = super::args(std::process::id() as i32).expect("our own argv");
+        assert_eq!(me.len(), std::env::args().count());
+        assert_eq!(me.first().map(String::as_str), std::env::args().next().as_deref());
+        let a: Vec<String> = ["claude", "--plugin-dir", "/a/b", "--name", "x", "--plugin-dir=/c d"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(super::plugin_dirs(&a), vec![std::path::PathBuf::from("/a/b"), std::path::PathBuf::from("/c d")]);
+        assert_eq!(super::args(-1), None);
+    }
+
     use super::*;
 
     #[test]

@@ -179,7 +179,7 @@ pub fn resolve<'a>(list: &'a [Command], name: &str) -> Result<&'a Command, Strin
 
 /// A command name as both harnesses draw them: letters, digits, `_ . : -`,
 /// starting with a letter or digit, at most 100 bytes.
-fn valid_name(n: &str) -> bool {
+pub fn valid_name(n: &str) -> bool {
     !n.is_empty()
         && n.len() <= 100
         && n.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
