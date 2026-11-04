@@ -1741,6 +1741,11 @@ mod tests {
             include_str!(concat!("../../worktrees-core/tests/fixtures/claude-screen/2.1.318/slash/", $name))
         };
     }
+    macro_rules! effort_claude {
+        ($name:literal) => {
+            include_str!(concat!("../../worktrees-core/tests/fixtures/claude-screen/2.1.318/model-effort/", $name))
+        };
+    }
     macro_rules! slash_codex {
         ($name:literal) => {
             include_str!(concat!("../../worktrees-core/tests/fixtures/codex-inline/0.160.1/slash/", $name))
@@ -1770,6 +1775,14 @@ mod tests {
         let (r, keys, _) = answer_on(Arc::new(Fake::with(vec![("claude", "repo-lane", models())])), "model-moved", 3, true);
         assert_eq!(r.unwrap()["confirmed"], true);
         assert_eq!(keys, vec![Key::Down, Key::SessionOnly], "a device too, and never Enter");
+        // Another model: the effort row under the list follows the highlight
+        // (xHigh on Opus 5.5 and Fable 5.1, Medium on Sonnet 5.5), and the
+        // move is still proved on the same list before `s` (fixtures
+        // `2.1.318/model-effort/`; the owner's "the prompt changed").
+        let other = || pane(vec![effort_claude!("on-current.e.txt"), effort_claude!("on-fable.e.txt"), effort_claude!("on-sonnet.e.txt")], effort_claude!("sonnet-session-only.e.txt"));
+        let (r, keys, _) = answer_on(Arc::new(Fake::with(vec![("claude", "repo-lane", other())])), "model-other", 4, true);
+        assert_eq!(r.unwrap()["label"], "Sonnet 5.5");
+        assert_eq!(keys, vec![Key::Down, Key::Down, Key::SessionOnly], "never Enter, and no ←/→: the effort is the model's");
         let view = || pane(vec![slash_claude!("status-view.e.txt")], slash_claude!("status-dismissed.e.txt"));
         let (r, keys, v) = answer_on(Arc::new(Fake::with(vec![("claude", "repo-lane", view())])), "view", 1, true);
         assert_eq!((v["picker"].as_str(), v["choices"][0]["label"].as_str()), (Some("view"), Some("Close")));

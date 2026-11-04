@@ -580,9 +580,72 @@ fn claude_models(rows: &[String], head: usize, foot: usize, last: usize) -> Opti
         return None;
     }
     let mut m = modal(provider::CLAUDE.id, Kind::Question, rows, head, last, foot, choices);
+    m.body = model_body(&m.body);
     m.picker = Some(Picker::Model);
     m.hidden = hidden;
     Some(m)
+}
+
+/// Claude's effort levels, each with the glyph its model list draws for it
+/// (2.1.318: `low`…`max`, `xhigh` spelled `xHigh`).
+const CLAUDE_EFFORTS: [(char, &str); 5] = [('○', "Low"), ('◐', "Medium"), ('●', "High"), ('◉', "xHigh"), ('◈', "Max")];
+/// The row Claude draws under a `Max` effort row (`⚠ ` before it in some
+/// themes).
+const CLAUDE_MAX_EFFORT_WARNING: &str = "May use excessive tokens resulting in long response times or overthinking. Use sparingly for the hardest tasks.";
+/// What an effort row is in a model list's [`Modal::body`].
+const EFFORT_SLOT: &str = "<effort>";
+
+/// The effort row under Claude's model list — the HIGHLIGHTED model's
+/// effort, so it changes as the highlight moves (fixtures
+/// `2.1.318/model-effort/`): `<glyph> <Level> effort[ (default)][ ←/→ to
+/// adjust][ · Ultracode on (/effort)]`, or `○ Effort not supported[ for
+/// <model>]`. Its level, `""` for the latter; `None` for any other row.
+fn claude_effort_row(row: &str) -> Option<&str> {
+    let t = row.trim();
+    let mut cs = t.chars();
+    let glyph = cs.next()?;
+    let rest = cs.as_str().strip_prefix(' ')?;
+    if glyph == '○' && (rest == "Effort not supported" || rest.strip_prefix("Effort not supported for ").is_some_and(|m| !m.trim().is_empty())) {
+        return Some("");
+    }
+    let rest = rest.strip_suffix(" · Ultracode on (/effort)").unwrap_or(rest);
+    let rest = rest.strip_suffix(" ←/→ to adjust").unwrap_or(rest);
+    let rest = rest.strip_suffix(" (default)").unwrap_or(rest);
+    let level = rest.strip_suffix(" effort")?;
+    CLAUDE_EFFORTS.contains(&(glyph, level)).then_some(level)
+}
+
+/// A model list's body with what follows its highlight compared by shape
+/// alone, as a permission's footer is: a row's `↓`/`↑`, which the `❯`
+/// replaces on the row it lands on, and the effort row, with the warning a
+/// `Max` row carries under it (wrapped or not) and the blank rows below.
+/// Every other row — the head, the `/fast` row, the hints — stays as
+/// drawn, so anything else that changes is another prompt.
+fn model_body(body: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(body.len());
+    let mut i = 0;
+    while i < body.len() {
+        let r = &body[i];
+        i += 1;
+        if let Some((mark @ ('↓' | '↑'), ..)) = model_row(r) {
+            out.push(r.replacen(mark, " ", 1));
+        } else if let Some(level) = claude_effort_row(r) {
+            out.push(format!("{}{EFFORT_SLOT}", &r[..r.len() - r.trim_start().len()]));
+            let end = (i..body.len()).find(|&j| body[j].trim().is_empty()).unwrap_or(body.len());
+            let under = body[i..end].iter().map(|r| r.trim()).collect::<Vec<_>>().join(" ");
+            if level == "Max" && end > i && under.strip_prefix("⚠ ").unwrap_or(&under) == CLAUDE_MAX_EFFORT_WARNING {
+                i = end;
+            }
+            // And the blank rows after it: the box keeps the height a warning
+            // gave it once the effort is lowered again (`medium-toggled`).
+            while body.get(i).is_some_and(|r| r.trim().is_empty()) {
+                i += 1;
+            }
+        } else {
+            out.push(r.clone());
+        }
+    }
+    out
 }
 
 /// The lists a Codex slash command opens (fixtures `codex-inline/0.160.1/
@@ -2534,6 +2597,82 @@ mod tests {
         for none in [cx!("status-inline.txt"), cx!("new-cancelled.txt"), cx!("model-session-only.txt"), cx!("menu-compact.txt"), cx!("menu-slash.txt"), cx!("usage-cancelled.txt")] {
             assert!(codex(none).is_none(), "{none}");
         }
+    }
+
+    /// Claude's model list draws the HIGHLIGHTED model's effort under it
+    /// (2.1.318, fixtures `2.1.318/model-effort/`): `◉ xHigh effort` on
+    /// Opus 5.5, `◐ Medium effort (default)` on Sonnet 5.5, `○ Effort not
+    /// supported for Haiku 4.5`, and a `◈ Max` pick's warning row under it;
+    /// and the `❯` landing on row 10 takes the place of its `↓`. Moving the
+    /// highlight is still the same list — the proof before `s` that told the
+    /// owner "the prompt changed" when they picked Sonnet (2026-11-04) — while
+    /// the user still sees the effort as Claude draws it, a scrolled window
+    /// is other rows, and a row in the effort's place that is no effort row
+    /// is another prompt.
+    #[test]
+    fn a_model_lists_effort_row_follows_the_highlight_and_it_is_the_same_list() {
+        macro_rules! fx {
+            ($f:literal) => {
+                include_str!(concat!("../tests/fixtures/claude-screen/2.1.318/model-effort/", $f))
+            };
+        }
+        let lit = |m: &Modal| m.choices.iter().find(|c| c.highlighted).map(|c| c.n);
+        let on = claude(fx!("on-current.e.txt")).expect("the model list");
+        assert_eq!((lit(&on), on.hidden, on.choices.len()), (Some(2), Some(3), 10));
+        // The window as `/model` opens it (rows 1–10), and the same list
+        // scrolled to rows 2–11, where ←/→ were pressed: the user's effort,
+        // which a move keeps, not a model's.
+        let window2 = claude(fx!("window-2.e.txt")).expect("the model list, scrolled");
+        assert_eq!((lit(&window2), window2.hidden, window2.choices[0].n), (Some(3), Some(2), 2));
+        for (from, screen, n, effort) in [
+            (&on, fx!("on-fable.e.txt"), 3, "◉ xHigh effort ←/→ to adjust"),
+            (&on, fx!("on-sonnet.e.txt"), 4, "◐ Medium effort (default) ←/→ to adjust"),
+            (&on, fx!("on-sonnet.txt"), 4, "◐ Medium effort (default) ←/→ to adjust"),
+            (&on, fx!("on-haiku-4-5.e.txt"), 6, "○ Effort not supported for Haiku 4.5"),
+            (&on, fx!("on-row-10.e.txt"), 10, "◉ xHigh effort ←/→ to adjust"),
+            (&window2, fx!("max.e.txt"), 3, "◈ Max effort ←/→ to adjust"),
+            (&window2, fx!("medium-toggled.e.txt"), 3, "◐ Medium effort ←/→ to adjust"),
+        ] {
+            let now = claude(screen).expect("the model list");
+            assert_eq!(lit(&now), Some(n));
+            assert!(now.lines.iter().any(|l| l.trim() == effort), "the user sees the effort as Claude draws it: {effort}");
+            assert!(same_prompt(from, &now), "the highlight on {n}, {effort}: still the same list");
+            assert_eq!(answer_key(&now), Key::SessionOnly);
+        }
+        assert!(claude(fx!("max.e.txt")).unwrap().lines.iter().any(|l| l.trim().starts_with("May use excessive tokens")));
+        for scrolled in [fx!("scrolled-12.e.txt"), fx!("window-2.e.txt")] {
+            assert!(!same_prompt(&on, &claude(scrolled).unwrap()), "a scrolled window shows other rows");
+        }
+        let odd = fx!("on-sonnet.e.txt").replace("Medium effort (default)", "Medium thing (default)");
+        assert!(!same_prompt(&on, &claude(&odd).unwrap()), "no effort row in the effort's place: another prompt");
+        let unwarned = fx!("max.e.txt").replace("Use sparingly", "Use often");
+        assert!(!same_prompt(&window2, &claude(&unwarned).unwrap()), "only Claude's own warning goes with Max");
+        let row = "   ◐ Medium effort ←/→ to adjust\n";
+        assert!(fx!("medium-toggled.txt").contains(row));
+        let warned = fx!("medium-toggled.txt").replace(row, &format!("{row}   {CLAUDE_MAX_EFFORT_WARNING}\n"));
+        assert!(!same_prompt(&window2, &claude(&warned).expect("still a list")), "and only under Max");
+        assert!(same_prompt(&window2, &claude(&warned.replace("◐ Medium", "◈ Max")).expect("a list")), "where it is Claude's");
+        let fast = fx!("on-sonnet.e.txt").replace("to turn on Fast mode", "to turn on Slow mode");
+        assert!(!same_prompt(&on, &claude(&fast).unwrap()), "the /fast row does not follow the highlight: compared whole");
+        for none in [fx!("cancelled.e.txt"), fx!("sonnet-session-only.e.txt"), fx!("switch-confirmed.e.txt")] {
+            assert!(claude(none).is_none(), "Esc's `Kept model as …`, `s`'s `Set model to … for this session only`");
+        }
+        // In a conversation the prompt cache holds, `s` on another model
+        // brings Claude's "Switch model?" — whose Yes is the same row
+        // whether the list was answered with `s` or with the Enter that
+        // saves the default (Claude keeps which in its own state). Not read
+        // here: it is the terminal's.
+        assert!(claude(fx!("switch-confirm.e.txt")).is_none());
+        // The owner's own list (five models, `2. Opus ✔`), as it stood after
+        // the move, and as it read before it: `❯` on Opus, Opus's effort.
+        let after = fx!("owner-sonnet.txt");
+        let before = after
+            .replace("     2. Opus ✔", "   ❯ 2. Opus ✔")
+            .replace("   ❯ 4. Sonnet", "     4. Sonnet")
+            .replace("◐ Medium effort (default) ←/→", "◉ xHigh effort ←/→");
+        let (before, after) = (claude(&before).expect("before"), claude(after).expect("after"));
+        assert_eq!((lit(&before), lit(&after), after.choices.len()), (Some(2), Some(4), 5));
+        assert!(same_prompt(&before, &after), "the owner's Sonnet pick is the same list");
     }
 
     /// Before the Enter that runs a command, the composer must hold exactly

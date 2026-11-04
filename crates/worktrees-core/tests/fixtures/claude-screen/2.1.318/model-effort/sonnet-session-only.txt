@@ -1,0 +1,52 @@
+
+ ▐▛███▛█   Claude Code v2.1.318
+▝▜██████▀  Sonnet 5.5 · Claude Max
+ ▝▝   ▝▝   /…/-Users-bret-Projects-worktrees--worktrees-feat-harness-updates/672ce622-3c10-4f81-89b9-5cf671be1499/scratchpad/repos/scA
+
+
+❯ /model
+  ⎿  Kept model as Opus 5.5
+
+❯ /model
+  ⎿  Set model to Sonnet 5.5 for this session only
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                                                       ◐ medium · /effort
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── scA-(main) ─
+❯ 
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← 1 agent
