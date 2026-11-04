@@ -5,6 +5,23 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (the repo's `/close-out` skill, `.claude/skills/close-out`;
 this repo's settings in `.claude/close-out.md`).
 
+- **A `permission` step cannot be opened (awaiting David's decision).** A command
+  someone approved at a prompt still shows only its first line in the chat, on
+  desktop and phone: `Step::Tool` turns into `Step::Permission` and loses its
+  `call_id` and `ran`. Tool rows open since #607; this one does not. `(main)` is
+  putting it to David.
+  _From: 2026-11-04, chat-full-command_
+- **`a_proven_client_below_the_protocol_floor_is_told_to_update_and_never_served`
+  hung locally, unexplained.** During #607's gates, `cargo test -p worktrees-cli`
+  sat about 30 minutes in this `serve::remote` test on a Mac, and was killed. Cause
+  not investigated, and #607 does not touch that code. It did not reproduce in CI:
+  `rust (macos-latest)` passed it on the heads checked. A hang like this holds the
+  gate slot, so a bound on the test's waits may be worth having either way.
+  _From: 2026-11-04, chat-full-command_
+- **CI flake: `serve::tests::writes_to_one_stream_reach_the_pty_in_the_order_they_were_sent`.**
+  Reported by `(main)` on main's CI, macos-latest, at `fa3b003`. Not looked into
+  in this session.
+  _From: 2026-11-04, chat-full-command_
 - **Chat double send (#606): what it leaves open.**
   - **The nav ✎ and ⌘K read the same stale sample.** A composer sample caught
     between a send's paste and Enter still shows there for up to 15 s. Only the
