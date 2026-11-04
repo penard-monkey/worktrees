@@ -23,6 +23,11 @@
 //   place; its answer is a path, which the message then names. Nothing types
 //   it: the line still goes through `agent_send`
 //   (docs/proposals/chat-attachments.md).
+// - `agent_commands` (read) and `agent_command` (instruct; admin for the
+//   sensitive tier): the session's slash commands, and one run. The third
+//   path that types into Claude, its own row because `agent_send`'s rule
+//   refuses a leading `/` (docs/proposals/chat-slash-commands.md); the menu's
+//   rules are `slash.ts`.
 //
 // Memory only: turns, prompts, drafts and pending messages live for the
 // window's life and are fetched again after a reload. Nothing is written.
@@ -69,7 +74,7 @@ export type AgentTurns = { harness?: string; session?: string; turns: Turn[]; mo
  *  spacing kept; `preview_hidden` rows of it are cut off in the terminal. */
 export type PromptChoice = {
   n: number; label: string; more?: string[]; highlighted: boolean;
-  host_only?: "widens" | "text"; checked?: boolean; text?: "field" | "amend";
+  host_only?: "widens" | "text" | "saves" | "spends" | "elsewhere"; checked?: boolean; text?: "field" | "amend";
   preview?: string; preview_hidden?: number;
 };
 /** A `previews` question's ONE notes field (`prompt::Notes`): `open` while
@@ -83,9 +88,12 @@ export type AgentPrompt =
   | {
     waiting: true; readable: true; harness: string; session: string; kind: "permission" | "question";
     fingerprint: string; lines: string[]; choices: PromptChoice[]; note: string; multi?: boolean; detail?: PromptDetail;
-    /** Claude's own resume picker (`claude -r`): a question whose choices are
-     *  the conversations on screen; `hidden` more are in the terminal's list. */
-    picker?: "resume"; hidden?: number;
+    /** A list the HARNESS draws: Claude's resume picker (`claude -r`), whose
+     *  choices are the conversations on screen; a model or effort list a
+     *  `/model` opened (answered for this session only); a dialog a command
+     *  opened (`view`: one choice, Close); another list (`menu`). `hidden`
+     *  more rows are in the terminal's list. */
+    picker?: "resume" | "model" | "effort" | "view" | "menu"; hidden?: number;
     /** Claude's question with a preview per option: `all` (every option's,
      *  from Claude's own call) or `shown` (only the one the terminal shows). */
     previews?: "all" | "shown"; notes?: PromptNotes;
@@ -101,6 +109,26 @@ export type AgentAnsweredMany = { answered: true; confirmed: boolean; harness: s
 export type AgentStopped = { interrupted: boolean; unconfirmed?: boolean; harness: string; session: string; note: string };
 /** `agent_attach`'s answer: where the host kept the file, relative to the
  *  place root, and what its bytes are. `name` is the display name, cleaned. */
+/** `slash::Command` (`agent_commands`). */
+export type SlashCommand = {
+  name: string;
+  description: string;
+  source: "built-in" | "user" | "project" | "plugin";
+  plugin?: string;
+  tier: "normal" | "sensitive";
+  why?: string;
+  confirm?: string;
+  hint?: string;
+  args: boolean;
+};
+export type AgentCommands = { harness: string; session: string; version?: string | null; measured: string; commands: SlashCommand[]; note: string };
+/** `agent_command`: what opened (a prompt's `picker`, or its kind), and the
+ *  rows a Codex command printed, which no rollout keeps. */
+export type AgentCommandRun = { delivered: boolean; queued: boolean; harness: string; session: string; command: string; opened?: string; output?: string[]; note: string };
+/** A command this window ran whose output only the answer carried (Codex's
+ *  `/status`): shown as its Command notice until the window goes. */
+export type Ran = { id: number; name: string; args: string; output?: string; at: number };
+
 export type AgentAttached = { path: string; bytes: number; sha256: string; kind: "image" | "pdf" | "text"; name?: string };
 
 /** `agent_tool_call`'s answer (`turns::CallDetail`): `input` is a string for a
@@ -681,6 +709,10 @@ export function splitAtRule(rows: string[]): { above: string[]; question: string
 export type ChoiceWay = { open: boolean; how: "plain" | "field" | "amend"; note?: string };
 export function choiceOpen(c: PromptChoice): ChoiceWay {
   if (c.host_only === "text" && c.text !== "field") return { open: false, how: "plain", note: "Opens a text field: answer this one in the terminal" };
+  // The terminal's alone, from anywhere (`HostOnly::terminal_only`).
+  if (c.host_only === "saves") return { open: false, how: "plain", note: "Choosing it would make it your default: choose it in the terminal" };
+  if (c.host_only === "spends") return { open: false, how: "plain", note: "Spends something of your account’s: choose it in the terminal" };
+  if (c.host_only === "elsewhere") return { open: false, how: "plain", note: "Opens something the chat does not follow: choose it in the terminal" };
   const how = c.text === "field" && c.host_only === "text" ? "field" : c.text === "amend" ? "amend" : "plain";
   if (c.host_only === "widens") {
     return windowOnHost()
@@ -1077,6 +1109,11 @@ export type ChatView = {
   /** Words when this host has no `agent_attach` (an older one): the
    *  paperclip is off, with them as its reason. The host's, so every place's. */
   attachOff: string | null;
+  /** The agent's slash commands (`agent_commands`), read when the composer
+   *  first meets a `/`. */
+  commands: Load<AgentCommands>;
+  /** Commands run from here whose output only their answer carried. */
+  ran: Ran[];
 };
 
 /** Set once a host answers `unknown command: agent_attach`. */
@@ -1089,6 +1126,7 @@ const blank = (): ChatView => ({
   stopping: false, stopWords: null, stopped: false,
   calls: { open: {}, read: {} },
   attachments: [], attachWords: null, attachOff,
+  commands: { data: null, error: null, loading: false, at: null }, ran: [],
 });
 const EMPTY = blank();
 let views = new Map<string, ChatView>();
@@ -1418,6 +1456,53 @@ export async function sendDraft(t: Target, agent: string): Promise<void> {
     put(t.path, { sending: false, sentLine: null, sendWords: w });
     if (w.prompt) void loadPrompt(t);
   }
+}
+
+/** Read the agent's slash commands, at most once a minute unless `force`. */
+export async function loadCommands(t: Target, force = false): Promise<void> {
+  const c = viewOf(t.path).commands;
+  if (c.loading || (!force && c.at !== null && Date.now() - c.at < 60_000 && c.data?.session === t.session)) return;
+  put(t.path, { commands: { ...c, loading: true } });
+  try {
+    const data = await invoke<AgentCommands>("agent_commands", { repo: t.repo, slug: t.slug, session: t.session });
+    put(t.path, { commands: { data, error: null, loading: false, at: Date.now() } });
+  } catch (e) {
+    put(t.path, { commands: { data: null, error: String(e), loading: false, at: Date.now() } });
+  }
+}
+
+let nextRan = 1;
+
+/** Run slash command `name` with `args` (`agent_command`). The host checks it
+ *  against the session's list; `words` turns a refusal into the composer's
+ *  line. What it opened is read like any prompt; a Codex command's output
+ *  becomes a Command notice of this window's. */
+export async function sendCommand(t: Target, name: string, args: string, words: (err: string) => SendWords): Promise<void> {
+  const v = viewOf(t.path);
+  if (v.sending) return;
+  const draft = v.draft;
+  put(t.path, { sending: true, sendWords: null, stopWords: null, attachWords: null });
+  try {
+    const r = await invoke<AgentCommandRun>("agent_command", { repo: t.repo, slug: t.slug, session: t.session, name, args: args || null });
+    const cur = viewOf(t.path);
+    const ran = r.output?.length ? [...cur.ran, { id: nextRan++, name: r.command, args, output: r.output.join("\n"), at: Math.floor(Date.now() / 1000) }] : cur.ran;
+    put(t.path, {
+      sending: false, followUp: null, ran,
+      draft: cur.draft === draft ? "" : cur.draft,
+      sendWords: r.delivered ? (r.queued ? { line: `/${r.command} is queued behind the running turn.` } : null) : { line: r.note, terminal: true },
+    });
+    if (r.opened) void loadPrompt(t);
+    void loadTurns(t);
+  } catch (e) {
+    const w = words(String(e));
+    put(t.path, { sending: false, sendWords: w });
+    if (w.prompt) void loadPrompt(t);
+  }
+}
+
+/** This window's command notices, as items after the transcript's. */
+export function ranItems(ran: Ran[]): Item[] {
+  return ran.map((r) => ({ k: "notice", key: `ran-${r.id}`, at: r.at, notice: { kind: "command", name: r.name, args: r.args, ...(r.output ? { output: r.output } : {}) } }));
 }
 
 export function selectChoice(path: string, n: number | null): void {

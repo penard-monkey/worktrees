@@ -314,7 +314,31 @@
 
 /* ── the composer ────────────────────────────────────────────────────────── */
 /* Its gutters are the column's, so the box lines up with the bubbles. */
-.chat-composer { flex: none; border-top: 1px solid var(--line); background: var(--bg-panel); padding: var(--s2) 7cqi 6px; }
+.chat-composer { flex: none; border-top: 1px solid var(--line); background: var(--bg-panel); padding: var(--s2) 7cqi 6px; position: relative; }
+/* The `/` menu: over the conversation, right above the composer, the width of
+   its row. Its rows scroll; a name never wraps, a description is clipped. */
+.chat-slash {
+  position: absolute; left: 7cqi; right: 7cqi; bottom: calc(100% - 1px); z-index: 5;
+  list-style: none; margin: 0; padding: 4px; max-height: min(320px, 50vh); overflow-y: auto;
+  background: var(--bg-panel); border: 1px solid var(--line-strong); border-radius: var(--r-md);
+  box-shadow: 0 -6px 18px rgb(0 0 0 / 0.25);
+}
+.chat-slash-empty { padding: var(--s2) var(--s3); color: var(--txt-dim); font-size: var(--fs-meta); }
+.chat-slash-row {
+  display: grid; grid-template-columns: minmax(0, max-content) minmax(0, 1fr) auto; align-items: baseline; gap: var(--s3);
+  padding: 4px var(--s2); border-radius: var(--r-sm); cursor: pointer; font-size: var(--fs-body);
+}
+.chat-slash-row.on { background: color-mix(in srgb, var(--accent) 16%, var(--bg-panel)); }
+.chat-slash-name { color: var(--txt-hi); font-family: var(--font-mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chat-slash-hint { color: var(--txt-dim); }
+.chat-slash-desc { color: var(--txt-dim); font-size: var(--fs-meta); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.chat-slash-tags { display: inline-flex; gap: 4px; }
+.chat-slash-tag {
+  padding: 0 6px; border: 1px solid var(--line); border-radius: var(--r-full);
+  color: var(--txt-dim); font-size: var(--fs-meta); line-height: 18px; white-space: nowrap;
+}
+/* Hue in the tint and the border, the words in a text token (AGENTS.md). */
+.chat-slash-tag.sensitive { color: var(--txt-hi); border-color: var(--warn); background: color-mix(in srgb, var(--warn) 16%, var(--bg-panel)); }
 .chat-composer-row { display: flex; align-items: flex-end; gap: var(--s2); }
 .chat-field {
   flex: 1; min-width: 0; resize: none; display: block;

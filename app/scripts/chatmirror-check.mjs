@@ -41,6 +41,7 @@ const SRC = {
   mock: process.env.CHATMIRROR_MOCK ?? here("../src/mock/install.ts"),
   attach: process.env.CHATMIRROR_ATTACH ?? here("../../crates/worktrees-core/src/attach.rs"),
   budget: process.env.CHATMIRROR_BUDGET ?? here("../../crates/worktrees-cli/src/serve/budget.rs"),
+  slash: process.env.CHATMIRROR_SLASH ?? here("../../crates/worktrees-core/src/slash.rs"),
 };
 
 let failed = 0;
@@ -132,7 +133,13 @@ function body(src, head) {
 
 const api = live(read(SRC.api));
 const harness = live(read(SRC.harness));
-const apiSaid = rustStrings(api).map(rendered);
+// `agent_command`'s refusals are said in core's `slash` too, some built from
+// its string constants (`format!("{ERR_UNKNOWN} /{n}")`): a constant's
+// value stands in for its name before the rest renders as "7".
+const slashSrc = live(read(SRC.slash));
+const strConsts = new Map([...(api + slashSrc).matchAll(/pub const ([A-Z_]+): &str = ("(?:[^"\\]|\\.)*");/g)].map((m) => [m[1], rustStrings(m[2])[0]]));
+const withConsts = (s) => s.replace(/\{([A-Z][A-Z_]+)\}/g, (m, n) => strConsts.get(n) ?? m);
+const apiSaid = [...rustStrings(api), ...rustStrings(slashSrc)].map((s) => rendered(withConsts(s)));
 const typed = body(harness, "pub fn typed_line_ok(");
 if (!typed) { fail("harness.rs has no `pub fn typed_line_ok(` for this check to read"); done(); }
 const typedSaid = rustStrings(typed).map(rendered);

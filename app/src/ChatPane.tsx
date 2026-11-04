@@ -25,12 +25,14 @@ import { previewOf, type ChoiceWay } from "./chat";
 import { announcement, gather, hear, promptKeyOf, type Bundle, type ChatView, type Heard } from "./chat";
 // Attachments (docs/proposals/chat-attachments.md): their own line, for the same reason.
 import { addAttachments, attachProblem, removeAttachment, sizeWords, splitAttached, type Attachment } from "./chat";
+import { loadCommands, ranItems, sendCommand, type SlashCommand } from "./chat";
+import { commandProblem, commandWords, confirmStep, confirmWords, filterCommands, menuFor, slashDraft, sourceWord, type Armed } from "./slash";
 import { HARNESS_LABEL, isHarness, type Harness } from "./harness";
 import * as Icons from "./icons";
 import { Markdown } from "./markdown";
 import { useDocPathLinks } from "./useDocPathLinks";
 import { BeforeCommit, useStickToBottom } from "./stickToBottom";
-import { escapeDepth } from "./useEscape";
+import { escapeDepth, useEscape } from "./useEscape";
 import "./ChatPane.css";
 
 /** While the agent works, the one visible chat re-reads its turns this often:
@@ -117,7 +119,8 @@ export function ChatPane(props: ChatPaneProps) {
   }, []);
 
   const data = v.turns.data;
-  const items = data ? itemsOf(data.turns, v.answered, v.pending, working) : [];
+  // A Codex command's output, which no rollout keeps, after the transcript's.
+  const items = data ? [...itemsOf(data.turns, v.answered, v.pending, working), ...ranItems(v.ran)] : [];
   const lastReply = [...items].reverse().find((it) => it.k === "reply")?.key ?? null;
   const promptKey = promptKeyOf(prompt);
   const { toBottom, fresh, dismiss, take, reveal } = useStickToBottom(scrollRef, !!data, promptKey, lastReply);
@@ -707,7 +710,14 @@ function PromptCard(props: {
   // Claude's resume picker: its rows ARE the choices (the screen above them
   // is its search box and key hints), and only those on screen are offered.
   const resume = p.picker === "resume";
-  const kind = resume ? "Resume" : p.detail?.tool === "ExitPlanMode" ? "Plan" : p.kind === "question" ? "Question" : "Permission";
+  // A list a slash command opened: a model or effort list (answered for this
+  // session only), a dialog (its one choice, Close), or another list.
+  const listed = p.picker === "model" || p.picker === "effort";
+  const kind = resume ? "Resume" : listed ? "Model" : p.picker === "view" ? "Screen" : p.picker === "menu" ? "List"
+    : p.detail?.tool === "ExitPlanMode" ? "Plan" : p.kind === "question" ? "Question" : "Permission";
+  const heading = resume ? `${agent} is asking which conversation to resume`
+    : p.picker === "model" ? `${agent}’s models` : p.picker === "effort" ? `${agent}’s reasoning effort`
+    : p.picker === "view" ? `${agent} is showing a screen` : `${agent} needs your answer`;
   const answer = () => { if (canAnswer) void sendAnswer(target, agent); };
   const many = () => { if (canSendMany) void sendMany(target); };
   // Enter's send: what the Send button on screen runs, behind its own enabled state.
@@ -769,7 +779,7 @@ function PromptCard(props: {
       onPointerDown={() => { props.keyboard.tookAt.current = null; }}>
       <div className="chat-card-head">
         <span className="chat-card-dot" aria-hidden="true" />
-        <b id={`${ids}-h`}>{resume ? `${agent} is asking which conversation to resume` : `${agent} needs your answer`}</b>
+        <b id={`${ids}-h`}>{heading}</b>
         <span className="chat-kind">{kind}</span>
       </div>
       {p.detail && <PromptDetail d={p.detail} root={target.path} agent={agent} onLink={props.onLink} />}
@@ -780,6 +790,11 @@ function PromptCard(props: {
         </details>
       )}
       {!resume && <pre className="chat-prompt-lines" data-testid="chat-prompt-lines">{question.join("\n")}</pre>}
+      {listed && (
+        <p className="chat-hint" data-testid="chat-session-only">
+          The chat chooses for this session only. A default for new sessions is set in the terminal.
+        </p>
+      )}
       {resume && !!p.hidden && (
         <p className="chat-hint" data-testid="chat-resume-hidden">
           {p.choices.length} of {p.choices.length + p.hidden} shown. {p.hidden === 1 ? "The other one is" : `The other ${p.hidden} are`} in the terminal’s list.
@@ -1051,7 +1066,31 @@ function Composer(props: {
   const ids = useId();
   const text = v.draft;
   const files = v.attachments.length;
-  const problem = files ? attachProblem(text, files) : draftProblem(text);
+  // A line that starts with `/` is a slash command: the session's own list
+  // (`agent_commands`) decides what it may be, and `agent_command` runs it.
+  const slash = slashDraft(text);
+  const cmds = v.commands.data?.commands ?? null;
+  const problem = slash
+    ? (files ? "Files go with a message, not a command: remove them, or write a message." : commandProblem(cmds, text, (a) => draftProblem(a)) ?? (v.commands.error && !cmds ? commandWords(v.commands.error, agent).line : null))
+    : files ? attachProblem(text, files) : draftProblem(text);
+  const cmd: SlashCommand | null = slash && cmds ? cmds.find((c) => c.name === slash.name) ?? null : null;
+  useEffect(() => { if (slash) void loadCommands(target); }, [!!slash, target.session]); // eslint-disable-line react-hooks/exhaustive-deps
+  // The menu: while a name is typed, until Esc closes it for this draft.
+  const [closedAt, setClosedAt] = useState<string | null>(null);
+  const query = menuFor(text);
+  const menuOn = query !== null && closedAt !== text && !props.waiting;
+  const rows = menuOn && cmds ? filterCommands(cmds, query) : [];
+  const [hi, setHi] = useState(0);
+  useEffect(() => setHi(0), [query]);
+  useEscape(() => setClosedAt(text), menuOn);
+  // A confirm's first press, and when it lapses.
+  const [armed, setArmed] = useState<Armed | null>(null);
+  useEffect(() => {
+    if (!armed) return;
+    const t = setTimeout(() => setArmed(null), Math.max(0, armed.until - Date.now()) + 10);
+    return () => clearTimeout(t);
+  }, [armed]);
+  useEffect(() => setArmed(null), [text]);
   const n = bytes(text);
   const picker = useRef<HTMLInputElement>(null);
   const [dropping, setDropping] = useState(false);
@@ -1108,7 +1147,20 @@ function Composer(props: {
 
   const preparing = v.attachments.some((a) => a.state === "preparing");
   const canSend = (!!text.trim() || files > 0) && !problem && !props.waiting && !v.sending && !preparing;
-  const send = () => { if (canSend) void sendDraft(target, agent); };
+  const runCommand = () => {
+    if (!slash || !cmd) return;
+    const args = (slash.args ?? "").trim();
+    const step = confirmStep(cmd, `/${cmd.name}${args ? " " + args : ""}`, armed, Date.now());
+    setArmed(step.armed);
+    if (step.run) void sendCommand(target, cmd.name, args, (e) => commandWords(e, agent));
+  };
+  const send = () => { if (!canSend) return; if (slash) runCommand(); else void sendDraft(target, agent); };
+  // A menu row: the exact name runs (Enter), any other fills the field.
+  const pick = (c: SlashCommand, how: "enter" | "tab" | "click") => {
+    if (how !== "tab" && c.name === query) { setClosedAt(text); send(); return; }
+    setDraft(target.path, `/${c.name}${how === "tab" && c.args ? " " : ""}`);
+    field.current?.focus({ preventScroll: true });
+  };
   // Only a line break or a tab is wrong: offer to join, by hand, never silently.
   const joinable = !!problem && /[\n\r\t]/.test(text) && !draftProblem(text.replace(/\s*[\r\n\t]+\s*/g, " ").trim());
 
@@ -1126,10 +1178,12 @@ function Composer(props: {
   else if (v.attachWords) { line = v.attachWords.line; alert = true; }
   // A stop's words: a refusal or an unconfirmed stop is an alert; "Stopped." is not.
   else if (v.stopWords) { line = v.stopWords.line; alert = !!(v.stopWords.terminal || v.stopWords.prompt); }
+  else if (armed && cmd) { line = `Press Enter again to run /${cmd.name}. ${confirmWords(cmd) ?? ""}`; alert = true; }
   else if (problem) { line = problem; alert = true; }
   else if (props.waiting) line = `Messages can’t be sent while a prompt is waiting. Answer it ${props.waiting === "above" ? "above" : "in the terminal"}.`;
   else if (props.followUp && !text.trim()) line = props.followUp;
-  else line = n >= COUNT_FROM ? `One line · ${n.toLocaleString()} of ${SEND_MAX.toLocaleString()} bytes` : "One line · Enter sends";
+  else if (cmd) line = `Enter runs /${cmd.name}${cmd.tier === "sensitive" ? " · a sensitive command, confirmed first" : confirmWords(cmd) ? " · confirmed first" : ""}`;
+  else line = n >= COUNT_FROM ? `One line · ${n.toLocaleString()} of ${SEND_MAX.toLocaleString()} bytes` : "One line · Enter sends · / for commands";
 
   return (
     <div className={"chat-composer" + (dropping ? " dropping" : "")} data-testid="chat-composer"
@@ -1155,6 +1209,11 @@ function Composer(props: {
         </p>
       )}
       {files > 0 && <AttachChips attachments={v.attachments} sending={v.sending} path={target.path} />}
+      {menuOn && (
+        <SlashMenu id={`${ids}-m`} rows={rows} hi={hi} loading={!cmds && v.commands.loading}
+          error={!cmds && v.commands.error ? commandWords(v.commands.error, agent).line : null}
+          onHover={setHi} onPick={(c) => pick(c, "click")} />
+      )}
       <div className="chat-composer-row">
         {/* A plain file input: it reads bytes, never a path, so it works the
             same through the remote door. */}
@@ -1171,8 +1230,11 @@ function Composer(props: {
         </button>
         <label htmlFor={`${ids}-f`} className="sr-only">Message {agent}</label>
         <textarea id={`${ids}-f`} ref={field} className="chat-field" rows={1} value={text}
-          placeholder={props.waiting ? "Answer the prompt to continue" : dropping ? "Drop to attach" : `Message ${agent}`}
+          placeholder={props.waiting ? "Answer the prompt to continue" : dropping ? "Drop to attach" : `Message ${agent}, or / for a command`}
           aria-describedby={`${ids}-l`} aria-invalid={problem ? true : undefined}
+          role={menuOn ? "combobox" : undefined} aria-expanded={menuOn ? rows.length > 0 : undefined}
+          aria-controls={menuOn ? `${ids}-m` : undefined} aria-autocomplete={menuOn ? "list" : undefined}
+          aria-activedescendant={menuOn && rows[hi] ? `${ids}-m-${hi}` : undefined}
           autoCorrect="off" autoCapitalize="off" autoComplete="off" spellCheck={false}
           onChange={(e) => setDraft(target.path, e.currentTarget.value)}
           onPaste={(e) => {
@@ -1184,7 +1246,21 @@ function Composer(props: {
             addAttachments(target.path, pasted);
           }}
           onKeyDown={(e) => {
-            if (e.key !== "Enter" || e.nativeEvent.isComposing) return;
+            if (e.nativeEvent.isComposing) return;
+            // The menu has the arrows, Tab and Enter while it shows rows.
+            if (menuOn && rows.length) {
+              if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                e.preventDefault();
+                setHi((h) => (h + (e.key === "ArrowDown" ? 1 : rows.length - 1)) % rows.length);
+                return;
+              }
+              if ((e.key === "Enter" && !e.shiftKey && !e.altKey) || (e.key === "Tab" && !e.shiftKey)) {
+                e.preventDefault();
+                pick(rows[Math.min(hi, rows.length - 1)], e.key === "Tab" ? "tab" : "enter");
+                return;
+              }
+            }
+            if (e.key !== "Enter") return;
             // A message is one line: Enter sends it, and no key adds a break.
             e.preventDefault();
             if (!e.shiftKey && !e.altKey) send();
@@ -1211,6 +1287,43 @@ function Composer(props: {
         </button>
       </div>
     </div>
+  );
+}
+
+/** The composer's `/` menu: the agent's commands that match what is typed,
+ *  each with its description and where it comes from. The field keeps the
+ *  keyboard (arrows, Tab, Enter; Esc closes it through `useEscape`); a click
+ *  is a pick. */
+function SlashMenu(props: {
+  id: string; rows: SlashCommand[]; hi: number; loading: boolean; error: string | null;
+  onHover: (i: number) => void; onPick: (c: SlashCommand) => void;
+}) {
+  const list = useRef<HTMLUListElement>(null);
+  useEffect(() => {
+    list.current?.querySelector(`[data-i="${props.hi}"]`)?.scrollIntoView({ block: "nearest" });
+  }, [props.hi]);
+  if (props.loading || props.error || !props.rows.length) {
+    return (
+      <div className="chat-slash chat-slash-empty" data-testid="chat-slash">
+        {props.loading ? "Reading the agent’s commands…" : props.error ?? "No command matches."}
+      </div>
+    );
+  }
+  return (
+    <ul ref={list} id={props.id} className="chat-slash" role="listbox" aria-label="Commands" data-testid="chat-slash">
+      {props.rows.map((c, i) => (
+        <li key={c.name} id={`${props.id}-${i}`} data-i={i} role="option" aria-selected={i === props.hi}
+          className={"chat-slash-row" + (i === props.hi ? " on" : "")} data-testid={`chat-slash-${c.name}`}
+          onMouseDown={(e) => e.preventDefault()} onMouseEnter={() => props.onHover(i)} onClick={() => props.onPick(c)}>
+          <span className="chat-slash-name">/{c.name}{c.hint ? <span className="chat-slash-hint"> {c.hint}</span> : null}</span>
+          <span className="chat-slash-desc" title={c.description}>{c.description}</span>
+          <span className="chat-slash-tags">
+            {c.tier === "sensitive" && <span className="chat-slash-tag sensitive" title={c.why ?? "Sensitive"}>Sensitive</span>}
+            <span className="chat-slash-tag">{sourceWord(c)}</span>
+          </span>
+        </li>
+      ))}
+    </ul>
   );
 }
 
