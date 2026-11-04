@@ -335,7 +335,12 @@ fn claude_turns(lines: &[String]) -> Vec<Turn> {
     // Match after scanning both, using their IDs rather than line order.
     let mut absorbed: HashMap<String, HashSet<String>> = HashMap::new();
     for l in lines {
-        if !(l.contains("\"type\":\"user\"") || l.contains("\"type\":\"assistant\"") || l.contains("\"type\":\"attachment\"") || l.contains("\"type\":\"queue-operation\"")) {
+        if !(l.contains("\"type\":\"user\"")
+            || l.contains("\"type\":\"assistant\"")
+            || l.contains("\"type\":\"attachment\"")
+            || l.contains("\"type\":\"queue-operation\"")
+            || l.contains("\"subtype\":\"local_command\""))
+        {
             continue;
         }
         let Ok(v) = serde_json::from_str::<serde_json::Value>(l) else { continue };
@@ -385,43 +390,17 @@ fn claude_turns(lines: &[String]) -> Vec<Turn> {
                     _ => None,
                 };
                 if let Some(text) = text {
-                    match claude_entry(&v, &text) {
-                        ClaudeEntry::Person => turns.push(Turn::new(at, Some(text))),
-                        ClaudeEntry::Notice(Notice::Command { name, args, output: Some(out) }) if name.is_empty() => {
-                            if let Some(t) = turns.iter_mut().rev().find(|t| matches!(t.notice, Some(Notice::Command { .. }))) {
-                                if let Some(Notice::Command { output, .. }) = t.notice.as_mut() { *output = Some(out); }
-                                t.user = t.notice.as_ref().map(Notice::fallback);
-                            } else {
-                                turns.push(Turn::notice(at, Notice::Command { name, args, output: Some(out) }));
-                            }
-                        }
-                        ClaudeEntry::Notice(Notice::Command { name, args, output }) => {
-                            // /compact writes the person's literal command before
-                            // the confirming wrapper, sometimes with a summary
-                            // between them. The wrapper proves what that line was.
-                            let typed = format!("/{name}{}{}", if args.is_empty() { "" } else { " " }, args);
-                            if let Some(t) = turns.iter_mut().rev().find(|t| t.user.as_deref() == Some(&typed)) {
-                                let notice = Notice::Command { name, args, output };
-                                t.user = Some(notice.fallback());
-                                t.notice = Some(notice);
-                            } else {
-                                turns.push(Turn::notice(at, Notice::Command { name, args, output }));
-                            }
-                        }
-                        ClaudeEntry::Notice(Notice::Shell { command, output, stderr }) if command.is_empty() => {
-                            if let Some(t) = turns.iter_mut().rev().find(|t| matches!(t.notice, Some(Notice::Shell { .. }))) {
-                                if let Some(Notice::Shell { output: o, stderr: e, .. }) = t.notice.as_mut() { *o = output; *e = stderr; }
-                                t.user = t.notice.as_ref().map(Notice::fallback);
-                            } else {
-                                turns.push(Turn::notice(at, Notice::Shell { command, output, stderr }));
-                            }
-                        }
-                        ClaudeEntry::Notice(notice) => turns.push(Turn::notice(at, notice)),
-                        ClaudeEntry::Skip => {}
-                    }
+                    absorb(&mut turns, at, claude_entry(&v, &text), text);
                 } else if let (Some(serde_json::Value::Array(blocks)), Some(turn)) = (content, turns.last_mut()) {
                     answered(turn, &v, blocks, at);
                 }
+            }
+            // 2.1.318 writes a local command's name and its output as
+            // `system` entries (`local_command`), where 2.1.316 wrote `user`
+            // ones: the same wrappers, read the same way.
+            Some("system") if v.get("subtype").and_then(|s| s.as_str()) == Some("local_command") => {
+                let Some(text) = v.get("content").and_then(|c| c.as_str()) else { continue };
+                absorb(&mut turns, at, local_command(text.trim()), text.to_string());
             }
             Some("assistant") => {
                 let Some(serde_json::Value::Array(blocks)) = content else { continue };
@@ -453,13 +432,117 @@ fn claude_turns(lines: &[String]) -> Vec<Turn> {
 
 enum ClaudeEntry { Person, Notice(Notice), Skip }
 
+/// One of Claude's user (or 2.1.318 `local_command`) entries into the turns:
+/// a person's line starts a turn, a command's output joins the command it
+/// follows, a command's wrapper takes over the literal line `/compact`
+/// writes first, and a shell's output joins its `!` line.
+fn absorb(turns: &mut Vec<Turn>, at: Option<i64>, entry: ClaudeEntry, text: String) {
+    match entry {
+        ClaudeEntry::Person => turns.push(Turn::new(at, Some(text))),
+        ClaudeEntry::Notice(Notice::Command { name, args, output }) if name.is_empty() => {
+            if let Some(t) = turns.iter_mut().rev().find(|t| matches!(t.notice, Some(Notice::Command { .. }))) {
+                if let Some(Notice::Command { output: o, .. }) = t.notice.as_mut() {
+                    *o = output;
+                }
+                t.user = t.notice.as_ref().map(Notice::fallback);
+            } else if output.is_some() {
+                turns.push(Turn::notice(at, Notice::Command { name, args, output }));
+            }
+        }
+        ClaudeEntry::Notice(Notice::Command { name, args, output }) => {
+            // /compact writes the person's literal command before
+            // the confirming wrapper, sometimes with a summary
+            // between them. The wrapper proves what that line was.
+            let typed = format!("/{name}{}{}", if args.is_empty() { "" } else { " " }, args);
+            if let Some(t) = turns.iter_mut().rev().find(|t| t.notice.is_none() && t.user.as_deref() == Some(&typed)) {
+                let notice = Notice::Command { name, args, output };
+                t.user = Some(notice.fallback());
+                t.notice = Some(notice);
+            } else {
+                turns.push(Turn::notice(at, Notice::Command { name, args, output }));
+            }
+        }
+        ClaudeEntry::Notice(Notice::Shell { command, output, stderr }) if command.is_empty() => {
+            if let Some(t) = turns.iter_mut().rev().find(|t| matches!(t.notice, Some(Notice::Shell { .. }))) {
+                if let Some(Notice::Shell { output: o, stderr: e, .. }) = t.notice.as_mut() {
+                    *o = output;
+                    *e = stderr;
+                }
+                t.user = t.notice.as_ref().map(Notice::fallback);
+            } else {
+                turns.push(Turn::notice(at, Notice::Shell { command, output, stderr }));
+            }
+        }
+        ClaudeEntry::Notice(notice) => turns.push(Turn::notice(at, notice)),
+        ClaudeEntry::Skip => {}
+    }
+}
+
+/// A 2.1.318 `local_command` entry: a command's wrapper or its output, and
+/// nothing else (an entry of any other shape is skipped, never a person's).
+fn local_command(t: &str) -> ClaudeEntry {
+    if let Some((name, args)) = command_wrapper(t) {
+        return ClaudeEntry::Notice(Notice::Command { name: one_line(name.trim_start_matches('/')).unwrap_or_default(), args: one_line(args).unwrap_or_default(), output: None });
+    }
+    if let Some(output) = whole_tag(t, "local-command-stdout") {
+        return ClaudeEntry::Notice(Notice::Command { name: String::new(), args: String::new(), output: command_output(output) });
+    }
+    ClaudeEntry::Skip
+}
+
+/// A command's printed output as a client shows it, in a block: its lines
+/// kept, its terminal styling (ANSI CSI and OSC sequences) and every other
+/// control or invisible character gone, clipped. `None` when nothing is left.
+fn command_output(text: &str) -> Option<String> {
+    let mut clean = String::with_capacity(text.len());
+    let mut it = text.chars().peekable();
+    while let Some(c) = it.next() {
+        match c {
+            '\u{1b}' => match it.next() {
+                // CSI: parameters and intermediates, then one final byte.
+                Some('[') => {
+                    for d in it.by_ref() {
+                        if ('\u{40}'..='\u{7e}').contains(&d) {
+                            break;
+                        }
+                    }
+                }
+                // OSC: up to BEL or ST (ESC \\).
+                Some(']') => {
+                    while let Some(d) = it.next() {
+                        if d == '\u{7}' || (d == '\u{1b}' && it.next_if_eq(&'\\').is_some()) {
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            '\n' => clean.push('\n'),
+            '\t' => clean.push(' '),
+            c if c.is_control() || crate::harness::invisible(c) => {}
+            c => clean.push(c),
+        }
+    }
+    let lines: Vec<&str> = clean.lines().map(str::trim_end).collect();
+    let text = lines.join("\n");
+    let text = text.trim_matches('\n');
+    (!text.trim().is_empty()).then(|| clip(text.trim_start_matches(' ')).0)
+}
+
 /// Whole-wrapper parser for Claude's injected user entries. The human origin
 /// wins even when a person types XML verbatim. The peer origin is checked
 /// before `isMeta`, since 2.1.316 marks peer messages as meta.
 fn claude_entry(v: &serde_json::Value, text: &str) -> ClaudeEntry {
     let origin = v.get("origin");
     let kind = origin.and_then(|o| o.get("kind")).and_then(|k| k.as_str());
-    if kind == Some("human") { return ClaudeEntry::Person; }
+    if kind == Some("human") {
+        // A prompt command (2.1.318, `/hello world`): Claude's whole wrapper,
+        // `<command-message>` first, on the person's own entry.
+        if let Some((name, args)) = prompt_command(text.trim()) {
+            return ClaudeEntry::Notice(Notice::Command { name: one_line(name.trim_start_matches('/')).unwrap_or_default(), args: one_line(args).unwrap_or_default(), output: None });
+        }
+        return ClaudeEntry::Person;
+    }
     if kind == Some("peer") {
         let from_name = origin.and_then(|o| o.get("name")).and_then(|s| s.as_str()).and_then(one_line).unwrap_or_else(|| "another session".into());
         let body = origin.and_then(|o| o.get("body")).and_then(|s| s.as_str()).unwrap_or("");
@@ -499,7 +582,7 @@ fn claude_entry(v: &serde_json::Value, text: &str) -> ClaudeEntry {
         return ClaudeEntry::Notice(Notice::Command { name: one_line(name.trim_start_matches('/')).unwrap_or_default(), args: String::new(), output: None });
     }
     if let Some(output) = whole_tag(t, "local-command-stdout") {
-        return ClaudeEntry::Notice(Notice::Command { name: String::new(), args: String::new(), output: Some(safe_text(output)) });
+        return ClaudeEntry::Notice(Notice::Command { name: String::new(), args: String::new(), output: command_output(output) });
     }
     if whole_tag(t, "system-reminder").is_some() || whole_tag(t, "local-command-caveat").is_some() { return ClaudeEntry::Skip; }
     if t.is_empty() { ClaudeEntry::Skip } else { ClaudeEntry::Person }
@@ -517,6 +600,26 @@ fn whole_tag<'a>(text: &'a str, name: &str) -> Option<&'a str> {
     let t = text.trim();
     let body = tag(t, name)?;
     (t == format!("<{name}>{body}</{name}>")).then_some(body)
+}
+
+/// A prompt command's wrapper as 2.1.318 writes it on the person's entry:
+/// `<command-message>x</command-message>`, `<command-name>/x</command-name>`
+/// and an optional `<command-args>…</command-args>`, each on its own line,
+/// and nothing else.
+fn prompt_command(text: &str) -> Option<(&str, &str)> {
+    let (message, rest) = text.strip_prefix("<command-message>")?.split_once("</command-message>")?;
+    let (name, rest) = rest.trim_start().strip_prefix("<command-name>")?.split_once("</command-name>")?;
+    let rest = rest.trim();
+    let args = if rest.is_empty() {
+        ""
+    } else {
+        let (args, tail) = rest.strip_prefix("<command-args>")?.split_once("</command-args>")?;
+        if !tail.trim().is_empty() {
+            return None;
+        }
+        args
+    };
+    (message.trim() == name.trim_start_matches('/') && name.starts_with('/')).then_some((name, args))
 }
 
 fn command_wrapper(text: &str) -> Option<(&str, &str)> {
@@ -1562,6 +1665,59 @@ mod tests {
         assert!(!all.contains("META-ONLY-MARKER"), "isMeta entry leaked");
         assert!(!all.contains("SYSTEM-PROMPT-MARKER"), "system reminder leaked");
         assert!(!all.contains("<task-notification>\\n"), "raw wrapper leaked");
+    }
+
+    /// Claude 2.1.318 writes a local command's name and output as `system` /
+    /// `local_command` entries, with ANSI in the output, and a prompt
+    /// command's `human` entry with `<command-message>` before
+    /// `<command-name>` (a real, trimmed transcript). Each is the command's
+    /// notice: its output keeps its lines and loses its escapes, and nothing
+    /// Claude wrote for the model (the markdown copy, the expansion, the
+    /// compact summary) comes back.
+    #[test]
+    fn claude_2_1_318_commands_are_notices() {
+        let fx = lines(include_str!("../tests/fixtures/transcripts/claude-2.1.318-commands.jsonl"));
+        let got = claude(&fx, 20);
+        let all = serde_json::to_string(&got).unwrap();
+        for secret in ["CONTEXT-META-MARKER", "COMMAND-EXPANSION-MARKER", "REMINDER-MARKER", "THINKING-MARKER", "TOOL-OUTPUT-MARKER", "<command-", "local-command", "\\u001b", "[1m", "[22m"] {
+            assert!(!all.contains(secret), "{secret} leaked: {all}");
+        }
+        let commands: Vec<(&str, &str, Option<&str>)> = got
+            .iter()
+            .filter_map(|t| match &t.notice {
+                Some(Notice::Command { name, args, output }) => Some((name.as_str(), args.as_str(), output.as_deref())),
+                _ => None,
+            })
+            .collect();
+        let names: Vec<(&str, &str)> = commands.iter().map(|(n, a, _)| (*n, *a)).collect();
+        assert_eq!(
+            names,
+            vec![
+                ("context", ""),
+                ("model", ""),
+                ("context", ""),
+                ("compact", "keep only that we listed animal facts"),
+                ("clear", ""),
+                ("hello", "world"),
+                ("preexec", ""),
+                ("model", ""),
+                ("context", ""),
+                ("context", ""),
+            ]
+        );
+        assert!(got.iter().any(|t| matches!(&t.notice, Some(Notice::Summary { text }) if text.contains("SUMMARY-MARKER"))), "the summary, its reminder cut");
+        let context = commands[0].2.expect("/context's output");
+        assert!(context.starts_with("Context Usage\n"), "{context:?}");
+        assert!(context.lines().count() > 10 && context.contains("27.6k/1m tokens (3%)"), "{context:?}");
+        assert_eq!(commands[1].2, Some("Set model to `Opus 5.5` for this session only"));
+        assert_eq!(commands[3].2, Some("Compacted (ctrl+o to see full summary)"));
+        assert_eq!(commands[4].2, None, "an empty output is none");
+        let reply = |name: &str| got.iter().find(|t| matches!(&t.notice, Some(Notice::Command { name: n, .. }) if n == name)).map(|t| t.reply.as_str());
+        assert_eq!(reply("hello"), Some("Hello, world!"), "a prompt command's reply is its turn's");
+        assert_eq!(reply("preexec"), Some("ok"));
+        assert!(got.iter().any(|t| t.user.as_deref() == Some("Reply with the single word pong. Use no tools.") && t.reply == "pong"));
+        // The literal line /compact writes first is the command's turn, once.
+        assert!(!got.iter().any(|t| t.notice.is_none() && t.user.as_deref().is_some_and(|u| u.starts_with("/compact"))), "{got:#?}");
     }
 
     /// A Claude transcript shaped like 2.1.309's (the entry types and fields a

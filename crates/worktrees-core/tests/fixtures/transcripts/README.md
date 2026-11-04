@@ -118,10 +118,11 @@ a scratch capture is available.
 
 `claude-2.1.318-commands.jsonl` is a REAL transcript, trimmed: the two
 scratch sessions behind `claude-screen/2.1.318/slash/` (2026-11-04), in
-order — `/context`, `/model` (`s`), two messages, a queued `/context`,
+order — `/context`, `/model` (`s`), three messages, a queued `/context`,
 `/compact keep only that we listed animal facts`, then (after `/clear`, a new
-session id) `/hello world` and `/preexec` (project commands) and an
-AskUserQuestion. Kept: `user`, `assistant`, and `system` entries of subtype
+session id) `/hello world` and `/preexec` (project commands), an
+AskUserQuestion (the owner's form, re-asked), `/model` (`s`), `/context`, a
+long reply and the `/context` queued behind it. Kept: `user`, `assistant`, and `system` entries of subtype
 `local_command` and `compact_boundary`, with the fields the reader looks at.
 Thinking is `THINKING-MARKER`, a tool's output `TOOL-OUTPUT-MARKER`, the
 compact summary `SUMMARY-MARKER` (with a `<system-reminder>`), `/context`'s
