@@ -5,14 +5,36 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.48.0] - 2026-11-05
+
 ### Added
 
+- **Settings has Beginner, Advanced and Expert modes.** A switch in the Settings header decides how much each page shows; it never turns anything off. A setting you changed, a problem, and the agents you have installed are always shown, and each page ends with how many more settings the next mode adds. A fresh install opens in Beginner; an existing one opens in Expert, with nothing missing.
+- **Search Settings from its header.** Type into the box beside the mode switch, or press ⌘F while Settings is open, to find a setting by its name or by everyday words ("dark mode", "cap agents"). Opening one goes to its page and highlights it, even when your mode hides it, without changing the mode.
+- **Agent policy presets: Cautious, Balanced and Autonomous.** Balanced is today's defaults. Settings → Agent policy says when you've changed something from your preset, with a way back for each change, and Compare shows all three side by side. Autonomous asks before it gives Codex full access.
+- **Limits** in Settings → Agent policy: how many agents may run at once and how much memory must stay free, written to config.toml's `[limits]`.
+- **A notification while the window is hidden** when an agent starts waiting for you, or also when it finishes (Settings → Agents → Notifications).
+- Settings → Reference panels gathers the Files tab's preferences; Terminal → Scrollback sets how many lines a terminal keeps; Agents → Default model sets a model per installed agent.
+- **Update Claude, Codex, Kimi and pi from Settings → Updates.** Check for updates, and the hourly check, now look at these four agent CLIs too, and the update bubble says when one has a newer version. Each shows its installed and latest version with an Update button. An install worktrees can't update itself, such as Codex inside VS Code's extension, gets the steps to do it by hand. Sessions already running keep their version until they restart.
+- **Restart the Claude and Codex sessions that run an older version.** Under each CLI in Settings → Updates, restart the idle ones across every project, or restart all of them, with a warning that counts the turns it would interrupt. Each session comes back on its own conversation.
+- **Slash commands in the chat.** Type / for the agent's own commands (Claude's built-ins, your and the repository's commands and skills, plugins; Codex's built-ins), with descriptions and sources. /model picks for this session only; /status, /usage and /help open as a card; output shows as command notices. Sensitive commands and /clear ask twice, and on a phone need admin. MCP prompts are not listed yet.
 - The chat's tool calls open on click to show what each was given: a whole multi-line command, a sub-agent's prompt, or an MCP tool's input as JSON. Rows and pills look as they did and stay closed until clicked, including a failed call. File contents and tool output stay in the terminal.
 - **Drag a place onto the chat to reference it.** Dropping a place anywhere on the chat view puts its reference in your message at the cursor, ready to edit and send, as dropping it on the terminal does. Dropped at the very start of a message, it comes with the words "Look at" in front, because a message can't start with `@`. Files you drop still attach.
 - **The host can now send push notifications to a paired iPhone: the host's half.** While your Mac is running worktrees with remote access on, it can tell your phone when an agent has waited 30 seconds for input, remind you once after 15 minutes, and, if you allow it for that phone with `worktrees serve push security`, pass on this host's security alerts. Project and place names are encrypted so Apple never sees them, and prompt text never leaves the host. Nothing is delivered yet: real delivery needs an APNs key, imported with `worktrees serve push key-import`, and the iOS app's half. Turning remote access off stops notifications too, and none are sent once serve has stopped, which an app-owned serve does after you quit the app.
 - **Write several lines in the chat.** With Claude or Codex, Shift+Enter or Cmd+Enter adds a line and Enter sends. The box grows to 12 lines, then scrolls, and a message can be up to 16 KB. pi and kimi still take one line, and the box says so. A paired host that hasn't been updated takes one line too, and the box offers to join your lines.
 
+### Changed
+
+- **Settings is regrouped into six groups**: Workspace, Agents, Agent policy, Projects, Remote access, System. Each page says whose settings it holds, this window's or this computer's. Everything that limits what agents may do is on one page, Agent policy. Links to the old pages still land in the right place.
+- A setting decided by an environment variable says so and names the variable (Codex permissions, pi trust, agent guidance).
+- On a window driving another computer, a setting it may read but not change is shown read-only with the reason, and one it may not read says why.
+- **Reset takes a scope.** Resetting the look no longer clears each place's memory or the suggestions you silenced.
+
 ### Fixed
+- **The chat, the nav dots and place status follow the pane's own Claude**, not a review Claude that a plugin starts inside it (such as security-guidance's on `git push`), which could put the review's conversation in your chat. Parked background jobs still show as activity.
+- **The chat answers Claude's question forms in a short pane.** A form exactly as tall as the terminal (two questions in 80×24) no longer says to answer it in the terminal.
+- **Two-click confirms expire.** Three Settings buttons stayed armed until clicked again; every confirm now expires after 4 seconds, and Remove, Disconnect and Revoke buttons that acted on one click now ask twice.
+- Claude 2.1.318's /context, /clear and project commands show in the chat as command notices.
 - **A long message from the chat now reaches Claude as your own words.** Past about 850 characters, Claude was collapsing it and treating it as pasted text, which can change what the agent does with it. The chat also showed it wrapped in raw tags and left a second "waiting" copy beside it. Text you paste into Claude's terminal yourself still arrives as pasted, and now shows as plain words in the chat.
 - **A message ending in `;` keeps it.** Anything pasted into an agent's input, a dropped reference included, lost a final semicolon, and a lone `;` wasn't sent at all.
 - **Stop no longer says Claude isn't working when it is.** For about 8 seconds after a long paste, it now says to try again in a moment.
