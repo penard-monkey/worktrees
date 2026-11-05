@@ -1053,9 +1053,29 @@ another name (`cp /bin/sleep claude`) prints "coreutils: unknown program
 'claude'" and exits 1. In a tmux pane, the session dies with it, and the test
 reads as the product missing a live agent. serve_bin's two moved-project tests
 failed that way, on that runner only: ubuntu:24.04, bookworm and macOS all
-pass. Copy `/bin/bash` (its own binary everywhere) and have it wait on a
-builtin. Reproduce runner-only failures in the runner's OS: its log prints it
-under "Operating System", and that image ships tmux preinstalled.
+pass. A copy of `/bin/bash` is its own binary on Linux, so it runs there, but
+**not on macOS 27: `cp /bin/bash x; ./x -c true` exits 137** (SIGKILL at exec;
+a copy of a platform binary loses its signature's standing). Measured with
+tmux 3.7b on macOS 27.0, as `pane_current_command` of a pane running a file
+named `claude`: a plain copy dies (no pane); a copy re-signed with
+`codesign -f -s -` lives and reports `claude`; a SYMLINK to bash lives and
+reports `bash` (tmux names the resolved executable, so the product would not
+see Claude); a small program built with `cc` lives and reports `claude`. The
+last needs no signing step and runs the same on both OSes, so
+`remote_bin.rs`'s waiting-edge test compiles one (`FAKE_CLAUDE`). `serve_bin.rs`
+re-signs a bash copy on macOS instead. Reproduce runner-only failures in the
+runner's OS: its log prints it under "Operating System", and that image ships
+tmux preinstalled.
+
+**A tmux socket path is measured AFTER symlinks resolve, and macOS caps it at
+104 bytes.** `TMUX_TMPDIR=$TMPDIR/wt-…/tmux` is 100 bytes as written on macOS
+(`/var/folders/xx/<28>/T/`) and 108 to tmux (`/private/var/…`): `tmux -S <that>`
+from the test connects, but serve's own `list-panes` answers "File name too
+long", its poll sees no pane, and a waiting-edge test times out with a healthy
+pane in front of it and nothing in serve.log (`a_real_waiting_edge…`, green on
+Ubuntu and in CI because no job ran it on a Mac). A sandbox's tmux dir lives
+under `/tmp`, and a test that names a socket asserts the canonicalised path
+fits.
 
 **`tmux new-session -c <dir>` returns before the pane is in `<dir>`.** The
 server forks the pane and answers the client at once, and the child's
