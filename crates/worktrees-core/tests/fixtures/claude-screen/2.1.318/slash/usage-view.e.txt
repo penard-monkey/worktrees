@@ -1,0 +1,40 @@
+
+[38;5;246m  ⎿  [39mSet model to [38;5;153mOpus 5.5[39m for this session only
+[38;5;153m▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔[39m [38;5;246m◉ xhigh · /effort[38;5;153m ▔
+[39m   [1m[38;5;153mSettings[0m  Status   Config  [1m[38;5;16m[48;5;153m Usage [0m  Stats
+
+   [1mSession[0m
+
+   [38;5;246mTotal cost:            $0.3522[39m
+   [38;5;246mTotal duration (API):  24s[39m
+   [38;5;246mTotal duration (wall): 23m 56s[39m
+   [38;5;246mTotal code changes:    0 lines added, 0 lines removed[39m
+   [38;5;246mUsage by model:[39m
+   [38;5;246m     claude-opus-5-5:  10 input, 1.3k output, 133.9k cache read, 37.4k cache write ($0.3522)[39m
+   [38;5;246mPrompt cache (main):   4 requests · 78% of input tokens from cache · 1 miss (last 23m 34s ago, 16.9k tokens [39m
+   [38;5;246mre-cached) · warm (1h TTL, last activity 4m 53s ago)[39m
+
+   [1mCurrent session[0m
+   [38;5;153m[48;5;102m██████████████████▌                               [39m[49m 37% used
+   [38;5;246mResets 4:50pm (America/Denver)[39m
+
+   [1mCurrent week (all models)[0m
+   [38;5;153m[48;5;102m██▌                                               [39m[49m 5% used
+   [38;5;246mResets Nov 10 at 11pm (America/Denver)[39m
+
+   [1mCurrent week (Fable)[0m
+   [38;5;153m[48;5;102m██                                                [39m[49m 4% used
+   [38;5;246mResets Nov 10 at 11pm (America/Denver)[39m
+
+   [1mWhat's contributing to your usage?[0m
+   [38;5;246mApproximate · sessions on this machine only[39m
+
+   [38;5;246mLast 24h · shares overlap[39m
+
+   90%  Start fresh when you switch tasks[38;5;246m · run /clear[39m
+   29%  Give "Explore" subagents a cheaper model
+   26%  Run fewer sessions at once[38;5;246m · up to 7 at once[39m
+   20%  Trim ~/Projects/worktrees/.worktrees/feat-harness-updates/AGENTS.md[38;5;246m · 41k [39m
+        [38;5;246mtokens per request[39m
+
+   Subagents               [38;5;246m% of usage[39m                                                                                 [38;5;246m↓[39m

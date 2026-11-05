@@ -1,0 +1,40 @@
+[38;5;246m  ⎿  · Measured on Claude 2.1.318 and Codex 0.160.1: in both /model pickers, Enter SAVES the pick as your default for [39m
+     [38;5;246mnew sessions (~/.claude/settings.json, ~/.codex/config.toml); only the picker's `s` key is "this session only". [39m
+     [38;5;246mClaude's `/model <name>` with an argument also saves the default. What should choosing a model from the chat do? →
+[39m     [38;5;246mSave as default[39m
+     [38;5;246m· Claude's MCP prompts (e.g. /mcp__kicad__routing_strategy) are known only inside the running Claude process: no [39m
+     [38;5;246mfile lists them, and the one listing API (a `claude -p` initialize sidecar) ran an UNTRUSTED repo's SessionStart [39m
+     [38;5;246mhook in my test (ADR 0001). How should the chat's command list treat MCP prompts? → leave them out for now[39m
+
+[38;5;231m⏺[39m You answered both questions:
+
+  - [1m/model:[0m [1mSave as default[0m, which is not the recommended option. Picking a model from the chat will work like pressing
+    Enter in the terminal: it becomes the default for new sessions and gets written to [38;5;153m~/.claude/settings.json[39m or
+    [38;5;153m~/.codex/config.toml[39m. The chat's confirmation should say that it saves a default.
+  - [1mMCP prompts:[0m [1mLeave them out for now.[0m The chat's command list will show built-ins, your own and project commands and
+    skills, and plugin commands. MCP prompts stay terminal-only, and the proposal will record why: the only way to list
+    them ran an untrusted repo's SessionStart hook (ADR 0001).
+
+[38;5;246m✻[39m [38;5;246mCooked for 16s · done 1:08 PM[39m
+[38;5;153m▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+[39m   [1m[38;5;153mSelect model[0m
+   [38;5;246mSwitch between Claude models. Your pick becomes the default for new sessions. For other/previous model names, [39m
+   [38;5;246mspecify with --model.[39m
+
+     [38;5;246m1.  [39mDefault (recommended)  [38;5;174mOpus 5.5[38;5;246m · Best for everyday, complex tasks[39m
+   [38;5;153m❯[39m [38;5;246m2.  [38;5;114mOpus 5.5[39m [38;5;114m✔[39m             [38;5;246mFor complex work and everyday tasks[39m
+     [38;5;246m3.  [39mFable 5.1              [38;5;246mFor your toughest challenges[39m
+     [38;5;246m4.  [39mSonnet 5.5             [38;5;246mMost efficient for simpler tasks[39m
+     [38;5;246m5.  [39mHaiku 5.5              [38;5;246mFastest for quick answers[39m
+     [38;5;246m6.  [39mHaiku 4.5              [38;5;246mFastest for quick answers[39m
+     [38;5;246m7.  [39mSonnet 5               [38;5;246mEfficient for routine tasks[39m
+     [38;5;246m8.  [39mOpus 5                 [38;5;246mBest for everyday, complex tasks[39m
+     [38;5;246m9.  [39mFable 5                [38;5;246mMost capable for your hardest and longest-running tasks[39m
+   [38;5;246m↓[39m [38;5;246m10. [39mOpus 4.8               [38;5;246mBest for everyday, complex tasks[39m
+      [38;5;246m… +3 models[39m
+
+   [38;5;174m◉[38;5;246m xHigh effort[38;5;239m ←/→ to adjust[39m
+
+   [38;5;246mUse [1m/fast[0m[38;5;246m to turn on Fast mode (Opus 5.5).[39m
+
+   [38;5;246mEnter to set as default · s to use this session only · Esc to cancel[39m

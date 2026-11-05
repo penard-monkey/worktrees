@@ -1,0 +1,630 @@
+     /private/tmp/claude-501/wtcx/repo
+› /model         choose what model and reasoning effort to use
+  /fast          1.5x speed
+  /ide           include current selection, open files, and other context from your IDE
+  /permissions   choose what Codex is allowed to do
+  /keymap        remap TUI shortcuts
+  /vim           toggle Vim mode for the composer
+  /experimental  toggle experimental features
+  /approve       approve one retry of a recent auto-review denial
+     /private/tmp/claude-501/wtcx/repo
+  /model         choose what model and reasoning effort to use
+› /fast          1.5x speed
+  /ide           include current selection, open files, and other context from your IDE
+  /permissions   choose what Codex is allowed to do
+  /keymap        remap TUI shortcuts
+  /vim           toggle Vim mode for the composer
+  /experimental  toggle experimental features
+  /approve       approve one retry of a recent auto-review denial
+     /private/tmp/claude-501/wtcx/repo
+  /model         choose what model and reasoning effort to use
+  /fast          1.5x speed
+› /ide           include current selection, open files, and other context from your IDE
+  /permissions   choose what Codex is allowed to do
+  /keymap        remap TUI shortcuts
+  /vim           toggle Vim mode for the composer
+  /experimental  toggle experimental features
+  /approve       approve one retry of a recent auto-review denial
+     /private/tmp/claude-501/wtcx/repo
+  /model         choose what model and reasoning effort to use
+  /fast          1.5x speed
+  /ide           include current selection, open files, and other context from your IDE
+› /permissions   choose what Codex is allowed to do
+  /keymap        remap TUI shortcuts
+  /vim           toggle Vim mode for the composer
+  /experimental  toggle experimental features
+  /approve       approve one retry of a recent auto-review denial
+     /private/tmp/claude-501/wtcx/repo
+  /model         choose what model and reasoning effort to use
+  /fast          1.5x speed
+  /ide           include current selection, open files, and other context from your IDE
+  /permissions   choose what Codex is allowed to do
+› /keymap        remap TUI shortcuts
+  /vim           toggle Vim mode for the composer
+  /experimental  toggle experimental features
+  /approve       approve one retry of a recent auto-review denial
+     /private/tmp/claude-501/wtcx/repo
+  /model         choose what model and reasoning effort to use
+  /fast          1.5x speed
+  /ide           include current selection, open files, and other context from your IDE
+  /permissions   choose what Codex is allowed to do
+  /keymap        remap TUI shortcuts
+› /vim           toggle Vim mode for the composer
+  /experimental  toggle experimental features
+  /approve       approve one retry of a recent auto-review denial
+     /private/tmp/claude-501/wtcx/repo
+  /model         choose what model and reasoning effort to use
+  /fast          1.5x speed
+  /ide           include current selection, open files, and other context from your IDE
+  /permissions   choose what Codex is allowed to do
+  /keymap        remap TUI shortcuts
+  /vim           toggle Vim mode for the composer
+› /experimental  toggle experimental features
+  /approve       approve one retry of a recent auto-review denial
+     /private/tmp/claude-501/wtcx/repo
+  /model         choose what model and reasoning effort to use
+  /fast          1.5x speed
+  /ide           include current selection, open files, and other context from your IDE
+  /permissions   choose what Codex is allowed to do
+  /keymap        remap TUI shortcuts
+  /vim           toggle Vim mode for the composer
+  /experimental  toggle experimental features
+› /approve       approve one retry of a recent auto-review denial
+     /private/tmp/claude-501/wtcx/repo
+  /fast          1.5x speed
+  /ide           include current selection, open files, and other context from your IDE
+  /permissions   choose what Codex is allowed to do
+  /keymap        remap TUI shortcuts
+  /vim           toggle Vim mode for the composer
+  /experimental  toggle experimental features
+  /approve       approve one retry of a recent auto-review denial
+› /memories      configure memory use and generation
+     /private/tmp/claude-501/wtcx/repo
+  /ide           include current selection, open files, and other context from your IDE
+  /permissions   choose what Codex is allowed to do
+  /keymap        remap TUI shortcuts
+  /vim           toggle Vim mode for the composer
+  /experimental  toggle experimental features
+  /approve       approve one retry of a recent auto-review denial
+  /memories      configure memory use and generation
+› /skills        use skills to improve how Codex performs specific tasks
+     /private/tmp/claude-501/wtcx/repo
+  /permissions   choose what Codex is allowed to do
+  /keymap        remap TUI shortcuts
+  /vim           toggle Vim mode for the composer
+  /experimental  toggle experimental features
+  /approve       approve one retry of a recent auto-review denial
+  /memories      configure memory use and generation
+  /skills        use skills to improve how Codex performs specific tasks
+› /import        import setup, this project, and recent chats from Claude Code
+     /private/tmp/claude-501/wtcx/repo
+  /keymap        remap TUI shortcuts
+  /vim           toggle Vim mode for the composer
+  /experimental  toggle experimental features
+  /approve       approve one retry of a recent auto-review denial
+  /memories      configure memory use and generation
+  /skills        use skills to improve how Codex performs specific tasks
+  /import        import setup, this project, and recent chats from Claude Code
+› /hooks         view and manage lifecycle hooks
+     /private/tmp/claude-501/wtcx/repo
+  /vim           toggle Vim mode for the composer
+  /experimental  toggle experimental features
+  /approve       approve one retry of a recent auto-review denial
+  /memories      configure memory use and generation
+  /skills        use skills to improve how Codex performs specific tasks
+  /import        import setup, this project, and recent chats from Claude Code
+  /hooks         view and manage lifecycle hooks
+› /review        review my current changes and find issues
+     /private/tmp/claude-501/wtcx/repo
+  /experimental  toggle experimental features
+  /approve       approve one retry of a recent auto-review denial
+  /memories      configure memory use and generation
+  /skills        use skills to improve how Codex performs specific tasks
+  /import        import setup, this project, and recent chats from Claude Code
+  /hooks         view and manage lifecycle hooks
+  /review        review my current changes and find issues
+› /rename        rename the current thread
+     /private/tmp/claude-501/wtcx/repo
+  /approve       approve one retry of a recent auto-review denial
+  /memories      configure memory use and generation
+  /skills        use skills to improve how Codex performs specific tasks
+  /import        import setup, this project, and recent chats from Claude Code
+  /hooks         view and manage lifecycle hooks
+  /review        review my current changes and find issues
+  /rename        rename the current thread
+› /new           start a new chat during a conversation
+     /private/tmp/claude-501/wtcx/repo
+  /memories      configure memory use and generation
+  /skills        use skills to improve how Codex performs specific tasks
+  /import        import setup, this project, and recent chats from Claude Code
+  /hooks         view and manage lifecycle hooks
+  /review        review my current changes and find issues
+  /rename        rename the current thread
+  /new           start a new chat during a conversation
+› /archive       archive this session
+     /private/tmp/claude-501/wtcx/repo
+  /skills        use skills to improve how Codex performs specific tasks
+  /import        import setup, this project, and recent chats from Claude Code
+  /hooks         view and manage lifecycle hooks
+  /review        review my current changes and find issues
+  /rename        rename the current thread
+  /new           start a new chat during a conversation
+  /archive       archive this session
+› /delete        permanently delete this session
+     /private/tmp/claude-501/wtcx/repo
+  /import        import setup, this project, and recent chats from Claude Code
+  /hooks         view and manage lifecycle hooks
+  /review        review my current changes and find issues
+  /rename        rename the current thread
+  /new           start a new chat during a conversation
+  /archive       archive this session
+  /delete        permanently delete this session
+› /resume        resume a saved chat
+     /private/tmp/claude-501/wtcx/repo
+  /hooks         view and manage lifecycle hooks
+  /review        review my current changes and find issues
+  /rename        rename the current thread
+  /new           start a new chat during a conversation
+  /archive       archive this session
+  /delete        permanently delete this session
+  /resume        resume a saved chat
+› /fork          fork the current chat
+     /private/tmp/claude-501/wtcx/repo
+  /review        review my current changes and find issues
+  /rename        rename the current thread
+  /new           start a new chat during a conversation
+  /archive       archive this session
+  /delete        permanently delete this session
+  /resume        resume a saved chat
+  /fork          fork the current chat
+› /worktree      start or continue a conversation in a new worktree
+     /private/tmp/claude-501/wtcx/repo
+  /rename        rename the current thread
+  /new           start a new chat during a conversation
+  /archive       archive this session
+  /delete        permanently delete this session
+  /resume        resume a saved chat
+  /fork          fork the current chat
+  /worktree      start or continue a conversation in a new worktree
+› /app           continue this session in the Desktop app
+     /private/tmp/claude-501/wtcx/repo
+  /new           start a new chat during a conversation
+  /archive       archive this session
+  /delete        permanently delete this session
+  /resume        resume a saved chat
+  /fork          fork the current chat
+  /worktree      start or continue a conversation in a new worktree
+  /app           continue this session in the Desktop app
+› /init          create an AGENTS.md file with instructions for Codex
+     /private/tmp/claude-501/wtcx/repo
+  /archive       archive this session
+  /delete        permanently delete this session
+  /resume        resume a saved chat
+  /fork          fork the current chat
+  /worktree      start or continue a conversation in a new worktree
+  /app           continue this session in the Desktop app
+  /init          create an AGENTS.md file with instructions for Codex
+› /compact       summarize conversation to prevent hitting the context limit
+     /private/tmp/claude-501/wtcx/repo
+  /delete        permanently delete this session
+  /resume        resume a saved chat
+  /fork          fork the current chat
+  /worktree      start or continue a conversation in a new worktree
+  /app           continue this session in the Desktop app
+  /init          create an AGENTS.md file with instructions for Codex
+  /compact       summarize conversation to prevent hitting the context limit
+› /recap         summarize the current conversation now
+     /private/tmp/claude-501/wtcx/repo
+  /resume        resume a saved chat
+  /fork          fork the current chat
+  /worktree      start or continue a conversation in a new worktree
+  /app           continue this session in the Desktop app
+  /init          create an AGENTS.md file with instructions for Codex
+  /compact       summarize conversation to prevent hitting the context limit
+  /recap         summarize the current conversation now
+› /plan          switch to Plan mode
+     /private/tmp/claude-501/wtcx/repo
+  /fork          fork the current chat
+  /worktree      start or continue a conversation in a new worktree
+  /app           continue this session in the Desktop app
+  /init          create an AGENTS.md file with instructions for Codex
+  /compact       summarize conversation to prevent hitting the context limit
+  /recap         summarize the current conversation now
+  /plan          switch to Plan mode
+› /goal          set or view the goal for a long-running task
+     /private/tmp/claude-501/wtcx/repo
+  /worktree      start or continue a conversation in a new worktree
+  /app           continue this session in the Desktop app
+  /init          create an AGENTS.md file with instructions for Codex
+  /compact       summarize conversation to prevent hitting the context limit
+  /recap         summarize the current conversation now
+  /plan          switch to Plan mode
+  /goal          set or view the goal for a long-running task
+› /agents        open the agent command center
+     /private/tmp/claude-501/wtcx/repo
+  /app           continue this session in the Desktop app
+  /init          create an AGENTS.md file with instructions for Codex
+  /compact       summarize conversation to prevent hitting the context limit
+  /recap         summarize the current conversation now
+  /plan          switch to Plan mode
+  /goal          set or view the goal for a long-running task
+  /agents        open the agent command center
+› /side          start a side conversation in an ephemeral fork
+     /private/tmp/claude-501/wtcx/repo
+  /init          create an AGENTS.md file with instructions for Codex
+  /compact       summarize conversation to prevent hitting the context limit
+  /recap         summarize the current conversation now
+  /plan          switch to Plan mode
+  /goal          set or view the goal for a long-running task
+  /agents        open the agent command center
+  /side          start a side conversation in an ephemeral fork
+› /copy          copy the last response or part of it
+     /private/tmp/claude-501/wtcx/repo
+  /compact       summarize conversation to prevent hitting the context limit
+  /recap         summarize the current conversation now
+  /plan          switch to Plan mode
+  /goal          set or view the goal for a long-running task
+  /agents        open the agent command center
+  /side          start a side conversation in an ephemeral fork
+  /copy          copy the last response or part of it
+› /export        export the conversation as markdown
+     /private/tmp/claude-501/wtcx/repo
+  /recap         summarize the current conversation now
+  /plan          switch to Plan mode
+  /goal          set or view the goal for a long-running task
+  /agents        open the agent command center
+  /side          start a side conversation in an ephemeral fork
+  /copy          copy the last response or part of it
+  /export        export the conversation as markdown
+› /raw           toggle raw scrollback mode for copy-friendly terminal selection
+     /private/tmp/claude-501/wtcx/repo
+  /plan          switch to Plan mode
+  /goal          set or view the goal for a long-running task
+  /agents        open the agent command center
+  /side          start a side conversation in an ephemeral fork
+  /copy          copy the last response or part of it
+  /export        export the conversation as markdown
+  /raw           toggle raw scrollback mode for copy-friendly terminal selection
+› /tui           choose the TUI mode for the next launch
+     /private/tmp/claude-501/wtcx/repo
+  /goal          set or view the goal for a long-running task
+  /agents        open the agent command center
+  /side          start a side conversation in an ephemeral fork
+  /copy          copy the last response or part of it
+  /export        export the conversation as markdown
+  /raw           toggle raw scrollback mode for copy-friendly terminal selection
+  /tui           choose the TUI mode for the next launch
+› /diff          show git diff (including untracked files)
+     /private/tmp/claude-501/wtcx/repo
+  /agents        open the agent command center
+  /side          start a side conversation in an ephemeral fork
+  /copy          copy the last response or part of it
+  /export        export the conversation as markdown
+  /raw           toggle raw scrollback mode for copy-friendly terminal selection
+  /tui           choose the TUI mode for the next launch
+  /diff          show git diff (including untracked files)
+› /mention       mention a file
+     /private/tmp/claude-501/wtcx/repo
+  /side          start a side conversation in an ephemeral fork
+  /copy          copy the last response or part of it
+  /export        export the conversation as markdown
+  /raw           toggle raw scrollback mode for copy-friendly terminal selection
+  /tui           choose the TUI mode for the next launch
+  /diff          show git diff (including untracked files)
+  /mention       mention a file
+› /status        show current session configuration and token usage
+     /private/tmp/claude-501/wtcx/repo
+  /copy          copy the last response or part of it
+  /export        export the conversation as markdown
+  /raw           toggle raw scrollback mode for copy-friendly terminal selection
+  /tui           choose the TUI mode for the next launch
+  /diff          show git diff (including untracked files)
+  /mention       mention a file
+  /status        show current session configuration and token usage
+› /daemon        Manage the local background server
+     /private/tmp/claude-501/wtcx/repo
+  /export        export the conversation as markdown
+  /raw           toggle raw scrollback mode for copy-friendly terminal selection
+  /tui           choose the TUI mode for the next launch
+  /diff          show git diff (including untracked files)
+  /mention       mention a file
+  /status        show current session configuration and token usage
+  /daemon        Manage the local background server
+› /warnings      view retained warnings and diagnostic details
+     /private/tmp/claude-501/wtcx/repo
+  /raw           toggle raw scrollback mode for copy-friendly terminal selection
+  /tui           choose the TUI mode for the next launch
+  /diff          show git diff (including untracked files)
+  /mention       mention a file
+  /status        show current session configuration and token usage
+  /daemon        Manage the local background server
+  /warnings      view retained warnings and diagnostic details
+› /cd            change the current working directory
+     /private/tmp/claude-501/wtcx/repo
+  /tui           choose the TUI mode for the next launch
+  /diff          show git diff (including untracked files)
+  /mention       mention a file
+  /status        show current session configuration and token usage
+  /daemon        Manage the local background server
+  /warnings      view retained warnings and diagnostic details
+  /cd            change the current working directory
+› /pwd           show the current working directory
+     /private/tmp/claude-501/wtcx/repo
+  /diff          show git diff (including untracked files)
+  /mention       mention a file
+  /status        show current session configuration and token usage
+  /daemon        Manage the local background server
+  /warnings      view retained warnings and diagnostic details
+  /cd            change the current working directory
+  /pwd           show the current working directory
+› /usage         view account usage or use a usage limit reset
+     /private/tmp/claude-501/wtcx/repo
+  /mention       mention a file
+  /status        show current session configuration and token usage
+  /daemon        Manage the local background server
+  /warnings      view retained warnings and diagnostic details
+  /cd            change the current working directory
+  /pwd           show the current working directory
+  /usage         view account usage or use a usage limit reset
+› /title         configure which items appear in the terminal title
+     /private/tmp/claude-501/wtcx/repo
+  /status        show current session configuration and token usage
+  /daemon        Manage the local background server
+  /warnings      view retained warnings and diagnostic details
+  /cd            change the current working directory
+  /pwd           show the current working directory
+  /usage         view account usage or use a usage limit reset
+  /title         configure which items appear in the terminal title
+› /statusline    configure which items appear in the status line
+     /private/tmp/claude-501/wtcx/repo
+  /daemon        Manage the local background server
+  /warnings      view retained warnings and diagnostic details
+  /cd            change the current working directory
+  /pwd           show the current working directory
+  /usage         view account usage or use a usage limit reset
+  /title         configure which items appear in the terminal title
+  /statusline    configure which items appear in the status line
+› /theme         choose a syntax highlighting theme
+     /private/tmp/claude-501/wtcx/repo
+  /warnings      view retained warnings and diagnostic details
+  /cd            change the current working directory
+  /pwd           show the current working directory
+  /usage         view account usage or use a usage limit reset
+  /title         configure which items appear in the terminal title
+  /statusline    configure which items appear in the status line
+  /theme         choose a syntax highlighting theme
+› /pets          choose or hide the terminal pet
+     /private/tmp/claude-501/wtcx/repo
+  /cd            change the current working directory
+  /pwd           show the current working directory
+  /usage         view account usage or use a usage limit reset
+  /title         configure which items appear in the terminal title
+  /statusline    configure which items appear in the status line
+  /theme         choose a syntax highlighting theme
+  /pets          choose or hide the terminal pet
+› /mcp           list configured MCP tools; use /mcp verbose for details
+     /private/tmp/claude-501/wtcx/repo
+  /pwd           show the current working directory
+  /usage         view account usage or use a usage limit reset
+  /title         configure which items appear in the terminal title
+  /statusline    configure which items appear in the status line
+  /theme         choose a syntax highlighting theme
+  /pets          choose or hide the terminal pet
+  /mcp           list configured MCP tools; use /mcp verbose for details
+› /plugins       browse plugins
+     /private/tmp/claude-501/wtcx/repo
+  /usage         view account usage or use a usage limit reset
+  /title         configure which items appear in the terminal title
+  /statusline    configure which items appear in the status line
+  /theme         choose a syntax highlighting theme
+  /pets          choose or hide the terminal pet
+  /mcp           list configured MCP tools; use /mcp verbose for details
+  /plugins       browse plugins
+› /logout        log out of Codex
+     /private/tmp/claude-501/wtcx/repo
+  /title         configure which items appear in the terminal title
+  /statusline    configure which items appear in the status line
+  /theme         choose a syntax highlighting theme
+  /pets          choose or hide the terminal pet
+  /mcp           list configured MCP tools; use /mcp verbose for details
+  /plugins       browse plugins
+  /logout        log out of Codex
+› /exit          exit Codex
+     /private/tmp/claude-501/wtcx/repo
+  /statusline    configure which items appear in the status line
+  /theme         choose a syntax highlighting theme
+  /pets          choose or hide the terminal pet
+  /mcp           list configured MCP tools; use /mcp verbose for details
+  /plugins       browse plugins
+  /logout        log out of Codex
+  /exit          exit Codex
+› /feedback      send logs to maintainers
+     /private/tmp/claude-501/wtcx/repo
+  /theme         choose a syntax highlighting theme
+  /pets          choose or hide the terminal pet
+  /mcp           list configured MCP tools; use /mcp verbose for details
+  /plugins       browse plugins
+  /logout        log out of Codex
+  /exit          exit Codex
+  /feedback      send logs to maintainers
+› /ps            list background terminals
+     /private/tmp/claude-501/wtcx/repo
+  /pets          choose or hide the terminal pet
+  /mcp           list configured MCP tools; use /mcp verbose for details
+  /plugins       browse plugins
+  /logout        log out of Codex
+  /exit          exit Codex
+  /feedback      send logs to maintainers
+  /ps            list background terminals
+› /stop          stop all background terminals
+     /private/tmp/claude-501/wtcx/repo
+  /mcp           list configured MCP tools; use /mcp verbose for details
+  /plugins       browse plugins
+  /logout        log out of Codex
+  /exit          exit Codex
+  /feedback      send logs to maintainers
+  /ps            list background terminals
+  /stop          stop all background terminals
+› /clear         clear the terminal and start a new chat
+     /private/tmp/claude-501/wtcx/repo
+  /plugins       browse plugins
+  /logout        log out of Codex
+  /exit          exit Codex
+  /feedback      send logs to maintainers
+  /ps            list background terminals
+  /stop          stop all background terminals
+  /clear         clear the terminal and start a new chat
+› /subagents     switch between this session's subagents
+     /private/tmp/claude-501/wtcx/repo
+› /model         choose what model and reasoning effort to use
+  /fast          1.5x speed
+  /ide           include current selection, open files, and other context from your IDE
+  /permissions   choose what Codex is allowed to do
+  /keymap        remap TUI shortcuts
+  /vim           toggle Vim mode for the composer
+  /experimental  toggle experimental features
+  /approve       approve one retry of a recent auto-review denial
+     /private/tmp/claude-501/wtcx/repo
+  /model         choose what model and reasoning effort to use
+› /fast          1.5x speed
+  /ide           include current selection, open files, and other context from your IDE
+  /permissions   choose what Codex is allowed to do
+  /keymap        remap TUI shortcuts
+  /vim           toggle Vim mode for the composer
+  /experimental  toggle experimental features
+  /approve       approve one retry of a recent auto-review denial
+     /private/tmp/claude-501/wtcx/repo
+  /model         choose what model and reasoning effort to use
+  /fast          1.5x speed
+› /ide           include current selection, open files, and other context from your IDE
+  /permissions   choose what Codex is allowed to do
+  /keymap        remap TUI shortcuts
+  /vim           toggle Vim mode for the composer
+  /experimental  toggle experimental features
+  /approve       approve one retry of a recent auto-review denial
+     /private/tmp/claude-501/wtcx/repo
+  /model         choose what model and reasoning effort to use
+  /fast          1.5x speed
+  /ide           include current selection, open files, and other context from your IDE
+› /permissions   choose what Codex is allowed to do
+  /keymap        remap TUI shortcuts
+  /vim           toggle Vim mode for the composer
+  /experimental  toggle experimental features
+  /approve       approve one retry of a recent auto-review denial
+     /private/tmp/claude-501/wtcx/repo
+  /model         choose what model and reasoning effort to use
+  /fast          1.5x speed
+  /ide           include current selection, open files, and other context from your IDE
+  /permissions   choose what Codex is allowed to do
+› /keymap        remap TUI shortcuts
+  /vim           toggle Vim mode for the composer
+  /experimental  toggle experimental features
+  /approve       approve one retry of a recent auto-review denial
+     /private/tmp/claude-501/wtcx/repo
+  /model         choose what model and reasoning effort to use
+  /fast          1.5x speed
+  /ide           include current selection, open files, and other context from your IDE
+  /permissions   choose what Codex is allowed to do
+  /keymap        remap TUI shortcuts
+› /vim           toggle Vim mode for the composer
+  /experimental  toggle experimental features
+  /approve       approve one retry of a recent auto-review denial
+     /private/tmp/claude-501/wtcx/repo
+  /model         choose what model and reasoning effort to use
+  /fast          1.5x speed
+  /ide           include current selection, open files, and other context from your IDE
+  /permissions   choose what Codex is allowed to do
+  /keymap        remap TUI shortcuts
+  /vim           toggle Vim mode for the composer
+› /experimental  toggle experimental features
+  /approve       approve one retry of a recent auto-review denial
+     /private/tmp/claude-501/wtcx/repo
+  /model         choose what model and reasoning effort to use
+  /fast          1.5x speed
+  /ide           include current selection, open files, and other context from your IDE
+  /permissions   choose what Codex is allowed to do
+  /keymap        remap TUI shortcuts
+  /vim           toggle Vim mode for the composer
+  /experimental  toggle experimental features
+› /approve       approve one retry of a recent auto-review denial
+     /private/tmp/claude-501/wtcx/repo
+  /fast          1.5x speed
+  /ide           include current selection, open files, and other context from your IDE
+  /permissions   choose what Codex is allowed to do
+  /keymap        remap TUI shortcuts
+  /vim           toggle Vim mode for the composer
+  /experimental  toggle experimental features
+  /approve       approve one retry of a recent auto-review denial
+› /memories      configure memory use and generation
+     /private/tmp/claude-501/wtcx/repo
+  /ide           include current selection, open files, and other context from your IDE
+  /permissions   choose what Codex is allowed to do
+  /keymap        remap TUI shortcuts
+  /vim           toggle Vim mode for the composer
+  /experimental  toggle experimental features
+  /approve       approve one retry of a recent auto-review denial
+  /memories      configure memory use and generation
+› /skills        use skills to improve how Codex performs specific tasks
+     /private/tmp/claude-501/wtcx/repo
+  /permissions   choose what Codex is allowed to do
+  /keymap        remap TUI shortcuts
+  /vim           toggle Vim mode for the composer
+  /experimental  toggle experimental features
+  /approve       approve one retry of a recent auto-review denial
+  /memories      configure memory use and generation
+  /skills        use skills to improve how Codex performs specific tasks
+› /import        import setup, this project, and recent chats from Claude Code
+     /private/tmp/claude-501/wtcx/repo
+  /keymap        remap TUI shortcuts
+  /vim           toggle Vim mode for the composer
+  /experimental  toggle experimental features
+  /approve       approve one retry of a recent auto-review denial
+  /memories      configure memory use and generation
+  /skills        use skills to improve how Codex performs specific tasks
+  /import        import setup, this project, and recent chats from Claude Code
+› /hooks         view and manage lifecycle hooks
+     /private/tmp/claude-501/wtcx/repo
+  /vim           toggle Vim mode for the composer
+  /experimental  toggle experimental features
+  /approve       approve one retry of a recent auto-review denial
+  /memories      configure memory use and generation
+  /skills        use skills to improve how Codex performs specific tasks
+  /import        import setup, this project, and recent chats from Claude Code
+  /hooks         view and manage lifecycle hooks
+› /review        review my current changes and find issues
+     /private/tmp/claude-501/wtcx/repo
+  /experimental  toggle experimental features
+  /approve       approve one retry of a recent auto-review denial
+  /memories      configure memory use and generation
+  /skills        use skills to improve how Codex performs specific tasks
+  /import        import setup, this project, and recent chats from Claude Code
+  /hooks         view and manage lifecycle hooks
+  /review        review my current changes and find issues
+› /rename        rename the current thread
+     /private/tmp/claude-501/wtcx/repo
+  /approve       approve one retry of a recent auto-review denial
+  /memories      configure memory use and generation
+  /skills        use skills to improve how Codex performs specific tasks
+  /import        import setup, this project, and recent chats from Claude Code
+  /hooks         view and manage lifecycle hooks
+  /review        review my current changes and find issues
+  /rename        rename the current thread
+› /new           start a new chat during a conversation
+     /private/tmp/claude-501/wtcx/repo
+  /memories      configure memory use and generation
+  /skills        use skills to improve how Codex performs specific tasks
+  /import        import setup, this project, and recent chats from Claude Code
+  /hooks         view and manage lifecycle hooks
+  /review        review my current changes and find issues
+  /rename        rename the current thread
+  /new           start a new chat during a conversation
+› /archive       archive this session
+     /private/tmp/claude-501/wtcx/repo
+  /skills        use skills to improve how Codex performs specific tasks
+  /import        import setup, this project, and recent chats from Claude Code
+  /hooks         view and manage lifecycle hooks
+  /review        review my current changes and find issues
+  /rename        rename the current thread
+  /new           start a new chat during a conversation
+  /archive       archive this session
+› /delete        permanently delete this session

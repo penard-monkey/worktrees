@@ -1,0 +1,51 @@
+
+ ▐▛███▛█   Claude Code v2.1.318
+▝▜██████▀  Sonnet 5.5 · Claude Max
+ ▝▝   ▝▝   /…/-Users-bret-Projects-worktrees--worktrees-feat-harness-updates/672ce622-3c10-4f81-89b9-5cf671be1499/scratchpad/repos/scA
+
+
+❯ /model
+  ⎿  Kept model as Opus 5.5
+
+❯ /model
+  ⎿  Set model to Sonnet 5.5 for this session only
+
+❯ Reply with the single word ok.
+
+⏺ ok
+
+✻ Worked for 1s · done 2:47 PM
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   Switch model?
+   Your next response will be slower and use more tokens
+
+   This conversation is cached for the current model. Switching to Opus 5.5 means the full history gets re-read.
+
+   ❯ 1. Yes, switch to Opus 5.5
+     2. No, go back

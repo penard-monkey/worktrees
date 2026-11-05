@@ -2011,6 +2011,25 @@ impl ConnAudit {
                     detail.insert("session".into(), json!(ident(s)));
                 }
             }
+            // A slash command (chat-slash-commands §2.2): its NAME, which the
+            // host validated against the session's list, and its argument's
+            // length and hash, never the argument — and the session.
+            "agent_command" => {
+                // Only a name's shape is recorded: what a device sent in its
+                // place may be anything, and the log keeps no free text.
+                if let Some(Value::String(n)) = arg(args, "name") {
+                    let n = n.trim().trim_start_matches('/');
+                    let shown = if worktrees_core::slash::valid_name(n) { ident(n) } else { "(not a command name)".into() };
+                    detail.insert("command".into(), json!(shown));
+                }
+                if let Some(Value::String(t)) = arg(args, "args").filter(|v| v.as_str().is_some_and(|t| !t.is_empty())) {
+                    detail.insert("bytes".into(), json!(t.len()));
+                    detail.insert("sha256".into(), json!(sha256_hex(t.as_bytes())));
+                }
+                if let Some(Value::String(s)) = arg(args, "session") {
+                    detail.insert("session".into(), json!(ident(s)));
+                }
+            }
             // Free text into a prompt's field: like a line, its length and
             // hash and never the text — and which choice, of which prompt.
             "agent_answer_text" => {
@@ -3813,6 +3832,30 @@ mod tests {
         let answered = g.records("call", "agent_answer");
         assert_eq!((answered[0]["detail"]["choice"].as_u64(), answered[0]["detail"]["fingerprint"].as_str()), (Some(1), Some(fp.as_str())));
         assert_eq!(answered[0]["cap"], json!("answer"));
+    }
+
+    /// A slash command is recorded by its NAME, and its argument by length
+    /// and SHA-256 — never the argument; a "name" that has no command name's
+    /// shape is not recorded either (a device's free text in its place).
+    #[test]
+    fn an_agent_command_is_recorded_by_name_never_its_argument() {
+        let mut g = Gate::new("agentcmd", phone_caller());
+        let (_pane, session) = g.agent(super::super::tests::CLAUDE_EMPTY);
+        let c = phone(&g.a, 9);
+        let run = |name: &str, args: &str| through(&g.cx, &c, &g.w, "agent_command", json!({ "repo": g.root, "slug": "(main)", "session": session, "name": name, "args": args }));
+        let _ = run("/compact", "keep SECRET-ARGS-1");
+        let _ = run("/x SECRET-NAME-2", "");
+        let raw = std::fs::read_to_string(g.d.join(FILE)).unwrap();
+        assert!(!raw.contains("SECRET-ARGS") && !raw.contains("SECRET-NAME"), "free text reached the log:\n{raw}");
+        let rec = g.records("call", "agent_command");
+        assert_eq!(rec.len(), 2, "{rec:#?}");
+        assert_eq!(rec[0]["detail"]["command"], json!("compact"));
+        assert_eq!(rec[0]["detail"]["bytes"], json!("keep SECRET-ARGS-1".len()));
+        assert_eq!(rec[0]["detail"]["sha256"], json!(sha256_hex(b"keep SECRET-ARGS-1")));
+        assert_eq!(rec[0]["detail"]["session"], json!(session));
+        assert_eq!(rec[0]["cap"], json!("instruct"));
+        assert_eq!(rec[1]["detail"]["command"], json!("(not a command name)"));
+        assert!(rec[1]["detail"].get("bytes").is_none());
     }
 
     /// A file for the agent is recorded by its size, the SHA-256 of its

@@ -1,7 +1,8 @@
 // The agent rows — `agent_prompt`, `agent_answer`, `agent_answer_text`,
 // `agent_answer_many`, `agent_send`, `agent_interrupt`, `agent_turns`,
-// `agent_attach` (iOS MVP §2.4, S6–S11, feat/actionable-prompts,
-// feat/chat-interrupt and feat/chat-attachments) — say
+// `agent_attach`, `agent_commands`, `agent_command` (iOS MVP §2.4, S6–S11,
+// feat/actionable-prompts, feat/chat-interrupt, feat/chat-attachments and
+// feat/chat-slash-commands) — say
 // the same thing in the four places that state them:
 //
 //   node app/scripts/agent-rows-check.mjs      # exits non-zero on failure
@@ -56,6 +57,11 @@ const ROWS = {
   agent_attach: "instruct, place(repo, slug)",
   agent_turns: "read, place(repo, slug), opt(session_of(session, repo, slug))",
   agent_tool_call: "read, place(repo, slug)",
+  // Slash commands (docs/proposals/chat-slash-commands.md): the list is a
+  // read; a run is `instruct`, like a line — drive-class, step-up, the DRIVE
+  // budget — with `admin` checked in the body for the sensitive tier.
+  agent_commands: "read, place(repo, slug), opt(session_of(session, repo, slug))",
+  agent_command: "instruct, place(repo, slug), session_of(session, repo, slug)",
 };
 const norm = (s) => s.replace(/\s+/g, " ").trim();
 

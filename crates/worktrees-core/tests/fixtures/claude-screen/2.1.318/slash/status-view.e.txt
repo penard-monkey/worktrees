@@ -1,0 +1,40 @@
+
+[38;5;246m  ⎿  [39mSet model to [38;5;153mOpus 5.5[39m for this session only
+[38;5;153m▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔[39m [38;5;246m◉ xhigh · /effort[38;5;153m ▔
+[39m   [1m[38;5;153mSettings[0m [1m[38;5;16m[48;5;153m Status [0m  Config   Usage   Stats
+
+   [1mVersion:[0m           2.1.318
+   [1mSession name:[0m      scA-main
+   [1mSession ID:[0m        21666f49-fcb0-444a-9d2e-cdd67d558278
+   [1mSession kind:[0m      interactive
+   [1mPeer address:[0m      uds:/tmp/cc-socks/10040.sock
+   [1mcwd:[0m               /private/tmp/claude-501/-Users-u-Projects-worktrees--worktrees-feat-harness-updates/672ce622
+                      -3c10-4f81-89b9-5cf671be1499/scratchpad/repos/scA
+   [1mLogin method:[0m      Claude Max account
+   [1mOrganization:[0m      u@example.com's Organization
+   [1mEmail:[0m             u@example.com
+   [1mCloud sessions:[0m    Not set up · /web-setup to connect GitHub
+   [1m [0m
+   [1mModel:[0m             opus (claude-opus-5-5)
+   [1mMCP servers:[0m       [38;5;114m6 connected[39m, [38;5;246m1 disabled[39m [38;5;246m· /mcp[39m
+   [1mSetting sources:[0m   User settings
+   [1mAuto mode server:[0m  Enabled
+
+   [38;5;246mEsc to cancel[39m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,40 @@
+  "description": "Faithful to the terminal's Enter: the pick becomes the default for new sessions (writes your
+  settings). The chat's confirm would say so."}, {"label": "Offer both", "description": "Each model choice shows two
+  actions in the chat: \"This session\" and \"Make default\" (the second needs a confirm, and admin on the phone)."}],
+  "multiSelect": false}, {"question": "Claude's MCP prompts (e.g. /mcp__kicad__routing_strategy) are known only inside
+  the running Claude process: no file lists them, and the one listing API (a claude -p initialize sidecar) ran an
+  UNTRUSTED repo's SessionStart hook in my test (ADR 0001). How should the chat's command list treat MCP prompts?",
+  "header": "MCP prompts", "options": [{"label": "Leave them out (Recommended)", "description": "The menu lists
+  built-ins, your commands and skills, project commands/skills and plugin commands; MCP prompts stay a terminal feature
+  for now, and the proposal records why."}, {"label": "Allow by server name", "description": "Accept a typed
+  /mcp__<server>__<prompt> when <server> is an MCP server configured for Claude (read from ~/.claude.json and the
+  plugins), without a description and unvalidated beyond that."}], "multiSelect": false}]}
+  ⎿  1 skill available
+
+⏺ User answered Claude's questions:
+  ⎿  · Measured on Claude 2.1.318 and Codex 0.160.1: in both /model pickers, Enter SAVES the pick as your default for
+     new sessions (~/.claude/settings.json, ~/.codex/config.toml); only the picker's `s` key is "this session only".
+     Claude's `/model <name>` with an argument also saves the default. What should choosing a model from the chat do? →
+     Save as default
+     · Claude's MCP prompts (e.g. /mcp__kicad__routing_strategy) are known only inside the running Claude process: no
+     file lists them, and the one listing API (a `claude -p` initialize sidecar) ran an UNTRUSTED repo's SessionStart
+     hook in my test (ADR 0001). How should the chat's command list treat MCP prompts? → leave them out for now
+
+⏺ You answered both questions:
+
+  - /model: Save as default, which is not the recommended option. Picking a model from the chat will work like pressing
+    Enter in the terminal: it becomes the default for new sessions and gets written to ~/.claude/settings.json or
+    ~/.codex/config.toml. The chat's confirmation should say that it saves a default.
+  - MCP prompts: Leave them out for now. The chat's command list will show built-ins, your own and project commands and
+    skills, and plugin commands. MCP prompts stay terminal-only, and the proposal will record why: the only way to list
+    them ran an untrusted repo's SessionStart hook (ADR 0001).
+
+✻ Cooked for 16s · done 1:08 PM
+
+❯ /model
+  ⎿  Set model to Opus 5.5 for this session only
+                                                                                                     ◉ xhigh · /effort
+───────────────────────────────────────────────────────────────────────────────────────────────────────────── scA-main ─
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← 1 agent

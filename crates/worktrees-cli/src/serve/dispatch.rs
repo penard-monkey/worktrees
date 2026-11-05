@@ -1,4 +1,4 @@
-//! The 195 commands, each with its exposure, capability and objects, in ONE
+//! The 197 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -1125,6 +1125,18 @@ commands! { cx, a;
     agent_tool_call: Engine [read, place(repo, slug)] => agents::agent_tool_call(
         &cx.ctx, a.get("repo")?, a.get("slug")?, a.get("call_id")?,
     ),
+    // Slash commands (docs/proposals/chat-slash-commands.md): the session's
+    // list, read from tables and files, never the pane; and one command run,
+    // `instruct` like a line — drive-class, step-up, the DRIVE budget — with
+    // `admin` required in the body for the sensitive tier, as
+    // `agent_answer_text` requires `answer`. Its own row, never an argument
+    // on `agent_send`, whose rule refuses a leading `/` for MCP `send` too.
+    agent_commands: Engine [read, place(repo, slug), opt(session_of(session, repo, slug))] => agents::agent_commands(
+        &cx.ctx, a.get("repo")?, a.get("slug")?, a.get("session")?,
+    ),
+    agent_command: Engine [instruct, place(repo, slug), session_of(session, repo, slug)] => agents::agent_command(
+        &cx.ctx, a.get("repo")?, a.get("slug")?, a.get("session")?, a.get("name")?, a.get("args")?,
+    ),
 
     // ── backend preferences, the Data pane, local usage metrics (prefs) ──
     // Host policy (`worktrees_api::hostpolicy`): `admin`, not console-only, as it widens no agent (decision 6).
@@ -1258,7 +1270,7 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 195 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 197 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six, the slots pair and
     /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
@@ -1269,13 +1281,14 @@ mod tests {
     /// turn (`agent_interrupt`), `project_sessions`, the one that keeps
     /// a file for the agent (`agent_attach`), and sync's five hub and batch
     /// rows, plus `update_harness` and the agent restart's two
-    /// (`harness_sessions`, `restart_harness_sessions`); the check scripts
+    /// (`harness_sessions`, `restart_harness_sessions`), and the slash
+    /// commands' two (`agent_commands`, `agent_command`); the check scripts
     /// hold the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 195, "the table has 195 commands");
+        assert_eq!(TABLE.len(), 197, "the table has 197 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1663,7 +1676,9 @@ mod tests {
     /// `sync_hub_choose`, `sync_hub_forget` (`admin`) and the batch pair
     /// `sync_batch_preview`/`sync_batch_apply` (console); `update_harness`
     /// (`admin`) and the agent restart's `harness_sessions` (`read`) and
-    /// `restart_harness_sessions` (`admin`). A row that moves group
+    /// `restart_harness_sessions` (`admin`); and the slash commands'
+    /// `agent_commands` (`read`) and `agent_command` (`instruct`, `admin` in
+    /// its body for the sensitive tier). A row that moves group
     /// fails here until the count (and the proposal's table) move with it.
     #[test]
     fn every_row_has_one_base_group_and_the_counts_are_section_3_4s() {
@@ -1680,7 +1695,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 62), ("write", 23), ("admin", 40), ("console", 41), ("stream", 10), ("instruct", 7), ("answer", 2),
+            ("read", 63), ("write", 23), ("admin", 40), ("console", 41), ("stream", 10), ("instruct", 8), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 3),
         ]
         .into();

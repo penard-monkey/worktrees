@@ -86,6 +86,25 @@ pub enum HostOnly {
     /// `answer` (Phase 2 §9.2) — `agent_answer_text`, when the choice has a
     /// [`Typing`]; kimi's have none yet.
     Text,
+    /// Choosing it here would SAVE it as the default for new sessions: a
+    /// Codex model with one effort level applies at once from the model
+    /// list (`docs/proposals/chat-slash-commands.md` §1.3). The owner's
+    /// rule: defaults are set in the terminal. Refused for every caller.
+    Saves,
+    /// It spends something of the account's: Codex's `Redeem reset`.
+    /// Refused for every caller.
+    Spends,
+    /// It opens or makes something this reader does not follow: Codex's
+    /// `New worktree` (a Codex-managed checkout outside the place), its
+    /// effort list's `More reasoning…`. Refused for every caller.
+    Elsewhere,
+}
+
+impl HostOnly {
+    /// Only the terminal makes it, the console included.
+    pub fn terminal_only(self) -> bool {
+        matches!(self, HostOnly::Saves | HostOnly::Spends | HostOnly::Elsewhere)
+    }
 }
 
 /// How a choice takes free text (`agent_answer_text`).
@@ -113,6 +132,19 @@ pub enum Picker {
     /// lane's are all its session name) and Claude's row under it, `<age> ·
     /// <branch> · <size>`.
     Resume,
+    /// A model list a `/model` opened: Claude's "Select model" (answered
+    /// with `s`, this session only — never Enter, which saves the default)
+    /// and Codex's first step (Enter opens its effort list).
+    Model,
+    /// Codex's effort list, the second step of `/model`: answered with `s`,
+    /// this session only.
+    Effort,
+    /// A full-screen dialog a command opened (Claude's Settings dialog for
+    /// `/status`, `/usage`, `/config`, `/stats`, and `/help`): its rows to
+    /// read and ONE choice, Close, which is Escape.
+    View,
+    /// Another list a command opened (Codex's `/new`, `/usage`): Enter.
+    Menu,
 }
 
 /// One of a prompt's own choices.
@@ -350,6 +382,10 @@ pub fn claude(screen: &str) -> Option<Modal> {
     if name_tag(&rows[last], width) {
         last = last_nonblank(&rows, last)?;
     }
+    // A sheet a slash command opened: the model picker, a dialog.
+    if let Some(m) = claude_sheet(&rows, last) {
+        return Some(m);
+    }
     // First: in a wide pane the picker's footer wraps onto a row of its own,
     // `Esc to cancel`, which read below as a permission of its first two rows.
     if let Some(list) = resume_list(&rows, last, width) {
@@ -462,6 +498,313 @@ fn drawn_tab_bar(row: &str) -> bool {
     let tabs: Vec<&str> = inner.split("  ").collect();
     let Some((last, boxes)) = tabs.split_last() else { return false };
     *last == "✔ Submit" && !boxes.is_empty() && boxes.iter().all(|t| t.strip_prefix(['☐', '☒']).is_some_and(|h| h.starts_with(' ') && !h.trim().is_empty()))
+}
+
+// ── sheets and lists a slash command opens (2.1.318, codex 0.160.1) ─────────
+
+/// Claude's model picker: its head, and its key hints — whose `s` is the one
+/// key that picks for this session only (Enter saves the default).
+const CLAUDE_MODEL_HEAD: &str = "Select model";
+const CLAUDE_MODEL_FOOT: &str = "Enter to set as default · s to use this session only · Esc to cancel";
+/// Claude's dialogs' tab rows, word by word (`/status` and `/help`).
+const CLAUDE_VIEWS: &[&[&str]] = &[&["Settings", "Status", "Config", "Usage", "Stats"], &["Help", "General", "Commands", "Custom", "commands"]];
+const CLAUDE_VIEW_FOOT: &str = "Esc to cancel";
+
+/// A sheet's top edge: a column-0 row of `▔` (it may carry the effort
+/// badge, `▔▔ ◉ xhigh · /effort ▔`).
+fn sheet_edge(row: &str) -> bool {
+    row.starts_with('▔') && row.chars().filter(|&c| c == '▔').count() >= 20
+}
+
+/// A sheet a slash command opened in Claude (fixtures `2.1.318/slash/`),
+/// under its `▔` edge: the model picker, by its head and its key hints, or a
+/// dialog, by its tab row right under the edge and its foot (`Esc to cancel`,
+/// or a scrolled tab's `↓`). Nothing else is read here.
+fn claude_sheet(rows: &[String], last: usize) -> Option<Modal> {
+    let top = (0..last).rev().find(|&i| sheet_edge(&rows[i]))?;
+    let head = (top + 1..=last).find(|&i| !rows[i].trim().is_empty())?;
+    let h = rows[head].trim();
+    // The hints may wrap in a narrow pane: up to two rows, no blank between.
+    let foot = if last > head && !rows[last - 1].trim().is_empty() && rows[last - 1].trim().starts_with("Enter to set") { last - 1 } else { last };
+    let hints = rows[foot..=last].iter().map(|r| r.trim()).collect::<Vec<_>>().join(" ");
+    if h == CLAUDE_MODEL_HEAD && hints == CLAUDE_MODEL_FOOT {
+        return claude_models(rows, head, foot, last);
+    }
+    let words: Vec<&str> = h.split_whitespace().collect();
+    // Its foot: `Esc to cancel`, or — a tab whose rows run past the pane
+    // (`/usage`) — the `↓` at the end of its last row.
+    let foot_seen = rows[last].trim() == CLAUDE_VIEW_FOOT || rows[last].trim_end().ends_with('↓');
+    if CLAUDE_VIEWS.contains(&words.as_slice()) && foot_seen && last > head {
+        let close = Choice { n: 1, label: "Close".into(), more: Vec::new(), highlighted: true, host_only: None, checked: None, text: None, preview: None, preview_hidden: None };
+        let mut m = modal(provider::CLAUDE.id, Kind::Question, rows, head, last, last, vec![close]);
+        m.body = vec![rows[head].trim().to_string()];
+        m.picker = Some(Picker::View);
+        return Some(m);
+    }
+    None
+}
+
+/// A row of Claude's model list: `   ❯ 2.  Opus 5.5 ✔   For complex work…`
+/// — its mark in column 3 (`❯` the highlight, `↓`/`↑` more below/above the
+/// window), its number, its name and, after two spaces, its description.
+fn model_row(row: &str) -> Option<(char, u32, &str, &str)> {
+    let rest = row.strip_prefix("   ")?;
+    let mut cs = rest.chars();
+    let mark = cs.next()?;
+    if !matches!(mark, ' ' | '❯' | '↓' | '↑') {
+        return None;
+    }
+    let rest = cs.as_str().strip_prefix(' ')?;
+    let (n, rest) = rest.split_once('.')?;
+    let n: u32 = n.parse().ok()?;
+    let rest = rest.trim_start();
+    let (name, desc) = rest.split_once("  ").map_or((rest, ""), |(a, b)| (a, b.trim()));
+    (!name.is_empty()).then_some((mark, n, name.trim(), desc))
+}
+
+/// Claude's "Select model" (`/model`): the models on screen are its choices
+/// (one highlighted, `✔` on the one in effect), `… +3 models` below the
+/// window counted as `hidden`.
+fn claude_models(rows: &[String], head: usize, foot: usize, last: usize) -> Option<Modal> {
+    let mut choices = Vec::new();
+    let mut hidden = None;
+    for r in &rows[head + 1..foot] {
+        if let Some((mark, n, name, desc)) = model_row(r) {
+            let more = if desc.is_empty() { Vec::new() } else { vec![desc.to_string()] };
+            choices.push(Choice { n, label: name.to_string(), more, highlighted: mark == '❯', host_only: None, checked: None, text: None, preview: None, preview_hidden: None });
+        } else if let Some(k) = r.trim().strip_prefix("… +").and_then(|t| t.split_whitespace().next()).and_then(|k| k.parse::<u32>().ok()) {
+            hidden = Some(k);
+        }
+    }
+    if choices.iter().filter(|c| c.highlighted).count() != 1 {
+        return None;
+    }
+    let mut m = modal(provider::CLAUDE.id, Kind::Question, rows, head, last, foot, choices);
+    m.body = model_body(&m.body);
+    m.picker = Some(Picker::Model);
+    m.hidden = hidden;
+    Some(m)
+}
+
+/// Claude's effort levels, each with the glyph its model list draws for it
+/// (2.1.318: `low`…`max`, `xhigh` spelled `xHigh`).
+const CLAUDE_EFFORTS: [(char, &str); 5] = [('○', "Low"), ('◐', "Medium"), ('●', "High"), ('◉', "xHigh"), ('◈', "Max")];
+/// The row Claude draws under a `Max` effort row (`⚠ ` before it in some
+/// themes).
+const CLAUDE_MAX_EFFORT_WARNING: &str = "May use excessive tokens resulting in long response times or overthinking. Use sparingly for the hardest tasks.";
+/// What an effort row is in a model list's [`Modal::body`].
+const EFFORT_SLOT: &str = "<effort>";
+
+/// The effort row under Claude's model list — the HIGHLIGHTED model's
+/// effort, so it changes as the highlight moves (fixtures
+/// `2.1.318/model-effort/`): `<glyph> <Level> effort[ (default)][ ←/→ to
+/// adjust][ · Ultracode on (/effort)]`, or `○ Effort not supported[ for
+/// <model>]`. Its level, `""` for the latter; `None` for any other row.
+fn claude_effort_row(row: &str) -> Option<&str> {
+    let t = row.trim();
+    let mut cs = t.chars();
+    let glyph = cs.next()?;
+    let rest = cs.as_str().strip_prefix(' ')?;
+    if glyph == '○' && (rest == "Effort not supported" || rest.strip_prefix("Effort not supported for ").is_some_and(|m| !m.trim().is_empty())) {
+        return Some("");
+    }
+    let rest = rest.strip_suffix(" · Ultracode on (/effort)").unwrap_or(rest);
+    let rest = rest.strip_suffix(" ←/→ to adjust").unwrap_or(rest);
+    let rest = rest.strip_suffix(" (default)").unwrap_or(rest);
+    let level = rest.strip_suffix(" effort")?;
+    CLAUDE_EFFORTS.contains(&(glyph, level)).then_some(level)
+}
+
+/// A model list's body with what follows its highlight compared by shape
+/// alone, as a permission's footer is: a row's `↓`/`↑`, which the `❯`
+/// replaces on the row it lands on, and the effort row, with the warning a
+/// `Max` row carries under it (wrapped or not) and the blank rows below.
+/// Every other row — the head, the `/fast` row, the hints — stays as
+/// drawn, so anything else that changes is another prompt.
+fn model_body(body: &[String]) -> Vec<String> {
+    let mut out = Vec::with_capacity(body.len());
+    let mut i = 0;
+    while i < body.len() {
+        let r = &body[i];
+        i += 1;
+        if let Some((mark @ ('↓' | '↑'), ..)) = model_row(r) {
+            out.push(r.replacen(mark, " ", 1));
+        } else if let Some(level) = claude_effort_row(r) {
+            out.push(format!("{}{EFFORT_SLOT}", &r[..r.len() - r.trim_start().len()]));
+            let end = (i..body.len()).find(|&j| body[j].trim().is_empty()).unwrap_or(body.len());
+            let under = body[i..end].iter().map(|r| r.trim()).collect::<Vec<_>>().join(" ");
+            if level == "Max" && end > i && under.strip_prefix("⚠ ").unwrap_or(&under) == CLAUDE_MAX_EFFORT_WARNING {
+                i = end;
+            }
+            // And the blank rows after it: the box keeps the height a warning
+            // gave it once the effort is lowered again (`medium-toggled`).
+            while body.get(i).is_some_and(|r| r.trim().is_empty()) {
+                i += 1;
+            }
+        } else {
+            out.push(r.clone());
+        }
+    }
+    out
+}
+
+/// The lists a Codex slash command opens (fixtures `codex-inline/0.160.1/
+/// slash/`): its head (the first of the rows above the list), its key hints
+/// (the last row), and which [`Picker`] it is. Only these are read.
+const CODEX_PICKERS: &[(&str, &str, Picker)] = &[
+    ("Select Model and Effort", "enter select · esc back", Picker::Model),
+    ("Select Reasoning Level for ", "enter default · s session · esc back", Picker::Effort),
+    ("Where should the new conversation run?", "enter select · esc back", Picker::Menu),
+    ("Usage", "enter open · esc back", Picker::Menu),
+];
+/// Codex's effort list with its highlight on `More reasoning…`, which opens
+/// another list: its hints follow the highlight there (fixture
+/// `effort-picker-on-more`), so this pair is that list only while that row
+/// is lit. A row the highlight moves to shows the effort list's own hints
+/// again, and `s` is pressed only on a capture that does.
+const CODEX_EFFORT_ON_MORE: (&str, &str) = ("Select Reasoning Level for ", "enter select · esc back");
+
+/// A Codex list row: `› 4. GPT-6-Sol (current)    Previous generation…`.
+fn codex_list_row(row: &str) -> Option<(bool, u32, &str, &str)> {
+    let (hl, rest) = match row.strip_prefix("› ") {
+        Some(r) => (true, r),
+        None => (false, row.strip_prefix("  ")?),
+    };
+    let (n, rest) = rest.split_once(". ")?;
+    let n: u32 = n.parse().ok()?;
+    let (label, desc) = rest.split_once("  ").map_or((rest, ""), |(a, b)| (a, b.trim()));
+    (!label.trim().is_empty() && !label.starts_with(' ')).then_some((hl, n, label.trim(), desc))
+}
+
+fn codex_picker(rows: &[String]) -> Option<Modal> {
+    let last = last_nonblank(rows, rows.len())?;
+    let hints = rows[last].trim();
+    // The list: the numbered rows right above the hints, blanks between.
+    let end = last_nonblank(rows, last)? + 1;
+    let first = (0..end).rev().take_while(|&i| codex_list_row(&rows[i]).is_some()).last()?;
+    let lead = last_nonblank(rows, first)?;
+    let start = (0..=lead).rev().take_while(|&i| !rows[i].trim().is_empty()).last()?;
+    let head = rows[start].trim();
+    let known = CODEX_PICKERS.iter().find(|(h, f, _)| (head == *h || (h.ends_with(' ') && head.starts_with(h))) && hints == *f).map(|&(_, _, p)| (p, false));
+    let on_more = || (head.starts_with(CODEX_EFFORT_ON_MORE.0) && hints == CODEX_EFFORT_ON_MORE.1).then_some((Picker::Effort, true));
+    let (picker, on_more) = known.or_else(on_more)?;
+    let mut choices = Vec::new();
+    for r in &rows[first..end] {
+        let (hl, n, label, desc) = codex_list_row(r)?;
+        let host_only = match label {
+            "New worktree" => Some(HostOnly::Elsewhere),
+            "Redeem reset" => Some(HostOnly::Spends),
+            l if picker == Picker::Effort && l.ends_with('…') => Some(HostOnly::Elsewhere),
+            _ => None,
+        };
+        let more = if desc.is_empty() { Vec::new() } else { vec![desc.to_string()] };
+        choices.push(Choice { n, label: label.to_string(), more, highlighted: hl, host_only, checked: None, text: None, preview: None, preview_hidden: None });
+    }
+    if choices.iter().filter(|c| c.highlighted).count() != 1 || (on_more && !choices.iter().any(|c| c.highlighted && c.label.ends_with('…'))) {
+        return None;
+    }
+    // After `modal`, which classifies every choice afresh.
+    let terminal: Vec<Option<HostOnly>> = choices.iter().map(|c| c.host_only).collect();
+    let mut m = modal(provider::CODEX.id, Kind::Question, rows, start, last, last, choices);
+    for (c, h) in m.choices.iter_mut().zip(terminal) {
+        c.host_only = c.host_only.or(h);
+    }
+    m.picker = Some(picker);
+    Some(m)
+}
+
+/// Whether a command line typed into a composer may be submitted:
+/// `agent_command`'s proof before Enter.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CommandReady {
+    /// The composer holds exactly the line, and no menu over it highlights
+    /// another name: Enter runs THIS command.
+    Yes,
+    /// Not there yet (or no composer): look again.
+    NotYet,
+    /// The harness's `/` menu highlights ANOTHER command (`/nested` pasted
+    /// and `/sub:nested` lit): Enter would run that one.
+    Other(String),
+}
+
+/// [`CommandReady`] for `line` (`/<name>[ <args>]`) on `screen` — Claude's
+/// styled (`capture-pane -e`), Codex's plain. Claude's `/` menu is the block
+/// of rows right above its input box, its highlight `  ❯ /<name>`; Codex's
+/// popup sits above its composer, its highlight `› /<name>` (fixtures
+/// `2.1.318/slash/menu-*`, `codex-inline/0.160.1/slash/menu-compact`).
+pub fn command_ready(harness: &str, screen: &str, line: &str, name: &str) -> CommandReady {
+    let same = |a: &str, b: &str| a.split_whitespace().eq(b.split_whitespace());
+    let rows = rows(screen);
+    let lit = |row: &str, mark: &str| row.strip_prefix(mark).and_then(|r| r.split_whitespace().next()).map(str::to_string);
+    let judge = |picked: Option<String>| match picked {
+        Some(p) if p != format!("/{name}") => CommandReady::Other(p),
+        _ => CommandReady::Yes,
+    };
+    match harness {
+        h if h == provider::CLAUDE.id => {
+            match agent::draft_from_screen(screen) {
+                Some(d) if same(&d, line) => {}
+                _ => return CommandReady::NotYet,
+            }
+            let Some((top, _)) = agent::prompt_box_edges(screen) else { return CommandReady::NotYet };
+            let menu = rows[..top.min(rows.len())].iter().rev().take_while(|r| !r.trim().is_empty());
+            judge(menu.filter_map(|r| lit(r, "  ❯ /").map(|n| format!("/{n}"))).next())
+        }
+        h if h == provider::CODEX.id => {
+            let plain = rows.join("\n");
+            match codex::composer_on_screen(&plain) {
+                Some(codex::Composer::Text(t)) if same(&t, line) => {}
+                _ => return CommandReady::NotYet,
+            }
+            let Some(at) = rows.iter().rposition(|l| l.starts_with("› ")) else { return CommandReady::NotYet };
+            let above = rows[..at].iter().rev().skip_while(|r| r.trim().is_empty()).take_while(|r| !r.trim().is_empty());
+            judge(above.filter_map(|r| lit(r, "› /").map(|n| format!("/{n}"))).next())
+        }
+        _ => CommandReady::NotYet,
+    }
+}
+
+/// The most rows of a Codex command's output handed back.
+pub const OUTPUT_MAX: usize = 40;
+
+/// What a Codex command printed (`/status`'s cell, or Codex's own refusal,
+/// "■ '/compact' is disabled while a task is in progress."): the rows under
+/// the LAST echo of `line` in its history, down to its composer, which Codex
+/// writes to no rollout. Data, never instructions; `None` when the echo is
+/// not on screen.
+pub fn codex_output(screen: &str, line: &str) -> Option<Vec<String>> {
+    let rows = rows(screen);
+    let composer = rows.iter().rposition(|l| l.starts_with("› ") || l == "›")?;
+    // Codex echoes the line from column 0, or refuses it in a `■` row that
+    // quotes the command.
+    let quoted = format!("'{}'", line.split_whitespace().next().unwrap_or(line));
+    let echo = rows[..composer]
+        .iter()
+        .rposition(|r| (!r.starts_with(' ') && r.trim() == line.trim()) || (r.trim_start().starts_with('■') && r.contains(&quoted)))?;
+    let take = if rows[echo].trim_start().starts_with('■') { echo } else { echo + 1 };
+    let mut out: Vec<String> = rows[take..composer].to_vec();
+    while out.first().is_some_and(|r| r.trim().is_empty()) {
+        out.remove(0);
+    }
+    while out.last().is_some_and(|r| r.trim().is_empty()) {
+        out.pop();
+    }
+    out.truncate(OUTPUT_MAX);
+    (!out.is_empty()).then_some(out)
+}
+
+/// The key that ANSWERS `m` once its highlight is on the choice: `s` on a
+/// model or effort list that names it in its key hints — this session only,
+/// never the Enter that saves a default — except Codex's first step, whose
+/// Enter only opens its effort list; Escape for a dialog's Close; Enter for
+/// everything else.
+pub fn answer_key(m: &Modal) -> Key {
+    match (m.picker, m.harness) {
+        (Some(Picker::View), _) => Key::Escape,
+        (Some(Picker::Model), h) if h == provider::CLAUDE.id => Key::SessionOnly,
+        (Some(Picker::Effort), _) => Key::SessionOnly,
+        _ => Key::Enter,
+    }
 }
 
 /// One source for the reader's `multi` and the answer path's box refusal.
@@ -785,6 +1128,11 @@ pub fn neighbour(m: &Modal, n: u32) -> Option<u32> {
 /// added: moving the highlight is not another prompt, while a changed
 /// choice, preview or note is.
 pub fn seen(m: &Modal) -> (Vec<String>, String) {
+    // A dialog's content can tick (`/usage`'s "last activity 10m 25s ago");
+    // what it IS — its tab row — is what Close is checked against.
+    if m.picker == Some(Picker::View) {
+        return (m.body.clone(), serde_json::to_string(&m.choices).unwrap_or_default());
+    }
     if m.previews.is_none() {
         return (m.lines.clone(), serde_json::to_string(&m.choices).unwrap_or_default());
     }
@@ -975,6 +1323,9 @@ pub fn asking(harness: &str, screen: &str) -> Option<String> {
 /// the last history row, or the row after that history row.
 pub fn codex(screen: &str) -> Option<Modal> {
     let rows = rows(screen);
+    if let Some(m) = codex_picker(&rows) {
+        return Some(m);
+    }
     if !codex::waiting_on_screen(&rows.join("\n")) {
         return None;
     }
@@ -2189,6 +2540,217 @@ mod tests {
         assert!(!second.multi && !same_form(&first, &second));
         let review = claude(include_str!("../tests/fixtures/claude-screen/2.1.316/form-multiselect/review.txt")).unwrap();
         assert!(!review.multi && review.choices[0].label == "Submit answers");
+    }
+
+    /// What a slash command opens, read as prompts (fixtures
+    /// `2.1.318/slash/`, `codex-inline/0.160.1/slash/`): Claude's model list
+    /// (answered with `s`: this session only), its Settings dialog (one
+    /// choice, Close, which is Escape), Codex's model list (Enter opens its
+    /// effort list), its effort list (`s`), and its `/new` and `/usage`
+    /// lists, whose `New worktree`, `Redeem reset` and `More reasoning…` are
+    /// the terminal's alone. Everything else they leave on screen is no
+    /// prompt.
+    #[test]
+    fn the_lists_and_dialogs_slash_commands_open_are_prompts() {
+        macro_rules! cl {
+            ($f:literal) => {
+                include_str!(concat!("../tests/fixtures/claude-screen/2.1.318/slash/", $f))
+            };
+        }
+        macro_rules! cx {
+            ($f:literal) => {
+                include_str!(concat!("../tests/fixtures/codex-inline/0.160.1/slash/", $f))
+            };
+        }
+        let lit = |m: &Modal| m.choices.iter().find(|c| c.highlighted).map(|c| (c.n, c.label.clone()));
+        let picker = claude(cl!("model-picker.e.txt")).expect("Claude's model list");
+        assert_eq!((picker.kind, picker.picker, picker.hidden), (Kind::Question, Some(Picker::Model), Some(3)));
+        assert_eq!(picker.choices.len(), 10);
+        assert_eq!(lit(&picker), Some((2, "Opus 5.5 ✔".into())));
+        assert_eq!((picker.choices[0].label.as_str(), picker.choices[0].more.as_slice()), ("Default (recommended)", &["Opus 5.5 · Best for everyday, complex tasks".to_string()][..]));
+        assert_eq!(answer_key(&picker), Key::SessionOnly, "never Enter, which saves the default");
+        assert!(picker.lines.last().unwrap().contains("s to use this session only"));
+        let moved = claude(cl!("model-picker-moved.txt")).unwrap();
+        assert_eq!(lit(&moved), Some((3, "Fable 5.1".into())));
+        assert!(same_prompt(&picker, &moved), "the highlight moved, the list did not");
+        assert_eq!(steps(&picker, 4), Some(vec![Key::Down, Key::Down]));
+        for view in [cl!("status-view.e.txt"), cl!("usage-view.e.txt")] {
+            let v = claude(view).expect("a dialog");
+            assert_eq!((v.picker, v.choices.len(), v.choices[0].label.as_str(), v.choices[0].highlighted), (Some(Picker::View), 1, "Close", true));
+            assert_eq!(answer_key(&v), Key::Escape);
+            assert_eq!(seen(&v).0, vec!["Settings  Status   Config   Usage   Stats".to_string()], "a dialog is what it is, not what ticks in it");
+        }
+        assert!(claude(cl!("status-view.e.txt")).unwrap().lines.last().unwrap().contains("Esc to cancel"));
+        assert!(claude(cl!("usage-view.e.txt")).unwrap().lines.last().unwrap().ends_with('↓'), "a tab that scrolls");
+        for none in [cl!("model-session-only.e.txt"), cl!("status-dismissed.e.txt"), cl!("context-inline.e.txt"), cl!("menu-model.e.txt"), cl!("menu-status.e.txt"), cl!("busy-queued-context.e.txt"), cl!("composer-compact-args.e.txt")] {
+            assert!(claude(none).is_none(), "{none}");
+        }
+        let models = codex(cx!("model-picker.txt")).expect("Codex's model list");
+        assert_eq!((models.picker, models.choices.len()), (Some(Picker::Model), 8));
+        assert_eq!(lit(&models), Some((4, "GPT-6-Sol (current)".into())));
+        assert_eq!(models.choices[3].more, vec!["Previous generation workhorse model.".to_string()]);
+        assert_eq!(answer_key(&models), Key::Enter, "Codex's first step: Enter opens the effort list");
+        assert!(same_prompt(&models, &codex(cx!("model-picker-moved.txt")).unwrap()));
+        let effort = codex(cx!("effort-picker.txt")).expect("Codex's effort list");
+        assert_eq!((effort.picker, lit(&effort)), (Some(Picker::Effort), Some((2, "Medium (default) (current)".into()))));
+        assert_eq!(answer_key(&effort), Key::SessionOnly);
+        assert_eq!(effort.choices[4].host_only, Some(HostOnly::Elsewhere), "More reasoning… opens a list this host does not follow");
+        let new = codex(cx!("new-picker.txt")).expect("/new's list");
+        assert_eq!((new.picker, new.choices[1].label.as_str(), new.choices[1].host_only), (Some(Picker::Menu), "New worktree", Some(HostOnly::Elsewhere)));
+        assert_eq!((new.choices[0].host_only, answer_key(&new)), (None, Key::Enter));
+        let usage = codex(cx!("usage-picker.txt")).expect("/usage's list");
+        assert_eq!((usage.choices[1].label.as_str(), usage.choices[1].host_only), ("Redeem reset", Some(HostOnly::Spends)));
+        assert!(usage.lines[0].trim() == "Usage" && usage.lines[1].trim() == "Account usage and resets.");
+        assert!(HostOnly::Spends.terminal_only() && HostOnly::Saves.terminal_only() && !HostOnly::Widens.terminal_only());
+        for none in [cx!("status-inline.txt"), cx!("new-cancelled.txt"), cx!("model-session-only.txt"), cx!("menu-compact.txt"), cx!("menu-slash.txt"), cx!("usage-cancelled.txt")] {
+            assert!(codex(none).is_none(), "{none}");
+        }
+    }
+
+    /// Claude's model list draws the HIGHLIGHTED model's effort under it
+    /// (2.1.318, fixtures `2.1.318/model-effort/`): `◉ xHigh effort` on
+    /// Opus 5.5, `◐ Medium effort (default)` on Sonnet 5.5, `○ Effort not
+    /// supported for Haiku 4.5`, and a `◈ Max` pick's warning row under it;
+    /// and the `❯` landing on row 10 takes the place of its `↓`. Moving the
+    /// highlight is still the same list — the proof before `s` that told the
+    /// owner "the prompt changed" when they picked Sonnet (2026-11-04) — while
+    /// the user still sees the effort as Claude draws it, a scrolled window
+    /// is other rows, and a row in the effort's place that is no effort row
+    /// is another prompt.
+    #[test]
+    fn a_model_lists_effort_row_follows_the_highlight_and_it_is_the_same_list() {
+        macro_rules! fx {
+            ($f:literal) => {
+                include_str!(concat!("../tests/fixtures/claude-screen/2.1.318/model-effort/", $f))
+            };
+        }
+        let lit = |m: &Modal| m.choices.iter().find(|c| c.highlighted).map(|c| c.n);
+        let on = claude(fx!("on-current.e.txt")).expect("the model list");
+        assert_eq!((lit(&on), on.hidden, on.choices.len()), (Some(2), Some(3), 10));
+        // The window as `/model` opens it (rows 1–10), and the same list
+        // scrolled to rows 2–11, where ←/→ were pressed: the user's effort,
+        // which a move keeps, not a model's.
+        let window2 = claude(fx!("window-2.e.txt")).expect("the model list, scrolled");
+        assert_eq!((lit(&window2), window2.hidden, window2.choices[0].n), (Some(3), Some(2), 2));
+        for (from, screen, n, effort) in [
+            (&on, fx!("on-fable.e.txt"), 3, "◉ xHigh effort ←/→ to adjust"),
+            (&on, fx!("on-sonnet.e.txt"), 4, "◐ Medium effort (default) ←/→ to adjust"),
+            (&on, fx!("on-sonnet.txt"), 4, "◐ Medium effort (default) ←/→ to adjust"),
+            (&on, fx!("on-haiku-4-5.e.txt"), 6, "○ Effort not supported for Haiku 4.5"),
+            (&on, fx!("on-row-10.e.txt"), 10, "◉ xHigh effort ←/→ to adjust"),
+            (&window2, fx!("max.e.txt"), 3, "◈ Max effort ←/→ to adjust"),
+            (&window2, fx!("medium-toggled.e.txt"), 3, "◐ Medium effort ←/→ to adjust"),
+        ] {
+            let now = claude(screen).expect("the model list");
+            assert_eq!(lit(&now), Some(n));
+            assert!(now.lines.iter().any(|l| l.trim() == effort), "the user sees the effort as Claude draws it: {effort}");
+            assert!(same_prompt(from, &now), "the highlight on {n}, {effort}: still the same list");
+            assert_eq!(answer_key(&now), Key::SessionOnly);
+        }
+        assert!(claude(fx!("max.e.txt")).unwrap().lines.iter().any(|l| l.trim().starts_with("May use excessive tokens")));
+        for scrolled in [fx!("scrolled-12.e.txt"), fx!("window-2.e.txt")] {
+            assert!(!same_prompt(&on, &claude(scrolled).unwrap()), "a scrolled window shows other rows");
+        }
+        let odd = fx!("on-sonnet.e.txt").replace("Medium effort (default)", "Medium thing (default)");
+        assert!(!same_prompt(&on, &claude(&odd).unwrap()), "no effort row in the effort's place: another prompt");
+        let unwarned = fx!("max.e.txt").replace("Use sparingly", "Use often");
+        assert!(!same_prompt(&window2, &claude(&unwarned).unwrap()), "only Claude's own warning goes with Max");
+        let row = "   ◐ Medium effort ←/→ to adjust\n";
+        assert!(fx!("medium-toggled.txt").contains(row));
+        let warned = fx!("medium-toggled.txt").replace(row, &format!("{row}   {CLAUDE_MAX_EFFORT_WARNING}\n"));
+        assert!(!same_prompt(&window2, &claude(&warned).expect("still a list")), "and only under Max");
+        assert!(same_prompt(&window2, &claude(&warned.replace("◐ Medium", "◈ Max")).expect("a list")), "where it is Claude's");
+        let fast = fx!("on-sonnet.e.txt").replace("to turn on Fast mode", "to turn on Slow mode");
+        assert!(!same_prompt(&on, &claude(&fast).unwrap()), "the /fast row does not follow the highlight: compared whole");
+        for none in [fx!("cancelled.e.txt"), fx!("sonnet-session-only.e.txt"), fx!("switch-confirmed.e.txt")] {
+            assert!(claude(none).is_none(), "Esc's `Kept model as …`, `s`'s `Set model to … for this session only`");
+        }
+        // In a conversation the prompt cache holds, `s` on another model
+        // brings Claude's "Switch model?" — whose Yes is the same row
+        // whether the list was answered with `s` or with the Enter that
+        // saves the default (Claude keeps which in its own state). Not read
+        // here: it is the terminal's.
+        assert!(claude(fx!("switch-confirm.e.txt")).is_none());
+        // The owner's own list (five models, `2. Opus ✔`), as it stood after
+        // the move, and as it read before it: `❯` on Opus, Opus's effort.
+        let after = fx!("owner-sonnet.txt");
+        let before = after
+            .replace("     2. Opus ✔", "   ❯ 2. Opus ✔")
+            .replace("   ❯ 4. Sonnet", "     4. Sonnet")
+            .replace("◐ Medium effort (default) ←/→", "◉ xHigh effort ←/→");
+        let (before, after) = (claude(&before).expect("before"), claude(after).expect("after"));
+        assert_eq!((lit(&before), lit(&after), after.choices.len()), (Some(2), Some(4), 5));
+        assert!(same_prompt(&before, &after), "the owner's Sonnet pick is the same list");
+    }
+
+    /// Codex's effort list depends on the model picked, but it is a prompt of
+    /// its own, read after the model list's Enter: the chat shows THAT
+    /// model's levels (`effort-picker-other`: GPT-6-Astra's, `Low (default)`
+    /// lit and no `(current)`). In both lists only the `›` follows the
+    /// highlight — but for the effort list's hints, which read `enter select
+    /// · esc back` while `More reasoning…` is lit (fixtures
+    /// `codex-inline/0.160.1/slash/`).
+    #[test]
+    fn codex_effort_list_is_the_same_list_wherever_its_highlight_is() {
+        macro_rules! cx {
+            ($f:literal) => {
+                include_str!(concat!("../tests/fixtures/codex-inline/0.160.1/slash/", $f))
+            };
+        }
+        let lit = |m: &Modal| m.choices.iter().find(|c| c.highlighted).map(|c| (c.n, c.label.clone()));
+        let other = codex(cx!("effort-picker-other.txt")).expect("GPT-6-Astra's effort list");
+        assert_eq!((other.picker, lit(&other), other.choices.len()), (Some(Picker::Effort), Some((1, "Low (default)".into())), 5));
+        let on4 = codex(cx!("effort-picker-other-on-4.txt")).unwrap();
+        assert!(same_prompt(&other, &codex(cx!("effort-picker-other-moved.txt")).unwrap()) && same_prompt(&other, &on4));
+        let more = codex(cx!("effort-picker-on-more.txt")).expect("the effort list, More reasoning… lit");
+        assert_eq!((more.picker, lit(&more)), (Some(Picker::Effort), Some((5, "More reasoning…".into()))));
+        assert_eq!(more.choices[4].host_only, Some(HostOnly::Elsewhere), "and still the terminal's");
+        assert!(more.lines.last().unwrap().trim() == "enter select · esc back");
+        assert!(same_prompt(&more, &other), "the same list, its hints aside");
+        assert_eq!(steps(&more, 3), Some(vec![Key::Up, Key::Up]));
+        assert_eq!(answer_key(&on4), Key::SessionOnly);
+        let hints = "enter default · s session · esc back";
+        assert!(cx!("effort-picker-other.txt").contains(hints));
+        let odd = cx!("effort-picker-other.txt").replace(hints, "enter select · esc back");
+        assert!(codex(&odd).is_none(), "those hints on any other row: no list this reader knows");
+    }
+
+    /// Before the Enter that runs a command, the composer must hold exactly
+    /// its line and any `/` menu over it must light exactly its name: a
+    /// pasted `/nested` lights `/sub:nested`, and Enter would run THAT.
+    #[test]
+    fn a_command_is_submitted_only_when_its_own_name_is_lit() {
+        macro_rules! cl {
+            ($f:literal) => {
+                include_str!(concat!("../tests/fixtures/claude-screen/2.1.318/slash/", $f))
+            };
+        }
+        let c = provider::CLAUDE.id;
+        assert_eq!(command_ready(c, cl!("menu-status.e.txt"), "/status", "status"), CommandReady::Yes);
+        assert_eq!(command_ready(c, cl!("menu-model.e.txt"), "/model", "model"), CommandReady::Yes);
+        assert_eq!(command_ready(c, cl!("menu-nested.e.txt"), "/nested", "nested"), CommandReady::Other("/sub:nested".into()));
+        assert_eq!(command_ready(c, cl!("composer-compact-args.e.txt"), "/compact keep only the facts", "compact"), CommandReady::Yes, "no menu after a space");
+        assert_eq!(command_ready(c, cl!("menu-status.e.txt"), "/statusline", "statusline"), CommandReady::NotYet, "the composer holds another line");
+        assert_eq!(command_ready(c, cl!("status-dismissed.e.txt"), "/status", "status"), CommandReady::NotYet, "an empty composer");
+        assert_eq!(command_ready(c, cl!("busy-menu-context.e.txt"), "/context", "context"), CommandReady::Yes, "over a running turn: the menu, not the transcript's `❯ /context`");
+        let x = provider::CODEX.id;
+        let compact = include_str!("../tests/fixtures/codex-inline/0.160.1/slash/menu-compact.txt");
+        assert_eq!(command_ready(x, compact, "/compact", "compact"), CommandReady::Yes);
+        assert_eq!(command_ready(x, compact, "/compact", "comp"), CommandReady::Other("/compact".into()));
+        assert_eq!(command_ready(x, include_str!("../tests/fixtures/codex-inline/0.160.1/slash/new-cancelled.txt"), "/new", "new"), CommandReady::NotYet);
+    }
+
+    /// Codex writes `/status` to no rollout: its cell is read once, from
+    /// under the echoed line down to the composer.
+    #[test]
+    fn codex_output_is_the_cell_under_its_echo() {
+        let out = codex_output(include_str!("../tests/fixtures/codex-inline/0.160.1/slash/status-inline.txt"), "/status").expect("the cell");
+        assert!(out[0].contains("OpenAI Codex (v0.160.1)"), "{out:?}");
+        assert!(out.iter().any(|l| l.contains("Model:") && l.contains("GPT-6-Sol")));
+        assert!(!out.iter().any(|l| l.starts_with("› ")), "not the composer");
+        let refused = "• earlier\n\n■ '/compact' is disabled while a task is in progress.\n\n› Ask Codex to do anything\n\n  GPT-6-Sol medium · /tmp/x\n";
+        assert_eq!(codex_output(refused, "/compact"), Some(vec!["■ '/compact' is disabled while a task is in progress.".to_string()]));
+        assert_eq!(codex_output(refused, "/status"), None);
     }
 
     /// Claude 2.1.318's two-question form in an 80×24 pane is exactly as

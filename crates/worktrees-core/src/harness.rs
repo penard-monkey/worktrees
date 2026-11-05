@@ -1088,7 +1088,7 @@ pub(crate) const SEND_ENTER_TRIES: usize = 3;
 /// nonempty composer and the modal guard. Failed captures never authorize a
 /// keypress or count as confirmation. Clock and I/O seams keep timing tests
 /// deterministic; production uses exactly this loop.
-pub(crate) fn submit_codex(
+pub fn submit_codex(
     mut capture: impl FnMut() -> Option<String>,
     mut enter: impl FnMut() -> Result<(), String>,
     now: impl Fn() -> u64,

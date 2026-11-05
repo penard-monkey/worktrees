@@ -69,8 +69,38 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   rule, `instruct` (AND `answer`, checked in the body: an amended "Yes"
   approves, so `instruct` alone must not reach it), length and hash, stamp —
   and only into a field the
-  prompt itself opened and shows empty, each step proved before Enter. Do not
-  grow a third path that types into Claude. `agent_interrupt`
+  prompt itself opened and shows empty, each step proved before Enter. **The
+  third, and the last, is `agent_command`** (owner's ask of 2026-11-04,
+  `docs/proposals/chat-slash-commands.md`): a slash command from the chat,
+  its own row because `typed_line_ok`'s leading-`/` refusal is the rule MCP
+  `send` shares, and agents must never drive each other's commands — do not
+  loosen that rule, and do not give MCP `send` commands. It types only
+  `/<name>[ <args>]` for a name `agent_commands` lists for THAT session
+  (`slash::resolve`; `!` and `#` refused as shell and memory), the arguments
+  under `typed_line_ok`'s rules plus no `@` (Claude's file menu would take
+  Enter); the same paste, lock, empty-composer and no-prompt checks as
+  `agent_send`; and before Enter a fresh capture must show exactly the line
+  and no `/` menu lighting ANOTHER name (`prompt::command_ready`: a pasted
+  `/nested` lights `/sub:nested`). It is `instruct`, with `admin` checked in
+  the body for the sensitive tier — or for an argument naming a sensitive
+  command (`/loop 5m /login`); the audit gets the name and the argument's
+  length and hash. **`/model` is a trap in BOTH harnesses**: Claude 2.1.318's
+  picker and Codex 0.160.1's effort list SAVE the pick as the default on
+  Enter (`~/.claude/settings.json`, `~/.codex/config.toml`), and so does
+  Claude's `/model <name>`; only their `s` is "this session only". The owner
+  decided the chat is session-only: `prompt::answer_key` presses `s` there
+  (`Key::SessionOnly`), `/model` takes no argument from the chat, and a Codex
+  model with fewer than two effort levels (`models_cache.json`), which its
+  first step would apply and save, is `host_only: saves` — refused to the
+  console too, like `spends` and `elsewhere`. **Claude's model list draws the
+  HIGHLIGHTED model's effort** under it (`◉ xHigh effort` on Opus, `◐ Medium
+  effort (default)` on Sonnet 5.5), so the proof before `s` compares that
+  row by shape (`prompt::model_body`); an e2e that picks the model in effect
+  never moves it, which is how the owner's Sonnet pick reached "the prompt
+  changed" (2026-11-04, `2.1.318/model-effort/`). In a warm conversation `s`
+  on another model brings Claude's "Switch model?", whose Yes reads the same
+  after the saving Enter: it is the terminal's. Do not grow a fourth path that
+  types into Claude. `agent_interrupt`
   (`agents::agent_interrupt`, the chat's Stop and its Esc, `stopTurn` in
   `chat.ts`) is not one: it types no text, only ONE key,
   Escape, through `tmux::press` as `agent_answer`'s keys go, under the same
@@ -116,7 +146,12 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   on the footer's head and compared without it (`prompt::same_prompt`). A
   question draws a full-width rule INSIDE its list, so a modal's top is the
   rule whose next row is not a choice — and the option just above that rule
-  is its free-text row, whose words a typed answer REPLACES. The
+  is its free-text row, whose words a typed answer REPLACES. A form exactly
+  as tall as its pane (two questions in 80×24, 2.1.318) scrolls that top
+  rule OFF the screen; then row 0 is the tab bar, and only Claude's own tab
+  bar from column 0, under a question's footer, stands in for the rule
+  (`2.1.318/form-bar/`; the owner's chat said "answer it in the terminal"
+  until then). The
   folder-trust prompt comes before Claude writes any probe file, so "is it
   waiting" there is the pane's alone; the dot poll finds that pane in its own
   per-tick `list-panes -a`, by its cwd, because a registry only a snapshot
@@ -139,7 +174,12 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   dropping meta; a task has `origin.kind: task-notification`. A compact
   summary is `isCompactSummary: true` and embeds a `<system-reminder>` whose
   body must never reach a client. Whole wrappers classify the other entries;
-  a person's prose mentioning one stays a person message. A tall prompt's
+  a person's prose mentioning one stays a person message. **2.1.318 moved a
+  local command's name and output to `type: "system", subtype:
+  "local_command"`** (ANSI in the output) and puts `<command-message>` BEFORE
+  `<command-name>` on a prompt command's `human` entry; `turns::claude` read
+  neither until `feat/chat-slash-commands` (`claude-2.1.318-commands.jsonl`).
+  A dismissed dialog (`/status`, `/help`) writes nothing. A tall prompt's
   detail comes from a THIRD
   `--plugin-dir` (`claude-prompt`, `guidance::materialize_prompt_in`) on
   every Claude launch, whatever guidance and planning say, set in
@@ -209,7 +249,7 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   do not align them). hyper parses the HTTP and tungstenite sees only frames,
   also ON PURPOSE: tungstenite's `accept_hdr_async` WRITES an HTTP error
   response when it refuses, while a hyper service that returns `Err` closes
-  with 0 bytes. The 194 commands sit in ONE macro table
+  with 0 bytes. The 197 commands sit in ONE macro table
   (`serve/dispatch.rs`) with an `Exposure` each; the six `ClientLocal` rows
   (clipboard, editor, terminal, zoom, the app bundle) are refused with
   `err: "client-local"`, never run on the host — the docs viewer is an
@@ -575,6 +615,17 @@ while it was added per-repo and became a red ✘ in `/mcp` for every session
 started in a home or scratch directory the moment the app began installing it
 globally. It now handshakes, advertises zero tools and says why; `test/mcp.bats`
 pins that, and the bats suite caught the change by asserting the old contract.
+
+**Never start a Claude to ask it something — it runs the repository's
+hooks.** Claude's SDK `initialize` (`claude -p --input-format stream-json`)
+lists a session's commands in 0.26 s without a model call, and in a scratch
+repository nobody had trusted it RAN that repository's `SessionStart` hook
+(measured 2026-11-04): worktrees would be launching a cloned repo's code
+(ADR 0001). The slash-command list is read from files and tables instead
+(`worktrees_core::slash`), which is also why MCP prompts are not listed. And
+a scratch Codex for an e2e is found as a lane only under the place's
+CANONICAL session name (`<prefix>-(main)`): Claude is adopted by its pane's
+cwd, Codex is not (`workspace::agent_session_names`).
 
 **A client's string is never a flag (R3) — and `--` alone would have made it
 worse.** Every core `cmd_*` parser sorts flags from positionals by the leading
