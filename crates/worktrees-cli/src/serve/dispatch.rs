@@ -1,4 +1,4 @@
-//! The 207 commands, each with its exposure, capability and objects, in ONE
+//! The 211 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -1300,7 +1300,7 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 207 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 211 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six, the slots pair and
     /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
@@ -1311,14 +1311,16 @@ mod tests {
     /// turn (`agent_interrupt`), `project_sessions`, the one that keeps
     /// a file for the agent (`agent_attach`), and sync's five hub and batch
     /// rows, plus `update_harness` and the agent restart's two
-    /// (`harness_sessions`, `restart_harness_sessions`), and the slash
-    /// commands' two (`agent_commands`, `agent_command`); the check scripts
+    /// (`harness_sessions`, `restart_harness_sessions`), the slash commands'
+    /// two (`agent_commands`, `agent_command`), notifications' nine (the
+    /// `push_*` rows), and Settings → Agent policy's four (`limits_settings`,
+    /// `set_limits`, `policy_preset_status`, `apply_policy_preset`); the check scripts
     /// hold the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 207, "the table has 207 commands");
+        assert_eq!(TABLE.len(), 211, "the table has 211 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
