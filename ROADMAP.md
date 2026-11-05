@@ -5,6 +5,34 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (the repo's `/close-out` skill, `.claude/skills/close-out`;
 this repo's settings in `.claude/close-out.md`).
 
+- **Remove this lane's two leftover volumes once Podman is back.** The engine behind
+  `docker` broke when the disk filled, so they could not be removed. `(main)` runs
+  this once the machine is repaired:
+  `docker volume rm wt-push-target wt-push-registry`
+  _From: 2026-11-04, push-notifications-host_
+- **First real APNs delivery, waiting on Bret's key.** Nothing in #612 has reached
+  Apple, and no real `.p8` has been parsed (a `ring`-generated PKCS#8 stands in, so
+  `key.rs`'s parser is unproved on Apple's file). Needs Bret's `.p8` imported with
+  `worktrees serve push key-import`, and Push enabled on
+  `com.brethash.worktrees.ios`. It is the first check of the headers, the JWT and
+  the trust chain against Apple itself.
+  _From: 2026-11-04, push-notifications-host_
+- **Sound on a push (awaiting David).** Pushes are silent, as the design's `aps` has
+  no `sound`, even Time Sensitive ones, and the phone asks for sound permission
+  anyway. `(main)` is putting it to David. It is one constant: `payload::SOUND`.
+  _From: 2026-11-04, push-notifications-host_
+- **This Mac's connections to its own LAN address never reach `accept`.** A bare
+  Python socket shows it: `connect` succeeds and `accept` times out, while loopback
+  works. So `serve::remote::tests` and `remote_bin` hang locally with no output,
+  which holds a gate slot, while CI passes them. Cause not investigated. It may also
+  explain the local `serve::remote` hang recorded from chat-full-command below. The
+  dial in those tests has no timeout, so a bound would turn the hang into a failure.
+  _From: 2026-11-04, push-notifications-host_
+- **`push_test`'s words in the remote-off race.** A `push_test` that meets the kill
+  switch answers `unavailable: the host could not reach Apple. Try again later.`
+  That is slightly wrong: Apple was not the reason. It can only arise in that race,
+  since a phone with remote off has no connection.
+  _From: 2026-11-04, push-notifications-host_
 - **A `permission` step cannot be opened (awaiting David's decision).** A command
   someone approved at a prompt still shows only its first line in the chat, on
   desktop and phone: `Step::Tool` turns into `Step::Permission` and loses its
