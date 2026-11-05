@@ -1615,6 +1615,15 @@ impl Audit {
         self.record(Record::new("lifecycle", Value::Object(d)));
     }
 
+    /// What the push sender did since its last such record: counts per device,
+    /// never a name, a token or a key (`serve::push`). Written at most every
+    /// ten minutes and only when something happened, so 16 devices cost about
+    /// 2 KB per ten minutes, 290 KB a day against the 20 MiB the rotated files
+    /// hold. Serve's own, so never charged to a device's budget.
+    pub fn push_sends(&self, devices: Value) {
+        self.record(Record::new("push", json!({ "event": "sends", "devices": devices })));
+    }
+
     /// The listener is down. Open episodes end first, so their counts land.
     pub fn stopped(&self) {
         let mut st = guard(&self.st);
@@ -1705,6 +1714,13 @@ fn device_record(pairing_for: &mut Option<PrincipalId>, e: &DeviceEvent) -> Opti
             ("device", None, None, json!({ "event": "new_address_class", "subject": subject, "from": from, "to": to, "by": serve }))
         }
         E::ConnectRefused { .. } => return None,
+        // Apple's reason, from `serve::push`'s closed list. The event holds no
+        // token and no key, so this record cannot name them.
+        E::PushTokenDropped { subject, why } => ("device", None, None, json!({ "event": "push_token_dropped", "subject": subject, "why": why, "by": serve })),
+        // The console's act. The allowance itself is `serve::push`'s file.
+        E::PushSecurityChanged { subject, allowed } => {
+            ("device", console(), None, json!({ "event": "push_security_changed", "subject": subject, "allowed": allowed }))
+        }
         // The event holds neither the link nor its secret, and the record
         // could not name them if it did.
         E::PairingOpened { for_principal, expires_at, grant, expiry } => {
@@ -1961,6 +1977,10 @@ impl ConnAudit {
         if !recorded(row) {
             return None;
         }
+        // A `push_prefs` that sets nothing is a read, and has no record.
+        if name == "push_prefs" && super::push::rows::prefs_sets(args).is_empty() {
+            return None;
+        }
         let mut detail = Map::new();
         let what = if STREAM_OPEN.contains(&name) {
             What::Open((name == "shell_open").then(|| shell_key(args)))
@@ -1975,6 +1995,20 @@ impl ConnAudit {
             }
         }
         match name {
+            // Which environment; never the token, the key or the topic.
+            "push_register" => {
+                if let Some(Value::String(env)) = arg(args, "env") {
+                    detail.insert("env".into(), json!(ident(env)));
+                }
+            }
+            // Which switches moved, and how many mutes it holds: never which
+            // projects or places, the same names a payload keeps from Apple.
+            "push_prefs" => {
+                detail.insert("set".into(), json!(super::push::rows::prefs_sets(args)));
+                if let Some(Value::Array(m)) = arg(args, "muted") {
+                    detail.insert("muted".into(), json!(m.len()));
+                }
+            }
             "update_harness" => {
                 // A fixed enum is the whole requested action. Never log the
                 // command's output, which belongs only in the reply.
@@ -3299,6 +3333,8 @@ mod tests {
             E::Forgotten { subject: owner_subject("d_gone") },
             E::NewAddressClass { subject: owner_subject("d_new"), from: "cgnat".into(), to: "rfc1918".into() },
             E::ConnectRefused { subject: Some(owner_subject("d_new")), spki_sha256: "a".repeat(64), why: ConnectRefusal::Revoked, peer: None },
+            E::PushTokenDropped { subject: owner_subject("d_new"), why: "unregistered" },
+            E::PushSecurityChanged { subject: owner_subject("d_new"), allowed: true },
         ];
         events
             .into_iter()
@@ -3318,6 +3354,8 @@ mod tests {
                     E::Reloaded => ("device", Some("reloaded")),
                     E::NewAddressClass { .. } => ("device", Some("new_address_class")),
                     E::ConnectRefused { .. } => ("auth", None),
+                    E::PushTokenDropped { .. } => ("device", Some("push_token_dropped")),
+                    E::PushSecurityChanged { .. } => ("device", Some("push_security_changed")),
                     E::PairingOpened { .. } => ("pairing", Some("opened")),
                     E::PairingAttempt { .. } => ("pairing", Some("attempt")),
                     E::PairingPending { .. } => ("pairing", Some("verified")),

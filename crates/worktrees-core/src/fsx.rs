@@ -527,6 +527,7 @@ mod tests {
         ("worktrees-api/src/viewer.rs", "join(std::process::id().to_string())", "a directory in the app's config dir"),
         ("worktrees-cli/src/serve/mod.rs", "[{level}] [{}] {msg}", "a serve.log line carrying the pid; names nothing"),
         ("worktrees-cli/src/serve/tests.rs", "std::process::id()", "test code: serve/mod.rs declares the file under #[cfg(test)], which a line scan cannot see"),
+        ("worktrees-cli/src/serve/push/tests.rs", "std::process::id()", "test code: push/mod.rs declares the file under #[cfg(test)], which a line scan cannot see"),
         ("worktrees-cli/src/serve/remote/tests.rs", "std::process::id()", "test code: remote/mod.rs declares the file under #[cfg(test)], which a line scan cannot see"),
     ];
 

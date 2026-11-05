@@ -977,6 +977,7 @@ pub(crate) mod fixture {
             pairing,
             flights: Default::default(),
             remote: None,
+            push: None,
         }
     }
 

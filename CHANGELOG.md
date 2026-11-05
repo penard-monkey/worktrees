@@ -9,6 +9,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 - The chat's tool calls open on click to show what each was given: a whole multi-line command, a sub-agent's prompt, or an MCP tool's input as JSON. Rows and pills look as they did and stay closed until clicked, including a failed call. File contents and tool output stay in the terminal.
 - **Drag a place onto the chat to reference it.** Dropping a place anywhere on the chat view puts its reference in your message at the cursor, ready to edit and send, as dropping it on the terminal does. Dropped at the very start of a message, it comes with the words "Look at" in front, because a message can't start with `@`. Files you drop still attach.
+- **The host can now send push notifications to a paired iPhone: the host's half.** While your Mac is running worktrees with remote access on, it can tell your phone when an agent has waited 30 seconds for input, remind you once after 15 minutes, and, if you allow it for that phone with `worktrees serve push security`, pass on this host's security alerts. Project and place names are encrypted so Apple never sees them, and prompt text never leaves the host. Nothing is delivered yet: real delivery needs an APNs key, imported with `worktrees serve push key-import`, and the iOS app's half. Turning remote access off stops notifications too, and none are sent once serve has stopped, which an app-owned serve does after you quit the app.
 
 ### Fixed
 - **A message you send in the chat shows once.** A message that ended in a

@@ -1,4 +1,4 @@
-//! The 198 commands, each with its exposure, capability and objects, in ONE
+//! The 207 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -155,6 +155,9 @@ pub struct Call {
     /// Remote access (§4.1), for the console's `remote_*` rows. `None` in a
     /// serve built without it (the in-process tests).
     pub remote: Option<Arc<super::remote::RemoteAccess>>,
+    /// Notifications (`serve::push`). `None` in a serve built without them
+    /// (the in-process tests that hand in their own registry).
+    pub push: Option<Arc<super::push::Push>>,
 }
 
 impl Call {
@@ -173,6 +176,7 @@ impl Call {
             pairing: self.pairing.clone(),
             flights: self.flights.clone(),
             remote: self.remote.clone(),
+            push: self.push.clone(),
         }
     }
 }
@@ -1205,6 +1209,24 @@ commands! { cx, a;
     pair_decide: HostConsole => cx.pairing.decide(a.get("allow")?, now()),
     pair_cancel: HostConsole => ok(cx.pairing.cancel()),
     pair_status: HostConsole => ok(cx.pairing.status()),
+    // ── notifications (`serve::push`): a device's own record, and the host's key ──
+    // `Own`, Observe included: the identity is the connection's, no argument
+    // names a device, and what a push says is cut to the grant when it is sent.
+    push_register: Own => super::push::rows::register(cx, a),
+    push_unregister: Own => super::push::rows::unregister(cx),
+    push_prefs: Own => super::push::rows::prefs(cx, a),
+    push_test: Own => super::push::rows::test(cx),
+    // The team's key: a path the person at the Mac typed, and what the console
+    // may know of it is that one is there. `p8` is not an audit object key, so
+    // the file's name (`AuthKey_<id>.p8`) stays out of the record too.
+    push_key_import: HostConsole => super::push::rows::service(cx)?.import_key(&a.get::<String>("p8")?, &a.get::<String>("key_id")?, &a.get::<String>("team_id")?),
+    push_key_remove: HostConsole => super::push::rows::service(cx)?.remove_key(),
+    push_status: HostConsole => ok(super::push::rows::service(cx)?.status()),
+    // Seal and log instead of calling APNs, until serve restarts.
+    push_dry_run: HostConsole => ok(super::push::rows::service(cx)?.set_dry_run(a.get("on")?)),
+    // Security alerts to a phone: the host's decision (§5.3's alert is for the
+    // person at the host), per device, owner principal only.
+    push_allow_security: HostConsole [console, device(id)] => super::push::rows::service(cx)?.allow_security(&device_id(a)?, a.get("allowed")?),
     // ── step-up (§2.5): what a device does for itself, on its own connection ──
     stepup_challenge: Own => cx.frames.stepup().challenge(std::time::Instant::now()).map(|c| serde_json::json!({
         "challenge": worktrees_api::files::b64_encode(&c), "valid_secs": stepup::CHALLENGE_FOR.as_secs(),
@@ -1265,6 +1287,7 @@ mod tests {
             pairing: Arc::new(Pairing::new(None, Arc::new(DeviceRegistry::in_memory()))),
             flights: Default::default(),
             remote: None,
+            push: None,
         };
         (call, dir, rx)
     }
@@ -1273,7 +1296,7 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 198 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 207 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six, the slots pair and
     /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
@@ -1291,7 +1314,7 @@ mod tests {
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 198, "the table has 198 commands");
+        assert_eq!(TABLE.len(), 207, "the table has 207 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1679,9 +1702,13 @@ mod tests {
     /// `sync_hub_choose`, `sync_hub_forget` (`admin`) and the batch pair
     /// `sync_batch_preview`/`sync_batch_apply` (console); `update_harness`
     /// (`admin`) and the agent restart's `harness_sessions` (`read`) and
-    /// `restart_harness_sessions` (`admin`); and the slash commands'
+    /// `restart_harness_sessions` (`admin`); the slash commands'
     /// `agent_commands` (`read`) and `agent_command` (`instruct`, `admin` in
-    /// its body for the sensitive tier). A row that moves group
+    /// its body for the sensitive tier); and notifications' four a device
+    /// makes for itself (`own`: `push_register`, `push_unregister`,
+    /// `push_prefs`, `push_test`) and five at the console (`push_key_import`,
+    /// `push_key_remove`, `push_status`, `push_dry_run`,
+    /// `push_allow_security`). A row that moves group
     /// fails here until the count (and the proposal's table) move with it.
     #[test]
     fn every_row_has_one_base_group_and_the_counts_are_section_3_4s() {
@@ -1698,8 +1725,8 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 64), ("write", 23), ("admin", 40), ("console", 41), ("stream", 10), ("instruct", 8), ("answer", 2),
-            ("client-local", 6), ("loopback-only", 1), ("own", 3),
+            ("read", 64), ("write", 23), ("admin", 40), ("console", 46), ("stream", 10), ("instruct", 8), ("answer", 2),
+            ("client-local", 6), ("loopback-only", 1), ("own", 7),
         ]
         .into();
         assert_eq!(groups, want);

@@ -130,3 +130,136 @@ fn the_kill_switch_and_a_revoke_end_a_live_device_at_once() {
     assert!(refused_at_tls(tls(at, &pin, Some(&dev))), "the revoked key is still served");
     drop(sb);
 }
+
+/// Notifications through the real binary and a really paired device, with no
+/// Apple anywhere: the `ok` flag; an Observe device registers; `not-configured`
+/// with no key; the console's dry run, then the whole path to a sealed payload
+/// and a line in the log, which names no token, key or name; a device cannot
+/// turn the dry run on; the kill switch stops `push_prefs`'s connection.
+#[test]
+fn a_paired_device_registers_and_the_dry_run_seals_a_push() {
+    let Some(lan) = lan_or_skip() else { return };
+    let (sb, sf) = Sandbox::launch("push");
+    let mut con = console(&sf);
+    let st = rpc(&mut con, 2, "remote_enable", json!({ "address": lan.to_string() }));
+    let at: SocketAddr = st["ok"]["at"].as_str().unwrap().parse().unwrap();
+    let pin = st["ok"]["pin"].as_str().unwrap().to_string();
+    let dev = device();
+    pair(&mut con, &dev, &["read"]);
+    let (mut ws, ok) = session(at, &pin, &dev).expect("a session");
+    assert_eq!(ok["push"], json!(true), "the flag: {ok}");
+    let prefs = rpc(&mut ws, 3, "push_prefs", json!({}));
+    assert_eq!(prefs["ok"], json!({ "registered": false, "input": true, "reminder": true, "security": null, "muted": [] }), "{prefs}");
+    assert_eq!(rpc(&mut ws, 4, "push_test", json!({}))["err"], json!("not-registered"));
+    let token = "a1".repeat(32);
+    let key = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=";
+    let key_id = "AQIDBAUGBwg=";
+    let reg = rpc(&mut ws, 5, "push_register", json!({ "token": token, "env": "development", "topic": "com.brethash.worktrees.ios", "key": key, "key_id": key_id }));
+    assert_eq!(reg["ok"], json!({ "registered": true }), "an Observe device registers: {reg}");
+    assert!(rpc(&mut ws, 6, "push_test", json!({}))["err"].as_str().unwrap().starts_with("not-configured"));
+    assert_eq!(rpc(&mut ws, 7, "push_dry_run", json!({ "on": true }))["err"], json!("console-only"));
+    assert_eq!(rpc(&mut con, 8, "push_dry_run", json!({ "on": true }))["ok"]["dry_run"], json!(true));
+    assert_eq!(rpc(&mut ws, 9, "push_test", json!({}))["ok"], json!({ "sent": true }));
+
+    let home = sb.root.join("home");
+    let log = std::fs::read_to_string(home.join(".cache/worktrees/serve.log")).unwrap();
+    assert!(log.contains("dry run: kind=test") && log.contains("sealed=true"), "{log}");
+    let audit = std::fs::read_to_string(sb.root.join("cfg/audit.jsonl")).unwrap();
+    let devices = std::fs::read_to_string(sb.root.join("cfg/devices.json")).unwrap();
+    for (what, text) in [("serve.log", &log), ("audit.jsonl", &audit), ("devices.json", &devices)] {
+        assert!(!text.contains(&token) && !text.contains(key), "{what} holds a secret");
+    }
+    let held = std::fs::read_to_string(sb.root.join("cfg/push-devices.json")).unwrap();
+    assert!(held.contains(&token), "the one file that holds it");
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(std::fs::metadata(sb.root.join("cfg/push-devices.json")).unwrap().permissions().mode() & 0o777, 0o600);
+
+    // What the console may read, and the kill switch.
+    let status = rpc(&mut con, 10, "push_status", json!({}));
+    assert_eq!(status["ok"]["devices"][0]["registered"], json!(true), "{status}");
+    assert!(!status.to_string().contains(&token));
+    let off = rpc(&mut con, 11, "remote_disable", json!({}));
+    assert_eq!(off["ok"]["state"], json!("off"), "{off}");
+    assert!(closed_with(&mut ws, WAIT).is_some(), "the device's socket ended");
+}
+
+/// The whole path, in the real binary, with no Apple: a pane in a registered
+/// project showing Claude's folder-trust prompt, which is the waiting edge the
+/// amber dot draws; serve's own poll hears it; 30 real seconds later the sender
+/// seals a needs-input push for a paired device and says so in the log. Real
+/// time on purpose: every other test here runs the rule on a scripted clock,
+/// and this is the one that sees the poll and the sender joined up.
+#[test]
+fn a_real_waiting_edge_becomes_a_sealed_push_in_the_dry_run() {
+    // The `rust` job on macOS installs no tmux; Ubuntu's image ships it, so CI
+    // still runs this there, and a Linux runner without it fails rather than
+    // passing on nothing, as `lan_or_skip` does for a missing LAN.
+    if std::process::Command::new("tmux").arg("-V").output().is_err() {
+        assert!(cfg!(target_os = "macos") || std::env::var_os("CI").is_none(), "no tmux on a Linux CI runner: the waiting edge's witness did not run");
+        eprintln!("no tmux on this host; the waiting edge's witness did not run");
+        return;
+    }
+    let Some(lan) = lan_or_skip() else { return };
+    let (sb, sf) = Sandbox::launch("push-edge");
+    let git = |dir: &std::path::Path, a: &[&str]| {
+        let ok = std::process::Command::new("git").arg("-C").arg(dir).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(a).output().unwrap();
+        assert!(ok.status.success(), "git {a:?}: {ok:?}");
+    };
+    let repo = sb.root.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-q"]);
+    git(&repo, &["commit", "-q", "--allow-empty", "-m", "x"]);
+    let repo = std::fs::canonicalize(&repo).unwrap();
+
+    let mut con = console(&sf);
+    let added = rpc(&mut con, 1, "add_project", json!({ "dir": repo }));
+    assert!(added.get("ok").is_some(), "{added}");
+    let st = rpc(&mut con, 2, "remote_enable", json!({ "address": lan.to_string() }));
+    let at: SocketAddr = st["ok"]["at"].as_str().unwrap().parse().unwrap();
+    let pin = st["ok"]["pin"].as_str().unwrap().to_string();
+    let dev = device();
+    pair(&mut con, &dev, &["read"]);
+    let (mut ws, _) = session(at, &pin, &dev).expect("a session");
+    let reg = rpc(&mut ws, 3, "push_register", json!({ "token": "b2".repeat(32), "env": "production", "topic": "com.brethash.worktrees.ios", "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=", "key_id": "AQIDBAUGBwg=" }));
+    assert_eq!(reg["ok"], json!({ "registered": true }), "{reg}");
+    assert_eq!(rpc(&mut con, 4, "push_dry_run", json!({ "on": true }))["ok"]["dry_run"], json!(true));
+
+    // A pane running something called `claude` that shows the prompt. A copy of
+    // bash: AGENTS.md's coreutils trap rules out copying `sleep`.
+    let fake = sb.root.join("claude");
+    assert!(std::process::Command::new("cp").arg("/bin/bash").arg(&fake).status().unwrap().success());
+    let screen = sb.root.join("screen.txt");
+    std::fs::write(&screen, include_str!("../../worktrees-core/tests/fixtures/claude-screen/2.1.309/trust.txt")).unwrap();
+    let uid = unsafe { libc::getuid() };
+    let sock = sb.root.join(format!("tmux/tmux-{uid}/default"));
+    std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(sock.parent().unwrap(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = |a: &[&str]| std::process::Command::new("tmux").env_remove("TMUX").arg("-S").arg(&sock).args(a).output();
+    // Never panics: this runs while a failed assertion unwinds.
+    struct Down<'a>(&'a dyn Fn(&[&str]) -> std::io::Result<std::process::Output>);
+    impl Drop for Down<'_> {
+        fn drop(&mut self) {
+            let _ = (self.0)(&["kill-server"]);
+        }
+    }
+    let _down = Down(&tmux);
+    let cmd = format!("{} -c 'cat {}; while :; do read -t 100 x; done'", fake.display(), screen.display());
+    let made = tmux(&["new-session", "-d", "-x", "100", "-y", "40", "-s", "repo-main", "-c", repo.to_str().unwrap(), &cmd]).unwrap();
+    assert!(made.status.success(), "{made:?}");
+
+    let log = sb.root.join("home/.cache/worktrees/serve.log");
+    let deadline = Instant::now() + Duration::from_secs(75);
+    let found = loop {
+        let text = std::fs::read_to_string(&log).unwrap_or_default();
+        if text.contains("dry run: kind=input") {
+            break text;
+        }
+        assert!(Instant::now() < deadline, "no push within 75 s. pane: {:?}\nlog:\n{text}", tmux(&["list-panes", "-a", "-F", "#{session_name} #{pane_current_command} #{pane_current_path}"]).map(|o| String::from_utf8_lossy(&o.stdout).into_owned()));
+        std::thread::sleep(Duration::from_millis(500));
+    };
+    let line = found.lines().find(|l| l.contains("dry run: kind=input")).unwrap();
+    assert!(line.contains("sealed=true"), "{line}");
+    assert!(!found.contains(&"b2".repeat(32)), "the token is not in the log");
+    assert!(!line.contains("repo"), "no name in the line: {line}");
+}

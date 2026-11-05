@@ -25,7 +25,7 @@ use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::tungstenite::protocol::Role;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
-use worktrees_api::Ctx;
+use worktrees_api::{Ctx, Host as _};
 use worktrees_core::authz::{Capability, Caps, Caller, Grant, PrincipalId, Projects};
 
 use super::super::conn::{Broadcast, Clients};
@@ -1237,4 +1237,51 @@ mod signer {
             assert!(e.to_string().to_lowercase().contains("alert"), "{e}");
         });
     }
+}
+
+/// The kill switch stops pushes (the brief's decision): `remote_disable`, the
+/// real one, aborts a send in the air at once, and the sender's next look finds
+/// the opt-in off. Against the live `is_on`, and so needing a LAN address, as
+/// the switch's own test does. The transport never answers: no Apple here.
+#[test]
+fn the_kill_switch_stops_pushes_too() {
+    use super::super::push::apns::{Request, Sending, Transport};
+    use super::super::push::store::{PushEnv, PushReg, Store};
+    use super::super::push::{live_deps, Push};
+    struct Hang(Arc<std::sync::atomic::AtomicUsize>);
+    impl Transport for Hang {
+        fn send(&self, _: Request) -> Sending {
+            self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async {
+                std::future::pending::<()>().await;
+                unreachable!()
+            })
+        }
+    }
+    let Some(lan) = lan_or_skip() else { return };
+    let h = host("kill-push");
+    let clients = h.remote.deps.clients.clone();
+    let mut deps = live_deps(Arc::downgrade(&clients), h.audit.clone());
+    deps.place = Box::new(|p, _| Some(("/r".to_string(), p.rsplit('/').next()?.to_string(), "r".to_string())));
+    // The feed stays the live one: what `Broadcast` last sent on the sockets.
+    Broadcast(clients.clone()).emit("sessions:busy", serde_json::json!({ "busy": [], "waiting": ["/r/.worktrees/ui"], "waiting_by": {} }));
+    deps.roots = Box::new(|| vec!["/r".to_string()]);
+    let push = Push::new(None, Store::in_memory(), h.reg.clone(), deps, Some(h.rt.handle().clone()));
+    let sends = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    push.use_transport(Arc::new(Hang(sends.clone())));
+    clients.set_push(push.clone());
+    let d = h.enroll(&device_key(), &[Capability::Read]);
+    push.store.register(&d.id, PushReg { token: "ab".repeat(32), env: PushEnv::Production, topic: "a.b".into(), key: worktrees_api::files::b64_encode(&[1; 32]), key_id: worktrees_api::files::b64_encode(&[2; 8]) }).unwrap();
+
+    push.tick(1000);
+    push.tick(1030);
+    assert_eq!(sends.load(std::sync::atomic::Ordering::SeqCst), 0, "remote is off: nothing leaves");
+    h.remote.enable(&lan.to_string(), None, None, None).unwrap();
+    push.tick(1031);
+    assert_eq!(sends.load(std::sync::atomic::Ordering::SeqCst), 1, "on: the push went");
+    assert_eq!(push.in_air(), 1);
+    h.remote.disable().unwrap();
+    assert_eq!(push.in_air(), 0, "the switch itself stopped what was in the air");
+    push.tick(5000);
+    assert_eq!(sends.load(std::sync::atomic::Ordering::SeqCst), 1, "and nothing more leaves");
 }

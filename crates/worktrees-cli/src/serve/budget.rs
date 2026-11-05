@@ -139,6 +139,11 @@ pub struct PerDevice {
     /// may write to the host's disk through attachments, on top of each
     /// place's own cap (`worktrees_core::attach`).
     pub uploads: Rate,
+    /// `push_register`, `push_unregister` and a `push_prefs` that sets
+    /// something: each rewrites `devices.json` and is an audit record.
+    pub push_changes: Rate,
+    /// `push_test`: each is a call to Apple on the team's key.
+    pub push_tests: Rate,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -196,10 +201,18 @@ pub const BUDGETS: Budgets = Budgets {
         shells: 8,
         launches: Rate { per_sec: 10.0 / 3600.0, burst: 10.0 },
         uploads: Rate { per_sec: (256 * MIB) as f64 / 3600.0, burst: (64 * MIB) as f64 },
+        push_changes: Rate { per_sec: 0.1, burst: 30.0 },
+        push_tests: Rate { per_sec: 1.0 / 300.0, burst: 5.0 },
     },
     remote_bodies: 64,
 };
 
+/// (Beside the table's own notes.) `push_changes`: a person turning the card's
+/// switches and muting a project at a time; 30 at once and one every 10 s after
+/// never meets that, while a looping client costs 360 file writes an hour at
+/// most, not the request rate's 180,000. `push_tests`: a person's button, 5 at
+/// once and one every 5 minutes.
+///
 /// The console's per-connection budget. The outbox and lanes are the
 /// remote's: they bound memory, and the desk's own use sits far below them
 /// (the drive above peaked at 217 KiB queued, a changelog, and no lane).
@@ -269,6 +282,8 @@ struct Share {
     requests: Mutex<Bucket>,
     launches: Mutex<Bucket>,
     uploads: Mutex<Bucket>,
+    push_changes: Mutex<Bucket>,
+    push_tests: Mutex<Bucket>,
     inputs: Mutex<HashMap<String, Bucket>>,
 }
 
@@ -303,6 +318,8 @@ impl Budget {
                     requests: Mutex::new(Bucket::full(d.requests, now)),
                     launches: Mutex::new(Bucket::full(d.launches, now)),
                     uploads: Mutex::new(Bucket::full(d.uploads, now)),
+                    push_changes: Mutex::new(Bucket::full(d.push_changes, now)),
+                    push_tests: Mutex::new(Bucket::full(d.push_tests, now)),
                     inputs: Mutex::new(HashMap::new()),
                 })
             })
@@ -452,6 +469,15 @@ impl Account {
         if LAUNCH_ROWS.contains(&cmd) {
             let ok = d.launches.lock().unwrap().take(p.launches, 1.0, now);
             self.check(t, "launch_rate", START_BUDGET, ok.then_some(()), now)?;
+        }
+        // Notifications: a write to `devices.json`, or a call to Apple.
+        if matches!(cmd, "push_register" | "push_unregister") || (cmd == "push_prefs" && !super::push::rows::prefs_sets(args).is_empty()) {
+            let ok = d.push_changes.lock().unwrap().take(p.push_changes, 1.0, now);
+            self.check(t, "push_change_rate", RATE, ok.then_some(()), now)?;
+        }
+        if cmd == "push_test" {
+            let ok = d.push_tests.lock().unwrap().take(p.push_tests, 1.0, now);
+            self.check(t, "push_test_rate", RATE, ok.then_some(()), now)?;
         }
         // Bytes for the host's disk (`agent_attach`), decoded, per device.
         if cmd == "agent_attach" {
@@ -849,6 +875,35 @@ mod tests {
         let desk = b.open(2, &Caller::console(), None).unwrap();
         assert!((0..20).all(|_| desk.admit_at("agent_attach", &up(3), None, t0).is_ok()), "no upload budget at the desk");
         assert_eq!(desk.answer(ATTACH_BUDGET, &up(3), t0), json!(ATTACH_BUDGET), "no device, no bucket to count");
+    }
+
+    /// The push rows that write or call Apple spend their own buckets, flooded
+    /// past the cap: a change, a test. A `push_prefs` that only reads does not,
+    /// so the phone's card can always ask. Each refills at its rate, and the
+    /// console has neither.
+    #[test]
+    fn the_push_rows_have_their_own_rates() {
+        let b = Budget::new(BUDGETS);
+        let a = device(&b, "phone");
+        let t0 = Instant::now();
+        let read = args(json!({}));
+        let set = args(json!({ "input": false }));
+        let cap = BUDGETS.device.push_changes.burst as usize;
+        let admitted = (0..cap + 20).filter(|i| a.admit_at(["push_register", "push_unregister", "push_prefs"][i % 3], &set, None, t0).is_ok()).count();
+        assert_eq!(admitted, cap, "the flood reached the cap and stopped there");
+        assert_eq!(a.admit_at("push_prefs", &set, None, t0).err(), Some(RATE));
+        assert!(a.admit_at("push_prefs", &read, None, t0).is_ok(), "a read is not a change");
+        assert!(a.admit_at("push_prefs", &args(json!({ "input": null })), None, t0).is_ok(), "a null sets nothing");
+        assert!(a.admit_at("push_prefs", &set, None, t0 + Duration::from_secs(10)).is_ok(), "one every 10 s");
+        assert_eq!(a.admit_at("push_prefs", &set, None, t0 + Duration::from_secs(10)).err(), Some(RATE));
+
+        let cap = BUDGETS.device.push_tests.burst as usize;
+        let admitted = (0..cap + 20).filter(|_| a.admit_at("push_test", &read, None, t0).is_ok()).count();
+        assert_eq!(admitted, cap, "the flood reached the cap and stopped there");
+        assert!(a.admit_at("push_test", &read, None, t0 + Duration::from_secs(300)).is_ok(), "one every 5 minutes");
+
+        let desk = b.open(2, &Caller::console(), None).unwrap();
+        assert!((0..60).all(|_| desk.admit_at("push_prefs", &set, None, t0).is_ok()), "no such bucket at the desk");
     }
 
     /// A client sitting AT its cap is admitted and refused by turns, one each

@@ -498,7 +498,9 @@ mod tests {
     /// server identity, step-up, scopes, the remote listener and the audit log.
     fn is_control(word: &str) -> bool {
         const PREFIXES: &[&str] = &["pair_", "pairing_", "device_", "devices_", "identity_", "stepup_", "audit_", "remote_access", "listener_"];
-        PREFIXES.iter().any(|p| word.starts_with(p)) || word.ends_with("_scope") || word.contains("_scope_")
+        // Notifications, by name: `push_` alone is every `push_str` in Rust.
+        const PUSH: &[&str] = &["push_register", "push_unregister", "push_prefs", "push_test", "push_key_import", "push_key_remove", "push_status", "push_dry_run", "push_allow_security"];
+        PREFIXES.iter().any(|p| word.starts_with(p)) || PUSH.contains(&word) || word.contains("apns") || word.ends_with("_scope") || word.contains("_scope_")
     }
 
     /// Every word in `src` that names a Phase 2 control: a table row in a
@@ -512,7 +514,7 @@ mod tests {
                 found.push(w.to_string());
             }
         }
-        for needle in ["serve::", "devices.json", "audit.jsonl"] {
+        for needle in ["serve::", "devices.json", "audit.jsonl", "push-devices.json", "apns-key.json"] {
             if src.contains(needle) {
                 found.push(needle.to_string());
             }
