@@ -54,13 +54,19 @@ Read the record, not the screen: `user` entries of the session's transcript unde
    and no command may run. Then a later line `@<real file>`: note whether it attaches.
 4. Send a message ending in `;`. The record must keep it.
 5. Resize to 40, 24, 16, 12, 11 and 10 rows and send 60 short lines by chunks, with no
-   Enter. Count the box's rows at each height against `Pace::of`, and note where
-   a chunk with a line break becomes a placeholder.
+   Enter. Count the box's rows at each height against `Pace::of` (3 at 12 to 16, then
+   `rows / 2 - 5`), and note where a chunk with a line break becomes a placeholder.
+   Check a long line's rows at 80 columns too: it wraps at `cols - 4`.
 6. Send 15 KB in small pastes and watch for the fold near 10,000 characters. Then
    submit: the record must be whole.
 7. Send 1500 short lines with nobody typing: delivered. Then send it again and, about
    half a second in, `tmux send-keys -l ' TYPED'`. It must answer `stopped: true`,
-   and no new record may hold `TYPED`. Repeat at a few moments.
+   and no new record may hold `TYPED`. Repeat at a few moments, at 120x40 and at
+   80x24 with lines that wrap: a call is counted in rows, and wrapping is where that
+   can go wrong.
+   Then again with Enter instead of the keystroke, `tmux send-keys Enter`: it must answer
+   `stopped: true`, and the words must say that part may have been submitted, because
+   it was. No second record may hold the rest.
 8. In 10 rows, send 4 lines. It collapses and must still deliver, and `turns` must show
    the words, not the tags. Note how long `paste again to expand` lasts after Enter,
    and that Stop says to try again rather than "not working" meanwhile.

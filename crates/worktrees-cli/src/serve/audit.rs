@@ -946,14 +946,18 @@ struct State {
     /// How far the tests have moved the log's clocks.
     #[cfg(test)]
     skew: Duration,
+    /// A clock a test scripts: time passes only by [`Audit::advance`].
+    #[cfg(test)]
+    frozen: Option<Instant>,
 }
 
 impl State {
     /// The monotonic clock a budget and its episodes are decided by.
     fn mono(&self) -> Instant {
+        #[cfg(not(test))]
         let t = Instant::now();
         #[cfg(test)]
-        let t = t + self.skew;
+        let t = self.frozen.unwrap_or_else(Instant::now) + self.skew;
         t
     }
 
@@ -1014,6 +1018,8 @@ impl Audit {
                 fail: None,
                 #[cfg(test)]
                 skew: Duration::ZERO,
+                #[cfg(test)]
+                frozen: None,
             }),
         };
         let v = {
@@ -1585,6 +1591,14 @@ impl Audit {
     #[cfg(test)]
     pub(crate) fn advance(&self, by: Duration) {
         guard(&self.st).skew += by;
+    }
+
+    /// Stop the budgets' clock. A refill pays by the wall clock, so a test that
+    /// spends a budget and asserts the next act is refused otherwise races its
+    /// runner: 40 B/s buys a few bytes back in a descheduled moment (#613's CI).
+    #[cfg(test)]
+    pub(crate) fn freeze(&self) {
+        guard(&self.st).frozen = Some(Instant::now());
     }
 
     // ── the events, one method each ─────────────────────────────────────────
@@ -4012,6 +4026,7 @@ mod tests {
         let c = phone(&g.a, 9);
         let p = through(&g.cx, &c, &g.w, "agent_prompt", json!({ "repo": g.root, "slug": "(main)" })).unwrap();
         let fp = p["fingerprint"].as_str().unwrap().to_string();
+        g.a.freeze();
         g.spend(&c);
         let answer = through(&g.cx, &c, &g.w, "agent_answer", json!({ "repo": g.root, "slug": "(main)", "choice": 1, "fingerprint": fp }));
         let send = g.send(&c, &session, "one more thing");
@@ -4064,6 +4079,7 @@ mod tests {
     fn the_refill_the_answer_names_lets_a_drive_act_through_again() {
         let g = Gate::new("gate-refill", phone_caller());
         let c = phone(&g.a, 9);
+        g.a.freeze();
         let (ran, answer) = g.spend(&c);
         for _ in 0..5 {
             assert!(format!("{:?}", g.drive(&c)).contains("audit-budget"), "too soon");

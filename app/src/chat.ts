@@ -1293,6 +1293,8 @@ export function loadPrompt(t: Target): Promise<void> {
  *  serve samples every 15 s (`host.rs`, five 3 s ticks), so a sample caught
  *  between the paste and Enter stays up until the next one, plus a margin. */
 const OWN_SEND_SAMPLE_MS = 20_000;
+/** The fewest non-space characters from the middle of a sent message that count as it. */
+const OWN_SEND_MID_MIN = 24;
 
 /** Whether the `sessions:drafts` text is only `sentLine`, this window's own send, seen
  *  in the moment between the paste and Enter (serve.log: `drafts: 1` as the
@@ -1307,8 +1309,10 @@ export function draftIsOwnSend(draft: string, v: Pick<ChatView, "sentLine">): bo
   const d = bare(draft);
   const line = bare(v.sentLine.text);
   // A long message is only part of the box: its last rows, once tall, and up
-  // to the first blank row. Collapsed, it is one placeholder.
-  return line.includes(d.endsWith("…") ? d.slice(0, -1) : d) || /^(\[Pastedtext#\d+(\+\d+lines)?\])+$/u.test(d);
+  // to the first blank row. Collapsed, it is one placeholder. In between, a few
+  // words someone typed could read as the message's own, so only a long stretch counts.
+  const cut = d.endsWith("…") ? d.slice(0, -1) : d;
+  return line.startsWith(cut) || line.endsWith(cut) || (cut.length >= OWN_SEND_MID_MIN && line.includes(cut)) || /^(\[Pastedtext#\d+(\+\d+lines)?\])+$/u.test(d);
 }
 
 export function setDraft(path: string, draft: string): void {

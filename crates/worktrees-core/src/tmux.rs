@@ -1052,9 +1052,15 @@ pub fn paste_into(pane: &PaneId, text: &str) -> Result<(), String> {
 /// stays its own paste to the program in the pane: Claude collapses a big paste
 /// into a placeholder and records it as pasted material (`prompt::feed_claude`).
 pub fn paste_batch(pane: &PaneId, chunks: &[String]) -> Result<(), String> {
-    let args = paste_batch_args(&format!("worktrees-send-{}", std::process::id()), pane.as_str(), chunks);
+    let buf = format!("worktrees-send-{}", std::process::id());
+    let args = paste_batch_args(&buf, pane.as_str(), chunks);
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-    run_ok(&argv)
+    let done = run_ok(&argv);
+    // tmux drops the rest of a list at an error, the delete with it.
+    if done.is_err() {
+        let _ = tmux(&["delete-buffer", "-b", &buf]);
+    }
+    done
 }
 
 fn paste_batch_args(buf: &str, pane: &str, chunks: &[String]) -> Vec<String> {

@@ -121,6 +121,9 @@ pub enum SendOutcome {
     /// The composer holds something other than the message, so Enter was never
     /// pressed: someone typed at the terminal while it was going in.
     Foreign,
+    /// The composer emptied part way, with `pasted` of `total` bytes in. This
+    /// host pressed no Enter, but someone at the terminal may have.
+    Emptied { pasted: usize, total: usize },
 }
 
 impl SendOutcome {
@@ -158,8 +161,9 @@ impl SendOutcome {
             Self::Modal => "Codex opened an approval or a question while sending. No Enter was pressed into that prompt. The text may be sitting in its input; the user has to answer the prompt. Submission is not confirmed; the message copy is left unread if recorded. Submitting the composer later and reading messages can deliver the same instruction twice; check the composer and inbox before resending.".into(),
             Self::Unconfirmed => "Text was typed but submission could not be confirmed within the retry limit. It may still be in the composer. The message copy is left unread if recorded; read it with messages before retrying to avoid duplicates.".into(),
             Self::EnterFailed(e) => format!("Text was typed but Enter failed: {e}. Submission is not confirmed. The message copy is left unread if recorded; read it with messages before retrying to avoid duplicates."),
-            Self::Stopped { pasted, total, why } => format!("Pasting stopped ({why}) after about {pasted} of {total} bytes. Nothing was submitted; the first part may be in the composer. Check it before resending."),
-            Self::Foreign => "The composer held something other than this text, so nothing was submitted. Check it before resending.".into(),
+            Self::Stopped { pasted, total, why } => format!("Pasting stopped ({why}) after about {pasted} of {total} bytes. Enter was not pressed; the first part may be in the composer. Check it before resending."),
+            Self::Foreign => "The composer held something other than this text, so Enter was not pressed. Check it before resending.".into(),
+            Self::Emptied { pasted, total } => format!("The composer emptied after about {pasted} of {total} bytes, so that part may have been submitted. Check before resending."),
         }
     }
 }

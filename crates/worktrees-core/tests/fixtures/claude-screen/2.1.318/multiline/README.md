@@ -14,6 +14,8 @@ Each draft went in by `tmux paste-buffer -p`, one line per paste unless noted:
 - `placeholder`: five lines as ONE paste: `[Pasted text #19 +4 lines]`, with
   `paste again to expand` in place of the status row.
 - `typed-after`: `first line`, `second line`, then `send-keys -l` at the terminal.
+- `wrapped`: one 134-character line of prose as one paste, at 80×24: it wraps at a
+  word, here after 76 of its `cols - 4` columns.
 - `truncated`: 15 KB as it crossed 10,000 characters: the middle folded into
   `[...Truncated text #9 +90 lines...]`, caught by polling. Next draws scroll it off.
 - `after-collapsed`: a turn running 1.5 s after Enter on a collapsed paste, resized
@@ -29,8 +31,12 @@ Each draft went in by `tmux paste-buffer -p`, one line per paste unless noted:
 | A collapsed paste is recorded as | `\n\n<pasted_content id="807e">\n…\n</pasted_content id="807e">\n` | `turns::pasted_body` |
 | Separate pastes | stay separate, with no gap between them | `prompt::claude_chunks` |
 | A paste with one line break | stays literal at 11+ rows; a placeholder at 10 and under | `prompt::CHUNK_MIN_ROWS` |
-| A tall draft's window | `rows / 2 - 5` rows: 3 at 12–16, 7 at 24, 15 at 40, 25 at 60 | `prompt::Pace::of` |
+| A tall draft's window | 3 rows at 12–16, then `rows / 2 - 5`: 7 at 24, 15 at 40, 25 at 60 | `prompt::Pace::of` |
+| The box wraps at | `cols - 4`, at a word where it can, so a row can hold less | `prompt::Pace::of` |
+| Fewer rows than the window | the box shows ALL it holds, so its start must be the message's | `prompt::drew` |
+| Enter at the terminal mid-send | submits the fragment; the next paste lands in the empty box | `prompt::Drew::Lost` |
 | A draft past ~10,000 characters | its middle folds into `[...Truncated text …]`, and it submits whole | `prompt::drew` |
 | `paste again to expand` | ~8 s after a collapsed paste, over the whole status row | `prompt::turn_shown` |
 | A later line starting `/ ! #` | stays text | `harness::typed_message` |
 | A later line `@<real file>` | attaches the file, as `@` mid-line does | `harness::typed_message` |
+| Trailing spaces inside a line | recorded as typed | `chat.ts::isRecordOf` |

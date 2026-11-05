@@ -555,18 +555,24 @@ pub fn draft_from_screen(screen: &str) -> Option<String> {
 /// at the LAST edge on the screen: a message can hold a line of `─`, and only
 /// claude's status row is below the real one.
 pub fn composer_text(screen: &str) -> Option<String> {
+    composer_box(screen).map(|(text, _)| text)
+}
+
+/// [`composer_text`], and how many rows the box shows it in: fewer than its
+/// scrolling window means it shows all it holds (`prompt::Drew`).
+pub fn composer_box(screen: &str) -> Option<(String, usize)> {
     let raw: Vec<&str> = screen.lines().collect();
     let stripped: Vec<String> = raw.iter().map(|l| strip_escapes(l)).collect();
     let start = prompt_start(&stripped)?;
     if body_starts_dim(raw[start]) {
-        return Some(String::new());
+        return Some((String::new(), 0));
     }
     let end = stripped.iter().rposition(|l| is_box_edge(l.trim())).filter(|e| *e > start)?;
     let mut text = String::from(prompt_body(&stripped[start])?);
     for row in &stripped[start + 1..end] {
         text.push_str(row);
     }
-    Some(text.chars().filter(|c| !c.is_whitespace()).collect())
+    Some((text.chars().filter(|c| !c.is_whitespace()).collect(), end - start))
 }
 
 /// Whether `screen` shows claude's input box at all — the question

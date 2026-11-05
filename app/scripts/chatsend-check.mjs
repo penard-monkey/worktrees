@@ -383,10 +383,17 @@ async function sendAndEcho(t, text, at, ...before) {
   check(own("[Pasted text #12 +3 lines]", v()), "so is the placeholder Claude collapsed it to");
   check(own("[Pasted text #12]", v()), "… with no line count too");
   check(!own("one two TYPED", v()), "words of someone's still count as a draft");
+  check(!own("wo fo", v()), "a few words from its middle are someone's draft too");
   check(!own("[Pasted text #12] hello", v()), "… beside a placeholder too");
   await answer("agent_send", SENT);
   await done;
   check(C.useChat(t.path).pending.length === 1, "it is pending until the transcript has it");
+  {
+    const mid = { sentLine: { text: "the first paragraph of this message\n\nand a second one, longer than it needs to be\n\nand the last" } };
+    check(own("and a second one, longer than it needs to be", mid), "a long stretch from its middle is its own send");
+    check(!own("a second one", mid), "a short stretch is not");
+    check(own("the first", mid) && own("the last", mid), "its start and its end are, at any length");
+  }
   // Claude trims the ends and keeps the lines (measured 2.1.318); the host has
   // unwrapped a collapsed paste by the time it answers.
   const at = T0 + 1;

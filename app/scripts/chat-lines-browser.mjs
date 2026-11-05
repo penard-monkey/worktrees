@@ -141,14 +141,15 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     check(await value(page) === "one two", `${name}: and can be joined`, JSON.stringify(await value(page)));
 
     // Stopped part way, or someone typed: said, whole draft kept, terminal offered.
-    for (const [mode, re] of [["stopped", /about 512 of 2048 bytes/], ["foreign", /something other than this message/]]) {
+    // Emptied says only what it can: that part may have gone.
+    for (const [mode, re, said2] of [["stopped", /about 512 of 2048 bytes/, /Enter was not pressed/], ["foreign", /something other than this message/, /Enter was not pressed/], ["emptied", /about 512 of 2048 bytes/, /may have been submitted/]]) {
       page = await open(`&agentsend=${mode}`);
       const n = await bubbles(page);
       await page.locator(FIELD).fill("one\ntwo");
       await page.keyboard.press("Enter");
       await page.waitForTimeout(150);
       const said = await words(page);
-      check(re.test(said) && /Nothing was submitted/.test(said), `${name}: ${mode}: the words say what happened`, said);
+      check(re.test(said) && said2.test(said), `${name}: ${mode}: the words say what happened`, said);
       check(await value(page) === "one\ntwo", `${name}: ${mode}: the whole draft stays`);
       check(await bubbles(page) === n && await page.locator(".chat-bubble-pending").count() === 0, `${name}: ${mode}: no bubble claims it went`);
       check(await page.getByRole("button", { name: "Open the terminal" }).count() === 1, `${name}: ${mode}: the terminal is offered`);
