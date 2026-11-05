@@ -238,7 +238,11 @@ fn a_real_waiting_edge_becomes_a_sealed_push_in_the_dry_run() {
     let screen = sb.root.join("screen.txt");
     std::fs::write(&screen, include_str!("../../worktrees-core/tests/fixtures/claude-screen/2.1.309/trust.txt")).unwrap();
     let uid = unsafe { libc::getuid() };
-    let sock = sb.root.join(format!("tmux/tmux-{uid}/default"));
+    let sock = sb.tmux.join(format!("tmux-{uid}/default"));
+    // serve finds this socket through `TMUX_TMPDIR`, and tmux measures the path
+    // after resolving it (`/var` -> `/private/var`).
+    let resolved = std::fs::canonicalize(&sb.tmux).unwrap().join(format!("tmux-{uid}/default"));
+    assert!(resolved.as_os_str().len() < 104, "tmux's socket path is too long to connect: {resolved:?}");
     std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(sock.parent().unwrap(), std::fs::Permissions::from_mode(0o700)).unwrap();
