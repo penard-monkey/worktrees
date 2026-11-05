@@ -241,3 +241,25 @@ export function mentionPlan(i: MentionInput): MentionPlan | null {
   if (i.intoPrivate) return { ok: false, hint: "this session's project is private, so it reaches no other project" };
   return { ok: true, foreign: true, token: false };
 }
+
+/** What a message may not start with (`harness::typed_line_ok`): at an agent's
+ *  prompt each of these runs something. */
+const RUNS_SOMETHING = "/@!#";
+/** The words before a reference that would otherwise start the message. */
+export const REFERENCE_LEAD = "Look at ";
+
+/** The draft once `ref` (`place_reference`'s answer) replaces the selection
+ *  `start`..`end`, and where the caret goes: right after it. Spaces only where
+ *  a neighbour needs one, because Claude resolves a reference only when
+ *  whitespace or the start of the message comes before it, and the one after
+ *  closes it. A message can't start with `@`, so a reference that would start
+ *  the draft takes a lead-in the person can see and edit: a refused draft is a
+ *  dead end for a drop that promised to work. */
+export function referenceInDraft(draft: string, start: number, end: number, ref: string): { draft: string; caret: number } {
+  const before = draft.slice(0, start);
+  const after = draft.slice(end);
+  const open = !before.trim() && RUNS_SOMETHING.includes(ref[0]) ? REFERENCE_LEAD : before && !/\s$/u.test(before) ? " " : "";
+  const close = /^\s/u.test(after) ? "" : " ";
+  const head = before + open + ref;
+  return { draft: head + close + after, caret: head.length };
+}

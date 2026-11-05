@@ -2156,21 +2156,10 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     // Claude; otherwise a plain-text address, refused across projects while
     // reach is off or either side is private. The real command also refuses a
     // Codex/pi pane that is waiting on an answer; the frontend says so first.
+    case "place_reference": return mockReference(args);
     case "drop_reference": {
       const provider = String(args.provider ?? "claude");
-      const from = projectName(String(args.repo));
-      const into = projectName(String(args.intoRepo ?? args.repo));
-      let token: string;
-      if (args.repo === (args.intoRepo ?? args.repo)) {
-        token = provider === "claude"
-          ? `@worktrees:place://${String(args.slug).replace(/[^\p{L}\p{N}_.-]/gu, "-").replace(/^[-.]+|[-.]+$/g, "") || "place"}`
-          : `place ${from}:${args.slug}`;
-      } else {
-        if (mockReach === "off") throw "cross-project reach is off — turn it on in Settings → Agent guidance";
-        if (mockPrivate.has(from)) throw `'${from}' is private; its places cannot be referenced from other projects`;
-        if (mockPrivate.has(into)) throw `this session's project ('${into}') is private, so it reaches no other project`;
-        token = `place ${from}:${args.slug}`;
-      }
+      const token = mockReference(args);
       mockDrops.push({
         repo: args.repo, slug: args.slug, intoRepo: args.intoRepo ?? args.repo,
         intoSlug: args.intoSlug, intoSession: args.intoSession, provider, token,
@@ -5224,6 +5213,25 @@ setTimeout(() => emitEvent("sessions:drafts", { drafts }), 500);
 //
 // `root` defaults to the cdv fixture. Returns the root it touched. Both fire a
 // places:changed so the nav re-pulls immediately instead of waiting on the sweep.
+/** `ops::reference_for`: the token or the address a drop would type. */
+function mockReference(args: Record<string, unknown>): string {
+  const provider = String(args.provider ?? "claude");
+  const from = projectName(String(args.repo));
+  const into = projectName(String(args.intoRepo ?? args.repo));
+  let token: string;
+  if (args.repo === (args.intoRepo ?? args.repo)) {
+    token = provider === "claude"
+      ? `@worktrees:place://${String(args.slug).replace(/[^\p{L}\p{N}_.-]/gu, "-").replace(/^[-.]+|[-.]+$/g, "") || "place"}`
+      : `place ${from}:${args.slug}`;
+  } else {
+    if (mockReach === "off") throw "cross-project reach is off — turn it on in Settings → Agent guidance";
+    if (mockPrivate.has(from)) throw `'${from}' is private; its places cannot be referenced from other projects`;
+    if (mockPrivate.has(into)) throw `this session's project ('${into}') is private, so it reaches no other project`;
+    token = `place ${from}:${args.slug}`;
+  }
+  return token;
+}
+
 /** Every `drop_reference` this session recorded — what the nav drag would have
  *  pasted, and into which session. The real command's effect is a tmux paste,
  *  which the harness has no way to observe. */

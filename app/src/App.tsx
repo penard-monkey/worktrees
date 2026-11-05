@@ -16,6 +16,7 @@ import { destAt, destinations, GRIP_LABEL, isCurrent, resetPatch, undoOf, zoneOf
 import { cloneSource, dirNameProblem, isCloneError, type CloneProgress } from "./clone";
 import { ShellPane, TerminalPane } from "./TerminalPane";
 import { AgentViewSwitch, ChatPane } from "./ChatPane";
+import { insertReference } from "./chat";
 import { DocsPane } from "./DocsPane";
 import { PlanPane } from "./PlanPane";
 import { FilesPane, FileView, type DockAt } from "./FilesPane";
@@ -6870,8 +6871,10 @@ function App() {
     | { kind: "reject"; hint: string }
     | { kind: "project"; before: string | null }
     // Dropping a place onto the TERMINAL is not a move at all — it types a
-    // reference to that place into the Claude session running there.
-    | { kind: "mention"; repo: string; slug: string; intoRepo: string; intoSlug: string; intoSession: string; name: string;
+    // reference to that place into the Claude session running there. Onto the
+    // CHAT (`intoPath`) it goes into the draft at the cursor instead, and the
+    // person sends it with the rest of their message.
+    | { kind: "mention"; repo: string; slug: string; intoRepo: string; intoSlug: string; intoSession: string; name: string; intoPath: string | null;
         provider: Harness; foreign: boolean; token: boolean; label: string; intoName: string };
 
   const placeAt = (repo: string, slug: string) =>
@@ -6928,6 +6931,7 @@ function App() {
       if (!sel) return null;
       const provider = (termEl.dataset.dropProvider ?? "claude") as Harness;
       const agent = selectedAgents?.[provider];
+      const intoChat = termEl.dataset.dropInto === "chat";
       // Names and `private` from `crossProject` — the registry as last read,
       // refreshed by every Settings write — rather than `ws`, which only
       // catches up on the next list_workspace.
@@ -6942,7 +6946,8 @@ function App() {
         reach: crossProject ? crossProject.level : null,
         fromPrivate: !!pv(item.repo)?.private, intoPrivate: !!pv(sel.repo)?.private,
         fromRegistered: !!pv(item.repo)?.name, intoRegistered: !!pv(sel.repo)?.name,
-        waiting: !!selected && (waitingBy ? !!waitingBy[provider]?.has(selected.path) : waitingPaths.has(selected.path)),
+        // A draft is not the pane: nothing reaches an agent that is waiting.
+        waiting: !intoChat && !!selected && (waitingBy ? !!waitingBy[provider]?.has(selected.path) : waitingPaths.has(selected.path)),
       });
       if (!plan || !agent) return null;
       if (!plan.ok) return { kind: "reject", hint: plan.hint };
@@ -6951,7 +6956,7 @@ function App() {
       const from = pv(item.repo)?.name;
       return {
         kind: "mention", repo: item.repo, slug: item.slug, intoRepo: sel.repo,
-        intoSlug: sel.slug, intoSession: agent.name, name: nameOf(p),
+        intoSlug: sel.slug, intoSession: agent.name, name: nameOf(p), intoPath: intoChat ? selected?.path ?? null : null,
         provider, foreign: plan.foreign, token: plan.token,
         // What will be PASTED (core's `mention::address`), not just the slug.
         label: from ? `place ${from}:${item.slug}` : `place ${item.slug}`,
@@ -7015,6 +7020,18 @@ function App() {
       if (target.before === item.root) return;
       const roots = moveBefore((ws?.projects ?? []).map((pv) => pv.root), item.root, target.before);
       reorderProjects(roots);
+      return;
+    }
+    if (target.kind === "mention" && target.intoPath) {
+      const path = target.intoPath;
+      invoke<string>("place_reference", {
+        repo: target.repo, slug: target.slug, intoRepo: target.intoRepo, intoSlug: target.intoSlug, provider: target.provider,
+      })
+        .then((text) => insertReference(path, text))
+        .catch(async (e) => {
+          const { unsupportedFeature } = await import("./ipcws");
+          fail(unsupportedFeature(e, "dropping a place into the chat") ?? e);
+        });
       return;
     }
     if (target.kind === "mention") {
@@ -9793,9 +9810,9 @@ function App() {
           {drag.item.kind === "project" ? basename(drag.item.root) : nameOf({ slug: drag.item.slug, declared: placeAt(drag.item.repo, drag.item.slug)?.declared })}
           {drag.target?.kind === "reject" && <span className="drag-why">{drag.target.hint}</span>}
           {drag.target?.kind === "tier" && <span className="drag-why">→ {TIER_LABEL[drag.target.lands]}</span>}
-          {drag.target?.kind === "mention" && <span className="drag-why">{drag.target.token
-            ? "→ reference in this session"
-            : `→ types “${drag.target.label}” here`}</span>}
+          {drag.target?.kind === "mention" && <span className="drag-why">{drag.target.intoPath
+            ? (drag.target.token ? "→ reference in your message" : `→ adds “${drag.target.label}” to your message`)
+            : drag.target.token ? "→ reference in this session" : `→ types “${drag.target.label}” here`}</span>}
         </div>
       )}
 

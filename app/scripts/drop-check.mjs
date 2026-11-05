@@ -25,7 +25,7 @@ const fail = (m) => { console.error(`FAIL ${m}`); bad++; };
 const ok = (m) => console.log(`ok   ${m}`);
 
 const js = (await transformWithEsbuild(read("../src/dnd.ts"), "dnd.ts", { loader: "ts", format: "esm" })).code;
-const { mentionPlan } = await import("data:text/javascript;base64," + Buffer.from(js).toString("base64"));
+const { mentionPlan, referenceInDraft, REFERENCE_LEAD } = await import("data:text/javascript;base64," + Buffer.from(js).toString("base64"));
 
 // A base input: alpha → alpha, Claude up, reach off, both registered.
 const base = {
@@ -122,6 +122,36 @@ if (!call || !/intoRepo/.test(call[1]) || !/provider/.test(call[1])) {
   if (!/const pv = \(root: string\) => crossProject\?\.projects/.test(rd)) fail("the drop reads names/private from ws rather than crossProject");
   else ok("names and private come from crossProject");
 }
+
+// ── 4. a drop on the chat: into the draft, never the pane ───────────────────
+const TOKEN = "@worktrees:place://x";
+for (const [name, [d, s, e, ref], want, caretAfter] of [
+  ["an empty draft takes the lead-in", ["", 0, 0, TOKEN], `${REFERENCE_LEAD}${TOKEN} `, TOKEN],
+  ["whitespace alone still starts the message", ["  ", 2, 2, TOKEN], `  ${REFERENCE_LEAD}${TOKEN} `, TOKEN],
+  ["the start of a draft takes the lead-in", ["why", 0, 0, TOKEN], `${REFERENCE_LEAD}${TOKEN} why`, TOKEN],
+  ["mid-draft: the reference alone, spaced", ["ab cd", 2, 2, TOKEN], `ab ${TOKEN} cd`, TOKEN],
+  ["after a space: no second space", ["ab ", 3, 3, TOKEN], `ab ${TOKEN} `, TOKEN],
+  ["a selection is replaced", ["ab cd ef", 3, 5, TOKEN], `ab ${TOKEN} ef`, TOKEN],
+  ["an address needs no lead-in", ["", 0, 0, "place a:b"], "place a:b ", "place a:b"],
+]) {
+  const got = referenceInDraft(d, s, e, ref);
+  if (got.draft !== want) fail(`${name}: got ${JSON.stringify(got.draft)}`);
+  else if (!got.draft.slice(0, got.caret).endsWith(caretAfter)) fail(`${name}: the caret is not after the reference (${got.caret})`);
+  else ok(name);
+}
+// The lead-in exists because of this refusal; if it goes, so should the lead-in.
+const harness = read("../../crates/worktrees-core/src/harness.rs");
+if (!/matches!\(c, '\/' \| '@' \| '!' \| '#'\)/.test(harness)) fail("typed_line_ok no longer refuses a leading / @ ! #, which is what the chat's lead-in answers");
+else ok("the lead-in still answers typed_line_ok's refusal of a leading @");
+const chatPane = read("../src/ChatPane.tsx");
+if (!/className="chat"[^>]*data-drop="mention"[^>]*data-drop-into="chat"/.test(chatPane)) fail("the whole chat, transcript included, must be the drop target");
+else ok("the whole chat is the drop target");
+const commit = app.slice(app.indexOf("const commitDrop ="), app.indexOf('invoke<string>("drop_reference"'));
+if (!/target\.intoPath[\s\S]*invoke<string>\("place_reference"[\s\S]*insertReference\(/.test(commit)) fail("a drop on the chat must ask place_reference and fill the draft, before drop_reference can paste");
+else ok("a drop on the chat asks place_reference and never reaches drop_reference");
+if (!/waiting: !intoChat &&/.test(app)) fail("a waiting agent must not refuse a drop into the draft: nothing reaches its pane");
+else ok("a waiting agent does not refuse a drop into the draft");
+
 if (/a session can only reference worktrees from its own project/.test(app)) fail("the old blanket refusal is back");
 else ok("the old same-project-only refusal is gone");
 

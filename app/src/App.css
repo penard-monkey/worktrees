@@ -3485,11 +3485,13 @@ body.dragging .menu-catch { pointer-events: none; }
    cross-project drag is over the same pixels and resolves to a reject, so it
    must not light up. `outline` rather than `border`: the terminal's grid is
    sized from this box, and a border would re-cols the pty mid-drag. */
-body.dragging-place .term-wrap[data-drop="mention"] {
+body.dragging-place .term-wrap[data-drop="mention"],
+body.dragging-place .chat[data-drop="mention"] {
   outline: 1px dashed var(--line);
   outline-offset: -2px;
 }
-body.dragging-place.drop-mention .term-wrap[data-drop="mention"] {
+body.dragging-place.drop-mention .term-wrap[data-drop="mention"],
+body.dragging-place.drop-mention .chat[data-drop="mention"] {
   outline: 2px solid var(--accent);
 }
 

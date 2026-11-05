@@ -1070,6 +1070,9 @@ export type ChatView = {
   pending: Pending[];
   answered: Answered[];
   draft: string;
+  /** A reference on its way into the draft (`insertReference`), until the
+   *  composer, which knows the cursor, takes it. */
+  insert: { id: number; text: string } | null;
   sending: boolean;
   sendWords: SendWords | null;
   /** The line this window is pasting into the agent's composer, or pasted
@@ -1121,7 +1124,7 @@ let attachOff: string | null = null;
 const blank = (): ChatView => ({
   turns: { data: null, error: null, loading: false, at: null },
   prompt: { data: null, error: null, loading: false, at: null },
-  pending: [], answered: [], draft: "", sending: false, sendWords: null, sentLine: null, followUp: null,
+  pending: [], answered: [], draft: "", insert: null, sending: false, sendWords: null, sentLine: null, followUp: null,
   selected: null, answerText: "", ticks: null, boxText: "", answering: false, answerWords: null,
   stopping: false, stopWords: null, stopped: false,
   calls: { open: {}, read: {} },
@@ -1268,6 +1271,19 @@ export function draftIsOwnSend(draft: string, v: Pick<ChatView, "sentLine">): bo
 
 export function setDraft(path: string, draft: string): void {
   put(path, { draft, sendWords: null, stopWords: null });
+}
+
+let nextInsert = 1;
+
+/** Put `text` in this place's draft at the cursor. It waits here for the
+ *  composer, so a view switched away meanwhile still gets it on return. */
+export function insertReference(path: string, text: string): void {
+  put(path, { insert: { id: nextInsert++, text } });
+}
+
+/** The composer took the reference: this is the draft it made of it. */
+export function tookReference(path: string, draft: string): void {
+  put(path, { draft, insert: null, sendWords: null, stopWords: null });
 }
 
 let nextAttachment = 1;
