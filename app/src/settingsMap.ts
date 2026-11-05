@@ -162,6 +162,12 @@ export type SectionDef = {
   page: PageId;
   tier: Mode;
   label: string;
+  /** The person's words for it, for the header's search (settingsSearch.ts):
+   *  what someone types who does not know the sheet's label ("dark mode" →
+   *  Theme, "cap agents" → Limits). Hand-written and lowercase; never the
+   *  text of the controls inside, which the owner chose not to index. Every
+   *  section has some (`settingsmap-check.mjs` rule 9). */
+  keywords: readonly string[];
   /** The blob keys it shows a control for. */
   keys?: readonly (keyof Settings)[];
   /** The host values it shows a control for. */
@@ -186,99 +192,99 @@ export type SectionDef = {
 
 export const SECTIONS: readonly SectionDef[] = [
   // ── General
-  { id: "restore-last", page: "general", tier: "beginner", label: "Startup", keys: ["restore_last"] },
-  { id: "restore-window", page: "general", tier: "advanced", label: "Restore window", keys: ["restore_window"], localOnly: true },
-  { id: "editor", page: "general", tier: "beginner", label: "Editor", keys: ["editor_cmd"] },
-  { id: "terminal-command", page: "general", tier: "advanced", label: "Terminal command", keys: ["terminal_cmd"] },
-  { id: "pull-requests", page: "general", tier: "beginner", label: "Pull requests", keys: ["pull_requests"] },
-  { id: "auto-fetch", page: "general", tier: "advanced", label: "Git", host: ["fetch_interval"], scope: "computer", write: "set_fetch_interval" },
-  { id: "projects-parent", page: "general", tier: "advanced", label: "New projects", keys: ["projects_parent"] },
+  { id: "restore-last", page: "general", tier: "beginner", label: "Startup", keywords: ["reopen", "restore", "last place", "on launch", "open at start"], keys: ["restore_last"] },
+  { id: "restore-window", page: "general", tier: "advanced", label: "Restore window", keywords: ["window size", "window position", "remember window", "reopen window"], keys: ["restore_window"], localOnly: true },
+  { id: "editor", page: "general", tier: "beginner", label: "Editor", keywords: ["code editor", "ide", "vscode", "vs code", "cursor", "zed", "open in editor"], keys: ["editor_cmd"] },
+  { id: "terminal-command", page: "general", tier: "advanced", label: "Terminal command", keywords: ["terminal app", "external terminal", "open in terminal", "iterm", "ghostty"], keys: ["terminal_cmd"] },
+  { id: "pull-requests", page: "general", tier: "beginner", label: "Pull requests", keywords: ["prs", "pr status", "github", "gh"], keys: ["pull_requests"] },
+  { id: "auto-fetch", page: "general", tier: "advanced", label: "Git", keywords: ["fetch", "git fetch", "background fetch", "refresh remotes", "interval"], host: ["fetch_interval"], scope: "computer", write: "set_fetch_interval" },
+  { id: "projects-parent", page: "general", tier: "advanced", label: "New projects", keywords: ["clone", "clone folder", "project folder", "new project location", "directory"], keys: ["projects_parent"] },
   // ── Appearance
-  { id: "zoom", page: "appearance", tier: "beginner", label: "Overall size", keys: ["app_zoom"] },
-  { id: "ui-font", page: "appearance", tier: "advanced", label: "UI font size", keys: ["ui_rem"] },
-  { id: "theme", page: "appearance", tier: "beginner", label: "Theme", keys: ["theme"] },
-  { id: "theme-pair", page: "appearance", tier: "advanced", label: "Light ↔ dark pair", keys: ["theme_light", "theme_dark"], applies: (s) => s.theme === "system" },
-  { id: "density", page: "appearance", tier: "advanced", label: "Density", keys: ["density"] },
+  { id: "zoom", page: "appearance", tier: "beginner", label: "Overall size", keywords: ["zoom", "scale", "bigger", "smaller", "text size", "magnify"], keys: ["app_zoom"] },
+  { id: "ui-font", page: "appearance", tier: "advanced", label: "UI font size", keywords: ["font", "font size", "text size", "interface font", "rem"], keys: ["ui_rem"] },
+  { id: "theme", page: "appearance", tier: "beginner", label: "Theme", keywords: ["dark mode", "light mode", "colors", "colours", "color scheme", "night mode"], keys: ["theme"] },
+  { id: "theme-pair", page: "appearance", tier: "advanced", label: "Light ↔ dark pair", keywords: ["dark mode", "light mode", "follow system", "system theme", "auto theme"], keys: ["theme_light", "theme_dark"], applies: (s) => s.theme === "system" },
+  { id: "density", page: "appearance", tier: "advanced", label: "Density", keywords: ["compact", "spacing", "padding", "dense", "row height"], keys: ["density"] },
   // ── Layout
-  { id: "sidebar", page: "layout", tier: "beginner", label: "Sidebar", keys: ["nav_pinned", "nav_hover_reveal"] },
-  { id: "layout", page: "layout", tier: "beginner", label: "Layout", keys: ["places_side", "dock_side"] },
-  { id: "nav-width", page: "layout", tier: "advanced", label: "Nav width", keys: ["nav_width"] },
-  { id: "nav-tiers", page: "layout", tier: "advanced", label: "Nav tiers", keys: ["hidden_tiers"] },
-  { id: "dock-lower", page: "layout", tier: "advanced", label: "Terminal placement", keys: ["dock_lower"] },
-  { id: "usage-meter", page: "layout", tier: "advanced", label: "Usage meter", keys: ["usage_place"] },
-  { id: "tree-guides", page: "layout", tier: "expert", label: "Tree guide lines", keys: ["nav_guides"] },
-  { id: "afterglow", page: "layout", tier: "expert", label: "Afterglow", keys: ["done_horizon_secs", "done_steps"] },
+  { id: "sidebar", page: "layout", tier: "beginner", label: "Sidebar", keywords: ["nav", "navigation", "places list", "pin sidebar", "hide sidebar", "hover reveal"], keys: ["nav_pinned", "nav_hover_reveal"] },
+  { id: "layout", page: "layout", tier: "beginner", label: "Layout", keywords: ["swap sides", "dock side", "places side", "move panels", "left", "right"], keys: ["places_side", "dock_side"] },
+  { id: "nav-width", page: "layout", tier: "advanced", label: "Nav width", keywords: ["sidebar width", "places width", "wider sidebar", "nav size"], keys: ["nav_width"] },
+  { id: "nav-tiers", page: "layout", tier: "advanced", label: "Nav tiers", keywords: ["hide idle places", "hide dormant places", "nav groups", "sidebar sections"], keys: ["hidden_tiers"] },
+  { id: "dock-lower", page: "layout", tier: "advanced", label: "Terminal placement", keywords: ["terminal position", "terminal below", "split terminal", "reference column"], keys: ["dock_lower"] },
+  { id: "usage-meter", page: "layout", tier: "advanced", label: "Usage meter", keywords: ["usage", "quota meter", "plan meter", "rate limit", "status bar"], keys: ["usage_place"] },
+  { id: "tree-guides", page: "layout", tier: "expert", label: "Tree guide lines", keywords: ["indent guides", "tree lines", "nav lines", "outline"], keys: ["nav_guides"] },
+  { id: "afterglow", page: "layout", tier: "expert", label: "Afterglow", keywords: ["done ring", "finished dot", "fade", "unread", "decay"], keys: ["done_horizon_secs", "done_steps"] },
   // ── Terminal
-  { id: "term-font", page: "terminal", tier: "beginner", label: "Terminal font", keys: ["term_family", "term_size"] },
-  { id: "term-scrollback", page: "terminal", tier: "advanced", label: "Scrollback", keys: ["term_scrollback"] },
-  { id: "term-remembers", page: "terminal", tier: "advanced", label: "What a shell tab remembers", host: ["term_history"], scope: "computer", write: "set_term_history_opts" },
-  { id: "term-history", page: "terminal", tier: "advanced", label: "Saved terminal history", scope: "computer", read: "term_history_info", write: "term_history_clear" },
+  { id: "term-font", page: "terminal", tier: "beginner", label: "Terminal font", keywords: ["font", "font size", "font family", "monospace", "typeface", "terminal text size"], keys: ["term_family", "term_size"] },
+  { id: "term-scrollback", page: "terminal", tier: "advanced", label: "Scrollback", keywords: ["history lines", "buffer", "lines kept", "scroll history"], keys: ["term_scrollback"] },
+  { id: "term-remembers", page: "terminal", tier: "advanced", label: "What a shell tab remembers", keywords: ["shell history", "per tab history", "persist scrollback", "restore terminal", "zsh history"], host: ["term_history"], scope: "computer", write: "set_term_history_opts" },
+  { id: "term-history", page: "terminal", tier: "advanced", label: "Saved terminal history", keywords: ["clear history", "saved scrollback", "delete history", "terminal data"], scope: "computer", read: "term_history_info", write: "term_history_clear" },
   // ── Reference panels
-  { id: "files-layout", page: "reference", tier: "advanced", label: "Files layout", keys: ["files_layout", "files_split_pct", "files_stack_pct"] },
-  { id: "files-reading", page: "reference", tier: "advanced", label: "Reading", keys: ["files_wrap", "files_md_source", "files_md_zoom"] },
-  { id: "files-tree", page: "reference", tier: "advanced", label: "File tree", keys: ["files_show_ignored", "files_changed_only"] },
-  { id: "files-diff", page: "reference", tier: "advanced", label: "Diffs", keys: ["files_diff_base"] },
+  { id: "files-layout", page: "reference", tier: "advanced", label: "Files layout", keywords: ["file tree", "side by side", "stacked", "split", "reader layout"], keys: ["files_layout", "files_split_pct", "files_stack_pct"] },
+  { id: "files-reading", page: "reference", tier: "advanced", label: "Reading", keywords: ["markdown", "line wrap", "word wrap", "source view", "markdown zoom", "svg"], keys: ["files_wrap", "files_md_source", "files_md_zoom"] },
+  { id: "files-tree", page: "reference", tier: "advanced", label: "File tree", keywords: ["ignored files", "gitignore", "changed files", "hidden files"], keys: ["files_show_ignored", "files_changed_only"] },
+  { id: "files-diff", page: "reference", tier: "advanced", label: "Diffs", keywords: ["diff base", "compare", "merge base", "changes against"], keys: ["files_diff_base"] },
   // ── Agents
-  { id: "default-agent", page: "agents", tier: "beginner", label: "Default agent", keys: ["default_provider"] },
-  { id: "default-models", page: "agents", tier: "beginner", label: "Default model", keys: ["default_models"] },
-  { id: "auto-resume", page: "agents", tier: "beginner", label: "Resume on open", keys: ["ai_auto_resume"] },
-  { id: "chat-view", page: "agents", tier: "beginner", label: "Chat view", keys: ["chat_view"] },
-  { id: "notifications", page: "agents", tier: "beginner", label: "Notifications", keys: ["notify_hidden"] },
-  { id: "connections", page: "agents", tier: "beginner", label: "Worktrees tools for agents", scope: "computer" },
-  { id: "plan-usage", page: "agents", tier: "advanced", label: "Plan usage", keys: ["usage_claude", "usage_codex", "usage_kimi"] },
-  { id: "ai-command", page: "agents", tier: "expert", label: "AI command (CLI)", scope: "computer" },
+  { id: "default-agent", page: "agents", tier: "beginner", label: "Default agent", keywords: ["provider", "harness", "which ai", "claude", "codex", "pi", "kimi"], keys: ["default_provider"] },
+  { id: "default-models", page: "agents", tier: "beginner", label: "Default model", keywords: ["models", "ai model", "llm", "opus", "sonnet", "gpt"], keys: ["default_models"] },
+  { id: "auto-resume", page: "agents", tier: "beginner", label: "Resume on open", keywords: ["continue conversation", "last conversation", "auto resume", "reattach"], keys: ["ai_auto_resume"] },
+  { id: "chat-view", page: "agents", tier: "beginner", label: "Chat view", keywords: ["chat", "transcript", "conversation view", "messages"], keys: ["chat_view"] },
+  { id: "notifications", page: "agents", tier: "beginner", label: "Notifications", keywords: ["notify", "alerts", "banner", "when done", "notification center"], keys: ["notify_hidden"] },
+  { id: "connections", page: "agents", tier: "beginner", label: "Worktrees tools for agents", keywords: ["mcp", "mcp server", "tools", "connect agents", "integrations"], scope: "computer" },
+  { id: "plan-usage", page: "agents", tier: "advanced", label: "Plan usage", keywords: ["usage", "quota", "rate limit", "subscription", "account usage"], keys: ["usage_claude", "usage_codex", "usage_kimi"] },
+  { id: "ai-command", page: "agents", tier: "expert", label: "AI command (CLI)", keywords: ["cli", "ai flag", "default command", "launch command"], scope: "computer" },
   // ── Claude
-  { id: "mcp-server", page: "claude", tier: "beginner", label: "Claude MCP server", harness: "claude", read: "mcp_status", write: "mcp_install" },
-  { id: "claude-policy", page: "claude", tier: "beginner", label: "Agent policy", harness: "claude" },
+  { id: "mcp-server", page: "claude", tier: "beginner", label: "Claude MCP server", keywords: ["mcp", "claude tools", "install mcp", "integration"], harness: "claude", read: "mcp_status", write: "mcp_install" },
+  { id: "claude-policy", page: "claude", tier: "beginner", label: "Agent policy", keywords: ["claude permissions", "safety", "autonomy"], harness: "claude" },
   // ── Codex
-  { id: "codex-skills", page: "codex", tier: "advanced", label: "Your skills", write: "agent_link_skills" },
-  { id: "codex-mcp", page: "codex", tier: "beginner", label: "Codex MCP server", harness: "codex", read: "codex_mcp_status", write: "codex_mcp_install" },
-  { id: "codex-policy", page: "codex", tier: "beginner", label: "Agent policy", harness: "codex" },
+  { id: "codex-skills", page: "codex", tier: "advanced", label: "Your skills", keywords: ["skills", "link skills", "claude skills", "agents skills"], write: "agent_link_skills" },
+  { id: "codex-mcp", page: "codex", tier: "beginner", label: "Codex MCP server", keywords: ["mcp", "codex tools", "install mcp", "integration"], harness: "codex", read: "codex_mcp_status", write: "codex_mcp_install" },
+  { id: "codex-policy", page: "codex", tier: "beginner", label: "Agent policy", keywords: ["codex permissions", "approvals", "safety", "autonomy"], harness: "codex" },
   // ── pi
-  { id: "pi-mcp", page: "pi", tier: "beginner", label: "pi MCP server", harness: "pi", read: "pi_mcp_status", write: "pi_mcp_install" },
-  { id: "pi-install", page: "pi", tier: "advanced", label: "pi", harness: "pi" },
-  { id: "pi-models", page: "pi", tier: "beginner", label: "Models", harness: "pi" },
-  { id: "pi-policy", page: "pi", tier: "beginner", label: "Agent policy", harness: "pi" },
+  { id: "pi-mcp", page: "pi", tier: "beginner", label: "pi MCP server", keywords: ["mcp", "pi tools", "install mcp", "integration"], harness: "pi", read: "pi_mcp_status", write: "pi_mcp_install" },
+  { id: "pi-install", page: "pi", tier: "advanced", label: "pi", keywords: ["install pi", "pi cli", "setup pi", "preflight"], harness: "pi" },
+  { id: "pi-models", page: "pi", tier: "beginner", label: "Models", keywords: ["pi models", "model list", "providers", "allowed models"], harness: "pi" },
+  { id: "pi-policy", page: "pi", tier: "beginner", label: "Agent policy", keywords: ["pi permissions", "pi trust", "safety", "autonomy"], harness: "pi" },
   // ── Kimi
-  { id: "kimi-mcp", page: "kimi", tier: "beginner", label: "kimi MCP server", harness: "kimi", read: "kimi_mcp_status", write: "kimi_mcp_set" },
-  { id: "kimi-install", page: "kimi", tier: "advanced", label: "kimi", harness: "kimi" },
-  { id: "kimi-models", page: "kimi", tier: "beginner", label: "Models", harness: "kimi" },
-  { id: "kimi-policy", page: "kimi", tier: "beginner", label: "Agent policy", harness: "kimi" },
+  { id: "kimi-mcp", page: "kimi", tier: "beginner", label: "kimi MCP server", keywords: ["mcp", "kimi tools", "install mcp", "integration"], harness: "kimi", read: "kimi_mcp_status", write: "kimi_mcp_set" },
+  { id: "kimi-install", page: "kimi", tier: "advanced", label: "kimi", keywords: ["install kimi", "kimi cli", "setup kimi"], harness: "kimi" },
+  { id: "kimi-models", page: "kimi", tier: "beginner", label: "Models", keywords: ["kimi models", "model list", "providers"], harness: "kimi" },
+  { id: "kimi-policy", page: "kimi", tier: "beginner", label: "Agent policy", keywords: ["kimi permissions", "kimi trust", "safety", "autonomy"], harness: "kimi" },
   // ── Profiles
-  { id: "profiles", page: "profiles", tier: "advanced", label: "AI profiles", host: ["profiles"], read: "profiles_info", write: "save_profile" },
+  { id: "profiles", page: "profiles", tier: "advanced", label: "AI profiles", keywords: ["profile", "accounts", "switch account", "config dir", "claude config"], host: ["profiles"], read: "profiles_info", write: "save_profile" },
   // ── Guidance
-  { id: "agent-guidance", page: "guidance", tier: "advanced", label: "Agent guidance", host: ["guidance_enabled"], write: "set_agent_guidance" },
-  { id: "guidance-policy", page: "guidance", tier: "advanced", label: "Agent policy" },
-  { id: "guidance-skill", page: "guidance", tier: "expert", label: "The skill", host: ["guidance_skill"], write: "set_agent_guidance_skill" },
+  { id: "agent-guidance", page: "guidance", tier: "advanced", label: "Agent guidance", keywords: ["guidance", "instructions", "launch guidance", "agents md", "rules"], host: ["guidance_enabled"], write: "set_agent_guidance" },
+  { id: "guidance-policy", page: "guidance", tier: "advanced", label: "Agent policy", keywords: ["guard", "main guard", "safety", "rules"] },
+  { id: "guidance-skill", page: "guidance", tier: "expert", label: "The skill", keywords: ["edit skill", "skill text", "custom guidance", "instructions", "prompt"], host: ["guidance_skill"], write: "set_agent_guidance_skill" },
   // ── Agent policy
-  { id: "policy-preset", page: "policy", tier: "beginner", label: "Preset", host: ["policy_preset"], write: "apply_policy_preset" },
-  { id: "codex-permissions", page: "policy", tier: "beginner", label: "Codex permissions", host: ["codex_access"], write: "set_codex_permissions" },
-  { id: "main-guard", page: "policy", tier: "beginner", label: "Claude in (main)", host: ["main_guard"], write: "set_agent_guidance" },
-  { id: "plan-limits", page: "policy", tier: "beginner", label: "Plan limits", host: ["quota_gate"], write: "set_quota_settings" },
-  { id: "plan-threshold", page: "policy", tier: "advanced", label: "Weekly threshold", host: ["quota_pct"], write: "set_quota_settings" },
-  { id: "pi-trust", page: "policy", tier: "advanced", label: "pi", host: ["pi_trust", "pi_allowed"], write: "set_pi_trust" },
-  { id: "kimi-trust", page: "policy", tier: "advanced", label: "Kimi", host: ["kimi_allowed"], write: "set_kimi_allowed" },
-  { id: "cross-project", page: "policy", tier: "advanced", label: "Other projects", host: ["cross_project", "private_projects"], write: "set_cross_project" },
-  { id: "limits", page: "policy", tier: "advanced", label: "Limits", host: ["limits"], write: "set_limits" },
-  { id: "heavy-jobs", page: "policy", tier: "advanced", label: "Heavy jobs", host: ["slots"], write: "set_slot_capacity" },
+  { id: "policy-preset", page: "policy", tier: "beginner", label: "Preset", keywords: ["presets", "safety", "autonomy", "risk level"], host: ["policy_preset"], write: "apply_policy_preset" },
+  { id: "codex-permissions", page: "policy", tier: "beginner", label: "Codex permissions", keywords: ["permissions", "codex access", "approvals", "sandbox", "auto review", "full access"], host: ["codex_access"], write: "set_codex_permissions" },
+  { id: "main-guard", page: "policy", tier: "beginner", label: "Claude in (main)", keywords: ["guard", "protect main", "main branch", "git worktree add", "branching"], host: ["main_guard"], write: "set_agent_guidance" },
+  { id: "plan-limits", page: "policy", tier: "beginner", label: "Plan limits", keywords: ["quota", "usage limit", "spent plan", "rate limit", "gate"], host: ["quota_gate"], write: "set_quota_settings" },
+  { id: "plan-threshold", page: "policy", tier: "advanced", label: "Weekly threshold", keywords: ["weekly limit", "quota threshold", "percent", "warn"], host: ["quota_pct"], write: "set_quota_settings" },
+  { id: "pi-trust", page: "policy", tier: "advanced", label: "pi", keywords: ["pi permissions", "pi trust", "project trust", "allowed repos"], host: ["pi_trust", "pi_allowed"], write: "set_pi_trust" },
+  { id: "kimi-trust", page: "policy", tier: "advanced", label: "Kimi", keywords: ["kimi permissions", "kimi trust", "folder trust", "allowed folders"], host: ["kimi_allowed"], write: "set_kimi_allowed" },
+  { id: "cross-project", page: "policy", tier: "advanced", label: "Other projects", keywords: ["cross project", "other repos", "read other projects", "private projects", "reach", "access"], host: ["cross_project", "private_projects"], write: "set_cross_project" },
+  { id: "limits", page: "policy", tier: "advanced", label: "Limits", keywords: ["max agents", "cap agents", "agent limit", "how many agents", "live agents", "concurrency", "memory", "swap"], host: ["limits"], write: "set_limits" },
+  { id: "heavy-jobs", page: "policy", tier: "advanced", label: "Heavy jobs", keywords: ["slots", "build slots", "parallel builds", "concurrency", "gates"], host: ["slots"], write: "set_slot_capacity" },
   // ── Projects
-  { id: "planning", page: "projects", tier: "beginner", label: "Planning", host: ["planning_default"], write: "set_planning_default" },
+  { id: "planning", page: "projects", tier: "beginner", label: "Planning", keywords: ["plan files", "planning with files", "task plan", "planning profile"], host: ["planning_default"], write: "set_planning_default" },
   // ── Remote
-  { id: "this-window-drives", page: "remote", tier: "beginner", label: "This window drives", scope: "window" },
-  { id: "remote-access", page: "remote", tier: "advanced", label: "Let devices reach this computer", host: ["remote_access"], scope: "computer" },
-  { id: "devices", page: "remote", tier: "advanced", label: "Paired devices", host: ["devices"], scope: "computer" },
+  { id: "this-window-drives", page: "remote", tier: "beginner", label: "This window drives", keywords: ["remote host", "drive host", "which machine", "paired host", "other computer", "connect to host"], scope: "window" },
+  { id: "remote-access", page: "remote", tier: "advanced", label: "Let devices reach this computer", keywords: ["remote", "lan", "network", "phone", "iphone", "pairing", "kill switch"], host: ["remote_access"], scope: "computer" },
+  { id: "devices", page: "remote", tier: "advanced", label: "Paired devices", keywords: ["phone", "iphone", "ipad", "pair", "pairing", "revoke"], host: ["devices"], scope: "computer" },
   // ── Updates
-  { id: "version", page: "updates", tier: "beginner", label: "Version", keys: ["update_auto_check"] },
-  { id: "agent-clis", page: "updates", tier: "advanced", label: "Agent CLIs", scope: "computer", write: "update_harness" },
-  { id: "install-version", page: "updates", tier: "expert", label: "Install another version" },
+  { id: "version", page: "updates", tier: "beginner", label: "Version", keywords: ["update", "upgrade", "check for updates", "auto update", "release", "about"], keys: ["update_auto_check"] },
+  { id: "agent-clis", page: "updates", tier: "advanced", label: "Agent CLIs", keywords: ["update claude", "update codex", "upgrade", "cli versions", "harness updates"], scope: "computer", write: "update_harness" },
+  { id: "install-version", page: "updates", tier: "expert", label: "Install another version", keywords: ["downgrade", "rollback", "older version", "specific version"] },
   // ── Data & privacy
-  { id: "feedback", page: "data", tier: "beginner", label: "Send feedback" },
-  { id: "logs", page: "data", tier: "advanced", label: "Logs", scope: "computer", write: "log_tail" },
-  { id: "settings-file", page: "data", tier: "advanced", label: "Settings file", scope: "window" },
-  { id: "reset", page: "data", tier: "advanced", label: "Reset", scope: "window" },
-  { id: "usage", page: "data", tier: "expert", label: "Usage record", scope: "computer", write: "ui_events_clear" },
+  { id: "feedback", page: "data", tier: "beginner", label: "Send feedback", keywords: ["bug report", "report a bug", "contact", "support"] },
+  { id: "logs", page: "data", tier: "advanced", label: "Logs", keywords: ["log", "debug", "diagnostics", "errors", "serve log", "app log"], scope: "computer", write: "log_tail" },
+  { id: "settings-file", page: "data", tier: "advanced", label: "Settings file", keywords: ["ui state", "json", "config file", "reveal", "settings json"], scope: "window" },
+  { id: "reset", page: "data", tier: "advanced", label: "Reset", keywords: ["defaults", "restore defaults", "factory reset", "clear settings", "start over"], scope: "window" },
+  { id: "usage", page: "data", tier: "expert", label: "Usage record", keywords: ["analytics", "telemetry", "events", "privacy", "tracking"], scope: "computer", write: "ui_events_clear" },
   // ── Shortcuts
-  { id: "shortcuts", page: "shortcuts", tier: "beginner", label: "Shortcuts" },
+  { id: "shortcuts", page: "shortcuts", tier: "beginner", label: "Shortcuts", keywords: ["keyboard", "keys", "hotkeys", "keybindings", "chords"] },
 ];
 export const SECTION: Record<string, SectionDef> = Object.fromEntries(SECTIONS.map((s) => [s.id, s]));
 

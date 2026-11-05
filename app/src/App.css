@@ -3034,12 +3034,72 @@ body.dragging .menu-catch { pointer-events: none; }
    Words are --txt-hi / --txt-dim everywhere here; the one hue is the tier DOT
    (an accent is a fill, not text). */
 /* The mode switch sits at the right of the header, just left of the esc / ⌘,
-   hints and the close button (the owner's review: it had trailed the title).
-   The free space is between the title and the switch; the title's own margin
-   keeps them apart if the header ever runs out of it. */
+   hints and the close button (the owner's review: it had trailed the title),
+   and the search box sits just left of the switch. The free space is between
+   the title and the box — the box's `margin-left: auto` — so the box widening
+   on focus eats that space and nothing to its right moves; the title's own
+   margin keeps them apart if the header ever runs out of it. */
 .settings-h b { flex: 0 1 auto; margin-right: var(--s4); }
-.settings-mode { margin-left: auto; margin-right: var(--s4); }
+.settings-mode { margin-right: var(--s4); }
 .settings-mode button { padding: var(--s1) var(--s3); font-size: var(--fs-meta); }
+/* The search (SettingsSearchBox.tsx): small with its glass and "Search" until
+   focused, then wide while focused or holding text. A row's words are
+   --txt-hi and --txt (--txt-dim on --bg-panel is 3.57:1 in tokyo-day); hue
+   is only the tier dot, as on a section. Its fill is
+   --bg-field, LIGHTER than the header (the owner: "so that it looks like an
+   intentional text box"); --bg-input sat 4-10 units darker and read as part
+   of the header. */
+.settings-search { position: relative; flex: 0 1 auto; min-width: 0; margin-left: auto; margin-right: var(--s3); display: flex; align-items: center; }
+.settings-search-icon { position: absolute; left: var(--s2); color: var(--txt-dim); pointer-events: none; }
+.settings-search-input {
+  width: 7.5em; min-width: 0; font-family: inherit; font-size: var(--fs-meta);
+  padding: var(--s1) var(--s2) var(--s1) calc(var(--s2) + 12px + var(--s1));
+  background: var(--bg-field); color: var(--txt-hi);
+  border: 1px solid var(--line-strong); border-radius: var(--r-sm);
+  transition: width var(--dur) var(--ease);
+}
+.settings-search.wide .settings-search-input { width: 18em; }
+.settings-search-input::placeholder { color: var(--txt-dim); }
+.settings-search-input:focus { outline: none; border-color: var(--accent); }
+/* Under the box, right edges flush, growing LEFT into the header's free space;
+   inside the modal (whose overflow is hidden) at its smallest, 900×560: eight
+   two-line rows end well above its bottom edge (settings-browser measures). */
+.settings-search-pop {
+  position: absolute; top: calc(100% + 4px); right: 0; z-index: 50;
+  width: 20rem; min-width: 100%; padding: var(--s1);
+  background: var(--bg-panel); border: 1px solid var(--line-strong);
+  border-radius: var(--r-md); box-shadow: var(--shadow-float);
+  animation: pop var(--dur-slow) var(--ease);
+}
+.settings-search-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: var(--s2);
+  padding: var(--s1) var(--s2); border-radius: var(--r-sm); cursor: pointer;
+}
+.settings-search-row.hi { background: var(--bg-elev); box-shadow: inset 2px 0 0 var(--accent); }
+/* --bg-elev is DARKER than --bg-panel in catppuccin-latte, where --txt on it
+   measured 4.05:1: the active row's every word is --txt-hi. */
+.settings-search-row.hi .settings-search-where, .settings-search-row.hi .settings-search-tier { color: var(--txt-hi); }
+.settings-search-label {
+  font-size: var(--fs-label); color: var(--txt-hi);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.settings-search-where {
+  grid-column: 1 / -1; font-size: var(--fs-micro); color: var(--txt);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.settings-search-tier {
+  display: inline-flex; align-items: center; gap: var(--s1); padding: 0 var(--s1);
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  font-size: var(--fs-micro); color: var(--txt);
+}
+.settings-search-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
+.settings-search-tier[data-tier="advanced"] .settings-search-dot { background: var(--warn); }
+.settings-search-tier[data-tier="expert"] .settings-search-dot { background: var(--danger); }
+.settings-search-none { padding: var(--s1) var(--s2); font-size: var(--fs-meta); color: var(--txt); }
+@media (prefers-reduced-motion: reduce) {
+  .settings-search-input { transition: none; }
+  .settings-search-pop { animation: none; }
+}
 /* Six groups with a header each: what lets the page rows read as six things.
    The owner's review found the first cut read as one more page (small muted
    caps at the pages' own left edge), so a heading is --txt-hi and heavier, its

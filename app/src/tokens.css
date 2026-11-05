@@ -16,6 +16,13 @@
   --bg-panel: #1a1b26;   /* top bar, cards, popovers (raised) */
   --bg-elev: #1e2030;    /* hover, selected wash, menus */
   --bg-input: #12131c;   /* inset fields */
+  /* A field that must read as one on a --bg-tree surface (the Settings header's
+     search): a few shades LIGHTER than --bg-tree, where --bg-input is darker
+     and 4-10 RGB units off it. --bg-elev is lighter than --bg-tree by 18-31
+     units in five themes, and --txt-dim on it is already the app's own lowest
+     --txt-dim ratio there, so a placeholder on it is no worse than a hovered
+     row; catppuccin-latte, whose --bg-elev is DARKER, sets its own. */
+  --bg-field: var(--bg-elev);
   --line: #252838;       /* hairline borders / dividers */
   --line-strong: #33384f;/* focus base, active outline, splitter */
 
@@ -269,6 +276,9 @@
   --bg-panel: #eff1f5;
   --bg-elev: #ccd0da;
   --bg-input: #e1e5eb;
+  /* --bg-elev is darker than --bg-tree here: white, 25 units lighter, and
+     the field keeps its --line-strong border (settings-browser measures). */
+  --bg-field: #ffffff;
   --line: #ccd0da;
   --line-strong: #acb0be;
   --txt-hi: #4c4f69;

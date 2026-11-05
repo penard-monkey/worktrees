@@ -4161,6 +4161,8 @@ function App() {
   // `settingsOpen` is derived, so "the sheet is up" and "which section it went
   // to" cannot disagree. `{}`-with-no-cat is the ordinary ⌘, open.
   const [settingsAt, setSettingsAt] = useState<{ cat: CatId; focus?: string } | null>(null);
+  /** ⌘F while Settings is the only dialog up: focus its header search. */
+  const [settingsFindToken, setSettingsFindToken] = useState(0);
   const settingsOpen = settingsAt !== null;
   const openSettings = useCallback((at?: { cat: CatId; focus?: string }) => {
     setSettingsAt(at ?? { cat: "general" });
@@ -7575,9 +7577,10 @@ function App() {
       // dialog), so a dialog added later is covered without anyone remembering
       // to add a flag. Same reasoning as the sidebar's `.menu-catch` check.
       //
-      // Three exceptions. Two of them CLOSE what is on top rather than moving
+      // Four exceptions. Two of them CLOSE what is on top rather than moving
       // anything behind it: ⌘, when Settings is the only thing up, and ⌘K when
-      // the palette already owns the keyboard. The third is page zoom, which
+      // the palette already owns the keyboard. ⌘F with Settings alone finds IN
+      // it (its header search). The fourth is page zoom, which
       // changes the view and moves nothing — it cannot disturb what a dialog is
       // holding, and "make everything bigger" is exactly what you reach for
       // while squinting at Settings, whose own size slider is right there. The
@@ -7589,8 +7592,11 @@ function App() {
         const plain = e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && !e.repeat;
         const closesSettings = plain && e.key === "," && onlySettingsOpen();
         const closesPalette = plain && e.key.toLowerCase() === "k" && keyRef.current.switchOpen;
+        // ⌘F with Settings alone moves nothing behind it either: it focuses the
+        // sheet's own search box (the ⌘F branch below sends it there).
+        const findsInSettings = plain && e.key.toLowerCase() === "f" && onlySettingsOpen();
         const pageZoom = dir !== undefined && !e.altKey;
-        if (!closesSettings && !closesPalette && !pageZoom) return;
+        if (!closesSettings && !closesPalette && !findsInSettings && !pageZoom) return;
       }
       // ⌘⇧T — new dock terminal. The chord this started as; ⌘T (in the
       // meta-only section below) is the advertised one now and ⌘⇧T is kept as
@@ -7753,6 +7759,12 @@ function App() {
         // a second press re-selects the field rather than toggling the bar shut,
         // which is what every other find bar does.
         e.preventDefault();
+        // Settings up (and alone — the guard above let nothing else through):
+        // its header search is the find field, never the terminal under it.
+        if (onlySettingsOpen()) {
+          setSettingsFindToken((v) => v + 1);
+          return;
+        }
         // `lastSurface` is read HERE, live. A copy taken during render goes
         // stale the moment the user does something that changes no React state
         // — clicking into a terminal to focus it, clicking the open file's
@@ -9932,7 +9944,7 @@ function App() {
         }}
       />
 
-      <SettingsSheet open={settingsOpen} at={settingsAt} settings={settings} onResetLayout={resetLayout} onChange={(patch) => {
+      <SettingsSheet open={settingsOpen} at={settingsAt} findToken={settingsFindToken} settings={settings} onResetLayout={resetLayout} onChange={(patch) => {
         updateSettings(patch);
         if (patch.default_provider === "codex") void ensureCodexCli("codex");
       }} onClose={() => setSettingsAt(null)}

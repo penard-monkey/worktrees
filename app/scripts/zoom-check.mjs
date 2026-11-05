@@ -201,6 +201,12 @@ eq(press(",", { modal: true, settingsAlone: true }).through, true, "⌘, reaches
 eq(press(",", { modal: true, settingsAlone: false }).through, false, "⌘, is dead behind any other dialog — it must not pull Settings out from under it");
 eq(press("k", { code: "KeyK", modal: true }, { switchOpen: true }).through, true, "⌘K reaches its handler while the palette owns the keyboard");
 eq(press("k", { code: "KeyK", modal: true }, { switchOpen: false }).through, false, "⌘K cannot open the palette from behind a dialog");
+// ⌘F is the third, and it moves nothing behind the dialog either: with Settings
+// alone it focuses the sheet's own search box (SettingsSearchBox). Behind any
+// other dialog it stays unbound, like the rest.
+eq(press("f", { code: "KeyF", modal: true, settingsAlone: true }).through, true, "⌘F reaches its handler when Settings is the only dialog up (the sheet's search)");
+eq(press("f", { code: "KeyF", modal: true, settingsAlone: false }).through, false, "⌘F is dead behind any other dialog");
+eq(press("f", { code: "KeyF", shift: true, modal: true, settingsAlone: true }).through, false, "⌘⇧F is not the search chord");
 
 // ⌥ switches to the markdown reader's own size — and only where one is showing.
 const md = press("+", { alt: true }, { mdPreview: true });

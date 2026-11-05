@@ -18,7 +18,8 @@ their source additively (`get_codex_permissions {detail}`, `pi_status
 gets a shape it does not read. The owner's sandbox review then renamed the
 Remote group's heading to *Remote access* (its page stays *Remote*), set the
 headings apart from their pages, and moved the mode switch to the header's
-right. The plan was written from the code on `main` at 81a64fc0 (v0.47.0 plus #603/#604),
+right. It also added a search box to the header, left of the switch (§4.6).
+The plan was written from the code on `main` at 81a64fc0 (v0.47.0 plus #603/#604),
 the mock harness (every category screenshotted), the proposals under
 `docs/proposals/`, ROADMAP.md, and PrusaSlicer's knowledge base.
 **The ask:** "plan a reorg of the Settings pane. suggest new categories to
@@ -733,6 +734,23 @@ rail's gear tooltip is unchanged.
 
 Key: `settings_mode: "beginner" | "advanced" | "expert"` in the blob (per
 window; a phone and a Mac can differ, which is right).
+
+**Search** (the owner's addition after the first build): a small box with a
+magnifying glass immediately left of the switch, which widens leftward on
+focus and stays wide while it holds text. As you type, a list under it names
+sections: label, *group › page*, and a tier chip when the mode hides one.
+Arrows and Enter, or a click, open the page at the section and flash it; a
+hidden section is revealed for the visit the way a deep link reveals it, and
+the mode never changes. It matches labels (section, page, group), the setting
+keys, and a hand-written `keywords` list on every section ("dark mode" →
+Theme, "cap agents" → Limits), never the text of the controls. The ranking
+is name prefix, label word, keyword, page/group/key, substring, then sheet
+order, at most eight rows (`settingsSearch.ts`, held by
+`settingssearch-check.mjs`; settingsmap-check's rule 9 fails a section with
+no keywords). Escape closes the list, then clears the box, then the sheet;
+⌘F focuses the box while Settings is the only dialog up. A remote window
+lists nothing it can never draw. Its fill is `--bg-field`, a few shades
+lighter than the header so it reads as a field.
 
 ### 4.7 Defaults
 

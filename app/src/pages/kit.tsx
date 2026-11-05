@@ -62,6 +62,9 @@ export type SheetProps = {
   onFail: (e: unknown) => void;
   /** Settings → Projects: close the sheet and open a project's own sheet. */
   onOpenProject?: (root: string) => void;
+  /** Bumped by ⌘F while Settings is the only dialog up: focus the header's
+   *  search box (App's chord handler). */
+  findToken?: number;
   mcpStatus: McpStatus | null;
   onMcpChanged: (s: McpStatus) => void;
   mcpOfferPending: boolean;

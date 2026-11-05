@@ -33,6 +33,9 @@
 //   7. ONE ARM: no component keeps its own two-click timer (useArmed.ts).
 //   8. GRANTS: every row a section names for a remote window is one the
 //      remote door can refuse (ipc.ts's tables), and exists in serve.
+//   9. KEYWORDS: every section carries the hand-written synonyms the header's
+//      search matches on (settingsSearch.ts), so a section added without them
+//      is one nobody finds by the word they think of first.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -351,6 +354,24 @@ if (S.SETTINGS_REV !== 5) fail(`SETTINGS_REV is ${S.SETTINGS_REV}, expected 5`);
     }
   }
   if (!bad) ok("every row a section names for a remote window is one the remote door can refuse");
+}
+
+// ── 9. keywords ─────────────────────────────────────────────────────────────
+// The search (settingsSearch.ts) indexes labels and keys, which are the
+// sheet's words; `keywords` are the person's ("dark mode", "permissions", "cap
+// agents"). A section with none is found only by someone who already knows
+// what the sheet calls it.
+{
+  const before = bad;
+  const none = M.SECTIONS.filter((s) => !Array.isArray(s.keywords) || s.keywords.length === 0).map((s) => s.id);
+  if (none.length) fail(`${none.length} section(s) have no keywords — the header's search finds them only by their label: ${none.join(", ")}`);
+  for (const s of M.SECTIONS) {
+    for (const k of s.keywords ?? []) {
+      if (typeof k !== "string" || k !== k.trim().toLowerCase() || !/^[a-z0-9]/.test(k)) fail(`section ${s.id}: keyword ${JSON.stringify(k)} is not lowercase, trimmed words`);
+    }
+    if (new Set(s.keywords ?? []).size !== (s.keywords ?? []).length) fail(`section ${s.id} lists a keyword twice`);
+  }
+  if (bad === before) ok(`every section carries search keywords (${M.SECTIONS.reduce((n, s) => n + s.keywords.length, 0)} in all)`);
 }
 
 console.log(bad ? `\n${bad} failure(s)` : "\nall good");

@@ -28,6 +28,14 @@
 //     and heavier, a rule the rail does not swallow), and at the narrowest
 //     window, in every mode, here and remote: its pages sit indented under it,
 //     nothing is clipped, and the mode switch sits right, by esc and close.
+//   - the header's search: small with its glass, wider on focus without moving
+//     the switch, esc or close; a list as you type (a combobox: arrows, Enter,
+//     a click), a hit the mode hides marked with its tier and REVEALED when
+//     opened, the mode untouched; Escape closes the list, then clears the
+//     box, then the sheet; a press outside closes the list; ⌘F focuses it; a
+//     remote window never lists what it cannot draw; at the narrowest window
+//     the list sits inside the modal and every row is reachable; in all six
+//     themes the field is lighter than the header and its words read.
 const { chromium, webkit } = await import(process.env.PLAYWRIGHT_MODULE ?? "playwright");
 import fs from "node:fs";
 const BASE = process.env.SETTINGS_MOCK_URL ?? "http://localhost:1458";
@@ -123,7 +131,7 @@ const railLook = (page) => page.evaluate(() => {
   });
   const mid = (r) => r.top + r.height / 2;
   const box = (sel) => document.querySelector(sel).getBoundingClientRect();
-  const [title, seg, keys] = [box(".settings-h b"), box(".settings-mode"), box(".settings-h .modal-keys")];
+  const [title, search, seg, keys] = [box(".settings-h b"), box(".settings-search-input"), box(".settings-mode"), box(".settings-h .modal-keys")];
   return {
     headingVsItem: ratio(hc, ic),
     heavier: +getComputedStyle(heads[0]).fontWeight > +getComputedStyle(items[0]).fontWeight,
@@ -138,9 +146,87 @@ const railLook = (page) => page.evaluate(() => {
       const r = document.createRange(); r.selectNodeContents(e.firstChild);
       return new Set([...r.getClientRects()].map((q) => Math.round(q.top))).size > 1;
     }).map((e) => e.textContent),
-    titleGap: seg.left - title.right,
+    titleGap: search.left - title.right,
+    searchToSeg: seg.left - search.right,
     segToKeys: keys.left - seg.right,
-    centre: Math.abs(mid(seg) - mid(title)),
+    centre: Math.max(Math.abs(mid(seg) - mid(title)), Math.abs(mid(search) - mid(title))),
+  };
+});
+
+const SEARCH = "[data-testid=settings-search-input]";
+/** The header's search as drawn: the box and its neighbours, the list, its
+ *  rows (each hit-tested at its centre: the list floats over the page inside
+ *  a modal whose overflow is hidden), and the combobox's ARIA. */
+const searchLook = (page) => page.evaluate(() => {
+  const R = (el) => { if (!el) return null; const b = el.getBoundingClientRect(); return { left: b.left, right: b.right, top: b.top, bottom: b.bottom, width: b.width, height: b.height }; };
+  const q = (s) => document.querySelector(s);
+  const input = q("[data-testid=settings-search-input]");
+  const rows = [...document.querySelectorAll("[data-testid=settings-search-row]")];
+  const pop = R(q(".settings-search-pop")), modal = R(q(".settings-modal"));
+  return {
+    box: R(input), icon: R(q(".settings-search-icon")), title: R(q(".settings-h b")), seg: R(q(".settings-mode")),
+    keys: R(q(".settings-h .modal-keys")), close: R(q(".settings-h .icon-btn")), pop, modal,
+    inside: pop && modal ? pop.left >= modal.left && pop.right <= modal.right && pop.top >= modal.top && pop.bottom <= modal.bottom - 1 : null,
+    rows: rows.map((r) => ({
+      id: r.dataset.id, optId: r.id, selected: r.getAttribute("aria-selected"),
+      tier: r.querySelector("[data-testid=settings-search-tier]")?.textContent ?? null,
+      label: r.querySelector(".settings-search-label")?.textContent, where: r.querySelector(".settings-search-where")?.textContent,
+    })),
+    unhit: rows.filter((r) => {
+      const b = r.getBoundingClientRect();
+      const hit = document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2);
+      return !(hit && r.contains(hit));
+    }).map((r) => r.dataset.id),
+    none: !!q("[data-testid=settings-search-none]"),
+    role: input?.getAttribute("role"), expanded: input?.getAttribute("aria-expanded"),
+    controls: input?.getAttribute("aria-controls") ?? null, active: input?.getAttribute("aria-activedescendant") ?? null,
+    listbox: q(".settings-search-pop [role=listbox]")?.id ?? null,
+    focused: document.activeElement === input, value: input?.value, sheet: !!q(".settings-modal"),
+    selection: input ? [input.selectionStart, input.selectionEnd] : null,
+  };
+});
+/** Type into the box from empty, as a person would (it is focused first). */
+const searchFor = async (page, text) => {
+  await page.click(SEARCH);
+  await page.fill(SEARCH, "");
+  await page.keyboard.type(text);
+  await page.waitForTimeout(150);
+};
+const near = (a, b) => Math.abs(a - b) <= 1;
+/** The field against the header, and the words in the list, composited. */
+const searchColours = (page) => page.evaluate(() => {
+  const parse = (c) => {
+    let m = /^rgba?\(([^)]+)\)/.exec(c);
+    if (m) { const p = m[1].split(/[ ,/]+/).filter(Boolean).map(Number); return [p[0], p[1], p[2], p[3] ?? 1]; }
+    m = /^color\(srgb ([^)]+)\)/.exec(c);
+    if (m) { const p = m[1].split(/[ /]+/).filter(Boolean).map(Number); return [p[0] * 255, p[1] * 255, p[2] * 255, p[3] ?? 1]; }
+    return [0, 0, 0, 0];
+  };
+  const over = (t, u) => { const a = t[3]; return [0, 1, 2].map((i) => t[i] * a + u[i] * (1 - a)).concat(1); };
+  const bgOf = (el) => { const st = []; for (let e = el; e; e = e.parentElement) { const c = parse(getComputedStyle(e).backgroundColor); if (c[3] > 0) st.push(c); if (c[3] >= 1) break; } let acc = [255, 255, 255, 1]; for (const c of st.reverse()) acc = over(c, acc); return acc; };
+  const lum = (c) => { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]); };
+  const ratio = (x, y) => { const [a, b] = [lum(x), lum(y)].sort((p, q) => q - p); return (a + 0.05) / (b + 0.05); };
+  const text = (el) => ratio(over(parse(getComputedStyle(el).color), bgOf(el)), bgOf(el));
+  const input = document.querySelector(".settings-search-input");
+  const head = bgOf(document.querySelector(".settings-h"));
+  const fill = bgOf(input);
+  // The floor the placeholder is held to: --txt-dim on --bg-elev, the
+  // lowest the app already puts it on (a hovered row), in this theme.
+  const root = getComputedStyle(document.documentElement);
+  const tok = (n) => { const d = document.createElement("i"); d.style.color = root.getPropertyValue(n); document.body.append(d); const c = parse(getComputedStyle(d).color); d.remove(); return c; };
+  const hiRow = document.querySelector(".settings-search-row.hi");
+  const pop = document.querySelector(".settings-search-pop");
+  return {
+    fillDelta: Math.max(...[0, 1, 2].map((i) => Math.abs(fill[i] - head[i]))), lighter: lum(fill) > lum(head),
+    placeholder: ratio(over(parse(getComputedStyle(input, "::placeholder").color), fill), fill),
+    icon: ratio(over(parse(getComputedStyle(document.querySelector(".settings-search-icon")).color), fill), fill),
+    border: ratio(over(parse(getComputedStyle(input).borderTopColor), head), head),
+    floor: ratio(tok("--txt-dim"), tok("--bg-elev")),
+    words: [...document.querySelectorAll(".settings-search-label, .settings-search-where, .settings-search-tier, .settings-search-none")]
+      .map((e) => ({ text: e.textContent.trim().slice(0, 24), ratio: text(e) })),
+    // the highlighted row: its accent bar against the row, as a non-text mark
+    bar: hiRow ? ratio(tok("--accent"), bgOf(hiRow)) : null,
+    popVsHead: pop ? ratio(bgOf(pop), head) : null,
   };
 });
 
@@ -405,6 +491,169 @@ async function run(engine, name) {
   if (SHOTS) await rp.locator(".settings-modal").screenshot({ path: `${SHOTS}/${name}-remote-data.png` });
   await rctx.close();
 
+  // ── the header's search ──────────────────────────────────────────────────
+  const sctx = await browser.newContext({ viewport: { width: 1280, height: 860 } });
+  const sp = await sctx.newPage();
+  sp.on("pageerror", (e) => ok(false, `[${name}] search page error: ${e.message}`));
+  await openSheet(sp);
+  await sp.waitForTimeout(300); // the modal's pop animation scales every rect
+  const s0 = await searchLook(sp);
+  ok(s0.role === "combobox" && s0.expanded === "false" && s0.box.width < 110,
+    `[${name}] search: a small combobox at rest (${s0.box.width.toFixed(0)}px), collapsed`);
+  ok(s0.icon.left >= s0.box.left && s0.icon.right <= s0.box.right && s0.icon.top >= s0.box.top && s0.icon.bottom <= s0.box.bottom,
+    `[${name}] search: the magnifying glass sits inside the box`);
+  ok(s0.seg.left - s0.box.right >= 8 && s0.seg.left - s0.box.right <= 16, `[${name}] search: immediately left of the mode switch (${(s0.seg.left - s0.box.right).toFixed(0)}px)`);
+  await sp.click(SEARCH);
+  await sp.waitForTimeout(300);
+  const s1 = await searchLook(sp);
+  ok(s1.box.width >= s0.box.width + 80 && near(s1.box.right, s0.box.right),
+    `[${name}] search: focused, it widens LEFTWARD (${s0.box.width.toFixed(0)} → ${s1.box.width.toFixed(0)}px, right edge kept)`);
+  ok(near(s1.seg.left, s0.seg.left) && near(s1.keys.left, s0.keys.left) && near(s1.close.left, s0.close.left) && near(s1.title.left, s0.title.left),
+    `[${name}] search: …and the title, switch, esc and close do not move`);
+
+  await sp.keyboard.type("dark mode");
+  await sp.waitForTimeout(150);
+  let sl = await searchLook(sp);
+  ok(sl.rows.length >= 1 && sl.rows[0].id === "theme" && sl.rows[0].where === "Workspace › Appearance" && sl.rows[0].tier === null,
+    `[${name}] search: "dark mode" lists Theme, in Workspace › Appearance, no tier chip (Beginner shows it): ${sl.rows.map((r) => r.id).join(", ")}`);
+  ok(!sl.rows.some((r) => r.id === "theme-pair"), `[${name}] search: …and not the light/dark pair, which this theme setting never draws`);
+  ok(sl.expanded === "true" && sl.listbox && sl.controls === sl.listbox && sl.active === sl.rows[0].optId && sl.rows[0].selected === "true",
+    `[${name}] search: combobox semantics — expanded, controls the listbox, the active option is announced`);
+  ok(sl.inside && sl.unhit.length === 0, `[${name}] search: the list sits inside the modal and every row is reachable at its centre${sl.unhit.length ? ` — not: ${sl.unhit.join(", ")}` : ""}`);
+
+  await searchFor(sp, "zzqqxx");
+  sl = await searchLook(sp);
+  ok(sl.none && sl.rows.length === 0 && sl.controls === null, `[${name}] search: nothing matches → "No settings match", and no listbox to point at`);
+
+  // arrows wrap, Enter opens: "font" is UI font size (Advanced, hidden in
+  // Beginner) then Terminal font.
+  await searchFor(sp, "font");
+  sl = await searchLook(sp);
+  ok(sl.rows.slice(0, 2).map((r) => `${r.id}:${r.tier}`).join() === "ui-font:Advanced,term-font:null",
+    `[${name}] search: "font" → both font sections, the hidden one marked Advanced (${sl.rows.map((r) => `${r.id}:${r.tier}`).join(", ")})`);
+  const actives = [];
+  for (const k of ["ArrowDown", "ArrowDown", "ArrowUp", "ArrowUp"]) {
+    await sp.keyboard.press(k);
+    await sp.waitForTimeout(60);
+    const now = await searchLook(sp);
+    actives.push(now.rows.findIndex((r) => r.optId === now.active && r.selected === "true"));
+  }
+  const n = sl.rows.length;
+  ok(actives.join() === [1 % n, 2 % n, 1 % n, 0].join(), `[${name}] search: ↓↓↑↑ moves the active row and wraps (${actives.join(" → ")} of ${n})`);
+  await sp.keyboard.press("ArrowDown");
+  await sp.keyboard.press("Enter");
+  // A wait that a broken box would leave hanging reports, never throws: the
+  // rules after it still run (a mutation of the list's outside handler lost
+  // the row's click, and the bare wait took the whole run down with it).
+  const reached = (page, cat) => page.waitForSelector(`.settings-body[data-page=${cat}]`, { timeout: 3000 }).then(() => true, () => false);
+  const toTerminal = await reached(sp, "terminal");
+  await sp.waitForTimeout(120);
+  sl = await searchLook(sp);
+  const flashed = await sp.evaluate(() => document.querySelector(".settings-body [data-sec=term-font]")?.classList.contains("focus-flash"));
+  ok(toTerminal && flashed && !sl.pop && sl.value === "font" && sl.focused, `[${name}] search: Enter opens Terminal at Terminal font and flashes it; the list closes, the words stay, focus stays in the box`);
+  ok(await mode(sp) === "beginner", `[${name}] search: …in Beginner still`);
+
+  // a hit the mode hides is REVEALED by opening it, by a click, and the mode stays
+  await searchFor(sp, "cap agents");
+  sl = await searchLook(sp);
+  ok(sl.rows[0]?.id === "limits" && sl.rows[0].tier === "Advanced" && sl.rows[0].where === "Agent policy",
+    `[${name}] search: "cap agents" → Limits first, marked Advanced, in Agent policy`);
+  await sp.locator("[data-testid=settings-search-row][data-id=limits]").click({ timeout: 3000 }).catch(() => {});
+  const toPolicy = await reached(sp, "policy");
+  await sp.waitForTimeout(250);
+  ok(toPolicy && (await drawn(sp)).includes("limits") && await sp.locator("[data-testid=reveal-switch-limits]").count() === 1,
+    `[${name}] search: clicking it opens Agent policy with Limits revealed, and the switch to Advanced beside it`);
+  ok(await mode(sp) === "beginner" && ((await blob(sp))?.settings_mode ?? "beginner") === "beginner", `[${name}] search: …and the mode is still Beginner, in the blob too`);
+  ok((await searchLook(sp)).focused, `[${name}] search: a click on a row keeps focus in the box`);
+
+  // Escape: the list, then the text, then the sheet
+  await searchFor(sp, "theme");
+  const escs = [];
+  for (let i = 0; i < 3; i++) {
+    await sp.keyboard.press("Escape");
+    await sp.waitForTimeout(120);
+    const e = await searchLook(sp);
+    escs.push(e.sheet ? `${e.pop ? "list" : "no list"}/${e.value ? "text" : "empty"}` : "closed");
+  }
+  ok(escs.join(" · ") === "no list/text · no list/empty · closed", `[${name}] search: Escape closes the list, then clears the box, then the sheet (${escs.join(" · ")})`);
+
+  // a press outside closes the list; an empty box collapses on blur
+  await openSheet(sp);
+  await sp.waitForTimeout(300);
+  await searchFor(sp, "plan");
+  await sp.click(".settings-h b"); // outside the box and its list, which covers the page title
+  await sp.waitForTimeout(250);
+  sl = await searchLook(sp);
+  ok(!sl.pop && sl.value === "plan" && sl.box.width >= s1.box.width - 1, `[${name}] search: a press outside closes the list; holding text, the box stays wide`);
+  await sp.click(SEARCH);
+  await sp.waitForTimeout(150);
+  ok(!!(await searchLook(sp)).pop, `[${name}] search: focusing a box that holds text opens its list again`);
+  await sp.fill(SEARCH, "");
+  await sp.click(".settings-h b"); // outside the box and its list, which covers the page title
+  await sp.waitForTimeout(300);
+  sl = await searchLook(sp);
+  ok(!sl.focused && near(sl.box.width, s0.box.width), `[${name}] search: empty and blurred, it collapses (${sl.box.width.toFixed(0)}px)`);
+
+  // ⌘F, with Settings the only dialog up, focuses the box (and selects its text)
+  await sp.fill(SEARCH, "logs");
+  await sp.click(".settings-h b"); // outside the box and its list, which covers the page title
+  await sp.keyboard.press("Meta+f");
+  await sp.waitForTimeout(150);
+  sl = await searchLook(sp);
+  ok(sl.focused && sl.selection?.join() === "0,4", `[${name}] search: ⌘F focuses the box and selects what it holds`);
+
+  // the field and the list in every theme: the field LIGHTER than the header
+  // (the owner's review), its glass and placeholder no fainter than --txt-dim
+  // on a hovered row, the list's words ≥ 4.5:1, the active row marked.
+  await sp.fill(SEARCH, "");
+  await sp.click(".settings-h b"); // outside the box and its list, which covers the page title
+  await sp.waitForTimeout(250);
+  for (const theme of THEMES) {
+    await sp.evaluate((t) => { document.documentElement.dataset.theme = t; }, theme);
+    await sp.waitForTimeout(60);
+    const f = await searchColours(sp);
+    ok(f.lighter && f.fillDelta >= 15 && f.border >= 1.4,
+      `[${name}] ${theme}: the search field is lighter than the header (${f.fillDelta} RGB units), border ${f.border.toFixed(2)}:1`);
+    ok(f.placeholder >= f.floor - 0.01 && f.icon >= f.floor - 0.01,
+      `[${name}] ${theme}: its placeholder and glass read (${f.placeholder.toFixed(2)}:1, --txt-dim on a hovered row is ${f.floor.toFixed(2)}:1)`);
+  }
+  await searchFor(sp, "a");
+  for (const theme of THEMES) {
+    await sp.evaluate((t) => { document.documentElement.dataset.theme = t; }, theme);
+    await sp.waitForTimeout(60);
+    const f = await searchColours(sp);
+    const low = f.words.filter((w) => w.ratio < 4.5);
+    ok(f.words.length >= 16 && low.length === 0,
+      `[${name}] ${theme}: the list's labels, places and tier chips ≥ 4.5:1${low.length ? ` — ${low.map((w) => `"${w.text}" ${w.ratio.toFixed(2)}`).join(", ")}` : ` (min ${Math.min(...f.words.map((w) => w.ratio)).toFixed(2)})`}`);
+    ok(f.bar >= 3, `[${name}] ${theme}: the active row's mark shows (${f.bar.toFixed(2)}:1)`);
+    if (SHOTS && ["tokyo-day", "nord"].includes(theme)) await sp.locator(".settings-modal").screenshot({ path: `${SHOTS}/${name}-search-${theme}.png` });
+  }
+  await searchFor(sp, "zzqqxx");
+  for (const theme of THEMES) {
+    await sp.evaluate((t) => { document.documentElement.dataset.theme = t; }, theme);
+    await sp.waitForTimeout(60);
+    const w = (await searchColours(sp)).words;
+    ok(w.length === 1 && w[0].ratio >= 4.5, `[${name}] ${theme}: "No settings match" reads (${w[0]?.ratio.toFixed(2)}:1)`);
+  }
+  await sctx.close();
+
+  // a remote window lists nothing it can never draw, and opens a GrantNote
+  const srctx = await browser.newContext({ viewport: { width: 1280, height: 860 } });
+  const srp = await srctx.newPage();
+  srp.on("pageerror", (e) => ok(false, `[${name}] remote search page error: ${e.message}`));
+  await openSheet(srp, "?remote=noadmin");
+  await searchFor(srp, "restore");
+  const rIds = (await searchLook(srp)).rows.map((r) => r.id);
+  ok(rIds.includes("restore-last") && !rIds.includes("restore-window"), `[${name}] remote search: "restore" lists Startup, never Restore window (${rIds.join(", ")})`);
+  await searchFor(srp, "ai profiles");
+  const prof = (await searchLook(srp)).rows[0];
+  ok(prof?.id === "profiles" && prof.tier === "Advanced", `[${name}] remote search: "ai profiles" → AI profiles, marked Advanced`);
+  await srp.keyboard.press("Enter");
+  const toProfiles = await srp.waitForSelector(".settings-body[data-page=profiles]", { timeout: 3000 }).then(() => true, () => false);
+  await srp.waitForTimeout(250);
+  ok(toProfiles && await srp.locator(".sec[data-sec=profiles] [data-testid=grant-note]").count() === 1, `[${name}] remote search: opening it shows the GrantNote that says why`);
+  await srctx.close();
+
   // ── the rail and the header at the app's narrowest window ────────────────
   // (tauri.conf.json's minWidth × minHeight), in every mode, here and remote.
   for (const remote of [false, true]) {
@@ -419,8 +668,22 @@ async function run(engine, name) {
       ok(r.indent >= 8 && r.pillShift >= -1, `[${name}] ${where}, ${m}: pages sit indented under their heading, the selected pill too (${r.indent.toFixed(0)}px, pill ${r.pillShift.toFixed(0)}px)`);
       ok(r.minRoom >= 16, `[${name}] ${where}, ${m}: room above every later group (${r.minRoom.toFixed(0)}px)`);
       ok(r.clipped.length === 0, `[${name}] ${where}, ${m}: no heading or page clipped or wrapped${r.clipped.length ? ` — ${r.clipped.join(", ")}` : ""}`);
-      ok(r.segToKeys >= 0 && r.segToKeys <= 24 && r.titleGap >= 16 && r.centre <= 1,
-        `[${name}] ${where}, ${m}: the mode switch sits right, beside esc and close (${r.segToKeys.toFixed(0)}px), clear of the title (${r.titleGap.toFixed(0)}px), centred with it (${r.centre.toFixed(1)}px)`);
+      ok(r.segToKeys >= 0 && r.segToKeys <= 24 && r.searchToSeg >= 8 && r.searchToSeg <= 16 && r.titleGap >= 16 && r.centre <= 1,
+        `[${name}] ${where}, ${m}: the search then the mode switch sit right, beside esc and close (${r.searchToSeg.toFixed(0)}px, ${r.segToKeys.toFixed(0)}px), clear of the title (${r.titleGap.toFixed(0)}px), centred with it (${r.centre.toFixed(1)}px)`);
+      // Wide and listing its eight rows, nothing to its right moves and the
+      // list stays inside the modal, every row reachable.
+      const before = await searchLook(np);
+      await searchFor(np, "a");
+      const w = await searchLook(np);
+      const wr = await railLook(np);
+      ok(w.rows.length === 8 && w.inside && w.unhit.length === 0 && near(w.seg.left, before.seg.left) && near(w.close.left, before.close.left) && wr.titleGap >= 16 && wr.centre <= 1,
+        `[${name}] ${where}, ${m}: the open search fits — 8 rows inside the modal (bottom ${(w.modal.bottom - w.pop.bottom).toFixed(0)}px clear), all reachable, switch and close unmoved, title ${wr.titleGap.toFixed(0)}px clear`);
+      if (SHOTS && m === "beginner") await np.locator(".settings-modal").screenshot({ path: `${SHOTS}/${name}-narrow${remote ? "-remote" : ""}-search.png` });
+      // Cleared and blurred directly, not by Escape: Escape has its own rule
+      // above, and a broken one must not close the sheet under this loop.
+      await np.fill(SEARCH, "");
+      await np.evaluate(() => document.activeElement?.blur());
+      await np.waitForTimeout(250);
     }
     if (SHOTS) await np.locator(".settings-modal").screenshot({ path: `${SHOTS}/${name}-narrow${remote ? "-remote" : ""}-expert.png` });
     await nctx.close();

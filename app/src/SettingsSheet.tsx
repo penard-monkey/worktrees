@@ -18,6 +18,7 @@ import {
   type HostKey, type Mode, type PageId, type VisCtx,
 } from "./settingsMap";
 import { SheetContext, type HostSnap, type SheetApi, type SheetProps } from "./pages/kit";
+import { SettingsSearchBox } from "./SettingsSearchBox";
 import { useUpdateRuns } from "./pages/updates";
 import { GeneralPage } from "./pages/general";
 import { AppearancePage } from "./pages/appearance";
@@ -291,6 +292,10 @@ export function SettingsSheet(props: SheetProps) {
       <aside className="modal settings-modal" onClick={(e) => e.stopPropagation()}>
         <header className="settings-h">
           <b>Settings</b>
+          {/* The search (SettingsSearchBox.tsx): a hit opens its page at the
+              section, through the same `goto` a pointer line takes, so a
+              section the mode hides is revealed and the mode stays. */}
+          <SettingsSearchBox vis={vis} onOpen={goto} focusToken={props.findToken} />
           {/* The mode (§4.6): what the sheet DRAWS, never what anything does.
               A segmented control, not a popover — no new Escape surface. */}
           <div className="seg seg-plain settings-mode" role="radiogroup" aria-label="Settings mode" data-testid="settings-mode">
