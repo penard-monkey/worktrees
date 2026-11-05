@@ -29,7 +29,7 @@ export const GROUPS = [
   { id: "agents", label: "Agents" },
   { id: "policy", label: "Agent policy" },
   { id: "projects", label: "Projects" },
-  { id: "remote", label: "Remote" },
+  { id: "remote", label: "Remote access" },
   { id: "system", label: "System" },
 ] as const;
 export type GroupId = (typeof GROUPS)[number]["id"];

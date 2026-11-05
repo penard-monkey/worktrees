@@ -64,6 +64,7 @@
   --fw-body: 400;
   --fw-med: 500;
   --fw-bold: 600;
+  --fw-heavy: 700;   /* a heading over rows that are --fw-med: the Settings rail's groups */
   --lh-row: 1.5;
   --lh-prose: 1.6;
   --font-ui: ui-sans-serif, -apple-system, "Inter", system-ui, sans-serif;

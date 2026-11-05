@@ -3033,18 +3033,29 @@ body.dragging .menu-catch { pointer-events: none; }
 /* ── the regrouped sheet (docs/proposals/settings-reorg.md) ─────────────────
    Words are --txt-hi / --txt-dim everywhere here; the one hue is the tier DOT
    (an accent is a fill, not text). */
-/* The mode switch sits right of the title (§4.6); the title stops growing so
-   the switch stays beside it rather than at the far edge. */
-.settings-h b { flex: 0 1 auto; }
-.settings-mode { margin-left: var(--s4); margin-right: auto; }
+/* The mode switch sits at the right of the header, just left of the esc / ⌘,
+   hints and the close button (the owner's review: it had trailed the title).
+   The free space is between the title and the switch; the title's own margin
+   keeps them apart if the header ever runs out of it. */
+.settings-h b { flex: 0 1 auto; margin-right: var(--s4); }
+.settings-mode { margin-left: auto; margin-right: var(--s4); }
 .settings-mode button { padding: var(--s1) var(--s3); font-size: var(--fs-meta); }
-/* Six groups with a header each: what lets the page rows read as six things. */
+/* Six groups with a header each: what lets the page rows read as six things.
+   The owner's review found the first cut read as one more page (small muted
+   caps at the pages' own left edge), so a heading is --txt-hi and heavier, its
+   pages sit one step in (the selected pill with them), and every later group
+   gets room and a rule above it. The rule is --line-strong: --line on the
+   rail's --bg-tree measured 1.13:1 in tokyo-day (13 RGB units) and the next
+   weakest 1.23:1; --line-strong is 1.49:1 at its weakest (settings-browser). */
 .settings-group { display: flex; flex-direction: column; gap: 2px; }
-.settings-group + .settings-group { margin-top: var(--s2); }
-.settings-group-h {
-  padding: var(--s1) var(--s3) 2px; font-size: var(--fs-micro); font-weight: var(--fw-bold);
-  letter-spacing: 0.06em; text-transform: uppercase; color: var(--txt);
+.settings-group + .settings-group {
+  margin-top: var(--s2); padding-top: var(--s3); border-top: 1px solid var(--line-strong);
 }
+.settings-group-h {
+  padding: var(--s1) var(--s3); font-size: var(--fs-micro); font-weight: var(--fw-heavy);
+  letter-spacing: 0.06em; text-transform: uppercase; color: var(--txt-hi);
+}
+.settings-group .settings-cat { margin-left: var(--s3); }
 /* A page: its title, the one sentence saying whose its settings are, its
    sections, and the "N more settings" line. */
 .page-head { display: flex; flex-direction: column; gap: 2px; margin-bottom: calc(-1 * var(--s2)); }

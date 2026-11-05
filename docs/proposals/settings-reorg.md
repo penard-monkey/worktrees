@@ -15,7 +15,10 @@ environment, so a control the environment decides is NOT drawn disabled
 guidance's switch, where the environment wins, is. And the getters report
 their source additively (`get_codex_permissions {detail}`, `pi_status
 .trust_origin`, `agent_guidance_status.enabled_origin`), so no older client
-gets a shape it does not read. The plan was written from the code on `main` at 81a64fc0 (v0.47.0 plus #603/#604),
+gets a shape it does not read. The owner's sandbox review then renamed the
+Remote group's heading to *Remote access* (its page stays *Remote*), set the
+headings apart from their pages, and moved the mode switch to the header's
+right. The plan was written from the code on `main` at 81a64fc0 (v0.47.0 plus #603/#604),
 the mock harness (every category screenshotted), the proposals under
 `docs/proposals/`, ROADMAP.md, and PrusaSlicer's knowledge base.
 **The ask:** "plan a reorg of the Settings pane. suggest new categories to
@@ -34,7 +37,7 @@ organizes its configuration."
   over five categories) and what sits together does not belong (Appearance
   holds a polling switch; Navigation holds the layout).
 - **Regroup into six groups and 17 pages** (§3): Workspace, Agents, Agent
-  policy, Projects, Remote, System. Every page shows WHICH machine a setting
+  policy, Projects, Remote access, System. Every page shows WHICH machine a setting
   belongs to. Old category ids become aliases, so every deep link survives.
 - **Modes: yes, three, named as the owner wrote them (Beginner / Advanced /
   Expert), with one rule PrusaSlicer lacks:** a setting you changed is never
@@ -389,7 +392,7 @@ AGENT POLICY     this machine: how much agents may do
   Agent policy                ← presets live here (§5)
 PROJECTS
   Projects
-REMOTE
+REMOTE ACCESS
   Remote
 SYSTEM
   Updates
@@ -720,7 +723,8 @@ pointer would need to know the mode, which is the precondition trap.
 
 ### 4.6 Where the switch lives
 
-In the Settings header, right of the title, as a three-way segmented
+In the Settings header, at its right beside the esc / ⌘, hints and the
+close button (the owner's review moved it there from beside the title), as a three-way segmented
 control (`.seg`, the same control Sidebar uses), **not** in a category and
 not in a popover (no new `useEscape` surface). PrusaSlicer puts it on the
 main window; this app's main window has no chrome to spare and the mode

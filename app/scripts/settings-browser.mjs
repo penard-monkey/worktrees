@@ -23,7 +23,11 @@
 //     window is not drawn, and the settings file is this machine's;
 //   - every button on every page is REACHABLE (elementFromPoint at its
 //     centre), and the new words — group headers, scope sentences, chips, the
-//     footer — read at ≥ 4.5:1 in all six themes (composited backgrounds).
+//     footer — read at ≥ 4.5:1 in all six themes (composited backgrounds);
+//   - a group heading stands apart from its pages in all six themes (brighter
+//     and heavier, a rule the rail does not swallow), and at the narrowest
+//     window, in every mode, here and remote: its pages sit indented under it,
+//     nothing is clipped, and the mode switch sits right, by esc and close.
 const { chromium, webkit } = await import(process.env.PLAYWRIGHT_MODULE ?? "playwright");
 import fs from "node:fs";
 const BASE = process.env.SETTINGS_MOCK_URL ?? "http://localhost:1458";
@@ -82,6 +86,64 @@ const contrast = (page, sel) => page.evaluate((sel) => {
   });
 }, sel);
 
+/** The rail and the header as drawn (the owner's review of the first build:
+ *  the group headings read as one more page). What sets a heading apart from
+ *  its pages — colour against them, weight, the pages indented under it, a
+ *  rule and room above every later group — and where the mode switch sits. */
+const railLook = (page) => page.evaluate(() => {
+  const parse = (c) => {
+    let m = /^rgba?\(([^)]+)\)/.exec(c);
+    if (m) { const p = m[1].split(/[ ,/]+/).filter(Boolean).map(Number); return [p[0], p[1], p[2], p[3] ?? 1]; }
+    m = /^color\(srgb ([^)]+)\)/.exec(c);
+    if (m) { const p = m[1].split(/[ /]+/).filter(Boolean).map(Number); return [p[0] * 255, p[1] * 255, p[2] * 255, p[3] ?? 1]; }
+    return [0, 0, 0, 0];
+  };
+  const over = (top, under) => { const a = top[3]; return [0, 1, 2].map((i) => top[i] * a + under[i] * (1 - a)).concat(1); };
+  const bgOf = (el) => {
+    const stack = [];
+    for (let e = el; e; e = e.parentElement) { const c = parse(getComputedStyle(e).backgroundColor); if (c[3] > 0) stack.push(c); if (c[3] >= 1) break; }
+    let acc = [255, 255, 255, 1];
+    for (const c of stack.reverse()) acc = over(c, acc);
+    return acc;
+  };
+  const lum = (c) => { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(c[0]) + 0.7152 * f(c[1]) + 0.0722 * f(c[2]); };
+  const ratio = (x, y) => { const [a, b] = [lum(x), lum(y)].sort((p, q) => q - p); return (a + 0.05) / (b + 0.05); };
+  const textX = (el) => { const r = document.createRange(); r.selectNodeContents(el.firstChild); return r.getBoundingClientRect().left; };
+  const rail = document.querySelector(".settings-cats");
+  const surface = bgOf(rail);
+  const heads = [...document.querySelectorAll(".settings-group-h")];
+  const items = [...document.querySelectorAll(".settings-cat:not(.on)")];
+  const on = document.querySelector(".settings-cat.on");
+  const groups = [...document.querySelectorAll(".settings-group")];
+  const hc = over(parse(getComputedStyle(heads[0]).color), surface);
+  const ic = over(parse(getComputedStyle(items[0]).color), bgOf(items[0]));
+  const rules = groups.slice(1).map((g) => {
+    const cs = getComputedStyle(g);
+    return parseFloat(cs.borderTopWidth) >= 1 ? ratio(over(parse(cs.borderTopColor), surface), surface) : 0;
+  });
+  const mid = (r) => r.top + r.height / 2;
+  const box = (sel) => document.querySelector(sel).getBoundingClientRect();
+  const [title, seg, keys] = [box(".settings-h b"), box(".settings-mode"), box(".settings-h .modal-keys")];
+  return {
+    headingVsItem: ratio(hc, ic),
+    heavier: +getComputedStyle(heads[0]).fontWeight > +getComputedStyle(items[0]).fontWeight,
+    minRule: Math.min(...rules),
+    indent: Math.min(...items.map(textX)) - Math.max(...heads.map(textX)),
+    pillShift: on ? on.getBoundingClientRect().left - Math.max(...heads.map(textX)) : 0,
+    minRoom: Math.min(...groups.slice(1).map((g, i) => g.querySelector(".settings-group-h").getBoundingClientRect().top - groups[i].getBoundingClientRect().bottom)),
+    // A page row does not wrap (nowrap), so it overflows; a heading is a
+    // block, so it WRAPS instead — "Remote access" on two lines is the miss.
+    clipped: [...rail.querySelectorAll(".settings-cat, .settings-group-h")].filter((e) => {
+      if (e.scrollWidth > e.clientWidth + 0.5) return true;
+      const r = document.createRange(); r.selectNodeContents(e.firstChild);
+      return new Set([...r.getClientRects()].map((q) => Math.round(q.top))).size > 1;
+    }).map((e) => e.textContent),
+    titleGap: seg.left - title.right,
+    segToKeys: keys.left - seg.right,
+    centre: Math.abs(mid(seg) - mid(title)),
+  };
+});
+
 async function run(engine, name) {
   const browser = await engine.launch();
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 860 } });
@@ -92,7 +154,7 @@ async function run(engine, name) {
   await openSheet(page);
   ok(await mode(page) === "beginner", `[${name}] a fresh window opens Settings in Beginner`);
   const groups = await page.evaluate(() => [...document.querySelectorAll(".settings-group-h")].map((h) => h.textContent));
-  ok(groups.join("|") === "Workspace|Agents|Agent policy|Projects|Remote|System", `[${name}] six groups: ${groups.join(", ")}`);
+  ok(groups.join("|") === "Workspace|Agents|Agent policy|Projects|Remote access|System", `[${name}] six groups: ${groups.join(", ")}`);
   const beg = await listed(page);
   ok(!beg.includes("reference") && !beg.includes("guidance"), `[${name}] Beginner lists no Advanced page that holds nothing changed (${beg.join(", ")})`);
   // A page above the mode is listed only for a section that is drawn anyway,
@@ -213,6 +275,12 @@ async function run(engine, name) {
     ];
     const low = rows.filter((r) => r.ratio < 4.5);
     ok(low.length === 0, `[${name}] ${theme}: group headers, scope, chips ≥ 4.5:1${low.length ? ` — ${low.map((r) => `"${r.text}" ${r.ratio.toFixed(2)}`).join(", ")}` : ` (min ${Math.min(...rows.map((r) => r.ratio)).toFixed(2)})`}`);
+    // A heading reads as a heading, not one more page: brighter than its pages
+    // and heavier, and a rule above each later group that the surface does
+    // not swallow (`--line` measured 1.13:1 on tokyo-day's rail).
+    const r = await railLook(page);
+    ok(r.headingVsItem >= 1.5 && r.heavier, `[${name}] ${theme}: a group heading stands apart from its pages (${r.headingVsItem.toFixed(2)}:1 against them, heavier: ${r.heavier})`);
+    ok(r.minRule >= 1.4, `[${name}] ${theme}: the rule between groups shows on the rail (${r.minRule.toFixed(2)}:1)`);
   }
   await ctx.close();
 
@@ -336,6 +404,27 @@ async function run(engine, name) {
   ok(file.includes("remote-ui-state.json"), `[${name}] the settings file is this machine's: "${file}"`);
   if (SHOTS) await rp.locator(".settings-modal").screenshot({ path: `${SHOTS}/${name}-remote-data.png` });
   await rctx.close();
+
+  // ── the rail and the header at the app's narrowest window ────────────────
+  // (tauri.conf.json's minWidth × minHeight), in every mode, here and remote.
+  for (const remote of [false, true]) {
+    const nctx = await browser.newContext({ viewport: { width: 900, height: 560 } });
+    const np = await nctx.newPage();
+    np.on("pageerror", (e) => ok(false, `[${name}] narrow page error: ${e.message}`));
+    await openSheet(np, remote ? "?remote=noadmin" : "");
+    const where = remote ? "remote, 900px" : "900px";
+    for (const m of ["beginner", "advanced", "expert"]) {
+      await setMode(np, m);
+      const r = await railLook(np);
+      ok(r.indent >= 8 && r.pillShift >= -1, `[${name}] ${where}, ${m}: pages sit indented under their heading, the selected pill too (${r.indent.toFixed(0)}px, pill ${r.pillShift.toFixed(0)}px)`);
+      ok(r.minRoom >= 16, `[${name}] ${where}, ${m}: room above every later group (${r.minRoom.toFixed(0)}px)`);
+      ok(r.clipped.length === 0, `[${name}] ${where}, ${m}: no heading or page clipped or wrapped${r.clipped.length ? ` — ${r.clipped.join(", ")}` : ""}`);
+      ok(r.segToKeys >= 0 && r.segToKeys <= 24 && r.titleGap >= 16 && r.centre <= 1,
+        `[${name}] ${where}, ${m}: the mode switch sits right, beside esc and close (${r.segToKeys.toFixed(0)}px), clear of the title (${r.titleGap.toFixed(0)}px), centred with it (${r.centre.toFixed(1)}px)`);
+    }
+    if (SHOTS) await np.locator(".settings-modal").screenshot({ path: `${SHOTS}/${name}-narrow${remote ? "-remote" : ""}-expert.png` });
+    await nctx.close();
+  }
   await browser.close();
 }
 
