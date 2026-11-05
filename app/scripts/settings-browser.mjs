@@ -18,6 +18,7 @@
 //     switch beside it (§4.3);
 //   - the confirms: Full access asks first and its arm expires; Reset arms,
 //     expires, and resets only its scope;
+//   - an available agent CLI update draws Agent CLIs in any mode (rule 3);
 //   - a remote window: computer pages name the host, a console-only control is
 //     drawn disabled with why, an admin-only read is a GrantNote, Restore
 //     window is not drawn, and the settings file is this machine's;
@@ -454,6 +455,25 @@ async function run(engine, name) {
   ok(gEnv.includes("WORKTREES_AGENT_GUIDANCE=off") && gEnv.includes("wins over this switch"), `[${name}] Guidance: the variable wins over the switch, and says so`);
   ok(await ep.evaluate(() => document.querySelector("[data-testid=guidance-enabled]").disabled), `[${name}] …and the switch it outranks is disabled`);
   await ectx.close();
+
+  // ── an available agent CLI update is never hidden (rule 3) ───────────────
+  // The update bubble and the rail's "upd" badge both say a harness has an
+  // update; Agent CLIs, where it is installed, is Advanced. In Beginner the
+  // bubble's own destination drew nothing about it (harness-updates-browser
+  // found that, after the rebase onto #605–#612's main).
+  const uctx = await browser.newContext({ viewport: { width: 1280, height: 860 } });
+  const up = await uctx.newPage();
+  up.on("pageerror", (e) => ok(false, `[${name}] update page error: ${e.message}`));
+  await up.goto(`${BASE}/?harnessupdates=1`);
+  const bubbleShown = await up.locator("[data-testid=update-bubble]").waitFor({ timeout: 12_000 }).then(() => true, () => false);
+  if (bubbleShown) await up.locator("[data-testid=update-bubble] .enter-btn").click();
+  const onUpdates = await up.waitForSelector(".settings-body[data-page=updates]", { timeout: 5000 }).then(() => true, () => false);
+  await up.waitForTimeout(250);
+  ok(bubbleShown && onUpdates && await mode(up) === "beginner", `[${name}] the update bubble opens Settings → Updates (a fresh window: Beginner)`);
+  const clis = await up.locator("[data-testid=why-agent-clis]").textContent().catch(() => null);
+  ok((await drawn(up)).includes("agent-clis") && !!clis && clis.includes("needs attention"),
+    `[${name}] …where Agent CLIs (Advanced) is drawn while an update is available, saying why: "${clis}"`);
+  await uctx.close();
 
   // ── a remote window ──────────────────────────────────────────────────────
   const rctx = await browser.newContext({ viewport: { width: 1280, height: 860 } });

@@ -165,11 +165,15 @@ export function SettingsSheet(props: SheetProps) {
     if ((snap.slots?.problems.length ?? 0) > 0) p.add("heavy-jobs");
     if ((snap.limits?.problems.length ?? 0) > 0) p.add("limits");
     if (snap.pi?.preflight.problem) p.add("pi-install");
+    // An agent CLI with an update waiting: the update bubble and the rail's
+    // "upd" badge both send the person here, so its section (Advanced) must
+    // be drawn in every mode, as "needs attention".
+    if (update?.harnesses?.some((h) => h.update_available)) p.add("agent-clis");
     const st = remote.status?.state;
     if (st === "unreadable" || st === "error" || st === "paused" || remote.alerts.some((a) => a.cat === "remote")) p.add("remote-access");
     if (remote.alerts.some((a) => a.cat === "devices")) p.add("devices");
     return p;
-  }, [reported, mcpStatus?.state, guidance?.skill_edit?.invalid, guidance?.error, snap, remote.status?.state, remote.alerts]);
+  }, [reported, mcpStatus?.state, guidance?.skill_edit?.invalid, guidance?.error, snap, remote.status?.state, remote.alerts, update?.harnesses]);
 
   // Rule 2's host half: which host values differ from what ships.
   const host = useMemo(() => {
