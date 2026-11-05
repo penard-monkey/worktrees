@@ -138,7 +138,7 @@ fn claude_activity_in(
         if !probe.represents_place_agent() {
             continue;
         }
-        if probe.tmux.is_some() {
+        if probe.is_interactive_cli() && probe.tmux.is_some() {
             models.push((probe.pid, probe_model(w, probe)));
         }
         // The mapping is core's (`activity::claude_state`), shared with the
@@ -539,7 +539,7 @@ pub fn cached_model(w: &Watch, path: &Path, parse: fn(&[String]) -> Option<Strin
 /// NOW (`ClaudeProbe::session`): a probe keeps naming the session it started
 /// in, and `add_project` renames a moved project's sessions.
 pub fn claude_model(w: &Watch, probes: &[worktrees_core::agent::ClaudeProbe], session: &str) -> Option<String> {
-    probe_model(w, probes.iter().find(|p| p.represents_place_agent() && p.session() == Some(session))?)
+    probe_model(w, probes.iter().find(|p| p.is_interactive_cli() && p.session() == Some(session))?)
 }
 
 pub fn probe_model(w: &Watch, p: &worktrees_core::agent::ClaudeProbe) -> Option<String> {
@@ -1140,6 +1140,7 @@ mod tests {
     fn sdk_child_does_not_supply_the_claude_dot_or_model() {
         let own = worktrees_core::agent::parse_probe(include_bytes!("../../worktrees-core/tests/fixtures/claude-probes/interactive.json")).unwrap();
         let child = worktrees_core::agent::parse_probe(include_bytes!("../../worktrees-core/tests/fixtures/claude-probes/sdk-py-child.json")).unwrap();
+        let background = worktrees_core::agent::parse_probe(include_bytes!("../../worktrees-core/tests/fixtures/claude-probes/background.json")).unwrap();
         let w = Watch::default();
         let mut panes = tmux::PaneList::from_panes(vec![tmux::Pane {
             id: Some("%0".into()),
@@ -1163,6 +1164,25 @@ mod tests {
             assert_eq!(models.iter().map(|(pid, _)| *pid).collect::<Vec<_>>(), [own.pid]);
             assert_eq!(claude_model(&w, &probes, "wt-probe").as_deref(), Some("Sonnet 5"));
         }
+        let mut only_child = vec![child];
+        worktrees_core::agent::locate(&mut only_child, &panes);
+        let (busy, waiting, models) = claude_activity_in(&w, &only_child, &mut panes, no_ps, |_| Vec::new());
+        assert!(busy.is_empty() && waiting.is_empty() && models.is_empty());
+        assert!(claude_model(&w, &only_child, "wt-probe").is_none());
+
+        let mut with_background = vec![background, own.clone()];
+        for p in &mut with_background {
+            p.root = root.clone();
+        }
+        let file = Path::new(&worktrees_core::project::claude_dir_in(&root, &with_background[0].cwd))
+            .join(format!("{}.jsonl", with_background[0].session_id.as_deref().unwrap()));
+        std::fs::write(file, "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-5-5\"}}\n").unwrap();
+        worktrees_core::agent::locate(&mut with_background, &panes);
+        let (busy, waiting, models) = claude_activity_in(&w, &with_background, &mut panes, no_ps, |_| panic!("a probed pane was captured"));
+        assert_eq!(busy, ["/w/probe"], "the parked job still lights the place's dot");
+        assert!(waiting.is_empty());
+        assert_eq!(models.iter().map(|(pid, _)| *pid).collect::<Vec<_>>(), [own.pid]);
+        assert_eq!(claude_model(&w, &with_background, "wt-probe").as_deref(), Some("Sonnet 5"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

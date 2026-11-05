@@ -133,6 +133,17 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   because pane ids are per tmux server. A transcript is still found under
   `cwd`.
 
+- **A place's Claude is its interactive CLI Claude, not a child that inherited
+  its pane.** Claude Code 2.1.318's `claude -p` child reports
+  `kind: interactive`, `entrypoint: sdk-cli` and the SAME `tmux` pane as its
+  parent; the security-guidance Python SDK review transcripts report
+  `entrypoint: sdk-py`. `agent::ClaudeProbe::represents_place_agent` excludes
+  SDK children from the shared probe scan, chat transcript, nav dots, model
+  label and `place_status`. Older probes without `entrypoint` still count;
+  `kind: background` still counts for parked jobs but `is_interactive_cli`
+  keeps it out of the pane's chat transcript and model. Do not identify the
+  pane's Claude by `kind` or pane id alone.
+
 - **The agent rows (`worktrees_api::agents`, `worktrees_core::prompt`) read
   Claude's screen, and Claude has five traps** (fixtures and READMEs:
   `crates/worktrees-core/tests/fixtures/claude-screen/2.1.309` and

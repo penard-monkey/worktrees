@@ -1245,10 +1245,10 @@ pub fn lane_probe<'a>(probes: &'a [agent::ClaudeProbe], lane: &Lane) -> Option<&
     let named = |p: &agent::ClaudeProbe| p.tmux.as_deref().and_then(agent::session_name) == Some(lane.session.as_str());
     probes
         .iter()
-        .filter(|p| p.represents_place_agent())
+        .filter(|p| p.is_interactive_cli())
         .find(|p| pane(p) && named(p))
-        .or_else(|| probes.iter().filter(|p| p.represents_place_agent()).find(|p| pane(p) && p.live.is_some()))
-        .or_else(|| probes.iter().filter(|p| p.represents_place_agent()).find(|p| named(p)))
+        .or_else(|| probes.iter().filter(|p| p.is_interactive_cli()).find(|p| pane(p) && p.live.is_some()))
+        .or_else(|| probes.iter().filter(|p| p.is_interactive_cli()).find(|p| named(p)))
 }
 
 /// The harness's reading of the place, for a send into `lane`. The harness
@@ -3108,6 +3108,19 @@ mod moved_tests {
             }
             assert!(lane_probe(&[child], &lane).is_none());
         }
+    }
+
+    /// A parked background job still contributes to place_status, but its
+    /// inherited pane address must never select its transcript for chat.
+    #[test]
+    fn a_background_job_does_not_own_the_lanes_pane() {
+        let own = agent::parse_probe(include_bytes!("../../worktrees-core/tests/fixtures/claude-probes/interactive.json")).unwrap();
+        let background = agent::parse_probe(include_bytes!("../../worktrees-core/tests/fixtures/claude-probes/background.json")).unwrap();
+        let lane = Lane { harness: "claude", session: "wt-probe".into(), pane: "%0".into() };
+        for probes in [vec![background.clone(), own.clone()], vec![own.clone(), background.clone()]] {
+            assert_eq!(lane_probe(&probes, &lane).and_then(|p| p.session_id.as_deref()), own.session_id.as_deref());
+        }
+        assert!(lane_probe(&[background], &lane).is_none());
     }
 
     /// Every Claude on the machine writes its probe into the one

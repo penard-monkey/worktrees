@@ -88,13 +88,20 @@ pub struct LivePane {
 }
 
 impl ClaudeProbe {
+    /// The CLI Claude that can own an interactive tmux pane. Background jobs
+    /// may still work for this place, but they cannot supply that pane's chat
+    /// transcript or model even if they inherited its tmux address.
+    pub fn is_interactive_cli(&self) -> bool {
+        self.kind.as_deref() != Some("background") && self.entrypoint.as_deref().is_none_or(|e| e == "cli")
+    }
+
     /// Whether this probe represents an agent in a place. Claude's SDK/print
     /// children inherit the interactive parent's tmux pane and cwd, and may
     /// even say `kind: interactive`; their `entrypoint` identifies them. Older
     /// probes without that field still count. A background job has its own
     /// probe and must keep reporting work after its parent parks a turn.
     pub fn represents_place_agent(&self) -> bool {
-        self.kind.as_deref() == Some("background") || self.entrypoint.as_deref().is_none_or(|e| e == "cli")
+        self.kind.as_deref() == Some("background") || self.is_interactive_cli()
     }
 
     /// The directory this Claude is in, which every probe-to-place match keys
@@ -744,6 +751,7 @@ mod tests {
     const SDK_PY_CHILD: &str = include_str!("../tests/fixtures/claude-probes/sdk-py-child.json");
     const SDK_CLI_CHILD: &str = include_str!("../tests/fixtures/claude-probes/sdk-cli-child.json");
     const BACKGROUND: &str = include_str!("../tests/fixtures/claude-probes/background.json");
+    const EXTRA_CLI: &str = include_str!("../tests/fixtures/claude-probes/extra-cli.json");
 
     fn probe(s: &str) -> ClaudeProbe {
         serde_json::from_str(s).expect("probe must parse")
@@ -1075,20 +1083,20 @@ mod tests {
             assert!(crate::activity::claude_activity(&[child], "/w/probe").is_none());
         }
         // A parked job's own background probe is still a place agent.
-        let agents = agents_at(&[own, probe(BACKGROUND)], "/w/probe");
-        assert_eq!(agents.iter().map(|a| a.pid).collect::<Vec<_>>(), [1004, 1002]);
+        let agents = agents_at(&[own, probe(BACKGROUND), probe(EXTRA_CLI)], "/w/probe");
+        assert_eq!(agents.iter().map(|a| a.pid).collect::<Vec<_>>(), [1004, 1002, 1005]);
     }
 
     #[test]
     fn scan_keeps_the_interactive_probe_and_background_job_not_sdk_children() {
         let root = probe_root("interactive-owner");
-        for (name, body) in [("1001", SDK_PY_CHILD), ("1002", INTERACTIVE), ("1003", SDK_CLI_CHILD), ("1004", BACKGROUND)] {
+        for (name, body) in [("1001", SDK_PY_CHILD), ("1002", INTERACTIVE), ("1003", SDK_CLI_CHILD), ("1004", BACKGROUND), ("1005", EXTRA_CLI)] {
             std::fs::write(root.join(format!("sessions/{name}.json")), body).unwrap();
         }
         let scan = scan_probes_in(std::slice::from_ref(&root), |_| true);
         let mut pids = scan.probes.iter().map(|p| p.pid).collect::<Vec<_>>();
         pids.sort_unstable();
-        assert_eq!(pids, [1002, 1004]);
+        assert_eq!(pids, [1002, 1004, 1005]);
         assert!(scan.unreadable.is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
