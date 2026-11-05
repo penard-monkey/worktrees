@@ -97,6 +97,10 @@ struct State {
     /// Path → its place, while it waits. `None`: not a registered project's.
     places: HashMap<String, Option<PlaceKey>>,
     air: HashMap<DeviceId, InAir>,
+    /// `push_test`s in the air, by a number of their own: a request's, so several
+    /// can be up for one device. Stopped with everything else.
+    tests: HashMap<u64, (DeviceId, JoinHandle<()>)>,
+    next_test: u64,
     last_tally: i64,
     /// The last reason sends failed, so a run of them is one line.
     said: Option<&'static str>,
@@ -152,18 +156,19 @@ impl Push {
         me
     }
 
+    /// What the registry says about `id` now. While it cannot be read it says
+    /// nothing, so what the person chose is kept and only the token goes.
+    pub fn standing(&self, id: &DeviceId) -> Standing {
+        self.devices.snapshot().map_or(Standing::Paused, |f| standing_in(&f, id))
+    }
+
     /// What this registry says about each id, for [`Store::sweep`].
     fn sweep(&self) {
         let Some(file) = self.devices.snapshot() else {
             (self.deps.log)("serve: push: the device list can't be read, so nothing is swept");
             return;
         };
-        let n = self.store.sweep(|id| match file.device(id) {
-            None => Standing::Gone,
-            Some(d) if d.is_revoked() => Standing::Gone,
-            Some(d) if d.disabled.is_some() => Standing::Paused,
-            Some(_) => Standing::Live,
-        });
+        let n = self.store.sweep(|id| standing_in(&file, id));
         if n > 0 {
             (self.deps.log)(&format!("serve: push: dropped what {n} device(s) no longer being served had left"));
         }
@@ -203,7 +208,8 @@ impl Push {
 
     #[cfg(test)]
     pub fn in_air(&self) -> usize {
-        self.st.lock().unwrap().air.len()
+        let st = self.st.lock().unwrap();
+        st.air.len() + st.tests.len()
     }
 
     pub fn set_dry_run(&self, on: bool) -> Value {
@@ -258,7 +264,8 @@ impl Push {
     /// `push_allow_security`, the console's: owner principal only, and the
     /// act is a record in the audit log.
     pub fn allow_security(&self, id: &DeviceId, allowed: bool) -> Result<bool, String> {
-        let f = self.devices.snapshot().ok_or_else(|| self.devices.readable().unwrap_err())?;
+        self.devices.readable()?;
+        let f = self.devices.snapshot().ok_or("the device list can't be read")?;
         let d = f.device(id).ok_or_else(|| format!("no device {id}"))?;
         if d.is_revoked() {
             return Err(format!("device {id} is revoked"));
@@ -286,6 +293,12 @@ impl Push {
             if let Some(a) = st.air.remove(id) {
                 a.task.abort();
             }
+            st.tests.retain(|_, (d, task)| {
+                if d == id {
+                    task.abort();
+                }
+                d != id
+            });
             st.planner.forget(id);
         }
         if !e.alerts() {
@@ -354,6 +367,12 @@ impl Push {
             a.task.abort();
             st.planner.abandon(&id, &a.planned);
         }
+        for (_, (_, task)) in st.tests.drain() {
+            task.abort();
+        }
+        drop(st);
+        // Nothing is left to carry: the next send dials afresh.
+        *self.apple.lock().unwrap() = None;
     }
 
     /// serve is stopping: the counts land, and nothing more goes.
@@ -556,6 +575,10 @@ impl Push {
     /// `push_test`: one push, answered with how it ended. Runs on a request's
     /// blocking thread, so waiting here holds nothing else up.
     pub fn test(self: &Arc<Self>, id: &DeviceId) -> Result<Value, String> {
+        // Remote off means nothing leaves, and that has no exception.
+        if !(self.deps.enabled)() {
+            return Err(TEST_FAILED.into());
+        }
         let reg = self.store.record(id)?.reg.ok_or(NOT_REGISTERED)?;
         let transport = self.transport().ok_or(NOT_CONFIGURED)?;
         let rt = self.rt.as_ref().ok_or(NOT_CONFIGURED)?;
@@ -566,9 +589,20 @@ impl Push {
         let request = self.build(&Kind::Test, 0, &reg, now).ok_or_else(|| TEST_FAILED.to_string())?;
         let sending = transport.send(request);
         let (tx, rx) = std::sync::mpsc::channel();
-        rt.spawn(async move {
-            let _ = tx.send(sending.await);
-        });
+        {
+            // Held across the spawn, so the task cannot finish before its entry
+            // exists. An aborted task drops `tx`, which answers the wait below.
+            let mut st = self.st.lock().unwrap();
+            st.next_test += 1;
+            let n = st.next_test;
+            let me = self.clone();
+            let task = rt.spawn(async move {
+                let how = sending.await;
+                me.st.lock().unwrap().tests.remove(&n);
+                let _ = tx.send(how);
+            });
+            st.tests.insert(n, (id.clone(), task));
+        }
         let how = rx.recv_timeout(TEST_WAIT).map_err(|_| TEST_FAILED.to_string())?;
         self.note(&how);
         match how {
@@ -579,6 +613,15 @@ impl Push {
             }
             _ => Err(TEST_FAILED.into()),
         }
+    }
+}
+
+fn standing_in(file: &super::devices::DevicesFile, id: &DeviceId) -> Standing {
+    match file.device(id) {
+        None => Standing::Gone,
+        Some(d) if d.is_revoked() => Standing::Gone,
+        Some(d) if d.disabled.is_some() => Standing::Paused,
+        Some(_) => Standing::Live,
     }
 }
 

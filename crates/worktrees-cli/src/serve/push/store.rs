@@ -224,7 +224,9 @@ impl Store {
         let before = st.devices.get(id.as_str()).cloned();
         let mut rec = before.clone().unwrap_or_default();
         let t = f(&mut rec)?;
-        if before.as_ref() != Some(&rec) {
+        // Against the default too: a no-op on an absent entry must not create
+        // one, or a dead token's verdict after a revoke re-creates the entry.
+        if rec != before.clone().unwrap_or_default() {
             st.devices.insert(id.as_str().to_string(), rec);
             if let Err(e) = self.write(&st) {
                 match before {

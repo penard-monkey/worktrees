@@ -25,6 +25,7 @@
     { "cmd": "push_register", "args": { "token": "A1B2", "env": "development", "topic": "com.brethash.worktrees.ios", "key": "$key", "key_id": "$key_id" }, "err": "bad-args: token" },
     { "cmd": "push_register", "args": { "token": "$token", "env": "staging", "topic": "com.brethash.worktrees.ios", "key": "$key", "key_id": "$key_id" }, "err": "bad-args: env" },
     { "cmd": "push_register", "args": { "token": "$token", "env": "production", "topic": "no spaces\r\nx: y", "key": "$key", "key_id": "$key_id" }, "err": "bad-args: topic" },
+    { "cmd": "push_register", "args": { "token": "$token", "env": "production", "topic": "com.brethash.another-app", "key": "$key", "key_id": "$key_id" }, "err": "bad-args: topic" },
     { "cmd": "push_register", "args": { "token": "$token", "env": "production", "topic": "com.brethash.worktrees.ios", "key": "AAEC", "key_id": "$key_id" }, "err": "bad-args: key" },
     { "cmd": "push_register", "args": { "token": "$token", "env": "production", "topic": "com.brethash.worktrees.ios", "key": "$key", "key_id": "AAEC" }, "err": "bad-args: key_id" },
     { "cmd": "push_prefs", "args": { "input": "yes" }, "err": "bad-args: input" },

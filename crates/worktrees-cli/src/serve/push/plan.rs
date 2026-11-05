@@ -269,28 +269,7 @@ impl Planner {
             }
             Delivery::Retry(_) | Delivery::Auth(_) => {
                 d.tally.failed += 1;
-                // Not told after all: what is still due folds into the next.
-                for (path, _) in &p.told {
-                    d.told.remove(path);
-                }
-                for (path, _) in &p.reminded {
-                    d.reminded.remove(path);
-                }
-                if p.counted {
-                    if let Some(i) = d.sent.iter().rposition(|t| *t == p.at) {
-                        d.sent.remove(i);
-                    }
-                }
-                if p.was_input {
-                    d.last_input = None;
-                }
-                if let Some(a) = &p.was_alert {
-                    d.alerts.push_front(a.clone());
-                    d.last_security = None;
-                }
-                if is_badge {
-                    d.last_badge = None;
-                }
+                undo(d, p);
                 if matches!(how, Delivery::Retry(_)) {
                     let step = d.next_pause.clamp(FIRST_PAUSE, MAX_PAUSE);
                     d.pause_until = now + step;
@@ -300,24 +279,12 @@ impl Planner {
         }
     }
 
-    /// A send that will never report: aborted by the kill switch.
+    /// A send that will never report: aborted by the kill switch. As a retry
+    /// leaves things, with no pause, because it was not Apple that failed.
     pub fn abandon(&mut self, id: &DeviceId, p: &Planned) {
         if let Some(d) = self.devices.get_mut(id) {
             d.busy = false;
-            for (path, _) in &p.told {
-                d.told.remove(path);
-            }
-            for (path, _) in &p.reminded {
-                d.reminded.remove(path);
-            }
-            if p.counted {
-                if let Some(i) = d.sent.iter().rposition(|t| *t == p.at) {
-                    d.sent.remove(i);
-                }
-            }
-            if p.was_input {
-                d.last_input = None;
-            }
+            undo(d, p);
         }
     }
 
@@ -331,6 +298,33 @@ impl Planner {
             .collect();
         out.sort_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
         out
+    }
+}
+
+/// `p` did not arrive: not told after all. What is still due folds into the next
+/// push, an alert goes back to the front of its queue, and neither the hour nor
+/// the pace is spent on it.
+fn undo(d: &mut Dev, p: &Planned) {
+    for (path, _) in &p.told {
+        d.told.remove(path);
+    }
+    for (path, _) in &p.reminded {
+        d.reminded.remove(path);
+    }
+    if p.counted {
+        if let Some(i) = d.sent.iter().rposition(|t| *t == p.at) {
+            d.sent.remove(i);
+        }
+    }
+    if p.was_input {
+        d.last_input = None;
+    }
+    if let Some(a) = &p.was_alert {
+        d.alerts.push_front(a.clone());
+        d.last_security = None;
+    }
+    if matches!(p.kind, Kind::Badge) {
+        d.last_badge = None;
     }
 }
 
@@ -579,6 +573,33 @@ mod tests {
         assert!(p.plan(5000, &id(), &v).is_none(), "still in the air");
         p.abandon(&id(), &x);
         assert!(p.plan(5001, &id(), &v).is_some(), "abandoned, still due");
+    }
+
+    /// A send the kill switch stopped did not arrive, whatever it was: an alert
+    /// goes out again, and a badge does not wait out its minute.
+    #[test]
+    fn an_abandoned_send_is_as_if_it_never_left() {
+        let places = [place("a")];
+        let quiet = View { input: true, reminder: true, security: true, waiting: &[] };
+        let mut p = Planner::default();
+        p.queue_alert(&id(), Alert { what: "refused", device: None, reason: None });
+        let x = p.plan(0, &id(), &quiet).unwrap();
+        assert_eq!(x.kind.word(), "security");
+        p.abandon(&id(), &x);
+        let again = p.plan(1, &id(), &quiet).expect("the alert is still due, inside its minute");
+        assert_eq!(again.kind.word(), "security");
+        p.report(&id(), &again, &Delivery::Sent, 1);
+
+        let mut p = Planner::default();
+        p.observe(0, &["/r/a".to_string()]);
+        let v = View { input: true, reminder: true, security: false, waiting: &places };
+        let told = p.plan(30, &id(), &v).unwrap();
+        p.report(&id(), &told, &Delivery::Sent, 30);
+        p.observe(31, &[]);
+        let b = p.plan(31, &id(), &quiet).unwrap();
+        assert_eq!((b.kind.word(), b.badge), ("badge", 0));
+        p.abandon(&id(), &b);
+        assert!(p.plan(32, &id(), &quiet).is_some(), "the badge does not wait out a minute for a push that never left");
     }
 
     /// Security alerts wait a minute between them, are held in a short queue,

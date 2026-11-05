@@ -10,6 +10,8 @@
 //!   fails until a release does, and says `trust`.
 //! - **No redirect, no proxy**, because no HTTP client is above `h2`: a request
 //!   is one URI and a 3xx is a status. `TcpStream::connect` reads no variable.
+//!   `/etc/hosts` can still send the TCP connection elsewhere, but SNI and the
+//!   embedded roots pin the name, so that ends in a `trust` failure, not a push.
 //! - **Bounded**: [`CONNECT`] and [`SEND`]. A slow or dead Apple costs one
 //!   task per device, whatever it does, and the poll never meets any of it.
 //! - The token is in the request's path, so no error here carries a request.

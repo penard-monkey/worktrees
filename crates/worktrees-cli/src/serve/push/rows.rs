@@ -23,7 +23,10 @@ use super::{NOT_CONFIGURED, NOT_REGISTERED};
 
 /// An APNs token: 32 bytes today, and Apple says up to 100.
 const TOKEN_HEX: std::ops::RangeInclusive<usize> = 64..=200;
-const MAX_TOPIC: usize = 155;
+/// The only topics this host sends to: the app and its preview build. The team's
+/// key signs for every app on the team, and a paired device must not be able to
+/// point this host at another of them.
+pub const TOPICS: &[&str] = &["com.brethash.worktrees.ios", "com.brethash.worktrees.ios.preview"];
 const MAX_MUTED: usize = 64;
 const MAX_REPO: usize = 4096;
 
@@ -42,13 +45,6 @@ fn str_arg(a: &Args, key: &str) -> Result<String, String> {
     a.raw(key).as_str().map(str::to_string).ok_or_else(|| bad(key))
 }
 
-fn topic_ok(t: &str) -> bool {
-    !t.is_empty()
-        && t.len() <= MAX_TOPIC
-        && t.split('.').all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
-        && t.contains('.')
-}
-
 /// The arguments as a registration. Nothing is echoed: a token or a key in an
 /// error would reach a log the moment anything logged it.
 fn registration(a: &Args) -> Result<PushReg, String> {
@@ -58,7 +54,7 @@ fn registration(a: &Args) -> Result<PushReg, String> {
     }
     let env = PushEnv::parse(&str_arg(a, "env")?).ok_or_else(|| bad("env"))?;
     let topic = str_arg(a, "topic")?;
-    if !topic_ok(&topic) {
+    if !TOPICS.contains(&topic.as_str()) {
         return Err(bad("topic"));
     }
     let key = str_arg(a, "key")?;
@@ -72,17 +68,24 @@ fn registration(a: &Args) -> Result<PushReg, String> {
     Ok(PushReg { token, env, topic, key, key_id })
 }
 
+/// After a write to the store. A revoke or disable that landed while this request
+/// was on its way has already swept the entry, and the write just put it back: put
+/// the entry in the state that device's standing calls for, so nothing waits for
+/// the next boot sweep. A disable keeps what the person chose.
+fn still_served(cx: &Call, p: &super::Push, id: &DeviceId) -> Result<(), String> {
+    if cx.registry.device_grant(cx.caller.principal(), id).is_some() {
+        return Ok(());
+    }
+    p.store.drop_for(id, p.standing(id));
+    Err(resolve::ERR_DENIED.into())
+}
+
 pub fn register(cx: &Call, a: &Args) -> Result<Value, String> {
     let id = me(cx)?;
     let reg = registration(a)?;
     let p = service(cx)?;
     p.store.register(id, reg)?;
-    // A revoke that landed while this was on its way has already swept: check
-    // again, so a token is not left for a device nobody serves.
-    if cx.registry.device_grant(cx.caller.principal(), id).is_none() {
-        p.store.drop_for(id, super::store::Standing::Gone);
-        return Err(resolve::ERR_DENIED.into());
-    }
+    still_served(cx, p, id)?;
     Ok(json!({ "registered": true }))
 }
 
@@ -162,6 +165,7 @@ pub fn prefs(cx: &Call, a: &Args) -> Result<Value, String> {
     if !prefs_sets(a).is_empty() {
         let change = PushPrefs { input: bool_arg(a, "input")?, reminder: bool_arg(a, "reminder")?, security: bool_arg(a, "security")?, muted: muted_arg(cx, a)? };
         p.store.set_prefs(id, change)?;
+        still_served(cx, p, id)?;
     }
     let rec = p.store.record(id)?;
     let grant = authz::effective(&*cx.registry, &cx.caller);

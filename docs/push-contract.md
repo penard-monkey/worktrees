@@ -27,7 +27,7 @@ names a device.
 
 | Row | Arguments | Answer |
 |---|---|---|
-| `push_register` | `token` (lowercase hex, 32 to 100 bytes), `env` (`development` or `production`), `topic`, `key` (32 bytes), `key_id` (8 bytes), the last two standard padded base64 | `{registered: true}` |
+| `push_register` | `token` (lowercase hex, 32 to 100 bytes), `env` (`development` or `production`), `topic` (exactly `com.brethash.worktrees.ios` or `com.brethash.worktrees.ios.preview`), `key` (32 bytes), `key_id` (8 bytes), the last two standard padded base64 | `{registered: true}` |
 | `push_unregister` | none | `{registered: false}`, however often |
 | `push_prefs` | none reads; each of `input`, `reminder`, `security`, `muted` given is set | `{registered, input, reminder, security, muted: [{repo, slug?}]}` |
 | `push_test` | none | `{sent: true}` once Apple took it |
@@ -47,10 +47,10 @@ Errors, all exact strings or prefixes:
 | Error | When |
 |---|---|
 | `bad-args: <field>` | A malformed argument. It never quotes the value. |
-| `denied` | `security` set before the console allowed it, or a revoke that raced a `push_register`. |
+| `denied` | `security` set before the console allowed it, or a revoke or disable that raced a `push_register` or a `push_prefs` set. |
 | `not-registered` | `push_test` with no registration, or Apple just said the token is dead. |
 | `not-configured: this host has no APNs key yet.` | `push_test` before a key is imported. The phone shows it as written. |
-| `unavailable: …` | The host cannot read its push file, or could not reach Apple. The phone shows it as written. |
+| `unavailable: …` | The host cannot read its push file, could not reach Apple, or remote access was off when a `push_test` asked. The phone shows it as written. |
 | `rate` | Past the row's budget: changes 30 at once then one per 10 s, `push_test` 5 at once then one per 5 min, and `push_test` past the 20-an-hour push cap. |
 
 ## The payload
@@ -131,8 +131,9 @@ reads it back.
 
 The two APNs hosts and nothing else, chosen by the token's `env`; TLS 1.3 against
 two embedded roots (USERTrust RSA and AAA Certificate Services, not the OS store);
-HTTP/2 with no client above it, so no redirect and no proxy; 10 s to connect, 15 s
-to send. If Apple moves to another CA, `serve.log` says the certificate does not
+HTTP/2 with no client above it, so no redirect and no proxy (`/etc/hosts` can move
+the TCP connection, but SNI and the embedded roots pin the name); 10 s to connect,
+15 s to send. If Apple moves to another CA, `serve.log` says the certificate does not
 chain to the embedded roots, and nothing is sent until a release updates them.
 
 **Not yet proved against Apple.** No test here reaches it, and no real `.p8` has

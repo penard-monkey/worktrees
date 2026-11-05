@@ -192,8 +192,10 @@ fn a_paired_device_registers_and_the_dry_run_seals_a_push() {
 #[test]
 fn a_real_waiting_edge_becomes_a_sealed_push_in_the_dry_run() {
     // The `rust` job on macOS installs no tmux; Ubuntu's image ships it, so CI
-    // still runs this there.
+    // still runs this there, and a Linux runner without it fails rather than
+    // passing on nothing, as `lan_or_skip` does for a missing LAN.
     if std::process::Command::new("tmux").arg("-V").output().is_err() {
+        assert!(cfg!(target_os = "macos") || std::env::var_os("CI").is_none(), "no tmux on a Linux CI runner: the waiting edge's witness did not run");
         eprintln!("no tmux on this host; the waiting edge's witness did not run");
         return;
     }

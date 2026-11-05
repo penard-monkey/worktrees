@@ -302,7 +302,7 @@ fn the_rows_keep_to_their_side() {
     let desk = w.call(Caller::console());
     for row in ["push_register", "push_unregister", "push_prefs", "push_test"] {
         let e = dispatch::call(&desk, row, &args(reg_args())).unwrap_err();
-        assert!(e.as_str().unwrap().contains("console has no device record") || row == "push_test", "{row}: {e}");
+        assert!(e.as_str().unwrap().contains("console has no device record"), "{row}: {e}");
     }
     let phone = w.call(caller(&d));
     for row in ["push_key_import", "push_key_remove", "push_status", "push_dry_run", "push_allow_security"] {
@@ -621,6 +621,115 @@ fn every_kind_is_what_the_contract_says() {
     assert_eq!(dispatch::call(&phone, "push_test", &args(json!({}))), Ok(json!({ "sent": true })));
     check(&w, 0, "test", 0);
     let _ = d;
+}
+
+/// A write that lands after the device stopped being served leaves the entry as
+/// that standing calls for, at once and on disk: a revoked device nothing, a
+/// disabled one what the person chose and no token. Driven through the row bodies,
+/// because the resolver has already refused such a device by then; these are the
+/// requests that were past it when the revoke landed.
+#[test]
+fn a_write_racing_a_stop_leaves_the_right_entry() {
+    use super::rows;
+    let dir = scratch("race");
+    let reg = Arc::new(DeviceRegistry::open(&dir));
+    let w = world_on(Some(dir.clone()), reg.clone());
+    let console = Caller::console();
+    let all = Grant::everything();
+    let held = || std::fs::read_to_string(dir.join(FILE)).unwrap_or_default();
+    let denied = || Err("denied".to_string());
+
+    let d = enroll(&reg, 1, &[Capability::Read], Projects::All);
+    let phone = w.call(caller(&d));
+    rows::prefs(&phone, &args(json!({ "reminder": false }))).unwrap();
+    reg.disable(&d.id, NOW).unwrap();
+    assert_eq!(rows::register(&phone, &args(reg_args())), denied());
+    assert!(!held().contains(TOKEN), "a disabled device holds no token: {}", held());
+    assert!(!w.push.store.record(&d.id).unwrap().reminder, "and keeps what the person chose");
+    assert_eq!(rows::prefs(&phone, &args(json!({ "input": false }))), denied());
+    assert!(held().contains(d.id.as_str()), "its entry stays: {}", held());
+
+    let r = enroll(&reg, 2, &[Capability::Read], Projects::All);
+    let phone = w.call(caller(&r));
+    reg.revoke(&console, &all, &r.id, NOW).unwrap();
+    assert_eq!(rows::prefs(&phone, &args(json!({ "input": false }))), denied());
+    assert!(!held().contains(r.id.as_str()), "prefs did not re-create it: {}", held());
+    assert_eq!(rows::register(&phone, &args(reg_args())), denied());
+    assert!(!held().contains(r.id.as_str()), "nor did register: {}", held());
+    rows::unregister(&phone).unwrap();
+    assert!(!w.push.store.drop_token(&r.id, TOKEN).unwrap());
+    assert!(!held().contains(r.id.as_str()), "a no-op creates no entry: {}", held());
+}
+
+/// The topic is one of the app's own: the team's key signs for every app on the
+/// team, and a paired device cannot point this host at another.
+#[test]
+fn only_the_apps_own_topics_are_taken() {
+    let w = world();
+    let d = enroll(&w.reg, 1, &[Capability::Read], Projects::All);
+    let phone = w.call(caller(&d));
+    for t in super::rows::TOPICS {
+        let mut a = reg_args();
+        a["topic"] = json!(t);
+        dispatch::call(&phone, "push_register", &args(a)).unwrap();
+    }
+    for t in ["com.brethash.other", "com.brethash.worktrees.ios.voip", "com.brethash.worktrees.ios.", "COM.BRETHASH.WORKTREES.IOS", ""] {
+        let mut a = reg_args();
+        a["topic"] = json!(t);
+        assert_eq!(dispatch::call(&phone, "push_register", &args(a)), Err(json!("bad-args: topic")), "{t}");
+    }
+}
+
+/// `push_test` has no exception to "remote off means nothing leaves": refused
+/// while off, and one in the air stops with the kill switch, or with a revoke. The
+/// waiting request answers at once, not after the 30 s bound.
+#[test]
+fn a_test_in_the_air_stops_with_everything_else() {
+    let ask = |w: &Arc<World>, d: &DeviceRecord| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (w2, id) = (w.clone(), d.id.clone());
+        std::thread::spawn(move || {
+            let _ = tx.send(w2.push.test(&id));
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while w.push.in_air() == 0 {
+            assert!(std::time::Instant::now() < deadline, "the test never left");
+            std::thread::yield_now();
+        }
+        rx
+    };
+    let answered = std::time::Duration::from_secs(10);
+
+    let w = Arc::new(world());
+    let d = w.phone("Phone", 1, Projects::All);
+    w.wire.hang.store(true, Ordering::SeqCst);
+    let rx = ask(&w, &d);
+    w.push.kill();
+    assert_eq!(w.push.in_air(), 0);
+    assert_eq!(rx.recv_timeout(answered).expect("answered at once"), Err(super::TEST_FAILED.to_string()));
+
+    let sent = w.kinds().len();
+    w.on.store(false, Ordering::SeqCst);
+    assert_eq!(w.push.test(&d.id), Err(super::TEST_FAILED.to_string()), "off: it does not leave");
+    assert_eq!(w.kinds().len(), sent);
+    w.on.store(true, Ordering::SeqCst);
+
+    let rx = ask(&w, &d);
+    w.reg.revoke(&Caller::console(), &Grant::everything(), &d.id, NOW).unwrap();
+    assert_eq!(w.push.in_air(), 0, "a revoke stops it");
+    assert_eq!(rx.recv_timeout(answered).expect("answered at once"), Err(super::TEST_FAILED.to_string()));
+}
+
+/// The console's row answers with the reason while the device list can't be read.
+#[test]
+fn allowing_alerts_with_an_unreadable_device_list_says_so() {
+    let dir = scratch("allow-unreadable");
+    std::fs::write(dir.join(super::super::devices::FILE), "{ not json").unwrap();
+    let reg = Arc::new(DeviceRegistry::open(&dir));
+    let w = world_on(Some(dir.clone()), reg.clone());
+    let e = w.push.allow_security(&worktrees_core::authz::DeviceId::new("d_x"), true).unwrap_err();
+    assert_eq!(e, reg.readable().unwrap_err());
+    assert_eq!(std::fs::read_to_string(dir.join(FILE)).unwrap_or_default(), "", "nothing was written");
 }
 
 /// A place outside the grant never notifies, by name or by count: not a push,
