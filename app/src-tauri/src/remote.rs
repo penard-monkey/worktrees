@@ -136,7 +136,7 @@ impl Remote {
         let mut said = |m: &str| crate::applog("info", &format!("remote: {}", worktrees_remote::printable(m)));
         let reached = reach::open(&self.store, &rec, &Keys::from(key), &reach::Env::platform(), CONNECT_WAIT, &mut said).await.map_err(|e| {
             let m = match &e {
-                ReachError::NotFound { .. } => format!("{} Then paste it in Settings → Hosts → Paste a new address. {}", e.headline(), e.details()).trim_end().to_string(),
+                ReachError::NotFound { .. } => format!("{} Then paste it in Settings → Remote → Paste a new address. {}", e.headline(), e.details()).trim_end().to_string(),
                 e => format!("{} ({}): {e}", rec.name, rec.addr),
             };
             crate::applog("warn", &format!("remote: connect failed: {m}"));
