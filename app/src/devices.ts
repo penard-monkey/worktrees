@@ -105,7 +105,7 @@ export function pairingBlock(status: RemoteStatus | null, full: boolean, statusE
   }
   switch (status.state) {
     case "off":
-      return { kind: "off", message: "A device pairs over remote access: turn it on in Settings → Remote access first." };
+      return { kind: "off", message: "A device pairs over remote access: turn it on in Settings → Remote first." };
     case "paused": {
       const reason = (status.paused?.trim() || `${status.address ?? "The configured address"} is no longer available on ${status.iface ?? "its interface"}`).replace(/[.!?]+$/, "");
       return { kind: "paused", message: `Remote access is paused: ${reason}. The configured address is no longer valid for pairing. Choose another address in Remote access, or turn remote access off.` };

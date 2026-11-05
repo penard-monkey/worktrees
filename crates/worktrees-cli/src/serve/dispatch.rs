@@ -1,4 +1,4 @@
-//! The 207 commands, each with its exposure, capability and objects, in ONE
+//! The 211 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -39,7 +39,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::sync::Arc;
-use worktrees_api::{agents, config, files, hostenv, macprivacy, meta, ops, prefs, profiles, project, status, term, viewer, workspace, Ctx};
+use worktrees_api::{agents, config, files, hostenv, macprivacy, meta, ops, prefs, presets, profiles, project, status, term, viewer, workspace, Ctx};
 use worktrees_core::authz::{self, Caller, Capability, Caps, DeviceId, Grant, Projects, Registry};
 use worktrees_core::fetchpolicy::Fetcher;
 
@@ -780,7 +780,7 @@ pub fn cap_of(cmd: &str) -> Option<Capability> {
 /// ways by a test, so a new `global` row is a second, deliberate edit here.
 pub const GLOBAL_OK: &[&str] = &[
     // read
-    "settings_info", "get_settings", "quota_settings", "slots_settings", "claude_usage", "codex_usage", "kimi_usage", "claude_status",
+    "settings_info", "get_settings", "quota_settings", "slots_settings", "limits_settings", "policy_preset_status", "claude_usage", "codex_usage", "kimi_usage", "claude_status",
     "check_update", "harness_sessions", "list_releases", "get_ai_config", "get_codex_permissions", "get_fetch_interval",
     "get_term_history_opts", "agent_guidance_status", "agent_guidance_diff", "agent_models", "agent_user_skills",
     "kimi_version", "tmux_check", "log_info", "get_changelog", "new_profile_id", "skills_list", "ui_usage",
@@ -872,6 +872,10 @@ commands! { cx, a;
     set_quota_settings: Engine [admin, all] => ops::set_quota_settings(a.get("gate")?, a.get("weekly_warn_pct")?),
     slots_settings: Engine [read, global] => ops::slots_settings(),
     set_slot_capacity: HostConsole => ops::set_slot_capacity(a.get("name")?, a.get("capacity")?),
+    limits_settings: Engine [read, global] => ops::limits_settings(),
+    set_limits: Engine [admin, all] => ops::set_limits(a.get("key")?, a.get("value")?),
+    policy_preset_status: Engine [read, global] => presets::policy_preset_status(&cx.ctx),
+    apply_policy_preset: HostConsole => presets::apply_policy_preset(&cx.ctx, a.get("name")?, a.get("keys")?),
     set_project_private: HostConsole [console, project(root)] => ops::set_project_private(a.get("root")?, a.get("private")?),
     copy_text: ClientLocal => refused(),
     set_title: Engine [write, place(repo, slug)] => ops::set_title(&cx.ctx, a.get("repo")?, a.get("slug")?, a.get("title")?),
@@ -976,7 +980,7 @@ commands! { cx, a;
     // Host policy (`worktrees_api::hostpolicy`): written only by this explicit
     // act, read by the engine; the getter is a read like any other.
     set_codex_permissions: HostConsole => project::set_codex_permissions(&cx.ctx, a.get("mode")?),
-    get_codex_permissions: Engine [read, global] => project::get_codex_permissions(),
+    get_codex_permissions: Engine [read, global] => project::get_codex_permissions(a.get("detail")?),
     agent_guidance_status: Engine [read, global] => project::agent_guidance_status(),
     set_agent_guidance: HostConsole => project::set_agent_guidance(a.get("enabled")?, a.get("guard")?),
     set_agent_guidance_skill: HostConsole => project::set_agent_guidance_skill(a.get("text")?),
@@ -1296,7 +1300,7 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 207 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 211 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six, the slots pair and
     /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
@@ -1307,14 +1311,16 @@ mod tests {
     /// turn (`agent_interrupt`), `project_sessions`, the one that keeps
     /// a file for the agent (`agent_attach`), and sync's five hub and batch
     /// rows, plus `update_harness` and the agent restart's two
-    /// (`harness_sessions`, `restart_harness_sessions`), and the slash
-    /// commands' two (`agent_commands`, `agent_command`); the check scripts
+    /// (`harness_sessions`, `restart_harness_sessions`), the slash commands'
+    /// two (`agent_commands`, `agent_command`), notifications' nine (the
+    /// `push_*` rows), and Settings → Agent policy's four (`limits_settings`,
+    /// `set_limits`, `policy_preset_status`, `apply_policy_preset`); the check scripts
     /// hold the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 207, "the table has 207 commands");
+        assert_eq!(TABLE.len(), 211, "the table has 211 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1704,11 +1710,14 @@ mod tests {
     /// (`admin`) and the agent restart's `harness_sessions` (`read`) and
     /// `restart_harness_sessions` (`admin`); the slash commands'
     /// `agent_commands` (`read`) and `agent_command` (`instruct`, `admin` in
-    /// its body for the sensitive tier); and notifications' four a device
+    /// its body for the sensitive tier); notifications' four a device
     /// makes for itself (`own`: `push_register`, `push_unregister`,
     /// `push_prefs`, `push_test`) and five at the console (`push_key_import`,
     /// `push_key_remove`, `push_status`, `push_dry_run`,
-    /// `push_allow_security`). A row that moves group
+    /// `push_allow_security`); Settings → Agent policy → Limits'
+    /// `limits_settings` (`read`) and `set_limits` (`admin`); and the policy
+    /// presets' `policy_preset_status` (`read`) and `apply_policy_preset`
+    /// (console). A row that moves group
     /// fails here until the count (and the proposal's table) move with it.
     #[test]
     fn every_row_has_one_base_group_and_the_counts_are_section_3_4s() {
@@ -1725,7 +1734,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 64), ("write", 23), ("admin", 40), ("console", 46), ("stream", 10), ("instruct", 8), ("answer", 2),
+            ("read", 66), ("write", 23), ("admin", 41), ("console", 47), ("stream", 10), ("instruct", 8), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 7),
         ]
         .into();

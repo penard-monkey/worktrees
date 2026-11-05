@@ -77,6 +77,7 @@ pub mod util;
 pub mod viewer;
 pub mod ops;
 pub mod prefs;
+pub mod presets;
 pub mod profiles;
 
 use std::path::PathBuf;

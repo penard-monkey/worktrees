@@ -68,7 +68,7 @@ async function remoteBoot(host: HostSummary): Promise<EngineDoor> {
   const shim = shimOf(tauriDoor);
   const remedy =
     `Reconnect now tries again at once; each try looks for ${host.name} on the LAN if it is not where it was. ` +
-    `If it moved, paste its address code in Settings → Hosts → Paste a new address; if it no longer knows this machine, pair again there.`;
+    `If it moved, paste its address code in Settings → Remote → Paste a new address; if it no longer knows this machine, pair again there.`;
   return remoteDoor(
     tauriDoor,
     host.name,

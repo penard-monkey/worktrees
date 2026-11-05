@@ -372,7 +372,7 @@ pub fn planning_suggested(root: String) -> Result<bool, String> {
     Ok(worktrees_core::planning::repo_suggests(Path::new(&root)))
 }
 
-/// Settings → Behavior → Plan limits: the user's `[quota]` launch-gate policy
+/// Settings → Agent policy → Plan limits: the user's `[quota]` launch-gate policy
 /// (`worktrees_core::quota`), and what was wrong with a hand-edited one.
 /// Machine-level, and read by the gate at launch time — a change reaches the
 /// next launch everywhere, running MCP servers included.
@@ -403,6 +403,78 @@ pub fn set_quota_settings(gate: bool, weekly_warn_pct: Option<u8>) -> Result<Quo
         .inspect_err(|e| applog("error", &format!("set_quota_settings: {e}")))?;
     applog("info", &format!("quota: gate = {gate}, weekly_warn_pct = {weekly_warn_pct:?}"));
     Ok(quota_now())
+}
+
+/// Settings → Agent policy → Limits (settings-reorg §6 item 1): the user's
+/// `[limits]`, which the launch guard (`worktrees_core::guard`) reads at every
+/// agent start — until now with no UI, so the only way to learn it existed
+/// was a refused launch. What the file sets (`explicit`, so a default can be
+/// told from a choice), what the guard applies (the file over this machine's
+/// defaults), and how many agents are live now, by provider: counts only,
+/// like `slots_settings` — WHICH sessions are live names places in every
+/// project, and does not leave this body.
+#[derive(Serialize)]
+pub struct LimitsSettings {
+    pub explicit: worktrees_core::guard::ExplicitLimits,
+    /// `None` = no cap (`max_live_agents = 0`, or this machine's RAM unknown).
+    pub max_live_agents: Option<u32>,
+    pub max_live: std::collections::BTreeMap<String, u32>,
+    pub min_free_memory_pct: u8,
+    pub max_swap_used_pct: u8,
+    /// What an absent `max_live_agents` means here: half the RAM in GiB.
+    pub default_cap: Option<u32>,
+    pub ram_gib: Option<u64>,
+    pub default_min_free_pct: u8,
+    pub live: std::collections::BTreeMap<String, usize>,
+    pub providers: Vec<String>,
+    /// The highest value each key takes (`guard::LimitKey::range`), so the
+    /// panel holds no copy of the rule.
+    pub max_agents: u32,
+    pub problems: Vec<String>,
+    pub config_path: String,
+}
+pub fn limits_now() -> LimitsSettings {
+    let mem = worktrees_core::guard::memory();
+    let path = worktrees_core::config::config_toml_path();
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let (l, problems) = worktrees_core::guard::limits_from(&text, mem.ram_bytes);
+    let panes = worktrees_core::tmux::PaneList::fetch();
+    let probes = worktrees_core::agent::live_probes_in(panes.as_ref());
+    let mut live = std::collections::BTreeMap::new();
+    for a in worktrees_core::guard::live_agents(panes.as_ref(), &probes, &[]) {
+        *live.entry(a.provider).or_insert(0) += 1;
+    }
+    LimitsSettings {
+        explicit: worktrees_core::guard::explicit_from(&text),
+        max_live_agents: l.max_live,
+        max_live: l.per_provider,
+        min_free_memory_pct: l.min_free_pct,
+        max_swap_used_pct: l.max_swap_pct,
+        default_cap: worktrees_core::guard::default_cap(mem.ram_bytes),
+        ram_gib: mem.ram_bytes.map(|b| b >> 30),
+        default_min_free_pct: worktrees_core::guard::DEFAULT_MIN_FREE_PCT,
+        live,
+        providers: provider::PROVIDERS.iter().map(|p| p.id.to_string()).collect(),
+        max_agents: worktrees_core::guard::LimitKey::MaxLiveAgents.range().1,
+        problems,
+        config_path: path.to_string_lossy().into_owned(),
+    }
+}
+
+pub fn limits_settings() -> Result<LimitsSettings, String> {
+    Ok(limits_now())
+}
+
+/// The user's act: set (`Some`) or remove (`None`, back to the default) one
+/// `[limits]` key — `max_live_agents`, `max_live.<provider>`,
+/// `min_free_memory_pct` or `max_swap_used_pct`. `key` is data checked
+/// against that fixed set; a value the guard would ignore is refused, never
+/// written (`guard::LimitKey::check`).
+pub fn set_limits(key: String, value: Option<u32>) -> Result<LimitsSettings, String> {
+    let k = worktrees_core::guard::LimitKey::parse(&key)?;
+    worktrees_core::guard::set_limit(&k, value).inspect_err(|e| applog("error", &format!("set_limits: {e}")))?;
+    applog("info", &format!("limits: {} = {value:?}", k.name()));
+    Ok(limits_now())
 }
 
 /// Settings → Behavior → Heavy jobs: the user's `[slots]`

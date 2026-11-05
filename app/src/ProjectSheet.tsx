@@ -6,6 +6,7 @@ import type { ProfilesInfo } from "./ProfilesPanel";
 import { AgentFixButton, AgentSetupSection, RulesSection, openPr, useAgentSetup, type AgentSetupStatus } from "./AgentSetup";
 import { projectTodos, type Remedies, type Todo, type TodoHealth } from "./projectTodos";
 import { LEVEL_WORDS, ProjectRow, writeProjectPlanning, type PlanningStatus } from "./PlanningPanel";
+import { useArmed } from "./useArmed";
 
 // Right-side slide-over for ONE project (proposal §10). It stays a sheet:
 // unlike Settings, it is about the thing selected in the tree behind it.
@@ -221,8 +222,10 @@ export function ProjectSheet({
   // Arm-then-confirm for the one destructive control in this sheet (`--force`),
   // same two-click shape as .pop-item.danger / .ctrl.sm.danger elsewhere. It is
   // disarmed by every state change below — an armed button surviving a re-check
-  // would fire against findings it was never aimed at.
-  const [armed, setArmed] = useState(false);
+  // would fire against findings it was never aimed at — and it expires
+  // (useArmed), so one armed and forgotten does not fire on a stray click.
+  const arm = useArmed<"force">();
+  const armed = arm.armed === "force";
 
   // Errors are NEVER swallowed: they surface in this sheet's own error area AND
   // land in app.log (ProjectSheet has no fail() — same shape as SettingsSheet).
@@ -251,7 +254,7 @@ export function ProjectSheet({
   // action below — see the hazard note on `run`.
   const refresh = useCallback(async () => {
     setChecking(true);
-    setArmed(false);
+    arm.disarm();
     try {
       // The mock harness returns null for an unmocked command, so every typed
       // invoke here has to tolerate null rather than assume a shape.
@@ -277,7 +280,7 @@ export function ProjectSheet({
     setLog("");
     setErr(null);
     setShowToml(false);
-    setArmed(false);
+    arm.disarm();
     setTodoRan(false);
     refresh();
     // On sheet-open only: profiles_info does a filesystem probe per profile, so
@@ -303,7 +306,7 @@ export function ProjectSheet({
   const run = async (kind: "relink" | "force" | "provision" | "init", cmdline: string, cmd: string, args: Record<string, unknown>) => {
     if (running) return;
     setRunning(kind);
-    setArmed(false);
+    arm.disarm();
     setErr(null);
     setLog(`$ worktrees ${cmdline}\n`);
     try {
@@ -358,10 +361,9 @@ export function ProjectSheet({
   const canProvision = !!cfg?.ports && !cfg?.error;
   // The Health section's --force arm, shared: one armed state, whichever of
   // the two buttons armed it.
-  const reseed = () => {
-    if (!armed) { setArmed(true); return; }
+  const reseed = () => arm.confirm("force", () => {
     run("force", "relink --all --force", "relink", { repo: root, slug: null, force: true });
-  };
+  });
   const todos = projectTodos(todoHealth, agent.status ?? agentStatus);
   const canRelink = !!cfg?.exists && !cfg?.error;
   const show = (section: Todo["section"]) => {
@@ -757,7 +759,7 @@ function PlanningSheetSection({ root, open, status, onStatus, onOpenSettings, on
     <div className="ver-actions">
       <button className="ctrl sm" data-testid="project-planning-settings" onClick={onOpenSettings}>Default &amp; how it works…</button>
     </div>
-    <div className="hint">Your default for every project, and what planning writes, are in Settings → Planning.</div>
+    <div className="hint">Your default for every project, and what planning writes, are in Settings → Projects.</div>
   </section>;
 }
 

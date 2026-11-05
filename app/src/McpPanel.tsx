@@ -16,6 +16,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "./ipc";
 import { copyToClipboard } from "./clipboard";
 import * as Icons from "./icons";
+import { useArmed } from "./useArmed";
 
 /** Mirrors `mcpsetup::Entry`. */
 export type McpEntry = {
@@ -91,8 +92,11 @@ function verdict(s: McpStatus): { tone: "ok" | "warn" | "off"; line: string } {
 
 /** Settings → Claude. The permanent home: the real state, the actions, and the
  *  command spelled out for anyone who would rather run it themselves. */
-export function McpSection({ status, repo, offerPending, onSilenceOffer, onChanged, onReport }: {
+export function McpSection({ status, repo, offerPending, onSilenceOffer, onChanged, onReport, mutationsDefault = true }: {
   status: McpStatus | null;
+  /** "Let Claude create and close worktrees" before the user ticks it: the
+   *  policy preset's suggestion (settings-reorg §5.2). */
+  mutationsDefault?: boolean;
   /** The project in focus, or "" — only used to check the local/project scopes. */
   repo: string;
   /** Is this still an un-taken, un-silenced offer (`offers.ts`)? If so this
@@ -119,9 +123,12 @@ export function McpSection({ status, repo, offerPending, onSilenceOffer, onChang
 
   const [busy, setBusy] = useState<"" | "install" | "remove">("");
   const [log, setLog] = useState("");
-  const [mutations, setMutations] = useState(true);
+  const [picked, setMutations] = useState<boolean | null>(null);
+  const mutations = picked ?? mutationsDefault;
   const [copied, setCopied] = useState(false);
-  const [removeArmed, setRemoveArmed] = useState(false);
+  // Two clicks, and the arm expires (useArmed): an arm forgotten must not
+  // remove the server on a stray click minutes later.
+  const arm = useArmed<"remove">();
 
   const run = async (kind: "install" | "remove") => {
     if (busy) return;
@@ -140,7 +147,7 @@ export function McpSection({ status, repo, offerPending, onSilenceOffer, onChang
       onReport(String(e));
     } finally {
       setBusy("");
-      setRemoveArmed(false);
+      arm.disarm();
     }
   };
 
@@ -160,7 +167,7 @@ export function McpSection({ status, repo, offerPending, onSilenceOffer, onChang
   const verb = status.state === "stale" ? "Repair" : status.state === "read-only" ? "Re-install" : "Set up";
 
   return (
-    <section className="setting" data-focus="mcp-server">
+    <section className="setting" data-testid="mcp-server">
       <label>
         Claude MCP server
         {status.state === "stale" && <span className="upd-tag">broken</span>}
@@ -223,11 +230,11 @@ export function McpSection({ status, repo, offerPending, onSilenceOffer, onChang
         )}
         {installed && status.state !== "foreign" && (
           <button
-            className={"ctrl sm danger" + (removeArmed ? " armed" : "")}
+            className={"ctrl sm danger" + (arm.armed ? " armed" : "")}
             disabled={!!busy || !status.claude_bin}
-            onClick={() => (removeArmed ? run("remove") : setRemoveArmed(true))}
+            onClick={() => arm.confirm("remove", () => void run("remove"))}
           >
-            {busy === "remove" ? "Removing…" : removeArmed ? "Remove?" : "Remove"}
+            {busy === "remove" ? "Removing…" : arm.armed ? "Remove?" : "Remove"}
           </button>
         )}
       </div>

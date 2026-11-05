@@ -76,6 +76,36 @@ pub fn pi_trust() -> PiTrust {
     env.as_deref().and_then(PiTrust::parse).or_else(|| cfg.as_deref().and_then(PiTrust::parse)).unwrap_or(PiTrust::Never)
 }
 
+/// The variable `pi_trust()` reads below host policy.
+pub const PI_TRUST_ENV: &str = "WORKTREES_PI_PROJECT_TRUST";
+
+/// `pi_trust()`, and what decided it, in the same order (host policy > env >
+/// user config > default).
+pub fn pi_trust_origin() -> (PiTrust, crate::config::Origin) {
+    let host = *PI_TRUST_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner());
+    let env = crate::config::env_var(PI_TRUST_ENV);
+    let cfg = crate::config::user_cfg("pi_project_trust");
+    pi_trust_origin_from(host, env, cfg.as_deref())
+}
+
+pub fn pi_trust_origin_from(
+    host: Option<PiTrust>,
+    env: Option<crate::config::EnvVar>,
+    cfg: Option<&str>,
+) -> (PiTrust, crate::config::Origin) {
+    use crate::config::Source;
+    let (t, source) = if let Some(t) = host {
+        (t, Source::Host)
+    } else if let Some(t) = env.as_ref().and_then(|e| PiTrust::parse(&e.value)) {
+        (t, Source::Env)
+    } else if let Some(t) = cfg.and_then(PiTrust::parse) {
+        (t, Source::Config)
+    } else {
+        (PiTrust::Never, Source::Default)
+    };
+    (t, crate::config::Origin { source, env })
+}
+
 /// The repo a place belongs to, as the allowance names it: the parent of its
 /// git COMMON dir, canonicalised — so every worktree of a repo, including ones
 /// created later, shares one entry, and a place directory a repo could fake is
@@ -504,6 +534,19 @@ pub fn cmd_trust(p: &crate::Project, ui: &mut dyn crate::Ui, args: &[String]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pi_trust_origin_agrees_with_pi_trust_order() {
+        use crate::config::{EnvVar, Source};
+        let ev = |v: &str| Some(EnvVar { name: PI_TRUST_ENV, value: v.into() });
+        assert_eq!(pi_trust_origin_from(None, None, None), (PiTrust::Never, crate::config::Origin { source: Source::Default, env: None }));
+        assert_eq!(pi_trust_origin_from(None, ev("ask"), Some("never")).0, PiTrust::Ask);
+        assert_eq!(pi_trust_origin_from(None, ev("ask"), Some("never")).1.source, Source::Env);
+        assert_eq!(pi_trust_origin_from(None, ev("nope"), Some("ask")).1.source, Source::Config);
+        let (t, o) = pi_trust_origin_from(Some(PiTrust::Never), ev("ask"), None);
+        assert_eq!((t, o.source), (PiTrust::Never, Source::Host), "host policy outranks the variable");
+        assert_eq!(o.env.map(|e| e.value), Some("ask".into()), "…which is still reported");
+    }
 
     #[test]
     fn the_allowance_edit_changes_only_the_trust_key() {

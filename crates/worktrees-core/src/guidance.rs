@@ -150,6 +150,28 @@ pub fn settings() -> Settings {
     settings_from(file.as_deref(), std::env::var("WORKTREES_AGENT_GUIDANCE").ok().as_deref())
 }
 
+/// The variable `settings()` reads over the file's `enabled`.
+pub const GUIDANCE_ENV: &str = "WORKTREES_AGENT_GUIDANCE";
+
+/// What decided `settings().enabled`: the variable (`on`/`off`) OUTRANKS the
+/// file, so a Settings switch cannot move it while it is set — the one of the
+/// three policy getters where the environment wins over a click.
+pub fn enabled_origin_from(file: Option<&str>, env: Option<crate::config::EnvVar>) -> crate::config::Origin {
+    use crate::config::Source;
+    let from_env = env.as_ref().is_some_and(|e| matches!(e.value.trim(), "on" | "off"));
+    let in_file = file
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(t).ok())
+        .is_some_and(|v| v.get("enabled").is_some_and(|e| e.is_boolean()));
+    let source = if from_env {
+        Source::Env
+    } else if in_file {
+        Source::File
+    } else {
+        Source::Default
+    };
+    crate::config::Origin { source, env }
+}
+
 pub fn settings_from(file: Option<&str>, env: Option<&str>) -> Settings {
     let mut s = file.and_then(|t| serde_json::from_str::<Settings>(t).ok()).unwrap_or_default();
     match env.map(str::trim) {
@@ -932,7 +954,7 @@ fn refusal(why: &str) -> String {
     format!(
         "Refused by the worktrees guard: {why} This repository is managed by worktrees. Create a place \
          with the create_worktree tool (or `worktrees new <branch>`) and work in its directory. The guard \
-         is optional: Settings → Agent guidance turns it off."
+         is optional: Settings → Agent policy turns it off."
     )
 }
 
@@ -1034,6 +1056,9 @@ pub struct Status {
     /// [`VERSION`].
     pub version: u32,
     pub settings: Settings,
+    /// What decided `settings.enabled` (Settings → Guidance says when the
+    /// environment holds it).
+    pub enabled_origin: crate::config::Origin,
     /// Whether the guard can be delivered: it needs a `worktrees` CLI that has
     /// it ([`guard_bin`]). Asked for but unavailable, Claude gets the plain
     /// plugin.
@@ -1086,6 +1111,7 @@ pub fn status() -> Status {
     Status {
         version: VERSION,
         guard_available: m.as_ref().is_some_and(|m| m.claude_guard_plugin.is_some()),
+        enabled_origin: enabled_origin_from(std::fs::read_to_string(settings_path()).ok().as_deref(), crate::config::env_var(GUIDANCE_ENV)),
         settings: s,
         settings_path: settings_path().to_string_lossy().into_owned(),
         dir: m.map(|m| m.dir.to_string_lossy().into_owned()),
@@ -1162,7 +1188,7 @@ fn skill_line(edit: Option<&SkillEdit>, path: &str) -> String {
         None => "the default".into(),
         Some(SkillEdit { invalid: Some(why), .. }) => format!("the default — your edit at {path} is not used: {why}"),
         Some(SkillEdit { stale: true, base: Some(b), .. }) => format!(
-            "your edit ({path}); the default has changed since you edited v{} — compare in Settings → Agent guidance, or `worktrees guide --default`",
+            "your edit ({path}); the default has changed since you edited v{} — compare in Settings → Guidance, or `worktrees guide --default`",
             b.version
         ),
         Some(SkillEdit { stale: true, .. }) => {
@@ -1235,6 +1261,18 @@ pub fn pretooluse_with(input: &str, s: &Settings, discover: &dyn Fn(&Path) -> Op
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_variable_outranks_the_file_for_enabled_and_says_so() {
+        use crate::config::{EnvVar, Source};
+        let ev = |v: &str| Some(EnvVar { name: GUIDANCE_ENV, value: v.into() });
+        let file = Some(r#"{"enabled": true, "guard": false}"#);
+        assert_eq!(enabled_origin_from(file, ev("off")).source, Source::Env);
+        assert!(!settings_from(file, Some("off")).enabled, "the origin names what settings_from applies");
+        assert_eq!(enabled_origin_from(file, ev("maybe")).source, Source::File, "a value it ignores does not decide");
+        assert_eq!(enabled_origin_from(None, None).source, Source::Default);
+        assert_eq!(enabled_origin_from(Some("{}"), None).source, Source::Default);
+    }
 
     #[test]
     fn the_head_is_the_rule_in_one_short_line() {

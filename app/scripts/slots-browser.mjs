@@ -1,4 +1,4 @@
-// Optional browser gate for Settings → Behavior → Heavy jobs (SlotsPanel.tsx),
+// Optional browser gate for Settings → Agent policy → Heavy jobs (SlotsPanel.tsx),
 // in Chromium AND WebKit (the app is WKWebView; the harness is Chrome — AGENTS.md).
 //
 // Install Playwright in scratch space with both engines, then run against the
@@ -34,19 +34,23 @@ async function open(page, query = "") {
   await page.goto(`${BASE}/${query}`);
   await page.waitForSelector("[data-track=settings]");
   await page.click("[data-track=settings]");
-  await page.locator(".settings-cat", { hasText: "Behavior" }).click();
+  // Heavy jobs is Agent policy's, at Advanced (settings-reorg §3.2).
+  await page.locator("[data-testid=settings-mode] [data-mode=expert]").click();
+  await page.locator(".settings-cat[data-cat=policy]").click();
   await page.waitForSelector(`${SECTION} [data-testid=slot-gate]`);
   await page.locator(SECTION).scrollIntoViewIfNeeded();
 }
 
 /** Every slot row as the page shows it. */
-const rows = (page) => page.evaluate(() => [...document.querySelectorAll(".slot-row")].map((r) => ({
+// Scoped to the section: Limits, on the same page since the regroup, borrows
+// `.slot-row` for its own rows.
+const rows = (page) => page.evaluate((sel) => [...document.querySelectorAll(`${sel} .slot-row`)].map((r) => ({
   name: r.dataset.testid.slice(5),
   cap: r.querySelector(".slot-cap").textContent,
   source: r.querySelector("[data-testid^=slot-source-]").textContent,
   meta: r.querySelector(".slot-meta").textContent,
   reset: r.querySelector(".slot-reset")?.textContent ?? null,
-})));
+})), SECTION);
 
 /** Each button in the section: reachable at its centre, and whether it is disabled. */
 const reach = (page) => page.evaluate((sel) => [...document.querySelectorAll(`${sel} button`)].map((b) => {
@@ -56,7 +60,7 @@ const reach = (page) => page.evaluate((sel) => [...document.querySelectorAll(`${
   return { id: b.dataset.testid, hit: !!hit && b.contains(hit), w: q.width, h: q.height };
 }), SECTION);
 
-const overflow = (page) => page.evaluate(() => [...document.querySelectorAll(".slot-row")].filter((r) => r.scrollWidth > r.clientWidth + 1).map((r) => r.dataset.testid));
+const overflow = (page) => page.evaluate((sel) => [...document.querySelectorAll(`${sel} .slot-row`)].filter((r) => r.scrollWidth > r.clientWidth + 1).map((r) => r.dataset.testid), SECTION);
 
 const row = async (page, name) => (await rows(page)).find((r) => r.name === name);
 

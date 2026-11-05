@@ -8,10 +8,13 @@ const BASE = process.env.PAIR_PAUSED_URL ?? "http://127.0.0.1:1477";
 const SHOTS = process.env.PAIR_PAUSED_SHOTS;
 if (SHOTS) fs.mkdirSync(SHOTS, { recursive: true });
 
-async function open(page, query, cat) {
+// Since the Settings regroup, the listener and the devices are two sections of
+// one page, Remote (Advanced): every caller lands there, in Expert.
+async function open(page, query, _cat) {
   await page.goto(`${BASE}/?${query}`);
   await page.locator("[data-track=settings]").click();
-  await page.locator(".settings-cat", { hasText: cat }).click();
+  await page.locator("[data-testid=settings-mode] [data-mode=expert]").click();
+  await page.locator(".settings-cat[data-cat=remote]").click();
 }
 
 async function hit(page, selector) {
@@ -58,7 +61,8 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
 
     await page.goto(`${BASE}/?access=paused&devices=0`);
     await page.locator("[data-track=settings]").click();
-    await page.locator(".settings-cat", { hasText: "Remote access" }).click();
+    await page.locator("[data-testid=settings-mode] [data-mode=expert]").click();
+    await page.locator(".settings-cat[data-cat=remote]").click();
     const offAgain = page.locator('[data-focus="remote-access"]').getByRole("button", { name: "Turn off", exact: true });
     await offAgain.click();
     await page.getByRole("dialog", { name: "Turn off remote access?" }).getByRole("button", { name: "Turn off" }).click();

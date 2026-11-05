@@ -94,6 +94,23 @@ const mockHostPolicy: MockHostPolicy = (() => {
   try { return { ...d, ...JSON.parse(sessionStorage.getItem(MOCK_HOST_POLICY_KEY) ?? "{}") }; } catch { return d; }
 })();
 const mockHostPolicySets: { cmd: string; mode: string }[] = [];
+// `?env=codex,pi,guidance`: the engine was started with WORKTREES_CODEX_
+// PERMISSIONS=full / WORKTREES_PI_PROJECT_TRUST=ask / WORKTREES_AGENT_GUIDANCE
+// =off (settings-reorg §6 item 4). Codex's and pi's lose to a value this
+// session's Settings set (host policy outranks them, as in core); guidance's
+// wins over the switch.
+const mockEnv = new Set((new URLSearchParams(location.search).get("env") ?? "").split(",").filter(Boolean));
+const MOCK_ENV_VARS: Record<string, { name: string; value: string }> = {
+  codex: { name: "WORKTREES_CODEX_PERMISSIONS", value: "full" },
+  pi: { name: "WORKTREES_PI_PROJECT_TRUST", value: "ask" },
+  guidance: { name: "WORKTREES_AGENT_GUIDANCE", value: "off" },
+};
+/** `Origin` for one of the two host-policy agent settings. */
+const mockOrigin = (which: "codex" | "pi", setter: string) => {
+  const env = mockEnv.has(which) ? MOCK_ENV_VARS[which] : null;
+  const held = mockHostPolicySets.some((x) => x.cmd === setter);
+  return { source: held ? "host" : env ? "env" : "default", env };
+};
 function setHostPolicy(cmd: string, patch: Partial<MockHostPolicy>) {
   mockHostPolicySets.push({ cmd, mode: Object.keys(patch).length === 1 ? String(Object.values(patch)[0]) : JSON.stringify(patch) });
   if (location.search.includes("hostpolicyfail")) {
@@ -250,6 +267,72 @@ let mockQuota: { gate: boolean; weekly_warn_pct: number | null; problems: string
     ? ["[quota] weekly_warn_pct = 150 is not a whole number from 1 to 100 — ignored, the provider's own grade applies"] : [],
 };
 const mockQuotaNow = () => ({ ...mockQuota, config_path: "/Users/demo/.config/worktrees/config.toml" });
+
+// Settings → Agent policy → Preset (`policy_preset_status` /
+// `apply_policy_preset`): core's `policy_presets`, mirrored — the same three
+// presets and keys, Balanced the shipped defaults, the name kept only for a
+// whole apply. `?preset=cautious` starts as if Cautious had been applied.
+const MOCK_PRESET_KEYS = ["codex_access", "main_guard", "pi_trust", "cross_project", "quota_gate", "quota_weekly_pct", "max_live_agents"];
+type MockPresetValues = { codex_access: string; main_guard: boolean; pi_trust: string; cross_project: string; quota_gate: boolean; quota_weekly_pct: number | null; max_live_agents: number | null };
+const MOCK_PRESETS: { name: string; label: string; summary: string; values: MockPresetValues; mutations_default: boolean; pair_scope: string }[] = [
+  { name: "cautious", label: "Cautious", summary: "Codex asks before each command, Claude may not branch in (main), pi skips repo resources, agents see only their own project and stop at 80% of a weekly plan, and two may be live at once.",
+    values: { codex_access: "ask", main_guard: true, pi_trust: "never", cross_project: "off", quota_gate: true, quota_weekly_pct: 80, max_live_agents: 2 }, mutations_default: false, pair_scope: "observe" },
+  { name: "balanced", label: "Balanced", summary: "Codex's reviewer approves or refuses each command, pi skips repo resources, agents see only their own project and stop on a nearly spent plan, up to this machine's default number at once. Today's defaults.",
+    values: { codex_access: "auto-review", main_guard: false, pi_trust: "never", cross_project: "off", quota_gate: true, quota_weekly_pct: null, max_live_agents: null }, mutations_default: true, pair_scope: "observe" },
+  { name: "autonomous", label: "Autonomous", summary: "Codex runs with no prompts and no sandbox, pi asks about each repo's resources, agents may read your other projects, and no plan check stops a launch.",
+    values: { codex_access: "full", main_guard: false, pi_trust: "ask", cross_project: "read", quota_gate: false, quota_weekly_pct: null, max_live_agents: null }, mutations_default: true, pair_scope: "operate" },
+];
+let mockPresetApplied: { name: string; version: number } | null =
+  mockQuotaQ.get("preset") ? { name: mockQuotaQ.get("preset")!, version: 1 } : null;
+const mockPresetDiffers = (a: MockPresetValues, b: MockPresetValues) => MOCK_PRESET_KEYS.filter((k) =>
+  k === "quota_weekly_pct" ? a.quota_gate && b.quota_gate && a.quota_weekly_pct !== b.quota_weekly_pct
+    : a[k as keyof MockPresetValues] !== b[k as keyof MockPresetValues]);
+function mockPresetStatus() {
+  const current: MockPresetValues = {
+    codex_access: mockHostPolicy.codex_permissions, main_guard: mockGuidanceSettings.guard,
+    pi_trust: mockHostPolicy.pi_project_trust, cross_project: mockReach,
+    quota_gate: mockQuota.gate, quota_weekly_pct: mockQuota.weekly_warn_pct, max_live_agents: mockLimits.max_live_agents ?? null,
+  };
+  const matches = MOCK_PRESETS.filter((p) => mockPresetDiffers(p.values, current).length === 0).map((p) => p.name);
+  const known = MOCK_PRESETS.find((p) => p.name === mockPresetApplied?.name);
+  return {
+    name: known ? known.name : matches[0] ?? "custom",
+    applied: mockPresetApplied, version: 1, stale: false,
+    modified: known ? mockPresetDiffers(known.values, current) : [],
+    matches, current, presets: MOCK_PRESETS,
+    sources: { codex_access: mockOrigin("codex", "set_codex_permissions"), pi_trust: mockOrigin("pi", "set_pi_trust") },
+  };
+}
+
+// Settings → Agent policy → Limits (`limits_settings` / `set_limits`), the
+// mirror of core's `guard::LimitKey`: the same four keys and ranges, a value
+// outside refused with core's words, an absent key back on the machine's
+// default (a 36 GiB machine: a cap of 18). `?limits=custom` starts with two
+// keys set.
+const MOCK_LIMIT_RANGE: Record<string, [number, number]> = { max_live_agents: [0, 1000], min_free_memory_pct: [0, 90], max_swap_used_pct: [0, 100] };
+let mockLimits: Record<string, number> = mockQuotaQ.get("limits") === "custom" ? { max_live_agents: 6, "max_live.claude": 4 } : {};
+const mockLimitsNow = () => {
+  const explicit = {
+    max_live_agents: mockLimits.max_live_agents ?? null,
+    max_live: Object.fromEntries(Object.entries(mockLimits).filter(([k]) => k.startsWith("max_live.")).map(([k, v]) => [k.slice(9), v])),
+    min_free_memory_pct: mockLimits.min_free_memory_pct ?? null,
+    max_swap_used_pct: mockLimits.max_swap_used_pct ?? null,
+  };
+  const cap = explicit.max_live_agents ?? 18;
+  return {
+    explicit,
+    max_live_agents: cap === 0 ? null : cap,
+    max_live: Object.fromEntries(Object.entries(explicit.max_live).filter(([, v]) => v > 0)),
+    min_free_memory_pct: explicit.min_free_memory_pct ?? 20,
+    max_swap_used_pct: explicit.max_swap_used_pct ?? 0,
+    default_cap: 18, ram_gib: 36, default_min_free_pct: 20,
+    live: { claude: 3, codex: 1 },
+    providers: ["claude", "codex", "pi", "kimi"],
+    max_agents: 1000,
+    problems: [] as string[],
+    config_path: "/Users/demo/.config/worktrees/config.toml",
+  };
+};
 // The user's `[slots]` (`slots_settings`), resolved the way core's
 // `slots::resolve` does: the name's own key, else `default` (for any other
 // name), else the machine's. Starts as this repo's author left it — `gate = 3`
@@ -366,12 +449,15 @@ function mockSaveSkill(text: string | null) {
 let mockGuidanceSettings = { enabled: new URLSearchParams(location.search).get("guidance") !== "off", guard: false };
 function mockGuidance(): Record<string, unknown> {
   const mode = new URLSearchParams(location.search).get("guidance") ?? "";
-  const on = mockGuidanceSettings.enabled;
+  // `?env=guidance`: WORKTREES_AGENT_GUIDANCE=off outranks the file's switch.
+  const envOff = mockEnv.has("guidance");
+  const on = mockGuidanceSettings.enabled && !envOff;
   const dir = "/Users/demo/.local/share/worktrees/agent/f05534dced979d78";
   const d = (flags: string[]) => (on ? { state: "on", flags } : { state: "off" });
   return {
     version: 3,
-    settings: { ...mockGuidanceSettings },
+    settings: { ...mockGuidanceSettings, enabled: on },
+    enabled_origin: envOff ? { source: "env", env: MOCK_ENV_VARS.guidance } : { source: "file", env: null },
     guard_available: mode !== "noguard",
     settings_path: "/Users/demo/.config/worktrees/agent-guidance.json",
     dir, error: null,
@@ -2174,6 +2260,42 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       // A write rewrites both keys, so whatever the hand-edit got wrong is gone.
       mockQuota = { gate: !!args.gate, weekly_warn_pct: pct, problems: [] };
       return mockQuotaNow();
+    }
+    case "policy_preset_status":
+      return mockPresetStatus();
+    case "apply_policy_preset": {
+      const name = String(args.name);
+      const keys = (args.keys as string[] | null | undefined) ?? null;
+      if (name === "custom" && !keys) { mockPresetApplied = null; return mockPresetStatus(); }
+      const p = MOCK_PRESETS.find((x) => x.name === name);
+      if (!p) throw `unknown policy preset '${name}' (expected cautious, balanced or autonomous)`;
+      const bad = (keys ?? []).find((k) => !MOCK_PRESET_KEYS.includes(k));
+      if (bad) throw `a policy preset sets no '${bad}' (it sets ${MOCK_PRESET_KEYS.join(", ")})`;
+      const want = (k: string) => !keys || keys.includes(k);
+      const v = p.values;
+      if (want("codex_access")) setHostPolicy("set_codex_permissions", { codex_permissions: v.codex_access });
+      if (want("main_guard")) mockGuidanceSettings = { ...mockGuidanceSettings, guard: v.main_guard };
+      if (want("pi_trust")) setHostPolicy("set_pi_trust", { pi_project_trust: v.pi_trust });
+      if (want("cross_project")) mockReach = v.cross_project;
+      if (want("quota_gate") || want("quota_weekly_pct")) mockQuota = {
+        gate: want("quota_gate") ? v.quota_gate : mockQuota.gate,
+        weekly_warn_pct: want("quota_weekly_pct") ? v.quota_weekly_pct : mockQuota.weekly_warn_pct, problems: [] };
+      if (want("max_live_agents")) { if (v.max_live_agents === null) delete mockLimits.max_live_agents; else mockLimits.max_live_agents = v.max_live_agents; }
+      if (!keys) mockPresetApplied = { name, version: 1 };
+      return mockPresetStatus();
+    }
+    case "limits_settings":
+      return mockLimitsNow();
+    case "set_limits": {
+      const key = String(args.key);
+      const n = args.value as number | null;
+      const prov = /^max_live\.(.+)$/.exec(key)?.[1];
+      if (prov !== undefined && !["claude", "codex", "pi", "kimi"].includes(prov)) throw `[limits] max_live.${prov}: no such provider (claude, codex, pi, kimi)`;
+      const range = prov !== undefined ? [0, 1000] : MOCK_LIMIT_RANGE[key];
+      if (!range) throw `[limits] has no key \`${key}\``;
+      if (n !== null && (!Number.isInteger(n) || n < range[0] || n > range[1])) throw `[limits] ${key} must be a whole number from ${range[0]} to ${range[1]} (got ${n})`;
+      if (n === null) delete mockLimits[key]; else mockLimits[key] = n;
+      return mockLimitsNow();
     }
     case "slots_settings":
       return mockSlotsNow();
@@ -4159,7 +4281,9 @@ Phase 3: Frontend pane and mock harness
           node_path: "/Users/demo/.local/share/pi-node/current/bin/node", node_version: "26.10.0",
           node_floor: "22.19.0", problem: null,
         },
-        trust: mockHostPolicy.pi_project_trust, allowed: [...piAllowed], repo_root: root, repo_allowed: !!root && piAllowed.has(root),
+        trust: mockOrigin("pi", "set_pi_trust").source === "env" ? "ask" : mockHostPolicy.pi_project_trust,
+        trust_origin: mockOrigin("pi", "set_pi_trust"),
+        allowed: [...piAllowed], repo_root: root, repo_allowed: !!root && piAllowed.has(root),
         // `?pitrust=trusted|untrusted` stands in for pi's own trust.json;
         // `?pitrust=shadowed` for a .pi/mcp.json that defines `worktrees`
         // (pi's file trusting the repo too, so the veto is visible).
@@ -4199,8 +4323,11 @@ Phase 3: Frontend pane and mock harness
       setHostPolicy("set_codex_permissions", { codex_permissions: mode });
       return null;
     }
-    case "get_codex_permissions":
-      return mockHostPolicy.codex_permissions;
+    case "get_codex_permissions": {
+      const origin = mockOrigin("codex", "set_codex_permissions");
+      const value = origin.source === "env" ? "full" : mockHostPolicy.codex_permissions;
+      return args.detail ? { value, ...origin } : value;
+    }
 
     case "init_suggest":
       return clone(mockSuggestions[args.repo] ?? {
@@ -5261,7 +5388,7 @@ function mockReference(args: Record<string, unknown>): string {
       ? `@worktrees:place://${String(args.slug).replace(/[^\p{L}\p{N}_.-]/gu, "-").replace(/^[-.]+|[-.]+$/g, "") || "place"}`
       : `place ${from}:${args.slug}`;
   } else {
-    if (mockReach === "off") throw "cross-project reach is off — turn it on in Settings → Agent guidance";
+    if (mockReach === "off") throw "cross-project reach is off — turn it on in Settings → Agent policy";
     if (mockPrivate.has(from)) throw `'${from}' is private; its places cannot be referenced from other projects`;
     if (mockPrivate.has(into)) throw `this session's project ('${into}') is private, so it reaches no other project`;
     token = `place ${from}:${args.slug}`;
@@ -5286,7 +5413,18 @@ const mockPlanPrompts: { session: string }[] = [];
 const mockAskMain: { slug: string; session: string; provider: string | null }[] = [];
 
 const healthyConfigs: Record<string, MockCfg> = {};
+// The notification plugin (notifyhost.ts): permission and every send, recorded.
+// `?notify=granted` starts allowed. `__mock.notifications()` reads the sends.
+const mockNotified: { title: string; body: string }[] = [];
+let mockNotifyGranted = new URLSearchParams(location.search).get("notify") === "granted";
+(window as any).__mockNotify = {
+  granted: () => mockNotifyGranted,
+  request: () => { mockNotifyGranted = true; return "granted"; },
+  send: (title: string, body: string) => { mockNotified.push({ title, body }); },
+};
 (window as any).__mock = {
+  /** Every notification the app sent, oldest first. */
+  notifications: () => mockNotified.slice(),
   /** A backend provider switch, followed by its workspace push. `canonicalShell`
    * leaves the old tmux session up as a bare shell while Codex runs. */
   async switchAgent(repo: string, slug: string, provider: Harness, canonicalShell = false) {

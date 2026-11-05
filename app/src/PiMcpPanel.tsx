@@ -6,6 +6,7 @@
 
 import { useEffect, useState } from "react";
 import { invoke } from "./ipc";
+import { useArmed } from "./useArmed";
 
 export type PiMcpStatus = {
   state: "installed" | "read-only" | "disabled" | "stale" | "foreign" | "unreadable" | "absent" | "cli-missing" | "pi-missing";
@@ -29,8 +30,10 @@ const VERDICT: Record<PiMcpStatus["state"], string> = {
   "pi-missing": "pi is not installed.",
 };
 
-export function PiMcpSection({ onReport, onStatus, offerPending = false, onSilenceOffer, "data-focus": focusId }: {
+export function PiMcpSection({ onReport, onStatus, offerPending = false, onSilenceOffer, mutationsDefault = true, "data-focus": focusId }: {
   onReport: (text: string) => void;
+  /** "Allow create and close tools" before the user ticks it. */
+  mutationsDefault?: boolean;
   "data-focus"?: string;
   /** Every status read or handed back — App keeps the `pi-mcp` offer in step. */
   onStatus?: (s: PiMcpStatus) => void;
@@ -40,7 +43,13 @@ export function PiMcpSection({ onReport, onStatus, offerPending = false, onSilen
   const [status, setStatusRaw] = useState<PiMcpStatus | null>(null);
   const setStatus = (s: PiMcpStatus) => { setStatusRaw(s); onStatus?.(s); };
   const [busy, setBusy] = useState(false);
-  const [mutations, setMutations] = useState(true);
+  // Two clicks (settings-reorg §6 item 3): removing drops the server entry
+  // from pi's own config, and every lane loses the tools at its next start.
+  const arm = useArmed<"remove">();
+  // The box's starting value is the policy preset's suggestion
+  // (settings-reorg §5.2: unticked under Cautious); the user's tick wins.
+  const [picked, setMutations] = useState<boolean | null>(null);
+  const mutations = picked ?? mutationsDefault;
   const [output, setOutput] = useState("");
   useEffect(() => { invoke<PiMcpStatus>("pi_mcp_status").then(setStatus).catch((e) => onReport(String(e))); }, []);
   const act = async (remove: boolean) => {
@@ -66,7 +75,8 @@ export function PiMcpSection({ onReport, onStatus, offerPending = false, onSilen
       <div className="ver-actions">
         <button className="ctrl sm" data-testid="pi-mcp-install" disabled={busy || !status.worktrees_bin}
           onClick={() => act(false)}>{busy ? "Working…" : status.entry ? "Repair or update" : "Set up pi"}</button>
-        {status.entry && <button className="ctrl sm danger" disabled={busy} onClick={() => act(true)}>Remove from pi</button>}
+        {status.entry && <button className={"ctrl sm danger" + (arm.armed ? " armed" : "")} disabled={busy} data-testid="pi-mcp-remove"
+          onClick={() => arm.confirm("remove", () => void act(true))}>{arm.armed ? "Remove from pi — sure?" : "Remove from pi"}</button>}
         {offerPending && onSilenceOffer && <button className="mcp-dismiss" onClick={onSilenceOffer}>Stop suggesting this</button>}
       </div>
       {status.entry && <div className="hint">Repair replaces the whole entry, including any per-tool exposure or timeout you added to it by hand.</div>}

@@ -199,6 +199,9 @@ for(const [engine,type] of Object.entries({chromium,webkit})) {
  // Settings checkboxes actually save explicit false (not just injected fixtures).
  await page.setViewportSize({width:1280,height:800});await page.keyboard.press('Escape');
  await page.keyboard.press('Meta+,');
+ // Agents → Plan usage, at Advanced (settings-reorg §3); a fresh blob opens in Beginner.
+ await page.locator('[data-testid=settings-mode] [data-mode=advanced]').click();
+ await page.locator('.settings-cat[data-cat=agents]').click();
  const checkbox=page.getByLabel('Codex plan usage',{exact:true});
  await checkbox.waitFor();await checkbox.uncheck();await page.waitForTimeout(500);
  const saved=await page.evaluate(()=>JSON.parse(sessionStorage.getItem('wt-mock-ui-state')));

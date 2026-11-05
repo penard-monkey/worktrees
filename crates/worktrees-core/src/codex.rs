@@ -289,6 +289,37 @@ pub fn permissions_from(env: Option<&str>, cfg: Option<&str>) -> Permissions {
         .unwrap_or(Permissions::AutoReview)
 }
 
+/// The variable `permissions()` reads below host policy.
+pub const PERMISSIONS_ENV: &str = "WORKTREES_CODEX_PERMISSIONS";
+
+/// `permissions()`, and what decided it: host policy > env > user config >
+/// the default — the same order, so a host value set from Settings outranks
+/// the variable (`origin_agrees_with_permissions`).
+pub fn permissions_origin() -> (Permissions, crate::config::Origin) {
+    let host = *PERMISSIONS_OVERRIDE.lock().unwrap_or_else(|e| e.into_inner());
+    let env = crate::config::env_var(PERMISSIONS_ENV);
+    let cfg = crate::config::user_cfg("codex_permissions");
+    permissions_origin_from(host, env, cfg.as_deref())
+}
+
+pub fn permissions_origin_from(
+    host: Option<Permissions>,
+    env: Option<crate::config::EnvVar>,
+    cfg: Option<&str>,
+) -> (Permissions, crate::config::Origin) {
+    use crate::config::Source;
+    let (p, source) = if let Some(p) = host {
+        (p, Source::Host)
+    } else if let Some(p) = env.as_ref().and_then(|e| Permissions::parse(&e.value)) {
+        (p, Source::Env)
+    } else if let Some(p) = cfg.and_then(Permissions::parse) {
+        (p, Source::Config)
+    } else {
+        (Permissions::AutoReview, Source::Default)
+    };
+    (p, crate::config::Origin { source, env })
+}
+
 /// Codex arguments (already shell-quoted) for `mode` in a worktree whose git
 /// common dir is `git_common`.
 ///
@@ -571,6 +602,29 @@ pub fn composer_submitted(screen: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn origin_agrees_with_permissions() {
+        use crate::config::{EnvVar, Source};
+        let ev = |v: &str| Some(EnvVar { name: PERMISSIONS_ENV, value: v.into() });
+        for (host, env, cfg) in [
+            (None, None, None),
+            (None, ev("full"), None),
+            (None, ev("bogus"), Some("ask")),
+            (None, None, Some("full")),
+            (Some(Permissions::Ask), ev("full"), Some("full")),
+        ] {
+            let (p, o) = permissions_origin_from(host, env.clone(), cfg);
+            let want = host.unwrap_or_else(|| permissions_from(env.as_ref().map(|e| e.value.as_str()), cfg));
+            assert_eq!(p, want, "{host:?} {env:?} {cfg:?}");
+            assert_eq!(o.env, env, "the variable is reported whether or not it decided");
+            let _ = o.source;
+        }
+        assert_eq!(permissions_origin_from(None, ev("full"), Some("ask")).1.source, Source::Env);
+        assert_eq!(permissions_origin_from(Some(Permissions::Ask), ev("full"), None).1.source, Source::Host, "host policy outranks the variable");
+        assert_eq!(permissions_origin_from(None, ev("bogus"), Some("ask")).1.source, Source::Config, "a value the variable cannot hold does not decide");
+        assert_eq!(permissions_origin_from(None, None, None).1.source, Source::Default);
+    }
 
     const SEND_EMPTY: &str = include_str!("../tests/fixtures/codex-send/empty.txt");
     const SEND_TYPED: &str = include_str!("../tests/fixtures/codex-send/typed.txt");

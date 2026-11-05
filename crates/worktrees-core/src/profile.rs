@@ -634,7 +634,7 @@ pub fn claude_launch_check(cmd: &str, match_word: &str) -> Result<(), String> {
     }
     if match_word == "claude" {
         return Err(
-            "your AI profile could not be prepared, so claude was not launched — see the app log (Settings → Logs)"
+            "your AI profile could not be prepared, so claude was not launched — see the app log (Settings → Data & privacy → Logs)"
                 .into(),
         );
     }

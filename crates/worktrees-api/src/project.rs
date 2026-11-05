@@ -813,9 +813,19 @@ pub fn set_codex_permissions(ctx: &Ctx, mode: String) -> Result<(), String> {
 }
 
 /// What the next Codex launch on this host will use, for Settings to render:
-/// the host's own value, else whatever env or user config decide.
-pub fn get_codex_permissions() -> Result<String, String> {
-    Ok(worktrees_core::codex::permissions().as_str().to_string())
+/// the host's own value, else whatever env or user config decide. With
+/// `detail`, also what decided it (settings-reorg §6 item 4) —
+/// `{value, source, env}` — so Settings can say "set by the environment"
+/// rather than draw a control that looks stuck. Without it, the plain string
+/// every client before `detail` reads (an older host ignores the argument and
+/// answers the string, which the client takes as "source unknown").
+pub fn get_codex_permissions(detail: Option<bool>) -> Result<serde_json::Value, String> {
+    let (p, origin) = worktrees_core::codex::permissions_origin();
+    if detail.unwrap_or(false) {
+        Ok(serde_json::json!({ "value": p.as_str(), "source": origin.source, "env": origin.env }))
+    } else {
+        Ok(serde_json::Value::String(p.as_str().to_string()))
+    }
 }
 
 /// What a model picker lists for `harness` (`choice::options_for`): Claude's
@@ -833,6 +843,8 @@ pub fn agent_models(harness: String) -> Result<Vec<worktrees_core::choice::Model
 pub struct PiStatus {
     pub preflight: worktrees_core::pimodels::Preflight,
     pub trust: worktrees_core::trust::PiTrust,
+    /// What decided `trust` (settings-reorg §6 item 4).
+    pub trust_origin: worktrees_core::config::Origin,
     pub allowed: Vec<String>,
     pub repo_root: Option<String>,
     pub repo_allowed: bool,
@@ -851,6 +863,7 @@ pub fn pi_status(repo: Option<String>) -> Result<PiStatus, String> {
     Ok(PiStatus {
         preflight: worktrees_core::pimodels::preflight(),
         trust: worktrees_core::trust::pi_trust(),
+        trust_origin: worktrees_core::trust::pi_trust_origin().1,
         allowed,
         repo_root,
         repo_allowed,
@@ -986,7 +999,7 @@ pub fn diagnostics(_ctx: &Ctx, gh: Option<bool>, viewer_path: String) -> Result<
     // validates tokens against the API, so with Pull requests switched off it
     // is not made at all: "off stops every gh call" includes this button.
     let gh_line = if gh == Some(false) {
-        "(not checked — Pull requests is off in Settings → Behavior)".to_string()
+        "(not checked — Pull requests is off in Settings → General)".to_string()
     } else {
         let gh = worktrees_core::github::gh_bin();
         let mut which = worktrees_core::childenv::command("which");
@@ -1279,7 +1292,7 @@ pub fn project_prs(
 /// quoting inside the command string.
 pub fn open_editor(path: String, cmd: String) -> Result<(), String> {
     if cmd.trim().is_empty() {
-        return Err("no editor configured (Settings → Editor command)".into());
+        return Err("no editor configured (Settings → General → Editor)".into());
     }
     let line = format!("{cmd} \"$0\"");
     launch_watched(&line, Some(&path), "Editor command", &cmd, LAUNCH_GRACE)
@@ -1298,7 +1311,7 @@ pub fn detect_editors() -> Result<Vec<editors::Editor>, String> {
 /// the whole command runs via `/bin/sh -c`. Same trust model as editor_cmd.
 pub fn open_terminal(cmd: String, session: String) -> Result<(), String> {
     if cmd.trim().is_empty() {
-        return Err("no terminal command configured (Settings → Terminal command)".into());
+        return Err("no terminal command configured (Settings → General → Terminal command)".into());
     }
     let quoted = worktrees_core::tmux::sq(&session);
     let line = cmd.replace("{session}", &quoted);
@@ -1397,13 +1410,13 @@ pub fn launch_watched(
         Some(127) => format!(
             "{setting} `{first}` was not found — {}",
             if setting == "Editor command" {
-                "choose an installed editor in Settings → Commands"
+                "choose an installed editor in Settings → General"
             } else {
-                "install it, or change it in Settings → Commands"
+                "install it, or change it in Settings → General"
             }
         ),
         Some(126) => format!(
-            "{setting} `{first}` is not executable — change it in Settings → Commands"
+            "{setting} `{first}` is not executable — change it in Settings → General"
         ),
         Some(n) if said.is_empty() => format!("{setting} `{cmd}` failed (exit {n})"),
         Some(n) => format!("{setting} `{cmd}` failed (exit {n}): {said}"),
@@ -1577,7 +1590,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.contains("`wt-no-such-editor-xyz` was not found"), "{e}");
-        assert!(e.contains("choose an installed editor in Settings → Commands"), "{e}");
+        assert!(e.contains("choose an installed editor in Settings → General"), "{e}");
     }
 
     /// Any other quick non-zero exit is an error too, carrying the last line

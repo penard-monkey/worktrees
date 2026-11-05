@@ -57,6 +57,7 @@ pub mod pimcp;
 pub mod pimodels;
 pub mod plan;
 pub mod plancmd;
+pub mod policy_presets;
 pub mod planning;
 pub mod proc;
 pub mod procinfo;

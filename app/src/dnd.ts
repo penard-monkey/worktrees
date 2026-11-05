@@ -234,7 +234,7 @@ export function mentionPlan(i: MentionInput): MentionPlan | null {
   if (!claude && i.waiting) return { ok: false, hint: "that agent is waiting on an approval or a question — drop again once it has an answer" };
   if (i.fromRepo === i.intoRepo) return { ok: true, foreign: false, token: claude };
   if (i.reach === null) return null;
-  if (i.reach === "off") return { ok: false, hint: "cross-project reach is off — turn it on in Settings → Agent guidance" };
+  if (i.reach === "off") return { ok: false, hint: "cross-project reach is off — turn it on in Settings → Agent policy" };
   if (!i.fromRegistered) return { ok: false, hint: "that place's project is not registered, so it has no name to address it by" };
   if (i.fromPrivate) return { ok: false, hint: "that project is private; its places cannot be referenced from other projects" };
   if (!i.intoRegistered) return { ok: false, hint: "this session's project is not registered, so it reaches no other project" };

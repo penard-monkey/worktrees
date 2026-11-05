@@ -10,10 +10,11 @@
 //      the range is a menu entry that fails when chosen.
 //
 //   2. THE REMEDY. Every refusal says where to change the setting
-//      (`SETTINGS_PATH`, via `how_to_change`: "Settings → Behavior → Plan limits"). A message's
+//      (`SETTINGS_PATH`, via `how_to_change`: "Settings → Agent policy → Plan limits"). A message's
 //      remedy is a claim (AGENTS.md); renaming the section or moving it to
-//      another category would leave every refusal pointing at nothing. So the
-//      path is checked against what SettingsSheet actually renders.
+//      another page would leave every refusal pointing at nothing. So the
+//      path is checked against the page settingsMap.ts names and what that
+//      page's file actually renders.
 //
 // Plus the plumbing a new command needs: serve's dispatch table has a row for
 // both commands (the app is its client) and the mock answers both, or the
@@ -29,7 +30,8 @@ const ok = (m) => console.log(`ok   ${m}`);
 
 const quota = read("../../crates/worktrees-core/src/quota.rs").split("#[cfg(test)]\nmod tests")[0];
 const panel = read("../src/QuotaPanel.tsx");
-const sheet = read("../src/SettingsSheet.tsx");
+// The pages and their labels: settingsMap.ts's PAGES, one per line.
+const map = read("../src/settingsMap.ts");
 // The commands are the ENGINE's: the app is a client of `worktrees serve`, and a
 // command exists for it when serve's dispatch table has a row for it (the shim
 // registers only the client-local ones — engine-route-check.mjs).
@@ -61,12 +63,16 @@ else if (!path) fail("quota.rs: SETTINGS_PATH no longer reads `Settings → <cat
 else if (!/\{SETTINGS_PATH\}/.test(quota.match(/pub fn how_to_change[\s\S]*?\n\}/)?.[0] ?? "")) fail("quota.rs: how_to_change no longer names SETTINGS_PATH, so refusals carry no Settings remedy");
 else {
   const [cat, section] = [path[1].trim(), path[2].trim()];
-  const catId = [...sheet.matchAll(/\{ id: "([a-z-]+)", label: "([^"]+)" \}/g)].find((m) => m[2] === cat)?.[1];
-  if (!catId) fail(`SETTINGS_PATH names category "${cat}", which SettingsSheet's CATS does not have`);
+  const catId = [...map.matchAll(/\{ id: "([a-z-]+)", label: "([^"]+)", group: /g)].find((m) => m[2] === cat)?.[1];
+  if (!catId) fail(`SETTINGS_PATH names page "${cat}", which settingsMap.ts's PAGES does not have`);
   else {
-    // The section must be rendered INSIDE that category's block.
-    const block = sheet.split(`{cat === "${catId}" && <>`)[1]?.split("</>}")[0] ?? "";
-    if (!block.includes("<QuotaSection")) fail(`<QuotaSection> is not rendered under cat === "${catId}" (${cat})`);
+    // The section must be rendered by THAT page's file (pages/<id>.tsx), and
+    // its map entry must put it on that page.
+    let block = "";
+    try { block = read(`../src/pages/${catId}.tsx`); } catch { /* no such page file */ }
+    const entry = new RegExp(`\\{ id: "plan-limits", page: "${catId}",`).test(map);
+    if (!block.includes("<QuotaSection")) fail(`<QuotaSection> is not rendered by pages/${catId}.tsx (${cat})`);
+    else if (!entry) fail(`settingsMap.ts does not put the plan-limits section on "${catId}"`);
     else if (!panel.includes(`<label>${section}</label>`)) fail(`QuotaPanel's heading is not "${section}", which SETTINGS_PATH promises`);
     else ok(`SETTINGS_PATH's "Settings → ${cat} → ${section}" is where QuotaSection renders`);
   }

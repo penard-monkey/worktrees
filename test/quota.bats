@@ -248,7 +248,7 @@ JSON
   [ "$status" -eq 5 ]
   [[ "$output" == *"92% of its Weekly window"* ]]
   [[ "$output" == *"the user's limit: 90% of a weekly window"* ]]
-  [[ "$output" == *"Settings → Behavior → Plan limits"* ]]
+  [[ "$output" == *"Settings → Agent policy → Plan limits"* ]]
   [[ "$output" == *'`[quota]` in ~/.config/worktrees/config.toml'* ]]
   [[ "$output" == *"worktrees open feat-wk92 --force"* ]]
 }

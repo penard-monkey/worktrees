@@ -50,7 +50,8 @@ function advertWords(st: RemoteStatus): string {
   return "Not announced on the network.";
 }
 
-export function RemoteAccessSection({ onReport }: { onReport: (msg: string) => void }) {
+/** `advertise`: draw the mDNS switch (an Expert control, settings-reorg §4.3). */
+export function RemoteAccessSection({ onReport, advertise = true }: { onReport: (msg: string) => void; advertise?: boolean }) {
   const r = useRemote();
   const st = r.status;
   const [picking, setPicking] = useState(false);
@@ -62,11 +63,11 @@ export function RemoteAccessSection({ onReport }: { onReport: (msg: string) => v
   // A window that drives a paired host is not that host's console: it does
   // not ask (ipc.ts CONSOLE_ROWS), and serve's `console-only` says the same.
   if (notGranted("remote_status") || notConsole(r)) {
-    return <GrantNote cmd="remote_status" label="Remote access" focus="remote-access" refused />;
+    return <GrantNote cmd="remote_status" label="Remote access" refused />;
   }
   if (!st) {
     return (
-      <section className="setting ra" data-focus="remote-access">
+      <section className="setting ra" data-testid="remote-access">
         <label>Remote access</label>
         <div className="ra-note">{r.statusErr ? `Remote access could not be read: ${r.statusErr}` : "Reading remote access…"}</div>
       </section>
@@ -106,7 +107,7 @@ export function RemoteAccessSection({ onReport }: { onReport: (msg: string) => v
 
   return (
     <>
-      <section className="setting ra" data-focus="remote-access">
+      <section className="setting ra" data-testid="remote-access">
         <label>Remote access</label>
         <div className="ra-status" role="status" data-state={st.state}>
           <span className={`ra-dot ${h.dot}`} aria-hidden />
@@ -156,7 +157,7 @@ export function RemoteAccessSection({ onReport }: { onReport: (msg: string) => v
           </details>
         )}
       </section>
-      <AdvertiseSection st={st} onFail={setErr} />
+      {advertise && <AdvertiseSection st={st} onFail={setErr} />}
       {confirmOff && (
         <ConfirmDialog title="Turn off remote access?" confirm="Turn off" danger busy={busy} error={err}
           onConfirm={disable} onClose={() => setConfirmOff(false)}>

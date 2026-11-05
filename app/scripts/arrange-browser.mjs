@@ -215,7 +215,8 @@ for (const [engine, type] of Object.entries({ chromium, webkit })) {
   {
     const { ctx, page } = await open(browser, { places_side: "right", dock_lower: "terminal" });
     await page.locator('[data-track="settings"]').click();
-    await page.getByText("Navigation", { exact: true }).first().click();
+    // Layout's Reset, on the Layout page since the regroup (settings-reorg §3).
+    await page.locator('.settings-cat[data-cat="layout"]').click();
     await page.locator('[data-testid="layout-reset"]').click();
     await page.waitForTimeout(300);
     let s = await sides(page);

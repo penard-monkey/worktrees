@@ -17,8 +17,8 @@ import { useEscape } from "./useEscape";
 import { useRemote } from "./remoteStore";
 import { ExpiryEditor, RunsLabel, ScopeEditor, scopeProblem, useNow, useProjects, useUnprompted, type Scope } from "./remoteui";
 import {
-  capsWords, codeSpaced, DEFAULT_EXPIRY, ENDED_WORDS, expiryWords, pairingBlock, PLATFORM_LABEL, qrPath, scopeWords, secondsLeft,
-  type DeviceRecord, type Expiry, type PairBegin, type PairStatus,
+  capsWords, codeSpaced, DEFAULT_EXPIRY, ENDED_WORDS, expiryWords, pairingBlock, PLATFORM_LABEL, PRESETS, qrPath, scopeWords, secondsLeft,
+  type DeviceRecord, type Expiry, type PairBegin, type PairStatus, type Preset,
 } from "./devices";
 import "./RemoteAccess.css";
 
@@ -39,12 +39,14 @@ function Qr({ size, modules }: { size: number; modules: string }) {
   );
 }
 
-export function PairSheet({ onClose, onRemote }: { onClose: () => void; onRemote: () => void }) {
+/** `startScope`: the capabilities the sheet starts on — the policy preset's
+ *  suggestion (settings-reorg §5.2: Operate under Autonomous), Observe else. */
+export function PairSheet({ onClose, onRemote, startScope = "observe" }: { onClose: () => void; onRemote: () => void; startScope?: Preset }) {
   const r = useRemote();
   const host = r.status?.host;
   const projects = useProjects();
   const unprompted = useUnprompted();
-  const [scope, setScope] = useState<Scope>({ caps: ["read"], projects: [] });
+  const [scope, setScope] = useState<Scope>({ caps: [...PRESETS[startScope]], projects: [] });
   const [expiry, setExpiry] = useState<Expiry>(DEFAULT_EXPIRY);
   const [win, setWin] = useState<PairBegin | null>(null);
   const [st, setSt] = useState<PairStatus | null>(null);

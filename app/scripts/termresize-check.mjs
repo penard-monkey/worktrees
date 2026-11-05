@@ -579,14 +579,54 @@ async function settled(opts) {
     fileURLToPath(new URL("../../crates/worktrees-api/src/term.rs", import.meta.url)), "utf8");
   const ringM = /const SHELL_RING: usize = ([^;]+);/.exec(api);
   const scrollM = /const TERM_SCROLLBACK = (\d+);/.exec(raw);
+  const minM = /const TERM_SCROLLBACK_MIN = (\d+);/.exec(raw);
   if (!ringM) fail("SHELL_RING not found in worktrees-api/src/term.rs — has the dock shell's ring been renamed?");
   else if (!scrollM) fail("TERM_SCROLLBACK not found in TerminalPane.tsx — has the scrollback been inlined again?");
+  else if (!minM) fail("TERM_SCROLLBACK_MIN not found in TerminalPane.tsx — what floors the Scrollback setting?");
   else {
     const ring = ringM[1].split("*").reduce((a, b) => a * Number(b.trim()), 1);
     const scrollback = Number(scrollM[1]);
+    const min = Number(minM[1]);
     const held = scrollback * 80;
     if (held >= ring) ok(`xterm holds a full ring: scrollback ${scrollback} x 80 cols = ${held} >= SHELL_RING ${ring}`);
     else fail(`xterm keeps ${scrollback} lines (~${held} bytes at 80 cols) but the backend replays up to SHELL_RING ${ring} — the oldest ${ring - held} bytes of every replay are dropped`);
+    // Settings → Terminal → Scrollback (settings-reorg §6 item 10): the SETTING
+    // may raise the number, never take it under the floor. Three halves, all
+    // required: the floor holds a ring, settings.ts offers nothing under it,
+    // and the pane clamps whatever it is handed (a hand-edited blob included).
+    if (min * 80 >= ring) ok(`the scrollback floor holds a full ring: ${min} x 80 = ${min * 80} >= ${ring}`);
+    else fail(`TERM_SCROLLBACK_MIN ${min} x 80 = ${min * 80} < SHELL_RING ${ring}: a Scrollback setting at the floor truncates every replay`);
+    const settingsTs = fs.readFileSync(fileURLToPath(new URL("../src/settings.ts", import.meta.url)), "utf8");
+    const stepsM = /export const TERM_SCROLLBACK_STEPS = \[([^\]]+)\]/.exec(settingsTs);
+    const dfltM = /\n  term_scrollback: (\d+),\n/.exec(settingsTs);
+    if (!stepsM) fail("settings.ts: no `export const TERM_SCROLLBACK_STEPS = [...]` — what does Settings offer?");
+    else {
+      const steps = stepsM[1].split(",").map((x) => Number(x.trim()));
+      if (steps.some((n) => !(n >= min))) fail(`settings.ts offers scrollback ${steps.filter((n) => !(n >= min))} below the floor ${min}`);
+      else ok(`every offered scrollback (${steps.join(", ")}) is at or above the floor`);
+      if (!dfltM || Number(dfltM[1]) !== scrollback) fail(`DEFAULTS.term_scrollback (${dfltM?.[1]}) is not TerminalPane's TERM_SCROLLBACK (${scrollback})`);
+      else if (!steps.includes(scrollback)) fail(`the default scrollback ${scrollback} is not one of the offered steps`);
+      else ok(`the default scrollback ${scrollback} is offered and matches the pane's`);
+    }
+    // The pane's setter, evaluated: whatever it is handed, it never goes under.
+    const fn = /export function setTermScrollback\(lines: number\): void \{[\s\S]*?\n\}/.exec(raw)?.[0];
+    if (!fn) fail("TerminalPane.tsx: no setTermScrollback — how does the setting reach a live terminal?");
+    else {
+      const js = (await transformWithEsbuild(`let scrollbackLines = ${scrollback}; const TERM_SCROLLBACK = ${scrollback}; const TERM_SCROLLBACK_MIN = ${min};
+        const liveTerms = new Set([{ options: { scrollback: ${scrollback} } }]);
+        ${fn.replace("export function", "function")}
+        export function run(v) { setTermScrollback(v); return { lines: scrollbackLines, live: [...liveTerms][0].options.scrollback }; }`,
+        "scrollback.ts", { loader: "ts", format: "esm" })).code;
+      const { run } = await import("data:text/javascript;base64," + Buffer.from(js).toString("base64"));
+      const bad = [0, 100, -5, NaN, min - 1].map((v) => [v, run(v)]).filter(([, r]) => !(r.lines >= min && r.live >= min));
+      if (bad.length) fail(`setTermScrollback let ${bad.map(([v, r]) => `${v} → ${r.lines}`).join(", ")} under the floor ${min}`);
+      else ok("setTermScrollback never goes under the floor (0, 100, -5, NaN, min-1 all clamp)");
+      const up = run(20000);
+      if (up.lines !== 20000 || up.live !== 20000) fail(`setTermScrollback(20000) left ${up.lines} / live ${up.live}: a live terminal must follow the setting`);
+      else ok("setTermScrollback moves every live terminal");
+    }
+    if (!/scrollback: scrollbackLines,/.test(raw)) fail("useTerm does not open terminals with `scrollbackLines` — the setting would apply only to terminals that were already open");
+    else ok("new terminals open with the setting");
   }
 }
 

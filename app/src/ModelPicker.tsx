@@ -130,6 +130,8 @@ export type PiStatus = {
     node_floor: string | null; problem: string | null;
   };
   trust: "never" | "ask";
+  /** What decided `trust` (settings-reorg §6 item 4); absent from an older host. */
+  trust_origin?: import("./EnvLine").Origin;
   allowed: string[];
   repo_root: string | null;
   repo_allowed: boolean;

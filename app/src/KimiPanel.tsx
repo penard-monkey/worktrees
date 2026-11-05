@@ -1,6 +1,7 @@
 // Settings → Kimi: which kimi a pane will get, whether its lanes get the
-// Worktrees tools, the models kimi's config declares (and the one to preselect),
-// and the repos whose kimi lanes start trusted.
+// Worktrees tools, the models kimi's config declares (and the one to preselect)
+// — and, under Settings → Agent policy since the regroup (settings-reorg §3.2),
+// the repos whose kimi lanes start trusted.
 //
 // Nothing here writes kimi's own files. The MCP choice is worktrees' own
 // `kimi_mcp` setting: each kimi launch then writes (or removes) the server in
@@ -9,10 +10,10 @@
 // or `worktrees trust kimi`.
 
 import { useCallback, useEffect, useState } from "react";
-import { invoke, notGranted } from "./ipc";
-import { GrantNote } from "./GrantNote";
+import { invoke } from "./ipc";
 import type { Settings } from "./settings";
 import { ModelPicker, modelArg, type ModelOption } from "./ModelPicker";
+import { useArmed } from "./useArmed";
 
 export type KimiMcpMode = "off" | "read-only" | "mutations";
 
@@ -57,8 +58,10 @@ export function kimiTrustText(t: KimiLaunchTrust): string {
   }
 }
 
-export function KimiMcpSection({ onReport, onStatus, offerPending = false, onSilenceOffer, "data-focus": focusId }: {
+export function KimiMcpSection({ onReport, onStatus, offerPending = false, onSilenceOffer, mutationsDefault = true, "data-focus": focusId }: {
   onReport: (text: string) => void;
+  /** "Allow create and close tools" before the user ticks it. */
+  mutationsDefault?: boolean;
   "data-focus"?: string;
   /** Every status read or handed back — App keeps the `kimi-mcp` offer in step. */
   onStatus?: (s: KimiMcpStatus) => void;
@@ -68,7 +71,13 @@ export function KimiMcpSection({ onReport, onStatus, offerPending = false, onSil
   const [status, setStatusRaw] = useState<KimiMcpStatus | null>(null);
   const setStatus = (s: KimiMcpStatus) => { setStatusRaw(s); onStatus?.(s); };
   const [busy, setBusy] = useState(false);
-  const [mutations, setMutations] = useState(true);
+  // The box's starting value is the policy preset's suggestion
+  // (settings-reorg §5.2: unticked under Cautious); the user's tick wins.
+  const [picked, setMutations] = useState<boolean | null>(null);
+  const mutations = picked ?? mutationsDefault;
+  // Disconnect is two clicks (settings-reorg §6 item 3): every kimi lane loses
+  // its tools at its next launch.
+  const arm = useArmed<"off">();
   // eslint-disable-next-line react-hooks/exhaustive-deps -- one read per mount
   useEffect(() => { invoke<KimiMcpStatus>("kimi_mcp_status").then(setStatus).catch((e) => onReport(String(e))); }, []);
   const set = async (mode: KimiMcpMode) => {
@@ -93,53 +102,42 @@ export function KimiMcpSection({ onReport, onStatus, offerPending = false, onSil
         {on && <button className="ctrl sm" disabled={busy || fromEnv} data-testid="kimi-mcp-toggle"
           onClick={() => set(status.mode === "mutations" ? "read-only" : "mutations")}>
           {status.mode === "mutations" ? "Make read-only" : "Allow create and close"}</button>}
-        {on && <button className="ctrl sm danger" disabled={busy || fromEnv} data-testid="kimi-mcp-remove" onClick={() => set("off")}>Disconnect</button>}
+        {on && <button className={"ctrl sm danger" + (arm.armed ? " armed" : "")} disabled={busy || fromEnv} data-testid="kimi-mcp-remove"
+          onClick={() => arm.confirm("off", () => void set("off"))}>{arm.armed ? "Disconnect — sure?" : "Disconnect"}</button>}
         {offerPending && onSilenceOffer && <button className="mcp-dismiss" onClick={onSilenceOffer}>Stop suggesting this</button>}
       </div>
+      {arm.armed && <div className="hint">Every kimi lane loses the Worktrees tools at its next launch.</div>}
       <div className="hint">kimi has no setting Worktrees can add a server to without editing kimi's own files, so each kimi launch writes it into the place itself, as <code>{status.file}</code> — kept out of git, and never written over a <code>.kimi-code/mcp.json</code> the repo has. A running kimi picks a change up at its next launch, or <code>/new</code>.</div>
       <div className="hint">Saved as <code>kimi_mcp</code> in {status.config_path}. Also: <code>worktrees mcp --install --ai kimi [--read-only]</code>.</div>
     </>}
   </section>;
 }
 
-export default function KimiPanel({ settings, repo, onChange, onReport, onMcpStatus, mcpOfferPending, onSilenceMcpOffer }: {
-  settings: Settings;
-  repo: string | null;
-  onChange: (patch: Partial<Settings>) => void;
-  onReport: (msg: string) => void;
-  onMcpStatus?: (s: KimiMcpStatus) => void;
-  mcpOfferPending?: boolean;
-  onSilenceMcpOffer?: () => void;
-}) {
+/** `kimi_status` for `repo` and the allowance write; `kimi_version` on its
+ *  own (it starts a kimi process, which nothing on a dialog's path may wait
+ *  for — "" while asking, null when it could not be read). */
+export function useKimiStatus(repo: string | null, onReport: (msg: string) => void) {
   const [status, setStatus] = useState<KimiStatus | null>(null);
-  const [models, setModels] = useState<ModelOption[] | null>(null);
-  // Its own command: it starts a kimi process, which nothing on a dialog's
-  // path may wait for. "" while asking, null when it could not be read.
-  const [version, setVersion] = useState<string | null>("");
-  useEffect(() => {
-    invoke<string>("kimi_version").then(setVersion).catch(() => setVersion(null));
-  }, []);
   const reload = useCallback(() => {
     invoke<KimiStatus>("kimi_status", { repo }).then(setStatus).catch((e) => onReport(`kimi: ${String(e)}`));
-    setModels(null);
-    invoke<ModelOption[]>("agent_models", { harness: "kimi" }).then(setModels).catch((e) => { setModels([]); onReport(`kimi models: ${String(e)}`); });
   }, [repo, onReport]);
   useEffect(() => { reload(); }, [reload]);
-
   const allow = async (root: string, on: boolean) => {
     try {
       await invoke("set_kimi_allowed", { repo: root, allow: on });
       reload();
     } catch (e) { onReport(`kimi allowance: ${String(e)}`); }
   };
+  return { status, reload, allow };
+}
 
-  return <>
-    {/* FIRST: the `kimi-mcp` offer's deep-link target; the sections below
-        fill in asynchronously and would push it off screen. */}
-    {notGranted("kimi_mcp_status") ? <GrantNote cmd="kimi_mcp_status" label="kimi MCP server" focus="kimi-mcp" /> :
-    <KimiMcpSection data-focus="kimi-mcp" onReport={onReport} onStatus={onMcpStatus}
-      offerPending={mcpOfferPending} onSilenceOffer={onSilenceMcpOffer} />}
-
+/** Settings → Kimi → kimi: which kimi a pane gets. */
+export function KimiInstallSection({ status }: { status: KimiStatus | null }) {
+  const [version, setVersion] = useState<string | null>("");
+  useEffect(() => {
+    invoke<string>("kimi_version").then(setVersion).catch(() => setVersion(null));
+  }, []);
+  return (
     <section className="setting" data-testid="kimi-install">
       <label>kimi</label>
       {!status ? <div className="hint">reading…</div> : status.kimi_bin ? <div className="ver-rows">
@@ -147,7 +145,22 @@ export default function KimiPanel({ settings, repo, onChange, onReport, onMcpSta
       </div> : <div className="hint">Kimi Code is not installed. Install it from kimi.com/code, then sign in with <code>kimi login</code>.</div>}
       <div className="hint">kimi takes no prompt when it starts, so a brief's opener is typed into kimi once its prompt is empty — never over a question or into text you are typing — and given up on after ten minutes. <code>worktrees doctor --kimi</code> says how the last one went.</div>
     </section>
+  );
+}
 
+/** Settings → Kimi → Models: what kimi's config declares, and the default. */
+export function KimiModelsSection({ settings, status, onChange, onReport }: {
+  settings: Settings;
+  status: KimiStatus | null;
+  onChange: (patch: Partial<Settings>) => void;
+  onReport: (msg: string) => void;
+}) {
+  const [models, setModels] = useState<ModelOption[] | null>(null);
+  useEffect(() => {
+    invoke<ModelOption[]>("agent_models", { harness: "kimi" }).then(setModels).catch((e) => { setModels([]); onReport(`kimi models: ${String(e)}`); });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- one read per mount
+  }, []);
+  return (
     <section className="setting" data-testid="kimi-models">
       <label>Models</label>
       {models === null ? <div className="hint">reading kimi's models…</div>
@@ -163,18 +176,31 @@ export default function KimiPanel({ settings, repo, onChange, onReport, onMcpSta
       <label className="sub">Default model</label>
       <ModelPicker harness="kimi" value={settings.default_models.kimi ?? ""} options={models} testid="kimi-default-model"
         onChange={(m) => onChange({ default_models: { ...settings.default_models, kimi: m || undefined } })} />
-      <div className="hint">Preselected when you start kimi. Left on the CLI's default, kimi uses its own <code>default_model</code>. Only the model list is read from kimi's config, never the rest of it.</div>
+      <div className="hint">Preselected when you start kimi, in this window. Left on the CLI's default, kimi uses its own <code>default_model</code>. Only the model list is read from kimi's config, never the rest of it.</div>
     </section>
+  );
+}
 
+/** Settings → Agent policy → Kimi: the repos whose kimi lanes start trusted.
+ *  A Revoke is two clicks (settings-reorg §6 item 3). */
+export function KimiTrustSection({ status, allow }: {
+  status: KimiStatus | null;
+  allow: (root: string, on: boolean) => void;
+}) {
+  const arm = useArmed<string>();
+  return (
     <section className="setting" data-testid="kimi-trust">
-      <label>Folder trust</label>
+      <label>Kimi</label>
+      <label className="sub">Folder trust</label>
       <div className="hint">kimi asks to trust every folder it has not seen, and every place is a new folder. Answering "Trust and continue" lets the repo's <code>.mcp.json</code> start its servers inside kimi.</div>
       {status?.launch && <div className="hint" data-testid="kimi-trust-source"><b>This repo:</b> {kimiTrustText(status.launch)}</div>}
       <label className="sub">Allowed repos</label>
       {status?.allowed.length ? <div className="ver-rows">{status.allowed.map((r) => (
         <div className="ver-row" key={r}><code>{r}</code>
-          <button className="ctrl sm" data-testid="kimi-revoke" onClick={() => allow(r, false)}>Revoke</button></div>
+          <button className={"ctrl sm danger" + (arm.armed === r ? " armed" : "")} data-testid="kimi-revoke"
+            onClick={() => arm.confirm(r, () => allow(r, false))}>{arm.armed === r ? "Revoke — sure?" : "Revoke"}</button></div>
       ))}</div> : <div className="hint">None. kimi lanes in an allowed repo start trusted, with no prompt — code from that repo's MCP servers runs inside kimi.</div>}
+      {arm.armed && <div className="hint">A kimi lane in that repo asks "Trust this folder?" again from its next start.</div>}
       {status?.repo_root && !status.repo_allowed && (
         <div className="ver-actions">
           <button className="ctrl sm" data-testid="kimi-allow-repo" onClick={() => allow(status.repo_root!, true)}>
@@ -184,5 +210,5 @@ export default function KimiPanel({ settings, repo, onChange, onReport, onMcpSta
       )}
       <div className="hint">Kept in ~/.config/worktrees/config.toml as [trust] kimi. It trusts each launch only and is never written into kimi's own trust records, so it does not reach a kimi you run by hand. Also: <code>worktrees trust kimi [--revoke]</code>.</div>
     </section>
-  </>;
+  );
 }

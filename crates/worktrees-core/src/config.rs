@@ -232,6 +232,41 @@ pub fn sync_cfg() -> SyncCfg {
 
 /// The user tier of the precedence chain: `config.toml` wins over the kv
 /// `config` when both define a key. Pure form for testing (`*_from` convention).
+/// Where an effective setting's value came from (settings-reorg §6 item 4):
+/// Settings says "set by the environment" instead of drawing a control that
+/// looks stuck. `Host` is the engine's host-policy file, `File` a worktrees
+/// settings file (agent-guidance.json), `Config` the user's config.toml.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Source {
+    Host,
+    Env,
+    Config,
+    File,
+    Default,
+}
+
+/// A variable set in the environment of the process that answered.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct EnvVar {
+    pub name: &'static str,
+    pub value: String,
+}
+
+/// What decided a value, and the variable that would have — reported even
+/// when something outranks it, so Settings can say "set, but this computer's
+/// choice wins".
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct Origin {
+    pub source: Source,
+    pub env: Option<EnvVar>,
+}
+
+/// `$name`, when set to something non-empty.
+pub fn env_var(name: &'static str) -> Option<EnvVar> {
+    std::env::var(name).ok().filter(|v| !v.trim().is_empty()).map(|value| EnvVar { name, value })
+}
+
 pub fn user_cfg_from(toml_val: Option<&str>, kv_val: Option<&str>) -> Option<String> {
     toml_val
         .filter(|s| !s.is_empty())

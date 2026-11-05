@@ -461,7 +461,7 @@ export const REMOTE_SETTINGS: Readonly<Record<string, string>> = {
 export const ADMIN_ROWS: readonly string[] = [
   "add_project", "probe_dir", "create_project", "clone_project", "clone_cancel", "init_repo",
   "create_initial_commit", "remove_project", "set_planning_default", "set_project_planning",
-  "set_quota_settings", "set_fetch_interval", "mcp_status", "mcp_uninstall", "codex_mcp_status",
+  "set_quota_settings", "set_limits", "set_fetch_interval", "mcp_status", "mcp_uninstall", "codex_mcp_status",
   "codex_mcp_uninstall", "codex_mcp_migration_plan", "pi_mcp_status", "pi_mcp_uninstall", "kimi_mcp_status",
   "sync_hub_list", "sync_hubs", "sync_hub_choose", "sync_hub_forget", "sync_apply", "diagnostics", "log_tail", "set_term_history_opts", "term_history_info",
   "term_history_clear", "ui_events_clear", "profiles_info", "delete_profile", "skill_inspect",
@@ -472,7 +472,7 @@ export const ADMIN_ROWS: readonly string[] = [
  *  and device administration, what widens agents, the CLI's own update —
  *  done at the host itself. Held both ways by engine-route-check.mjs. */
 export const CONSOLE_ROWS: readonly string[] = [
-  "set_cross_project", "set_project_private", "update_cli", "mcp_install", "codex_mcp_install",
+  "set_cross_project", "set_project_private", "apply_policy_preset", "update_cli", "mcp_install", "codex_mcp_install",
   "pi_mcp_install", "kimi_mcp_set", "codex_mcp_migrate", "agent_link_skills", "set_codex_permissions",
   "set_agent_guidance", "set_agent_guidance_skill", "agent_guidance_merge", "set_pi_trust", "set_pi_allowed",
   "set_kimi_allowed", "sync_batch_preview", "sync_batch_apply", "ui_events_append", "save_profile", "set_project_profile", "set_default_profile",

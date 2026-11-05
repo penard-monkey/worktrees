@@ -3030,6 +3030,182 @@ body.dragging .menu-catch { pointer-events: none; }
    shows what the app has recorded about itself. */
 .settings-cat.sep { margin-top: var(--s2); padding-top: calc(var(--row-pad-v) + var(--s2)); border-top: 1px solid var(--line); border-radius: 0 0 var(--r-md) var(--r-md); }
 
+/* ── the regrouped sheet (docs/proposals/settings-reorg.md) ─────────────────
+   Words are --txt-hi / --txt-dim everywhere here; the one hue is the tier DOT
+   (an accent is a fill, not text). */
+/* The mode switch sits at the right of the header, just left of the esc / ⌘,
+   hints and the close button (the owner's review: it had trailed the title),
+   and the search box sits just left of the switch. The free space is between
+   the title and the box — the box's `margin-left: auto` — so the box widening
+   on focus eats that space and nothing to its right moves; the title's own
+   margin keeps them apart if the header ever runs out of it. */
+.settings-h b { flex: 0 1 auto; margin-right: var(--s4); }
+.settings-mode { margin-right: var(--s4); }
+.settings-mode button { padding: var(--s1) var(--s3); font-size: var(--fs-meta); }
+/* The search (SettingsSearchBox.tsx): small with its glass and "Search" until
+   focused, then wide while focused or holding text. A row's words are
+   --txt-hi and --txt (--txt-dim on --bg-panel is 3.57:1 in tokyo-day); hue
+   is only the tier dot, as on a section. Its fill is
+   --bg-field, LIGHTER than the header (the owner: "so that it looks like an
+   intentional text box"); --bg-input sat 4-10 units darker and read as part
+   of the header. */
+.settings-search { position: relative; flex: 0 1 auto; min-width: 0; margin-left: auto; margin-right: var(--s3); display: flex; align-items: center; }
+.settings-search-icon { position: absolute; left: var(--s2); color: var(--txt-dim); pointer-events: none; }
+.settings-search-input {
+  width: 7.5em; min-width: 0; font-family: inherit; font-size: var(--fs-meta);
+  padding: var(--s1) var(--s2) var(--s1) calc(var(--s2) + 12px + var(--s1));
+  background: var(--bg-field); color: var(--txt-hi);
+  border: 1px solid var(--line-strong); border-radius: var(--r-sm);
+  transition: width var(--dur) var(--ease);
+}
+.settings-search.wide .settings-search-input { width: 18em; }
+.settings-search-input::placeholder { color: var(--txt-dim); }
+.settings-search-input:focus { outline: none; border-color: var(--accent); }
+/* Under the box, right edges flush, growing LEFT into the header's free space;
+   inside the modal (whose overflow is hidden) at its smallest, 900×560: eight
+   two-line rows end well above its bottom edge (settings-browser measures). */
+.settings-search-pop {
+  position: absolute; top: calc(100% + 4px); right: 0; z-index: 50;
+  width: 20rem; min-width: 100%; padding: var(--s1);
+  background: var(--bg-panel); border: 1px solid var(--line-strong);
+  border-radius: var(--r-md); box-shadow: var(--shadow-float);
+  animation: pop var(--dur-slow) var(--ease);
+}
+.settings-search-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; column-gap: var(--s2);
+  padding: var(--s1) var(--s2); border-radius: var(--r-sm); cursor: pointer;
+}
+.settings-search-row.hi { background: var(--bg-elev); box-shadow: inset 2px 0 0 var(--accent); }
+/* --bg-elev is DARKER than --bg-panel in catppuccin-latte, where --txt on it
+   measured 4.05:1: the active row's every word is --txt-hi. */
+.settings-search-row.hi .settings-search-where, .settings-search-row.hi .settings-search-tier { color: var(--txt-hi); }
+.settings-search-label {
+  font-size: var(--fs-label); color: var(--txt-hi);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.settings-search-where {
+  grid-column: 1 / -1; font-size: var(--fs-micro); color: var(--txt);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.settings-search-tier {
+  display: inline-flex; align-items: center; gap: var(--s1); padding: 0 var(--s1);
+  border: 1px solid var(--line); border-radius: var(--r-sm);
+  font-size: var(--fs-micro); color: var(--txt);
+}
+.settings-search-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--ok); }
+.settings-search-tier[data-tier="advanced"] .settings-search-dot { background: var(--warn); }
+.settings-search-tier[data-tier="expert"] .settings-search-dot { background: var(--danger); }
+.settings-search-none { padding: var(--s1) var(--s2); font-size: var(--fs-meta); color: var(--txt); }
+@media (prefers-reduced-motion: reduce) {
+  .settings-search-input { transition: none; }
+  .settings-search-pop { animation: none; }
+}
+/* Six groups with a header each: what lets the page rows read as six things.
+   The owner's review found the first cut read as one more page (small muted
+   caps at the pages' own left edge), so a heading is --txt-hi and heavier, its
+   pages sit one step in (the selected pill with them), and every later group
+   gets room and a rule above it. The rule is --line-strong: --line on the
+   rail's --bg-tree measured 1.13:1 in tokyo-day (13 RGB units) and the next
+   weakest 1.23:1; --line-strong is 1.49:1 at its weakest (settings-browser). */
+.settings-group { display: flex; flex-direction: column; gap: 2px; }
+.settings-group + .settings-group {
+  margin-top: var(--s2); padding-top: var(--s3); border-top: 1px solid var(--line-strong);
+}
+.settings-group-h {
+  padding: var(--s1) var(--s3); font-size: var(--fs-micro); font-weight: var(--fw-heavy);
+  letter-spacing: 0.06em; text-transform: uppercase; color: var(--txt-hi);
+}
+.settings-group .settings-cat { margin-left: var(--s3); }
+/* A page: its title, the one sentence saying whose its settings are, its
+   sections, and the "N more settings" line. */
+.page-head { display: flex; flex-direction: column; gap: 2px; margin-bottom: calc(-1 * var(--s2)); }
+.page-title { margin: 0; font-size: var(--fs-title); font-weight: var(--fw-bold); color: var(--txt-hi); }
+.page-scope { font-size: var(--fs-meta); color: var(--txt); }
+.page-note { font-size: var(--fs-micro); color: var(--txt-dim); }
+.page-foot { border-top: 1px solid var(--line); padding-top: var(--s3); }
+.page-more {
+  background: none; border: 0; padding: 0; cursor: pointer; font: inherit;
+  font-size: var(--fs-label); color: var(--txt-hi);
+}
+.page-more:hover { text-decoration: underline; }
+/* One section: a fieldset, so a remote window that may read but not change it
+   can disable every control in it at once. Its defaults are taken off. */
+.sec {
+  position: relative; border: 0; margin: 0; padding: 0; min-width: 0;
+  display: flex; flex-direction: column; gap: var(--s5);
+}
+/* The tier, as a dot in the body's left gutter beside the section's first
+   line: Beginner, Advanced, Expert. */
+.sec-dot {
+  position: absolute; left: calc(-1 * var(--s3)); top: 0.45em; width: 6px; height: 6px;
+  border-radius: 50%; background: var(--ok); opacity: 0.85;
+}
+.sec[data-tier="advanced"] > .sec-dot { background: var(--warn); }
+.sec[data-tier="expert"] > .sec-dot { background: var(--danger); }
+/* Above the section: its scope when that is not its page's, and why a
+   section above the mode is drawn anyway (rules 2 and 3, a deep link). */
+.sec-eyebrow { display: flex; flex-wrap: wrap; gap: var(--s1); margin-bottom: calc(-1 * var(--s3)); }
+.sec-chip {
+  padding: 1px var(--s2); border-radius: var(--r-sm); border: 1px solid var(--line);
+  background: var(--bg-panel); font-size: var(--fs-micro); color: var(--txt);
+}
+.sec-why { color: var(--txt-hi); }
+.sec-reveal {
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2);
+  margin-top: calc(-1 * var(--s3)); font-size: var(--fs-micro); color: var(--txt-dim);
+}
+.sec-reveal .mcp-dismiss { color: var(--txt-hi); text-decoration: underline; }
+.grant-line { color: var(--txt-dim); }
+/* A section that moved pages leaves one line behind (§3.2). */
+.pointer-line { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s2); }
+.pointer-line .hint b { color: var(--txt-hi); }
+.pointer-line .mcp-dismiss { color: var(--txt-hi); }
+/* Settings → Agents: a default model per agent, and the connection table. */
+.model-rows, .conn-rows { display: flex; flex-direction: column; gap: var(--s2); }
+.model-row {
+  display: grid; grid-template-columns: 5.5em minmax(0, 1fr); align-items: center;
+  column-gap: var(--s3); row-gap: 2px;
+}
+.model-row-name, .conn-name { font-size: var(--fs-label); color: var(--txt-hi); }
+.model-row-cli { grid-column: 2; }
+.conn-row {
+  display: grid; grid-template-columns: 5.5em minmax(0, 1fr) auto; align-items: center;
+  column-gap: var(--s3); padding: var(--s1) var(--s3); background: var(--bg-panel); border-radius: var(--r-sm);
+}
+.conn-state { font-size: var(--fs-label); color: var(--txt-dim); }
+/* Settings → Projects: a project's profile, privacy, and its own sheet. */
+.planning-project { display: flex; flex-direction: column; gap: 2px; }
+.project-extra { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s1) var(--s2); }
+.project-extra .mcp-dismiss { color: var(--txt-hi); }
+/* Settings → Data & privacy → Reset: the scopes, one per line. */
+.reset-scopes { display: flex; flex-direction: column; gap: 0; }
+.reset-scopes .setting-check { margin-top: var(--s1); }
+.usage-record > summary { cursor: pointer; font-size: var(--fs-label); color: var(--txt); font-weight: var(--fw-med); }
+.usage-record[open] > summary { margin-bottom: var(--s3); }
+/* Settings → Agent policy → Preset (settings-reorg §5). */
+.preset-compare-toggle { align-self: flex-start; color: var(--txt-hi); }
+.preset-modified {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px var(--s1);
+  font-size: var(--fs-meta); color: var(--txt);
+}
+.preset-modified .mcp-dismiss { color: var(--txt-hi); text-decoration: underline; padding: 0; }
+.preset-acts { display: inline-flex; gap: var(--s2); margin-left: var(--s2); }
+.preset-back .mcp-dismiss { color: var(--txt-hi); padding: 0; }
+.preset-compare { border-collapse: collapse; font-size: var(--fs-meta); color: var(--txt); width: 100%; }
+.preset-compare th, .preset-compare td { text-align: left; padding: var(--s1) var(--s2); border-bottom: 1px solid var(--line); vertical-align: top; }
+.preset-compare thead th { color: var(--txt-hi); font-weight: var(--fw-bold); }
+.preset-compare tbody th { color: var(--txt-dim); font-weight: var(--fw-body); }
+/* The current preset's column: a tint, never a coloured word. */
+.preset-compare .cur { background: var(--bg-panel); color: var(--txt-hi); }
+.preset-now { color: var(--txt-dim); }
+/* "Set by the environment" (§6 item 4). */
+.setting .hint.env-line { color: var(--txt-dim); }
+.env-line code { color: var(--txt-hi); }
+/* The line a Full access click is confirmed against. */
+.confirm-line { color: var(--txt-hi); }
+.seg button.armed { background: var(--danger); color: var(--accent-ink); }
+
+
 .um-head { display: flex; align-items: center; gap: var(--s3); }
 .um-head .hint { margin-top: 0; }
 .um-head select { margin-left: auto; width: auto; }

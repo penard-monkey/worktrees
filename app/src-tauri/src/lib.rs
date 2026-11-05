@@ -389,6 +389,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init())
         // The window tracker IS the window. The engine finder is managed in
         // `.setup()` below, once the config dir can be resolved; those two are
         // the only state this process holds (api-boundary-check.mjs).
