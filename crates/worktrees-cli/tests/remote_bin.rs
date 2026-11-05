@@ -191,6 +191,12 @@ fn a_paired_device_registers_and_the_dry_run_seals_a_push() {
 /// and this is the one that sees the poll and the sender joined up.
 #[test]
 fn a_real_waiting_edge_becomes_a_sealed_push_in_the_dry_run() {
+    // The `rust` job on macOS installs no tmux; Ubuntu's image ships it, so CI
+    // still runs this there.
+    if std::process::Command::new("tmux").arg("-V").output().is_err() {
+        eprintln!("no tmux on this host; the waiting edge's witness did not run");
+        return;
+    }
     let Some(lan) = lan_or_skip() else { return };
     let (sb, sf) = Sandbox::launch("push-edge");
     let git = |dir: &std::path::Path, a: &[&str]| {
@@ -227,8 +233,9 @@ fn a_real_waiting_edge_becomes_a_sealed_push_in_the_dry_run() {
     std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(sock.parent().unwrap(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    let tmux = |a: &[&str]| std::process::Command::new("tmux").env_remove("TMUX").arg("-S").arg(&sock).args(a).output().unwrap();
-    struct Down<'a>(&'a dyn Fn(&[&str]) -> std::process::Output);
+    let tmux = |a: &[&str]| std::process::Command::new("tmux").env_remove("TMUX").arg("-S").arg(&sock).args(a).output();
+    // Never panics: this runs while a failed assertion unwinds.
+    struct Down<'a>(&'a dyn Fn(&[&str]) -> std::io::Result<std::process::Output>);
     impl Drop for Down<'_> {
         fn drop(&mut self) {
             let _ = (self.0)(&["kill-server"]);
@@ -236,7 +243,7 @@ fn a_real_waiting_edge_becomes_a_sealed_push_in_the_dry_run() {
     }
     let _down = Down(&tmux);
     let cmd = format!("{} -c 'cat {}; while :; do read -t 100 x; done'", fake.display(), screen.display());
-    let made = tmux(&["new-session", "-d", "-x", "100", "-y", "40", "-s", "repo-main", "-c", repo.to_str().unwrap(), &cmd]);
+    let made = tmux(&["new-session", "-d", "-x", "100", "-y", "40", "-s", "repo-main", "-c", repo.to_str().unwrap(), &cmd]).unwrap();
     assert!(made.status.success(), "{made:?}");
 
     let log = sb.root.join("home/.cache/worktrees/serve.log");
@@ -246,7 +253,7 @@ fn a_real_waiting_edge_becomes_a_sealed_push_in_the_dry_run() {
         if text.contains("dry run: kind=input") {
             break text;
         }
-        assert!(Instant::now() < deadline, "no push within 75 s. pane: {:?}\nlog:\n{text}", String::from_utf8_lossy(&tmux(&["list-panes", "-a", "-F", "#{session_name} #{pane_current_command} #{pane_current_path}"]).stdout));
+        assert!(Instant::now() < deadline, "no push within 75 s. pane: {:?}\nlog:\n{text}", tmux(&["list-panes", "-a", "-F", "#{session_name} #{pane_current_command} #{pane_current_path}"]).map(|o| String::from_utf8_lossy(&o.stdout).into_owned()));
         std::thread::sleep(Duration::from_millis(500));
     };
     let line = found.lines().find(|l| l.contains("dry run: kind=input")).unwrap();
