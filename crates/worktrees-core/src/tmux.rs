@@ -824,10 +824,7 @@ fn pick_agent_pane<'a>(
 /// — even after `-l --` (measured) — so a message ending in one lost it. A
 /// trailing `\;` is tmux's escape for a literal semicolon there.
 pub fn send_literal_args(pane: &str, text: &str) -> Vec<String> {
-    let text = match text.strip_suffix(';') {
-        Some(head) => format!("{head}\\;"),
-        None => text.to_string(),
-    };
+    let text = literal_arg(text);
     leave_mode(pane)
         .into_iter()
         .chain(["send-keys", "-t", pane, "-l", "--"])
@@ -862,6 +859,17 @@ fn run_ok(args: &[&str]) -> Result<(), String> {
 /// pause and a fresh look at the screen, so a TUI's paste-burst detection does
 /// not read it as a newline and a modal that appeared meanwhile is not
 /// answered by it.
+/// `text` as one tmux argument: an argument ENDING in `;` is a command
+/// separator to tmux's argv parser, which eats the `;` (and turns `\\;` into
+/// `;`), wherever the argument sits. Measured on 3.6: a paste of `abc;` landed
+/// as `abc`, and a bare `;` was refused.
+fn literal_arg(text: &str) -> String {
+    match text.strip_suffix(';') {
+        Some(head) => format!("{head}\\;"),
+        None => text.to_string(),
+    }
+}
+
 pub fn send_literal(pane: &PaneId, text: &str) -> Result<(), String> {
     let args = send_literal_args(pane.as_str(), text);
     let argv: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -1021,7 +1029,8 @@ pub fn paste_to_ai(session: &str, ai_word: &str, text: &str) -> Result<(), Strin
 /// same `%id` it read, not into whatever a second lookup finds.
 pub fn paste_into(pane: &PaneId, text: &str) -> Result<(), String> {
     let buf = format!("worktrees-drop-{}", std::process::id());
-    let [set_argv, paste_argv, del_argv] = paste_commands(&buf, pane, text);
+    let text = literal_arg(text);
+    let [set_argv, paste_argv, del_argv] = paste_commands(&buf, pane, &text);
     let set = tmux(&set_argv).map_err(|e| e.to_string())?;
     if !set.status.success() {
         return Err(String::from_utf8_lossy(&set.stderr).trim().to_string());
@@ -1036,6 +1045,47 @@ pub fn paste_into(pane: &PaneId, text: &str) -> Result<(), String> {
         Ok(o) => Err(String::from_utf8_lossy(&o.stderr).trim().to_string()),
         Err(e) => Err(e.to_string()),
     }
+}
+
+/// Paste `chunks` as separate bracketed pastes, in ONE tmux invocation so
+/// nothing can come between them and no other paste can take the buffer. Each
+/// stays its own paste to the program in the pane: Claude collapses a big paste
+/// into a placeholder and records it as pasted material (`prompt::feed_claude`).
+pub fn paste_batch(pane: &PaneId, chunks: &[String]) -> Result<(), String> {
+    let buf = format!("worktrees-send-{}", std::process::id());
+    let args = paste_batch_args(&buf, pane.as_str(), chunks);
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    let done = run_ok(&argv);
+    // tmux drops the rest of a list at an error, the delete with it.
+    if done.is_err() {
+        let _ = tmux(&["delete-buffer", "-b", &buf]);
+    }
+    done
+}
+
+fn paste_batch_args(buf: &str, pane: &str, chunks: &[String]) -> Vec<String> {
+    let mut args: Vec<String> = leave_mode(pane).into_iter().map(str::to_string).collect();
+    for c in chunks {
+        for a in ["set-buffer", "-b", buf, "--"] {
+            args.push(a.into());
+        }
+        args.push(literal_arg(c));
+        for a in [";", "paste-buffer", "-b", buf, "-p", "-t", pane, ";"] {
+            args.push(a.into());
+        }
+    }
+    for a in ["delete-buffer", "-b", buf] {
+        args.push(a.into());
+    }
+    args
+}
+
+/// `pane`'s rows and columns.
+pub fn pane_size(pane: &PaneId) -> Option<(usize, usize)> {
+    let out = tmux(&["display-message", "-p", "-t", pane.as_str(), "#{pane_height} #{pane_width}"]).ok()?;
+    let said = String::from_utf8_lossy(&out.stdout);
+    let (rows, cols) = said.trim().split_once(' ')?;
+    Some((rows.parse().ok()?, cols.parse().ok()?))
 }
 
 /// The three tmux invocations a drop makes, as argv.
@@ -1090,6 +1140,23 @@ mod paste_tests {
         for argv in [&set, &paste, &del] {
             assert!(!argv.contains(&"send-keys"), "send-keys can type into a confirmation dialog");
         }
+    }
+
+    /// Each chunk is its own bracketed paste, every value is past `--`, and a
+    /// value ending in `;` cannot end the command (measured on 3.6: unescaped,
+    /// `a;` lands as `a`).
+    #[test]
+    fn a_batch_is_separate_pastes_and_a_semicolon_stays_text() {
+        let chunks = ["a;".to_string(), "\nb\\;".to_string(), "\n;".to_string(), "\n-c".to_string()];
+        let args = paste_batch_args("b1", "%7", &chunks);
+        assert_eq!(args[..5], ["copy-mode", "-q", "-t", "%7", ";"]);
+        let sets: Vec<&str> = args.windows(5).filter(|w| w[0] == "set-buffer").map(|w| w[4].as_str()).collect();
+        assert_eq!(sets, ["a\\;", "\nb\\\\;", "\n\\;", "\n-c"]);
+        assert_eq!(args.iter().filter(|a| *a == "paste-buffer").count(), 4);
+        let pastes = args.windows(6).filter(|w| w[0] == "paste-buffer" && w[3] == "-p" && w[5] == "%7").count();
+        assert_eq!(pastes, 4, "every paste bracketed, at the pane id: {args:?}");
+        assert_eq!(args[args.len() - 3..], ["delete-buffer", "-b", "b1"]);
+        assert_eq!(literal_arg("a;b"), "a;b", "only the END of an argument separates");
     }
 
     /// A pane the user scrolled back in the app sits in copy-mode, which eats

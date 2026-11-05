@@ -12,7 +12,8 @@
 //!
 //! `WT_E2E_STEP` is `prompt`, `answer <n>` (the prompt's own fingerprint is
 //! read first, as a client would), `text <n> <text…>`, `commands`, `command
-//! <name> [args…]` (the session `agent_commands` names), or `turns <n>`.
+//! <name> [args…]` (the session `agent_commands` names), `turns <n>`, or `send`,
+//! which sends `WT_E2E_TEXT` (it can hold line breaks) to `WT_E2E_SESSION`.
 //! `WT_E2E_SLUG` defaults to `(main)`. The answer is printed as JSON.
 
 use std::sync::Arc;
@@ -64,6 +65,13 @@ fn drive_one_step() {
         }),
         ["command", name] => agents::agent_command(&ctx, repo.clone(), slug.clone(), session(), name.into(), None),
         ["command", name, args] => agents::agent_command(&ctx, repo.clone(), slug.clone(), session(), name.into(), Some(args.into())),
+        ["send"] => agents::agent_send(
+            &ctx,
+            repo.clone(),
+            slug.clone(),
+            std::env::var("WT_E2E_SESSION").expect("WT_E2E_SESSION"),
+            std::env::var("WT_E2E_TEXT").expect("WT_E2E_TEXT"),
+        ),
         ["turns", n] => agents::agent_turns(&ctx, repo.clone(), slug.clone(), None, Some(n.parse().unwrap())),
         ["answer", n] => agents::agent_answer(&ctx, repo.clone(), slug.clone(), n.parse().unwrap(), fingerprint()),
         ["text", n, text] => agents::agent_answer_text(&ctx, repo.clone(), slug.clone(), n.parse().unwrap(), fingerprint(), text.into()),

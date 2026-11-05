@@ -71,7 +71,7 @@ Date.now = () => nowSec * 1000;
 
 /** Every invoke parks here until the test answers it, in the test's order. */
 const calls = [];
-globalThis.__chatSendInvoke = (cmd) => new Promise((resolve, reject) => { calls.push({ cmd, resolve, reject }); });
+globalThis.__chatSendInvoke = (cmd, args) => new Promise((resolve, reject) => { calls.push({ cmd, args, resolve, reject }); });
 /** Let promise chains run, on a real timer the stubbed clock does not touch. */
 const settle = () => new Promise((resolve) => setTimeout(resolve, 5));
 /** The oldest unanswered call of `cmd`: a missing one is a failure of ITS test,
@@ -368,6 +368,62 @@ async function sendAndEcho(t, text, at, ...before) {
 // at 22:30:18). For those 15 s the notice said a message Claude had already
 // taken was unsent. A send that did NOT land has to leave the notice telling
 // the truth: there the text may really be in the composer.
+// ── a message of several lines ──────────────────────────────────────────────
+{
+  const lines = { lineBreaks: true, maxBytes: 16 * 1024 };
+  const t = place();
+  C.setDraft(t.path, "one\ntwo\n\nfour  \n");
+  const done = C.sendDraft(t, "Claude", lines);
+  await settle();
+  const sending = calls.find((c) => c.cmd === "agent_send");
+  check(sending?.args.text === "one\ntwo\n\nfour  \n", "the draft goes as typed: the host normalises and trims nothing the person sees", JSON.stringify(sending?.args.text));
+  const own = C.draftIsOwnSend, v = () => C.useChat(t.path);
+  check(own("one two", v()), "a sample cut at the first blank row is its own send");
+  check(own("four", v()), "so is one showing only the end of a tall draft");
+  check(own("[Pasted text #12 +3 lines]", v()), "so is the placeholder Claude collapsed it to");
+  check(own("[Pasted text #12]", v()), "… with no line count too");
+  check(!own("one two TYPED", v()), "words of someone's still count as a draft");
+  check(!own("wo fo", v()), "a few words from its middle are someone's draft too");
+  check(!own("[Pasted text #12] hello", v()), "… beside a placeholder too");
+  await answer("agent_send", SENT);
+  await done;
+  check(C.useChat(t.path).pending.length === 1, "it is pending until the transcript has it");
+  {
+    const mid = { sentLine: { text: "the first paragraph of this message\n\nand a second one, longer than it needs to be\n\nand the last" } };
+    check(own("and a second one, longer than it needs to be", mid), "a long stretch from its middle is its own send");
+    check(!own("a second one", mid), "a short stretch is not");
+    check(own("the first", mid) && own("the last", mid), "its start and its end are, at any length");
+  }
+  // Claude trims the ends and keeps the lines (measured 2.1.318); the host has
+  // unwrapped a collapsed paste by the time it answers.
+  const at = T0 + 1;
+  const after = C.settlePending(C.useChat(t.path).pending, [turn(at, "one\ntwo\n\nfour")]);
+  check(after.length === 0, "its record settles it", JSON.stringify(after));
+  const crlf = C.settlePending([{ id: 1, text: "a\r\nb\rc", sentAt: T0 * 1000 }], [turn(at, "a\nb\nc")]);
+  check(crlf.length === 0, "CRLF and CR settle against the LF the host typed");
+  const other = C.settlePending(C.useChat(t.path).pending, [turn(at, "one two four")]);
+  check(other.length === 1, "the same words with the lines flattened are not its record");
+  const long = "line\n".repeat(1500);
+  const cut = C.settlePending([{ id: 2, text: long, sentAt: T0 * 1000 }], [turn(at, `${[...long.trim()].slice(0, C.HOST_TEXT_MAX).join("")}…`)]);
+  check(cut.length === 0, "a long one settles against the host's cut");
+  await drain();
+
+  // A send that stopped: said in the host's words, the whole draft kept.
+  const u = place();
+  C.setDraft(u.path, "one\ntwo");
+  const stopped = C.sendDraft(u, "Claude", lines);
+  await settle();
+  const note = "Not sent: a prompt opened part way, after about 512 of 2048 bytes.";
+  await answer("agent_send", { delivered: false, queued: false, harness: "claude", session: "s", note, stopped: true });
+  await stopped;
+  const w = C.useChat(u.path);
+  check(w.sendWords?.line === note && w.sendWords?.terminal === true, "a stopped send says what the host said and offers the terminal", JSON.stringify(w.sendWords));
+  check(w.draft === "one\ntwo" && w.pending.length === 0 && w.sentLine === null, "the whole draft stays, nothing claims to be on its way");
+  await drain();
+  // An older host's refusal is a way out, not a dead end.
+  const old = C.sendWords("text contains a control character (newline, tab, escape…); only ONE line is typed", "Claude");
+  check(old.join === true && /one line/.test(old.line), "an older host's refusal offers to join", JSON.stringify(old));
+}
 if (typeof C.draftIsOwnSend !== "function") {
   fail("chat.ts exports no draftIsOwnSend");
 } else {

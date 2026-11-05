@@ -36,6 +36,8 @@ pub(super) struct ScriptedAgent {
     pub after: &'static str,
     pub keys: Mutex<Vec<worktrees_core::tmux::Key>>,
     pub sent: Mutex<Vec<String>>,
+    /// What a send answers: `Submitted` unless a test says otherwise.
+    pub outcome: Mutex<Option<worktrees_core::harness::SendOutcome>>,
     /// The screen once something is pasted (`agent_answer_text`); `None`
     /// keeps the one showing.
     pub typed: Mutex<Option<&'static str>>,
@@ -63,6 +65,7 @@ impl ScriptedAgent {
             after,
             keys: Default::default(),
             sent: Default::default(),
+            outcome: Default::default(),
             typed: Default::default(),
         })
     }
@@ -106,7 +109,7 @@ impl worktrees_api::agents::AgentIo for ScriptedAgent {
         text: &str,
     ) -> Result<worktrees_core::harness::SendOutcome, String> {
         self.sent.lock().unwrap().push(text.to_string());
-        Ok(worktrees_core::harness::SendOutcome::Submitted)
+        Ok(self.outcome.lock().unwrap().clone().unwrap_or(worktrees_core::harness::SendOutcome::Submitted))
     }
     fn transcript(&self, _: &worktrees_core::Project, _: &str, _: &worktrees_api::agents::Lane) -> Result<Vec<String>, String> {
         let t = include_str!("../../../worktrees-core/tests/fixtures/transcripts/claude-2.1.309.jsonl");

@@ -106,7 +106,7 @@ pub enum ResumeTarget {
 }
 
 /// Whether a typed message was confirmed submitted.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SendOutcome {
     Submitted,
     /// pi was mid-turn: the text left the composer and sits in pi's steering
@@ -115,6 +115,19 @@ pub enum SendOutcome {
     Modal,
     Unconfirmed,
     EnterFailed(String),
+    /// Pasting stopped part way (`prompt::feed_claude`): the composer holds up
+    /// to `pasted` of `total` bytes and nothing was submitted.
+    Stopped { pasted: usize, total: usize, why: String },
+    /// The composer holds something other than the message, so Enter was never
+    /// pressed: someone typed at the terminal while it was going in.
+    Foreign,
+    /// The composer lost the start of what was pasted and kept its end, with
+    /// `pasted` of `total` bytes in. This host pressed no Enter; someone did at
+    /// the terminal, so the start was submitted and the end is still there.
+    Lost { pasted: usize, total: usize },
+    /// The composer stayed empty after `pasted` of `total` bytes: a draw that
+    /// never came, or an Enter at the terminal. It cannot say which.
+    Emptied { pasted: usize, total: usize },
 }
 
 impl SendOutcome {
@@ -152,6 +165,10 @@ impl SendOutcome {
             Self::Modal => "Codex opened an approval or a question while sending. No Enter was pressed into that prompt. The text may be sitting in its input; the user has to answer the prompt. Submission is not confirmed; the message copy is left unread if recorded. Submitting the composer later and reading messages can deliver the same instruction twice; check the composer and inbox before resending.".into(),
             Self::Unconfirmed => "Text was typed but submission could not be confirmed within the retry limit. It may still be in the composer. The message copy is left unread if recorded; read it with messages before retrying to avoid duplicates.".into(),
             Self::EnterFailed(e) => format!("Text was typed but Enter failed: {e}. Submission is not confirmed. The message copy is left unread if recorded; read it with messages before retrying to avoid duplicates."),
+            Self::Stopped { pasted, total, why } => format!("Pasting stopped ({why}) after about {pasted} of {total} bytes. Enter was not pressed; the first part may be in the composer. Check it before resending."),
+            Self::Foreign => "The composer held something other than this text, so Enter was not pressed. Check it before resending.".into(),
+            Self::Lost { pasted, total } => format!("The composer lost its start with about {pasted} of {total} bytes pasted: someone seems to have pressed Enter there, submitting that start. Enter was not pressed from here. Check before resending."),
+            Self::Emptied { pasted, total } => format!("The composer stayed empty after about {pasted} of {total} bytes. They may not have drawn, or someone may have submitted them. Check before resending."),
         }
     }
 }
@@ -576,7 +593,10 @@ impl Adapter for Codex {
                 req.path
             ));
         };
-        if let Err(e) = tmux::send_literal(&pane, req.typed) {
+        // A typed newline is Enter: a message with line breaks goes in as one
+        // bracketed paste, which Codex holds until Enter (measured on 0.162.1).
+        let typed = if req.typed.contains('\n') { tmux::paste_into(&pane, req.typed) } else { tmux::send_literal(&pane, req.typed) };
+        if let Err(e) = typed {
             return Delivery::Refused(format!("could not type into {codex}: {e}"));
         }
         let t0 = std::time::Instant::now();
@@ -1149,14 +1169,67 @@ pub const LINE_MAX: usize = 4 * 1024;
 /// `@` a file picker, `#` Claude's memory, which writes an instruction file.
 /// A refusal says which, so the caller can fix it.
 pub fn typed_line_ok(text: &str) -> Result<(), String> {
+    typed_ok(text, LINE_MAX, false)
+}
+
+/// The most a message may hold where line breaks are proved: measured whole,
+/// byte for byte in the record, on Claude 2.1.318 and Codex 0.162.1. Anything
+/// longer belongs in a file.
+pub const MESSAGE_MAX: usize = 16 * 1024;
+
+/// Whether `harness` is proved to take a message with line breaks: it holds
+/// one unsent until Enter, and a later line that reads as a command stays text.
+/// pi and kimi are not measured, so they stay one line.
+pub fn line_breaks_proved(harness: &str) -> bool {
+    harness == crate::provider::CLAUDE.id || harness == crate::provider::CODEX.id
+}
+
+/// What `agent_send` types into `harness`: `text` with CRLF and CR made LF, by
+/// [`typed_line_ok`]'s rule with line breaks allowed, or, for a harness not
+/// proved, by that rule unchanged. A tab, every other control and invisible
+/// character, and a leading `/ @ ! #` are refused on either. Only the message's
+/// FIRST non-blank line can run something, so a later line may start with one:
+/// in the composer it is text (a later `@path` attaches the file, as `@` in the
+/// middle of a line does).
+pub fn typed_message(harness: &str, text: &str) -> Result<String, String> {
+    if !line_breaks_proved(harness) {
+        typed_line_ok(text)?;
+        return Ok(text.to_string());
+    }
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    typed_ok(&text, MESSAGE_MAX, true)?;
+    Ok(text)
+}
+
+/// What a client may send, for the remote `ok` frame (iOS's `SendCaps`). Only
+/// what is measured: a harness's own entry wins over the host-wide values.
+pub fn send_caps() -> serde_json::Value {
+    let proved = serde_json::json!({ "line_breaks": true, "max_bytes": MESSAGE_MAX });
+    serde_json::json!({
+        "line_breaks": false,
+        "max_bytes": LINE_MAX,
+        "emoji_joiners": false,
+        "harnesses": { crate::provider::CLAUDE.id: proved, crate::provider::CODEX.id: proved },
+    })
+}
+
+fn typed_ok(text: &str, max: usize, line_breaks: bool) -> Result<(), String> {
     if text.trim().is_empty() {
         return Err("text is empty".into());
     }
-    if text.len() > LINE_MAX {
-        return Err(format!("text is {} bytes; a line typed into an agent may be up to {LINE_MAX}", text.len()));
+    if text.len() > max {
+        return Err(if line_breaks {
+            format!("text is {} bytes; a message typed into an agent may be up to {max}", text.len())
+        } else {
+            format!("text is {} bytes; a line typed into an agent may be up to {max}", text.len())
+        });
     }
-    if text.chars().any(char::is_control) {
-        return Err("text contains a control character (newline, tab, escape…); only ONE line is typed".into());
+    if text.chars().any(|c| c.is_control() && !(line_breaks && c == '\n')) {
+        return Err(if line_breaks {
+            "text contains a control character (tab, escape…); only line breaks are typed".into()
+        } else {
+            "text contains a control character (newline, tab, escape…); only ONE line is typed".into()
+        });
     }
     if let Some(c) = text.chars().find(|c| invisible(*c)) {
         return Err(format!(
@@ -1223,6 +1296,52 @@ mod tests {
     /// character (Unicode category Cf), and the line and paragraph separators
     /// that render as breaks — named in the refusal. Visible text in any
     /// script passes.
+    /// The one rule, widened only where measured: CRLF and CR become LF, every
+    /// other control and invisible character stays out, and only the FIRST
+    /// non-blank line can run something.
+    #[test]
+    fn a_message_takes_line_breaks_only_where_they_are_proved() {
+        for h in ["claude", "codex"] {
+            assert_eq!(typed_message(h, "a\r\nb\rc\nd").unwrap(), "a\nb\nc\nd", "{h}");
+            assert_eq!(typed_message(h, "ask\n/clear\n!ls\n#x\n@f").unwrap(), "ask\n/clear\n!ls\n#x\n@f", "{h}: a later line is text");
+            for (bad, why) in [
+                ("a\tb", "control"), ("a\nb\u{1b}[A", "control"), ("a\n\u{7f}", "control"), ("a\u{85}b", "control"),
+                ("a\nb\u{202E}", "invisible"), ("a\u{2028}b", "invisible"), ("a\u{200D}b", "invisible"),
+                ("/clear\nx", "start with '/'"), ("\n\n  @f\nx", "start with '@'"), ("\r\n!ls", "start with '!'"), ("#x\ny", "start with '#'"),
+                ("\n \r\n", "empty"),
+            ] {
+                let e = typed_message(h, bad).unwrap_err();
+                assert!(e.contains(why), "{h} {bad:?}: {e}");
+            }
+            assert!(typed_message(h, &"x".repeat(MESSAGE_MAX)).is_ok());
+            assert!(typed_message(h, &"x".repeat(MESSAGE_MAX + 1)).unwrap_err().contains("16384"));
+        }
+        for h in ["pi", "kimi", "nobody"] {
+            assert!(typed_message(h, "a\nb").unwrap_err().contains("ONE line"), "{h}");
+            assert!(typed_message(h, &"x".repeat(LINE_MAX + 1)).unwrap_err().contains("4096"), "{h}");
+            assert_eq!(typed_message(h, "one").unwrap(), "one");
+        }
+        assert!(typed_line_ok("a\nb").unwrap_err().contains("ONE line"), "MCP send stays one line");
+    }
+
+    /// iOS's `SendCaps`, and what the rule above really does.
+    #[test]
+    fn send_caps_state_what_the_rule_does() {
+        let c = send_caps();
+        assert_eq!(c, serde_json::json!({
+            "line_breaks": false, "max_bytes": 4096, "emoji_joiners": false,
+            "harnesses": {
+                "claude": { "line_breaks": true, "max_bytes": 16384 },
+                "codex": { "line_breaks": true, "max_bytes": 16384 },
+            },
+        }));
+        assert!(typed_line_ok("\u{1F468}\u{200D}\u{1F469}").is_err(), "emoji_joiners: false is true of the rule");
+        for (h, v) in c["harnesses"].as_object().unwrap() {
+            assert_eq!(v["line_breaks"], true);
+            assert!(line_breaks_proved(h) && typed_message(h, "a\nb").is_ok());
+        }
+    }
+
     #[test]
     fn a_typed_line_carries_no_invisible_characters() {
         for (c, name) in [

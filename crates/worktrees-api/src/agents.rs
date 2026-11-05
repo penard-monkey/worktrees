@@ -789,13 +789,17 @@ pub fn send_text_ok(text: &str) -> Result<(), String> {
     harness::typed_line_ok(text)
 }
 
-/// `agent_send`: type one line into the agent running in `session` of this
-/// place and submit it — `{delivered, queued, harness, session, note}`.
+/// `agent_send`: type a message into the agent running in `session` of this
+/// place and submit it — `{delivered, queued, harness, session, note}`, plus
+/// `{stopped: true, pasted, total}` when it did not submit and the composer may
+/// hold some of it, or something else, which `note` says in words. Line breaks
+/// only where the harness is proved (`harness::typed_message`).
 /// Refused while that agent shows a prompt, while its composer holds
 /// someone's text, and when no composer can be seen. A paired device's send
 /// is stamped on the place (`last_remote_send`).
 pub fn agent_send(ctx: &Ctx, repo: String, slug: String, session: String, text: String) -> Result<Value, String> {
-    send_text_ok(&text)?;
+    // Before the pane is looked at: what no harness would take.
+    harness::typed_message(provider::CLAUDE.id, &text)?;
     let project = discover(&repo)?;
     let io = &*ctx.agents.io;
     let lock = ctx.agents.lock(&project.place_dir(&slug));
@@ -805,6 +809,7 @@ pub fn agent_send(ctx: &Ctx, repo: String, slug: String, session: String, text: 
         .into_iter()
         .find(|l| l.session == session)
         .ok_or_else(|| format!("no agent this place launched is running in {session}"))?;
+    let text = harness::typed_message(lane.harness, &text)?;
     let screen = io.capture(&lane).ok_or_else(|| format!("could not read the agent's screen in {session}"))?;
     if read_any(lane.harness, &screen).is_some() {
         return Err(ERR_PROMPT_UP.into());
@@ -815,14 +820,55 @@ pub fn agent_send(ctx: &Ctx, repo: String, slug: String, session: String, text: 
         None => return Err(ERR_NO_COMPOSER.into()),
     }
     let outcome = io.deliver(&project, &slug, &lane, &text)?;
-    stamp_send(ctx, &repo, &slug, &lane);
-    Ok(json!({
+    let stopped = matches!(outcome, SendOutcome::Stopped { .. } | SendOutcome::Foreign | SendOutcome::Lost { .. } | SendOutcome::Emptied { .. });
+    // A send that stopped is not a send: no stamp, and `ok: false` makes the
+    // audit record it as `err`.
+    if !stopped {
+        stamp_send(ctx, &repo, &slug, &lane);
+    }
+    let mut sent = json!({
         "delivered": outcome.confirmed(),
         "queued": outcome == SendOutcome::Queued,
         "harness": lane.harness,
         "session": lane.session,
         "note": send_note(&outcome),
-    }))
+    });
+    match &outcome {
+        SendOutcome::Stopped { pasted, total, .. } | SendOutcome::Lost { pasted, total } | SendOutcome::Emptied { pasted, total } => {
+            sent["pasted"] = json!(pasted);
+            sent["total"] = json!(total);
+        }
+        _ => {}
+    }
+    if stopped {
+        sent["stopped"] = json!(true);
+        sent["ok"] = json!(false);
+    }
+    Ok(sent)
+}
+
+/// What [`AgentIo::deliver`] makes of pasting a message that stopped: refused
+/// when nothing reached the pane, and otherwise an answer that says so.
+fn fed(stop: prompt::FeedStop, pasted: usize, total: usize, session: &str) -> Result<SendOutcome, String> {
+    use prompt::FeedStop::{Emptied, Foreign, Lost, Paste, Prompt, Slow, Unreadable};
+    if pasted == 0 {
+        return Err(match stop {
+            Prompt => ERR_PROMPT_UP.to_string(),
+            Foreign => ERR_MID_INPUT.to_string(),
+            Unreadable | Slow | Lost | Emptied => format!("could not read the agent's screen in {session}"),
+            Paste(e) => e,
+        });
+    }
+    let why = match stop {
+        Prompt => "a prompt opened".to_string(),
+        Unreadable => "the agent's input could not be read".to_string(),
+        Foreign => return Ok(SendOutcome::Foreign),
+        Lost => return Ok(SendOutcome::Lost { pasted, total }),
+        Emptied => return Ok(SendOutcome::Emptied { pasted, total }),
+        Slow => "pasting took too long".to_string(),
+        Paste(e) => format!("pasting failed ({e})"),
+    };
+    Ok(SendOutcome::Stopped { pasted, total, why })
 }
 
 /// The place's lane in `session`, or its first.
@@ -935,6 +981,16 @@ fn send_note(o: &SendOutcome) -> String {
         SendOutcome::Modal => "A prompt opened while sending and nothing was submitted; the line may be sitting in the agent's prompt.".into(),
         SendOutcome::Unconfirmed => "Typed, but the submission could not be confirmed; look before sending it again.".into(),
         SendOutcome::EnterFailed(e) => format!("Typed, but Enter failed ({e}); look before sending it again."),
+        SendOutcome::Stopped { pasted, total, why } => format!(
+            "Not sent: {why} part way, after about {pasted} of {total} bytes. Enter was not pressed, and the first part may be in the agent's input. Look at the terminal and clear it before sending again."
+        ),
+        SendOutcome::Foreign => "Not sent: the agent's input holds something other than this message, perhaps typed in the terminal while it went in. Enter was not pressed. Look at the terminal and clear it before sending again.".into(),
+        SendOutcome::Lost { pasted, total } => format!(
+            "Not sent whole: with about {pasted} of {total} bytes pasted, the start left the agent's input, so someone seems to have pressed Enter in the terminal. That start was probably submitted, and the last part pasted is still in the input. Enter was not pressed from here. Look at the terminal and clear it before sending again."
+        ),
+        SendOutcome::Emptied { pasted, total } => format!(
+            "Not sent: the agent's input stayed empty after about {pasted} of {total} bytes were pasted. It may not have drawn them, or someone may have pressed Enter in the terminal and submitted them. Look at the terminal before sending this again."
+        ),
     }
 }
 
@@ -1320,10 +1376,26 @@ impl AgentIo for Live {
         let t0 = std::time::Instant::now();
         let sleep = |ms| std::thread::sleep(std::time::Duration::from_millis(ms));
         if lane.harness == provider::CLAUDE.id {
-            // A paste, as every other write into Claude is (`tmux::paste_into`):
-            // bracketed, so Claude takes it as pasted text and not keystrokes.
-            tmux::paste_into(&pane, text)?;
+            // Pastes, as every other write into Claude is: bracketed, so Claude
+            // takes them as pasted text and not keystrokes. Several small ones,
+            // or it collapses the message and the agent reads it as pasted
+            // material (`prompt::feed_claude`).
+            // One size for the send: the calls and the proofs must agree on the window.
+            let size = tmux::pane_size(&pane);
+            let fed_in = prompt::feed_claude(
+                text,
+                size,
+                |b| tmux::paste_batch(&pane, b),
+                || tmux::capture_styled(&pane),
+                || t0.elapsed().as_millis() as u64,
+                sleep,
+            );
+            if let Err((pasted, stop)) = fed_in {
+                return fed(stop, pasted, text.len(), &lane.session);
+            }
             return Ok(prompt::submit_claude(
+                text,
+                size.map(|(rows, _)| rows),
                 || tmux::capture_styled(&pane),
                 || tmux::press_enter(&pane),
                 || t0.elapsed().as_millis() as u64,
@@ -1436,7 +1508,7 @@ impl AgentIo for Live {
         }
         if claude {
             let t0 = std::time::Instant::now();
-            return Ok(prompt::submit_claude(capture, || tmux::press_enter(&pane), || t0.elapsed().as_millis() as u64, sleep));
+            return Ok(prompt::submit_claude(line, tmux::pane_size(&pane).map(|(rows, _)| rows), capture, || tmux::press_enter(&pane), || t0.elapsed().as_millis() as u64, sleep));
         }
         // Codex: ONE Enter on the proved line, then what follows — a list it
         // opened, or its composer back empty (run, or refused in its own
@@ -1577,6 +1649,8 @@ mod tests {
         keys: Mutex<Vec<Key>>,
         captures: AtomicUsize,
         delivered: Mutex<Vec<String>>,
+        /// What `deliver` answers: `Submitted` unless a test says otherwise.
+        outcome: Mutex<Option<SendOutcome>>,
         transcript: Vec<String>,
         pasted: Mutex<Vec<String>>,
         waiting: bool,
@@ -1679,7 +1753,7 @@ mod tests {
         }
         fn deliver(&self, _: &Project, _: &str, _: &Lane, text: &str) -> Result<SendOutcome, String> {
             self.delivered.lock().unwrap().push(text.to_string());
-            Ok(SendOutcome::Submitted)
+            Ok(self.outcome.lock().unwrap().clone().unwrap_or(SendOutcome::Submitted))
         }
         fn transcript(&self, _: &Project, _: &str, _: &Lane) -> Result<Vec<String>, String> {
             Ok(self.transcript.clone())
@@ -2530,7 +2604,6 @@ mod tests {
         let fake = Arc::new(Fake::with(vec![("claude", "repo-lane", pane(vec![fx!("composer-empty.e.txt")], ""))]));
         let (ctx, repo) = setup("sendtext", fake.clone());
         for (text, why) in [
-            ("two\nlines", "control character"),
             ("tab\there", "control character"),
             ("\u{1b}[A", "control character"),
             ("del\u{7f}", "control character"),
@@ -2544,11 +2617,66 @@ mod tests {
             let err = agent_send(&ctx, repo.clone(), "lane".into(), "repo-lane".into(), text.into()).unwrap_err();
             assert!(err.contains(why), "{text:?}: {err}");
         }
-        let err = agent_send(&ctx, repo.clone(), "lane".into(), "repo-lane".into(), "x".repeat(SEND_MAX + 1)).unwrap_err();
-        assert!(err.contains("4096"), "{err}");
+        let err = agent_send(&ctx, repo.clone(), "lane".into(), "repo-lane".into(), "x".repeat(harness::MESSAGE_MAX + 1)).unwrap_err();
+        assert!(err.contains("16384"), "{err}");
         assert_eq!(fake.captures.load(Ordering::SeqCst), 0, "refused before the pane is looked at");
         assert!(fake.delivered.lock().unwrap().is_empty());
-        assert!(agent_send(&ctx, repo, "lane".into(), "repo-lane".into(), "x".repeat(SEND_MAX)).is_ok(), "4 KB exactly is fine");
+        assert!(agent_send(&ctx, repo, "lane".into(), "repo-lane".into(), "x".repeat(harness::MESSAGE_MAX)).is_ok(), "16 KB exactly is fine");
+    }
+
+    /// Line breaks reach a harness that is proved, as LF, and no other.
+    #[test]
+    fn a_message_with_line_breaks_reaches_only_a_proved_harness() {
+        let fake = Arc::new(Fake::with(vec![("claude", "repo-lane", pane(vec![fx!("composer-empty.e.txt")], ""))]));
+        let (ctx, repo) = setup("sendlines", fake.clone());
+        let sent = agent_send(&device(&ctx), repo.clone(), "lane".into(), "repo-lane".into(), "one\r\n/clear\rthree".into()).unwrap();
+        assert_eq!(sent["delivered"], true);
+        assert_eq!(sent.get("stopped"), None);
+        assert_eq!(*fake.delivered.lock().unwrap(), ["one\n/clear\nthree"]);
+
+        let fake = Arc::new(Fake::with(vec![("pi", "repo-lane", pane(vec![fx!("composer-empty.e.txt")], ""))]));
+        let (ctx, repo) = setup("sendlinespi", fake.clone());
+        let err = agent_send(&ctx, repo.clone(), "lane".into(), "repo-lane".into(), "one\ntwo".into()).unwrap_err();
+        assert!(err.contains("ONE line"), "{err}");
+        let err = agent_send(&ctx, repo, "lane".into(), "repo-lane".into(), "x".repeat(SEND_MAX + 1)).unwrap_err();
+        assert!(err.contains("4096"), "{err}");
+        assert!(fake.delivered.lock().unwrap().is_empty());
+    }
+
+    /// A send that did not land says what happened, is never `delivered`, and
+    /// tells the client to look.
+    #[test]
+    fn a_send_stopped_part_way_says_so_and_is_not_delivered() {
+        for (outcome, words, said) in [
+            (SendOutcome::Stopped { pasted: 512, total: 2048, why: "a prompt opened".into() }, "about 512 of 2048 bytes", "Enter was not pressed"),
+            (SendOutcome::Foreign, "something other than this message", "Enter was not pressed"),
+            (SendOutcome::Lost { pasted: 512, total: 2048 }, "about 512 of 2048 bytes", "probably submitted"),
+            (SendOutcome::Emptied { pasted: 512, total: 2048 }, "about 512 of 2048 bytes", "may have pressed Enter"),
+        ] {
+            let fake = Arc::new(Fake::with(vec![("claude", "repo-lane", pane(vec![fx!("composer-empty.e.txt")], ""))]));
+            *fake.outcome.lock().unwrap() = Some(outcome.clone());
+            let (ctx, repo) = setup("sendstopped", fake);
+            let sent = agent_send(&device(&ctx), repo.clone(), "lane".into(), "repo-lane".into(), "one\ntwo".into()).unwrap();
+            assert_eq!((&sent["delivered"], &sent["stopped"], &sent["ok"]), (&json!(false), &json!(true), &json!(false)), "{sent}");
+            let note = sent["note"].as_str().unwrap();
+            assert!(note.contains(words) && note.contains(said) && note.contains("terminal"), "{note}");
+            let stamped = store::read_lenient(&repo).places.get("lane").and_then(|d| d.last_remote_send.clone());
+            assert!(stamped.is_none(), "a stop is not a send: no stamp");
+        }
+    }
+
+    /// Nothing pasted is a plain refusal; something pasted must be said.
+    #[test]
+    fn a_stop_before_anything_was_pasted_is_a_refusal() {
+        use prompt::FeedStop::{Emptied, Foreign, Lost, Paste, Prompt, Unreadable};
+        assert_eq!(fed(Lost, 4, 9, "s"), Ok(SendOutcome::Lost { pasted: 4, total: 9 }));
+        assert_eq!(fed(Emptied, 4, 9, "s"), Ok(SendOutcome::Emptied { pasted: 4, total: 9 }));
+        assert_eq!(fed(Prompt, 0, 9, "s"), Err(ERR_PROMPT_UP.to_string()));
+        assert!(fed(Unreadable, 0, 9, "s").unwrap_err().contains("could not read"));
+        assert_eq!(fed(Paste("no pane".into()), 0, 9, "s"), Err("no pane".to_string()));
+        assert_eq!(fed(Foreign, 0, 9, "s"), Err(ERR_MID_INPUT.to_string()));
+        assert_eq!(fed(Prompt, 4, 9, "s"), Ok(SendOutcome::Stopped { pasted: 4, total: 9, why: "a prompt opened".into() }));
+        assert_eq!(fed(Foreign, 4, 9, "s"), Ok(SendOutcome::Foreign));
     }
 
     /// A line whose bytes say something its screen does not — a bidi

@@ -93,6 +93,7 @@ pub fn auth_reply(proof: &str, device: Option<&Value>) -> String {
         // This host has the push rows. A new row never bumps `proto`; the
         // flag lets a client know without asking. Absent on an older host.
         v["push"] = json!(true);
+        v["send_caps"] = worktrees_core::harness::send_caps();
     }
     v.to_string()
 }
@@ -750,7 +751,7 @@ mod tests {
         let v: Value = serde_json::from_str(&auth_reply("p", Some(&d))).unwrap();
         assert_eq!(
             v,
-            json!({ "ok": true, "version": env!("CARGO_PKG_VERSION"), "proof": "p", "device": d, "proto": 1, "proto_min": 1, "push": true }),
+            json!({ "ok": true, "version": env!("CARGO_PKG_VERSION"), "proof": "p", "device": d, "proto": 1, "proto_min": 1, "push": true, "send_caps": worktrees_core::harness::send_caps() }),
             "a remote session's names its device and the protocol range this host serves"
         );
         let c: Value = serde_json::from_str(&challenge_frame("s")).unwrap();

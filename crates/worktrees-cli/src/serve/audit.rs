@@ -946,14 +946,18 @@ struct State {
     /// How far the tests have moved the log's clocks.
     #[cfg(test)]
     skew: Duration,
+    /// A clock a test scripts: time passes only by [`Audit::advance`].
+    #[cfg(test)]
+    frozen: Option<Instant>,
 }
 
 impl State {
     /// The monotonic clock a budget and its episodes are decided by.
     fn mono(&self) -> Instant {
+        #[cfg(not(test))]
         let t = Instant::now();
         #[cfg(test)]
-        let t = t + self.skew;
+        let t = self.frozen.unwrap_or_else(Instant::now) + self.skew;
         t
     }
 
@@ -1014,6 +1018,8 @@ impl Audit {
                 fail: None,
                 #[cfg(test)]
                 skew: Duration::ZERO,
+                #[cfg(test)]
+                frozen: None,
             }),
         };
         let v = {
@@ -1585,6 +1591,14 @@ impl Audit {
     #[cfg(test)]
     pub(crate) fn advance(&self, by: Duration) {
         guard(&self.st).skew += by;
+    }
+
+    /// Stop the budgets' clock. A refill pays by the wall clock, so a test that
+    /// spends a budget and asserts the next act is refused otherwise races its
+    /// runner: 40 B/s buys a few bytes back in a descheduled moment (#613's CI).
+    #[cfg(test)]
+    pub(crate) fn freeze(&self) {
+        guard(&self.st).frozen = Some(Instant::now());
     }
 
     // ── the events, one method each ─────────────────────────────────────────
@@ -3848,7 +3862,7 @@ mod tests {
         let c = phone(&g.a, 9);
         let text = "deploy the SECRET-PAYLOAD-1 branch";
         assert_eq!(g.send(&c, &session, text).map(|v| v["delivered"].clone()), Ok(json!(true)));
-        assert!(g.send(&c, &session, "SECRET-PAYLOAD-2\nline two").is_err(), "a control character: the body refuses");
+        assert!(g.send(&c, &session, "SECRET-PAYLOAD-2\tline two").is_err(), "a control character: the body refuses");
         assert!(g.send(&c, "not-a-session", "SECRET-PAYLOAD-3").is_err(), "an unknown session: the resolver refuses");
         assert_eq!(*pane.sent.lock().unwrap(), vec![text.to_string()]);
         let raw = std::fs::read_to_string(g.d.join(FILE)).unwrap();
@@ -3860,6 +3874,20 @@ mod tests {
         assert_eq!(sent[0]["detail"]["session"], json!(session));
         assert_eq!((sent[0]["outcome"].as_str(), sent[1]["outcome"].as_str()), (Some("ok"), Some("err")));
         assert_eq!(g.records("refused", "agent_send").len(), 1);
+
+        // A message of several lines at the most a harness takes: the record is
+        // the same size as a short one's, so the DRIVE budget charges no more.
+        let long = format!("SECRET-PAYLOAD-4\n{}", "x".repeat(worktrees_core::harness::MESSAGE_MAX - 17));
+        assert_eq!(long.len(), worktrees_core::harness::MESSAGE_MAX);
+        assert_eq!(g.send(&c, &session, &long).map(|v| v["delivered"].clone()), Ok(json!(true)));
+        let raw = std::fs::read_to_string(g.d.join(FILE)).unwrap();
+        assert!(!raw.contains("SECRET-PAYLOAD"), "the text reached the log");
+        let sent = g.records("call", "agent_send");
+        assert_eq!(sent[2]["detail"]["bytes"], json!(long.len()));
+        assert_eq!(sent[2]["detail"]["sha256"], json!(sha256_hex(long.as_bytes())));
+        let line_of = |at: usize| raw.lines().filter(|l| l.contains("\"agent_send\"") && l.contains("\"sha256\"")).nth(at).map_or(0, str::len);
+        assert!(line_of(0) > 0 && line_of(2) > 0, "the records this compares are there");
+        assert!(line_of(2).abs_diff(line_of(0)) < 16, "a long message's record costs no more: {} and {}", line_of(0), line_of(2));
 
         *pane.screen.lock().unwrap() = super::super::tests::CLAUDE_TRUST;
         let p = through(&g.cx, &c, &g.w, "agent_prompt", json!({ "repo": g.root, "slug": "(main)" })).unwrap();
@@ -3992,12 +4020,36 @@ mod tests {
     /// `DRIVE` budget a device's answer and send are refused `audit-budget`
     /// before their bodies run, and nothing reaches the pane.
     #[test]
+    fn a_send_that_stopped_is_recorded_as_err_through_the_real_row() {
+        use worktrees_core::harness::SendOutcome::{Emptied, Foreign, Lost, Stopped};
+        let mut g = Gate::new("agentstopped", phone_caller());
+        let (pane, session) = g.agent(super::super::tests::CLAUDE_EMPTY);
+        let c = phone(&g.a, 9);
+        let cases = [
+            Stopped { pasted: 4, total: 9, why: "a prompt opened".into() },
+            Foreign,
+            Lost { pasted: 4, total: 9 },
+            Emptied { pasted: 4, total: 9 },
+        ];
+        for (i, outcome) in cases.into_iter().enumerate() {
+            *pane.outcome.lock().unwrap() = Some(outcome);
+            let answer = g.send(&c, &session, "one\ntwo").unwrap();
+            assert_eq!((&answer["delivered"], &answer["stopped"]), (&json!(false), &json!(true)), "{answer}");
+            assert_eq!(g.records("call", "agent_send")[i]["outcome"], json!("err"), "case {i}");
+        }
+        *pane.outcome.lock().unwrap() = None;
+        assert_eq!(g.send(&c, &session, "one\ntwo").map(|v| v["delivered"].clone()), Ok(json!(true)));
+        assert_eq!(g.records("call", "agent_send")[4]["outcome"], json!("ok"), "a send that went is ok");
+    }
+
+    #[test]
     fn past_its_drive_budget_a_devices_answer_and_send_are_refused() {
         let mut g = Gate::new("agentgate", phone_caller());
         let (pane, session) = g.agent(super::super::tests::CLAUDE_TRUST);
         let c = phone(&g.a, 9);
         let p = through(&g.cx, &c, &g.w, "agent_prompt", json!({ "repo": g.root, "slug": "(main)" })).unwrap();
         let fp = p["fingerprint"].as_str().unwrap().to_string();
+        g.a.freeze();
         g.spend(&c);
         let answer = through(&g.cx, &c, &g.w, "agent_answer", json!({ "repo": g.root, "slug": "(main)", "choice": 1, "fingerprint": fp }));
         let send = g.send(&c, &session, "one more thing");
@@ -4050,6 +4102,7 @@ mod tests {
     fn the_refill_the_answer_names_lets_a_drive_act_through_again() {
         let g = Gate::new("gate-refill", phone_caller());
         let c = phone(&g.a, 9);
+        g.a.freeze();
         let (ran, answer) = g.spend(&c);
         for _ in 0..5 {
             assert!(format!("{:?}", g.drive(&c)).contains("audit-budget"), "too soon");

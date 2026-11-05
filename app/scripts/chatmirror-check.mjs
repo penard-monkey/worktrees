@@ -64,7 +64,7 @@ if (/^import /m.test(stubbed)) { fail("chat.ts gained an import this check does 
 const js = (await transformWithEsbuild(stubbed, "chat.ts", { loader: "ts", format: "esm" })).code;
 const C = await import("data:text/javascript;base64," + Buffer.from(js).toString("base64"));
 for (const name of [
-  "AGENT_ERR", "draftProblem", "answerWords", "sendWords", "stopWords", "SEND_MAX", "TURNS_MAX",
+  "AGENT_ERR", "draftProblem", "answerWords", "sendWords", "stopWords", "SEND_MAX", "MESSAGE_MAX", "ONE_LINE", "sendRulesFor", "TURNS_MAX",
   "ATTACH_ERR", "ATTACH_MAX", "ATTACH_PATH_MAX", "ATTACH_PER_MESSAGE", "attachLine", "attachLead", "attachProblem", "attachWords", "splitAttached",
 ]) {
   if (C[name] === undefined) fail(`chat.ts exports no ${name}`);
@@ -140,8 +140,9 @@ const slashSrc = live(read(SRC.slash));
 const strConsts = new Map([...(api + slashSrc).matchAll(/pub const ([A-Z_]+): &str = ("(?:[^"\\]|\\.)*");/g)].map((m) => [m[1], rustStrings(m[2])[0]]));
 const withConsts = (s) => s.replace(/\{([A-Z][A-Z_]+)\}/g, (m, n) => strConsts.get(n) ?? m);
 const apiSaid = [...rustStrings(api), ...rustStrings(slashSrc)].map((s) => rendered(withConsts(s)));
-const typed = body(harness, "pub fn typed_line_ok(");
-if (!typed) { fail("harness.rs has no `pub fn typed_line_ok(` for this check to read"); done(); }
+// typed_line_ok and typed_message are this one body, with and without line breaks.
+const typed = body(harness, "fn typed_ok(");
+if (!typed) { fail("harness.rs has no `fn typed_ok(` for this check to read"); done(); }
 const typedSaid = rustStrings(typed).map(rendered);
 const hostSaid = new Set([...apiSaid, ...typedSaid]);
 
@@ -213,6 +214,12 @@ const LINE_MAX = (() => {
   const m = /pub const LINE_MAX: usize = ([^;]+);/.exec(harness);
   return m ? m[1].replace(/_/g, "").split("*").reduce((a, s) => a * Number(s.trim()), 1) : NaN;
 })();
+const MESSAGE_MAX = (() => {
+  const m = /pub const MESSAGE_MAX: usize = ([^;]+);/.exec(harness);
+  return m ? m[1].replace(/_/g, "").split("*").reduce((a, s) => a * Number(s.trim()), 1) : NaN;
+})();
+if (C.MESSAGE_MAX !== MESSAGE_MAX) fail(`chat.ts's MESSAGE_MAX is ${C.MESSAGE_MAX}; harness::MESSAGE_MAX is ${MESSAGE_MAX}`);
+else ok(`MESSAGE_MAX is harness::MESSAGE_MAX (${MESSAGE_MAX})`);
 if (C.SEND_MAX !== LINE_MAX) fail(`chat.ts's SEND_MAX is ${C.SEND_MAX}; harness::LINE_MAX is ${LINE_MAX}`);
 else ok(`SEND_MAX is harness::LINE_MAX (${LINE_MAX})`);
 const maxTurns = Number(/pub const MAX_TURNS: usize = (\d+);/.exec(read(SRC.turns))?.[1]);
@@ -224,8 +231,8 @@ else ok(`TURNS_MAX is turns::MAX_TURNS (${maxTurns})`);
 // follow it.
 const SHAPE = [
   ["text.trim().is_empty()", "a blank line is refused"],
-  ["text.len() > LINE_MAX", "the bound is in bytes"],
-  ["text.chars().any(char::is_control)", "a control character (category Cc) is refused"],
+  ["text.len() > max", "the bound is in bytes"],
+  ["text.chars().any(|c| c.is_control() && !(line_breaks && c == '\\n'))", "a control character (category Cc) is refused, a line break only where it is allowed"],
   ["text.chars().find(|c| invisible(*c))", "an INVISIBLE character is refused"],
   ["text.trim_start().chars().next()", "the first character after leading white space is the one that runs something"],
 ];
@@ -279,6 +286,45 @@ if (shapeOk) {
   if (differ.length) {
     fail("draftProblem and typed_line_ok disagree — a Unicode update can do this too (INVISIBLE is generated from one version, \\p{Cf} is node's):\n       " + differ.join("\n       "));
   } else ok("draftProblem refuses what typed_line_ok refuses, for every code point, with the same reason");
+
+  // The same rule where line breaks are proved (`harness::typed_message`): a
+  // line break and a CR go through, as the host makes them LF, and nothing else.
+  const proved = { lineBreaks: true, maxBytes: MESSAGE_MAX };
+  const hostLines = (text) => {
+    const t = text.replace(/\r\n?/g, "\n");
+    if (!t.trim()) return "blank";
+    if (new TextEncoder().encode(t).length > MESSAGE_MAX) return "length";
+    const cps = [...t].map((ch) => ch.codePointAt(0));
+    if (cps.some((cp) => cp !== 0x0a && (cp <= 0x1f || (cp >= 0x7f && cp <= 0x9f)))) return "control";
+    if (cps.some((cp) => INVISIBLE.some(([lo, hi]) => cp >= lo && cp <= hi))) return "invisible";
+    const first = [...t].find((ch) => !/\p{White_Space}/u.test(ch));
+    return LEAD.has(first) ? "lead" : null;
+  };
+  const clientLines = (text) => {
+    const p = C.draftProblem(text, "message", proved);
+    if (p === null) return null;
+    if (p.startsWith("Remove the tabs")) return "control";
+    if (p.startsWith("Remove the invisible")) return "invisible";
+    if (p.startsWith("Too long")) return "length";
+    if (p.startsWith("Slash commands") || / can’t start with /.test(p)) return "lead";
+    return `unknown words: ${p}`;
+  };
+  const differLines = [];
+  for (let cp = 0; cp <= 0x10ffff && differLines.length < 12; cp++) {
+    if (cp >= 0xd800 && cp <= 0xdfff) continue;
+    const ch = String.fromCodePoint(cp);
+    for (const [text, where] of [[`${ch}x`, "heading the message"], [`x${ch}x`, "inside a line"], [`x\n${ch}x`, "heading a LATER line"]]) {
+      const h = hostLines(text), c = clientLines(text);
+      if (h !== c && !(h === "blank" && c === null)) differLines.push(`U+${cp.toString(16).toUpperCase().padStart(4, "0")} ${where}: host ${h ?? "takes it"}, draftProblem ${c ?? "takes it"}`);
+    }
+  }
+  if (differLines.length) fail("with line breaks, draftProblem and typed_message disagree:\n       " + differLines.join("\n       "));
+  else ok("with line breaks, draftProblem refuses what typed_message refuses, for every code point, on the first line and a later one");
+  for (const [text, want] of [["a\nb", null], ["a\r\nb", null], ["\n/x\ny", "lead"], ["a\n/x", null], ["a\tb\nc", "control"], ["x".repeat(MESSAGE_MAX), null], ["x".repeat(MESSAGE_MAX + 1), "length"]]) {
+    if (clientLines(text) !== want || hostLines(text) !== want) fail(`with line breaks ${JSON.stringify(text.slice(0, 12))}: host ${hostLines(text)}, client ${clientLines(text)}, want ${want}`);
+  }
+  if (C.draftProblem("a\nb") === null || C.draftProblem("a\nb", "answer", C.ONE_LINE) === null) fail("an answer, and a harness not proved, stay one line");
+  else ok("an answer and a harness not proved stay one line");
 
   const lines = [
     ["x".repeat(LINE_MAX), null], ["x".repeat(LINE_MAX + 1), "length"],
@@ -361,6 +407,24 @@ const split = C.splitAttached(C.attachLine("Compare", [P1, P2]));
 if (split.text !== "Compare" || split.paths.join("|") !== `${P1}|${P2}`) fail(`splitAttached does not undo attachLine: ${JSON.stringify(split)}`);
 else ok("splitAttached undoes attachLine");
 if (C.splitAttached("see [attached: /etc/passwd]").paths.length) fail("splitAttached takes a path the host never writes");
+// What the composer believes: this build's table (which must be core's), and a
+// paired host's `send_caps` as the iOS app reads it.
+{
+  const R = (h, caps, remote = true) => JSON.stringify(C.sendRulesFor(h, remote, caps));
+  const one = JSON.stringify(C.ONE_LINE), lines = JSON.stringify({ lineBreaks: true, maxBytes: MESSAGE_MAX });
+  const caps = { line_breaks: false, max_bytes: LINE_MAX, emoji_joiners: false, harnesses: { claude: { line_breaks: true, max_bytes: MESSAGE_MAX }, codex: { line_breaks: true, max_bytes: MESSAGE_MAX } } };
+  const table = [
+    ["claude here", R("claude", null, false), lines], ["codex here", R("codex", null, false), lines], ["pi here", R("pi", null, false), one], ["kimi here", R("kimi", null, false), one],
+    ["an older host", R("claude", null), one], ["host's claude", R("claude", caps), lines], ["host's pi", R("pi", caps), one],
+    ["junk caps", R("claude", "yes"), one], ["junk values", R("claude", { line_breaks: "yes", max_bytes: 12 }), one],
+    ["host-wide", R("pi", { line_breaks: true }), JSON.stringify({ lineBreaks: true, maxBytes: LINE_MAX })],
+  ];
+  for (const [what, got, want] of table) if (got !== want) fail(`sendRulesFor, ${what}: ${got}, want ${want}`);
+  const proved = /pub fn line_breaks_proved[\s\S]*?\n\}/.exec(harness)?.[0] ?? "";
+  if (!/CLAUDE\.id/.test(proved) || !/CODEX\.id/.test(proved) || /PI\.id|KIMI\.id/.test(proved)) fail("harness::line_breaks_proved no longer names claude and codex alone: chat.ts's ON_THIS_HOST must follow");
+  else ok("sendRulesFor reads send_caps as the iOS app does, and this build's table is core's");
+}
+
 // At its longest, every line attachProblem lets through passes typed_line_ok.
 if (shapeOk) {
   const longPath = (i) => `${dir}/20261101-${i.toString(16).padStart(16, "0")}.${"x".repeat(longest)}`;

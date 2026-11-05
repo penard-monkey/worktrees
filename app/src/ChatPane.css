@@ -75,6 +75,8 @@
 }
 .chat-bubble-pending { opacity: 0.85; border-style: dashed; }
 .chat-bubble-pending p { margin: 0; white-space: pre-wrap; }
+/* A person's line break is theirs: markdown would fold it into a space. */
+.chat-bubble-user .md p { white-space: pre-wrap; }
 .chat-notice {
   min-width: 0; max-width: 85%; margin: var(--s2) 0; padding: var(--s1) var(--s2);
   color: var(--txt-dim); font-size: var(--fs-meta); line-height: var(--lh-prose);

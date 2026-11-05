@@ -493,6 +493,18 @@ export function setRemoteGrant(caps: readonly string[] | null): void {
   remoteCaps = caps;
 }
 
+let sendCaps: unknown = null;
+
+/** What the paired host's `ok` said `agent_send` takes (`ipcremote.ts`), judged
+ *  by `chat.ts::sendRulesFor`. Null until it says, and from an older host. */
+export function setHostSendCaps(caps: unknown): void {
+  sendCaps = caps;
+}
+
+export function hostSendCaps(): unknown {
+  return sendCaps;
+}
+
 /** May this window's caller do what `cap` allows on its engine? Always true on
  *  the host (the console holds every capability) and while a remote grant is
  *  not known yet — serve decides then. */

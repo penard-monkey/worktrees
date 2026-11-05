@@ -59,7 +59,7 @@ async function chosenHost(door: Door): Promise<HostSummary | null> {
  *  Never `engine_connect`: with a host chosen, no local serve is found or
  *  started (§4.4). `owned: false`, so the retries reconnect and never start. */
 async function remoteBoot(host: HostSummary): Promise<EngineDoor> {
-  const { remoteDoor, setRemoteGrant, tauriDoor } = await import("./ipc");
+  const { remoteDoor, setHostSendCaps, setRemoteGrant, tauriDoor } = await import("./ipc");
   // Destructured, never a namespace binding: a dynamic import Rollup sees used
   // as a whole object keeps EVERY export of ipcws, the dev stack's token client
   // (`bootSocket`) included, in the production chunk (transport-check).
@@ -81,7 +81,8 @@ async function remoteBoot(host: HostSummary): Promise<EngineDoor> {
       };
       // A fresh grant per socket: a narrowed device learns it on reconnect.
       setRemoteGrant(null);
-      pipe = await openPipe(shim, host.id, { setTimeout: (fn, ms) => window.setTimeout(fn, ms) }, setRemoteGrant);
+      setHostSendCaps(null);
+      pipe = await openPipe(shim, host.id, { setTimeout: (fn, ms) => window.setTimeout(fn, ms) }, setRemoteGrant, setHostSendCaps);
       const sock = connectRemote({ ...socketDeps(lost, remedy), port: 0, token: pipe.connected.token, remoteHost: pipe.remoteHost, WebSocket: pipe.WebSocket });
       return { sock, owned: false, started: false };
     },
@@ -105,8 +106,11 @@ async function boot() {
     // that need it say so.
     const remote = new URLSearchParams(window.location.search).get("remote");
     if (remote !== null) {
-      const { markRemote, setRemoteGrant } = await import("./ipc");
+      const { markRemote, setHostSendCaps, setRemoteGrant } = await import("./ipc");
       markRemote("Studio");
+      // `?sendcaps=<json>`: what this host's `ok` said `agent_send` takes. None: an older host.
+      const caps = new URLSearchParams(window.location.search).get("sendcaps");
+      if (caps) setHostSendCaps(JSON.parse(caps));
       if (remote === "noadmin") setRemoteGrant(["read", "write", "stream"]);
     }
     // `?slowengine[=ms]`: the app's boot over the mock — an engine door whose
