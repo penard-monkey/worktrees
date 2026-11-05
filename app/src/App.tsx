@@ -6950,6 +6950,8 @@ function App() {
         waiting: !intoChat && !!selected && (waitingBy ? !!waitingBy[provider]?.has(selected.path) : waitingPaths.has(selected.path)),
       });
       if (!plan || !agent) return null;
+      // Never fall through to the pane: a drop on the chat does not paste.
+      if (intoChat && !selected) return null;
       if (!plan.ok) return { kind: "reject", hint: plan.hint };
       const p = placeAt(item.repo, item.slug);
       if (!p) return null;

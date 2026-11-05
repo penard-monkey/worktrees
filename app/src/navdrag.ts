@@ -159,16 +159,24 @@ export function useNavDrag<T>(opts: {
     const cancel = () => end(false);
     // `stillDown`: on Escape the button is still held, so the gesture's click
     // arrives only with the eventual release — the swallower must wait for it.
-    const key = (e: KeyboardEvent) => { if (e.key === "Escape" && g.current?.live) end(false, true); };
+    // In the capture phase, and owning the key: the chat would stop a turn on it
+    // and xterm send it to the pty, each stopping it from ever reaching a bubble
+    // listener, so "cancel" acted on the agent and the drop still landed.
+    const key = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || !g.current?.live) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      end(false, true);
+    };
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
     window.addEventListener("pointercancel", cancel);
-    window.addEventListener("keydown", key);
+    window.addEventListener("keydown", key, true);
     return () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       window.removeEventListener("pointercancel", cancel);
-      window.removeEventListener("keydown", key);
+      window.removeEventListener("keydown", key, true);
     };
   }, [end]);
 

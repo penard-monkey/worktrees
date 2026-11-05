@@ -149,6 +149,25 @@ else ok("the whole chat is the drop target");
 const commit = app.slice(app.indexOf("const commitDrop ="), app.indexOf('invoke<string>("drop_reference"'));
 if (!/target\.intoPath[\s\S]*invoke<string>\("place_reference"[\s\S]*insertReference\(/.test(commit)) fail("a drop on the chat must ask place_reference and fill the draft, before drop_reference can paste");
 else ok("a drop on the chat asks place_reference and never reaches drop_reference");
+{
+  // The DECISION, not only its mechanism: with `intoPath: null` every drop on
+  // the chat falls through to `drop_reference` and pastes into the pane, the
+  // behaviour this replaces, and all the wiring above still reads right.
+  const rd = app.slice(app.indexOf("const termEl = el?.closest"), app.indexOf('const zone = el?.closest<HTMLElement>("[data-tier]")'));
+  if (!/const intoChat = termEl\.dataset\.dropInto === "chat"/.test(rd)) fail("resolveDrop must read data-drop-into off the element it hit-tested");
+  else if (!/intoPath: intoChat \? selected\?\.path/.test(rd)) fail("resolveDrop must set intoPath from that: without it a drop on the chat pastes into the pane");
+  else ok("a drop on the chat is told apart by what the pointer hit");
+}
+// Escape in a live drag cancels the drag and nothing else. In a bubble listener
+// it never arrives: the chat stops it to stop the turn, and xterm to send it to
+// the pty, so "cancel" interrupted the agent and the drop still landed.
+{
+  const nav = read("../src/navdrag.ts");
+  const key = nav.match(/const key = \(e: KeyboardEvent\) => \{[\s\S]*?\n    \};/)?.[0] ?? "";
+  if (!/window\.addEventListener\("keydown", key, true\)/.test(nav)) fail("the drag's Escape must listen in the capture phase");
+  else if (!/g\.current\?\.live/.test(key) || !/stopImmediatePropagation\(\)/.test(key)) fail("the drag's Escape must own the key, and only while a gesture is live");
+  else ok("a live drag owns Escape");
+}
 if (!/waiting: !intoChat &&/.test(app)) fail("a waiting agent must not refuse a drop into the draft: nothing reaches its pane");
 else ok("a waiting agent does not refuse a drop into the draft");
 

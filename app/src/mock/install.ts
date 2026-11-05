@@ -4446,6 +4446,7 @@ Phase 3: Frontend pane and mock harness
     // seen to stop), `unsupported` (pi's refusal); `old` is a host without
     // the row (`mockInvoke`'s head).
     case "agent_interrupt": {
+      mockInterrupts.push(String(args.slug));
       const path = mockPlacePath(args.repo, args.slug);
       const harness = mockHarnessAt(path);
       const mode = new URLSearchParams(location.search).get("agentinterrupt");
@@ -5237,6 +5238,8 @@ function mockReference(args: Record<string, unknown>): string {
  *  which the harness has no way to observe. */
 type MockDrop = { repo: string; slug: string; intoRepo: string; intoSlug: string; intoSession: string; provider: string; token: string };
 const mockDrops: MockDrop[] = [];
+/** Every `agent_interrupt` asked for: a stop is drive-class, so a test proves none happened. */
+const mockInterrupts: string[] = [];
 /** Every `copy_text` this session recorded, oldest first. */
 const mockCopies: string[] = [];
 /** Every `plan_prompt` this session recorded — the session each "Generate
@@ -5310,6 +5313,7 @@ const healthyConfigs: Record<string, MockCfg> = {};
   uiEvents: () => mockUiEvents.slice(),
   /** What the nav drag dropped into a session, newest last. */
   drops: () => mockDrops.slice(),
+  interrupts: () => mockInterrupts.slice(),
   copies: () => mockCopies.slice(),
   /** What "Generate plan" pasted, and into which session, newest last. */
   planPrompts: () => mockPlanPrompts.slice(),

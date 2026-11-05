@@ -1151,21 +1151,23 @@ function Composer(props: {
   // A place dropped on the chat (App's `commitDrop`): only here is the cursor
   // known. By id, because StrictMode runs this twice on a mount that finds one.
   const tookInsert = useRef(0);
-  const caret = useRef<number | null>(null);
+  const caret = useRef<{ at: number; draft: string } | null>(null);
   useLayoutEffect(() => {
     const el = field.current;
     if (!v.insert || !el || tookInsert.current === v.insert.id) return;
     tookInsert.current = v.insert.id;
     const next = referenceInDraft(text, el.selectionStart, el.selectionEnd, v.insert.text);
-    caret.current = next.caret;
+    caret.current = { at: next.caret, draft: next.draft };
     tookReference(target.path, next.draft);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- the insert is the trigger
   }, [v.insert]);
   useLayoutEffect(() => {
     const el = field.current;
-    if (!el || caret.current === null) return;
+    // Once the field holds the draft it is for: on a mount that takes an insert
+    // this runs first with the old one, which would clamp the caret.
+    if (!el || caret.current?.draft !== text) return;
     el.focus({ preventScroll: true });
-    el.setSelectionRange(caret.current, caret.current);
+    el.setSelectionRange(caret.current.at, caret.current.at);
     caret.current = null;
   }, [text, field]);
 

@@ -1,6 +1,7 @@
 // Headless drive of the mock harness in Chromium AND WebKit (the app's engine):
 // dropping a place from the nav onto the chat puts its reference in the draft,
-// at the cursor, and sends nothing. Real pointer input (Playwright's mouse goes
+// at the cursor, and sends nothing, and Escape in the drag cancels only the drag.
+// Real pointer input (Playwright's mouse goes
 // through hit-testing, a synthetic drag does not: AGENTS.md).
 //
 //   VITE_MOCK=1 vite --port 1457 --force      # in app/, the mock harness
@@ -29,8 +30,8 @@ async function open(browser, query = "") {
 }
 
 /** Press on a nav row, travel to `to` ({x, y}), and return what is under the
- *  pointer and what the page shows mid-drag; `drop` releases, else Escape. */
-async function drag(page, slug, to, drop = true) {
+ *  pointer and what the page shows mid-drag; `drop` false presses Escape first, with the button still held. */
+async function drag(page, slug, to, drop = true, keep = FIELD) {
   const box = await page.locator(`li.row[data-slug="${slug}"]`).first().boundingBox();
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.down();
@@ -48,6 +49,17 @@ async function drag(page, slug, to, drop = true) {
       why: document.querySelector(".drag-why")?.textContent ?? "",
     };
   }, to);
+  if (!drop) {
+    // A click on a nav row moves focus here and does NOT in WKWebView (AGENTS.md),
+    // so the app's composer keeps it through a drag. Put it back, or this passes.
+    await page.locator(keep).focus().catch(() => {});
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(80);
+    seen.afterEscape = await page.evaluate(() => ({
+      place: document.body.classList.contains("dragging-place"),
+      lit: document.body.classList.contains("drop-mention"),
+    }));
+  }
   await page.mouse.up();
   await page.waitForTimeout(150);
   return seen;
@@ -113,6 +125,33 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
       v = await value(page);
       check(/^place [^ ]+:[^ ]+ $/.test(v), `${name}: another project with reach on is an address, no lead-in`, JSON.stringify(v));
     }
+
+    // Escape cancels the drag and nothing else, with the composer focused (where
+    // every drop leaves it) and Claude busy, when it would otherwise stop the turn.
+    page = await open(browser, "&activity=1");
+    await page.locator('[data-testid="chat-stop"]').waitFor();
+    await page.locator(FIELD).fill("keep me");
+    await page.locator(FIELD).focus();
+    seen = await drag(page, "billing-refactor", scroll, false);
+    check(seen.lit, `${name}: the drag was live over the chat`, JSON.stringify(seen));
+    check(!seen.afterEscape.place && !seen.afterEscape.lit, `${name}: Escape ends the drag`, JSON.stringify(seen.afterEscape));
+    check(await page.evaluate(() => window.__mock.interrupts().length) === 0, `${name}: Escape in a drag does not stop the turn`);
+    check(await value(page) === "keep me", `${name}: the release after Escape drops nothing`, await value(page));
+    check(await page.locator('[data-testid="chat-stop"]').count() === 1, `${name}: the turn is still running`);
+    await page.locator(FIELD).focus();
+    await page.keyboard.press("Escape");
+    await page.waitForTimeout(120);
+    check(await page.evaluate(() => window.__mock.interrupts().length) === 1, `${name}: with no drag, Escape still stops the turn`);
+
+    // The terminal's twin: Escape is the drag's, and a key the pty never sees.
+    page = await open(browser);
+    await page.locator('[data-testid="agent-view-terminal"]').click();
+    await page.waitForTimeout(150);
+    const held = await page.evaluate(() => window.__mock.termInput?.().length ?? null);
+    seen = await drag(page, "billing-refactor", await centre(page, ".xterm-helper-textarea"), false, ".xterm-helper-textarea");
+    check(seen.lit && !seen.afterEscape.place, `${name}: over the terminal Escape ends the drag`, JSON.stringify(seen));
+    check(await pasted(page) === 0, `${name}: and the release pastes nothing`);
+    if (held !== null) check(await page.evaluate(() => window.__mock.termInput().length) === held, `${name}: and the pty never got the key`);
 
     // The terminal's own drop still pastes.
     page = await open(browser);
