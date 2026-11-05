@@ -582,6 +582,11 @@ pub enum DeviceEvent {
     /// seen from (`netclass::Class`: a tailnet device now on the LAN, say).
     /// Alert (§5.3).
     NewAddressClass { subject: Subject, from: String, to: String },
+    /// APNs said a token is dead and it was dropped, with its key
+    /// (`serve::push`). The words are from a closed list; never the token.
+    PushTokenDropped { subject: Subject, why: &'static str },
+    /// The console allowed this device security alerts, or stopped.
+    PushSecurityChanged { subject: Subject, allowed: bool },
 }
 
 impl DeviceEvent {

@@ -1,0 +1,34 @@
+{
+  "_about": "Each row's answers, in the order a phone meets them. `args` is the frame's args, `ok` the answer, `err` the refusal. A device with scope [\"/r/a\"] on a host whose registered roots are /r/a and /r/b. serve/push/tests.rs runs this file against the rows.",
+  "token": "a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90",
+  "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+  "key_id": "AQIDBAUGBwg=",
+  "steps": [
+    { "cmd": "push_prefs", "args": {}, "ok": { "registered": false, "input": true, "reminder": true, "security": null, "muted": [] } },
+    { "cmd": "push_test", "args": {}, "err": "not-registered" },
+    { "cmd": "push_register", "args": { "token": "$token", "env": "development", "topic": "com.brethash.worktrees.ios", "key": "$key", "key_id": "$key_id" }, "ok": { "registered": true } },
+    { "cmd": "push_prefs", "args": {}, "ok": { "registered": true, "input": true, "reminder": true, "security": null, "muted": [] } },
+    { "cmd": "push_prefs", "args": { "reminder": false }, "ok": { "registered": true, "input": true, "reminder": false, "security": null, "muted": [] } },
+    { "cmd": "push_prefs", "args": { "security": true }, "err": "denied" },
+    { "cmd": "push_prefs", "args": { "muted": [{ "repo": "/r/a" }, { "repo": "/r/a", "slug": "ui" }, { "repo": "/r/b" }, { "repo": "/not/registered" }] }, "ok": { "registered": true, "input": true, "reminder": false, "security": null, "muted": [{ "repo": "/r/a" }, { "repo": "/r/a", "slug": "ui" }] } },
+    { "console": "push_allow_security", "args": { "allowed": true } },
+    { "cmd": "push_prefs", "args": {}, "ok": { "registered": true, "input": true, "reminder": false, "security": true, "muted": [{ "repo": "/r/a" }, { "repo": "/r/a", "slug": "ui" }] } },
+    { "cmd": "push_prefs", "args": { "security": false, "muted": [] }, "ok": { "registered": true, "input": true, "reminder": false, "security": false, "muted": [] } },
+    { "console": "push_allow_security", "args": { "allowed": false } },
+    { "cmd": "push_prefs", "args": {}, "ok": { "registered": true, "input": true, "reminder": false, "security": null, "muted": [] } },
+    { "cmd": "push_unregister", "args": {}, "ok": { "registered": false } },
+    { "cmd": "push_prefs", "args": {}, "ok": { "registered": false, "input": true, "reminder": false, "security": null, "muted": [] } },
+    { "cmd": "push_unregister", "args": {}, "ok": { "registered": false } }
+  ],
+  "refused_args": [
+    { "cmd": "push_register", "args": { "token": "", "env": "development", "topic": "com.brethash.worktrees.ios", "key": "$key", "key_id": "$key_id" }, "err": "bad-args: token" },
+    { "cmd": "push_register", "args": { "token": "A1B2", "env": "development", "topic": "com.brethash.worktrees.ios", "key": "$key", "key_id": "$key_id" }, "err": "bad-args: token" },
+    { "cmd": "push_register", "args": { "token": "$token", "env": "staging", "topic": "com.brethash.worktrees.ios", "key": "$key", "key_id": "$key_id" }, "err": "bad-args: env" },
+    { "cmd": "push_register", "args": { "token": "$token", "env": "production", "topic": "no spaces\r\nx: y", "key": "$key", "key_id": "$key_id" }, "err": "bad-args: topic" },
+    { "cmd": "push_register", "args": { "token": "$token", "env": "production", "topic": "com.brethash.worktrees.ios", "key": "AAEC", "key_id": "$key_id" }, "err": "bad-args: key" },
+    { "cmd": "push_register", "args": { "token": "$token", "env": "production", "topic": "com.brethash.worktrees.ios", "key": "$key", "key_id": "AAEC" }, "err": "bad-args: key_id" },
+    { "cmd": "push_prefs", "args": { "input": "yes" }, "err": "bad-args: input" },
+    { "cmd": "push_prefs", "args": { "muted": "all" }, "err": "bad-args: muted" },
+    { "cmd": "push_prefs", "args": { "muted": [{ "repo": "/r/a", "project": "x" }] }, "err": "bad-args: muted" }
+  ]
+}

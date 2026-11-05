@@ -27,6 +27,9 @@ pub const USAGE: &str = "\
 usage: worktrees serve call <command> [json-args] [--config-dir DIR]
        worktrees serve remote on <address> [--iface IF] [--port N] [--advertise on|off] [--config-dir DIR]
        worktrees serve remote off | status | advertise on|off [--config-dir DIR]
+       worktrees serve push key-import <file.p8> --key-id ID --team-id ID [--config-dir DIR]
+       worktrees serve push key-remove | status | dry-run on|off [--config-dir DIR]
+       worktrees serve push security <device-id> on|off [--config-dir DIR]
        worktrees serve pair (--projects ROOT[,ROOT…] | --all-projects)
                             [--preset observe|operate|drive] [--caps CAP[,CAP…]] [--admin]
                             [--expiry 30d|never|<YYYY-MM-DDTHH:MM:SSZ>] [--config-dir DIR]
@@ -38,6 +41,13 @@ connection, the listener and any pairing window, at once. `remote advertise
 off` keeps this host from announcing itself over mDNS on the LAN — set it
 before `remote on` and nothing is ever announced; it is on unless you turn it
 off (§4.7), and it is remembered.
+
+`push` is notifications, at this console only. `key-import` takes the team's
+APNs key from a `.p8` you name here; nothing reads it back. `dry-run on` seals
+each push and logs that it did instead of calling Apple, until serve restarts.
+`security` lets one of the owner's devices hear this host's security alerts.
+Pushes need remote access on and serve running: an app-owned serve stops after
+the app quits, and then nothing is sent.
 
 `pair` opens a pairing window over remote access (turn it on first): it prints
 the QR and the link (`worktrees remote pair '<link>'` on the other machine
@@ -169,7 +179,7 @@ fn fail(msg: &str) -> i32 {
 pub fn dispatch(args: &[String]) -> Option<i32> {
     let (sub, rest) = args.split_first()?;
     let mut rest = rest.to_vec();
-    if rest.iter().any(|a| a == "-h" || a == "--help") && matches!(sub.as_str(), "call" | "remote" | "pair") {
+    if rest.iter().any(|a| a == "-h" || a == "--help") && matches!(sub.as_str(), "call" | "remote" | "pair" | "push") {
         println!("{USAGE}");
         return Some(0);
     }
@@ -177,6 +187,7 @@ pub fn dispatch(args: &[String]) -> Option<i32> {
         "call" => call(&mut rest),
         "remote" => remote(&mut rest),
         "pair" => pair(&mut rest),
+        "push" => push(&mut rest),
         _ => return None,
     };
     Some(run.unwrap_or_else(|e| {
@@ -197,6 +208,38 @@ fn call(args: &mut Vec<String>) -> Result<i32, String> {
     };
     let mut c = Console::connect(&dir)?;
     match c.call(&cmd, json_args) {
+        Ok(v) => {
+            println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+            Ok(0)
+        }
+        Err(e) => Ok(fail(&err_text(&e))),
+    }
+}
+
+fn push(args: &mut Vec<String>) -> Result<i32, String> {
+    let dir = config_dir(args)?;
+    let key_id = take(args, "--key-id")?;
+    let team_id = take(args, "--team-id")?;
+    let on_off = |w: &str| match w {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        _ => Err("usage: on or off".to_string()),
+    };
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    let (cmd, a) = match words.as_slice() {
+        ["key-import", p8] => {
+            let (Some(k), Some(t)) = (key_id, team_id) else { return Err("usage: worktrees serve push key-import <file.p8> --key-id ID --team-id ID".into()) };
+            let p8 = std::fs::canonicalize(p8).map_err(|e| format!("{p8}: {e}"))?;
+            ("push_key_import", json!({ "p8": p8, "key_id": k, "team_id": t }))
+        }
+        ["key-remove"] => ("push_key_remove", json!({})),
+        ["status"] => ("push_status", json!({})),
+        ["dry-run", w] => ("push_dry_run", json!({ "on": on_off(w)? })),
+        ["security", id, w] => ("push_allow_security", json!({ "id": id, "allowed": on_off(w)? })),
+        _ => return Err("usage: worktrees serve push key-import|key-remove|status|dry-run|security".into()),
+    };
+    let mut c = Console::connect(&dir)?;
+    match c.call(cmd, a) {
         Ok(v) => {
             println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
             Ok(0)

@@ -30,6 +30,7 @@ mod netwatch;
 mod pairing;
 mod policy;
 mod provenance;
+mod push;
 mod remote;
 mod resolve;
 mod scope;
@@ -296,6 +297,13 @@ pub fn start_with(config_dir: PathBuf, port: u16, allow_origin: Vec<String>, lim
     let advertiser = remote::platform_advertiser();
     let r = remote::RemoteAccess::new(config_dir, running.ctx.clone(), running.clients.clone(), devices.clone(), pairing, audit, gate, advertiser, read);
     running.clients.set_remote(&r);
+    // Notifications: after the registry's boot cross-check, whose verdict the
+    // store's sweep reads, and before any device can connect.
+    let store = push::store::Store::open(&running.ctx.config_dir);
+    let deps = push::live_deps(Arc::downgrade(&running.clients), running.listener.audit());
+    let p = push::Push::new(Some(running.ctx.config_dir.clone()), store, devices.clone(), deps, Some(tokio::runtime::Handle::current()));
+    p.spawn();
+    running.clients.set_push(p);
     running.devices = Some(devices);
     running.remote = Some(r);
     Ok(running)
@@ -559,6 +567,9 @@ pub fn cmd_serve(args: &[String]) -> i32 {
         // `last_seen` is written at most every ten minutes, and at exit (§2.5).
         if let Some(devices) = &running.devices {
             devices.flush_seen(worktrees_core::sysclock::now_epoch());
+        }
+        if let Some(p) = running.clients.push() {
+            p.shutdown();
         }
         if let Some(r) = &running.remote {
             r.shutdown();

@@ -256,6 +256,12 @@ impl RemoteAccess {
         me
     }
 
+    /// The opt-in stands, whether the listener is up or paused. Off is the kill
+    /// switch, and the push sender's word too; a pause is the network's.
+    pub fn is_on(&self) -> bool {
+        self.st.lock().unwrap().saved.as_ref().is_some_and(|s| s.on)
+    }
+
     /// §5.1, the device half: may a device's non-read request be served
     /// now? `false` while the audit log cannot take its record. Said once
     /// per episode.
@@ -528,6 +534,11 @@ impl RemoteAccess {
         let unreadable = st.unreadable.is_some();
         *st = State { saved: kept.clone(), ..State::default() };
         drop(st);
+        // Nothing leaves for a device from here on: the sender's next look
+        // finds `is_on` false, and this stops what is in the air now.
+        if let Some(p) = self.deps.clients.push() {
+            p.kill();
+        }
         match (&kept, unreadable) {
             (Some(s), false) => file::write(&self.dir, s)?,
             _ => file::remove(&self.dir)?,

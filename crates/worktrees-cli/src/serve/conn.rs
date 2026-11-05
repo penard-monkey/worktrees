@@ -277,6 +277,8 @@ pub struct Clients {
     /// Remote access, for the console's rows (`remote_*`). Weak: remote
     /// access holds this client set, not the other way round.
     remote: std::sync::OnceLock<std::sync::Weak<RemoteAccess>>,
+    /// Notifications, one service per serve (`serve::push`).
+    push: std::sync::OnceLock<Arc<super::push::Push>>,
 }
 
 impl Default for Clients {
@@ -306,6 +308,7 @@ impl Clients {
             ready: Default::default(),
             next_id: AtomicU64::new(1),
             remote: Default::default(),
+            push: Default::default(),
         }
     }
     /// Grants from the device registry itself, as serve runs.
@@ -323,6 +326,7 @@ impl Clients {
             ready: Default::default(),
             next_id: AtomicU64::new(1),
             remote: Default::default(),
+            push: Default::default(),
         }
     }
     /// The same set, spending from `budgets` instead of `budget::BUDGETS`.
@@ -339,6 +343,13 @@ impl Clients {
     }
     pub fn remote(&self) -> Option<Arc<RemoteAccess>> {
         self.remote.get().and_then(std::sync::Weak::upgrade)
+    }
+    /// Notifications, once serve has made them (`mod::start_with`).
+    pub fn set_push(&self, p: Arc<super::push::Push>) {
+        let _ = self.push.set(p);
+    }
+    pub fn push(&self) -> Option<Arc<super::push::Push>> {
+        self.push.get().cloned()
     }
     /// A fresh id for a connection on either listener.
     pub fn next_id(&self) -> u64 {
@@ -427,6 +438,13 @@ impl Clients {
     }
     /// The registered roots an event's paths are attributed by: the world's,
     /// or the registry file's.
+    pub(super) fn event_roots(&self) -> Vec<String> {
+        self.roots()
+    }
+    /// The last payload of a `scope::SNAPSHOT` event, unprojected.
+    pub(super) fn last_event(&self, event: &str) -> Option<Value> {
+        self.last.lock().unwrap().get(event).cloned()
+    }
     fn roots(&self) -> Vec<String> {
         match &self.world {
             Some(w) => w.roots(),
@@ -1301,6 +1319,7 @@ pub(super) async fn serve_caller<S>(
         pairing: clients.pairing(),
         flights: clients.flights.clone(),
         remote: clients.remote(),
+        push: clients.push(),
     });
     frames.reconciled().store(call.registry.generation(), Ordering::SeqCst);
     let kill = clients.join(id, outbox.clone(), call.clone());

@@ -4586,6 +4586,22 @@ Phase 3: Frontend pane and mock harness
       mockAccess.advertise = !!args.on;
       remoteChanged();
       return mockAccessStatus();
+    // Notifications. A device's own rows have no record to act on at this
+    // console, as serve answers; the console's say there is no key.
+    case "push_register":
+    case "push_unregister":
+    case "push_prefs":
+    case "push_test":
+      throw "the console has no device record; these rows are a paired device's";
+    case "push_key_import":
+    case "push_key_remove":
+    case "push_status":
+    case "push_dry_run":
+      consoleOnly(cmd);
+      return { configured: false, dry_run: false, store_readable: true, devices: [] };
+    case "push_allow_security":
+      consoleOnly(cmd);
+      return false;
     case "devices_list":
       consoleOnly("devices_list");
       return clone(mockDevices);

@@ -1,0 +1,53 @@
+{
+  "_about": "What each kind of push looks like, on a host named Studio Mac: `plaintext` is what the phone opens, exactly, `aps` is what Apple sees, `headers` the APNs headers other than authorization and the token. serve/push/tests.rs drives the real sender to each of these. `expires_in` is apns-expiration minus the send's time. `collapse` says whether apns-collapse-id is present.",
+  "input": {
+    "plaintext": { "v": 1, "kind": "input", "host": "Studio Mac", "repo": "/r/a", "slug": "ui", "project": "a", "place": "ui", "agent": "Claude", "waited_s": 30 },
+    "aps": { "alert": { "title": "Worktrees", "body": "A session needs input" }, "mutable-content": 1, "interruption-level": "time-sensitive", "badge": 1 },
+    "headers": { "apns-push-type": "alert", "apns-priority": "10" }, "expires_in": 3600, "collapse": true
+  },
+  "reminder": {
+    "plaintext": { "v": 1, "kind": "reminder", "host": "Studio Mac", "repo": "/r/a", "slug": "ui", "project": "a", "place": "ui", "agent": "Claude", "waited_s": 900 },
+    "aps": { "alert": { "title": "Worktrees", "body": "A session is still waiting for input" }, "mutable-content": 1, "interruption-level": "time-sensitive", "badge": 1 },
+    "headers": { "apns-push-type": "alert", "apns-priority": "10" }, "expires_in": 3600, "collapse": true
+  },
+  "several": {
+    "plaintext": { "v": 1, "kind": "several", "host": "Studio Mac", "places": [ { "project": "a", "place": "p1" }, { "project": "a", "place": "p2" } ], "waited_s": 30 },
+    "aps": { "alert": { "title": "Worktrees", "body": "A session needs input" }, "mutable-content": 1, "interruption-level": "time-sensitive", "badge": 2 },
+    "headers": { "apns-push-type": "alert", "apns-priority": "10" }, "expires_in": 3600, "collapse": false
+  },
+  "several_with_count": {
+    "plaintext": { "v": 1, "kind": "several", "host": "Studio Mac", "places": [ { "project": "a", "place": "p1" }, { "project": "a", "place": "p2" }, { "project": "a", "place": "p3" }, { "project": "a", "place": "p4" }, { "project": "a", "place": "p5" } ], "count": 7, "waited_s": 30 },
+    "aps": { "alert": { "title": "Worktrees", "body": "A session needs input" }, "mutable-content": 1, "interruption-level": "time-sensitive", "badge": 7 },
+    "headers": { "apns-push-type": "alert", "apns-priority": "10" }, "expires_in": 3600, "collapse": false
+  },
+  "security_enrolled": {
+    "plaintext": { "v": 1, "kind": "security", "host": "Studio Mac", "what": "enrolled", "device": "iPad" },
+    "aps": { "alert": { "title": "Worktrees", "body": "Security alert from your host" }, "mutable-content": 1, "interruption-level": "active", "badge": 0 },
+    "headers": { "apns-push-type": "alert", "apns-priority": "10" }, "expires_in": 86400, "collapse": false
+  },
+  "security_disabled": {
+    "plaintext": { "v": 1, "kind": "security", "host": "Studio Mac", "what": "disabled", "device": "iPad", "reason": "It went unused for too long." },
+    "aps": { "alert": { "title": "Worktrees", "body": "Security alert from your host" }, "mutable-content": 1, "interruption-level": "active", "badge": 0 },
+    "headers": { "apns-push-type": "alert", "apns-priority": "10" }, "expires_in": 86400, "collapse": false
+  },
+  "security_refused": {
+    "plaintext": { "v": 1, "kind": "security", "host": "Studio Mac", "what": "refused", "device": "iPad", "reason": "iPad was revoked and tried to connect." },
+    "aps": { "alert": { "title": "Worktrees", "body": "Security alert from your host" }, "mutable-content": 1, "interruption-level": "active", "badge": 0 },
+    "headers": { "apns-push-type": "alert", "apns-priority": "10" }, "expires_in": 86400, "collapse": false
+  },
+  "security_address": {
+    "plaintext": { "v": 1, "kind": "security", "host": "Studio Mac", "what": "address", "device": "iPad", "reason": "iPad connected from a new kind of network." },
+    "aps": { "alert": { "title": "Worktrees", "body": "Security alert from your host" }, "mutable-content": 1, "interruption-level": "active", "badge": 0 },
+    "headers": { "apns-push-type": "alert", "apns-priority": "10" }, "expires_in": 86400, "collapse": false
+  },
+  "test": {
+    "plaintext": { "v": 1, "kind": "test", "host": "Studio Mac" },
+    "aps": { "alert": { "title": "Worktrees", "body": "Notifications are working" }, "mutable-content": 1, "interruption-level": "active", "badge": 0 },
+    "headers": { "apns-push-type": "alert", "apns-priority": "10" }, "expires_in": 3600, "collapse": false
+  },
+  "badge": {
+    "plaintext": null,
+    "aps": { "badge": 0 },
+    "headers": { "apns-push-type": "alert", "apns-priority": "5" }, "expires_in": 3600, "collapse": false
+  }
+}

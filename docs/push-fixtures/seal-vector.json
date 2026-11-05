@@ -1,0 +1,20 @@
+{
+  "_about": "The host and the phone both test against this. Made with node:crypto, independently of either implementation.",
+  "key_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "key_id_hex": "0102030405060708",
+  "nonce_hex": "000102030405060708090a0b",
+  "aad_hex": "776f726b74726565732d707573682d76310102030405060708",
+  "plaintext": "{\"v\":1,\"kind\":\"input\",\"host\":\"Studio Mac\",\"repo\":\"/Users/me/work/worktrees\",\"slug\":\"build-nav\",\"project\":\"worktrees\",\"place\":\"build-nav\",\"agent\":\"Claude\",\"waited_s\":31}",
+  "ciphertext_and_tag_hex": "f2d97e2213268962dcea5197ba272c0aa700c79373588fd189e45be74fe2f54899e4459cc653d0fb151e54aa00e4e00144a686218e4dcae83dd5bc28e720ecbd560fd3bf8e605e8ca1656f903a0fb084bdfc7d100d1f99526a7a9e6fae5f2e9d3dac039992ba53d68b7984d8d0fac3f28c0a251aa57f30942e0e51fd431ddd33c80aa790c752a94e65311e1d49521f188e53c41e6a1aa83b10cd8546c572d45c5be6f2ca8777a59bd10fe6f703ff25ee5c993ec9e00cdfdf",
+  "wt": {
+    "v": 1,
+    "k": "AQIDBAUGBwg=",
+    "n": "AAECAwQFBgcICQoL",
+    "c": "8tl+IhMmiWLc6lGXuicsCqcAx5NzWI/RieRb50/i9UiZ5EWcxlPQ+xUeVKoA5OABRKaGIY5Nyug91bwo5yDsvVYP07+OYF6MoWVvkDoPsIS9/H0QDR+ZUmp6nm+uXy6dPawDmZK6U9aLeYTY0PrD8owKJRqlfzCULg5R/UMd3TPICqeQx1KpTmUxHh1JUh8YjlPEHmoaqDsQzYVGxXLUXFvm8sqHd6Wb0Q/m9wP/Je5cmT7J4Azf3w=="
+  },
+  "collapse": {
+    "repo": "/Users/me/work/worktrees",
+    "slug": "build-nav",
+    "id": "2a53e651a16eb11807cd24e7005165ff"
+  }
+}

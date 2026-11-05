@@ -2045,6 +2045,7 @@ mod devices {
             pairing: e.clients.pairing(),
             flights: Default::default(),
             remote: None,
+            push: None,
         };
         assert_eq!(dispatch::call(&stale, "get_changelog", &Args(Default::default())), Err(json!("denied")));
         // And its next handshake.
@@ -2122,6 +2123,7 @@ mod devices {
             pairing: e.clients.pairing(),
             flights: Default::default(),
             remote: None,
+            push: None,
         };
         let enable = || Args(json!({"id": phone.id.as_str()}).as_object().cloned().unwrap());
         assert_eq!(dispatch::call(&stale, "get_changelog", &Args(Default::default())), Err(json!("denied")));
@@ -2223,6 +2225,7 @@ mod devices {
             pairing: e.clients.pairing(),
             flights: Default::default(),
             remote: None,
+            push: None,
         });
         call.frames.note_term(901, "sa".into());
         call.frames.note_term(902, "sb".into());
@@ -2283,6 +2286,7 @@ mod devices {
             pairing: e.clients.pairing(),
             flights: Default::default(),
             remote: None,
+            push: None,
         };
         call.frames.reconciled().store(1, Ordering::SeqCst);
         call.frames.note_term(903, "sa".into());
@@ -2319,6 +2323,7 @@ mod devices {
             pairing: e.clients.pairing(),
             flights: Default::default(),
             remote: None,
+            push: None,
         });
         call.frames.note_shell(ShellHold { repo: a.clone(), slug: "(main)".into(), index: 0, gen: 7 });
         let _kill = e.clients.join(1, out, call.clone());
@@ -2379,6 +2384,7 @@ mod devices {
             pairing: e.clients.pairing(),
             flights: Default::default(),
             remote: None,
+            push: None,
         };
         frames.reconciled().store(1, Ordering::SeqCst);
         // No `cols`: the body fails on its arguments before it reaches tmux.
@@ -3439,6 +3445,7 @@ mod devices {
             pairing: e.clients.pairing(),
             flights: Default::default(),
             remote: None,
+            push: None,
         };
         let write = |cmd: &str, extra: Value| {
             let mut args = json!({"repo": a, "slug": "(main)", "index": 0, "data": [104, 105], "id": 905});
@@ -3572,6 +3579,7 @@ mod devices {
             pairing: e.clients.pairing(),
             flights: Default::default(),
             remote: None,
+            push: None,
         });
         let grant = authz::effective(&*e.reg, &call.caller);
         let mut args = Args(json!({"id": "job-1", "parent": "/x", "url": "https://example.com/r.git"}).as_object().cloned().unwrap());

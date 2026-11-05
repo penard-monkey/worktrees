@@ -109,3 +109,19 @@ qrcode = { version = "0.14", default-features = false }
 # one implementation for serve and its devices, in the transport crate the
 # desktop shim and the iOS app dial through. `worktrees remote …` is its CLI.
 worktrees-remote = { workspace = true }
+#
+# ── notifications: serve's one outbound connection (`serve/push/`) ──────────
+# HTTP/2 to the two APNs hosts and nowhere else. `h2` directly, with no HTTP
+# client above it, so there is nothing to follow a redirect, read a proxy from
+# the environment or resolve another host: the request names one URI and a 3xx
+# is a status. It is also the test fixture's server. hyper's own `http2`
+# feature would add the same crate plus features the docs server must not grow.
+# New in the lock: h2 0.4.20 alone, measured by the lock's `name =` lines before
+# and after (22 lines); everything under it (atomic-waker, fnv, indexmap, slab,
+# tokio-util, tracing) was already there. `http` and `bytes` are new edges to
+# crates already in the lock. `cargo deny` passes. Apple's two roots are embedded
+# (`serve/push/roots/`) rather than `webpki-roots`, which would add a crate and a
+# license and trust far more than APNs needs.
+h2 = "0.4"
+http = "1"
+bytes = "1"

@@ -80,15 +80,19 @@ pub fn challenge_frame(sn: &str) -> String {
 /// `{id, principal, name, caps, projects, expiry, stepup_required}` — so the
 /// device can show its own grant and expiry (Phase 2 §4.5, as amended by
 /// (main) 2026-10-22: the remote listener runs handshake v1 unchanged, and
-/// this is its `ok`), and `proto` / `proto_min`, the protocol this host
-/// speaks and the oldest a client may (iOS Q10, `worktrees_remote::protocol`).
-/// Loopback's has none of the three: its client is this build.
+/// this is its `ok`), `proto` / `proto_min`, the protocol this host speaks and
+/// the oldest a client may (iOS Q10, `worktrees_remote::protocol`), and `push`,
+/// that it has the notification rows. Loopback's has none of these: its client
+/// is this build.
 pub fn auth_reply(proof: &str, device: Option<&Value>) -> String {
     let mut v = json!({ "ok": true, "version": env!("CARGO_PKG_VERSION"), "proof": proof });
     if let Some(d) = device {
         v["device"] = d.clone();
         v["proto"] = json!(worktrees_remote::protocol::PROTO);
         v["proto_min"] = json!(worktrees_remote::protocol::PROTO_MIN);
+        // This host has the push rows. A new row never bumps `proto`; the
+        // flag lets a client know without asking. Absent on an older host.
+        v["push"] = json!(true);
     }
     v.to_string()
 }
@@ -746,7 +750,7 @@ mod tests {
         let v: Value = serde_json::from_str(&auth_reply("p", Some(&d))).unwrap();
         assert_eq!(
             v,
-            json!({ "ok": true, "version": env!("CARGO_PKG_VERSION"), "proof": "p", "device": d, "proto": 1, "proto_min": 1 }),
+            json!({ "ok": true, "version": env!("CARGO_PKG_VERSION"), "proof": "p", "device": d, "proto": 1, "proto_min": 1, "push": true }),
             "a remote session's names its device and the protocol range this host serves"
         );
         let c: Value = serde_json::from_str(&challenge_frame("s")).unwrap();
