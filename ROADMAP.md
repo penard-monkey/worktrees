@@ -5,6 +5,29 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (the repo's `/close-out` skill, `.claude/skills/close-out`;
 this repo's settings in `.claude/close-out.md`).
 
+- **A stop's words after an Enter at the terminal (#613).** Three related cases, all
+  rare, none mixing text into a send.
+  - A message of identical lines plus Enter at the terminal reads as `Behind`, not
+    `Lost`, because the call in the emptied box is also a prefix of the message. A
+    mid-feed stop then says "could not be read". Before the last call it ends
+    `Unconfirmed`, stamped and audited `ok` (`delivered: false`), though the terminal
+    really submitted the start. A `whole` box that holds a stable strict prefix could
+    answer `Lost`. The input is contrived, so low priority.
+  - Enter at the terminal after the last paste also ends `Unconfirmed`, stamped, audit
+    `ok`, though the whole message went. The person may resend it.
+  - "Stayed empty" is the wording on a stop that can follow a submitted fragment (one
+    run recorded 3247 bytes). The words allow for it but read weaker than the facts.
+  _From: [2026-11-05 chat-composer-refs-lines](docs/sessions/2026-11-05-chat-composer-refs-lines/summary.md), review-613-3_
+- **What #613 did not prove.** A resize mid-send: the size is read once at the start,
+  and it is a WIDTH shrink that can bury typed text (a height shrink turns into a
+  `Lost` stop). The fake pane cannot express a resize, a torn draw or a moved cursor.
+  Codex's live run predates #613's last two review rounds, which do not touch its
+  path; Codex has no per-call or before-Enter content proof either way.
+  _From: [2026-11-05 chat-composer-refs-lines](docs/sessions/2026-11-05-chat-composer-refs-lines/summary.md)_
+- **Check #611 and #613 in the real app.** Neither has been driven there; each PR's
+  body has the steps for David. Re-run `docs/claude-paste-manual-checks.md` when
+  Claude is upgraded, as the thresholds are undocumented.
+  _From: [2026-11-05 chat-composer-refs-lines](docs/sessions/2026-11-05-chat-composer-refs-lines/summary.md)_
 - **Remove this lane's two leftover volumes once Podman is back.** The engine behind
   `docker` broke when the disk filled, so they could not be removed. `(main)` runs
   this once the machine is repaired:
@@ -27,7 +50,9 @@ this repo's settings in `.claude/close-out.md`).
   which holds a gate slot, while CI passes them. Cause not investigated. It may also
   explain the local `serve::remote` hang recorded from chat-full-command below. The
   dial in those tests has no timeout, so a bound would turn the hang into a failure.
-  _From: 2026-11-04, push-notifications-host_
+  Seen again in #611 and #613 (a handshake timeout, os error 35), where CI was the
+  only witness for those tests.
+  _From: 2026-11-04, push-notifications-host; 2026-11-05, chat-composer-refs-lines_
 - **`push_test`'s words in the remote-off race.** A `push_test` that meets the kill
   switch answers `unavailable: the host could not reach Apple. Try again later.`
   That is slightly wrong: Apple was not the reason. It can only arise in that race,
@@ -98,8 +123,8 @@ this repo's settings in `.claude/close-out.md`).
   every such lane sees two failures and has to re-run them under
   `env -u WORKTREES_VIEWER_JS`. Fix one of three ways: unset it in the gate
   commands, have the tests clear it for themselves, or stop exporting it into
-  lanes.
-  _From: [2026-10-22 usage-strip-fixes](docs/sessions/2026-10-22-usage-strip-fixes/summary.md)_
+  lanes. Hit again in #611's gates.
+  _From: [2026-10-22 usage-strip-fixes](docs/sessions/2026-10-22-usage-strip-fixes/summary.md); 2026-11-05, chat-composer-refs-lines_
 - **Check #542's fix in the real app.** The false "unavailable" was a timing
   bug that the mock's instant replies cannot reproduce. Return to the window
   with Codex and kimi enabled and confirm the strip never says "unavailable"
