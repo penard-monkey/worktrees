@@ -1894,14 +1894,251 @@ pub fn composer_empty(harness: &str, screen: &str) -> Option<bool> {
     }
 }
 
-/// Press Enter on text already PASTED into Claude's composer, and confirm it:
+/// The most bytes of one paste into Claude. Claude 2.1.318 collapses a paste
+/// over 800 to 850 characters, or with more than two line breaks, into `[Pasted
+/// text #N +M lines]`, and records it as `<pasted_content>`: the agent reads the
+/// person's own words as pasted material. Undocumented, so this keeps a margin
+/// and `docs/claude-paste-manual-checks.md` re-measures it on an upgrade.
+const CHUNK_BYTES: usize = 512;
+/// One tmux call is at most this many chunks, and fewer in a short or narrow
+/// pane ([`Pace::of`]).
+const CHUNKS_PER_CALL: usize = 4;
+/// How long Claude may take to draw one call before the send stops.
+const DRAW_MS: u64 = 2_000;
+/// How long pasting may hold the place's lock: a 16 KB message of one-character
+/// lines is thousands of calls, and is told it took too long, never half sent.
+const FEED_MAX_MS: u64 = 20_000;
+const FEED_POLL_MS: u64 = 10;
+/// How long a box that is not the message must hold still to count as someone's
+/// text. A capture can land inside Claude's redraw and see old and new rows torn
+/// together (2.1.318: 5 of 15 sends stopped on nothing else, 0.1 to 0.3 s in).
+/// Typed words stay; a torn frame is gone by the next draw.
+const FOREIGN_MS: u64 = 200;
+/// Below this many rows Claude's box cannot be read while it holds a tall draft
+/// (its top edge goes: measured on 2.1.318 at 11 rows), and at 10 it collapses
+/// even a single line break, so chunks would leave one placeholder per line among
+/// the text. A message sent whole there still arrives, as pasted material, and
+/// [`composer_holds`] can read the one placeholder it becomes.
+const CHUNK_MIN_ROWS: usize = 12;
+
+/// How much one tmux call may add, for a pane of `rows` by `cols`, or `None` to
+/// send the message whole. What a call adds must stay inside the box's scrolling
+/// window until the next look, or text someone typed between calls is buried
+/// above it. That window is `rows / 2 - 5` rows (measured on 2.1.318: 3 at 12 to
+/// 16, 7 at 24, 15 at 40, 25 at 60), and the typed text takes a row of its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Pace {
+    chunks: usize,
+    bytes: usize,
+}
+
+impl Pace {
+    const DEFAULT: Pace = Pace { chunks: CHUNKS_PER_CALL, bytes: CHUNK_BYTES };
+
+    pub fn of(size: Option<(usize, usize)>) -> Option<Pace> {
+        let Some((rows, cols)) = size else { return Some(Pace::DEFAULT) };
+        if rows < CHUNK_MIN_ROWS {
+            return None;
+        }
+        let room = (rows / 2).saturating_sub(5).saturating_sub(1).max(1);
+        // Claude's own gutter takes two columns on each side of a row.
+        let bytes = (room * cols.saturating_sub(4).max(1)).clamp(16, CHUNK_BYTES);
+        Some(Pace { chunks: room.min(CHUNKS_PER_CALL), bytes })
+    }
+}
+
+/// `text` as pastes Claude keeps literal: at most one line break each, leading
+/// its chunk, and at most `max` bytes, cut on a character boundary.
+fn claude_chunks(text: &str, max: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    for (i, line) in text.split('\n').enumerate() {
+        let mut chunk = String::from(if i > 0 { "\n" } else { "" });
+        for c in line.chars() {
+            if chunk.len() + c.len_utf8() > max && !chunk.is_empty() {
+                out.push(std::mem::take(&mut chunk));
+            }
+            chunk.push(c);
+        }
+        if !chunk.is_empty() {
+            out.push(chunk);
+        }
+    }
+    out
+}
+
+/// Why pasting a message stopped part way.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FeedStop {
+    /// A prompt came up: another paste could land in its text field.
+    Prompt,
+    /// The screen could not be read, or never showed what was pasted.
+    Unreadable,
+    /// The box holds something other than what was pasted: someone typed.
+    Foreign,
+    /// [`FEED_MAX_MS`] ran out.
+    Slow,
+    Paste(String),
+}
+
+/// [`claude_chunks`], in tmux calls.
+fn claude_batches(text: &str, pace: Pace) -> Vec<Vec<String>> {
+    let mut out: Vec<Vec<String>> = Vec::new();
+    let (mut n, mut size) = (0, 0);
+    for c in claude_chunks(text, pace.bytes) {
+        if out.is_empty() || n == pace.chunks || size + c.len() > pace.bytes {
+            out.push(Vec::new());
+            (n, size) = (0, 0);
+        }
+        (n, size) = (n + 1, size + c.len());
+        out.last_mut().unwrap().push(c);
+    }
+    out
+}
+
+/// What the box shows against what went in, both with whitespace gone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Drew {
+    /// It ends in what went in.
+    Drawn,
+    /// A part of what went in: a draw behind.
+    Behind,
+    /// Something else: someone typed.
+    Other,
+}
+
+/// Past about 10,000 characters Claude folds the MIDDLE of a draft into `[...Truncated
+/// text #5 +90 lines...]`, and submits it whole (measured on 2.1.318: 16 KB
+/// recorded byte for byte). What it folded was looked at before it folded.
+fn drew(went_in: &str, held: &str) -> Drew {
+    const OPEN: &str = "[...Truncatedtext#";
+    const CLOSE: &str = "...]";
+    let (mut head, mut tail) = (held, held);
+    if let Some(at) = held.find(OPEN) {
+        if let Some(end) = held.rfind(CLOSE).filter(|e| *e > at) {
+            (head, tail) = (&held[..at], &held[end + CLOSE.len()..]);
+        }
+    }
+    if !went_in.contains(head) || !went_in.contains(tail) {
+        Drew::Other
+    } else if went_in.ends_with(tail) {
+        Drew::Drawn
+    } else {
+        Drew::Behind
+    }
+}
+
+fn bare(text: &str) -> String {
+    text.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// Paste `text` into Claude's composer, one tmux call at a time. Before each,
+/// the screen must show no prompt and the box must end in exactly what was
+/// pasted so far, drawn: the only way to catch someone typing at the terminal
+/// in a tall draft, because the box scrolls and the proof before Enter
+/// ([`composer_holds`]) sees only its last rows. On a stop nothing more is
+/// pasted, and the answer is how much was: the caller must say so, because the
+/// composer now holds part of the message. `size` is the pane's rows and
+/// columns, if known. Never presses Enter.
+pub fn feed_claude(
+    text: &str,
+    size: Option<(usize, usize)>,
+    mut paste: impl FnMut(&[String]) -> Result<(), String>,
+    mut capture: impl FnMut() -> Option<String>,
+    now: impl Fn() -> u64,
+    mut sleep: impl FnMut(u64),
+) -> Result<(), (usize, FeedStop)> {
+    let batches = match Pace::of(size) {
+        Some(pace) => claude_batches(text, pace),
+        None => vec![vec![text.to_string()]],
+    };
+    let start = now();
+    let mut pasted = 0;
+    let mut so_far = String::new();
+    for batch in batches {
+        let asked = now();
+        let mut other: Option<(String, u64)> = None;
+        loop {
+            let time = now();
+            if time.saturating_sub(start) >= FEED_MAX_MS {
+                return Err((pasted, FeedStop::Slow));
+            }
+            let Some(screen) = capture() else { return Err((pasted, FeedStop::Unreadable)) };
+            if claude(&screen).is_some() {
+                return Err((pasted, FeedStop::Prompt));
+            }
+            if let Some(held) = agent::composer_text(&screen) {
+                // Empty only before the first paste; collapsed, it says nothing
+                // of the words but nothing was typed around it.
+                if so_far.is_empty() && held.is_empty() || !held.is_empty() && pasted > 0 && only_placeholders(&held) {
+                    break;
+                }
+                match drew(&so_far, &held) {
+                    Drew::Drawn if !held.is_empty() => break,
+                    Drew::Other => match &other {
+                        Some((same, since)) if *same == held => {
+                            if time.saturating_sub(*since) >= FOREIGN_MS {
+                                return Err((pasted, FeedStop::Foreign));
+                            }
+                        }
+                        _ => other = Some((held, time)),
+                    },
+                    _ => other = None,
+                }
+            }
+            if time.saturating_sub(asked) >= DRAW_MS {
+                return Err((pasted, FeedStop::Unreadable));
+            }
+            sleep(FEED_POLL_MS);
+        }
+        paste(&batch).map_err(|e| (pasted, FeedStop::Paste(e)))?;
+        pasted += batch.iter().map(String::len).sum::<usize>();
+        so_far.extend(batch.iter().map(|c| bare(c)));
+    }
+    Ok(())
+}
+
+/// Whether Claude's composer on `screen` holds `text` and nothing else: the
+/// proof before Enter, or someone typing at the terminal while the message goes
+/// in gets a mix submitted. Its rows are the END of the message (a tall draft
+/// scrolls), or, where Claude collapsed it, only placeholders, which say nothing
+/// of the words but do show nothing was typed around them.
+pub fn composer_holds(screen: &str, text: &str) -> bool {
+    let Some(held) = agent::composer_text(screen) else { return false };
+    if held.is_empty() {
+        return false;
+    }
+    drew(&bare(text), &held) == Drew::Drawn || only_placeholders(&held)
+}
+
+/// `[Pastedtext#12]` or `[Pastedtext#12+3lines]`, one or more, whitespace gone.
+fn only_placeholders(held: &str) -> bool {
+    let mut rest = held;
+    while !rest.is_empty() {
+        let Some(after) = rest.strip_prefix("[Pastedtext#") else { return false };
+        let Some((inner, tail)) = after.split_once(']') else { return false };
+        let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        let ok = match inner.split_once('+') {
+            Some((n, lines)) => digits(n) && lines.strip_suffix("lines").is_some_and(digits),
+            None => digits(inner),
+        };
+        if !ok {
+            return false;
+        }
+        rest = tail;
+    }
+    true
+}
+
+/// Press Enter on `text`, already PASTED into Claude's composer, and confirm it:
 /// `capture` must be a `capture-pane -e` screen. Enter waits for the draft to
-/// be there and to have stopped changing, and the text counts as taken once
+/// be there and to have stopped changing, and for it to be `text`
+/// ([`composer_holds`]). The text counts as taken once
 /// the box is back and empty — submitted at once, or queued behind a running
 /// turn, which Claude shows the same way. A modal that opens meanwhile stops
 /// everything: an Enter there would answer it. The clock and I/O seams are
 /// `harness::submit_codex`'s, with the same bounds.
 pub fn submit_claude(
+    text: &str,
     mut capture: impl FnMut() -> Option<String>,
     mut enter: impl FnMut() -> Result<(), String>,
     now: impl Fn() -> u64,
@@ -1932,6 +2169,9 @@ pub fn submit_claude(
                 } else if time.saturating_sub(stable_since) >= SEND_STABLE_MS
                     && last_enter.is_none_or(|at| time.saturating_sub(at) >= SEND_VERIFY_MS)
                 {
+                    if !composer_holds(&screen, text) {
+                        return SendOutcome::Foreign;
+                    }
                     if tries == SEND_ENTER_TRIES {
                         return SendOutcome::Unconfirmed;
                     }
@@ -1976,6 +2216,8 @@ pub enum TurnShown {
 
 /// Claude's busy hint, on its status row (2.1.314, 2.1.316).
 const CLAUDE_BUSY_HINT: &str = "esc to interrupt";
+/// What replaces Claude's status row after a collapsed paste.
+const CLAUDE_PASTE_HINT: &str = "paste again to expand";
 /// The end of Codex's busy row: `• Working (12s • esc to interrupt)`.
 const CODEX_BUSY_HINT: &str = "s • esc to interrupt)";
 /// Under a turn Claude stopped, after its `⎿`: the whole phrase, so a reply
@@ -2009,7 +2251,9 @@ pub fn turn_shown(harness: &str, screen: &str) -> Option<TurnShown> {
                 return Some(TurnShown::Drafted);
             }
             let status: Vec<&String> = rows[close + 1..].iter().filter(|r| !r.trim().is_empty()).collect();
-            if status.is_empty() {
+            // For ~8 s after a paste Claude collapsed, this hint takes the whole
+            // row, the busy hint included (measured on 2.1.318): it cannot say.
+            if status.is_empty() || status.iter().any(|r| r.contains(CLAUDE_PASTE_HINT)) {
                 return None;
             }
             Some(if status.iter().any(|r| r.contains(CLAUDE_BUSY_HINT)) { TurnShown::Running } else { TurnShown::Idle })
@@ -2540,6 +2784,229 @@ mod tests {
         assert!(!second.multi && !same_form(&first, &second));
         let review = claude(include_str!("../tests/fixtures/claude-screen/2.1.316/form-multiselect/review.txt")).unwrap();
         assert!(!review.multi && review.choices[0].label == "Submit answers");
+    }
+
+    macro_rules! multi {
+        ($name:literal) => {
+            include_str!(concat!("../tests/fixtures/claude-screen/2.1.318/multiline/", $name, ".e.txt"))
+        };
+    }
+
+    /// A paste Claude keeps literal: at most one line break, leading it, and
+    /// at most CHUNK_BYTES, cut between characters; rejoined, the message.
+    #[test]
+    fn a_message_is_cut_into_pastes_claude_keeps_literal() {
+        let long = "é".repeat(700);
+        for text in ["one line", "a\nb\n\nd\n", "\n/clear\nx", long.as_str()] {
+            let chunks = claude_chunks(text, CHUNK_BYTES);
+            assert_eq!(chunks.concat(), text, "{text:?}");
+            for c in &chunks {
+                assert!(c.len() <= CHUNK_BYTES, "{} bytes", c.len());
+                assert!(!c.strip_prefix('\n').unwrap_or(c).contains('\n'), "{c:?}");
+            }
+        }
+        assert_eq!(claude_chunks("a\nb\n\nd", CHUNK_BYTES), ["a", "\nb", "\n", "\nd"]);
+    }
+
+    /// A box holding `tail`, as a screen.
+    fn boxed(tail: &str) -> String {
+        format!("──────\n❯\u{a0}{tail}\n──────\n  status\n")
+    }
+
+    /// A clock that sleeps instantly, and a fake pane that draws what is
+    /// pasted, then does `at`'s thing on the look before call `at.0`.
+    fn feed_with(text: &str, at: Option<(usize, &'static str)>) -> (Result<(), (usize, FeedStop)>, Vec<usize>) {
+        use std::cell::{Cell, RefCell};
+        let t = Cell::new(0u64);
+        let calls = RefCell::new(Vec::new());
+        let drawn = RefCell::new(String::new());
+        let looks = Cell::new(0usize);
+        let torn = Cell::new(false);
+        let got = feed_claude(
+            text,
+            Some((40, 120)),
+            |b| {
+                if at == Some((calls.borrow().len(), "refuse")) {
+                    return Err("no pane".to_string());
+                }
+                calls.borrow_mut().push(b.len());
+                drawn.borrow_mut().push_str(&b.concat());
+                Ok(())
+            },
+            || {
+                looks.set(looks.get() + 1);
+                let n = calls.borrow().len();
+                let here = at.filter(|a| a.0 == n).map(|a| a.1);
+                let tail = bare(&drawn.borrow());
+                match here {
+                    Some("modal") => Some(claude_fx!("permission-bash.e.txt").to_string()),
+                    Some("blind") => None,
+                    Some("typed") => Some(boxed(&format!("{tail}TYPED"))),
+                    Some("stale") => Some(boxed(tail.get(..tail.len().saturating_sub(1)).unwrap_or(""))),
+                    // Inside a redraw: this look only.
+                    Some("torn") if !torn.replace(true) => Some(boxed(&format!("{tail}torn"))),
+                    _ => Some(boxed(&tail)),
+                }
+            },
+            || t.get(),
+            |ms| t.set(t.get() + ms),
+        );
+        let calls = calls.into_inner();
+        (got, calls)
+    }
+
+    /// Every stop point of a paste: nothing more goes in, the answer says how
+    /// much did, and there is no Enter in this function to press.
+    #[test]
+    fn pasting_stops_at_a_prompt_or_an_error_and_says_how_far_it_got() {
+        // "a" and "\nb": 2 bytes a chunk after the first, 4 chunks a call. All
+        // different: a stale draw of one letter repeated would read as whole.
+        let text = "abcdefghijkl".chars().map(String::from).collect::<Vec<_>>().join("\n");
+        assert_eq!(feed_with(&text, None), (Ok(()), vec![4, 4, 4]), "whole, with a look before each call");
+        let first = 7; // a, \nb, \nc, \nd
+        for (stage, what, stop) in [
+            ("modal", "a prompt", FeedStop::Prompt),
+            ("blind", "a screen it cannot read", FeedStop::Unreadable),
+            ("typed", "someone typing", FeedStop::Foreign),
+            ("stale", "a draw that never catches up", FeedStop::Unreadable),
+        ] {
+            if stage != "stale" && stage != "typed" {
+                assert_eq!(feed_with(&text, Some((0, stage))), (Err((0, stop.clone())), vec![]), "{what} at the start");
+            }
+            assert_eq!(feed_with(&text, Some((1, stage))), (Err((first, stop.clone())), vec![4]), "{what} after the first call");
+            assert_eq!(feed_with(&text, Some((2, stage))), (Err((first + 8, stop)), vec![4, 4]), "{what} after the second");
+        }
+        assert_eq!(feed_with(&text, Some((1, "torn"))), (Ok(()), vec![4, 4, 4]), "a frame torn by a redraw is no one's text");
+        assert_eq!(feed_with(&text, Some((1, "refuse"))), (Err((first, FeedStop::Paste("no pane".into()))), vec![4]), "tmux refused");
+        // Someone's text already there when the first call would go.
+        let (got, calls) = {
+            let mut calls = 0;
+            let t = std::cell::Cell::new(0u64);
+            let got = feed_claude("hello", Some((40, 120)), |_| { calls += 1; Ok(()) }, || Some(boxed("draft")), || t.get(), |ms| t.set(t.get() + ms));
+            (got, calls)
+        };
+        assert_eq!((got, calls), (Err((0, FeedStop::Foreign)), 0));
+    }
+
+    /// The bound on the lock: a message of thousands of calls stops, and says so.
+    #[test]
+    fn pasting_is_bounded() {
+        use std::cell::Cell;
+        let t = Cell::new(0u64);
+        let drawn = std::cell::RefCell::new(String::new());
+        let text = vec!["k"; 8000].join("\n");
+        let got = feed_claude(
+            &text,
+            Some((40, 120)),
+            |b| { drawn.borrow_mut().push_str(&bare(&b.concat())); t.set(t.get() + 50); Ok(()) },
+            || Some(boxed(&drawn.borrow())),
+            || t.get(),
+            |ms| t.set(t.get() + ms),
+        );
+        let (pasted, stop) = got.unwrap_err();
+        assert_eq!(stop, FeedStop::Slow);
+        assert!(pasted > 0 && pasted < text.len(), "{pasted}");
+        assert!(t.get() <= FEED_MAX_MS + 100, "{}", t.get());
+    }
+
+    /// A call never adds more than the scrolling box keeps in view, one row
+    /// spare for what someone typed. The window is measured: `rows / 2 - 5`.
+    #[test]
+    fn a_call_is_small_enough_that_the_next_look_can_see_what_was_typed() {
+        assert_eq!(Pace::of(None), Some(Pace::DEFAULT));
+        assert_eq!(Pace::of(Some((11, 120))), None, "too short to read a tall box");
+        for (rows, cols) in [(12, 120), (14, 120), (16, 40), (20, 80), (24, 80), (30, 40), (40, 120), (40, 40), (60, 200)] {
+            let pace = Pace::of(Some((rows, cols))).unwrap();
+            let window = rows / 2 - 5;
+            for text in [vec!["l"; 100].join("\n"), "w".repeat(3000), vec!["z".repeat(300); 9].join("\n"), "é🙂".repeat(300)] {
+                let batches = claude_batches(&text, pace);
+                assert_eq!(batches.concat().concat(), text);
+                for b in &batches {
+                    assert!(b.len() <= pace.chunks && b.concat().len() <= pace.bytes, "{rows}x{cols}: {} chunks, {} bytes", b.len(), b.concat().len());
+                    // A row per line break, and the wrapped rows of the text.
+                    let breaks = b.concat().matches('\n').count();
+                    let wrapped = b.concat().chars().filter(|c| *c != '\n').count().div_ceil(cols - 4);
+                    assert!(breaks.max(wrapped) < window.max(2), "{rows}x{cols}: {breaks} breaks, {wrapped} rows, window {window}");
+                }
+            }
+        }
+    }
+
+    /// Claude folds the middle of a long draft: what it shows must still be
+    /// the message, and typing after the fold still shows.
+    #[test]
+    fn a_folded_draft_is_read_by_what_it_still_shows() {
+        let text: String = (0..200).map(|i| format!("row{i}")).collect::<Vec<_>>().join("\n");
+        let b = bare(&text);
+        assert_eq!(drew(&b, "row0row1[...Truncatedtext#5+90lines...]row198row199"), Drew::Drawn);
+        assert_eq!(drew(&b, "row0row1[...Truncatedtext#5+90lines...]row150row151"), Drew::Behind);
+        assert_eq!(drew(&b, "row0row1[...Truncatedtext#5+90lines...]row199TYPED"), Drew::Other);
+        assert_eq!(drew(&b, "TYPEDrow1[...Truncatedtext#5...]row199"), Drew::Other);
+        assert_eq!(drew(&b, "row198row199"), Drew::Drawn);
+        assert_eq!(drew(&b, "row5row6"), Drew::Behind);
+        assert_eq!(drew(&b, "row199TYPED"), Drew::Other);
+        assert!(composer_holds(&boxed("row0row1[...Truncated text #5 +90 lines...]row198row199"), &text));
+        assert!(composer_holds(multi!("truncated"), &format!("Reply with only the word OK.\n{}", vec!["q".repeat(100); 150].join("\n"))));
+    }
+
+    /// Too short for chunks: one paste. A short pane gets smaller calls, so it
+    /// takes more of them; none is bigger than the room it has.
+    #[test]
+    fn a_short_pane_gets_the_message_whole_or_in_smaller_calls() {
+        let text = "a\nb\nc\nd\ne\nf";
+        for (size, first) in [(Some((11, 120)), vec![text]), (Some((12, 120)), vec!["a"]), (Some((40, 120)), vec!["a", "\nb", "\nc", "\nd"]), (None, vec!["a", "\nb", "\nc", "\nd"])] {
+            let mut got: Vec<Vec<String>> = Vec::new();
+            let drawn = std::cell::RefCell::new(String::new());
+            feed_claude(text, size, |b| { got.push(b.to_vec()); drawn.borrow_mut().push_str(&bare(&b.concat())); Ok(()) }, || Some(boxed(&drawn.borrow())), || 0, |_| {}).unwrap();
+            assert_eq!(got[0], first, "{size:?}");
+            assert_eq!(got.concat().concat(), text);
+        }
+    }
+
+    /// The proof before Enter, on real 2.1.318 screens launched with
+    /// worktrees' flags.
+    #[test]
+    fn the_composer_proves_it_holds_the_message_and_nothing_else() {
+        let chunked = "first line\nsecond line\n\nfourth line";
+        assert!(composer_holds(multi!("chunked"), chunked));
+        assert!(!composer_holds(multi!("chunked"), "first line\nsecond line"), "more than the message");
+        assert!(!composer_holds(multi!("chunked"), "a different message\nfourth lin"));
+        let tall: Vec<String> = (0..40).map(|i| format!("tall {i}")).collect();
+        assert!(composer_holds(multi!("tall"), &tall.join("\n")), "a tall draft shows its end");
+        assert!(composer_holds(multi!("rule"), "above a rule\n────────────────\nbelow it"), "a rule in the message is not the box's edge");
+        assert!(composer_holds(multi!("long-line"), &"w".repeat(2000)));
+        assert!(composer_holds(multi!("placeholder"), "one\ntwo\nthree\nfour\nfive"), "collapsed: nothing around it");
+        assert!(!composer_holds(multi!("typed-after"), "first line\nsecond line"), "typed at the terminal as it went in");
+        assert!(!composer_holds(multi!("empty"), "anything"));
+        assert!(!composer_holds(claude_fx!("permission-bash.e.txt"), "anything"), "no box");
+        assert!(only_placeholders("[Pastedtext#1+3lines][Pastedtext#2]"));
+        for no in ["[Pastedtext#1+3lines]x", "x[Pastedtext#1]", "[Pastedtext#]", "[Pastedtext#1+lines]", "[Pastedtext#1"] {
+            assert!(!only_placeholders(no), "{no}");
+        }
+    }
+
+    /// A turn is running under the paste hint: not "idle", which would tell a
+    /// client there is nothing to stop.
+    #[test]
+    fn the_paste_hint_hides_the_turn_so_it_reads_as_unknown() {
+        assert_eq!(turn_shown("claude", multi!("after-collapsed")), None);
+        assert_eq!(turn_shown("claude", multi!("empty")), Some(TurnShown::Idle));
+    }
+
+    /// Someone typing at the terminal during a send gets no mix submitted.
+    #[test]
+    fn enter_is_never_pressed_on_a_composer_that_holds_something_else() {
+        use std::cell::Cell;
+        let t = Cell::new(0u64);
+        let enters = Cell::new(0);
+        let out = submit_claude(
+            "first line\nsecond line",
+            || Some(multi!("typed-after").to_string()),
+            || { enters.set(enters.get() + 1); Ok(()) },
+            || t.get(),
+            |ms| t.set(t.get() + ms),
+        );
+        assert_eq!((out, enters.get()), (SendOutcome::Foreign, 0));
     }
 
     /// What a slash command opens, read as prompts (fixtures
@@ -3126,12 +3593,15 @@ mod tests {
         use std::cell::{Cell, RefCell};
         let typed = claude_fx!("composer-typed.e.txt");
         let empty = claude_fx!("composer-after-turn.e.txt");
+        // The proof reads the box: this is what that fixture's holds.
+        let held = &agent::composer_text(typed).unwrap();
         let run = |script: Vec<&'static str>| {
             let t = Cell::new(0u64);
             let enters = Cell::new(0);
             let shown = RefCell::new(script.into_iter());
             let last = RefCell::new(None);
             let out = submit_claude(
+                held,
                 || {
                     let next = shown.borrow_mut().next();
                     if let Some(s) = next {

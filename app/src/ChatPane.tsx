@@ -17,11 +17,12 @@ import {
   activityMoved, boxesOf, bytes, callFetches, callKeys, callsSay, callsWords, cardDigits, cardKey, cardTakesFocus, choiceOpen, choiceWay, clockMs, clockOf,
   dayLabel, draftIsOwnSend, draftProblem, fieldWords, foldCalls, itemsOf, keyFocusOf, lineDiff, loadPrompt, loadTurns, noSessionYet, permissionAnswerWords,
   promptBody, questionAnswerWords, selectChoice, sendAnswer, sendDraft, sendMany, setAnswerText, setBoxText, setDraft,
-  splitAtRule, stopTurn, ticksOf, toggleCall, toggleTick, tookReference, turnsUnsupported, underRoot, useChat, SEND_MAX,
+  sendRulesFor, splitAtRule, stopTurn, ticksOf, toggleCall, toggleTick, tookReference, turnsUnsupported, underRoot, useChat,
   type AskedStep, type CallRead, type Item, type PromptChoice, type PromptDetail, type ReadablePrompt, type Target, type ToolCall,
 } from "./chat";
 import { previewOf, type ChoiceWay } from "./chat";
 import { referenceInDraft } from "./dnd";
+import { hostSendCaps, remoteHost } from "./ipc";
 // What a screen reader is told (VoiceOver): its own line, so the lanes' imports merge apart.
 import { announcement, gather, hear, promptKeyOf, type Bundle, type ChatView, type Heard } from "./chat";
 // Attachments (docs/proposals/chat-attachments.md): their own line, for the same reason.
@@ -41,7 +42,12 @@ import "./ChatPane.css";
  *  for many minutes. Nothing polls while idle, waiting, or hidden. */
 const BUSY_POLL_MS = 10_000;
 /** The byte count appears under the field from here. */
-const COUNT_FROM = 3500;
+const COUNT_LEFT = 596;
+/** The most rows the message box grows to, before it scrolls. */
+const FIELD_ROWS = 12;
+/** …and the most of the chat's height it may take: at 40% of a 400px pane the
+ *  transcript and the send button still fit. */
+const FIELD_SHARE = 0.4;
 
 /** The focused element, read through shadow roots (the feedback dialog is one). */
 function focused(): Element | null {
@@ -253,7 +259,7 @@ export function ChatPane(props: ChatPaneProps) {
         <button className="chat-new" onClick={() => { dismiss(); toBottom(); }} data-testid="chat-new">New messages ↓</button>
       )}
       </div>
-      <Composer target={target} agent={agent} fieldRef={fieldRef} waiting={prompt ? (prompt.readable ? "above" : "terminal") : null} paneDraft={props.paneDraft} followUp={v.followUp}
+      <Composer target={target} agent={agent} harness={reported ?? provider} fieldRef={fieldRef} waiting={prompt ? (prompt.readable ? "above" : "terminal") : null} paneDraft={props.paneDraft} followUp={v.followUp}
         busy={busy} uiRem={props.uiRem} onTerminal={props.onTerminal} onRefresh={refresh} loading={v.turns.loading || v.prompt.loading} />
       {menu}
       {/* Renders nothing: it reads the scroll before each commit (stickToBottom.ts). */}
@@ -1050,7 +1056,7 @@ function DiffRows(props: { a: string; b: string }) {
 
 function Composer(props: {
   /** Where a waiting prompt is answered: on the card above, or in the terminal. */
-  target: Target; agent: string; waiting: "above" | "terminal" | null; paneDraft: { text: string; queued: boolean } | null;
+  target: Target; agent: string; harness: string; waiting: "above" | "terminal" | null; paneDraft: { text: string; queued: boolean } | null;
   /** The field, ChatPane's: a prompt card takes the keyboard from it and gives it back. */
   fieldRef: RefObject<HTMLTextAreaElement | null>;
   /** What to type next, after an answer that hands over to the composer. */
@@ -1067,13 +1073,14 @@ function Composer(props: {
   const ids = useId();
   const text = v.draft;
   const files = v.attachments.length;
+  const rules = sendRulesFor(props.harness, remoteHost() !== null, hostSendCaps());
   // A line that starts with `/` is a slash command: the session's own list
   // (`agent_commands`) decides what it may be, and `agent_command` runs it.
   const slash = slashDraft(text);
   const cmds = v.commands.data?.commands ?? null;
   const problem = slash
     ? (files ? "Files go with a message, not a command: remove them, or write a message." : commandProblem(cmds, text, (a) => draftProblem(a)) ?? (v.commands.error && !cmds ? commandWords(v.commands.error, agent).line : null))
-    : files ? attachProblem(text, files) : draftProblem(text);
+    : files ? attachProblem(text, files, rules) : draftProblem(text, "message", rules);
   const cmd: SlashCommand | null = slash && cmds ? cmds.find((c) => c.name === slash.name) ?? null : null;
   useEffect(() => { if (slash) void loadCommands(target); }, [!!slash, target.session]); // eslint-disable-line react-hooks/exhaustive-deps
   // The menu: while a name is typed, until Esc closes it for this draft.
@@ -1108,8 +1115,8 @@ function Composer(props: {
   }, []);
   useEffect(() => { if (props.followUp) field.current?.focus({ preventScroll: true }); }, [props.followUp]);
 
-  // Grow with the text, to six lines; a long line wraps, it never scrolls
-  // sideways. The field scrolls only past the cap: with "always show scroll
+  // Grow with the text, to FIELD_ROWS lines or FIELD_SHARE of the chat; a long
+  // line wraps, it never scrolls sideways. The field scrolls only past the cap: with "always show scroll
   // bars" a sub-pixel shortfall (a 1.45 line height against an integer
   // scrollHeight) drew a vertical bar, whose width then drew a horizontal one.
   const fit = useCallback(() => {
@@ -1124,7 +1131,8 @@ function Composer(props: {
     const line = parseFloat(cs.lineHeight) || 20;
     const pad = parseFloat(cs.paddingTop) + parseFloat(cs.paddingBottom);
     const border = parseFloat(cs.borderTopWidth) + parseFloat(cs.borderBottomWidth);
-    const cap = Math.ceil(line * 6 + pad);
+    const room = el.closest(".chat")?.clientHeight ?? Infinity;
+    const cap = Math.ceil(Math.max(line + pad, Math.min(line * FIELD_ROWS + pad, room * FIELD_SHARE)));
     const over = el.scrollHeight > cap;
     el.style.overflowY = over ? "auto" : "hidden";
     el.style.height = `${Math.ceil(Math.min(el.scrollHeight, cap) + border)}px`;
@@ -1137,14 +1145,18 @@ function Composer(props: {
   useEffect(() => {
     const el = field.current;
     if (!el || typeof ResizeObserver === "undefined") return;
+    // The chat's height moves the cap the same way. Its own height is ours.
+    const chat = el.closest(".chat");
     let w = -1;
-    const ro = new ResizeObserver((es) => {
-      const cw = es[es.length - 1].contentRect.width;
-      if (cw === w) return;
-      w = cw;
+    let room = -1;
+    const ro = new ResizeObserver(() => {
+      const [cw, ch] = [el.clientWidth, chat?.clientHeight ?? 0];
+      if (cw === w && ch === room) return;
+      [w, room] = [cw, ch];
       fit();
     });
     ro.observe(el);
+    if (chat) ro.observe(chat);
     return () => ro.disconnect();
   }, [field, fit]);
 
@@ -1180,7 +1192,7 @@ function Composer(props: {
     setArmed(step.armed);
     if (step.run) void sendCommand(target, cmd.name, args, (e) => commandWords(e, agent));
   };
-  const send = () => { if (!canSend) return; if (slash) runCommand(); else void sendDraft(target, agent); };
+  const send = () => { if (!canSend) return; if (slash) runCommand(); else void sendDraft(target, agent, rules); };
   // A menu row: the exact name runs (Enter), any other fills the field.
   const pick = (c: SlashCommand, how: "enter" | "tab" | "click") => {
     if (how !== "tab" && c.name === query) { setClosedAt(text); send(); return; }
@@ -1188,7 +1200,7 @@ function Composer(props: {
     field.current?.focus({ preventScroll: true });
   };
   // Only a line break or a tab is wrong: offer to join, by hand, never silently.
-  const joinable = !!problem && /[\n\r\t]/.test(text) && !draftProblem(text.replace(/\s*[\r\n\t]+\s*/g, " ").trim());
+  const joinable = !!(problem || v.sendWords?.join) && /[\n\r\t]/.test(text) && !draftProblem(text.replace(/\s*[\r\n\t]+\s*/g, " ").trim());
 
   const stop = () => { if (!v.stopping) void stopTurn(target, agent); };
   const said = v.sendWords ?? v.attachWords ?? v.stopWords;
@@ -1211,7 +1223,8 @@ function Composer(props: {
   else if (props.waiting) line = `Messages can’t be sent while a prompt is waiting. Answer it ${props.waiting === "above" ? "above" : "in the terminal"}.`;
   else if (props.followUp && !text.trim()) line = props.followUp;
   else if (cmd) line = `Enter runs /${cmd.name}${cmd.tier === "sensitive" ? " · a sensitive command, confirmed first" : confirmWords(cmd) ? " · confirmed first" : ""}`;
-  else line = n >= COUNT_FROM ? `One line · ${n.toLocaleString()} of ${SEND_MAX.toLocaleString()} bytes` : "One line · Enter sends · / for commands";
+  else if (n >= rules.maxBytes - COUNT_LEFT) line = `${rules.lineBreaks ? "" : "One line · "}${n.toLocaleString()} of ${rules.maxBytes.toLocaleString()} bytes`;
+  else line = rules.lineBreaks ? "Enter sends · Shift+Enter adds a line · / for commands" : `${agent} takes one line here · Enter sends · / for commands`;
 
   return (
     <div className={"chat-composer" + (dropping ? " dropping" : "")} data-testid="chat-composer"
@@ -1282,16 +1295,24 @@ function Composer(props: {
                 setHi((h) => (h + (e.key === "ArrowDown" ? 1 : rows.length - 1)) % rows.length);
                 return;
               }
-              if ((e.key === "Enter" && !e.shiftKey && !e.altKey) || (e.key === "Tab" && !e.shiftKey)) {
+              if ((e.key === "Enter" && !e.shiftKey && !e.altKey && !e.metaKey) || (e.key === "Tab" && !e.shiftKey)) {
                 e.preventDefault();
                 pick(rows[Math.min(hi, rows.length - 1)], e.key === "Tab" ? "tab" : "enter");
                 return;
               }
             }
             if (e.key !== "Enter") return;
-            // A message is one line: Enter sends it, and no key adds a break.
+            // Enter sends. Shift+Enter is the field's own line break, which
+            // keeps undo and the scroll to the caret; Cmd+Enter has none, so
+            // it asks for the same edit. Where the harness takes one line,
+            // neither adds one (the line under the field says so).
+            if (e.shiftKey && rules.lineBreaks) return;
             e.preventDefault();
-            if (!e.shiftKey && !e.altKey) send();
+            if (e.metaKey && rules.lineBreaks) {
+              // execCommand keeps undo; it fails only in a field that cannot be edited.
+              if (!document.execCommand("insertText", false, "\n")) e.currentTarget.setRangeText("\n", e.currentTarget.selectionStart, e.currentTarget.selectionEnd, "end");
+              setDraft(target.path, e.currentTarget.value);
+            } else if (!e.shiftKey && !e.altKey && !e.metaKey) send();
           }}
           data-testid="chat-field" />
         {props.busy && (
@@ -1307,7 +1328,7 @@ function Composer(props: {
       <div className="chat-line-row">
         <p id={`${ids}-l`} className={"chat-line" + (alert ? " alert" : "")} role={alert ? "alert" : undefined} data-testid="chat-line">
           {line}
-          {joinable && !v.sendWords && <> <button className="chat-linkbtn" onClick={() => setDraft(target.path, text.replace(/\s*[\r\n\t]+\s*/g, " ").trim())}>Join into one line</button></>}
+          {joinable && (!v.sendWords || v.sendWords.join) && <> <button className="chat-linkbtn" onClick={() => setDraft(target.path, text.replace(/\s*[\r\n\t]+\s*/g, " ").trim())}>Join into one line</button></>}
           {said?.terminal && !v.sending && !v.stopping && <> <button className="chat-linkbtn" onClick={props.onTerminal}>Open the terminal</button></>}
         </p>
         <button className="chat-linkbtn chat-refresh" onClick={props.onRefresh} disabled={props.loading} title="Read the transcript and the prompt again">

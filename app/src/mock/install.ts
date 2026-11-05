@@ -4297,12 +4297,24 @@ Phase 3: Frontend pane and mock harness
     case "agent_send": {
       const text = String(args.text ?? "");
       if (!text.trim()) throw "text is empty";
-      if (/\p{Cc}/u.test(text)) throw "text contains a control character (newline, tab, escape…); only ONE line is typed";
-      if (mockPromptUp(args.repo, args.slug)) throw "the agent is waiting on a prompt: answer it with agent_answer";
       const mode = new URLSearchParams(location.search).get("agentsend");
+      // `harness::typed_message`: line breaks only where proved. `oldhost` is a
+      // paired host from before them, which a stale client can still reach.
+      const proved = mode !== "oldhost" && ["claude", "codex"].includes(mockHarnessAt(mockPlacePath(args.repo, args.slug)));
+      if (/\p{Cc}/u.test(proved ? text.replace(/[\r\n]/g, "") : text)) throw "text contains a control character (newline, tab, escape…); only ONE line is typed";
+      if (mockPromptUp(args.repo, args.slug)) throw "the agent is waiting on a prompt: answer it with agent_answer";
       if (mode === "gone") throw `no agent this place launched is running in ${args.session}`;
       if (mode === "mid") throw "the agent's prompt has unsent text in it (someone is typing there): send nothing until it is empty";
       if (mode === "nocomposer") throw "the agent is not at its prompt (starting, or a screen this host does not recognise): try again shortly";
+      // `prompt::feed_claude`'s stop and the proof before Enter: nothing submitted.
+      if (mode === "stopped" || mode === "foreign") {
+        return {
+          delivered: false, queued: false, harness: mockHarnessAt(mockPlacePath(args.repo, args.slug)), session: args.session, stopped: true,
+          note: mode === "stopped"
+            ? "Not sent: a prompt opened part way, after about 512 of 2048 bytes. Nothing was submitted, and the first part may be in the agent's input. Look at the terminal and clear it before sending again."
+            : "Not sent: the agent's input holds something other than this message, perhaps typed in the terminal while it went in. Nothing was submitted. Look at the terminal and clear it before sending again.",
+        };
+      }
       const path = mockPlacePath(args.repo, args.slug);
       // ?turns=queued demonstrates Claude absorbing the first busy send as
       // a person step inside the running turn. The next send becomes a

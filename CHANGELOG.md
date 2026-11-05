@@ -11,7 +11,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 - **Drag a place onto the chat to reference it.** Dropping a place anywhere on the chat view puts its reference in your message at the cursor, ready to edit and send, as dropping it on the terminal does. Dropped at the very start of a message, it comes with the words "Look at" in front, because a message can't start with `@`. Files you drop still attach.
 - **The host can now send push notifications to a paired iPhone: the host's half.** While your Mac is running worktrees with remote access on, it can tell your phone when an agent has waited 30 seconds for input, remind you once after 15 minutes, and, if you allow it for that phone with `worktrees serve push security`, pass on this host's security alerts. Project and place names are encrypted so Apple never sees them, and prompt text never leaves the host. Nothing is delivered yet: real delivery needs an APNs key, imported with `worktrees serve push key-import`, and the iOS app's half. Turning remote access off stops notifications too, and none are sent once serve has stopped, which an app-owned serve does after you quit the app.
 
+- **Write several lines in the chat.** With Claude or Codex, Shift+Enter or Cmd+Enter adds a line and Enter sends. The box grows to 12 lines, then scrolls, and a message can be up to 16 KB. pi and kimi still take one line, and the box says so. A paired host that hasn't been updated takes one line too, and the box offers to join your lines.
+
 ### Fixed
+- **A long message from the chat now reaches Claude as your own words.** Past about 850 characters, Claude was collapsing it and treating it as pasted text, which can change what the agent does with it. The chat also showed it wrapped in raw tags and left a second "waiting" copy beside it. Text you paste into Claude's terminal yourself still arrives as pasted, and now shows as plain words in the chat.
+- **A message ending in `;` keeps it.** Anything pasted into an agent's input, a dropped reference included, lost a final semicolon, and a lone `;` wasn't sent at all.
+- **Stop no longer says Claude isn't working when it is.** For about 8 seconds after a long paste, it now says to try again in a moment.
+- **A message sent while Claude is working keeps its line breaks in the chat.**
 - **A message you send in the chat shows once.** A message that ended in a
   space, or ran past 4000 characters, stayed as a "waiting for Claude" bubble
   beside the real one, because Claude's record of it never matched exactly. A

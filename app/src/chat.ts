@@ -100,7 +100,11 @@ export type AgentPrompt =
   }
   | { waiting: true; readable: false; harness: string | null; session: string | null; reason: string; lines?: string[]; note?: string };
 export type ReadablePrompt = Extract<AgentPrompt, { readable: true }>;
-export type AgentSent = { delivered: boolean; queued: boolean; harness: string; session: string; note: string };
+export type AgentSent = {
+  delivered: boolean; queued: boolean; harness: string; session: string; note: string;
+  /** Nothing was submitted, and the composer may hold part of it or something else: `note` says. */
+  stopped?: boolean;
+};
 export type AgentAnswer = { answered: true; confirmed: boolean; harness: string; session: string; choice: number; label: string };
 /** A multi-select's free-text box, filled: nothing is sent yet. */
 export type AgentFilled = { answered: false; harness: string; session: string; choice: number; note: string };
@@ -177,6 +181,36 @@ export const AGENT_ERR = {
 
 /** `harness::LINE_MAX`. */
 export const SEND_MAX = 4 * 1024;
+/** `harness::MESSAGE_MAX`. */
+export const MESSAGE_MAX = 16 * 1024;
+
+/** What `agent_send` takes for one harness. */
+export type SendRules = { lineBreaks: boolean; maxBytes: number };
+export const ONE_LINE: SendRules = { lineBreaks: false, maxBytes: SEND_MAX };
+
+/** `harness::line_breaks_proved`: what this build's own host takes. */
+const ON_THIS_HOST: Record<string, SendRules> = {
+  claude: { lineBreaks: true, maxBytes: MESSAGE_MAX },
+  codex: { lineBreaks: true, maxBytes: MESSAGE_MAX },
+};
+
+/** What `agent_send` takes for `harness`. A window on its own host's engine is
+ *  one build with it. A paired host says, on its `ok` (`caps`, iOS's shape:
+ *  every key optional, a harness's own entry wins); one that says nothing is an
+ *  older host, which takes one line. A value that makes no sense is ignored. */
+export function sendRulesFor(harness: string, remote: boolean, caps: unknown): SendRules {
+  if (!remote) return ON_THIS_HOST[harness] ?? ONE_LINE;
+  const r = { ...ONE_LINE };
+  if (!caps || typeof caps !== "object") return r;
+  const c = caps as { harnesses?: Record<string, unknown> };
+  const own = c.harnesses && typeof c.harnesses === "object" ? c.harnesses[harness] : undefined;
+  for (const e of [c, own] as ({ line_breaks?: unknown; max_bytes?: unknown } | undefined)[]) {
+    if (!e || typeof e !== "object") continue;
+    if (typeof e.line_breaks === "boolean") r.lineBreaks = e.line_breaks;
+    if (typeof e.max_bytes === "number" && Number.isInteger(e.max_bytes) && e.max_bytes >= SEND_MAX) r.maxBytes = e.max_bytes;
+  }
+  return r;
+}
 /** `turns::MAX_TURNS`: the most one `agent_turns` answers. */
 export const TURNS_MAX = 20;
 
@@ -224,15 +258,15 @@ export function splitAttached(line: string): { text: string; paths: string[] } {
 /** Why the message would be refused, checked BEFORE anything is uploaded:
  *  the text by today's rule, then the line it becomes with `n` attachments,
  *  every path at its longest. */
-export function attachProblem(text: string, n: number): string | null {
-  const own = draftProblem(text);
+export function attachProblem(text: string, n: number, rules: SendRules = ONE_LINE): string | null {
+  const own = draftProblem(text, "message", rules);
   if (own || !n) return own;
   if (n > ATTACH_PER_MESSAGE) return `At most ${ATTACH_PER_MESSAGE} files in one message.`;
   const line = attachLine(text, Array.from({ length: n }, () => "x".repeat(ATTACH_PATH_MAX)));
-  if (bytes(line) > SEND_MAX) {
-    return `Too long with ${n === 1 ? "the attachment" : `${n} attachments`}: ${bytes(line).toLocaleString()} of ${SEND_MAX.toLocaleString()} bytes.`;
+  if (bytes(line) > rules.maxBytes) {
+    return `Too long with ${n === 1 ? "the attachment" : `${n} attachments`}: ${bytes(line).toLocaleString()} of ${rules.maxBytes.toLocaleString()} bytes.`;
   }
-  return draftProblem(line);
+  return draftProblem(line, "message", rules);
 }
 
 /** A size in words: `512 B`, `34 KB`, `2.4 MB`. */
@@ -278,12 +312,14 @@ export const bytes = (text: string) => new TextEncoder().encode(text).length;
  *  (MCP `send` shares it), checked before the line leaves so a refusal is
  *  explained where it is typed. A pasted draft is never changed to make it
  *  pass. `what` names the thing typed: a message, an answer, a note. */
-export function draftProblem(text: string, what: "message" | "answer" | "note" = "message"): string | null {
+export function draftProblem(text: string, what: "message" | "answer" | "note" = "message", rules: SendRules = ONE_LINE): string | null {
   if (!text.trim()) return null;
   const one = `${what === "answer" ? "an" : "a"} ${what}`;
-  if (/\p{Cc}/u.test(text)) return `Use one line: ${one} can’t hold line breaks, tabs or other control characters.`;
+  if (rules.lineBreaks) {
+    if (/\p{Cc}/u.test(text.replace(/[\r\n]/g, ""))) return `Remove the tabs and other control characters: ${one} can’t hold them.`;
+  } else if (/\p{Cc}/u.test(text)) return `Use one line: ${one} can’t hold line breaks, tabs or other control characters.`;
   if (/[\p{Cf}\p{Zl}\p{Zp}]/u.test(text)) return "Remove the invisible formatting characters: the agent would read something other than what you see.";
-  if (bytes(text) > SEND_MAX) return `Too long: ${bytes(text).toLocaleString()} of ${SEND_MAX.toLocaleString()} bytes.`;
+  if (bytes(text) > rules.maxBytes) return `Too long: ${bytes(text).toLocaleString()} of ${rules.maxBytes.toLocaleString()} bytes.`;
   const lead = text.trimStart()[0];
   if ("/@!#".includes(lead)) {
     return lead === "/"
@@ -295,7 +331,7 @@ export function draftProblem(text: string, what: "message" | "answer" | "note" =
 
 /** What a refused or unconfirmed send says under the field. `terminal` offers
  *  the way back; `prompt` re-reads the prompt the refusal says is up. */
-export type SendWords = { line: string; terminal?: boolean; prompt?: boolean };
+export type SendWords = { line: string; terminal?: boolean; prompt?: boolean; join?: boolean };
 /** What a refused or unconfirmed answer says on the card. */
 export type Words = SendWords;
 
@@ -306,6 +342,9 @@ export function sendWords(err: string, agent: string): SendWords {
   }
   if (err === AGENT_ERR.noComposer) return { line: `${agent} isn’t at its prompt yet (starting up, or a screen this app doesn’t know). Try again in a moment.`, terminal: true };
   if (err.startsWith(AGENT_ERR.noLanePrefix)) return { line: "No agent is running in this place." };
+  // A host that takes one line here, whatever this client believed: an older
+  // host's own words, and a dead end without the way out.
+  if (err.includes("only ONE line is typed")) return { line: `${agent} takes one line at a time here. Join the lines to send this.`, join: true };
   // typed_line_ok's own words, should the client's check ever drift from it.
   if (err.startsWith("text ")) return { line: `Not sent: ${err}.` };
   return { line: `Not sent: ${err}`, terminal: true };
@@ -630,8 +669,9 @@ export const HOST_TEXT_MAX = 4000;
  *  points and an ellipsis. Compared exactly, those never settled. Only that
  *  exact shape counts as a cut: a person can end a message in `…` too. */
 function isRecordOf(sent: string, record: string): boolean {
-  const s = sent.trim();
-  const r = record.trim();
+  // A record is LF: the host makes CRLF and CR that before it types anything.
+  const s = sent.replace(/\r\n?/g, "\n").trim();
+  const r = record.replace(/\r\n?/g, "\n").trim();
   if (s === r) return true;
   return r.endsWith("…") && [...r].length === HOST_TEXT_MAX + 1 && s.startsWith(r.slice(0, -1));
 }
@@ -1266,7 +1306,9 @@ export function draftIsOwnSend(draft: string, v: Pick<ChatView, "sentLine">): bo
   const bare = (s: string) => s.replace(/\s+/gu, "");
   const d = bare(draft);
   const line = bare(v.sentLine.text);
-  return d === line || (d.endsWith("…") && line.startsWith(d.slice(0, -1)));
+  // A long message is only part of the box: its last rows, once tall, and up
+  // to the first blank row. Collapsed, it is one placeholder.
+  return line.includes(d.endsWith("…") ? d.slice(0, -1) : d) || /^(\[Pastedtext#\d+(\+\d+lines)?\])+$/u.test(d);
 }
 
 export function setDraft(path: string, draft: string): void {
@@ -1425,11 +1467,11 @@ let nextPending = 1;
  *  order, and only once every one is kept is the line sent, naming them
  *  (`attachLine`). A refused upload sends nothing. The draft and the files
  *  clear only on a confirmed delivery. */
-export async function sendDraft(t: Target, agent: string): Promise<void> {
+export async function sendDraft(t: Target, agent: string, rules: SendRules = ONE_LINE): Promise<void> {
   const v = viewOf(t.path);
   const draft = v.draft;
   const n = v.attachments.length;
-  if (v.sending || v.attachments.some((a) => a.state === "preparing") || (!draft.trim() && !n) || attachProblem(draft, n)) return;
+  if (v.sending || v.attachments.some((a) => a.state === "preparing") || (!draft.trim() && !n) || attachProblem(draft, n, rules)) return;
   put(t.path, { sending: true, sentLine: null, sendWords: null, stopWords: null, attachWords: null });
   const paths = n ? await uploadAll(t) : [];
   if (!paths) return;
@@ -1445,7 +1487,9 @@ export async function sendDraft(t: Target, agent: string): Promise<void> {
     const cur = viewOf(t.path);
     let sentId: number | null = null;
     if (!r.delivered) {
-      put(t.path, { sending: false, sentLine: null, sendWords: { line: UNCONFIRMED, terminal: true } });
+      // The whole draft stays. `stopped`: part of it, or someone else's text,
+      // may be in the agent's input, and the host's note says which.
+      put(t.path, { sending: false, sentLine: null, sendWords: { line: r.stopped ? r.note : UNCONFIRMED, terminal: true } });
     } else {
       sentId = nextPending++;
       // In the store, not at render: the drafts push is change-gated, so if

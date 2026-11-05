@@ -546,6 +546,29 @@ pub fn draft_from_screen(screen: &str) -> Option<String> {
     Some(text)
 }
 
+/// What claude's input box holds, with ALL whitespace removed, because the pane
+/// wraps and pads it: `Some("")` for an empty box, or one showing its dim
+/// placeholder, `None` for no box. Unlike [`draft_from_screen`], whose job is a
+/// short label, nothing is cut and a blank row does not end it, so the proof
+/// that the box holds a message can reach the end of it (`prompt::composer_holds`).
+/// A tall draft scrolls inside the box, so this is its LAST rows. The box ends
+/// at the LAST edge on the screen: a message can hold a line of `─`, and only
+/// claude's status row is below the real one.
+pub fn composer_text(screen: &str) -> Option<String> {
+    let raw: Vec<&str> = screen.lines().collect();
+    let stripped: Vec<String> = raw.iter().map(|l| strip_escapes(l)).collect();
+    let start = prompt_start(&stripped)?;
+    if body_starts_dim(raw[start]) {
+        return Some(String::new());
+    }
+    let end = stripped.iter().rposition(|l| is_box_edge(l.trim())).filter(|e| *e > start)?;
+    let mut text = String::from(prompt_body(&stripped[start])?);
+    for row in &stripped[start + 1..end] {
+        text.push_str(row);
+    }
+    Some(text.chars().filter(|c| !c.is_whitespace()).collect())
+}
+
 /// Whether `screen` shows claude's input box at all — the question
 /// `draft_from_screen` cannot answer, because its `None` means both "an empty
 /// box" and "no box I recognise". A caller about to TYPE into the pane needs

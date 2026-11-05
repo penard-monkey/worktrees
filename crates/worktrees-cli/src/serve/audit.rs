@@ -3848,7 +3848,7 @@ mod tests {
         let c = phone(&g.a, 9);
         let text = "deploy the SECRET-PAYLOAD-1 branch";
         assert_eq!(g.send(&c, &session, text).map(|v| v["delivered"].clone()), Ok(json!(true)));
-        assert!(g.send(&c, &session, "SECRET-PAYLOAD-2\nline two").is_err(), "a control character: the body refuses");
+        assert!(g.send(&c, &session, "SECRET-PAYLOAD-2\tline two").is_err(), "a control character: the body refuses");
         assert!(g.send(&c, "not-a-session", "SECRET-PAYLOAD-3").is_err(), "an unknown session: the resolver refuses");
         assert_eq!(*pane.sent.lock().unwrap(), vec![text.to_string()]);
         let raw = std::fs::read_to_string(g.d.join(FILE)).unwrap();
@@ -3860,6 +3860,20 @@ mod tests {
         assert_eq!(sent[0]["detail"]["session"], json!(session));
         assert_eq!((sent[0]["outcome"].as_str(), sent[1]["outcome"].as_str()), (Some("ok"), Some("err")));
         assert_eq!(g.records("refused", "agent_send").len(), 1);
+
+        // A message of several lines at the most a harness takes: the record is
+        // the same size as a short one's, so the DRIVE budget charges no more.
+        let long = format!("SECRET-PAYLOAD-4\n{}", "x".repeat(worktrees_core::harness::MESSAGE_MAX - 17));
+        assert_eq!(long.len(), worktrees_core::harness::MESSAGE_MAX);
+        assert_eq!(g.send(&c, &session, &long).map(|v| v["delivered"].clone()), Ok(json!(true)));
+        let raw = std::fs::read_to_string(g.d.join(FILE)).unwrap();
+        assert!(!raw.contains("SECRET-PAYLOAD"), "the text reached the log");
+        let sent = g.records("call", "agent_send");
+        assert_eq!(sent[2]["detail"]["bytes"], json!(long.len()));
+        assert_eq!(sent[2]["detail"]["sha256"], json!(sha256_hex(long.as_bytes())));
+        let line_of = |at: usize| raw.lines().filter(|l| l.contains("\"agent_send\"") && l.contains("\"sha256\"")).nth(at).map_or(0, str::len);
+        assert!(line_of(0) > 0 && line_of(2) > 0, "the records this compares are there");
+        assert!(line_of(2).abs_diff(line_of(0)) < 16, "a long message's record costs no more: {} and {}", line_of(0), line_of(2));
 
         *pane.screen.lock().unwrap() = super::super::tests::CLAUDE_TRUST;
         let p = through(&g.cx, &c, &g.w, "agent_prompt", json!({ "repo": g.root, "slug": "(main)" })).unwrap();

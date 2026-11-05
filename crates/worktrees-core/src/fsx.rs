@@ -523,6 +523,7 @@ mod tests {
         ("worktrees-core/src/messages.rs", "format!(\"{:013}-{:x}-{:08x}\"", "a message id; its file is written by fsx"),
         ("worktrees-core/src/messages.rs", "ends_with(\".tmp\")", "matches stranded temps to sweep; builds nothing"),
         ("worktrees-core/src/tmux.rs", "\"worktrees-drop-{}\"", "a tmux buffer name, not a path"),
+        ("worktrees-core/src/tmux.rs", "\"worktrees-send-{}\"", "a tmux buffer name, not a path"),
         ("worktrees-api/src/viewer.rs", "\".{name}.{}.{n}.tmp\"", "the app's config dir; a sync per document would cost every derive"),
         ("worktrees-api/src/viewer.rs", "join(std::process::id().to_string())", "a directory in the app's config dir"),
         ("worktrees-cli/src/serve/mod.rs", "[{level}] [{}] {msg}", "a serve.log line carrying the pid; names nothing"),

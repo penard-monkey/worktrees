@@ -365,7 +365,8 @@ fn claude_turns(lines: &[String]) -> Vec<Turn> {
                     a.get("prompt").and_then(|s| s.as_str()),
                     turns.last(),
                 ) else { continue };
-                let text: String = raw.chars().filter(|c| !c.is_control() && !crate::harness::invisible(*c)).collect();
+                // A line break is the person's; everything else control goes.
+                let text: String = pasted_body(raw).unwrap_or(raw).chars().filter(|c| *c == '\n' || (!c.is_control() && !crate::harness::invisible(*c))).collect();
                 if !text.is_empty() {
                     queued.push(Queued { turn: turns.len() - 1, step: turn.steps.len(), source: source.to_string(), delivery: delivery.to_string(), at, text });
                 }
@@ -438,7 +439,7 @@ enum ClaudeEntry { Person, Notice(Notice), Skip }
 /// writes first, and a shell's output joins its `!` line.
 fn absorb(turns: &mut Vec<Turn>, at: Option<i64>, entry: ClaudeEntry, text: String) {
     match entry {
-        ClaudeEntry::Person => turns.push(Turn::new(at, Some(text))),
+        ClaudeEntry::Person => turns.push(Turn::new(at, Some(pasted_body(&text).map_or(text.clone(), str::to_string)))),
         ClaudeEntry::Notice(Notice::Command { name, args, output }) if name.is_empty() => {
             if let Some(t) = turns.iter_mut().rev().find(|t| matches!(t.notice, Some(Notice::Command { .. }))) {
                 if let Some(Notice::Command { output: o, .. }) = t.notice.as_mut() {
@@ -586,6 +587,22 @@ fn claude_entry(v: &serde_json::Value, text: &str) -> ClaudeEntry {
     }
     if whole_tag(t, "system-reminder").is_some() || whole_tag(t, "local-command-caveat").is_some() { return ClaudeEntry::Skip; }
     if t.is_empty() { ClaudeEntry::Skip } else { ClaudeEntry::Person }
+}
+
+/// What a person pasted, when the WHOLE message is one `<pasted_content
+/// id="x">` wrapper with matching ids: how Claude records a paste it collapsed
+/// (2.1.316, 2.1.318), which shows as tags in a chat and never matches the line
+/// that was sent. For display and matching only. Words around the wrapper are
+/// the person's own and leave it as it is, as does a body that holds its close.
+fn pasted_body(text: &str) -> Option<&str> {
+    let rest = text.trim().strip_prefix("<pasted_content id=\"")?;
+    let (id, rest) = rest.split_once("\">\n")?;
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    let close = format!("\n</pasted_content id=\"{id}\">");
+    let body = rest.strip_suffix(close.as_str())?;
+    (!body.contains("</pasted_content")).then_some(body)
 }
 
 fn tag<'a>(text: &'a str, name: &str) -> Option<&'a str> {
@@ -2387,6 +2404,49 @@ mod tests {
             ]
         );
         assert!(!serde_json::to_string(&got).unwrap().contains("TOOL-OUTPUT-MARKER"));
+    }
+
+    /// What Claude 2.1.318 recorded for a collapsed paste, and for one queued:
+    /// the bubble shows the person's words, and only a WHOLE wrapper counts.
+    #[test]
+    fn a_collapsed_paste_shows_as_the_words_pasted() {
+        use serde_json::json;
+        let body = "reply OK only\nl2\n\nl4";
+        let whole = format!("\n\n<pasted_content id=\"807e\">\n{body}\n</pasted_content id=\"807e\">\n");
+        assert_eq!(pasted_body(&whole), Some(body));
+        let user = |c: &str| json!({"type": "user", "message": {"role": "user", "content": c}}).to_string();
+        assert_eq!(claude(&[user(&whole)], 1)[0].user.as_deref(), Some(body));
+        for keep in [
+            format!("look at this: {whole}"),
+            format!("{whole} and this"),
+            "<pasted_content id=\"a\">\nx\n</pasted_content id=\"b\">".to_string(),
+            "<pasted_content id=\"a\">\nx\n</pasted_content id=\"a\">\n<pasted_content id=\"a\">\ny\n</pasted_content id=\"a\">".to_string(),
+            "<pasted_content id=\"\">\nx\n</pasted_content id=\"\">".to_string(),
+            "<pasted_content>\nx\n</pasted_content>".to_string(),
+        ] {
+            assert_eq!(pasted_body(&keep), None, "{keep:?}");
+            assert_eq!(claude(&[user(&keep)], 1)[0].user.as_deref(), Some(keep.as_str()), "a person's own words stay");
+        }
+    }
+
+    /// A message queued during a turn keeps its lines, wrapped or not, and
+    /// loses every other control and invisible character (measured 2.1.318).
+    #[test]
+    fn a_queued_message_keeps_its_line_breaks() {
+        use serde_json::json;
+        for (prompt, want) in [
+            ("one\ntwo\u{202E}\u{1b}", "one\ntwo"),
+            ("<pasted_content id=\"807e\">\none\ntwo\n</pasted_content id=\"807e\">", "one\ntwo"),
+        ] {
+            let fx = vec![
+                json!({"type":"user","message":{"role":"user","content":"go"}}).to_string(),
+                json!({"type":"attachment","attachment":{"type":"queued_command","prompt":prompt,"source_uuid":"s1","delivery_id":"d1","commandMode":"prompt","humanTurn":true}}).to_string(),
+                json!({"type":"queue-operation","operation":"remove","reason":"absorbed_mid_turn","commandUuid":"s1","deliveryId":"d1"}).to_string(),
+            ];
+            let got = claude(&fx, 1);
+            let said: Vec<&str> = got[0].steps.iter().filter_map(|s| if let Step::User { text, .. } = s { Some(text.as_str()) } else { None }).collect();
+            assert_eq!(said, [want]);
+        }
     }
 
     /// A summary is transcript text a repository or a prompt can steer, so

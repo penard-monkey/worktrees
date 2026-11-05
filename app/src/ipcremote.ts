@@ -89,9 +89,22 @@ export function grantOf(frame: string): string[] | undefined {
   }
 }
 
+/** What the host says `agent_send` takes (`harness::send_caps`), out of the same
+ *  `ok` frame, unjudged; null when it says nothing, as a host from before it. */
+export function sendCapsOf(frame: string): unknown {
+  if (!frame.includes('"send_caps"')) return null;
+  try {
+    const v = JSON.parse(frame) as { ok?: unknown; send_caps?: unknown };
+    return v.ok === true ? v.send_caps ?? null : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Open the pipe to `hostId`. Rejects with the shim's words if it cannot.
- *  `onGrant` hears the device's capabilities once the host's `ok` passes. */
-export async function openPipe(shim: RemoteShim, hostId: string, timers: Timers, onGrant?: (caps: string[]) => void): Promise<OpenPipe> {
+ *  `onGrant` hears the device's capabilities once the host's `ok` passes,
+ *  and `onSendCaps` what that frame says `agent_send` takes. */
+export async function openPipe(shim: RemoteShim, hostId: string, timers: Timers, onGrant?: (caps: string[]) => void, onSendCaps?: (caps: unknown) => void): Promise<OpenPipe> {
   const early: PipeMsg[] = [];
   let granted = false;
   let sock: PipeSock | null = null;
@@ -139,6 +152,7 @@ export async function openPipe(shim: RemoteShim, hostId: string, timers: Timers,
           if (caps) {
             granted = true;
             onGrant?.(caps);
+            onSendCaps?.(sendCapsOf(m.frame));
           }
         }
         this.onmessage?.call(this as unknown as WebSocket, { data: m.frame } as MessageEvent);

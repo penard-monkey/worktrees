@@ -1645,13 +1645,25 @@ ${body}
   };
   // The third command's send completes 40 ms late (hello, auth, then requests).
   const { shim, pipes } = fakeShim({ delays: [0, 0, 0, 40, 0] });
+  // `send_caps` off the host's `ok`, as the grant is: what the composer judges.
+  {
+    const caps = { line_breaks: false, max_bytes: 4096, harnesses: { claude: { line_breaks: true, max_bytes: 16384 } } };
+    const sameCaps = JSON.stringify(RJ.sendCapsOf(JSON.stringify({ ok: true, version: "x", proof: "p", device: { caps: ["read"] }, send_caps: caps }))) === JSON.stringify(caps);
+    check(sameCaps, "(remote) sendCapsOf reads what a host's ok frame says agent_send takes");
+    check(RJ.sendCapsOf(JSON.stringify({ ok: true, version: "x", proof: "p", device: { caps: ["read"] } })) === null, "(remote) a host from before send_caps says nothing");
+    check(RJ.sendCapsOf(JSON.stringify({ ok: false, send_caps: caps })) === null && RJ.sendCapsOf("{not json \"send_caps\"") === null, "(remote) only an ok frame counts");
+    const main = fs.readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8");
+    check(/setHostSendCaps\(null\);\s*pipe = await openPipe\([^;]*setRemoteGrant, setHostSendCaps\)/.test(main), "(remote) the app forgets a host's send_caps at each connect and hears the next");
+    const rs = fs.readFileSync(new URL("../../crates/worktrees-cli/src/serve/wire.rs", import.meta.url), "utf8");
+    check(/v\["send_caps"\] = worktrees_core::harness::send_caps\(\);/.test(rs), "(remote) serve's remote ok carries send_caps");
+  }
   const rclk = clock();
   const env = { now: rclk.now, setTimeout: rclk.setTimeout, clearTimeout: rclk.clearTimeout, random: () => 0, visible: () => true };
   const door = ipc.remoteDoor(tauri, "Studio", async ({ onLost }) => {
     let pipe = null;
     const lost = (m) => { const w = pipe?.closedWhy(); onLost(w && !m.includes(w) ? `${m} (${w})` : m); };
     ipc.setRemoteGrant(null);
-    pipe = await RJ.openPipe(shim, "h_studio", { setTimeout: (fn, ms) => setTimeout(fn, ms) }, ipc.setRemoteGrant);
+    pipe = await RJ.openPipe(shim, "h_studio", { setTimeout: (fn, ms) => setTimeout(fn, ms) }, ipc.setRemoteGrant, ipc.setHostSendCaps);
     const sock = WS.connectSocket({
       port: 0, token: pipe.connected.token, remoteHost: pipe.remoteHost, version: VERSION, crypto: webcrypto().crypto, WebSocket: pipe.WebSocket,
       setTimeout: (fn, ms) => setTimeout(fn, ms), clearTimeout: (h) => clearTimeout(h), atob: globalThis.atob, onError: lost, warn: () => {},
