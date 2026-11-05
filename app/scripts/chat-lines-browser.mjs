@@ -141,8 +141,8 @@ for (const [name, engine] of Object.entries({ chromium, webkit })) {
     check(await value(page) === "one two", `${name}: and can be joined`, JSON.stringify(await value(page)));
 
     // Stopped part way, or someone typed: said, whole draft kept, terminal offered.
-    // Emptied says only what it can: that part may have gone.
-    for (const [mode, re, said2] of [["stopped", /about 512 of 2048 bytes/, /Enter was not pressed/], ["foreign", /something other than this message/, /Enter was not pressed/], ["emptied", /about 512 of 2048 bytes/, /may have been submitted/]]) {
+    // Lost and emptied say only what each can: gone, or perhaps gone.
+    for (const [mode, re, said2] of [["stopped", /about 512 of 2048 bytes/, /Enter was not pressed/], ["foreign", /something other than this message/, /Enter was not pressed/], ["lost", /about 512 of 2048 bytes/, /probably submitted/], ["emptied", /about 512 of 2048 bytes/, /may have pressed Enter/]]) {
       page = await open(`&agentsend=${mode}`);
       const n = await bubbles(page);
       await page.locator(FIELD).fill("one\ntwo");

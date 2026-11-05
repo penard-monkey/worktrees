@@ -66,7 +66,8 @@ Read the record, not the screen: `user` entries of the session's transcript unde
    can go wrong.
    Then again with Enter instead of the keystroke, `tmux send-keys Enter`: it must answer
    `stopped: true`, and the words must say that part may have been submitted, because
-   it was. No second record may hold the rest.
+   it was. No second record may hold the rest. Run it with lines of four 40-character
+   tokens as well as code: a token moves whole to the next row.
 8. In 10 rows, send 4 lines. It collapses and must still deliver, and `turns` must show
    the words, not the tags. Note how long `paste again to expand` lasts after Enter,
    and that Stop says to try again rather than "not working" meanwhile.

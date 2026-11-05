@@ -1922,13 +1922,20 @@ const FOREIGN_MS: u64 = 200;
 const CHUNK_MIN_ROWS: usize = 12;
 
 /// How much one tmux call may add, for a pane of `rows` by `cols`, or `None` to
-/// send the message whole. What a call adds must stay inside the box's scrolling
-/// window until the next look, or text someone typed between calls is buried
-/// above it, and then both that look and the proof before Enter read a clean tail.
-/// So a call is counted in ROWS: the window less the row the typed text sits on.
-/// Measured on 2.1.318, the window is 3 rows at 12 to 16, then `rows / 2 - 5`: 7
-/// at 24, 15 at 40, 25 at 60. Claude wraps at `cols - 4`; counting a row as only
-/// three quarters of that leaves room for a line that wraps early at a word.
+/// send the message whole. Two rules rest on it, both counted in ROWS:
+///
+/// - What a call adds must stay inside the box's scrolling window until the next
+///   look, or text someone typed between calls is buried above it, and then both
+///   that look and the proof before Enter read a clean tail.
+/// - After an Enter at the terminal, the next call lands in an empty box, which
+///   already has a row, and it must leave that box short of the window: only a
+///   box shorter than its window can be known to show all it holds ([`drew`]).
+///
+/// So a call adds at most `window - 2` rows, and a row is counted at HALF the
+/// width: Claude wraps at `cols - 4`, at a space where it can (four 40-character
+/// tokens take 4 rows at 80 columns, fixture `tokens-40`), and any two rows a
+/// line wraps to hold at least that width between them. The window is measured
+/// ([`box_window`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Pace {
     rows: usize,
@@ -1943,7 +1950,7 @@ impl Pace {
         if rows < CHUNK_MIN_ROWS {
             return None;
         }
-        Some(Pace { rows: box_window(rows) - 1, width: (cols.saturating_sub(4) * 3 / 4).max(1) })
+        Some(Pace { rows: box_window(rows).saturating_sub(2).max(1), width: (cols.saturating_sub(4) / 2).max(1) })
     }
 
     /// A chunk that fits a call whatever column it starts in.
@@ -1998,8 +2005,11 @@ pub enum FeedStop {
     Unreadable,
     /// The box holds something other than what was pasted: someone typed.
     Foreign,
-    /// The box stayed empty after a paste, for all of [`DRAW_MS`]: someone may
-    /// have pressed Enter at the terminal and submitted what was there.
+    /// The box lost the start of what was pasted, keeping its end: someone
+    /// pressed Enter at the terminal, and what follows would be a second message.
+    Lost,
+    /// The box stayed empty after a paste, for all of [`DRAW_MS`]: a draw that
+    /// never came, or an Enter at the terminal. It cannot say which.
     Emptied,
     /// [`FEED_MAX_MS`] ran out.
     Slow,
@@ -2071,13 +2081,14 @@ fn drew(went_in: &str, held: &str, whole: bool) -> Drew {
 }
 
 /// What `screen`'s box holds, and whether it shows all of it: it does in fewer
-/// rows than its window, the pane's height being the capture's.
-fn read_box(screen: &str) -> Option<(String, bool)> {
+/// rows than its window, known only with the pane's height.
+fn read_box(screen: &str, rows: Option<usize>) -> Option<(String, bool)> {
     let (held, shown) = agent::composer_box(screen)?;
-    Some((held, shown < box_window(screen.lines().count())))
+    Some((held, rows.is_some_and(|r| shown < box_window(r))))
 }
 
-/// The rows of a tall draft's scrolling window in a pane of `rows`.
+/// The rows of a tall draft's scrolling window in a pane of `rows`: measured on
+/// 2.1.318 at all 33 heights the fixtures' README lists.
 fn box_window(rows: usize) -> usize {
     (rows / 2).saturating_sub(5).max(3)
 }
@@ -2124,7 +2135,7 @@ pub fn feed_claude(
                 return Err((pasted, FeedStop::Prompt));
             }
             let mut emptied = false;
-            if let Some((held, whole)) = read_box(&screen) {
+            if let Some((held, whole)) = read_box(&screen, size.map(|(r, _)| r)) {
                 emptied = held.is_empty() && pasted > 0;
                 // Empty only before the first paste; collapsed, it says nothing
                 // of the words but nothing was typed around it.
@@ -2135,7 +2146,7 @@ pub fn feed_claude(
                     Drew::Drawn if !held.is_empty() => break,
                     verdict @ (Drew::Other | Drew::Lost) => {
                         if time.saturating_sub(*other.get_or_insert(time)) >= FOREIGN_MS {
-                            let stop = if verdict == Drew::Lost { FeedStop::Emptied } else { FeedStop::Foreign };
+                            let stop = if verdict == Drew::Lost { FeedStop::Lost } else { FeedStop::Foreign };
                             return Err((pasted, stop));
                         }
                     }
@@ -2159,15 +2170,15 @@ pub fn feed_claude(
 /// in gets a mix submitted. Its rows are the END of the message (a tall draft
 /// scrolls), or, where Claude collapsed it, only placeholders, which say nothing
 /// of the words but do show nothing was typed around them.
-pub fn composer_holds(screen: &str, text: &str) -> bool {
-    box_against(screen, text) == Drew::Drawn
+pub fn composer_holds(screen: &str, text: &str, rows: Option<usize>) -> bool {
+    box_against(screen, text, rows) == Drew::Drawn
 }
 
 /// [`composer_holds`], telling a box still drawing (wait) from one holding
 /// something else. No box, or an empty one, is still drawing: its rows after a
 /// blank line can come well after the first paragraph looks settled.
-fn box_against(screen: &str, text: &str) -> Drew {
-    let (held, whole) = read_box(screen).unwrap_or_default();
+fn box_against(screen: &str, text: &str, rows: Option<usize>) -> Drew {
+    let (held, whole) = read_box(screen, rows).unwrap_or_default();
     if held.is_empty() {
         Drew::Behind
     } else if only_placeholders(&held) {
@@ -2207,6 +2218,7 @@ fn only_placeholders(held: &str) -> bool {
 /// `harness::submit_codex`'s, with the same bounds.
 pub fn submit_claude(
     text: &str,
+    rows: Option<usize>,
     mut capture: impl FnMut() -> Option<String>,
     mut enter: impl FnMut() -> Result<(), String>,
     now: impl Fn() -> u64,
@@ -2233,35 +2245,35 @@ pub fn submit_claude(
                 if tries > 0 && draft.is_none() && agent::prompt_box_on_screen(&screen) {
                     return SendOutcome::Submitted;
                 }
+                // On every look, not only a stable one: someone typing keeps the
+                // draft changing, and is no less someone typing.
+                let verdict = box_against(&screen, text, rows);
+                if matches!(verdict, Drew::Other | Drew::Lost) {
+                    if time.saturating_sub(*other.get_or_insert(time)) >= FOREIGN_MS {
+                        return if verdict == Drew::Lost {
+                            SendOutcome::Lost { pasted: text.len(), total: text.len() }
+                        } else {
+                            SendOutcome::Foreign
+                        };
+                    }
+                } else {
+                    other = None;
+                }
                 if draft.is_none() || draft != previous {
                     stable_since = time;
-                } else if time.saturating_sub(stable_since) >= SEND_STABLE_MS
+                } else if verdict == Drew::Drawn
+                    && time.saturating_sub(stable_since) >= SEND_STABLE_MS
                     && last_enter.is_none_or(|at| time.saturating_sub(at) >= SEND_VERIFY_MS)
                 {
-                    match box_against(&screen, text) {
-                        Drew::Drawn => {
-                            other = None;
-                            if tries == SEND_ENTER_TRIES {
-                                return SendOutcome::Unconfirmed;
-                            }
-                            if let Err(e) = enter() {
-                                return SendOutcome::EnterFailed(e);
-                            }
-                            tries += 1;
-                            last_enter = Some(time);
-                            stable_since = time;
-                        }
-                        Drew::Behind => other = None,
-                        verdict @ (Drew::Other | Drew::Lost) => {
-                            if time.saturating_sub(*other.get_or_insert(time)) >= FOREIGN_MS {
-                                return if verdict == Drew::Lost {
-                                    SendOutcome::Emptied { pasted: text.len(), total: text.len() }
-                                } else {
-                                    SendOutcome::Foreign
-                                };
-                            }
-                        }
+                    if tries == SEND_ENTER_TRIES {
+                        return SendOutcome::Unconfirmed;
                     }
+                    if let Err(e) = enter() {
+                        return SendOutcome::EnterFailed(e);
+                    }
+                    tries += 1;
+                    last_enter = Some(time);
+                    stable_since = time;
                 }
                 previous = draft;
             }
@@ -2990,18 +3002,36 @@ mod tests {
         assert!(t.get() <= FEED_MAX_MS + 100, "{}", t.get());
     }
 
-    /// A pane as it behaves: it hard-wraps at `cols - 4` and shows only the
-    /// last `window` rows of a tall draft. The fake above draws everything,
-    /// which is how a call measured in bytes once passed while it buried text.
+    /// A pane as it behaves (measured on 2.1.318, fixtures `tokens-40`,
+    /// `leading-newline`, `wrapped`): it wraps at `cols - 4`, at a space where it can,
+    /// keeps a leading line break as a blank first row, and shows only the last
+    /// `window` rows of a tall draft. A fake that drew everything, then one that
+    /// hard-wrapped and dropped that newline, each let a real bug pass.
     fn scrolled(text: &str, rows: usize, cols: usize) -> String {
         let width = cols - 4;
         let mut all: Vec<String> = Vec::new();
         for line in text.split('\n') {
-            let chars: Vec<char> = line.chars().collect();
-            if chars.is_empty() {
-                all.push(String::new());
+            let mut row = String::new();
+            let mut used = 0;
+            for word in line.split_inclusive(' ') {
+                let mut left: Vec<char> = word.chars().collect();
+                let fits = left.iter().filter(|c| **c != ' ').count();
+                if used > 0 && used + fits > width {
+                    all.push(std::mem::take(&mut row));
+                    used = 0;
+                }
+                // A word wider than a row is cut where the row ends.
+                while used + left.len() > width && left.len() > width {
+                    let rest = left.split_off(width - used);
+                    row.extend(left.iter());
+                    all.push(std::mem::take(&mut row));
+                    used = 0;
+                    left = rest;
+                }
+                used += left.len();
+                row.extend(left.iter());
             }
-            all.extend(chars.chunks(width).map(|c| c.iter().collect::<String>()));
+            all.push(row);
         }
         let window = (rows / 2).saturating_sub(5).max(3);
         let shown = &all[all.len().saturating_sub(window)..];
@@ -3041,6 +3071,12 @@ mod tests {
         (got, drawn)
     }
 
+    /// Four 40-character tokens: SHAs, paths. Each takes a row of its own at 80
+    /// columns, where a row could hold nearly two (fixture `tokens-40`).
+    fn four_tokens(i: usize) -> String {
+        (0..4).map(|t| format!("{i:04}{t}{}", "t".repeat(35))).collect::<Vec<_>>().join(" ")
+    }
+
     /// Enter at the terminal between the look before call `at` and that call:
     /// the box loses what it held, and the next paste lands in it empty, so its
     /// end still reads as the message. Measured on 2.1.318: the rest was then
@@ -3048,8 +3084,11 @@ mod tests {
     #[test]
     fn enter_at_the_terminal_between_calls_stops_the_send() {
         use std::cell::{Cell, RefCell};
-        for (rows, cols) in [(40usize, 120usize), (24, 80), (16, 80)] {
-            let text = (0..60).map(|i| format!("{i:04}{}", "c".repeat(50))).collect::<Vec<_>>().join("\n");
+        for (rows, cols, width) in [(40usize, 120usize, 54usize), (24, 80, 54), (16, 80, 54), (24, 80, 100), (20, 80, 100), (24, 80, 163), (16, 80, 100), (12, 80, 54), (24, 40, 100), (16, 80, 30), (20, 80, 30)] {
+            let text = (0..60)
+                .map(|i| if width == 163 { four_tokens(i) } else { format!("{i:04}{}", "c".repeat(width - 4)) })
+                .collect::<Vec<_>>()
+                .join("\n");
             let (t, calls) = (Cell::new(0u64), Cell::new(0usize));
             let drawn = RefCell::new(String::new());
             let at = 2;
@@ -3061,15 +3100,15 @@ mod tests {
                         drawn.borrow_mut().clear();
                     }
                     calls.set(calls.get() + 1);
-                    drawn.borrow_mut().push_str(b.concat().trim_start_matches(|c| c == '\n' && calls.get() == at + 1));
+                    drawn.borrow_mut().push_str(&b.concat());
                     Ok(())
                 },
                 || Some(scrolled(&drawn.borrow(), rows, cols)),
                 || t.get(),
                 |ms| t.set(t.get() + ms),
             );
-            assert!(matches!(got, Err((_, FeedStop::Emptied))), "{cols}x{rows}: {got:?}");
-            assert_eq!(calls.get(), at + 1, "{cols}x{rows}: no call after it");
+            assert!(matches!(got, Err((_, FeedStop::Lost))), "{cols}x{rows}, lines of {width}: {got:?}");
+            assert_eq!(calls.get(), at + 1, "{cols}x{rows}, lines of {width}: no call after it");
         }
     }
 
@@ -3082,11 +3121,13 @@ mod tests {
             let w = cols - 4;
             for line in [w + 1, w - 1, w, 100, 2 * w + 3, 30] {
                 // Every row differs, or a stale tail could read as a suffix.
-                let text = (0..40).map(|i| format!("{i:04}{}", "c".repeat(line.saturating_sub(4)))).collect::<Vec<_>>().join("\n");
+                let text = (0..16).map(|i| format!("{i:04}{}", "c".repeat(line.saturating_sub(4)))).collect::<Vec<_>>().join("\n");
+                let tokens = (0..16).map(four_tokens).collect::<Vec<_>>().join("\n");
+                let text = if line == 30 { tokens } else { text };
                 let calls = Pace::of(Some((rows, cols))).map_or(1, |p| claude_batches(&text, p).len());
                 for at in 0..calls {
                     let (got, drawn) = feed_typing(&text, rows, cols, at);
-                    let held = composer_holds(&scrolled(&drawn, rows, cols), &text);
+                    let held = composer_holds(&scrolled(&drawn, rows, cols), &text, Some(rows));
                     assert!(
                         matches!(got, Err((_, FeedStop::Foreign))) || !held,
                         "{cols}x{rows}, lines of {line}, typed before call {at} of {calls}: not seen ({got:?})"
@@ -3114,7 +3155,7 @@ mod tests {
                 for b in &batches {
                     so_far.push_str(&b.concat());
                     let after: usize = so_far.split('\n').map(|l| l.chars().count().div_ceil(wrap).max(1)).sum();
-                    assert!(after - before < window, "{cols}x{rows}: a call adds {} rows, window {window}", after - before);
+                    assert!(after - before + 2 <= window.max(3), "{cols}x{rows}: a call adds {} rows, window {window}", after - before);
                     assert!(b.len() <= CHUNKS_PER_CALL && b.concat().len() <= CHUNK_BYTES);
                     before = after;
                 }
@@ -3140,9 +3181,9 @@ mod tests {
         assert_eq!(drew(&b, "row198row199", false), Drew::Drawn, "scrolled: its end is all it can show");
         assert_eq!(drew(&b, "row198row199", true), Drew::Lost, "not scrolled: its start has gone");
         assert_eq!(drew(&b, "row0row1", true), Drew::Behind, "still drawing");
-        assert!(composer_holds(&boxed("row0row1[...Truncated text #5 +90 lines...]row198row199"), &text));
-        assert!(!composer_holds(multi!("chunked"), "first line\nsecond line\n\nolder words\n\nfourth line"), "its start has gone");
-        assert!(composer_holds(multi!("truncated"), &format!("Reply with only the word OK.\n{}", vec!["q".repeat(100); 150].join("\n"))));
+        assert!(composer_holds(&boxed("row0row1[...Truncated text #5 +90 lines...]row198row199"), &text, Some(40)));
+        assert!(!composer_holds(multi!("chunked"), "first line\nsecond line\n\nolder words\n\nfourth line", Some(40)), "its start has gone");
+        assert!(composer_holds(multi!("truncated"), &format!("Reply with only the word OK.\n{}", vec!["q".repeat(100); 150].join("\n")), Some(40)));
     }
 
     /// Too short for chunks: one paste. A short pane gets smaller calls, so it
@@ -3150,7 +3191,7 @@ mod tests {
     #[test]
     fn a_short_pane_gets_the_message_whole_or_in_smaller_calls() {
         let text = "a\nb\nc\nd\ne\nf";
-        for (size, first) in [(Some((11, 120)), vec![text]), (Some((12, 120)), vec!["a", "\nb", "\nc"]), (Some((40, 120)), vec!["a", "\nb", "\nc", "\nd"]), (None, vec![text])] {
+        for (size, first) in [(Some((11, 120)), vec![text]), (Some((12, 120)), vec!["a", "\nb"]), (Some((40, 120)), vec!["a", "\nb", "\nc", "\nd"]), (None, vec![text])] {
             let mut got: Vec<Vec<String>> = Vec::new();
             let drawn = std::cell::RefCell::new(String::new());
             feed_claude(text, size, |b| { got.push(b.to_vec()); drawn.borrow_mut().push_str(&bare(&b.concat())); Ok(()) }, || Some(boxed(&drawn.borrow())), || 0, |_| {}).unwrap();
@@ -3164,17 +3205,17 @@ mod tests {
     #[test]
     fn the_composer_proves_it_holds_the_message_and_nothing_else() {
         let chunked = "first line\nsecond line\n\nfourth line";
-        assert!(composer_holds(multi!("chunked"), chunked));
-        assert!(!composer_holds(multi!("chunked"), "first line\nsecond line"), "more than the message");
-        assert!(!composer_holds(multi!("chunked"), "a different message\nfourth lin"));
+        assert!(composer_holds(multi!("chunked"), chunked, Some(40)));
+        assert!(!composer_holds(multi!("chunked"), "first line\nsecond line", Some(40)), "more than the message");
+        assert!(!composer_holds(multi!("chunked"), "a different message\nfourth lin", Some(40)));
         let tall: Vec<String> = (0..40).map(|i| format!("tall {i}")).collect();
-        assert!(composer_holds(multi!("tall"), &tall.join("\n")), "a tall draft shows its end");
-        assert!(composer_holds(multi!("rule"), "above a rule\n────────────────\nbelow it"), "a rule in the message is not the box's edge");
-        assert!(composer_holds(multi!("long-line"), &"w".repeat(2000)));
-        assert!(composer_holds(multi!("placeholder"), "one\ntwo\nthree\nfour\nfive"), "collapsed: nothing around it");
-        assert!(!composer_holds(multi!("typed-after"), "first line\nsecond line"), "typed at the terminal as it went in");
-        assert!(!composer_holds(multi!("empty"), "anything"));
-        assert!(!composer_holds(claude_fx!("permission-bash.e.txt"), "anything"), "no box");
+        assert!(composer_holds(multi!("tall"), &tall.join("\n"), Some(40)), "a tall draft shows its end");
+        assert!(composer_holds(multi!("rule"), "above a rule\n────────────────\nbelow it", Some(40)), "a rule in the message is not the box's edge");
+        assert!(composer_holds(multi!("long-line"), &"w".repeat(2000), Some(40)));
+        assert!(composer_holds(multi!("placeholder"), "one\ntwo\nthree\nfour\nfive", Some(40)), "collapsed: nothing around it");
+        assert!(!composer_holds(multi!("typed-after"), "first line\nsecond line", Some(40)), "typed at the terminal as it went in");
+        assert!(!composer_holds(multi!("empty"), "anything", Some(40)));
+        assert!(!composer_holds(claude_fx!("permission-bash.e.txt"), "anything", Some(40)), "no box");
         assert!(only_placeholders("[Pastedtext#1+3lines][Pastedtext#2]"));
         for no in ["[Pastedtext#1+3lines]x", "x[Pastedtext#1]", "[Pastedtext#]", "[Pastedtext#1+lines]", "[Pastedtext#1"] {
             assert!(!only_placeholders(no), "{no}");
@@ -3189,6 +3230,56 @@ mod tests {
         assert_eq!(turn_shown("claude", multi!("empty")), Some(TurnShown::Idle));
     }
 
+    /// Real screens at 80x24: a paste with a leading line break keeps it as a
+    /// blank first row, and tokens wrap to a row each.
+    #[test]
+    fn the_box_is_read_as_claude_draws_it() {
+        assert_eq!(agent::composer_box(multi!("leading-newline")), Some(("abcdef".to_string(), 3)));
+        assert!(composer_holds(multi!("leading-newline"), "\nabc\ndef", Some(24)));
+        let tokens = ["a", "b", "c", "d"].map(|c| c.repeat(40)).join(" ");
+        assert_eq!(agent::composer_box(multi!("tokens-40")).map(|b| b.1), Some(4));
+        assert!(composer_holds(multi!("tokens-40"), &tokens, Some(24)));
+    }
+
+    /// Someone typing steadily through the proof before Enter: a stop, no Enter,
+    /// and not "could not be confirmed" eight seconds later.
+    #[test]
+    fn steady_typing_during_the_final_proof_is_someones_text() {
+        use std::cell::{Cell, RefCell};
+        let (t, enters, typed) = (Cell::new(0u64), Cell::new(0), RefCell::new(String::new()));
+        let out = submit_claude(
+            "first line",
+            Some(40),
+            || {
+                typed.borrow_mut().push('x');
+                Some(boxed(&format!("first line {}", typed.borrow())))
+            },
+            || { enters.set(enters.get() + 1); Ok(()) },
+            || t.get(),
+            |ms| t.set(t.get() + ms),
+        );
+        assert_eq!((out, enters.get()), (SendOutcome::Foreign, 0));
+        assert!(t.get() < 1000, "said at once, not at the timeout: {}", t.get());
+    }
+
+    /// Enter at the terminal after the last paste's look: the start has gone,
+    /// the last paste is still there, and that is what it says.
+    #[test]
+    fn a_box_that_lost_its_start_before_enter_says_so() {
+        use std::cell::Cell;
+        let (t, enters) = (Cell::new(0u64), Cell::new(0));
+        let text = "one\ntwo\nthree\nfour\nfive";
+        let out = submit_claude(
+            text,
+            Some(40),
+            || Some("──────\n❯\u{a0}four\n  five\n──────\n  status\n".to_string()),
+            || { enters.set(enters.get() + 1); Ok(()) },
+            || t.get(),
+            |ms| t.set(t.get() + ms),
+        );
+        assert_eq!((out, enters.get()), (SendOutcome::Lost { pasted: text.len(), total: text.len() }, 0));
+    }
+
     /// A message with a blank line: the draft reads settled at the first blank
     /// row, so the rows after it can come well after. That is a wait, not
     /// someone's text.
@@ -3199,6 +3290,7 @@ mod tests {
         let (t, enters) = (Cell::new(0u64), Cell::new(0));
         let out = submit_claude(
             text,
+            Some(40),
             || {
                 if enters.get() > 0 {
                     Some(multi!("empty").to_string())
@@ -3264,6 +3356,7 @@ mod tests {
         let enters = Cell::new(0);
         let out = submit_claude(
             "first line\nsecond line",
+            Some(40),
             || Some(multi!("typed-after").to_string()),
             || { enters.set(enters.get() + 1); Ok(()) },
             || t.get(),
@@ -3865,6 +3958,7 @@ mod tests {
             let last = RefCell::new(None);
             let out = submit_claude(
                 held,
+                Some(40),
                 || {
                     let next = shown.borrow_mut().next();
                     if let Some(s) = next {

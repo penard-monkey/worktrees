@@ -820,7 +820,7 @@ pub fn agent_send(ctx: &Ctx, repo: String, slug: String, session: String, text: 
         None => return Err(ERR_NO_COMPOSER.into()),
     }
     let outcome = io.deliver(&project, &slug, &lane, &text)?;
-    let stopped = matches!(outcome, SendOutcome::Stopped { .. } | SendOutcome::Foreign | SendOutcome::Emptied { .. });
+    let stopped = matches!(outcome, SendOutcome::Stopped { .. } | SendOutcome::Foreign | SendOutcome::Lost { .. } | SendOutcome::Emptied { .. });
     // A send that stopped is not a send: no stamp, and `ok: false` makes the
     // audit record it as `err`.
     if !stopped {
@@ -834,7 +834,7 @@ pub fn agent_send(ctx: &Ctx, repo: String, slug: String, session: String, text: 
         "note": send_note(&outcome),
     });
     match &outcome {
-        SendOutcome::Stopped { pasted, total, .. } | SendOutcome::Emptied { pasted, total } => {
+        SendOutcome::Stopped { pasted, total, .. } | SendOutcome::Lost { pasted, total } | SendOutcome::Emptied { pasted, total } => {
             sent["pasted"] = json!(pasted);
             sent["total"] = json!(total);
         }
@@ -850,12 +850,12 @@ pub fn agent_send(ctx: &Ctx, repo: String, slug: String, session: String, text: 
 /// What [`AgentIo::deliver`] makes of pasting a message that stopped: refused
 /// when nothing reached the pane, and otherwise an answer that says so.
 fn fed(stop: prompt::FeedStop, pasted: usize, total: usize, session: &str) -> Result<SendOutcome, String> {
-    use prompt::FeedStop::{Emptied, Foreign, Paste, Prompt, Slow, Unreadable};
+    use prompt::FeedStop::{Emptied, Foreign, Lost, Paste, Prompt, Slow, Unreadable};
     if pasted == 0 {
         return Err(match stop {
             Prompt => ERR_PROMPT_UP.to_string(),
             Foreign => ERR_MID_INPUT.to_string(),
-            Unreadable | Slow | Emptied => format!("could not read the agent's screen in {session}"),
+            Unreadable | Slow | Lost | Emptied => format!("could not read the agent's screen in {session}"),
             Paste(e) => e,
         });
     }
@@ -863,6 +863,7 @@ fn fed(stop: prompt::FeedStop, pasted: usize, total: usize, session: &str) -> Re
         Prompt => "a prompt opened".to_string(),
         Unreadable => "the agent's input could not be read".to_string(),
         Foreign => return Ok(SendOutcome::Foreign),
+        Lost => return Ok(SendOutcome::Lost { pasted, total }),
         Emptied => return Ok(SendOutcome::Emptied { pasted, total }),
         Slow => "pasting took too long".to_string(),
         Paste(e) => format!("pasting failed ({e})"),
@@ -984,8 +985,11 @@ fn send_note(o: &SendOutcome) -> String {
             "Not sent: {why} part way, after about {pasted} of {total} bytes. Enter was not pressed, and the first part may be in the agent's input. Look at the terminal and clear it before sending again."
         ),
         SendOutcome::Foreign => "Not sent: the agent's input holds something other than this message, perhaps typed in the terminal while it went in. Enter was not pressed. Look at the terminal and clear it before sending again.".into(),
+        SendOutcome::Lost { pasted, total } => format!(
+            "Not sent whole: with about {pasted} of {total} bytes pasted, the start left the agent's input, so someone seems to have pressed Enter in the terminal. That start was probably submitted, and the last part pasted is still in the input. Enter was not pressed from here. Look at the terminal and clear it before sending again."
+        ),
         SendOutcome::Emptied { pasted, total } => format!(
-            "Not sent whole: the agent's input emptied after about {pasted} of {total} bytes, so that part may have been submitted, if someone pressed Enter in the terminal. Look at the terminal before sending this again."
+            "Not sent: the agent's input stayed empty after about {pasted} of {total} bytes were pasted. It may not have drawn them, or someone may have pressed Enter in the terminal and submitted them. Look at the terminal before sending this again."
         ),
     }
 }
@@ -1376,9 +1380,11 @@ impl AgentIo for Live {
             // takes them as pasted text and not keystrokes. Several small ones,
             // or it collapses the message and the agent reads it as pasted
             // material (`prompt::feed_claude`).
+            // One size for the send: the calls and the proofs must agree on the window.
+            let size = tmux::pane_size(&pane);
             let fed_in = prompt::feed_claude(
                 text,
-                tmux::pane_size(&pane),
+                size,
                 |b| tmux::paste_batch(&pane, b),
                 || tmux::capture_styled(&pane),
                 || t0.elapsed().as_millis() as u64,
@@ -1389,6 +1395,7 @@ impl AgentIo for Live {
             }
             return Ok(prompt::submit_claude(
                 text,
+                size.map(|(rows, _)| rows),
                 || tmux::capture_styled(&pane),
                 || tmux::press_enter(&pane),
                 || t0.elapsed().as_millis() as u64,
@@ -1501,7 +1508,7 @@ impl AgentIo for Live {
         }
         if claude {
             let t0 = std::time::Instant::now();
-            return Ok(prompt::submit_claude(line, capture, || tmux::press_enter(&pane), || t0.elapsed().as_millis() as u64, sleep));
+            return Ok(prompt::submit_claude(line, tmux::pane_size(&pane).map(|(rows, _)| rows), capture, || tmux::press_enter(&pane), || t0.elapsed().as_millis() as u64, sleep));
         }
         // Codex: ONE Enter on the proved line, then what follows — a list it
         // opened, or its composer back empty (run, or refused in its own
@@ -2643,7 +2650,8 @@ mod tests {
         for (outcome, words, said) in [
             (SendOutcome::Stopped { pasted: 512, total: 2048, why: "a prompt opened".into() }, "about 512 of 2048 bytes", "Enter was not pressed"),
             (SendOutcome::Foreign, "something other than this message", "Enter was not pressed"),
-            (SendOutcome::Emptied { pasted: 512, total: 2048 }, "about 512 of 2048 bytes", "may have been submitted"),
+            (SendOutcome::Lost { pasted: 512, total: 2048 }, "about 512 of 2048 bytes", "probably submitted"),
+            (SendOutcome::Emptied { pasted: 512, total: 2048 }, "about 512 of 2048 bytes", "may have pressed Enter"),
         ] {
             let fake = Arc::new(Fake::with(vec![("claude", "repo-lane", pane(vec![fx!("composer-empty.e.txt")], ""))]));
             *fake.outcome.lock().unwrap() = Some(outcome.clone());
@@ -2660,7 +2668,8 @@ mod tests {
     /// Nothing pasted is a plain refusal; something pasted must be said.
     #[test]
     fn a_stop_before_anything_was_pasted_is_a_refusal() {
-        use prompt::FeedStop::{Emptied, Foreign, Paste, Prompt, Unreadable};
+        use prompt::FeedStop::{Emptied, Foreign, Lost, Paste, Prompt, Unreadable};
+        assert_eq!(fed(Lost, 4, 9, "s"), Ok(SendOutcome::Lost { pasted: 4, total: 9 }));
         assert_eq!(fed(Emptied, 4, 9, "s"), Ok(SendOutcome::Emptied { pasted: 4, total: 9 }));
         assert_eq!(fed(Prompt, 0, 9, "s"), Err(ERR_PROMPT_UP.to_string()));
         assert!(fed(Unreadable, 0, 9, "s").unwrap_err().contains("could not read"));

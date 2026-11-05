@@ -4020,6 +4020,29 @@ mod tests {
     /// `DRIVE` budget a device's answer and send are refused `audit-budget`
     /// before their bodies run, and nothing reaches the pane.
     #[test]
+    fn a_send_that_stopped_is_recorded_as_err_through_the_real_row() {
+        use worktrees_core::harness::SendOutcome::{Emptied, Foreign, Lost, Stopped};
+        let mut g = Gate::new("agentstopped", phone_caller());
+        let (pane, session) = g.agent(super::super::tests::CLAUDE_EMPTY);
+        let c = phone(&g.a, 9);
+        let cases = [
+            Stopped { pasted: 4, total: 9, why: "a prompt opened".into() },
+            Foreign,
+            Lost { pasted: 4, total: 9 },
+            Emptied { pasted: 4, total: 9 },
+        ];
+        for (i, outcome) in cases.into_iter().enumerate() {
+            *pane.outcome.lock().unwrap() = Some(outcome);
+            let answer = g.send(&c, &session, "one\ntwo").unwrap();
+            assert_eq!((&answer["delivered"], &answer["stopped"]), (&json!(false), &json!(true)), "{answer}");
+            assert_eq!(g.records("call", "agent_send")[i]["outcome"], json!("err"), "case {i}");
+        }
+        *pane.outcome.lock().unwrap() = None;
+        assert_eq!(g.send(&c, &session, "one\ntwo").map(|v| v["delivered"].clone()), Ok(json!(true)));
+        assert_eq!(g.records("call", "agent_send")[4]["outcome"], json!("ok"), "a send that went is ok");
+    }
+
+    #[test]
     fn past_its_drive_budget_a_devices_answer_and_send_are_refused() {
         let mut g = Gate::new("agentgate", phone_caller());
         let (pane, session) = g.agent(super::super::tests::CLAUDE_TRUST);

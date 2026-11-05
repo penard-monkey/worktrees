@@ -121,8 +121,12 @@ pub enum SendOutcome {
     /// The composer holds something other than the message, so Enter was never
     /// pressed: someone typed at the terminal while it was going in.
     Foreign,
-    /// The composer emptied part way, with `pasted` of `total` bytes in. This
-    /// host pressed no Enter, but someone at the terminal may have.
+    /// The composer lost the start of what was pasted and kept its end, with
+    /// `pasted` of `total` bytes in. This host pressed no Enter; someone did at
+    /// the terminal, so the start was submitted and the end is still there.
+    Lost { pasted: usize, total: usize },
+    /// The composer stayed empty after `pasted` of `total` bytes: a draw that
+    /// never came, or an Enter at the terminal. It cannot say which.
     Emptied { pasted: usize, total: usize },
 }
 
@@ -163,7 +167,8 @@ impl SendOutcome {
             Self::EnterFailed(e) => format!("Text was typed but Enter failed: {e}. Submission is not confirmed. The message copy is left unread if recorded; read it with messages before retrying to avoid duplicates."),
             Self::Stopped { pasted, total, why } => format!("Pasting stopped ({why}) after about {pasted} of {total} bytes. Enter was not pressed; the first part may be in the composer. Check it before resending."),
             Self::Foreign => "The composer held something other than this text, so Enter was not pressed. Check it before resending.".into(),
-            Self::Emptied { pasted, total } => format!("The composer emptied after about {pasted} of {total} bytes, so that part may have been submitted. Check before resending."),
+            Self::Lost { pasted, total } => format!("The composer lost its start with about {pasted} of {total} bytes pasted: someone seems to have pressed Enter there, submitting that start. Enter was not pressed from here. Check before resending."),
+            Self::Emptied { pasted, total } => format!("The composer stayed empty after about {pasted} of {total} bytes. They may not have drawn, or someone may have submitted them. Check before resending."),
         }
     }
 }

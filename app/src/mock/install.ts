@@ -4307,10 +4307,12 @@ Phase 3: Frontend pane and mock harness
       if (mode === "mid") throw "the agent's prompt has unsent text in it (someone is typing there): send nothing until it is empty";
       if (mode === "nocomposer") throw "the agent is not at its prompt (starting, or a screen this host does not recognise): try again shortly";
       // `prompt::feed_claude`'s stop and the proof before Enter: nothing submitted.
-      if (mode === "emptied") {
+      if (mode === "lost" || mode === "emptied") {
         return {
           ok: false, delivered: false, queued: false, harness: mockHarnessAt(mockPlacePath(args.repo, args.slug)), session: args.session, stopped: true,
-          note: "Not sent whole: the agent's input emptied after about 512 of 2048 bytes, so that part may have been submitted, if someone pressed Enter in the terminal. Look at the terminal before sending this again.",
+          note: mode === "lost"
+            ? "Not sent whole: with about 512 of 2048 bytes pasted, the start left the agent's input, so someone seems to have pressed Enter in the terminal. That start was probably submitted, and the last part pasted is still in the input. Enter was not pressed from here. Look at the terminal and clear it before sending again."
+            : "Not sent: the agent's input stayed empty after about 512 of 2048 bytes were pasted. It may not have drawn them, or someone may have pressed Enter in the terminal and submitted them. Look at the terminal before sending this again.",
         };
       }
       if (mode === "stopped" || mode === "foreign") {
