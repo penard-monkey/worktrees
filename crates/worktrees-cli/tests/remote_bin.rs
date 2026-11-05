@@ -224,14 +224,25 @@ fn a_real_waiting_edge_becomes_a_sealed_push_in_the_dry_run() {
     assert_eq!(reg["ok"], json!({ "registered": true }), "{reg}");
     assert_eq!(rpc(&mut con, 4, "push_dry_run", json!({ "on": true }))["ok"]["dry_run"], json!(true));
 
-    // A pane running something called `claude` that shows the prompt. A copy of
-    // bash: AGENTS.md's coreutils trap rules out copying `sleep`.
+    // A pane running something called `claude` that shows the prompt. Compiled,
+    // not copied: macOS 27 SIGKILLs a copy of /bin/bash (137, before it prints a
+    // byte) and Linux's uutils coreutils is one multi-call binary that rejects
+    // its own copy under another name. A fresh binary from `cc` runs on both,
+    // and tmux names its pane by the executable, so `pane_current_command` is
+    // `claude`, as the product reads it.
     let fake = sb.root.join("claude");
-    assert!(std::process::Command::new("cp").arg("/bin/bash").arg(&fake).status().unwrap().success());
+    let src = sb.root.join("claude.c");
+    std::fs::write(&src, FAKE_CLAUDE).unwrap();
+    let cc = std::process::Command::new("cc").arg("-o").arg(&fake).arg(&src).output().expect("a C compiler, which every CI image and Mac has");
+    assert!(cc.status.success(), "cc: {cc:?}");
     let screen = sb.root.join("screen.txt");
     std::fs::write(&screen, include_str!("../../worktrees-core/tests/fixtures/claude-screen/2.1.309/trust.txt")).unwrap();
     let uid = unsafe { libc::getuid() };
-    let sock = sb.root.join(format!("tmux/tmux-{uid}/default"));
+    let sock = sb.tmux.join(format!("tmux-{uid}/default"));
+    // serve finds this socket through `TMUX_TMPDIR`, and tmux measures the path
+    // after resolving it (`/var` -> `/private/var`).
+    let resolved = std::fs::canonicalize(&sb.tmux).unwrap().join(format!("tmux-{uid}/default"));
+    assert!(resolved.as_os_str().len() < 104, "tmux's socket path is too long to connect: {resolved:?}");
     std::fs::create_dir_all(sock.parent().unwrap()).unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(sock.parent().unwrap(), std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -244,7 +255,7 @@ fn a_real_waiting_edge_becomes_a_sealed_push_in_the_dry_run() {
         }
     }
     let _down = Down(&tmux);
-    let cmd = format!("{} -c 'cat {}; while :; do read -t 100 x; done'", fake.display(), screen.display());
+    let cmd = format!("{} {}", fake.display(), screen.display());
     let made = tmux(&["new-session", "-d", "-x", "100", "-y", "40", "-s", "repo-main", "-c", repo.to_str().unwrap(), &cmd]).unwrap();
     assert!(made.status.success(), "{made:?}");
 
@@ -263,3 +274,16 @@ fn a_real_waiting_edge_becomes_a_sealed_push_in_the_dry_run() {
     assert!(!found.contains(&"b2".repeat(32)), "the token is not in the log");
     assert!(!line.contains("repo"), "no name in the line: {line}");
 }
+
+/// The fake agent: print the file named by argv[1], then wait.
+const FAKE_CLAUDE: &str = r#"
+#include <stdio.h>
+#include <unistd.h>
+int main(int argc, char **argv) {
+    FILE *f = argc > 1 ? fopen(argv[1], "r") : NULL;
+    int c;
+    while (f && (c = fgetc(f)) != EOF) putchar(c);
+    fflush(stdout);
+    for (;;) sleep(100);
+}
+"#;

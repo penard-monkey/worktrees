@@ -30,6 +30,8 @@ fn bin() -> &'static str {
 
 pub struct Sandbox {
     pub root: PathBuf,
+    /// serve's `TMUX_TMPDIR`: short, and outside `root` (see `launch`).
+    pub tmux: PathBuf,
     child: Option<Child>,
 }
 
@@ -40,6 +42,7 @@ impl Drop for Sandbox {
             let _ = c.wait();
         }
         let _ = std::fs::remove_dir_all(&self.root);
+        let _ = std::fs::remove_dir_all(&self.tmux);
     }
 }
 
@@ -49,9 +52,17 @@ impl Sandbox {
     pub fn launch(tag: &str) -> (Sandbox, Value) {
         let root = std::env::temp_dir().join(format!("wt-remote-bin-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        for d in ["home", "xdg", "cfg", "tmux"] {
+        for d in ["home", "xdg", "cfg"] {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
+        // A tmux socket path may not pass 104 bytes on macOS, and tmux counts it
+        // AFTER resolving symlinks: `$TMPDIR` there is `/var/folders/xx/<28>/T/`
+        // and `/var` is `/private/var`, so a socket under `root` (100 bytes as
+        // written) is 108 to tmux, and serve's `list-panes` answers "File name
+        // too long" with nothing to show for it. `/tmp` is short on both OSes.
+        let tmux = PathBuf::from(format!("/tmp/wt-rb-{}-{}", std::process::id(), tag));
+        let _ = std::fs::remove_dir_all(&tmux);
+        std::fs::create_dir_all(&tmux).unwrap();
         let child = Command::new(bin())
             .args(["serve", "--config-dir"])
             .arg(root.join("cfg"))
@@ -59,7 +70,7 @@ impl Sandbox {
             .env("XDG_CONFIG_HOME", root.join("xdg"))
             .env("SHELL", "/bin/sh")
             .env_remove("TMUX")
-            .env("TMUX_TMPDIR", root.join("tmux"))
+            .env("TMUX_TMPDIR", &tmux)
             .env_remove("WORKTREES_CODEX_PERMISSIONS")
             .env_remove("WORKTREES_PI_PROJECT_TRUST")
             .stdin(Stdio::null())
@@ -68,7 +79,7 @@ impl Sandbox {
             .spawn()
             .expect("spawn worktrees serve");
         let pid = child.id();
-        let sb = Sandbox { root, child: Some(child) };
+        let sb = Sandbox { root, tmux, child: Some(child) };
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             if let Some(v) = std::fs::read(sb.root.join("cfg/serve.json")).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) {

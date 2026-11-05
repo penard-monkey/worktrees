@@ -46,7 +46,10 @@ jobs:
       - name: bash 3.2 parse gate (real 3.2 via docker) — the shim
         run: docker run --rm -v "$PWD:/s" bash:3.2 bash -n /s/bin/worktrees
 
-  # Rust unit tests + build (fast, no tmux).
+  # Rust unit tests + build. macOS installs tmux: ubuntu-latest ships it, and
+  # without it every test that skips when `tmux -V` fails (the push
+  # waiting-edge witness among them) returned early on macOS, so a regression
+  # there stayed green in CI while failing on a Mac.
   rust:
     strategy:
       fail-fast: false
@@ -55,6 +58,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+      - name: install tmux (macos)
+        if: runner.os == 'macOS'
+        run: brew install tmux
       - name: build + test core/cli (GitHub runners ship Rust stable)
         run: |
           cargo build -p worktrees-core -p worktrees-cli --locked
