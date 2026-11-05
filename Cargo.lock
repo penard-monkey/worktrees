@@ -49,7 +49,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "app"
-version = "0.47.0"
+version = "0.48.0"
 dependencies = [
  "getrandom 0.3.4",
  "hmac",
@@ -5718,7 +5718,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "worktrees-api"
-version = "0.47.0"
+version = "0.48.0"
 dependencies = [
  "getrandom 0.3.4",
  "http-body-util",
@@ -5735,7 +5735,7 @@ dependencies = [
 
 [[package]]
 name = "worktrees-cli"
-version = "0.47.0"
+version = "0.48.0"
 dependencies = [
  "bytes",
  "futures-util",
@@ -5765,7 +5765,7 @@ dependencies = [
 
 [[package]]
 name = "worktrees-core"
-version = "0.47.0"
+version = "0.48.0"
 dependencies = [
  "libc",
  "serde",
@@ -5775,7 +5775,7 @@ dependencies = [
 
 [[package]]
 name = "worktrees-remote"
-version = "0.47.0"
+version = "0.48.0"
 dependencies = [
  "futures-util",
  "getrandom 0.3.4",
