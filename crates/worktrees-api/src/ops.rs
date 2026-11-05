@@ -116,49 +116,27 @@ pub fn drop_reference(
     into_session: String,
     provider: Option<String>,
 ) -> Result<String, String> {
-    let provider = provider.unwrap_or_else(|| worktrees_core::provider::CLAUDE.id.to_string());
-    let prov = worktrees_core::provider::by_id(&provider).ok_or_else(|| format!("unknown agent: {provider}"))?;
-    let project = Project::discover(std::path::Path::new(&repo)).map_err(|e| e.msg)?;
-    let into = Project::discover(std::path::Path::new(&into_repo)).map_err(|e| e.msg)?;
-    let places = project.place_index();
-    if !places.iter().any(|p| p.slug == slug) {
-        return Err(format!("no such place: {slug}"));
-    }
-    let plan = worktrees_core::reach::plan_drop(
-        &worktrees_core::registry::read_lenient(),
-        worktrees_core::reach::user_level(),
-        &project.main_root,
-        &slug,
-        &into.main_root,
-        prov.id,
-    )?;
-    let text = match plan {
-        // `mcpsetup::claude_json_path()` rather than hand-building it from
-        // $HOME: that module owns where claude's config lives.
-        worktrees_core::reach::Drop::Token => drop_token(&places, &slug, &into.main_root, &into_slug, &mcpsetup::claude_json_path())?,
-        worktrees_core::reach::Drop::Address(a) => {
-            // Codex and pi: refuse while the agent is on an approval or a
-            // question. A Claude permission prompt ignores a BRACKETED paste
-            // (tmux::paste_to_ai); that is not verified for Codex's or pi's
-            // composer, so a paste there could read as the answer.
-            if prov.id != worktrees_core::provider::CLAUDE.id {
-                let panes = tmux::PaneList::fetch();
-                let probes = worktrees_core::agent::live_probes_in(panes.as_ref());
-                let scan = worktrees_core::harness::Scan { probes: &probes, panes: panes.as_ref() };
-                let path = into.place_dir(&into_slug);
-                let waiting = worktrees_core::harness::place_activities(&into, &into_slug, &path, &scan)
-                    .into_iter()
-                    .any(|(a, r)| a.provider().id == prov.id && r.state == worktrees_core::activity::State::Waiting);
-                if waiting {
-                    return Err(format!(
-                        "{}'s {} is waiting on an approval or a question — drop it again once it has an answer",
-                        into_slug, prov.label
-                    ));
-                }
-            }
-            a
+    let r = reference_for(&repo, &slug, &into_repo, &into_slug, provider)?;
+    let (text, prov, into) = (r.text, r.prov, r.into);
+    // Codex and pi: refuse while the agent is on an approval or a
+    // question. A Claude permission prompt ignores a BRACKETED paste
+    // (tmux::paste_to_ai); that is not verified for Codex's or pi's
+    // composer, so a paste there could read as the answer.
+    if prov.id != worktrees_core::provider::CLAUDE.id {
+        let panes = tmux::PaneList::fetch();
+        let probes = worktrees_core::agent::live_probes_in(panes.as_ref());
+        let scan = worktrees_core::harness::Scan { probes: &probes, panes: panes.as_ref() };
+        let path = into.place_dir(&into_slug);
+        let waiting = worktrees_core::harness::place_activities(&into, &into_slug, &path, &scan)
+            .into_iter()
+            .any(|(a, r)| a.provider().id == prov.id && r.state == worktrees_core::activity::State::Waiting);
+        if waiting {
+            return Err(format!(
+                "{}'s {} is waiting on an approval or a question — drop it again once it has an answer",
+                into_slug, prov.label
+            ));
         }
-    };
+    }
     // Spaces on BOTH sides. The client's extractor requires whitespace (or
     // start-of-input) before the `@`, and this cannot see the prompt to know
     // whether there already is any; the trailing one closes the `\b` and
@@ -170,6 +148,50 @@ pub fn drop_reference(
     tmux::paste_to_ai(&into_session, prov.match_word, &format!(" {text} "))?;
     applog("info", &format!("drop_reference: {text} -> {into_session} ({})", prov.id));
     Ok(text)
+}
+
+/// `place_reference`: what a drop of `slug` into the agent running in
+/// `into_slug` would type, typed nowhere. The chat's composer puts it in the
+/// draft, so the person sends it with the rest of their message. The same
+/// refusals as a drop, except a waiting pane: nothing reaches a pane here.
+/// A row of its own, not an argument on `drop_reference`: an older host ignores
+/// an unknown argument and would paste.
+pub fn place_reference(repo: String, slug: String, into_repo: String, into_slug: String, provider: Option<String>) -> Result<String, String> {
+    Ok(reference_for(&repo, &slug, &into_repo, &into_slug, provider)?.text)
+}
+
+struct Reference {
+    text: String,
+    prov: &'static worktrees_core::provider::Provider,
+    into: Project,
+}
+
+/// The one decision behind [`drop_reference`] and [`place_reference`]:
+/// `reach::plan_drop`, then the token or the address it chose.
+fn reference_for(repo: &str, slug: &str, into_repo: &str, into_slug: &str, provider: Option<String>) -> Result<Reference, String> {
+    let provider = provider.unwrap_or_else(|| worktrees_core::provider::CLAUDE.id.to_string());
+    let prov = worktrees_core::provider::by_id(&provider).ok_or_else(|| format!("unknown agent: {provider}"))?;
+    let project = Project::discover(std::path::Path::new(repo)).map_err(|e| e.msg)?;
+    let into = Project::discover(std::path::Path::new(into_repo)).map_err(|e| e.msg)?;
+    let places = project.place_index();
+    if !places.iter().any(|p| p.slug == slug) {
+        return Err(format!("no such place: {slug}"));
+    }
+    let plan = worktrees_core::reach::plan_drop(
+        &worktrees_core::registry::read_lenient(),
+        worktrees_core::reach::user_level(),
+        &project.main_root,
+        slug,
+        &into.main_root,
+        prov.id,
+    )?;
+    let text = match plan {
+        // `mcpsetup::claude_json_path()` rather than hand-building it from
+        // $HOME: that module owns where claude's config lives.
+        worktrees_core::reach::Drop::Token => drop_token(&places, slug, &into.main_root, into_slug, &mcpsetup::claude_json_path())?,
+        worktrees_core::reach::Drop::Address(a) => a,
+    };
+    Ok(Reference { text, prov, into })
 }
 
 /// The `@<server>:place://…` token for `slug` (among `places`, the DRAGGED

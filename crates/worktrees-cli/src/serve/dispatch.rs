@@ -1,4 +1,4 @@
-//! The 197 commands, each with its exposure, capability and objects, in ONE
+//! The 198 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -855,6 +855,9 @@ commands! { cx, a;
     drop_reference: Engine [write, place(repo, slug), place(into_repo, into_slug), session_of(into_session, into_repo, into_slug)] => ops::drop_reference(
         a.get("repo")?, a.get("slug")?, a.get("into_repo")?, a.get("into_slug")?, a.get("into_session")?, a.get("provider")?,
     ),
+    place_reference: Engine [read, place(repo, slug), place(into_repo, into_slug)] => ops::place_reference(
+        a.get("repo")?, a.get("slug")?, a.get("into_repo")?, a.get("into_slug")?, a.get("provider")?,
+    ),
     cross_project_status: Engine [read, filtered(by_project)] => ops::cross_project_status(),
     set_cross_project: HostConsole => ops::set_cross_project(a.get("level")?),
     planning_status: Engine [read, filtered(by_project)] => ops::planning_status(),
@@ -1270,7 +1273,7 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 197 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 198 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six, the slots pair and
     /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
@@ -1288,7 +1291,7 @@ mod tests {
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 197, "the table has 197 commands");
+        assert_eq!(TABLE.len(), 198, "the table has 198 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1695,7 +1698,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 63), ("write", 23), ("admin", 40), ("console", 41), ("stream", 10), ("instruct", 8), ("answer", 2),
+            ("read", 64), ("write", 23), ("admin", 40), ("console", 41), ("stream", 10), ("instruct", 8), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 3),
         ]
         .into();

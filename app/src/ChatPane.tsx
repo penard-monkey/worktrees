@@ -17,10 +17,11 @@ import {
   activityMoved, boxesOf, bytes, callFetches, callKeys, callsSay, callsWords, cardDigits, cardKey, cardTakesFocus, choiceOpen, choiceWay, clockMs, clockOf,
   dayLabel, draftIsOwnSend, draftProblem, fieldWords, foldCalls, itemsOf, keyFocusOf, lineDiff, loadPrompt, loadTurns, noSessionYet, permissionAnswerWords,
   promptBody, questionAnswerWords, selectChoice, sendAnswer, sendDraft, sendMany, setAnswerText, setBoxText, setDraft,
-  splitAtRule, stopTurn, ticksOf, toggleCall, toggleTick, turnsUnsupported, underRoot, useChat, SEND_MAX,
+  splitAtRule, stopTurn, ticksOf, toggleCall, toggleTick, tookReference, turnsUnsupported, underRoot, useChat, SEND_MAX,
   type AskedStep, type CallRead, type Item, type PromptChoice, type PromptDetail, type ReadablePrompt, type Target, type ToolCall,
 } from "./chat";
 import { previewOf, type ChoiceWay } from "./chat";
+import { referenceInDraft } from "./dnd";
 // What a screen reader is told (VoiceOver): its own line, so the lanes' imports merge apart.
 import { announcement, gather, hear, promptKeyOf, type Bundle, type ChatView, type Heard } from "./chat";
 // Attachments (docs/proposals/chat-attachments.md): their own line, for the same reason.
@@ -214,7 +215,7 @@ export function ChatPane(props: ChatPaneProps) {
   };
 
   return (
-    <div className="chat" data-testid="chat" onKeyDown={onKeyDown}>
+    <div className="chat" data-testid="chat" data-drop="mention" data-drop-provider={provider} data-drop-into="chat" onKeyDown={onKeyDown}>
       <div className="sr-only" aria-live="polite" aria-atomic="true" data-testid="chat-announce"><span key={said.n}>{said.text}</span></div>
       <div className="chat-scrollwrap">
       {/* Focusable by a click (not by Tab): a click in the transcript keeps
@@ -1146,6 +1147,29 @@ function Composer(props: {
     ro.observe(el);
     return () => ro.disconnect();
   }, [field, fit]);
+
+  // A place dropped on the chat (App's `commitDrop`): only here is the cursor
+  // known. By id, because StrictMode runs this twice on a mount that finds one.
+  const tookInsert = useRef(0);
+  const caret = useRef<{ at: number; draft: string } | null>(null);
+  useLayoutEffect(() => {
+    const el = field.current;
+    if (!v.insert || !el || tookInsert.current === v.insert.id) return;
+    tookInsert.current = v.insert.id;
+    const next = referenceInDraft(text, el.selectionStart, el.selectionEnd, v.insert.text);
+    caret.current = { at: next.caret, draft: next.draft };
+    tookReference(target.path, next.draft);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the insert is the trigger
+  }, [v.insert]);
+  useLayoutEffect(() => {
+    const el = field.current;
+    // Once the field holds the draft it is for: on a mount that takes an insert
+    // this runs first with the old one, which would clamp the caret.
+    if (!el || caret.current?.draft !== text) return;
+    el.focus({ preventScroll: true });
+    el.setSelectionRange(caret.current.at, caret.current.at);
+    caret.current = null;
+  }, [text, field]);
 
   const preparing = v.attachments.some((a) => a.state === "preparing");
   const canSend = (!!text.trim() || files > 0) && !problem && !props.waiting && !v.sending && !preparing;

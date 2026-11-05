@@ -1595,6 +1595,25 @@ mod tests {
         assert!(try_row("diagnostics", &adm, &ag, json!({}), &w).is_ok(), "a global admin row needs no scope");
     }
 
+    /// A drop on the chat only asks for words, so a read device may, within
+    /// its scope on BOTH ends, and the row that pastes stays out of its reach.
+    #[test]
+    fn a_reference_for_the_draft_is_a_read_and_keeps_to_the_scope() {
+        let t = two("reference");
+        let (cx, g) = phone(&[Read], &[&t.a]);
+        let w = t.world();
+        let ask = |from: &Path, into: &Path| {
+            try_row("place_reference", &cx, &g, json!({ "repo": s(from), "slug": "feat", "into_repo": s(into), "into_slug": "(main)" }), &w)
+        };
+        assert!(ask(&t.a, &t.a).is_ok());
+        assert!(ask(&t.b, &t.a).is_err(), "a place outside the scope");
+        assert!(ask(&t.a, &t.b).is_err(), "into a place outside the scope");
+        let paste = try_row("drop_reference", &cx, &g, json!({
+            "repo": s(&t.a), "slug": "feat", "into_repo": s(&t.a), "into_slug": "(main)", "into_session": "x",
+        }), &w);
+        assert_eq!(paste.unwrap_err().wire(), json!(ERR_DENIED));
+    }
+
     #[test]
     fn updating_a_harness_requires_admin_even_without_a_project() {
         let t = two("harness-update");

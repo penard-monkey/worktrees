@@ -195,3 +195,28 @@ fn every_provider_is_polled_through_a_public_ctx() {
     }
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// A drop on the chat asks for the words a drop would type. No tmux server is
+/// involved: an address needs no session, and a slug that names no place is
+/// refused as `drop_reference` refuses it.
+#[test]
+fn a_place_reference_answers_with_the_words_and_types_nothing() {
+    let dir = std::env::temp_dir().join(format!("wt-place-ref-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let git = |args: &[&str]| {
+        let ok = std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap().status.success();
+        assert!(ok, "git {args:?}");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["-c", "user.name=x", "-c", "user.email=x@example.invalid", "commit", "-q", "--allow-empty", "-m", "init"]);
+    let root = dir.canonicalize().unwrap().to_string_lossy().into_owned();
+    let ask = |slug: &str, provider: &str| {
+        worktrees_api::ops::place_reference(root.clone(), slug.into(), root.clone(), "(main)".into(), Some(provider.into()))
+    };
+    let said = ask("(main)", "codex").unwrap();
+    assert!(said.starts_with("place ") && said.ends_with("(main)"), "{said}");
+    assert_eq!(ask("nope", "codex").unwrap_err(), "no such place: nope");
+    assert_eq!(ask("(main)", "nobody").unwrap_err(), "unknown agent: nobody");
+    let _ = std::fs::remove_dir_all(&dir);
+}
