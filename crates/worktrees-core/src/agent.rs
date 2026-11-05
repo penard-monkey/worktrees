@@ -43,6 +43,11 @@ pub struct ClaudeProbe {
     /// `interactive`, `background`, …
     #[serde(default)]
     pub kind: Option<String>,
+    /// `cli` for the pane's Claude; `sdk-cli` for `claude -p`, `sdk-py` for
+    /// Python Agent SDK children. A child inherits the parent's tmux address,
+    /// so the pane alone cannot distinguish it from the agent that owns it.
+    #[serde(default)]
+    pub entrypoint: Option<String>,
     #[serde(default)]
     pub version: Option<String>,
     /// Set when this session handed its turn to a background job. `Option` is
@@ -83,6 +88,15 @@ pub struct LivePane {
 }
 
 impl ClaudeProbe {
+    /// Whether this probe represents an agent in a place. Claude's SDK/print
+    /// children inherit the interactive parent's tmux pane and cwd, and may
+    /// even say `kind: interactive`; their `entrypoint` identifies them. Older
+    /// probes without that field still count. A background job has its own
+    /// probe and must keep reporting work after its parent parks a turn.
+    pub fn represents_place_agent(&self) -> bool {
+        self.kind.as_deref() == Some("background") || self.entrypoint.as_deref().is_none_or(|e| e == "cli")
+    }
+
     /// The directory this Claude is in, which every probe-to-place match keys
     /// on (`agents_at`, the dots, `place_status`): its live pane's once
     /// located, else the `cwd` it started in. Claude never rewrites `cwd`, so
@@ -187,7 +201,7 @@ pub fn effective_state(p: &ClaudeProbe) -> String {
 }
 
 /// Scan `<config dir>/sessions/*.json` for EVERY config root and keep only
-/// LIVE-pid probes with a cwd. Every failure degrades to "skipped"; the ones a
+/// LIVE-pid place-agent probes with a cwd. Every failure degrades to "skipped"; the ones a
 /// caller should be able to explain are in [`scan_probes`].
 ///
 /// Every root, not just `~/.claude`: a profiled session writes its probes under
@@ -300,7 +314,7 @@ pub fn scan_probes_in(roots: &[std::path::PathBuf], pid_alive: impl Fn(i32) -> b
                     Ok(mut probe) => {
                         probe.root = root.clone();
                         // A dead pid (a crashed session's stale file) → skip.
-                        if !probe.cwd.is_empty() && pid_alive(probe.pid) {
+                        if !probe.cwd.is_empty() && pid_alive(probe.pid) && probe.represents_place_agent() {
                             out.probes.push(probe);
                         }
                         continue;
@@ -366,7 +380,7 @@ fn rank(state: &str) -> u8 {
 pub fn agents_at(probes: &[ClaudeProbe], path: &str) -> Vec<Agent> {
     let mut out: Vec<Agent> = probes
         .iter()
-        .filter(|p| p.place_dir() == path)
+        .filter(|p| p.represents_place_agent() && p.place_dir() == path)
         .map(|p| Agent {
             provider: "claude",
             state: effective_state(p),
@@ -726,6 +740,11 @@ fn is_box_edge(t: &str) -> bool {
 mod tests {
     use super::*;
 
+    const INTERACTIVE: &str = include_str!("../tests/fixtures/claude-probes/interactive.json");
+    const SDK_PY_CHILD: &str = include_str!("../tests/fixtures/claude-probes/sdk-py-child.json");
+    const SDK_CLI_CHILD: &str = include_str!("../tests/fixtures/claude-probes/sdk-cli-child.json");
+    const BACKGROUND: &str = include_str!("../tests/fixtures/claude-probes/background.json");
+
     fn probe(s: &str) -> ClaudeProbe {
         serde_json::from_str(s).expect("probe must parse")
     }
@@ -1036,6 +1055,42 @@ mod tests {
         // `agent` JSON leaves absent fields out rather than writing nulls.
         let j = serde_json::to_value(&agents_at(&probes, "/w/b")[0]).unwrap();
         assert_eq!(j, serde_json::json!({"provider":"claude","state":"busy","pid":9}));
+    }
+
+    /// A print or SDK review launched by the pane's Claude inherits its tmux
+    /// address. Even when its probe claims `busy`, it cannot stand for that
+    /// pane in the place rows or the shared place_status activity derivation.
+    #[test]
+    fn sdk_children_do_not_become_the_places_agent() {
+        let own = probe(INTERACTIVE);
+        for child in [probe(SDK_PY_CHILD), probe(SDK_CLI_CHILD)] {
+            for probes in [vec![child.clone(), own.clone()], vec![own.clone(), child.clone()]] {
+                let agents = agents_at(&probes, "/w/probe");
+                assert_eq!(agents.iter().map(|a| a.pid).collect::<Vec<_>>(), [own.pid]);
+                let activity = crate::activity::claude_activity(&probes, "/w/probe").unwrap();
+                assert_eq!(activity.state, crate::activity::State::Idle);
+                assert_eq!(activity.session.as_deref(), Some("wt-probe"));
+            }
+            assert!(agents_at(&[child.clone()], "/w/probe").is_empty());
+            assert!(crate::activity::claude_activity(&[child], "/w/probe").is_none());
+        }
+        // A parked job's own background probe is still a place agent.
+        let agents = agents_at(&[own, probe(BACKGROUND)], "/w/probe");
+        assert_eq!(agents.iter().map(|a| a.pid).collect::<Vec<_>>(), [1004, 1002]);
+    }
+
+    #[test]
+    fn scan_keeps_the_interactive_probe_and_background_job_not_sdk_children() {
+        let root = probe_root("interactive-owner");
+        for (name, body) in [("1001", SDK_PY_CHILD), ("1002", INTERACTIVE), ("1003", SDK_CLI_CHILD), ("1004", BACKGROUND)] {
+            std::fs::write(root.join(format!("sessions/{name}.json")), body).unwrap();
+        }
+        let scan = scan_probes_in(std::slice::from_ref(&root), |_| true);
+        let mut pids = scan.probes.iter().map(|p| p.pid).collect::<Vec<_>>();
+        pids.sort_unstable();
+        assert_eq!(pids, [1002, 1004]);
+        assert!(scan.unreadable.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     // ── the unsent prompt ───────────────────────────────────────────────────

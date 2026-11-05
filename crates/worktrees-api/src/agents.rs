@@ -1245,9 +1245,10 @@ pub fn lane_probe<'a>(probes: &'a [agent::ClaudeProbe], lane: &Lane) -> Option<&
     let named = |p: &agent::ClaudeProbe| p.tmux.as_deref().and_then(agent::session_name) == Some(lane.session.as_str());
     probes
         .iter()
+        .filter(|p| p.represents_place_agent())
         .find(|p| pane(p) && named(p))
-        .or_else(|| probes.iter().find(|p| pane(p) && p.live.is_some()))
-        .or_else(|| probes.iter().find(|p| named(p)))
+        .or_else(|| probes.iter().filter(|p| p.represents_place_agent()).find(|p| pane(p) && p.live.is_some()))
+        .or_else(|| probes.iter().filter(|p| p.represents_place_agent()).find(|p| named(p)))
 }
 
 /// The harness's reading of the place, for a send into `lane`. The harness
@@ -3089,6 +3090,24 @@ mod moved_tests {
         // And nothing else is.
         let probes = vec![probe("new-(main)-x:@1.%1150", "/z", "prefix"), probe("old-(main):@1.%11", "/z", "near")];
         assert_eq!(sid(lane_probe(&probes, &lane)), None);
+    }
+
+    /// The review's Python SDK process and a `claude -p` child inherit the
+    /// pane id and session name, but neither owns the interactive transcript.
+    #[test]
+    fn a_lanes_probe_is_its_interactive_claude_in_either_scan_order() {
+        let own = agent::parse_probe(include_bytes!("../../worktrees-core/tests/fixtures/claude-probes/interactive.json")).unwrap();
+        let sdk = agent::parse_probe(include_bytes!("../../worktrees-core/tests/fixtures/claude-probes/sdk-py-child.json")).unwrap();
+        let print = agent::parse_probe(include_bytes!("../../worktrees-core/tests/fixtures/claude-probes/sdk-cli-child.json")).unwrap();
+        let lane = Lane { harness: "claude", session: "wt-probe".into(), pane: "%0".into() };
+        let here = PaneList::from_panes(worktrees_core::tmux::parse_pane_rows("wt-probe\t/w/probe\t2.1.318\t\t\t%0"));
+        for child in [sdk, print] {
+            for mut probes in [vec![child.clone(), own.clone()], vec![own.clone(), child.clone()]] {
+                agent::locate(&mut probes, &here);
+                assert_eq!(lane_probe(&probes, &lane).and_then(|p| p.session_id.as_deref()), own.session_id.as_deref());
+            }
+            assert!(lane_probe(&[child], &lane).is_none());
+        }
     }
 
     /// Every Claude on the machine writes its probe into the one
