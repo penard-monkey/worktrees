@@ -324,13 +324,19 @@ if (S.SETTINGS_REV !== 5) fail(`SETTINGS_REV is ${S.SETTINGS_REV}, expected 5`);
 }
 
 // ── 7. one arm ──────────────────────────────────────────────────────────────
+// Files with an arm of their own, and why. A pure function a check script
+// loads alone (a data: module may not import useArmed) whose arm is a TYPED
+// line pressed twice, not a button: the chat's slash commands (#610).
+const OWN_ARM = {
+  "slash.ts": "the chat's slash commands: Enter twice on the same typed line, a pure step slashmenu-check loads alone",
+};
 {
   const offenders = [];
   const walk = (dir) => {
     for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
       const p = path.join(dir, e.name);
       if (e.isDirectory()) { if (e.name !== "mock") walk(p); continue; }
-      if (!/\.tsx?$/.test(e.name) || e.name === "useArmed.ts") continue;
+      if (!/\.tsx?$/.test(e.name) || e.name === "useArmed.ts" || OWN_ARM[e.name]) continue;
       const src = fs.readFileSync(p, "utf8");
       if (/setTimeout\(\(\) => set[A-Z]\w*Armed\(/.test(src) || /const (?:[A-Z_]+_)?ARM_MS = /.test(src) || /\bset[A-Z]?\w*Armed\(true\)/.test(src)) offenders.push(e.name);
     }
@@ -338,6 +344,16 @@ if (S.SETTINGS_REV !== 5) fail(`SETTINGS_REV is ${S.SETTINGS_REV}, expected 5`);
   walk(here("../src"));
   if (offenders.length) fail(`a component keeps its own two-click arm (${offenders.join(", ")}) — use useArmed, whose arm expires`);
   else ok("every two-click arm is useArmed's");
+  // An arm that is not a component's button, kept on purpose — and held to
+  // the two things the rule is for: it EXPIRES, on useArmed's one number.
+  const armMs = (src) => src.match(/export const ARM_MS = (\d+);/)?.[1];
+  const shared = armMs(read("../src/useArmed.ts"));
+  for (const [file, why] of Object.entries(OWN_ARM)) {
+    const src = read(`../src/${file}`);
+    if (armMs(src) !== shared) fail(`${file} keeps its own arm (${why}), but its ARM_MS (${armMs(src)}) is not useArmed's (${shared})`);
+    else if (!/now <= armed\.until/.test(src)) fail(`${file} keeps its own arm (${why}), but no longer checks its expiry (\`now <= armed.until\`)`);
+    else ok(`${file}'s own arm expires, on useArmed's ${shared} ms (${why})`);
+  }
 }
 
 // ── 8. grants ───────────────────────────────────────────────────────────────
