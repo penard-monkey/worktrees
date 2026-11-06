@@ -201,7 +201,29 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   SessionEnd, after an answer that used it, or once no prompt is up), and
   `agent_prompt` reads a clipped prompt (`prompt::clipped`) only beside a
   record that AGREES with the screen, as `detail`, which the fingerprint
-  covers; a plan with no record falls back to the file its footer names,
+  covers. **The same record is sent as `asked` on every readable Claude
+  prompt it agrees with** (`feat/prompt-asked`, iOS prompt-display §4):
+  `{tool, input, from: "hook", cwd?, current?, done?}`, `cwd` being the
+  hook's (`Asked.cwd`), `current`/`done` an AskUserQuestion's question on
+  screen and its `☒` tabs. A clipped prompt's `asked` is its `detail` plus
+  `cwd`; a whole prompt has `asked` and NO `detail`, and the fingerprint
+  covers whichever it has. `prompt::call_agrees` is the per-tool rule and
+  the only gate: AskUserQuestion (header among the tabs, question text,
+  `multiSelect`, option labels in order — only the free-text row and `Chat
+  about this` may follow, and exactly ONE question may match), Bash (the
+  rows between the dashed rules EQUAL the command; a clipped prompt's only
+  end it), Edit/MultiEdit/Write (`diff_in`), ExitPlanMode (the plan's head).
+  **Left out, on purpose:** an MCP or any other tool (its input is on no
+  row, and the hook fires as each prompt comes up, not at once — measured
+  on 2.1.319, `claude-screen/2.1.319/README.md` — so the newest record is
+  right only while the hook wrote one: an oversize input, a failed hook or a
+  Claude from before the plugin leaves the last same-tool record, which
+  nothing on screen can refute); WebFetch (a 2.1.319 sub-agent's prompt has
+  no key hints, so nothing reads it, and its url row carries a trailing `/`
+  the call lacks); WebSearch (no screen captured); NotebookEdit; Bash drawn
+  with no dashed rules (no fixture). A whole prompt's record goes with the
+  answer that used it, except an AskUserQuestion's, which serves the form's
+  next question and goes with the "no prompt is up" sweep; a plan with no record falls back to the file its footer names,
   read through `safepath::safe_under`. The hook NEVER decides: its command
   discards stdout and ends `|| true`, because exit 2 or a printed decision
   would deny the user's prompt. Anything else that cannot be read whole is

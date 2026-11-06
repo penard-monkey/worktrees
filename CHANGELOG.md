@@ -5,6 +5,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+
+- **A Claude prompt can now come with the call Claude made.** `agent_prompt` sends it as `asked` — the tool, its whole input and the folder it asked from — when the screen agrees with it: a question (which of its questions is up, and which are answered), a Bash command, an Edit, MultiEdit or Write, a plan. A client can then draw the question, the command or the diff as Claude meant it instead of as the terminal drew it. The choices are still the screen's and are answered by number. A prompt whose call does not match the screen, and every other tool (an MCP tool's input is never on the screen to check), carries none.
+
 ## [0.48.0] - 2026-11-05
 
 ### Added

