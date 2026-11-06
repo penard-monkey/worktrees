@@ -1,0 +1,40 @@
+
+ ▐▛███▛█   Claude Code v2.1.319
+▝▜██████▀  Sonnet 5.5 · Claude Max
+ ▝▝   ▝▝   /private/tmp/claude-501/e2e/repo
+
+
+❯ Reply with the single word ok.
+
+⏺ ok
+
+✻ Cooked for 2s · done 4:19 PM
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   Switch model?
+   Your next response will be slower and use more tokens
+
+   This conversation is cached for the current model. Switching to Opus 5.5 means the full history gets re-read.
+
+   ❯ 1. Yes, switch to Opus 5.5
+     2. No, go back
+
