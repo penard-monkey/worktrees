@@ -58,6 +58,9 @@ const mockRemote: { chosen: string | null; hosts: MockHost[] } = (() => {
 })();
 
 const kimiMissing = () => new URLSearchParams(location.search).get("kimi") === "missing";
+/** `?claudestart=<ms>`: how long after the page loads every Claude has written
+ *  no session file yet (`agent_turns`). */
+const mockClaudeStartMs = Number(new URLSearchParams(location.search).get("claudestart") ?? 0) || 0;
 const kimiMcpStatus = () => ({
   state: kimiMissing() ? "kimi-missing" : kimiMcpMode, mode: kimiMcpMode,
   kimi_bin: kimiMissing() ? null : "/Users/demo/.kimi-code/bin/kimi",
@@ -4625,6 +4628,12 @@ Phase 3: Frontend pane and mock harness
       const ps = mockPromptState(args.repo, args.slug);
       const picking = !!ps.screen && !("unreadable" in ps.screen) && !!ps.screen.picker && mockPromptUp(args.repo, args.slug);
       if (picking || (ps.resumedAt !== undefined && Date.now() - ps.resumedAt < 500)) {
+        throw `the claude in ${mockAgentSession(args.slug)} has written no session file yet`;
+      }
+      // `?claudestart=<ms>`: every Claude is still starting for that long
+      // after the page loads, with no session file written yet (about a
+      // second on 2.1.318), as a chat opened with a new session meets it.
+      if (harness === "claude" && performance.now() < mockClaudeStartMs) {
         throw `the claude in ${mockAgentSession(args.slug)} has written no session file yet`;
       }
       const all = mockTurnsAt(args.repo, args.slug);
