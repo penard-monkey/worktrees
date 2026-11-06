@@ -5,6 +5,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Fixed
+
+- **A lane whose launch was refused, and then started anyway, now opens on its brief.** When the live-agent limit, a nearly spent plan window or an unreachable model host refused a new lane, the worktree and its brief were kept. But retrying the same branch with "launch anyway", as the refusal says to (the MCP `create_worktree` retry, or `worktrees new <branch> --force`), started the agent with an empty prompt. It now gets the brief, as `worktrees open --force` already did. Where the agent has run in that place before, the retry says the brief won't be re-sent and how to re-brief it.
+
 ## [0.48.0] - 2026-11-05
 
 ### Added
