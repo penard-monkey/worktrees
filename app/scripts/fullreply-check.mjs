@@ -83,6 +83,32 @@ const text = (items) => replies(items).map((it) => it.text).join("\n");
   else ok("an uncut prompt offers none");
 }
 
+// 2b. Where the cut is, the note is: a turn `truncated` only for its prompt
+//     leaves a whole reply alone; an older host's cut prompt gets the plain
+//     note on its own bubble; a cut nothing accounts for stays the reply's.
+{
+  const whole = { steps: [{ kind: "text", at: T0 + 1, text: "Read it." }], reply: "Read it." };
+  const items = C.itemsOf([shortTurn("t1", { user: cutUser, ...whole })], [], []);
+  const u = items.find((it) => it.k === "user"), r = replies(items)[0];
+  if (u?.turnId !== "t1" || u.cut !== true || r?.truncated || "turnId" in r) fail(`a cut prompt over a whole reply: the button on the prompt only — ${JSON.stringify({ u: u && { cut: u.cut, turnId: u.turnId }, r: r && { t: r.truncated, id: r.turnId } })}`);
+  else ok("a turn cut only in its prompt marks the prompt, and leaves its whole reply without a note");
+  const both = replies(C.itemsOf([shortTurn("t1", { user: cutUser })], [], [])).at(-1);
+  if (both?.turnId !== "t1" || !both.truncated) fail("a turn whose prompt AND reply were cut keeps the button on the reply too");
+  else ok("a turn whose prompt and reply were both cut keeps the button on both");
+  const old = C.itemsOf([shortTurn(undefined, { user: cutUser, ...whole })], [], []);
+  if (old.find((it) => it.k === "user")?.cut !== true || "turnId" in old.find((it) => it.k === "user") || replies(old)[0].truncated) fail("an older host's cut prompt carries the plain note on its own bubble");
+  else ok("an older host's cut prompt carries the plain note on its own bubble");
+  const plan = C.itemsOf([shortTurn("t1", { reply: "Read it.", steps: whole.steps })], [], []);
+  if (replies(plan).at(-1)?.truncated !== true || replies(plan).at(-1).turnId !== "t1") fail("a cut nothing accounts for (a long plan) stays the reply's, with its button");
+  else ok("a cut nothing accounts for stays the reply's, with its button");
+  const exact = C.itemsOf([shortTurn("t1", { reply: "x", steps: [{ kind: "text", at: T0 + 1, text: "a".repeat(MAX) }] })], [], []);
+  if (replies(exact).at(-1)?.turnId !== "t1") fail("a reply that used the whole budget may have lost later blocks: it offers the turn");
+  else ok("a reply that used the whole budget (later blocks may be dropped) offers the turn");
+  const bare = C.itemsOf([{ id: "t9", at: T0, user: "q", reply: `${"b".repeat(MAX)}…`, tools: [], truncated: true }], [], []);
+  if (replies(bare)[0]?.turnId !== "t9") fail("a turn with no steps and a cut reply offers the turn");
+  else ok("a turn with no steps and a cut reply offers the turn");
+}
+
 // 3. The whole turn replaces the short one BY ID, and stays through a re-read.
 {
   const items = C.itemsOf([shortTurn("t1")], [], [], false, { t1: { state: "done", turn: wholeTurn("t1") } });

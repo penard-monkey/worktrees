@@ -437,7 +437,7 @@ export type ToolCall = { name: string; call_id?: string; summary?: string; faile
 export type Item =
   | { k: "sep"; key: string; at: number }
   | { k: "earlier"; key: string }
-  | { k: "user"; key: string; text: string; at: number | null; midTurn?: boolean; turnId?: string }
+  | { k: "user"; key: string; text: string; at: number | null; midTurn?: boolean; cut?: true; turnId?: string }
   | { k: "notice"; key: string; notice: Notice; at: number | null }
   | { k: "reply"; key: string; text: string; tools: string[]; calls: ToolCall[]; truncated: boolean; at: number | null; label: boolean; turnId?: string }
   | { k: "asked"; key: string; step: AskedStep; label: boolean }
@@ -445,6 +445,21 @@ export type Item =
   | { k: "answered"; key: string; a: Answered }
   | { k: "pending"; key: string; p: Pending; caughtUp: boolean };
 
+/** The host cut this turn's reply, as far as the turn can say. A reply's
+ *  `text` steps share `HOST_TEXT_MAX`: a cut one ends in the ellipsis, one that
+ *  used the budget exactly has the later ones dropped without a mark, so a
+ *  turn whose kept words reach the cap may have lost more. A turn with no steps
+ *  is its `reply`, cut by `clip_to` the same way. */
+const replyCut = (t: Turn) => {
+  if (!t.truncated) return false;
+  if (!t.steps?.length) return [...t.reply].length > HOST_TEXT_MAX && t.reply.endsWith("…");
+  const texts = t.steps.filter((s) => s.kind === "text") as Extract<Step, { kind: "text" }>[];
+  return texts.reduce((n, s) => n + [...s.text].length, 0) >= HOST_TEXT_MAX;
+};
+/** What the user's bubble says is cut, and the reply's note is for: a turn
+ *  `truncated` only because of its prompt leaves a whole reply alone. A cut
+ *  nothing here accounts for (a long plan, a question's text) stays the reply's. */
+const replyShort = (t: Turn) => t.truncated && (!userCut(t) || replyCut(t));
 /** The host cut this turn's prompt (`clip_to`: the cap's characters and an
  *  ellipsis). */
 const userCut = (t: Turn) => t.truncated && !t.notice && t.user !== null && t.user.endsWith("…") && [...t.user].length === HOST_TEXT_MAX + 1;
@@ -502,12 +517,12 @@ export function itemsOf(shortTurns: Turn[], answered: Answered[], pending: Pendi
       lastWasAgent = t.notice.kind === "peer_message";
     } else if (t.user === null) out.push({ k: "earlier", key: `e${i}` });
     else {
-      out.push({ k: "user", key: `u${i}`, text: t.user, at: t.at, ...(userCut(t) && offer(t) ? { turnId: offer(t) } : {}) });
+      out.push({ k: "user", key: `u${i}`, text: t.user, at: t.at, ...(userCut(t) ? { cut: true as const, ...(offer(t) ? { turnId: offer(t) } : {}) } : {}) });
       lastWasAgent = false;
     }
     if (!t.steps?.length) {
-      if (t.reply || t.tools.length || t.truncated) {
-        out.push({ k: "reply", key: `r${i}`, text: t.reply, tools: t.tools, calls: t.tools.map((name) => ({ name })), truncated: t.truncated, at: t.at, label: !lastWasAgent, ...(offer(t) ? { turnId: offer(t) } : {}) });
+      if (t.reply || t.tools.length || replyShort(t)) {
+        out.push({ k: "reply", key: `r${i}`, text: t.reply, tools: t.tools, calls: t.tools.map((name) => ({ name })), truncated: replyShort(t), at: t.at, label: !lastWasAgent, ...(replyShort(t) && offer(t) ? { turnId: offer(t) } : {}) });
         lastWasAgent = true;
       }
       return;
@@ -548,7 +563,7 @@ export function itemsOf(shortTurns: Turn[], answered: Answered[], pending: Pendi
       out.push({ k: "answer", key: `a${key}`, step: st });
       lastWasAgent = false;
     });
-    if (t.truncated) {
+    if (replyShort(t)) {
       const last = [...out].reverse().find((it) => it.k === "reply") as Extract<Item, { k: "reply" }> | undefined;
       if (last) {
         last.truncated = true;

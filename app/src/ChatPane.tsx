@@ -507,7 +507,7 @@ function ChatItem(props: { it: Item; agent: string; target: Target; root: string
             aria-label={`You${it.at ? `, ${clockOf(it.at)}` : ""}`} data-testid="chat-user">
             <Markdown src={sent.text} onLink={props.onLink} />
             {sent.paths.length > 0 && <SentFiles paths={sent.paths} />}
-            {it.turnId && <Shortened id={it.turnId} what="message" target={props.target} full={props.full} fullOff={props.fullOff} />}
+            {it.cut && <Shortened id={it.turnId} what="message" target={props.target} full={props.full} fullOff={props.fullOff} />}
             {it.midTurn && <p className="chat-bubble-note chat-midturn-caption">Sent while {agent} was working</p>}
           </div>
         </li>
