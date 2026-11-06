@@ -5,6 +5,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Fixed
+
+- A chat opened on a Claude that has only just started no longer says "Couldn't read the conversation: … has written no session file yet". A new Claude writes that file about a second after it starts, and the chat read once, in that gap, and kept the error until a turn began. It now says "Claude is starting…" and reads again until the conversation is there, for about half a minute, before it shows the failure; "Try again" starts the wait over.
+
 ## [0.48.0] - 2026-11-05
 
 ### Added
