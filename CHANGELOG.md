@@ -5,6 +5,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+
+- **A shortened chat message can be read in full.** When a long reply (or a long message you sent) says "Shortened by the host", it now has a **Show full reply** (or **Show full message**) link. It fetches the whole turn and shows it in place, including any later paragraphs that were dropped, such as the question an agent was asking. It stays open as the chat refreshes, and a turn that is still running keeps updating. If the turn is too old for the host to read, it says so and points you to the terminal; an older host keeps the note it had.
+
 ## [0.48.0] - 2026-11-05
 
 ### Added
