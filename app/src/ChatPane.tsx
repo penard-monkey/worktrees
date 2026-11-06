@@ -17,8 +17,8 @@ import {
   activityMoved, boxesOf, bytes, callFetches, callKeys, callsSay, callsWords, cardDigits, cardKey, cardTakesFocus, choiceOpen, choiceWay, clockMs, clockOf,
   dayLabel, draftIsOwnSend, draftProblem, fieldWords, foldCalls, itemsOf, keyFocusOf, lineDiff, loadPrompt, loadTurns, noSessionYet, permissionAnswerWords,
   promptBody, questionAnswerWords, selectChoice, sendAnswer, sendDraft, sendMany, setAnswerText, setBoxText, setDraft,
-  sendRulesFor, splitAtRule, stopTurn, ticksOf, toggleCall, toggleTick, tookReference, turnsUnsupported, underRoot, useChat,
-  type AskedStep, type CallRead, type Item, type PromptChoice, type PromptDetail, type ReadablePrompt, type Target, type ToolCall,
+  sendRulesFor, showFull, splitAtRule, stopTurn, ticksOf, toggleCall, toggleTick, tookReference, turnsUnsupported, underRoot, useChat,
+  type AskedStep, type CallRead, type FullRead, type Item, type PromptChoice, type PromptDetail, type ReadablePrompt, type Target, type ToolCall,
 } from "./chat";
 import { previewOf, type ChoiceWay } from "./chat";
 import { referenceInDraft } from "./dnd";
@@ -127,7 +127,7 @@ export function ChatPane(props: ChatPaneProps) {
 
   const data = v.turns.data;
   // A Codex command's output, which no rollout keeps, after the transcript's.
-  const items = data ? [...itemsOf(data.turns, v.answered, v.pending, working), ...ranItems(v.ran)] : [];
+  const items = data ? [...itemsOf(data.turns, v.answered, v.pending, working, v.full), ...ranItems(v.ran)] : [];
   const lastReply = [...items].reverse().find((it) => it.k === "reply")?.key ?? null;
   const promptKey = promptKeyOf(prompt);
   const { toBottom, fresh, dismiss, take, reveal } = useStickToBottom(scrollRef, !!data, promptKey, lastReply);
@@ -202,7 +202,7 @@ export function ChatPane(props: ChatPaneProps) {
         </p>
         {items.length === 0 && !prompt && <p className="chat-note" data-testid="chat-empty">No messages in this session yet.</p>}
         <ol className="chat-list" data-testid="chat-list">
-          {items.map((it) => <ChatItem key={it.key} it={it} agent={agent} target={target} root={path} reveal={reveal} onLink={onLink} pathLinks={pathLinks} />)}
+          {items.map((it) => <ChatItem key={it.key} it={it} agent={agent} target={target} root={path} reveal={reveal} fullOff={v.fullOff} full={v.full} onLink={onLink} pathLinks={pathLinks} />)}
         </ol>
       </>
     );
@@ -466,7 +466,33 @@ function ToolCalls(props: { calls: ToolCall[]; itemKey: string; target: Target; 
   );
 }
 
-function ChatItem(props: { it: Item; agent: string; target: Target; root: string; reveal: Reveal; onLink: (href: string) => void; pathLinks: ReturnType<typeof useDocPathLinks>["pathLinks"] }) {
+/** What a shortened bubble says under its words, and its one way to read the
+ *  rest: "Show full reply" asks the host for the whole turn (`showFull`), which
+ *  then replaces the short one in place. A host with no such row, a turn with no
+ *  id, and a turn the host has stopped reading keep the plain note. */
+function Shortened(props: { id: string | undefined; what: "reply" | "message"; target: Target; full: Record<string, FullRead>; fullOff: string | null }) {
+  const { id, what, target } = props;
+  const read = id ? props.full[id] : undefined;
+  if (!id || props.fullOff || read?.state === "gone") {
+    return (
+      <p className="chat-bubble-note" data-testid="chat-shortened">
+        {read?.state === "gone" ? `This ${what} has left what the host reads: the full text is in the terminal.` : `Shortened by the host: the full ${what} is in the terminal.`}
+      </p>
+    );
+  }
+  const loading = read?.state === "loading";
+  return (
+    <p className="chat-bubble-note" data-testid="chat-shortened">
+      Shortened by the host.{" "}
+      <button className="chat-linkbtn" disabled={loading} onClick={() => void showFull(target, id)} data-testid="chat-show-full">
+        {loading ? "Loading…" : read?.state === "failed" ? `Try again to show the full ${what}` : `Show full ${what}`}
+      </button>
+      {read?.state === "failed" && <span role="alert"> {read.words}</span>}
+    </p>
+  );
+}
+
+function ChatItem(props: { it: Item; agent: string; target: Target; root: string; reveal: Reveal; fullOff: string | null; full: Record<string, FullRead>; onLink: (href: string) => void; pathLinks: ReturnType<typeof useDocPathLinks>["pathLinks"] }) {
   const { it, agent } = props;
   switch (it.k) {
     case "sep":
@@ -481,6 +507,7 @@ function ChatItem(props: { it: Item; agent: string; target: Target; root: string
             aria-label={`You${it.at ? `, ${clockOf(it.at)}` : ""}`} data-testid="chat-user">
             <Markdown src={sent.text} onLink={props.onLink} />
             {sent.paths.length > 0 && <SentFiles paths={sent.paths} />}
+            {it.turnId && <Shortened id={it.turnId} what="message" target={props.target} full={props.full} fullOff={props.fullOff} />}
             {it.midTurn && <p className="chat-bubble-note chat-midturn-caption">Sent while {agent} was working</p>}
           </div>
         </li>
@@ -498,7 +525,7 @@ function ChatItem(props: { it: Item; agent: string; target: Target; root: string
             {(it.text || it.truncated) && (
               <div className="chat-bubble chat-bubble-agent">
                 {it.text && <Markdown src={it.text} onLink={props.onLink} pathLinks={props.pathLinks} />}
-                {it.truncated && <p className="chat-bubble-note">Shortened by the host: the full reply is in the terminal.</p>}
+                {it.truncated && <Shortened id={it.turnId} what="reply" target={props.target} full={props.full} fullOff={props.fullOff} />}
               </div>
             )}
             {it.calls.length > 0 && <ToolCalls calls={it.calls} itemKey={it.key} target={props.target} root={props.root} reveal={props.reveal} />}
