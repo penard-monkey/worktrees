@@ -1,0 +1,61 @@
+{"type":"metadata","protocol_version":"1.5","created_at":1760000000000}
+{"type":"profile.bind","agentId":"main","modelAlias":"kimi-code/kimi-for-coding-highspeed","profileName":"agent","thinkingEffort":"on","time":1760000000010}
+{"type":"agent.turn.started","turnId":0,"queueItemId":"msg_PROBE1","time":1760000000100,"kind":"event"}
+{"type":"turn.prompt","agentId":"main","input":[{"type":"text","text":"Run the probe, apply the patch, then reply DONE."}],"origin":{"kind":"user"},"promptId":"msg_PROBE1","turnId":0,"time":1760000000101}
+{"type":"llm.request","agentId":"main","kind":"loop","provider":"openai","model":"kimi-for-coding-highspeed","modelAlias":"kimi-code/kimi-for-coding-highspeed","turnStep":"0.1","time":1760000000110}
+{"type":"context.append_loop_event","agentId":"main","time":1760000000200,"event":{"type":"step.begin","uuid":"step-0-1","turnId":"0","step":1}}
+{"type":"context.append_loop_event","agentId":"main","time":1760000000201,"event":{"type":"content.part","uuid":"p-0-1a","turnId":"0","step":1,"stepUuid":"step-0-1","part":{"type":"think","think":"THINKING-MARKER the probe plan","reasoningKey":"reasoning_content"}}}
+{"type":"context.append_loop_event","agentId":"main","time":1760000000210,"event":{"type":"content.part","uuid":"p-0-1b","turnId":"0","step":1,"stepUuid":"step-0-1","part":{"type":"text","text":"Running the probe now."}}}
+{"type":"interaction.request","agentId":"main","id":"approval_probe","kind":"approval","toolCallId":"tool_probe","request":{"id":"approval_probe","sessionId":"session_fixture","agentId":"main","turnId":0,"toolCallId":"tool_probe","toolName":"Bash","action":"Running: ./probe.sh","display":{"kind":"command","command":"./probe.sh","cwd":"/tmp/place","language":"bash"}},"time":1760000000400}
+{"type":"interaction.resolved","agentId":"main","id":"approval_probe","response":{"decision":"approved"},"time":1760000000500}
+{"type":"permission.record_approval_result","action":"allowed_once","agentId":"main","result":{"decision":"approved"},"sessionApprovalRule":null,"time":1760000000501,"toolCallId":"tool_probe","toolName":"Bash","turnId":0}
+{"type":"context.append_loop_event","agentId":"main","time":1760000000600,"event":{"type":"tool.call","uuid":"c-0-1","turnId":"0","step":1,"stepUuid":"step-0-1","toolCallId":"tool_probe","name":"Bash","args":{"command":"./probe.sh"},"display":{"kind":"command","command":"./probe.sh","cwd":"/tmp/place","language":"bash"}}}
+{"type":"context.append_loop_event","agentId":"main","time":1760000000650,"event":{"type":"tool.result","parentUuid":"c-0-1","toolCallId":"tool_probe","result":{"durationMs":1200,"output":"TOOL-OUTPUT-MARKER\nprobe: ok\n"}}}
+{"type":"context.append_loop_event","agentId":"main","time":1760000000700,"event":{"type":"content.part","uuid":"p-0-2","turnId":"0","step":2,"stepUuid":"step-0-2","part":{"type":"text","text":"Applying the patch."}}}
+{"type":"interaction.request","agentId":"main","id":"approval_edit","kind":"approval","toolCallId":"tool_edit","request":{"id":"approval_edit","sessionId":"session_fixture","agentId":"main","turnId":0,"toolCallId":"tool_edit","toolName":"Edit","action":"Editing: src/parse.rs","display":{"kind":"file_io","operation":"edit","path":"/tmp/place/src/parse.rs"}},"time":1760000000900}
+{"type":"interaction.resolved","agentId":"main","id":"approval_edit","response":{"decision":"approved","scope":"session"},"time":1760000001000}
+{"type":"context.append_loop_event","agentId":"main","time":1760000001100,"event":{"type":"tool.call","uuid":"c-0-2","turnId":"0","step":2,"stepUuid":"step-0-2","toolCallId":"tool_edit","name":"Edit","args":{"path":"src/parse.rs","old_string":"OLD-MARKER","new_string":"NEW-MARKER"},"display":{"kind":"file_io","operation":"edit","path":"/tmp/place/src/parse.rs","before":"OLD-MARKER","after":"NEW-MARKER"}}}
+{"type":"context.append_loop_event","agentId":"main","time":1760000001150,"event":{"type":"tool.result","parentUuid":"c-0-2","toolCallId":"tool_edit","result":{"durationMs":80,"output":"ok"}}}
+{"type":"context.append_loop_event","agentId":"main","time":1760000001200,"event":{"type":"content.part","uuid":"p-0-3","turnId":"0","step":3,"stepUuid":"step-0-3","part":{"type":"text","text":"Patched. DONE."}}}
+{"type":"agent.turn.ended","turnId":0,"outcome":"done","time":1760000001300,"kind":"event"}
+{"type":"turn.ended","agentId":"main","turnId":0,"reason":"completed","durationMs":12000,"time":1760000001301}
+{"type":"prompt.completed","agentId":"main","promptId":"msg_PROBE1","finishedAt":"2026-10-19T17:40:01.000Z","reason":"completed","time":1760000001302}
+{"type":"agent.turn.started","turnId":1,"queueItemId":"msg_COUNT","time":1760000010000,"kind":"event"}
+{"type":"turn.prompt","agentId":"main","input":[{"type":"text","text":"List the crates, then read the missing manifest."}],"origin":{"kind":"user"},"promptId":"msg_COUNT","turnId":1,"time":1760000010001}
+{"type":"llm.request","agentId":"main","kind":"loop","provider":"openai","model":"kimi-for-coding-highspeed","modelAlias":"kimi-code/kimi-for-coding-highspeed","turnStep":"1.1","time":1760000010010}
+{"type":"interaction.request","agentId":"main","id":"approval_ls","kind":"approval","toolCallId":"tool_ls","request":{"id":"approval_ls","sessionId":"session_fixture","agentId":"main","turnId":1,"toolCallId":"tool_ls","toolName":"Bash","action":"Running: ls crates/","display":{"kind":"command","command":"ls crates/","cwd":"/tmp/place","language":"bash"}},"time":1760000010200}
+{"type":"interaction.resolved","agentId":"main","id":"approval_ls","response":{"decision":"rejected"},"time":1760000010300}
+{"type":"context.append_loop_event","agentId":"main","time":1760000010350,"event":{"type":"content.part","uuid":"p-1-1a","turnId":"1","step":2,"stepUuid":"step-1-2","part":{"type":"text","text":"Skipping the listing, as you asked."}}}
+{"type":"context.append_loop_event","agentId":"main","time":1760000010400,"event":{"type":"tool.call","uuid":"c-1-2","turnId":"1","step":2,"stepUuid":"step-1-2","toolCallId":"tool_read","name":"Read","args":{"path":"missing-manifest.toml"},"display":{"kind":"file_io","operation":"read","path":"/tmp/place/missing-manifest.toml"}}}
+{"type":"context.append_loop_event","agentId":"main","time":1760000010450,"event":{"type":"tool.result","parentUuid":"c-1-2","toolCallId":"tool_read","result":{"durationMs":10,"output":"TOOL-OUTPUT-MARKER no such file","isError":true}}}
+{"type":"context.append_loop_event","agentId":"main","time":1760000010500,"event":{"type":"content.part","uuid":"p-1-2","turnId":"1","step":3,"stepUuid":"step-1-3","part":{"type":"text","text":"No manifest; done anyway."}}}
+{"type":"agent.turn.ended","turnId":1,"outcome":"done","time":1760000010600,"kind":"event"}
+{"type":"turn.ended","agentId":"main","turnId":1,"reason":"completed","durationMs":600,"time":1760000010601}
+{"type":"prompt.completed","agentId":"main","promptId":"msg_COUNT","finishedAt":"2026-10-19T17:40:45.000Z","reason":"completed","time":1760000010602}
+{"type":"agent.turn.started","turnId":2,"queueItemId":"msg_ASK","time":1760000020000,"kind":"event"}
+{"type":"turn.prompt","agentId":"main","input":[{"type":"text","text":"Ask me to pick red or blue, nothing else."}],"origin":{"kind":"user"},"promptId":"msg_ASK","turnId":2,"time":1760000020001}
+{"type":"llm.request","agentId":"main","kind":"loop","provider":"openai","model":"kimi-for-coding-highspeed","modelAlias":"kimi-code/kimi-for-coding-highspeed","turnStep":"2.1","time":1760000020010}
+{"type":"context.append_loop_event","agentId":"main","time":1760000020100,"event":{"type":"tool.call","uuid":"c-2-1","turnId":"2","step":1,"stepUuid":"step-2-1","toolCallId":"tool_ask","name":"AskUserQuestion","args":{"questions":[{"question":"Which color?","options":[{"label":"Red","description":"The warm one."},{"label":"Blue","description":"The cool one."},{"label":"Other"}]}]},"display":null}}
+{"type":"interaction.request","agentId":"main","id":"question_ask","kind":"question","toolCallId":"tool_ask","request":{"turnId":2,"toolCallId":"tool_ask","questions":[{"question":"Which color?","header":"Shade","options":[{"label":"Red","description":"The warm one."},{"label":"Blue","description":"The cool one."},{"label":"Other"}]}]},"time":1760000020200}
+{"type":"interaction.resolved","agentId":"main","id":"question_ask","response":{"answers":{"Which color?":"Blue"},"method":"enter"},"time":1760000020300}
+{"type":"context.append_loop_event","agentId":"main","time":1760000020400,"event":{"type":"tool.result","parentUuid":"c-2-1","toolCallId":"tool_ask","result":{"durationMs":200,"output":"TOOL-OUTPUT-MARKER blue picked"}}}
+{"type":"context.append_loop_event","agentId":"main","time":1760000020500,"event":{"type":"content.part","uuid":"p-2-1","turnId":"2","step":2,"stepUuid":"step-2-2","part":{"type":"text","text":"Blue it is."}}}
+{"type":"agent.turn.ended","turnId":2,"outcome":"done","time":1760000020600,"kind":"event"}
+{"type":"turn.ended","agentId":"main","turnId":2,"reason":"completed","durationMs":600,"time":1760000020601}
+{"type":"prompt.completed","agentId":"main","promptId":"msg_ASK","finishedAt":"2026-10-19T17:42:00.000Z","reason":"completed","time":1760000020602}
+{"type":"agent.turn.started","turnId":3,"queueItemId":"msg_QUEUE","time":1760000030000,"kind":"event"}
+{"type":"turn.prompt","agentId":"main","input":[{"type":"text","text":"[worktrees: message from place \"probe\"] reply QUEUED-OK"}],"origin":{"kind":"user"},"promptId":"msg_QUEUE","turnId":3,"time":1760000030001}
+{"type":"llm.request","agentId":"main","kind":"loop","provider":"openai","model":"kimi-for-coding-highspeed","modelAlias":"kimi-code/kimi-for-coding-highspeed","turnStep":"3.1","time":1760000030010}
+{"type":"context.append_loop_event","agentId":"main","time":1760000030050,"event":{"type":"tool.call","uuid":"c-3-1","turnId":"3","step":1,"stepUuid":"step-3-1","toolCallId":"tool_status","name":"mcp__worktrees__place_status","args":{"slug":"probe"},"display":null}}
+{"type":"context.append_loop_event","agentId":"main","time":1760000030075,"event":{"type":"tool.result","parentUuid":"c-3-1","toolCallId":"tool_status","result":{"durationMs":300,"output":"TOOL-OUTPUT-MARKER idle"}}}
+{"type":"context.append_loop_event","agentId":"main","time":1760000030100,"event":{"type":"content.part","uuid":"p-3-1","turnId":"3","step":2,"stepUuid":"step-3-2","part":{"type":"text","text":"QUEUED-OK"}}}
+{"type":"agent.turn.ended","turnId":3,"outcome":"done","time":1760000030200,"kind":"event"}
+{"type":"turn.ended","agentId":"main","turnId":3,"reason":"completed","durationMs":200,"time":1760000030201}
+{"type":"prompt.completed","agentId":"main","promptId":"msg_QUEUE","finishedAt":"2026-10-19T17:43:00.000Z","reason":"completed","time":1760000030202}
+{"type":"agent.turn.started","turnId":4,"queueItemId":"msg_POEM","time":1760000040000,"kind":"event"}
+{"type":"turn.prompt","agentId":"main","input":[{"type":"text","text":"Write a long poem, no tools."}],"origin":{"kind":"user"},"promptId":"msg_POEM","turnId":4,"time":1760000040001}
+{"type":"context.append_loop_event","agentId":"main","time":1760000040100,"event":{"type":"content.part","uuid":"p-4-1","turnId":"4","step":1,"stepUuid":"step-4-1","part":{"type":"text","text":"The river bends"}}}
+{"type":"turn.cancel","agentId":"main","turnId":4,"target":"active","reason":"user_cancelled","time":1760000040200}
+{"type":"agent.turn.ended","turnId":4,"outcome":"aborted","time":1760000040201,"kind":"event"}
+{"type":"turn.ended","agentId":"main","turnId":4,"reason":"cancelled","durationMs":200,"time":1760000040202}
+{"type":"prompt.aborted","agentId":"main","promptId":"msg_POEM","abortedAt":"2026-10-19T17:44:00.000Z","time":1760000040203}

@@ -188,7 +188,7 @@ export function AgentsPage() {
           Show a Chat | Terminal switch on each agent (preview)
         </label>
         <div className="hint">
-          Chat is the default for Claude and Codex; pi and kimi open on Terminal. Each place
+          Chat is the default for Claude, Codex and Kimi; pi opens on Terminal. Each place
           remembers your choice. Chat shows recent turns, waiting prompts, and a message box.
           Terminal is one click away for tool output, diffs, and slash commands.
         </div>

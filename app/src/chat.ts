@@ -163,14 +163,14 @@ export const AGENT_ERR = {
   noBox: "name at least one box to tick",
   /** `agent_send` / `agent_turns` naming a session no agent of the place runs in. */
   noLanePrefix: "no agent this place launched is running in ",
-  /** `agent_turns` for pi and kimi. */
-  turnsUnsupportedPrefix: "agent_turns reads Claude's and Codex's transcripts;",
+  /** `agent_turns` for pi. */
+  turnsUnsupportedPrefix: "agent_turns reads Claude's, Codex's and Kimi's transcripts;",
   /** `agent_interrupt` with no turn running. */
   notBusy: "the agent is not working on a turn: there is nothing to stop",
   /** `agent_interrupt` while the terminal's input holds a draft. */
   stopDraft: "the agent's prompt has unsent text in it (someone is typing there), which hides whether a turn is running: stop it at the host",
-  /** `agent_interrupt` for pi and kimi. */
-  stopUnsupportedPrefix: "agent_interrupt stops Claude's and Codex's turns;",
+  /** `agent_interrupt` for pi. */
+  stopUnsupportedPrefix: "agent_interrupt stops Claude's, Codex's and Kimi's turns;",
   /** `agent_interrupt` in a place with no agent running. */
   noAgent: "no agent is running in this place",
   /** How `agent_turns` ends for a Claude with no session yet (`the claude in
