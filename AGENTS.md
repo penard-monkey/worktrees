@@ -99,8 +99,24 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   never moves it, which is how the owner's Sonnet pick reached "the prompt
   changed" (2026-11-04, `2.1.318/model-effort/`). In a warm conversation `s`
   on another model brings Claude's "Switch model?", whose Yes reads the same
-  after the saving Enter: it is the terminal's. Do not grow a fourth path that
-  types into Claude. `agent_interrupt`
+  after the saving Enter, so `prompt::claude` never reads it. The HOST knows
+  what it pressed: `agent_answer`'s `s` on a model list, under the place lock,
+  records (pane, session, model, `#{session_activity}` before the press) in
+  `Agents::switched` — memory only — once a fresh capture shows the dialog for
+  that same model (`prompt::read_switch`, `names_model`). Only beside a
+  matching, young (120 s) record whose session has seen no client activity
+  since is the dialog a prompt; any other screen, answer, send, command or
+  interrupt drops it, and a restart, another model or a stale record leaves it
+  the terminal's. The witness is `#{session_activity}` (`tmux::
+  terminal_activity`), NOT `#{client_activity}`: both move on a client's key
+  and neither on the host's `send-keys`/`paste-buffer`, but a client's own
+  value dies with the client, so a key followed by a detach passed for no
+  activity. One-second resolution: no record when a client was active in the
+  second of the press; the baseline is read BEFORE the capture that proves the
+  list (read after it, a saving Enter typed in the gap was already in it).
+  Residual, not closable without an atomic tmux step: a key typed between the
+  last activity check and the Enter that answers the dialog. Answering uses the ordinary move, proof and Enter, and
+  the record is consumed. Do not grow a fourth path that types into Claude. `agent_interrupt`
   (`agents::agent_interrupt`, the chat's Stop and its Esc, `stopTurn` in
   `chat.ts`) is not one: it types no text, only ONE key,
   Escape, through `tmux::press` as `agent_answer`'s keys go, under the same

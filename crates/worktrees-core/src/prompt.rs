@@ -544,6 +544,69 @@ fn claude_sheet(rows: &[String], last: usize) -> Option<Modal> {
     None
 }
 
+/// Claude's "Switch model?" confirmation (fixtures `2.1.318/model-effort/
+/// switch-confirm*`), which `s` on another model brings up in a conversation
+/// the prompt cache holds. [`claude`] does NOT read it, on purpose: its rows
+/// are the same whether the list was answered with `s` or with the Enter that
+/// saves the default, so the screen alone cannot say that Yes is safe. The
+/// HOST knows what it pressed, and `worktrees_api::agents` admits the dialog
+/// only beside its own record of that press ([`read_switch`]).
+const CLAUDE_SWITCH_HEAD: &str = "Switch model?";
+const CLAUDE_SWITCH_YES: &str = "Yes, switch to ";
+const CLAUDE_SWITCH_NO: &str = "No, go back";
+
+/// The dialog on a Claude screen: the model it names and the two choices.
+#[derive(Clone, Debug)]
+pub struct Switch {
+    /// `Opus 5.5` of `Yes, switch to Opus 5.5`.
+    pub model: String,
+    pub modal: Modal,
+}
+
+/// Claude's "Switch model?" on `screen`, or `None` for anything else — with
+/// exactly its two rows (`1. Yes, switch to <model>`, `2. No, go back`) as
+/// its last rows and one of them highlighted.
+pub fn read_switch(harness: &str, screen: &str) -> Option<Switch> {
+    if harness != provider::CLAUDE.id {
+        return None;
+    }
+    let rows = rows(screen);
+    let width = rows.iter().map(|r| r.chars().count()).max()?;
+    let mut last = last_nonblank(&rows, rows.len())?;
+    if name_tag(&rows[last], width) {
+        last = last_nonblank(&rows, last)?;
+    }
+    let top = (0..last).rev().find(|&i| sheet_edge(&rows[i]))?;
+    let head = (top + 1..=last).find(|&i| !rows[i].trim().is_empty())?;
+    if rows[head].trim() != CLAUDE_SWITCH_HEAD {
+        return None;
+    }
+    let first = (head + 1..=last).find(|&i| numbered(&rows[i]).is_some())?;
+    let choices = numbered_run(&rows, first, last + 1)?;
+    let ok = choices.len() == 2
+        && choices[0].n == 1
+        && choices[1].n == 2
+        && choices[0].more.is_empty()
+        && choices[1].more.is_empty()
+        && choices[1].label == CLAUDE_SWITCH_NO
+        && choices.iter().filter(|c| c.highlighted).count() == 1;
+    let model = choices.first()?.label.strip_prefix(CLAUDE_SWITCH_YES)?.trim().to_string();
+    if !ok || model.is_empty() {
+        return None;
+    }
+    let modal = modal(provider::CLAUDE.id, Kind::Question, &rows, head, last, last + 1, choices);
+    Some(Switch { model, modal })
+}
+
+/// Whether a model list's highlighted `choice` is the model a "Switch
+/// model?" names: its name, or the model its description opens with
+/// (`Opus` · `Opus 5.5 · Best for…`), without the `✔` of the one in effect.
+pub fn names_model(choice: &Choice, model: &str) -> bool {
+    let name = |t: &str| t.trim().trim_end_matches('✔').trim().to_string();
+    let first = choice.more.first().map(|d| name(d.split(" · ").next().unwrap_or(d)));
+    name(&choice.label) == model || first.as_deref() == Some(model)
+}
+
 /// A row of Claude's model list: `   ❯ 2.  Opus 5.5 ✔   For complex work…`
 /// — its mark in column 3 (`❯` the highlight, `↓`/`↑` more below/above the
 /// window), its number, its name and, after two spaces, its description.
@@ -3613,6 +3676,26 @@ mod tests {
         }
     }
 
+    /// Claude 2.1.319's model list and "Switch model?" (fixtures
+    /// `2.1.319/model-effort/`): the list gained a `More models` row.
+    #[test]
+    fn claude_2_1_319_model_screens_read_as_2_1_318_did() {
+        macro_rules! f {
+            ($f:literal) => {
+                include_str!(concat!("../tests/fixtures/claude-screen/2.1.319/model-effort/", $f))
+            };
+        }
+        let list = claude(f!("list-on-opus.e.txt")).expect("the list reads");
+        let labels: Vec<_> = list.choices.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(list.picker, Some(Picker::Model));
+        assert_eq!(labels, ["Default (recommended)", "Opus 5.5", "Fable 5.1", "Sonnet 5.5 ✔", "Haiku 5.5", "More models"], "{labels:?}");
+        assert!(claude(f!("switch-confirm.e.txt")).is_none(), "still not a prompt by its screen alone");
+        let sw = read_switch("claude", f!("switch-confirm.e.txt")).expect("2.1.319's dialog");
+        assert_eq!(sw.model, "Opus 5.5");
+        assert!(names_model(&list.choices[1], &sw.model) && !names_model(&list.choices[3], &sw.model));
+        assert!(same_prompt(&sw.modal, &read_switch("claude", f!("switch-confirm.txt")).unwrap().modal));
+    }
+
     /// Claude's model list draws the HIGHLIGHTED model's effort under it
     /// (2.1.318, fixtures `2.1.318/model-effort/`): `◉ xHigh effort` on
     /// Opus 5.5, `◐ Medium effort (default)` on Sonnet 5.5, `○ Effort not
@@ -3677,6 +3760,18 @@ mod tests {
         // saves the default (Claude keeps which in its own state). Not read
         // here: it is the terminal's.
         assert!(claude(fx!("switch-confirm.e.txt")).is_none());
+        let sw = read_switch("claude", fx!("switch-confirm.e.txt")).expect("the dialog reads on its own");
+        assert_eq!((sw.model.as_str(), sw.modal.choices.len(), sw.modal.choices[0].highlighted), ("Opus 5.5", 2, true));
+        assert!(sw.modal.lines.iter().any(|l| l.contains("the full history gets re-read")), "Claude's warning is shown whole");
+        assert!(read_switch("claude", fx!("on-sonnet.e.txt")).is_none() && read_switch("codex", fx!("switch-confirm.e.txt")).is_none());
+        assert!(read_switch("claude", fx!("switch-confirmed.e.txt")).is_none());
+        let on_no = fx!("switch-confirm.txt");
+        let no = read_switch("claude", &on_no.replace("❯ 1.", "  1.").replace("  2. No", "❯ 2. No")).expect("highlight on No");
+        assert!(same_prompt(&sw.modal, &no.modal), "the highlight moving is the same dialog");
+        assert!(read_switch("claude", &on_no.replace("No, go back", "No, stay")).is_none(), "a third wording is not this dialog");
+        let c = |label: &str, more: &str| Choice { n: 1, label: label.into(), more: if more.is_empty() { vec![] } else { vec![more.into()] }, highlighted: false, host_only: None, checked: None, text: None, preview: None, preview_hidden: None };
+        assert!(names_model(&c("Opus 5.5 ✔", ""), "Opus 5.5") && names_model(&c("Opus", "Opus 5.5 · Best for everyday"), "Opus 5.5"));
+        assert!(!names_model(&c("Sonnet", "Sonnet 5.5 · Efficient"), "Opus 5.5") && !names_model(&c("Opus 5", ""), "Opus 5.5"));
         // The owner's own list (five models, `2. Opus ✔`), as it stood after
         // the move, and as it read before it: `❯` on Opus, Opus's effort.
         let after = fx!("owner-sonnet.txt");

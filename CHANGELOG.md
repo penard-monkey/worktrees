@@ -9,6 +9,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 - **A Claude prompt can now come with the call Claude made.** `agent_prompt` sends it as `asked` — the tool, its whole input and the folder it asked from — when the screen agrees with it: a question (which of its questions is up, and which are answered), a Bash command, an Edit, MultiEdit or Write, a plan. A client can then draw the question, the command or the diff as Claude meant it instead of as the terminal drew it. The choices are still the screen's and are answered by number. A prompt whose call does not match the screen, and every other tool (an MCP tool's input is never on the screen to check), carries none.
 
+### Fixed
+
+- **The chat can finish a model switch it started.** Picking another model from the chat in a conversation Claude has cached brings up Claude's "Switch model?", which the chat used to leave for the terminal. It now shows Claude's warning with Yes and No, only while nobody has typed at a terminal since the chat chose the model; otherwise it still says to answer at the host. The switch stays this-session-only.
+
 ## [0.48.0] - 2026-11-05
 
 ### Added
