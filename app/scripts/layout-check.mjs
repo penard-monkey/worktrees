@@ -153,34 +153,32 @@ if (S.SETTINGS_REV < 4) fail(`SETTINGS_REV is ${S.SETTINGS_REV} — the dock_sid
   } else ok("the dock resizer's sign follows dock_side");
 }
 
-// ── the notice stack sits over the AGENT in every layout ─────────────────────
-// `leftOfMain` is evaluated against the grid this file just checked: the
-// tracks before `space`, plus the dock when it is on the left and open.
+// ── the app-level floats name NO layout track ────────────────────────────────
+// Every corner of the window is some pane's, and which pane depends on the
+// layout (places_side × dock_side, per place): `left: rail-w` / `leftOfMain` put
+// the error toast on the chat composer and the usage meters (owner, 2026-11-07).
+// The stack is anchored to the window's top centre instead, so the rule here is
+// the ABSENCE of anything layout-dependent: no inline position on the stack, no
+// `--rail-w` / `bottom` / `right` in the stack's or the toast's own rule.
 {
-  const m = app.match(/const leftOfMain = ([\s\S]*?);\n/);
-  const from = app.indexOf("  const navTrack: [string, string | null]");
-  const to = app.indexOf("  const ord = Object.fromEntries(shell", from);
-  if (!m || from < 0) fail("App.tsx: `const leftOfMain = …;` is gone — where does the notice stack anchor?");
-  else if (!/left: `calc\(\$\{leftOfMain\}px \+ var\(--s3\)\)`/.test(app)) fail("`.float-stack` does not read leftOfMain");
-  else {
-    const block = app.slice(from, to).replace(/: \[string, string \| null\]/g, "").replace(/: \[key: string, track: string \| null\]\[\]/, "");
-    // eslint-disable-next-line no-new-func
-    const build = new Function("merged", "mirrored", "fit", `${block}; return shell;`);
-    // eslint-disable-next-line no-new-func
-    const left = new Function("mirrored", "merged", "fit", "dockLeft", "dockShown", "RAIL_W", `return ${m[1]};`);
-    const wrong = [];
-    for (const t of S.LAYOUT_TILES) for (const navShown of [false, true]) for (const dockShown of [false, true]) {
-      const merged = t.places === t.dock, mirrored = t.places === "right", dockLeft = t.dock === "left";
-      const fit = { navShown, navW: 300, dockW: 360 };
-      const shell = build(merged, mirrored, fit);
-      const tracks = shell.slice(0, shell.findIndex(([k]) => k === "space")).reduce((a, [, tr]) => a + (tr === "var(--rail-w)" ? S.RAIL_W : tr ? parseInt(tr) : 0), 0);
-      const want = tracks + (dockLeft && dockShown ? 360 : 0);
-      const got = left(mirrored, merged, fit, dockLeft, dockShown, S.RAIL_W);
-      if (got !== want) wrong.push(`${t.name} nav ${navShown ? "pinned" : "hidden"} dock ${dockShown ? "open" : "shut"}: ${got} vs ${want}`);
-    }
-    if (wrong.length) fail(`the notice stack is not at the agent's left edge: ${wrong.join("; ")}`);
-    else ok("the notice stack sits at the agent's bottom-left in all 16 shapes");
+  const rule = (sel) => {
+    const m = css.match(new RegExp(`(?:^|\\n)${sel.replace(/[.]/g, "\\.")}\\s*\\{([^}]*)\\}`));
+    return m ? m[1].replace(/\/\*[\s\S]*?\*\//g, "") : null;
+  };
+  for (const sel of [".float-stack", ".err-float"]) {
+    const body = rule(sel);
+    if (body == null) { fail(`App.css: no \`${sel} { … }\` rule — where does the toast anchor?`); continue; }
+    if (!/position:\s*fixed/.test(body)) fail(`${sel} is not position: fixed`);
+    else if (!/left:\s*50%/.test(body) || !/top:\s*var\(--float-top\)/.test(body)) fail(`${sel} is not anchored at left: 50% / top: var(--float-top)`);
+    else if (/--rail-w|--nav-w|bottom\s*:|right\s*:|left:\s*calc/.test(body)) fail(`${sel} names a layout track, bottom or right edge: ${body.trim().replace(/\s+/g, " ")}`);
+    else ok(`${sel} is anchored at the window's top centre, naming no track`);
   }
+  const tag = app.match(/<div className="float-stack"([^>]*)>/);
+  if (!tag) fail("App.tsx: `<div className=\"float-stack\">` is gone");
+  else if (tag[1].trim()) fail(`App.tsx: the float-stack carries ${tag[1].trim()} — an inline position puts a layout back in the anchor`);
+  else ok("App.tsx: the float-stack takes no inline position");
+  if (/\bleftOfMain\b|\bbubbleLift\b/.test(app.replace(/\/\/.*$/gm, ""))) fail("App.tsx still derives a layout offset (leftOfMain / bubbleLift) for the floats");
+  if (!/--float-top:\s*\d+px/.test(read("../src/tokens.css"))) fail("tokens.css: --float-top is gone");
 }
 
 // ── 3. one dock group, two hosts, complementary conditions ──────────────────

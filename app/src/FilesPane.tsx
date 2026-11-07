@@ -1059,6 +1059,10 @@ export function FileView(props: FileViewProps) {
           <div className="bin-glyph" aria-hidden="true">▦</div>
           <div className="bin-label">{info.label} file{read.size ? ` · ${humanSize(read.size)}` : ""}</div>
           <div className="bin-actions">
+            {/* The system's default app first: a PDF or an image has a viewer, and
+                the editor command is the wrong act for it — and fails outright
+                on a Mac with no `code`. The editor stays as the second choice. */}
+            <button className="ctrl sm" {...hostOnly("Open")} onClick={() => openOnHost(path).catch(onError)}>Open</button>
             <button className="ctrl sm" {...hostOnly("Open in editor")} onClick={() => onOpenEditor(path)}>Open in editor</button>
             <button className="ctrl sm" {...hostOnly("Reveal in Finder")} onClick={() => revealOnHost(path).catch(onError)}>Reveal</button>
           </div>

@@ -12,8 +12,8 @@
 //   - geometry: the bubble sits beside the gear with its tail on the gear's
 //     centre, on whichever side the rail is (mirrored Places), merged with
 //     the dock's rail or not (Settings → Layout), at 900 and 1280px, and every button is REACHABLE (elementFromPoint, not a rect);
-//   - the error/undo float-stack, which anchors at the same bottom-left
-//     corner, is lifted above the bubble instead of painting over it;
+//   - the error/undo float-stack, anchored at the window's top centre, never
+//     paints over the bubble;
 //   - dismissal per VERSION across reloads; "Update…" and visiting Settings →
 //     Updates by any route retire it; reopening Settings elsewhere does NOT
 //     (the stale-category edge — it failed before SettingsSheet reset `cat` on
@@ -100,9 +100,10 @@ for (const [engine, type] of Object.entries({ chromium, webkit })) {
   await page.click(".upd-bubble-link"); await page.waitForTimeout(400);
   const lay = await page.evaluate(() => {
     const f = document.querySelector(".float-stack"), bb = document.querySelector(".upd-bubble");
-    return f && { floatBottom: f.getBoundingClientRect().bottom, bubbleTop: bb.getBoundingClientRect().top };
+    const a = f?.getBoundingClientRect(), b = bb.getBoundingClientRect();
+    return f && { overlap: !(a.right <= b.left || a.left >= b.right || a.bottom <= b.top || a.top >= b.bottom), floatTop: a.top, bubbleTop: b.top };
   });
-  ok(!!lay && lay.floatBottom <= lay.bubbleTop, `float-stack lifted above the bubble (${JSON.stringify(lay)})`);
+  ok(!!lay && !lay.overlap, `float-stack (top centre) and the bubble do not overlap (${JSON.stringify(lay)})`);
   if (lay) { await page.click(".err-float"); await page.waitForTimeout(200); }
 
   await page.keyboard.press("Escape"); await page.waitForTimeout(200);

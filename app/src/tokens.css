@@ -124,6 +124,7 @@
 
   /* ── layout ── */
   --rail-w: 44px;
+  --float-top: 56px; /* the app-level toasts: below the place header, top centre */
   --nav-w: 300px;
   --ind: 14px; /* nav tree: one indent step — generous enough that nesting reads
                   at a glance (Mux-style), tight enough to keep slug width */

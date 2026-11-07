@@ -245,8 +245,8 @@ html[data-places-side="right"] .rail-group .rail-icon.active::before { left: aut
 }
 /* app-level error toast — the nav can be hidden, errors can't be */
 .err-float {
-  position: fixed; left: calc(var(--rail-w) + var(--s3)); bottom: var(--s3);
-  z-index: 80; max-width: 440px; margin: 0; cursor: pointer;
+  position: fixed; left: 50%; top: var(--float-top); transform: translateX(-50%);
+  z-index: 80; max-width: min(440px, calc(100vw - 2 * var(--s3))); margin: 0; cursor: pointer;
   background: color-mix(in srgb, var(--danger) 14%, var(--bg-panel));
   box-shadow: var(--shadow-float);
   animation: pop var(--dur-slow) var(--ease);
@@ -1323,18 +1323,22 @@ body.dragging .menu-catch { pointer-events: none; }
   0%, 60% { background: color-mix(in srgb, var(--accent) 22%, transparent); }
   100% { background: none; }
 }
-/* The floats are ONE bottom-anchored stack. Two fixed elements at the same
-   coordinates paint over each other — which put the undo banner exactly on top
-   of the landing note from the same drop. Children go static; DOM order is
-   screen order, undo above, err/notice at the edge. */
+/* The floats are ONE stack, anchored to the WINDOW's top centre. Two fixed
+   elements at the same coordinates paint over each other — which put the undo
+   banner exactly on top of the landing note from the same drop. Children go
+   static; DOM order is screen order, undo above, err/notice below it.
+   The anchor names no track on purpose: the rails, the nav and the dock change
+   sides with the layout and per place, and every corner of the window is some
+   pane's — the old bottom-left was the chat composer and the usage meters. The
+   top centre is a track-free column below the header (--float-top clears it),
+   over transcript or terminal rows, nothing you act on. layout-check.mjs
+   holds it. */
 .float-stack {
-  /* `left` is inline: the agent's bottom-left, whichever layout (App.tsx
-     `leftOfMain`). This is the fallback before the first render. */
-  position: fixed; left: calc(var(--rail-w) + var(--s3)); bottom: var(--s3);
+  position: fixed; left: 50%; top: var(--float-top); transform: translateX(-50%);
   z-index: 80; display: flex; flex-direction: column; gap: var(--s2);
-  align-items: flex-start;
+  align-items: center; max-width: calc(100vw - 2 * var(--s3));
 }
-.float-stack .err-float { position: static; }
+.float-stack .err-float { position: static; transform: none; }
 .err-float.undo { display: flex; align-items: center; gap: var(--s3); cursor: default; }
 .undo-btn {
   padding: 1px var(--s2); border-radius: var(--r-sm);
