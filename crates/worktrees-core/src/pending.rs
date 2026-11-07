@@ -9,7 +9,8 @@
 //! launch gets (`guidance::materialize_prompt_in`, `ops::ai_launch_for`),
 //! saves the tool and its input here; serve's `agent_prompt` shows it as
 //! `detail` beside a prompt only when the screen agrees with it
-//! (`prompt::Clipped::agrees`).
+//! (`prompt::Clipped::agrees`), and, with the hook's `cwd`, as `asked` on any
+//! readable Claude prompt it agrees with (`prompt::call_agrees`).
 //!
 //! **The hook never decides.** It prints nothing and exits 0 whatever
 //! happens: a worktrees bug must never become a Claude permission error. Its
@@ -60,6 +61,10 @@ pub struct Asked {
     pub input: Value,
     /// When the hook ran, in ms since the epoch.
     pub at: u64,
+    /// The hook's `cwd`: where Claude was when it asked. Absent in a record
+    /// an older hook wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -76,6 +81,8 @@ struct HookIn {
     tool_name: Option<String>,
     #[serde(default)]
     tool_input: Option<Value>,
+    #[serde(default)]
+    cwd: Option<String>,
 }
 
 /// `$XDG_STATE_HOME/worktrees/pending`.
@@ -160,7 +167,9 @@ pub fn record_in(dir: &Path, stdin: &[u8], now_ms: u64) -> Result<(), String> {
         return Err("the tool input is over the size this keeps".into());
     }
     let mut asked = asked_in(dir, &h.session_id);
-    asked.push(Asked { tool, input, at: now_ms });
+    // A working directory is a path; anything else in its place is no cwd.
+    let cwd = h.cwd.filter(|c| !c.is_empty() && c.len() <= 4096 && c.starts_with('/') && !c.chars().any(char::is_control));
+    asked.push(Asked { tool, input, at: now_ms, cwd });
     let over = asked.len().saturating_sub(KEEP);
     asked.drain(..over);
     while asked.len() > 1 && serde_json::to_vec(&Saved { asked: asked.clone() }).map_or(0, |b| b.len()) > MAX_FILE {
@@ -318,6 +327,28 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         Scratch(d)
+    }
+
+    /// The hook's `cwd` is kept beside the call (`asked.cwd`): a path, or
+    /// nothing — and a record an older hook wrote reads without it.
+    #[test]
+    fn the_hooks_working_directory_is_kept_when_it_is_a_path() {
+        let d = scratch("cwd");
+        record_in(d.path(), hook_fx!("hook-bash.json"), 1).unwrap();
+        let sid = "dde2366a-1223-4dc0-9584-dd8aa90ffc11";
+        assert_eq!(asked_in(d.path(), sid)[0].cwd.as_deref(), Some("/private/tmp/claude-501/wtph/repo"));
+        let mut odd: serde_json::Value = serde_json::from_slice(hook_fx!("hook-bash.json")).unwrap();
+        for bad in ["relative/dir", "", "/tmp/x\nforged"] {
+            odd["cwd"] = bad.into();
+            record_in(d.path(), &serde_json::to_vec(&odd).unwrap(), 2).unwrap();
+            assert_eq!(asked_in(d.path(), sid).last().unwrap().cwd, None, "{bad:?}");
+        }
+        odd.as_object_mut().unwrap().remove("cwd");
+        record_in(d.path(), &serde_json::to_vec(&odd).unwrap(), 3).unwrap();
+        assert_eq!(asked_in(d.path(), sid).last().unwrap().cwd, None);
+        // A file from before `cwd` existed.
+        fs::write(d.path().join(format!("{sid}.json")), br#"{"asked":[{"tool":"Bash","input":{"command":"ls"},"at":1}]}"#).unwrap();
+        assert_eq!(asked_in(d.path(), sid).len(), 1);
     }
 
     fn mode(p: &Path) -> u32 {

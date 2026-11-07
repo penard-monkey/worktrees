@@ -15,7 +15,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import {
   activityMoved, boxesOf, bytes, callFetches, callKeys, callsSay, callsWords, cardDigits, cardKey, cardTakesFocus, choiceOpen, choiceWay, clockMs, clockOf,
-  dayLabel, draftIsOwnSend, draftProblem, fieldWords, foldCalls, itemsOf, keyFocusOf, lineDiff, loadPrompt, loadTurns, noSessionYet, permissionAnswerWords,
+  dayLabel, draftIsOwnSend, draftProblem, fieldWords, foldCalls, itemsOf, keyFocusOf, lineDiff, loadPrompt, loadTurns, noSessionYet, permissionAnswerWords, rereadTurns, startingUp,
   promptBody, questionAnswerWords, selectChoice, sendAnswer, sendDraft, sendMany, setAnswerText, setBoxText, setDraft,
   sendRulesFor, showFull, splitAtRule, stopTurn, ticksOf, toggleCall, toggleTick, tookReference, turnsUnsupported, underRoot, useChat,
   type AskedStep, type CallRead, type FullRead, type Item, type PromptChoice, type PromptDetail, type ReadablePrompt, type Target, type ToolCall,
@@ -116,7 +116,7 @@ export function ChatPane(props: ChatPaneProps) {
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [liveKey]);
-  const refresh = () => { void loadTurns(target); void loadPrompt(target); };
+  const refresh = () => { void rereadTurns(target); void loadPrompt(target); };
   useEffect(() => { activityMoved(path, activity === "busy"); }, [path, activity]);
 
   const { pathLinks, menu } = useDocPathLinks(path, null, props.reloadToken, props.onOpenPath);
@@ -182,6 +182,10 @@ export function ChatPane(props: ChatPaneProps) {
       // Not a failure: Claude has no conversation until the prompt below is
       // answered (its resume picker, its folder-trust question).
       body = <p className="chat-note" data-testid="chat-no-session">{agent} has no conversation open yet.</p>;
+    } else if (startingUp(v)) {
+      // Not a failure either: a Claude writes its session file a moment
+      // after it starts, and the read is retried until it has.
+      body = <p className="chat-note" role="status" data-testid="chat-starting">{agent} is starting…</p>;
     } else if (v.turns.error) {
       body = (
         <div className="chat-fallback" role="alert" data-testid="chat-failed">

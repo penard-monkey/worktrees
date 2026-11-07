@@ -51,6 +51,11 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   warns in that case (`ops::opener_plan`). A re-brief refuses a live session
   and writes nothing, because the opener reaches only a session the launch
   CREATES (`ops::session_to_reuse`): close it, or message the agent.
+  **A `new` that REUSES a place without `--brief` takes `open`'s rule too**
+  (`ops::plan_opener`): that is the MCP `create_worktree` retry with `force`
+  that a refused launch prescribes, and until 2026-11-05 it set the opener
+  only for `--brief`, so the forced retry started Claude blank on the brief
+  the refused call had just written.
   **No agent types into Claude:** MCP `send` refuses a Claude place and names
   its session for `SendMessage` (`harness::Claude::send`). **The one
   exception is serve's `agent_send`** (iOS MVP S8), decided by the user on
@@ -99,8 +104,24 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   never moves it, which is how the owner's Sonnet pick reached "the prompt
   changed" (2026-11-04, `2.1.318/model-effort/`). In a warm conversation `s`
   on another model brings Claude's "Switch model?", whose Yes reads the same
-  after the saving Enter: it is the terminal's. Do not grow a fourth path that
-  types into Claude. `agent_interrupt`
+  after the saving Enter, so `prompt::claude` never reads it. The HOST knows
+  what it pressed: `agent_answer`'s `s` on a model list, under the place lock,
+  records (pane, session, model, `#{session_activity}` before the press) in
+  `Agents::switched` — memory only — once a fresh capture shows the dialog for
+  that same model (`prompt::read_switch`, `names_model`). Only beside a
+  matching, young (120 s) record whose session has seen no client activity
+  since is the dialog a prompt; any other screen, answer, send, command or
+  interrupt drops it, and a restart, another model or a stale record leaves it
+  the terminal's. The witness is `#{session_activity}` (`tmux::
+  terminal_activity`), NOT `#{client_activity}`: both move on a client's key
+  and neither on the host's `send-keys`/`paste-buffer`, but a client's own
+  value dies with the client, so a key followed by a detach passed for no
+  activity. One-second resolution: no record when a client was active in the
+  second of the press; the baseline is read BEFORE the capture that proves the
+  list (read after it, a saving Enter typed in the gap was already in it).
+  Residual, not closable without an atomic tmux step: a key typed between the
+  last activity check and the Enter that answers the dialog. Answering uses the ordinary move, proof and Enter, and
+  the record is consumed. Do not grow a fourth path that types into Claude. `agent_interrupt`
   (`agents::agent_interrupt`, the chat's Stop and its Esc, `stopTurn` in
   `chat.ts`) is not one: it types no text, only ONE key,
   Escape, through `tmux::press` as `agent_answer`'s keys go, under the same
@@ -201,7 +222,32 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   SessionEnd, after an answer that used it, or once no prompt is up), and
   `agent_prompt` reads a clipped prompt (`prompt::clipped`) only beside a
   record that AGREES with the screen, as `detail`, which the fingerprint
-  covers; a plan with no record falls back to the file its footer names,
+  covers. **The same record is sent as `asked` on every readable Claude
+  prompt it agrees with** (`feat/prompt-asked`, iOS prompt-display §4):
+  `{tool, input, from: "hook", cwd?, current?, done?}`, `cwd` being the
+  hook's (`Asked.cwd`), `current`/`done` an AskUserQuestion's question on
+  screen and its `☒` tabs. A clipped prompt's `asked` is its `detail` plus
+  `cwd`; a whole prompt has `asked` and NO `detail`, and the fingerprint
+  covers whichever it has. `prompt::call_agrees` is the per-tool rule and
+  the only gate: AskUserQuestion (header among the tabs, question text,
+  `multiSelect`, option labels in order — only the free-text row and `Chat
+  about this` may follow, and exactly ONE question may match), Bash (the
+  rows between the dashed rules EQUAL the command; a clipped prompt's only
+  end it), Edit/MultiEdit/Write (`diff_in`; on a WHOLE prompt the rows must
+  also rebuild the new and old text exactly, `rebuilds`, except a Write over
+  an existing file, and a `…`-cut row refuses), ExitPlanMode (the plan's head;
+  a whole plan must EQUAL the call's, by letters and digits).
+  **Left out, on purpose:** an MCP or any other tool (its input is on no
+  row, and the hook fires as each prompt comes up, not at once — measured
+  on 2.1.319, `claude-screen/2.1.319/README.md` — so the newest record is
+  right only while the hook wrote one: an oversize input, a failed hook or a
+  Claude from before the plugin leaves the last same-tool record, which
+  nothing on screen can refute); WebFetch (a 2.1.319 sub-agent's prompt has
+  no key hints, so nothing reads it, and its url row carries a trailing `/`
+  the call lacks); WebSearch (no screen captured); NotebookEdit; Bash drawn
+  with no dashed rules (no fixture). A whole prompt's record goes with the
+  answer that used it, except an AskUserQuestion's, which serves the form's
+  next question and goes with the "no prompt is up" sweep; a plan with no record falls back to the file its footer names,
   read through `safepath::safe_under`. The hook NEVER decides: its command
   discards stdout and ends `|| true`, because exit 2 or a printed decision
   would deny the user's prompt. Anything else that cannot be read whole is
