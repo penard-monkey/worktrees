@@ -212,7 +212,10 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   `multiSelect`, option labels in order — only the free-text row and `Chat
   about this` may follow, and exactly ONE question may match), Bash (the
   rows between the dashed rules EQUAL the command; a clipped prompt's only
-  end it), Edit/MultiEdit/Write (`diff_in`), ExitPlanMode (the plan's head).
+  end it), Edit/MultiEdit/Write (`diff_in`; on a WHOLE prompt the rows must
+  also rebuild the new and old text exactly, `rebuilds`, except a Write over
+  an existing file, and a `…`-cut row refuses), ExitPlanMode (the plan's head;
+  a whole plan must EQUAL the call's, by letters and digits).
   **Left out, on purpose:** an MCP or any other tool (its input is on no
   row, and the hook fires as each prompt comes up, not at once — measured
   on 2.1.319, `claude-screen/2.1.319/README.md` — so the newest record is

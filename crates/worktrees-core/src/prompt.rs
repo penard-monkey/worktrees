@@ -1891,11 +1891,21 @@ fn agree(asks: &Asks, shown: &[String], tool: &str, input: &serde_json::Value, w
                 "Write" => (text("content").into_iter().collect(), Vec::new()),
                 _ => return false,
             };
-            named(name, text("file_path")) && !new.is_empty() && diff_in(shown, &new, (tool != "Write").then_some(&old[..]))
+            named(name, text("file_path"))
+                && !new.is_empty()
+                && diff_in(shown, &new, (tool != "Write").then_some(&old[..]))
+                // A whole edit shows ALL of its change: the rows must rebuild
+                // the call's texts, not merely sit inside them. (A Write over
+                // an existing file shows only what differs: no rebuild.)
+                && (!whole || tool == "Write" || rebuilds(shown, &new, Some(&old)))
         }
         Asks::Create { name } => {
             let content: Vec<&str> = text("content").into_iter().collect();
-            tool == "Write" && named(name, text("file_path")) && !content.is_empty() && diff_in(shown, &content, None)
+            tool == "Write"
+                && named(name, text("file_path"))
+                && !content.is_empty()
+                && diff_in(shown, &content, None)
+                && (!whole || rebuilds(shown, &content, None))
         }
         Asks::Proceed => {
             let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
@@ -1925,7 +1935,10 @@ fn agree(asks: &Asks, shown: &[String], tool: &str, input: &serde_json::Value, w
                 (None, _) => true,
                 (Some(_), None) => false,
             };
-            tool == "ExitPlanMode" && same_file && !seen.is_empty() && text("plan").is_some_and(|p| words(p).starts_with(&seen))
+            tool == "ExitPlanMode"
+                && same_file
+                && !seen.is_empty()
+                && text("plan").is_some_and(|p| if whole { words(p) == seen } else { words(p).starts_with(&seen) })
         }
     }
 }
@@ -1946,6 +1959,37 @@ fn diff_in(shown: &[String], new: &[&str], old: Option<&[&str]>) -> bool {
             _ => true,
         }
     })
+}
+
+/// The rows `shown` of a WHOLE edit or creation rebuild the call's texts:
+/// squashed, the added rows (a creation's rows, which carry no mark) are
+/// `new` joined and the removed rows `old` joined, a row with no line number
+/// continuing the one above. A row cut with `…` cannot be rebuilt: no.
+fn rebuilds(shown: &[String], new: &[&str], old: Option<&[&str]>) -> bool {
+    let squash = |s: &str| s.chars().filter(|c| !c.is_whitespace()).collect::<String>();
+    let (mut added, mut removed) = (String::new(), String::new());
+    let mut into = None;
+    for r in shown {
+        match diff_row(r) {
+            Some((mark, line)) => {
+                if line.trim_end().ends_with('…') {
+                    return false;
+                }
+                into = Some(mark);
+                match (mark, old) {
+                    ('+', _) | (' ', None) => added.push_str(line),
+                    ('-', Some(_)) => removed.push_str(line),
+                    _ => {}
+                }
+            }
+            None => match (into, old) {
+                (Some('+'), _) | (Some(' '), None) => added.push_str(r.trim()),
+                (Some('-'), Some(_)) => removed.push_str(r.trim()),
+                _ => {}
+            },
+        }
+    }
+    squash(&added) == squash(&new.concat()) && old.is_none_or(|o| squash(&removed) == squash(&o.concat()))
 }
 
 /// A diff or preview row, ` 32 +row 32 changed` / `  1 hello`: its mark
@@ -4917,7 +4961,14 @@ mod tests {
         ] {
             assert_eq!(agreed(claude314!("permission-edit.txt"), "Edit", &bad), None, "{why}");
         }
+        // A call with MORE than the whole screen shows is not the prompt.
+        let more = serde_json::json!({ "file_path": "/r/README.md", "old_string": "hi", "new_string": "hello\nrm -rf ~" });
+        assert_eq!(agreed(claude314!("permission-edit.txt"), "Edit", &more), None, "extra new text the screen never shows");
+        let more = serde_json::json!({ "file_path": "/r/README.md", "old_string": "hi\nsecret", "new_string": "hello" });
+        assert_eq!(agreed(claude314!("permission-edit.txt"), "Edit", &more), None, "extra old text");
         let write = serde_json::json!({ "file_path": "/r/notes.txt", "content": "hello from the probe" });
+        let more = serde_json::json!({ "file_path": "/r/notes.txt", "content": "hello from the probe\nplus a line" });
+        assert_eq!(agreed(claude314!("permission-write.txt"), "Write", &more), None, "a creation with more than its rows");
         assert_eq!(agreed(claude314!("permission-write.txt"), "Write", &write), some);
         assert_eq!(agreed(claude314!("permission-write.txt"), "Write", &serde_json::json!({ "file_path": "/r/notes.txt", "content": "else" })), None);
         assert_eq!(agreed(claude314!("permission-write.txt"), "Write", &serde_json::json!({ "file_path": "/r/other.txt", "content": "hello from the probe" })), None);
@@ -4928,6 +4979,9 @@ mod tests {
         let mut other = plan.clone();
         other["planFilePath"] = "/Users/u/.claude/plans/another-plan.md".into();
         assert_eq!(agreed(claude316!("plan-approval-80.txt"), &tool, &other), None, "another plan's file");
+        let mut longer = plan.clone();
+        longer["plan"] = format!("{}\n\nAlso delete everything.", plan["plan"].as_str().unwrap()).into();
+        assert_eq!(agreed(claude316!("plan-approval-80.txt"), &tool, &longer), None, "a whole plan is the whole plan");
         let mut revised = plan.clone();
         revised["plan"] = plan["plan"].as_str().unwrap().replacen("Plan", "Scheme", 1).into();
         assert_eq!(agreed(claude316!("plan-approval-80.txt"), &tool, &revised), None, "another plan");
