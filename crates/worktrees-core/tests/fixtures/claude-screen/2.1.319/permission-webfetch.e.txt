@@ -1,0 +1,45 @@
+
+[38;5;174m ▐[48;5;16m▛███▛█[39m[49m   [1mClaude Code[0m [38;5;246mv2.1.319[39m
+[38;5;174m▝▜[48;5;16m█████[49m█▀[39m  [38;5;246mHaiku 5.5 · Claude Max[39m
+[38;5;174m ▝▝   ▝▝ [39m  [38;5;246m/private/tmp/claude-501/wtask/repo[39m
+
+
+[38;5;246m[48;5;237m❯ [38;5;231mIn ONE message, issue two Bash tool calls in parallel: first [38;5;153mtouch pa.txt[38;5;231m, second [38;5;153mtouch pb.txt[38;5;231m. Nothing else, no [39m
+  [38;5;231mexplanation.[39m
+
+[49m  [38;5;246mRan [1m2[0m[38;5;246m shell commands [39m
+
+[38;5;231m⏺[39m I ran [38;5;153mtouch pa.txt[39m and [38;5;153mtouch pb.txt[39m in parallel. Both completed with no output.
+
+[38;5;246m✻[39m [38;5;246mSautéed for 2s · done 4:22 PM[39m
+
+[38;5;246m[48;5;237m❯ [38;5;231mUse the WebFetch tool on https://example.com and ask it: what is the page title? One line answer.[39m
+
+[38;5;246m[49m⏺[39m [1mFetch[0m(https://example.com)
+[38;5;246m  ⎿  Fetching…[39m
+     [38;5;246m(ctrl+b ctrl+b (twice) to run in background)[39m
+
+[38;5;153m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m [1m[38;5;153mFetch[0m [38;5;246m· [39mfrom the web-fetch agent
+ [38;5;246mClaude wants to fetch content from example.com[39m
+[38;5;239m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+[39m url: https://example.com/
+ prompt: What is the page title? Reply with the title only.
+[38;5;239m╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+[39m Do you want to allow Claude to fetch this content?
+ [38;5;153m❯[39m [38;5;246m1. [38;5;153mYes[39m
+   [38;5;246m2. [39mYes, and don't ask again for [1mexample.com[0m
+   [38;5;246m3. [39mNo, and tell Claude what to do differently [1m(esc)[0m
+
+
+
+
+
+
+
+
+
+
+
+
+[38;5;244m────────────────────────────────────────────────────────────────────────────────────────────────────────── wtask-probe ─
