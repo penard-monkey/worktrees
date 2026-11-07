@@ -8,6 +8,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ### Added
 
 - **A Claude prompt can now come with the call Claude made.** `agent_prompt` sends it as `asked` — the tool, its whole input and the folder it asked from — when the screen agrees with it: a question (which of its questions is up, and which are answered), a Bash command, an Edit, MultiEdit or Write, a plan. A client can then draw the question, the command or the diff as Claude meant it instead of as the terminal drew it. The choices are still the screen's and are answered by number. A prompt whose call does not match the screen, and every other tool (an MCP tool's input is never on the screen to check), carries none.
+- **A shortened chat message can be read in full.** When a long reply (or a long message you sent) says "Shortened by the host", it now has a **Show full reply** (or **Show full message**) link. It fetches the whole turn and shows it in place, including any later paragraphs that were dropped, such as the question an agent was asking. It stays open as the chat refreshes, and a turn that is still running keeps updating. If the turn is too old for the host to read, it says so and points you to the terminal; an older host keeps the note it had.
 
 ### Fixed
 
