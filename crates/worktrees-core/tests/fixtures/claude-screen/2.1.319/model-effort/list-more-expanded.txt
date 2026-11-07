@@ -1,0 +1,40 @@
+
+ ▐▛███▛█   Claude Code v2.1.319
+▝▜██████▀  Sonnet 5.5 · Claude Max
+ ▝▝   ▝▝   /…/4557f7f6-8a8f-48c3-8d2c-808f8128d3b9/scratchpad/repo
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+   Select model
+   Switch between Claude models. Your pick becomes the default for new sessions. For other/previous model names,
+   specify with --model.
+
+   ↑ 5.  Haiku 5.5              Fastest for quick answers
+   ❯ 6.  More models            Hide
+     7.  Haiku 4.5              Fastest for quick answers
+     8.  Sonnet 5               Efficient for routine tasks
+     9.  Opus 5                 Best for everyday, complex tasks
+     10. Fable 5                Most capable for your hardest and longest-running tasks
+     11. Opus 4.8               Best for everyday, complex tasks
+     12. Opus 4.7               Best for everyday, complex tasks
+     13. Opus 4.6               Best for everyday, complex tasks
+     14. Sonnet 4.6             Efficient for routine tasks
+
+
+
+
+   Use /fast to turn on Fast mode (Opus 5.5).
+
+   Enter to collapse · Esc to cancel
