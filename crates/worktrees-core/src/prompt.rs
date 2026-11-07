@@ -2359,6 +2359,13 @@ pub fn turn_shown(harness: &str, screen: &str) -> Option<TurnShown> {
             let busy = near_above(&rows, at).any(|r| r.trim_start().starts_with("• ") && r.contains(CODEX_BUSY_HINT));
             Some(if busy { TurnShown::Running } else { TurnShown::Idle })
         }
+        // kimi: no busy hint to read — the wire log says busy, this says
+        // whether the composer is free (a draft hides the hints). An empty
+        // composer reads Idle and the caller pairs it with the log.
+        h if h == provider::KIMI.id => {
+            let c = kimi::read_composer(&rows.join("\n"))?;
+            Some(if c.input.is_empty() { TurnShown::Idle } else { TurnShown::Drafted })
+        }
         _ => None,
     }
 }
@@ -4270,6 +4277,25 @@ mod tests {
         assert_eq!(turn_shown("codex", codexstop!("busy-draft.txt")), Some(TurnShown::Drafted));
         assert!(interrupted_shown("codex", codexstop!("busy-draft-esc.txt")));
         assert_eq!(turn_shown("pi", codexstop!("busy.txt")), None, "a harness this does not read");
+    }
+
+    /// kimi 2.2.0: no busy hint to read on screen — the wire log says busy.
+    /// The screen only says whether the composer is free: a draft is
+    /// `Drafted`, an empty composer `Idle` (the caller pairs it with the
+    /// log), a modal or the trust prompt nothing (Esc would cancel them).
+    #[test]
+    fn kimi_shows_only_whether_its_composer_is_free() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/kimi-screen/2.2.0");
+        let s = |n: &str| std::fs::read_to_string(dir.join(n)).unwrap();
+        assert_eq!(turn_shown("kimi", &s("idle.txt")), Some(TurnShown::Idle));
+        assert_eq!(turn_shown("kimi", &s("busy-typed.txt")), Some(TurnShown::Drafted));
+        assert_eq!(turn_shown("kimi", &s("busy-queued.txt")), Some(TurnShown::Idle), "queued messages are not a draft");
+        assert_eq!(turn_shown("kimi", &s("composer-typed.txt")), Some(TurnShown::Drafted));
+        for modal in ["approval.txt", "question.txt", "trust.txt"] {
+            assert_eq!(turn_shown("kimi", &s(modal)), None, "{modal}: a prompt, Esc would cancel it");
+        }
+        assert_eq!(turn_shown("kimi", ""), None, "no composer yet");
+        assert!(!interrupted_shown("kimi", &s("idle.txt")));
     }
 
     /// History can quote the hints: an idle Claude whose last reply is a

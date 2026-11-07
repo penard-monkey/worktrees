@@ -20,6 +20,7 @@ screens and the session layout are pinned by fixtures to one version:
 | wire log: a question modal | 2.2.0 | `…/kimi-wire/2.2.0/question.jsonl` |
 | wire log: a session-only `/model` switch (`config.update`) | 2.2.0 | `…/kimi-wire/2.2.0/model-switch.jsonl` |
 | wire log: a message queued behind a turn | 2.2.0 | `…/kimi-wire/2.2.0/queued.jsonl` |
+| wire log: turns for the chat (text, tools, approvals, a question, an Esc) | 2.2.0 | `…/kimi-wire/2.2.0/transcript.jsonl` |
 | screens: idle, typed, busy-typed, busy-queued, trust, approval, question | 2.2.0 | `…/kimi-screen/2.2.0/` |
 
 The wire fixtures keep only the record types the reader uses, scrubbed of
@@ -115,6 +116,33 @@ send {slug: "lane1", text: "Reply with the single word ACK. Do not run tools."}
 - [x] Busy: a second send while kimi works answers `queued: true` — kimi lists it above the composer (`❯ …` / `↑ to edit · ctrl-s to steer immediately`) and logs it only when its turn starts.
 - [ ] With an approval open, `send` is refused before any key is typed. (Unit-tested on the captured screen.)
 - [ ] While a lane's opener is still pending, `send` is refused ("still being handed its brief").
+
+## 4b. The chat (agent_turns, agent_tool_call, agent_interrupt)
+
+Read and verified on 2026-11-06 against a REAL session through a scratch
+serve (handshake v1 over the loopback socket; the branch's release CLI; a
+scratch config dir + registry, the real tmux server and `~/.kimi-code`): the
+chat's turns came back from THIS session's live wire log (its approvals as
+permission steps — one "approve once", then "for this session" — and a Read's
+path-only detail); `agent_send` delivered a line into a scratch lane
+(`delivered: true`); `agent_interrupt` stopped a long count with ONE Esc and
+answered `interrupted: true`, the wire log ending `outcome: aborted`.
+Re-run on every kimi upgrade — the record shapes are kimi's, not a published
+API:
+
+- [ ] `agent_turns` answers this session's turns (user text, reply text,
+      tools with their one-line summaries, permission steps allowed/refused,
+      questions with their picks). The fixtures pin the shapes.
+- [ ] The orders an approval's `interaction.request` can land BEFORE its
+      `tool.call`, a question's after, and a REJECTED approval has no call at
+      all — the reader builds the step at the resolution (`transcript.jsonl`
+      is in the request-first order, measured on the real log above).
+- [ ] `agent_interrupt` refuses while an approval/question/trust modal is up
+      (Esc would cancel it), on a draft, and on an idle lane; stops a running
+      turn once (the wire log, not the screen, is the witness).
+- [ ] In the app: a kimi place opens on Chat, turns render, the Stop button
+      works, and a queued message shows `queued: true`. (Unit-tested on the
+      fixtures + the mock's `ledger-sync`; the by-hand pass is §10.)
 
 ## 5. Resume
 
@@ -273,6 +301,7 @@ repo you don't mind kimi touching, and the cheap model (`K2.7 Code Highspeed`).
 | Re-list on model switch | `LaneTick::models_moved` from the wire log's alias | app unit test; §10 open |
 | MCP | per-place `.kimi-code/mcp.json`, `WORKTREES_MCP_PROVIDER=kimi`, mode `kimi_mcp` | bats + §8 |
 | `send` | composer by position, receipt from `turn.prompt`, queue from screen | unit + §4 |
+| Chat (`agent_turns` / `agent_tool_call` / `agent_interrupt`) | `turns::kimi` on the wire log; approvals and questions as steps, either arrival order; the stop's witness is the log | unit + §4b (live, 2026-11-06) |
 | Plan paste / Ask (main) | refuse unless kimi is at an EMPTY composer | app unit test; §10 open |
 | Guidance | `.kimi-code/AGENTS.md` + `skills/worktrees/` (kimi never shows MCP `instructions`) | bats + §8 |
 | Security | trust asks by default; allowance per repo; protect-ours over it; `kimi_mcp` and `[trust] kimi` are user-only | unit + bats + §7 |

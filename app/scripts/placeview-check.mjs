@@ -172,9 +172,9 @@ eq("an unknown global survives a save", s2.a_newer_builds_key, "kept");
 // ── 2. read: stored choice wins, else provider rule, never a global ─────────
 eq("agentViewFor: stored Chat wins for pi", S.agentViewFor(s, A, "pi"), "chat");
 eq("agentViewFor: stored Terminal wins for Claude", S.agentViewFor(s, B, "claude"), "terminal");
-for (const provider of ["claude", "codex"])
+for (const provider of ["claude", "codex", "kimi"])
   eq(`agentViewFor: absent is Chat for ${provider}`, S.agentViewFor(s, C, provider), "chat");
-for (const provider of ["pi", "kimi"])
+for (const provider of ["pi"])
   eq(`agentViewFor: absent is Terminal for ${provider}`, S.agentViewFor(s, C, provider), "terminal");
 eq("agentViewFor: an existing record with no view uses provider default", S.agentViewFor(s, BARE, "codex"), "chat");
 eq("agentViewFor: no place is Terminal", S.agentViewFor(s, null, "claude"), "terminal");

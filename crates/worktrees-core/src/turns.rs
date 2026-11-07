@@ -1470,6 +1470,361 @@ fn codex_typed(text: &str) -> bool {
     !t.is_empty() && !t.starts_with('<') && !t.starts_with("# AGENTS.md instructions")
 }
 
+/// The last `n` turns of a kimi session's wire log `lines`, oldest first.
+/// kimi 2.2.0 (`kimi-wire/2.2.0/transcript.jsonl`, the record shapes a real
+/// session wrote, the content invented): a `turn.prompt` starts a turn; the
+/// turn's story is `context.append_loop_event` events — `content.part` text
+/// blocks (`think` parts are reasoning, left out like Claude's), `tool.call` /
+/// `tool.result` pairs (only `isError` is read of a result, never its
+/// output) — and `interaction.request` / `interaction.resolved` pairs carry
+/// what a person was asked and did: an approval turns its call into a
+/// `permission` step (allowed, and a session scope, from the resolution), a
+/// question turns its `AskUserQuestion` call into a `question` step (the
+/// answer is keyed by the question's text). The two arrive in DIFFERENT
+/// orders, measured on real sessions: an approval's request lands BEFORE its
+/// `tool.call` (a rejected one has no call at all — the step is built at the
+/// resolution), a question's call BEFORE its request. An interaction whose
+/// resolution left the read window stays un-answered, which the chat does
+/// not draw: the live prompt card covers it. An Esc is `agent.turn.ended`
+/// with `outcome: aborted`: the turn keeps the part that ran, with no
+/// marker, as Codex's reader leaves an interrupted turn.
+pub fn kimi(lines: &[String], n: usize) -> Vec<Turn> {
+    finish(kimi_turns(lines), n)
+}
+
+/// Every turn in a kimi wire log's `lines`, as [`kimi`] reads them.
+fn kimi_turns(lines: &[String]) -> Vec<Turn> {
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Ask {
+        Approval,
+        Question,
+    }
+    /// An interaction still open: matched to its `tool.call` by the call id
+    /// (a permission step carries no id, so the step's place is recorded
+    /// once made), and filled by the resolution.
+    #[derive(Clone)]
+    struct Open {
+        id: String,
+        tool_call: String,
+        ask: Ask,
+        asked_at: Option<i64>,
+        tool: String,
+        said: Option<String>,
+        questions: Vec<Question>,
+        answered_at: Option<i64>,
+        allowed: Option<bool>,
+        scope: Option<String>,
+        answer: Option<Answer>,
+        step: Option<(usize, usize)>,
+    }
+    let mut turns: Vec<Turn> = Vec::new();
+    let mut open: Vec<Open> = Vec::new();
+    let mut apply = |open: &Open, turns: &mut Vec<Turn>| {
+        let Some((ti, si)) = open.step else { return };
+        let Some(step) = turns.get_mut(ti).and_then(|t| t.steps.get_mut(si)) else { return };
+        match step {
+            Step::Permission { answered_at, allowed, scope, .. } => {
+                *answered_at = open.answered_at;
+                *allowed = open.allowed.unwrap_or(false);
+                *scope = open.allowed.unwrap_or(false).then(|| open.scope.clone()).flatten();
+            }
+            Step::Question { answered_at, answer, .. } => {
+                *answered_at = open.answered_at;
+                *answer = open.answer.clone();
+            }
+            _ => {}
+        }
+    };
+    for l in lines {
+        if !(l.contains("\"turn.prompt\"")
+            || l.contains("\"context.append_loop_event\"")
+            || l.contains("\"interaction.request\"")
+            || l.contains("\"interaction.resolved\""))
+        {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(l) else { continue };
+        let at = v.get("time").and_then(|t| t.as_i64()).map(|ms| ms / 1000);
+        match v.get("type").and_then(|t| t.as_str()) {
+            Some("turn.prompt") => {
+                if v.pointer("/origin/kind").and_then(|k| k.as_str()) != Some("user") {
+                    continue;
+                }
+                let text = v
+                    .get("input")
+                    .and_then(|i| i.as_array())
+                    .map(|parts| parts.iter().filter_map(|p| p.get("text").and_then(|t| t.as_str())).collect::<Vec<_>>().join(""))
+                    .unwrap_or_default();
+                turns.push(Turn::new(at, Some(text)));
+            }
+            Some("context.append_loop_event") => {
+                let Some(e) = v.get("event") else { continue };
+                match e.get("type").and_then(|t| t.as_str()) {
+                    Some("content.part") => {
+                        // `think` parts are reasoning, not the reply.
+                        if e.pointer("/part/type").and_then(|t| t.as_str()) != Some("text") {
+                            continue;
+                        }
+                        let Some(text) = e.pointer("/part/text").and_then(|t| t.as_str()) else { continue };
+                        current(&mut turns, at).say(at, text);
+                    }
+                    Some("tool.call") => {
+                        let (Some(name), id) = (
+                            e.get("name").and_then(|n| n.as_str()),
+                            e.get("toolCallId").and_then(|i| i.as_str()).unwrap_or("").to_string(),
+                        ) else { continue };
+                        let args = e.get("args");
+                        // A call a person is asked about is its asked step,
+                        // whatever order the pair arrived in: the request
+                        // first (an approval's way — the resolution may have
+                        // built the step already, and the call then adds
+                        // nothing) or the call first (a question's way).
+                        let open_i = open.iter().position(|o| o.tool_call == id);
+                        if open_i.is_some_and(|i| open[i].step.is_some()) {
+                            continue;
+                        }
+                        let asked = open_i.map(|i| open[i].clone());
+                        let turn = current(&mut turns, at);
+                        turn.tools.push(name.to_string());
+                        let step = match asked {
+                            Some(o) if o.ask == Ask::Question => Step::Question {
+                                at,
+                                answered_at: o.answered_at,
+                                questions: if o.questions.is_empty() { kimi_questions(args) } else { o.questions.clone() },
+                                answer: o.answer.clone(),
+                                id,
+                            },
+                            Some(o) => Step::Permission {
+                                at,
+                                answered_at: o.answered_at,
+                                tool: if o.tool.is_empty() { name.to_string() } else { o.tool },
+                                summary: o.said.clone(),
+                                allowed: o.allowed.unwrap_or(false),
+                                scope: o.allowed.unwrap_or(false).then(|| o.scope.clone()).flatten(),
+                                note: None,
+                            },
+                            None if name == "AskUserQuestion" => Step::Question { at, answered_at: None, questions: kimi_questions(args), answer: None, id },
+                            None => Step::Tool {
+                                at,
+                                name: name.to_string(),
+                                id,
+                                summary: kimi_summary(name, args, e.get("display")),
+                                failed: false,
+                                ran: kimi_ran(name, args),
+                                detail: false,
+                            },
+                        };
+                        let si = turn.steps.len();
+                        turn.steps.push(step);
+                        if let Some(i) = open_i {
+                            open[i].step = Some((turns.len() - 1, si));
+                        }
+                    }
+                    Some("tool.result") => {
+                        let Some(id) = e.get("toolCallId").and_then(|i| i.as_str()) else { continue };
+                        if let Some(Step::Tool { failed, .. }) = current(&mut turns, at).steps.iter_mut().find(|s| s.id() == Some(id)) {
+                            *failed = e.pointer("/result/isError").and_then(|x| x.as_bool()) == Some(true);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Some("interaction.request") => {
+                let (Some(id), Some(kind), tool_call) = (
+                    v.get("id").and_then(|i| i.as_str()),
+                    v.get("kind").and_then(|k| k.as_str()),
+                    v.get("toolCallId").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+                ) else { continue };
+                let req = v.get("request");
+                let mut o = Open {
+                    id: id.to_string(),
+                    tool_call: tool_call.clone(),
+                    ask: if kind == "question" { Ask::Question } else { Ask::Approval },
+                    asked_at: at,
+                    tool: req.and_then(|r| r.get("toolName")).and_then(|t| t.as_str()).unwrap_or("").to_string(),
+                    said: req.and_then(|r| r.get("action")).and_then(|a| a.as_str()).and_then(one_line),
+                    questions: kimi_questions(req),
+                    answered_at: None,
+                    allowed: None,
+                    scope: None,
+                    answer: None,
+                    step: None,
+                };
+                // Call-first ordering (a question's way): the step exists —
+                // merge the request's canonical questions, or upgrade the
+                // tool, and record where the resolution writes.
+                let ti = turns.len().saturating_sub(1);
+                if let Some(pos) = turns.last().and_then(|t| t.steps.iter().position(|s| s.id() == Some(tool_call.as_str()))) {
+                    match (o.ask, &mut turns[ti].steps[pos]) {
+                        (Ask::Approval, Step::Tool { at: called, name, summary, .. }) => {
+                            let said = summary.take().or(o.said.take());
+                            let tool = if o.tool.is_empty() { std::mem::take(name) } else { std::mem::take(&mut o.tool) };
+                            turns[ti].steps[pos] = Step::Permission {
+                                at: *called,
+                                answered_at: None,
+                                tool,
+                                summary: said,
+                                allowed: false,
+                                scope: None,
+                                note: None,
+                            };
+                        }
+                        (Ask::Question, Step::Question { questions, .. }) => {
+                            if !o.questions.is_empty() {
+                                *questions = o.questions.clone();
+                            }
+                        }
+                        _ => {}
+                    }
+                    o.step = Some((ti, pos));
+                }
+                open.push(o);
+            }
+            Some("interaction.resolved") => {
+                let Some(id) = v.get("id").and_then(|i| i.as_str()) else { continue };
+                let Some(i) = open.iter().position(|o| o.id == id) else { continue };
+                let response = v.get("response");
+                {
+                    let o = &mut open[i];
+                    o.answered_at = at;
+                    if o.ask == Ask::Approval {
+                        o.allowed = Some(response.and_then(|r| r.get("decision")).and_then(|d| d.as_str()) == Some("approved"));
+                        o.scope = response.and_then(|r| r.get("scope")).and_then(|s| s.as_str()).map(str::to_string);
+                    } else {
+                        // A dismissal (Esc) resolves the question with no
+                        // response at all (`kimi-wire/2.2.0/question.jsonl`).
+                        o.answer = match response {
+                            Some(r) => r.get("answers").and_then(|a| a.as_object()).map(|given| Answer {
+                                how: "picked",
+                                answers: o.questions.iter().filter_map(|q| given.get(&q.key).and_then(|a| a.as_str()).map(|a| picked(q, a))).collect(),
+                            }),
+                            None => Some(Answer { how: "declined", answers: Vec::new() }),
+                        };
+                    }
+                }
+                if open[i].step.is_some() {
+                    apply(&open[i], &mut turns);
+                } else {
+                    // Request-first ordering's rejected approval: no call ever
+                    // lands, so the step is born of the resolution, at the
+                    // position the refusal reached.
+                    let o = open[i].clone();
+                    if !(o.ask == Ask::Approval && o.tool.is_empty()) {
+                        let turn = current(&mut turns, o.asked_at);
+                        if !o.tool.is_empty() {
+                            turn.tools.push(o.tool.clone());
+                        }
+                        let si = turn.steps.len();
+                        turn.steps.push(match o.ask {
+                            Ask::Approval => Step::Permission {
+                                at: o.asked_at,
+                                answered_at: o.answered_at,
+                                tool: o.tool,
+                                summary: o.said,
+                                allowed: o.allowed.unwrap_or(false),
+                                scope: o.allowed.unwrap_or(false).then(|| o.scope.clone()).flatten(),
+                                note: None,
+                            },
+                            Ask::Question => Step::Question { at: o.asked_at, answered_at: o.answered_at, questions: o.questions.clone(), answer: o.answer.clone(), id: o.tool_call.clone() },
+                        });
+                        open[i].step = Some((turns.len() - 1, si));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    turns
+}
+
+/// kimi's `AskUserQuestion` arguments into questions. The resolution's
+/// `answers` object is keyed by the question's own text (`key` is what the
+/// answer is looked up by), and 2.2.0's questions have no multi-select.
+fn kimi_questions(args: Option<&serde_json::Value>) -> Vec<Question> {
+    let s = |v: &serde_json::Value, k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+    args.and_then(|a| a.get("questions"))
+        .and_then(|q| q.as_array())
+        .map(|qs| {
+            qs.iter()
+                .map(|q| {
+                    let question = s(q, "question");
+                    Question {
+                        key: question.clone(),
+                        header: s(q, "header"),
+                        question,
+                        multi: false,
+                        options: q.get("options").and_then(|o| o.as_array()).map(|os| os.iter().map(|o| QuestionOption { label: s(o, "label"), description: s(o, "description") }).collect()).unwrap_or_default(),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// What a kimi tool call does, in a line: its command, the file it touched
+/// (the path as typed, where the arguments carry one — `display.path` is
+/// absolute), a search's pattern, an address. Nothing for a tool with
+/// nothing to say (an MCP tool's): its name already says what it is.
+fn kimi_summary(name: &str, args: Option<&serde_json::Value>, display: Option<&serde_json::Value>) -> Option<String> {
+    let arg = |k: &str| args.and_then(|a| a.get(k)).and_then(|v| v.as_str());
+    let disp = |k: &str| display.and_then(|d| d.get(k)).and_then(|v| v.as_str());
+    match name {
+        "Bash" => one_line(arg("command").or(disp("command"))?),
+        "Grep" => match (arg("pattern"), arg("path").or(disp("path"))) {
+            (Some(pattern), Some(path)) => one_line(&format!("{pattern} in {path}")),
+            (Some(pattern), None) => one_line(pattern),
+            _ => one_line(disp("path")?),
+        },
+        "Glob" => one_line(arg("pattern")?),
+        "WebSearch" => one_line(arg("query").or(disp("query"))?),
+        "FetchURL" => one_line(arg("url").or(disp("url"))?),
+        _ => match display.and_then(|d| d.get("kind")).and_then(|k| k.as_str()) {
+            Some("file_io") => one_line(arg("path").or(disp("path"))?),
+            Some("todo_list") => display.and_then(|d| d.get("items")).and_then(|i| i.as_array()).map(|i| format!("{} {}", i.len(), if i.len() == 1 { "item" } else { "items" })),
+            Some("agent_call") => one_line(disp("agent_name")?),
+            Some("skill_call") => one_line(disp("skill_name")?),
+            _ => None,
+        },
+    }
+}
+
+/// kimi tools whose `args` carry a file's contents: like Claude's
+/// [`PATH_ONLY`], only the path is kept, as the contents stay in the terminal.
+/// kimi's own names and argument keys, measured on 2.2.0.
+const KIMI_PATH_ONLY: [(&str, &str); 2] = [("Write", "path"), ("Edit", "path")];
+
+/// What a kimi tool call was given: the command or the path for a tool
+/// [`kimi_summary`] names, only the path of a [`KIMI_PATH_ONLY`] tool (its
+/// `content`/`old_string`/`new_string` stay in the terminal), and the
+/// structured arguments for any other tool, an MCP tool's included.
+fn kimi_ran(name: &str, args: Option<&serde_json::Value>) -> Ran {
+    let Some(args) = args else { return Ran::Nothing };
+    let s = |k: &str| args.get(k).and_then(|v| v.as_str()).map(str::to_string);
+    if let Some((_, key)) = KIMI_PATH_ONLY.iter().find(|(tool, _)| *tool == name) {
+        return s(key).map_or(Ran::Nothing, |path| Ran::Parts(vec![Some(path)]));
+    }
+    let text = match name {
+        "Bash" => s("command"),
+        "Read" | "Grep" => match (s("pattern"), s("path")) {
+            (Some(pattern), Some(path)) => Some(format!("{pattern} in {path}")),
+            (Some(pattern), None) => Some(pattern),
+            _ => s("path"),
+        },
+        "Glob" => s("pattern"),
+        "WebSearch" => s("query"),
+        "FetchURL" => s("url"),
+        _ => return ran_json(args),
+    };
+    text.map_or(Ran::Nothing, |t| Ran::Parts(vec![Some(t)]))
+}
+
+/// The input of the kimi call `id`, as [`claude_tool_call`]. A call a person
+/// decided at its approval is a permission step by then, and holds no input,
+/// as Claude's model has it.
+pub fn kimi_tool_call(lines: &[String], id: &str) -> Option<CallDetail> {
+    detail_in(kimi_turns(lines), id)
+}
+
 /// The turn a reply belongs to: the last one, or a prompt-less one when the
 /// window starts inside a turn.
 fn current(turns: &mut Vec<Turn>, at: Option<i64>) -> &mut Turn {
@@ -2682,5 +3037,107 @@ mod tests {
         assert!(dropped && kept.iter().map(Turn::bytes).sum::<usize>() <= TOTAL_MAX);
         assert_eq!(kept.len(), fit, "as many turns as their words allow");
         assert!(calls(kept.last().unwrap()).last().unwrap().1.is_some(), "the newest call keeps its line");
+    }
+
+    /// kimi 2.2.0's wire log (`kimi-wire/2.2.0/transcript.jsonl`, real record
+    /// shapes, invented content): prompts and text blocks are turns; thinking,
+    /// tool output, the system prompt and bookkeeping records are not; an
+    /// approval upgrades its call to a permission step (allowed, and session
+    /// scope, from the resolution); a question's answer is keyed by the
+    /// question's text; an Esc'd turn keeps the part that ran.
+    #[test]
+    fn kimi_turns_are_prompts_replies_and_what_a_person_decided() {
+        let fx = lines(include_str!("../tests/fixtures/kimi-wire/2.2.0/transcript.jsonl"));
+        let got = kimi(&fx, 20);
+        let all = serde_json::to_string(&got).unwrap();
+        for secret in ["THINKING-MARKER", "TOOL-OUTPUT-MARKER", "OLD-MARKER", "NEW-MARKER", "systemPrompt"] {
+            assert!(!all.contains(secret), "{secret} leaked: {all}");
+        }
+        assert_eq!(got.len(), 5, "{got:#?}");
+
+        // Turn 0: text, a Bash approved once, an Edit approved for the
+        // session — both permission steps, the Edit's contents left out.
+        assert_eq!(got[0].user.as_deref(), Some("Run the probe, apply the patch, then reply DONE."));
+        assert_eq!(got[0].at, Some(1760000000));
+        assert_eq!(got[0].reply, "Running the probe now.\n\nApplying the patch.\n\nPatched. DONE.");
+        assert_eq!(got[0].tools, vec!["Bash".to_string(), "Edit".to_string()]);
+        let steps = |t: &Turn| t.steps.clone();
+        let s0 = steps(&got[0]);
+        assert!(matches!(&s0[1], Step::Permission { tool, allowed: true, scope: None, summary: Some(s), answered_at: Some(_), .. } if tool == "Bash" && s == "Running: ./probe.sh"), "{s0:#?}");
+        assert!(matches!(&s0[3], Step::Permission { tool, allowed: true, scope: Some(sc), summary: Some(s), .. } if tool == "Edit" && sc == "session" && s == "Editing: src/parse.rs"), "{s0:#?}");
+        // The Edit carried contents: only its path leaves.
+        assert!(!all.contains("old_string"), "a path-only tool's contents leaked: {all}");
+
+        // Turn 1: a rejected approval — no call ever lands for it, so the
+        // permission step is born of the resolution, where the refusal
+        // reached — then a tool nobody was asked about that failed (isError).
+        let s1 = steps(&got[1]);
+        let kinds1: Vec<&str> = got[1].steps.iter().map(|s| match s {
+            Step::Text { .. } => "text",
+            Step::Tool { .. } => "tool",
+            Step::Permission { .. } => "permission",
+            _ => "other",
+        }).collect();
+        assert_eq!(kinds1, vec!["permission", "text", "tool", "text"], "the rejected approval keeps its place");
+        assert!(matches!(&s1[0], Step::Permission { tool, allowed: false, scope: None, answered_at: Some(_), .. } if tool == "Bash"), "{s1:#?}");
+        assert!(matches!(&s1[2], Step::Tool { name, failed: true, summary: Some(s), .. } if name == "Read" && s == "missing-manifest.toml"), "{s1:#?}");
+
+        // Turn 2: a question and its answer, picked by the question's text.
+        let s2 = steps(&got[2]);
+        match &s2[0] {
+            Step::Question { questions, answer: Some(a), .. } => {
+                assert_eq!(questions.len(), 1);
+                assert_eq!(questions[0].header, "Shade");
+                assert_eq!(questions[0].options.len(), 3);
+                assert_eq!(a.how, "picked");
+                assert_eq!(a.answers, vec![QuestionAnswer { question: "Which color?".into(), picked: vec!["Blue".into()], typed: None, note: None }]);
+            }
+            other => panic!("expected a question, got {other:?}"),
+        }
+
+        // Turn 3: a queued worktrees message is an ordinary user turn.
+        assert_eq!(got[3].user.as_deref(), Some("[worktrees: message from place \"probe\"] reply QUEUED-OK"));
+
+        // Turn 4: Esc'd — the part that ran stays, with no end marker.
+        assert_eq!(got[4].user.as_deref(), Some("Write a long poem, no tools."));
+        assert_eq!(got[4].reply, "The river bends");
+    }
+
+    /// kimi's call detail: a structured input comes back cleaned; a path-only
+    /// tool (Write/Edit) answers its path; a call a person decided at its
+    /// approval holds no input, as Claude's model has it.
+    #[test]
+    fn kimi_tool_call_reads_the_call_it_names() {
+        let fx = lines(include_str!("../tests/fixtures/kimi-wire/2.2.0/transcript.jsonl"));
+        let mcp = kimi_tool_call(&fx, "tool_status").expect("the MCP call");
+        assert_eq!(mcp.tool, "mcp__worktrees__place_status");
+        assert_eq!(mcp.input, serde_json::json!({"slug": "probe"}));
+        assert!(!mcp.truncated);
+        let read = kimi_tool_call(&fx, "tool_read").expect("the failed Read");
+        assert_eq!(read.input, serde_json::json!("missing-manifest.toml"));
+        // Calls a person decided at their approval are permission steps: their
+        // input left with the upgrade.
+        assert!(kimi_tool_call(&fx, "tool_probe").is_none());
+        assert!(kimi_tool_call(&fx, "tool_edit").is_none());
+        assert!(kimi_tool_call(&fx, "tool_gone").is_none());
+    }
+
+    /// A wire log read mid-question: the question step is there, un-answered
+    /// (the chat does not draw it — the live prompt card does), and a tail
+    /// that starts inside a turn starts with `user: null`.
+    #[test]
+    fn kimi_tail_windows_read_honestly() {
+        let fx = lines(include_str!("../tests/fixtures/kimi-wire/2.2.0/transcript.jsonl"));
+        let ask = fx.iter().position(|l| l.contains("\"question_ask\"")).unwrap();
+        let got = kimi(&fx[..=ask], 20);
+        let last = got.last().unwrap();
+        assert!(matches!(last.steps.last(), Some(Step::Question { answer: None, answered_at: None, .. })), "{last:#?}");
+        let mid = fx.iter().position(|l| l.contains("Patched. DONE.")).unwrap();
+        let got = kimi(&fx[..=mid], 20);
+        assert_eq!(got.last().unwrap().user, Some("Run the probe, apply the patch, then reply DONE.".into()));
+        let from = fx.iter().position(|l| l.contains("Applying the patch.")).unwrap();
+        let got = kimi(&fx[from..from + 1], 20);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].user, None, "the window starts inside the turn");
     }
 }

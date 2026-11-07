@@ -5,6 +5,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+
+- **Kimi in the chat.** A place running Kimi now opens on the Chat view like Claude and Codex: its turns are read from the session's wire log (your messages, its replies, the tools it called and whether one failed, and the approvals and questions you answered, allowed or refused with a session scope where you gave one), prompts show as cards you answer from the chat, and the Stop button ends a running turn — Kimi has no busy hint on screen, so the wire log is the witness, the same derivation the dot and place status read. New places still ask Kimi to trust the folder first, and the trust prompt stays the terminal's. Kimi takes one line at a time, as before.
+
 ## [0.48.0] - 2026-11-05
 
 ### Added
