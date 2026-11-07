@@ -20,7 +20,7 @@ import * as Icons from "./icons";
 
 const GAP = 10; // px between the gear's edge and the bubble's tail tip
 
-export function UpdateBubble({ items, releaseTag, appVersion, cliVersion, appStale, cliStale, anchor, side, onUpdate, onNotes, onDismiss, onLift }: {
+export function UpdateBubble({ items, releaseTag, appVersion, cliVersion, appStale, cliStale, anchor, side, onUpdate, onNotes, onDismiss }: {
   items: string[];
   releaseTag: string | null;
   appVersion: string | undefined;
@@ -34,11 +34,6 @@ export function UpdateBubble({ items, releaseTag, appVersion, cliVersion, appSta
   onUpdate: () => void;
   onNotes: () => void;
   onDismiss: () => void;
-  /** Distance from the viewport bottom to just above this bubble (null when
-   *  gone). The error/undo float-stack anchors at the same bottom-left corner;
-   *  App lifts it by this so the two are one stack and never paint over each
-   *  other (AGENTS.md: two fixed elements at the same coordinates). */
-  onLift: (px: number | null) => void;
 }) {
   const [pos, setPos] = useState<{ x: number; bottom: number; tailY: number } | null>(null);
   const boxRef = useRef<HTMLDivElement | null>(null);
@@ -52,7 +47,6 @@ export function UpdateBubble({ items, releaseTag, appVersion, cliVersion, appSta
       // Tail at the gear's vertical centre, measured from the bubble's bottom.
       const tailY = Math.min(Math.max(window.innerHeight - bottom - (r.top + r.height / 2), 10), Math.max(10, h - 10));
       setPos({ x: side === "left" ? r.right + GAP : window.innerWidth - r.left + GAP, bottom, tailY });
-      onLift(side === "left" ? bottom + h + 8 : null);
     };
     place();
     // The rail's height moves when the usage strip appears or goes, and the
@@ -61,8 +55,8 @@ export function UpdateBubble({ items, releaseTag, appVersion, cliVersion, appSta
     ro.observe(anchor.parentElement ?? anchor);
     if (boxRef.current) ro.observe(boxRef.current);
     window.addEventListener("resize", place);
-    return () => { ro.disconnect(); window.removeEventListener("resize", place); onLift(null); };
-  }, [anchor, side, onLift]);
+    return () => { ro.disconnect(); window.removeEventListener("resize", place); };
+  }, [anchor, side]);
 
   const behind: string[] = [];
   if (appStale && appVersion) behind.push(`app ${appVersion}`);

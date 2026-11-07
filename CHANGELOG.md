@@ -5,6 +5,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Fixed
+
+- **A PDF (or any binary file) in the Files tab now has an Open button.** It opens the file in the system's default app (Preview for a PDF); before, "Open in editor" was the only way, and it failed with "Editor command `code` was not found" on a Mac with no `code`. Reveal and Open in editor stay.
+- **Error toasts no longer sit over the chat box and the usage meters.** The error, undo, notice and plan-hint toasts used to anchor at the bottom-left of the agent, which moved with each project's layout and covered the composer, the send button or the bottom bar. They now appear at the top centre of the window, below the header, in every layout.
+
 ## [0.48.0] - 2026-11-05
 
 ### Added
