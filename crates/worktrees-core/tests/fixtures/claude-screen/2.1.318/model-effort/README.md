@@ -43,8 +43,10 @@ The `❯` landing on a row replaces that row's `↓`/`↑`.
   → `s` on Opus 5.5 opened Claude's "Switch model? / Your next response will
   be slower and use more tokens … `❯ 1. Yes, switch to Opus 5.5` / `2. No, go
   back`". Its rows are the same whether the list was answered with `s` or
-  with the Enter that saves the default (Claude keeps that in state), so it
-  is not read: the chat says to answer it at the host. `switch-confirmed`:
+  with the Enter that saves the default (Claude keeps that in state), so
+  `prompt::claude` does not read it. The host reads it (`prompt::read_switch`)
+  only beside its own record of the `s` it pressed, with no terminal activity
+  since (AGENTS.md); anywhere else the chat says to answer it at the host. `switch-confirmed`:
   Enter on Yes at the host — `Set model to Opus 5.5 for this session only`.
 - `owner-sonnet.txt`: the owner's own capture from the sandbox (139×52,
   2026-11-04, `capture-pane -p`), after the failed answer: a five-model list

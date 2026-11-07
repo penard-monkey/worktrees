@@ -5,6 +5,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Fixed
+
+- **The chat can finish a model switch it started.** Picking another model from the chat in a conversation Claude has cached brings up Claude's "Switch model?", which the chat used to leave for the terminal. It now shows Claude's warning with Yes and No, only while nobody has typed at a terminal since the chat chose the model; otherwise it still says to answer at the host. The switch stays this-session-only.
+
 ## [0.48.0] - 2026-11-05
 
 ### Added
