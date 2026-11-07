@@ -131,6 +131,9 @@ impl worktrees_api::agents::AgentIo for ScriptedAgent {
     fn command(&self, _: &worktrees_api::agents::Lane, _: &str, _: &str) -> Result<worktrees_core::harness::SendOutcome, String> {
         Err("scripted agents run no commands".into())
     }
+    fn terminal_activity(&self, _: &worktrees_api::agents::Lane) -> Result<u64, String> {
+        Err("scripted agents have no tmux session".into())
+    }
     fn sleep(&self, _: u64) {}
 }
 

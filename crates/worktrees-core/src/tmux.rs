@@ -950,6 +950,29 @@ pub fn capture_styled(pane: &PaneId) -> Option<String> {
     o.status.success().then(|| String::from_utf8_lossy(&o.stdout).into_owned())
 }
 
+/// When a client last did anything in `session` — `#{session_activity}`, epoch
+/// seconds. It moves when a client attaches or types (a key, a mouse or focus
+/// report) and NOT for `send-keys` or `paste-buffer` from the host, and it
+/// outlives the client: measured on tmux 3.7b with a private server (`#{
+/// client_activity}` moves the same way but is gone once its client detaches,
+/// so a keystroke followed by a detach would pass for no activity at all;
+/// `#{window_activity}` moves for everything, the host's keys included). It has
+/// one-second resolution, so a caller compares against a value read BEFORE
+/// its own act and refuses a tie it cannot break. `Err` when tmux cannot say:
+/// callers fail closed.
+pub fn terminal_activity(session: &str) -> Result<u64, String> {
+    let target = format!("={session}:");
+    let o = tmux(&["display-message", "-p", "-t", &target, "#{session_activity}"]).map_err(|e| format!("tmux display-message: {e}"))?;
+    if !o.status.success() {
+        return Err(format!("tmux display-message failed: {}", String::from_utf8_lossy(&o.stderr).trim()));
+    }
+    parse_activity(&String::from_utf8_lossy(&o.stdout))
+}
+
+fn parse_activity(out: &str) -> Result<u64, String> {
+    out.trim().parse::<u64>().map_err(|_| format!("tmux session_activity not a number: {:?}", out.trim()))
+}
+
 /// `%0=zsh %1=vim`, so a refusal can be diagnosed from one log line.
 fn pane_summary(session: &str) -> String {
     let target = format!("={session}");
@@ -1395,6 +1418,12 @@ pub fn kill_session(name: &str) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn terminal_activity_parses_one_number_and_fails_closed() {
+        assert_eq!(parse_activity("1794006790\n"), Ok(1794006790));
+        assert!(parse_activity("").is_err() && parse_activity("soon").is_err());
+    }
+
     use super::*;
 
     /// `tune_session` sets two window options on the session it is given, and
