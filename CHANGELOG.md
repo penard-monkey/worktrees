@@ -5,8 +5,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+
+- **A Claude prompt can now come with the call Claude made.** `agent_prompt` sends it as `asked` — the tool, its whole input and the folder it asked from — when the screen agrees with it: a question (which of its questions is up, and which are answered), a Bash command, an Edit, MultiEdit or Write, a plan. A client can then draw the question, the command or the diff as Claude meant it instead of as the terminal drew it. The choices are still the screen's and are answered by number. A prompt whose call does not match the screen, and every other tool (an MCP tool's input is never on the screen to check), carries none.
+
 ### Fixed
 
+- **The chat can finish a model switch it started.** Picking another model from the chat in a conversation Claude has cached brings up Claude's "Switch model?", which the chat used to leave for the terminal. It now shows Claude's warning with Yes and No, only while nobody has typed at a terminal since the chat chose the model; otherwise it still says to answer at the host. The switch stays this-session-only.
+- **A PDF (or any binary file) in the Files tab now has an Open button.** It opens the file in the system's default app (Preview for a PDF); before, "Open in editor" was the only way, and it failed with "Editor command `code` was not found" on a Mac with no `code`. Reveal and Open in editor stay.
+- **Error toasts no longer sit over the chat box and the usage meters.** The error, undo, notice and plan-hint toasts used to anchor at the bottom-left of the agent, which moved with each project's layout and covered the composer, the send button or the bottom bar. They now appear at the top centre of the window, below the header, in every layout.
 - **A lane whose launch was refused, and then started anyway, now opens on its brief.** When the live-agent limit, a nearly spent plan window or an unreachable model host refused a new lane, the worktree and its brief were kept. But retrying the same branch with "launch anyway", as the refusal says to (the MCP `create_worktree` retry, or `worktrees new <branch> --force`), started the agent with an empty prompt. It now gets the brief, as `worktrees open --force` already did. Where the agent has run in that place before, the retry says the brief won't be re-sent and how to re-brief it.
 
 ## [0.48.0] - 2026-11-05

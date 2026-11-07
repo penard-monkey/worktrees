@@ -46,7 +46,7 @@ import { installUsage, setSurface, trackChord } from "./usage";
 import { fileInfo } from "./filekind";
 import { fromDevice, instructionLine, instructionTitle, launchedTitle, deviceLabel, type By, type LaunchedBy, type RemoteInstruction } from "./provenance";
 import { canStep as canStepNav, empty as emptyHistory, goTo as goToNav, label as labelNav, locKey, prune as pruneNav, reachable as reachableNav, record as recordNav, type History as NavHistory, type Loc } from "./navHistory";
-import { agentViewFor, applySettings, applyZoom, clampDock, clampMdZoom, clampNav, clampZoom, DEFAULTS, fitLayout, loadSettings, lowerFits, lowerFracFor, lowerRange, panelsFor, placeKey, RAIL_W, railsMerged, railsWidth, saveSettings, stepMdZoom, stepZoom, upperTab, viewportWidth, withAgentView, type PlacePanels, type Settings, type UpdateInfo } from "./settings";
+import { agentViewFor, applySettings, applyZoom, clampDock, clampMdZoom, clampNav, clampZoom, DEFAULTS, fitLayout, loadSettings, lowerFits, lowerFracFor, lowerRange, panelsFor, placeKey, railsMerged, railsWidth, saveSettings, stepMdZoom, stepZoom, upperTab, viewportWidth, withAgentView, type PlacePanels, type Settings, type UpdateInfo } from "./settings";
 import {
   alphaIndex, dropIntent, landingNote, moveBefore, naturalTop, pointerIndex,
   predictTier, recentIndex, spliceOrder, TIER_LABEL, type DeclPatch, type Tier,
@@ -4775,7 +4775,6 @@ function App() {
   // bubble re-appearing when you close the sheet you opened to read the same
   // news would be the nag this is built not to be.
   const [gearEl, setGearEl] = useState<HTMLButtonElement | null>(null);
-  const [bubbleLift, setBubbleLift] = useState<number | null>(null);
   const bubble = updateNews({ release: upd?.latest, worktreesNewer: appStale || cliStale,
     harnesses: upd?.harnesses ?? [], dismissed: settings.update_dismissed || undefined });
   const dismissBubble = useCallback((key: string) => {
@@ -8732,19 +8731,6 @@ function App() {
   // column: the overlay covers the terminal rather than sharing the row with
   // it, so there is nothing to reserve width away from.
   const navOverlayW = clampNav(settings.nav_width, 0, vw, railsWidth(settings));
-  // The notice stack (errors, undo, notices, the plan hint) sits at the
-  // bottom-left of the AGENT, in every layout. It used to be the window's
-  // bottom-left beside the rail — which, with the reference panels on the
-  // left, is the dock's Terminal prompt line or its last Files rows; mirrored,
-  // it was already over the dock. Everything left of `.main` is a track this
-  // component sized, so the offset is arithmetic, not a measurement: the rail
-  // on that edge (none when the merged strip is on the right), a pinned nav on
-  // the left, and the dock when it is on the left and open. An overlaid nav
-  // owns no track and floats above the stack's z-order anyway.
-  const leftOfMain = (!mirrored || !merged ? RAIL_W : 0)
-    + (!mirrored && fit.navShown ? fit.navW : 0)
-    + (dockLeft && dockShown ? fit.dockW : 0);
-
   return (
     <div className="appwrap">
     {/* `.app` stays exactly the four-column grid it was. The strip is its
@@ -9821,7 +9807,7 @@ function App() {
           same coordinates the undo banner sat exactly on top of the note it
           was supposed to accompany. Undo first in DOM = above on screen. */}
       {(err || notice || undo || planHint) && (
-        <div className="float-stack" style={{ left: `calc(${leftOfMain}px + var(--s3))`, ...(bubbleLift !== null ? { bottom: bubbleLift } : null) }}>
+        <div className="float-stack">
           {/* One click back from a slip of the wrist — a drag rewrites declared
               state, and the row it moves can land in a collapsed group or a
               hidden tier, i.e. out of sight of the gesture that moved it. */}
@@ -10365,7 +10351,7 @@ function App() {
         appStale={appStale} cliStale={cliStale} anchor={gearEl} side={mirrored ? "right" : "left"}
         onUpdate={() => openSettings({ cat: "updates" })}
         onNotes={() => { if (bubble.releaseTag) openUrl(`${RELEASES_URL}/tag/${bubble.releaseTag}`).catch(fail); }}
-        onDismiss={() => dismissBubble(bubble.key)} onLift={setBubbleLift}
+        onDismiss={() => dismissBubble(bubble.key)}
       />
     )}
     {((settings.usage_place === "strip" && usage.info) || statusChipHost === "strip" || remoteNoticeHost === "strip") && (
