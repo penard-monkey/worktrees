@@ -676,6 +676,20 @@ pub fn agent_answer(ctx: &Ctx, repo: String, slug: String, choice: u32, fingerpr
     let io = &*ctx.agents.io;
     let lock = ctx.agents.lock(&project.place_dir(&slug));
     let _held = lock.lock().unwrap_or_else(|e| e.into_inner());
+    // The terminal's last activity, read BEFORE any capture that proves the
+    // list: a key typed after this read lands in a later second than it, so
+    // the quiet check after `s` sees it. Read after the proof, a saving
+    // Enter pressed in the gap would already be in the baseline. A tie with
+    // the current second cannot be told apart: no baseline then.
+    let before: Vec<(String, u64)> = io
+        .lanes(&project, &slug)
+        .into_iter()
+        .filter(|l| l.harness == provider::CLAUDE.id)
+        .filter_map(|l| {
+            let b = io.terminal_activity(&l).ok().filter(|b| (*b as i64) < worktrees_core::sysclock::now_epoch())?;
+            Some((l.session, b))
+        })
+        .collect();
     let (lane, m, detail) = find_prompt(&ctx.agents, &project, &slug, &fingerprint)?;
     let c = m.choices.iter().find(|c| c.n == choice).ok_or(ERR_NO_CHOICE)?;
     if let Some(why) = refused(io, ctx, &lane, &m, c) {
@@ -703,9 +717,7 @@ pub fn agent_answer(ctx: &Ctx, repo: String, slug: String, choice: u32, fingerpr
         .then(|| now.choices.iter().find(|c| c.highlighted).cloned())
         .flatten()
         .and_then(|c| {
-            // Typed at a terminal in the very second of the press cannot be
-            // told from before it: no record then.
-            let baseline = io.terminal_activity(&lane).ok().filter(|b| (*b as i64) < worktrees_core::sysclock::now_epoch())?;
+            let baseline = before.iter().find(|(s, _)| *s == lane.session)?.1;
             Some((c, baseline))
         });
     if switching {
@@ -1821,6 +1833,10 @@ mod tests {
         /// What `terminal_activity` answers (epoch seconds; 0 = nobody typed),
         /// or an error when `None`.
         clients: Mutex<Option<u64>>,
+        /// `(captures to let pass, value)`: once that many captures have
+        /// returned, the NEXT one moves `clients` to the value as it returns —
+        /// a key typed at the terminal in the middle of an answer.
+        bump: Mutex<Option<(usize, u64)>>,
     }
 
     impl Fake {
@@ -1859,6 +1875,17 @@ mod tests {
                 *met += 1;
                 cv.notify_all();
                 let _ = cv.wait_timeout_while(met, std::time::Duration::from_millis(300), |met| *met < 2).unwrap();
+            }
+            {
+                let mut b = self.bump.lock().unwrap();
+                match b.as_mut() {
+                    Some((0, v)) => {
+                        *self.clients.lock().unwrap() = Some(*v);
+                        *b = None;
+                    }
+                    Some((k, _)) => *k -= 1,
+                    None => {}
+                }
             }
             let panes = self.panes.lock().unwrap();
             let p = panes.get(&lane.session)?;
@@ -2115,6 +2142,27 @@ mod tests {
         set_screen(&fake, &yes);
         assert_ne!(prompt_of(&ctx, &repo)["readable"], true);
         assert!(ctx.agents.switches().is_empty());
+    }
+
+    #[test]
+    fn a_saving_enter_typed_at_the_terminal_while_the_list_is_proved_makes_no_record() {
+        // The terminal presses Enter on the list (the saving one) in the gap
+        // between the capture that proves the list and the host's `s`: the
+        // dialog that comes up looks the same, and must stay the host's.
+        let (list, yes, ..) = switch_screens();
+        let mut fake = Fake::with(vec![("claude", "repo-lane", script(&list, vec![yes]))]);
+        fake.waiting = true;
+        *fake.clients.get_mut().unwrap() = Some(0);
+        let fake = Arc::new(fake);
+        let (ctx, repo) = setup("switch-toctou", fake.clone());
+        // The baseline needs a quiet terminal at some earlier second.
+        *fake.clients.lock().unwrap() = Some(worktrees_core::sysclock::now_epoch() as u64 - 60);
+        let fp = prompt_of(&ctx, &repo)["fingerprint"].as_str().unwrap().to_string();
+        // An earlier second than now (a later second than the baseline read).
+        *fake.bump.lock().unwrap() = Some((0, worktrees_core::sysclock::now_epoch() as u64 - 10));
+        agent_answer(&ctx, repo.clone(), "lane".into(), 2, fp).unwrap();
+        assert!(ctx.agents.switches().is_empty(), "a key after the baseline read is seen");
+        assert_ne!(prompt_of(&ctx, &repo)["readable"], true);
     }
 
     #[test]

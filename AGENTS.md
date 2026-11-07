@@ -112,7 +112,10 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   and neither on the host's `send-keys`/`paste-buffer`, but a client's own
   value dies with the client, so a key followed by a detach passed for no
   activity. One-second resolution: no record when a client was active in the
-  second of the press. Answering uses the ordinary move, proof and Enter, and
+  second of the press; the baseline is read BEFORE the capture that proves the
+  list (read after it, a saving Enter typed in the gap was already in it).
+  Residual, not closable without an atomic tmux step: a key typed between the
+  last activity check and the Enter that answers the dialog. Answering uses the ordinary move, proof and Enter, and
   the record is consumed. Do not grow a fourth path that types into Claude. `agent_interrupt`
   (`agents::agent_interrupt`, the chat's Stop and its Esc, `stopTurn` in
   `chat.ts`) is not one: it types no text, only ONE key,
