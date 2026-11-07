@@ -1157,6 +1157,9 @@ export type ChatView = {
   commands: Load<AgentCommands>;
   /** Commands run from here whose output only their answer carried. */
   ran: Ran[];
+  /** Reads in a row that failed only because the place's Claude has written
+   *  no session file yet (`START_REREAD_MS`); 0 after any other answer. */
+  startMisses: number;
 };
 
 /** Set once a host answers `unknown command: agent_attach`. */
@@ -1170,6 +1173,7 @@ const blank = (): ChatView => ({
   calls: { open: {}, read: {} },
   attachments: [], attachWords: null, attachOff,
   commands: { data: null, error: null, loading: false, at: null }, ran: [],
+  startMisses: 0,
 });
 const EMPTY = blank();
 let views = new Map<string, ChatView>();
@@ -1210,11 +1214,26 @@ export function loadTurns(t: Target): Promise<void> {
       put(t.path, {
         turns: { data: r, error: null, loading: false, at: Date.now() },
         pending: settlePending(cur.pending, r.turns), answered: settleAnswered(cur.answered, r.turns),
+        startMisses: 0,
       });
     } catch (e) {
-      put(t.path, { turns: { ...viewOf(t.path).turns, loading: false, error: String(e) } });
+      const err = String(e);
+      // A Claude that has just started writes its session file a moment
+      // later, and nothing else re-reads an idle agent: read again on
+      // START_REREAD_MS while the read fails only that way.
+      const misses = noSessionYet(err) ? viewOf(t.path).startMisses + 1 : 0;
+      put(t.path, { turns: { ...viewOf(t.path).turns, loading: false, error: err }, startMisses: misses });
+      const wait = misses > 0 ? START_REREAD_MS[misses - 1] : undefined;
+      if (wait !== undefined) setTimeout(() => { if (noSessionYet(viewOf(t.path).turns.error)) void loadTurns(t); }, wait);
     }
   });
+}
+
+/** Read the turns again from the start of `START_REREAD_MS`: the chat's
+ *  "Try again", after a read ran out of its re-reads. */
+export function rereadTurns(t: Target): Promise<void> {
+  if (viewOf(t.path).startMisses) put(t.path, { startMisses: 0 });
+  return loadTurns(t);
 }
 
 /** Open a tool call, or close it. The first opening of one the host can say
@@ -1260,6 +1279,14 @@ export const noSessionYet = (err: string | null) => !!err && err.endsWith(AGENT_
  *  straight after the answer), so the turns are read again on these delays
  *  while they still fail that way. */
 export const RESUME_REREAD_MS = [500, 1500, 3500] as const;
+/** A Claude writes its session file about a second after its pane opens
+ *  (measured on 2.1.318), so a chat opened with the place reads in
+ *  that gap. The read is retried on these delays (about 30 s in all) while it
+ *  fails only that way; once they run out, the failure is shown. */
+export const START_REREAD_MS = [500, 1000, 2000, 4000, 8000, 15000] as const;
+/** The turns failed only because the place's Claude is still starting, and
+ *  another read is on its way (`START_REREAD_MS`). */
+export const startingUp = (v: ChatView) => noSessionYet(v.turns.error) && v.startMisses > 0 && v.startMisses <= START_REREAD_MS.length;
 
 export const CHANGED = "Not sent: the prompt changed before the answer reached it. Someone may have answered it in the terminal.";
 
