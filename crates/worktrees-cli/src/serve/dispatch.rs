@@ -1,4 +1,4 @@
-//! The 211 commands, each with its exposure, capability and objects, in ONE
+//! The 212 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -1136,6 +1136,11 @@ commands! { cx, a;
     agent_tool_call: Engine [read, place(repo, slug)] => agents::agent_tool_call(
         &cx.ctx, a.get("repo")?, a.get("slug")?, a.get("call_id")?,
     ),
+    // One shortened turn whole, for a bubble that says it was cut: fetched then,
+    // so the poll above stays small. `read`, like the turns it completes.
+    agent_turn_text: Engine [read, place(repo, slug)] => agents::agent_turn_text(
+        &cx.ctx, a.get("repo")?, a.get("slug")?, a.get("turn_id")?,
+    ),
     // Slash commands (docs/proposals/chat-slash-commands.md): the session's
     // list, read from tables and files, never the pane; and one command run,
     // `instruct` like a line — drive-class, step-up, the DRIVE budget — with
@@ -1300,7 +1305,7 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 211 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 212 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six, the slots pair and
     /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
@@ -1320,7 +1325,7 @@ mod tests {
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 211, "the table has 211 commands");
+        assert_eq!(TABLE.len(), 212, "the table has 212 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1734,7 +1739,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 66), ("write", 23), ("admin", 41), ("console", 47), ("stream", 10), ("instruct", 8), ("answer", 2),
+            ("read", 67), ("write", 23), ("admin", 41), ("console", 47), ("stream", 10), ("instruct", 8), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 7),
         ]
         .into();

@@ -51,6 +51,11 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   warns in that case (`ops::opener_plan`). A re-brief refuses a live session
   and writes nothing, because the opener reaches only a session the launch
   CREATES (`ops::session_to_reuse`): close it, or message the agent.
+  **A `new` that REUSES a place without `--brief` takes `open`'s rule too**
+  (`ops::plan_opener`): that is the MCP `create_worktree` retry with `force`
+  that a refused launch prescribes, and until 2026-11-05 it set the opener
+  only for `--brief`, so the forced retry started Claude blank on the brief
+  the refused call had just written.
   **No agent types into Claude:** MCP `send` refuses a Claude place and names
   its session for `SendMessage` (`harness::Claude::send`). **The one
   exception is serve's `agent_send`** (iOS MVP S8), decided by the user on
@@ -306,7 +311,7 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   do not align them). hyper parses the HTTP and tungstenite sees only frames,
   also ON PURPOSE: tungstenite's `accept_hdr_async` WRITES an HTTP error
   response when it refuses, while a hyper service that returns `Err` closes
-  with 0 bytes. The 211 commands sit in ONE macro table
+  with 0 bytes. The 212 commands sit in ONE macro table
   (`serve/dispatch.rs`) with an `Exposure` each; the six `ClientLocal` rows
   (clipboard, editor, terminal, zoom, the app bundle) are refused with
   `err: "client-local"`, never run on the host — the docs viewer is an
