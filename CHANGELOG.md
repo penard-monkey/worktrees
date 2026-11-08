@@ -5,6 +5,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Changed
+
+- **Error and notice toasts have a visible × to dismiss them.** They were dismissed by clicking anywhere on them, which nothing on screen said. The × is a labelled, keyboard-reachable button at the toast's end; errors still stay until you dismiss them, and clicking the toast still works. The message text can now be selected to copy an error.
+
 ## [0.49.0] - 2026-11-07
 
 ### Added

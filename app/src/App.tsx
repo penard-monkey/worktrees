@@ -9817,8 +9817,18 @@ function App() {
               <button className="undo-btn" onClick={undo.run}>Undo</button>
             </div>
           )}
-          {err && <div className="err err-float" title="dismiss" onClick={() => setErr("")}>{err}</div>}
-          {!err && notice && <div className="err err-float notice" title="dismiss" onClick={() => setNotice("")}>{notice}</div>}
+          {err && (
+            <div className="err err-float has-dismiss" title="dismiss" onClick={() => { if (!window.getSelection()?.toString()) setErr(""); }}>
+              <span className="float-text">{err}</span>
+              <button type="button" className="float-dismiss" aria-label="Dismiss" data-testid="err-dismiss" onClick={() => setErr("")}><Icons.X size={14} /></button>
+            </div>
+          )}
+          {!err && notice && (
+            <div className="err err-float notice has-dismiss" title="dismiss" onClick={() => { if (!window.getSelection()?.toString()) setNotice(""); }}>
+              <span className="float-text">{notice}</span>
+              <button type="button" className="float-dismiss" aria-label="Dismiss" data-testid="notice-dismiss" onClick={() => setNotice("")}><Icons.X size={14} /></button>
+            </div>
+          )}
           {!err && !notice && planHint && (
             <div className="err err-float notice plan-hint" data-testid="plan-hint">
               <span>{planHint.name} uses worktrees planning — turn it on for this project?</span>

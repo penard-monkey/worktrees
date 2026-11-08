@@ -1339,6 +1339,20 @@ body.dragging .menu-catch { pointer-events: none; }
   align-items: center; max-width: calc(100vw - 2 * var(--s3));
 }
 .float-stack .err-float { position: static; transform: none; }
+/* The × is the visible half of "click to dismiss". Hue lives in the toast's fill,
+   so the icon takes --txt-hi: --danger/--warn as an icon colour measures 2.2-2.5:1
+   in nord and tokyo-day. It is a plain box (not a flex container: WebKit
+   shrink-wraps those without their shrinkable children) and never shrinks, so
+   it cannot cover the message at any width. */
+.err-float.has-dismiss { display: flex; align-items: flex-start; gap: var(--s2); }
+.err-float .float-text { flex: 1 1 auto; min-width: 0; user-select: text; cursor: text; }
+.float-dismiss {
+  flex: none; width: 22px; height: 22px; margin: -2px calc(-1 * var(--s1)) -2px 0; padding: 0;
+  border: 0; border-radius: var(--r-sm); background: transparent; color: var(--txt-hi);
+  cursor: pointer; line-height: 0; text-align: center;
+}
+.float-dismiss:hover { background: color-mix(in srgb, currentColor 16%, transparent); }
+.float-dismiss:focus-visible { outline: 2px solid currentColor; outline-offset: 1px; }
 .err-float.undo { display: flex; align-items: center; gap: var(--s3); cursor: default; }
 .undo-btn {
   padding: 1px var(--s2); border-radius: var(--r-sm);
