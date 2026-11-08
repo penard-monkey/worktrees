@@ -181,6 +181,21 @@ if (S.SETTINGS_REV < 4) fail(`SETTINGS_REV is ${S.SETTINGS_REV} — the dock_sid
   if (!/--float-top:\s*\d+px/.test(read("../src/tokens.css"))) fail("tokens.css: --float-top is gone");
 }
 
+// ── the hand-dismissed floats carry a labelled × wired to clearing them ─────
+{
+  for (const [setter, id] of [["setErr", "err-dismiss"], ["setNotice", "notice-dismiss"]]) {
+    const m = app.match(new RegExp(`<button type="button" className="float-dismiss"[^]*?data-testid="${id}"[^]*?</button>`));
+    if (!m) fail(`App.tsx: no \`float-dismiss\` button (${id}) — the toast has no visible dismiss`);
+    else if (!/aria-label="Dismiss"/.test(m[0]) || !/type="button"/.test(m[0])) fail(`${id}: the × needs type="button" and aria-label="Dismiss"`);
+    else if (!new RegExp(`onClick=\\{\\(\\) => ${setter}\\(""\\)\\}`).test(m[0])) fail(`${id}: the × does not call ${setter}("")`);
+    else ok(`${id}: a labelled <button> that calls ${setter}("")`);
+  }
+  if (/setTimeout\([^)]*set(Err|Notice)\(""\)/.test(app)) fail("App.tsx: an error or notice clears on a timer — errors stay until dismissed");
+  const btn = css.match(/(?:^|\n)\.float-dismiss\s*\{([^}]*)\}/);
+  if (!btn || !/flex:\s*none/.test(btn[1]) || /display:\s*(inline-)?flex/.test(btn[1])) fail("App.css: .float-dismiss must be `flex: none` and not itself a flex container (WebKit)");
+  else ok(".float-dismiss never shrinks and is not a flex container");
+}
+
 // ── 3. one dock group, two hosts, complementary conditions ──────────────────
 // Sliced by HOST rather than by a window of characters before each call: the
 // Places rail (`<nav className="rail"` … its `</nav>`) and the dock's own rail,
