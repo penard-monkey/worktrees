@@ -1,0 +1,40 @@
+
+ ▐▛███▛█   Claude Code v2.1.319
+▝▜██████▀  Sonnet 5.5 · Claude Max
+ ▝▝   ▝▝   /…/4557f7f6-8a8f-48c3-8d2c-808f8128d3b9/scratchpad/repo
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔ tmux detected · scroll with PgUp/PgDn · or add 'set -g mouse on' to ~/.tmux.conf for wheel scroll ▔
+   Select model
+   Switch between Claude models. Your pick becomes the default for new sessions. For other/previous model names,
+   specify with --model.
+
+     1.  Default (recommended)  Opus 5.5 · Best for everyday, complex tasks
+     2.  Opus 5.5               For complex work and everyday tasks
+     3.  Fable 5.1              For your toughest challenges
+     4.  Sonnet 5.5 ✔           Most efficient for simpler tasks
+     5.  Haiku 5.5              Fastest for quick answers
+   ❯ 6.  More models            Show 8 more
+
+
+
+   Use /fast to turn on Fast mode (Opus 5.5).
+
+   Enter to expand · Esc to cancel

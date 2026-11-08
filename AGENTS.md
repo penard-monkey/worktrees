@@ -102,7 +102,12 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   effort (default)` on Sonnet 5.5), so the proof before `s` compares that
   row by shape (`prompt::model_body`); an e2e that picks the model in effect
   never moves it, which is how the owner's Sonnet pick reached "the prompt
-  changed" (2026-11-04, `2.1.318/model-effort/`). In a warm conversation `s`
+  changed" (2026-11-04, `2.1.318/model-effort/`). **Claude 2.1.319's `6. More models  Show 8 more`
+  row is not a model**: Enter on it expands the list in place (it becomes
+  `Hide`, rows 7-14 follow), `s` and Space do nothing, and its footer is
+  `Enter to expand`, so the list is not read while it is highlighted. It is
+  out of the choices but in the walk's `order`, so a key count to a model
+  below it crosses it (`2.1.319/model-effort/`). In a warm conversation `s`
   on another model brings Claude's "Switch model?", whose Yes reads the same
   after the saving Enter, so `prompt::claude` never reads it. The HOST knows
   what it pressed: `agent_answer`'s `s` on a model list, under the place lock,

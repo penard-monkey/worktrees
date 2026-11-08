@@ -12,6 +12,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ### Fixed
 
+- **The chat no longer offers Claude 2.1.319's "More models" row as a model.** The row only expands Claude's list in place and saves nothing, so it is left out of the choices (the models it hides are still chosen at the terminal) and the numbers of the others stay Claude's own.
 - **The chat can finish a model switch it started.** Picking another model from the chat in a conversation Claude has cached brings up Claude's "Switch model?", which the chat used to leave for the terminal. It now shows Claude's warning with Yes and No, only while nobody has typed at a terminal since the chat chose the model; otherwise it still says to answer at the host. The switch stays this-session-only.
 - **A PDF (or any binary file) in the Files tab now has an Open button.** It opens the file in the system's default app (Preview for a PDF); before, "Open in editor" was the only way, and it failed with "Editor command `code` was not found" on a Mac with no `code`. Reveal and Open in editor stay.
 - **Error toasts no longer sit over the chat box and the usage meters.** The error, undo, notice and plan-hint toasts used to anchor at the bottom-left of the agent, which moved with each project's layout and covered the composer, the send button or the bottom bar. They now appear at the top centre of the window, below the header, in every layout.

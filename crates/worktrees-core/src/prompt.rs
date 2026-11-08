@@ -631,8 +631,17 @@ fn model_row(row: &str) -> Option<(char, u32, &str, &str)> {
 fn claude_models(rows: &[String], head: usize, foot: usize, last: usize) -> Option<Modal> {
     let mut choices = Vec::new();
     let mut hidden = None;
+    // Claude 2.1.319's `More models` row, which is not a model: it expands
+    // the list in place and saves nothing, but the highlight still walks
+    // over it, so its number stays in `order`.
+    let mut expander = None;
     for r in &rows[head + 1..foot] {
         if let Some((mark, n, name, desc)) = model_row(r) {
+            if let Some(k) = more_models(name, desc) {
+                expander = Some(n);
+                hidden = k.or(hidden);
+                continue;
+            }
             let more = if desc.is_empty() { Vec::new() } else { vec![desc.to_string()] };
             choices.push(Choice { n, label: name.to_string(), more, highlighted: mark == '❯', host_only: None, checked: None, text: None, preview: None, preview_hidden: None });
         } else if let Some(k) = r.trim().strip_prefix("… +").and_then(|t| t.split_whitespace().next()).and_then(|k| k.parse::<u32>().ok()) {
@@ -646,7 +655,25 @@ fn claude_models(rows: &[String], head: usize, foot: usize, last: usize) -> Opti
     m.body = model_body(&m.body);
     m.picker = Some(Picker::Model);
     m.hidden = hidden;
+    if let Some(n) = expander {
+        m.order.push(Some(n));
+        m.order.sort();
+    }
     Some(m)
+}
+
+/// Claude 2.1.319's `More models` row (fixtures `2.1.319/model-effort/
+/// list-*more*`): `Show 8 more` while collapsed, `Hide` once expanded. The
+/// outer `Some` says it is that row; the inner is the count it hides.
+fn more_models(name: &str, desc: &str) -> Option<Option<u32>> {
+    if name != "More models" {
+        return None;
+    }
+    if desc == "Hide" {
+        return Some(None);
+    }
+    let k = desc.strip_prefix("Show ")?.strip_suffix(" more")?.parse().ok()?;
+    Some(Some(k))
 }
 
 /// Claude's effort levels, each with the glyph its model list draws for it
@@ -3688,12 +3715,53 @@ mod tests {
         let list = claude(f!("list-on-opus.e.txt")).expect("the list reads");
         let labels: Vec<_> = list.choices.iter().map(|c| c.label.as_str()).collect();
         assert_eq!(list.picker, Some(Picker::Model));
-        assert_eq!(labels, ["Default (recommended)", "Opus 5.5", "Fable 5.1", "Sonnet 5.5 ✔", "Haiku 5.5", "More models"], "{labels:?}");
+        assert_eq!(labels, ["Default (recommended)", "Opus 5.5", "Fable 5.1", "Sonnet 5.5 ✔", "Haiku 5.5"], "{labels:?}");
         assert!(claude(f!("switch-confirm.e.txt")).is_none(), "still not a prompt by its screen alone");
         let sw = read_switch("claude", f!("switch-confirm.e.txt")).expect("2.1.319's dialog");
         assert_eq!(sw.model, "Opus 5.5");
         assert!(names_model(&list.choices[1], &sw.model) && !names_model(&list.choices[3], &sw.model));
         assert!(same_prompt(&sw.modal, &read_switch("claude", f!("switch-confirm.txt")).unwrap().modal));
+    }
+
+    /// Claude 2.1.319's `6. More models  Show 8 more` row is not a model
+    /// (measured 2026-11-07, fixtures `2.1.319/model-effort/list-*more*`): on
+    /// it the footer is `Enter to expand · Esc to cancel`, `s` and Space do
+    /// nothing, and Enter expands the list in place (row 6 becomes `Hide`,
+    /// rows 7-14 follow, nothing is saved). It is never a choice, but it
+    /// still occupies a row the highlight walks over, so the keys to a model
+    /// below it count it, and numbers stay the screen's.
+    #[test]
+    fn claude_2_1_319_more_models_is_not_a_model_but_the_highlight_walks_over_it() {
+        macro_rules! f {
+            ($f:literal) => {
+                include_str!(concat!("../tests/fixtures/claude-screen/2.1.319/model-effort/", $f))
+            };
+        }
+        let ns = |m: &Modal| m.choices.iter().map(|c| c.n).collect::<Vec<_>>();
+        for s in [f!("list-on-sonnet.e.txt"), f!("list-on-opus.e.txt")] {
+            let m = claude(s).expect("the collapsed list reads");
+            assert_eq!(ns(&m), [1, 2, 3, 4, 5]);
+            assert!(m.choices.iter().all(|c| !c.label.contains("More models")));
+            assert_eq!(m.hidden, Some(8));
+        }
+        // The highlight ON the row is another footer: not this list at all.
+        for s in [f!("list-on-more.e.txt"), f!("list-on-more-after-s.e.txt"), f!("list-more-expanded.e.txt")] {
+            assert!(claude(s).is_none(), "the row's own footer is no model list");
+        }
+        // Expanded, highlight on 7: choices 5 and 7..=14, row 6 (`Hide`) between.
+        let m = claude(f!("list-more-expanded-on-7.e.txt")).expect("the expanded list reads");
+        assert_eq!(ns(&m), [5, 7, 8, 9, 10, 11, 12, 13, 14]);
+        assert!(m.choices.iter().all(|c| c.label != "More models"));
+        assert_eq!(m.hidden, None);
+        assert_eq!(steps(&m, 5), Some(vec![Key::Up, Key::Up]), "row 6 is walked over");
+        assert_eq!(steps(&m, 9), Some(vec![Key::Down, Key::Down]));
+        assert_eq!(steps(&m, 6), None, "the row is no choice");
+        // Collapsed: 5 -> nothing below it, 4 -> 5 is one step.
+        let c = claude(f!("list-on-sonnet.e.txt")).unwrap();
+        assert_eq!(steps(&c, 5), Some(vec![Key::Down]));
+        assert_eq!(steps(&c, 6), None);
+        // A model row below the expanded list is not the collapsed list.
+        assert!(!same_prompt(&c, &m));
     }
 
     /// Claude's model list draws the HIGHLIGHTED model's effort under it
