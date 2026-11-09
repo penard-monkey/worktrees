@@ -120,6 +120,8 @@ export function startFeedback(): Promise<void> {
     const mock = !!import.meta.env.VITE_MOCK;
     const config = feedbackConfig(import.meta.env.VITE_ORFIS_KEY, import.meta.env.VITE_ORFIS_API_URL, import.meta.env.DEV);
     if (!mock && !config) return;
+    // The MAIN window only: not the Ideas companion (label `companion`,
+    // which does not call this) nor any other window the app may open.
     if (!mock && getCurrentWindow().label !== "main") return;
     // The version this frontend was BUILT as (vite.config.ts, from the
     // workspace Cargo.toml the bundle inherits too), not the engine's: the

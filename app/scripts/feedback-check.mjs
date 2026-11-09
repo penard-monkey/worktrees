@@ -182,7 +182,9 @@ function engineDown() {
   }
 }
 
-for (const args of [{ configured: false }, { label: 'docs-123' }]) {
+// The Ideas companion is a window of this app too, and gets no widget: the
+// feedback form is the main window's.
+for (const args of [{ configured: false }, { label: 'docs-123' }, { label: 'companion' }]) {
   const a = await adapter(args);
   await a.mod.startFeedback();
   assert.deepEqual(a.counts(), { sdk: 0, fake: 0, destroyed: 0 });

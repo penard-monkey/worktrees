@@ -6,5 +6,5 @@
     "moduleResolution": "bundler",
     "allowSyntheticDefaultImports": true
   },
-  "include": ["vite.config.ts", "vite.viewer.config.ts", "vite.serve-door.ts"]
+  "include": ["vite.config.ts", "vite.viewer.config.ts", "vite.companion.config.ts", "vite.serve-door.ts"]
 }

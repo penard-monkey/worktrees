@@ -5,6 +5,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+
+- **An Ideas window, empty for now.** The lightbulb in the left rail (or ⌘⇧I) opens a second window, "Ideas", that you can maximise or put full screen on its own Space, independently of the main window. Closing it leaves the app running; reopening it brings it back where it was, and if it was open when you quit it comes back at launch (Settings → Behavior → Restore window covers both windows). It says "No ideas yet": writing and keeping ideas arrive in a later release. Closing the main window still quits the app, and takes the Ideas window with it. The Ideas window connects to the app's engine on its own but never starts or restarts it; that stays the main window's job, so a lost engine is restarted once.
+
 ### Changed
 
 - **Error and notice toasts have a visible × to dismiss them.** They were dismissed by clicking anywhere on them, which nothing on screen said. The × is a labelled, keyboard-reachable button at the toast's end; errors still stay until you dismiss them, and clicking the toast still works. The message text can now be selected to copy an error.

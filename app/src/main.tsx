@@ -214,6 +214,12 @@ async function boot() {
       <FeedbackNotice />
     </React.StrictMode>,
   );
+  // The cross-window drag probe (dragprobe.tsx): dev builds only, and only
+  // when asked for. Its own root, so the tree above is unchanged.
+  if (import.meta.env.DEV) {
+    const { mountDragProbe } = await import("./dragprobe");
+    mountDragProbe("main");
+  }
 }
 
 void boot();
