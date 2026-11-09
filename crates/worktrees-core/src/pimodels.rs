@@ -276,10 +276,67 @@ pub fn pi_bin() -> Option<PathBuf> {
     std::env::split_paths(&path).map(|d| d.join("pi")).find(|p| p.is_file())
 }
 
-fn run_pi(args: &[&str], secs: u64) -> Option<std::process::Output> {
-    let mut cmd = crate::childenv::command(pi_bin()?);
+/// THE builder for every pi process worktrees starts by itself (the pane's
+/// launch is [`pane_ext_words`], from the same extension path): the binary,
+/// then `-e <worktrees' model hosts extension>` when `hosts` is set, and
+/// nothing else — each caller keeps its own environment and arguments.
+///
+/// `hosts: false` is for `pi auth check` only: it ignores `-e` (measured,
+/// 1.5.0), and `-e` ahead of `auth` is a parse error ("Unknown options").
+/// `app/scripts/pi-spawn-check.mjs` fails on a pi spawn that goes around this.
+pub fn pi_command(hosts: bool) -> Option<std::process::Command> {
+    Some(pi_command_for(&pi_bin()?, hosts))
+}
+
+/// [`pi_command`] for a given binary.
+pub fn pi_command_for(bin: &Path, hosts: bool) -> std::process::Command {
+    let mut cmd = crate::childenv::command(bin);
+    if hosts {
+        cmd.args(ext_args());
+    }
+    cmd
+}
+
+/// `-e <path>` for a spawn, or nothing when the extension could not be
+/// written (pi then runs with its own hosts only).
+pub fn ext_args() -> Vec<String> {
+    crate::pihosts::extension().map(|p| vec!["-e".to_string(), p.to_string_lossy().into_owned()]).unwrap_or_default()
+}
+
+/// The same, shell-quoted, for a pane's launch line — launch and resume alike:
+/// a resume WITHOUT it silently starts a session whose model is one of ours on
+/// another model (measured, 1.5.0).
+pub fn pane_ext_words() -> Vec<String> {
+    let mut a = ext_args();
+    if let Some(p) = a.get_mut(1) {
+        *p = crate::profile::shell_quote(p);
+    }
+    a
+}
+
+fn run_pi(args: &[&str], secs: u64, hosts: bool) -> Option<std::process::Output> {
+    let mut cmd = pi_command(hosts)?;
     cmd.args(args).env("PI_OFFLINE", "1");
     crate::proc::run_deadline(cmd, secs).ok()
+}
+
+/// What a pi worktrees starts sees as declared: pi's models.json, with each
+/// worktrees host replacing pi's host of the same id (the extension composes
+/// above models.json and its model list replaces pi's, measured on 1.5.0).
+pub fn effective_declared() -> Vec<Declared> {
+    let mut out = declared();
+    let own = crate::pihosts::read().unwrap_or_default();
+    for h in crate::pihosts::as_hosts(&own, &|_| true) {
+        if h.models.is_empty() {
+            continue; // the extension registers no host without a model
+        }
+        let d = Declared { backend: h.backend.clone(), base_url: h.base_url, models: h.models.into_iter().map(|m| m.id).collect() };
+        match out.iter_mut().find(|x| x.backend == h.backend) {
+            Some(x) => *x = d,
+            None => out.push(d),
+        }
+    }
+    out
 }
 
 // ── reachability (§7) ────────────────────────────────────────────────────────
@@ -377,7 +434,7 @@ pub fn reach_reason(reach: &Reach, model: &str) -> Option<Reason> {
 /// endpoint is pi's business.
 pub fn launch_reason(model: &str) -> Option<(Reason, String)> {
     let (backend, id) = model.split_once('/')?;
-    let d = declared().into_iter().find(|d| d.backend == backend)?;
+    let d = effective_declared().into_iter().find(|d| d.backend == backend)?;
     let url = d.base_url?;
     let reason = reach_reason(&probe(&url), id.split(':').next().unwrap_or(id))?;
     let why = match reason {
@@ -484,17 +541,20 @@ fn catalog() -> (Vec<ModelOption>, Option<String>) {
             }
         }
     }
-    let Some(out) = run_pi(&["--list-models", "--offline"], 10) else { return (Vec::new(), None) };
+    let Some(out) = run_pi(&["--list-models", "--offline"], 10, true) else { return (Vec::new(), None) };
     let listed = parse_list_models(&String::from_utf8_lossy(&out.stdout));
     let load_error = parse_load_error(&String::from_utf8_lossy(&out.stderr));
-    let declared = declared();
+    let declared = effective_declared();
+    // pi's `auth check` ignores `-e`: it calls a worktrees host
+    // `provider_not_found`, so it is never asked about one.
+    let own: Vec<String> = crate::pihosts::read().map(|o| o.hosts.keys().cloned().collect()).unwrap_or_default();
     let default = default_model();
     // Only providers pi did NOT list are asked about, all at once, under ONE
     // deadline: a picker waits on this, and N serial checks at 5s each is a
     // dialog that opens N×5s late. A check still running at the deadline is
     // simply unanswered (the row still says it is unusable).
     let mut unlisted: Vec<String> = declared.iter().map(|d| d.backend.clone()).chain(default.iter().map(|(b, _)| b.clone())).collect();
-    unlisted.retain(|b| !listed.iter().any(|l| &l.backend == b));
+    unlisted.retain(|b| !listed.iter().any(|l| &l.backend == b) && !own.contains(b));
     unlisted.dedup();
     let answers = auth_checks(&unlisted, AUTH_DEADLINE);
     let auth = |b: &str| answers.get(b).cloned().flatten();
@@ -505,29 +565,40 @@ fn catalog() -> (Vec<ModelOption>, Option<String>) {
 
 // ── Settings → pi → Models: the hosts view ───────────────────────────────────
 
-/// One declared provider as Settings shows it.
+/// One host as Settings shows it.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct HostView {
     #[serde(flatten)]
     pub host: Host,
+    /// `pi` (pi's own models.json: read-only here) or `worktrees` (ours).
+    pub origin: &'static str,
+    /// A worktrees host that replaces pi's host of the same id; or, on pi's
+    /// host, that worktrees replaces it (for pi worktrees starts only).
+    pub overridden: bool,
     /// `served` (its `/models` answered with a list), `up` (it answered, not
     /// with a list we read), `down`, or `unprobed` (no http(s) `baseUrl`: a
     /// built-in provider's endpoint is pi's business).
     pub reach: &'static str,
-    /// Ids the host's `/models` lists that this provider does not declare —
+    /// Ids the host's `/models` lists that this host does not declare —
     /// models pi cannot use until they are declared.
     pub served_undeclared: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct Hosts {
+    /// pi's models.json.
     pub path: String,
     /// `missing`, `ok`, or `unreadable` (`problem` says why).
     pub file: &'static str,
     pub problem: Option<String>,
-    /// pi's own reason it drops the file (`load_error`): every provider in it
-    /// is then unusable, whatever the rows below say.
+    /// pi's own reason it drops its models.json (`load_error`): every host in
+    /// it is then unusable, whatever its row says.
     pub load_error: Option<String>,
+    /// worktrees' own file (`pihosts::data_path`), and why it cannot be used
+    /// when it cannot: the extension then registers none of its hosts.
+    pub own_path: String,
+    pub own_problem: Option<String>,
+    /// worktrees' hosts first, then pi's.
     pub hosts: Vec<HostView>,
 }
 
@@ -542,12 +613,23 @@ pub fn served_undeclared(served: &[String], declared: &[HostModel]) -> Vec<Strin
     out
 }
 
-/// Join the parsed hosts with each one's reachability. Pure: `reach` is
-/// passed in, asked once per distinct `baseUrl`.
-pub fn host_views(hosts: Vec<Host>, reach: &dyn Fn(&str) -> Option<Reach>) -> Vec<HostView> {
-    hosts
+/// Join worktrees' hosts and pi's with each one's reachability. Pure: `reach`
+/// is passed in, asked once per distinct `baseUrl`.
+pub fn host_views(own: Vec<Host>, pi: Vec<Host>, reach: &dyn Fn(&str) -> Option<Reach>) -> Vec<HostView> {
+    let own_ids: Vec<String> = own.iter().map(|h| h.backend.clone()).collect();
+    let pi_ids: Vec<String> = pi.iter().map(|h| h.backend.clone()).collect();
+    let tagged = own
         .into_iter()
         .map(|h| {
+            let o = pi_ids.contains(&h.backend);
+            (h, "worktrees", o)
+        })
+        .chain(pi.into_iter().map(|h| {
+            let o = own_ids.contains(&h.backend);
+            (h, "pi", o)
+        }));
+    tagged
+        .map(|(h, origin, overridden)| {
             let r = h.base_url.as_deref().filter(|u| probe_url(u).is_some()).map(|u| reach(u));
             let (reach, served_undeclared) = match r {
                 None => ("unprobed", Vec::new()),
@@ -555,43 +637,66 @@ pub fn host_views(hosts: Vec<Host>, reach: &dyn Fn(&str) -> Option<Reach>) -> Ve
                 Some(Some(Reach::Up)) => ("up", Vec::new()),
                 Some(Some(Reach::Served(ids))) => ("served", served_undeclared(&ids, &h.models)),
             };
-            HostView { host: h, reach, served_undeclared }
+            HostView { host: h, origin, overridden, reach, served_undeclared }
         })
         .collect()
 }
 
-/// Settings → pi → Models: every provider models.json declares, each host's
-/// state and what it serves undeclared, and pi's own load error. Reads the
+/// Settings → pi → Models: worktrees' hosts and pi's, each host's state and
+/// what it serves undeclared, and why either file cannot be used. Reads pi's
 /// file for the fields `Host` names and nothing else; probes every host at
 /// once, under one deadline (`probe`'s cache is shared with the catalog).
 pub fn hosts() -> Hosts {
     let path = models_json_path();
-    let mut out = Hosts { path: path.to_string_lossy().into_owned(), file: "missing", problem: None, load_error: None, hosts: Vec::new() };
-    let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return out,
+    let own_path = crate::pihosts::data_path();
+    let mut out = Hosts {
+        path: path.to_string_lossy().into_owned(),
+        file: "missing",
+        problem: None,
+        load_error: None,
+        own_path: own_path.to_string_lossy().into_owned(),
+        own_problem: None,
+        hosts: Vec::new(),
+    };
+    let pi = match std::fs::read_to_string(&path) {
+        Ok(text) => match parse_hosts(&text) {
+            Ok(h) => {
+                out.file = "ok";
+                h
+            }
+            Err(why) => {
+                out.file = "unreadable";
+                out.problem = Some(why);
+                Vec::new()
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(e) => {
             out.file = "unreadable";
             out.problem = Some(format!("cannot read it: {e}"));
-            return out;
+            Vec::new()
         }
     };
-    let parsed = match parse_hosts(&text) {
-        Ok(h) => h,
+    let own = match crate::pihosts::read_at(&own_path) {
+        Ok(o) => {
+            let bad: Vec<String> = o.entries().into_iter().filter_map(|(id, h)| h.err().map(|e| format!("{id}: {e}"))).collect();
+            if !bad.is_empty() {
+                out.own_problem = Some(format!("left out: {}", bad.join("; ")));
+            }
+            crate::pihosts::as_hosts(&o, &|id| pi.iter().any(|h| h.backend == id && h.has_key))
+        }
         Err(why) => {
-            out.file = "unreadable";
-            out.problem = Some(why);
-            out.load_error = load_error();
-            return out;
+            out.own_problem = Some(why);
+            Vec::new()
         }
     };
-    let mut urls: Vec<String> = parsed.iter().filter_map(|h| h.base_url.clone()).filter(|u| probe_url(u).is_some()).collect();
+    let mut urls: Vec<String> =
+        own.iter().chain(pi.iter()).filter_map(|h| h.base_url.clone()).filter(|u| probe_url(u).is_some()).collect();
     urls.sort();
     urls.dedup();
     let answers = gather(&urls, Duration::from_secs(5), probe);
-    out.file = "ok";
     out.load_error = load_error();
-    out.hosts = host_views(parsed, &|u| answers.get(u).cloned());
+    out.hosts = host_views(own, pi, &|u| answers.get(u).cloned());
     out
 }
 
@@ -610,7 +715,7 @@ pub const AUTH_DEADLINE: Duration = Duration::from_secs(5);
 fn auth_checks(backends: &[String], deadline: Duration) -> HashMap<String, Option<Option<String>>> {
     let secs = deadline.as_secs().max(1);
     gather(backends, deadline, move |b| {
-        run_pi(&["auth", "check", "--provider", b, "--json", "--no-refresh"], secs)
+        run_pi(&["auth", "check", "--provider", b, "--json", "--no-refresh"], secs, false)
             .and_then(|o| parse_auth_check(&String::from_utf8_lossy(&o.stdout)))
     })
 }
@@ -881,14 +986,21 @@ mod tests {
             "http://h:1234/v1" => Some(Reach::Served(vec!["qwen3-coder-next".into(), "new-one".into(), "new-one".into()])),
             _ => Some(Reach::Down),
         };
-        let v = host_views(h.clone(), &served);
+        let v = host_views(vec![], h.clone(), &served);
         assert_eq!((v[0].reach, v[0].served_undeclared.clone()), ("served", vec!["new-one".to_string()]));
         assert_eq!((v[1].reach, v[1].served_undeclared.len()), ("down", 0));
+        assert!(v.iter().all(|x| x.origin == "pi" && !x.overridden));
         let mut built_in = h[0].clone();
         built_in.base_url = None;
-        assert_eq!(host_views(vec![built_in], &|_| panic!("not probed"))[0].reach, "unprobed");
-        assert_eq!(host_views(h.clone(), &|_| Some(Reach::Up))[0].reach, "up");
-        assert_eq!(host_views(h, &|_| None)[0].reach, "down", "no answer by the deadline is down");
+        assert_eq!(host_views(vec![], vec![built_in], &|_| panic!("not probed"))[0].reach, "unprobed");
+        assert_eq!(host_views(vec![], h.clone(), &|_| Some(Reach::Up))[0].reach, "up");
+        assert_eq!(host_views(vec![], h.clone(), &|_| None)[0].reach, "down", "no answer by the deadline is down");
+        // Ours first; an override is marked on both rows.
+        let mut ours = h[0].clone();
+        ours.models.truncate(1);
+        let both = host_views(vec![ours], h, &served);
+        assert_eq!(both.iter().map(|x| (x.origin, x.host.backend.as_str(), x.overridden)).collect::<Vec<_>>(),
+            [("worktrees", "lm-studio", true), ("pi", "lm-studio", true), ("pi", "ollama", false)]);
         let json = serde_json::to_value(&v[0]).unwrap();
         assert_eq!(json["has_key"], true, "flattened");
         assert!(json.get("apiKey").is_none() && !json.to_string().contains("security"));
