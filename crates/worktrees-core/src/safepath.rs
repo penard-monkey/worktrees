@@ -260,8 +260,15 @@ pub struct ImageRead {
 /// file between the check and the open is refused. Then up to `cap` bytes, and
 /// `check_image` over them. `have_etag` (the client's `"<mtime ms>-<size>"`)
 /// returns early with no bytes, `unchanged`.
-pub fn open_place_image(root: &Path, is_main: bool, path: &str, cap: u64, have_etag: Option<&str>) -> Result<(ImageRead, bool), String> {
-    open_place_image_with(root, is_main, path, cap, have_etag, |p| {
+pub fn open_place_image(
+    root: &Path,
+    is_main: bool,
+    path: &str,
+    cap: u64,
+    have_etag: Option<&str>,
+    allow: &dyn Fn(&Path) -> Result<(), String>,
+) -> Result<(ImageRead, bool), String> {
+    open_place_image_with(root, is_main, path, cap, have_etag, allow, |p| {
         use std::os::unix::fs::OpenOptionsExt;
         std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(p)
     })
@@ -276,11 +283,16 @@ fn open_place_image_with(
     path: &str,
     cap: u64,
     have_etag: Option<&str>,
+    allow: &dyn Fn(&Path) -> Result<(), String>,
     open: impl FnOnce(&Path) -> std::io::Result<std::fs::File>,
 ) -> Result<(ImageRead, bool), String> {
     use std::io::Read;
     use std::os::unix::fs::MetadataExt;
     let f = place_image(root, is_main, path)?;
+    // The caller's own question about the RESOLVED path (a device's path class)
+    // comes before the file is opened, read or looked into: nothing about a
+    // file it may not read (its size, header or pixel count) is ever said.
+    allow(&f.path)?;
     let mut file = open(&f.path).map_err(|e| if e.raw_os_error() == Some(libc::ELOOP) { format!("outside this place: {path}") } else { format!("not found: {path}") })?;
     let md = file.metadata().map_err(|e| e.to_string())?;
     if !md.is_file() || (md.dev(), md.ino()) != (f.dev, f.ino) {
@@ -295,6 +307,10 @@ fn open_place_image_with(
     (&mut file).take(cap + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
     let truncated = bytes.len() as u64 > cap;
     bytes.truncate(cap as usize);
+    if truncated && f.mime == "image/svg+xml" {
+        // the tail was never scanned, and half an SVG is no picture
+        return Err(format!("not shown: an SVG over {} bytes is refused: {path}", cap));
+    }
     check_image(&bytes, f.mime, path)?;
     Ok((ImageRead { path: f.path, bytes, truncated, on_disk, mtime_ms, mime: f.mime }, false))
 }
@@ -372,7 +388,9 @@ pub fn image_dims(bytes: &[u8], mime: &str) -> Option<(u64, u64)> {
 /// that unfolds to gigabytes in a parser). `path` is only for the words.
 pub fn check_image(bytes: &[u8], mime: &str, path: &str) -> Result<(), String> {
     if mime == "image/svg+xml" {
-        let head = String::from_utf8_lossy(&bytes[..bytes.len().min(1 << 20)]).to_ascii_lowercase();
+        // EVERY byte that will be handed on, never a prefix: a DOCTYPE past the
+        // first megabyte is as live as one at the top.
+        let head = String::from_utf8_lossy(bytes).to_ascii_lowercase();
         if head.contains("<!doctype") || head.contains("<!entity") {
             return Err(format!("not shown: an SVG with a DOCTYPE or ENTITY is refused: {path}"));
         }
@@ -567,7 +585,7 @@ mod tests {
         fs::write(root.join("shots/a.png"), b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR\0\0\0\x08\0\0\0\x08").unwrap();
         let open = |p: &Path| std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(p);
         // no swap: read
-        let (read, unchanged) = open_place_image_with(&root, false, "shots/a.png", 1 << 20, None, open).unwrap();
+        let (read, unchanged) = open_place_image_with(&root, false, "shots/a.png", 1 << 20, None, &|_| Ok(()), open).unwrap();
         assert!(!unchanged && read.bytes.starts_with(b"\x89PNG"), "{read:?}");
         // another file renamed over it in the window
         let swapped = |p: &Path| {
@@ -575,7 +593,7 @@ mod tests {
             fs::rename(root.join("shots/new.png"), p).unwrap();
             open(p)
         };
-        assert_eq!(open_place_image_with(&root, false, "shots/a.png", 1 << 20, None, swapped).unwrap_err(), "outside this place: shots/a.png");
+        assert_eq!(open_place_image_with(&root, false, "shots/a.png", 1 << 20, None, &|_| Ok(()), swapped).unwrap_err(), "outside this place: shots/a.png");
         // a link planted in its place in the window: O_NOFOLLOW refuses it
         fs::write(root.join("shots/b.png"), "x").unwrap();
         let linked = |p: &Path| {
@@ -583,7 +601,7 @@ mod tests {
             symlink(out.join("secret.png"), p).unwrap();
             open(p)
         };
-        let e = open_place_image_with(&root, false, "shots/b.png", 1 << 20, None, linked).unwrap_err();
+        let e = open_place_image_with(&root, false, "shots/b.png", 1 << 20, None, &|_| Ok(()), linked).unwrap_err();
         assert_eq!(e, "outside this place: shots/b.png");
         // ... and WITHOUT O_NOFOLLOW it would have read the secret (what the flag is for)
         fs::remove_file(root.join("shots/b.png")).unwrap();
@@ -593,7 +611,7 @@ mod tests {
             symlink(out.join("secret.png"), p).unwrap();
             std::fs::File::open(p)
         };
-        let e = open_place_image_with(&root, false, "shots/b.png", 1 << 20, None, follows).unwrap_err();
+        let e = open_place_image_with(&root, false, "shots/b.png", 1 << 20, None, &|_| Ok(()), follows).unwrap_err();
         assert_eq!(e, "outside this place: shots/b.png", "the identity check alone refuses a followed link too");
         let _ = fs::remove_dir_all(&base);
     }
@@ -644,8 +662,20 @@ mod tests {
         // end to end: a bomb on disk is refused by the reader, with its note
         let base = tmp("bomb");
         fs::write(base.join("big.png"), hdr_png(10_000, 10_000)).unwrap();
-        let e = open_place_image(&base, false, "big.png", 1 << 20, None).unwrap_err();
+        let e = open_place_image(&base, false, "big.png", 1 << 20, None, &|_| Ok(())).unwrap_err();
         assert!(e.contains("10000×10000") && e.contains("over the 40 limit"), "{e}");
+        // a caller that may not read the file is refused BEFORE anything is said
+        // about it: a bomb gets the caller's refusal, not its pixel count
+        let e = open_place_image(&base, false, "big.png", 1 << 20, None, &|_| Err("not readable from this device".into())).unwrap_err();
+        assert_eq!(e, "not readable from this device");
+        // an SVG whose DOCTYPE lies past the first megabyte, and a cut SVG, are refused
+        let mut late = b"<svg xmlns='http://www.w3.org/2000/svg'>".to_vec();
+        late.extend(vec![b' '; (1 << 20) + 10]);
+        late.extend(b"<!ENTITY a 'b'></svg>");
+        assert!(check_image(&late, "image/svg+xml", "l.svg").is_err(), "scanned whole");
+        fs::write(base.join("cut.svg"), vec![b' '; 3000]).unwrap();
+        let e = open_place_image(&base, false, "cut.svg", 2048, None, &|_| Ok(())).unwrap_err();
+        assert!(e.contains("SVG over") && e.contains("refused"), "{e}");
         let _ = fs::remove_dir_all(&base);
     }
 }

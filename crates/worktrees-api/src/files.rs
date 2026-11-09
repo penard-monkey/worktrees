@@ -1389,12 +1389,15 @@ pub fn read_place_image(ctx: &Ctx, repo: String, slug: String, path: String, max
     let cap = read_cap(max_bytes, READ_BASE64_MAX);
     // Opened O_NOFOLLOW and held to the identity that was checked, its pixel
     // size and SVG read from the header (`safepath::open_place_image`).
-    let (read, unchanged) = worktrees_core::safepath::open_place_image(&root, slug == "(main)", &path, cap, etag.as_deref())?;
-    if let Some(cl) = read_classes(ctx) {
-        if unreadable(ctx, &cl, &read.path).is_some() {
-            return Err(format!("not readable from this device: {path}"));
-        }
-    }
+    // The caller's path class is asked of the RESOLVED path before the file is
+    // opened or looked into (`allow`), so a device is never told anything about
+    // a file it may not read: not its size, its header or its pixel count.
+    let classes = read_classes(ctx);
+    let allow = |canon: &Path| match &classes {
+        Some(cl) if unreadable(ctx, cl, canon).is_some() => Err(format!("not readable from this device: {path}")),
+        _ => Ok(()),
+    };
+    let (read, unchanged) = worktrees_core::safepath::open_place_image(&root, slug == "(main)", &path, cap, etag.as_deref(), &allow)?;
     let etag = format!("{}-{}", read.mtime_ms, read.on_disk);
     let size = if unchanged { read.on_disk.min(cap) } else { read.bytes.len() as u64 };
     Ok(PlaceImage { b64: b64_encode(&read.bytes), size, truncated: read.truncated, mtime: read.mtime_ms, mime: read.mime, etag, unchanged })
