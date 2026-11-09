@@ -87,6 +87,7 @@ pub mod tmux_server;
 pub mod trust;
 pub mod ideas;
 pub mod ulid;
+pub mod workspaces;
 pub mod ui;
 
 pub use error::{Result, WtError};

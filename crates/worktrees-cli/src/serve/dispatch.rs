@@ -1,4 +1,4 @@
-//! The 219 commands, each with its exposure, capability and objects, in ONE
+//! The 225 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -39,7 +39,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::sync::Arc;
-use worktrees_api::{agents, config, files, hostenv, ideas, macprivacy, meta, ops, prefs, presets, profiles, project, status, term, viewer, workspace, Ctx};
+use worktrees_api::{agents, config, files, hostenv, ideas, macprivacy, meta, ops, prefs, presets, profiles, project, status, term, viewer, workspace, workspaces, Ctx};
 use worktrees_core::authz::{self, Caller, Capability, Caps, DeviceId, Grant, Projects, Registry};
 use worktrees_core::fetchpolicy::Fetcher;
 
@@ -1276,6 +1276,15 @@ commands! { cx, a;
     // The addresses `remote_enable` would take now: the host app's picker.
     remote_candidates: HostConsole => remote(cx)?.candidates(),
     remote_advertise: HostConsole => remote(cx)?.set_advertise(a.get("on")?),
+    // ── named workspaces (idea board phase 2, `workspaces.json`): desktop only ──
+    // Lists of references to registered projects. Console, by the owner's
+    // decision of 2026-11-08: nothing a paired device or an agent reaches.
+    workspaces_list: HostConsole => workspaces::workspaces_list(),
+    workspace_create: HostConsole => workspaces::workspace_create(a.get("name")?),
+    workspace_rename: HostConsole => workspaces::workspace_rename(a.get("id")?, a.get("name")?),
+    workspace_remove: HostConsole => workspaces::workspace_remove(a.get("id")?),
+    workspace_set_projects: HostConsole => workspaces::workspace_set_projects(a.get("id")?, a.get("roots")?),
+    workspace_reorder: HostConsole => workspaces::workspace_reorder(a.get("ids")?),
 }
 
 #[cfg(test)]
@@ -1319,7 +1328,7 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 219 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 225 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six, the slots pair and
     /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
@@ -1334,6 +1343,7 @@ mod tests {
     /// two (`agent_commands`, `agent_command`), notifications' nine (the
     /// `push_*` rows), and Settings → Agent policy's four (`limits_settings`,
     /// `set_limits`, `policy_preset_status`, `apply_policy_preset`), and the
+    /// named workspaces' six console rows (`workspaces_list`, `workspace_*`), and the
     /// idea board's seven console rows (`ideas_list`, `idea_read`,
     /// `idea_create`, `idea_write`, `idea_rename`, `idea_remove`,
     /// `idea_adopt`); the check scripts
@@ -1342,7 +1352,7 @@ mod tests {
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 219, "the table has 219 commands");
+        assert_eq!(TABLE.len(), 225, "the table has 225 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1665,6 +1675,10 @@ mod tests {
         ("set_project_profile", "id", "a profile id; the project is `repo`, declared"),
         ("skill_install_local", "path", "any directory the user picks to install a skill FROM (a console act)"),
         ("open_docs_viewer", "place", "the place's branch and dirty state for the page header; addresses nothing"),
+        ("workspace_rename", "id", "a named workspace's id: workspaces.json is the host's (a console act)"),
+        ("workspace_remove", "id", "a named workspace's id (a console act)"),
+        ("workspace_set_projects", "id", "a named workspace's id (a console act)"),
+        ("workspace_set_projects", "roots", "roots to REFERENCE, kept even once unregistered; the body checks a new one against the registry (a console act)"),
         ("idea_read", "id", "an idea's ULID: ideas are the host's, in its own folder, not a project's (a console act)"),
         ("idea_write", "id", "an idea's ULID (a console act)"),
         ("idea_rename", "id", "an idea's ULID (a console act)"),
@@ -1743,7 +1757,7 @@ mod tests {
     /// `push_allow_security`); Settings → Agent policy → Limits'
     /// `limits_settings` (`read`) and `set_limits` (`admin`); and the policy
     /// presets' `policy_preset_status` (`read`) and `apply_policy_preset`
-    /// (console); and the idea board's seven rows (console). A row that moves group
+    /// (console); the named workspaces' six (console); and the idea board's seven (console). A row that moves group
     /// fails here until the count (and the proposal's table) move with it.
     #[test]
     fn every_row_has_one_base_group_and_the_counts_are_section_3_4s() {
@@ -1760,7 +1774,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 67), ("write", 23), ("admin", 41), ("console", 54), ("stream", 10), ("instruct", 8), ("answer", 2),
+            ("read", 67), ("write", 23), ("admin", 41), ("console", 60), ("stream", 10), ("instruct", 8), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 7),
         ]
         .into();

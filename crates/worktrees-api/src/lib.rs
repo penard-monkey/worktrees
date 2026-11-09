@@ -74,6 +74,7 @@ pub mod status;
 pub mod term;
 pub mod watch;
 pub mod workspace;
+pub mod workspaces;
 pub mod util;
 pub mod viewer;
 pub mod ops;

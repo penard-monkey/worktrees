@@ -3911,3 +3911,66 @@ body.dragging .grip { cursor: grabbing; }
    footnote, it is the half people skip. */
 .privacy-why { color: var(--txt-dim); }
 .privacy-why strong { color: var(--txt-hi); font-weight: var(--fw-med); }
+
+/* ── named workspaces (idea board phase 2, workspaces.ts) ──────────────────
+   The switch sits between the filter and the list; the Workspaces view draws
+   each workspace as a sticky header over its projects, whose own sticky
+   headers stack under it (`--ws-head`). Hue lives in fills and dots; words
+   take the text tokens (AGENTS.md: an accent token is a fill, not text). */
+.nav-view {
+  display: flex; flex: none; margin: 0 var(--s3) var(--s2); padding: 2px;
+  background: var(--bg-input); border: 1px solid var(--line); border-radius: var(--r-md);
+}
+.nav-view-seg {
+  flex: 1 1 0; min-width: 0; padding: 2px var(--s2);
+  background: transparent; color: var(--txt-dim); border: 1px solid transparent; border-radius: var(--r-sm);
+  font-size: var(--fs-label); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.nav-view-seg:hover { color: var(--txt-hi); }
+.nav-view-seg.on { background: var(--bg-panel); color: var(--txt-hi); border-color: var(--line); }
+.nav-view-seg.drop-on,
+.ws-group.drop-on > .ws-h {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, var(--bg-tree));
+}
+.ws-group { --ws-head: 30px; }
+.ws-group + .ws-group, .drop-gap.ws + .ws-group { margin-top: var(--s2); }
+.ws-group.dragged { opacity: 0.4; }
+.ws-h {
+  position: sticky; top: 0; z-index: 3; box-sizing: border-box; height: var(--ws-head);
+  display: flex; align-items: center; gap: var(--s2);
+  padding: 0 var(--s3); font-size: var(--fs-label);
+  background: var(--bg-tree); border: 1px solid transparent; border-bottom-color: var(--line);
+  cursor: grab;
+}
+body.dragging .ws-h { cursor: grabbing; }
+.ws-h:hover .mini, .ws-h:focus-within .mini { opacity: 1; }
+.ws-icon { position: relative; display: grid; place-items: center; width: 16px; height: 16px; color: var(--txt-dim); flex: none; }
+.ws-icon.busy::after, .ws-icon.waiting::after, .ws-icon.done::after {
+  content: ""; position: absolute; top: -2px; right: -2px;
+  width: 6px; height: 6px; border-radius: var(--r-full); box-shadow: 0 0 0 2px var(--bg-tree);
+}
+.ws-icon.busy::after { background: var(--ok); }
+.ws-icon.waiting::after { background: var(--warn); }
+.ws-icon.done::after { background: var(--done); }
+.ws-name {
+  flex: 1; min-width: 0; font-size: var(--fs-row); font-weight: var(--fw-bold); color: var(--txt-hi);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer;
+}
+.ws-name-input { flex: 1; min-width: 0; }
+/* No indent: a project under a workspace draws exactly as in All projects,
+   whose header is already short of width (measured: 41px of name at 1280). */
+.ws-kids .project-h { top: var(--ws-head); }
+.ws-drop-hint { padding: var(--s2) var(--s3); }
+.ws-gone .pname { color: var(--txt-dim); font-weight: var(--fw-body); }
+.ws-gone .pgone { color: var(--txt-dim); }
+.ws-empty { display: flex; flex-direction: column; align-items: flex-start; gap: var(--s2); }
+.ws-new-btn {
+  display: inline-flex; align-items: center; gap: var(--s1); margin: var(--s2) var(--s3);
+  padding: 2px var(--s2); background: transparent; color: var(--txt-dim);
+  border: 1px dashed var(--line-strong); border-radius: var(--r-sm); font-size: var(--fs-label);
+}
+.ws-empty .ws-new-btn { margin: 0; }
+.ws-new-btn:hover { color: var(--txt-hi); border-color: var(--txt-mute); }
+.ws-new-row { display: flex; align-items: center; gap: var(--s2); margin: var(--s2) var(--s3); color: var(--txt-dim); }
+.drop-gap.ws { height: var(--ws-head, 30px); margin: var(--s1) 0; }

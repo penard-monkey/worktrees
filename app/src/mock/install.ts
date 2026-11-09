@@ -259,6 +259,47 @@ const mockPlanLevel: string = new URLSearchParams(location.search).get("planleve
 const mockPlanProjects = new Map<string, { level: string | null; plan_path: string | null; plan_scope: string | null }>();
 const mockPrivate = new Set((new URLSearchParams(location.search).get("private") ?? "").split(",").filter(Boolean));
 const projectName = (root: string) => root.split("/").filter(Boolean).pop() ?? root;
+
+// ── named workspaces (idea board phase 2): `workspaces.json`, the core store's
+// shape. Empty unless `?workspaces=1`, which seeds two workspaces sharing a
+// project plus one reference to a root that is not registered.
+type MockWsDef = { id: string; name: string; projects: string[] };
+let mockWsSeq = 0;
+const mockWsId = () => `01MOCK${String(++mockWsSeq).padStart(20, "0")}`;
+let mockWsDefs: MockWsDef[] | null = null;
+const mockWsSeed = (): MockWsDef[] => {
+  if (new URLSearchParams(location.search).get("workspaces") !== "1") return [];
+  const roots = ws.projects.map((p) => p.root);
+  return [
+    { id: mockWsId(), name: "Everything", projects: [...roots.slice(0, 2), "/Users/demo/workspace/unregistered-thing"] },
+    { id: mockWsId(), name: "Tools", projects: roots.slice(1, 2) },
+  ];
+};
+const mockWsView = () => {
+  mockWsDefs ??= mockWsSeed();
+  return {
+    workspaces: mockWsDefs.map((w) => ({
+      id: w.id, name: w.name,
+      projects: w.projects.map((root) => {
+        const on = ws.projects.some((p) => p.root === root);
+        return { root, name: on ? projectName(root) : null, registered: on };
+      }),
+    })),
+  };
+};
+const mockWsName = (name: unknown, except?: string) => {
+  const n = String(name ?? "").trim();
+  if (!n) throw "a workspace needs a name";
+  if (n.length > 80) throw "a workspace name is at most 80 characters";
+  if ((mockWsDefs ?? []).some((w) => w.id !== except && w.name.toLowerCase() === n.toLowerCase()))
+    throw `a workspace named '${n}' already exists`;
+  return n;
+};
+const mockWsGet = (id: unknown) => {
+  const w = (mockWsDefs ?? []).find((x) => x.id === id);
+  if (!w) throw `no workspace ${id}`;
+  return w;
+};
 // The launch gate's `[quota]` policy (`quota_settings`): `?quota=off` starts
 // with the gate off, `?quotapct=<n>` with a weekly threshold, and
 // `?quotapct=bad` with a hand-edit the gate ignored (so the problems line shows).
@@ -2444,6 +2485,42 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
       if (args.private) mockPrivate.add(n); else mockPrivate.delete(n);
       emitEvent("places:changed", null);
       return mockCrossProject();
+    }
+    // ── named workspaces (core `workspaces`, api `workspaces.rs`) ──
+    case "workspaces_list":
+      return mockWsView();
+    case "workspace_create": {
+      mockWsView();
+      mockWsDefs!.push({ id: mockWsId(), name: mockWsName(args.name), projects: [] });
+      return mockWsView();
+    }
+    case "workspace_rename": {
+      mockWsView();
+      mockWsGet(args.id).name = mockWsName(args.name, String(args.id));
+      return mockWsView();
+    }
+    case "workspace_remove":
+      mockWsView();
+      mockWsDefs = mockWsDefs!.filter((w) => w.id !== args.id);
+      return mockWsView();
+    case "workspace_set_projects": {
+      mockWsView();
+      const w = mockWsGet(args.id);
+      const next: string[] = [];
+      for (const r of (args.roots as string[]) ?? []) {
+        if (next.includes(r)) continue;
+        if (!w.projects.includes(r) && !ws.projects.some((p) => p.root === r)) throw `not a registered project: ${r}`;
+        next.push(r);
+      }
+      w.projects = next;
+      return mockWsView();
+    }
+    case "workspace_reorder": {
+      mockWsView();
+      const ids = (args.ids as string[]) ?? [];
+      const named = ids.map((id) => mockWsDefs!.find((w) => w.id === id)).filter((w): w is MockWsDef => !!w);
+      mockWsDefs = [...named, ...mockWsDefs!.filter((w) => !ids.includes(w.id))];
+      return mockWsView();
     }
     // Every "Copy …". The real one is pbcopy; here, record the text
     // (`__mock.copies()`) so a harness run can assert what a click copied
