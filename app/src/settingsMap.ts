@@ -203,6 +203,10 @@ export const SECTIONS: readonly SectionDef[] = [
   { id: "pull-requests", page: "general", tier: "beginner", label: "Pull requests", keywords: ["prs", "pr status", "github", "gh"], keys: ["pull_requests"] },
   { id: "auto-fetch", page: "general", tier: "advanced", label: "Git", keywords: ["fetch", "git fetch", "background fetch", "refresh remotes", "interval"], host: ["fetch_interval"], scope: "computer", write: "set_fetch_interval" },
   { id: "projects-parent", page: "general", tier: "advanced", label: "New projects", keywords: ["clone", "clone folder", "project folder", "new project location", "directory"], keys: ["projects_parent"] },
+  // One row per beta feature (beta.ts). Advanced and Expert only (the owner's
+  // call, 2026-11-08); a feature turned on is a changed value, so rule 2
+  // shows the section in Beginner too, where it can be turned off again.
+  { id: "beta", page: "general", tier: "advanced", label: "Beta features", keywords: ["beta", "experimental", "preview", "early access", "feature flag", "ideas", "workspaces"], keys: ["beta_ideas"], localOnly: true },
   // ── Appearance
   { id: "zoom", page: "appearance", tier: "beginner", label: "Overall size", keywords: ["zoom", "scale", "bigger", "smaller", "text size", "magnify"], keys: ["app_zoom"] },
   { id: "ui-font", page: "appearance", tier: "advanced", label: "UI font size", keywords: ["font", "font size", "text size", "interface font", "rem"], keys: ["ui_rem"] },
