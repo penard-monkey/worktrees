@@ -5,7 +5,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+
+- **Workspaces: group the projects that belong together.** A switch at the top of the nav moves between **All projects** (the nav as it was) and **Workspaces**. A workspace is a named list of your registered projects. It shows each project and every place under it, and selecting a place opens it exactly as All projects does. A project can be in any number of workspaces. Make one with **New workspace**. Add a project by dragging it onto a workspace; from All projects, hold it over **Workspaces** and the view opens. Or use the project's menu: **Add to workspace ▸**. Drag a workspace to reorder it, or use its menu: **Move up**, **Move down**, **Rename**, **Remove workspace**. Taking a project out (its ✕, **Remove from workspace**, or dragging it onto **All projects**) offers Undo, and never removes it from All projects. Removing a workspace asks first and removes only the list. A project that is no longer registered stays listed as "not registered" until you take it out. Workspaces are kept in `~/.config/worktrees/workspaces.json`, beside `projects.json`. They are on this computer only: a paired device and an agent cannot reach them. The app remembers which view you had open.
+
 ### Changed
+
+- **"Remove from workspace" on a project is now "Remove from All projects".** It does the same as before: it unregisters the project. "Workspace" now means a named workspace.
 
 - **Error and notice toasts have a visible × to dismiss them.** They were dismissed by clicking anywhere on them, which nothing on screen said. The × is a labelled, keyboard-reachable button at the toast's end; errors still stay until you dismiss them, and clicking the toast still works. The message text can now be selected to copy an error.
 
