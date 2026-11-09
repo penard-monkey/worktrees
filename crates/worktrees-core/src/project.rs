@@ -723,6 +723,10 @@ impl Project {
                 let _ = writeln!(f, "{p}");
             }
         }
+        // The chat's images (`feat/chat-images`): an agent saves a picture under
+        // `.worktrees-attachments/` on the skill's word, before any upload has
+        // made the folder or its exclusion, and `git add -A` must not take it.
+        let _ = crate::attach::ensure_excluded(Path::new(&self.git_common));
     }
 
     pub fn wt_root_dir(&self) -> &str {

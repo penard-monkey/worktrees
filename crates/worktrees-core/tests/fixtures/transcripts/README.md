@@ -131,3 +131,27 @@ markdown copy for the model `CONTEXT-META-MARKER`, a command's expansion
 a local command's name and output are `type: "system", subtype:
 "local_command"` entries (with ANSI in the output), and a prompt command's
 `human`-origin entry puts `<command-message>` before `<command-name>`.
+
+`claude-2.1.319-read-image.jsonl` is a MEASURED shape (feat/chat-images,
+2026-11-09): what Claude Code 2.1.319 writes when its Read tool opens a png.
+Surveyed across real sessions on this machine (a png of 859,941 bytes, one of
+152,865); the content here is invented and the image is a 64x48 stand-in.
+- The `assistant` entry's `tool_use` is `{name: "Read", input: {file_path}}`;
+  that path is all `turns::summary_of` keeps, and all the chat's thumbnail uses
+  (the file itself is read again through `read_place_image`).
+- The `user` entry's `tool_result.content` is an ARRAY holding one
+  `{type: "image", source: {type: "base64", data, media_type}}`. `media_type`
+  is what the model was shown, not the file's type: the 860 KB png became a
+  224 KB `image/jpeg`, the 153 KB png an `image/png` of 203,820 base64 chars
+  (~150 KB). So a block is 150-300 KB of base64 per Read.
+- The same entry's top-level `toolUseResult` repeats it as `{type: "image",
+  file: {base64, type, originalSize, dimensions: {originalWidth,
+  originalHeight, displayWidth, displayHeight}}}`: the image TWICE per entry.
+- The older `{hash, message, sessionId, type}` entries (no version) hold the
+  block too.
+So `agent_turns` never carries the block (150-300 KB per Read would ride every
+poll). A Read's thumbnail reads the FILE through `read_place_image` when it is
+inside the place; for a file outside it (a render in `/tmp`) the block is served
+on demand by `agent_call_image` (`turns::claude_call_image`), to the host's own
+console only. Tests: `claude_read_of_an_image_is_a_path_and_no_pixels`,
+`claude_call_image_is_the_read_results_block_by_id`.

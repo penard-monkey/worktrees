@@ -1430,6 +1430,53 @@ pub fn agent_tool_call(ctx: &Ctx, repo: String, slug: String, call_id: String) -
     Err(unread.unwrap_or_else(|| ERR_GONE.to_string()))
 }
 
+/// What a device is told when it asks for [`agent_call_image`].
+pub const ERR_CALL_IMAGE_CONSOLE: &str = "not shown on this device: this picture is a file Claude read, which only the host's own console may see";
+
+/// `agent_call_image` (`feat/chat-images`): the picture a Claude Read call was
+/// SHOWN, from the transcript, by the `call_id` of a Read step —
+/// `{call_id, mime, b64, size, truncated, harness, session}`. It exists for the
+/// Read of a file OUTSIDE the place (a render in `/tmp`), which
+/// `read_place_image` refuses. Because that file may be anywhere on the host,
+/// only the CONSOLE gets it: a paired device is refused with
+/// [`ERR_CALL_IMAGE_CONSOLE`], so it never receives pixels of a file outside
+/// the projects it may read. Fetched when the thumbnail mounts, never part of
+/// `agent_turns`, capped at [`turns::CALL_IMAGE_MAX_B64`] (`truncated`, no
+/// bytes). [`ERR_GONE`] once the call has left what is read of the
+/// transcripts, or it was no Read of an image.
+pub fn agent_call_image(ctx: &Ctx, repo: String, slug: String, call_id: String) -> Result<Value, String> {
+    if !ctx.is_console() {
+        return Err(ERR_CALL_IMAGE_CONSOLE.to_string());
+    }
+    let project = discover(&repo)?;
+    let io = &*ctx.agents.io;
+    let mut unread = None;
+    for lane in io.lanes(&project, &slug) {
+        if lane.harness != provider::CLAUDE.id {
+            continue;
+        }
+        match io.transcript(&project, &slug, &lane) {
+            Ok(lines) => {
+                if let Some(img) = turns::claude_call_image(&lines, &call_id) {
+                    // The same limits as a file's (`safepath::check_image`): a
+                    // block's header is read before the pixels are handed on.
+                    if !img.truncated {
+                        let bytes = worktrees_core::attach::decode(&img.b64).map_err(|_| "not shown: the picture Claude was shown is not readable".to_string())?;
+                        worktrees_core::safepath::check_image(&bytes, &img.mime, "the picture Claude was shown")?;
+                    }
+                    return Ok(json!({
+                        "call_id": call_id, "mime": img.mime, "b64": img.b64, "size": img.size, "truncated": img.truncated,
+                        "harness": lane.harness, "session": lane.session,
+                    }));
+                }
+            }
+            Err(e) if !e.ends_with(ERR_NO_SESSION_YET) => unread = unread.or(Some(e)),
+            Err(_) => {}
+        }
+    }
+    Err(unread.unwrap_or_else(|| ERR_GONE.to_string()))
+}
+
 /// `agent_turn_text`: one turn whole, by the `id` of a turn of `agent_turns`
 /// that says `truncated` — `{turn_id, turn, harness, session, note}`, `turn`
 /// being [`turns::Turn`] as `agent_turns` gives it (its `steps` in order, the
@@ -3289,6 +3336,42 @@ mod tests {
         assert_eq!(agent_tool_call(&ctx, repo, "lane".into(), "toolu_a".into()).unwrap_err(), ERR_GONE);
         let (ctx, repo) = setup("toolcallpi", Arc::new(Fake::with(vec![("pi", "repo-lane~agent~pi", pane(vec![], ""))])));
         assert_eq!(agent_tool_call(&ctx, repo, "lane".into(), "x".into()).unwrap_err(), ERR_GONE);
+    }
+
+    /// The picture a Read was shown, by the call's id: the console gets it, a
+    /// paired device is refused in words (the file may be anywhere on the
+    /// host), and a call that is no Read of an image is `gone`.
+    #[test]
+    fn a_reads_picture_is_the_consoles_alone() {
+        let call = |id: &str, name: &str, path: &str| json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":id,"name":name,"input":{"file_path":path}}]}}).to_string();
+        let shown = |id: &str| json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":id,"content":[{"type":"image","source":{"type":"base64","data":"iVBORw0KGgoAAAANSUhEUgAAAAgAAAAI","media_type":"image/png"}}]}]}}).to_string();
+        let mut fake = Fake::with(vec![("claude", "repo-lane", pane(vec![], ""))]);
+        fake.transcript = vec![
+            json!({"type":"user","message":{"role":"user","content":"Look."}}).to_string(),
+            call("toolu_r", "Read", "/private/tmp/render.png"), shown("toolu_r"),
+            call("toolu_t", "Read", "/r/a.txt"),
+            call("toolu_b", "Read", "/private/tmp/bomb.png"),
+        ];
+        // the pixel limit holds for a transcript's block too: a 10000x10000 header
+        let mut h = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();
+        h.extend(10_000u32.to_be_bytes());
+        h.extend(10_000u32.to_be_bytes());
+        h.extend([8, 0, 0, 0, 0]);
+        fake.transcript.push(json!({"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_b","content":[{"type":"image","source":{"type":"base64","data":crate::files::b64_encode(&h),"media_type":"image/png"}}]}]}}).to_string());
+        let (ctx, repo) = setup("callimage", Arc::new(fake));
+        let v = agent_call_image(&ctx, repo.clone(), "lane".into(), "toolu_r".into()).unwrap();
+        assert_eq!((&v["mime"], &v["b64"], &v["truncated"], &v["call_id"]), (&json!("image/png"), &json!("iVBORw0KGgoAAAANSUhEUgAAAAgAAAAI"), &json!(false), &json!("toolu_r")));
+        for gone in ["toolu_t", "toolu_none", ""] {
+            assert_eq!(agent_call_image(&ctx, repo.clone(), "lane".into(), gone.into()).unwrap_err(), ERR_GONE, "{gone}");
+        }
+        let e = agent_call_image(&ctx, repo.clone(), "lane".into(), "toolu_b".into()).unwrap_err();
+        assert!(e.contains("10000×10000") && e.contains("megapixels"), "{e}");
+        let phone = device(&ctx);
+        let refused = agent_call_image(&phone, repo.clone(), "lane".into(), "toolu_r".into()).unwrap_err();
+        assert_eq!(refused, ERR_CALL_IMAGE_CONSOLE);
+        assert!(!refused.contains("iVBOR"), "a refusal carries no pixels");
+        // and the poll never carries one
+        assert!(!agent_turns(&ctx, repo, "lane".into(), None, Some(2)).unwrap().to_string().contains("iVBOR"));
     }
 
     /// A shortened turn comes back whole by the id `agent_turns` gave it, from

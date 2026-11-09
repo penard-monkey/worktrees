@@ -75,6 +75,22 @@ pub struct FileBlob {
     pub mtime: u64,
 }
 
+/// A chat image: [`FileBlob`] and the MIME the `data:` URI needs.
+#[derive(Serialize)]
+pub struct PlaceImage {
+    pub b64: String,
+    pub size: u64,
+    pub truncated: bool,
+    pub mtime: u64,
+    pub mime: &'static str,
+    /// `"<mtime ms>-<bytes on disk>"`: what the client keeps beside the pixels
+    /// and sends back as `etag`.
+    pub etag: String,
+    /// The `etag` the client sent still names the file: `b64` is empty and the
+    /// client's copy stands.
+    pub unchanged: bool,
+}
+
 /// How one path differs from the branch's base, coarsely. Four classes is what
 /// a tinted NAME can carry on its own; a fifth would need a second channel.
 #[derive(Serialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -1350,6 +1366,41 @@ pub fn read_file_base64(ctx: &Ctx, path: String, max_bytes: Option<u64>) -> Resu
         truncated,
         mtime: file_mtime_ms(&f),
     })
+}
+
+/// An image the CHAT shows (`![](path)` in a reply, a Read's thumbnail): the
+/// place's own, and nothing else. Unlike `read_file_base64`, whose path is
+/// judged against every project the caller may see, this takes the place
+/// (`place(repo, slug)`; a grant reaches PROJECTS, not places, so this is the
+/// chat's containment, not an access boundary) and resolves `path` under THAT
+/// place's root alone, by `safepath::place_image`
+/// (relative to the root, or absolute under it; a link, `..` or another
+/// place's tree refused in words naming the path). The path class the caller
+/// may read is asked of the result too, as for a `file(path)`. Same cap and
+/// `truncated` as `read_file_base64`. A client that already holds the image
+/// sends its `etag` (mtime + size on disk) and is told `unchanged` instead of
+/// being sent the bytes again, so a re-mounted bubble costs one stat.
+pub fn read_place_image(ctx: &Ctx, repo: String, slug: String, path: String, max_bytes: Option<u64>, etag: Option<String>) -> Result<PlaceImage, String> {
+    let project = Project::discover(Path::new(&repo)).map_err(|e| e.to_string())?;
+    if slug.contains('/') || slug.starts_with('-') || slug == ".." {
+        return Err(format!("not a place: {slug}"));
+    }
+    let root = PathBuf::from(project.place_dir(&slug));
+    let cap = read_cap(max_bytes, READ_BASE64_MAX);
+    // Opened O_NOFOLLOW and held to the identity that was checked, its pixel
+    // size and SVG read from the header (`safepath::open_place_image`).
+    // The caller's path class is asked of the RESOLVED path before the file is
+    // opened or looked into (`allow`), so a device is never told anything about
+    // a file it may not read: not its size, its header or its pixel count.
+    let classes = read_classes(ctx);
+    let allow = |canon: &Path| match &classes {
+        Some(cl) if unreadable(ctx, cl, canon).is_some() => Err(format!("not readable from this device: {path}")),
+        _ => Ok(()),
+    };
+    let (read, unchanged) = worktrees_core::safepath::open_place_image(&root, slug == "(main)", &path, cap, etag.as_deref(), &allow)?;
+    let etag = format!("{}-{}", read.mtime_ms, read.on_disk);
+    let size = if unchanged { read.on_disk.min(cap) } else { read.bytes.len() as u64 };
+    Ok(PlaceImage { b64: b64_encode(&read.bytes), size, truncated: read.truncated, mtime: read.mtime_ms, mime: read.mime, etag, unchanged })
 }
 
 /// Standard base64 (RFC 4648, padded). Hand-rolled: the app pulls in no base64

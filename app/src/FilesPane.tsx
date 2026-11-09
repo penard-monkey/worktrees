@@ -39,6 +39,7 @@ import { CtxMenu } from "./CtxMenu";
 import { DiffView, type FileDiffDto } from "./DiffView";
 import { FindBar, useFileFind } from "./Find";
 import { Markdown } from "./markdown";
+import { ImageView } from "./ImageView";
 import { useDocPathLinks } from "./useDocPathLinks";
 import { basename, fileInfo, humanSize, relPath, revealsThrough, treePath, type FileKind } from "./filekind";
 import { MD_ZOOM_MAX, MD_ZOOM_MIN, clampMdZoom, stepMdZoom, type Settings } from "./settings";
@@ -168,7 +169,6 @@ const CHANGE_WHY: Record<ChangeKind, string> = {
   deleted: "deleted on this branch",
 };
 type FileRead = { content: string; truncated: boolean; binary: boolean; mtime: number; size: number };
-type FileBlob = { b64: string; size: number; truncated: boolean; mtime: number };
 
 // ── tree ─────────────────────────────────────────────────────────────────
 
@@ -503,60 +503,7 @@ function FileTree({ root, openPath: rawOpen, revealToken, showIgnored, reloadTok
   );
 }
 
-// ── image ────────────────────────────────────────────────────────────────
-
-// Loads bytes as base64 and shows them as a data: URI. Used both for an image
-// FILE and for a relative ![]() inside a rendered markdown doc, hence the
-// standalone component and the `inline` variant.
-function ImageView({ path, mime, inline = false, alt = "", onError }: {
-  path: string; mime: string; inline?: boolean; alt?: string; onError?: (e: unknown) => void;
-}) {
-  const [blob, setBlob] = useState<FileBlob | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  const [actual, setActual] = useState(false);
-  const [dim, setDim] = useState<{ w: number; h: number } | null>(null);
-
-  useEffect(() => {
-    let alive = true;
-    setBlob(null); setErr(null); setDim(null);
-    invoke<FileBlob>("read_file_base64", { path })
-      .then((b) => { if (alive) setBlob(b); })
-      .catch((e) => { if (!alive) return; setErr(String(e)); onError?.(e); });
-    return () => { alive = false; };
-  }, [path, onError]);
-
-  // Inline (inside markdown prose) these must be SPANs: a <div> inside the <p>
-  // React puts prose in is invalid nesting the browser reparents.
-  const note = (cls: string, body: ReactNode) =>
-    inline ? <span className={`tree-note inline-note ${cls}`}>{body}</span> : <div className={`tree-note ${cls}`}>{body}</div>;
-  if (err) return note("err-note", err);
-  if (!blob) return note("", "loading image…");
-  // A partial image decodes to garbage or nothing — say so instead of showing it.
-  if (blob.truncated) return note("", `image too large to preview (${humanSize(blob.size)}+)`);
-
-  const img = (
-    <img
-      className={"img-el" + (actual ? " actual" : "")}
-      src={`data:${mime};base64,${blob.b64}`}
-      alt={alt || basename(path)}
-      onLoad={(e) => setDim({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })}
-    />
-  );
-  if (inline) return <span className="md-img">{img}</span>;
-
-  return (
-    <div className="imgview">
-      <div className="img-stage">{img}</div>
-      <div className="img-meta">
-        <span>{dim ? `${dim.w} × ${dim.h}` : "—"}</span>
-        <span className="dot-sep">·</span>
-        <span>{humanSize(blob.size)}</span>
-        <span className="dock-spacer" />
-        <button className="ctrl sm" onClick={() => setActual((a) => !a)}>{actual ? "Fit" : "1:1"}</button>
-      </div>
-    </div>
-  );
-}
+// The image viewer lives in ImageView.tsx, shared with the chat.
 
 // A renderer failure must cost the PANE, not the window. There is no error
 // boundary above App, so an uncaught throw here (a pathological document, a
