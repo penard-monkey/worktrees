@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.50.0] - 2026-11-09
+
 ### Added
 
 - **Beta features, in Settings → General.** Code that ships before it is finished stays out of sight until you turn it on there. The section shows in the Advanced and Expert modes, and the header's search finds it by "beta". Its first switch is **Ideas and workspaces**, off by default: with it off the app looks and works as it did before the Ideas window and workspaces below. Turning it off again hides them, closes an open Ideas window, and deletes nothing.
@@ -18,7 +20,6 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ### Changed
 
 - **With the workspaces beta on, "Remove from workspace" on a project reads "Remove from All projects".** It does the same as before: it unregisters the project. "Workspace" then means a named workspace. With the beta off the item keeps its old name.
-
 - **Error and notice toasts have a visible × to dismiss them.** They were dismissed by clicking anywhere on them, which nothing on screen said. The × is a labelled, keyboard-reachable button at the toast's end; errors still stay until you dismiss them, and clicking the toast still works. The message text can now be selected to copy an error.
 
 ### Fixed
