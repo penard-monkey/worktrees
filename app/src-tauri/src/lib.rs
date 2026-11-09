@@ -23,6 +23,8 @@ use worktrees_api::status::{list_published_releases, valid_tag};
 use worktrees_api::util::fmt_utc;
 use worktrees_core::sysclock;
 
+// The Ideas companion: a second window, made on demand (Ideas phase 0).
+mod companion;
 mod engine;
 // This window driving ANOTHER host's serve: pairing, the hosts kept, and the
 // pinned pipe the page's protocol runs over (Phase 2 §4.4).
@@ -249,19 +251,29 @@ async fn engine_connect(
     .map_err(|e| engine::ConnectError::failed(e.to_string()))?
 }
 
-/// Bring the window forward. The engine's inbox emits `app:open-doc` when a
-/// session runs `worktrees show` / `show_doc`, and the page calls this so the
+/// Bring the MAIN window forward. The engine's inbox emits `app:open-doc` when
+/// a session runs `worktrees show` / `show_doc`, and the page calls this so the
 /// person sees the document — the half of that delivery that needs a window,
-/// which serve (a phone's engine as much as this desktop's) does not have.
+/// which serve (a phone's engine as much as this desktop's) does not have. The
+/// document opens in main's dock, so it is main that comes forward, whichever
+/// window is in front (the Ideas companion never asks).
 #[tauri::command]
 async fn raise_window(app: AppHandle) -> Result<(), String> {
-    let w = app.get_webview_window("main").ok_or("no main window")?;
+    let w = app.get_webview_window(winstate::MAIN).ok_or("no main window")?;
     let _ = w.unminimize();
     let _ = w.show();
     w.set_focus().map_err(|e| {
         applog("warn", &format!("inbox: could not focus the window: {e}"));
         e.to_string()
     })
+}
+
+/// Open the Ideas companion window, or bring it forward if it is open
+/// (companion.rs). Main's button and chord call it.
+#[tauri::command]
+async fn open_companion(app: AppHandle) -> Result<(), String> {
+    let dir = app.path().app_config_dir().map_err(|e| e.to_string())?;
+    companion::open(&app, &dir, "asked")
 }
 
 // ── the remote door (remote.rs) ─────────────────────────────────────────────
@@ -448,11 +460,18 @@ pub fn run() {
             // Settings → Behavior → Restore window. Read straight from
             // ui-state.json because this runs before the frontend exists;
             // see winstate.rs for why that file is only ever READ here.
-            if let Some(w) = app.get_webview_window("main") {
-                let ui = std::fs::read(config_dir.join("ui-state.json"))
-                    .ok()
-                    .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
-                winstate::attach(&w, &config_dir, winstate::enabled(ui.as_ref()));
+            let restore = winstate::enabled_in(&config_dir);
+            if let Some(w) = app.get_webview_window(winstate::MAIN) {
+                winstate::attach(&w, &config_dir, restore, winstate::MAIN_MIN);
+            }
+            // The Ideas companion comes back if it was open when the app last
+            // ran, under the same setting as the frames (winstate.rs). A debug
+            // build also opens it on WORKTREES_OPEN_COMPANION=1, so a sandbox
+            // run can show it without anyone scripting a click.
+            let dev_open = cfg!(debug_assertions) && std::env::var_os("WORKTREES_OPEN_COMPANION").is_some_and(|v| v == "1");
+            if dev_open || (restore && winstate::seed(app.handle(), &config_dir).was_open(companion::LABEL)) {
+                let why = if dev_open { "WORKTREES_OPEN_COMPANION" } else { "open when the app last ran" };
+                let _ = companion::open(app.handle(), &config_dir, why);
             }
             // macOS 26 floats a Writing Tools affordance (AppKit's Campo
             // lightweight UI) over any selection, and hovering the one it puts
@@ -548,6 +567,7 @@ pub fn run() {
             set_zoom,
             engine_connect,
             raise_window,
+            open_companion,
             remote_hosts,
             remote_choose,
             remote_forget,
@@ -559,6 +579,13 @@ pub fn run() {
             remote_settings_get,
             remote_settings_set
         ])
+        // Closing `main` quits the app, as it did when it was the only window:
+        // the companion goes with it (companion.rs).
+        .on_window_event(|window, event| {
+            if window.label() == winstate::MAIN && matches!(event, tauri::WindowEvent::Destroyed) {
+                companion::main_closed(window.app_handle());
+            }
+        })
         .build(tauri::generate_context!())
         .expect("error while running tauri application")
         .run(|handle, event| {

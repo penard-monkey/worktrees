@@ -14,7 +14,8 @@
 // Covered: the backoff sequence, its cap, the jitter's bounds (and that the
 // machine applies it), the crash-loop limit and what a stop leaves behind,
 // owned vs unowned, a manual try cancelling the timer, a hidden window
-// deferring a due retry, and exactly one try in flight.
+// deferring a due retry, exactly one try in flight, and a window that never
+// starts one (`neverStart`: the Ideas companion).
 //
 // Override, so a mutation can be tested without touching the tree:
 //   RECONNECT_SRC=<path to a reconnect.ts>
@@ -67,13 +68,13 @@ function clock() {
 
 /** The machine under a virtual clock, a scripted connector and a switchable
  *  visibility. Each try waits until the test answers it. */
-function rig({ random = () => 0, visible = true } = {}) {
+function rig({ random = () => 0, visible = true, policy } = {}) {
   const clk = clock();
   const env = { now: clk.now, setTimeout: clk.setTimeout, clearTimeout: clk.clearTimeout, random: () => random(), visible: () => rig.visible };
   rig.visible = visible;
   const tries = [];
   const views = [];
-  const m = R.retrier(env, (t, phase) => new Promise((resolve) => tries.push({ ...t, at: clk.now(), phase, resolve })), (v) => views.push(v));
+  const m = R.retrier(env, (t, phase) => new Promise((resolve) => tries.push({ ...t, at: clk.now(), phase, resolve })), (v) => views.push(v), policy);
   const r = {
     clk, m, tries, views,
     get visible() { return rig.visible; },
@@ -338,6 +339,41 @@ const SEQ = [500, 1000, 2000, 4000, 8000, 16000, 30000, 30000, 30000];
   check(views[views.length - 1].kind === "waiting" && /dial blew up/.test(views[views.length - 1].reason), "a connector that throws reads as a failed try, and the retries go on");
   clk.advance(500); await ticks();
   check(n === 2, "…on the backoff");
+}
+
+// A window that never starts a serve (`{ neverStart: true }`, the Ideas
+// companion): every try is a reconnect — at launch, on the backoff, on a press
+// — and finding nothing is a reason to wait for the main window's serve,
+// never to stop. Two windows that both restarted a lost engine would race.
+{
+  const h = rig({ policy: { neverStart: true } });
+  void h.m.boot(); await ticks();
+  check(h.tries.length === 1 && h.last().start === false, "(neverStart) the launch's try may not start a serve, though no serve has been anyone's yet");
+  await h.failed("nothing to reconnect to: no serve.json", { declined: true });
+  check(h.view().kind === "waiting" && h.view().notOurs === true, `(neverStart) finding nothing at launch waits for the serve, marked not this window's to start (${h.view().kind})`);
+  for (let i = 0; i < 8; i++) {
+    h.clk.advance(30_000); await ticks();
+    await h.failed("nothing to reconnect to", { declined: true });
+  }
+  check(h.tries.length === 9 && h.tries.every((t) => t.start === false), `(neverStart) nine declined tries in a row never start one (${h.tries.map((t) => t.start).join(",")})`);
+  check(h.view().kind === "waiting", `(neverStart) …and never stop: the main window's restart is what they wait for (${h.view().kind})`);
+  void h.m.now(); await ticks();
+  check(h.last().manual === true && h.last().start === false, "(neverStart) a press of Reconnect now reconnects, and still may not start one");
+  await h.up(true, false);
+  check(h.view().kind === "up", "(neverStart) the main window's serve, once there, is reached");
+  h.m.lost("the connection to worktrees serve closed");
+  h.clk.advance(500); await ticks();
+  check(h.last().start === false && h.last().reason !== null, "(neverStart) after a loss of the app's OWN serve the retry still may not start one: the main window restarts it");
+  h.visible = false;
+  await h.failed("refused");
+  h.clk.advance(1000); await ticks();
+  check(h.view().kind === "hidden", "(neverStart) a hidden window defers its retries like any other");
+}
+{
+  // The default is unchanged: no policy is the main window's.
+  const h = rig();
+  void h.m.boot(); await ticks();
+  check(h.last().start === true, "(default) the launch's try may start a serve when no policy is given");
 }
 
 console.log(failed ? `\nreconnect-check: ${failed} failure(s)` : "\nreconnect-check: all good");

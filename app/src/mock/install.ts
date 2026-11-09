@@ -2810,6 +2810,11 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     // not on an engine (main.tsx) — and says so if something ever calls it.
     case "raise_window":
       return null;
+    // The Ideas companion: a second Tauri window in the app; in the harness, a
+    // second tab on the same dev server, carrying this page's query.
+    case "open_companion":
+      window.open(`/companion/index.html${location.search}`, "worktrees-companion");
+      return null;
     case "engine_connect":
       throw new Error("the mock harness has no engine: it answers every command itself");
 

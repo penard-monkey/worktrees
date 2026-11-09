@@ -1940,7 +1940,7 @@ wait loop on it never ended and a sandbox app ran for two hours.
   the working integration would have ended it.
 - Design tokens: `app/src/tokens.css` — everything scales off `--ui-rem`;
   terminal font is independent (`--term-*`). No UI libraries, plain CSS. "No UI
-  libraries" means no COMPONENT/design-system libraries and no editor — a pure
+  libraries" means no COMPONENT/design-system libraries — a pure
   PARSER that emits data we render ourselves is allowed, and `marked` (lexer
   only, for the dock's markdown) is the one instance. Syntax highlighting is
   hand-rolled in `app/src/highlight.ts` for the same reason.
@@ -1964,6 +1964,18 @@ wait loop on it never ended and a sandbox app ran for two hours.
   build (+1.9 MB, and the only symptom was a large file), and **a hash added to
   `style-src` beside `'unsafe-inline'` voids the keyword** and makes every
   diagram vanish while the prose still renders perfectly.
+  **CodeMirror 6 is the THIRD admitted exception, on the owner's decision of
+  2026-11-08, and only inside the Ideas companion window's own bundle
+  (`app/companion/`, built by `vite.companion.config.ts` into
+  `app/dist/companion/`) — never `app/src`.** Ideas need a real editor, and
+  CodeMirror edits the markdown as TEXT, so the file on disk stays exactly what
+  was typed. A rich-text editor that re-serializes markdown is not admitted. The
+  boundary is the viewer's, again: a build of its own, never a second input to
+  the app's, and `app/scripts/companion-boundary-check.mjs` walks the app's
+  import graph and, when a build exists, greps `app/dist` outside
+  `dist/companion/`. The library itself arrives with Ideas phase 1; phase 0
+  added the window, the bundle and the check, not CodeMirror. A new exception
+  names its bundle and its check in this paragraph.
 - **Driving the sandbox app by NAME drives the INSTALLED app — and it has no
   bundle id to address instead.** `sandbox.sh --app` runs `tauri dev`, which
   execs the UNBUNDLED binary (`<worktree>/target/debug/app` — the workspace
