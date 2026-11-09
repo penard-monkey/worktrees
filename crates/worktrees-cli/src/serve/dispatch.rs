@@ -1,4 +1,4 @@
-//! The 225 commands, each with its exposure, capability and objects, in ONE
+//! The 229 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -782,7 +782,7 @@ pub const GLOBAL_OK: &[&str] = &[
     // read
     "settings_info", "get_settings", "quota_settings", "slots_settings", "limits_settings", "policy_preset_status", "claude_usage", "codex_usage", "kimi_usage", "claude_status",
     "check_update", "harness_sessions", "list_releases", "get_ai_config", "get_codex_permissions", "get_fetch_interval",
-    "get_term_history_opts", "agent_guidance_status", "agent_guidance_diff", "agent_models", "agent_user_skills",
+    "get_term_history_opts", "agent_guidance_status", "agent_guidance_diff", "agent_models", "agent_user_skills", "pi_hosts",
     "kimi_version", "tmux_check", "log_info", "get_changelog", "new_profile_id", "skills_list", "ui_usage",
     // write
     "set_settings", "log_event",
@@ -988,6 +988,11 @@ commands! { cx, a;
     agent_guidance_merge: HostConsole => project::agent_guidance_merge(),
     agent_models: Engine [read, global] => project::agent_models(a.get("harness")?),
     pi_status: Engine [read, opt_project(repo, Free)] => project::pi_status(a.get("repo")?),
+    // pi's model hosts (docs/proposals/pi-models-config.md). The read answers
+    // `has_key` as a boolean only; the edit is console-only — a base URL is
+    // where a lane's prompts and code go — and no edit takes a key.
+    pi_hosts: Engine [read, global] => project::pi_hosts(),
+    pi_host_edit: HostConsole => project::pi_host_edit(a.get("edit")?),
     kimi_status: Engine [read, opt_project(repo, Free)] => project::kimi_status(a.get("repo")?),
     // Starts a kimi process for its --version; a read.
     kimi_version: Engine [read, global] => project::kimi_version(),
@@ -1341,7 +1346,7 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 225 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 229 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six, the slots pair and
     /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
@@ -1365,7 +1370,7 @@ mod tests {
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 227, "the table has 227 commands");
+        assert_eq!(TABLE.len(), 229, "the table has 229 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1788,7 +1793,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 69), ("write", 23), ("admin", 41), ("console", 60), ("stream", 10), ("instruct", 8), ("answer", 2),
+            ("read", 70), ("write", 23), ("admin", 41), ("console", 61), ("stream", 10), ("instruct", 8), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 7),
         ]
         .into();

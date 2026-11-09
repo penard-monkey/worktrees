@@ -30,7 +30,9 @@ pi_cmd() { unq "$(tmux_pane0_cmd "repo-$1~agent~pi")"; }
   [ "$status" -eq 0 ]
   tmux_session_exists 'repo-feat-x~agent~pi'
   local c; c="$(pi_cmd feat-x)"
-  [[ "$c" == *"pi --session-dir '$PI_CODING_AGENT_DIR/sessions/--"*"-feat-x--' --no-approve --session-id 'repo-feat-x-"*"-g1' --model 'lm-studio/qwen3.6-27b' 'Read .planning/brief.md and begin.'"* ]]
+  # `-e` first: worktrees' model hosts reach every pi it starts that way
+  # (docs/proposals/pi-models-config.md).
+  [[ "$c" == *"pi -e '"*"/worktrees-models.js' --session-dir '$PI_CODING_AGENT_DIR/sessions/--"*"-feat-x--' --no-approve --session-id 'repo-feat-x-"*"-g1' --model 'lm-studio/qwen3.6-27b' 'Read .planning/brief.md and begin.'"* ]] || false
   [[ "$c" != *fake-ai* ]]
 }
 

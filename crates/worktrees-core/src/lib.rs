@@ -54,6 +54,7 @@ pub mod pathclass;
 pub mod pending;
 pub mod pi;
 pub mod pimcp;
+pub mod pihosts;
 pub mod pimodels;
 pub mod plan;
 pub mod plancmd;

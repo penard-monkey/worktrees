@@ -251,7 +251,7 @@ export const SECTIONS: readonly SectionDef[] = [
   // ── pi
   { id: "pi-mcp", page: "pi", tier: "beginner", label: "pi MCP server", keywords: ["mcp", "pi tools", "install mcp", "integration"], harness: "pi", read: "pi_mcp_status", write: "pi_mcp_install" },
   { id: "pi-install", page: "pi", tier: "advanced", label: "pi", keywords: ["install pi", "pi cli", "setup pi", "preflight"], harness: "pi" },
-  { id: "pi-models", page: "pi", tier: "beginner", label: "Models", keywords: ["pi models", "model list", "providers", "allowed models"], harness: "pi" },
+  { id: "pi-models", page: "pi", tier: "beginner", label: "Models", keywords: ["pi models", "model list", "providers", "allowed models", "model hosts", "lm studio", "ollama", "base url", "models.json"], harness: "pi" },
   { id: "pi-policy", page: "pi", tier: "beginner", label: "Agent policy", keywords: ["pi permissions", "pi trust", "safety", "autonomy"], harness: "pi" },
   // ── Kimi
   { id: "kimi-mcp", page: "kimi", tier: "beginner", label: "kimi MCP server", keywords: ["mcp", "kimi tools", "install mcp", "integration"], harness: "kimi", read: "kimi_mcp_status", write: "kimi_mcp_set" },
