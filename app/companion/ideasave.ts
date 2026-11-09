@@ -15,7 +15,9 @@
 // - **A refused save** (the file changed on disk since `mtime`) never
 //   discards the person's text: the session goes to `conflict` and stops
 //   saving until they choose `reload()` (take the file's) or `keepMine()`
-//   (write theirs over it, against the file's current mtime).
+//   (write theirs over it, against the file's current mtime — and with
+//   `keepHistory`, so the text it overwrites is copied to `.history/` first:
+//   no text is ever lost, including the other editor's).
 // - **`ideas:changed`** (`external`): a `changed` entry for this idea whose
 //   mtime is one a write of OURS returned is our own save, a tick late.
 //   ANY mtime ours ever got, not only the last: a tick that fell between
@@ -43,7 +45,10 @@ export type Clock = {
 };
 
 export type Rows = {
-  write(id: string, content: string, expectedMtime: number): Promise<number>;
+  /** `keepHistory`: copy the file's current bytes to `.history/` before the
+   *  replace. Keep mine only — the text it overwrites came from elsewhere and
+   *  exists nowhere else. Never an ordinary save. */
+  write(id: string, content: string, expectedMtime: number, keepHistory: boolean): Promise<number>;
   read(id: string): Promise<{ content: string; mtime_ms: number }>;
 };
 
@@ -120,7 +125,7 @@ export class Session {
     return this.save();
   }
 
-  private save(): Promise<void> {
+  private save(keepHistory = false): Promise<void> {
     if (this.closed || this.held()) return Promise.resolve();
     if (this.inflight) { this.again = true; return this.inflight; }
     const content = this.deps.text();
@@ -128,7 +133,7 @@ export class Session {
     this.set({ kind: "saving" });
     const run = (async () => {
       try {
-        const m = await this.deps.rows.write(this.id, content, this.mtime);
+        const m = await this.deps.rows.write(this.id, content, this.mtime, keepHistory);
         this.base = content;
         this.mtime = m;
         this.own.add(m);
@@ -223,7 +228,7 @@ export class Session {
     this.base = d.content;
     this.mtime = d.mtime_ms;
     this.set(this.dirty() ? { kind: "dirty" } : { kind: "clean", savedAt: null });
-    await this.save();
+    await this.save(true);
   }
 
   /** The file was changed by one of the window's own acts (a rename): its

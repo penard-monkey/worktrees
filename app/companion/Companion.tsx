@@ -304,7 +304,8 @@ export function Companion() {
     session.current?.close();
     const s = new Session(d.id!, d.content, d.mtime_ms, {
       rows: {
-        write: (id, content, expectedMtime) => invoke<number>("idea_write", { id, content, expectedMtime }),
+        write: (id, content, expectedMtime, keepHistory) =>
+          invoke<number>("idea_write", keepHistory ? { id, content, expectedMtime, keepHistory: true } : { id, content, expectedMtime }),
         read: (id) => invoke<Doc>("idea_read", { id }),
       },
       clock,
@@ -508,7 +509,8 @@ export function Companion() {
                 <span>{save.why === "refused"
                   ? "This idea changed on disk, so your edit was not saved. Your text is still here."
                   : "This idea was changed in another editor while you had unsaved text. Your text is still here."}</span>
-                <button className="ix-btn" data-testid="ideas-keep-mine" onClick={() => void session.current?.keepMine()}>Keep mine</button>
+                <button className="ix-btn" data-testid="ideas-keep-mine" onClick={() => void session.current?.keepMine()}
+                  title="Saves your text. The other version is copied to the folder's .history first.">Keep mine (theirs goes to .history)</button>
                 <button className={`ix-btn${arm.armed === "reload" ? " ix-btn-armed" : ""}`} data-testid="ideas-reload"
                   onClick={() => arm.confirm("reload", () => void session.current?.reload())}>
                   {arm.armed === "reload" ? "Drop mine and reload?" : "Reload theirs"}

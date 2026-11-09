@@ -1825,7 +1825,9 @@ function ideasTouched() {
   }, IDEAS_TICK);
 }
 /** Every idea_write the page sent, in order (`__mock.ideaWrites()`). */
-const mockIdeaWrites: { id: string; content: string; expected_mtime: unknown }[] = [];
+const mockIdeaWrites: { id: string; content: string; expected_mtime: unknown; keep_history: boolean }[] = [];
+/** What `idea_write` with `keep_history` copied aside (`__mock.ideaHistory()`). */
+const mockIdeaHistory: { id: string; content: string }[] = [];
 /** The mtime an outside act gives a file: later than anything before it,
  *  even inside one millisecond. */
 let mockIdeaClock = 0;
@@ -3776,9 +3778,13 @@ Phase 3: Frontend pane and mock harness
       const content = args.content as string;
       const carried = ideaFront(content, "id");
       if (carried !== args.id) throw carried ? `the text carries the id ${carried}, not ${args.id}: refusing to save one idea over another` : `the text has no id: keep the frontmatter's \`id: ${args.id}\` line`;
-      mockIdeaWrites.push({ id: args.id as string, content, expected_mtime: args.expectedMtime ?? args.expected_mtime });
+      const keep = (args.keepHistory ?? args.keep_history) === true;
+      mockIdeaWrites.push({ id: args.id as string, content, expected_mtime: args.expectedMtime ?? args.expected_mtime, keep_history: keep });
       ideaCas(d, args.expectedMtime ?? args.expected_mtime);
-      if (d.content !== content) { d.content = content; d.mtime_ms = ideaNow(); ideasTouched(); }
+      if (d.content !== content) {
+        if (keep) mockIdeaHistory.push({ id: d.id!, content: d.content });
+        d.content = content; d.mtime_ms = ideaNow(); ideasTouched();
+      }
       return d.mtime_ms;
     }
     case "idea_rename": {
@@ -5742,6 +5748,8 @@ let mockNotifyGranted = new URLSearchParams(location.search).get("notify") === "
   // ── ideas: what another editor, Finder or a person does to the folder ──
   /** Every idea_write the page sent, in order. */
   ideaWrites: () => mockIdeaWrites.slice(),
+  /** The copies `keep_history` writes took (the real store's `.history/`). */
+  ideaHistory: (id?: string) => mockIdeaHistory.filter((h) => !id || h.id === id),
   /** An idea's bytes and mtime as the "disk" holds them. */
   ideaFile(id: string) { const d = [...mockIdeas.values()].find((x) => x.id === id); return d ? { file: d.file, content: d.content, mtime_ms: d.mtime_ms } : null; },
   /** Another editor saves `content` over the idea `id` (the next tick reports it). */

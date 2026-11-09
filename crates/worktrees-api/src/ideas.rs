@@ -53,9 +53,15 @@ pub fn idea_create(ctx: &Ctx, title: Option<String>) -> Result<Doc, String> {
     ideas::create_at(root(ctx), title.as_deref().unwrap_or(""))
 }
 
-/// Save `content` byte for byte; the saved mtime comes back.
-pub fn idea_write(ctx: &Ctx, id: String, content: String, expected_mtime: Option<u64>) -> Result<u64, String> {
-    ideas::write_at(root(ctx), &id, &content, expected_mtime)
+/// Save `content` byte for byte; the saved mtime comes back. `keep_history`
+/// copies the file's current bytes to `.history/` first (a person keeping
+/// their text over an edit made elsewhere); an ordinary save never sets it.
+pub fn idea_write(ctx: &Ctx, id: String, content: String, expected_mtime: Option<u64>, keep_history: Option<bool>) -> Result<u64, String> {
+    if keep_history == Some(true) {
+        ideas::write_kept_at(root(ctx), &id, &content, expected_mtime)
+    } else {
+        ideas::write_at(root(ctx), &id, &content, expected_mtime)
+    }
 }
 
 pub fn idea_rename(ctx: &Ctx, id: String, title: String, expected_mtime: Option<u64>) -> Result<Doc, String> {

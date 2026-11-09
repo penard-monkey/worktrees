@@ -19,8 +19,11 @@
 //     by rename) is a change, gone is `removed` — and nothing replaces the
 //     editor's text either way while it is dirty.
 //
+// And the two error sentences the module reads (isStale, isGone) are held
+// against the Rust that sends them (crates/worktrees-core/src/ideas.rs).
+//
 // Override, so a mutation can be shown red without touching the tree:
-//   IDEASAVE_SRC=<path to a copy of ideasave.ts>
+//   IDEASAVE_SRC=<path to a copy of ideasave.ts>   IDEAS_RS=<copy of ideas.rs>
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { transformWithEsbuild } from "vite";
@@ -35,6 +38,51 @@ check(!/^\s*import\s(?!type\b)/m.test(src), "ideasave.ts has no runtime import (
 const js = (await transformWithEsbuild(src, "ideasave.ts", { loader: "ts" })).code;
 const M = await import(`data:text/javascript;base64,${Buffer.from(js).toString("base64")}`);
 const { Session, SAVE_PAUSE_MS } = M;
+
+// ── the two sentences the client reads, held against core ───────────────────
+// `isStale` and `isGone` decide conflict, removed and error from the text of
+// an error, so they mirror two sentences in crates/worktrees-core/src/ideas.rs.
+// The rig below scripts its own copies; without this, rewording either in
+// Rust leaves every check here green while a stale save reads as a plain
+// error and a removed idea is never noticed. The emitters are found by WHERE
+// they are (check_mtime's Err, and the Err that ends Index::resolve), never by
+// the regex under test, and each must be found exactly once.
+{
+  const RS = process.env.IDEAS_RS ?? here("../../crates/worktrees-core/src/ideas.rs");
+  const full = fs.readFileSync(RS, "utf8");
+  const cut = full.search(/\n#\[cfg\(test\)\]\s*\nmod tests\b/);
+  const live = cut >= 0 ? full.slice(0, cut) : full;
+  check(cut >= 0 && live.length > 5000, `ideas.rs's non-test source was read (${live.length} bytes before mod tests)`);
+  /** The literal of every `Err("…")` / `Err(format!("…"` in `body`. */
+  const errs = (body) => [...body.matchAll(/Err\(\s*(?:format!\(\s*)?"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1]);
+  /** The body of `fn name` (to its first line that is a lone `}` at the fn's indent). */
+  const fnBody = (name) => {
+    const all = [...live.matchAll(new RegExp(`\\n( *)(?:pub )?fn ${name}\\b[^\\n]*\\{\\n`, "g"))];
+    if (all.length !== 1) return { n: all.length, body: "" };
+    const m = all[0];
+    const start = m.index + m[0].length;
+    const end = live.indexOf(`\n${m[1]}}\n`, start);
+    return { n: 1, body: live.slice(start, end < 0 ? undefined : end) };
+  };
+  const ULID = "01JC8Z4K3M9QX2T7VBN5R6WYHD";
+  const fill = (lit) => lit.replace(/\{[a-z_]*(?::\?)?\}/g, ULID);
+  const cm = fnBody("check_mtime");
+  const staleLits = errs(cm.body);
+  check(cm.n === 1 && staleLits.length === 1, `the stale-save sentence is found once, in fn check_mtime (fns: ${cm.n}, Errs: ${staleLits.length})`);
+  const rs = fnBody("resolve");
+  const rsLits = errs(rs.body);
+  // resolve's LAST Err is the one for an id no file carries.
+  const goneLit = rsLits.at(-1);
+  check(rs.n === 1 && rsLits.length >= 1, `the gone sentence is found once, as fn resolve's last Err (fns: ${rs.n}, Errs: ${rsLits.length})`);
+  const stale = staleLits[0] ?? "", gone = fill(goneLit ?? "");
+  check(M.isStale(stale) && !M.isGone(stale), `isStale reads core's stale sentence, and isGone does not (${JSON.stringify(stale)})`);
+  check(M.isGone(gone) && !M.isStale(gone), `isGone reads core's gone sentence, and isStale does not (${JSON.stringify(goneLit)})`);
+  // Exactly the sentence it is for: no other error core can send matches.
+  const others = errs(live).map(fill).filter((l) => l !== stale && l !== gone);
+  const staleWide = others.filter((l) => M.isStale(l)), goneWide = others.filter((l) => M.isGone(l));
+  check(others.length > 10 && staleWide.length === 0 && goneWide.length === 0,
+    `no other of core's ${others.length} error sentences reads as stale or gone${[...staleWide, ...goneWide].length ? `: ${[...staleWide, ...goneWide].join(" | ")}` : ""}`);
+}
 
 // ── the rig ─────────────────────────────────────────────────────────────────
 function clock() {
@@ -90,8 +138,8 @@ function rig(initial = "---\nid: 01JC\n---\n\n# A\n", { holdWrites = false } = {
     return disk.mtime;
   };
   const rows = {
-    write(id, content, exp) {
-      calls.push({ row: "idea_write", content, exp });
+    write(id, content, exp, keepHistory) {
+      calls.push({ row: "idea_write", content, exp, keep: keepHistory });
       if (!holdWrites) { try { return Promise.resolve(doWrite(content, exp)); } catch (e) { return Promise.reject(e); } }
       return new Promise((res, rej) => held.push(() => { try { res(doWrite(content, exp)); } catch (e) { rej(e); } }));
     },
@@ -135,6 +183,7 @@ function rig(initial = "---\nid: 01JC\n---\n\n# A\n", { holdWrites = false } = {
   r.type(r.editor + "z");
   await r.s.flush();
   check(r.writes().length === 2 && r.writes()[1].exp === 1010, "a flush saves at once, against the mtime the last write returned");
+  check(r.writes().every((x) => x.keep === false), "neither an autosave nor a flush asks for a history copy");
 }
 {
   const r = rig();
@@ -183,6 +232,8 @@ function rig(initial = "---\nid: 01JC\n---\n\n# A\n", { holdWrites = false } = {
   await r.s.keepMine();
   const w = r.writes()[1];
   check(w && w.exp === 5000 && w.content === mine + "!" && r.disk.content === mine + "!", "Keep mine writes the editor's text against the file's current mtime");
+  check(w?.keep === true, "Keep mine asks the write to copy the other text to history first (keep_history)");
+  check(r.writes().slice(0, 1).every((x) => x.keep === false), "the autosave before it did not");
   check(r.last() === "clean", "and the session is clean again");
 }
 {

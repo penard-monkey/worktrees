@@ -123,6 +123,9 @@ async function run(engine, name) {
   await page.waitForTimeout(400);
   ok((await writes(page, TIDY)).length === 0 && (await file(page, TIDY)).content === tidy0, `${tag} opened, moved in, blurred, Read and back, typed and deleted back, switched away: no idea_write`);
 
+  const attrs = await page.evaluate(() => { const c = document.querySelector(".cm-content"); return [c.getAttribute("autocorrect"), c.getAttribute("autocapitalize"), c.getAttribute("spellcheck")]; });
+  ok(JSON.stringify(attrs) === '["off","off","true"]', `${tag} the source editor turns autocorrect and autocapitalize off, spellcheck on (${JSON.stringify(attrs)})`);
+
   // ── the frontmatter guard ──
   await openIdea(page, TIDY);
   await caretAfter(page, `id: ${TIDY}`);
@@ -192,6 +195,9 @@ async function run(engine, name) {
   await until(page, (id) => window.__mock.ideaFile(id).content.includes(" MINE"), JELLY, 3000);
   const kept = (await file(page, JELLY)).content;
   ok(kept.includes(" MINE") && !kept.includes("THEIRS") && !(await page.$("[data-testid=ideas-conflict]")), `${tag} Keep mine writes the editor's text`);
+  const hist = await page.evaluate((id) => window.__mock.ideaHistory(id), JELLY);
+  ok(hist.length === 1 && hist[0].content.includes("THEIRS"), `${tag} and the text it overwrote went to history (keep_history)`);
+  ok((await writes(page, JELLY)).filter((w) => w.keep_history).length === 1, `${tag} only Keep mine's write asked for a history copy`);
 
   // ── dirty → Reload ──
   await caretAfter(page, "MINE");

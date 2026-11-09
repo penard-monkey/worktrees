@@ -94,7 +94,12 @@ export function ideaState(text: string, hooks: EditorHooks, selection?: { anchor
     drawSelection(),
     highlightSpecialChars(),
     EditorView.lineWrapping,
-    EditorView.contentAttributes.of({ spellcheck: "true", autocorrect: "on", autocapitalize: "sentences", "aria-label": "Idea text" }),
+    // The text is markdown SOURCE: autocorrect and autocapitalize stay off,
+    // as CodeMirror defaults them, so macOS's smart dashes and quotes cannot
+    // turn `---` into an em dash or a straight quote in code into a curly
+    // one (unmeasured in WKWebView: the conservative default). Spelling is
+    // only underlined, so it stays on.
+    EditorView.contentAttributes.of({ spellcheck: "true", autocorrect: "off", autocapitalize: "off", "aria-label": "Idea text" }),
     markdown({ base: markdownLanguage, extensions: [Frontmatter], codeLanguages: [] }),
     syntaxHighlighting(stage1),
     chrome,

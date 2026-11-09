@@ -624,7 +624,22 @@ pub fn create_at(root: &Path, title: &str) -> Result<Doc, String> {
 /// client cannot save one document over another. Bytes equal to what is on
 /// disk write nothing, and the mtime does not move. Returns the file's mtime
 /// after the save: the next save's `expected_mtime`.
+///
+/// A save (typing) copies nothing to history; [`write_kept_at`] does.
 pub fn write_at(root: &Path, id: &str, content: &str, expected_mtime: Option<u64>) -> Result<u64, String> {
+    write_with_at(root, id, content, expected_mtime, false)
+}
+
+/// [`write_at`] that first copies the file's CURRENT bytes to history when it
+/// would change them: the overwrite a person chooses over text that came from
+/// elsewhere ("Keep mine" in a conflict), and what an agent's proposal that
+/// rewrites a document will use. That text exists nowhere else; an ordinary
+/// save never takes this path.
+pub fn write_kept_at(root: &Path, id: &str, content: &str, expected_mtime: Option<u64>) -> Result<u64, String> {
+    write_with_at(root, id, content, expected_mtime, true)
+}
+
+fn write_with_at(root: &Path, id: &str, content: &str, expected_mtime: Option<u64>, keep_history: bool) -> Result<u64, String> {
     refuse_real(root)?;
     let idx = list_at(root)?;
     let idea = idx.resolve(id)?.clone();
@@ -637,6 +652,9 @@ pub fn write_at(root: &Path, id: &str, content: &str, expected_mtime: Option<u64
     check_mtime(&md, expected_mtime)?;
     if now == content {
         return Ok(mtime_ms(&md));
+    }
+    if keep_history {
+        history_copy_at(root, id, now.as_bytes())?;
     }
     let p = root.join(&idea.file);
     crate::fsx::write_atomic(&p, content.as_bytes(), Some(md.permissions())).map_err(|e| format!("{}: {e}", idea.file))?;
@@ -835,6 +853,33 @@ mod tests {
         assert_eq!(fs::read(&p).unwrap(), text.as_bytes());
         // The title is read from the heading, not the fence's `# ` line.
         assert_eq!(read_at(&root, &id).unwrap().idea.title, "Jellyfin on the home server");
+        assert!(!root.join(HISTORY_DIR).exists(), "a save (typing) copies nothing to history");
+    }
+
+    /// Keep mine: the text it overwrites came from another editor and exists
+    /// nowhere else, so it is copied to history first — and only when the
+    /// write changes the bytes.
+    #[test]
+    fn a_kept_write_copies_the_text_it_replaces_to_history_first() {
+        let t = Tmp::new("kept");
+        let root = t.root();
+        let d = create_at(&root, "x").unwrap();
+        let id = d.idea.id.unwrap();
+        let p = root.join(&d.idea.file);
+        let theirs = format!("{}theirs, from another editor\n", d.content);
+        fs::write(&p, &theirs).unwrap();
+        let m = mtime_ms(&fs::metadata(&p).unwrap());
+        let mine = format!("{}mine\n", d.content);
+        let m2 = write_kept_at(&root, &id, &mine, Some(m)).unwrap();
+        assert_eq!(fs::read_to_string(&p).unwrap(), mine);
+        let hist: Vec<_> = fs::read_dir(root.join(HISTORY_DIR).join(&id)).unwrap().map(|e| e.unwrap().path()).collect();
+        assert_eq!(hist.len(), 1, "one copy");
+        assert_eq!(fs::read_to_string(&hist[0]).unwrap(), theirs, "of the text it replaced");
+        write_kept_at(&root, &id, &mine, Some(m2)).unwrap();
+        assert_eq!(fs::read_dir(root.join(HISTORY_DIR).join(&id)).unwrap().count(), 1, "no change, no copy");
+        let e = write_kept_at(&root, &id, &theirs, Some(1)).unwrap_err();
+        assert!(e.contains("changed on disk"), "{e}");
+        assert_eq!(fs::read_dir(root.join(HISTORY_DIR).join(&id)).unwrap().count(), 1, "a refused write copies nothing");
     }
 
     #[test]
