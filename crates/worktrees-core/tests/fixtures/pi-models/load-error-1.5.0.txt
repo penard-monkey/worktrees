@@ -1,0 +1,5 @@
+Warning: errors loading models.json:
+Invalid models.json schema:
+  - providers.lm-studio.apiKey: must not have fewer than 1 characters
+
+File: /Users/demo/.pi/agent/models.json

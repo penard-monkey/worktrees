@@ -95,24 +95,168 @@ pub struct Declared {
 }
 
 pub fn parse_models_json(text: &str) -> Vec<Declared> {
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else { return Vec::new() };
-    let Some(providers) = v.get("providers").and_then(|p| p.as_object()) else { return Vec::new() };
-    providers
-        .iter()
-        .map(|(name, p)| Declared {
-            backend: name.clone(),
-            base_url: p.get("baseUrl").and_then(|u| u.as_str()).map(str::to_string),
-            models: p
-                .get("models")
-                .and_then(|m| m.as_array())
-                .map(|a| a.iter().filter_map(|m| m.get("id")?.as_str().map(str::to_string)).collect())
-                .unwrap_or_default(),
-        })
+    parse_hosts(text)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|h| Declared { backend: h.backend, base_url: h.base_url, models: h.models.into_iter().map(|m| m.id).collect() })
         .collect()
 }
 
 pub fn declared() -> Vec<Declared> {
-    std::fs::read_to_string(crate::pi::agent_dir().join("models.json")).map(|t| parse_models_json(&t)).unwrap_or_default()
+    std::fs::read_to_string(models_json_path()).map(|t| parse_models_json(&t)).unwrap_or_default()
+}
+
+pub fn models_json_path() -> PathBuf {
+    crate::pi::agent_dir().join("models.json")
+}
+
+/// pi's own pre-parse (1.5.0 `utils/json.js`): `//` line comments and
+/// trailing commas are dropped, string literals left alone. pi reads
+/// models.json as `JSON.parse(stripJsonComments(stripBom(text)))`, so a file
+/// pi loads can be one strict JSON refuses — read through this, or such a
+/// file reads as declaring nothing. `/* */` is NOT pi's, and stays an error.
+pub fn strip_json_comments(text: &str) -> String {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    // Pass 1: comments. Pass 2: trailing commas — two passes, as pi does, so a
+    // comment between a comma and its `}` is gone before the comma is judged.
+    let no_comments = scan_json(text, |rest| {
+        rest.starts_with("//").then(|| rest.find('\n').unwrap_or(rest.len()))
+    });
+    scan_json(&no_comments, |rest| {
+        let after = rest.strip_prefix(',')?;
+        after.trim_start().starts_with(['}', ']']).then_some(1)
+    })
+}
+
+/// Copy `text`, keeping string literals whole and dropping the bytes `cut`
+/// claims (its answer is how many) at any position outside one.
+fn scan_json(text: &str, cut: impl Fn(&str) -> Option<usize>) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < text.len() {
+        let rest = &text[i..];
+        if rest.starts_with('"') {
+            // A literal: up to the next unescaped quote. An unterminated one is
+            // copied as is — the JSON parse then fails, as pi's does.
+            let mut end = rest.len();
+            let mut esc = false;
+            for (j, c) in rest.char_indices().skip(1) {
+                if esc {
+                    esc = false;
+                } else if c == '\\' {
+                    esc = true;
+                } else if c == '"' {
+                    end = j + 1;
+                    break;
+                }
+            }
+            out.push_str(&rest[..end]);
+            i += end;
+        } else if let Some(n) = cut(rest) {
+            i += n;
+        } else {
+            let c = rest.chars().next().unwrap_or(' ');
+            out.push(c);
+            i += c.len_utf8();
+        }
+    }
+    out
+}
+
+/// A model a provider in models.json declares: the fields Settings shows and
+/// may one day edit. pi's defaults (1.5.0 `models-configuration.md`) apply
+/// when a field is absent: context 128000, max output 16384.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct HostModel {
+    pub id: String,
+    pub name: Option<String>,
+    pub context_window: Option<u64>,
+    pub max_tokens: Option<u64>,
+    pub reasoning: Option<bool>,
+    /// `input` includes `"image"`.
+    pub images: Option<bool>,
+}
+
+/// A provider models.json declares. `has_key` says whether an `apiKey` is
+/// present, never what it is: the value may be a secret or a `!command`, and
+/// it is not copied out of the parse.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Host {
+    pub backend: String,
+    pub base_url: Option<String>,
+    pub api: Option<String>,
+    pub has_key: bool,
+    pub models: Vec<HostModel>,
+}
+
+/// Every provider models.json declares, or why the file cannot be read as
+/// pi reads it. A provider entry that is not an object is skipped.
+pub fn parse_hosts(text: &str) -> Result<Vec<Host>, String> {
+    let v: serde_json::Value = serde_json::from_str(&strip_json_comments(text)).map_err(|e| format!("not JSON: {e}"))?;
+    let providers = match v.get("providers") {
+        None => return Ok(Vec::new()),
+        Some(p) => p.as_object().ok_or("\"providers\" is not an object")?,
+    };
+    let s = |o: &serde_json::Value, k: &str| o.get(k).and_then(|u| u.as_str()).map(str::to_string);
+    Ok(providers
+        .iter()
+        .filter(|(_, p)| p.is_object())
+        .map(|(name, p)| Host {
+            backend: name.clone(),
+            base_url: s(p, "baseUrl"),
+            api: s(p, "api"),
+            has_key: p.get("apiKey").and_then(|k| k.as_str()).is_some_and(|k| !k.is_empty()),
+            models: p
+                .get("models")
+                .and_then(|m| m.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|m| {
+                            Some(HostModel {
+                                id: s(m, "id")?,
+                                name: s(m, "name"),
+                                context_window: m.get("contextWindow").and_then(|n| n.as_u64()),
+                                max_tokens: m.get("maxTokens").and_then(|n| n.as_u64()),
+                                reasoning: m.get("reasoning").and_then(|b| b.as_bool()),
+                                images: m
+                                    .get("input")
+                                    .and_then(|i| i.as_array())
+                                    .map(|i| i.iter().any(|x| x.as_str() == Some("image"))),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+        .collect())
+}
+
+/// What pi said on stderr about a models.json it could not load
+/// (`Warning: errors loading models.json:` and its reason, 1.5.0,
+/// `fixtures/pi-models/load-error-1.5.0.txt`). pi then drops EVERY provider
+/// the file declares, so this is the file's state, not one row's.
+///
+/// Only lines that name a PATH are kept. A parse failure's own text is
+/// replaced: node's `JSON.parse` message quotes a snippet of the file, which
+/// can be an `apiKey`.
+pub fn parse_load_error(stderr: &str) -> Option<String> {
+    let (_, rest) = stderr.split_once("errors loading models.json:")?;
+    let mut why: Vec<String> = Vec::new();
+    for l in rest.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()) {
+        // Whatever follows a parse failure may be the rest of node's snippet.
+        if l.starts_with("Failed to parse models.json") {
+            return Some("Failed to parse models.json: it is not valid JSON, even allowing // comments and trailing commas.".into());
+        } else if l.starts_with("Failed to load models.json") {
+            return Some("Failed to load models.json: pi could not read the file.".into());
+        } else if l.starts_with("Invalid models.json schema") || l.starts_with("  - ") || l.starts_with("Provider \"") {
+            why.push(l.to_string());
+        }
+    }
+    if why.is_empty() {
+        why.push("pi reported an error loading models.json.".into());
+    }
+    let why = why.join("\n");
+    Some(if why.chars().count() > 600 { why.chars().take(600).collect::<String>() + "…" } else { why })
 }
 
 /// pi's configured default (`defaultProvider`, `defaultModel`), if set.
@@ -316,20 +460,33 @@ pub fn merge_options(
 }
 
 pub const CATALOG_TTL: Duration = Duration::from_secs(60);
-static CATALOG: Mutex<Option<(Instant, Vec<ModelOption>)>> = Mutex::new(None);
+/// The rows, and what pi said about a models.json it could not load.
+type Catalog = (Instant, Vec<ModelOption>, Option<String>);
+static CATALOG: Mutex<Option<Catalog>> = Mutex::new(None);
 
 /// pi's picker rows, cached for `CATALOG_TTL`. Empty when pi is not installed.
 pub fn options() -> Vec<ModelOption> {
+    catalog().0
+}
+
+/// pi's reason it could not load models.json, from the same `--list-models`
+/// run the catalog came from (`parse_load_error`).
+pub fn load_error() -> Option<String> {
+    catalog().1
+}
+
+fn catalog() -> (Vec<ModelOption>, Option<String>) {
     {
         let g = CATALOG.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((at, v)) = g.as_ref() {
+        if let Some((at, v, e)) = g.as_ref() {
             if at.elapsed() < CATALOG_TTL {
-                return v.clone();
+                return (v.clone(), e.clone());
             }
         }
     }
-    let Some(out) = run_pi(&["--list-models", "--offline"], 10) else { return Vec::new() };
+    let Some(out) = run_pi(&["--list-models", "--offline"], 10) else { return (Vec::new(), None) };
     let listed = parse_list_models(&String::from_utf8_lossy(&out.stdout));
+    let load_error = parse_load_error(&String::from_utf8_lossy(&out.stderr));
     let declared = declared();
     let default = default_model();
     // Only providers pi did NOT list are asked about, all at once, under ONE
@@ -342,8 +499,107 @@ pub fn options() -> Vec<ModelOption> {
     let answers = auth_checks(&unlisted, AUTH_DEADLINE);
     let auth = |b: &str| answers.get(b).cloned().flatten();
     let v = merge_options(&listed, &declared, default, &auth, &probe);
-    *CATALOG.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), v.clone()));
-    v
+    *CATALOG.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), v.clone(), load_error.clone()));
+    (v, load_error)
+}
+
+// ── Settings → pi → Models: the hosts view ───────────────────────────────────
+
+/// One declared provider as Settings shows it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct HostView {
+    #[serde(flatten)]
+    pub host: Host,
+    /// `served` (its `/models` answered with a list), `up` (it answered, not
+    /// with a list we read), `down`, or `unprobed` (no http(s) `baseUrl`: a
+    /// built-in provider's endpoint is pi's business).
+    pub reach: &'static str,
+    /// Ids the host's `/models` lists that this provider does not declare —
+    /// models pi cannot use until they are declared.
+    pub served_undeclared: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct Hosts {
+    pub path: String,
+    /// `missing`, `ok`, or `unreadable` (`problem` says why).
+    pub file: &'static str,
+    pub problem: Option<String>,
+    /// pi's own reason it drops the file (`load_error`): every provider in it
+    /// is then unusable, whatever the rows below say.
+    pub load_error: Option<String>,
+    pub hosts: Vec<HostView>,
+}
+
+/// Ids in `served` that `declared` does not name, in the host's order.
+pub fn served_undeclared(served: &[String], declared: &[HostModel]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for s in served {
+        if !declared.iter().any(|d| &d.id == s) && !out.contains(s) {
+            out.push(s.clone());
+        }
+    }
+    out
+}
+
+/// Join the parsed hosts with each one's reachability. Pure: `reach` is
+/// passed in, asked once per distinct `baseUrl`.
+pub fn host_views(hosts: Vec<Host>, reach: &dyn Fn(&str) -> Option<Reach>) -> Vec<HostView> {
+    hosts
+        .into_iter()
+        .map(|h| {
+            let r = h.base_url.as_deref().filter(|u| probe_url(u).is_some()).map(|u| reach(u));
+            let (reach, served_undeclared) = match r {
+                None => ("unprobed", Vec::new()),
+                Some(None) | Some(Some(Reach::Down)) => ("down", Vec::new()),
+                Some(Some(Reach::Up)) => ("up", Vec::new()),
+                Some(Some(Reach::Served(ids))) => ("served", served_undeclared(&ids, &h.models)),
+            };
+            HostView { host: h, reach, served_undeclared }
+        })
+        .collect()
+}
+
+/// Settings → pi → Models: every provider models.json declares, each host's
+/// state and what it serves undeclared, and pi's own load error. Reads the
+/// file for the fields `Host` names and nothing else; probes every host at
+/// once, under one deadline (`probe`'s cache is shared with the catalog).
+pub fn hosts() -> Hosts {
+    let path = models_json_path();
+    let mut out = Hosts { path: path.to_string_lossy().into_owned(), file: "missing", problem: None, load_error: None, hosts: Vec::new() };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return out,
+        Err(e) => {
+            out.file = "unreadable";
+            out.problem = Some(format!("cannot read it: {e}"));
+            return out;
+        }
+    };
+    let parsed = match parse_hosts(&text) {
+        Ok(h) => h,
+        Err(why) => {
+            out.file = "unreadable";
+            out.problem = Some(why);
+            out.load_error = load_error();
+            return out;
+        }
+    };
+    let mut urls: Vec<String> = parsed.iter().filter_map(|h| h.base_url.clone()).filter(|u| probe_url(u).is_some()).collect();
+    urls.sort();
+    urls.dedup();
+    let answers = gather(&urls, Duration::from_secs(5), probe);
+    out.file = "ok";
+    out.load_error = load_error();
+    out.hosts = host_views(parsed, &|u| answers.get(u).cloned());
+    out
+}
+
+/// Drop the catalog and reachability caches, so the next read asks pi and
+/// the hosts again.
+pub fn forget() {
+    *CATALOG.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    *REACH.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 /// The whole budget for `auth check`s in one catalog read.
@@ -561,6 +817,81 @@ mod tests {
         assert!(parse_list_models("").is_empty());
         let two = format!("{LIST_0_99_1}kimi-coding  k3  256K  32K  yes  yes\n");
         assert_eq!(parse_list_models(&two).len(), 2);
+    }
+
+    const LIST_1_5_0: &str = include_str!("../tests/fixtures/pi-models/list-models-1.5.0.txt");
+    const COMMENTED: &str = include_str!("../tests/fixtures/pi-models/models-commented.json");
+    const LOAD_ERROR_1_5_0: &str = include_str!("../tests/fixtures/pi-models/load-error-1.5.0.txt");
+
+    #[test]
+    fn the_1_5_0_table_parses_too() {
+        let l = parse_list_models(LIST_1_5_0);
+        assert_eq!(l.iter().map(|r| r.model.as_str()).collect::<Vec<_>>(), ["qwen3-coder-next", "qwen3.8-27b-obliterated-6bit"]);
+        assert!(l.iter().all(|r| r.backend == "lm-studio" && r.context == "128K"));
+    }
+
+    /// pi 1.5.0 loads a models.json with `//` comments and trailing commas
+    /// (measured: `--list-models` lists both of this fixture's lm-studio
+    /// models). Strict JSON read it as declaring nothing.
+    #[test]
+    fn a_models_json_pi_accepts_with_comments_and_trailing_commas_reads_whole() {
+        let d = parse_models_json(COMMENTED);
+        assert_eq!(d.len(), 2, "{d:?}");
+        assert_eq!(d[0].backend, "lm-studio");
+        assert_eq!(d[0].base_url.as_deref(), Some("http://h:1234/v1"));
+        assert_eq!(d[0].models, ["qwen3-coder-next", "a//b"], "a // inside a string is not a comment");
+        let h = parse_hosts(COMMENTED).unwrap();
+        assert_eq!(h[0].models[1].name.as_deref(), Some("slashes \"// in\" a string"));
+        assert_eq!(
+            h[0].models[0],
+            HostModel {
+                id: "qwen3-coder-next".into(),
+                name: None,
+                context_window: Some(262144),
+                max_tokens: Some(32768),
+                reasoning: Some(true),
+                images: Some(true)
+            }
+        );
+        assert!(h[0].has_key && !h[1].has_key);
+        assert_eq!(h[1].api.as_deref(), Some("openai-completions"));
+        assert!(!format!("{h:?}").contains("security"), "the apiKey never leaves the parse");
+        // `/* */` is not pi's, and a broken file is an error, not "no hosts".
+        assert!(parse_hosts("{/* x */\"providers\":{}}").is_err());
+        assert!(parse_hosts("{\"providers\":[]}").is_err());
+        assert_eq!(parse_hosts("{}").unwrap(), vec![]);
+        assert_eq!(strip_json_comments("\u{feff}[1, 2 ,\n]"), "[1, 2 \n]");
+    }
+
+    #[test]
+    fn pis_load_error_is_read_and_never_quotes_the_file() {
+        let e = parse_load_error(LOAD_ERROR_1_5_0).unwrap();
+        assert_eq!(e, "Invalid models.json schema:\n  - providers.lm-studio.apiKey: must not have fewer than 1 characters");
+        assert_eq!(parse_load_error("provider  model\n"), None, "no warning, no error");
+        // node's JSON.parse message quotes the file; only our sentence is kept.
+        let parse = "Warning: errors loading models.json:\nFailed to parse models.json: Unexpected token 'x', \"\"apiKey\": \"sk-secret\"\" is not valid JSON\n  - sk-secret\n\nFile: /x";
+        let e = parse_load_error(parse).unwrap();
+        assert!(!e.contains("sk-secret") && e.starts_with("Failed to parse models.json"), "{e}");
+    }
+
+    #[test]
+    fn a_host_view_says_what_it_serves_that_is_not_declared() {
+        let h = parse_hosts(COMMENTED).unwrap();
+        let served = |u: &str| match u {
+            "http://h:1234/v1" => Some(Reach::Served(vec!["qwen3-coder-next".into(), "new-one".into(), "new-one".into()])),
+            _ => Some(Reach::Down),
+        };
+        let v = host_views(h.clone(), &served);
+        assert_eq!((v[0].reach, v[0].served_undeclared.clone()), ("served", vec!["new-one".to_string()]));
+        assert_eq!((v[1].reach, v[1].served_undeclared.len()), ("down", 0));
+        let mut built_in = h[0].clone();
+        built_in.base_url = None;
+        assert_eq!(host_views(vec![built_in], &|_| panic!("not probed"))[0].reach, "unprobed");
+        assert_eq!(host_views(h.clone(), &|_| Some(Reach::Up))[0].reach, "up");
+        assert_eq!(host_views(h, &|_| None)[0].reach, "down", "no answer by the deadline is down");
+        let json = serde_json::to_value(&v[0]).unwrap();
+        assert_eq!(json["has_key"], true, "flattened");
+        assert!(json.get("apiKey").is_none() && !json.to_string().contains("security"));
     }
 
     #[test]

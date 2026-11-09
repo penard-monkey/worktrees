@@ -1,0 +1,15 @@
+{
+  // the box under the desk
+  "providers": {
+    "lm-studio": {
+      "baseUrl": "http://h:1234/v1", // LAN
+      "api": "openai-completions",
+      "apiKey": "!security find-generic-password -w",
+      "models": [
+        { "id": "qwen3-coder-next", "contextWindow": 262144, "maxTokens": 32768, "reasoning": true, "input": ["text", "image"], },
+        { "id": "a//b", "name": "slashes \"// in\" a string", },
+      ],
+    },
+    "ollama": { "baseUrl": "http://localhost:11434/v1", "api": "openai-completions", "models": [], },
+  },
+}
