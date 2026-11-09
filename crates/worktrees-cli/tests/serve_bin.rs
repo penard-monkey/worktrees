@@ -1126,6 +1126,15 @@ fn a_moved_projects_agent_is_read_before_and_after_it_is_adopted() {
     let main = r["ok"]["places"].as_array().and_then(|ps| ps.iter().find(|p| p["slug"] == json!("(main)"))).unwrap_or_else(|| panic!("{r}"));
     assert_eq!(main["agent_sessions"]["claude"]["name"], json!("new-(main)"), "{main}");
     assert!(main["agent_sessions"]["claude"]["model"].is_string(), "the model label after the rename: {main}");
+    // `sessions:busy` is change-gated, and every `rpc` above skipped the
+    // events that came while it waited: on a slow runner the poll's push of
+    // this state (its first tick, or the adopt) landed inside one of them,
+    // was dropped, and no further push was ever due (CI, macOS, #635). Ask for
+    // the CURRENT state instead: a listen frame that ADDS a snapshot event is
+    // sent its last push at once (`conn::Clients::declare`), and before the
+    // first push there is nothing to miss.
+    listen(&mut ws, &[]);
+    listen(&mut ws, &["sessions:busy"]);
     let busy = busy_until(&mut ws, &json!([new_root]), Duration::from_secs(15));
     assert_eq!(busy, json!([new_root]), "the busy dot names the new folder");
     assert_eq!(sb.terminate().code(), Some(0));
