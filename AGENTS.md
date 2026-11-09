@@ -170,6 +170,71 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   keeps it out of the pane's chat transcript and model. Do not identify the
   pane's Claude by `kind` or pane id alone.
 
+- **A chat image is the PLACE's, and the host resolves it** (`feat/chat-images`).
+  `![alt](path)` in a bubble and a Read's thumbnail go through ONE row,
+  `read_place_image: Engine [read, place(repo, slug)]`, never `read_file_base64`
+  (`file(path)`: judged against EVERY project the caller may see, which is the
+  wrong question for a picture an agent chose to show). **The place-only rule is
+  the CHAT's containment, not an access boundary**: grants reach PROJECTS, not
+  places (`authz::Projects`), so a device with the project may read any place of
+  it by other rows; the rule keeps a reply from showing another place's or the
+  host's files. The rule is
+  `safepath::place_image`: relative to the place's root, or absolute and under
+  it, then `safe_under` (string rule, lstat of the last component, canonical
+  containment: a link out, `..`, another place's tree, a URL all refused in
+  words that name the path); an image extension from `IMAGE_TYPES`; and for
+  `(main)` nothing under `.worktrees/`, because its root holds every other
+  place's tree, decided on the RESOLVED file by identity: is `<root>/.worktrees`
+  one of its ancestors by (dev, ino)? A string compare passed `.Worktrees/x/y.png`
+  on the default case-insensitive APFS. **Behind any link the answer is one
+  voice** ("outside this place"), whether or not a file exists past it
+  (`why_not` walks the components; `classify`'s answers differed and told a
+  reader which files exist outside); only real folders inside the place give
+  "not found". `open_place_image` then OPENS the file `O_NOFOLLOW` and fstats the
+  handle, which must be a regular file with the (dev, ino) `place_image` checked
+  (a swap between check and open is refused), and reads `check_image` off the
+  header: a raster over `MAX_IMAGE_PIXELS` (40 MP: the file cap does not bound
+  it, a solid 150 MP PNG is 175 KB; Chromium and Playwright WebKit decoded up to
+  150 MP, so the number is MEMORY, 4 B a pixel decoded; the system WKWebView was
+  not measured), one whose header cannot be read, or an SVG with a DOCTYPE or
+  ENTITY is refused with a note. `agent_call_image` applies `check_image` to the
+  transcript's block too. A symlinked image is refused even when it points
+  inside, as in
+  `safe_under`. `app/src/imgsrc.ts` restates it ONLY to say the refusal without
+  a round trip and to keep a remote URL from ever becoming an `<img>`; the host
+  is the authority, and `chatimage-check.mjs` runs both the rule and the real
+  `Markdown` + `chatImageNode`. **A Read's thumbnail has two sources.** Inside the
+  place it is the call's `file_path` through `read_place_image`. A Read of a file
+  OUTSIDE the place (a render in `/tmp`: the owner's potato, 2026-11-09, the
+  sandbox's first run) has no path the rule allows, so it is the picture Claude
+  was SHOWN, from the transcript, through `agent_call_image: Engine [read,
+  place(repo, slug)]`, fetched when the thumbnail mounts and never in
+  `agent_turns`: 2.1.319 writes the block TWICE per entry (`tool_result.content[]`
+  and `toolUseResult.file`), 150-300 KB each and recompressed
+  (`claude-2.1.319-read-image.jsonl`, its README), `turns::claude_call_image`
+  reads only a Read's block by id, size-capped. **The body refuses every caller
+  but the console** (`Ctx::is_console`; `ERR_CALL_IMAGE_CONSOLE`): that file may
+  be anywhere on the host, so a paired device gets a note and no pixels. The
+  console check lives in the body, not the capability column, because the row's
+  `read` is the base group and a device holds it. The cache is `ImageView.tsx`'s, by place + path + etag
+  (`"<mtime ms>-<bytes>"`, answered `unchanged` with no bytes), a call's picture
+  kept by call id: a mounted bubble
+  paints from it in its first frame, which is also why an image arriving below
+  the fold does not move a reader (`chat-image-browser.mjs`, Chromium and
+  WebKit). **The rule must be always-on, not skill-only**: the skill loads on demand, and
+  "draw me a potato" never asks for "branch work", while Claude Code's own prompt
+  says to keep temporary files in its scratchpad (the owner's sandbox run, with
+  no `![]()` in either reply). `guidance::IMAGE_RULE` is a constant that reaches
+  Claude as the prompt plugin's SessionStart stdout (every launch, whatever the
+  skill and planning settings) and pi, Codex and kimi inside `rules_text`; the
+  skill repeats it. Agents save under `.worktrees-attachments/agent/`
+  (`attach::AGENT_DIR`): its own folder, so agent files never count toward
+  `attach`'s 50 files / 100 MB (`holding` reads only the top level and only
+  names it made), swept after seven days by `attach::sweep_agent` (regular
+  files, flat, a link never followed), covered by the same exclusion, which
+  `Project::ensure_excluded` now adds since the rule sends agents there before
+  any upload has made it.
+
 - **The agent rows (`worktrees_api::agents`, `worktrees_core::prompt`) read
   Claude's screen, and Claude has five traps** (fixtures and READMEs:
   `crates/worktrees-core/tests/fixtures/claude-screen/2.1.309` and

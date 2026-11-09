@@ -12,7 +12,7 @@
 // inside the chat and no dialog, sheet or menu owning the key (useEscape).
 
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import {
   activityMoved, boxesOf, bytes, callFetches, callKeys, callsSay, callsWords, cardDigits, cardKey, cardTakesFocus, choiceOpen, choiceWay, clockMs, clockOf,
   dayLabel, draftIsOwnSend, draftProblem, fieldWords, foldCalls, itemsOf, keyFocusOf, lineDiff, loadPrompt, loadTurns, noSessionYet, permissionAnswerWords, rereadTurns, startingUp,
@@ -32,6 +32,9 @@ import { commandProblem, commandWords, confirmStep, confirmWords, filterCommands
 import { HARNESS_LABEL, isHarness, type Harness } from "./harness";
 import * as Icons from "./icons";
 import { Markdown } from "./markdown";
+import { ImageView } from "./ImageView";
+import { chatImageSrc, readImagePath } from "./imgsrc";
+import { chatImageNode } from "./chatImageNode";
 import { useDocPathLinks } from "./useDocPathLinks";
 import { BeforeCommit, useStickToBottom } from "./stickToBottom";
 import { escapeDepth, useEscape } from "./useEscape";
@@ -48,6 +51,15 @@ const FIELD_ROWS = 12;
 /** …and the most of the chat's height it may take: at 40% of a 400px pane the
  *  transcript and the send button still fit. */
 const FIELD_SHARE = 0.4;
+
+/** `![alt](src)` in a bubble (feat/chat-images): the image shows, click to
+ *  enlarge, when it is a picture inside THIS place; every other source is a note
+ *  that names it (`imgsrc.ts`, and the host judges the path again). Stable per
+ *  place, so `Markdown`'s memo is not defeated by a new function each render. */
+function useChatImage(target: Target, root: string) {
+  const { repo, slug } = target;
+  return useCallback((src: string, alt: string): ReactNode => chatImageNode(src, alt, root, { repo, slug }), [repo, slug, root]);
+}
 
 /** The focused element, read through shadow roots (the feedback dialog is one). */
 function focused(): Element | null {
@@ -393,6 +405,15 @@ function CallRow(props: { c: ToolCall; k: string; target: Target; root: string; 
   const open = !!v.calls.open[k];
   const read = c.call_id ? v.calls.read[c.call_id] : undefined;
   useRevealOnChange(props.reveal, open, read, li, panel);
+  // A Read of an image shows what it opened, small (feat/chat-images). The
+  // path is the call's `file_path`, judged by the same place-only rule.
+  const shot = readImagePath(c.name, c.summary, c.failed);
+  const thumb = shot ? chatImageSrc(shot, "", props.root) : null;
+  // Inside the place: the file itself. Outside it (a render in /tmp, the
+  // owner's flow): the picture Claude was shown, from the transcript, which
+  // only the host's own console is given; a device is told so in words.
+  const shown = shot && thumb ? (thumb.kind === "show" ? thumb.path : shot) : null;
+  const byCall = thumb?.kind === "note" && !!c.call_id;
   const head = (
     <>
       <span className="chat-tool chat-call-name">{c.name}</span>
@@ -410,6 +431,12 @@ function CallRow(props: { c: ToolCall; k: string; target: Target; root: string; 
           <span className="chat-call">{head}</span>
         </button>
       ) : <div className="chat-call">{head}</div>}
+      {shown && (thumb?.kind === "show" || byCall) && (
+        <div className="chat-call-thumb">
+          <ImageView path={shown} place={{ repo: target.repo, slug: target.slug }} call={byCall ? { repo: target.repo, slug: target.slug, callId: c.call_id! } : undefined}
+            inline enlarge thumb alt={`Read: ${shown.split("/").pop()}`} errPrefix="preview not shown — " />
+        </div>
+      )}
       {open && <CallFull c={c} read={read} id={id} panel={panel} />}
     </li>
   );
@@ -498,6 +525,7 @@ function Shortened(props: { id: string | undefined; what: "reply" | "message"; t
 
 function ChatItem(props: { it: Item; agent: string; target: Target; root: string; reveal: Reveal; fullOff: string | null; full: Record<string, FullRead>; onLink: (href: string) => void; pathLinks: ReturnType<typeof useDocPathLinks>["pathLinks"] }) {
   const { it, agent } = props;
+  const renderImage = useChatImage(props.target, props.root);
   switch (it.k) {
     case "sep":
       return <li className="chat-sep" title={new Date(it.at * 1000).toLocaleString()}>{dayLabel(it.at)}</li>;
@@ -509,7 +537,7 @@ function ChatItem(props: { it: Item; agent: string; target: Target; root: string
         <li className="chat-row chat-row-user">
           <div className="chat-bubble chat-bubble-user" role="group"
             aria-label={`You${it.at ? `, ${clockOf(it.at)}` : ""}`} data-testid="chat-user">
-            <Markdown src={sent.text} onLink={props.onLink} />
+            <Markdown src={sent.text} onLink={props.onLink} renderImage={renderImage} />
             {sent.paths.length > 0 && <SentFiles paths={sent.paths} />}
             {it.cut && <Shortened id={it.turnId} what="message" target={props.target} full={props.full} fullOff={props.fullOff} />}
             {it.midTurn && <p className="chat-bubble-note chat-midturn-caption">Sent while {agent} was working</p>}
@@ -528,7 +556,7 @@ function ChatItem(props: { it: Item; agent: string; target: Target; root: string
             data-testid="chat-agent">
             {(it.text || it.truncated) && (
               <div className="chat-bubble chat-bubble-agent">
-                {it.text && <Markdown src={it.text} onLink={props.onLink} pathLinks={props.pathLinks} />}
+                {it.text && <Markdown src={it.text} onLink={props.onLink} pathLinks={props.pathLinks} renderImage={renderImage} />}
                 {it.truncated && <Shortened id={it.turnId} what="reply" target={props.target} full={props.full} fullOff={props.fullOff} />}
               </div>
             )}

@@ -1047,6 +1047,60 @@ pub fn claude_tool_call(lines: &[String], id: &str) -> Option<CallDetail> {
     detail_in(claude_turns(lines), id)
 }
 
+/// The picture a Claude Read call was SHOWN (`feat/chat-images`): the
+/// `tool_result` image block of the Read whose `tool_use` id is `id`, as Claude
+/// 2.1.319 writes it (`claude-2.1.319-read-image.jsonl`). `b64` is what the
+/// model saw, recompressed, not the file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CallImage {
+    pub mime: String,
+    /// Empty when `truncated`: a block past [`CALL_IMAGE_MAX_B64`] is never carried.
+    pub b64: String,
+    /// Decoded bytes the block holds.
+    pub size: u64,
+    pub truncated: bool,
+}
+
+/// The most base64 a [`CallImage`] carries: the 4 MB `read_file_base64` cap, as
+/// base64.
+pub const CALL_IMAGE_MAX_B64: usize = 5_400_000;
+
+/// The image of the Claude Read call `id` in `lines`, or None when `id` names no
+/// Read, its result holds no image block, the type is not one the viewer draws
+/// (png, jpeg, gif, webp) or it has left `lines`. Reads `user` and `assistant`
+/// entries by id only; nothing else of a result is returned.
+pub fn claude_call_image(lines: &[String], id: &str) -> Option<CallImage> {
+    use serde_json::Value;
+    if id.is_empty() {
+        return None;
+    }
+    let mut is_read = false;
+    let mut found = None;
+    for line in lines.iter().filter(|l| l.contains(id)) {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        let Some(items) = v.pointer("/message/content").and_then(|c| c.as_array()) else { continue };
+        for it in items {
+            match it.get("type").and_then(|t| t.as_str()) {
+                Some("tool_use") if it["id"] == id && v["type"] == "assistant" => is_read = it["name"] == "Read",
+                Some("tool_result") if it["tool_use_id"] == id && v["type"] == "user" => {
+                    let img = it.get("content").and_then(|c| c.as_array()).and_then(|a| a.iter().find(|b| b["type"] == "image"));
+                    if let Some(src) = img.and_then(|b| b.get("source")).filter(|s| s["type"] == "base64") {
+                        found = Some((src["media_type"].as_str().unwrap_or("").to_string(), src["data"].as_str().unwrap_or("").to_string()));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let (mime, data) = found?;
+    if !is_read || !["image/png", "image/jpeg", "image/gif", "image/webp"].contains(&mime.as_str()) || data.is_empty() {
+        return None;
+    }
+    let size = (data.len() / 4 * 3) as u64;
+    let truncated = data.len() > CALL_IMAGE_MAX_B64;
+    Some(CallImage { mime, b64: if truncated { String::new() } else { data }, size, truncated })
+}
+
 /// The input of the Codex call `id`, as [`claude_tool_call`].
 pub fn codex_tool_call(lines: &[String], id: &str) -> Option<CallDetail> {
     detail_in(codex_turns(lines), id)
@@ -2440,6 +2494,50 @@ mod tests {
         );
         assert_eq!(got[0].tools, vec!["Bash", "Bash", "Grep", "Glob", "Read"], "`tools` is as it was, for older clients");
         assert!(tool_steps(&got[0])[0].get("failed").is_none(), "a success carries no flag at all");
+    }
+
+    /// `claude_call_image` serves the block of a Read, by its id, and nothing
+    /// else: not another tool's result, not an unknown id, not a text result,
+    /// and nothing past the cap.
+    #[test]
+    fn claude_call_image_is_the_read_results_block_by_id() {
+        let fx = lines(include_str!("../tests/fixtures/transcripts/claude-2.1.319-read-image.jsonl"));
+        let got = claude_call_image(&fx, "toolu_01ReadImg").expect("the Read's image");
+        assert_eq!((got.mime.as_str(), got.truncated), ("image/png", false));
+        assert!(got.b64.starts_with("iVBORw0KGgo") && got.size > 100, "{got:?}");
+        assert_eq!(claude_call_image(&fx, "toolu_nope"), None);
+        assert_eq!(claude_call_image(&fx, ""), None);
+        // the same block under a tool that is not Read
+        let other: Vec<String> = fx.iter().map(|l| l.replace("\"name\":\"Read\"", "\"name\":\"mcp__x__shot\"")).collect();
+        assert_eq!(claude_call_image(&other, "toolu_01ReadImg"), None, "only a Read's picture is served");
+        // a type the viewer does not draw
+        let odd: Vec<String> = fx.iter().map(|l| l.replace("\"media_type\":\"image/png\"", "\"media_type\":\"image/tiff\"")).collect();
+        assert_eq!(claude_call_image(&odd, "toolu_01ReadImg"), None);
+        // past the cap: said, never carried
+        let big = "A".repeat(CALL_IMAGE_MAX_B64 + 4);
+        let huge: Vec<String> = fx.iter().map(|l| if l.contains("tool_result") { l.replace("iVBORw0KGgo", &big) } else { l.clone() }).collect();
+        let cut = claude_call_image(&huge, "toolu_01ReadImg").unwrap();
+        assert!(cut.truncated && cut.b64.is_empty());
+        // `agent_turns` still carries no pixels
+        assert!(!without_call_ids(&claude(&fx, 10)).contains("iVBORw0KGgo"));
+    }
+
+    /// A Read of an image (Claude 2.1.319, measured: the fixture's README): the
+    /// transcript holds the picture as base64 TWICE in the result entry, and
+    /// the turn keeps the call's `file_path` as its summary and no pixels, which
+    /// is all the chat's thumbnail needs (it reads the file again through
+    /// `read_place_image`, under the place-only rule).
+    #[test]
+    fn claude_read_of_an_image_is_a_path_and_no_pixels() {
+        let fx = lines(include_str!("../tests/fixtures/transcripts/claude-2.1.319-read-image.jsonl"));
+        assert!(fx.iter().any(|l| l.contains("\"type\":\"image\"") && l.contains("iVBORw0KGgo")), "the fixture holds the image block");
+        let got = claude(&fx, 10);
+        let all = without_call_ids(&got);
+        for leaked in ["iVBORw0KGgo", "base64", "SYSTEM-PROMPT-MARKER", "originalSize"] {
+            assert!(!all.contains(leaked), "{leaked} leaked: {all}");
+        }
+        assert_eq!(got.len(), 1, "{got:#?}");
+        assert_eq!(calls(&got[0]), vec![call("Read", Some("/Users/u/proj/.worktrees-attachments/20261107-4c34b746fcf4773d.png"), false)]);
     }
 
     /// One Claude assistant entry calling `name` with `input`, then its
