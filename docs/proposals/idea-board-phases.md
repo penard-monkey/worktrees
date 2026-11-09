@@ -4,13 +4,27 @@ title: "Ideas: the phase plan"
 
 # Ideas: the phase plan
 
-**Status:** plan, **revision 2, 2026-11-08**. Nothing is built yet. The owner
+**Status:** plan, **revision 3, 2026-11-08**. Nothing is built yet. The owner
 read v1 and v2 of [Ideas](idea-board.html) and decided to build the idea
 board in phases, in the shape v1 first described: a place for ideas inside
 worktrees, desktop only. This document is that build plan. It overrules v2's
 "rehearse first, build no destination yet" (v2's own choices C2(c) and C3(b)).
 
-**What changed in this revision (2026-11-08, after the owner's answers):**
+**What changed in revision 3 (2026-11-08, more of the owner's answers):**
+
+- Decided: C9 (AGENTS.md gets CodeMirror as a third named exception, in the
+  phase 0 PR), C6 (today's nav is "All projects"; workspaces exist only once
+  someone makes one), C8 (a workspace shows its projects, then every place
+  of each).
+- A place belongs to its project, never to a workspace. The record of which
+  place a work item started moved from the workspace to the plan's work
+  item (§2.2), and a place is dragged onto a work item, not onto a
+  workspace (§6.1).
+- Agent help stays last, and every earlier phase now says what it must leave
+  in place for it ("For agent help later", §8).
+- Still open: C10 and C11 (§10).
+
+**What changed in revision 2 (2026-11-08, after the owner's answers):**
 
 - Decided and now fixed: a blank document per idea; CodeMirror 6, with Bear's
   way of handling markdown as the north star (§4); documents in
@@ -25,8 +39,8 @@ worktrees, desktop only. This document is that build plan. It overrules v2's
 - New: agents help while you act (§7). Every act has a manual result first,
   and an optional agent proposal that you accept, edit or skip. The agent runs
   in a session of its own against the ideas folder, shown in the chat view.
-- The phases are now seven (§8). The choices still open are C6, C8, C9 (in
-  plain words), and two new ones, C10 and C11 (§9).
+- The phases are now seven (§8). The choices then open were C6, C8, C9, C10
+  and C11.
 
 Claims about the app are marked **checked** (read on `origin/main` at
 `1f2064d` on 2026-11-08) or **assumed** (not measured). Claims about libraries
@@ -134,6 +148,7 @@ project: homelab-ansible
 branch: jellyfin-role
 brief: |
   Goal, deliverable, rules, when to stop.
+started: homelab-ansible · jellyfin-role · 2026-11-12
 ```
 
 - An idea can feed more than one plan; a plan can come from several ideas. An
@@ -147,6 +162,12 @@ brief: |
   `task_plan.md` stays that place's agent's working memory; they do not sync.
   The link is the brief: at start (phase 5) a work item's brief is **copied**
   into the new place's `.planning/brief.md`. After that it is the place's.
+- **Which item started which place** is the item's `started:` line, which the
+  app writes into the plan when a Start succeeds (phase 5): project, place,
+  date. It is provenance kept in the document, as Bear keeps its metadata in
+  the markdown (§4.1), so it survives a copy of the plan. If the place is
+  later removed, the line stays and the item shows "place removed". The app
+  writes it like any other act: history copy first, `expected_mtime` checked.
 
 ### 2.3 A workspace
 
@@ -154,6 +175,11 @@ A **named list of references to registered projects**, plus the plan it came
 from and any ideas linked to it. It answers the owner's first ask
 (2026-11-06): "a workspace with multiple projects? Where the workspace also has
 context?" The context is the plan and its ideas.
+
+Today there are no workspaces, and none is made for you. The owner: "We would
+create them as needed, for example after that exists, we could create the
+worktrees workspace which could have the `worktrees` and the `worktrees-ios`
+projects." The Workspaces view starts empty.
 
 ```json
 {
@@ -166,10 +192,6 @@ context?" The context is the plan and its ideas.
       "projects": [
         { "root": "/Users/davidpena/workspace/worktrees" },
         { "root": "/Users/davidpena/workspace/homelab-ansible" }
-      ],
-      "started": [
-        { "item": "Ansible role for Jellyfin", "root": "/Users/…/homelab-ansible",
-          "branch": "jellyfin-role", "slug": "jellyfin-role", "at": "2026-11-12T10:04:00Z" }
       ]
     }
   ]
@@ -183,16 +205,19 @@ context?" The context is the plan and its ideas.
   touched. A project removed from the registry stays referenced and shows as
   "not registered", with a way to drop it.
 - A project can be in any number of workspaces.
-- `started` is the durable record of what this workspace started (v2's
-  "commission"), kept apart from the live place. If the place goes, the record
-  stays and the view says the place is gone.
+- **A place belongs to its project, never to a workspace.** A workspace shows
+  a project and then every place under it (C8, decided). The owner: "I don't
+  know if there are places directly tied to a workspace though I'm not
+  opposed. But it would be weird." So a workspace holds no place ids. What a
+  plan started is recorded on the plan's work item (§2.2), which is v2's
+  "commission" record, kept apart from the live place.
 
-**What the existing word becomes** (choice C6). Today "workspace" means every
-registered project on this host (**checked**: `list_workspace`,
-`crates/worktrees-api/src/workspace.rs`). Named workspaces take the word. In
-the UI the current meaning becomes **All projects**, and it stays the default.
-In code `list_workspace` keeps its name; renaming a row the app, serve and the
-phone all call is churn with no benefit to David.
+**What the existing word becomes** (C6, decided). In code, "workspace" means
+every registered project on this host (**checked**: `list_workspace`,
+`crates/worktrees-api/src/workspace.rs`). In the UI that is now the projects
+view, labelled **All projects**, and it stays the default. "Workspace" in the
+UI means only a named workspace someone made. Code names stay: renaming a row
+the app, serve and the phone all call is churn with no benefit to David.
 
 ### 2.4 From a workspace to projects and places
 
@@ -204,7 +229,7 @@ phone all call is churn with no benefit to David.
 
 Then each `## Work` item becomes a place: David opens the item and reads its
 brief, shown as the exact text that will be written and editable there; Start
-creates the place with that brief; the workspace records it in `started`.
+creates the place with that brief; the app writes the item's `started:` line.
 Nothing starts without that review. A plan with five items does not start
 five agents on one click.
 
@@ -436,10 +461,12 @@ the non-drag path; the drag itself is checked by hand in the real app.
 | an idea | a workspace | link the idea to the workspace's context (`ideas`) | idea menu → Link to workspace ▸ | 4 |
 | a plan | a workspace with no plan | set the workspace's plan | plan strip → Make workspace / Link ▸ | 4 |
 | a project | a plan | add it to the plan's `## Projects` as registered | plan strip → Add project… | 4 |
-| a place (nav row) | a workspace | record an existing place as this workspace's work (a `started` record, no new place) | place menu → Add to workspace ▸ | 5 |
+| a place (nav row) | a work item in the workspace overview's Work list (same window) or in the plan (companion) | record that existing place as the item's place (its `started:` line, no new place) | work item menu → Link a place… | 5 |
 | a `.md` file from Finder | the idea list | import it as a new idea (a copy) | ⋯ → Import… | later |
 
-Considered and left out: dragging a work item onto a project (the item's
+Considered and left out: dragging a place onto a workspace (a place belongs
+to its project, and the workspace already shows every place of its
+projects), dragging a work item onto a project (the item's
 `project:` line is one word to type), and dragging an idea onto a project
 (the relation is idea → plan → project, not idea → project; a shortcut would
 make two ways to say the same thing).
@@ -635,6 +662,10 @@ yet" and is connected to the engine.
 
 **Left out on purpose:** documents, the editor, any store.
 
+**For agent help later:** the window's layout leaves room for a side panel
+(phase 6's chat view), and the page's engine door is the one any later panel
+uses; no second socket.
+
 **Thrown away if we stop here:** the window, its capability, its bundle, the
 label in winstate. Small.
 
@@ -676,6 +707,12 @@ elsewhere.
 **Left out on purpose:** relations, plans, links' `[[` picker (phase 3),
 hidden markers (stage 2), anchors, search beyond a title filter, tabs.
 
+**For agent help later:** every change the app makes, as opposed to your
+typing, is a named operation with parameters (`idea_create(title)`,
+`idea_rename(id, title)`, `idea_remove(id)`), so a proposal can later carry
+the same parameters; and the history rule starts here: rename and remove copy
+the file into `.history/` first.
+
 **Thrown away if we stop here:** the bundle and the rows. The `.md` files stay
 and are useful without the app.
 
@@ -691,7 +728,8 @@ IME input (accents, an emoji) and undo.
 
 ### Phase 2: the workspaces view (parallel with 1)
 
-**David can:** switch the main window's nav to Workspaces, make a workspace,
+**David can:** switch the main window's nav to Workspaces (empty at first),
+make a workspace (say `worktrees`, holding `worktrees` and `worktrees-ios`),
 drag projects into it (or use the menu), reorder workspaces, see each
 project's places under it, and switch back to All projects with nothing
 changed.
@@ -709,7 +747,14 @@ changed.
 - "All projects" in the UI wherever "workspace" means every project (C6): a
   sweep of user-facing strings, not code names.
 
-**Left out on purpose:** plans, ideas, `started`, cloning or creating.
+**Left out on purpose:** plans, ideas, cloning or creating.
+
+**For agent help later:** each workspace act is a named operation with
+parameters (`workspace_create(name)`, `workspace_set_projects(id, roots)`,
+and the rest), so "these three projects belong together" can later be a
+proposal of the same call. `workspaces.json` keeps its previous version
+before every change (one `.prev` copy is enough here; there is no prose to
+lose).
 
 **Thrown away if we stop here:** the switch, the grouped nav, the store.
 All projects is today's nav.
@@ -738,6 +783,13 @@ idea's related ideas, and restore any earlier version from history.
 - The phase 3 drags of §6.1 in the companion, each with its menu.
 
 **Left out on purpose:** agent proposals, unmerge as an act.
+
+**For agent help later:** this phase is the seam. `relate(a, b)`,
+`merge(into, from)`, `combine(ids, title)` and `split(id, range, keep)` are
+the operations a proposal will carry, so they take their whole input as
+parameters (a merge takes the merged text, defaulting to the plain append,
+so an agent's rewritten text is the same call). Every one writes history
+first.
 
 **Thrown away if we stop here:** the operations and the index. Every file and
 every history copy stays.
@@ -770,6 +822,11 @@ plan or idea onto a workspace; open each from the other.
 
 **Left out on purpose:** cloning, creating, starting places; agent drafts.
 
+**For agent help later:** `make_plan(ideas, draft)` takes the draft text as a
+parameter, defaulting to the template, so an agent's draft is the same call;
+linking ideas, projects and a workspace are named operations too; history
+before every change the app makes to a plan.
+
 **Thrown away if we stop here:** the reader and the links. Plans stay as
 documents.
 
@@ -785,8 +842,9 @@ another keeps the plan's `plan_of` resolving.
 **David can:** clone a "to clone" project or create a "to create" one, after
 which it is registered and referenced; open a work item, read and edit its
 brief, and press Start, which creates the place with that brief and launches
-its agent; drag an existing place onto a workspace to record it; see which
-items were started and whether each place is there, busy, or gone.
+its agent; drag an existing place onto a work item to record it as that
+item's place; see which items were started and whether each place is there,
+busy, or gone.
 
 **Built:**
 
@@ -797,18 +855,25 @@ items were started and whether each place is there, busy, or gone.
   Drive-class, console-only.
 - The review step: the brief as the exact text that will be written, editable,
   then Start.
-- `started` records, written after the create succeeds, with live state from
-  the snapshot the nav already has.
+- The work item's `started:` line (§2.2), written into the plan after the
+  create succeeds, with live state shown beside it from the snapshot the nav
+  already has.
 
 **Left out on purpose:** a return path from finished work into the idea (v2's
 Harvest), starting several items at once, MCP.
+
+**For agent help later:** `start(item, brief)` takes the brief text as a
+parameter, so an agent's proposed brief is the same call, and the review step
+stays in front of it: an agent never starts a place, it can only fill the
+text you review.
 
 **Thrown away if we stop here:** nothing extra; this ends the chain.
 
 **Checked in the real app:** in a scratch project, start a place from a plan
 item; confirm `.planning/brief.md` holds the reviewed text and the agent opened
 on it (the opener goes only on a first launch, AGENTS.md; check the pane);
-remove the place and see "place removed" with the record kept; create a project
+remove the place and see "place removed" on the item, with its `started:`
+line kept; drag another place onto an item and see the line written; create a project
 at a scratch path and see it registered. Any scratch Claude runs with
 `DISABLE_AUTOUPDATER=1` and the real `XDG_DATA_HOME` (AGENTS.md), which is why
 §5 gives the stores their own override.
@@ -891,46 +956,52 @@ right side (terminal, dock) is unchanged.
 │────────────────────────────│  plan: Plan: Jellyfin ▸   ideas: 2 ▸          │
 │ ▾ Jellyfin              ●  │──────────────────────────────────────────────│
 │   ▾ homelab-ansible        │  Projects                    (drop one here)  │
-│       jellyfin-role     ●  │   homelab-ansible   registered               │
-│   ▾ worktrees              │   worktrees         registered               │
-│       (main)               │   jellyfin-config   to create  [Create…]     │
-│ ▸ Phone                    │                                               │
-│                            │  Work                                         │
-│ + New workspace            │   Ansible role      started 12 Nov ● busy    │
-│                            │   Config repo       not started   [Review…]  │
-│                            │   Docs page         started · place removed  │
+│       (main)               │   homelab-ansible   registered               │
+│       jellyfin-role     ●  │   worktrees         registered               │
+│   ▾ worktrees              │   jellyfin-config   to create  [Create…]     │
+│       (main)               │                                               │
+│       ui-changes           │  Work (from the plan)                         │
+│       bug-fixes         ●  │   Ansible role      started 12 Nov ● busy    │
+│ ▸ worktrees                │   Config repo       not started   [Review…]  │
+│ + New workspace            │   Docs page         started · place removed  │
 └────────────────────────────┴───────────────────────────────────────────────┘
 ```
 
+- The Workspaces view starts empty, with only "+ New workspace". The second
+  group in the sketch is the owner's example, a `worktrees` workspace holding
+  the `worktrees` and `worktrees-ios` projects.
 - Drag a project from All projects (or another workspace) onto a group.
-- Under a workspace, each project shows the places this workspace started plus
-  `(main)`, with "show all" (C8).
+- Under a workspace: its projects, then every place of each project (C8,
+  decided). No toggle, no filter by what the workspace started.
+- The Work list is the plan's work items, each with its status; a place is
+  dragged onto an item there, never onto the workspace.
 - The right side shows the workspace overview when the workspace row is
   selected, and the place as today when a place is selected.
 - "plan ▸" and "ideas ▸" open the documents in the companion.
 - In time this may become the default view (the owner's words); the switch
   makes that a setting, not a redesign.
 
-## 10. Choices still open
+## 10. Choices
 
-Recommended answer first.
+**Decided on 2026-11-08** (now fixed in the plan above): C1, C2, C3, C4, C5
+(answered by §7: you draft plans until phase 6), C7, and:
 
-- **C6. The word "workspace".** (a) "All projects" in the UI for today's
-  meaning (every registered project), code names unchanged. (b) Keep
-  "Workspace" for all projects and call the new thing something else.
-- **C8. Which places a workspace shows.** (a) The ones it started, plus
-  `(main)`, with "show all". (b) Every place of every referenced project.
-- **C9. One rule-file sentence, a yes or no before phase 1 merges.**
-  AGENTS.md is the rule file every agent in this repo reads. It says the app
-  uses no UI libraries and no editor, and names two exceptions: `marked` (a
-  markdown parser) and `mermaid` (diagrams, only inside the docs viewer).
-  Using CodeMirror contradicts that sentence, so it needs a third named
-  exception, and David approves edits to that file himself. The proposed
-  sentence: *"CodeMirror 6 is the third exception, only in the Ideas companion
-  bundle (`app/companion/`, with its own boundary check), because ideas need a
-  real editor and CodeMirror edits markdown as text, so the file stays exactly
-  what was typed. A rich-text editor that rewrites markdown from its own model
-  is not admitted."* (a) Yes, add it. (b) Change the wording.
+- **C6, the word:** today's nav is the projects view, "All projects"; a
+  workspace exists only once someone makes one; code names stay.
+- **C8, which places a workspace shows:** its projects, then every place of
+  each project.
+- **C9, AGENTS.md:** yes. The owner: "We can fix the AGENTS.md file to remove
+  that contradiction." (main) handed the edit to the phase 0 lane, so it lands
+  in the PR that creates the companion bundle and its boundary check. The
+  wording to start from is the sentence below; this document does not edit
+  AGENTS.md. *"CodeMirror 6 is the third exception, only in the Ideas
+  companion bundle (`app/companion/`, with its own boundary check), because
+  ideas need a real editor and CodeMirror edits markdown as text, so the file
+  stays exactly what was typed. A rich-text editor that rewrites markdown from
+  its own model is not admitted."*
+
+**Still open**, recommended answer first:
+
 - **C10. Where the helping agent runs** (§7.2). (a) A session of its own
   against the ideas folder, one per request, shown in the chat view, with
   follow-ups through the chat view's existing send. (b) A one-shot headless
