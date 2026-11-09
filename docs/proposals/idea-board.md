@@ -4,6 +4,12 @@ title: "Proposal — ideas: thinking before a place exists"
 
 # Proposal — ideas: thinking before a place exists
 
+> **2026-11-08: the owner chose to build it, in phases.** After reading v1
+> and v2, the owner decided to build the idea board in v1's shape, inside
+> worktrees, phase by phase with a stop rule. That is v2's own C2(c) and
+> C3(b). The build plan is [Ideas: the phase plan](idea-board-phases.html).
+> The rest of this document is unchanged and stays as the reasoning.
+
 **Status:** product exploration, **version 2, 2026-11-06**. It replaces v1
 (`815fcb0`, the same day) after independent reviews by Codex and Kimi. Nothing
 is built and nothing here permits building it. "Ideas" remains a working name.
