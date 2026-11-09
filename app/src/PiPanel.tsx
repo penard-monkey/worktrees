@@ -106,6 +106,9 @@ export type PiHost = {
   backend: string; base_url: string | null; api: string | null; has_key: boolean; models: PiHostModel[];
   origin: "pi" | "worktrees"; overridden: boolean;
   reach: "served" | "up" | "down" | "unprobed"; served_undeclared: string[];
+  /** Served ids no declare can take (an `@` quantization variant). Absent from
+   *  an older host. */
+  served_unusable?: string[];
 };
 export type PiHosts = {
   path: string; file: "missing" | "ok" | "unreadable"; problem: string | null; load_error: string | null;
@@ -266,6 +269,12 @@ export function PiModelsSection({ settings, models, onChange, reloadModels, onFa
               <code>{id}</code><span className="pi-host-meta">served, not declared</span>
               {ours && <span className="pi-host-acts"><button className="ctrl sm" disabled={busy} data-testid="pi-declare"
                 onClick={() => void edit({ op: "declare", id: h.backend, model: id })}>Declare</button></span>}
+            </div>
+          ))}
+          {(h.served_unusable ?? []).map((id) => (
+            <div className="ver-row pi-host-model undeclared" key={`x:${h.backend}/${id}`} data-testid="pi-served-unusable">
+              <span className="pi-dot" aria-hidden="true" />
+              <code>{id}</code><span className="pi-host-meta">served; its name has characters pi's model ids cannot carry</span>
             </div>
           ))}
           {!ours && h.served_undeclared.length > 0 && <div className="hint">Override this host in worktrees to declare one.</div>}

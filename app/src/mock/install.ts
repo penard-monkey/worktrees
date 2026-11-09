@@ -159,7 +159,7 @@ const piHostsSwitch = () => new URLSearchParams(location.search).get("pihosts");
 const piHostReach = (backend: string): string =>
   backend === "lm-dead" || (backend === "lm-studio" && piHostsSwitch() === "dead") ? "down" : "served";
 const mockServed = (backend: string): string[] =>
-  backend === "lm-studio" && piHostsSwitch() === "undeclared" ? ["qwen3.6-27b", "qwen3-coder-next", "gemma-4-12b"] : [];
+  backend === "lm-studio" && piHostsSwitch() === "undeclared" ? ["qwen3.6-27b", "qwen3-coder-next", "gemma-4-12b", "qwen3-coder-next@q4_k_m"] : [];
 function mockPiHosts() {
   const own = [...mockOwnHosts.entries()].map(([backend, h]) => ({
     backend, base_url: h.base_url, api: h.api, has_key: true, models: h.models.map((m) => ({ ...m })),
@@ -173,7 +173,9 @@ function mockPiHosts() {
     hosts: [...own, ...pi].map((h) => {
       const reach = piHostReach(h.backend);
       const served = reach === "down" ? [] : mockServed(h.backend);
-      return { ...h, reach, served_undeclared: served.filter((s) => !h.models.some((m) => m.id === s)) };
+      const undeclared = served.filter((s) => !h.models.some((m) => m.id === s));
+      const ok = (s: string) => /^[A-Za-z0-9._/:-]+$/.test(s) && !s.startsWith("-");
+      return { ...h, reach, served_undeclared: undeclared.filter(ok), served_unusable: undeclared.filter((s) => !ok(s)) };
     }),
   };
 }

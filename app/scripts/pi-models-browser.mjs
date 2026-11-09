@@ -33,6 +33,7 @@ const hosts = (page) => page.$$eval("[data-testid=pi-host]", (els) => els.map((e
   tag: e.querySelector(".pi-host-tag")?.textContent,
   models: [...e.querySelectorAll("[data-testid=pi-host-model] code")].map((c) => c.textContent),
   undeclared: [...e.querySelectorAll("[data-testid=pi-served-undeclared] code")].map((c) => c.textContent),
+  unusable: [...e.querySelectorAll("[data-testid=pi-served-unusable]")].map((r) => [r.querySelector("code")?.textContent, !!r.querySelector("button")]),
   bad: !!e.querySelector(".pi-host-head .pi-dot.bad"),
 })));
 const host = async (page, origin, name) => (await hosts(page)).find((h) => h.origin === origin && h.name === name);
@@ -53,6 +54,7 @@ for (const [name, engine] of [["chromium", chromium], ["webkit", webkit]]) {
   ok(lms?.tag === "pi's config" && lms.models.join() === "qwen3.6-27b", `[${name}] pi's lm-studio is drawn read-only with its model`);
   ok(lms?.undeclared.join() === "qwen3-coder-next,gemma-4-12b", `[${name}] …and the two models it serves undeclared`);
   ok(await page.locator(inHost("pi", "lm-studio", "[data-testid=pi-declare]")).count() === 0, `[${name}] …with no Declare on pi's own host`);
+  ok(JSON.stringify(lms?.unusable) === JSON.stringify([["qwen3-coder-next@q4_k_m", false]]), `[${name}] a served id pi's ids cannot carry is listed with no button`);
   ok((await host(page, "pi", "lm-dead"))?.bad === true, `[${name}] a dead host's dot is the bad one`);
   ok(await page.locator("[data-testid=pi-models] .hint", { hasText: "exist only for pi started by worktrees" }).count() === 1,
     `[${name}] the page says the hosts are worktrees' only, and the resume trap`);
@@ -75,6 +77,7 @@ for (const [name, engine] of [["chromium", chromium], ["webkit", webkit]]) {
   await page.waitForFunction(() => [...document.querySelectorAll("[data-testid=pi-default-model] option")].some((o) => o.value === "lm-studio/qwen3-coder-next"), null, { timeout: 3000 }).catch(() => {});
   lms = await host(page, "worktrees", "lm-studio");
   ok(lms?.models.join() === "qwen3.6-27b,qwen3-coder-next" && lms.undeclared.join() === "gemma-4-12b", `[${name}] Declare moves a served model into the host`);
+  ok(JSON.stringify(lms?.unusable) === JSON.stringify([["qwen3-coder-next@q4_k_m", false]]), `[${name}] …and on our override the unusable id still has no Declare`);
   ok((await options(page)).includes("lm-studio/qwen3-coder-next"), `[${name}] …and the default-model picker offers it, no reload`);
 
   ok((await unreachable(page)).length === 0, `[${name}] every button is reachable: ${JSON.stringify(await unreachable(page))}`);

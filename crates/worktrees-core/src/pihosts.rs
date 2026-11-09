@@ -222,13 +222,33 @@ fn validate_count(what: &str, n: Option<u64>) -> Result<(), String> {
 static EDIT: Mutex<()> = Mutex::new(());
 
 /// Read, change and replace the file at `path` under one lock, refusing when
-/// it changed on disk between the read and the swap (the user may edit it by
-/// hand). An unreadable file is never overwritten.
+/// it changed on disk between the read and the swap. An unreadable file is
+/// never overwritten.
+///
+/// The lock is `workspaces::edit_at`'s: a mutex for this process's threads
+/// and an `flock` on a `.lock` sidecar for every process (the CLI, serve, an
+/// MCP server). A hand edit takes no lock, which is what the compare before
+/// the swap is for.
 pub fn edit_at<R>(path: &Path, f: impl FnOnce(&mut Owned) -> Result<R, String>) -> Result<R, String> {
+    use std::os::fd::AsRawFd;
     if path == data_path() && crate::registry::real_writes_forbidden() {
         return Err(format!("refused: a test reached the user's real {} — use edit_at with a temp path", FILE));
     }
     let _g = EDIT.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let lock_path = dir.join(format!("{FILE}.lock"));
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|e| format!("{}: {e}", lock_path.display()))?;
+    // SAFETY: flock gets a live descriptor; `lock` outlives the critical
+    // section and closing it releases the lock on every exit path.
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        return Err(format!("could not lock {}", lock_path.display()));
+    }
     let before = std::fs::read(path).ok();
     let mut owned = read_at(path)?;
     owned.version = 1;
@@ -237,10 +257,8 @@ pub fn edit_at<R>(path: &Path, f: impl FnOnce(&mut Owned) -> Result<R, String>) 
     if std::fs::read(path).ok() != before {
         return Err(format!("{} changed while it was being edited; nothing was written. Try again.", path.display()));
     }
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-    }
     crate::fsx::write_atomic(path, &bytes, None).map_err(|e| format!("{}: {e}", path.display()))?;
+    drop(lock);
     Ok(r)
 }
 
@@ -365,16 +383,27 @@ pub fn ext_source(data: &Path) -> String {
     EXT_SOURCE.replacen("__DATA__", &lit, 1)
 }
 
-/// Write the extension into `dir` unless the file there already holds exactly
-/// this source: compared on every call, never trusted because it exists.
+/// Write the extension under `dir`, in a directory named by a hash of its
+/// whole source (the data path included), unless the file there already holds
+/// exactly this source: compared on every call, never trusted because it
+/// exists. Different sources never share a path, so a pi that loads its file
+/// a moment after its launch line was built reads what that line meant — even
+/// while an older build still running, or an engine with its own config dir
+/// beside the shared data dir, writes its own.
 pub fn materialize_at(dir: &Path, data: &Path) -> Result<PathBuf, String> {
-    let file = dir.join(EXT_FILE);
     let src = ext_source(data);
+    let dir = dir.join(format!("{:016x}", fnv1a(src.as_bytes())));
+    let file = dir.join(EXT_FILE);
     if std::fs::read(&file).ok().as_deref() != Some(src.as_bytes()) {
-        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
         crate::fsx::write_atomic(&file, src.as_bytes(), None).map_err(|e| format!("{}: {e}", file.display()))?;
     }
     Ok(file)
+}
+
+/// FNV-1a: stable across Rust versions, which a directory name must be.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3))
 }
 
 /// The extension every pi worktrees starts loads, or `None` when it cannot be
@@ -497,6 +526,23 @@ mod tests {
         assert!(read_at(&p).unwrap_err().contains("not valid"));
         assert!(edit_at(&p, |o| add_host(o, "x", "http://h:1/v1", "openai-completions", &[])).is_err());
         assert_eq!(std::fs::read(&p).unwrap(), b"{not json");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Two engines with different data files (a scratch serve's own
+    /// XDG_CONFIG_HOME beside the user's), or two builds, must never write
+    /// one path: a pi that loads it a moment after its launch line was built
+    /// would read the other's hosts.
+    #[test]
+    fn different_extension_sources_never_share_a_path() {
+        let d = tmp("ext-two");
+        let a = materialize_at(&d, &d.join("a/pi-models.json")).unwrap();
+        let b = materialize_at(&d, &d.join("b/pi-models.json")).unwrap();
+        assert_ne!(a, b, "two sources, two paths");
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), ext_source(&d.join("a/pi-models.json")), "a kept its own source");
+        assert_eq!(std::fs::read_to_string(&b).unwrap(), ext_source(&d.join("b/pi-models.json")));
+        assert_eq!(materialize_at(&d, &d.join("a/pi-models.json")).unwrap(), a, "the same source, the same path");
+        assert!(a.ends_with(EXT_FILE));
         let _ = std::fs::remove_dir_all(&d);
     }
 

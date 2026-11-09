@@ -582,6 +582,10 @@ pub struct HostView {
     /// Ids the host's `/models` lists that this host does not declare —
     /// models pi cannot use until they are declared.
     pub served_undeclared: Vec<String>,
+    /// Served, undeclared ids the model rule (`choice::validate_model`)
+    /// refuses, so no declare can take them (LM Studio's `name@q4_k_m`
+    /// quantization variants carry an `@`).
+    pub served_unusable: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -637,7 +641,9 @@ pub fn host_views(own: Vec<Host>, pi: Vec<Host>, reach: &dyn Fn(&str) -> Option<
                 Some(Some(Reach::Up)) => ("up", Vec::new()),
                 Some(Some(Reach::Served(ids))) => ("served", served_undeclared(&ids, &h.models)),
             };
-            HostView { host: h, origin, overridden, reach, served_undeclared }
+            let (served_undeclared, served_unusable): (Vec<String>, Vec<String>) =
+                served_undeclared.into_iter().partition(|id| crate::choice::validate_model(id).is_ok());
+            HostView { host: h, origin, overridden, reach, served_undeclared, served_unusable }
         })
         .collect()
 }
@@ -983,11 +989,14 @@ mod tests {
     fn a_host_view_says_what_it_serves_that_is_not_declared() {
         let h = parse_hosts(COMMENTED).unwrap();
         let served = |u: &str| match u {
-            "http://h:1234/v1" => Some(Reach::Served(vec!["qwen3-coder-next".into(), "new-one".into(), "new-one".into()])),
+            "http://h:1234/v1" => {
+                Some(Reach::Served(vec!["qwen3-coder-next".into(), "new-one".into(), "new-one".into(), "qwen3@q4_k_m".into()]))
+            }
             _ => Some(Reach::Down),
         };
         let v = host_views(vec![], h.clone(), &served);
         assert_eq!((v[0].reach, v[0].served_undeclared.clone()), ("served", vec!["new-one".to_string()]));
+        assert_eq!(v[0].served_unusable, ["qwen3@q4_k_m"], "an id no declare can take has no Declare");
         assert_eq!((v[1].reach, v[1].served_undeclared.len()), ("down", 0));
         assert!(v.iter().all(|x| x.origin == "pi" && !x.overridden));
         let mut built_in = h[0].clone();

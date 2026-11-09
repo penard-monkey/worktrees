@@ -562,7 +562,7 @@ pub fn materialize_in(data_root: &Path, bin: Option<&Path>, skill: &str) -> Resu
 
 /// Write `files` under `<data_root>/agent/<hash of them>/`, once. Content-
 /// addressed so a running session's `--plugin-dir` never changes under it.
-pub(crate) fn write_hashed(data_root: &Path, files: &[(String, String)]) -> Result<PathBuf, String> {
+fn write_hashed(data_root: &Path, files: &[(String, String)]) -> Result<PathBuf, String> {
     let dir = data_root.join("agent").join(format!("{:016x}", fnv1a(files)));
     if !dir.join(".complete").is_file() {
         // Build beside it and rename into place, so a reader never sees half a
