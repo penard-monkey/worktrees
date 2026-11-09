@@ -1,8 +1,103 @@
-/* The Ideas companion window. Sized and coloured from tokens.css alone. */
+/* The Ideas window. Sized and coloured from tokens.css alone; App.css is
+   loaded before this for the Read view's `.md` rules and the shared base.
+   Classes are `ix-` so nothing here restyles an App.css class (a shared
+   class restyled for one host restyles the others — AGENTS.md).
+
+   Surfaces: the list is `--bg-panel`, the document `--bg-abyss` (the body).
+   They differ in every theme; `--bg-input` would equal the body in
+   catppuccin-mocha. Words take `--txt-hi` / `--txt`: `--txt-dim` reads
+   2.8:1 on the body in tokyo-day and under 4.5 on the panel in the light
+   themes and nord (measured, ideas-browser.mjs), so even an age or a status
+   is `--txt`, set smaller instead of dimmer. An accent
+   or danger token is a FILL or a border here, never 11px text on its tint. */
 html, body, #root { height: 100%; margin: 0; }
 * { box-sizing: border-box; }
 body { font-family: var(--font-ui); background: var(--bg-abyss); color: var(--txt); font-size: var(--fs-body); }
-.cmp { height: 100%; display: grid; place-items: center; padding: 0 16px; }
-.cmp-empty { text-align: center; max-width: 36rem; }
-.cmp-title { margin: 0; color: var(--txt-dim); font-size: 1rem; }
-.cmp-engine { margin: var(--s2) 0 0; color: var(--txt-dim); font-size: var(--fs-meta); }
+
+/* [list | document | side]: the side column is the agent panel's (phase 6),
+   zero-wide until it exists. `minmax(0, 1fr)`, so a long line in the editor
+   never widens the grid (the min-content ratchet). */
+.ix { height: 100%; display: grid; grid-template-columns: minmax(200px, 280px) minmax(0, 1fr) 0; }
+
+/* ── buttons: plain inline boxes. A <button> that is itself a flex container
+   is shrink-wrapped by WebKit without its overflow:hidden children
+   (AGENTS.md), so none of these is one. */
+.ix-btn {
+  display: inline-block; flex: none; white-space: nowrap;
+  font-size: var(--fs-label); line-height: 1.4; padding: 3px 10px;
+  border: 1px solid var(--line-strong); border-radius: 5px;
+  background: var(--bg-elev); color: var(--txt-hi);
+}
+.ix-btn:hover:not(:disabled) { border-color: var(--accent); }
+.ix-btn:disabled { color: var(--txt-mute); cursor: default; }
+.ix-btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: var(--fw-bold); }
+.ix-btn-small { font-size: var(--fs-meta); padding: 1px 8px; }
+.ix-btn-quiet { background: transparent; border-color: transparent; color: var(--txt); }
+.ix-btn-quiet:hover { color: var(--txt-hi); border-color: var(--line-strong); }
+/* Armed: the hue is the border and a tint; the words stay --txt-hi. */
+.ix-btn-armed { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 16%, var(--bg-elev)); }
+.ix-quiet { color: var(--txt); font-size: var(--fs-meta); margin: 0; }
+
+/* ── the list ── */
+.ix-list { display: flex; flex-direction: column; min-height: 0; min-width: 0; background: var(--bg-panel); border-right: 1px solid var(--line); }
+.ix-list-head { display: flex; flex-direction: column; gap: var(--s2); padding: var(--s3); border-bottom: 1px solid var(--line); }
+.ix-filter {
+  width: 100%; font-size: var(--fs-body); padding: 4px 8px;
+  border: 1px solid var(--line-strong); border-radius: 5px;
+  background: var(--bg-abyss); color: var(--txt-hi);
+}
+.ix-filter::placeholder { color: var(--txt-mute); }
+.ix-filter:focus { outline: none; border-color: var(--accent); }
+.ix-rows { list-style: none; margin: 0; padding: var(--s1) 0; overflow-y: auto; flex: 1 1 auto; min-height: 0; }
+.ix-row { margin: 0 var(--s2); border-radius: 5px; }
+.ix-row.on { background: var(--bg-elev); }
+.ix-row-main {
+  display: block; width: 100%; text-align: left; padding: var(--row-pad-v) var(--row-pad-h);
+  border: 0; background: transparent; color: var(--txt); font-size: var(--fs-row); border-radius: 5px;
+}
+button.ix-row-main:hover { background: var(--bg-elev); }
+.ix-row.on .ix-row-main { color: var(--txt-hi); }
+/* On --bg-elev, --txt measured 4.05:1 in catppuccin-latte. */
+.ix-row.on .ix-row-age { color: var(--txt-hi); }
+.ix-row-title { display: inline-block; max-width: calc(100% - 3em); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+.ix-row-age { float: right; color: var(--txt); font-size: var(--fs-meta); line-height: var(--lh-row); padding-top: 1px; }
+.ix-row-static { cursor: default; color: var(--txt); }
+.ix-row-problem .ix-row-title { font-style: italic; }
+.ix-row-why { display: flex; align-items: center; gap: var(--s2); padding: 0 var(--row-pad-h) var(--row-pad-v); color: var(--txt); font-size: var(--fs-meta); }
+.ix-row-why > span { flex: 1 1 auto; min-width: 0; }
+.ix-list-empty { padding: var(--s3); }
+.ix-list-foot { padding: var(--s2) var(--s3); border-top: 1px solid var(--line); display: flex; flex-direction: column; align-items: flex-start; gap: var(--s1); }
+.ix-list-foot .ix-quiet { overflow-wrap: anywhere; }
+
+/* ── the document ── */
+.ix-doc { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.ix-side { min-width: 0; overflow: hidden; }
+.ix-head { display: flex; align-items: center; gap: var(--s3); padding: var(--s2) var(--s4); border-bottom: 1px solid var(--line); min-height: 44px; flex-wrap: wrap; }
+.ix-title { margin: 0; font-size: var(--fs-h); font-weight: var(--fw-bold); color: var(--txt-hi); flex: 1 1 12rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ix-rename { flex: 1 1 12rem; min-width: 0; font-size: var(--fs-h); font-weight: var(--fw-bold); padding: 2px 6px; border: 1px solid var(--accent); border-radius: 5px; background: var(--bg-panel); color: var(--txt-hi); }
+.ix-rename:focus { outline: none; }
+.ix-tools { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; }
+.ix-state { color: var(--txt); font-size: var(--fs-meta); min-width: 5.5em; text-align: right; }
+/* Edit | Read: a segmented pair. Not `.seg` — App.css's `.seg` is Settings'. */
+.ix-seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: 5px; overflow: hidden; flex: none; }
+.ix-seg > button { display: inline-block; border: 0; background: transparent; color: var(--txt); font-size: var(--fs-label); padding: 3px 10px; line-height: 1.4; }
+.ix-seg > button + button { border-left: 1px solid var(--line-strong); }
+.ix-seg > button.on { background: var(--bg-elev); color: var(--txt-hi); font-weight: var(--fw-med); }
+
+.ix-banner, .ix-notice {
+  display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap;
+  padding: var(--s2) var(--s4); border-bottom: 1px solid var(--line);
+  background: var(--bg-panel); color: var(--txt-hi); font-size: var(--fs-body);
+}
+.ix-banner { border-left: 3px solid var(--warn); }
+.ix-banner > span, .ix-notice > span { flex: 1 1 16rem; min-width: 0; }
+.ix-engine { margin: 0; padding: var(--s2) var(--s4); color: var(--txt); font-size: var(--fs-meta); border-bottom: 1px solid var(--line); }
+
+.ix-body { position: relative; flex: 1 1 auto; min-height: 0; }
+.ix-editor { position: absolute; inset: 0; }
+.ix-editor[hidden] { display: none; }
+.ix-read { position: absolute; inset: 0; overflow-y: auto; }
+.ix-read > .md { margin: 0 auto; padding-top: var(--s5); }
+
+.ix-none { flex: 1 1 auto; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; padding: 0 16px; gap: var(--s2); }
+.ix-none-title { margin: 0; color: var(--txt-dim); font-size: 1rem; }

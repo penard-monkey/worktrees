@@ -30,8 +30,18 @@ fn root(ctx: &Ctx) -> &Path {
     ctx.ideas_dir()
 }
 
-pub fn ideas_list(ctx: &Ctx) -> Result<Index, String> {
-    ideas::list_at(root(ctx))
+/// `ideas_list`'s answer: the index, and the folder it was read from — the
+/// one path this module hands out, for the window's Show in Finder (a reveal
+/// on the HOST, through `onhost.ts`; every row still takes an id, never it).
+#[derive(Serialize)]
+pub struct Listing {
+    #[serde(flatten)]
+    pub index: Index,
+    pub dir: String,
+}
+
+pub fn ideas_list(ctx: &Ctx) -> Result<Listing, String> {
+    Ok(Listing { index: ideas::list_at(root(ctx))?, dir: root(ctx).to_string_lossy().into_owned() })
 }
 
 pub fn idea_read(ctx: &Ctx, id: String) -> Result<Doc, String> {
@@ -43,9 +53,15 @@ pub fn idea_create(ctx: &Ctx, title: Option<String>) -> Result<Doc, String> {
     ideas::create_at(root(ctx), title.as_deref().unwrap_or(""))
 }
 
-/// Save `content` byte for byte; the saved mtime comes back.
-pub fn idea_write(ctx: &Ctx, id: String, content: String, expected_mtime: Option<u64>) -> Result<u64, String> {
-    ideas::write_at(root(ctx), &id, &content, expected_mtime)
+/// Save `content` byte for byte; the saved mtime comes back. `keep_history`
+/// copies the file's current bytes to `.history/` first (a person keeping
+/// their text over an edit made elsewhere); an ordinary save never sets it.
+pub fn idea_write(ctx: &Ctx, id: String, content: String, expected_mtime: Option<u64>, keep_history: Option<bool>) -> Result<u64, String> {
+    if keep_history == Some(true) {
+        ideas::write_kept_at(root(ctx), &id, &content, expected_mtime)
+    } else {
+        ideas::write_at(root(ctx), &id, &content, expected_mtime)
+    }
 }
 
 pub fn idea_rename(ctx: &Ctx, id: String, title: String, expected_mtime: Option<u64>) -> Result<Doc, String> {

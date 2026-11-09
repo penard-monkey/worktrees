@@ -1795,16 +1795,60 @@ const ideaFree = (stem: string, own?: string) => {
   for (let n = 1; ; n++) { const f = n === 1 ? `${stem}.md` : `${stem}-${n}.md`; if (f === own || !mockIdeas.has(f)) return f; }
 };
 const ideaRow = (d: MockIdea) => ({
-  id: d.id, title: ideaTitle(d.content) ?? d.file.replace(/\.md$/, ""), file: d.file, created: d.created,
-  mtime_ms: d.mtime_ms, size: new TextEncoder().encode(d.content).length, ...(d.id ? {} : { problem: "no-id" }),
+  id: d.id && /^[0-9A-HJKMNP-TV-Z]{26}$/.test(d.id) ? d.id : null, title: ideaTitle(d.content) ?? d.file.replace(/\.md$/, ""), file: d.file, created: d.created,
+  mtime_ms: d.mtime_ms, size: new TextEncoder().encode(d.content).length,
+  ...(d.id ? (/^[0-9A-HJKMNP-TV-Z]{26}$/.test(d.id) ? {} : { problem: "bad-id" }) : { problem: "no-id" }),
 });
 const ideaById = (id: string) => {
+  if (!/^[0-9A-HJKMNP-TV-Z]{26}$/.test(id)) throw `not an idea id: "${id}"`;
   for (const d of mockIdeas.values()) if (d.id === id) return d;
   throw `no idea has the id ${id}`;
 };
 const ideaCas = (d: MockIdea, exp: unknown) => {
   if (exp != null && exp !== d.mtime_ms) throw "the idea changed on disk since you opened it — reload to see the latest";
 };
+/** The poll's stand-in (worktrees_api::ideas::tick): a tick after any change
+ *  to the folder sends `ideas:changed` with what moved since the last one —
+ *  our own writes included, a tick late, as the real poll does. The tick is
+ *  `?ideastick=<ms>` (default 300; the real one is 3 s). */
+const IDEAS_TICK = Number(new URLSearchParams(location.search).get("ideastick") ?? 300);
+let ideasSeen = new Map<string, string>(); // id → "mtime|size"
+let ideasTickTimer: number | null = null;
+const ideasSnapshot = () => new Map([...mockIdeas.values()].filter((d) => d.id).map((d) => [d.id!, `${d.mtime_ms}|${d.content.length}`]));
+function ideasTouched() {
+  if (ideasTickTimer !== null) return;
+  ideasTickTimer = window.setTimeout(() => {
+    ideasTickTimer = null;
+    const now = ideasSnapshot();
+    const changed = [...now].filter(([id, m]) => ideasSeen.get(id) !== m).map(([id, m]) => ({ id, mtime_ms: Number(m.split("|")[0]) }));
+    const removed = [...ideasSeen.keys()].filter((id) => !now.has(id));
+    ideasSeen = now;
+    emitEvent("ideas:changed", { changed, removed });
+  }, IDEAS_TICK);
+}
+/** Every idea_write the page sent, in order (`__mock.ideaWrites()`). */
+const mockIdeaWrites: { id: string; content: string; expected_mtime: unknown; keep_history: boolean }[] = [];
+/** What `idea_write` with `keep_history` copied aside (`__mock.ideaHistory()`). */
+const mockIdeaHistory: { id: string; content: string }[] = [];
+/** The mtime an outside act gives a file: later than anything before it,
+ *  even inside one millisecond. */
+let mockIdeaClock = 0;
+const ideaNow = () => (mockIdeaClock = Math.max(Date.now(), mockIdeaClock + 1));
+/** `?ideas=seed`: three ideas, a hand-made file, one with a bad id, and a
+ *  skipped entry, so the list has every kind of row. */
+const mockIdeaSkipped: string[] = [];
+if (new URLSearchParams(location.search).get("ideas") === "seed") {
+  const day = 86_400_000, t0 = Date.now();
+  const seed = (file: string, id: string | null, content: string, ago: number) =>
+    mockIdeas.set(file, { id, file, content, mtime_ms: t0 - ago, created: id ? "2026-11-01" : null });
+  seed("jellyfin-on-the-home-server.md", "01JC8Z4K3M9QX2T7VB00000901", "---\nid: 01JC8Z4K3M9QX2T7VB00000901\ncreated: 2026-11-01\nrelated: [01JC8Z4K3M9QX2T7VB00000902]\n---\n\n# Jellyfin on the home server\n\n<!-- ¶ 7k2q -->\n- transcode on the **GPU**?\n- which *box*\n\n| box | gpu |\n|---|---|\n| nuc | none |\n\n```mermaid\ngraph TD; A-->B\n```\n", 2 * 3600_000);
+  seed("home-server-gpu.md", "01JC8Z4K3M9QX2T7VB00000902", "---\r\nid: 01JC8Z4K3M9QX2T7VB00000902\r\ncreated: 2026-11-01\r\n---\r\n\r\n# Home server GPU\r\n\r\nA CRLF file.\r\n", 3 * day);
+  seed("media-library-tidy.md", "01JC8Z4K3M9QX2T7VB00000903", "---\nid: 01JC8Z4K3M9QX2T7VB00000903\ncreated: 2026-10-20\n---\n\n# Media library tidy\n", 8 * day);
+  seed("notes-from-the-train.md", null, "# Notes from the train\n\nWritten in another editor.\n", 5 * day);
+  seed("broken.md", "not-a-ulid", "---\nid: not-a-ulid\n---\n\n# Broken id\n", 20 * day);
+  mockIdeaSkipped.push("a-link.md");
+}
+ideasSeen = ideasSnapshot();
 // dock shell sidecars, keyed "repo|slug" → set of 1-based tab indices
 const shellSidecars = new Map<string, Set<number>>();
 // exited-but-kept shells (mirrors the real registry's try_wait liveness) — the
@@ -3723,7 +3767,7 @@ Phase 3: Frontend pane and mock harness
     }
     // ── ideas (idea board phase 1): see `mockIdeas` ──────────────────────────
     case "ideas_list":
-      return { ideas: [...mockIdeas.values()].sort((a, b) => b.mtime_ms - a.mtime_ms).map(ideaRow), skipped: [] };
+      return { ideas: [...mockIdeas.values()].sort((a, b) => b.mtime_ms - a.mtime_ms).map(ideaRow), skipped: mockIdeaSkipped.slice(), dir: "/Users/mock/.local/share/worktrees/ideas" };
     case "idea_read": {
       const d = ideaById(args.id as string);
       return { ...ideaRow(d), content: d.content };
@@ -3732,8 +3776,9 @@ Phase 3: Frontend pane and mock harness
       const title = String(args.title ?? "").trim() || "Untitled";
       const id = ideaId();
       const created = new Date().toISOString().slice(0, 10);
-      const d: MockIdea = { id, file: ideaFree(ideaSlug(title)), created, mtime_ms: Date.now(), content: `---\nid: ${id}\ncreated: ${created}\n---\n\n# ${title}\n` };
+      const d: MockIdea = { id, file: ideaFree(ideaSlug(title)), created, mtime_ms: ideaNow(), content: `---\nid: ${id}\ncreated: ${created}\n---\n\n# ${title}\n` };
       mockIdeas.set(d.file, d);
+      ideasTouched();
       return { ...ideaRow(d), content: d.content };
     }
     case "idea_write": {
@@ -3741,8 +3786,13 @@ Phase 3: Frontend pane and mock harness
       const content = args.content as string;
       const carried = ideaFront(content, "id");
       if (carried !== args.id) throw carried ? `the text carries the id ${carried}, not ${args.id}: refusing to save one idea over another` : `the text has no id: keep the frontmatter's \`id: ${args.id}\` line`;
+      const keep = (args.keepHistory ?? args.keep_history) === true;
+      mockIdeaWrites.push({ id: args.id as string, content, expected_mtime: args.expectedMtime ?? args.expected_mtime, keep_history: keep });
       ideaCas(d, args.expectedMtime ?? args.expected_mtime);
-      if (d.content !== content) { d.content = content; d.mtime_ms = Date.now(); }
+      if (d.content !== content) {
+        if (keep) mockIdeaHistory.push({ id: d.id!, content: d.content });
+        d.content = content; d.mtime_ms = ideaNow(); ideasTouched();
+      }
       return d.mtime_ms;
     }
     case "idea_rename": {
@@ -3752,14 +3802,16 @@ Phase 3: Frontend pane and mock harness
       d.content = /^ {0,3}# .*$/m.test(d.content) ? d.content.replace(/^( {0,3})# .*$/m, `# ${title}`) : `${d.content}\n# ${title}\n`;
       mockIdeas.delete(d.file);
       d.file = ideaFree(ideaSlug(title), d.file);
-      d.mtime_ms = Date.now();
+      d.mtime_ms = ideaNow();
       mockIdeas.set(d.file, d);
+      ideasTouched();
       return { ...ideaRow(d), content: d.content };
     }
     case "idea_remove": {
       const d = ideaById(args.id as string);
       ideaCas(d, args.expectedMtime ?? args.expected_mtime);
       mockIdeas.delete(d.file);
+      ideasTouched();
       return null;
     }
     case "idea_adopt": {
@@ -3771,7 +3823,8 @@ Phase 3: Frontend pane and mock harness
       d.id = ideaId();
       d.created = d.created ?? new Date().toISOString().slice(0, 10);
       d.content = `---\nid: ${d.id}\ncreated: ${d.created}\n---\n\n${d.content}`;
-      d.mtime_ms = Date.now();
+      d.mtime_ms = ideaNow();
+      ideasTouched();
       return { ...ideaRow(d), content: d.content };
     }
     // Dock shells are PTYs the backend OWNS (no tmux). The mock models the
@@ -5707,6 +5760,28 @@ let mockNotifyGranted = new URLSearchParams(location.search).get("notify") === "
   send: (title: string, body: string) => { mockNotified.push({ title, body }); },
 };
 (window as any).__mock = {
+  // ── ideas: what another editor, Finder or a person does to the folder ──
+  /** Every idea_write the page sent, in order. */
+  ideaWrites: () => mockIdeaWrites.slice(),
+  /** The copies `keep_history` writes took (the real store's `.history/`). */
+  ideaHistory: (id?: string) => mockIdeaHistory.filter((h) => !id || h.id === id),
+  /** An idea's bytes and mtime as the "disk" holds them. */
+  ideaFile(id: string) { const d = [...mockIdeas.values()].find((x) => x.id === id); return d ? { file: d.file, content: d.content, mtime_ms: d.mtime_ms } : null; },
+  /** Another editor saves `content` over the idea `id` (the next tick reports it). */
+  ideaEditElsewhere(id: string, content: string) { const d = ideaById(id); d.content = content; d.mtime_ms = ideaNow(); ideasTouched(); },
+  /** The idea's file is deleted elsewhere (Finder, `rm`). */
+  ideaRemoveElsewhere(id: string) { const d = ideaById(id); mockIdeas.delete(d.file); ideasTouched(); },
+  /** An editor that saves by rename: the poll sees the file gone, and it is
+   *  back (with new bytes) before the page's idea_read reaches it. */
+  ideaFlickerElsewhere(id: string, content: string) {
+    const d = ideaById(id);
+    ideasSeen.delete(id);
+    d.content = content; d.mtime_ms = ideaNow();
+    emitEvent("ideas:changed", { changed: [], removed: [id] });
+    ideasSeen.set(id, `${d.mtime_ms}|${d.content.length}`);
+  },
+  /** A person drops a markdown file into the folder by hand. */
+  ideaDrop(file: string, content: string) { mockIdeas.set(file, { id: null, file, content, mtime_ms: ideaNow(), created: null }); ideasTouched(); },
   /** Every notification the app sent, oldest first. */
   notifications: () => mockNotified.slice(),
   /** A backend provider switch, followed by its workspace push. `canonicalShell`

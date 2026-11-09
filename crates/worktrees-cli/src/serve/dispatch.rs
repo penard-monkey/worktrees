@@ -1264,7 +1264,7 @@ commands! { cx, a;
     ideas_list: HostConsole => ideas::ideas_list(&cx.ctx),
     idea_read: HostConsole => ideas::idea_read(&cx.ctx, a.get("id")?),
     idea_create: HostConsole => ideas::idea_create(&cx.ctx, a.get("title")?),
-    idea_write: HostConsole => ideas::idea_write(&cx.ctx, a.get("id")?, a.get("content")?, a.get("expected_mtime")?),
+    idea_write: HostConsole => ideas::idea_write(&cx.ctx, a.get("id")?, a.get("content")?, a.get("expected_mtime")?, a.get("keep_history")?),
     idea_rename: HostConsole => ideas::idea_rename(&cx.ctx, a.get("id")?, a.get("title")?, a.get("expected_mtime")?),
     idea_remove: HostConsole => ideas::idea_remove(&cx.ctx, a.get("id")?, a.get("expected_mtime")?),
     idea_adopt: HostConsole => ideas::idea_adopt(&cx.ctx, a.get("file")?, a.get("expected_mtime")?),
@@ -1821,7 +1821,9 @@ mod tests {
         let folder = dir.join("ideas");
         let c = Call { ctx: c.ctx.clone().with_ideas_dir(folder.clone()), ..c };
         let run = |cmd: &str, v: Value| super::call(&c, cmd, &args(v));
-        assert_eq!(run("ideas_list", json!({})).unwrap()["ideas"], json!([]));
+        let l0 = run("ideas_list", json!({})).unwrap();
+        assert_eq!(l0["ideas"], json!([]));
+        assert_eq!(l0["dir"], json!(folder.to_string_lossy()), "the folder, for Show in Finder");
         assert!(!folder.exists(), "a listing creates nothing");
         let d = run("idea_create", json!({"title": "Jellyfin", "path": "/etc"})).unwrap();
         let id = d["id"].as_str().unwrap().to_string();
@@ -1830,6 +1832,11 @@ mod tests {
         let text = format!("{}<!-- ¶ 7k2q -->\n", d["content"].as_str().unwrap());
         let m = run("idea_write", json!({"id": id, "content": text, "expectedMtime": d["mtime_ms"]})).unwrap();
         assert_eq!(std::fs::read_to_string(folder.join("jellyfin.md")).unwrap(), text);
+        let kept = format!("{text}kept\n");
+        let m = run("idea_write", json!({"id": id, "content": kept, "expectedMtime": m, "keepHistory": true})).unwrap();
+        assert_eq!(std::fs::read_dir(folder.join(".history").join(&id)).unwrap().count(), 1, "keep_history copies the replaced text");
+        let m = run("idea_write", json!({"id": id, "content": text, "expectedMtime": m})).unwrap();
+        assert_eq!(std::fs::read_dir(folder.join(".history").join(&id)).unwrap().count(), 1, "an ordinary save copies nothing");
         let e = run("idea_write", json!({"id": id, "content": text, "expected_mtime": 1})).unwrap_err();
         assert!(e.as_str().unwrap().contains("changed on disk"), "{e}");
         let other = run("idea_create", json!({})).unwrap();
