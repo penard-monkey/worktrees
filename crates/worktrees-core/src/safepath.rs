@@ -382,20 +382,44 @@ pub fn image_dims(bytes: &[u8], mime: &str) -> Option<(u64, u64)> {
     }
 }
 
+/// `bytes` is an SVG a text scan can be trusted on (see `check_image`).
+fn svg_is_plain_utf8(bytes: &[u8]) -> bool {
+    let Ok(text) = std::str::from_utf8(bytes) else { return false };
+    if bytes.iter().any(|&b| b == 0 || b == 0x1b) {
+        return false;
+    }
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let lower = text.to_ascii_lowercase();
+    let Some(rest) = lower.strip_prefix("<?xml") else { return true };
+    // `<?xml` must be followed by XML whitespace to be the declaration at all
+    if !rest.starts_with([' ', '\t', '\r', '\n']) {
+        return true;
+    }
+    // the whole input is searched for the end of the declaration, never a window
+    let Some(decl) = rest.split("?>").next().filter(|_| rest.contains("?>")) else { return false };
+    const WS: [char; 4] = [' ', '\t', '\r', '\n'];
+    let Some((_, after)) = decl.split_once("encoding") else { return true };
+    let after = after.trim_start_matches(WS);
+    let Some(after) = after.strip_prefix('=') else { return false };
+    let after = after.trim_start_matches(WS);
+    let Some(q) = after.chars().next().filter(|c| *c == '"' || *c == '\'') else { return false };
+    let Some(value) = after[1..].split(q).next() else { return false };
+    value == "utf-8" || value == "us-ascii"
+}
+
 /// Refuse an image the viewer must not be handed: a raster over
 /// [`MAX_IMAGE_PIXELS`] by its header (or one whose header says nothing), an
 /// SVG that declares a DOCTYPE or an ENTITY (entity expansion: a small file
 /// that unfolds to gigabytes in a parser). `path` is only for the words.
 pub fn check_image(bytes: &[u8], mime: &str, path: &str) -> Result<(), String> {
     if mime == "image/svg+xml" {
-        // The scan below reads ASCII, so only an encoding it can read is let
-        // through: UTF-16/32 (a BOM, or NULs between the letters) and an XML
-        // declaration naming any encoding but UTF-8/US-ASCII would hide a
-        // DOCTYPE from it and show it to the browser's parser.
-        let declared = String::from_utf8_lossy(&bytes[..bytes.len().min(256)]).to_ascii_lowercase();
-        let encoding = declared.strip_prefix('\u{feff}').unwrap_or(&declared).trim_start().strip_prefix("<?xml").and_then(|d| d.split("?>").next()).and_then(|d| d.split("encoding").nth(1)).map(|e| e.trim_start_matches(|c: char| c == '=' || c == ' ' || c == '"' || c == '\'').split(|c: char| c == '"' || c == '\'').next().unwrap_or("").to_string());
-        let odd_encoding = encoding.is_some_and(|e| e != "utf-8" && e != "us-ascii");
-        if bytes.contains(&0) || bytes.starts_with(&[0xff, 0xfe]) || bytes.starts_with(&[0xfe, 0xff]) || odd_encoding {
+        // The scan below reads text, so only text it can read is let through, and
+        // everything else fails CLOSED: not valid UTF-8 (UTF-16/32, EBCDIC, any
+        // legacy code page), a NUL or ESC byte (ISO-2022 switches charsets by
+        // ESC), or an XML declaration that is unterminated or names any encoding
+        // but UTF-8/US-ASCII would hide a DOCTYPE or ENTITY from it and show it to
+        // the browser's parser.
+        if !svg_is_plain_utf8(bytes) {
             return Err(format!("not shown: an SVG that is not plain UTF-8 is refused: {path}"));
         }
         // EVERY byte that will be handed on, never a prefix: a DOCTYPE past the
@@ -691,6 +715,22 @@ mod tests {
         let latin = b"<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><svg/>";
         assert!(check_image(latin, "image/svg+xml", "i.svg").unwrap_err().contains("not plain UTF-8"));
         assert!(check_image(b"<?xml version='1.0' encoding='UTF-8'?><svg/>", "image/svg+xml", "ok.svg").is_ok());
+        // fail closed: a declaration past 256 bytes of padding, an unterminated one,
+        // tab/newline spellings, a legacy byte, ESC, EBCDIC
+        let pad = " ".repeat(400);
+        for bad in [
+            format!("<?xml version=\"1.0\"{pad} encoding=\"UTF-16\"?><svg/>"),
+            "<?xml version=\"1.0\" <svg/>".to_string(),
+            "<?xml version=\"1.0\"\n\tencoding\n=\r\"shift_jis\"?><svg/>".to_string(),
+            "<?xml version=\"1.0\" encoding=iso-8859-1?><svg/>".to_string(),
+            "<svg>\x1b$B</svg>".to_string(),
+        ] {
+            assert!(check_image(bad.as_bytes(), "image/svg+xml", "b.svg").is_err(), "{bad:?}");
+        }
+        assert!(check_image(b"<svg>\xff\xfe</svg>", "image/svg+xml", "l1.svg").is_err(), "not UTF-8");
+        assert!(check_image(&[0x4c, 0x6f, 0xa7, 0x94, 0x93], "image/svg+xml", "e.svg").is_err(), "EBCDIC <?xml");
+        assert!(check_image(b"<?xml version=\"1.0\"\n encoding\t=\n'utf-8' ?><svg/>", "image/svg+xml", "ws.svg").is_ok());
+        assert!(check_image(b"<svg>caf\xc3\xa9</svg>", "image/svg+xml", "u8.svg").is_ok(), "real UTF-8 text is fine");
         assert!(check_image(b"\xef\xbb\xbf<svg/>", "image/svg+xml", "bom.svg").is_ok(), "a UTF-8 BOM is fine");
         fs::write(base.join("cut.svg"), vec![b' '; 3000]).unwrap();
         let e = open_place_image(&base, false, "cut.svg", 2048, None, &|_| Ok(())).unwrap_err();
