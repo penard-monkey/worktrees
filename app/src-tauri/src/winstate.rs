@@ -360,13 +360,22 @@ pub fn seed<R: Runtime>(app: &AppHandle<R>, dir: &Path) -> StateFile {
     app.state::<Tracker>().seed.get_or_init(|| load(dir).unwrap_or_default()).clone()
 }
 
+/// What a window attaching now restores from: its LIVE slot when it already
+/// had one this session (closed and reopened — the frame it was just left at),
+/// else the file as the session first read it. The seed is a launch-time
+/// snapshot and goes stale the moment a window moves.
+pub fn restore_from(live: Option<Other>, seed: &StateFile, label: &str) -> Other {
+    live.unwrap_or_else(|| seed.slot(label))
+}
+
 /// A new window: seed its slot, restore when `restore` says so, and start
 /// tracking. `min` is the window's own minimum size.
 pub fn attach<R: Runtime>(w: &WebviewWindow<R>, dir: &Path, restore: bool, min: (f64, f64)) {
     let label = w.label().to_string();
     let file = seed(w.app_handle(), dir);
-    let saved = file.slot(&label);
     let tracker = w.state::<Tracker>();
+    let live = tracker.slots.lock().unwrap().get(&label).map(|s| s.state);
+    let saved = restore_from(live, &file, &label);
     let have = saved.state != WinState::default();
     crate::applog(
         "info",
@@ -619,6 +628,27 @@ mod tests {
         let snap = t.snapshot();
         assert_eq!(snap.main.frame, Some(SCREEN));
         assert_eq!(snap.windows.get("companion"), both().windows.get("companion"));
+    }
+
+    /// Closed and reopened in the same session: it comes back where it was
+    /// LEFT, not where the app launched with it — whatever the seed says, and
+    /// including a companion closed while fullscreen or maximised (its normal
+    /// frame kept beside the flag, as `observe` keeps it).
+    #[test]
+    fn a_reopen_in_the_same_session_restores_the_frame_it_was_closed_at() {
+        let seed = both();
+        let moved = Frame { x: 40.0, y: 60.0, width: 700.0, height: 500.0 };
+        let left = Other { state: WinState { frame: Some(moved), maximized: false, fullscreen: false }, open: false };
+        assert_eq!(restore_from(Some(left), &seed, "companion"), left, "the live slot, not the launch-time file");
+        let fs = Other { state: WinState { frame: Some(moved), maximized: false, fullscreen: true }, open: false };
+        assert_eq!(restore_from(Some(fs), &seed, "companion"), fs, "closed fullscreen: fullscreen again, over its normal frame");
+        let max = Other { state: WinState { frame: Some(moved), maximized: true, fullscreen: false }, open: false };
+        assert_eq!(restore_from(Some(max), &seed, "companion"), max, "closed maximised: maximised again");
+        // A first run: nothing in the file, but the window was opened and moved.
+        assert_eq!(restore_from(Some(left), &StateFile::default(), "companion"), left);
+        // No live slot yet this session: the file decides.
+        assert_eq!(restore_from(None, &seed, "companion"), seed.slot("companion"));
+        assert_eq!(restore_from(None, &StateFile::default(), "companion"), Other::default());
     }
 
     /// Closed by the person: still remembered where it was, but not reopened.
