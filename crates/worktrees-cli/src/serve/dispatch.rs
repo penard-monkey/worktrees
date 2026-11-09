@@ -1,4 +1,4 @@
-//! The 218 commands, each with its exposure, capability and objects, in ONE
+//! The 225 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -39,7 +39,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::sync::Arc;
-use worktrees_api::{agents, config, files, hostenv, macprivacy, meta, ops, prefs, presets, profiles, project, status, term, viewer, workspace, workspaces, Ctx};
+use worktrees_api::{agents, config, files, hostenv, ideas, macprivacy, meta, ops, prefs, presets, profiles, project, status, term, viewer, workspace, workspaces, Ctx};
 use worktrees_core::authz::{self, Caller, Capability, Caps, DeviceId, Grant, Projects, Registry};
 use worktrees_core::fetchpolicy::Fetcher;
 
@@ -1255,6 +1255,20 @@ commands! { cx, a;
         let revoked = cx.devices.revoke_all_others(None, now())?;
         ok(serde_json::json!({ "pin": id.pin(), "revoked": revoked }))
     },
+    // ── ideas (idea board phase 1, `worktrees_core::ideas`) ──────────────
+    // Desktop only (the owner, 2026-11-08): console rows, no device and no
+    // MCP tool reaches them. Each is one operation with plain parameters,
+    // addressed by the idea's ULID; `idea_adopt` alone names a FILE, a bare
+    // name in the folder, because a hand-made document has no id yet. The
+    // folder is the engine's (`Ctx::ideas_dir`), never a client's path.
+    ideas_list: HostConsole => ideas::ideas_list(&cx.ctx),
+    idea_read: HostConsole => ideas::idea_read(&cx.ctx, a.get("id")?),
+    idea_create: HostConsole => ideas::idea_create(&cx.ctx, a.get("title")?),
+    idea_write: HostConsole => ideas::idea_write(&cx.ctx, a.get("id")?, a.get("content")?, a.get("expected_mtime")?),
+    idea_rename: HostConsole => ideas::idea_rename(&cx.ctx, a.get("id")?, a.get("title")?, a.get("expected_mtime")?),
+    idea_remove: HostConsole => ideas::idea_remove(&cx.ctx, a.get("id")?, a.get("expected_mtime")?),
+    idea_adopt: HostConsole => ideas::idea_adopt(&cx.ctx, a.get("file")?, a.get("expected_mtime")?),
+
     // ── remote access (§4.1): the host's own acts, never a device's ──────────
     remote_enable: HostConsole => remote(cx)?.enable(&a.get::<String>("address")?, a.get("iface")?, a.get("port")?, a.get("advertise")?),
     remote_disable: HostConsole => remote(cx)?.disable(),
@@ -1314,7 +1328,7 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 218 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 225 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six, the slots pair and
     /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
@@ -1329,14 +1343,16 @@ mod tests {
     /// two (`agent_commands`, `agent_command`), notifications' nine (the
     /// `push_*` rows), and Settings → Agent policy's four (`limits_settings`,
     /// `set_limits`, `policy_preset_status`, `apply_policy_preset`), and the
-    /// named workspaces' six console rows (`workspaces_list`, `workspace_*`);
-    /// the check scripts
+    /// named workspaces' six console rows (`workspaces_list`, `workspace_*`), and the
+    /// idea board's seven console rows (`ideas_list`, `idea_read`,
+    /// `idea_create`, `idea_write`, `idea_rename`, `idea_remove`,
+    /// `idea_adopt`); the check scripts
     /// hold the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 218, "the table has 218 commands");
+        assert_eq!(TABLE.len(), 225, "the table has 225 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1663,6 +1679,10 @@ mod tests {
         ("workspace_remove", "id", "a named workspace's id (a console act)"),
         ("workspace_set_projects", "id", "a named workspace's id (a console act)"),
         ("workspace_set_projects", "roots", "roots to REFERENCE, kept even once unregistered; the body checks a new one against the registry (a console act)"),
+        ("idea_read", "id", "an idea's ULID: ideas are the host's, in its own folder, not a project's (a console act)"),
+        ("idea_write", "id", "an idea's ULID (a console act)"),
+        ("idea_rename", "id", "an idea's ULID (a console act)"),
+        ("idea_remove", "id", "an idea's ULID (a console act)"),
     ];
 
     /// Every `a.get("…")` a body reads that names an object is covered by the
@@ -1737,7 +1757,7 @@ mod tests {
     /// `push_allow_security`); Settings → Agent policy → Limits'
     /// `limits_settings` (`read`) and `set_limits` (`admin`); and the policy
     /// presets' `policy_preset_status` (`read`) and `apply_policy_preset`
-    /// (console); the named workspaces' six (console). A row that moves group
+    /// (console); the named workspaces' six (console); and the idea board's seven (console). A row that moves group
     /// fails here until the count (and the proposal's table) move with it.
     #[test]
     fn every_row_has_one_base_group_and_the_counts_are_section_3_4s() {
@@ -1754,7 +1774,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 67), ("write", 23), ("admin", 41), ("console", 53), ("stream", 10), ("instruct", 8), ("answer", 2),
+            ("read", 67), ("write", 23), ("admin", 41), ("console", 60), ("stream", 10), ("instruct", 8), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 7),
         ]
         .into();
@@ -1790,6 +1810,63 @@ mod tests {
         let projected: HashSet<String> = scope::EVENTS.iter().map(|(n, _)| n.to_string()).collect();
         let unprojected: Vec<_> = emitted.difference(&projected).collect();
         assert!(unprojected.is_empty(), "events with no projection: {unprojected:?}");
+    }
+
+    /// The ideas rows through the dispatcher, each one act with plain
+    /// arguments over the ENGINE's folder: a `path` a client sends is not an
+    /// argument any of them reads, and a write must carry the idea's own id.
+    #[test]
+    fn the_ideas_rows_are_one_act_each_over_the_engines_own_folder() {
+        let (c, dir, _rx) = call("ideas");
+        let folder = dir.join("ideas");
+        let c = Call { ctx: c.ctx.clone().with_ideas_dir(folder.clone()), ..c };
+        let run = |cmd: &str, v: Value| super::call(&c, cmd, &args(v));
+        assert_eq!(run("ideas_list", json!({})).unwrap()["ideas"], json!([]));
+        assert!(!folder.exists(), "a listing creates nothing");
+        let d = run("idea_create", json!({"title": "Jellyfin", "path": "/etc"})).unwrap();
+        let id = d["id"].as_str().unwrap().to_string();
+        assert_eq!(d["file"], json!("jellyfin.md"));
+        assert!(folder.join("jellyfin.md").is_file());
+        let text = format!("{}<!-- ¶ 7k2q -->\n", d["content"].as_str().unwrap());
+        let m = run("idea_write", json!({"id": id, "content": text, "expectedMtime": d["mtime_ms"]})).unwrap();
+        assert_eq!(std::fs::read_to_string(folder.join("jellyfin.md")).unwrap(), text);
+        let e = run("idea_write", json!({"id": id, "content": text, "expected_mtime": 1})).unwrap_err();
+        assert!(e.as_str().unwrap().contains("changed on disk"), "{e}");
+        let other = run("idea_create", json!({})).unwrap();
+        assert_eq!(other["title"], json!("Untitled"));
+        let e = run("idea_write", json!({"id": other["id"], "content": text})).unwrap_err();
+        assert!(e.as_str().unwrap().contains("refusing to save one idea over another"), "{e}");
+        let r = run("idea_rename", json!({"id": id, "title": "Jellyfin at home", "expected_mtime": m})).unwrap();
+        assert_eq!((r["id"].as_str(), r["file"].as_str()), (Some(id.as_str()), Some("jellyfin-at-home.md")));
+        assert_eq!(run("idea_read", json!({"id": id})).unwrap()["content"], json!(text.replace("# Jellyfin\n", "# Jellyfin at home\n")));
+        run("idea_remove", json!({"id": id})).unwrap();
+        assert!(folder.join(".history").join(&id).is_dir(), "history first");
+        std::fs::write(folder.join("hand.md"), "# Hand\n").unwrap();
+        let l = run("ideas_list", json!({})).unwrap();
+        assert_eq!(l["ideas"].as_array().unwrap().len(), 2);
+        assert!(run("idea_adopt", json!({"file": "../hand.md"})).is_err());
+        let a = run("idea_adopt", json!({"file": "hand.md"})).unwrap();
+        assert!(a["content"].as_str().unwrap().ends_with("---\n\n# Hand\n"));
+        for cmd in ["ideas_list", "idea_read", "idea_create", "idea_write", "idea_rename", "idea_remove", "idea_adopt"] {
+            assert_eq!(exposure(cmd), Some(Exposure::HostConsole), "{cmd}: desktop only");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An engine a test starts writes no idea into the user's real folder:
+    /// its `Ctx` resolves `ideas::dir()`, the real one under a test's
+    /// environment, and the registry's one-way switch refuses it.
+    #[test]
+    fn an_engine_under_test_cannot_write_the_real_ideas_folder() {
+        worktrees_core::registry::forbid_real_writes();
+        let (c, dir, _rx) = call("ideas-real");
+        let real = worktrees_core::ideas::default_dir();
+        assert_eq!(c.ctx.ideas_dir(), real.as_path(), "no override in this process");
+        let existed = real.exists();
+        let e = super::call(&c, "idea_create", &args(json!({"title": "leak"}))).unwrap_err();
+        assert!(e.as_str().unwrap().contains("real ideas folder"), "{e}");
+        assert_eq!(real.exists(), existed, "not even the folder");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// gap 17: a body's `Ctx` fetches as its caller. A device's is pinned to

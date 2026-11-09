@@ -483,6 +483,7 @@ export const CONSOLE_ROWS: readonly string[] = [
   "pair_cancel", "pair_status", "identity_rotate", "set_slot_capacity", "remote_enable", "remote_disable",
   "remote_status", "remote_advertise", "remote_candidates", "device_rename",
   "push_key_import", "push_key_remove", "push_status", "push_dry_run", "push_allow_security",
+  "ideas_list", "idea_read", "idea_create", "idea_write", "idea_rename", "idea_remove", "idea_adopt",
   // named workspaces (idea board phase 2): desktop only
   "workspaces_list", "workspace_create", "workspace_rename", "workspace_remove", "workspace_set_projects",
   "workspace_reorder",

@@ -165,7 +165,7 @@ pub fn create_at(p: &Path, name: &str) -> Result<Workspace, String> {
         if name_taken(f, &name, None) {
             return Err(format!("a workspace named '{name}' already exists"));
         }
-        let w = Workspace { id: ulid(), name, ..Default::default() };
+        let w = Workspace { id: crate::ulid::new(), name, ..Default::default() };
         f.workspaces.push(w.clone());
         Ok(w)
     })
@@ -261,23 +261,6 @@ pub fn reorder(ids: &[String]) -> Result<(), String> {
     reorder_at(&path(), ids)
 }
 
-/// A ULID: 48 bits of milliseconds since the epoch, then 80 random bits, in
-/// Crockford base32 (26 characters, sortable by creation time).
-pub fn ulid() -> String {
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-    let rand = ((crate::fsx::random_u64() as u128) << 64 | crate::fsx::random_u64() as u128) & ((1u128 << 80) - 1);
-    ulid_from(ms, rand)
-}
-
-fn ulid_from(ms: u64, rand80: u128) -> String {
-    const ALPHA: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
-    let v: u128 = ((ms as u128 & ((1u128 << 48) - 1)) << 80) | (rand80 & ((1u128 << 80) - 1));
-    (0..26).rev().map(|i| ALPHA[((v >> (i * 5)) & 31) as usize] as char).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,15 +301,15 @@ mod tests {
         assert!(refuse_real(Path::new("/tmp/t/workspaces.json"), real, true).is_ok());
     }
 
+    /// A workspace's id comes from the one generator (`crate::ulid`) and
+    /// passes its one rule.
     #[test]
-    fn a_ulid_is_26_crockford_characters_led_by_its_time() {
-        assert_eq!(ulid_from(0, 0), "0".repeat(26));
-        // The spec's own example time, 1469918176385 ms → "01ARYZ6S41".
-        assert!(ulid_from(1_469_918_176_385, 0).starts_with("01ARYZ6S41"));
-        let a = ulid();
-        assert_eq!(a.len(), 26);
-        assert!(a.bytes().all(|b| b"0123456789ABCDEFGHJKMNPQRSTVWXYZ".contains(&b)), "{a}");
-        assert_ne!(ulid(), ulid());
+    fn a_workspace_id_is_a_ulid_from_the_one_generator() {
+        let t = Tmp::new("ulid");
+        let a = create_at(&t.file(), "A").unwrap();
+        let b = create_at(&t.file(), "B").unwrap();
+        assert!(crate::ulid::is_valid(&a.id) && crate::ulid::is_valid(&b.id), "{} {}", a.id, b.id);
+        assert!(a.id < b.id, "made in order, sorted in order");
     }
 
     #[test]

@@ -85,6 +85,8 @@ pub mod tmux;
 pub mod turns;
 pub mod tmux_server;
 pub mod trust;
+pub mod ideas;
+pub mod ulid;
 pub mod workspaces;
 pub mod ui;
 

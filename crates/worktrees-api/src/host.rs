@@ -179,6 +179,9 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
     // that comes back after a recovery is heard again, and capped so a place
     // producing fresh text on every tick cannot grow it without bound.
     let mut said_viewer: HashSet<String> = HashSet::new();
+    // The ideas folder's stamp: one `readdir` and an `lstat` per entry a tick,
+    // the folder read only when it moved (`ideas::tick`).
+    let mut ideas_watch = crate::ideas::IdeasWatch::default();
     // One `Ctx` for the thread's whole life, and the registries out of it: the
     // dot poll is the hottest reader of both and must not re-resolve them 20
     // times a minute.
@@ -256,6 +259,7 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
                 log::log(n.level, &format!("viewer refresh: {}", n.msg));
             }
         }
+        crate::ideas::tick(&pollctx, &mut ideas_watch);
         attach_ticks += 1;
         if attach_ticks >= 1200 {
             attach_ticks = 0;
