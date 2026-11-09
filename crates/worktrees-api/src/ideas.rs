@@ -66,7 +66,7 @@ pub fn idea_adopt(ctx: &Ctx, file: String, expected_mtime: Option<u64>) -> Resul
 // ── the poll ────────────────────────────────────────────────────────────────
 
 /// What the poll last saw of the folder.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct IdeasWatch {
     stamp: Option<Vec<(String, bool, u64, u64)>>,
     /// id → (mtime ms, size): the size too, because two writes inside one
@@ -94,13 +94,28 @@ fn seen(idx: &Index) -> HashMap<String, (u64, u64)> {
 /// One tick: `Some` with the event's payload when the folder changed since
 /// the last tick. The first tick only takes the baseline.
 pub fn tick_at(root: &Path, w: &mut IdeasWatch) -> Option<IdeasChanged> {
+    tick_with(root, w, &ideas::scan_at)
+}
+
+/// [`tick_at`] with the scan given: the seam a test scripts a failed scan
+/// through. A scan that fails sends NOTHING and keeps the last stamp and the
+/// last ids, so the next tick tries again: read as an empty folder, it
+/// would list every idea in `removed`, and a client that trusts the event
+/// closes the open editor.
+fn tick_with(root: &Path, w: &mut IdeasWatch, scan: &dyn Fn(&Path) -> std::io::Result<Index>) -> Option<IdeasChanged> {
     let stamp = ideas::stamp_at(root);
     if w.stamp.as_ref() == Some(&stamp) {
         return None;
     }
+    let now = match scan(root) {
+        Ok(i) => seen(&i),
+        Err(e) => {
+            crate::log::warn(&format!("ideas: could not read {}: {e}", root.display()));
+            return None;
+        }
+    };
     let first = w.stamp.is_none();
     w.stamp = Some(stamp);
-    let now = ideas::scan_at(root).map(|i| seen(&i)).unwrap_or_default();
     let before = std::mem::replace(&mut w.seen, now);
     if first {
         return None;
@@ -179,6 +194,27 @@ mod tests {
 
         ideas::remove_at(&root, &id, None).unwrap();
         assert_eq!(tick_at(&root, &mut w).unwrap().removed, vec![id]);
+        let _ = fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    /// A scan that fails after a good baseline is not "every idea removed":
+    /// no event, the baseline kept, and the next good tick compares with it.
+    #[test]
+    fn a_failed_scan_sends_nothing_and_keeps_the_baseline() {
+        let root = tmp("tickerr");
+        let mut w = IdeasWatch::default();
+        let d = ideas::create_at(&root, "Kept").unwrap();
+        let id = d.idea.id.clone().unwrap();
+        assert_eq!(tick_at(&root, &mut w), None, "the baseline");
+        let (stamp, seen) = (w.stamp.clone(), w.seen.clone());
+        std::thread::sleep(std::time::Duration::from_millis(15));
+        fs::write(root.join(&d.idea.file), format!("{}\nmore\n", d.content)).unwrap();
+        let fail = |_: &Path| -> std::io::Result<Index> { Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)) };
+        assert_eq!(tick_with(&root, &mut w, &fail), None, "no event on a failed scan");
+        assert_eq!((&w.stamp, &w.seen), (&stamp, &seen), "the baseline unchanged");
+        let ev = tick_at(&root, &mut w).expect("the next good tick sees the edit");
+        assert_eq!((ev.changed.len(), ev.removed.len()), (1, 0));
+        assert_eq!(ev.changed[0].id, id);
         let _ = fs::remove_dir_all(root.parent().unwrap());
     }
 }

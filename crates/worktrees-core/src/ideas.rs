@@ -301,6 +301,9 @@ pub enum Problem {
     TooLarge,
     /// Not UTF-8; listed by its name, not read.
     NotText,
+    /// The engine could not stat or read it (a permission, an I/O error):
+    /// listed by its name so the folder still lists, and addressed by nothing.
+    Unreadable,
 }
 
 /// One document as the list shows it.
@@ -373,30 +376,63 @@ pub fn mtime_ms(md: &fs::Metadata) -> u64 {
 /// index; nothing is created. Only top-level entries, only regular `.md` files
 /// not starting with `.` (which leaves out `.history`, a write's temp and
 /// Finder's `.DS_Store`), each `lstat`ed before it is read.
+///
+/// Only a failure to read the FOLDER fails the scan. An error on one entry
+/// is about that entry: an editor that saves by rename (vim, most sync
+/// clients) removes and recreates its file, so a name `readdir` gave can be
+/// gone by the `lstat` or the read — that entry is skipped — and any other
+/// error lists the file as [`Problem::Unreadable`]. Every row starts with a
+/// scan, so one bad file must never fail the rows for every other idea.
 pub fn scan_at(root: &Path) -> io::Result<Index> {
-    let mut idx = Index::default();
     let rd = match fs::read_dir(root) {
         Ok(rd) => rd,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(idx),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Index::default()),
         Err(e) => return Err(e),
     };
-    for e in rd {
-        let e = e?;
-        let Ok(name) = e.file_name().into_string() else { continue };
+    // An entry the iterator itself fails on has no name to list or skip by.
+    let names = rd.filter_map(Result::ok).filter_map(|e| e.file_name().into_string().ok());
+    Ok(scan_with(root, names, &|p| fs::read(p)))
+}
+
+/// [`scan_at`] past the `readdir`: the entry names, and how a file's bytes
+/// are read. The seam a test scripts a vanished name or an unreadable file
+/// through, rather than racing a real one (or relying on `chmod 000`, which
+/// a root test process reads through).
+fn scan_with(root: &Path, names: impl Iterator<Item = String>, read: &dyn Fn(&Path) -> io::Result<Vec<u8>>) -> Index {
+    let mut idx = Index::default();
+    for name in names {
         if name.starts_with('.') || !name.ends_with(".md") {
             continue;
         }
-        let md = fs::symlink_metadata(e.path())?;
+        let p = root.join(&name);
+        let stem = name.trim_end_matches(".md").to_string();
+        let unreadable = |name: String| Idea { id: None, title: stem.clone(), file: name, created: None, mtime_ms: 0, size: 0, problem: Some(Problem::Unreadable) };
+        let md = match fs::symlink_metadata(&p) {
+            Ok(md) => md,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(_) => {
+                idx.ideas.push(unreadable(name));
+                continue;
+            }
+        };
         if !md.file_type().is_file() {
             idx.skipped.push(name);
             continue;
         }
-        let stem = name.trim_end_matches(".md").to_string();
-        let mut doc = Idea { id: None, title: stem, file: name, created: None, mtime_ms: mtime_ms(&md), size: md.len(), problem: None };
+        let mut doc = Idea { id: None, title: stem.clone(), file: name, created: None, mtime_ms: mtime_ms(&md), size: md.len(), problem: None };
         if md.len() > MAX_BYTES {
             doc.problem = Some(Problem::TooLarge);
         } else {
-            match String::from_utf8(fs::read(e.path())?) {
+            let bytes = match read(&p) {
+                Ok(b) => b,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(_) => {
+                    doc.problem = Some(Problem::Unreadable);
+                    idx.ideas.push(doc);
+                    continue;
+                }
+            };
+            match String::from_utf8(bytes) {
                 Err(_) => doc.problem = Some(Problem::NotText),
                 Ok(text) => {
                     if let Some(t) = title_of(&text) {
@@ -431,7 +467,7 @@ pub fn scan_at(root: &Path) -> io::Result<Index> {
         }
     }
     idx.skipped.sort();
-    Ok(idx)
+    idx
 }
 
 /// What the poll compares between ticks: every top-level entry's name, kind,
@@ -956,6 +992,38 @@ mod tests {
         assert!(e.contains("not a real directory"), "{e}");
         assert!(r2.join("h.md").exists(), "no history copy, no delete");
         assert_eq!(fs::read_dir(t2.0.join("elsewhere")).unwrap().count(), 0);
+    }
+
+    /// One bad entry is about that entry: a name gone by the `lstat` (an
+    /// editor saving by rename) is skipped, a file that cannot be read is
+    /// listed as unreadable and addressed by nothing, and every OTHER idea
+    /// stays listed and readable. Scripted through the seam, never raced.
+    #[test]
+    fn one_vanished_or_unreadable_entry_does_not_fail_the_folder() {
+        let t = Tmp::new("badentry");
+        let root = t.root();
+        let good = create_at(&root, "Good").unwrap();
+        let locked = create_at(&root, "Locked").unwrap();
+        let racy = create_at(&root, "Racy").unwrap();
+        let names = ["good.md", "gone.md", "locked.md", "racy.md"].map(String::from);
+        let read = |p: &Path| -> io::Result<Vec<u8>> {
+            match p.file_name().and_then(|n| n.to_str()) {
+                Some("locked.md") => Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+                // Gone between its `lstat` and its read.
+                Some("racy.md") => Err(io::Error::from(io::ErrorKind::NotFound)),
+                _ => fs::read(p),
+            }
+        };
+        let idx = scan_with(&root, names.into_iter(), &read);
+        let files: Vec<&str> = idx.ideas.iter().map(|d| d.file.as_str()).collect();
+        assert!(!files.contains(&"gone.md") && !files.contains(&"racy.md"), "a vanished entry is skipped: {files:?}");
+        let l = idx.ideas.iter().find(|d| d.file == "locked.md").unwrap();
+        assert_eq!((l.problem, l.id.as_deref(), l.title.as_str()), (Some(Problem::Unreadable), None, "locked"));
+        assert!(idx.resolve(locked.idea.id.as_deref().unwrap()).is_err(), "and addressed by nothing");
+        assert!(idx.resolve(racy.idea.id.as_deref().unwrap()).is_err());
+        assert_eq!(idx.resolve(good.idea.id.as_deref().unwrap()).unwrap().file, "good.md", "the others still resolve");
+        // The real scan of the same folder, with nothing wrong, lists all three.
+        assert_eq!(scan_at(&root).unwrap().ideas.len(), 3);
     }
 
     #[test]
