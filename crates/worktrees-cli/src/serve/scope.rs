@@ -199,6 +199,9 @@ pub const EVENTS: &[(&str, Event)] = &[
     // Remote access's state (`remote_status`): on, paused and why, a question
     // for the host. The host's, like every remote-access act (§4.1).
     ("remote:changed", Event::Console),
+    // `{changed: [{id, mtime_ms}], removed: [id]}`: the ideas folder moved
+    // (`worktrees_api::ideas`). Desktop only, like every ideas row.
+    ("ideas:changed", Event::Console),
 ];
 
 // ── who listens (§9.3) ───────────────────────────────────────────────────────

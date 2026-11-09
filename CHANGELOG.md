@@ -5,6 +5,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+
+- **Ideas have a home on disk, ready for the idea board.** Each idea is one plain markdown file in `~/.local/share/worktrees/ideas/` (or `$XDG_DATA_HOME/worktrees/ideas/`; `WORKTREES_IDEAS_DIR` moves that folder alone). A new idea gets an `id` that never changes and a file name made from its title; renaming changes both the heading and the file name, and every other byte of the file stays exactly as it was, so you can edit the files in any editor. Before an idea is renamed or removed, its current text is copied into the folder's `.history/`. A file you put there yourself is listed, and gets an id only when you ask. There is no screen for this yet: this release adds the store and the desktop app's rows for it (`ideas_list`, `idea_read`, `idea_create`, `idea_write`, `idea_rename`, `idea_remove`, `idea_adopt`) and an `ideas:changed` event when a file in the folder changes. None of it is reachable from a paired device or an agent.
+
 ### Changed
 
 - **Error and notice toasts have a visible × to dismiss them.** They were dismissed by clicking anywhere on them, which nothing on screen said. The × is a labelled, keyboard-reachable button at the toast's end; errors still stay until you dismiss them, and clicking the toast still works. The message text can now be selected to copy an error.

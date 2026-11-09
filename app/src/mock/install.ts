@@ -1731,6 +1731,37 @@ const fsBlocked = new Map<string, string | null>();
 const fsDenied = new Map<string, { area: string; label: string; path: string; pane: string; reset_command: string }>();
 const fsChildren = new Map<string, MockEntry[]>();
 const fsFiles = new Map<string, { content: string; binary: boolean; mtime: number; b64?: string }>();
+
+// ── ideas (idea board phase 1): the mock of `worktrees_core::ideas` ──────────
+// One in-memory folder keyed by ULID-shaped id. Parity that matters: every row
+// takes an id (adopt alone a bare file name), a write must carry the idea's
+// own `id:` line, `expected_mtime` is a compare-and-swap, a save with no
+// change keeps the mtime, and rename moves the heading and the file name.
+type MockIdea = { id: string | null; file: string; content: string; mtime_ms: number; created: string | null };
+const mockIdeas = new Map<string, MockIdea>(); // keyed by file name
+let mockIdeaSeq = 0;
+const ideaId = () => `01JC8Z4K3M9QX2T7VB${String(++mockIdeaSeq).padStart(8, "0")}`;
+const ideaFront = (t: string, k: string) => {
+  const m = /^---\r?\n([\s\S]*?)\r?\n(?:---|\.\.\.)\r?\n/.exec(t);
+  const v = m && new RegExp(`^${k}:(.*)$`, "m").exec(m[1]);
+  return v ? v[1].trim().replace(/^["']|["']$/g, "") || null : null;
+};
+const ideaTitle = (t: string) => /^ {0,3}# (.+)$/m.exec(t.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, ""))?.[1].trim() ?? null;
+const ideaSlug = (t: string) => t.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-+|-+$/g, "").slice(0, 64).replace(/-+$/, "") || "untitled";
+const ideaFree = (stem: string, own?: string) => {
+  for (let n = 1; ; n++) { const f = n === 1 ? `${stem}.md` : `${stem}-${n}.md`; if (f === own || !mockIdeas.has(f)) return f; }
+};
+const ideaRow = (d: MockIdea) => ({
+  id: d.id, title: ideaTitle(d.content) ?? d.file.replace(/\.md$/, ""), file: d.file, created: d.created,
+  mtime_ms: d.mtime_ms, size: new TextEncoder().encode(d.content).length, ...(d.id ? {} : { problem: "no-id" }),
+});
+const ideaById = (id: string) => {
+  for (const d of mockIdeas.values()) if (d.id === id) return d;
+  throw `no idea has the id ${id}`;
+};
+const ideaCas = (d: MockIdea, exp: unknown) => {
+  if (exp != null && exp !== d.mtime_ms) throw "the idea changed on disk since you opened it — reload to see the latest";
+};
 // dock shell sidecars, keyed "repo|slug" → set of 1-based tab indices
 const shellSidecars = new Map<string, Set<number>>();
 // exited-but-kept shells (mirrors the real registry's try_wait liveness) — the
@@ -3599,6 +3630,59 @@ Phase 3: Frontend pane and mock harness
       // the next save (lib.rs). Returning null here would let a second ⌘S pass
       // in the harness and fail in the app.
       return mtime;
+    }
+    // ── ideas (idea board phase 1): see `mockIdeas` ──────────────────────────
+    case "ideas_list":
+      return { ideas: [...mockIdeas.values()].sort((a, b) => b.mtime_ms - a.mtime_ms).map(ideaRow), skipped: [] };
+    case "idea_read": {
+      const d = ideaById(args.id as string);
+      return { ...ideaRow(d), content: d.content };
+    }
+    case "idea_create": {
+      const title = String(args.title ?? "").trim() || "Untitled";
+      const id = ideaId();
+      const created = new Date().toISOString().slice(0, 10);
+      const d: MockIdea = { id, file: ideaFree(ideaSlug(title)), created, mtime_ms: Date.now(), content: `---\nid: ${id}\ncreated: ${created}\n---\n\n# ${title}\n` };
+      mockIdeas.set(d.file, d);
+      return { ...ideaRow(d), content: d.content };
+    }
+    case "idea_write": {
+      const d = ideaById(args.id as string);
+      const content = args.content as string;
+      const carried = ideaFront(content, "id");
+      if (carried !== args.id) throw carried ? `the text carries the id ${carried}, not ${args.id}: refusing to save one idea over another` : `the text has no id: keep the frontmatter's \`id: ${args.id}\` line`;
+      ideaCas(d, args.expectedMtime ?? args.expected_mtime);
+      if (d.content !== content) { d.content = content; d.mtime_ms = Date.now(); }
+      return d.mtime_ms;
+    }
+    case "idea_rename": {
+      const d = ideaById(args.id as string);
+      ideaCas(d, args.expectedMtime ?? args.expected_mtime);
+      const title = String(args.title ?? "").trim() || "Untitled";
+      d.content = /^ {0,3}# .*$/m.test(d.content) ? d.content.replace(/^( {0,3})# .*$/m, `# ${title}`) : `${d.content}\n# ${title}\n`;
+      mockIdeas.delete(d.file);
+      d.file = ideaFree(ideaSlug(title), d.file);
+      d.mtime_ms = Date.now();
+      mockIdeas.set(d.file, d);
+      return { ...ideaRow(d), content: d.content };
+    }
+    case "idea_remove": {
+      const d = ideaById(args.id as string);
+      ideaCas(d, args.expectedMtime ?? args.expected_mtime);
+      mockIdeas.delete(d.file);
+      return null;
+    }
+    case "idea_adopt": {
+      const file = String(args.file ?? "");
+      const d = mockIdeas.get(file);
+      if (!d || file.includes("/") || file.startsWith(".")) throw `no document named "${file}"`;
+      if (d.id) throw `${file} already has the id ${d.id}`;
+      ideaCas(d, args.expectedMtime ?? args.expected_mtime);
+      d.id = ideaId();
+      d.created = d.created ?? new Date().toISOString().slice(0, 10);
+      d.content = `---\nid: ${d.id}\ncreated: ${d.created}\n---\n\n${d.content}`;
+      d.mtime_ms = Date.now();
+      return { ...ideaRow(d), content: d.content };
     }
     // Dock shells are PTYs the backend OWNS (no tmux). The mock models the
     // registry the same way — spawn-or-reattach keyed by repo+slug+index — so a

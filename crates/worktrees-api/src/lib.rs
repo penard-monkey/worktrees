@@ -60,6 +60,7 @@ pub mod docserver;
 pub mod editors;
 pub mod files;
 pub mod host;
+pub mod ideas;
 pub mod hostenv;
 pub mod hostpolicy;
 pub mod harness_restart;
@@ -175,6 +176,11 @@ pub struct Ctx {
     /// device's launch narrows to — Server Edition Phase 2, §7.3, §7.5).
     /// `None` is the engine's own work. Set only through [`Ctx::acting_for`].
     acting: Arc<Option<worktrees_core::store::LaunchedBy>>,
+    /// The ideas folder this engine serves (`worktrees_core::ideas::dir()` at
+    /// start, so `WORKTREES_IDEAS_DIR` moves it for a spawned engine). A test
+    /// that runs the engine in-process moves it with [`Ctx::with_ideas_dir`],
+    /// never with `set_var`.
+    ideas_dir: Arc<PathBuf>,
 }
 
 impl Ctx {
@@ -193,7 +199,18 @@ impl Ctx {
             caps: worktrees_core::authz::Caps::ALL,
             console: true,
             acting: Arc::new(None),
+            ideas_dir: Arc::new(worktrees_core::ideas::dir()),
         }
+    }
+
+    /// The ideas folder (`ideas`).
+    pub fn ideas_dir(&self) -> &std::path::Path {
+        &self.ideas_dir
+    }
+
+    /// This engine with its ideas in `dir`: a test's own folder.
+    pub fn with_ideas_dir(self, dir: PathBuf) -> Ctx {
+        Ctx { ideas_dir: Arc::new(dir), ..self }
     }
 
     /// The same engine, seen by a caller whose grant reaches `scope`. Every
