@@ -18,6 +18,11 @@
 //   long ago the starts were.
 // - A serve someone else started is never restarted: the retries go on,
 //   reconnect-only, until it is back.
+// - A window that is not the one owning restarts (`{ neverStart: true }`: the
+//   Ideas companion) never starts one, not at launch and not on a press: it
+//   reconnects, on the same backoff, until the serve the main window keeps is
+//   there. Two windows that each restarted a lost engine would race to start
+//   two, and the second would find the first and replace it.
 // - A press of Reconnect now cancels the timer, tries at once, and may start
 //   one serve — a person asked — which the ledger records. A press never
 //   re-arms automatic starts: after a stop, one press is one start, and if
@@ -88,6 +93,10 @@ export type RetryEnv = {
   visible: () => boolean;
 };
 
+/** Who may start a serve. `neverStart`: never, on any try — every try is a
+ *  reconnect, and finding nothing is a reason to wait, never to stop. */
+export type RetryPolicy = { neverStart?: boolean };
+
 export type Retrier = {
   /** The launch: one try, now, allowed to start (there is no serve yet to
    *  have been someone else's). Not deferred for a hidden window. */
@@ -104,7 +113,9 @@ export function retrier(
   env: RetryEnv,
   connect: (t: Try, phase: (p: string) => void) => Promise<Outcome>,
   report: (v: RetryView) => void,
+  policy: RetryPolicy = {},
 ): Retrier {
+  const neverStart = policy.neverStart === true;
   /** The last serve reached: the app's? null before the first. */
   let owned: boolean | null = null;
   /** When each start this page asked for was reported, oldest first. */
@@ -133,7 +144,7 @@ export function retrier(
     while (starts.length && starts[0] <= since) starts.shift();
     return starts.length;
   };
-  const mayStart = (manual: boolean) => manual || (!tripped && owned !== false && recentStarts() < CRASH_LOOP.starts);
+  const mayStart = (manual: boolean) => !neverStart && (manual || (!tripped && owned !== false && recentStarts() < CRASH_LOOP.starts));
 
   function cancel() {
     if (timer !== null) env.clearTimeout(timer);
@@ -176,8 +187,10 @@ export function retrier(
     why = r.reason;
     if (r.started) startFailure = r.reason;
     if (r.declined && !start) {
-      if (owned === false) {
-        schedule(true); // someone else's serve: wait for it to come back
+      if (owned === false || neverStart) {
+        // Someone else's serve, or a window that never starts one: wait for it
+        // to come back. `notOurs`: no automatic try here will start it.
+        schedule(true);
         return;
       }
       const again = tripped;

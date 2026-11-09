@@ -1,0 +1,11 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "companion",
+  "description": "Capability for the Ideas companion window: the core set only. It reaches serve through the app's own commands (engine_connect) and its socket, needs no plugin, and must not inherit main's opener, dialog, updater, process or notification rights. A later phase adds exactly what it uses (the opener for Show in Finder), here.",
+  "windows": [
+    "companion"
+  ],
+  "permissions": [
+    "core:default"
+  ]
+}

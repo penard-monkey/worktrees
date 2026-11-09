@@ -185,6 +185,16 @@ pub fn permit(d: Decision, may_start: bool) -> Decision {
 
 /// Look, in order, and stop at the first step that fails.
 pub fn observe(config_dir: &Path, origin: &str) -> Seen {
+    observe_in(config_dir, origin, &port_open)
+}
+
+/// `observe`, with the "is anything listening on this loopback port" probe
+/// passed in. Production always passes `port_open`; the seam is for tests,
+/// which script "closed" rather than borrow a real port by binding `:0` and
+/// dropping it — a parallel test could take that port before the probe ran,
+/// so `observe` saw it open and the settle tests gave up before their bound
+/// (macos-latest, three sightings).
+fn observe_in(config_dir: &Path, origin: &str, port_open: &dyn Fn(u16) -> bool) -> Seen {
     let path = config_dir.join(SERVE_FILE);
     let bytes = match std::fs::read(&path) {
         Ok(b) => b,
@@ -1026,6 +1036,17 @@ mod tests {
 
     // ── settle: a serve still stopping is waited for ───────────────────────
 
+    /// The port a scripted-closed serve.json names. Never dialled: the probe
+    /// below answers for it.
+    const SCRIPTED_PORT: u16 = 1;
+
+    /// "Nothing is listening", scripted — never a real port borrowed by
+    /// binding `:0` and dropping it, which a parallel test could take first.
+    fn closed_port(port: u16) -> bool {
+        assert_eq!(port, SCRIPTED_PORT, "the probe was asked about a port this test did not script");
+        false
+    }
+
     #[test]
     fn a_closed_port_under_a_pid_that_exits_is_waited_for_then_looked_at_again() {
         let d = tmp("settle-gone");
@@ -1033,9 +1054,8 @@ mod tests {
         let pid = child.id();
         // Reaped as it exits: kill(pid, 0) answers for a zombie too.
         let reaper = std::thread::spawn(move || child.wait());
-        let closed = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        write(&d, &ServeFile { port: closed, ..sf(pid, Some(OWNER)) });
-        let seen = observe(&d, APP_ORIGIN);
+        write(&d, &ServeFile { port: SCRIPTED_PORT, ..sf(pid, Some(OWNER)) });
+        let seen = observe_in(&d, APP_ORIGIN, &closed_port);
         assert!(matches!(seen, Seen::PortClosed(_)), "{seen:?}");
         let phases = Mutex::new(Vec::<String>::new());
         let t0 = Instant::now();
@@ -1050,9 +1070,8 @@ mod tests {
     #[test]
     fn a_closed_port_under_a_pid_that_never_goes_falls_through_to_a_start_after_the_bound() {
         let d = tmp("settle-stuck");
-        let closed = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        write(&d, &ServeFile { port: closed, ..sf(live_pid(), None) });
-        let seen = observe(&d, APP_ORIGIN);
+        write(&d, &ServeFile { port: SCRIPTED_PORT, ..sf(live_pid(), None) });
+        let seen = observe_in(&d, APP_ORIGIN, &closed_port);
         let t0 = Instant::now();
         let after = engine_on(&d, Err("unused".into())).settle(seen.clone(), Duration::from_millis(300), &|_: &str| {});
         assert!(t0.elapsed() >= Duration::from_millis(300), "gave up before the bound ({:?})", t0.elapsed());
@@ -1225,9 +1244,8 @@ mod tests {
         write(&d, &sf(4_000_000_000, None));
         assert!(matches!(observe(&d, APP_ORIGIN), Seen::DeadPid(_)));
 
-        let closed = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        write(&d, &ServeFile { port: closed, ..sf(live_pid(), None) });
-        assert!(matches!(observe(&d, APP_ORIGIN), Seen::PortClosed(_)));
+        write(&d, &ServeFile { port: SCRIPTED_PORT, ..sf(live_pid(), None) });
+        assert!(matches!(observe_in(&d, APP_ORIGIN, &closed_port), Seen::PortClosed(_)));
 
         let (port, h) = fake_serve(K, "1.2.3", Fake::WrongToken);
         write(&d, &ServeFile { port, token: K.into(), ..sf(live_pid(), Some("app")) });
