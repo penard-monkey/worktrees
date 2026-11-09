@@ -4426,3 +4426,26 @@ fn a_test_serve_cannot_write_the_users_project_registry() {
     let e = r["err"].as_str().unwrap_or_default();
     assert!(e.contains("real project registry"), "the refusal says why: {r}");
 }
+
+/// **Nor the user's real `workspaces.json`** (idea board phase 2). It sits
+/// beside the registry, outside any config dir a test hands serve, so the same
+/// process-wide guard covers it (`workspaces::edit_at` asks
+/// `registry::real_writes_forbidden`). Shown red under a temp `HOME` only.
+#[test]
+fn a_test_serve_cannot_write_the_users_workspaces() {
+    let l = live("realws");
+    let mut ws = client(&l);
+    let name = format!("wt-test-{}", std::process::id());
+    let r = rpc(&mut ws, json!(1), "workspace_create", json!({ "name": name }));
+    let real = worktrees_core::workspaces::read().unwrap_or_default();
+    let landed: Vec<String> = real.workspaces.iter().filter(|w| w.name == name).map(|w| w.id.clone()).collect();
+    for id in &landed {
+        // Never leave it behind, whatever the assertions below say. (This
+        // write is refused too while the guard holds; it runs only when the
+        // guard failed, and the guard is what failed.)
+        let _ = worktrees_core::workspaces::remove(id);
+    }
+    assert!(landed.is_empty(), "the workspace landed in the real workspaces.json: {r}");
+    let e = r["err"].as_str().unwrap_or_default();
+    assert!(e.contains("real workspaces.json"), "the refusal says why: {r}");
+}

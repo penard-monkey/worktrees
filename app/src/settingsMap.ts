@@ -140,12 +140,16 @@ export const MEMORY_KEYS = [
   // the dock and the nav remembering what you did with them (§1.3)
   "dock_open", "dock_width", "dock_tab", "dock_lower_frac", "files_diff",
   "sort_mode", "sort_dir", "sync_with_sessions",
+  // which nav view is showing: All projects or Workspaces (workspaces.ts)
+  "nav_view",
 ] as const;
 /** Memory kept PER PLACE (or per project): what Reset's "Per-place memory"
  *  clears, and what no other scope may touch. */
 export const PLACE_MEMORY_KEYS = [
   "place_panels", "term_tab_names", "term_tabs", "term_tab_active", "docs_collapsed",
   "files_open", "files_open_at", "collapsed", "manual_order",
+  // a named workspace's folding, and its projects' (workspaces.ts)
+  "ws_collapsed",
 ] as const;
 /** Markers the controls write, never a control of their own. */
 export const MARKER_KEYS = ["settings_rev", "last_seen_version", "update_dismissed", "chat_default_v1", "init_dismissed", "offers_dismissed"] as const;

@@ -85,6 +85,7 @@ pub mod tmux;
 pub mod turns;
 pub mod tmux_server;
 pub mod trust;
+pub mod workspaces;
 pub mod ui;
 
 pub use error::{Result, WtError};
