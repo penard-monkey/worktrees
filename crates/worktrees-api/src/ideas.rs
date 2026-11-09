@@ -30,8 +30,18 @@ fn root(ctx: &Ctx) -> &Path {
     ctx.ideas_dir()
 }
 
-pub fn ideas_list(ctx: &Ctx) -> Result<Index, String> {
-    ideas::list_at(root(ctx))
+/// `ideas_list`'s answer: the index, and the folder it was read from — the
+/// one path this module hands out, for the window's Show in Finder (a reveal
+/// on the HOST, through `onhost.ts`; every row still takes an id, never it).
+#[derive(Serialize)]
+pub struct Listing {
+    #[serde(flatten)]
+    pub index: Index,
+    pub dir: String,
+}
+
+pub fn ideas_list(ctx: &Ctx) -> Result<Listing, String> {
+    Ok(Listing { index: ideas::list_at(root(ctx))?, dir: root(ctx).to_string_lossy().into_owned() })
 }
 
 pub fn idea_read(ctx: &Ctx, id: String) -> Result<Doc, String> {

@@ -36,8 +36,8 @@ const read = (rel) => fs.readFileSync(path.join(APP, rel), "utf8");
 const exists = (rel) => fs.existsSync(path.join(APP, rel));
 const code = (s) => s.replace(/\/\*[\s\S]*?\*\/|\/\/.*/g, "");
 
-/** Packages only the companion's bundle may reach. CodeMirror is phase 1's;
- *  it is listed now so the line exists before the dependency does. */
+/** Packages only the companion's bundle may reach: CodeMirror and its parser
+ *  (Ideas phase 1, the editor). */
 const COMPANION_ONLY = ["codemirror", "@codemirror", "@lezer", "@uiw"];
 
 function resolveRel(fromFile, spec) {
@@ -100,6 +100,10 @@ const inCompanion = (f) => f.startsWith(path.join(APP, "companion") + path.sep);
       "the port and token go from engine_connect's answer straight to connectSocket, stored and logged nowhere");
     check(!/bootSocket/.test(main) && /version: __WT_VERSION__/.test(main), "the companion never names the dev token client, and hands its socket __WT_VERSION__");
     check(/document\.addEventListener\("visibilitychange", \(\) => door\.visibility\(\)\);/.test(main), "a hidden companion defers its retries (it hears visibilitychange)");
+    // The positive control: a walk that stopped short would pass assertion 1
+    // with CodeMirror in the app, because it would find it nowhere.
+    const cm = [...g.pkgs].filter(only);
+    check(cm.includes("@codemirror/view") && cm.includes("@codemirror/state"), `the walk finds the editor where it lives: the companion's graph reaches CodeMirror (${cm.join(", ") || "nothing"})`);
   }
 }
 
@@ -132,6 +136,11 @@ const inCompanion = (f) => f.startsWith(path.join(APP, "companion") + path.sep);
   const ids = (c) => c.permissions.map((p) => (typeof p === "string" ? p : p.identifier));
   const borrowed = ids(cap).filter((p) => p !== "core:default" && ids(main).includes(p));
   check(borrowed.length === 0, `the companion holds none of main's plugin permissions${borrowed.length ? `: ${borrowed.join(", ")}` : ""} (${ids(cap).join(", ")})`);
+  // Exactly what the window uses: Show in Finder's reveal, and no opener set
+  // (opener:default would also open URLs and paths).
+  const ALLOWED = ["core:default", "opener:allow-reveal-item-in-dir"];
+  const extra = ids(cap).filter((p) => !ALLOWED.includes(p));
+  check(extra.length === 0 && cap.permissions.every((p) => typeof p === "string"), `the companion's rights are ${ALLOWED.join(" + ")} at most${extra.length ? `: also ${extra.join(", ")}` : ""}`);
 }
 
 // ── 5. the build, when there is one ─────────────────────────────────────────
@@ -142,9 +151,13 @@ const inCompanion = (f) => f.startsWith(path.join(APP, "companion") + path.sep);
     const walk = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); if (e.isDirectory()) walk(p); else if (/\.(js|mjs|css|html)$/.test(e.name)) all.push(p); } };
     walk(path.join(APP, "dist"));
     const appFiles = all.filter((f) => !f.startsWith(path.join(APP, "dist/companion") + path.sep));
-    const leak = appFiles.filter((f) => /@codemirror|codemirror|@lezer/i.test(fs.readFileSync(f, "utf8")));
+    // Package names may not survive minification; CodeMirror's own class
+    // names do (the positive control below finds them in the companion's).
+    const leak = appFiles.filter((f) => /@codemirror|codemirror|@lezer|cm-content|cm-scroller/i.test(fs.readFileSync(f, "utf8")));
     check(leak.length === 0, `the app's built files carry no companion-only library${leak.length ? `: ${leak.map((f) => path.relative(APP, f)).join(", ")}` : ""}`);
     check(exists("dist/companion/index.html"), "the build has the companion's page at dist/companion/index.html");
+    const cmp = all.filter((f) => f.startsWith(path.join(APP, "dist/companion") + path.sep));
+    check(cmp.some((f) => /cm-content|cm-scroller/.test(fs.readFileSync(f, "utf8"))), "the companion's build carries the editor (the leak test above greps for something that exists)");
     const probe = all.filter((f) => /x-worktrees-dragprobe|drag me \(/.test(fs.readFileSync(f, "utf8")));
     check(probe.length === 0, `no built file carries the dev-only drag probe${probe.length ? `: ${probe.map((f) => path.relative(APP, f)).join(", ")}` : ""}`);
     const dev = all.filter((f) => f.startsWith(path.join(APP, "dist/companion")) && /\/__worktrees\/serve|the dev server could not say/.test(fs.readFileSync(f, "utf8")));

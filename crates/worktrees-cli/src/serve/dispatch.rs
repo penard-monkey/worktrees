@@ -1821,7 +1821,9 @@ mod tests {
         let folder = dir.join("ideas");
         let c = Call { ctx: c.ctx.clone().with_ideas_dir(folder.clone()), ..c };
         let run = |cmd: &str, v: Value| super::call(&c, cmd, &args(v));
-        assert_eq!(run("ideas_list", json!({})).unwrap()["ideas"], json!([]));
+        let l0 = run("ideas_list", json!({})).unwrap();
+        assert_eq!(l0["ideas"], json!([]));
+        assert_eq!(l0["dir"], json!(folder.to_string_lossy()), "the folder, for Show in Finder");
         assert!(!folder.exists(), "a listing creates nothing");
         let d = run("idea_create", json!({"title": "Jellyfin", "path": "/etc"})).unwrap();
         let id = d["id"].as_str().unwrap().to_string();
