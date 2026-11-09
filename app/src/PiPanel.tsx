@@ -163,6 +163,20 @@ const fmtTokens = (n: number | null, dflt: number) => {
 const REACH_TEXT: Record<PiHost["reach"], string> = {
   served: "answering", up: "answering (its model list is not readable)", down: "not answering", unprobed: "pi's built-in endpoint",
 };
+/** The places whose live pi runs on `host` (or `host/model`), from the same
+ *  snapshot the nav draws: read when a remove is ARMED, so the confirm can say
+ *  who loses it. A read that fails names nobody — a remove is never blocked. */
+async function piUsers(host: string, model?: string): Promise<string[]> {
+  type Snap = { projects: { name?: string | null; root: string; snapshot: { places: { slug: string; agent_sessions?: { pi?: { up: boolean; model?: string | null } } }[] } | null }[] };
+  try {
+    const w = await invoke<Snap>("list_workspace");
+    const want = (m: string | null | undefined) => !!m && (model ? m === `${host}/${model}` : m.startsWith(`${host}/`));
+    return w.projects.flatMap((p) => (p.snapshot?.places ?? [])
+      .filter((pl) => pl.agent_sessions?.pi?.up && want(pl.agent_sessions.pi.model))
+      .map((pl) => `${p.name ?? p.root.split("/").pop()}:${pl.slug}`));
+  } catch { return []; }
+}
+
 const toCount = (s: string): number | undefined => {
   const n = Number(s.trim());
   return s.trim() === "" || !Number.isInteger(n) || n <= 0 ? undefined : n;
@@ -183,6 +197,17 @@ export function PiModelsSection({ settings, models, onChange, reloadModels, onFa
   const [adding, setAdding] = useState({ id: "", url: "http://127.0.0.1:1234/v1", api: "openai-completions" });
   const [urlEdit, setUrlEdit] = useState<{ id: string; url: string } | null>(null);
   const [modelEdit, setModelEdit] = useState<{ id: string; model: string; ctx: string; max: string } | null>(null);
+  const [users, setUsers] = useState<{ key: string; places: string[] } | null>(null);
+  /** A two-click remove that, on the arming click, looks up who uses it. */
+  const removeClick = (key: string, host: string, model: string | undefined, act: () => void) => {
+    if (arm.armed !== key) {
+      setUsers(null);
+      void piUsers(host, model).then((places) => setUsers({ key, places }));
+    }
+    arm.confirm(key, act);
+  };
+  const usedBy = (key: string) => (users?.key === key && users.places.length > 0 && arm.armed === key
+    ? <div className="hint" data-testid="pi-remove-users">In use by pi in {users.places.join(", ")}. A running lane keeps it until it is restarted; after that, it cannot start on it.</div> : null);
   const dflt = settings.default_models.pi ?? "";
   const row = (backend: string, model: string) => models?.find((o) => o.model.backend === backend && o.model.model === model);
   const shown = new Set((hosts?.hosts ?? []).filter((h) => !(h.origin === "pi" && h.overridden)).map((h) => h.backend));
@@ -229,7 +254,7 @@ export function PiModelsSection({ settings, models, onChange, reloadModels, onFa
                 {ours && <span className="pi-host-acts">
                   <button className="ctrl sm" onClick={() => setModelEdit({ id: h.backend, model: m.id, ctx: m.context_window ? String(m.context_window) : "", max: m.max_tokens ? String(m.max_tokens) : "" })}>Edit</button>
                   <button className={"ctrl sm danger" + (arm.armed === `m:${mk}` ? " armed" : "")} disabled={busy} data-testid="pi-model-remove"
-                    onClick={() => arm.confirm(`m:${mk}`, () => void edit({ op: "remove_model", id: h.backend, model: m.id }))}>
+                    onClick={() => removeClick(`m:${mk}`, h.backend, m.id, () => void edit({ op: "remove_model", id: h.backend, model: m.id }))}>
                     {arm.armed === `m:${mk}` ? "Remove — sure?" : "Remove"}</button>
                 </span>}
               </div>
@@ -248,7 +273,7 @@ export function PiModelsSection({ settings, models, onChange, reloadModels, onFa
         <div className="ver-actions">
           {ours && urlEdit?.id !== h.backend && <button className="ctrl sm" onClick={() => setUrlEdit({ id: h.backend, url: h.base_url ?? "" })}>Edit URL</button>}
           {ours && <button className={"ctrl sm danger" + (arm.armed === `h:${h.backend}` ? " armed" : "")} disabled={busy} data-testid="pi-host-remove"
-            onClick={() => arm.confirm(`h:${h.backend}`, () => void edit({ op: "remove", id: h.backend }))}>
+            onClick={() => removeClick(`h:${h.backend}`, h.backend, undefined, () => void edit({ op: "remove", id: h.backend }))}>
             {arm.armed === `h:${h.backend}` ? (h.overridden ? "Remove override — sure?" : "Remove host — sure?") : (h.overridden ? "Remove override" : "Remove host")}</button>}
           {!ours && !h.overridden && h.base_url && <button className="ctrl sm" disabled={busy} data-testid="pi-host-override"
             onClick={() => void edit({ op: "override", id: h.backend })}>Override in worktrees</button>}
@@ -258,6 +283,8 @@ export function PiModelsSection({ settings, models, onChange, reloadModels, onFa
           : `Its models are gone from pi worktrees starts from their next start.`}{usesDefault(h.backend) && ` Your default model, ${dflt}, is on this host.`}</div>}
         {arm.armed?.startsWith(`m:${h.backend}/`) && usesDefault(h.backend, arm.armed.slice(`m:${h.backend}/`.length)) &&
           <div className="hint">{dflt} is your default model.</div>}
+        {usedBy(`h:${h.backend}`)}
+        {arm.armed?.startsWith(`m:${h.backend}/`) && usedBy(arm.armed)}
         {ours && h.overridden && <div className="hint">This host's models come from worktrees now, and later edits to pi's own config for it do not reach pi worktrees starts. Its key is still pi's: worktrees never copies one.</div>}
       </div>
     );
