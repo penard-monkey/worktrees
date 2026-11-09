@@ -149,9 +149,9 @@ Surveyed across real sessions on this machine (a png of 859,941 bytes, one of
   originalHeight, displayWidth, displayHeight}}}`: the image TWICE per entry.
 - The older `{hash, message, sessionId, type}` entries (no version) hold the
   block too.
-That is why the thumbnail is NOT cut from the transcript: it would put 150-300
-KB per image through `agent_turns`' poll (or need a second place-scoped row
-reading the transcript), would show a recompressed copy, and would hand a device
-the pixels of a file it may not be allowed to read. The path goes through the
-same place-only rule as a reply's image instead. The test is
-`claude_read_of_an_image_is_a_path_and_no_pixels`.
+So `agent_turns` never carries the block (150-300 KB per Read would ride every
+poll). A Read's thumbnail reads the FILE through `read_place_image` when it is
+inside the place; for a file outside it (a render in `/tmp`) the block is served
+on demand by `agent_call_image` (`turns::claude_call_image`), to the host's own
+console only. Tests: `claude_read_of_an_image_is_a_path_and_no_pixels`,
+`claude_call_image_is_the_read_results_block_by_id`.

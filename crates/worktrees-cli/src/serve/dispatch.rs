@@ -1043,8 +1043,9 @@ commands! { cx, a;
     },
     read_file_base64: Engine [read, file(path)] => files::read_file_base64(&cx.ctx, a.get("path")?, a.get("max_bytes")?),
     // A chat's image (feat/chat-images): resolved under the PLACE's own root by
-    // the host, never a client path judged against every project, so a device
-    // scoped to one place reads only that place's images.
+    // the host, never a client path judged against every project: the place-only
+    // rule is the chat's containment (a reply cannot show another place's or the
+    // host's files), NOT an access boundary: grants reach projects, not places.
     read_place_image: Engine [read, place(repo, slug)] => files::read_place_image(&cx.ctx, a.get("repo")?, a.get("slug")?, a.get("path")?, a.get("max_bytes")?, a.get("etag")?),
     write_file: Engine [write, file(path)] => files::write_file(&cx.ctx, a.get("path")?, a.get("content")?, a.get("expected_mtime")?),
 
@@ -1151,6 +1152,14 @@ commands! { cx, a;
     // `admin` required in the body for the sensitive tier, as
     // `agent_answer_text` requires `answer`. Its own row, never an argument
     // on `agent_send`, whose rule refuses a leading `/` for MCP `send` too.
+    // The picture a Claude Read was shown (feat/chat-images), for a Read of a
+    // file OUTSIDE the place, by the call's id: fetched when a thumbnail
+    // mounts, never in the poll above. `read`, and the body refuses every
+    // caller but the host's own console (a file outside the projects is not a
+    // device's to see).
+    agent_call_image: Engine [read, place(repo, slug)] => agents::agent_call_image(
+        &cx.ctx, a.get("repo")?, a.get("slug")?, a.get("call_id")?,
+    ),
     agent_commands: Engine [read, place(repo, slug), opt(session_of(session, repo, slug))] => agents::agent_commands(
         &cx.ctx, a.get("repo")?, a.get("slug")?, a.get("session")?,
     ),
@@ -1350,13 +1359,13 @@ mod tests {
     /// named workspaces' six console rows (`workspaces_list`, `workspace_*`), and the
     /// idea board's seven console rows (`ideas_list`, `idea_read`,
     /// `idea_create`, `idea_write`, `idea_rename`, `idea_remove`,
-    /// `idea_adopt`), and the chat's image (`read_place_image`); the check scripts
+    /// `idea_adopt`), and the chat's images (`read_place_image`, `agent_call_image`); the check scripts
     /// hold the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 226, "the table has 226 commands");
+        assert_eq!(TABLE.len(), 227, "the table has 227 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1762,7 +1771,7 @@ mod tests {
     /// `push_allow_security`); Settings → Agent policy → Limits'
     /// `limits_settings` (`read`) and `set_limits` (`admin`); and the policy
     /// presets' `policy_preset_status` (`read`) and `apply_policy_preset`
-    /// (console); the named workspaces' six (console); and the idea board's seven (console); `read_place_image` is a `read`. A row that moves group
+    /// (console); the named workspaces' six (console); and the idea board's seven (console); `read_place_image` and `agent_call_image` are `read`. A row that moves group
     /// fails here until the count (and the proposal's table) move with it.
     #[test]
     fn every_row_has_one_base_group_and_the_counts_are_section_3_4s() {
@@ -1779,7 +1788,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 68), ("write", 23), ("admin", 41), ("console", 60), ("stream", 10), ("instruct", 8), ("answer", 2),
+            ("read", 69), ("write", 23), ("admin", 41), ("console", 60), ("stream", 10), ("instruct", 8), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 7),
         ]
         .into();

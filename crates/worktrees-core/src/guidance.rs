@@ -42,6 +42,21 @@ under .worktrees/ plus a tmux session). Do branch work in a place: create_worktr
 pub const HEAVY: &str = "Run gates, builds and full test suites as `worktrees run --slot gate -- <cmd>` \
 (the machine is shared with every lane); nudge or launch lanes at most three at a time.";
 
+/// How to show the user an image (`feat/chat-images`), ALWAYS ON: Claude gets it
+/// as the prompt plugin's SessionStart output, pi, Codex and kimi inside
+/// [`rules_text`]. It cannot live only in the skill: a skill loads on demand,
+/// and "draw me a potato" never asks for "branch work" (the owner's sandbox
+/// run, 2026-11-09), while Claude Code's own prompt says to keep temporary
+/// files in its scratchpad, so nothing outranked that. A CONSTANT, like every
+/// text here: nothing a repository contains reaches it (ADR 0001). The folder
+/// is `attach::DIR`/`attach::AGENT_DIR`, git-excluded and swept after seven
+/// days; a test holds the two together.
+pub const IMAGE_RULE: &str = "When the user should SEE an image you made (a render, screenshot, chart, drawing), \
+save it inside the current place under .worktrees-attachments/agent/ (mkdir -p it; git-excluded, cleared after seven \
+days), NOT in your scratchpad or /tmp, and put ![what it is](.worktrees-attachments/agent/name.png) in your reply: that \
+is how the worktrees chat view shows it (a terminal shows the markdown). Only an image inside the place shows (png, \
+jpg, gif, webp, bmp, svg; up to 4 MB). This overrides any rule to keep temporary files elsewhere.";
+
 /// The `worktrees` skill (tier b). Repo-agnostic: a repository's own
 /// AGENTS.md still carries its specifics, and the skill says so.
 pub const SKILL_MD: &str = include_str!("guidance/SKILL.md");
@@ -61,7 +76,7 @@ pub const VERSION: u32 = 6;
 pub fn rules_text() -> String {
     format!(
         "{HEAD} {HEAVY} For the how-to (handing work to another agent, messaging between places, finishing \
-         and releasing from a place), use the worktrees skill if you have it, or run `worktrees guide`."
+         and releasing from a place), use the worktrees skill if you have it, or run `worktrees guide`. {IMAGE_RULE}"
     )
 }
 
@@ -621,8 +636,9 @@ pub fn materialize_plan_in(data_root: &Path, bin: &Path) -> Result<PathBuf, Stri
 
 /// The prompt plugin for Claude (`feat/actionable-prompts`): a THIRD
 /// `--plugin-dir`, its own hash directory, on every Claude launch whatever
-/// guidance and planning say — it teaches the agent nothing; it lets serve
-/// show a prompt taller than its pane whole (`pending`).
+/// guidance and planning say — it lets serve show a prompt taller than its pane
+/// whole (`pending`), and its SessionStart hook is the one thing it teaches:
+/// [`IMAGE_RULE`], which must reach every Claude, skill or no skill.
 ///
 /// PermissionRequest saves what a permission prompt asks; SessionEnd removes
 /// it. Neither ever decides: each command discards its output and ends `||
@@ -649,8 +665,16 @@ fn prompt_plugin_files(bin: &Path) -> Result<Vec<(String, String)>, String> {
             "timeout": 10,
         }] }])
     };
+    // SessionStart's plain stdout reaches the model (as the planning plugin's
+    // does): the image rule, a fixed text, on every start, resume, clear and
+    // compact. This one hook prints; the two above never do.
+    let image = serde_json::json!([{ "matcher": "startup|resume|clear|compact", "hooks": [{
+        "type": "command",
+        "command": format!("printf '%s\\n' {}", crate::profile::shell_quote(IMAGE_RULE)),
+        "timeout": 10,
+    }] }]);
     let hooks = serde_json::to_string_pretty(&serde_json::json!({
-        "hooks": { "PermissionRequest": hook("permission-request"), "SessionEnd": hook("session-end") }
+        "hooks": { "PermissionRequest": hook("permission-request"), "SessionEnd": hook("session-end"), "SessionStart": image }
     }))
     .map_err(|e| e.to_string())?;
     Ok(vec![
@@ -1360,6 +1384,27 @@ mod tests {
         d
     }
 
+    /// The image rule reaches EVERY Claude as SessionStart's stdout (the skill
+    /// loads on demand and "draw me a potato" never asks for it), whatever the
+    /// binary is; it is a constant, and it names the folder `attach` owns.
+    #[test]
+    fn the_image_rule_is_always_on_for_every_harness() {
+        assert!(IMAGE_RULE.contains(&format!("{}/{}/", crate::attach::DIR, crate::attach::AGENT_DIR)), "{IMAGE_RULE}");
+        assert!(IMAGE_RULE.contains("![what it is](") && IMAGE_RULE.contains("NOT in your scratchpad or /tmp"));
+        assert!(rules_text().contains(IMAGE_RULE) && !rules_text().contains('\n'), "pi, Codex and kimi get it in the rules line");
+        assert!(SKILL_MD.contains(".worktrees-attachments/agent/"));
+        let root = tmp("image-rule");
+        let dir = materialize_prompt_in(&root, Path::new("/nonexistent/worktrees")).unwrap();
+        let hooks: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("hooks/hooks.json")).unwrap()).unwrap();
+        let start = &hooks["hooks"]["SessionStart"][0];
+        assert_eq!(start["matcher"], "startup|resume|clear|compact");
+        let cmd = start["hooks"][0]["command"].as_str().unwrap();
+        let out = crate::proc::run_deadline_stdin({ let mut c = crate::childenv::command("/bin/sh"); c.args(["-c", cmd]); c }, b"{}".to_vec(), 10).unwrap();
+        assert_eq!(out.status.code(), Some(0));
+        assert_eq!(String::from_utf8_lossy(&out.stdout), format!("{IMAGE_RULE}\n"), "the model is given exactly the constant");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// The prompt plugin's hooks never decide: whatever the binary does —
     /// missing, failing with exit 2 (which Claude would read as a denial),
     /// printing a decision — each command exits 0 and prints nothing.
@@ -1370,7 +1415,7 @@ mod tests {
         assert!(dir.ends_with("claude-prompt") && dir.starts_with(root.join("agent")), "{}", dir.display());
         let hooks: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(dir.join("hooks/hooks.json")).unwrap()).unwrap();
         let events: Vec<&String> = hooks["hooks"].as_object().unwrap().keys().collect();
-        assert_eq!(events, ["PermissionRequest", "SessionEnd"]);
+        assert_eq!(events, ["PermissionRequest", "SessionEnd", "SessionStart"]);
         let command = |event: &str| hooks["hooks"][event][0]["hooks"][0]["command"].as_str().unwrap().to_string();
         assert!(hooks["hooks"]["PermissionRequest"][0].get("matcher").is_none(), "every tool's prompt");
         assert_eq!(command("PermissionRequest"), "'/opt/wt bin/worktrees' agent-hook permission-request >/dev/null 2>&1 || true");

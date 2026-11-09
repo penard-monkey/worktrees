@@ -76,7 +76,7 @@ async function show(browserType, name) {
       console.log("  notes:", JSON.stringify(view.notes));
       check(view.agentImgs === 2, `the reply shows its two place images (${view.agentImgs})`);
       check(view.userImgs === 1, `the user's own message shows its image (${view.userImgs})`);
-      check(view.thumbs === 1 && view.thumbRows === 1, `a Read of an image in the place has a thumbnail, and the /tmp one has none (${view.thumbs})`);
+      check(view.thumbs === 2 && view.thumbRows === 2, `a Read of an image has a thumbnail, in the place (its file) and outside it (the picture Claude was shown) (${view.thumbs})`);
       check(view.sizes.some(([w]) => w === 640) && view.sizes.some(([w]) => w === 64), `the images decode at their own size (${JSON.stringify(view.sizes)})`);
       check(view.broken === 0, "no broken image anywhere");
       check(!view.srcs.some((s) => /example\.com/.test(s)) && view.srcs.every((s) => s.startsWith("data:") || s === "" || /^(blob:|http:\/\/localhost)/.test(s)),
@@ -107,7 +107,7 @@ async function show(browserType, name) {
       const reads = () => page.evaluate(() => window.__mock.imageReads.slice());
       const first = await reads();
       const dup = first.filter((p, i) => first.indexOf(p) !== i);
-      check(first.length >= 3 && dup.length === 0, `each image was read once (${first.length} reads, ${dup.length} repeats)`);
+      check(first.length >= 4 && dup.length === 0, `each image was read once (${first.length} reads, ${dup.length} repeats)`);
       await page.waitForTimeout(2300); // past the cache's freshness: the next mount revalidates
       const terminal = page.getByRole("button", { name: /^Terminal$/ });
       if (await terminal.count()) {
@@ -118,7 +118,7 @@ async function show(browserType, name) {
       const after = await reads();
       check(after.length === first.length, `leaving the chat and coming back reads no bytes again (${first.length} → ${after.length})`);
       // an image rewritten on disk IS read again
-      const target = first.find((p) => p.endsWith("preview.png"));
+      const target = first.find((p) => p.endsWith("preview.png") && !p.startsWith("call:"));
       await page.evaluate((p) => window.__mock.imageTouched(p), target);
       await page.waitForTimeout(2300);
       if (await terminal.count()) {
@@ -128,6 +128,21 @@ async function show(browserType, name) {
         const again = await reads();
         check(again.length === first.length + 1 && again.at(-1) === target, `an image that changed on disk is read again (${again.length - first.length} new read)`);
       } else check(false, "the Chat/Terminal switch was not found");
+      await page.context().close();
+    }
+    // ── a paired device: the Read outside the place says so, no pixels ──────
+    {
+      const page = await (await browser.newContext({ viewport: { width: 1100, height: 900 } })).newPage();
+      await open(page, "turns=images&callimage=device&activity=3&agentprompt=off");
+      await page.waitForFunction(() => document.querySelectorAll('[data-testid="chat-img"] img').length >= 3, null, { timeout: 8000 });
+      await page.waitForTimeout(300);
+      const d = await page.evaluate(() => ({
+        thumbs: document.querySelectorAll('[data-testid="chat-img-thumb"] img').length,
+        text: [...document.querySelectorAll(".chat-call-thumb")].map((n) => n.textContent.trim()),
+        reads: window.__mock.imageReads.filter((p) => p.startsWith("call:")).length,
+      }));
+      check(d.thumbs === 1 && d.text.some((t) => /preview not shown — not shown on this device/.test(t)), `a device: the in-place Read still has its thumbnail, the outside one says it is not shown here (${JSON.stringify(d.text)})`);
+      await page.screenshot({ path: path.join(shots, `chat-thumb-device-${name}.png`) });
       await page.context().close();
     }
     // ── 4: the scroll ──────────────────────────────────────────────────────

@@ -120,11 +120,28 @@ try {
   for (const n of ["1", "2", "3", "4"]) await IV.loadPlaceImage(placeRef, `${n}.png`, t0);
   check(IV.peekPlaceImage(placeRef, "1.png") === null && IV.peekPlaceImage(placeRef, "4.png") !== null, `the cache is bounded (${IV.CACHE_MAX_BYTES >> 20} MiB): the oldest goes first`);
 
+  // ── the picture a Read was shown (outside the place, the console's) ──────
+  IV.clearPlaceImages();
+  calls = [];
+  globalThis.__invoke = async (cmd, args) => { calls.push({ cmd, ...args }); return { call_id: args.call_id, b64: "PNGDATA", size: 7, truncated: false, mime: "image/png" }; };
+  const cref = { ...placeRef, callId: "toolu_x" };
+  const c1 = await IV.loadCallImage(cref, t0);
+  await IV.loadCallImage(cref, t0 + 999_999);
+  check(calls.length === 1 && calls[0].cmd === "agent_call_image" && calls[0].call_id === "toolu_x" && c1.b64 === "PNGDATA", "a Read's picture is asked for once by its call id, and kept (its pixels never change)");
+  check(IV.peekCallImage(cref)?.mime === "image/png" && IV.peekPlaceImage(placeRef, "toolu_x") === null, "a call's picture and a place image never share a key");
+  IV.clearPlaceImages();
+  globalThis.__invoke = async () => { throw "not shown on this device: this picture is a file Claude read, which only the host's own console may see"; };
+  let said = null;
+  await IV.loadCallImage(cref, t0).catch((e) => { said = String(e); });
+  check(/not shown on this device/.test(said ?? "") && IV.peekCallImage(cref) === null, "a device's refusal reaches the viewer in the host's words and is not cached");
+  html("![x](a.png)"); // (the rule's html helper is unaffected)
+
   // ── the wiring ───────────────────────────────────────────────────────────
   const pane = fs.readFileSync(path.join(ROOT, "src/ChatPane.tsx"), "utf8");
   const uses = pane.match(/<Markdown [^>]*renderImage=\{renderImage\}/g) ?? [];
   check(uses.length === 2, `ChatPane gives both the user's and the agent's bubble the hook (${uses.length} of 2)`);
   check(/readImagePath\(c\.name, c\.summary, c\.failed\)/.test(pane) && /ImageView[^>]*thumb/.test(pane), "a Read of an image draws a thumbnail");
+  check(/call=\{byCall \?/.test(pane) && /thumb\?\.kind === "note" && !!c\.call_id/.test(pane), "a Read outside the place falls back to the picture the call was shown, only with a call id");
   check(!/read_file_base64/.test(pane + fs.readFileSync(path.join(ROOT, "src/chatImageNode.tsx"), "utf8")), "the chat never asks for an image through the project-wide read");
   const fp = fs.readFileSync(path.join(ROOT, "src/FilesPane.tsx"), "utf8");
   check(!/function ImageView/.test(fp) && /from "\.\/ImageView"/.test(fp), "FilesPane uses the shared ImageView, not a copy");

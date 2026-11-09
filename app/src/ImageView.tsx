@@ -72,6 +72,29 @@ export function loadPlaceImage(p: PlaceRef, path: string, now = Date.now()): Pro
   return flight;
 }
 
+/** The picture a Claude Read was shown (`agent_call_image`, the host's console
+ *  only): for a Read of a file OUTSIDE the place. The pixels of a call never
+ *  change, so one is kept for good (until the LRU takes it) and asked for once. */
+export type CallRef = PlaceRef & { callId: string };
+const callKey = (c: CallRef) => `call\0${c.repo}\0${c.slug}\0${c.callId}`;
+export const peekCallImage = (c: CallRef): PlaceBlob | null => held.get(callKey(c))?.blob ?? null;
+export function loadCallImage(c: CallRef, now = Date.now()): Promise<PlaceBlob> {
+  const key = callKey(c);
+  const have = held.get(key);
+  if (have) return Promise.resolve(have.blob);
+  const going = flights.get(key);
+  if (going) return going;
+  const flight = invoke<{ b64: string; size: number; truncated: boolean; mime: string }>("agent_call_image", { repo: c.repo, slug: c.slug, call_id: c.callId })
+    .then((b) => {
+      const blob: PlaceBlob = { ...b, mtime: 0, etag: key };
+      remember(key, blob, now);
+      return blob;
+    })
+    .finally(() => { flights.delete(key); });
+  flights.set(key, flight);
+  return flight;
+}
+
 /** Forget everything (the checks). */
 export function clearPlaceImages() { held.clear(); flights.clear(); heldBytes = 0; }
 
@@ -90,21 +113,27 @@ function Lightbox({ src, alt, onClose }: { src: string; alt: string; onClose: ()
 // Loads bytes as base64 and shows them as a data: URI. Used for an image FILE,
 // for a relative ![]() inside a rendered markdown doc (`inline`) and, with
 // `place`, for the chat's images and a Read's thumbnail (`enlarge`, `thumb`).
-export function ImageView({ path, mime, inline = false, alt = "", onError, place, enlarge = false, thumb = false, errPrefix = "" }: {
+export function ImageView({ path, mime, inline = false, alt = "", onError, place, call, enlarge = false, thumb = false, errPrefix = "" }: {
   path: string; mime?: string; inline?: boolean; alt?: string; onError?: (e: unknown) => void;
-  place?: PlaceRef; enlarge?: boolean; thumb?: boolean; errPrefix?: string;
+  place?: PlaceRef; call?: CallRef; enlarge?: boolean; thumb?: boolean; errPrefix?: string;
 }) {
-  const [blob, setBlob] = useState<(FileBlob & { mime?: string }) | null>(() => (place ? peekPlaceImage(place, path) : null));
+  const [blob, setBlob] = useState<(FileBlob & { mime?: string }) | null>(() => (call ? peekCallImage(call) : place ? peekPlaceImage(place, path) : null));
   const [err, setErr] = useState<string | null>(null);
   const [actual, setActual] = useState(false);
   const [big, setBig] = useState(false);
   const [dim, setDim] = useState<{ w: number; h: number } | null>(null);
-  const repo = place?.repo, slug = place?.slug;
+  const repo = place?.repo, slug = place?.slug, callId = call?.callId;
 
   useEffect(() => {
     let alive = true;
     setErr(null);
-    if (repo !== undefined && slug !== undefined) {
+    if (repo !== undefined && slug !== undefined && callId !== undefined) {
+      const c = { repo, slug, callId };
+      setBlob(peekCallImage(c));
+      loadCallImage(c)
+        .then((b) => { if (alive) setBlob(b); })
+        .catch((e) => { if (!alive) return; setBlob(null); setErr(String(e)); onError?.(e); });
+    } else if (repo !== undefined && slug !== undefined) {
       // Cached: shown already, and only replaced when the file changed on disk.
       setBlob(peekPlaceImage({ repo, slug }, path));
       loadPlaceImage({ repo, slug }, path)
@@ -117,7 +146,7 @@ export function ImageView({ path, mime, inline = false, alt = "", onError, place
         .catch((e) => { if (!alive) return; setErr(String(e)); onError?.(e); });
     }
     return () => { alive = false; };
-  }, [path, repo, slug, onError]);
+  }, [path, repo, slug, callId, onError]);
 
   // Inline (inside markdown prose) these must be SPANs: a <div> inside the <p>
   // React puts prose in is invalid nesting the browser reparents.

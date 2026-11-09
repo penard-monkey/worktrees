@@ -59,6 +59,10 @@ const ROWS = {
   agent_tool_call: "read, place(repo, slug)",
   // One shortened turn whole (the chat's "Show full reply"): a read, like the turns it completes.
   agent_turn_text: "read, place(repo, slug)",
+  // The picture a Claude Read was shown (feat/chat-images), for a file outside
+  // the place: a read by capability, and the BODY refuses every caller but the
+  // host's own console (`ERR_CALL_IMAGE_CONSOLE`).
+  agent_call_image: "read, place(repo, slug)",
   // Slash commands (docs/proposals/chat-slash-commands.md): the list is a
   // read; a run is `instruct`, like a line — drive-class, step-up, the DRIVE
   // budget — with `admin` checked in the body for the sensitive tier.

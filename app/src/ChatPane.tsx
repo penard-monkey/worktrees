@@ -409,6 +409,11 @@ function CallRow(props: { c: ToolCall; k: string; target: Target; root: string; 
   // path is the call's `file_path`, judged by the same place-only rule.
   const shot = readImagePath(c.name, c.summary, c.failed);
   const thumb = shot ? chatImageSrc(shot, "", props.root) : null;
+  // Inside the place: the file itself. Outside it (a render in /tmp, the
+  // owner's flow): the picture Claude was shown, from the transcript, which
+  // only the host's own console is given; a device is told so in words.
+  const shown = shot && thumb ? (thumb.kind === "show" ? thumb.path : shot) : null;
+  const byCall = thumb?.kind === "note" && !!c.call_id;
   const head = (
     <>
       <span className="chat-tool chat-call-name">{c.name}</span>
@@ -426,9 +431,10 @@ function CallRow(props: { c: ToolCall; k: string; target: Target; root: string; 
           <span className="chat-call">{head}</span>
         </button>
       ) : <div className="chat-call">{head}</div>}
-      {thumb?.kind === "show" && (
+      {shown && (thumb?.kind === "show" || byCall) && (
         <div className="chat-call-thumb">
-          <ImageView path={thumb.path} place={{ repo: target.repo, slug: target.slug }} inline enlarge thumb alt={`Read: ${thumb.path.split("/").pop()}`} errPrefix="preview not shown — " />
+          <ImageView path={shown} place={{ repo: target.repo, slug: target.slug }} call={byCall ? { repo: target.repo, slug: target.slug, callId: c.call_id! } : undefined}
+            inline enlarge thumb alt={`Read: ${shown.split("/").pop()}`} errPrefix="preview not shown — " />
         </div>
       )}
       {open && <CallFull c={c} read={read} id={id} panel={panel} />}

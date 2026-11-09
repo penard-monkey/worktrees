@@ -124,13 +124,13 @@ cross-project reach on):
 ## Showing the user an image
 
 - The worktrees app's chat view draws `![what it is](path)` in your reply as a
-  picture. To show one you made (a render, a screenshot, a chart), save it
-  inside the place under `.worktrees-attachments/` (git-excluded, cleared after
-  seven days), such as `.worktrees-attachments/preview.png`, and write
-  `![preview](.worktrees-attachments/preview.png)`.
+  picture. Save an image the user should see (a render, screenshot, chart)
+  inside the place under `.worktrees-attachments/agent/` (`mkdir -p` it;
+  git-excluded, cleared after seven days), never in a scratchpad or `/tmp`, and
+  write `![preview](.worktrees-attachments/agent/preview.png)`.
 - Only an image inside the place shows (png, jpg, gif, webp, bmp, svg; up to
-  4 MB). A file in `/tmp`, another place's tree or a URL shows as a note, so
-  copy it in first. This is for the chat view; a terminal prints the markdown.
+  4 MB). A file elsewhere or a URL shows as a note, so copy it in first. This
+  is for the chat view; a terminal prints the markdown.
 
 ## Finishing
 

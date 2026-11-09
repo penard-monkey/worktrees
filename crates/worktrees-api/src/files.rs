@@ -1371,8 +1371,9 @@ pub fn read_file_base64(ctx: &Ctx, path: String, max_bytes: Option<u64>) -> Resu
 /// An image the CHAT shows (`![](path)` in a reply, a Read's thumbnail): the
 /// place's own, and nothing else. Unlike `read_file_base64`, whose path is
 /// judged against every project the caller may see, this takes the place
-/// (`place(repo, slug)`, so a scoped device is held to its own places) and
-/// resolves `path` under THAT place's root alone, by `safepath::place_image`
+/// (`place(repo, slug)`; a grant reaches PROJECTS, not places, so this is the
+/// chat's containment, not an access boundary) and resolves `path` under THAT
+/// place's root alone, by `safepath::place_image`
 /// (relative to the root, or absolute under it; a link, `..` or another
 /// place's tree refused in words naming the path). The path class the caller
 /// may read is asked of the result too, as for a `file(path)`. Same cap and
@@ -1385,27 +1386,18 @@ pub fn read_place_image(ctx: &Ctx, repo: String, slug: String, path: String, max
         return Err(format!("not a place: {slug}"));
     }
     let root = PathBuf::from(project.place_dir(&slug));
-    let (f, mime) = worktrees_core::safepath::place_image(&root, slug == "(main)", &path)?;
+    let cap = read_cap(max_bytes, READ_BASE64_MAX);
+    // Opened O_NOFOLLOW and held to the identity that was checked, its pixel
+    // size and SVG read from the header (`safepath::open_place_image`).
+    let (read, unchanged) = worktrees_core::safepath::open_place_image(&root, slug == "(main)", &path, cap, etag.as_deref())?;
     if let Some(cl) = read_classes(ctx) {
-        if unreadable(ctx, &cl, &f).is_some() {
+        if unreadable(ctx, &cl, &read.path).is_some() {
             return Err(format!("not readable from this device: {path}"));
         }
     }
-    let cap = read_cap(max_bytes, READ_BASE64_MAX);
-    let file = std::fs::File::open(&f).map_err(|e| e.to_string())?;
-    let on_disk = file.metadata().map(|m| m.len()).map_err(|e| e.to_string())?;
-    let mtime = file_mtime_ms(&f);
-    let now = format!("{mtime}-{on_disk}");
-    if etag.as_deref() == Some(now.as_str()) {
-        return Ok(PlaceImage { b64: String::new(), size: on_disk.min(cap), truncated: on_disk > cap, mtime, mime, etag: now, unchanged: true });
-    }
-    let mut bytes = Vec::new();
-    file.take(cap + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
-    let truncated = bytes.len() as u64 > cap;
-    if truncated {
-        bytes.truncate(cap as usize);
-    }
-    Ok(PlaceImage { b64: b64_encode(&bytes), size: bytes.len() as u64, truncated, mtime, mime, etag: now, unchanged: false })
+    let etag = format!("{}-{}", read.mtime_ms, read.on_disk);
+    let size = if unchanged { read.on_disk.min(cap) } else { read.bytes.len() as u64 };
+    Ok(PlaceImage { b64: b64_encode(&read.bytes), size, truncated: read.truncated, mtime: read.mtime_ms, mime: read.mime, etag, unchanged })
 }
 
 /// Standard base64 (RFC 4648, padded). Hand-rolled: the app pulls in no base64
