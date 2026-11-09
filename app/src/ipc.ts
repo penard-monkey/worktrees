@@ -137,7 +137,8 @@ export const CLIENT_LOCAL: readonly string[] = [
 /** The shim's own commands: not serve rows at all, and never to become ones.
  *  `engine_connect` finds or starts serve and is the ONLY way its token reaches
  *  the page; `raise_window` brings the main window forward for `app:open-doc`;
- *  `open_companion` opens (or raises) the Ideas companion window. The
+ *  `open_companion` opens (or raises) the Ideas companion window, and
+ *  `close_companion` closes it when the Ideas beta is turned off. The
  *  `remote_*` ones are the remote door's (src-tauri/src/remote.rs): the hosts
  *  this machine is paired with, pairing, the choice of engine, following a
  *  host that moved (its address code), the pinned pipe to a paired host
@@ -146,6 +147,7 @@ export const SHIM_COMMANDS: readonly string[] = [
   "engine_connect",
   "raise_window",
   "open_companion",
+  "close_companion",
   "remote_hosts",
   "remote_choose",
   "remote_forget",

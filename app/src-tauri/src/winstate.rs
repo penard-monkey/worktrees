@@ -211,10 +211,15 @@ pub fn enabled(ui_state: Option<&serde_json::Value>) -> bool {
 /// never cached: a companion opened an hour into the session follows the
 /// setting as it is then.
 pub fn enabled_in(dir: &Path) -> bool {
-    let ui = std::fs::read(dir.join("ui-state.json"))
+    enabled(ui_state_in(dir).as_ref())
+}
+
+/// `ui-state.json` in `dir`, READ only (the frontend owns it whole-blob). An
+/// absent or unparsable file is `None`, which every reader takes as defaults.
+pub fn ui_state_in(dir: &Path) -> Option<serde_json::Value> {
+    std::fs::read(dir.join("ui-state.json"))
         .ok()
-        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
-    enabled(ui.as_ref())
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
 }
 
 /// A corrupt or absent file is "nothing saved", never an error on launch.

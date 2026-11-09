@@ -276,6 +276,13 @@ async fn open_companion(app: AppHandle) -> Result<(), String> {
     companion::open(&app, &dir, "asked")
 }
 
+/// Close the Ideas companion window if it is open (companion.rs). Main calls
+/// it when Settings → Beta features → Ideas is turned off.
+#[tauri::command]
+async fn close_companion(app: AppHandle) -> Result<(), String> {
+    companion::close(&app)
+}
+
 // ── the remote door (remote.rs) ─────────────────────────────────────────────
 // The shim's own commands, like engine_connect: never serve rows. The page
 // never sees a key or a pin through any of them.
@@ -465,11 +472,12 @@ pub fn run() {
                 winstate::attach(&w, &config_dir, restore, winstate::MAIN_MIN);
             }
             // The Ideas companion comes back if it was open when the app last
-            // ran, under the same setting as the frames (winstate.rs). A debug
+            // ran, under the same setting as the frames (winstate.rs), and only
+            // with Settings → Beta features → Ideas on (companion.rs). A debug
             // build also opens it on WORKTREES_OPEN_COMPANION=1, so a sandbox
             // run can show it without anyone scripting a click.
             let dev_open = cfg!(debug_assertions) && std::env::var_os("WORKTREES_OPEN_COMPANION").is_some_and(|v| v == "1");
-            if dev_open || (restore && winstate::seed(app.handle(), &config_dir).was_open(companion::LABEL)) {
+            if dev_open || companion::reopens_at_launch(&config_dir, winstate::seed(app.handle(), &config_dir).was_open(companion::LABEL)) {
                 let why = if dev_open { "WORKTREES_OPEN_COMPANION" } else { "open when the app last ran" };
                 let _ = companion::open(app.handle(), &config_dir, why);
             }
@@ -568,6 +576,7 @@ pub fn run() {
             engine_connect,
             raise_window,
             open_companion,
+            close_companion,
             remote_hosts,
             remote_choose,
             remote_forget,

@@ -57,6 +57,7 @@ import {
   VIEW_LABEL, addableTo, idsMoved, idsStepped, projectDrop, rootsWith, rootsWithout, springsTo, wsProjectKey,
   type NavView, type WsDef, type WsHit, type WsList,
 } from "./workspaces";
+import { ideasBeta } from "./beta";
 import { remoteHostLabel, remoteTitle, remoteWebUrl } from "./remote";
 import { PrsPane } from "./PrsPane";
 import { ageOf, prOfPlace, prsShown, prSummary, TAB_MAX_AGE_S, useProjectPrs } from "./prs";
@@ -4690,6 +4691,23 @@ function App() {
     setErr(m);
     invoke("log_event", { level: "error", msg: m }).catch(() => {});
   }, []);
+  // Settings → General → Beta features (beta.ts): the Ideas window and named
+  // workspaces. Every surface of either asks THIS, never the settings key.
+  const ideasOn = ideasBeta(settings);
+  // Turning it off closes an Ideas window that is open (a shim command, which
+  // closes it the way its own close button does, so winstate records it shut
+  // and the next launch does not bring it back). Only on a change seen in
+  // this session: at launch the flag is simply off, and the debug-only
+  // WORKTREES_OPEN_COMPANION window must stay up.
+  const ideasWas = useRef<boolean | null>(null);
+  useEffect(() => {
+    if (!settingsReady) return;
+    const was = ideasWas.current;
+    ideasWas.current = ideasOn;
+    if (was === true && !ideasOn) {
+      invoke("close_companion").catch((e) => invoke("log_event", { level: "warn", msg: `beta: could not close the Ideas window: ${String(e)}` }).catch(() => {}));
+    }
+  }, [settingsReady, ideasOn]);
   // The Ideas companion window (the rail's lightbulb, ⌘⇧I). A shim command,
   // so it works while the engine is down too — which is why its failure is
   // shown here rather than through `fail`, which stays quiet then.
@@ -6388,8 +6406,10 @@ function App() {
   };
   // ── named workspaces (`workspaces.ts`) ──
   // The view showing. Workspaces only once the list has loaded: a window that
-  // cannot reach the console rows (remote) has no switch and stays here.
-  const navView: NavView = wsList && settings.nav_view === "workspaces" ? "workspaces" : "projects";
+  // cannot reach the console rows (remote) has no switch and stays here. With
+  // the beta off the list is never fetched (below), so this is All projects
+  // whatever `nav_view` holds, and `nav_view` is kept for when it comes back.
+  const navView: NavView = ideasOn && wsList && settings.nav_view === "workspaces" ? "workspaces" : "projects";
   const setNavView = (v: NavView) => { if (v !== settings.nav_view) updateSettings({ nav_view: v }); };
   /** Every row answers with the whole list; a failure is the error banner
    *  and leaves the list as it was. */
@@ -6399,9 +6419,14 @@ function App() {
   // Re-read whenever the registry's roots change: "not registered" is the
   // registry's answer, joined in by the row.
   const wsRegKey = (ws?.projects ?? []).map((pv) => pv.root).join("\n");
+  // Beta (beta.ts): off, the list is not fetched and is dropped, which takes
+  // the switch and every workspace menu item with it.
   useEffect(() => {
-    invoke<WsList>("workspaces_list").then(setWsList).catch(() => setWsList(null));
-  }, [wsRegKey]);
+    if (!ideasOn) { setWsList(null); return; }
+    let alive = true;
+    invoke<WsList>("workspaces_list").then((l) => { if (alive) setWsList(l); }).catch(() => { if (alive) setWsList(null); });
+    return () => { alive = false; };
+  }, [wsRegKey, ideasOn]);
   /** Adding never asks. */
   const wsAddProject = (id: string, root: string) => {
     const w = wsById(id);
@@ -7766,11 +7791,11 @@ function App() {
   // the keydown listener stays stable (registered once, no per-render churn).
   // The history step, for the chord handler below (stable effect, live function).
   const navStepRef = useRef<(dir: -1 | 1) => void>(() => {});
-  const keyRef = useRef({ selectedPath: null as string | null, editorCmd: settings.editor_cmd, switchOpen, dockFile: null as string | null, reading: false, settingsOpen: false, filesTabOpen: false, mdPreview: false, mdZoom: DEFAULTS.files_md_zoom, appZoom: DEFAULTS.app_zoom, dockShown: false, dockTab: "files" as Settings["dock_tab"], mainTermUp: false, findOn: null as null | Surface, lowerUp: false, lowerSet: false, dockOpen: false, dockEligible: false, dockFits: true, navPinned: false });
+  const keyRef = useRef({ selectedPath: null as string | null, editorCmd: settings.editor_cmd, switchOpen, dockFile: null as string | null, reading: false, settingsOpen: false, filesTabOpen: false, mdPreview: false, mdZoom: DEFAULTS.files_md_zoom, appZoom: DEFAULTS.app_zoom, dockShown: false, dockTab: "files" as Settings["dock_tab"], mainTermUp: false, findOn: null as null | Surface, lowerUp: false, lowerSet: false, dockOpen: false, dockEligible: false, dockFits: true, navPinned: false, ideasOn: false });
   const filesTabOpen = eff.dock_open && shownTab === "files";
   keyRef.current = {
     selectedPath: selected?.path ?? null, editorCmd: settings.editor_cmd, switchOpen, dockFile, reading, settingsOpen,
-    filesTabOpen,
+    filesTabOpen, ideasOn,
     // ⌘+/⌘−/⌘0 only mean something while a RENDERED markdown doc is on screen —
     // in the dock's Files tab or in the reader. Anywhere else the chord is left
     // alone rather than silently adjusting a size nobody can see.
@@ -7896,7 +7921,8 @@ function App() {
       // ⌘⇧I — the Ideas companion window (open, or bring it forward). Shift-
       // guarded, so above the meta-only gate like ⌘⇧T. `e.code` too, so a
       // layout whose I key types another letter still has it.
-      if (e.metaKey && e.shiftKey && !e.altKey && !e.ctrlKey && !e.repeat && (e.key.toLowerCase() === "i" || e.code === "KeyI")) {
+      // Beta (beta.ts): off, the chord is not taken at all, as before Ideas.
+      if (keyRef.current.ideasOn && e.metaKey && e.shiftKey && !e.altKey && !e.ctrlKey && !e.repeat && (e.key.toLowerCase() === "i" || e.code === "KeyI")) {
         e.preventDefault();
         openIdeas();
         return;
@@ -8850,7 +8876,7 @@ function App() {
             <button
               className={"mini" + (confirmRm === `hdr|${pv.root}` ? " armed" : "")}
               data-track="nav.project.remove"
-              title={confirmRm === `hdr|${pv.root}` ? "click again to remove from All projects" : "remove project"}
+              title={confirmRm === `hdr|${pv.root}` ? (ideasOn ? "click again to remove from All projects" : "click again to remove from workspace") : "remove project"}
               onClick={() => removeProjectHdr(pv.root)}
             >
               {confirmRm === `hdr|${pv.root}` ? "remove?" : <Icons.X size={13} />}
@@ -9184,7 +9210,7 @@ function App() {
         {/* The Ideas companion: a window of its own (Ideas phase 0). The
             rail is the one strip every layout shows, and this sits with the
             app-wide actions rather than with Places. */}
-        <button className="rail-icon" title="Ideas — open the Ideas window (⌘⇧I)" data-testid="ideas-rail" onClick={openIdeas}><Icons.Lightbulb size={17} /></button>
+        {ideasOn && <button className="rail-icon" title="Ideas — open the Ideas window (⌘⇧I)" data-testid="ideas-rail" onClick={openIdeas}><Icons.Lightbulb size={17} /></button>}
         <button className="rail-icon" title="add project" data-testid="add-menu-rail" onClick={openAddMenu}><Icons.FolderPlus size={17} /></button>
         {/* Renders nothing unless the widget initialized, so a build with no
             Orfis configuration leaves the rail exactly as it was. */}
@@ -9256,7 +9282,7 @@ function App() {
         {initAsk && (
           <InitRepoPrompt dir={initAsk} onInit={initRepo} onCancel={() => setInitAsk(null)} />
         )}
-        {wsList && (
+        {ideasOn && wsList && (
           <NavViewSwitch
             view={navView}
             onPick={setNavView}
@@ -10738,7 +10764,7 @@ function App() {
             <button className="pop-item" onClick={() => copyText(ctx.root)}>Copy path</button>
             <button className="pop-item" {...hostOnly("Reveal in Finder")} onClick={() => revealPlace(ctx.root)}>Reveal in Finder</button>
             <button className="pop-item" {...hostOnly("Open in editor")} onClick={() => editIn(ctx.root)}>Open in editor</button>
-            {wsList && (
+            {ideasOn && wsList && (
               <>
                 <div className="ctx-sep" />
                 {/* The drags' twins (`workspaces.ts`): add opens the list of
@@ -10765,7 +10791,7 @@ function App() {
                   className={"pop-item danger" + (confirmRm === `proj|${ctx.root}` ? " armed" : "")}
                   onClick={() => removeProjectCtx(ctx.root)}
                 >
-                  {confirmRm === `proj|${ctx.root}` ? "Confirm remove?" : "Remove from All projects"}
+                  {confirmRm === `proj|${ctx.root}` ? "Confirm remove?" : ideasOn ? "Remove from All projects" : "Remove from workspace"}
                 </button>
               </>
             )}

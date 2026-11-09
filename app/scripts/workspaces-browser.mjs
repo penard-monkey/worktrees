@@ -1,6 +1,7 @@
 // Optional browser gate for the named workspaces view (idea board phase 2),
 // in Chromium AND WebKit (the app is WKWebView; the harness is Chrome —
-// AGENTS.md). Against the mock, seeded with `?workspaces=1`: "Everything"
+// AGENTS.md). Against the mock, seeded with `?workspaces=1` and the Ideas and
+// workspaces beta on (beta.ts): "Everything"
 // holds two projects and one root that is not registered, "Tools" shares one
 // of them.
 //
@@ -77,9 +78,11 @@ async function run(engine, name) {
   // over a header scrolled out of the nav hits nothing (the drags below).
   const page = await browser.newPage({ viewport: { width: 1280, height: 2400 } });
   // A pinned nav: unpinned, it hides itself on Home (arrange-browser's seed).
+  // Workspaces are a beta (beta.ts), off by default: the seed turns it on.
+  // `beta-browser.mjs` holds what the nav draws with it off.
   await page.addInitScript((s) => {
     if (!sessionStorage.getItem("wt-mock-ui-state")) sessionStorage.setItem("wt-mock-ui-state", JSON.stringify(s));
-  }, { places_side: "left", dock_side: "left", settings_rev: 4, nav_pinned: true });
+  }, { places_side: "left", dock_side: "left", settings_rev: 4, nav_pinned: true, beta_ideas: true });
   await page.goto(`${BASE}/?workspaces=1`);
   await page.waitForSelector("[data-testid=nav-view-projects]");
   const tag = `[${name}]`;

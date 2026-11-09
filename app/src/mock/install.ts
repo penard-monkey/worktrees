@@ -267,6 +267,8 @@ type MockWsDef = { id: string; name: string; projects: string[] };
 let mockWsSeq = 0;
 const mockWsId = () => `01MOCK${String(++mockWsSeq).padStart(20, "0")}`;
 let mockWsDefs: MockWsDef[] | null = null;
+/** The tab `open_companion` opened, for `close_companion`. */
+let mockCompanionTab: Window | null = null;
 const mockWsSeed = (): MockWsDef[] => {
   if (new URLSearchParams(location.search).get("workspaces") !== "1") return [];
   const roots = ws.projects.map((p) => p.root);
@@ -2857,7 +2859,13 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     // The Ideas companion: a second Tauri window in the app; in the harness, a
     // second tab on the same dev server, carrying this page's query.
     case "open_companion":
-      window.open(`/companion/index.html${location.search}`, "worktrees-companion");
+      mockCompanionTab = window.open(`/companion/index.html${location.search}`, "worktrees-companion");
+      return null;
+    // The Ideas beta was turned off: close the tab `open_companion` opened, if
+    // this page opened one (a tab it did not open, it cannot close).
+    case "close_companion":
+      mockCompanionTab?.close();
+      mockCompanionTab = null;
       return null;
     case "engine_connect":
       throw new Error("the mock harness has no engine: it answers every command itself");
@@ -5261,6 +5269,13 @@ Phase 3: Frontend pane and mock harness
         const raw = sessionStorage.getItem(MOCK_SETTINGS_KEY);
         if (raw) return JSON.parse(raw);
       } catch { /* private mode */ }
+      // ?beta=ideas — a fresh tab with Settings → Beta features → Ideas and
+      // workspaces on (beta.ts). Off by default here too, as in the app. Only
+      // while nothing is stored, so turning it off in the sheet sticks.
+      if (new URLSearchParams(location.search).get("beta")?.split(",").includes("ideas")) {
+        const m = /layout=(left|right)-(left|right)/.exec(location.search);
+        return { beta_ideas: true, ...(m ? { places_side: m[1], dock_side: m[2], settings_rev: 4 } : {}) };
+      }
       // ?layout=<places>-<dock> (e.g. left-left: reference left, agent right) —
       // a fresh tab in one of Settings → Layout's four shapes. Only while
       // nothing is stored, so a later pick in the sheet still sticks. Stamped
