@@ -270,22 +270,22 @@ export function PiModelsSection({ settings, models, onChange, reloadModels, onFa
           ))}
           {!ours && h.served_undeclared.length > 0 && <div className="hint">Override this host in worktrees to declare one.</div>}
         </div>}
-        <div className="ver-actions">
+        {(ours || (!h.overridden && h.base_url)) && <div className="ver-actions">
           {ours && urlEdit?.id !== h.backend && <button className="ctrl sm" onClick={() => setUrlEdit({ id: h.backend, url: h.base_url ?? "" })}>Edit URL</button>}
           {ours && <button className={"ctrl sm danger" + (arm.armed === `h:${h.backend}` ? " armed" : "")} disabled={busy} data-testid="pi-host-remove"
             onClick={() => removeClick(`h:${h.backend}`, h.backend, undefined, () => void edit({ op: "remove", id: h.backend }))}>
             {arm.armed === `h:${h.backend}` ? (h.overridden ? "Remove override — sure?" : "Remove host — sure?") : (h.overridden ? "Remove override" : "Remove host")}</button>}
           {!ours && !h.overridden && h.base_url && <button className="ctrl sm" disabled={busy} data-testid="pi-host-override"
             onClick={() => void edit({ op: "override", id: h.backend })}>Override in worktrees</button>}
-        </div>
+        </div>}
         {arm.armed === `h:${h.backend}` && <div className="hint">{h.overridden
-          ? `pi worktrees starts goes back to pi's own ${h.backend} from its next start.`
-          : `Its models are gone from pi worktrees starts from their next start.`}{usesDefault(h.backend) && ` Your default model, ${dflt}, is on this host.`}</div>}
+          ? `The pi that worktrees starts goes back to pi's own ${h.backend} from its next start.`
+          : `Its models are gone from the pi that worktrees starts, from its next start.`}{usesDefault(h.backend) && ` Your default model, ${dflt}, is on this host.`}</div>}
         {arm.armed?.startsWith(`m:${h.backend}/`) && usesDefault(h.backend, arm.armed.slice(`m:${h.backend}/`.length)) &&
           <div className="hint">{dflt} is your default model.</div>}
         {usedBy(`h:${h.backend}`)}
         {arm.armed?.startsWith(`m:${h.backend}/`) && usedBy(arm.armed)}
-        {ours && h.overridden && <div className="hint">This host's models come from worktrees now, and later edits to pi's own config for it do not reach pi worktrees starts. Its key is still pi's: worktrees never copies one.</div>}
+        {ours && h.overridden && <div className="hint">Its models now come from worktrees: a later edit to this host in pi's own config does not reach the pi that worktrees starts. It still uses pi's key; worktrees never copies one.</div>}
       </div>
     );
   };
