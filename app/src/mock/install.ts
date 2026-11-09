@@ -143,6 +143,100 @@ const PI_MODELS = [
     source: "pi-config", meta: {} },
 ];
 
+// pi's model hosts (`pi_hosts`, `pi_host_edit`). pi's own models.json is
+// fixed; worktrees' hosts live in `mockOwnHosts`. `?pihosts=dead` makes
+// lm-studio stop answering; `?pihosts=undeclared` has it serve two models
+// nobody declared; `?pihosts=broken` makes pi refuse its models.json.
+type MockHostModel = { id: string; name: null; context_window: number | null; max_tokens: number | null; reasoning: null; images: null };
+const mhm = (id: string, context_window: number | null = null, max_tokens: number | null = null): MockHostModel =>
+  ({ id, name: null, context_window, max_tokens, reasoning: null, images: null });
+const MOCK_PI_HOSTS = [
+  { backend: "lm-studio", base_url: "http://100.64.0.7:1234/v1", api: "openai-completions", has_key: true, models: [mhm("qwen3.6-27b")] },
+  { backend: "lm-dead", base_url: "http://10.0.0.9:1234/v1", api: "openai-completions", has_key: true, models: [mhm("qwen3-coder-30b", 262144, 32768)] },
+];
+const mockOwnHosts = new Map<string, { base_url: string; api: string; override: boolean; models: MockHostModel[] }>();
+const piHostsSwitch = () => new URLSearchParams(location.search).get("pihosts");
+const piHostReach = (backend: string): string =>
+  backend === "lm-dead" || (backend === "lm-studio" && piHostsSwitch() === "dead") ? "down" : "served";
+const mockServed = (backend: string): string[] =>
+  backend === "lm-studio" && piHostsSwitch() === "undeclared" ? ["qwen3.6-27b", "qwen3-coder-next", "gemma-4-12b"] : [];
+function mockPiHosts() {
+  const own = [...mockOwnHosts.entries()].map(([backend, h]) => ({
+    backend, base_url: h.base_url, api: h.api, has_key: true, models: h.models.map((m) => ({ ...m })),
+    origin: "worktrees", overridden: h.override,
+  }));
+  const pi = MOCK_PI_HOSTS.map((h) => ({ ...h, models: h.models.map((m) => ({ ...m })), origin: "pi", overridden: mockOwnHosts.has(h.backend) }));
+  return {
+    path: "/Users/demo/.pi/agent/models.json", file: "ok",
+    problem: null, load_error: piHostsSwitch() === "broken" ? "Invalid models.json schema:\n  - providers.lm-studio.apiKey: must not have fewer than 1 characters" : null,
+    own_path: "/Users/demo/.config/worktrees/pi-models.json", own_problem: null,
+    hosts: [...own, ...pi].map((h) => {
+      const reach = piHostReach(h.backend);
+      const served = reach === "down" ? [] : mockServed(h.backend);
+      return { ...h, reach, served_undeclared: served.filter((s) => !h.models.some((m) => m.id === s)) };
+    }),
+  };
+}
+/** PI_MODELS as a pi worktrees starts sees them: worktrees' hosts replace pi's. */
+function mockPiModels() {
+  const own = [...mockOwnHosts.entries()];
+  const rows: { model: { harness: string; backend: string; model: string; label: null }; ready: boolean; reason: string | null;
+    source: string; meta: Record<string, unknown> }[] = PI_MODELS.filter((o) => !mockOwnHosts.has(o.model.backend ?? ""));
+  for (const [backend, h] of own) for (const m of h.models) {
+    const down = piHostReach(backend) === "down";
+    const k = (n: number | null, d: number) => `${Math.round((n ?? d) / 100) / 10}K`;
+    rows.unshift({ model: { harness: "pi", backend, model: m.id, label: null }, ready: !down, reason: down ? "endpoint_unreachable" : null,
+      source: "pi-list-models", meta: { context: k(m.context_window, 128000), max_out: k(m.max_tokens, 16384), thinking: false, images: false } });
+  }
+  return rows;
+}
+function mockPiHostEdit(e: Record<string, unknown>) {
+  const id = String(e.id ?? "");
+  const okId = (s: string) => /^[A-Za-z0-9._:-]+$/.test(s) && !s.startsWith("-");
+  const okUrl = (s: string) => /^https?:\/\/[^\s@/?#]+/.test(s) && !/[?#\s]/.test(s);
+  const count = (v: unknown) => (v == null ? null : Number(v));
+  const own = mockOwnHosts.get(id);
+  switch (e.op) {
+    case "add":
+      if (!okId(id)) throw `host '${id}' may contain only letters, digits and . _ : -`;
+      if (!okUrl(String(e.base_url))) throw "the base URL must start with http:// or https://";
+      if (mockOwnHosts.has(id)) throw `worktrees already has a host named ${id}`;
+      if (MOCK_PI_HOSTS.some((h) => h.backend === id)) throw `pi's own config declares ${id}; use "Override in worktrees" on it instead`;
+      mockOwnHosts.set(id, { base_url: String(e.base_url).replace(/\/+$/, ""), api: String(e.api ?? "openai-completions"), override: false, models: [] });
+      return null;
+    case "override": {
+      const h = MOCK_PI_HOSTS.find((x) => x.backend === id);
+      if (!h) throw `pi's config declares no host named ${id}`;
+      mockOwnHosts.set(id, { base_url: h.base_url, api: h.api, override: true, models: h.models.map((m) => ({ ...m })) });
+      return null;
+    }
+  }
+  if (!own) throw `worktrees has no host named ${id}`;
+  const model = String(e.model ?? "");
+  switch (e.op) {
+    case "set_url":
+      if (!okUrl(String(e.base_url))) throw "the base URL must start with http:// or https://";
+      own.base_url = String(e.base_url).replace(/\/+$/, "");
+      return null;
+    case "remove": mockOwnHosts.delete(id); return null;
+    case "declare":
+      if (own.models.some((m) => m.id === model)) throw `${id} already declares ${model}`;
+      own.models.push(mhm(model, count(e.context_window), count(e.max_tokens)));
+      return null;
+    case "update_model": {
+      const m = own.models.find((x) => x.id === model);
+      if (!m) throw `${id} does not declare ${model}`;
+      m.context_window = count(e.context_window); m.max_tokens = count(e.max_tokens);
+      return null;
+    }
+    case "remove_model":
+      if (!own.models.some((m) => m.id === model)) throw `${id} does not declare ${model}`;
+      own.models = own.models.filter((m) => m.id !== model);
+      return null;
+  }
+  throw `unknown pi host edit '${String(e.op)}'`;
+}
+
 function editPlace(repo: string, slug: string, fn: (p: Place) => void) {
   const pv = findProject(repo);
   const pl = pv?.snapshot?.places.find((p) => p.slug === slug);
@@ -4530,7 +4624,7 @@ Phase 3: Frontend pane and mock harness
     }
     case "agent_models": {
       const h = String(args.harness);
-      if (h === "pi") return PI_MODELS;
+      if (h === "pi") return mockPiModels();
       if (h === "claude") return ["opus", "sonnet", "haiku", "fable"].map((m) => ({
         model: { harness: "claude", backend: null, model: m, label: null }, ready: true, reason: null, source: "claude-aliases", meta: {},
       }));
@@ -4566,6 +4660,13 @@ Phase 3: Frontend pane and mock harness
       const had = kimiAllowed.has(root);
       if (args.allow) kimiAllowed.add(root); else kimiAllowed.delete(root);
       return had !== !!args.allow;
+    }
+    case "pi_hosts":
+      return mockPiHosts();
+    case "pi_host_edit": {
+      const e = (args.edit ?? {}) as Record<string, unknown>;
+      if ("apiKey" in e || "api_key" in e) throw "unknown field `apiKey`";
+      return mockPiHostEdit(e);
     }
     case "pi_status": {
       const root = typeof args.repo === "string" ? args.repo : null;

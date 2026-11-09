@@ -134,7 +134,8 @@ pub fn status() -> Status {
 }
 
 fn run(pi: &str, args: &[String]) -> Result<(bool, String), String> {
-    let mut cmd = crate::childenv::command(pi);
+    // The one builder, without the hosts extension: `pi mcp` loads no model.
+    let mut cmd = crate::pimodels::pi_command_for(std::path::Path::new(pi), false);
     cmd.args(args).env("PI_CODING_AGENT_DIR", crate::pi::agent_dir()).env("PI_OFFLINE", "1");
     let out = crate::proc::run_deadline(cmd, 60).map_err(|e| format!("pi mcp: {e}"))?;
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();

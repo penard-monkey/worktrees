@@ -68,14 +68,19 @@ export function usePiStatus({ settings, repo, onChange, onReport, onFail }: {
 }
 export type PiState = ReturnType<typeof usePiStatus>;
 
-/** pi's catalog, read once per mount. */
-export function usePiModels(onReport: (msg: string) => void): ModelOption[] | null {
+/** pi's catalog: read once per mount, and again after a hosts edit. */
+export function usePiModels(onReport: (msg: string) => void) {
   const [models, setModels] = useState<ModelOption[] | null>(null);
-  useEffect(() => {
-    invoke<ModelOption[]>("agent_models", { harness: "pi" }).then(setModels).catch((e) => { setModels([]); onReport(`pi models: ${String(e)}`); });
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- one read per mount
+  const seq = useRef(0);
+  const reload = useCallback(() => {
+    const n = ++seq.current;
+    invoke<ModelOption[]>("agent_models", { harness: "pi" })
+      .then((v) => { if (seq.current === n) setModels(v); })
+      .catch((e) => { if (seq.current === n) setModels([]); onReport(`pi models: ${String(e)}`); });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- onReport is per-render
   }, []);
-  return models;
+  useEffect(() => { reload(); }, [reload]);
+  return { models, reload };
 }
 
 /** Settings → pi → pi: which pi and node a pane gets. */
@@ -95,28 +100,203 @@ export function PiInstallSection({ status }: { status: PiStatus | null }) {
   );
 }
 
-/** Settings → pi → Models: the catalog with each unusable model's reason, and
- *  the default (the same `default_models.pi` Settings → Agents shows). */
-export function PiModelsSection({ settings, models, onChange }: {
+/** `pi_hosts`: every host a pi worktrees starts can use (pimodels::Hosts). */
+export type PiHostModel = { id: string; name: string | null; context_window: number | null; max_tokens: number | null; reasoning: boolean | null; images: boolean | null };
+export type PiHost = {
+  backend: string; base_url: string | null; api: string | null; has_key: boolean; models: PiHostModel[];
+  origin: "pi" | "worktrees"; overridden: boolean;
+  reach: "served" | "up" | "down" | "unprobed"; served_undeclared: string[];
+};
+export type PiHosts = {
+  path: string; file: "missing" | "ok" | "unreadable"; problem: string | null; load_error: string | null;
+  own_path: string; own_problem: string | null; hosts: PiHost[];
+};
+/** `pi_host_edit`'s argument (api `PiHostEdit`). No variant carries a key. */
+export type PiHostEdit =
+  | { op: "add"; id: string; base_url: string; api?: string }
+  | { op: "set_url"; id: string; base_url: string }
+  | { op: "remove"; id: string }
+  | { op: "override"; id: string }
+  | { op: "declare"; id: string; model: string; context_window?: number; max_tokens?: number }
+  | { op: "update_model"; id: string; model: string; context_window?: number; max_tokens?: number }
+  | { op: "remove_model"; id: string; model: string };
+
+export const PI_HOST_APIS = ["openai-completions", "openai-responses"] as const;
+
+/** `pi_hosts`, and the one write. Only the newest read lands; every write is
+ *  followed by a re-read here and of the catalog (`onChanged`), so the dots
+ *  and the default-model picker follow without a restart. */
+export function usePiHosts(onChanged: () => void, onFail: (e: unknown) => void) {
+  const [hosts, setHosts] = useState<PiHosts | null>(null);
+  const [busy, setBusy] = useState(false);
+  const seq = useRef(0);
+  const read = useCallback(() => {
+    const n = ++seq.current;
+    invoke<PiHosts>("pi_hosts")
+      .then((v) => { if (seq.current === n) setHosts(v); })
+      .catch((e) => { if (seq.current === n) onFail(`pi hosts: ${String(e)}`); });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- onFail is per-render
+  }, []);
+  useEffect(() => { read(); }, [read]);
+  const edit = async (e: PiHostEdit): Promise<boolean> => {
+    setBusy(true);
+    try {
+      await invoke("pi_host_edit", { edit: e });
+      return true;
+    } catch (err) {
+      onFail(`pi hosts: ${String(err)}`);
+      return false;
+    } finally {
+      setBusy(false);
+      read();
+      onChanged();
+    }
+  };
+  return { hosts, busy, edit, read };
+}
+
+const fmtTokens = (n: number | null, dflt: number) => {
+  const v = n ?? dflt;
+  const s = v >= 1000 ? `${Math.round(v / 100) / 10}K` : String(v);
+  return n == null ? `${s} (pi's default)` : s;
+};
+const REACH_TEXT: Record<PiHost["reach"], string> = {
+  served: "answering", up: "answering (its model list is not readable)", down: "not answering", unprobed: "pi's built-in endpoint",
+};
+const toCount = (s: string): number | undefined => {
+  const n = Number(s.trim());
+  return s.trim() === "" || !Number.isInteger(n) || n <= 0 ? undefined : n;
+};
+
+/** Settings → pi → Models: the hosts (worktrees' own, editable; pi's own,
+ *  read-only), the models each declares and the ones it serves undeclared,
+ *  and the default (the same `default_models.pi` Settings → Agents shows). */
+export function PiModelsSection({ settings, models, onChange, reloadModels, onFail }: {
   settings: Settings;
   models: ModelOption[] | null;
   onChange: (patch: Partial<Settings>) => void;
+  reloadModels: () => void;
+  onFail: (e: unknown) => void;
 }) {
+  const { hosts, busy, edit } = usePiHosts(reloadModels, onFail);
+  const arm = useArmed<string>();
+  const [adding, setAdding] = useState({ id: "", url: "http://127.0.0.1:1234/v1", api: "openai-completions" });
+  const [urlEdit, setUrlEdit] = useState<{ id: string; url: string } | null>(null);
+  const [modelEdit, setModelEdit] = useState<{ id: string; model: string; ctx: string; max: string } | null>(null);
+  const dflt = settings.default_models.pi ?? "";
+  const row = (backend: string, model: string) => models?.find((o) => o.model.backend === backend && o.model.model === model);
+  const shown = new Set((hosts?.hosts ?? []).filter((h) => !(h.origin === "pi" && h.overridden)).map((h) => h.backend));
+  const others = (models ?? []).filter((o) => !shown.has(o.model.backend ?? ""));
+  const usesDefault = (id: string, model?: string) => dflt !== "" && (model ? dflt === `${id}/${model}` : dflt.startsWith(`${id}/`));
+  const host = (h: PiHost) => {
+    const ours = h.origin === "worktrees";
+    const key = `${h.origin}:${h.backend}`;
+    const shadow = h.origin === "pi" && h.overridden;
+    return (
+      <div className="pi-host" key={key} data-testid="pi-host" data-origin={h.origin}>
+        <div className="pi-host-head">
+          <span className={"pi-dot" + (h.reach === "served" || h.reach === "up" ? " ok" : h.reach === "down" ? " bad" : "")} aria-hidden="true" />
+          <b>{h.backend}</b>
+          <span className="pi-host-tag">{ours ? (h.overridden ? "overridden in worktrees" : "worktrees") : shadow ? "pi's config · replaced by worktrees" : "pi's config"}</span>
+          {!shadow && <span className="pi-host-state">{REACH_TEXT[h.reach]}</span>}
+        </div>
+        {urlEdit?.id === h.backend && ours ? (
+          <div className="pi-host-form">
+            <input type="text" aria-label={`${h.backend} base URL`} value={urlEdit.url} onChange={(e) => setUrlEdit({ ...urlEdit, url: e.target.value })} />
+            <button className="ctrl sm" disabled={busy} onClick={() => void edit({ op: "set_url", id: h.backend, base_url: urlEdit.url }).then((ok) => ok && setUrlEdit(null))}>Save</button>
+            <button className="ctrl sm" onClick={() => setUrlEdit(null)}>Cancel</button>
+          </div>
+        ) : h.base_url && <div className="ver-row"><code>{h.base_url}</code>{h.api && <> · {h.api}</>}</div>}
+        {!shadow && <div className="ver-rows">
+          {h.models.length === 0 && <div className="hint">No models declared{ours ? " yet: pi will not list this host until one is." : "."}</div>}
+          {h.models.map((m) => {
+            const o = row(h.backend, m.id);
+            const mk = `${h.backend}/${m.id}`;
+            if (ours && modelEdit?.id === h.backend && modelEdit.model === m.id) return (
+              <div className="pi-host-form" key={mk}>
+                <code>{m.id}</code>
+                <input type="number" min={1} aria-label="context window" placeholder="context (128000)" value={modelEdit.ctx} onChange={(e) => setModelEdit({ ...modelEdit, ctx: e.target.value })} />
+                <input type="number" min={1} aria-label="max output" placeholder="max out (16384)" value={modelEdit.max} onChange={(e) => setModelEdit({ ...modelEdit, max: e.target.value })} />
+                <button className="ctrl sm" disabled={busy} onClick={() => void edit({ op: "update_model", id: h.backend, model: m.id, context_window: toCount(modelEdit.ctx), max_tokens: toCount(modelEdit.max) }).then((ok) => ok && setModelEdit(null))}>Save</button>
+                <button className="ctrl sm" onClick={() => setModelEdit(null)}>Cancel</button>
+              </div>
+            );
+            return (
+              <div className="ver-row pi-host-model" key={mk} data-testid="pi-host-model">
+                <span className={"pi-dot" + (o?.ready ? " ok" : "")} aria-hidden="true" />
+                <code>{m.id}</code>
+                <span className="pi-host-meta">{fmtTokens(m.context_window, 128000)} context · {fmtTokens(m.max_tokens, 16384)} out{o?.reason && <> — {REASON_TEXT[o.reason]}</>}</span>
+                {ours && <span className="pi-host-acts">
+                  <button className="ctrl sm" onClick={() => setModelEdit({ id: h.backend, model: m.id, ctx: m.context_window ? String(m.context_window) : "", max: m.max_tokens ? String(m.max_tokens) : "" })}>Edit</button>
+                  <button className={"ctrl sm danger" + (arm.armed === `m:${mk}` ? " armed" : "")} disabled={busy} data-testid="pi-model-remove"
+                    onClick={() => arm.confirm(`m:${mk}`, () => void edit({ op: "remove_model", id: h.backend, model: m.id }))}>
+                    {arm.armed === `m:${mk}` ? "Remove — sure?" : "Remove"}</button>
+                </span>}
+              </div>
+            );
+          })}
+          {h.served_undeclared.map((id) => (
+            <div className="ver-row pi-host-model undeclared" key={`u:${h.backend}/${id}`} data-testid="pi-served-undeclared">
+              <span className="pi-dot" aria-hidden="true" />
+              <code>{id}</code><span className="pi-host-meta">served, not declared</span>
+              {ours && <span className="pi-host-acts"><button className="ctrl sm" disabled={busy} data-testid="pi-declare"
+                onClick={() => void edit({ op: "declare", id: h.backend, model: id })}>Declare</button></span>}
+            </div>
+          ))}
+          {!ours && h.served_undeclared.length > 0 && <div className="hint">Override this host in worktrees to declare one.</div>}
+        </div>}
+        <div className="ver-actions">
+          {ours && urlEdit?.id !== h.backend && <button className="ctrl sm" onClick={() => setUrlEdit({ id: h.backend, url: h.base_url ?? "" })}>Edit URL</button>}
+          {ours && <button className={"ctrl sm danger" + (arm.armed === `h:${h.backend}` ? " armed" : "")} disabled={busy} data-testid="pi-host-remove"
+            onClick={() => arm.confirm(`h:${h.backend}`, () => void edit({ op: "remove", id: h.backend }))}>
+            {arm.armed === `h:${h.backend}` ? (h.overridden ? "Remove override — sure?" : "Remove host — sure?") : (h.overridden ? "Remove override" : "Remove host")}</button>}
+          {!ours && !h.overridden && h.base_url && <button className="ctrl sm" disabled={busy} data-testid="pi-host-override"
+            onClick={() => void edit({ op: "override", id: h.backend })}>Override in worktrees</button>}
+        </div>
+        {arm.armed === `h:${h.backend}` && <div className="hint">{h.overridden
+          ? `pi worktrees starts goes back to pi's own ${h.backend} from its next start.`
+          : `Its models are gone from pi worktrees starts from their next start.`}{usesDefault(h.backend) && ` Your default model, ${dflt}, is on this host.`}</div>}
+        {arm.armed?.startsWith(`m:${h.backend}/`) && usesDefault(h.backend, arm.armed.slice(`m:${h.backend}/`.length)) &&
+          <div className="hint">{dflt} is your default model.</div>}
+        {ours && h.overridden && <div className="hint">This host's models come from worktrees now, and later edits to pi's own config for it do not reach pi worktrees starts. Its key is still pi's: worktrees never copies one.</div>}
+      </div>
+    );
+  };
   return (
     <section className="setting" data-testid="pi-models">
       <label>Models</label>
-      {models === null ? <div className="hint">reading pi's models…</div>
-        : models.length === 0 ? <div className="hint">pi lists no models this build can read.</div>
-        : <div className="ver-rows">{models.map((o) => (
+      <div className="hint">The hosts worktrees adds here exist only for pi started by worktrees: a pi you start yourself reads only {hosts?.path ?? "~/.pi/agent/models.json"}, and a session on one of these models, resumed there, starts on another model without a warning. A pi that is already running picks up a change when it is restarted.</div>
+      {hosts === null ? <div className="hint">reading pi's hosts…</div> : <>
+        {hosts.own_problem && <div className="hint warn" data-testid="pi-own-problem">worktrees cannot use {hosts.own_path}: {hosts.own_problem}</div>}
+        {(hosts.problem || hosts.load_error) && <div className="hint warn" data-testid="pi-load-error">pi cannot load {hosts.path}: {hosts.load_error ?? hosts.problem}. Every host it declares is unusable until it is fixed.</div>}
+        {hosts.hosts.length === 0 && <div className="hint">No model hosts yet.</div>}
+        <div className="pi-hosts">{hosts.hosts.map(host)}</div>
+        <label className="sub">Add a host</label>
+        <div className="pi-host-form">
+          <input type="text" aria-label="host name" placeholder="name (e.g. lm-studio-local)" value={adding.id} onChange={(e) => setAdding({ ...adding, id: e.target.value })} />
+          <input type="text" aria-label="base URL" placeholder="http://127.0.0.1:1234/v1" value={adding.url} onChange={(e) => setAdding({ ...adding, url: e.target.value })} />
+          <select aria-label="API" value={adding.api} onChange={(e) => setAdding({ ...adding, api: e.target.value })}>
+            {PI_HOST_APIS.map((a) => <option key={a} value={a}>{a}</option>)}
+          </select>
+          <button className="ctrl sm" data-testid="pi-host-add" disabled={busy || !adding.id.trim() || !adding.url.trim()}
+            onClick={() => void edit({ op: "add", id: adding.id.trim(), base_url: adding.url.trim(), api: adding.api }).then((ok) => ok && setAdding({ ...adding, id: "" }))}>Add</button>
+        </div>
+        <div className="hint">For a local server that needs no key (LM Studio, Ollama, vLLM, llama.cpp). Then declare the models it serves. A host that needs a key belongs in pi's own config (<code>pi auth</code>); override it here to change its models.</div>
+      </>}
+      {others.length > 0 && <>
+        <label className="sub">Other providers</label>
+        <div className="ver-rows">{others.map((o) => (
           <div className="ver-row" key={modelArg(o)}>
             <span className={"pi-dot" + (o.ready ? " ok" : "")} aria-hidden="true" />
             <code>{modelArg(o)}</code>{o.reason && <> — {REASON_TEXT[o.reason]}</>}
           </div>
-        ))}</div>}
+        ))}</div>
+        <div className="hint">pi's own providers and sign-in: <code>pi auth</code>.</div>
+      </>}
       <label className="sub">Default model</label>
-      <ModelPicker harness="pi" value={settings.default_models.pi ?? ""} options={models} testid="pi-default-model"
+      <ModelPicker harness="pi" value={dflt} options={models} testid="pi-default-model"
         onChange={(m) => onChange({ default_models: { ...settings.default_models, pi: m || undefined } })} />
-      <div className="hint">Preselected when you start pi, in this window. pi's own default is never used: it may be a provider nobody signed in to. A model LM Studio serves but pi's models.json does not declare is not offered — pi cannot use it.</div>
+      <div className="hint">Preselected when you start pi, in this window. pi's own default is never used: it may be a provider nobody signed in to.</div>
     </section>
   );
 }

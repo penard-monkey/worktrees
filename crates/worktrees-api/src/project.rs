@@ -1628,3 +1628,93 @@ mod tests {
         assert!(e.contains("exit 7"), "{e}");
     }
 }
+
+// ── Settings → pi → Models: the hosts (docs/proposals/pi-models-config.md) ───
+
+/// Every host a pi worktrees starts can use — worktrees' own and pi's — with
+/// each host's state and the models it serves undeclared. pi's keys are never
+/// read out: `has_key` is a boolean. Probes hosts: async here.
+pub fn pi_hosts() -> Result<worktrees_core::pimodels::Hosts, String> {
+    Ok(worktrees_core::pimodels::hosts())
+}
+
+/// One change to worktrees' own pi hosts. No variant takes a key, and an
+/// unknown field (an `apiKey`, say) is refused rather than ignored.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PiHostEdit {
+    Add { id: String, base_url: String, api: Option<String> },
+    SetUrl { id: String, base_url: String },
+    /// A worktrees host, or an override (pi's own host then applies again).
+    Remove { id: String },
+    /// Override pi's host `id`, starting from a copy of it (never its key).
+    Override { id: String },
+    Declare { id: String, model: String, context_window: Option<u64>, max_tokens: Option<u64> },
+    UpdateModel { id: String, model: String, context_window: Option<u64>, max_tokens: Option<u64> },
+    RemoveModel { id: String, model: String },
+}
+
+/// Apply `edit` to worktrees' hosts file at `path`, with `pi` as pi's own
+/// hosts (an add may not take one of their ids; an override copies one).
+pub fn pi_host_edit_at(path: &Path, pi: &[worktrees_core::pimodels::Host], edit: PiHostEdit) -> Result<(), String> {
+    use worktrees_core::pihosts::{self as ph, ModelFields};
+    let pi_ids: Vec<String> = pi.iter().map(|h| h.backend.clone()).collect();
+    ph::edit_at(path, |o| match &edit {
+        PiHostEdit::Add { id, base_url, api } => ph::add_host(o, id, base_url, api.as_deref().unwrap_or("openai-completions"), &pi_ids),
+        PiHostEdit::SetUrl { id, base_url } => ph::set_base_url(o, id, base_url),
+        PiHostEdit::Remove { id } => ph::remove_host(o, id),
+        PiHostEdit::Override { id } => {
+            let h = pi.iter().find(|h| &h.backend == id).ok_or_else(|| format!("pi's config declares no host named {id}"))?;
+            ph::override_host(o, h)
+        }
+        PiHostEdit::Declare { id, model, context_window, max_tokens } => {
+            ph::declare_model(o, id, model, &ModelFields { context_window: *context_window, max_tokens: *max_tokens })
+        }
+        PiHostEdit::UpdateModel { id, model, context_window, max_tokens } => {
+            ph::update_model(o, id, model, &ModelFields { context_window: *context_window, max_tokens: *max_tokens })
+        }
+        PiHostEdit::RemoveModel { id, model } => ph::remove_model(o, id, model),
+    })
+}
+
+/// Settings → pi → Models' one write: the host's user's act (a `HostConsole`
+/// row — a base URL is where prompts and code go). Drops the catalog cache
+/// after, so the picker and the dots re-read.
+pub fn pi_host_edit(edit: PiHostEdit) -> Result<(), String> {
+    let pi = std::fs::read_to_string(worktrees_core::pimodels::models_json_path())
+        .ok()
+        .and_then(|t| worktrees_core::pimodels::parse_hosts(&t).ok())
+        .unwrap_or_default();
+    let what = format!("{edit:?}");
+    let r = pi_host_edit_at(&worktrees_core::pihosts::data_path(), &pi, edit);
+    worktrees_core::pimodels::forget();
+    match &r {
+        Ok(()) => applog("info", &format!("pi_host_edit: {what}")),
+        Err(e) => applog("warn", &format!("pi_host_edit refused: {e}")),
+    }
+    r
+}
+
+#[cfg(test)]
+mod pi_host_tests {
+    use super::*;
+
+    #[test]
+    fn an_edit_takes_no_key_and_lands_in_the_given_file() {
+        let bad: Result<PiHostEdit, _> =
+            serde_json::from_value(serde_json::json!({"op": "add", "id": "box", "base_url": "http://h:1/v1", "apiKey": "sk"}));
+        assert!(bad.unwrap_err().to_string().contains("apiKey"), "a key is refused by name");
+        let d = std::env::temp_dir().join(format!("wt-api-pihosts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let p = d.join(worktrees_core::pihosts::FILE);
+        let pi = worktrees_core::pimodels::parse_hosts(r#"{"providers":{"lm-studio":{"baseUrl":"http://h:2/v1","apiKey":"secret","models":[{"id":"q"}]}}}"#).unwrap();
+        let e = |v: serde_json::Value| serde_json::from_value::<PiHostEdit>(v).unwrap();
+        pi_host_edit_at(&p, &pi, e(serde_json::json!({"op": "add", "id": "box", "base_url": "http://h:1/v1"}))).unwrap();
+        pi_host_edit_at(&p, &pi, e(serde_json::json!({"op": "declare", "id": "box", "model": "m", "context_window": 32768}))).unwrap();
+        pi_host_edit_at(&p, &pi, e(serde_json::json!({"op": "override", "id": "lm-studio"}))).unwrap();
+        assert!(pi_host_edit_at(&p, &pi, e(serde_json::json!({"op": "add", "id": "lm-studio", "base_url": "http://x/v1"}))).is_err());
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.contains("\"box\"") && text.contains("\"override\": true") && !text.contains("secret"), "{text}");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
