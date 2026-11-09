@@ -1111,6 +1111,9 @@ const mockTurnHarnessAt = (path: string) => {
 // then approved, as `turns::Step`s shaped like claude-2.1.316-answers.jsonl.
 type MockTurn = { id?: string; at: number | null; user: string | null; reply: string; tools: string[]; truncated: boolean; notice?: import("../chat").Notice; steps?: Record<string, unknown>[] };
 const mockTurns = new Map<string, MockTurn[]>();
+/** `read_place_image` calls that read bytes, and mtimes a drive bumps. */
+const mockImageReads: string[] = [];
+const mockImageMtime = new Map<string, number>();
 const mockAbsorbedSend = new Set<string>();
 function mockAnsweredTurns(now: number, place: string): MockTurn[] {
   const q = (header: string, question: string, multi: boolean, options: [string, string][]) => ({ header, question, multi, options: options.map(([label, description]) => ({ label, description })) });
@@ -1238,6 +1241,37 @@ function mockToolTurns(now: number, place: string, harness: string): MockTurn[] 
     ]),
   ];
 }
+// `?turns=images` (feat/chat-images): turns with pictures. A reply carrying
+// `![](…)` of a place file, a remote URL, a path outside the place, a `..`
+// escape and a file the host refuses; a user message with an image; a Read of
+// an image in the place and one in /tmp; and, with `&filler=N`, N turns above
+// them so the images sit below the fold (`chat-image-browser.mjs`).
+function mockImageTurns(now: number, place: string, filler: number): MockTurn[] {
+  const f = Array.from({ length: filler }, (_, i): MockTurn => ({
+    at: now - 3000 - (filler - i) * 20, user: `Earlier question ${i + 1}.`, tools: [], truncated: false,
+    reply: `Earlier answer ${i + 1}, a few lines long so the list is taller than the pane.\n\nSecond paragraph of answer ${i + 1}, which says nothing more.`,
+  }));
+  const shot = `${place}/.worktrees-attachments/preview.png`;
+  const steps: Record<string, unknown>[] = [
+    { kind: "tool", at: now - 118, name: "Read", call_id: "toolu_img_1", summary: shot },
+    { kind: "tool", at: now - 117, name: "Read", call_id: "toolu_img_2", summary: "/tmp/outside-shot.png" },
+    { kind: "text", at: now - 116, text: [
+      "Here is the design preview:",
+      "![Design preview](.worktrees-attachments/wide-preview.svg)",
+      "And the small one, by absolute path: ![Small](" + shot + ")",
+      "A remote one: ![Remote logo](https://example.com/logo.png)",
+      "Outside the place: ![Secret](/etc/secret.png)",
+      "Escaping with dots: ![Up](../other/secret.png)",
+      "A link out: ![Linked](shots/linked.png)",
+      "Not an image: ![Notes](notes.txt)",
+    ].join("\n\n") },
+  ];
+  return [...f,
+    { at: now - 200, user: "Look at this one: ![mine](shots/mine.png)", reply: "I see it.", tools: [], truncated: false },
+    { at: now - 120, user: "Render a design preview and show it to me.", truncated: false, steps,
+      reply: steps.filter((x) => x.kind === "text").map((x) => x.text).join("\n\n"), tools: ["Read", "Read"] },
+  ];
+}
 // `?turns=cut` gives every Claude and Codex place turns the host shortens
 // (`mockHostShort`): a 10,000-character reply whose last sentence is past the
 // cut; a turn whose later `text` steps the host drops, the question among
@@ -1347,6 +1381,11 @@ function mockTurnsAt(repo: string, slug: string) {
   }
   if (harness === "claude" && new URLSearchParams(location.search).get("turns") === "answered") {
     t = mockAnsweredTurns(now, mockPlacePath(repo, slug));
+    mockTurns.set(key, t);
+    return t;
+  }
+  if (harness === "claude" && new URLSearchParams(location.search).get("turns") === "images") {
+    t = mockImageTurns(now, mockPlacePath(repo, slug), Number(new URLSearchParams(location.search).get("filler") ?? 0));
     mockTurns.set(key, t);
     return t;
   }
@@ -3751,6 +3790,45 @@ Phase 3: Frontend pane and mock harness
       const truncated = (args.path as string).includes("truncated");
       return { b64, size, truncated, mtime: f.mtime };
     }
+    // A chat's image (`files::read_place_image`): the PLACE's own, by the host's
+    // rule (`safepath::place_image`) restated over a made-up tree. Every image is
+    // the 64×48 PNG but for `wide*.svg` (640×320, so a load moves the layout);
+    // `missing*` is not found and `linked*` is a link out. `?imgslow=<ms>` delays
+    // the answer; each call that reaches the "disk" is counted in
+    // `__mock.imageReads` (an `unchanged` answer is not), the etag is
+    // mtime-size like the host's.
+    case "read_place_image": {
+      const place = mockPlacePath(args.repo, args.slug);
+      const given = String(args.path ?? "").trim();
+      const outside = `outside this place: ${args.path}`;
+      let rel: string;
+      if (!given || given.includes("://") || given.startsWith("data:")) throw `not a file in this place: ${args.path}`;
+      if (given.startsWith("/")) {
+        if (!given.startsWith(place + "/")) throw outside;
+        rel = given.slice(place.length + 1);
+      } else rel = given.replace(/^(\.\/)+/, "");
+      if (rel.split("/").some((x) => x === ".." || x === "")) throw outside;
+      const ext = /\.([^./]+)$/.exec(rel)?.[1]?.toLowerCase();
+      const mimes: Record<string, string> = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", bmp: "image/bmp", svg: "image/svg+xml" };
+      if (!ext || !mimes[ext]) throw `not an image: ${args.path}`;
+      if (args.slug === "(main)" && rel.startsWith(".worktrees/")) throw outside;
+      const base = rel.split("/").pop() ?? "";
+      if (base.startsWith("linked")) throw outside;
+      if (base.startsWith("missing")) throw `not found: ${args.path}`;
+      const slow = Number(new URLSearchParams(location.search).get("imgslow") ?? 0);
+      if (slow > 0) await sleep(slow);
+      const wide = base.startsWith("wide");
+      const b64 = wide
+        ? btoa('<svg xmlns="http://www.w3.org/2000/svg" width="640" height="320" viewBox="0 0 640 320"><rect width="640" height="320" fill="#3b82f6"/><circle cx="320" cy="160" r="90" fill="#fde68a"/></svg>')
+        : MOCK_PNG_B64;
+      const size = b64Bytes(b64);
+      const mtime = mockImageMtime.get(`${place}/${rel}`) ?? 1_700_000_000_000;
+      const etag = `${mtime}-${size}`;
+      const truncated = base.startsWith("huge");
+      if (args.etag === etag) return { b64: "", size, truncated, mtime, mime: mimes[ext], etag, unchanged: true };
+      mockImageReads.push(`${place}/${rel}`);
+      return { b64, size, truncated, mtime, mime: mimes[ext], etag, unchanged: false };
+    }
     case "write_file": {
       const path = args.path as string;
       const prev = fsFiles.get(path);
@@ -5868,6 +5946,10 @@ let mockNotifyGranted = new URLSearchParams(location.search).get("notify") === "
     emitEvent("places:changed", {});
     return root;
   },
+  /** `read_place_image` calls that read bytes (the rest were `unchanged`), and
+   *  `imageTouched`: the file changed on disk, so its etag moves. */
+  imageReads: mockImageReads,
+  imageTouched(path: string) { mockImageMtime.set(path, Date.now()); },
   /** Fire the backend's shell:exit — the only way to reach the dock's
    * "process exited / Restart shell" state headlessly, since the mock has no
    * real PTY to die. */

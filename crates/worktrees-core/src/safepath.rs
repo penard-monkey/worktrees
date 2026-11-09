@@ -130,6 +130,64 @@ pub fn classify(root: &Path, rel: &str) -> Result<Target, Refusal> {
     }
 }
 
+/// The image types a chat shows, by extension: what a place's agent may point
+/// `![](path)` at, and the MIME the viewer's `data:` URI needs. SVG is in: an
+/// `<img>` never runs a script, and the Files pane shows one the same way.
+pub const IMAGE_TYPES: &[(&str, &str)] = &[
+    ("png", "image/png"),
+    ("jpg", "image/jpeg"),
+    ("jpeg", "image/jpeg"),
+    ("gif", "image/gif"),
+    ("webp", "image/webp"),
+    ("bmp", "image/bmp"),
+    ("svg", "image/svg+xml"),
+];
+
+/// A chat image's path, resolved to a regular file INSIDE one place, or why not
+/// (`feat/chat-images`). `path` is what an agent wrote in `![](…)`: relative to
+/// the PLACE's root, or absolute and then only under that root. Everything
+/// else is refused in words that name the path, never dropped: another
+/// place's tree, `/tmp`, `..`, a link out, a URL.
+///
+/// The accepting answer is `safe_under`'s alone (its own two layers: the
+/// string rule, then lstat of the last component and canonicalisation of the
+/// rest, so a committed `img -> /etc` directory link cannot leak a file). This
+/// function only turns an absolute path into the relative one it takes, picks
+/// the words, and keeps `(main)` out of the places under its `.worktrees/`:
+/// the root of `(main)` contains every other place's tree.
+pub fn place_image(root: &Path, is_main: bool, path: &str) -> Result<(PathBuf, &'static str), String> {
+    let outside = || format!("outside this place: {path}");
+    let p = path.trim();
+    if p.is_empty() || p.contains('\0') || p.contains("://") || p.starts_with("data:") {
+        return Err(format!("not a file in this place: {path}"));
+    }
+    let mut rel: String = if p.starts_with('/') {
+        let canon = std::fs::canonicalize(root).map_err(|_| outside())?;
+        let under = |r: &Path| Path::new(p).strip_prefix(r).ok().map(|x| x.to_string_lossy().into_owned());
+        under(root).or_else(|| under(&canon)).ok_or_else(outside)?
+    } else {
+        p.to_string()
+    };
+    while let Some(r) = rel.strip_prefix("./") {
+        rel = r.to_string();
+    }
+    let ext = rel.rsplit_once('.').map(|(_, e)| e.to_ascii_lowercase()).unwrap_or_default();
+    let Some((_, mime)) = IMAGE_TYPES.iter().find(|(e, _)| *e == ext) else {
+        return Err(format!("not an image: {path}"));
+    };
+    if is_main && rel.split('/').next() == Some(".worktrees") {
+        return Err(outside());
+    }
+    match safe_under(root, &rel) {
+        Some(f) => Ok((f, mime)),
+        None => Err(match classify(root, &rel) {
+            Err(Refusal::NotFound) => format!("not found: {path}"),
+            Err(Refusal::NotAFile) => format!("not a file: {path}"),
+            _ => outside(),
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,5 +246,58 @@ mod tests {
         assert_eq!(normalize_entered("docs/plan/"), "docs/plan");
         assert_eq!(normalize_entered(" docs/plan "), "docs/plan");
         assert_eq!(normalize_entered("docs/plan//"), "docs/plan/");
+    }
+
+    /// The chat-image rule, one case per way a path can name a file: inside
+    /// (relative, `./`, absolute), and every way out. The place is a nested
+    /// folder of `base`, which also holds an "other place" with a real image.
+    #[test]
+    fn a_chat_image_resolves_only_to_a_regular_image_inside_its_place() {
+        let base = tmp("chatimg");
+        let root = base.join("place");
+        let other = base.join("other");
+        fs::create_dir_all(root.join(".worktrees-attachments")).unwrap();
+        fs::create_dir_all(root.join("shots")).unwrap();
+        fs::create_dir_all(root.join(".worktrees/sib")).unwrap();
+        fs::create_dir_all(&other).unwrap();
+        fs::write(root.join(".worktrees-attachments/a.PNG"), "x").unwrap();
+        fs::write(root.join("shots/b.jpg"), "x").unwrap();
+        fs::write(root.join("notes.txt"), "x").unwrap();
+        fs::write(root.join(".worktrees/sib/c.png"), "x").unwrap();
+        fs::write(other.join("secret.png"), "x").unwrap();
+        symlink(other.join("secret.png"), root.join("shots/link.png")).unwrap();
+        symlink(&other, root.join("away")).unwrap();
+        let canon = fs::canonicalize(&root).unwrap();
+        let ok = |p: &str| place_image(&root, false, p).map(|(f, m)| (f.strip_prefix(&canon).unwrap().to_path_buf(), m));
+        // inside: relative, dotted, absolute (as given and canonical)
+        assert_eq!(ok("shots/b.jpg").unwrap(), (PathBuf::from("shots/b.jpg"), "image/jpeg"));
+        assert_eq!(ok("./shots/b.jpg").unwrap().0, PathBuf::from("shots/b.jpg"));
+        assert_eq!(ok(".worktrees-attachments/a.PNG").unwrap().1, "image/png");
+        assert!(ok(&format!("{}/shots/b.jpg", root.display())).is_ok());
+        assert!(ok(&format!("{}/shots/b.jpg", canon.display())).is_ok());
+        // outside: absolute elsewhere, `..`, absolute with `..`, links out, a link's directory
+        for bad in [
+            other.join("secret.png").to_string_lossy().into_owned(),
+            "../other/secret.png".into(),
+            format!("{}/../other/secret.png", root.display()),
+            "shots/link.png".into(),
+            "away/secret.png".into(),
+            "/etc/hosts.png".into(),
+        ] {
+            let e = ok(&bad).unwrap_err();
+            assert!(e.starts_with("outside this place: ") && e.ends_with(&bad), "{bad}: {e}");
+        }
+        // never fetched: URLs and data: are not files at all
+        for url in ["https://example.com/a.png", "http://x/a.png", "data:image/png;base64,AAAA", "file:///etc/a.png"] {
+            assert!(ok(url).unwrap_err().starts_with("not a file in this place: "), "{url}");
+        }
+        // other refusals say what they are
+        assert!(ok("notes.txt").unwrap_err().starts_with("not an image: "));
+        assert!(ok("shots/none.png").unwrap_err().starts_with("not found: "));
+        assert!(ok("shots.png").unwrap_err().starts_with("not found: "));
+        // (main)'s root holds every other place's tree
+        assert!(place_image(&root, false, ".worktrees/sib/c.png").is_ok());
+        assert!(place_image(&root, true, ".worktrees/sib/c.png").unwrap_err().starts_with("outside this place: "));
+        let _ = fs::remove_dir_all(&base);
     }
 }

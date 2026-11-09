@@ -1042,6 +1042,10 @@ commands! { cx, a;
         )
     },
     read_file_base64: Engine [read, file(path)] => files::read_file_base64(&cx.ctx, a.get("path")?, a.get("max_bytes")?),
+    // A chat's image (feat/chat-images): resolved under the PLACE's own root by
+    // the host, never a client path judged against every project, so a device
+    // scoped to one place reads only that place's images.
+    read_place_image: Engine [read, place(repo, slug)] => files::read_place_image(&cx.ctx, a.get("repo")?, a.get("slug")?, a.get("path")?, a.get("max_bytes")?, a.get("etag")?),
     write_file: Engine [write, file(path)] => files::write_file(&cx.ctx, a.get("path")?, a.get("content")?, a.get("expected_mtime")?),
 
     // ── the dock: shells, scrollback, and the tmux attach (term) ─────────
@@ -1346,13 +1350,13 @@ mod tests {
     /// named workspaces' six console rows (`workspaces_list`, `workspace_*`), and the
     /// idea board's seven console rows (`ideas_list`, `idea_read`,
     /// `idea_create`, `idea_write`, `idea_rename`, `idea_remove`,
-    /// `idea_adopt`); the check scripts
+    /// `idea_adopt`), and the chat's image (`read_place_image`); the check scripts
     /// hold the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 225, "the table has 225 commands");
+        assert_eq!(TABLE.len(), 226, "the table has 226 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1683,6 +1687,7 @@ mod tests {
         ("idea_write", "id", "an idea's ULID (a console act)"),
         ("idea_rename", "id", "an idea's ULID (a console act)"),
         ("idea_remove", "id", "an idea's ULID (a console act)"),
+        ("read_place_image", "path", "a path in the PLACE (relative to its root, or absolute under it): the body resolves it under `place(repo, slug)`'s own root by `safepath::place_image`, which is not a `file(path)` judged against every project"),
     ];
 
     /// Every `a.get("…")` a body reads that names an object is covered by the
@@ -1757,7 +1762,7 @@ mod tests {
     /// `push_allow_security`); Settings → Agent policy → Limits'
     /// `limits_settings` (`read`) and `set_limits` (`admin`); and the policy
     /// presets' `policy_preset_status` (`read`) and `apply_policy_preset`
-    /// (console); the named workspaces' six (console); and the idea board's seven (console). A row that moves group
+    /// (console); the named workspaces' six (console); and the idea board's seven (console); `read_place_image` is a `read`. A row that moves group
     /// fails here until the count (and the proposal's table) move with it.
     #[test]
     fn every_row_has_one_base_group_and_the_counts_are_section_3_4s() {
@@ -1774,7 +1779,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 67), ("write", 23), ("admin", 41), ("console", 60), ("stream", 10), ("instruct", 8), ("answer", 2),
+            ("read", 68), ("write", 23), ("admin", 41), ("console", 60), ("stream", 10), ("instruct", 8), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 7),
         ]
         .into();

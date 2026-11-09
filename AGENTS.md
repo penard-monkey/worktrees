@@ -170,6 +170,35 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   keeps it out of the pane's chat transcript and model. Do not identify the
   pane's Claude by `kind` or pane id alone.
 
+- **A chat image is the PLACE's, and the host resolves it** (`feat/chat-images`).
+  `![alt](path)` in a bubble and a Read's thumbnail go through ONE row,
+  `read_place_image: Engine [read, place(repo, slug)]`, never `read_file_base64`
+  (`file(path)`: judged against EVERY project the caller may see, which is the
+  wrong question for a picture an agent chose to show). The rule is
+  `safepath::place_image`: relative to the place's root, or absolute and under
+  it, then `safe_under` (string rule, lstat of the last component, canonical
+  containment: a link out, `..`, another place's tree, a URL all refused in
+  words that name the path); an image extension from `IMAGE_TYPES`; and for
+  `(main)` nothing under `.worktrees/`, because its root holds every other
+  place's tree. A symlinked image is refused even when it points inside, as in
+  `safe_under`. `app/src/imgsrc.ts` restates it ONLY to say the refusal without
+  a round trip and to keep a remote URL from ever becoming an `<img>`; the host
+  is the authority, and `chatimage-check.mjs` runs both the rule and the real
+  `Markdown` + `chatImageNode`. **A Read's thumbnail comes from the call's
+  `file_path`, not the transcript**: 2.1.319 writes the image as a base64
+  block TWICE per entry (`tool_result.content[]` and `toolUseResult.file`),
+  150-300 KB each and recompressed (`claude-2.1.319-read-image.jsonl`, its
+  README), so cutting it from the transcript would load `agent_turns`' poll or
+  need a second row reading transcripts, and would show a device pixels of a
+  file it may not read. The cache is `ImageView.tsx`'s, by place + path + etag
+  (`"<mtime ms>-<bytes>"`, answered `unchanged` with no bytes): a mounted bubble
+  paints from it in its first frame, which is also why an image arriving below
+  the fold does not move a reader (`chat-image-browser.mjs`, Chromium and
+  WebKit). Agents are told in the skill's "Showing the user an image"
+  (guidance VERSION 6), and `Project::ensure_excluded` now excludes
+  `.worktrees-attachments/` too, since the skill sends them there before any
+  upload has made the exclusion.
+
 - **The agent rows (`worktrees_api::agents`, `worktrees_core::prompt`) read
   Claude's screen, and Claude has five traps** (fixtures and READMEs:
   `crates/worktrees-core/tests/fixtures/claude-screen/2.1.309` and

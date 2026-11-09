@@ -2442,6 +2442,24 @@ mod tests {
         assert!(tool_steps(&got[0])[0].get("failed").is_none(), "a success carries no flag at all");
     }
 
+    /// A Read of an image (Claude 2.1.319, measured: the fixture's README): the
+    /// transcript holds the picture as base64 TWICE in the result entry, and
+    /// the turn keeps the call's `file_path` as its summary and no pixels, which
+    /// is all the chat's thumbnail needs (it reads the file again through
+    /// `read_place_image`, under the place-only rule).
+    #[test]
+    fn claude_read_of_an_image_is_a_path_and_no_pixels() {
+        let fx = lines(include_str!("../tests/fixtures/transcripts/claude-2.1.319-read-image.jsonl"));
+        assert!(fx.iter().any(|l| l.contains("\"type\":\"image\"") && l.contains("iVBORw0KGgo")), "the fixture holds the image block");
+        let got = claude(&fx, 10);
+        let all = without_call_ids(&got);
+        for leaked in ["iVBORw0KGgo", "base64", "SYSTEM-PROMPT-MARKER", "originalSize"] {
+            assert!(!all.contains(leaked), "{leaked} leaked: {all}");
+        }
+        assert_eq!(got.len(), 1, "{got:#?}");
+        assert_eq!(calls(&got[0]), vec![call("Read", Some("/Users/u/proj/.worktrees-attachments/20261107-4c34b746fcf4773d.png"), false)]);
+    }
+
     /// One Claude assistant entry calling `name` with `input`, then its
     /// result, shaped as 2.1.316 writes them.
     fn claude_call(name: &str, input: serde_json::Value, is_error: Option<bool>) -> Vec<String> {

@@ -52,7 +52,8 @@ pub const SKILL_MD: &str = include_str!("guidance/SKILL.md");
 /// 3: the "Across projects" section (cross-project P1b).
 /// 4: start agents only through a launch, and why; what `unknown` means.
 /// 5: heavy jobs in machine-wide slots; lanes nudged and launched in batches.
-pub const VERSION: u32 = 5;
+/// 6: showing the user an image in the chat view (`.worktrees-attachments/`).
+pub const VERSION: u32 = 6;
 
 /// The rule plus where the how-to lives, for the channels that take a prompt
 /// rather than a skill (pi's `--append-system-prompt`, Codex's

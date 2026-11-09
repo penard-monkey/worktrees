@@ -121,6 +121,17 @@ cross-project reach on):
   the worktrees app's file viewer at that line. Print the file only when they
   ask for its text.
 
+## Showing the user an image
+
+- The worktrees app's chat view draws `![what it is](path)` in your reply as a
+  picture. To show one you made (a render, a screenshot, a chart), save it
+  inside the place under `.worktrees-attachments/` (git-excluded, cleared after
+  seven days), such as `.worktrees-attachments/preview.png`, and write
+  `![preview](.worktrees-attachments/preview.png)`.
+- Only an image inside the place shows (png, jpg, gif, webp, bmp, svg; up to
+  4 MB). A file in `/tmp`, another place's tree or a URL shows as a note, so
+  copy it in first. This is for the chat view; a terminal prints the markdown.
+
 ## Finishing
 
 - Commit, push and open the pull request from the place, not from `(main)`.
