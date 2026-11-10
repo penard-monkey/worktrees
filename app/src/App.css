@@ -2584,8 +2584,10 @@ body.dragging .menu-catch { pointer-events: none; }
   display: flex; flex-direction: column; overflow: hidden;
   animation: pop var(--dur-slow) var(--ease);
 }
-/* The title keeps `flex: 1` (see `.settings-h b`), so the chips ride hard right
-   with the close button rather than trailing the word "Settings". */
+/* The chips ride hard right with the close button rather than trailing the
+   word "Settings": in the Settings modal the free space is the search box's
+   `margin-left: auto` (see `.settings-modal .settings-h b`); in every other
+   sheet it is the title's `flex: 1`. */
 .modal-keys { display: flex; align-items: center; gap: var(--s2); margin-right: var(--s3); }
 .modal-foot {
   flex: none; padding: var(--s2) var(--s4); border-top: 1px solid var(--line);
@@ -3056,8 +3058,11 @@ body.dragging .menu-catch { pointer-events: none; }
    and the search box sits just left of the switch. The free space is between
    the title and the box — the box's `margin-left: auto` — so the box widening
    on focus eats that space and nothing to its right moves; the title's own
-   margin keeps them apart if the header ever runs out of it. */
-.settings-h b { flex: 0 1 auto; margin-right: var(--s4); }
+   margin keeps them apart if the header ever runs out of it.
+   SCOPED to the Settings modal: the same header is What's new, Project and
+   Status, whose title must keep `flex: 1` — they have no search to take the
+   free space, and unscoped this rule (#615) put their × beside the title. */
+.settings-modal .settings-h b { flex: 0 1 auto; margin-right: var(--s4); }
 .settings-mode { margin-right: var(--s4); }
 .settings-mode button { padding: var(--s1) var(--s3); font-size: var(--fs-meta); }
 /* The search (SettingsSearchBox.tsx): small with its glass and "Search" until

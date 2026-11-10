@@ -5,6 +5,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Fixed
+
+- **The × in What's new, the Project sheet and the Status sheet is back at the right edge.** Since v0.48.0 it sat beside the title, because a rule written for the Settings header's new layout reached every sheet that shares the header. It now applies to Settings only, where the search takes that space.
+
 ## [0.50.0] - 2026-11-09
 
 ### Added
