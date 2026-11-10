@@ -110,3 +110,23 @@ export const addableTo = (list: WsList | null, root: string): WsDef[] =>
 /** The collapse key of a project UNDER a workspace: its own per workspace, so
  *  folding it in one leaves All projects and every other workspace alone. */
 export const wsProjectKey = (id: string, root: string) => `${id}|${root}`;
+
+/** A workspace menu's "Add project ▸": the registered projects (`registered`,
+ *  in All projects' order) it does not hold yet. */
+export const projectsAddable = (w: WsDef, registered: string[]): string[] =>
+  registered.filter((r) => !w.projects.some((p) => p.root === r));
+
+/** The project a New project / Add existing / Clone just brought, so a
+ *  workspace menu's continuation can put it in that workspace: the root the
+ *  registry gained, or — when it already held it (Add existing of a project
+ *  that is registered, or of a folder inside one) — the registered root that
+ *  is `dir` or holds it, the deepest one. Null when neither: nothing is added. */
+export function arrivedRoot(before: string[], after: string[], dir: string | null): string | null {
+  const had = new Set(before);
+  const fresh = after.find((r) => !had.has(r));
+  if (fresh) return fresh;
+  if (!dir) return null;
+  const d = dir.replace(/\/+$/, "");
+  const holds = after.filter((r) => d === r || d.startsWith(r + "/"));
+  return holds.sort((a, b) => b.length - a.length)[0] ?? null;
+}
