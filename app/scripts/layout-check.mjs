@@ -196,6 +196,34 @@ if (S.SETTINGS_REV < 4) fail(`SETTINGS_REV is ${S.SETTINGS_REV} — the dock_sid
   else ok(".float-dismiss never shrinks and is not a flex container");
 }
 
+// ── a sheet header's × sits at its right edge ───────────────────────────────
+// `.settings-h` is the header of Settings, What's new, Project and Status. Its
+// title's `flex: 1` is what pushes the × right in every one but Settings, whose
+// search box takes the free space instead (`margin-left: auto`). #615 shrank
+// the title for Settings with an UNSCOPED `.settings-h b`, and the other three
+// drew their × beside the title until v0.50.0's What's new showed it. So a rule
+// that gives the header's title any `flex` but 1 must be scoped to the
+// Settings modal, and the search must keep the margin that stands in for it.
+{
+  const before = bad;
+  // `[^{}]*` for the body, so a rule nested in an @media block is read as its
+  // own selector rather than swallowed into the at-rule's.
+  const rules = [...css.replace(/\/\*[^]*?\*\//g, "").matchAll(/([^{}]+)\{([^{}]*)\}/g)];
+  let title = 0;
+  for (const [, sels, body] of rules) {
+    const flex = body.match(/(?:^|;)\s*flex:\s*([^;]+)/)?.[1].trim();
+    for (const sel of sels.split(",").map((s) => s.trim().replace(/\s+/g, " "))) {
+      if (!/(^| )\.settings-h b$/.test(sel)) continue;
+      if (sel === ".settings-h b" && flex === "1") title++;
+      else if (flex != null && flex !== "1" && !/(^| )\.settings-modal /.test(sel)) fail(`App.css: \`${sel} { flex: ${flex} }\` reaches every sheet's header — scope it to \`.settings-modal\`, or What's new, Project and Status lose the title's flex: 1 and their × leaves the right edge`);
+    }
+  }
+  if (title !== 1) fail(`App.css: expected one \`.settings-h b { flex: 1 }\`, found ${title} — the title is what pushes the × right`);
+  const search = rules.find(([, sels]) => sels.trim() === ".settings-search")?.[2] ?? "";
+  if (!/margin-left:\s*auto/.test(search)) fail("App.css: `.settings-search` lost `margin-left: auto` — the Settings header's free space has nowhere to go");
+  if (bad === before) ok("a sheet header's title takes the free space everywhere but Settings, where the search does");
+}
+
 // ── 3. one dock group, two hosts, complementary conditions ──────────────────
 // Sliced by HOST rather than by a window of characters before each call: the
 // Places rail (`<nav className="rail"` … its `</nav>`) and the dock's own rail,
