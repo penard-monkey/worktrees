@@ -4,11 +4,44 @@ title: "Ideas: the phase plan"
 
 # Ideas: the phase plan
 
-**Status:** plan, **revision 3, 2026-11-08**. Nothing is built yet. The owner
-read v1 and v2 of [Ideas](idea-board.html) and decided to build the idea
-board in phases, in the shape v1 first described: a place for ideas inside
-worktrees, desktop only. This document is that build plan. It overrules v2's
-"rehearse first, build no destination yet" (v2's own choices C2(c) and C3(b)).
+**Status:** plan, **revision 4, 2026-11-10**. Phases 0, 1 and 2 **shipped in
+v0.50.0** (#632 to #636, behind Settings → General → Beta features, off by
+default). The owner read v1 and v2 of [Ideas](idea-board.html) and decided to
+build the idea board in phases, in the shape v1 first described: a place for
+ideas inside worktrees, desktop only. This document is that build plan. It
+overrules v2's "rehearse first, build no destination yet" (v2's own choices
+C2(c) and C3(b)).
+
+**What changed in revision 4 (2026-11-10, after the owner used v0.50.0):**
+
+- Phases 0 to 2 are marked shipped (§8).
+- Phase 1 gets a follow-up: **a first heading names the file.** The owner
+  wrote an idea headed "# Jellyfin Sharing" and the file stayed
+  `untitled.md`. A change to the first heading now renames the file, as Rename
+  does. A lane has it (`feat/idea-heading-names-file`).
+- Part of phase 5 is pulled forward: **the workspace's menu adds projects.**
+  The owner: "I think we need a menu to be able to create/open/add/projects
+  directly in this view. One thing I want to do is add/clone the jellyfin
+  repo(s) as needed." The workspace's menu and its empty state get Add project
+  ▸ New project…, Add existing…, Clone from URL…, each reusing the nav
+  footer's dialogs and adding the result to that workspace. A lane has it
+  (`feat/workspace-project-menu`).
+- New, and next to design before anyone codes it: **idea sessions** (§7.3,
+  phase S). The owner: "We need to be able to open up a corresponding chat
+  session or sessions that go with that particular idea. The goal being that
+  we can have that session tied to that idea and we can iterate on it.
+  Eventually we can tell that idea to go ahead and make/clone things into
+  workspaces as necessary. So the idea stays there and we can see where it
+  started. The workspace is then the next phase." This settles C10 as (a), a
+  session against the ideas folder in the chat view, but changes its shape: a
+  **persistent conversation**, or several, tied to one idea, that can be
+  reopened like a lane's chat. It goes before phase 3. Phase 6's agent help
+  becomes a later use of the same session kind.
+- New choices C12 to C15 (§10). C11 stays open.
+
+Phase numbers stay as they were, because shipped code cites them (for
+example `ideas.rs` names "phase 3's `related`" and "phase 4's `plan_of`").
+The new phase is called **phase S** and runs between 2 and 3.
 
 **What changed in revision 3 (2026-11-08, more of the owner's answers):**
 
@@ -43,9 +76,11 @@ worktrees, desktop only. This document is that build plan. It overrules v2's
   and C11.
 
 Claims about the app are marked **checked** (read on `origin/main` at
-`1f2064d` on 2026-11-08) or **assumed** (not measured). Claims about libraries
-and about Bear are marked **read** (npm registry, Bear's own pages, 2026-11-08)
-or **assumed**.
+`1f2064d` on 2026-11-08; for revision 4's new text, §7.3 and phase S, at
+`d5e5e46` on 2026-11-10) or **assumed** (not measured). Claims about libraries,
+Bear and Claude's CLI are marked **read** (npm registry, Bear's own pages,
+2026-11-08; `claude --help` of Claude Code 2.1.322, 2026-11-10) or
+**assumed**.
 
 ## 1. The answer
 
@@ -54,29 +89,30 @@ Build the chain the owner named, end to end, before anything richer:
 > "turn an idea into a plan which can then be a workspace which can then be a
 > set of projects, places to work on it."
 
-| # | Phase | What David can do at the end | Size |
-|---|---|---|---|
-| 0 | Companion window | Open an Ideas window, full screen it, close it without quitting; try a drag between windows | S–M |
-| 1 | Documents | Write ideas in a Bear-like editor: create, list, open, edit, rename, remove | M |
-| 2 | Workspaces view | Make named workspaces and drag projects into them, in the main window | M |
-| 3 | Ideas relate | Relate, merge, split and combine ideas, by drag or menu, with nothing lost | M |
-| 4 | Ideas → plan → workspace | Make a plan from one idea or several, and a workspace from the plan | M |
-| 5 | Projects and places | Clone or create missing projects, and start places from the plan with a reviewed brief | M–L |
-| 6 | Agent help | Ask an agent to propose a merge, a split, links or a plan draft, and accept, edit or skip it | L |
+| # | Phase | What David can do at the end | Size | State |
+|---|---|---|---|---|
+| 0 | Companion window | Open an Ideas window, full screen it, close it without quitting; try a drag between windows | S–M | shipped, v0.50.0 |
+| 1 | Documents | Write ideas in a Bear-like editor: create, list, open, edit, rename, remove | M | shipped, v0.50.0; follow-up: the first heading names the file (lane) |
+| 2 | Workspaces view | Make named workspaces and drag projects into them, in the main window | M | shipped, v0.50.0; follow-up: the workspace's project menu, from phase 5 (lane) |
+| S | Idea sessions | Open a conversation (or several) tied to one idea, iterate in it, close it, and resume it later | M–L | next to design |
+| 3 | Ideas relate | Relate, merge, split and combine ideas, by drag or menu, with nothing lost | M | |
+| 4 | Ideas → plan → workspace | Make a plan from one idea or several, and a workspace from the plan | M | |
+| 5 | Projects and places | Clone or create missing projects, and start places from the plan with a reviewed brief | M–L | the menu part pulled forward |
+| 6 | Agent help | From an idea's conversation, the agent proposes a merge, a split, links, a plan draft or a workspace, and David accepts, edits or skips it | M | |
 
 Later, and not in this plan: conversations on part of a document, the rest of
 the Bear-like editor (§4.3), diagrams, quick capture, threads, MCP tools.
 
 ```
-  lane A  [0 window]──[1 documents: screen]──[3 relate]──[4 chain]──[5 places]
-  lane B  [1 documents: store + rows]─┘                     │
-  lane C  [2 workspaces view]───────────────────────────────┘
-  lane D                                       [6 agent help]  (after 3)
+  shipped [0 window] [1 documents] [2 workspaces view]
+  lanes   [1+ heading names the file]  [2+ workspace project menu (from 5)]
+  next    [S idea sessions]──[3 relate]──[4 chain]──[5 places]
+                    └────────────────────[6 agent help]  (after S and 3)
 ```
 
-Phase 0 and phase 2 run from day one, and so do phase 1's store and rows.
-Phase 3 needs 1. Phase 4 needs 2 and 3. Phase 5 needs 4. Phase 6 needs 3, and
-can run beside 4 and 5; each act it helps with must exist first.
+Phase S needs 1 (shipped). Phase 3 needs 1, and can run beside S. Phase 4
+needs 2 and 3. Phase 5 needs 4. Phase 6 needs S and 3, and can run beside 4
+and 5; each act it helps with must exist first.
 
 Sizes: **S** is about one lane-day, **M** two to four, **L** about a week.
 These are guesses.
@@ -397,7 +433,8 @@ is settled by C2 and is not repeated here.
 
 **Decided:** documents in `$XDG_DATA_HOME/worktrees/ideas/`, which is
 `~/.local/share/worktrees/ideas/` by default. History in its `.history/`.
-Agent proposals in its `.desk/` (§7).
+Idea conversations (their records and `start.md`) and, later, agent
+proposals in its `.desk/` (§7.3, §7.4).
 
 **Picked here:** workspaces in `$XDG_CONFIG_HOME/worktrees/workspaces.json`
 (`~/.config/worktrees/workspaces.json`), beside `projects.json`, which they
@@ -557,9 +594,9 @@ v1 §6's lines stand, word for word where they fit:
   you accept it. Accepting is the same operation, with the same history copy.
 - **A dismissed suggestion stays dismissed.**
 
-### 7.2 Where the agent runs (v1's Q2)
+### 7.2 Where the agent runs (v1's Q2): decided, a session
 
-There is no worktree for an idea. Three shapes:
+There is no worktree for an idea. Revision 3 weighed three shapes:
 
 | | One-shot headless call per proposal | **A session against the ideas folder, in the chat view** | A place in a hidden `ideas` project |
 |---|---|---|---|
@@ -569,58 +606,274 @@ There is no worktree for an idea. Three shapes:
 | New engine work | a parser for its output | a session kind that is not a place: launch, dots, chat view keyed by it | almost none |
 | Cost to the rest of the app | none | small | a project in every list, a branch per conversation (the "not a branch" problem v1 began with), and the ideas folder becomes a repo |
 
-**Pick: the session against the ideas folder** (choice C10). It keeps "you can
-see it and stop it", it reuses the chat view that places already have
-(`chat-session-view.md`), and it adds one kind of session instead of a fake
-project.
-
-How it works, shallowly:
-
-- One request is one launch, the way a lane starts on its brief: the app
-  writes the request to `ideas/.desk/<request>.md` and launches the session on
-  a fixed opener that names that file. Nothing reaches Claude through argv and
-  nothing is typed into it to start it, as with briefs (**checked**,
-  AGENTS.md: `BRIEF_OPENER`).
-- The agent writes its proposal to `ideas/.desk/<request>.proposal.md`, with
-  frontmatter naming the act and its parameters. The companion shows it with
-  Accept, Edit, Skip. Accepting runs the operation.
-- A follow-up line goes through the chat view's existing send, which is
-  `agent_send` (**checked**, AGENTS.md: the owner-approved exception for
-  typing into Claude). This is the same row reaching a new kind of session, not
-  a fourth path; it still needs David's yes, because AGENTS.md says not to
-  grow paths that type into Claude (part of C10).
-- The session ends when the proposal is accepted or skipped.
+**Decided (C10, 2026-11-10): the session against the ideas folder.** The
+owner's words settle it: "open up a corresponding chat session or sessions
+that go with that particular idea … tied to that idea and we can iterate on
+it." They also change its shape. Revision 3 had one short session per request,
+ending when its proposal was accepted or skipped. The owner wants a
+**conversation that lasts**: tied to one idea, iterated in, closed, and
+reopened later, like a lane's chat. §7.3 designs that. Revision 3's request and
+proposal strip is not thrown away: it becomes phase 6, a later use of the same
+conversation (§7.4).
 
 **Its reach is a route rule, not a sandbox** (v2's lesson). The agent can
-technically write any file in the ideas folder. It is told to write only into
-`.desk/`; the app never applies a proposal without your accept; a file changed
-outside the app is noticed by the store's change event; and history makes any
-stray write recoverable.
+technically write any file in the ideas folder. The app never applies a
+proposal without your accept; a file changed outside the app is noticed by the
+store's change event (`ideas:changed`, shipped in phase 1); and history makes
+any stray write recoverable.
 
-**AGENTS.md's warning about starting a Claude to ask it something.** The rule
-exists because a Claude started in a repository runs that repository's hooks:
-a scratch `claude -p` in an untrusted clone ran its `SessionStart` hook
-(**checked**, AGENTS.md, measured 2026-11-04). The ideas folder changes the
-main reason: it is worktrees' own folder, not a cloned repo, and has no
-`.claude/` of anyone else's. Three things still apply:
+### 7.3 Idea sessions
 
-- The **user's own** global hooks and plugins run (they are the user's, which is
-  acceptable, but each start costs seconds). That is one more reason for one
-  visible session per request over a burst of hidden calls.
-- worktrees' own planning hooks must be **off** for this session, or it grows a
-  `.planning/` inside the ideas folder (**assumed**: launched like a lane, it
-  would get them).
-- The first launch meets Claude's folder-trust prompt for the ideas folder;
-  the amber dot already shows a pane waiting on it (**checked**, AGENTS.md).
+An **idea session** is one conversation with Claude about one idea. It runs in
+its own tmux session with the ideas folder as its working directory, and the
+companion shows it in the chat view. An idea can have several. The idea's
+document stays the record of where the idea started; the conversations sit
+beside it, never inside it.
 
-**First used in phase 6.** Its first request is the cheapest: "Suggest
-related ideas". Then merge, split, and plan drafts. This also answers C5: in
-phase 4 David drafts a plan from the template; from phase 6 an agent can
-propose the draft.
+```
+ ideas/                                   (~/.local/share/worktrees/ideas, or WORKTREES_IDEAS_DIR)
+   jellyfin-sharing.md                    the idea, id 01JC8Z…; its text is never rewritten by this
+   .history/01JC8Z…/<time>.md             a copy taken when each conversation starts
+   .desk/01JC8Z…/sessions.json            the idea's conversations (the record, below)
+   .desk/01JC8Z…/<conv>/start.md          what the conversation was opened on (fixed template)
 
-Ideas and workspaces stay desktop only (decided): no MCP tools for other
-agents, nothing for paired devices or the phone. The desk agent reads the
-ideas folder as files, which needs no MCP tool.
+ tmux: worktrees~idea~<conv>              one session per live conversation
+ ~/.claude/projects/<ideas folder, mangled>/<session id>.jsonl   its transcript (Claude's own)
+```
+
+#### Where it runs, and what it opens on
+
+- **Working directory: the ideas folder,** as §7.2 picked. One folder for every
+  conversation means one folder-trust prompt, once, and one Claude project
+  directory for every transcript.
+- **The opener is fixed text naming a file**, the way `BRIEF_OPENER` ("Read
+  .planning/brief.md and begin.") names the brief (**checked**,
+  `ops.rs:805`). Here it is `Read .desk/<idea>/<conv>/start.md and begin.`,
+  where both names are ULIDs the engine made (`crate::ulid`, **checked**:
+  the store's ids are ULIDs) and are checked as ULIDs before they reach argv.
+  It carries no text of the idea and nothing the user typed. Nothing else
+  reaches Claude through argv, and nothing is typed into it to start it.
+- **`start.md` is a fixed template the engine fills with ids and a file name**:
+  this conversation is about the idea whose frontmatter `id` is `<id>`, now in
+  `<file>.md`; read it; talk it through with David; change that file only when
+  he asks; never write elsewhere in the folder except `.desk/<idea>/<conv>/`.
+  It names the id as well as the file because a heading change now renames the
+  file (phase 1's follow-up), so the name in `start.md` can go stale during a
+  conversation, and the id cannot: "if the file is not there, find the `.md`
+  whose frontmatter says `id: <id>`."
+- **No `CLAUDE.md` in the ideas folder** (C13). `start.md` carries the
+  conversation's instructions, and a resumed conversation already has them.
+  A `CLAUDE.md` at the folder's root would also be listed as an idea: the
+  store reads every `.md` there not starting with `.` (**checked**,
+  `ideas.rs:404`).
+- **worktrees' planning hooks are off, by construction.** They reach a Claude
+  only through `ops::ai_launch_for`, which takes a `Project` and adds the plan
+  plugin only when that project's planning level is Full (**checked**,
+  `ops.rs:84`, `planning_for`). An idea session has no project, so it gets a
+  launcher of its own, built from the same parts minus the project ones:
+  `--name`, the model, and the prompt plugin (`prompt_hook_for`, which keys on
+  the harness alone, **checked**), because the chat reads a tall permission
+  prompt through that plugin's record. No guidance plugin (it is for managed
+  repos), no planning plugin.
+- **This is the user's real Claude**, launched as a lane's is, with their own
+  settings, global hooks and plugins. `DISABLE_AUTOUPDATER=1` is for the
+  scratch Claudes of a sandbox check only (AGENTS.md); it is never set here.
+- **The folder-trust prompt** comes on the first conversation ever. Claude
+  records the answer in `~/.claude.json`, which worktrees reads and never
+  writes (AGENTS.md), so the user answers it. Before any probe file exists, a
+  waiting pane is seen by its screen (`watch::claude_startup_tick`,
+  **checked**). Whether the chat's prompt reader answers the trust prompt is
+  **assumed** not; the first slice gives the panel an "Open in terminal"
+  fallback (the shim's terminal row, as the main window has) for any screen
+  the chat cannot answer.
+- **The user-scope worktrees MCP server** starts in this session too, and in a
+  folder that is not a repository it handshakes and offers zero tools
+  (**checked**, AGENTS.md, `test/mcp.bats`). So the agent has no worktrees
+  tools, as decided (desktop only; §7.4 for later).
+
+#### How a conversation is tied to its idea
+
+One record per idea, `ideas/.desk/<idea id>/sessions.json`, written with
+`fsx::write_atomic`. The store skips every name starting with `.`
+(**checked**, `ideas.rs:404`), so `.desk/` is never listed as an idea. The
+idea's own frontmatter gets nothing: a conversation is not part of the text.
+
+```jsonc
+{
+  "conversations": [
+    {
+      "id": "01JCB2…",                         // the conversation's ULID: names start.md's folder and the tmux session
+      "harness": "claude",
+      "session_id": "5f0c…-…",                 // Claude's own id, chosen by us, written BEFORE launch
+      "title": "Who can see what",             // editable; defaults to "Conversation 1", "2", …
+      "started": "2026-11-10T14:02:11Z",
+      "started_from": ".history/01JC8Z…/20261110T140211Z.md"
+    }
+  ]
+}
+```
+
+- **The session id is chosen before launch** with Claude's `--session-id
+  <uuid>` (**read**: `claude --help`, 2.1.322) and written into the record
+  first, as a place's launch stamp is written before `new-session`
+  (AGENTS.md). Then the transcript's path is known without a probe:
+  `claude_dir_in(<claude root>, <ideas folder>)/<session id>.jsonl`, the same
+  join the chat uses today (**checked**, `agents.rs` `transcript`,
+  `project.rs:838`).
+- **"We can see where it started":** starting a conversation first copies the
+  idea into `.history/` (the store's own history rule, **checked**: rename and
+  remove already copy there), and `started_from` names that copy. The
+  conversation list shows it as "started from this version".
+- **Live state** comes from the engine's existing readers: Claude's probe
+  files, found by pane (`agent::locate`, `ClaudeProbe::session()`, **checked**:
+  `agent.rs:118`), matched by the tmux session name, never by `cwd`, which
+  every conversation shares.
+- **A conversation that has ended** has no tmux session and no probe, and its
+  transcript is still on disk. The chat reads it by session id and shows it
+  read-only, with Resume. This is new: today a lane's chat shows "no agent is
+  running in this place" once its session ends, because `agent_turns` reads
+  only a live lane (**checked**, `agents.rs:1378`, `chat.ts:191`). A
+  transcript Claude has since cleaned up is shown as "this conversation's
+  transcript is no longer on disk" (**assumed**: Claude removes old
+  transcripts after its cleanup period).
+
+#### One idea, several conversations
+
+- The chat panel has a header: the conversation's title, and a menu with the
+  idea's conversations, newest first, each with its state (running, waiting,
+  ended) and its start date, plus **New conversation**.
+- **New conversation** writes the record and `start.md`, takes the history
+  copy, and launches.
+- **Close** ends the tmux session (`kill-session`, through `tmux::tmux()`).
+  Claude's transcript stays. The record stays.
+- **Resume** launches `claude --resume '<session id>'` in the ideas folder,
+  under the same tmux name. The launch args already carry a UUID resume after
+  `--name` (**checked**, `harness.rs:385`). The opener is NOT sent again: a
+  resumed conversation has it.
+- **Remove a conversation** (in the menu, asks first) deletes its record entry
+  and its `<conv>/` folder, and leaves Claude's transcript, which is Claude's
+  file.
+- Removing the idea (phase 1's remove) closes its live conversations first and
+  moves `.desk/<id>/` along with the file. Merging B into A (phase 3) lists B's
+  conversations under A, marked "from B"; the id index already resolves B to A.
+
+#### The tmux session, and why nothing mistakes it for a place
+
+- **Name: `worktrees~idea~<conv>`** (C12). A place's session is
+  `<prefix>-<slug>` (**checked**, `project.rs:755`), its prefix is only
+  `[a-z0-9_-]` (**checked**, `config.rs` `sanitize_prefix`), and `~` cannot
+  appear in a place's session; the dock's shell sidecars rely on that already
+  (`<session>~term`, **checked**, `tmux.rs:21` and `:45`). So the name can
+  never be a place's. A ULID starts with a digit, so `~term` cannot appear in
+  it either.
+- **`Project::live_session_in` cannot adopt it.** Adoption is by pane cwd under
+  a place's directory, and the ideas folder is under no registered project
+  (**assumed** for an override: `WORKTREES_IDEAS_DIR` should refuse a folder
+  under a registered project, so this stays true).
+- **`--name worktrees~idea~<conv>`** as for every pane-0 Claude worktrees
+  launches, because the chat's prompt reader is proved on named Claudes (the
+  name row under every modal, AGENTS.md). It gives the conversation an address
+  for Claude's own messaging; the reach is not new, since local Claude sessions
+  are listed to each other anyway (**assumed**).
+- **Dots.** The poll's `claude_activity` buckets probes into busy and waiting
+  `cwd`s for `sessions:busy` (**checked**, `watch.rs:116`). An idea session
+  lands there as the ideas folder's path, which matches no place, so the main
+  window's nav shows nothing for it, correctly. But every conversation shares
+  that path, so it cannot tell them apart. Phase S adds a second bucket in the
+  same loop, keyed by tmux session name for names carrying `~idea~`, pushed as
+  its own change-gated event (`ideas:sessions`, declared in `scope::EVENTS`
+  like the rest). The companion paints a dot per conversation and per idea in
+  its list; the main window's lightbulb gets the amber dot when any
+  conversation waits on David, and nothing for busy.
+- **Host policy's live-agent limit** (`[limits] max_live_agents`, **checked**:
+  `policy_presets.rs:45`) should count idea sessions, since each is a Claude
+  spending the same quota (C15). Whether its counter sees a session that is not
+  a place is **assumed** not, today.
+
+#### The rows: new ones, keyed by the idea
+
+The chat view is driven by `agent_turns`, `agent_prompt`, `agent_send`,
+`agent_answer*`, `agent_interrupt` and friends, every one keyed by `(repo,
+slug)` and declared `Engine [cap, place(repo, slug)]` (**checked**,
+`dispatch.rs:1113`–`1171`). An idea session has no repo and no slug. Two
+shapes:
+
+- **Reuse the rows with a synthetic key** (say `repo: "~ideas"`). That is a
+  lie the resolver would have to tell: `Obj::Place` resolves a registered root
+  and stats a directory under it (**checked**, `resolve.rs:63`), so a fake
+  project needs a special case there. And those rows are `Engine` rows, which
+  a paired iPhone reaches with the right grant. Ideas are desktop only
+  (decided), so a synthetic key would hand idea sessions to the phone.
+- **New rows, `HostConsole`, keyed by the idea** (recommended). A `HostConsole`
+  row names objects and no capability, and no device grant reaches it
+  (**checked**, `dispatch.rs` header and `Row::new`). Two new object kinds,
+  each a true statement the resolver can check: `idea(id)`, an id the engine's
+  index knows, and `idea_conv(conv, id)`, a conversation in that idea's
+  record. Names for size: `idea_conversations`, `idea_conversation_start`,
+  `idea_conversation_resume`, `idea_conversation_close`,
+  `idea_conversation_remove`, `idea_turns`, `idea_turn_text`,
+  `idea_tool_call`, `idea_prompt`, `idea_answer`, `idea_answer_text`,
+  `idea_answer_many`, `idea_send`, `idea_interrupt`.
+
+The bodies are not copied. `agents.rs` puts every screen and transcript read
+behind `AgentIo`, whose methods take `(project, slug, lane)` (**checked**,
+`agents.rs:198`); most of them use only the `Lane` (session, pane, harness).
+The refactor gives the bodies a `Lane` and a transcript locator, with two thin
+entries: the place rows find the lane from `(repo, slug)` as now; the idea rows
+find it from the record (the tmux name, and the transcript path from the
+session id). The place rows keep the place lock (`agents::place_lock`,
+**checked**: it exists); the idea rows take one lock per conversation, which
+does for a conversation what the place lock does for a place: two clients
+cannot answer one prompt twice.
+
+**Typing into an idea session is `agent_send`'s path, reaching one more kind of
+session** (C14). AGENTS.md has exactly three ways text reaches a Claude
+(`agent_send`, `agent_answer_text`, `agent_command`) and says not to grow a
+fourth. `idea_send` and `idea_answer_text` are new rows over the same bodies:
+the same `typed_line_ok` rule, the same paste, the same empty-composer and
+no-prompt checks, length and hash in the audit and never the text. That is the
+same path with a second door, console only, and it needs David's yes because
+AGENTS.md is his. No slash commands from the idea chat in phase S.
+
+#### The companion's screen
+
+The chat panel opens on the right of the editor, in the room phase 0 left for
+it (§9.1). The idea's list gets a dot per idea with a live conversation. The
+panel is the main window's `ChatPane`; the companion may import from
+`app/src` (**checked**: `Companion.tsx` imports `../src/ipc`,
+`../src/markdown`), and its boundary check guards only the other direction.
+`ChatPane`'s target today is `{repo, slug, path, session}` (**checked**,
+`chat.ts:1146`), so it learns a second kind of target whose calls go to the
+`idea_*` rows. The main window shows nothing new except the lightbulb's dot.
+
+When the agent edits the idea's file, the editor gets `ideas:changed`; if
+David has unsaved typing, the existing "the file changed under you" handling
+applies, as for an edit in another editor (phase 1, `expected_mtime`).
+
+### 7.4 The seam for "make and clone"
+
+"Eventually we can tell that idea to go ahead and make/clone things into
+workspaces as necessary." Not in phase S. What it would need, so phase S does
+not close it off:
+
+- **The agent proposes, David accepts** (§7.1). The conversation writes a
+  proposal file into its own folder, `.desk/<idea>/<conv>/proposals/<n>.md`,
+  whose frontmatter names one act and its parameters: `make_plan(ideas,
+  draft)`, `workspace_create(name)`, `clone_project(url, path)`,
+  `create_project(path)`, `workspace_set_projects(id, roots)`. The companion
+  shows it in the chat with Accept, Edit, Skip. Accept runs the existing
+  console row with those parameters, so nothing new can act; the agent only
+  fills in parameters.
+- **No MCP tools for it, first.** The ideas folder's MCP server offers zero
+  tools today, by decision. Proposal files need none: the agent writes a file
+  and the engine reads it. MCP tools that only write proposals
+  (`propose_workspace`, …) would give structured input and need a mode of the
+  MCP server for this one folder; that is a later choice with its own consent.
+- **Each act keeps its own guard.** `clone_project` is a drive-class console
+  act that warns on `~/Documents` and the like (phase 5); none of that moves
+  into the agent.
+- **What phase S leaves for it:** the conversation's own folder, the record,
+  and the chat panel. Phase 6 adds the proposal reader and the strip.
 
 ## 8. The phases
 
@@ -631,6 +884,8 @@ pointing at a scratch folder and its own tmux server (`env -u TMUX
 TMUX_TMPDIR=<short dir>`). Never David's running app.
 
 ### Phase 0: the companion window
+
+**Shipped in v0.50.0** (#632; the beta switch, #636).
 
 **David can:** open an Ideas window from the main window (a button and a
 shortcut), maximise it or make it full screen on its own Space, close it, and
@@ -663,7 +918,7 @@ yet" and is connected to the engine.
 **Left out on purpose:** documents, the editor, any store.
 
 **For agent help later:** the window's layout leaves room for a side panel
-(phase 6's chat view), and the page's engine door is the one any later panel
+(the chat panel, phase S), and the page's engine door is the one any later panel
 uses; no second socket.
 
 **Thrown away if we stop here:** the window, its capability, its bundle, the
@@ -682,6 +937,17 @@ on Linux if a Linux build is to hand. Record whether the drop arrives and what
 **Size:** S–M.
 
 ### Phase 1: documents
+
+**Shipped in v0.50.0** (#634 the store and rows, #635 the list and editor).
+
+**Follow-up, with a lane (`feat/idea-heading-names-file`): a first heading
+names the file.** Phase 1 shipped the rule that typing a heading changes
+neither the name nor anything else, and only Rename renames (**checked**,
+`ideas.rs` header). The owner found that wrong in use: an idea headed "#
+Jellyfin Sharing" stayed `untitled.md`. Now a change to the first heading
+renames the file as Rename does, with its history copy. Two consequences
+for later phases: links are by id (§3), so they do not care; and an idea
+session's `start.md` names the id as well as the file (§7.3).
 
 **David can:** create an idea, see the list, open one, write in it with
 headings sized and markers dimmed (stage 1), switch to Read, rename it, remove
@@ -728,6 +994,19 @@ IME input (accents, an emoji) and undo.
 
 ### Phase 2: the workspaces view (parallel with 1)
 
+**Shipped in v0.50.0** (#633).
+
+**Follow-up, with a lane (`feat/workspace-project-menu`), pulled forward from
+phase 5.** The empty state said to drag projects in or add them, and the
+owner wants to do it from the view: "I think we need a menu to be able to
+create/open/add/projects directly in this view. One thing I want to do is
+add/clone the jellyfin repo(s) as needed." The workspace's menu and its empty
+state get **Add project ▸ New project…, Add existing…, Clone from URL…**, each
+reusing the nav footer's existing dialog and adding the result to that
+workspace (`workspace_set_projects`). This is phase 5's "clone or create a
+missing project" without the plan: phase 5 later calls the same menu from a
+plan's "to clone" and "to create" rows.
+
 **David can:** switch the main window's nav to Workspaces (empty at first),
 make a workspace (say `worktrees`, holding `worktrees` and `worktrees-ios`),
 drag projects into it (or use the menu), reorder workspaces, see each
@@ -766,6 +1045,84 @@ project onto a workspace and out again; remove a workspace and diff
 references and see "not registered".
 
 **Size:** M.
+
+### Phase S: idea sessions (after 1, before 3)
+
+**David can:** open an idea and press **New conversation**; the chat panel
+opens beside the editor and Claude starts on the idea; he talks it through,
+approves Claude's edit to the idea's file from the chat, and sees the editor
+update; starts a second conversation on the same idea; closes one; closes the
+Ideas window and the app, comes back the next day, sees both conversations in
+the idea's list (one ended, one still running in tmux), reads the ended one,
+and resumes it. The main window gains nothing but an amber dot on the
+lightbulb while a conversation waits on him.
+
+**Built, first slice (M–L):**
+
+- The record and the folder of §7.3: `.desk/<id>/sessions.json`, `start.md`
+  from its fixed template, the history copy on start, ULID checks on every id
+  that reaches argv.
+- A launcher for a session that is not a place: tmux `worktrees~idea~<conv>`,
+  cwd the ideas folder, `--name`, `--session-id` chosen first, the prompt
+  plugin, no guidance and no planning plugin, the fixed opener. Resume with
+  `--resume '<session id>'` and no opener.
+- The rows of §7.3, `HostConsole`, on two new object kinds, `idea(id)` and
+  `idea_conv(conv, id)`, in `resolve.rs`. The agent bodies refactored to take a
+  `Lane` and a transcript locator, so place rows and idea rows share them.
+- A transcript read by session id that works after the session has ended.
+- The `ideas:sessions` event from the poll's Claude loop, keyed by session
+  name; the dots in the companion; the lightbulb's amber dot.
+- The chat panel in the companion: `ChatPane` with an idea target, the
+  conversation header and menu (New, Close, Resume, Rename, Remove), and "Open
+  in terminal" for any screen the chat cannot answer (the trust prompt first).
+- Single-select prompts and free-text answers (`idea_prompt`, `idea_answer`,
+  `idea_answer_text`) in the first slice, because every edit Claude makes to
+  the idea asks permission first; without them the first edit is a trip to the
+  terminal. Multi-select (`idea_answer_many`) and `idea_tool_call` can follow.
+
+**Left out on purpose:** harnesses other than Claude (Codex's rollout is found
+by cwd, which every conversation would share, **checked**: `agents.rs`
+`transcript` uses `codex::latest_rollout(place_dir)`); slash commands from the
+idea chat; any act beyond editing the idea's own file; proposals (phase 6);
+a conversation about several ideas at once (phase 4's plan is the place for
+that; until then, one idea per conversation); anything on a paired device.
+
+**For agent help later:** each conversation has its own folder
+(`.desk/<idea>/<conv>/`) where phase 6's proposal files go; the chat panel is
+where the Accept, Edit, Skip strip will sit; and the record is per idea, so a
+"Suggest…" button can start a conversation or reuse the newest live one.
+
+**Thrown away if we stop here:** the launcher, the rows, the event, the chat
+panel in the companion, and the agents refactor (which stays useful: it is
+only a cleaner seam). The ideas, their history copies, the records and
+Claude's transcripts stay on disk, and each conversation can still be resumed
+by hand with `claude --resume <id>` in the ideas folder.
+
+**Checked in the real app:** through `sandbox.sh --app` with
+`WORKTREES_IDEAS_DIR` on a scratch folder, its own tmux server (`env -u TMUX
+TMUX_TMPDIR=<short dir>`), and the scratch Claude under `DISABLE_AUTOUPDATER=1`
+with the real `XDG_DATA_HOME` (AGENTS.md; the user's own Claude never gets
+that variable). Then:
+
+- the first conversation meets the trust prompt, the lightbulb and the
+  conversation go amber, and "Open in terminal" answers it;
+- Claude reads the idea from `start.md` alone (look at its first turn), and
+  `ps` shows no idea text in its argv;
+- ask for an edit, approve it in the chat, and see the editor update; type in
+  the editor while Claude edits and see the "changed under you" handling;
+- rename the idea's heading mid-conversation (phase 1's follow-up), then ask
+  Claude to edit again: it finds the file by id;
+- two conversations on one idea, both busy, two separate dots;
+- close one: its tmux session is gone, its transcript reads in the panel;
+  resume it: the same session id, no second opener in the transcript;
+- quit the app with a conversation running; relaunch; it is still running and
+  its dot is right;
+- the main window: no new place, nothing in the nav, `list_places` and MCP
+  `place_status` do not list it, `doctor` does not call it an orphan;
+- `audit.jsonl` records each `idea_send` with length and hash, never the text;
+- no `.planning/` and no `CLAUDE.md` appear in the ideas folder.
+
+**Size:** M–L.
 
 ### Phase 3: ideas relate
 
@@ -839,6 +1196,11 @@ another keeps the plan's `plan_of` resolving.
 
 ### Phase 5: projects and places from a workspace
 
+**Part pulled forward:** the workspace's Add project menu (New, Add existing,
+Clone from URL) is phase 2's follow-up. Phase 5 reuses it from a plan's "to
+clone" and "to create" rows, so what is left here is the plan's side and the
+places.
+
 **David can:** clone a "to clone" project or create a "to create" one, after
 which it is registered and referenced; open a work item, read and edit its
 brief, and press Start, which creates the place with that brief and launches
@@ -880,35 +1242,44 @@ at a scratch path and see it registered. Any scratch Claude runs with
 
 **Size:** M–L.
 
-### Phase 6: agent help (after 3, beside 4 and 5)
+### Phase 6: agent help (after S and 3, beside 4 and 5)
 
-**David can:** press "Suggest…" beside relate, merge, split and Make a plan;
-watch the agent work in a chat panel in the companion; accept, edit or skip
-its proposal; and type a follow-up to it.
+Revision 3 had phase 6 build its own session kind, one session per request.
+Phase S builds the session kind; phase 6 becomes a use of it (§7.4).
+
+**David can:** press "Suggest…" beside relate, merge, split and Make a plan,
+which asks in the idea's newest live conversation or starts one; or ask in his
+own words in a conversation ("make a workspace for this and clone the jellyfin
+repos"); see the agent's proposal in the chat with Accept, Edit, Skip; and
+accept it, which runs the same operation the manual path runs.
 
 **Built:**
 
-- A session kind that is not a place: launch against the ideas folder on a
-  fixed opener, its dot, its chat view, its close (§7.2).
-- `.desk/` requests and proposals, and the Accept / Edit / Skip strip, where
-  Accept runs the phase 3 or 4 operation.
-- Planning hooks off for that session; the trust prompt handled by the
-  existing amber dot.
+- The proposal file of §7.4 (`.desk/<idea>/<conv>/proposals/<n>.md`, one act
+  and its parameters in frontmatter), its reader, and the strip in the chat
+  panel, where Accept runs the phase 3, 4 or 5 console row.
+- "Suggest…" buttons, each sending one fixed request line into the
+  conversation through `idea_send`.
+- The acts it may propose, growing with the phases that ship them: relate,
+  merge, split, combine (3); a plan draft, a workspace (4); clone or create a
+  project, a reviewed brief (5).
 
 **Left out on purpose:** conversations anchored to part of a document (later,
-on §4.4's anchors), other harnesses than Claude at first, any agent act
-without a click.
+on §4.4's anchors), other harnesses than Claude at first, MCP tools for it
+(§7.4), any agent act without a click.
 
-**Thrown away if we stop here:** the session kind and `.desk/`. Every manual
-act still works.
+**Thrown away if we stop here:** the proposal reader and the strip. Every
+manual act still works, and the conversations stay.
 
 **Checked in the real app:** ask for related ideas on a folder of five; skip
 it and see it stay dismissed; ask for a merge draft, edit it, accept, and find
-the history copy; ask for a plan draft and accept it; close the companion while
-the agent works and reopen it (the session is still there, or ended cleanly).
-`DISABLE_AUTOUPDATER=1` on that Claude, as in phase 5.
+the history copy; ask for a workspace with one registered and one missing
+project, accept, and see the clone dialog open with the agent's URL filled in
+and waiting for David; close the companion while the agent works and reopen it
+(the conversation is still there). `DISABLE_AUTOUPDATER=1` on the scratch
+Claude, as in phase S.
 
-**Size:** L.
+**Size:** M.
 
 ## 9. The screens
 
@@ -916,25 +1287,37 @@ the agent works and reopen it (the session is still there, or ended cleanly).
 
 One window, labelled `companion`, separate from `main`. It can be maximised or
 full screen on its own (the owner's ask). Documents in a list, one open at a
-time; the agent panel (phase 6) opens on the right when asked.
+time; the idea's conversation panel (phase S) opens on the right.
 
 ```
-┌ Ideas ─────────────────────────────────────────────────────────────── ◻ ✕ ┐
-│ ┌────────────────────┐ ┌───────────────────────────────────┐ ┌──────────┐ │
-│ │ + New idea    ⌕    │ │ Jellyfin on the home server       │ │ Agent    │ │
-│ │────────────────────│ │ saved 10:42 · [Edit|Read] · ⋯     │ │ (phase 6)│ │
-│ │ ● Jellyfin on the  │ │ Related: Home server GPU ·        │ │          │ │
-│ │   home server  2h  │ │   Media library tidy  Suggest…    │ │ Proposal:│ │
-│ │   └ Plan: Jelly 1d │ │───────────────────────────────────│ │ merge    │ │
-│ │ Home server GPU 3d │ │ Jellyfin on the home server       │ │ these two│ │
-│ │ Media library  1w  │ │ (heading, large; # dimmed)        │ │          │ │
-│ │ Docs search    2w  │ │                                   │ │ [Accept] │ │
-│ │                    │ │ - transcode on the GPU?           │ │ [Edit]   │ │
-│ │                    │ │ - which box                       │ │ [Skip]   │ │
-│ │ Show in Finder     │ │                                   │ │          │ │
-│ └────────────────────┘ └───────────────────────────────────┘ └──────────┘ │
-└──────────────────────────────────────────────────────────────────────────┘
+┌ Ideas ───────────────────────────────────────────────────────────────────── ◻ ✕ ┐
+│ ┌──────────────────┐ ┌──────────────────────────────┐ ┌──────────────────────────┐ │
+│ │ + New idea   ⌕   │ │ Jellyfin Sharing             │ │ Who can see what  ▾  ⋯   │ │
+│ │──────────────────│ │ saved 10:42 · [Edit|Read] · ⋯│ │──────────────────────────│ │
+│ │ Jellyfin      ●  │ │──────────────────────────────│ │ You: who outside the     │ │
+│ │  Sharing     2h  │ │ Jellyfin Sharing             │ │ house needs access?      │ │
+│ │ Home server  3d  │ │ (heading, large; # dimmed)   │ │ Claude: three groups …   │ │
+│ │  GPU             │ │                              │ │  ┌ Edit jellyfin-       │ │
+│ │ Media library 1w │ │ - family outside the house   │ │  │ sharing.md   [Yes]   │ │
+│ │ Docs search   2w │ │ - read-only for most         │ │  └ [No] [Open in term.] │ │
+│ │                  │ │                              │ │──────────────────────────│ │
+│ │ Show in Finder   │ │                              │ │ [type a message…]   Send │ │
+│ └──────────────────┘ └──────────────────────────────┘ └──────────────────────────┘ │
+└────────────────────────────────────────────────────────────────────────────────────┘
+
+  ▾ (the conversation menu)
+    ● Who can see what        running · started 10 Nov
+      Transcoding hardware    ended · started 9 Nov       Resume
+    + New conversation
 ```
+
+- The dot beside an idea means a live conversation: amber when one waits on
+  David, the busy colour while one works. The panel's `▾` lists the idea's
+  conversations; `⋯` holds Rename, Close, Remove, Open in terminal, and
+  "Started from this version" (the history copy).
+- An ended conversation reads in the same panel, read-only, with Resume in
+  place of the composer.
+- Phase 6 adds the proposal strip (Accept, Edit, Skip) inside the chat.
 
 - Newest-edited first. A plan sits indented under its first idea.
 - Drag a row onto another row to relate or merge (§6.1). Drag selected text
@@ -1000,17 +1383,41 @@ right side (terminal, dock) is unchanged.
   stays exactly what was typed. A rich-text editor that rewrites markdown from
   its own model is not admitted."*
 
+**Decided on 2026-11-10:**
+
+- **C10, where the helping agent runs:** (a), a session against the ideas
+  folder in the chat view, in the shape the owner described: persistent
+  conversations tied to one idea, several per idea, reopened like a lane's
+  chat (§7.2, §7.3). The one-per-request shape moves into phase 6 as a use of
+  them.
+
 **Still open**, recommended answer first:
 
-- **C10. Where the helping agent runs** (§7.2). (a) A session of its own
-  against the ideas folder, one per request, shown in the chat view, with
-  follow-ups through the chat view's existing send. (b) A one-shot headless
-  call per proposal, with no session to see or stop. (c) A place in a hidden
-  ideas project. Saying yes to (a) is also saying yes to `agent_send` reaching
-  this one new kind of session.
 - **C11. Combine and merge as one act** (§3). (a) Yes: combine is a merge into
   a new idea; extract is a split that keeps the original. (b) Keep them as
   separate acts with their own menus.
+- **C12. The tmux name of an idea session** (§7.3). (a)
+  `worktrees~idea~<conversation ULID>`: `~` never appears in a place's session,
+  so nothing can mistake it for one, and the dock's `~term` sidecars already
+  rely on that. (b) `<some prefix>-idea-<id>`, which a project with that prefix
+  and a place called `idea-…` could collide with, and which
+  `Project::live_session_in` would have to be taught to skip.
+- **C13. What tells the agent its job** (§7.3). (a) A per-conversation
+  `start.md` from a fixed template, named by the fixed opener; no `CLAUDE.md`
+  in the ideas folder. (b) A `CLAUDE.md` written by worktrees at the folder's
+  root, which the store would list as an idea, or under `.claude/`, which
+  every conversation reads whether it is about that idea or not.
+- **C14. The idea chat's send** (§7.3). (a) Yes: `idea_send` and
+  `idea_answer_text` are new console-only rows over the SAME bodies as
+  `agent_send` and `agent_answer_text` (the same `typed_line_ok`, paste,
+  checks and audit), so text reaches one more kind of session by the existing
+  path. This is the owner's call because AGENTS.md says not to grow a fourth
+  path. (b) No send: the conversation is driven from "Open in terminal" only,
+  which loses the iterate-in-the-chat the owner asked for.
+- **C15. Idea sessions and the live-agent limit** (§7.3). (a) They count
+  against host policy's `max_live_agents`, like any lane, and a start past it
+  is refused with the same words. (b) They do not count; the user closes them
+  by hand.
 
 ## 11. What I could not establish
 
@@ -1027,11 +1434,29 @@ right side (terminal, dock) is unchanged.
   app-owned serve's idle stop (it counts console connections, so a companion
   holds serve up; assumed harmless), full screen on its own Space, and the
   "hidden window defers retries" rule when only one window is hidden.
-- **Launching a Claude session that is not a place.** The launch, dot and chat
-  view are all keyed by place today (assumed from AGENTS.md's descriptions,
-  not read in code). Phase 6's first task is to find every place-shaped key.
+- **Phases 0 to 2 shipped.** What their real-app checks found (the
+  cross-window drag of §6.3, CodeMirror in WKWebView, the second page) is in
+  their PRs, #632 to #636; revision 4 did not re-read them, so the items
+  below about those phases are left as revision 3 wrote them.
+- **Every place-shaped key an idea session meets.** Read for revision 4: the
+  launcher (`ops::ai_launch_for` takes a `Project`), the agent rows
+  (`place(repo, slug)`), `AgentIo` (`(project, slug, lane)`), the chat's
+  target (`{repo, slug, path, session}`) and the dots (`sessions:busy`, by
+  cwd). Not read: `doctor`'s view of tmux sessions it cannot place, the
+  live-agent limit's counter, the MCP server's `list_places`, and the
+  audit's record shape for a row with no place. Phase S's first task is to
+  read those too.
+- **Whether the chat's prompt reader reads Claude's folder-trust prompt.**
+  Assumed not; "Open in terminal" covers it.
+- **Claude's `--session-id` with `--name` and the plugin dirs on one launch,**
+  and `--resume <id>` from the same cwd finding the transcript. Read in
+  `claude --help` (2.1.322), not run.
+- **How long Claude keeps a transcript.** Assumed it removes old ones after a
+  cleanup period; an ended conversation then has a record and no text.
 - **Whether worktrees' planning hooks reach a session launched outside a
-  place**, and how to keep them out of the ideas folder.
+  place**: checked for revision 4, they do not, as long as the idea launcher
+  does not go through `ai_launch_for` (§7.3). The user's own global plugins
+  still run.
 - **Moving a file to the Trash from serve**, including on Linux.
 - **Bear's exact rules** beyond what its pages say: which markers hide, when
   tables switch to source. The table in §4.2 is ours, not a copy of Bear's.
