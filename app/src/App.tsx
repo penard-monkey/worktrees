@@ -4345,7 +4345,7 @@ function App() {
   const [termVersion, setTermVersion] = useState(0);
   const [termFocus, setTermFocus] = useState(0);
   // The chat view (settings.chat_view, a preview): a stored `agent_view` wins;
-  // otherwise Claude/Codex start on Chat and pi/kimi on Terminal. Only this
+  // otherwise Claude/Codex/Kimi start on Chat and pi on Terminal. Only this
   // writes a choice. Gate the switch on `settingsReady`: before hydration the
   // default is only a guess, and its shallow stash would replace the whole
   // `place_panels` map.

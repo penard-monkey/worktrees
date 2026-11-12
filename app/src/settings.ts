@@ -100,8 +100,8 @@ export type PlacePanels = {
    *  and then spread that stale value back over the global. */
   files_diff?: boolean;
   /** The agent cell's Chat | Terminal choice for THIS place (the chat view,
-   *  `chat_view`). Absent uses the agent's default: Chat for Claude/Codex,
-   *  Terminal for pi/kimi.
+   *  `chat_view`). Absent uses the agent's default: Chat for Claude/Codex/Kimi,
+   *  Terminal for pi.
    *
    *  OPTIONAL, and unlike the two above it has NO global twin, and must never
    *  get one: a place you never switched uses its provider's default, never
@@ -171,7 +171,7 @@ export function panelsFor(s: Settings, key: string | null): Settings {
  *  this answer is kept while that is off. */
 export const agentViewFor = (s: Settings, key: string | null, provider: Harness): AgentView => {
   if (!key) return "terminal";
-  return s.place_panels?.[key]?.agent_view ?? (provider === "claude" || provider === "codex" ? "chat" : "terminal");
+  return s.place_panels?.[key]?.agent_view ?? (provider === "claude" || provider === "codex" || provider === "kimi" ? "chat" : "terminal");
 };
 
 /** `s` with THIS place's view set, and nothing else: no other place's record,

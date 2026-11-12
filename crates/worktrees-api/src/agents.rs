@@ -129,8 +129,8 @@ pub const ERR_NOT_BUSY: &str = "the agent is not working on a turn: there is not
 /// no key hints then, so whether a turn runs cannot be seen.
 pub const ERR_STOP_DRAFT: &str = "the agent's prompt has unsent text in it (someone is typing there), which hides whether a turn is running: stop it at the host";
 /// The head of `agent_interrupt`'s refusal for a harness it does not stop
-/// (pi, kimi), which names it after this.
-pub const ERR_STOP_UNSUPPORTED: &str = "agent_interrupt stops Claude's and Codex's turns;";
+/// (pi), which names it after this.
+pub const ERR_STOP_UNSUPPORTED: &str = "agent_interrupt stops Claude's, Codex's and Kimi's turns;";
 
 /// `agent_command` with a sensitive command from a caller without `admin`.
 pub const ERR_NEEDS_ADMIN: &str = "denied: this command is in the sensitive tier (account, permissions, settings, MCP, hooks, plugins, directories, or a file that runs a shell or grants tools), which needs the admin capability";
@@ -1357,7 +1357,7 @@ pub fn sweep_attachments_in(roots: &[String], now: std::time::SystemTime) -> usi
 /// reply streams, its rollout (`activity`, the nav dots' one derivation).
 /// Refused while a prompt is up (Esc would cancel it: answer it with
 /// `agent_answer`), while the composer holds someone's text (it hides the
-/// hints), on an idle agent (`ERR_NOT_BUSY`), and for pi and kimi. A key,
+/// hints), on an idle agent (`ERR_NOT_BUSY`), and for pi. A key,
 /// never text: `agent_send` stays the one path that types into Claude. It is
 /// `instruct` (drive-class), under the place's lock like an answer, and a
 /// device's stop is stamped like its send.
@@ -1392,6 +1392,7 @@ pub(crate) fn interrupt_at(ctx: &Ctx, at: &Locus) -> Result<Value, String> {
         match prompt::turn_shown(lane.harness, &screen) {
             Some(prompt::TurnShown::Running) => {}
             Some(prompt::TurnShown::Idle) if lane.harness == provider::CODEX.id && codex_busy(io, at, lane) => {}
+            Some(prompt::TurnShown::Idle) if lane.harness == provider::KIMI.id && kimi_busy(io, at, lane) => {}
             Some(prompt::TurnShown::Idle) => continue,
             Some(prompt::TurnShown::Drafted) => {
                 drafted = true;
@@ -1408,7 +1409,7 @@ pub(crate) fn interrupt_at(ctx: &Ctx, at: &Locus) -> Result<Value, String> {
     let Some((lane, screen)) = target else {
         if !stoppable {
             let label = harness::by_id(lanes[0].harness).map_or(lanes[0].harness, |a| a.provider().label);
-            return Err(format!("agent_interrupt stops Claude's and Codex's turns; {label}'s cannot be stopped from here yet"));
+            return Err(format!("{ERR_STOP_UNSUPPORTED} {label}'s cannot be stopped from here yet"));
         }
         // A screen with no composer whose agent waits is a prompt this host
         // cannot read: Esc would cancel it all the same.
@@ -1437,6 +1438,9 @@ pub(crate) fn interrupt_at(ctx: &Ctx, at: &Locus) -> Result<Value, String> {
             // Claude always draws its hint while a turn runs and the box is
             // empty, so an idle status row is the turn gone.
             Some(prompt::TurnShown::Idle) if lane.harness == provider::CLAUDE.id => true,
+            // kimi's log answers (its screen has no busy hint): the turn is
+            // stopped once the log no longer says busy.
+            Some(prompt::TurnShown::Idle) if lane.harness == provider::KIMI.id => i % 10 == 9 && !kimi_busy(io, at, &lane),
             // Codex hides its busy row while a reply streams: only its
             // rollout says the turn ended. Asked twice a second, not per poll.
             Some(prompt::TurnShown::Idle) => i % 10 == 9 && !codex_busy(io, at, &lane),
@@ -1453,15 +1457,24 @@ pub(crate) fn interrupt_at(ctx: &Ctx, at: &Locus) -> Result<Value, String> {
     Ok(v)
 }
 
-/// The harnesses `agent_interrupt` stops: the two whose busy screen it reads.
+/// The harnesses `agent_interrupt` stops: the two whose busy screen it reads,
+/// and kimi, whose wire log does (like Codex's rollout, through `activity`).
 fn stops(harness: &str) -> bool {
-    harness == provider::CLAUDE.id || harness == provider::CODEX.id
+    harness == provider::CLAUDE.id || harness == provider::CODEX.id || harness == provider::KIMI.id
 }
 
 /// The place's Codex in `lane` is mid-turn by its rollout.
 fn codex_busy(io: &dyn AgentIo, at: &Locus, lane: &Lane) -> bool {
     let a = io.activity(at);
     a.state == activity::State::Busy && a.provider == Some(provider::CODEX.id) && a.session.as_deref() == Some(lane.session.as_str())
+}
+
+/// The place's kimi in `lane` is mid-turn by its wire log (the derivation the
+/// dot and `place_status` read). The screen has no busy hint; the log is the
+/// truth, so an empty composer mid-turn reads Idle and this says busy.
+fn kimi_busy(io: &dyn AgentIo, at: &Locus, lane: &Lane) -> bool {
+    let a = io.activity(at);
+    a.state == activity::State::Busy && a.provider == Some(provider::KIMI.id) && a.session.as_deref() == Some(lane.session.as_str())
 }
 
 /// `agent_turns`: the last `n` turns (default [`DEFAULT_TURNS`], at most
@@ -1487,7 +1500,8 @@ pub(crate) fn turns_at(ctx: &Ctx, at: &Locus, session: Option<String>, n: Option
     let read: fn(&[String], usize) -> Vec<turns::Turn> = match lane.harness {
         h if h == provider::CLAUDE.id => turns::claude,
         h if h == provider::CODEX.id => turns::codex,
-        h => return Err(format!("agent_turns reads Claude's and Codex's transcripts; {h}'s is not read yet")),
+        h if h == provider::KIMI.id => turns::kimi,
+        h => return Err(format!("agent_turns reads Claude's, Codex's and Kimi's transcripts; {h}'s is not read yet")),
     };
     let lines = match io.transcript(at, &lane) {
         Ok(l) => l,
@@ -1527,6 +1541,7 @@ pub(crate) fn tool_call_at(ctx: &Ctx, at: &Locus, call_id: String) -> Result<Val
         let read: fn(&[String], &str) -> Option<turns::CallDetail> = match lane.harness {
             h if h == provider::CLAUDE.id => turns::claude_tool_call,
             h if h == provider::CODEX.id => turns::codex_tool_call,
+            h if h == provider::KIMI.id => turns::kimi_tool_call,
             _ => continue,
         };
         match io.transcript(at, &lane) {
@@ -1618,6 +1633,7 @@ pub(crate) fn turn_text_at(ctx: &Ctx, at: &Locus, turn_id: String) -> Result<Val
         let read: fn(&[String], &str) -> Option<turns::Turn> = match lane.harness {
             h if h == provider::CLAUDE.id => turns::claude_turn,
             h if h == provider::CODEX.id => turns::codex_turn,
+            h if h == provider::KIMI.id => turns::kimi_turn,
             _ => continue,
         };
         match io.transcript(at, &lane) {
@@ -1881,6 +1897,17 @@ impl AgentIo for Live {
             }
             h if h == provider::CODEX.id => {
                 codex::latest_rollout(&project.place_dir(slug)).ok_or("this place has no Codex rollout yet")?
+            }
+            h if h == provider::KIMI.id => {
+                // The place's own current session (created no earlier than the
+                // place — the rule resume and the dot read), never a dead
+                // lane's. None yet — nothing submitted — is an EMPTY
+                // transcript, not an error: the chat opens on an empty
+                // conversation.
+                match worktrees_core::kimi::current_session(&project.place_dir(slug)) {
+                    Some(s) => s.wire(),
+                    None => return Ok(Vec::new()),
+                }
             }
             h => return Err(format!("no transcript reader for {h}")),
         };
@@ -3541,6 +3568,15 @@ mod tests {
         assert_eq!(agent_tool_call(&ctx, repo, "lane".into(), "toolu_a".into()).unwrap_err(), ERR_GONE);
         let (ctx, repo) = setup("toolcallpi", Arc::new(Fake::with(vec![("pi", "repo-lane~agent~pi", pane(vec![], ""))])));
         assert_eq!(agent_tool_call(&ctx, repo, "lane".into(), "x".into()).unwrap_err(), ERR_GONE);
+
+        // kimi: an MCP call's structured input by its `toolCallId`; a call a
+        // person decided at its approval holds no input (gone with the step).
+        let mut kx = Fake::with(vec![("kimi", "repo-lane~agent~kimi", pane(vec![], ""))]);
+        kx.transcript = include_str!("../../worktrees-core/tests/fixtures/kimi-wire/2.2.0/transcript.jsonl").lines().map(str::to_string).collect();
+        let (kctx, krepo) = setup("toolcallkimi", Arc::new(kx));
+        let v = agent_tool_call(&kctx, krepo.clone(), "lane".into(), "tool_status".into()).unwrap();
+        assert_eq!((&v["tool"], &v["input"], &v["harness"]), (&json!("mcp__worktrees__place_status"), &json!({"slug": "probe"}), &json!("kimi")), "{v}");
+        assert_eq!(agent_tool_call(&kctx, krepo, "lane".into(), "tool_probe".into()).unwrap_err(), ERR_GONE, "an approved call is a permission step: no input");
     }
 
     /// The picture a Read was shown, by the call's id: the console gets it, a
@@ -3616,6 +3652,15 @@ mod tests {
         assert_eq!(agent_turn_text(&cctx, crepo, "lane".into(), "u-1".into()).unwrap_err(), ERR_GONE, "a Claude id is no Codex turn");
         let (ctx, repo) = setup("turntextnone", Arc::new(Fake::with(vec![])));
         assert_eq!(agent_turn_text(&ctx, repo, "lane".into(), "u-1".into()).unwrap_err(), ERR_GONE, "no agent, no turn");
+        // kimi's turn, by its prompt's `promptId`.
+        let mut kx = Fake::with(vec![("kimi", "repo-lane~agent~kimi", pane(vec![], ""))]);
+        kx.transcript = include_str!("../../worktrees-core/tests/fixtures/kimi-wire/2.2.0/transcript.jsonl").lines().map(str::to_string).collect();
+        let (kctx, krepo) = setup("turntextkimi", Arc::new(kx));
+        let v = agent_turns(&kctx, krepo.clone(), "lane".into(), None, None).unwrap();
+        assert_eq!(v["turns"][0]["id"], "msg_PROBE1");
+        let w = agent_turn_text(&kctx, krepo.clone(), "lane".into(), "msg_PROBE1".into()).unwrap();
+        assert_eq!((&w["harness"], &w["turn"]["user"]), (&json!("kimi"), &json!("Run the probe, apply the patch, then reply DONE.")));
+        assert_eq!(agent_turn_text(&kctx, krepo, "lane".into(), "t-1".into()).unwrap_err(), ERR_GONE, "a Codex id is no kimi turn");
         let (ctx, repo) = setup("turntextpi", Arc::new(Fake::with(vec![("pi", "repo-lane~agent~pi", pane(vec![], ""))])));
         assert_eq!(agent_turn_text(&ctx, repo, "lane".into(), "x".into()).unwrap_err(), ERR_GONE);
     }
@@ -3668,7 +3713,24 @@ mod tests {
         assert!(err.contains("no agent this place launched"), "{err}");
         let fake = Arc::new(Fake::with(vec![("pi", "repo-lane~agent~pi", pane(vec![""], ""))]));
         let (ctx, repo) = setup("turnspi", fake);
-        assert!(agent_turns(&ctx, repo, "lane".into(), None, None).unwrap_err().contains("not read yet"));
+        assert!(agent_turns(&ctx, repo, "lane".into(), None, None).unwrap_err().contains("not read yet"), "pi names itself after the prefix");
+
+        // kimi: the wire log's turns, the pane never read; a lane with no
+        // session yet (nothing submitted) answers an empty conversation.
+        let mut f = Fake::with(vec![("kimi", "repo-lane~agent~kimi", pane(vec![""], ""))]);
+        f.transcript = include_str!("../../worktrees-core/tests/fixtures/kimi-wire/2.2.0/transcript.jsonl").lines().map(str::to_string).collect();
+        let fake = Arc::new(f);
+        let (ctx, repo) = setup("turnskimi", fake);
+        let v = agent_turns(&ctx, repo.clone(), "lane".into(), None, None).unwrap();
+        assert_eq!((v["harness"].as_str(), v["session"].as_str()), (Some("kimi"), Some("repo-lane~agent~kimi")), "{v}");
+        assert_eq!(v["turns"].as_array().map(Vec::len), Some(5));
+        assert_eq!(v["turns"][0]["tools"], json!(["Bash", "Edit"]));
+        assert_eq!(v["turns"][0]["steps"][1]["kind"], "permission");
+        assert_eq!(v["turns"][1]["steps"][2]["failed"], json!(true));
+        assert!(!v.to_string().contains("MARKER"), "{v}");
+        let (ctx, repo) = setup("turnskimi-empty", Arc::new(Fake::with(vec![("kimi", "repo-lane~agent~kimi", pane(vec![""], ""))])));
+        let v = agent_turns(&ctx, repo, "lane".into(), None, None).unwrap();
+        assert_eq!(v["turns"].as_array().map(Vec::len), Some(0), "no session yet: an empty conversation, not an error");
     }
 
     /// A Claude whose session file worktrees cannot read is not one that has
@@ -3968,6 +4030,11 @@ mod tests {
             include_str!(concat!("../../worktrees-core/tests/fixtures/codex-inline/0.160.1/interrupt/", $name))
         };
     }
+    macro_rules! kimiscreen {
+        ($name:literal) => {
+            include_str!(concat!("../../worktrees-core/tests/fixtures/kimi-screen/2.2.0/", $name))
+        };
+    }
 
     /// A real Claude 2.1.316 mid-turn: ONE Escape, then the turn is seen to
     /// stop (its mark, its idle status row) — `interrupted: true`. A device's
@@ -3994,7 +4061,7 @@ mod tests {
     /// Claude's `Esc again to clear`; two open its rewind menu), a prompt up
     /// (Esc would cancel it), a draft that hides the hints, a screen with no
     /// composer (unless its agent waits: then a prompt this host cannot
-    /// read), pi and kimi, and a place with no agent.
+    /// read), pi, and a place with no agent.
     #[test]
     fn a_stop_is_refused_unless_a_turn_is_seen_running_and_presses_nothing() {
         let cases: Vec<(&str, &'static str, &'static str, bool, String)> = vec![
@@ -4011,7 +4078,10 @@ mod tests {
             ("capproval", "codex", codexstop!("busy-approval.txt"), false, ERR_PROMPT_UP.into()),
             ("cdraft", "codex", codexstop!("busy-draft.txt"), false, ERR_STOP_DRAFT.into()),
             ("pi", "pi", codexstop!("busy.txt"), false, format!("{ERR_STOP_UNSUPPORTED} pi's cannot be stopped from here yet")),
-            ("kimi", "kimi", codexstop!("busy.txt"), false, format!("{ERR_STOP_UNSUPPORTED} Kimi's cannot be stopped from here yet")),
+            ("kidle", "kimi", kimiscreen!("idle.txt"), false, ERR_NOT_BUSY.into()),
+            ("kqueue", "kimi", kimiscreen!("busy-queued.txt"), false, ERR_NOT_BUSY.into()),
+            ("kapproval", "kimi", kimiscreen!("approval.txt"), false, ERR_PROMPT_UP.into()),
+            ("kdraft", "kimi", kimiscreen!("busy-typed.txt"), false, ERR_STOP_DRAFT.into()),
         ];
         for (tag, harness, screen, waiting, want) in cases {
             let mut f = Fake::with(vec![(harness, "repo-lane", pane(vec![screen], stop316!("interrupted.e.txt")))]);
@@ -4082,6 +4152,28 @@ mod tests {
         *f.busy.lock().unwrap() = Some(("codex", "repo-other~agent~codex".into()));
         let fake = Arc::new(f);
         let (ctx, repo) = setup("stop-codex-other", fake.clone());
+        assert_eq!(agent_interrupt(&ctx, repo, "lane".into()), Err(ERR_NOT_BUSY.into()));
+        assert_eq!(fake.keys(), vec![]);
+    }
+
+    /// kimi 2.2.0: no busy hint on screen — the wire log is the witness both
+    /// ways. An empty composer while the log says busy is a running turn; one
+    /// Esc ends it (the log no longer busy); a log busy in ANOTHER session is
+    /// not this lane's.
+    #[test]
+    fn kimi_is_stopped_by_its_wire_log_with_an_empty_composer_screen() {
+        let f = Fake::with(vec![("kimi", "repo-lane~agent~kimi", pane(vec![kimiscreen!("idle.txt")], kimiscreen!("idle.txt")))]);
+        *f.busy.lock().unwrap() = Some(("kimi", "repo-lane~agent~kimi".into()));
+        let fake = Arc::new(f);
+        let (ctx, repo) = setup("stop-kimi", fake.clone());
+        let v = agent_interrupt(&ctx, repo, "lane".into()).unwrap();
+        assert_eq!((v["interrupted"].as_bool(), v["harness"].as_str()), (Some(true), Some("kimi")), "{v}");
+        assert_eq!(fake.keys(), vec![Key::Escape]);
+
+        let f = Fake::with(vec![("kimi", "repo-lane~agent~kimi", pane(vec![kimiscreen!("idle.txt")], kimiscreen!("idle.txt")))]);
+        *f.busy.lock().unwrap() = Some(("kimi", "repo-other~agent~kimi".into()));
+        let fake = Arc::new(f);
+        let (ctx, repo) = setup("stop-kimi-other", fake.clone());
         assert_eq!(agent_interrupt(&ctx, repo, "lane".into()), Err(ERR_NOT_BUSY.into()));
         assert_eq!(fake.keys(), vec![]);
     }
