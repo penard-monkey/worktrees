@@ -207,7 +207,7 @@ fn planning_for(p: &Project, ui: &mut dyn Ui, wt: &str, launch: &crate::profile:
 /// fail-closed launch. Without a CLI that has the hook (`pending::hook_bin`)
 /// it is left out, quietly: a prompt taller than its pane is then
 /// `readable: false`, as it was before the hook.
-fn prompt_hook_for(launch: &crate::profile::AiLaunch) -> Vec<String> {
+pub(crate) fn prompt_hook_for(launch: &crate::profile::AiLaunch) -> Vec<String> {
     let Some(adapter) = crate::harness::for_cmd(&launch.cmd).filter(|_| !launch.cmd.is_empty()) else {
         return Vec::new();
     };
@@ -324,6 +324,7 @@ fn ai_launch_inner(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> crat
                 model: None,
                 resume: false,
                 resume_id: None,
+                session_id: None,
                 force: false,
             }
         }
@@ -1360,10 +1361,15 @@ pub fn cmd_new(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     let mut ai = ai_launch_for(p, ui, &wt, &ai_cmd);
     (ai.model, ai.resume, ai.force) = (model, resume, force);
     ai.resume_id = resume_id;
+    let session = agent_session_name(&session, &ai.match_word);
     if brief.is_some() && !ai.cmd.is_empty() {
         ai.opener = Some(BRIEF_OPENER.to_string());
+    } else if already {
+        // A reused place without `--brief`: `open`'s rule, so the launch-anyway
+        // after a refused `new --brief` carries the opener that `new` would
+        // have passed (plan_opener's doc).
+        plan_opener(p, ui, &wt, &slug, &session, &mut ai, false, resume);
     }
-    let session = agent_session_name(&session, &ai.match_word);
     let rc = launch(p, ui, &wt, &session, pane1_install, &ai, do_attach, spare_shell);
     if rc != 0 {
         rc
@@ -1668,14 +1674,36 @@ pub fn open_place(p: &Project, ui: &mut dyn Ui, req: &OpenRequest) -> i32 {
     // Where the harness HAS run, the opener is not re-sent — and that is said,
     // because a brief rewritten in place reads as the plan on every surface
     // while the agent starts blank (four lanes, one idle hour).
+    plan_opener(p, ui, &wt, &slug, &session, &mut ai, req.brief.is_some(), resume);
+    launch(p, ui, &wt, &session, "", &ai, req.attach, req.spare)
+}
+
+/// [`opener_plan`] for a launch into an EXISTING place, applied to `ai`: the
+/// opener set, or the re-brief warning said. `open` calls it, and so does a
+/// `new` that reuses a place without `--brief` — which is how the MCP
+/// `create_worktree` retry after a refused launch arrives, the retry its own
+/// refusal prescribes. That `new` passed the opener only with `--brief`, so
+/// the forced retry started Claude blank on a brief it had just written
+/// (2026-11-05, `feat-chat-full-reply`).
+#[allow(clippy::too_many_arguments)]
+fn plan_opener(
+    p: &Project,
+    ui: &mut dyn Ui,
+    wt: &str,
+    slug: &str,
+    session: &str,
+    ai: &mut crate::profile::AiLaunch,
+    rebrief: bool,
+    resume: bool,
+) {
     let adapter = crate::harness::by_word(&ai.match_word);
     let plan = opener_plan(
-        req.brief.is_some(),
+        rebrief,
         resume,
         adapter.is_some() && !ai.cmd.is_empty(),
-        Path::new(&wt).join(BRIEF_PATH).is_file(),
-        || session_to_reuse(p, &wt, &session, &ai.match_word).is_some(),
-        || adapter.is_some_and(|a| a.never_launched(p, &slug)),
+        Path::new(wt).join(BRIEF_PATH).is_file(),
+        || session_to_reuse(p, wt, session, &ai.match_word).is_some(),
+        || adapter.is_some_and(|a| a.never_launched(p, slug)),
     );
     match plan {
         OpenerPlan::Send => ai.opener = Some(BRIEF_OPENER.to_string()),
@@ -1686,7 +1714,6 @@ pub fn open_place(p: &Project, ui: &mut dyn Ui, req: &OpenRequest) -> i32 {
         )),
         OpenerPlan::Skip => {}
     }
-    launch(p, ui, &wt, &session, "", &ai, req.attach, req.spare)
 }
 
 /// `--model` is data for a harness's `model_arg`: it must pass

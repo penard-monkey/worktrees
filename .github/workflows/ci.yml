@@ -12,7 +12,10 @@ name: ci
 # rely on).
 on:
   push:
-    branches: [main]
+    # staging: the integration branch for working-model PRs (app/scripts/
+    # staging.sh follows it). A merge into it gets a run; nothing is released
+    # from it, so release.yml and publish.yml do not name it.
+    branches: [main, staging]
     paths-ignore:
       - 'docs/**'
       - 'ROADMAP.md'

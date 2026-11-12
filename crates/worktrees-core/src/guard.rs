@@ -795,6 +795,34 @@ mod tests {
         }
     }
 
+    /// C15 (idea sessions, phase S): an idea conversation is a Claude in its
+    /// own tmux session, `worktrees~idea~<conv>`, which is no place's. It
+    /// counts against `max_live_agents` like a lane — once, by its session,
+    /// with its probe vouching for it — and a start past the cap gets a lane's
+    /// words. Measured: the counter needed nothing new; `~idea~` is neither a
+    /// dock shell nor a provider sidecar, so `agent_sessions` takes it.
+    #[test]
+    fn an_idea_session_counts_against_the_cap_like_a_lane() {
+        let idea = crate::ideasessions::session_name("01JCB2Z4K3M9QX2T7VBN5R6WYH");
+        for cmd in ["claude", "2.1.322"] {
+            let panes = crate::tmux::PaneList::from_panes(vec![
+                crate::tmux::Pane { session: "repo-a".into(), path: "/r/a".into(), cmd: "claude".into(), id: Some("%1".into()), ..crate::tmux::Pane::default() },
+                crate::tmux::Pane { session: idea.clone(), path: "/ideas".into(), cmd: cmd.into(), id: Some("%2".into()), ..crate::tmux::Pane::default() },
+            ]);
+            let mut probes: Vec<crate::agent::ClaudeProbe> =
+                vec![serde_json::from_value(serde_json::json!({"pid": 10, "cwd": "/ideas", "status": "busy", "tmux": format!("{idea}:@2.%2")})).unwrap()];
+            crate::agent::locate(&mut probes, &panes);
+            let live = live_agents(Some(&panes), &probes, &[]);
+            let labels: Vec<&str> = live.iter().map(|l| l.label.as_str()).collect();
+            assert_eq!(labels, ["repo-a", idea.as_str()], "{cmd}");
+            let why = decide(Some("claude"), &live, &Memory::default(), &lim(Some(2)), "HOW").unwrap();
+            assert!(why.starts_with("2 agents are already live on this machine (limit 2, `[limits] max_live_agents`)"), "{why}");
+            assert!(why.contains(&idea), "{why}");
+            // Excluded as the session a launch would reuse, it does not count.
+            assert_eq!(live_agents(Some(&panes), &probes, std::slice::from_ref(&idea)).len(), 1);
+        }
+    }
+
     /// Review of #486, B1: `node` is claude only where something says so. A
     /// bare `node` session (a bundler, a dev server) with no claude probe
     /// naming it is not an agent; one a probe names is, once.

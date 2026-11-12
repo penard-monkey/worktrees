@@ -15,7 +15,9 @@ are all pinned by fixtures to one version:
 
 | Fixture | Version | Where |
 |---|---|---|
-| `pi --list-models` table | 0.99.1 | `crates/worktrees-core/tests/fixtures/pi-models/` |
+| `pi --list-models` table | 0.99.1, and 1.5.0 beside it | `crates/worktrees-core/tests/fixtures/pi-models/` |
+| models.json with `//` comments and trailing commas (pi accepts it); pi's load-error stderr | 1.5.0 | `…/fixtures/pi-models/` |
+| the model-hosts extension (`-e`, `registerProvider`) | 1.5.0 live, 1.3.0 `--list-models` | `crates/worktrees-core/src/pihosts_ext.js`, `app/scripts/pi-models-ext-check.mjs` |
 | session JSONL (`message`, `context_edit` + `targetId`, `model_change`) | 0.99.1 live (`pi-session/0.99.1/`), 0.87.1 kept beside it | `…/fixtures/pi-session/` |
 | TUI screens (Working, Retrying, trust modal, done, Esc) | 0.99.1 live (`pi-screen/0.99.1/`), 0.87.1 kept beside it | `…/fixtures/pi-screen/` |
 | `send` screens (typed inline, submitted, `Steering:` queue) | 0.99.1 live | `…/fixtures/pi-send/0.99.1/` |
@@ -224,6 +226,31 @@ cat $PI_CODING_AGENT_DIR/mcp.json
 - [ ] `wt close feat -y && wt open feat --ai pi -r --no-attach`: the command
       carries `--session-id <that session's uuid>` and no `--model`, and pi
       reopens that conversation.
+
+## 12. worktrees' model hosts (docs/proposals/pi-models-config.md)
+
+Run against a scratch `PI_CODING_AGENT_DIR` AND a scratch `XDG_CONFIG_HOME`:
+the hosts file is `$XDG_CONFIG_HOME/worktrees/pi-models.json`.
+
+- [ ] Settings → pi → Models: add a host (`http://127.0.0.1:1234/v1`) and
+      declare a model it serves. `worktrees doctor --pi` and the new-place
+      model picker both list it, ready.
+- [ ] Launch a lane on it: the pane's command starts `pi -e '<…>/worktrees-models.js'`,
+      and pi's footer names the model.
+- [ ] Close and reopen the lane (a resume): still on that model.
+- [ ] **The trap, on purpose:** in a plain shell, `pi --session-id <that id>`
+      without `-e` starts on ANOTHER model with no warning. This is expected
+      (pi started by hand never sees worktrees' hosts), and the page says so.
+- [ ] "Override in worktrees" on a host of pi's own config: its models are
+      copied, `pi -e … --list-models` lists them, and the host still
+      authenticates with pi's key (none was copied). "Remove override" brings
+      pi's own list back.
+- [ ] A running pi lane does not see a change until it is restarted.
+- [ ] Break the hosts file by hand (`{`): the page says worktrees cannot use
+      it, and pi still starts with its own hosts.
+
+Last run: 2026-11-09, pi 1.5.0, on the extension and `--list-models` by
+hand (no LM Studio server was up, so no lane reached a model).
 
 ## Afterwards
 

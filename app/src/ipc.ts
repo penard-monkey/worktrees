@@ -28,7 +28,7 @@
 import { Channel as TauriChannel, invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen as tauriListen } from "@tauri-apps/api/event";
 import type { Event, EventCallback, UnlistenFn } from "@tauri-apps/api/event";
-import { retrier, type Outcome, type RetryEnv, type RetryView, type Try } from "./reconnect";
+import { retrier, type Outcome, type RetryEnv, type RetryPolicy, type RetryView, type Try } from "./reconnect";
 
 export type { Event, EventCallback, UnlistenFn } from "@tauri-apps/api/event";
 
@@ -136,7 +136,9 @@ export const CLIENT_LOCAL: readonly string[] = [
 
 /** The shim's own commands: not serve rows at all, and never to become ones.
  *  `engine_connect` finds or starts serve and is the ONLY way its token reaches
- *  the page; `raise_window` brings the window forward for `app:open-doc`. The
+ *  the page; `raise_window` brings the main window forward for `app:open-doc`;
+ *  `open_companion` opens (or raises) the Ideas companion window, and
+ *  `close_companion` closes it when the Ideas beta is turned off. The
  *  `remote_*` ones are the remote door's (src-tauri/src/remote.rs): the hosts
  *  this machine is paired with, pairing, the choice of engine, following a
  *  host that moved (its address code), the pinned pipe to a paired host
@@ -144,6 +146,8 @@ export const CLIENT_LOCAL: readonly string[] = [
 export const SHIM_COMMANDS: readonly string[] = [
   "engine_connect",
   "raise_window",
+  "open_companion",
+  "close_companion",
   "remote_hosts",
   "remote_choose",
   "remote_forget",
@@ -287,7 +291,7 @@ export type EngineDoor = Door & { connect(): Promise<void>; visibility(): void }
  *  When the socket dies the door retries on its own (`reconnect.ts` holds when,
  *  and whether a try may start a serve); `reconnectEngine()` tries at once.
  *  `env.now` also ages the one-shot events kept for a late listener. */
-export function engineDoor(local: Door | null, dial: Dial, env: RetryEnv): EngineDoor {
+export function engineDoor(local: Door | null, dial: Dial, env: RetryEnv, policy: RetryPolicy = {}): EngineDoor {
   // Nothing reaches the page until the first connect succeeds: the gate in
   // main.tsx mounts the app at gen 1, never against a dead engine.
   setEngine({ kind: "starting", gen: 0, phase: null, manual: false, reason: null });
@@ -404,7 +408,7 @@ export function engineDoor(local: Door | null, dial: Dial, env: RetryEnv): Engin
     else if (v.kind === "waiting") setEngine({ kind: "waiting", gen, reason: v.reason, at: v.at, notOurs: v.notOurs });
     else if (v.kind === "hidden") setEngine({ kind: "hidden", gen, reason: v.reason, notOurs: v.notOurs });
     else setEngine({ kind: "down", gen, reason: v.reason });
-  });
+  }, policy);
   reconnector = retries.now;
 
   return {
@@ -474,13 +478,20 @@ export const ADMIN_ROWS: readonly string[] = [
 export const CONSOLE_ROWS: readonly string[] = [
   "set_cross_project", "set_project_private", "apply_policy_preset", "update_cli", "mcp_install", "codex_mcp_install",
   "pi_mcp_install", "kimi_mcp_set", "codex_mcp_migrate", "agent_link_skills", "set_codex_permissions",
-  "set_agent_guidance", "set_agent_guidance_skill", "agent_guidance_merge", "set_pi_trust", "set_pi_allowed",
+  "set_agent_guidance", "set_agent_guidance_skill", "agent_guidance_merge", "set_pi_trust", "set_pi_allowed", "pi_host_edit",
   "set_kimi_allowed", "sync_batch_preview", "sync_batch_apply", "ui_events_append", "save_profile", "set_project_profile", "set_default_profile",
   "skill_install_local", "skill_install_git", "device_set_scope", "device_disable", "device_enable",
   "device_set_expiry", "device_set_stepup", "devices_revoke_all_others", "pair_begin", "pair_decide",
   "pair_cancel", "pair_status", "identity_rotate", "set_slot_capacity", "remote_enable", "remote_disable",
   "remote_status", "remote_advertise", "remote_candidates", "device_rename",
   "push_key_import", "push_key_remove", "push_status", "push_dry_run", "push_allow_security",
+  "ideas_list", "idea_read", "idea_create", "idea_write", "idea_rename", "idea_remove", "idea_adopt",
+  "idea_conversations", "idea_conversation_start", "idea_conversation_resume", "idea_conversation_close",
+  "idea_conversation_remove", "idea_conversation_rename", "idea_turns", "idea_turn_text", "idea_tool_call",
+  "idea_prompt", "idea_answer", "idea_answer_text", "idea_answer_many", "idea_send", "idea_interrupt",
+  // named workspaces (idea board phase 2): desktop only
+  "workspaces_list", "workspace_create", "workspace_rename", "workspace_remove", "workspace_set_projects",
+  "workspace_reorder",
 ];
 
 /** The device's capabilities on the host this window drives, from the remote

@@ -77,10 +77,10 @@ impl ScriptedAgent {
 }
 
 impl worktrees_api::agents::AgentIo for ScriptedAgent {
-    fn lanes(&self, _: &worktrees_core::Project, _: &str) -> Vec<worktrees_api::agents::Lane> {
+    fn lanes(&self, _: &worktrees_api::agents::Locus) -> Vec<worktrees_api::agents::Lane> {
         vec![worktrees_api::agents::Lane { harness: "claude", session: self.session.clone(), pane: "%1".into() }]
     }
-    fn activity(&self, _: &worktrees_core::Project, _: &str) -> worktrees_core::activity::Activity {
+    fn activity(&self, _: &worktrees_api::agents::Locus) -> worktrees_core::activity::Activity {
         worktrees_core::activity::Activity::none()
     }
     fn capture(&self, _: &worktrees_api::agents::Lane) -> Option<String> {
@@ -103,15 +103,14 @@ impl worktrees_api::agents::AgentIo for ScriptedAgent {
     }
     fn deliver(
         &self,
-        _: &worktrees_core::Project,
-        _: &str,
+        _: &worktrees_api::agents::Locus,
         _: &worktrees_api::agents::Lane,
         text: &str,
     ) -> Result<worktrees_core::harness::SendOutcome, String> {
         self.sent.lock().unwrap().push(text.to_string());
         Ok(self.outcome.lock().unwrap().clone().unwrap_or(worktrees_core::harness::SendOutcome::Submitted))
     }
-    fn transcript(&self, _: &worktrees_core::Project, _: &str, _: &worktrees_api::agents::Lane) -> Result<Vec<String>, String> {
+    fn transcript(&self, _: &worktrees_api::agents::Locus, _: &worktrees_api::agents::Lane) -> Result<Vec<String>, String> {
         let t = include_str!("../../../worktrees-core/tests/fixtures/transcripts/claude-2.1.309.jsonl");
         Ok(t.lines().map(str::to_string).collect())
     }
@@ -125,11 +124,14 @@ impl worktrees_api::agents::AgentIo for ScriptedAgent {
     fn codex_models(&self) -> Vec<(String, usize)> {
         Vec::new()
     }
-    fn commands_of(&self, _: &worktrees_core::Project, _: &str, _: &worktrees_api::agents::Lane) -> (Option<String>, Vec<worktrees_core::slash::Command>) {
+    fn commands_of(&self, _: &worktrees_api::agents::Locus, _: &worktrees_api::agents::Lane) -> (Option<String>, Vec<worktrees_core::slash::Command>) {
         (None, Vec::new())
     }
     fn command(&self, _: &worktrees_api::agents::Lane, _: &str, _: &str) -> Result<worktrees_core::harness::SendOutcome, String> {
         Err("scripted agents run no commands".into())
+    }
+    fn terminal_activity(&self, _: &worktrees_api::agents::Lane) -> Result<u64, String> {
+        Err("scripted agents have no tmux session".into())
     }
     fn sleep(&self, _: u64) {}
 }
@@ -4422,4 +4424,27 @@ fn a_test_serve_cannot_write_the_users_project_registry() {
     assert!(!listed, "the scratch repo landed in the real registry: {r}");
     let e = r["err"].as_str().unwrap_or_default();
     assert!(e.contains("real project registry"), "the refusal says why: {r}");
+}
+
+/// **Nor the user's real `workspaces.json`** (idea board phase 2). It sits
+/// beside the registry, outside any config dir a test hands serve, so the same
+/// process-wide guard covers it (`workspaces::edit_at` asks
+/// `registry::real_writes_forbidden`). Shown red under a temp `HOME` only.
+#[test]
+fn a_test_serve_cannot_write_the_users_workspaces() {
+    let l = live("realws");
+    let mut ws = client(&l);
+    let name = format!("wt-test-{}", std::process::id());
+    let r = rpc(&mut ws, json!(1), "workspace_create", json!({ "name": name }));
+    let real = worktrees_core::workspaces::read().unwrap_or_default();
+    let landed: Vec<String> = real.workspaces.iter().filter(|w| w.name == name).map(|w| w.id.clone()).collect();
+    for id in &landed {
+        // Never leave it behind, whatever the assertions below say. (This
+        // write is refused too while the guard holds; it runs only when the
+        // guard failed, and the guard is what failed.)
+        let _ = worktrees_core::workspaces::remove(id);
+    }
+    assert!(landed.is_empty(), "the workspace landed in the real workspaces.json: {r}");
+    let e = r["err"].as_str().unwrap_or_default();
+    assert!(e.contains("real workspaces.json"), "the refusal says why: {r}");
 }

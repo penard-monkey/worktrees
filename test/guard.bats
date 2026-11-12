@@ -43,6 +43,46 @@ memory_fixture() {
   tmux_session_exists repo-feat-g
 }
 
+OPENER="Read .planning/brief.md and begin."
+
+# What `claude_session_present` reads: a transcript under claude's project dir,
+# for both spellings of the worktree path (open.bats has the same helper).
+claude_has_run() {
+  local d m
+  for d in "$REPO/.worktrees/$1" "$(cd "$REPO/.worktrees/$1" && pwd -P)"; do
+    m="$(printf '%s' "$d" | sed 's/[^A-Za-z0-9]/-/g')"
+    mkdir -p "$HOME/.claude/projects/$m" && : > "$HOME/.claude/projects/$m/s.jsonl"
+  done
+}
+
+# The MCP `create_worktree` retry the refusal prescribes is `new <branch>
+# --force` with no brief: it reuses the place and must start the agent on the
+# brief the refused `new --brief` wrote (2026-11-05: it started Claude blank).
+@test "guard: a refused new --brief, retried as new --force, opens the agent on the brief" {
+  limits 'max_live_agents = 1'
+  plant other-a
+  export WORKTREES_AI_CMD=claude
+  run_wt new feat-rb --brief 'do x' --no-attach
+  [ "$status" -eq 5 ]
+  [ -f "$REPO/.worktrees/feat-rb/.planning/brief.md" ]
+  ! tmux_session_exists repo-feat-rb || false
+  run_wt new feat-rb --force --no-attach
+  [ "$status" -eq 0 ]
+  grep -qF -- "$OPENER" <<<"$(tmux_pane0_cmd repo-feat-rb)"
+  ! grep -qF "won't be told" <<<"$output" || false
+}
+
+@test "guard: new on a briefed place where claude HAS run sends no opener, and says so" {
+  export WORKTREES_AI_CMD=claude
+  run_wt new feat-ran --brief 'do x' --no-tmux
+  [ "$status" -eq 0 ]
+  claude_has_run feat-ran
+  run_wt new feat-ran --no-attach
+  [ "$status" -eq 0 ]
+  ! grep -qF -- "$OPENER" <<<"$(tmux_pane0_cmd repo-feat-ran)" || false
+  grep -qF "this place has a brief (.planning/brief.md), but claude has run here before, so it won't be told to read it" <<<"$output"
+}
+
 @test "guard: below the cap launches, and shells and editors are not agents" {
   limits 'max_live_agents = 2'
   plant other-a; plant notes vim; plant build bash; plant dev node

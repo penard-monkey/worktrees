@@ -40,6 +40,10 @@ import { convertPhoto, jpegName, photoDecision, photoKind, INPUT_MAX } from "./c
 
 /** `turns::Turn`. `user: null` when the window starts inside the turn. */
 export type Turn = {
+  /** The turn's own id (`turns::Turn::id`), the same on every read: what
+   *  `agent_turn_text` is asked by. Absent from an older host, and from a
+   *  turn the host has no id for. */
+  id?: string;
   at: number | null; user: string | null; reply: string; tools: string[]; truncated: boolean;
   /** Claude's own entry, never the person's message. Older hosts omit it. */
   notice?: Notice;
@@ -66,7 +70,9 @@ export type AskedQuestion = { header: string; question: string; multi: boolean; 
 export type QuestionAnswer = { question: string; picked: string[]; typed?: string; note?: string };
 export type AskedStep = Extract<Step, { kind: "question" | "permission" | "plan" }>;
 /** `agent_turns`' answer; `reason` only when no agent is running. */
-export type AgentTurns = { harness?: string; session?: string; turns: Turn[]; more: boolean; note: string; reason?: string };
+/** `ended`: an idea conversation read from its transcript with no session
+ *  running (phase S), read-only. */
+export type AgentTurns = { harness?: string; session?: string; turns: Turn[]; more: boolean; note: string; reason?: string; ended?: boolean };
 /** `prompt::Choice`. `checked` marks a multi-select's box; `text` a choice
  *  that takes free text: `field` IS a text field, `amend` takes an optional
  *  note. `host_only: "text"` on a field means it is empty. `preview` is what
@@ -138,6 +144,18 @@ export type AgentAttached = { path: string; bytes: number; sha256: string; kind:
 /** `agent_tool_call`'s answer (`turns::CallDetail`): `input` is a string for a
  *  command and always once `truncated`; `bytes` is its whole length as text. */
 export type AgentToolCall = { tool: string; input: unknown; truncated: boolean; bytes: number; call_id: string; harness: string; session: string; note: string };
+/** `agent_turn_text`'s answer: `turn` is the turn whole, its words in `steps`
+ *  (`reply` is empty), cut only past the host's own much larger cap. */
+export type AgentTurnText = { turn_id: string; turn: Turn; harness: string; session: string; note: string };
+/** One shortened turn, as far as this window has asked for it. Only a click
+ *  asks. `done` is the whole turn, shown in place of the short one by its id;
+ *  `gone` says the host no longer reads it (it is in the terminal); a host
+ *  without the row is `ChatView.fullOff`'s, for every bubble at once. */
+export type FullRead =
+  | { state: "loading" }
+  | { state: "done"; turn: Turn }
+  | { state: "gone" }
+  | { state: "failed"; words: string };
 /** One call's input, as far as this window has asked for it. */
 export type CallRead =
   | { state: "loading" }
@@ -421,14 +439,32 @@ export type ToolCall = { name: string; call_id?: string; summary?: string; faile
 export type Item =
   | { k: "sep"; key: string; at: number }
   | { k: "earlier"; key: string }
-  | { k: "user"; key: string; text: string; at: number | null; midTurn?: boolean }
+  | { k: "user"; key: string; text: string; at: number | null; midTurn?: boolean; cut?: true; turnId?: string }
   | { k: "notice"; key: string; notice: Notice; at: number | null }
-  | { k: "reply"; key: string; text: string; tools: string[]; calls: ToolCall[]; truncated: boolean; at: number | null; label: boolean }
+  | { k: "reply"; key: string; text: string; tools: string[]; calls: ToolCall[]; truncated: boolean; at: number | null; label: boolean; turnId?: string }
   | { k: "asked"; key: string; step: AskedStep; label: boolean }
   | { k: "answer"; key: string; step: AskedStep }
   | { k: "answered"; key: string; a: Answered }
   | { k: "pending"; key: string; p: Pending; caughtUp: boolean };
 
+/** The host cut this turn's reply, as far as the turn can say. A reply's
+ *  `text` steps share `HOST_TEXT_MAX`: a cut one ends in the ellipsis, one that
+ *  used the budget exactly has the later ones dropped without a mark, so a
+ *  turn whose kept words reach the cap may have lost more. A turn with no steps
+ *  is its `reply`, cut by `clip_to` the same way. */
+const replyCut = (t: Turn) => {
+  if (!t.truncated) return false;
+  if (!t.steps?.length) return [...t.reply].length > HOST_TEXT_MAX && t.reply.endsWith("…");
+  const texts = t.steps.filter((s) => s.kind === "text") as Extract<Step, { kind: "text" }>[];
+  return texts.reduce((n, s) => n + [...s.text].length, 0) >= HOST_TEXT_MAX;
+};
+/** What the user's bubble says is cut, and the reply's note is for: a turn
+ *  `truncated` only because of its prompt leaves a whole reply alone. A cut
+ *  nothing here accounts for (a long plan, a question's text) stays the reply's. */
+const replyShort = (t: Turn) => t.truncated && (!userCut(t) || replyCut(t));
+/** The host cut this turn's prompt (`clip_to`: the cap's characters and an
+ *  ellipsis). */
+const userCut = (t: Turn) => t.truncated && !t.notice && t.user !== null && t.user.endsWith("…") && [...t.user].length === HOST_TEXT_MAX + 1;
 const GAP_S = 5 * 60;
 const sameDay = (a: number, b: number) => new Date(a * 1000).toDateString() === new Date(b * 1000).toDateString();
 
@@ -446,7 +482,12 @@ const sameDay = (a: number, b: number) => new Date(a * 1000).toDateString() === 
  *  the browser's scroll anchoring held a row that now said something else
  *  (docs/proposals/chat-session-view.md §7). A second thing at the same
  *  second gets `~1`, `~2`. */
-export function itemsOf(turns: Turn[], answered: Answered[], pending: Pending[], busy = false): Item[] {
+export function itemsOf(shortTurns: Turn[], answered: Answered[], pending: Pending[], busy = false, full: Record<string, FullRead> = {}): Item[] {
+  // A turn asked for whole is drawn from what the host gave, by its id, so a
+  // re-read of the short turns never snaps it back; the ids still offered a
+  // button are the turns not read whole yet.
+  const turns = shortTurns.map((t) => { const f = t.id ? full[t.id] : undefined; return f?.state === "done" ? { ...f.turn, id: t.id } : t; });
+  const offer = (t: Turn) => (t.id && t.truncated && full[t.id]?.state !== "done" ? t.id : undefined);
   const out: Item[] = [];
   const taken = new Map<string, number>();
   const idOf = (base: string) => {
@@ -478,12 +519,12 @@ export function itemsOf(turns: Turn[], answered: Answered[], pending: Pending[],
       lastWasAgent = t.notice.kind === "peer_message";
     } else if (t.user === null) out.push({ k: "earlier", key: `e${i}` });
     else {
-      out.push({ k: "user", key: `u${i}`, text: t.user, at: t.at });
+      out.push({ k: "user", key: `u${i}`, text: t.user, at: t.at, ...(userCut(t) ? { cut: true as const, ...(offer(t) ? { turnId: offer(t) } : {}) } : {}) });
       lastWasAgent = false;
     }
     if (!t.steps?.length) {
-      if (t.reply || t.tools.length || t.truncated) {
-        out.push({ k: "reply", key: `r${i}`, text: t.reply, tools: t.tools, calls: t.tools.map((name) => ({ name })), truncated: t.truncated, at: t.at, label: !lastWasAgent });
+      if (t.reply || t.tools.length || replyShort(t)) {
+        out.push({ k: "reply", key: `r${i}`, text: t.reply, tools: t.tools, calls: t.tools.map((name) => ({ name })), truncated: replyShort(t), at: t.at, label: !lastWasAgent, ...(replyShort(t) && offer(t) ? { turnId: offer(t) } : {}) });
         lastWasAgent = true;
       }
       return;
@@ -524,9 +565,12 @@ export function itemsOf(turns: Turn[], answered: Answered[], pending: Pending[],
       out.push({ k: "answer", key: `a${key}`, step: st });
       lastWasAgent = false;
     });
-    if (t.truncated) {
+    if (replyShort(t)) {
       const last = [...out].reverse().find((it) => it.k === "reply") as Extract<Item, { k: "reply" }> | undefined;
-      if (last) last.truncated = true;
+      if (last) {
+        last.truncated = true;
+        if (offer(t)) last.turnId = offer(t);
+      }
     }
   });
   flushAnswered(null);
@@ -1101,7 +1145,24 @@ export function announcement(b: Bundle, agent: string, promptNow: string | null,
 
 // ── the store: one view per place, keyed by its path ────────────────────────
 
-export type Target = { repo: string; slug: string; path: string; session: string };
+/** Whom a chat talks to: a place's agent (`agent_*` rows, by `repo` and
+ *  `slug`), or, with `idea`, an idea conversation (phase S): the `idea_*`
+ *  console rows, by the idea's id and the conversation's. An idea target's
+ *  `path` is only the view's key (`ideaChatKey`), never a folder, and its
+ *  `repo`/`slug` are empty. No slash commands and no attachments reach an
+ *  idea conversation. */
+export type Target = { repo: string; slug: string; path: string; session: string; idea?: IdeaConv };
+export type IdeaConv = { id: string; conv: string };
+
+/** The chat-view key of an idea conversation: no place's path starts so. */
+export function ideaChatKey(c: IdeaConv): string {
+  return `idea:${c.id}:${c.conv}`;
+}
+
+/** An idea conversation's row arguments: the idea and the conversation. */
+function ideaArgs(t: Target): IdeaConv {
+  return { id: t.idea!.id, conv: t.idea!.conv };
+}
 type Load<T> = { data: T | null; error: string | null; loading: boolean; at: number | null };
 
 export type ChatView = {
@@ -1149,6 +1210,12 @@ export type ChatView = {
    *  about each it was asked for. Only a click opens one, and it stays open
    *  through every re-read. */
   calls: { open: Record<string, true>; read: Record<string, CallRead> };
+  /** The turns a person asked to read whole, by their ids (`showFull`). A
+   *  `done` one is drawn instead of the short turn through every re-read. */
+  full: Record<string, FullRead>;
+  /** Words when this host has no `agent_turn_text`: no bubble offers the
+   *  button, and each says what it did before. The host's, so every place's. */
+  fullOff: string | null;
   /** Words when this host has no `agent_attach` (an older one): the
    *  paperclip is off, with them as its reason. The host's, so every place's. */
   attachOff: string | null;
@@ -1157,19 +1224,25 @@ export type ChatView = {
   commands: Load<AgentCommands>;
   /** Commands run from here whose output only their answer carried. */
   ran: Ran[];
+  /** Reads in a row that failed only because the place's Claude has written
+   *  no session file yet (`START_REREAD_MS`); 0 after any other answer. */
+  startMisses: number;
 };
 
 /** Set once a host answers `unknown command: agent_attach`. */
 let attachOff: string | null = null;
+/** Set once a host answers `unknown command: agent_turn_text`. */
+let fullOff: string | null = null;
 const blank = (): ChatView => ({
   turns: { data: null, error: null, loading: false, at: null },
   prompt: { data: null, error: null, loading: false, at: null },
   pending: [], answered: [], draft: "", insert: null, sending: false, sendWords: null, sentLine: null, followUp: null,
   selected: null, answerText: "", ticks: null, boxText: "", answering: false, answerWords: null,
   stopping: false, stopWords: null, stopped: false,
-  calls: { open: {}, read: {} },
+  calls: { open: {}, read: {} }, full: {}, fullOff,
   attachments: [], attachWords: null, attachOff,
   commands: { data: null, error: null, loading: false, at: null }, ran: [],
+  startMisses: 0,
 });
 const EMPTY = blank();
 let views = new Map<string, ChatView>();
@@ -1177,7 +1250,7 @@ const subs = new Set<() => void>();
 /** EMPTY once the host is known to lack `agent_attach`: one object, as
  *  `useSyncExternalStore` needs the same snapshot until something changes. */
 let emptyOff: ChatView | null = null;
-const viewOf = (path: string) => views.get(path) ?? (attachOff ? (emptyOff ??= { ...EMPTY, attachOff }) : EMPTY);
+const viewOf = (path: string) => views.get(path) ?? (attachOff || fullOff ? (emptyOff ??= { ...EMPTY, attachOff, fullOff }) : EMPTY);
 function put(path: string, patch: Partial<ChatView>) {
   views = new Map(views).set(path, { ...viewOf(path), ...patch });
   for (const f of [...subs]) f();
@@ -1205,14 +1278,75 @@ export function loadTurns(t: Target): Promise<void> {
   return once(`t|${t.path}`, async () => {
     put(t.path, { turns: { ...viewOf(t.path).turns, loading: true } });
     try {
-      const r = await invoke<AgentTurns>("agent_turns", { repo: t.repo, slug: t.slug, session: t.session, n: TURNS_MAX });
+      const r = t.idea
+        ? await invoke<AgentTurns>("idea_turns", { ...ideaArgs(t), n: TURNS_MAX })
+        : await invoke<AgentTurns>("agent_turns", { repo: t.repo, slug: t.slug, session: t.session, n: TURNS_MAX });
       const cur = viewOf(t.path);
       put(t.path, {
         turns: { data: r, error: null, loading: false, at: Date.now() },
         pending: settlePending(cur.pending, r.turns), answered: settleAnswered(cur.answered, r.turns),
+        startMisses: 0,
       });
+      // The newest turn may still be running, and a whole turn read earlier
+      // is stale if it grew: read it again, quietly.
+      const newest = r.turns[r.turns.length - 1]?.id;
+      if (newest && cur.full[newest]?.state === "done") void readFull(t, newest, true);
     } catch (e) {
-      put(t.path, { turns: { ...viewOf(t.path).turns, loading: false, error: String(e) } });
+      const err = String(e);
+      // A Claude that has just started writes its session file a moment
+      // later, and nothing else re-reads an idle agent: read again on
+      // START_REREAD_MS while the read fails only that way.
+      const misses = noSessionYet(err) ? viewOf(t.path).startMisses + 1 : 0;
+      put(t.path, { turns: { ...viewOf(t.path).turns, loading: false, error: err }, startMisses: misses });
+      const wait = misses > 0 ? START_REREAD_MS[misses - 1] : undefined;
+      if (wait !== undefined) setTimeout(() => { if (noSessionYet(viewOf(t.path).turns.error)) void loadTurns(t); }, wait);
+    }
+  });
+}
+
+/** Read the turns again from the start of `START_REREAD_MS`: the chat's
+ *  "Try again", after a read ran out of its re-reads. */
+export function rereadTurns(t: Target): Promise<void> {
+  if (viewOf(t.path).startMisses) put(t.path, { startMisses: 0 });
+  return loadTurns(t);
+}
+
+/** "Show full reply": read one shortened turn whole, once. The answer is kept
+ *  by the turn's id and drawn in place of the short turn, so a re-read of the
+ *  turns does not take it back. A failure asks again on the next click. */
+export function showFull(t: Target, id: string): Promise<void> {
+  const cur = viewOf(t.path).full[id];
+  return cur && cur.state !== "failed" ? Promise.resolve() : readFull(t, id, false);
+}
+
+function readFull(t: Target, id: string, quiet: boolean): Promise<void> {
+  const land = (r: FullRead) => {
+    const { full } = viewOf(t.path);
+    put(t.path, { full: { ...full, [id]: r } });
+  };
+  return once(`f|${t.path}|${id}`, async () => {
+    if (!quiet) land({ state: "loading" });
+    try {
+      const r = t.idea
+        ? await invoke<AgentTurnText>("idea_turn_text", { ...ideaArgs(t), turn_id: id })
+        : await invoke<AgentTurnText>("agent_turn_text", { repo: t.repo, slug: t.slug, turn_id: id });
+      land({ state: "done", turn: r.turn });
+    } catch (e) {
+      // A turn read already stays read: it went `gone` after being shown, and
+      // that is the host's window moving, not the words changing.
+      if (quiet) return;
+      if (e === AGENT_ERR.gone) return land({ state: "gone" });
+      const { unsupportedFeature } = await import("./ipcws");
+      const old = unsupportedFeature(e, "showing a whole reply");
+      if (old) {
+        fullOff = old;
+        emptyOff = null;
+        views = new Map([...views].map(([k, w]) => [k, { ...w, fullOff: old }]));
+        const { [id]: _off, ...rest } = viewOf(t.path).full;
+        put(t.path, { full: rest, fullOff: old });
+        return;
+      }
+      land({ state: "failed", words: String(e) });
     }
   });
 }
@@ -1241,7 +1375,9 @@ function readCall(t: Target, id: string): Promise<void> {
   return once(`c|${t.path}|${id}`, async () => {
     land({ state: "loading" });
     try {
-      const r = await invoke<AgentToolCall>("agent_tool_call", { repo: t.repo, slug: t.slug, call_id: id });
+      const r = t.idea
+        ? await invoke<AgentToolCall>("idea_tool_call", { ...ideaArgs(t), call_id: id })
+        : await invoke<AgentToolCall>("agent_tool_call", { repo: t.repo, slug: t.slug, call_id: id });
       land({ state: "done", text: inputText(r.input), truncated: r.truncated, bytes: r.bytes });
     } catch (e) {
       if (e === AGENT_ERR.gone) return land({ state: "gone" });
@@ -1260,6 +1396,14 @@ export const noSessionYet = (err: string | null) => !!err && err.endsWith(AGENT_
  *  straight after the answer), so the turns are read again on these delays
  *  while they still fail that way. */
 export const RESUME_REREAD_MS = [500, 1500, 3500] as const;
+/** A Claude writes its session file about a second after its pane opens
+ *  (measured on 2.1.318), so a chat opened with the place reads in
+ *  that gap. The read is retried on these delays (about 30 s in all) while it
+ *  fails only that way; once they run out, the failure is shown. */
+export const START_REREAD_MS = [500, 1000, 2000, 4000, 8000, 15000] as const;
+/** The turns failed only because the place's Claude is still starting, and
+ *  another read is on its way (`START_REREAD_MS`). */
+export const startingUp = (v: ChatView) => noSessionYet(v.turns.error) && v.startMisses > 0 && v.startMisses <= START_REREAD_MS.length;
 
 export const CHANGED = "Not sent: the prompt changed before the answer reached it. Someone may have answered it in the terminal.";
 
@@ -1275,7 +1419,9 @@ export function loadPrompt(t: Target): Promise<void> {
   return once(`p|${t.path}`, async () => {
     put(t.path, { prompt: { ...viewOf(t.path).prompt, loading: true } });
     try {
-      const r = await invoke<AgentPrompt>("agent_prompt", { repo: t.repo, slug: t.slug });
+      const r = t.idea
+        ? await invoke<AgentPrompt>("idea_prompt", ideaArgs(t))
+        : await invoke<AgentPrompt>("agent_prompt", { repo: t.repo, slug: t.slug });
       const cur = viewOf(t.path);
       const chose = cur.selected !== null || cur.ticks !== null || !!cur.answerText || !!cur.boxText;
       const moved = !cur.answering && chose && fpOf(cur.prompt.data) !== fpOf(r);
@@ -1410,6 +1556,8 @@ async function base64Of(f: Blob): Promise<string> {
 /** Upload each file the host does not have yet, in order. The paths, or
  *  null when one was refused: then nothing is sent, and the chips say which. */
 async function uploadAll(t: Target): Promise<string[] | null> {
+  // An idea conversation has no place to keep a file in (phase S).
+  if (t.idea) return [];
   const paths: string[] = [];
   for (const a of viewOf(t.path).attachments) {
     if (a.path) { paths.push(a.path); continue; }
@@ -1448,7 +1596,9 @@ export async function stopTurn(t: Target, agent: string): Promise<void> {
   if (viewOf(t.path).stopping) return;
   put(t.path, { stopping: true, stopWords: null, sendWords: null });
   try {
-    const r = await invoke<AgentStopped>("agent_interrupt", { repo: t.repo, slug: t.slug });
+    const r = t.idea
+      ? await invoke<AgentStopped>("idea_interrupt", ideaArgs(t))
+      : await invoke<AgentStopped>("agent_interrupt", { repo: t.repo, slug: t.slug });
     put(t.path, {
       stopping: false, stopped: r.interrupted,
       stopWords: r.interrupted ? { line: `Stopped. ${agent} is waiting for your next message.` } : { line: STOP_UNCONFIRMED(agent), terminal: true },
@@ -1487,7 +1637,9 @@ export async function sendDraft(t: Target, agent: string, rules: SendRules = ONE
     const held = messagesOf(viewOf(t.path).turns.data?.turns ?? []).flatMap((m) => (m.at !== null && isRecordOf(text, m.text) ? [m.at] : []));
     const line = { text };
     put(t.path, { sentLine: line });
-    const r = await invoke<AgentSent>("agent_send", { repo: t.repo, slug: t.slug, session: t.session, text });
+    const r = t.idea
+      ? await invoke<AgentSent>("idea_send", { ...ideaArgs(t), text })
+      : await invoke<AgentSent>("agent_send", { repo: t.repo, slug: t.slug, session: t.session, text });
     const cur = viewOf(t.path);
     let sentId: number | null = null;
     if (!r.delivered) {
@@ -1525,6 +1677,8 @@ export async function sendDraft(t: Target, agent: string, rules: SendRules = ONE
 /** Read the agent's slash commands, at most once a minute unless `force`. */
 export async function loadCommands(t: Target, force = false): Promise<void> {
   const c = viewOf(t.path).commands;
+  // An idea conversation takes no slash commands (phase S): nothing to list.
+  if (t.idea) return;
   if (c.loading || (!force && c.at !== null && Date.now() - c.at < 60_000 && c.data?.session === t.session)) return;
   put(t.path, { commands: { ...c, loading: true } });
   try {
@@ -1545,6 +1699,7 @@ export async function sendCommand(t: Target, name: string, args: string, words: 
   const v = viewOf(t.path);
   if (v.sending) return;
   const draft = v.draft;
+  if (t.idea) return;
   put(t.path, { sending: true, sendWords: null, stopWords: null, attachWords: null });
   try {
     const r = await invoke<AgentCommandRun>("agent_command", { repo: t.repo, slug: t.slug, session: t.session, name, args: args || null });
@@ -1619,10 +1774,13 @@ export async function sendAnswer(t: Target, agent: string): Promise<void> {
   if (!way.open || (way.how === "field" && !text.trim()) || draftProblem(text, way.how === "field" ? "answer" : "note")) return;
   put(t.path, { answering: true, answerWords: null });
   try {
-    const args = { repo: t.repo, slug: t.slug, choice: c.n, fingerprint: d.fingerprint };
-    const r = text.trim()
-      ? await invoke<AgentAnswer>("agent_answer_text", { ...args, text })
-      : await invoke<AgentAnswer>("agent_answer", args);
+    const r = t.idea
+      ? text.trim()
+        ? await invoke<AgentAnswer>("idea_answer_text", { ...ideaArgs(t), choice: c.n, fingerprint: d.fingerprint, text })
+        : await invoke<AgentAnswer>("idea_answer", { ...ideaArgs(t), choice: c.n, fingerprint: d.fingerprint })
+      : text.trim()
+        ? await invoke<AgentAnswer>("agent_answer_text", { repo: t.repo, slug: t.slug, choice: c.n, fingerprint: d.fingerprint, text })
+        : await invoke<AgentAnswer>("agent_answer", { repo: t.repo, slug: t.slug, choice: c.n, fingerprint: d.fingerprint });
     const cur = viewOf(t.path);
     const a: Answered = way.how === "field" ? { label: text, at: Date.now(), confirmed: r.confirmed } : { label: r.label, note: text.trim() ? text : undefined, at: Date.now(), confirmed: r.confirmed };
     if (d.picker === "resume") a.resumed = (c.more ?? []).join(" · ");
@@ -1658,8 +1816,11 @@ export async function sendMany(t: Target): Promise<void> {
   try {
     let fingerprint = d.fingerprint;
     if (fill) {
-      await invoke<AgentFilled>("agent_answer_text", { repo: t.repo, slug: t.slug, choice: freeBox.n, fingerprint, text: v.boxText });
-      const now = await invoke<AgentPrompt>("agent_prompt", { repo: t.repo, slug: t.slug });
+      if (t.idea) await invoke<AgentFilled>("idea_answer_text", { ...ideaArgs(t), choice: freeBox.n, fingerprint, text: v.boxText });
+      else await invoke<AgentFilled>("agent_answer_text", { repo: t.repo, slug: t.slug, choice: freeBox.n, fingerprint, text: v.boxText });
+      const now = t.idea
+        ? await invoke<AgentPrompt>("idea_prompt", ideaArgs(t))
+        : await invoke<AgentPrompt>("agent_prompt", { repo: t.repo, slug: t.slug });
       put(t.path, { prompt: { data: now, error: null, loading: false, at: Date.now() } });
       if (!now.waiting || !now.readable || !now.multi || !now.choices.some((c) => c.n === freeBox.n && c.checked)) {
         put(t.path, { answering: false, answerWords: { line: "Your answer was typed into its box, then the prompt changed, so nothing was sent. Check the boxes and send again.", terminal: true } });
@@ -1668,7 +1829,9 @@ export async function sendMany(t: Target): Promise<void> {
       }
       fingerprint = now.fingerprint;
     }
-    const r = await invoke<AgentAnsweredMany>("agent_answer_many", { repo: t.repo, slug: t.slug, choices: want, fingerprint });
+    const r = t.idea
+      ? await invoke<AgentAnsweredMany>("idea_answer_many", { ...ideaArgs(t), choices: want, fingerprint })
+      : await invoke<AgentAnsweredMany>("agent_answer_many", { repo: t.repo, slug: t.slug, choices: want, fingerprint });
     const cur = viewOf(t.path);
     put(t.path, { ...NO_CHOICE, answering: false, answered: [...cur.answered, { label: r.labels.join(", "), at: Date.now(), confirmed: r.confirmed }] });
   } catch (e) {

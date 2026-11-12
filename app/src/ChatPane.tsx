@@ -12,13 +12,13 @@
 // inside the chat and no dialog, sheet or menu owning the key (useEscape).
 
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
 import {
   activityMoved, boxesOf, bytes, callFetches, callKeys, callsSay, callsWords, cardDigits, cardKey, cardTakesFocus, choiceOpen, choiceWay, clockMs, clockOf,
-  dayLabel, draftIsOwnSend, draftProblem, fieldWords, foldCalls, itemsOf, keyFocusOf, lineDiff, loadPrompt, loadTurns, noSessionYet, permissionAnswerWords,
+  dayLabel, draftIsOwnSend, draftProblem, fieldWords, foldCalls, itemsOf, keyFocusOf, lineDiff, loadPrompt, loadTurns, noSessionYet, permissionAnswerWords, rereadTurns, startingUp,
   promptBody, questionAnswerWords, selectChoice, sendAnswer, sendDraft, sendMany, setAnswerText, setBoxText, setDraft,
-  sendRulesFor, splitAtRule, stopTurn, ticksOf, toggleCall, toggleTick, tookReference, turnsUnsupported, underRoot, useChat,
-  type AskedStep, type CallRead, type Item, type PromptChoice, type PromptDetail, type ReadablePrompt, type Target, type ToolCall,
+  sendRulesFor, showFull, splitAtRule, stopTurn, ticksOf, toggleCall, toggleTick, tookReference, turnsUnsupported, underRoot, useChat,
+  type AskedStep, type CallRead, type FullRead, type Item, type PromptChoice, type PromptDetail, type ReadablePrompt, type Target, type ToolCall,
 } from "./chat";
 import { previewOf, type ChoiceWay } from "./chat";
 import { referenceInDraft } from "./dnd";
@@ -26,12 +26,15 @@ import { hostSendCaps, remoteHost } from "./ipc";
 // What a screen reader is told (VoiceOver): its own line, so the lanes' imports merge apart.
 import { announcement, gather, hear, promptKeyOf, type Bundle, type ChatView, type Heard } from "./chat";
 // Attachments (docs/proposals/chat-attachments.md): their own line, for the same reason.
-import { addAttachments, attachProblem, removeAttachment, sizeWords, splitAttached, type Attachment } from "./chat";
+import { addAttachments, attachProblem, removeAttachment, sizeWords, splitAttached, type Attachment, type IdeaConv } from "./chat";
 import { loadCommands, ranItems, sendCommand, type SlashCommand } from "./chat";
 import { commandProblem, commandWords, confirmStep, confirmWords, filterCommands, menuFor, slashDraft, sourceWord, type Armed } from "./slash";
 import { HARNESS_LABEL, isHarness, type Harness } from "./harness";
 import * as Icons from "./icons";
 import { Markdown } from "./markdown";
+import { ImageView } from "./ImageView";
+import { chatImageSrc, readImagePath } from "./imgsrc";
+import { chatImageNode } from "./chatImageNode";
 import { useDocPathLinks } from "./useDocPathLinks";
 import { BeforeCommit, useStickToBottom } from "./stickToBottom";
 import { escapeDepth, useEscape } from "./useEscape";
@@ -48,6 +51,18 @@ const FIELD_ROWS = 12;
 /** …and the most of the chat's height it may take: at 40% of a 400px pane the
  *  transcript and the send button still fit. */
 const FIELD_SHARE = 0.4;
+
+/** `![alt](src)` in a bubble (feat/chat-images): the image shows, click to
+ *  enlarge, when it is a picture inside THIS place; every other source is a note
+ *  that names it (`imgsrc.ts`, and the host judges the path again). Stable per
+ *  place, so `Markdown`'s memo is not defeated by a new function each render. */
+function useChatImage(target: Target, root: string) {
+  const { repo, slug } = target;
+  const idea = !!target.idea;
+  // An idea conversation has no place for a picture to be in: its images are
+  // shown as their alt text, never fetched.
+  return useCallback((src: string, alt: string): ReactNode => (idea ? <span className="chat-img-note">{alt || src}</span> : chatImageNode(src, alt, root, { repo, slug })), [repo, slug, root, idea]);
+}
 
 /** The focused element, read through shadow roots (the feedback dialog is one). */
 function focused(): Element | null {
@@ -84,11 +99,22 @@ export type ChatPaneProps = {
   /** The Files tree's reload token, so path links are re-asked on a refresh. */
   reloadToken: number;
   onError: (msg: string) => void;
+  /** An idea conversation (phase S): the chat drives the `idea_*` rows, and
+   *  `path` is only its view key (`ideaChatKey`). No slash commands, no
+   *  attachments, no place images or path links. */
+  idea?: IdeaConv;
+  /** The folder a reply's relative paths are under, when it is not `path`
+   *  (an idea conversation's: the ideas folder). */
+  root?: string;
+  /** Read-only: what stands in the composer's place (an ended idea
+   *  conversation's Resume bar). Nothing can be sent from it. */
+  readOnly?: ReactNode;
 };
 
 export function ChatPane(props: ChatPaneProps) {
-  const { repo, slug, path, provider, session, activity } = props;
-  const target: Target = { repo, slug, path, session };
+  const { repo, slug, path, provider, session, activity, idea } = props;
+  const target: Target = { repo, slug, path, session, ...(idea ? { idea } : {}) };
+  const root = props.root ?? path;
   const v = useChat(path);
   // The transcript's reader names the provider that wrote these turns. A
   // snapshot can race a provider switch; its label must not rename a Codex
@@ -116,10 +142,10 @@ export function ChatPane(props: ChatPaneProps) {
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [liveKey]);
-  const refresh = () => { void loadTurns(target); void loadPrompt(target); };
+  const refresh = () => { void rereadTurns(target); void loadPrompt(target); };
   useEffect(() => { activityMoved(path, activity === "busy"); }, [path, activity]);
 
-  const { pathLinks, menu } = useDocPathLinks(path, null, props.reloadToken, props.onOpenPath);
+  const { pathLinks, menu } = useDocPathLinks(idea ? null : path, null, props.reloadToken, props.onOpenPath);
   const onLink = useCallback((href: string) => {
     if (/^https?:/i.test(href)) openUrl(href).catch((e) => props.onError(`open ${href}: ${String(e)}`));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -127,7 +153,7 @@ export function ChatPane(props: ChatPaneProps) {
 
   const data = v.turns.data;
   // A Codex command's output, which no rollout keeps, after the transcript's.
-  const items = data ? [...itemsOf(data.turns, v.answered, v.pending, working), ...ranItems(v.ran)] : [];
+  const items = data ? [...itemsOf(data.turns, v.answered, v.pending, working, v.full), ...ranItems(v.ran)] : [];
   const lastReply = [...items].reverse().find((it) => it.k === "reply")?.key ?? null;
   const promptKey = promptKeyOf(prompt);
   const { toBottom, fresh, dismiss, take, reveal } = useStickToBottom(scrollRef, !!data, promptKey, lastReply);
@@ -182,6 +208,10 @@ export function ChatPane(props: ChatPaneProps) {
       // Not a failure: Claude has no conversation until the prompt below is
       // answered (its resume picker, its folder-trust question).
       body = <p className="chat-note" data-testid="chat-no-session">{agent} has no conversation open yet.</p>;
+    } else if (startingUp(v)) {
+      // Not a failure either: a Claude writes its session file a moment
+      // after it starts, and the read is retried until it has.
+      body = <p className="chat-note" role="status" data-testid="chat-starting">{agent} is starting…</p>;
     } else if (v.turns.error) {
       body = (
         <div className="chat-fallback" role="alert" data-testid="chat-failed">
@@ -197,12 +227,12 @@ export function ChatPane(props: ChatPaneProps) {
       <>
         <p className="chat-top">
           {data.more ? `The latest ${data.turns.length} turns` : "The session’s turns"}, from its transcript.
-          {" "}Type / for the agent’s commands. Tool output and diffs are in the{" "}
+          {idea ? " " : " Type / for the agent’s commands. "}Tool output and diffs are in the{" "}
           <button className="chat-linkbtn" onClick={props.onTerminal}>terminal</button>.
         </p>
         {items.length === 0 && !prompt && <p className="chat-note" data-testid="chat-empty">No messages in this session yet.</p>}
         <ol className="chat-list" data-testid="chat-list">
-          {items.map((it) => <ChatItem key={it.key} it={it} agent={agent} target={target} root={path} reveal={reveal} onLink={onLink} pathLinks={pathLinks} />)}
+          {items.map((it) => <ChatItem key={it.key} it={it} agent={agent} target={target} root={root} reveal={reveal} fullOff={v.fullOff} full={v.full} onLink={onLink} pathLinks={pathLinks} />)}
         </ol>
       </>
     );
@@ -259,8 +289,8 @@ export function ChatPane(props: ChatPaneProps) {
         <button className="chat-new" onClick={() => { dismiss(); toBottom(); }} data-testid="chat-new">New messages ↓</button>
       )}
       </div>
-      <Composer target={target} agent={agent} harness={reported ?? provider} fieldRef={fieldRef} waiting={prompt ? (prompt.readable ? "above" : "terminal") : null} paneDraft={props.paneDraft} followUp={v.followUp}
-        busy={busy} uiRem={props.uiRem} onTerminal={props.onTerminal} onRefresh={refresh} loading={v.turns.loading || v.prompt.loading} />
+      {props.readOnly ? props.readOnly : <Composer target={target} agent={agent} harness={reported ?? provider} fieldRef={fieldRef} waiting={prompt ? (prompt.readable ? "above" : "terminal") : null} paneDraft={props.paneDraft} followUp={v.followUp}
+        busy={busy} uiRem={props.uiRem} onTerminal={props.onTerminal} onRefresh={refresh} loading={v.turns.loading || v.prompt.loading} />}
       {menu}
       {/* Renders nothing: it reads the scroll before each commit (stickToBottom.ts). */}
       <BeforeCommit take={take} />
@@ -389,6 +419,15 @@ function CallRow(props: { c: ToolCall; k: string; target: Target; root: string; 
   const open = !!v.calls.open[k];
   const read = c.call_id ? v.calls.read[c.call_id] : undefined;
   useRevealOnChange(props.reveal, open, read, li, panel);
+  // A Read of an image shows what it opened, small (feat/chat-images). The
+  // path is the call's `file_path`, judged by the same place-only rule.
+  const shot = target.idea ? null : readImagePath(c.name, c.summary, c.failed);
+  const thumb = shot ? chatImageSrc(shot, "", props.root) : null;
+  // Inside the place: the file itself. Outside it (a render in /tmp, the
+  // owner's flow): the picture Claude was shown, from the transcript, which
+  // only the host's own console is given; a device is told so in words.
+  const shown = shot && thumb ? (thumb.kind === "show" ? thumb.path : shot) : null;
+  const byCall = thumb?.kind === "note" && !!c.call_id;
   const head = (
     <>
       <span className="chat-tool chat-call-name">{c.name}</span>
@@ -406,6 +445,12 @@ function CallRow(props: { c: ToolCall; k: string; target: Target; root: string; 
           <span className="chat-call">{head}</span>
         </button>
       ) : <div className="chat-call">{head}</div>}
+      {shown && (thumb?.kind === "show" || byCall) && (
+        <div className="chat-call-thumb">
+          <ImageView path={shown} place={{ repo: target.repo, slug: target.slug }} call={byCall ? { repo: target.repo, slug: target.slug, callId: c.call_id! } : undefined}
+            inline enlarge thumb alt={`Read: ${shown.split("/").pop()}`} errPrefix="preview not shown — " />
+        </div>
+      )}
       {open && <CallFull c={c} read={read} id={id} panel={panel} />}
     </li>
   );
@@ -466,8 +511,35 @@ function ToolCalls(props: { calls: ToolCall[]; itemKey: string; target: Target; 
   );
 }
 
-function ChatItem(props: { it: Item; agent: string; target: Target; root: string; reveal: Reveal; onLink: (href: string) => void; pathLinks: ReturnType<typeof useDocPathLinks>["pathLinks"] }) {
+/** What a shortened bubble says under its words, and its one way to read the
+ *  rest: "Show full reply" asks the host for the whole turn (`showFull`), which
+ *  then replaces the short one in place. A host with no such row, a turn with no
+ *  id, and a turn the host has stopped reading keep the plain note. */
+function Shortened(props: { id: string | undefined; what: "reply" | "message"; target: Target; full: Record<string, FullRead>; fullOff: string | null }) {
+  const { id, what, target } = props;
+  const read = id ? props.full[id] : undefined;
+  if (!id || props.fullOff || read?.state === "gone") {
+    return (
+      <p className="chat-bubble-note" data-testid="chat-shortened">
+        {read?.state === "gone" ? `This ${what} has left what the host reads: the full text is in the terminal.` : `Shortened by the host: the full ${what} is in the terminal.`}
+      </p>
+    );
+  }
+  const loading = read?.state === "loading";
+  return (
+    <p className="chat-bubble-note" data-testid="chat-shortened">
+      Shortened by the host.{" "}
+      <button className="chat-linkbtn" disabled={loading} onClick={() => void showFull(target, id)} data-testid="chat-show-full">
+        {loading ? "Loading…" : read?.state === "failed" ? `Try again to show the full ${what}` : `Show full ${what}`}
+      </button>
+      {read?.state === "failed" && <span role="alert"> {read.words}</span>}
+    </p>
+  );
+}
+
+function ChatItem(props: { it: Item; agent: string; target: Target; root: string; reveal: Reveal; fullOff: string | null; full: Record<string, FullRead>; onLink: (href: string) => void; pathLinks: ReturnType<typeof useDocPathLinks>["pathLinks"] }) {
   const { it, agent } = props;
+  const renderImage = useChatImage(props.target, props.root);
   switch (it.k) {
     case "sep":
       return <li className="chat-sep" title={new Date(it.at * 1000).toLocaleString()}>{dayLabel(it.at)}</li>;
@@ -479,8 +551,9 @@ function ChatItem(props: { it: Item; agent: string; target: Target; root: string
         <li className="chat-row chat-row-user">
           <div className="chat-bubble chat-bubble-user" role="group"
             aria-label={`You${it.at ? `, ${clockOf(it.at)}` : ""}`} data-testid="chat-user">
-            <Markdown src={sent.text} onLink={props.onLink} />
+            <Markdown src={sent.text} onLink={props.onLink} renderImage={renderImage} />
             {sent.paths.length > 0 && <SentFiles paths={sent.paths} />}
+            {it.cut && <Shortened id={it.turnId} what="message" target={props.target} full={props.full} fullOff={props.fullOff} />}
             {it.midTurn && <p className="chat-bubble-note chat-midturn-caption">Sent while {agent} was working</p>}
           </div>
         </li>
@@ -497,8 +570,8 @@ function ChatItem(props: { it: Item; agent: string; target: Target; root: string
             data-testid="chat-agent">
             {(it.text || it.truncated) && (
               <div className="chat-bubble chat-bubble-agent">
-                {it.text && <Markdown src={it.text} onLink={props.onLink} pathLinks={props.pathLinks} />}
-                {it.truncated && <p className="chat-bubble-note">Shortened by the host: the full reply is in the terminal.</p>}
+                {it.text && <Markdown src={it.text} onLink={props.onLink} pathLinks={props.pathLinks} renderImage={renderImage} />}
+                {it.truncated && <Shortened id={it.turnId} what="reply" target={props.target} full={props.full} fullOff={props.fullOff} />}
               </div>
             )}
             {it.calls.length > 0 && <ToolCalls calls={it.calls} itemKey={it.key} target={props.target} root={props.root} reveal={props.reveal} />}
@@ -1076,7 +1149,7 @@ function Composer(props: {
   const rules = sendRulesFor(props.harness, remoteHost() !== null, hostSendCaps());
   // A line that starts with `/` is a slash command: the session's own list
   // (`agent_commands`) decides what it may be, and `agent_command` runs it.
-  const slash = slashDraft(text);
+  const slash = target.idea ? null : slashDraft(text);
   const cmds = v.commands.data?.commands ?? null;
   const problem = slash
     ? (files ? "Files go with a message, not a command: remove them, or write a message." : commandProblem(cmds, text, (a) => draftProblem(a)) ?? (v.commands.error && !cmds ? commandWords(v.commands.error, agent).line : null))
@@ -1087,7 +1160,7 @@ function Composer(props: {
   const [closedAt, setClosedAt] = useState<string | null>(null);
   // Closed for THAT draft: any change to it opens the menu again.
   useEffect(() => { if (closedAt !== null && text !== closedAt) setClosedAt(null); }, [text, closedAt]);
-  const query = menuFor(text);
+  const query = target.idea ? null : menuFor(text);
   const menuOn = query !== null && closedAt !== text && !props.waiting;
   const rows = menuOn && cmds ? filterCommands(cmds, query) : [];
   const [hi, setHi] = useState(0);
@@ -1216,7 +1289,11 @@ function Composer(props: {
   else if (v.attachWords) { line = v.attachWords.line; alert = true; }
   // A stop's words: a refusal or an unconfirmed stop is an alert; "Stopped." is not.
   else if (v.stopWords) { line = v.stopWords.line; alert = !!(v.stopWords.terminal || v.stopWords.prompt); }
-  else if (armed && cmd) { line = `Press Enter again to run /${cmd.name}. ${confirmWords(cmd) ?? ""}`; alert = true; }
+  // Only a confirm armed for THIS line: the `[text]` effect that drops a stale
+  // one runs a render after the draft changed, and that render showed
+  // "Press Enter again to run /model" for a draft never armed (the slash
+  // check's `/login` then `/model sonnet`, seen in WebKit and Chromium).
+  else if (armed && cmd && armed.line === `/${cmd.name}${(slash?.args ?? "").trim() ? " " + (slash?.args ?? "").trim() : ""}`) { line = `Press Enter again to run /${cmd.name}. ${confirmWords(cmd) ?? ""}`; alert = true; }
   // Still choosing from the menu: how to pick, not what is wrong.
   else if (menuOn && rows.length && !cmd) line = "↑↓ to choose · Enter or Tab to pick · Esc to close";
   else if (problem) { line = problem; alert = true; }
@@ -1224,12 +1301,16 @@ function Composer(props: {
   else if (props.followUp && !text.trim()) line = props.followUp;
   else if (cmd) line = `Enter runs /${cmd.name}${cmd.tier === "sensitive" ? " · a sensitive command, confirmed first" : confirmWords(cmd) ? " · confirmed first" : ""}`;
   else if (n >= rules.maxBytes - COUNT_LEFT) line = `${rules.lineBreaks ? "" : "One line · "}${n.toLocaleString()} of ${rules.maxBytes.toLocaleString()} bytes`;
-  else line = rules.lineBreaks ? "Enter sends · Shift+Enter adds a line · / for commands" : `${agent} takes one line here · Enter sends · / for commands`;
+  else {
+    // An idea conversation takes no slash commands (phase S): no hint of them.
+    const cmds = target.idea ? "" : " · / for commands";
+    line = rules.lineBreaks ? `Enter sends · Shift+Enter adds a line${cmds}` : `${agent} takes one line here · Enter sends${cmds}`;
+  }
 
   return (
     <div className={"chat-composer" + (dropping ? " dropping" : "")} data-testid="chat-composer"
       onDragOver={(e) => {
-        if (!withFiles(e) || v.attachOff) return;
+        if (!withFiles(e) || v.attachOff || target.idea) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = "copy";
         setDropping(true);
@@ -1237,7 +1318,7 @@ function Composer(props: {
       onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setDropping(false); }}
       onDrop={(e) => {
         setDropping(false);
-        if (!withFiles(e) || v.attachOff) return;
+        if (!withFiles(e) || v.attachOff || target.idea) return;
         e.preventDefault();
         addAttachments(target.path, Array.from(e.dataTransfer.files));
         field.current?.focus({ preventScroll: true });
@@ -1264,14 +1345,14 @@ function Composer(props: {
             e.currentTarget.value = "";
             field.current?.focus({ preventScroll: true });
           }} />
-        <button className="chat-attach" onClick={() => picker.current?.click()} disabled={v.sending || !!v.attachOff}
+        {!target.idea && <button className="chat-attach" onClick={() => picker.current?.click()} disabled={v.sending || !!v.attachOff}
           aria-label={v.attachOff ? `Attach files: ${v.attachOff}` : "Attach files"} title={v.attachOff ?? "Attach files (or paste or drop them here)"}
           data-testid="chat-attach">
           <Icons.Paperclip size={15} />
-        </button>
+        </button>}
         <label htmlFor={`${ids}-f`} className="sr-only">Message {agent}</label>
         <textarea id={`${ids}-f`} ref={field} className="chat-field" rows={1} value={text}
-          placeholder={props.waiting ? "Answer the prompt to continue" : dropping ? "Drop to attach" : `Message ${agent}, or / for a command`}
+          placeholder={props.waiting ? "Answer the prompt to continue" : dropping ? "Drop to attach" : (target.idea ? `Message ${agent}` : `Message ${agent}, or / for a command`)}
           aria-describedby={`${ids}-l`} aria-invalid={problem ? true : undefined}
           role={menuOn ? "combobox" : undefined} aria-expanded={menuOn ? rows.length > 0 : undefined}
           aria-controls={menuOn ? `${ids}-m` : undefined} aria-autocomplete={menuOn ? "list" : undefined}
@@ -1282,7 +1363,7 @@ function Composer(props: {
             // An image or a file on the clipboard is an attachment; text
             // pastes as it always has.
             const pasted = Array.from(e.clipboardData?.files ?? []);
-            if (!pasted.length || v.attachOff) return;
+            if (!pasted.length || v.attachOff || target.idea) return;
             e.preventDefault();
             addAttachments(target.path, pasted);
           }}

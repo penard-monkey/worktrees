@@ -5,6 +5,15 @@ the session summary that spawned it (see docs/sessions/). Groomed during the
 close-out ritual (the repo's `/close-out` skill, `.claude/skills/close-out`;
 this repo's settings in `.claude/close-out.md`).
 
+- **SimpleX bridge experiment, parked.** `docs/proposals/simplex-transport.md`
+  answers whether SimpleX can carry worktrees communications: no as the
+  channel's transport (keep D6), never linked (AGPL-3.0 throughout), nothing in
+  the iOS app. The one thing worth trying later is a one-way "mentions to my
+  SimpleX" bridge through the user's own `simplex-chat -p` (§8: two Macs, preset
+  relays, two days, kill criteria). David parked it on 2026-11-06: the worktrees
+  mobile app is the communication path for now. Needs his OK before anything
+  SimpleX is installed or run, since public relays see metadata.
+  _From: 2026-11-06, simplex-investigation_
 - **A stop's words after an Enter at the terminal (#613).** Three related cases, all
   rare, none mixing text into a send.
   - A message of identical lines plus Enter at the terminal reads as `Behind`, not

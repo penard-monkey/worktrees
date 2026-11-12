@@ -1,4 +1,4 @@
-//! The main window's frame across launches — Settings → Behavior → "Restore
+//! The windows' frames across launches — Settings → Behavior → "Restore
 //! window". Quit fullscreen, relaunch (by hand or through an in-app update) and
 //! the window comes back fullscreen; quit it small in a corner, it comes back
 //! small in that corner.
@@ -26,21 +26,39 @@
 //!   Freezing at exit and writing only settled states makes the quit path —
 //!   ⌘Q, closing the window, the updater's `relaunch()`, even a crash —
 //!   irrelevant. The price is a move made in the last second before quitting.
+//!
+//! Two windows (Ideas phase 0). `main` is declared in tauri.conf.json; the
+//! Ideas `companion` is made on demand (companion.rs). Each has a SLOT here,
+//! under the rules above, and the one file holds both:
+//! - `main`'s state stays at the TOP level, exactly where every earlier build
+//!   reads it; the others sit under `windows`, which an older build ignores
+//!   (serde skips unknown keys). A downgrade keeps the main window's frame and
+//!   loses only the companion's, the next time it writes.
+//! - A slot is seeded from the file the first time any window attaches, and the
+//!   whole file is written from all of them, so a settled main window never
+//!   erases the frame of a companion that was not opened this session.
+//! - The companion also keeps `open`: true when it is made, false only when the
+//!   person CLOSES it. ⌘Q sends no `CloseRequested` (tao 0.35 has no
+//!   `applicationShouldTerminate`, so AppKit terminates and the loop ends), and
+//!   closing `main` destroys the companion without one, so either way a
+//!   companion open at quit is reopened at launch — when the setting is on.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, Runtime, WebviewWindow};
 
 pub const FILE: &str = "window-state.json";
 /// The `ui-state.json` key the frontend's Settings writes (`settings.ts`).
 pub const SETTING: &str = "restore_window";
+/// The window tauri.conf.json declares (no label there: tauri's default).
+pub const MAIN: &str = "main";
 /// tauri.conf.json's `minWidth`/`minHeight` — a hand-edited file must not hand
 /// back a window smaller than the app will ever lay out.
-const MIN_W: f64 = 900.0;
-const MIN_H: f64 = 560.0;
+pub const MAIN_MIN: (f64, f64) = (900.0, 560.0);
 /// How much of the frame's top edge must sit on a monitor for the saved
 /// position to be used: enough title bar to grab. A frame left on a monitor
 /// that is no longer attached gets the OS's placement instead.
@@ -73,19 +91,93 @@ pub struct WinState {
     pub fullscreen: bool,
 }
 
-/// What the window is right now, tracked from its events so the exit save does
-/// not depend on the window still answering questions at `RunEvent::Exit`.
+/// A window other than `main`, as the file keeps it.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Default)]
+pub struct Other {
+    #[serde(flatten)]
+    pub state: WinState,
+    /// Open when the app last ran (see the module doc for when it turns false).
+    #[serde(default)]
+    pub open: bool,
+}
+
+/// `window-state.json`: `main` at the top level, as it always was, and every
+/// other window under `windows`.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Default)]
+pub struct StateFile {
+    #[serde(flatten)]
+    pub main: WinState,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub windows: BTreeMap<String, Other>,
+}
+
+impl StateFile {
+    /// The slot for `label`, as this file has it.
+    pub fn slot(&self, label: &str) -> Other {
+        if label == MAIN {
+            Other { state: self.main, open: true }
+        } else {
+            self.windows.get(label).copied().unwrap_or_default()
+        }
+    }
+
+    fn set(&mut self, label: &str, o: Other) {
+        if label == MAIN {
+            self.main = o.state;
+        } else {
+            self.windows.insert(label.to_string(), o);
+        }
+    }
+
+    /// Whether `label` was open when the app last ran, and so should come back
+    /// at launch. `main` always does.
+    pub fn was_open(&self, label: &str) -> bool {
+        label == MAIN || self.windows.get(label).is_some_and(|o| o.open)
+    }
+}
+
+/// One window's live slot.
+#[derive(Default)]
+struct Slot {
+    state: Other,
+    /// Fullscreen is applied once the event loop is running (`RunEvent::Ready`
+    /// for a window that exists at launch, at once for one made later):
+    /// asking AppKit to toggle fullscreen on a window the event loop has not
+    /// shown yet is a request it is free to drop.
+    pending_fullscreen: bool,
+}
+
+/// What each window is right now, tracked from its events so the exit save does
+/// not depend on a window still answering questions at `RunEvent::Exit`.
 #[derive(Default)]
 pub struct Tracker {
-    state: Mutex<WinState>,
-    /// Fullscreen is applied on `RunEvent::Ready`, not in setup: asking AppKit
-    /// to toggle fullscreen on a window the event loop has not shown yet is a
-    /// request it is free to drop.
-    pending_fullscreen: Mutex<bool>,
-    /// When the state last CHANGED and has not been written since.
+    /// The file as read at the first attach; every slot starts from it.
+    seed: OnceLock<StateFile>,
+    slots: Mutex<BTreeMap<String, Slot>>,
+    /// When some slot last CHANGED and has not been written since.
     dirty: Mutex<Option<Instant>>,
     /// Set at exit: no more samples, no more writes.
     stopped: AtomicBool,
+    /// `RunEvent::Ready` has passed: a window attached from now on applies its
+    /// fullscreen at once.
+    ready: AtomicBool,
+    /// The one writer thread, started by the first attach.
+    writer: OnceLock<()>,
+}
+
+impl Tracker {
+    /// The file to write: the seed with every live slot laid over it.
+    fn snapshot(&self) -> StateFile {
+        let mut f = self.seed.get().cloned().unwrap_or_default();
+        for (label, slot) in self.slots.lock().unwrap().iter() {
+            f.set(label, slot.state);
+        }
+        f
+    }
+
+    fn touch(&self) {
+        *self.dirty.lock().unwrap() = Some(Instant::now());
+    }
 }
 
 /// Whether a pending change has been still long enough to write.
@@ -101,14 +193,37 @@ fn describe(st: &WinState) -> String {
     format!("fullscreen={} maximized={} frame={frame}", st.fullscreen, st.maximized)
 }
 
+fn describe_file(f: &StateFile) -> String {
+    let mut s = format!("main: {}", describe(&f.main));
+    for (label, o) in &f.windows {
+        s.push_str(&format!("; {label}: {} open={}", describe(&o.state), o.open));
+    }
+    s
+}
+
 /// Missing key ⇒ ON, matching `DEFAULTS.restore_window` in settings.ts. A
 /// fresh install has no ui-state.json at all and must behave like the default.
 pub fn enabled(ui_state: Option<&serde_json::Value>) -> bool {
     ui_state.and_then(|v| v.get(SETTING)).and_then(|v| v.as_bool()).unwrap_or(true)
 }
 
+/// The setting as `ui-state.json` in `dir` says it now. Read afresh each time,
+/// never cached: a companion opened an hour into the session follows the
+/// setting as it is then.
+pub fn enabled_in(dir: &Path) -> bool {
+    enabled(ui_state_in(dir).as_ref())
+}
+
+/// `ui-state.json` in `dir`, READ only (the frontend owns it whole-blob). An
+/// absent or unparsable file is `None`, which every reader takes as defaults.
+pub fn ui_state_in(dir: &Path) -> Option<serde_json::Value> {
+    std::fs::read(dir.join("ui-state.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+}
+
 /// A corrupt or absent file is "nothing saved", never an error on launch.
-pub fn load(dir: &Path) -> Option<WinState> {
+pub fn load(dir: &Path) -> Option<StateFile> {
     std::fs::read(dir.join(FILE)).ok().and_then(|b| serde_json::from_slice(&b).ok())
 }
 
@@ -142,8 +257,8 @@ pub fn reachable(f: &Frame, monitors: &[(f64, f64, f64, f64)]) -> bool {
 }
 
 /// Clamp a saved size up to the window's minimum.
-pub fn clamp_size(f: &Frame) -> (f64, f64) {
-    (f.width.max(MIN_W), f.height.max(MIN_H))
+pub fn clamp_size(f: &Frame, min: (f64, f64)) -> (f64, f64) {
+    (f.width.max(min.0), f.height.max(min.1))
 }
 
 fn current<R: Runtime>(w: &WebviewWindow<R>) -> Option<(Frame, bool, bool, bool)> {
@@ -165,31 +280,52 @@ fn sample<R: Runtime>(w: &WebviewWindow<R>) {
         return;
     }
     let Some((frame, fs, max, min)) = current(w) else { return };
-    let mut st = tracker.state.lock().unwrap();
-    let next = observe(*st, frame, fs, max, min);
-    if next != *st {
-        *st = next;
-        *tracker.dirty.lock().unwrap() = Some(Instant::now());
+    let mut slots = tracker.slots.lock().unwrap();
+    let slot = slots.entry(w.label().to_string()).or_default();
+    let next = observe(slot.state.state, frame, fs, max, min);
+    if next != slot.state.state {
+        slot.state.state = next;
+        drop(slots);
+        tracker.touch();
     }
 }
 
-fn write(dir: &Path, st: &WinState) {
-    if st.frame.is_none() && !st.fullscreen && !st.maximized {
+/// Record that `label` is open or closed — a fact about the session, not the
+/// frame, written like any other change.
+fn mark_open<R: Runtime>(app: &AppHandle<R>, label: &str, open: bool) {
+    let tracker = app.state::<Tracker>();
+    if tracker.stopped.load(Ordering::SeqCst) || label == MAIN {
+        return;
+    }
+    let mut slots = tracker.slots.lock().unwrap();
+    let slot = slots.entry(label.to_string()).or_default();
+    if slot.state.open != open {
+        slot.state.open = open;
+        drop(slots);
+        tracker.touch();
+    }
+}
+
+fn write(dir: &Path, f: &StateFile) {
+    let empty = |s: &WinState| s.frame.is_none() && !s.fullscreen && !s.maximized;
+    if empty(&f.main) && f.windows.values().all(|o| empty(&o.state) && !o.open) {
         return; // nothing observed — leave whatever is on disk alone
     }
     // The dir first: on a fresh install it is serve that makes it, and the
-    // window can settle before serve has started.
-    let res = serde_json::to_vec_pretty(st)
+    // window can settle before serve has started. Replaced with
+    // `fsx::write_atomic` (a random temp name, O_EXCL|O_NOFOLLOW), the one way
+    // this repo replaces a file (AGENTS.md).
+    let res = serde_json::to_vec_pretty(f)
         .map_err(|e| e.to_string())
         .and_then(|b| std::fs::create_dir_all(dir).map(|()| b).map_err(|e| e.to_string()))
-        .and_then(|b| std::fs::write(dir.join(FILE), b).map_err(|e| e.to_string()));
+        .and_then(|b| worktrees_core::fsx::write_atomic(&dir.join(FILE), &b, None).map_err(|e| e.to_string()));
     match res {
-        Ok(()) => crate::applog("info", &format!("window state saved: {}", describe(st))),
+        Ok(()) => crate::applog("info", &format!("window state saved: {}", describe_file(f))),
         Err(e) => crate::applog("warn", &format!("window state: could not save: {e}")),
     }
 }
 
-/// Writes each settled change until `stop`.
+/// Writes each settled change until `stop`. One writer for every window.
 fn spawn_writer<R: Runtime>(app: AppHandle<R>, dir: PathBuf) {
     std::thread::spawn(move || loop {
         std::thread::sleep(TICK);
@@ -206,8 +342,7 @@ fn spawn_writer<R: Runtime>(app: AppHandle<R>, dir: PathBuf) {
             due
         };
         if due {
-            let st = *tracker.state.lock().unwrap();
-            write(&dir, &st);
+            write(&dir, &tracker.snapshot());
         }
     });
 }
@@ -225,78 +360,122 @@ fn monitors<R: Runtime>(w: &WebviewWindow<R>) -> Vec<(f64, f64, f64, f64)> {
         .collect()
 }
 
-/// Setup: seed the tracker, restore when `restore` says so, and start tracking.
-pub fn attach<R: Runtime>(w: &WebviewWindow<R>, dir: &Path, restore: bool) {
-    let saved = load(dir);
+/// The file as this session first read it (read once, at the first attach).
+pub fn seed<R: Runtime>(app: &AppHandle<R>, dir: &Path) -> StateFile {
+    app.state::<Tracker>().seed.get_or_init(|| load(dir).unwrap_or_default()).clone()
+}
+
+/// What a window attaching now restores from: its LIVE slot when it already
+/// had one this session (closed and reopened — the frame it was just left at),
+/// else the file as the session first read it. The seed is a launch-time
+/// snapshot and goes stale the moment a window moves.
+pub fn restore_from(live: Option<Other>, seed: &StateFile, label: &str) -> Other {
+    live.unwrap_or_else(|| seed.slot(label))
+}
+
+/// A new window: seed its slot, restore when `restore` says so, and start
+/// tracking. `min` is the window's own minimum size.
+pub fn attach<R: Runtime>(w: &WebviewWindow<R>, dir: &Path, restore: bool, min: (f64, f64)) {
+    let label = w.label().to_string();
+    let file = seed(w.app_handle(), dir);
     let tracker = w.state::<Tracker>();
+    let live = tracker.slots.lock().unwrap().get(&label).map(|s| s.state);
+    let saved = restore_from(live, &file, &label);
+    let have = saved.state != WinState::default();
     crate::applog(
         "info",
         &format!(
-            "window restore: {}, saved: {}",
+            "window restore ({label}): {}, saved: {}",
             if restore { "on" } else { "off" },
-            saved.as_ref().map(describe).unwrap_or_else(|| "nothing".into())
+            if have { describe(&saved.state) } else { "nothing".into() }
         ),
     );
-    match saved {
-        Some(st) if restore => {
-            if let Some(f) = st.frame {
-                if reachable(&f, &monitors(w)) {
-                    let _ = w.set_position(LogicalPosition::new(f.x, f.y));
-                }
-                let (width, height) = clamp_size(&f);
-                let _ = w.set_size(LogicalSize::new(width, height));
+    let mut pending = false;
+    if restore && have {
+        let st = saved.state;
+        if let Some(f) = st.frame {
+            if reachable(&f, &monitors(w)) {
+                let _ = w.set_position(LogicalPosition::new(f.x, f.y));
             }
-            if st.maximized && !st.fullscreen {
-                let _ = w.maximize();
-            }
-            *tracker.pending_fullscreen.lock().unwrap() = st.fullscreen;
-            // Seed with the file as-is, so the saved frame survives even if no
-            // event reports a plain window this session (e.g. it stays
-            // fullscreen until quit).
-            *tracker.state.lock().unwrap() = st;
+            let (width, height) = clamp_size(&f, min);
+            let _ = w.set_size(LogicalSize::new(width, height));
         }
-        _ => {
-            // Not restoring (or nothing saved): the window is the config's plain
-            // frame, so that is what a quit right now should record.
-            sample(w);
+        if st.maximized && !st.fullscreen {
+            let _ = w.maximize();
         }
+        pending = st.fullscreen;
+        // Seed with the file as-is, so the saved frame survives even if no
+        // event reports a plain window this session (e.g. it stays
+        // fullscreen until quit).
+        tracker.slots.lock().unwrap().insert(label.clone(), Slot { state: saved, pending_fullscreen: pending });
+    } else {
+        // Not restoring (or nothing saved): the window is its plain default
+        // frame, so that is what a quit right now should record. The `open`
+        // flag is the file's until `mark_open` says otherwise.
+        tracker.slots.lock().unwrap().insert(label.clone(), Slot { state: Other { state: WinState::default(), open: saved.open }, pending_fullscreen: false });
+        sample(w);
     }
+    mark_open(w.app_handle(), &label, true);
     let win = w.clone();
-    w.on_window_event(move |e| {
-        if matches!(e, tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_)) {
-            sample(&win);
-        }
+    w.on_window_event(move |e| match e {
+        tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_) => sample(&win),
+        // The person closed it. Never sent by ⌘Q (module doc), so this is the
+        // one way `open` turns false.
+        tauri::WindowEvent::CloseRequested { .. } => mark_open(win.app_handle(), win.label(), false),
+        _ => {}
     });
-    spawn_writer(w.app_handle().clone(), dir.to_path_buf());
+    let (app, d) = (w.app_handle().clone(), dir.to_path_buf());
+    tracker.writer.get_or_init(move || spawn_writer(app, d));
+    if pending && tracker.ready.load(Ordering::SeqCst) {
+        enter_fullscreen(w.app_handle(), &label);
+    }
 }
 
-/// `RunEvent::Ready`: the deferred half of a fullscreen restore. Checked after
-/// a moment and retried once, because `set_fullscreen` only QUEUES the request
-/// — an `Ok` here says nothing about whether AppKit acted on it.
-pub fn ready<R: Runtime>(app: &AppHandle<R>) {
+/// The deferred half of a fullscreen restore. Checked after a moment and
+/// retried once, because `set_fullscreen` only QUEUES the request — an `Ok`
+/// here says nothing about whether AppKit acted on it.
+fn enter_fullscreen<R: Runtime>(app: &AppHandle<R>, label: &str) {
     let tracker = app.state::<Tracker>();
-    let pending = std::mem::take(&mut *tracker.pending_fullscreen.lock().unwrap());
+    let pending = tracker
+        .slots
+        .lock()
+        .unwrap()
+        .get_mut(label)
+        .map(|s| std::mem::take(&mut s.pending_fullscreen))
+        .unwrap_or(false);
     if !pending {
         return;
     }
-    let Some(w) = app.get_webview_window("main") else { return };
-    crate::applog("info", "window restore: entering fullscreen");
+    let Some(w) = app.get_webview_window(label) else { return };
+    let label = label.to_string();
+    crate::applog("info", &format!("window restore ({label}): entering fullscreen"));
     if let Err(e) = w.set_fullscreen(true) {
-        crate::applog("warn", &format!("window restore: fullscreen: {e}"));
+        crate::applog("warn", &format!("window restore ({label}): fullscreen: {e}"));
     }
     std::thread::spawn(move || {
         for attempt in 1..=2 {
             std::thread::sleep(FULLSCREEN_CHECK);
             if w.is_fullscreen().unwrap_or(false) {
-                crate::applog("info", &format!("window restore: fullscreen confirmed (check {attempt})"));
+                crate::applog("info", &format!("window restore ({label}): fullscreen confirmed (check {attempt})"));
                 return;
             }
-            crate::applog("warn", &format!("window restore: not fullscreen after check {attempt}"));
+            crate::applog("warn", &format!("window restore ({label}): not fullscreen after check {attempt}"));
             if attempt == 1 {
                 let _ = w.set_fullscreen(true);
             }
         }
     });
+}
+
+/// `RunEvent::Ready`: every window attached before the loop ran applies its
+/// fullscreen now; one attached later does it itself.
+pub fn ready<R: Runtime>(app: &AppHandle<R>) {
+    let tracker = app.state::<Tracker>();
+    tracker.ready.store(true, Ordering::SeqCst);
+    let labels: Vec<String> = tracker.slots.lock().unwrap().iter().filter(|(_, s)| s.pending_fullscreen).map(|(l, _)| l.clone()).collect();
+    for label in labels {
+        enter_fullscreen(app, &label);
+    }
 }
 
 /// `RunEvent::Exit`: stop sampling and writing. Deliberately NOT a save — see
@@ -367,8 +546,10 @@ mod tests {
 
     #[test]
     fn a_saved_size_never_goes_under_the_window_minimum() {
-        assert_eq!(clamp_size(&Frame { width: 300.0, height: 200.0, ..F }), (900.0, 560.0));
-        assert_eq!(clamp_size(&F), (1200.0, 800.0));
+        assert_eq!(clamp_size(&Frame { width: 300.0, height: 200.0, ..F }, MAIN_MIN), (900.0, 560.0));
+        assert_eq!(clamp_size(&F, MAIN_MIN), (1200.0, 800.0));
+        // Each window has its own: the companion's is smaller than main's.
+        assert_eq!(clamp_size(&Frame { width: 300.0, height: 200.0, ..F }, (480.0, 360.0)), (480.0, 360.0));
     }
 
     /// On a fresh install the config dir does not exist yet when the window
@@ -380,7 +561,7 @@ mod tests {
         let base = std::env::temp_dir().join(format!("winstate-fresh-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let dir = base.join("net.example.fresh");
-        let st = WinState { frame: Some(F), maximized: false, fullscreen: false };
+        let st = StateFile { main: WinState { frame: Some(F), maximized: false, fullscreen: false }, windows: BTreeMap::new() };
         write(&dir, &st);
         assert_eq!(load(&dir), Some(st), "the save did not land in a config dir that was not there yet");
         std::fs::remove_dir_all(&base).unwrap();
@@ -391,9 +572,98 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("winstate-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join(FILE), b"{\"fullscreen\":true}").unwrap();
-        assert_eq!(load(&dir), Some(WinState { frame: None, maximized: false, fullscreen: true }));
+        assert_eq!(
+            load(&dir),
+            Some(StateFile { main: WinState { frame: None, maximized: false, fullscreen: true }, windows: BTreeMap::new() })
+        );
         std::fs::write(dir.join(FILE), b"not json").unwrap();
         assert_eq!(load(&dir), None);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // ── two windows in one file ─────────────────────────────────────────────
+
+    const C: Frame = Frame { x: 300.0, y: 120.0, width: 900.0, height: 640.0 };
+
+    fn both() -> StateFile {
+        let mut windows = BTreeMap::new();
+        windows.insert("companion".to_string(), Other { state: WinState { frame: Some(C), maximized: false, fullscreen: true }, open: true });
+        StateFile { main: WinState { frame: Some(F), maximized: true, fullscreen: false }, windows }
+    }
+
+    /// The file a build from before the companion wrote is read unchanged: main
+    /// at the top level, no companion, which therefore does not reopen.
+    #[test]
+    fn a_file_from_before_the_companion_still_restores_main() {
+        let old = json!({ "frame": { "x": 100.0, "y": 80.0, "width": 1200.0, "height": 800.0 }, "maximized": true, "fullscreen": false });
+        let f: StateFile = serde_json::from_value(old).unwrap();
+        assert_eq!(f.slot(MAIN).state, WinState { frame: Some(F), maximized: true, fullscreen: false });
+        assert_eq!(f.slot("companion"), Other::default());
+        assert!(f.was_open(MAIN) && !f.was_open("companion"));
+    }
+
+    /// …and the other way round: what this build writes, an older build (whose
+    /// whole file type was `WinState`) reads as main's frame — a downgrade keeps
+    /// the main window where it was.
+    #[test]
+    fn an_older_build_reads_main_from_this_builds_file() {
+        let text = serde_json::to_string(&both()).unwrap();
+        let old: WinState = serde_json::from_str(&text).unwrap();
+        assert_eq!(old, WinState { frame: Some(F), maximized: true, fullscreen: false });
+        let back: StateFile = serde_json::from_str(&text).unwrap();
+        assert_eq!(back, both(), "round trip: {text}");
+    }
+
+    /// A file with only main in it is written exactly as before: no `windows`
+    /// key appears for a session that never opened the companion.
+    #[test]
+    fn main_alone_writes_the_old_shape() {
+        let f = StateFile { main: WinState { frame: Some(F), maximized: false, fullscreen: false }, windows: BTreeMap::new() };
+        let v = serde_json::to_value(&f).unwrap();
+        assert_eq!(v, json!({ "frame": { "x": 100.0, "y": 80.0, "width": 1200.0, "height": 800.0 }, "maximized": false, "fullscreen": false }));
+    }
+
+    /// A settled main window writes the whole file, and the companion's saved
+    /// slot — seeded, never opened this session — survives it.
+    #[test]
+    fn a_main_save_keeps_a_companion_that_was_not_opened() {
+        let t = Tracker::default();
+        let _ = t.seed.set(both());
+        t.slots.lock().unwrap().insert(MAIN.into(), Slot { state: Other { state: WinState { frame: Some(SCREEN), maximized: false, fullscreen: false }, open: true }, pending_fullscreen: false });
+        let snap = t.snapshot();
+        assert_eq!(snap.main.frame, Some(SCREEN));
+        assert_eq!(snap.windows.get("companion"), both().windows.get("companion"));
+    }
+
+    /// Closed and reopened in the same session: it comes back where it was
+    /// LEFT, not where the app launched with it — whatever the seed says, and
+    /// including a companion closed while fullscreen or maximised (its normal
+    /// frame kept beside the flag, as `observe` keeps it).
+    #[test]
+    fn a_reopen_in_the_same_session_restores_the_frame_it_was_closed_at() {
+        let seed = both();
+        let moved = Frame { x: 40.0, y: 60.0, width: 700.0, height: 500.0 };
+        let left = Other { state: WinState { frame: Some(moved), maximized: false, fullscreen: false }, open: false };
+        assert_eq!(restore_from(Some(left), &seed, "companion"), left, "the live slot, not the launch-time file");
+        let fs = Other { state: WinState { frame: Some(moved), maximized: false, fullscreen: true }, open: false };
+        assert_eq!(restore_from(Some(fs), &seed, "companion"), fs, "closed fullscreen: fullscreen again, over its normal frame");
+        let max = Other { state: WinState { frame: Some(moved), maximized: true, fullscreen: false }, open: false };
+        assert_eq!(restore_from(Some(max), &seed, "companion"), max, "closed maximised: maximised again");
+        // A first run: nothing in the file, but the window was opened and moved.
+        assert_eq!(restore_from(Some(left), &StateFile::default(), "companion"), left);
+        // No live slot yet this session: the file decides.
+        assert_eq!(restore_from(None, &seed, "companion"), seed.slot("companion"));
+        assert_eq!(restore_from(None, &StateFile::default(), "companion"), Other::default());
+    }
+
+    /// Closed by the person: still remembered where it was, but not reopened.
+    #[test]
+    fn a_closed_companion_keeps_its_frame_and_does_not_reopen() {
+        let mut f = both();
+        let mut c = f.slot("companion");
+        c.open = false;
+        f.set("companion", c);
+        assert!(!f.was_open("companion"));
+        assert_eq!(f.slot("companion").state.frame, Some(C));
     }
 }

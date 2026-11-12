@@ -22,7 +22,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 export type DragItem =
   | { kind: "place"; repo: string; slug: string }
-  | { kind: "project"; root: string };
+  // `ws`: the named workspace the row was dragged OUT of (workspaces.ts);
+  // absent from All projects.
+  | { kind: "project"; root: string; ws?: string }
+  | { kind: "workspace"; id: string };
 
 export type DragSession<T> = { item: DragItem; x: number; y: number; target: T | null };
 
@@ -98,7 +101,7 @@ export function useNavDrag<T>(opts: {
     g.current = null;
     if (s?.scroll) cancelAnimationFrame(s.scroll);
     if (s?.raf) cancelAnimationFrame(s.raf);
-    document.body.classList.remove("dragging", "dragging-place", "dragging-project");
+    document.body.classList.remove("dragging", "dragging-place", "dragging-project", "dragging-workspace");
     if (s?.live) {
       swallowNextClick(stillDown);
       cb.current.onZone?.(null, null);

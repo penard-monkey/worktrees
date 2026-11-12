@@ -1,4 +1,4 @@
-//! The 211 commands, each with its exposure, capability and objects, in ONE
+//! The 244 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -39,7 +39,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::sync::Arc;
-use worktrees_api::{agents, config, files, hostenv, macprivacy, meta, ops, prefs, presets, profiles, project, status, term, viewer, workspace, Ctx};
+use worktrees_api::{agents, config, files, hostenv, ideas, ideasessions, macprivacy, meta, ops, prefs, presets, profiles, project, status, term, viewer, workspace, workspaces, Ctx};
 use worktrees_core::authz::{self, Caller, Capability, Caps, DeviceId, Grant, Projects, Registry};
 use worktrees_core::fetchpolicy::Fetcher;
 
@@ -364,6 +364,8 @@ macro_rules! obj {
     (candidates($a:ident)) => { Obj::Candidates(stringify!($a)) };
     (filtered($f:ident)) => { Obj::Filtered(scope::$f) };
     (opt($($inner:tt)+)) => { Obj::Opt(&obj!($($inner)+)) };
+    (idea($a:ident)) => { Obj::Idea(stringify!($a)) };
+    (idea_conv($c:ident, $i:ident)) => { Obj::IdeaConv(stringify!($c), stringify!($i)) };
     (global) => { Obj::Global };
     (all) => { Obj::All };
     (not_remote) => { Obj::NotRemote };
@@ -782,7 +784,7 @@ pub const GLOBAL_OK: &[&str] = &[
     // read
     "settings_info", "get_settings", "quota_settings", "slots_settings", "limits_settings", "policy_preset_status", "claude_usage", "codex_usage", "kimi_usage", "claude_status",
     "check_update", "harness_sessions", "list_releases", "get_ai_config", "get_codex_permissions", "get_fetch_interval",
-    "get_term_history_opts", "agent_guidance_status", "agent_guidance_diff", "agent_models", "agent_user_skills",
+    "get_term_history_opts", "agent_guidance_status", "agent_guidance_diff", "agent_models", "agent_user_skills", "pi_hosts",
     "kimi_version", "tmux_check", "log_info", "get_changelog", "new_profile_id", "skills_list", "ui_usage",
     // write
     "set_settings", "log_event",
@@ -988,6 +990,11 @@ commands! { cx, a;
     agent_guidance_merge: HostConsole => project::agent_guidance_merge(),
     agent_models: Engine [read, global] => project::agent_models(a.get("harness")?),
     pi_status: Engine [read, opt_project(repo, Free)] => project::pi_status(a.get("repo")?),
+    // pi's model hosts (docs/proposals/pi-models-config.md). The read answers
+    // `has_key` as a boolean only; the edit is console-only — a base URL is
+    // where a lane's prompts and code go — and no edit takes a key.
+    pi_hosts: Engine [read, global] => project::pi_hosts(),
+    pi_host_edit: HostConsole => project::pi_host_edit(a.get("edit")?),
     kimi_status: Engine [read, opt_project(repo, Free)] => project::kimi_status(a.get("repo")?),
     // Starts a kimi process for its --version; a read.
     kimi_version: Engine [read, global] => project::kimi_version(),
@@ -1042,6 +1049,11 @@ commands! { cx, a;
         )
     },
     read_file_base64: Engine [read, file(path)] => files::read_file_base64(&cx.ctx, a.get("path")?, a.get("max_bytes")?),
+    // A chat's image (feat/chat-images): resolved under the PLACE's own root by
+    // the host, never a client path judged against every project: the place-only
+    // rule is the chat's containment (a reply cannot show another place's or the
+    // host's files), NOT an access boundary: grants reach projects, not places.
+    read_place_image: Engine [read, place(repo, slug)] => files::read_place_image(&cx.ctx, a.get("repo")?, a.get("slug")?, a.get("path")?, a.get("max_bytes")?, a.get("etag")?),
     write_file: Engine [write, file(path)] => files::write_file(&cx.ctx, a.get("path")?, a.get("content")?, a.get("expected_mtime")?),
 
     // ── the dock: shells, scrollback, and the tmux attach (term) ─────────
@@ -1136,12 +1148,25 @@ commands! { cx, a;
     agent_tool_call: Engine [read, place(repo, slug)] => agents::agent_tool_call(
         &cx.ctx, a.get("repo")?, a.get("slug")?, a.get("call_id")?,
     ),
+    // One shortened turn whole, for a bubble that says it was cut: fetched then,
+    // so the poll above stays small. `read`, like the turns it completes.
+    agent_turn_text: Engine [read, place(repo, slug)] => agents::agent_turn_text(
+        &cx.ctx, a.get("repo")?, a.get("slug")?, a.get("turn_id")?,
+    ),
     // Slash commands (docs/proposals/chat-slash-commands.md): the session's
     // list, read from tables and files, never the pane; and one command run,
     // `instruct` like a line — drive-class, step-up, the DRIVE budget — with
     // `admin` required in the body for the sensitive tier, as
     // `agent_answer_text` requires `answer`. Its own row, never an argument
     // on `agent_send`, whose rule refuses a leading `/` for MCP `send` too.
+    // The picture a Claude Read was shown (feat/chat-images), for a Read of a
+    // file OUTSIDE the place, by the call's id: fetched when a thumbnail
+    // mounts, never in the poll above. `read`, and the body refuses every
+    // caller but the host's own console (a file outside the projects is not a
+    // device's to see).
+    agent_call_image: Engine [read, place(repo, slug)] => agents::agent_call_image(
+        &cx.ctx, a.get("repo")?, a.get("slug")?, a.get("call_id")?,
+    ),
     agent_commands: Engine [read, place(repo, slug), opt(session_of(session, repo, slug))] => agents::agent_commands(
         &cx.ctx, a.get("repo")?, a.get("slug")?, a.get("session")?,
     ),
@@ -1250,6 +1275,43 @@ commands! { cx, a;
         let revoked = cx.devices.revoke_all_others(None, now())?;
         ok(serde_json::json!({ "pin": id.pin(), "revoked": revoked }))
     },
+    // ── ideas (idea board phase 1, `worktrees_core::ideas`) ──────────────
+    // Desktop only (the owner, 2026-11-08): console rows, no device and no
+    // MCP tool reaches them. Each is one operation with plain parameters,
+    // addressed by the idea's ULID; `idea_adopt` alone names a FILE, a bare
+    // name in the folder, because a hand-made document has no id yet. The
+    // folder is the engine's (`Ctx::ideas_dir`), never a client's path.
+    ideas_list: HostConsole => ideas::ideas_list(&cx.ctx),
+    idea_read: HostConsole => ideas::idea_read(&cx.ctx, a.get("id")?),
+    idea_create: HostConsole => ideas::idea_create(&cx.ctx, a.get("title")?),
+    idea_write: HostConsole => ideas::idea_write(&cx.ctx, a.get("id")?, a.get("content")?, a.get("expected_mtime")?, a.get("keep_history")?),
+    idea_rename: HostConsole => ideas::idea_rename(&cx.ctx, a.get("id")?, a.get("title")?, a.get("expected_mtime")?),
+    idea_remove: HostConsole => ideas::idea_remove(&cx.ctx, a.get("id")?, a.get("expected_mtime")?),
+    idea_adopt: HostConsole => ideas::idea_adopt(&cx.ctx, a.get("file")?, a.get("expected_mtime")?),
+    // ── idea sessions (phase S, `worktrees_core::ideasessions`) ──────────
+    // A conversation with Claude about one idea, in its own tmux session
+    // (`worktrees~idea~<conv>`), never a place. Console rows on two objects,
+    // `idea(id)` (the index knows it) and `idea_conv(conv, id)` (its record
+    // does), so no device grant reaches them. The chat rows run the agent
+    // rows' bodies (`agents::*_at`) on the conversation: `idea_send` and
+    // `idea_answer_text` are `agent_send`'s and `agent_answer_text`'s path
+    // with a second, console-only door (C14), audited the same way.
+    idea_conversations: HostConsole [console, idea(id)] => ideasessions::idea_conversations(&cx.ctx, a.get("id")?),
+    idea_conversation_start: HostConsole [console, idea(id)] => ideasessions::idea_conversation_start(&cx.ctx, a.get("id")?),
+    idea_conversation_resume: HostConsole [console, idea_conv(conv, id)] => ideasessions::idea_conversation_resume(&cx.ctx, a.get("id")?, a.get("conv")?),
+    idea_conversation_close: HostConsole [console, idea_conv(conv, id)] => ideasessions::idea_conversation_close(&cx.ctx, a.get("id")?, a.get("conv")?),
+    idea_conversation_remove: HostConsole [console, idea_conv(conv, id)] => ideasessions::idea_conversation_remove(&cx.ctx, a.get("id")?, a.get("conv")?),
+    idea_conversation_rename: HostConsole [console, idea_conv(conv, id)] => ideasessions::idea_conversation_rename(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("title")?),
+    idea_turns: HostConsole [console, idea_conv(conv, id)] => ideasessions::idea_turns(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("n")?),
+    idea_turn_text: HostConsole [console, idea_conv(conv, id)] => ideasessions::idea_turn_text(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("turn_id")?),
+    idea_tool_call: HostConsole [console, idea_conv(conv, id)] => ideasessions::idea_tool_call(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("call_id")?),
+    idea_prompt: HostConsole [console, idea_conv(conv, id)] => ideasessions::idea_prompt(&cx.ctx, a.get("id")?, a.get("conv")?),
+    idea_answer: HostConsole [console, idea_conv(conv, id)] => ideasessions::idea_answer(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("choice")?, a.get("fingerprint")?),
+    idea_answer_text: HostConsole [console, idea_conv(conv, id)] => ideasessions::idea_answer_text(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("choice")?, a.get("fingerprint")?, a.get("text")?),
+    idea_answer_many: HostConsole [console, idea_conv(conv, id)] => ideasessions::idea_answer_many(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("choices")?, a.get("fingerprint")?),
+    idea_send: HostConsole [console, idea_conv(conv, id)] => ideasessions::idea_send(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("text")?),
+    idea_interrupt: HostConsole [console, idea_conv(conv, id)] => ideasessions::idea_interrupt(&cx.ctx, a.get("id")?, a.get("conv")?),
+
     // ── remote access (§4.1): the host's own acts, never a device's ──────────
     remote_enable: HostConsole => remote(cx)?.enable(&a.get::<String>("address")?, a.get("iface")?, a.get("port")?, a.get("advertise")?),
     remote_disable: HostConsole => remote(cx)?.disable(),
@@ -1257,6 +1319,15 @@ commands! { cx, a;
     // The addresses `remote_enable` would take now: the host app's picker.
     remote_candidates: HostConsole => remote(cx)?.candidates(),
     remote_advertise: HostConsole => remote(cx)?.set_advertise(a.get("on")?),
+    // ── named workspaces (idea board phase 2, `workspaces.json`): desktop only ──
+    // Lists of references to registered projects. Console, by the owner's
+    // decision of 2026-11-08: nothing a paired device or an agent reaches.
+    workspaces_list: HostConsole => workspaces::workspaces_list(),
+    workspace_create: HostConsole => workspaces::workspace_create(a.get("name")?),
+    workspace_rename: HostConsole => workspaces::workspace_rename(a.get("id")?, a.get("name")?),
+    workspace_remove: HostConsole => workspaces::workspace_remove(a.get("id")?),
+    workspace_set_projects: HostConsole => workspaces::workspace_set_projects(a.get("id")?, a.get("roots")?),
+    workspace_reorder: HostConsole => workspaces::workspace_reorder(a.get("ids")?),
 }
 
 #[cfg(test)]
@@ -1300,7 +1371,7 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 211 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 244 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six, the slots pair and
     /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
@@ -1314,13 +1385,18 @@ mod tests {
     /// (`harness_sessions`, `restart_harness_sessions`), the slash commands'
     /// two (`agent_commands`, `agent_command`), notifications' nine (the
     /// `push_*` rows), and Settings → Agent policy's four (`limits_settings`,
-    /// `set_limits`, `policy_preset_status`, `apply_policy_preset`); the check scripts
+    /// `set_limits`, `policy_preset_status`, `apply_policy_preset`), and the
+    /// named workspaces' six console rows (`workspaces_list`, `workspace_*`), and the
+    /// idea board's seven console rows (`ideas_list`, `idea_read`,
+    /// `idea_create`, `idea_write`, `idea_rename`, `idea_remove`,
+    /// `idea_adopt`), and the chat's images (`read_place_image`, `agent_call_image`), and phase S's fifteen
+    /// idea-session console rows (`idea_conversation*`, `idea_*` over the agent bodies); the check scripts
     /// hold the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 211, "the table has 211 commands");
+        assert_eq!(TABLE.len(), 244, "the table has 244 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1643,6 +1719,15 @@ mod tests {
         ("set_project_profile", "id", "a profile id; the project is `repo`, declared"),
         ("skill_install_local", "path", "any directory the user picks to install a skill FROM (a console act)"),
         ("open_docs_viewer", "place", "the place's branch and dirty state for the page header; addresses nothing"),
+        ("workspace_rename", "id", "a named workspace's id: workspaces.json is the host's (a console act)"),
+        ("workspace_remove", "id", "a named workspace's id (a console act)"),
+        ("workspace_set_projects", "id", "a named workspace's id (a console act)"),
+        ("workspace_set_projects", "roots", "roots to REFERENCE, kept even once unregistered; the body checks a new one against the registry (a console act)"),
+        ("idea_read", "id", "an idea's ULID: ideas are the host's, in its own folder, not a project's (a console act)"),
+        ("idea_write", "id", "an idea's ULID (a console act)"),
+        ("idea_rename", "id", "an idea's ULID (a console act)"),
+        ("idea_remove", "id", "an idea's ULID (a console act)"),
+        ("read_place_image", "path", "a path in the PLACE (relative to its root, or absolute under it): the body resolves it under `place(repo, slug)`'s own root by `safepath::place_image`, which is not a `file(path)` judged against every project"),
     ];
 
     /// Every `a.get("…")` a body reads that names an object is covered by the
@@ -1717,7 +1802,7 @@ mod tests {
     /// `push_allow_security`); Settings → Agent policy → Limits'
     /// `limits_settings` (`read`) and `set_limits` (`admin`); and the policy
     /// presets' `policy_preset_status` (`read`) and `apply_policy_preset`
-    /// (console). A row that moves group
+    /// (console); the named workspaces' six (console); and the idea board's seven (console); phase S's fifteen idea-session rows (console); `read_place_image` and `agent_call_image` are `read`. A row that moves group
     /// fails here until the count (and the proposal's table) move with it.
     #[test]
     fn every_row_has_one_base_group_and_the_counts_are_section_3_4s() {
@@ -1734,7 +1819,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 66), ("write", 23), ("admin", 41), ("console", 47), ("stream", 10), ("instruct", 8), ("answer", 2),
+            ("read", 70), ("write", 23), ("admin", 41), ("console", 76), ("stream", 10), ("instruct", 8), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 7),
         ]
         .into();
@@ -1770,6 +1855,90 @@ mod tests {
         let projected: HashSet<String> = scope::EVENTS.iter().map(|(n, _)| n.to_string()).collect();
         let unprojected: Vec<_> = emitted.difference(&projected).collect();
         assert!(unprojected.is_empty(), "events with no projection: {unprojected:?}");
+    }
+
+    /// The ideas rows through the dispatcher, each one act with plain
+    /// arguments over the ENGINE's folder: a `path` a client sends is not an
+    /// argument any of them reads, and a write must carry the idea's own id.
+    #[test]
+    fn the_ideas_rows_are_one_act_each_over_the_engines_own_folder() {
+        let (c, dir, _rx) = call("ideas");
+        let folder = dir.join("ideas");
+        let c = Call { ctx: c.ctx.clone().with_ideas_dir(folder.clone()), ..c };
+        let run = |cmd: &str, v: Value| super::call(&c, cmd, &args(v));
+        let l0 = run("ideas_list", json!({})).unwrap();
+        assert_eq!(l0["ideas"], json!([]));
+        assert_eq!(l0["dir"], json!(folder.to_string_lossy()), "the folder, for Show in Finder");
+        assert!(!folder.exists(), "a listing creates nothing");
+        let d = run("idea_create", json!({"title": "Jellyfin", "path": "/etc"})).unwrap();
+        let id = d["id"].as_str().unwrap().to_string();
+        assert_eq!(d["file"], json!("jellyfin.md"));
+        assert!(folder.join("jellyfin.md").is_file());
+        let text = format!("{}<!-- ¶ 7k2q -->\n", d["content"].as_str().unwrap());
+        let w = run("idea_write", json!({"id": id, "content": text, "expectedMtime": d["mtime_ms"]})).unwrap();
+        assert_eq!((w["id"].as_str(), w["file"].as_str()), (Some(id.as_str()), Some("jellyfin.md")), "the idea as saved");
+        assert!(w.get("content").is_none(), "without its text");
+        assert_eq!(std::fs::read_to_string(folder.join("jellyfin.md")).unwrap(), text);
+        let kept = format!("{text}kept\n");
+        let w = run("idea_write", json!({"id": id, "content": kept, "expectedMtime": w["mtime_ms"], "keepHistory": true})).unwrap();
+        assert_eq!(std::fs::read_dir(folder.join(".history").join(&id)).unwrap().count(), 1, "keep_history copies the replaced text");
+        let m = run("idea_write", json!({"id": id, "content": text, "expectedMtime": w["mtime_ms"]})).unwrap()["mtime_ms"].clone();
+        // The first heading names the file; the next save goes by id.
+        let moved = text.replace("# Jellyfin\n", "# Jellyfin Sharing\n");
+        let w = run("idea_write", json!({"id": id, "content": moved, "expectedMtime": m})).unwrap();
+        assert_eq!(w["file"], json!("jellyfin-sharing.md"));
+        assert!(!folder.join("jellyfin.md").exists());
+        let m = run("idea_write", json!({"id": id, "content": text, "expectedMtime": w["mtime_ms"]})).unwrap()["mtime_ms"].clone();
+        assert!(folder.join("jellyfin.md").is_file(), "and back");
+        assert_eq!(std::fs::read_dir(folder.join(".history").join(&id)).unwrap().count(), 1, "an ordinary save copies nothing");
+        let e = run("idea_write", json!({"id": id, "content": text, "expected_mtime": 1})).unwrap_err();
+        assert!(e.as_str().unwrap().contains("changed on disk"), "{e}");
+        let other = run("idea_create", json!({})).unwrap();
+        assert_eq!(other["title"], json!("Untitled"));
+        let e = run("idea_write", json!({"id": other["id"], "content": text})).unwrap_err();
+        assert!(e.as_str().unwrap().contains("refusing to save one idea over another"), "{e}");
+        let r = run("idea_rename", json!({"id": id, "title": "Jellyfin at home", "expected_mtime": m})).unwrap();
+        assert_eq!((r["id"].as_str(), r["file"].as_str()), (Some(id.as_str()), Some("jellyfin-at-home.md")));
+        assert_eq!(run("idea_read", json!({"id": id})).unwrap()["content"], json!(text.replace("# Jellyfin\n", "# Jellyfin at home\n")));
+        run("idea_remove", json!({"id": id})).unwrap();
+        assert!(folder.join(".history").join(&id).is_dir(), "history first");
+        std::fs::write(folder.join("hand.md"), "# Hand\n").unwrap();
+        let l = run("ideas_list", json!({})).unwrap();
+        assert_eq!(l["ideas"].as_array().unwrap().len(), 2);
+        assert!(run("idea_adopt", json!({"file": "../hand.md"})).is_err());
+        let a = run("idea_adopt", json!({"file": "hand.md"})).unwrap();
+        assert!(a["content"].as_str().unwrap().ends_with("---\n\n# Hand\n"));
+        for cmd in ["ideas_list", "idea_read", "idea_create", "idea_write", "idea_rename", "idea_remove", "idea_adopt"] {
+            assert_eq!(exposure(cmd), Some(Exposure::HostConsole), "{cmd}: desktop only");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An engine a test starts writes no idea into the user's real folder:
+    /// its `Ctx` resolves `ideas::dir()`, the real one under a test's
+    /// environment, and the registry's one-way switch refuses it.
+    #[test]
+    fn an_engine_under_test_cannot_write_the_real_ideas_folder() {
+        worktrees_core::registry::forbid_real_writes();
+        let (c, dir, _rx) = call("ideas-real");
+        let real = worktrees_core::ideas::default_dir();
+        assert_eq!(c.ctx.ideas_dir(), real.as_path(), "no override in this process");
+        let existed = real.exists();
+        let e = super::call(&c, "idea_create", &args(json!({"title": "leak"}))).unwrap_err();
+        assert!(e.as_str().unwrap().contains("real ideas folder"), "{e}");
+        assert_eq!(real.exists(), existed, "not even the folder");
+        // Phase S's writes are guarded the same way: a conversation's record,
+        // its start.md and history copy never reach the real folder.
+        let id = worktrees_core::ulid::new();
+        let desk = real.join(worktrees_core::ideasessions::DESK_DIR);
+        let desk_existed = desk.exists();
+        let e = worktrees_core::ideasessions::prepare_at(&real, &id).unwrap_err();
+        assert!(e.contains("real ideas folder"), "{e}");
+        let e = worktrees_core::ideasessions::rename_at(&real, &id, &worktrees_core::ulid::new(), "x").unwrap_err();
+        assert!(e.contains("real ideas folder") || e.contains("no conversation"), "{e}");
+        assert!(worktrees_core::ideasessions::remove_at(&real, &id, &worktrees_core::ulid::new()).unwrap_err().contains("real ideas folder"));
+        assert_eq!((real.exists(), desk.exists()), (existed, desk_existed), "not even the folder");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// gap 17: a body's `Ctx` fetches as its caller. A device's is pinned to

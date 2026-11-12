@@ -1126,6 +1126,15 @@ fn a_moved_projects_agent_is_read_before_and_after_it_is_adopted() {
     let main = r["ok"]["places"].as_array().and_then(|ps| ps.iter().find(|p| p["slug"] == json!("(main)"))).unwrap_or_else(|| panic!("{r}"));
     assert_eq!(main["agent_sessions"]["claude"]["name"], json!("new-(main)"), "{main}");
     assert!(main["agent_sessions"]["claude"]["model"].is_string(), "the model label after the rename: {main}");
+    // `sessions:busy` is change-gated, and every `rpc` above skipped the
+    // events that came while it waited: on a slow runner the poll's push of
+    // this state (its first tick, or the adopt) landed inside one of them,
+    // was dropped, and no further push was ever due (CI, macOS, #635). Ask for
+    // the CURRENT state instead: a listen frame that ADDS a snapshot event is
+    // sent its last push at once (`conn::Clients::declare`), and before the
+    // first push there is nothing to miss.
+    listen(&mut ws, &[]);
+    listen(&mut ws, &["sessions:busy"]);
     let busy = busy_until(&mut ws, &json!([new_root]), Duration::from_secs(15));
     assert_eq!(busy, json!([new_root]), "the busy dot names the new folder");
     assert_eq!(sb.terminate().code(), Some(0));
@@ -1187,5 +1196,66 @@ fn remove_project_names_the_sessions_it_leaves_running() {
     assert_eq!(r["ok"]["projects"], json!([]), "removed all the same: {r}");
     // Nothing was closed: removing a project only unregisters it.
     assert!(tmux.run(&["has-session", "-t", "=busy-(main)"]).status.success());
+    assert_eq!(sb.terminate().code(), Some(0));
+}
+
+/// The ideas folder of a SPAWNED serve is the one `WORKTREES_IDEAS_DIR`
+/// names, never `$HOME`'s, and an edit made outside the app reaches a client
+/// as `ideas:changed` carrying an mtime no row answered with — which is how a
+/// client tells it from its own save, whose mtime the row DID answer with.
+#[test]
+fn a_spawned_serves_ideas_live_where_the_override_says_and_an_outside_edit_is_an_event() {
+    let mut sb = Sandbox::new("ideas");
+    let folder = sb.root.join("ideas-here");
+    let sf = sb.launch_env(&[], &[("WORKTREES_IDEAS_DIR", folder.to_str().unwrap())]);
+    let mut ws = connect(&sf, "tauri://localhost");
+    // The poll's first tick takes the folder's baseline, and the same tick
+    // always pushes `sessions:busy` (after the ideas beat): act only after
+    // it, or the create and the save are the baseline and no event is due.
+    listen(&mut ws, &["ideas:changed", "sessions:busy"]);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        assert!(Instant::now() < deadline, "the poll never ticked");
+        let v: Value = serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
+        if v["event"] == json!("sessions:busy") {
+            break;
+        }
+    }
+    let r = rpc(&mut ws, 1, "ideas_list", json!({}));
+    assert_eq!(r["ok"]["ideas"], json!([]), "{r}");
+    assert!(!folder.exists(), "a listing creates nothing");
+    let d = rpc(&mut ws, 2, "idea_create", json!({ "title": "From the test" }))["ok"].clone();
+    let id = d["id"].as_str().unwrap_or_else(|| panic!("{d}")).to_string();
+    let file = folder.join("from-the-test.md");
+    assert!(file.is_file(), "under the override");
+    assert!(!sb.root.join("home/.local/share/worktrees/ideas").exists(), "and not under HOME");
+    let saved = rpc(&mut ws, 3, "idea_write", json!({ "id": id, "content": format!("{}\nmine\n", d["content"].as_str().unwrap()), "expectedMtime": d["mtime_ms"] }))["ok"]["mtime_ms"]
+        .as_u64()
+        .unwrap();
+    // The poll's next tick names the app's own save, at the mtime it answered.
+    // A tick may have caught the create first; read until the save's turn.
+    let wait = |ws: &mut WebSocket<TcpStream>, want: &dyn Fn(u64) -> bool| -> u64 {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut heard = Vec::new();
+        loop {
+            assert!(Instant::now() < deadline, "no ideas:changed for {id}; heard {heard:?}");
+            let v: Value = serde_json::from_str(ws.read().unwrap().to_text().unwrap()).unwrap();
+            heard.push(v.get("event").cloned().unwrap_or(Value::Null).to_string() + &v.get("payload").map(|p| p.to_string()).unwrap_or_default().chars().take(200).collect::<String>());
+            if v["event"] != json!("ideas:changed") {
+                continue;
+            }
+            for c in v["payload"]["changed"].as_array().unwrap() {
+                let m = c["mtime_ms"].as_u64().unwrap();
+                if c["id"] == json!(id) && want(m) {
+                    return m;
+                }
+            }
+        }
+    };
+    assert_eq!(wait(&mut ws, &|m| m == saved), saved, "its own save");
+    std::thread::sleep(Duration::from_millis(20));
+    std::fs::write(&file, format!("{}\nfrom another editor\n", d["content"].as_str().unwrap())).unwrap();
+    let outside = wait(&mut ws, &|m| m != saved);
+    assert_ne!(outside, saved, "an outside edit carries an mtime no row answered with");
     assert_eq!(sb.terminate().code(), Some(0));
 }

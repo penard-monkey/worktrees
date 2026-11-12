@@ -142,5 +142,22 @@ export function GeneralPage() {
         <div className="hint">Where New project… and Clone from URL… put a project. Each of them also remembers the folder it last used here. Empty: the folder your projects already share, else ~/workspace.</div>
       </section>
     </Sec>
+
+    {/* One row per beta feature (beta.ts): its switch and one line on what it
+        turns on. Turning one off hides it and deletes nothing. */}
+    <Sec id="beta">
+      <section className="setting">
+        <label>Beta features</label>
+        <label className="tier-toggle setting-check">
+          <input type="checkbox" checked={settings.beta_ideas} data-testid="beta-ideas"
+            onChange={(e) => onChange({ beta_ideas: e.currentTarget.checked })} />
+          Ideas and workspaces
+        </label>
+        <div className="hint">
+          Adds the Ideas window (the lightbulb in the rail, ⌘⇧I) and named workspaces in the
+          nav. Both are still changing. Turning it off hides them and keeps what you made.
+        </div>
+      </section>
+    </Sec>
   </Page>;
 }

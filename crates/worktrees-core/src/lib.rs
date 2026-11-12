@@ -54,6 +54,7 @@ pub mod pathclass;
 pub mod pending;
 pub mod pi;
 pub mod pimcp;
+pub mod pihosts;
 pub mod pimodels;
 pub mod plan;
 pub mod plancmd;
@@ -85,6 +86,10 @@ pub mod tmux;
 pub mod turns;
 pub mod tmux_server;
 pub mod trust;
+pub mod ideas;
+pub mod ideasessions;
+pub mod ulid;
+pub mod workspaces;
 pub mod ui;
 
 pub use error::{Result, WtError};

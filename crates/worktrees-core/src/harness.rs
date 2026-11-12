@@ -392,6 +392,10 @@ impl Adapter for Claude {
         };
         if let Some(id) = launch.resume_id.as_deref().filter(|id| launch.resume && crate::codex::is_uuid(id)) {
             tail.extend(["--resume".to_string(), shell_quote(id)]);
+        } else if let Some(id) = launch.session_id.as_deref().filter(|id| !launch.resume && crate::codex::is_uuid(id)) {
+            // A fresh conversation whose id the caller chose and recorded
+            // first (an idea session): its transcript is then known by path.
+            tail.extend(["--session-id".to_string(), shell_quote(id)]);
         }
         LaunchArgs { head: model_words(self.provider(), launch), tail }
     }
@@ -639,8 +643,13 @@ impl Adapter for Pi {
     /// decided, and the flag is the one thing that outranks it — so a repo
     /// cannot move the file activity is read from. Then the trust flag
     /// (`trust::pi_flag`).
+    ///
+    /// First of all `-e <worktrees' model hosts>` (`pimodels::pane_ext_words`):
+    /// a launch AND a resume, since a resume without it starts a session whose
+    /// model is one of worktrees' on another model, silently (pi 1.5.0).
     fn place_flags(&self, wt: &str) -> Vec<String> {
-        let mut f = vec!["--session-dir".to_string(), shell_quote(&crate::pi::session_dir(wt).to_string_lossy())];
+        let mut f = crate::pimodels::pane_ext_words();
+        f.extend(["--session-dir".to_string(), shell_quote(&crate::pi::session_dir(wt).to_string_lossy())]);
         f.extend(crate::trust::pi_flag(wt).map(str::to_string));
         f
     }
@@ -1380,6 +1389,30 @@ mod tests {
         assert_eq!(CLAUDE.resume_display(), "-r");
         assert_eq!(PI.resume_display(), "--session-id <per place>");
         assert!(!PI.resume_display().contains("place-"), "not a derived id");
+    }
+
+    /// Every pi worktrees starts loads the SAME model-hosts extension: the
+    /// pane's launch, its resume (without it a session on one of worktrees'
+    /// models silently resumes on another, pi 1.5.0) and `--list-models`.
+    #[test]
+    fn a_pi_launch_its_resume_and_the_catalog_carry_the_same_hosts_extension() {
+        let ext = crate::pimodels::ext_args();
+        assert_eq!(ext.len(), 2, "materialized under test: {ext:?}");
+        assert_eq!(ext[0], "-e");
+        let word = format!("-e {}", shell_quote(&ext[1]));
+        let mut l = AiLaunch::plain("pi");
+        l.place_flags = PI.place_flags("/tmp/w");
+        l.model = Some("box/qwen3:8b".into());
+        let launch = l.launch_cmd("p-feat~agent~pi");
+        assert!(launch.starts_with(&format!("pi {word} --session-dir ")), "{launch}");
+        l.resume = true;
+        let resume = l.launch_cmd("p-feat~agent~pi");
+        assert!(resume.starts_with(&format!("pi {word} --session-dir ")) && !resume.contains("--model"), "{resume}");
+        let list = crate::pimodels::pi_command_for(std::path::Path::new("pi"), true);
+        let args: Vec<String> = list.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(args, ext, "--list-models gets the same -e");
+        let auth = crate::pimodels::pi_command_for(std::path::Path::new("pi"), false);
+        assert_eq!(auth.get_args().count(), 0, "auth check ignores -e, and -e before `auth` is a parse error");
     }
 
     /// The launch a place's pi gets, and the resume: identical but for

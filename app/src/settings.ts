@@ -452,6 +452,19 @@ export type Settings = {
   // folder the workspace's projects already share, else ~/workspace.
   projects_parent: string;
   collapsed: Record<string, boolean>; // per-project-root collapse
+  // The nav's view: All projects (today's nav) or Workspaces (named lists of
+  // project references, `workspaces.ts`). Per viewer, like every key here.
+  nav_view: "projects" | "workspaces"; // workspaces.ts NavView: settings.ts takes no relative import (settingsmap-check)
+  // Workspace view collapse: a workspace by its id, a project under one by
+  // `wsProjectKey(id, root)` — apart from `collapsed`, so folding a project in
+  // a workspace leaves All projects alone.
+  ws_collapsed: Record<string, boolean>;
+  // Settings → General → Beta features: Ideas and workspaces (the Ideas
+  // window, its rail button and ⌘⇧I, the All projects | Workspaces switch and
+  // every workspace menu). Off by default; read ONLY through `beta.ts`
+  // (`ideasBeta`), and by the shim at launch (companion.rs `BETA`), which never
+  // writes this file. Never retire it: an older build reads the blob too.
+  beta_ideas: boolean;
   hidden_tiers: string[]; // lifecycle tiers hidden in the Places tree (active/idle/dormant)
   sort_mode: "recent" | "alpha" | "manual";
   sort_dir: "asc" | "desc";
@@ -602,6 +615,9 @@ export const DEFAULTS: Settings = {
   sync_with_sessions: false,
   projects_parent: "",
   collapsed: {},
+  nav_view: "projects",
+  ws_collapsed: {},
+  beta_ideas: false,
   hidden_tiers: [],
   sort_mode: "recent",
   sort_dir: "desc",
@@ -950,6 +966,9 @@ export async function loadSettings(): Promise<Settings> {
     s.done_horizon_secs = snapHorizon(s.done_horizon_secs);
     s.done_steps = clampSteps(s.done_steps);
     if (typeof s.projects_parent !== "string") s.projects_parent = "";
+    if (s.nav_view !== "workspaces") s.nav_view = "projects";
+    if (!s.ws_collapsed || typeof s.ws_collapsed !== "object") s.ws_collapsed = {};
+    if (s.beta_ideas !== true) s.beta_ideas = false;
     if (!isHarness(s.default_provider)) s.default_provider = HARNESSES[0];
     // A tab that no longer exists must land on Files, globally AND per place.
     // Without this, `"automations"` (the tab removed after 0.40.1) persisted in

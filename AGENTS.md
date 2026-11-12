@@ -51,6 +51,11 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   warns in that case (`ops::opener_plan`). A re-brief refuses a live session
   and writes nothing, because the opener reaches only a session the launch
   CREATES (`ops::session_to_reuse`): close it, or message the agent.
+  **A `new` that REUSES a place without `--brief` takes `open`'s rule too**
+  (`ops::plan_opener`): that is the MCP `create_worktree` retry with `force`
+  that a refused launch prescribes, and until 2026-11-05 it set the opener
+  only for `--brief`, so the forced retry started Claude blank on the brief
+  the refused call had just written.
   **No agent types into Claude:** MCP `send` refuses a Claude place and names
   its session for `SendMessage` (`harness::Claude::send`). **The one
   exception is serve's `agent_send`** (iOS MVP S8), decided by the user on
@@ -97,10 +102,34 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   effort (default)` on Sonnet 5.5), so the proof before `s` compares that
   row by shape (`prompt::model_body`); an e2e that picks the model in effect
   never moves it, which is how the owner's Sonnet pick reached "the prompt
-  changed" (2026-11-04, `2.1.318/model-effort/`). In a warm conversation `s`
+  changed" (2026-11-04, `2.1.318/model-effort/`). **Claude 2.1.319's `6. More models  Show 8 more`
+  row is not a model**: Enter on it expands the list in place (it becomes
+  `Hide`, rows 7-14 follow), `s` and Space do nothing, and its footer is
+  `Enter to expand`, so the list is not read while it is highlighted. It is
+  out of the choices but in the walk's `order`, so a key count to a model
+  below it crosses it (`2.1.319/model-effort/`). In a warm conversation `s`
   on another model brings Claude's "Switch model?", whose Yes reads the same
-  after the saving Enter: it is the terminal's. Do not grow a fourth path that
-  types into Claude. `agent_interrupt`
+  after the saving Enter, so `prompt::claude` never reads it. The HOST knows
+  what it pressed: `agent_answer`'s `s` on a model list, under the place lock,
+  records (pane, session, model, `#{session_activity}` before the press) in
+  `Agents::switched` — memory only — once a fresh capture shows the dialog for
+  that same model (`prompt::read_switch`, `names_model`). Only beside a
+  matching, young (120 s) record whose session has seen no client activity
+  since is the dialog a prompt; any other screen, answer, send, command or
+  interrupt drops it, and a restart, another model or a stale record leaves it
+  the terminal's. The witness is `#{session_activity}` (`tmux::
+  terminal_activity`), NOT `#{client_activity}`: both move on a client's key
+  and neither on the host's `send-keys`/`paste-buffer`, but a client's own
+  value dies with the client, so a key followed by a detach passed for no
+  activity. One-second resolution: no record when a client was active in the
+  second of the press; the baseline is read BEFORE the capture that proves the
+  list (read after it, a saving Enter typed in the gap was already in it).
+  Residual, not closable without an atomic tmux step: a key typed between the
+  last activity check and the Enter that answers the dialog. Answering uses the ordinary move, proof and Enter, and
+  the record is consumed. Do not grow a fourth path that types into Claude. `idea_send` and
+  `idea_answer_text` (phase S, C14, the owner's yes of 2026-11-11) are not a fourth: they are the
+  same bodies (`agents::send_at`, `answer_text_at`) behind console-only rows for idea
+  conversations, with the same rule, checks and audit record. `agent_interrupt`
   (`agents::agent_interrupt`, the chat's Stop and its Esc, `stopTurn` in
   `chat.ts`) is not one: it types no text, only ONE key,
   Escape, through `tmux::press` as `agent_answer`'s keys go, under the same
@@ -143,6 +172,71 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   `kind: background` still counts for parked jobs but `is_interactive_cli`
   keeps it out of the pane's chat transcript and model. Do not identify the
   pane's Claude by `kind` or pane id alone.
+
+- **A chat image is the PLACE's, and the host resolves it** (`feat/chat-images`).
+  `![alt](path)` in a bubble and a Read's thumbnail go through ONE row,
+  `read_place_image: Engine [read, place(repo, slug)]`, never `read_file_base64`
+  (`file(path)`: judged against EVERY project the caller may see, which is the
+  wrong question for a picture an agent chose to show). **The place-only rule is
+  the CHAT's containment, not an access boundary**: grants reach PROJECTS, not
+  places (`authz::Projects`), so a device with the project may read any place of
+  it by other rows; the rule keeps a reply from showing another place's or the
+  host's files. The rule is
+  `safepath::place_image`: relative to the place's root, or absolute and under
+  it, then `safe_under` (string rule, lstat of the last component, canonical
+  containment: a link out, `..`, another place's tree, a URL all refused in
+  words that name the path); an image extension from `IMAGE_TYPES`; and for
+  `(main)` nothing under `.worktrees/`, because its root holds every other
+  place's tree, decided on the RESOLVED file by identity: is `<root>/.worktrees`
+  one of its ancestors by (dev, ino)? A string compare passed `.Worktrees/x/y.png`
+  on the default case-insensitive APFS. **Behind any link the answer is one
+  voice** ("outside this place"), whether or not a file exists past it
+  (`why_not` walks the components; `classify`'s answers differed and told a
+  reader which files exist outside); only real folders inside the place give
+  "not found". `open_place_image` then OPENS the file `O_NOFOLLOW` and fstats the
+  handle, which must be a regular file with the (dev, ino) `place_image` checked
+  (a swap between check and open is refused), and reads `check_image` off the
+  header: a raster over `MAX_IMAGE_PIXELS` (40 MP: the file cap does not bound
+  it, a solid 150 MP PNG is 175 KB; Chromium and Playwright WebKit decoded up to
+  150 MP, so the number is MEMORY, 4 B a pixel decoded; the system WKWebView was
+  not measured), one whose header cannot be read, or an SVG with a DOCTYPE or
+  ENTITY is refused with a note. `agent_call_image` applies `check_image` to the
+  transcript's block too. A symlinked image is refused even when it points
+  inside, as in
+  `safe_under`. `app/src/imgsrc.ts` restates it ONLY to say the refusal without
+  a round trip and to keep a remote URL from ever becoming an `<img>`; the host
+  is the authority, and `chatimage-check.mjs` runs both the rule and the real
+  `Markdown` + `chatImageNode`. **A Read's thumbnail has two sources.** Inside the
+  place it is the call's `file_path` through `read_place_image`. A Read of a file
+  OUTSIDE the place (a render in `/tmp`: the owner's potato, 2026-11-09, the
+  sandbox's first run) has no path the rule allows, so it is the picture Claude
+  was SHOWN, from the transcript, through `agent_call_image: Engine [read,
+  place(repo, slug)]`, fetched when the thumbnail mounts and never in
+  `agent_turns`: 2.1.319 writes the block TWICE per entry (`tool_result.content[]`
+  and `toolUseResult.file`), 150-300 KB each and recompressed
+  (`claude-2.1.319-read-image.jsonl`, its README), `turns::claude_call_image`
+  reads only a Read's block by id, size-capped. **The body refuses every caller
+  but the console** (`Ctx::is_console`; `ERR_CALL_IMAGE_CONSOLE`): that file may
+  be anywhere on the host, so a paired device gets a note and no pixels. The
+  console check lives in the body, not the capability column, because the row's
+  `read` is the base group and a device holds it. The cache is `ImageView.tsx`'s, by place + path + etag
+  (`"<mtime ms>-<bytes>"`, answered `unchanged` with no bytes), a call's picture
+  kept by call id: a mounted bubble
+  paints from it in its first frame, which is also why an image arriving below
+  the fold does not move a reader (`chat-image-browser.mjs`, Chromium and
+  WebKit). **The rule must be always-on, not skill-only**: the skill loads on demand, and
+  "draw me a potato" never asks for "branch work", while Claude Code's own prompt
+  says to keep temporary files in its scratchpad (the owner's sandbox run, with
+  no `![]()` in either reply). `guidance::IMAGE_RULE` is a constant that reaches
+  Claude as the prompt plugin's SessionStart stdout (every launch, whatever the
+  skill and planning settings) and pi, Codex and kimi inside `rules_text`; the
+  skill repeats it. Agents save under `.worktrees-attachments/agent/`
+  (`attach::AGENT_DIR`): its own folder, so agent files never count toward
+  `attach`'s 50 files / 100 MB (`holding` reads only the top level and only
+  names it made), swept after seven days by `attach::sweep_agent` (regular
+  files, flat, a link never followed), covered by the same exclusion, which
+  `Project::ensure_excluded` now adds since the rule sends agents there before
+  any upload has made it.
 
 - **The agent rows (`worktrees_api::agents`, `worktrees_core::prompt`) read
   Claude's screen, and Claude has five traps** (fixtures and READMEs:
@@ -201,7 +295,32 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   SessionEnd, after an answer that used it, or once no prompt is up), and
   `agent_prompt` reads a clipped prompt (`prompt::clipped`) only beside a
   record that AGREES with the screen, as `detail`, which the fingerprint
-  covers; a plan with no record falls back to the file its footer names,
+  covers. **The same record is sent as `asked` on every readable Claude
+  prompt it agrees with** (`feat/prompt-asked`, iOS prompt-display §4):
+  `{tool, input, from: "hook", cwd?, current?, done?}`, `cwd` being the
+  hook's (`Asked.cwd`), `current`/`done` an AskUserQuestion's question on
+  screen and its `☒` tabs. A clipped prompt's `asked` is its `detail` plus
+  `cwd`; a whole prompt has `asked` and NO `detail`, and the fingerprint
+  covers whichever it has. `prompt::call_agrees` is the per-tool rule and
+  the only gate: AskUserQuestion (header among the tabs, question text,
+  `multiSelect`, option labels in order — only the free-text row and `Chat
+  about this` may follow, and exactly ONE question may match), Bash (the
+  rows between the dashed rules EQUAL the command; a clipped prompt's only
+  end it), Edit/MultiEdit/Write (`diff_in`; on a WHOLE prompt the rows must
+  also rebuild the new and old text exactly, `rebuilds`, except a Write over
+  an existing file, and a `…`-cut row refuses), ExitPlanMode (the plan's head;
+  a whole plan must EQUAL the call's, by letters and digits).
+  **Left out, on purpose:** an MCP or any other tool (its input is on no
+  row, and the hook fires as each prompt comes up, not at once — measured
+  on 2.1.319, `claude-screen/2.1.319/README.md` — so the newest record is
+  right only while the hook wrote one: an oversize input, a failed hook or a
+  Claude from before the plugin leaves the last same-tool record, which
+  nothing on screen can refute); WebFetch (a 2.1.319 sub-agent's prompt has
+  no key hints, so nothing reads it, and its url row carries a trailing `/`
+  the call lacks); WebSearch (no screen captured); NotebookEdit; Bash drawn
+  with no dashed rules (no fixture). A whole prompt's record goes with the
+  answer that used it, except an AskUserQuestion's, which serves the form's
+  next question and goes with the "no prompt is up" sweep; a plan with no record falls back to the file its footer names,
   read through `safepath::safe_under`. The hook NEVER decides: its command
   discards stdout and ends `|| true`, because exit 2 or a printed decision
   would deny the user's prompt. Anything else that cannot be read whole is
@@ -260,7 +379,7 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   do not align them). hyper parses the HTTP and tungstenite sees only frames,
   also ON PURPOSE: tungstenite's `accept_hdr_async` WRITES an HTTP error
   response when it refuses, while a hyper service that returns `Err` closes
-  with 0 bytes. The 211 commands sit in ONE macro table
+  with 0 bytes. The 212 commands sit in ONE macro table
   (`serve/dispatch.rs`) with an `Exposure` each; the six `ClientLocal` rows
   (clipboard, editor, terminal, zoom, the app bundle) are refused with
   `err: "client-local"`, never run on the host — the docs viewer is an
@@ -1889,7 +2008,7 @@ wait loop on it never ended and a sandbox app ran for two hours.
   the working integration would have ended it.
 - Design tokens: `app/src/tokens.css` — everything scales off `--ui-rem`;
   terminal font is independent (`--term-*`). No UI libraries, plain CSS. "No UI
-  libraries" means no COMPONENT/design-system libraries and no editor — a pure
+  libraries" means no COMPONENT/design-system libraries — a pure
   PARSER that emits data we render ourselves is allowed, and `marked` (lexer
   only, for the dock's markdown) is the one instance. Syntax highlighting is
   hand-rolled in `app/src/highlight.ts` for the same reason.
@@ -1913,6 +2032,18 @@ wait loop on it never ended and a sandbox app ran for two hours.
   build (+1.9 MB, and the only symptom was a large file), and **a hash added to
   `style-src` beside `'unsafe-inline'` voids the keyword** and makes every
   diagram vanish while the prose still renders perfectly.
+  **CodeMirror 6 is the THIRD admitted exception, on the owner's decision of
+  2026-11-08, and only inside the Ideas companion window's own bundle
+  (`app/companion/`, built by `vite.companion.config.ts` into
+  `app/dist/companion/`) — never `app/src`.** Ideas need a real editor, and
+  CodeMirror edits the markdown as TEXT, so the file on disk stays exactly what
+  was typed. A rich-text editor that re-serializes markdown is not admitted. The
+  boundary is the viewer's, again: a build of its own, never a second input to
+  the app's, and `app/scripts/companion-boundary-check.mjs` walks the app's
+  import graph and, when a build exists, greps `app/dist` outside
+  `dist/companion/`. The library itself arrives with Ideas phase 1; phase 0
+  added the window, the bundle and the check, not CodeMirror. A new exception
+  names its bundle and its check in this paragraph.
 - **Driving the sandbox app by NAME drives the INSTALLED app — and it has no
   bundle id to address instead.** `sandbox.sh --app` runs `tauri dev`, which
   execs the UNBUNDLED binary (`<worktree>/target/debug/app` — the workspace

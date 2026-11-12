@@ -42,6 +42,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// The folder in a place's root that holds its attachments.
 pub const DIR: &str = ".worktrees-attachments";
+/// The agent's own subfolder of [`DIR`] (`feat/chat-images`): where a lane
+/// saves a picture the user should SEE (the chat view draws it). Its own folder
+/// so the agent's files never count toward [`MAX_FILES`] or [`MAX_TOTAL`] (an
+/// upload cannot be blocked by them: [`holding`] reads only the top level and
+/// only names this module made), and flat, because [`sweep_agent`] clears
+/// regular files in it older than [`KEEP`] and looks no deeper. The folder
+/// goes with the place, and the exclusion of [`DIR`] covers it.
+pub const AGENT_DIR: &str = "agent";
 /// The most one file may hold, decoded. Its base64 is 4/3 of it, ~10.7 MiB,
 /// well under serve's 16 MiB message.
 pub const MAX_BYTES: usize = 8 << 20;
@@ -328,6 +336,7 @@ pub fn store_in(
     let (kind, ext) = sniff(data, &shown)?;
     let dir = open_dir(place).map_err(|e| e.said(place))?;
     sweep_dir(&dir, now);
+    sweep_agent(&dir, now);
     let (files, total) = holding(&dir);
     if files >= MAX_FILES {
         return Err(format!("{ERR_FILES}: {MAX_FILES}"));
@@ -482,9 +491,31 @@ fn sweep_dir(dir: &Path, now: SystemTime) -> usize {
 pub fn sweep(place: &Path, now: SystemTime) -> usize {
     let dir = place.join(DIR);
     match fs::symlink_metadata(&dir) {
-        Ok(md) if md.is_dir() && md.uid() == euid() => sweep_dir(&dir, now),
+        Ok(md) if md.is_dir() && md.uid() == euid() => sweep_dir(&dir, now) + sweep_agent(&dir, now),
         _ => 0,
     }
+}
+
+/// [`AGENT_DIR`] of `dir` (the attachments folder, already vetted): its regular
+/// files older than [`KEEP`], removed, whatever their names. A link in place of
+/// the folder, a folder that is not ours, and anything that is not a regular
+/// file are left alone and never followed. How many went.
+fn sweep_agent(dir: &Path, now: SystemTime) -> usize {
+    let agent = dir.join(AGENT_DIR);
+    match fs::symlink_metadata(&agent) {
+        Ok(md) if md.is_dir() && md.uid() == euid() => {}
+        _ => return 0,
+    }
+    let Ok(rd) = fs::read_dir(&agent) else { return 0 };
+    let mut gone = 0;
+    for e in rd.flatten() {
+        let Ok(md) = fs::symlink_metadata(e.path()) else { continue };
+        let old = md.is_file() && md.modified().ok().and_then(|m| now.duration_since(m).ok()).is_some_and(|age| age > KEEP);
+        if old && fs::remove_file(e.path()).is_ok() {
+            gone += 1;
+        }
+    }
+    gone
 }
 
 /// Append [`EXCLUDE`] (and its header) to `<git_common>/info/exclude`
@@ -530,7 +561,7 @@ fn yyyymmdd(now: SystemTime) -> String {
 
 /// Days since 1970-01-01 → (year, month, day), proleptic Gregorian (Howard
 /// Hinnant's `civil_from_days`, the inverse of `sysclock::parse_iso8601`'s).
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
+pub(crate) fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;
@@ -853,5 +884,38 @@ mod tests {
         assert!(o.status.success(), "a plain remove, no --force: {}", String::from_utf8_lossy(&o.stderr));
         assert!(!wt.exists());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    /// An agent's pictures live in `.worktrees-attachments/agent/`: not counted
+    /// toward an upload's limits, cleared after seven days, a link there never
+    /// followed.
+    #[test]
+    fn the_agent_folder_is_swept_and_never_counted() {
+        let root = repo("agentdir");
+        let dir = root.join(DIR);
+        fs::create_dir_all(dir.join(AGENT_DIR)).unwrap();
+        let old = now() - KEEP - Duration::from_secs(60);
+        let set = |p: &Path, t: SystemTime| fs::OpenOptions::new().write(true).open(p).unwrap().set_modified(t).unwrap();
+        let set_old = |p: &Path| set(p, old);
+        fs::write(dir.join(AGENT_DIR).join("potato.png"), b"x").unwrap();
+        fs::write(dir.join(AGENT_DIR).join("fresh.png"), b"x").unwrap();
+        set_old(&dir.join(AGENT_DIR).join("potato.png"));
+        set(&dir.join(AGENT_DIR).join("fresh.png"), now());
+        let outside = repo("agentdir-out");
+        fs::write(outside.join("keep.png"), b"x").unwrap();
+        symlink(outside.join("keep.png"), dir.join(AGENT_DIR).join("link.png")).unwrap();
+        assert_eq!(holding(&dir), (0, 0), "the agent's files are not uploads");
+        assert_eq!(sweep(&root, now()), 1, "the old picture goes");
+        assert!(!dir.join(AGENT_DIR).join("potato.png").exists());
+        assert!(dir.join(AGENT_DIR).join("fresh.png").exists() && outside.join("keep.png").exists());
+        // a link in place of the folder is never followed
+        fs::remove_dir_all(dir.join(AGENT_DIR)).unwrap();
+        fs::write(outside.join("old.png"), b"x").unwrap();
+        set_old(&outside.join("old.png"));
+        symlink(&outside, dir.join(AGENT_DIR)).unwrap();
+        assert_eq!(sweep(&root, now()), 0);
+        assert!(outside.join("old.png").exists());
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&outside);
     }
 }

@@ -153,34 +153,75 @@ if (S.SETTINGS_REV < 4) fail(`SETTINGS_REV is ${S.SETTINGS_REV} — the dock_sid
   } else ok("the dock resizer's sign follows dock_side");
 }
 
-// ── the notice stack sits over the AGENT in every layout ─────────────────────
-// `leftOfMain` is evaluated against the grid this file just checked: the
-// tracks before `space`, plus the dock when it is on the left and open.
+// ── the app-level floats name NO layout track ────────────────────────────────
+// Every corner of the window is some pane's, and which pane depends on the
+// layout (places_side × dock_side, per place): `left: rail-w` / `leftOfMain` put
+// the error toast on the chat composer and the usage meters (owner, 2026-11-07).
+// The stack is anchored to the window's top centre instead, so the rule here is
+// the ABSENCE of anything layout-dependent: no inline position on the stack, no
+// `--rail-w` / `bottom` / `right` in the stack's or the toast's own rule.
 {
-  const m = app.match(/const leftOfMain = ([\s\S]*?);\n/);
-  const from = app.indexOf("  const navTrack: [string, string | null]");
-  const to = app.indexOf("  const ord = Object.fromEntries(shell", from);
-  if (!m || from < 0) fail("App.tsx: `const leftOfMain = …;` is gone — where does the notice stack anchor?");
-  else if (!/left: `calc\(\$\{leftOfMain\}px \+ var\(--s3\)\)`/.test(app)) fail("`.float-stack` does not read leftOfMain");
-  else {
-    const block = app.slice(from, to).replace(/: \[string, string \| null\]/g, "").replace(/: \[key: string, track: string \| null\]\[\]/, "");
-    // eslint-disable-next-line no-new-func
-    const build = new Function("merged", "mirrored", "fit", `${block}; return shell;`);
-    // eslint-disable-next-line no-new-func
-    const left = new Function("mirrored", "merged", "fit", "dockLeft", "dockShown", "RAIL_W", `return ${m[1]};`);
-    const wrong = [];
-    for (const t of S.LAYOUT_TILES) for (const navShown of [false, true]) for (const dockShown of [false, true]) {
-      const merged = t.places === t.dock, mirrored = t.places === "right", dockLeft = t.dock === "left";
-      const fit = { navShown, navW: 300, dockW: 360 };
-      const shell = build(merged, mirrored, fit);
-      const tracks = shell.slice(0, shell.findIndex(([k]) => k === "space")).reduce((a, [, tr]) => a + (tr === "var(--rail-w)" ? S.RAIL_W : tr ? parseInt(tr) : 0), 0);
-      const want = tracks + (dockLeft && dockShown ? 360 : 0);
-      const got = left(mirrored, merged, fit, dockLeft, dockShown, S.RAIL_W);
-      if (got !== want) wrong.push(`${t.name} nav ${navShown ? "pinned" : "hidden"} dock ${dockShown ? "open" : "shut"}: ${got} vs ${want}`);
-    }
-    if (wrong.length) fail(`the notice stack is not at the agent's left edge: ${wrong.join("; ")}`);
-    else ok("the notice stack sits at the agent's bottom-left in all 16 shapes");
+  const rule = (sel) => {
+    const m = css.match(new RegExp(`(?:^|\\n)${sel.replace(/[.]/g, "\\.")}\\s*\\{([^}]*)\\}`));
+    return m ? m[1].replace(/\/\*[\s\S]*?\*\//g, "") : null;
+  };
+  for (const sel of [".float-stack", ".err-float"]) {
+    const body = rule(sel);
+    if (body == null) { fail(`App.css: no \`${sel} { … }\` rule — where does the toast anchor?`); continue; }
+    if (!/position:\s*fixed/.test(body)) fail(`${sel} is not position: fixed`);
+    else if (!/left:\s*50%/.test(body) || !/top:\s*var\(--float-top\)/.test(body)) fail(`${sel} is not anchored at left: 50% / top: var(--float-top)`);
+    else if (/--rail-w|--nav-w|bottom\s*:|right\s*:|left:\s*calc/.test(body)) fail(`${sel} names a layout track, bottom or right edge: ${body.trim().replace(/\s+/g, " ")}`);
+    else ok(`${sel} is anchored at the window's top centre, naming no track`);
   }
+  const tag = app.match(/<div className="float-stack"([^>]*)>/);
+  if (!tag) fail("App.tsx: `<div className=\"float-stack\">` is gone");
+  else if (tag[1].trim()) fail(`App.tsx: the float-stack carries ${tag[1].trim()} — an inline position puts a layout back in the anchor`);
+  else ok("App.tsx: the float-stack takes no inline position");
+  if (/\bleftOfMain\b|\bbubbleLift\b/.test(app.replace(/\/\/.*$/gm, ""))) fail("App.tsx still derives a layout offset (leftOfMain / bubbleLift) for the floats");
+  if (!/--float-top:\s*\d+px/.test(read("../src/tokens.css"))) fail("tokens.css: --float-top is gone");
+}
+
+// ── the hand-dismissed floats carry a labelled × wired to clearing them ─────
+{
+  for (const [setter, id] of [["setErr", "err-dismiss"], ["setNotice", "notice-dismiss"]]) {
+    const m = app.match(new RegExp(`<button type="button" className="float-dismiss"[^]*?data-testid="${id}"[^]*?</button>`));
+    if (!m) fail(`App.tsx: no \`float-dismiss\` button (${id}) — the toast has no visible dismiss`);
+    else if (!/aria-label="Dismiss"/.test(m[0]) || !/type="button"/.test(m[0])) fail(`${id}: the × needs type="button" and aria-label="Dismiss"`);
+    else if (!new RegExp(`onClick=\\{\\(\\) => ${setter}\\(""\\)\\}`).test(m[0])) fail(`${id}: the × does not call ${setter}("")`);
+    else ok(`${id}: a labelled <button> that calls ${setter}("")`);
+  }
+  if (/setTimeout\([^)]*set(Err|Notice)\(""\)/.test(app)) fail("App.tsx: an error or notice clears on a timer — errors stay until dismissed");
+  const btn = css.match(/(?:^|\n)\.float-dismiss\s*\{([^}]*)\}/);
+  if (!btn || !/flex:\s*none/.test(btn[1]) || /display:\s*(inline-)?flex/.test(btn[1])) fail("App.css: .float-dismiss must be `flex: none` and not itself a flex container (WebKit)");
+  else ok(".float-dismiss never shrinks and is not a flex container");
+}
+
+// ── a sheet header's × sits at its right edge ───────────────────────────────
+// `.settings-h` is the header of Settings, What's new, Project and Status. Its
+// title's `flex: 1` is what pushes the × right in every one but Settings, whose
+// search box takes the free space instead (`margin-left: auto`). #615 shrank
+// the title for Settings with an UNSCOPED `.settings-h b`, and the other three
+// drew their × beside the title until v0.50.0's What's new showed it. So a rule
+// that gives the header's title any `flex` but 1 must be scoped to the
+// Settings modal, and the search must keep the margin that stands in for it.
+{
+  const before = bad;
+  // `[^{}]*` for the body, so a rule nested in an @media block is read as its
+  // own selector rather than swallowed into the at-rule's.
+  const rules = [...css.replace(/\/\*[^]*?\*\//g, "").matchAll(/([^{}]+)\{([^{}]*)\}/g)];
+  let title = 0;
+  for (const [, sels, body] of rules) {
+    const flex = body.match(/(?:^|;)\s*flex:\s*([^;]+)/)?.[1].trim();
+    for (const sel of sels.split(",").map((s) => s.trim().replace(/\s+/g, " "))) {
+      if (!/(^| )\.settings-h b$/.test(sel)) continue;
+      if (sel === ".settings-h b" && flex === "1") title++;
+      else if (flex != null && flex !== "1" && !/(^| )\.settings-modal /.test(sel)) fail(`App.css: \`${sel} { flex: ${flex} }\` reaches every sheet's header — scope it to \`.settings-modal\`, or What's new, Project and Status lose the title's flex: 1 and their × leaves the right edge`);
+    }
+  }
+  if (title !== 1) fail(`App.css: expected one \`.settings-h b { flex: 1 }\`, found ${title} — the title is what pushes the × right`);
+  const search = rules.find(([, sels]) => sels.trim() === ".settings-search")?.[2] ?? "";
+  if (!/margin-left:\s*auto/.test(search)) fail("App.css: `.settings-search` lost `margin-left: auto` — the Settings header's free space has nowhere to go");
+  if (bad === before) ok("a sheet header's title takes the free space everywhere but Settings, where the search does");
 }
 
 // ── 3. one dock group, two hosts, complementary conditions ──────────────────

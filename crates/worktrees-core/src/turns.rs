@@ -65,9 +65,27 @@ pub const TAIL_BYTES: u64 = 2 * 1024 * 1024;
 /// The longest measured across this machine's recent transcripts on
 /// 2026-11-04: a 15,015-character Bash command, a 6,654-character MCP input.
 pub const CALL_INPUT_MAX: usize = 64 * 1024;
+/// Characters of one turn's text a whole-turn read ([`claude_turn`],
+/// [`codex_turn`], serve's `agent_turn_text`) keeps: its prompt, each of its
+/// other long strings, and its reply's `text` steps in all. Measured on
+/// 2026-11-06 over the 4,574 turns of the 799 Claude transcripts this machine
+/// touched in 30 days (main checkout's `~/.claude/projects`): reply text per
+/// turn p50 403, p90 2,998, p99 7,485, p99.9 13,454, longest 20,640
+/// characters, so the cap is ~5x the longest; prompts reach 404,000 (a pasted
+/// log or a handover), and one of those is cut at the cap with `truncated`.
+/// At most ~400 KB on the wire, far inside serve's 16 MiB message limit, and
+/// one read of one turn, never polled, so a phone can afford it.
+pub const TURN_TEXT_MAX: usize = 100_000;
 
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 pub struct Turn {
+    /// The turn's own id, the same on every read and while it grows, for
+    /// `agent_turn_text`: Claude's `uuid` of the prompt's entry (of the first
+    /// entry in the window, for a turn the window starts inside), Codex's
+    /// `turn_id`. Absent from an older host, and from a turn that has none to
+    /// give.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub id: String,
     /// When its prompt was written (epoch seconds), from the entry's own
     /// timestamp — never the file's mtime.
     pub at: Option<i64>,
@@ -244,7 +262,7 @@ pub struct QuestionAnswer {
 
 impl Turn {
     fn new(at: Option<i64>, user: Option<String>) -> Turn {
-        Turn { at, user, notice: None, reply: String::new(), tools: Vec::new(), truncated: false, steps: Vec::new() }
+        Turn { id: String::new(), at, user, notice: None, reply: String::new(), tools: Vec::new(), truncated: false, steps: Vec::new() }
     }
 
     fn notice(at: Option<i64>, notice: Notice) -> Turn {
@@ -281,7 +299,8 @@ impl Turn {
     }
 
     fn bytes(&self) -> usize {
-        self.user.as_ref().map_or(0, String::len)
+        self.id.len()
+            + self.user.as_ref().map_or(0, String::len)
             + self.notice.as_ref().map_or(0, |n| serde_json::to_string(n).map_or(0, |s| s.len()))
             + self.reply.len()
             + self.tools.iter().map(String::len).sum::<usize>()
@@ -391,7 +410,11 @@ fn claude_turns(lines: &[String]) -> Vec<Turn> {
                     _ => None,
                 };
                 if let Some(text) = text {
+                    let before = turns.len();
                     absorb(&mut turns, at, claude_entry(&v, &text), text);
+                    if turns.len() > before {
+                        turns[before].id = uuid_of(&v);
+                    }
                 } else if let (Some(serde_json::Value::Array(blocks)), Some(turn)) = (content, turns.last_mut()) {
                     answered(turn, &v, blocks, at);
                 }
@@ -401,11 +424,15 @@ fn claude_turns(lines: &[String]) -> Vec<Turn> {
             // ones: the same wrappers, read the same way.
             Some("system") if v.get("subtype").and_then(|s| s.as_str()) == Some("local_command") => {
                 let Some(text) = v.get("content").and_then(|c| c.as_str()) else { continue };
+                let before = turns.len();
                 absorb(&mut turns, at, local_command(text.trim()), text.to_string());
+                if turns.len() > before {
+                    turns[before].id = uuid_of(&v);
+                }
             }
             Some("assistant") => {
                 let Some(serde_json::Value::Array(blocks)) = content else { continue };
-                let turn = current(&mut turns, at);
+                let turn = current(&mut turns, at, &uuid_of(&v));
                 for b in blocks {
                     match b.get("type").and_then(|t| t.as_str()) {
                         Some("text") => turn.say(at, b.get("text").and_then(|t| t.as_str()).unwrap_or("")),
@@ -428,7 +455,25 @@ fn claude_turns(lines: &[String]) -> Vec<Turn> {
         turns[q.turn].steps.insert(q.step + inserted[q.turn], Step::User { at: q.at, text: q.text });
         inserted[q.turn] += 1;
     }
+    unique_ids(&mut turns);
     turns
+}
+
+/// An id names one turn: a later turn that carries an earlier one's (a
+/// transcript that repeats a `uuid`, a rollout with no `task_started` before a
+/// prompt) loses it, rather than answering a lookup with the wrong turn.
+fn unique_ids(turns: &mut [Turn]) {
+    let mut seen = HashSet::new();
+    for t in turns {
+        if !t.id.is_empty() && !seen.insert(t.id.clone()) {
+            t.id.clear();
+        }
+    }
+}
+
+/// A Claude entry's own `uuid`, the id of the turn it starts.
+fn uuid_of(v: &serde_json::Value) -> String {
+    v.get("uuid").and_then(|u| u.as_str()).filter(|u| u.len() <= 64 && u.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')).unwrap_or("").to_string()
 }
 
 enum ClaudeEntry { Person, Notice(Notice), Skip }
@@ -1002,6 +1047,60 @@ pub fn claude_tool_call(lines: &[String], id: &str) -> Option<CallDetail> {
     detail_in(claude_turns(lines), id)
 }
 
+/// The picture a Claude Read call was SHOWN (`feat/chat-images`): the
+/// `tool_result` image block of the Read whose `tool_use` id is `id`, as Claude
+/// 2.1.319 writes it (`claude-2.1.319-read-image.jsonl`). `b64` is what the
+/// model saw, recompressed, not the file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CallImage {
+    pub mime: String,
+    /// Empty when `truncated`: a block past [`CALL_IMAGE_MAX_B64`] is never carried.
+    pub b64: String,
+    /// Decoded bytes the block holds.
+    pub size: u64,
+    pub truncated: bool,
+}
+
+/// The most base64 a [`CallImage`] carries: the 4 MB `read_file_base64` cap, as
+/// base64.
+pub const CALL_IMAGE_MAX_B64: usize = 5_400_000;
+
+/// The image of the Claude Read call `id` in `lines`, or None when `id` names no
+/// Read, its result holds no image block, the type is not one the viewer draws
+/// (png, jpeg, gif, webp) or it has left `lines`. Reads `user` and `assistant`
+/// entries by id only; nothing else of a result is returned.
+pub fn claude_call_image(lines: &[String], id: &str) -> Option<CallImage> {
+    use serde_json::Value;
+    if id.is_empty() {
+        return None;
+    }
+    let mut is_read = false;
+    let mut found = None;
+    for line in lines.iter().filter(|l| l.contains(id)) {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        let Some(items) = v.pointer("/message/content").and_then(|c| c.as_array()) else { continue };
+        for it in items {
+            match it.get("type").and_then(|t| t.as_str()) {
+                Some("tool_use") if it["id"] == id && v["type"] == "assistant" => is_read = it["name"] == "Read",
+                Some("tool_result") if it["tool_use_id"] == id && v["type"] == "user" => {
+                    let img = it.get("content").and_then(|c| c.as_array()).and_then(|a| a.iter().find(|b| b["type"] == "image"));
+                    if let Some(src) = img.and_then(|b| b.get("source")).filter(|s| s["type"] == "base64") {
+                        found = Some((src["media_type"].as_str().unwrap_or("").to_string(), src["data"].as_str().unwrap_or("").to_string()));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let (mime, data) = found?;
+    if !is_read || !["image/png", "image/jpeg", "image/gif", "image/webp"].contains(&mime.as_str()) || data.is_empty() {
+        return None;
+    }
+    let size = (data.len() / 4 * 3) as u64;
+    let truncated = data.len() > CALL_IMAGE_MAX_B64;
+    Some(CallImage { mime, b64: if truncated { String::new() } else { data }, size, truncated })
+}
+
 /// The input of the Codex call `id`, as [`claude_tool_call`].
 pub fn codex_tool_call(lines: &[String], id: &str) -> Option<CallDetail> {
     detail_in(codex_turns(lines), id)
@@ -1350,7 +1449,29 @@ fn codex_turns(lines: &[String]) -> Vec<Turn> {
     let mut turns: Vec<Turn> = Vec::new();
     // The calls awaiting their output, by `call_id`, in the last turn.
     let mut open: Vec<String> = Vec::new();
+    // The `turn_id` of the turn being read: `task_started` opens one (before
+    // its typed prompt in every rollout measured), and a `turn_context` names
+    // it for a window that starts inside a turn and so holds no `task_started`.
+    let mut turn_id = String::new();
     for l in lines {
+        if l.contains("\"task_started\"") || l.contains("\"turn_context\"") {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(l) {
+                let started = v.pointer("/payload/type").and_then(|t| t.as_str()) == Some("task_started");
+                if let Some(id) = v.pointer("/payload/turn_id").and_then(|i| i.as_str()).filter(|i| i.len() <= 64 && i.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')) {
+                    if started || (turn_id.is_empty() && turns.last().is_none_or(|t| t.id != id)) {
+                        turn_id = id.to_string();
+                    }
+                }
+            }
+            continue;
+        }
+        // A window that starts inside a turn holds neither: its first turn is
+        // named by the first event that carries the id, near the line's head.
+        if turns.is_empty() && turn_id.is_empty() && l.contains("\"item_completed\"") {
+            if let Some(id) = l.get(..l.len().min(600)).and_then(|h| h.split_once("\"turn_id\":\"")).and_then(|(_, r)| r.split_once('"')).map(|(id, _)| id).filter(|i| i.len() <= 64 && i.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')) {
+                turn_id = id.to_string();
+            }
+        }
         let event = l.contains("\"item_completed\"") && l.contains("\"CommandExecution\"");
         if !event && !l.contains("\"response_item\"") {
             continue;
@@ -1398,19 +1519,21 @@ fn codex_turns(lines: &[String]) -> Vec<Turn> {
             (Some("message"), Some("user")) => {
                 let typed: Vec<String> = texts("input_text").into_iter().filter(|t| codex_typed(t)).collect();
                 if !typed.is_empty() {
-                    turns.push(Turn::new(at, Some(typed.join("\n"))));
+                    let mut turn = Turn::new(at, Some(typed.join("\n")));
+                    turn.id = std::mem::take(&mut turn_id);
+                    turns.push(turn);
                     open.clear();
                 }
             }
             (Some("message"), Some("assistant")) => {
-                let turn = current(&mut turns, at);
+                let turn = current(&mut turns, at, &turn_id);
                 for t in texts("output_text") {
                     turn.say(at, &t);
                 }
             }
             (Some("function_call" | "custom_tool_call"), _) => {
                 if let Some(name) = p.get("name").and_then(|n| n.as_str()) {
-                    let t = current(&mut turns, at);
+                    let t = current(&mut turns, at, &turn_id);
                     t.tools.push(name.to_string());
                     let id = p.get("call_id").and_then(|c| c.as_str()).unwrap_or("").to_string();
                     if !id.is_empty() {
@@ -1443,6 +1566,7 @@ fn codex_turns(lines: &[String]) -> Vec<Turn> {
             _ => {}
         }
     }
+    unique_ids(&mut turns);
     turns
 }
 
@@ -1566,7 +1690,7 @@ fn kimi_turns(lines: &[String]) -> Vec<Turn> {
                             continue;
                         }
                         let Some(text) = e.pointer("/part/text").and_then(|t| t.as_str()) else { continue };
-                        current(&mut turns, at).say(at, text);
+                        current(&mut turns, at, "").say(at, text);
                     }
                     Some("tool.call") => {
                         let (Some(name), id) = (
@@ -1584,7 +1708,7 @@ fn kimi_turns(lines: &[String]) -> Vec<Turn> {
                             continue;
                         }
                         let asked = open_i.map(|i| open[i].clone());
-                        let turn = current(&mut turns, at);
+                        let turn = current(&mut turns, at, "");
                         turn.tools.push(name.to_string());
                         let step = match asked {
                             Some(o) if o.ask == Ask::Question => Step::Question {
@@ -1622,7 +1746,7 @@ fn kimi_turns(lines: &[String]) -> Vec<Turn> {
                     }
                     Some("tool.result") => {
                         let Some(id) = e.get("toolCallId").and_then(|i| i.as_str()) else { continue };
-                        if let Some(Step::Tool { failed, .. }) = current(&mut turns, at).steps.iter_mut().find(|s| s.id() == Some(id)) {
+                        if let Some(Step::Tool { failed, .. }) = current(&mut turns, at, "").steps.iter_mut().find(|s| s.id() == Some(id)) {
                             *failed = e.pointer("/result/isError").and_then(|x| x.as_bool()) == Some(true);
                         }
                     }
@@ -1710,7 +1834,7 @@ fn kimi_turns(lines: &[String]) -> Vec<Turn> {
                     // position the refusal reached.
                     let o = open[i].clone();
                     if !(o.ask == Ask::Approval && o.tool.is_empty()) {
-                        let turn = current(&mut turns, o.asked_at);
+                        let turn = current(&mut turns, o.asked_at, "");
                         if !o.tool.is_empty() {
                             turn.tools.push(o.tool.clone());
                         }
@@ -1827,9 +1951,11 @@ pub fn kimi_tool_call(lines: &[String], id: &str) -> Option<CallDetail> {
 
 /// The turn a reply belongs to: the last one, or a prompt-less one when the
 /// window starts inside a turn.
-fn current(turns: &mut Vec<Turn>, at: Option<i64>) -> &mut Turn {
+fn current<'a>(turns: &'a mut Vec<Turn>, at: Option<i64>, id: &str) -> &'a mut Turn {
     if turns.is_empty() {
-        turns.push(Turn::new(at, None));
+        let mut turn = Turn::new(at, None);
+        turn.id = id.to_string();
+        turns.push(turn);
     }
     turns.last_mut().expect("just pushed")
 }
@@ -1849,23 +1975,57 @@ fn finish(mut turns: Vec<Turn>, n: usize) -> Vec<Turn> {
             let (r, cut) = clip(&t.reply);
             t.reply = r;
             t.truncated |= cut;
-            t.truncated |= clip_steps(&mut t.steps);
-            for step in &mut t.steps {
-                if let Step::Tool { summary, ran, detail, .. } = step {
-                    *detail = says_more(ran, summary.as_deref());
-                }
-            }
+            t.truncated |= clip_steps(&mut t.steps, TEXT_MAX, TEXT_MAX);
+            mark_detail(&mut t);
             t
         })
         .collect()
 }
 
-/// The steps held to the reply's caps: TEXT_MAX characters of reply text
-/// across all `text` steps (any past it go), and TEXT_MAX for each other
+fn mark_detail(t: &mut Turn) {
+    for step in &mut t.steps {
+        if let Step::Tool { summary, ran, detail, .. } = step {
+            *detail = says_more(ran, summary.as_deref());
+        }
+    }
+}
+
+/// The turn `id` names, whole: read by [`claude_turns`]'s own parser like
+/// [`claude`], and cut only at [`TURN_TEXT_MAX`]. `None` once it is not in
+/// `lines` (the transcript's window has moved past it) or `id` names no turn.
+pub fn claude_turn(lines: &[String], id: &str) -> Option<Turn> {
+    whole(claude_turns(lines), id)
+}
+
+/// [`claude_turn`] for a Codex rollout's `lines`.
+pub fn codex_turn(lines: &[String], id: &str) -> Option<Turn> {
+    whole(codex_turns(lines), id)
+}
+
+/// One turn at the whole-turn cap. Its `reply` is left empty: the text is in
+/// `steps`, and carrying both would send every word twice.
+fn whole(turns: Vec<Turn>, id: &str) -> Option<Turn> {
+    if id.is_empty() {
+        return None;
+    }
+    let mut t = turns.into_iter().find(|t| t.id == id)?;
+    if let Some(u) = t.user.take() {
+        let (u, cut) = clip_to(&u, TURN_TEXT_MAX);
+        t.user = Some(u);
+        t.truncated |= cut;
+    }
+    t.reply.clear();
+    t.truncated |= clip_steps(&mut t.steps, TURN_TEXT_MAX, TURN_TEXT_MAX);
+    mark_detail(&mut t);
+    Some(t)
+}
+
+/// The steps held to the reply's caps: `text` characters of reply text
+/// across all `text` steps (any past it go), and `each` for each other
 /// string. True when anything was cut.
-fn clip_steps(steps: &mut Vec<Step>) -> bool {
+fn clip_steps(steps: &mut Vec<Step>, text: usize, each: usize) -> bool {
     let mut cut = false;
-    let mut left = TEXT_MAX;
+    let mut left = text;
     steps.retain_mut(|step| {
         let Step::Text { text, .. } = step else { return true };
         if left == 0 {
@@ -1879,7 +2039,7 @@ fn clip_steps(steps: &mut Vec<Step>) -> bool {
         true
     });
     let mut c = |s: &mut String| {
-        let (out, was) = clip(s);
+        let (out, was) = clip_to(s, each);
         *s = out;
         cut |= was;
     };
@@ -2691,6 +2851,50 @@ mod tests {
         assert!(tool_steps(&got[0])[0].get("failed").is_none(), "a success carries no flag at all");
     }
 
+    /// `claude_call_image` serves the block of a Read, by its id, and nothing
+    /// else: not another tool's result, not an unknown id, not a text result,
+    /// and nothing past the cap.
+    #[test]
+    fn claude_call_image_is_the_read_results_block_by_id() {
+        let fx = lines(include_str!("../tests/fixtures/transcripts/claude-2.1.319-read-image.jsonl"));
+        let got = claude_call_image(&fx, "toolu_01ReadImg").expect("the Read's image");
+        assert_eq!((got.mime.as_str(), got.truncated), ("image/png", false));
+        assert!(got.b64.starts_with("iVBORw0KGgo") && got.size > 100, "{got:?}");
+        assert_eq!(claude_call_image(&fx, "toolu_nope"), None);
+        assert_eq!(claude_call_image(&fx, ""), None);
+        // the same block under a tool that is not Read
+        let other: Vec<String> = fx.iter().map(|l| l.replace("\"name\":\"Read\"", "\"name\":\"mcp__x__shot\"")).collect();
+        assert_eq!(claude_call_image(&other, "toolu_01ReadImg"), None, "only a Read's picture is served");
+        // a type the viewer does not draw
+        let odd: Vec<String> = fx.iter().map(|l| l.replace("\"media_type\":\"image/png\"", "\"media_type\":\"image/tiff\"")).collect();
+        assert_eq!(claude_call_image(&odd, "toolu_01ReadImg"), None);
+        // past the cap: said, never carried
+        let big = "A".repeat(CALL_IMAGE_MAX_B64 + 4);
+        let huge: Vec<String> = fx.iter().map(|l| if l.contains("tool_result") { l.replace("iVBORw0KGgo", &big) } else { l.clone() }).collect();
+        let cut = claude_call_image(&huge, "toolu_01ReadImg").unwrap();
+        assert!(cut.truncated && cut.b64.is_empty());
+        // `agent_turns` still carries no pixels
+        assert!(!without_call_ids(&claude(&fx, 10)).contains("iVBORw0KGgo"));
+    }
+
+    /// A Read of an image (Claude 2.1.319, measured: the fixture's README): the
+    /// transcript holds the picture as base64 TWICE in the result entry, and
+    /// the turn keeps the call's `file_path` as its summary and no pixels, which
+    /// is all the chat's thumbnail needs (it reads the file again through
+    /// `read_place_image`, under the place-only rule).
+    #[test]
+    fn claude_read_of_an_image_is_a_path_and_no_pixels() {
+        let fx = lines(include_str!("../tests/fixtures/transcripts/claude-2.1.319-read-image.jsonl"));
+        assert!(fx.iter().any(|l| l.contains("\"type\":\"image\"") && l.contains("iVBORw0KGgo")), "the fixture holds the image block");
+        let got = claude(&fx, 10);
+        let all = without_call_ids(&got);
+        for leaked in ["iVBORw0KGgo", "base64", "SYSTEM-PROMPT-MARKER", "originalSize"] {
+            assert!(!all.contains(leaked), "{leaked} leaked: {all}");
+        }
+        assert_eq!(got.len(), 1, "{got:#?}");
+        assert_eq!(calls(&got[0]), vec![call("Read", Some("/Users/u/proj/.worktrees-attachments/20261107-4c34b746fcf4773d.png"), false)]);
+    }
+
     /// One Claude assistant entry calling `name` with `input`, then its
     /// result, shaped as 2.1.316 writes them.
     fn claude_call(name: &str, input: serde_json::Value, is_error: Option<bool>) -> Vec<String> {
@@ -3139,5 +3343,164 @@ mod tests {
         let got = kimi(&fx[from..from + 1], 20);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].user, None, "the window starts inside the turn");
+    }
+
+    // ── the turn's id and the whole-turn read (`agent_turn_text`) ──────────
+
+    fn c_user(uuid: &str, text: &str) -> String {
+        serde_json::json!({"type":"user","uuid":uuid,"timestamp":"2026-11-06T10:00:00Z","origin":{"kind":"human"},"message":{"role":"user","content":text}}).to_string()
+    }
+    fn c_say(uuid: &str, text: &str) -> String {
+        serde_json::json!({"type":"assistant","uuid":uuid,"timestamp":"2026-11-06T10:00:01Z","message":{"role":"assistant","content":[{"type":"text","text":text}]}}).to_string()
+    }
+    fn c_tool(uuid: &str, id: &str) -> String {
+        serde_json::json!({"type":"assistant","uuid":uuid,"timestamp":"2026-11-06T10:00:02Z","message":{"role":"assistant","content":[{"type":"tool_use","id":id,"name":"Bash","input":{"command":"ls"}}]}}).to_string()
+    }
+    fn x_line(kind: &str, payload: serde_json::Value) -> String {
+        serde_json::json!({"timestamp":"2026-11-06T10:00:00Z","type":kind,"payload":payload}).to_string()
+    }
+    fn x_started(id: &str) -> String {
+        x_line("event_msg", serde_json::json!({"type":"task_started","turn_id":id}))
+    }
+    fn x_msg(role: &str, kind: &str, text: &str) -> String {
+        x_line("response_item", serde_json::json!({"type":"message","role":role,"content":[{"type":kind,"text":text}]}))
+    }
+
+    /// A turn's id is its prompt entry's `uuid`, and it is the same on every
+    /// read and while the turn grows: a client keeps an expanded bubble open
+    /// across the poll by it. A window that starts inside a turn names it by
+    /// its first entry, and a repeated uuid names only the first turn.
+    #[test]
+    fn a_claude_turns_id_is_stable_across_reads_and_growth() {
+        let mut fx = vec![c_user("u-1", "first"), c_say("a-1", "one"), c_user("u-2", "second"), c_say("a-2", "two")];
+        let ids = |l: &[String]| claude(l, 20).iter().map(|t| t.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&fx), ["u-1", "u-2"]);
+        assert_eq!(ids(&fx), ids(&fx), "the same on a second read");
+        fx.push(c_tool("a-3", "toolu_1"));
+        fx.push(c_say("a-4", "more words"));
+        assert_eq!(ids(&fx), ["u-1", "u-2"], "growing the last turn moves no id");
+        assert_eq!(claude(&fx, 20)[1].steps.len(), 3);
+        // The window starts inside a turn: that turn has the first entry's id.
+        let mid = vec![c_say("a-9", "tail of a turn"), c_user("u-3", "next")];
+        assert_eq!(ids(&mid), ["a-9", "u-3"]);
+        // A uuid that repeats names the first turn only.
+        let twice = vec![c_user("u-1", "a"), c_user("u-1", "b")];
+        assert_eq!(ids(&twice), ["u-1", ""]);
+        // None when the entry has none: absent on the wire, like an older host.
+        let bare = serde_json::json!({"type":"user","origin":{"kind":"human"},"message":{"role":"user","content":"x"}}).to_string();
+        let t = &claude(&[bare], 20)[0];
+        assert!(t.id.is_empty() && serde_json::to_value(t).unwrap().get("id").is_none());
+    }
+
+    /// The reply in the owner's photo: a long reply, and a later text step
+    /// `agent_turns` drops past its 4000 characters, both come back whole from
+    /// the whole-turn read, tool steps between them as `agent_turns` has them.
+    #[test]
+    fn a_whole_claude_turn_has_the_text_agent_turns_cut_and_dropped() {
+        let long = format!("{} END-OF-THE-LONG-BLOCK", "x".repeat(10_000));
+        let last = "**One question before step 2**: which branch?";
+        let fx = vec![c_user("u-1", "go"), c_say("a-1", &long), c_tool("a-2", "toolu_1"), c_say("a-3", "after the tool"), c_say("a-4", last)];
+        let short = &claude(&fx, 5)[0];
+        assert!(short.truncated);
+        let texts = |t: &Turn| t.steps.iter().filter_map(|s| if let Step::Text { text, .. } = s { Some(text.clone()) } else { None }).collect::<Vec<_>>();
+        assert!(!short.reply.contains("which branch"), "the short read loses the question");
+        assert!(texts(short).iter().all(|t| !t.contains("which branch")));
+        let full = claude_turn(&fx, "u-1").expect("by its id");
+        assert!(!full.truncated, "100,000 characters hold it");
+        assert_eq!(texts(&full), [long.clone(), "after the tool".to_string(), last.to_string()]);
+        let kinds: Vec<&str> = full.steps.iter().map(|s| match s { Step::Text { .. } => "text", Step::Tool { .. } => "tool", _ => "other" }).collect();
+        assert_eq!(kinds, ["text", "tool", "text", "text"], "in order, the tool between");
+        assert_eq!(full.user.as_deref(), Some("go"));
+        assert!(full.reply.is_empty(), "the words are in steps, once");
+        assert_eq!(full.id, "u-1");
+    }
+
+    /// The whole-turn cap: text past it is cut with an ellipsis, `truncated`,
+    /// later text steps go, and a prompt is cut at it too.
+    #[test]
+    fn the_whole_turn_cap_cuts_and_says_so() {
+        let fx = vec![c_user("u-1", &"p".repeat(TURN_TEXT_MAX + 5)), c_say("a-1", &"y".repeat(TURN_TEXT_MAX - 3)), c_say("a-2", "zzzzzzzz"), c_say("a-3", "dropped")];
+        let full = claude_turn(&fx, "u-1").unwrap();
+        assert!(full.truncated);
+        assert_eq!(full.user.as_ref().unwrap().chars().count(), TURN_TEXT_MAX + 1);
+        let texts: Vec<usize> = full.steps.iter().filter_map(|s| if let Step::Text { text, .. } = s { Some(text.chars().count()) } else { None }).collect();
+        assert_eq!(texts, [TURN_TEXT_MAX - 3, 4], "the second is cut to what is left (3 + the ellipsis); the third goes");
+        let exact = claude_turn(&[c_user("u-1", "q"), c_say("a-1", &"y".repeat(TURN_TEXT_MAX))], "u-1").unwrap();
+        assert!(!exact.truncated, "a reply exactly at the cap is whole");
+    }
+
+    /// Gone: an id the lines no longer hold (the window moved past the turn)
+    /// and no id at all answer nothing, and the other turns are untouched.
+    #[test]
+    fn a_turn_that_left_the_window_is_gone() {
+        let fx = vec![c_user("u-2", "kept"), c_say("a-1", "words")];
+        assert!(claude_turn(&fx, "u-1").is_none());
+        assert!(claude_turn(&fx, "").is_none());
+        assert!(claude_turn(&[], "u-2").is_none());
+        assert!(codex_turn(&fx, "u-2").is_none(), "a Claude id is not a Codex turn");
+        assert!(claude_turn(&fx, "u-2").is_some());
+    }
+
+    /// Transcript text is data through the same reader: the system prompt in
+    /// an `api-request-blob`, a reminder-only entry and a compact summary's body
+    /// never reach the whole-turn read.
+    #[test]
+    fn the_whole_turn_read_keeps_the_readers_rules() {
+        let fx = vec![
+            serde_json::json!({"type":"api-request-blob","uuid":"b-1","content":"SYSTEM-PROMPT-MARKER"}).to_string(),
+            serde_json::json!({"type":"user","uuid":"r-1","isMeta":true,"message":{"role":"user","content":"<system-reminder>REMINDER-MARKER</system-reminder>"}}).to_string(),
+            c_user("u-1", "hello"),
+            serde_json::json!({"type":"assistant","uuid":"s-1","isSidechain":true,"message":{"role":"assistant","content":[{"type":"text","text":"SIDECHAIN-MARKER"}]}}).to_string(),
+            c_say("a-1", "the answer"),
+        ];
+        let full = claude_turn(&fx, "u-1").unwrap();
+        let wire = serde_json::to_string(&full).unwrap();
+        for marker in ["SYSTEM-PROMPT-MARKER", "REMINDER-MARKER", "SIDECHAIN-MARKER"] {
+            assert!(!wire.contains(marker), "{marker} leaked: {wire}");
+        }
+        assert!(wire.contains("the answer"));
+    }
+
+    /// Codex: `task_started`'s `turn_id` names the turn, the same on every
+    /// read and while it grows; a long reply and a late text step come back
+    /// whole; a window starting inside a turn takes the id of the first event
+    /// that carries it, and none when none does.
+    #[test]
+    fn a_codex_turns_id_and_whole_text() {
+        let long = format!("{} CODEX-END", "w".repeat(9_000));
+        let mut fx = vec![
+            x_started("t-1"), x_msg("user", "input_text", "go"), x_msg("assistant", "output_text", &long),
+            x_started("t-2"), x_msg("user", "input_text", "again"), x_msg("assistant", "output_text", "short"),
+        ];
+        let ids = |l: &[String]| codex(l, 20).iter().map(|t| t.id.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&fx), ["t-1", "t-2"]);
+        fx.push(x_msg("assistant", "output_text", "a later block of the second turn"));
+        assert_eq!(ids(&fx), ["t-1", "t-2"], "growth moves no id");
+        let short = codex(&fx, 20);
+        assert!(short[0].truncated && !short[0].reply.contains("CODEX-END"));
+        let full = codex_turn(&fx, "t-1").unwrap();
+        assert!(!full.truncated && matches!(&full.steps[0], Step::Text { text, .. } if text.ends_with("CODEX-END")));
+        assert_eq!(codex_turn(&fx, "t-2").unwrap().steps.len(), 2);
+        assert!(codex_turn(&fx, "t-9").is_none());
+        // Inside a turn: its `turn_context` (or an item event) carries the id.
+        let ctx = x_line("turn_context", serde_json::json!({"turn_id":"t-7"}));
+        assert_eq!(ids(&[ctx, x_msg("assistant", "output_text", "tail")]), ["t-7"]);
+        let item = x_line("event_msg", serde_json::json!({"type":"item_completed","turn_id":"t-8","item":{"type":"AgentMessage"}}));
+        assert_eq!(ids(&[item, x_msg("assistant", "output_text", "tail")]), ["t-8"]);
+        assert_eq!(ids(&[x_msg("assistant", "output_text", "tail")]), [""], "nothing names it");
+        // A turn_context after the typed prompt never gives the NEXT turn this one's id.
+        let late = vec![x_started("t-1"), x_msg("user", "input_text", "a"), x_line("turn_context", serde_json::json!({"turn_id":"t-1"})), x_msg("user", "input_text", "b")];
+        assert_eq!(ids(&late), ["t-1", ""]);
+        // A turn that began with no typed prompt (a wrapper only) leaves its id behind.
+        assert_eq!(ids(&[x_started("t-5"), x_started("t-6"), x_msg("user", "input_text", "go")]), ["t-6"]);
+    }
+
+    /// The id costs the poll's budget like any other text.
+    #[test]
+    fn an_id_counts_toward_the_total() {
+        let mut t = Turn::new(None, Some("u".into()));
+        let bare = t.bytes();
+        t.id = "0123456789abcdef".into();
+        assert_eq!(t.bytes(), bare + 16);
     }
 }

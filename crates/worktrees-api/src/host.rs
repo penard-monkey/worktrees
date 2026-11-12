@@ -138,6 +138,7 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
     // not pane output — so the dot decayed while Claude worked.
     let mut last = PaneList::fetch_unnamed().unwrap_or_default().fingerprint();
     let mut busy_gate = BusyGate::default();
+    let mut last_ideas: Option<crate::watch::IdeaSessions> = None;
     let mut last_models: Option<Vec<(i32, Option<String>)>> = None;
     let mut ticks: u32 = 0;
     // Inbox requests the last tick left waiting for a client, for its log line.
@@ -179,6 +180,9 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
     // that comes back after a recovery is heard again, and capped so a place
     // producing fresh text on every tick cannot grow it without bound.
     let mut said_viewer: HashSet<String> = HashSet::new();
+    // The ideas folder's stamp: one `readdir` and an `lstat` per entry a tick,
+    // the folder read only when it moved (`ideas::tick`).
+    let mut ideas_watch = crate::ideas::IdeasWatch::default();
     // One `Ctx` for the thread's whole life, and the registries out of it: the
     // dot poll is the hottest reader of both and must not re-resolve them 20
     // times a minute.
@@ -256,6 +260,7 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
                 log::log(n.level, &format!("viewer refresh: {}", n.msg));
             }
         }
+        crate::ideas::tick(&pollctx, &mut ideas_watch);
         attach_ticks += 1;
         if attach_ticks >= 1200 {
             attach_ticks = 0;
@@ -319,7 +324,14 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
                 }
             }
         }
-        let (busy, waiting, models) = claude_activity(watch, &mut panes, &fp);
+        let ((busy, waiting, models), idea_sessions) = claude_activity(watch, &mut panes, &fp);
+        let idea_sessions = if idea_sessions.live.is_empty() { idea_sessions } else { idea_sessions.with_ideas(pollctx.ideas_dir()) };
+        // Change-gated like `sessions:busy`, and pushed on the first tick
+        // whatever it holds, so a client that declares it has a state.
+        if last_ideas.as_ref() != Some(&idea_sessions) {
+            pollctx.emit("ideas:sessions", payload(&idea_sessions));
+            last_ideas = Some(idea_sessions);
+        }
         // Every harness without a probe file, read once each (`harness_feed`:
         // codex's rollouts, pi's session files).
         let lanes: Vec<(&'static str, LaneTick)> = provider::PROVIDERS

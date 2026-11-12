@@ -245,8 +245,8 @@ html[data-places-side="right"] .rail-group .rail-icon.active::before { left: aut
 }
 /* app-level error toast — the nav can be hidden, errors can't be */
 .err-float {
-  position: fixed; left: calc(var(--rail-w) + var(--s3)); bottom: var(--s3);
-  z-index: 80; max-width: 440px; margin: 0; cursor: pointer;
+  position: fixed; left: 50%; top: var(--float-top); transform: translateX(-50%);
+  z-index: 80; max-width: min(440px, calc(100vw - 2 * var(--s3))); margin: 0; cursor: pointer;
   background: color-mix(in srgb, var(--danger) 14%, var(--bg-panel));
   box-shadow: var(--shadow-float);
   animation: pop var(--dur-slow) var(--ease);
@@ -1323,18 +1323,36 @@ body.dragging .menu-catch { pointer-events: none; }
   0%, 60% { background: color-mix(in srgb, var(--accent) 22%, transparent); }
   100% { background: none; }
 }
-/* The floats are ONE bottom-anchored stack. Two fixed elements at the same
-   coordinates paint over each other — which put the undo banner exactly on top
-   of the landing note from the same drop. Children go static; DOM order is
-   screen order, undo above, err/notice at the edge. */
+/* The floats are ONE stack, anchored to the WINDOW's top centre. Two fixed
+   elements at the same coordinates paint over each other — which put the undo
+   banner exactly on top of the landing note from the same drop. Children go
+   static; DOM order is screen order, undo above, err/notice below it.
+   The anchor names no track on purpose: the rails, the nav and the dock change
+   sides with the layout and per place, and every corner of the window is some
+   pane's — the old bottom-left was the chat composer and the usage meters. The
+   top centre is a track-free column below the header (--float-top clears it),
+   over transcript or terminal rows, nothing you act on. layout-check.mjs
+   holds it. */
 .float-stack {
-  /* `left` is inline: the agent's bottom-left, whichever layout (App.tsx
-     `leftOfMain`). This is the fallback before the first render. */
-  position: fixed; left: calc(var(--rail-w) + var(--s3)); bottom: var(--s3);
+  position: fixed; left: 50%; top: var(--float-top); transform: translateX(-50%);
   z-index: 80; display: flex; flex-direction: column; gap: var(--s2);
-  align-items: flex-start;
+  align-items: center; max-width: calc(100vw - 2 * var(--s3));
 }
-.float-stack .err-float { position: static; }
+.float-stack .err-float { position: static; transform: none; }
+/* The × is the visible half of "click to dismiss". Hue lives in the toast's fill,
+   so the icon takes --txt-hi: --danger/--warn as an icon colour measures 2.2-2.5:1
+   in nord and tokyo-day. It is a plain box (not a flex container: WebKit
+   shrink-wraps those without their shrinkable children) and never shrinks, so
+   it cannot cover the message at any width. */
+.err-float.has-dismiss { display: flex; align-items: flex-start; gap: var(--s2); }
+.err-float .float-text { flex: 1 1 auto; min-width: 0; user-select: text; cursor: text; }
+.float-dismiss {
+  flex: none; width: 22px; height: 22px; margin: -2px calc(-1 * var(--s1)) -2px 0; padding: 0;
+  border: 0; border-radius: var(--r-sm); background: transparent; color: var(--txt-hi);
+  cursor: pointer; line-height: 0; text-align: center;
+}
+.float-dismiss:hover { background: color-mix(in srgb, currentColor 16%, transparent); }
+.float-dismiss:focus-visible { outline: 2px solid currentColor; outline-offset: 1px; }
 .err-float.undo { display: flex; align-items: center; gap: var(--s3); cursor: default; }
 .undo-btn {
   padding: 1px var(--s2); border-radius: var(--r-sm);
@@ -2566,8 +2584,10 @@ body.dragging .menu-catch { pointer-events: none; }
   display: flex; flex-direction: column; overflow: hidden;
   animation: pop var(--dur-slow) var(--ease);
 }
-/* The title keeps `flex: 1` (see `.settings-h b`), so the chips ride hard right
-   with the close button rather than trailing the word "Settings". */
+/* The chips ride hard right with the close button rather than trailing the
+   word "Settings": in the Settings modal the free space is the search box's
+   `margin-left: auto` (see `.settings-modal .settings-h b`); in every other
+   sheet it is the title's `flex: 1`. */
 .modal-keys { display: flex; align-items: center; gap: var(--s2); margin-right: var(--s3); }
 .modal-foot {
   flex: none; padding: var(--s2) var(--s4); border-top: 1px solid var(--line);
@@ -3038,8 +3058,11 @@ body.dragging .menu-catch { pointer-events: none; }
    and the search box sits just left of the switch. The free space is between
    the title and the box — the box's `margin-left: auto` — so the box widening
    on focus eats that space and nothing to its right moves; the title's own
-   margin keeps them apart if the header ever runs out of it. */
-.settings-h b { flex: 0 1 auto; margin-right: var(--s4); }
+   margin keeps them apart if the header ever runs out of it.
+   SCOPED to the Settings modal: the same header is What's new, Project and
+   Status, whose title must keep `flex: 1` — they have no search to take the
+   free space, and unscoped this rule (#615) put their × beside the title. */
+.settings-modal .settings-h b { flex: 0 1 auto; margin-right: var(--s4); }
 .settings-mode { margin-right: var(--s4); }
 .settings-mode button { padding: var(--s1) var(--s3); font-size: var(--fs-meta); }
 /* The search (SettingsSearchBox.tsx): small with its glass and "Search" until
@@ -3893,3 +3916,89 @@ body.dragging .grip { cursor: grabbing; }
    footnote, it is the half people skip. */
 .privacy-why { color: var(--txt-dim); }
 .privacy-why strong { color: var(--txt-hi); font-weight: var(--fw-med); }
+
+/* ── named workspaces (idea board phase 2, workspaces.ts) ──────────────────
+   The switch sits between the filter and the list; the Workspaces view draws
+   each workspace as a sticky header over its projects, whose own sticky
+   headers stack under it (`--ws-head`). Hue lives in fills and dots; words
+   take the text tokens (AGENTS.md: an accent token is a fill, not text). */
+.nav-view {
+  display: flex; flex: none; margin: 0 var(--s3) var(--s2); padding: 2px;
+  background: var(--bg-input); border: 1px solid var(--line); border-radius: var(--r-md);
+}
+.nav-view-seg {
+  flex: 1 1 0; min-width: 0; padding: 2px var(--s2);
+  background: transparent; color: var(--txt-dim); border: 1px solid transparent; border-radius: var(--r-sm);
+  font-size: var(--fs-label); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.nav-view-seg:hover { color: var(--txt-hi); }
+.nav-view-seg.on { background: var(--bg-panel); color: var(--txt-hi); border-color: var(--line); }
+.nav-view-seg.drop-on,
+.ws-group.drop-on > .ws-h {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 16%, var(--bg-tree));
+}
+.ws-group { --ws-head: 30px; }
+.ws-group + .ws-group, .drop-gap.ws + .ws-group { margin-top: var(--s2); }
+.ws-group.dragged { opacity: 0.4; }
+.ws-h {
+  position: sticky; top: 0; z-index: 3; box-sizing: border-box; height: var(--ws-head);
+  display: flex; align-items: center; gap: var(--s2);
+  padding: 0 var(--s3); font-size: var(--fs-label);
+  background: var(--bg-tree); border: 1px solid transparent; border-bottom-color: var(--line);
+  cursor: grab;
+}
+body.dragging .ws-h { cursor: grabbing; }
+.ws-h:hover .mini, .ws-h:focus-within .mini { opacity: 1; }
+.ws-icon { position: relative; display: grid; place-items: center; width: 16px; height: 16px; color: var(--txt-dim); flex: none; }
+.ws-icon.busy::after, .ws-icon.waiting::after, .ws-icon.done::after {
+  content: ""; position: absolute; top: -2px; right: -2px;
+  width: 6px; height: 6px; border-radius: var(--r-full); box-shadow: 0 0 0 2px var(--bg-tree);
+}
+.ws-icon.busy::after { background: var(--ok); }
+.ws-icon.waiting::after { background: var(--warn); }
+.ws-icon.done::after { background: var(--done); }
+.ws-name {
+  flex: 1; min-width: 0; font-size: var(--fs-row); font-weight: var(--fw-bold); color: var(--txt-hi);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer;
+}
+.ws-name-input { flex: 1; min-width: 0; }
+/* No indent: a project under a workspace draws exactly as in All projects,
+   whose header is already short of width (measured: 41px of name at 1280). */
+.ws-kids .project-h { top: var(--ws-head); }
+.ws-drop-hint { padding: var(--s2) var(--s3); }
+.ws-drop-hint .ws-empty-add { display: flex; align-items: center; gap: var(--s1); margin-top: var(--s2); }
+.ws-gone .pname { color: var(--txt-dim); font-weight: var(--fw-body); }
+.ws-gone .pgone { color: var(--txt-dim); }
+.ws-empty { display: flex; flex-direction: column; align-items: flex-start; gap: var(--s2); }
+.ws-new-btn {
+  display: inline-flex; align-items: center; gap: var(--s1); margin: var(--s2) var(--s3);
+  padding: 2px var(--s2); background: transparent; color: var(--txt-dim);
+  border: 1px dashed var(--line-strong); border-radius: var(--r-sm); font-size: var(--fs-label);
+}
+.ws-empty .ws-new-btn { margin: 0; }
+.ws-new-btn:hover { color: var(--txt-hi); border-color: var(--txt-mute); }
+.ws-new-row { display: flex; align-items: center; gap: var(--s2); margin: var(--s2) var(--s3); color: var(--txt-dim); }
+.drop-gap.ws { height: var(--ws-head, 30px); margin: var(--s1) 0; }
+
+/* ── Settings → pi → Models: the hosts (PiPanel.tsx) ─────────────────────────
+   Words stay --txt-hi/--txt-dim; hue lives only in the dot. */
+.pi-dot.bad { background: var(--danger); }
+.pi-hosts { display: flex; flex-direction: column; gap: var(--s3); }
+.pi-host { display: flex; flex-direction: column; gap: var(--s1); padding: var(--s2) var(--s3); border: 1px solid var(--line); border-radius: var(--r-sm); min-width: 0; }
+.pi-host-head { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s1) var(--s2); font-size: var(--fs-label); color: var(--txt-hi); min-width: 0; }
+.pi-host-head .pi-dot { margin-right: 0; }
+.pi-host-tag, .pi-host-state { color: var(--txt-dim); font-size: var(--fs-meta); }
+.pi-host-tag { padding: 0 var(--s2); border-radius: var(--r-full); background: var(--bg-panel); }
+.pi-host-model { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s1) var(--s2); }
+.pi-host-model .pi-dot { margin-right: 0; }
+.pi-host code { overflow-wrap: anywhere; min-width: 0; }
+.pi-host > .ver-row { font-size: var(--fs-label); color: var(--txt); }
+.pi-host-meta { color: var(--txt-dim); font-size: var(--fs-meta); }
+.pi-host-acts { display: inline-flex; gap: var(--s1); margin-left: auto; }
+.pi-host-form { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); }
+.pi-host-form input[type="text"] { flex: 1 1 10em; min-width: 0; }
+.pi-host-form input[type="number"] { width: 9em; }
+/* Phase S: an idea conversation waits on the person — the lightbulb's dot. */
+.rail-icon.rail-waiting { position: relative; }
+.rail-icon.rail-waiting::after { content: ""; position: absolute; top: 3px; right: 3px; width: 7px; height: 7px; border-radius: 50%; background: var(--warn); }

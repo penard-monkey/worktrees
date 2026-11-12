@@ -9,7 +9,7 @@ import { Page, Pointer, Sec, useSheet } from "./kit";
 export function PiPage() {
   const { settings, repo, onChange, onReport, onFail, onPiMcpChanged, piMcpOfferPending, onSilencePiMcpOffer, snap } = useSheet();
   const pi = usePiStatus({ settings, repo: repo || null, onChange, onReport, onFail });
-  const models = usePiModels(onReport);
+  const { models, reload: reloadModels } = usePiModels(onReport);
   const allowed = pi.status?.allowed.length ?? 0;
   return <Page page="pi">
     {/* FIRST: a deep-link target (offers.ts `pi-mcp`), and the sections below
@@ -23,7 +23,7 @@ export function PiPage() {
       <PiInstallSection status={pi.status} />
     </Sec>
     <Sec id="pi-models">
-      <PiModelsSection settings={settings} models={models} onChange={onChange} />
+      <PiModelsSection settings={settings} models={models} onChange={onChange} reloadModels={reloadModels} onFail={onFail} />
     </Sec>
     <Sec id="pi-policy">
       <Pointer to="pi-trust" label="Agent policy">
