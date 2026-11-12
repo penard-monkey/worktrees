@@ -70,7 +70,9 @@ export type AskedQuestion = { header: string; question: string; multi: boolean; 
 export type QuestionAnswer = { question: string; picked: string[]; typed?: string; note?: string };
 export type AskedStep = Extract<Step, { kind: "question" | "permission" | "plan" }>;
 /** `agent_turns`' answer; `reason` only when no agent is running. */
-export type AgentTurns = { harness?: string; session?: string; turns: Turn[]; more: boolean; note: string; reason?: string };
+/** `ended`: an idea conversation read from its transcript with no session
+ *  running (phase S), read-only. */
+export type AgentTurns = { harness?: string; session?: string; turns: Turn[]; more: boolean; note: string; reason?: string; ended?: boolean };
 /** `prompt::Choice`. `checked` marks a multi-select's box; `text` a choice
  *  that takes free text: `field` IS a text field, `amend` takes an optional
  *  note. `host_only: "text"` on a field means it is empty. `preview` is what
@@ -1143,7 +1145,24 @@ export function announcement(b: Bundle, agent: string, promptNow: string | null,
 
 // ── the store: one view per place, keyed by its path ────────────────────────
 
-export type Target = { repo: string; slug: string; path: string; session: string };
+/** Whom a chat talks to: a place's agent (`agent_*` rows, by `repo` and
+ *  `slug`), or, with `idea`, an idea conversation (phase S): the `idea_*`
+ *  console rows, by the idea's id and the conversation's. An idea target's
+ *  `path` is only the view's key (`ideaChatKey`), never a folder, and its
+ *  `repo`/`slug` are empty. No slash commands and no attachments reach an
+ *  idea conversation. */
+export type Target = { repo: string; slug: string; path: string; session: string; idea?: IdeaConv };
+export type IdeaConv = { id: string; conv: string };
+
+/** The chat-view key of an idea conversation: no place's path starts so. */
+export function ideaChatKey(c: IdeaConv): string {
+  return `idea:${c.id}:${c.conv}`;
+}
+
+/** An idea conversation's row arguments: the idea and the conversation. */
+function ideaArgs(t: Target): IdeaConv {
+  return { id: t.idea!.id, conv: t.idea!.conv };
+}
 type Load<T> = { data: T | null; error: string | null; loading: boolean; at: number | null };
 
 export type ChatView = {
@@ -1259,7 +1278,9 @@ export function loadTurns(t: Target): Promise<void> {
   return once(`t|${t.path}`, async () => {
     put(t.path, { turns: { ...viewOf(t.path).turns, loading: true } });
     try {
-      const r = await invoke<AgentTurns>("agent_turns", { repo: t.repo, slug: t.slug, session: t.session, n: TURNS_MAX });
+      const r = t.idea
+        ? await invoke<AgentTurns>("idea_turns", { ...ideaArgs(t), n: TURNS_MAX })
+        : await invoke<AgentTurns>("agent_turns", { repo: t.repo, slug: t.slug, session: t.session, n: TURNS_MAX });
       const cur = viewOf(t.path);
       put(t.path, {
         turns: { data: r, error: null, loading: false, at: Date.now() },
@@ -1306,7 +1327,9 @@ function readFull(t: Target, id: string, quiet: boolean): Promise<void> {
   return once(`f|${t.path}|${id}`, async () => {
     if (!quiet) land({ state: "loading" });
     try {
-      const r = await invoke<AgentTurnText>("agent_turn_text", { repo: t.repo, slug: t.slug, turn_id: id });
+      const r = t.idea
+        ? await invoke<AgentTurnText>("idea_turn_text", { ...ideaArgs(t), turn_id: id })
+        : await invoke<AgentTurnText>("agent_turn_text", { repo: t.repo, slug: t.slug, turn_id: id });
       land({ state: "done", turn: r.turn });
     } catch (e) {
       // A turn read already stays read: it went `gone` after being shown, and
@@ -1352,7 +1375,9 @@ function readCall(t: Target, id: string): Promise<void> {
   return once(`c|${t.path}|${id}`, async () => {
     land({ state: "loading" });
     try {
-      const r = await invoke<AgentToolCall>("agent_tool_call", { repo: t.repo, slug: t.slug, call_id: id });
+      const r = t.idea
+        ? await invoke<AgentToolCall>("idea_tool_call", { ...ideaArgs(t), call_id: id })
+        : await invoke<AgentToolCall>("agent_tool_call", { repo: t.repo, slug: t.slug, call_id: id });
       land({ state: "done", text: inputText(r.input), truncated: r.truncated, bytes: r.bytes });
     } catch (e) {
       if (e === AGENT_ERR.gone) return land({ state: "gone" });
@@ -1394,7 +1419,9 @@ export function loadPrompt(t: Target): Promise<void> {
   return once(`p|${t.path}`, async () => {
     put(t.path, { prompt: { ...viewOf(t.path).prompt, loading: true } });
     try {
-      const r = await invoke<AgentPrompt>("agent_prompt", { repo: t.repo, slug: t.slug });
+      const r = t.idea
+        ? await invoke<AgentPrompt>("idea_prompt", ideaArgs(t))
+        : await invoke<AgentPrompt>("agent_prompt", { repo: t.repo, slug: t.slug });
       const cur = viewOf(t.path);
       const chose = cur.selected !== null || cur.ticks !== null || !!cur.answerText || !!cur.boxText;
       const moved = !cur.answering && chose && fpOf(cur.prompt.data) !== fpOf(r);
@@ -1529,6 +1556,8 @@ async function base64Of(f: Blob): Promise<string> {
 /** Upload each file the host does not have yet, in order. The paths, or
  *  null when one was refused: then nothing is sent, and the chips say which. */
 async function uploadAll(t: Target): Promise<string[] | null> {
+  // An idea conversation has no place to keep a file in (phase S).
+  if (t.idea) return [];
   const paths: string[] = [];
   for (const a of viewOf(t.path).attachments) {
     if (a.path) { paths.push(a.path); continue; }
@@ -1567,7 +1596,9 @@ export async function stopTurn(t: Target, agent: string): Promise<void> {
   if (viewOf(t.path).stopping) return;
   put(t.path, { stopping: true, stopWords: null, sendWords: null });
   try {
-    const r = await invoke<AgentStopped>("agent_interrupt", { repo: t.repo, slug: t.slug });
+    const r = t.idea
+      ? await invoke<AgentStopped>("idea_interrupt", ideaArgs(t))
+      : await invoke<AgentStopped>("agent_interrupt", { repo: t.repo, slug: t.slug });
     put(t.path, {
       stopping: false, stopped: r.interrupted,
       stopWords: r.interrupted ? { line: `Stopped. ${agent} is waiting for your next message.` } : { line: STOP_UNCONFIRMED(agent), terminal: true },
@@ -1606,7 +1637,9 @@ export async function sendDraft(t: Target, agent: string, rules: SendRules = ONE
     const held = messagesOf(viewOf(t.path).turns.data?.turns ?? []).flatMap((m) => (m.at !== null && isRecordOf(text, m.text) ? [m.at] : []));
     const line = { text };
     put(t.path, { sentLine: line });
-    const r = await invoke<AgentSent>("agent_send", { repo: t.repo, slug: t.slug, session: t.session, text });
+    const r = t.idea
+      ? await invoke<AgentSent>("idea_send", { ...ideaArgs(t), text })
+      : await invoke<AgentSent>("agent_send", { repo: t.repo, slug: t.slug, session: t.session, text });
     const cur = viewOf(t.path);
     let sentId: number | null = null;
     if (!r.delivered) {
@@ -1644,6 +1677,8 @@ export async function sendDraft(t: Target, agent: string, rules: SendRules = ONE
 /** Read the agent's slash commands, at most once a minute unless `force`. */
 export async function loadCommands(t: Target, force = false): Promise<void> {
   const c = viewOf(t.path).commands;
+  // An idea conversation takes no slash commands (phase S): nothing to list.
+  if (t.idea) return;
   if (c.loading || (!force && c.at !== null && Date.now() - c.at < 60_000 && c.data?.session === t.session)) return;
   put(t.path, { commands: { ...c, loading: true } });
   try {
@@ -1664,6 +1699,7 @@ export async function sendCommand(t: Target, name: string, args: string, words: 
   const v = viewOf(t.path);
   if (v.sending) return;
   const draft = v.draft;
+  if (t.idea) return;
   put(t.path, { sending: true, sendWords: null, stopWords: null, attachWords: null });
   try {
     const r = await invoke<AgentCommandRun>("agent_command", { repo: t.repo, slug: t.slug, session: t.session, name, args: args || null });
@@ -1738,10 +1774,13 @@ export async function sendAnswer(t: Target, agent: string): Promise<void> {
   if (!way.open || (way.how === "field" && !text.trim()) || draftProblem(text, way.how === "field" ? "answer" : "note")) return;
   put(t.path, { answering: true, answerWords: null });
   try {
-    const args = { repo: t.repo, slug: t.slug, choice: c.n, fingerprint: d.fingerprint };
-    const r = text.trim()
-      ? await invoke<AgentAnswer>("agent_answer_text", { ...args, text })
-      : await invoke<AgentAnswer>("agent_answer", args);
+    const r = t.idea
+      ? text.trim()
+        ? await invoke<AgentAnswer>("idea_answer_text", { ...ideaArgs(t), choice: c.n, fingerprint: d.fingerprint, text })
+        : await invoke<AgentAnswer>("idea_answer", { ...ideaArgs(t), choice: c.n, fingerprint: d.fingerprint })
+      : text.trim()
+        ? await invoke<AgentAnswer>("agent_answer_text", { repo: t.repo, slug: t.slug, choice: c.n, fingerprint: d.fingerprint, text })
+        : await invoke<AgentAnswer>("agent_answer", { repo: t.repo, slug: t.slug, choice: c.n, fingerprint: d.fingerprint });
     const cur = viewOf(t.path);
     const a: Answered = way.how === "field" ? { label: text, at: Date.now(), confirmed: r.confirmed } : { label: r.label, note: text.trim() ? text : undefined, at: Date.now(), confirmed: r.confirmed };
     if (d.picker === "resume") a.resumed = (c.more ?? []).join(" · ");
@@ -1777,8 +1816,11 @@ export async function sendMany(t: Target): Promise<void> {
   try {
     let fingerprint = d.fingerprint;
     if (fill) {
-      await invoke<AgentFilled>("agent_answer_text", { repo: t.repo, slug: t.slug, choice: freeBox.n, fingerprint, text: v.boxText });
-      const now = await invoke<AgentPrompt>("agent_prompt", { repo: t.repo, slug: t.slug });
+      if (t.idea) await invoke<AgentFilled>("idea_answer_text", { ...ideaArgs(t), choice: freeBox.n, fingerprint, text: v.boxText });
+      else await invoke<AgentFilled>("agent_answer_text", { repo: t.repo, slug: t.slug, choice: freeBox.n, fingerprint, text: v.boxText });
+      const now = t.idea
+        ? await invoke<AgentPrompt>("idea_prompt", ideaArgs(t))
+        : await invoke<AgentPrompt>("agent_prompt", { repo: t.repo, slug: t.slug });
       put(t.path, { prompt: { data: now, error: null, loading: false, at: Date.now() } });
       if (!now.waiting || !now.readable || !now.multi || !now.choices.some((c) => c.n === freeBox.n && c.checked)) {
         put(t.path, { answering: false, answerWords: { line: "Your answer was typed into its box, then the prompt changed, so nothing was sent. Check the boxes and send again.", terminal: true } });
@@ -1787,7 +1829,9 @@ export async function sendMany(t: Target): Promise<void> {
       }
       fingerprint = now.fingerprint;
     }
-    const r = await invoke<AgentAnsweredMany>("agent_answer_many", { repo: t.repo, slug: t.slug, choices: want, fingerprint });
+    const r = t.idea
+      ? await invoke<AgentAnsweredMany>("idea_answer_many", { ...ideaArgs(t), choices: want, fingerprint })
+      : await invoke<AgentAnsweredMany>("agent_answer_many", { repo: t.repo, slug: t.slug, choices: want, fingerprint });
     const cur = viewOf(t.path);
     put(t.path, { ...NO_CHOICE, answering: false, answered: [...cur.answered, { label: r.labels.join(", "), at: Date.now(), confirmed: r.confirmed }] });
   } catch (e) {

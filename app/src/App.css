@@ -3999,3 +3999,6 @@ body.dragging .ws-h { cursor: grabbing; }
 .pi-host-form { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); }
 .pi-host-form input[type="text"] { flex: 1 1 10em; min-width: 0; }
 .pi-host-form input[type="number"] { width: 9em; }
+/* Phase S: an idea conversation waits on the person — the lightbulb's dot. */
+.rail-icon.rail-waiting { position: relative; }
+.rail-icon.rail-waiting::after { content: ""; position: absolute; top: 3px; right: 3px; width: 7px; height: 7px; border-radius: 50%; background: var(--warn); }

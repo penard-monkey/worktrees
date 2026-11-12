@@ -132,6 +132,23 @@ pub struct IdeaSessions {
     pub live: Vec<String>,
     pub busy: Vec<String>,
     pub waiting: Vec<String>,
+    /// Each live session's idea (`ideasessions::idea_of_conv`), so a client
+    /// dots the idea in its list without asking every record. Filled by the
+    /// poll, which knows the folder (`with_ideas`).
+    pub idea_of: std::collections::BTreeMap<String, String>,
+}
+
+impl IdeaSessions {
+    /// [`IdeaSessions::idea_of`] for the live sessions, from the folder at `root`.
+    pub fn with_ideas(mut self, root: &std::path::Path) -> IdeaSessions {
+        use worktrees_core::ideasessions as is;
+        self.idea_of = self
+            .live
+            .iter()
+            .filter_map(|s| Some((s.clone(), is::idea_of_conv(root, is::conv_of_session(s)?)?)))
+            .collect();
+        self
+    }
 }
 
 /// [`IdeaSessions`] for one tick, over its probes and panes; `capture` reads
@@ -1197,7 +1214,7 @@ mod tests {
             assert_eq!(targets, [(c.to_string(), c.to_string())], "only the probe-less conversation is captured");
             vec![(c.into(), "claude".into(), TRUST.into())]
         });
-        assert_eq!(got, IdeaSessions { live: v(&[a, b, c]), busy: v(&[a, b]), waiting: v(&[c]) });
+        assert_eq!(got, IdeaSessions { live: v(&[a, b, c]), busy: v(&[a, b]), waiting: v(&[c]), ..IdeaSessions::default() });
         // The place dots never capture an idea pane for a probe at its cwd.
         let waiting = claude_startup_tick(&mut panes, &[], no_ps, |t| {
             assert!(t.iter().all(|(_, s)| !s.contains("~idea~")), "{t:?}");

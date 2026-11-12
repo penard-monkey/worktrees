@@ -325,6 +325,7 @@ fn poll(pollctx: Ctx, hooks: Hooks) {
             }
         }
         let ((busy, waiting, models), idea_sessions) = claude_activity(watch, &mut panes, &fp);
+        let idea_sessions = if idea_sessions.live.is_empty() { idea_sessions } else { idea_sessions.with_ideas(pollctx.ideas_dir()) };
         // Change-gated like `sessions:busy`, and pushed on the first tick
         // whatever it holds, so a client that declares it has a state.
         if last_ideas.as_ref() != Some(&idea_sessions) {

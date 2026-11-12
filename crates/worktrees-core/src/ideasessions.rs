@@ -314,6 +314,24 @@ pub fn transcript_paths(claude_root: &Path, root: &Path, session_id: &str) -> Ve
     dirs.iter().map(|d| PathBuf::from(crate::project::claude_dir_in(claude_root, d)).join(format!("{session_id}.jsonl"))).collect()
 }
 
+/// The idea whose record has conversation `conv`: the folder
+/// `.desk/<idea>/<conv>/` that `prepare_at` made, looked for under each idea
+/// in `.desk/`, real directories only. The poll's question for a live
+/// session (`ideas:sessions`' `idea_of`): one `readdir`, one `lstat` per idea.
+pub fn idea_of_conv(root: &Path, conv: &str) -> Option<String> {
+    if !crate::ulid::is_valid(conv) {
+        return None;
+    }
+    let desk = root.join(DESK_DIR);
+    if !fs::symlink_metadata(&desk).ok()?.file_type().is_dir() {
+        return None;
+    }
+    fs::read_dir(&desk).ok()?.filter_map(Result::ok).filter_map(|e| e.file_name().into_string().ok()).filter(|n| crate::ulid::is_valid(n)).find(|idea| {
+        fs::symlink_metadata(desk.join(idea)).is_ok_and(|m| m.file_type().is_dir())
+            && fs::symlink_metadata(desk.join(idea).join(conv)).is_ok_and(|m| m.file_type().is_dir())
+    })
+}
+
 // ── the ideas folder must not be a place's ──────────────────────────────────
 
 /// Refuse an ideas folder inside a registered project (or one holding a
@@ -526,6 +544,17 @@ mod tests {
         let c2 = prepare_at(&root, &id).unwrap();
         assert_eq!(c2.title, "Conversation 2");
         assert_eq!(list_at(&root, &id).unwrap().iter().map(|c| c.id.clone()).collect::<Vec<_>>(), vec![c2.id.clone(), c.id.clone()], "newest first");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_conversation_names_its_idea_by_its_folder() {
+        let root = tmp("ideaof");
+        let id = ideas::create_at(&root, "x").unwrap().idea.id.unwrap();
+        let c = prepare_at(&root, &id).unwrap();
+        assert_eq!(idea_of_conv(&root, &c.id), Some(id));
+        assert_eq!(idea_of_conv(&root, &crate::ulid::new()), None);
+        assert_eq!(idea_of_conv(&root, "../x"), None);
         let _ = fs::remove_dir_all(&root);
     }
 
