@@ -8,6 +8,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ### Added
 
 - **A workspace's menu adds projects to it directly (beta).** In Workspaces, a workspace's ⋯ menu — and an **Add a project** button in an empty one — now offers Add project ▸ (any project you already have), New project…, Add existing… and Clone from URL…. Whichever you pick, the project ends up in that workspace; cancel or a failed clone leaves the workspace as it was.
+- **Developer tool: `app/scripts/staging.sh`, a sandbox that follows a branch.** It keeps a place on `staging` (or `--branch <b>`) fast-forwarded to origin, builds each new commit, and `--app` launches the sandbox app from it; `--watch` installs a macOS launchd agent that pulls and builds every 10 minutes and never touches a running app. CI now also runs on pushes to `staging`.
 
 ### Changed
 
