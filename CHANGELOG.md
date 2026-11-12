@@ -5,6 +5,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+
+- **A workspace's menu adds projects to it directly (beta).** In Workspaces, a workspace's ⋯ menu — and an **Add a project** button in an empty one — now offers Add project ▸ (any project you already have), New project…, Add existing… and Clone from URL…. Whichever you pick, the project ends up in that workspace; cancel or a failed clone leaves the workspace as it was.
+
 ### Changed
 
 - **The first heading names an idea's file (Ideas, beta).** An idea whose first line becomes `# Jellyfin Sharing` is saved as `jellyfin-sharing.md` instead of staying `untitled.md`, and the list and the window's title follow at once. A name another idea already holds gets a number (`jellyfin-sharing-2.md`) and keeps it, an idea with no heading is `untitled.md`, and its id never changes, so nothing that points at it breaks. A file you made by hand and adopted takes its heading's name on its first save. Rename still works as before, for setting the title without typing in the document: it rewrites the heading and the name together.

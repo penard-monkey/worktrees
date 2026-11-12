@@ -54,7 +54,7 @@ import {
 } from "./dnd";
 import { useNavDrag, type DragItem } from "./navdrag";
 import {
-  VIEW_LABEL, addableTo, idsMoved, idsStepped, projectDrop, rootsWith, rootsWithout, springsTo, wsProjectKey,
+  VIEW_LABEL, addableTo, arrivedRoot, idsMoved, idsStepped, projectDrop, projectsAddable, rootsWith, rootsWithout, springsTo, wsProjectKey,
   type NavView, type WsDef, type WsHit, type WsList,
 } from "./workspaces";
 import { ideasBeta } from "./beta";
@@ -746,6 +746,9 @@ type Ctx =
   // list (a second menu, the way the rail's Move ▸ is).
   | { kind: "ws"; x: number; y: number; id: string }
   | { kind: "ws-add"; x: number; y: number; root: string }
+  // …and the workspace menu's own "Add project ▸": the registered projects
+  // that workspace does not hold yet.
+  | { kind: "ws-projects"; x: number; y: number; id: string }
   // The ⇄ popover. Same state machine as the right-click menus on purpose: only
   // one of them can be open, and every dismissal path already clears it.
   | { kind: "sync"; x: number; y: number; root: string }
@@ -1194,8 +1197,10 @@ function PendingRow({ label }: { label: string }) {
 // worktree at all (git: "not a valid object name"), so init-only would just
 // move the dead end one click later. Module scope: keeps its busy flag across
 // App's re-renders.
-function InitRepoPrompt({ dir, onInit, onCancel }: {
+function InitRepoPrompt({ dir, into, onInit, onCancel }: {
   dir: string;
+  /** The workspace it then goes into, by name (`wsArrive`), if any. */
+  into?: string | null;
   onInit: (dir: string) => Promise<void>;
   onCancel: () => void;
 }) {
@@ -1218,6 +1223,7 @@ function InitRepoPrompt({ dir, onInit, onCancel }: {
       <p className="newform-note">
         <code>{dir}</code> isn't a git repository. Initialize it with an empty first commit?
       </p>
+      {into && <p className="newform-note" data-testid="dialog-into">then adds it to <b>{into}</b></p>}
       <button disabled={busy} onClick={run}>{busy ? "Initializing…" : "git init + first commit"}</button>
     </div>
   );
@@ -3467,8 +3473,10 @@ function nameProblem(n: string): string {
  *  one dialog that can pre-set planning from the repo's own `[plan]` section
  *  (owned-planning §2.3). The suggestion pre-sets the choice and says why; it
  *  never applies itself. Module scope (CLAUDE.md): it owns a text input. */
-function AddProjectDialog({ dir, suggested, planningDefault, onAdd, onClose }: {
+function AddProjectDialog({ dir, suggested, planningDefault, into, onAdd, onClose }: {
   dir: string;
+  /** The workspace it then goes into, by name (`wsArrive`), if any. */
+  into?: string | null;
   suggested: boolean;
   planningDefault: PlanningStatus["default"] | undefined;
   onAdd: (pick: PlanningPick) => void;
@@ -3487,6 +3495,7 @@ function AddProjectDialog({ dir, suggested, planningDefault, onAdd, onClose }: {
         <header className="sync-h"><b>Add project</b></header>
         <div className="sync-body">
           <div className="np-path" data-testid="add-path">will add <code>{dir}</code></div>
+          {into && <div className="np-path" data-testid="dialog-into">then adds it to <b>{into}</b></div>}
           <PlanningChoice value={pick} onChange={setPick} dflt={planningDefault} suggested={suggested} />
         </div>
         <footer className="sync-foot">
@@ -3498,8 +3507,10 @@ function AddProjectDialog({ dir, suggested, planningDefault, onAdd, onClose }: {
   );
 }
 
-function NewProjectDialog({ defaultLocation, planningDefault, busy, error, onBrowse, onCreate, onClose }: {
+function NewProjectDialog({ defaultLocation, planningDefault, busy, error, into, onBrowse, onCreate, onClose }: {
   defaultLocation: string;
+  /** The workspace it then goes into, by name (`wsArrive`), if any. */
+  into?: string | null;
   /** The global planning default the choice starts from. A fresh `git init`
    *  has no `.worktrees.toml`, so there is no repo suggestion to read here. */
   planningDefault: PlanningStatus["default"] | undefined;
@@ -3553,6 +3564,7 @@ function NewProjectDialog({ defaultLocation, planningDefault, busy, error, onBro
           <div className="np-path" data-testid="np-path">
             will create <code>{full}</code>
           </div>
+          {into && <div className="np-path" data-testid="dialog-into">then adds it to <b>{into}</b></div>}
           <PlanningChoice value={pick} onChange={setPick} dflt={planningDefault} disabled={busy} />
           {problem && <div className="sync-err" data-testid="np-error">{problem}</div>}
           {!problem && error && <div className="sync-err" data-testid="np-error">{error}</div>}
@@ -3582,8 +3594,10 @@ function NewProjectDialog({ defaultLocation, planningDefault, busy, error, onBro
  *
  *  Module scope (CLAUDE.md): it owns three text inputs, and App re-renders on
  *  every refresh tick. */
-function CloneDialog({ defaultParent, planningDefault, running, cancelling, progress, error, note, onBrowse, onClone, onCancel, onClose }: {
+function CloneDialog({ defaultParent, planningDefault, running, cancelling, progress, error, note, into, onBrowse, onClone, onCancel, onClose }: {
   defaultParent: string;
+  /** The workspace it then goes into, by name (`wsArrive`), if any. */
+  into?: string | null;
   /** The global planning default only: the repo does not exist until the
    *  clone finishes, so a `[plan]` suggestion becomes a post-clone line. */
   planningDefault: PlanningStatus["default"] | undefined;
@@ -3655,6 +3669,7 @@ function CloneDialog({ defaultParent, planningDefault, running, cancelling, prog
           <div className="np-path" data-testid="clone-path">
             will create <code>{`${trimmedParent || "…"}/${folder || "…"}`}</code>
           </div>
+          {into && <div className="np-path" data-testid="dialog-into">then adds it to <b>{into}</b></div>}
           <PlanningChoice value={pick} onChange={setPick} dflt={planningDefault} disabled={running} />
           {problem && <div className="sync-err" data-testid="clone-problem">{problem}</div>}
           {running && (
@@ -4262,9 +4277,16 @@ function App() {
   const pendingSeq = useRef(0);
   // A picked folder that is not a repo yet, awaiting the `git init` offer.
   const [initAsk, setInitAsk] = useState<string | null>(null);
+  /** The workspace a project arriving through a dialog goes into once it is
+   *  registered — set only when the dialog was opened from that workspace's
+   *  menu (`wsArrive`), null from the nav footer. One per dialog, so a clone
+   *  still running is not retargeted by a dialog opened beside it. */
+  const [initInto, setInitInto] = useState<string | null>(null);
+  const [npInto, setNpInto] = useState<string | null>(null);
+  const [cloneInto, setCloneInto] = useState<string | null>(null);
   // Add existing's confirm step (planning choice), and Clone's post-clone
   // planning line (owned-planning §2.3).
-  const [addAsk, setAddAsk] = useState<{ dir: string; suggested: boolean } | null>(null);
+  const [addAsk, setAddAsk] = useState<{ dir: string; suggested: boolean; into: string | null } | null>(null);
   const [planHint, setPlanHint] = useState<{ root: string; name: string } | null>(null);
   const [ctx, setCtx] = useState<Ctx | null>(null);
   const [confirmRm, setConfirmRm] = useState<string | null>(null);
@@ -6148,7 +6170,7 @@ function App() {
     () => new Set((ws?.projects ?? []).filter((p) => p.snapshot?.unborn).map((p) => p.root)),
     [ws],
   );
-  const addProject = async () => {
+  const addProject = async (into: string | null = null) => {
     try {
       const dir = await pickDirForHost("Add a git project");
       if (dir === null) return;
@@ -6158,12 +6180,13 @@ function App() {
       const probe = await invoke<DirProbe>("probe_dir", { dir });
       if (!probe.is_git) {
         setInitAsk(dir);
+        setInitInto(into);
         // The offer renders INSIDE the nav, so the nav has to be on screen —
         // and `initAsk` is one of the sticky conditions, so it stays there.
         revealNav(false);
         return;
       }
-      setAddAsk({ dir, suggested: !!probe.plan_suggested });
+      setAddAsk({ dir, suggested: !!probe.plan_suggested, into });
     } catch (e) { fail(e); }
   };
   /** The project a write just added: the root present now and not before. */
@@ -6193,12 +6216,14 @@ function App() {
     try {
       const before = ws;
       const after = await invoke<Workspace>("add_project", { dir: ask.dir });
+      await wsArrive(ask.into, before, after, ask.dir);
       commitWs(after);
       await applyPick(newRoot(before, after), pick);
     } catch (e) { fail(e); }
   };
-  const openNewProject = () => {
+  const openNewProject = (into: string | null = null) => {
     closeCtx();
+    setNpInto(into);
     setNpErr("");
     setNpOpen(true);
   };
@@ -6221,7 +6246,9 @@ function App() {
     try {
       setErr("");
       const before = ws;
+      const into = npInto;
       const after = await invoke<Workspace>("create_project", { location, name });
+      await wsArrive(into, before, after, null);
       commitWs(after);
       setNpOpen(false);
       await applyPick(newRoot(before, after), pick);
@@ -6251,8 +6278,9 @@ function App() {
     return settings.projects_parent || best || "~/workspace";
   }, [ws, settings.projects_parent]);
 
-  const openClone = () => {
+  const openClone = (into: string | null = null) => {
     closeCtx();
+    setCloneInto(into);
     setCloneErr("");
     setCloneNote("");
     setCloneProg(null);
@@ -6275,10 +6303,12 @@ function App() {
     setCloneProg(null);
     const onProgress = new Channel<CloneProgress>();
     onProgress.onmessage = (p) => setCloneProg(p);
+    const into = cloneInto;
     try {
       setErr("");
       const done = await invoke<{ workspace: Workspace; root: string; dir: string; has_submodules: boolean }>(
         "clone_project", { id, url, parent, name: name || null, onProgress });
+      await wsArrive(into, ws, done.workspace, done.root);
       commitWs(done.workspace);
       updateSettings({ projects_parent: parent });
       setCloneOpen(false);
@@ -6312,7 +6342,11 @@ function App() {
   const initRepo = async (dir: string) => {
     try {
       setErr("");
-      commitWs(await invoke<Workspace>("init_repo", { dir }));
+      const before = ws;
+      const into = initInto;
+      const after = await invoke<Workspace>("init_repo", { dir });
+      await wsArrive(into, before, after, dir);
+      commitWs(after);
       setInitAsk(null);
     } catch (e) { fail(e); }
   };
@@ -6433,6 +6467,22 @@ function App() {
     if (!w || w.projects.some((p) => p.root === root)) return;
     void wsRun("workspace_set_projects", { id, roots: rootsWith(w, root) });
   };
+  /** A workspace menu's New project / Add existing / Clone, once the project
+   *  is registered: put it in workspace `id` (null = opened from the nav
+   *  footer, nothing to do). Awaited BEFORE the caller commits the new
+   *  registry, whose re-key re-reads the list — so that read sees this write.
+   *  The list is read fresh: the dialog may have sat open while it changed. A
+   *  failure is said and leaves the project registered, outside the workspace. */
+  const wsArrive = async (id: string | null, before: Workspace | null, after: Workspace, dir: string | null) => {
+    if (!id) return;
+    const root = arrivedRoot((before?.projects ?? []).map((p) => p.root), after.projects.map((p) => p.root), dir);
+    if (!root) return;
+    const l = await invoke<WsList>("workspaces_list").catch((e) => { fail(e); return null; });
+    const w = l?.workspaces.find((x) => x.id === id);
+    if (!l || !w) { if (l) setWsList(l); return; }
+    if (w.projects.some((p) => p.root === root)) { setWsList(l); return; }
+    await wsRun("workspace_set_projects", { id, roots: rootsWith(w, root) });
+  };
   /** Taking a project out of a workspace (never out of the registry) offers
    *  Undo, which puts the list back exactly as it was. */
   const wsRemoveProject = (id: string, root: string) => {
@@ -6484,6 +6534,14 @@ function App() {
     setMenu(null);
     setConfirmRm(null);
     setCtx({ kind: "ws", x: e.clientX, y: e.clientY, id });
+  };
+  /** The same menu opened from a button, anchored under it. */
+  const wsMenuAt = (e: React.MouseEvent, id: string) => {
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    e.stopPropagation();
+    setMenu(null);
+    setConfirmRm(null);
+    setCtx({ kind: "ws", x: r.left, y: r.bottom + 2, id });
   };
   const startNewWorkspace = (withRoot: string | null = null) => {
     closeCtx();
@@ -9012,7 +9070,13 @@ function App() {
                 {open && (
                   <div className="ws-kids">
                     {w.projects.length === 0 && (
-                      <div className="empty small ws-drop-hint">Drag a project here, or use its menu: Add to workspace.</div>
+                      <div className="empty small ws-drop-hint">
+                        Drag a project here, or use its menu: Add to workspace.
+                        {/* The workspace menu again, anchored here: one menu,
+                            two anchors. */}
+                        <button className="ctrl ws-empty-add" data-testid="ws-empty-add" data-track="nav.workspace.empty.add"
+                          onClick={(e) => wsMenuAt(e, w.id)}><Icons.Plus size={12} /> Add a project</button>
+                      </div>
                     )}
                     {w.projects.map((p) => {
                       const pv = p.registered ? pvOf(p.root) : null;
@@ -9280,7 +9344,7 @@ function App() {
           onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); enterFirstMatch(); } }}
         />
         {initAsk && (
-          <InitRepoPrompt dir={initAsk} onInit={initRepo} onCancel={() => setInitAsk(null)} />
+          <InitRepoPrompt dir={initAsk} into={initInto ? wsById(initInto)?.name : null} onInit={initRepo} onCancel={() => setInitAsk(null)} />
         )}
         {ideasOn && wsList && (
           <NavViewSwitch
@@ -9783,7 +9847,7 @@ function App() {
                       repo that is already on disk is the third way in and lives in
                       the nav footer's menu, one click away, beside these. */}
                   <div className="home-actions">
-                    <button className="enter-btn big home-open with-icon" data-testid="new-project-home" onClick={openNewProject}>
+                    <button className="enter-btn big home-open with-icon" data-testid="new-project-home" onClick={() => openNewProject()}>
                       <Icons.Plus size={15} /> New project…
                     </button>
                     <button className="ctrl home-import with-icon" data-testid="hubs-open-home" onClick={openHubs}>
@@ -10458,6 +10522,7 @@ function App() {
           planningDefault={planning?.default}
           busy={npBusy}
           error={npErr}
+          into={npInto ? wsById(npInto)?.name : null}
           onBrowse={browseLocation}
           onCreate={createProject}
           onClose={() => { setNpOpen(false); setNpErr(""); }}
@@ -10465,6 +10530,7 @@ function App() {
       )}
       {addAsk && (
         <AddProjectDialog dir={addAsk.dir} suggested={addAsk.suggested} planningDefault={planning?.default}
+          into={addAsk.into ? wsById(addAsk.into)?.name : null}
           onAdd={confirmAdd} onClose={() => setAddAsk(null)} />
       )}
       {cloneOpen && (
@@ -10476,6 +10542,7 @@ function App() {
           progress={cloneProg}
           error={cloneErr}
           note={cloneNote}
+          into={cloneInto ? wsById(cloneInto)?.name : null}
           onBrowse={browseCloneParent}
           onClone={runClone}
           onCancel={cancelClone}
@@ -10680,11 +10747,11 @@ function App() {
               modal, and a popover left open under it is still open when it
               returns (closeMenu discipline). */}
           <button className="pop-item" data-testid="add-new"
-            onClick={openNewProject}>New project…</button>
+            onClick={() => openNewProject()}>New project…</button>
           <button className="pop-item" data-testid="add-existing" {...hostOnly("Choosing a folder")}
             onClick={() => { closeCtx(); addProject(); }}>Add existing…</button>
           <button className="pop-item" data-testid="add-clone"
-            onClick={openClone}>Clone from URL…</button>
+            onClick={() => openClone()}>Clone from URL…</button>
           <button className="pop-item" data-testid="add-hubs"
             onClick={openHubs}>Hubs…</button>
         </CtxMenu>
@@ -10828,6 +10895,23 @@ function App() {
         return (
           <CtxMenu x={ctx.x} y={ctx.y} onClose={closeCtx}>
             <div className="pop-hint">{w.name}</div>
+            {/* Every way a project arrives, each ending with it IN this
+                workspace: one already registered (the list), or the nav
+                footer's three acts with this workspace as their continuation
+                (`wsArrive`). Hubs… stays in the footer: a hub import is not
+                one project. */}
+            <button className="pop-item" data-testid="ws-add-project" data-track="nav.workspace.add"
+              onClick={() => { setConfirmRm(null); setCtx({ kind: "ws-projects", x: ctx.x, y: ctx.y, id: w.id }); }}>
+              Add project <Icons.ChevronRight size={12} />
+            </button>
+            <button className="pop-item" data-testid="ws-add-new-project" data-track="nav.workspace.add.new"
+              onClick={() => openNewProject(w.id)}>New project…</button>
+            <button className="pop-item" data-testid="ws-add-existing" data-track="nav.workspace.add.existing"
+              {...hostOnly("Choosing a folder")}
+              onClick={() => { closeCtx(); addProject(w.id); }}>Add existing…</button>
+            <button className="pop-item" data-testid="ws-add-clone" data-track="nav.workspace.add.clone"
+              onClick={() => openClone(w.id)}>Clone from URL…</button>
+            <div className="ctx-sep" />
             <button className="pop-item" data-testid="ws-rename" data-track="nav.workspace.rename"
               onClick={() => { closeCtx(); setWsNaming(w.id); }}>Rename…</button>
             <button className="pop-item" data-testid="ws-move-up" data-track="nav.workspace.up" disabled={!up}
@@ -10841,6 +10925,26 @@ function App() {
               title="removes the workspace only — its projects, places and branches stay"
               onClick={() => wsRemove(w.id)}
             >{armed ? "Confirm remove?" : "Remove workspace"}</button>
+          </CtxMenu>
+        );
+      })()}
+      {/* ── a workspace's "Add project ▸" list ── */}
+      {ctx?.kind === "ws-projects" && (() => {
+        const w = wsById(ctx.id);
+        if (!w) return null;
+        const can = projectsAddable(w, (ws?.projects ?? []).filter((p) => p.ok).map((p) => p.root));
+        return (
+          <CtxMenu x={ctx.x} y={ctx.y} onClose={closeCtx}>
+            <div className="pop-hint">add to {w.name}</div>
+            {can.map((root) => (
+              <button key={root} className="pop-item" data-testid="ws-projects-item" data-track="nav.workspace.add.item"
+                title={root} onClick={() => { const id = w.id; closeCtx(); wsAddProject(id, root); }}>
+                {basename(root)}
+              </button>
+            ))}
+            {can.length === 0 && (
+              <button className="pop-item" data-testid="ws-projects-none" disabled>every project is in it</button>
+            )}
           </CtxMenu>
         );
       })()}
