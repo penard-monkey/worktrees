@@ -1288,6 +1288,18 @@ commands! { cx, a;
     idea_rename: HostConsole => ideas::idea_rename(&cx.ctx, a.get("id")?, a.get("title")?, a.get("expected_mtime")?),
     idea_remove: HostConsole => ideas::idea_remove(&cx.ctx, a.get("id")?, a.get("expected_mtime")?),
     idea_adopt: HostConsole => ideas::idea_adopt(&cx.ctx, a.get("file")?, a.get("expected_mtime")?),
+    // ── ideas relate (idea board phase 3, `worktrees_core::ideas`) ──────
+    // The four acts with their whole input as parameters (§7.1, C11), the
+    // relations, and history. `idea_versions` and `idea_restore` take an id
+    // that may have no live file (a removed or merged-away idea), so they
+    // name no `idea` object; the body validates it as a ULID.
+    idea_relate: HostConsole [console, idea(id), idea(other)] => ideas::idea_relate(&cx.ctx, a.get("id")?, a.get("other")?),
+    idea_merge: HostConsole [console, idea(into), idea(from)] => ideas::idea_merge(&cx.ctx, a.get("into")?, a.get("from")?, a.get("text")?, a.get("expected_into")?, a.get("expected_from")?),
+    idea_combine: HostConsole => ideas::idea_combine(&cx.ctx, a.get("ids")?, a.get("title")?, a.get("text")?),
+    idea_split: HostConsole [console, idea(id)] => ideas::idea_split(&cx.ctx, a.get("id")?, a.get("start")?, a.get("end")?, a.get("extract")?, a.get("title")?, a.get("expected_mtime")?),
+    idea_related: HostConsole [console, idea(id)] => ideas::idea_related(&cx.ctx, a.get("id")?),
+    idea_versions: HostConsole => ideas::idea_versions(&cx.ctx, a.get("id")?),
+    idea_restore: HostConsole => ideas::idea_restore(&cx.ctx, a.get("id")?, a.get("version")?, a.get("expected_mtime")?),
     // ── idea sessions (phase S, `worktrees_core::ideasessions`) ──────────
     // A conversation with Claude about one idea, in its own tmux session
     // (`worktrees~idea~<conv>`), never a place. Console rows on two objects,
@@ -1389,14 +1401,16 @@ mod tests {
     /// named workspaces' six console rows (`workspaces_list`, `workspace_*`), and the
     /// idea board's seven console rows (`ideas_list`, `idea_read`,
     /// `idea_create`, `idea_write`, `idea_rename`, `idea_remove`,
-    /// `idea_adopt`), and the chat's images (`read_place_image`, `agent_call_image`), and phase S's fifteen
+    /// `idea_adopt`) and phase 3's seven (`idea_relate`, `idea_merge`,
+    /// `idea_combine`, `idea_split`, `idea_related`, `idea_versions`,
+    /// `idea_restore`), and the chat's images (`read_place_image`, `agent_call_image`), and phase S's fifteen
     /// idea-session console rows (`idea_conversation*`, `idea_*` over the agent bodies); the check scripts
     /// hold the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 244, "the table has 244 commands");
+        assert_eq!(TABLE.len(), 251, "the table has 251 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1727,6 +1741,8 @@ mod tests {
         ("idea_write", "id", "an idea's ULID (a console act)"),
         ("idea_rename", "id", "an idea's ULID (a console act)"),
         ("idea_remove", "id", "an idea's ULID (a console act)"),
+        ("idea_versions", "id", "an idea's ULID that may have no live file (a removed or merged-away idea's history); the body checks it is a ULID (a console act)"),
+        ("idea_restore", "id", "an idea's ULID that may have no live file (restoring a removed or merged-away idea makes it again); the body checks it is a ULID (a console act)"),
         ("read_place_image", "path", "a path in the PLACE (relative to its root, or absolute under it): the body resolves it under `place(repo, slug)`'s own root by `safepath::place_image`, which is not a `file(path)` judged against every project"),
     ];
 
@@ -1802,7 +1818,7 @@ mod tests {
     /// `push_allow_security`); Settings → Agent policy → Limits'
     /// `limits_settings` (`read`) and `set_limits` (`admin`); and the policy
     /// presets' `policy_preset_status` (`read`) and `apply_policy_preset`
-    /// (console); the named workspaces' six (console); and the idea board's seven (console); phase S's fifteen idea-session rows (console); `read_place_image` and `agent_call_image` are `read`. A row that moves group
+    /// (console); the named workspaces' six (console); and the idea board's seven and phase 3's seven (console); phase S's fifteen idea-session rows (console); `read_place_image` and `agent_call_image` are `read`. A row that moves group
     /// fails here until the count (and the proposal's table) move with it.
     #[test]
     fn every_row_has_one_base_group_and_the_counts_are_section_3_4s() {
@@ -1819,7 +1835,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 70), ("write", 23), ("admin", 41), ("console", 76), ("stream", 10), ("instruct", 8), ("answer", 2),
+            ("read", 70), ("write", 23), ("admin", 41), ("console", 83), ("stream", 10), ("instruct", 8), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 7),
         ]
         .into();
@@ -1909,6 +1925,45 @@ mod tests {
         let a = run("idea_adopt", json!({"file": "hand.md"})).unwrap();
         assert!(a["content"].as_str().unwrap().ends_with("---\n\n# Hand\n"));
         for cmd in ["ideas_list", "idea_read", "idea_create", "idea_write", "idea_rename", "idea_remove", "idea_adopt"] {
+            assert_eq!(exposure(cmd), Some(Exposure::HostConsole), "{cmd}: desktop only");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Phase 3's rows through the dispatcher: each act with its plain
+    /// parameters, an absorbed id answering for the idea that took it, and a
+    /// restore of an idea that has no live file.
+    #[test]
+    fn the_relate_rows_are_one_act_each_and_a_merged_id_keeps_resolving() {
+        let (c, dir, _rx) = call("ideas-relate");
+        let folder = dir.join("ideas");
+        let c = Call { ctx: c.ctx.clone().with_ideas_dir(folder.clone()), ..c };
+        let run = |cmd: &str, v: Value| super::call(&c, cmd, &args(v));
+        let mk = |t: &str| run("idea_create", json!({"title": t})).unwrap()["id"].as_str().unwrap().to_string();
+        let (a, b, x, y) = (mk("Alpha"), mk("Beta"), mk("Ex"), mk("Why"));
+        let r = run("idea_relate", json!({"id": a, "other": x})).unwrap();
+        assert!(r["content"].as_str().unwrap().contains(&format!("related: [{x}]")));
+        assert_eq!(run("idea_related", json!({"id": x})).unwrap()[0]["how"], json!("related-by"));
+        let m = run("idea_merge", json!({"into": a, "from": b})).unwrap();
+        assert!(m["content"].as_str().unwrap().contains(&format!("absorbed: [{b}]")));
+        let via = run("idea_read", json!({"id": b})).unwrap();
+        assert_eq!((via["id"].as_str(), via["merged"]["id"].as_str()), (Some(a.as_str()), Some(b.as_str())));
+        let e = run("idea_merge", json!({"into": a, "from": b})).unwrap_err();
+        assert!(e.as_str().unwrap().contains("merged into"), "an absorbed id is not an act's target: {e}");
+        let cmb = run("idea_combine", json!({"ids": [x, y], "title": "Both"})).unwrap();
+        assert_eq!(cmb["file"], json!("both.md"));
+        let cid = cmb["id"].as_str().unwrap().to_string();
+        let text = cmb["content"].as_str().unwrap().to_string();
+        let start = text.find("## From: Why").unwrap();
+        let sp = run("idea_split", json!({"id": cid, "start": start, "end": text.len(), "expectedMtime": cmb["mtime_ms"]})).unwrap();
+        assert_eq!(sp["new"]["title"], json!(format!("From: Why ({})", worktrees_core::ideas::date_of(worktrees_core::sysclock::now_epoch()))));
+        assert!(sp["source"]["content"].as_str().unwrap().contains(&format!("(idea:{})", sp["new"]["id"].as_str().unwrap())));
+        let v = run("idea_versions", json!({"id": b})).unwrap();
+        assert_eq!(v.as_array().unwrap().len(), 1, "B's copy, taken by the merge");
+        let back = run("idea_restore", json!({"id": b, "version": v[0]["version"]})).unwrap();
+        assert_eq!((back["id"].as_str(), back.get("merged")), (Some(b.as_str()), None), "B is its own again");
+        assert!(run("idea_versions", json!({"id": "../x"})).is_err());
+        for cmd in ["idea_relate", "idea_merge", "idea_combine", "idea_split", "idea_related", "idea_versions", "idea_restore"] {
             assert_eq!(exposure(cmd), Some(Exposure::HostConsole), "{cmd}: desktop only");
         }
         let _ = std::fs::remove_dir_all(&dir);

@@ -130,3 +130,54 @@ button.ix-row-main:hover { background: var(--bg-elev); }
 .ix-row-main .ix-dot { margin-right: var(--s1); }
 .ix-head .ix-btn .ix-dot { margin-right: var(--s1); vertical-align: 1px; }
 .chat-img-note { color: var(--txt-dim); font-style: italic; }
+
+/* ── phase 3: ideas relate ─────────────────────────────────────────────────
+   A drop target is a border and a tint (an accent is a FILL here, never
+   text); a target that cannot take the drag shows nothing (§6.1). */
+.ix-row.ix-drop { box-shadow: inset 0 0 0 1.5px var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--bg-panel)); }
+.ix-btn-primary.ix-drop { box-shadow: 0 0 0 2px var(--bg-panel), 0 0 0 4px var(--accent); }
+.ix-row.ix-row-sel { background: color-mix(in srgb, var(--accent) 10%, var(--bg-panel)); }
+.ix-row.ix-row-sel .ix-row-main { color: var(--txt-hi); }
+body.dragging .ix-row-main:hover { background: transparent; }
+.ix-list-hot { box-shadow: inset 0 0 0 2px var(--accent); }
+.ix-list-tip { padding: var(--s1) var(--s3); }
+.ix-catch { position: fixed; inset: 0; z-index: 20; }
+body.dragging .ix-catch { pointer-events: none; }
+.ix-pop {
+  position: fixed; z-index: 21; min-width: 200px; max-width: 320px; display: flex; flex-direction: column; gap: 2px; padding: var(--s1);
+  background: var(--bg-panel); border: 1px solid var(--line-strong); border-radius: 8px; box-shadow: 0 6px 20px rgb(0 0 0 / 0.25);
+}
+.ix-pop-head { margin: 0; padding: var(--s1) var(--s2); color: var(--txt); font-size: var(--fs-meta); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ix-pop-item {
+  display: block; width: 100%; text-align: left; padding: 4px var(--s2); border: 0; border-radius: 5px;
+  background: transparent; color: var(--txt-hi); font-size: var(--fs-body); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ix-pop-item:hover, .ix-pop-item:focus-visible, .ix-pop-item.on { background: var(--bg-elev); outline: none; }
+.ix-pop-key { float: right; color: var(--txt); font-size: var(--fs-meta); margin-left: var(--s3); }
+.ix-linkpick { max-height: 220px; overflow-y: auto; }
+.ix-scrim { position: fixed; inset: 0; z-index: 30; background: rgb(0 0 0 / 0.35); display: flex; align-items: flex-start; justify-content: center; padding: 12vh 16px 16px; }
+.ix-dialog {
+  width: min(440px, 100%); max-height: 76vh; overflow-y: auto; display: flex; flex-direction: column; gap: var(--s2); padding: var(--s3);
+  background: var(--bg-panel); border: 1px solid var(--line-strong); border-radius: 10px; box-shadow: 0 10px 30px rgb(0 0 0 / 0.3);
+}
+.ix-dialog-head { margin: 0; color: var(--txt-hi); font-weight: var(--fw-bold); }
+.ix-dialog-foot { display: flex; justify-content: flex-end; gap: var(--s2); }
+.ix-pick-rows { list-style: none; margin: 0; padding: 0; max-height: 40vh; overflow-y: auto; }
+.ix-split-preview { margin: 0; max-height: 8rem; overflow: auto; padding: var(--s2); border: 1px solid var(--line); border-radius: 5px; background: var(--bg-abyss); color: var(--txt); font-size: var(--fs-meta); white-space: pre-wrap; }
+.ix-check { display: flex; align-items: center; gap: var(--s2); color: var(--txt-hi); font-size: var(--fs-body); }
+.ix-check > input { font-size: inherit; margin: 0; }
+.ix-related { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; padding: var(--s1) var(--s4); border-bottom: 1px solid var(--line); }
+.ix-related-head { color: var(--txt); font-size: var(--fs-meta); }
+.ix-chip {
+  display: inline-block; max-width: 18rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding: 1px 8px;
+  border: 1px solid var(--line-strong); border-radius: 10px; background: var(--bg-panel); color: var(--txt-hi); font-size: var(--fs-meta);
+}
+.ix-chip:hover { border-color: var(--accent); }
+.ix-chip-how { margin-left: var(--s1); color: var(--txt); }
+.ix-versions { border-bottom: 1px solid var(--line); background: var(--bg-panel); max-height: 34vh; overflow-y: auto; padding: var(--s1) var(--s4) var(--s2); }
+.ix-versions-head { display: flex; align-items: center; justify-content: space-between; color: var(--txt-hi); font-weight: var(--fw-bold); font-size: var(--fs-body); }
+.ix-version-rows { list-style: none; margin: 0; padding: 0; }
+.ix-version { display: flex; align-items: center; gap: var(--s3); padding: 3px 0; border-top: 1px solid var(--line); font-size: var(--fs-meta); color: var(--txt); }
+.ix-version-when { flex: none; color: var(--txt-hi); }
+.ix-version-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ix-version-size { flex: none; }
