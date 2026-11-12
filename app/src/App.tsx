@@ -5072,6 +5072,14 @@ function App() {
     });
     return () => { un.then((f) => f()).catch(() => {}); };
   }, []);
+  // Phase S: an idea conversation waiting on the person ambers the Ideas
+  // lightbulb, and nothing else in this window shows idea sessions (they are
+  // never places). Busy shows nothing.
+  const [ideaWaiting, setIdeaWaiting] = useState(false);
+  useEffect(() => {
+    const un = listen<{ waiting?: string[] }>("ideas:sessions", (e) => setIdeaWaiting((e.payload?.waiting?.length ?? 0) > 0));
+    return () => { un.then((f) => f()).catch(() => {}); };
+  }, []);
   const activityOf = (p: Place): "busy" | "waiting" | "" =>
     busyPaths.has(p.path) ? "busy" : waitingPaths.has(p.path) ? "waiting" : "";
 
@@ -9274,7 +9282,8 @@ function App() {
         {/* The Ideas companion: a window of its own (Ideas phase 0). The
             rail is the one strip every layout shows, and this sits with the
             app-wide actions rather than with Places. */}
-        {ideasOn && <button className="rail-icon" title="Ideas — open the Ideas window (⌘⇧I)" data-testid="ideas-rail" onClick={openIdeas}><Icons.Lightbulb size={17} /></button>}
+        {ideasOn && <button className={"rail-icon" + (ideaWaiting ? " rail-waiting" : "")} data-waiting={ideaWaiting || undefined}
+          title={ideaWaiting ? "Ideas — a conversation is waiting on you (⌘⇧I)" : "Ideas — open the Ideas window (⌘⇧I)"} data-testid="ideas-rail" onClick={openIdeas}><Icons.Lightbulb size={17} /></button>}
         <button className="rail-icon" title="add project" data-testid="add-menu-rail" onClick={openAddMenu}><Icons.FolderPlus size={17} /></button>
         {/* Renders nothing unless the widget initialized, so a build with no
             Orfis configuration leaves the rail exactly as it was. */}

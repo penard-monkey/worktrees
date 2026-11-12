@@ -26,6 +26,7 @@ import { ideaState } from "./editor";
 import { Session, type IdeasChanged, type SaveState, type Saved } from "./ideasave";
 import { savedText } from "./ideastate";
 import { bodyOf, commentOnly, withId } from "./ideatext";
+import { IdeaChat, ideaDots, type ConvState, type IdeaSessionsEv } from "./IdeaChat";
 
 // ── the rows' shapes (worktrees_core::ideas) ────────────────────────────────
 type Problem = "no-id" | "bad-id" | "duplicate-id" | "too-large" | "not-text" | "unreadable";
@@ -121,6 +122,8 @@ function IdeaList(props: {
   onAdopt(i: Idea): void;
   onReveal(): void;
   canReveal: boolean;
+  /** Each idea's conversations, at a glance (`ideas:sessions`). */
+  dots: Map<string, ConvState>;
 }) {
   const { listing, openId, filter } = props;
   const shown = useMemo(() => {
@@ -157,6 +160,8 @@ function IdeaList(props: {
             >
               {openable ? (
                 <button className="ix-row-main" onClick={() => props.onOpen(i.id!)} title={i.file}>
+                  {props.dots.get(i.id!) && <span className={`ix-dot ix-dot-${props.dots.get(i.id!)}`} data-testid="ideas-dot" data-state={props.dots.get(i.id!)}
+                    aria-label={`A conversation is ${props.dots.get(i.id!) === "waiting" ? "waiting on you" : props.dots.get(i.id!) === "busy" ? "working" : "open"}`} />}
                   <span className="ix-row-title">{i.title || "Untitled"}</span>
                   <span className="ix-row-age">{age(i.mtime_ms)}</span>
                 </button>
@@ -270,13 +275,18 @@ export function Companion() {
   const handle = useRef<EditorHandle | null>(null);
   const arm = useArmed<"remove" | "reload">();
   const keySeq = useRef(0);
+  // Phase S: the open idea's conversations beside the editor.
+  const [sessions, setSessions] = useState<IdeaSessionsEv | null>(null);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [prefs, setPrefs] = useState<{ terminal: string; uiRem: number }>({ terminal: "", uiRem: 15 });
+  const dots = useMemo(() => ideaDots(sessions), [sessions]);
 
   // Once per socket: the window's theme from the shared settings (read only —
   // the main window owns ui-state.json's whole-blob save), and the connect
   // line. gen 0 is a door with no engine (the mock): nothing to log to.
   useEffect(() => {
     if (!up) return;
-    loadSettings().then(applySettings).catch(() => {});
+    loadSettings().then((st) => { applySettings(st); setPrefs({ terminal: st.terminal_cmd, uiRem: st.ui_rem }); }).catch(() => {});
     if (gen > 0) invoke("log_event", { level: "info", msg: connectLine(gen) }).catch(() => {});
   }, [up, gen]);
 
@@ -298,6 +308,16 @@ export function Companion() {
     }).then((u) => { if (gone) u(); else off = u; }).catch(() => {});
     return () => { gone = true; off?.(); };
   }, [refresh]);
+
+  // The conversations' live state, by tmux session (serve sends the last one
+  // as soon as this window declares the event).
+  useEffect(() => {
+    let off: (() => void) | null = null;
+    let gone = false;
+    listen<IdeaSessionsEv>("ideas:sessions", (ev) => { if (ev.payload) setSessions(ev.payload); })
+      .then((u) => { if (gone) u(); else off = u; }).catch(() => {});
+    return () => { gone = true; off?.(); };
+  }, []);
 
   /** Start a session on a document just read, created or adopted. */
   const begin = useCallback((d: Doc, focus = false) => {
@@ -463,7 +483,7 @@ export function Companion() {
   };
 
   return (
-    <main className="ix">
+    <main className={`ix${open && chatOpen ? " ix-with-chat" : ""}`}>
       <IdeaList
         listing={listing}
         openId={open?.id ?? null}
@@ -474,6 +494,7 @@ export function Companion() {
         onAdopt={(i) => void adopt(i)}
         onReveal={reveal}
         canReveal={!!listing?.dir}
+        dots={dots}
       />
       <section className="ix-doc" data-testid="ideas-doc">
         {words && <p className="ix-engine" data-testid="companion-engine">{words}</p>}
@@ -508,6 +529,10 @@ export function Companion() {
                   <button className={mode === "edit" ? "on" : ""} data-testid="ideas-mode-edit" aria-pressed={mode === "edit"} onClick={() => switchMode("edit")}>Edit</button>
                   <button className={mode === "read" ? "on" : ""} data-testid="ideas-mode-read" aria-pressed={mode === "read"} onClick={() => switchMode("read")}>Read</button>
                 </span>
+                <button className={`ix-btn${chatOpen ? " on" : ""}`} data-testid="ideas-chat-toggle" aria-pressed={chatOpen} onClick={() => setChatOpen((o) => !o)}
+                  title="Talk this idea through with Claude, beside the editor">
+                  {dots.get(open.id) && <span className={`ix-dot ix-dot-${dots.get(open.id)}`} aria-hidden="true" />}Conversations
+                </button>
                 <button className="ix-btn" data-testid="ideas-rename" disabled={busy} onMouseDown={(e) => e.preventDefault()} onClick={() => setRenaming(open.title)}>Rename</button>
                 {listing?.dir && <button className="ix-btn" data-testid="ideas-reveal" onClick={reveal}>Show in Finder</button>}
                 <button className={`ix-btn${arm.armed === "remove" ? " ix-btn-armed" : ""}`} data-testid="ideas-remove" disabled={busy} onClick={remove}
@@ -562,7 +587,9 @@ export function Companion() {
           </div>
         )}
       </section>
-      <aside className="ix-side" aria-hidden="true" />
+      {open && chatOpen
+        ? <IdeaChat ideaId={open.id} dir={listing?.dir ?? null} sessions={sessions} terminalCmd={prefs.terminal} uiRem={prefs.uiRem} onNotice={setNotice} />
+        : <aside className="ix-side" aria-hidden="true" />}
     </main>
   );
 }
