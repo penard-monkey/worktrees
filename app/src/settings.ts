@@ -642,6 +642,9 @@ export type HarnessUpdate = {
   /** The host's by-hand steps for an install it won't update itself. Absent
    *  when the row has an Update button, or the tool is not installed. */
   manual?: HarnessManual;
+  /** The folder of another copy of this tool further down PATH. Sent to the
+   *  host's own console only: it is a path from that machine. */
+  behind_on_path?: string;
 };
 
 /** Every string here is fixed on the host, never a path from the machine. */

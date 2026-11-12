@@ -49,13 +49,13 @@ impl Tool {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Method { Native, Npm, Homebrew, Managed, LegacyPython, Unknown, NotInstalled }
+enum Method { Native, Npm, Homebrew, Managed, Standalone, LegacyPython, Unknown, NotInstalled }
 
 impl Method {
     fn name(self) -> &'static str {
         match self {
             Self::Native => "native", Self::Npm => "npm", Self::Homebrew => "homebrew",
-            Self::Managed => "managed", Self::LegacyPython => "legacy-python",
+            Self::Managed => "managed", Self::Standalone => "standalone", Self::LegacyPython => "legacy-python",
             Self::Unknown => "unknown", Self::NotInstalled => "not-installed",
         }
     }
@@ -65,6 +65,7 @@ impl Method {
             (Tool::Claude, Self::Npm) => Some("npm install -g @anthropic-ai/claude-code@latest"),
             (Tool::Codex, Self::Npm) => Some("npm install -g @openai/codex@latest"),
             (Tool::Codex, Self::Homebrew) => Some("brew upgrade --cask codex"),
+            (Tool::Codex, Self::Standalone) => Some("codex update"),
             (Tool::Kimi, Self::Native) => Some("kimi upgrade -y"),
             (Tool::Kimi, Self::Npm) => Some("npm install -g @moonshot-ai/kimi-code@latest"),
             (Tool::Pi, Self::Managed) => Some("pi update"),
@@ -158,6 +159,7 @@ const CODEX_NODE: Manual = Manual {
 const CODEX_OTHER: Manual = Manual {
     why: "Worktrees can't tell how this Codex was installed, for example a binary downloaded from GitHub.",
     steps: &[
+        run("Installed by Codex's own installer (~/.codex/packages):", "codex update"),
         run("Installed with npm:", "npm install -g @openai/codex@latest"),
         run("Installed with Homebrew:", "brew upgrade --cask codex"),
         say("Downloaded from GitHub: replace it with the latest release from github.com/openai/codex/releases."),
@@ -242,6 +244,11 @@ pub struct HarnessUpdate {
     /// row has an Update button or the tool is not installed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manual: Option<Manual>,
+    /// The folder of another copy of this tool further down PATH, which the
+    /// one reported here hides. A PATH from this machine: the status row
+    /// keeps it for the console and clears it for a paired device.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub behind_on_path: Option<String>,
 }
 
 struct Probe {
@@ -272,6 +279,18 @@ impl Probe {
 
 fn find_bin_in(name: &str, path: &std::ffi::OsStr) -> Option<PathBuf> {
     std::env::split_paths(path).map(|d| d.join(name)).find(|p| p.is_file())
+}
+
+/// The first copy of `name` on PATH after `first` that is a different file:
+/// the copy a person may have updated while `first` kept running. Nothing is
+/// spawned; a second entry that resolves to the same file is the same copy.
+fn behind_in(name: &str, path: &std::ffi::OsStr, first: &Path) -> Option<PathBuf> {
+    let first_real = canonical(first);
+    std::env::split_paths(path).map(|d| d.join(name))
+        .filter(|p| p.is_file())
+        .skip_while(|p| p != first)
+        .skip(1)
+        .find(|p| canonical(p) != first_real)
 }
 
 fn find_bin(name: &str) -> Option<PathBuf> {
@@ -325,6 +344,24 @@ fn pi_managed_launcher(path: &Path) -> bool {
         && text.contains("exec \"$pi_release_bin\" \"$@\"")
 }
 
+/// Codex's own installer (`codex doctor`: "install method: standalone") keeps
+/// each version in `~/.codex/packages/standalone/releases/<version>-<triple>`
+/// and points `current` at one; `~/.local/bin/codex` links through `current`.
+/// The release folder `real` runs from, when that layout owns it: the binary
+/// is that folder's `bin/codex`, the folder is named by a version, and
+/// `current` resolves to it.
+fn codex_standalone_release(real: &Path, home: &Path) -> Option<PathBuf> {
+    let root = home.join(".codex/packages/standalone");
+    let releases = canonical(&root.join("releases"));
+    let folder = real.parent()?.parent()?;
+    let ok = real.file_name()? == "codex"
+        && real.parent()?.file_name()? == "bin"
+        && folder.parent() == Some(releases.as_path())
+        && folder.file_name()?.to_str().and_then(numeric).is_some()
+        && std::fs::canonicalize(root.join("current")).ok().as_deref() == Some(folder);
+    ok.then(|| folder.to_owned())
+}
+
 /// Pure ownership rule. `path` is the PATH entry; `real` is its canonical
 /// target. The npm prefix is the one the current npm would modify.
 fn method(tool: Tool, path: &Path, real: &Path, p: &Probe) -> Method {
@@ -372,6 +409,9 @@ fn method(tool: Tool, path: &Path, real: &Path, p: &Probe) -> Method {
                 return Method::Homebrew;
             }
         }
+    }
+    if tool == Tool::Codex && codex_standalone_release(real, &p.home).is_some() {
+        return Method::Standalone;
     }
     if tool == Tool::Kimi && legacy_kimi(real) {
         return Method::LegacyPython;
@@ -474,6 +514,11 @@ fn installed(tool: Tool, p: &Probe) -> (Option<PathBuf>, Option<String>, Method)
 
 fn check_one(tool: Tool, p: &Probe) -> HarnessUpdate {
     let (path, installed_version, method) = installed(tool, p);
+    let behind_on_path = match (tool, &path, std::env::var_os("PATH")) {
+        (Tool::Claude | Tool::Codex, Some(first), Some(env_path)) => behind_in(tool.name(), &env_path, first)
+            .and_then(|b| b.parent().map(|d| d.to_string_lossy().into_owned())),
+        _ => None,
+    };
     let manual = path.as_deref().and_then(|path| manual(tool, method, origin(tool, path, &canonical(path), p)));
     let latest_version = if method == Method::LegacyPython {
         None
@@ -491,25 +536,52 @@ fn check_one(tool: Tool, p: &Probe) -> HarnessUpdate {
         install_method: method.name(), update_available,
         update_command: method.command(tool),
         manual,
+        behind_on_path,
     }
 }
 
-static CACHE: Mutex<Option<(Instant, Vec<HarnessUpdate>)>> = Mutex::new(None);
+type Cache = Mutex<Option<(Instant, Vec<HarnessUpdate>)>>;
+static CACHE: Cache = Mutex::new(None);
 static UPDATING: [AtomicBool; 4] = [const { AtomicBool::new(false) }; 4];
 
-pub fn check_all() -> Vec<HarnessUpdate> {
+/// The four rows. `force` is a person's "Check for updates": it probes again
+/// however young the cache is. The hourly poll passes false and is answered
+/// from rows up to [`CACHE_AGE`] old. The status row decides who may force.
+fn check_all(force: bool) -> Vec<HarnessUpdate> {
+    check_all_in(&CACHE, force, || {
+        let p = Probe::current();
+        std::thread::scope(|s| {
+            let probe = &p;
+            let jobs: Vec<_> = Tool::ALL.into_iter().map(|tool| s.spawn(move || check_one(tool, probe))).collect();
+            jobs.into_iter().map(|j| j.join().unwrap()).collect::<Vec<_>>()
+        })
+    })
+}
+
+/// The rows for one caller. Only the console may force a probe: a paired
+/// device's `force` is ignored, so no device can make the host spawn four
+/// CLIs and four fetches per request; and only the console sees
+/// `behind_on_path`, a path from this machine.
+pub fn check_for(console: bool, force: bool) -> Vec<HarnessUpdate> {
+    rows_for(console, force, check_all)
+}
+
+fn rows_for(console: bool, force: bool, check: impl FnOnce(bool) -> Vec<HarnessUpdate>) -> Vec<HarnessUpdate> {
+    check(force && console).into_iter()
+        .map(|mut h| { if !console { h.behind_on_path = None; } h })
+        .collect()
+}
+
+fn check_all_in(cache: &Cache, force: bool, probe: impl FnOnce() -> Vec<HarnessUpdate>) -> Vec<HarnessUpdate> {
     // The lock is held across the fetch: a manual check cannot start a second
     // set of four probes while the hourly one is in flight.
-    let mut cache = CACHE.lock().unwrap();
-    if let Some((at, rows)) = &*cache {
-        if at.elapsed() < CACHE_AGE { return rows.clone(); }
+    let mut cache = cache.lock().unwrap();
+    if !force {
+        if let Some((at, rows)) = &*cache {
+            if at.elapsed() < CACHE_AGE { return rows.clone(); }
+        }
     }
-    let p = Probe::current();
-    let rows = std::thread::scope(|s| {
-        let probe = &p;
-        let jobs: Vec<_> = Tool::ALL.into_iter().map(|tool| s.spawn(move || check_one(tool, probe))).collect();
-        jobs.into_iter().map(|j| j.join().unwrap()).collect::<Vec<_>>()
-    });
+    let rows = probe();
     *cache = Some((Instant::now(), rows.clone()));
     rows
 }
@@ -530,9 +602,19 @@ pub fn update(tool_name: String) -> Result<CmdResult, String> {
     let p = Probe::current();
     let (path, _before, method) = installed(tool, &p);
     let path = path.ok_or("harness is not installed")?;
+    update_at(tool, path, method, &p, || find_tool_bin(tool))
+}
+
+/// Run `method`'s update of the install at `path`, then judge it from a fresh
+/// resolution (`resolve`, the PATH lookup outside tests).
+fn update_at(tool: Tool, path: PathBuf, method: Method, p: &Probe,
+    resolve: impl Fn() -> Option<PathBuf>) -> Result<CmdResult, String> {
     let label = method.command(tool).ok_or(NO_FIXED_UPDATE)?;
+    // A standalone Codex keeps its PATH entry and moves `current`: the release
+    // folder it ran from is what has to change.
+    let release_before = codex_standalone_release(&canonical(&path), &p.home);
     let mut c = match method {
-        Method::Native | Method::Managed => childenv::command(&path),
+        Method::Native | Method::Managed | Method::Standalone => childenv::command(&path),
         Method::Npm => childenv::command("npm"),
         Method::Homebrew => childenv::command("brew"),
         _ => return Err(NO_FIXED_UPDATE.into()),
@@ -544,6 +626,7 @@ pub fn update(tool_name: String) -> Result<CmdResult, String> {
         (Tool::Claude, Method::Native) => { c.arg("update"); }
         (Tool::Kimi, Method::Native) => { c.args(["upgrade", "-y"]); }
         (Tool::Pi, Method::Managed) => { c.arg("update"); }
+        (Tool::Codex, Method::Standalone) => { c.arg("update"); }
         (Tool::Codex, Method::Homebrew) => { c.args(["upgrade", "--cask", "codex"]); }
         (Tool::Pi, Method::Npm) => { c.args(["install", "-g", "--ignore-scripts", "@earendil-works/pi-coding-agent@latest"]); }
         (_, Method::Npm) => { c.args(["install", "-g", &format!("{}@latest", tool.package())]); }
@@ -551,12 +634,24 @@ pub fn update(tool_name: String) -> Result<CmdResult, String> {
     }
     let out = run_deadline(c, 180).map_err(|e| format!("{label}: {e}"))?;
     *CACHE.lock().unwrap() = None;
-    let (new_path, after, new_method) = installed(tool, &p);
+    let (new_path, after, new_method) = match resolve() {
+        Some(found) => installed_at(tool, found, p),
+        None => (None, None, Method::NotInstalled),
+    };
     let mut output = String::from_utf8_lossy(&out.stdout).to_string();
     output.push_str(&String::from_utf8_lossy(&out.stderr));
     output.truncate(output.floor_char_boundary(output.len().min(16_384)));
     if let Some(v) = after.as_deref() { output.push_str(&format!("\n{} now reports {v}", tool.name())); }
-    let verified = new_path.as_deref() == Some(path.as_path()) && new_method == method && after.is_some();
+    let release_moved = match (method, &release_before, new_path.as_deref()) {
+        (Method::Standalone, Some(before), Some(np)) => codex_standalone_release(&canonical(np), &p.home)
+            .is_some_and(|after| {
+                let name = |d: &Path| d.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                newer(&name(&after), &name(before))
+            }),
+        (Method::Standalone, ..) => false,
+        _ => true,
+    };
+    let verified = new_path.as_deref() == Some(path.as_path()) && new_method == method && after.is_some() && release_moved;
     if !verified { output.push_str("\nCould not verify the updated executable."); }
     let ok = out.status.success() && verified;
     Ok(CmdResult { ok, code: out.status.code().unwrap_or(-1), output, slug: None, needs_confirm: None, warnings: Vec::new() })
@@ -700,7 +795,7 @@ mod tests {
         let origins = [Origin::Override, Origin::Editor, Origin::PiCustomUpdate, Origin::Homebrew, Origin::OtherNode, Origin::Other];
         for tool in Tool::ALL {
             for o in origins {
-                for m in [Method::Native, Method::Npm, Method::Homebrew, Method::Managed, Method::LegacyPython, Method::Unknown, Method::NotInstalled] {
+                for m in [Method::Native, Method::Npm, Method::Homebrew, Method::Managed, Method::Standalone, Method::LegacyPython, Method::Unknown, Method::NotInstalled] {
                     let steps = manual(tool, m, o);
                     assert_eq!(steps.is_none(), m == Method::NotInstalled || m.command(tool).is_some(), "{tool:?} {m:?} {o:?}");
                     if let Some(s) = steps { assert!(!s.steps.is_empty()); }
@@ -710,12 +805,139 @@ mod tests {
         let row = |manual| serde_json::to_value(HarnessUpdate {
             tool: "codex", installed_version: Some("0.160.1".into()), latest_version: None,
             install_method: "unknown", update_available: false, update_command: None, manual,
+            behind_on_path: None,
         }).unwrap();
         assert!(row(None).get("manual").is_none());
         let json = row(Some(CODEX_EDITOR));
         assert_eq!(json["manual"]["steps"][0]["command"], "npm install -g @openai/codex");
         assert!(json["manual"]["steps"][3].get("command").is_none());
         assert!(!json.to_string().contains(&*home.to_string_lossy()));
+    }
+
+    /// Codex's own installer's layout under `home`: one release folder per
+    /// version, `current` naming `current_to`, and `~/.local/bin/codex`
+    /// linking through `current`, as `codex update` 0.167.0 leaves it.
+    fn codex_standalone(home: &Path, versions: &[&str], current_to: &str) -> PathBuf {
+        let root = home.join(".codex/packages/standalone");
+        for v in versions {
+            script(&root.join("releases").join(format!("{v}-aarch64-apple-darwin/bin/codex")),
+                &format!("#!/bin/sh\necho 'codex-cli {v}'\n"));
+        }
+        symlink(root.join("releases").join(format!("{current_to}-aarch64-apple-darwin")), root.join("current")).unwrap();
+        let link = home.join(".local/bin/codex");
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        symlink(root.join("current/bin/codex"), &link).unwrap();
+        link
+    }
+
+    #[test]
+    fn codex_from_its_own_installer_is_updated_with_codex_update() {
+        let scratch = worktrees_core::fsx::PrivateDir::new(&std::env::temp_dir(), "harness-standalone").unwrap();
+        let home = scratch.path();
+        let p = Probe { home: home.to_owned(), npm_prefix: Some(home.join("npm")), brew_prefix: None, brew_codex: false };
+        let link = codex_standalone(home, &["0.162.1", "0.167.0"], "0.167.0");
+        let (_, v, m) = installed_at(Tool::Codex, link.clone(), &p);
+        assert_eq!(v.as_deref(), Some("0.167.0"));
+        assert_eq!(m, Method::Standalone);
+        assert_eq!(m.command(Tool::Codex), Some("codex update"));
+        assert_eq!(m.name(), "standalone");
+        assert!(manual(Tool::Codex, m, origin(Tool::Codex, &link, &canonical(&link), &p)).is_none());
+
+        // The release `current` does not name is not what the installer
+        // updates: an older folder run directly is not standalone.
+        let old = home.join(".codex/packages/standalone/releases/0.162.1-aarch64-apple-darwin/bin/codex");
+        let old_real = canonical(&old);
+        let m = method(Tool::Codex, &old, &old_real, &p);
+        assert_eq!(m, Method::Unknown);
+        // ...and the steps it gets still lead with Codex's own updater.
+        let steps = manual(Tool::Codex, m, origin(Tool::Codex, &old, &old_real, &p)).unwrap();
+        assert_eq!(steps.steps[0].command, Some("codex update"));
+        // A codex beside the release folder, not in its bin/, is not one.
+        let stray = home.join(".codex/packages/standalone/releases/0.167.0-aarch64-apple-darwin/codex");
+        script(&stray, "#!/bin/sh\necho 'codex-cli 0.167.0'\n");
+        assert_eq!(method(Tool::Codex, &stray, &canonical(&stray), &p), Method::Unknown);
+        // Nor a release folder not named by a version.
+        let named = home.join(".codex/packages/standalone/releases/nightly/bin/codex");
+        script(&named, "#!/bin/sh\necho 'codex-cli 0.168.0'\n");
+        std::fs::remove_file(home.join(".codex/packages/standalone/current")).unwrap();
+        symlink(home.join(".codex/packages/standalone/releases/nightly"), home.join(".codex/packages/standalone/current")).unwrap();
+        assert_eq!(method(Tool::Codex, &link, &canonical(&link), &p), Method::Unknown);
+    }
+
+    #[test]
+    fn a_standalone_update_is_verified_by_the_release_current_moves_to() {
+        let scratch = worktrees_core::fsx::PrivateDir::new(&std::env::temp_dir(), "harness-standalone-run").unwrap();
+        let home = scratch.path();
+        let p = Probe { home: home.to_owned(), npm_prefix: None, brew_prefix: None, brew_codex: false };
+        let link = codex_standalone(home, &["0.167.2"], "0.167.2");
+        let root = home.join(".codex/packages/standalone");
+        // The running release answers `update` the way the real one does:
+        // a new release folder, then `current` moved onto it.
+        let current = root.join("current");
+        let newer_folder = root.join("releases/0.167.2-aarch64-apple-darwin");
+        script(&root.join("releases/0.167.0-aarch64-apple-darwin/bin/codex"), &format!(
+            "#!/bin/sh\nif [ \"$1\" = update ]; then ln -sfn '{}' '{}'; echo updated; exit 0; fi\necho 'codex-cli 0.167.0'\n",
+            newer_folder.display(), current.display()));
+        std::fs::remove_file(&current).unwrap();
+        symlink(root.join("releases/0.167.0-aarch64-apple-darwin"), &current).unwrap();
+        assert_eq!(installed_at(Tool::Codex, link.clone(), &p).2, Method::Standalone);
+
+        let r = update_at(Tool::Codex, link.clone(), Method::Standalone, &p, || Some(link.clone())).unwrap();
+        assert!(r.ok, "{}", r.output);
+        assert!(r.output.contains("codex now reports 0.167.2"), "{}", r.output);
+
+        // An `update` that exits 0 and moves nothing is not an update.
+        script(&newer_folder.join("bin/codex"), "#!/bin/sh\n[ \"$1\" = update ] && exit 0\necho 'codex-cli 0.167.2'\n");
+        let r = update_at(Tool::Codex, link.clone(), Method::Standalone, &p, || Some(link.clone())).unwrap();
+        assert!(!r.ok, "{}", r.output);
+        assert!(r.output.contains("Could not verify"), "{}", r.output);
+    }
+
+    #[test]
+    fn a_forced_check_probes_again_and_the_poll_keeps_the_cache() {
+        let cache: Cache = Mutex::new(None);
+        let calls = std::cell::Cell::new(0);
+        let probe = || { calls.set(calls.get() + 1); Vec::new() };
+        check_all_in(&cache, false, probe);
+        check_all_in(&cache, false, probe);
+        assert_eq!(calls.get(), 1, "an unforced check inside the cache age is answered from it");
+        check_all_in(&cache, true, probe);
+        assert_eq!(calls.get(), 2, "a forced check probes again");
+        check_all_in(&cache, false, probe);
+        assert_eq!(calls.get(), 2, "and refills the cache the poll reads");
+    }
+
+    #[test]
+    fn only_the_console_forces_a_check_or_sees_a_path() {
+        let row = || HarnessUpdate {
+            tool: "codex", installed_version: Some("0.167.0".into()), latest_version: None,
+            install_method: "standalone", update_available: false, update_command: Some("codex update"),
+            manual: None, behind_on_path: Some("/Users/x/.nvm/versions/node/v22/bin".into()),
+        };
+        let forced = std::cell::Cell::new(None);
+        let rows = rows_for(false, true, |f| { forced.set(Some(f)); vec![row()] });
+        assert_eq!(forced.get(), Some(false), "a device's force is ignored");
+        assert!(rows[0].behind_on_path.is_none());
+        let rows = rows_for(true, true, |f| { forced.set(Some(f)); vec![row()] });
+        assert_eq!(forced.get(), Some(true));
+        assert!(rows[0].behind_on_path.is_some());
+    }
+
+    #[test]
+    fn a_second_copy_further_down_path_is_named() {
+        let scratch = worktrees_core::fsx::PrivateDir::new(&std::env::temp_dir(), "harness-behind").unwrap();
+        let home = scratch.path();
+        let (a, b, c) = (home.join("a"), home.join("b"), home.join("c"));
+        script(&a.join("codex"), "#!/bin/sh\necho 'codex-cli 0.167.0'\n");
+        std::fs::create_dir_all(&b).unwrap();
+        symlink(a.join("codex"), b.join("codex")).unwrap();
+        script(&c.join("codex"), "#!/bin/sh\necho 'codex-cli 0.167.2'\n");
+        let path = std::env::join_paths([&a, &b, &c]).unwrap();
+        let first = find_bin_in("codex", &path).unwrap();
+        // b's entry is a's file again; c's is the other copy.
+        assert_eq!(behind_in("codex", &path, &first), Some(c.join("codex")));
+        let alone = std::env::join_paths([&a, &b]).unwrap();
+        assert_eq!(behind_in("codex", &alone, &first), None);
     }
 
     #[test]

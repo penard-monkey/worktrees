@@ -910,7 +910,7 @@ commands! { cx, a;
     // blocking pool, which is what the shim's spawn_blocking buys it.
     kimi_usage: Engine [read, global] => status::kimi_usage(),
     claude_status: Engine [read, global] => status::claude_status(),
-    check_update: Engine [read, global] => status::check_update(),
+    check_update: Engine [read, global] => status::check_update(&cx.ctx, a.get::<Option<bool>>("force")?.unwrap_or(false)),
     update_harness: Engine [admin, global] => worktrees_api::harness_updates::update(a.get("tool")?),
     // The agent sessions that run an older Claude or Codex than the one
     // installed, and restarting them (docs/proposals/harness-restart.md).

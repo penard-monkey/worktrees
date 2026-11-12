@@ -5404,13 +5404,20 @@ function App() {
   // (and the bubble) out and back. The manual check replaces it — Settings says
   // "couldn't reach the release feed" from a null `latest`, and that has to stay
   // true of the check you just pressed.
-  const updateCheckInFlight = useRef<Promise<UpdateInfo | null> | null>(null);
-  const checkUpdate = useCallback(async (keepLatest = false) => {
-    let pending = updateCheckInFlight.current;
+  //
+  // `force` is the Settings button's: the host probes the agent CLIs again
+  // instead of answering from its three-minute cache. A forced check joins
+  // only a forced one in flight, never the poll's, which may be a cache hit.
+  const updateCheckInFlight = useRef<{ promise: Promise<UpdateInfo | null>; force: boolean } | null>(null);
+  const checkUpdate = useCallback(async (keepLatest = false, force = false) => {
+    const inFlight = updateCheckInFlight.current;
+    let pending = inFlight && (inFlight.force || !force) ? inFlight.promise : null;
     if (!pending) {
-      pending = invoke<UpdateInfo>("check_update").catch(() => null);
-      updateCheckInFlight.current = pending;
-      void pending.finally(() => { if (updateCheckInFlight.current === pending) updateCheckInFlight.current = null; });
+      const started = invoke<UpdateInfo>("check_update", force ? { force: true } : undefined).catch(() => null);
+      const entry = { promise: started, force };
+      updateCheckInFlight.current = entry;
+      void started.finally(() => { if (updateCheckInFlight.current === entry) updateCheckInFlight.current = null; });
+      pending = started;
     }
     const u = await pending;
     if (!u) return false;
