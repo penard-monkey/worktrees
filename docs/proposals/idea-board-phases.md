@@ -37,7 +37,8 @@ C2(c) and C3(b)).
   **persistent conversation**, or several, tied to one idea, that can be
   reopened like a lane's chat. It goes before phase 3. Phase 6's agent help
   becomes a later use of the same session kind.
-- New choices C12 to C15 (§10). C11 stays open.
+- New choices C12 to C15 (§10). On 2026-11-11 the owner answered C11 to C15
+  "all (a)"; none is open now.
 
 Phase numbers stay as they were, because shipped code cites them (for
 example `ideas.rs` names "phase 3's `related`" and "phase 4's `plan_of`").
@@ -786,9 +787,10 @@ idea's own frontmatter gets nothing: a conversation is not part of the text.
   its list; the main window's lightbulb gets the amber dot when any
   conversation waits on David, and nothing for busy.
 - **Host policy's live-agent limit** (`[limits] max_live_agents`, **checked**:
-  `policy_presets.rs:45`) should count idea sessions, since each is a Claude
-  spending the same quota (C15). Whether its counter sees a session that is not
-  a place is **assumed** not, today.
+  `policy_presets.rs:45`) counts idea sessions, since each is a Claude
+  spending the same quota (C15, decided), and a start past it is refused with
+  the same words as a lane's. Whether today's counter already sees a session
+  that is not a place is **assumed** not, so phase S teaches it.
 
 #### The rows: new ones, keyed by the idea
 
@@ -832,8 +834,10 @@ session** (C14). AGENTS.md has exactly three ways text reaches a Claude
 fourth. `idea_send` and `idea_answer_text` are new rows over the same bodies:
 the same `typed_line_ok` rule, the same paste, the same empty-composer and
 no-prompt checks, length and hash in the audit and never the text. That is the
-same path with a second door, console only, and it needs David's yes because
-AGENTS.md is his. No slash commands from the idea chat in phase S.
+same path with a second door, console only. David said yes to it on
+2026-11-11 (C14); the AGENTS.md paragraph on the three paths names this door
+in the phase S PR, with his approval. No slash commands from the idea chat in
+phase S.
 
 #### The companion's screen
 
@@ -1143,7 +1147,9 @@ idea's related ideas, and restore any earlier version from history.
 
 **For agent help later:** this phase is the seam. `relate(a, b)`,
 `merge(into, from)`, `combine(ids, title)` and `split(id, range, keep)` are
-the operations a proposal will carry, so they take their whole input as
+the operations a proposal will carry (C11, decided: combine is a merge into a
+new idea, and extract is a split that keeps the original, so the four share
+two bodies), so they take their whole input as
 parameters (a merge takes the merged text, defaulting to the plain append,
 so an agent's rewritten text is the same call). Every one writes history
 first.
@@ -1391,33 +1397,27 @@ right side (terminal, dock) is unchanged.
   chat (§7.2, §7.3). The one-per-request shape moves into phase 6 as a use of
   them.
 
-**Still open**, recommended answer first:
+**Decided on 2026-11-11.** The owner, on PR #641's choices: "all (a)".
 
-- **C11. Combine and merge as one act** (§3). (a) Yes: combine is a merge into
-  a new idea; extract is a split that keeps the original. (b) Keep them as
-  separate acts with their own menus.
-- **C12. The tmux name of an idea session** (§7.3). (a)
-  `worktrees~idea~<conversation ULID>`: `~` never appears in a place's session,
-  so nothing can mistake it for one, and the dock's `~term` sidecars already
-  rely on that. (b) `<some prefix>-idea-<id>`, which a project with that prefix
-  and a place called `idea-…` could collide with, and which
-  `Project::live_session_in` would have to be taught to skip.
-- **C13. What tells the agent its job** (§7.3). (a) A per-conversation
-  `start.md` from a fixed template, named by the fixed opener; no `CLAUDE.md`
-  in the ideas folder. (b) A `CLAUDE.md` written by worktrees at the folder's
-  root, which the store would list as an idea, or under `.claude/`, which
-  every conversation reads whether it is about that idea or not.
-- **C14. The idea chat's send** (§7.3). (a) Yes: `idea_send` and
-  `idea_answer_text` are new console-only rows over the SAME bodies as
-  `agent_send` and `agent_answer_text` (the same `typed_line_ok`, paste,
-  checks and audit), so text reaches one more kind of session by the existing
-  path. This is the owner's call because AGENTS.md says not to grow a fourth
-  path. (b) No send: the conversation is driven from "Open in terminal" only,
-  which loses the iterate-in-the-chat the owner asked for.
-- **C15. Idea sessions and the live-agent limit** (§7.3). (a) They count
-  against host policy's `max_live_agents`, like any lane, and a start past it
-  is refused with the same words. (b) They do not count; the user closes them
-  by hand.
+- **C11, combine and merge:** one act. Combine is a merge into a new idea;
+  extract is a split that keeps the original (§3, phase 3).
+- **C12, the tmux name of an idea session:**
+  `worktrees~idea~<conversation ULID>`. `~` never appears in a place's
+  session, so nothing can mistake it for one, and the dock's `~term` sidecars
+  already rely on that (§7.3).
+- **C13, what tells the agent its job:** a per-conversation `start.md` from a
+  fixed template, named by the fixed opener; no `CLAUDE.md` in the ideas
+  folder (§7.3).
+- **C14, the idea chat's send:** yes. `idea_send` and `idea_answer_text` are
+  new console-only rows over the SAME bodies as `agent_send` and
+  `agent_answer_text` (the same `typed_line_ok`, paste, checks and audit), so
+  text reaches one more kind of session by the existing path. This is the
+  owner's yes to that second door, which AGENTS.md otherwise forbids (§7.3).
+- **C15, idea sessions and the live-agent limit:** they count against host
+  policy's `max_live_agents`, like any lane, and a start past it is refused
+  with the same words (§7.3).
+
+Nothing is open.
 
 ## 11. What I could not establish
 
