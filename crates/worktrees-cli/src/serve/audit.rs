@@ -1844,8 +1844,16 @@ fn term_key(id: &Value) -> String {
 /// `Loopback` rows, which declare none, are recorded — except stream
 /// traffic, which is totalled into its attach's close instead.
 fn recorded(row: &Row) -> bool {
-    row.cap != Some(Capability::Read) && !STREAM_TRAFFIC.contains(&row.name)
+    row.cap != Some(Capability::Read) && !STREAM_TRAFFIC.contains(&row.name) && !CONSOLE_READS.contains(&row.name)
 }
+
+/// Console rows that only READ, which a console row cannot say in its
+/// capability column: the idea chat's (phase S), which the companion polls
+/// as the main window polls `agent_turns`, a `read` row no record is made
+/// of. Recorded, each poll would be a line. Every act on a conversation
+/// (start, resume, close, remove, rename, send, answer, interrupt) is still
+/// recorded.
+const CONSOLE_READS: &[&str] = &["idea_conversations", "idea_turns", "idea_turn_text", "idea_tool_call", "idea_prompt"];
 
 /// A drive-class act, as the audit budget counts one: what step-up guards
 /// (`dispatch::needs_stepup` over the resolver's `needs`, so a path class's
@@ -2050,13 +2058,18 @@ impl ConnAudit {
             // A line typed into an agent (iOS MVP S8): its length and hash and
             // the session, never the text — the record names what was sent
             // without the log holding what a phone told an agent.
-            "agent_send" => {
+            // `idea_send` is the same path's console door (phase S, C14): the
+            // same record, the conversation's id in place of a session.
+            "agent_send" | "idea_send" => {
                 if let Some(Value::String(t)) = arg(args, "text") {
                     detail.insert("bytes".into(), json!(t.len()));
                     detail.insert("sha256".into(), json!(sha256_hex(t.as_bytes())));
                 }
                 if let Some(Value::String(s)) = arg(args, "session") {
                     detail.insert("session".into(), json!(ident(s)));
+                }
+                if let Some(Value::String(c)) = arg(args, "conv") {
+                    detail.insert("conv".into(), json!(ident(c)));
                 }
             }
             // A slash command (chat-slash-commands §2.2): its NAME, which the
@@ -2080,7 +2093,7 @@ impl ConnAudit {
             }
             // Free text into a prompt's field: like a line, its length and
             // hash and never the text — and which choice, of which prompt.
-            "agent_answer_text" => {
+            "agent_answer_text" | "idea_answer_text" => {
                 if let Some(Value::String(t)) = arg(args, "text") {
                     detail.insert("bytes".into(), json!(t.len()));
                     detail.insert("sha256".into(), json!(sha256_hex(t.as_bytes())));
@@ -2110,7 +2123,7 @@ impl ConnAudit {
                 _ => {}
             },
             // A multi-select's boxes: which, to which prompt.
-            "agent_answer_many" => {
+            "agent_answer_many" | "idea_answer_many" => {
                 if let Some(Value::Array(cs)) = arg(args, "choices") {
                     detail.insert("choices".into(), json!(cs.iter().filter_map(Value::as_u64).take(64).collect::<Vec<_>>()));
                 }
@@ -2120,7 +2133,7 @@ impl ConnAudit {
             }
             // An answer (S7, §9.2): which of the prompt's choices, to which
             // prompt — the fingerprint is a hash of what the device saw.
-            "agent_answer" => {
+            "agent_answer" | "idea_answer" => {
                 if let Some(c) = arg(args, "choice").and_then(Value::as_u64) {
                     detail.insert("choice".into(), json!(c));
                 }
@@ -3221,7 +3234,12 @@ mod tests {
         }
         let reads = TABLE.iter().filter(|r| r.cap == Some(Capability::Read)).count();
         let quiet: Vec<&str> = TABLE.iter().filter(|r| r.exposure != Exposure::ClientLocal && !recorded(r)).map(|r| r.name).collect();
-        assert_eq!(quiet.len(), reads + STREAM_TRAFFIC.len(), "{quiet:?}");
+        assert_eq!(quiet.len(), reads + STREAM_TRAFFIC.len() + CONSOLE_READS.len(), "{quiet:?}");
+        // The console reads are console rows that exist: a renamed one would
+        // make an idea chat act silent.
+        for n in CONSOLE_READS {
+            assert_eq!(row(n).exposure, Exposure::HostConsole, "{n}");
+        }
         assert!(recorded(row("update_cli")) && recorded(row("ui_events_append")), "a console or loopback row declares no capability");
     }
 
@@ -3898,6 +3916,50 @@ mod tests {
         let answered = g.records("call", "agent_answer");
         assert_eq!((answered[0]["detail"]["choice"].as_u64(), answered[0]["detail"]["fingerprint"].as_str()), (Some(1), Some(fp.as_str())));
         assert_eq!(answered[0]["cap"], json!("answer"));
+    }
+
+    /// Phase S, C14: `idea_send` is `agent_send`'s path with a console door,
+    /// recorded the same way — its length, its SHA-256 and the conversation,
+    /// never the text — and so is `idea_answer_text`. The chat's polled
+    /// reads (`idea_turns`, `idea_prompt`, …) are not records, as
+    /// `agent_turns` is not; a device is refused every idea row.
+    #[test]
+    fn an_idea_send_is_recorded_like_an_agent_send_and_its_reads_are_not() {
+        let mut g = Gate::new("ideasend", Caller::console());
+        let ideas = g.top.join("ideas");
+        let id = worktrees_core::ideas::create_at(&ideas, "Talk").unwrap().idea.id.unwrap();
+        let conv = worktrees_core::ideasessions::prepare_at(&ideas, &id).unwrap();
+        let session = worktrees_core::ideasessions::session_name(&conv.id);
+        let pane = super::super::tests::ScriptedAgent::new(&session, super::super::tests::CLAUDE_EMPTY, super::super::tests::CLAUDE_EMPTY);
+        g.cx.ctx = g.cx.ctx.clone().with_agents(worktrees_api::agents::Agents::new(pane.clone())).with_ideas_dir(ideas.clone());
+        let c = ConnAudit::new(g.a.clone(), 7, Some("127.0.0.1".into()), Caller::console());
+        let text = "make it SECRET-IDEA-1 shorter";
+        let r = through(&g.cx, &c, &g.w, "idea_send", json!({ "id": id, "conv": conv.id, "text": text }));
+        assert_eq!(r.map(|v| v["delivered"].clone()), Ok(json!(true)));
+        assert!(through(&g.cx, &c, &g.w, "idea_send", json!({ "id": id, "conv": conv.id, "text": "SECRET-IDEA-2\tx" })).is_err(), "the body refuses a control character");
+        assert_eq!(*pane.sent.lock().unwrap(), vec![text.to_string()]);
+        let t = through(&g.cx, &c, &g.w, "idea_turns", json!({ "id": id, "conv": conv.id })).unwrap();
+        assert!(t["turns"].is_array(), "{t}");
+        let _ = through(&g.cx, &c, &g.w, "idea_prompt", json!({ "id": id, "conv": conv.id }));
+        let raw = std::fs::read_to_string(g.d.join(FILE)).unwrap();
+        assert!(!raw.contains("SECRET-IDEA"), "the text reached the log:\n{raw}");
+        let sent = g.records("call", "idea_send");
+        assert_eq!(sent.len(), 2, "{sent:#?}");
+        assert_eq!(sent[0]["detail"]["bytes"], json!(text.len()));
+        assert_eq!(sent[0]["detail"]["sha256"], json!(sha256_hex(text.as_bytes())));
+        assert_eq!(sent[0]["detail"]["conv"], json!(conv.id));
+        assert!(g.records("call", "idea_turns").is_empty() && g.records("call", "idea_prompt").is_empty(), "a read is not recorded");
+        // A conversation the record does not have is refused before the body.
+        let other = worktrees_core::ulid::new();
+        assert!(through(&g.cx, &c, &g.w, "idea_send", json!({ "id": id, "conv": other, "text": "x" })).is_err());
+        assert_eq!(g.records("refused", "idea_send").len(), 1);
+        // A device reaches no idea row.
+        let mut pcx = g.cx.with(g.cx.ctx.clone(), g.cx.frames.clone());
+        pcx.caller = phone_caller();
+        let p = phone(&g.a, 9);
+        let refused = through(&pcx, &p, &g.w, "idea_send", json!({ "id": id, "conv": conv.id, "text": "x" }));
+        assert_eq!(refused, Err(json!("console-only")), "{refused:?}");
+        assert_eq!(pane.sent.lock().unwrap().len(), 1);
     }
 
     /// A slash command is recorded by its NAME, and its argument by length

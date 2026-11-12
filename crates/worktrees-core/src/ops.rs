@@ -207,7 +207,7 @@ fn planning_for(p: &Project, ui: &mut dyn Ui, wt: &str, launch: &crate::profile:
 /// fail-closed launch. Without a CLI that has the hook (`pending::hook_bin`)
 /// it is left out, quietly: a prompt taller than its pane is then
 /// `readable: false`, as it was before the hook.
-fn prompt_hook_for(launch: &crate::profile::AiLaunch) -> Vec<String> {
+pub(crate) fn prompt_hook_for(launch: &crate::profile::AiLaunch) -> Vec<String> {
     let Some(adapter) = crate::harness::for_cmd(&launch.cmd).filter(|_| !launch.cmd.is_empty()) else {
         return Vec::new();
     };
@@ -324,6 +324,7 @@ fn ai_launch_inner(p: &Project, ui: &mut dyn Ui, wt: &str, ai_cmd: &str) -> crat
                 model: None,
                 resume: false,
                 resume_id: None,
+                session_id: None,
                 force: false,
             }
         }

@@ -146,6 +146,13 @@ pub enum Obj {
     NotRemote,
     /// The inner object when its argument is present (non-null, non-empty).
     Opt(&'static Obj),
+    /// An idea (idea board, phase S): a ULID the engine's index of its own
+    /// ideas folder resolves (`ideas::Index::resolve`). Ideas are the host's,
+    /// not a project's: only `HostConsole` rows name one.
+    Idea(&'static str),
+    /// A conversation of an idea: `(conv, id)`, a ULID in that idea's record
+    /// (`ideasessions::find_at`). The idea is resolved too.
+    IdeaConv(&'static str, &'static str),
 }
 
 impl Obj {
@@ -156,6 +163,8 @@ impl Obj {
             Project(a) | OptProject(a, _) | Slug(a) | Root(a) | File(a) | Probe(a) | Session(a) | Attach(a) | Close(a) | ShellRef(a) | Job(a)
             | NewJob(a) | Device(a) | Revocable(a) | NewPath(a) | RemoteUrl(a) | Places(a) | Roots(a) | Candidates(a) => vec![a],
             SessionIn(s, _) => vec![s],
+            Idea(a) => vec![a],
+            IdeaConv(c, i) => vec![c, i],
             Place(r, s) => vec![r, s],
             SessionOf(s, _, _) => vec![s],
             Shell(r, s, i) => vec![r, s, i],
@@ -641,6 +650,17 @@ impl St<'_> {
                 self.bind(a, key, None);
             }
             Obj::Probe(a) => self.resolve(row, &Obj::File(a), args)?,
+            Obj::Idea(a) => {
+                let id: String = self.get(args, a)?;
+                let idx = worktrees_core::ideas::list_at(self.cx.ctx.ideas_dir()).map_err(Refusal::not_found)?;
+                idx.resolve(&id).map_err(Refusal::not_found)?;
+            }
+            Obj::IdeaConv(c, i) => {
+                self.resolve(row, &Obj::Idea(i), args)?;
+                let id: String = self.get(args, i)?;
+                let conv: String = self.get(args, c)?;
+                worktrees_core::ideasessions::find_at(self.cx.ctx.ideas_dir(), &id, &conv).map_err(Refusal::not_found)?;
+            }
             Obj::Session(a) => {
                 let name: String = self.get(args, a)?;
                 let key = self.session_project(&name, None)?;

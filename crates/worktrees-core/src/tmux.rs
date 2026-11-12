@@ -527,7 +527,9 @@ impl PaneList {
         let mut found = Vec::new();
         for pane in &self.panes {
             let (session, path) = (&pane.session, &pane.path);
-            if is_shell_sidecar(session) || !(path == wt || path.starts_with(&prefix)) { continue; }
+            // An idea conversation (`worktrees~idea~<conv>`) is no place's
+            // agent, wherever its pane is (`ideasessions`).
+            if is_shell_sidecar(session) || crate::ideasessions::is_idea_session(session) || !(path == wt || path.starts_with(&prefix)) { continue; }
             if exclude_under.is_some_and(|dir| path == dir || path.starts_with(&format!("{dir}/"))) { continue; }
             let Some(provider) = crate::provider::for_pane(session, pane.program()) else { continue };
             let provider = provider.id;
@@ -563,7 +565,7 @@ impl PaneList {
         let mut found: Vec<String> = Vec::new();
         for pane in &self.panes {
             let (session, path) = (&pane.session, &pane.path);
-            if session.is_empty() || is_shell_sidecar(session) || !(path == wt || path.starts_with(&prefix)) { continue; }
+            if session.is_empty() || is_shell_sidecar(session) || crate::ideasessions::is_idea_session(session) || !(path == wt || path.starts_with(&prefix)) { continue; }
             if exclude_under.is_some_and(|dir| path == dir || path.starts_with(&format!("{dir}/"))) { continue; }
             if !found.contains(session) {
                 found.push(session.clone());
@@ -613,7 +615,10 @@ impl PaneList {
             // the worktree and runs a bare shell — never let it be adopted AS the
             // place's session (that would attach the AI view to a plain shell and
             // skip launching Claude). It's addressed by its exact name instead.
-            if is_shell_sidecar(sess) || crate::provider::is_sidecar(sess) {
+            // Nor an idea conversation's session (`worktrees~idea~<conv>`):
+            // it is no place's, and the ideas folder is refused inside a
+            // project (`ideasessions::check_root`) — this holds even so.
+            if is_shell_sidecar(sess) || crate::provider::is_sidecar(sess) || crate::ideasessions::is_idea_session(sess) {
                 continue;
             }
             if let Some((eroot, eprefix)) = &excl {

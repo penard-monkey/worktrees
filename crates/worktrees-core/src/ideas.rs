@@ -106,7 +106,7 @@ pub fn default_dir() -> PathBuf {
 /// `Err` for a write under `root` when it is the user's real folder and this
 /// process runs an engine for a test (`registry::forbid_real_writes`, the
 /// same one-way switch: one guard for every user-owned store).
-fn refuse_real(root: &Path) -> Result<(), String> {
+pub(crate) fn refuse_real(root: &Path) -> Result<(), String> {
     refuse_real_in(root, &default_dir(), crate::registry::real_writes_forbidden())
 }
 
@@ -555,13 +555,13 @@ fn today() -> String {
     date_of(crate::sysclock::now_epoch())
 }
 
-fn date_of(epoch: i64) -> String {
+pub(crate) fn date_of(epoch: i64) -> String {
     let (y, m, d) = crate::attach::civil_from_days(epoch.div_euclid(86_400));
     format!("{y:04}-{m:02}-{d:02}")
 }
 
 /// `20261108T153012.345Z`: when a history copy was taken, sortable.
-fn history_stamp() -> String {
+pub(crate) fn history_stamp() -> String {
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64);
@@ -580,7 +580,7 @@ fn ensure_root(root: &Path) -> Result<(), String> {
 
 /// Create `path`, which must not exist (`O_EXCL`, `O_NOFOLLOW`), with `bytes`.
 /// For a NEW file only — a replace goes through `fsx::write_atomic`.
-fn create_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn create_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let mut f = fs::OpenOptions::new()
         .write(true)
         .create_new(true)

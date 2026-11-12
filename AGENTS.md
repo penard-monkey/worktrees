@@ -126,7 +126,10 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   list (read after it, a saving Enter typed in the gap was already in it).
   Residual, not closable without an atomic tmux step: a key typed between the
   last activity check and the Enter that answers the dialog. Answering uses the ordinary move, proof and Enter, and
-  the record is consumed. Do not grow a fourth path that types into Claude. `agent_interrupt`
+  the record is consumed. Do not grow a fourth path that types into Claude. `idea_send` and
+  `idea_answer_text` (phase S, C14, the owner's yes of 2026-11-11) are not a fourth: they are the
+  same bodies (`agents::send_at`, `answer_text_at`) behind console-only rows for idea
+  conversations, with the same rule, checks and audit record. `agent_interrupt`
   (`agents::agent_interrupt`, the chat's Stop and its Esc, `stopTurn` in
   `chat.ts`) is not one: it types no text, only ONE key,
   Escape, through `tmux::press` as `agent_answer`'s keys go, under the same

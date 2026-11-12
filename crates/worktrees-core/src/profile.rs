@@ -524,6 +524,11 @@ pub struct AiLaunch {
     /// `None` with `resume` set means "nothing to attach to", which degrades to
     /// a fresh launch and never to a picker.
     pub resume_id: Option<String>,
+    /// The id a FRESH Claude conversation is to have (`--session-id <uuid>`),
+    /// chosen by the caller and recorded before the launch: an idea session
+    /// (`ideasessions`) knows its transcript's path without a probe. Only a UUID
+    /// is emitted, and never on a resume. `None` everywhere else.
+    pub session_id: Option<String>,
     /// Launch even though the model host did not answer (`--force`, the app's
     /// "launch anyway"). Never overrides a harness that cannot run at all.
     pub force: bool,
@@ -584,6 +589,7 @@ pub fn claude_launch(base: &AiLaunch, p: &Profile, m: &Materialized) -> AiLaunch
         model: base.model.clone(),
         resume: base.resume,
         resume_id: base.resume_id.clone(),
+        session_id: base.session_id.clone(),
         force: base.force,
     }
 }
@@ -657,6 +663,7 @@ impl AiLaunch {
             model: None,
             resume: false,
             resume_id: None,
+            session_id: None,
             force: false,
         }
     }
@@ -1747,6 +1754,7 @@ mod tests {
             model: None,
             resume: false,
             resume_id: None,
+            session_id: None,
             force: false,
         };
         assert_eq!(l.match_word, "claude", "adoption matches the program, not the env prefix");
@@ -1784,6 +1792,7 @@ mod tests {
             model: None,
             resume: false,
             resume_id: None,
+            session_id: None,
             force: false,
         };
         assert_eq!(
@@ -1830,6 +1839,7 @@ mod tests {
             model: None,
             resume: false,
             resume_id: None,
+            session_id: None,
             force: false,
         };
         assert_eq!(
@@ -1903,6 +1913,7 @@ mod tests {
             model: None,
             resume: false,
             resume_id: None,
+            session_id: None,
             force: false,
         };
         assert_eq!(l.shell_prefix(), "CLAUDE_CONFIG_DIR='/tmp/a dir/it'\\''s' ");

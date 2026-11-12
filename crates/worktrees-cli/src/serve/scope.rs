@@ -202,6 +202,9 @@ pub const EVENTS: &[(&str, Event)] = &[
     // `{changed: [{id, mtime_ms}], removed: [id]}`: the ideas folder moved
     // (`worktrees_api::ideas`). Desktop only, like every ideas row.
     ("ideas:changed", Event::Console),
+    // `{live, busy, waiting}`: the idea conversations' tmux sessions, by name
+    // (phase S, `worktrees_api::watch::IdeaSessions`). Desktop only.
+    ("ideas:sessions", Event::Console),
 ];
 
 // ── who listens (§9.3) ───────────────────────────────────────────────────────
@@ -228,8 +231,9 @@ pub fn is_one_shot(event: &str) -> bool {
 /// `places:changed` are not here: the first is one turn and the second
 /// "re-read", and a client re-pulls the workspace, which carries
 /// `last_worked_epoch`, on every reconnect. `sessions:drafts` has
-/// `list_drafts`.
-pub const SNAPSHOT: &[&str] = &["sessions:busy"];
+/// `list_drafts`. `ideas:sessions` is the idea conversations' live, busy
+/// and waiting sets, the companion's dots: the same shape of state.
+pub const SNAPSHOT: &[&str] = &["sessions:busy", "ideas:sessions"];
 
 /// `event`'s row in [`SNAPSHOT`], for the `'static` name a cache keys on.
 pub fn snapshot(event: &str) -> Option<&'static str> {

@@ -77,10 +77,10 @@ impl ScriptedAgent {
 }
 
 impl worktrees_api::agents::AgentIo for ScriptedAgent {
-    fn lanes(&self, _: &worktrees_core::Project, _: &str) -> Vec<worktrees_api::agents::Lane> {
+    fn lanes(&self, _: &worktrees_api::agents::Locus) -> Vec<worktrees_api::agents::Lane> {
         vec![worktrees_api::agents::Lane { harness: "claude", session: self.session.clone(), pane: "%1".into() }]
     }
-    fn activity(&self, _: &worktrees_core::Project, _: &str) -> worktrees_core::activity::Activity {
+    fn activity(&self, _: &worktrees_api::agents::Locus) -> worktrees_core::activity::Activity {
         worktrees_core::activity::Activity::none()
     }
     fn capture(&self, _: &worktrees_api::agents::Lane) -> Option<String> {
@@ -103,15 +103,14 @@ impl worktrees_api::agents::AgentIo for ScriptedAgent {
     }
     fn deliver(
         &self,
-        _: &worktrees_core::Project,
-        _: &str,
+        _: &worktrees_api::agents::Locus,
         _: &worktrees_api::agents::Lane,
         text: &str,
     ) -> Result<worktrees_core::harness::SendOutcome, String> {
         self.sent.lock().unwrap().push(text.to_string());
         Ok(self.outcome.lock().unwrap().clone().unwrap_or(worktrees_core::harness::SendOutcome::Submitted))
     }
-    fn transcript(&self, _: &worktrees_core::Project, _: &str, _: &worktrees_api::agents::Lane) -> Result<Vec<String>, String> {
+    fn transcript(&self, _: &worktrees_api::agents::Locus, _: &worktrees_api::agents::Lane) -> Result<Vec<String>, String> {
         let t = include_str!("../../../worktrees-core/tests/fixtures/transcripts/claude-2.1.309.jsonl");
         Ok(t.lines().map(str::to_string).collect())
     }
@@ -125,7 +124,7 @@ impl worktrees_api::agents::AgentIo for ScriptedAgent {
     fn codex_models(&self) -> Vec<(String, usize)> {
         Vec::new()
     }
-    fn commands_of(&self, _: &worktrees_core::Project, _: &str, _: &worktrees_api::agents::Lane) -> (Option<String>, Vec<worktrees_core::slash::Command>) {
+    fn commands_of(&self, _: &worktrees_api::agents::Locus, _: &worktrees_api::agents::Lane) -> (Option<String>, Vec<worktrees_core::slash::Command>) {
         (None, Vec::new())
     }
     fn command(&self, _: &worktrees_api::agents::Lane, _: &str, _: &str) -> Result<worktrees_core::harness::SendOutcome, String> {

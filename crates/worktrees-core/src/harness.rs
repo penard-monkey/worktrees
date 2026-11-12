@@ -392,6 +392,10 @@ impl Adapter for Claude {
         };
         if let Some(id) = launch.resume_id.as_deref().filter(|id| launch.resume && crate::codex::is_uuid(id)) {
             tail.extend(["--resume".to_string(), shell_quote(id)]);
+        } else if let Some(id) = launch.session_id.as_deref().filter(|id| !launch.resume && crate::codex::is_uuid(id)) {
+            // A fresh conversation whose id the caller chose and recorded
+            // first (an idea session): its transcript is then known by path.
+            tail.extend(["--session-id".to_string(), shell_quote(id)]);
         }
         LaunchArgs { head: model_words(self.provider(), launch), tail }
     }
