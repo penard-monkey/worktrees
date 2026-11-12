@@ -5,6 +5,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+
+- **A workspace's menu adds projects to it directly (beta).** In Workspaces, a workspace's ⋯ menu — and an **Add a project** button in an empty one — now offers Add project ▸ (any project you already have), New project…, Add existing… and Clone from URL…. Whichever you pick, the project ends up in that workspace; cancel or a failed clone leaves the workspace as it was.
+
 ### Fixed
 
 - **The × in What's new, the Project sheet and the Status sheet is back at the right edge.** Since v0.48.0 it sat beside the title, because a rule written for the Settings header's new layout reached every sheet that shares the header. It now applies to Settings only, where the search takes that space.

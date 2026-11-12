@@ -3967,6 +3967,7 @@ body.dragging .ws-h { cursor: grabbing; }
    whose header is already short of width (measured: 41px of name at 1280). */
 .ws-kids .project-h { top: var(--ws-head); }
 .ws-drop-hint { padding: var(--s2) var(--s3); }
+.ws-drop-hint .ws-empty-add { display: flex; align-items: center; gap: var(--s1); margin-top: var(--s2); }
 .ws-gone .pname { color: var(--txt-dim); font-weight: var(--fw-body); }
 .ws-gone .pgone { color: var(--txt-dim); }
 .ws-empty { display: flex; flex-direction: column; align-items: flex-start; gap: var(--s2); }

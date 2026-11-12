@@ -58,6 +58,16 @@ eq("move down at the end is disabled", W.idsStepped(["A", "B", "C"], "C", 1), nu
 eq("Add to workspace offers the ones that do not hold it", W.addableTo(list, "/x").map((w) => w.id), ["B"]);
 eq("the word", W.VIEW_LABEL, { projects: "All projects", workspaces: "Workspaces" });
 
+// A workspace menu's "Add project ▸" and its dialogs' continuation.
+const A = list.workspaces[0];
+eq("Add project ▸ lists the registered projects the workspace lacks, in order", W.projectsAddable(A, ["/y", "/x", "/z"]), ["/y", "/z"]);
+eq("…and nothing when it holds them all", W.projectsAddable(A, ["/x"]), []);
+eq("the project a dialog brought is the root the registry gained", W.arrivedRoot(["/x"], ["/x", "/new"], "/elsewhere"), "/new");
+eq("an Add existing of a registered project arrives as that project", W.arrivedRoot(["/x", "/y"], ["/x", "/y"], "/y/"), "/y");
+eq("…and of a folder inside one, as the deepest root holding it", W.arrivedRoot(["/r", "/r/sub"], ["/r", "/r/sub"], "/r/sub/deep"), "/r/sub");
+eq("a prefix is not a parent", W.arrivedRoot(["/r"], ["/r"], "/rx"), null);
+eq("nothing new and no folder: nothing arrives", W.arrivedRoot(["/x"], ["/x"], null), null);
+
 // ── 2. rows ──
 const ROWS = ["workspaces_list", "workspace_create", "workspace_rename", "workspace_remove", "workspace_set_projects", "workspace_reorder"];
 const dispatch = read("../../crates/worktrees-cli/src/serve/dispatch.rs");
@@ -82,6 +92,27 @@ for (const [what, re] of [
   ["workspace menu → Remove workspace", /data-testid="ws-remove"/],
   ["a New workspace button", /data-testid="ws-new"/],
 ]) ok(`menu twin: ${what}`, re.test(app));
+// The workspace menu's add section: the footer's three acts with this
+// workspace as their continuation, never a fork of them.
+const wsMenuSrc = app.slice(app.indexOf('{ctx?.kind === "ws" && ('), app.indexOf('{ctx?.kind === "ws-projects" && ('));
+ok("the workspace menu was found", wsMenuSrc.length > 200);
+ok("…offers Add project ▸", /data-testid="ws-add-project"[\s\S]{0,200}kind: "ws-projects"/.test(wsMenuSrc));
+ok("…New project… through the footer's openNewProject", /openNewProject\(w\.id\)/.test(wsMenuSrc));
+ok("…Add existing… through addProject, host-only as in the footer", /hostOnly\("Choosing a folder"\)[\s\S]{0,120}addProject\(w\.id\)/.test(wsMenuSrc));
+ok("…Clone from URL… through openClone", /openClone\(w\.id\)/.test(wsMenuSrc));
+ok("…and not Hubs (a hub import is not one project)", !/openHubs/.test(wsMenuSrc));
+ok("the footer menu still opens them with no workspace", /data-testid="add-new"\s+onClick=\{\(\) => openNewProject\(\)\}/.test(app) && /data-testid="add-clone"\s+onClick=\{\(\) => openClone\(\)\}/.test(app));
+const subSrc = app.slice(app.indexOf('{ctx?.kind === "ws-projects" && ('));
+ok("Add project ▸ adds through wsAddProject, from projectsAddable", /projectsAddable\(/.test(subSrc.slice(0, 1500)) && /wsAddProject\(id, root\)/.test(subSrc.slice(0, 1500)));
+ok("…and says so when every project is in it", /disabled>every project is in it</.test(subSrc.slice(0, 1500)));
+for (const [fn, call] of [
+  ["confirmAdd", /add_project[\s\S]{0,120}await wsArrive\(ask\.into, before, after, ask\.dir\);\s*commitWs\(after\)/],
+  ["createProject", /create_project[\s\S]{0,120}await wsArrive\(into, before, after, null\);\s*commitWs\(after\)/],
+  ["runClone", /clone_project[\s\S]{0,200}await wsArrive\(into, ws, done\.workspace, done\.root\);\s*commitWs\(done\.workspace\)/],
+  ["initRepo", /init_repo[\s\S]{0,120}await wsArrive\(into, before, after, dir\);\s*commitWs\(after\)/],
+]) ok(`${fn} puts the project in its workspace before committing the registry`, call.test(app));
+ok("wsArrive writes only through workspace_set_projects, from arrivedRoot", /const wsArrive = [\s\S]{0,900}arrivedRoot\([\s\S]{0,600}wsRun\("workspace_set_projects"/.test(app));
+ok("the empty workspace offers Add a project, opening the same menu", /data-testid="ws-empty-add"[^>]*onClick=\{\(e\) => wsMenuAt\(e, w\.id\)\}/.test(app) && /const wsMenuAt = [\s\S]{0,300}kind: "ws", x: r\.left/.test(app));
 // The header ✕ of a project under a workspace. Sliced from the ProjectNode
 // header so a match elsewhere cannot stand in for it.
 const hdr = app.slice(app.indexOf("const ProjectNode = "), app.indexOf("{open && pv.ok && ("));
