@@ -140,6 +140,10 @@ API:
 - [ ] `agent_interrupt` refuses while an approval/question/trust modal is up
       (Esc would cancel it), on a draft, and on an idle lane; stops a running
       turn once (the wire log, not the screen, is the witness).
+- [ ] A turn's `id` is its `turn.prompt`'s `promptId` (a ULID on the real
+      logs measured), and `agent_turn_text` returns a long reply whole by it:
+      the chat's **Show full reply**. Not yet run live (added 2026-11-12, after
+      the main merge); the fixture pins it.
 - [ ] In the app: a kimi place opens on Chat, turns render, the Stop button
       works, and a queued message shows `queued: true`. (Unit-tested on the
       fixtures + the mock's `ledger-sync`; the by-hand pass is §10.)
