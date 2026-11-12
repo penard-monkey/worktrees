@@ -143,11 +143,12 @@ uninstall:
 	@echo "removed: $(BINDIR)/worktrees"
 
 lint:
-	shellcheck -x bin/worktrees install.sh app/scripts/sidecar.sh test/helpers/*.bash
-	bash -n bin/worktrees && bash -n install.sh && bash -n app/scripts/sidecar.sh
-	@# bash-4-ism gate on the shim, the installer and the sidecar script, which
-	@# `make install-app` runs (all must run on stock bash 3.2)
-	@if sed 's/[[:space:]]*#.*//' bin/worktrees install.sh app/scripts/sidecar.sh | grep -nE 'mapfile|readarray|declare -A|\$$\{[A-Za-z_]+(,,|\^\^)'; then \
+	shellcheck -x bin/worktrees install.sh app/scripts/sidecar.sh app/scripts/staging.sh test/helpers/*.bash
+	bash -n bin/worktrees && bash -n install.sh && bash -n app/scripts/sidecar.sh && bash -n app/scripts/staging.sh
+	@# bash-4-ism gate on the shim, the installer, the sidecar script, which
+	@# `make install-app` runs, and staging.sh, which launchd runs with
+	@# /bin/bash (all must run on stock bash 3.2)
+	@if sed 's/[[:space:]]*#.*//' bin/worktrees install.sh app/scripts/sidecar.sh app/scripts/staging.sh | grep -nE 'mapfile|readarray|declare -A|\$$\{[A-Za-z_]+(,,|\^\^)'; then \
 	  echo "bash-4-ism found (see above)"; exit 1; else echo "bash-3.2 gate: clean"; fi
 
 # The gate = the Rust binary (bin/worktrees shim is common.bash's WT_BIN).

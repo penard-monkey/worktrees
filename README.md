@@ -516,6 +516,7 @@ These scripts live in `app/scripts/`:
 | Script | What it does | Touches |
 |---|---|---|
 | `sandbox.sh` | Builds the current branch and hands you an isolated worktrees to test it in. `--app` launches the desktop app against it. | a scratch repo, or one you name with `--repo` |
+| `staging.sh` | Keeps a place on the `staging` branch up to date with origin and built, and launches `sandbox.sh --app` from it. `--watch` does the pulling and building every 10 minutes. | its own place (`.worktrees/staging`) |
 | `record-readme.sh` | Regenerates the README's desktop media (`docs/media/desktop-*.{gif,png}`). | nothing — mock harness |
 | `shoot-profiles.sh` | Regenerates the AI-profiles screenshots for `docs/ai-profiles.html`. | nothing — mock harness |
 | `record-profiles.sh` | Regenerates that page's walkthrough clip (`walkthrough.mp4`). | nothing — mock harness |
@@ -553,6 +554,44 @@ tmux ls | grep -v sbx-   # yours, untouched
 It also isolates the AI-profile store and, with `--app`, overrides the bundle
 identifier so the sandbox app gets its own `ui-state.json` instead of sharing
 yours.
+
+#### A sandbox that follows `staging`
+
+`staging` is the integration branch for work that several developers iterate on
+together before it is ready for a release (the Ideas working model, first).
+Pull requests for that work target `staging`; CI runs on them and on every merge
+into it; `main` stays releasable, and `staging` is merged into `main` when the
+work is ready. Nothing is ever released from `staging`.
+
+Each developer keeps a sandbox on it:
+
+```sh
+app/scripts/staging.sh --app       # pull staging, build if it moved, launch the sandbox app
+app/scripts/staging.sh             # (--update) just pull and build
+app/scripts/staging.sh --watch     # …every 10 minutes, so --app launches at once
+app/scripts/staging.sh --unwatch
+app/scripts/staging.sh --clean     # sandbox.sh --clean, for staging's sandbox
+```
+
+It works in a place of its own, `.worktrees/staging` (made with `worktrees new
+staging --no-tmux --no-install` the first time), and updates it with `git fetch`
+and `git merge --ff-only origin/staging`. That place holds no work: with local
+changes or local commits the update refuses and says which. A commit it has not
+built yet gets the fresh-worktree bootstrap (submodules, `corepack pnpm install`
+in `app/` under the `.nvmrc` node) and `cargo build --release -p worktrees-cli`
+in the `gate` slot. `--app` then runs `sandbox.sh --app` from the place, so the
+app, its config dir and its tmux prefix are the sandbox's (`sbx-staging`), with
+`DISABLE_AUTOUPDATER=1` set. `--branch <b>` follows another branch.
+
+`--watch` (macOS) installs a launchd agent,
+`~/Library/LaunchAgents/net.casadelvalle.worktrees.staging.plist`, that runs the
+update when installed and every 10 minutes after, logging to
+`~/.cache/worktrees/staging/staging.log`. It **only pulls and builds**: it never
+starts, stops or relaunches an app, and it skips its turn while a sandbox app
+launched by `staging.sh --app` is open (a merge under a running `tauri dev`
+would rebuild and relaunch the window by itself), so a new `staging` reaches
+the app the next time you launch it. On Linux there is no agent; run
+`staging.sh` from cron or a systemd timer if you want one.
 
 ## Documentation
 
