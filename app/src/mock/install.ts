@@ -1929,6 +1929,17 @@ const ideaSlug = (t: string) => t.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "-")
 const ideaFree = (stem: string, own?: string) => {
   for (let n = 1; ; n++) { const f = n === 1 ? `${stem}.md` : `${stem}-${n}.md`; if (f === own || !mockIdeas.has(f)) return f; }
 };
+/** ideas::write_at's naming: the first heading names the file, and a stem
+ *  already the slug, or the slug's `-<n>` while the plain name is taken,
+ *  stays (a second "Jellyfin Sharing" keeps its `-2`). */
+const ideaNameFor = (d: MockIdea) => {
+  const want = ideaSlug(ideaTitle(d.content) ?? "");
+  const stem = d.file.replace(/\.md$/, "");
+  if (stem === want) return d.file;
+  const n = stem.startsWith(`${want}-`) ? stem.slice(want.length + 1) : "";
+  if (/^[1-9][0-9]*$/.test(n) && Number(n) >= 2 && mockIdeas.has(`${want}.md`) && `${want}.md` !== d.file) return d.file;
+  return ideaFree(want, d.file);
+};
 const ideaRow = (d: MockIdea) => ({
   id: d.id && /^[0-9A-HJKMNP-TV-Z]{26}$/.test(d.id) ? d.id : null, title: ideaTitle(d.content) ?? d.file.replace(/\.md$/, ""), file: d.file, created: d.created,
   mtime_ms: d.mtime_ms, size: new TextEncoder().encode(d.content).length,
@@ -3969,7 +3980,11 @@ Phase 3: Frontend pane and mock harness
         if (keep) mockIdeaHistory.push({ id: d.id!, content: d.content });
         d.content = content; d.mtime_ms = ideaNow(); ideasTouched();
       }
-      return d.mtime_ms;
+      // The answer is the idea as saved, without its text: its new `file`
+      // when the first heading renamed it (the mtime does not move for that).
+      const to = ideaNameFor(d);
+      if (to !== d.file) { mockIdeas.delete(d.file); d.file = to; mockIdeas.set(d.file, d); ideasTouched(); }
+      return ideaRow(d);
     }
     case "idea_rename": {
       const d = ideaById(args.id as string);

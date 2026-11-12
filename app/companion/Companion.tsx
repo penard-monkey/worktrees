@@ -23,7 +23,7 @@ import "../src/tokens.css";
 import "../src/App.css";
 import "./companion.css";
 import { ideaState } from "./editor";
-import { Session, type IdeasChanged, type SaveState } from "./ideasave";
+import { Session, type IdeasChanged, type SaveState, type Saved } from "./ideasave";
 import { savedText } from "./ideastate";
 import { bodyOf, commentOnly, withId } from "./ideatext";
 
@@ -302,10 +302,11 @@ export function Companion() {
   /** Start a session on a document just read, created or adopted. */
   const begin = useCallback((d: Doc, focus = false) => {
     session.current?.close();
+    let known = { file: d.file, title: d.title };
     const s = new Session(d.id!, d.content, d.mtime_ms, {
       rows: {
         write: (id, content, expectedMtime, keepHistory) =>
-          invoke<number>("idea_write", keepHistory ? { id, content, expectedMtime, keepHistory: true } : { id, content, expectedMtime }),
+          invoke<Saved>("idea_write", keepHistory ? { id, content, expectedMtime, keepHistory: true } : { id, content, expectedMtime }),
         read: (id) => invoke<Doc>("idea_read", { id }),
       },
       clock,
@@ -315,6 +316,17 @@ export function Companion() {
         setSave(st);
         if (st.kind === "conflict" || st.kind === "removed" || st.kind === "error") trace(gen, `idea ${d.id} ${st.kind}${st.kind === "conflict" ? ` (${st.why})` : ""}`);
       },
+      // The first heading names the file: a save may have renamed it. The
+      // open idea's name and title follow at once, and the list re-pulls
+      // rather than wait for the poll.
+      onSaved: (saved) => {
+        setOpen((o) => (o && o.id === d.id ? { ...o, file: saved.file, title: saved.title } : o));
+        if (saved.file !== known.file || saved.title !== known.title) {
+          if (saved.file !== known.file) trace(gen, `saved ${d.id} as ${saved.file}`);
+          known = saved;
+          void refresh();
+        }
+      },
     });
     session.current = s;
     setSave({ kind: "clean", savedAt: null });
@@ -322,7 +334,7 @@ export function Companion() {
     arm.disarm();
     setOpen({ id: d.id!, title: d.title, file: d.file, key: `${d.id}#${++keySeq.current}`, initial: d.content, focus });
     setReadText(d.content);
-  }, [arm, gen]);
+  }, [arm, gen, refresh]);
 
   /** Leave the open idea, saving first. Refused while its text cannot be
    *  saved (a conflict, or it was removed): that text exists nowhere else. */
@@ -411,9 +423,9 @@ export function Companion() {
     try {
       const d = await invoke<Doc>("idea_create", { title: open.title });
       const content = withId(text, d.id!) ?? d.content;
-      const m = await invoke<number>("idea_write", { id: d.id, content, expectedMtime: d.mtime_ms });
+      const w = await invoke<Saved>("idea_write", { id: d.id, content, expectedMtime: d.mtime_ms });
       trace(gen, `kept removed ${open.id} as ${d.id}`);
-      begin({ ...d, content, mtime_ms: m });
+      begin({ ...d, ...w, content });
       void refresh();
     } catch (e) { setNotice(`Could not save it as a new idea: ${errText(e)}`); }
   }, [open, begin, refresh, gen]);

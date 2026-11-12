@@ -1849,12 +1849,21 @@ mod tests {
         assert_eq!(d["file"], json!("jellyfin.md"));
         assert!(folder.join("jellyfin.md").is_file());
         let text = format!("{}<!-- ¶ 7k2q -->\n", d["content"].as_str().unwrap());
-        let m = run("idea_write", json!({"id": id, "content": text, "expectedMtime": d["mtime_ms"]})).unwrap();
+        let w = run("idea_write", json!({"id": id, "content": text, "expectedMtime": d["mtime_ms"]})).unwrap();
+        assert_eq!((w["id"].as_str(), w["file"].as_str()), (Some(id.as_str()), Some("jellyfin.md")), "the idea as saved");
+        assert!(w.get("content").is_none(), "without its text");
         assert_eq!(std::fs::read_to_string(folder.join("jellyfin.md")).unwrap(), text);
         let kept = format!("{text}kept\n");
-        let m = run("idea_write", json!({"id": id, "content": kept, "expectedMtime": m, "keepHistory": true})).unwrap();
+        let w = run("idea_write", json!({"id": id, "content": kept, "expectedMtime": w["mtime_ms"], "keepHistory": true})).unwrap();
         assert_eq!(std::fs::read_dir(folder.join(".history").join(&id)).unwrap().count(), 1, "keep_history copies the replaced text");
-        let m = run("idea_write", json!({"id": id, "content": text, "expectedMtime": m})).unwrap();
+        let m = run("idea_write", json!({"id": id, "content": text, "expectedMtime": w["mtime_ms"]})).unwrap()["mtime_ms"].clone();
+        // The first heading names the file; the next save goes by id.
+        let moved = text.replace("# Jellyfin\n", "# Jellyfin Sharing\n");
+        let w = run("idea_write", json!({"id": id, "content": moved, "expectedMtime": m})).unwrap();
+        assert_eq!(w["file"], json!("jellyfin-sharing.md"));
+        assert!(!folder.join("jellyfin.md").exists());
+        let m = run("idea_write", json!({"id": id, "content": text, "expectedMtime": w["mtime_ms"]})).unwrap()["mtime_ms"].clone();
+        assert!(folder.join("jellyfin.md").is_file(), "and back");
         assert_eq!(std::fs::read_dir(folder.join(".history").join(&id)).unwrap().count(), 1, "an ordinary save copies nothing");
         let e = run("idea_write", json!({"id": id, "content": text, "expected_mtime": 1})).unwrap_err();
         assert!(e.as_str().unwrap().contains("changed on disk"), "{e}");
