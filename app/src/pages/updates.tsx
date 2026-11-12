@@ -38,7 +38,8 @@ function cmpVer(a: string, b: string): number {
 export function useUpdateRuns({ open, update, onCheckUpdate }: {
   open: boolean;
   update: UpdateInfo | null;
-  onCheckUpdate: () => Promise<unknown> | void;
+  /** `force` (the Check for updates button) re-probes the agent CLIs. */
+  onCheckUpdate: (keepLatest?: boolean, force?: boolean) => Promise<unknown> | void;
 }) {
   const [updating, setUpdating] = useState(false);
   const [updateLog, setUpdateLog] = useState("");
@@ -69,7 +70,7 @@ export function useUpdateRuns({ open, update, onCheckUpdate }: {
   };
   const doCheck = async () => {
     setCheckState("checking");
-    try { await onCheckUpdate(); } finally { setCheckState("done"); }
+    try { await onCheckUpdate(false, true); } finally { setCheckState("done"); }
   };
   const doUpdate = async () => {
     if (!update?.latest || updating) return;
@@ -407,7 +408,10 @@ export function UpdatesPage() {
                 {h.manual ? h.manual.why
                   : method === "unknown" || method === "legacy-python" ? "Worktrees can't update this install itself."
                   : method === "not-installed" ? "Not installed"
-                  : `Installed with ${method}${h.update_command ? ` · ${h.update_command}` : ""}`}
+                  : `Installed ${method === "standalone" ? "standalone" : `with ${method}`}${h.update_command ? ` · ${h.update_command}` : ""}`}
+              </div>}
+              {known && h.behind_on_path && <div className="harness-update-meta" data-testid={`harness-behind-${h.tool}`}>
+                Another {name} is on PATH behind this one at {h.behind_on_path}; this one is what agents run.
               </div>}
               {known && h.installed_version && h.manual && (
                 <HarnessSteps tool={h.tool} manual={h.manual} open={h.update_available} />

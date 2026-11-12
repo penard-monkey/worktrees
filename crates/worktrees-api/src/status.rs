@@ -347,7 +347,10 @@ pub fn cli_binary() -> Option<(String, String)> {
     None
 }
 
-pub fn check_update() -> Result<UpdateInfo, String> {
+/// `force` is the Settings button's "Check for updates": the harness rows
+/// are probed again rather than served from their three-minute cache. Who
+/// may force is `harness_updates::check_for`'s rule (the console only).
+pub fn check_update(ctx: &crate::Ctx, force: bool) -> Result<UpdateInfo, String> {
     // The release probe and the four harness probes form one check. Two
     // clients asking at once share the harness cache and never overlap here.
     static CHECK_LOCK: Mutex<()> = Mutex::new(());
@@ -361,7 +364,7 @@ pub fn check_update() -> Result<UpdateInfo, String> {
         cli_version,
         cli_path,
         latest: latest_release_tag(),
-        harnesses: crate::harness_updates::check_all(),
+        harnesses: crate::harness_updates::check_for(ctx.is_console(), force),
     })
 }
 
