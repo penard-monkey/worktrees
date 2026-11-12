@@ -1495,7 +1495,25 @@ function mockTurnsAt(repo: string, slug: string) {
     mockTurns.set(key, t);
     return t;
   }
-  t = harness === "codex" ? [
+  t = harness === "kimi" ? [
+    {
+      at: now - 1500, user: "Summarise the ledger sync gaps, then fix the biggest one.", reply: "Reading the sync log first.\n\nThe gap was the reconcile pass skipping empty batches; it now handles them. 14 tests pass.", tools: ["Read", "Bash", "Edit"], truncated: false,
+      steps: [
+        { kind: "text", at: now - 1500, text: "Reading the sync log first." },
+        { kind: "tool", at: now - 1490, name: "Read", summary: "crates/sync/src/log.rs", call_id: "kimi-c-1" },
+        { kind: "permission", at: now - 1480, answered_at: now - 1440, tool: "Bash", summary: "cargo test -p sync", allowed: true, scope: "session" },
+        { kind: "tool", at: now - 1430, name: "Edit", summary: "crates/sync/src/reconcile.rs", call_id: "kimi-c-2", failed: true },
+        { kind: "text", at: now - 1400, text: "The gap was the reconcile pass skipping empty batches; it now handles them. 14 tests pass." },
+      ],
+    },
+    {
+      at: now - 600, user: "Which retry window should the scheduler use?", reply: "Set to the 15-minute window.", tools: ["AskUserQuestion"], truncated: false,
+      steps: [
+        { kind: "question", at: now - 590, answered_at: now - 560, questions: [{ header: "Window", question: "Which retry window?", multi: false, options: [{ label: "5 minutes" }, { label: "15 minutes" }, { label: "Other" }] }], answer: { how: "picked", answers: [{ question: "Which retry window?", picked: ["15 minutes"] }] } },
+        { kind: "text", at: now - 550, text: "Set to the 15-minute window." },
+      ],
+    },
+  ] : harness === "codex" ? [
     { at: now - 1500, user: "Move the invoice totals onto the new ledger API.", reply: "Done for `InvoiceSummary` and `InvoiceTable`. Both read `ledger.totals(accountId)` now; the old `computeTotals` helper has no callers left, so I removed it.\n\nTwo tests needed new fixtures (`billing/__fixtures__/ledger.json`).", tools: ["shell", "apply_patch", "apply_patch", "shell"], truncated: false },
     { at: now - 1320, user: "Run the billing tests.", reply: "`pnpm test billing` — 86 passed, 0 failed.", tools: ["shell"], truncated: false },
     { at: now - 240, user: "Now the credit notes.", reply: "Starting with `CreditNoteForm`. It still posts to `/v1/credits`; I'll switch it to the ledger's `adjustments` endpoint and keep the form's validation as is.", tools: ["shell"], truncated: false },
@@ -5256,8 +5274,8 @@ Phase 3: Frontend pane and mock harness
       const harness = mockHarnessAt(path);
       const mode = new URLSearchParams(location.search).get("agentinterrupt");
       if (mode === "gone") throw "no agent is running in this place";
-      if (mode === "unsupported" || (!mode && (harness === "pi" || harness === "kimi"))) {
-        throw `agent_interrupt stops Claude's and Codex's turns; ${harness === "kimi" ? "Kimi" : "pi"}'s cannot be stopped from here yet`;
+      if (mode === "unsupported" || (!mode && harness === "pi")) {
+        throw `agent_interrupt stops Claude's, Codex's and Kimi's turns; ${harness}'s cannot be stopped from here yet`;
       }
       if (mode === "prompt" || (!mode && mockPromptUp(args.repo, args.slug))) throw "the agent is waiting on a prompt: answer it with agent_answer";
       if (mode === "draft") throw "the agent's prompt has unsent text in it (someone is typing there), which hides whether a turn is running: stop it at the host";
@@ -5277,7 +5295,7 @@ Phase 3: Frontend pane and mock harness
     }
     case "agent_turns": {
       const harness = mockTurnHarnessAt(mockPlacePath(args.repo, args.slug));
-      if (harness === "pi" || harness === "kimi") throw `agent_turns reads Claude's and Codex's transcripts; ${harness}'s is not read yet`;
+      if (harness === "pi") throw `agent_turns reads Claude's, Codex's and Kimi's transcripts; ${harness}'s is not read yet`;
       // Claude on its resume picker has no session yet, and writes one about
       // half a second after a pick (measured on 2.1.316).
       const ps = mockPromptState(args.repo, args.slug);
