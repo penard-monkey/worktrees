@@ -1633,6 +1633,7 @@ pub(crate) fn turn_text_at(ctx: &Ctx, at: &Locus, turn_id: String) -> Result<Val
         let read: fn(&[String], &str) -> Option<turns::Turn> = match lane.harness {
             h if h == provider::CLAUDE.id => turns::claude_turn,
             h if h == provider::CODEX.id => turns::codex_turn,
+            h if h == provider::KIMI.id => turns::kimi_turn,
             _ => continue,
         };
         match io.transcript(at, &lane) {
@@ -3651,6 +3652,15 @@ mod tests {
         assert_eq!(agent_turn_text(&cctx, crepo, "lane".into(), "u-1".into()).unwrap_err(), ERR_GONE, "a Claude id is no Codex turn");
         let (ctx, repo) = setup("turntextnone", Arc::new(Fake::with(vec![])));
         assert_eq!(agent_turn_text(&ctx, repo, "lane".into(), "u-1".into()).unwrap_err(), ERR_GONE, "no agent, no turn");
+        // kimi's turn, by its prompt's `promptId`.
+        let mut kx = Fake::with(vec![("kimi", "repo-lane~agent~kimi", pane(vec![], ""))]);
+        kx.transcript = include_str!("../../worktrees-core/tests/fixtures/kimi-wire/2.2.0/transcript.jsonl").lines().map(str::to_string).collect();
+        let (kctx, krepo) = setup("turntextkimi", Arc::new(kx));
+        let v = agent_turns(&kctx, krepo.clone(), "lane".into(), None, None).unwrap();
+        assert_eq!(v["turns"][0]["id"], "msg_PROBE1");
+        let w = agent_turn_text(&kctx, krepo.clone(), "lane".into(), "msg_PROBE1".into()).unwrap();
+        assert_eq!((&w["harness"], &w["turn"]["user"]), (&json!("kimi"), &json!("Run the probe, apply the patch, then reply DONE.")));
+        assert_eq!(agent_turn_text(&kctx, krepo, "lane".into(), "t-1".into()).unwrap_err(), ERR_GONE, "a Codex id is no kimi turn");
         let (ctx, repo) = setup("turntextpi", Arc::new(Fake::with(vec![("pi", "repo-lane~agent~pi", pane(vec![], ""))])));
         assert_eq!(agent_turn_text(&ctx, repo, "lane".into(), "x".into()).unwrap_err(), ERR_GONE);
     }

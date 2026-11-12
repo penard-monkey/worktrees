@@ -1643,7 +1643,7 @@ fn kimi_turns(lines: &[String]) -> Vec<Turn> {
     }
     let mut turns: Vec<Turn> = Vec::new();
     let mut open: Vec<Open> = Vec::new();
-    let mut apply = |open: &Open, turns: &mut Vec<Turn>| {
+    let apply = |open: &Open, turns: &mut Vec<Turn>| {
         let Some((ti, si)) = open.step else { return };
         let Some(step) = turns.get_mut(ti).and_then(|t| t.steps.get_mut(si)) else { return };
         match step {
@@ -1679,7 +1679,12 @@ fn kimi_turns(lines: &[String]) -> Vec<Turn> {
                     .and_then(|i| i.as_array())
                     .map(|parts| parts.iter().filter_map(|p| p.get("text").and_then(|t| t.as_str())).collect::<Vec<_>>().join(""))
                     .unwrap_or_default();
-                turns.push(Turn::new(at, Some(text)));
+                // Its `promptId` (a ULID on real logs, one per message) names
+                // the turn for the whole-turn read. A window that starts
+                // inside a turn has no prompt and leaves that turn unnamed.
+                let mut turn = Turn::new(at, Some(text));
+                turn.id = v.get("promptId").and_then(|p| p.as_str()).unwrap_or("").to_string();
+                turns.push(turn);
             }
             Some("context.append_loop_event") => {
                 let Some(e) = v.get("event") else { continue };
@@ -2000,6 +2005,11 @@ pub fn claude_turn(lines: &[String], id: &str) -> Option<Turn> {
 /// [`claude_turn`] for a Codex rollout's `lines`.
 pub fn codex_turn(lines: &[String], id: &str) -> Option<Turn> {
     whole(codex_turns(lines), id)
+}
+
+/// The kimi turn `id` (its `turn.prompt`'s `promptId`) whole, as [`claude_turn`].
+pub fn kimi_turn(lines: &[String], id: &str) -> Option<Turn> {
+    whole(kimi_turns(lines), id)
 }
 
 /// One turn at the whole-turn cap. Its `reply` is left empty: the text is in
@@ -3343,6 +3353,23 @@ mod tests {
         let got = kimi(&fx[from..from + 1], 20);
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].user, None, "the window starts inside the turn");
+    }
+
+    /// A kimi turn is named by its prompt's `promptId`, the same on every
+    /// read; a window that starts inside a turn leaves that turn unnamed
+    /// (no prompt, so no id); the whole-turn read finds a turn by it.
+    #[test]
+    fn a_kimi_turns_id_is_its_prompt_id() {
+        let fx = lines(include_str!("../tests/fixtures/kimi-wire/2.2.0/transcript.jsonl"));
+        let ids: Vec<String> = kimi(&fx, 20).into_iter().map(|t| t.id).collect();
+        assert_eq!(ids, ["msg_PROBE1", "msg_COUNT", "msg_ASK", "msg_QUEUE", "msg_POEM"]);
+        let from = fx.iter().position(|l| l.contains("Applying the patch.")).unwrap();
+        assert_eq!(kimi(&fx[from..], 20)[0].id, "", "the head turn has no prompt");
+        let full = kimi_turn(&fx, "msg_PROBE1").expect("by its id");
+        assert_eq!(full.user.as_deref(), Some("Run the probe, apply the patch, then reply DONE."));
+        assert!(full.reply.is_empty(), "the words are in steps, once");
+        assert!(kimi_turn(&fx, "msg_GONE").is_none());
+        assert!(kimi_turn(&fx, "").is_none());
     }
 
     // ── the turn's id and the whole-turn read (`agent_turn_text`) ──────────
