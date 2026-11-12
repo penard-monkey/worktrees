@@ -1,4 +1,4 @@
-//! The 229 commands, each with its exposure, capability and objects, in ONE
+//! The 244 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -39,7 +39,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::sync::Arc;
-use worktrees_api::{agents, config, files, hostenv, ideas, macprivacy, meta, ops, prefs, presets, profiles, project, status, term, viewer, workspace, workspaces, Ctx};
+use worktrees_api::{agents, config, files, hostenv, ideas, ideasessions, macprivacy, meta, ops, prefs, presets, profiles, project, status, term, viewer, workspace, workspaces, Ctx};
 use worktrees_core::authz::{self, Caller, Capability, Caps, DeviceId, Grant, Projects, Registry};
 use worktrees_core::fetchpolicy::Fetcher;
 
@@ -364,6 +364,8 @@ macro_rules! obj {
     (candidates($a:ident)) => { Obj::Candidates(stringify!($a)) };
     (filtered($f:ident)) => { Obj::Filtered(scope::$f) };
     (opt($($inner:tt)+)) => { Obj::Opt(&obj!($($inner)+)) };
+    (idea($a:ident)) => { Obj::Idea(stringify!($a)) };
+    (idea_conv($c:ident, $i:ident)) => { Obj::IdeaConv(stringify!($c), stringify!($i)) };
     (global) => { Obj::Global };
     (all) => { Obj::All };
     (not_remote) => { Obj::NotRemote };
@@ -1286,6 +1288,29 @@ commands! { cx, a;
     idea_rename: HostConsole => ideas::idea_rename(&cx.ctx, a.get("id")?, a.get("title")?, a.get("expected_mtime")?),
     idea_remove: HostConsole => ideas::idea_remove(&cx.ctx, a.get("id")?, a.get("expected_mtime")?),
     idea_adopt: HostConsole => ideas::idea_adopt(&cx.ctx, a.get("file")?, a.get("expected_mtime")?),
+    // ── idea sessions (phase S, `worktrees_core::ideasessions`) ──────────
+    // A conversation with Claude about one idea, in its own tmux session
+    // (`worktrees~idea~<conv>`), never a place. Console rows on two objects,
+    // `idea(id)` (the index knows it) and `idea_conv(conv, id)` (its record
+    // does), so no device grant reaches them. The chat rows run the agent
+    // rows' bodies (`agents::*_at`) on the conversation: `idea_send` and
+    // `idea_answer_text` are `agent_send`'s and `agent_answer_text`'s path
+    // with a second, console-only door (C14), audited the same way.
+    idea_conversations: HostConsole [console, idea(id)] => ideasessions::idea_conversations(&cx.ctx, a.get("id")?),
+    idea_conversation_start: HostConsole [console, idea(id)] => ideasessions::idea_conversation_start(&cx.ctx, a.get("id")?),
+    idea_conversation_resume: HostConsole [console, idea_conv(conv, id)] => ideasessions::idea_conversation_resume(&cx.ctx, a.get("id")?, a.get("conv")?),
+    idea_conversation_close: HostConsole [console, idea_conv(conv, id)] => ideasessions::idea_conversation_close(&cx.ctx, a.get("id")?, a.get("conv")?),
+    idea_conversation_remove: HostConsole [console, idea_conv(conv, id)] => ideasessions::idea_conversation_remove(&cx.ctx, a.get("id")?, a.get("conv")?),
+    idea_conversation_rename: HostConsole [console, idea_conv(conv, id)] => ideasessions::idea_conversation_rename(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("title")?),
+    idea_turns: HostConsole [console, idea_conv(conv, id)] => ideasessions::idea_turns(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("n")?),
+    idea_turn_text: HostConsole [console, idea_conv(conv, id)] => ideasessions::idea_turn_text(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("turn_id")?),
+    idea_tool_call: HostConsole [console, idea_conv(conv, id)] => ideasessions::idea_tool_call(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("call_id")?),
+    idea_prompt: HostConsole [console, idea_conv(conv, id)] => ideasessions::idea_prompt(&cx.ctx, a.get("id")?, a.get("conv")?),
+    idea_answer: HostConsole [console, idea_conv(conv, id)] => ideasessions::idea_answer(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("choice")?, a.get("fingerprint")?),
+    idea_answer_text: HostConsole [console, idea_conv(conv, id)] => ideasessions::idea_answer_text(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("choice")?, a.get("fingerprint")?, a.get("text")?),
+    idea_answer_many: HostConsole [console, idea_conv(conv, id)] => ideasessions::idea_answer_many(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("choices")?, a.get("fingerprint")?),
+    idea_send: HostConsole [console, idea_conv(conv, id)] => ideasessions::idea_send(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("text")?),
+    idea_interrupt: HostConsole [console, idea_conv(conv, id)] => ideasessions::idea_interrupt(&cx.ctx, a.get("id")?, a.get("conv")?),
 
     // ── remote access (§4.1): the host's own acts, never a device's ──────────
     remote_enable: HostConsole => remote(cx)?.enable(&a.get::<String>("address")?, a.get("iface")?, a.get("port")?, a.get("advertise")?),
@@ -1346,7 +1371,7 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 229 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 244 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six, the slots pair and
     /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
@@ -1364,13 +1389,14 @@ mod tests {
     /// named workspaces' six console rows (`workspaces_list`, `workspace_*`), and the
     /// idea board's seven console rows (`ideas_list`, `idea_read`,
     /// `idea_create`, `idea_write`, `idea_rename`, `idea_remove`,
-    /// `idea_adopt`), and the chat's images (`read_place_image`, `agent_call_image`); the check scripts
+    /// `idea_adopt`), and the chat's images (`read_place_image`, `agent_call_image`), and phase S's fifteen
+    /// idea-session console rows (`idea_conversation*`, `idea_*` over the agent bodies); the check scripts
     /// hold the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 229, "the table has 229 commands");
+        assert_eq!(TABLE.len(), 244, "the table has 244 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1776,7 +1802,7 @@ mod tests {
     /// `push_allow_security`); Settings → Agent policy → Limits'
     /// `limits_settings` (`read`) and `set_limits` (`admin`); and the policy
     /// presets' `policy_preset_status` (`read`) and `apply_policy_preset`
-    /// (console); the named workspaces' six (console); and the idea board's seven (console); `read_place_image` and `agent_call_image` are `read`. A row that moves group
+    /// (console); the named workspaces' six (console); and the idea board's seven (console); phase S's fifteen idea-session rows (console); `read_place_image` and `agent_call_image` are `read`. A row that moves group
     /// fails here until the count (and the proposal's table) move with it.
     #[test]
     fn every_row_has_one_base_group_and_the_counts_are_section_3_4s() {
@@ -1793,7 +1819,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 70), ("write", 23), ("admin", 41), ("console", 61), ("stream", 10), ("instruct", 8), ("answer", 2),
+            ("read", 70), ("write", 23), ("admin", 41), ("console", 76), ("stream", 10), ("instruct", 8), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 7),
         ]
         .into();
@@ -1901,6 +1927,17 @@ mod tests {
         let e = super::call(&c, "idea_create", &args(json!({"title": "leak"}))).unwrap_err();
         assert!(e.as_str().unwrap().contains("real ideas folder"), "{e}");
         assert_eq!(real.exists(), existed, "not even the folder");
+        // Phase S's writes are guarded the same way: a conversation's record,
+        // its start.md and history copy never reach the real folder.
+        let id = worktrees_core::ulid::new();
+        let desk = real.join(worktrees_core::ideasessions::DESK_DIR);
+        let desk_existed = desk.exists();
+        let e = worktrees_core::ideasessions::prepare_at(&real, &id).unwrap_err();
+        assert!(e.contains("real ideas folder"), "{e}");
+        let e = worktrees_core::ideasessions::rename_at(&real, &id, &worktrees_core::ulid::new(), "x").unwrap_err();
+        assert!(e.contains("real ideas folder") || e.contains("no conversation"), "{e}");
+        assert!(worktrees_core::ideasessions::remove_at(&real, &id, &worktrees_core::ulid::new()).unwrap_err().contains("real ideas folder"));
+        assert_eq!((real.exists(), desk.exists()), (existed, desk_existed), "not even the folder");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

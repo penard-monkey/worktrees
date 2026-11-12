@@ -486,6 +486,9 @@ export const CONSOLE_ROWS: readonly string[] = [
   "remote_status", "remote_advertise", "remote_candidates", "device_rename",
   "push_key_import", "push_key_remove", "push_status", "push_dry_run", "push_allow_security",
   "ideas_list", "idea_read", "idea_create", "idea_write", "idea_rename", "idea_remove", "idea_adopt",
+  "idea_conversations", "idea_conversation_start", "idea_conversation_resume", "idea_conversation_close",
+  "idea_conversation_remove", "idea_conversation_rename", "idea_turns", "idea_turn_text", "idea_tool_call",
+  "idea_prompt", "idea_answer", "idea_answer_text", "idea_answer_many", "idea_send", "idea_interrupt",
   // named workspaces (idea board phase 2): desktop only
   "workspaces_list", "workspace_create", "workspace_rename", "workspace_remove", "workspace_set_projects",
   "workspace_reorder",

@@ -113,10 +113,71 @@ impl Watch {
 /// only for a transcript that grew, plus ONE chained capture while some live
 /// claude has no probe yet (`claude_startup_tick`) — and none otherwise.
 /// `panes` is the tick's `list-panes -a` and `sessions` its fingerprint.
-pub fn claude_activity(w: &Watch, panes: &mut tmux::PaneList, sessions: &str) -> ClaudeTick {
-    claude_activity_in(w, &worktrees_core::agent::live_probes_in(Some(&*panes)), panes, tmux::ps_foreground, |targets| {
-        activity::capture_chain(sessions, targets)
-    })
+pub fn claude_activity(w: &Watch, panes: &mut tmux::PaneList, sessions: &str) -> (ClaudeTick, IdeaSessions) {
+    let probes = worktrees_core::agent::live_probes_in(Some(&*panes));
+    let tick = claude_activity_in(w, &probes, panes, tmux::ps_foreground, |targets| activity::capture_chain(sessions, targets));
+    let ideas = idea_sessions_in(&probes, panes, |targets| activity::capture_chain(sessions, targets));
+    (tick, ideas)
+}
+
+/// Payload for `ideas:sessions` (phase S): the idea conversations' tmux
+/// sessions (`worktrees~idea~<conv>`), by NAME — every conversation shares
+/// the ideas folder as its cwd, so the path `sessions:busy` keys on cannot
+/// tell them apart. `live` has a session; `busy` and `waiting` are the
+/// Claude in it, from its probe found by session (`ClaudeProbe::session`),
+/// or, before it wrote one, its screen (the folder-trust prompt). Whole
+/// state, change-gated, like `sessions:busy`.
+#[derive(Serialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct IdeaSessions {
+    pub live: Vec<String>,
+    pub busy: Vec<String>,
+    pub waiting: Vec<String>,
+}
+
+/// [`IdeaSessions`] for one tick, over its probes and panes; `capture` reads
+/// the screens of the idea panes running Claude with no probe yet (keyed by
+/// session, so two conversations starting at once are told apart).
+fn idea_sessions_in(
+    probes: &[worktrees_core::agent::ClaudeProbe],
+    panes: &tmux::PaneList,
+    capture: impl FnOnce(&[(String, String)]) -> Vec<(String, String, String)>,
+) -> IdeaSessions {
+    use worktrees_core::ideasessions::is_idea_session;
+    let mut out = IdeaSessions::default();
+    for p in panes.panes() {
+        if is_idea_session(&p.session) && !out.live.contains(&p.session) {
+            out.live.push(p.session.clone());
+        }
+    }
+    let mut probed: Vec<&str> = Vec::new();
+    for probe in probes.iter().filter(|p| p.is_interactive_cli()) {
+        let Some(session) = probe.session().filter(|s| is_idea_session(s) && out.live.iter().any(|l| l == s)) else { continue };
+        probed.push(session);
+        match activity::claude_state(&worktrees_core::agent::effective_state(probe)) {
+            activity::State::Busy => out.busy.push(session.to_string()),
+            activity::State::Waiting => out.waiting.push(session.to_string()),
+            _ => {}
+        }
+    }
+    let targets: Vec<(String, String)> = panes
+        .panes()
+        .iter()
+        .filter(|p| is_idea_session(&p.session) && !probed.contains(&p.session.as_str()) && !tmux::is_shell_command(&p.cmd))
+        .filter(|p| provider::for_pane(&p.session, p.program()).is_some_and(|x| x.id == provider::CLAUDE.id))
+        .map(|p| (p.session.clone(), p.session.clone()))
+        .collect();
+    if !targets.is_empty() {
+        for (session, cmd, screen) in capture(&targets) {
+            if activity::startup_activity("claude", &session, &cmd, &screen).is_some() {
+                out.waiting.push(session);
+            }
+        }
+    }
+    for v in [&mut out.live, &mut out.busy, &mut out.waiting] {
+        v.sort_unstable();
+        v.dedup();
+    }
+    out
 }
 
 /// Busy cwds, waiting cwds, and (pid, model) per tmux-hosted session.
@@ -179,6 +240,9 @@ fn claude_startup_tick(
     let candidate = |p: &tmux::Pane| {
         !p.session.is_empty()
             && !tmux::is_shell_sidecar(&p.session)
+            // An idea conversation's screen is read by `idea_sessions_in`,
+            // keyed by its session; its cwd (the ideas folder) is no place's.
+            && !worktrees_core::ideasessions::is_idea_session(&p.session)
             && !tmux::is_shell_command(&p.cmd)
             && activity::claude_activity(probes, &p.path).is_none()
             && provider::for_pane(&p.session, p.program()).is_some_and(|x| x.id == provider::CLAUDE.id)
@@ -1113,6 +1177,33 @@ mod tests {
         assert!(claude_startup_tick(&mut panes(), &[probe], no_ps, |_| panic!("a probed idle session must not be captured")).is_empty());
         let waiting = claude_startup_tick(&mut panes(), &[], no_ps, |_| vec![("/fresh".into(), "zsh".into(), TRUST.into())]);
         assert!(waiting.is_empty(), "a shell retaining a modal is not a waiting agent");
+    }
+
+    /// Phase S: idea conversations are told apart by SESSION, never by cwd,
+    /// which they all share. Two busy conversations are two names; one at
+    /// its folder-trust prompt (no probe yet) is waiting by its screen; and
+    /// none of them reaches the place dots' startup capture.
+    #[test]
+    fn idea_sessions_are_bucketed_by_session_name() {
+        let (a, b, c) = ("worktrees~idea~01JCB2Z4K3M9QX2T7VBN5R6WY1", "worktrees~idea~01JCB2Z4K3M9QX2T7VBN5R6WY2", "worktrees~idea~01JCB2Z4K3M9QX2T7VBN5R6WY3");
+        let pane = |s: &str, id: &str| tmux::Pane { session: s.into(), path: "/ideas".into(), cmd: "claude".into(), id: Some(id.into()), ..tmux::Pane::default() };
+        let mut panes = tmux::PaneList::from_panes(vec![pane(a, "%1"), pane(b, "%2"), pane(c, "%3"), pane("repo-x", "%4")]);
+        let probe = |pid: i32, s: &str, id: &str| -> worktrees_core::agent::ClaudeProbe {
+            serde_json::from_value(serde_json::json!({"pid": pid, "cwd": "/ideas", "status": "busy", "tmux": format!("{s}:@1.{id}")})).unwrap()
+        };
+        let mut probes = vec![probe(1, a, "%1"), probe(2, b, "%2")];
+        worktrees_core::agent::locate(&mut probes, &panes);
+        let got = idea_sessions_in(&probes, &panes, |targets| {
+            assert_eq!(targets, [(c.to_string(), c.to_string())], "only the probe-less conversation is captured");
+            vec![(c.into(), "claude".into(), TRUST.into())]
+        });
+        assert_eq!(got, IdeaSessions { live: v(&[a, b, c]), busy: v(&[a, b]), waiting: v(&[c]) });
+        // The place dots never capture an idea pane for a probe at its cwd.
+        let waiting = claude_startup_tick(&mut panes, &[], no_ps, |t| {
+            assert!(t.iter().all(|(_, s)| !s.contains("~idea~")), "{t:?}");
+            Vec::new()
+        });
+        assert!(waiting.is_empty());
     }
 
     /// A project whose folder was renamed: its Claude's probe still names the

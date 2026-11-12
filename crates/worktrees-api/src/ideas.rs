@@ -72,7 +72,12 @@ pub fn idea_rename(ctx: &Ctx, id: String, title: String, expected_mtime: Option<
 }
 
 pub fn idea_remove(ctx: &Ctx, id: String, expected_mtime: Option<u64>) -> Result<(), String> {
-    ideas::remove_at(root(ctx), &id, expected_mtime)
+    ideas::remove_at(root(ctx), &id, expected_mtime)?;
+    // Then its live conversations (phase S), so none keeps talking about a
+    // file that is gone — after the remove, so a refused one (the file
+    // changed) ends nothing. Their records and transcripts stay.
+    crate::ideasessions::close_all(ctx, &id);
+    Ok(())
 }
 
 /// Give a hand-made document (`problem: "no-id"` in the list) an id. The one
