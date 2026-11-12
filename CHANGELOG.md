@@ -5,6 +5,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Changed
+
+- **The first heading names an idea's file (Ideas, beta).** An idea whose first line becomes `# Jellyfin Sharing` is saved as `jellyfin-sharing.md` instead of staying `untitled.md`, and the list and the window's title follow at once. A name another idea already holds gets a number (`jellyfin-sharing-2.md`) and keeps it, an idea with no heading is `untitled.md`, and its id never changes, so nothing that points at it breaks. A file you made by hand and adopted takes its heading's name on its first save. Rename still works as before, for setting the title without typing in the document: it rewrites the heading and the name together.
+
 ### Fixed
 
 - **The × in What's new, the Project sheet and the Status sheet is back at the right edge.** Since v0.48.0 it sat beside the title, because a rule written for the Settings header's new layout reached every sheet that shares the header. It now applies to Settings only, where the search takes that space.

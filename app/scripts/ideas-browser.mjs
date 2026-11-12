@@ -19,7 +19,9 @@
 //   - the frontmatter: a keystroke in the id line changes nothing, and
 //     select-all + delete keeps the three guarded lines;
 //   - create (the new idea is listed and takes typing), rename (file and
-//     heading, same id), remove (two clicks, says .history), adopt;
+//     heading, same id), editing the first heading renames the file on its
+//     save (header, list row and mock file follow; no conflict), remove (two
+//     clicks, says .history), adopt;
 //   - an edit elsewhere: reloaded when clean; a conflict when dirty, with
 //     the typed text kept, then Keep mine and Reload; a `removed` that the
 //     read finds (a save by rename) reloads, one that it does not shows the
@@ -163,6 +165,19 @@ async function run(engine, name) {
   ok(await until(page, () => document.querySelector(".cm-content")?.innerText.includes("# Greetings plan")), `${tag} and the editor shows the renamed heading`);
   await page.waitForTimeout(500); // the rename's own tick
   ok(!(await page.$("[data-testid=ideas-conflict]")), `${tag} the rename's own ideas:changed is not taken for an edit elsewhere`);
+
+  // ── the first heading names the file ──
+  await caretAfter(page, "# Greetings plan");
+  await page.keyboard.type(" shared");
+  ok(await until(page, (id) => window.__mock.ideaFile(id)?.file === "greetings-plan-shared.md", newId, 3000), `${tag} a save whose heading changed renames the file (${(await file(page, newId))?.file})`);
+  ok(await until(page, (id) => document.querySelector(".ix-title")?.textContent === "Greetings plan shared"
+    && document.querySelector(`[data-idea='${id}']`)?.dataset.file === "greetings-plan-shared.md", newId, 3000),
+    `${tag} the header and the list row follow the save's answer`);
+  await page.waitForTimeout(500); // the rename's own tick
+  await page.keyboard.type("!");
+  await saved(page);
+  ok(!(await page.$("[data-testid=ideas-conflict]")) && !(await page.$("[data-testid=ideas-error]")) && (await file(page, newId))?.content.includes("# Greetings plan shared!"),
+    `${tag} the renamed file's next save goes through: no conflict, no error`);
 
   // ── remove ──
   await page.click("[data-testid=ideas-remove]");

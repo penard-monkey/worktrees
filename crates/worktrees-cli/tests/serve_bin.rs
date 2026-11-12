@@ -1229,7 +1229,7 @@ fn a_spawned_serves_ideas_live_where_the_override_says_and_an_outside_edit_is_an
     let file = folder.join("from-the-test.md");
     assert!(file.is_file(), "under the override");
     assert!(!sb.root.join("home/.local/share/worktrees/ideas").exists(), "and not under HOME");
-    let saved = rpc(&mut ws, 3, "idea_write", json!({ "id": id, "content": format!("{}\nmine\n", d["content"].as_str().unwrap()), "expectedMtime": d["mtime_ms"] }))["ok"]
+    let saved = rpc(&mut ws, 3, "idea_write", json!({ "id": id, "content": format!("{}\nmine\n", d["content"].as_str().unwrap()), "expectedMtime": d["mtime_ms"] }))["ok"]["mtime_ms"]
         .as_u64()
         .unwrap();
     // The poll's next tick names the app's own save, at the mtime it answered.

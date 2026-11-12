@@ -272,11 +272,26 @@ pub fn slug(title: &str) -> String {
 /// A free `<stem>.md` in `root`, else `<stem>-2.md`, `-3`, … `own` is the
 /// document's current name, which is never a collision with itself. "Taken"
 /// is ANY entry at the name, a link or a hand-made file included.
+///
+/// A name that reaches `own`'s own file (`Groceries.md` asked for as
+/// `groceries.md` on a case-insensitive volume) is `own`'s too.
 fn free_name(root: &Path, stem: &str, own: Option<&str>) -> String {
+    let mine = own.and_then(|o| fs::symlink_metadata(root.join(o)).ok());
     (1..)
         .map(|n| if n == 1 { format!("{stem}.md") } else { format!("{stem}-{n}.md") })
-        .find(|name| Some(name.as_str()) == own || fs::symlink_metadata(root.join(name)).is_err())
+        .find(|name| {
+            Some(name.as_str()) == own
+                || match fs::symlink_metadata(root.join(name)) {
+                    Err(_) => true,
+                    Ok(md) => mine.as_ref().is_some_and(|m| same_file(m, &md)),
+                }
+        })
         .expect("an unbounded range finds a free name")
+}
+
+fn same_file(a: &fs::Metadata, b: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    a.dev() == b.dev() && a.ino() == b.ino()
 }
 
 /// A bare document name a client may hand back (`adopt_at`): one component,
@@ -622,11 +637,17 @@ pub fn create_at(root: &Path, title: &str) -> Result<Doc, String> {
 /// Replace the text of the idea `id` with exactly `content`, unless the file
 /// changed since `expected_mtime`. `content` must carry the same `id`, so a
 /// client cannot save one document over another. Bytes equal to what is on
-/// disk write nothing, and the mtime does not move. Returns the file's mtime
-/// after the save: the next save's `expected_mtime`.
+/// disk write nothing, and the mtime does not move. Returns the idea as it
+/// is after the save: its `mtime_ms` is the next save's `expected_mtime`,
+/// and its `file` the name it now has.
+///
+/// **The first heading names the file** (as [`rename_at`] would): after the
+/// bytes are written, a file whose name is not [`slug`] of the title (no
+/// heading: `untitled`) is moved to it, suffixed when taken ([`name_for`]).
+/// The move keeps the inode, so the mtime returned is the write's.
 ///
 /// A save (typing) copies nothing to history; [`write_kept_at`] does.
-pub fn write_at(root: &Path, id: &str, content: &str, expected_mtime: Option<u64>) -> Result<u64, String> {
+pub fn write_at(root: &Path, id: &str, content: &str, expected_mtime: Option<u64>) -> Result<Idea, String> {
     write_with_at(root, id, content, expected_mtime, false)
 }
 
@@ -635,11 +656,11 @@ pub fn write_at(root: &Path, id: &str, content: &str, expected_mtime: Option<u64
 /// elsewhere ("Keep mine" in a conflict), and what an agent's proposal that
 /// rewrites a document will use. That text exists nowhere else; an ordinary
 /// save never takes this path.
-pub fn write_kept_at(root: &Path, id: &str, content: &str, expected_mtime: Option<u64>) -> Result<u64, String> {
+pub fn write_kept_at(root: &Path, id: &str, content: &str, expected_mtime: Option<u64>) -> Result<Idea, String> {
     write_with_at(root, id, content, expected_mtime, true)
 }
 
-fn write_with_at(root: &Path, id: &str, content: &str, expected_mtime: Option<u64>, keep_history: bool) -> Result<u64, String> {
+fn write_with_at(root: &Path, id: &str, content: &str, expected_mtime: Option<u64>, keep_history: bool) -> Result<Idea, String> {
     refuse_real(root)?;
     let idx = list_at(root)?;
     let idea = idx.resolve(id)?.clone();
@@ -650,15 +671,64 @@ fn write_with_at(root: &Path, id: &str, content: &str, expected_mtime: Option<u6
     }
     let (now, md) = load(root, &idea)?;
     check_mtime(&md, expected_mtime)?;
-    if now == content {
-        return Ok(mtime_ms(&md));
+    if now != content {
+        if keep_history {
+            history_copy_at(root, id, now.as_bytes())?;
+        }
+        let p = root.join(&idea.file);
+        crate::fsx::write_atomic(&p, content.as_bytes(), Some(md.permissions())).map_err(|e| format!("{}: {e}", idea.file))?;
     }
-    if keep_history {
-        history_copy_at(root, id, now.as_bytes())?;
+    // Checked on an unchanged save too: a rename that failed after its write
+    // is tried again by the next save, whatever it carries.
+    let file = rename_to_title(root, &idea.file, content)?;
+    let md = fs::symlink_metadata(root.join(&file)).map_err(|e| format!("{file}: {e}"))?;
+    Ok(Idea {
+        title: title_of(content).unwrap_or_else(|| file.trim_end_matches(".md").to_string()),
+        created: front_value(content, "created").map(str::to_string),
+        mtime_ms: mtime_ms(&md),
+        size: md.len(),
+        file,
+        ..idea
+    })
+}
+
+/// The name a document whose text is `text`, now at `own`, should have: `own`
+/// itself when its stem is already [`slug`] of the title (no heading:
+/// `untitled`), or that slug with the `-<n>` [`free_name`] gives while the
+/// plain name is taken by another entry — so a second "Jellyfin Sharing"
+/// stays `jellyfin-sharing-2.md` and does not bounce. Otherwise the first
+/// free name for the slug.
+fn name_for(root: &Path, own: &str, text: &str) -> String {
+    let want = slug(&clean_title(&title_of(text).unwrap_or_default()));
+    let stem = own.strip_suffix(".md").unwrap_or(own);
+    if stem == want {
+        return own.to_string();
     }
-    let p = root.join(&idea.file);
-    crate::fsx::write_atomic(&p, content.as_bytes(), Some(md.permissions())).map_err(|e| format!("{}: {e}", idea.file))?;
-    fs::symlink_metadata(&p).map(|m| mtime_ms(&m)).map_err(|e| format!("{}: {e}", idea.file))
+    let suffixed = stem
+        .strip_prefix(want.as_str())
+        .and_then(|r| r.strip_prefix('-'))
+        .is_some_and(|n| !n.starts_with('0') && n.parse::<u32>().is_ok_and(|n| n >= 2));
+    if suffixed && fs::symlink_metadata(root.join(format!("{want}.md"))).is_ok() {
+        return own.to_string();
+    }
+    free_name(root, &want, Some(own))
+}
+
+/// Move the document at `own` to [`name_for`] its text, and say where it is.
+/// A name taken between the look and the move is looked for again.
+fn rename_to_title(root: &Path, own: &str, text: &str) -> Result<String, String> {
+    for _ in 0..16 {
+        let to = name_for(root, own, text);
+        if to == own {
+            return Ok(to);
+        }
+        match move_excl(&root.join(own), &root.join(&to)) {
+            Ok(()) => return Ok(to),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("saved, but could not rename {own} → {to}: {e}")),
+        }
+    }
+    Err(format!("saved, but found no free name to rename {own} to"))
 }
 
 /// Retitle the idea `id`: its first heading's line, and its file name, which
@@ -689,7 +759,15 @@ pub fn rename_at(root: &Path, id: &str, title: &str, expected_mtime: Option<u64>
 /// Move `from` to `to`, which must not exist: a hard link (which refuses an
 /// existing name) and an unlink, so a name taken in the meantime is never
 /// clobbered. A filesystem with no hard links falls back to a checked rename.
+///
+/// A `to` that is `from`'s own file (a change of case on a case-insensitive
+/// volume) is a plain rename: nothing else can be clobbered.
 fn move_excl(from: &Path, to: &Path) -> io::Result<()> {
+    if let (Ok(a), Ok(b)) = (fs::symlink_metadata(from), fs::symlink_metadata(to)) {
+        if same_file(&a, &b) {
+            return fs::rename(from, to);
+        }
+    }
     match fs::hard_link(from, to) {
         Ok(()) => fs::remove_file(from),
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(e),
@@ -755,7 +833,7 @@ pub fn read(id: &str) -> Result<Doc, String> {
 pub fn create(title: &str) -> Result<Doc, String> {
     create_at(&dir(), title)
 }
-pub fn write(id: &str, content: &str, expected_mtime: Option<u64>) -> Result<u64, String> {
+pub fn write(id: &str, content: &str, expected_mtime: Option<u64>) -> Result<Idea, String> {
     write_at(&dir(), id, content, expected_mtime)
 }
 pub fn rename(id: &str, title: &str, expected_mtime: Option<u64>) -> Result<Doc, String> {
@@ -842,13 +920,15 @@ mod tests {
         let d = create_at(&root, "x").unwrap();
         let id = d.idea.id.unwrap();
         let text = rich(&id);
-        let m1 = write_at(&root, &id, &text, Some(d.idea.mtime_ms)).unwrap();
-        let p = root.join(&d.idea.file);
+        let w1 = write_at(&root, &id, &text, Some(d.idea.mtime_ms)).unwrap();
+        let m1 = w1.mtime_ms;
+        let p = root.join(&w1.file);
         assert_eq!(fs::read(&p).unwrap(), text.as_bytes(), "exactly the bytes given");
         let before = fs::metadata(&p).unwrap().modified().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
-        let m2 = write_at(&root, &id, &text, Some(m1)).unwrap();
-        assert_eq!(m2, m1, "the same mtime back");
+        let w2 = write_at(&root, &id, &text, Some(m1)).unwrap();
+        assert_eq!(w2.mtime_ms, m1, "the same mtime back");
+        assert_eq!(w2.file, w1.file, "and the same name");
         assert_eq!(fs::metadata(&p).unwrap().modified().unwrap(), before, "and on disk");
         assert_eq!(fs::read(&p).unwrap(), text.as_bytes());
         // The title is read from the heading, not the fence's `# ` line.
@@ -870,7 +950,7 @@ mod tests {
         fs::write(&p, &theirs).unwrap();
         let m = mtime_ms(&fs::metadata(&p).unwrap());
         let mine = format!("{}mine\n", d.content);
-        let m2 = write_kept_at(&root, &id, &mine, Some(m)).unwrap();
+        let m2 = write_kept_at(&root, &id, &mine, Some(m)).unwrap().mtime_ms;
         assert_eq!(fs::read_to_string(&p).unwrap(), mine);
         let hist: Vec<_> = fs::read_dir(root.join(HISTORY_DIR).join(&id)).unwrap().map(|e| e.unwrap().path()).collect();
         assert_eq!(hist.len(), 1, "one copy");
@@ -936,6 +1016,94 @@ mod tests {
         // A rename to the same slug keeps the name.
         let r2 = rename_at(&root, &id, "JELLYFIN at home", None).unwrap();
         assert_eq!(r2.idea.file, "jellyfin-at-home.md");
+    }
+
+    /// What the window sends: the text with its first heading edited.
+    fn titled(id: &str, heading: Option<&str>) -> String {
+        let h = heading.map_or(String::new(), |h| format!("# {h}\n\n"));
+        format!("---\nid: {id}\ncreated: 2026-11-10\n---\n\n{h}body, kept as typed  \r\n")
+    }
+
+    fn files(root: &Path) -> Vec<String> {
+        let mut v: Vec<String> = fs::read_dir(root).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).filter(|n| !n.starts_with('.')).collect();
+        v.sort();
+        v
+    }
+
+    /// David's `untitled.md` whose first line became `# Jellyfin Sharing`.
+    #[test]
+    fn a_save_whose_heading_changed_renames_the_file_to_its_slug() {
+        let t = Tmp::new("hname");
+        let root = t.root();
+        let d = create_at(&root, "").unwrap();
+        assert_eq!(d.idea.file, "untitled.md");
+        let id = d.idea.id.unwrap();
+        let text = titled(&id, Some("Jellyfin Sharing"));
+        let w = write_at(&root, &id, &text, Some(d.idea.mtime_ms)).unwrap();
+        assert_eq!(w.file, "jellyfin-sharing.md");
+        assert_eq!(w.title, "Jellyfin Sharing");
+        assert_eq!(w.id.as_deref(), Some(id.as_str()), "the id does not move");
+        assert_eq!(files(&root), ["jellyfin-sharing.md"], "untitled.md is gone");
+        assert_eq!(fs::read_to_string(root.join(&w.file)).unwrap(), text, "byte for byte");
+        let md = fs::symlink_metadata(root.join(&w.file)).unwrap();
+        assert_eq!((w.mtime_ms, w.size), (mtime_ms(&md), md.len()), "the answer is the file's");
+        assert!(!root.join(HISTORY_DIR).exists(), "a save's rename copies nothing to history");
+        let r = read_at(&root, &id).unwrap();
+        assert_eq!((r.idea.file.as_str(), r.idea.mtime_ms), ("jellyfin-sharing.md", w.mtime_ms), "the next save's expected mtime holds");
+        // Another heading moves it again.
+        let w2 = write_at(&root, &id, &titled(&id, Some("Jellyfin, shared!")), Some(w.mtime_ms)).unwrap();
+        assert_eq!(w2.file, "jellyfin-shared.md");
+        assert_eq!(files(&root), ["jellyfin-shared.md"]);
+    }
+
+    #[test]
+    fn a_suffixed_name_for_the_same_title_does_not_bounce() {
+        let t = Tmp::new("hbounce");
+        let root = t.root();
+        let a = create_at(&root, "Jellyfin Sharing").unwrap();
+        let b = create_at(&root, "").unwrap();
+        let idb = b.idea.id.unwrap();
+        let w = write_at(&root, &idb, &titled(&idb, Some("Jellyfin Sharing")), None).unwrap();
+        assert_eq!(w.file, "jellyfin-sharing-2.md", "a taken name gets a suffix");
+        for n in 0..3 {
+            let w = write_at(&root, &idb, &format!("{}more {n}\n", titled(&idb, Some("Jellyfin Sharing"))), None).unwrap();
+            assert_eq!(w.file, "jellyfin-sharing-2.md", "save {n} keeps the suffix");
+        }
+        assert_eq!(files(&root), ["jellyfin-sharing-2.md", "jellyfin-sharing.md"]);
+        assert_eq!(read_at(&root, a.idea.id.as_ref().unwrap()).unwrap().content, a.content, "the other idea is untouched");
+        // A suffix that is part of the title is not one: "Roadmap 2026" → "Roadmap".
+        let c = create_at(&root, "Roadmap 2026").unwrap();
+        let idc = c.idea.id.unwrap();
+        assert_eq!(write_at(&root, &idc, &titled(&idc, Some("Roadmap")), None).unwrap().file, "roadmap.md");
+    }
+
+    #[test]
+    fn a_save_with_no_heading_names_the_file_untitled() {
+        let t = Tmp::new("huntitled");
+        let root = t.root();
+        create_at(&root, "").unwrap();
+        let d = create_at(&root, "Plan").unwrap();
+        let id = d.idea.id.unwrap();
+        let w = write_at(&root, &id, &titled(&id, None), None).unwrap();
+        assert_eq!(w.file, "untitled-2.md", "untitled.md is taken");
+        assert_eq!(w.title, "untitled-2", "no heading: the list shows the file name");
+        let w = write_at(&root, &id, &titled(&id, Some("#")).replace("# #", "#"), None).unwrap();
+        assert_eq!(w.file, "untitled-2.md", "an empty heading is no title, and the suffix holds");
+    }
+
+    #[test]
+    fn a_hand_made_file_takes_its_headings_name_on_its_first_save_after_adoption() {
+        let t = Tmp::new("hadopt");
+        let root = t.root();
+        raw_doc(&root, "Groceries.md", "# Groceries\n\n- milk\n");
+        let a = adopt_at(&root, "Groceries.md", None).unwrap();
+        assert_eq!(a.idea.file, "Groceries.md", "adoption keeps the name");
+        let id = a.idea.id.unwrap();
+        let text = format!("{}- eggs\n", a.content);
+        let w = write_at(&root, &id, &text, Some(a.idea.mtime_ms)).unwrap();
+        assert_eq!(w.file, "groceries.md", "a change of case only, on any volume");
+        assert_eq!(files(&root), ["groceries.md"]);
+        assert_eq!(fs::read_to_string(root.join("groceries.md")).unwrap(), text);
     }
 
     #[test]

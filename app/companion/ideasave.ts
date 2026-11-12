@@ -25,6 +25,13 @@
 //   elsewhere: reloaded when the editor is clean, a conflict when it is not.
 //   An event that arrives while a write is in flight waits for its answer —
 //   until then the mtime it carries may be that write's.
+// - **A save can rename the file**: the first heading names it
+//   (`ideas::write_at`), and `idea_write` answers with the idea as saved —
+//   its mtime and its `file`. The move keeps the mtime, so the watcher's
+//   vanish-and-appear of the old and new names carries an mtime that is
+//   already ours (and a `removed` for the instant two names hold the id is
+//   confirmed by id, below). The window hears the new name through
+//   `onSaved`, never by reading the list.
 // - **A `removed` entry** is confirmed with `idea_read` before anything
 //   closes, because an editor that saves by rename makes a file vanish for an
 //   instant. Found: it is a change like any other. Gone: `removed`, and the
@@ -44,11 +51,14 @@ export type Clock = {
   now(): number;
 };
 
+/** `idea_write`'s answer: the idea as saved, without its text. */
+export type Saved = { mtime_ms: number; file: string; title: string };
+
 export type Rows = {
   /** `keepHistory`: copy the file's current bytes to `.history/` before the
    *  replace. Keep mine only — the text it overwrites came from elsewhere and
    *  exists nowhere else. Never an ordinary save. */
-  write(id: string, content: string, expectedMtime: number, keepHistory: boolean): Promise<number>;
+  write(id: string, content: string, expectedMtime: number, keepHistory: boolean): Promise<Saved>;
   read(id: string): Promise<{ content: string; mtime_ms: number }>;
 };
 
@@ -69,6 +79,9 @@ export type SessionDeps = {
   /** Put the file's text in the editor (a reload). */
   replace(content: string): void;
   onState(s: SaveState): void;
+  /** A write of ours was answered: the file's name and title as saved (the
+   *  first heading renames it). */
+  onSaved?(s: Saved): void;
 };
 
 export type IdeasChanged = { changed: { id: string; mtime_ms: number }[]; removed: string[] };
@@ -133,10 +146,12 @@ export class Session {
     this.set({ kind: "saving" });
     const run = (async () => {
       try {
-        const m = await this.deps.rows.write(this.id, content, this.mtime, keepHistory);
+        const saved = await this.deps.rows.write(this.id, content, this.mtime, keepHistory);
+        const m = saved.mtime_ms;
         this.base = content;
         this.mtime = m;
         this.own.add(m);
+        if (!this.closed) this.deps.onSaved?.(saved);
         this.set(this.dirty() ? { kind: "dirty" } : { kind: "clean", savedAt: this.deps.clock.now() });
       } catch (e) {
         const msg = errText(e);

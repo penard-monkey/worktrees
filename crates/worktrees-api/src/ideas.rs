@@ -12,7 +12,8 @@
 //! on a change). Its payload is `{changed: [{id, mtime_ms}], removed: [id]}`.
 //! It fires for the app's OWN saves too, a tick later, and a client tells
 //! the two apart by mtime: `idea_write`, `idea_rename` and `idea_adopt`
-//! answer with the file's mtime after the act, and a `changed` entry for the
+//! answer with the idea after the act (its `mtime_ms`, and its `file`: a
+//! save whose first heading changed renames the file, keeping the mtime), and a `changed` entry for the
 //! open idea whose `mtime_ms` equals the last one the client was given is
 //! its own write — anything else is an edit made elsewhere. A client
 //! re-pulls `ideas_list` on every event, whatever it carries: a hand-made
@@ -22,7 +23,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use serde::Serialize;
-use worktrees_core::ideas::{self, Doc, Index};
+use worktrees_core::ideas::{self, Doc, Idea, Index};
 
 use crate::Ctx;
 
@@ -53,10 +54,12 @@ pub fn idea_create(ctx: &Ctx, title: Option<String>) -> Result<Doc, String> {
     ideas::create_at(root(ctx), title.as_deref().unwrap_or(""))
 }
 
-/// Save `content` byte for byte; the saved mtime comes back. `keep_history`
+/// Save `content` byte for byte; the idea as saved comes back (no content):
+/// its `mtime_ms`, and its `file`, which follows the first heading (`ideas::
+/// write_at`), so a client learns a rename from the answer. `keep_history`
 /// copies the file's current bytes to `.history/` first (a person keeping
 /// their text over an edit made elsewhere); an ordinary save never sets it.
-pub fn idea_write(ctx: &Ctx, id: String, content: String, expected_mtime: Option<u64>, keep_history: Option<bool>) -> Result<u64, String> {
+pub fn idea_write(ctx: &Ctx, id: String, content: String, expected_mtime: Option<u64>, keep_history: Option<bool>) -> Result<Idea, String> {
     if keep_history == Some(true) {
         ideas::write_kept_at(root(ctx), &id, &content, expected_mtime)
     } else {
@@ -183,7 +186,7 @@ mod tests {
 
         // The app's own save: the event's mtime is the one the save returned.
         std::thread::sleep(std::time::Duration::from_millis(15));
-        let saved = ideas::write_at(&root, &id, &format!("{}\nmore\n", d.content), None).unwrap();
+        let saved = ideas::write_at(&root, &id, &format!("{}\nmore\n", d.content), None).unwrap().mtime_ms;
         assert_eq!(tick_at(&root, &mut w).unwrap().changed, vec![Changed { id: id.clone(), mtime_ms: saved }]);
         // A save with no change sends nothing.
         ideas::write_at(&root, &id, &format!("{}\nmore\n", d.content), Some(saved)).unwrap();

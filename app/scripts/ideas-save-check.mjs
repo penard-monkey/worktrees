@@ -17,7 +17,10 @@
 //     elsewhere, reloaded when clean and a conflict when not;
 //   - a `removed` is confirmed with idea_read: found (an editor that saves
 //     by rename) is a change, gone is `removed` — and nothing replaces the
-//     editor's text either way while it is dirty.
+//     editor's text either way while it is dirty;
+//   - a save that renames the file (the first heading names it) hands the
+//     new name to `onSaved`, and the watcher's vanish-and-appear that
+//     follows is ours: no read, no reload, no conflict.
 //
 // And the two error sentences the module reads (isStale, isGone) are held
 // against the Rust that sends them (crates/worktrees-core/src/ideas.rs).
@@ -124,8 +127,9 @@ const GONE = "no idea has the id 01JC";
 
 /** A file on "disk", rows that write and read it, and a log of every call. */
 function rig(initial = "---\nid: 01JC\n---\n\n# A\n", { holdWrites = false } = {}) {
-  const disk = { content: initial, mtime: 1000, exists: true };
+  const disk = { content: initial, mtime: 1000, exists: true, file: "a.md" };
   const calls = [];
+  const saved = [];
   const held = [];
   let editor = initial;
   const states = [];
@@ -135,7 +139,10 @@ function rig(initial = "---\nid: 01JC\n---\n\n# A\n", { holdWrites = false } = {
     if (!disk.exists) throw GONE;
     if (exp !== disk.mtime) throw STALE;
     if (content !== disk.content) { disk.content = content; disk.mtime += 10; }
-    return disk.mtime;
+    // As ideas::write_at: the first heading names the file, the mtime stays.
+    const title = /^# (.+)$/m.exec(content)?.[1] ?? "untitled";
+    disk.file = `${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.md`;
+    return { mtime_ms: disk.mtime, file: disk.file, title };
   };
   const rows = {
     write(id, content, exp, keepHistory) {
@@ -153,9 +160,10 @@ function rig(initial = "---\nid: 01JC\n---\n\n# A\n", { holdWrites = false } = {
     text: () => editor,
     replace: (t) => { replaced.push(t); editor = t; },
     onState: (st) => states.push(st),
+    onSaved: (x) => saved.push(x),
   });
   return {
-    s, c, disk, calls, states, replaced,
+    s, c, disk, calls, states, replaced, saved,
     type(t) { editor = t; s.edited(); },
     get editor() { return editor; },
     writes: () => calls.filter((x) => x.row === "idea_write"),
@@ -322,6 +330,25 @@ function rig(initial = "---\nid: 01JC\n---\n\n# A\n", { holdWrites = false } = {
   await r.c.advance(SAVE_PAUSE_MS * 2);
   await r.s.flush();
   check(r.writes().length === 0, "and nothing tries to save over a removed idea");
+}
+
+// ── a save that renames ─────────────────────────────────────────────────────
+{
+  const r = rig();
+  r.type(r.editor.replace("# A\n", "# Jellyfin Sharing\n"));
+  await r.s.flush();
+  const w = r.saved[r.saved.length - 1];
+  check(w?.file === "jellyfin-sharing.md" && w?.title === "Jellyfin Sharing" && w?.mtime_ms === r.disk.mtime, `the save's answer reaches onSaved with the new name (${JSON.stringify(w)})`);
+  check(r.s.lastMtime === r.disk.mtime, "and its mtime is the next save's");
+  // The poll sees the old name vanish and the new appear: by id, the moment
+  // two names hold it reads as removed, then as changed at our own mtime.
+  await r.s.external({ changed: [], removed: ["01JC"] });
+  await r.s.external({ changed: [{ id: "01JC", mtime_ms: r.disk.mtime }], removed: [] });
+  check(r.replaced.length === 0 && r.last() === "clean", `the rename's vanish-and-appear is ours: no reload, no conflict (${r.last()})`);
+  r.s.close();
+  r.type(r.editor + "x");
+  await r.s.flush();
+  check(r.saved.length === 1, "a closed session reports no save");
 }
 
 // ── close ───────────────────────────────────────────────────────────────────
