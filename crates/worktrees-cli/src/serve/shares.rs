@@ -90,20 +90,40 @@ impl Default for SharesFile {
 }
 
 /// The identity of a place's directory when it was shared: a later place
-/// with the same slug is another directory and inherits nothing.
+/// with the same slug is another directory and inherits nothing. Device and
+/// inode are not enough on their own: Linux hands a removed directory's inode
+/// to the next one made (measured on ubuntu-latest's ext4, where a remove and
+/// a make under the same name kept it), so the directory's BIRTH time is part
+/// of it too — `statx` on Linux, `st_birthtime` on macOS. A filesystem that
+/// records no birth time falls back to device and inode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlaceId {
     pub dev: u64,
     pub ino: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub born_ns: Option<u64>,
 }
 
 impl PlaceId {
     pub fn of(dir: &Path) -> Option<PlaceId> {
         use std::os::unix::fs::MetadataExt;
         let m = fs::metadata(dir).ok().filter(|m| m.is_dir())?;
-        Some(PlaceId { dev: m.dev(), ino: m.ino() })
+        let born_ns = m.created().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).and_then(|d| u64::try_from(d.as_nanos()).ok());
+        Some(PlaceId { dev: m.dev(), ino: m.ino(), born_ns })
     }
+}
+
+/// Remove `dir` and make it again under the same name, as a removed place
+/// and a new one with its slug would be — later than the old one's birth by
+/// more than a filesystem's timestamp tick (ext4 stamps with a coarse clock,
+/// a few milliseconds), so the birth times differ as they do between two
+/// real places.
+#[cfg(test)]
+pub(crate) fn remake(dir: &Path) {
+    fs::remove_dir_all(dir).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    fs::create_dir_all(dir).unwrap();
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1035,8 +1055,8 @@ mod tests {
         let s = lab.share(&lab.session("a", 1));
         let feat = Path::new(&lab.root).join(".worktrees/feat");
         // The place removed and made again under the same slug (serve down).
-        fs::remove_dir_all(&feat).unwrap();
-        fs::create_dir_all(&feat).unwrap();
+        remake(&feat);
+        assert!(s.place.born_ns.is_some(), "this filesystem records no birth time: {:?}", s.place);
         assert_ne!(PlaceId::of(&feat), Some(s.place));
         // The live check: what serve's poll hands it.
         let check = |sh: &Share| if PlaceId::of(&place_dir(&sh.project, &sh.slug)) == Some(sh.place) { Lane::Paused } else { Lane::Gone };
@@ -1359,8 +1379,7 @@ mod serve_tests {
         let two = h.console("share_create", json!({"repo": h.a, "slug": "other", "guests": [bret]})).unwrap()["id"].as_str().unwrap().to_string();
         // "Serve down": the place removed and remade under the same slug
         // before anything looks.
-        fs::remove_dir_all(place_dir(&h.a, "feat")).unwrap();
-        fs::create_dir_all(place_dir(&h.a, "feat")).unwrap();
+        remake(&place_dir(&h.a, "feat"));
         // "Serve up": the other place simply removed.
         fs::remove_dir_all(place_dir(&h.a, "other")).unwrap();
         let mut ch = h.poll();
