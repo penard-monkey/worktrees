@@ -6,9 +6,10 @@
 // `app/scripts/devices-check.mjs` loads it as a `data:` module and holds its
 // mirrors (the presets, the expiry bounds) against the Rust they copy.
 
-export type Cap = "read" | "write" | "answer" | "instruct" | "stream" | "admin";
-/** `authz::Capability`, in its own order. */
-export const CAPS: readonly Cap[] = ["read", "write", "answer", "instruct", "stream", "admin"];
+export type Cap = "read" | "write" | "answer" | "instruct" | "stream" | "admin" | "guest";
+/** `authz::Capability`, in its own order. `guest` is a guest principal's
+ *  alone (group chat §2): never one of the owner's devices' to choose. */
+export const CAPS: readonly Cap[] = ["read", "write", "answer", "instruct", "stream", "admin", "guest"];
 export type Projects = "*" | string[];
 export type Expiry = { idle_days: number } | { until: string } | "never";
 export type Platform = "ios" | "ipados" | "macos" | "linux";
@@ -177,6 +178,7 @@ export const CAP_WORDS: Record<Cap, string> = {
   instruct: "write what agents obey (briefs, AGENTS.md)",
   stream: "terminals and shells",
   admin: "host settings that widen no agent",
+  guest: "only what is shared with this guest, and the host's place names",
 };
 
 /** "Observe", "Drive + host admin", or the list for a custom set. */
