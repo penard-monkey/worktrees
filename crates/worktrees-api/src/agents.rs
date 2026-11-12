@@ -1728,6 +1728,56 @@ pub fn lane_probe<'a>(probes: &'a [agent::ClaudeProbe], lane: &Lane) -> Option<&
         .or_else(|| probes.iter().filter(|p| p.is_interactive_cli()).find(|p| named(p)))
 }
 
+/// What a place's agent session is NOW, for a share's binding (group chat
+/// §3.3): which harness, which session id, and the transcript that id names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LiveSession {
+    /// No live agent in the place, or one whose id cannot be read yet (a
+    /// Claude that has written no probe, a Codex holding no rollout): a share
+    /// is paused, never ended, on this.
+    None,
+    /// A live Claude or Codex and the id it runs.
+    Running { harness: &'static str, id: String, transcript: PathBuf },
+    /// A live agent of a harness whose transcript nothing reads yet (Kimi,
+    /// pi): its provider label.
+    Unsupported(&'static str),
+}
+
+/// The live session of place `slug` of the project at `root`. Claude's id is
+/// its session file's `sessionId`, found by PANE (`lane_probe`); Codex's is
+/// the NEWEST STARTED rollout its process holds (`codex::held_rollout`),
+/// never "the newest in the place", which a resumed older thread is not.
+pub fn place_live_session(root: &str, slug: &str) -> LiveSession {
+    let Some(panes) = PaneList::fetch() else { return LiveSession::None };
+    let Ok(project) = Project::discover(Path::new(root)) else { return LiveSession::None };
+    let path = project.place_dir(slug);
+    let exclude = exclude_for(&project, slug);
+    for (a, session) in live_agent_sessions(&project, slug, &panes, &worktrees_core::project::adopt_ai_word()) {
+        let Some(pane) = panes.agent_pane_of(&session, &path, exclude.as_deref(), a.provider().match_word) else { continue };
+        let harness = a.provider().id;
+        if harness == provider::CLAUDE.id {
+            let scan = located(agent::scan_probes());
+            let lane = Lane { harness, session: session.clone(), pane: pane.id.clone().unwrap_or_default() };
+            let Some(p) = lane_probe(&scan.probes, &lane) else { return LiveSession::None };
+            let Some(sid) = p.session_id.clone() else { return LiveSession::None };
+            let transcript = Path::new(&worktrees_core::project::claude_dir_in(&p.root, &p.cwd)).join(format!("{sid}.jsonl"));
+            return LiveSession::Running { harness, id: sid, transcript };
+        }
+        if harness == provider::CODEX.id {
+            let Some(tty) = pane.tty.as_deref() else { return LiveSession::None };
+            let jobs = tmux::foreground_jobs(&[tty]);
+            let Some(job) = jobs.get(tty) else { return LiveSession::None };
+            let open: Vec<PathBuf> = job.members.iter().flat_map(|m| worktrees_core::procinfo::open_paths(*m)).collect();
+            return match codex::held_rollout(&open, &path) {
+                Some((id, transcript)) => LiveSession::Running { harness, id, transcript },
+                None => LiveSession::None,
+            };
+        }
+        return LiveSession::Unsupported(a.provider().label);
+    }
+    LiveSession::None
+}
+
 /// The harness's reading of the place, for a send into `lane`. The harness
 /// finds its own session from the canonical name and the lane came from
 /// [`live_agent_sessions`]: the two must be the SAME session, or the line

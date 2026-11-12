@@ -1844,7 +1844,10 @@ fn term_key(id: &Value) -> String {
 /// `Loopback` rows, which declare none, are recorded — except stream
 /// traffic, which is totalled into its attach's close instead.
 fn recorded(row: &Row) -> bool {
-    row.cap != Some(Capability::Read) && !STREAM_TRAFFIC.contains(&row.name) && !CONSOLE_READS.contains(&row.name)
+    row.cap != Some(Capability::Read)
+        && !STREAM_TRAFFIC.contains(&row.name)
+        && !CONSOLE_READS.contains(&row.name)
+        && !dispatch::GUEST_READS.contains(&row.name)
 }
 
 /// Console rows that only READ, which a console row cannot say in its
@@ -1853,7 +1856,12 @@ fn recorded(row: &Row) -> bool {
 /// of. Recorded, each poll would be a line. Every act on a conversation
 /// (start, resume, close, remove, rename, send, answer, interrupt) is still
 /// recorded.
-const CONSOLE_READS: &[&str] = &["idea_conversations", "idea_turns", "idea_turn_text", "idea_tool_call", "idea_prompt"];
+///
+/// Group chat's console listings join them: the shares, the guests and the
+/// open requests, which the owner's app reads on every `shares:changed`.
+const CONSOLE_READS: &[&str] = &[
+    "idea_conversations", "idea_turns", "idea_turn_text", "idea_tool_call", "idea_prompt", "shares_all", "guests_list", "share_requests_list",
+];
 
 /// A drive-class act, as the audit budget counts one: what step-up guards
 /// (`dispatch::needs_stepup` over the resolver's `needs`, so a path class's
@@ -2070,6 +2078,18 @@ impl ConnAudit {
                 }
                 if let Some(Value::String(c)) = arg(args, "conv") {
                     detail.insert("conv".into(), json!(ident(c)));
+                }
+            }
+            // A guest's share request (group chat §2.2): the place it named
+            // (the slug is the object) and its note's length and hash, never
+            // the note — the same record whether the place is real or not.
+            "share_request" => {
+                if let Some(Value::String(t)) = arg(args, "note").filter(|v| v.as_str().is_some_and(|t| !t.is_empty())) {
+                    detail.insert("bytes".into(), json!(t.len()));
+                    detail.insert("sha256".into(), json!(sha256_hex(t.as_bytes())));
+                }
+                if let Some(Value::String(p)) = arg(args, "project") {
+                    detail.insert("project_id".into(), json!(ident(p)));
                 }
             }
             // A slash command (chat-slash-commands §2.2): its NAME, which the
@@ -3234,11 +3254,20 @@ mod tests {
         }
         let reads = TABLE.iter().filter(|r| r.cap == Some(Capability::Read)).count();
         let quiet: Vec<&str> = TABLE.iter().filter(|r| r.exposure != Exposure::ClientLocal && !recorded(r)).map(|r| r.name).collect();
-        assert_eq!(quiet.len(), reads + STREAM_TRAFFIC.len() + CONSOLE_READS.len(), "{quiet:?}");
+        // The guest reads in the table now (group chat §2's trap); the rest
+        // of `GUEST_READS` are PR B's and C's, named ahead of their rows.
+        let guest_reads: Vec<&str> = dispatch::GUEST_READS.iter().copied().filter(|n| super::super::dispatch::row(n).is_some()).collect();
+        assert_eq!(guest_reads, vec!["shares_list", "guest_places"]);
+        assert_eq!(quiet.len(), reads + STREAM_TRAFFIC.len() + CONSOLE_READS.len() + guest_reads.len(), "{quiet:?}");
         // The console reads are console rows that exist: a renamed one would
         // make an idea chat act silent.
         for n in CONSOLE_READS {
             assert_eq!(row(n).exposure, Exposure::HostConsole, "{n}");
+        }
+        // A guest read is a guest row: a renamed one, or one moved off
+        // `guest`, must not keep a silence it no longer earns.
+        for n in &guest_reads {
+            assert_eq!(row(n).cap, Some(Capability::Guest), "{n}");
         }
         assert!(recorded(row("update_cli")) && recorded(row("ui_events_append")), "a console or loopback row declares no capability");
     }
@@ -3867,6 +3896,47 @@ mod tests {
         fn send(&self, c: &ConnAudit, session: &str, text: &str) -> Result<Value, Value> {
             through(&self.cx, c, &self.w, "agent_send", json!({ "repo": self.root, "slug": "(main)", "session": session, "text": text }))
         }
+    }
+
+    /// Group chat §2's trap: a guest's polled reads (`shares_list`,
+    /// `guest_places`) write no line however often they run, and its acts —
+    /// a join, a share request — do, the request by its note's length and
+    /// hash, never the note, the same record for a place that is real or not.
+    #[test]
+    fn a_guests_polling_writes_nothing_and_its_requests_are_recorded_by_length_and_hash() {
+        let (top, root, w) = project("guest");
+        let d = dir("guest");
+        let (a, _) = Audit::open(&d, None, Fleet::none());
+        let bret = PrincipalId::new("g_bret");
+        let mut reg = Devices::default();
+        let g = Grant { capabilities: Caps::GUEST, projects: Projects::only(Vec::<String>::new()) };
+        reg.principals.insert(bret.clone(), g.clone());
+        reg.devices.insert(DeviceId::new("d_bret"), (bret.clone(), g));
+        let who = Caller::paired(bret, DeviceId::new("d_bret"));
+        let mut cx = call_as(who.clone(), Arc::new(reg));
+        cx.ctx = worktrees_api::Ctx::new(top.join("config"), Arc::new(Catch::default()));
+        let c = ConnAudit::new(a.clone(), 11, Some("100.64.0.9".into()), who);
+        let before = live(&d).len();
+        for _ in 0..25 {
+            assert!(through(&cx, &c, &w, "shares_list", json!({})).is_ok());
+            assert!(through(&cx, &c, &w, "guest_places", json!({})).is_ok());
+        }
+        assert_eq!(live(&d).len(), before, "polling wrote: {:#?}", &live(&d)[before..]);
+        let note = "SECRET-NOTE-1 may I watch?";
+        let pid = super::super::shares::project_id(&root);
+        assert_eq!(through(&cx, &c, &w, "share_request", json!({ "project": pid, "slug": "feat", "note": note })), Ok(Value::Null));
+        assert_eq!(through(&cx, &c, &w, "share_request", json!({ "project": "ffffffffffffffff", "slug": "x", "note": note })), Ok(Value::Null));
+        let raw = std::fs::read_to_string(d.join(FILE)).unwrap();
+        assert!(!raw.contains("SECRET-NOTE"), "the note reached the log:\n{raw}");
+        let recs: Vec<Value> = live(&d).into_iter().filter(|r| r["cmd"] == "share_request").collect();
+        assert_eq!(recs.len(), 2, "{recs:#?}");
+        for r in &recs {
+            assert_eq!((r["kind"].as_str(), r["outcome"].as_str()), (Some("call"), Some("ok")));
+            assert_eq!(r["detail"]["bytes"], json!(note.len()));
+            assert_eq!(r["detail"]["sha256"], json!(sha256_hex(note.as_bytes())));
+        }
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_dir_all(&top);
     }
 
     /// A line typed into an agent is recorded by its length, its SHA-256 and

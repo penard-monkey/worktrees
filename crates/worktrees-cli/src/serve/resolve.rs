@@ -153,6 +153,16 @@ pub enum Obj {
     /// A conversation of an idea: `(conv, id)`, a ULID in that idea's record
     /// (`ideasessions::find_at`). The idea is resolved too.
     IdeaConv(&'static str, &'static str),
+    /// A share (group chat §2), read from `shares.json` on every request: for
+    /// the console, one that exists; for anyone else, one that names the
+    /// caller's principal among its guests — another's reads as missing. An
+    /// unreadable file refuses every guest.
+    Share(&'static str),
+    /// A guest row's own view (group chat §2, §2.2): no project object — a
+    /// guest holds none — and the body reads only what that row allows. For
+    /// a device, `shares.json` must be readable: an unreadable file refuses
+    /// every guest, on every guest row.
+    Guest,
 }
 
 impl Obj {
@@ -163,12 +173,12 @@ impl Obj {
             Project(a) | OptProject(a, _) | Slug(a) | Root(a) | File(a) | Probe(a) | Session(a) | Attach(a) | Close(a) | ShellRef(a) | Job(a)
             | NewJob(a) | Device(a) | Revocable(a) | NewPath(a) | RemoteUrl(a) | Places(a) | Roots(a) | Candidates(a) => vec![a],
             SessionIn(s, _) => vec![s],
-            Idea(a) => vec![a],
+            Idea(a) | Share(a) => vec![a],
             IdeaConv(c, i) => vec![c, i],
             Place(r, s) => vec![r, s],
             SessionOf(s, _, _) => vec![s],
             Shell(r, s, i) => vec![r, s, i],
-            Global | Filtered(_) | All | NotRemote => vec![],
+            Global | Filtered(_) | All | NotRemote | Guest => vec![],
             Opt(o) => o.args(),
         }
     }
@@ -376,6 +386,13 @@ pub fn authorize(row: &Row, cx: &Call, grant: &Grant, args: &mut Args, world: &d
 /// so serve's reader runs them before a request is admitted
 /// (`dispatch::precheck`), and a request they refuse never takes a slot.
 pub fn admissible(row: &Row, caller: &Caller, grant: &Grant) -> Result<(), Refusal> {
+    // A guest (group chat §2) reaches the guest rows and NOTHING else — not
+    // even the `own` rows every other caller may make — so a new row can
+    // never widen a guest by accident: it would have to be a `guest` row.
+    // Only a guest principal's grant holds `guest` (`devices::parse`).
+    if grant.allows(Capability::Guest) && row.cap != Some(Capability::Guest) {
+        return Err(Refusal::denied(format!("{} is not a guest row", row.name)));
+    }
     match row.exposure {
         Exposure::ClientLocal => return Err(Refusal::new(RefusalKind::ClientLocal, "a client-local command")),
         Exposure::HostConsole if !caller.is_console() => {
@@ -660,6 +677,20 @@ impl St<'_> {
                 let id: String = self.get(args, i)?;
                 let conv: String = self.get(args, c)?;
                 worktrees_core::ideasessions::find_at(self.cx.ctx.ideas_dir(), &id, &conv).map_err(Refusal::not_found)?;
+            }
+            Obj::Share(a) => {
+                let id: String = self.get(args, a)?;
+                let f = super::shares::Shares::at(&self.cx.ctx.config_dir).read().map_err(Refusal::denied)?;
+                let me = self.cx.caller.principal();
+                let named = f.shares.iter().any(|s| s.id == id && (self.cx.caller.is_console() || s.guests.iter().any(|g| &g.principal == me)));
+                if !named {
+                    return Err(Refusal::not_found(format!("no share {id} names {me}")));
+                }
+            }
+            Obj::Guest => {
+                if !self.cx.caller.is_console() {
+                    super::shares::Shares::at(&self.cx.ctx.config_dir).read().map_err(Refusal::denied)?;
+                }
             }
             Obj::Session(a) => {
                 let name: String = self.get(args, a)?;

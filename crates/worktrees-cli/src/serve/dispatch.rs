@@ -1,4 +1,4 @@
-//! The 244 commands, each with its exposure, capability and objects, in ONE
+//! The 260 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -44,7 +44,7 @@ use worktrees_core::authz::{self, Caller, Capability, Caps, DeviceId, Grant, Pro
 use worktrees_core::fetchpolicy::Fetcher;
 
 use super::devices::{DeviceRegistry, Expiry};
-use super::pairing::{Offer, Pairing};
+use super::pairing::{Invite, Offer, Pairing};
 use super::stepup;
 use super::flight::{self, Flights, Join};
 use super::resolve::{self, Absent, Obj, World};
@@ -335,6 +335,7 @@ macro_rules! cap {
     (instruct) => { Some(Capability::Instruct) };
     (stream) => { Some(Capability::Stream) };
     (admin) => { Some(Capability::Admin) };
+    (guest) => { Some(Capability::Guest) };
 }
 
 /// One object spec → its `Obj`. The kinds are `resolve::Obj`'s, snake_case.
@@ -366,6 +367,8 @@ macro_rules! obj {
     (opt($($inner:tt)+)) => { Obj::Opt(&obj!($($inner)+)) };
     (idea($a:ident)) => { Obj::Idea(stringify!($a)) };
     (idea_conv($c:ident, $i:ident)) => { Obj::IdeaConv(stringify!($c), stringify!($i)) };
+    (share($a:ident)) => { Obj::Share(stringify!($a)) };
+    (guest) => { Obj::Guest };
     (global) => { Obj::Global };
     (all) => { Obj::All };
     (not_remote) => { Obj::NotRemote };
@@ -701,7 +704,7 @@ pub fn needs_stepup(row: &Row, needs: &[Capability], holds: bool) -> bool {
     needs.iter().any(|c| match c {
         Capability::Instruct | Capability::Answer | Capability::Admin => true,
         Capability::Stream => OPENS_A_STREAM.contains(&row.name) || !holds,
-        Capability::Read | Capability::Write => false,
+        Capability::Read | Capability::Write | Capability::Guest => false,
     })
 }
 
@@ -733,7 +736,7 @@ pub fn holds_channel_with(cx: &Call, row: &Row, args: &Args, live: &dyn Fn(&str,
 /// cannot take its record — the console fails open, a device fails closed.
 /// The row's own capability decides, as it decides what is recorded.
 fn audit_gate(cx: &Call, row: &Row) -> Result<(), resolve::Refusal> {
-    if cx.caller.is_console() || row.cap == Some(Capability::Read) || cx.remote.as_ref().is_none_or(|r| r.audit_healthy()) {
+    if cx.caller.is_console() || row.cap == Some(Capability::Read) || GUEST_READS.contains(&row.name) || cx.remote.as_ref().is_none_or(|r| r.audit_healthy()) {
         return Ok(());
     }
     Err(resolve::Refusal::audit_unavailable(format!("{} is not a read, and the audit log cannot take its record", row.name)))
@@ -794,6 +797,22 @@ pub const GLOBAL_OK: &[&str] = &[
     "sync_hub_choose", "sync_hub_forget", "diagnostics",
     "log_tail", "term_history_info", "profiles_info", "devices_list", "update_harness", "restart_harness_sessions",
 ];
+
+/// Every row a GUEST can reach (group chat §2): the rows whose capability is
+/// `guest`. Held against the table both ways by a test, and every other row
+/// refuses a guest (a test generated from the table), so a new row cannot
+/// widen a guest without a second, deliberate edit here. None may ever reach
+/// an agent.
+#[cfg_attr(not(test), allow(dead_code))]
+pub const GUEST_ROWS: &[&str] = &["shares_list", "share_join", "guest_places", "share_request"];
+
+/// The guest rows a client POLLS (§2's trap): exempt from the per-request
+/// audit record and the audit gate, as `read` rows are, or a guest's poll
+/// would write a line each time and spend its device's audit budget. The
+/// later rows (`shared_turns`, `shared_tool_call`, `thread_read`, PRs B and
+/// C) are named now so they join by being added to the table as guest rows.
+/// Every act — a join, a request — is recorded.
+pub const GUEST_READS: &[&str] = &["shares_list", "guest_places", "shared_turns", "shared_tool_call", "thread_read"];
 
 /// The lane a request runs on, or `None` for the concurrent pool.
 ///
@@ -1228,12 +1247,19 @@ commands! { cx, a;
     // ── pairing (§2.2–§2.4): the host opens the window, the host decides ──
     // The scope and the expiry are chosen BEFORE the window exists (§2.2
     // step 1); a missing expiry is the default, 30 days unused.
+    // An `invite` makes the window a guest's (group chat §2.1): a new guest
+    // by `{"name"}` or an existing one by `{"guest": id}`, chosen here before
+    // the window opens, holding `guest` and no project whatever `caps` says.
     pair_begin: HostConsole => {
         let expiry = match a.raw("expiry") {
             Value::Null => Expiry::default(),
             v => Expiry::from_value(&v)?,
         };
-        cx.pairing.begin(Offer { grant: scope_arg(cx, a, true)?, expiry }, now())
+        let offer = match a.raw("invite") {
+            Value::Null => Offer::owner(scope_arg(cx, a, true)?, expiry),
+            v => Offer::guest(Invite::from_value(&v, &cx.devices)?, expiry),
+        };
+        cx.pairing.begin(offer, now())
     },
     pair_decide: HostConsole => cx.pairing.decide(a.get("allow")?, now()),
     pair_cancel: HostConsole => ok(cx.pairing.cancel()),
@@ -1311,6 +1337,35 @@ commands! { cx, a;
     idea_answer_many: HostConsole [console, idea_conv(conv, id)] => ideasessions::idea_answer_many(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("choices")?, a.get("fingerprint")?),
     idea_send: HostConsole [console, idea_conv(conv, id)] => ideasessions::idea_send(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("text")?),
     idea_interrupt: HostConsole [console, idea_conv(conv, id)] => ideasessions::idea_interrupt(&cx.ctx, a.get("id")?, a.get("conv")?),
+
+    // ── group chat's shares (`docs/proposals/group-chat.md` §2, §2.2, §3.3) ──
+    // The owner's acts are console rows: share a running Claude or Codex
+    // session with named guests, bind the lane's live session again, let a
+    // guest in or take them out, stop, hide a project's place names, and the
+    // requests guests made. `shares.json` is the record (`serve::shares`).
+    share_create: HostConsole [console, place(repo, slug)] => super::shares::rows::create(cx, a.get("repo")?, a.get("slug")?, a.get("guests")?),
+    share_again: HostConsole [console, share(share)] => super::shares::rows::again(cx, a.get("share")?),
+    share_allow: HostConsole [console, share(share)] => super::shares::rows::allow(cx, a.get("share")?, a.get("principal")?),
+    share_remove_guest: HostConsole [console, share(share)] => super::shares::rows::remove_guest(cx, a.get("share")?, a.get("principal")?),
+    share_stop: HostConsole [console, share(share)] => super::shares::rows::stop(cx, a.get("share")?),
+    guest_places_hide: HostConsole [console, project(project)] => super::shares::rows::hide(cx, a.get("project")?, a.get("hidden")?),
+    share_requests_list: HostConsole => super::shares::rows::requests(cx),
+    share_request_dismiss: HostConsole => super::shares::rows::dismiss(cx, a.get("request")?),
+    shares_all: HostConsole => super::shares::rows::all(cx),
+    // The people: guests and their devices, removing one from the host, and
+    // the name a guest sees the owner by.
+    guests_list: HostConsole => super::shares::rows::guests(cx),
+    guest_remove: HostConsole => super::shares::rows::remove_principal(cx, a.get("principal")?),
+    owner_set_name: HostConsole => cx.devices.set_owner_name(&a.get::<String>("name")?),
+    // A guest's rows (`guest` and nothing else, `GUEST_ROWS`): what is shared
+    // with this principal, asking to join one, the owner's unhidden place
+    // names, and asking for a share. None reaches an agent, a file, a
+    // terminal or a prompt; the polled reads write no audit record
+    // (`GUEST_READS`). The transcript and thread rows are PRs B and C.
+    shares_list: Engine [guest, guest] => super::shares::rows::list(cx),
+    share_join: Engine [guest, share(share)] => super::shares::rows::join(cx, a.get("share")?),
+    guest_places: Engine [guest, guest] => super::shares::rows::places(cx),
+    share_request: Engine [guest, guest] => super::shares::rows::request(cx, a.get("project")?, a.get("slug")?, a.get("note")?),
 
     // ── remote access (§4.1): the host's own acts, never a device's ──────────
     remote_enable: HostConsole => remote(cx)?.enable(&a.get::<String>("address")?, a.get("iface")?, a.get("port")?, a.get("advertise")?),
@@ -1390,13 +1445,14 @@ mod tests {
     /// idea board's seven console rows (`ideas_list`, `idea_read`,
     /// `idea_create`, `idea_write`, `idea_rename`, `idea_remove`,
     /// `idea_adopt`), and the chat's images (`read_place_image`, `agent_call_image`), and phase S's fifteen
-    /// idea-session console rows (`idea_conversation*`, `idea_*` over the agent bodies); the check scripts
+    /// idea-session console rows (`idea_conversation*`, `idea_*` over the agent bodies), and group
+    /// chat's sixteen share rows (twelve console, four `guest`); the check scripts
     /// hold the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 244, "the table has 244 commands");
+        assert_eq!(TABLE.len(), 260, "the table has 260 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1727,6 +1783,7 @@ mod tests {
         ("idea_write", "id", "an idea's ULID (a console act)"),
         ("idea_rename", "id", "an idea's ULID (a console act)"),
         ("idea_remove", "id", "an idea's ULID (a console act)"),
+        ("share_request", "slug", "a place NAME a guest asks about (group chat §2.2): resolving it would answer whether it exists, which the row must not; the body stores it, answered alike for a real, hidden or missing place"),
         ("read_place_image", "path", "a path in the PLACE (relative to its root, or absolute under it): the body resolves it under `place(repo, slug)`'s own root by `safepath::place_image`, which is not a `file(path)` judged against every project"),
     ];
 
@@ -1802,7 +1859,10 @@ mod tests {
     /// `push_allow_security`); Settings → Agent policy → Limits'
     /// `limits_settings` (`read`) and `set_limits` (`admin`); and the policy
     /// presets' `policy_preset_status` (`read`) and `apply_policy_preset`
-    /// (console); the named workspaces' six (console); and the idea board's seven (console); phase S's fifteen idea-session rows (console); `read_place_image` and `agent_call_image` are `read`. A row that moves group
+    /// (console); the named workspaces' six (console); and the idea board's seven (console); phase S's fifteen idea-session rows (console); `read_place_image` and `agent_call_image` are `read`; and group chat's
+    /// shares: twelve console rows (`share_*` for the owner, `guest_places_hide`,
+    /// `shares_all`, `guests_list`, `guest_remove`, `owner_set_name`) and the
+    /// four `guest` rows (`GUEST_ROWS`), the capability's first. A row that moves group
     /// fails here until the count (and the proposal's table) move with it.
     #[test]
     fn every_row_has_one_base_group_and_the_counts_are_section_3_4s() {
@@ -1819,8 +1879,8 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 70), ("write", 23), ("admin", 41), ("console", 76), ("stream", 10), ("instruct", 8), ("answer", 2),
-            ("client-local", 6), ("loopback-only", 1), ("own", 7),
+            ("read", 70), ("write", 23), ("admin", 41), ("console", 88), ("stream", 10), ("instruct", 8), ("answer", 2),
+            ("client-local", 6), ("loopback-only", 1), ("own", 7), ("guest", 4),
         ]
         .into();
         assert_eq!(groups, want);
