@@ -27,7 +27,7 @@ export type DragItem =
   | { kind: "project"; root: string; ws?: string }
   | { kind: "workspace"; id: string };
 
-export type DragSession<T> = { item: DragItem; x: number; y: number; target: T | null };
+export type DragSession<T, I extends { kind: string } = DragItem> = { item: I; x: number; y: number; target: T | null };
 
 const THRESHOLD = 4;
 /** How close to the scroller's edge the pointer must get to auto-scroll, and
@@ -64,17 +64,19 @@ function swallowNextClick(stillDown: boolean) {
   if (!stillDown) onUp();
 }
 
-export function useNavDrag<T>(opts: {
+/** `I`: what is dragged. The nav's `DragItem` by default; the Ideas window
+ *  passes its own (an idea, or several) and reuses the plumbing unchanged. */
+export function useNavDrag<T, I extends { kind: string } = DragItem>(opts: {
   scrollRef: { current: HTMLElement | null };
   /** Hit-test + landing calculation. Runs every frame the pointer moves. */
-  resolve: (item: DragItem, x: number, y: number) => T | null;
+  resolve: (item: I, x: number, y: number) => T | null;
   /** Called on drop with the last resolved target (null = dropped on nothing). */
-  commit: (item: DragItem, target: T | null) => void;
+  commit: (item: I, target: T | null) => void;
   /** The drop zone under the pointer, only when it CHANGES — spring-open hangs
    *  off this rather than off every frame. */
-  onZone?: (el: HTMLElement | null, item: DragItem | null) => void;
+  onZone?: (el: HTMLElement | null, item: I | null) => void;
 }) {
-  const [drag, setDrag] = useState<DragSession<T> | null>(null);
+  const [drag, setDrag] = useState<DragSession<T, I> | null>(null);
   // Callbacks are re-created every render; the window listeners are not. Keep
   // the live ones in a ref so a drag started three renders ago still commits
   // against current state instead of a closure from mousedown time.
@@ -83,7 +85,7 @@ export function useNavDrag<T>(opts: {
   // The whole gesture, outside React: a drag is a stream of frames and setState
   // per frame is for RENDERING it, not for deciding it.
   const g = useRef<{
-    item: DragItem; x0: number; y0: number; live: boolean;
+    item: I; x0: number; y0: number; live: boolean;
     x: number; y: number; target: T | null; zone: HTMLElement | null;
     raf: number; scroll: number;
   } | null>(null);
@@ -101,7 +103,7 @@ export function useNavDrag<T>(opts: {
     g.current = null;
     if (s?.scroll) cancelAnimationFrame(s.scroll);
     if (s?.raf) cancelAnimationFrame(s.raf);
-    document.body.classList.remove("dragging", "dragging-place", "dragging-project", "dragging-workspace");
+    if (s) document.body.classList.remove("dragging", `dragging-${s.item.kind}`);
     if (s?.live) {
       swallowNextClick(stillDown);
       cb.current.onZone?.(null, null);
@@ -185,9 +187,12 @@ export function useNavDrag<T>(opts: {
 
   /** Arm a drag. Left button only, and never from a control inside the row —
    *  the ⋯/✕/+ buttons keep working as buttons. */
-  const arm = useCallback((e: React.PointerEvent, item: DragItem) => {
+  const arm = useCallback((e: React.PointerEvent, item: I) => {
     if (e.button !== 0) return;
-    if ((e.target as HTMLElement).closest("button,input,textarea,select,a")) return;
+    // A row that IS a button (the Ideas list) marks it `data-drag-handle`:
+    // a press there may start a drag, a control inside it still may not.
+    const ctl = (e.target as HTMLElement).closest("button,input,textarea,select,a");
+    if (ctl && !ctl.hasAttribute("data-drag-handle")) return;
     g.current = {
       item, x0: e.clientX, y0: e.clientY, live: false,
       x: e.clientX, y: e.clientY, target: null, zone: null, raf: 0, scroll: 0,

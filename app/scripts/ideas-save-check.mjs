@@ -48,7 +48,8 @@ const { Session, SAVE_PAUSE_MS } = M;
 // The rig below scripts its own copies; without this, rewording either in
 // Rust leaves every check here green while a stale save reads as a plain
 // error and a removed idea is never noticed. The emitters are found by WHERE
-// they are (check_mtime's Err, and the Err that ends Index::resolve), never by
+// they are (check_mtime's Err, and the Err that ends Index::exact, which
+// Index::resolve goes through since phase 3's absorbed ids), never by
 // the regex under test, and each must be found exactly once.
 {
   const RS = process.env.IDEAS_RS ?? here("../../crates/worktrees-core/src/ideas.rs");
@@ -72,11 +73,12 @@ const { Session, SAVE_PAUSE_MS } = M;
   const cm = fnBody("check_mtime");
   const staleLits = errs(cm.body);
   check(cm.n === 1 && staleLits.length === 1, `the stale-save sentence is found once, in fn check_mtime (fns: ${cm.n}, Errs: ${staleLits.length})`);
-  const rs = fnBody("resolve");
+  const rs = fnBody("exact");
   const rsLits = errs(rs.body);
-  // resolve's LAST Err is the one for an id no file carries.
+  // exact's LAST Err is the one for an id no file carries (every lookup,
+  // `resolve` and `resolve_exact`, ends there).
   const goneLit = rsLits.at(-1);
-  check(rs.n === 1 && rsLits.length >= 1, `the gone sentence is found once, as fn resolve's last Err (fns: ${rs.n}, Errs: ${rsLits.length})`);
+  check(rs.n === 1 && rsLits.length >= 1, `the gone sentence is found once, as fn exact's last Err (fns: ${rs.n}, Errs: ${rsLits.length})`);
   const stale = staleLits[0] ?? "", gone = fill(goneLit ?? "");
   check(M.isStale(stale) && !M.isGone(stale), `isStale reads core's stale sentence, and isGone does not (${JSON.stringify(stale)})`);
   check(M.isGone(gone) && !M.isStale(gone), `isGone reads core's gone sentence, and isStale does not (${JSON.stringify(goneLit)})`);
