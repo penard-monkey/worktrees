@@ -12,10 +12,11 @@
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { markdown, markdownLanguage } from "@codemirror/lang-markdown";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
-import { EditorState, Transaction, type Extension } from "@codemirror/state";
+import { EditorState, Prec, Transaction, type Extension } from "@codemirror/state";
 import { drawSelection, EditorView, highlightSpecialChars, keymap } from "@codemirror/view";
 import { tags as t } from "@lezer/highlight";
 import type { MarkdownConfig } from "@lezer/markdown";
+import { linkAt, pickerQuery } from "./ideasrelate";
 import { textExtensions } from "./ideastate";
 
 /** The frontmatter as its own block, so its keys are not read as a setext
@@ -83,7 +84,55 @@ export type EditorHooks = {
   edited(): void;
   /** The editor lost focus: a save point. */
   blurred(): void;
+  /** Phase 3: `[[` typed — the picker's query, where `[[` starts and the
+   *  cursor (document positions) and where to draw it; `null` closes it. */
+  picker?(p: { from: number; to: number; query: string; x: number; y: number } | null): void;
+  /** A key while the picker is open; `true` = it took the key. */
+  pickerKey?(key: "ArrowUp" | "ArrowDown" | "Enter" | "Tab" | "Escape"): boolean;
+  /** ⌘-click (Ctrl elsewhere) on an `idea:` link. */
+  follow?(id: string): void;
+  /** Whether text is selected, when that changes. */
+  selected?(has: boolean): void;
 };
+
+/** The phase 3 pieces: the `[[` picker's trigger and keys, following a link,
+ *  and telling the window a selection exists (Split acts on it). */
+function relateExtensions(hooks: EditorHooks): Extension[] {
+  const keys = (["ArrowUp", "ArrowDown", "Enter", "Tab", "Escape"] as const).map((key) => ({
+    key,
+    run: () => hooks.pickerKey?.(key) ?? false,
+  }));
+  return [
+    Prec.highest(keymap.of(keys)),
+    EditorView.updateListener.of((u) => {
+      if (u.selectionSet || u.docChanged) {
+        const r = u.state.selection.main;
+        if (u.startState.selection.main.empty !== r.empty) hooks.selected?.(!r.empty);
+        let open: Parameters<NonNullable<EditorHooks["picker"]>>[0] = null;
+        if (r.empty && u.view.hasFocus) {
+          const line = u.state.doc.lineAt(r.head);
+          const q = pickerQuery(line.text.slice(0, r.head - line.from));
+          const at = q && u.view.coordsAtPos(r.head);
+          if (q && at) open = { from: line.from + q.from, to: r.head, query: q.query, x: at.left, y: at.bottom };
+        }
+        hooks.picker?.(open);
+      }
+    }),
+    EditorView.domEventHandlers({
+      mousedown: (e, view) => {
+        if (!(e.metaKey || e.ctrlKey) || e.button !== 0) return false;
+        const pos = view.posAtCoords({ x: e.clientX, y: e.clientY });
+        if (pos == null) return false;
+        const line = view.state.doc.lineAt(pos);
+        const id = linkAt(line.text, pos - line.from);
+        if (!id) return false;
+        e.preventDefault();
+        hooks.follow?.(id);
+        return true;
+      },
+    }),
+  ];
+}
 
 /** A fresh state for a document whose file text is `text`. */
 export function ideaState(text: string, hooks: EditorHooks, selection?: { anchor: number; head: number }): EditorState {
@@ -106,7 +155,8 @@ export function ideaState(text: string, hooks: EditorHooks, selection?: { anchor
     EditorView.updateListener.of((u) => {
       if (u.docChanged && u.transactions.some((tr) => tr.annotation(Transaction.userEvent))) hooks.edited();
     }),
-    EditorView.domEventHandlers({ blur: () => { hooks.blurred(); } }),
+    EditorView.domEventHandlers({ blur: () => { hooks.blurred(); hooks.picker?.(null); } }),
+    relateExtensions(hooks),
   ];
   const state = EditorState.create({ doc: text, extensions: ext });
   if (!selection) return state;

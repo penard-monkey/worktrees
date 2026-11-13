@@ -233,6 +233,9 @@ pub fn prepare_at(root: &Path, idea: &str) -> Result<Conversation, String> {
     check_idea(idea)?;
     ideas::refuse_real(root)?;
     let doc = ideas::read_at(root, idea)?;
+    if doc.merged.is_some() {
+        return Err(format!("that idea was merged into “{}”: talk about that one", doc.idea.title));
+    }
     let copy = ideas::history_copy_at(root, idea, doc.content.as_bytes())?;
     let started_from = copy.strip_prefix(root).unwrap_or(&copy).to_string_lossy().into_owned();
     let mut rec = read_record_at(root, idea)?;

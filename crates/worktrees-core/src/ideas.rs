@@ -158,6 +158,109 @@ fn front_value<'a>(text: &'a str, key: &str) -> Option<&'a str> {
     })
 }
 
+/// The line ending a document uses: `\r\n` when its first line ends so.
+fn sep_of(text: &str) -> &'static str {
+    match text.find('\n') {
+        Some(i) if i > 0 && text.as_bytes()[i - 1] == b'\r' => "\r\n",
+        _ => "\n",
+    }
+}
+
+/// The byte span of a top-level `key:` in the frontmatter: its line, and the
+/// `- item` lines of a block list under it, each with its line ending.
+fn front_key_span(text: &str, key: &str) -> Option<(usize, usize)> {
+    let (s, e, _) = frontmatter(text)?;
+    let mut at = s;
+    while at < e {
+        let end = text[at..e].find('\n').map_or(e, |i| at + i + 1);
+        let line = text[at..end].trim_end_matches(['\n', '\r']);
+        if line.strip_prefix(key).is_some_and(|r| r.starts_with(':')) {
+            let mut stop = end;
+            if line[key.len() + 1..].trim().is_empty() {
+                while stop < e {
+                    let next = text[stop..e].find('\n').map_or(e, |i| stop + i + 1);
+                    if !text[stop..next].trim_start().starts_with("- ") && text[stop..next].trim() != "-" {
+                        break;
+                    }
+                    stop = next;
+                }
+            }
+            return Some((at, stop));
+        }
+        at = end;
+    }
+    None
+}
+
+/// The items of a frontmatter list, `key: [a, b]` (what the app writes),
+/// `key: a`, or a block of `- a` lines under `key:`. Quotes are dropped.
+pub fn front_list(text: &str, key: &str) -> Vec<String> {
+    let Some((a, b)) = front_key_span(text, key) else { return Vec::new() };
+    let chunk = &text[a..b];
+    let first = chunk.lines().next().unwrap_or("");
+    let v = first[key.len() + 1..].trim();
+    let unq = |x: &str| x.trim().trim_matches(|c| c == '"' || c == '\'').to_string();
+    let items: Vec<String> = if let Some(inner) = v.strip_prefix('[') {
+        inner.trim_end_matches(']').split(',').map(unq).collect()
+    } else if !v.is_empty() {
+        vec![unq(v)]
+    } else {
+        chunk.lines().skip(1).map(|l| unq(l.trim_start().trim_start_matches('-'))).collect()
+    };
+    let mut out: Vec<String> = Vec::new();
+    for i in items {
+        if !i.is_empty() && !out.contains(&i) {
+            out.push(i);
+        }
+    }
+    out
+}
+
+/// `text` with the frontmatter's `key` set to the list `items`, written
+/// `key: [a, b]`: the key's line (and a block list's lines) replaced, or a
+/// line added before the closing `---`. An empty list removes the key.
+/// Every other byte is copied through. `None` without a frontmatter.
+fn with_front_list(text: &str, key: &str, items: &[String]) -> Option<String> {
+    let (_, e, _) = frontmatter(text)?;
+    let sep = sep_of(text);
+    let line = if items.is_empty() { String::new() } else { format!("{key}: [{}]{sep}", items.join(", ")) };
+    Some(match front_key_span(text, key) {
+        Some((a, b)) => format!("{}{line}{}", &text[..a], &text[b..]),
+        None => format!("{}{line}{}", &text[..e], &text[e..]),
+    })
+}
+
+/// Every idea a body links to as `idea:<ULID>` (`[title](idea:<id>)`), in
+/// order, once each.
+pub fn links_in(text: &str) -> Vec<String> {
+    let from = frontmatter(text).map_or(0, |(_, _, b)| b);
+    let body = &text[from..];
+    let mut out: Vec<String> = Vec::new();
+    for (i, _) in body.match_indices("idea:") {
+        if let Some(id) = body.get(i + 5..i + 31) {
+            let ends = body[i + 31..].chars().next().is_none_or(|c| !c.is_ascii_alphanumeric());
+            if ends && crate::ulid::is_valid(id) && !out.iter().any(|o| o == id) {
+                out.push(id.to_string());
+            }
+        }
+    }
+    out
+}
+
+/// A document's body with its first heading's line taken out, and blank
+/// lines trimmed at both ends: what a merge appends under its own heading.
+fn body_without_title(text: &str) -> String {
+    let b = frontmatter(text).map_or(0, |(_, _, b)| b);
+    let rest = match heading(text) {
+        Some((s, e, _)) => {
+            let e = if text[e..].starts_with("\r\n") { e + 2 } else if text[e..].starts_with('\n') { e + 1 } else { e };
+            format!("{}{}", &text[b..s], &text[e..])
+        }
+        None => text[b..].to_string(),
+    };
+    rest.trim_start_matches(['\n', '\r']).trim_end().to_string()
+}
+
 /// The `id` a document's text carries, as written (it may not be a ULID).
 pub fn id_of(text: &str) -> Option<&str> {
     front_value(text, "id").filter(|v| !v.is_empty())
@@ -351,15 +454,80 @@ pub struct Index {
     /// id → position in `ideas`, for the ids exactly one file carries.
     #[serde(skip)]
     by_id: HashMap<String, usize>,
-    // Phase 3 adds `absorbed: HashMap<String, String>` (a merged-away id →
-    // the id that absorbed it), filled from each document's `absorbed:` line
-    // in `scan_at`; `resolve` follows it after `by_id`. Every lookup already
-    // goes through `resolve`, so nothing else moves.
+    /// A merged-away id → the live id whose `absorbed:` names it (phase 3,
+    /// §3), or `None` when two live documents both claim it. An id that is
+    /// live itself is never here: a restored idea is its own again.
+    #[serde(skip)]
+    absorbed: HashMap<String, Option<String>>,
+    /// Each live id's relations as its own file writes them.
+    #[serde(skip)]
+    rels: HashMap<String, Rels>,
+}
+
+/// What one document's text says about other ideas (§3's table): its
+/// frontmatter's `related`, `absorbed` and `from`, and the `idea:<id>` links
+/// in its body. Read, never printed back.
+#[derive(Default, Debug, Clone, PartialEq, Eq)]
+pub struct Rels {
+    pub related: Vec<String>,
+    pub absorbed: Vec<String>,
+    pub from: Option<String>,
+    pub links: Vec<String>,
+}
+
+impl Rels {
+    fn of(text: &str) -> Rels {
+        Rels {
+            related: front_list(text, "related"),
+            absorbed: front_list(text, "absorbed"),
+            from: front_value(text, "from").filter(|v| !v.is_empty()).map(str::to_string),
+            links: links_in(text),
+        }
+    }
 }
 
 impl Index {
-    /// The document `id` names, or why none can be addressed by it.
+    /// The document `id` names, or why none can be addressed by it. An id
+    /// that was merged away resolves to the idea that absorbed it (§3): a
+    /// link, a plan or a workspace that names it keeps working. A READ goes
+    /// through here; an act that changes a file uses [`Index::resolve_exact`].
     pub fn resolve(&self, id: &str) -> Result<&Idea, String> {
+        self.lookup(id).map(|(d, _)| d)
+    }
+
+    /// [`Index::resolve`], and whether it went through an `absorbed` id.
+    pub fn lookup(&self, id: &str) -> Result<(&Idea, bool), String> {
+        match self.exact(id) {
+            Ok(d) => Ok((d, false)),
+            Err(e) => match self.absorbed.get(id) {
+                Some(Some(by)) => Ok((&self.ideas[self.by_id[by]], true)),
+                Some(None) => Err(format!("the id {id} was merged into more than one idea: remove it from one `absorbed:` list by hand")),
+                None => Err(e),
+            },
+        }
+    }
+
+    /// The document whose OWN id is `id`. A merged-away id is refused here
+    /// with the idea that absorbed it, so an act never changes A when it was
+    /// asked to change B.
+    pub fn resolve_exact(&self, id: &str) -> Result<&Idea, String> {
+        self.exact(id).map_err(|e| match self.absorbed.get(id) {
+            Some(Some(by)) => format!("that idea was merged into “{}”: act on that one", self.ideas[self.by_id[by]].title),
+            _ => e,
+        })
+    }
+
+    /// The live id that absorbed `id`, when it was merged away.
+    pub fn absorbed_by(&self, id: &str) -> Option<&str> {
+        self.absorbed.get(id).and_then(|o| o.as_deref())
+    }
+
+    /// A live idea's relations as its own file writes them.
+    pub fn rels(&self, id: &str) -> Option<&Rels> {
+        self.rels.get(id)
+    }
+
+    fn exact(&self, id: &str) -> Result<&Idea, String> {
         if !crate::ulid::is_valid(id) {
             return Err(format!("not an idea id: {id:?}"));
         }
@@ -415,6 +583,7 @@ pub fn scan_at(root: &Path) -> io::Result<Index> {
 /// a root test process reads through).
 fn scan_with(root: &Path, names: impl Iterator<Item = String>, read: &dyn Fn(&Path) -> io::Result<Vec<u8>>) -> Index {
     let mut idx = Index::default();
+    let mut rels_by_file: HashMap<String, Rels> = HashMap::new();
     for name in names {
         if name.starts_with('.') || !name.ends_with(".md") {
             continue;
@@ -457,7 +626,10 @@ fn scan_with(root: &Path, names: impl Iterator<Item = String>, read: &dyn Fn(&Pa
                     match id_of(&text) {
                         None => doc.problem = Some(Problem::NoId),
                         Some(id) if !crate::ulid::is_valid(id) => doc.problem = Some(Problem::BadId),
-                        Some(id) => doc.id = Some(id.to_string()),
+                        Some(id) => {
+                            doc.id = Some(id.to_string());
+                            rels_by_file.insert(doc.file.clone(), Rels::of(&text));
+                        }
                     }
                 }
             }
@@ -480,6 +652,27 @@ fn scan_with(root: &Path, names: impl Iterator<Item = String>, read: &dyn Fn(&Pa
                 idx.ideas[i].problem = Some(Problem::DuplicateId);
             }
         }
+    }
+    // Relations and absorbed ids, from the live documents only.
+    let mut live: Vec<(&String, &usize)> = idx.by_id.iter().collect();
+    live.sort();
+    for (id, i) in live {
+        let Some(r) = rels_by_file.remove(&idx.ideas[*i].file) else { continue };
+        for a in &r.absorbed {
+            if a == id || idx.by_id.contains_key(a) || !crate::ulid::is_valid(a) {
+                continue;
+            }
+            match idx.absorbed.get(a) {
+                Some(Some(by)) if by != id => {
+                    idx.absorbed.insert(a.clone(), None);
+                }
+                Some(_) => {}
+                None => {
+                    idx.absorbed.insert(a.clone(), Some(id.clone()));
+                }
+            }
+        }
+        idx.rels.insert(id.clone(), r);
     }
     idx.skipped.sort();
     idx
@@ -513,6 +706,20 @@ pub struct Doc {
     #[serde(flatten)]
     pub idea: Idea,
     pub content: String,
+    /// Set when the id asked for was merged into this idea (§3): "B was
+    /// merged into A on <date>".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merged: Option<Merged>,
+}
+
+/// The id a read asked for, which was merged into the idea it answers with:
+/// its last title and the day it was absorbed, both from its newest history
+/// copy (the merge took one), when there is one.
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct Merged {
+    pub id: String,
+    pub title: Option<String>,
+    pub date: Option<String>,
 }
 
 pub fn list_at(root: &Path) -> Result<Index, String> {
@@ -521,9 +728,14 @@ pub fn list_at(root: &Path) -> Result<Index, String> {
 
 pub fn read_at(root: &Path, id: &str) -> Result<Doc, String> {
     let idx = list_at(root)?;
-    let idea = idx.resolve(id)?.clone();
+    let (idea, via) = idx.lookup(id)?;
+    let idea = idea.clone();
     let (content, md) = load(root, &idea)?;
-    Ok(Doc { idea: Idea { mtime_ms: mtime_ms(&md), size: md.len(), ..idea }, content })
+    let merged = via.then(|| {
+        let last = versions_at(root, id).ok().and_then(|v| v.into_iter().next());
+        Merged { id: id.to_string(), title: last.as_ref().and_then(|v| v.title.clone()), date: last.map(|v| v.at[..10].to_string()) }
+    });
+    Ok(Doc { idea: Idea { mtime_ms: mtime_ms(&md), size: md.len(), ..idea }, content, merged })
 }
 
 /// The current text of a listed document, from a path re-checked to be a
@@ -555,7 +767,7 @@ fn today() -> String {
     date_of(crate::sysclock::now_epoch())
 }
 
-pub(crate) fn date_of(epoch: i64) -> String {
+pub fn date_of(epoch: i64) -> String {
     let (y, m, d) = crate::attach::civil_from_days(epoch.div_euclid(86_400));
     format!("{y:04}-{m:02}-{d:02}")
 }
@@ -663,7 +875,7 @@ pub fn write_kept_at(root: &Path, id: &str, content: &str, expected_mtime: Optio
 fn write_with_at(root: &Path, id: &str, content: &str, expected_mtime: Option<u64>, keep_history: bool) -> Result<Idea, String> {
     refuse_real(root)?;
     let idx = list_at(root)?;
-    let idea = idx.resolve(id)?.clone();
+    let idea = idx.resolve_exact(id)?.clone();
     match id_of(content) {
         Some(c) if c == id => {}
         Some(c) => return Err(format!("the text carries the id {c}, not {id}: refusing to save one idea over another")),
@@ -738,7 +950,7 @@ fn rename_to_title(root: &Path, own: &str, text: &str) -> Result<String, String>
 pub fn rename_at(root: &Path, id: &str, title: &str, expected_mtime: Option<u64>) -> Result<Doc, String> {
     refuse_real(root)?;
     let idx = list_at(root)?;
-    let idea = idx.resolve(id)?.clone();
+    let idea = idx.resolve_exact(id)?.clone();
     let (text, md) = load(root, &idea)?;
     check_mtime(&md, expected_mtime)?;
     history_copy_at(root, id, text.as_bytes())?;
@@ -784,7 +996,7 @@ fn move_excl(from: &Path, to: &Path) -> io::Result<()> {
 pub fn remove_at(root: &Path, id: &str, expected_mtime: Option<u64>) -> Result<(), String> {
     refuse_real(root)?;
     let idx = list_at(root)?;
-    let idea = idx.resolve(id)?.clone();
+    let idea = idx.resolve_exact(id)?.clone();
     let (text, md) = load(root, &idea)?;
     check_mtime(&md, expected_mtime)?;
     history_copy_at(root, id, text.as_bytes())?;
@@ -822,6 +1034,466 @@ pub fn adopt_at(root: &Path, file: &str, expected_mtime: Option<u64>) -> Result<
     read_at(root, &id)
 }
 
+// ── phase 3: ideas relate (§3) ──────────────────────────────────────────────
+//
+// The four acts are two bodies (C11): a MERGE (into an existing idea, or into
+// a new one: combine) and a SPLIT (moving the text, or copying it: extract).
+// Each takes its whole input as parameters, so an agent's proposal later is
+// the same call (§7.1), and each copies every file it is about to change to
+// `.history/<id>/` FIRST. The other side of a relation is computed from the
+// index, never written.
+
+/// `ids` once each, in order, leaving out `skip`.
+fn union(lists: &[&[String]], skip: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for l in lists {
+        for i in *l {
+            if !skip.contains(&i.as_str()) && !out.contains(i) {
+                out.push(i.clone());
+            }
+        }
+    }
+    out
+}
+
+/// A body handed in for a merge, combine or rewrite: the text AFTER the
+/// frontmatter, which stays the core's. One that carries its own frontmatter
+/// is refused, so a client can never write ids or `absorbed` by hand.
+fn check_body(text: &str) -> Result<(), String> {
+    if frontmatter(text).is_some() {
+        return Err("the text must be the idea's body, without its frontmatter (the `---` block)".into());
+    }
+    Ok(())
+}
+
+/// Relate `id` to `other` (§3): `other` goes into `id`'s `related:` list.
+/// `other` may be a merged-away id: the relation is to the idea that holds it
+/// now. Already related, either way round, writes nothing.
+pub fn relate_at(root: &Path, id: &str, other: &str) -> Result<Doc, String> {
+    refuse_real(root)?;
+    let idx = list_at(root)?;
+    let a = idx.resolve_exact(id)?.clone();
+    let b = idx.resolve(other)?.clone();
+    let b_id = b.id.clone().unwrap_or_default();
+    if b_id == id {
+        return Err("an idea cannot be related to itself".into());
+    }
+    let mine = idx.rels(id).cloned().unwrap_or_default();
+    let theirs = idx.rels(&b_id).cloned().unwrap_or_default();
+    if mine.related.contains(&b_id) || theirs.related.iter().any(|r| r == id) {
+        return read_at(root, id);
+    }
+    let (text, md) = load(root, &a)?;
+    let mut related = mine.related.clone();
+    related.push(b_id);
+    let new_text = with_front_list(&text, "related", &related).ok_or("the idea has no frontmatter")?;
+    history_copy_at(root, id, text.as_bytes())?;
+    crate::fsx::write_atomic(&root.join(&a.file), new_text.as_bytes(), Some(md.permissions())).map_err(|e| format!("{}: {e}", a.file))?;
+    read_at(root, id)
+}
+
+/// The section a merge appends for one absorbed idea.
+fn from_section(title: &str, date: &str, text: &str, sep: &str) -> String {
+    let body = body_without_title(text);
+    let mut s = format!("## From: {title} ({date}){sep}");
+    if !body.is_empty() {
+        s.push_str(sep);
+        s.push_str(&body.replace("\r\n", "\n").replace('\n', sep));
+        s.push_str(sep);
+    }
+    s
+}
+
+/// Merge `from` into `into` (§3): `into` keeps its id and gains `from`'s
+/// text, by default appended under `## From: <from's title> (date)`, or
+/// replaced by `text` (the whole BODY, after the frontmatter: an agent's
+/// rewrite is the same call). `from`'s id, and every id it had absorbed, go
+/// into `into`'s `absorbed:`; its `related:` joins `into`'s. Both files are
+/// copied to history first; then `into` is written and `from`'s file removed.
+pub fn merge_at(root: &Path, into: &str, from: &str, text: Option<&str>, into_mtime: Option<u64>, from_mtime: Option<u64>) -> Result<Doc, String> {
+    refuse_real(root)?;
+    if let Some(t) = text {
+        check_body(t)?;
+    }
+    let idx = list_at(root)?;
+    let a = idx.resolve_exact(into)?.clone();
+    let b = idx.resolve_exact(from)?.clone();
+    if into == from {
+        return Err("an idea cannot be merged into itself".into());
+    }
+    let (a_text, a_md) = load(root, &a)?;
+    let (b_text, b_md) = load(root, &b)?;
+    check_mtime(&a_md, into_mtime)?;
+    check_mtime(&b_md, from_mtime)?;
+    let ra = idx.rels(into).cloned().unwrap_or_default();
+    let rb = idx.rels(from).cloned().unwrap_or_default();
+    let absorbed = union(&[&ra.absorbed, std::slice::from_ref(&from.to_string()), &rb.absorbed], &[into]);
+    let skip: Vec<&str> = absorbed.iter().map(String::as_str).chain([into, from]).collect();
+    let related = union(&[&ra.related, &rb.related], &skip);
+    let sep = sep_of(&a_text);
+    let fronted = with_front_list(&a_text, "absorbed", &absorbed).ok_or("the idea has no frontmatter")?;
+    let fronted = with_front_list(&fronted, "related", &related).ok_or("the idea has no frontmatter")?;
+    let body_at = frontmatter(&fronted).map_or(0, |(_, _, b)| b);
+    let new_text = match text {
+        Some(t) => format!("{}{t}", &fronted[..body_at]),
+        None => {
+            let kept = fronted.trim_end();
+            format!("{kept}{sep}{sep}{}", from_section(&b.title, &today(), &b_text, sep))
+        }
+    };
+    history_copy_at(root, into, a_text.as_bytes())?;
+    history_copy_at(root, from, b_text.as_bytes())?;
+    crate::fsx::write_atomic(&root.join(&a.file), new_text.as_bytes(), Some(a_md.permissions())).map_err(|e| format!("{}: {e}", a.file))?;
+    rename_to_title(root, &a.file, &new_text)?;
+    fs::remove_file(root.join(&b.file)).map_err(|e| {
+        format!("merged into “{}”, but could not remove {}: {e}. Both are listed until it is removed by hand", a.title, b.file)
+    })?;
+    read_at(root, into)
+}
+
+/// Combine `ids` (two or more) into a NEW idea titled `title` (§3, C11: a
+/// merge whose target is new). Its body is `text` when given (the body,
+/// after the frontmatter), else `# title` and each idea's text under its own
+/// `## From:` heading, in the order given. Every source id, and every id
+/// each had absorbed, go into the new idea's `absorbed:`. Each source is
+/// copied to history first; then the new file is made and the sources are
+/// removed.
+pub fn combine_at(root: &Path, ids: &[String], title: &str, text: Option<&str>) -> Result<Doc, String> {
+    refuse_real(root)?;
+    if let Some(t) = text {
+        check_body(t)?;
+    }
+    if ids.len() < 2 {
+        return Err("combining needs two ideas or more".into());
+    }
+    let idx = list_at(root)?;
+    let mut srcs: Vec<(Idea, String)> = Vec::new();
+    for id in ids {
+        if srcs.iter().any(|(d, _)| d.id.as_deref() == Some(id)) {
+            return Err(format!("the idea {id} is named twice"));
+        }
+        let d = idx.resolve_exact(id)?.clone();
+        let (t, _) = load(root, &d)?;
+        srcs.push((d, t));
+    }
+    let title = clean_title(title);
+    let rels: Vec<Rels> = ids.iter().map(|i| idx.rels(i).cloned().unwrap_or_default()).collect();
+    let ab: Vec<&[String]> = ids.iter().zip(&rels).flat_map(|(i, r)| [std::slice::from_ref(i), &r.absorbed[..]]).collect();
+    let absorbed = union(&ab, &[]);
+    let skip: Vec<&str> = absorbed.iter().map(String::as_str).collect();
+    let rl: Vec<&[String]> = rels.iter().map(|r| &r.related[..]).collect();
+    let related = union(&rl, &skip);
+    let id = crate::ulid::new();
+    let date = today();
+    let mut front = format!("---\nid: {id}\ncreated: {date}\nabsorbed: [{}]\n", absorbed.join(", "));
+    if !related.is_empty() {
+        front.push_str(&format!("related: [{}]\n", related.join(", ")));
+    }
+    front.push_str("---\n\n");
+    let body = match text {
+        Some(t) => t.to_string(),
+        None => {
+            let mut b = format!("# {title}\n");
+            for (d, t) in &srcs {
+                b.push('\n');
+                b.push_str(&from_section(&d.title, &date, t, "\n"));
+            }
+            b
+        }
+    };
+    let content = format!("{front}{body}");
+    for (d, t) in &srcs {
+        history_copy_at(root, d.id.as_deref().unwrap_or_default(), t.as_bytes())?;
+    }
+    let stem = slug(&clean_title(&title_of(&content).unwrap_or(title)));
+    create_named(root, &stem, &content)?;
+    let mut left = Vec::new();
+    for (d, _) in &srcs {
+        if let Err(e) = fs::remove_file(root.join(&d.file)) {
+            left.push(format!("{}: {e}", d.file));
+        }
+    }
+    if !left.is_empty() {
+        return Err(format!("combined, but could not remove {}: both copies are listed until removed by hand", left.join("; ")));
+    }
+    read_at(root, &id)
+}
+
+/// Make `<stem>.md` (or the first free `-<n>`) holding `content`.
+fn create_named(root: &Path, stem: &str, content: &str) -> Result<String, String> {
+    ensure_root(root)?;
+    for _ in 0..16 {
+        let file = free_name(root, stem, None);
+        match create_new(&root.join(&file), content.as_bytes()) {
+            Ok(()) => return Ok(file),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("{file}: {e}")),
+        }
+    }
+    Err(format!("no free file name for {stem:?}"))
+}
+
+/// A UTF-16 offset (what a JavaScript string counts) as a byte offset in
+/// `text`; `None` past the end or inside a character.
+pub fn utf16_to_byte(text: &str, n: usize) -> Option<usize> {
+    let mut acc = 0;
+    for (b, c) in text.char_indices() {
+        if acc == n {
+            return Some(b);
+        }
+        if acc > n {
+            return None;
+        }
+        acc += c.len_utf16();
+    }
+    (acc == n).then_some(text.len())
+}
+
+/// The title a split takes from its text when it is given none: the first
+/// line with words, its markdown markers dropped, cut to 80 characters.
+fn title_from(sel: &str) -> String {
+    let line = sel.lines().map(|l| l.trim_start_matches(|c: char| c.is_whitespace() || "#>-*+".contains(c)).trim()).find(|l| !l.is_empty());
+    clean_title(&line.unwrap_or("").chars().take(80).collect::<String>())
+}
+
+/// What a split made: the new idea, and the source as it is after it.
+#[derive(Serialize, Debug)]
+pub struct Split {
+    pub new: Doc,
+    pub source: Doc,
+}
+
+/// Split `start..end` of the idea `id`'s CURRENT text (UTF-16 offsets, what
+/// the editor's string counts; the text is the one `expected_mtime` names)
+/// into a new idea that carries `from: <id>` (§3). Its title is `title`, or
+/// the selection's first line. With `keep` (extract) the source is not
+/// touched; otherwise the selection is replaced in it by a link,
+/// `[<title>](idea:<new id>)`, keeping the selection's leading and trailing
+/// blank space so the paragraphs around it stay where they were, after the
+/// source is copied to history.
+pub fn split_at(root: &Path, id: &str, start: usize, end: usize, keep: bool, title: Option<&str>, expected_mtime: Option<u64>) -> Result<Split, String> {
+    refuse_real(root)?;
+    let idx = list_at(root)?;
+    let a = idx.resolve_exact(id)?.clone();
+    let (text, md) = load(root, &a)?;
+    check_mtime(&md, expected_mtime)?;
+    let (Some(s), Some(e)) = (utf16_to_byte(&text, start), utf16_to_byte(&text, end)) else {
+        return Err("the selection is not inside the idea's text: reload it and select again".into());
+    };
+    if s >= e {
+        return Err("nothing is selected".into());
+    }
+    if s < frontmatter(&text).map_or(0, |(_, _, b)| b) {
+        return Err("the selection reaches into the frontmatter (the `---` block): select text below it".into());
+    }
+    let sel = &text[s..e];
+    let core = sel.trim();
+    if core.is_empty() {
+        return Err("the selection has no text".into());
+    }
+    let title = match title.map(str::trim).filter(|t| !t.is_empty()) {
+        Some(t) => clean_title(t),
+        None => title_from(core),
+    };
+    let sep = sep_of(&text);
+    let new_id = crate::ulid::new();
+    let picked = sel.trim_start_matches(['\n', '\r']).trim_end();
+    let content = format!("---{sep}id: {new_id}{sep}created: {}{sep}from: {id}{sep}---{sep}{sep}# {title}{sep}{sep}{picked}{sep}", today());
+    let lead = &sel[..sel.len() - sel.trim_start().len()];
+    let trail = &sel[sel.trim_end().len()..];
+    let label = title.replace('\\', "\\\\").replace('[', "\\[").replace(']', "\\]");
+    let new_src = format!("{}{lead}[{label}](idea:{new_id}){trail}{}", &text[..s], &text[e..]);
+    if !keep {
+        history_copy_at(root, id, text.as_bytes())?;
+    }
+    create_named(root, &slug(&title), &content)?;
+    if !keep {
+        crate::fsx::write_atomic(&root.join(&a.file), new_src.as_bytes(), Some(md.permissions()))
+            .map_err(|err| format!("made “{title}”, but could not replace the text in {}: {err}", a.file))?;
+    }
+    Ok(Split { new: read_at(root, &new_id)?, source: read_at(root, id)? })
+}
+
+// ── history: versions and restore ───────────────────────────────────────────
+
+/// One copy in `.history/<id>/`.
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct Version {
+    /// Its bare file name: what `restore_at` takes.
+    pub version: String,
+    /// When it was taken, `2026-11-08T15:30:12.345Z`.
+    pub at: String,
+    pub size: u64,
+    /// The title it had then.
+    pub title: Option<String>,
+}
+
+/// `20261108T153012.345Z[-n].md` → `2026-11-08T15:30:12.345Z`.
+fn stamp_iso(name: &str) -> Option<String> {
+    let b = name.as_bytes();
+    if b.len() < 23 || b[8] != b'T' || b[19] != b'Z' || b[15] != b'.' || !name.ends_with(".md") {
+        return None;
+    }
+    let digits = |r: std::ops::Range<usize>| name.get(r.clone()).filter(|x| x.bytes().all(|c| c.is_ascii_digit()));
+    Some(format!(
+        "{}-{}-{}T{}:{}:{}.{}Z",
+        digits(0..4)?, digits(4..6)?, digits(6..8)?, digits(9..11)?, digits(11..13)?, digits(13..15)?, digits(16..19)?
+    ))
+}
+
+/// The history folder of `id`, when it is a real directory (never a link).
+fn history_dir(root: &Path, id: &str) -> Result<Option<PathBuf>, String> {
+    if !crate::ulid::is_valid(id) {
+        return Err(format!("not an idea id: {id:?}"));
+    }
+    let h = root.join(HISTORY_DIR);
+    let d = h.join(id);
+    for p in [&h, &d] {
+        match fs::symlink_metadata(p) {
+            Ok(md) if md.file_type().is_dir() => {}
+            Ok(_) => return Err(format!("{} is not a folder", p.display())),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("{}: {e}", p.display())),
+        }
+    }
+    Ok(Some(d))
+}
+
+/// Every copy history holds of the idea `id`, newest first. The id is taken
+/// as it is (a removed or merged-away idea has versions too); none is an
+/// empty list. Only regular files with a history stamp for a name.
+pub fn versions_at(root: &Path, id: &str) -> Result<Vec<Version>, String> {
+    let Some(d) = history_dir(root, id)? else { return Ok(Vec::new()) };
+    let rd = fs::read_dir(&d).map_err(|e| format!("{}: {e}", d.display()))?;
+    let mut out = Vec::new();
+    for e in rd.filter_map(Result::ok) {
+        let Ok(name) = e.file_name().into_string() else { continue };
+        let Some(at) = stamp_iso(&name) else { continue };
+        let Ok(md) = fs::symlink_metadata(e.path()) else { continue };
+        if !md.file_type().is_file() {
+            continue;
+        }
+        let title = (md.len() <= MAX_BYTES)
+            .then(|| fs::read(e.path()).ok())
+            .flatten()
+            .and_then(|b| String::from_utf8(b).ok())
+            .and_then(|t| title_of(&t));
+        out.push(Version { version: name, at, size: md.len(), title });
+    }
+    out.sort_by(|x, y| y.version.cmp(&x.version));
+    Ok(out)
+}
+
+/// The exact text of one history copy of `id`.
+pub fn version_text_at(root: &Path, id: &str, version: &str) -> Result<String, String> {
+    if stamp_iso(version).is_none() || version.contains('/') {
+        return Err(format!("not a version name: {version:?}"));
+    }
+    let Some(d) = history_dir(root, id)? else { return Err(format!("the idea {id} has no history")) };
+    let p = d.join(version);
+    let md = fs::symlink_metadata(&p).map_err(|e| format!("{version}: {e}"))?;
+    if !md.file_type().is_file() || md.len() > MAX_BYTES {
+        return Err(format!("{version} is not a readable copy"));
+    }
+    String::from_utf8(fs::read(&p).map_err(|e| format!("{version}: {e}"))?).map_err(|_| format!("{version} is not UTF-8"))
+}
+
+/// Put the history copy `version` back as the idea `id` (§3: a merge, split
+/// or remove that was a mistake is undone this way). A live idea's current
+/// file is copied to history FIRST, then replaced (and renamed after its
+/// heading). An id with no live file (removed, or merged away) is made
+/// again under its own id, as a new file; a merge that absorbed it keeps its
+/// text and its `absorbed:` line, and the live file answers for the id. A
+/// copy whose own `id` is not `id` (the text an adoption replaced) is refused.
+pub fn restore_at(root: &Path, id: &str, version: &str, expected_mtime: Option<u64>) -> Result<Doc, String> {
+    refuse_real(root)?;
+    let text = version_text_at(root, id, version)?;
+    if id_of(&text) != Some(id) {
+        return Err("that copy was taken before the idea had its id, so it cannot be restored as this idea: open it from .history by hand".into());
+    }
+    let idx = list_at(root)?;
+    match idx.exact(id) {
+        Ok(idea) => {
+            let idea = idea.clone();
+            let (now, md) = load(root, &idea)?;
+            check_mtime(&md, expected_mtime)?;
+            if now != text {
+                history_copy_at(root, id, now.as_bytes())?;
+                crate::fsx::write_atomic(&root.join(&idea.file), text.as_bytes(), Some(md.permissions())).map_err(|e| format!("{}: {e}", idea.file))?;
+            }
+            rename_to_title(root, &idea.file, &text)?;
+        }
+        Err(_) if idx.ideas.iter().any(|d| d.id.as_deref() == Some(id)) => {
+            return Err(idx.exact(id).err().unwrap_or_default());
+        }
+        Err(_) => {
+            create_named(root, &slug(&clean_title(&title_of(&text).unwrap_or_default())), &text)?;
+        }
+    }
+    read_at(root, id)
+}
+
+// ── related ideas ───────────────────────────────────────────────────────────
+
+/// One idea related to another, and how.
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct Relation {
+    pub id: String,
+    pub title: String,
+    /// `related` (this idea's `related:` names it), `related-by` (its
+    /// `related:` names this one), `links-to` / `linked-from` (an `idea:`
+    /// link in the text), `split-from` (this idea's `from:`) or `split-into`
+    /// (its `from:` is this one).
+    pub how: &'static str,
+    /// The merged-away id the relation was written with, when it resolved
+    /// through one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
+}
+
+/// Every idea related to `id`, written and computed (§3): its own
+/// `related:`, `from:` and links, and every other live idea whose
+/// `related:`, `from:` or links name it or an id it absorbed. An id that
+/// resolves nowhere is left out; the idea itself never appears.
+pub fn related_at(root: &Path, id: &str) -> Result<Vec<Relation>, String> {
+    let idx = list_at(root)?;
+    let me = idx.resolve(id)?.id.clone().unwrap_or_default();
+    let mine = idx.rels(&me).cloned().unwrap_or_default();
+    let names_me = |x: &str| x == me || idx.absorbed_by(x) == Some(me.as_str());
+    let mut out: Vec<Relation> = Vec::new();
+    let mut push = |other: &str, how: &'static str| {
+        let Ok((d, via)) = idx.lookup(other) else { return };
+        let Some(oid) = d.id.clone() else { return };
+        if oid == me || out.iter().any(|r| r.id == oid && r.how == how) {
+            return;
+        }
+        out.push(Relation { id: oid, title: d.title.clone(), how, via: via.then(|| other.to_string()) });
+    };
+    for r in &mine.related {
+        push(r, "related");
+    }
+    if let Some(f) = &mine.from {
+        push(f, "split-from");
+    }
+    for l in &mine.links {
+        push(l, "links-to");
+    }
+    let mut others: Vec<(&String, &Rels)> = idx.rels.iter().filter(|(k, _)| **k != me).collect();
+    others.sort_by_key(|(k, _)| *k);
+    for (other, r) in others {
+        if r.related.iter().any(|x| names_me(x)) {
+            push(other, "related-by");
+        }
+        if r.from.as_deref().is_some_and(names_me) {
+            push(other, "split-into");
+        }
+        if r.links.iter().any(|x| names_me(x)) {
+            push(other, "linked-from");
+        }
+    }
+    Ok(out)
+}
+
 // ── the same, in the folder `dir()` names ───────────────────────────────────
 
 pub fn list() -> Result<Index, String> {
@@ -844,6 +1516,16 @@ pub fn remove(id: &str, expected_mtime: Option<u64>) -> Result<(), String> {
 }
 pub fn adopt(file: &str, expected_mtime: Option<u64>) -> Result<Doc, String> {
     adopt_at(&dir(), file, expected_mtime)
+}
+
+pub fn relate(id: &str, other: &str) -> Result<Doc, String> {
+    relate_at(&dir(), id, other)
+}
+pub fn related(id: &str) -> Result<Vec<Relation>, String> {
+    related_at(&dir(), id)
+}
+pub fn versions(id: &str) -> Result<Vec<Version>, String> {
+    versions_at(&dir(), id)
 }
 
 #[cfg(test)]
@@ -1294,6 +1976,204 @@ mod tests {
 
     /// The guard's rule on its inputs. The switch itself is process-wide and
     /// set by the tests that start an engine, never here.
+    // ── phase 3: ideas relate ───────────────────────────────────────────────
+
+    /// A new idea whose text is exactly `body` under its heading.
+    fn made(root: &Path, title: &str, body: &str) -> Doc {
+        let d = create_at(root, title).unwrap();
+        let id = d.idea.id.clone().unwrap();
+        let text = format!("{}\n{body}", d.content);
+        write_at(root, &id, &text, None).unwrap();
+        read_at(root, &id).unwrap()
+    }
+
+    /// Every history copy of `id`, oldest first, as text.
+    fn copies(root: &Path, id: &str) -> Vec<String> {
+        let mut v = versions_at(root, id).unwrap();
+        v.reverse();
+        v.iter().map(|x| version_text_at(root, id, &x.version).unwrap()).collect()
+    }
+
+    fn id(d: &Doc) -> String {
+        d.idea.id.clone().unwrap()
+    }
+
+    #[test]
+    fn a_frontmatter_list_reads_every_form_and_a_write_touches_only_its_key() {
+        let t = "---\nid: X\nrelated: [A, \"B\" ,A]\nabsorbed:\n  - C\n  - 'D'\nx-mine: 1\n---\n\n# T\n";
+        assert_eq!(front_list(t, "related"), vec!["A", "B"]);
+        assert_eq!(front_list(t, "absorbed"), vec!["C", "D"]);
+        assert_eq!(front_list(t, "from"), Vec::<String>::new());
+        let w = with_front_list(t, "absorbed", &["C".into(), "D".into(), "E".into()]).unwrap();
+        assert_eq!(w, "---\nid: X\nrelated: [A, \"B\" ,A]\nabsorbed: [C, D, E]\nx-mine: 1\n---\n\n# T\n");
+        let w = with_front_list(&w, "plan_of", &["P".into()]).unwrap();
+        assert!(w.ends_with("x-mine: 1\nplan_of: [P]\n---\n\n# T\n"), "{w}");
+        let crlf = "---\r\nid: X\r\n---\r\n\r\n# T\r\n";
+        assert_eq!(with_front_list(crlf, "related", &["A".into()]).unwrap(), "---\r\nid: X\r\nrelated: [A]\r\n---\r\n\r\n# T\r\n");
+        assert_eq!(utf16_to_byte("a😀b", 3), Some(5), "an astral character is two UTF-16 units");
+        assert_eq!(utf16_to_byte("a😀b", 2), None, "inside a surrogate pair");
+        assert_eq!(utf16_to_byte("a😀b", 4), Some(6));
+    }
+
+    #[test]
+    fn relate_writes_one_side_only_and_the_other_side_is_computed() {
+        let t = Tmp::new("relate");
+        let root = t.root();
+        let a = made(&root, "Alpha", "a text\n");
+        let b = made(&root, "Beta", "b text\n");
+        let (ai, bi) = (id(&a), id(&b));
+        let r = relate_at(&root, &ai, &bi).unwrap();
+        assert_eq!(front_list(&r.content, "related"), vec![bi.clone()]);
+        assert_eq!(r.content.replace(&format!("related: [{bi}]\n"), ""), a.content, "only the line was added");
+        assert_eq!(read_at(&root, &bi).unwrap().content, b.content, "the other side is never written");
+        assert_eq!(copies(&root, &ai), vec![a.content.clone()], "the history copy is the original, byte for byte");
+        let rel = related_at(&root, &bi).unwrap();
+        assert_eq!((rel[0].id.as_str(), rel[0].how), (ai.as_str(), "related-by"), "{rel:?}");
+        assert_eq!(related_at(&root, &ai).unwrap()[0].how, "related");
+        // Already related, either way round: nothing written, no copy.
+        relate_at(&root, &ai, &bi).unwrap();
+        relate_at(&root, &bi, &ai).unwrap();
+        assert_eq!(copies(&root, &ai).len(), 1);
+        assert!(copies(&root, &bi).is_empty());
+        assert!(relate_at(&root, &ai, &ai).unwrap_err().contains("itself"));
+    }
+
+    #[test]
+    fn a_merge_appends_under_a_heading_absorbs_the_id_and_the_old_id_resolves_to_the_absorber() {
+        let t = Tmp::new("merge");
+        let root = t.root();
+        let ai = crate::ulid::new();
+        raw_doc(&root, "jellyfin.md", &rich(&ai));
+        let a = read_at(&root, &ai).unwrap();
+        let b = made(&root, "Beta plan", "first para\n\nsecond para\n");
+        let c = made(&root, "Gamma", "g\n");
+        let (bi, ci) = (id(&b), id(&c));
+        relate_at(&root, &bi, &ci).unwrap();
+        let b = read_at(&root, &bi).unwrap();
+        let m = merge_at(&root, &ai, &bi, None, Some(a.idea.mtime_ms), Some(b.idea.mtime_ms)).unwrap();
+        // History first: both originals, byte for byte.
+        assert_eq!(copies(&root, &ai), vec![a.content.clone()]);
+        assert_eq!(copies(&root, &bi).last(), Some(&b.content), "(the relate copied B before)");
+        // §3's table: B's id in A's `absorbed`, B's related joins A's.
+        assert_eq!(front_list(&m.content, "absorbed"), vec![bi.clone()]);
+        assert_eq!(front_list(&m.content, "related"), vec!["01JC8Z9P0000000000000000AA".to_string(), ci.clone()]);
+        let section = format!("## From: Beta plan ({})\n\nfirst para\n\nsecond para\n", today());
+        assert!(m.content.ends_with(&section), "{}", m.content);
+        assert!(m.content.contains("x-mine: \"keep  me\"") && m.content.contains("<!-- ¶ 7k2q -->"), "every other byte survives");
+        assert!(!root.join(&b.idea.file).exists(), "B's file leaves the list");
+        // B keeps resolving, to A, with the note.
+        let via = read_at(&root, &bi).unwrap();
+        assert_eq!(via.idea.id.as_deref(), Some(ai.as_str()));
+        assert_eq!(via.merged, Some(Merged { id: bi.clone(), title: Some("Beta plan".into()), date: Some(today()) }));
+        assert!(read_at(&root, &ai).unwrap().merged.is_none());
+        // An act never reaches A through B's id.
+        for e in [
+            write_at(&root, &bi, &m.content, None).unwrap_err(),
+            remove_at(&root, &bi, None).unwrap_err(),
+            rename_at(&root, &bi, "x", None).unwrap_err(),
+        ] {
+            assert!(e.contains("merged into “Jellyfin on the home server”"), "{e}");
+        }
+        assert!(root.join(&m.idea.file).exists(), "A is untouched by those");
+        // A merge of A into D carries B along: B now resolves to D.
+        let d = made(&root, "Delta", "d\n");
+        let di = id(&d);
+        let m2 = merge_at(&root, &di, &ai, Some("\n# Delta, rewritten\n\nOne text.\n"), None, None).unwrap();
+        assert_eq!(front_list(&m2.content, "absorbed"), vec![ai.clone(), bi.clone()]);
+        assert!(m2.content.ends_with("---\n\n# Delta, rewritten\n\nOne text.\n"), "the given body, the core's frontmatter: {}", m2.content);
+        assert_eq!(m2.idea.file, "delta-rewritten.md", "the first heading names the file");
+        assert_eq!(read_at(&root, &bi).unwrap().idea.id.as_deref(), Some(di.as_str()));
+        assert!(merge_at(&root, &di, &ci, Some("---\nid: x\n---\n"), None, None).unwrap_err().contains("without its frontmatter"));
+        assert!(merge_at(&root, &di, &di, None, None, None).unwrap_err().contains("itself"));
+        assert!(merge_at(&root, &di, &ci, None, Some(1), None).unwrap_err().contains("changed on disk"));
+    }
+
+    #[test]
+    fn combine_is_a_merge_into_a_new_idea() {
+        let t = Tmp::new("combine");
+        let root = t.root();
+        let a = made(&root, "Alpha", "aa\n");
+        let b = made(&root, "Beta", "bb\n");
+        let (ai, bi) = (id(&a), id(&b));
+        assert!(combine_at(&root, std::slice::from_ref(&ai), "x", None).unwrap_err().contains("two ideas"));
+        assert!(combine_at(&root, &[ai.clone(), ai.clone()], "x", None).unwrap_err().contains("twice"));
+        let c = combine_at(&root, &[ai.clone(), bi.clone()], "Both", None).unwrap();
+        let ci = id(&c);
+        assert_eq!(front_list(&c.content, "absorbed"), vec![ai.clone(), bi.clone()]);
+        let date = today();
+        assert!(c.content.ends_with(&format!("# Both\n\n## From: Alpha ({date})\n\naa\n\n## From: Beta ({date})\n\nbb\n")), "{}", c.content);
+        assert_eq!(c.idea.file, "both.md");
+        assert_eq!(copies(&root, &ai), vec![a.content.clone()]);
+        assert_eq!(copies(&root, &bi), vec![b.content.clone()]);
+        assert_eq!(list_at(&root).unwrap().ideas.len(), 1, "both sources leave the list");
+        for x in [&ai, &bi] {
+            let r = read_at(&root, x).unwrap();
+            assert_eq!((r.idea.id.as_deref(), r.merged.as_ref().map(|m| m.id.as_str())), (Some(ci.as_str()), Some(x.as_str())));
+        }
+    }
+
+    #[test]
+    fn a_split_moves_the_text_to_a_new_idea_and_leaves_a_link_that_round_trips() {
+        let t = Tmp::new("split");
+        let root = t.root();
+        let a = made(&root, "Home 😀 server", "Intro para.\n\nJellyfin sharing\nwith friends.\n\nOutro.\n");
+        let ai = id(&a);
+        let s = a.content.find("Jellyfin").unwrap();
+        let e = a.content.find("Outro").unwrap();
+        let u16 = |b: usize| a.content[..b].encode_utf16().count();
+        // A selection reaching into the frontmatter, and a stale one, are refused.
+        assert!(split_at(&root, &ai, 0, u16(s), false, None, None).unwrap_err().contains("frontmatter"));
+        assert!(split_at(&root, &ai, u16(s), u16(e), false, None, Some(1)).unwrap_err().contains("changed on disk"));
+        let out = split_at(&root, &ai, u16(s), u16(e), false, None, Some(a.idea.mtime_ms)).unwrap();
+        let ci = id(&out.new);
+        assert_eq!(out.new.idea.title, "Jellyfin sharing");
+        assert_eq!(front_value(&out.new.content, "from"), Some(ai.as_str()));
+        assert!(out.new.content.ends_with("---\n\n# Jellyfin sharing\n\nJellyfin sharing\nwith friends.\n"), "{}", out.new.content);
+        let want = a.content.replace("Jellyfin sharing\nwith friends.\n\n", &format!("[Jellyfin sharing](idea:{ci})\n\n"));
+        assert_eq!(out.source.content, want, "the selection is replaced by a link, blank lines kept");
+        assert_eq!(links_in(&out.source.content), vec![ci.clone()]);
+        assert_eq!(copies(&root, &ai), vec![a.content.clone()], "A's previous version is in history");
+        let hows = |x: &str| related_at(&root, x).unwrap().into_iter().map(|r| r.how).collect::<Vec<_>>();
+        assert_eq!(hows(&ai), vec!["links-to", "split-into"]);
+        assert_eq!(hows(&ci), vec!["split-from", "linked-from"]);
+        // And back, by restoring A's copy: the original bytes, and the version
+        // it replaced kept in history in turn.
+        let v = versions_at(&root, &ai).unwrap();
+        let back = restore_at(&root, &ai, &v[0].version, Some(out.source.idea.mtime_ms)).unwrap();
+        assert_eq!(back.content, a.content);
+        assert_eq!(copies(&root, &ai), vec![a.content.clone(), out.source.content.clone()]);
+        // Extract keeps the source as it is and copies nothing.
+        let ex = split_at(&root, &ai, u16(s), u16(e), true, Some("Copy"), Some(back.idea.mtime_ms)).unwrap();
+        assert_eq!(ex.source.content, a.content);
+        assert_eq!(copies(&root, &ai).len(), 2);
+        assert_eq!(ex.new.idea.title, "Copy");
+    }
+
+    #[test]
+    fn restore_puts_a_copy_back_and_makes_a_removed_or_merged_idea_live_again() {
+        let t = Tmp::new("restore");
+        let root = t.root();
+        let a = made(&root, "Alpha", "one\n");
+        let b = made(&root, "Beta", "two\n");
+        let (ai, bi) = (id(&a), id(&b));
+        merge_at(&root, &ai, &bi, None, None, None).unwrap();
+        let vb = versions_at(&root, &bi).unwrap();
+        assert_eq!(vb.len(), 1);
+        assert_eq!(vb[0].title.as_deref(), Some("Beta"));
+        assert_eq!(&vb[0].at[..10], today());
+        // B comes back under its own id, and answers for it again.
+        let r = restore_at(&root, &bi, &vb[0].version, None).unwrap();
+        assert_eq!((r.content.as_str(), r.merged.is_none()), (b.content.as_str(), true));
+        assert!(root.join("beta.md").exists());
+        assert!(restore_at(&root, &bi, "../x.md", None).unwrap_err().contains("not a version"));
+        // A copy taken before an adoption has no id: refused.
+        raw_doc(&root, "hand.md", "# Hand\n");
+        let h = adopt_at(&root, "hand.md", None).unwrap();
+        let vh = versions_at(&root, &id(&h)).unwrap();
+        assert!(restore_at(&root, &id(&h), &vh[0].version, None).unwrap_err().contains("before the idea had its id"));
+        assert!(versions_at(&root, &crate::ulid::new()).unwrap().is_empty());
+    }
+
     #[test]
     fn a_forbidden_process_cannot_write_the_real_ideas_folder() {
         let real = Path::new("/home/u/.local/share/worktrees/ideas");
