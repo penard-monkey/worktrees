@@ -3255,9 +3255,9 @@ mod tests {
         let reads = TABLE.iter().filter(|r| r.cap == Some(Capability::Read)).count();
         let quiet: Vec<&str> = TABLE.iter().filter(|r| r.exposure != Exposure::ClientLocal && !recorded(r)).map(|r| r.name).collect();
         // The guest reads in the table now (group chat §2's trap); the rest
-        // of `GUEST_READS` are PR B's and C's, named ahead of their rows.
+        // of `GUEST_READS` are PR B's, named ahead of their rows.
         let guest_reads: Vec<&str> = dispatch::GUEST_READS.iter().copied().filter(|n| super::super::dispatch::row(n).is_some()).collect();
-        assert_eq!(guest_reads, vec!["shares_list", "guest_places"]);
+        assert_eq!(guest_reads, vec!["shares_list", "guest_places", "shared_turns", "shared_tool_call"]);
         assert_eq!(quiet.len(), reads + STREAM_TRAFFIC.len() + CONSOLE_READS.len() + guest_reads.len(), "{quiet:?}");
         // The console reads are console rows that exist: a renamed one would
         // make an idea chat act silent.

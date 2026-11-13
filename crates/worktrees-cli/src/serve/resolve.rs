@@ -404,7 +404,8 @@ pub fn admissible(row: &Row, caller: &Caller, grant: &Grant) -> Result<(), Refus
         _ => {}
     }
     if let Some(cap) = row.cap {
-        if !grant.allows(cap) {
+        let console_guest_row = cap == Capability::Guest && caller.is_console() && super::dispatch::CONSOLE_GUEST_ROWS.contains(&row.name);
+        if !grant.allows(cap) && !console_guest_row {
             return Err(Refusal::denied(format!("{} needs `{cap}`", row.name)));
         }
     }

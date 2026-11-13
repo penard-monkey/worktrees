@@ -25,6 +25,7 @@ mod conn;
 mod devices;
 mod dispatch;
 mod flight;
+mod history;
 mod identity;
 mod netwatch;
 mod pairing;
