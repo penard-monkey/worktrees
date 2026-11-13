@@ -477,7 +477,7 @@ fn the_kill_switch_closes_every_device_socket_and_both_ports() {
     assert_eq!(h.at(), at, "a kill switch cost the devices their address");
     h.remote.disable().unwrap();
     let pair = h.remote.deps.clients.pairing().begin(
-        super::super::pairing::Offer { grant: Grant { capabilities: Caps::of(&[Capability::Read]), projects: Projects::All }, expiry: Expiry::default() },
+        super::super::pairing::Offer::owner(Grant { capabilities: Caps::of(&[Capability::Read]), projects: Projects::All }, Expiry::default()),
         worktrees_core::sysclock::now_epoch(),
     );
     assert!(pair.is_err(), "a pairing window opened with remote access off");
@@ -491,7 +491,7 @@ fn a_pairing_window_opens_where_remote_access_listens() {
     let Some(lan) = lan_or_skip() else { return };
     let h = host("pairbind");
     let off = h.remote.deps.clients.pairing().begin(
-        super::super::pairing::Offer { grant: Grant { capabilities: Caps::of(&[Capability::Read]), projects: Projects::All }, expiry: Expiry::default() },
+        super::super::pairing::Offer::owner(Grant { capabilities: Caps::of(&[Capability::Read]), projects: Projects::All }, Expiry::default()),
         worktrees_core::sysclock::now_epoch(),
     );
     assert!(off.is_err(), "no window while remote access is off");
@@ -502,7 +502,7 @@ fn a_pairing_window_opens_where_remote_access_listens() {
         .clients
         .pairing()
         .begin(
-            super::super::pairing::Offer { grant: Grant { capabilities: Caps::of(&[Capability::Read]), projects: Projects::All }, expiry: Expiry::default() },
+            super::super::pairing::Offer::owner(Grant { capabilities: Caps::of(&[Capability::Read]), projects: Projects::All }, Expiry::default()),
             worktrees_core::sysclock::now_epoch(),
         )
         .unwrap();

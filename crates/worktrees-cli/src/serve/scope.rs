@@ -285,6 +285,13 @@ pub enum Event {
 /// `payload` as `caller` (holding `grant`) may see it, or `None` to send it
 /// nothing. `roots` is asked for only when the scope is not `"*"`.
 pub fn event(name: &str, payload: &Value, caller: &Caller, grant: &Grant, roots: &mut dyn FnMut() -> Vec<String>) -> Option<Value> {
+    // A guest (group chat §2) hears none of the host's events: even an empty
+    // projection, or `places:changed`'s bare "re-read", would tell it when the
+    // owner works. Its own event, `shares:changed`, is PR B's, with a kind of
+    // its own that names the principal it is for.
+    if grant.allows(worktrees_core::authz::Capability::Guest) {
+        return None;
+    }
     let Some((_, how)) = EVENTS.iter().find(|(n, _)| *n == name) else {
         // Unprojected: the console only.
         return caller.is_console().then(|| payload.clone());
@@ -332,6 +339,20 @@ pub fn event(name: &str, payload: &Value, caller: &Caller, grant: &Grant, roots:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A guest hears no host event at all: not a projected busy set, not a
+    /// bare "re-read", not a device event (group chat §2).
+    #[test]
+    fn a_guest_hears_no_host_event() {
+        use worktrees_core::authz::{Caps, DeviceId, PrincipalId, Projects};
+        let guest = Caller::paired(PrincipalId::new("g_bret"), DeviceId::new("d_bret"));
+        let g = Grant { capabilities: Caps::GUEST, projects: Projects::only(Vec::<String>::new()) };
+        for (name, _) in EVENTS {
+            let p = serde_json::json!({"busy": [], "waiting": [], "path": "/x", "drafts": [], "repo": "/x"});
+            assert_eq!(event(name, &p, &guest, &g, &mut Vec::new), None, "{name}");
+        }
+        assert!(event("places:changed", &Value::Null, &Caller::console(), &Grant::everything(), &mut Vec::new).is_some());
+    }
     use serde_json::json;
     use worktrees_core::authz::{Capability, Caps, DeviceId, PrincipalId};
 

@@ -493,6 +493,9 @@ export const CONSOLE_ROWS: readonly string[] = [
   // named workspaces (idea board phase 2): desktop only
   "workspaces_list", "workspace_create", "workspace_rename", "workspace_remove", "workspace_set_projects",
   "workspace_reorder",
+  // group chat's shares (PR A): the owner's acts and listings
+  "share_create", "share_again", "share_allow", "share_remove_guest", "share_stop", "guest_places_hide",
+  "share_requests_list", "share_request_dismiss", "shares_all", "guests_list", "guest_remove", "owner_set_name",
 ];
 
 /** The device's capabilities on the host this window drives, from the remote

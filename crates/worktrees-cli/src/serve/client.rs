@@ -33,6 +33,7 @@ usage: worktrees serve call <command> [json-args] [--config-dir DIR]
        worktrees serve pair (--projects ROOT[,ROOT…] | --all-projects)
                             [--preset observe|operate|drive] [--caps CAP[,CAP…]] [--admin]
                             [--expiry 30d|never|<YYYY-MM-DDTHH:MM:SSZ>] [--config-dir DIR]
+       worktrees serve pair (--invite NAME | --guest ID) [--expiry …] [--config-dir DIR]
 
 Console clients of the running `worktrees serve` (the one serve.json in the
 config dir names). `remote on` turns remote access on, on one private address
@@ -54,7 +55,15 @@ the QR and the link (`worktrees remote pair '<link>'` on the other machine
 takes it), then the six-digit code the device shows, and asks you to allow
 it. The scope comes first: name the projects, or --all-projects. The preset
 is Observe (read) unless you choose another; drive is read, write, answer,
-instruct and stream, and a device holding it can run commands here as you.";
+instruct and stream, and a device holding it can run commands here as you.
+
+`pair --invite NAME` pairs ANOTHER person's device as a guest (group chat):
+NAME is a new guest, created when you allow the device; `--guest ID` pairs a
+further device of a guest you have (`worktrees serve call guests_list`). A
+guest holds no project: only what you share with them (`share_create`), your
+place names unless you hide a project (`guest_places_hide`), and asking you
+for a share. A devices.json that names a guest is refused WHOLE by a
+worktrees from before guests, your own devices included.";
 
 /// One console connection.
 pub struct Console {
@@ -361,8 +370,19 @@ fn pair(args: &mut Vec<String>) -> Result<i32, String> {
     let all = take_flag(args, "--all-projects");
     let admin = take_flag(args, "--admin");
     let expiry_arg = take(args, "--expiry")?;
+    let invite_name = take(args, "--invite")?;
+    let guest_id = take(args, "--guest")?;
     if !args.is_empty() {
         return Err(format!("usage: unexpected {:?}", args[0]));
+    }
+    let invite = match (invite_name, guest_id) {
+        (Some(_), Some(_)) => return Err("--invite or --guest, not both".into()),
+        (Some(n), None) => Some(json!({ "name": n })),
+        (None, Some(g)) => Some(json!({ "guest": g })),
+        (None, None) => None,
+    };
+    if invite.is_some() && (caps_arg.is_some() || preset_name.is_some() || projects_arg.is_some() || all || admin) {
+        return Err("a guest's device holds no project and no capability but `guest`: --invite and --guest take no scope".into());
     }
     let mut caps: Vec<String> = match (&caps_arg, &preset_name) {
         (Some(_), Some(_)) => return Err("--caps or --preset, not both".into()),
@@ -374,6 +394,7 @@ fn pair(args: &mut Vec<String>) -> Result<i32, String> {
     }
     // §2.2 step 1: a scope is always chosen, never inherited.
     let projects = match (projects_arg, all) {
+        _ if invite.is_some() => json!([]),
         (Some(_), true) => return Err("--projects or --all-projects, not both".into()),
         (None, false) => return Err("usage: name the projects this device may reach (--projects ROOT,…) or --all-projects".into()),
         (None, true) => json!("*"),
@@ -395,7 +416,11 @@ fn pair(args: &mut Vec<String>) -> Result<i32, String> {
             st["state"].as_str().unwrap_or("off")
         ));
     }
-    let w = c.call("pair_begin", json!({ "caps": caps, "projects": projects, "expiry": expiry })).map_err(|e| err_text(&e))?;
+    let begin = match &invite {
+        Some(i) => json!({ "invite": i, "expiry": expiry }),
+        None => json!({ "caps": caps, "projects": projects, "expiry": expiry }),
+    };
+    let w = c.call("pair_begin", begin).map_err(|e| err_text(&e))?;
     let uri = w["uri"].as_str().ok_or("pair_begin answered no link")?.to_string();
     // SAFETY: a handler that only stores to an atomic.
     unsafe { libc::signal(libc::SIGINT, on_sigint as *const () as libc::sighandler_t) };
@@ -406,7 +431,13 @@ fn pair(args: &mut Vec<String>) -> Result<i32, String> {
     } else {
         String::new()
     };
-    println!("Scope: {} on {}{label}", caps.join(", "), if projects == json!("*") { "every project".to_string() } else { projects.to_string() });
+    match &invite {
+        Some(i) => println!(
+            "Scope: a guest ({}) — only what you share with them, and your unhidden place names",
+            i.get("name").or_else(|| i.get("guest")).and_then(Value::as_str).unwrap_or("?")
+        ),
+        None => println!("Scope: {} on {}{label}", caps.join(", "), if projects == json!("*") { "every project".to_string() } else { projects.to_string() }),
+    }
     println!("The window closes in {} s, or after one attempt. ^C cancels it.\n", w["expires_at"].as_i64().map_or(120, |e| e - worktrees_core::sysclock::now_epoch()));
     let mut asked = false;
     loop {
@@ -422,8 +453,9 @@ fn pair(args: &mut Vec<String>) -> Result<i32, String> {
                 let r = &s["request"];
                 let code = r["code"].as_str().unwrap_or_default();
                 let code = if code.len() == 6 { format!("{} {}", &code[..3], &code[3..]) } else { code.to_string() };
+                let whose = r["invite"]["name"].as_str().map(|n| format!(" as {n}, a guest,")).unwrap_or_default();
                 println!(
-                    "{} ({}, from {}) wants to pair · code {code}\nAllow only if this code is on your device right now.",
+                    "{} ({}, from {}){whose} wants to pair · code {code}\nAllow only if this code is on the device right now.",
                     r["name"].as_str().unwrap_or("?"),
                     r["platform"].as_str().unwrap_or("?"),
                     r["peer"].as_str().unwrap_or("?"),
