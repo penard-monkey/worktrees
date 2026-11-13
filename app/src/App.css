@@ -4019,6 +4019,7 @@ body.dragging .ws-h { cursor: grabbing; }
 /* Not `.mini`: that one is hidden outside a hovered project header. */
 .ws-ov-x { border: 0; background: transparent; color: var(--txt-dim); font-size: var(--fs-body); line-height: 1; padding: 0 4px; border-radius: 6px; cursor: pointer; }
 .ws-ov-x:hover { color: var(--txt-hi); background: var(--bg-elev); }
+.ws-ov-merged { margin-left: var(--s1); color: var(--txt-dim); }
 .ws-ov-gone { color: var(--txt-dim); font-style: italic; font-size: var(--fs-meta); }
 .ws-ov-pick { list-style: none; margin: 0; padding: var(--s2); display: flex; flex-wrap: wrap; gap: var(--s2); border: 1px solid var(--line); border-radius: 8px; background: var(--bg-panel); }
 .ws-ov-problems { margin: 0; padding: var(--s2) var(--s3) var(--s2) var(--s5); border-left: 3px solid var(--warn); background: var(--bg-panel); color: var(--txt-hi); font-size: var(--fs-meta); }
