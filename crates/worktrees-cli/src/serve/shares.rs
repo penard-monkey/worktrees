@@ -1141,7 +1141,7 @@ mod tests {
 /// registry is `devices.json` in a scratch config dir, with the owner and two
 /// guests, Bret and Eve; objects resolve against a fixture world.
 #[cfg(test)]
-mod serve_tests {
+pub(crate) mod serve_tests {
     use super::*;
     use crate::serve::devices::{DeviceRegistry, Enrollment, Expiry, Platform, PrincipalRecord};
     use crate::serve::dispatch::{self, Args, Call, Exposure, GUEST_ROWS, TABLE};
@@ -1151,15 +1151,15 @@ mod serve_tests {
     use worktrees_api::agents::LiveSession;
     use worktrees_core::authz::{self, Caller, Capability, DeviceId, Grant};
 
-    struct Host {
-        top: PathBuf,
-        cfg: PathBuf,
-        a: String,
+    pub(crate) struct Host {
+        pub(crate) top: PathBuf,
+        pub(crate) cfg: PathBuf,
+        pub(crate) a: String,
         b: String,
         devices: Arc<DeviceRegistry>,
-        world: Fixture,
-        bret: Caller,
-        eve: Caller,
+        pub(crate) world: Fixture,
+        pub(crate) bret: Caller,
+        pub(crate) eve: Caller,
     }
 
     fn guest(devices: &DeviceRegistry, name: &str, key: u8) -> Caller {
@@ -1181,7 +1181,7 @@ mod serve_tests {
     const NOW: i64 = 1_800_000_000;
 
     impl Host {
-        fn new(tag: &str) -> Host {
+        pub(crate) fn new(tag: &str) -> Host {
             let top = scratch(&format!("shares-{tag}"));
             let (a, b) = (top.join("a"), top.join("b"));
             for r in [&a, &b] {
@@ -1212,17 +1212,17 @@ mod serve_tests {
             }
         }
 
-        fn run(&self, who: &Caller, cmd: &str, a: Value) -> Result<Value, Value> {
+        pub(crate) fn run(&self, who: &Caller, cmd: &str, a: Value) -> Result<Value, Value> {
             dispatch::call_in(&self.call(who), cmd, &Args(a.as_object().cloned().unwrap_or_default()), &self.world)
         }
 
-        fn console(&self, cmd: &str, a: Value) -> Result<Value, Value> {
+        pub(crate) fn console(&self, cmd: &str, a: Value) -> Result<Value, Value> {
             self.run(&Caller::console(), cmd, a)
         }
 
         /// A live Claude in place `slug` of `a`, on session `id`, whose
         /// transcript holds `bytes`.
-        fn live(&self, slug: &str, id: &str, bytes: usize) -> PathBuf {
+        pub(crate) fn live(&self, slug: &str, id: &str, bytes: usize) -> PathBuf {
             let t = self.top.join(format!("{id}.jsonl"));
             if !t.exists() {
                 fs::write(&t, vec![b'x'; bytes]).unwrap();
@@ -1234,11 +1234,11 @@ mod serve_tests {
             t
         }
 
-        fn poll(&self) -> Vec<Change> {
+        pub(crate) fn poll(&self) -> Vec<Change> {
             Shares::at(&self.cfg).reconcile(worktrees_core::sysclock::now_epoch(), &|s| lane_now(&self.world.roots, s)).unwrap()
         }
 
-        fn principal(c: &Caller) -> String {
+        pub(crate) fn principal(c: &Caller) -> String {
             c.principal().as_str().to_string()
         }
     }

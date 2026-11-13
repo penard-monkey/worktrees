@@ -340,64 +340,100 @@ pub fn claude(lines: &[String], n: usize) -> Vec<Turn> {
 
 /// Every turn in a Claude transcript's `lines`, as [`claude`] reads them.
 fn claude_turns(lines: &[String]) -> Vec<Turn> {
-    let mut turns: Vec<Turn> = Vec::new();
-    struct Queued {
-        turn: usize,
-        step: usize,
-        source: String,
-        delivery: String,
-        at: Option<i64>,
-        text: String,
+    let mut r = ClaudeReader::default();
+    for l in lines {
+        r.feed(l);
     }
-    let mut queued: Vec<Queued> = Vec::new();
+    r.finish()
+}
+
+/// A person's message absorbed mid-turn, waiting for its queue removal.
+struct Queued {
+    turn: usize,
+    step: usize,
+    source: String,
+    delivery: String,
+    at: Option<i64>,
+    text: String,
+}
+
+/// [`claude_turns`]' parser, fed one line at a time, so the full-history
+/// index ([`Indexer`]) reads a transcript with the SAME code as every turn
+/// read, never a second reading of the format.
+#[derive(Default)]
+struct ClaudeReader {
+    turns: Vec<Turn>,
+    queued: Vec<Queued>,
     // Claude may append the removal before the attachment it describes.
     // Match after scanning both, using their IDs rather than line order.
-    let mut absorbed: HashMap<String, HashSet<String>> = HashMap::new();
-    for l in lines {
+    absorbed: HashMap<String, HashSet<String>>,
+    /// What the last line fed did to a turn other than the newest, for
+    /// [`Indexer`]: the turn it changed (a command's or a shell's output, a
+    /// command's wrapper, a queued message's removal) …
+    reached: Option<usize>,
+    /// … a removal no attachment had come for yet …
+    early: Option<(String, String)>,
+    /// … or an attachment an earlier removal names.
+    late: Option<(String, String)>,
+}
+
+impl ClaudeReader {
+    fn feed(&mut self, l: &str) {
+        self.reached = None;
+        self.early = None;
+        self.late = None;
+        let ClaudeReader { turns, queued, absorbed, reached, early, late } = self;
         if !(l.contains("\"type\":\"user\"")
             || l.contains("\"type\":\"assistant\"")
             || l.contains("\"type\":\"attachment\"")
             || l.contains("\"type\":\"queue-operation\"")
             || l.contains("\"subtype\":\"local_command\""))
         {
-            continue;
+            return;
         }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(l) else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(l) else { return };
         if v.get("isSidechain").and_then(|s| s.as_bool()) == Some(true) {
-            continue;
+            return;
         }
         let at = v.get("timestamp").and_then(|t| t.as_str()).and_then(crate::sysclock::parse_iso8601);
         let content = v.pointer("/message/content");
         match v.get("type").and_then(|t| t.as_str()) {
             Some("attachment") => {
-                let Some(a) = v.get("attachment") else { continue };
+                let Some(a) = v.get("attachment") else { return };
                 let human = a.pointer("/origin/kind").and_then(|k| k.as_str()) == Some("human")
                     || a.get("humanTurn").and_then(|h| h.as_bool()) == Some(true);
                 if !human || a.get("type").and_then(|t| t.as_str()) != Some("queued_command")
                     || a.get("commandMode").and_then(|m| m.as_str()) != Some("prompt")
                 {
-                    continue;
+                    return;
                 }
                 let (Some(source), Some(delivery), Some(raw), Some(turn)) = (
                     a.get("source_uuid").and_then(|s| s.as_str()),
                     a.get("delivery_id").and_then(|s| s.as_str()),
                     a.get("prompt").and_then(|s| s.as_str()),
                     turns.last(),
-                ) else { continue };
+                ) else { return };
                 // A line break is the person's; everything else control goes.
                 let text: String = pasted_body(raw).unwrap_or(raw).chars().filter(|c| *c == '\n' || (!c.is_control() && !crate::harness::invisible(*c))).collect();
                 if !text.is_empty() {
+                    if absorbed.get(source).is_some_and(|ids| ids.contains(delivery)) {
+                        *late = Some((source.to_string(), delivery.to_string()));
+                    }
                     queued.push(Queued { turn: turns.len() - 1, step: turn.steps.len(), source: source.to_string(), delivery: delivery.to_string(), at, text });
                 }
             }
             Some("queue-operation") if v.get("operation").and_then(|o| o.as_str()) == Some("remove") => {
                 if v.get("reason").and_then(|r| r.as_str()) != Some("absorbed_mid_turn") {
-                    continue;
+                    return;
                 }
                 let (Some(source), Some(delivery)) = (
                     v.get("commandUuid").and_then(|s| s.as_str()),
                     v.get("deliveryId").and_then(|s| s.as_str()),
-                ) else { continue };
+                ) else { return };
+                match queued.iter().rfind(|q| q.source == source && q.delivery == delivery) {
+                    Some(q) => *reached = Some(q.turn),
+                    None => *early = Some((source.to_string(), delivery.to_string())),
+                }
                 absorbed.entry(source.to_string()).or_default().insert(delivery.to_string());
             }
             Some("user") => {
@@ -411,7 +447,7 @@ fn claude_turns(lines: &[String]) -> Vec<Turn> {
                 };
                 if let Some(text) = text {
                     let before = turns.len();
-                    absorb(&mut turns, at, claude_entry(&v, &text), text);
+                    *reached = absorb(turns, at, claude_entry(&v, &text), text);
                     if turns.len() > before {
                         turns[before].id = uuid_of(&v);
                     }
@@ -423,16 +459,16 @@ fn claude_turns(lines: &[String]) -> Vec<Turn> {
             // `system` entries (`local_command`), where 2.1.316 wrote `user`
             // ones: the same wrappers, read the same way.
             Some("system") if v.get("subtype").and_then(|s| s.as_str()) == Some("local_command") => {
-                let Some(text) = v.get("content").and_then(|c| c.as_str()) else { continue };
+                let Some(text) = v.get("content").and_then(|c| c.as_str()) else { return };
                 let before = turns.len();
-                absorb(&mut turns, at, local_command(text.trim()), text.to_string());
+                *reached = absorb(turns, at, local_command(text.trim()), text.to_string());
                 if turns.len() > before {
                     turns[before].id = uuid_of(&v);
                 }
             }
             Some("assistant") => {
-                let Some(serde_json::Value::Array(blocks)) = content else { continue };
-                let turn = current(&mut turns, at, &uuid_of(&v));
+                let Some(serde_json::Value::Array(blocks)) = content else { return };
+                let turn = current(turns, at, &uuid_of(&v));
                 for b in blocks {
                     match b.get("type").and_then(|t| t.as_str()) {
                         Some("text") => turn.say(at, b.get("text").and_then(|t| t.as_str()).unwrap_or("")),
@@ -448,15 +484,19 @@ fn claude_turns(lines: &[String]) -> Vec<Turn> {
             _ => {}
         }
     }
-    let mut inserted = vec![0; turns.len()];
-    for q in queued.into_iter().filter(|q| {
-        absorbed.get(&q.source).is_some_and(|ids| ids.contains(&q.delivery))
-    }) {
-        turns[q.turn].steps.insert(q.step + inserted[q.turn], Step::User { at: q.at, text: q.text });
-        inserted[q.turn] += 1;
+
+    fn finish(self) -> Vec<Turn> {
+        let ClaudeReader { mut turns, queued, absorbed, .. } = self;
+        let mut inserted = vec![0; turns.len()];
+        for q in queued.into_iter().filter(|q| {
+            absorbed.get(&q.source).is_some_and(|ids| ids.contains(&q.delivery))
+        }) {
+            turns[q.turn].steps.insert(q.step + inserted[q.turn], Step::User { at: q.at, text: q.text });
+            inserted[q.turn] += 1;
+        }
+        unique_ids(&mut turns);
+        turns
     }
-    unique_ids(&mut turns);
-    turns
 }
 
 /// An id names one turn: a later turn that carries an earlier one's (a
@@ -482,11 +522,14 @@ enum ClaudeEntry { Person, Notice(Notice), Skip }
 /// a person's line starts a turn, a command's output joins the command it
 /// follows, a command's wrapper takes over the literal line `/compact`
 /// writes first, and a shell's output joins its `!` line.
-fn absorb(turns: &mut Vec<Turn>, at: Option<i64>, entry: ClaudeEntry, text: String) {
+fn absorb(turns: &mut Vec<Turn>, at: Option<i64>, entry: ClaudeEntry, text: String) -> Option<usize> {
+    let mut changed = None;
     match entry {
         ClaudeEntry::Person => turns.push(Turn::new(at, Some(pasted_body(&text).map_or(text.clone(), str::to_string)))),
         ClaudeEntry::Notice(Notice::Command { name, args, output }) if name.is_empty() => {
-            if let Some(t) = turns.iter_mut().rev().find(|t| matches!(t.notice, Some(Notice::Command { .. }))) {
+            if let Some(i) = turns.iter().rposition(|t| matches!(t.notice, Some(Notice::Command { .. }))) {
+                changed = Some(i);
+                let t = &mut turns[i];
                 if let Some(Notice::Command { output: o, .. }) = t.notice.as_mut() {
                     *o = output;
                 }
@@ -500,7 +543,9 @@ fn absorb(turns: &mut Vec<Turn>, at: Option<i64>, entry: ClaudeEntry, text: Stri
             // the confirming wrapper, sometimes with a summary
             // between them. The wrapper proves what that line was.
             let typed = format!("/{name}{}{}", if args.is_empty() { "" } else { " " }, args);
-            if let Some(t) = turns.iter_mut().rev().find(|t| t.notice.is_none() && t.user.as_deref() == Some(&typed)) {
+            if let Some(i) = turns.iter().rposition(|t| t.notice.is_none() && t.user.as_deref() == Some(&typed)) {
+                changed = Some(i);
+                let t = &mut turns[i];
                 let notice = Notice::Command { name, args, output };
                 t.user = Some(notice.fallback());
                 t.notice = Some(notice);
@@ -509,7 +554,9 @@ fn absorb(turns: &mut Vec<Turn>, at: Option<i64>, entry: ClaudeEntry, text: Stri
             }
         }
         ClaudeEntry::Notice(Notice::Shell { command, output, stderr }) if command.is_empty() => {
-            if let Some(t) = turns.iter_mut().rev().find(|t| matches!(t.notice, Some(Notice::Shell { .. }))) {
+            if let Some(i) = turns.iter().rposition(|t| matches!(t.notice, Some(Notice::Shell { .. }))) {
+                changed = Some(i);
+                let t = &mut turns[i];
                 if let Some(Notice::Shell { output: o, stderr: e, .. }) = t.notice.as_mut() {
                     *o = output;
                     *e = stderr;
@@ -522,6 +569,7 @@ fn absorb(turns: &mut Vec<Turn>, at: Option<i64>, entry: ClaudeEntry, text: Stri
         ClaudeEntry::Notice(notice) => turns.push(Turn::notice(at, notice)),
         ClaudeEntry::Skip => {}
     }
+    changed
 }
 
 /// A 2.1.318 `local_command` entry: a command's wrapper or its output, and
@@ -572,7 +620,7 @@ fn command_output(text: &str) -> Option<String> {
     let lines: Vec<&str> = clean.lines().map(str::trim_end).collect();
     let text = lines.join("\n");
     let text = text.trim_matches('\n');
-    (!text.trim().is_empty()).then(|| clip(text.trim_start_matches(' ')).0)
+    (!text.trim().is_empty()).then(|| text.trim_start_matches(' ').to_string())
 }
 
 /// Whole-wrapper parser for Claude's injected user entries. The human origin
@@ -710,7 +758,7 @@ fn safe_text(text: &str) -> String {
         c if c.is_control() || crate::harness::invisible(c) => None,
         c => Some(c),
     }).collect();
-    clip(clean.trim()).0
+    clean.trim().to_string()
 }
 
 /// A user entry carrying tool results: each answers the step its
@@ -1025,6 +1073,237 @@ fn repeats_line(input: &serde_json::Value, summary: Option<&str>) -> bool {
         ([Value::String(s)], Some(line)) => one_line(s).as_deref() == Some(line) && s.trim().chars().count() <= SUMMARY_MAX && s.trim().lines().count() <= 1,
         _ => false,
     }
+}
+
+// ── the full-history reader (group chat §3.2) ───────────────────────────────
+
+/// Turns the [`Indexer`] keeps in memory while it reads a transcript: the
+/// parser looks back only at the last turn (and, for a command's or a shell's
+/// output, the last such notice), so a short tail reads every boundary as
+/// the whole file would, in memory that does not grow with the file.
+const INDEX_TAIL: usize = 16;
+
+/// Which turn each line of a transcript belongs to, found by feeding it,
+/// line by line, to the SAME parser every turn read uses ([`claude`],
+/// [`codex`]) — never a second reading of the format. A turn is the line
+/// that starts it and the lines after it, until the next, LESS any line that
+/// the parser applies to an EARLIER turn (Claude's command and shell output,
+/// a command's wrapper over its literal line, a queued message's removal),
+/// which belongs to that turn instead: so a turn's bytes are a list of
+/// [`Span`]s, and reading them with the parser gives the turn the whole file
+/// gives.
+pub struct Indexer {
+    reader: Reader,
+    /// Turns begun so far.
+    count: usize,
+    /// Codex: the `task_started` (and what follows it while nothing else
+    /// does) that opens the next turn, whose range starts there so the turn
+    /// keeps its id.
+    pending: Option<(u64, u64)>,
+    /// Claude: removals of queued messages whose attachment has not come yet,
+    /// by (source, delivery): the attachment's turn takes them too.
+    early: HashMap<(String, String), (u64, u64)>,
+    /// Calls found since [`Indexer::take_calls`] last asked, with their turn.
+    calls: Vec<(String, usize)>,
+}
+
+enum Reader {
+    Claude(ClaudeReader),
+    Codex(CodexReader),
+}
+
+/// Bytes `start..end` of a transcript belong to turn `turn` (0 the first);
+/// `begins` when they start it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Span {
+    pub turn: usize,
+    pub start: u64,
+    pub end: u64,
+    pub begins: bool,
+}
+
+/// The harnesses the full-history reader reads (group chat §3.2,
+/// `shares::SHAREABLE`): Claude and Codex.
+pub fn history_reads(harness: &str) -> bool {
+    harness == "claude" || harness == "codex"
+}
+
+/// Early removals the index remembers at most: each is one absorbed message
+/// whose removal Claude wrote first, so a handful is the real number.
+const EARLY_MAX: usize = 1024;
+
+impl Indexer {
+    /// `None` for a harness the full-history reader does not read.
+    pub fn new(harness: &str) -> Option<Indexer> {
+        let reader = match harness {
+            "claude" => Reader::Claude(ClaudeReader::default()),
+            "codex" => Reader::Codex(CodexReader::default()),
+            _ => return None,
+        };
+        Some(Indexer { reader, count: 0, pending: None, early: HashMap::new(), calls: Vec::new() })
+    }
+
+    /// Turns begun so far.
+    pub fn turns(&self) -> usize {
+        self.count
+    }
+
+    /// The calls (by their transcript id) read since the last ask, each with
+    /// the turn it is in.
+    pub fn take_calls(&mut self) -> Vec<(String, usize)> {
+        std::mem::take(&mut self.calls)
+    }
+
+    /// The newest held turn's calls past its first `from` steps, as turn
+    /// `turn`'s.
+    fn note_calls(&mut self, held: &[Turn], from: usize) {
+        if let (Some(t), Some(turn)) = (held.last(), self.count.checked_sub(1)) {
+            self.calls.extend(t.steps.iter().skip(from).filter_map(Step::id).map(|id| (id.to_string(), turn)));
+        }
+    }
+
+    /// Feed one complete line (no newline) that occupies bytes `start..end`
+    /// (its newline included): the spans it adds. Nothing for a line before
+    /// the first turn, or one a Codex turn may yet start on.
+    pub fn feed(&mut self, line: &str, start: u64, end: u64) -> Vec<Span> {
+        let mut out = Vec::new();
+        let span = |turn, (start, end), begins| Span { turn, start, end, begins };
+        match &mut self.reader {
+            Reader::Claude(r) => {
+                let before = r.turns.len();
+                let steps = r.turns.last().map_or(0, |t| t.steps.len());
+                r.feed(line);
+                let held = r.turns.len();
+                if held > before {
+                    self.count += 1;
+                    out.push(span(self.count - 1, (start, end), true));
+                } else if held > 0 {
+                    let last = self.count - 1;
+                    // `reached` indexes the turns held, the newest `last`.
+                    let to = r.reached.map_or(last, |i| last - (held - 1 - i));
+                    out.push(span(to, (start, end), false));
+                }
+                if let Some(k) = r.early.take() {
+                    if self.early.len() < EARLY_MAX {
+                        self.early.insert(k, (start, end));
+                    }
+                }
+                if let Some(k) = r.late.take() {
+                    if let (Some(s), Some(last)) = (self.early.remove(&k), self.count.checked_sub(1)) {
+                        out.push(span(last, s, false));
+                    }
+                }
+                let from = if held > before { 0 } else { steps };
+                let turns = std::mem::take(&mut r.turns);
+                self.note_calls(&turns, from);
+                let Reader::Claude(r) = &mut self.reader else { unreachable!() };
+                r.turns = turns;
+                if r.turns.len() > 2 * INDEX_TAIL {
+                    let n = r.turns.len() - INDEX_TAIL;
+                    r.turns.drain(..n);
+                    r.queued.retain(|q| q.turn >= n);
+                    r.queued.iter_mut().for_each(|q| q.turn -= n);
+                }
+            }
+            Reader::Codex(r) => {
+                let sig = |t: &[Turn]| (t.len(), t.last().map_or((0, 0), |l| (l.steps.len(), l.reply.len())));
+                let before = sig(&r.turns);
+                r.feed(line);
+                let after = sig(&r.turns);
+                let last = self.count.checked_sub(1);
+                if r.started {
+                    if let (Some(p), Some(last)) = (self.pending.take(), last) {
+                        out.push(span(last, p, false));
+                    }
+                    self.pending = Some((start, end));
+                } else if after.0 > before.0 {
+                    self.count += 1;
+                    let from = self.pending.take().map_or(start, |p| p.0);
+                    out.push(span(self.count - 1, (from, end), true));
+                } else if let Some(p) = self.pending.as_mut().filter(|_| after == before || last.is_none()) {
+                    p.1 = end;
+                } else if let Some(last) = last {
+                    // The previous turn went on after a `task_started`: those
+                    // lines stay its own, and the next turn starts at its own.
+                    if let Some(p) = self.pending.take() {
+                        out.push(span(last, p, false));
+                    }
+                    out.push(span(last, (start, end), false));
+                }
+                let from = if after.0 > before.0 { 0 } else { before.1 .0 };
+                let mut turns = std::mem::take(&mut r.turns);
+                self.note_calls(&turns, from);
+                if turns.len() > 2 * INDEX_TAIL {
+                    turns.drain(..turns.len() - INDEX_TAIL);
+                }
+                let Reader::Codex(r) = &mut self.reader else { unreachable!() };
+                r.turns = turns;
+            }
+        }
+        out
+    }
+}
+
+/// The text a turn's spans of `bytes` hold, in order, each span whole.
+pub fn span_lines(bytes: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(bytes).lines().map(str::to_string).collect()
+}
+
+/// The turns a shared history's byte range holds (`lines`, every line of it),
+/// read by the harness's own parser and each held to `max` characters a
+/// string ([`clip_whole`]). `chars` is each turn's text before the cut, so a
+/// cut one can say how much it had. Empty for a harness it does not read.
+pub fn history_turns(harness: &str, lines: &[String], max: usize) -> Vec<(Turn, usize)> {
+    let turns = match harness {
+        "claude" => claude_turns(lines),
+        "codex" => codex_turns(lines),
+        _ => return Vec::new(),
+    };
+    turns
+        .into_iter()
+        .map(|t| {
+            let chars = text_chars(&t);
+            (clip_whole(t, max), chars)
+        })
+        .collect()
+}
+
+/// The input of call `id` in a shared history's byte range, as
+/// [`claude_tool_call`] and [`codex_tool_call`] give it.
+pub fn history_tool_call(harness: &str, lines: &[String], id: &str) -> Option<CallDetail> {
+    match harness {
+        "claude" => claude_tool_call(lines, id),
+        "codex" => codex_tool_call(lines, id),
+        _ => None,
+    }
+}
+
+/// The characters of a turn's text: its prompt, its notice's long strings,
+/// and every string of its steps but a tool's one-line summary.
+pub fn text_chars(t: &Turn) -> usize {
+    let n = |s: &str| s.chars().count();
+    let o = |s: &Option<String>| s.as_deref().map_or(0, n);
+    let notice = match &t.notice {
+        Some(Notice::Summary { text } | Notice::PeerMessage { text, .. }) => n(text),
+        Some(Notice::Command { output, .. }) => o(output),
+        Some(Notice::Shell { output, stderr, .. }) => o(output) + o(stderr),
+        _ => 0,
+    };
+    let steps: usize = t
+        .steps
+        .iter()
+        .map(|s| match s {
+            Step::Text { text, .. } | Step::User { text, .. } => n(text),
+            Step::Question { questions, answer, .. } => {
+                questions.iter().map(|q| n(&q.header) + n(&q.question) + q.options.iter().map(|x| n(&x.label) + n(&x.description)).sum::<usize>()).sum::<usize>()
+                    + answer.iter().flat_map(|a| &a.answers).map(|a| n(&a.question) + a.picked.iter().map(|p| n(p)).sum::<usize>() + o(&a.typed) + o(&a.note)).sum::<usize>()
+            }
+            Step::Plan { plan, note, .. } => n(plan) + o(note),
+            Step::Permission { note, .. } => o(note),
+            Step::Tool { .. } => 0,
+        })
+        .sum();
+    o(&t.user) + notice + steps
 }
 
 /// One call's input, `agent_tool_call`'s answer. `input` is the whole text
@@ -1446,43 +1725,62 @@ pub fn codex(lines: &[String], n: usize) -> Vec<Turn> {
 
 /// Every turn in a Codex rollout's `lines`, as [`codex`] reads them.
 fn codex_turns(lines: &[String]) -> Vec<Turn> {
-    let mut turns: Vec<Turn> = Vec::new();
+    let mut r = CodexReader::default();
+    for l in lines {
+        r.feed(l);
+    }
+    r.finish()
+}
+
+/// [`codex_turns`]' parser, fed one line at a time, as [`ClaudeReader`].
+#[derive(Default)]
+struct CodexReader {
+    turns: Vec<Turn>,
     // The calls awaiting their output, by `call_id`, in the last turn.
-    let mut open: Vec<String> = Vec::new();
+    open: Vec<String>,
     // The `turn_id` of the turn being read: `task_started` opens one (before
     // its typed prompt in every rollout measured), and a `turn_context` names
     // it for a window that starts inside a turn and so holds no `task_started`.
-    let mut turn_id = String::new();
-    for l in lines {
+    turn_id: String,
+    /// The last line fed was a `task_started`: the line a turn's range starts
+    /// on, for [`Indexer`], since it names the turn its prompt opens.
+    started: bool,
+}
+
+impl CodexReader {
+    fn feed(&mut self, l: &str) {
+        let CodexReader { turns, open, turn_id, started: just_started } = self;
+        *just_started = false;
         if l.contains("\"task_started\"") || l.contains("\"turn_context\"") {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(l) {
                 let started = v.pointer("/payload/type").and_then(|t| t.as_str()) == Some("task_started");
+                *just_started = started;
                 if let Some(id) = v.pointer("/payload/turn_id").and_then(|i| i.as_str()).filter(|i| i.len() <= 64 && i.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')) {
                     if started || (turn_id.is_empty() && turns.last().is_none_or(|t| t.id != id)) {
-                        turn_id = id.to_string();
+                        *turn_id = id.to_string();
                     }
                 }
             }
-            continue;
+            return;
         }
         // A window that starts inside a turn holds neither: its first turn is
         // named by the first event that carries the id, near the line's head.
         if turns.is_empty() && turn_id.is_empty() && l.contains("\"item_completed\"") {
             if let Some(id) = l.get(..l.len().min(600)).and_then(|h| h.split_once("\"turn_id\":\"")).and_then(|(_, r)| r.split_once('"')).map(|(id, _)| id).filter(|i| i.len() <= 64 && i.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')) {
-                turn_id = id.to_string();
+                *turn_id = id.to_string();
             }
         }
         let event = l.contains("\"item_completed\"") && l.contains("\"CommandExecution\"");
         if !event && !l.contains("\"response_item\"") {
-            continue;
+            return;
         }
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(l) else { continue };
-        let Some(p) = v.get("payload") else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(l) else { return };
+        let Some(p) = v.get("payload") else { return };
         match v.get("type").and_then(|t| t.as_str()) {
             Some("response_item") => {}
             Some("event_msg") if event && p.get("type").and_then(|t| t.as_str()) == Some("item_completed") => {
-                let Some(item) = p.get("item").filter(|i| i.get("type").and_then(|t| t.as_str()) == Some("CommandExecution")) else { continue };
-                let [id] = open.as_slice() else { continue };
+                let Some(item) = p.get("item").filter(|i| i.get("type").and_then(|t| t.as_str()) == Some("CommandExecution")) else { return };
+                let [id] = open.as_slice() else { return };
                 if let Some(Step::Tool { failed, summary, ran, .. }) = turns.last_mut().and_then(|t| t.steps.iter_mut().find(|s| s.id() == Some(id.as_str()))) {
                     *failed |= item.get("status").and_then(|s| s.as_str()) == Some("failed") || item.get("exit_code").and_then(|c| c.as_i64()).is_some_and(|c| c != 0);
                     let argv = item.get("command").and_then(|c| c.as_array());
@@ -1499,9 +1797,9 @@ fn codex_turns(lines: &[String]) -> Vec<Turn> {
                         }
                     }
                 }
-                continue;
+                return;
             }
-            _ => continue,
+            _ => return,
         }
         let at = v.get("timestamp").and_then(|t| t.as_str()).and_then(crate::sysclock::parse_iso8601);
         let texts = |kind: &str| -> Vec<String> {
@@ -1520,20 +1818,20 @@ fn codex_turns(lines: &[String]) -> Vec<Turn> {
                 let typed: Vec<String> = texts("input_text").into_iter().filter(|t| codex_typed(t)).collect();
                 if !typed.is_empty() {
                     let mut turn = Turn::new(at, Some(typed.join("\n")));
-                    turn.id = std::mem::take(&mut turn_id);
+                    turn.id = std::mem::take(turn_id);
                     turns.push(turn);
                     open.clear();
                 }
             }
             (Some("message"), Some("assistant")) => {
-                let turn = current(&mut turns, at, &turn_id);
+                let turn = current(turns, at, turn_id);
                 for t in texts("output_text") {
                     turn.say(at, &t);
                 }
             }
             (Some("function_call" | "custom_tool_call"), _) => {
                 if let Some(name) = p.get("name").and_then(|n| n.as_str()) {
-                    let t = current(&mut turns, at, &turn_id);
+                    let t = current(turns, at, turn_id);
                     t.tools.push(name.to_string());
                     let id = p.get("call_id").and_then(|c| c.as_str()).unwrap_or("").to_string();
                     if !id.is_empty() {
@@ -1566,8 +1864,12 @@ fn codex_turns(lines: &[String]) -> Vec<Turn> {
             _ => {}
         }
     }
-    unique_ids(&mut turns);
-    turns
+
+    fn finish(self) -> Vec<Turn> {
+        let mut turns = self.turns;
+        unique_ids(&mut turns);
+        turns
+    }
 }
 
 /// One question's answer in a Codex `request_user_input` output: its
@@ -1980,6 +2282,7 @@ fn finish(mut turns: Vec<Turn>, n: usize) -> Vec<Turn> {
             let (r, cut) = clip(&t.reply);
             t.reply = r;
             t.truncated |= cut;
+            t.truncated |= clip_notice(&mut t.notice, TEXT_MAX);
             t.truncated |= clip_steps(&mut t.steps, TEXT_MAX, TEXT_MAX);
             mark_detail(&mut t);
             t
@@ -2018,16 +2321,46 @@ fn whole(turns: Vec<Turn>, id: &str) -> Option<Turn> {
     if id.is_empty() {
         return None;
     }
-    let mut t = turns.into_iter().find(|t| t.id == id)?;
+    let t = turns.into_iter().find(|t| t.id == id)?;
+    Some(clip_whole(t, TURN_TEXT_MAX))
+}
+
+/// One turn held to `max` characters for each of its strings, its reply's
+/// `text` steps in all: [`whole`]'s cut, and the full-history reader's. Its
+/// `reply` is left empty, the words being in `steps`; `truncated` says
+/// whether anything was cut.
+pub fn clip_whole(mut t: Turn, max: usize) -> Turn {
     if let Some(u) = t.user.take() {
-        let (u, cut) = clip_to(&u, TURN_TEXT_MAX);
+        let (u, cut) = clip_to(&u, max);
         t.user = Some(u);
         t.truncated |= cut;
     }
     t.reply.clear();
-    t.truncated |= clip_steps(&mut t.steps, TURN_TEXT_MAX, TURN_TEXT_MAX);
+    t.truncated |= clip_notice(&mut t.notice, max);
+    t.truncated |= clip_steps(&mut t.steps, max, max);
     mark_detail(&mut t);
-    Some(t)
+    t
+}
+
+/// A notice's long strings (a summary, a peer's message, a command's or a
+/// shell's output) cut to `max` characters. True when anything was cut.
+fn clip_notice(n: &mut Option<Notice>, max: usize) -> bool {
+    let mut cut = false;
+    let mut c = |s: &mut String| {
+        let (out, was) = clip_to(s, max);
+        *s = out;
+        cut |= was;
+    };
+    match n {
+        Some(Notice::Summary { text } | Notice::PeerMessage { text, .. }) => c(text),
+        Some(Notice::Command { output, .. }) => output.iter_mut().for_each(&mut c),
+        Some(Notice::Shell { output, stderr, .. }) => {
+            output.iter_mut().for_each(&mut c);
+            stderr.iter_mut().for_each(&mut c);
+        }
+        _ => {}
+    }
+    cut
 }
 
 /// The steps held to the reply's caps: `text` characters of reply text
@@ -2165,6 +2498,135 @@ mod tests {
 
     fn lines(s: &str) -> Vec<String> {
         s.lines().map(str::to_string).collect()
+    }
+
+    /// Index `text` as the full-history reader does, then read every turn's
+    /// spans with the parser: each turn's spans, and the turns they give.
+    fn by_ranges(harness: &str, text: &str) -> (Vec<Vec<(u64, u64)>>, Vec<Turn>) {
+        let mut ix = Indexer::new(harness).unwrap();
+        let mut spans: Vec<Vec<(u64, u64)>> = Vec::new();
+        let mut at = 0u64;
+        for l in text.split_inclusive('\n') {
+            let end = at + l.len() as u64;
+            for sp in ix.feed(l.trim_end_matches('\n'), at, end) {
+                if sp.begins {
+                    assert_eq!(sp.turn, spans.len());
+                    spans.push(Vec::new());
+                }
+                spans[sp.turn].push((sp.start, sp.end));
+            }
+            at = end;
+        }
+        let mut out = Vec::new();
+        for (i, ss) in spans.iter_mut().enumerate() {
+            ss.sort();
+            let bytes: Vec<u8> = ss.iter().flat_map(|(s, e)| text.as_bytes()[*s as usize..*e as usize].iter().copied()).collect();
+            let got = history_turns(harness, &span_lines(&bytes), TURN_TEXT_MAX);
+            assert_eq!(got.len(), 1, "turn {i} of {harness} parses to {} turns: {:#?}", got.len(), got.iter().map(|t| (&t.0.user, &t.0.notice)).collect::<Vec<_>>());
+            out.extend(got.into_iter().map(|(t, _)| t));
+        }
+        (spans, out)
+    }
+
+    const ALL_FIXTURES: &[(&str, &str)] = &[
+        ("claude", include_str!("../tests/fixtures/transcripts/claude-2.1.309.jsonl")),
+        ("claude", include_str!("../tests/fixtures/transcripts/claude-2.1.316-answers.jsonl")),
+        ("claude", include_str!("../tests/fixtures/transcripts/claude-2.1.316-injected.jsonl")),
+        ("claude", include_str!("../tests/fixtures/transcripts/claude-2.1.316-preview-answers.jsonl")),
+        ("claude", include_str!("../tests/fixtures/transcripts/claude-2.1.316-queued-synthetic.jsonl")),
+        ("claude", include_str!("../tests/fixtures/transcripts/claude-2.1.316-tools.jsonl")),
+        ("claude", include_str!("../tests/fixtures/transcripts/claude-2.1.318-commands.jsonl")),
+        ("claude", include_str!("../tests/fixtures/transcripts/claude-2.1.319-read-image.jsonl")),
+        ("codex", include_str!("../tests/fixtures/transcripts/codex-0.160.1-answers.jsonl")),
+        ("codex", include_str!("../tests/fixtures/transcripts/codex-0.160.1-exec.jsonl")),
+        ("codex", include_str!("../tests/fixtures/transcripts/codex-0.160.1-tools.jsonl")),
+        ("codex", include_str!("../tests/fixtures/transcripts/codex-rollout.jsonl")),
+    ];
+
+    /// Group chat §3.2: every turn read from its own byte range is the turn
+    /// the whole file reads to, on every real fixture — ids, notices, steps,
+    /// answers — so the index reuses the parser and loses nothing at a seam.
+    #[test]
+    fn a_turn_read_from_its_indexed_range_is_the_turn_the_whole_file_reads() {
+        for (n, (harness, text)) in ALL_FIXTURES.iter().enumerate() {
+            let whole: Vec<Turn> = history_turns(harness, &lines(text), TURN_TEXT_MAX).into_iter().map(|(t, _)| t).collect();
+            assert!(!whole.is_empty(), "fixture {n} reads no turns");
+            let (_, ranged) = by_ranges(harness, text);
+            assert_eq!(ranged, whole, "fixture {n} ({harness})");
+        }
+    }
+
+    /// The index's memory is a tail of turns, whatever the file's length, and
+    /// a file many times longer than the tail is still read at every seam.
+    #[test]
+    fn the_index_keeps_a_short_tail_and_still_finds_every_turn() {
+        for (harness, text) in [ALL_FIXTURES[2], ALL_FIXTURES[11]] {
+            let long = text.repeat(20);
+            let whole = history_turns(harness, &lines(&long), TURN_TEXT_MAX).len();
+            let (starts, ranged) = by_ranges(harness, &long);
+            assert_eq!((starts.len(), ranged.len()), (whole, whole), "{harness}");
+            let mut ix = Indexer::new(harness).unwrap();
+            let mut at = 0;
+            for l in long.lines() {
+                ix.feed(l, at, at + l.len() as u64 + 1);
+                at += l.len() as u64 + 1;
+                let held = match &ix.reader {
+                    Reader::Claude(r) => r.turns.len(),
+                    Reader::Codex(r) => r.turns.len(),
+                };
+                assert!(held <= 2 * INDEX_TAIL, "{harness} holds {held} turns");
+            }
+        }
+    }
+
+    /// The index finds every call where the whole file has it, so a call is
+    /// read from its own turn's spans.
+    #[test]
+    fn the_index_knows_the_turn_of_every_call() {
+        for (n, (harness, text)) in ALL_FIXTURES.iter().enumerate() {
+            let whole = history_turns(harness, &lines(text), TURN_TEXT_MAX);
+            let want: Vec<(String, usize)> = whole.iter().enumerate().flat_map(|(i, (t, _))| t.steps.iter().filter_map(Step::id).map(move |id| (id.to_string(), i))).collect();
+            let mut ix = Indexer::new(harness).unwrap();
+            let mut at = 0u64;
+            for l in text.split_inclusive('\n') {
+                ix.feed(l.trim_end_matches('\n'), at, at + l.len() as u64);
+                at += l.len() as u64;
+            }
+            // A call a person then decided becomes a permission step with no
+            // id: the index may know more ids than are read, never fewer.
+            let got: HashMap<String, usize> = ix.take_calls().into_iter().collect();
+            for (id, turn) in want {
+                assert_eq!(got.get(&id), Some(&turn), "fixture {n}: {id}");
+            }
+        }
+    }
+
+    /// A Codex turn's range opens at its `task_started`, so the turn keeps
+    /// its id read alone.
+    #[test]
+    fn a_codex_turn_read_alone_keeps_its_id() {
+        for (harness, text) in ALL_FIXTURES.iter().filter(|f| f.0 == "codex") {
+            let whole: Vec<String> = codex_turns(&lines(text)).into_iter().map(|t| t.id).collect();
+            let (_, ranged) = by_ranges(harness, text);
+            assert!(whole.iter().any(|i| !i.is_empty()));
+            assert_eq!(ranged.into_iter().map(|t| t.id).collect::<Vec<_>>(), whole);
+        }
+    }
+
+    /// A notice cut at the cap says so, with the count of what it had.
+    #[test]
+    fn a_long_compact_summary_is_cut_and_says_so() {
+        let body = "word ".repeat(3000);
+        let line = serde_json::json!({"type": "user", "isCompactSummary": true, "uuid": "u1", "timestamp": "2026-11-12T00:00:00Z",
+            "message": {"role": "user", "content": format!("{body}<system-reminder>SECRET</system-reminder>")}}).to_string();
+        let got = history_turns("claude", &[line.clone()], 1000);
+        let (t, chars) = &got[0];
+        assert!(t.truncated && *chars > 1000, "{t:?}");
+        assert!(!serde_json::to_string(t).unwrap().contains("SECRET"));
+        // agent_turns' cut is still 4,000, and now says so too.
+        let t = &claude(&[line], 1)[0];
+        assert!(t.truncated);
+        assert!(matches!(&t.notice, Some(Notice::Summary { text }) if text.chars().count() == TEXT_MAX + 1));
     }
 
     /// The turns as the wire has them, less each tool step's `call_id`: the
