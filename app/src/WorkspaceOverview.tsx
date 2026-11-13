@@ -81,7 +81,7 @@ export function WorkspaceOverview(props: {
                   {i.live
                     ? <button className="ws-ov-chip-open" title="Open it in the Ideas window; drag it onto another workspace to link it there too"
                         onPointerDown={(e) => props.arm(e, { id: i.live!, title: i.title ?? "", kind: "idea" })}
-                        onClick={() => props.openDoc(i.live!)}>{i.title} ▸</button>
+                        onClick={() => props.openDoc(i.live!)}>{i.title}{i.merged && <span className="ws-ov-merged" title="This id was merged into it">merged</span>} ▸</button>
                     : <span className="ws-ov-gone">an idea that is gone</span>}
                   <button className="ws-ov-x" title="Unlink it (the idea stays)" data-testid="ws-ov-idea-unlink" onClick={() => props.unlinkIdea(i.id)}>×</button>
                 </span>
