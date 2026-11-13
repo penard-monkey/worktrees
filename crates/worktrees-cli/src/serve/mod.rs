@@ -36,6 +36,7 @@ mod resolve;
 mod scope;
 mod servefile;
 mod shares;
+mod sharethread;
 mod stepup;
 mod tls;
 mod wire;
@@ -530,7 +531,7 @@ pub fn cmd_serve(args: &[String]) -> i32 {
         host::start(running.ctx.clone(), host::Hooks::default());
         // Group chat's shares (§3.3): every share's lane and binding checked
         // now and on serve's own poll, whether or not a guest is reading.
-        tokio::spawn(shares::watch(opts.config_dir.clone()));
+        tokio::spawn(shares::watch(opts.config_dir.clone(), running.ctx.host.clone()));
         // The device registry's own: an unreadable file's alert, the expiries
         // that ran out while serve was down, then the expiry clock.
         if let Some(devices) = running.devices.clone() {
