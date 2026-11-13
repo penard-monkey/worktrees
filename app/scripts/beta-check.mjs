@@ -130,7 +130,10 @@ ok(gated('data-testid="ideas-rail"'), "the rail's lightbulb renders only with Id
 const chord = code.match(/if \([^\n]*e\.code === "KeyI"\)\) \{/)?.[0] ?? "";
 ok(/^if \(keyRef\.current\.ideasOn && /.test(chord), "⌘⇧I is taken only with Ideas on");
 ok(/keyRef\.current = \{[\s\S]*?\bideasOn\b[\s\S]*?\};/.test(code), "…and keyRef carries ideasOn");
-ok((code.match(/openIdeas\(\)|onClick=\{openIdeas\}/g) ?? []).length === 2, "openIdeas has exactly its two callers, the chord and the rail");
+ok((code.match(/openIdeas\(\)|onClick=\{openIdeas\}/g) ?? []).length === 3, "openIdeas has exactly its three callers, the chord, the rail and openIdeaDoc");
+// The third (phase 4): a workspace overview's plan ▸ / idea ▸ opens the
+// document in the Ideas window, and returns first with Ideas off.
+ok(/const openIdeaDoc = \(id: string\) => \{\s*if \(!ideasOn\) return;/.test(code), "…and openIdeaDoc opens nothing with Ideas off");
 ok(/if \(was === true && !ideasOn\) \{\s*invoke\("close_companion"\)/.test(code), "turning Ideas off closes the Ideas window (close_companion)");
 // Workspaces: out of the beta (2026-11-14).
 ok(ungated("<NavViewSwitch"), "the Workspaces | All projects switch is behind no beta");

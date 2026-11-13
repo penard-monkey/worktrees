@@ -33,10 +33,15 @@ import {
   combineCall, combineDrop, ideaDrop, ideaHref, ideaLink, mergeCall, mergedNote, nextSelection, pickerMatches, readableLinks,
   relateCall, splitCall, versionWhen, type Call, type Choice,
 } from "./ideasrelate";
+import { PickProject, PickWorkspace, PlanPanel, PlanStrip, type RegProject, type WsOption } from "./PlanPanel";
+import {
+  addIdeasCall, addProjectCall, fromPlanCall, ideaOntoPlan, linkIdeaCall, makePlanCall, planSources, plansIn, projectOntoPlan,
+  removeIdeaCall, setPlanCall, showRequest, SHOW_KEY, WS_SHOW_KEY, type PlanView,
+} from "../src/plans";
 
 // ── the rows' shapes (worktrees_core::ideas) ────────────────────────────────
 type Problem = "no-id" | "bad-id" | "duplicate-id" | "too-large" | "not-text" | "unreadable";
-export type Idea = { id: string | null; title: string; file: string; created: string | null; mtime_ms: number; size: number; problem?: Problem };
+export type Idea = { id: string | null; title: string; file: string; created: string | null; mtime_ms: number; size: number; kind?: "idea" | "plan"; problem?: Problem };
 type Listing = { ideas: Idea[]; skipped: string[]; dir?: string };
 type Merged = { id: string; title: string | null; date: string | null };
 type Doc = Idea & { content: string; merged?: Merged };
@@ -142,6 +147,9 @@ function IdeaList(props: {
   newHot: boolean;
   onRowMenu(e: React.MouseEvent, i: Idea): void;
   onCombine(): void;
+  /** Phase 4: how many selected ideas "Make a plan" would take, and it. */
+  planFrom: number;
+  onPlan(): void;
   /** Text dragged out of the editor over the list: Split (⌥ extracts). */
   textDrag: boolean;
   onTextDrop(extract: boolean): void;
@@ -166,6 +174,9 @@ function IdeaList(props: {
           title="A new idea. Drop two or more selected ideas here to combine them.">New idea</button>
         {props.selected.length >= 2 && (
           <button className="ix-btn" data-testid="ideas-combine" onClick={props.onCombine}>Combine {props.selected.length}…</button>
+        )}
+        {props.planFrom > 0 && props.selected.length >= 2 && (
+          <button className="ix-btn" data-testid="ideas-plan-selected" onClick={props.onPlan}>Make a plan from {props.planFrom}</button>
         )}
         <input
           className="ix-filter"
@@ -202,6 +213,7 @@ function IdeaList(props: {
                   {props.dots.get(i.id!) && <span className={`ix-dot ix-dot-${props.dots.get(i.id!)}`} data-testid="ideas-dot" data-state={props.dots.get(i.id!)}
                     aria-label={`A conversation is ${props.dots.get(i.id!) === "waiting" ? "waiting on you" : props.dots.get(i.id!) === "busy" ? "working" : "open"}`} />}
                   <span className="ix-row-title">{i.title || "Untitled"}</span>
+                  {i.kind === "plan" && <span className="ix-row-tag" data-testid="ideas-plan-tag">plan</span>}
                   <span className="ix-row-age">{age(i.mtime_ms)}</span>
                 </button>
               ) : (
@@ -246,6 +258,8 @@ export type EditorHandle = {
   /** Replace document positions `from..to` with `text`, as a person's input
    *  (so it saves), and put the cursor after it. */
   insert(from: number, to: number, text: string): void;
+  /** Put the cursor at the start of line `n` (1-based, the file's) and show it. */
+  gotoLine(n: number): void;
 };
 
 /** One CodeMirror view for the window's life; a new document gets a new
@@ -298,6 +312,11 @@ function EditorHost(props: {
         v.dispatch({ changes: { from, to, insert: text }, selection: { anchor: from + text.length }, userEvent: "input.complete", scrollIntoView: true });
         v.focus();
       },
+      gotoLine: (n) => {
+        const l = v.state.doc.line(Math.max(1, Math.min(n, v.state.doc.lines)));
+        v.dispatch({ selection: { anchor: l.from, head: l.to }, scrollIntoView: true });
+        v.focus();
+      },
     };
     if (props.focus) v.focus();
     // The initial text is read once per document; a reload goes through
@@ -327,7 +346,7 @@ function ReadView({ text, follow }: { text: string; follow(id: string): void }) 
 /** The open idea. `focus`: put the cursor in the editor as it opens (a new
  *  idea), from the editor host's own effect — a timer set beside the state
  *  change can fire before React commits it (it did, in Chromium). */
-type Open = { id: string; title: string; file: string; key: string; initial: string; focus: boolean };
+type Open = { id: string; title: string; file: string; key: string; initial: string; focus: boolean; kind: "idea" | "plan" };
 
 export function Companion() {
   const engine = useEngine();
@@ -370,6 +389,11 @@ export function Companion() {
   const [textDrag, setTextDrag] = useState(false);
   const listRef = useRef<HTMLUListElement | null>(null);
   const lastXY = useRef({ x: 0, y: 0 });
+  // Phase 4: the open plan as core's reader answers it, and the pickers.
+  const [planView, setPlanView] = useState<PlanView | null>(null);
+  const [regProjects, setRegProjects] = useState<RegProject[] | null>(null);
+  const [wsPick, setWsPick] = useState<{ mode: "link-idea" | "set-plan"; id: string; rows: WsOption[] } | null>(null);
+  const [addIdeaPick, setAddIdeaPick] = useState<string | null>(null);
 
   // Once per socket: the window's theme from the shared settings (read only —
   // the main window owns ui-state.json's whole-blob save), and the connect
@@ -443,7 +467,7 @@ export function Companion() {
     setSave({ kind: "clean", savedAt: null });
     setRenaming(null);
     arm.disarm();
-    setOpen({ id: d.id!, title: d.title, file: d.file, key: `${d.id}#${++keySeq.current}`, initial: d.content, focus });
+    setOpen({ id: d.id!, title: d.title, file: d.file, key: `${d.id}#${++keySeq.current}`, initial: d.content, focus, kind: d.kind === "plan" ? "plan" : "idea" });
     setReadText(d.content);
     setVersions((v) => (v === false ? false : null));
     setHasSel(false);
@@ -668,6 +692,121 @@ export function Companion() {
     } catch (e) { setNotice(`Could not restore it: ${errText(e)}`); }
   }), [arm, open, begin, refresh, gen]);
 
+  // ── phase 4: plans (§2.2, §6.1). Each act is one call from plans.ts,
+  // through `act` (the open document saved first — and before the call is
+  // built, since an edit to the open plan carries its mtime AFTER that save). A change to the OPEN
+  // plan comes back as its new text and is loaded, so the editor never
+  // holds the text the act replaced (the act copied that to history).
+  const ideaRowsAll = listing?.ideas ?? [];
+  const rowOf = (id: string) => ideaRowsAll.find((i) => i.id === id) ?? null;
+  const afterPlanEdit = useCallback(async (d: Doc | null) => {
+    if (!d) return;
+    if (open?.id === d.id) await reopen(d); else setRelTick((n) => n + 1);
+  }, [open, reopen]);
+
+  const doMakePlan = useCallback(async (ids: string[]) => {
+    if (ids.length === 0) { setNotice("Pick an idea to make a plan from."); return; }
+    const d = await act<Doc>(makePlanCall(ids), `make a plan from ${ids.join(",")}`);
+    if (!d) return;
+    setNotice(`Made “${d.title}” from ${ids.length === 1 ? `“${titleOf(ids[0])}”` : `${ids.length} ideas`}. Fill in its Goal, Projects and Work.`);
+    if (await leave()) begin(d);
+  }, [act, titleOf, leave, begin]);
+
+  const doAddIdeas = useCallback(async (plan: string, ids: string[]) => {
+    await session.current?.flush();
+    const d = await act<Doc>(addIdeasCall(plan, ids, mtimeOf(plan)), `add ${ids.join(",")} to plan ${plan}`);
+    if (!d) return;
+    setNotice(`Added ${ids.length === 1 ? `“${titleOf(ids[0])}”` : `${ids.length} ideas`} to “${d.title}”.`);
+    await afterPlanEdit(d);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [act, titleOf, afterPlanEdit]);
+
+  const doRemoveIdea = useCallback(async (plan: string, idea: string) => {
+    await session.current?.flush();
+    const d = await act<Doc>(removeIdeaCall(plan, idea, mtimeOf(plan)), `take ${idea} out of plan ${plan}`);
+    if (!d) return;
+    setNotice(`Took it out of “${d.title}”. The idea stays; the plan's last version is in Versions.`);
+    await afterPlanEdit(d);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [act, afterPlanEdit]);
+
+  const doAddProject = useCallback(async (plan: string, root: string) => {
+    await session.current?.flush();
+    const d = await act<Doc>(addProjectCall(plan, root, mtimeOf(plan)), `add project ${root} to plan ${plan}`);
+    if (!d) return;
+    setNotice(`Added the project to “${d.title}”'s Projects.`);
+    await afterPlanEdit(d);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [act, afterPlanEdit]);
+
+  /** Show a workspace in the main window: the hand-off key, then raise it. */
+  const showWorkspace = useCallback((id: string) => {
+    try { window.localStorage.setItem(WS_SHOW_KEY, JSON.stringify({ id, at: Date.now() })); } catch { /* no storage: the window still comes forward */ }
+    invoke("raise_window").catch(() => {});
+  }, []);
+
+  const doMakeWorkspace = useCallback(async (plan: string) => {
+    const out = await act<{ id: string; created: boolean; workspaces: { id: string; name: string }[] }>(fromPlanCall(plan), `make workspace from ${plan}`);
+    if (!out) return;
+    const name = out.workspaces.find((w) => w.id === out.id)?.name ?? "";
+    setNotice(out.created ? `Made the workspace “${name}”. It is in the main window, under Workspaces.` : `This plan already has a workspace, “${name}”: showing it.`);
+    setRelTick((n) => n + 1);
+    showWorkspace(out.id);
+  }, [act, showWorkspace]);
+
+  const openWsPick = useCallback(async (mode: "link-idea" | "set-plan", id: string) => {
+    try {
+      const l = await invoke<{ workspaces: WsOption[] }>("workspaces_list");
+      const rows = l.workspaces.filter((w) => (mode === "set-plan" ? !w.plan : !w.ideas.includes(id)));
+      setWsPick({ mode, id, rows });
+    } catch (e) { setNotice(`Could not list the workspaces: ${errText(e)}`); }
+  }, []);
+  const doWsPick = useCallback(async (ws: string) => {
+    const p = wsPick;
+    setWsPick(null);
+    if (!p) return;
+    const call = p.mode === "set-plan" ? setPlanCall(ws, p.id) : linkIdeaCall(ws, p.id);
+    const l = await act<{ workspaces: { id: string; name: string }[] }>(call, `${p.mode} ${p.id} → ${ws}`);
+    if (!l) return;
+    const name = l.workspaces.find((w) => w.id === ws)?.name ?? "";
+    setNotice(p.mode === "set-plan" ? `“${name}” is this plan's workspace now.` : `Linked “${titleOf(p.id)}” to “${name}”.`);
+    setRelTick((n) => n + 1);
+  }, [wsPick, act, titleOf]);
+
+  const openProjectPick = useCallback(async () => {
+    try {
+      const st = await invoke<{ projects: RegProject[] }>("cross_project_status");
+      setRegProjects(st.projects.map((p) => ({ root: p.root, name: p.name })));
+    } catch (e) { setNotice(`Could not list the projects: ${errText(e)}`); }
+  }, []);
+
+  // The open plan, read through core's reader: again on any folder change.
+  useEffect(() => {
+    if (!open || open.kind !== "plan" || !up) { setPlanView(null); return; }
+    let gone = false;
+    invoke<PlanView>("plan_read", { id: open.id }).then((v) => { if (!gone) setPlanView(v); })
+      .catch((e) => { if (!gone) { setPlanView(null); setNotice(`Could not read the plan: ${errText(e)}`); } });
+    return () => { gone = true; };
+  }, [open?.id, open?.kind, open?.key, relTick, up]);
+
+  // The main window asks for a document (a workspace's plan or idea):
+  // written to localStorage just before it brings this window forward.
+  useEffect(() => {
+    const look = () => {
+      let id: string | null = null;
+      try {
+        id = showRequest(window.localStorage.getItem(SHOW_KEY), Date.now());
+        if (id) window.localStorage.removeItem(SHOW_KEY);
+      } catch { return; }
+      if (id) { trace(gen, `asked to show ${id}`); void openIdeaRef.current(id); }
+    };
+    const onStorage = (e: StorageEvent) => { if (e.key === SHOW_KEY) look(); };
+    if (up) look();
+    window.addEventListener("focus", look);
+    window.addEventListener("storage", onStorage);
+    return () => { window.removeEventListener("focus", look); window.removeEventListener("storage", onStorage); };
+  }, [up, gen]);
+
   // The Versions list and the related ideas follow the open idea, and any
   // change in the folder.
   useEffect(() => {
@@ -686,24 +825,47 @@ export function Companion() {
 
   // ── the drag: one idea onto another (the chooser), or the selected rows
   // onto "New idea" (Combine). navdrag's plumbing; Escape cancels there.
-  type IdeaDrag = { kind: "idea"; id: string } | { kind: "ideas"; ids: string[] };
-  type IdeaTarget = { kind: "onto"; id: string } | { kind: "new"; ids: string[] };
+  type IdeaDrag = { kind: "idea"; id: string } | { kind: "ideas"; ids: string[] } | { kind: "project"; root: string };
+  type IdeaTarget = { kind: "onto"; id: string } | { kind: "new"; ids: string[] } | { kind: "plan"; id: string; ids: string[] } | { kind: "plan-projects"; id: string; root: string };
   const ideaRows = listing?.ideas ?? [];
   const { drag, arm: armDrag } = useNavDrag<IdeaTarget, IdeaDrag>({
     scrollRef: listRef,
     resolve: (item, x, y) => {
       lastXY.current = { x, y };
       const el = document.elementFromPoint(x, y) as HTMLElement | null;
-      if (item.kind === "ideas") {
-        const ids = el?.closest("[data-drop-new]") ? combineDrop(item.ids) : null;
-        return ids ? { kind: "new", ids } : null;
+      // Phase 4: a registered project (from Add project…) onto the open
+      // plan's Projects box.
+      if (item.kind === "project") {
+        const box = el?.closest<HTMLElement>("[data-drop-plan-projects]");
+        return box && planView && box.dataset.dropPlanProjects === planView.doc.id && projectOntoPlan(item.root, planView)
+          ? { kind: "plan-projects", id: planView.doc.id, root: item.root } : null;
       }
+      // An idea (or the selected ones) onto a plan: the open plan's strip,
+      // or a plan's row in the list. Adds; never the relate/merge chooser.
+      const ids = item.kind === "ideas" ? item.ids : [item.id];
+      const strip = el?.closest<HTMLElement>("[data-drop-plan]");
+      const planRow = el?.closest<HTMLElement>("[data-idea]");
+      const planId = strip?.dataset.dropPlan ?? (planRow && rowOf(planRow.dataset.idea ?? "")?.kind === "plan" ? planRow.dataset.idea! : null);
+      if (planId) {
+        const planned = planView?.doc.id === planId ? planView.ideas.map((i) => i.live ?? i.id) : [];
+        const ok = ids.filter((i) => ideaOntoPlan(rowOf(i), rowOf(planId) ?? { id: planId, kind: "plan" }, planned) === planId);
+        return ok.length ? { kind: "plan", id: planId, ids: ok } : null;
+      }
+      if (item.kind === "ideas") {
+        const c = el?.closest("[data-drop-new]") ? combineDrop(item.ids) : null;
+        return c ? { kind: "new", ids: c } : null;
+      }
+      // Relate / merge are between ideas: a plan is neither side of them.
+      if (rowOf(item.id)?.kind === "plan") return null;
       const row = el?.closest<HTMLElement>("[data-idea]");
-      const onto = row ? ideaDrop(item.id, ideaRows.find((i) => i.id === row.dataset.idea) ?? null) : null;
+      const ontoRow = row ? ideaRows.find((i) => i.id === row.dataset.idea) ?? null : null;
+      const onto = ontoRow && ontoRow.kind !== "plan" ? ideaDrop(item.id, ontoRow) : null;
       return onto ? { kind: "onto", id: onto } : null;
     },
     commit: (item, target) => {
       if (!target) return;
+      if (target.kind === "plan") { void doAddIdeas(target.id, target.ids); return; }
+      if (target.kind === "plan-projects") { void doAddProject(target.id, target.root); return; }
       if (target.kind === "new") { setCombineAsk(target.ids); return; }
       if (item.kind === "idea") setChooser({ from: item.id, onto: target.id, ...lastXY.current });
     },
@@ -812,6 +974,8 @@ export function Companion() {
         newHot={drag?.target?.kind === "new"}
         onRowMenu={(e, i) => { e.preventDefault(); setRowMenu({ idea: i, x: e.clientX, y: e.clientY }); }}
         onCombine={() => setCombineAsk(selected)}
+        planFrom={planSources(null, selected, ideaRowsAll).length}
+        onPlan={() => void doMakePlan(planSources(null, selected, ideaRowsAll))}
         textDrag={textDrag}
         onTextDrop={onTextDrop}
         scrollRef={listRef}
@@ -870,7 +1034,34 @@ export function Companion() {
                 </button>
               </div>
             </header>
-            <RelatedStrip rels={related} open={(id) => void openIdea(id)} />
+            <RelatedStrip rels={related.filter((r) => r.how !== "planned-in" && r.how !== "plan-of")} open={(id) => void openIdea(id)} />
+            {open.kind === "plan" ? (
+              planView && planView.doc.id === open.id && (
+                <PlanPanel
+                  view={planView}
+                  busy={busy}
+                  ideasHot={drag?.target?.kind === "plan" && drag.target.id === open.id}
+                  projectsHot={drag?.target?.kind === "plan-projects"}
+                  openIdea={(id) => void openIdea(id)}
+                  removeIdea={(id) => void doRemoveIdea(open.id, id)}
+                  addIdea={() => setAddIdeaPick(open.id)}
+                  addProject={() => void openProjectPick()}
+                  makeWorkspace={() => void doMakeWorkspace(open.id)}
+                  openWorkspace={showWorkspace}
+                  linkWorkspace={() => void openWsPick("set-plan", open.id)}
+                  gotoLine={(n) => { if (mode !== "edit") switchMode("edit"); window.setTimeout(() => handle.current?.gotoLine(n), 0); }}
+                />
+              )
+            ) : (
+              <PlanStrip
+                plans={plansIn(related)}
+                sources={planSources(open, selected, ideaRowsAll).length}
+                busy={busy}
+                open={(id) => void openIdea(id)}
+                make={() => void doMakePlan(planSources(open, selected, ideaRowsAll))}
+                link={() => void openWsPick("link-idea", open.id)}
+              />
+            )}
             {versions !== false && <VersionsPanel versions={versions} armed={(arm.armed as string | null)?.startsWith("restore:") ? (arm.armed as string).slice(8) : null} restore={restore} close={() => setVersions(false)} />}
             {save.kind === "conflict" && (
               <div className="ix-banner" data-testid="ideas-conflict" data-why={save.why} role="alert">
@@ -931,6 +1122,18 @@ export function Companion() {
             {selected.length >= 2 && selected.includes(rowMenu.idea.id!) && (
               <button className="ix-pop-item" role="menuitem" data-testid="ideas-menu-combine" onClick={() => { setCombineAsk(selected); setRowMenu(null); }}>Combine {selected.length}…</button>
             )}
+            {rowMenu.idea.kind === "plan" ? (
+              <button className="ix-pop-item" role="menuitem" data-testid="ideas-menu-make-ws" onClick={() => { const id = rowMenu.idea.id!; setRowMenu(null); void doMakeWorkspace(id); }}>Make workspace</button>
+            ) : (
+              <>
+                <button className="ix-pop-item" role="menuitem" data-testid="ideas-menu-plan" onClick={() => {
+                  const id = rowMenu.idea.id!;
+                  setRowMenu(null);
+                  void doMakePlan(selected.includes(id) ? planSources(null, selected, ideaRowsAll) : [id]);
+                }}>Make a plan{selected.length >= 2 && selected.includes(rowMenu.idea.id!) ? ` from ${planSources(null, selected, ideaRowsAll).length}` : ""}</button>
+                <button className="ix-pop-item" role="menuitem" data-testid="ideas-menu-link-ws" onClick={() => { const id = rowMenu.idea.id!; setRowMenu(null); void openWsPick("link-idea", id); }}>Link to workspace…</button>
+              </>
+            )}
           </div>
         </>
       )}
@@ -942,6 +1145,33 @@ export function Companion() {
           confirm={pick.act === "merge" ? (r) => `“${titleOf(pick.id)}” is appended to “${r.title}” and leaves the list. Its id keeps pointing at “${r.title}”; both versions are kept in Versions.` : undefined}
           act={(r) => { const p = pick; setPick(null); if (p.act === "relate") void doRelate(p.id, r.id!); else void doMerge(r.id!, p.id); }}
           close={() => setPick(null)}
+        />
+      )}
+      {addIdeaPick && (
+        <PickIdea
+          title={`Add an idea to “${titleOf(addIdeaPick)}”`}
+          rows={ideaRows.filter((r) => r.kind !== "plan" && !(planView?.doc.id === addIdeaPick && planView.ideas.some((i) => i.live === r.id)))}
+          exclude={addIdeaPick}
+          act={(r) => { const p = addIdeaPick; setAddIdeaPick(null); void doAddIdeas(p, [r.id!]); }}
+          close={() => setAddIdeaPick(null)}
+        />
+      )}
+      {regProjects && planView && open?.kind === "plan" && (
+        <PickProject
+          rows={regProjects}
+          skip={planView.project_states.map((s) => s.root ?? "").filter(Boolean)}
+          act={(root) => { setRegProjects(null); void doAddProject(planView.doc.id, root); }}
+          arm={(e, root) => armDrag(e, { kind: "project", root })}
+          close={() => setRegProjects(null)}
+        />
+      )}
+      {wsPick && (
+        <PickWorkspace
+          title={wsPick.mode === "set-plan" ? `Make a workspace “${titleOf(wsPick.id)}”'s` : `Link “${titleOf(wsPick.id)}” to a workspace`}
+          rows={wsPick.rows}
+          empty={wsPick.mode === "set-plan" ? "Every workspace has a plan already. Make one with Make workspace." : "No workspace to link it to. Make one in the main window, under Workspaces."}
+          act={(id) => void doWsPick(id)}
+          close={() => setWsPick(null)}
         />
       )}
       {combineAsk && <CombineAsk titles={combineAsk.map(titleOf)} act={(t) => void doCombine(combineAsk, t)} close={() => setCombineAsk(null)} />}
