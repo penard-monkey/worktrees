@@ -58,6 +58,8 @@ import {
   type NavView, type WsDef, type WsHit, type WsList,
 } from "./workspaces";
 import { ideasBeta } from "./beta";
+import { ideaOntoWorkspace, linkIdeaCall, planOntoWorkspace, setPlanCall, showRequest, SHOW_KEY, unlinkIdeaCall, WS_SHOW_KEY, type Overview } from "./plans";
+import { WorkspaceOverview, type DocLite } from "./WorkspaceOverview";
 import { remoteHostLabel, remoteTitle, remoteWebUrl } from "./remote";
 import { PrsPane } from "./PrsPane";
 import { ageOf, prOfPlace, prsShown, prSummary, TAB_MAX_AGE_S, useProjectPrs } from "./prs";
@@ -1124,9 +1126,12 @@ function WsNameField({ initial, onCommit, onCancel }: {
 
 /** A named workspace's header row. A drag handle for reordering, a drop zone
  *  for a project (`data-ws-id` on the group around it), and its menu. */
-function WorkspaceHeader({ w, open, naming, rollup, onToggle, onMenu, onArm, onRename, onRenameStart, onRenameCancel }: {
+function WorkspaceHeader({ w, open, naming, rollup, active, onOpen, onToggle, onMenu, onArm, onRename, onRenameStart, onRenameCancel }: {
   w: WsDef;
   open: boolean;
+  /** Its overview is what the main area shows (phase 4). */
+  active: boolean;
+  onOpen: () => void;
   naming: boolean;
   rollup: "" | "busy" | "waiting" | "done";
   onToggle: () => void;
@@ -1138,7 +1143,7 @@ function WorkspaceHeader({ w, open, naming, rollup, onToggle, onMenu, onArm, onR
 }) {
   return (
     <div
-      className="ws-h"
+      className={"ws-h" + (active ? " on" : "")}
       data-testid="ws-header"
       data-track="nav.workspace"
       onContextMenu={onMenu}
@@ -1148,7 +1153,7 @@ function WorkspaceHeader({ w, open, naming, rollup, onToggle, onMenu, onArm, onR
       <span className={"ws-icon" + (rollup ? " " + rollup : "")}><Icons.Layers size={13} /></span>
       {naming
         ? <WsNameField initial={w.name} onCommit={onRename} onCancel={onRenameCancel} />
-        : <span className="ws-name" title="Double-click to rename" onClick={onToggle} onDoubleClick={onRenameStart}>{w.name}</span>}
+        : <span className="ws-name" data-testid="ws-name" title="Click for its overview; double-click to rename" onClick={onOpen} onDoubleClick={onRenameStart}>{w.name}</span>}
       <span className="pcount">{w.projects.length}</span>
       <button className="mini" title="workspace menu" data-testid="ws-menu" data-track="nav.workspace.menu"
         onClick={(e) => onMenu(e)}><Icons.Ellipsis size={13} /></button>
@@ -4318,6 +4323,13 @@ function App() {
   // The workspace whose name is being edited inline, or "new" for the
   // "New workspace" field.
   const [wsNaming, setWsNaming] = useState<string | null>(null);
+  // Phase 4: the workspace whose overview the main area shows while no place
+  // is selected, what `workspace_overview` answered for it, and the ideas
+  // folder's documents (for its Link pickers).
+  const [wsOpen, setWsOpen] = useState<string | null>(null);
+  const [wsOv, setWsOv] = useState<{ id: string; ov: Overview | null; error: string | null } | null>(null);
+  const [ideaDocs, setIdeaDocs] = useState<DocLite[]>([]);
+  const [ideasTick, setIdeasTick] = useState(0);
   const [settings, setSettings] = useState<Settings>(DEFAULTS);
   // A persisted Off must suppress even the first usage request at startup.
   const [settingsReady, setSettingsReady] = useState(false);
@@ -6565,6 +6577,61 @@ function App() {
     setWsNaming("new");
   };
 
+  // ── a workspace's overview (idea board phase 4, `plans.ts`) ──
+  // Clicking a workspace's name shows it in the main area while no place is
+  // selected; entering a place leaves it. Read again on every list change
+  // and every change in the ideas folder (`ideas:changed`).
+  const openWsOverview = (id: string) => { setSel(null); setWsOpen(id); };
+  useEffect(() => { if (sel) setWsOpen(null); }, [sel]);
+  useEffect(() => { if (!ideasOn) setWsOpen(null); }, [ideasOn]);
+  useEffect(() => {
+    if (!ideasOn || !wsOpen) return;
+    const un = listen("ideas:changed", () => setIdeasTick((n) => n + 1));
+    return () => { un.then((f) => f()).catch(() => {}); };
+  }, [ideasOn, wsOpen]);
+  useEffect(() => {
+    if (!ideasOn || !wsOpen) { setWsOv(null); return; }
+    let alive = true;
+    invoke<Overview>("workspace_overview", { id: wsOpen })
+      .then((ov) => { if (alive) setWsOv({ id: wsOpen, ov, error: null }); })
+      .catch((e) => { if (alive) setWsOv({ id: wsOpen, ov: null, error: String(e) }); });
+    invoke<{ ideas: { id: string | null; title: string; kind?: "idea" | "plan"; problem?: string }[] }>("ideas_list")
+      .then((l) => { if (alive) setIdeaDocs(l.ideas.filter((d) => d.id && !d.problem).map((d) => ({ id: d.id!, title: d.title, kind: d.kind === "plan" ? "plan" : "idea" }))); })
+      .catch(() => { if (alive) setIdeaDocs([]); });
+    return () => { alive = false; };
+  }, [ideasOn, wsOpen, wsList, ideasTick]);
+  /** Open a plan or an idea in the Ideas window: the hand-off key, then
+   *  open (or raise) it; it reads the key on load, focus or `storage`. */
+  const openIdeaDoc = (id: string) => {
+    if (!ideasOn) return;
+    try { window.localStorage.setItem(SHOW_KEY, JSON.stringify({ id, at: Date.now() })); } catch { /* the window still opens */ }
+    openIdeas();
+  };
+  /** The Ideas window asks to show a workspace ("Make workspace", "Open
+   *  workspace ▸"), the same way round. */
+  useEffect(() => {
+    if (!ideasOn) return;
+    const look = () => {
+      let id: string | null = null;
+      try {
+        id = showRequest(window.localStorage.getItem(WS_SHOW_KEY), Date.now());
+        if (id) window.localStorage.removeItem(WS_SHOW_KEY);
+      } catch { return; }
+      if (!id) return;
+      setNavView("workspaces");
+      openWsOverview(id);
+      invoke<WsList>("workspaces_list").then(setWsList).catch(() => {});
+    };
+    const onStorage = (e: StorageEvent) => { if (e.key === WS_SHOW_KEY) look(); };
+    look();
+    window.addEventListener("focus", look);
+    window.addEventListener("storage", onStorage);
+    return () => { window.removeEventListener("focus", look); window.removeEventListener("storage", onStorage); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ideasOn]);
+  const wsCall = (c: { cmd: string; args: Record<string, unknown> }) => wsRun(c.cmd, c.args);
+  const wsLite = () => (wsList?.workspaces ?? []).map((w) => ({ id: w.id, plan: w.plan ?? null, ideas: w.ideas ?? [] }));
+
   // Auto-disarm the TIMED arms: the project-header ✕ ("hdr|") and both Close
   // arms ("close|" bare, "closectx|" in the menu). The first two have no popover
   // to dismiss them at all; the ctx one does, but a menu can sit open for hours
@@ -7234,6 +7301,10 @@ function App() {
     | { kind: "ws-add"; id: string; root: string }
     | { kind: "ws-remove"; id: string; root: string }
     | { kind: "ws-order"; before: string | null }
+    // Phase 4 (`plans.ts`): a plan onto a workspace with none, an idea onto
+    // a workspace that does not link it.
+    | { kind: "ws-plan"; id: string; plan: string }
+    | { kind: "ws-idea"; id: string; idea: string }
     // Dropping a place onto the TERMINAL is not a move at all — it types a
     // reference to that place into the Claude session running there. Onto the
     // CHAT (`intoPath`) it goes into the draft at the cursor instead, and the
@@ -7282,6 +7353,18 @@ function App() {
 
   const resolveDrop = (item: DragItem, x: number, y: number): DropTarget | null => {
     const el = document.elementFromPoint(x, y) as HTMLElement | null;
+    if (item.kind === "plan" || item.kind === "idea") {
+      const hit = wsHitAt(el);
+      if (hit?.kind !== "group") return null;
+      const all = wsLite();
+      const onto = all.find((w) => w.id === hit.id) ?? null;
+      if (item.kind === "plan") {
+        const id = planOntoWorkspace(item.id, onto, all);
+        return id ? { kind: "ws-plan", id, plan: item.id } : null;
+      }
+      const id = ideaOntoWorkspace(item.id, onto);
+      return id ? { kind: "ws-idea", id, idea: item.id } : null;
+    }
     if (item.kind === "workspace") {
       // Between workspaces: the groups' own geometry, the project reorder's
       // rule. Anywhere else (the switch, the right side): nothing.
@@ -7390,7 +7473,7 @@ function App() {
     if (springRef.current) { clearTimeout(springRef.current.timer); springRef.current = null; }
     // The view switch springs too: a project held over "Workspaces" in All
     // projects flips the nav, so the drag can go on to land on a workspace.
-    if (item && item.kind !== "place" && zone?.dataset.wsSwitch) {
+    if (item && (item.kind === "project" || item.kind === "workspace") && zone?.dataset.wsSwitch) {
       const to = springsTo(item, wsHitAt(zone), navView);
       if (to) springRef.current = { key: "nav-view", timer: window.setTimeout(() => setNavView(to), 500) };
       return;
@@ -7409,6 +7492,9 @@ function App() {
       return;
     }
     if (target.kind === "ws-add") { wsAddProject(target.id, target.root); return; }
+    if (target.kind === "ws-plan") { void wsCall(setPlanCall(target.id, target.plan)); return; }
+    if (target.kind === "ws-idea") { void wsCall(linkIdeaCall(target.id, target.idea)); return; }
+    if (item.kind === "plan" || item.kind === "idea") return;
     if (target.kind === "ws-remove") { wsRemoveProject(target.id, target.root); return; }
     if (item.kind === "workspace") {
       if (target.kind !== "ws-order" || target.before === item.id) return;
@@ -9059,7 +9145,7 @@ function App() {
           const rollup = places.some((p) => activityOf(p) === "busy") ? "busy"
             : places.some((p) => activityOf(p) === "waiting") ? "waiting"
               : places.some((p) => doneOf(p) === 1) ? "done" : "";
-          const dropOn = drag?.target?.kind === "ws-add" && drag.target.id === w.id;
+          const dropOn = (drag?.target?.kind === "ws-add" || drag?.target?.kind === "ws-plan" || drag?.target?.kind === "ws-idea") && drag.target.id === w.id;
           const dragged = drag?.item.kind === "workspace" && drag.item.id === w.id;
           return (
             <Fragment key={w.id}>
@@ -9075,6 +9161,8 @@ function App() {
                   open={open}
                   naming={wsNaming === w.id}
                   rollup={rollup}
+                  active={!sel && wsOpen === w.id}
+                  onOpen={() => openWsOverview(w.id)}
                   onToggle={() => toggleWs(w.id)}
                   onMenu={(e) => wsMenu(e, w.id)}
                   onArm={(e) => arm(e, { kind: "workspace", id: w.id })}
@@ -9839,6 +9927,20 @@ function App() {
                   </footer>
                 )}
               </>
+            ) : wsOpen && wsById(wsOpen) ? (
+              <WorkspaceOverview
+                key={wsOpen}
+                name={wsById(wsOpen)!.name}
+                ov={wsOv?.id === wsOpen ? wsOv.ov : null}
+                error={wsOv?.id === wsOpen ? wsOv.error : null}
+                freePlans={ideaDocs.filter((d) => d.kind === "plan" && !(wsList?.workspaces ?? []).some((w) => w.plan === d.id))}
+                linkable={ideaDocs.filter((d) => d.kind === "idea" && !(wsById(wsOpen)!.ideas ?? []).includes(d.id))}
+                openDoc={openIdeaDoc}
+                setPlan={(plan) => void wsCall(setPlanCall(wsOpen, plan))}
+                linkIdea={(id) => void wsCall(linkIdeaCall(wsOpen, id))}
+                unlinkIdea={(id) => void wsCall(unlinkIdeaCall(wsOpen, id))}
+                arm={(e, d) => arm(e, { kind: d.kind, id: d.id, title: d.title })}
+              />
             ) : (
               /* Home scrolls in its own box. Without it a briefing taller
                  than the pane overflowed `.main` and was clipped with nothing
@@ -10356,10 +10458,13 @@ function App() {
         >
           {drag.item.kind === "project" ? basename(drag.item.root)
             : drag.item.kind === "workspace" ? (wsById(drag.item.id)?.name ?? "")
+            : drag.item.kind === "plan" || drag.item.kind === "idea" ? drag.item.title
               : nameOf({ slug: drag.item.slug, declared: placeAt(drag.item.repo, drag.item.slug)?.declared })}
           {drag.target?.kind === "reject" && <span className="drag-why">{drag.target.hint}</span>}
           {drag.target?.kind === "tier" && <span className="drag-why">→ {TIER_LABEL[drag.target.lands]}</span>}
           {drag.target?.kind === "ws-add" && <span className="drag-why">→ add to {wsById(drag.target.id)?.name}</span>}
+          {drag.target?.kind === "ws-plan" && <span className="drag-why">→ {wsById(drag.target.id)?.name}'s plan</span>}
+          {drag.target?.kind === "ws-idea" && <span className="drag-why">→ link to {wsById(drag.target.id)?.name}</span>}
           {drag.target?.kind === "ws-remove" && <span className="drag-why">→ take out of {wsById(drag.target.id)?.name}</span>}
           {drag.target?.kind === "mention" && <span className="drag-why">{drag.target.intoPath
             ? (drag.target.token ? "→ reference in your message" : `→ adds “${drag.target.label}” to your message`)
@@ -10911,6 +11016,8 @@ function App() {
         return (
           <CtxMenu x={ctx.x} y={ctx.y} onClose={closeCtx}>
             <div className="pop-hint">{w.name}</div>
+            <button className="pop-item" data-testid="ws-overview-open" data-track="nav.workspace.overview"
+              onClick={() => { closeCtx(); openWsOverview(w.id); }}>Overview</button>
             {/* Every way a project arrives, each ending with it IN this
                 workspace: one already registered (the list), or the nav
                 footer's three acts with this workspace as their continuation
