@@ -44,7 +44,7 @@ export type SheetProps = {
   cliStale: boolean;
   cliMissing: boolean;
   appStale: boolean;
-  onCheckUpdate: () => Promise<unknown> | void;
+  onCheckUpdate: (keepLatest?: boolean, force?: boolean) => Promise<unknown> | void;
   /** The page on screen, whichever way it got there (opened at it, or clicked
    *  to). App uses it to retire the update bubble once Updates has been seen. */
   onCatShown?: (cat: PageId) => void;

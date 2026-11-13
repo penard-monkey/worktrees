@@ -1495,7 +1495,25 @@ function mockTurnsAt(repo: string, slug: string) {
     mockTurns.set(key, t);
     return t;
   }
-  t = harness === "codex" ? [
+  t = harness === "kimi" ? [
+    {
+      at: now - 1500, user: "Summarise the ledger sync gaps, then fix the biggest one.", reply: "Reading the sync log first.\n\nThe gap was the reconcile pass skipping empty batches; it now handles them. 14 tests pass.", tools: ["Read", "Bash", "Edit"], truncated: false,
+      steps: [
+        { kind: "text", at: now - 1500, text: "Reading the sync log first." },
+        { kind: "tool", at: now - 1490, name: "Read", summary: "crates/sync/src/log.rs", call_id: "kimi-c-1" },
+        { kind: "permission", at: now - 1480, answered_at: now - 1440, tool: "Bash", summary: "cargo test -p sync", allowed: true, scope: "session" },
+        { kind: "tool", at: now - 1430, name: "Edit", summary: "crates/sync/src/reconcile.rs", call_id: "kimi-c-2", failed: true },
+        { kind: "text", at: now - 1400, text: "The gap was the reconcile pass skipping empty batches; it now handles them. 14 tests pass." },
+      ],
+    },
+    {
+      at: now - 600, user: "Which retry window should the scheduler use?", reply: "Set to the 15-minute window.", tools: ["AskUserQuestion"], truncated: false,
+      steps: [
+        { kind: "question", at: now - 590, answered_at: now - 560, questions: [{ header: "Window", question: "Which retry window?", multi: false, options: [{ label: "5 minutes" }, { label: "15 minutes" }, { label: "Other" }] }], answer: { how: "picked", answers: [{ question: "Which retry window?", picked: ["15 minutes"] }] } },
+        { kind: "text", at: now - 550, text: "Set to the 15-minute window." },
+      ],
+    },
+  ] : harness === "codex" ? [
     { at: now - 1500, user: "Move the invoice totals onto the new ledger API.", reply: "Done for `InvoiceSummary` and `InvoiceTable`. Both read `ledger.totals(accountId)` now; the old `computeTotals` helper has no callers left, so I removed it.\n\nTwo tests needed new fixtures (`billing/__fixtures__/ledger.json`).", tools: ["shell", "apply_patch", "apply_patch", "shell"], truncated: false },
     { at: now - 1320, user: "Run the billing tests.", reply: "`pnpm test billing` — 86 passed, 0 failed.", tools: ["shell"], truncated: false },
     { at: now - 240, user: "Now the credit notes.", reply: "Starting with `CreditNoteForm`. It still posts to `/v1/credits`; I'll switch it to the ledger's `adjustments` endpoint and keep the form's validation as is.", tools: ["shell"], truncated: false },
@@ -2031,6 +2049,34 @@ const mockIdeaSends: { id: string; conv: string; text: string }[] = [];
 const mockIdeaWrites: { id: string; content: string; expected_mtime: unknown; keep_history: boolean }[] = [];
 /** What `idea_write` with `keep_history` copied aside (`__mock.ideaHistory()`). */
 const mockIdeaHistory: { id: string; content: string }[] = [];
+/** Phase 3's history (`.history/<id>/<stamp>.md`): every copy an act took,
+ *  newest last (`__mock.ideaVersions()`). */
+const mockIdeaVersions: { id: string; version: string; at: string; content: string }[] = [];
+let mockVersionSeq = 0;
+function ideaKeep(id: string, content: string) {
+  const at = new Date(Date.now() + ++mockVersionSeq).toISOString();
+  mockIdeaVersions.push({ id, version: `${at.replace(/[-:]/g, "").replace(/\.(\d+)Z$/, ".$1Z")}.md`, at, content });
+}
+/** A frontmatter list (`related`, `absorbed`), as `ideas::front_list` reads it. */
+const ideaList = (t: string, k: string) => (ideaFront(t, k) ?? "").replace(/^\[|\]$/g, "").split(",").map((x) => x.trim()).filter(Boolean);
+/** `t` with the frontmatter's `k` set to `items` (`ideas::with_front_list`). */
+function ideaSetList(t: string, k: string, items: string[]): string {
+  const m = /^(---\n)([\s\S]*?\n)(---\n)/.exec(t);
+  if (!m) return t;
+  let inner = m[2].replace(new RegExp(`^${k}:.*\n`, "m"), "");
+  if (items.length) inner += `${k}: [${items.join(", ")}]\n`;
+  return `${m[1]}${inner}${m[3]}${t.slice(m[0].length)}`;
+}
+/** The live idea an id names, through `absorbed` (`Index::lookup`). */
+function ideaLookup(id: string): { d: MockIdea; via: boolean } {
+  try { return { d: ideaById(id), via: false }; } catch (e) {
+    for (const d of mockIdeas.values()) if (d.id && ideaList(d.content, "absorbed").includes(id)) return { d, via: true };
+    throw e;
+  }
+}
+const ideaBody = (t: string) => t.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, "");
+const ideaBodyNoTitle = (t: string) => ideaBody(t).replace(/^ {0,3}# .*\r?\n?/m, "").replace(/^(\r?\n)+/, "").trimEnd().replace(/\r\n/g, "\n");
+const ideaToday = () => new Date().toISOString().slice(0, 10);
 /** The mtime an outside act gives a file: later than anything before it,
  *  even inside one millisecond. */
 let mockIdeaClock = 0;
@@ -4011,8 +4057,10 @@ Phase 3: Frontend pane and mock harness
     case "ideas_list":
       return { ideas: [...mockIdeas.values()].sort((a, b) => b.mtime_ms - a.mtime_ms).map(ideaRow), skipped: mockIdeaSkipped.slice(), dir: "/Users/mock/.local/share/worktrees/ideas" };
     case "idea_read": {
-      const d = ideaById(args.id as string);
-      return { ...ideaRow(d), content: d.content };
+      const { d, via } = ideaLookup(args.id as string);
+      if (!via) return { ...ideaRow(d), content: d.content };
+      const last = mockIdeaVersions.filter((v) => v.id === args.id).pop();
+      return { ...ideaRow(d), content: d.content, merged: { id: args.id, title: last ? ideaTitle(last.content) : null, date: last?.at.slice(0, 10) ?? null } };
     }
     case "idea_create": {
       const title = String(args.title ?? "").trim() || "Untitled";
@@ -4062,6 +4110,109 @@ Phase 3: Frontend pane and mock harness
       for (const c of mockConvs.get(d.id!) ?? []) c.live = false;
       ideaSessionsPush();
       return null;
+    }
+    // ── ideas relate (phase 3): the acts over `mockIdeas`, history in
+    // `mockIdeaVersions`; the rules are `worktrees_core::ideas`'s, simplified.
+    case "idea_relate": {
+      const a = ideaById(args.id as string);
+      const b = ideaLookup(args.other as string).d;
+      if (a.id === b.id) throw "an idea cannot be related to itself";
+      const mine = ideaList(a.content, "related");
+      if (!mine.includes(b.id!) && !ideaList(b.content, "related").includes(a.id!)) {
+        ideaKeep(a.id!, a.content);
+        a.content = ideaSetList(a.content, "related", [...mine, b.id!]); a.mtime_ms = ideaNow(); ideasTouched();
+      }
+      return { ...ideaRow(a), content: a.content };
+    }
+    case "idea_merge": {
+      const a = ideaById(args.into as string), b = ideaById(args.from as string);
+      if (a === b) throw "an idea cannot be merged into itself";
+      ideaCas(a, args.expectedInto); ideaCas(b, args.expectedFrom);
+      ideaKeep(a.id!, a.content); ideaKeep(b.id!, b.content);
+      const absorbed = [...new Set([...ideaList(a.content, "absorbed"), b.id!, ...ideaList(b.content, "absorbed")])];
+      const front = ideaSetList(a.content, "absorbed", absorbed);
+      const text = args.text as string | undefined;
+      a.content = text != null ? front.replace(/^(---\n[\s\S]*?\n---\n)[\s\S]*$/, `$1${text}`)
+        : `${front.trimEnd()}\n\n## From: ${ideaTitle(b.content) ?? b.file} (${ideaToday()})\n\n${ideaBodyNoTitle(b.content)}\n`;
+      a.mtime_ms = ideaNow();
+      mockIdeas.delete(b.file);
+      ideasTouched();
+      return { ...ideaRow(a), content: a.content };
+    }
+    case "idea_combine": {
+      const ids = args.ids as string[];
+      if (ids.length < 2) throw "combining needs two ideas or more";
+      const srcs = ids.map(ideaById);
+      const id = ideaId();
+      const title = String(args.title ?? "").trim() || "Untitled";
+      const absorbed = [...new Set(srcs.flatMap((d) => [d.id!, ...ideaList(d.content, "absorbed")]))];
+      const body = (args.text as string | undefined) ?? `# ${title}\n${srcs.map((d) => `\n## From: ${ideaTitle(d.content) ?? d.file} (${ideaToday()})\n\n${ideaBodyNoTitle(d.content)}\n`).join("")}`;
+      for (const d of srcs) { ideaKeep(d.id!, d.content); mockIdeas.delete(d.file); }
+      const d: MockIdea = { id, file: ideaFree(ideaSlug(title)), created: ideaToday(), mtime_ms: ideaNow(), content: `---\nid: ${id}\ncreated: ${ideaToday()}\nabsorbed: [${absorbed.join(", ")}]\n---\n\n${body}` };
+      mockIdeas.set(d.file, d);
+      ideasTouched();
+      return { ...ideaRow(d), content: d.content };
+    }
+    case "idea_split": {
+      const a = ideaById(args.id as string);
+      ideaCas(a, args.expectedMtime ?? args.expected_mtime);
+      const [st, en] = [args.start as number, args.end as number];
+      const fm = /^---\n[\s\S]*?\n---\n/.exec(a.content)?.[0].length ?? 0;
+      if (st < fm) throw "the selection reaches into the frontmatter (the `---` block): select text below it";
+      const sel = a.content.slice(st, en);
+      if (!sel.trim()) throw "the selection has no text";
+      const title = String(args.title ?? "").trim() || sel.trim().split("\n")[0].replace(/^[#>*+\-\s]+/, "").slice(0, 80) || "Untitled";
+      const id = ideaId();
+      const c: MockIdea = { id, file: ideaFree(ideaSlug(title)), created: ideaToday(), mtime_ms: ideaNow(),
+        content: `---\nid: ${id}\ncreated: ${ideaToday()}\nfrom: ${a.id}\n---\n\n# ${title}\n\n${sel.replace(/^\n+/, "").trimEnd()}\n` };
+      mockIdeas.set(c.file, c);
+      if (!args.extract) {
+        ideaKeep(a.id!, a.content);
+        const lead = sel.slice(0, sel.length - sel.trimStart().length), trail = sel.slice(sel.trimEnd().length);
+        a.content = `${a.content.slice(0, st)}${lead}[${title}](idea:${id})${trail}${a.content.slice(en)}`;
+        a.mtime_ms = ideaNow();
+      }
+      ideasTouched();
+      return { new: { ...ideaRow(c), content: c.content }, source: { ...ideaRow(a), content: a.content } };
+    }
+    case "idea_related": {
+      const me = ideaLookup(args.id as string).d;
+      const out: { id: string; title: string; how: string }[] = [];
+      const add = (x: string, how: string) => {
+        try { const d = ideaLookup(x).d; if (d !== me && !out.some((r) => r.id === d.id && r.how === how)) out.push({ id: d.id!, title: ideaRow(d).title, how }); } catch { /* gone */ }
+      };
+      const links = (t: string) => [...ideaBody(t).matchAll(/idea:([0-9A-HJKMNP-TV-Z]{26})/g)].map((m) => m[1]);
+      ideaList(me.content, "related").forEach((x) => add(x, "related"));
+      const from = ideaFront(me.content, "from"); if (from) add(from, "split-from");
+      links(me.content).forEach((x) => add(x, "links-to"));
+      for (const d of mockIdeas.values()) {
+        if (!d.id || d === me) continue;
+        if (ideaList(d.content, "related").includes(me.id!)) add(d.id, "related-by");
+        if (ideaFront(d.content, "from") === me.id) add(d.id, "split-into");
+        if (links(d.content).includes(me.id!)) add(d.id, "linked-from");
+      }
+      return out;
+    }
+    case "idea_versions": {
+      const id = args.id as string;
+      if (!/^[0-9A-HJKMNP-TV-Z]{26}$/.test(id)) throw `not an idea id: "${id}"`;
+      return mockIdeaVersions.filter((v) => v.id === id).reverse().map((v) => ({ version: v.version, at: v.at, size: v.content.length, title: ideaTitle(v.content) }));
+    }
+    case "idea_restore": {
+      const id = args.id as string;
+      const v = mockIdeaVersions.find((x) => x.id === id && x.version === args.version);
+      if (!v) throw `not a version name: "${args.version}"`;
+      let d: MockIdea | null = null;
+      try { d = ideaById(id); } catch { /* not live: made again */ }
+      if (d) {
+        ideaCas(d, args.expectedMtime ?? args.expected_mtime);
+        if (d.content !== v.content) { ideaKeep(id, d.content); d.content = v.content; d.mtime_ms = ideaNow(); }
+      } else {
+        d = { id, file: ideaFree(ideaSlug(ideaTitle(v.content) ?? "untitled")), created: ideaFront(v.content, "created"), mtime_ms: ideaNow(), content: v.content };
+        mockIdeas.set(d.file, d);
+      }
+      ideasTouched();
+      return { ...ideaRow(d), content: d.content };
     }
     // ── idea sessions (phase S): see `mockConvs` ─────────────────────────────
     case "idea_conversations": {
@@ -5256,8 +5407,8 @@ Phase 3: Frontend pane and mock harness
       const harness = mockHarnessAt(path);
       const mode = new URLSearchParams(location.search).get("agentinterrupt");
       if (mode === "gone") throw "no agent is running in this place";
-      if (mode === "unsupported" || (!mode && (harness === "pi" || harness === "kimi"))) {
-        throw `agent_interrupt stops Claude's and Codex's turns; ${harness === "kimi" ? "Kimi" : "pi"}'s cannot be stopped from here yet`;
+      if (mode === "unsupported" || (!mode && harness === "pi")) {
+        throw `agent_interrupt stops Claude's, Codex's and Kimi's turns; ${harness}'s cannot be stopped from here yet`;
       }
       if (mode === "prompt" || (!mode && mockPromptUp(args.repo, args.slug))) throw "the agent is waiting on a prompt: answer it with agent_answer";
       if (mode === "draft") throw "the agent's prompt has unsent text in it (someone is typing there), which hides whether a turn is running: stop it at the host";
@@ -5277,7 +5428,7 @@ Phase 3: Frontend pane and mock harness
     }
     case "agent_turns": {
       const harness = mockTurnHarnessAt(mockPlacePath(args.repo, args.slug));
-      if (harness === "pi" || harness === "kimi") throw `agent_turns reads Claude's and Codex's transcripts; ${harness}'s is not read yet`;
+      if (harness === "pi") throw `agent_turns reads Claude's, Codex's and Kimi's transcripts; ${harness}'s is not read yet`;
       // Claude on its resume picker has no session yet, and writes one about
       // half a second after a pick (measured on 2.1.316).
       const ps = mockPromptState(args.repo, args.slug);
@@ -6145,6 +6296,7 @@ let mockNotifyGranted = new URLSearchParams(location.search).get("notify") === "
   endConv: (id: string, conv: string) => { const c = convOf(id, conv); c.live = false; c.prompt = null; ideaSessionsPush(); },
   /** The copies `keep_history` writes took (the real store's `.history/`). */
   ideaHistory: (id?: string) => mockIdeaHistory.filter((h) => !id || h.id === id),
+  ideaVersions: (id?: string) => mockIdeaVersions.filter((h) => !id || h.id === id),
   /** An idea's bytes and mtime as the "disk" holds them. */
   ideaFile(id: string) { const d = [...mockIdeas.values()].find((x) => x.id === id); return d ? { file: d.file, content: d.content, mtime_ms: d.mtime_ms } : null; },
   /** Another editor saves `content` over the idea `id` (the next tick reports it). */

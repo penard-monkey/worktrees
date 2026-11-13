@@ -946,6 +946,18 @@ as pre-existing. One was called pre-existing that way while it was a real
 regression on the branch (#367). Compare against `main` from the same directory
 CI uses before calling anything pre-existing.
 
+**A lane's shell carries `WORKTREES_VIEWER_JS`, and two gate tests refuse to
+run under it.** The desktop app sets that variable when it starts serve, so
+every tmux pane the app launches inherits it, every lane included. Two tests
+decide the very question it answers, whether a serve with NO bundle refuses
+`open_docs_viewer` in clear words, and they panic rather than pass for the
+wrong reason: `open_docs_viewer_without_a_bundle_is_a_clear_refusal` in
+`cargo test -p worktrees-cli` and `a_build_with_no_viewer_bundle_refuses_the_open`
+in `cargo test -p worktrees-api`. One red test in each suite, the same on every
+lane, with the branch innocent. Run those two gates as
+`env -u WORKTREES_VIEWER_JS cargo test -p …` (seen on 2026-10-22, 2026-11-01
+and 2026-11-12 before this note was written).
+
 **bats helpers run under macOS `/bin/bash` 3.2 on the macos runner.** A
 pattern-substitution REPLACEMENT keeps its quote characters there —
 `${c//"'\''"/"'"}` turns `'` into `"'"` — so a helper passes on a

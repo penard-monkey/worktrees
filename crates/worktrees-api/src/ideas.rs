@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use serde::Serialize;
-use worktrees_core::ideas::{self, Doc, Idea, Index};
+use worktrees_core::ideas::{self, Doc, Idea, Index, Relation, Split, Version};
 
 use crate::Ctx;
 
@@ -85,6 +85,59 @@ pub fn idea_remove(ctx: &Ctx, id: String, expected_mtime: Option<u64>) -> Result
 /// name in the folder, refused with any `/` or a leading dot.
 pub fn idea_adopt(ctx: &Ctx, file: String, expected_mtime: Option<u64>) -> Result<Doc, String> {
     ideas::adopt_at(root(ctx), &file, expected_mtime)
+}
+
+// ── phase 3: ideas relate (§3, §7.1) ────────────────────────────────────────
+//
+// One row per act, each `worktrees_core::ideas`'s operation with its plain
+// parameters (the seam an agent's proposal will use, C11). Every act copies
+// each file it changes to `.history/` first; `ideas:changed` follows from
+// the poll, as for the phase 1 writes.
+
+/// Relate `id` to `other`: written in `id`'s `related:` only.
+pub fn idea_relate(ctx: &Ctx, id: String, other: String) -> Result<Doc, String> {
+    ideas::relate_at(root(ctx), &id, &other)
+}
+
+/// Merge `from` into `into`; `text`, when given, is the merged BODY (after
+/// the frontmatter), else `from` is appended under `## From:`. `from`'s live
+/// conversations end with its file (as for a remove).
+pub fn idea_merge(ctx: &Ctx, into: String, from: String, text: Option<String>, expected_into: Option<u64>, expected_from: Option<u64>) -> Result<Doc, String> {
+    let d = ideas::merge_at(root(ctx), &into, &from, text.as_deref(), expected_into, expected_from)?;
+    crate::ideasessions::close_all(ctx, &from);
+    Ok(d)
+}
+
+/// Combine `ids` into a new idea titled `title` (a merge into a new idea).
+pub fn idea_combine(ctx: &Ctx, ids: Vec<String>, title: String, text: Option<String>) -> Result<Doc, String> {
+    let d = ideas::combine_at(root(ctx), &ids, &title, text.as_deref())?;
+    for id in &ids {
+        crate::ideasessions::close_all(ctx, id);
+    }
+    Ok(d)
+}
+
+/// Split `start..end` (UTF-16 offsets into the text `expected_mtime` names)
+/// of `id` into a new idea; `extract` copies it and leaves `id` as it is.
+pub fn idea_split(ctx: &Ctx, id: String, start: usize, end: usize, extract: Option<bool>, title: Option<String>, expected_mtime: Option<u64>) -> Result<Split, String> {
+    ideas::split_at(root(ctx), &id, start, end, extract == Some(true), title.as_deref(), expected_mtime)
+}
+
+/// The ideas related to `id`, written and computed, links included.
+pub fn idea_related(ctx: &Ctx, id: String) -> Result<Vec<Relation>, String> {
+    ideas::related_at(root(ctx), &id)
+}
+
+/// Every history copy of `id`, newest first. The id need not be live: a
+/// removed or merged-away idea has versions too.
+pub fn idea_versions(ctx: &Ctx, id: String) -> Result<Vec<Version>, String> {
+    ideas::versions_at(root(ctx), &id)
+}
+
+/// Put `version` back as `id` (its current file to history first), or make a
+/// removed or merged-away idea live again from it.
+pub fn idea_restore(ctx: &Ctx, id: String, version: String, expected_mtime: Option<u64>) -> Result<Doc, String> {
+    ideas::restore_at(root(ctx), &id, &version, expected_mtime)
 }
 
 // ── the poll ────────────────────────────────────────────────────────────────

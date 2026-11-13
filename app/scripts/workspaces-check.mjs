@@ -124,7 +124,11 @@ const settings = read("../src/settings.ts");
 ok("nav_view is in Settings, defaulting to All projects", /nav_view: "projects" \| "workspaces";/.test(settings) && /nav_view: "projects",/.test(settings));
 ok("a junk nav_view loads as All projects", /if \(s\.nav_view !== "workspaces"\) s\.nav_view = "projects";/.test(settings));
 const navdrag = read("../src/navdrag.ts");
-ok("navdrag clears the workspace drag's body class", /"dragging-workspace"/.test(navdrag));
+// The class a drag adds is `dragging-<kind>`; the end removes that same
+// class (since phase 3's idea drags reuse the plumbing), so a workspace
+// drag's is cleared like every other kind's.
+ok("navdrag clears the workspace drag's body class",
+  /classList\.add\("dragging", `dragging-\$\{s\.item\.kind\}`\)/.test(navdrag) && /classList\.remove\("dragging", `dragging-\$\{s\.item\.kind\}`\)/.test(navdrag));
 ok("still no HTML5 drag-and-drop in the nav", !/draggable=|onDragStart|dataTransfer/.test(app.slice(app.indexOf("const ProjectNode = "), app.indexOf("const DOCK_RAIL"))));
 
 if (failed) { console.log(`\n${failed} failed`); process.exit(1); }
