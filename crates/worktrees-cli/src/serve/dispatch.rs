@@ -804,7 +804,7 @@ pub const GLOBAL_OK: &[&str] = &[
 /// widen a guest without a second, deliberate edit here. None may ever reach
 /// an agent.
 #[cfg_attr(not(test), allow(dead_code))]
-pub const GUEST_ROWS: &[&str] = &["shares_list", "share_join", "guest_places", "share_request"];
+pub const GUEST_ROWS: &[&str] = &["shares_list", "share_join", "guest_places", "share_request", "thread_read", "thread_post"];
 
 /// The guest rows a client POLLS (§2's trap): exempt from the per-request
 /// audit record and the audit gate, as `read` rows are, or a guest's poll
@@ -813,6 +813,12 @@ pub const GUEST_ROWS: &[&str] = &["shares_list", "share_join", "guest_places", "
 /// C) are named now so they join by being added to the table as guest rows.
 /// Every act — a join, a request — is recorded.
 pub const GUEST_READS: &[&str] = &["shares_list", "guest_places", "shared_turns", "shared_tool_call", "thread_read"];
+
+/// The guest rows the CONSOLE may also make (group chat §2: "an allowed
+/// guest, and the owner"): the owner reads and posts in a thread and reads
+/// the shared session, as the console. A test holds it against the table.
+/// Nothing else widens: a paired owner device is not the console.
+pub const CONSOLE_GUEST_ROWS: &[&str] = &["thread_read", "thread_post"];
 
 /// The lane a request runs on, or `None` for the concurrent pool.
 ///
@@ -1378,6 +1384,12 @@ commands! { cx, a;
     share_join: Engine [guest, share(share)] => super::shares::rows::join(cx, a.get("share")?),
     guest_places: Engine [guest, guest] => super::shares::rows::places(cx),
     share_request: Engine [guest, guest] => super::shares::rows::request(cx, a.get("project")?, a.get("slug")?, a.get("note")?),
+    // The thread beside a share (§4, `serve::sharethread`): a guest the share
+    // has let in, and the console (`CONSOLE_GUEST_ROWS`), read a page and
+    // post. Inert text: nothing here reaches an agent. `thread_read` is
+    // polled (`GUEST_READS`); a post is recorded by length and hash.
+    thread_read: Engine [guest, share(share)] => super::sharethread::rows::read(cx, a.get("share")?, a.get("after")?, a.get("limit")?),
+    thread_post: Engine [guest, share(share)] => super::sharethread::rows::post(cx, a.get("share")?, a.get("id")?, a.get("text")?),
 
     // ── remote access (§4.1): the host's own acts, never a device's ──────────
     remote_enable: HostConsole => remote(cx)?.enable(&a.get::<String>("address")?, a.get("iface")?, a.get("port")?, a.get("advertise")?),
@@ -1460,13 +1472,14 @@ mod tests {
     /// `idea_combine`, `idea_split`, `idea_related`, `idea_versions`,
     /// `idea_restore`), and the chat's images (`read_place_image`, `agent_call_image`), and phase S's fifteen
     /// idea-session console rows (`idea_conversation*`, `idea_*` over the agent bodies), and group
-    /// chat's sixteen share rows (twelve console, four `guest`); the check scripts
+    /// chat's sixteen share rows (twelve console, four `guest`) and its thread's two
+    /// (`thread_read`, `thread_post`, `guest`); the check scripts
     /// hold the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 267, "the table has 267 commands");
+        assert_eq!(TABLE.len(), 269, "the table has 269 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1800,6 +1813,7 @@ mod tests {
         ("idea_versions", "id", "an idea's ULID that may have no live file (a removed or merged-away idea's history); the body checks it is a ULID (a console act)"),
         ("idea_restore", "id", "an idea's ULID that may have no live file (restoring a removed or merged-away idea makes it again); the body checks it is a ULID (a console act)"),
         ("share_request", "slug", "a place NAME a guest asks about (group chat §2.2): resolving it would answer whether it exists, which the row must not; the body stores it, answered alike for a real, hidden or missing place"),
+        ("thread_post", "id", "the client's own id for its post (group chat §4), so a retry returns the original; it names nothing on the host, and the body checks its shape"),
         ("read_place_image", "path", "a path in the PLACE (relative to its root, or absolute under it): the body resolves it under `place(repo, slug)`'s own root by `safepath::place_image`, which is not a `file(path)` judged against every project"),
     ];
 
@@ -1878,7 +1892,8 @@ mod tests {
     /// (console); the named workspaces' six (console); and the idea board's seven and phase 3's seven (console); phase S's fifteen idea-session rows (console); `read_place_image` and `agent_call_image` are `read`; and group chat's
     /// shares: twelve console rows (`share_*` for the owner, `guest_places_hide`,
     /// `shares_all`, `guests_list`, `guest_remove`, `owner_set_name`) and the
-    /// four `guest` rows (`GUEST_ROWS`), the capability's first. A row that moves group
+    /// four `guest` rows (`GUEST_ROWS`), the capability's first, and the thread's
+    /// two `guest` rows (`thread_read`, `thread_post`). A row that moves group
     /// fails here until the count (and the proposal's table) move with it.
     #[test]
     fn every_row_has_one_base_group_and_the_counts_are_section_3_4s() {
@@ -1896,7 +1911,7 @@ mod tests {
         }
         let want: BTreeMap<&str, usize> = [
             ("read", 70), ("write", 23), ("admin", 41), ("console", 95), ("stream", 10), ("instruct", 8), ("answer", 2),
-            ("client-local", 6), ("loopback-only", 1), ("own", 7), ("guest", 4),
+            ("client-local", 6), ("loopback-only", 1), ("own", 7), ("guest", 6),
         ]
         .into();
         assert_eq!(groups, want);

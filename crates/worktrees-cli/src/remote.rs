@@ -41,7 +41,12 @@ When a host is not at its address (nothing answers, or another machine
 does), `call` looks for it on the LAN (macOS) and follows it there once its
 key matches the pin kept at pairing.
 An address code (`worktrees-addr:v1?…`) is followed the same way: the new
-address is kept only once a connection to it proves the same key.";
+address is kept only once a connection to it proves the same key.
+
+A guest posts in the thread of a share it was let into with one JSON object:
+  worktrees remote call <host> thread_post '{\"share\": \"s_…\", \"id\": \"m-1\", \"text\": \"…\"}'
+The id is yours: a retry with the same id returns the first post, never a
+second. `thread_read '{\"share\": \"s_…\", \"after\": 0}'` reads a page.";
 
 struct Opts {
     dir: PathBuf,

@@ -1210,6 +1210,33 @@ pub fn typed_message(harness: &str, text: &str) -> Result<String, String> {
     Ok(text)
 }
 
+/// [`typed_line_ok`]'s CHARACTER rule alone, for text that is stored and
+/// shown, never typed (group chat's thread, `serve::sharethread`): not empty,
+/// at most `max` bytes, line breaks kept (CRLF and CR made LF, as
+/// [`typed_message`] does), and every other control character and every
+/// [`INVISIBLE`] one refused, never stripped, so that a later "Use these"
+/// cannot fail on content. A leading `/ @ ! #` is allowed: nothing types it.
+pub fn shown_text_ok(text: &str, max: usize) -> Result<String, String> {
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
+    if text.trim().is_empty() {
+        return Err("text is empty".into());
+    }
+    if text.len() > max {
+        return Err(format!("text is {} bytes; a message may be up to {max}", text.len()));
+    }
+    if text.chars().any(|c| c.is_control() && c != '\n') {
+        return Err("text contains a control character (tab, escape…); only line breaks are kept".into());
+    }
+    if let Some(c) = text.chars().find(|c| invisible(*c)) {
+        return Err(format!(
+            "text contains an invisible format character, U+{:04X} (a bidi control, a zero-width character or another \
+             Unicode format or separator character): what a reader saw would differ from what was stored",
+            c as u32
+        ));
+    }
+    Ok(text)
+}
+
 /// What a client may send, for the remote `ok` frame (iOS's `SendCaps`). Only
 /// what is measured: a harness's own entry wins over the host-wide values.
 pub fn send_caps() -> serde_json::Value {

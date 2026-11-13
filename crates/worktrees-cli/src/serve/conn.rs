@@ -652,7 +652,7 @@ impl Host for Broadcast {
             clients.last.lock().unwrap().insert(name, payload.clone());
         }
         map.retain(|_, c| {
-            if scope::is_one_shot(event) && !c.listens.has(event) {
+            if scope::needs_declaration(event) && !c.listens.has(event) {
                 return true;
             }
             let grant = authz::effective(&*clients.registry, &c.caller);
