@@ -119,7 +119,10 @@ ok(firstList > 0 && eff.length > 0 && firstList === code.indexOf(eff) + eff.inde
 const chord = code.match(/if \([^\n]*e\.code === "KeyI"\)\) \{/)?.[0] ?? "";
 ok(/^if \(keyRef\.current\.ideasOn && /.test(chord), "⌘⇧I is taken only with the beta on");
 ok(/keyRef\.current = \{[\s\S]*?\bideasOn\b[\s\S]*?\};/.test(code), "…and keyRef carries ideasOn");
-ok((code.match(/openIdeas\(\)|onClick=\{openIdeas\}/g) ?? []).length === 2, "openIdeas has exactly its two callers, the chord and the rail");
+ok((code.match(/openIdeas\(\)|onClick=\{openIdeas\}/g) ?? []).length === 3, "openIdeas has exactly its three callers, the chord, the rail and openIdeaDoc");
+// The third (phase 4): a workspace overview's plan ▸ / idea ▸ opens the
+// document in the Ideas window, and returns first with the beta off.
+ok(/const openIdeaDoc = \(id: string\) => \{\s*if \(!ideasOn\) return;/.test(code), "…and openIdeaDoc opens nothing with the beta off");
 // The words. "All projects" is on screen only with the beta on.
 const visible = [...code.matchAll(/"[^"\n]*[Aa]ll projects[^"\n]*"/g)].map((m) => ({ s: m[0], at: m.index }));
 const allowedAllProjects = (v) =>

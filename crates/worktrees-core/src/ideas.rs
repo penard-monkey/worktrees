@@ -73,6 +73,9 @@ use serde::Serialize;
 /// The variable that names the ideas folder, and nothing else.
 pub const OVERRIDE_ENV: &str = "WORKTREES_IDEAS_DIR";
 
+/// The frontmatter key that makes a document a plan and names its ideas.
+pub const PLAN_OF: &str = "plan_of";
+
 /// Where a document's copies go before an operation changes it.
 pub const HISTORY_DIR: &str = ".history";
 
@@ -439,8 +442,28 @@ pub struct Idea {
     /// `ideas:changed` carries.
     pub mtime_ms: u64,
     pub size: u64,
+    /// `idea`, or `plan` when its frontmatter carries a `plan_of:` key
+    /// (phase 4, §2.2): a plan is a document in the same folder.
+    pub kind: Kind,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub problem: Option<Problem>,
+}
+
+/// What a document is: an idea, or a plan made from ideas (§2.2). Decided by
+/// one fact, a `plan_of:` key in the frontmatter (an empty list included),
+/// so the list, the index and every row read it the same way.
+#[derive(Serialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    #[default]
+    Idea,
+    Plan,
+}
+
+impl Kind {
+    pub fn of(text: &str) -> Kind {
+        if front_key_span(text, PLAN_OF).is_some() { Kind::Plan } else { Kind::Idea }
+    }
 }
 
 /// Every document in the folder, and the one lookup by id.
@@ -473,6 +496,9 @@ pub struct Rels {
     pub absorbed: Vec<String>,
     pub from: Option<String>,
     pub links: Vec<String>,
+    /// A plan's ideas (phase 4, §2.2), as written: an absorbed id stays as
+    /// it is and resolves through the index.
+    pub plan_of: Vec<String>,
 }
 
 impl Rels {
@@ -482,6 +508,7 @@ impl Rels {
             absorbed: front_list(text, "absorbed"),
             from: front_value(text, "from").filter(|v| !v.is_empty()).map(str::to_string),
             links: links_in(text),
+            plan_of: front_list(text, PLAN_OF),
         }
     }
 }
@@ -590,7 +617,7 @@ fn scan_with(root: &Path, names: impl Iterator<Item = String>, read: &dyn Fn(&Pa
         }
         let p = root.join(&name);
         let stem = name.trim_end_matches(".md").to_string();
-        let unreadable = |name: String| Idea { id: None, title: stem.clone(), file: name, created: None, mtime_ms: 0, size: 0, problem: Some(Problem::Unreadable) };
+        let unreadable = |name: String| Idea { id: None, title: stem.clone(), file: name, created: None, mtime_ms: 0, size: 0, kind: Kind::Idea, problem: Some(Problem::Unreadable) };
         let md = match fs::symlink_metadata(&p) {
             Ok(md) => md,
             Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
@@ -603,7 +630,7 @@ fn scan_with(root: &Path, names: impl Iterator<Item = String>, read: &dyn Fn(&Pa
             idx.skipped.push(name);
             continue;
         }
-        let mut doc = Idea { id: None, title: stem.clone(), file: name, created: None, mtime_ms: mtime_ms(&md), size: md.len(), problem: None };
+        let mut doc = Idea { id: None, title: stem.clone(), file: name, created: None, mtime_ms: mtime_ms(&md), size: md.len(), kind: Kind::Idea, problem: None };
         if md.len() > MAX_BYTES {
             doc.problem = Some(Problem::TooLarge);
         } else {
@@ -623,6 +650,7 @@ fn scan_with(root: &Path, names: impl Iterator<Item = String>, read: &dyn Fn(&Pa
                         doc.title = t;
                     }
                     doc.created = front_value(&text, "created").map(str::to_string);
+                    doc.kind = Kind::of(&text);
                     match id_of(&text) {
                         None => doc.problem = Some(Problem::NoId),
                         Some(id) if !crate::ulid::is_valid(id) => doc.problem = Some(Problem::BadId),
@@ -897,6 +925,7 @@ fn write_with_at(root: &Path, id: &str, content: &str, expected_mtime: Option<u6
     Ok(Idea {
         title: title_of(content).unwrap_or_else(|| file.trim_end_matches(".md").to_string()),
         created: front_value(content, "created").map(str::to_string),
+        kind: Kind::of(content),
         mtime_ms: mtime_ms(&md),
         size: md.len(),
         file,
@@ -1442,8 +1471,11 @@ pub struct Relation {
     pub title: String,
     /// `related` (this idea's `related:` names it), `related-by` (its
     /// `related:` names this one), `links-to` / `linked-from` (an `idea:`
-    /// link in the text), `split-from` (this idea's `from:`) or `split-into`
-    /// (its `from:` is this one).
+    /// link in the text), `split-from` (this idea's `from:`), `split-into`
+    /// (its `from:` is this one), `plan-of` (this plan's `plan_of:` names
+    /// it) or `planned-in` (it is a plan whose `plan_of:` names this idea,
+    /// phase 4). A plan's own links to its ideas are said once, as
+    /// `plan-of` / `planned-in`, not again as links.
     pub how: &'static str,
     /// The merged-away id the relation was written with, when it resolved
     /// through one.
@@ -1475,8 +1507,15 @@ pub fn related_at(root: &Path, id: &str) -> Result<Vec<Relation>, String> {
     if let Some(f) = &mine.from {
         push(f, "split-from");
     }
+    for p in &mine.plan_of {
+        push(p, "plan-of");
+    }
+    let live = |x: &str| idx.resolve(x).ok().and_then(|d| d.id.clone());
+    let planned: Vec<String> = mine.plan_of.iter().filter_map(|p| live(p)).collect();
     for l in &mine.links {
-        push(l, "links-to");
+        if !live(l).is_some_and(|i| planned.contains(&i)) {
+            push(l, "links-to");
+        }
     }
     let mut others: Vec<(&String, &Rels)> = idx.rels.iter().filter(|(k, _)| **k != me).collect();
     others.sort_by_key(|(k, _)| *k);
@@ -1487,11 +1526,271 @@ pub fn related_at(root: &Path, id: &str) -> Result<Vec<Relation>, String> {
         if r.from.as_deref().is_some_and(names_me) {
             push(other, "split-into");
         }
-        if r.links.iter().any(|x| names_me(x)) {
+        let plans_me = r.plan_of.iter().any(|x| names_me(x));
+        if plans_me {
+            push(other, "planned-in");
+        }
+        if !plans_me && r.links.iter().any(|x| names_me(x)) {
             push(other, "linked-from");
         }
     }
     Ok(out)
+}
+
+// ── phase 4: plans (§2.2) ───────────────────────────────────────────────────
+//
+// A plan is a document in the same folder whose frontmatter carries
+// `plan_of: [ids]` ([`Kind::Plan`]). Making one is ONE operation with its
+// whole input as parameters, the draft included (§7.1: an agent's draft is
+// the same call); each later change the app makes to a plan (its ideas, a
+// project line) copies the file to history first and checks
+// `expected_mtime`. The ideas themselves are never written: "planned in" is
+// computed ([`related_at`]). A plan naming an id that was later merged away
+// keeps resolving through the index, and is never rewritten for it.
+
+/// A title as the text of a markdown link: `\`, `[` and `]` escaped.
+fn link_label(title: &str) -> String {
+    title.replace('\\', "\\\\").replace('[', "\\[").replace(']', "\\]")
+}
+
+/// The heading a plan is given: `Plan: <title>`, unless the title says so.
+fn plan_title(title: &str) -> String {
+    let t = clean_title(title);
+    if t.to_lowercase().starts_with("plan:") { t } else { format!("Plan: {t}") }
+}
+
+/// The body [`make_plan_at`] writes when it is given no draft: the heading,
+/// a line linking every idea by title, and the three sections the template
+/// of §2.2 has, empty for David to fill.
+pub fn plan_template(title: &str, ideas: &[(String, String)]) -> String {
+    let links: Vec<String> = ideas.iter().map(|(id, t)| format!("[{}](idea:{id})", link_label(t))).collect();
+    let from = match links.len() {
+        0 => String::new(),
+        1 => links[0].clone(),
+        n => format!("{} and {}", links[..n - 1].join(", "), links[n - 1]),
+    };
+    format!("# {}\n\nFrom {from}.\n\n## Goal\n\n## Projects\n\n## Work\n", plan_title(title))
+}
+
+/// `text` with `plan_of:` set to `items`; an empty list is written
+/// `plan_of: []`, never dropped, because the key is what makes it a plan.
+fn with_plan_of(text: &str, items: &[String]) -> Option<String> {
+    if !items.is_empty() {
+        return with_front_list(text, PLAN_OF, items);
+    }
+    let sep = sep_of(text);
+    let (a, b) = front_key_span(text, PLAN_OF)?;
+    Some(format!("{}{PLAN_OF}: []{sep}{}", &text[..a], &text[b..]))
+}
+
+/// The live idea each of `ids` names (an absorbed id resolves to the idea
+/// that took it), once each, refusing a plan and `not`.
+fn live_ideas(idx: &Index, ids: &[String], not: Option<&str>) -> Result<Vec<(String, String)>, String> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for id in ids {
+        let d = idx.resolve(id)?;
+        let live = d.id.clone().unwrap_or_default();
+        if d.kind == Kind::Plan {
+            return Err(format!("“{}” is a plan: a plan is made from ideas", d.title));
+        }
+        if Some(live.as_str()) == not {
+            return Err("a plan cannot name itself".into());
+        }
+        if !out.iter().any(|(i, _)| *i == live) {
+            out.push((live, d.title.clone()));
+        }
+    }
+    Ok(out)
+}
+
+/// Make a plan from `ideas` (one or more; §2.2): a new document whose
+/// frontmatter is `id`, `plan_of` (each idea's live id, once) and `created`,
+/// and whose body is `draft` when given (the body after the frontmatter, as
+/// [`merge_at`]'s `text`: one that carries its own frontmatter is refused),
+/// else [`plan_template`] titled `title`, or the first idea's title. The
+/// file is named, as every document is, by its first heading: a plan titled
+/// `Plan: Jellyfin` is `plan-jellyfin.md`. No idea is written.
+pub fn make_plan_at(root: &Path, ideas: &[String], title: Option<&str>, draft: Option<&str>) -> Result<Doc, String> {
+    refuse_real(root)?;
+    if let Some(d) = draft {
+        check_body(d)?;
+    }
+    if ideas.is_empty() {
+        return Err("a plan is made from one idea or more".into());
+    }
+    let idx = list_at(root)?;
+    let live = live_ideas(&idx, ideas, None)?;
+    let title = title.map(str::trim).filter(|t| !t.is_empty()).map_or_else(|| live[0].1.clone(), str::to_string);
+    let id = crate::ulid::new();
+    let ids: Vec<String> = live.iter().map(|(i, _)| i.clone()).collect();
+    let body = match draft {
+        Some(d) => d.to_string(),
+        None => plan_template(&title, &live),
+    };
+    let content = format!("---\nid: {id}\n{PLAN_OF}: [{}]\ncreated: {}\n---\n\n{body}", ids.join(", "), today());
+    let stem = slug(&title_of(&content).unwrap_or_else(|| plan_title(&title)));
+    create_named(root, &stem, &content)?;
+    read_at(root, &id)
+}
+
+/// The plan `plan`, refused when the document is not one.
+fn plan_doc<'a>(idx: &'a Index, plan: &str) -> Result<&'a Idea, String> {
+    let p = idx.resolve_exact(plan)?;
+    if p.kind != Kind::Plan {
+        return Err(format!("“{}” is not a plan", p.title));
+    }
+    Ok(p)
+}
+
+/// Write a plan's new text: its current file to history first.
+fn rewrite_plan(root: &Path, p: &Idea, text: &str, md: &fs::Metadata, new_text: &str) -> Result<(), String> {
+    if new_text == text {
+        return Ok(());
+    }
+    history_copy_at(root, p.id.as_deref().unwrap_or_default(), text.as_bytes())?;
+    crate::fsx::write_atomic(&root.join(&p.file), new_text.as_bytes(), Some(md.permissions())).map_err(|e| format!("{}: {e}", p.file))
+}
+
+/// Add `ideas` to the plan `plan`'s `plan_of:` (§6.1: an idea dropped on a
+/// plan). Each is recorded by its live id; one the plan already names
+/// (directly or through an absorbed id) is skipped. Nothing to add writes
+/// nothing. The plan goes to history first.
+pub fn plan_add_ideas_at(root: &Path, plan: &str, ideas: &[String], expected_mtime: Option<u64>) -> Result<Doc, String> {
+    refuse_real(root)?;
+    let idx = list_at(root)?;
+    let p = plan_doc(&idx, plan)?.clone();
+    let (text, md) = load(root, &p)?;
+    check_mtime(&md, expected_mtime)?;
+    let add = live_ideas(&idx, ideas, Some(plan))?;
+    let mut list = front_list(&text, PLAN_OF);
+    let named: Vec<String> = list.iter().filter_map(|x| idx.resolve(x).ok().and_then(|d| d.id.clone())).collect();
+    for (id, _) in add {
+        if !named.contains(&id) && !list.contains(&id) {
+            list.push(id);
+        }
+    }
+    let new_text = with_plan_of(&text, &list).ok_or("the plan has no frontmatter")?;
+    rewrite_plan(root, &p, &text, &md, &new_text)?;
+    read_at(root, plan)
+}
+
+/// Take `idea` out of the plan `plan`'s `plan_of:`: every entry that is
+/// `idea` or resolves to the same live idea. The last one may go; the key
+/// stays (`plan_of: []`), so the document is still a plan. The plan goes to
+/// history first. An id the plan does not name writes nothing.
+pub fn plan_remove_idea_at(root: &Path, plan: &str, idea: &str, expected_mtime: Option<u64>) -> Result<Doc, String> {
+    refuse_real(root)?;
+    let idx = list_at(root)?;
+    let p = plan_doc(&idx, plan)?.clone();
+    let (text, md) = load(root, &p)?;
+    check_mtime(&md, expected_mtime)?;
+    let live = |x: &str| idx.resolve(x).ok().and_then(|d| d.id.clone());
+    let gone = live(idea);
+    let mut list = front_list(&text, PLAN_OF);
+    list.retain(|x| x != idea && (gone.is_none() || live(x) != gone));
+    let new_text = with_plan_of(&text, &list).ok_or("the plan has no frontmatter")?;
+    rewrite_plan(root, &p, &text, &md, &new_text)?;
+    read_at(root, plan)
+}
+
+/// Add `- <name> (registered)` to the plan's `## Projects` (§6.1: a project
+/// dropped on a plan): after the section's last line, or as a new section
+/// before `## Work` (else at the end) when the plan has none. A name the
+/// section already lists writes nothing. The plan goes to history first.
+pub fn plan_add_project_at(root: &Path, plan: &str, name: &str, expected_mtime: Option<u64>) -> Result<Doc, String> {
+    refuse_real(root)?;
+    let name = name.trim();
+    if name.is_empty() || name.chars().any(char::is_control) || name.starts_with('(') {
+        return Err(format!("not a project name: {name:?}"));
+    }
+    let idx = list_at(root)?;
+    let p = plan_doc(&idx, plan)?.clone();
+    let (text, md) = load(root, &p)?;
+    check_mtime(&md, expected_mtime)?;
+    let read = crate::plans::read(&text);
+    if read.projects.as_ref().is_some_and(|ps| ps.iter().any(|x| x.name == name)) {
+        return read_at(root, plan);
+    }
+    let sep = sep_of(&text);
+    let line = format!("- {name} (registered){sep}");
+    let new_text = match crate::plans::section_span(&text, "projects") {
+        Some((_, body, end)) => {
+            // After the last line with words: the blank lines before the
+            // next heading stay below the new line.
+            let kept = text[body..end].trim_end_matches(['\n', '\r']);
+            let at = if kept.trim().is_empty() { body } else { body + kept.len() + sep.len() };
+            let at = at.min(text.len());
+            let lead = if at == text.len() && !text.ends_with('\n') { sep } else { "" };
+            format!("{}{lead}{line}{}", &text[..at], &text[at..])
+        }
+        None => {
+            let block = format!("## Projects{sep}{sep}{line}{sep}");
+            match crate::plans::section_span(&text, "work") {
+                Some((h, _, _)) => format!("{}{block}{}", &text[..h], &text[h..]),
+                None => {
+                    let kept = text.trim_end();
+                    format!("{kept}{sep}{sep}{block}")
+                }
+            }
+        }
+    };
+    rewrite_plan(root, &p, &text, &md, &new_text)?;
+    read_at(root, plan)
+}
+
+/// One idea a plan names, as the plan strip shows it.
+#[derive(Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct PlanIdea {
+    /// The id as the plan writes it.
+    pub id: String,
+    /// The live idea it resolves to, or `None` when it resolves nowhere (a
+    /// removed idea): listed, never dropped for the user.
+    pub live: Option<String>,
+    pub title: Option<String>,
+    /// It resolved through an absorbed id (merged into `live`).
+    pub merged: bool,
+}
+
+/// A plan read whole: the document, its ideas resolved, and its two
+/// sections as [`crate::plans::read`] answers them.
+#[derive(Serialize, Debug)]
+pub struct Plan {
+    pub doc: Doc,
+    pub ideas: Vec<PlanIdea>,
+    #[serde(flatten)]
+    pub sections: crate::plans::Sections,
+}
+
+pub fn plan_read_at(root: &Path, plan: &str) -> Result<Plan, String> {
+    let idx = list_at(root)?;
+    plan_doc(&idx, idx.resolve(plan)?.id.as_deref().unwrap_or_default())?;
+    let doc = read_at(root, plan)?;
+    let ideas = front_list(&doc.content, PLAN_OF)
+        .into_iter()
+        .map(|id| match idx.lookup(&id) {
+            Ok((d, via)) => PlanIdea { live: d.id.clone(), title: Some(d.title.clone()), merged: via, id },
+            Err(_) => PlanIdea { live: None, title: None, merged: false, id },
+        })
+        .collect();
+    let sections = crate::plans::read(&doc.content);
+    Ok(Plan { doc, ideas, sections })
+}
+
+/// The plans whose `plan_of:` names `id` (or an id it absorbed), newest first.
+pub fn plans_of_at(root: &Path, id: &str) -> Result<Vec<Idea>, String> {
+    let idx = list_at(root)?;
+    let me = idx.resolve(id)?.id.clone().unwrap_or_default();
+    Ok(idx
+        .ideas
+        .iter()
+        .filter(|d| d.kind == Kind::Plan)
+        .filter(|d| {
+            d.id.as_deref().and_then(|p| idx.rels(p)).is_some_and(|r| {
+                r.plan_of.iter().any(|x| idx.resolve(x).ok().and_then(|d| d.id.as_deref()) == Some(me.as_str()))
+            })
+        })
+        .cloned()
+        .collect())
 }
 
 // ── the same, in the folder `dir()` names ───────────────────────────────────
@@ -2172,6 +2471,118 @@ mod tests {
         let vh = versions_at(&root, &id(&h)).unwrap();
         assert!(restore_at(&root, &id(&h), &vh[0].version, None).unwrap_err().contains("before the idea had its id"));
         assert!(versions_at(&root, &crate::ulid::new()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn make_plan_fills_the_template_with_the_ideas_titles_and_links() {
+        let t = Tmp::new("plan-make");
+        let root = t.root();
+        let a = made(&root, "Jellyfin [sharing]", "a\n");
+        let b = made(&root, "Home server GPU", "b\n");
+        let (ai, bi) = (id(&a), id(&b));
+        let (a_before, b_before) = (a.content.clone(), b.content.clone());
+        let p = make_plan_at(&root, &[ai.clone(), bi.clone(), ai.clone()], Some("Jellyfin at home"), None).unwrap();
+        let pi = id(&p);
+        assert_eq!(p.idea.kind, Kind::Plan);
+        assert_eq!(p.idea.file, "plan-jellyfin-at-home.md", "named by its heading, as every document");
+        assert_eq!(front_list(&p.content, PLAN_OF), vec![ai.clone(), bi.clone()], "each idea once, in order");
+        let body = format!(
+            "# Plan: Jellyfin at home\n\nFrom [Jellyfin \\[sharing\\]](idea:{ai}) and [Home server GPU](idea:{bi}).\n\n## Goal\n\n## Projects\n\n## Work\n"
+        );
+        assert_eq!(p.content, format!("---\nid: {pi}\nplan_of: [{ai}, {bi}]\ncreated: {}\n---\n\n{body}", today()));
+        assert_eq!(read_at(&root, &ai).unwrap().content, a_before, "no idea is written");
+        assert_eq!(read_at(&root, &bi).unwrap().content, b_before);
+        // The list says which is which, and an idea's related list says "planned in".
+        let l = list_at(&root).unwrap();
+        assert_eq!(l.ideas.iter().filter(|d| d.kind == Kind::Plan).count(), 1);
+        let rel = related_at(&root, &ai).unwrap();
+        assert_eq!(rel.iter().map(|r| (r.id.as_str(), r.how)).collect::<Vec<_>>(), vec![(pi.as_str(), "planned-in")], "said once, not again as a link");
+        assert_eq!(related_at(&root, &pi).unwrap().iter().map(|r| r.how).collect::<Vec<_>>(), vec!["plan-of", "plan-of"]);
+        assert_eq!(plans_of_at(&root, &bi).unwrap().iter().map(|d| d.id.clone().unwrap()).collect::<Vec<_>>(), vec![pi.clone()]);
+        // One idea, no title: the idea's own.
+        let solo = make_plan_at(&root, std::slice::from_ref(&bi), None, None).unwrap();
+        assert!(solo.content.contains("\n# Plan: Home server GPU\n\nFrom [Home server GPU](idea:"), "{}", solo.content);
+        // Refused: no idea, a plan as an idea.
+        assert!(make_plan_at(&root, &[], None, None).unwrap_err().contains("one idea or more"));
+        assert!(make_plan_at(&root, &[pi.clone()], None, None).unwrap_err().contains("is a plan"));
+    }
+
+    #[test]
+    fn a_draft_is_the_body_and_one_with_its_own_frontmatter_is_refused() {
+        let t = Tmp::new("plan-draft");
+        let root = t.root();
+        let a = id(&made(&root, "Alpha", "a\n"));
+        let e = make_plan_at(&root, std::slice::from_ref(&a), None, Some("---\nid: 01JC90A1000000000000000000\nplan_of: []\n---\n# Plan: x\n")).unwrap_err();
+        assert!(e.contains("without its frontmatter"), "{e}");
+        assert_eq!(list_at(&root).unwrap().ideas.len(), 1, "nothing was made");
+        let d = make_plan_at(&root, std::slice::from_ref(&a), Some("ignored for the body"), Some("# Plan: Drafted\n\n## Work\n### One\nproject: p\nbranch: b\n")).unwrap();
+        assert!(d.content.ends_with("---\n\n# Plan: Drafted\n\n## Work\n### One\nproject: p\nbranch: b\n"), "{}", d.content);
+        assert_eq!(d.idea.file, "plan-drafted.md");
+        assert_eq!(d.idea.kind, Kind::Plan);
+    }
+
+    #[test]
+    fn plan_of_edits_copy_the_plan_to_history_first_and_check_the_mtime() {
+        let t = Tmp::new("plan-edit");
+        let root = t.root();
+        let (a, b, c) = (id(&made(&root, "A", "a\n")), id(&made(&root, "B", "b\n")), id(&made(&root, "C", "c\n")));
+        let p0 = make_plan_at(&root, std::slice::from_ref(&a), Some("P"), None).unwrap();
+        let pi = id(&p0);
+        assert!(plan_add_ideas_at(&root, &pi, std::slice::from_ref(&b), Some(1)).unwrap_err().contains("changed on disk"));
+        assert!(copies(&root, &pi).is_empty(), "a refused edit copies nothing");
+        let p1 = plan_add_ideas_at(&root, &pi, &[b.clone(), a.clone()], Some(p0.idea.mtime_ms)).unwrap();
+        assert_eq!(front_list(&p1.content, PLAN_OF), vec![a.clone(), b.clone()]);
+        assert_eq!(copies(&root, &pi), vec![p0.content.clone()], "the plan as it was, first");
+        assert_eq!(p1.content.replace(&format!("plan_of: [{a}, {b}]"), &format!("plan_of: [{a}]")), p0.content, "only the key moved");
+        // Adding what it holds writes nothing and copies nothing.
+        plan_add_ideas_at(&root, &pi, std::slice::from_ref(&a), None).unwrap();
+        assert_eq!(copies(&root, &pi).len(), 1);
+        assert!(plan_add_ideas_at(&root, &pi, std::slice::from_ref(&pi), None).unwrap_err().contains("is a plan"));
+        assert!(plan_add_ideas_at(&root, &a, std::slice::from_ref(&c), None).unwrap_err().contains("is not a plan"));
+        // Remove each; the last leaves `plan_of: []`, still a plan.
+        let p2 = plan_remove_idea_at(&root, &pi, &a, Some(p1.idea.mtime_ms)).unwrap();
+        assert_eq!(front_list(&p2.content, PLAN_OF), vec![b.clone()]);
+        let p3 = plan_remove_idea_at(&root, &pi, &b, None).unwrap();
+        assert!(p3.content.contains("\nplan_of: []\n"), "{}", p3.content);
+        assert_eq!(p3.idea.kind, Kind::Plan);
+        assert_eq!(copies(&root, &pi), vec![p0.content.clone(), p1.content.clone(), p2.content.clone()]);
+        plan_remove_idea_at(&root, &pi, &c, None).unwrap();
+        assert_eq!(copies(&root, &pi).len(), 3, "an id it does not name writes nothing");
+        // A project, as registered, in its section; twice is once.
+        let p4 = plan_add_project_at(&root, &pi, "worktrees", None).unwrap();
+        assert!(p4.content.contains("## Projects\n- worktrees (registered)\n\n## Work\n"), "{}", p4.content);
+        let p5 = plan_add_project_at(&root, &pi, "homelab", None).unwrap();
+        assert!(p5.content.contains("## Projects\n- worktrees (registered)\n- homelab (registered)\n\n## Work\n"), "{}", p5.content);
+        plan_add_project_at(&root, &pi, "homelab", None).unwrap();
+        assert_eq!(copies(&root, &pi).len(), 5);
+        assert_eq!(crate::plans::read(&p5.content).problems, vec![]);
+    }
+
+    #[test]
+    fn a_plan_naming_a_merged_or_renamed_idea_keeps_resolving() {
+        let t = Tmp::new("plan-absorbed");
+        let root = t.root();
+        let (a, b) = (id(&made(&root, "Jellyfin", "a\n")), id(&made(&root, "Sharing", "b\n")));
+        let p = make_plan_at(&root, &[a.clone(), b.clone()], None, None).unwrap();
+        let pi = id(&p);
+        rename_at(&root, &a, "Jellyfin at home", None).unwrap();
+        merge_at(&root, &a, &b, None, None, None).unwrap();
+        assert_eq!(read_at(&root, &pi).unwrap().content, p.content, "the plan is never rewritten for it");
+        let r = plan_read_at(&root, &pi).unwrap();
+        assert_eq!(
+            r.ideas,
+            vec![
+                PlanIdea { id: a.clone(), live: Some(a.clone()), title: Some("Jellyfin at home".into()), merged: false },
+                PlanIdea { id: b.clone(), live: Some(a.clone()), title: Some("Jellyfin at home".into()), merged: true },
+            ]
+        );
+        assert_eq!(plans_of_at(&root, &b).unwrap().len(), 1, "B's id finds the plan through A");
+        // Adding A again is a no-op: B's entry already names it.
+        plan_add_ideas_at(&root, &pi, std::slice::from_ref(&a), None).unwrap();
+        assert!(copies(&root, &pi).is_empty());
+        // Removing by B's id takes both entries (they are one idea now).
+        let gone = plan_remove_idea_at(&root, &pi, &b, None).unwrap();
+        assert!(gone.content.contains("\nplan_of: []\n"), "{}", gone.content);
     }
 
     #[test]

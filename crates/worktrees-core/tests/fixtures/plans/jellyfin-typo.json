@@ -1,0 +1,53 @@
+{
+  "projects": [
+    {
+      "line": 17,
+      "name": "worktrees",
+      "kind": "registered"
+    },
+    {
+      "line": 18,
+      "name": "homelab-ansible",
+      "kind": "clone",
+      "url": "git@github.com:david/homelab-ansible.git"
+    },
+    {
+      "line": 19,
+      "name": "jellyfin-config",
+      "kind": "new",
+      "path": "~/workspace/jellyfin-config"
+    }
+  ],
+  "work": [
+    {
+      "line": 23,
+      "title": "Ansible role for Jellyfin",
+      "project": null,
+      "branch": "jellyfin-role",
+      "brief": "Goal, deliverable, rules, when to stop.",
+      "started": "homelab-ansible · jellyfin-role · 2026-11-12"
+    },
+    {
+      "line": 30,
+      "title": "Config repo",
+      "project": "jellyfin-config",
+      "branch": "main-config",
+      "brief": "one line",
+      "started": null
+    }
+  ],
+  "problems": [
+    {
+      "line": 23,
+      "section": "work",
+      "text": "### Ansible role for Jellyfin",
+      "words": "the item “Ansible role for Jellyfin” has no `project:` line"
+    },
+    {
+      "line": 24,
+      "section": "work",
+      "text": "projet: homelab-ansible",
+      "words": "unknown key `projet:`: expected `project:`, `branch:`, `brief:` or `started:`"
+    }
+  ]
+}

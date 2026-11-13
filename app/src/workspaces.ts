@@ -25,7 +25,9 @@ export const VIEW_LABEL: Record<NavView, string> = {
 export const isNavView = (v: unknown): v is NavView => v === "projects" || v === "workspaces";
 
 export type WsProject = { root: string; name: string | null; registered: boolean };
-export type WsDef = { id: string; name: string; projects: WsProject[] };
+/** `plan` and `ideas` (phase 4) are ids as stored; `workspace_overview`
+ *  resolves them. */
+export type WsDef = { id: string; name: string; projects: WsProject[]; plan?: string | null; ideas?: string[] };
 export type WsList = { workspaces: WsDef[] };
 
 /** What a nav drag in the workspace view can carry. A project row under a

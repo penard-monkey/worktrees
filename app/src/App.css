@@ -4002,3 +4002,35 @@ body.dragging .ws-h { cursor: grabbing; }
 /* Phase S: an idea conversation waits on the person — the lightbulb's dot. */
 .rail-icon.rail-waiting { position: relative; }
 .rail-icon.rail-waiting::after { content: ""; position: absolute; top: 3px; right: 3px; width: 7px; height: 7px; border-radius: 50%; background: var(--warn); }
+
+/* ── a workspace's overview (idea board phase 4, WorkspaceOverview.tsx) ── */
+.ws-h.on { background: var(--bg-elev); }
+.ws-ov { max-width: 760px; margin: 0 auto; padding: var(--s6) var(--s5); display: flex; flex-direction: column; gap: var(--s3); }
+.ws-ov-title { margin: 0; color: var(--txt-hi); font-size: 1.4rem; }
+.ws-ov-err { color: var(--txt-hi); border-left: 3px solid var(--danger); padding-left: var(--s2); }
+.ws-ov-line { display: flex; align-items: center; flex-wrap: wrap; gap: var(--s2); }
+.ws-ov-key { color: var(--txt-dim); font-size: var(--fs-meta); min-width: 3.5em; }
+.ws-ov-chip {
+  display: inline-flex; align-items: center; gap: 2px; max-width: 20rem; padding: 1px 8px;
+  border: 1px solid var(--line-strong); border-radius: 10px; background: var(--bg-panel); color: var(--txt-hi); font-size: var(--fs-meta);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: grab;
+}
+.ws-ov-chip-open { border: 0; background: transparent; color: inherit; font: inherit; padding: 0; cursor: grab; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Not `.mini`: that one is hidden outside a hovered project header. */
+.ws-ov-x { border: 0; background: transparent; color: var(--txt-dim); font-size: var(--fs-body); line-height: 1; padding: 0 4px; border-radius: 6px; cursor: pointer; }
+.ws-ov-x:hover { color: var(--txt-hi); background: var(--bg-elev); }
+.ws-ov-gone { color: var(--txt-dim); font-style: italic; font-size: var(--fs-meta); }
+.ws-ov-pick { list-style: none; margin: 0; padding: var(--s2); display: flex; flex-wrap: wrap; gap: var(--s2); border: 1px solid var(--line); border-radius: 8px; background: var(--bg-panel); }
+.ws-ov-problems { margin: 0; padding: var(--s2) var(--s3) var(--s2) var(--s5); border-left: 3px solid var(--warn); background: var(--bg-panel); color: var(--txt-hi); font-size: var(--fs-meta); }
+.ws-ov-rows { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.ws-ov-row { display: flex; align-items: baseline; gap: var(--s3); padding: var(--s1) var(--s3); border-top: 1px solid var(--line); font-size: var(--fs-meta); color: var(--txt-dim); width: 100%; }
+.ws-ov-rows > :first-child .ws-ov-row, .ws-ov-rows > .ws-ov-row:first-child { border-top: 0; }
+.ws-ov-row-btn { border-left: 0; border-right: 0; border-bottom: 0; background: transparent; text-align: left; cursor: pointer; font: inherit; font-size: var(--fs-meta); }
+.ws-ov-name { flex: none; color: var(--txt-hi); max-width: 40%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-ov-state { flex: none; color: var(--txt-hi); }
+.ws-ov-state::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 5px; border-radius: 50%; background: var(--txt-dim); vertical-align: 1px; }
+.ws-ov-state.registered::before { background: var(--ok); }
+.ws-ov-state.not-registered::before { background: var(--danger); }
+.ws-ov-state.to-clone::before, .ws-ov-state.to-create::before { background: var(--warn); }
+.ws-ov-detail { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ws-ov-brief { margin: 0 var(--s3) var(--s2); padding: var(--s2); white-space: pre-wrap; font-size: var(--fs-meta); background: var(--bg-panel); border: 1px solid var(--line); border-radius: 6px; color: var(--txt-hi); }

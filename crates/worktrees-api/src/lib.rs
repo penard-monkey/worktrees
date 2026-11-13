@@ -79,6 +79,7 @@ pub mod workspaces;
 pub mod util;
 pub mod viewer;
 pub mod ops;
+pub mod plans;
 pub mod prefs;
 pub mod presets;
 pub mod profiles;
