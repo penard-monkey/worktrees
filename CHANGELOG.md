@@ -21,6 +21,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 - **The × in What's new, the Project sheet and the Status sheet is back at the right edge.** Since v0.48.0 it sat beside the title, because a rule written for the Settings header's new layout reached every sheet that shares the header. It now applies to Settings only, where the search takes that space.
 - **Settings → Updates updates a Codex installed by Codex's own installer.** A Codex in `~/.codex/packages/standalone` (`codex doctor` calls it "standalone") was shown as "Worktrees can't tell how this Codex was installed", with npm and Homebrew steps that installed a second copy PATH never reached. It is now recognised: the row says "Installed standalone · codex update", and **Update** runs `codex update` and checks that the release Codex runs from moved to the new version. A layout Worktrees does not recognise still lists `codex update` first among its steps. When another Claude or Codex sits further down PATH behind the one in use, the row says where it is and that agents run the first one. And **Check for updates** now asks the agent CLIs again every time you press it, instead of showing an answer up to three minutes old; the hourly check still uses the cached one, and a paired device always does.
+- **⌘` moves between the main window and the Ideas window (macOS).** The key did nothing from either window. The Window menu now has "Cycle Through Windows", which focuses the app's next open window and skips a minimised one.
 
 ## [0.50.0] - 2026-11-09
 

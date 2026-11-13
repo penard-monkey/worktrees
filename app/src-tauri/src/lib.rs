@@ -29,6 +29,8 @@ mod engine;
 // This window driving ANOTHER host's serve: pairing, the hosts kept, and the
 // pinned pipe the page's protocol runs over (Phase 2 §4.4).
 mod remote;
+// The app menu's own items: ⌘` between the windows.
+mod winmenu;
 // Window state: where the window was, restored on launch. Its own file because
 // it is the one part of this shim with real logic of its own.
 mod winstate;
@@ -387,7 +389,9 @@ pub fn run() {
     // from `engine_connect`, inherits that repaired PATH. `worktrees serve`
     // runs the same preamble (`worktrees_api::host`).
     worktrees_api::host::boot(std::sync::Arc::new(AppLog));
-    tauri::Builder::default()
+    // The menu bar: tauri's default plus Window → Cycle Through Windows
+    // (winmenu.rs). macOS only.
+    winmenu::install(tauri::Builder::default())
         // `open_path` (the Files tab's right-click → Open) needs BOTH halves,
         // and JSON cannot carry the reason: `opener:allow-open-path` in
         // capabilities/default.json plus a path scope, because the plugin's
