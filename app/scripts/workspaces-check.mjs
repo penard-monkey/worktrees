@@ -85,7 +85,7 @@ ok("no MCP tool reaches a workspace", !/workspace_(create|rename|remove|set_proj
 // ── 3. App wiring ──
 const app = read("../src/App.tsx");
 for (const [what, re] of [
-  ["project menu → Add to workspace", /data-testid="ctx-ws-add"/],
+  ["project menu → Add to workspace", /<SubMenu label="Add to workspace" testId="ctx-ws-add"/],
   ["project menu → Remove from workspace", /data-testid="ctx-ws-remove"/],
   ["workspace menu → Move up / Move down", /data-testid="ws-move-up"[\s\S]*data-testid="ws-move-down"/],
   ["workspace menu → Rename", /data-testid="ws-rename"/],
@@ -94,17 +94,21 @@ for (const [what, re] of [
 ]) ok(`menu twin: ${what}`, re.test(app));
 // The workspace menu's add section: the footer's three acts with this
 // workspace as their continuation, never a fork of them.
-const wsMenuSrc = app.slice(app.indexOf('{ctx?.kind === "ws" && ('), app.indexOf('{ctx?.kind === "ws-projects" && ('));
+const wsMenuSrc = app.slice(app.indexOf('{ctx?.kind === "ws" && ('), app.indexOf('data-testid="ws-remove"'));
 ok("the workspace menu was found", wsMenuSrc.length > 200);
-ok("…offers Add project ▸", /data-testid="ws-add-project"[\s\S]{0,200}kind: "ws-projects"/.test(wsMenuSrc));
+ok("…offers Add project ▸, beside it on hover", /<SubMenu label="Add project" testId="ws-add-project"/.test(wsMenuSrc));
 ok("…New project… through the footer's openNewProject", /openNewProject\(w\.id\)/.test(wsMenuSrc));
 ok("…Add existing… through addProject, host-only as in the footer", /hostOnly\("Choosing a folder"\)[\s\S]{0,120}addProject\(w\.id\)/.test(wsMenuSrc));
 ok("…Clone from URL… through openClone", /openClone\(w\.id\)/.test(wsMenuSrc));
 ok("…and not Hubs (a hub import is not one project)", !/openHubs/.test(wsMenuSrc));
 ok("the footer menu still opens them with no workspace", /data-testid="add-new"\s+onClick=\{\(\) => openNewProject\(\)\}/.test(app) && /data-testid="add-clone"\s+onClick=\{\(\) => openClone\(\)\}/.test(app));
-const subSrc = app.slice(app.indexOf('{ctx?.kind === "ws-projects" && ('));
-ok("Add project ▸ adds through wsAddProject, from projectsAddable", /projectsAddable\(/.test(subSrc.slice(0, 1500)) && /wsAddProject\(id, root\)/.test(subSrc.slice(0, 1500)));
-ok("…and says so when every project is in it", /disabled>every project is in it</.test(subSrc.slice(0, 1500)));
+const subAt = app.indexOf('<SubMenu label="Add project"');
+const subSrc = subAt < 0 ? "" : app.slice(subAt, app.indexOf("</SubMenu>", subAt));
+ok("Add project ▸ adds through wsAddProject, from projectsAddable", /const addable = projectsAddable\(/.test(wsMenuSrc) && /addable\.map/.test(subSrc) && /wsAddProject\(id, root\)/.test(subSrc));
+ok("…and says so when every project is in it", /disabled>every project is in it</.test(subSrc));
+// The owner (2026-11-14): a ▸ row opens BESIDE its menu on hover. Until then
+// each replaced the whole menu on click, through a Ctx kind of its own.
+ok("no ▸ row replaces its menu with a second one", !/kind: "ws-add", x:|kind: "ws-projects"/.test(app));
 for (const [fn, call] of [
   ["confirmAdd", /add_project[\s\S]{0,120}await wsArrive\(ask\.into, before, after, ask\.dir\);\s*commitWs\(after\)/],
   ["createProject", /create_project[\s\S]{0,120}await wsArrive\(into, before, after, null\);\s*commitWs\(after\)/],
@@ -113,6 +117,15 @@ for (const [fn, call] of [
 ]) ok(`${fn} puts the project in its workspace before committing the registry`, call.test(app));
 ok("wsArrive writes only through workspace_set_projects, from arrivedRoot", /const wsArrive = [\s\S]{0,900}arrivedRoot\([\s\S]{0,600}wsRun\("workspace_set_projects"/.test(app));
 ok("the empty workspace offers Add a project, opening the same menu", /data-testid="ws-empty-add"[^>]*onClick=\{\(e\) => wsMenuAt\(e, w\.id\)\}/.test(app) && /const wsMenuAt = [\s\S]{0,300}kind: "ws", x: r\.left/.test(app));
+// The hint's WORDS, comments cut: the Workspaces view lists no project to drag
+// (the owner, 2026-11-14: "the projects are hidden behind the toggle"), so a
+// drag is only ever offered from All projects, by holding over the switch.
+{
+  const a = app.indexOf('className="empty small ws-drop-hint"');
+  const hint = a < 0 ? "" : app.slice(a, app.indexOf('data-testid="ws-empty-add"', a)).replace(/\{\/\*[\s\S]*?\*\/\}/g, "").replace(/\s+/g, " ");
+  ok("the empty workspace's hint was found", hint.length > 40);
+  ok("…and never asks for a drag from a view that lists no project", !/drag (a|one|the) project here/i.test(hint) && /All projects/.test(hint) && /hold it over Workspaces/.test(hint));
+}
 // The header ✕ of a project under a workspace. Sliced from the ProjectNode
 // header so a match elsewhere cannot stand in for it.
 const hdr = app.slice(app.indexOf("const ProjectNode = "), app.indexOf("{open && pv.ok && ("));

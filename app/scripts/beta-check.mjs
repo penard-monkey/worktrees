@@ -96,7 +96,7 @@ const gated = (needle) => {
 };
 ok(gated('data-testid="ideas-rail"'), "the rail's lightbulb renders only with the beta on");
 ok(gated("<NavViewSwitch"), "the All projects | Workspaces switch renders only with the beta on");
-ok(gated('data-testid="ctx-ws-add"'), "a project's Add to workspace renders only with the beta on");
+ok(gated('testId="ctx-ws-add"'), "a project's Add to workspace renders only with the beta on");
 ok(gated('data-testid="ctx-ws-remove"'), "a project's Remove from workspace renders only with the beta on");
 // The Workspaces view itself, and the two menus only it opens.
 ok(/const navView: NavView = ideasOn && wsList && settings\.nav_view === "workspaces"/.test(code),

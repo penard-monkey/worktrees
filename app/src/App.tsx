@@ -9,6 +9,7 @@ import { copyToClipboard } from "./clipboard";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { clampSteps, doneBounds, doneOpacity, doneTierSeen, isUnread, seenEpoch } from "./afterglow";
 import * as Icons from "./icons";
+import { SubMenu } from "./SubMenu";
 import { CtxMenu } from "./CtxMenu";
 import { useEscape } from "./useEscape";
 import { batchJobs, bytes, changedSincePush, chosenIds, connectedHubs, defaultPushHubs, holders, newestHub, projectNames, type HubDash, type SyncItem, type SyncJob } from "./hubs";
@@ -742,13 +743,10 @@ type Ctx =
   // `ws`: opened on the project's row UNDER a named workspace (workspaces.ts),
   // which adds "Remove from workspace".
   | { kind: "project"; x: number; y: number; root: string; ws?: string }
-  // A named workspace's header menu, and a project's "Add to workspace ▸"
-  // list (a second menu, the way the rail's Move ▸ is).
+  // A named workspace's header menu. Its "Add project ▸" and a project's
+  // "Add to workspace ▸" are not menus of their own: each is a SubMenu that
+  // opens beside its row on hover (SubMenu.tsx).
   | { kind: "ws"; x: number; y: number; id: string }
-  | { kind: "ws-add"; x: number; y: number; root: string }
-  // …and the workspace menu's own "Add project ▸": the registered projects
-  // that workspace does not hold yet.
-  | { kind: "ws-projects"; x: number; y: number; id: string }
   // The ⇄ popover. Same state machine as the right-click menus on purpose: only
   // one of them can be open, and every dismissal path already clears it.
   | { kind: "sync"; x: number; y: number; root: string }
@@ -9086,7 +9084,11 @@ function App() {
                   <div className="ws-kids">
                     {w.projects.length === 0 && (
                       <div className="empty small ws-drop-hint">
-                        Drag a project here, or use its menu: Add to workspace.
+                        {/* The view this hint sits in lists no project to drag,
+                            so it leads with the button; a drag reaches here only
+                            from All projects, by holding over the view switch. */}
+                        No projects yet. Add one with the button, or drag one from
+                        All projects and hold it over Workspaces until this view opens.
                         {/* The workspace menu again, anchored here: one menu,
                             two anchors. */}
                         <button className="ctrl ws-empty-add" data-testid="ws-empty-add" data-track="nav.workspace.empty.add"
@@ -10853,12 +10855,25 @@ function App() {
                 {/* The drags' twins (`workspaces.ts`): add opens the list of
                     workspaces that do not hold it yet; remove takes it out of
                     the workspace this row is under, never the registry. */}
-                {pv?.ok && (
-                  <button className="pop-item" data-testid="ctx-ws-add" data-track="nav.project.ws.add"
-                    onClick={() => { const r = ctx.root; setConfirmRm(null); setCtx({ kind: "ws-add", x: ctx.x, y: ctx.y, root: r }); }}>
-                    Add to workspace <Icons.ChevronRight size={12} />
-                  </button>
-                )}
+                {pv?.ok && (() => {
+                  const can = addableTo(wsList, ctx.root);
+                  const root = ctx.root;
+                  return (
+                    <SubMenu label="Add to workspace" testId="ctx-ws-add" track="nav.project.ws.add">
+                      <div className="pop-hint">add {basename(root)} to</div>
+                      {can.map((w) => (
+                        <button key={w.id} className="pop-item" data-testid="ws-add-item" data-track="nav.project.ws.add.item"
+                          onClick={() => { closeCtx(); wsAddProject(w.id, root); }}>
+                          <Icons.Layers size={12} /> {w.name}
+                        </button>
+                      ))}
+                      {can.length === 0 && (wsList?.workspaces.length ?? 0) > 0 && <div className="pop-hint">already in every workspace</div>}
+                      <div className="ctx-sep" />
+                      <button className="pop-item" data-testid="ws-add-new" data-track="nav.project.ws.add.new"
+                        onClick={() => startNewWorkspace(root)}>New workspace…</button>
+                    </SubMenu>
+                  );
+                })()}
                 {ctx.ws && (
                   <button className="pop-item" data-testid="ctx-ws-remove" data-track="nav.project.ws.remove"
                     onClick={() => { const { ws: id, root } = ctx; closeCtx(); if (id) wsRemoveProject(id, root); }}>
@@ -10881,25 +10896,6 @@ function App() {
           </CtxMenu>
         );
       })()}
-      {/* ── a project's "Add to workspace ▸" list ── */}
-      {ctx?.kind === "ws-add" && (() => {
-        const can = addableTo(wsList, ctx.root);
-        return (
-          <CtxMenu x={ctx.x} y={ctx.y} onClose={closeCtx}>
-            <div className="pop-hint">add {basename(ctx.root)} to</div>
-            {can.map((w) => (
-              <button key={w.id} className="pop-item" data-testid="ws-add-item" data-track="nav.project.ws.add.item"
-                onClick={() => { const r = ctx.root; closeCtx(); wsAddProject(w.id, r); }}>
-                <Icons.Layers size={12} /> {w.name}
-              </button>
-            ))}
-            {can.length === 0 && (wsList?.workspaces.length ?? 0) > 0 && <div className="pop-hint">already in every workspace</div>}
-            <div className="ctx-sep" />
-            <button className="pop-item" data-testid="ws-add-new" data-track="nav.project.ws.add.new"
-              onClick={() => startNewWorkspace(ctx.root)}>New workspace…</button>
-          </CtxMenu>
-        );
-      })()}
       {/* ── a named workspace's menu ── */}
       {ctx?.kind === "ws" && (() => {
         const ids = (wsList?.workspaces ?? []).map((w) => w.id);
@@ -10908,6 +10904,7 @@ function App() {
         const up = idsStepped(ids, w.id, -1);
         const down = idsStepped(ids, w.id, 1);
         const armed = confirmRm === `ws|${w.id}`;
+        const addable = projectsAddable(w, (ws?.projects ?? []).filter((p) => p.ok).map((p) => p.root));
         return (
           <CtxMenu x={ctx.x} y={ctx.y} onClose={closeCtx}>
             <div className="pop-hint">{w.name}</div>
@@ -10916,10 +10913,18 @@ function App() {
                 footer's three acts with this workspace as their continuation
                 (`wsArrive`). Hubs… stays in the footer: a hub import is not
                 one project. */}
-            <button className="pop-item" data-testid="ws-add-project" data-track="nav.workspace.add"
-              onClick={() => { setConfirmRm(null); setCtx({ kind: "ws-projects", x: ctx.x, y: ctx.y, id: w.id }); }}>
-              Add project <Icons.ChevronRight size={12} />
-            </button>
+            <SubMenu label="Add project" testId="ws-add-project" track="nav.workspace.add">
+              <div className="pop-hint">add to {w.name}</div>
+              {addable.map((root) => (
+                <button key={root} className="pop-item" data-testid="ws-projects-item" data-track="nav.workspace.add.item"
+                  title={root} onClick={() => { const id = w.id; closeCtx(); wsAddProject(id, root); }}>
+                  {basename(root)}
+                </button>
+              ))}
+              {addable.length === 0 && (
+                <button className="pop-item" data-testid="ws-projects-none" disabled>every project is in it</button>
+              )}
+            </SubMenu>
             <button className="pop-item" data-testid="ws-add-new-project" data-track="nav.workspace.add.new"
               onClick={() => openNewProject(w.id)}>New project…</button>
             <button className="pop-item" data-testid="ws-add-existing" data-track="nav.workspace.add.existing"
@@ -10941,26 +10946,6 @@ function App() {
               title="removes the workspace only — its projects, places and branches stay"
               onClick={() => wsRemove(w.id)}
             >{armed ? "Confirm remove?" : "Remove workspace"}</button>
-          </CtxMenu>
-        );
-      })()}
-      {/* ── a workspace's "Add project ▸" list ── */}
-      {ctx?.kind === "ws-projects" && (() => {
-        const w = wsById(ctx.id);
-        if (!w) return null;
-        const can = projectsAddable(w, (ws?.projects ?? []).filter((p) => p.ok).map((p) => p.root));
-        return (
-          <CtxMenu x={ctx.x} y={ctx.y} onClose={closeCtx}>
-            <div className="pop-hint">add to {w.name}</div>
-            {can.map((root) => (
-              <button key={root} className="pop-item" data-testid="ws-projects-item" data-track="nav.workspace.add.item"
-                title={root} onClick={() => { const id = w.id; closeCtx(); wsAddProject(id, root); }}>
-                {basename(root)}
-              </button>
-            ))}
-            {can.length === 0 && (
-              <button className="pop-item" data-testid="ws-projects-none" disabled>every project is in it</button>
-            )}
           </CtxMenu>
         );
       })()}

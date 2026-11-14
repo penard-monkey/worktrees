@@ -125,7 +125,13 @@ async function run(engine, name) {
   // menu: Add to workspace (from All projects)
   const firstRoot = await page.$eval(".nav-scroll .project[data-project-root]", (p) => p.dataset.projectRoot);
   await ctxOn(page, `.project[data-project-root="${firstRoot}"] .project-h`);
-  await page.click("[data-testid=ctx-ws-add]");
+  // A ▸ row opens BESIDE its menu on hover, no click (SubMenu.tsx; the owner,
+  // 2026-11-14). Hovered with the real mouse: the intent delay, then the list.
+  await page.waitForTimeout(250);
+  await page.hover("[data-testid=ctx-ws-add]");
+  await page.waitForTimeout(350);
+  ok(!!(await page.$("[data-testid=ctx-ws-add-list]")) && !!(await page.$(".ctxmenu:not(.ctx-flyout) [data-testid=ctx-ws-add]")),
+    `${tag} Add to workspace opens on hover, beside the menu it belongs to`);
   const offers = await page.$$eval("[data-testid=ws-add-item]", (b) => b.map((x) => x.textContent.trim()));
   ok(!offers.includes("Everything"), `${tag} Add to workspace offers only the ones that do not hold it: ${JSON.stringify(offers)}`);
   await page.click("[data-testid=ws-add-item]");

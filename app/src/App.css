@@ -1084,6 +1084,12 @@ html[data-guides="off"] .kids > .places::after { display: none; }
   max-height: calc(100vh - 16px); overflow-y: auto; overscroll-behavior: contain;
 }
 .ctx-sep { height: 1px; margin: var(--s1) var(--s2); background: var(--line); }
+/* A ▸ row (SubMenu.tsx): its chevron at the right edge, and the row stays lit
+   while its list is open, so you can see which row the list belongs to. The
+   list itself is a `.ctxmenu` of its own, a portal beside the parent. */
+.pop-item.sub-item .sub-label { flex: 1; min-width: 0; }
+.pop-item.sub-item.open { background: var(--bg-elev); color: var(--txt-hi); }
+.ctx-flyout { z-index: 61; }
 /* A PATH as the hint (the terminal's link menu): never uppercased — paths are
    case-sensitive and `README.md` is not `readme.md` — and one line, ellipsised
    from the box's max-width rather than wrapping a long path into three. */

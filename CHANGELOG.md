@@ -15,6 +15,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ### Changed
 
+- **A menu row ending in ▸ opens its list beside the menu when you rest on it (workspaces beta).** A project's **Add to workspace ▸** and a workspace's **Add project ▸** used to replace the whole menu with a second one when clicked. Now the list appears to the side, the way macOS menus work, and closes when you move to another row. A click or Enter still opens it, and Esc closes the list before the menu.
+- **An empty workspace says how to fill it from where you are.** It used to say to drag a project into it, but the Workspaces view lists no project to drag. It now points to the **Add a project** button, or to dragging one from All projects and holding it over Workspaces.
 - **The first heading names an idea's file (Ideas, beta).** An idea whose first line becomes `# Jellyfin Sharing` is saved as `jellyfin-sharing.md` instead of staying `untitled.md`, and the list and the window's title follow at once. A name another idea already holds gets a number (`jellyfin-sharing-2.md`) and keeps it, an idea with no heading is `untitled.md`, and its id never changes, so nothing that points at it breaks. A file you made by hand and adopted takes its heading's name on its first save. Rename still works as before, for setting the title without typing in the document: it rewrites the heading and the name together.
 
 ### Fixed
