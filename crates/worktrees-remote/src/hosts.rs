@@ -85,7 +85,17 @@ pub struct HostSummary {
     pub device_id: String,
     pub expiry: Value,
     pub paired_at: i64,
+    /// The host's id for this device's PERSON: `owner`, or a guest's `g_` id
+    /// (a thread names its authors by it, so a window finds its own posts).
+    pub principal_id: String,
+    /// This device is a GUEST of the host (group chat §7): its grant is the
+    /// `guest` rows alone, so the host is never this window's engine.
+    pub guest: bool,
 }
+
+/// The prefix of a guest principal's id (`serve::devices::new_guest_id`):
+/// the host's owner is `owner`, every guest `g_` and 26 base32 characters.
+pub const GUEST_PRINCIPAL_PREFIX: &str = "g_";
 
 impl HostRecord {
     pub fn summary(&self) -> HostSummary {
@@ -96,7 +106,15 @@ impl HostRecord {
             device_id: self.device_id.clone(),
             expiry: self.expiry.clone(),
             paired_at: self.paired_at,
+            principal_id: self.principal_id.clone(),
+            guest: self.is_guest(),
         }
+    }
+
+    /// Is this device a guest of the host — paired by an invite, as a
+    /// person the host made, not as one of the owner's own devices?
+    pub fn is_guest(&self) -> bool {
+        self.principal_id.starts_with(GUEST_PRINCIPAL_PREFIX)
     }
 
     /// The listener's address, read again by the dial rule.
@@ -389,8 +407,13 @@ impl HostStore {
     pub fn choose(&self, id: Option<&str>) -> Result<(), String> {
         self.locked(|f| {
             if let Some(id) = id {
-                if !f.hosts.iter().any(|h| h.rec.id == id) {
+                let Some(h) = f.hosts.iter().find(|h| h.rec.id == id) else {
                     return Err(format!("no host {id:?} is kept here"));
+                };
+                // A guest's grant is the guest rows alone: a window driving
+                // that host would be refused every command it makes.
+                if h.rec.is_guest() {
+                    return Err(format!("{} shares sessions with you as a guest: it cannot be this window's engine", h.rec.name));
                 }
             }
             f.chosen = id.map(str::to_string);
@@ -529,6 +552,29 @@ pub(crate) mod tests {
         assert_eq!(st.forget("Studio").unwrap(), b);
         assert_eq!(st.list().unwrap(), Hosts { chosen: None, hosts: vec![a.clone()] }, "forgetting the chosen host unchooses it");
         assert!(!st.key_path(&b.id).exists(), "and deletes its key");
+        let _ = fs::remove_dir_all(&d);
+    }
+
+    /// Group chat §7: a host this device is a GUEST of (its principal is a
+    /// `g_` id the host made at the invite) is marked so in what the page is
+    /// told, and is never the window's engine: a guest's grant reaches only
+    /// the guest rows, so a window driving it would be refused everything.
+    #[test]
+    fn a_guest_host_is_marked_and_never_chosen() {
+        let d = dir("guest");
+        let st = HostStore::new(&d);
+        let own = record("Studio");
+        let mut theirs = record("David's Mac");
+        theirs.principal_id = "g_aaaaaaaaaaaaaaaaaaaaaaaaaa".into();
+        st.add(&own, &DeviceKey::generate().unwrap()).unwrap();
+        st.add(&theirs, &DeviceKey::generate().unwrap()).unwrap();
+        assert!(!own.summary().guest && theirs.summary().guest);
+        let s = serde_json::to_value(theirs.summary()).unwrap();
+        assert_eq!(s["guest"], serde_json::json!(true), "{s}");
+        let e = st.choose(Some(&theirs.id)).unwrap_err();
+        assert!(e.contains("guest") && e.contains("David's Mac"), "{e}");
+        assert_eq!(st.list().unwrap().chosen, None, "nothing chosen");
+        st.choose(Some(&own.id)).unwrap();
         let _ = fs::remove_dir_all(&d);
     }
 

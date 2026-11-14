@@ -135,7 +135,7 @@ export function ScopeEditor({ value, onChange, projects, unprompted, host }: {
         )}
         {shown === "custom" && (
           <div className="ra-caps">
-            {CAPS.filter((c) => c !== "admin").map((c) => (
+            {CAPS.filter((c) => c !== "admin" && c !== "guest").map((c) => (
               <label key={c} className="ra-check">
                 <input type="checkbox" checked={value.caps.includes(c)} onChange={(e) => toggle(c, e.currentTarget.checked)} />
                 <span><b>{c}</b> — {CAP_WORDS[c]}</span>

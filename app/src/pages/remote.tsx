@@ -7,6 +7,7 @@ import { useRemote } from "../remoteStore";
 import { HostsPanel } from "../HostsPanel";
 import { RemoteAccessSection } from "../RemoteAccessPanel";
 import { DevicesSection } from "../DevicesPanel";
+import { GuestsSection } from "../GuestsPanel";
 import { presetDefaults } from "../presets";
 import { Page, Sec, useSheet } from "./kit";
 
@@ -25,6 +26,9 @@ export function RemotePage() {
     <Sec id="devices" problem={r.alerts.some((a) => a.cat === "devices")}>
       <DevicesSection onRemote={() => goto("remote", "remote-access")} stepup={mode === "expert"}
         pairScope={presetDefaults(snap.preset).pairScope} />
+    </Sec>
+    <Sec id="guests">
+      <GuestsSection onRemote={() => goto("remote", "remote-access")} />
     </Sec>
   </Page>;
 }

@@ -2883,6 +2883,59 @@ mod devices {
         assert!(want.iter().all(|w| it.any(|e| e == w)), "in order: {events:?}");
     }
 
+    /// Group chat §2.1: an INVITE window pairs a device to a guest the host
+    /// named before it opened — a new one by name, created only with the
+    /// Allow, or an existing one by id — holding `guest` and no project
+    /// whatever else the console sent. A denied invite leaves no guest, and a
+    /// name in use is refused before a window opens.
+    #[test]
+    fn an_invite_pairs_a_guests_device_to_the_guest_the_host_named() {
+        let e = engine("invite", vec![]);
+        e.bind_loopback();
+        let mut con = e.connect(Caller::console());
+        // Denied: nobody is created.
+        let r = e.rpc(&mut con, "pair_begin", json!({"invite": {"name": "Bret"}, "expiry": null}));
+        let uri = r["ok"]["uri"].as_str().unwrap_or_else(|| panic!("{r}")).to_string();
+        let mut p = e.attempt(&uri, &Attempt::desktop("Bret's MacBook")).unwrap();
+        assert_eq!(e.line(&mut p.tls, Duration::from_secs(5)), Some(json!({"pending": true})));
+        let st = e.status(&mut con);
+        assert_eq!(st["request"]["invite"]["name"], json!("Bret"), "the host's dialog says whose device: {st}");
+        assert_eq!(st["request"]["grant"]["capabilities"], json!(["guest"]));
+        assert!(e.rpc(&mut con, "pair_decide", json!({"allow": false})).get("ok").is_some());
+        e.closed_as(&mut con);
+        assert!(e.reg.guests().unwrap().is_empty(), "a denied invite creates no guest");
+        // Allowed: the guest and the device, together. `caps` is ignored.
+        let r = e.rpc(&mut con, "pair_begin", json!({"invite": {"name": "Bret"}, "caps": ["read", "admin"], "projects": "*", "expiry": null}));
+        let uri = r["ok"]["uri"].as_str().unwrap_or_else(|| panic!("{r}")).to_string();
+        let mut p = e.attempt(&uri, &Attempt::desktop("Bret's MacBook")).unwrap();
+        assert_eq!(e.line(&mut p.tls, Duration::from_secs(5)), Some(json!({"pending": true})));
+        let rec = e.rpc(&mut con, "pair_decide", json!({"allow": true}))["ok"].clone();
+        let bret = rec["principal"].as_str().unwrap_or_else(|| panic!("{rec}")).to_string();
+        assert!(bret.starts_with("g_"), "{rec}");
+        assert_eq!((rec["caps"].clone(), rec["projects"].clone()), (json!(["guest"]), json!([])));
+        let answer = e.line(&mut p.tls, Duration::from_secs(5)).expect("the device's answer");
+        assert_eq!(answer["paired"]["principal_id"], json!(bret));
+        e.closed_as(&mut con);
+        let guests = e.reg.guests().unwrap();
+        assert_eq!((guests.len(), guests[0].name.as_str(), guests[0].devices.len()), (1, "Bret", 1));
+        let caller = e.reg.admit(&p.key.pin, worktrees_core::sysclock::now_epoch(), None).unwrap();
+        assert_eq!(caller.principal().as_str(), bret);
+        let g = worktrees_core::authz::effective(&*e.reg, &caller);
+        assert!(g.allows(worktrees_core::authz::Capability::Guest) && !g.allows(worktrees_core::authz::Capability::Read));
+        // The same name again is refused before any window opens; the same
+        // person by id pairs a second machine.
+        let r = e.rpc(&mut con, "pair_begin", json!({"invite": {"name": "Bret"}, "expiry": null}));
+        assert!(r["err"].as_str().is_some_and(|m| m.contains("exists already")), "{r}");
+        let r = e.rpc(&mut con, "pair_begin", json!({"invite": {"guest": bret}, "expiry": null}));
+        let uri = r["ok"]["uri"].as_str().unwrap_or_else(|| panic!("{r}")).to_string();
+        let mut p = e.attempt(&uri, &Attempt::desktop("Bret's Mac mini")).unwrap();
+        assert_eq!(e.line(&mut p.tls, Duration::from_secs(5)), Some(json!({"pending": true})));
+        assert_eq!(e.rpc(&mut con, "pair_decide", json!({"allow": true}))["ok"]["principal"], json!(bret));
+        e.closed_as(&mut con);
+        assert_eq!(e.reg.guests().unwrap()[0].devices.len(), 2);
+        assert!(e.rpc(&mut con, "pair_begin", json!({"invite": {"guest": "g_nobody"}, "expiry": null}))["err"].is_string());
+    }
+
     /// §2.2 step 5, §2.4: ANY failure closes the window, with no retry and
     /// nothing said — a proof keyed with another secret, bound to another
     /// session, or made for another key; a frame that is malformed, too long,

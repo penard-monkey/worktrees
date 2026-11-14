@@ -61,11 +61,18 @@
 //      routes (settings to the device's blob, host-path commands refused with
 //      a reason) and `windowOnHost()`; and the remote boot never asking for
 //      `engine_connect`.
+//   6. HOLDS THE GUEST CONNECTION OUTSIDE THE DOOR (group chat §7): its
+//      commands are dispatch.rs's `GUEST_ROWS`, exactly; every other row of
+//      the table is refused before a frame; ipc.ts neither imports it nor
+//      routes a guest row; only the guest modules import it; its boot reaches
+//      the shim through `tauriDoor`, never the engine door's `invoke`; and a
+//      lost connection goes offline and is redialled on its own, with every
+//      reconnect re-declaring `shares:changed`.
 //
 // Overrides, so a mutation can be tested without touching the tree:
 //   TRANSPORT_IPCWS, TRANSPORT_IPC, TRANSPORT_IPCREMOTE, TRANSPORT_RECONNECT, TRANSPORT_WIRE, TRANSPORT_POLICY,
 //   TRANSPORT_DISPATCH, TRANSPORT_CONN, TRANSPORT_SERVEFILE, TRANSPORT_MAIN,
-//   TRANSPORT_DOOR, TRANSPORT_DIST
+//   TRANSPORT_DOOR, TRANSPORT_DIST, TRANSPORT_GUESTDOOR, TRANSPORT_GUESTBOOT
 import { createHmac, randomBytes } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
@@ -78,6 +85,8 @@ const SRC = {
   ipcws: process.env.TRANSPORT_IPCWS ?? here("../src/ipcws.ts"),
   ipc: process.env.TRANSPORT_IPC ?? here("../src/ipc.ts"),
   ipcremote: process.env.TRANSPORT_IPCREMOTE ?? here("../src/ipcremote.ts"),
+  guestdoor: process.env.TRANSPORT_GUESTDOOR ?? here("../src/guestdoor.ts"),
+  guestboot: process.env.TRANSPORT_GUESTBOOT ?? here("../src/guestboot.ts"),
   reconnect: process.env.TRANSPORT_RECONNECT ?? here("../src/reconnect.ts"),
   ipcInTree: here("../src/ipc.ts"),
   pane: here("../src/TerminalPane.tsx"),
@@ -1878,6 +1887,95 @@ ${body}
   let threw = false;
   try { D.serveDoor().configureServer({ config: { server: { host: "0.0.0.0" } }, middlewares: { use() {} } }); } catch { threw = true; }
   check(threw, "the plugin refuses to start on a dev server listening beyond loopback");
+}
+
+// ── 6. the guest connection, outside the door ───────────────────────────────
+{
+  const dispatch = read(SRC.dispatch);
+  const gd = read(SRC.guestdoor);
+  const gb = read(SRC.guestboot);
+  const ipcSrc = read(SRC.ipcInTree);
+  const rustList = (name) => {
+    const m = new RegExp(`pub const ${name}: &\\[&str\\] = &\\[([^\\]]*)\\];`).exec(dispatch);
+    return m ? [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1]) : null;
+  };
+  const guestRows = rustList("GUEST_ROWS");
+  check(Array.isArray(guestRows) && guestRows.length > 0, `dispatch.rs names its GUEST_ROWS (${guestRows?.length ?? 0})`);
+  if (/^import (?!type )/m.test(gd)) fail("guestdoor.ts gained a runtime import: it must load as a data: module");
+  const G = await load("guestdoor.ts", await tsModule(SRC.guestdoor));
+  check(same([...G.GUEST_COMMANDS].sort(), [...(guestRows ?? [])].sort()), `the guest connection's commands ARE dispatch.rs's GUEST_ROWS (${[...G.GUEST_COMMANDS].join(", ")})`);
+  // Every row of the table: the table is `name: Exposure …` lines inside `rows!`/`table!`.
+  const table = [...dispatch.slice(0, dispatch.search(/\n#\[cfg\(test\)\]\s*\nmod tests\b/)).matchAll(/^\s{4}([a-z][a-z0-9_]*): (?:Engine|HostConsole|Loopback|Stream|ClientLocal|Own)\b/gm)].map((m) => m[1]);
+  check(table.length > 200 && guestRows?.every((r) => table.includes(r)), `the table read from dispatch.rs holds every guest row (${table.length} rows)`);
+  const leaks = table.filter((r) => !guestRows?.includes(r) && G.notAGuestRow(r) === null);
+  check(leaks.length === 0, `every other row of the table is refused on the guest connection before a frame${leaks.length ? `: ${leaks.join(", ")}` : ""}`);
+  // ipc.ts: no import of the guest modules, no guest row in its local routes.
+  check(!/from "\.\/guest(door|boot)?"/.test(ipcSrc), "ipc.ts imports none of the guest modules: the engine door never carries a guest socket");
+  const local = [...ipcSrc.matchAll(/export const (CLIENT_LOCAL|SHIM_COMMANDS): readonly string\[\] = \[([\s\S]*?)\];/g)].flatMap((m) => [...m[2].matchAll(/"([^"]+)"/g)].map((x) => x[1]));
+  const routed = local.filter((c) => guestRows?.includes(c));
+  check(local.length > 5 && routed.length === 0, `no guest row is in the engine door's route table${routed.length ? `: ${routed.join(", ")}` : ""}`);
+  // Only the guest modules import the guest door.
+  const allowed = new Set(["guest.ts", "guestboot.ts", "guestview.ts", "GuestSession.tsx", "GuestNav.tsx"]);
+  const importers = [];
+  const walkDir = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const f = path.join(d, e.name); if (e.isDirectory()) { if (e.name !== "mock") walkDir(f); } else if (/\.(ts|tsx)$/.test(e.name) && /from "\.\.?\/(?:[^"]*\/)?guestdoor"/.test(read(f))) importers.push(path.relative(SRC.appsrc, f)); } };
+  walkDir(SRC.appsrc);
+  const strangers = importers.filter((f) => !allowed.has(f));
+  check(importers.length > 0 && strangers.length === 0, `only the guest modules import guestdoor.ts (${importers.join(", ")})${strangers.length ? ` — NOT: ${strangers.join(", ")}` : ""}`);
+  // The boot reaches the shim through tauriDoor, never the engine door.
+  const ipcImport = /^import \{([^}]*)\} from "\.\/ipc";$/m.exec(gb)?.[1].split(",").map((x) => x.trim()).filter(Boolean) ?? [];
+  check(same(ipcImport, ["tauriDoor"]), `guestboot.ts takes only tauriDoor from ipc.ts at runtime (${ipcImport.join(", ") || "nothing"})`);
+  check(!/\binvoke\(/.test(gb.replace(/\.invoke\(/g, "")), "guestboot.ts never calls the engine door's bare invoke()");
+
+  // Drive guestLink on a virtual clock over a fake socket door.
+  let now = 0;
+  const timers = [];
+  const env = { now: () => now, setTimeout: (fn, ms) => { const t = { at: now + ms, fn }; timers.push(t); return t; }, clearTimeout: (t) => { const i = timers.indexOf(t); if (i >= 0) timers.splice(i, 1); }, visible: () => true };
+  const advance = async (ms) => { now += ms; for (const t of timers.filter((x) => x.at <= now)) { timers.splice(timers.indexOf(t), 1); t.fn(); } await ticks(); };
+  const socks = [];
+  let refuse = false;
+  const dial = async (onLost) => {
+    if (refuse) throw "connection refused";
+    const s = { sent: [], declared: [], listeners: {}, closed: false, onLost };
+    s.door = {
+      ready: Promise.resolve(),
+      invoke: async (cmd, args) => { s.sent.push(cmd); return { cmd, args }; },
+      listen: async (ev, h) => { s.listeners[ev] = h; return () => {}; },
+      channel: () => ({}), openChannels: () => 0,
+      declare: (names) => s.declared.push([...names]),
+    };
+    socks.push(s);
+    return { sock: s.door, closedWhy: () => null, close: () => { s.closed = true; } };
+  };
+  const host = { id: "h_x", name: "David's Mac", addr: "100.64.0.2:7461", device_id: "d", expiry: null, paired_at: 1, guest: true };
+  const link = G.guestLink(host, dial, env);
+  const heard = [];
+  link.onChanged((p) => heard.push(p.what));
+  await ticks();
+  check(link.state().kind === "up" && socks.length === 1, "a guest link connects on its own");
+  check(same(socks[0].declared, [["shares:changed"]]), "it declares shares:changed, the one event a guest hears (serve sends it only to a socket that declared it)");
+  check(heard[0] === "connected", "a connect is heard as `connected`, so the lists are read again (nothing is queued while the app is closed)");
+  let refused = null;
+  await link.call("agent_send", { text: "x" }).catch((e) => { refused = String(e); });
+  check(refused !== null && /not a guest row/.test(refused) && !socks[0].sent.includes("agent_send"), `a non-guest row is refused here and never sent (${refused})`);
+  const r = await link.call("shared_turns", { share: "s" });
+  check(r.cmd === "shared_turns" && socks[0].sent.includes("shared_turns"), "a guest row goes out on the guest socket");
+  socks[0].listeners["shares:changed"]?.({ payload: { what: "post", share: "s", seq: 3 } });
+  check(heard.at(-1) === "post", "shares:changed reaches the store");
+  refuse = true;
+  socks[0].onLost("the host closed the connection: going away");
+  await ticks();
+  check(link.state().kind === "offline" && /going away/.test(link.state().why), `a lost connection is offline, in the host's words (${link.state().why})`);
+  check(socks[0].closed, "the lost socket is let go");
+  await link.call("shares_list").catch((e) => { refused = String(e); });
+  check(/going away/.test(refused), "a call while offline is refused with why, not queued");
+  await advance(G.RETRY_MS[0]);
+  check(link.state().kind === "offline" && socks.length === 1, "a refused redial stays offline and tries again later");
+  refuse = false;
+  await advance(G.RETRY_MS[1]);
+  check(link.state().kind === "up" && socks.length === 2 && same(socks[1].declared, [["shares:changed"]]), "the host back: redialled on its own, shares:changed declared again");
+  check(heard.at(-1) === "connected", "…and the lists are read again");
+  link.close();
+  check(socks[1].closed, "closing the link closes its socket");
 }
 
 // The build: when one exists, the socket client IS in it — the shipped app is

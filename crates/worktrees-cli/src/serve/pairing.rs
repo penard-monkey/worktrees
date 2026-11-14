@@ -63,7 +63,7 @@ use tokio::sync::{oneshot, Notify};
 use worktrees_core::authz::{DeviceId, Grant, PrincipalId};
 use worktrees_core::pairuri::{self, PairUri};
 
-use super::devices::{hex, is_pin, name_ok, DeviceEvent, DeviceRegistry, Enrollment, Expiry, Platform, MAX_DEVICES};
+use super::devices::{hex, is_pin, name_ok, DeviceEvent, DeviceRegistry, Enrollment, Expiry, Platform, PrincipalRecord, MAX_DEVICES};
 use super::identity::Identity;
 use super::remote::peer::Rule;
 use super::tls;
@@ -86,6 +86,74 @@ pub use worktrees_remote::pair::{comparison_code, proof_ok};
 pub struct Offer {
     pub grant: Grant,
     pub expiry: Expiry,
+    /// Whose device this becomes: `None` is the owner's (every pairing
+    /// before group chat), `Some` a guest the host named before the window
+    /// opened (group chat §2.1). A guest's offer holds `guest` and no project.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invite: Option<Invite>,
+}
+
+impl Offer {
+    /// The owner's device, with this grant: what pairing always was.
+    pub fn owner(grant: Grant, expiry: Expiry) -> Offer {
+        Offer { grant, expiry, invite: None }
+    }
+
+    /// A guest's device: `guest` and no project, whatever else is asked.
+    pub fn guest(invite: Invite, expiry: Expiry) -> Offer {
+        Offer { grant: Invite::grant(), expiry, invite: Some(invite) }
+    }
+
+    /// The principal the device will belong to.
+    pub fn principal(&self) -> PrincipalId {
+        self.invite.as_ref().map_or_else(PrincipalId::owner, |i| i.id().clone())
+    }
+}
+
+/// A guest invite (group chat §2.1, §1): the person, chosen by the host,
+/// never claimed by the device. A NEW guest gets its id when the window
+/// opens and its record when the host allows the device — both or neither.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Invite {
+    New { id: PrincipalId, name: String },
+    Existing { id: PrincipalId, name: String },
+}
+
+impl Invite {
+    pub fn id(&self) -> &PrincipalId {
+        match self {
+            Invite::New { id, .. } | Invite::Existing { id, .. } => id,
+        }
+    }
+
+    /// Every guest's grant: `guest`, no project.
+    pub fn grant() -> Grant {
+        Grant { capabilities: worktrees_core::authz::Caps::GUEST, projects: worktrees_core::authz::Projects::Only(Default::default()) }
+    }
+
+    /// The invite `pair_begin` names: `{"name": …}` for a new guest, or
+    /// `{"guest": <id>}` for one the host has. A new name already used by a
+    /// guest is refused, so two people never share a name in a thread.
+    pub fn from_value(v: &Value, devices: &DeviceRegistry) -> Result<Invite, String> {
+        const SHAPE: &str = r#"an invite is {"name": "<a new guest's name>"} or {"guest": "<an existing guest's id>"}"#;
+        let m = v.as_object().filter(|m| m.len() == 1).ok_or(SHAPE)?;
+        if let Some(name) = m.get("name") {
+            let name = name.as_str().ok_or(SHAPE)?.trim().to_string();
+            name_ok(&name)?;
+            let taken = devices.guests()?.into_iter().any(|g| g.name == name);
+            if taken {
+                return Err(format!("a guest named {name:?} exists already: invite them by id"));
+            }
+            return Ok(Invite::New { id: super::devices::new_guest_id(), name });
+        }
+        if let Some(id) = m.get("guest") {
+            let id = PrincipalId::new(id.as_str().ok_or(SHAPE)?);
+            let g = devices.guest(&id).ok_or_else(|| format!("no guest {id}"))?;
+            return Ok(Invite::Existing { id, name: g.name });
+        }
+        Err(SHAPE.into())
+    }
 }
 
 /// Where windows open: an address of the remote listener's, on which the
@@ -114,6 +182,9 @@ pub struct Request {
     pub peer: String,
     pub grant: Grant,
     pub expiry: Expiry,
+    /// The guest this device would belong to, when the window is an invite.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invite: Option<Invite>,
     #[serde(skip)]
     spki_sha256: String,
     #[serde(skip)]
@@ -308,7 +379,7 @@ impl Pairing {
             *cur = Some(Window { id: wid, offer: offer.clone(), uri: uri.clone(), expires_at, stop: stop.clone(), why: why.clone(), phase: Phase::Open });
         }
         self.devices.announce(DeviceEvent::PairingOpened {
-            for_principal: PrincipalId::owner(),
+            for_principal: offer.principal(),
             expires_at,
             grant: offer.grant.clone(),
             expiry: offer.expiry,
@@ -355,8 +426,12 @@ impl Pairing {
         }
         let bind = (*self.bind.lock().unwrap()).ok_or("remote access was turned off")?;
         let discovery = self.dir.as_deref().map(Identity::ensure).transpose()?.map(|i| i.discovery_id().to_string());
+        let create = match &offer.invite {
+            Some(Invite::New { id, name }) => Some(PrincipalRecord::guest(id.clone(), name, now)),
+            _ => None,
+        };
         let e = Enrollment {
-            principal: PrincipalId::owner(),
+            principal: offer.principal(),
             name: request.name.clone(),
             platform: request.platform,
             spki_sha256: request.spki_sha256.clone(),
@@ -365,7 +440,7 @@ impl Pairing {
             expiry: offer.expiry,
             addr: Some(request.peer.clone()),
         };
-        match self.devices.enroll(e, now) {
+        match self.devices.enroll_creating(e, create, now) {
             Ok(rec) => {
                 let answer = json!({
                     "device_id": rec.id, "principal_id": rec.principal, "host_name": self.host,
@@ -408,7 +483,8 @@ impl Pairing {
         };
         let peer = peer.ip().to_string();
         self.set_phase(wid, Phase::Attempt { peer: peer.clone() });
-        self.devices.announce(DeviceEvent::PairingAttempt { for_principal: PrincipalId::owner(), peer: peer.clone() });
+        let for_principal = self.cur.lock().unwrap().as_ref().filter(|w| w.id == wid).map_or_else(PrincipalId::owner, |w| w.offer.principal());
+        self.devices.announce(DeviceEvent::PairingAttempt { for_principal, peer: peer.clone() });
         // 2. Any further connection ends the window. The listener lives in
         // this watcher, so ending it closes the port.
         let watcher = {
@@ -486,6 +562,7 @@ impl Pairing {
                 peer: peer.to_string(),
                 grant: w.offer.grant.clone(),
                 expiry: w.offer.expiry,
+                invite: w.offer.invite.clone(),
                 spki_sha256: device_pin,
                 stepup_spki_sha256: stepup_pin,
             };

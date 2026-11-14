@@ -97,21 +97,43 @@ pub fn is_uuid(id: &str) -> bool {
 /// thread's rollout open and appends to it, so this is the conversation the
 /// process runs — exactly, where `resume_id` is only the newest one started
 /// in the place. Sub-agent and `exec` rollouts never match (`is_user_thread`).
+///
+/// After `/clear` and a turn the process holds BOTH the old and the new
+/// thread's rollouts (group-chat §3.3, measured on 0.167.0), so this is the
+/// NEWEST STARTED of the held user threads: `session_meta.timestamp`, then
+/// the rollout's name, which begins with its start time. The first one found
+/// used to win, and a restart after `/clear` could resume the older thread.
 pub fn held_thread(open: &[PathBuf], cwd: &str) -> Option<String> {
     held_thread_in(&sessions_dir(), open, cwd)
 }
 
 fn held_thread_in(sessions: &Path, open: &[PathBuf], cwd: &str) -> Option<String> {
+    held_rollout_in(sessions, open, cwd).map(|(id, _)| id)
+}
+
+/// [`held_thread`], with the rollout's path: what a share binds and reads.
+pub fn held_rollout(open: &[PathBuf], cwd: &str) -> Option<(String, PathBuf)> {
+    held_rollout_in(&sessions_dir(), open, cwd)
+}
+
+fn held_rollout_in(sessions: &Path, open: &[PathBuf], cwd: &str) -> Option<(String, PathBuf)> {
     let root = std::fs::canonicalize(sessions).unwrap_or_else(|_| sessions.to_path_buf());
     let cwd = physical(cwd);
     open.iter()
         .filter(|p| p.extension().is_some_and(|x| x == "jsonl"))
         .filter(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()).starts_with(&root))
-        .find_map(|p| {
+        .filter_map(|p| {
             let meta = session_meta(p)?;
             let id = meta.get("id")?.as_str()?;
-            (is_user_thread(&meta, &cwd) && is_uuid(id)).then(|| id.to_string())
+            if !(is_user_thread(&meta, &cwd) && is_uuid(id)) {
+                return None;
+            }
+            let started = meta.get("timestamp").and_then(|t| t.as_str()).unwrap_or("").to_string();
+            let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            Some(((started, name), (id.to_string(), p.clone())))
         })
+        .max_by(|a, b| a.0.cmp(&b.0))
+        .map(|(_, v)| v)
 }
 
 fn sorted_desc(dir: &Path, dirs: bool) -> Vec<PathBuf> {
@@ -776,6 +798,44 @@ mod tests {
         assert_eq!(held(&[guard.clone(), other.clone(), user.clone()]).as_deref(), Some("11111111-1111-4111-8111-111111111111"));
         assert_eq!(held(&[guard, other, named, stray]), None);
         assert_eq!(held(&[]), None);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// After `/clear` and a turn, Codex 0.167.0 holds BOTH rollouts open
+    /// (group-chat §3.3, measured): the thread before the clear and the one
+    /// after it. The held thread is the NEWEST STARTED, whatever order the
+    /// process lists its open files in — by `session_meta.timestamp`, and by
+    /// the rollout's name (which begins with its start time) without one.
+    #[test]
+    fn after_a_clear_the_held_thread_is_the_newest_started() {
+        let root = std::env::temp_dir().join(format!("wt-held-clear-{}", std::process::id()));
+        let day = root.join("sessions/2026/11/12");
+        std::fs::create_dir_all(&day).unwrap();
+        let place = root.join("place");
+        std::fs::create_dir_all(&place).unwrap();
+        let place_s = std::fs::canonicalize(&place).unwrap().to_string_lossy().into_owned();
+        let write = |name: &str, meta: serde_json::Value| {
+            let p = day.join(name);
+            std::fs::write(&p, format!("{}\n", serde_json::json!({"type":"session_meta","payload":meta}))).unwrap();
+            p
+        };
+        let old = write(
+            "rollout-2026-11-12T09-00-00-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa.jsonl",
+            serde_json::json!({"id":"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa","cwd":place_s,"source":"cli","timestamp":"2026-11-12T09:00:00.000Z"}),
+        );
+        let new = write(
+            "rollout-2026-11-12T10-30-00-bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb.jsonl",
+            serde_json::json!({"id":"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb","cwd":place_s,"source":"cli","timestamp":"2026-11-12T10:30:00.000Z"}),
+        );
+        let sessions = root.join("sessions");
+        let held = |open: &[PathBuf]| held_thread_in(&sessions, open, &place_s);
+        assert_eq!(held(&[old.clone(), new.clone()]).as_deref(), Some("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"));
+        assert_eq!(held(&[new.clone(), old.clone()]).as_deref(), Some("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"));
+        // No timestamp in either: the name's start time decides.
+        let a = write("rollout-2026-11-12T08-00-00-cccccccc-cccc-4ccc-8ccc-cccccccccccc.jsonl", serde_json::json!({"id":"cccccccc-cccc-4ccc-8ccc-cccccccccccc","cwd":place_s,"source":"cli"}));
+        let b = write("rollout-2026-11-12T08-05-00-dddddddd-dddd-4ddd-8ddd-dddddddddddd.jsonl", serde_json::json!({"id":"dddddddd-dddd-4ddd-8ddd-dddddddddddd","cwd":place_s,"source":"cli"}));
+        assert_eq!(held(&[b.clone(), a.clone()]).as_deref(), Some("dddddddd-dddd-4ddd-8ddd-dddddddddddd"));
+        assert_eq!(held(&[a, b]).as_deref(), Some("dddddddd-dddd-4ddd-8ddd-dddddddddddd"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
