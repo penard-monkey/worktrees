@@ -496,6 +496,8 @@ export const CONSOLE_ROWS: readonly string[] = [
   // group chat's shares (PR A): the owner's acts and listings
   "share_create", "share_again", "share_allow", "share_remove_guest", "share_stop", "guest_places_hide",
   "share_requests_list", "share_request_dismiss", "shares_all", "guests_list", "guest_remove", "owner_set_name",
+  // group chat PR D: Use these, recorded in the thread after a confirmed send
+  "share_used",
 ];
 
 /** The device's capabilities on the host this window drives, from the remote

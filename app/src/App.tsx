@@ -18,6 +18,7 @@ import { setTermScrollback, ShellPane, TerminalPane } from "./TerminalPane";
 import { newNotifier, onDone, onVisibility, onWaitingSnapshot, type NotifyMode } from "./notify";
 import { notify } from "./notifyhost";
 import { AgentViewSwitch, ChatPane } from "./ChatPane";
+import { LaneShareBar, LaneThread } from "./LaneShare";
 import { insertReference } from "./chat";
 import { DocsPane } from "./DocsPane";
 import { PlanPane } from "./PlanPane";
@@ -9713,6 +9714,8 @@ function App() {
                           </span>
                           {settingsReady && settings.chat_view && <AgentViewSwitch chat={chatOn} onChat={(on) => setChatView(viewKey, provider, on)} />}
                         </div>
+                        <LaneShareBar repo={sel.repo} slug={sel.slug} harness={provider} up={!!selectedAgents?.[provider].up} />
+                        <div className="agent-row">
                         {/* The terminal stays mounted under the chat — hidden and
                             inert, at its own size — so no resize reaches the pty
                             and the way back keeps its scrollback. */}
@@ -9735,6 +9738,8 @@ function App() {
                               onOpenPath={(path, at) => openPathFromTerm(path, at.line, at.col)}
                               reloadToken={placesToken} onError={fail} />
                           )}
+                        </div>
+                        <LaneThread repo={sel.repo} slug={sel.slug} session={selectedAgents![provider].name} up={!!selectedAgents?.[provider].up} />
                         </div>
                       </div>
                       );

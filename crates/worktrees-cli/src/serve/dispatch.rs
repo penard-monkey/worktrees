@@ -1370,6 +1370,10 @@ commands! { cx, a;
     share_requests_list: HostConsole => super::shares::rows::requests(cx),
     share_request_dismiss: HostConsole => super::shares::rows::dismiss(cx, a.get("request")?),
     shares_all: HostConsole => super::shares::rows::all(cx),
+    // *Use these* (§5) is `agent_attach` + `agent_send` from the console;
+    // this row only RECORDS it in the thread, after a confirmed send, as the
+    // `shared_with_agent` event for posts `first..=last`. It types nothing.
+    share_used: HostConsole [console, share(share)] => super::shares::rows::used(cx, a.get("share")?, a.get("first")?, a.get("last")?),
     // The people: guests and their devices, removing one from the host, and
     // the name a guest sees the owner by.
     guests_list: HostConsole => super::shares::rows::guests(cx),
@@ -1478,15 +1482,15 @@ mod tests {
     /// `idea_combine`, `idea_split`, `idea_related`, `idea_versions`,
     /// `idea_restore`), and the chat's images (`read_place_image`, `agent_call_image`), and phase S's fifteen
     /// idea-session console rows (`idea_conversation*`, `idea_*` over the agent bodies), and group
-    /// chat's sixteen share rows (twelve console, four `guest`), its thread's two
-    /// (`thread_read`, `thread_post`, `guest`) and PR C's two `guest` history
-    /// rows (`shared_turns`, `shared_tool_call`); the check scripts
+    /// chat's seventeen share rows (thirteen console with PR D's `share_used`, four
+    /// `guest`), its thread's two (`thread_read`, `thread_post`, `guest`) and PR C's
+    /// two `guest` history rows (`shared_turns`, `shared_tool_call`); the check scripts
     /// hold the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 271, "the table has 271 commands");
+        assert_eq!(TABLE.len(), 272, "the table has 272 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1897,7 +1901,7 @@ mod tests {
     /// `limits_settings` (`read`) and `set_limits` (`admin`); and the policy
     /// presets' `policy_preset_status` (`read`) and `apply_policy_preset`
     /// (console); the named workspaces' six (console); and the idea board's seven and phase 3's seven (console); phase S's fifteen idea-session rows (console); `read_place_image` and `agent_call_image` are `read`; and group chat's
-    /// shares: twelve console rows (`share_*` for the owner, `guest_places_hide`,
+    /// shares: thirteen console rows (`share_*` for the owner, `share_used`, `guest_places_hide`,
     /// `shares_all`, `guests_list`, `guest_remove`, `owner_set_name`) and the
     /// four `guest` rows (`GUEST_ROWS`), the capability's first, the thread's
     /// two `guest` rows (`thread_read`, `thread_post`) and PR C's two
@@ -1918,7 +1922,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 70), ("write", 23), ("admin", 41), ("console", 95), ("stream", 10), ("instruct", 8), ("answer", 2),
+            ("read", 70), ("write", 23), ("admin", 41), ("console", 96), ("stream", 10), ("instruct", 8), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 7), ("guest", 8),
         ]
         .into();

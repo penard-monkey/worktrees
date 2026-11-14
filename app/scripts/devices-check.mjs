@@ -163,7 +163,7 @@ for (const [file, fn, row] of [["RemoteAccessPanel.tsx", "RemoteAccessSection", 
 }
 const pair = src("PairSheet.tsx");
 eq("the pair sheet's begin is greyed with the remote status and notGranted's reason",
-  /const problem = notGranted\("pair_begin"\) \?\? remoteProblem\?\.message \?\? scopeProblem\(scope\);/.test(pair) && /disabled=\{busy \|\| !!problem\} title=\{problem \?\? undefined\} onClick=\{begin\}/.test(pair), true);
+  /const problem = notGranted\("pair_begin"\) \?\? remoteProblem\?\.message \?\? \(inviting \? \(guestName\.trim\(\) \? null : "[^"]+"\) : scopeProblem\(scope\)\);/.test(pair) && /disabled=\{busy \|\| !!problem\} title=\{problem \?\? undefined\} onClick=\{begin\}/.test(pair), true);
 const watch = fnBody(store, "watchRemote");
 const stop = watch.indexOf('if (notGranted("remote_status")) return');
 eq("watchRemote is found", watch.length > 0, true);
@@ -175,7 +175,7 @@ eq("…and lists devices only where the grant reaches devices_list",
 const layer = fnBody(src("EngineGate.tsx"), "RemoteLayer");
 const noticeGate = fnBody(src("EngineGate.tsx"), "useRemoteNotice");
 eq("RemoteLayer shows no alert on a remote window",
-  /const onConsole = !notGranted\("remote_status"\);/.test(layer) && /const shown = onConsole && alerts\.length > 0;/.test(layer), true);
+  /const onConsole = !notGranted\("remote_status"\);/.test(layer) && /const shown = onConsole && \(alerts\.length > 0 \|\| asks\);/.test(layer) && /const asks = useShares\(\)\.asked\.length > 0 && sharesHere\(\);/.test(layer), true);
 eq("…and useRemoteNotice no notice there",
   /return up && !notGranted\("remote_status"\) && remoteNoticeWords\(status\) !== null \? status : null;/.test(noticeGate), true);
 // DeviceRow calls its rows through `act("…", args)`, which adds the id.

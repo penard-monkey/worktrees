@@ -919,13 +919,29 @@ pub mod rows {
         Ok(gone)
     }
 
+    /// *Use these* happened (§5): the owner's confirmed send of posts
+    /// `first..=last`, recorded as a thread event every reader sees. Only on
+    /// a share whose binding is active: an ended one has no session to use
+    /// them in until *Share again*.
+    pub fn used(cx: &Call, share: String, first: u64, last: u64) -> Result<Value, String> {
+        let s = store(cx).read()?.shares.into_iter().find(|s| s.id == share).ok_or_else(|| format!("no share {share}"))?;
+        if !s.binding.as_ref().is_some_and(Binding::is_active) {
+            return Err(format!("share {share} has no live session bound: Share again first"));
+        }
+        let e = threads(cx).shared_with_agent(&share, first, last, now())?;
+        changed(&*cx.ctx.host, "used", Some(&share), &crate::serve::sharethread::rows::allowed(&s), Some(e.seq));
+        serde_json::to_value(e).map_err(|e| e.to_string())
+    }
+
     pub fn hide(cx: &Call, project: String, hidden: bool) -> Result<bool, String> {
         store(cx).hide(&project, hidden)
     }
 
     pub fn all(cx: &Call) -> Result<Value, String> {
         let f = store(cx).read()?;
-        Ok(json!({ "shares": f.shares, "hidden_projects": f.hidden_projects }))
+        // `owner`: the name guests see the owner by (`owner_set_name`), which
+        // the owner's *Use these* line names (§5).
+        Ok(json!({ "shares": f.shares, "hidden_projects": f.hidden_projects, "owner": owner_name(cx) }))
     }
 
     pub fn requests(cx: &Call) -> Result<Value, String> {
@@ -1456,6 +1472,30 @@ pub(crate) mod serve_tests {
         TEST_LIVE.lock().unwrap().insert(place_dir(&h.a, "other"), LiveSession::Unsupported("Kimi"));
         let e = h.console("share_create", json!({"repo": h.a, "slug": "other", "guests": [bret]})).unwrap_err();
         assert!(e.as_str().unwrap().contains("Kimi sessions cannot be shared yet"), "{e}");
+    }
+
+    /// §5: *Use these* is recorded by `share_used` alone, as a
+    /// `shared_with_agent` event every allowed reader sees, and only while a
+    /// live session is bound; it is the console's, never a guest's.
+    #[test]
+    fn share_used_records_the_use_in_the_thread_and_only_on_a_live_binding() {
+        let h = Host::new("used");
+        h.live("feat", "s-old", 10);
+        let bret = Host::principal(&h.bret);
+        let id = h.console("share_create", json!({"repo": h.a, "slug": "feat", "guests": [bret]})).unwrap()["id"].as_str().unwrap().to_string();
+        h.console("share_allow", json!({"share": id, "principal": bret})).unwrap();
+        h.run(&h.bret, "thread_post", json!({"share": id, "id": "p1", "text": "try the cache"})).unwrap();
+        let e = h.console("share_used", json!({"share": id, "first": 2, "last": 2})).unwrap();
+        assert_eq!((e["kind"].clone(), e["first"].clone(), e["last"].clone()), (json!("shared_with_agent"), json!(2), json!(2)));
+        let page = h.run(&h.bret, "thread_read", json!({"share": id})).unwrap();
+        assert_eq!(page["entries"].as_array().unwrap().last().unwrap()["kind"], json!("shared_with_agent"));
+        assert!(h.run(&h.bret, "share_used", json!({"share": id, "first": 2, "last": 2})).is_err(), "a guest never records a use");
+        assert!(h.console("share_used", json!({"share": id, "first": 3, "last": 2})).is_err(), "first after last");
+        // The binding ends: no session to use them in until Share again.
+        h.live("feat", "s-new", 5);
+        h.poll();
+        let e = h.console("share_used", json!({"share": id, "first": 2, "last": 2})).unwrap_err();
+        assert!(e.as_str().unwrap().contains("Share again first"), "{e}");
     }
 
     /// §8: removing the lane with serve up (the poll) or down (the next
