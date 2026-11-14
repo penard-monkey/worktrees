@@ -5804,8 +5804,8 @@ Phase 3: Frontend pane and mock harness
         const raw = sessionStorage.getItem(MOCK_SETTINGS_KEY);
         if (raw) return JSON.parse(raw);
       } catch { /* private mode */ }
-      // ?beta=ideas — a fresh tab with Settings → Beta features → Ideas and
-      // workspaces on (beta.ts). Off by default here too, as in the app. Only
+      // ?beta=ideas — a fresh tab with Settings → Beta features → Ideas on
+      // (beta.ts). Off by default here too, as in the app. Only
       // while nothing is stored, so turning it off in the sheet sticks.
       if (new URLSearchParams(location.search).get("beta")?.split(",").includes("ideas")) {
         const m = /layout=(left|right)-(left|right)/.exec(location.search);

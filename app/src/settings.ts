@@ -459,11 +459,12 @@ export type Settings = {
   // `wsProjectKey(id, root)` — apart from `collapsed`, so folding a project in
   // a workspace leaves All projects alone.
   ws_collapsed: Record<string, boolean>;
-  // Settings → General → Beta features: Ideas and workspaces (the Ideas
-  // window, its rail button and ⌘⇧I, the Workspaces | All projects switch and
-  // every workspace menu). Off by default; read ONLY through `beta.ts`
+  // Settings → General → Beta features → Ideas (the Ideas window, its rail
+  // button and ⌘⇧I). Off by default; read ONLY through `beta.ts`
   // (`ideasBeta`), and by the shim at launch (companion.rs `BETA`), which never
-  // writes this file. Never retire it: an older build reads the blob too.
+  // writes this file. Named workspaces shared this key until they left the
+  // beta (2026-11-14); a build from before that still reads it for both, so
+  // never retire it. Each beta feature has its OWN `beta_<name>` key.
   beta_ideas: boolean;
   hidden_tiers: string[]; // lifecycle tiers hidden in the Places tree (active/idle/dormant)
   sort_mode: "recent" | "alpha" | "manual";

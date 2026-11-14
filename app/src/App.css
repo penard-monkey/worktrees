@@ -1380,6 +1380,9 @@ body.dragging .menu-catch { pointer-events: none; }
 /* checkbox that stands alone in a setting (not in a tier row): no cramping,
    full-width click target, normal casing */
 .setting-check { margin-top: var(--s2); text-transform: none; }
+/* Settings → Beta features: one block per feature (beta.ts BETA_FEATURES), each
+   its checkbox and the line on what it adds. */
+.beta-feature + .beta-feature { margin-top: var(--s3); }
 
 /* Shortcuts cheatsheet (read-only) */
 .shortcuts { display: flex; flex-direction: column; gap: 2px; }
