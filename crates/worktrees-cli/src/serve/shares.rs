@@ -453,14 +453,16 @@ impl Shares {
     }
 
     /// Take `principal` off EVERY share and drop its open requests (the
-    /// console's Remove guest). How many shares named them.
-    pub fn remove_principal(&self, principal: &PrincipalId) -> Result<usize, String> {
+    /// console's Remove guest). The shares that named them.
+    pub fn remove_principal(&self, principal: &PrincipalId) -> Result<Vec<String>, String> {
         self.mutate(|f| {
-            let mut n = 0;
+            let mut n = Vec::new();
             for s in &mut f.shares {
                 let before = s.guests.len();
                 s.guests.retain(|g| &g.principal != principal);
-                n += usize::from(s.guests.len() != before);
+                if s.guests.len() != before {
+                    n.push(s.id.clone());
+                }
             }
             f.requests.retain(|r| &r.principal != principal);
             Ok(n)
@@ -747,20 +749,47 @@ pub fn lane_now(roots: &[String], s: &Share) -> Lane {
 
 /// One pass of the share check: every share's lane, judged against the
 /// registry as it stands. Quiet when there is no `shares.json`. Its changes
-/// go to serve.log, by share id only.
-pub fn tick(config_dir: &Path) {
+/// go to serve.log, by share id only, to the threads, and as
+/// `shares:changed` to the share's guests.
+pub fn tick(config_dir: &Path, host: &dyn worktrees_api::Host) {
     let store = Shares::at(config_dir);
     if !store.path().exists() {
         return;
     }
     let roots = worktrees_core::registry::read_lenient().roots();
-    match store.reconcile(worktrees_core::sysclock::now_epoch(), &|s| lane_now(&roots, s)) {
-        Ok(changes) => {
-            for c in changes {
-                worktrees_api::log::info(&format!("serve: shares: {c:?}"));
-            }
-        }
+    let now = worktrees_core::sysclock::now_epoch();
+    let before = store.read().map(|f| f.shares).unwrap_or_default();
+    match store.reconcile(now, &|s| lane_now(&roots, s)) {
+        Ok(changes) => after_reconcile(config_dir, host, &before, &changes, now),
         Err(e) => worktrees_api::log::warn(&format!("serve: shares: {e}")),
+    }
+}
+
+/// What a reconcile's changes mean beyond `shares.json`: an ended binding is
+/// a `session_ended` in the thread, a removed lane takes its thread, and
+/// each is `shares:changed` to the guests the share named (`before`, the
+/// file as it was read ahead of the pass).
+pub fn after_reconcile(config_dir: &Path, host: &dyn worktrees_api::Host, before: &[Share], changes: &[Change], now: i64) {
+    use super::sharethread::{changed, rows::named, Kind, Threads};
+    let threads = Threads::at(config_dir);
+    let guests = |id: &str| before.iter().find(|s| s.id == id).map(named).unwrap_or_default();
+    for c in changes {
+        worktrees_api::log::info(&format!("serve: shares: {c:?}"));
+        match c {
+            Change::Ended { share, .. } => {
+                if let Err(e) = threads.event(share, Kind::SessionEnded, None, now) {
+                    worktrees_api::log::warn(&format!("serve: shares: thread of {share}: {e}"));
+                }
+                changed(host, "ended", Some(share), &guests(share), None);
+            }
+            Change::Removed { share } => {
+                if let Err(e) = threads.remove(share) {
+                    worktrees_api::log::warn(&format!("serve: shares: thread of {share}: {e}"));
+                }
+                changed(host, "removed", Some(share), &guests(share), None);
+            }
+            Change::Pruned(_) => {}
+        }
     }
 }
 
@@ -769,10 +798,11 @@ pub fn tick(config_dir: &Path) {
 pub const TICK: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// The check at start and then every [`TICK`], until serve stops.
-pub async fn watch(config_dir: PathBuf) {
+pub async fn watch(config_dir: PathBuf, host: std::sync::Arc<dyn worktrees_api::Host>) {
     loop {
         let d = config_dir.clone();
-        let _ = tokio::task::spawn_blocking(move || tick(&d)).await;
+        let h = host.clone();
+        let _ = tokio::task::spawn_blocking(move || tick(&d, &*h)).await;
         tokio::time::sleep(TICK).await;
     }
 }
@@ -784,6 +814,7 @@ pub async fn watch(config_dir: PathBuf) {
 pub mod rows {
     use super::*;
     use crate::serve::dispatch::Call;
+    use crate::serve::sharethread::{changed, rows::named, Kind, Threads};
 
     fn store(cx: &Call) -> Shares {
         Shares::at(&cx.ctx.config_dir)
@@ -817,30 +848,75 @@ pub mod rows {
 
     // The console's.
 
+    fn threads(cx: &Call) -> Threads {
+        Threads::at(&cx.ctx.config_dir)
+    }
+
+    /// `shares:changed` (§6) for `to` and the console.
+    fn tell(cx: &Call, what: &str, share: Option<&str>, to: &[PrincipalId]) {
+        changed(&*cx.ctx.host, what, share, to, None);
+    }
+
+    /// A thread event that could not be written does not undo the act it
+    /// records: the act is done, and serve.log says what the thread lacks.
+    fn log_thread(share: &str, r: Result<impl Sized, String>) {
+        if let Err(e) = r {
+            worktrees_api::log::warn(&format!("serve: shares: thread of {share}: {e}"));
+        }
+    }
+
     pub fn create(cx: &Call, repo: String, slug: String, guests: Vec<String>) -> Result<Value, String> {
         let guests = guests.iter().map(|g| guest_of(cx, g)).collect::<Result<Vec<_>, _>>()?;
         let place = PlaceId::of(&place_dir(&repo, &slug)).ok_or_else(|| format!("no such place: {slug}"))?;
         let live = bindable(&repo, &slug)?;
-        serde_json::to_value(store(cx).create(&repo, &slug, place, &guests, &live, now())?).map_err(|e| e.to_string())
+        let s = store(cx).create(&repo, &slug, place, &guests, &live, now())?;
+        tell(cx, "shared", Some(&s.id), &named(&s));
+        serde_json::to_value(s).map_err(|e| e.to_string())
     }
 
     pub fn again(cx: &Call, share: String) -> Result<Value, String> {
         let s = store(cx).read()?.shares.into_iter().find(|s| s.id == share).ok_or_else(|| format!("no share {share}"))?;
         let live = bindable(&s.project, &s.slug)?;
-        serde_json::to_value(store(cx).share_again(&share, &live, now())?).map_err(|e| e.to_string())
+        let s = store(cx).share_again(&share, &live, now())?;
+        log_thread(&share, threads(cx).event(&share, Kind::SharedAgain, None, now()));
+        tell(cx, "again", Some(&share), &named(&s));
+        serde_json::to_value(s).map_err(|e| e.to_string())
     }
 
     pub fn allow(cx: &Call, share: String, principal: String) -> Result<bool, String> {
         let p = guest_of(cx, &principal)?;
-        store(cx).allow(&share, &p, now())
+        let new = store(cx).allow(&share, &p, now())?;
+        if new {
+            log_thread(&share, threads(cx).event(&share, Kind::Joined, Some(&p), now()));
+            if let Some(s) = store(cx).read()?.shares.iter().find(|s| s.id == share) {
+                tell(cx, "allowed", Some(&share), &named(s));
+            }
+        }
+        Ok(new)
     }
 
     pub fn remove_guest(cx: &Call, share: String, principal: String) -> Result<bool, String> {
-        store(cx).remove_guest(&share, &PrincipalId::new(principal))
+        let p = PrincipalId::new(principal);
+        let gone = store(cx).remove_guest(&share, &p)?;
+        if gone {
+            log_thread(&share, threads(cx).event(&share, Kind::Removed, Some(&p), now()));
+            let mut to = store(cx).read()?.shares.iter().find(|s| s.id == share).map(named).unwrap_or_default();
+            to.push(p);
+            tell(cx, "removed_guest", Some(&share), &to);
+        }
+        Ok(gone)
     }
 
+    /// Stop sharing: the share and its thread go (§4: there is no other
+    /// delete), and every guest it named hears it.
     pub fn stop(cx: &Call, share: String) -> Result<bool, String> {
-        store(cx).stop(&share)
+        let to = store(cx).read()?.shares.iter().find(|s| s.id == share).map(named).unwrap_or_default();
+        let gone = store(cx).stop(&share)?;
+        if gone {
+            threads(cx).remove(&share)?;
+            tell(cx, "stopped", Some(&share), &to);
+        }
+        Ok(gone)
     }
 
     pub fn hide(cx: &Call, project: String, hidden: bool) -> Result<bool, String> {
@@ -881,7 +957,14 @@ pub mod rows {
         let p = guest_of(cx, &principal)?;
         let revoked = cx.devices.revoke_guest(&p, now())?;
         let shares = store(cx).remove_principal(&p)?;
-        Ok(json!({ "revoked": revoked, "shares": shares }))
+        let f = store(cx).read()?;
+        for id in &shares {
+            log_thread(id, threads(cx).event(id, Kind::Removed, Some(&p), now()));
+            let mut to = f.shares.iter().find(|s| &s.id == id).map(named).unwrap_or_default();
+            to.push(p.clone());
+            tell(cx, "removed_guest", Some(id), &to);
+        }
+        Ok(json!({ "revoked": revoked, "shares": shares.len() }))
     }
 
     // A guest's.
@@ -891,8 +974,10 @@ pub mod rows {
         Ok(json!({ "owner": owner_name(cx), "shares": shares }))
     }
 
+    /// The owner hears an ask (the console, and the guest's own sockets).
     pub fn join(cx: &Call, share: String) -> Result<Value, String> {
         let state = store(cx).join(&share, cx.caller.principal(), now())?;
+        tell(cx, "asked", Some(&share), std::slice::from_ref(cx.caller.principal()));
         Ok(json!({ "state": state }))
     }
 
@@ -906,7 +991,11 @@ pub mod rows {
     pub fn request(cx: &Call, project: String, slug: String, note: Option<String>) -> Result<(), String> {
         let roots = all_roots(cx);
         let resolve = |id: &str| roots.iter().find(|r| project_id(r) == id).cloned();
-        store(cx).request(cx.caller.principal(), &project, &slug, note.as_deref(), now(), &resolve)
+        store(cx).request(cx.caller.principal(), &project, &slug, note.as_deref(), now(), &resolve)?;
+        // The same event for a real, hidden or missing place, as the answer
+        // is the same: it names no request and no place.
+        tell(cx, "request", None, std::slice::from_ref(cx.caller.principal()));
+        Ok(())
     }
 }
 
@@ -1160,6 +1249,9 @@ mod serve_tests {
         world: Fixture,
         bret: Caller,
         eve: Caller,
+        /// Every emit goes through serve's real `Broadcast`, to the sockets
+        /// a test adds (`socket`).
+        clients: Arc<crate::serve::conn::Clients>,
     }
 
     fn guest(devices: &DeviceRegistry, name: &str, key: u8) -> Caller {
@@ -1195,17 +1287,17 @@ mod serve_tests {
             let bret = guest(&devices, "Bret", 1);
             let eve = guest(&devices, "Eve", 2);
             let world = Fixture { roots: vec![s(&a), s(&b)], panes: vec![] };
-            Host { a: s(&a), b: s(&b), top, cfg, devices, world, bret, eve }
+            let clients = Arc::new(crate::serve::conn::Clients::with(
+                devices.clone(),
+                Some(Arc::new(Fixture { roots: world.roots.clone(), panes: vec![] })),
+            ));
+            Host { a: s(&a), b: s(&b), top, cfg, devices, world, bret, eve, clients }
         }
 
         fn call(&self, who: &Caller) -> Call {
             let base = call_as(who.clone(), self.devices.clone());
-            struct Quiet;
-            impl worktrees_api::Host for Quiet {
-                fn emit(&self, _: &str, _: Value) {}
-            }
             Call {
-                ctx: worktrees_api::Ctx::new(self.cfg.clone(), Arc::new(Quiet)),
+                ctx: worktrees_api::Ctx::new(self.cfg.clone(), Arc::new(crate::serve::conn::Broadcast(self.clients.clone()))),
                 devices: self.devices.clone(),
                 world: Some(Arc::new(Fixture { roots: self.world.roots.clone(), panes: vec![] })),
                 ..base
@@ -1473,4 +1565,192 @@ mod serve_tests {
         assert_eq!(h.run(&h.eve, "shares_list", json!({})).unwrap()["owner"], json!("David"));
         let _ = DeviceId::new("unused");
     }
+
+    // ── the thread and `shares:changed` (PR B, §4, §6) ───────────────────────
+
+    type Rx = tokio::sync::mpsc::UnboundedReceiver<tokio_tungstenite::tungstenite::Message>;
+
+    impl Host {
+        /// A socket of `who`'s, joined to serve's client set; declaring
+        /// `shares:changed` unless `declare` is false.
+        fn socket(&self, id: u64, who: &Caller, declare: bool) -> Rx {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            let l = self.clients.add(id, crate::serve::wire::Outbox::unbounded(tx), who.clone());
+            if declare {
+                l.declare(["shares:changed"]);
+            }
+            rx
+        }
+
+        fn shared(&self, guests: &[&Caller]) -> String {
+            self.live("feat", "s-1", 10);
+            let g: Vec<String> = guests.iter().map(|c| Host::principal(c)).collect();
+            let share = self.console("share_create", json!({"repo": self.a, "slug": "feat", "guests": g})).unwrap();
+            share["id"].as_str().unwrap().to_string()
+        }
+    }
+
+    /// The `shares:changed` payloads a socket was sent since last asked.
+    fn heard(rx: &mut Rx) -> Vec<Value> {
+        let mut out = Vec::new();
+        while let Ok(m) = rx.try_recv() {
+            let v: Value = serde_json::from_str(m.to_text().unwrap()).unwrap();
+            assert_eq!(v["event"], json!("shares:changed"), "{v}");
+            out.push(v["payload"].clone());
+        }
+        out
+    }
+
+    fn whats(v: &[Value]) -> Vec<String> {
+        v.iter().map(|p| p["what"].as_str().unwrap().to_string()).collect()
+    }
+
+    /// §8: a guest reads and posts only in the thread of a share that names
+    /// them and has let them in, and not after removal; the console reads
+    /// and posts in any; nobody else does — another guest, or the owner's
+    /// own paired device, which is not the console. `from` is the caller's,
+    /// whatever the request says. Stop sharing takes the thread with it.
+    #[test]
+    fn a_guest_reads_and_posts_only_in_the_threads_of_shares_naming_them() {
+        let h = Host::new("thread");
+        let id = h.shared(&[&h.bret]);
+        let bret = Host::principal(&h.bret);
+        let post = |who: &Caller, cid: &str, text: &str| h.run(who, "thread_post", json!({"share": id, "id": cid, "text": text}));
+        let read = |who: &Caller| h.run(who, "thread_read", json!({"share": id}));
+        // Named but not let in: refused, saying so.
+        assert!(read(&h.bret).unwrap_err().as_str().unwrap().contains("not let you in"));
+        assert!(post(&h.bret, "b1", "hi").is_err());
+        // Eve is not on it: the share reads as missing.
+        assert_eq!(read(&h.eve), Err(json!(res::ERR_NOT_FOUND)));
+        assert_eq!(post(&h.eve, "e1", "hi"), Err(json!(res::ERR_NOT_FOUND)));
+        // The owner's paired phone holds every capability but `guest`, and is
+        // not the console: the thread rows are not its.
+        let phone = Caller::paired(PrincipalId::owner(), DeviceId::new("d_phone"));
+        assert!(h.run(&phone, "thread_read", json!({"share": id})).is_err());
+        h.console("share_allow", json!({"share": id, "principal": bret})).unwrap();
+        // `from` comes from the connection: a `from`, `principal` or `device`
+        // in the request is not read.
+        let e = h.run(&h.bret, "thread_post", json!({"share": id, "id": "b1", "text": "hello", "from": "owner", "principal": "owner", "device": "x"})).unwrap();
+        assert_eq!((e["principal"].as_str(), e["name"].as_str(), e["device_name"].as_str()), (Some(bret.as_str()), Some("Bret"), Some("Bret's MacBook")));
+        assert_eq!(e["seq"], json!(2), "after the joined event: {e}");
+        let o = post(&Caller::console(), "o1", "/not a command, just text").unwrap();
+        assert_eq!((o["principal"].as_str(), o.get("device")), (Some("owner"), None));
+        let page = read(&h.bret).unwrap();
+        let kinds: Vec<&str> = page["entries"].as_array().unwrap().iter().map(|e| e["kind"].as_str().unwrap()).collect();
+        assert_eq!(kinds, ["joined", "post", "post"]);
+        assert_eq!(read(&Caller::console()).unwrap(), page, "the console reads what the guest reads");
+        assert_eq!(h.run(&h.bret, "thread_read", json!({"share": id, "after": 2})).unwrap()["entries"].as_array().unwrap().len(), 1);
+        // Removed: refused on the very next request, and the thread says so.
+        h.console("share_remove_guest", json!({"share": id, "principal": bret})).unwrap();
+        assert_eq!(read(&h.bret), Err(json!(res::ERR_NOT_FOUND)));
+        assert_eq!(post(&h.bret, "b2", "still here?"), Err(json!(res::ERR_NOT_FOUND)));
+        let last = read(&Caller::console()).unwrap();
+        assert_eq!(last["entries"].as_array().unwrap().last().unwrap()["kind"], json!("removed"));
+        // Stop sharing deletes the thread.
+        let file = crate::serve::sharethread::Threads::at(&h.cfg).path(&id).unwrap();
+        assert!(file.exists());
+        h.console("share_stop", json!({"share": id})).unwrap();
+        assert!(!file.exists(), "the thread outlived its share");
+    }
+
+    /// §8: `shares:changed` reaches the console and the sockets of the
+    /// guests the share or request names, on every listed act, through
+    /// serve's real broadcast — never another guest's, never the owner's
+    /// paired device, never a socket that did not declare it — and carries
+    /// ids only.
+    #[test]
+    fn shares_changed_reaches_the_console_and_the_named_guests_only() {
+        let h = Host::new("event");
+        let phone = Caller::paired(PrincipalId::owner(), DeviceId::new("d_phone"));
+        let mut console = h.socket(1, &Caller::console(), true);
+        let mut bret = h.socket(2, &h.bret, true);
+        let mut bret2 = h.socket(3, &h.bret, true);
+        let mut quiet = h.socket(4, &h.bret, false);
+        let mut eve = h.socket(5, &h.eve, true);
+        let mut owner_phone = h.socket(6, &phone, true);
+        let b = Host::principal(&h.bret);
+
+        let id = h.shared(&[&h.bret]);
+        h.run(&h.bret, "share_join", json!({"share": id})).unwrap();
+        h.console("share_allow", json!({"share": id, "principal": b})).unwrap();
+        h.run(&h.bret, "thread_post", json!({"share": id, "id": "p1", "text": "a SECRET-POST"})).unwrap();
+        h.run(&h.bret, "thread_post", json!({"share": id, "id": "p1", "text": "a SECRET-POST"})).unwrap(); // a retry: no event
+        h.live("feat", "s-2", 10);
+        let before = Shares::at(&h.cfg).read().unwrap().shares;
+        let changes = h.poll();
+        assert!(matches!(changes.as_slice(), [Change::Ended { .. }]), "{changes:?}");
+        after_reconcile(&h.cfg, &crate::serve::conn::Broadcast(h.clients.clone()), &before, &changes, NOW);
+        h.console("share_again", json!({"share": id})).unwrap();
+        let pid = project_id(&h.a);
+        h.run(&h.bret, "share_request", json!({"project": pid, "slug": "other", "note": "SECRET-NOTE"})).unwrap();
+        h.console("share_remove_guest", json!({"share": id, "principal": b})).unwrap();
+        h.console("share_stop", json!({"share": id})).unwrap();
+
+        let all = ["shared", "asked", "allowed", "post", "ended", "again", "request", "removed_guest", "stopped"];
+        let c = heard(&mut console);
+        assert_eq!(whats(&c), all);
+        // Bret hears every act while the share names him, his request, and
+        // his removal; the stop after it is no longer his to hear.
+        let his = &all[..all.len() - 1];
+        assert_eq!(whats(&heard(&mut bret)), his);
+        assert_eq!(whats(&heard(&mut bret2)), his, "on every socket of his");
+        assert!(heard(&mut quiet).is_empty(), "a socket that did not declare it");
+        assert!(heard(&mut eve).is_empty(), "another guest hears nothing");
+        assert!(heard(&mut owner_phone).is_empty(), "the owner's paired device is not the console");
+        // Ids only: no `to`, no text, no name, no path.
+        for p in &c {
+            let o = p.as_object().unwrap();
+            assert!(o.keys().all(|k| ["what", "share", "seq"].contains(&k.as_str())), "{p}");
+            let t = p.to_string();
+            for secret in ["SECRET", "Bret", &h.a, &b] {
+                assert!(!t.contains(secret), "{secret} in {p}");
+            }
+        }
+        assert_eq!(c[3]["seq"], json!(2), "a post names its seq (after the joined event)");
+        assert!(c[6].get("share").is_none(), "a request names no share");
+
+        // Eve's share is hers: Bret's sockets hear nothing of it.
+        let e = Host::principal(&h.eve);
+        h.live("other", "s-9", 10);
+        h.console("share_create", json!({"repo": h.a, "slug": "other", "guests": [e]})).unwrap();
+        assert_eq!(whats(&heard(&mut eve)), ["shared"]);
+        assert!(heard(&mut bret).is_empty());
+        assert_eq!(whats(&heard(&mut console)), ["shared"]);
+    }
+
+    /// §8: a removed lane takes its thread on the poll, and the guests hear.
+    #[test]
+    fn a_removed_lane_takes_its_thread() {
+        let h = Host::new("lanethread");
+        let id = h.shared(&[&h.bret]);
+        let mut bret = h.socket(1, &h.bret, true);
+        h.console("share_allow", json!({"share": id, "principal": Host::principal(&h.bret)})).unwrap();
+        h.run(&h.bret, "thread_post", json!({"share": id, "id": "p", "text": "x"})).unwrap();
+        let file = crate::serve::sharethread::Threads::at(&h.cfg).path(&id).unwrap();
+        assert!(file.exists());
+        fs::remove_dir_all(place_dir(&h.a, "feat")).unwrap();
+        let before = Shares::at(&h.cfg).read().unwrap().shares;
+        let changes = h.poll();
+        after_reconcile(&h.cfg, &crate::serve::conn::Broadcast(h.clients.clone()), &before, &changes, NOW);
+        assert!(!file.exists());
+        assert_eq!(whats(&heard(&mut bret)), ["allowed", "post", "removed"]);
+    }
+
+    /// The console reaches exactly the guest rows `CONSOLE_GUEST_ROWS`
+    /// names, and those are guest rows: it is no guest elsewhere.
+    #[test]
+    fn the_console_reaches_only_the_guest_rows_it_is_named_on() {
+        let h = Host::new("consolerows");
+        let grant = authz::effective(&*h.devices, &Caller::console());
+        let reached: Vec<&str> = TABLE
+            .iter()
+            .filter(|r| r.cap == Some(Capability::Guest) && res::admissible(r, &Caller::console(), &grant).is_ok())
+            .map(|r| r.name)
+            .collect();
+        assert_eq!(reached, dispatch::CONSOLE_GUEST_ROWS.to_vec());
+        for n in dispatch::CONSOLE_GUEST_ROWS {
+            assert!(GUEST_ROWS.contains(n), "{n} is not a guest row");
+        }
+    }
 }
+
