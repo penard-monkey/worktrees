@@ -4,7 +4,7 @@ title: Two engineers, two agents, one feature (group chat, v4)
 
 # Proposal v4 — two engineers, two agents, one feature
 
-*Version 4, 2026-11-14. Status: draft for David, nothing built. Follows
+*Version 4.1, 2026-11-14 (evening). Status: draft for David, nothing built. 4.1 revises 4.0 (`6f95de6`, the same day) after David's direction: conversations span projects and workspaces, a collaboration system rather than a chat, and an experiment program on the test VMs before the shape is fixed (§12). Follows
 [v3.1, shared sessions](group-chat.md), which shipped to staging on 2026-11-14
 as PRs #650, #656, #657, #661, #663 and #664 and is going to main behind the
 Group chat beta switch, and takes the two-agent, hand-off and Stop analysis from
@@ -18,14 +18,20 @@ the code wins.*
 proper feature build (like we have here but now it is two engineers). This
 current flow we have is a good first step but we're going to start thinking of
 the better approach." And: "we will likely need to have the messages support
-files and images."
+files and images." Then, after the rehearsal: "I think we should do a room per
+feature like discussed but if we're going to do that should we not be able to
+have the conversation/conversations across projects/workspaces? I feel like
+conversations then become something that are based on topics or ideas … We
+should run some experiments on a lot of different ways we can get a chat
+session working across different sections of the app. Make it a collaboration
+system rather than just chat … the VMs allow us to run 3 potential users."
 
 ---
 
 ## 0. The recommendation, on one page
 
-**Build a room per feature, not a share per session, in four steps that each
-ship on their own.** v3.1 proved the hard part: one person can read another's
+**Build a conversation per topic, not a share per session, and settle where it
+lives by experiment before building it.** v3.1 proved the hard part: one person can read another's
 live agent session over a pinned connection and talk beside it, and the owner's
 *Use these* is a safe, explicit way for a colleague's words to reach an agent.
 What it cannot do is let the second engineer *work*: Bret has no agent in the
@@ -39,7 +45,7 @@ v4 keeps every rule v3 and v2 established, and adds the missing half:
 |---|---|---|
 | **4.1 Fix and finish** | The rehearsal's defects; the note as the first field of *Use these*; a request inbox; push for new turns; files and images in the thread | One PR on main, in the beta |
 | **4.2 What changed** | A read-only diff and file view of the shared place for the guest, under the same warning as the transcript | One PR, in the beta |
-| **4.3 Symmetry** | Bret's own lane, on Bret's Mac, shared back the same way; the thread becomes the room's log and outlives any one share | Two PRs |
+| **4.3 Conversations** | The topic-anchored conversation, placed where §12's experiments say; Bret's own lane shared back the same way | Two PRs, after the experiments |
 | **4.4 Hand-offs** | A card from one engineer to the other's agent, accepted by its owner, delivered through the *Use these* path | v2 §5, scoped to two hosts |
 
 **What stays fixed, from v2 and v3:**
@@ -54,25 +60,27 @@ v4 keeps every rule v3 and v2 established, and adds the missing half:
   the owner's app called.
 - Agent-authored text never triggers anything. No serve-side parser acts on
   text. Software never retries an unknown send. Stop never presses twice.
-- One coordinator per room: the opener's serve. No failover, no migration.
+- One coordinator per conversation: the opener's serve. No failover, no migration.
 
 **What David decides** (my pick in the Answer column; each is a yes/no he can
 flip):
 
 | # | Decision | Answer | Where |
 |---|---|---|---|
-| D1 | The unit of sharing | A **room per feature** that holds shares, the thread and files, instead of a thread per share. A share still binds one lane's session; the room outlives it. | §3 |
-| D2 | Files and images in the thread | **Yes**, in 4.1: images shown inline, files downloadable, both kept on the coordinator under the room, with the chat-image rules applied to anything drawn. | §4 |
+| D1 | The unit of sharing | A **conversation per topic** (4.0 said "room per feature"): it holds members, the log, files and any number of shares, from any project or workspace on either host. A share still binds one lane's session; the conversation outlives every one of them and is not tied to a place. | §3 |
+| D2 | Files and images in the thread | **Yes**, in 4.1: images shown inline, files downloadable, both kept on the coordinator under the conversation, with the chat-image rules applied to anything drawn. | §4 |
 | D3 | What the agent gets from an attachment | Only through *Use these*: the file is **copied** into the place's attachments folder beside the bundle, named in the frame, and the agent reads it as material. Never a path on the guest's Mac, never a URL. | §4.3 |
 | D4 | Diffs and files for the guest | **Yes**, in 4.2, as a per-share switch that is **off** by default and carries v3's warning: "Bret can read every file and every change in this place." Read-only, the place's own tree only, no other place, no host paths. | §5 |
 | D5 | The note in *Use these* | **Required** unless the owner unticks "send without a note". The rehearsal showed that without a note the agent reads the comments and does nothing. | §1, §6 |
 | D6 | Requests and asks | A **request inbox** in the owner's corner, like join asks today, for every share request wherever it lands. | §6 |
 | D7 | Liveness | The guest's transcript updates on a **push** when the host's poll sees a new turn, not on a 10 s timer. The host already indexes transcripts per tick. | §6 |
 | D8 | Symmetry | Bret's host runs the same serve with remote access on; David pairs to it as a guest; Bret shares his lane. Two pairings, no third kind of principal. | §7 |
-| D9 | Where the room lives | On the **opener's** serve, which sequences the log and keeps the files. The other host keeps a copy of what it was sent. When the opener is off, the room is read-only. | §7 |
+| D9 | Where a conversation's data lives | On the **opener's** serve, which sequences the log and keeps the files. The other hosts keep a copy of what they were sent. When the opener is off, the conversation is read-only. | §7 |
 | D10 | Hand-offs | v2 §5's card and states, scoped to two hosts, in 4.4 and only after 4.3 is in use. Accept is the target owner's act and goes through *Use these*. | §8 |
 | D11 | Stop and the judge | Stop stays the owner's button; a guest gets "Ask David to stop". No judge. Unchanged from v2 §6 and §7.3. | §8 |
-| D12 | Out of v4 | More than two people in the UI, phone, OS notifications, DMs, a Slack mirror, Kimi and pi readers, peer instruct, any transcript filter. | §10 |
+| D12 | Out of v4 | Phone, OS notifications, DMs, a Slack mirror, Kimi and pi readers, peer instruct, any transcript filter. (Three people in the UI is **in**: the experiments run three.) | §10 |
+| D13 | Where a conversation shows in the app | **Settled by the experiments of §12**, not by this document. The candidates are listed there; 4.1 and 4.2 build the parts every candidate needs. | §12 |
+| D14 | How the experiments are run | On the three test VMs, with scripted engineers driven by agents, every variant recorded and scored on one rubric (§12.4). The winner becomes 4.3. | §12 |
 
 ---
 
@@ -107,7 +115,7 @@ run with Bret.
 v2 bet that two people's independent local agents coordinate better through a
 shared room than through chat and two windows. v3 bet, smaller, that one
 person watching and commenting on the other's agent is useful. v4 bets that
-**the two bets are one path**: the room v3 built is the right room, and what it
+**the two bets are one path**: the conversation v3 built is the right one, and what it
 lacks is the second engineer's own agent, the artefacts, and a way to hand work
 across. Each step of §0's table can stop the path if its proof fails.
 
@@ -118,34 +126,67 @@ holds unchanged, and nothing here reopens it.
 
 ---
 
-## 3. A room per feature (D1)
+## 3. A conversation per topic (D1, D13)
 
 Today a share is attached to a lane and carries its own thread
 (`shares.rs`, `sharethread.rs`, **read**). Bret's view is "David's lane, this
-session"; when the lane is removed the thread goes with it. For one session that
-is right. For a feature that runs over days, two lanes and both people's agents,
-it is the wrong unit: the conversation about the feature is the thing that
-lasts.
+session"; when the lane is removed the thread goes with it. For one session
+that is right. For the way two engineers actually work it is the wrong unit
+three times over: a feature runs across lanes; a question ("should status get
+`--json`?") runs across projects and workspaces; and the conversation about it
+is the thing that lasts, while sessions, places and even branches come and go.
 
-**Contract:** a room is `{ id, name, opener, members, shares[], files[], log }`.
+David's framing, which 4.1 adopts: **a conversation is a topic**, and a topic is
+close to what an idea already is in this app (the Ideas beta: a markdown file
+with its own conversations with an agent, related to other ideas, with
+versions). A conversation here is a topic with **people** in it, with the
+things they are looking at attached.
+
+**Contract:** a conversation is
+`{ id, title, opener, members, refs[], shares[], files[], log }`.
 
 - The **log** is today's thread, lifted one level: one durable sequence per
-  room, idempotent posts, events for every share added, joined, ended, shared
-  again, stopped. Today's `thread_read`/`thread_post` keep their shape with
-  `room` in place of `share`; a share's events name the share they are about.
+  conversation, idempotent posts, events for every share added, joined, ended,
+  shared again, stopped, every ref added or removed. `thread_read` and
+  `thread_post` keep their shape with `conversation` in place of `share`.
+- **Refs** are what the conversation is about: places (by project id and slug),
+  workspaces, ideas, on either host. A ref grants nothing; it says where the
+  conversation shows up and what a share can be added from. A ref to a place on
+  Bret's host is a ref Bret's app added.
 - **Shares** are v3's shares unchanged (lane-bound, session-bound, ended
-  bindings kept) and now belong to a room. A room can hold David's lane and
-  Bret's lane at once (§7). Stopping a share leaves the log.
-- **Files** are the room's attachments (§4).
-- **Members** are v3's guest principals plus the opener. Two in v4.
+  bindings kept), each owned by the host that holds it, each listed in the
+  conversation. A conversation can hold David's lane in project A and Bret's
+  lane in project B at once (§7).
+- **Files** are the conversation's attachments (§4).
+- **Members** are v3's guest principals plus the opener. Two or three in v4.
+- **Where it lives** is D13: the opener's serve sequences the log and keeps the
+  files (D9); the other hosts keep what they were sent. In the app it shows in
+  more than one place, and which places is what §12 settles: a conversation
+  with a ref to a place is visible from that place; one with a ref to a
+  workspace is visible from that workspace; every conversation a person is in
+  is visible from one list, wherever that list ends up living.
 - **Removing a lane** removes its shares and nothing else. **Deleting the
-  room** deletes the log and the files, on the opener's host, after a
+  conversation** deletes the log and the files on the opener's host, after a
   confirmation that says what is lost.
+
+**What "collaboration system rather than chat" adds, as contracts, not UI:**
+
+- Every act in a conversation is an **event with an author and a target**:
+  a post, a file, a share, a request, a hand-off (§8), a ref. The log is the
+  record of the work's conversation, and it reads back as one.
+- A conversation has **state a person can act on**: which shares are live,
+  which requests are open, which hand-offs wait on whom, what was last used by
+  an agent. The Use these count ("3 selected for the agent") is the first such
+  state; the experiments decide which others earn a place on screen.
+- The agent is a **participant that only its owner can address**, and whose
+  replies reach the others only through the owner's share. That rule does not
+  move whatever the surface looks like.
 
 The v3 data model allows this: a share already carries guests as a list, the
 thread store is keyed by an id, and the events are typed (`Kind`, **read**).
-The migration is a `room` field on `Share` and a thread file keyed by room,
-with today's one-share rooms created on first read from each existing share.
+The migration is a `conversation` field on `Share`, refs as a list of ids, and
+a thread file keyed by conversation, with today's one-share conversations
+created on first read from each existing share.
 
 ---
 
@@ -161,13 +202,13 @@ Mac arrives as an em dash. v4 adds attachments to posts and fixes the composer.
 |---|---|---|
 | Who may attach | Any member, on a share they are let into | Same gate as a post |
 | Per file | 10 MiB | A screenshot, a log, a patch. Not a build artefact. |
-| Per room | 200 MiB, oldest sweepable by the opener | `attach`'s 100 MB precedent, doubled for two people |
+| Per conversation | 200 MiB, oldest sweepable by the opener | `attach`'s 100 MB precedent, doubled for two people |
 | Types shown inline | `IMAGE_TYPES` (png, jpg, gif, webp, bmp, svg) through `check_image`: the 40 MP cap, header sniffed, SVG with DOCTYPE or ENTITY refused | The chat-image rules, `safepath`/`imgsrc` (**read**) |
 | Types kept as files | Anything else, by extension and sniff; downloaded, never opened by the app; executables and archives refused | No surface runs a guest's file |
 | Names | Sanitised as `attach::store` does (**read**); the original name is display text | A name is not a path |
-| Where | Under the room on the opener's host: `<config_dir>/rooms/<id>/files/<random>`, 0600, swept with the room | One store, the host's |
-| Transport | A new guest row, `thread_attach {room, id, name, bytes}` under the 16 MiB frame cap; the post that references it carries `files: [id]` | Through the guest connection, which sends only guest rows (**read**, `guestdoor.ts`) |
-| Reading | `thread_file {room, file}` answers bytes, to members only, with an etag so a picture is fetched once | `ImageView`'s cache by etag (**read**) |
+| Where | Under the conversation on the opener's host: `<config_dir>/conversations/<id>/files/<random>`, 0600, swept with it | One store, the host's |
+| Transport | A new guest row, `thread_attach {conversation, id, name, bytes}` under the 16 MiB frame cap; the post that references it carries `files: [id]` | Through the guest connection, which sends only guest rows (**read**, `guestdoor.ts`) |
+| Reading | `thread_file {conversation, file}` answers bytes, to members only, with an etag so a picture is fetched once | `ImageView`'s cache by etag (**read**) |
 | Audit | Attach and read are `guest` acts: name length, bytes and hash, never content | As posts |
 
 ### 4.2 The composer
@@ -260,30 +301,30 @@ all measured in the real app with the browser check PR E added
 The second engineer's agent runs on the second engineer's Mac. Nothing in the
 transport makes that special: Bret's Mac runs the same app, its serve has remote
 access on, David pairs to it as a guest with an invite, and Bret shares his lane
-into the same room.
+into the same conversation.
 
-**What a room needs that a share did not:**
+**What a conversation needs that a share did not:**
 
-- **Two hosts, one log.** The room's log lives on the opener's serve (D9). A
+- **Two hosts, one log.** The conversation's log lives on the opener's serve (D9). A
   post Bret makes travels over his guest connection to David's serve as today.
-  A share Bret *opens* on his own host is announced to the room by Bret's app
+  A share Bret *opens* on his own host is announced to the conversation by Bret's app
   through the same connection: an event `share_added {host, share}` carrying
   ids and the host's pin fingerprint, so David's app knows which host to read
   that share from. Reading Bret's share goes over David's guest connection
-  **to Bret's host**: shares are read from the host that holds them, the room
-  is only the index.
+  **to Bret's host**: shares are read from the host that holds them, the
+  conversation is only the index.
 - **Two guest connections in one window.** v3's guest door already keeps one
   socket per guest host (`remote.rs`, **read**), so a window that is the owner
   of its own engine, a guest of David's and a guest of Bret's is three sockets
   it already knows how to hold.
 - **Who may see what.** Each share keeps its own owner, its own guests and its
-  own switches. The room shows a share's row to every member; opening it asks to
-  join, and the share's owner allows. Membership of the room grants nothing on
+  own switches. The conversation shows a share's row to every member; opening it asks to
+  join, and the share's owner allows. Membership of a conversation grants nothing on
   any host.
-- **Naming.** A room's share is shown as `<owner's name> · <slug>`; a lane slug
+- **Naming.** A conversation's share is shown as `<owner's name> · <slug>`; a lane slug
   alone names nothing (v2 §4).
 
-**When the opener is off**, the room is read-only: no posts, no new shares,
+**When the opener is off**, the conversation is read-only: no posts, no new shares,
 and the last page of the log stays on screen ("David's host is offline" is
 already the words). Bret's share on Bret's host stays readable by David, because
 that read never touched the opener. **No failover** (v2 §8.1).
@@ -298,13 +339,13 @@ and the only way was to write it in the thread and wait for David to use it. A
 hand-off makes that explicit and bounded, and it is v2 §5 with two hosts:
 
 - A member writes a **card** aimed at a share's agent: one request line, the
-  posts and files it should carry, an expiry (30 min to start). It is a room
+  posts and files it should carry, an expiry (30 min to start). It is a conversation
   event in state `requested`, executes nothing, and shows on the owner's corner
   like a join ask.
 - The owner's **accept** is *Use these* with the card's selection preloaded and
   the request line as the note. The frame says `request from Bret, accepted by
   David, hand-off <id>`. The states and receipts are v2 §5.2's, written to the
-  room log; `observed` comes from the transcript as it does for the owner's
+  conversation's log; `observed` comes from the transcript as it does for the owner's
   own sends.
 - Nothing new types into an agent. The journal-before-paste rule and "unknown
   is never retried" hold because the path is the owner's existing one.
@@ -321,17 +362,17 @@ hand-off makes that explicit and bounded, and it is v2 §5 with two hosts:
 | **4.1a** | The rehearsal's fixes: Ask form, offline duplicate, smart substitutions off, the note first, the request inbox, push for turns | The two-VM rehearsal again, scripted (`scenario.sh` in the parallels cache), every step on screen on both Macs |
 | **4.1b** | Attachments: `thread_attach`/`thread_file`, the composer's paste and drop, inline images, *Use these* copying files into the bundle | A screenshot and a patch from Bret reach Claude as files; an SVG with an entity is refused; a 11 MiB file is refused with the count; a guest without the share is refused |
 | **4.2** | `shared_diff`/`shared_file`, the switch, the Changes tab | Bret reads the diff of the file Codex wrote in the rehearsal; a path with `..`, a link out, and `(main)`'s `.worktrees/` are refused in words; the switch off refuses both rows |
-| **4.3a** | Rooms: the `room` field, the log keyed by room, the migration of existing shares, the events | Existing shares read unchanged after the upgrade; a room with two shares keeps one log |
-| **4.3b** | Symmetry: `share_added`, reading a share from the host that holds it, the room's share list across hosts | The rehearsal with the VMs swapped: Bret's VM shares a lane into David's room; David reads it over his guest connection to Bret's VM while David's own lane is shared the other way |
+| **4.3a** | Conversations: the `conversation` field, refs, the log keyed by conversation, the migration of existing shares, the events; placed in the app where §12's winning variant puts it | Existing shares read unchanged after the upgrade; a conversation with two shares from two projects keeps one log; the winning variant's own proof from §12 |
+| **4.3b** | Symmetry: `share_added`, reading a share from the host that holds it, the conversation's share list across hosts | The rehearsal with the VMs swapped: Bret's VM shares a lane into David's conversation; David reads it over his guest connection to Bret's VM while David's own lane is shared the other way |
 | **4.4** | Hand-off cards, accept through *Use these*, receipts, turn-bound Stop | v2 §10.3's list: kill-at-every-step journal test, replayed history executes nothing, no agent-authored event makes a card, a stale incarnation refuses with no key sent, one lane end to end on two real Macs |
 
 **Tests that must exist, each shown red first:** a guest calling any
 non-guest row is refused, generated from the table (exists; extended to the new
-rows); an attachment outside the room's store is unreachable by any id; a file
+rows); an attachment outside the conversation's store is unreachable by any id; a file
 named with a path is stored under a random name and listed by its display name;
 `shared_file` on a link out of the place refuses with the same words as
 `read_place_image`; `shared_diff` with a guest-supplied `base` that is not a
-commit the owner listed is refused before git runs; the room's log keeps its
+commit the owner listed is refused before git runs; the conversation's log keeps its
 order across a restart; a turn push reaches only the share's guests; the note
 prompt appears only with an empty note; a request appears in the corner within
 one poll.
@@ -340,8 +381,7 @@ one poll.
 
 ## 10. Out of v4, and should not be built (D12)
 
-**Out until a result asks:** more than two members in the UI (the data model
-allows them); phone and phone push; OS notifications; DMs; a Slack mirror; Kimi
+**Out until a result asks:** phone and phone push; OS notifications; DMs; a Slack mirror; Kimi
 and pi readers; peer instruct (v2 §2.3's preconditions are real security work);
 a guest answering prompts or stopping turns; failover or host migration; any
 transport but the pinned one; editing from the guest's side.
@@ -365,8 +405,8 @@ not on that socket.
 - Every file a guest sends is stored under a random name on the opener's host,
   shown by display name, never executed, and copied into a place only by the
   owner's *Use these*.
-- A guest reads a share from the host that owns it, and the room grants nothing
-  on any host.
+- A guest reads a share from the host that owns it, and a conversation grants
+  nothing on any host.
 - The log's order survives restarts, posts are idempotent, and replay executes
   nothing.
 - Unknown sends are never retried by software; Stop never presses twice.
@@ -378,7 +418,117 @@ not on that socket.
 | Does a note-first *Use these* get used, or does David keep typing to the agent himself? | 4.1 in use for a week, counted in the log |
 | Are images in the thread mostly screenshots of the app, and would a "share this screen" act beat them? | 4.1b in use |
 | Is a diff enough, or does Bret want to open the file in his editor? | 4.2 in use |
-| Does the opener's host being off block the feature too often? | 4.3 in use; the answer decides whether a room needs a second host |
+| Does the opener's host being off block the feature too often? | 4.3 in use; the answer decides whether a conversation needs a second host |
 | Do hand-offs get written, or does the thread plus *Use these* cover it? | 4.3 in use before 4.4 is started |
 | What does a 10 MiB image cost on the guest's first read over Tailscale? | Measured in 4.1b |
 | Which WebKit attribute turns smart dashes off in a textarea, and does it hold in the system WKWebView? | Measured in the VM before 4.1a closes |
+
+---
+
+## 12. The experiment program (D13, D14)
+
+Where a conversation lives in the app is the one question this document
+refuses to answer from a desk. The rehearsal of 2026-11-14 showed how much a
+real drive finds that reading cannot (§1), and David's ask is to try "a lot of
+different ways we can get a chat session working across different sections of
+the app" and score them. The three test Macs make that cheap: an owner, a
+reviewer and a third engineer, each driven by a script, each screen recorded.
+
+### 12.1 The variants
+
+Each variant is one answer to "where is the conversation, and what does each
+person see first". They share one log, one data model (§3) and one set of
+rows; only the surface differs, so a variant is mostly frontend work and the
+host rows of 4.1 and 4.2 serve all of them.
+
+| # | Variant | The conversation is | First thing a member sees | What it bets |
+|---|---|---|---|---|
+| V1 | **Beside the session** (shipped, v3.1) | A thread on one share | The owner's lane with a thread panel; the guest's read-only view | Reading the agent is the centre of the work |
+| V2 | **On the workspace** | A tab on a workspace, with shares added from any of its projects | The workspace page: the conversations about it, each with its live shares | People think in workspaces, and a feature is a workspace's business |
+| V3 | **As an idea** | An idea in the Ideas window with people in it: the idea's text is the brief, the conversation is beside it, shares attach to it | The Ideas window, the idea open, the people and their shares listed | A conversation is a document first; the text is what the agent gets |
+| V4 | **A Conversations list in the rail** | A standalone list across every project and host, each entry a topic with refs; opening one shows the log and the attached shares side by side | A list with badges, like an inbox | People want one place to find every conversation, whatever it is about |
+| V5 | **In the chat, by reference** | The owner's own chat view gains a member strip; a `@place` or `@idea` typed in the thread pulls that share or idea inline | The place's chat, with the thread folded in as a second column and refs as chips | Nobody wants a new surface; the chat they have should grow |
+| V6 | **Topic-first, place-second** | V4's list as the home, where a conversation can have NO ref and gains them as work starts; a share added later is a ref of its own | A blank conversation and a composer | Conversations start before places exist, and the app should not demand a place |
+
+V1 exists. V2 and V3 reuse surfaces that exist (the workspace page, the Ideas
+window). V4 and V6 share one list. V5 is the least new code and the most
+crowded screen. Each is built as a **mock first** in the design harness
+(`pnpm dev:mock`, where every variant can be a route on the same data), then
+the two or three that survive the mock get the real build on the VMs.
+
+### 12.2 The people
+
+Three scripted engineers, one per VM, each an agent with a persona and a
+budget of acts, driving the real app through the same helper the rehearsal
+used (`vm.sh`: clicks, keys, screenshots) and the CLI where a click is
+unnecessary (`worktrees remote call`, `worktrees serve call`):
+
+| Person | VM | Role in every run | Drives |
+|---|---|---|---|
+| **Dana** (owner) | `macOS` | Owns the feature's lane, runs the agent, decides what the agent gets | Codex or Claude in the lane, the share, Use these, replies in the conversation |
+| **Bret** (reviewer) | `macOS-guest` | Reads, asks, comments, sends a screenshot and a patch, asks for a diff | The guest's UI only |
+| **Cy** (second engineer) | `macOS-guest2`, or a Linux VM | Has his own lane on his own host in another project of the same workspace, shares it back, hands a request to Dana's agent | Owner on his host, guest on Dana's |
+
+**Measured 2026-11-14:** Apple's virtualization runs at most **two macOS VMs at
+once** ("The number of virtual machines exceeds the limit" on the third's
+start, with `macOS-guest2` cloned and ready). So three people means either a
+Linux VM for Cy, running the AppImage (which also tests the Linux app for
+real), or Cy's acts run as scripted CLI calls from a third config dir on one of
+the Macs while the two macOS VMs carry the two screens that are watched. The
+Linux VM is the better test and the first thing to try.
+
+The engineers are **agents with a script, not a model improvising**: each run
+is a fixed sequence of intents ("Bret: ask why the exit code is 2", "Cy: share
+your lane", "Dana: use Bret's last two comments with the note 'fold in'") so
+two variants are compared on the same work. A Claude in `-p` mode writes the
+*wording* of each intent from the live transcript it is shown, so the
+comments read like a person's and differ between runs, but the acts and their
+order do not. The transcript it is shown is the shared session's, read through
+the guest rows, so the scripted person never sees more than the real one would.
+
+### 12.3 The task
+
+One real task per run, small enough to finish in twenty minutes and large
+enough to need two people: the rehearsal's (`--json` for `worktrees status`,
+in a docs plan, then a stub, then a test) is the first. Each run is the same
+task on a fresh snapshot of the three VMs (`off-ready` and its clones), so
+nothing carries over.
+
+### 12.4 The rubric
+
+Every run produces the three hosts' serve logs and audit logs, every
+conversation's log, and a screenshot of each VM every five seconds plus one
+at every intent. The score is read from those, not from impressions:
+
+| Measure | Read from | Why it matters |
+|---|---|---|
+| **Comment to agent action** | Thread seq time to the `shared_with_agent` event, then to the agent's next turn in the transcript | The whole point: how fast a colleague's words reach the work |
+| **Notes used** | How many Use these sends carried a note, and how many agent turns changed a file after one | The rehearsal's main finding, measured per variant |
+| **Blind spots** | Intents the reviewer could not complete ("read the diff", "see the file") | What the surface hides |
+| **Lost attention** | Toasts and badges that were on screen but never acted on within two intents; requests never answered | What the surface fails to surface |
+| **Acts per outcome** | Clicks and keys between an intent and its completion, from the driver's log | Friction |
+| **Wrong place** | Times a person opened something that was not the conversation they needed | The cost of the surface's location |
+| **Errors** | Refusals, offline banners, failed sends, anything in the logs at `warn` or above | Robustness, per variant |
+| **Recovery** | A host reboot mid-run: seconds until each person is back where they were | The reboot test, kept |
+
+The driver writes one JSON record per run; a small script renders the table.
+Two runs per variant per task at least, because the wording differs.
+
+### 12.5 What the experiments do not decide
+
+They do not decide the security model (§2 of v2, §2 of v3 and §11 here stand
+whatever the surface), the transport, or whether agents may talk to agents
+(no). They decide **where** people meet the conversation and **what they see
+first**, and from that, 4.3's build.
+
+### 12.6 Order
+
+1. The 4.1 defects and the files rows (§4), because every variant needs them.
+2. The driver: three VMs from snapshots, the persona scripts, the screenshot
+   cadence, the rubric reader. Proved on V1, which exists, so the first table
+   has one row before any new surface is built.
+3. Mocks of V2 to V6 in the design harness, reviewed with David, two or three
+   chosen.
+4. The chosen variants built behind the beta switch as routes, run, scored.
+5. 4.3 built as the winner, with its proof being the same run.
+
