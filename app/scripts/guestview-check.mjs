@@ -152,6 +152,20 @@ const seqs = (ts) => ts.map((t) => `${t.seq}:${t.user}`);
   const lists = { shares: [{ project: "worktrees", id: "1" }, { project: "garden", id: "2" }], projects: [{ name: "worktrees", id: "w", places: [] }, { name: "garden", id: "g", places: [] }] };
   expect("a share goes under the local project of its name", R.placed(lists, "worktrees", ["worktrees"]).shares.map((x) => x.id), ["1"]);
   expect("…and everything matching no local project under Shared with me", R.placed(lists, null, ["worktrees"]).projects.map((x) => x.name), ["garden"]);
+  // Offline (the 2026-11-14 rehearsal): a host listed under its local
+  // project AND as an empty *Shared with me › David's Places · offline*.
+  // Its empty status group goes where its rows went: under the local project
+  // it matched, by the lists it holds or, before any read this run, by the
+  // project names it matched last time (`known`).
+  const held = { ...lists, projects: [lists.projects[0]], shares: [lists.shares[0]] };
+  check(R.placed(held, "worktrees", ["worktrees"]).status === true, "an offline host that matched a local project keeps its status there");
+  check(R.placed(held, null, ["worktrees"]).status === false, "…and not as an empty group under Shared with me too");
+  const cold = { shares: null, projects: null, known: ["worktrees"] };
+  check(R.placed(cold, "worktrees", ["worktrees"]).status === true && R.placed(cold, null, ["worktrees"]).status === false, "a host never read this run stays where its known names put it");
+  const never = { shares: null, projects: null };
+  check(R.placed(never, null, ["worktrees"]).status === true && R.placed(never, "worktrees", ["worktrees"]).status === false, "a host with no names at all is under Shared with me");
+  check(R.placed(lists, null, ["worktrees"]).status === false, "a host that matched a local project has no status group of its own under Shared with me");
+  check(R.placed(lists, null, ["elsewhere"]).status === true, "…while one that matched none has it there");
   expect("an invited row says opening asks to join", R.shareWords({ state: "invited", binding: null }, "David").words, "Open to ask to join");
 }
 

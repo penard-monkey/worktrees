@@ -12,7 +12,7 @@ import { presetDefaults } from "../presets";
 import { Page, Sec, useSheet } from "./kit";
 
 export function RemotePage() {
-  const { onReport, onFail, mode, goto, snap } = useSheet();
+  const { onReport, onFail, mode, goto, snap, settings, onChange } = useSheet();
   const r = useRemote();
   const listenerProblem = r.status?.state === "unreadable" || r.status?.state === "error" || r.status?.state === "paused"
     || r.alerts.some((a) => a.cat === "remote");
@@ -29,6 +29,16 @@ export function RemotePage() {
     </Sec>
     <Sec id="guests">
       <GuestsSection onRemote={() => goto("remote", "remote-access")} />
+      {/* *Use these*' ask before a send with no note, and the way back from
+          its "Don't ask again" (this window's own setting). */}
+      <section className="setting">
+        <label className="tier-toggle setting-check">
+          <input type="checkbox" checked={settings.use_these_ask_note} data-testid="use-these-ask-setting"
+            onChange={(e) => onChange({ use_these_ask_note: e.currentTarget.checked })} />
+          Ask before sending a guest’s comments to the agent with no note
+        </label>
+        <div className="hint">The note is what the agent is asked to do; without one it only reads the comments.</div>
+      </section>
     </Sec>
   </Page>;
 }

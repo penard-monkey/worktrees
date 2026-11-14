@@ -42,4 +42,8 @@
 .usethese-preview { margin: 0; max-height: 14em; overflow: auto; font-family: var(--font-mono); font-size: var(--fs-micro); white-space: pre-wrap; overflow-wrap: anywhere; background: var(--bg-input); border: 1px solid var(--line); border-radius: var(--r-sm, 4px); padding: var(--s2); color: var(--txt); }
 .usethese-label { font-weight: var(--fw-med); color: var(--txt-hi); }
 .usethese-words { color: var(--txt-hi); }
+/* The ask before a send with no note: a tint and words in text tokens. */
+.usethese-ask { display: flex; flex-direction: column; gap: var(--s1); padding: var(--s2); border-radius: var(--r-sm, 4px); background: color-mix(in srgb, var(--warn) 12%, var(--bg-panel)); }
+.usethese-ask .grow { color: var(--txt-hi); }
+.usethese-never { display: inline-flex; align-items: center; gap: var(--s1); color: var(--txt-dim); cursor: pointer; }
 .usethese-words.bad { padding: var(--s1) var(--s2); background: color-mix(in srgb, var(--danger) 14%, var(--bg-panel)); border-radius: var(--r-sm, 4px); }

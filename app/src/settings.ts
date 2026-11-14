@@ -470,6 +470,10 @@ export type Settings = {
   // guest, the thread, and the guest's side). Off by default; read ONLY
   // through `beta.ts` (`groupChatBeta`). The engine's rows are never gated.
   beta_group_chat: boolean;
+  // Group chat's *Use these*: ask once before sending comments with no note
+  // (the note is the instruction; without one Codex answered "the plan is
+  // unchanged" in the 2026-11-14 rehearsal). False after "Don't ask again".
+  use_these_ask_note: boolean;
   hidden_tiers: string[]; // lifecycle tiers hidden in the Places tree (active/idle/dormant)
   sort_mode: "recent" | "alpha" | "manual";
   sort_dir: "asc" | "desc";
@@ -624,6 +628,7 @@ export const DEFAULTS: Settings = {
   ws_collapsed: {},
   beta_ideas: false,
   beta_group_chat: false,
+  use_these_ask_note: true,
   hidden_tiers: [],
   sort_mode: "recent",
   sort_dir: "desc",
@@ -979,6 +984,7 @@ export async function loadSettings(): Promise<Settings> {
     if (!s.ws_collapsed || typeof s.ws_collapsed !== "object") s.ws_collapsed = {};
     if (s.beta_ideas !== true) s.beta_ideas = false;
     if (s.beta_group_chat !== true) s.beta_group_chat = false;
+    if (s.use_these_ask_note !== false) s.use_these_ask_note = true;
     if (!isHarness(s.default_provider)) s.default_provider = HARNESSES[0];
     // A tab that no longer exists must land on Files, globally AND per place.
     // Without this, `"automations"` (the tab removed after 0.40.1) persisted in

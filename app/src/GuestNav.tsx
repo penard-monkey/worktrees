@@ -15,6 +15,7 @@
 import { useState } from "react";
 import { dismissToast, openShare, requestShare, useGuests, type GuestHostView, type GuestProject, type GuestShare } from "./guest";
 import { placed, shareWords } from "./guestview";
+import { PLAIN_TEXT } from "./thread";
 import "./GuestSession.css";
 
 /** `shares::NOTE_MAX`: a request's note, in bytes. */
@@ -72,17 +73,23 @@ function NameRow({ hv, project, slug, title }: { hv: GuestHostView; project: Gue
         ? <span className="guest-asked" data-testid="guest-asked-mark">Asked</span>
         : <button className="guest-ask-btn" data-testid="guest-ask" disabled={hv.link.kind !== "up"} title={`Ask ${hv.owner} to share this session with you`} onClick={(e) => { e.stopPropagation(); setAsking(!asking); }}>Ask</button>}
       {asking && !asked && (
-        <div className="guest-askform" onClick={(e) => e.stopPropagation()}>
+        // A real form, so the button and Enter are one submit. It spans the
+        // row's grid (`.guest-askform`): as the row's fourth child it fell
+        // into the 14px dot column, one word per line.
+        <form className="guest-askform" data-testid="guest-askform" onClick={(e) => e.stopPropagation()}
+          ref={(f) => { if (f && !f.dataset.shown) { f.dataset.shown = "1"; f.scrollIntoView({ block: "nearest" }); } }}
+          onSubmit={(e) => { e.preventDefault(); if (!over && !busy) void send(); }}>
           <div className="hint">Ask {hv.owner} to share {title || slug}. It grants nothing: {hv.owner} shares it, or not.</div>
-          <input type="text" value={note} placeholder="A note (optional)" aria-label="A note for the ask" maxLength={NOTE_MAX * 2}
-            onChange={(e) => setNote(e.currentTarget.value)} onKeyDown={(e) => { if (e.key === "Enter" && !over && !busy) void send(); }} />
+          <input type="text" value={note} placeholder="A note (optional)" aria-label="A note for the ask" maxLength={NOTE_MAX * 2} autoFocus {...PLAIN_TEXT}
+            onChange={(e) => setNote(e.currentTarget.value)} />
           <div className="ver-actions">
-            <button className="ctrl sm" data-testid="guest-ask-send" disabled={busy || over} onClick={() => void send()}>Ask {hv.owner} to share</button>
-            <button className="ctrl sm" onClick={() => setAsking(false)}>Cancel</button>
+            <button type="submit" className="ctrl sm" data-testid="guest-ask-send" disabled={busy || over || hv.link.kind !== "up"}>Ask {hv.owner} to share</button>
+            <button type="button" className="ctrl sm" onClick={() => setAsking(false)}>Cancel</button>
           </div>
+          {hv.link.kind !== "up" && <div className="hint">{hv.owner}’s host is not connected; the ask goes once it is.</div>}
           {over && <div className="hint">The note is {bytes(note)} bytes; at most {NOTE_MAX}.</div>}
           {err && <div className="hint" role="alert">{err}</div>}
-        </div>
+        </form>
       )}
     </li>
   );
@@ -125,7 +132,7 @@ export function GuestUnder({ projectName, localNames }: { projectName: string; l
     <>
       {g.hosts.map((hv) => {
         const p = placed(hv, projectName, localNames);
-        if (!p.shares.length && !p.projects.length) return null;
+        if (!p.shares.length && !p.projects.length && !(p.status && hv.link.kind !== "up")) return null;
         return <HostGroup key={hv.host.id} hv={hv} shares={p.shares} projects={p.projects} heading={`${hv.owner}’s Places`} openShareId={g.open?.host === hv.host.id ? g.open.share : null} />;
       })}
     </>
@@ -136,8 +143,11 @@ export function GuestUnder({ projectName, localNames }: { projectName: string; l
 export function SharedWithMe({ localNames }: { localNames: readonly string[] }) {
   const g = useGuests();
   if (!g.hosts.length) return null;
-  const groups = g.hosts.map((hv) => ({ hv, ...placed(hv, null, localNames) }));
-  if (!groups.some((x) => x.shares.length || x.projects.length || x.hv.link.kind !== "up")) return null;
+  // A host with no rows here shows its standing here only when this is where
+  // its rows go (`placed`'s status): offline, it is not listed twice.
+  const groups = g.hosts.map((hv) => ({ hv, ...placed(hv, null, localNames) }))
+    .filter((x) => x.shares.length || x.projects.length || (x.status && x.hv.link.kind !== "up"));
+  if (!groups.length) return null;
   return (
     <div className="project guest-project" data-testid="shared-with-me">
       <div className="project-h"><span className="pname">Shared with me</span></div>

@@ -61,6 +61,7 @@ import {
 } from "./workspaces";
 import { groupChatBeta, ideasBeta } from "./beta";
 import { publishGroupChat } from "./betaLive";
+import { publishLanes } from "./laneLive";
 import { remoteHostLabel, remoteTitle, remoteWebUrl } from "./remote";
 import { PrsPane } from "./PrsPane";
 import { ageOf, prOfPlace, prsShown, prSummary, TAB_MAX_AGE_S, useProjectPrs } from "./prs";
@@ -4728,6 +4729,14 @@ function App() {
   // through betaLive. Off until the settings load, like every switch.
   const groupChatOn = groupChatBeta(settings);
   useEffect(() => publishGroupChat(groupChatOn), [groupChatOn]);
+  // The places with a live Claude or Codex, for the corner's share requests
+  // (laneLive.ts): a request for a place with no live session says so.
+  useEffect(() => {
+    if (!ws || !groupChatOn) return;
+    publishLanes(ws.projects.flatMap((pv) => (pv.snapshot?.places ?? [])
+      .filter((p) => liveAgents(p.agent_sessions).some((h) => h === "claude" || h === "codex"))
+      .map((p) => [pv.root, p.slug] as const)));
+  }, [ws, groupChatOn]);
   // Turning it off closes an Ideas window that is open (a shim command, which
   // closes it the way its own close button does, so winstate records it shut
   // and the next launch does not bring it back). Only on a change seen in
@@ -8866,6 +8875,13 @@ function App() {
    *  rows as All projects; only its collapse is its own, its drag carries the
    *  workspace, and its ✕ takes it out of the workspace instead of
    *  unregistering it. */
+  //
+  // A render FUNCTION, called as `ProjectNode({ pv })`, never `<ProjectNode/>`:
+  // it holds no hooks, and as a component defined in here it had a new
+  // identity every render, so React remounted the whole subtree on every
+  // poll tick. The module-level components inside it (the guest rows' *Ask*
+  // form, the banners) lost their state with it: the guest's half-typed ask
+  // closed under them in the 2026-11-14 rehearsal (guest-ask-browser.mjs).
   // Where a guest host's rows go: under a local project of the same NAME.
   const localNames = (ws?.projects ?? []).map((pv) => basename(pv.root));
   const ProjectNode = ({ pv, inWs }: { pv: ProjectView; inWs?: string }) => {
@@ -9166,7 +9182,7 @@ function App() {
                         <Fragment key={p.root}>
                           {wsRowGapAt(w.id, p.root) && <div className="drop-gap proj wsp" />}
                           {pv
-                            ? <ProjectNode pv={pv} inWs={w.id} />
+                            ? ProjectNode({ pv, inWs: w.id })
                             : (
                               <WsGoneRow
                                 root={p.root}
@@ -9450,7 +9466,7 @@ function App() {
             : ws?.projects.map((pv) => (
                 <Fragment key={pv.root}>
                   {projGapAt(pv.root) && <div className="drop-gap proj" />}
-                  <ProjectNode pv={pv} />
+                  {ProjectNode({ pv })}
                 </Fragment>
               ))}
           {projGapAt(null) && <div className="drop-gap proj" />}
@@ -9816,7 +9832,8 @@ function App() {
                               reloadToken={placesToken} onError={fail} />
                           )}
                         </div>
-                        {groupChatOn && <LaneThread repo={sel.repo} slug={sel.slug} session={selectedAgents![provider].name} up={!!selectedAgents?.[provider].up} />}
+                        {groupChatOn && <LaneThread repo={sel.repo} slug={sel.slug} session={selectedAgents![provider].name} up={!!selectedAgents?.[provider].up}
+                          askNote={settings.use_these_ask_note} onNeverAsk={() => updateSettings({ use_these_ask_note: false })} />}
                         </div>
                       </div>
                       );

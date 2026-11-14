@@ -97,7 +97,9 @@ export function RemoteLayer() {
   const onConsole = !notGranted("remote_status");
   const groupChat = useGroupChat();
   const shares = useShares();
-  const asks = groupChat && shares.asked.length > 0 && sharesHere();
+  // Join asks and share requests both reach the corner (a request used to
+  // show only in its lane's bar, unseen unless that lane was open).
+  const asks = groupChat && (shares.asked.length > 0 || shares.requests.length > 0) && sharesHere();
   const shown = onConsole && (alerts.length > 0 || asks);
   const at = useClearCorner(shown);
   return (
