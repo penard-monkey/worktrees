@@ -467,7 +467,15 @@ unnecessary (`worktrees remote call`, `worktrees serve call`):
 |---|---|---|---|
 | **Dana** (owner) | `macOS` | Owns the feature's lane, runs the agent, decides what the agent gets | Codex or Claude in the lane, the share, Use these, replies in the conversation |
 | **Bret** (reviewer) | `macOS-guest` | Reads, asks, comments, sends a screenshot and a patch, asks for a diff | The guest's UI only |
-| **Cy** (second engineer) | `macOS-guest2` | Has his own lane on his own host in another project of the same workspace, shares it back, hands a request to Dana's agent | Owner on his host, guest on Dana's |
+| **Cy** (second engineer) | `macOS-guest2`, or a Linux VM | Has his own lane on his own host in another project of the same workspace, shares it back, hands a request to Dana's agent | Owner on his host, guest on Dana's |
+
+**Measured 2026-11-14:** Apple's virtualization runs at most **two macOS VMs at
+once** ("The number of virtual machines exceeds the limit" on the third's
+start, with `macOS-guest2` cloned and ready). So three people means either a
+Linux VM for Cy, running the AppImage (which also tests the Linux app for
+real), or Cy's acts run as scripted CLI calls from a third config dir on one of
+the Macs while the two macOS VMs carry the two screens that are watched. The
+Linux VM is the better test and the first thing to try.
 
 The engineers are **agents with a script, not a model improvising**: each run
 is a fixed sequence of intents ("Bret: ask why the exit code is 2", "Cy: share
