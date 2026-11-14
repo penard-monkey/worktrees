@@ -205,7 +205,24 @@ pub const EVENTS: &[(&str, Event)] = &[
     // `{live, busy, waiting}`: the idea conversations' tmux sessions, by name
     // (phase S, `worktrees_api::watch::IdeaSessions`). Desktop only.
     ("ideas:sessions", Event::Console),
+    // `{what, share?, seq?}` (group chat §6, `sharethread::changed`): a share,
+    // its guests or its thread changed. The console, and the sockets of the
+    // principals its `to` names — a guest hears about its own shares and
+    // nobody else's — with `to` cut from what anyone is sent. Only to a
+    // socket that declared it (`DECLARED_ONLY`).
+    ("shares:changed", Event::Principals),
 ];
+
+/// Events sent only to a connection that declared it listens for them, like
+/// a one-shot event, but neither consumed by the emit nor waited for
+/// (`Host::has_audience` is the one-shots' alone). `shares:changed` is one:
+/// a client that does not show shares has no use for it, and a guest's
+/// socket gets nothing it did not ask for.
+pub const DECLARED_ONLY: &[&str] = &["shares:changed"];
+
+pub fn needs_declaration(event: &str) -> bool {
+    is_one_shot(event) || DECLARED_ONLY.contains(&event)
+}
 
 // ── who listens (§9.3) ───────────────────────────────────────────────────────
 
@@ -280,19 +297,38 @@ pub enum Event {
     ByPath(&'static str),
     Drafts,
     Console,
+    /// The console, and the callers whose principal the payload's `to`
+    /// names; `to` is cut from every copy. The ONE kind a guest hears.
+    Principals,
 }
 
 /// `payload` as `caller` (holding `grant`) may see it, or `None` to send it
 /// nothing. `roots` is asked for only when the scope is not `"*"`.
 pub fn event(name: &str, payload: &Value, caller: &Caller, grant: &Grant, roots: &mut dyn FnMut() -> Vec<String>) -> Option<Value> {
-    // A guest (group chat §2) hears none of the host's events: even an empty
-    // projection, or `places:changed`'s bare "re-read", would tell it when the
-    // owner works. Its own event, `shares:changed`, is PR B's, with a kind of
-    // its own that names the principal it is for.
+    let how = EVENTS.iter().find(|(n, _)| *n == name).map(|(_, how)| *how);
+    // `shares:changed` (group chat §6): to the console and the principals it
+    // names, keyed by principal — a paired owner device is not the console
+    // and is never named, so it hears nothing either.
+    if how == Some(Event::Principals) {
+        // Only a guest is ever named; the check makes it so whatever `to` says.
+        let named = grant.allows(worktrees_core::authz::Capability::Guest)
+            && payload.get("to").and_then(Value::as_array).is_some_and(|to| to.iter().any(|p| p.as_str() == Some(caller.principal().as_str())));
+        if !caller.is_console() && !named {
+            return None;
+        }
+        let mut v = payload.clone();
+        if let Some(o) = v.as_object_mut() {
+            o.remove("to");
+        }
+        return Some(v);
+    }
+    // A guest (group chat §2) hears none of the host's other events: even an
+    // empty projection, or `places:changed`'s bare "re-read", would tell it
+    // when the owner works.
     if grant.allows(worktrees_core::authz::Capability::Guest) {
         return None;
     }
-    let Some((_, how)) = EVENTS.iter().find(|(n, _)| *n == name) else {
+    let Some(how) = how else {
         // Unprojected: the console only.
         return caller.is_console().then(|| payload.clone());
     };
@@ -307,8 +343,8 @@ pub fn event(name: &str, payload: &Value, caller: &Caller, grant: &Grant, roots:
     // No event carries a stamp, so none names a device.
     let view = View { projects: scope, roots: &roots, caller, names: &NoDevices };
     match how {
-        Event::Everyone | Event::Console => unreachable!("answered above"),
-        Event::ByPath(field) => payload.get(*field).and_then(Value::as_str).is_some_and(|p| covers(&view, p)).then(|| payload.clone()),
+        Event::Everyone | Event::Console | Event::Principals => unreachable!("answered above"),
+        Event::ByPath(field) => payload.get(field).and_then(Value::as_str).is_some_and(|p| covers(&view, p)).then(|| payload.clone()),
         Event::Drafts => {
             let mut v = payload.clone();
             if let Some(list) = v.get_mut("drafts") {
