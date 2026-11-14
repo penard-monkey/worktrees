@@ -2092,6 +2092,18 @@ impl ConnAudit {
                     detail.insert("project_id".into(), json!(ident(p)));
                 }
             }
+            // A post in a share's thread (group chat §4): the share and the
+            // text's length and hash, never the text — a guest's words to the
+            // owner are not the log's to keep.
+            "thread_post" => {
+                if let Some(Value::String(t)) = arg(args, "text") {
+                    detail.insert("bytes".into(), json!(t.len()));
+                    detail.insert("sha256".into(), json!(sha256_hex(t.as_bytes())));
+                }
+                if let Some(Value::String(sh)) = arg(args, "share") {
+                    detail.insert("share".into(), json!(ident(sh)));
+                }
+            }
             // A slash command (chat-slash-commands §2.2): its NAME, which the
             // host validated against the session's list, and its argument's
             // length and hash, never the argument — and the session.
@@ -3255,9 +3267,9 @@ mod tests {
         let reads = TABLE.iter().filter(|r| r.cap == Some(Capability::Read)).count();
         let quiet: Vec<&str> = TABLE.iter().filter(|r| r.exposure != Exposure::ClientLocal && !recorded(r)).map(|r| r.name).collect();
         // The guest reads in the table now (group chat §2's trap); the rest
-        // of `GUEST_READS` are PR B's and C's, named ahead of their rows.
+        // of `GUEST_READS` are PR C's, named ahead of their rows.
         let guest_reads: Vec<&str> = dispatch::GUEST_READS.iter().copied().filter(|n| super::super::dispatch::row(n).is_some()).collect();
-        assert_eq!(guest_reads, vec!["shares_list", "guest_places"]);
+        assert_eq!(guest_reads, vec!["shares_list", "guest_places", "thread_read"]);
         assert_eq!(quiet.len(), reads + STREAM_TRAFFIC.len() + CONSOLE_READS.len() + guest_reads.len(), "{quiet:?}");
         // The console reads are console rows that exist: a renamed one would
         // make an idea chat act silent.
@@ -3934,6 +3946,55 @@ mod tests {
             assert_eq!((r["kind"].as_str(), r["outcome"].as_str()), (Some("call"), Some("ok")));
             assert_eq!(r["detail"]["bytes"], json!(note.len()));
             assert_eq!(r["detail"]["sha256"], json!(sha256_hex(note.as_bytes())));
+        }
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_dir_all(&top);
+    }
+
+    /// Group chat §2's trap, for the thread (§4): a guest's `thread_read`
+    /// poll writes no line however often it runs, and each post writes one,
+    /// by the text's length and hash and the share, never the text — a
+    /// retry included, which is a request like any other.
+    #[test]
+    fn a_guests_thread_polling_writes_nothing_and_a_post_is_recorded_by_length_and_hash() {
+        use super::super::shares::{Live, PlaceId, Shares};
+        let (top, root, w) = project("thread");
+        let d = dir("thread");
+        let (a, _) = Audit::open(&d, None, Fleet::none());
+        let bret = PrincipalId::new("g_bret");
+        let mut reg = Devices::default();
+        let g = Grant { capabilities: Caps::GUEST, projects: Projects::only(Vec::<String>::new()) };
+        reg.principals.insert(bret.clone(), g.clone());
+        reg.devices.insert(DeviceId::new("d_bret"), (bret.clone(), g));
+        let who = Caller::paired(bret.clone(), DeviceId::new("d_bret"));
+        let cfg = top.join("config");
+        let place = PlaceId::of(&std::path::Path::new(&root).join(".worktrees/feat")).unwrap();
+        let t = top.join("s.jsonl");
+        std::fs::write(&t, "x").unwrap();
+        let session = Live { harness: "claude".into(), id: "s-1".into(), transcript: t };
+        let share = Shares::at(&cfg).create(&root, "feat", place, std::slice::from_ref(&bret), &session, 1).unwrap().id;
+        Shares::at(&cfg).allow(&share, &bret, 1).unwrap();
+        let mut cx = call_as(who.clone(), Arc::new(reg));
+        cx.ctx = worktrees_api::Ctx::new(cfg, Arc::new(Catch::default()));
+        let c = ConnAudit::new(a.clone(), 11, Some("100.64.0.9".into()), who);
+        let before = live(&d).len();
+        for _ in 0..25 {
+            assert!(through(&cx, &c, &w, "thread_read", json!({ "share": share })).is_ok());
+        }
+        assert_eq!(live(&d).len(), before, "polling wrote: {:#?}", &live(&d)[before..]);
+        let text = "SECRET-POST-1 look at line 40";
+        for _ in 0..2 {
+            assert!(through(&cx, &c, &w, "thread_post", json!({ "share": share, "id": "p-1", "text": text })).is_ok());
+        }
+        let raw = std::fs::read_to_string(d.join(FILE)).unwrap();
+        assert!(!raw.contains("SECRET-POST"), "the text reached the log:\n{raw}");
+        let recs: Vec<Value> = live(&d).into_iter().filter(|r| r["cmd"] == "thread_post").collect();
+        assert_eq!(recs.len(), 2, "{recs:#?}");
+        for r in &recs {
+            assert_eq!((r["kind"].as_str(), r["outcome"].as_str(), r["cap"].as_str()), (Some("call"), Some("ok"), Some("guest")));
+            assert_eq!(r["detail"]["bytes"], json!(text.len()));
+            assert_eq!(r["detail"]["sha256"], json!(sha256_hex(text.as_bytes())));
+            assert_eq!(r["detail"]["share"], json!(share));
         }
         let _ = std::fs::remove_dir_all(&d);
         let _ = std::fs::remove_dir_all(&top);

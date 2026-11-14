@@ -63,7 +63,14 @@ further device of a guest you have (`worktrees serve call guests_list`). A
 guest holds no project: only what you share with them (`share_create`), your
 place names unless you hide a project (`guest_places_hide`), and asking you
 for a share. A devices.json that names a guest is refused WHOLE by a
-worktrees from before guests, your own devices included.";
+worktrees from before guests, your own devices included.
+
+Each share has a thread beside it, between you and the guests you let in:
+`worktrees serve call thread_post '{\"share\": \"s_…\", \"id\": \"m-1\", \"text\": \"…\"}'`
+posts as you (pick a new id per post; the same id again returns the first
+post instead of making a second), and `thread_read '{\"share\": \"s_…\",
+\"after\": 0}'` reads a page. Nothing in a thread reaches an agent. Stop
+sharing (`share_stop`) deletes it.";
 
 /// One console connection.
 pub struct Console {
