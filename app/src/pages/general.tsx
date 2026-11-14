@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "../ipc";
 import { pickDirForHost, hostOnly } from "../onhost";
 import { FetchIntervalSection } from "../HostPolicyControls";
+import { BETA_FEATURES } from "../beta";
 import { Page, Sec, useSheet } from "./kit";
 
 /** One row of `detect_editors` (lib.rs `editors::Editor`). */
@@ -143,20 +144,22 @@ export function GeneralPage() {
       </section>
     </Sec>
 
-    {/* One row per beta feature (beta.ts): its switch and one line on what it
-        turns on. Turning one off hides it and deletes nothing. */}
+    {/* One checkbox per beta feature, drawn from beta.ts's BETA_FEATURES: each
+        feature its own switch, so each can be tried alone (the owner,
+        2026-11-14). Turning one off hides it and deletes nothing. */}
     <Sec id="beta">
       <section className="setting">
         <label>Beta features</label>
-        <label className="tier-toggle setting-check">
-          <input type="checkbox" checked={settings.beta_ideas} data-testid="beta-ideas"
-            onChange={(e) => onChange({ beta_ideas: e.currentTarget.checked })} />
-          Ideas and workspaces
-        </label>
-        <div className="hint">
-          Adds the Ideas window (the lightbulb in the rail, ⌘⇧I) and named workspaces in the
-          nav. Both are still changing. Turning it off hides them and keeps what you made.
-        </div>
+        {BETA_FEATURES.map((f) => (
+          <div key={f.key} className="beta-feature" data-beta={f.key}>
+            <label className="tier-toggle setting-check">
+              <input type="checkbox" checked={settings[f.key] === true} data-testid={f.testId}
+                onChange={(e) => onChange({ [f.key]: e.currentTarget.checked })} />
+              {f.label}
+            </label>
+            <div className="hint">{f.what}</div>
+          </div>
+        ))}
       </section>
     </Sec>
   </Page>;

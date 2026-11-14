@@ -6460,10 +6460,10 @@ function App() {
   };
   // ── named workspaces (`workspaces.ts`) ──
   // The view showing. Workspaces only once the list has loaded: a window that
-  // cannot reach the console rows (remote) has no switch and stays here. With
-  // the beta off the list is never fetched (below), so this is All projects
-  // whatever `nav_view` holds, and `nav_view` is kept for when it comes back.
-  const navView: NavView = ideasOn && wsList && settings.nav_view === "workspaces" ? "workspaces" : "projects";
+  // cannot reach the console rows (remote) has no switch and stays here.
+  // Named workspaces left the beta on 2026-11-14 (beta.ts): no flag decides
+  // this any more.
+  const navView: NavView = wsList && settings.nav_view === "workspaces" ? "workspaces" : "projects";
   const setNavView = (v: NavView) => { if (v !== settings.nav_view) updateSettings({ nav_view: v }); };
   /** Every row answers with the whole list; a failure is the error banner
    *  and leaves the list as it was. */
@@ -6473,14 +6473,14 @@ function App() {
   // Re-read whenever the registry's roots change: "not registered" is the
   // registry's answer, joined in by the row.
   const wsRegKey = (ws?.projects ?? []).map((pv) => pv.root).join("\n");
-  // Beta (beta.ts): off, the list is not fetched and is dropped, which takes
-  // the switch and every workspace menu item with it.
+  // Always fetched: a window that cannot reach the row (a remote one: it is
+  // console-only) gets null, which takes the switch and every workspace menu
+  // item with it.
   useEffect(() => {
-    if (!ideasOn) { setWsList(null); return; }
     let alive = true;
     invoke<WsList>("workspaces_list").then((l) => { if (alive) setWsList(l); }).catch(() => { if (alive) setWsList(null); });
     return () => { alive = false; };
-  }, [wsRegKey, ideasOn]);
+  }, [wsRegKey]);
   /** Adding never asks. */
   const wsAddProject = (id: string, root: string) => {
     const w = wsById(id);
@@ -8988,7 +8988,7 @@ function App() {
             <button
               className={"mini" + (confirmRm === `hdr|${pv.root}` ? " armed" : "")}
               data-track="nav.project.remove"
-              title={confirmRm === `hdr|${pv.root}` ? (ideasOn ? "click again to remove from All projects" : "click again to remove from workspace") : "remove project"}
+              title={confirmRm === `hdr|${pv.root}` ? "click again to remove from All projects" : "remove project"}
               onClick={() => removeProjectHdr(pv.root)}
             >
               {confirmRm === `hdr|${pv.root}` ? "remove?" : <Icons.X size={13} />}
@@ -9415,7 +9415,7 @@ function App() {
         {initAsk && (
           <InitRepoPrompt dir={initAsk} into={initInto ? wsById(initInto)?.name : null} onInit={initRepo} onCancel={() => setInitAsk(null)} />
         )}
-        {ideasOn && wsList && (
+        {wsList && (
           <NavViewSwitch
             view={navView}
             onPick={setNavView}
@@ -10901,7 +10901,7 @@ function App() {
             <button className="pop-item" onClick={() => copyText(ctx.root)}>Copy path</button>
             <button className="pop-item" {...hostOnly("Reveal in Finder")} onClick={() => revealPlace(ctx.root)}>Reveal in Finder</button>
             <button className="pop-item" {...hostOnly("Open in editor")} onClick={() => editIn(ctx.root)}>Open in editor</button>
-            {ideasOn && wsList && (
+            {wsList && (
               <>
                 <div className="ctx-sep" />
                 {/* The drags' twins (`workspaces.ts`): add opens the list of
@@ -10955,7 +10955,7 @@ function App() {
                   className={"pop-item danger" + (confirmRm === `proj|${ctx.root}` ? " armed" : "")}
                   onClick={() => removeProjectCtx(ctx.root)}
                 >
-                  {confirmRm === `proj|${ctx.root}` ? "Confirm remove?" : ideasOn ? "Remove from All projects" : "Remove from workspace"}
+                  {confirmRm === `proj|${ctx.root}` ? "Confirm remove?" : "Remove from All projects"}
                 </button>
               </>
             )}

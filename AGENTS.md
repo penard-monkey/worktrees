@@ -705,6 +705,18 @@ DESIGN.md (app), MIGRATION.md (bash→Rust history).
   remote …` with no `--config-dir` asks the user's REAL serve: name the
   scratch dir on every call.
 
+**A feature behind a flag gets its OWN flag and its OWN checkbox** (the
+owner, 2026-11-14). A beta feature is one entry in `BETA_FEATURES`
+(`app/src/beta.ts`): its own `beta_<name>` key in `ui-state.json`, default
+off, its own helper that every gate asks, and its own checkbox in Settings →
+General → Beta features, which draws one per entry. Never put a second
+feature under an existing flag: Ideas and workspaces shared `beta_ideas`, so
+nobody could try one without the other, until workspaces left the beta.
+Leaving the beta deletes the feature's gates, entry and helper, never its
+KEY, which an older build still reads ("Retiring a key from `ui-state.json`
+breaks a DOWNGRADE", below). `beta-check.mjs` holds the table, the
+Settings rows and the keys to each other.
+
 **Adding a harness? Walk `docs/adding-a-harness.md` first, and tick it only
 by SEEING each surface work.** pi shipped in v0.33.0 with a correct core —
 MCP `place_status` said `busy` — and no nav dot at all: the app builds its dots

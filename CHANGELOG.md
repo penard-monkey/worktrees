@@ -17,6 +17,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ### Changed
 
+- **Workspaces are no longer a beta.** The Workspaces | All projects switch, workspace cards and their menus are there for everyone, with no setting to turn on. If you had the Workspaces view open, it opens there again; otherwise the nav stays on All projects until you switch.
+- **Settings → Beta features has one checkbox per feature.** Each beta feature can be turned on and off on its own. Today there is one, **Ideas** (the Ideas window, the lightbulb in the rail and ⌘⇧I), which keeps the switch it had: if Ideas and workspaces was on, Ideas is still on.
 - **The nav's switch reads Workspaces, then All projects (workspaces beta).** The two were the other way round. Which one is open, and what each shows, is unchanged.
 - **A workspace is drawn as a card (workspaces beta).** Its projects sit inside a bordered, rounded box under a tinted title bar, so it is clear which workspace a project belongs to. A collapsed workspace is just its title bar. A drag over a workspace outlines the whole card.
 - **A menu row ending in ▸ opens its list beside the menu when you rest on it (workspaces beta).** A project's **Add to workspace ▸** and a workspace's **Add project ▸** used to replace the whole menu with a second one when clicked. Now the list appears to the side, the way macOS menus work, and closes when you move to another row. A click or Enter still opens it, and Esc closes the list before the menu.
