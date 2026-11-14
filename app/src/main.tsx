@@ -193,6 +193,16 @@ async function boot() {
   void startFeedback();
   window.addEventListener("pagehide", stopFeedback, { once: true });
   if (import.meta.hot) import.meta.hot.dispose(stopFeedback);
+  // The guest connections (group chat §7): one per host this machine is a
+  // guest of, beside the engine door and never through it. The app's are
+  // pinned pipes through the shim; the harness's are the mock's. A browser
+  // page (the dev stack) has no shim, so no guest host.
+  if (import.meta.env.VITE_MOCK || (!import.meta.env.VITE_SERVE && "__TAURI_INTERNALS__" in window)) {
+    const { startGuests, guestsVisible } = await import("./guest");
+    const { appGuestSource, mockGuestSource } = await import("./guestboot");
+    startGuests(import.meta.env.VITE_MOCK ? mockGuestSource() : appGuestSource());
+    document.addEventListener("visibilitychange", () => { if (document.visibilityState !== "hidden") guestsVisible(); });
+  }
   const { default: App } = await import("./App");
   // The gate holds the app back until the engine has answered once — App
   // hydrates its settings on mount, and against a dead engine it would hydrate

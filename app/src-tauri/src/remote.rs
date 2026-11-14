@@ -16,9 +16,13 @@
 //! machine gave the pairing; every answer about a host is a `HostSummary`.
 //! The key file stays in the config dir, read here at each connect.
 //!
-//! **One remote socket per window.** A connect replaces the one before it,
-//! and `conn` (a fresh number per socket) is on every send and close, so a
-//! page's stale socket cannot write into the next one.
+//! **One remote socket per HOST.** A connect replaces the one before it to
+//! the same host, and `conn` (a fresh number per socket) is on every send and
+//! close, so a page's stale socket cannot write into the next one. Sockets to
+//! different hosts live side by side: a window that drives one host can also
+//! hold its guest connection to another (group chat §7), and a guest host is
+//! never the window's engine (`HostStore::choose`), so the two never share a
+//! host.
 //!
 //! **A host that moved is followed, never trusted.** When the host is not at
 //! its kept address — nothing answers, or a machine with another key does —
@@ -40,6 +44,7 @@
 //! `ui-state.json` — written whole by the page, as that one is, and never
 //! edited by this side.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -69,7 +74,8 @@ struct Live {
 pub struct Remote {
     dir: PathBuf,
     store: HostStore,
-    live: Mutex<Option<Live>>,
+    /// The open socket to each host, by host id.
+    live: Mutex<HashMap<String, Live>>,
     next: AtomicU64,
 }
 
@@ -92,7 +98,7 @@ pub struct HostList {
 
 impl Remote {
     pub fn new(dir: &Path) -> Remote {
-        Remote { dir: dir.to_path_buf(), store: HostStore::new(dir), live: Mutex::new(None), next: AtomicU64::new(1) }
+        Remote { dir: dir.to_path_buf(), store: HostStore::new(dir), live: Mutex::new(HashMap::new()), next: AtomicU64::new(1) }
     }
 
     pub fn hosts(&self) -> Result<HostList, String> {
@@ -121,15 +127,15 @@ impl Remote {
         Ok(rec.summary())
     }
 
-    /// Open the socket to `id`, replacing any other, and pipe what it sends to
-    /// `frames`.
+    /// Open the socket to `id`, replacing the one this window had to it, and
+    /// pipe what it sends to `frames`.
     pub async fn connect(&self, id: &str, frames: Channel<Value>) -> Result<Connected, String> {
         let rec = self.store.get(id)?;
         if rec.id != id {
             return Err(format!("{id:?} is not a host id"));
         }
         let key = self.store.key_for(&rec)?;
-        self.close_live().await;
+        self.close_host(&rec.id).await;
         // Logged: a remote window that cannot connect shows a banner, and the
         // person at it reads app.log for the rest (the host's serve.log is on
         // the host).
@@ -147,7 +153,11 @@ impl Remote {
         let (tx, mut rx) = p.split();
         let conn = self.next.fetch_add(1, Ordering::SeqCst);
         let tx = Arc::new(Mutex::new(Some(tx)));
-        *self.live.lock().await = Some(Live { conn, tx: tx.clone() });
+        // A connect that raced this one to the same host loses its socket:
+        // one per host, the newest.
+        if let Some(old) = self.live.lock().await.insert(rec.id.clone(), Live { conn, tx: tx.clone() }) {
+            close_tx(&old.tx).await;
+        }
         let name = rec.name.clone();
         tauri::async_runtime::spawn(async move {
             loop {
@@ -194,9 +204,9 @@ impl Remote {
     }
 
     pub async fn send(&self, conn: u64, text: String) -> Result<(), String> {
-        let tx = match self.live.lock().await.as_ref() {
-            Some(l) if l.conn == conn => l.tx.clone(),
-            _ => return Err("this remote connection has been closed or replaced".into()),
+        let tx = match self.live.lock().await.values().find(|l| l.conn == conn) {
+            Some(l) => l.tx.clone(),
+            None => return Err("this remote connection has been closed or replaced".into()),
         };
         let mut g = tx.lock().await;
         match g.as_mut() {
@@ -206,25 +216,21 @@ impl Remote {
     }
 
     pub async fn close(&self, conn: u64) -> Result<(), String> {
-        let mut live = self.live.lock().await;
-        if live.as_ref().is_some_and(|l| l.conn == conn) {
-            let l = live.take().expect("checked");
-            drop(live);
-            let tx = l.tx.lock().await.take();
-            if let Some(tx) = tx {
-                tx.close().await;
-            }
+        let l = {
+            let mut live = self.live.lock().await;
+            let host = live.iter().find(|(_, l)| l.conn == conn).map(|(h, _)| h.clone());
+            host.and_then(|h| live.remove(&h))
+        };
+        if let Some(l) = l {
+            close_tx(&l.tx).await;
         }
         Ok(())
     }
 
-    async fn close_live(&self) {
-        let l = self.live.lock().await.take();
+    async fn close_host(&self, host: &str) {
+        let l = self.live.lock().await.remove(host);
         if let Some(l) = l {
-            let tx = l.tx.lock().await.take();
-            if let Some(tx) = tx {
-                tx.close().await;
-            }
+            close_tx(&l.tx).await;
         }
     }
 
@@ -240,6 +246,13 @@ impl Remote {
         let json = serde_json::to_vec_pretty(&settings).map_err(|e| e.to_string())?;
         worktrees_core::fsx::write_atomic(&self.dir.join(REMOTE_UI_STATE), &json, Some(std::fs::Permissions::from_mode(0o600)))
             .map_err(|e| e.to_string())
+    }
+}
+
+async fn close_tx(tx: &Mutex<Option<PipeTx>>) {
+    let tx = tx.lock().await.take();
+    if let Some(tx) = tx {
+        tx.close().await;
     }
 }
 

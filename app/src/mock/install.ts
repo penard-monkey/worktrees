@@ -7,6 +7,7 @@
 // harness during a redesign.
 
 import type { MigrationRow, MigrationOutcome } from "../CodexMcpPanel";
+import { GUEST_HOST, guestHelpers, guestInvoke } from "./guest";
 import { agentSessions, initialWorkspace, sessionName, type Place, type Workspace } from "./fixtures";
 import { isHarness, type Harness } from "../harness";
 import { cloneSource, type CloneErrorKind, type CloneProgress } from "../clone";
@@ -51,10 +52,12 @@ const kimiAllowed = new Set<string>();
 /** The remote door's state in the harness: the hosts this "machine" is
  *  paired with, and the one the window drives. `?remote` starts with one
  *  chosen, so the path-taking acts can be seen greyed. */
-type MockHost = { id: string; name: string; addr: string; device_id: string; expiry: unknown; paired_at: number };
+type MockHost = { id: string; name: string; addr: string; device_id: string; expiry: unknown; paired_at: number; principal_id?: string; guest?: boolean };
 const mockRemote: { chosen: string | null; hosts: MockHost[] } = (() => {
-  const studio: MockHost = { id: "h_mockstudioaaaaaaaaaaaaaaaa", name: "Studio", addr: "192.168.1.20:7461", device_id: "d_studio", expiry: { idle_days: 30 }, paired_at: 1_790_000_000 };
-  return { chosen: new URLSearchParams(location.search).has("remote") ? studio.id : null, hosts: [studio] };
+  const studio: MockHost = { id: "h_mockstudioaaaaaaaaaaaaaaaa", name: "Studio", addr: "192.168.1.20:7461", device_id: "d_studio", expiry: { idle_days: 30 }, paired_at: 1_790_000_000, principal_id: "owner", guest: false };
+  // `?guest`: this machine is also a GUEST of David's Mac (group chat §7, mock/guest.ts).
+  const guest = new URLSearchParams(location.search).has("guest") ? [GUEST_HOST] : [];
+  return { chosen: new URLSearchParams(location.search).has("remote") ? studio.id : null, hosts: [studio, ...guest] };
 })();
 
 const kimiMissing = () => new URLSearchParams(location.search).get("kimi") === "missing";
@@ -2500,6 +2503,12 @@ function mockFacts(p: any) {
 
 type Args = Record<string, any>;
 async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
+  // A call on the guest connection (guestboot.ts's mock dial): David's host
+  // answers it as a guest's, and refuses every other row.
+  if (args.__guestHost !== undefined) {
+    const { __guestHost: _host, ...rest } = args;
+    return guestInvoke(cmd, rest, emitEvent);
+  }
   // `?agentinterrupt=old`: a host from before the row, which serve's dispatch
   // answers `unknown command: <cmd>` (the remote door passes it on unchanged).
   if (cmd === "agent_interrupt" && new URLSearchParams(location.search).get("agentinterrupt") === "old") throw `unknown command: ${cmd}`;
@@ -3129,6 +3138,8 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     case "remote_choose": {
       const id = (args.hostId ?? null) as string | null;
       if (id !== null && !mockRemote.hosts.some((h) => h.id === id)) throw `no host "${id}" is kept here`;
+      const g = mockRemote.hosts.find((h) => h.id === id && h.guest);
+      if (g) throw `${g.name} shares sessions with you as a guest: it cannot be this window's engine`;
       mockRemote.chosen = id;
       return null;
     }
@@ -6479,6 +6490,7 @@ let mockNotifyGranted = new URLSearchParams(location.search).get("notify") === "
   send: (title: string, body: string) => { mockNotified.push({ title, body }); },
 };
 (window as any).__mock = {
+  ...guestHelpers,
   // ── ideas: what another editor, Finder or a person does to the folder ──
   /** Every idea_write the page sent, in order. */
   ideaWrites: () => mockIdeaWrites.slice(),
