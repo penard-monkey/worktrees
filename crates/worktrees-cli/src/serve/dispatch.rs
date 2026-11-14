@@ -1476,14 +1476,14 @@ mod tests {
     /// `idea_combine`, `idea_split`, `idea_related`, `idea_versions`,
     /// `idea_restore`), and the chat's images (`read_place_image`, `agent_call_image`), and phase S's fifteen
     /// idea-session console rows (`idea_conversation*`, `idea_*` over the agent bodies), and group
-    /// chat's sixteen share rows (twelve console, four `guest`) and its thread's two
-    /// (`thread_read`, `thread_post`, `guest`); the check scripts
+    /// chat's seventeen share rows (thirteen console with PR D's `share_used`, four
+    /// `guest`) and its thread's two (`thread_read`, `thread_post`, `guest`); the check scripts
     /// hold the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 269, "the table has 269 commands");
+        assert_eq!(TABLE.len(), 270, "the table has 270 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
