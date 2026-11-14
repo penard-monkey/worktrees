@@ -253,6 +253,25 @@ impl PrincipalRecord {
     pub fn grant(&self) -> Grant {
         Grant { capabilities: self.caps, projects: self.projects.clone() }
     }
+
+    /// A guest principal (group chat §2.1): not the owner, holding exactly
+    /// `guest` and no project.
+    pub fn is_guest(&self) -> bool {
+        !self.id.is_owner() && self.caps == Caps::GUEST && self.projects == Projects::Only(BTreeSet::new())
+    }
+
+    /// A new guest named `name`, as the host's invite creates one.
+    pub fn guest(id: PrincipalId, name: &str, now: i64) -> PrincipalRecord {
+        PrincipalRecord { id, name: name.to_string(), caps: Caps::GUEST, projects: Projects::Only(BTreeSet::new()), created_at: now }
+    }
+}
+
+/// A fresh guest principal id: `g_` and 128 random bits in lowercase base32.
+/// Random, never derived from the name, so a rename keeps who said what.
+pub fn new_guest_id() -> PrincipalId {
+    let mut b = [0u8; 16];
+    getrandom::fill(&mut b).expect("the OS refused entropy");
+    PrincipalId::new(format!("g_{}", base32(&b)))
 }
 
 /// One paired device (§2.1). `id` is random, never derived from the key;
@@ -394,20 +413,29 @@ impl DevicesFile {
         DevicesFile { version: VERSION, principals: vec![PrincipalRecord::owner(now)], devices: Vec::new() }
     }
 
-    /// Parse and validate, as Phase 2 reads it: exactly one principal, the
-    /// owner with everything; every device the owner's. Anything else is
-    /// corruption (§2.8, §5.2), refused rather than handled.
+    /// Parse and validate: exactly one OWNER, first, with every capability
+    /// and `"*"`; and any number of GUESTS (group chat §2.1), each holding
+    /// exactly `guest` and no project. Anything else — a second owner, a
+    /// principal with any other grant — is corruption (§2.8, §5.2), refused
+    /// rather than handled. A build from before guests refuses a file that
+    /// names one WHOLE, the owner's devices included: the downgrade trap the
+    /// release note states.
     pub fn parse(bytes: &[u8]) -> Result<DevicesFile, String> {
         let f: DevicesFile = serde_json::from_slice(bytes).map_err(|e| format!("{FILE} does not parse: {e}"))?;
         if f.version != VERSION {
             return Err(format!("{FILE} is version {}; this build reads version {VERSION}", f.version));
         }
         match f.principals.as_slice() {
-            [p] if p.id.is_owner() && p.caps == Caps::ALL && p.projects.is_all() => {}
-            _ => return Err(format!("{FILE} must name exactly one principal, the owner, with every capability and \"*\"")),
+            [p, guests @ ..] if p.id.is_owner() && p.caps == Caps::ALL && p.projects.is_all() && guests.iter().all(PrincipalRecord::is_guest) => {}
+            _ => {
+                return Err(format!(
+                    "{FILE} must name the owner first, with every capability and \"*\", and otherwise only guests, \
+                     each with `guest` alone and no project"
+                ))
+            }
         }
-        // With the owner the only principal, `check` refuses a device that
-        // names any other.
+        // `check` refuses a device under a principal the file lacks, or wider
+        // than its principal: a guest's device holds at most `guest`.
         f.check()?;
         Ok(f)
     }
@@ -650,6 +678,16 @@ pub struct Enrollment {
 /// A device as a listing shows it: the record, with `last_seen` as serve
 /// knows it (it is written at most every ten minutes).
 pub type DeviceView = DeviceRecord;
+
+/// A guest as the console's people list shows one: the person and its
+/// devices.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct GuestView {
+    pub id: PrincipalId,
+    pub name: String,
+    pub created_at: i64,
+    pub devices: Vec<DeviceView>,
+}
 
 struct State {
     /// The file, or why it cannot be read.
@@ -981,14 +1019,92 @@ impl DeviceRegistry {
         Some(st.file.as_ref().map(|f| f.devices.iter().filter(|d| !d.is_revoked()).map(DeviceRecord::security).collect()).unwrap_or_default())
     }
 
+    /// The guest principals (group chat §2.1), each with its devices,
+    /// tombstones included: the console's people list. `None` while the
+    /// file is unreadable.
+    pub fn guests(&self) -> Result<Vec<GuestView>, String> {
+        let f = self.snapshot().ok_or_else(|| self.readable().unwrap_err())?;
+        Ok(f.principals
+            .iter()
+            .filter(|p| p.is_guest())
+            .map(|p| GuestView {
+                id: p.id.clone(),
+                name: p.name.clone(),
+                created_at: p.created_at,
+                devices: f.devices.iter().filter(|d| d.principal == p.id).cloned().collect(),
+            })
+            .collect())
+    }
+
+    /// The principal `id`, when it is a guest (its record as it stands).
+    pub fn guest(&self, id: &PrincipalId) -> Option<PrincipalRecord> {
+        let st = self.state.read().unwrap();
+        st.file.as_ref().ok()?.principal(id).filter(|p| p.is_guest()).cloned()
+    }
+
+    /// A principal's display name: the owner's record names the owner (its
+    /// `name`, `"owner"` until the host sets one), a guest's names the guest.
+    pub fn principal_name(&self, id: &PrincipalId) -> Option<String> {
+        let st = self.state.read().unwrap();
+        st.file.as_ref().ok()?.principal(id).map(|p| p.name.clone())
+    }
+
     // ── changes ──────────────────────────────────────────────────────────────
+
+    /// The owner's display name (group chat §2.1: what a guest sees the
+    /// person sharing with them called). Held to the device-name rule.
+    pub fn set_owner_name(&self, name: &str) -> Result<bool, String> {
+        name_ok(name)?;
+        self.mutate(|f, _| {
+            let p = f.principals.iter_mut().find(|p| p.id.is_owner()).ok_or("the file names no owner")?;
+            if p.name == name {
+                return Ok(false);
+            }
+            p.name = name.to_string();
+            Ok(true)
+        })
+    }
+
+    /// Revoke every unrevoked device of guest `id` (the console's "Remove
+    /// Bret"): each its own `Revoked` event, so every socket closes at once.
+    /// The principal's record stays, so what it posted is still named.
+    pub fn revoke_guest(&self, id: &PrincipalId, now: i64) -> Result<Vec<DeviceId>, String> {
+        self.mutate(|f, events| {
+            if !f.principal(id).is_some_and(PrincipalRecord::is_guest) {
+                return Err(format!("no guest {id}"));
+            }
+            let mut out = Vec::new();
+            for d in f.devices.iter_mut().filter(|d| &d.principal == id && !d.is_revoked()) {
+                d.revoked_at = Some(now);
+                events.push(DeviceEvent::Revoked { subject: d.subject(), by: Actor::Console });
+                out.push(d.id.clone());
+            }
+            Ok(out)
+        })
+    }
+
 
     /// Enroll a device (§2.2 step 7, the host's Allow). Refused past
     /// [`MAX_DEVICES`], for a key already on an unrevoked device, for a grant
     /// wider than its principal's (§2.8), and for a step-up key on the wrong
     /// platform: an iPhone or iPad enrolls one, a desktop has none.
+    #[cfg(test)]
     pub fn enroll(&self, e: Enrollment, now: i64) -> Result<DeviceRecord, String> {
+        self.enroll_creating(e, None, now)
+    }
+
+    /// [`DeviceRegistry::enroll`], creating `create` — a new guest the
+    /// host's invite named (group chat §2.1) — in the same write, unless a
+    /// principal with its id exists already. The device and its person
+    /// appear together or not at all: a pairing that fails leaves no guest.
+    pub fn enroll_creating(&self, e: Enrollment, create: Option<PrincipalRecord>, now: i64) -> Result<DeviceRecord, String> {
         name_ok(&e.name)?;
+        if let Some(p) = &create {
+            name_ok(&p.name)?;
+            if !p.is_guest() || p.id != e.principal {
+                return Err("only a guest is created by pairing, and the device is its own".into());
+            }
+        }
         if !is_pin(&e.spki_sha256) || e.stepup_spki_sha256.as_deref().is_some_and(|p| !is_pin(p)) {
             return Err("a key pin is 64 lowercase hex characters".into());
         }
@@ -1003,6 +1119,12 @@ impl DeviceRegistry {
             }
         }
         self.mutate(|f, events| {
+            if let Some(p) = create.filter(|p| f.principal(&p.id).is_none()) {
+                if f.principals.iter().any(|q| q.is_guest() && q.name == p.name) {
+                    return Err(format!("a guest named {:?} exists already: invite them by id", p.name));
+                }
+                f.principals.push(p);
+            }
             let pg = f.principal_grant(&e.principal).ok_or_else(|| format!("no principal {}", e.principal))?;
             authz::check_device_grant(&pg, &e.grant)?;
             if f.enrolled() >= MAX_DEVICES {
@@ -1733,6 +1855,47 @@ mod tests {
         // The owner's console reaches only the owner's devices, by principal.
         assert_eq!(reg.revoke(&Caller::console(), &Grant::everything(), &bobs.id, NOW).unwrap_err(), format!("no device {}", bobs.id));
         assert_eq!(reg.list(&PrincipalId::owner()).unwrap().len(), 1, "a listing is the caller's principal's");
+    }
+
+    /// Group chat §2.1: the file may name guests beside the owner — each
+    /// holding exactly `guest` and no project — and still exactly one owner,
+    /// first, with everything. Any other principal is corruption, as before.
+    #[test]
+    fn a_file_may_name_guests_and_only_in_their_exact_shape() {
+        let d = dir("guests");
+        let reg = DeviceRegistry::open(&d);
+        phone(&reg, "Phone", 1, &[Read]);
+        let bret = new_guest_id();
+        let mut e = enrollment("Bret's MacBook", 2, Platform::Macos, grant(&[Guest], Projects::only(Vec::<String>::new())));
+        e.principal = bret.clone();
+        let guest = PrincipalRecord::guest(bret.clone(), "Bret", NOW);
+        // A device wider than `guest` is refused; the principal is not made.
+        let mut wide = e.clone();
+        wide.grant = grant(&[Guest, Read], Projects::only(Vec::<String>::new()));
+        assert!(reg.enroll_creating(wide, Some(guest.clone()), NOW).is_err());
+        assert!(reg.guests().unwrap().is_empty());
+        reg.enroll_creating(e, Some(guest), NOW).unwrap();
+        let good: Value = serde_json::from_slice(&fs::read(d.join(FILE)).unwrap()).unwrap();
+        assert_eq!(good["principals"][1], json!({"id": bret, "name": "Bret", "caps": ["guest"], "projects": [], "created_at": NOW}));
+        assert!(DevicesFile::parse(&serde_json::to_vec(&good).unwrap()).is_ok());
+        // The owner's record is what an older build reads: its six capabilities.
+        assert_eq!(good["principals"][0]["caps"], json!(["read", "write", "answer", "instruct", "stream", "admin"]));
+        let bent = |f: &dyn Fn(&mut Value)| {
+            let mut v = good.clone();
+            f(&mut v);
+            DevicesFile::parse(&serde_json::to_vec(&v).unwrap())
+        };
+        assert!(bent(&|v| v["principals"][1]["caps"] = json!(["guest", "read"])).is_err(), "a guest with more");
+        assert!(bent(&|v| v["principals"][1]["projects"] = json!("*")).is_err(), "a guest with projects");
+        assert!(bent(&|v| v["principals"][1]["id"] = json!("owner")).is_err(), "a second owner");
+        assert!(bent(&|v| v["principals"].as_array_mut().unwrap().reverse()).is_err(), "the owner not first");
+        assert!(bent(&|v| v["principals"][0]["caps"] = json!(["read", "write", "answer", "instruct", "stream", "admin", "guest"])).is_err(), "an owner holding guest");
+        assert!(bent(&|v| v["devices"][1]["caps"] = json!(["read"])).is_err(), "a guest's device wider than its guest");
+        // The owner's display name.
+        assert!(reg.set_owner_name("David").unwrap());
+        assert_eq!(reg.principal_name(&PrincipalId::owner()).as_deref(), Some("David"));
+        assert!(reg.set_owner_name("Dav\u{202e}id").is_err());
+        let _ = fs::remove_dir_all(&d);
     }
 
     /// §3.2: an `admin` device takes away from a peer, never adds, never

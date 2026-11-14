@@ -19,6 +19,7 @@ import { setTermScrollback, ShellPane, TerminalPane } from "./TerminalPane";
 import { newNotifier, onDone, onVisibility, onWaitingSnapshot, type NotifyMode } from "./notify";
 import { notify } from "./notifyhost";
 import { AgentViewSwitch, ChatPane } from "./ChatPane";
+import { LaneShareBar, LaneThread } from "./LaneShare";
 import { insertReference } from "./chat";
 import { DocsPane } from "./DocsPane";
 import { PlanPane } from "./PlanPane";
@@ -58,11 +59,15 @@ import {
   VIEW_LABEL, WS_COLORS, addableTo, arrivedRoot, idsMoved, idsStepped, projectDrop, projectsAddable, rootsMoved, rootsStepped, rootsWith, rootsWithout, springsTo, wsColorOf, wsProjectKey,
   type NavView, type WsColor, type WsDef, type WsHit, type WsList,
 } from "./workspaces";
-import { ideasBeta } from "./beta";
+import { groupChatBeta, ideasBeta } from "./beta";
+import { publishGroupChat } from "./betaLive";
 import { remoteHostLabel, remoteTitle, remoteWebUrl } from "./remote";
 import { PrsPane } from "./PrsPane";
 import { ageOf, prOfPlace, prsShown, prSummary, TAB_MAX_AGE_S, useProjectPrs } from "./prs";
 import { setSettingsOpener, useDeviceList } from "./remoteStore";
+import { GuestToasts, GuestUnder, SharedWithMe } from "./GuestNav";
+import { GuestSpace } from "./GuestSession";
+import { closeShare, useGuests } from "./guest";
 import logoUrl from "./assets/logo.png";
 import "./tokens.css";
 import "./App.css";
@@ -4251,6 +4256,8 @@ function App() {
   const [ws, setWs] = useState<Workspace | null>(null);
   const [err, setErr] = useState("");
   const [sel, setSel] = useState<{ repo: string; slug: string } | null>(null);
+  // A share open as a guest (group chat §7) stands in for a place.
+  const guestOpen = useGuests().open !== null;
   const [filter, setFilter] = useState("");
   // The sidebar's TRANSIENT half: is the unpinned overlay on screen right now.
   // Never persisted — a reveal is a peek, and an app that reopened holding one
@@ -4716,6 +4723,11 @@ function App() {
   // Settings → General → Beta features (beta.ts): the Ideas window and named
   // workspaces. Every surface of either asks THIS, never the settings key.
   const ideasOn = ideasBeta(settings);
+  // Group chat (beta): every surface of it in this window asks this, and the
+  // ones outside App (main.tsx's guest connections, RemoteLayer) hear it
+  // through betaLive. Off until the settings load, like every switch.
+  const groupChatOn = groupChatBeta(settings);
+  useEffect(() => publishGroupChat(groupChatOn), [groupChatOn]);
   // Turning it off closes an Ideas window that is open (a shim command, which
   // closes it the way its own close button does, so winstate records it shut
   // and the next launch does not bring it back). Only on a change seen in
@@ -6640,6 +6652,7 @@ function App() {
   /** The same verb addressed by slug — the nav filter's Enter has a row element,
    *  not a `Place` (see `enterFirstMatch`). */
   const selectSlug = (repo: string, slug: string) => {
+    closeShare();
     setSel({ repo, slug });
     setMenu(null);
     closeCtx();
@@ -6666,6 +6679,7 @@ function App() {
   const enterPlace = (repo: string, p: Place, opts?: { fresh?: boolean }) => {
     const live = liveAgents(p.agent_sessions);
     const provider = live.length === 1 ? live[0] : settings.default_provider;
+    closeShare();
     setSel({ repo, slug: p.slug });
     setActiveProvider(provider);
     setMenu(null);
@@ -8852,6 +8866,8 @@ function App() {
    *  rows as All projects; only its collapse is its own, its drag carries the
    *  workspace, and its ✕ takes it out of the workspace instead of
    *  unregistering it. */
+  // Where a guest host's rows go: under a local project of the same NAME.
+  const localNames = (ws?.projects ?? []).map((pv) => basename(pv.root));
   const ProjectNode = ({ pv, inWs }: { pv: ProjectView; inWs?: string }) => {
     const open = inWs ? !settings.ws_collapsed?.[wsProjectKey(inWs, pv.root)] : !collapsed[pv.root];
     const toggle = () => (inWs ? toggleWs(wsProjectKey(inWs, pv.root)) : toggleProject(pv.root));
@@ -9068,6 +9084,10 @@ function App() {
                 </div>
               );
             })()}
+            {/* A host this machine is a guest of: its owner's shares and
+                place names for a project of the same name (group chat §7),
+                after this machine's own places. */}
+            {groupChatOn && <GuestUnder projectName={basename(pv.root)} localNames={localNames} />}
           </div>
         )}
       </div>
@@ -9369,7 +9389,7 @@ function App() {
         onPointerEnter={() => navPointer("nav", true)}
         onPointerLeave={() => navPointer("nav", false)}
       >
-        <button className={"home-item" + (sel ? "" : " on")} onClick={() => { setSel(null); setMenu(null); closeCtx(); hideNav(); }}>
+        <button className={"home-item" + (sel || guestOpen ? "" : " on")} onClick={() => { closeShare(); setSel(null); setMenu(null); closeCtx(); hideNav(); }}>
           <HomeIcon /> Home
         </button>
         <div className="nav-head">
@@ -9434,6 +9454,7 @@ function App() {
                 </Fragment>
               ))}
           {projGapAt(null) && <div className="drop-gap proj" />}
+          {groupChatOn && <SharedWithMe localNames={localNames} />}
           </>}
         </div>
         {/* Overlay only. Pinned, the sidebar is furniture you have already
@@ -9464,6 +9485,10 @@ function App() {
         {/* tmux missing is an APP-level condition, not a per-place one, so it
             stays above the space header rather than under it. */}
         {!tmuxOk && <TmuxBanner onRecheck={recheckTmux} />}
+        {/* A share open as a guest covers the workbench rather than replacing
+            it: the terminals underneath keep their size, so tmux sees no
+            resize, and they are as they were when the share closes. */}
+        {groupChatOn && guestOpen && <div className="guest-overlay"><GuestSpace /></div>}
 
         {selected && sel && (
           <>
@@ -9766,6 +9791,8 @@ function App() {
                           </span>
                           {settingsReady && settings.chat_view && <AgentViewSwitch chat={chatOn} onChat={(on) => setChatView(viewKey, provider, on)} />}
                         </div>
+                        {groupChatOn && <LaneShareBar repo={sel.repo} slug={sel.slug} harness={provider} up={!!selectedAgents?.[provider].up} />}
+                        <div className="agent-row">
                         {/* The terminal stays mounted under the chat — hidden and
                             inert, at its own size — so no resize reaches the pty
                             and the way back keeps its scrollback. */}
@@ -9788,6 +9815,8 @@ function App() {
                               onOpenPath={(path, at) => openPathFromTerm(path, at.line, at.col)}
                               reloadToken={placesToken} onError={fail} />
                           )}
+                        </div>
+                        {groupChatOn && <LaneThread repo={sel.repo} slug={sel.slug} session={selectedAgents![provider].name} up={!!selectedAgents?.[provider].up} />}
                         </div>
                       </div>
                       );
@@ -10360,6 +10389,7 @@ function App() {
           routinely arrive from the same drop, and as two fixed elements at the
           same coordinates the undo banner sat exactly on top of the note it
           was supposed to accompany. Undo first in DOM = above on screen. */}
+      {groupChatOn && <GuestToasts />}
       {(err || notice || undo || planHint) && (
         <div className="float-stack">
           {/* One click back from a slip of the wrist — a drag rewrites declared

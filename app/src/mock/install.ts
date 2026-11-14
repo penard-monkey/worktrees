@@ -7,6 +7,7 @@
 // harness during a redesign.
 
 import type { MigrationRow, MigrationOutcome } from "../CodexMcpPanel";
+import { GUEST_HOST, guestHelpers, guestInvoke } from "./guest";
 import { agentSessions, initialWorkspace, sessionName, type Place, type Workspace } from "./fixtures";
 import { isHarness, type Harness } from "../harness";
 import { cloneSource, type CloneErrorKind, type CloneProgress } from "../clone";
@@ -51,10 +52,12 @@ const kimiAllowed = new Set<string>();
 /** The remote door's state in the harness: the hosts this "machine" is
  *  paired with, and the one the window drives. `?remote` starts with one
  *  chosen, so the path-taking acts can be seen greyed. */
-type MockHost = { id: string; name: string; addr: string; device_id: string; expiry: unknown; paired_at: number };
+type MockHost = { id: string; name: string; addr: string; device_id: string; expiry: unknown; paired_at: number; principal_id?: string; guest?: boolean };
 const mockRemote: { chosen: string | null; hosts: MockHost[] } = (() => {
-  const studio: MockHost = { id: "h_mockstudioaaaaaaaaaaaaaaaa", name: "Studio", addr: "192.168.1.20:7461", device_id: "d_studio", expiry: { idle_days: 30 }, paired_at: 1_790_000_000 };
-  return { chosen: new URLSearchParams(location.search).has("remote") ? studio.id : null, hosts: [studio] };
+  const studio: MockHost = { id: "h_mockstudioaaaaaaaaaaaaaaaa", name: "Studio", addr: "192.168.1.20:7461", device_id: "d_studio", expiry: { idle_days: 30 }, paired_at: 1_790_000_000, principal_id: "owner", guest: false };
+  // `?guest`: this machine is also a GUEST of David's Mac (group chat §7, mock/guest.ts).
+  const guest = new URLSearchParams(location.search).has("guest") ? [GUEST_HOST] : [];
+  return { chosen: new URLSearchParams(location.search).has("remote") ? studio.id : null, hosts: [studio, ...guest] };
 })();
 
 const kimiMissing = () => new URLSearchParams(location.search).get("kimi") === "missing";
@@ -2502,6 +2505,12 @@ function mockFacts(p: any) {
 
 type Args = Record<string, any>;
 async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
+  // A call on the guest connection (guestboot.ts's mock dial): David's host
+  // answers it as a guest's, and refuses every other row.
+  if (args.__guestHost !== undefined) {
+    const { __guestHost: _host, ...rest } = args;
+    return guestInvoke(cmd, rest, emitEvent);
+  }
   // `?agentinterrupt=old`: a host from before the row, which serve's dispatch
   // answers `unknown command: <cmd>` (the remote door passes it on unchanged).
   if (cmd === "agent_interrupt" && new URLSearchParams(location.search).get("agentinterrupt") === "old") throw `unknown command: ${cmd}`;
@@ -3138,6 +3147,8 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     case "remote_choose": {
       const id = (args.hostId ?? null) as string | null;
       if (id !== null && !mockRemote.hosts.some((h) => h.id === id)) throw `no host "${id}" is kept here`;
+      const g = mockRemote.hosts.find((h) => h.id === id && h.guest);
+      if (g) throw `${g.name} shares sessions with you as a guest: it cannot be this window's engine`;
       mockRemote.chosen = id;
       return null;
     }
@@ -5616,7 +5627,146 @@ Phase 3: Frontend pane and mock harness
       return false;
     case "devices_list":
       consoleOnly("devices_list");
-      return clone(mockDevices);
+      return clone(mockDevices.filter((d) => d.principal === "owner"));
+
+    // ── group chat: guests, shares, requests, threads (serve::shares, sharethread) ──
+    case "guests_list":
+      consoleOnly(cmd);
+      return mockGuests.map((g) => ({ ...g, devices: clone(mockDevices.filter((d) => d.principal === g.id)) }));
+    case "guest_remove": {
+      consoleOnly(cmd);
+      const g = mockGuests.find((x) => x.id === args.principal);
+      if (!g) throw `no guest ${args.principal}`;
+      const revoked: string[] = [];
+      for (const d of mockDevices) if (d.principal === g.id && d.revoked_at == null) { d.revoked_at = nowSec(); revoked.push(d.id); deviceEvent({ event: "revoked", subject: subj(d), by: { kind: "console" } }); }
+      const ids: string[] = [];
+      for (const sh of mockShares) if (sh.guests.some((x) => x.principal === g.id)) { sh.guests = sh.guests.filter((x) => x.principal !== g.id); ids.push(sh.id); threadEvent(sh.id, "removed", g.id); }
+      mockRequests = mockRequests.filter((r) => r.principal !== g.id);
+      sharesChanged("removed_guest");
+      return { revoked, shares: ids.length };
+    }
+    case "owner_set_name": {
+      consoleOnly(cmd);
+      const name = String(args.name ?? "").trim();
+      if (!name || name.length > 64) throw "a name is 1 to 64 characters";
+      if (mockOwnerName === name) return false;
+      mockOwnerName = name;
+      return true;
+    }
+    case "shares_all":
+      consoleOnly(cmd);
+      return { shares: clone(mockShares), hidden_projects: [...mockHidden], owner: mockOwnerName };
+    case "share_requests_list":
+      consoleOnly(cmd);
+      return mockRequests.filter((r) => !r.dismissed).map((r) => ({ id: r.id, principal: r.principal, name: mockGuests.find((g) => g.id === r.principal)?.name ?? null, project: r.project, slug: r.slug, note: r.note, at: r.at }));
+    case "share_request_dismiss": {
+      consoleOnly(cmd);
+      const r = mockRequests.find((x) => x.id === args.request && !x.dismissed);
+      if (!r) return false;
+      r.dismissed = true;
+      return true;
+    }
+    case "guest_places_hide": {
+      consoleOnly(cmd);
+      const root = String(args.project);
+      const had = mockHidden.has(root);
+      if (args.hidden) mockHidden.add(root); else mockHidden.delete(root);
+      return had !== !!args.hidden;
+    }
+    case "share_create": {
+      consoleOnly(cmd);
+      const repo = String(args.repo), slug = String(args.slug);
+      const place = findProject(repo)?.snapshot?.places.find((p) => p.slug === slug);
+      if (!place) throw `no such place: ${slug}`;
+      const live = Object.entries(place.agent_sessions ?? {}).find(([, a]) => (a as { up?: boolean }).up);
+      if (!live || mockQuery.get("share") === "unnamed") throw "no agent session is running in this place, or it has not named its session yet: start it, then share";
+      if (!["claude", "codex"].includes(live[0])) throw `${live[0]} sessions cannot be shared yet`;
+      if (mockShares.some((x) => x.project === repo && x.slug === slug)) throw `${slug} is shared already`;
+      const guests = (args.guests as string[]).map((id) => {
+        if (!mockGuests.some((g) => g.id === id)) throw `no guest ${id}`;
+        return { principal: id, state: "invited", since: nowSec() };
+      });
+      const sh: MockShare = { id: `s_${Math.random().toString(36).slice(2, 12).replace(/[^a-z0-9]/g, "a")}`, project: repo, slug, created_at: nowSec(), guests, binding: mockBinding(live[0]), ended: [] };
+      mockShares.push(sh);
+      mockRequests = mockRequests.map((r) => (r.project === repo && r.slug === slug && guests.some((g) => g.principal === r.principal) ? { ...r, dismissed: true } : r));
+      sharesChanged("shared", sh.id);
+      return clone(sh);
+    }
+    case "share_again": {
+      consoleOnly(cmd);
+      const sh = mockShare(args.share);
+      if (sh.binding?.state === "active") throw `share ${sh.id} is bound to a live session already`;
+      if (mockQuery.get("share") === "unnamed") throw "no agent session is running in this place, or it has not named its session yet: start it, then share";
+      if (sh.binding) sh.ended.push(sh.binding);
+      sh.binding = mockBinding(sh.binding?.harness ?? "claude");
+      threadEvent(sh.id, "shared_again");
+      sharesChanged("again", sh.id);
+      return clone(sh);
+    }
+    case "share_allow": {
+      consoleOnly(cmd);
+      const sh = mockShare(args.share);
+      const g = sh.guests.find((x) => x.principal === args.principal);
+      if (!g) throw `${args.principal} is not on share ${sh.id}`;
+      if (g.state === "allowed") return false;
+      g.state = "allowed"; g.since = nowSec();
+      threadEvent(sh.id, "joined", g.principal);
+      sharesChanged("allowed", sh.id);
+      return true;
+    }
+    case "share_remove_guest": {
+      consoleOnly(cmd);
+      const sh = mockShare(args.share);
+      const before = sh.guests.length;
+      sh.guests = sh.guests.filter((x) => x.principal !== args.principal);
+      if (sh.guests.length === before) return false;
+      threadEvent(sh.id, "removed", String(args.principal));
+      sharesChanged("removed_guest", sh.id);
+      return true;
+    }
+    case "share_stop": {
+      consoleOnly(cmd);
+      const n = mockShares.length;
+      mockShares = mockShares.filter((x) => x.id !== args.share);
+      delete mockThreads[String(args.share)];
+      if (mockShares.length !== n) sharesChanged("stopped", String(args.share));
+      return mockShares.length !== n;
+    }
+    case "share_used": {
+      consoleOnly(cmd);
+      const sh = mockShare(args.share);
+      if (sh.binding?.state !== "active") throw `share ${sh.id} has no live session bound: Share again first`;
+      if (Number(args.first) > Number(args.last)) throw "first is after last";
+      const e = threadPush(sh.id, { kind: "shared_with_agent", first: Number(args.first), last: Number(args.last) });
+      sharesChanged("used", sh.id);
+      return e;
+    }
+    case "thread_read": {
+      const sh = mockShare(args.share);
+      const after = Number(args.after ?? 0);
+      const limit = Math.min(200, Math.max(1, Number(args.limit ?? 200)));
+      const all = mockThreads[sh.id]?.entries ?? [];
+      const rest = all.filter((e) => e.seq > after);
+      return { share: sh.id, entries: rest.slice(0, limit).map(threadView), more: rest.length > limit, last: (mockThreads[sh.id]?.next ?? 1) - 1 };
+    }
+    case "thread_post": {
+      const sh = mockShare(args.share);
+      const id = String(args.id ?? "");
+      if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) throw "invalid args: a post id is 1 to 64 of A-Z a-z 0-9 - _";
+      const text = String(args.text ?? "").replace(/\r\n?/g, "\n");
+      if (!text.trim()) throw "text is empty";
+      if (new TextEncoder().encode(text).length > 8192) throw `text is ${new TextEncoder().encode(text).length} bytes; a message may be up to 8192`;
+      if (/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/.test(text)) throw "text contains a control character (tab, escape…); only line breaks are kept";
+      if (mockQuery.get("thread") === "flaky" && !mockFlaked.has(id)) { mockFlaked.add(id); throw "timed out"; }
+      const old = (mockThreads[sh.id]?.entries ?? []).find((e) => e.kind === "post" && e.id === id && e.principal === "owner");
+      if (old) {
+        if (old.text !== text) throw `post ${id} was already made with other text; a retry sends the same text, a new post a new id`;
+        return threadView(old);
+      }
+      const e = threadPush(sh.id, { kind: "post", id, principal: "owner", text });
+      sharesChanged("post", sh.id);
+      return e;
+    }
     case "device_rename": {
       consoleOnly("device_rename");
       const d = mockDevice(args.id);
@@ -5689,13 +5839,28 @@ Phase 3: Frontend pane and mock harness
       consoleOnly("pair_begin");
       if (!mockAccess.on || mockAccess.paused) throw "remote access is off: a device pairs over the remote listener's address, so turn remote access on first";
       if (mockDevices.filter((d) => d.revoked_at == null).length >= 16) throw "16 devices are enrolled; revoke one before pairing another";
-      const projects = args.projects as "*" | string[];
+      // A guest invite (group chat §2.1): a name the host chose, or a guest it has; `guest` and no project.
+      const inv = args.invite as undefined | { name?: string; guest?: string };
+      let invite: MockInvite | null = null;
+      if (inv) {
+        if (inv.name !== undefined) {
+          const name = String(inv.name).trim();
+          if (!name || name.length > 64) throw "a name is 1 to 64 characters";
+          if (mockGuests.some((g) => g.name === name)) throw `a guest named "${name}" exists already: invite them by id`;
+          invite = { kind: "new", id: `g_${Math.random().toString(36).slice(2, 12)}`, name };
+        } else {
+          const g = mockGuests.find((x) => x.id === inv.guest);
+          if (!g) throw `no guest ${inv.guest}`;
+          invite = { kind: "existing", id: g.id, name: g.name };
+        }
+      }
+      const projects = (invite ? [] : args.projects) as "*" | string[];
       if (projects !== "*") for (const r of projects) if (!ws.projects.some((p) => p.root === r)) throw `not a registered project: ${r}`;
       if (mockPair.window) closeWindow("superseded");
       const expires_at = nowSec() + 120;
       const secret = Array.from({ length: 26 }, (_, i) => "abcdefghijklmnopqrstuvwxyz234567"[(i * 7 + expires_at) % 32]).join("");
       const uri = `worktrees-pair:v1?addr=${mockAccess.address}:51877&pin=${MOCK_PIN}&secret=${secret}&host=Demo-MacBook-Pro&exp=${expires_at}`;
-      mockPair.window = { uri, expires_at, grant: { capabilities: (args.caps as string[]).slice(), projects }, expiry: args.expiry ?? { idle_days: 30 }, phase: { state: "open" } };
+      mockPair.window = { uri, expires_at, grant: { capabilities: invite ? ["guest"] : (args.caps as string[]).slice(), projects }, expiry: args.expiry ?? { idle_days: 30 }, phase: { state: "open" }, invite };
       mockPair.timer = window.setTimeout(() => closeWindow("expired"), 120_000);
       deviceEvent({ event: "pairing_opened", for_principal: "owner", expires_at });
       return { uri, expires_at, pin: MOCK_PIN, host: "Demo-MacBook-Pro", qr: mockQr(uri) };
@@ -5715,8 +5880,9 @@ Phase 3: Frontend pane and mock harness
       deviceEvent({ event: "pairing_decided", allow: !!args.allow });
       if (!args.allow) { closeWindow("denied"); return null; }
       const r = w.phase.request;
+      if (w.invite && !mockGuests.some((g) => g.id === w.invite!.id)) mockGuests.push({ id: w.invite.id, name: w.invite.name, created_at: nowSec() });
       const rec: MockDevice = {
-        id: `d_${Math.random().toString(36).slice(2, 12)}`, principal: "owner", name: r.name, platform: r.platform,
+        id: `d_${Math.random().toString(36).slice(2, 12)}`, principal: w.invite?.id ?? "owner", name: r.name, platform: r.platform,
         spki_sha256: "b".repeat(64), stepup_spki_sha256: r.platform === "ios" || r.platform === "ipados" ? "c".repeat(64) : null,
         stepup_required: r.platform === "ios" || r.platform === "ipados",
         caps: w.grant.capabilities, projects: w.grant.projects, expiry: w.expiry, enrolled_at: nowSec(),
@@ -5804,12 +5970,17 @@ Phase 3: Frontend pane and mock harness
         const raw = sessionStorage.getItem(MOCK_SETTINGS_KEY);
         if (raw) return JSON.parse(raw);
       } catch { /* private mode */ }
-      // ?beta=ideas — a fresh tab with Settings → Beta features → Ideas on
-      // (beta.ts). Off by default here too, as in the app. Only
-      // while nothing is stored, so turning it off in the sheet sticks.
-      if (new URLSearchParams(location.search).get("beta")?.split(",").includes("ideas")) {
-        const m = /layout=(left|right)-(left|right)/.exec(location.search);
-        return { beta_ideas: true, ...(m ? { places_side: m[1], dock_side: m[2], settings_rev: 4 } : {}) };
+      // ?beta=ideas, ?beta=group_chat (or both, comma-separated) — a fresh
+      // tab with those Settings → Beta features on (beta.ts). Off by default
+      // here too, as in the app. Only while nothing is stored, so turning one
+      // off in the sheet sticks.
+      {
+        const ideas = new URLSearchParams(location.search).get("beta")?.split(",").includes("ideas");
+        const groupChat = new URLSearchParams(location.search).get("beta")?.split(",").includes("group_chat");
+        if (ideas || groupChat) {
+          const m = /layout=(left|right)-(left|right)/.exec(location.search);
+          return { ...(ideas ? { beta_ideas: true } : {}), ...(groupChat ? { beta_group_chat: true } : {}), ...(m ? { places_side: m[1], dock_side: m[2], settings_rev: 4 } : {}) };
+        }
       }
       // ?layout=<places>-<dock> (e.g. left-left: reference left, agent right) —
       // a fresh tab in one of Settings → Layout's four shapes. Only while
@@ -6054,8 +6225,46 @@ type MockPairPhase =
   | { state: "open" }
   | { state: "attempt"; peer: string }
   | { state: "pending"; request: { name: string; platform: MockDevice["platform"]; code: string; peer: string }; decide_by: number };
+// ── group chat (serve::shares, sharethread): guests, shares, requests, threads ──
+type MockInvite = { kind: "new" | "existing"; id: string; name: string };
+type MockGuest = { id: string; name: string; created_at: number };
+type MockBinding = { harness: string; session: string; transcript: string; bound_at: number; state: "active" | "ended"; ended_offset?: number; ended_at?: number };
+type MockShare = { id: string; project: string; slug: string; created_at: number; guests: { principal: string; state: string; since: number }[]; binding: MockBinding | null; ended: MockBinding[] };
+type MockThreadEntry = { seq: number; at: number; kind: string; id?: string; principal?: string; device?: string; text?: string; first?: number; last?: number };
+let mockOwnerName = "owner";
+const mockGuests: MockGuest[] = mockQuery.get("guests") === "0" ? [] : [{ id: "g_bret00001", name: "Bret", created_at: epochNow() - 2 * DAY }];
+let mockShares: MockShare[] = [];
+let mockRequests: { id: string; principal: string; project: string | null; slug: string; note: string | null; at: number; dismissed?: boolean }[] = [];
+const mockHidden = new Set<string>();
+const mockThreads: Record<string, { next: number; entries: MockThreadEntry[] }> = {};
+const mockFlaked = new Set<string>();
+function mockBinding(harness: string): MockBinding {
+  return { harness, session: `sess-${Math.random().toString(36).slice(2, 10)}`, transcript: "/Users/demo/.claude/projects/x/s.jsonl", bound_at: epochNow(), state: "active" };
+}
+function mockShare(id: unknown): MockShare {
+  const sh = mockShares.find((x) => x.id === id);
+  if (!sh) throw `no share ${id}`;
+  return sh;
+}
+function threadView(e: MockThreadEntry) {
+  const name = e.principal === "owner" ? mockOwnerName : e.principal ? mockGuests.find((g) => g.id === e.principal)?.name ?? null : undefined;
+  const dev = e.device ? mockDevices.find((d) => d.id === e.device)?.name ?? null : undefined;
+  return { ...e, ...(name !== undefined ? { name } : {}), ...(dev !== undefined ? { device_name: dev } : {}) };
+}
+function threadPush(share: string, e: Omit<MockThreadEntry, "seq" | "at">) {
+  const t = (mockThreads[share] ??= { next: 1, entries: [] });
+  const full = { ...e, seq: t.next++, at: epochNow() };
+  t.entries.push(full);
+  return threadView(full);
+}
+function threadEvent(share: string, kind: string, principal?: string) {
+  threadPush(share, { kind, ...(principal ? { principal } : {}) });
+}
+function sharesChanged(what: string, share?: string) {
+  emitEvent("shares:changed", { what, ...(share ? { share } : {}) });
+}
 const mockPair: {
-  window: null | { uri: string; expires_at: number; grant: { capabilities: string[]; projects: "*" | string[] }; expiry: MockExpiry; phase: MockPairPhase };
+  window: null | { uri: string; expires_at: number; grant: { capabilities: string[]; projects: "*" | string[] }; expiry: MockExpiry; phase: MockPairPhase; invite?: MockInvite | null };
   last: unknown;
   timer: number | null;
 } = { window: null, last: { state: "none" }, timer: null };
@@ -6064,7 +6273,7 @@ function mockPairStatus() {
   if (!w) return clone(mockPair.last);
   if (w.phase.state === "open") return { state: "open", uri: w.uri, expires_at: w.expires_at };
   if (w.phase.state === "attempt") return { state: "attempt", peer: w.phase.peer, expires_at: w.expires_at };
-  return { state: "pending", request: { ...w.phase.request, grant: w.grant, expiry: w.expiry }, decide_by: w.phase.decide_by };
+  return { state: "pending", request: { ...w.phase.request, grant: w.grant, expiry: w.expiry, ...(w.invite ? { invite: w.invite } : {}) }, decide_by: w.phase.decide_by };
 }
 function closeWindow(ended: string, device: string | null = null) {
   if (mockPair.timer !== null) window.clearTimeout(mockPair.timer);
@@ -6295,6 +6504,7 @@ let mockNotifyGranted = new URLSearchParams(location.search).get("notify") === "
   send: (title: string, body: string) => { mockNotified.push({ title, body }); },
 };
 (window as any).__mock = {
+  ...guestHelpers,
   // ── ideas: what another editor, Finder or a person does to the folder ──
   /** Every idea_write the page sent, in order. */
   ideaWrites: () => mockIdeaWrites.slice(),
@@ -6338,6 +6548,49 @@ let mockNotifyGranted = new URLSearchParams(location.search).get("notify") === "
   },
   /** The remote-access and device rows the page has asked for so far. */
   accessCalls: () => [...accessCalls],
+  /** Group chat: what another person's Mac does, which no click here can.
+   *  `guestJoin` asks to join (`share_join`); `guestPost` posts in a thread
+   *  as the guest; `guestRequest` asks for a share of a place; `shareEnd`
+   *  ends the binding as a `/clear` would. All emit `shares:changed`. */
+  guestJoin(share?: string, principal = "g_bret00001") {
+    const sh = share ? mockShare(share) : mockShares[0];
+    const g = sh?.guests.find((x) => x.principal === principal);
+    if (!g) return null;
+    if (g.state === "invited") { g.state = "asked"; g.since = epochNow(); }
+    sharesChanged("asked", sh.id);
+    return g.state;
+  },
+  guestPost(text: string, share?: string, principal = "g_bret00001") {
+    const sh = share ? mockShare(share) : mockShares[0];
+    if (!sh) return null;
+    const dev = mockDevices.find((d) => d.principal === principal && d.revoked_at == null);
+    const e = threadPush(sh.id, { kind: "post", id: `g_${Math.random().toString(36).slice(2, 10)}`, principal, ...(dev ? { device: dev.id } : {}), text });
+    sharesChanged("post", sh.id);
+    return e;
+  },
+  guestRequest(repo: string, slug: string, note: string | null = null, principal = "g_bret00001") {
+    const r = { id: `r_${Math.random().toString(36).slice(2, 10)}`, principal, project: repo, slug, note, at: epochNow() };
+    mockRequests.push(r);
+    sharesChanged("request");
+    return r.id;
+  },
+  shareEnd(share?: string) {
+    const sh = share ? mockShare(share) : mockShares[0];
+    if (!sh?.binding || sh.binding.state !== "active") return false;
+    sh.binding = { ...sh.binding, state: "ended", ended_offset: 4096, ended_at: epochNow() };
+    threadEvent(sh.id, "session_ended");
+    sharesChanged("ended", sh.id);
+    return true;
+  },
+  /** A guest device paired under `principal` (for the Guests list). */
+  guestDevice(name = "Bret's MacBook", principal = "g_bret00001") {
+    const rec: MockDevice = {
+      id: `d_${Math.random().toString(36).slice(2, 12)}`, principal, name, platform: "macos", spki_sha256: "e".repeat(64), stepup_spki_sha256: null,
+      stepup_required: false, caps: ["guest"], projects: [], expiry: { idle_days: 30 }, enrolled_at: nowSec(), last_seen: nowSec(), last_addr: "100.80.1.2", disabled: null, revoked_at: null,
+    };
+    mockDevices.push(rec);
+    return rec.id;
+  },
   /** A device scans the open pairing window and proves its secret: the
    *  request the host is asked about (§2.2 step 6), with its comparison code.
    *  Unreachable by clicking — it comes from ANOTHER machine. With no window

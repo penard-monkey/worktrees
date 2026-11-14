@@ -46,11 +46,32 @@ pub enum Capability {
     Stream,
     /// Host-wide configuration that cannot widen agent autonomy.
     Admin,
+    /// A guest's (group chat §2): the guest rows alone — what is shared with
+    /// this principal, the owner's unhidden place names, a request for a
+    /// share. Never on a row that reaches an agent, a file, a terminal or a
+    /// prompt; a drift test generated from serve's table holds that. Not one
+    /// of the owner's ([`Capability::ALL`]): a guest holds exactly this, and
+    /// the owner holds everything else.
+    Guest,
 }
 
 impl Capability {
+    /// Every capability the OWNER holds: [`Caps::ALL`]. `guest` is not one —
+    /// the owner's record in `devices.json` lists these six, exactly as a
+    /// build from before guests reads it.
     pub const ALL: [Capability; 6] =
         [Capability::Read, Capability::Write, Capability::Answer, Capability::Instruct, Capability::Stream, Capability::Admin];
+
+    /// Every capability there is, `guest` included: what a name parses to.
+    pub const EVERY: [Capability; 7] = [
+        Capability::Read,
+        Capability::Write,
+        Capability::Answer,
+        Capability::Instruct,
+        Capability::Stream,
+        Capability::Admin,
+        Capability::Guest,
+    ];
 
     /// The wire and file spelling: `read`, `write`, …
     pub fn name(self) -> &'static str {
@@ -61,11 +82,12 @@ impl Capability {
             Capability::Instruct => "instruct",
             Capability::Stream => "stream",
             Capability::Admin => "admin",
+            Capability::Guest => "guest",
         }
     }
 
     pub fn parse(s: &str) -> Option<Capability> {
-        Capability::ALL.into_iter().find(|c| c.name() == s)
+        Capability::EVERY.into_iter().find(|c| c.name() == s)
     }
 
     fn bit(self) -> u8 {
@@ -88,7 +110,10 @@ pub struct Caps(u8);
 
 impl Caps {
     pub const NONE: Caps = Caps(0);
+    /// The owner's: every capability but `guest` ([`Capability::ALL`]).
     pub const ALL: Caps = Caps(0b11_1111);
+    /// A guest principal's whole grant: `guest` and nothing else.
+    pub const GUEST: Caps = Caps(1 << 6);
 
     pub fn of(caps: &[Capability]) -> Caps {
         Caps(caps.iter().fold(0, |b, c| b | c.bit()))
@@ -108,7 +133,7 @@ impl Caps {
     }
 
     pub fn iter(self) -> impl Iterator<Item = Capability> {
-        Capability::ALL.into_iter().filter(move |c| self.has(*c))
+        Capability::EVERY.into_iter().filter(move |c| self.has(*c))
     }
 }
 
@@ -669,9 +694,20 @@ mod tests {
         assert!(!Requirement::Never.met_by(Caps::ALL, true), "nor is the console enough for never");
     }
 
+    /// `guest` is a capability of its own, outside the owner's set: the
+    /// owner's grant does not hold it, and a guest's holds nothing else.
+    #[test]
+    fn guest_is_outside_the_owners_capabilities() {
+        assert!(!Grant::everything().allows(Guest));
+        assert_eq!(Caps::of(&[Guest]), Caps::GUEST);
+        assert!(!Caps::GUEST.within(Caps::ALL) && Caps::GUEST.iter().eq([Guest]));
+        assert_eq!(serde_json::to_value(Caps::GUEST).unwrap(), serde_json::json!(["guest"]));
+        assert_eq!(serde_json::to_value(Caps::ALL).unwrap(), serde_json::json!(["read", "write", "answer", "instruct", "stream", "admin"]));
+    }
+
     #[test]
     fn capabilities_have_one_spelling_each() {
-        for c in Capability::ALL {
+        for c in Capability::EVERY {
             assert_eq!(Capability::parse(c.name()), Some(c));
             assert_eq!(serde_json::to_value(c).unwrap(), serde_json::json!(c.name()));
         }

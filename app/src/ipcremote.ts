@@ -33,7 +33,13 @@ import type { Channel, Door } from "./ipc";
 import type { Sock } from "./ipcws";
 
 /** What the shim tells the page about a host: never its pin, never a key. */
-export type HostSummary = { id: string; name: string; addr: string; device_id: string; expiry: unknown; paired_at: number };
+export type HostSummary = { id: string; name: string; addr: string; device_id: string; expiry: unknown; paired_at: number;
+  /** The host's id for this machine's person: `owner`, or a guest's `g_` id.
+   *  Absent from a shim that predates it. */
+  principal_id?: string;
+  /** This machine is a GUEST of the host (group chat §7): never the window's
+   *  engine. Absent from a shim that predates it. */
+  guest?: boolean };
 
 /** One message on `remote_connect`'s channel. */
 export type PipeMsg = { frame: string } | { closed: string };

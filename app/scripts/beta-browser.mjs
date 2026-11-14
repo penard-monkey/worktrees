@@ -18,7 +18,8 @@
 //     Ideas tab `open_companion` opened is closed and both are gone.
 //   - Settings: Beta features is not drawn in Beginner, is in Advanced, the
 //     header's search finds it by "beta", and it draws ONE checkbox per beta
-//     feature (beta.ts BETA_FEATURES), today just "Ideas".
+//     feature (beta.ts BETA_FEATURES): "Ideas" and "Group chat"
+//     (groupchat-beta-browser.mjs drives the second).
 const { chromium, webkit } = await import(process.env.PLAYWRIGHT_MODULE ?? "playwright");
 const BASE = process.env.BETA_MOCK_URL ?? "http://localhost:1468";
 
@@ -98,7 +99,7 @@ async function run(engine, name) {
   await setMode(page, "advanced");
   ok(await has(page, ".settings-body [data-sec=beta]"), `${tag} Advanced: Beta features is drawn on General`);
   const boxes = await page.$$eval(".settings-body [data-sec=beta] input[type=checkbox]", (b) => b.map((x) => x.closest("label")?.innerText.trim()));
-  ok(JSON.stringify(boxes) === JSON.stringify(["Ideas"]), `${tag} …one checkbox per beta feature, today just Ideas: ${JSON.stringify(boxes)}`);
+  ok(JSON.stringify(boxes) === JSON.stringify(["Ideas", "Group chat"]), `${tag} …one checkbox per beta feature, Ideas and Group chat: ${JSON.stringify(boxes)}`);
   ok(!(await page.evaluate(() => document.querySelector(".settings-body [data-sec=beta]")?.innerText.includes("workspaces"))), `${tag} …and it no longer mentions workspaces`);
   await page.fill(".settings-search-input", "beta");
   await page.waitForTimeout(200);
