@@ -96,6 +96,14 @@ impl Default for SharesFile {
 /// a make under the same name kept it), so the directory's BIRTH time is part
 /// of it too — `statx` on Linux, `st_birthtime` on macOS. A filesystem that
 /// records no birth time falls back to device and inode.
+///
+/// The DEVICE number is not compared when both sides carry a birth time
+/// ([`PlaceId::same`]): macOS numbers the APFS data volume anew at boot, so
+/// one place read `dev=16777234 ino=282622` before a reboot and
+/// `dev=16777231 ino=282622` after it, same birth (measured on macOS 27.0.1,
+/// 2026-11-14), and every share was removed at serve's next start. `dev` is
+/// still written, so older files read and a record with no birth time keeps
+/// the (dev, ino) rule.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlaceId {
@@ -111,6 +119,16 @@ impl PlaceId {
         let m = fs::metadata(dir).ok().filter(|m| m.is_dir())?;
         let born_ns = m.created().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).and_then(|d| u64::try_from(d.as_nanos()).ok());
         Some(PlaceId { dev: m.dev(), ino: m.ino(), born_ns })
+    }
+
+    /// The same directory: the inode, and the birth time when both sides
+    /// record one, else the device (see the type's doc for why not both).
+    pub fn same(&self, other: &PlaceId) -> bool {
+        self.ino == other.ino
+            && match (self.born_ns, other.born_ns) {
+                (Some(a), Some(b)) => a == b,
+                _ => self.dev == other.dev,
+            }
     }
 }
 
@@ -369,7 +387,7 @@ impl Shares {
             return Err("a share names at least one guest".into());
         }
         self.mutate(|f| {
-            if let Some(s) = f.shares.iter().find(|s| s.project == project && s.slug == slug && s.place == place) {
+            if let Some(s) = f.shares.iter().find(|s| s.project == project && s.slug == slug && s.place.same(&place)) {
                 return Err(format!("this place is shared already ({}): add a guest with share_allow, or bind the live session with share_again", s.id));
             }
             let mut id = new_id("s_");
@@ -733,11 +751,16 @@ pub fn bindable(root: &str, slug: &str) -> Result<Live, String> {
     }
 }
 
+/// Whether the directory at the share's slug is the place it shared.
+pub fn place_is_there(s: &Share) -> bool {
+    PlaceId::of(&place_dir(&s.project, &s.slug)).is_some_and(|p| p.same(&s.place))
+}
+
 /// A share's lane now (§3.3), as [`Shares::reconcile`] judges it. `roots`
 /// are every registered project's registry keys.
 pub fn lane_now(roots: &[String], s: &Share) -> Lane {
     use worktrees_api::agents::LiveSession;
-    if !roots.contains(&s.project) || PlaceId::of(&place_dir(&s.project, &s.slug)) != Some(s.place) {
+    if !roots.contains(&s.project) || !place_is_there(s) {
         return Lane::Gone;
     }
     match live_session(&s.project, &s.slug) {
@@ -919,13 +942,29 @@ pub mod rows {
         Ok(gone)
     }
 
+    /// *Use these* happened (§5): the owner's confirmed send of posts
+    /// `first..=last`, recorded as a thread event every reader sees. Only on
+    /// a share whose binding is active: an ended one has no session to use
+    /// them in until *Share again*.
+    pub fn used(cx: &Call, share: String, first: u64, last: u64) -> Result<Value, String> {
+        let s = store(cx).read()?.shares.into_iter().find(|s| s.id == share).ok_or_else(|| format!("no share {share}"))?;
+        if !s.binding.as_ref().is_some_and(Binding::is_active) {
+            return Err(format!("share {share} has no live session bound: Share again first"));
+        }
+        let e = threads(cx).shared_with_agent(&share, first, last, now())?;
+        changed(&*cx.ctx.host, "used", Some(&share), &crate::serve::sharethread::rows::allowed(&s), Some(e.seq));
+        serde_json::to_value(e).map_err(|e| e.to_string())
+    }
+
     pub fn hide(cx: &Call, project: String, hidden: bool) -> Result<bool, String> {
         store(cx).hide(&project, hidden)
     }
 
     pub fn all(cx: &Call) -> Result<Value, String> {
         let f = store(cx).read()?;
-        Ok(json!({ "shares": f.shares, "hidden_projects": f.hidden_projects }))
+        // `owner`: the name guests see the owner by (`owner_set_name`), which
+        // the owner's *Use these* line names (§5).
+        Ok(json!({ "shares": f.shares, "hidden_projects": f.hidden_projects, "owner": owner_name(cx) }))
     }
 
     pub fn requests(cx: &Call) -> Result<Value, String> {
@@ -1146,11 +1185,73 @@ mod tests {
         // The place removed and made again under the same slug (serve down).
         remake(&feat);
         assert!(s.place.born_ns.is_some(), "this filesystem records no birth time: {:?}", s.place);
-        assert_ne!(PlaceId::of(&feat), Some(s.place));
+        assert!(!PlaceId::of(&feat).unwrap().same(&s.place));
         // The live check: what serve's poll hands it.
-        let check = |sh: &Share| if PlaceId::of(&place_dir(&sh.project, &sh.slug)) == Some(sh.place) { Lane::Paused } else { Lane::Gone };
-        assert_eq!(lab.shares.reconcile(NOW, &check).unwrap(), vec![Change::Removed { share: s.id }]);
+        assert_eq!(lab.shares.reconcile(NOW, &place_check).unwrap(), vec![Change::Removed { share: s.id }]);
         assert!(lab.shares.read().unwrap().shares.is_empty());
+    }
+
+    /// `lane_now`'s place half, as serve's poll hands it to `reconcile`.
+    fn place_check(sh: &Share) -> Lane {
+        if place_is_there(sh) { Lane::Paused } else { Lane::Gone }
+    }
+
+    /// Rewrite the stored identity of the only share, as another boot's
+    /// numbering of the same volume would leave it.
+    fn restamp(lab: &Lab, f: impl FnOnce(&mut PlaceId)) {
+        lab.shares.mutate(|file| {
+            f(&mut file.shares[0].place);
+            Ok(())
+        }).unwrap();
+    }
+
+    /// macOS renumbers the APFS data volume at boot: the same place, same
+    /// inode and birth, under another device number is the same place, and
+    /// its share survives (measured 2026-11-14: a reboot removed every share).
+    #[test]
+    fn a_share_survives_the_volume_being_renumbered_at_boot() {
+        let lab = Lab::new("reboot");
+        let s = lab.share(&lab.session("a", 1));
+        assert!(s.place.born_ns.is_some(), "this filesystem records no birth time: {:?}", s.place);
+        restamp(&lab, |p| p.dev = p.dev.wrapping_add(3));
+        assert_ne!(lab.only().place, s.place);
+        assert_eq!(lab.shares.reconcile(NOW, &place_check).unwrap(), Vec::<Change>::new());
+        assert_eq!(lab.only().id, s.id);
+        // And sharing it again is "shared already", not a second share.
+        let e = lab.shares.create(&lab.root, "feat", lab.place, &[bret()], &lab.session("b", 1), NOW).unwrap_err();
+        assert!(e.contains("shared already"), "{e}");
+    }
+
+    /// A removed place made again under the same slug is another place even
+    /// when the filesystem hands it the old inode, and whatever the device
+    /// number says: the birth decides.
+    #[test]
+    fn a_remade_place_with_the_old_inode_is_still_gone() {
+        let lab = Lab::new("reino");
+        let s = lab.share(&lab.session("a", 1));
+        let feat = Path::new(&lab.root).join(".worktrees/feat");
+        remake(&feat);
+        let now = PlaceId::of(&feat).unwrap();
+        assert!(s.place.born_ns.is_some() && now.born_ns.is_some(), "no birth time: {:?}", s.place);
+        assert_ne!(now.born_ns, s.place.born_ns);
+        // Stored as if the inode had been reused, under another device number.
+        restamp(&lab, |p| {
+            p.ino = now.ino;
+            p.dev = now.dev.wrapping_add(1);
+        });
+        assert_eq!(lab.shares.reconcile(NOW, &place_check).unwrap(), vec![Change::Removed { share: s.id }]);
+    }
+
+    /// A record from a filesystem with no birth time keeps the old rule: a
+    /// different device is another place.
+    #[test]
+    fn with_no_birth_time_the_device_still_decides() {
+        let lab = Lab::new("noborn");
+        let s = lab.share(&lab.session("a", 1));
+        restamp(&lab, |p| p.born_ns = None);
+        assert_eq!(lab.shares.reconcile(NOW, &place_check).unwrap(), Vec::<Change>::new(), "same dev and ino, no birth: the same place");
+        restamp(&lab, |p| p.dev = p.dev.wrapping_add(1));
+        assert_eq!(lab.shares.reconcile(NOW, &place_check).unwrap(), vec![Change::Removed { share: s.id }]);
     }
 
     #[test]
@@ -1456,6 +1557,30 @@ pub(crate) mod serve_tests {
         TEST_LIVE.lock().unwrap().insert(place_dir(&h.a, "other"), LiveSession::Unsupported("Kimi"));
         let e = h.console("share_create", json!({"repo": h.a, "slug": "other", "guests": [bret]})).unwrap_err();
         assert!(e.as_str().unwrap().contains("Kimi sessions cannot be shared yet"), "{e}");
+    }
+
+    /// §5: *Use these* is recorded by `share_used` alone, as a
+    /// `shared_with_agent` event every allowed reader sees, and only while a
+    /// live session is bound; it is the console's, never a guest's.
+    #[test]
+    fn share_used_records_the_use_in_the_thread_and_only_on_a_live_binding() {
+        let h = Host::new("used");
+        h.live("feat", "s-old", 10);
+        let bret = Host::principal(&h.bret);
+        let id = h.console("share_create", json!({"repo": h.a, "slug": "feat", "guests": [bret]})).unwrap()["id"].as_str().unwrap().to_string();
+        h.console("share_allow", json!({"share": id, "principal": bret})).unwrap();
+        h.run(&h.bret, "thread_post", json!({"share": id, "id": "p1", "text": "try the cache"})).unwrap();
+        let e = h.console("share_used", json!({"share": id, "first": 2, "last": 2})).unwrap();
+        assert_eq!((e["kind"].clone(), e["first"].clone(), e["last"].clone()), (json!("shared_with_agent"), json!(2), json!(2)));
+        let page = h.run(&h.bret, "thread_read", json!({"share": id})).unwrap();
+        assert_eq!(page["entries"].as_array().unwrap().last().unwrap()["kind"], json!("shared_with_agent"));
+        assert!(h.run(&h.bret, "share_used", json!({"share": id, "first": 2, "last": 2})).is_err(), "a guest never records a use");
+        assert!(h.console("share_used", json!({"share": id, "first": 3, "last": 2})).is_err(), "first after last");
+        // The binding ends: no session to use them in until Share again.
+        h.live("feat", "s-new", 5);
+        h.poll();
+        let e = h.console("share_used", json!({"share": id, "first": 2, "last": 2})).unwrap_err();
+        assert!(e.as_str().unwrap().contains("Share again first"), "{e}");
     }
 
     /// §8: removing the lane with serve up (the poll) or down (the next
