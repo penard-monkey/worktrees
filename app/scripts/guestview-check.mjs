@@ -106,6 +106,7 @@ const seqs = (ts) => ts.map((t) => `${t.seq}:${t.user}`);
   expect("a poll's page replaces the turns it covers and keeps the older ones", seqs(R.mergeNewest(held, [T(4), T(3, "u3'"), T(2, "u2'")])), ["0:u0", "1:u1", "2:u2'", "3:u3'", "4:u4"]);
   expect("an empty page changes nothing", seqs(R.mergeNewest(held, [])), seqs(held));
   expect("the first page is the newest, oldest first", seqs(R.mergeNewest([], [T(9), T(8)])), ["8:u8", "9:u9"]);
+  check(R.leavesGap([T(0), T(1)], [T(9), T(8)]) && !R.leavesGap([T(0), T(1)], [T(3), T(2)]) && !R.leavesGap([], [T(9)]), "a poll whose page does not reach what is held is a gap, and stands alone");
   expect("an older page goes before, never over, what is held", seqs(R.mergeOlder([T(5), T(6)], [T(5, "dup"), T(4), T(3)])), ["3:u3", "4:u4", "5:u5", "6:u6"]);
   // Two turns can share one index seq (history_turns of one span): both stay.
   const twin = [{ ...T(7), user: "a" }, { ...T(7), user: "b" }];

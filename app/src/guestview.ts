@@ -51,6 +51,14 @@ export function mergeNewest(held: SharedTurn[], page: SharedTurn[]): SharedTurn[
   return [...held.filter((t) => t.seq < from), ...fresh];
 }
 
+/** A poll's page does not reach back to what is held: more turns came than
+ *  one page holds, so joining them would hide the ones between. The page
+ *  then stands alone, and "Earlier turns" pages back from it. */
+export function leavesGap(held: SharedTurn[], page: SharedTurn[]): boolean {
+  if (!held.length || !page.length) return false;
+  return page[page.length - 1].seq > held[held.length - 1].seq + 1;
+}
+
 /** `page` (newest first) is the page BEFORE `held`'s oldest: prepend it. */
 export function mergeOlder(held: SharedTurn[], page: SharedTurn[]): SharedTurn[] {
   const until = held.length ? held[0].seq : Infinity;

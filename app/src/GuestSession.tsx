@@ -26,7 +26,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Notice, Step } from "./chat";
 import { closeShare, guestLinkOf, joinShare, useGuests, type GuestHostView, type GuestShare } from "./guest";
-import { mergeNewest, mergeOlder, piecesOf, standing, type SharedPage, type SharedTurn } from "./guestview";
+import { leavesGap, mergeNewest, mergeOlder, piecesOf, standing, type SharedPage, type SharedTurn } from "./guestview";
 import type { GuestLink } from "./guestdoor";
 import { Markdown } from "./markdown";
 import { ThreadPanel } from "./ThreadPanel";
@@ -63,8 +63,9 @@ function useSharedTurns(link: GuestLink | undefined, share: string, binding: num
       const p = await link.call<SharedPage>("shared_turns", { share, ...(binding === undefined ? {} : { binding }), limit: SHARED_PAGE });
       if (keyRef.current !== k) return;
       setTurns((cur) => {
-        // The first page sets the cursor; later polls only refresh the tail.
-        if (!cur.length) { before.current = p.next_before; setMore(p.more); }
+        // The first page sets the cursor; later polls only refresh the tail,
+        // unless more turns came than a page holds (`leavesGap`).
+        if (!cur.length || leavesGap(cur, p.turns)) { before.current = p.next_before; setMore(p.more); return mergeNewest([], p.turns); }
         return mergeNewest(cur, p.turns);
       });
       setError(null);
@@ -174,8 +175,16 @@ function TurnItems({ t, agent, owner, link, share, binding }: { t: SharedTurn; a
     <>
       {piecesOf(t).map((p, n) => {
         switch (p.k) {
-          case "notice":
-            return <li key={n} className="chat-note" data-testid="guest-notice">{noticeWords(p.notice)}</li>;
+          case "notice": {
+            // §3.1: a `!` command's output and a slash command's are shown.
+            const out = p.notice.kind === "shell" ? [p.notice.output, p.notice.stderr].filter(Boolean).join("\n") : p.notice.kind === "command" ? p.notice.output ?? "" : "";
+            return (
+              <li key={n} className="chat-note" data-testid="guest-notice">
+                {noticeWords(p.notice)}
+                {out && <details className="chat-notice-details"><summary>Output</summary><pre>{out}</pre></details>}
+              </li>
+            );
+          }
           case "user":
             return (
               <li key={n} className="chat-row chat-row-user">
