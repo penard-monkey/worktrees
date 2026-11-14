@@ -5,7 +5,7 @@
 // a nudge with *Share* / *Dismiss*, *Stop sharing* and taking a guest off,
 // the thread beside the session, and *Use these*. Every row is the console's
 // (shares.ts); a window that is not its host's console draws none of it.
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "./ipc";
 import { useEscape } from "./useEscape";
 import { ThreadPanel } from "./ThreadPanel";
@@ -327,8 +327,14 @@ export function UseThese({ entries, picked, onPicked, share, repo, slug, session
     setOpen(true);
   };
 
+  // One send at a time, held in a ref so a second Enter in the same render
+  // cannot pass either: a send is a drive-class act and never repeated by
+  // software (§5). After an unconfirmed outcome only the owner's own
+  // "I looked" clears the way, as on the button.
+  const flight = useRef(false);
   const send = async () => {
-    if (!chosen.length || problem || !live) return;
+    if (busy || flight.current || words?.kind === "unknown" || !chosen.length || problem || !live) return;
+    flight.current = true;
     setBusy(true);
     setWords(null);
     try {
@@ -368,6 +374,7 @@ export function UseThese({ entries, picked, onPicked, share, repo, slug, session
     } catch (e) {
       setWords({ kind: "refused", text: `${e}. Nothing was sent; the selection stays.` });
     } finally {
+      flight.current = false;
       setBusy(false);
     }
   };
