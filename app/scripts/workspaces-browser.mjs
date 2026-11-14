@@ -88,6 +88,9 @@ async function run(engine, name) {
   const tag = `[${name}]`;
 
   ok(await reachable(page, "[data-testid=nav-view-workspaces]"), `${tag} the Workspaces switch is reachable`);
+  // The owner's order (2026-11-14): Workspaces first, then All projects.
+  const segs = await page.$$eval(".nav-view .nav-view-seg", (b) => b.map((x) => x.textContent));
+  ok(segs.join("|") === "Workspaces|All projects", `${tag} the switch reads Workspaces, then All projects: ${JSON.stringify(segs)}`);
   ok(await page.$eval("[data-testid=nav-view-projects]", (b) => b.textContent === "All projects" && b.getAttribute("aria-selected") === "true"),
     `${tag} All projects is the default and says so`);
   const allRows = await page.$$eval(".nav-scroll li.row[data-slug]", (r) => r.length);

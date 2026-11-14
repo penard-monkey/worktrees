@@ -1,6 +1,6 @@
 // Holds the Ideas and workspaces beta (app/src/beta.ts) to its rule: with the
 // flag OFF the main window shows nothing Ideas (#632) or workspaces (#633)
-// added — no lightbulb in the rail, no ⌘⇧I, no All projects | Workspaces
+// added — no lightbulb in the rail, no ⌘⇧I, no Workspaces | All projects
 // switch, no workspace menu item, no `workspaces_list` fetch, and the remove
 // wording from before "All projects" existed — and with it ON each is there.
 // Every gate asks ONE helper, and the shim's launch rule reads the same key.
@@ -95,7 +95,7 @@ const gated = (needle) => {
   return at.length > 0 && at.every((p) => regions.some(([a, b]) => p > a && p < b));
 };
 ok(gated('data-testid="ideas-rail"'), "the rail's lightbulb renders only with the beta on");
-ok(gated("<NavViewSwitch"), "the All projects | Workspaces switch renders only with the beta on");
+ok(gated("<NavViewSwitch"), "the Workspaces | All projects switch renders only with the beta on");
 ok(gated('testId="ctx-ws-add"'), "a project's Add to workspace renders only with the beta on");
 ok(gated('data-testid="ctx-ws-remove"'), "a project's Remove from workspace renders only with the beta on");
 // The Workspaces view itself, and the two menus only it opens.

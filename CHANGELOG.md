@@ -16,6 +16,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ### Changed
 
+- **The nav's switch reads Workspaces, then All projects (workspaces beta).** The two were the other way round. Which one is open, and what each shows, is unchanged.
 - **A workspace is drawn as a card (workspaces beta).** Its projects sit inside a bordered, rounded box under a tinted title bar, so it is clear which workspace a project belongs to. A collapsed workspace is just its title bar. A drag over a workspace outlines the whole card.
 - **A menu row ending in ▸ opens its list beside the menu when you rest on it (workspaces beta).** A project's **Add to workspace ▸** and a workspace's **Add project ▸** used to replace the whole menu with a second one when clicked. Now the list appears to the side, the way macOS menus work, and closes when you move to another row. A click or Enter still opens it, and Esc closes the list before the menu.
 - **An empty workspace says how to fill it from where you are.** It used to say to drag a project into it, but the Workspaces view lists no project to drag. It now points to the **Add a project** button, or to dragging one from All projects and holding it over Workspaces.

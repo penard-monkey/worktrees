@@ -1052,7 +1052,8 @@ function TitleEditor({ initial, slug, onCommit, onCancel }: {
 
 // ── named workspaces (idea board phase 2): the nav's pieces, module scope ──
 
-/** The switch at the top of the nav: All projects | Workspaces. During a drag
+/** The switch at the top of the nav: Workspaces | All projects (Workspaces
+ *  first, the owner's order of 2026-11-14). During a drag
  *  each segment is a drop zone (`data-ws-switch`): a project held over
  *  "Workspaces" flips the view to it (spring-load), and a project dragged out
  *  of a workspace onto "All projects" is taken out of that workspace. */
@@ -1064,7 +1065,7 @@ function NavViewSwitch({ view, onPick, dropOn }: {
 }) {
   return (
     <div className="nav-view" role="tablist" aria-label="nav view">
-      {(["projects", "workspaces"] as const).map((v) => (
+      {(["workspaces", "projects"] as const).map((v) => (
         <button
           key={v}
           role="tab"
