@@ -48,6 +48,17 @@
   --done: var(--ai);
   --dirty: #e0af68;      /* uncommitted / behind */
   --danger: #f7768e;     /* destructive / broken / error */
+  /* A workspace card's palette, by name (WS_COLORS in workspaces.ts, core's
+     workspaces::COLORS): each theme's OWN shade of each, so a card stays
+     readable and follows a theme switch. Every theme block defines all eight. */
+  --hue-blue: #7aa2f7;
+  --hue-purple: #bb9af7;
+  --hue-green: #9ece6a;
+  --hue-amber: #e0af68;
+  --hue-orange: #ff9e64;
+  --hue-red: #f7768e;
+  --hue-teal: #73daca;
+  --hue-gray: #737aa2;
   --warn: #ff9e64;       /* attention / Claude waiting for input (amber) */
   --idle: #7e8ab8;       /* dormant-but-recent */
   --sticky: #565f89;     /* closed/saved/archived/abandoned dot */
@@ -185,6 +196,14 @@
   --ai: #9854f1;
   --dirty: #b15c00;
   --danger: #f52a65;
+  --hue-blue: #2e7de9;
+  --hue-purple: #9854f1;
+  --hue-green: #587539;
+  --hue-amber: #8c6c3e;
+  --hue-orange: #b15c00;
+  --hue-red: #f52a65;
+  --hue-teal: #118c74;
+  --hue-gray: #848cb5;
   --warn: #b15c00;       /* amber, darkened for legibility on the light nav */
   --idle: #68709a;
   --sticky: #848cb5;
@@ -243,6 +262,14 @@
   --ai: #cba6f7;
   --dirty: #fab387;
   --danger: #f38ba8;
+  --hue-blue: #89b4fa;
+  --hue-purple: #cba6f7;
+  --hue-green: #a6e3a1;
+  --hue-amber: #f9e2af;
+  --hue-orange: #fab387;
+  --hue-red: #f38ba8;
+  --hue-teal: #94e2d5;
+  --hue-gray: #9399b2;
   --warn: #fab387;       /* Catppuccin peach — amber attention */
   --idle: #7f849c;
   --sticky: #585b70;
@@ -294,6 +321,14 @@
   --ai: #8839ef;
   --dirty: #df8e1d;
   --danger: #d20f39;
+  --hue-blue: #1e66f5;
+  --hue-purple: #8839ef;
+  --hue-green: #40a02b;
+  --hue-amber: #df8e1d;
+  --hue-orange: #fe640b;
+  --hue-red: #d20f39;
+  --hue-teal: #179299;
+  --hue-gray: #7c7f93;
   --warn: #fe640b;       /* Latte peach — amber, dark enough on the light nav */
   --idle: #6c6f85;
   --sticky: #8c8fa1;
@@ -353,6 +388,14 @@
   --ai: #b48ead;
   --dirty: #ebcb8b;
   --danger: #bf616a;
+  --hue-blue: #81a1c1;
+  --hue-purple: #b48ead;
+  --hue-green: #a3be8c;
+  --hue-amber: #ebcb8b;
+  --hue-orange: #d08770;
+  --hue-red: #bf616a;
+  --hue-teal: #8fbcbb;
+  --hue-gray: #7b88a1;
   --warn: #ebcb8b;       /* Nord Aurora yellow — amber attention */
   --idle: #5e81ac;
   --sticky: #4c566a;
@@ -400,6 +443,14 @@
   --ai: #d3869b;
   --dirty: #d79921;
   --danger: #fb4934;
+  --hue-blue: #83a598;
+  --hue-purple: #d3869b;
+  --hue-green: #b8bb26;
+  --hue-amber: #fabd2f;
+  --hue-orange: #fe8019;
+  --hue-red: #fb4934;
+  --hue-teal: #8ec07c;
+  --hue-gray: #a89984;
   --warn: #fabd2f;       /* Gruvbox bright yellow — amber attention */
   --idle: #a89984;
   --sticky: #7c6f64;

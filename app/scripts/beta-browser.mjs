@@ -50,7 +50,7 @@ const chord = async (page) => {
 
 async function off(page, tag, when) {
   ok(!(await has(page, "[data-testid=ideas-rail]")), `${tag} ${when}: no lightbulb in the rail`);
-  ok(!(await has(page, "[data-testid=nav-view-projects]")), `${tag} ${when}: no All projects | Workspaces switch`);
+  ok(!(await has(page, "[data-testid=nav-view-projects]")), `${tag} ${when}: no Workspaces | All projects switch`);
   ok(!(await has(page, "[data-testid=ws-group]")) && (await page.$$(".nav-scroll li.row[data-slug]")).length > 0, `${tag} ${when}: the nav is All projects (rows, no workspace groups)`);
   ok(!(await page.evaluate(() => document.body.innerText.includes("All projects"))), `${tag} ${when}: "All projects" is nowhere on screen`);
   await ctxOnFirstProject(page);

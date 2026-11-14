@@ -359,7 +359,9 @@ const projectName = (root: string) => root.split("/").filter(Boolean).pop() ?? r
 // ── named workspaces (idea board phase 2): `workspaces.json`, the core store's
 // shape. Empty unless `?workspaces=1`, which seeds two workspaces sharing a
 // project plus one reference to a root that is not registered.
-type MockWsDef = { id: string; name: string; projects: string[] };
+type MockWsDef = { id: string; name: string; projects: string[]; color?: string | null };
+/** Core's `workspaces::COLORS`; workspaces-check.mjs holds it to the page's. */
+const MOCK_WS_COLORS = ["blue", "purple", "green", "amber", "orange", "red", "teal", "gray"];
 let mockWsSeq = 0;
 const mockWsId = () => `01MOCK${String(++mockWsSeq).padStart(20, "0")}`;
 let mockWsDefs: MockWsDef[] | null = null;
@@ -377,7 +379,7 @@ const mockWsView = () => {
   mockWsDefs ??= mockWsSeed();
   return {
     workspaces: mockWsDefs.map((w) => ({
-      id: w.id, name: w.name,
+      id: w.id, name: w.name, color: w.color ?? null,
       projects: w.projects.map((root) => {
         const on = ws.projects.some((p) => p.root === root);
         return { root, name: on ? projectName(root) : null, registered: on };
@@ -2808,6 +2810,13 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
         next.push(r);
       }
       w.projects = next;
+      return mockWsView();
+    }
+    case "workspace_set_color": {
+      mockWsView();
+      const c = String(args.color ?? "").trim();
+      if (c && !MOCK_WS_COLORS.includes(c)) throw `not a workspace color: "${c}"`;
+      mockWsGet(args.id).color = c || null;
       return mockWsView();
     }
     case "workspace_reorder": {

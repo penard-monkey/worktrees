@@ -36,6 +36,11 @@ pub const FILE: &str = "workspaces.json";
 const VERSION: u32 = 1;
 /// A name is a nav label. Long enough for anything a person types as one.
 pub const NAME_MAX: usize = 80;
+/// The colors a workspace's card may take, by NAME: each theme draws its own
+/// shade of each (`--hue-<name>` in the app's tokens.css), so a card stays
+/// readable in every theme. No color is the theme's accent. The app's
+/// `WS_COLORS` mirrors this list, and workspaces-check.mjs holds the two equal.
+pub const COLORS: &[&str] = &["blue", "purple", "green", "amber", "orange", "red", "teal", "gray"];
 
 static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
@@ -54,6 +59,10 @@ pub struct Workspace {
     pub name: String,
     #[serde(default)]
     pub projects: Vec<ProjectRef>,
+    /// The card's color, one of `COLORS`; absent is the theme's accent. A
+    /// build from before colors keeps it in `extra` and writes it back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -227,6 +236,21 @@ pub fn set_projects_at(
     })
 }
 
+/// Set a workspace's card color to one of `COLORS`, or clear it (`None`, or an
+/// empty string) back to the theme's accent. Any other name is refused and
+/// nothing is written.
+pub fn set_color_at(p: &Path, id: &str, color: Option<&str>) -> Result<(), String> {
+    let color = match color.map(str::trim).filter(|c| !c.is_empty()) {
+        None => None,
+        Some(c) if COLORS.contains(&c) => Some(c.to_string()),
+        Some(c) => return Err(format!("not a workspace color: {c:?} (one of {})", COLORS.join(", "))),
+    };
+    edit_at(p, |f| {
+        f.get_mut(id)?.color = color;
+        Ok(())
+    })
+}
+
 /// Put the workspaces in the order `ids` names. An id that no longer exists is
 /// ignored, and one `ids` leaves out keeps its place after the named ones: a
 /// reorder computed a moment before a create or remove still lands.
@@ -259,6 +283,9 @@ pub fn set_projects(id: &str, roots: &[String], can_add: impl Fn(&str) -> bool) 
 }
 pub fn reorder(ids: &[String]) -> Result<(), String> {
     reorder_at(&path(), ids)
+}
+pub fn set_color(id: &str, color: Option<&str>) -> Result<(), String> {
+    set_color_at(&path(), id, color)
 }
 
 #[cfg(test)]
@@ -399,5 +426,47 @@ mod tests {
         rename_at(&t.file(), &w.id, "W").unwrap();
         reorder_at(&t.file(), &s(&[&w.id])).unwrap();
         assert_eq!(fs::metadata(t.file()).unwrap().modified().unwrap(), m0);
+    }
+    /// A card color is a NAME from the palette, cleared back to none (the
+    /// theme's accent) by `None` or "", and anything else is refused with
+    /// the file untouched.
+    #[test]
+    fn a_color_is_a_palette_name_and_clears_back_to_none() {
+        let t = Tmp::new("color");
+        let w = create_at(&t.file(), "W").unwrap();
+        assert_eq!(w.color, None, "a new workspace has no color of its own");
+        set_color_at(&t.file(), &w.id, Some("teal")).unwrap();
+        assert_eq!(read_at(&t.file()).unwrap().workspaces[0].color.as_deref(), Some("teal"));
+        let raw: Value = serde_json::from_str(&fs::read_to_string(t.file()).unwrap()).unwrap();
+        assert_eq!(raw["workspaces"][0]["color"], "teal");
+
+        let before = fs::read_to_string(t.file()).unwrap();
+        let e = set_color_at(&t.file(), &w.id, Some("pink")).unwrap_err();
+        assert!(e.contains("not a workspace color") && e.contains("teal"), "{e}");
+        assert!(set_color_at(&t.file(), "01NOPE", Some("red")).is_err(), "an unknown id is refused");
+        assert_eq!(fs::read_to_string(t.file()).unwrap(), before, "a refusal writes nothing");
+
+        set_color_at(&t.file(), &w.id, Some("")).unwrap();
+        assert_eq!(read_at(&t.file()).unwrap().workspaces[0].color, None, "\"\" clears it");
+        set_color_at(&t.file(), &w.id, Some("gray")).unwrap();
+        set_color_at(&t.file(), &w.id, None).unwrap();
+        let raw: Value = serde_json::from_str(&fs::read_to_string(t.file()).unwrap()).unwrap();
+        assert!(raw["workspaces"][0].get("color").is_none(), "a cleared color leaves no key: {raw}");
+        for c in COLORS {
+            set_color_at(&t.file(), &w.id, Some(c)).unwrap();
+        }
+    }
+
+    /// The color is the workspace's: a rename or a project change keeps it,
+    /// and a hand-written one is read.
+    #[test]
+    fn a_color_survives_the_other_edits() {
+        let t = Tmp::new("color-keep");
+        fs::write(t.file(), r#"{"version":1,"workspaces":[{"id":"01W","name":"Jelly","color":"amber","projects":[]}]}"#).unwrap();
+        assert_eq!(read_at(&t.file()).unwrap().workspaces[0].color.as_deref(), Some("amber"));
+        rename_at(&t.file(), "01W", "Jellyfin").unwrap();
+        set_projects_at(&t.file(), "01W", &s(&["/a"]), any).unwrap();
+        reorder_at(&t.file(), &s(&["01W"])).unwrap();
+        assert_eq!(read_at(&t.file()).unwrap().workspaces[0].color.as_deref(), Some("amber"));
     }
 }
