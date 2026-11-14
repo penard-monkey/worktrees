@@ -55,8 +55,8 @@ import {
 } from "./dnd";
 import { useNavDrag, type DragItem } from "./navdrag";
 import {
-  VIEW_LABEL, addableTo, arrivedRoot, idsMoved, idsStepped, projectDrop, projectsAddable, rootsWith, rootsWithout, springsTo, wsProjectKey,
-  type NavView, type WsDef, type WsHit, type WsList,
+  VIEW_LABEL, WS_COLORS, addableTo, arrivedRoot, idsMoved, idsStepped, projectDrop, projectsAddable, rootsWith, rootsWithout, springsTo, wsColorOf, wsProjectKey,
+  type NavView, type WsColor, type WsDef, type WsHit, type WsList,
 } from "./workspaces";
 import { ideasBeta } from "./beta";
 import { remoteHostLabel, remoteTitle, remoteWebUrl } from "./remote";
@@ -6510,6 +6510,12 @@ function App() {
       });
     });
   };
+  /** A workspace card's color: one of `WS_COLORS`, or null for the theme's
+   *  accent. Optimistic, as `wsReorder` is. */
+  const wsSetColor = (id: string, color: WsColor | null) => {
+    setWsList((cur) => cur && { workspaces: cur.workspaces.map((x) => x.id === id ? { ...x, color } : x) });
+    void wsRun("workspace_set_color", { id, color }).then((l) => { if (!l) invoke<WsList>("workspaces_list").then(setWsList).catch(() => {}); });
+  };
   const wsReorder = (ids: string[]) => {
     setWsList((cur) => cur && { workspaces: ids.map((i) => cur.workspaces.find((w) => w.id === i)!).filter(Boolean) });
     void wsRun("workspace_reorder", { ids }).then((l) => { if (!l) invoke<WsList>("workspaces_list").then(setWsList).catch(() => {}); });
@@ -9065,6 +9071,7 @@ function App() {
               <div
                 className={"ws-group" + (dropOn ? " drop-on" : "") + (dragged ? " dragged" : "")}
                 data-ws-id={w.id}
+                data-ws-color={wsColorOf(w) ?? undefined}
                 data-drop="workspace"
                 data-testid="ws-group"
               >
@@ -10935,6 +10942,21 @@ function App() {
             <div className="ctx-sep" />
             <button className="pop-item" data-testid="ws-rename" data-track="nav.workspace.rename"
               onClick={() => { closeCtx(); setWsNaming(w.id); }}>Rename…</button>
+            {/* The card's color, from the themes' own palette (WS_COLORS). */}
+            <SubMenu label="Color" testId="ws-color" track="nav.workspace.color">
+              <button className="pop-item" data-testid="ws-color-item" data-color="" data-track="nav.workspace.color.item"
+                title="the theme's accent" onClick={() => { const id = w.id; closeCtx(); wsSetColor(id, null); }}>
+                <span className="check">{!wsColorOf(w) && <Icons.Check size={12} />}</span>
+                <span className="ws-swatch" /> Default
+              </button>
+              {WS_COLORS.map((c) => (
+                <button key={c.id} className="pop-item" data-testid="ws-color-item" data-color={c.id} data-track="nav.workspace.color.item"
+                  onClick={() => { const id = w.id; closeCtx(); wsSetColor(id, c.id); }}>
+                  <span className="check">{wsColorOf(w) === c.id && <Icons.Check size={12} />}</span>
+                  <span className="ws-swatch" style={{ "--sw": `var(--hue-${c.id})` } as React.CSSProperties} /> {c.label}
+                </button>
+              ))}
+            </SubMenu>
             <button className="pop-item" data-testid="ws-move-up" data-track="nav.workspace.up" disabled={!up}
               onClick={() => { closeCtx(); if (up) wsReorder(up); }}>Move up</button>
             <button className="pop-item" data-testid="ws-move-down" data-track="nav.workspace.down" disabled={!down}

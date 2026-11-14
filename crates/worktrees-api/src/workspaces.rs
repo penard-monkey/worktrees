@@ -28,6 +28,10 @@ pub struct WsRow {
     pub id: String,
     pub name: String,
     pub projects: Vec<WsProject>,
+    /// The card's color, a name from `store::COLORS`, or `None` for the
+    /// theme's accent. A name the palette does not have (a hand edit) is
+    /// answered as `None`, so the page only ever sees one it can draw.
+    pub color: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq, Default)]
@@ -45,6 +49,7 @@ fn view(ws: &Path, reg: &Path) -> Result<Workspaces, String> {
             .map(|w| WsRow {
                 id: w.id,
                 name: w.name,
+                color: w.color.filter(|c| store::COLORS.contains(&c.as_str())),
                 projects: w
                     .projects
                     .into_iter()
@@ -90,6 +95,11 @@ pub fn reorder_in(ws: &Path, reg: &Path, ids: &[String]) -> Result<Workspaces, S
     view(ws, reg)
 }
 
+pub fn set_color_in(ws: &Path, reg: &Path, id: &str, color: Option<&str>) -> Result<Workspaces, String> {
+    store::set_color_at(ws, id, color)?;
+    view(ws, reg)
+}
+
 fn paths() -> (std::path::PathBuf, std::path::PathBuf) {
     (store::path(), registry::path())
 }
@@ -117,6 +127,10 @@ pub fn workspace_set_projects(id: String, roots: Vec<String>) -> Result<Workspac
 pub fn workspace_reorder(ids: Vec<String>) -> Result<Workspaces, String> {
     let (w, r) = paths();
     reorder_in(&w, &r, &ids)
+}
+pub fn workspace_set_color(id: String, color: Option<String>) -> Result<Workspaces, String> {
+    let (w, r) = paths();
+    set_color_in(&w, &r, &id, color.as_deref())
 }
 
 #[cfg(test)]
@@ -166,6 +180,24 @@ mod tests {
         assert_eq!(v.workspaces.iter().map(|w| w.name.as_str()).collect::<Vec<_>>(), ["Two"]);
         assert_eq!(fs::read(&reg).unwrap(), before2, "the registry is never written");
         assert_ne!(before, before2);
+        let _ = fs::remove_dir_all(d);
+    }
+    /// A color is answered with its workspace; one the palette does not have
+    /// (a hand edit of the file) is answered as none.
+    #[test]
+    fn a_workspace_answers_its_color() {
+        let d = tmp("color");
+        let (ws, reg) = (d.join("workspaces.json"), d.join("projects.json"));
+        fs::write(&reg, r#"{"version":1,"projects":[]}"#).unwrap();
+        let v = create_in(&ws, &reg, "One").unwrap();
+        let id = v.workspaces[0].id.clone();
+        assert_eq!(v.workspaces[0].color, None);
+        let v = set_color_in(&ws, &reg, &id, Some("purple")).unwrap();
+        assert_eq!(v.workspaces[0].color.as_deref(), Some("purple"));
+        assert_eq!(serde_json::to_value(&v).unwrap()["workspaces"][0]["color"], "purple");
+        assert!(set_color_in(&ws, &reg, &id, Some("chartreuse")).is_err());
+        fs::write(&ws, format!(r#"{{"version":1,"workspaces":[{{"id":"{id}","name":"One","color":"chartreuse"}}]}}"#)).unwrap();
+        assert_eq!(list_in(&ws, &reg).unwrap().workspaces[0].color, None, "an unknown name reads as none");
         let _ = fs::remove_dir_all(d);
     }
 }

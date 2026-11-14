@@ -492,7 +492,7 @@ export const CONSOLE_ROWS: readonly string[] = [
   "idea_prompt", "idea_answer", "idea_answer_text", "idea_answer_many", "idea_send", "idea_interrupt",
   // named workspaces (idea board phase 2): desktop only
   "workspaces_list", "workspace_create", "workspace_rename", "workspace_remove", "workspace_set_projects",
-  "workspace_reorder",
+  "workspace_reorder", "workspace_set_color",
 ];
 
 /** The device's capabilities on the host this window drives, from the remote

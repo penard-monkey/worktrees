@@ -69,7 +69,7 @@ eq("a prefix is not a parent", W.arrivedRoot(["/r"], ["/r"], "/rx"), null);
 eq("nothing new and no folder: nothing arrives", W.arrivedRoot(["/x"], ["/x"], null), null);
 
 // ── 2. rows ──
-const ROWS = ["workspaces_list", "workspace_create", "workspace_rename", "workspace_remove", "workspace_set_projects", "workspace_reorder"];
+const ROWS = ["workspaces_list", "workspace_create", "workspace_rename", "workspace_remove", "workspace_set_projects", "workspace_reorder", "workspace_set_color"];
 const dispatch = read("../../crates/worktrees-cli/src/serve/dispatch.rs");
 const ipc = read("../src/ipc.ts");
 const consoleRows = ipc.match(/export const CONSOLE_ROWS[^=]*=\s*\[([\s\S]*?)\];/)?.[1] ?? "";
@@ -80,7 +80,38 @@ for (const r of ROWS) {
   ok(`the mock answers ${r}`, mock.includes(`case "${r}":`));
 }
 const mcp = read("../../crates/worktrees-cli/src/mcp.rs");
-ok("no MCP tool reaches a workspace", !/workspace_(create|rename|remove|set_projects|reorder)|workspaces_list/.test(mcp));
+ok("no MCP tool reaches a workspace", !/workspace_(create|rename|remove|set_projects|reorder|set_color)|workspaces_list/.test(mcp));
+
+// ── 2b. the card colors: ONE palette, by name, in five places ──
+// Core's COLORS decides what the file may hold, the page's WS_COLORS what the
+// menu offers, the mock's what it accepts; tokens.css gives every theme its
+// own shade of each, and App.css maps each name onto the card. A name missing
+// from any of them is a swatch that draws nothing, or a card that is refused.
+{
+  const core = read("../../crates/worktrees-core/src/workspaces.rs");
+  const app0 = read("../src/App.tsx");
+  const rust = (core.match(/pub const COLORS: &\[&str\] = &\[([^\]]*)\]/)?.[1] ?? "").match(/"[a-z]+"/g)?.map((x) => x.slice(1, -1)) ?? [];
+  const page = W.WS_COLORS.map((c) => c.id);
+  const mockList = (mock.match(/const MOCK_WS_COLORS = \[([^\]]*)\]/)?.[1] ?? "").match(/"[a-z]+"/g)?.map((x) => x.slice(1, -1)) ?? [];
+  eq("core's COLORS and the page's WS_COLORS name the same colors, in order", rust, page);
+  eq("…and so does the mock", mockList, page);
+  ok("…eight of them", page.length === 8);
+  const tokens = read("../src/tokens.css");
+  const blocks = [...tokens.matchAll(/(^:root|^:root\[data-theme="([a-z-]+)"\])\s*\{([\s\S]*?)^\}/gm)]
+    .filter((m) => /--bg-tree:/.test(m[3]));
+  ok(`tokens.css has the six theme blocks (${blocks.length})`, blocks.length === 6);
+  for (const m of blocks) {
+    const missing = page.filter((c) => !new RegExp(`--hue-${c}:\\s*#[0-9a-f]{6};`, "i").test(m[3]));
+    ok(`${m[2] ?? "tokyo-night (:root)"} defines its own shade of every color${missing.length ? `: missing ${missing}` : ""}`, missing.length === 0);
+  }
+  const css = read("../src/App.css");
+  const unmapped = page.filter((c) => !css.includes(`.ws-group[data-ws-color="${c}"] { --ws-hue: var(--hue-${c}); }`));
+  ok(`App.css maps every color onto the card${unmapped.length ? `: missing ${unmapped}` : ""}`, unmapped.length === 0);
+  eq("wsColorOf draws a palette name", W.wsColorOf({ color: "teal" }), "teal");
+  eq("…and the accent for none or a name it does not know", [W.wsColorOf({ color: null }), W.wsColorOf({}), W.wsColorOf({ color: "pink" })], [null, null, null]);
+  ok("the workspace menu offers Color ▸, with Default and every color", /<SubMenu label="Color" testId="ws-color"/.test(app0) && /WS_COLORS\.map\(\(c\) =>/.test(app0) && /wsSetColor\(id, null\)/.test(app0));
+  ok("a card carries its color as data-ws-color", /data-ws-color=\{wsColorOf\(w\) \?\? undefined\}/.test(app0));
+}
 
 // ── 3. App wiring ──
 const app = read("../src/App.tsx");
