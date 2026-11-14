@@ -1340,6 +1340,7 @@ commands! { cx, a;
     workspace_remove: HostConsole => workspaces::workspace_remove(a.get("id")?),
     workspace_set_projects: HostConsole => workspaces::workspace_set_projects(a.get("id")?, a.get("roots")?),
     workspace_reorder: HostConsole => workspaces::workspace_reorder(a.get("ids")?),
+    workspace_set_color: HostConsole => workspaces::workspace_set_color(a.get("id")?, a.get("color")?),
 }
 
 #[cfg(test)]
@@ -1398,7 +1399,7 @@ mod tests {
     /// two (`agent_commands`, `agent_command`), notifications' nine (the
     /// `push_*` rows), and Settings → Agent policy's four (`limits_settings`,
     /// `set_limits`, `policy_preset_status`, `apply_policy_preset`), and the
-    /// named workspaces' six console rows (`workspaces_list`, `workspace_*`), and the
+    /// named workspaces' seven console rows (`workspaces_list`, `workspace_*`), and the
     /// idea board's seven console rows (`ideas_list`, `idea_read`,
     /// `idea_create`, `idea_write`, `idea_rename`, `idea_remove`,
     /// `idea_adopt`) and phase 3's seven (`idea_relate`, `idea_merge`,
@@ -1410,7 +1411,7 @@ mod tests {
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 251, "the table has 251 commands");
+        assert_eq!(TABLE.len(), 252, "the table has 252 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1737,6 +1738,7 @@ mod tests {
         ("workspace_remove", "id", "a named workspace's id (a console act)"),
         ("workspace_set_projects", "id", "a named workspace's id (a console act)"),
         ("workspace_set_projects", "roots", "roots to REFERENCE, kept even once unregistered; the body checks a new one against the registry (a console act)"),
+        ("workspace_set_color", "id", "a named workspace's id (a console act)"),
         ("idea_read", "id", "an idea's ULID: ideas are the host's, in its own folder, not a project's (a console act)"),
         ("idea_write", "id", "an idea's ULID (a console act)"),
         ("idea_rename", "id", "an idea's ULID (a console act)"),
@@ -1818,7 +1820,7 @@ mod tests {
     /// `push_allow_security`); Settings → Agent policy → Limits'
     /// `limits_settings` (`read`) and `set_limits` (`admin`); and the policy
     /// presets' `policy_preset_status` (`read`) and `apply_policy_preset`
-    /// (console); the named workspaces' six (console); and the idea board's seven and phase 3's seven (console); phase S's fifteen idea-session rows (console); `read_place_image` and `agent_call_image` are `read`. A row that moves group
+    /// (console); the named workspaces' seven (console); and the idea board's seven and phase 3's seven (console); phase S's fifteen idea-session rows (console); `read_place_image` and `agent_call_image` are `read`. A row that moves group
     /// fails here until the count (and the proposal's table) move with it.
     #[test]
     fn every_row_has_one_base_group_and_the_counts_are_section_3_4s() {
@@ -1835,7 +1837,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 70), ("write", 23), ("admin", 41), ("console", 83), ("stream", 10), ("instruct", 8), ("answer", 2),
+            ("read", 70), ("write", 23), ("admin", 41), ("console", 84), ("stream", 10), ("instruct", 8), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 7),
         ]
         .into();

@@ -15,6 +15,6 @@ import type { Settings } from "./settings";
 
 /** Ideas and workspaces (idea board phases 0–2): the Ideas window (the rail's
  *  lightbulb, ⌘⇧I, its reopening at launch) and the nav's named workspaces
- *  (the All projects | Workspaces switch, every workspace menu item, and the
+ *  (the Workspaces | All projects switch, every workspace menu item, and the
  *  "All projects" wording that came with them). */
 export const ideasBeta = (s: Pick<Settings, "beta_ideas">): boolean => s.beta_ideas === true;

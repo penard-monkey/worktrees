@@ -1,6 +1,6 @@
 /** Named workspaces (idea board phase 2) — the frontend's RULES, pure, checked
  *  by `scripts/workspaces-check.mjs`. The store is core's
- *  (`worktrees_core::workspaces`, `workspaces.json`); the rows are serve's six
+ *  (`worktrees_core::workspaces`, `workspaces.json`); the rows are serve's seven
  *  console rows (`workspaces_list`, `workspace_*`), every one answering with
  *  the whole list.
  *
@@ -24,8 +24,31 @@ export const VIEW_LABEL: Record<NavView, string> = {
 
 export const isNavView = (v: unknown): v is NavView => v === "projects" || v === "workspaces";
 
+/** A workspace card's colors, by NAME (the owner, 2026-11-14: each workspace
+ *  its own color, from a palette the themes draw). Each theme defines its own
+ *  shade as `--hue-<id>` in tokens.css, so a card stays readable in every
+ *  theme and follows a theme switch. Mirrors core's `workspaces::COLORS`;
+ *  workspaces-check.mjs holds the two lists, and every theme's tokens, equal.
+ *  Pink is not offered: Nord and Gruvbox have none of their own. */
+export const WS_COLORS = [
+  { id: "blue", label: "Blue" },
+  { id: "purple", label: "Purple" },
+  { id: "green", label: "Green" },
+  { id: "amber", label: "Amber" },
+  { id: "orange", label: "Orange" },
+  { id: "red", label: "Red" },
+  { id: "teal", label: "Teal" },
+  { id: "gray", label: "Gray" },
+] as const;
+export type WsColor = (typeof WS_COLORS)[number]["id"];
+/** The color a card draws: its own when it names one of `WS_COLORS`, else
+ *  null (the theme's accent). */
+export const wsColorOf = (w: Pick<WsDef, "color">): WsColor | null =>
+  WS_COLORS.find((c) => c.id === w.color)?.id ?? null;
+
 export type WsProject = { root: string; name: string | null; registered: boolean };
-export type WsDef = { id: string; name: string; projects: WsProject[] };
+/** `color`: a name from `WS_COLORS`, or null for the theme's accent. */
+export type WsDef = { id: string; name: string; projects: WsProject[]; color?: string | null };
 export type WsList = { workspaces: WsDef[] };
 
 /** What a nav drag in the workspace view can carry. A project row under a

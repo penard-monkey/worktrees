@@ -1084,6 +1084,12 @@ html[data-guides="off"] .kids > .places::after { display: none; }
   max-height: calc(100vh - 16px); overflow-y: auto; overscroll-behavior: contain;
 }
 .ctx-sep { height: 1px; margin: var(--s1) var(--s2); background: var(--line); }
+/* A ▸ row (SubMenu.tsx): its chevron at the right edge, and the row stays lit
+   while its list is open, so you can see which row the list belongs to. The
+   list itself is a `.ctxmenu` of its own, a portal beside the parent. */
+.pop-item.sub-item .sub-label { flex: 1; min-width: 0; }
+.pop-item.sub-item.open { background: var(--bg-elev); color: var(--txt-hi); }
+.ctx-flyout { z-index: 61; }
 /* A PATH as the hint (the terminal's link menu): never uppercased — paths are
    case-sensitive and `README.md` is not `readme.md` — and one line, ellipsised
    from the box's max-width rather than wrapping a long path into three. */
@@ -3933,27 +3939,58 @@ body.dragging .grip { cursor: grabbing; }
 }
 .nav-view-seg:hover { color: var(--txt-hi); }
 .nav-view-seg.on { background: var(--bg-panel); color: var(--txt-hi); border-color: var(--line); }
-.nav-view-seg.drop-on,
-.ws-group.drop-on > .ws-h {
+.nav-view-seg.drop-on {
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 16%, var(--bg-tree));
 }
-.ws-group { --ws-head: 30px; }
-.ws-group + .ws-group, .drop-gap.ws + .ws-group { margin-top: var(--s2); }
+/* A workspace is a CARD (the owner's pick of three, 2026-11-14): a bordered,
+   rounded box whose title bar is tinted with the workspace's own color, so its
+   projects read as INSIDE it. `--ws-hue` is the card's `--hue-<name>` (each
+   theme's own shade, tokens.css), else the theme's accent. The side margin
+   costs ~18px of name width; the owner chose it over a 4px spine knowingly. */
+.ws-group {
+  --ws-head: 30px;
+  --ws-hue: var(--accent);
+  --ws-head-bg: color-mix(in srgb, var(--ws-hue) 16%, var(--bg-tree));
+  margin: var(--s2) var(--s2) 0;
+  border: 1px solid var(--line-strong); border-radius: var(--r-md);
+  background: var(--bg-tree);
+}
+.ws-group[data-ws-color="blue"] { --ws-hue: var(--hue-blue); }
+.ws-group[data-ws-color="purple"] { --ws-hue: var(--hue-purple); }
+.ws-group[data-ws-color="green"] { --ws-hue: var(--hue-green); }
+.ws-group[data-ws-color="amber"] { --ws-hue: var(--hue-amber); }
+.ws-group[data-ws-color="orange"] { --ws-hue: var(--hue-orange); }
+.ws-group[data-ws-color="red"] { --ws-hue: var(--hue-red); }
+.ws-group[data-ws-color="teal"] { --ws-hue: var(--hue-teal); }
+.ws-group[data-ws-color="gray"] { --ws-hue: var(--hue-gray); }
+.ws-group + .ws-group, .drop-gap.ws + .ws-group { margin-top: var(--s3); }
 .ws-group.dragged { opacity: 0.4; }
+/* A drop onto it lights the whole card: its title is tinted already. */
+.ws-group.drop-on {
+  border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent);
+  --ws-head-bg: color-mix(in srgb, var(--accent) 28%, var(--bg-tree));
+}
 .ws-h {
   position: sticky; top: 0; z-index: 3; box-sizing: border-box; height: var(--ws-head);
   display: flex; align-items: center; gap: var(--s2);
   padding: 0 var(--s3); font-size: var(--fs-label);
-  background: var(--bg-tree); border: 1px solid transparent; border-bottom-color: var(--line);
+  background: var(--ws-head-bg);
+  border-radius: calc(var(--r-md) - 1px) calc(var(--r-md) - 1px) 0 0;
   cursor: grab;
 }
+/* Collapsed, the title bar is the whole card. */
+.ws-h:last-child { border-radius: calc(var(--r-md) - 1px); }
+/* The rule under the title belongs to the LIST, so a collapsed card does not
+   draw it against its own bottom border. */
+.ws-kids { border-top: 1px solid var(--line-strong); padding-bottom: var(--s1); }
+.ws-kids > .project:first-child, .ws-kids > .drop-gap:first-child + .project { margin-top: var(--s1); }
 body.dragging .ws-h { cursor: grabbing; }
 .ws-h:hover .mini, .ws-h:focus-within .mini { opacity: 1; }
 .ws-icon { position: relative; display: grid; place-items: center; width: 16px; height: 16px; color: var(--txt-dim); flex: none; }
 .ws-icon.busy::after, .ws-icon.waiting::after, .ws-icon.done::after {
   content: ""; position: absolute; top: -2px; right: -2px;
-  width: 6px; height: 6px; border-radius: var(--r-full); box-shadow: 0 0 0 2px var(--bg-tree);
+  width: 6px; height: 6px; border-radius: var(--r-full); box-shadow: 0 0 0 2px var(--ws-head-bg, var(--bg-tree));
 }
 .ws-icon.busy::after { background: var(--ok); }
 .ws-icon.waiting::after { background: var(--warn); }
@@ -3979,7 +4016,13 @@ body.dragging .ws-h { cursor: grabbing; }
 .ws-empty .ws-new-btn { margin: 0; }
 .ws-new-btn:hover { color: var(--txt-hi); border-color: var(--txt-mute); }
 .ws-new-row { display: flex; align-items: center; gap: var(--s2); margin: var(--s2) var(--s3); color: var(--txt-dim); }
-.drop-gap.ws { height: var(--ws-head, 30px); margin: var(--s1) 0; }
+.drop-gap.ws { height: var(--ws-head, 30px); margin: var(--s2) var(--s2) 0; }
+/* The Color ▸ list (the workspace menu): each row's swatch is the theme's own
+   shade, the same token the card's title is tinted from. */
+.ws-swatch {
+  display: inline-block; flex: none; width: 10px; height: 10px; border-radius: var(--r-full);
+  background: var(--sw, var(--accent)); box-shadow: 0 0 0 1px color-mix(in srgb, var(--txt-hi) 25%, transparent);
+}
 
 /* ── Settings → pi → Models: the hosts (PiPanel.tsx) ─────────────────────────
    Words stay --txt-hi/--txt-dim; hue lives only in the dot. */

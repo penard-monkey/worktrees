@@ -88,6 +88,9 @@ async function run(engine, name) {
   const tag = `[${name}]`;
 
   ok(await reachable(page, "[data-testid=nav-view-workspaces]"), `${tag} the Workspaces switch is reachable`);
+  // The owner's order (2026-11-14): Workspaces first, then All projects.
+  const segs = await page.$$eval(".nav-view .nav-view-seg", (b) => b.map((x) => x.textContent));
+  ok(segs.join("|") === "Workspaces|All projects", `${tag} the switch reads Workspaces, then All projects: ${JSON.stringify(segs)}`);
   ok(await page.$eval("[data-testid=nav-view-projects]", (b) => b.textContent === "All projects" && b.getAttribute("aria-selected") === "true"),
     `${tag} All projects is the default and says so`);
   const allRows = await page.$$eval(".nav-scroll li.row[data-slug]", (r) => r.length);
@@ -125,7 +128,13 @@ async function run(engine, name) {
   // menu: Add to workspace (from All projects)
   const firstRoot = await page.$eval(".nav-scroll .project[data-project-root]", (p) => p.dataset.projectRoot);
   await ctxOn(page, `.project[data-project-root="${firstRoot}"] .project-h`);
-  await page.click("[data-testid=ctx-ws-add]");
+  // A ▸ row opens BESIDE its menu on hover, no click (SubMenu.tsx; the owner,
+  // 2026-11-14). Hovered with the real mouse: the intent delay, then the list.
+  await page.waitForTimeout(250);
+  await page.hover("[data-testid=ctx-ws-add]");
+  await page.waitForTimeout(350);
+  ok(!!(await page.$("[data-testid=ctx-ws-add-list]")) && !!(await page.$(".ctxmenu:not(.ctx-flyout) [data-testid=ctx-ws-add]")),
+    `${tag} Add to workspace opens on hover, beside the menu it belongs to`);
   const offers = await page.$$eval("[data-testid=ws-add-item]", (b) => b.map((x) => x.textContent.trim()));
   ok(!offers.includes("Everything"), `${tag} Add to workspace offers only the ones that do not hold it: ${JSON.stringify(offers)}`);
   await page.click("[data-testid=ws-add-item]");
@@ -354,6 +363,75 @@ async function run(engine, name) {
   await page.click("[data-testid=nav-view-projects]");
   await page.waitForTimeout(100);
   ok((await page.$$(`.nav-scroll .project[data-project-root="${r0}"]`)).length === 1, `${tag} …and is still in All projects`);
+
+  // ── the card and its color (the owner's style B, 2026-11-14) ──
+  await page.click("[data-testid=nav-view-workspaces]");
+  await page.waitForTimeout(150);
+  const colorOf = () => page.$eval("[data-testid=ws-group]", (g) => g.dataset.wsColor ?? null);
+  const pickColor = async (c) => {
+    await page.click("[data-testid=ws-group] [data-testid=ws-menu]");
+    await page.waitForTimeout(250);
+    await page.hover("[data-testid=ws-color]");
+    await page.waitForTimeout(350);
+    const items = await page.$$eval("[data-testid=ws-color-list] [data-testid=ws-color-item]", (b) => b.map((x) => ({ c: x.dataset.color, on: !!x.querySelector(".check svg") })));
+    await page.click(`[data-testid=ws-color-list] [data-testid=ws-color-item][data-color="${c}"]`);
+    await page.waitForTimeout(150);
+    return items;
+  };
+  ok((await colorOf()) === null, `${tag} a new workspace's card has no color of its own (the accent)`);
+  let items = await pickColor("teal");
+  ok(items.length === 9 && items[0].c === "" && items[0].on && items.filter((i) => i.on).length === 1,
+    `${tag} Color ▸ opens on hover with Default and eight colors, Default ticked: ${JSON.stringify(items.map((i) => i.c + (i.on ? "*" : "")))}`);
+  ok((await colorOf()) === "teal", `${tag} …and picking Teal colors the card`);
+  const saved = await page.evaluate(() => window.__TAURI_INTERNALS__.invoke("workspaces_list").then((l) => l.workspaces[0].color));
+  ok(saved === "teal", `${tag} …through workspace_set_color (${saved})`);
+  items = await pickColor("");
+  ok(items.find((i) => i.on)?.c === "teal", `${tag} …the menu then ticks Teal`);
+  ok((await colorOf()) === null, `${tag} …and Default takes the color off`);
+
+  // Every theme and every color: the title stays readable on its tint, the
+  // tint stands off the nav, and the card's border shows. Measured on the
+  // composited colors (a color-mix() reads back as color(srgb …)).
+  const worst = await page.evaluate(() => {
+    const parse = (s) => {
+      let m = s.match(/^rgba?\(([^)]+)\)/);
+      if (m) { const p = m[1].split(/[ ,/]+/).filter(Boolean).map(Number); return { r: p[0], g: p[1], b: p[2], a: p[3] ?? 1 }; }
+      m = s.match(/^color\(srgb ([^)]+)\)/);
+      if (m) { const p = m[1].split(/[ /]+/).filter(Boolean).map(Number); return { r: p[0] * 255, g: p[1] * 255, b: p[2] * 255, a: p[3] ?? 1 }; }
+      throw new Error("unparsed color " + s);
+    };
+    const over = (t, u) => ({ r: t.r * t.a + u.r * (1 - t.a), g: t.g * t.a + u.g * (1 - t.a), b: t.b * t.a + u.b * (1 - t.a), a: 1 });
+    const bgOf = (el) => {
+      const st = [];
+      for (let e = el; e; e = e.parentElement) { const c = parse(getComputedStyle(e).backgroundColor); if (c.a > 0) st.push(c); if (c.a >= 1) break; }
+      return st.reverse().reduce((a, c) => (a ? over(c, a) : c), null);
+    };
+    const lum = (c) => { const f = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; }; return 0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b); };
+    const ratio = (a, b) => { const [x, y] = [lum(a), lum(b)].sort((p, q) => q - p); return (x + 0.05) / (y + 0.05); };
+    const dist = (a, b) => Math.max(Math.abs(a.r - b.r), Math.abs(a.g - b.g), Math.abs(a.b - b.b));
+    const g = document.querySelector("[data-testid=ws-group]");
+    const before = document.documentElement.dataset.theme;
+    const w = { text: [99, ""], tint: [999, ""], border: [999, ""] };
+    for (const t of ["tokyo-night", "tokyo-day", "catppuccin-mocha", "catppuccin-latte", "nord", "gruvbox-dark"]) {
+      document.documentElement.dataset.theme = t;
+      for (const c of ["", "blue", "purple", "green", "amber", "orange", "red", "teal", "gray"]) {
+        if (c) g.setAttribute("data-ws-color", c); else g.removeAttribute("data-ws-color");
+        const nav = bgOf(g.parentElement), head = bgOf(g.querySelector(".ws-h"));
+        const tx = ratio(parse(getComputedStyle(g.querySelector(".ws-name")).color), head);
+        const tn = dist(head, nav), bd = dist(over(parse(getComputedStyle(g).borderTopColor), nav), nav);
+        const at = `${t}/${c || "default"}`;
+        if (tx < w.text[0]) w.text = [tx, at];
+        if (tn < w.tint[0]) w.tint = [tn, at];
+        if (bd < w.border[0]) w.border = [bd, at];
+      }
+    }
+    g.removeAttribute("data-ws-color");
+    document.documentElement.dataset.theme = before;
+    return w;
+  });
+  ok(worst.text[0] >= 4.5, `${tag} every theme and color: the card title reads at ≥ 4.5:1 (worst ${worst.text[0].toFixed(2)} at ${worst.text[1]})`);
+  ok(worst.tint[0] >= 10, `${tag} …its tint stands ≥ 10 RGB units off the nav (worst ${Math.round(worst.tint[0])} at ${worst.tint[1]})`);
+  ok(worst.border[0] >= 12, `${tag} …and its border ≥ 12 (worst ${Math.round(worst.border[0])} at ${worst.border[1]})`);
   await browser.close();
 }
 
