@@ -152,6 +152,95 @@ async function run(engine, name) {
   await page.click("[data-testid=nav-view-workspaces]");
   await page.waitForTimeout(80);
 
+  // ── re-ordering the projects INSIDE a workspace (drag + menu twin) ──
+  // Everything holds [a, b, gone]; Tools holds b and a (a was added above).
+  const order = (name) => page.evaluate((n) => {
+    const g = [...document.querySelectorAll("[data-testid=ws-group]")].find((x) => x.querySelector(".ws-name")?.textContent === n);
+    return [...g.querySelectorAll(".ws-kids > [data-ws-row]")].map((r) => r.dataset.wsRow);
+  }, name);
+  const allOrder = () => page.$$eval(".nav-scroll .project[data-project-root]", (p) => p.map((x) => x.dataset.projectRoot));
+  const hdrOf = (name, root) => `ws:${name}|.ws-kids > [data-ws-row="${root}"] .project-h`;
+  const E0 = await order("Everything");
+  const T0 = await order("Tools");
+  const [pa, pb, pg] = E0;
+  ok(E0.length === 3 && pg.includes("unregistered"), `${tag} Everything holds two projects and the unregistered one, in order`);
+  await page.click("[data-testid=nav-view-projects]");
+  await page.waitForTimeout(60);
+  const A0 = await allOrder();
+  await page.click("[data-testid=nav-view-workspaces]");
+  await page.waitForTimeout(60);
+  // menu twin: Move up / Move down, disabled at the ends, hit-testable
+  await ctxOn(page, hdrOf("Everything", pa));
+  ok((await page.$eval("[data-testid=ctx-ws-proj-up]", (b) => b.disabled)) && !(await page.$eval("[data-testid=ctx-ws-proj-down]", (b) => b.disabled)),
+    `${tag} the first project's menu: Move up is disabled, Move down is not`);
+  ok(await reachable(page, "[data-testid=ctx-ws-proj-up]") && await reachable(page, "[data-testid=ctx-ws-proj-down]"), `${tag} …both items are reachable (elementFromPoint)`);
+  ok(await page.$eval("[data-testid=ctx-ws-remove]", (b) => b.nextElementSibling?.dataset.testid === "ctx-ws-proj-up"), `${tag} …and sit beside Remove from workspace`);
+  await page.click("[data-testid=ctx-ws-proj-down]");
+  await page.waitForTimeout(100);
+  ok((await order("Everything")).join() === [pb, pa, pg].join(), `${tag} Move down moves it one place`);
+  ok((await order("Tools")).join() === T0.join(), `${tag} …and another workspace's order is unchanged`);
+  await ctxOn(page, hdrOf("Everything", pg));
+  ok((await page.$eval("[data-testid=ctx-ws-proj-down]", (b) => b.disabled)) && !(await page.$eval("[data-testid=ctx-ws-proj-up]", (b) => b.disabled)),
+    `${tag} the last row (not registered): Move down is disabled, Move up is not`);
+  await page.click("[data-testid=ctx-ws-proj-up]");
+  await page.waitForTimeout(100);
+  ok((await order("Everything")).join() === [pb, pg, pa].join(), `${tag} a not-registered row moves like any other`);
+  await ctxOn(page, hdrOf("Everything", pb));
+  ok(await page.$eval("[data-testid=ctx-ws-proj-up]", (b) => b.disabled), `${tag} the new first row: Move up is disabled`);
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(60);
+  // drag: the not-registered row to the top
+  await page.$eval(".nav-scroll", (n) => { n.scrollTop = 0; });
+  await pointer(page, "pointerdown", hdrOf("Everything", pg));
+  await pointer(page, "pointermove", hdrOf("Everything", pg), -6);
+  await pointer(page, "pointermove", hdrOf("Everything", pb), -4);
+  const gap = await page.evaluate(() => {
+    const gp = document.querySelector(".drop-gap.wsp");
+    if (!gp) return null;
+    const r = gp.getBoundingClientRect();
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    return { n: document.querySelectorAll(".drop-gap").length, before: gp.nextElementSibling?.dataset.wsRow ?? null, hit: hit === gp };
+  });
+  ok(gap && gap.n === 1 && gap.before === pb, `${tag} the drag opens ONE gap, above the row it will land on`);
+  ok(gap?.hit, `${tag} …and the gap is what is under its own centre (elementFromPoint)`);
+  ok((await groups(page)).every((x) => !x.lit), `${tag} …and no workspace lights (it is a move, not an add)`);
+  await pointer(page, "pointerup", hdrOf("Everything", pb), -4);
+  await page.waitForTimeout(150);
+  ok((await order("Everything")).join() === [pg, pb, pa].join(), `${tag} dropping there writes the new order`);
+  ok((await order("Tools")).join() === T0.join(), `${tag} …Tools' order is unchanged`);
+  await page.waitForTimeout(250);
+  // drag: the first row to the END (the lower half of the last row)
+  // (its own bottom edge, 4px up: `pointer` aims at an element's centre)
+  const pointerBottom = (type, root) => page.evaluate(async ([t, r]) => {
+    const el = document.querySelector(`.ws-kids > [data-ws-row="${r}"]`);
+    const b = el.getBoundingClientRect();
+    window.dispatchEvent(new PointerEvent(t, { bubbles: true, clientX: b.left + 40, clientY: b.bottom - 4, button: 0, buttons: t === "pointerup" ? 0 : 1, pointerId: 1 }));
+    await new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res)));
+  }, [type, root]);
+  await pointer(page, "pointerdown", hdrOf("Everything", pg));
+  await pointer(page, "pointermove", hdrOf("Everything", pg), -6);
+  await pointerBottom("pointermove", pa);
+  ok((await page.$$eval(".ws-kids > .drop-gap.wsp", (g) => g.length)) === 1 && await page.$eval(".ws-kids > .drop-gap.wsp", (g) => !g.nextElementSibling), `${tag} over the last row's lower half the gap is at the end`);
+  await pointerBottom("pointerup", pa);
+  await page.waitForTimeout(150);
+  ok((await order("Everything")).join() === [pb, pa, pg].join(), `${tag} …and the drop puts it last`);
+  await page.waitForTimeout(250);
+  // over ANOTHER workspace that holds the project: still nothing (a workspace
+  // that lacks it still adds: the Phone drag below)
+  await pointer(page, "pointerdown", hdrOf("Everything", pa));
+  await pointer(page, "pointermove", hdrOf("Everything", pa), 6);
+  await pointer(page, "pointermove", "ws:Tools|.ws-h");
+  ok((await page.$$(".drop-gap.wsp")).length === 0 && (await groups(page)).every((x) => !x.lit), `${tag} over another workspace that holds it: no gap, no light`);
+  await page.keyboard.press("Escape");
+  await pointer(page, "pointerup", "ws:Tools|.ws-h");
+  await page.waitForTimeout(250);
+  ok((await order("Everything")).join() === [pb, pa, pg].join() && (await order("Tools")).join() === T0.join(), `${tag} …and the drop changed nothing`);
+  await page.click("[data-testid=nav-view-projects]");
+  await page.waitForTimeout(60);
+  ok((await allOrder()).join() === A0.join(), `${tag} All projects' order is untouched by all of it`);
+  await page.click("[data-testid=nav-view-workspaces]");
+  await page.waitForTimeout(60);
+
   // menu: Move down
   await page.click("[data-testid=ws-group] [data-testid=ws-menu]");
   await page.click("[data-testid=ws-move-down]");

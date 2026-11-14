@@ -38,7 +38,7 @@ const list = {
 const P = (root, ws) => ({ kind: "project", root, ...(ws ? { ws } : {}) });
 eq("a project from All projects onto a workspace adds it", W.projectDrop(P("/y"), { kind: "group", id: "A" }, list), { kind: "ws-add", id: "A", root: "/y" });
 eq("a project in A onto B adds it there too", W.projectDrop(P("/x", "A"), { kind: "group", id: "B" }, list), { kind: "ws-add", id: "B", root: "/x" });
-eq("onto the workspace that already holds it: nothing", W.projectDrop(P("/x", "A"), { kind: "group", id: "A" }, list), null);
+eq("from All projects onto a workspace that already holds it: nothing", W.projectDrop(P("/x"), { kind: "group", id: "A" }, list), null);
 eq("onto a workspace that is gone: nothing", W.projectDrop(P("/x"), { kind: "group", id: "Z" }, list), null);
 eq("a project in A onto the All projects switch takes it out of A", W.projectDrop(P("/x", "A"), { kind: "switch", view: "projects" }, list), { kind: "ws-remove", id: "A", root: "/x" });
 eq("a project from All projects onto that switch: nothing", W.projectDrop(P("/x"), { kind: "switch", view: "projects" }, list), null);
@@ -55,7 +55,36 @@ eq("reorder before", W.idsMoved(["A", "B", "C"], "C", "A"), ["C", "A", "B"]);
 eq("reorder to the end", W.idsMoved(["A", "B", "C"], "A", null), ["B", "C", "A"]);
 eq("move up", W.idsStepped(["A", "B", "C"], "B", -1), ["B", "A", "C"]);
 eq("move down at the end is disabled", W.idsStepped(["A", "B", "C"], "C", 1), null);
-eq("Add to workspace offers the ones that do not hold it", W.addableTo(list, "/x").map((w) => w.id), ["B"]);
+// Re-ordering the projects INSIDE one workspace (per workspace: a project in
+// several keeps a position in each, and All projects' order is not involved).
+const wsOrder = { workspaces: [
+  { id: "A", name: "A", projects: ["/p", "/q", "/gone", "/r"].map((root) => ({ root, name: root, registered: root !== "/gone" })) },
+  { id: "B", name: "B", projects: [{ root: "/r", name: "r", registered: true }, { root: "/p", name: "p", registered: true }] },
+] };
+eq("a project in A over A's own group moves, before the row the pointer picked",
+  W.projectDrop(P("/r", "A"), { kind: "group", id: "A" }, wsOrder, "/q"), { kind: "ws-move", id: "A", root: "/r", before: "/q" });
+eq("…or to the end when no row follows the pointer",
+  W.projectDrop(P("/p", "A"), { kind: "group", id: "A" }, wsOrder, null), { kind: "ws-move", id: "A", root: "/p", before: null });
+eq("the same project over B, which holds it, is still nothing",
+  W.projectDrop(P("/p", "A"), { kind: "group", id: "B" }, wsOrder, "/r"), null);
+eq("a project from All projects over a workspace that holds it does not move it",
+  W.projectDrop(P("/q"), { kind: "group", id: "A" }, wsOrder, "/p"), null);
+eq("over another workspace that lacks it, a drag still adds (the before is ignored)",
+  W.projectDrop(P("/q", "A"), { kind: "group", id: "B" }, wsOrder, "/r"), { kind: "ws-add", id: "B", root: "/q" });
+eq("the switch still takes it out of A", W.projectDrop(P("/q", "A"), { kind: "switch", view: "projects" }, wsOrder, "/p"), { kind: "ws-remove", id: "A", root: "/q" });
+eq("a drag from a workspace the list no longer has: nothing",
+  W.projectDrop(P("/q", "Z"), { kind: "group", id: "Z" }, wsOrder, "/p"), null);
+eq("moved before: one workspace's list only", W.rootsMoved(wsOrder.workspaces[0], "/r", "/q"), ["/p", "/r", "/q", "/gone"]);
+eq("moved to the end", W.rootsMoved(wsOrder.workspaces[0], "/p", null), ["/q", "/gone", "/r", "/p"]);
+eq("an unregistered row moves like any other", W.rootsMoved(wsOrder.workspaces[0], "/gone", "/p"), ["/gone", "/p", "/q", "/r"]);
+eq("dropped where it already is: the same list", W.rootsMoved(wsOrder.workspaces[0], "/q", "/gone"), ["/p", "/q", "/gone", "/r"]);
+eq("moving in A leaves B's list as it was", W.rootsMoved(wsOrder.workspaces[1], "/zzz", null), ["/r", "/p", "/zzz"]);
+eq("Move up steps one place", W.rootsStepped(wsOrder.workspaces[0], "/q", -1), ["/q", "/p", "/gone", "/r"]);
+eq("Move down steps an unregistered row", W.rootsStepped(wsOrder.workspaces[0], "/gone", 1), ["/p", "/q", "/r", "/gone"]);
+eq("Move up on the first is disabled", W.rootsStepped(wsOrder.workspaces[0], "/p", -1), null);
+eq("Move down on the last is disabled", W.rootsStepped(wsOrder.workspaces[0], "/r", 1), null);
+eq("a project the workspace does not hold cannot step", W.rootsStepped(wsOrder.workspaces[1], "/q", 1), null);
+eq("Add to workspace offers the ones that do not hold it",W.addableTo(list, "/x").map((w) => w.id), ["B"]);
 eq("the word", W.VIEW_LABEL, { projects: "All projects", workspaces: "Workspaces" });
 
 // A workspace menu's "Add project ▸" and its dialogs' continuation.
@@ -87,6 +116,7 @@ const app = read("../src/App.tsx");
 for (const [what, re] of [
   ["project menu → Add to workspace", /data-testid="ctx-ws-add"/],
   ["project menu → Remove from workspace", /data-testid="ctx-ws-remove"/],
+  ["project menu → Move up / Move down under a workspace", /data-testid="ctx-ws-proj-up"[\s\S]*data-testid="ctx-ws-proj-down"/],
   ["workspace menu → Move up / Move down", /data-testid="ws-move-up"[\s\S]*data-testid="ws-move-down"/],
   ["workspace menu → Rename", /data-testid="ws-rename"/],
   ["workspace menu → Remove workspace", /data-testid="ws-remove"/],
@@ -120,6 +150,9 @@ ok("ProjectNode was found", hdr.length > 200);
 ok("under a workspace the header ✕ takes it out of the workspace", /inWs\s*\?[\s\S]{0,500}wsRemoveProject\(/.test(hdr));
 ok("…and never unregisters it", !/inWs[^\n]*confirmRemoveProject/.test(hdr));
 ok("the view is the per-viewer nav_view setting", /settings\.nav_view/.test(app) && /updateSettings\(\{\s*nav_view:/.test(app));
+ok("a not-registered row is armed for the drag like any other", /<WsGoneRow[\s\S]{0,400}onArm=\{\(e\) => arm\(e, \{ kind: "project", root: p\.root, ws: w\.id \}\)\}/.test(app));
+ok("a drop within a workspace writes the whole list through workspace_set_projects", /const wsSetOrder = [\s\S]{0,700}wsRun\("workspace_set_projects", \{ id, roots \}\)/.test(app));
+ok("the project drag's order rule is the pure one", /rootsMoved\(w, root, before\)/.test(app) && /rootsStepped\(w, ctx\.root, -1\)/.test(app));
 const settings = read("../src/settings.ts");
 ok("nav_view is in Settings, defaulting to All projects", /nav_view: "projects" \| "workspaces";/.test(settings) && /nav_view: "projects",/.test(settings));
 ok("a junk nav_view loads as All projects", /if \(s\.nav_view !== "workspaces"\) s\.nav_view = "projects";/.test(settings));
