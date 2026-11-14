@@ -159,7 +159,7 @@ export function GuestToasts() {
       {g.toasts.map((t) => (
         <div key={t.id} className="guest-toast" data-testid="guest-toast">
           <span>{t.text}</span>
-          <button className="mini" aria-label="Dismiss" onClick={() => dismissToast(t.id)}>×</button>
+          <button className="guest-toast-x" aria-label="Dismiss" onClick={() => dismissToast(t.id)}>×</button>
         </div>
       ))}
     </div>
