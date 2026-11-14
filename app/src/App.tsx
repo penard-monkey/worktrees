@@ -55,7 +55,7 @@ import {
 } from "./dnd";
 import { useNavDrag, type DragItem } from "./navdrag";
 import {
-  VIEW_LABEL, WS_COLORS, addableTo, arrivedRoot, idsMoved, idsStepped, projectDrop, projectsAddable, rootsWith, rootsWithout, springsTo, wsColorOf, wsProjectKey,
+  VIEW_LABEL, WS_COLORS, addableTo, arrivedRoot, idsMoved, idsStepped, projectDrop, projectsAddable, rootsMoved, rootsStepped, rootsWith, rootsWithout, springsTo, wsColorOf, wsProjectKey,
   type NavView, type WsColor, type WsDef, type WsHit, type WsList,
 } from "./workspaces";
 import { ideasBeta } from "./beta";
@@ -1157,14 +1157,15 @@ function WorkspaceHeader({ w, open, naming, rollup, onToggle, onMenu, onArm, onR
 
 /** A referenced project that is no longer registered. Kept, never dropped for
  *  the user: they take it out by hand (✕ or the menu). */
-function WsGoneRow({ root, onRemove, onMenu }: {
+function WsGoneRow({ root, onRemove, onMenu, onArm }: {
   root: string;
   onRemove: () => void;
   onMenu: (e: React.MouseEvent) => void;
+  onArm: (e: React.PointerEvent) => void;
 }) {
   return (
-    <div className="project ws-gone" data-testid="ws-gone" onContextMenu={onMenu}>
-      <div className="project-h" data-track="nav.project">
+    <div className="project ws-gone" data-testid="ws-gone" data-ws-row={root} onContextMenu={onMenu}>
+      <div className="project-h" data-track="nav.project" onPointerDown={onArm}>
         <span className="rollup broken" title="not registered">⊘</span>
         <span className="pname" title={root}>{basename(root)}</span>
         <span className="pgone">not registered</span>
@@ -6062,8 +6063,13 @@ function App() {
     // this effect's deps stable): a vanished target must never leave confirmRm
     // armed — for the project branch that would resurrect a one-click remove.
     if (ctx.kind === "place" && !ctxPlace) { setCtx(null); setConfirmRm(null); }
-    if (ctx.kind === "project" && !ws.projects.some((v) => v.root === ctx.root)) { setCtx(null); setConfirmRm(null); }
-  }, [ctx, ctxPlace, ws]);
+    // A root that left the registry is still a row under the workspace that
+    // references it (its menu has Remove from workspace and Move up/down), so
+    // the menu stays while that workspace still holds it.
+    const held = !!ctx.kind && ctx.kind === "project" && !!ctx.ws
+      && !!wsList?.workspaces.find((w) => w.id === ctx.ws)?.projects.some((p) => p.root === ctx.root);
+    if (ctx.kind === "project" && !held && !ws.projects.some((v) => v.root === ctx.root)) { setCtx(null); setConfirmRm(null); }
+  }, [ctx, ctxPlace, ws, wsList]);
 
   /** Apply a DECLARED change to the workspace already in hand, so the UI shows
    *  it now instead of after a full git sweep.
@@ -6510,6 +6516,21 @@ function App() {
         run: () => { setUndo(null); void wsRun("workspace_set_projects", { id, roots: prev }); },
       });
     });
+  };
+  /** Re-order the projects inside ONE workspace: the whole list through
+   *  `workspace_set_projects` (it keeps the order given, and keeps a root that
+   *  has left the registry). Optimistic, as `wsReorder` is, so the row does not
+   *  snap back for the length of a round trip. `roots` is null at an edge. */
+  const wsSetOrder = (id: string, roots: string[] | null) => {
+    const w = wsById(id);
+    if (!w || !roots || roots.join("\n") === w.projects.map((p) => p.root).join("\n")) return;
+    const by = new Map(w.projects.map((p) => [p.root, p]));
+    setWsList((cur) => cur && { workspaces: cur.workspaces.map((x) => x.id !== id ? x : { ...x, projects: roots.map((r) => by.get(r)!).filter(Boolean) }) });
+    void wsRun("workspace_set_projects", { id, roots }).then((l) => { if (!l) invoke<WsList>("workspaces_list").then(setWsList).catch(() => {}); });
+  };
+  const wsMoveProject = (id: string, root: string, before: string | null) => {
+    const w = wsById(id);
+    if (w) wsSetOrder(id, rootsMoved(w, root, before));
   };
   /** A workspace card's color: one of `WS_COLORS`, or null for the theme's
    *  accent. Optimistic, as `wsReorder` is. */
@@ -7238,6 +7259,7 @@ function App() {
     // workspace moved between the others.
     | { kind: "ws-add"; id: string; root: string }
     | { kind: "ws-remove"; id: string; root: string }
+    | { kind: "ws-move"; id: string; root: string; before: string | null }
     | { kind: "ws-order"; before: string | null }
     // Dropping a place onto the TERMINAL is not a move at all — it types a
     // reference to that place into the Claude session running there. Onto the
@@ -7298,7 +7320,18 @@ function App() {
     if (item.kind === "project" && (navView === "workspaces" || el?.closest("[data-ws-switch]"))) {
       // In the Workspaces view a project drag adds or removes, never reorders
       // the registry; over the switch in All projects it only springs.
-      return projectDrop(item, wsHitAt(el), wsList);
+      const hit = wsHitAt(el);
+      // Over the group it was dragged out of, the pointer picks the slot among
+      // THAT workspace's rows (registered or not), the project reorder's rule.
+      let before: string | null = null;
+      if (hit?.kind === "group" && item.ws === hit.id) {
+        const zone = navScrollRef.current?.querySelector<HTMLElement>(`[data-ws-id="${CSS.escape(hit.id)}"]`);
+        if (zone) {
+          const { rows, y: ny } = rowGeometry(zone, y, item.root, "[data-ws-row]", (n) => n.dataset.wsRow!, ".drop-gap.wsp");
+          before = rows[pointerIndex(rows, ny)]?.slug ?? null;
+        }
+      }
+      return projectDrop(item, hit, wsList, before);
     }
     if (item.kind === "project") {
       const list = navScrollRef.current;
@@ -7415,6 +7448,7 @@ function App() {
     }
     if (target.kind === "ws-add") { wsAddProject(target.id, target.root); return; }
     if (target.kind === "ws-remove") { wsRemoveProject(target.id, target.root); return; }
+    if (target.kind === "ws-move") { wsMoveProject(target.id, target.root, target.before); return; }
     if (item.kind === "workspace") {
       if (target.kind !== "ws-order" || target.before === item.id) return;
       const ids = (wsList?.workspaces ?? []).map((w) => w.id);
@@ -8872,7 +8906,7 @@ function App() {
     );
 
     return (
-      <div className="project" data-project-root={pv.root} data-drop="project">
+      <div className="project" data-project-root={pv.root} data-drop="project" data-ws-row={inWs ? pv.root : undefined}>
         <div
           className="project-h"
           // usage: the header's own label is the repo path; the buttons inside
@@ -9046,6 +9080,9 @@ function App() {
    *  component defined in here would remount every render. */
   const wsGapAt = (id: string | null) =>
     drag?.item.kind === "workspace" && drag.target?.kind === "ws-order" && drag.target.before === id;
+  /** The gap a project drag opens inside its own workspace, above `before`. */
+  const wsRowGapAt = (id: string, before: string | null) =>
+    drag?.item.kind === "project" && drag.target?.kind === "ws-move" && drag.target.id === id && drag.target.before === before;
   const workspacesNav = () => {
     const list = wsList?.workspaces ?? [];
     const pvOf = (root: string) => ws?.projects.find((v) => v.root === root) ?? null;
@@ -9105,17 +9142,23 @@ function App() {
                     )}
                     {w.projects.map((p) => {
                       const pv = p.registered ? pvOf(p.root) : null;
-                      return pv
-                        ? <ProjectNode key={p.root} pv={pv} inWs={w.id} />
-                        : (
-                          <WsGoneRow
-                            key={p.root}
-                            root={p.root}
-                            onRemove={() => wsRemoveProject(w.id, p.root)}
-                            onMenu={(e) => projectCtx(e, p.root, w.id)}
-                          />
-                        );
+                      return (
+                        <Fragment key={p.root}>
+                          {wsRowGapAt(w.id, p.root) && <div className="drop-gap proj wsp" />}
+                          {pv
+                            ? <ProjectNode pv={pv} inWs={w.id} />
+                            : (
+                              <WsGoneRow
+                                root={p.root}
+                                onRemove={() => wsRemoveProject(w.id, p.root)}
+                                onMenu={(e) => projectCtx(e, p.root, w.id)}
+                                onArm={(e) => arm(e, { kind: "project", root: p.root, ws: w.id })}
+                              />
+                            )}
+                        </Fragment>
+                      );
                     })}
+                    {wsRowGapAt(w.id, null) && <div className="drop-gap proj wsp" />}
                   </div>
                 )}
               </div>
@@ -10371,6 +10414,7 @@ function App() {
           {drag.target?.kind === "tier" && <span className="drag-why">→ {TIER_LABEL[drag.target.lands]}</span>}
           {drag.target?.kind === "ws-add" && <span className="drag-why">→ add to {wsById(drag.target.id)?.name}</span>}
           {drag.target?.kind === "ws-remove" && <span className="drag-why">→ take out of {wsById(drag.target.id)?.name}</span>}
+          {drag.target?.kind === "ws-move" && <span className="drag-why">→ move within {wsById(drag.target.id)?.name}</span>}
           {drag.target?.kind === "mention" && <span className="drag-why">{drag.target.intoPath
             ? (drag.target.token ? "→ reference in your message" : `→ adds “${drag.target.label}” to your message`)
             : drag.target.token ? "→ reference in this session" : `→ types “${drag.target.label}” here`}</span>}
@@ -10797,7 +10841,7 @@ function App() {
         return (
           <CtxMenu x={ctx.x} y={ctx.y} onClose={closeCtx}>
             <div className="pop-hint">{basename(ctx.root)}</div>
-            <button className="pop-item" onClick={() => { closeCtx(); openNewForm(ctx.root, ""); }}>New worktree…</button>
+            {pv && <button className="pop-item" onClick={() => { closeCtx(); openNewForm(ctx.root, ""); }}>New worktree…</button>}
             {main && <button className="pop-item" onClick={() => enterPlace(ctx.root, main)}>Enter main ▸</button>}
             {pv?.ok && (
               <button className="pop-item" onClick={() => { closeCtx(); mutate(invoke("fetch_origin", { root: ctx.root })); }}>Fetch origin</button>
@@ -10888,6 +10932,20 @@ function App() {
                     Remove from workspace
                   </button>
                 )}
+                {ctx.ws && (() => {
+                  const w = wsById(ctx.ws);
+                  const up = w ? rootsStepped(w, ctx.root, -1) : null;
+                  const down = w ? rootsStepped(w, ctx.root, 1) : null;
+                  const id = ctx.ws;
+                  return (
+                    <>
+                      <button className="pop-item" data-testid="ctx-ws-proj-up" data-track="nav.project.ws.up" disabled={!up}
+                        onClick={() => { closeCtx(); if (id) wsSetOrder(id, up); }}>Move up</button>
+                      <button className="pop-item" data-testid="ctx-ws-proj-down" data-track="nav.project.ws.down" disabled={!down}
+                        onClick={() => { closeCtx(); if (id) wsSetOrder(id, down); }}>Move down</button>
+                    </>
+                  );
+                })()}
               </>
             )}
             {pv && (

@@ -64,22 +64,32 @@ export type WsHit = { kind: "group"; id: string } | { kind: "switch"; view: NavV
 
 export type WsDrop =
   | { kind: "ws-add"; id: string; root: string }
-  | { kind: "ws-remove"; id: string; root: string };
+  | { kind: "ws-remove"; id: string; root: string }
+  // A project dragged within the workspace it is under: `before` is the root
+  // of the row it lands above (null = at the end). Per workspace.
+  | { kind: "ws-move"; id: string; root: string; before: string | null };
 
 /** The drop a PROJECT drag means over `hit`, or null when the thing under the
  *  pointer cannot take it — and null shows no highlight and does nothing.
  *
  *  - onto a workspace that does not hold it: add it (from All projects, or
  *    from another workspace — a project can be in many);
- *  - onto the workspace it is already in: nothing;
+ *  - onto the workspace it was dragged OUT of: a move within it, above the
+ *    row `before` names (the caller reads that off the pointer; a header or
+ *    the space above the first row means the top). A project from All projects
+ *    over a workspace that holds it, or one dragged from workspace A over B
+ *    which also holds it: nothing;
  *  - a project IN a workspace onto the "All projects" switch: take it out of
  *    that workspace (never out of the registry);
  *  - anything else: nothing. */
-export function projectDrop(item: WsItem, hit: WsHit, list: WsList | null): WsDrop | null {
+export function projectDrop(item: WsItem, hit: WsHit, list: WsList | null, before: string | null = null): WsDrop | null {
   if (item.kind !== "project" || !hit || !list) return null;
   if (hit.kind === "group") {
     const w = list.workspaces.find((x) => x.id === hit.id);
-    if (!w || w.projects.some((p) => p.root === item.root)) return null;
+    if (!w) return null;
+    if (w.projects.some((p) => p.root === item.root)) {
+      return item.ws === w.id ? { kind: "ws-move", id: w.id, root: item.root, before } : null;
+    }
     return { kind: "ws-add", id: w.id, root: item.root };
   }
   if (hit.view === "projects" && item.ws) {
@@ -106,6 +116,11 @@ export const rootsWith = (w: WsDef, root: string): string[] =>
 export const rootsWithout = (w: WsDef, root: string): string[] =>
   w.projects.filter((p) => p.root !== root).map((p) => p.root);
 
+/** …and for a move inside the workspace: `root` above `before` (null = last).
+ *  Only this workspace's list; another that holds the project keeps its own. */
+export const rootsMoved = (w: WsDef, root: string, before: string | null): string[] =>
+  idsMoved(w.projects.map((p) => p.root), root, before);
+
 /** `ids` with `moved` placed before `before` (null = at the end). */
 export function idsMoved(ids: string[], moved: string, before: string | null): string[] {
   const out = ids.filter((x) => x !== moved);
@@ -124,6 +139,11 @@ export function idsStepped(ids: string[], id: string, dir: -1 | 1): string[] | n
   [out[i], out[j]] = [out[j], out[i]];
   return out;
 }
+
+/** The project menu's Move up / Move down under a workspace: null at an end
+ *  (disabled), or when the workspace does not hold the project. */
+export const rootsStepped = (w: WsDef, root: string, dir: -1 | 1): string[] | null =>
+  idsStepped(w.projects.map((p) => p.root), root, dir);
 
 /** The workspaces a project's "Add to workspace ▸" offers: the ones that do
  *  not hold it yet. */
