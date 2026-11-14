@@ -90,7 +90,7 @@ pub enum Kind {
     /// The owner took a guest off the share, or off the host.
     Removed,
     /// The owner shared posts `first..=last` with the agent (*Use these*,
-    /// PR D). Reserved: no row appends it yet.
+    /// PR D's `share_used`, after a confirmed `agent_send`).
     SharedWithAgent,
     /// The binding ended: another session in the lane.
     SessionEnded,
@@ -266,8 +266,7 @@ impl Threads {
         self.mutate(share, |f| Self::push(f, Entry::event(kind, principal, now)))
     }
 
-    /// `SharedWithAgent` (PR D's *Use these*): posts `first..=last`.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// `SharedWithAgent` (PR D's *Use these*, the `share_used` row): posts `first..=last`.
     pub fn shared_with_agent(&self, share: &str, first: u64, last: u64, now: i64) -> Result<Entry, String> {
         if first > last {
             return Err("first is after last".into());

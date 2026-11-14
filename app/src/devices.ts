@@ -76,7 +76,13 @@ export type PairRequest = {
   peer: string;
   grant: { capabilities: Cap[]; projects: Projects };
   expiry: Expiry;
+  /** The guest this device would belong to, when the window is an invite
+   *  (group chat §2.1): the person the host named, never the device's claim. */
+  invite?: PairInvite;
 };
+
+/** `pairing::Invite`: a new guest, or one the host has. */
+export type PairInvite = { kind: "new" | "existing"; id: string; name: string };
 
 /** `pair_status` (`pairing::Status`). */
 export type PairStatus =
