@@ -498,6 +498,8 @@ export const CONSOLE_ROWS: readonly string[] = [
   "share_requests_list", "share_request_dismiss", "shares_all", "guests_list", "guest_remove", "owner_set_name",
   // group chat PR D: Use these, recorded in the thread after a confirmed send
   "share_used",
+  // and the proof before it that the lane's live session is the bound one
+  "share_check",
 ];
 
 /** The device's capabilities on the host this window drives, from the remote
