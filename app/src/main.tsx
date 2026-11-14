@@ -198,9 +198,17 @@ async function boot() {
   // pinned pipes through the shim; the harness's are the mock's. A browser
   // page (the dev stack) has no shim, so no guest host.
   if (import.meta.env.VITE_MOCK || (!import.meta.env.VITE_SERVE && "__TAURI_INTERNALS__" in window)) {
-    const { startGuests, guestsVisible } = await import("./guest");
+    // Group chat is a beta (beta.ts `groupChatBeta`): no guest connection at
+    // all while it is off, started when it goes on and stopped when it goes
+    // off, no restart either way. App publishes the switch once it has loaded
+    // the settings (betaLive), so a launch with it off never dials.
+    const { startGuests, stopGuests, guestsVisible } = await import("./guest");
     const { appGuestSource, mockGuestSource } = await import("./guestboot");
-    startGuests(import.meta.env.VITE_MOCK ? mockGuestSource() : appGuestSource());
+    const { onGroupChat } = await import("./betaLive");
+    onGroupChat((on) => {
+      if (on) startGuests(import.meta.env.VITE_MOCK ? mockGuestSource() : appGuestSource());
+      else stopGuests();
+    });
     document.addEventListener("visibilitychange", () => { if (document.visibilityState !== "hidden") guestsVisible(); });
   }
   const { default: App } = await import("./App");

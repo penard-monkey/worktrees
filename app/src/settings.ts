@@ -466,6 +466,10 @@ export type Settings = {
   // beta (2026-11-14); a build from before that still reads it for both, so
   // never retire it. Each beta feature has its OWN `beta_<name>` key.
   beta_ideas: boolean;
+  // Settings → General → Beta features → Group chat (sharing a session with a
+  // guest, the thread, and the guest's side). Off by default; read ONLY
+  // through `beta.ts` (`groupChatBeta`). The engine's rows are never gated.
+  beta_group_chat: boolean;
   hidden_tiers: string[]; // lifecycle tiers hidden in the Places tree (active/idle/dormant)
   sort_mode: "recent" | "alpha" | "manual";
   sort_dir: "asc" | "desc";
@@ -619,6 +623,7 @@ export const DEFAULTS: Settings = {
   nav_view: "projects",
   ws_collapsed: {},
   beta_ideas: false,
+  beta_group_chat: false,
   hidden_tiers: [],
   sort_mode: "recent",
   sort_dir: "desc",
@@ -973,6 +978,7 @@ export async function loadSettings(): Promise<Settings> {
     if (s.nav_view !== "workspaces") s.nav_view = "projects";
     if (!s.ws_collapsed || typeof s.ws_collapsed !== "object") s.ws_collapsed = {};
     if (s.beta_ideas !== true) s.beta_ideas = false;
+    if (s.beta_group_chat !== true) s.beta_group_chat = false;
     if (!isHarness(s.default_provider)) s.default_provider = HARNESSES[0];
     // A tab that no longer exists must land on Files, globally AND per place.
     // Without this, `"automations"` (the tab removed after 0.40.1) persisted in

@@ -59,7 +59,8 @@ import {
   VIEW_LABEL, WS_COLORS, addableTo, arrivedRoot, idsMoved, idsStepped, projectDrop, projectsAddable, rootsMoved, rootsStepped, rootsWith, rootsWithout, springsTo, wsColorOf, wsProjectKey,
   type NavView, type WsColor, type WsDef, type WsHit, type WsList,
 } from "./workspaces";
-import { ideasBeta } from "./beta";
+import { groupChatBeta, ideasBeta } from "./beta";
+import { publishGroupChat } from "./betaLive";
 import { remoteHostLabel, remoteTitle, remoteWebUrl } from "./remote";
 import { PrsPane } from "./PrsPane";
 import { ageOf, prOfPlace, prsShown, prSummary, TAB_MAX_AGE_S, useProjectPrs } from "./prs";
@@ -4722,6 +4723,11 @@ function App() {
   // Settings → General → Beta features (beta.ts): the Ideas window and named
   // workspaces. Every surface of either asks THIS, never the settings key.
   const ideasOn = ideasBeta(settings);
+  // Group chat (beta): every surface of it in this window asks this, and the
+  // ones outside App (main.tsx's guest connections, RemoteLayer) hear it
+  // through betaLive. Off until the settings load, like every switch.
+  const groupChatOn = groupChatBeta(settings);
+  useEffect(() => publishGroupChat(groupChatOn), [groupChatOn]);
   // Turning it off closes an Ideas window that is open (a shim command, which
   // closes it the way its own close button does, so winstate records it shut
   // and the next launch does not bring it back). Only on a change seen in
@@ -9081,7 +9087,7 @@ function App() {
             {/* A host this machine is a guest of: its owner's shares and
                 place names for a project of the same name (group chat §7),
                 after this machine's own places. */}
-            <GuestUnder projectName={basename(pv.root)} localNames={localNames} />
+            {groupChatOn && <GuestUnder projectName={basename(pv.root)} localNames={localNames} />}
           </div>
         )}
       </div>
@@ -9448,7 +9454,7 @@ function App() {
                 </Fragment>
               ))}
           {projGapAt(null) && <div className="drop-gap proj" />}
-          <SharedWithMe localNames={localNames} />
+          {groupChatOn && <SharedWithMe localNames={localNames} />}
           </>}
         </div>
         {/* Overlay only. Pinned, the sidebar is furniture you have already
@@ -9482,7 +9488,7 @@ function App() {
         {/* A share open as a guest covers the workbench rather than replacing
             it: the terminals underneath keep their size, so tmux sees no
             resize, and they are as they were when the share closes. */}
-        {guestOpen && <div className="guest-overlay"><GuestSpace /></div>}
+        {groupChatOn && guestOpen && <div className="guest-overlay"><GuestSpace /></div>}
 
         {selected && sel && (
           <>
@@ -9785,7 +9791,7 @@ function App() {
                           </span>
                           {settingsReady && settings.chat_view && <AgentViewSwitch chat={chatOn} onChat={(on) => setChatView(viewKey, provider, on)} />}
                         </div>
-                        <LaneShareBar repo={sel.repo} slug={sel.slug} harness={provider} up={!!selectedAgents?.[provider].up} />
+                        {groupChatOn && <LaneShareBar repo={sel.repo} slug={sel.slug} harness={provider} up={!!selectedAgents?.[provider].up} />}
                         <div className="agent-row">
                         {/* The terminal stays mounted under the chat — hidden and
                             inert, at its own size — so no resize reaches the pty
@@ -9810,7 +9816,7 @@ function App() {
                               reloadToken={placesToken} onError={fail} />
                           )}
                         </div>
-                        <LaneThread repo={sel.repo} slug={sel.slug} session={selectedAgents![provider].name} up={!!selectedAgents?.[provider].up} />
+                        {groupChatOn && <LaneThread repo={sel.repo} slug={sel.slug} session={selectedAgents![provider].name} up={!!selectedAgents?.[provider].up} />}
                         </div>
                       </div>
                       );
@@ -10383,7 +10389,7 @@ function App() {
           routinely arrive from the same drop, and as two fixed elements at the
           same coordinates the undo banner sat exactly on top of the note it
           was supposed to accompany. Undo first in DOM = above on screen. */}
-      <GuestToasts />
+      {groupChatOn && <GuestToasts />}
       {(err || notice || undo || planHint) && (
         <div className="float-stack">
           {/* One click back from a slip of the wrist — a drag rewrites declared

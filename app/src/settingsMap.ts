@@ -207,7 +207,7 @@ export const SECTIONS: readonly SectionDef[] = [
   // feature's key, beta-check holds them equal). Advanced and Expert only (the owner's
   // call, 2026-11-08); a feature turned on is a changed value, so rule 2
   // shows the section in Beginner too, where it can be turned off again.
-  { id: "beta", page: "general", tier: "advanced", label: "Beta features", keywords: ["beta", "experimental", "preview", "early access", "feature flag", "ideas"], keys: ["beta_ideas"], localOnly: true },
+  { id: "beta", page: "general", tier: "advanced", label: "Beta features", keywords: ["beta", "experimental", "preview", "early access", "feature flag", "ideas", "group chat"], keys: ["beta_ideas", "beta_group_chat"], localOnly: true },
   // ── Appearance
   { id: "zoom", page: "appearance", tier: "beginner", label: "Overall size", keywords: ["zoom", "scale", "bigger", "smaller", "text size", "magnify"], keys: ["app_zoom"] },
   { id: "ui-font", page: "appearance", tier: "advanced", label: "UI font size", keywords: ["font", "font size", "text size", "interface font", "rem"], keys: ["ui_rem"] },
@@ -282,7 +282,8 @@ export const SECTIONS: readonly SectionDef[] = [
   { id: "this-window-drives", page: "remote", tier: "beginner", label: "This window drives", keywords: ["remote host", "drive host", "which machine", "paired host", "other computer", "connect to host"], scope: "window" },
   { id: "remote-access", page: "remote", tier: "advanced", label: "Let devices reach this computer", keywords: ["remote", "lan", "network", "phone", "iphone", "pairing", "kill switch"], host: ["remote_access"], scope: "computer" },
   { id: "devices", page: "remote", tier: "advanced", label: "Paired devices", keywords: ["phone", "iphone", "ipad", "pair", "pairing", "revoke"], host: ["devices"], scope: "computer" },
-  { id: "guests", page: "remote", tier: "advanced", label: "Guests", keywords: ["guest", "invite", "share", "share a session", "bret", "group chat", "place names", "hide project"], scope: "computer", read: "guests_list" },
+  // Group chat's beta (beta.ts `groupChatBeta`, restated: this file imports no value).
+  { id: "guests", page: "remote", tier: "advanced", label: "Guests", keywords: ["guest", "invite", "share", "share a session", "bret", "group chat", "place names", "hide project"], scope: "computer", read: "guests_list", applies: (s) => s.beta_group_chat === true },
   // ── Updates
   { id: "version", page: "updates", tier: "beginner", label: "Version", keywords: ["update", "upgrade", "check for updates", "auto update", "release", "about"], keys: ["update_auto_check"] },
   { id: "agent-clis", page: "updates", tier: "advanced", label: "Agent CLIs", keywords: ["update claude", "update codex", "upgrade", "cli versions", "harness updates"], scope: "computer", write: "update_harness" },

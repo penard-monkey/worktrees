@@ -158,18 +158,23 @@ function drop(id: string) {
 /** Read the paired hosts again, and connect to each one this machine is a
  *  guest of (a pairing just made, a host just forgotten). */
 export async function refreshGuestHosts(): Promise<void> {
-  if (!source) return;
+  const src = source;
+  if (!src) return;
   let hosts: HostSummary[];
   try {
-    hosts = (await source.hosts()).filter((h) => h.guest === true);
+    hosts = (await src.hosts()).filter((h) => h.guest === true);
   } catch {
     return; // Settings → Hosts says why the list cannot be read
   }
+  // Stopped (group chat switched off), or stopped and started again, while
+  // the list was read: this answer is not the current source's to act on.
+  if (source !== src) return;
   for (const h of hosts) adopt(h);
   for (const id of [...links.keys()]) if (!hosts.some((h) => h.id === id)) drop(id);
 }
 
-/** Start: once, from main.tsx, with the app's or the harness's source. */
+/** Start, with the app's or the harness's source: main.tsx, each time group
+ *  chat's beta switch goes on (betaLive). A second start is a no-op. */
 export function startGuests(src: GuestSource): void {
   if (source) return;
   source = src;
@@ -225,10 +230,18 @@ export async function requestShare(host: string, projectId: string, slug: string
   patch(host, (h) => ({ ...h, asked: [...h.asked, `${projectId}|${slug}`] }));
 }
 
-/** Tests only: forget every host and the source. */
-export function resetGuestsForTest() {
+/** Stop: group chat's beta switch went off. Every guest connection closes,
+ *  the source is forgotten (so the next on starts afresh), and an open guest
+ *  view, the hosts' lists and the toasts go, told to every subscriber. The
+ *  pairings stay: Settings → Hosts still lists them, and nothing is deleted. */
+export function stopGuests(): void {
   for (const l of links.values()) l.close();
   links.clear();
   source = null;
-  state = { hosts: [], toasts: [], open: null };
+  set(() => ({ hosts: [], toasts: [], open: null }));
+}
+
+/** Tests only: forget every host and the source. */
+export function resetGuestsForTest() {
+  stopGuests();
 }

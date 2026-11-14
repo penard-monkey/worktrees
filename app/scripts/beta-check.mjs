@@ -107,7 +107,7 @@ for (const k of keys) {
 // ── 4. App.tsx: Ideas behind `ideasOn`, workspaces behind nothing ──
 const app = read("../src/App.tsx");
 const code = app.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, " ")).replace(/\/\/[^\n]*/g, (m) => " ".repeat(m.length));
-ok(/import \{ ideasBeta \} from "\.\/beta";/.test(app) && /const ideasOn = ideasBeta\(settings\);/.test(code), "App.tsx: ideasOn = ideasBeta(settings)");
+ok(/import \{[^}]*\bideasBeta\b[^}]*\} from "\.\/beta";/.test(app) && /const ideasOn = ideasBeta\(settings\);/.test(code), "App.tsx: ideasOn = ideasBeta(settings)");
 
 /** The `{ideasOn && … (` or `{ideasOn && <x … />}` regions, start to the
  *  matching close. Comments are blanked first, so a paren in one cannot

@@ -5970,12 +5970,17 @@ Phase 3: Frontend pane and mock harness
         const raw = sessionStorage.getItem(MOCK_SETTINGS_KEY);
         if (raw) return JSON.parse(raw);
       } catch { /* private mode */ }
-      // ?beta=ideas — a fresh tab with Settings → Beta features → Ideas on
-      // (beta.ts). Off by default here too, as in the app. Only
-      // while nothing is stored, so turning it off in the sheet sticks.
-      if (new URLSearchParams(location.search).get("beta")?.split(",").includes("ideas")) {
-        const m = /layout=(left|right)-(left|right)/.exec(location.search);
-        return { beta_ideas: true, ...(m ? { places_side: m[1], dock_side: m[2], settings_rev: 4 } : {}) };
+      // ?beta=ideas, ?beta=group_chat (or both, comma-separated) — a fresh
+      // tab with those Settings → Beta features on (beta.ts). Off by default
+      // here too, as in the app. Only while nothing is stored, so turning one
+      // off in the sheet sticks.
+      {
+        const ideas = new URLSearchParams(location.search).get("beta")?.split(",").includes("ideas");
+        const groupChat = new URLSearchParams(location.search).get("beta")?.split(",").includes("group_chat");
+        if (ideas || groupChat) {
+          const m = /layout=(left|right)-(left|right)/.exec(location.search);
+          return { ...(ideas ? { beta_ideas: true } : {}), ...(groupChat ? { beta_group_chat: true } : {}), ...(m ? { places_side: m[1], dock_side: m[2], settings_rev: 4 } : {}) };
+        }
       }
       // ?layout=<places>-<dock> (e.g. left-left: reference left, agent right) —
       // a fresh tab in one of Settings → Layout's four shapes. Only while

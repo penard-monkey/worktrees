@@ -25,7 +25,7 @@
 import type { Settings } from "./settings";
 
 /** The keys a beta feature may use: each its own `beta_<name>` boolean. */
-export type BetaKey = "beta_ideas";
+export type BetaKey = "beta_ideas" | "beta_group_chat";
 
 export type BetaFeature = {
   /** Its own settings key, default off (settings.ts). */
@@ -46,9 +46,22 @@ export const BETA_FEATURES: readonly BetaFeature[] = [
     what: "Adds the Ideas window: the lightbulb in the rail, and ⌘⇧I. Still changing. Turning it off hides it and keeps what you wrote.",
     testId: "beta-ideas",
   },
+  {
+    key: "beta_group_chat",
+    label: "Group chat",
+    what: "Share a running session with a guest, talk beside it in a thread, and see what a host shares with you. Turning it off hides it and keeps every pairing and share.",
+    testId: "beta-group-chat",
+  },
 ];
 
 /** Ideas (idea board phases 0, 1, 3 and S): the Ideas window, the rail's
  *  lightbulb, ⌘⇧I and its reopening at launch (the shim reads the same key,
  *  companion.rs `BETA`). Named workspaces left the beta on 2026-11-14. */
 export const ideasBeta = (s: Pick<Settings, "beta_ideas">): boolean => s.beta_ideas === true;
+
+/** Group chat (docs/proposals/group-chat.md, PRs #650–#664): the owner's
+ *  Share bar, thread, join asks and Settings → Remote → Guests, and the
+ *  guest's connections, David's Places, Shared with me, toasts and view.
+ *  Surfaces outside App (main.tsx's guests, RemoteLayer) read it through
+ *  betaLive.ts, which App feeds from this helper. */
+export const groupChatBeta = (s: Pick<Settings, "beta_group_chat">): boolean => s.beta_group_chat === true;

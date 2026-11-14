@@ -16,7 +16,8 @@
 // is the VM's collapse, a panel that takes its content's height.
 const pw = await import(process.env.PLAYWRIGHT_MODULE ?? "playwright");
 const port = Number(process.argv[2] ?? 1437);
-const URL0 = `http://localhost:${port}/?guest`;
+// Group chat is a beta: the mock turns it on with ?beta=group_chat.
+const URL0 = `http://localhost:${port}/?guest&beta=group_chat`;
 let failed = 0;
 const fail = (m) => { failed++; console.log(`not ok — ${m}`); };
 const ok = (m) => console.log(`ok — ${m}`);

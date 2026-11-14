@@ -175,7 +175,7 @@ eq("…and lists devices only where the grant reaches devices_list",
 const layer = fnBody(src("EngineGate.tsx"), "RemoteLayer");
 const noticeGate = fnBody(src("EngineGate.tsx"), "useRemoteNotice");
 eq("RemoteLayer shows no alert on a remote window",
-  /const onConsole = !notGranted\("remote_status"\);/.test(layer) && /const shown = onConsole && \(alerts\.length > 0 \|\| asks\);/.test(layer) && /const asks = useShares\(\)\.asked\.length > 0 && sharesHere\(\);/.test(layer), true);
+  /const onConsole = !notGranted\("remote_status"\);/.test(layer) && /const shown = onConsole && \(alerts\.length > 0 \|\| asks\);/.test(layer) && /const asks = groupChat && shares\.asked\.length > 0 && sharesHere\(\);/.test(layer), true);
 eq("…and useRemoteNotice no notice there",
   /return up && !notGranted\("remote_status"\) && remoteNoticeWords\(status\) !== null \? status : null;/.test(noticeGate), true);
 // DeviceRow calls its rows through `act("…", args)`, which adds the id.

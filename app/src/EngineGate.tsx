@@ -19,6 +19,7 @@
 // limit), with the reason and the log that says more.
 import { ShareAlerts } from "./LaneShare";
 import { sharesHere, useShares, watchShares } from "./shares";
+import { useGroupChat } from "./betaLive";
 import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
 import { engineState, invoke, notGranted, onEngineState, reconnectEngine, remoteHost, type EngineState } from "./ipc";
 import { dismissAlert, labelOf, openRemoteSettings, useRemote, watchRemote } from "./remoteStore";
@@ -94,25 +95,29 @@ export function RemoteLayer() {
   // paired host is not on it, and `remote_status` is the console's (ipc.ts
   // CONSOLE_ROWS). Its watch still names devices.
   const onConsole = !notGranted("remote_status");
-  const asks = useShares().asked.length > 0 && sharesHere();
+  const groupChat = useGroupChat();
+  const shares = useShares();
+  const asks = groupChat && shares.asked.length > 0 && sharesHere();
   const shown = onConsole && (alerts.length > 0 || asks);
   const at = useClearCorner(shown);
   return (
     <>
-      <RemoteWatch />
+      <RemoteWatch groupChat={groupChat} />
       {shown && (
         <div className="remote-corner" style={{ bottom: at.bottom, right: at.right }}>
           {alerts.length > 0 && <RemoteAlerts />}
-          <ShareAlerts />
+          {groupChat && <ShareAlerts />}
         </div>
       )}
     </>
   );
 }
 
-function RemoteWatch() {
+function RemoteWatch({ groupChat }: { groupChat: boolean }) {
   useEffect(() => watchRemote(), []);
-  useEffect(() => watchShares(), []);
+  // Group chat (beta): shares:changed is heard only while the switch is on,
+  // and unheard the moment it goes off.
+  useEffect(() => (groupChat ? watchShares() : undefined), [groupChat]);
   return null;
 }
 
