@@ -14,30 +14,12 @@
 // same for every name (§2.2), so the row only says the ask went.
 import { useState } from "react";
 import { dismissToast, openShare, requestShare, useGuests, type GuestHostView, type GuestProject, type GuestShare } from "./guest";
+import { placed, shareWords } from "./guestview";
 import "./GuestSession.css";
 
 /** `shares::NOTE_MAX`: a request's note, in bytes. */
 export const NOTE_MAX = 280;
 const bytes = (s: string) => new TextEncoder().encode(s).length;
-
-/** A row's standing in words, and whether it is live. */
-export function shareWords(s: GuestShare, owner: string): { words: string; cls: string } {
-  if (s.state === "invited") return { words: "Open to ask to join", cls: "invited" };
-  if (s.state === "asked") return { words: `Waiting for ${owner}`, cls: "asked" };
-  if (!s.binding) return { words: "Nothing bound", cls: "ended" };
-  if (s.binding.state === "ended") return { words: "Ended", cls: "ended" };
-  return { words: "Shared", cls: "live" };
-}
-
-/** Which of a host's projects and shares go under the local project `name`
- *  (null: the ones that match no local project). Pure, for the check. */
-export function placed(hv: Pick<GuestHostView, "shares" | "projects">, name: string | null, localNames: readonly string[]): { shares: GuestShare[]; projects: GuestProject[] } {
-  const mine = (p: string) => (name === null ? !localNames.includes(p) : p === name);
-  return {
-    shares: (hv.shares ?? []).filter((s) => mine(s.project)),
-    projects: (hv.projects ?? []).filter((p) => mine(p.name)),
-  };
-}
 
 function ShareRow({ hv, s, selected }: { hv: GuestHostView; s: GuestShare; selected: boolean }) {
   const w = shareWords(s, hv.owner);

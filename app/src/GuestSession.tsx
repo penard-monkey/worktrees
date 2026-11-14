@@ -24,9 +24,10 @@
 // David's host offline: the last page stays, in memory only (§3.4, §6).
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { Notice, Step, Turn } from "./chat";
-import { closeShare, guestLinkOf, joinShare, useGuests, type GuestBinding, type GuestHostView, type GuestShare } from "./guest";
-import type { GuestLink, GuestState } from "./guestdoor";
+import type { Notice, Step } from "./chat";
+import { closeShare, guestLinkOf, joinShare, useGuests, type GuestHostView, type GuestShare } from "./guest";
+import { mergeNewest, mergeOlder, piecesOf, standing, type SharedPage, type SharedTurn } from "./guestview";
+import type { GuestLink } from "./guestdoor";
 import { Markdown } from "./markdown";
 import { ThreadPanel } from "./ThreadPanel";
 import type { ThreadAccess, ThreadEntry, ThreadPage } from "./thread";
@@ -38,44 +39,7 @@ export const SHARED_POLL_MS = 10_000;
 /** Turns per page asked for (the host's default; at most 50). */
 export const SHARED_PAGE = 20;
 
-/** A turn as `shared_turns` answers it: `turns::Turn`, plus its index seq and,
- *  when cut, its counts. Several turns can share one seq. */
-export type SharedTurn = Turn & { seq: number; chars?: number; kept?: number };
-export type SharedPage = {
-  harness: string;
-  state: "active" | "ended";
-  turns: SharedTurn[];
-  total: number;
-  next_before: number;
-  more: boolean;
-};
 type CallDetail = { tool: string; input: unknown; truncated: boolean; bytes: number };
-
-/** Turns oldest first, after `page` (newest first) is merged into `held`:
- *  every held turn at or past the page's oldest seq is replaced by the page's.
- *  Pure, for the check. */
-export function mergeNewest(held: SharedTurn[], page: SharedTurn[]): SharedTurn[] {
-  if (!page.length) return held;
-  const fresh = [...page].reverse();
-  const from = fresh[0].seq;
-  return [...held.filter((t) => t.seq < from), ...fresh];
-}
-
-/** `page` (newest first) is the page BEFORE `held`'s oldest: prepend it. */
-export function mergeOlder(held: SharedTurn[], page: SharedTurn[]): SharedTurn[] {
-  const until = held.length ? held[0].seq : Infinity;
-  return [...[...page].reverse().filter((t) => t.seq < until), ...held];
-}
-
-/** What the view says about where this guest and this session stand. */
-export function standing(share: GuestShare, binding: GuestBinding | null, link: GuestState, owner: string): { live: boolean; words: string | null } {
-  if (link.kind === "offline") return { live: false, words: `${owner}'s host is offline` };
-  if (share.state === "invited") return { live: false, words: `Asking ${owner} to let you in…` };
-  if (share.state === "asked") return { live: false, words: `Waiting for ${owner} to let you in` };
-  if (!binding) return { live: false, words: "Nothing is shared in this place right now" };
-  if (binding.state === "ended") return { live: false, words: "Ended: this session moved on, and is shown as it was" };
-  return { live: link.kind === "up", words: null };
-}
 
 function useSharedTurns(link: GuestLink | undefined, share: string, binding: number | undefined, live: boolean, allowed: boolean, bump: number) {
   const [turns, setTurns] = useState<SharedTurn[]>([]);
@@ -203,36 +167,6 @@ function Asked({ st, owner }: { st: Extract<Step, { kind: "question" | "permissi
   }
   const answer = st.kind === "permission" ? (st.allowed ? "allowed" : "refused") : st.kind === "plan" ? (st.approved ? "approved" : "not approved") : "answered";
   return <li className="chat-note" data-testid="guest-asked">{what} · {owner} {answer}</li>;
-}
-
-type Piece =
-  | { k: "user"; text: string; mid: boolean }
-  | { k: "notice"; notice: Notice }
-  | { k: "agent"; text: string; calls: Extract<Step, { kind: "tool" }>[]; at: number | null }
-  | { k: "asked"; st: Extract<Step, { kind: "question" | "permission" | "plan" }> };
-
-/** One turn as pieces, in its steps' order: a reply block with the tools
- *  that followed it, a message sent mid-turn, what a person was asked. A turn
- *  without steps (an older host) is its reply and its tools. Pure. */
-export function piecesOf(t: Turn): Piece[] {
-  const out: Piece[] = [];
-  if (t.notice) out.push({ k: "notice", notice: t.notice });
-  else if (t.user !== null) out.push({ k: "user", text: t.user, mid: false });
-  const steps: Step[] = t.steps?.length ? t.steps : [{ kind: "text", at: t.at, text: t.reply }, ...t.tools.map((name) => ({ kind: "tool" as const, at: t.at, name }))];
-  let agent: Extract<Piece, { k: "agent" }> | null = null;
-  for (const st of steps) {
-    if (st.kind === "text" || st.kind === "tool") {
-      if (st.kind === "text" || !agent) {
-        agent = { k: "agent", text: st.kind === "text" ? st.text : "", calls: [], at: st.at };
-        out.push(agent);
-      }
-      if (st.kind === "tool") agent.calls.push(st);
-      continue;
-    }
-    agent = null;
-    out.push(st.kind === "user" ? { k: "user", text: st.text, mid: true } : { k: "asked", st });
-  }
-  return out.filter((p) => p.k !== "agent" || p.text || p.calls.length);
 }
 
 function TurnItems({ t, agent, owner, link, share, binding }: { t: SharedTurn; agent: string; owner: string; link: GuestLink | undefined; share: string; binding: number | undefined }) {

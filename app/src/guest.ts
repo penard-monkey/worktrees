@@ -20,27 +20,9 @@
 import { useSyncExternalStore } from "react";
 import { guestLink, type GuestDial, type GuestEnv, type GuestLink, type GuestState, type SharesChanged } from "./guestdoor";
 import type { HostSummary } from "./ipcremote";
+import { newsOf, shareMark, unseenOf, type GuestProject, type GuestShare } from "./guestview";
 
-/** A share's binding as a guest sees it (`Binding::guest_view`). */
-export type GuestBinding = { harness: string; state: "active" | "ended"; bound_at: number; ended_at: number | null };
-
-/** One entry of `shares_list` (`Shares::guest_shares`). */
-export type GuestShare = {
-  id: string;
-  project: string;
-  project_id: string;
-  slug: string;
-  title: string | null;
-  /** Where this guest stands: named, asked to join, or let in. */
-  state: "invited" | "asked" | "allowed";
-  binding: GuestBinding | null;
-  /** Bindings a Share again replaced, oldest first: `shared_turns`' `binding: n`. */
-  ended: GuestBinding[];
-  created_at: number;
-};
-
-/** `guest_places`: the owner's unhidden projects, names only. */
-export type GuestProject = { id: string; name: string; places: { slug: string; title: string | null }[] };
+export type { GuestBinding, GuestProject, GuestShare } from "./guestview";
 
 /** What a guest host's window shows. */
 export type GuestHostView = {
@@ -88,9 +70,6 @@ const links = new Map<string, GuestLink>();
 let source: GuestSource | null = null;
 let toastN = 0;
 
-/** A share's fingerprint for the badge: its standing and its bindings. */
-export const shareMark = (s: GuestShare): string => `${s.state}|${s.binding?.state ?? "-"}|${s.binding?.bound_at ?? 0}|${s.ended.length}`;
-
 const seenKey = (host: string) => `wt-guest-seen:${host}`;
 function readSeen(host: string): Record<string, string> {
   try {
@@ -103,27 +82,6 @@ function readSeen(host: string): Record<string, string> {
 }
 function writeSeen(host: string, seen: Record<string, string>) {
   try { source?.storage?.set(seenKey(host), JSON.stringify(seen)); } catch { /* storage is a convenience */ }
-}
-
-/** The shares the badge counts: never opened, or moved since. */
-export function unseenOf(shares: GuestShare[], seen: Record<string, string>): string[] {
-  return shares.filter((s) => seen[s.id] !== shareMark(s)).map((s) => s.id);
-}
-
-/** The toast a re-read earns: a share that was not there before (or was, and
- *  was shared again), in the words §6 gives. Pure, for the check. */
-export function newsOf(owner: string, before: GuestShare[] | null, after: GuestShare[]): string[] {
-  if (before === null) return [];
-  const was = new Map(before.map((s) => [s.id, s]));
-  const out: string[] = [];
-  for (const s of after) {
-    const b = was.get(s.id);
-    const name = s.title || s.slug;
-    if (!b) out.push(`${owner} shared ${name} with you`);
-    else if (b.state !== "allowed" && s.state === "allowed") out.push(`${owner} let you in on ${name}`);
-    else if ((b.binding?.bound_at ?? 0) !== (s.binding?.bound_at ?? 0) && s.binding?.state === "active") out.push(`${owner} shared ${name} again`);
-  }
-  return out;
 }
 
 const patch = (id: string, f: (h: GuestHostView) => GuestHostView) =>
