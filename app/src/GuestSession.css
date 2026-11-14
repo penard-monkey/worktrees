@@ -37,7 +37,7 @@
 .guest-toast-x:hover { color: var(--txt-hi); }
 
 /* ── the session ───────────────────────────────────────────────────────── */
-.guest-session { flex: 1; min-height: 0; min-width: 0; display: flex; background: var(--bg-abyss); }
+.guest-session { flex: 1; height: 100%; min-height: 0; min-width: 0; display: flex; background: var(--bg-abyss); }
 .guest-gone { flex-direction: column; align-items: center; justify-content: center; gap: var(--s3); }
 .guest-main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
 .guest-head { flex: none; display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s2); padding: var(--s2) var(--s3); border-bottom: 1px solid var(--line); background: var(--bg-panel); }
@@ -55,7 +55,18 @@
 .guest-scroll { flex: 1; min-height: 0; overflow-y: auto; }
 .guest-earlier { display: block; margin: var(--s2) auto; }
 .guest-waiting { color: var(--txt-hi); }
-.guest-thread { flex: none; width: clamp(260px, 32%, 420px); min-height: 0; display: flex; flex-direction: column; }
+/* The thread column: a definite height down the whole chain (overlay → session
+   → this column), and the panel a flex child of it rather than `height: 100%`
+   of it. ThreadPanel.css gives `.thread` `height: 100%`, which needs the
+   column's height to resolve; on the owner's guest VM (system WKWebView) it
+   did not, `.thread-list` collapsed and only the composer showed (2026-11-14),
+   while Playwright WebKit and Chromium resolved it. A flex child needs no
+   percentage at all. guest-thread-browser.mjs measures it. */
+.guest-thread {
+  flex: none; align-self: stretch; width: clamp(260px, 32%, 420px);
+  min-height: 0; overflow: hidden; display: flex; flex-direction: column;
+}
+.guest-thread > .thread { flex: 1 1 0; min-height: 0; height: auto; }
 .guest-thread-wait { margin: auto var(--s3); }
 @media (max-width: 720px) {
   .guest-session { flex-direction: column; }
