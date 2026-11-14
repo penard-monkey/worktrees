@@ -189,6 +189,31 @@ export function useTheseLine(count: number, authors: readonly string[], ownerNam
   return n ? `${frame} ${n}` : frame;
 }
 
+/** A field for words a person types to an agent or a guest: macOS text
+ *  substitution off. Measured on the system WKWebView (macOS 27.2, a
+ *  standalone probe with Edit → Substitutions' smart dashes and quotes on):
+ *  `--json` became `—json` and `"hi"` `“hi”` in a plain field and in one
+ *  with `autocorrect="off"` alone; `spellcheck="false"` is the attribute
+ *  WebKit honours, and stopped both, in a textarea and an input. The other
+ *  two are for engines that read them (iOS). A `beforeinput` guard on
+ *  `insertReplacementText` is NOT a fix: cancelling it left the caret behind
+ *  and scrambled the text. Spread it onto the element. */
+export const PLAIN_TEXT = { spellCheck: false, autoCorrect: "off", autoCapitalize: "off" } as const;
+
+/** The note's placeholder: it is the instruction (the frame says the
+ *  comments are not), so it reads as one. */
+export const NOTE_PLACEHOLDER = "Fold these in and show me the result";
+/** What *Use these* asks before a send with no note, once per send. */
+export const NOTE_ASK = "Send without telling the agent what to do with them?";
+
+/** Whether a send must ask first: the note is empty and the owner has not
+ *  said "Don't ask again" (`use_these_ask_note`). Two comments sent with no
+ *  note made Codex answer "the plan is unchanged" (2026-11-14 rehearsal);
+ *  with a note it acted. */
+export function asksForNote(note: string, ask: boolean): boolean {
+  return ask && note.trim() === "";
+}
+
 /** Why the line would be refused before anything is attached, or null:
  *  never cut (§5: "refused with the count shown"). The note is one line. */
 export function lineProblem(line: string, note: string): string | null {

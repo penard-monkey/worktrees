@@ -42,6 +42,9 @@ export type GuestHostView = {
   bump: number;
   /** Requests sent from this window this run, `project_id|slug`. */
   asked: string[];
+  /** The project names the last read held, kept per host: where an offline
+   *  host's group goes before this run has read it (`placed`). */
+  known: string[] | null;
 };
 
 export type Toast = { id: number; host: string; text: string; share?: string };
@@ -83,6 +86,19 @@ function readSeen(host: string): Record<string, string> {
 function writeSeen(host: string, seen: Record<string, string>) {
   try { source?.storage?.set(seenKey(host), JSON.stringify(seen)); } catch { /* storage is a convenience */ }
 }
+const knownKey = (host: string) => `wt-guest-projects:${host}`;
+function readKnown(host: string): string[] | null {
+  try {
+    const raw = source?.storage?.get(knownKey(host));
+    const v = raw ? JSON.parse(raw) : null;
+    return Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : null;
+  } catch {
+    return null;
+  }
+}
+function writeKnown(host: string, names: string[]) {
+  try { source?.storage?.set(knownKey(host), JSON.stringify(names)); } catch { /* storage is a convenience */ }
+}
 
 const patch = (id: string, f: (h: GuestHostView) => GuestHostView) =>
   set((s) => ({ ...s, hosts: s.hosts.map((h) => (h.host.id === id ? f(h) : h)) }));
@@ -117,8 +133,10 @@ async function reread(id: string, news: boolean) {
       seen = { ...seen, [shown.id]: shareMark(shown) };
       writeSeen(id, seen);
     }
+    const known = [...new Set([...gp.projects.map((p) => p.name), ...sl.shares.map((x) => x.project)])];
+    writeKnown(id, known);
     patch(id, (h) => ({
-      ...h, owner, shares: sl.shares, projects: gp.projects, error: null,
+      ...h, owner, shares: sl.shares, projects: gp.projects, known, error: null,
       unseen: unseenOf(sl.shares, seen), bump: h.bump + 1,
     }));
     for (const s of said) toast(id, s);
@@ -143,7 +161,7 @@ function adopt(host: HostSummary) {
   links.set(host.id, link);
   set((s) => ({
     ...s,
-    hosts: [...s.hosts, { host, link: link.state(), owner: host.name, shares: null, projects: null, error: null, unseen: [], threadBump: {}, bump: 0, asked: [] }],
+    hosts: [...s.hosts, { host, link: link.state(), owner: host.name, shares: null, projects: null, error: null, unseen: [], threadBump: {}, bump: 0, asked: [], known: readKnown(host.id) }],
   }));
   link.onState(() => patch(host.id, (h) => ({ ...h, link: link.state() })));
   link.onChanged((p) => heard(host.id, p));

@@ -27,8 +27,10 @@ export type GuestShare = {
 /** `guest_places`: the owner's unhidden projects, names only. */
 export type GuestProject = { id: string; name: string; places: { slug: string; title: string | null }[] };
 
-/** What a guest host's lists are, for `placed`. */
-export type GuestLists = { shares: GuestShare[] | null; projects: GuestProject[] | null };
+/** What a guest host's lists are, for `placed`. `known`: the project names
+ *  its last read held (kept per host by guest.ts), for a run that has not
+ *  read the lists yet — a host offline since the app started. */
+export type GuestLists = { shares: GuestShare[] | null; projects: GuestProject[] | null; known?: readonly string[] | null };
 
 /** A turn as `shared_turns` answers it: `turns::Turn`, plus its index seq and,
  *  when cut, its counts. Several turns can share one seq. */
@@ -139,12 +141,22 @@ export function shareWords(s: GuestShare, owner: string): { words: string; cls: 
 }
 
 /** Which of a host's projects and shares go under the local project `name`
- *  (null: the ones that match no local project). Pure, for the check. */
-export function placed(hv: GuestLists, name: string | null, localNames: readonly string[]): { shares: GuestShare[]; projects: GuestProject[] } {
+ *  (null: the ones that match no local project), and `status`: whether the
+ *  host's group belongs HERE when it has no rows (offline, connecting), so it
+ *  says so in one place. That is where its rows went: under each local
+ *  project its names match, else under Shared with me. The names are the
+ *  lists it holds or, before any read this run, the ones it last held. An
+ *  offline host was listed under its project AND as an empty *Shared with
+ *  me* group in the 2026-11-14 rehearsal. Pure, for the check. */
+export function placed(hv: GuestLists, name: string | null, localNames: readonly string[]): { shares: GuestShare[]; projects: GuestProject[]; status: boolean } {
   const mine = (p: string) => (name === null ? !localNames.includes(p) : p === name);
+  const names = hv.projects || hv.shares
+    ? [...(hv.projects ?? []).map((p) => p.name), ...(hv.shares ?? []).map((s) => s.project)]
+    : [...(hv.known ?? [])];
+  const matched = names.filter((n) => localNames.includes(n));
   return {
     shares: (hv.shares ?? []).filter((s) => mine(s.project)),
     projects: (hv.projects ?? []).filter((p) => mine(p.name)),
+    status: name === null ? matched.length === 0 : matched.includes(name),
   };
 }
-

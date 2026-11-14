@@ -13,7 +13,7 @@
 // the original entry rather than a second one.
 
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { eventWords, mergeEntries, newPostId, postProblem, whoOf, type ThreadAccess, type ThreadEntry } from "./thread";
+import { eventWords, mergeEntries, newPostId, PLAIN_TEXT, postProblem, whoOf, type ThreadAccess, type ThreadEntry } from "./thread";
 import "./ThreadPanel.css";
 
 export type ThreadPanelProps = {
@@ -274,6 +274,7 @@ export function ThreadPanel(p: ThreadPanelProps) {
             value={draft}
             placeholder="Write in the thread"
             aria-label="Write in the thread"
+            {...PLAIN_TEXT}
             onChange={(ev) => {
               setDraft(ev.target.value);
               if (!ev.target.value) draftId.current = null;

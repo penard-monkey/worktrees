@@ -13,6 +13,16 @@
 // 4. The outcomes: sent / refused / unknown, and unknown is never "sent".
 // 5. LaneShare.tsx sends with agent_attach then agent_send, records with
 //    share_used only after a confirmed send, and carries §1's warning.
+// 6. The note is the instruction (2026-11-14 rehearsal: two comments with no
+//    note, and Codex answered "the plan is unchanged"): it is the panel's
+//    first field, focused, with a real placeholder; a send with an empty
+//    note asks once, with a "Don't ask again" kept in settings.
+// 7. No smart dashes or quotes (`--json` posted as `—json`): the thread's
+//    composer, the note and the guest's ask carry PLAIN_TEXT, whose
+//    `spellCheck: false` is what WebKit honours (measured, thread.ts).
+//
+// Overrides, to show a mutation red without touching the tree:
+//   USETHESE_THREAD, USETHESE_LANE, USETHESE_PANEL, USETHESE_NAV (file paths)
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { transformWithEsbuild } from "vite";
@@ -33,7 +43,8 @@ const load = async (src, name) => {
   return import("data:text/javascript;base64," + Buffer.from(js).toString("base64"));
 };
 
-const src = read("../src/thread.ts");
+const fileOf = (env, rel) => (process.env[env] ? fs.readFileSync(process.env[env], "utf8") : read(rel));
+const src = fileOf("USETHESE_THREAD", "../src/thread.ts");
 ok(!/^import (?!type )/m.test(src), "thread.ts has no runtime import (it loads alone, and the guest lane reads it too)");
 const T = await load(src, "thread.ts");
 
@@ -127,7 +138,7 @@ ok(/answer it first/.test(T.useRefusal("agent_send: " + T.SEND_REFUSALS.prompt))
 ok(/Nothing was sent/.test(T.useRefusal(T.SEND_REFUSALS.draft)), "a draft in the composer: nothing was sent");
 
 // ── 5. the component's order ──
-const lane = read("../src/LaneShare.tsx");
+const lane = fileOf("USETHESE_LANE", "../src/LaneShare.tsx");
 const send = lane.slice(lane.indexOf("const send = async"), lane.indexOf("if (!open)"));
 const at = (s) => send.indexOf(s);
 ok(at('invoke<{ path: string }>("agent_attach"') > 0 && at('invoke<UseSent>("agent_send"') > at('"agent_attach"'), "Use these attaches the file, then sends the line");
@@ -142,6 +153,33 @@ const shares = read("../src/shares.ts");
 ok(shares.includes("can read this whole session from its first turn, including anything it printed. This can't be recalled."), "§1's warning, exact");
 ok(shares.includes("send the agent something first, then share"), "the unnamed-session refusal tells the owner what to do");
 ok(!/from "\.\/ipc"|from '\.\/ipc'/.test(read("../src/ThreadPanel.tsx")), "ThreadPanel imports no door: its access is injected");
+
+// ── 6. the note first ──
+ok(T.asksForNote?.("", true) === true && T.asksForNote("   ", true) === true, "an empty (or blank) note asks before the send");
+ok(T.asksForNote?.("fold them in", true) === false, "…a note does not");
+ok(T.asksForNote?.("", false) === false, "…and after Don't ask again nothing asks");
+eq(T.NOTE_PLACEHOLDER, "Fold these in and show me the result", "the note's placeholder is an instruction");
+eq(T.NOTE_ASK, "Send without telling the agent what to do with them?", "the ask, in the brief's words");
+const panel = lane.slice(lane.indexOf('<div className="usethese open"'));
+const field = /<input[^>]*className="usethese-note"[\s\S]*?\/>/.exec(panel)?.[0] ?? "";
+ok(!!field && panel.indexOf(field) < panel.indexOf("<pre") && panel.indexOf(field) < panel.indexOf("Untick a message"), "the note is the open panel's first field, above the selection and the previews");
+ok(/\bautoFocus\b/.test(field) && /placeholder=\{NOTE_PLACEHOLDER\}/.test(field), "…focused, with the instruction placeholder");
+ok(/if \(asksForNote\(note, askNote\) && !noteOk\.current\) \{\s*setAsking\(true\);\s*return;/.test(send) && send.indexOf("asksForNote(") < send.indexOf("flight.current = true"),
+  "send() asks before anything is attached, Enter in the note included");
+ok(/onNeverAsk\(\)/.test(panel) && /Don’t ask again|Don't ask again/.test(panel), "the ask carries Don't ask again, kept by the caller");
+const settings = read("../src/settings.ts");
+ok(/use_these_ask_note: true,/.test(settings) && /if \(s\.use_these_ask_note !== false\) s\.use_these_ask_note = true;/.test(settings), "settings keep use_these_ask_note, asking by default");
+ok(/askNote=\{settings\.use_these_ask_note\} onNeverAsk=\{\(\) => updateSettings\(\{ use_these_ask_note: false \}\)\}/.test(read("../src/App.tsx")), "App hands the setting to the lane's thread, and Don't ask again writes it");
+ok(/checked=\{settings\.use_these_ask_note\}/.test(read("../src/pages/remote.tsx")), "Settings → Remote → Guests can turn the ask back on");
+
+// ── 7. no text substitution ──
+ok(T.PLAIN_TEXT?.spellCheck === false, "PLAIN_TEXT turns spellcheck off, the attribute WebKit's substitution honours");
+const plain = (txt, re, m) => ok(re.test(txt), m);
+plain(field, /\{\.\.\.PLAIN_TEXT\}/, "the Use these note carries PLAIN_TEXT");
+const panelSrc = fileOf("USETHESE_PANEL", "../src/ThreadPanel.tsx");
+plain(/<textarea[\s\S]*?className="thread-field"[\s\S]*?\/?>/.exec(panelSrc)?.[0] ?? "", /\{\.\.\.PLAIN_TEXT\}/, "the thread's composer carries PLAIN_TEXT");
+const navSrc = fileOf("USETHESE_NAV", "../src/GuestNav.tsx");
+plain(/<input[^>]*aria-label="A note for the ask"[\s\S]*?\/>/.exec(navSrc)?.[0] ?? "", /\{\.\.\.PLAIN_TEXT\}/, "the guest's ask note carries PLAIN_TEXT");
 
 if (bad) {
   console.log(`\n${bad} failed`);

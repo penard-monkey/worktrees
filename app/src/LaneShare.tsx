@@ -9,12 +9,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "./ipc";
 import { useEscape } from "./useEscape";
 import { ThreadPanel } from "./ThreadPanel";
+import { laneLive, useLanes } from "./laneLive";
 import {
   consoleThread, guestName, ownerForAgent, guestLive, namesOf, ownerWords, readShares, seenAsks, setThreadOpen, shareRefusal, sharesHere, sharesOf, shareWarning,
   useShares, useThreadOpen, type Share, type ShareRequest, type SharesState,
 } from "./shares";
 import {
-  authorsOf, joinNames, lineProblem, PREVIEW_PATH, sinceLastUse, useOutcome, useRefusal, useTheseFile, useTheseLine, useTheseName, utf8Bytes,
+  asksForNote, authorsOf, joinNames, lineProblem, NOTE_ASK, NOTE_PLACEHOLDER, PLAIN_TEXT, PREVIEW_PATH, sinceLastUse, useOutcome, useRefusal, useTheseFile, useTheseLine, useTheseName, utf8Bytes,
   LINE_MAX, type ThreadEntry, type UseSent,
 } from "./thread";
 import "./ThreadPanel.css";
@@ -258,7 +259,11 @@ function ManageDialog({ s, share: first, onClose }: { s: SharesState; share: Sha
 }
 
 /** The thread beside a lane, with *Use these* — for the lane's first share. */
-export function LaneThread({ repo, slug, session, up }: { repo: string; slug: string; session: string; up: boolean }) {
+export function LaneThread({ repo, slug, session, up, askNote, onNeverAsk }: {
+  repo: string; slug: string; session: string; up: boolean;
+  /** Settings' `use_these_ask_note`, and its "Don't ask again" (App owns settings). */
+  askNote: boolean; onNeverAsk: () => void;
+}) {
   const s = useShares();
   const key = repo + "|" + slug;
   const on = useThreadOpen(key);
@@ -291,7 +296,7 @@ export function LaneThread({ repo, slug, session, up }: { repo: string; slug: st
         }}
         footer={(entries) => (
           <UseThese entries={entries} picked={picked} onPicked={setPicked} share={share} repo={repo} slug={slug} session={session}
-            ownerName={ownerForAgent(s)} named={s.owner !== "owner"} live={!ended && up} />
+            ownerName={ownerForAgent(s)} named={s.owner !== "owner"} live={!ended && up} askNote={askNote} onNeverAsk={onNeverAsk} />
         )}
         onClose={() => setThreadOpen(key, false)}
       />
@@ -304,12 +309,20 @@ export function LaneThread({ repo, slug, session, up }: { repo: string; slug: st
  *  then `agent_attach` + `agent_send` as the console, and `share_used`
  *  records it once the send is confirmed. An unknown outcome is never
  *  retried by software. */
-export function UseThese({ entries, picked, onPicked, share, repo, slug, session, ownerName, named, live }: {
+export function UseThese({ entries, picked, onPicked, share, repo, slug, session, ownerName, named, live, askNote, onNeverAsk }: {
   entries: readonly ThreadEntry[]; picked: Set<number> | null; onPicked: (p: Set<number> | null) => void;
   share: Share; repo: string; slug: string; session: string; ownerName: string; named: boolean; live: boolean;
+  /** `use_these_ask_note`: ask before a send with no note. */
+  askNote: boolean; onNeverAsk: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [note, setNote] = useState("");
+  // The ask before a send with no note (`asksForNote`), and its "Don't ask
+  // again". `noteOk` lets the send the ask answered through, once.
+  const [asking, setAsking] = useState(false);
+  const [never, setNever] = useState(false);
+  const noteOk = useRef(false);
+  const noteRef = useRef<HTMLInputElement | null>(null);
   const [busy, setBusy] = useState(false);
   const [words, setWords] = useState<{ kind: "sent" | "refused" | "unknown" | "error"; text: string } | null>(null);
   const fresh = useMemo(() => sinceLastUse(entries), [entries]);
@@ -324,6 +337,7 @@ export function UseThese({ entries, picked, onPicked, share, repo, slug, session
     // Opening materialises the preselection, so the boxes show it.
     if (picked === null) onPicked(new Set(fresh));
     setWords(null);
+    setAsking(false);
     setOpen(true);
   };
 
@@ -334,6 +348,12 @@ export function UseThese({ entries, picked, onPicked, share, repo, slug, session
   const flight = useRef(false);
   const send = async () => {
     if (busy || flight.current || words?.kind === "unknown" || !chosen.length || problem || !live) return;
+    if (asksForNote(note, askNote) && !noteOk.current) {
+      setAsking(true);
+      return;
+    }
+    noteOk.current = false;
+    setAsking(false);
     flight.current = true;
     setBusy(true);
     setWords(null);
@@ -396,13 +416,30 @@ export function UseThese({ entries, picked, onPicked, share, repo, slug, session
   }
   return (
     <div className="usethese open" data-testid="use-these">
+      {/* The note first, and focused: it is the instruction. The frame tells
+          the agent the comments are NOT instructions, so with no note it has
+          nothing to do (2026-11-14: "the plan is unchanged"). */}
+      <label className="usethese-label" htmlFor={`usethese-note-${share.id}`}>What should the agent do with them?</label>
+      <div className="usethese-row">
+        <input id={`usethese-note-${share.id}`} ref={noteRef} className="usethese-note" data-testid="use-these-note" value={note} placeholder={NOTE_PLACEHOLDER} aria-label="What the agent should do with them"
+          autoFocus {...PLAIN_TEXT}
+          onChange={(e) => { setNote(e.target.value); setAsking(false); }} onKeyDown={(e) => { if (e.key === "Enter") void send(); }} />
+      </div>
+      {asking && (
+        <div className="usethese-ask" role="alertdialog" aria-label={NOTE_ASK} data-testid="use-these-ask">
+          <div className="usethese-row"><span className="grow">{NOTE_ASK}</span></div>
+          <div className="usethese-row">
+            <label className="usethese-never"><input type="checkbox" checked={never} onChange={(e) => setNever(e.target.checked)} data-testid="use-these-never" /> Don’t ask again</label>
+            <span className="grow" />
+            <button className="ctrl sm" onClick={() => { setAsking(false); noteRef.current?.focus(); }}>Write a note</button>
+            <button className="ctrl sm primary" data-testid="use-these-send-anyway" disabled={busy}
+              onClick={() => { if (never) onNeverAsk(); noteOk.current = true; void send(); }}>Send without a note</button>
+          </div>
+        </div>
+      )}
       <div className="usethese-row">
         <span className="usethese-label">Use {chosen.length} {chosen.length === 1 ? "message" : "messages"} with the agent</span>
         <span className="grow">Untick a message above to leave it out.</span>
-      </div>
-      <div className="usethese-row">
-        <input className="usethese-note" value={note} placeholder="A note for the agent (optional)" aria-label="A note for the agent"
-          onChange={(e) => setNote(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void send(); }} />
       </div>
       <div className="usethese-label">The file the agent gets</div>
       <pre className="usethese-preview" data-testid="use-these-file">{file}</pre>
@@ -425,11 +462,18 @@ export function UseThese({ entries, picked, onPicked, share, repo, slug, session
   );
 }
 
-/** Join requests, for the corner (RemoteLayer): a guest asks to join a share,
- *  with Allow and Later. */
+/** The corner (RemoteLayer): join asks, with Allow and Later, and share
+ *  requests (§2.2), with *Share…* (the share dialog for that place, the asker
+ *  ticked) and *Dismiss*. A request used to show only in its lane's share
+ *  bar, so it went unseen unless the owner happened to look at that lane
+ *  (2026-11-14 rehearsal). One for a place with no live Claude or Codex says
+ *  so (`laneLive`) instead of offering a Share the host would refuse. */
 export function ShareAlerts() {
   const s = useShares();
-  if (!sharesHere() || !s.asked.length) return null;
+  const lanes = useLanes();
+  const [dialog, setDialog] = useState<{ repo: string; slug: string; preset: string[] } | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  if (!sharesHere() || (!s.asked.length && !s.requests.length && !dialog)) return null;
   return (
     <div className="ra-alerts ra" aria-live="polite" data-testid="share-alerts">
       {s.asked.map((a) => {
@@ -445,6 +489,43 @@ export function ShareAlerts() {
           </div>
         );
       })}
+      {s.requests.map((r) => {
+        const w = requestWords(r, r.project === null ? null : laneLive(lanes, r.project, r.slug), sharesOf(s, r.project ?? "", r.slug).length > 0);
+        return (
+          <div key={r.id} className="ra-alert" role="status" data-testid="share-request-alert" data-request={r.id}>
+            <span className="ra-dot warn" aria-hidden />
+            <span className="ra-alert-txt">
+              {r.name ?? "A guest"} asks to see {r.slug}{r.note ? <>: <q>{r.note}</q></> : "."}
+              {w.why && <span className="ra-alert-why" data-testid="share-request-why"> {w.why}</span>}
+            </span>
+            <span className="ra-alert-acts">
+              {w.share && r.project !== null && (
+                <button className="ctrl sm primary" data-track="share-request-share" data-testid="share-request-share"
+                  onClick={() => setDialog({ repo: r.project!, slug: r.slug, preset: [r.principal] })}>
+                  Share…
+                </button>
+              )}
+              <button className="ctrl sm" data-testid="share-request-dismiss" disabled={busy === r.id}
+                onClick={() => { setBusy(r.id); void invoke("share_request_dismiss", { request: r.id }).finally(() => { setBusy(null); void readShares(); }); }}>
+                Dismiss
+              </button>
+            </span>
+          </div>
+        );
+      })}
+      {dialog && <ShareDialog s={s} repo={dialog.repo} slug={dialog.slug} preset={dialog.preset} onClose={() => setDialog(null)}
+        onShared={() => setThreadOpen(dialog.repo + "|" + dialog.slug, true)} />}
     </div>
   );
+}
+
+/** What a share request in the corner says beside its words, and whether it
+ *  offers *Share…*: a place this host does not resolve, one already shared
+ *  (its lane's bar manages it), one with no live session. `live` null: not
+ *  known yet (no snapshot), so the Share is offered and the host decides. */
+export function requestWords(r: Pick<ShareRequest, "project">, live: boolean | null, shared: boolean): { why: string | null; share: boolean } {
+  if (r.project === null) return { why: "It is not a place this host shows.", share: false };
+  if (shared) return { why: "It is shared already: Sharing… on its lane adds a guest.", share: false };
+  if (live === false) return { why: "It has no live session: start its agent there, then share it.", share: false };
+  return { why: null, share: true };
 }

@@ -12,6 +12,7 @@ import * as Icons from "./icons";
 import { invoke, notGranted, remoteHost, windowOnHost } from "./ipc";
 import { dismissCat, useRemote } from "./remoteStore";
 import { DEFAULTS } from "./settings";
+import { groupChatBeta } from "./beta";
 import { HARNESSES, type Harness } from "./harness";
 import {
   GROUPS, MODES, MODE_LABEL, PAGES, focusSection, isMode, pageListed, resolveAt, sectionWhy, SECTION,
@@ -220,7 +221,7 @@ export function SettingsSheet(props: SheetProps) {
   }, [seen, linked]);
 
   const vis: VisCtx = useMemo(() => ({
-    mode, settings, defaults: DEFAULTS, host, problems, installed, revealed, onHost: windowOnHost(),
+    mode, settings, defaults: DEFAULTS, host, problems, installed, revealed, onHost: windowOnHost(), groupChat: groupChatBeta,
   }), [mode, settings, host, problems, installed, revealed]);
 
   // Remember what this visit drew above the mode, so it stays put.

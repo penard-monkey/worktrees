@@ -23,8 +23,10 @@
 }
 .guest-ask-btn:hover:not(:disabled) { color: var(--txt-hi); border-color: var(--line-strong); }
 .guest-ask-btn:disabled { opacity: 0.5; cursor: default; }
-.guest-askform { flex-basis: 100%; display: flex; flex-direction: column; gap: var(--s1); padding: var(--s1) 0 var(--s2); }
-.guest-askform input { font: inherit; font-size: var(--fs-meta); color: var(--txt-hi); background: var(--bg-input); border: 1px solid var(--line); border-radius: var(--r-sm, 4px); padding: var(--s1) var(--s2); }
+/* `.row` is a three-column grid (dot, name, glyphs): the form spans all of it. */
+.guest-askform { grid-column: 1 / -1; min-width: 0; display: flex; flex-direction: column; gap: var(--s1); padding: var(--s1) 0 var(--s2); }
+.guest-askform .ver-actions { flex-wrap: wrap; }
+.guest-askform input { min-width: 0; width: 100%; box-sizing: border-box; font: inherit; font-size: var(--fs-meta); color: var(--txt-hi); background: var(--bg-input); border: 1px solid var(--line); border-radius: var(--r-sm, 4px); padding: var(--s1) var(--s2); }
 
 .guest-toasts { position: fixed; right: var(--s4); bottom: var(--s4); z-index: 60; display: flex; flex-direction: column; gap: var(--s2); max-width: min(360px, calc(100vw - 32px)); }
 .guest-toast {

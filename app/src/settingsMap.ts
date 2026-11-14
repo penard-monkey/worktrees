@@ -190,8 +190,9 @@ export type SectionDef = {
   /** Drawn only on the window's own host (`restore_window` is read by the
    *  host's shim at launch; on a remote window nothing reads it). */
   localOnly?: boolean;
-  /** Only meaningful while this holds (the light/dark pair, for System). */
-  applies?: (s: Settings) => boolean;
+  /** Only meaningful while this holds (the light/dark pair, for System; a
+   *  beta's section, by the helper `ctx` hands in). */
+  applies?: (s: Settings, ctx: Pick<VisCtx, "groupChat">) => boolean;
 };
 
 export const SECTIONS: readonly SectionDef[] = [
@@ -282,8 +283,9 @@ export const SECTIONS: readonly SectionDef[] = [
   { id: "this-window-drives", page: "remote", tier: "beginner", label: "This window drives", keywords: ["remote host", "drive host", "which machine", "paired host", "other computer", "connect to host"], scope: "window" },
   { id: "remote-access", page: "remote", tier: "advanced", label: "Let devices reach this computer", keywords: ["remote", "lan", "network", "phone", "iphone", "pairing", "kill switch"], host: ["remote_access"], scope: "computer" },
   { id: "devices", page: "remote", tier: "advanced", label: "Paired devices", keywords: ["phone", "iphone", "ipad", "pair", "pairing", "revoke"], host: ["devices"], scope: "computer" },
-  // Group chat's beta (beta.ts `groupChatBeta`, restated: this file imports no value).
-  { id: "guests", page: "remote", tier: "advanced", label: "Guests", keywords: ["guest", "invite", "share", "share a session", "bret", "group chat", "place names", "hide project"], scope: "computer", read: "guests_list", applies: (s) => s.beta_group_chat === true },
+  // Group chat's beta: beta.ts's `groupChatBeta`, handed in (`VisCtx.groupChat`),
+  // since this file imports no value; not handed in, the section is off.
+  { id: "guests", page: "remote", tier: "advanced", label: "Guests", keywords: ["guest", "invite", "share", "share a session", "bret", "group chat", "place names", "hide project"], scope: "computer", read: "guests_list", keys: ["use_these_ask_note"], applies: (s, c) => c.groupChat?.(s) === true },
   // ── Updates
   { id: "version", page: "updates", tier: "beginner", label: "Version", keywords: ["update", "upgrade", "check for updates", "auto update", "release", "about"], keys: ["update_auto_check"] },
   { id: "agent-clis", page: "updates", tier: "advanced", label: "Agent CLIs", keywords: ["update claude", "update codex", "upgrade", "cli versions", "harness updates"], scope: "computer", write: "update_harness" },
@@ -371,6 +373,9 @@ export type VisCtx = {
   revealed: ReadonlySet<string>;
   /** False on a window driving a paired host. */
   onHost: boolean;
+  /** beta.ts's `groupChatBeta`, handed in so this file imports no value
+   *  (beta.ts: every surface of a beta asks its helper). */
+  groupChat?: (s: Settings) => boolean;
 };
 
 const same = (a: unknown, b: unknown): boolean => {
@@ -401,8 +406,8 @@ export function sectionChanged(sec: SectionDef, ctx: Pick<VisCtx, "settings" | "
 
 /** Whether `sec` applies here at all (a remote window, the theme). A section
  *  that does not apply is neither drawn nor counted as hidden. */
-export const sectionApplies = (sec: SectionDef, ctx: Pick<VisCtx, "settings" | "onHost">) =>
-  !(sec.localOnly && !ctx.onHost) && !(sec.applies && !sec.applies(ctx.settings));
+export const sectionApplies = (sec: SectionDef, ctx: Pick<VisCtx, "settings" | "onHost" | "groupChat">) =>
+  !(sec.localOnly && !ctx.onHost) && !(sec.applies && !sec.applies(ctx.settings, ctx));
 
 export function sectionWhy(sec: SectionDef, ctx: VisCtx): Why | null {
   if (!sectionApplies(sec, ctx)) return null;

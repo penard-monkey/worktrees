@@ -75,7 +75,8 @@ ok(!/useEffect\(\(\) => watchShares\(\), \[\]\);/.test(gate), "…no uncondition
 
 const map = read("../src/settingsMap.ts");
 const guests = map.match(/^\s*\{ id: "guests",[^\n]*\},$/m)?.[0] ?? "";
-ok(/applies: \(s\) => s\.beta_group_chat === true/.test(guests), "settingsMap: Settings → Remote → Guests applies only with group chat on");
+ok(/applies: \(s, c\) => c\.groupChat\?\.\(s\) === true/.test(guests), "settingsMap: Settings → Remote → Guests applies only with group chat on, by the helper handed in");
+ok(/groupChat: groupChatBeta\b/.test(read("../src/SettingsSheet.tsx")), "…and Settings hands it beta.ts's groupChatBeta (beta.ts: surfaces ask the helper)");
 const pairCallers = fs.readdirSync(here("../src"), { recursive: true })
   .filter((p) => /\.tsx?$/.test(p) && !p.startsWith("mock"))
   .filter((p) => /<PairSheet[^>]*\bguest=/.test(read(`../src/${p}`)));
