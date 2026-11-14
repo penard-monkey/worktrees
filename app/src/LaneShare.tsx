@@ -10,7 +10,7 @@ import { invoke } from "./ipc";
 import { useEscape } from "./useEscape";
 import { ThreadPanel } from "./ThreadPanel";
 import {
-  consoleThread, guestName, guestLive, namesOf, ownerWords, readShares, seenAsks, setThreadOpen, shareRefusal, sharesHere, sharesOf, shareWarning,
+  consoleThread, guestName, ownerForAgent, guestLive, namesOf, ownerWords, readShares, seenAsks, setThreadOpen, shareRefusal, sharesHere, sharesOf, shareWarning,
   useShares, useThreadOpen, type Share, type ShareRequest, type SharesState,
 } from "./shares";
 import {
@@ -124,6 +124,10 @@ function Modal({ title, onClose, children, foot }: { title: string; onClose: () 
 function ShareDialog({ s, repo, slug, preset, onClose, onShared }: { s: SharesState; repo: string; slug: string; preset?: string[]; onClose: () => void; onShared: () => void }) {
   const live = s.guests.filter(guestLive);
   const [picked, setPicked] = useState<Set<string>>(() => new Set(preset ?? (live.length === 1 ? [live[0].id] : [])));
+  // The guest list as it is now: a guest paired a minute ago is offered.
+  useEffect(() => {
+    void readShares();
+  }, []);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const names = live.filter((g) => picked.has(g.id)).map((g) => g.name);
@@ -287,7 +291,7 @@ export function LaneThread({ repo, slug, session, up }: { repo: string; slug: st
         }}
         footer={(entries) => (
           <UseThese entries={entries} picked={picked} onPicked={setPicked} share={share} repo={repo} slug={slug} session={session}
-            ownerName={owner} live={!ended && up} />
+            ownerName={ownerForAgent(s)} named={s.owner !== "owner"} live={!ended && up} />
         )}
         onClose={() => setThreadOpen(key, false)}
       />
@@ -300,9 +304,9 @@ export function LaneThread({ repo, slug, session, up }: { repo: string; slug: st
  *  then `agent_attach` + `agent_send` as the console, and `share_used`
  *  records it once the send is confirmed. An unknown outcome is never
  *  retried by software. */
-export function UseThese({ entries, picked, onPicked, share, repo, slug, session, ownerName, live }: {
+export function UseThese({ entries, picked, onPicked, share, repo, slug, session, ownerName, named, live }: {
   entries: readonly ThreadEntry[]; picked: Set<number> | null; onPicked: (p: Set<number> | null) => void;
-  share: Share; repo: string; slug: string; session: string; ownerName: string; live: boolean;
+  share: Share; repo: string; slug: string; session: string; ownerName: string; named: boolean; live: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [note, setNote] = useState("");
@@ -395,8 +399,9 @@ export function UseThese({ entries, picked, onPicked, share, repo, slug, session
       </div>
       <div className="usethese-label">The file the agent gets</div>
       <pre className="usethese-preview" data-testid="use-these-file">{file}</pre>
-      <div className="usethese-label">The line typed into the agent ({utf8Bytes(line)} of {LINE_MAX} bytes; the file's real name replaces &lt;file&gt;)</div>
+      <div className="usethese-label">The line typed into the agent ({utf8Bytes(line)} of {LINE_MAX} bytes; the host gives the file its final name, so the sent line may be a few bytes longer)</div>
       <pre className="usethese-preview" data-testid="use-these-line">{line}</pre>
+      {!named && <div className="ra-note">The agent is told “the owner” until you set your name in Settings → Remote → Guests.</div>}
       <div className="ra-note">The framing is not enforcement: the agent may still treat {joinNames(authors)}'s words as instructions. Read what goes.</div>
       {problem && <div className="usethese-words bad" role="alert">{problem}</div>}
       {words && <div className={"usethese-words" + (words.kind === "sent" ? "" : " bad")} role="status" data-testid="use-these-words">{words.text}</div>}

@@ -75,9 +75,16 @@ export function sharesHere(): boolean {
   return !notGranted("shares_all");
 }
 
-/** The owner's display name for sentences: "owner" reads as "You". */
+/** The owner's display name in the thread: "owner" (never set) reads as "You". */
 export function ownerWords(s: SharesState): string {
   return s.owner && s.owner !== "owner" ? s.owner : "You";
+}
+
+/** The owner as the AGENT is told of them in *Use these*' frame: the name
+ *  guests see (`owner_set_name`), or "the owner" until one is set, so the
+ *  line never reads "You shares". */
+export function ownerForAgent(s: SharesState): string {
+  return s.owner && s.owner !== "owner" ? s.owner : "the owner";
 }
 
 /** Join requests the owner dismissed from the corner, by share, guest and
