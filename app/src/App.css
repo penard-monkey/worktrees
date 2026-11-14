@@ -847,6 +847,10 @@ html[data-guides="off"] .kids > .places::after { display: none; }
  * columns cannot be expressed when the columns are removed rather than zeroed
  * (see `gridCols` in App.tsx — every line index shifts with ⌘B). */
 .space { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+/* A share open as a guest (GuestSession.tsx) covers the workbench. Positioned
+ * only then, so nothing else in the space gains a new containing block. */
+.space:has(> .guest-overlay) { position: relative; }
+.guest-overlay { position: absolute; inset: 0; z-index: 6; display: flex; }
 /* `position: relative` anchors the reading-mode overlay (.reading). It lives
  * here rather than on `.main` so the overlay is as wide as terminal + dock. */
 .space-body { position: relative; display: flex; flex: 1 1 auto; min-width: 0; min-height: 0; }
@@ -1244,6 +1248,8 @@ html[data-guides="off"] .kids > .places::after { display: none; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .hosts-row .ctrl { flex: none; }
+/* A host this machine is a guest of: marked, never driven (group chat §7). */
+.hosts-guest { flex: none; font-size: var(--fs-micro); font-weight: var(--fw-bold); color: var(--txt-hi); padding: 0 var(--s2); border-radius: 999px; background: color-mix(in srgb, var(--accent) 18%, var(--bg-panel)); }
 /* "Paste a new address": its own line under the host's row. */
 .hosts-move { flex: 1 0 100%; min-width: 0; padding-bottom: var(--s2); }
 .hosts-move input { width: 100%; margin-top: var(--s1); }

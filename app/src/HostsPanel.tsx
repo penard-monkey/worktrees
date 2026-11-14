@@ -21,6 +21,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Channel, invoke, remoteHost } from "./ipc";
 import type { HostSummary } from "./ipcremote";
+import { refreshGuestHosts } from "./guest";
 import { useArmed } from "./useArmed";
 
 type HostList = { chosen: string | null; hosts: HostSummary[]; this_name: string };
@@ -76,6 +77,7 @@ export function HostsPanel({ onReport, onFail, manage = true }: { onReport: (m: 
       await invoke("remote_forget", { hostId: h.id });
       onReport(`Forgot ${h.name}. It still lists this machine until it is revoked there.`);
       await reload();
+      void refreshGuestHosts();
     } catch (e) { onFail(e); }
   });
   const readdress = async (h: HostSummary, code: string) => {
@@ -106,8 +108,11 @@ export function HostsPanel({ onReport, onFail, manage = true }: { onReport: (m: 
       if (!mounted.current) return;
       setPairing(null);
       setLink("");
-      onReport(`Paired with ${h.name}. Choose it above to drive it from this window.`);
+      onReport(h.guest
+        ? `Paired with ${h.name} as a guest. What it shares with you shows in the sidebar; this window still drives this machine.`
+        : `Paired with ${h.name}. Choose it above to drive it from this window.`);
       await reload();
+      void refreshGuestHosts();
     } catch (e) {
       if (!mounted.current) return;
       setPairing(null);
@@ -138,10 +143,14 @@ export function HostsPanel({ onReport, onFail, manage = true }: { onReport: (m: 
           {(list?.hosts ?? []).map((h) => (
             <div className="hosts-row" key={h.id} data-testid="hosts-row">
               <span className="hosts-name">{h.name}</span>
-              <span className="hosts-meta">{h.addr} · paired {when(h.paired_at)}</span>
-              <button className="ctrl sm" disabled={chosen === h.id} onClick={() => void choose(h.id)}>
-                {chosen === h.id ? "Driving" : "Drive"}
-              </button>
+              <span className="hosts-meta">{h.addr} · paired {when(h.paired_at)}{h.guest ? " · you are a guest here" : ""}</span>
+              {/* A guest's grant is the guest rows alone (group chat §7): the
+                  host shares sessions into the sidebar and is never driven. */}
+              {h.guest
+                ? <span className="hosts-guest" data-testid="hosts-guest" title={`${h.name} shares sessions with you: they show in the sidebar`}>Guest</span>
+                : <button className="ctrl sm" disabled={chosen === h.id} onClick={() => void choose(h.id)}>
+                    {chosen === h.id ? "Driving" : "Drive"}
+                  </button>}
               {manage && <button className="ctrl sm" data-testid="hosts-move" disabled={moving?.id === h.id}
                 onClick={() => setMoving({ id: h.id, code: "", busy: false, err: null })}>
                 Paste a new address

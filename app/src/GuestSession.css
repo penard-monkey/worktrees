@@ -1,0 +1,61 @@
+/* The guest's views (GuestNav.tsx, GuestSession.tsx; group chat §7). Hue in
+   dots and tints, words in text tokens (AGENTS.md: an accent is a fill). */
+
+/* ── sidebar ───────────────────────────────────────────────────────────── */
+.guest-dot { background: var(--txt-mute); }
+.guest-dot.live { background: var(--ok); }
+.guest-dot.invited, .guest-dot.asked { background: var(--warn); }
+.guest-dot.ended { background: transparent; border: 1px solid var(--txt-mute); }
+.guest-dot.none { background: transparent; border: 1px dashed var(--line-strong); }
+.guest-row, .guest-name { cursor: pointer; flex-wrap: wrap; }
+.guest-name { cursor: default; }
+.guest-state, .row-branch.guest-state { color: var(--txt-dim); }
+.guest-new, .guest-badge {
+  flex: none; font-size: var(--fs-micro); font-weight: var(--fw-bold); color: var(--txt-hi);
+  padding: 0 var(--s1); border-radius: 999px; background: color-mix(in srgb, var(--accent) 24%, var(--bg-panel));
+}
+.guest-badge { margin-left: var(--s1); }
+.guest-off { margin-left: var(--s1); font-size: var(--fs-micro); color: var(--txt-dim); text-transform: none; letter-spacing: 0; }
+.guest-asked { flex: none; font-size: var(--fs-micro); color: var(--txt-dim); }
+.guest-ask-btn {
+  flex: none; background: transparent; border: 1px solid var(--line); border-radius: var(--r-sm); cursor: pointer;
+  padding: 0 var(--s2); font-size: var(--fs-micro); color: var(--txt-dim);
+}
+.guest-ask-btn:hover:not(:disabled) { color: var(--txt-hi); border-color: var(--line-strong); }
+.guest-ask-btn:disabled { opacity: 0.5; cursor: default; }
+.guest-askform { flex-basis: 100%; display: flex; flex-direction: column; gap: var(--s1); padding: var(--s1) 0 var(--s2); }
+.guest-askform input { font: inherit; font-size: var(--fs-meta); color: var(--txt-hi); background: var(--bg-input); border: 1px solid var(--line); border-radius: var(--r-sm, 4px); padding: var(--s1) var(--s2); }
+
+.guest-toasts { position: fixed; right: var(--s4); bottom: var(--s4); z-index: 60; display: flex; flex-direction: column; gap: var(--s2); max-width: min(360px, calc(100vw - 32px)); }
+.guest-toast {
+  display: flex; align-items: center; gap: var(--s2); padding: var(--s2) var(--s3);
+  font-size: var(--fs-meta); color: var(--txt-hi); background: var(--bg-elev);
+  border: 1px solid var(--line-strong); border-radius: var(--r-md, 8px); box-shadow: 0 4px 16px rgb(0 0 0 / 0.25);
+}
+.guest-toast span { flex: 1; min-width: 0; }
+
+/* ── the session ───────────────────────────────────────────────────────── */
+.guest-session { flex: 1; min-height: 0; min-width: 0; display: flex; background: var(--bg-abyss); }
+.guest-gone { flex-direction: column; align-items: center; justify-content: center; gap: var(--s3); }
+.guest-main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.guest-head { flex: none; display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s2); padding: var(--s2) var(--s3); border-bottom: 1px solid var(--line); background: var(--bg-panel); }
+.guest-title { color: var(--txt-hi); font-size: var(--fs-body); }
+.guest-owner { color: var(--txt-dim); }
+.guest-proj, .guest-ro { font-size: var(--fs-meta); color: var(--txt-dim); }
+.guest-ro { flex: 1; min-width: 0; }
+.guest-chip { font-size: var(--fs-micro); font-weight: var(--fw-bold); color: var(--txt-hi); padding: 0 var(--s1); border-radius: 999px; }
+.guest-chip.live { background: color-mix(in srgb, var(--ok) 22%, var(--bg-panel)); }
+.guest-chip.ended { background: color-mix(in srgb, var(--txt-mute) 26%, var(--bg-panel)); }
+.guest-bindings { display: inline-flex; gap: var(--s1); }
+.guest-bindings .ctrl.on { border-color: var(--accent); }
+.guest-banner { flex: none; padding: var(--s2) var(--s3); font-size: var(--fs-meta); color: var(--txt-hi); background: color-mix(in srgb, var(--warn) 12%, var(--bg-panel)); border-bottom: 1px solid var(--line); }
+.guest-banner.offline { background: color-mix(in srgb, var(--danger) 12%, var(--bg-panel)); }
+.guest-scroll { flex: 1; min-height: 0; overflow-y: auto; }
+.guest-earlier { display: block; margin: var(--s2) auto; }
+.guest-waiting { color: var(--txt-hi); }
+.guest-thread { flex: none; width: clamp(260px, 32%, 420px); min-height: 0; display: flex; flex-direction: column; }
+.guest-thread-wait { margin: auto var(--s3); }
+@media (max-width: 720px) {
+  .guest-session { flex-direction: column; }
+  .guest-thread { width: auto; height: 40%; }
+}
