@@ -314,7 +314,14 @@ pub fn transcript_paths(claude_root: &Path, root: &Path, session_id: &str) -> Ve
     if !dirs.contains(&raw) {
         dirs.push(raw);
     }
-    dirs.iter().map(|d| PathBuf::from(crate::project::claude_dir_in(claude_root, d)).join(format!("{session_id}.jsonl"))).collect()
+    let mut paths: Vec<PathBuf> =
+        dirs.iter().map(|d| PathBuf::from(crate::project::claude_dir_in(claude_root, d)).join(format!("{session_id}.jsonl"))).collect();
+    // A conversation resumed from another folder keeps its file in the
+    // folder it was born in (`agent::transcript_path`).
+    if !paths.iter().any(|p| p.is_file()) {
+        paths.extend(crate::agent::find_transcript(claude_root, session_id));
+    }
+    paths
 }
 
 /// The idea whose record has conversation `conv`: the folder
@@ -691,6 +698,20 @@ mod tests {
         assert_eq!(&u[14..15], "4");
         assert!(matches!(&u[19..20], "8" | "9" | "a" | "b"), "{u}");
         assert_ne!(u, new_uuid());
+    }
+
+    #[test]
+    fn a_resumed_conversation_is_looked_for_where_it_began() {
+        let claude = tmp("tx-resumed");
+        let sid = new_uuid();
+        let born = PathBuf::from(crate::project::claude_dir_in(&claude, "/elsewhere")).join(format!("{sid}.jsonl"));
+        fs::create_dir_all(born.parent().unwrap()).unwrap();
+        fs::write(&born, "{}\n").unwrap();
+        let p = transcript_paths(&claude, Path::new("/no/such/root"), &sid);
+        assert_eq!(p.last(), Some(&born), "{p:?}");
+        fs::remove_file(&born).unwrap();
+        assert!(transcript_paths(&claude, Path::new("/no/such/root"), &sid).iter().all(|p| !p.is_file()));
+        let _ = fs::remove_dir_all(&claude);
     }
 
     #[test]

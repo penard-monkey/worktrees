@@ -1259,3 +1259,71 @@ fn a_spawned_serves_ideas_live_where_the_override_says_and_an_outside_edit_is_an
     assert_ne!(outside, saved, "an outside edit carries an mtime no row answered with");
     assert_eq!(sb.terminate().code(), Some(0));
 }
+
+/// A Claude session resumed from another folder (`claude --resume <id>`):
+/// its probe names the resume's cwd, while Claude keeps appending to the
+/// transcript in the project folder of the cwd it was BORN in. The chat and
+/// the nav's model label read it there (`agent::transcript_path`); before the
+/// fix the chat said "No messages" under "Claude is working" (2026-11-14,
+/// Claude Code 2.1.325). A session in no folder keeps today's empty answer.
+#[test]
+fn a_resumed_sessions_transcript_is_read_from_the_folder_it_was_born_in() {
+    if !PrivateTmux::available() {
+        eprintln!("skipped: no tmux on PATH");
+        return;
+    }
+    let mut sb = Sandbox::new("resumed");
+    let tmux = PrivateTmux::new("resumed");
+    let repo = sb.root.join("projects/repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    git_in(&repo, &["init", "-q"]);
+    git_in(&repo, &["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "init"]);
+    let root = std::fs::canonicalize(&repo).unwrap().to_string_lossy().into_owned();
+    let claude = fake_claude(&sb.root.join("fake"));
+    let conf = tmux.keep_dead_panes();
+    let session = "repo-(main)";
+    let made = tmux.run(&["-f", &conf, "new-session", "-d", "-s", session, "-c", &root, "-x", "80", "-y", "24", &fake_claude_cmd(&claude, &tmux.err_file())]);
+    assert!(made.status.success(), "private tmux: {}", String::from_utf8_lossy(&made.stderr));
+    tmux.wait_for_cwd(&format!("={session}:"), &root);
+    let shown = tmux.run(&["display-message", "-p", "-t", &format!("={session}:"), "#{pane_pid}|#{window_id}|#{pane_id}"]);
+    let shown = String::from_utf8_lossy(&shown.stdout).trim().to_string();
+    let mut it = shown.split('|');
+    let (pid, window, pane) = (it.next().unwrap().to_string(), it.next().unwrap().to_string(), it.next().unwrap().to_string());
+    let claude_home = sb.root.join("home/.claude");
+    std::fs::create_dir_all(claude_home.join("sessions")).unwrap();
+    let probe = |sid: &str| {
+        std::fs::write(
+            claude_home.join(format!("sessions/{pid}.json")),
+            json!({ "pid": pid.parse::<i64>().unwrap(), "cwd": root, "status": "busy", "kind": "interactive",
+                    "tmux": format!("{session}:{window}.{pane}"), "sessionId": sid }).to_string(),
+        )
+        .unwrap();
+    };
+    let sid = "6a94c3da-1111-4111-8111-111111111111";
+    probe(sid);
+    // Born in another place's folder; the resume's folder exists and holds
+    // another session, as (main)'s does.
+    let mangle = |d: &str| -> String { d.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect() };
+    let born = claude_home.join("projects").join(mangle(&format!("{root}/.worktrees/elsewhere")));
+    std::fs::create_dir_all(&born).unwrap();
+    std::fs::write(born.join(format!("{sid}.jsonl")), include_str!("../../worktrees-core/tests/fixtures/transcripts/claude-2.1.309.jsonl")).unwrap();
+    let here = claude_home.join("projects").join(mangle(&root));
+    std::fs::create_dir_all(&here).unwrap();
+    std::fs::write(here.join("6a94c3da-2222-4222-8222-222222222222.jsonl"), "{}\n").unwrap();
+    sb.register(&root, "repo");
+    let sf = sb.launch_env(&["--allow-origin", "http://localhost:1420"], &[("TMUX", &tmux.env())]);
+    let mut ws = connect(&sf, "http://localhost:1420");
+
+    let r = rpc(&mut ws, 1, "agent_turns", json!({ "repo": root, "slug": "(main)" }));
+    assert_eq!(r["ok"]["harness"], json!("claude"), "{r}");
+    assert!(!r["ok"]["turns"].as_array().unwrap_or_else(|| panic!("{r}")).is_empty(), "{r}");
+    let r = rpc(&mut ws, 2, "list_places", json!({ "repo": root }));
+    let main = r["ok"]["places"].as_array().and_then(|ps| ps.iter().find(|p| p["slug"] == json!("(main)"))).unwrap_or_else(|| panic!("{r}"));
+    assert!(main["agent_sessions"]["claude"]["model"].is_string(), "the model label reads the same file: {main}");
+
+    // A session in no folder: the answer it always had, an empty conversation.
+    probe("6a94c3da-3333-4333-8333-333333333333");
+    let r = rpc(&mut ws, 3, "agent_turns", json!({ "repo": root, "slug": "(main)" }));
+    assert_eq!(r["ok"]["turns"], json!([]), "{r}");
+    assert_eq!(sb.terminate().code(), Some(0));
+}
