@@ -20,7 +20,7 @@
 import { useSyncExternalStore } from "react";
 import { guestLink, type GuestDial, type GuestEnv, type GuestLink, type GuestState, type SharesChanged } from "./guestdoor";
 import type { HostSummary } from "./ipcremote";
-import { newsOf, shareMark, unseenOf, type GuestProject, type GuestShare } from "./guestview";
+import { newsOf, ownerOf, shareMark, unseenOf, type GuestProject, type GuestShare } from "./guestview";
 
 export type { GuestBinding, GuestProject, GuestShare } from "./guestview";
 
@@ -120,11 +120,11 @@ async function reread(id: string, news: boolean) {
   if (!link) return;
   try {
     const [sl, gp] = await Promise.all([
-      link.call<{ owner: string; shares: GuestShare[] }>("shares_list"),
-      link.call<{ owner: string; projects: GuestProject[] }>("guest_places"),
+      link.call<{ owner: string | null; shares: GuestShare[] }>("shares_list"),
+      link.call<{ owner: string | null; projects: GuestProject[] }>("guest_places"),
     ]);
     const before = viewOf(id)?.shares ?? null;
-    const owner = sl.owner || gp.owner || link.host.name;
+    const owner = ownerOf(sl.owner, gp.owner, link.host.name);
     const said = news ? newsOf(owner, before, sl.shares) : [];
     // The share on screen is seen as it changes: it never badges itself.
     let seen = readSeen(id);

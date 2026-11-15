@@ -5,6 +5,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Fixed
+
+- Group chat: a host that never set its name no longer calls itself "owner".
+  A guest read "OWNER'S PLACES" and "Waiting for owner to let you in". The
+  host now answers no name until one is set, and a guest calls it by the
+  name it paired with (an older host's "owner" is skipped too). *Share… →
+  Someone new* now asks "Your name, as they will see it" while it is unset.
+
 ## [0.52.0] - 2026-11-14
 
 ### Added

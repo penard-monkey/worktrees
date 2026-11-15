@@ -133,6 +133,13 @@ const seqs = (ts) => ts.map((t) => `${t.seq}:${t.user}`);
   const active = { harness: "claude", state: "active", bound_at: 1, ended_at: null };
   const ended = { ...active, state: "ended", ended_at: 2 };
   const up = { kind: "up" };
+  // A host that never set its name (v0.52.0's three-VM run): null, or that
+  // release's placeholder "owner", is not a name; the host's own is.
+  expect("the owner's name, as the host answers it", R.ownerOf("Cy", "Cy", "cy-debian"), "Cy");
+  expect("a host that never set one is called by its own name", R.ownerOf(null, null, "cy-debian"), "cy-debian");
+  expect("a v0.52.0 host's placeholder \"owner\" is not a name", R.ownerOf("owner", "owner", "cy-debian"), "cy-debian");
+  expect("guest_places' name when shares_list has none", R.ownerOf(null, "Cy", "cy-debian"), "Cy");
+  expect("an owner\u2019s blank name is not one either", R.ownerOf(" ", undefined, "cy-debian"), "cy-debian");
   expect("an allowed, active share is live", R.standing(share("allowed", active), active, up, "David"), { live: true, words: null });
   expect("an ended binding is frozen, never live", R.standing(share("allowed", ended), ended, up, "David").live, false);
   check(/Ended/.test(R.standing(share("allowed", ended), ended, up, "David").words), "an ended binding says Ended");
