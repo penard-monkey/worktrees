@@ -5,6 +5,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+## [0.52.0] - 2026-11-14
+
 ### Added
 
 - **Group chat: share a running session with another person (group chat, beta).** Off by default: turn it on in Settings → General → Beta features → **Group chat**. A guest is another person, paired once to your host as a guest: Settings → Remote → **Guests** → **Invite a guest** opens a pairing window for a person you name (or `worktrees serve pair --invite <name>`; a further machine of theirs: `--guest <id>`), with the link, the QR code and the comparison code to Allow, as for your own devices. A guest holds no project and no capability but the new `guest`: they see only the sessions you share with them, the names and titles of your places in every project you have not hidden from guests (**Show place names to guests**, per project, on by default), and they can ask you for a share, which grants nothing and reaches no agent. The Guests list shows each guest with their devices, **Pair another device** and **Remove** (revokes every device of theirs and takes them off every share), and your own name as guests see it. With the switch off, the app shows none of this and opens no guest connection; turning it on starts them without a restart, and nothing paired or shared is deleted by the switch. **Downgrade warning:** once `devices.json` names a guest, a worktrees from before this release refuses the whole file — your own phone included — until the guest is removed.
