@@ -51,14 +51,26 @@ device = "bret-mac"
 # is reverted on it unless one is named here.
 snapshot = ""
 
-# The third person (§12.2's Cy). Apple runs at most two macOS VMs at once, so
-# until a Linux VM carries the AppImage, Cy is CLI calls from a third config
-# dir on the guest VM: a person with no screen (`--persons 3`).
+# The third person (§12.2's Cy): the Debian 13 arm64 VM with the AppImage, a
+# screen of his own (`--persons 3`). Linux: xdotool inside the GNOME session
+# (lin-session.sh, copied to ~/sess.sh), coordinates in pixels (a capture is
+# 1:1, 1464x931), the app maximized. He is Dana's second guest AND a host:
+# `[third.host]` is his lane, shared with Dana.
 [third]
 person = "cy"
-vm = "macOS-guest"
-ssh = "parallels-guest"
-ip = "10.211.55.16"
+vm = "Debian GNU Linux 13.6 ARM64"
+ssh = "parallels-lin"
+ip = "10.211.55.17"
+os = "linux"
 name = "Cy"
-device = "cy-cli"
-config_dir = "/Users/test-parallels/vmlab-cy"
+device = "cy-linux"
+
+[third.host]
+repo = "/home/parallels/workspace/worktrees"
+lane = "cy-lane"
+harness = "claude"
+# A Claude lane's agent is pane 0 of the place's own session.
+session = "worktrees-cy-lane"
+# Dana, as Cy's guest: her name on his host and her device's name.
+guest_name = "Dana"
+guest_device = "dana-mac"

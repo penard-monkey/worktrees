@@ -104,11 +104,40 @@ used when Claude fails.
 
 ### Three persons
 
-Apple runs at most two macOS VMs at once, so `--persons 3` makes Cy a person
-with no screen: CLI calls (`worktrees remote call`) from a third config dir
-on the guest VM, paired as a guest of his own. His intents are skipped in a
-two-person run. Not yet run end to end; the Linux VM with the AppImage is the
-better third screen (§12.2).
+`--persons 3` adds Cy on the third VM in config.toml's `[third]`: the Debian 13
+arm64 VM with the AppImage, his own screen (§12.2). He is Dana's second guest
+AND a host: `[third.host]` is his lane, shared with Dana. An intent's `on`
+names the share it acts on (`dana`, the default, or `cy`); the acts are the
+same, bound to that share's host, lane and guests (`Acts(run, ctx)`).
+
+A VM's `os` picks its backend. `macos`: osascript and cliclick, coordinates
+in points. `linux`: xdotool inside the logged-in GNOME session through
+`lin-session.sh` (copied to `~/sess.sh`; an ssh login has no display, so it
+borrows DISPLAY, WAYLAND_DISPLAY, the D-Bus address and mutter's XAUTHORITY from
+`gsd-xsettings`), coordinates in pixels (a capture is 1:1), the app maximized
+and started by `lin-launch-app.sh`. Its config dir is
+`~/.config/net.casadelvalle.worktrees`. Clipboard checks need `xclip`.
+
+UI files name one section per person and role: `<person>_host` (their own
+share) and `<person>_guest` (reading someone else's). `ui/v1.toml`'s
+`[owner]`/`[guest]` still work as Dana's and Bret's.
+
+### The release test (`--release`, `--from-ui`, segments)
+
+- `--release vX.Y.Z` installs a PUBLISHED release in every VM the way a user
+  does (`vm-install-release.sh`: quit the app, `curl …/<tag>/install.sh |
+  WORKTREES_INSTALL_APP=1 bash`, start it) instead of a local bundle.
+- `--from-ui` starts from pairings and shares people made in the apps (the
+  first run is what a release test measures, and it is driven by hand: see the
+  persona's `first_run`): each share is read back by its lane, each guest's
+  principal by name, each guest's host id by pin and live device. Only the
+  first segment touches the screens (Dana back on her lane).
+- `--intents A:B` plays a range, `--continue <run dir>` appends it to that
+  run's record. A run measured control by control goes in segments: measure
+  the next segment's buttons on the screens as they are, then play it. The
+  apps' UI state the acts rely on (the thread panel open, a send done) is
+  carried in the record between segments. Time-based scores of a segmented run
+  are upper bounds.
 
 ## The record
 
@@ -143,6 +172,24 @@ Beside it: `driver.log`, `shots/`, `host/{owner,guest}-serve.log`,
 | Recovery | The reboot: seconds to the owner's serve answering with the share kept, and to each guest reading the thread again |
 
 ## Traps
+
+- **A Linux display that powered off freezes the captures.** GNOME on the
+  Debian VM sets Mutter's PowerSaveMode to 3 even with idle-delay 0, and
+  `prlctl capture` then returns the LAST frame: an old clock, clicks that seem
+  to do nothing. `VM.wake()` sets it back before every Linux capture and click.
+- **XWayland's window geometry is not the screen's.** `xdotool
+  getwindowgeometry` reports the app 37 px lower than it paints; clicks by
+  SCREEN pixels (a capture) land right, window-relative ones do not.
+- **`sips --cropOffset` is y then x.** A crop to read a button's position with
+  the offsets swapped places the next click outside a dialog, which cancels a
+  pairing window.
+- **Positions move with names and state**: the share strip's buttons follow
+  "Shared with Bret and Cy", a pending ask adds "Bret asks to join · Allow", a
+  second earlier session adds a line to the Sharing… dialog, and a guest's
+  sidebar gains a group per kept pairing (B3). Measure in the state the act
+  will meet.
+- **A guest let in before the click proves nothing**: `open_share` says n/a
+  for a guest already allowed.
 
 - **Coordinates are points**: a capture is 2730 px wide, the screen 1365 pt.
   They hold only for the pinned window frame, and the owner's lane row only
