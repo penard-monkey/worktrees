@@ -701,6 +701,18 @@ pub struct GuestView {
     pub devices: Vec<DeviceView>,
 }
 
+impl GuestView {
+    /// Removed (the console's Remove, or every device revoked one by one):
+    /// no device left that is not a tombstone. The record stays, so the
+    /// threads still name what they wrote, but the owner no longer has them
+    /// as a guest: the app lists them nowhere, and their name is free — an
+    /// invite by it re-admits this same person (`Invite::from_value`). The
+    /// app's `guestLive` is the same rule.
+    pub fn removed(&self) -> bool {
+        self.devices.iter().all(DeviceRecord::is_revoked)
+    }
+}
+
 struct State {
     /// The file, or why it cannot be read.
     file: Result<DevicesFile, String>,
@@ -1032,7 +1044,8 @@ impl DeviceRegistry {
     }
 
     /// The guest principals (group chat §2.1), each with its devices,
-    /// tombstones included: the console's people list. `None` while the
+    /// tombstones and removed guests included ([`GuestView::removed`]: the
+    /// app lists only the others, and names old posts from all). `None` while the
     /// file is unreadable.
     pub fn guests(&self) -> Result<Vec<GuestView>, String> {
         let f = self.snapshot().ok_or_else(|| self.readable().unwrap_err())?;

@@ -5853,9 +5853,14 @@ Phase 3: Frontend pane and mock harness
         if (inv.name !== undefined) {
           const name = String(inv.name).trim();
           if (!name || name.length > 64) throw "a name is 1 to 64 characters";
-          const twin = mockGuests.find((g) => g.name.trim().toLowerCase() === name.toLowerCase());
+          // As serve's `Invite::from_value`: a live guest's name is taken; a
+          // removed guest's (no device left unrevoked) re-admits that guest.
+          const live = (g: { id: string }) => mockDevices.some((d) => d.principal === g.id && d.revoked_at == null);
+          const twins = mockGuests.filter((g) => g.name.trim().toLowerCase() === name.toLowerCase());
+          const twin = twins.find(live);
           if (twin) throw `a guest named "${twin.name}" exists: pair another device for them, or use another name`;
-          invite = { kind: "new", id: `g_${Math.random().toString(36).slice(2, 12)}`, name };
+          const back = twins.find((g) => g.name === name) ?? twins[0];
+          invite = back ? { kind: "existing", id: back.id, name: back.name } : { kind: "new", id: `g_${Math.random().toString(36).slice(2, 12)}`, name };
         } else {
           const g = mockGuests.find((x) => x.id === inv.guest);
           if (!g) throw `no guest ${inv.guest}`;

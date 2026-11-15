@@ -5,6 +5,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Fixed
+
+- Group chat (beta): a guest you removed no longer stays in Settings → Remote → Guests with a Remove that does nothing, and
+  their name is free again. *Share with… → Someone new* by that name no longer says "A guest named Bret exists (0 devices)"
+  under "Nobody is paired with this computer yet": it says Bret was a guest before, and pairing re-admits the same Bret, so
+  a thread shows their old posts and new ones as one person. A guest with a device still paired keeps the name taken.
+
 ## [0.52.0] - 2026-11-14
 
 ### Added
