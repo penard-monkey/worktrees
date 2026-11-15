@@ -16,6 +16,7 @@ import { useState } from "react";
 import { dismissToast, forgetGuestHost, openShare, requestShare, retryGuestHost, useGuests, type GuestHostView, type GuestProject, type GuestShare } from "./guest";
 import { placed, removedWords, shareWords } from "./guestview";
 import { PLAIN_TEXT } from "./thread";
+import { useArmed } from "./useArmed";
 import "./GuestSession.css";
 
 /** `shares::NOTE_MAX`: a request's note, in bytes. */
@@ -98,14 +99,14 @@ function NameRow({ hv, project, slug, title }: { hv: GuestHostView; project: Gue
 /** A host that ended this device: why, a Retry (a disabled device can be
  *  turned back on there) and *Forget this host*, a two-click arm. */
 function RemovedRow({ hv }: { hv: GuestHostView }) {
-  const [armed, setArmed] = useState(false);
+  const arm = useArmed<"forget">();
   const [err, setErr] = useState<string | null>(null);
   if (hv.link.kind !== "removed") return null;
-  const forget = async () => {
-    if (!armed) { setArmed(true); window.setTimeout(() => setArmed(false), 4000); return; }
+  const armed = arm.armed === "forget";
+  const forget = () => arm.confirm("forget", () => {
     setErr(null);
-    try { await forgetGuestHost(hv.host.id); } catch (e) { setErr(String(e)); setArmed(false); }
-  };
+    forgetGuestHost(hv.host.id).catch((e) => setErr(String(e)));
+  });
   return (
     <li className="row guest-name guest-removed" data-testid="guest-removed" title={hv.link.why}>
       <span className="status-dot guest-dot none" />
@@ -114,7 +115,7 @@ function RemovedRow({ hv }: { hv: GuestHostView }) {
       </span>
       <div className="guest-removed-acts">
         <button className="ctrl sm" data-testid="guest-retry" onClick={(e) => { e.stopPropagation(); retryGuestHost(hv.host.id); }}>Retry</button>
-        <button className={"ctrl sm danger" + (armed ? " armed" : "")} data-testid="guest-forget" onClick={(e) => { e.stopPropagation(); void forget(); }}>
+        <button className={"ctrl sm danger" + (armed ? " armed" : "")} data-testid="guest-forget" onClick={(e) => { e.stopPropagation(); forget(); }}>
           {armed ? "Really forget?" : "Forget this host"}
         </button>
       </div>
