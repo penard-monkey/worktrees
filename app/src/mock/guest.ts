@@ -193,8 +193,15 @@ export const guestHelpers = {
     w.__guestDown = true;
     w.__guestLost?.("the host closed the connection: going away");
   },
+  /** David removed this guest (Settings → Remote → Guests → Remove): the
+   *  host closes with `revoked`, and every redial's key is refused at TLS. */
+  guestRevoke() {
+    const w = window as unknown as { __guestLost?: (m: string) => void; __guestDown?: boolean | "revoked" };
+    w.__guestDown = "revoked";
+    w.__guestLost?.("the host closed the connection: revoked");
+  },
   guestBack() {
-    (window as unknown as { __guestDown?: boolean }).__guestDown = false;
+    (window as unknown as { __guestDown?: boolean | "revoked" }).__guestDown = false;
   },
   guestCalls() {
     const c = calls;

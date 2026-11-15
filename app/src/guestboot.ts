@@ -32,6 +32,10 @@ function storage(): GuestSource["storage"] {
   }
 }
 
+async function forgetOf(door: Pick<Door, "invoke">, hostId: string): Promise<void> {
+  await door.invoke("remote_forget", { hostId });
+}
+
 async function hostsOf(door: Pick<Door, "invoke">): Promise<HostSummary[]> {
   const h = await door.invoke<{ hosts: HostSummary[] }>("remote_hosts");
   return h.hosts;
@@ -61,7 +65,7 @@ export function appGuestSource(): GuestSource {
     });
     return { sock, closedWhy: pipe.closedWhy, close: () => { void shim.close(pipe.connected.conn).catch(() => {}); } };
   };
-  return { hosts: () => hostsOf(tauriDoor), dial, env: env(), storage: storage() };
+  return { hosts: () => hostsOf(tauriDoor), dial, forget: (id) => forgetOf(tauriDoor, id), env: env(), storage: storage() };
 }
 
 /** The harness's: the mock answers the guest rows itself (install.ts),
@@ -70,9 +74,10 @@ export function appGuestSource(): GuestSource {
 export function mockGuestSource(): GuestSource {
   // `__mock.guestDrop()` ends the open connection and refuses the next dials
   // until `__mock.guestBack()`: David's app quit, then came back (§6).
-  const w = window as unknown as { __guestLost?: (m: string) => void; __guestDown?: boolean };
+  const w = window as unknown as { __guestLost?: (m: string) => void; __guestDown?: boolean | "revoked" };
   const dial = (host: HostSummary): GuestDial => async (onLost) => {
     const offline = new URLSearchParams(window.location.search).get("guest") === "offline";
+    if (w.__guestDown === "revoked") throw `${host.name} (${host.addr}): the secure connection failed: the host refused this device's key (AccessDenied): it was revoked, disabled or expired there, or never enrolled`;
     if (offline || w.__guestDown) throw `${host.name} (${host.addr}): connection refused`;
     w.__guestLost = onLost;
     // A real socket's listeners die with it; the mock's bus outlives every
@@ -88,5 +93,5 @@ export function mockGuestSource(): GuestSource {
     };
     return { sock, closedWhy: () => null, close: () => { for (const u of uns.splice(0)) void u.then((f) => f()); } };
   };
-  return { hosts: () => hostsOf(tauriDoor), dial, env: env(), storage: storage() };
+  return { hosts: () => hostsOf(tauriDoor), dial, forget: (id) => forgetOf(tauriDoor, id), env: env(), storage: storage() };
 }

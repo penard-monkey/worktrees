@@ -13,8 +13,8 @@
 // act, *Ask <owner> to share*, with an optional note; the host answers the
 // same for every name (§2.2), so the row only says the ask went.
 import { useState } from "react";
-import { dismissToast, openShare, requestShare, useGuests, type GuestHostView, type GuestProject, type GuestShare } from "./guest";
-import { placed, shareWords } from "./guestview";
+import { dismissToast, forgetGuestHost, openShare, requestShare, retryGuestHost, useGuests, type GuestHostView, type GuestProject, type GuestShare } from "./guest";
+import { placed, removedWords, shareWords } from "./guestview";
 import { PLAIN_TEXT } from "./thread";
 import "./GuestSession.css";
 
@@ -95,6 +95,34 @@ function NameRow({ hv, project, slug, title }: { hv: GuestHostView; project: Gue
   );
 }
 
+/** A host that ended this device: why, a Retry (a disabled device can be
+ *  turned back on there) and *Forget this host*, a two-click arm. */
+function RemovedRow({ hv }: { hv: GuestHostView }) {
+  const [armed, setArmed] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  if (hv.link.kind !== "removed") return null;
+  const forget = async () => {
+    if (!armed) { setArmed(true); window.setTimeout(() => setArmed(false), 4000); return; }
+    setErr(null);
+    try { await forgetGuestHost(hv.host.id); } catch (e) { setErr(String(e)); setArmed(false); }
+  };
+  return (
+    <li className="row guest-name guest-removed" data-testid="guest-removed" title={hv.link.why}>
+      <span className="status-dot guest-dot none" />
+      <span className="row-id">
+        <span className="row-name guest-state">{removedWords(hv.link.by, hv.owner)}.</span>
+      </span>
+      <div className="guest-removed-acts">
+        <button className="ctrl sm" data-testid="guest-retry" onClick={(e) => { e.stopPropagation(); retryGuestHost(hv.host.id); }}>Retry</button>
+        <button className={"ctrl sm danger" + (armed ? " armed" : "")} data-testid="guest-forget" onClick={(e) => { e.stopPropagation(); void forget(); }}>
+          {armed ? "Really forget?" : "Forget this host"}
+        </button>
+      </div>
+      {err && <div className="hint" role="alert">{err}</div>}
+    </li>
+  );
+}
+
 /** One host's group: its shares, then its other place names by project. */
 function HostGroup({ hv, shares, projects, heading, openShareId }: { hv: GuestHostView; shares: GuestShare[]; projects: GuestProject[]; heading: string; openShareId: string | null }) {
   const [open, setOpen] = useState(true);
@@ -107,18 +135,20 @@ function HostGroup({ hv, shares, projects, heading, openShareId }: { hv: GuestHo
         <span className="caret">{open ? "▾" : "▸"}</span>
         {heading}
         {hv.link.kind === "offline" && <span className="guest-off" title={hv.link.why}>offline</span>}
+        {hv.link.kind === "removed" && <span className="guest-off" data-testid="guest-removed-tag" title={hv.link.why}>removed</span>}
         {unseen > 0 && <span className="guest-badge" data-testid="guest-badge" aria-label={`${unseen} new`}>{unseen}</span>}
         <span className="count">{shares.length}</span>
       </div>
       {open && (
         <ul className="places">
+          <RemovedRow hv={hv} />
           {shares.map((s) => <ShareRow key={s.id} hv={hv} s={s} selected={openShareId === s.id} />)}
           {projects.map((p) => (
             p.places.filter((pl) => !sharedSlugs.has(`${p.name}|${pl.slug}`)).map((pl) => (
               <NameRow key={`${p.id}|${pl.slug}`} hv={hv} project={p} slug={pl.slug} title={projects.length > 1 ? `${p.name} / ${pl.title || pl.slug}` : pl.title} />
             ))
           ))}
-          {hv.shares === null && hv.link.kind !== "offline" && <li className="row guest-name"><span className="row-id"><span className="row-name guest-state">Connecting to {hv.host.name}…</span></span></li>}
+          {hv.shares === null && hv.link.kind !== "offline" && hv.link.kind !== "removed" && <li className="row guest-name"><span className="row-id"><span className="row-name guest-state">Connecting to {hv.host.name}…</span></span></li>}
         </ul>
       )}
     </div>
