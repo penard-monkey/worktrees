@@ -216,7 +216,9 @@ export function ShareDialog({ s, repo, slug, preset, onClose, onShared }: { s: S
     w.release();
     onClose();
   };
-  const clash = someoneNew && name.trim() ? s.guests.find((g) => sameGuestName(g.name, name)) ?? null : null;
+  // The guest the name means: the exact one first, so "Bret" beside an older
+  // "bret" offers Bret's own devices (both were on the test VMs, 2026-11-14).
+  const clash = someoneNew && name.trim() ? s.guests.find((g) => g.name === name.trim()) ?? s.guests.find((g) => sameGuestName(g.name, name)) ?? null : null;
   const invite = (who: Invitee) => {
     setInvitee(who);
     setStep("pair");

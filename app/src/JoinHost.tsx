@@ -10,7 +10,7 @@
 // (S5, F6): a guest's pairing would succeed and show nothing, since the guest
 // connections start only with the beta on (main.tsx).
 import { useEffect, useRef, useState } from "react";
-import { Channel, invoke } from "./ipc";
+import { invoke, ShimChannel } from "./ipc";
 import type { HostSummary } from "./ipcremote";
 import { refreshGuestHosts } from "./guest";
 import { useEscape } from "./useEscape";
@@ -61,7 +61,7 @@ export function JoinForm({ groupChat, onJoined, onOpenBeta, autoFocus = false }:
     // S5: refused in words, before any call.
     if (!groupChat) { setRefused(true); return; }
     setPairing({});
-    const ch = new Channel<PairEv>((ev) => {
+    const ch = new ShimChannel<PairEv>((ev) => {
       if (!mounted.current) return;
       if (ev.dialling) setPairing({ host: ev.dialling.host, addr: ev.dialling.addr });
       if (ev.code) setPairing((p) => ({ ...p, code: ev.code }));

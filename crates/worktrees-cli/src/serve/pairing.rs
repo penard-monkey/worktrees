@@ -143,7 +143,9 @@ impl Invite {
             let name = name.as_str().ok_or(SHAPE)?.trim().to_string();
             name_ok(&name)?;
             // F7: in any case or spacing ("bret" beside "Bret" was a second person).
-            if let Some(g) = devices.guests()?.into_iter().find(|g| super::devices::same_guest_name(&g.name, &name)) {
+            let guests = devices.guests()?;
+            let twin = guests.iter().find(|g| g.name == name).or_else(|| guests.iter().find(|g| super::devices::same_guest_name(&g.name, &name)));
+            if let Some(g) = twin {
                 return Err(super::devices::guest_name_taken(&g.name));
             }
             return Ok(Invite::New { id: super::devices::new_guest_id(), name });

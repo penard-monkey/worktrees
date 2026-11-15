@@ -19,7 +19,7 @@
 // six-digit code must match the host's screen before anyone presses Allow
 // there.
 import { useEffect, useRef, useState } from "react";
-import { Channel, invoke, remoteHost } from "./ipc";
+import { invoke, remoteHost, ShimChannel } from "./ipc";
 import type { HostSummary } from "./ipcremote";
 import { refreshGuestHosts } from "./guest";
 import { useArmed } from "./useArmed";
@@ -99,7 +99,7 @@ export function HostsPanel({ onReport, onFail, manage = true }: { onReport: (m: 
   const pair = async () => {
     setPairErr(null);
     setPairing({});
-    const ch = new Channel<PairEv>((ev) => {
+    const ch = new ShimChannel<PairEv>((ev) => {
       if (!mounted.current) return;
       if (ev.dialling) setPairing({ host: ev.dialling.host, addr: ev.dialling.addr });
       if (ev.code) setPairing((p) => ({ ...p, code: ev.code }));

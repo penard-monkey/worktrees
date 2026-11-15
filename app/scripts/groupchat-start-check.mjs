@@ -92,6 +92,12 @@ ok(/if \(!groupChat\) \{ setRefused\(true\); return; \}/.test(joinFn) && joinFn.
   "a join with the beta off is refused before remote_pair is called (S5)");
 ok(/Turn on Group chat in Settings → General → Beta features first/.test(read("../src/JoinHost.tsx")), "…in the owner's words");
 
+// remote_pair is a shim command: its events need the local door's channel.
+for (const f of ["../src/JoinHost.tsx", "../src/HostsPanel.tsx"]) {
+  const src = blank(read(f));
+  ok(/new ShimChannel<PairEv>\(/.test(src) && !/new Channel<PairEv>\(/.test(src), `${f.slice(7)}: remote_pair's events come on a ShimChannel`);
+}
+
 // ── 5. entry points ──
 const app = blank(read("../src/App.tsx"));
 for (const [what, re] of [

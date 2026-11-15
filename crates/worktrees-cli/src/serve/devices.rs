@@ -1132,7 +1132,8 @@ impl DeviceRegistry {
         }
         self.mutate(|f, events| {
             if let Some(p) = create.filter(|p| f.principal(&p.id).is_none()) {
-                if let Some(q) = f.principals.iter().find(|q| q.is_guest() && same_guest_name(&q.name, &p.name)) {
+                let exact = f.principals.iter().find(|q| q.is_guest() && q.name == p.name);
+                if let Some(q) = exact.or_else(|| f.principals.iter().find(|q| q.is_guest() && same_guest_name(&q.name, &p.name))) {
                     return Err(guest_name_taken(&q.name));
                 }
                 f.principals.push(p);
