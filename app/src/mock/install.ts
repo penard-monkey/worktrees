@@ -5853,7 +5853,8 @@ Phase 3: Frontend pane and mock harness
         if (inv.name !== undefined) {
           const name = String(inv.name).trim();
           if (!name || name.length > 64) throw "a name is 1 to 64 characters";
-          if (mockGuests.some((g) => g.name === name)) throw `a guest named "${name}" exists already: invite them by id`;
+          const twin = mockGuests.find((g) => g.name.trim().toLowerCase() === name.toLowerCase());
+          if (twin) throw `a guest named "${twin.name}" exists: pair another device for them, or use another name`;
           invite = { kind: "new", id: `g_${Math.random().toString(36).slice(2, 12)}`, name };
         } else {
           const g = mockGuests.find((x) => x.id === inv.guest);
@@ -6854,13 +6855,3 @@ let mockNotifyGranted = new URLSearchParams(location.search).get("notify") === "
 };
 
 console.info("[mock] Tauri backend mocked — design harness active (window.__mock: breakConfig/fixConfig/exitShell/restoreScrollback/createFile/editFile/finishTask/syncFail/syncLive/release/denyFolder/allowFolder/uiEvents/hostPolicySets)");
-
-// `?design=start-a|start-b|start-c` (`&as=guest`): the group chat start-design
-// mocks (docs/proposals/group-chat-start.md), drawn over the harness and wired
-// to nothing. Throwaway: they exist to be screenshotted and walked.
-if (/^start-[abc]$/.test(new URLSearchParams(location.search).get("design") ?? "")) {
-  void import("./startDesign").then((m) => {
-    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", () => m.mountStartDesign());
-    else m.mountStartDesign();
-  });
-}

@@ -5,19 +5,22 @@
 // a nudge with *Share* / *Dismiss*, *Stop sharing* and taking a guest off,
 // the thread beside the session, and *Use these*. Every row is the console's
 // (shares.ts); a window that is not its host's console draws none of it.
-import { useEffect, useMemo, useRef, useState } from "react";
-import { invoke } from "./ipc";
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { invoke, notGranted } from "./ipc";
 import { useEscape } from "./useEscape";
 import { ThreadPanel } from "./ThreadPanel";
 import { laneLive, useLanes } from "./laneLive";
 import {
   consoleThread, guestName, ownerForAgent, guestLive, namesOf, ownerWords, readShares, seenAsks, setThreadOpen, shareRefusal, sharesHere, sharesOf, shareWarning,
-  useShares, useThreadOpen, type Share, type ShareRequest, type SharesState,
+  useShares, useThreadOpen, type Guest, type Share, type ShareRequest, type SharesState,
 } from "./shares";
 import {
   asksForNote, authorsOf, checkRefusal, joinNames, lineProblem, NOTE_ASK, NOTE_PLACEHOLDER, PLAIN_TEXT, PREVIEW_PATH, sinceLastUse, useOutcome, useRefusal, useTheseFile, useTheseLine, useTheseName, utf8Bytes,
   LINE_MAX, type ShareCheck, type ThreadEntry, type UseSent,
 } from "./thread";
+import { openRemoteSettings, readStatus, remoteState, useRemote } from "./remoteStore";
+import { DEFAULT_EXPIRY, expiryWords, pairingBlock, type Candidate, type DeviceRecord } from "./devices";
+import { PairCountdown, PairOpenBody, PairOutcomeBody, PairPendingBody, usePairWindow, type PairWindow } from "./PairWindow";
 import "./ThreadPanel.css";
 import "./LaneShare.css";
 
@@ -80,6 +83,36 @@ export function LaneShareBar({ repo, slug, harness, up }: { repo: string; slug: 
   );
 }
 
+// *Share this session…* from outside the lane's bar (§3.1, F10): the header's
+// ⋯ menu and the place's context menu ask `openShareDialog`, and the one
+// `ShareDialogHost` App mounts (behind the beta) draws the dialog.
+let shareAsk: { repo: string; slug: string } | null = null;
+const askSubs = new Set<() => void>();
+export function openShareDialog(repo: string, slug: string): void {
+  shareAsk = { repo, slug };
+  for (const f of [...askSubs]) f();
+}
+function useShareAsk() {
+  return useSyncExternalStore((f) => { askSubs.add(f); return () => { askSubs.delete(f); }; }, () => shareAsk);
+}
+export function ShareDialogHost() {
+  const ask = useShareAsk();
+  const s = useShares();
+  if (!ask || !sharesHere()) return null;
+  return <ShareDialog key={ask.repo + "|" + ask.slug} s={s} repo={ask.repo} slug={ask.slug}
+    onClose={() => { shareAsk = null; for (const f of [...askSubs]) f(); }} onShared={() => setThreadOpen(ask.repo + "|" + ask.slug, true)} />;
+}
+
+/** Whether *Share this session…* is offered for a place: this window is its
+ *  host's console, the place runs a live Claude or Codex (`laneLive`, the
+ *  rule the lane's bar applies), and it is not shared already (its bar's
+ *  *Sharing…* manages a share). */
+export function useShareStart(): (repo: string, slug: string) => boolean {
+  const s = useShares();
+  const lanes = useLanes();
+  return (repo, slug) => sharesHere() && s.shares !== null && laneLive(lanes, repo, slug) === true && sharesOf(s, repo, slug).length === 0;
+}
+
 async function allow(share: string, principal: string): Promise<void> {
   try {
     await invoke("share_allow", { share, principal });
@@ -121,17 +154,327 @@ function Modal({ title, onClose, children, foot }: { title: string; onClose: () 
   );
 }
 
-/** *Share with…*: pick guests, read §1's warning, share. */
-function ShareDialog({ s, repo, slug, preset, onClose, onShared }: { s: SharesState; repo: string; slug: string; preset?: string[]; onClose: () => void; onShared: () => void }) {
+/** Two guest names that are one person's name to a reader: the host refuses
+ *  a new guest whose name another guest has, in any case (F7, `pairing.rs`
+ *  `Invite::from_value`), and the dialog says so before asking. */
+export function sameGuestName(a: string, b: string): boolean {
+  return a.trim().toLowerCase() === b.trim().toLowerCase();
+}
+
+function when(at: number | null | undefined): string {
+  if (!at) return "never";
+  return new Date(at * 1000).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" });
+}
+
+/** "2 devices · paired Nov 12, 2026": what tells two guests apart (F7). */
+export function guestMeta(g: Guest): string {
+  const n = g.devices.filter((d) => !d.revoked_at).length;
+  return `${n} ${n === 1 ? "device" : "devices"} · paired ${when(g.created_at)}`;
+}
+
+/** The address the reach block preselects (§3.1, S6): the first overlay
+ *  candidate (Tailscale reaches a guest anywhere on the tailnet), else the
+ *  first LAN one; link-local never, since a cable is rarely the answer. */
+export function reachDefault(list: readonly Candidate[]): Candidate | null {
+  const usable = list.filter((c) => c.class !== "link-local");
+  return usable.find((c) => c.mode === "overlay") ?? usable.find((c) => c.mode === "lan") ?? usable[0] ?? null;
+}
+
+function reachWords(c: Candidate): string {
+  if (c.mode === "overlay") return c.class === "cgnat" ? "Tailscale or a VPN tunnel: works wherever both computers are on it" : "an overlay network";
+  return "this network only (home or office)";
+}
+
+type Invitee = { id: string | null; name: string };
+type Step = "who" | "pair" | "share";
+
+/** *Share…* (group chat start design A, §3.1): **Who** — the people paired
+ *  already, or *Someone new* with a name; **Pair** — for someone new, the
+ *  invite window (`PairWindow`, the one implementation Settings' sheet uses
+ *  too), with remote access turned on inline when it is off; **Share** — v3's
+ *  warning and *Share with <name>*. Allow (pairing) and Share (reading) stay
+ *  two screens and two presses: `PairStep` never shares, and `ShareStep` is
+ *  the one place `share_create` is called (groupchat-start-check.mjs). With
+ *  a guest already paired it is today's two acts: tick, Share. Closing the
+ *  dialog cancels a window still open. */
+export function ShareDialog({ s, repo, slug, preset, onClose, onShared }: { s: SharesState; repo: string; slug: string; preset?: string[]; onClose: () => void; onShared: () => void }) {
   const live = s.guests.filter(guestLive);
+  const [step, setStep] = useState<Step>("who");
+  const [someoneNew, setSomeoneNew] = useState(live.length === 0 && !preset?.length);
+  const [name, setName] = useState("");
   const [picked, setPicked] = useState<Set<string>>(() => new Set(preset ?? (live.length === 1 ? [live[0].id] : [])));
+  const [invitee, setInvitee] = useState<Invitee | null>(null);
+  const [paired, setPaired] = useState<{ principal: string; device: string; name: string } | null>(null);
+  const w = usePairWindow();
   // The guest list as it is now: a guest paired a minute ago is offered.
   useEffect(() => {
     void readShares();
   }, []);
+  // Someone new appears once guests are read, if there are none.
+  useEffect(() => { if (s.guests.length === 0 && !preset?.length) setSomeoneNew(true); }, [s.guests.length]); // eslint-disable-line react-hooks/exhaustive-deps
+  const close = () => {
+    w.release();
+    onClose();
+  };
+  // The guest the name means: the exact one first, so "Bret" beside an older
+  // "bret" offers Bret's own devices (both were on the test VMs, 2026-11-14).
+  const clash = someoneNew && name.trim() ? s.guests.find((g) => g.name === name.trim()) ?? s.guests.find((g) => sameGuestName(g.name, name)) ?? null : null;
+  const invite = (who: Invitee) => {
+    setInvitee(who);
+    setStep("pair");
+  };
+  const steps = someoneNew || step !== "who" ? ["Who", "Pair", "Share"] : null;
+  const stepAt = step === "who" ? 0 : step === "pair" ? 1 : 2;
+
+  return (
+    <ShareModal title={`Share ${slug}`} steps={steps} step={stepAt} onClose={close} countdown={step === "pair" ? <PairCountdown w={w} /> : null}>
+      {step === "who" && (
+        <WhoStep s={s} live={live} picked={picked} setPicked={setPicked} someoneNew={someoneNew} setSomeoneNew={setSomeoneNew}
+          name={name} setName={setName} clash={clash} onInvite={invite} onClose={close}
+          share={!someoneNew ? <ShareStep s={s} repo={repo} slug={slug} picked={picked} onClose={close} onShared={onShared} /> : null} />
+      )}
+      {step === "pair" && invitee && (
+        <PairStep w={w} invitee={invitee} onClose={close}
+          onPaired={(rec) => {
+            setPicked(new Set([rec.principal]));
+            setPaired({ principal: rec.principal, device: rec.name, name: invitee.name });
+            void readShares();
+            setStep("share");
+          }} />
+      )}
+      {step === "share" && (
+        <ShareStep s={s} repo={repo} slug={slug} picked={picked} setPicked={setPicked} paired={paired} onClose={close} onShared={onShared} />
+      )}
+    </ShareModal>
+  );
+}
+
+/** The dialog's frame: its steps named in the header, and the body each
+ *  step draws (each step draws its own footer, as `.sync-foot`). */
+function ShareModal({ title, steps, step, countdown, onClose, children }: {
+  title: string; steps: string[] | null; step: number; countdown: React.ReactNode; onClose: () => void; children: React.ReactNode;
+}) {
+  useEscape(onClose);
+  return (
+    <div className="scrim scrim-center" onClick={onClose}>
+      <div className="sync-modal ls-modal ra" role="dialog" aria-label={title} data-testid="share-dialog" data-step={steps ? steps[step].toLowerCase() : "who"} onClick={(e) => e.stopPropagation()}>
+        <header className="sync-h">
+          <b>{title}</b>
+          {steps && <span className="ls-steps" aria-label={`Step ${step + 1} of ${steps.length}`}>{steps.map((x, i) => <span key={x} className={i === step ? "on" : ""}>{i + 1}. {x}</span>)}</span>}
+          {countdown}
+        </header>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function Body({ children }: { children: React.ReactNode }) {
+  return <div className="sync-body">{children}</div>;
+}
+function Foot({ children }: { children: React.ReactNode }) {
+  return <footer className="sync-foot">{children}</footer>;
+}
+
+/** Step 1, who: the people paired already (each with their devices and when,
+ *  so two of one name are told apart, F7), or *Someone new*. */
+function WhoStep({ s, live, picked, setPicked, someoneNew, setSomeoneNew, name, setName, clash, onInvite, onClose, share }: {
+  s: SharesState; live: Guest[]; picked: Set<string>; setPicked: (p: Set<string>) => void;
+  someoneNew: boolean; setSomeoneNew: (on: boolean) => void; name: string; setName: (n: string) => void;
+  clash: Guest | null; onInvite: (who: Invitee) => void; onClose: () => void; share: React.ReactNode;
+}) {
+  const problem = notGranted("pair_begin") ?? (!name.trim() ? "Type their name first." : clash ? `A guest named ${clash.name} exists.` : null);
+  const pick = (
+    <div className="ls-pick" role="group" aria-label="Guests">
+      {live.length === 0 && <div className="ra-note">{s.shares === null ? "Reading who is paired…" : "Nobody is paired with this computer yet."}</div>}
+      {live.map((g) => (
+        <label key={g.id} className="tier-toggle setting-check" data-guest={g.id}>
+          <input type="checkbox" checked={!someoneNew && picked.has(g.id)}
+            onChange={(e) => { const n = new Set(picked); if (e.currentTarget.checked) n.add(g.id); else n.delete(g.id); setPicked(n); setSomeoneNew(false); }} />
+          {g.name} <span className="ra-note ls-guest-meta">{guestMeta(g)}</span>
+        </label>
+      ))}
+      <label className="tier-toggle setting-check ls-new">
+        <input type="checkbox" data-testid="share-someone-new" checked={someoneNew} onChange={(e) => setSomeoneNew(e.currentTarget.checked)} />
+        ＋ Someone new
+      </label>
+    </div>
+  );
+  if (!someoneNew) {
+    return <>
+      <Body>
+        <div className="ra-line">Who should read this session?</div>
+        {pick}
+      </Body>
+      {share}
+    </>;
+  }
+  return <>
+    <Body>
+      <div className="ra-line">Who should read this session?</div>
+      {pick}
+      <label className="ra-field">
+        <span className="ra-field-l">Their name, as you and the thread will see it</span>
+        <input autoFocus value={name} maxLength={64} placeholder="Bret" aria-label="Their name" data-testid="share-new-name" onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && !problem) onInvite({ id: null, name: name.trim() }); }} />
+      </label>
+      {clash ? (
+        <div className="ra-ask" role="note" data-testid="share-name-taken">
+          <span className="ra-dot warn" aria-hidden />
+          <div>
+            <div>A guest named <b>{clash.name}</b> exists ({guestMeta(clash)}). Pair another device for them, or use another name.</div>
+            <button className="ra-linkbtn" data-testid="share-pair-another" onClick={() => onInvite({ id: clash.id, name: clash.name })}>Pair another device for {clash.name}</button>
+          </div>
+        </div>
+      ) : (
+        <div className="ra-note">They pair their Mac with yours once, with a link you send them and a code you compare. Then you choose what they read.</div>
+      )}
+    </Body>
+    <Foot>
+      <span className="ra-foot-why">{problem ?? ""}</span>
+      <button className="ctrl" onClick={onClose}>Cancel</button>
+      <button className="enter-btn" data-testid="share-invite" disabled={!!problem} title={problem ?? undefined} onClick={() => onInvite({ id: null, name: name.trim() })}>
+        Invite {name.trim() || "them"}
+      </button>
+    </Foot>
+  </>;
+}
+
+/** Step 2, pair: reach (remote access, inline, only while it is off), then
+ *  the invite window, the code and Allow. Allow pairs and shares nothing:
+ *  this step never calls `share_create`. */
+function PairStep({ w, invitee, onClose, onPaired }: {
+  w: PairWindow; invitee: Invitee; onClose: () => void; onPaired: (rec: DeviceRecord) => void;
+}) {
+  const r = useRemote();
+  const off = r.status?.state === "off";
+  const problem = off ? null : pairingBlock(r.status, false, r.statusErr);
+  const args = { invite: invitee.id ? { guest: invitee.id } : { name: invitee.name }, expiry: DEFAULT_EXPIRY };
+  const [cands, setCands] = useState<Candidate[] | null>(null);
+  const [chosen, setChosen] = useState<string | null>(null);
+  const [turning, setTurning] = useState(false);
+  const started = useRef(false);
+  const key = (c: Candidate) => `${c.address}%${c.iface}`;
+
+  // Remote access listening already: the window opens at once (Invite was
+  // the press). Off: nothing opens until the reach block's own press.
+  useEffect(() => {
+    if (started.current || w.phase !== "idle" || r.status?.state !== "listening" || turning) return;
+    started.current = true;
+    void w.begin(args);
+  }, [r.status?.state, turning]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!off || cands) return;
+    let alive = true;
+    invoke<Candidate[]>("remote_candidates").then(
+      (l) => { if (!alive) return; setCands(l); const d = reachDefault(l); setChosen((c) => c ?? (d ? key(d) : null)); },
+      (e) => alive && w.setErr(String(e)),
+    );
+    return () => { alive = false; };
+  }, [off]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const pick = cands?.find((c) => key(c) === chosen) ?? null;
+  /** S6: turned on by this press only, on the one address named above it. */
+  const turnOn = async () => {
+    if (!pick) return;
+    setTurning(true);
+    w.setErr(null);
+    try {
+      await invoke("remote_enable", { address: pick.address, iface: pick.iface });
+      for (let i = 0; i < 40; i++) {
+        await readStatus();
+        if (remoteState().status?.state === "listening") break;
+        await new Promise((res) => window.setTimeout(res, 250));
+      }
+      if (remoteState().status?.state !== "listening") throw new Error("remote access did not start listening: open Settings → Remote to see why");
+      started.current = true;
+      await w.begin(args);
+    } catch (e) {
+      w.setErr(String(e));
+    } finally {
+      setTurning(false);
+    }
+  };
+  const allow = async () => {
+    const rec = await w.decide(true);
+    if (rec) onPaired(rec);
+  };
+  const usable = cands?.filter((c) => c.class !== "link-local") ?? [];
+
+  return <>
+    <Body>
+      {problem && problem.kind !== "loading" && (
+        <div className="ra-ask" role="alert" data-testid="pair-unavailable">
+          <span className="ra-dot warn" aria-hidden />
+          <div>
+            <div>{problem.message}</div>
+            <button className="ra-linkbtn" onClick={() => { onClose(); openRemoteSettings("remote"); }}>Open Remote access</button>
+          </div>
+        </div>
+      )}
+      {w.phase === "idle" && off && (
+        <div className="ls-reach" data-testid="share-reach">
+          <div className="ra-line"><b>{invitee.name}'s Mac has to reach this one.</b> Remote access is off. Turning it on listens on one private address, and only a key paired with this computer gets in.</div>
+          {!cands && <div className="ra-note">Reading this computer's addresses…</div>}
+          {cands && usable.length === 0 && <div className="ra-note">This computer holds no private address remote access may use. Join a network (or Tailscale), then try again.</div>}
+          {usable.length > 0 && (
+            <select aria-label="Address" data-testid="share-reach-address" value={chosen ?? ""} onChange={(e) => setChosen(e.currentTarget.value)}>
+              {usable.map((c) => <option key={key(c)} value={key(c)}>{c.address} · {reachWords(c)}</option>)}
+            </select>
+          )}
+          {pick?.warning && <div className="ra-cand-warn">{pick.warning}</div>}
+          <div className="ra-note">Change it or turn it off any time in Settings → Remote. Quitting worktrees turns it off.</div>
+        </div>
+      )}
+      {w.phase === "idle" && !off && !problem && <div className="ra-note">Opening the pairing window…</div>}
+      <PairOpenBody w={w} guest={invitee.name} summary={`A guest device for ${invitee.name} · ${expiryWords(DEFAULT_EXPIRY)}`} />
+      <PairPendingBody w={w} guest={invitee.name} />
+      <PairOutcomeBody w={w} />
+      {w.err && <div className="ra-err" role="alert" data-testid="share-pair-error">{w.err}</div>}
+    </Body>
+    <Foot>
+      {w.phase === "idle" && off && (
+        <>
+          <button className="ctrl" onClick={onClose}>Cancel</button>
+          <button className="enter-btn" data-testid="share-reach-on" disabled={turning || !pick || !!notGranted("remote_enable")} onClick={() => void turnOn()}>
+            {turning ? "Turning on…" : "Turn on and show the link"}
+          </button>
+        </>
+      )}
+      {w.phase === "idle" && !off && (
+        <>
+          <button className="ctrl" onClick={onClose}>Cancel</button>
+          {w.err && !problem && <button className="enter-btn" onClick={() => void w.begin(args)}>Try again</button>}
+        </>
+      )}
+      {w.phase === "open" && <button className="ctrl" data-testid="share-pair-cancel" onClick={() => void w.cancel()}>Cancel pairing</button>}
+      {w.phase === "pending" && (
+        <>
+          <button className="ctrl" disabled={w.busy} onClick={() => void w.decide(false)}>Deny</button>
+          <button className="enter-btn" data-testid="share-pair-allow" disabled={w.busy} onClick={() => void allow()}>{w.busy ? "Working…" : "Allow"}</button>
+        </>
+      )}
+      {w.phase === "closed" && (
+        <>
+          <button className="ctrl" onClick={onClose}>Close</button>
+          <button className="enter-btn" data-testid="share-pair-again" onClick={() => { started.current = false; w.reset(); }}>Open another window</button>
+        </>
+      )}
+    </Foot>
+  </>;
+}
+
+/** Step 3, share — and Who's own footer when the guests are paired already:
+ *  v3's warning, alone, and the press that shares. The one `share_create`. */
+function ShareStep({ s, repo, slug, picked, setPicked, paired, onClose, onShared }: {
+  s: SharesState; repo: string; slug: string; picked: Set<string>; setPicked?: (p: Set<string>) => void;
+  paired?: { principal: string; device: string; name: string } | null; onClose: () => void; onShared: () => void;
+}) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const names = live.filter((g) => picked.has(g.id)).map((g) => g.name);
+  const live = s.guests.filter(guestLive);
+  const nameOf = (id: string) => s.guests.find((g) => g.id === id)?.name ?? (paired?.principal === id ? paired.name : id);
+  const names = [...picked].map(nameOf);
   const go = async () => {
     setBusy(true);
     setErr(null);
@@ -146,29 +489,36 @@ function ShareDialog({ s, repo, slug, preset, onClose, onShared }: { s: SharesSt
       void readShares();
     }
   };
-  return (
-    <Modal title={`Share ${slug}`} onClose={onClose} foot={<>
-      <button className="ctrl" onClick={onClose}>Cancel</button>
-      <button className="enter-btn" data-testid="share-confirm" disabled={busy || picked.size === 0} onClick={go}>{busy ? "Sharing…" : "Share"}</button>
-    </>}>
-      {live.length === 0 ? (
-        <div className="ra-line">No guests yet. Invite one in Settings → Remote → Guests.</div>
-      ) : (
-        <div className="ls-pick" role="group" aria-label="Guests">
-          {live.map((g) => (
-            <label key={g.id} className="tier-toggle setting-check">
-              <input type="checkbox" checked={picked.has(g.id)}
-                onChange={(e) => { const n = new Set(picked); if (e.currentTarget.checked) n.add(g.id); else n.delete(g.id); setPicked(n); }} />
-              {g.name}
-            </label>
-          ))}
-        </div>
-      )}
+  const rows = paired && !live.some((g) => g.id === paired.principal) ? [...live, { id: paired.principal, name: paired.name, created_at: 0, devices: [] } as Guest] : live;
+  return <>
+    {paired && (
+      <Body>
+        <div className="ra-status" data-testid="share-paired"><span className="ra-dot on" aria-hidden />{paired.device} is paired as {paired.name}, a guest.</div>
+        {setPicked && (
+          <div className="ls-pick" role="group" aria-label="Guests">
+            {rows.map((g) => (
+              <label key={g.id} className="tier-toggle setting-check">
+                <input type="checkbox" checked={picked.has(g.id)}
+                  onChange={(e) => { const n = new Set(picked); if (e.currentTarget.checked) n.add(g.id); else n.delete(g.id); setPicked(n); }} />
+                {g.name} <span className="ra-note ls-guest-meta">{g.id === paired.principal ? "just paired" : guestMeta(g)}</span>
+              </label>
+            ))}
+          </div>
+        )}
+      </Body>
+    )}
+    <div className="sync-body ls-share-body">
       {names.length > 0 && <div className="ls-warn" data-testid="share-warning" role="note">{shareWarning(names)}</div>}
       <div className="ra-note">They ask to join when they open it, and you let them in. What they write sits in a thread beside the session; the agent sees none of it unless you send it.</div>
       {err && <div className="ra-err" role="alert" data-testid="share-error">{err}</div>}
-    </Modal>
-  );
+    </div>
+    <Foot>
+      <button className="ctrl" onClick={onClose}>{paired ? "Not now" : "Cancel"}</button>
+      <button className="enter-btn" data-testid="share-confirm" disabled={busy || picked.size === 0} onClick={go}>
+        {busy ? "Sharing…" : names.length === 1 ? `Share with ${names[0]}` : "Share"}
+      </button>
+    </Foot>
+  </>;
 }
 
 /** *Share again*: bind the lane's new session, the share's guests kept. */

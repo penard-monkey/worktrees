@@ -10,34 +10,14 @@
 // every pairing step serve announces (remoteStore's `pairTick`). Closing the
 // sheet while a window is open cancels it: an open window nobody is watching
 // is one a stranger could use.
-import { useEffect, useRef, useState } from "react";
-import { invoke, notGranted } from "./ipc";
-import { copyToClipboard } from "./clipboard";
+import { useState } from "react";
+import { notGranted } from "./ipc";
 import { useEscape } from "./useEscape";
 import { useRemote } from "./remoteStore";
-import { ExpiryEditor, RunsLabel, ScopeEditor, scopeProblem, useNow, useProjects, useUnprompted, type Scope } from "./remoteui";
-import {
-  capsWords, codeSpaced, DEFAULT_EXPIRY, ENDED_WORDS, expiryWords, pairingBlock, PLATFORM_LABEL, PRESETS, qrPath, scopeWords, secondsLeft,
-  type DeviceRecord, type Expiry, type PairBegin, type PairStatus, type Preset,
-} from "./devices";
+import { ExpiryEditor, ScopeEditor, scopeProblem, useProjects, useUnprompted, type Scope } from "./remoteui";
+import { DEFAULT_EXPIRY, expiryWords, capsWords, pairingBlock, PRESETS, scopeWords, type Expiry, type Preset } from "./devices";
+import { PairCountdown, PairOpenBody, PairOutcomeBody, PairPendingBody, usePairWindow } from "./PairWindow";
 import "./RemoteAccess.css";
-
-function clock(s: number): string {
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
-}
-
-/** The QR as SVG, black on white whatever the theme: a camera reads dark on
- *  light, and a theme's inversion would cost a scan. Four modules of quiet
- *  zone, as the standard asks. */
-function Qr({ size, modules }: { size: number; modules: string }) {
-  const q = 4;
-  return (
-    <svg className="ra-qr" viewBox={`${-q} ${-q} ${size + 2 * q} ${size + 2 * q}`} role="img" aria-label="Pairing QR code" shapeRendering="crispEdges">
-      <rect x={-q} y={-q} width={size + 2 * q} height={size + 2 * q} fill="#ffffff" />
-      <path d={qrPath(size, modules)} fill="#000000" />
-    </svg>
-  );
-}
 
 /** `startScope`: the capabilities the sheet starts on — the policy preset's
  *  suggestion (settings-reorg §5.2: Operate under Autonomous), Observe else. */
@@ -56,41 +36,13 @@ export function PairSheet({ onClose, onRemote, startScope = "observe", guest }: 
   const unprompted = useUnprompted();
   const [scope, setScope] = useState<Scope>({ caps: [...PRESETS[startScope]], projects: [] });
   const [expiry, setExpiry] = useState<Expiry>(DEFAULT_EXPIRY);
-  const [win, setWin] = useState<PairBegin | null>(null);
-  const [st, setSt] = useState<PairStatus | null>(null);
-  const [err, setErr] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [paired, setPaired] = useState<DeviceRecord | null>(null);
-  const [copied, setCopied] = useState(false);
-  const now = useNow(250);
+  const w = usePairWindow();
   const remoteProblem = pairingBlock(r.status, false, r.statusErr);
-
-  // The window as serve has it, while one is ours.
-  useEffect(() => {
-    if (!win) return;
-    let live = true;
-    const read = () => invoke<PairStatus>("pair_status").then((s) => live && setSt(s), (e) => live && setErr(String(e)));
-    void read();
-    const id = window.setInterval(read, 1000);
-    return () => { live = false; window.clearInterval(id); };
-  }, [win, r.pairTick]);
-
-  // Another window (`worktrees serve pair`, say) replaced ours.
-  const replaced = !!win && st?.state === "open" && st.uri !== win.uri;
-  const listenerStopped = !!r.status && r.status.state !== "listening";
-  const phase: "scope" | "open" | "pending" | "closed" =
-    !win ? "scope" : listenerStopped ? "closed" : replaced ? "closed" : st?.state === "pending" ? "pending" : st?.state === "closed" ? "closed" : "open";
-  const live = phase === "open" || phase === "pending";
-
-  const liveRef = useRef(live);
-  liveRef.current = live;
-  // Unmounting with a window open (Settings closed under it): cancel it.
-  useEffect(() => () => { if (liveRef.current) void invoke("pair_cancel").catch(() => {}); }, []);
+  const { phase, busy } = w;
 
   const close = () => {
     if (busy) return;
-    if (live) void invoke("pair_cancel").catch(() => {});
-    liveRef.current = false;
+    w.release();
     onClose();
   };
   const openRemote = () => { close(); onRemote(); };
@@ -99,55 +51,17 @@ export function PairSheet({ onClose, onRemote, startScope = "observe", guest }: 
   // Unreachable from a remote window (Devices says why instead), and greyed
   // with the reason if it ever is.
   const problem = notGranted("pair_begin") ?? remoteProblem?.message ?? (inviting ? (guestName.trim() ? null : "Type the guest's name first.") : scopeProblem(scope));
-  const begin = async () => {
-    setBusy(true);
-    setErr(null);
-    setPaired(null);
-    setSt(null);
-    try {
-      const b = inviting
-        ? await invoke<PairBegin>("pair_begin", { invite: guest!.id ? { guest: guest!.id } : { name: guestName.trim() }, expiry })
-        : await invoke<PairBegin>("pair_begin", { caps: scope.caps, projects: scope.projects, expiry });
-      setWin(b);
-      setSt({ state: "open", uri: b.uri, expires_at: b.expires_at });
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-  const decide = async (allow: boolean) => {
-    setBusy(true);
-    setErr(null);
-    try {
-      const rec = await invoke<DeviceRecord | null>("pair_decide", { allow });
-      if (rec) setPaired(rec);
-    } catch (e) {
-      setErr(String(e));
-    } finally {
-      setBusy(false);
-      void invoke<PairStatus>("pair_status").then(setSt, () => {});
-    }
-  };
-  const cancel = async () => {
-    await invoke("pair_cancel").catch((e) => setErr(String(e)));
-    void invoke<PairStatus>("pair_status").then(setSt, () => {});
-  };
-  const again = () => {
-    setWin(null);
-    setSt(null);
-    setErr(null);
-    setPaired(null);
-  };
+  const begin = () => void (inviting
+    ? w.begin({ invite: guest!.id ? { guest: guest!.id } : { name: guestName.trim() }, expiry })
+    : w.begin({ caps: scope.caps, projects: scope.projects, expiry }));
+  const who = guest?.id ? guest.name : guestName.trim();
 
   return (
     <div className="scrim scrim-center" onClick={close}>
-      <div className="sync-modal ra-pair ra" role="dialog" aria-label={inviting ? "Invite a guest" : "Pair a device"} data-phase={phase} data-invite={inviting || undefined} onClick={(e) => e.stopPropagation()}>
+      <div className="sync-modal ra-pair ra" role="dialog" aria-label={inviting ? "Invite a guest" : "Pair a device"} data-phase={phase === "idle" ? "scope" : phase} data-invite={inviting || undefined} onClick={(e) => e.stopPropagation()}>
         <header className="sync-h">
           <b>{inviting ? (guest!.id ? `Pair another device for ${guest!.name}` : "Invite a guest") : "Pair a device"}</b>
-          {phase === "open" && st && "expires_at" in st && (
-            <span className="ra-countdown" data-testid="pair-countdown">Closes in {clock(secondsLeft(st.expires_at, now))}</span>
-          )}
+          <PairCountdown w={w} />
         </header>
         <div className="sync-body">
           {remoteProblem && remoteProblem.kind !== "loading" && (
@@ -159,7 +73,7 @@ export function PairSheet({ onClose, onRemote, startScope = "observe", guest }: 
               </div>
             </div>
           )}
-          {phase === "scope" && inviting && (
+          {phase === "idle" && inviting && (
             <>
               <div className="ra-line">
                 A guest sees only the sessions you share with them, after you let them in, and the names of your places in projects you have not
@@ -181,7 +95,7 @@ export function PairSheet({ onClose, onRemote, startScope = "observe", guest }: 
               <ExpiryEditor value={expiry} onChange={setExpiry} />
             </>
           )}
-          {phase === "scope" && !inviting && (
+          {phase === "idle" && !inviting && (
             <>
               <div className="ra-line">
                 Choose what the device may do before anything opens. The code appears next, for two minutes and one attempt.
@@ -191,88 +105,35 @@ export function PairSheet({ onClose, onRemote, startScope = "observe", guest }: 
             </>
           )}
 
-          {phase === "open" && win && (
-            <div className="ra-window">
-              <Qr size={win.qr.size} modules={win.qr.modules} />
-              <div className="ra-window-txt">
-                <div className="ra-line">
-                  Scan this with the device, or paste the link on a device with no camera:
-                  <code className="ra-cmd">worktrees remote pair '&lt;link&gt;'</code>
-                </div>
-                <div className="ra-link">
-                  <input readOnly value={win.uri} aria-label="Pairing link" onFocus={(e) => e.currentTarget.select()} />
-                  <button className="ctrl sm" onClick={() => copyToClipboard(win.uri).then(() => { setCopied(true); window.setTimeout(() => setCopied(false), 2000); }, (e) => setErr(String(e)))}>
-                    {copied ? "Copied" : "Copy"}
-                  </button>
-                </div>
-                <div className="ra-summary">
-                  {inviting ? `A guest device for ${guest!.id ? guest!.name : guestName.trim()}` : `${capsWords(scope.caps)} on ${scopeWords(scope.projects)}`} · {expiryWords(expiry)}
-                </div>
-                {!inviting && <RunsLabel caps={scope.caps} unprompted={unprompted} host={host} />}
-                {inviting && <div className="ra-note">Opening another pairing window closes this one; this link then stops working.</div>}
-                <div className="ra-status" role="status">
-                  <span className="ra-dot warn" aria-hidden />
-                  {st?.state === "attempt" ? <span>A device is connecting from {st.peer}…</span> : <span>Waiting for a device. One attempt; any failure closes the window.</span>}
-                </div>
-              </div>
-            </div>
-          )}
+          <PairOpenBody w={w} guest={inviting ? who : undefined} caps={inviting ? undefined : scope.caps}
+            summary={`${inviting ? `A guest device for ${who}` : `${capsWords(scope.caps)} on ${scopeWords(scope.projects)}`} · ${expiryWords(expiry)}`} />
+          <PairPendingBody w={w} guest={inviting ? who : undefined} />
+          <PairOutcomeBody w={w}>
+            {inviting
+              ? <div className="ra-line">{w.paired?.name} is paired as {who}. They are listed under Guests, and you can share a session with them from the session itself.</div>
+              : <div className="ra-line">{w.paired?.name} is paired. It is listed under Devices, where you can change or revoke it.</div>}
+          </PairOutcomeBody>
 
-          {phase === "pending" && st?.state === "pending" && (
-            <div className="ra-request" data-testid="pair-request">
-              <div className="ra-req-who">
-                <b className="ra-req-name">{st.request.name}</b>
-                <span className="ra-req-meta">{PLATFORM_LABEL[st.request.platform] ?? st.request.platform} · from {st.request.peer}</span>
-              </div>
-              <div className="ra-code-l">Comparison code</div>
-              <div className="ra-code" data-testid="pair-code" aria-label={`Code ${st.request.code.split("").join(" ")}`}>{codeSpaced(st.request.code)}</div>
-              <div className="ra-line"><b>Allow only if this code is on your device right now.</b> The name is the device's own claim; the code is what shows it is yours.</div>
-              {st.request.invite ? (
-                <div className="ra-summary" data-testid="pair-as-guest">As <b>{st.request.invite.name}</b>, a guest · {expiryWords(st.request.expiry)}</div>
-              ) : (
-                <>
-                  <div className="ra-summary">
-                    {capsWords(st.request.grant.capabilities)} on {scopeWords(st.request.grant.projects)} · {expiryWords(st.request.expiry)}
-                  </div>
-                  <RunsLabel caps={st.request.grant.capabilities} unprompted={unprompted} host={host} />
-                </>
-              )}
-              <div className="ra-note">Unanswered in {clock(secondsLeft(st.decide_by, now))}, it is denied.</div>
-            </div>
-          )}
-
-          {phase === "closed" && (
-            <div className="ra-outcome" role="status" data-testid="pair-outcome">
-              <span className={`ra-dot ${paired || (st?.state === "closed" && st.ended === "paired") ? "on" : "off"}`} aria-hidden />
-              <div>
-                {listenerStopped && !paired ? "The pairing window closed when remote access stopped listening." : replaced ? ENDED_WORDS.superseded : st?.state === "closed" ? ENDED_WORDS[st.ended] ?? st.ended : "The window is closed."}
-                {paired && (inviting
-                  ? <div className="ra-line">{paired.name} is paired as {guest!.id ? guest!.name : guestName.trim()}. They are listed under Guests, and you can share a session with them from the session itself.</div>
-                  : <div className="ra-line">{paired.name} is paired. It is listed under Devices, where you can change or revoke it.</div>)}
-              </div>
-            </div>
-          )}
-
-          {err && <div className="ra-err" role="alert">{err}</div>}
+          {w.err && <div className="ra-err" role="alert">{w.err}</div>}
         </div>
         <footer className="sync-foot">
-          {phase === "scope" && (
+          {phase === "idle" && (
             <>
               <span className="ra-foot-why">{problem ?? ""}</span>
               <button className="ctrl" onClick={close}>Cancel</button>
               <button className="enter-btn" data-track="pair-show-code" disabled={busy || !!problem} title={problem ?? undefined} onClick={begin}>{busy ? "Opening…" : "Show the pairing code"}</button>
             </>
           )}
-          {phase === "open" && <button className="ctrl" onClick={cancel}>Cancel pairing</button>}
+          {phase === "open" && <button className="ctrl" onClick={() => void w.cancel()}>Cancel pairing</button>}
           {phase === "pending" && (
             <>
-              <button className="ctrl" disabled={busy} onClick={() => decide(false)}>Deny</button>
-              <button className="enter-btn" disabled={busy} onClick={() => decide(true)}>{busy ? "Working…" : "Allow"}</button>
+              <button className="ctrl" disabled={busy} onClick={() => void w.decide(false)}>Deny</button>
+              <button className="enter-btn" disabled={busy} onClick={() => void w.decide(true)}>{busy ? "Working…" : "Allow"}</button>
             </>
           )}
           {phase === "closed" && (
             <>
-              {!inviting && <button className="ctrl" onClick={again}>Pair another</button>}
+              {!inviting && <button className="ctrl" onClick={w.reset}>Pair another</button>}
               <button className="enter-btn" autoFocus onClick={close}>Done</button>
             </>
           )}

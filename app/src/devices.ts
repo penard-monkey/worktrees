@@ -360,18 +360,36 @@ export function alertOf(payload: unknown, at: number): Alert {
   return { key: `audit:${at}:${String(p.alert)}:${String(p.event ?? "")}`, cat: p.alert === "device" ? "devices" : "remote", payload: p };
 }
 
-/** An alert in words. `label` names a device id. */
-export function alertText(a: Alert, label: (id: string) => string): string {
+/** A guest as the alert names one: their name and their devices
+ *  (`guests_list`; the owner's `devices_list` holds only the owner's). */
+export type GuestLookup = (principal: string) => { name: string; devices: readonly { id: string; name: string }[] } | null;
+
+/** An alert in words. `label` names one of the owner's device ids;
+ *  `guestOf` names a guest and their devices (F8: a guest's device is not in
+ *  the owner's list, and its id is no name). */
+export function alertText(a: Alert, label: (id: string) => string, guestOf?: GuestLookup): string {
   const p = a.payload;
   if (p.alert === "auth_failures") {
     const since = p.since ? ` since ${new Date(String(p.since)).toLocaleTimeString()}` : "";
     return `${p.count ?? "Several"} connection attempts failed authentication${since}.`;
   }
   if (p.alert !== "device") return `Security alert: ${String(p.alert ?? "see the audit log")}.`;
-  const who = (p.subject as Subject | null)?.device ? label((p.subject as Subject).device) : "A device";
+  const subject = p.subject as Subject | null;
+  const claimed = typeof p.name === "string" && p.name ? p.name : null;
+  const guest = !!subject?.principal && subject.principal !== "owner";
+  let who: string;
+  if (!subject?.device) who = "A device";
+  else if (guest) {
+    const g = guestOf?.(subject.principal) ?? null;
+    const dev = g?.devices.find((d) => d.id === subject.device)?.name ?? claimed ?? "device";
+    who = g ? `${g.name}'s ${dev}` : `A guest's ${dev}`;
+  } else {
+    const named = label(subject.device);
+    who = named === subject.device && claimed ? claimed : named;
+  }
   switch (p.event) {
     case "enrolled":
-      return `${who} was paired with this computer.`;
+      return guest ? `${who} was paired as a guest.` : `${who} was paired with this computer.`;
     case "new_address_class":
       return `${who} connected from a different kind of network than before.`;
     case "disabled":

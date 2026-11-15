@@ -73,7 +73,7 @@ const sheetOrder = M.PAGES.flatMap((p) => M.SECTIONS.filter((s) => s.page === p.
   // "remote" (Git's "refresh remotes" among them, in sheet order first); Paired
   // devices and Guests only live in Remote access › Remote.
   eq(find("remote", all).map((h) => [h.id, h.rank]),
-    [["auto-fetch", "synonym"], ["this-window-drives", "synonym"], ["remote-access", "synonym"], ["devices", "context"], ["guests", "context"]],
+    [["auto-fetch", "synonym"], ["this-window-drives", "synonym"], ["remote-access", "synonym"], ["join-host", "context"], ["devices", "context"], ["guests", "context"]],
     "\"remote\": synonyms, then the page's other section");
   // context > substring: "keyboard" holds "board" mid-word only.
   eq(find("board", all).map((h) => [h.id, h.rank]), [["shortcuts", "substring"]], "\"board\": a substring, last");

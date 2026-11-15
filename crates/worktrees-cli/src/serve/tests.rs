@@ -2924,8 +2924,11 @@ mod devices {
         assert!(g.allows(worktrees_core::authz::Capability::Guest) && !g.allows(worktrees_core::authz::Capability::Read));
         // The same name again is refused before any window opens; the same
         // person by id pairs a second machine.
-        let r = e.rpc(&mut con, "pair_begin", json!({"invite": {"name": "Bret"}, "expiry": null}));
-        assert!(r["err"].as_str().is_some_and(|m| m.contains("exists already")), "{r}");
+        // F7: in any case or spacing, and in words that say what to do.
+        for twin in ["Bret", "bret", " BRET "] {
+            let r = e.rpc(&mut con, "pair_begin", json!({"invite": {"name": twin}, "expiry": null}));
+            assert!(r["err"].as_str().is_some_and(|m| m.contains("a guest named \"Bret\" exists: pair another device for them, or use another name")), "{twin}: {r}");
+        }
         let r = e.rpc(&mut con, "pair_begin", json!({"invite": {"guest": bret}, "expiry": null}));
         let uri = r["ok"]["uri"].as_str().unwrap_or_else(|| panic!("{r}")).to_string();
         let mut p = e.attempt(&uri, &Attempt::desktop("Bret's Mac mini")).unwrap();

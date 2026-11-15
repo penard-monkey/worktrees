@@ -47,6 +47,12 @@ export type Door = {
   invoke<T>(cmd: string, args?: InvokeArgs): Promise<T>;
   listen<T>(event: string, handler: EventCallback<T>): Promise<UnlistenFn>;
   channel<T>(onmessage?: (response: T) => void): Channel<T>;
+  /** A channel for a SHIM command (`SHIM_COMMANDS`), which goes to Tauri IPC
+   *  whatever `channel` is: the engine door's `channel` is the serve
+   *  socket's, whose id the shim does not know, so a shim command handed one
+   *  sent its messages nowhere (`remote_pair`'s comparison code, 2026-11-14).
+   *  Absent: `channel` is already the local one (Tauri's door). */
+  localChannel?<T>(onmessage?: (response: T) => void): Channel<T>;
 };
 
 export const tauriDoor: Door = {
@@ -76,6 +82,12 @@ export function listen<T>(event: string, handler: EventCallback<T>): Promise<Unl
  *  is a constructor function returning the door's object rather than a class. */
 export const Channel = function <T>(onmessage?: (response: T) => void): Channel<T> {
   return door.channel<T>(onmessage);
+} as unknown as new <T>(onmessage?: (response: T) => void) => Channel<T>;
+
+/** `new ShimChannel<T>()`: the channel a SHIM command takes (`remote_pair`'s
+ *  `onEvent`). `Channel` is the engine's, which is serve's socket in the app. */
+export const ShimChannel = function <T>(onmessage?: (response: T) => void): Channel<T> {
+  return door.localChannel ? door.localChannel<T>(onmessage) : door.channel<T>(onmessage);
 } as unknown as new <T>(onmessage?: (response: T) => void) => Channel<T>;
 
 // ── does this window run on the host ────────────────────────────────────────
@@ -436,6 +448,9 @@ export function engineDoor(local: Door | null, dial: Dial, env: RetryEnv, policy
     },
     channel<T>(onmessage?: (response: T) => void): Channel<T> {
       return sock ? sock.channel<T>(onmessage) : deadChannel<T>(onmessage);
+    },
+    localChannel<T>(onmessage?: (response: T) => void): Channel<T> {
+      return local ? local.channel<T>(onmessage) : deadChannel<T>(onmessage);
     },
   };
 }

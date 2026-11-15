@@ -18,7 +18,7 @@
 // says "Disconnected" only once the retries have stopped (the crash-loop
 // limit), with the reason and the log that says more.
 import { ShareAlerts } from "./LaneShare";
-import { sharesHere, useShares, watchShares } from "./shares";
+import { readShares, sharesHere, useShares, watchShares } from "./shares";
 import { useGroupChat } from "./betaLive";
 import { useEffect, useState, useSyncExternalStore, type ReactNode } from "react";
 import { engineState, invoke, notGranted, onEngineState, reconnectEngine, remoteHost, type EngineState } from "./ipc";
@@ -159,12 +159,22 @@ export function RemoteNotice({ st }: { st: RemoteStatus }) {
  *  one click to dismiss and one to look. Never a modal. */
 function RemoteAlerts() {
   const alerts = useRemote().alerts;
+  const shares = useShares();
+  // F8: a guest's device is named from the guest list, which a pairing a
+  // moment ago may not be in yet: read it once when an alert names a guest
+  // this window does not know.
+  const guestOf = (id: string) => shares.guests.find((g) => g.id === id) ?? null;
+  const unknownGuest = alerts.some((a) => {
+    const sub = a.payload.subject as { principal?: string } | null | undefined;
+    return !!sub?.principal && sub.principal !== "owner" && !guestOf(sub.principal);
+  });
+  useEffect(() => { if (unknownGuest && sharesHere()) void readShares(); }, [unknownGuest]);
   return (
     <div className="ra-alerts ra" aria-live="polite">
       {alerts.map((a) => (
         <div key={a.key} className="ra-alert" role="status" data-alert={a.key}>
           <span className="ra-dot warn" aria-hidden />
-          <span className="ra-alert-txt">{a.payload.alert === "question" ? String(a.payload.text) : alertText(a, labelOf)}</span>
+          <span className="ra-alert-txt">{a.payload.alert === "question" ? String(a.payload.text) : alertText(a, labelOf, guestOf)}</span>
           <span className="ra-alert-acts">
             <button className="ctrl sm" onClick={() => { dismissAlert(a.key); openRemoteSettings(a.cat); }}>Review</button>
             <button className="ra-alert-x" aria-label="Dismiss" title="Dismiss" onClick={() => dismissAlert(a.key)}>×</button>

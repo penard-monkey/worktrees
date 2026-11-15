@@ -1125,7 +1125,8 @@ async function loadIpc() {
   const tauri = {
     invoke: (cmd, args) => { local.push([cmd, args]); return Promise.resolve(`local:${cmd}`); },
     listen: () => Promise.reject("the local door has no events"),
-    channel: () => { throw new Error("the local door makes no channels"); },
+    // Only a SHIM command's channel (`ShimChannel`) may come from here.
+    channel: (cb) => ({ onmessage: cb, toJSON: () => "__LOCAL_CHANNEL__" }),
   };
   // What the next dials do: undefined (an honest serve, the app's), "unowned"
   // (honest, someone else's), "impostor" (fails the proof), "phase" (reports
@@ -1181,6 +1182,10 @@ async function loadIpc() {
   check(same((await listed).ok, { projects: [] }) && local.length === 2, "every other command goes to the socket and is answered from it");
   const ch = ipc.Channel ? new ipc.Channel() : null;
   check(ch && typeof ch.toJSON === "function" && String(ch.toJSON()).startsWith(K.prefix), `a channel is the current socket's (${ch?.toJSON?.()})`);
+  // remote_pair is a shim command: its onEvent handed the socket's channel id
+  // to the shim, which sent the comparison code nowhere (2026-11-14, the test VMs).
+  const shim = ipc.ShimChannel ? new ipc.ShimChannel() : null;
+  check(shim && shim.toJSON() === "__LOCAL_CHANNEL__", `a shim command's channel is the local door's, not the socket's (${shim?.toJSON?.()})`);
 
   const heard = [];
   await settle(ipc.listen("places:changed", (e) => heard.push(["a", e.payload])));

@@ -83,7 +83,7 @@ for (const k of keys) {
 const map = read("../src/settingsMap.ts");
 const sec = map.match(/^\s*\{ id: "beta",[^\n]*\},$/m)?.[0] ?? "";
 const mapKeys = (sec.match(/keys: \[([^\]]*)\]/)?.[1] ?? "").match(/"[a-z_]+"/g)?.map((x) => x.slice(1, -1)) ?? [];
-ok(/page: "general"/.test(sec) && /tier: "advanced"/.test(sec), "settingsMap: the Beta features section is on General, Advanced (and Expert)");
+ok(/page: "general"/.test(sec) && /tier: "beginner"/.test(sec), "settingsMap: the Beta features section is on General, Beginner (group chat start design S2)");
 ok(JSON.stringify([...mapKeys].sort()) === JSON.stringify([...keys].sort()),
   `settingsMap: the section owns exactly the table's keys (${mapKeys.join(", ")} vs ${keys.join(", ")})`);
 ok(/label: "Beta features"/.test(sec) && /"beta"/.test(sec) && /"ideas"/.test(sec), "settingsMap: it is labelled Beta features and found by beta / ideas");
