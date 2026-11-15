@@ -263,3 +263,13 @@ export function useRefusal(err: string): string {
   if (e.includes(SEND_REFUSALS.composer)) return "The agent is not at its prompt yet: try again shortly." + keep;
   return e.replace(/\.?$/, ".") + keep;
 }
+
+/** `share_check`'s answer (serve/shares.rs `BindingCheck`). */
+export type ShareCheck = { bound: string | null; live: string | null; same: boolean; why: string };
+
+/** Why *Use these* must not send, or null when the lane's live session is
+ *  the bound one. A null `live` never passes, whatever `same` says. */
+export function checkRefusal(c: ShareCheck): string | null {
+  if (c.same && c.live !== null && c.live === c.bound) return null;
+  return c.why || "the lane's session is not the shared one: Share again first";
+}

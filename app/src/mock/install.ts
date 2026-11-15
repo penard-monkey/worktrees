@@ -5695,10 +5695,12 @@ Phase 3: Frontend pane and mock harness
     case "share_again": {
       consoleOnly(cmd);
       const sh = mockShare(args.share);
-      if (sh.binding?.state === "active") throw `share ${sh.id} is bound to a live session already`;
       if (mockQuery.get("share") === "unnamed") throw "no agent session is running in this place, or it has not named its session yet: start it, then share";
-      if (sh.binding) sh.ended.push(sh.binding);
-      sh.binding = mockBinding(sh.binding?.harness ?? "claude");
+      // As the host: a binding active on the live id is refused, one active
+      // on another id (`?share=moved`) is ended first.
+      if (sh.binding?.state === "active" && mockLiveId(sh) === sh.binding.session) throw "this share is already bound to the live session";
+      if (sh.binding) sh.ended.push({ ...sh.binding, state: "ended" });
+      sh.binding = mockBinding(sh.binding?.harness ?? "claude", mockLiveId(sh) ?? undefined);
       threadEvent(sh.id, "shared_again");
       sharesChanged("again", sh.id);
       return clone(sh);
@@ -5735,11 +5737,16 @@ Phase 3: Frontend pane and mock harness
     case "share_used": {
       consoleOnly(cmd);
       const sh = mockShare(args.share);
-      if (sh.binding?.state !== "active") throw `share ${sh.id} has no live session bound: Share again first`;
+      const c = mockShareCheck(sh);
+      if (!c.same) throw c.why;
       if (Number(args.first) > Number(args.last)) throw "first is after last";
       const e = threadPush(sh.id, { kind: "shared_with_agent", first: Number(args.first), last: Number(args.last) });
       sharesChanged("used", sh.id);
       return e;
+    }
+    case "share_check": {
+      consoleOnly(cmd);
+      return mockShareCheck(mockShare(args.share));
     }
     case "thread_read": {
       const sh = mockShare(args.share);
@@ -6238,8 +6245,28 @@ let mockRequests: { id: string; principal: string; project: string | null; slug:
 const mockHidden = new Set<string>();
 const mockThreads: Record<string, { next: number; entries: MockThreadEntry[] }> = {};
 const mockFlaked = new Set<string>();
-function mockBinding(harness: string): MockBinding {
-  return { harness, session: `sess-${Math.random().toString(36).slice(2, 10)}`, transcript: "/Users/demo/.claude/projects/x/s.jsonl", bound_at: epochNow(), state: "active" };
+// The lane's live session as the host's share check reads it: the bound one,
+// or with `?share=moved` another (a reopened lane before the poll ended the
+// binding), or with `?share=nameless` none (a reopened Codex before its first
+// turn, which names no session).
+function mockLiveId(sh: MockShare): string | null {
+  const q = mockQuery.get("share");
+  if (q === "nameless" || q === "unnamed") return null;
+  if (q === "moved") return "sess-moved";
+  return sh.binding?.state === "active" ? sh.binding.session : "sess-live";
+}
+function mockShareCheck(sh: MockShare): { bound: string | null; live: string | null; same: boolean; why: string } {
+  const bound = sh.binding?.state === "active" ? sh.binding.session : null;
+  const live = mockLiveId(sh);
+  const same = bound !== null && live === bound;
+  const why = same ? ""
+    : bound === null ? `share ${sh.id} has no live session bound: Share again first`
+    : live === null ? "the lane's agent has not named its session yet: send it something first"
+    : "the lane's session is not the shared one: Share again first";
+  return { bound, live, same, why };
+}
+function mockBinding(harness: string, session?: string): MockBinding {
+  return { harness, session: session ?? `sess-${Math.random().toString(36).slice(2, 10)}`, transcript: "/Users/demo/.claude/projects/x/s.jsonl", bound_at: epochNow(), state: "active" };
 }
 function mockShare(id: unknown): MockShare {
   const sh = mockShares.find((x) => x.id === id);

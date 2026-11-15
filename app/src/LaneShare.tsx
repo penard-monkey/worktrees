@@ -15,8 +15,8 @@ import {
   useShares, useThreadOpen, type Share, type ShareRequest, type SharesState,
 } from "./shares";
 import {
-  asksForNote, authorsOf, joinNames, lineProblem, NOTE_ASK, NOTE_PLACEHOLDER, PLAIN_TEXT, PREVIEW_PATH, sinceLastUse, useOutcome, useRefusal, useTheseFile, useTheseLine, useTheseName, utf8Bytes,
-  LINE_MAX, type ThreadEntry, type UseSent,
+  asksForNote, authorsOf, checkRefusal, joinNames, lineProblem, NOTE_ASK, NOTE_PLACEHOLDER, PLAIN_TEXT, PREVIEW_PATH, sinceLastUse, useOutcome, useRefusal, useTheseFile, useTheseLine, useTheseName, utf8Bytes,
+  LINE_MAX, type ShareCheck, type ThreadEntry, type UseSent,
 } from "./thread";
 import "./ThreadPanel.css";
 import "./LaneShare.css";
@@ -193,7 +193,7 @@ function AgainDialog({ s, share, onClose }: { s: SharesState; share: Share; onCl
       <button className="ctrl" onClick={onClose}>Cancel</button>
       <button className="enter-btn" disabled={busy} onClick={go}>{busy ? "Sharing…" : "Share again"}</button>
     </>}>
-      <div className="ra-line">The session this lane shared has ended. Share again binds the session running here now, with the same guests.</div>
+      <div className="ra-line">The session this lane shared is not the one running here now. Share again binds the session running here now, with the same guests.</div>
       <div className="ls-warn" role="note">{shareWarning(namesOf(s, share))}</div>
       <div className="ra-note">The ended session stays readable beside it, as it was when it ended.</div>
       {err && <div className="ra-err" role="alert">{err}</div>}
@@ -270,6 +270,7 @@ export function LaneThread({ repo, slug, session, up, askNote, onNeverAsk }: {
   const share = sharesOf(s, repo, slug)[0];
   const access = useMemo(() => (share ? consoleThread(share.id) : null), [share?.id]); // eslint-disable-line react-hooks/exhaustive-deps
   const [picked, setPicked] = useState<Set<number> | null>(null);
+  const [again, setAgain] = useState(false);
   useEffect(() => setPicked(null), [share?.id]);
   if (!on || !share || !access) return null;
   const ended = share.binding?.state !== "active";
@@ -296,10 +297,12 @@ export function LaneThread({ repo, slug, session, up, askNote, onNeverAsk }: {
         }}
         footer={(entries) => (
           <UseThese entries={entries} picked={picked} onPicked={setPicked} share={share} repo={repo} slug={slug} session={session}
-            ownerName={ownerForAgent(s)} named={s.owner !== "owner"} live={!ended && up} askNote={askNote} onNeverAsk={onNeverAsk} />
+            ownerName={ownerForAgent(s)} named={s.owner !== "owner"} live={!ended && up} askNote={askNote} onNeverAsk={onNeverAsk}
+            onShareAgain={() => setAgain(true)} />
         )}
         onClose={() => setThreadOpen(key, false)}
       />
+      {again && <AgainDialog s={s} share={share} onClose={() => setAgain(false)} />}
     </div>
   );
 }
@@ -308,12 +311,17 @@ export function LaneThread({ repo, slug, session, up, askNote, onNeverAsk }: {
  *  checked once opened), deselect, a note, the exact file and line previewed,
  *  then `agent_attach` + `agent_send` as the console, and `share_used`
  *  records it once the send is confirmed. An unknown outcome is never
- *  retried by software. */
-export function UseThese({ entries, picked, onPicked, share, repo, slug, session, ownerName, named, live, askNote, onNeverAsk }: {
+ *  retried by software. Before anything is attached, `share_check` must say
+ *  the lane's live session IS the bound one: a Codex reopened after a reboot
+ *  names no session until its first turn, so the binding still reads active
+ *  while the lane runs an unshared session (the test VMs, 2026-11-14). */
+export function UseThese({ entries, picked, onPicked, share, repo, slug, session, ownerName, named, live, askNote, onNeverAsk, onShareAgain }: {
   entries: readonly ThreadEntry[]; picked: Set<number> | null; onPicked: (p: Set<number> | null) => void;
   share: Share; repo: string; slug: string; session: string; ownerName: string; named: boolean; live: boolean;
   /** `use_these_ask_note`: ask before a send with no note. */
   askNote: boolean; onNeverAsk: () => void;
+  /** *Share again*, offered when the check finds another session live. */
+  onShareAgain: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const [note, setNote] = useState("");
@@ -324,7 +332,7 @@ export function UseThese({ entries, picked, onPicked, share, repo, slug, session
   const noteOk = useRef(false);
   const noteRef = useRef<HTMLInputElement | null>(null);
   const [busy, setBusy] = useState(false);
-  const [words, setWords] = useState<{ kind: "sent" | "refused" | "unknown" | "error"; text: string } | null>(null);
+  const [words, setWords] = useState<{ kind: "sent" | "refused" | "unknown" | "error"; text: string; again?: boolean } | null>(null);
   const fresh = useMemo(() => sinceLastUse(entries), [entries]);
   const sel = picked ?? new Set(fresh);
   const chosen = entries.filter((e) => e.kind === "post" && sel.has(e.seq));
@@ -358,6 +366,14 @@ export function UseThese({ entries, picked, onPicked, share, repo, slug, session
     setBusy(true);
     setWords(null);
     try {
+      // The proof first: nothing is attached or typed unless the session
+      // live in the lane now is the one this share bound.
+      const c = await invoke<ShareCheck>("share_check", { share: share.id });
+      const why = checkRefusal(c);
+      if (why) {
+        setWords({ kind: "refused", text: why + ". Nothing was sent; the selection stays.", again: c.live !== null });
+        return;
+      }
       const bytes = new TextEncoder().encode(file);
       let bin = "";
       for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
@@ -411,6 +427,7 @@ export function UseThese({ entries, picked, onPicked, share, repo, slug, session
           </button>
         </div>
         {words && <div className={"usethese-words" + (words.kind === "sent" ? "" : " bad")} role="status">{words.text}</div>}
+        {words?.again && <ShareAgainOffer onShareAgain={onShareAgain} />}
       </div>
     );
   }
@@ -449,6 +466,7 @@ export function UseThese({ entries, picked, onPicked, share, repo, slug, session
       <div className="ra-note">The framing is not enforcement: the agent may still treat {joinNames(authors)}'s words as instructions. Read what goes.</div>
       {problem && <div className="usethese-words bad" role="alert">{problem}</div>}
       {words && <div className={"usethese-words" + (words.kind === "sent" ? "" : " bad")} role="status" data-testid="use-these-words">{words.text}</div>}
+      {words?.again && <ShareAgainOffer onShareAgain={onShareAgain} />}
       <div className="usethese-row">
         <span className="grow" />
         <button className="ctrl sm" disabled={busy} onClick={() => { setOpen(false); setWords(null); }}>Cancel</button>
@@ -458,6 +476,15 @@ export function UseThese({ entries, picked, onPicked, share, repo, slug, session
         </button>
         {words?.kind === "unknown" && <button className="ctrl sm" onClick={() => setWords(null)}>I looked: send again is allowed</button>}
       </div>
+    </div>
+  );
+}
+
+function ShareAgainOffer({ onShareAgain }: { onShareAgain: () => void }) {
+  return (
+    <div className="usethese-row">
+      <span className="grow" />
+      <button className="ctrl sm primary" data-testid="use-these-share-again" onClick={onShareAgain}>Share again</button>
     </div>
   );
 }
