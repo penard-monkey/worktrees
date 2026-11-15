@@ -32,7 +32,9 @@ export function LaneShareBar({ repo, slug, harness, up }: { repo: string; slug: 
   const s = useShares();
   const key = repo + "|" + slug;
   const threadOn = useThreadOpen(key);
-  const [dialog, setDialog] = useState<{ mode: "create"; preset?: string[] } | { mode: "again"; share: Share } | { mode: "manage"; share: Share } | null>(null);
+  const [dialog, setDialog] = useState<
+    { mode: "create"; preset?: string[] } | { mode: "again"; share: Share } | { mode: "manage"; share: Share } | { mode: "add"; share: Share; preset?: string[]; request?: string } | null
+  >(null);
   if (!sharesHere() || s.shares === null) return null;
   const mine = sharesOf(s, repo, slug);
   const requests = s.requests.filter((r) => r.project === repo && r.slug === slug);
@@ -74,11 +76,16 @@ export function LaneShareBar({ repo, slug, harness, up }: { repo: string; slug: 
         </button>
       )}
       {requests.map((r) => (
-        <RequestNudge key={r.id} r={r} canShare={shareable && up && mine.length === 0} onShare={() => setDialog({ mode: "create", preset: [r.principal] })} />
+        <RequestNudge key={r.id} r={r} canShare={shareable && up && mine.length === 0}
+          onShare={() => setDialog({ mode: "create", preset: [r.principal] })}
+          onLetIn={mine[0] ? () => setDialog({ mode: "add", share: mine[0], preset: [r.principal], request: r.id }) : null} />
       ))}
       {dialog?.mode === "create" && <ShareDialog s={s} repo={repo} slug={slug} preset={dialog.preset} onClose={() => setDialog(null)} onShared={() => setThreadOpen(key, true)} />}
       {dialog?.mode === "again" && <AgainDialog s={s} share={dialog.share} onClose={() => setDialog(null)} />}
-      {dialog?.mode === "manage" && <ManageDialog s={s} share={dialog.share} onClose={() => setDialog(null)} />}
+      {dialog?.mode === "manage" && <ManageDialog s={s} share={dialog.share} onClose={() => setDialog(null)} onAdd={() => setDialog({ mode: "add", share: dialog.share })} />}
+      {dialog?.mode === "add" && (
+        <ShareDialog s={s} repo={repo} slug={slug} addTo={dialog.share} preset={dialog.preset} request={dialog.request} onClose={() => setDialog(null)} onShared={() => setThreadOpen(key, true)} />
+      )}
     </div>
   );
 }
@@ -122,7 +129,9 @@ async function allow(share: string, principal: string): Promise<void> {
   }
 }
 
-function RequestNudge({ r, canShare, onShare }: { r: ShareRequest; canShare: boolean; onShare: () => void }) {
+/** A guest's request in the lane's bar: *Share* while the lane is not
+ *  shared, *Let <name> in…* (the add dialog, them ticked) once it is. */
+function RequestNudge({ r, canShare, onShare, onLetIn }: { r: ShareRequest; canShare: boolean; onShare: () => void; onLetIn: (() => void) | null }) {
   const [busy, setBusy] = useState(false);
   return (
     <div className="lane-share-row ls-request" data-testid="share-request" data-request={r.id}>
@@ -130,9 +139,15 @@ function RequestNudge({ r, canShare, onShare }: { r: ShareRequest; canShare: boo
       <span className="ls-marker">
         {r.name ?? "A guest"} asks to see this session{r.note ? <>: <q>{r.note}</q></> : "."}
       </span>
-      <button className="ctrl sm primary" data-track="share-request-share" disabled={!canShare} title={canShare ? undefined : "Start the agent here first, or the lane is shared already"} onClick={onShare}>
-        Share
-      </button>
+      {onLetIn ? (
+        <button className="ctrl sm primary" data-track="share-request-let-in" onClick={onLetIn}>
+          Let {r.name ?? "them"} in…
+        </button>
+      ) : (
+        <button className="ctrl sm primary" data-track="share-request-share" disabled={!canShare} title={canShare ? undefined : "Start the agent here first"} onClick={onShare}>
+          Share
+        </button>
+      )}
       <button className="ctrl sm" disabled={busy}
         onClick={() => { setBusy(true); void invoke("share_request_dismiss", { request: r.id }).finally(() => { setBusy(false); void readShares(); }); }}>
         Dismiss
@@ -196,9 +211,16 @@ type Step = "who" | "pair" | "share";
  *  two screens and two presses: `PairStep` never shares, and `ShareStep` is
  *  the one place `share_create` is called (groupchat-start-check.mjs). With
  *  a guest already paired it is today's two acts: tick, Share. Closing the
- *  dialog cancels a window still open. */
-export function ShareDialog({ s, repo, slug, preset, onClose, onShared }: { s: SharesState; repo: string; slug: string; preset?: string[]; onClose: () => void; onShared: () => void }) {
-  const live = s.guests.filter(guestLive);
+ *  dialog cancels a window still open.
+ *
+ *  With `addTo` it is *Add someone…* on a share that exists (Sharing…, or a
+ *  request for a shared place): the same steps, Who offering only the guests
+ *  not on it, and the last step lets them in with `share_allow` (`request`,
+ *  the request that asked, is dismissed once it has). */
+export function ShareDialog({ s, repo, slug, preset, addTo, request, onClose, onShared }: {
+  s: SharesState; repo: string; slug: string; preset?: string[]; addTo?: Share; request?: string; onClose: () => void; onShared: () => void;
+}) {
+  const live = s.guests.filter(guestLive).filter((g) => !addTo?.guests.some((x) => x.principal === g.id));
   const [step, setStep] = useState<Step>("who");
   const [someoneNew, setSomeoneNew] = useState(live.length === 0 && !preset?.length);
   const [name, setName] = useState("");
@@ -211,7 +233,7 @@ export function ShareDialog({ s, repo, slug, preset, onClose, onShared }: { s: S
     void readShares();
   }, []);
   // Someone new appears once guests are read, if there are none.
-  useEffect(() => { if (s.guests.length === 0 && !preset?.length) setSomeoneNew(true); }, [s.guests.length]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (live.length === 0 && !preset?.length) setSomeoneNew(true); }, [live.length]); // eslint-disable-line react-hooks/exhaustive-deps
   const close = () => {
     w.release();
     onClose();
@@ -227,11 +249,11 @@ export function ShareDialog({ s, repo, slug, preset, onClose, onShared }: { s: S
   const stepAt = step === "who" ? 0 : step === "pair" ? 1 : 2;
 
   return (
-    <ShareModal title={`Share ${slug}`} steps={steps} step={stepAt} onClose={close} countdown={step === "pair" ? <PairCountdown w={w} /> : null}>
+    <ShareModal title={addTo ? `Add someone to ${slug}` : `Share ${slug}`} steps={steps} step={stepAt} onClose={close} countdown={step === "pair" ? <PairCountdown w={w} /> : null}>
       {step === "who" && (
         <WhoStep s={s} live={live} picked={picked} setPicked={setPicked} someoneNew={someoneNew} setSomeoneNew={setSomeoneNew}
           name={name} setName={setName} clash={clash} onInvite={invite} onClose={close}
-          share={!someoneNew ? <ShareStep s={s} repo={repo} slug={slug} picked={picked} onClose={close} onShared={onShared} /> : null} />
+          share={!someoneNew ? <ShareStep s={s} repo={repo} slug={slug} picked={picked} addTo={addTo} request={request} onClose={close} onShared={onShared} /> : null} />
       )}
       {step === "pair" && invitee && (
         <PairStep w={w} invitee={invitee} onClose={close}
@@ -243,7 +265,7 @@ export function ShareDialog({ s, repo, slug, preset, onClose, onShared }: { s: S
           }} />
       )}
       {step === "share" && (
-        <ShareStep s={s} repo={repo} slug={slug} picked={picked} setPicked={setPicked} paired={paired} onClose={close} onShared={onShared} />
+        <ShareStep s={s} repo={repo} slug={slug} picked={picked} setPicked={setPicked} paired={paired} addTo={addTo} request={request} onClose={close} onShared={onShared} />
       )}
     </ShareModal>
   );
@@ -465,21 +487,30 @@ function PairStep({ w, invitee, onClose, onPaired }: {
 }
 
 /** Step 3, share — and Who's own footer when the guests are paired already:
- *  v3's warning, alone, and the press that shares. The one `share_create`. */
-function ShareStep({ s, repo, slug, picked, setPicked, paired, onClose, onShared }: {
+ *  v3's warning, alone, and the press that shares. The one `share_create`.
+ *  Adding to a share (`addTo`) it is `share_allow` instead, so an added guest
+ *  starts `allowed`: the owner chose them by name here (and for a request,
+ *  they asked), where a first share's guests are only named and ask on open.
+ *  The words say which. */
+function ShareStep({ s, repo, slug, picked, setPicked, paired, addTo, request, onClose, onShared }: {
   s: SharesState; repo: string; slug: string; picked: Set<string>; setPicked?: (p: Set<string>) => void;
-  paired?: { principal: string; device: string; name: string } | null; onClose: () => void; onShared: () => void;
+  paired?: { principal: string; device: string; name: string } | null; addTo?: Share; request?: string; onClose: () => void; onShared: () => void;
 }) {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const live = s.guests.filter(guestLive);
+  const live = s.guests.filter(guestLive).filter((g) => !addTo?.guests.some((x) => x.principal === g.id));
   const nameOf = (id: string) => s.guests.find((g) => g.id === id)?.name ?? (paired?.principal === id ? paired.name : id);
   const names = [...picked].map(nameOf);
   const go = async () => {
     setBusy(true);
     setErr(null);
     try {
-      await invoke("share_create", { repo, slug, guests: [...picked] });
+      if (addTo) {
+        for (const p of picked) await allow(addTo.id, p);
+        if (request) await invoke("share_request_dismiss", { request }).catch(() => undefined);
+      } else {
+        await invoke("share_create", { repo, slug, guests: [...picked] });
+      }
       onShared();
       onClose();
     } catch (e) {
@@ -509,13 +540,20 @@ function ShareStep({ s, repo, slug, picked, setPicked, paired, onClose, onShared
     )}
     <div className="sync-body ls-share-body">
       {names.length > 0 && <div className="ls-warn" data-testid="share-warning" role="note">{shareWarning(names)}</div>}
-      <div className="ra-note">They ask to join when they open it, and you let them in. What they write sits in a thread beside the session; the agent sees none of it unless you send it.</div>
+      <div className="ra-note" data-testid="share-admission">
+        {addTo
+          ? "Adding them lets them in: they read it as soon as they open it, with no ask to join."
+          : "They ask to join when they open it, and you let them in."}
+        {" "}What they write sits in a thread beside the session; the agent sees none of it unless you send it.
+      </div>
       {err && <div className="ra-err" role="alert" data-testid="share-error">{err}</div>}
     </div>
     <Foot>
       <button className="ctrl" onClick={onClose}>{paired ? "Not now" : "Cancel"}</button>
       <button className="enter-btn" data-testid="share-confirm" disabled={busy || picked.size === 0} onClick={go}>
-        {busy ? "Sharing…" : names.length === 1 ? `Share with ${names[0]}` : "Share"}
+        {addTo
+          ? busy ? "Letting in…" : names.length === 1 ? `Let ${names[0]} in` : "Let them in"
+          : busy ? "Sharing…" : names.length === 1 ? `Share with ${names[0]}` : "Share"}
       </button>
     </Foot>
   </>;
@@ -551,8 +589,9 @@ function AgainDialog({ s, share, onClose }: { s: SharesState; share: Share; onCl
   );
 }
 
-/** Who is on the share, letting a guest in or taking one off, Stop sharing. */
-function ManageDialog({ s, share: first, onClose }: { s: SharesState; share: Share; onClose: () => void }) {
+/** Who is on the share, letting a guest in or taking one off, *Add someone…*
+ *  (the share dialog on this share), Stop sharing. */
+function ManageDialog({ s, share: first, onClose, onAdd }: { s: SharesState; share: Share; onClose: () => void; onAdd: () => void }) {
   const share = (s.shares ?? []).find((x) => x.id === first.id) ?? first;
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -582,6 +621,7 @@ function ManageDialog({ s, share: first, onClose }: { s: SharesState; share: Sha
       ) : (
         <>
           <button className="ctrl danger" data-testid="stop-sharing" onClick={() => setStopping(true)}>Stop sharing…</button>
+          <button className="ctrl" data-testid="share-add" disabled={busy} onClick={onAdd}>Add someone…</button>
           <button className="enter-btn" onClick={onClose}>Done</button>
         </>
       )}
@@ -848,7 +888,7 @@ function ShareAgainOffer({ onShareAgain }: { onShareAgain: () => void }) {
 export function ShareAlerts() {
   const s = useShares();
   const lanes = useLanes();
-  const [dialog, setDialog] = useState<{ repo: string; slug: string; preset: string[] } | null>(null);
+  const [dialog, setDialog] = useState<{ repo: string; slug: string; preset: string[]; addTo?: Share; request?: string } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   if (!sharesHere() || (!s.asked.length && !s.requests.length && !dialog)) return null;
   return (
@@ -867,7 +907,8 @@ export function ShareAlerts() {
         );
       })}
       {s.requests.map((r) => {
-        const w = requestWords(r, r.project === null ? null : laneLive(lanes, r.project, r.slug), sharesOf(s, r.project ?? "", r.slug).length > 0);
+        const on = sharesOf(s, r.project ?? "", r.slug)[0];
+        const w = requestWords(r, r.project === null ? null : laneLive(lanes, r.project, r.slug), !!on);
         return (
           <div key={r.id} className="ra-alert" role="status" data-testid="share-request-alert" data-request={r.id}>
             <span className="ra-dot warn" aria-hidden />
@@ -882,6 +923,12 @@ export function ShareAlerts() {
                   Share…
                 </button>
               )}
+              {w.letIn && on && r.project !== null && (
+                <button className="ctrl sm primary" data-track="share-request-let-in" data-testid="share-request-let-in"
+                  onClick={() => setDialog({ repo: r.project!, slug: r.slug, preset: [r.principal], addTo: on, request: r.id })}>
+                  Let {r.name ?? "them"} in…
+                </button>
+              )}
               <button className="ctrl sm" data-testid="share-request-dismiss" disabled={busy === r.id}
                 onClick={() => { setBusy(r.id); void invoke("share_request_dismiss", { request: r.id }).finally(() => { setBusy(null); void readShares(); }); }}>
                 Dismiss
@@ -890,19 +937,21 @@ export function ShareAlerts() {
           </div>
         );
       })}
-      {dialog && <ShareDialog s={s} repo={dialog.repo} slug={dialog.slug} preset={dialog.preset} onClose={() => setDialog(null)}
+      {dialog && <ShareDialog s={s} repo={dialog.repo} slug={dialog.slug} preset={dialog.preset} addTo={dialog.addTo} request={dialog.request} onClose={() => setDialog(null)}
         onShared={() => setThreadOpen(dialog.repo + "|" + dialog.slug, true)} />}
     </div>
   );
 }
 
-/** What a share request in the corner says beside its words, and whether it
- *  offers *Share…*: a place this host does not resolve, one already shared
- *  (its lane's bar manages it), one with no live session. `live` null: not
- *  known yet (no snapshot), so the Share is offered and the host decides. */
-export function requestWords(r: Pick<ShareRequest, "project">, live: boolean | null, shared: boolean): { why: string | null; share: boolean } {
-  if (r.project === null) return { why: "It is not a place this host shows.", share: false };
-  if (shared) return { why: "It is shared already: Sharing… on its lane adds a guest.", share: false };
-  if (live === false) return { why: "It has no live session: start its agent there, then share it.", share: false };
-  return { why: null, share: true };
+/** What a share request in the corner says beside its words, and what it
+ *  offers: *Share…* for a live place not shared yet, *Let <name> in…*
+ *  (`share_allow`, through the add dialog) for one shared already, nothing
+ *  for a place this host does not resolve or one with no live session.
+ *  `live` null: not known yet (no snapshot), so the Share is offered and the
+ *  host decides. */
+export function requestWords(r: Pick<ShareRequest, "project">, live: boolean | null, shared: boolean): { why: string | null; share: boolean; letIn: boolean } {
+  if (r.project === null) return { why: "It is not a place this host shows.", share: false, letIn: false };
+  if (shared) return { why: "It is shared already.", share: false, letIn: true };
+  if (live === false) return { why: "It has no live session: start its agent there, then share it.", share: false, letIn: false };
+  return { why: null, share: true, letIn: false };
 }
