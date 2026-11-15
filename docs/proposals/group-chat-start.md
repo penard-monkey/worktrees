@@ -4,8 +4,8 @@ title: How a conversation starts, and how a guest is invited (group chat start d
 
 # How a conversation starts, and how a guest is invited
 
-*Version 1, 2026-11-14. Status: a design review for David. Nothing in the app
-changes with this document; the mocks are throwaway harness routes. Code claims
+*Version 1, 2026-11-14. Status: decided (A) and built; §7 is the build. The
+design's mocks were throwaway harness routes, removed by the build. Code claims
 are against `2b4624f` (main after #669). Each claim is marked **read** (in the
 code), **measured** (run, with where), **assumed**, **contract** (this design
 requires it and nothing provides it yet) or **hypothesis** (only use settles it).
@@ -338,3 +338,50 @@ it is easier to read past. A keeps it alone on its screen.
 | Would a `worktrees-pair:` URL scheme be worth a clickable link in a chat app? It saves one paste; it also makes any link in any chat open the app's pairing. | S7, later |
 | Does B's one list of who reads what earn a page once there are two guests? | Use; S8 |
 | Where does a conversation live? | v4.1 §12, not here |
+
+---
+
+## 7. As built (2026-11-14, `feat/group-chat-start`)
+
+A was built as §5 lists it, and driven end to end twice on the two test Macs
+with the real apps (owner `macOS`, guest `macOS-guest`): remote access off and
+nobody paired on the owner, no host on the guest, to Bret reading David's
+session. **Measured** acts (clicks plus fields filled), beside §0's mock counts:
+
+| | Mock (§0) | Built, measured |
+|---|---|---|
+| Owner, from the lane's *Share with…* | 8 + the beta's 3 = **11** | 8 + 3 = **11** |
+| Owner, from the ⋯ menu or the place menu | — | 9 + 3 = **12** (opening the menu is one more) |
+| Owner, Bret paired already | 2 | **2** from the bar, 3 from a menu |
+| Guest | 4 + 3 = **7** | 5 + 3 = **8**: the join dialog ends on *Done*, and the share's toast has no *Open* (the sidebar row opens it) |
+
+The beta's 3 (gear, tick, close) were not re-pressed on the VMs, whose switch
+was on already; that Beta features is now drawn in Beginner was checked there.
+
+What the drive found, and the build fixed:
+
+- **The guest never saw the comparison code** (pass 1): the app made
+  `remote_pair`'s event channel on the serve socket, and `remote_pair` is a
+  shim command, so `{code}` went to a channel the shim does not own. This is
+  older than A (*Pair with a host* had it too; §1's walk never paired from the
+  app). Pass 2, with `ShimChannel`, showed the same code on both screens.
+- **F7 met real data**: *Remove* keeps the person (their devices are revoked,
+  their thread posts keep an author), so "Bret" stays taken after removing
+  Bret, and the dialog offers *Pair another device for Bret*: the same number
+  of acts as *Invite Bret*. With both "bret" and "Bret" on file it now names
+  the exact one.
+- A guest link is not told from a drive link before pairing, so *Pair with a
+  host to drive it* stays in "This window drives" for Advanced, and *Join
+  with a link* (every mode, refused with the beta off) is the guest's.
+
+![Built: the lane's ⋯ menu](img/group-chat-start/build-owner-1-menu.jpg)
+![Built: Who, with a removed Bret's name taken](img/group-chat-start/build-owner-2-who-name-taken.jpg)
+![Built: the reach block, remote access off](img/group-chat-start/build-owner-3-reach.jpg)
+![Built: the invite window, "Send Bret this link"](img/group-chat-start/build-owner-4-window.jpg)
+![Built: the owner's code and Allow, "It shares nothing yet"](img/group-chat-start/build-owner-5-code.jpg)
+![Built: the guest's Join with a link, the same code](img/group-chat-start/build-guest-1-code.jpg)
+![Built: Share, a separate step after Allow; the pairing notice names Bret and the device](img/group-chat-start/build-owner-6-share.jpg)
+![Built: Bret asks to join](img/group-chat-start/build-owner-7-join-ask.jpg)
+![Built: Bret reads the session](img/group-chat-start/build-guest-2-reading.jpg)
+![Built: Bret paired already, the two-act share](img/group-chat-start/build-owner-8-paired-already.jpg)
+![Built: Settings → Remote in Beginner, Join with a link first](img/group-chat-start/build-owner-0-remote-beginner.jpg)
