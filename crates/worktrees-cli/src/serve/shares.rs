@@ -1792,6 +1792,35 @@ pub(crate) mod serve_tests {
         let _ = DeviceId::new("unused");
     }
 
+    /// A host that never set its name has none (v0.52.0's three-VM run): the
+    /// record's placeholder `"owner"` is not handed out as one, to the
+    /// console, to a guest's listings or as the author of the owner's posts,
+    /// so every reader falls back to a name it does have (a guest: the
+    /// host's). Once set, the name is what they all see.
+    #[test]
+    fn a_host_that_never_set_its_name_hands_out_no_owner_name() {
+        let h = Host::new("unnamed");
+        h.live("feat", "s-1", 1);
+        let bret = Host::principal(&h.bret);
+        let id = h.console("share_create", json!({"repo": h.a, "slug": "feat", "guests": [bret]})).unwrap()["id"].as_str().unwrap().to_string();
+        h.console("share_allow", json!({"share": id, "principal": bret})).unwrap();
+        h.console("thread_post", json!({"share": id, "id": "o1", "text": "have a look"})).unwrap();
+        let owner_post = |who: &Caller| {
+            let page = if who.is_console() { h.console("thread_read", json!({"share": id})) } else { h.run(who, "thread_read", json!({"share": id})) };
+            page.unwrap()["entries"].as_array().unwrap().iter().find(|e| e["principal"] == json!("owner")).unwrap()["name"].clone()
+        };
+        assert_eq!(h.console("shares_all", json!({})).unwrap()["owner"], Value::Null, "the console's listing");
+        assert_eq!(h.run(&h.bret, "shares_list", json!({})).unwrap()["owner"], Value::Null, "a guest's shares");
+        assert_eq!(h.run(&h.bret, "guest_places", json!({})).unwrap()["owner"], Value::Null, "a guest's place names");
+        assert_eq!(owner_post(&h.bret), Value::Null, "the owner's post, as a guest reads it");
+        assert_eq!(owner_post(&Caller::console()), Value::Null, "and as the console reads it");
+        assert_eq!(h.console("owner_set_name", json!({"name": "Cy"})).unwrap(), json!(true));
+        assert_eq!(h.console("shares_all", json!({})).unwrap()["owner"], json!("Cy"));
+        assert_eq!(h.run(&h.bret, "shares_list", json!({})).unwrap()["owner"], json!("Cy"));
+        assert_eq!(h.run(&h.bret, "guest_places", json!({})).unwrap()["owner"], json!("Cy"));
+        assert_eq!(owner_post(&h.bret), json!("Cy"));
+    }
+
     // ── the thread and `shares:changed` (PR B, §4, §6) ───────────────────────
 
     type Rx = tokio::sync::mpsc::UnboundedReceiver<tokio_tungstenite::tungstenite::Message>;

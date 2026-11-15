@@ -5655,7 +5655,7 @@ Phase 3: Frontend pane and mock harness
     }
     case "shares_all":
       consoleOnly(cmd);
-      return { shares: clone(mockShares), hidden_projects: [...mockHidden], owner: mockOwnerName };
+      return { shares: clone(mockShares), hidden_projects: [...mockHidden], owner: mockOwnerShown() };
     case "share_requests_list":
       consoleOnly(cmd);
       return mockRequests.filter((r) => !r.dismissed).map((r) => ({ id: r.id, principal: r.principal, name: mockGuests.find((g) => g.id === r.principal)?.name ?? null, project: r.project, slug: r.slug, note: r.note, at: r.at }));
@@ -6240,6 +6240,8 @@ type MockBinding = { harness: string; session: string; transcript: string; bound
 type MockShare = { id: string; project: string; slug: string; created_at: number; guests: { principal: string; state: string; since: number }[]; binding: MockBinding | null; ended: MockBinding[] };
 type MockThreadEntry = { seq: number; at: number; kind: string; id?: string; principal?: string; device?: string; text?: string; first?: number; last?: number };
 let mockOwnerName = "owner";
+/** As serve answers it: the record's placeholder "owner" is no name (null). */
+const mockOwnerShown = () => (mockOwnerName === "owner" ? null : mockOwnerName);
 const mockGuests: MockGuest[] = mockQuery.get("guests") === "0" ? [] : [{ id: "g_bret00001", name: "Bret", created_at: epochNow() - 2 * DAY }];
 let mockShares: MockShare[] = [];
 let mockRequests: { id: string; principal: string; project: string | null; slug: string; note: string | null; at: number; dismissed?: boolean }[] = [];
@@ -6275,7 +6277,7 @@ function mockShare(id: unknown): MockShare {
   return sh;
 }
 function threadView(e: MockThreadEntry) {
-  const name = e.principal === "owner" ? mockOwnerName : e.principal ? mockGuests.find((g) => g.id === e.principal)?.name ?? null : undefined;
+  const name = e.principal === "owner" ? mockOwnerShown() : e.principal ? mockGuests.find((g) => g.id === e.principal)?.name ?? null : undefined;
   const dev = e.device ? mockDevices.find((d) => d.id === e.device)?.name ?? null : undefined;
   return { ...e, ...(name !== undefined ? { name } : {}), ...(dev !== undefined ? { device_name: dev } : {}) };
 }

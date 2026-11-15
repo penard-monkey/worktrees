@@ -67,6 +67,16 @@ export function mergeOlder(held: SharedTurn[], page: SharedTurn[]): SharedTurn[]
   return [...[...page].reverse().filter((t) => t.seq < until), ...held];
 }
 
+/** The name a guest calls the host's owner by: the name the host answers
+ *  (`shares_list`, then `guest_places`), else the host's own name as this
+ *  machine paired it. A host that never set one answers `null`; one from
+ *  v0.52.0 answers its record's placeholder `"owner"`, which is not a name
+ *  either ("OWNER'S PLACES", found in the three-VM run). */
+export function ownerOf(listed: string | null | undefined, places: string | null | undefined, hostName: string): string {
+  const named = (n: string | null | undefined) => (n && n.trim() && n !== "owner" ? n : null);
+  return named(listed) ?? named(places) ?? hostName;
+}
+
 /** What the view says about where this guest and this session stand. */
 export function standing(share: GuestShare, binding: GuestBinding | null, link: GuestState, owner: string): { live: boolean; words: string | null } {
   if (link.kind === "offline") return { live: false, words: `${owner}'s host is offline` };
