@@ -164,7 +164,9 @@ export function namesOf(s: SharesState, share: Share): string[] {
   return share.guests.map((g) => guestName(s, g.principal));
 }
 
-/** A guest with a device that can still connect. */
+/** A guest with a device that can still connect. One without is REMOVED
+ *  (serve's `GuestView::removed`): listed nowhere, its name free, and an
+ *  invite by that name re-admits the same person. */
 export function guestLive(g: Guest): boolean {
   return g.devices.some((d) => !d.revoked_at);
 }
