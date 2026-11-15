@@ -5708,11 +5708,13 @@ Phase 3: Frontend pane and mock harness
     case "share_allow": {
       consoleOnly(cmd);
       const sh = mockShare(args.share);
+      // As the host's ShareStore::allow: a guest the share did not name is
+      // named on it, allowed (Sharing…'s Add someone…).
+      if (!mockGuests.some((x) => x.id === args.principal)) throw `no guest ${args.principal}`;
       const g = sh.guests.find((x) => x.principal === args.principal);
-      if (!g) throw `${args.principal} is not on share ${sh.id}`;
-      if (g.state === "allowed") return false;
-      g.state = "allowed"; g.since = nowSec();
-      threadEvent(sh.id, "joined", g.principal);
+      if (g?.state === "allowed") return false;
+      if (g) { g.state = "allowed"; g.since = nowSec(); } else sh.guests.push({ principal: String(args.principal), state: "allowed", since: nowSec() });
+      threadEvent(sh.id, "joined", String(args.principal));
       sharesChanged("allowed", sh.id);
       return true;
     }
