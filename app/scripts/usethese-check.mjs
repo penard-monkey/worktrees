@@ -17,6 +17,11 @@
 //    note, and Codex answered "the plan is unchanged"): it is the panel's
 //    first field, focused, with a real placeholder; a send with an empty
 //    note asks once, with a "Don't ask again" kept in settings.
+// 8. The proof (2026-11-14, the test VMs: a Codex reopened after a reboot
+//    names no session until its first turn, so the binding read active and
+//    the comments went into an unshared session): send() asks share_check
+//    BEFORE agent_attach and stops unless the live id is the bound one, with
+//    the host's words (shares.rs) and Share again offered.
 // 7. No smart dashes or quotes (`--json` posted as `—json`): the thread's
 //    composer, the note and the guest's ask carry PLAIN_TEXT, whose
 //    `spellCheck: false` is what WebKit honours (measured, thread.ts).
@@ -180,6 +185,23 @@ const panelSrc = fileOf("USETHESE_PANEL", "../src/ThreadPanel.tsx");
 plain(/<textarea[\s\S]*?className="thread-field"[\s\S]*?\/?>/.exec(panelSrc)?.[0] ?? "", /\{\.\.\.PLAIN_TEXT\}/, "the thread's composer carries PLAIN_TEXT");
 const navSrc = fileOf("USETHESE_NAV", "../src/GuestNav.tsx");
 plain(/<input[^>]*aria-label="A note for the ask"[\s\S]*?\/>/.exec(navSrc)?.[0] ?? "", /\{\.\.\.PLAIN_TEXT\}/, "the guest's ask note carries PLAIN_TEXT");
+
+// ── 8. the proof before the send ──
+const sharesRs = read("../../crates/worktrees-cli/src/serve/shares.rs");
+const hostWord = (name) => new RegExp(`pub const ${name}: &str = "([^"]*)";`).exec(sharesRs)?.[1];
+const notShared = hostWord("ERR_NOT_SHARED"), unnamed = hostWord("ERR_UNNAMED");
+ok(!!notShared && /Share again first$/.test(notShared), "the host's not-the-shared-one refusal says Share again first");
+ok(!!unnamed && /send it something first$/.test(unnamed), "the host's unnamed refusal says send it something first");
+ok(at('invoke<ShareCheck>("share_check"') > 0 && at('invoke<ShareCheck>("share_check"') < at('"agent_attach"'), "Use these asks share_check before it attaches anything");
+ok(/const why = checkRefusal\(c\);\s*if \(why\) \{[\s\S]*?again: c\.live !== null[\s\S]*?return;\s*\}/.test(send), "…and returns on a refusal, offering Share again when another session is live");
+ok(!/onPicked\(/.test(send.slice(at('"share_check"'), at('"agent_attach"'))), "…leaving the selection as it was");
+ok(/words\?\.again && <ShareAgainOffer/.test(lane) && /<AgainDialog s=\{s\} share=\{share\}/.test(lane.slice(lane.indexOf("export function LaneThread"))), "the refusal carries Share again, which opens the lane's Share again dialog");
+eq(T.checkRefusal?.({ bound: "a", live: "a", same: true, why: "" }), null, "the bound session live: no refusal");
+eq(T.checkRefusal?.({ bound: "a", live: "b", same: false, why: notShared }), notShared, "another live session: the host's words");
+eq(T.checkRefusal?.({ bound: "a", live: null, same: false, why: unnamed }), unnamed, "no nameable session: the host's words");
+ok(T.checkRefusal?.({ bound: "a", live: null, same: true, why: "" }) !== null, "a null live id never passes, whatever same says");
+const mock = read("../src/mock/install.ts");
+ok(mock.includes(`"${notShared}"`) && mock.includes(`"${unnamed}"`), "the mock refuses in the host's words");
 
 if (bad) {
   console.log(`\n${bad} failed`);

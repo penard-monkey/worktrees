@@ -751,6 +751,52 @@ pub fn bindable(root: &str, slug: &str) -> Result<Live, String> {
     }
 }
 
+/// Refused by `share_used` (and answered by `share_check`) when the lane's
+/// live session is another one than the share's binding.
+pub const ERR_NOT_SHARED: &str = "the lane's session is not the shared one: Share again first";
+/// ... and when the lane cannot name its session: no agent runs there, or a
+/// Codex reopened after a reboot or a close holds no rollout until its first
+/// turn, so the binding still reads active (2026-11-14, the test VMs).
+pub const ERR_UNNAMED: &str = "the lane's agent has not named its session yet: send it something first";
+
+/// Whether the share's binding is the lane's live session NOW, as *Use
+/// these* must know before it types anything (§5). The poll cannot end a
+/// binding on a lane that names no session (`Lane::Paused`), so an active
+/// binding alone is no proof: this compares it with the live id.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct BindingCheck {
+    /// The active binding's session, `None` once it has ended.
+    pub bound: Option<String>,
+    /// The lane's live session, `None` when it cannot be named.
+    pub live: Option<String>,
+    pub same: bool,
+    /// Why not, in the words `share_used` refuses with; empty when `same`.
+    pub why: String,
+}
+
+pub fn check_binding(s: &Share) -> BindingCheck {
+    use worktrees_api::agents::LiveSession;
+    let bound = s.binding.as_ref().filter(|b| b.is_active());
+    let (live, live_harness) = match live_session(&s.project, &s.slug) {
+        LiveSession::Running { harness, id, .. } => (Some(id), Some(harness)),
+        LiveSession::None | LiveSession::Unsupported(_) => (None, None),
+    };
+    let same = match (bound, &live, live_harness) {
+        (Some(b), Some(id), Some(h)) => &b.session == id && b.harness == h,
+        _ => false,
+    };
+    let why = if same {
+        String::new()
+    } else if bound.is_none() {
+        format!("share {} has no live session bound: Share again first", s.id)
+    } else if live.is_none() {
+        ERR_UNNAMED.to_string()
+    } else {
+        ERR_NOT_SHARED.to_string()
+    };
+    BindingCheck { bound: bound.map(|b| b.session.clone()), live, same, why }
+}
+
 /// Whether the directory at the share's slug is the place it shared.
 pub fn place_is_there(s: &Share) -> bool {
     PlaceId::of(&place_dir(&s.project, &s.slug)).is_some_and(|p| p.same(&s.place))
@@ -948,12 +994,21 @@ pub mod rows {
     /// them in until *Share again*.
     pub fn used(cx: &Call, share: String, first: u64, last: u64) -> Result<Value, String> {
         let s = store(cx).read()?.shares.into_iter().find(|s| s.id == share).ok_or_else(|| format!("no share {share}"))?;
-        if !s.binding.as_ref().is_some_and(Binding::is_active) {
-            return Err(format!("share {share} has no live session bound: Share again first"));
+        let c = check_binding(&s);
+        if !c.same {
+            return Err(c.why);
         }
         let e = threads(cx).shared_with_agent(&share, first, last, now())?;
         changed(&*cx.ctx.host, "used", Some(&share), &crate::serve::sharethread::rows::allowed(&s), Some(e.seq));
         serde_json::to_value(e).map_err(|e| e.to_string())
+    }
+
+    /// Is the share's binding the lane's live session now? *Use these* asks
+    /// before it attaches or types anything; `share_used` refuses on the
+    /// same answer.
+    pub fn check(cx: &Call, share: String) -> Result<Value, String> {
+        let s = store(cx).read()?.shares.into_iter().find(|s| s.id == share).ok_or_else(|| format!("no share {share}"))?;
+        serde_json::to_value(check_binding(&s)).map_err(|e| e.to_string())
     }
 
     pub fn hide(cx: &Call, project: String, hidden: bool) -> Result<bool, String> {
@@ -1581,6 +1636,52 @@ pub(crate) mod serve_tests {
         h.poll();
         let e = h.console("share_used", json!({"share": id, "first": 2, "last": 2})).unwrap_err();
         assert!(e.as_str().unwrap().contains("Share again first"), "{e}");
+    }
+
+    /// *Use these* types into the lane's live session, so an active binding
+    /// is not enough: after a reboot (or a close and open) the lane's Codex
+    /// is a NEW session that names none until its first turn, the poll keeps
+    /// the binding active meanwhile, and the owner's send went into the
+    /// unshared session (the test VMs, 2026-11-14). `share_check` says
+    /// whether the live id IS the bound one, and `share_used` refuses unless
+    /// it is.
+    #[test]
+    fn use_these_needs_the_live_session_to_be_the_bound_one() {
+        let h = Host::new("proof");
+        h.live("feat", "s-old", 10);
+        let bret = Host::principal(&h.bret);
+        let id = h.console("share_create", json!({"repo": h.a, "slug": "feat", "guests": [bret]})).unwrap()["id"].as_str().unwrap().to_string();
+        h.console("share_allow", json!({"share": id, "principal": bret})).unwrap();
+        h.run(&h.bret, "thread_post", json!({"share": id, "id": "p1", "text": "try the cache"})).unwrap();
+        let used = |h: &Host| h.console("share_used", json!({"share": id, "first": 2, "last": 2}));
+        // The happy path: the bound session is live.
+        let c = h.console("share_check", json!({"share": id})).unwrap();
+        assert_eq!(c, json!({"bound": "s-old", "live": "s-old", "same": true, "why": ""}));
+        used(&h).unwrap();
+        // The lane names no session (a reopened Codex before its first
+        // turn): the poll changes nothing, and both refuse.
+        TEST_LIVE.lock().unwrap().insert(place_dir(&h.a, "feat"), LiveSession::None);
+        assert_eq!(h.poll(), vec![]);
+        let c = h.console("share_check", json!({"share": id})).unwrap();
+        assert_eq!((c["bound"].clone(), c["live"].clone(), c["same"].clone()), (json!("s-old"), json!(null), json!(false)));
+        assert_eq!(c["why"], json!(ERR_UNNAMED));
+        assert!(ERR_UNNAMED.ends_with("send it something first"));
+        assert_eq!(used(&h).unwrap_err(), json!(ERR_UNNAMED));
+        // Another live id, before any poll has ended the binding.
+        h.live("feat", "s-new", 5);
+        let c = h.console("share_check", json!({"share": id})).unwrap();
+        assert_eq!(c, json!({"bound": "s-old", "live": "s-new", "same": false, "why": ERR_NOT_SHARED}));
+        assert_eq!(used(&h).unwrap_err(), json!(ERR_NOT_SHARED));
+        // A harness nothing reads cannot be the bound one either.
+        TEST_LIVE.lock().unwrap().insert(place_dir(&h.a, "feat"), LiveSession::Unsupported("Kimi"));
+        assert_eq!(h.console("share_check", json!({"share": id})).unwrap()["same"], json!(false));
+        // The console's only, as share_used is.
+        assert!(h.run(&h.bret, "share_check", json!({"share": id})).is_err(), "a guest never checks a binding");
+        // Share again binds the live one, and the check passes again.
+        h.live("feat", "s-new", 5);
+        h.console("share_again", json!({"share": id})).unwrap();
+        assert_eq!(h.console("share_check", json!({"share": id})).unwrap()["same"], json!(true));
+        used(&h).unwrap();
     }
 
     /// §8: removing the lane with serve up (the poll) or down (the next
