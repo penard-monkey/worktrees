@@ -10,7 +10,9 @@
 // `window.__mock`: `guestShare(slug)` shares another place (a toast and a
 // badge), `guestTurn(text)` appends a turn to the live share, `guestEnd()`
 // ends its binding, `guestAllow()` lets Bret in on the invited share,
-// `guestPost(text)` posts as David, `guestCalls()` the commands asked.
+// `guestPost(text)` posts as David, `guestCalls()` the commands asked,
+// `guestDrop()`/`guestBack()` the host quitting and returning, and
+// `guestRevoke()` David removing this guest (`removed`, never offline).
 
 export const GUEST_HOST = {
   id: "h_guestdavidmacaaaaaaaaaaaaa",
