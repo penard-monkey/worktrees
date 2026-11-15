@@ -1,0 +1,46 @@
+# V1, "beside the session" (the shipped surface, group chat behind its beta
+# switch): where each control is, in POINTS (a capture's pixels / 2), with
+# the app's window pinned to config.toml's `window` = [20, 40, 1320, 730].
+# Calibrated on 0.51.0 with PR #669 (the rehearsal's defect fixes: the Ask
+# form, note-first Use these) on 2026-11-14, from captures of both VMs. main
+# at 456102e differs in the Ask form and the Use these preview.
+# A control that moves with state has one entry per state.
+
+[owner]
+open_lane = [151, 335]         # the lane's row in the nav (ACTIVE group)
+toast_close = [1262, 699]      # the bottom toast's ×
+updates_close = [315, 680]     # the "Updates: Claude …, Codex …" card's ×
+allow = [603, 157]             # "Bret asks to join · Allow" in the share strip
+thread = [513, 157]            # the strip's Thread toggle (binding active)
+thread_ended = [645, 157]      # the same toggle once the binding has ended
+use_these = [1242, 666]        # "Use these…" under the thread
+use_these_after = [1242, 643]  # the same after this app's first send: a "Sent to
+                               #   the agent." line under it moves it up
+use_no_note = [1080, 362]      # "Send without a note" in the confirmation a send
+                               #   with no note brings up (#669)
+# The preview itself is driven by keys (its note field opens focused, and its
+# layout moves with its content): ⌘A, Delete, the note, Return.
+sharing = [583, 157]           # "Sharing…" (binding active)
+sharing_ended = [715, 157]     # "Sharing…" once the binding has ended
+stop = [855, 336]              # "Stop sharing…" in the Sharing dialog
+stop_confirm = [927, 343]      # "Stop sharing" in its confirmation
+stop_earlier_dy = 19           # both, lower by this once an earlier session is kept
+request_dismiss = [1240, 679]  # "Dismiss" on the "<guest> asks to see <place>" toast
+share_again = [569, 157]       # "Share again" (binding ended)
+share_again_confirm = [925, 420]
+
+[guest]
+open_share = [151, 358]        # the shared lane's row under "<owner>'S PLACES"
+toast_close = [1302, 738]      # "David let you in …" ×
+updates_close = [315, 681]
+composer = [1120, 708]         # "Write in the thread"
+post = [1262, 726]             # "Post"
+blur = [200, 600]              # empty nav: takes the focus off the composer
+ask_main = [326, 401]          # "Ask" beside (main) under "<owner>'S PLACES"
+ask_note = [224, 472]          # the Ask form's note
+ask_send = [162, 506]          # "Ask <owner> to share"
+ask_cancel = [256, 506]
+
+[macos]
+banner_hover = [1180, 90]      # a notification banner, top right
+banner_close = [1010, 50]      # its × (shown at its top-left while hovered)

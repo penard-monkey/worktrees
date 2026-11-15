@@ -1,0 +1,64 @@
+# vmlab: what one experiment runs on. Read by run.py (stdlib tomllib).
+# Nothing here names the host's own app, tmux or config: every VM is driven
+# over prlctl and ssh.
+
+# The bundle installed in every VM: a `make install-app APPDIR=<dir>` output
+# on the host. V1 is the shipped surface with group chat behind its beta
+# switch. ui/v1.toml is calibrated on main plus PR #669; a run against a build
+# someone else installed in the VMs keeps it with `--skip-install`.
+bundle = "~/.cache/worktrees/parallels/build-main/worktrees.app"
+
+# Beta switches turned on in each VM's ui-state.json before the app starts.
+beta = ["beta_group_chat"]
+
+# Where runs are written (one directory per run; screenshots stay here).
+runs = "~/.cache/worktrees/parallels/vmlab"
+
+# A screenshot of every VM this often, plus one at every intent.
+capture_every_s = 5
+
+# The window frame every app is pinned to, in points, so ui/<variant>.toml's
+# coordinates hold: {x, y} and {width, height}.
+window = [20, 40, 1320, 730]
+
+# Claude in -p mode writes a post's wording when a persona asks for it.
+# Never with its own XDG_DATA_HOME (AGENTS.md), always DISABLE_AUTOUPDATER=1.
+generate_cmd = ["claude", "-p"]
+generate_timeout_s = 120
+
+[owner]
+person = "dana"
+vm = "macOS"
+ssh = "parallels-test"
+ip = "10.211.55.15"
+# The repository inside the VM, and the lane the feature lives in.
+repo = "/Users/test-parallels/workspace/worktrees"
+lane = "gc-lane"
+harness = "codex"
+# The name guests see the owner by (owner_set_name); the rehearsal's.
+name = "David"
+
+[guest]
+person = "bret"
+vm = "macOS-guest"
+ssh = "parallels-guest"
+ip = "10.211.55.16"
+# The name the owner invites this person by, and their device's name.
+name = "Bret"
+device = "bret-mac"
+# The guest VM is a FULL clone made AFTER `off-ready`, so its own `off-ready`
+# is the owner's disk (the owner's hostname and serve identity). No snapshot
+# is reverted on it unless one is named here.
+snapshot = ""
+
+# The third person (§12.2's Cy). Apple runs at most two macOS VMs at once, so
+# until a Linux VM carries the AppImage, Cy is CLI calls from a third config
+# dir on the guest VM: a person with no screen (`--persons 3`).
+[third]
+person = "cy"
+vm = "macOS-guest"
+ssh = "parallels-guest"
+ip = "10.211.55.16"
+name = "Cy"
+device = "cy-cli"
+config_dir = "/Users/test-parallels/vmlab-cy"

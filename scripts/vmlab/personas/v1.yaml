@@ -1,0 +1,66 @@
+{
+  "_comment": [
+    "The rehearsal of 2026-11-14 as a script (group chat v4.1 §12.2, §12.3).",
+    "YAML written in its JSON subset, so the driver reads it with the stdlib.",
+    "An intent is {who, act, args?, wait_s?, impossible?, why?}. `wait_s` is the",
+    "person's pause AFTER the act (reading, thinking). `impossible` marks an",
+    "intent the variant cannot serve: it is recorded as a blind spot, not acted.",
+    "A post's `text` is literal, or {generate: <prompt>, fallback: <literal>}.",
+    "Intents of a person the run does not have (`--persons 2` has no cy) are skipped."
+  ],
+  "variant": "v1",
+  "task": "json-flag-plan",
+  "people": {
+    "dana": {"role": "owner", "about": "Owns the lane and its agent. Terse, decides what the agent gets."},
+    "bret": {"role": "guest", "about": "A reviewer who reads the live session and comments in the thread. Precise about CLI behaviour."},
+    "cy":   {"role": "guest", "about": "A second engineer with no screen in this run; posts through the CLI."}
+  },
+  "watch_files": ["docs/notes/group-chat-test.md"],
+  "intents": [
+    {"who": "bret", "act": "open_share", "wait_s": 3},
+    {"who": "dana", "act": "allow", "args": {"guest": "bret"}, "wait_s": 2},
+    {"who": "dana", "act": "open_thread", "wait_s": 1},
+    {"who": "cy", "act": "open_share", "wait_s": 2},
+    {"who": "dana", "act": "allow", "args": {"guest": "cy"}, "wait_s": 2},
+
+    {"who": "dana", "act": "send_task",
+     "args": {"text": "Create docs/notes/group-chat-test.md with a five-line plan for adding a --json flag to the worktrees status command. Do not run git. Keep it short."}},
+    {"who": "dana", "act": "wait", "args": {"until": "agent_idle", "max_s": 180}},
+
+    {"who": "bret", "act": "post", "wait_s": 5,
+     "args": {"text": {"generate": "Ask, in one sentence, what exit code the plan gives when the place does not exist.",
+                       "fallback": "The plan should say what the exit code is when the place does not exist."}}},
+    {"who": "bret", "act": "post", "wait_s": 5,
+     "args": {"text": {"generate": "Ask, in one sentence, that the human-readable output stay exactly as it is today, the JSON being additive.",
+                       "fallback": "And keep the human output exactly as it is today; the JSON is additive."}}},
+    {"who": "bret", "act": "post", "wait_s": 3, "why": "#669's smart-dash fix: two hyphens must survive the composer",
+     "args": {"text": "Use --json and --no-color here"}},
+    {"who": "cy", "act": "post", "wait_s": 3,
+     "args": {"text": {"generate": "As a second engineer who owns the code that prints status, say in one sentence which field you would want in the JSON.",
+                       "fallback": "From the status side: please include the branch and the session state as fields."}}},
+    {"who": "dana", "act": "use_these", "args": {"note": ""}},
+    {"who": "dana", "act": "wait", "args": {"until": "agent_idle", "max_s": 180}},
+
+    {"who": "bret", "act": "read_diff", "impossible": "V1 shows that a command ran, not the file it wrote (§1)"},
+
+    {"who": "bret", "act": "post", "wait_s": 5,
+     "args": {"text": {"generate": "Having read the latest turn, ask in one sentence for the plan to name one test to add.",
+                       "fallback": "Nice. Could the plan name one test to add?"}}},
+    {"who": "dana", "act": "use_these", "args": {"note": "Fold these into the plan file, then show me the file."}},
+    {"who": "dana", "act": "wait", "args": {"until": "agent_idle", "max_s": 180}},
+
+    {"who": "bret", "act": "ask_share", "args": {"slug": "(main)", "note": "Can I see main too, to compare the status command there?"}, "wait_s": 3},
+    {"who": "dana", "act": "wait", "args": {"s": 20}},
+    {"who": "dana", "act": "answer_request", "wait_s": 2},
+
+    {"who": "dana", "act": "end_session"},
+    {"who": "dana", "act": "share_again", "wait_s": 5},
+    {"who": "dana", "act": "reboot_owner"},
+    {"who": "bret", "act": "post", "wait_s": 3,
+     "args": {"text": {"generate": "The host just came back from a restart. Ask in one sentence whether the plan file survived and is complete.",
+                       "fallback": "Back after the restart: is the plan file still complete?"}}},
+    {"who": "dana", "act": "use_these", "args": {"note": "Check the plan file is complete and tell me."}},
+    {"who": "dana", "act": "wait", "args": {"until": "agent_idle", "max_s": 120}},
+    {"who": "dana", "act": "stop_sharing", "wait_s": 5}
+  ]
+}

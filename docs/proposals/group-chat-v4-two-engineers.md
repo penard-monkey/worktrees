@@ -527,6 +527,8 @@ first**, and from that, 4.3's build.
 2. The driver: three VMs from snapshots, the persona scripts, the screenshot
    cadence, the rubric reader. Proved on V1, which exists, so the first table
    has one row before any new surface is built.
+   **It exists:** `scripts/vmlab/` (`run.py`, `score.py`, the V1 persona and
+   coordinates; its README says how to run one and what each score means).
 3. Mocks of V2 to V6 in the design harness, reviewed with David, two or three
    chosen.
 4. The chosen variants built behind the beta switch as routes, run, scored.
