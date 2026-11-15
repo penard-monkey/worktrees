@@ -1776,7 +1776,7 @@ pub fn place_live_session(root: &str, slug: &str) -> LiveSession {
             let lane = Lane { harness, session: session.clone(), pane: pane.id.clone().unwrap_or_default() };
             let Some(p) = lane_probe(&scan.probes, &lane) else { return LiveSession::None };
             let Some(sid) = p.session_id.clone() else { return LiveSession::None };
-            let transcript = Path::new(&worktrees_core::project::claude_dir_in(&p.root, &p.cwd)).join(format!("{sid}.jsonl"));
+            let transcript = agent::transcript_path(&p.root, &p.cwd, &sid);
             return LiveSession::Running { harness, id: sid, transcript };
         }
         if harness == provider::CODEX.id {
@@ -1943,7 +1943,7 @@ impl AgentIo for Live {
                 let p = lane_probe(&scan.probes, lane)
                     .ok_or_else(|| no_probe(&lane.session, &scan.unreadable, || pids_on_pane(lane)))?;
                 let sid = p.session_id.as_deref().ok_or("claude's session file names no session id")?;
-                Path::new(&worktrees_core::project::claude_dir_in(&p.root, &p.cwd)).join(format!("{sid}.jsonl"))
+                agent::transcript_path(&p.root, &p.cwd, sid)
             }
             h if h == provider::CODEX.id => {
                 codex::latest_rollout(&project.place_dir(slug)).ok_or("this place has no Codex rollout yet")?

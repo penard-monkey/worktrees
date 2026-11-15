@@ -437,6 +437,82 @@ pub fn session_name(tmux: &str) -> Option<&str> {
     if s.is_empty() { None } else { Some(s) }
 }
 
+// ── where a session's transcript is ──────────────────────────────────────────
+// Claude files a transcript under the project folder of the cwd the session
+// was BORN in, and keeps appending there when `claude --resume <id>` picks it
+// up from another folder; the probe's `cwd` is the resume's. Measured on
+// Claude Code 2.1.325 (2026-11-14): the probe file carries NO transcript path
+// (its keys: asksForConvertedSkills, cwd, entrypoint, kind,
+// messagingSocketPath, name, nameSince, nameSource, peerFeatures,
+// peerProtocol, pid, pidDomain, procStart, sessionId, startedAt, status,
+// statusUpdatedAt, tmux, updatedAt, version), so the folder is found, not read.
+
+/// How long a search that found the session in NO folder is believed. The
+/// poll asks for every live probe each tick; a fresh session has written no
+/// file yet, and re-walking `projects/` for it every 3 s buys nothing.
+const TRANSCRIPT_MISS_SECS: u64 = 30;
+
+/// A search answer per (claude root, session id): the file found in another
+/// project folder, or `None` with when that miss was seen.
+type TranscriptCache = std::collections::HashMap<(std::path::PathBuf, String), (Option<std::path::PathBuf>, std::time::Instant)>;
+
+static TRANSCRIPTS: std::sync::Mutex<Option<TranscriptCache>> = std::sync::Mutex::new(None);
+
+/// THE transcript of session `sid` of a Claude whose probe says `cwd`, under
+/// config dir `claude_root`, for every reader (the chat's turns, the model
+/// label, a Read's picture, the afterglow's backfill, an idea's conversation):
+/// `<root>/projects/<cwd, mangled>/<sid>.jsonl` when that file exists, else
+/// the one file of that name in any other project folder (a session id is a
+/// UUID, so at most one folder holds it: a session resumed from another
+/// folder), else the cwd path, so a reader says what it said before
+/// ("no session file yet"). One `read_dir` of `projects/` and a `stat` per
+/// folder, cached per (root, sid) while the found file exists, and a miss for
+/// [`TRANSCRIPT_MISS_SECS`].
+pub fn transcript_path(claude_root: &std::path::Path, cwd: &str, sid: &str) -> std::path::PathBuf {
+    let here = std::path::Path::new(&crate::project::claude_dir_in(claude_root, cwd)).join(format!("{sid}.jsonl"));
+    if here.is_file() || !crate::codex::is_uuid(sid) {
+        return here;
+    }
+    let key = (claude_root.to_path_buf(), sid.to_string());
+    {
+        let cache = TRANSCRIPTS.lock().unwrap_or_else(|e| e.into_inner());
+        match cache.as_ref().and_then(|c| c.get(&key)) {
+            Some((Some(p), _)) if p.is_file() => return p.clone(),
+            Some((None, at)) if at.elapsed().as_secs() < TRANSCRIPT_MISS_SECS => return here,
+            _ => {}
+        }
+    }
+    let found = find_transcript(claude_root, sid);
+    let mut cache = TRANSCRIPTS.lock().unwrap_or_else(|e| e.into_inner());
+    cache.get_or_insert_with(Default::default).insert(key, (found.clone(), std::time::Instant::now()));
+    found.unwrap_or(here)
+}
+
+/// The `<sid>.jsonl` in any folder of `<claude_root>/projects/`, uncached.
+/// Real files in real folders only: a link is not followed. The first in
+/// name order, should two folders ever both hold one.
+pub fn find_transcript(claude_root: &std::path::Path, sid: &str) -> Option<std::path::PathBuf> {
+    if !crate::codex::is_uuid(sid) {
+        return None;
+    }
+    let mut dirs: Vec<std::path::PathBuf> = std::fs::read_dir(claude_root.join("projects"))
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .map(|e| e.path())
+        .collect();
+    dirs.sort();
+    let name = format!("{sid}.jsonl");
+    dirs.into_iter()
+        .map(|d| d.join(&name))
+        .find(|f| std::fs::symlink_metadata(f).is_ok_and(|m| m.file_type().is_file()))
+}
+
+/// [`transcript_path`] for `p`'s session, `None` when the probe names none.
+pub fn probe_transcript(p: &ClaudeProbe) -> Option<std::path::PathBuf> {
+    Some(transcript_path(&p.root, &p.cwd, p.session_id.as_deref()?))
+}
+
 // ── the model a session is running ───────────────────────────────────────────
 // The probe file does not say; the transcript does, in two places: every
 // assistant reply carries `message.model`, and a `/model` switch writes its
@@ -786,6 +862,42 @@ mod tests {
         serde_json::from_str(s).expect("probe must parse")
     }
 
+
+    /// A session resumed from another folder: Claude keeps its transcript in
+    /// the folder of the cwd it was BORN in, while the probe names the resume's.
+    #[test]
+    fn a_resumed_sessions_transcript_is_found_in_its_birth_folder() {
+        let root = std::env::temp_dir().join(format!("wt-resumed-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let sid = "6a94c3da-0000-4000-8000-000000000001";
+        let born = std::path::Path::new(&crate::project::claude_dir_in(&root, "/w/repo/.worktrees/other")).join(format!("{sid}.jsonl"));
+        std::fs::create_dir_all(born.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(crate::project::claude_dir_in(&root, "/w/repo")).unwrap();
+        std::fs::write(&born, "{}\n").unwrap();
+        let here = std::path::Path::new(&crate::project::claude_dir_in(&root, "/w/repo")).join(format!("{sid}.jsonl"));
+        assert_eq!(transcript_path(&root, "/w/repo", sid), born, "found in the folder it was born in");
+        // Cached, and the cache does not outlive the file it found.
+        assert_eq!(transcript_path(&root, "/w/repo", sid), born);
+        // The cwd folder wins when both hold it.
+        std::fs::write(&here, "{}\n").unwrap();
+        assert_eq!(transcript_path(&root, "/w/repo", sid), here);
+        std::fs::remove_file(&here).unwrap();
+        std::fs::remove_file(&born).unwrap();
+        // In no folder: the cwd path, so every reader says what it said before.
+        let gone = "6a94c3da-0000-4000-8000-000000000002";
+        let want = std::path::Path::new(&crate::project::claude_dir_in(&root, "/w/repo")).join(format!("{gone}.jsonl"));
+        assert_eq!(transcript_path(&root, "/w/repo", gone), want);
+        // A session id that is not a UUID is never searched for.
+        std::fs::write(born.with_file_name("x.jsonl"), "{}\n").unwrap();
+        assert_eq!(find_transcript(&root, "x"), None);
+        // A link in a project folder is not followed.
+        let sid3 = "6a94c3da-0000-4000-8000-000000000003";
+        let real = root.join("elsewhere.jsonl");
+        std::fs::write(&real, "{}\n").unwrap();
+        std::os::unix::fs::symlink(&real, born.with_file_name(format!("{sid3}.jsonl"))).unwrap();
+        assert_eq!(find_transcript(&root, sid3), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
     #[test]
     fn model_display_names_a_model_the_way_people_do() {
         assert_eq!(model_display("claude-opus-5-5"), "Opus 5.5");

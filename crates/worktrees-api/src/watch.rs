@@ -624,8 +624,7 @@ pub fn claude_model(w: &Watch, probes: &[worktrees_core::agent::ClaudeProbe], se
 }
 
 pub fn probe_model(w: &Watch, p: &worktrees_core::agent::ClaudeProbe) -> Option<String> {
-    let sid = p.session_id.as_deref()?;
-    let jsonl = Path::new(&worktrees_core::project::claude_dir_in(&p.root, &p.cwd)).join(format!("{sid}.jsonl"));
+    let jsonl = worktrees_core::agent::probe_transcript(p)?;
     cached_model(w, &jsonl, worktrees_core::agent::transcript_model)
         .map(|id| worktrees_core::agent::model_display(&id))
 }
@@ -1119,8 +1118,7 @@ pub fn backfill_worked(ctx: &Ctx) {
             // file) drag a ten-hour-old prompt up to "just finished", quietly
             // undoing the denylist above.
             if let Some(sid) = h.session_id.as_deref() {
-                let cdir = worktrees_core::project::claude_dir_in(&root, &project);
-                let jsonl = Path::new(&cdir).join(format!("{sid}.jsonl"));
+                let jsonl = worktrees_core::agent::transcript_path(&root, &project, sid);
                 let m = *landed.entry(jsonl.clone()).or_insert_with(|| transcript_epoch(&jsonl));
                 if let Some(m) = m {
                     if m > stamp {
