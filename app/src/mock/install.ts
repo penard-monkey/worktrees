@@ -6827,3 +6827,13 @@ let mockNotifyGranted = new URLSearchParams(location.search).get("notify") === "
 };
 
 console.info("[mock] Tauri backend mocked — design harness active (window.__mock: breakConfig/fixConfig/exitShell/restoreScrollback/createFile/editFile/finishTask/syncFail/syncLive/release/denyFolder/allowFolder/uiEvents/hostPolicySets)");
+
+// `?design=start-a|start-b|start-c` (`&as=guest`): the group chat start-design
+// mocks (docs/proposals/group-chat-start.md), drawn over the harness and wired
+// to nothing. Throwaway: they exist to be screenshotted and walked.
+if (/^start-[abc]$/.test(new URLSearchParams(location.search).get("design") ?? "")) {
+  void import("./startDesign").then((m) => {
+    if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", () => m.mountStartDesign());
+    else m.mountStartDesign();
+  });
+}
