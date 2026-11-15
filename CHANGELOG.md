@@ -5,6 +5,13 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Fixed
+
+- Group chat (beta): a guest the owner removed is told so. Its sidebar said
+  *offline* and kept redialling forever; now the host's group says "David
+  removed this device" (or that the host turned it off, or no longer accepts
+  it), stops retrying on its own, and offers Retry and **Forget this host**.
+
 ## [0.52.0] - 2026-11-14
 
 ### Added
