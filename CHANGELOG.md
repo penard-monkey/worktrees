@@ -5,6 +5,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Fixed
+
+- **Claude's usage meter works on Linux.** The bottom bar said "Claude · unavailable" on every Linux host, because the usage reader only asked the macOS keychain for Claude Code's login. Off macOS it now reads Claude Code's own credentials file (`~/.claude/.credentials.json`, or under `CLAUDE_CONFIG_DIR`), and refuses one that is a symlink or that anyone but you can read.
+
 ## [0.52.0] - 2026-11-14
 
 ### Added
