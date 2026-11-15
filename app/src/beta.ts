@@ -49,7 +49,7 @@ export const BETA_FEATURES: readonly BetaFeature[] = [
   {
     key: "beta_group_chat",
     label: "Group chat",
-    what: "Share a running session with a guest, talk beside it in a thread, and see what a host shares with you. Turning it off hides it and keeps every pairing and share.",
+    what: "Share a running session with a guest, talk beside it in a thread, and see what a host shares with you. Start with Share… on a running session, or Join with a link… on Home. Turning it off hides it and keeps every pairing and share.",
     testId: "beta-group-chat",
   },
 ];

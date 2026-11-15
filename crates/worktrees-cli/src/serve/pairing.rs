@@ -134,16 +134,17 @@ impl Invite {
 
     /// The invite `pair_begin` names: `{"name": …}` for a new guest, or
     /// `{"guest": <id>}` for one the host has. A new name already used by a
-    /// guest is refused, so two people never share a name in a thread.
+    /// guest, in any case, is refused, so two people never share a name in a
+    /// thread and a re-invite pairs the person the host meant (F7).
     pub fn from_value(v: &Value, devices: &DeviceRegistry) -> Result<Invite, String> {
         const SHAPE: &str = r#"an invite is {"name": "<a new guest's name>"} or {"guest": "<an existing guest's id>"}"#;
         let m = v.as_object().filter(|m| m.len() == 1).ok_or(SHAPE)?;
         if let Some(name) = m.get("name") {
             let name = name.as_str().ok_or(SHAPE)?.trim().to_string();
             name_ok(&name)?;
-            let taken = devices.guests()?.into_iter().any(|g| g.name == name);
-            if taken {
-                return Err(format!("a guest named {name:?} exists already: invite them by id"));
+            // F7: in any case or spacing ("bret" beside "Bret" was a second person).
+            if let Some(g) = devices.guests()?.into_iter().find(|g| super::devices::same_guest_name(&g.name, &name)) {
+                return Err(super::devices::guest_name_taken(&g.name));
             }
             return Ok(Invite::New { id: super::devices::new_guest_id(), name });
         }

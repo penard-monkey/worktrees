@@ -266,6 +266,18 @@ impl PrincipalRecord {
     }
 }
 
+/// Two guest names one reader would take for one person's (F7): equal once
+/// trimmed and lowercased. The app's share dialog says the same before it
+/// asks (`LaneShare.tsx` `sameGuestName`).
+pub fn same_guest_name(a: &str, b: &str) -> bool {
+    a.trim().to_lowercase() == b.trim().to_lowercase()
+}
+
+/// The refusal of a new guest named like one the host has (F7).
+pub fn guest_name_taken(existing: &str) -> String {
+    format!("a guest named {existing:?} exists: pair another device for them, or use another name")
+}
+
 /// A fresh guest principal id: `g_` and 128 random bits in lowercase base32.
 /// Random, never derived from the name, so a rename keeps who said what.
 pub fn new_guest_id() -> PrincipalId {
@@ -1120,8 +1132,8 @@ impl DeviceRegistry {
         }
         self.mutate(|f, events| {
             if let Some(p) = create.filter(|p| f.principal(&p.id).is_none()) {
-                if f.principals.iter().any(|q| q.is_guest() && q.name == p.name) {
-                    return Err(format!("a guest named {:?} exists already: invite them by id", p.name));
+                if let Some(q) = f.principals.iter().find(|q| q.is_guest() && same_guest_name(&q.name, &p.name)) {
+                    return Err(guest_name_taken(&q.name));
                 }
                 f.principals.push(p);
             }
@@ -1855,6 +1867,36 @@ mod tests {
         // The owner's console reaches only the owner's devices, by principal.
         assert_eq!(reg.revoke(&Caller::console(), &Grant::everything(), &bobs.id, NOW).unwrap_err(), format!("no device {}", bobs.id));
         assert_eq!(reg.list(&PrincipalId::owner()).unwrap().len(), 1, "a listing is the caller's principal's");
+    }
+
+    /// F7 (group chat start design §1.4): re-inviting "bret" made a second
+    /// person beside "Bret", and the share dialog then offered both with
+    /// nothing to tell them apart. A new guest whose name another guest has,
+    /// in any case or spacing, is refused in the enrolling write too (the
+    /// window's own check, `Invite::from_value`, may be a minute stale).
+    #[test]
+    fn a_new_guest_may_not_take_another_guests_name_in_any_case() {
+        let d = dir("guest-names");
+        let reg = DeviceRegistry::open(&d);
+        let guest = |name: &str, n: u8| {
+            let id = new_guest_id();
+            let mut e = enrollment(&format!("{name}-mac"), n, Platform::Macos, grant(&[Guest], Projects::only(Vec::<String>::new())));
+            e.principal = id.clone();
+            (e, PrincipalRecord::guest(id, name, NOW))
+        };
+        let (e, p) = guest("Bret", 1);
+        reg.enroll_creating(e, Some(p), NOW).unwrap();
+        for twin in ["bret", "BRET", "Bret"] {
+            let (e, p) = guest(twin, 2);
+            let err = reg.enroll_creating(e, Some(p), NOW).unwrap_err();
+            assert!(err.contains("a guest named \"Bret\" exists") && err.contains("pair another device for them, or use another name"), "{twin}: {err}");
+        }
+        assert_eq!(reg.guests().unwrap().len(), 1, "no second Bret");
+        let (e, p) = guest("Ana", 3);
+        reg.enroll_creating(e, Some(p), NOW).unwrap();
+        assert_eq!(reg.guests().unwrap().len(), 2);
+        assert!(same_guest_name("Bret", " bret ") && !same_guest_name("Bret", "Brett"));
+        let _ = fs::remove_dir_all(&d);
     }
 
     /// Group chat §2.1: the file may name guests beside the owner — each

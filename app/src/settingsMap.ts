@@ -205,10 +205,11 @@ export const SECTIONS: readonly SectionDef[] = [
   { id: "auto-fetch", page: "general", tier: "advanced", label: "Git", keywords: ["fetch", "git fetch", "background fetch", "refresh remotes", "interval"], host: ["fetch_interval"], scope: "computer", write: "set_fetch_interval" },
   { id: "projects-parent", page: "general", tier: "advanced", label: "New projects", keywords: ["clone", "clone folder", "project folder", "new project location", "directory"], keys: ["projects_parent"] },
   // One checkbox per beta feature (beta.ts BETA_FEATURES; `keys` lists every
-  // feature's key, beta-check holds them equal). Advanced and Expert only (the owner's
-  // call, 2026-11-08); a feature turned on is a changed value, so rule 2
-  // shows the section in Beginner too, where it can be turned off again.
-  { id: "beta", page: "general", tier: "advanced", label: "Beta features", keywords: ["beta", "experimental", "preview", "early access", "feature flag", "ideas", "group chat"], keys: ["beta_ideas", "beta_group_chat"], localOnly: true },
+  // feature's key, beta-check holds them equal). Beginner since 2026-11-14
+  // (group chat start design S2, the owner's pick): a person invited into a
+  // beta is not an advanced user by being invited. It was Advanced and
+  // Expert only from 2026-11-08.
+  { id: "beta", page: "general", tier: "beginner", label: "Beta features", keywords: ["beta", "experimental", "preview", "early access", "feature flag", "ideas", "group chat"], keys: ["beta_ideas", "beta_group_chat"], localOnly: true },
   // ── Appearance
   { id: "zoom", page: "appearance", tier: "beginner", label: "Overall size", keywords: ["zoom", "scale", "bigger", "smaller", "text size", "magnify"], keys: ["app_zoom"] },
   { id: "ui-font", page: "appearance", tier: "advanced", label: "UI font size", keywords: ["font", "font size", "text size", "interface font", "rem"], keys: ["ui_rem"] },
@@ -280,12 +281,18 @@ export const SECTIONS: readonly SectionDef[] = [
   // ── Projects
   { id: "planning", page: "projects", tier: "beginner", label: "Planning", keywords: ["plan files", "planning with files", "task plan", "planning profile"], host: ["planning_default"], write: "set_planning_default" },
   // ── Remote
+  // The guest's paste (group chat start design S4, F5): out of "This window
+  // drives", whose words are about driving another engine. Drawn in every
+  // mode and with the beta off too, so a guest who follows the host's words
+  // finds it; with the beta off its Join is refused in words (S5).
+  { id: "join-host", page: "remote", tier: "beginner", label: "Join with a link", keywords: ["join", "guest", "pairing link", "worktrees-pair", "join a host", "group chat", "someone sent me a link"], scope: "window" },
   { id: "this-window-drives", page: "remote", tier: "beginner", label: "This window drives", keywords: ["remote host", "drive host", "which machine", "paired host", "other computer", "connect to host"], scope: "window" },
   { id: "remote-access", page: "remote", tier: "advanced", label: "Let devices reach this computer", keywords: ["remote", "lan", "network", "phone", "iphone", "pairing", "kill switch"], host: ["remote_access"], scope: "computer" },
   { id: "devices", page: "remote", tier: "advanced", label: "Paired devices", keywords: ["phone", "iphone", "ipad", "pair", "pairing", "revoke"], host: ["devices"], scope: "computer" },
   // Group chat's beta: beta.ts's `groupChatBeta`, handed in (`VisCtx.groupChat`),
   // since this file imports no value; not handed in, the section is off.
-  { id: "guests", page: "remote", tier: "advanced", label: "Guests", keywords: ["guest", "invite", "share", "share a session", "bret", "group chat", "place names", "hide project"], scope: "computer", read: "guests_list", keys: ["use_these_ask_note"], applies: (s, c) => c.groupChat?.(s) === true },
+  // Beginner once the beta is on (S3): it is where people are removed.
+  { id: "guests", page: "remote", tier: "beginner", label: "Guests", keywords: ["guest", "invite", "invite someone", "people", "join", "share", "share a session", "bret", "group chat", "place names", "hide project"], scope: "computer", read: "guests_list", keys: ["use_these_ask_note"], applies: (s, c) => c.groupChat?.(s) === true },
   // ── Updates
   { id: "version", page: "updates", tier: "beginner", label: "Version", keywords: ["update", "upgrade", "check for updates", "auto update", "release", "about"], keys: ["update_auto_check"] },
   { id: "agent-clis", page: "updates", tier: "advanced", label: "Agent CLIs", keywords: ["update claude", "update codex", "upgrade", "cli versions", "harness updates"], scope: "computer", write: "update_harness" },

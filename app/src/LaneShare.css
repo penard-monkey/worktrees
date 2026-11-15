@@ -14,6 +14,15 @@
 .ls-modal { width: min(32rem, calc(100vw - 2 * var(--s4))); }
 .ls-pick { display: flex; flex-direction: column; gap: var(--s1); }
 .ls-warn { margin: var(--s2) 0; padding: var(--s2) var(--s3); border-left: 3px solid var(--warn); background: color-mix(in srgb, var(--warn) 10%, var(--bg-panel)); color: var(--txt-hi); font-weight: var(--fw-med); }
+/* The share dialog's steps (Who → Pair → Share): the current one in words
+   and weight, never in --accent as text (a fill, AGENTS.md). */
+.ls-steps { display: flex; gap: var(--s2); margin-left: auto; font-size: var(--fs-micro); color: var(--txt-mute); }
+.ls-steps span.on { color: var(--txt-hi); font-weight: var(--fw-bold, 700); }
+.ls-guest-meta { margin-left: var(--s1); }
+.ls-new { color: var(--txt-hi); }
+.ls-reach { border: 1px solid var(--line); border-radius: var(--r-md); padding: var(--s2) var(--s3); display: flex; flex-direction: column; gap: var(--s2); background: var(--bg-panel); }
+.ls-reach select { background: var(--bg-input); color: var(--txt-hi); border: 1px solid var(--line-strong); border-radius: var(--r-md); padding: 5px 8px; font: inherit; }
+.ls-share-body:empty { display: none; }
 .ls-guests { list-style: none; margin: var(--s2) 0 0; padding: 0; display: flex; flex-direction: column; gap: var(--s1); }
 .ls-guests li { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); color: var(--txt-hi); }
 .ls-guest-acts { margin-left: auto; display: flex; gap: var(--s1); }

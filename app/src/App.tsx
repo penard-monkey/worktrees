@@ -19,7 +19,8 @@ import { setTermScrollback, ShellPane, TerminalPane } from "./TerminalPane";
 import { newNotifier, onDone, onVisibility, onWaitingSnapshot, type NotifyMode } from "./notify";
 import { notify } from "./notifyhost";
 import { AgentViewSwitch, ChatPane } from "./ChatPane";
-import { LaneShareBar, LaneThread } from "./LaneShare";
+import { LaneShareBar, LaneThread, openShareDialog, ShareDialogHost, useShareStart } from "./LaneShare";
+import { JoinDialog } from "./JoinHost";
 import { insertReference } from "./chat";
 import { DocsPane } from "./DocsPane";
 import { PlanPane } from "./PlanPane";
@@ -4729,6 +4730,10 @@ function App() {
   // through betaLive. Off until the settings load, like every switch.
   const groupChatOn = groupChatBeta(settings);
   useEffect(() => publishGroupChat(groupChatOn), [groupChatOn]);
+  // *Share this session…* (group chat start design A, F10): offered where the
+  // lane's bar would offer *Share with…*, and Home's *Join with a link…*.
+  const shareStart = useShareStart();
+  const [joining, setJoining] = useState(false);
   // The places with a live Claude or Codex, for the corner's share requests
   // (laneLive.ts): a request for a place with no live session says so.
   useEffect(() => {
@@ -9719,6 +9724,11 @@ function App() {
                   <button className="ctrl icon-only" title="more actions" onClick={() => (menu === "more" ? closeMenu() : (setConfirmRm(null), setMenu("more")))}><Icons.Ellipsis /></button>
                   {menu === "more" && (
                     <div className="popover right">
+                      {groupChatOn && shareStart(sel.repo, sel.slug) && (
+                        <button className="pop-item" data-testid="topbar-share" onClick={() => { closeMenu(); openShareDialog(sel.repo, sel.slug); }}>
+                          Share this session…
+                        </button>
+                      )}
                       {selected.tmux_session.up && (
                         confirmRm === closeKey(sel.repo, sel.slug) ? (
                           <button className="pop-item danger armed"
@@ -9968,6 +9978,10 @@ function App() {
                     <button className="ctrl home-import with-icon" data-testid="hubs-open-home" onClick={openHubs}>
                       <Icons.HardDrive size={13} /> Hubs…
                     </button>
+                    {/* The guest's way in (S4, F5): the link a host's Share… sent. */}
+                    {groupChatOn && (
+                      <button className="ctrl home-import" data-testid="join-home" onClick={() => setJoining(true)}>Join with a link…</button>
+                    )}
                   </div>
                   <div className="chips">
                     <span className="chip"><span className="dot" style={{ background: "var(--ok)" }} /> {stats.live} live</span>
@@ -10407,6 +10421,8 @@ function App() {
           same coordinates the undo banner sat exactly on top of the note it
           was supposed to accompany. Undo first in DOM = above on screen. */}
       {groupChatOn && <GuestToasts />}
+      {groupChatOn && <ShareDialogHost />}
+      {groupChatOn && joining && <JoinDialog groupChat={groupChatOn} onClose={() => setJoining(false)} />}
       {(err || notice || undo || planHint) && (
         <div className="float-stack">
           {/* One click back from a slip of the wrist — a drag rewrites declared
@@ -10772,6 +10788,9 @@ function App() {
         <CtxMenu x={ctx.x} y={ctx.y} onClose={closeCtx}>
           <div className="pop-hint">{ctxPlace.is_main ? "◆ main" : ctxPlace.slug}</div>
           <button className="pop-item" onClick={() => enterPlace(ctx.repo, ctxPlace)}>Enter <Icons.ChevronRight size={12} /></button>
+          {groupChatOn && shareStart(ctx.repo, ctxPlace.slug) && (
+            <button className="pop-item" data-testid="ctx-share" onClick={() => { const r = ctx.repo, sl = ctxPlace.slug; closeCtx(); openShareDialog(r, sl); }}>Share this session…</button>
+          )}
           {!ctxPlace.tmux_session.up && ctxPlace.claude_session_present && (
             settings.ai_auto_resume ? (
               <button className="pop-item" onClick={() => enterPlace(ctx.repo, ctxPlace, { fresh: true })}>Open fresh (skip resume)</button>

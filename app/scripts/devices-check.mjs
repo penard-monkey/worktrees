@@ -130,6 +130,17 @@ eq("an unknown id is named by its id", D.alertText(D.alertOf({ alert: "device", 
 eq("a new address class names the device", D.alertText(device("new_address_class"), label), "Studio Mac connected from a different kind of network than before.");
 eq("a knock from a revoked device says so", D.alertText(device("connect_refused", { reason: "revoked" }), label), "Studio Mac tried to connect and was refused: it is revoked.");
 eq("an expiry says why", D.alertText(device("disabled", { reason: "idle" }), label), "Studio Mac was disabled: its idle expiry ran out.");
+// F8 (group chat start design §1.4): a guest's device is not in the owner's
+// `devices_list`, so its id used to be the toast ("d_6udj… was paired with
+// this computer"). The guest list names both the person and the device; the
+// enrolled event's own `name` covers a guest list not read yet.
+const guests = (p) => (p === "g_b" ? { name: "Bret", devices: [{ id: "d_g", name: "bret-mac" }] } : null);
+const gsub = { principal: "g_b", device: "d_g" };
+eq("a guest's device is paired as the guest's, by both names", D.alertText(D.alertOf({ alert: "device", event: "enrolled", subject: gsub, name: "bret-mac" }, 1), label, guests), "Bret's bret-mac was paired as a guest.");
+eq("…from the event's own name before the guest list has it", D.alertText(D.alertOf({ alert: "device", event: "enrolled", subject: { principal: "g_new", device: "d_x" }, name: "ana-mac" }, 1), label, guests), "A guest's ana-mac was paired as a guest.");
+eq("…never by the device id", D.alertText(D.alertOf({ alert: "device", event: "enrolled", subject: { principal: "g_new", device: "d_x" } }, 1), label, guests), "A guest's device was paired as a guest.");
+eq("a guest's device knocking is named the same way", D.alertText(D.alertOf({ alert: "device", event: "connect_refused", subject: gsub, reason: "revoked" }, 1), label, guests), "Bret's bret-mac tried to connect and was refused: it is revoked.");
+eq("an owner device keeps its own words", D.alertText(D.alertOf({ alert: "device", event: "enrolled", subject: sub, name: "Studio Mac" }, 1), label, guests), "Studio Mac was paired with this computer.");
 eq("auth failures count", D.alertText(D.alertOf({ alert: "auth_failures", count: 20 }, 1), label).startsWith("20 connection attempts failed authentication"), true);
 // The store raises notices from `audit:alert` alone: its `devices:changed`
 // handler re-reads, and never pushes one.
@@ -179,7 +190,7 @@ eq("RemoteLayer shows no alert on a remote window",
 eq("…and useRemoteNotice no notice there",
   /return up && !notGranted\("remote_status"\) && remoteNoticeWords\(status\) !== null \? status : null;/.test(noticeGate), true);
 // DeviceRow calls its rows through `act("…", args)`, which adds the id.
-const invoked = new Set(["RemoteAccessPanel.tsx", "DevicesPanel.tsx", "PairSheet.tsx", "remoteStore.ts"]
+const invoked = new Set(["RemoteAccessPanel.tsx", "DevicesPanel.tsx", "PairSheet.tsx", "PairWindow.tsx", "remoteStore.ts"]
   .flatMap((f) => [...src(f).matchAll(/\b(?:invoke(?:<[^>()]*(?:<[^>]*>[^>()]*)*>)?|act)\(\s*"([a-z_0-9]+)"/g)].map((m) => m[1])));
 eq("the rows the remote-access UI calls are found", invoked.size >= 15, true);
 // Not console rows, on purpose: `devices_list` is `[admin]` (a device with

@@ -36,8 +36,9 @@ function when(epoch: number): string {
   return new Date(epoch * 1000).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
 }
 
-/** `manage`: draw Paste a new address and Forget (Advanced, settings-reorg
- *  §4.3); Drive and Pair are always there. */
+/** `manage`: draw Paste a new address, Forget and Pair with a host to drive
+ *  it (Advanced, settings-reorg §4.3); Drive is always there. A guest joins
+ *  from Join with a link (JoinHost.tsx), drawn in every mode. */
 export function HostsPanel({ onReport, onFail, manage = true }: { onReport: (m: string) => void; onFail: (e: unknown) => void; manage?: boolean }) {
   const [list, setList] = useState<HostList | null>(null);
   const [listErr, setListErr] = useState<string | null>(null);
@@ -181,12 +182,16 @@ export function HostsPanel({ onReport, onFail, manage = true }: { onReport: (m: 
           ))}
         </div>
       </section>
-      <section className="setting" data-testid="hosts-pair">
-        <label>Pair with a host</label>
+      {/* Pairing to DRIVE a host (Advanced): a guest's link goes in Join with
+          a link above (group chat start design F5). The link cannot say which
+          it is before pairing, so both forms take either. */}
+      {manage && <section className="setting" data-testid="hosts-pair">
+        <label>Pair with a host to drive it</label>
         <div className="hint">
-          On the host, open a pairing window (Settings → Remote → Pair a device, or <code>worktrees serve pair</code>) and
+          On the host, open a pairing window (Settings → Remote → Paired devices → Pair a device, or <code>worktrees serve pair</code>) and
           copy the <code>worktrees-pair:v1?…</code> link it shows beside the QR — Universal Clipboard, AirDrop or a password
           manager. Only a private address (a LAN, Tailscale, a cable) is accepted, and it is checked before anything is dialled.
+          A link someone sent you to read what they share goes in <b>Join with a link</b> above.
         </div>
         <input type="text" value={link} aria-label="Pairing link" placeholder="worktrees-pair:v1?addr=…"
           disabled={pairing !== null} onChange={(e) => setLink(e.currentTarget.value)} />
@@ -211,7 +216,7 @@ export function HostsPanel({ onReport, onFail, manage = true }: { onReport: (m: 
           </div>
         )}
         {pairErr && <pre className="update-log" data-testid="hosts-pair-err">{pairErr}</pre>}
-      </section>
+      </section>}
     </>
   );
 }
