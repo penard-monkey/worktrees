@@ -59,6 +59,7 @@ import { useNavDrag, type DragItem } from "./navdrag";
 import {
   VIEW_LABEL, WS_COLORS, addableTo, arrivedRoot, idsMoved, idsStepped, projectDrop, projectsAddable, rootsMoved, rootsStepped, rootsWith, rootsWithout, springsTo, wsColorOf, wsProjectKey,
   type NavView, type WsColor, type WsDef, type WsHit, type WsList,
+  EVERYTHING_ELSE_ID, everythingElse,
 } from "./workspaces";
 import { groupChatBeta, ideasBeta } from "./beta";
 import { publishGroupChat } from "./betaLive";
@@ -1158,6 +1159,25 @@ function WorkspaceHeader({ w, open, naming, rollup, onToggle, onMenu, onArm, onR
       <span className="pcount">{w.projects.length}</span>
       <button className="mini" title="workspace menu" data-testid="ws-menu" data-track="nav.workspace.menu"
         onClick={(e) => onMenu(e)}><Icons.Ellipsis size={13} /></button>
+    </div>
+  );
+}
+
+/** The built-in "Everything Else" header: a workspace header with nothing to
+ *  change. No menu, no rename, no drag handle, and it is not a drop target
+ *  (it carries no `data-ws-id`). Only the fold. */
+function EverythingElseHeader({ w, open, rollup, onToggle }: {
+  w: WsDef;
+  open: boolean;
+  rollup: "" | "busy" | "waiting" | "done";
+  onToggle: () => void;
+}) {
+  return (
+    <div className="ws-h fixed" data-testid="ee-header" data-track="nav.everything-else">
+      <span className="caret" onClick={onToggle}>{open ? <Icons.ChevronDown size={11} /> : <Icons.ChevronRight size={11} />}</span>
+      <span className={"ws-icon" + (rollup ? " " + rollup : "")}><Icons.Layers size={13} /></span>
+      <span className="ws-name" onClick={onToggle}>{w.name}</span>
+      <span className="pcount">{w.projects.length}</span>
     </div>
   );
 }
@@ -7249,7 +7269,8 @@ function App() {
     e.stopPropagation();
     setMenu(null);
     setConfirmRm(null);
-    setCtx({ kind: "project", x: e.clientX, y: e.clientY, root, ...(inWs ? { ws: inWs } : {}) });
+    // Everything Else is no workspace to leave: its rows get the All projects menu.
+    setCtx({ kind: "project", x: e.clientX, y: e.clientY, root, ...(inWs && inWs !== EVERYTHING_ELSE_ID ? { ws: inWs } : {}) });
     // Re-read on every open rather than once: a hub is a drive someone plugs in
     // and pulls out, so a cached "no hub" would outlive the truth.
     if (ws?.projects.find((v) => v.root === root)?.ok) { loadSyncStatus(root); loadRemote(root).catch(fail); }
@@ -8890,6 +8911,9 @@ function App() {
   // Where a guest host's rows go: under a local project of the same NAME.
   const localNames = (ws?.projects ?? []).map((pv) => basename(pv.root));
   const ProjectNode = ({ pv, inWs }: { pv: ProjectView; inWs?: string }) => {
+    // `inNamed`: the id of a NAMED workspace it is under; Everything Else folds
+    // like one (its own key) but is not one to take it out of.
+    const inNamed = inWs && inWs !== EVERYTHING_ELSE_ID ? inWs : undefined;
     const open = inWs ? !settings.ws_collapsed?.[wsProjectKey(inWs, pv.root)] : !collapsed[pv.root];
     const toggle = () => (inWs ? toggleWs(wsProjectKey(inWs, pv.root)) : toggleProject(pv.root));
     const places = (pv.snapshot?.places ?? []).filter(visiblePlace);
@@ -8950,7 +8974,7 @@ function App() {
           // it carry their own keys, which `closest` finds first.
           data-track="nav.project"
           onContextMenu={(e) => projectCtx(e, pv.root, inWs)}
-          onPointerDown={(e) => arm(e, inWs ? { kind: "project", root: pv.root, ws: inWs } : { kind: "project", root: pv.root })}
+          onPointerDown={(e) => arm(e, inNamed ? { kind: "project", root: pv.root, ws: inWs } : { kind: "project", root: pv.root })}
         >
           <span className="caret" onClick={toggle}>{open ? <Icons.ChevronDown size={11} /> : <Icons.ChevronRight size={11} />}</span>
           {pv.ok
@@ -9013,13 +9037,13 @@ function App() {
               onClick={(e) => openSyncPop(e, pv.root)}>⇄</button>
           )}
           <button className="mini pnew" title="new worktree (⌘N)" data-track="nav.project.new" onClick={() => { setNewFor(newFor === pv.root ? null : pv.root); setNewBase(""); setNewDraft(null); }}><Icons.Plus size={13} /></button>
-          {inWs ? (
+          {inNamed ? (
             <button
               className="mini"
               data-testid="ws-project-remove"
               data-track="nav.workspace.project.remove"
               title="take it out of this workspace (it stays in All projects)"
-              onClick={() => wsRemoveProject(inWs, pv.root)}
+              onClick={() => wsRemoveProject(inNamed, pv.root)}
             ><Icons.X size={13} /></button>
           ) : (
             <button
@@ -9207,6 +9231,30 @@ function App() {
           );
         })}
         {wsGapAt(null) && <div className="drop-gap ws" />}
+        {(() => {
+          // The built-in last group (`everythingElse`): derived each render,
+          // folded like any card under its reserved id.
+          const ee = everythingElse(wsList, (ws?.projects ?? []).map((v) => v.root));
+          if (!ee) return null;
+          const open = !settings.ws_collapsed?.[ee.id];
+          const places = ee.projects.flatMap((p) => (pvOf(p.root)?.snapshot?.places ?? []).filter(visiblePlace));
+          const rollup = places.some((p) => activityOf(p) === "busy") ? "busy"
+            : places.some((p) => activityOf(p) === "waiting") ? "waiting"
+              : places.some((p) => doneOf(p) === 1) ? "done" : "";
+          return (
+            <div className="ws-group ee" data-ee data-testid="ee-group">
+              <EverythingElseHeader w={ee} open={open} rollup={rollup} onToggle={() => toggleWs(ee.id)} />
+              {open && (
+                <div className="ws-kids">
+                  {ee.projects.map((p) => {
+                    const pv = pvOf(p.root);
+                    return pv ? <Fragment key={p.root}>{ProjectNode({ pv, inWs: ee.id })}</Fragment> : null;
+                  })}
+                </div>
+              )}
+            </div>
+          );
+        })()}
         {wsNaming === "new"
           ? (
             <div className="ws-new-row">
