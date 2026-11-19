@@ -148,7 +148,20 @@ def score(d):
     reboot = next((i for i in intents if i["act"] == "reboot_owner"), None)
     rcv = (reboot or {}).get("recovery", {})
     unproved = [i for i in intents if i["proved"] == "unproved" and not i.get("impossible")]
+    # Other hosts' shares (§12.2: a guest who hosts too), host/thread-<key>.json.
+    others = {}
+    for f in sorted(host.glob("thread-*.json")):
+        key = f.stem.split("-", 1)[1]
+        th = json.loads(f.read_text() or "[]")
+        tp = host / f"turns-{key}.json"
+        rows = comment_to_action(th, all_turns(json.loads(tp.read_text() or "{}") if tp.exists() else {}))
+        got = [r["to_turn_s"] for r in rows if r["to_turn_s"] is not None]
+        others[key] = {"comment_to_action": rows, "median_s": statistics.median(got) if got else None,
+                       "reached": f"{len(got)}/{len(rows)}"}
     return {
+        "other_shares": others,
+        "replays": sum(1 for i in intents if any(j["i"] == i["i"] for j in intents if j is not i)) // 2,
+        "manual": [f"{i['i']} {i['act']}" for i in intents if i.get("manual")],
         "run": rec["run"], "variant": rec["variant"], "task": rec["task"],
         "intents": len(intents), "proved": sum(i["proved"] == "proved" for i in intents),
         "unproved": [f"{i['i']} {i['who']} {i['act']}: {i['proof']}" for i in unproved],
@@ -194,6 +207,13 @@ def table(s):
          f"share kept: {rcv.get('share_kept')}, binding after: {rcv.get('binding_after')}"
          + (", app reopened by hand" if rcv.get("app_reopened_by_hand") else "") if rcv else "no reboot in this run"),
     ]
+    for key, o in s.get("other_shares", {}).items():
+        rows.insert(1, (f"Comment to agent action ({key}'s share)", f"median {fmt(o['median_s'])} ({o['reached']} reached a turn)",
+                        "; ".join(f"#{r['seq']} {fmt(r['to_shared_s'])} → turn {fmt(r['to_turn_s'])} → done {fmt(r['to_done_s'])}"
+                                  for r in o["comment_to_action"]) or "no guest posts"))
+    if s.get("manual") or s.get("replays"):
+        rows.append(("Replays", f"{s.get('replays', 0)} intents replayed, {len(s.get('manual', []))} done by hand",
+                     ", ".join(s.get("manual", [])) or "—"))
     out = [f"**{s['run']}** — {s['variant']}, {s['task']}: {s['proved']}/{s['intents']} intents proved, {s['duration_s']} s",
            "", "| Measure | Value | Detail |", "|---|---|---|"]
     out += [f"| {a} | {b} | {c.replace('|', '/')} |" for a, b, c in rows]
