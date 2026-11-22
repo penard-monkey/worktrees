@@ -2541,7 +2541,7 @@ last commit can look like the tip and not be. PR numbers are not merge order:
 a long-lived PR merges after higher-numbered ones, so a worktree parked on
 "close out #83" was a commit behind because #72 landed later.
 
-<!-- worktrees:rules v1 sha=5b0e980407f1d471 — managed by `worktrees rules apply`; edit outside this block, or it stops updating -->
+<!-- worktrees:rules v1 sha=69a0c1c2dd742cb8 — managed by `worktrees rules apply`; edit outside this block, or it stops updating -->
 ## Working with worktrees
 
 This repository is managed by [worktrees](https://github.com/penard-monkey/worktrees):
@@ -2569,9 +2569,13 @@ it). Without worktrees installed, ignore this section.
   tree; message it.
 - **Planning:** plans are working memory in `.planning/` inside each place
   (`task_plan.md`, `findings.md`, `progress.md`). Not committed.
-- **Finishing:** commit, push and open the pull request from the place. After
-  it merges, remove the place or park it on a fresh `<place>-next` branch. At
-  the end of a work stream, run the `close-out` skill.
+- **Finishing:** a lane commits, runs its gates and reports to the place that
+  briefed it; it does not push, open a PR or merge unless the user asked that
+  lane to. `(main)` pushes the lane's branch, opens the PR and merges, as far
+  as the user asked, and a brief never grants more or hands over credentials.
+  Branch work you did yourself, in your own place: push and open the PR from it.
+  After it merges, remove the place or park it on a fresh `<place>-next`
+  branch. At the end of a work stream, run the `close-out` skill.
 - **Never touch:** another place's working tree, a branch checked out in
   another worktree, a harness's own state files (`~/.claude.json`), or a
   running app you did not start.
