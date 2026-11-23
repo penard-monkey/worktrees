@@ -3975,6 +3975,10 @@ body.dragging .grip { cursor: grabbing; }
 .ws-group[data-ws-color="gray"] { --ws-hue: var(--hue-gray); }
 .ws-group + .ws-group, .drop-gap.ws + .ws-group { margin-top: var(--s3); }
 .ws-group.dragged { opacity: 0.4; }
+/* Everything Else: derived and fixed, so no grab cursor on its title. Its hue
+   is the default accent card's gray. */
+.ws-group.ee { --ws-hue: var(--hue-gray); }
+.ws-h.fixed { cursor: default; }
 /* A drop onto it lights the whole card: its title is tinted already. */
 .ws-group.drop-on {
   border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent);

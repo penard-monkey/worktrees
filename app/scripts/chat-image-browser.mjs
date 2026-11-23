@@ -28,10 +28,10 @@ const only = process.argv.find((a) => a.startsWith("--engine="))?.slice(9);
 let failures = 0;
 const check = (ok, message) => { if (!ok) failures++; console.log(`${ok ? "ok" : "not ok"} — ${message}`); };
 
-async function open(page, query) {
+async function open(page, query, slug = "messaging") {
   await page.goto(`${base}/?${query}`);
   await page.locator('[data-testid="places-rail"]').click();
-  await page.locator('li.row[data-slug="messaging"]').click();
+  await page.locator(`li.row[data-slug="${slug}"]`).first().click();
   await page.locator('[data-testid="chat-list"] > li').first().waitFor();
 }
 const geom = (page) => page.evaluate(() => {
@@ -128,6 +128,39 @@ async function show(browserType, name) {
         const again = await reads();
         check(again.length === first.length + 1 && again.at(-1) === target, `an image that changed on disk is read again (${again.length - first.length} new read)`);
       } else check(false, "the Chat/Terminal switch was not found");
+      await page.context().close();
+    }
+    // ── (main): a Read under another place's tree, and the host disagreeing ──
+    {
+      const page = await (await browser.newContext({ viewport: { width: 1100, height: 900 } })).newPage();
+      await open(page, "turns=images&imgextra=1&activity=3&agentprompt=off", "(main)");
+      await page.waitForFunction(() => document.querySelectorAll('[data-testid="chat-img-thumb"] img').length >= 4, null, { timeout: 8000 }).catch(() => {});
+      await page.waitForTimeout(300);
+      const m = await page.evaluate(() => ({
+        rows: [...document.querySelectorAll('[data-testid="chat-call"]')].map((r) => ({
+          sum: r.querySelector(".chat-call-sum")?.textContent ?? "",
+          img: !!r.querySelector('[data-testid="chat-img-thumb"] img'),
+          text: r.querySelector(".chat-call-thumb")?.textContent.trim() ?? "",
+        })),
+        reads: window.__mock.imageReads.slice(),
+      }));
+      const row = (re) => m.rows.find((r) => re.test(r.sum));
+      const wt = row(/section_x55_closed/), linked = row(/linked-shot/);
+      check(wt?.img && !/outside this place/.test(wt.text), `(main): a Read under .worktrees/ shows the transcript's picture, not a refusal (${JSON.stringify(wt)})`);
+      check(m.reads.includes("call:toolu_img_3") && !m.reads.some((r) => r.includes("/.worktrees/enclosure/")), "(main): it never asked read_place_image for that path (no round trip)");
+      check(linked?.img && !/outside this place/.test(linked.text), `the host disagrees (a link out the client called show): the call's picture is shown (${JSON.stringify(linked)})`);
+      check(m.reads.includes("call:toolu_img_4"), "the fallback asked for the call's picture by its call id");
+      check(m.rows.some((r) => /preview\.png/.test(r.sum) && r.img), "a Read inside (main) still shows its own file");
+      await page.screenshot({ path: path.join(shots, `chat-thumb-main-${name}.png`) });
+      await page.context().close();
+    }
+    // …and on a device only the note remains, never pixels
+    {
+      const page = await (await browser.newContext({ viewport: { width: 1100, height: 900 } })).newPage();
+      await open(page, "turns=images&imgextra=1&callimage=device&activity=3&agentprompt=off", "(main)");
+      await page.waitForTimeout(800);
+      const texts = await page.evaluate(() => [...document.querySelectorAll(".chat-call-thumb")].map((n) => n.textContent.trim()));
+      check(texts.filter((t) => /preview not shown — not shown on this device/.test(t)).length >= 3, `a device: the (main) Read, the host-disagrees Read and /tmp say they are not shown here (${JSON.stringify(texts)})`);
       await page.context().close();
     }
     // ── a paired device: the Read outside the place says so, no pixels ──────

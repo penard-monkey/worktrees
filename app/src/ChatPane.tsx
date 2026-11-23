@@ -422,7 +422,7 @@ function CallRow(props: { c: ToolCall; k: string; target: Target; root: string; 
   // A Read of an image shows what it opened, small (feat/chat-images). The
   // path is the call's `file_path`, judged by the same place-only rule.
   const shot = target.idea ? null : readImagePath(c.name, c.summary, c.failed);
-  const thumb = shot ? chatImageSrc(shot, "", props.root) : null;
+  const thumb = shot ? chatImageSrc(shot, "", props.root, target.slug === "(main)") : null;
   // Inside the place: the file itself. Outside it (a render in /tmp, the
   // owner's flow): the picture Claude was shown, from the transcript, which
   // only the host's own console is given; a device is told so in words.
@@ -448,6 +448,7 @@ function CallRow(props: { c: ToolCall; k: string; target: Target; root: string; 
       {shown && (thumb?.kind === "show" || byCall) && (
         <div className="chat-call-thumb">
           <ImageView path={shown} place={{ repo: target.repo, slug: target.slug }} call={byCall ? { repo: target.repo, slug: target.slug, callId: c.call_id! } : undefined}
+            fallbackCall={c.call_id ? { repo: target.repo, slug: target.slug, callId: c.call_id } : undefined}
             inline enlarge thumb alt={`Read: ${shown.split("/").pop()}`} errPrefix="preview not shown — " />
         </div>
       )}
