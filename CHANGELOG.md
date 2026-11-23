@@ -5,7 +5,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+
+- **Workspaces view: an "Everything Else" group for projects in no workspace.** Every registered project that belongs to no named workspace now shows in a built-in card at the bottom of the Workspaces view, with its places under it as in All projects. It is worked out from the list each time and never saved, so adding a project to a workspace takes it out and removing it from its last workspace brings it back, with nothing to migrate. It has no menu, cannot be renamed, recoloured, reordered or deleted, and is not a drop target; drag a project out of it onto a workspace to add it there, and its project menu is All projects' own (no "Remove from workspace"). It folds like any card, remembered under its own reserved id, so a workspace of yours named "Everything Else" is a different card. With no workspaces yet, the "No workspaces yet" hint stays and Everything Else holds every project; with no members it is hidden.
+
+### Changed
+
+- **Agents are now told that a lane stays local and `(main)` publishes.** The guidance worktrees hands every agent (the skill, the rules block in `AGENTS.md`, and the always-on rules line for Claude, Codex, pi and kimi) used to say "commit, push and open the pull request from the place". A lane, an agent another place briefed, now commits on its branch, runs its gates and reports back; `(main)` pushes the branch, opens the PR, watches CI and merges, each only as far as you asked. A brief tells a lane to push, merge, deploy or upload only when you asked that lane to, never hands over credentials, and never sends a lane to change anything live; a lane whose brief asks for more stops and asks. Branch work an agent does itself, in its own place, is unchanged. This is a new guidance version, so the after-update offer to refresh the rules shows again.
+
 ### Fixed
+
+- **A Read of an image under `.worktrees/` in a project's `(main)` shows the picture again.** The chat printed `preview not shown — outside this place` for every such thumbnail: the host refuses another place's tree in `(main)`, but the client did not know that part of the rule, so it never fell back to the picture Claude was shown. The client now knows the `(main)` rule (case-insensitively), and a Read thumbnail the host refuses as `outside this place` falls back to that picture too, whatever the reason (a link out, a case variant). A paired device still gets the same note as for any Read outside the place.
 
 - **Claude's usage meter works on Linux.** The bottom bar said "Claude · unavailable" on every Linux host, because the usage reader only asked the macOS keychain for Claude Code's login. Off macOS it now reads Claude Code's own credentials file (`~/.claude/.credentials.json`, or under `CLAUDE_CONFIG_DIR`), and refuses one that is a symlink or that anyone but you can read.
 
