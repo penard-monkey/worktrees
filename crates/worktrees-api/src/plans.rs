@@ -390,6 +390,37 @@ mod tests {
         let _ = fs::remove_dir_all(d);
     }
 
+    /// The rows refuse the nav's Everything Else (#684: derived by the page,
+    /// never stored), and it has no overview. A workspace's color (#659) is
+    /// answered beside its plan and ideas.
+    #[test]
+    fn everything_else_is_refused_and_a_color_is_answered_beside_the_plan() {
+        const EE: &str = "everything-else";
+        let (d, f) = files("ee");
+        register(&f, &[]);
+        let a = mk(&f, "A");
+        let p = ideas::make_plan_at(&f.ideas, std::slice::from_ref(&a), None, None).unwrap().idea.id.unwrap();
+        let w = store::create_at(&f.ws, "One").unwrap().id;
+        let before = fs::read_to_string(&f.ws).unwrap();
+        for e in [
+            set_plan_in(&f, EE, Some(&p)).unwrap_err(),
+            set_plan_in(&f, EE, None).unwrap_err(),
+            link_idea_in(&f, EE, &a).unwrap_err(),
+            unlink_idea_in(&f, EE, &a).unwrap_err(),
+            overview_in(&f, EE).unwrap_err(),
+        ] {
+            assert_eq!(e, format!("no workspace {EE}"));
+        }
+        assert!(from_plan_in(&f, EE).is_err(), "nor is it a plan");
+        assert_eq!(fs::read_to_string(&f.ws).unwrap(), before, "a refusal writes nothing");
+        set_plan_in(&f, &w, Some(&p)).unwrap();
+        crate::workspaces::set_color_in(&f.ws, &f.reg, &w, Some("teal")).unwrap();
+        let l = link_idea_in(&f, &w, &a).unwrap();
+        let v = serde_json::to_value(&l.workspaces[0]).unwrap();
+        assert_eq!((&v["color"], &v["plan"], &v["ideas"]), (&"teal".into(), &p.as_str().into(), &serde_json::json!([a])));
+        let _ = fs::remove_dir_all(d);
+    }
+
     #[test]
     fn a_workspaces_plan_and_ideas_are_set_by_live_id_and_refused_otherwise() {
         let (d, f) = files("link");

@@ -569,6 +569,65 @@ mod tests {
         assert!(!raw.contains("\"ideas\": []"), "an empty list is not written: {raw}");
     }
 
+    /// The card's color (#659), the project order (#660) and phase 4's plan
+    /// and ideas live in one record: no edit of one drops another.
+    #[test]
+    fn color_projects_plan_and_ideas_keep_each_other() {
+        let t = Tmp::new("keep-all");
+        let (pl, idea) = (crate::ulid::new(), crate::ulid::new());
+        let w = create_at(&t.file(), "W").unwrap();
+        set_color_at(&t.file(), &w.id, Some("teal")).unwrap();
+        set_projects_at(&t.file(), &w.id, &s(&["/a", "/b"]), any).unwrap();
+        set_plan_at(&t.file(), &w.id, Some(&pl)).unwrap();
+        link_idea_at(&t.file(), &w.id, &idea).unwrap();
+        let same = |what: &str, roots: &[&str], color: Option<&str>| {
+            let f = read_at(&t.file()).unwrap();
+            let w = &f.workspaces[0];
+            assert_eq!(w.color.as_deref(), color, "{what}: color");
+            assert_eq!((w.plan.as_deref(), w.ideas.as_slice()), (Some(pl.as_str()), &[idea.clone()][..]), "{what}: plan and ideas");
+            assert_eq!(w.projects.iter().map(|p| p.root.as_str()).collect::<Vec<_>>(), roots, "{what}: projects");
+            assert!(w.extra.is_empty(), "{what}: every field is read by its name, none falls into `extra`: {:?}", w.extra);
+        };
+        same("after linking", &["/a", "/b"], Some("teal"));
+        set_projects_at(&t.file(), &w.id, &s(&["/b", "/a"]), any).unwrap();
+        same("after a move inside it", &["/b", "/a"], Some("teal"));
+        rename_at(&t.file(), &w.id, "Renamed").unwrap();
+        reorder_at(&t.file(), &s(&[&w.id])).unwrap();
+        set_color_at(&t.file(), &w.id, None).unwrap();
+        same("after clearing the color", &["/b", "/a"], None);
+        // And a workspace made from a plan takes a color as any other.
+        let (m, _) = from_plan_at(&t.file(), "M", &crate::ulid::new(), &[], &[], any).unwrap();
+        assert_eq!(m.color, None);
+        set_color_at(&t.file(), &m.id, Some("red")).unwrap();
+        set_plan_at(&t.file(), &m.id, None).unwrap();
+        assert_eq!(read_at(&t.file()).unwrap().workspaces[1].color.as_deref(), Some("red"));
+    }
+
+    /// The nav's Everything Else is the page's alone (#684): derived, never
+    /// stored, under an id core cannot mint. So no plan or idea can be put on
+    /// it, and nothing is written; nor does a plan of that name make it.
+    #[test]
+    fn everything_else_takes_no_plan_and_no_idea() {
+        const EE: &str = "everything-else";
+        let t = Tmp::new("ee");
+        create_at(&t.file(), "W").unwrap();
+        let before = fs::read_to_string(t.file()).unwrap();
+        let (pl, idea) = (crate::ulid::new(), crate::ulid::new());
+        assert!(!crate::ulid::is_valid(EE));
+        for e in [
+            set_plan_at(&t.file(), EE, Some(&pl)).unwrap_err(),
+            set_plan_at(&t.file(), EE, None).unwrap_err(),
+            link_idea_at(&t.file(), EE, &idea).unwrap_err(),
+            unlink_idea_at(&t.file(), EE, &idea).unwrap_err(),
+        ] {
+            assert!(e.contains(EE), "it names what was not found: {e}");
+        }
+        assert_eq!(fs::read_to_string(t.file()).unwrap(), before, "a refusal writes nothing");
+        assert!(from_plan_at(&t.file(), "X", EE, &[], &[], any).is_err(), "nor is it a plan");
+        let (w, made) = from_plan_at(&t.file(), "Everything Else", &pl, &[], &[], any).unwrap();
+        assert!(made && w.id != EE && crate::ulid::is_valid(&w.id), "a plan of that name makes a named workspace: {}", w.id);
+    }
+
     #[test]
     fn a_no_op_edit_writes_nothing() {
         let t = Tmp::new("noop");

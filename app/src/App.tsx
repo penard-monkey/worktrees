@@ -1138,7 +1138,8 @@ function WorkspaceHeader({ w, open, naming, rollup, active, onOpen, onToggle, on
   open: boolean;
   /** Its overview is what the main area shows (phase 4). */
   active: boolean;
-  onOpen: () => void;
+  /** Show its overview. Absent with Ideas off: the name folds the card. */
+  onOpen?: () => void;
   naming: boolean;
   rollup: "" | "busy" | "waiting" | "done";
   onToggle: () => void;
@@ -1160,7 +1161,7 @@ function WorkspaceHeader({ w, open, naming, rollup, active, onOpen, onToggle, on
       <span className={"ws-icon" + (rollup ? " " + rollup : "")}><Icons.Layers size={13} /></span>
       {naming
         ? <WsNameField initial={w.name} onCommit={onRename} onCancel={onRenameCancel} />
-        : <span className="ws-name" data-testid="ws-name" title="Click for its overview; double-click to rename" onClick={onOpen} onDoubleClick={onRenameStart}>{w.name}</span>}
+        : <span className="ws-name" data-testid="ws-name" title={onOpen ? "Click for its overview; double-click to rename" : "Double-click to rename"} onClick={onOpen ?? onToggle} onDoubleClick={onRenameStart}>{w.name}</span>}
       <span className="pcount">{w.projects.length}</span>
       <button className="mini" title="workspace menu" data-testid="ws-menu" data-track="nav.workspace.menu"
         onClick={(e) => onMenu(e)}><Icons.Ellipsis size={13} /></button>
@@ -6652,8 +6653,16 @@ function App() {
   // ── a workspace's overview (idea board phase 4, `plans.ts`) ──
   // Clicking a workspace's name shows it in the main area while no place is
   // selected; entering a place leaves it. Read again on every list change
-  // and every change in the ideas folder (`ideas:changed`).
-  const openWsOverview = (id: string) => { setSel(null); setWsOpen(id); };
+  // and every change in the ideas folder (`ideas:changed`). Ideas' beta, not
+  // the workspaces': with it off a name folds its card. Everything Else is no
+  // workspace and has none. A share open as a guest covers the main area, so
+  // it closes, as it does for a place.
+  const openWsOverview = (id: string) => {
+    if (!ideasOn || id === EVERYTHING_ELSE_ID) return;
+    closeShare();
+    setSel(null);
+    setWsOpen(id);
+  };
   useEffect(() => { if (sel) setWsOpen(null); }, [sel]);
   useEffect(() => { if (!ideasOn) setWsOpen(null); }, [ideasOn]);
   useEffect(() => {
@@ -9269,8 +9278,8 @@ function App() {
                   open={open}
                   naming={wsNaming === w.id}
                   rollup={rollup}
-                  active={!sel && wsOpen === w.id}
-                  onOpen={() => openWsOverview(w.id)}
+                  active={ideasOn && !sel && !guestOpen && wsOpen === w.id}
+                  onOpen={ideasOn ? () => openWsOverview(w.id) : undefined}
                   onToggle={() => toggleWs(w.id)}
                   onMenu={(e) => wsMenu(e, w.id)}
                   onArm={(e) => arm(e, { kind: "workspace", id: w.id })}
@@ -10084,7 +10093,7 @@ function App() {
                   </footer>
                 )}
               </>
-            ) : wsOpen && wsById(wsOpen) ? (
+            ) : ideasOn && wsOpen && wsById(wsOpen) ? (
               <WorkspaceOverview
                 key={wsOpen}
                 name={wsById(wsOpen)!.name}
@@ -11193,8 +11202,10 @@ function App() {
         return (
           <CtxMenu x={ctx.x} y={ctx.y} onClose={closeCtx}>
             <div className="pop-hint">{w.name}</div>
-            <button className="pop-item" data-testid="ws-overview-open" data-track="nav.workspace.overview"
-              onClick={() => { closeCtx(); openWsOverview(w.id); }}>Overview</button>
+            {ideasOn && (
+              <button className="pop-item" data-testid="ws-overview-open" data-track="nav.workspace.overview"
+                onClick={() => { closeCtx(); openWsOverview(w.id); }}>Overview</button>
+            )}
             {/* Every way a project arrives, each ending with it IN this
                 workspace: one already registered (the list), or the nav
                 footer's three acts with this workspace as their continuation

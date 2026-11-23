@@ -9,7 +9,8 @@
 // have no runtime import) and holds:
 //   - the drop rules of §6.1's four phase 4 rows: an idea onto a plan, a plan
 //     onto a workspace with no plan (one plan, at most one workspace), an idea
-//     onto a workspace, a project onto a plan; each null case is no target;
+//     onto a workspace, a project onto a plan; each null case is no target,
+//     and Everything Else (derived, never stored) is one for neither;
 //   - every call names a console row serve has (dispatch.rs), with arguments
 //     its body reads — so a drag, its menu path and a later agent's proposal
 //     are one call (§7.1);
@@ -57,6 +58,13 @@ check(P.planOntoWorkspace(PL, ws[1], ws) === null, "a workspace that has a plan 
 check(P.planOntoWorkspace(PL2, ws[0], ws) === null, "a plan that already has a workspace is no target anywhere else (one plan, at most one workspace)");
 check(P.ideaOntoWorkspace(B, ws[1]) === W2 && P.ideaOntoWorkspace(A, ws[1]) === null && P.ideaOntoWorkspace(A, null) === null,
   "an idea onto a workspace links it, unless it is linked there already");
+// Everything Else: the reserved group is not a workspace to link to (#684).
+const { EVERYTHING_ELSE_ID: EE } = await import(`data:text/javascript;base64,${Buffer.from((await transformWithEsbuild(fs.readFileSync(here("../src/workspaces.ts"), "utf8"), "workspaces.ts", { loader: "ts" })).code).toString("base64")}`);
+const ee = { id: EE, plan: null, ideas: [] };
+check(typeof EE === "string" && EE.length > 0, "workspaces.ts names the reserved id");
+check(P.planOntoWorkspace(PL, ee, [...ws, ee]) === null, "a plan onto Everything Else is no target");
+check(P.ideaOntoWorkspace(B, ee) === null, "an idea onto Everything Else is no target");
+check(P.showRequest(JSON.stringify({ id: EE, at: 1000 }), 1000) === null, "the Ideas window cannot ask to show Everything Else");
 const view = { project_states: [{ line: 17, name: "worktrees", state: "registered", root: "/w/worktrees" }] };
 check(P.projectOntoPlan("/w/other", view) && !P.projectOntoPlan("/w/worktrees", view) && !P.projectOntoPlan("rel", view) && !P.projectOntoPlan("/w/x", null),
   "a project onto a plan adds it unless the plan already lists that root");
@@ -135,6 +143,12 @@ check(/if \(target\.kind === "ws-plan"\) \{ void wsCall\(setPlanCall\(target\.id
 check(/if \(target\.kind === "ws-idea"\) \{ void wsCall\(linkIdeaCall\(target\.id, target\.idea\)\)/.test(app) && /linkIdea=\{\(id\) => void wsCall\(linkIdeaCall\(wsOpen, id\)\)\}/.test(app),
   "an idea dropped on a workspace and the overview's Link an idea ▸ end in the same call");
 check(/planOntoWorkspace\(item\.id, onto, all\)/.test(app) && /ideaOntoWorkspace\(item\.id, onto\)/.test(app), "the main window's drop resolves through plans.ts's rules");
+const eeHead = app.slice(app.indexOf("function EverythingElseHeader("), app.indexOf("function WsGoneRow("));
+const eeGroup = app.slice(app.indexOf('className="ws-group ee"'), app.indexOf("})()}", app.indexOf('className="ws-group ee"')));
+check(eeHead.length > 100 && !/onOpen|openWsOverview|onMenu/.test(eeHead) && eeGroup.length > 100 && !/openWsOverview|onOpen|data-ws-id/.test(eeGroup),
+  "Everything Else has no overview to open, no menu, and no data-ws-id a drop could find");
+check(/const wsLite = \(\) => \(wsList\?\.workspaces \?\? \[\]\)\.map/.test(app) && /invoke<\{ workspaces: WsOption\[\] \}>\("workspaces_list"\)/.test(comp),
+  "what a drop or a Link picker can name is the stored list, which Everything Else is never in");
 check(/ideaOntoPlan\(/.test(comp) && /projectOntoPlan\(item\.root, planView\)/.test(comp), "the companion's drop resolves through plans.ts's rules");
 check(/<PlanPanel[\s\S]{0,200}view=\{planView\}/.test(comp) && /\{v\.problems\.length > 0 &&/.test(fs.readFileSync(here("../companion/PlanPanel.tsx"), "utf8")),
   "a plan's problems are drawn above the editor, which shows the document whatever they are");

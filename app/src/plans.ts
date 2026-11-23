@@ -94,18 +94,23 @@ export function ideaOntoPlan(drag: DocRow | null, onto: DocRow | null, planned: 
 
 export type WsLite = { id: string; plan: string | null; ideas: string[] };
 
+/** A workspace that can hold a plan or an idea. Everything Else (workspaces.ts,
+ *  `EVERYTHING_ELSE_ID`, which plans-check.mjs holds this equal to) is derived,
+ *  never stored, and takes neither. */
+const namedWs = (w: WsLite | null): w is WsLite => !!w && w.id !== "everything-else";
+
 /** A plan dropped on a workspace sets its plan, only when it has none (one
  *  plan, at most one workspace: a plan that has a workspace is no target
  *  anywhere else either). */
 export function planOntoWorkspace(plan: string, onto: WsLite | null, all: readonly WsLite[]): string | null {
-  if (!onto || onto.plan) return null;
+  if (!namedWs(onto) || onto.plan) return null;
   if (all.some((w) => w.plan === plan)) return null;
   return onto.id;
 }
 
 /** An idea dropped on a workspace links it, unless it is linked already. */
 export function ideaOntoWorkspace(idea: string, onto: WsLite | null): string | null {
-  if (!onto || onto.ideas.includes(idea)) return null;
+  if (!namedWs(onto) || onto.ideas.includes(idea)) return null;
   return onto.id;
 }
 
