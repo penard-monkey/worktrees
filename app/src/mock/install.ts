@@ -621,7 +621,7 @@ function mockGuidance(): Record<string, unknown> {
     skill_hash: mockHash(MOCK_SKILL_DEFAULT),
     skill_edit: mockSkillEdit,
     edit_path: "/Users/demo/.config/worktrees/guidance/SKILL.md",
-    rules: "Managed by worktrees: every branch lives in its own PLACE (a git worktree under .worktrees/ plus a tmux session). Do branch work in a place: create_worktree or `worktrees new <branch>`. Never `git worktree add`; never switch branches in (main). Run gates, builds and full test suites as `worktrees run --slot gate -- <cmd>` (the machine is shared with every lane); nudge or launch lanes at most three at a time. For the how-to (handing work to another agent, messaging between places, finishing and releasing from a place), use the worktrees skill if you have it, or run `worktrees guide`.",
+    rules: "Managed by worktrees: every branch lives in its own PLACE (a git worktree under .worktrees/ plus a tmux session). Do branch work in a place: create_worktree or `worktrees new <branch>`. Never `git worktree add`; never switch branches in (main). Run gates, builds and full test suites as `worktrees run --slot gate -- <cmd>` (the machine is shared with every lane); nudge or launch lanes at most three at a time. A lane commits, runs its gates and reports to the place that briefed it; that place, normally (main), pushes, opens the PR and merges, as far as the user asked. Brief a lane to push, open a PR, merge, deploy or upload only when the user asked that lane to, and never hand it credentials or send it to change anything live. For the how-to (handing work to another agent, messaging between places, finishing and releasing from a place), use the worktrees skill if you have it, or run `worktrees guide`.",
   };
 }
 let mockMcp: Record<string, unknown> = (() => {
@@ -1347,7 +1347,7 @@ function mockToolTurns(now: number, place: string, harness: string): MockTurn[] 
 // escape and a file the host refuses; a user message with an image; a Read of
 // an image in the place and one in /tmp; and, with `&filler=N`, N turns above
 // them so the images sit below the fold (`chat-image-browser.mjs`).
-function mockImageTurns(now: number, place: string, filler: number): MockTurn[] {
+function mockImageTurns(now: number, place: string, filler: number, extra = false): MockTurn[] {
   const f = Array.from({ length: filler }, (_, i): MockTurn => ({
     at: now - 3000 - (filler - i) * 20, user: `Earlier question ${i + 1}.`, tools: [], truncated: false,
     reply: `Earlier answer ${i + 1}, a few lines long so the list is taller than the pane.\n\nSecond paragraph of answer ${i + 1}, which says nothing more.`,
@@ -1356,6 +1356,12 @@ function mockImageTurns(now: number, place: string, filler: number): MockTurn[] 
   const steps: Record<string, unknown>[] = [
     { kind: "tool", at: now - 118, name: "Read", call_id: "toolu_img_1", summary: shot },
     { kind: "tool", at: now - 117, name: "Read", call_id: "toolu_img_2", summary: "/tmp/outside-shot.png" },
+    // `&imgextra=1`: a Read under another place's tree (what (main) sees under
+    // `.worktrees/`) and one the client calls `show` that the host refuses (a link out).
+    ...(extra ? [
+      { kind: "tool", at: now - 117.5, name: "Read", call_id: "toolu_img_3", summary: `${place}/.worktrees/enclosure/enclosure/preview/section_x55_closed.png` },
+      { kind: "tool", at: now - 117.2, name: "Read", call_id: "toolu_img_4", summary: `${place}/.worktrees-attachments/linked-shot.png` },
+    ] : []),
     { kind: "text", at: now - 116, text: [
       "Here is the design preview:",
       "![Design preview](.worktrees-attachments/wide-preview.svg)",
@@ -1486,7 +1492,7 @@ function mockTurnsAt(repo: string, slug: string) {
     return t;
   }
   if (harness === "claude" && new URLSearchParams(location.search).get("turns") === "images") {
-    t = mockImageTurns(now, mockPlacePath(repo, slug), Number(new URLSearchParams(location.search).get("filler") ?? 0));
+    t = mockImageTurns(now, mockPlacePath(repo, slug), Number(new URLSearchParams(location.search).get("filler") ?? 0), new URLSearchParams(location.search).get("imgextra") === "1");
     mockTurns.set(key, t);
     return t;
   }
