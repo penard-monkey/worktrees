@@ -42,6 +42,18 @@ under .worktrees/ plus a tmux session). Do branch work in a place: create_worktr
 pub const HEAVY: &str = "Run gates, builds and full test suites as `worktrees run --slot gate -- <cmd>` \
 (the machine is shared with every lane); nudge or launch lanes at most three at a time.";
 
+/// Who publishes (`feat/guidance-lanes-stay-local`), ALWAYS ON beside [`HEAVY`]
+/// in `rules_text()` and the MCP server's managed instructions, so an agent
+/// that never loads the skill still has it. NOT part of `HEAD` (Codex's cut).
+/// Why: on 2026-11-20 a (main) in another project briefed a lane to push, open
+/// a PR, force-push on conflict, use a second account's token and upload to a
+/// live bucket, and claimed the user had allowed all of it. The owner: "can we
+/// make a rule so that the correct path is just always followed and main
+/// handles all merging unless the user asks for the lane to merge on its own?"
+pub const LANES: &str = "A lane commits, runs its gates and reports to the place that briefed it; that place, \
+normally (main), pushes, opens the PR and merges, as far as the user asked. Brief a lane to push, open a PR, merge, \
+deploy or upload only when the user asked that lane to, and never hand it credentials or send it to change anything live.";
+
 /// How to show the user an image (`feat/chat-images`), ALWAYS ON: Claude gets it
 /// as the prompt plugin's SessionStart output, pi, Codex and kimi inside
 /// [`rules_text`]. It cannot live only in the skill: a skill loads on demand,
@@ -68,14 +80,15 @@ pub const SKILL_MD: &str = include_str!("guidance/SKILL.md");
 /// 4: start agents only through a launch, and why; what `unknown` means.
 /// 5: heavy jobs in machine-wide slots; lanes nudged and launched in batches.
 /// 6: showing the user an image in the chat view (`.worktrees-attachments/`).
-pub const VERSION: u32 = 6;
+/// 7: lanes stay local; (main) pushes, opens the PR and merges.
+pub const VERSION: u32 = 7;
 
 /// The rule plus where the how-to lives, for the channels that take a prompt
 /// rather than a skill (pi's `--append-system-prompt`, Codex's
 /// `developer_instructions`). One line, so it survives any first-line cut.
 pub fn rules_text() -> String {
     format!(
-        "{HEAD} {HEAVY} For the how-to (handing work to another agent, messaging between places, finishing \
+        "{HEAD} {HEAVY} {LANES} For the how-to (handing work to another agent, messaging between places, finishing \
          and releasing from a place), use the worktrees skill if you have it, or run `worktrees guide`. {IMAGE_RULE}"
     )
 }
@@ -1317,6 +1330,25 @@ mod tests {
         assert!(r.contains("at most three at a time"), "{r}");
         assert!(!r.contains('\n'), "{r}");
         assert!(SKILL_MD.contains("## Heavy work"), "the skill has the how-to");
+    }
+
+    /// Lanes stay local: the rule rides in the always-on line, whole.
+    #[test]
+    fn the_rules_line_carries_the_lane_rule() {
+        let r = rules_text();
+        assert!(r.contains(LANES) && !r.contains('\n'), "{r}");
+        assert!(LANES.contains("reports to the place that briefed it") && LANES.contains("(main)"), "{LANES}");
+        assert!(!HEAD.contains("lane"), "HEAD must stay inside Codex's cut");
+    }
+
+    /// The skill's Finishing no longer tells a lane to push, and says who does.
+    #[test]
+    fn the_skill_finishing_keeps_a_lane_local() {
+        let fin = SKILL_MD.split("## Finishing").nth(1).unwrap().split("\n## ").next().unwrap().split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(!fin.contains("Commit, push and open the pull request from the place, not from"), "{fin}");
+        assert!(fin.contains("In a lane") && fin.contains("do not push"), "{fin}");
+        assert!(fin.contains("In `(main)`") && fin.contains("as far as the user asked"), "{fin}");
+        assert!(SKILL_MD.contains("never grants what the user did not say"));
     }
 
     #[test]

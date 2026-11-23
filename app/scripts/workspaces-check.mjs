@@ -97,6 +97,33 @@ eq("…and of a folder inside one, as the deepest root holding it", W.arrivedRoo
 eq("a prefix is not a parent", W.arrivedRoot(["/r"], ["/r"], "/rx"), null);
 eq("nothing new and no folder: nothing arrives", W.arrivedRoot(["/x"], ["/x"], null), null);
 
+// ── 1b. Everything Else: the derived last group ──
+// Registered projects in no named workspace. Never stored, never a drop target.
+{
+  const EE = W.EVERYTHING_ELSE_ID;
+  ok("its id is reserved: not a ULID, so core can never mint it", typeof EE === "string" && !/^[0-9A-HJKMNP-TV-Z]{26}$/i.test(EE));
+  eq("its name is display text", W.EVERYTHING_ELSE_NAME, "Everything Else");
+  const g = W.everythingElse(list, ["/x", "/y", "/z", "/w"]);
+  eq("holds the registered projects that are in no named workspace, in All projects' order", g?.projects.map((p) => p.root), ["/z", "/w"]);
+  eq("…each as a registered row", g?.projects.every((p) => p.registered), true);
+  eq("…under the reserved id, name and gray", [g?.id, g?.name, g?.color], [EE, "Everything Else", "gray"]);
+  eq("an unregistered reference in a named workspace never lands in it", W.everythingElse(list, ["/gone"]), null);
+  eq("with no named workspace it holds every project", W.everythingElse({ workspaces: [] }, ["/a", "/b"])?.projects.map((p) => p.root), ["/a", "/b"]);
+  eq("before the list loads it holds nothing (no flash)", W.everythingElse(null, ["/a"]), null);
+  eq("with zero members it is hidden", W.everythingElse(list, ["/x", "/y"]), null);
+  eq("no projects at all: hidden", W.everythingElse({ workspaces: [] }, []), null);
+  const moved = { workspaces: [{ ...list.workspaces[1], projects: [...list.workspaces[1].projects, { root: "/z", name: "z", registered: true }] }] };
+  eq("adding a project to a named workspace takes it out", W.everythingElse(moved, ["/y", "/z"]), null);
+  eq("removing it from its last workspace brings it back", W.everythingElse({ workspaces: [{ id: "B", name: "B", projects: [] }] }, ["/y"])?.projects.map((p) => p.root), ["/y"]);
+  const mine = { workspaces: [{ id: "01HZZZZZZZZZZZZZZZZZZZZZZZ", name: "Everything Else", projects: [{ root: "/y", name: "y", registered: true }] }] };
+  eq("a user's own workspace of that name does not collide", [W.everythingElse(mine, ["/y", "/q"])?.id, W.everythingElse(mine, ["/y", "/q"])?.projects.map((p) => p.root)], [EE, ["/q"]]);
+  eq("it is not a drop target: an add onto it is nothing", W.projectDrop(P("/x"), { kind: "group", id: EE }, list), null);
+  eq("…nor a move within it", W.projectDrop(P("/z", EE), { kind: "group", id: EE }, list), null);
+  eq("a project dragged out of it onto a named workspace adds it there", W.projectDrop(P("/z", EE), { kind: "group", id: "A" }, list), { kind: "ws-add", id: "A", root: "/z" });
+  eq("…and onto the All projects switch it is not 'removed' from anything", W.projectDrop(P("/z", EE), { kind: "switch", view: "projects" }, list), null);
+  eq("its project fold keys are its own", W.wsProjectKey(EE, "/z"), `${EE}|/z`);
+}
+
 // ── 2. rows ──
 const ROWS = ["workspaces_list", "workspace_create", "workspace_rename", "workspace_remove", "workspace_set_projects", "workspace_reorder", "workspace_set_color"];
 const dispatch = read("../../crates/worktrees-cli/src/serve/dispatch.rs");
@@ -191,8 +218,19 @@ ok("the empty workspace offers Add a project, opening the same menu", /data-test
 // header so a match elsewhere cannot stand in for it.
 const hdr = app.slice(app.indexOf("const ProjectNode = "), app.indexOf("{open && pv.ok && ("));
 ok("ProjectNode was found", hdr.length > 200);
-ok("under a workspace the header ✕ takes it out of the workspace", /inWs\s*\?[\s\S]{0,500}wsRemoveProject\(/.test(hdr));
+ok("under a workspace the header ✕ takes it out of the workspace", /inNamed\s*\?[\s\S]{0,500}wsRemoveProject\(/.test(hdr));
 ok("…and never unregisters it", !/inWs[^\n]*confirmRemoveProject/.test(hdr));
+// Everything Else's wiring: a fixed card, never addressable as a workspace.
+{
+  const at = app.indexOf('data-testid="ee-group"');
+  const card = at < 0 ? "" : app.slice(app.lastIndexOf("everythingElse(wsList", at), app.indexOf("})()}", at));
+  ok("Everything Else is drawn from the derived rule, after the named ones", /everythingElse\(wsList, /.test(app) && app.indexOf("everythingElse(wsList") > app.indexOf("{wsGapAt(null)"));
+  ok("…its card is no drop target and no reorder row (no data-ws-id / data-drop)", card.length > 100 && !/data-ws-id|data-drop/.test(card));
+  ok("…it folds under its reserved id", /toggleWs\(ee\.id\)/.test(card) && /settings\.ws_collapsed\?\.\[ee\.id\]/.test(card));
+  const head = app.slice(app.indexOf("function EverythingElseHeader"), app.indexOf("function WsGoneRow") > 0 ? app.indexOf("function WsGoneRow") : undefined);
+  ok("…its header has no menu, rename or drag arm", head.length > 100 && !/onMenu|onArm|onRename|ws-menu|onContextMenu|onPointerDown/.test(head.replace(/\/\*\*[\s\S]*?\*\//, "")));
+  ok("…its rows get the All projects menu (no ws on the ctx) and no leave-workspace ✕", /inWs && inWs !== EVERYTHING_ELSE_ID \? \{ ws: inWs \}/.test(app) && /const inNamed = inWs && inWs !== EVERYTHING_ELSE_ID/.test(app));
+}
 ok("the view is the per-viewer nav_view setting", /settings\.nav_view/.test(app) && /updateSettings\(\{\s*nav_view:/.test(app));
 ok("a not-registered row is armed for the drag like any other", /<WsGoneRow[\s\S]{0,400}onArm=\{\(e\) => arm\(e, \{ kind: "project", root: p\.root, ws: w\.id \}\)\}/.test(app));
 ok("a drop within a workspace writes the whole list through workspace_set_projects", /const wsSetOrder = [\s\S]{0,700}wsRun\("workspace_set_projects", \{ id, roots \}\)/.test(app));

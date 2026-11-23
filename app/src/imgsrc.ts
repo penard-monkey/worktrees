@@ -9,6 +9,9 @@
 //   - relative: resolved against the PLACE's root, which is what the host does
 //     with it, so it goes through as written;
 //   - absolute: only under the place's root, and sent as written;
+//   - in `(main)`, whose root holds every other place's tree, nothing under
+//     `<root>/.worktrees/` (compared case-insensitively: APFS is, and the host
+//     decides by file identity);
 //   - `..`, a path outside the root, or a file that is no image: a note that
 //     names the path. Never a broken image and never a silent drop.
 
@@ -21,8 +24,9 @@ export type ImageSrc =
 
 const SCHEME = /^[a-z][a-z0-9+.-]*:/i;
 
-/** `src` as an agent wrote it, for the place at `root` (its absolute path). */
-export function chatImageSrc(src: string, alt: string, root: string): ImageSrc {
+/** `src` as an agent wrote it, for the place at `root` (its absolute path).
+ *  `isMain` is the project's `(main)`, where `.worktrees/` is not the place's. */
+export function chatImageSrc(src: string, alt: string, root: string, isMain = false): ImageSrc {
   const what = alt ? `${alt} (${src})` : src;
   const raw = src.trim();
   if (/^https?:/i.test(raw) || raw.startsWith("//")) return { kind: "note", text: `[remote image not loaded: ${what}]` };
@@ -35,6 +39,7 @@ export function chatImageSrc(src: string, alt: string, root: string): ImageSrc {
     ? (path === base || path.startsWith(base + "/") ? path.slice(base.length + 1).split("/") : null)
     : path.split("/");
   if (!parts || parts.some((p) => p === "..") ) return { kind: "note", text: `[image not shown: outside this place: ${path}]` };
+  if (isMain && parts.find((p) => p !== "" && p !== ".")?.toLowerCase() === ".worktrees") return { kind: "note", text: `[image not shown: outside this place: ${path}]` };
   const ext = /\.([^./]+)$/.exec(path)?.[1]?.toLowerCase();
   if (!ext || !IMAGE_EXTS.includes(ext)) return { kind: "note", text: `[${alt || path}]` };
   return { kind: "show", path };
