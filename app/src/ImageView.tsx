@@ -113,16 +113,16 @@ function Lightbox({ src, alt, onClose }: { src: string; alt: string; onClose: ()
 // Loads bytes as base64 and shows them as a data: URI. Used for an image FILE,
 // for a relative ![]() inside a rendered markdown doc (`inline`) and, with
 // `place`, for the chat's images and a Read's thumbnail (`enlarge`, `thumb`).
-export function ImageView({ path, mime, inline = false, alt = "", onError, place, call, enlarge = false, thumb = false, errPrefix = "" }: {
+export function ImageView({ path, mime, inline = false, alt = "", onError, place, call, fallbackCall, enlarge = false, thumb = false, errPrefix = "" }: {
   path: string; mime?: string; inline?: boolean; alt?: string; onError?: (e: unknown) => void;
-  place?: PlaceRef; call?: CallRef; enlarge?: boolean; thumb?: boolean; errPrefix?: string;
+  place?: PlaceRef; call?: CallRef; fallbackCall?: CallRef; enlarge?: boolean; thumb?: boolean; errPrefix?: string;
 }) {
   const [blob, setBlob] = useState<(FileBlob & { mime?: string }) | null>(() => (call ? peekCallImage(call) : place ? peekPlaceImage(place, path) : null));
   const [err, setErr] = useState<string | null>(null);
   const [actual, setActual] = useState(false);
   const [big, setBig] = useState(false);
   const [dim, setDim] = useState<{ w: number; h: number } | null>(null);
-  const repo = place?.repo, slug = place?.slug, callId = call?.callId;
+  const repo = place?.repo, slug = place?.slug, callId = call?.callId, fbId = fallbackCall?.callId;
 
   useEffect(() => {
     let alive = true;
@@ -138,7 +138,21 @@ export function ImageView({ path, mime, inline = false, alt = "", onError, place
       setBlob(peekPlaceImage({ repo, slug }, path));
       loadPlaceImage({ repo, slug }, path)
         .then((b) => { if (alive) setBlob(b); })
-        .catch((e) => { if (!alive) return; setBlob(null); setErr(String(e)); onError?.(e); });
+        .catch((e) => {
+          if (!alive) return;
+          // The client cannot predict every host refusal (a link out, a case
+          // variant, a moved file). A Read the host calls "outside this place"
+          // is shown as if the client had said so: the picture Claude was shown.
+          if (fbId !== undefined && /^outside this place/.test(String(e))) {
+            const c = { repo, slug, callId: fbId };
+            setBlob(peekCallImage(c));
+            loadCallImage(c)
+              .then((b) => { if (alive) setBlob(b); })
+              .catch((e2) => { if (!alive) return; setBlob(null); setErr(String(e2)); onError?.(e2); });
+            return;
+          }
+          setBlob(null); setErr(String(e)); onError?.(e);
+        });
     } else {
       setBlob(null); setDim(null);
       invoke<FileBlob>("read_file_base64", { path })
@@ -146,7 +160,7 @@ export function ImageView({ path, mime, inline = false, alt = "", onError, place
         .catch((e) => { if (!alive) return; setErr(String(e)); onError?.(e); });
     }
     return () => { alive = false; };
-  }, [path, repo, slug, callId, onError]);
+  }, [path, repo, slug, callId, fbId, onError]);
 
   // Inline (inside markdown prose) these must be SPANs: a <div> inside the <p>
   // React puts prose in is invalid nesting the browser reparents.

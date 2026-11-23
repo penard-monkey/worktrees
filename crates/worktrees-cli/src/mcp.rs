@@ -1039,9 +1039,10 @@ impl Server {
                 ),
                 Some(p) => format!(
                     "{GUIDANCE_HEAD} {} list_places shows every place; agents in different \
-                     places talk through report / messages / wait. {} {}{}",
+                     places talk through report / messages / wait. {} {} {}{}",
                     role_line(&self.role(p), &p.main_root),
                     worktrees_core::guidance::HEAVY,
+                    worktrees_core::guidance::LANES,
                     if self.mutations {
                         "Mutating tools are enabled; destructive ones need confirm: true."
                     } else {
@@ -4452,6 +4453,8 @@ mod tests {
         let text = instructions_at(&sc.root, &sc.root);
         let at = text.find("worktrees run --slot gate --").expect(&text);
         assert!(at > 247, "must not push the place rule out of Codex's cut: {text}");
+        let lanes = text.find(worktrees_core::guidance::LANES).expect(&text);
+        assert!(lanes > at && lanes > 247, "the lane rule rides after the slot rule: {text}");
     }
 
     /// §3.1's role lines: the server knows where it runs, so it says so. The

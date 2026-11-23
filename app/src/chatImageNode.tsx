@@ -8,7 +8,7 @@ import { chatImageSrc } from "./imgsrc";
 /** A picture inside THIS place shows (click to enlarge); every other source is
  *  a note that names it. The host judges the path again (`read_place_image`). */
 export function chatImageNode(src: string, alt: string, root: string, place: PlaceRef): ReactNode {
-  const r = chatImageSrc(src, alt, root);
+  const r = chatImageSrc(src, alt, root, place.slug === "(main)");
   if (r.kind === "note") return <em className="md-img-note" data-testid="chat-img-note">{r.text}</em>;
   return <ImageView key={r.path} path={r.path} place={place} inline enlarge alt={alt} errPrefix="image not shown — " />;
 }
