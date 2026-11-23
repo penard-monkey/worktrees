@@ -81,6 +81,18 @@ try {
   check(/\[Notes\]/.test(html("![Notes](notes.txt)")) && !/<img/.test(html("![Notes](notes.txt)")), "a file that is no image is a note");
   check(!/<img/.test(html("![a](https://x/y.png) ![b](/etc/p.png) ![c](../d.png)")), "no <img> is ever built for a refused source");
 
+  // ── (main): its root holds every other place's tree ─────────────────────
+  const mroot = "/work/proj";
+  const kind = (src, isMain, r = mroot) => chatImageSrc(src, "", r, isMain).kind;
+  check(kind(".worktrees/x/a.png", true) === "note", "(main): a relative path under .worktrees/ is a note");
+  check(kind("./.worktrees/x/a.png", true) === "note", "(main): ./.worktrees/ is a note too");
+  check(kind(`${mroot}/.worktrees/x/a.png`, true) === "note", "(main): an absolute path under <root>/.worktrees/ is a note");
+  check(kind(".Worktrees/x/a.png", true) === "note" && kind(`${mroot}/.WORKTREES/x/a.png`, true) === "note", "(main): .Worktrees is a note (APFS is case-insensitive)");
+  check(/outside this place/.test(chatImageSrc(`${mroot}/.worktrees/x/a.png`, "", mroot, true).text ?? ""), "(main): the note says `outside this place`");
+  check(kind("docs/a.png", true) === "show" && kind(`${mroot}/docs/a.png`, true) === "show" && kind(".worktrees-attachments/a.png", true) === "show", "(main): docs/a.png and .worktrees-attachments/ show");
+  check(kind(".worktrees/x/a.png", false) === "show" && kind(`${mroot}/.worktrees/x/a.png`, false) === "show" && kind(".Worktrees/x/a.png", false) === "show", "a non-main place: the same paths show, unchanged");
+  check(kind(".worktrees/x/a.png", undefined) === "show", "the flag defaults to a non-main place");
+
   // ── a Read's thumbnail ───────────────────────────────────────────────────
   check(readImagePath("Read", "/p/a.PNG", false) === "/p/a.PNG", "a Read of a png has a thumbnail path");
   check(readImagePath("Read", "/p/a.ts", false) === null && readImagePath("Edit", "/p/a.png", false) === null && readImagePath("Read", "/p/a.png", true) === null,
@@ -135,6 +147,11 @@ try {
   await IV.loadCallImage(cref, t0).catch((e) => { said = String(e); });
   check(/not shown on this device/.test(said ?? "") && IV.peekCallImage(cref) === null, "a device's refusal reaches the viewer in the host's words and is not cached");
   html("![x](a.png)"); // (the rule's html helper is unaffected)
+
+  // ── the host disagrees: a Read the client called `show` ─────────────────
+  check(/fallbackCall=\{c\.call_id \?/.test(fs.readFileSync(path.join(ROOT, "src/ChatPane.tsx"), "utf8")), "a Read with a call id hands ImageView the call to fall back to");
+  const ivsrc = fs.readFileSync(path.join(ROOT, "src/ImageView.tsx"), "utf8");
+  check(/fallbackCall/.test(ivsrc) && /\^outside this place/.test(ivsrc), "ImageView falls back only on the host's `outside this place`");
 
   // ── the wiring ───────────────────────────────────────────────────────────
   const pane = fs.readFileSync(path.join(ROOT, "src/ChatPane.tsx"), "utf8");

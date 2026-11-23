@@ -108,6 +108,26 @@ export const springsTo = (item: WsItem, hit: WsHit, view: NavView): NavView | nu
   item.kind === "project" && hit?.kind === "switch" && hit.view === "workspaces" && view !== "workspaces"
     ? "workspaces" : null;
 
+/** The built-in last group of the Workspaces view: every registered project
+ *  that is in no named workspace. DERIVED, never stored (`workspaces.json`
+ *  holds named workspaces only), so adding a project to a workspace takes it
+ *  out and removing it from its last one brings it back, with no write.
+ *  The id is reserved: core mints ULIDs (`crate::ulid::new`), which never
+ *  contain a hyphen or lowercase, so a user's own "Everything Else" cannot
+ *  collide with it. The name is display text only. It is not in
+ *  `WsList.workspaces`, so no row, drop rule or menu can address it. */
+export const EVERYTHING_ELSE_ID = "everything-else";
+export const EVERYTHING_ELSE_NAME = "Everything Else";
+
+/** The group, or null while the list is loading or when it has no members
+ *  (hidden). `registered`: the registered roots in All projects' order. */
+export function everythingElse(list: WsList | null, registered: string[]): WsDef | null {
+  if (!list) return null;
+  const held = new Set(list.workspaces.flatMap((w) => w.projects.map((p) => p.root)));
+  const projects = registered.filter((r) => !held.has(r)).map((root) => ({ root, name: null, registered: true }));
+  return projects.length ? { id: EVERYTHING_ELSE_ID, name: EVERYTHING_ELSE_NAME, projects, color: "gray" } : null;
+}
+
 /** The roots `workspace_set_projects` gets for an add: appended, once. */
 export const rootsWith = (w: WsDef, root: string): string[] =>
   w.projects.some((p) => p.root === root) ? w.projects.map((p) => p.root) : [...w.projects.map((p) => p.root), root];
