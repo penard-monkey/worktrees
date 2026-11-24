@@ -621,7 +621,7 @@ function mockGuidance(): Record<string, unknown> {
     skill_hash: mockHash(MOCK_SKILL_DEFAULT),
     skill_edit: mockSkillEdit,
     edit_path: "/Users/demo/.config/worktrees/guidance/SKILL.md",
-    rules: "Managed by worktrees: every branch lives in its own PLACE (a git worktree under .worktrees/ plus a tmux session). Do branch work in a place: create_worktree or `worktrees new <branch>`. Never `git worktree add`; never switch branches in (main). Run gates, builds and full test suites as `worktrees run --slot gate -- <cmd>` (the machine is shared with every lane); nudge or launch lanes at most three at a time. A lane commits, runs its gates and reports to the place that briefed it; that place, normally (main), pushes, opens the PR and merges, as far as the user asked. Brief a lane to push, open a PR, merge, deploy or upload only when the user asked that lane to, and never hand it credentials or send it to change anything live. For the how-to (handing work to another agent, messaging between places, finishing and releasing from a place), use the worktrees skill if you have it, or run `worktrees guide`.",
+    rules: "Managed by worktrees: every branch lives in its own PLACE (a git worktree under .worktrees/ plus a tmux session). Do branch work in a place: create_worktree or `worktrees new <branch>`. Never `git worktree add`; never switch branches in (main). Run gates, builds and full test suites as `worktrees run --slot gate -- <cmd>` (the machine is shared with every lane); nudge or launch lanes at most three at a time. A lane commits, runs its gates and reports to the place that briefed it; that place, normally (main), pushes, opens the PR and merges, as far as the user asked. Brief a lane to push, open a PR, merge, deploy or upload only when the user asked that lane to, and never hand it credentials or send it to change anything live. The user's ideas (their own notes) are readable from any place with the MCP tools ideas_list, idea_read and idea_related; only (main) writes them, and only when the user asks. For the how-to (handing work to another agent, messaging between places, finishing and releasing from a place), use the worktrees skill if you have it, or run `worktrees guide`.",
   };
 }
 let mockMcp: Record<string, unknown> = (() => {
@@ -3222,6 +3222,10 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     // `engine_connect` is never reached here — the harness boots on this mock,
     // not on an engine (main.tsx) — and says so if something ever calls it.
     case "raise_window":
+      return null;
+    // A browser tab has no menu bar, and no zoom of its own the shim kept.
+    case "menu_ideas":
+    case "window_zoom":
       return null;
     // The Ideas companion: a second Tauri window in the app; in the harness, a
     // second tab on the same dev server, carrying this page's query.
@@ -5972,11 +5976,13 @@ Phase 3: Frontend pane and mock harness
     case "share_allow": {
       consoleOnly(cmd);
       const sh = mockShare(args.share);
+      // As the host's ShareStore::allow: a guest the share did not name is
+      // named on it, allowed (Sharing…'s Add someone…).
+      if (!mockGuests.some((x) => x.id === args.principal)) throw `no guest ${args.principal}`;
       const g = sh.guests.find((x) => x.principal === args.principal);
-      if (!g) throw `${args.principal} is not on share ${sh.id}`;
-      if (g.state === "allowed") return false;
-      g.state = "allowed"; g.since = nowSec();
-      threadEvent(sh.id, "joined", g.principal);
+      if (g?.state === "allowed") return false;
+      if (g) { g.state = "allowed"; g.since = nowSec(); } else sh.guests.push({ principal: String(args.principal), state: "allowed", since: nowSec() });
+      threadEvent(sh.id, "joined", String(args.principal));
       sharesChanged("allowed", sh.id);
       return true;
     }

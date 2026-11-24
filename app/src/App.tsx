@@ -62,6 +62,8 @@ import {
   EVERYTHING_ELSE_ID, everythingElse,
 } from "./workspaces";
 import { groupChatBeta, ideasBeta } from "./beta";
+import { wireMenu } from "./menu";
+import { zoomDir } from "./zoomkeys";
 import { publishGroupChat } from "./betaLive";
 import { publishLanes } from "./laneLive";
 import {
@@ -409,24 +411,6 @@ const NAV_CHORDS = ["home", "places"] as const;
  *  elements (they are separate boxes, so a diagonal exit fires `pointerleave`
  *  on one before `pointerenter` on the other), short enough not to feel stuck. */
 const NAV_HIDE_MS = 300;
-
-// Size chords. ⌘+/⌘−/⌘0 is the OVERALL app size (page zoom); add ⌥ for the
-// rendered markdown's reading size. `zoomDir` answers 1 / -1 / 0 (reset), or
-// undefined when the key is not a size chord at all.
-//
-// `e.key` covers both faces of each key: ⌘+ is ⌘⇧= on a US layout ("+"), ⌘− is
-// plain "-" but "_" when shifted, and the numeric keypad sends "+"/"-"
-// unshifted. `e.code` is the fallback, and it is what the ⌥ variants NEED:
-// macOS composes Option with the keyboard layout, so ⌥- arrives as "–" (an en
-// dash) and ⌥= as "≠". Keyed on `e.key` alone, ⌘⌥+/⌘⌥− would be silently dead
-// on exactly the layouts that compose — the chord fires, matches nothing, and
-// the reader never resizes. `e.code` is the physical key, so it is immune.
-const ZOOM_BY_KEY: Record<string, 1 | -1 | 0> = { "+": 1, "=": 1, "-": -1, "_": -1, "0": 0 };
-const ZOOM_BY_CODE: Record<string, 1 | -1 | 0> = {
-  Equal: 1, NumpadAdd: 1, Minus: -1, NumpadSubtract: -1, Digit0: 0, Numpad0: 0,
-};
-// `??`, not `||`: 0 is a legal direction (reset) and would fall through `||`.
-const zoomDir = (e: KeyboardEvent): 1 | -1 | 0 | undefined => ZOOM_BY_KEY[e.key] ?? ZOOM_BY_CODE[e.code];
 
 /** Is a dialog on top of the app? One DOM query, not a mirror of React state:
  *  every overlay paints a `.modal-scrim` (Settings, What's new) or a `.scrim`
@@ -4816,6 +4800,11 @@ function App() {
       invoke("close_companion").catch((e) => invoke("log_event", { level: "warn", msg: `beta: could not close the Ideas window: ${String(e)}` }).catch(() => {}));
     }
   }, [settingsReady, ideasOn]);
+  // Its menu items (File → New Idea, Window → Ideas) are there only while the
+  // beta is on.
+  useEffect(() => {
+    if (settingsReady) invoke("menu_ideas", { on: ideasOn }).catch((e) => invoke("log_event", { level: "warn", msg: `menu: ${String(e)}` }).catch(() => {}));
+  }, [settingsReady, ideasOn]);
   // The Ideas companion window (the rail's lightbulb, ⌘⇧I). A shim command,
   // so it works while the engine is down too — which is why its failure is
   // shown here rather than through `fail`, which stays quiet then.
@@ -8495,6 +8484,22 @@ function App() {
       window.removeEventListener("keydown", trackChord);
     };
   }, [navChord, focusPlaces, hideNav, toggleDock, updatePanels, fail]);
+
+  // The menu bar's items that no chord does (winmenu.rs); the rest replay
+  // their chord into the handler above (menu.ts). Behind a dialog they do
+  // nothing, as the chords do.
+  const menuActRef = useRef<(id: string) => void>(() => {});
+  menuActRef.current = (id) => {
+    if (modalOpen()) return;
+    if (id === "add-project") void addProject();
+    else if (id === "updates") openSettings({ cat: "updates" });
+    else if (id === "release-notes") void showReleaseNotes();
+    else if (id === "documentation") {
+      if (selected) updatePanels({ dock_tab: "docs", dock_open: true });
+      else setNotice("Open a place to read its documents.");
+    }
+  };
+  useEffect(() => wireMenu("main", (id) => menuActRef.current(id)), []);
 
   const q = filter.trim().toLowerCase();
   const matchPlace = (p: Place) =>
