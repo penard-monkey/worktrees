@@ -1862,6 +1862,14 @@ let mockFileFindings: Record<string, MockFinding[]> = {
         "copy `apps/backoffice/.env.local` differs from main and main is NEWER — " +
         "re-seed with: worktrees relink billing-refactor --force",
     },
+    {
+      // Verbatim from ops::undeclared_findings (an env file, so info). Its
+      // "Review with init" button needs CDV_ROOT's entry in mockSuggestions.
+      severity: "info", code: "undeclared", place: null, path: "apps/backoffice/.env.push",
+      message:
+        "apps/backoffice/.env.push is gitignored and tracked nowhere — no [[file]] entry declares it, so every worktree is missing it. " +
+        "Add it:  worktrees init --diff",
+    },
   ],
 };
 let mockPortFindings: Record<string, MockFinding[]> = {
@@ -1927,6 +1935,25 @@ const mockSuggestions: Record<string, any> = {
     truncated: false,
     toml: SUGGESTED_TOML,
     hash: "a1b2c3d4e5f60718",
+  },
+  // A project WITH a config still has a suggestion (init_suggest answers the
+  // whole file, `exists: true`): what an `undeclared` finding opens.
+  [CDV_ROOT]: {
+    path: `${CDV_ROOT}/.worktrees.toml`,
+    exists: true,
+    qualifies: true,
+    files: [
+      { path: "apps/mobile/google-services.json", credential: true },
+      { path: "apps/backoffice/.env.local", credential: false },
+      { path: "apps/backoffice/.env.push", credential: false },
+    ],
+    credentials: 1,
+    ports: true,
+    compose: false,
+    stale_places: ["messaging"],
+    truncated: false,
+    toml: SUGGESTED_TOML,
+    hash: "b2c3d4e5f6071829",
   },
 };
 

@@ -1457,8 +1457,8 @@ body.dragging .menu-catch { pointer-events: none; }
   font-family: inherit; font-size: var(--fs-body); line-height: var(--lh-prose);
   font-weight: var(--fw-med); color: var(--txt-hi);
 }
-.rel-lead:disabled { cursor: default; }
-.rel-lead:not(:disabled):hover { background: var(--bg-elev); }
+.rel-lead.flat { cursor: default; }
+.rel-lead:not(.flat):hover { background: var(--bg-elev); }
 .rel-chev {
   flex: 0 0 14px; display: flex; align-items: center; justify-content: center;
   height: calc(var(--fs-body) * var(--lh-prose)); color: var(--txt-mute);
@@ -4064,6 +4064,22 @@ body.dragging .ws-h { cursor: grabbing; }
 .rail-icon.rail-waiting { position: relative; }
 .rail-icon.rail-waiting::after { content: ""; position: absolute; top: 3px; right: 3px; width: 7px; height: 7px; border-radius: 50%; background: var(--warn); }
 
+/* The crash screen above a window's React root (AppErrorBoundary.tsx). */
+.app-crash {
+  position: fixed; inset: 0; overflow: auto;
+  display: flex; flex-direction: column; align-items: center; justify-content: safe center; gap: var(--s3);
+  padding: var(--s5); text-align: center;
+  background: var(--bg-abyss); color: var(--txt); font-family: var(--font-ui); font-size: var(--fs-body);
+}
+.app-crash h1 { margin: 0; color: var(--txt-hi); font-size: var(--fs-title); }
+.app-crash p { margin: 0; max-width: 60ch; }
+.app-crash pre {
+  margin: 0; max-width: min(70ch, 100%); padding: var(--s3); text-align: left;
+  white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text;
+  background: var(--bg-panel); color: var(--txt-hi); border: 1px solid var(--line); border-radius: var(--r-sm);
+  font-family: var(--font-mono); font-size: var(--fs-label);
+}
+.app-crash > * { flex: none; }
 /* ── a workspace's overview (idea board phase 4, WorkspaceOverview.tsx) ── */
 /* Marked in the card's own color; its tint stays, or the card would lose its
    color while its overview shows. */

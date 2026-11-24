@@ -712,9 +712,9 @@ pub fn shell_detach(repo: String, slug: String, index: u32, gen: u64, shells: &S
 
 /// A place's CANONICAL session name + worktree cwd, both derived backend-side
 /// from `repo` + `slug`. The dock never supplies a session name or path — that
-/// keeps the webview from naming/killing arbitrary tmux sessions or opening a
-/// shell outside the workspace, and keeps sidecar names STABLE (a place's
-/// canonical name doesn't change when it briefly runs under an adopted session).
+/// keeps the webview from naming/killing arbitrary sessions or opening a shell
+/// outside the workspace, and a place's canonical name is STABLE (it does not
+/// change when the place briefly runs under an adopted session).
 ///
 /// Only for a slug that IS a place, by the index `drop_reference` and the MCP
 /// resources read: `place_dir` joins whatever it is given onto `.worktrees/`,

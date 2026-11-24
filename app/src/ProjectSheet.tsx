@@ -150,6 +150,30 @@ export function reportFailed(r: DoctorReport | null | undefined): boolean {
 const forcible = (r: DoctorReport | null) =>
   (r?.findings ?? []).filter((f) => f.code === "copy-stale" || f.code === "shadowed");
 
+/** Whether the init suggestion shows: before there is a config, or once an
+ *  `undeclared` finding asked for it (init already knows those files). */
+export const initSuggestionShown = (s: InitSuggestion | null, cfg: ProjectConfigView | null, forDrift: boolean) =>
+  !!s?.qualifies && (!cfg?.exists || forDrift);
+
+/** One doctor finding. Relink and Provision have buttons of their own; an
+ *  undeclared file's is here, and opens the suggestion that names it. */
+export function FindingRow({ f, busy, onInit }: { f: DoctorFinding; busy: boolean; onInit: (() => void) | null }) {
+  return (
+    <div className="dx-row">
+      <span className={"dx-sev " + f.severity}>{f.severity === "error" ? "✗" : f.severity === "warn" ? "▸" : "·"}</span>
+      <span className="dx-msg">
+        {f.place ? <b className="dx-place">{f.place}</b> : null}
+        {f.place ? " " : null}
+        {f.message}
+        <span className="dx-code">{f.code}</span>
+        {f.code === "undeclared" && onInit ? (
+          <> <button className="ctrl sm" disabled={busy} onClick={onInit}>Review with init</button></>
+        ) : null}
+      </span>
+    </div>
+  );
+}
+
 // Module scope with props (CLAUDE.md): a component defined inside App() gets a
 // fresh identity every render, remounting its DOM and dropping input focus.
 export function ProjectSheet({
@@ -219,6 +243,9 @@ export function ProjectSheet({
   const [err, setErr] = useState<string | null>(null);
   const [pinfo, setPinfo] = useState<ProfilesInfo | null>(null);
   const [showToml, setShowToml] = useState(false);
+  // Opened from an `undeclared` doctor finding: the init suggestion exists for
+  // exactly those files, but the section is normally gated on no config yet.
+  const [initForDrift, setInitForDrift] = useState(false);
   // Arm-then-confirm for the one destructive control in this sheet (`--force`),
   // same two-click shape as .pop-item.danger / .ctrl.sm.danger elsewhere. It is
   // disarmed by every state change below — an armed button surviving a re-check
@@ -280,6 +307,7 @@ export function ProjectSheet({
     setLog("");
     setErr(null);
     setShowToml(false);
+    setInitForDrift(false);
     arm.disarm();
     setTodoRan(false);
     refresh();
@@ -347,7 +375,14 @@ export function ProjectSheet({
   const broken = report !== null && reportFailed(report);
   const issues = broken ? 0 : issueCount(report);
   const busy = running !== "";
-  const canSuggest = !!suggestion?.qualifies && !cfg?.exists;
+  const canSuggest = initSuggestionShown(suggestion, cfg, initForDrift);
+  // The section is the sheet's last, so opening it alone would look like a
+  // button that does nothing. Next frame: the click's render has mounted it.
+  const reviewInit = () => {
+    setInitForDrift(true);
+    requestAnimationFrame(() =>
+      bodyRef.current?.querySelector<HTMLElement>('[data-section="init"]')?.scrollIntoView({ block: "nearest", behavior: "smooth" }));
+  };
   // Force is offered only when something force would actually repair is present
   // at warn/error. The COUNT includes the info-level drifted copies, because
   // `--force` re-seeds those too — the confirm must name what it will rewrite,
@@ -619,15 +654,7 @@ export function ProjectSheet({
             ) : (
               <div className="dx-list">
                 {report.findings.map((f, i) => (
-                  <div className="dx-row" key={i}>
-                    <span className={"dx-sev " + f.severity}>{f.severity === "error" ? "✗" : f.severity === "warn" ? "▸" : "·"}</span>
-                    <span className="dx-msg">
-                      {f.place ? <b className="dx-place">{f.place}</b> : null}
-                      {f.place ? " " : null}
-                      {f.message}
-                      <span className="dx-code">{f.code}</span>
-                    </span>
-                  </div>
+                  <FindingRow key={i} f={f} busy={busy} onInit={suggestion?.qualifies ? reviewInit : null} />
                 ))}
               </div>
             )}
@@ -685,7 +712,7 @@ export function ProjectSheet({
             onOpenSettings={onOpenPlanningSettings} onError={logError} />
 
           {canSuggest && suggestion && (
-            <section className="setting">
+            <section className="setting" data-section="init">
               <label>Suggested config<span className="upd-tag warn">init</span></label>
               <div className="ver-rows">
                 <div className="ver-row">
@@ -706,8 +733,20 @@ export function ProjectSheet({
                 </button>
               </div>
               <div className="hint">
-                Nothing is written until you press Write. Credential files fail SILENTLY when a
-                worktree is missing them — that is what this file is for.
+                {cfg?.exists ? (
+                  // init refuses to write over a config, and this is the WHOLE
+                  // file: pasted in, the entries already there are duplicates.
+                  <>
+                    This is the whole file init would write today, to compare with yours: nothing
+                    here changes your .worktrees.toml. <code>worktrees init --diff</code> prints only
+                    the entries it is missing; append those, then Relink files.
+                  </>
+                ) : (
+                  <>
+                    Nothing is written until you press Write. Credential files fail SILENTLY when a
+                    worktree is missing them — that is what this file is for.
+                  </>
+                )}
                 {suggestion.truncated ? " (The search stopped early — add anything it missed by hand.)" : ""}
               </div>
               {showToml && <pre className="update-log">{suggestion.toml}</pre>}

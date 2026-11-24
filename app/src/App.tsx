@@ -7,6 +7,7 @@ import { hostOnly, pickDirForHost, revealOnHost } from "./onhost";
 import { RemoteNotice, useEngine, useRemoteNotice } from "./EngineGate";
 import { copyToClipboard } from "./clipboard";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { safeHref } from "./markdown";
 import { clampSteps, doneBounds, doneOpacity, doneTierSeen, isUnread, seenEpoch } from "./afterglow";
 import * as Icons from "./icons";
 import { SubMenu } from "./SubMenu";
@@ -838,25 +839,47 @@ function parseNotes(md: string): NotesSection[] {
     }));
 }
 
-// `code` / **strong** / *em* — the inline markup the changelog uses. One
-// alternation, code first, so a `**` inside a code span stays literal. The
-// inner text of a match can never re-match its own delimiter (each arm forbids
-// it), so the recursion below bottoms out after at most two levels.
-const INLINE = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*\s][^*]*\*)/;
-function renderInline(s: string): React.ReactNode[] {
+// `code` / **strong** / *em* / [text](url) — the inline markup the changelog
+// uses. One alternation, code first, so a `**` inside a code span stays literal.
+// The inner text of a match can never re-match its own delimiter (each arm
+// forbids it), so the recursion below bottoms out after a few levels.
+const INLINE = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*\s][^*]*\*|\[[^\]]+\]\([^()\s]+\))/;
+const INLINE_LINK = /^\[([^\]]+)\]\(([^()\s]+)\)$/;
+function renderInline(s: string, onError: (e: unknown) => void): React.ReactNode[] {
   return s.split(INLINE).map((part, i) => {
     if (i % 2 === 0) return part;
     if (part.startsWith("`")) return <code key={i}>{part.slice(1, -1)}</code>;
-    if (part.startsWith("**")) return <strong key={i}>{renderInline(part.slice(2, -2))}</strong>;
-    return <em key={i}>{renderInline(part.slice(1, -1))}</em>;
+    if (part.startsWith("**")) return <strong key={i}>{renderInline(part.slice(2, -2), onError)}</strong>;
+    const link = INLINE_LINK.exec(part);
+    if (link) return renderLink(link[1], link[2], i, onError);
+    return <em key={i}>{renderInline(part.slice(1, -1), onError)}</em>;
   });
 }
 
-function ReleaseNotes({ sections, notes, open, onToggle }: {
+/** A release note's link. `safeHref` vets the target, and only an http(s) one
+ *  is a link at all: the notes have no document to resolve a relative path or
+ *  an `#anchor` against. Both `click` and `auxclick` are ours, because a
+ *  middle-click fires no `click` and the WebView would follow the `href`. */
+function renderLink(label: string, target: string, key: number, onError: (e: unknown) => void): React.ReactNode {
+  const href = safeHref(target);
+  if (!href || !/^https?:/i.test(href)) return <span key={key} title={target}>{renderInline(label, onError)}</span>;
+  const go = (e: React.MouseEvent) => {
+    e.preventDefault();
+    // A link in a headline sits in the button that opens the entry.
+    e.stopPropagation();
+    if (e.button > 1) return; // auxclick is the right button too
+    openUrl(href).catch((err) => onError(`open ${href}: ${String(err)}`));
+  };
+  return <a key={key} className="md-link" href={href} title={href} onClick={go} onAuxClick={go}>{renderInline(label, onError)}</a>;
+}
+
+function ReleaseNotes({ sections, notes, open, onToggle, onError }: {
   sections: NotesSection[];
   notes: string;
   open: Set<string>;
   onToggle: (id: string) => void;
+  /** A link that could not be opened. */
+  onError: (e: unknown) => void;
 }) {
   if (!sections.length) return <pre className="notes">{notes}</pre>;
   return (
@@ -877,19 +900,26 @@ function ReleaseNotes({ sections, notes, open, onToggle }: {
                   return (
                     <li key={i} className="rel-item">
                       {/* The whole row is the target, not just the chevron. An
-                          item with no paragraph behind it is disabled rather
-                          than absent: it still reads as a headline, it just has
-                          nothing to open. */}
-                      <button
-                        className={"rel-lead" + (on ? " on" : "")}
-                        disabled={!it.rest}
-                        aria-expanded={it.rest ? on : undefined}
-                        onClick={() => onToggle(id)}
-                      >
-                        <span className="rel-chev">{it.rest ? <Icons.ChevronRight size={12} /> : null}</span>
-                        <span>{renderInline(it.lead)}</span>
-                      </button>
-                      {on && it.rest && <p className="rel-body">{renderInline(it.rest)}</p>}
+                          item with no paragraph behind it still reads as a
+                          headline, but it is not a button: it has nothing to
+                          open, and a link inside a disabled button cannot be
+                          pressed. */}
+                      {it.rest ? (
+                        <button
+                          className={"rel-lead" + (on ? " on" : "")}
+                          aria-expanded={on}
+                          onClick={() => onToggle(id)}
+                        >
+                          <span className="rel-chev"><Icons.ChevronRight size={12} /></span>
+                          <span>{renderInline(it.lead, onError)}</span>
+                        </button>
+                      ) : (
+                        <div className="rel-lead flat">
+                          <span className="rel-chev" />
+                          <span>{renderInline(it.lead, onError)}</span>
+                        </div>
+                      )}
+                      {on && it.rest && <p className="rel-body">{renderInline(it.rest, onError)}</p>}
                     </li>
                   );
                 })}
@@ -907,7 +937,7 @@ function ReleaseNotes({ sections, notes, open, onToggle }: {
 // and the header's Show/Hide details toggle are one piece of state that nothing
 // outside the modal reads, and a component defined inside App() would be
 // re-created (and reset) by the 3s poll.
-function WhatsNewModal({ version, notes, manual, offers, onTakeOffer, onSilenceOffer, onClose }: {
+function WhatsNewModal({ version, notes, manual, offers, onTakeOffer, onSilenceOffer, onClose, onError }: {
   version: string;
   notes: string;
   manual: boolean;
@@ -919,6 +949,7 @@ function WhatsNewModal({ version, notes, manual, offers, onTakeOffer, onSilenceO
   onTakeOffer: (o: Offer) => void;
   onSilenceOffer: (o: Offer) => void;
   onClose: () => void;
+  onError: (e: unknown) => void;
 }) {
   const sections = useMemo(() => parseNotes(notes), [notes]);
   const [open, setOpen] = useState<Set<string>>(() => new Set());
@@ -999,7 +1030,7 @@ function WhatsNewModal({ version, notes, manual, offers, onTakeOffer, onSilenceO
           </div>
         )}
         <div className="settings-body">
-          <ReleaseNotes sections={sections} notes={notes} open={open} onToggle={toggle} />
+          <ReleaseNotes sections={sections} notes={notes} open={open} onToggle={toggle} onError={onError} />
         </div>
         <div className="modal-foot">Full changelog · Settings → Updates</div>
       </aside>
@@ -1869,6 +1900,11 @@ function BranchCombo({
     ...matches.map((b) => ({ branch: b, create: false })),
     ...(creating ? [{ branch: q, create: true }] : []),
   ];
+  // The highlighted row. `hi` is where the arrows and the pointer left it, and
+  // the list can shrink under it (a re-read of the branches), so every index
+  // into `options` uses `at`: the row drawn lit, the row announced and the row
+  // Enter commits are one row, and it exists. -1 = no rows.
+  const at = Math.min(hi, options.length - 1);
 
   // One row, and it is the exact thing already typed: there is nothing to pick.
   // Left visible it would cover whatever sits under the field — in the dialog
@@ -1911,13 +1947,15 @@ function BranchCombo({
       e.preventDefault();
       if (!showPop) { show(); return; }
       const d = e.key === "ArrowDown" ? 1 : -1;
-      setHi((i) => (options.length ? (i + d + options.length) % options.length : 0));
+      // From the row on screen, not from a stale index past the end of the list.
+      const n = options.length;
+      setHi((i) => (n ? (Math.min(i, n - 1) + d + n) % n : 0));
       return;
     }
     if (e.key === "Enter") {
       // A highlighted row wins; otherwise the raw text does, so Enter still
       // works exactly as it did before the list existed.
-      commit(showPop && options[hi] ? options[hi].branch : value);
+      commit(showPop && at >= 0 ? options[at].branch : value);
       // Picking from a VISIBLE list is the whole keypress. Without this the
       // dialog hosting the field would also read it as "submit", so choosing a
       // branch would create the worktree before you had touched base or name.
@@ -1940,7 +1978,7 @@ function BranchCombo({
         aria-controls={showPop ? listId : undefined}
         // Focus never leaves the input, so WITHOUT this the arrow keys are
         // silent to a screen reader and Enter commits a row it never announced.
-        aria-activedescendant={showPop && options[hi] ? optId(hi) : undefined}
+        aria-activedescendant={showPop && at >= 0 ? optId(at) : undefined}
         data-testid={testid}
         spellCheck={false}
         autoCapitalize="off"
@@ -1978,9 +2016,9 @@ function BranchCombo({
               <button
                 key={(o.create ? "new:" : "b:") + o.branch}
                 id={optId(i)}
-                className={"combo-item" + (i === hi ? " hi" : "") + (o.create ? " create" : "")}
+                className={"combo-item" + (i === at ? " hi" : "") + (o.create ? " create" : "")}
                 role="option"
-                aria-selected={i === hi}
+                aria-selected={i === at}
                 // mousedown, not click: the input's blur would tear the row out
                 // from under the click
                 onMouseDown={(e) => { e.preventDefault(); commit(o.branch); }}
@@ -10788,6 +10826,7 @@ function App() {
           onTakeOffer={(o) => { updateSettings({ last_seen_version: whatsNew.version }); setWhatsNew(null); takeOffer(o); }}
           onSilenceOffer={silenceOffer}
           onClose={() => { updateSettings({ last_seen_version: whatsNew.version }); setWhatsNew(null); }}
+          onError={fail}
         />
       )}
       {newFor && (

@@ -217,19 +217,24 @@ async function boot() {
   // DEFAULTS and later save them over the real ones — and after that keeps it
   // mounted under a "disconnected" banner rather than blanking it.
   const { EngineGate, RemoteLayer } = await import("./EngineGate");
+  // Dynamic, like everything else that reaches ipc.ts: the harness's backend
+  // must be installed first.
+  const { AppErrorBoundary } = await import("./AppErrorBoundary");
   ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <React.StrictMode>
-      {gated ? (
-        <EngineGate>
-          <App />
-        </EngineGate>
-      ) : (
-        <>
-          <App />
-          <RemoteLayer />
-        </>
-      )}
-      <FeedbackNotice />
+      <AppErrorBoundary where="main window">
+        {gated ? (
+          <EngineGate>
+            <App />
+          </EngineGate>
+        ) : (
+          <>
+            <App />
+            <RemoteLayer />
+          </>
+        )}
+        <FeedbackNotice />
+      </AppErrorBoundary>
     </React.StrictMode>,
   );
   // The cross-window drag probe (dragprobe.tsx): dev builds only, and only

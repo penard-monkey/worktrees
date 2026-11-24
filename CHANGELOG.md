@@ -24,6 +24,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 - **Agents can read your ideas, and `(main)`'s agent can write them, through the worktrees MCP server.** Every server has `ideas_list`, `idea_read` and `idea_related`: each idea's title, text, problems and relations, by id. A server started with `--mutations` also has `idea_create`, `idea_append` (text at the end; nothing already there changes) and `idea_write` (a whole rewrite, refused without the `mtime_ms` the agent read, or when the idea changed since). These three work only from a project's `(main)`: a lane, a stray worktree or any other directory is refused and nothing is written. An append or a rewrite copies the text it replaces to the idea's history first, so History in the Ideas window can bring it back. The guidance line says so too, which is a new guidance version, so the after-update offer to refresh the rules shows again.
 
+- **Links in the release notes.** A `[text](url)` in *What's new* is a link that opens in your browser; a target that is not a web address shows as plain text. (After #298 by t957095.)
+
+- **A crash shows what went wrong and a Reload button, not a blank window.** When the window's interface failed while drawing, the whole window went blank until you quit the app. Now it says what happened, writes it to the log (Settings → Logs), and **Reload** starts the window again; agents and terminals keep running. The Ideas window has the same screen. (After #297 by t957095.)
+
+- **Review with init, beside an undeclared file.** In a project's sheet, a doctor finding about a gitignored file your `.worktrees.toml` does not name has a **Review with init** button. It opens what `init` would write today, which a project that already had a config could not see, and says which command prints only the entries yours is missing. (After #299 by t957095.)
+
 
 ### Changed
 
@@ -70,6 +76,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   Someone new* now asks "Your name, as they will see it" while it is unset.
 
 - **Two projects whose tmux sessions get the same name no longer share, or close, each other's session.** Two repositories in folders of the same name (or `app` with a place `x-feat` beside `app-x` with a place `feat`) name a session alike. `new` and `open` in the second reported the first one's session as its own, and `close` or `rm` there ended the other project's agent without asking. A session now belongs to a place by the folder it was created in: another project's is never shown, attached, typed into or closed as yours, and `new`/`open` say the name is taken, before anything is made, and how to give the project its own prefix. `doctor` names two registered places that clash. Needs tmux 3.2 or newer; on an older one the name still decides.
+
+- **The branch field: Enter takes the row you see highlighted.** When the list shrank under the highlight (the branches were read again), no row was lit and Enter took the typed text instead. Now the highlight moves to the last row left, and that row is the one drawn, announced to a screen reader and committed. (After #301 by t957095.)
+
+- **Markdown: more character references, and one id per heading.** The document view, the chat and the Ideas window now draw `&copy;`, `&hellip;`, `&mdash;` and a dozen more named references, and any numeric one (`&#169;`, `&#xA9;`); a reference inside `` `code` `` stays as it was written. A heading repeated in one document gets `-1`, `-2` on its id, as on GitHub, so `[x](#setup-1)` goes to the second *Setup*. (After #300 by t957095.)
 
 ## [0.52.0] - 2026-11-14
 

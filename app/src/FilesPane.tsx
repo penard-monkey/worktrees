@@ -505,10 +505,10 @@ function FileTree({ root, openPath: rawOpen, revealToken, showIgnored, reloadTok
 
 // The image viewer lives in ImageView.tsx, shared with the chat.
 
-// A renderer failure must cost the PANE, not the window. There is no error
-// boundary above App, so an uncaught throw here (a pathological document, a
-// highlighter edge case) would unmount the whole root and leave a blank
-// window. Class component because that is the only way to catch in React.
+// A renderer failure must cost the PANE, not the window. The boundary above App
+// (AppErrorBoundary) would replace the whole window with its crash screen for
+// an uncaught throw here (a pathological document, a highlighter edge case).
+// Class component because that is the only way to catch in React.
 class ViewErrorBoundary extends Component<{ resetKey: string; children: ReactNode }, { err: Error | null }> {
   state: { err: Error | null } = { err: null };
   static getDerivedStateFromError(err: Error) { return { err }; }
