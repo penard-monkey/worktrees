@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "../ipc";
 import { pickDirForHost, hostOnly } from "../onhost";
 import { FetchIntervalSection } from "../HostPolicyControls";
+import { KeepAwakeSection } from "../KeepAwake";
 import { BETA_FEATURES } from "../beta";
 import { Page, Sec, useSheet } from "./kit";
 
@@ -129,6 +130,10 @@ export function GeneralPage() {
 
     <Sec id="auto-fetch">
       <FetchIntervalSection settings={settings} onChange={onChange} onFail={onFail} />
+    </Sec>
+
+    <Sec id="keep-awake">
+      <KeepAwakeSection onFail={onFail} />
     </Sec>
 
     <Sec id="projects-parent">

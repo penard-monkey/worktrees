@@ -449,6 +449,61 @@ fn a_serve_started_again_after_a_crash_holds_the_engine_policies_it_was_set() {
     assert_eq!(sb.terminate().code(), Some(0));
 }
 
+/// Keep awake on a Mac, through the binary and read back from the system: the
+/// power assertion is this serve's, under its own name; a client that only
+/// listens hears the change; OFF and a clean stop drop it; a SIGKILL drops it
+/// too, and the next serve holds it again from host-policy.json.
+#[cfg(target_os = "macos")]
+#[test]
+fn keep_awake_is_this_serves_own_assertion_and_ends_with_it() {
+    fn asserted(pid: u32) -> bool {
+        let out = Command::new("/usr/bin/pmset").args(["-g", "assertions"]).output().unwrap();
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(text.contains("Listed by owning process"), "{text}");
+        text.lines().any(|l| l.contains(&format!("pid {pid}(")) && l.contains("PreventUserIdleSystemSleep") && l.contains("worktrees: Keep awake is on"))
+    }
+    let until = |pid: u32, want: bool| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while asserted(pid) != want {
+            assert!(Instant::now() < deadline, "pid {pid}: the assertion never became {want}");
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+    let mut sb = Sandbox::new("keepawake");
+    let policy = sb.cfg().join("host-policy.json");
+    let on_disk = || serde_json::from_slice::<Value>(&std::fs::read(&policy).unwrap()).unwrap()["keep_awake"].clone();
+    let args = ["--allow-origin", "http://localhost:1420"];
+    let sf = sb.launch(&args);
+    let first = sb.pid();
+    let mut ws = connect(&sf, "http://localhost:1420");
+    let r = rpc(&mut ws, 1, "get_keep_awake", json!({}));
+    assert_eq!((r["ok"]["supported"].clone(), r["ok"]["on"].clone()), (json!(true), json!(false)), "{r}");
+    assert!(!asserted(first), "off by default");
+    let r = rpc(&mut ws, 2, "set_keep_awake", json!({"on": true}));
+    assert_eq!((r["ok"]["held"].clone(), r["ok"]["mechanism"].clone()), (json!(true), json!("iokit")), "{r}");
+    assert_eq!(on_disk(), json!(true));
+    until(first, true);
+    let r = rpc(&mut ws, 3, "set_keep_awake", json!({"on": false}));
+    assert_eq!(r["ok"]["held"], json!(false), "{r}");
+    until(first, false);
+    rpc(&mut ws, 4, "set_keep_awake", json!({"on": true}));
+    until(first, true);
+    drop(ws);
+
+    let mut dead = sb.child.take().unwrap();
+    dead.kill().unwrap();
+    dead.wait().unwrap();
+    until(first, false);
+    sb.launch(&args);
+    let second = sb.pid();
+    until(second, true);
+    assert_eq!(sb.terminate().code(), Some(0));
+    until(second, false);
+    assert_eq!(on_disk(), json!(true), "a stop is not a set");
+    let log = std::fs::read_to_string(sb.log()).unwrap();
+    assert!(log.contains("keep-awake: released") && !log.contains("[panic]"), "{log}");
+}
+
 /// OWASP L1, through the binary: `log_event` is an Engine command, so any
 /// authenticated client reaches it, and the review used it to write a whole
 /// forged `serve: host-admin` line, timestamp and all, into serve.log. It

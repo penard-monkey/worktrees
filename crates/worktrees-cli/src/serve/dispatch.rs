@@ -1,4 +1,4 @@
-//! The 267 commands, each with its exposure, capability and objects, in ONE
+//! The 286 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -39,7 +39,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{Map, Value};
 use std::sync::Arc;
-use worktrees_api::{agents, config, files, hostenv, ideas, ideasessions, macprivacy, meta, ops, plans, prefs, presets, profiles, project, status, term, viewer, workspace, workspaces, Ctx};
+use worktrees_api::{agents, config, files, hostenv, ideas, ideasessions, keepawake, macprivacy, meta, ops, plans, prefs, presets, profiles, project, status, term, viewer, workspace, workspaces, Ctx};
 use worktrees_core::authz::{self, Caller, Capability, Caps, DeviceId, Grant, Projects, Registry};
 use worktrees_core::fetchpolicy::Fetcher;
 
@@ -786,7 +786,7 @@ pub fn cap_of(cmd: &str) -> Option<Capability> {
 pub const GLOBAL_OK: &[&str] = &[
     // read
     "settings_info", "get_settings", "quota_settings", "slots_settings", "limits_settings", "policy_preset_status", "claude_usage", "codex_usage", "kimi_usage", "claude_status",
-    "check_update", "harness_sessions", "list_releases", "get_ai_config", "get_codex_permissions", "get_fetch_interval",
+    "check_update", "harness_sessions", "list_releases", "get_ai_config", "get_codex_permissions", "get_fetch_interval", "get_keep_awake",
     "get_term_history_opts", "agent_guidance_status", "agent_guidance_diff", "agent_models", "agent_user_skills", "pi_hosts",
     "kimi_version", "tmux_check", "log_info", "get_changelog", "new_profile_id", "skills_list", "ui_usage",
     // write
@@ -919,6 +919,8 @@ commands! { cx, a;
     // Host policy (`worktrees_api::hostpolicy`): `admin`, not console-only like Codex's, as it widens no agent (decision 6).
     set_fetch_interval: Engine [admin, all] => ops::set_fetch_interval(&cx.ctx, a.get("mins")?),
     get_fetch_interval: Engine [read, global] => ops::get_fetch_interval(),
+    set_keep_awake: Engine [admin, all] => keepawake::set_keep_awake(&cx.ctx, a.get("on")?),
+    get_keep_awake: Engine [read, global] => keepawake::get_keep_awake(&cx.ctx),
     fetch_origin: Engine [write, project(root)] => ops::fetch_origin(a.get("root")?),
     list_drafts: Engine [read, filtered(drafts)] => ops::list_drafts(),
     close_place: Engine [write, place(repo, slug), opt(session_of(session, repo, slug))] => ops::close_place(
@@ -1480,7 +1482,7 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 244 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 286 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six, the slots pair and
     /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
@@ -1506,13 +1508,14 @@ mod tests {
     /// idea-session console rows (`idea_conversation*`, `idea_*` over the agent bodies), and group
     /// chat's eighteen share rows (fourteen console with PR D's `share_used` and `share_check`, four
     /// `guest`), its thread's two (`thread_read`, `thread_post`, `guest`) and PR C's
-    /// two `guest` history rows (`shared_turns`, `shared_tool_call`); the check scripts
+    /// two `guest` history rows (`shared_turns`, `shared_tool_call`), and the host's sleep
+    /// hold (`get_keep_awake`, `set_keep_awake`); the check scripts
     /// hold the page's commands against them.
     #[test]
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 284, "the table has 284 commands");
+        assert_eq!(TABLE.len(), 286, "the table has 286 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1928,7 +1931,7 @@ mod tests {
     /// `push_allow_security`); Settings → Agent policy → Limits'
     /// `limits_settings` (`read`) and `set_limits` (`admin`); and the policy
     /// presets' `policy_preset_status` (`read`) and `apply_policy_preset`
-    /// (console); the named workspaces' seven (console); and the idea board's seven and phase 3's seven (console); phase 4's ten (console); phase S's fifteen idea-session rows (console); `read_place_image` and `agent_call_image` are `read`; and group chat's
+    /// (console); the named workspaces' seven (console); and the idea board's seven and phase 3's seven (console); phase 4's ten (console); phase S's fifteen idea-session rows (console); `read_place_image` and `agent_call_image` are `read`; the host's sleep hold's `get_keep_awake` (`read`) and `set_keep_awake` (`admin`); and group chat's
     /// shares: fourteen console rows (`share_*` for the owner, `share_used`, `share_check`, `guest_places_hide`,
     /// `shares_all`, `guests_list`, `guest_remove`, `owner_set_name`) and the
     /// four `guest` rows (`GUEST_ROWS`), the capability's first, the thread's
@@ -1950,7 +1953,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 70), ("write", 23), ("admin", 41), ("console", 108), ("stream", 10), ("instruct", 8), ("answer", 2),
+            ("read", 71), ("write", 23), ("admin", 42), ("console", 108), ("stream", 10), ("instruct", 8), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 7), ("guest", 8),
         ]
         .into();

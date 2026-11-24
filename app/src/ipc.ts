@@ -499,7 +499,7 @@ export const REMOTE_SETTINGS: Readonly<Record<string, string>> = {
 export const ADMIN_ROWS: readonly string[] = [
   "add_project", "probe_dir", "create_project", "clone_project", "clone_cancel", "init_repo",
   "create_initial_commit", "remove_project", "set_planning_default", "set_project_planning",
-  "set_quota_settings", "set_limits", "set_fetch_interval", "mcp_status", "mcp_uninstall", "codex_mcp_status",
+  "set_quota_settings", "set_limits", "set_fetch_interval", "set_keep_awake", "mcp_status", "mcp_uninstall", "codex_mcp_status",
   "codex_mcp_uninstall", "codex_mcp_migration_plan", "pi_mcp_status", "pi_mcp_uninstall", "kimi_mcp_status",
   "sync_hub_list", "sync_hubs", "sync_hub_choose", "sync_hub_forget", "sync_apply", "diagnostics", "log_tail", "set_term_history_opts", "term_history_info",
   "term_history_clear", "ui_events_clear", "profiles_info", "delete_profile", "skill_inspect",
