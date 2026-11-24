@@ -1369,6 +1369,26 @@ fixture under `tests/fixtures/pi-*` was captured on. Re-run it when pi is
 upgraded — pi's `--list-models` table has no JSON form, and a changed header
 parses to an EMPTY catalog on purpose, which reads as "pi offers nothing".
 
+**Codex has one too: `docs/codex-manual-checks.md`, to re-run when codex is
+upgraded** (each row says the version it was last verified on). Four facts
+that each cost a measurement, all on 0.157.1:
+- Auto-review in a LINKED worktree needs two sandbox holes, or `git add` dies
+  on `index.lock` (exit 128) and push cannot resolve github.com: the git COMMON
+  dir as a writable root, so hooks and config are writable too, and
+  `network_access=true` (`codex::permission_flags`).
+- Any `-c` forces Codex into "embedded" mode (no shared background server), and
+  it warns so at startup. Every launch of ours passes `-c`.
+- Codex reads text typed at its prompt as the USER's intent, valid "even if
+  high-risk". That is why MCP `send` labels every message as from a place,
+  refuses a leading `/ @ ! #`, and refuses while Codex waits: Enter on its
+  approval list is "Yes, proceed".
+- Never write Codex's config. MCP servers go through `codex mcp add|remove`;
+  folder trust is the user's answer, and we only read it (`codextrust.rs`).
+
+**A test that PUSHES pins its cwd and its origin.** A bats test once ran
+`agent-setup fix` from the suite's cwd, this checkout, and pushed a real branch
+to the real remote: `cd "$REPO"`, and refuse unless origin is `$ORIGIN`.
+
 **kimi has one too, and four of its habits are traps.** `docs/kimi-manual-checks.md`
 pins the 2.2.0 wire log and screens. (1) Interactive kimi takes NO prompt word —
 a trailing one is "unknown command" — so its opener is typed by a helper the

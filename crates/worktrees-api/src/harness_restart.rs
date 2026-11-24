@@ -484,7 +484,6 @@ impl Live {
         } else {
             Default::default()
         };
-        let scan = harness::Scan { probes: &probes, panes: Some(&panes) };
         let mut claimed: HashSet<i32> = HashSet::new();
         let mut sessions = Vec::new();
         for c in &cands {
@@ -509,6 +508,8 @@ impl Live {
             // Activity only for the sessions a client is shown.
             let state = if older {
                 let canonical = c.project.session_name(&c.slug);
+                let here = c.project.place_panes(&c.slug, &panes);
+                let scan = harness::Scan { probes: &probes, panes: Some(&*here) };
                 tool_adapter(tool).activity(&scan, &canonical, &c.path).map_or("busy", |a| bucket(a.state))
             } else {
                 "idle"

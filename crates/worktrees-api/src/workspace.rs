@@ -142,7 +142,9 @@ pub fn snapshot(w: &Watch, repo: &str) -> Result<serde_json::Value, String> {
             let primary_name = place.pointer("/tmux_session/name").and_then(|s| s.as_str()).unwrap_or(&canonical).to_string();
             let place_path = place.get("path").and_then(|s| s.as_str()).unwrap_or("").to_string();
             let exclude = (slug == "(main)").then_some(project.wt_root.as_str());
-            let sessions = agent_sessions_for(w, agent_panes.as_ref(), &probes, &canonical, &primary_name, primary_up, &place_path, exclude);
+            let agent_panes = agent_panes.as_ref().map(|p| p.for_place(&canonical, &place_path, exclude));
+            let agent_panes = agent_panes.as_deref();
+            let sessions = agent_sessions_for(w, agent_panes, &probes, &canonical, &primary_name, primary_up, &place_path, exclude);
             // Watched only while the harness itself runs in the session: the
             // pane is `<cli> …; exec "$SHELL"`, so an agent that exited or was
             // killed leaves the session up with a shell in it, and a file
@@ -150,13 +152,13 @@ pub fn snapshot(w: &Watch, repo: &str) -> Result<serde_json::Value, String> {
             // otherwise hold the place green indefinitely. Every harness, not
             // a named one: `watch_lane` is where each is wired.
             for s in &sessions {
-                let running = s.up && agent_panes.as_ref().is_some_and(|panes| panes.session_runs_program(&s.name));
-                let launch = agent_panes.as_ref().and_then(|panes| panes.session_launch(&s.name));
+                let running = s.up && agent_panes.is_some_and(|panes| panes.session_runs_program(&s.name));
+                let launch = agent_panes.and_then(|panes| panes.session_launch(&s.name));
                 crate::watch::watch_lane(w, s.id, &place_path, running.then_some(&s.name), launch, &s.model);
             }
             // A bare shell still keeps the place open and closeable. Agent
             // presence and tmux existence are different questions.
-            let tmux_up = primary_up || sessions.iter().any(|s| agent_panes.as_ref().is_some_and(|p| p.has_session(&s.name)));
+            let tmux_up = primary_up || sessions.iter().any(|s| agent_panes.is_some_and(|p| p.has_session(&s.name)));
             // Profiles are claude's recipe, so only a live Claude can be stale.
             let claude_up = sessions.iter().any(|s| s.up && s.id == provider::CLAUDE.id);
             // `tmux_session` stays on the default harness's session when it is

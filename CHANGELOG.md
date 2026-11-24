@@ -63,6 +63,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   name it paired with (an older host's "owner" is skipped too). *Share… →
   Someone new* now asks "Your name, as they will see it" while it is unset.
 
+- **Two projects whose tmux sessions get the same name no longer share, or close, each other's session.** Two repositories in folders of the same name (or `app` with a place `x-feat` beside `app-x` with a place `feat`) name a session alike. `new` and `open` in the second reported the first one's session as its own, and `close` or `rm` there ended the other project's agent without asking. A session now belongs to a place by the folder it was created in: another project's is never shown, attached, typed into or closed as yours, and `new`/`open` say the name is taken, before anything is made, and how to give the project its own prefix. `doctor` names two registered places that clash. Needs tmux 3.2 or newer; on an older one the name still decides.
+
 ## [0.52.0] - 2026-11-14
 
 ### Added
