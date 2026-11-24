@@ -2077,17 +2077,25 @@ wait loop on it never ended and a sandbox app ran for two hours.
   `style-src` beside `'unsafe-inline'` voids the keyword** and makes every
   diagram vanish while the prose still renders perfectly.
   **CodeMirror 6 is the THIRD admitted exception, on the owner's decision of
-  2026-11-08, and only inside the Ideas companion window's own bundle
+  2026-11-08. It began inside the Ideas companion window's own bundle only
   (`app/companion/`, built by `vite.companion.config.ts` into
-  `app/dist/companion/`) — never `app/src`.** Ideas need a real editor, and
+  `app/dist/companion/`), never `app/src`.** Ideas need a real editor, and
   CodeMirror edits the markdown as TEXT, so the file on disk stays exactly what
-  was typed. A rich-text editor that re-serializes markdown is not admitted. The
-  boundary is the viewer's, again: a build of its own, never a second input to
-  the app's, and `app/scripts/companion-boundary-check.mjs` walks the app's
-  import graph and, when a build exists, greps `app/dist` outside
-  `dist/companion/`. The library itself arrives with Ideas phase 1; phase 0
-  added the window, the bundle and the check, not CodeMirror. A new exception
-  names its bundle and its check in this paragraph.
+  was typed. A rich-text editor that re-serializes markdown is not admitted.
+  **On 2026-11-24 the owner moved it into the main app too**
+  (`docs/proposals/workspace-chats.md` §4.5): ideas, plans and a workspace's
+  memory are edited in the main window with the same editor, and the Ideas
+  window is the floated form of the same pane. The rule is rewritten, not
+  dropped: CodeMirror is imported by ONE module, the document pane's editor,
+  and `app/src` reaches that module only through a dynamic `import()` with
+  destructured names (a namespace import defeats tree-shaking, above), so the
+  editor is a chunk fetched on first use and never part of the entry chunk.
+  The documents lane lands that module and rewrites
+  `app/scripts/companion-boundary-check.mjs` to hold exactly that. UNTIL IT
+  MERGES, the check still enforces the first rule (it walks the app's import
+  graph and, when a build exists, greps `app/dist` outside `dist/companion/`),
+  and no other lane imports CodeMirror into `app/src`. A new exception names
+  its bundle and its check in this paragraph.
 - **Driving the sandbox app by NAME drives the INSTALLED app — and it has no
   bundle id to address instead.** `sandbox.sh --app` runs `tauri dev`, which
   execs the UNBUNDLED binary (`<worktree>/target/debug/app` — the workspace
