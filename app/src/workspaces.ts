@@ -47,8 +47,10 @@ export const wsColorOf = (w: Pick<WsDef, "color">): WsColor | null =>
   WS_COLORS.find((c) => c.id === w.color)?.id ?? null;
 
 export type WsProject = { root: string; name: string | null; registered: boolean };
-/** `color`: a name from `WS_COLORS`, or null for the theme's accent. */
-export type WsDef = { id: string; name: string; projects: WsProject[]; color?: string | null };
+/** `color`: a name from `WS_COLORS`, or null for the theme's accent.
+ *  `plan` and `ideas` (phase 4) are ids as stored; `workspace_overview`
+ *  resolves them. */
+export type WsDef = { id: string; name: string; projects: WsProject[]; color?: string | null; plan?: string | null; ideas?: string[] };
 export type WsList = { workspaces: WsDef[] };
 
 /** What a nav drag in the workspace view can carry. A project row under a

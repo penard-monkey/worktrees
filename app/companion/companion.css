@@ -181,3 +181,40 @@ body.dragging .ix-catch { pointer-events: none; }
 .ix-version-when { flex: none; color: var(--txt-hi); }
 .ix-version-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ix-version-size { flex: none; }
+
+/* ── phase 4: plans (PlanPanel.tsx) ─────────────────────────────────────── */
+.ix-row-tag {
+  display: inline-block; margin-left: var(--s1); padding: 0 5px; border: 1px solid var(--line-strong); border-radius: 6px;
+  color: var(--txt); font-size: var(--fs-meta); line-height: 1.4; vertical-align: 1px;
+}
+.ix-planstrip .ix-plan-none { font-size: var(--fs-meta); }
+.ix-chip-plan { border-style: dashed; }
+.ix-plan { border-bottom: 1px solid var(--line); background: var(--bg-panel); max-height: 40vh; overflow-y: auto; }
+.ix-plan.ix-drop { box-shadow: inset 0 0 0 2px var(--accent); }
+.ix-plan-head { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; padding: var(--s1) var(--s4); }
+.ix-plan-ws { margin-left: auto; display: inline-flex; gap: var(--s1); }
+.ix-chip-idea { display: inline-flex; align-items: center; gap: 2px; padding-right: 2px; }
+.ix-chip-open { border: 0; background: transparent; color: inherit; font: inherit; padding: 0; cursor: pointer; max-width: 14rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ix-chip-gone { color: var(--txt); font-style: italic; }
+.ix-chip-x { border: 0; background: transparent; color: var(--txt); font-size: var(--fs-body); line-height: 1; padding: 0 3px; cursor: pointer; border-radius: 6px; }
+.ix-chip-x:hover { color: var(--txt-hi); background: var(--bg-elev); }
+.ix-plan-body { display: flex; flex-direction: column; gap: var(--s2); padding: 0 var(--s4) var(--s2); }
+.ix-plan-problems { list-style: none; margin: 0; padding: var(--s1) var(--s2); border: 1px solid var(--line-strong); border-left: 3px solid var(--warn); border-radius: 5px; background: var(--bg-abyss); }
+.ix-plan-problem { display: block; width: 100%; text-align: left; border: 0; background: transparent; color: var(--txt-hi); font-size: var(--fs-meta); padding: 2px 0; cursor: pointer; }
+.ix-plan-problem:hover { text-decoration: underline; }
+.ix-plan-col { border: 1px solid var(--line); border-radius: 6px; padding: var(--s1) var(--s2); }
+.ix-plan-col.ix-drop { box-shadow: inset 0 0 0 2px var(--accent); }
+.ix-plan-col-head { display: flex; align-items: center; justify-content: space-between; color: var(--txt-hi); font-weight: var(--fw-bold); font-size: var(--fs-body); }
+.ix-plan-col > .ix-quiet { margin: var(--s1) 0; font-size: var(--fs-meta); }
+.ix-plan-rows { list-style: none; margin: 0; padding: 0; }
+.ix-plan-row { display: flex; align-items: baseline; gap: var(--s3); padding: 3px 0; border-top: 1px solid var(--line); font-size: var(--fs-meta); color: var(--txt); width: 100%; }
+.ix-plan-row-btn { border-left: 0; border-right: 0; border-bottom: 0; background: transparent; text-align: left; cursor: pointer; font: inherit; font-size: var(--fs-meta); }
+.ix-plan-name { flex: none; color: var(--txt-hi); max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ix-plan-state { flex: none; color: var(--txt-hi); }
+.ix-plan-state::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 5px; border-radius: 50%; background: var(--txt); vertical-align: 1px; }
+.ix-plan-registered::before { background: var(--ok); }
+.ix-plan-not-registered::before { background: var(--danger); }
+.ix-plan-to-clone::before, .ix-plan-to-create::before { background: var(--warn); }
+.ix-plan-detail { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ix-pickproj { right: 16px; top: 120px; left: auto; width: 300px; max-width: 300px; }
+.ix-pickproj .ix-pick-rows { max-height: 40vh; overflow-y: auto; }

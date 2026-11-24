@@ -515,6 +515,9 @@ export const CONSOLE_ROWS: readonly string[] = [
   "share_used",
   // and the proof before it that the lane's live session is the bound one
   "share_check",
+  // plans and their workspaces (idea board phase 4): desktop only
+  "plan_make", "plan_read", "plan_add_ideas", "plan_remove_idea", "plan_add_project",
+  "workspace_from_plan", "workspace_set_plan", "workspace_link_idea", "workspace_unlink_idea", "workspace_overview",
 ];
 
 /** The device's capabilities on the host this window drives, from the remote
