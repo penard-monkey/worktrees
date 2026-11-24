@@ -98,6 +98,8 @@ Seven lanes starting the same monorepo gate at once have locked a machine up.
 - Claude sessions also have their own messaging (`SendMessage` to the full
   tmux session name). `send` types into a Codex, pi or kimi pane; check the pane is
   not mid-input before typing into it.
+- `ideas_list`, `idea_read` and `idea_related` read the user's ideas (their own
+  notes) from any place; only `(main)` writes them, and only when the user asks.
 
 ## Across projects
 

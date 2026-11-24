@@ -876,3 +876,61 @@ PYWAIT
 @test "first-run pi trust reaches status reason and wakes wait" {
   first_run_prompt pi pi-screen/0.99.1/trust-modal.txt
 }
+
+# ── ideas ────────────────────────────────────────────────────────────────────
+# The user's ideas folder is a directory of its own, named by
+# WORKTREES_IDEAS_DIR on the child alone.
+
+# ideas_in <dir> "<extra server args>" '<msg>'...
+ideas_in() {
+  local dir="$1" extra="$2"; shift 2
+  printf '%s\n' "$@" > "$BATS_TEST_TMPDIR/in.jsonl"
+  run bash -c "cd '$dir' && WORKTREES_IDEAS_DIR='$BATS_TEST_TMPDIR/ideas' '$WT_BIN' mcp $extra < '$BATS_TEST_TMPDIR/in.jsonl' 2>/dev/null"
+}
+
+@test "ideas are read from any place, and written only from (main) with --mutations" {
+  run_wt new feat-i --no-tmux
+  local wt="$REPO/.worktrees/feat-i" ideas="$BATS_TEST_TMPDIR/ideas"
+  local create='{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"idea_create","arguments":{"title":"Jellyfin","text":"From an agent."}}}'
+
+  # Read-only (main): not advertised, so not callable. A lane: refused by place.
+  ideas_in "$REPO" "" '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' "$create"
+  grep -qF '"ideas_list"' <<<"$output"
+  ! grep -qF '"name":"idea_create"' <<<"$output" || false
+  grep -qF 'without --mutations' <<<"$output"
+  ideas_in "$wt" "--mutations" "$create"
+  grep -qF 'works only from (main); this server runs in the place feat-i' <<<"$output"
+  [ ! -e "$ideas" ]
+
+  ideas_in "$REPO" "--mutations" "$create"
+  grep -qF '"isError":false' <<<"$output"
+  grep -qxF 'From an agent.' "$ideas/jellyfin.md"
+  local id; id="$(sed -n 's/^id: //p' "$ideas/jellyfin.md")"
+  cp "$ideas/jellyfin.md" "$BATS_TEST_TMPDIR/before.md"
+
+  # The lane reads what (main) wrote.
+  ideas_in "$wt" "" '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"idea_read","arguments":{"id":"'"$id"'"}}}'
+  grep -qF 'From an agent.' <<<"$output"
+
+  # An append keeps the old text, and history has it.
+  ideas_in "$REPO" "--mutations" '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"idea_append","arguments":{"id":"'"$id"'","text":"And more."}}}'
+  grep -qF '"isError":false' <<<"$output"
+  [ "$(tail -n 1 "$ideas/jellyfin.md")" = "And more." ]
+  [ "$(find "$ideas/.history/$id" -name '*.md' | wc -l | tr -d ' ')" = 1 ]
+  cmp "$(find "$ideas/.history/$id" -name '*.md')" "$BATS_TEST_TMPDIR/before.md"
+
+  # A rewrite with a stale mtime writes nothing.
+  cp "$ideas/jellyfin.md" "$BATS_TEST_TMPDIR/before.md"
+  ideas_in "$REPO" "--mutations" '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"idea_write","arguments":{"id":"'"$id"'","content":"---\nid: '"$id"'\n---\n# X\n","expected_mtime":1}}}'
+  grep -qF '"isError":true' <<<"$output"
+  cmp "$ideas/jellyfin.md" "$BATS_TEST_TMPDIR/before.md"
+  # Nothing of this is in either checkout.
+  [ -z "$(git -C "$REPO" status --porcelain)" ]
+}
+
+@test "the ideas tools are advertised nowhere outside a repository" {
+  ideas_in "$BATS_TEST_TMPDIR" "--mutations" '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ideas_list","arguments":{}}}'
+  grep -qF '"tools":[]' <<<"$output"
+  grep -qF 'unknown tool: ideas_list' <<<"$output"
+}
