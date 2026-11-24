@@ -8345,7 +8345,7 @@ function App() {
         e.preventDefault();
         // ⌘1 deliberately leaves the sidebar alone: Home is a destination in the
         // main pane, and a chord that also moved a panel would be two acts.
-        if (target === "home") { setSel(null); setMenu(null); closeCtx(); }
+        if (target === "home") { setSel(null); setWsOpen(null); setMenu(null); closeCtx(); }
         else focusPlaces();
       } else if (e.metaKey && k === "e") {
         // ⌘E — open the selected place in the editor (no-op when nothing selected).
@@ -9555,7 +9555,7 @@ function App() {
         onPointerEnter={() => navPointer("nav", true)}
         onPointerLeave={() => navPointer("nav", false)}
       >
-        <button className={"home-item" + (sel || guestOpen ? "" : " on")} onClick={() => { closeShare(); setSel(null); setMenu(null); closeCtx(); hideNav(); }}>
+        <button className={"home-item" + (sel || guestOpen ? "" : " on")} onClick={() => { closeShare(); setSel(null); setWsOpen(null); setMenu(null); closeCtx(); hideNav(); }}>
           <HomeIcon /> Home
         </button>
         <div className="nav-head">

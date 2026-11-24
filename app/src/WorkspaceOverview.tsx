@@ -67,7 +67,7 @@ export function WorkspaceOverview(props: {
                 {props.freePlans.length === 0 && <li className="empty small">No plan without a workspace. Make one in the Ideas window.</li>}
                 {props.freePlans.map((d) => (
                   <li key={d.id}>
-                    <button className="ws-ov-chip" data-testid="ws-ov-plan-pick-row" data-doc={d.id} title="Click to link it here, or drag it onto a workspace with no plan"
+                    <button className="ws-ov-chip" data-drag-handle="" data-testid="ws-ov-plan-pick-row" data-doc={d.id} title="Click to link it here, or drag it onto a workspace with no plan"
                       onPointerDown={(e) => props.arm(e, d)} onClick={() => { setPick(null); props.setPlan(d.id); }}>{d.title}</button>
                   </li>
                 ))}
@@ -79,7 +79,7 @@ export function WorkspaceOverview(props: {
               {ov.ideas.map((i) => (
                 <span key={i.id} className="ws-ov-chip ws-ov-idea" data-testid="ws-ov-idea" data-idea={i.id}>
                   {i.live
-                    ? <button className="ws-ov-chip-open" title="Open it in the Ideas window; drag it onto another workspace to link it there too"
+                    ? <button className="ws-ov-chip-open" data-drag-handle="" title="Open it in the Ideas window; drag it onto another workspace to link it there too"
                         onPointerDown={(e) => props.arm(e, { id: i.live!, title: i.title ?? "", kind: "idea" })}
                         onClick={() => props.openDoc(i.live!)}>{i.title}{i.merged && <span className="ws-ov-merged" title="This id was merged into it">merged</span>} ▸</button>
                     : <span className="ws-ov-gone">an idea that is gone</span>}
@@ -93,7 +93,7 @@ export function WorkspaceOverview(props: {
                 {props.linkable.length === 0 && <li className="empty small">No other idea to link.</li>}
                 {props.linkable.map((d) => (
                   <li key={d.id}>
-                    <button className="ws-ov-chip" data-testid="ws-ov-idea-pick-row" data-doc={d.id} title="Click to link it here, or drag it onto a workspace"
+                    <button className="ws-ov-chip" data-drag-handle="" data-testid="ws-ov-idea-pick-row" data-doc={d.id} title="Click to link it here, or drag it onto a workspace"
                       onPointerDown={(e) => props.arm(e, d)} onClick={() => { setPick(null); props.linkIdea(d.id); }}>{d.title}</button>
                   </li>
                 ))}

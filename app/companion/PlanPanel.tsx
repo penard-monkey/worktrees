@@ -159,7 +159,7 @@ export function PickProject(props: { rows: RegProject[]; skip: string[]; act(roo
         onKeyDown={(e) => { if (e.key === "Enter" && shown[0]) props.act(shown[0].root); }} />
       <div className="ix-pick-rows">
         {shown.map((r) => (
-          <button key={r.root} className="ix-pop-item" data-testid="plan-pick-project-row" data-root={r.root} title={r.root}
+          <button key={r.root} className="ix-pop-item" data-drag-handle="" data-testid="plan-pick-project-row" data-root={r.root} title={r.root}
             onPointerDown={(e) => props.arm(e, r.root)} onClick={() => props.act(r.root)}>{r.name}</button>
         ))}
         {shown.length === 0 && <p className="ix-quiet ix-pop-head">No other registered project.</p>}

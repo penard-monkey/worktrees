@@ -25,6 +25,7 @@
 //
 // Override, so a mutation can be shown red without touching the tree:
 //   PLANS_SRC=<copy of plans.ts>  COMPANION_SRC=<copy of Companion.tsx>  APP_SRC=<copy of App.tsx>
+//   OVERVIEW_SRC=<copy of WorkspaceOverview.tsx>  PANEL_SRC=<copy of PlanPanel.tsx>
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { transformWithEsbuild } from "vite";
@@ -33,6 +34,8 @@ const here = (p) => fileURLToPath(new URL(p, import.meta.url));
 const SRC = process.env.PLANS_SRC ?? here("../src/plans.ts");
 const COMP = process.env.COMPANION_SRC ?? here("../companion/Companion.tsx");
 const APP = process.env.APP_SRC ?? here("../src/App.tsx");
+const OVERVIEW = process.env.OVERVIEW_SRC ?? here("../src/WorkspaceOverview.tsx");
+const PANEL = process.env.PANEL_SRC ?? here("../companion/PlanPanel.tsx");
 let failed = 0;
 const check = (c, m) => { if (!c) failed++; console.log(`${c ? "ok" : "not ok"} — ${m}`); };
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -152,6 +155,24 @@ check(/const wsLite = \(\) => \(wsList\?\.workspaces \?\? \[\]\)\.map/.test(app)
 check(/ideaOntoPlan\(/.test(comp) && /projectOntoPlan\(item\.root, planView\)/.test(comp), "the companion's drop resolves through plans.ts's rules");
 check(/<PlanPanel[\s\S]{0,200}view=\{planView\}/.test(comp) && /\{v\.problems\.length > 0 &&/.test(fs.readFileSync(here("../companion/PlanPanel.tsx"), "utf8")),
   "a plan's problems are drawn above the editor, which shows the document whatever they are");
+
+// ── a press can START each drag, and Home leaves the overview ───────────────
+// `arm` (navdrag.ts) refuses a press inside a button that is not marked
+// `data-drag-handle`, so a chip without it drags nothing and says nothing.
+check(/closest\("button,input,textarea,select,a"\);\s*if \(ctl && !ctl\.hasAttribute\("data-drag-handle"\)\) return;/.test(fs.readFileSync(here("../src/navdrag.ts"), "utf8")),
+  "navdrag: a press in a button arms a drag only when the button is a data-drag-handle");
+for (const [file, text, want] of [
+  ["WorkspaceOverview.tsx", fs.readFileSync(OVERVIEW, "utf8"), 3],
+  ["PlanPanel.tsx", fs.readFileSync(PANEL, "utf8"), 1],
+]) {
+  const tags = [...text.matchAll(/onPointerDown=\{\(e\) => props\.arm\(/g)].map((m) => text.slice(text.lastIndexOf("<button", m.index), m.index));
+  check(tags.length === want, `${file}: ${want} drag source(s) (${tags.length})`);
+  tags.forEach((t, i) => check(/^<button\b/.test(t) && /\sdata-drag-handle=""/.test(t), `${file}: drag source ${i + 1} is a data-drag-handle`));
+}
+const homeItem = app.match(/<button className=\{"home-item"[^\n]*/)?.[0] ?? "";
+check(/setSel\(null\);/.test(homeItem) && /setWsOpen\(null\);/.test(homeItem), "Home in the nav leaves an open overview, not only a place");
+const homeChord = app.match(/if \(target === "home"\) \{[^\n]*\}/)?.[0] ?? "";
+check(/setSel\(null\);/.test(homeChord) && /setWsOpen\(null\);/.test(homeChord), "…and so does ⌘1");
 
 // ── the mock answers every phase 4 row ──────────────────────────────────────
 const mock = fs.readFileSync(here("../src/mock/install.ts"), "utf8");
