@@ -7,6 +7,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ### Added
 
+- **Links in the release notes.** A `[text](url)` in *What's new* is a link that opens in your browser; a target that is not a web address shows as plain text. (After #298 by t957095.)
+
 - **A crash shows what went wrong and a Reload button, not a blank window.** When the window's interface failed while drawing, the whole window went blank until you quit the app. Now it says what happened, writes it to the log (Settings → Logs), and **Reload** starts the window again; agents and terminals keep running. The Ideas window has the same screen. (After #297 by t957095.)
 
 - **Review with init, beside an undeclared file.** In a project's sheet, a doctor finding about a gitignored file your `.worktrees.toml` does not name has a **Review with init** button. It opens what `init` would write today, which a project that already had a config could not see, and says which command prints only the entries yours is missing. (After #299 by t957095.)

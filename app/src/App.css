@@ -1452,8 +1452,8 @@ body.dragging .menu-catch { pointer-events: none; }
   font-family: inherit; font-size: var(--fs-body); line-height: var(--lh-prose);
   font-weight: var(--fw-med); color: var(--txt-hi);
 }
-.rel-lead:disabled { cursor: default; }
-.rel-lead:not(:disabled):hover { background: var(--bg-elev); }
+.rel-lead.flat { cursor: default; }
+.rel-lead:not(.flat):hover { background: var(--bg-elev); }
 .rel-chev {
   flex: 0 0 14px; display: flex; align-items: center; justify-content: center;
   height: calc(var(--fs-body) * var(--lh-prose)); color: var(--txt-mute);
