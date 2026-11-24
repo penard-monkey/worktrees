@@ -10,7 +10,7 @@
 // server's environment, or `?dragprobe` on the page. Both callers import this
 // module under `import.meta.env.DEV`, which a production build makes the
 // literal `false`, so the probe is not in a release bundle at all
-// (companion-boundary-check.mjs greps app/dist for its marker).
+// (editor-boundary-check.mjs greps app/dist for its marker).
 import { useRef, useState } from "react";
 import ReactDOM from "react-dom/client";
 import { invoke } from "./ipc";

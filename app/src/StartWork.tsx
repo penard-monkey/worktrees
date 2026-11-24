@@ -6,7 +6,7 @@
  *  that will be written to `.planning/brief.md`, and Start starts this ONE
  *  item. In the Ideas window it is editable; in the main window's overview it
  *  is read-only, because the plan's document is not there to be read beside
- *  it: "Edit in Ideas" goes where it is. Editing the text here edits the
+ *  it: "Edit the plan" opens it. Editing the text here edits the
  *  brief, not the plan. */
 import { useMemo, useRef, useState } from "react";
 import { HARNESS_LABEL, NEEDS_MODEL, isHarness } from "./harness";
@@ -91,7 +91,7 @@ export function StartReview(props: {
         {refused && <p className="sw-note sw-bad" role="alert" data-testid="start-refused">The place {started!.slug} is ready with its brief. Its agent was not started: {lastLine(done!.result.output)}</p>}
         {done?.plan_error && <p className="sw-note sw-bad" role="alert" data-testid="start-plan-error">{done.plan_error}</p>}
         <div className="sw-foot">
-          {props.readOnly && props.edit && !started && <button className="sw-btn" data-testid="start-edit" disabled={busy} onClick={props.edit}>Edit in Ideas ▸</button>}
+          {props.readOnly && props.edit && !started && <button className="sw-btn" data-testid="start-edit" disabled={busy} onClick={props.edit}>Edit the plan ▸</button>}
           <span className="sw-gap" />
           <button className="sw-btn" data-testid="start-close" disabled={busy} onClick={props.close}>{started ? "Close" : "Cancel"}</button>
           {started && <button className="sw-btn" data-testid="start-show" disabled={busy} onClick={() => props.show(started.project, started.slug)}>Show the place ▸</button>}

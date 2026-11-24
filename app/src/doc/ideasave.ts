@@ -1,5 +1,5 @@
-// When an open idea is saved, and what an `ideas:changed` means for it — the
-// rules, pure. No import at runtime: ideas-save-check.mjs loads this file as a
+// When an open document (an idea, a plan) is saved, and what an
+// `ideas:changed` means for it — the rules, pure, the same in both windows. No import at runtime: ideas-save-check.mjs loads this file as a
 // `data:` module and drives it on a VIRTUAL clock with scripted rows, because
 // a test that races two sleeps asserts the scheduler (AGENTS.md).
 //
@@ -54,12 +54,15 @@ export type Clock = {
 /** `idea_write`'s answer: the idea as saved, without its text. */
 export type Saved = { mtime_ms: number; file: string; title: string };
 
+/** The file as read: its name and title too, when the source gives them. */
+export type Read = { content: string; mtime_ms: number; file?: string; title?: string };
+
 export type Rows = {
   /** `keepHistory`: copy the file's current bytes to `.history/` before the
    *  replace. Keep mine only — the text it overwrites came from elsewhere and
    *  exists nowhere else. Never an ordinary save. */
   write(id: string, content: string, expectedMtime: number, keepHistory: boolean): Promise<Saved>;
-  read(id: string): Promise<{ content: string; mtime_ms: number }>;
+  read(id: string): Promise<Read>;
 };
 
 export type SaveState =
@@ -74,6 +77,8 @@ export type SaveState =
 export type SessionDeps = {
   rows: Rows;
   clock: Clock;
+  /** The source's own refusals, when they are not the ideas' two sentences. */
+  refusals?: { stale(e: string): boolean; gone(e: string): boolean };
   /** The editor's text, exactly as it would be saved. */
   text(): string;
   /** Put the file's text in the editor (a reload). */
@@ -82,9 +87,13 @@ export type SessionDeps = {
   /** A write of ours was answered: the file's name and title as saved (the
    *  first heading renames it). */
   onSaved?(s: Saved): void;
+  /** The file's text was taken, changed elsewhere: its name and title may have
+   *  moved with it (another window typed in the heading). */
+  onTaken?(d: Read): void;
 };
 
-export type IdeasChanged = { changed: { id: string; mtime_ms: number }[]; removed: string[] };
+/** What moved in the source since it last said: `ideas:changed`'s payload. */
+export type Changed = { changed: { id: string; mtime_ms: number }[]; removed: string[] };
 
 const errText = (e: unknown) => (typeof e === "string" ? e : e instanceof Error ? e.message : String(e));
 
@@ -97,7 +106,7 @@ export class Session {
   private timer: unknown = null;
   private inflight: Promise<void> | null = null;
   private again = false;
-  private pending: IdeasChanged[] = [];
+  private pending: Changed[] = [];
   private state: SaveState = { kind: "clean", savedAt: null };
   private closed = false;
 
@@ -113,6 +122,9 @@ export class Session {
   dirty(): boolean { return this.deps.text() !== this.base; }
   /** Saving is held: a conflict, a removal or an error needs the person. */
   held(): boolean { return this.state.kind === "conflict" || this.state.kind === "removed"; }
+
+  private stale(e: string): boolean { return (this.deps.refusals?.stale ?? isStale)(e); }
+  private gone(e: string): boolean { return (this.deps.refusals?.gone ?? isGone)(e); }
 
   private set(s: SaveState) {
     this.state = s;
@@ -155,7 +167,7 @@ export class Session {
         this.set(this.dirty() ? { kind: "dirty" } : { kind: "clean", savedAt: this.deps.clock.now() });
       } catch (e) {
         const msg = errText(e);
-        this.set(isStale(msg) ? { kind: "conflict", why: "refused" } : { kind: "error", message: msg });
+        this.set(this.stale(msg) ? { kind: "conflict", why: "refused" } : { kind: "error", message: msg });
       }
     })();
     this.inflight = run.finally(() => {
@@ -175,7 +187,7 @@ export class Session {
   }
 
   /** An `ideas:changed` payload. Resolves once it has been acted on. */
-  async external(ev: IdeasChanged): Promise<void> {
+  async external(ev: Changed): Promise<void> {
     if (this.closed) return;
     if (this.inflight) { this.pending.push(ev); return; }
     const ch = ev.changed.find((c) => c.id === this.id);
@@ -189,7 +201,7 @@ export class Session {
         if (this.own.has(d.mtime_ms) || d.mtime_ms === this.mtime) return;
         return this.elsewhere(d);
       } catch (e) {
-        if (isGone(errText(e))) {
+        if (this.gone(errText(e))) {
           if (this.timer !== null) { this.deps.clock.clearTimeout(this.timer); this.timer = null; }
           this.set({ kind: "removed" });
         }
@@ -198,7 +210,7 @@ export class Session {
   }
 
   /** The file changed and the change is not ours. */
-  private async elsewhere(known?: { content: string; mtime_ms: number }): Promise<void> {
+  private async elsewhere(known?: Read): Promise<void> {
     if (this.state.kind === "removed") return;
     if (this.dirty() || this.state.kind === "conflict") {
       if (this.timer !== null) { this.deps.clock.clearTimeout(this.timer); this.timer = null; }
@@ -208,7 +220,7 @@ export class Session {
     let d = known;
     if (!d) {
       try { d = await this.deps.rows.read(this.id); } catch (e) {
-        if (isGone(errText(e))) this.set({ kind: "removed" });
+        if (this.gone(errText(e))) this.set({ kind: "removed" });
         return;
       }
     }
@@ -217,10 +229,11 @@ export class Session {
     this.take(d);
   }
 
-  private take(d: { content: string; mtime_ms: number }) {
+  private take(d: Read) {
     this.base = d.content;
     this.mtime = d.mtime_ms;
     if (this.deps.text() !== d.content) this.deps.replace(d.content);
+    if (!this.closed) this.deps.onTaken?.(d);
     this.set({ kind: "clean", savedAt: null });
   }
 
@@ -228,7 +241,7 @@ export class Session {
   async reload(): Promise<void> {
     try { this.take(await this.deps.rows.read(this.id)); } catch (e) {
       const msg = errText(e);
-      this.set(isGone(msg) ? { kind: "removed" } : { kind: "error", message: msg });
+      this.set(this.gone(msg) ? { kind: "removed" } : { kind: "error", message: msg });
     }
   }
 
@@ -237,7 +250,7 @@ export class Session {
     let d: { content: string; mtime_ms: number };
     try { d = await this.deps.rows.read(this.id); } catch (e) {
       const msg = errText(e);
-      this.set(isGone(msg) ? { kind: "removed" } : { kind: "error", message: msg });
+      this.set(this.gone(msg) ? { kind: "removed" } : { kind: "error", message: msg });
       return;
     }
     this.base = d.content;

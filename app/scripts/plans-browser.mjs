@@ -252,7 +252,7 @@ async function main(page, tag, name) {
   // ── the review is read-only; Start ──
   await page.locator("[data-testid=ws-ov-work]").nth(0).locator("[data-testid=ws-ov-review]").click();
   await page.waitForSelector("[data-testid=start-review]");
-  ok(await page.evaluate(() => document.querySelector("[data-testid=start-brief]").readOnly) && await page.locator("[data-testid=start-edit]").count() === 1, `${tag} overview: the brief is read-only, Edit in Ideas beside it`);
+  ok(await page.evaluate(() => document.querySelector("[data-testid=start-brief]").readOnly) && await page.locator("[data-testid=start-edit]").count() === 1, `${tag} overview: the brief is read-only, Edit the plan beside it`);
   if (SHOTS) await page.screenshot({ path: `${SHOTS}/overview-review-${name}.png` });
   await page.click("[data-testid=start-go]");
   ok(await until(page, () => document.querySelector("[data-testid=start-done]")), `${tag} overview: Start starts it`);

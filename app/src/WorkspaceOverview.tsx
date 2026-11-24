@@ -2,10 +2,11 @@
  *  linked ideas, and the plan's Projects and Work as core's reader answers
  *  them. A project to clone or create opens the Add project dialogs filled in;
  *  a work item is reviewed and started, or takes a place dropped from the nav
- *  (phase 5). The plan's text itself is edited in the Ideas window. Shown in the
+ *  (phase 5). The plan's text itself is edited in the document that opens here. Shown in the
  *  main area when the workspace's name is clicked and no place is selected.
  *
- *  "plan ▸" and an idea open the document in the Ideas window. The plan and
+ *  "plan ▸" and an idea open the document in the main area, in place of this
+ *  (doc/MainDocument.tsx), whose Float opens it in the Ideas window. The plan and
  *  idea chips here are the same-window drag sources of §6.3: a plan with no
  *  workspace, dragged onto a workspace in the nav, becomes its plan; an idea
  *  dragged there is linked. Every drag has its menu path here too (Link a
@@ -55,7 +56,7 @@ export function WorkspaceOverview(props: {
               {plan ? (
                 plan.live ? (
                   <>
-                    <button className="ctrl sm" data-testid="ws-ov-plan" onClick={() => props.openDoc(plan.live!)} title="Open it in the Ideas window">
+                    <button className="ctrl sm" data-testid="ws-ov-plan" onClick={() => props.openDoc(plan.live!)} title="Open it here">
                       {plan.title} ▸
                     </button>
                     <button className="ws-ov-x" title="Unlink the plan (the plan stays)" data-testid="ws-ov-plan-unlink" onClick={() => props.setPlan(null)}>×</button>
@@ -90,7 +91,7 @@ export function WorkspaceOverview(props: {
               {ov.ideas.map((i) => (
                 <span key={i.id} className="ws-ov-chip ws-ov-idea" data-testid="ws-ov-idea" data-idea={i.id}>
                   {i.live
-                    ? <button className="ws-ov-chip-open" data-drag-handle="" title="Open it in the Ideas window; drag it onto another workspace to link it there too"
+                    ? <button className="ws-ov-chip-open" data-drag-handle="" title="Open it here; drag it onto another workspace to link it there too"
                         onPointerDown={(e) => props.arm(e, { id: i.live!, title: i.title ?? "", kind: "idea" })}
                         onClick={() => props.openDoc(i.live!)}>{i.title}{i.merged && <span className="ws-ov-merged" title="This id was merged into it">merged</span>} ▸</button>
                     : <span className="ws-ov-gone">an idea that is gone</span>}

@@ -8,35 +8,36 @@
 // (§7). There is no second path that edits a document: the editor's text
 // reaches the file only through `Session` (ideasave.ts) → `idea_write`.
 //
+// The document itself — its session, its editor, its versions, its header — is
+// the pane both windows share (app/src/doc/: useDoc.ts, DocumentPane.tsx). What
+// is here is this window's own: the list, the acts between documents, the plan
+// panel and the conversations.
+//
 // Layout: a grid of [list | document | side]. The side column is empty and
 // zero-wide in phase 1; the agent panel of phase 6 opens there, beside the
 // editor, without moving either. List rows are plain elements carrying their
 // id (`data-idea`), which is what phase 3's drag (navdrag.ts) will hang on.
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { EditorView } from "@codemirror/view";
 import { engineState, invoke, listen, onEngineState, type EngineState } from "../src/ipc";
-import { Markdown } from "../src/markdown";
 import { revealOnHost } from "../src/onhost";
 import { wireMenu } from "../src/menu";
 import { WindowZoom } from "./zoom";
 import { applySettings, loadSettings } from "../src/settings";
 import { setTermScrollback } from "../src/TerminalPane";
-import { useArmed } from "../src/useArmed";
 import "../src/tokens.css";
 import "../src/App.css";
 import "./companion.css";
-import { ideaState, type EditorHooks } from "./editor";
-import { Session, type IdeasChanged, type SaveState, type Saved } from "./ideasave";
-import { savedText } from "./ideastate";
-import { bodyOf, commentOnly, withId } from "./ideatext";
+import { DocNotice, DocumentPane } from "../src/doc/DocumentPane";
+import { ideaDocs, type Doc, type Version } from "../src/doc/source";
+import { errText, useDoc } from "../src/doc/useDoc";
 import { quoteOf, type Quote } from "./ideaquote";
 import { IdeaChat, ideaDots, type ConvState, type IdeaSessionsEv } from "./IdeaChat";
 import { useNavDrag } from "../src/navdrag";
-import { CombineAsk, DropChooser, LinkPicker, PickIdea, RelatedStrip, SplitAsk, VersionsPanel, type Relation, type Version } from "./IdeaRelate";
+import { CombineAsk, DropChooser, PickIdea, RelatedStrip, SplitAsk, type Relation } from "./IdeaRelate";
 import {
-  combineCall, combineDrop, ideaDrop, ideaHref, ideaLink, mergeCall, mergedNote, nextSelection, pickerMatches, readableLinks,
-  relateCall, splitCall, versionWhen, type Call, type Choice,
-} from "./ideasrelate";
+  combineCall, combineDrop, ideaDrop, mergeCall, mergedNote, nextSelection,
+  relateCall, splitCall, type Call, type Choice,
+} from "../src/doc/ideasrelate";
 import { PickProject, PickWorkspace, PlanPanel, PlanStrip, type RegProject, type WsOption } from "./PlanPanel";
 import {
   addIdeasCall, addProjectCall, agentFor, fromPlanCall, ideaOntoPlan, itemPlace, launchCall, linkIdeaCall, linkPlaceCall, makePlanCall, MAIN_ASK_KEY, missingPlaces,
@@ -50,8 +51,6 @@ import { useGone } from "../src/useGone";
 type Problem = "no-id" | "bad-id" | "duplicate-id" | "too-large" | "not-text" | "unreadable";
 export type Idea = { id: string | null; title: string; file: string; created: string | null; mtime_ms: number; size: number; kind?: "idea" | "plan"; problem?: Problem };
 type Listing = { ideas: Idea[]; skipped: string[]; dir?: string };
-type Merged = { id: string; title: string | null; date: string | null };
-type Doc = Idea & { content: string; merged?: Merged };
 
 const PROBLEM: Record<Problem, string> = {
   "no-id": "Made by hand. Adopt it to open it here.",
@@ -61,8 +60,6 @@ const PROBLEM: Record<Problem, string> = {
   "not-text": "Not text (UTF-8), so it cannot be opened.",
   unreadable: "Could not be read.",
 };
-
-const errText = (e: unknown) => (typeof e === "string" ? e : e instanceof Error ? e.message : String(e));
 
 function useEngine(): EngineState {
   return useSyncExternalStore(onEngineState, engineState);
@@ -107,28 +104,8 @@ export function age(ms: number, now = Date.now()): string {
   return `${Math.floor(s / (86400 * 7))}w`;
 }
 
-const clock = {
-  setTimeout: (fn: () => void, ms: number) => window.setTimeout(fn, ms),
-  clearTimeout: (h: unknown) => window.clearTimeout(h as number),
-  now: () => Date.now(),
-};
-
-function saveWords(s: SaveState): string {
-  switch (s.kind) {
-    case "clean":
-      return s.savedAt ? `Saved ${new Date(s.savedAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "Saved";
-    case "dirty":
-      return "Edited";
-    case "saving":
-      return "Saving…";
-    case "conflict":
-      return "Not saved";
-    case "removed":
-      return "Removed";
-    case "error":
-      return "Not saved";
-  }
-}
+/** No list yet: one array, so it is the same one every render. */
+const NO_ROWS: Idea[] = [];
 
 // ── the list ────────────────────────────────────────────────────────────────
 function IdeaList(props: {
@@ -256,110 +233,7 @@ function IdeaList(props: {
   );
 }
 
-// ── the editor's host ───────────────────────────────────────────────────────
-export type EditorHandle = {
-  text(): string; replace(content: string): void; focus(): void;
-  /** The selection as offsets into `text()` (UTF-16, what a JS string
-   *  counts), and its text; `null` when nothing is selected. */
-  selection(): { start: number; end: number; text: string } | null;
-  /** Replace document positions `from..to` with `text`, as a person's input
-   *  (so it saves), and put the cursor after it. */
-  insert(from: number, to: number, text: string): void;
-  /** Put the cursor at the start of line `n` (1-based, the file's) and show it. */
-  gotoLine(n: number): void;
-};
-
-/** One CodeMirror view for the window's life; a new document gets a new
- *  STATE (its own history, its own line separator). `docKey` changes when
- *  another idea is opened. */
-function EditorHost(props: {
-  docKey: string; initial: string; focus: boolean; handle: React.MutableRefObject<EditorHandle | null>; edited(): void; blurred(): void; hidden: boolean;
-  /** Phase 3's hooks (`EditorHooks`), read through a ref so they stay current. */
-  more: Pick<EditorHooks, "picker" | "pickerKey" | "follow" | "selected" | "selectionMoved"> & {
-    /** The text was replaced under the editor (a reload, Claude's edit). */
-    replaced?(): void;
-  };
-  /** Text dragged out of the editor (an HTML5 drag CodeMirror starts). */
-  textDrag(on: boolean): void;
-}) {
-  const host = useRef<HTMLDivElement>(null);
-  const view = useRef<EditorView | null>(null);
-  const cb = useRef({ edited: props.edited, blurred: props.blurred, more: props.more });
-  cb.current = { edited: props.edited, blurred: props.blurred, more: props.more };
-  const hooks = useMemo<EditorHooks>(() => ({
-    edited: () => cb.current.edited(),
-    blurred: () => cb.current.blurred(),
-    picker: (p) => cb.current.more.picker?.(p),
-    pickerKey: (k) => cb.current.more.pickerKey?.(k) ?? false,
-    follow: (id) => cb.current.more.follow?.(id),
-    selected: (h) => cb.current.more.selected?.(h),
-    selectionMoved: () => cb.current.more.selectionMoved?.(),
-  }), []);
-  useEffect(() => {
-    const v = new EditorView({ parent: host.current! });
-    view.current = v;
-    return () => { v.destroy(); view.current = null; };
-  }, []);
-  useEffect(() => {
-    const v = view.current;
-    if (!v) return;
-    // The cursor starts at the end of the text: at 0 it would sit before the
-    // frontmatter, where the guard refuses every keystroke.
-    const end = Number.MAX_SAFE_INTEGER;
-    v.setState(ideaState(props.initial, hooks, { anchor: end, head: end }));
-    props.handle.current = {
-      text: () => savedText(v.state),
-      replace: (content) => {
-        const sel = v.state.selection.main;
-        v.setState(ideaState(content, hooks, { anchor: sel.anchor, head: sel.head }));
-        cb.current.more.replaced?.();
-      },
-      focus: () => v.focus(),
-      selection: () => {
-        const r = v.state.selection.main;
-        if (r.empty) return null;
-        return { start: v.state.sliceDoc(0, r.from).length, end: v.state.sliceDoc(0, r.to).length, text: v.state.sliceDoc(r.from, r.to) };
-      },
-      insert: (from, to, text) => {
-        v.dispatch({ changes: { from, to, insert: text }, selection: { anchor: from + text.length }, userEvent: "input.complete", scrollIntoView: true });
-        v.focus();
-      },
-      gotoLine: (n) => {
-        const l = v.state.doc.line(Math.max(1, Math.min(n, v.state.doc.lines)));
-        v.dispatch({ selection: { anchor: l.from, head: l.to }, scrollIntoView: true });
-        v.focus();
-      },
-    };
-    if (props.focus) v.focus();
-    // The initial text is read once per document; a reload goes through
-    // `replace`, never through a re-render.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [props.docKey]);
-  return <div ref={host} className="ix-editor" data-testid="ideas-editor" hidden={props.hidden}
-    onDragStart={() => props.textDrag(true)} onDragEnd={() => props.textDrag(false)} />;
-}
-
-/** Read: the dock's markdown renderer on the body (the frontmatter is the
- *  file's, not the prose). HTML comments draw as nothing — later phases'
- *  anchors are comments (§4.4); other raw HTML stays literal, inert text. A
- *  mermaid fence is code here: mermaid lives in the docs viewer's bundle
- *  alone. Links do nothing in phase 1. */
-function ReadView({ text, follow }: { text: string; follow(id: string): void }) {
-  // `idea:` links become `#idea:` ones, which the shared renderer links.
-  const body = useMemo(() => readableLinks(bodyOf(text)), [text]);
-  return (
-    <div className="ix-read" data-testid="ideas-read">
-      <Markdown src={body} renderHtml={(raw) => (commentOnly(raw) ? "" : null)} onLink={(href) => { const id = ideaHref(href); if (id) follow(id); }} />
-    </div>
-  );
-}
-
 // ── the window ──────────────────────────────────────────────────────────────
-/** The open idea. `focus`: put the cursor in the editor as it opens (a new
- *  idea), from the editor host's own effect — a timer set beside the state
- *  change can fire before React commits it (it did, in Chromium). */
-type Open = { id: string; title: string; file: string; key: string; initial: string; focus: boolean; kind: "idea" | "plan" };
-
 const zoom = new WindowZoom();
 const zoomReady = zoom.load();
 
@@ -369,17 +243,7 @@ export function Companion() {
   const gen = engine.gen;
   const [listing, setListing] = useState<Listing | null>(null);
   const [filter, setFilter] = useState("");
-  const [open, setOpen] = useState<Open | null>(null);
-  const [save, setSave] = useState<SaveState>({ kind: "clean", savedAt: null });
-  const [mode, setMode] = useState<"edit" | "read">("edit");
-  const [readText, setReadText] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
-  const [renaming, setRenaming] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const session = useRef<Session | null>(null);
-  const handle = useRef<EditorHandle | null>(null);
-  const arm = useArmed<"remove" | "reload">();
-  const keySeq = useRef(0);
   // Phase S: the open idea's conversations beside the editor.
   const [sessions, setSessions] = useState<IdeaSessionsEv | null>(null);
   const [chatOpen, setChatOpen] = useState(false);
@@ -393,17 +257,11 @@ export function Companion() {
   const [splitAsk, setSplitAsk] = useState<{ start: number; end: number; text: string } | null>(null);
   const [rowMenu, setRowMenu] = useState<{ idea: Idea; x: number; y: number } | null>(null);
   const [undo, setUndo] = useState<{ label: string; run: () => Promise<void> } | null>(null);
-  const [versions, setVersions] = useState<Version[] | null | false>(false);
   const [related, setRelated] = useState<Relation[]>([]);
-  const [relTick, setRelTick] = useState(0);
-  const [hasSel, setHasSel] = useState(false);
   // The selection as a message would quote it, read while a conversation's
   // panel is open.
   const [quote, setQuote] = useState<Quote | null>(null);
   const quoteTimer = useRef<number | undefined>(undefined);
-  const [picker, setPicker] = useState<{ from: number; to: number; query: string; x: number; y: number } | null>(null);
-  const [pickIdx, setPickIdx] = useState(0);
-  const pickerDismissed = useRef<number | null>(null);
   const textDragging = useRef(false);
   const [textDrag, setTextDrag] = useState(false);
   const listRef = useRef<HTMLUListElement | null>(null);
@@ -437,20 +295,22 @@ export function Companion() {
   }, []);
   useEffect(() => { if (up) void refresh(); }, [up, gen, refresh]);
 
-  // An edit anywhere in the folder: re-pull the list, whatever the event
-  // carries (a hand-made file has no id to name), and let the open idea's
-  // session decide what it means for the editor.
-  useEffect(() => {
-    let off: (() => void) | null = null;
-    let gone = false;
-    listen<IdeasChanged>("ideas:changed", (ev) => {
-      void refresh();
-      setRelTick((n) => n + 1);
-      const p = ev.payload;
-      if (p && session.current) void session.current.external({ changed: p.changed ?? [], removed: p.removed ?? [] });
-    }).then((u) => { if (gone) u(); else off = u; }).catch(() => {});
-    return () => { gone = true; off?.(); };
-  }, [refresh]);
+  // The open document. An edit anywhere in the folder re-pulls the list,
+  // whatever the event carries (a hand-made file has no id to name), and bumps
+  // `relTick`; the open document's session decides what it means for the editor.
+  const doc = useDoc({
+    source: ideaDocs,
+    notice: setNotice,
+    trace: (m) => trace(gen, m),
+    listed: () => void refresh(),
+    rows: listing?.ideas ?? NO_ROWS,
+    follow: (id) => void openIdea(id),
+    selectionMoved: () => readQuote(true),
+    // The same offsets over another text: offered, never attached by itself.
+    replaced: () => readQuote(false),
+    began: () => { window.clearTimeout(quoteTimer.current); setQuote(null); },
+  });
+  const { open, mode, busy, setBusy, session, handle, arm, hasSel, tick: relTick, bump, begin, leave, closeOpen, openDoc: openIdea, setMode, switchMode } = doc;
 
   // The conversations' live state, by tmux session (serve sends the last one
   // as soon as this window declares the event).
@@ -462,74 +322,6 @@ export function Companion() {
     return () => { gone = true; off?.(); };
   }, []);
 
-  /** Start a session on a document just read, created or adopted. */
-  const begin = useCallback((d: Doc, focus = false) => {
-    session.current?.close();
-    let known = { file: d.file, title: d.title };
-    const s = new Session(d.id!, d.content, d.mtime_ms, {
-      rows: {
-        write: (id, content, expectedMtime, keepHistory) =>
-          invoke<Saved>("idea_write", keepHistory ? { id, content, expectedMtime, keepHistory: true } : { id, content, expectedMtime }),
-        read: (id) => invoke<Doc>("idea_read", { id }),
-      },
-      clock,
-      text: () => handle.current?.text() ?? d.content,
-      replace: (c) => { handle.current?.replace(c); setReadText(c); },
-      onState: (st) => {
-        setSave(st);
-        if (st.kind === "conflict" || st.kind === "removed" || st.kind === "error") trace(gen, `idea ${d.id} ${st.kind}${st.kind === "conflict" ? ` (${st.why})` : ""}`);
-      },
-      // The first heading names the file: a save may have renamed it. The
-      // open idea's name and title follow at once, and the list re-pulls
-      // rather than wait for the poll.
-      onSaved: (saved) => {
-        setOpen((o) => (o && o.id === d.id ? { ...o, file: saved.file, title: saved.title } : o));
-        if (saved.file !== known.file || saved.title !== known.title) {
-          if (saved.file !== known.file) trace(gen, `saved ${d.id} as ${saved.file}`);
-          known = saved;
-          void refresh();
-        }
-      },
-    });
-    session.current = s;
-    setSave({ kind: "clean", savedAt: null });
-    setRenaming(null);
-    arm.disarm();
-    setOpen({ id: d.id!, title: d.title, file: d.file, key: `${d.id}#${++keySeq.current}`, initial: d.content, focus, kind: d.kind === "plan" ? "plan" : "idea" });
-    setReadText(d.content);
-    setVersions((v) => (v === false ? false : null));
-    setHasSel(false);
-    window.clearTimeout(quoteTimer.current);
-    setQuote(null);
-    setPicker(null);
-    setRelTick((n) => n + 1);
-  }, [arm, gen, refresh]);
-
-  /** Leave the open idea, saving first. Refused while its text cannot be
-   *  saved (a conflict, or it was removed): that text exists nowhere else. */
-  const leave = useCallback(async (): Promise<boolean> => {
-    const s = session.current;
-    if (!s) return true;
-    await s.flush();
-    if ((s.held() || s.current.kind === "error") && s.dirty()) {
-      setNotice("This idea has text that is not saved. Keep yours or reload before you open another.");
-      return false;
-    }
-    return true;
-  }, []);
-
-  const openIdea = useCallback(async (id: string) => {
-    if (open?.id === id) return;
-    if (!(await leave())) return;
-    try {
-      const d = await invoke<Doc>("idea_read", { id });
-      // An id that was merged away lands on the idea that took it (§3).
-      setNotice(d.merged ? mergedNote(d.merged, d.title) : null);
-      if (d.merged) trace(gen, `opened ${id}, merged into ${d.id}`);
-      if (d.id !== open?.id) begin(d);
-    } catch (e) { setNotice(`Could not open it: ${errText(e)}`); void refresh(); }
-  }, [open, leave, begin, refresh, gen]);
-
   const newIdea = useCallback(async () => {
     if (!(await leave())) return;
     try {
@@ -539,7 +331,7 @@ export function Companion() {
       begin(d, true);
       void refresh();
     } catch (e) { setNotice(`Could not make a new idea: ${errText(e)}`); }
-  }, [leave, begin, refresh, gen]);
+  }, [leave, begin, setMode, refresh, gen]);
 
   const adopt = useCallback(async (i: Idea) => {
     if (!(await leave())) return;
@@ -551,24 +343,6 @@ export function Companion() {
     } catch (e) { setNotice(`Could not adopt ${i.file}: ${errText(e)}`); void refresh(); }
   }, [leave, begin, refresh, gen]);
 
-  const rename = useCallback(async (title: string) => {
-    const s = session.current;
-    if (!s || !open) return;
-    setRenaming(null);
-    if (!title.trim() || title.trim() === open.title) return;
-    await s.flush();
-    if (s.held() || s.current.kind === "error") { setNotice("Save or reload this idea before renaming it."); return; }
-    setBusy(true);
-    try {
-      const d = await invoke<Doc>("idea_rename", { id: open.id, title: title.trim(), expectedMtime: s.lastMtime });
-      s.adopt(d.content, d.mtime_ms);
-      setOpen((o) => (o ? { ...o, title: d.title, file: d.file } : o));
-      trace(gen, `renamed ${open.id} → ${d.file}`);
-      void refresh();
-    } catch (e) { setNotice(`Could not rename it: ${errText(e)}`); }
-    finally { setBusy(false); }
-  }, [open, refresh, gen]);
-
   const remove = useCallback(() => arm.confirm("remove", async () => {
     const s = session.current;
     if (!s || !open) return;
@@ -577,35 +351,12 @@ export function Companion() {
     try {
       await invoke("idea_remove", { id: open.id, expectedMtime: s.lastMtime });
       trace(gen, `removed ${open.id}`);
-      s.close();
-      session.current = null;
-      setOpen(null);
+      closeOpen();
       setNotice(`Removed “${open.title}”. Its text is kept in the folder's .history.`);
       void refresh();
     } catch (e) { setNotice(`Could not remove it: ${errText(e)}`); }
     finally { setBusy(false); }
-  }), [arm, open, refresh, gen]);
-
-  /** A removed idea's text, kept as a new idea: create, then write the text
-   *  with the new id — two rows, each the ordinary one. */
-  const saveAsNew = useCallback(async () => {
-    if (!open) return;
-    const text = handle.current?.text() ?? "";
-    try {
-      const d = await invoke<Doc>("idea_create", { title: open.title });
-      const content = withId(text, d.id!) ?? d.content;
-      const w = await invoke<Saved>("idea_write", { id: d.id, content, expectedMtime: d.mtime_ms });
-      trace(gen, `kept removed ${open.id} as ${d.id}`);
-      begin({ ...d, ...w, content });
-      void refresh();
-    } catch (e) { setNotice(`Could not save it as a new idea: ${errText(e)}`); }
-  }, [open, begin, refresh, gen]);
-
-  const closeOpen = useCallback(() => {
-    session.current?.close();
-    session.current = null;
-    setOpen(null);
-  }, []);
+  }), [arm, open, session, setBusy, closeOpen, refresh, gen]);
 
   // ── phase 3: the acts (§3, §6.1). Every path, drag or menu, ends in `act`
   // with one row call from ideasrelate.ts. The open idea is saved first and
@@ -627,7 +378,7 @@ export function Companion() {
       return out;
     } catch (e) { setNotice(`Could not ${label}: ${errText(e)}`); void refresh(); return null; }
     finally { setBusy(false); }
-  }, [gen, refresh]);
+  }, [gen, refresh, session, setBusy]);
 
   /** Read the open idea again after an act changed or absorbed it. */
   const reopen = useCallback(async (d?: Doc) => {
@@ -667,7 +418,7 @@ export function Companion() {
     const d = await act<Doc>(relateCall(id, other), `relate ${id} to ${other}`);
     if (!d) return;
     setNotice(`Related “${titleOf(id)}” to “${titleOf(other)}”. Undo with Versions.`);
-    if (open?.id === id) await reopen(d); else setRelTick((n) => n + 1);
+    if (open?.id === id) await reopen(d); else bump();
   }, [act, titleOf, open, reopen]);
 
   /** `from` merged into `into`: asked first (the chooser or the dialog),
@@ -703,24 +454,8 @@ export function Companion() {
     if (!out) return;
     setNotice(`${extract ? "Extracted" : "Split"} “${out.new.title}” into a new idea.${extract ? "" : " A link to it takes the text's place."}`);
     setUndo({ label: `Undo ${extract ? "extract" : "split"}`, run: undoBy(extract ? [] : [id], [out.new.id!]) });
-    if (!extract) begin(out.source); else setRelTick((n) => n + 1);
+    if (!extract) begin(out.source); else bump();
   }, [open, act, undoBy, begin]);
-
-  const restore = useCallback((v: Version) => arm.confirm(`restore:${v.version}` as never, async () => {
-    if (!open) return;
-    const s = session.current;
-    if (s) {
-      await s.flush();
-      if (s.held() || s.current.kind === "error") { setNotice("Save or reload this idea before restoring a version."); return; }
-    }
-    try {
-      const d = await invoke<Doc>("idea_restore", { id: open.id, version: v.version, expectedMtime: s?.lastMtime });
-      trace(gen, `restored ${open.id} ${v.version}`);
-      begin(d);
-      setNotice(`Restored the version of ${versionWhen(v.at)}. The text it replaced is in Versions.`);
-      void refresh();
-    } catch (e) { setNotice(`Could not restore it: ${errText(e)}`); }
-  }), [arm, open, begin, refresh, gen]);
 
   // ── phase 4: plans (§2.2, §6.1). Each act is one call from plans.ts,
   // through `act` (the open document saved first — and before the call is
@@ -731,7 +466,7 @@ export function Companion() {
   const rowOf = (id: string) => ideaRowsAll.find((i) => i.id === id) ?? null;
   const afterPlanEdit = useCallback(async (d: Doc | null) => {
     if (!d) return;
-    if (open?.id === d.id) await reopen(d); else setRelTick((n) => n + 1);
+    if (open?.id === d.id) await reopen(d); else bump();
   }, [open, reopen]);
 
   const doMakePlan = useCallback(async (ids: string[]) => {
@@ -780,7 +515,7 @@ export function Companion() {
     if (!out) return;
     const name = out.workspaces.find((w) => w.id === out.id)?.name ?? "";
     setNotice(out.created ? `Made the workspace “${name}”. It is in the main window, under Workspaces.` : `This plan already has a workspace, “${name}”: showing it.`);
-    setRelTick((n) => n + 1);
+    bump();
     showWorkspace(out.id);
   }, [act, showWorkspace]);
 
@@ -800,7 +535,7 @@ export function Companion() {
     if (!l) return;
     const name = l.workspaces.find((w) => w.id === ws)?.name ?? "";
     setNotice(p.mode === "set-plan" ? `“${name}” is this plan's workspace now.` : `Linked “${titleOf(p.id)}” to “${name}”.`);
-    setRelTick((n) => n + 1);
+    bump();
   }, [wsPick, act, titleOf]);
 
   const openProjectPick = useCallback(async () => {
@@ -901,15 +636,7 @@ export function Companion() {
     return () => { window.removeEventListener("focus", look); window.removeEventListener("storage", onStorage); };
   }, [up, gen]);
 
-  // The Versions list and the related ideas follow the open idea, and any
-  // change in the folder.
-  useEffect(() => {
-    if (!open || versions === false) return;
-    let gone = false;
-    invoke<Version[]>("idea_versions", { id: open.id }).then((v) => { if (!gone) setVersions(v); }).catch((e) => { if (!gone) setNotice(`Could not read its versions: ${errText(e)}`); });
-    return () => { gone = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open?.id, versions === false, relTick]);
+  // The related ideas follow the open idea, and any change in the folder.
   useEffect(() => {
     if (!open || !up) { setRelated([]); return; }
     let gone = false;
@@ -986,17 +713,6 @@ export function Companion() {
     else void doMerge(ch.onto, ch.from);
   };
 
-  // ── the `[[` picker
-  const pickRows = useMemo(() => (picker ? pickerMatches(ideaRows, picker.query, open?.id ?? null) : []), [picker, ideaRows, open]);
-  const pickRef = useRef({ picker, pickRows, pickIdx });
-  pickRef.current = { picker, pickRows, pickIdx };
-  const insertLink = (r: Idea) => {
-    const p = pickRef.current.picker;
-    if (!p || !r.id) return;
-    handle.current?.insert(p.from, p.to, ideaLink(r.title, r.id));
-    trace(gen, `linked ${r.id} into ${open?.id}`);
-    setPicker(null);
-  };
   /** Read the selection into `quote`, once it has held still: a drag over a
    *  long document moves it every frame. None is at once. */
   const quoting = !!open && chatOpen && mode === "edit";
@@ -1013,31 +729,6 @@ export function Companion() {
     return () => window.clearTimeout(quoteTimer.current);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- the panel opening, the view, or the idea is the trigger
   }, [quoting, open?.key]);
-  const editorMore: Parameters<typeof EditorHost>[0]["more"] = {
-    picker: (p) => {
-      if (p && pickerDismissed.current === p.from) return;
-      if (!p) pickerDismissed.current = null;
-      setPicker((cur) => {
-        if (!p) return null;
-        if (!cur || cur.query !== p.query) setPickIdx(0);
-        return p;
-      });
-    },
-    pickerKey: (k) => {
-      const { picker: p, pickRows: rows, pickIdx: i } = pickRef.current;
-      if (!p) return false;
-      if (k === "Escape") { pickerDismissed.current = p.from; setPicker(null); return true; }
-      if (k === "ArrowDown") { setPickIdx((i + 1) % Math.max(1, rows.length)); return true; }
-      if (k === "ArrowUp") { setPickIdx((i - 1 + rows.length) % Math.max(1, rows.length)); return true; }
-      if ((k === "Enter" || k === "Tab") && rows[i]) { insertLink(rows[i]); return true; }
-      return false;
-    },
-    follow: (id) => void openIdea(id),
-    selected: (h) => setHasSel(h),
-    selectionMoved: () => readQuote(true),
-    // The same offsets over another text: offered, never attached by itself.
-    replaced: () => readQuote(false),
-  };
   const textDragOn = (on: boolean) => { textDragging.current = on; setTextDrag(on); };
   const onTextDrop = (extract: boolean) => {
     textDragOn(false);
@@ -1060,26 +751,6 @@ export function Companion() {
   const menuAct = useRef<(id: string) => void>(() => {});
   menuAct.current = (id) => { if (id === "new-idea") void newIdea(); };
   useEffect(() => wireMenu("companion", (id) => menuAct.current(id)), []);
-
-  // A hidden or closing window is a save point.
-  useEffect(() => {
-    const flush = () => { void session.current?.flush(); };
-    const vis = () => { if (document.visibilityState === "hidden") flush(); };
-    document.addEventListener("visibilitychange", vis);
-    window.addEventListener("pagehide", flush);
-    window.addEventListener("beforeunload", flush);
-    return () => {
-      document.removeEventListener("visibilitychange", vis);
-      window.removeEventListener("pagehide", flush);
-      window.removeEventListener("beforeunload", flush);
-    };
-  }, []);
-
-  const switchMode = (m: "edit" | "read") => {
-    if (m === "read") setReadText(handle.current?.text() ?? "");
-    setMode(m);
-    if (m === "edit") window.setTimeout(() => handle.current?.focus(), 0);
-  };
 
   const words = waitingWords(engine);
   const reveal = () => {
@@ -1116,37 +787,15 @@ export function Companion() {
       <section className="ix-doc" data-testid="ideas-doc">
         {words && <p className="ix-engine" data-testid="companion-engine">{words}</p>}
         {notice && (
-          <div className="ix-notice" data-testid="ideas-notice" role="status">
-            <span>{notice}</span>
-            {undo && <button className="ix-btn" data-testid="ideas-undo" onClick={() => void undo.run()}>{undo.label}</button>}
-            <button className="ix-btn ix-btn-quiet" onClick={() => { setNotice(null); setUndo(null); }} aria-label="Dismiss">Dismiss</button>
-          </div>
+          <DocNotice text={notice} dismiss={() => { setNotice(null); setUndo(null); }}
+            act={undo && <button className="ix-btn" data-testid="ideas-undo" onClick={() => void undo.run()}>{undo.label}</button>} />
         )}
         {open ? (
-          <>
-            <header className="ix-head">
-              {renaming !== null ? (
-                <input
-                  className="ix-rename"
-                  data-testid="ideas-rename-input"
-                  autoFocus
-                  value={renaming}
-                  onChange={(e) => setRenaming(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") void rename(renaming);
-                    if (e.key === "Escape") setRenaming(null);
-                  }}
-                  onBlur={() => setRenaming(null)}
-                />
-              ) : (
-                <h1 className="ix-title" title={open.file}>{open.title || "Untitled"}</h1>
-              )}
-              <div className="ix-tools">
-                <span className="ix-state" data-testid="ideas-save" data-state={save.kind}>{saveWords(save)}</span>
-                <span className="ix-seg" role="group" aria-label="View">
-                  <button className={mode === "edit" ? "on" : ""} data-testid="ideas-mode-edit" aria-pressed={mode === "edit"} onClick={() => switchMode("edit")}>Edit</button>
-                  <button className={mode === "read" ? "on" : ""} data-testid="ideas-mode-read" aria-pressed={mode === "read"} onClick={() => switchMode("read")}>Read</button>
-                </span>
+          <DocumentPane
+            doc={doc}
+            follow={(id) => void openIdea(id)}
+            textDrag={textDragOn}
+            tools={<>
                 <button className={`ix-btn${chatOpen ? " on" : ""}`} data-testid="ideas-chat-toggle" aria-pressed={chatOpen} onClick={() => setChatOpen((o) => !o)}
                   title="Talk this idea through with Claude, beside the editor">
                   {dots.get(open.id) && <span className={`ix-dot ix-dot-${dots.get(open.id)}`} aria-hidden="true" />}Conversations
@@ -1157,16 +806,15 @@ export function Companion() {
                   title="Move this idea's text into another idea; this one leaves the list">Merge into…</button>
                 <button className="ix-btn" data-testid="ideas-split" disabled={busy || !hasSel || mode !== "edit"} onMouseDown={(e) => e.preventDefault()} onClick={askSplit}
                   title="Split the selected text into a new idea (or drag the selection onto the list; ⌥ keeps a copy)">Split…</button>
-                <button className={`ix-btn${versions !== false ? " on" : ""}`} data-testid="ideas-versions-toggle" aria-pressed={versions !== false}
-                  onClick={() => setVersions((v) => (v === false ? null : false))}>Versions</button>
-                <button className="ix-btn" data-testid="ideas-rename" disabled={busy} onMouseDown={(e) => e.preventDefault()} onClick={() => setRenaming(open.title)}>Rename</button>
+            </>}
+            after={<>
                 {listing?.dir && <button className="ix-btn" data-testid="ideas-reveal" onClick={reveal}>Show in Finder</button>}
                 <button className={`ix-btn${arm.armed === "remove" ? " ix-btn-armed" : ""}`} data-testid="ideas-remove" disabled={busy} onClick={remove}
                   title="Removes the file. A copy is kept in the folder's .history.">
                   {arm.armed === "remove" ? "Remove? Kept in .history" : "Remove"}
                 </button>
-              </div>
-            </header>
+            </>}
+            strips={<>
             <RelatedStrip rels={related.filter((r) => r.how !== "planned-in" && r.how !== "plan-of")} open={(id) => void openIdea(id)} />
             {open.kind === "plan" ? (
               planView && planView.doc.id === open.id && (
@@ -1203,49 +851,8 @@ export function Companion() {
                 link={() => void openWsPick("link-idea", open.id)}
               />
             )}
-            {versions !== false && <VersionsPanel versions={versions} armed={(arm.armed as string | null)?.startsWith("restore:") ? (arm.armed as string).slice(8) : null} restore={restore} close={() => setVersions(false)} />}
-            {save.kind === "conflict" && (
-              <div className="ix-banner" data-testid="ideas-conflict" data-why={save.why} role="alert">
-                <span>{save.why === "refused"
-                  ? "This idea changed on disk, so your edit was not saved. Your text is still here."
-                  : "This idea was changed in another editor while you had unsaved text. Your text is still here."}</span>
-                <button className="ix-btn" data-testid="ideas-keep-mine" onClick={() => void session.current?.keepMine()}
-                  title="Saves your text. The other version is copied to the folder's .history first.">Keep mine (theirs goes to .history)</button>
-                <button className={`ix-btn${arm.armed === "reload" ? " ix-btn-armed" : ""}`} data-testid="ideas-reload"
-                  onClick={() => arm.confirm("reload", () => void session.current?.reload())}>
-                  {arm.armed === "reload" ? "Drop mine and reload?" : "Reload theirs"}
-                </button>
-              </div>
-            )}
-            {save.kind === "removed" && (
-              <div className="ix-banner" data-testid="ideas-removed" role="alert">
-                <span>This idea was removed from the folder. Your text is still here until you close it.</span>
-                <button className="ix-btn" data-testid="ideas-save-as-new" onClick={() => void saveAsNew()}>Save as a new idea</button>
-                <button className="ix-btn" data-testid="ideas-close" onClick={closeOpen}>Close</button>
-              </div>
-            )}
-            {save.kind === "error" && (
-              <div className="ix-banner" data-testid="ideas-error" role="alert">
-                <span>Not saved: {save.message}</span>
-                <button className="ix-btn" onClick={() => void session.current?.flush()}>Try again</button>
-              </div>
-            )}
-            <div className="ix-body">
-              <EditorHost
-                docKey={open.key}
-                initial={open.initial}
-                focus={open.focus}
-                handle={handle}
-                hidden={mode !== "edit"}
-                edited={() => session.current?.edited()}
-                blurred={() => { void session.current?.flush(); }}
-                more={editorMore}
-                textDrag={textDragOn}
-              />
-              {mode === "read" && <ReadView text={readText} follow={(id) => void openIdea(id)} />}
-              {picker && mode === "edit" && <LinkPicker x={picker.x} y={picker.y} rows={pickRows} index={pickIdx} pick={insertLink} />}
-            </div>
-          </>
+            </>}
+          />
         ) : (
           <div className="ix-none">
             <p className="ix-none-title">{listing && listing.ideas.length === 0 ? "No ideas yet" : "No idea open"}</p>

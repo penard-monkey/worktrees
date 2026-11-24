@@ -1,0 +1,79 @@
+/* The document pane (DocumentPane.tsx), in either window. Coloured and sized
+   from tokens.css alone. The classes are `ix-`, which App.css has none of, so
+   nothing here restyles an App.css class; companion.css holds what only the
+   Ideas window draws. The document's surface is `--bg-abyss`, as `.main` and
+   the Ideas window's body are; its banners and its versions are `--bg-panel`,
+   which differs from it in every theme. Words take `--txt-hi` / `--txt`
+   (companion.css says why, with the measurements). */
+/* ── buttons: plain inline boxes. A <button> that is itself a flex container
+   is shrink-wrapped by WebKit without its overflow:hidden children
+   (AGENTS.md), so none of these is one. */
+.ix-btn {
+  display: inline-block; flex: none; white-space: nowrap;
+  font-size: var(--fs-label); line-height: 1.4; padding: 3px 10px;
+  border: 1px solid var(--line-strong); border-radius: 5px;
+  background: var(--bg-elev); color: var(--txt-hi);
+}
+.ix-btn:hover:not(:disabled) { border-color: var(--accent); }
+.ix-btn:disabled { color: var(--txt-mute); cursor: default; }
+.ix-btn-primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: var(--fw-bold); }
+.ix-btn-small { font-size: var(--fs-meta); padding: 1px 8px; }
+.ix-btn-quiet { background: transparent; border-color: transparent; color: var(--txt); }
+.ix-btn-quiet:hover { color: var(--txt-hi); border-color: var(--line-strong); }
+/* Armed: the hue is the border and a tint; the words stay --txt-hi. */
+.ix-btn-armed { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 16%, var(--bg-elev)); }
+.ix-quiet { color: var(--txt); font-size: var(--fs-meta); margin: 0; }
+
+/* ── the document ── */
+.ix-doc { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.ix-head { display: flex; align-items: center; gap: var(--s3); padding: var(--s2) var(--s4); border-bottom: 1px solid var(--line); min-height: 44px; flex-wrap: wrap; }
+.ix-title { margin: 0; font-size: var(--fs-h); font-weight: var(--fw-bold); color: var(--txt-hi); flex: 1 1 12rem; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ix-rename { flex: 1 1 12rem; min-width: 0; font-size: var(--fs-h); font-weight: var(--fw-bold); padding: 2px 6px; border: 1px solid var(--accent); border-radius: 5px; background: var(--bg-panel); color: var(--txt-hi); }
+.ix-rename:focus { outline: none; }
+.ix-tools { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; }
+.ix-state { color: var(--txt); font-size: var(--fs-meta); min-width: 5.5em; text-align: right; }
+/* Edit | Read: a segmented pair. Not `.seg` — App.css's `.seg` is Settings'. */
+.ix-seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: 5px; overflow: hidden; flex: none; }
+.ix-seg > button { display: inline-block; border: 0; background: transparent; color: var(--txt); font-size: var(--fs-label); padding: 3px 10px; line-height: 1.4; }
+.ix-seg > button + button { border-left: 1px solid var(--line-strong); }
+.ix-seg > button.on { background: var(--bg-elev); color: var(--txt-hi); font-weight: var(--fw-med); }
+
+.ix-banner, .ix-notice {
+  display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap;
+  padding: var(--s2) var(--s4); border-bottom: 1px solid var(--line);
+  background: var(--bg-panel); color: var(--txt-hi); font-size: var(--fs-body);
+}
+.ix-banner { border-left: 3px solid var(--warn); }
+.ix-banner > span, .ix-notice > span { flex: 1 1 16rem; min-width: 0; }
+.ix-engine { margin: 0; padding: var(--s2) var(--s4); color: var(--txt); font-size: var(--fs-meta); border-bottom: 1px solid var(--line); }
+
+.ix-body { position: relative; flex: 1 1 auto; min-height: 0; }
+.ix-editor { position: absolute; inset: 0; }
+.ix-editor[hidden] { display: none; }
+.ix-read { position: absolute; inset: 0; overflow-y: auto; }
+.ix-read > .md { margin: 0 auto; padding-top: var(--s5); }
+.ix-editor-wait { margin: 0; padding: var(--s5); color: var(--txt); font-size: var(--fs-body); }
+/* In the main window: the main area's own column, under its header. */
+.ix-doc.ix-in-main { flex: 1 1 auto; background: var(--bg-abyss); color: var(--txt); font-size: var(--fs-body); }
+.ix-doc.ix-in-main[hidden] { display: none; }
+
+/* ── small surfaces ── */
+.ix-pop {
+  position: fixed; z-index: 21; min-width: 200px; max-width: 320px; display: flex; flex-direction: column; gap: 2px; padding: var(--s1);
+  background: var(--bg-panel); border: 1px solid var(--line-strong); border-radius: 8px; box-shadow: 0 6px 20px rgb(0 0 0 / 0.25);
+}
+.ix-pop-head { margin: 0; padding: var(--s1) var(--s2); color: var(--txt); font-size: var(--fs-meta); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ix-pop-item {
+  display: block; width: 100%; text-align: left; padding: 4px var(--s2); border: 0; border-radius: 5px;
+  background: transparent; color: var(--txt-hi); font-size: var(--fs-body); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ix-pop-item:hover, .ix-pop-item:focus-visible, .ix-pop-item.on { background: var(--bg-elev); outline: none; }
+.ix-pop-key { float: right; color: var(--txt); font-size: var(--fs-meta); margin-left: var(--s3); }
+.ix-linkpick { max-height: 220px; overflow-y: auto; }
+.ix-versions { border-bottom: 1px solid var(--line); background: var(--bg-panel); max-height: 34vh; overflow-y: auto; padding: var(--s1) var(--s4) var(--s2); }
+.ix-versions-head { display: flex; align-items: center; justify-content: space-between; color: var(--txt-hi); font-weight: var(--fw-bold); font-size: var(--fs-body); }
+.ix-version-rows { list-style: none; margin: 0; padding: 0; }
+.ix-version { display: flex; align-items: center; gap: var(--s3); padding: 3px 0; border-top: 1px solid var(--line); font-size: var(--fs-meta); color: var(--txt); }
+.ix-version-when { flex: none; color: var(--txt-hi); }
+.ix-version-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ix-version-size { flex: none; }

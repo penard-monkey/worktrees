@@ -5,6 +5,14 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+
+- **Ideas and plans open in the main window (Ideas, beta).** In a workspace's overview, **plan ▸** and an idea now open in the main area, in the same editor the Ideas window has: saved as you type, Versions, Rename, Read, `[[` links, and the same handling when the file changed elsewhere. The button with the workspace's name goes back to the overview, and **Float** opens the document in the Ideas window, where it can stay open beside this one; each window follows what the other saves, and when both have unsaved text nothing is written over until you choose. Picking a place in the sidebar saves the document and closes it; if its text cannot be saved it stays open in its workspace and the window says so. The editor is fetched the first time you open a document, so the app's start does not carry it. **Edit in Ideas** in a work item's review is **Edit the plan** now, and opens it here.
+
+### Fixed
+
+- **Ideas: an open idea's title follows a heading changed elsewhere.** When another window or editor changed the first heading, the text was reloaded but the header kept the old title until the idea was opened again.
+
 ## [0.53.1] - 2026-11-23
 
 ### Fixed

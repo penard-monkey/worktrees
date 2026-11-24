@@ -1,4 +1,4 @@
-// Ideas relate, the non-drag paths (app/companion/ideasrelate.ts, §6.1): a
+// Ideas relate, the non-drag paths (app/src/doc/ideasrelate.ts, §6.1): a
 // check cannot drive a real drag (navdrag.ts's header), so it holds the
 // rules every path goes through and the calls they end in.
 //
@@ -29,7 +29,7 @@ import { fileURLToPath } from "node:url";
 import { transformWithEsbuild } from "vite";
 
 const here = (p) => fileURLToPath(new URL(p, import.meta.url));
-const SRC = process.env.IDEASRELATE_SRC ?? here("../companion/ideasrelate.ts");
+const SRC = process.env.IDEASRELATE_SRC ?? here("../src/doc/ideasrelate.ts");
 const COMP = process.env.COMPANION_SRC ?? here("../companion/Companion.tsx");
 let failed = 0;
 const check = (c, m) => { if (!c) failed++; console.log(`${c ? "ok" : "not ok"} — ${m}`); };
