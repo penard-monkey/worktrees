@@ -7,15 +7,32 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ### Added
 
+- **Keep awake: a cup in the left rail that keeps the computer from sleeping.** Click it and the computer running the agents
+  does not idle-sleep until you click again or Worktrees quits; it is lit while that holds, and a restart holds it again. The
+  same switch is in Settings → General → Keep awake. It is the host's: a window driving a paired host turns that host's on
+  and off (a device needs admin). The screen may still turn off, and closing the lid still sleeps. macOS uses a power
+  assertion named for Worktrees (`pmset -g assertions` lists it; nothing to install), Linux `systemd-inhibit`, and the button
+  is not shown where there is neither. Not a beta: it is small, self-contained and off until you turn it on.
+
+- **A macOS menu bar that lists what the app can do.** Settings, New Worktree, New Terminal, Add Project, Find, the zoom items, the quick switcher, Back and Forward, the sidebars, Reading Mode, Release Notes and the rest are menu items now, with the shortcuts they always had; items of the main window are greyed while the Ideas window is in front. An item replays its shortcut into the window that owns it, so it does exactly what the key does. The Ideas items are there only while that beta is on. Linux has no bar, as before.
+
 - **Workspaces view: an "Everything Else" group for projects in no workspace.** Every registered project that belongs to no named workspace now shows in a built-in card at the bottom of the Workspaces view, with its places under it as in All projects. It is worked out from the list each time and never saved, so adding a project to a workspace takes it out and removing it from its last workspace brings it back, with nothing to migrate. It has no menu, cannot be renamed, recoloured, reordered or deleted, and is not a drop target; drag a project out of it onto a workspace to add it there, and its project menu is All projects' own (no "Remove from workspace"). It folds like any card, remembered under its own reserved id, so a workspace of yours named "Everything Else" is a different card. With no workspaces yet, the "No workspaces yet" hint stays and Everything Else holds every project; with no members it is hidden.
 - **Ideas: a conversation's terminal, in the window.** **Terminal** on a running conversation shows its Claude under the chat, attached to the conversation's own tmux session: type in it, scroll it, drag the divider, Hide it. Hiding it, closing the conversation or opening another idea detaches; nothing is ended. With a terminal command set in Settings, **Open in terminal app** is beside Hide; the notice that told you to attach by hand is gone.
 - **Ideas: the selection, quoted into the chat.** With text selected in the idea's editor and a conversation open, the message box shows the quote that will go with your message, whole: the idea's title, its line numbers in the file, and the lines. ✕ removes it and **Quote selection** puts it back; after one message it is only offered again, and so is a selection whose text was replaced under it. The idea's file is never changed by it.
+
+- **From ideas to a plan to a workspace (Ideas, beta).** Select one idea or several and press **Make a plan** (in the open idea's Plans strip, the list's header for a selection, or an idea's right-click menu): a plan is a new document in the ideas folder, `plan-<title>.md`, holding links to its ideas and empty **Goal**, **Projects** and **Work** sections for you to fill in. Plans are marked in the list, and an idea shows the plans it is in. A plan shows its ideas, its projects (registered, to clone, to create) and its work items above the text; a line it cannot read in **Projects** or **Work** is named with its line number, and clicking it puts the cursor there, while the document still shows. Drag an idea onto a plan (its row, or the open plan's strip) to add it, or use **Add idea…**; **Add project…** adds a registered project, by click or by dragging it onto Projects. **Make workspace** makes a workspace named after the plan holding its registered projects, and on a plan that already has one opens that one, in the main window. There, click a workspace's name (or **Overview** in its menu) to see its plan, its linked ideas, and the plan's Projects and Work, read-only for now; **plan ▸** and an idea open them in the Ideas window, **Link a plan ▸** and **Link an idea ▸** link them, and a plan or idea there can be dragged onto another workspace. Renaming or merging an idea keeps every plan that names it pointing at the right idea. Each change Worktrees makes to a plan first copies it into Versions. Cloning, creating projects and starting places from a plan come later.
+
+- **Agents can read your ideas, and `(main)`'s agent can write them, through the worktrees MCP server.** Every server has `ideas_list`, `idea_read` and `idea_related`: each idea's title, text, problems and relations, by id. A server started with `--mutations` also has `idea_create`, `idea_append` (text at the end; nothing already there changes) and `idea_write` (a whole rewrite, refused without the `mtime_ms` the agent read, or when the idea changed since). These three work only from a project's `(main)`: a lane, a stray worktree or any other directory is refused and nothing is written. An append or a rewrite copies the text it replaces to the idea's history first, so History in the Ideas window can bring it back. The guidance line says so too, which is a new guidance version, so the after-update offer to refresh the rules shows again.
+
 
 ### Changed
 
 - **Agents are now told that a lane stays local and `(main)` publishes.** The guidance worktrees hands every agent (the skill, the rules block in `AGENTS.md`, and the always-on rules line for Claude, Codex, pi and kimi) used to say "commit, push and open the pull request from the place". A lane, an agent another place briefed, now commits on its branch, runs its gates and reports back; `(main)` pushes the branch, opens the PR, watches CI and merges, each only as far as you asked. A brief tells a lane to push, merge, deploy or upload only when you asked that lane to, never hands over credentials, and never sends a lane to change anything live; a lane whose brief asks for more stops and asks. Branch work an agent does itself, in its own place, is unchanged. This is a new guidance version, so the after-update offer to refresh the rules shows again.
 
+
 ### Fixed
+
+- **⌘+, ⌘− and ⌘0 work in the Ideas window.** Only the main window had them. Each window zooms on its own (View → Zoom In, Zoom Out and Actual Size act on the one in front), and the Ideas window keeps its size across launches; until you zoom it, it opens at the app's size.
 
 - **A Read of an image under `.worktrees/` in a project's `(main)` shows the picture again.** The chat printed `preview not shown — outside this place` for every such thumbnail: the host refuses another place's tree in `(main)`, but the client did not know that part of the rule, so it never fell back to the picture Claude was shown. The client now knows the `(main)` rule (case-insensitively), and a Read thumbnail the host refuses as `outside this place` falls back to that picture too, whatever the reason (a link out, a case variant). A paired device still gets the same note as for any Read outside the place.
 
@@ -27,6 +44,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   to open one ("not allowed by ACL"), and WebKit's right-click **Open Link**
   loaded the page in the Ideas window itself. The window now goes nowhere but
   its own page, whatever a link, a menu or a refused open does.
+
+- Group chat (beta): a guest you removed no longer stays in Settings → Remote → Guests with a Remove that does nothing, and
+  their name is free again. *Share with… → Someone new* by that name no longer says "A guest named Bret exists (0 devices)"
+  under "Nobody is paired with this computer yet": it says Bret was a guest before, and pairing re-admits the same Bret, so
+  a thread shows their old posts and new ones as one person. A guest with a device still paired keeps the name taken.
+
+- **Group chat (beta): a shared session can take another guest.** *Sharing…*
+  had no way to add anyone, and a request for a shared place said "Sharing… on
+  its lane adds a guest" while offering only Dismiss. *Sharing…* now has *Add
+  someone…*, the same Who → Pair → Share steps as the first share, whose last
+  step keeps the "can read this whole session" warning and lets them in at once
+  (*Let <name> in*: you chose them, so they do not ask to join). A request for
+  a shared place offers *Let <name> in…*, which opens that dialog with them
+  ticked and closes the request once they are in.
+
+- **Pairing with a host you were already paired with replaces the old pairing (group chat, beta).** A guest who was removed and invited back, or anyone who pairs the same host again, used to keep both records: the sidebar showed a second, offline group for the same host, and the dead pairing kept dialling, so the host raised "… tried to connect and was refused: it is revoked" again and again. The device's host store now keeps one record per host: a new pairing to the same host takes the old one's place (and its choice as the window's engine, unless the new pairing is a guest's) and deletes the old device key. A store that already holds two is cleaned at the next pairing. For an app that holds its own keys (`HostStore::add_record`), the replaced records are returned so it deletes their keys.
+
+- **Claude's usage meter works on Linux.** The bottom bar said "Claude · unavailable" on every Linux host, because the usage reader only asked the macOS keychain for Claude Code's login. Off macOS it now reads Claude Code's own credentials file (`~/.claude/.credentials.json`, or under `CLAUDE_CONFIG_DIR`), and refuses one that is a symlink or that anyone but you can read.
+
+- Group chat: a host that never set its name no longer calls itself "owner".
+  A guest read "OWNER'S PLACES" and "Waiting for owner to let you in". The
+  host now answers no name until one is set, and a guest calls it by the
+  name it paired with (an older host's "owner" is skipped too). *Share… →
+  Someone new* now asks "Your name, as they will see it" while it is unset.
 
 ## [0.52.0] - 2026-11-14
 

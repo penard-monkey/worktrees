@@ -2939,6 +2939,37 @@ mod devices {
         assert!(e.rpc(&mut con, "pair_begin", json!({"invite": {"guest": "g_nobody"}, "expiry": null}))["err"].is_string());
     }
 
+    /// A removed guest (every device revoked by the console's Remove) no
+    /// longer holds their name: an invite by it, in any case, RE-ADMITS that
+    /// same person, so a thread names their old posts and new ones as one
+    /// guest (v0.52.0 three-VM run: "A guest named Bret exists (0 devices)").
+    /// A guest with a device still enrolled keeps the name taken.
+    #[test]
+    fn an_invite_by_a_removed_guests_name_readmits_that_guest() {
+        let e = engine("readmit", vec![]);
+        e.bind_loopback();
+        let mut con = e.connect(Caller::console());
+        let r = e.rpc(&mut con, "pair_begin", json!({"invite": {"name": "Bret"}, "expiry": null}));
+        let uri = r["ok"]["uri"].as_str().unwrap_or_else(|| panic!("{r}")).to_string();
+        let mut p = e.attempt(&uri, &Attempt::desktop("Bret's MacBook")).unwrap();
+        assert_eq!(e.line(&mut p.tls, Duration::from_secs(5)), Some(json!({"pending": true})));
+        let bret = e.rpc(&mut con, "pair_decide", json!({"allow": true}))["ok"]["principal"].as_str().unwrap().to_string();
+        e.closed_as(&mut con);
+        assert!(e.rpc(&mut con, "pair_begin", json!({"invite": {"name": "bret"}, "expiry": null}))["err"].is_string(), "a live guest keeps the name");
+        assert!(e.rpc(&mut con, "guest_remove", json!({"principal": bret}))["ok"].is_object());
+        let r = e.rpc(&mut con, "pair_begin", json!({"invite": {"name": " bret "}, "expiry": null}));
+        let uri = r["ok"]["uri"].as_str().unwrap_or_else(|| panic!("the name is free again: {r}")).to_string();
+        let mut p = e.attempt(&uri, &Attempt::desktop("Bret's new MacBook")).unwrap();
+        assert_eq!(e.line(&mut p.tls, Duration::from_secs(5)), Some(json!({"pending": true})));
+        let st = e.status(&mut con);
+        assert_eq!(st["request"]["invite"], json!({"kind": "existing", "id": bret, "name": "Bret"}), "{st}");
+        assert_eq!(e.rpc(&mut con, "pair_decide", json!({"allow": true}))["ok"]["principal"], json!(bret));
+        e.closed_as(&mut con);
+        let guests = e.reg.guests().unwrap();
+        assert_eq!(guests.len(), 1, "one Bret, old devices and new");
+        assert_eq!(guests[0].devices.iter().filter(|d| d.revoked_at.is_none()).count(), 1);
+    }
+
     /// §2.2 step 5, §2.4: ANY failure closes the window, with no retry and
     /// nothing said — a proof keyed with another secret, bound to another
     /// session, or made for another key; a frame that is malformed, too long,
@@ -3307,6 +3338,61 @@ mod devices {
         msg.extend_from_slice(&ex);
         let r = e.rpc(c, "stepup_prove", json!({"spki": worktrees_api::files::b64_encode(&k.spki), "signature": worktrees_api::files::b64_encode(&k.sign(&msg))}));
         assert!(r.get("ok").is_some(), "{r}");
+    }
+
+    /// Keep awake through the real chain. The hold is the HOST's, so turning it
+    /// is `admin` with a host-wide scope, a phone's step-up included, and each
+    /// turn is one audit record naming the device; reading it is any device's,
+    /// and a read is never recorded.
+    #[test]
+    fn keep_awake_is_turned_with_admin_over_everything_and_recorded() {
+        use worktrees_api::keepawake::{Held, KeepAwake, Mechanism};
+        struct Awake;
+        struct Hold;
+        impl Held for Hold {}
+        impl Mechanism for Awake {
+            fn id(&self) -> &'static str {
+                "fake"
+            }
+            fn hold(&self) -> Result<Box<dyn Held>, String> {
+                Ok(Box::new(Hold))
+            }
+        }
+        let mut e = engine("keep-awake", vec![]);
+        let root = s(&e.dir.join("a"));
+        e.ctx = e.ctx.clone().with_keep_awake(KeepAwake::with(Some(Arc::new(Awake))));
+        let held = |e: &Engine| e.ctx.keep_awake.state().held;
+
+        // Reads anyone with `read` may make; turning it, no one without `admin`.
+        let reader = enroll(&e.reg, "Reader", 1, &[Read, Write, Instruct], Projects::only([root.clone()]));
+        let mut r = e.connect(caller(&reader));
+        assert_eq!(e.rpc(&mut r, "get_keep_awake", json!({}))["ok"]["on"], json!(false));
+        assert_eq!(e.rpc(&mut r, "set_keep_awake", json!({"on": true}))["err"], json!("denied"));
+        // `admin` over one project is not over the host.
+        let one = enroll(&e.reg, "One project", 2, &[Read, Admin], Projects::only([root]));
+        let mut o = e.connect(caller(&one));
+        assert!(e.rpc(&mut o, "set_keep_awake", json!({"on": true}))["err"].is_string());
+        assert!(!held(&e), "a refused caller turned it on");
+
+        let (phone, k) = iphone(&e.reg, &[Read, Admin]);
+        let ex = [6u8; 32];
+        let mut c = e.connect_with(caller(&phone), Some(ex));
+        assert_eq!(e.rpc(&mut c, "set_keep_awake", json!({"on": true}))["err"], json!("step-up required"));
+        assert!(!held(&e));
+        prove(&e, &mut c, &k, ex);
+        let on = e.rpc(&mut c, "set_keep_awake", json!({"on": true}));
+        assert_eq!((on["ok"]["held"].clone(), held(&e)), (json!(true), true), "{on}");
+        assert_eq!(e.rpc(&mut r, "get_keep_awake", json!({}))["ok"]["held"], json!(true));
+        // A missing `on` is an error, never an OFF.
+        assert!(e.rpc(&mut c, "set_keep_awake", json!({}))["err"].is_string());
+        assert!(held(&e));
+
+        let text = std::fs::read_to_string(e.dir.join("cfg").join(super::super::audit::FILE)).unwrap();
+        let recs: Vec<Value> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert!(recs.iter().all(|r| r["cmd"] != json!("get_keep_awake")), "{recs:#?}");
+        let done: Vec<_> = recs.iter().filter(|r| r["cmd"] == json!("set_keep_awake") && r["kind"] == json!("call") && r["outcome"] == json!("ok")).collect();
+        assert_eq!(done.len(), 1, "{recs:#?}");
+        assert_eq!(done[0]["device"].as_str(), Some(phone.id.as_str()));
     }
 
     /// iOS MVP S7/S8 through the real chain: `agent_answer` and `agent_send`

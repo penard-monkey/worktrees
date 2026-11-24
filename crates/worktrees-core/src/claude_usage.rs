@@ -8,7 +8,7 @@
 //! `app/src-tauri`. Same move, and the same reason, as `codex_usage`.
 //!
 //! Nothing about how it works changed: still `security` for the keychain token
-//! and `curl` for the GET (no HTTP crate, no second TLS stack), still the same
+//! (macOS; elsewhere Claude Code's `.credentials.json`) and `curl` for the GET (no HTTP crate, no second TLS stack), still the same
 //! TTL, backoff and statusline fallback, still "missing data is not an error".
 //!
 //! `applog` became `logsink::log()`, the engine's one installable sink — the
@@ -30,7 +30,8 @@ use crate::logsink::log;
 // failing: the authoritative field is `limits[]` and the rest of the payload is
 // full of experimental nulls we deliberately ignore. Token comes from the macOS
 // Keychain via `security` (shelled out — house style, and it keeps the secret out
-// of our address space longer than a lib would). Claude Code rotates the token
+// of our address space longer than a lib would); on every other OS Claude Code
+// keeps the same JSON in `.credentials.json`, read by `credentials_file_token`. Claude Code rotates the token
 // ~hourly, so a 401 buys exactly one retry with a freshly re-read token.
 //
 // Fallback is the statusline widget's local snapshot (`~/.claude/widgets/
@@ -95,9 +96,74 @@ static USAGE_CACHE: Mutex<Option<UsageInfo>> = Mutex::new(None);
 /// Epoch of the last FAILED real attempt — the negative half of the TTL below.
 static USAGE_FAIL_AT: Mutex<Option<i64>> = Mutex::new(None);
 
-/// The Claude Code OAuth access token, straight out of the login Keychain item.
-/// None on any failure (not macOS, item absent, locked keychain, shape changed).
-fn claude_oauth_token() -> Option<String> {
+/// The Claude Code OAuth access token, wherever this OS's Claude Code keeps it.
+fn claude_oauth_token() -> Result<String, String> {
+    let home = std::env::var("HOME").ok();
+    let config_dir = std::env::var("CLAUDE_CONFIG_DIR").ok();
+    oauth_token_in(cfg!(target_os = "macos"), home.as_deref(), config_dir.as_deref())
+}
+
+/// The seam: which store to read is a VALUE, so a test on a Mac can take the
+/// non-macOS path without cfg tricks (and without ever touching the keychain).
+fn oauth_token_in(macos: bool, home: Option<&str>, config_dir: Option<&str>) -> Result<String, String> {
+    if macos {
+        return keychain_token().ok_or_else(|| "keychain: no Claude Code credentials".to_string());
+    }
+    // Claude Code off macOS keeps the keychain item's JSON in a file:
+    // `$CLAUDE_CONFIG_DIR/.credentials.json`, else `~/.claude/.credentials.json`.
+    let dir = match (config_dir.filter(|d| !d.is_empty()), home.filter(|h| !h.is_empty())) {
+        (Some(d), _) => std::path::PathBuf::from(d),
+        (None, Some(h)) => Path::new(h).join(".claude"),
+        (None, None) => return Err("credentials file: neither CLAUDE_CONFIG_DIR nor HOME is set".into()),
+    };
+    credentials_file_token(&dir.join(".credentials.json"))
+}
+
+/// Claude Code's credentials file is the live OAuth token in plain JSON, so it
+/// is read the way this codebase reads its own secrets (`identity.rs`,
+/// `push/key.rs`): opened `O_NOFOLLOW` (a link at the name is refused, not
+/// followed), the HANDLE fstat'd, and refused unless it is a regular file only
+/// its owner may read or write — Claude Code writes it 0600, so anything wider
+/// is not its file as written. Size-capped. No error ever quotes the contents.
+fn credentials_file_token(path: &Path) -> Result<String, String> {
+    use std::io::Read;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    const MAX: u64 = 64 * 1024;
+    let shown = path.display();
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|e| match e.raw_os_error() {
+            Some(libc::ELOOP) => format!("credentials file: {shown} is a symlink, refused"),
+            _ if e.kind() == std::io::ErrorKind::NotFound => format!("credentials file: no {shown} (is Claude Code logged in?)"),
+            _ => format!("credentials file: {shown}: {e}"),
+        })?;
+    let m = f.metadata().map_err(|e| format!("credentials file: {shown}: {e}"))?;
+    if !m.is_file() {
+        return Err(format!("credentials file: {shown} is not a regular file"));
+    }
+    let mode = m.permissions().mode() & 0o777;
+    if mode & 0o077 != 0 {
+        return Err(format!("credentials file: {shown} is open to others (mode {mode:o}, not 600), refused"));
+    }
+    if m.len() > MAX {
+        return Err(format!("credentials file: {shown} is larger than {MAX} bytes"));
+    }
+    let mut bytes = Vec::new();
+    f.take(MAX).read_to_end(&mut bytes).map_err(|e| format!("credentials file: {shown}: {e}"))?;
+    let v: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| format!("credentials file: {shown} is not JSON"))?;
+    v.get("claudeAiOauth")
+        .and_then(|o| o.get("accessToken"))
+        .and_then(|t| t.as_str())
+        .filter(|t| !t.is_empty())
+        .map(String::from)
+        .ok_or_else(|| format!("credentials file: {shown} carries no claudeAiOauth.accessToken"))
+}
+
+/// The token out of the login Keychain item. None on any failure (item absent,
+/// locked keychain, shape changed).
+fn keychain_token() -> Option<String> {
     let mut cmd = crate::childenv::command("/usr/bin/security");
     cmd.args(["find-generic-password", "-s", "Claude Code-credentials", "-w"]);
     let out = crate::proc::run_deadline(cmd, 6).ok()?;
@@ -136,7 +202,7 @@ fn usage_get(token: &str) -> Result<(u16, String), String> {
 /// curl ≥ 7.55. The other headers carry nothing secret and stay on argv.
 fn usage_cmd(token: &str, url: &str) -> Result<(std::process::Command, Vec<u8>), String> {
     if token.bytes().any(|b| matches!(b, b'\r' | b'\n' | 0)) {
-        return Err("keychain: Claude Code token has an unexpected shape".into());
+        return Err("Claude Code token has an unexpected shape".into());
     }
     let mut cmd = crate::childenv::command("curl");
     cmd.args(["-s", "--max-time", "10", "-w", "\n%{http_code}"])
@@ -186,11 +252,11 @@ fn parse_usage_limits(body: &str) -> Option<Vec<UsageLimit>> {
 }
 
 fn usage_from_oauth(now: i64) -> Result<UsageInfo, String> {
-    let token = claude_oauth_token().ok_or("keychain: no Claude Code credentials")?;
+    let token = claude_oauth_token()?;
     let (mut code, mut body) = usage_get(&token)?;
     if code == 401 {
         // token rotated under us (Claude Code refreshes ~hourly) — re-read once
-        let fresh = claude_oauth_token().ok_or("keychain: re-read failed after 401")?;
+        let fresh = claude_oauth_token().map_err(|e| format!("re-read failed after 401: {e}"))?;
         let retry = usage_get(&fresh)?;
         code = retry.0;
         body = retry.1;
@@ -549,5 +615,99 @@ mod tests {
             let e = usage_cmd(bad, USAGE_URL).err().expect("must refuse");
             assert!(!e.contains("SYN"), "error echoes the token: {e}");
         }
+    }
+
+    // ── Where the token comes from off macOS ─────────────────────────────────
+    //
+    // Claude Code on Linux keeps the keychain item's JSON in
+    // `~/.claude/.credentials.json` (0600), under `$CLAUDE_CONFIG_DIR` when set;
+    // v0.52.0 only ever asked `security`, so the meter read "unavailable" on
+    // every Linux host (found in the three-VM run, Debian 13 arm64). Fixture
+    // files in a temp HOME, synthetic tokens — never the real file or keychain.
+
+    struct Home(std::path::PathBuf);
+    impl Drop for Home {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    impl Home {
+        fn new(tag: &str) -> Home {
+            let d = std::env::temp_dir().join(format!("wt-claude-cred-{tag}-{}-{}", std::process::id(), crate::fsx::random_u64()));
+            std::fs::create_dir_all(&d).unwrap();
+            Home(d)
+        }
+        fn s(&self) -> &str {
+            self.0.to_str().unwrap()
+        }
+        /// `<dir>/.credentials.json` holding `token`, at `mode`.
+        fn creds(&self, dir: &str, token: &str, mode: u32) -> std::path::PathBuf {
+            use std::os::unix::fs::PermissionsExt;
+            let d = self.0.join(dir);
+            std::fs::create_dir_all(&d).unwrap();
+            let f = d.join(".credentials.json");
+            let body = serde_json::json!({"claudeAiOauth": {"accessToken": token, "refreshToken": "SYNTHETIC-refresh", "expiresAt": 1}});
+            std::fs::write(&f, body.to_string()).unwrap();
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(mode)).unwrap();
+            f
+        }
+    }
+
+    #[test]
+    fn off_macos_the_token_comes_from_the_credentials_file() {
+        let h = Home::new("file");
+        h.creds(".claude", FAKE, 0o600);
+        assert_eq!(oauth_token_in(false, Some(h.s()), None).as_deref(), Ok(FAKE));
+    }
+
+    #[test]
+    fn claude_config_dir_moves_the_credentials_file() {
+        let h = Home::new("cfgdir");
+        h.creds(".claude", "SYNTHETIC-home-token", 0o600);
+        h.creds("profile", FAKE, 0o600);
+        let cfg = h.0.join("profile");
+        assert_eq!(oauth_token_in(false, Some(h.s()), Some(cfg.to_str().unwrap())).as_deref(), Ok(FAKE));
+    }
+
+    #[test]
+    fn a_credentials_file_others_may_read_is_refused_without_echoing_the_token() {
+        for mode in [0o640, 0o604, 0o660, 0o644] {
+            let h = Home::new("mode");
+            h.creds(".claude", FAKE, mode);
+            let e = oauth_token_in(false, Some(h.s()), None).expect_err(&format!("mode {mode:o} must be refused"));
+            assert!(!e.contains("SYNTHETIC"), "error echoes the token: {e}");
+            assert!(e.contains(&format!("{:o}", mode)), "the refusal names the mode: {e}");
+        }
+    }
+
+    #[test]
+    fn a_symlinked_credentials_file_is_refused() {
+        let h = Home::new("link");
+        let real = h.creds("elsewhere", FAKE, 0o600);
+        std::fs::create_dir_all(h.0.join(".claude")).unwrap();
+        std::os::unix::fs::symlink(&real, h.0.join(".claude/.credentials.json")).unwrap();
+        let e = oauth_token_in(false, Some(h.s()), None).expect_err("a link at the name must be refused");
+        assert!(!e.contains("SYNTHETIC"), "error echoes the token: {e}");
+    }
+
+    #[test]
+    fn a_missing_credentials_file_says_so_and_never_says_keychain() {
+        let h = Home::new("missing");
+        let e = oauth_token_in(false, Some(h.s()), None).expect_err("nothing to read");
+        assert!(!e.contains("keychain"), "a Linux host has no keychain to blame: {e}");
+        assert!(e.contains(".credentials.json"), "the error names the file it looked for: {e}");
+    }
+
+    #[test]
+    fn a_credentials_file_without_a_token_is_refused_without_echoing_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let h = Home::new("shape");
+        let d = h.0.join(".claude");
+        std::fs::create_dir_all(&d).unwrap();
+        let f = d.join(".credentials.json");
+        std::fs::write(&f, r#"{"claudeAiOauth":{"refreshToken":"SYNTHETIC-refresh"}}"#).unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let e = oauth_token_in(false, Some(h.s()), None).expect_err("no accessToken");
+        assert!(!e.contains("SYNTHETIC"), "error echoes the file: {e}");
     }
 }

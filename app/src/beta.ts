@@ -43,7 +43,7 @@ export const BETA_FEATURES: readonly BetaFeature[] = [
   {
     key: "beta_ideas",
     label: "Ideas",
-    what: "Adds the Ideas window: the lightbulb in the rail, and ⌘⇧I. Still changing. Turning it off hides it and keeps what you wrote.",
+    what: "Adds the Ideas window (the lightbulb in the rail, and ⌘⇧I) and a workspace's overview, with its plan and ideas. Still changing. Turning it off hides it and keeps what you wrote.",
     testId: "beta-ideas",
   },
   {
@@ -54,9 +54,10 @@ export const BETA_FEATURES: readonly BetaFeature[] = [
   },
 ];
 
-/** Ideas (idea board phases 0, 1, 3 and S): the Ideas window, the rail's
+/** Ideas (idea board phases 0, 1, 3, 4 and S): the Ideas window, the rail's
  *  lightbulb, ⌘⇧I and its reopening at launch (the shim reads the same key,
- *  companion.rs `BETA`). Named workspaces left the beta on 2026-11-14. */
+ *  companion.rs `BETA`), and a workspace's overview (its plan and linked
+ *  ideas), which is all of phase 4 the main window draws. Named workspaces left the beta on 2026-11-14. */
 export const ideasBeta = (s: Pick<Settings, "beta_ideas">): boolean => s.beta_ideas === true;
 
 /** Group chat (docs/proposals/group-chat.md, PRs #650–#664): the owner's

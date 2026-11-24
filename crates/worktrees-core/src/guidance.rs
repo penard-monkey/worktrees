@@ -54,6 +54,12 @@ pub const LANES: &str = "A lane commits, runs its gates and reports to the place
 normally (main), pushes, opens the PR and merges, as far as the user asked. Brief a lane to push, open a PR, merge, \
 deploy or upload only when the user asked that lane to, and never hand it credentials or send it to change anything live.";
 
+/// The user's ideas as MCP tools (`feat/ideas-mcp-tools`), in `rules_text()`:
+/// who reads and who writes. The MCP server enforces it; this says the tools
+/// are there to an agent whose client defers tool schemas. NOT part of `HEAD`.
+pub const IDEAS: &str = "The user's ideas (their own notes) are readable from any place with the MCP tools \
+ideas_list, idea_read and idea_related; only (main) writes them, and only when the user asks.";
+
 /// How to show the user an image (`feat/chat-images`), ALWAYS ON: Claude gets it
 /// as the prompt plugin's SessionStart output, pi, Codex and kimi inside
 /// [`rules_text`]. It cannot live only in the skill: a skill loads on demand,
@@ -81,14 +87,15 @@ pub const SKILL_MD: &str = include_str!("guidance/SKILL.md");
 /// 5: heavy jobs in machine-wide slots; lanes nudged and launched in batches.
 /// 6: showing the user an image in the chat view (`.worktrees-attachments/`).
 /// 7: lanes stay local; (main) pushes, opens the PR and merges.
-pub const VERSION: u32 = 7;
+/// 8: the ideas tools: read from any place, written from (main).
+pub const VERSION: u32 = 8;
 
 /// The rule plus where the how-to lives, for the channels that take a prompt
 /// rather than a skill (pi's `--append-system-prompt`, Codex's
 /// `developer_instructions`). One line, so it survives any first-line cut.
 pub fn rules_text() -> String {
     format!(
-        "{HEAD} {HEAVY} {LANES} For the how-to (handing work to another agent, messaging between places, finishing \
+        "{HEAD} {HEAVY} {LANES} {IDEAS} For the how-to (handing work to another agent, messaging between places, finishing \
          and releasing from a place), use the worktrees skill if you have it, or run `worktrees guide`. {IMAGE_RULE}"
     )
 }
@@ -1339,6 +1346,18 @@ mod tests {
         assert!(r.contains(LANES) && !r.contains('\n'), "{r}");
         assert!(LANES.contains("reports to the place that briefed it") && LANES.contains("(main)"), "{LANES}");
         assert!(!HEAD.contains("lane"), "HEAD must stay inside Codex's cut");
+    }
+
+    /// The ideas tools: who reads and who writes, in the always-on line and in
+    /// the skill.
+    #[test]
+    fn the_rules_line_and_the_skill_say_who_writes_ideas() {
+        let r = rules_text();
+        assert!(r.contains(IDEAS) && !r.contains('\n'), "{r}");
+        let skill = SKILL_MD.split_whitespace().collect::<Vec<_>>().join(" ");
+        for needle in ["ideas_list", "idea_read", "only `(main)` writes"] {
+            assert!(skill.contains(needle), "{needle}");
+        }
     }
 
     /// The skill's Finishing no longer tells a lane to push, and says who does.

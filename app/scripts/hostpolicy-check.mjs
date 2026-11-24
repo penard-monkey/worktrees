@@ -87,7 +87,7 @@ const DISPATCH = process.argv[4] ?? fileURLToPath(new URL("../../crates/worktree
 // `apply_policy_preset` (settings-reorg §5) rewrites the two agent policies
 // above through their own setters, so it is held to the same rule: only the
 // user's act may call it.
-const SETTERS = ["set_codex_permissions", "set_pi_trust", "set_fetch_interval", "set_term_history_opts", "apply_policy_preset"];
+const SETTERS = ["set_codex_permissions", "set_pi_trust", "set_fetch_interval", "set_term_history_opts", "apply_policy_preset", "set_keep_awake"];
 /** Each host key in ui-state.json, the setter that changes it, and a value
  *  that is NOT its default (so DEFAULTS cannot pass rule 6 by accident). */
 const KEYS = [
@@ -100,7 +100,7 @@ const KEYS = [
 const HOST_KEYS = new Set(KEYS.map(([k]) => k));
 // pages/policy.tsx holds Codex's Permissions since the Settings regroup
 // (settings-reorg §3.2); PiPanel.tsx still holds pi's trust control.
-const ALLOWED = new Set(["policy.tsx", "PiPanel.tsx", "HostPolicyControls.tsx"]);
+const ALLOWED = new Set(["policy.tsx", "PiPanel.tsx", "HostPolicyControls.tsx", "KeepAwake.tsx"]);
 const EFFECTS = new Set(["useEffect", "useLayoutEffect", "useInsertionEffect"]);
 /** The intrinsic elements whose `onChange` only the user's own edit fires. */
 const FORM_CONTROLS = new Set(["input", "select", "textarea"]);
