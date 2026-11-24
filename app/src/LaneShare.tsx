@@ -155,10 +155,22 @@ function Modal({ title, onClose, children, foot }: { title: string; onClose: () 
 }
 
 /** Two guest names that are one person's name to a reader: the host refuses
- *  a new guest whose name another guest has, in any case (F7, `pairing.rs`
- *  `Invite::from_value`), and the dialog says so before asking. */
+ *  a new guest whose name another LIVE guest has, in any case (F7,
+ *  `pairing.rs` `Invite::from_value`), and the dialog says so before asking.
+ *  A removed guest's name re-admits that guest; the dialog says that too. */
 export function sameGuestName(a: string, b: string): boolean {
   return a.trim().toLowerCase() === b.trim().toLowerCase();
+}
+
+/** The guest a typed name means, as the host's `Invite::from_value` reads
+ *  it, the exact name first (so "Bret" beside an older "bret" offers Bret's
+ *  own devices): `clash`, a LIVE guest, whose name is taken; else
+ *  `returning`, a removed one (no device left, `live` false), whom an invite
+ *  by the name re-admits as the same person. */
+export function nameTwin<G extends { name: string }>(guests: readonly G[], name: string, live: (g: G) => boolean): { clash: G | null; returning: G | null } {
+  const twin = (of: G[]) => (name.trim() ? of.find((g) => g.name === name.trim()) ?? of.find((g) => sameGuestName(g.name, name)) ?? null : null);
+  const clash = twin(guests.filter(live));
+  return { clash, returning: clash ? null : twin(guests.filter((g) => !live(g))) };
 }
 
 function when(at: number | null | undefined): string {
@@ -211,14 +223,14 @@ export function ShareDialog({ s, repo, slug, preset, onClose, onShared }: { s: S
     void readShares();
   }, []);
   // Someone new appears once guests are read, if there are none.
-  useEffect(() => { if (s.guests.length === 0 && !preset?.length) setSomeoneNew(true); }, [s.guests.length]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (live.length === 0 && !preset?.length) setSomeoneNew(true); }, [live.length]); // eslint-disable-line react-hooks/exhaustive-deps
   const close = () => {
     w.release();
     onClose();
   };
   // The guest the name means: the exact one first, so "Bret" beside an older
   // "bret" offers Bret's own devices (both were on the test VMs, 2026-11-14).
-  const clash = someoneNew && name.trim() ? s.guests.find((g) => g.name === name.trim()) ?? s.guests.find((g) => sameGuestName(g.name, name)) ?? null : null;
+  const { clash, returning } = someoneNew ? nameTwin(s.guests, name, guestLive) : { clash: null, returning: null };
   const invite = (who: Invitee) => {
     setInvitee(who);
     setStep("pair");
@@ -230,7 +242,7 @@ export function ShareDialog({ s, repo, slug, preset, onClose, onShared }: { s: S
     <ShareModal title={`Share ${slug}`} steps={steps} step={stepAt} onClose={close} countdown={step === "pair" ? <PairCountdown w={w} /> : null}>
       {step === "who" && (
         <WhoStep s={s} live={live} picked={picked} setPicked={setPicked} someoneNew={someoneNew} setSomeoneNew={setSomeoneNew}
-          name={name} setName={setName} clash={clash} onInvite={invite} onClose={close}
+          name={name} setName={setName} clash={clash} returning={returning} onInvite={invite} onClose={close}
           share={!someoneNew ? <ShareStep s={s} repo={repo} slug={slug} picked={picked} onClose={close} onShared={onShared} /> : null} />
       )}
       {step === "pair" && invitee && (
@@ -278,10 +290,10 @@ function Foot({ children }: { children: React.ReactNode }) {
 
 /** Step 1, who: the people paired already (each with their devices and when,
  *  so two of one name are told apart, F7), or *Someone new*. */
-function WhoStep({ s, live, picked, setPicked, someoneNew, setSomeoneNew, name, setName, clash, onInvite, onClose, share }: {
+function WhoStep({ s, live, picked, setPicked, someoneNew, setSomeoneNew, name, setName, clash, returning, onInvite, onClose, share }: {
   s: SharesState; live: Guest[]; picked: Set<string>; setPicked: (p: Set<string>) => void;
   someoneNew: boolean; setSomeoneNew: (on: boolean) => void; name: string; setName: (n: string) => void;
-  clash: Guest | null; onInvite: (who: Invitee) => void; onClose: () => void; share: React.ReactNode;
+  clash: Guest | null; returning: Guest | null; onInvite: (who: Invitee) => void; onClose: () => void; share: React.ReactNode;
 }) {
   const problem = notGranted("pair_begin") ?? (!name.trim() ? "Type their name first." : clash ? `A guest named ${clash.name} exists.` : null);
   const pick = (
@@ -325,6 +337,11 @@ function WhoStep({ s, live, picked, setPicked, someoneNew, setSomeoneNew, name, 
             <div>A guest named <b>{clash.name}</b> exists ({guestMeta(clash)}). Pair another device for them, or use another name.</div>
             <button className="ra-linkbtn" data-testid="share-pair-another" onClick={() => onInvite({ id: clash.id, name: clash.name })}>Pair another device for {clash.name}</button>
           </div>
+        </div>
+      ) : returning ? (
+        <div className="ra-note" data-testid="share-name-returning">
+          {returning.name} was a guest here before and was removed. Pairing them again makes them {returning.name} again: the threads show their old
+          posts and new ones as one person. They are on no share until you choose one.
         </div>
       ) : (
         <div className="ra-note">They pair their Mac with yours once, with a link you send them and a code you compare. Then you choose what they read.</div>

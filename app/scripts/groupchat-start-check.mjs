@@ -78,7 +78,9 @@ ok(/data-testid="share-reach-on"[^>]*onClick=\{\(\) => void turnOn\(\)\}>\s*\{tu
   "…and turnOn runs only from the press that says \"Turn on and show the link\"");
 ok(/r\.status\?\.state !== "listening"/.test(pair) && /void w\.begin\(args\);/.test(pair), "the window opens on its own only while remote access is listening");
 const L = await import("data:text/javascript;base64," + Buffer.from((await transformWithEsbuild(
-  read("../src/LaneShare.tsx").match(/export function reachDefault[\s\S]*?\n\}/)[0] + "\n" + read("../src/LaneShare.tsx").match(/export function sameGuestName[\s\S]*?\n\}/)[0],
+  read("../src/LaneShare.tsx").match(/export function reachDefault[\s\S]*?\n\}/)[0] + "\n" + read("../src/LaneShare.tsx").match(/export function sameGuestName[\s\S]*?\n\}/)[0]
+    + "\n" + (read("../src/LaneShare.tsx").match(/export function nameTwin[\s\S]*?\n\}/)?.[0] ?? "export function nameTwin() { return { clash: null, returning: null }; }")
+    + "\n" + read("../src/shares.ts").match(/export function guestLive[\s\S]*?\n\}/)[0],
   "x.ts", { loader: "ts", format: "esm" })).code).toString("base64"));
 const c = (address, mode, cls = mode === "overlay" ? "cgnat" : "rfc1918") => ({ address, mode, class: cls, iface: "en0", prefix: 24, warning: null });
 ok(L.reachDefault([c("10.0.0.2", "lan"), c("100.64.1.2", "overlay")])?.address === "100.64.1.2", "reachDefault: an overlay first");
@@ -112,6 +114,22 @@ ok(/laneLive\(lanes, repo, slug\) === true && sharesOf\(s, repo, slug\)\.length 
 // ── 6. F7 ──
 ok(L.sameGuestName("Bret", " bret ") && !L.sameGuestName("Bret", "Brett"), "sameGuestName: trim + lowercase, as the host's same_guest_name");
 ok(/a\.trim\(\)\.to_lowercase\(\) == b\.trim\(\)\.to_lowercase\(\)/.test(read("../../crates/worktrees-cli/src/serve/devices.rs")), "…which is the host's rule (devices.rs)");
+// A removed guest (every device revoked) holds no name and is listed nowhere
+// (v0.52.0 three-VM run: "Nobody is paired" beside "A guest named Bret exists").
+{
+  const dev = (revoked_at) => ({ id: "d", revoked_at });
+  const bret = { id: "g_b", name: "Bret", devices: [dev(7)] }, ana = { id: "g_a", name: "Ana", devices: [dev(null)] };
+  const t = (name) => L.nameTwin([bret, ana], name, L.guestLive);
+  ok(t(" bret ").clash === null && t(" bret ").returning === bret, "nameTwin: a removed guest's name is free and re-admits them");
+  ok(t("ana").clash === ana && t("ana").returning === null, "nameTwin: a live guest's name is taken");
+  ok(t("Eve").clash === null && t("Eve").returning === null && t("").clash === null, "nameTwin: anyone else is new");
+  ok(L.nameTwin([{ ...bret, devices: [] }], "Bret", L.guestLive).returning?.id === "g_b", "nameTwin: a guest with no device at all is removed too");
+  const devices = read("../../crates/worktrees-cli/src/serve/devices.rs");
+  ok(/pub fn removed\(&self\) -> bool \{\s*self\.devices\.iter\(\)\.all\(DeviceRecord::is_revoked\)/.test(devices), "…the host's GuestView::removed is the same rule (devices.rs)");
+  ok(/const guests = s\.guests\.filter\(guestLive\);/.test(blank(read("../src/GuestsPanel.tsx"))) && !/s\.guests\.map\(/.test(blank(read("../src/GuestsPanel.tsx"))),
+    "GuestsPanel lists live guests only: a removed one has no card and no Remove");
+  ok(/nameTwin\(s\.guests, name, guestLive\)/.test(lane), "the Who step reads the name through nameTwin");
+}
 
 if (bad) { console.log(`\n${bad} failed`); process.exit(1); }
 console.log("\ngroupchat-start-check: all ok");
