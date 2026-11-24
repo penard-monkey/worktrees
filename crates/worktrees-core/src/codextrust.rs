@@ -1,6 +1,16 @@
 //! Will Codex stop at its folder-trust prompt in this directory? Read-only:
-//! trust is the user's to give, so this never writes Codex's config and never
-//! passes a `-c` that would trust a folder for them.
+//! trust is the user's to give, so this never writes Codex's config.
+//!
+//! The one `-c` worktrees ever passes for trust is the user's own allowance:
+//! a repo in `[trust] codex` (`worktrees trust codex`, or Settings → Policy →
+//! Codex folder trust) gets `-c 'projects={"<repo root>"={trust_level="trusted"}}'`
+//! on that launch (`harness::Codex::place_flags`, `trust::codex_launch_trust`),
+//! for THAT run only — Codex saves nothing — whether or not its own config
+//! already trusts the repo. A repo that is not allowed gets no `-c` at all.
+//! `check` counts the allowance as trusted, so the refusal below never fires
+//! for an allowed repo; it still fires, in words, for an allowed repo whose
+//! path the override cannot spell (`trust::codex_trust_override`), and the
+//! allowance never covers a config Codex cannot read.
 //!
 //! Mirrors the TUI's own decision at upstream tag `rust-v0.160.1`
 //! (`tui/src/config_update.rs::read_remote_project_trust`, which
@@ -24,20 +34,72 @@
 
 use std::path::{Path, PathBuf};
 
-/// `Ok` when Codex will open in `cwd` without asking. `Err` says why not, as
-/// a sentence that ends on what the user must do.
-pub fn check(cwd: &Path) -> Result<(), String> {
-    check_in(cwd, &crate::codexmcp::config_path())
+/// What the refusal says when it is Codex's prompt that would stop a lane
+/// (`ops`'s launch-anyway note keys on it: forcing starts Codex AT that prompt).
+pub const PROMPT_PHRASE: &str = "it would stop at its folder-trust prompt";
+
+/// Why Codex would not open without asking.
+enum Block {
+    /// Its config could not be read or parsed: no allowance fixes that.
+    Config(String),
+    /// Its folder-trust prompt, naming the root it would trust.
+    Prompt(String),
 }
 
+impl Block {
+    fn words(self) -> String {
+        match self {
+            Block::Config(s) => s,
+            Block::Prompt(target) => format!(
+                "Codex hasn't been told to trust {target} yet; {PROMPT_PHRASE}. \
+                 Allow it for this repo in Settings → Policy → Codex folder trust (`worktrees trust codex`), \
+                 or open Codex in that folder once and choose Trust"
+            ),
+        }
+    }
+}
+
+/// `Ok` when Codex will open in `cwd` without asking — by its own config or by
+/// the user's allowance. `Err` says why not, as a sentence that ends on what
+/// the user must do.
+pub fn check(cwd: &Path) -> Result<(), String> {
+    check_with(cwd, &crate::codexmcp::config_path(), || crate::trust::codex_launch_trust(&cwd.to_string_lossy()))
+}
+
+/// `check`, with Codex's config and the allowance's verdict given. The verdict
+/// is asked only when Codex's own config would stop at its prompt.
+pub fn check_with(
+    cwd: &Path,
+    config: &Path,
+    allowance: impl FnOnce() -> crate::trust::CodexLaunchTrust,
+) -> Result<(), String> {
+    match decide(cwd, config) {
+        Ok(()) => Ok(()),
+        Err(Block::Prompt(target)) => {
+            let t = allowance();
+            match t.source {
+                "allowance" => Ok(()),
+                "unspellable" => Err(t.reason.unwrap_or_default()),
+                _ => Err(Block::Prompt(target).words()),
+            }
+        }
+        Err(b) => Err(b.words()),
+    }
+}
+
+/// Codex's OWN decision from `config`, without the allowance.
 pub fn check_in(cwd: &Path, config: &Path) -> Result<(), String> {
+    decide(cwd, config).map_err(Block::words)
+}
+
+fn decide(cwd: &Path, config: &Path) -> Result<(), Block> {
     let text = match std::fs::read_to_string(config) {
         Ok(s) => s,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => return Err(format!("Codex's config {} could not be read ({e}); fix that", config.display())),
+        Err(e) => return Err(Block::Config(format!("Codex's config {} could not be read ({e}); fix that", config.display()))),
     };
     let cfg: toml::Value = toml::from_str(&text)
-        .map_err(|e| format!("Codex's config {} does not parse ({}); fix that", config.display(), e.message()))?;
+        .map_err(|e| Block::Config(format!("Codex's config {} does not parse ({}); fix that", config.display(), e.message())))?;
     let markers: Vec<String> = match cfg.get("project_root_markers").and_then(toml::Value::as_array) {
         Some(list) => list.iter().filter_map(toml::Value::as_str).map(String::from).collect(),
         None => vec![".git".into()],
@@ -62,10 +124,7 @@ pub fn check_in(cwd: &Path, config: &Path) -> Result<(), String> {
         // What Codex's prompt names: trusting applies to the repository root.
         None => git_root.as_deref().or(project_root.as_deref()).map_or_else(|| keys(cwd).remove(0), |r| keys(r).remove(0)),
     };
-    Err(format!(
-        "Codex hasn't been told to trust {target} yet; it would stop at its folder-trust prompt. \
-         Open Codex in that folder once and choose Trust"
-    ))
+    Err(Block::Prompt(target))
 }
 
 /// A directory's lookup keys, as Codex spells them: canonical first, then the
@@ -227,6 +286,41 @@ mod tests {
             std::fs::write(&cfg, entry(&alias, Some("trusted")) + &entry(&canonical, Some("untrusted"))).unwrap();
             assert!(check_in(&alias, &cfg).is_err(), "canonical spelling wins before the alias");
         }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The allowance counts as trusted exactly where Codex itself would stop at
+    /// its prompt, says how to get past it when it is not allowed, and never
+    /// covers a config Codex cannot read.
+    #[test]
+    fn the_allowance_counts_as_trusted_and_the_refusal_names_the_way() {
+        use crate::trust::codex_launch_trust_for as t;
+        let dir = std::env::temp_dir().join(format!("wt-codex-allow-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let repo = dir.join("my repo.v2");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        let cfg = dir.join("config.toml");
+        let root = keys(&repo).remove(0);
+        // Not allowed: refused, and the words name the new way and no --force.
+        let why = check_with(&repo, &cfg, || t(Some(&root), false)).unwrap_err();
+        assert!(why.contains(PROMPT_PHRASE) && why.contains(&root), "{why}");
+        assert!(why.contains("Settings → Policy → Codex folder trust") && why.contains("worktrees trust codex"), "{why}");
+        assert!(!why.contains("--force"), "{why}");
+        // Allowed: trusted, with no config file at all and nothing created.
+        assert_eq!(check_with(&repo, &cfg, || t(Some(&root), true)), Ok(()));
+        assert!(!cfg.exists(), "the allowance must not create Codex's config");
+        // Allowed but Codex's config is broken: still refused (no allowance fixes it).
+        std::fs::write(&cfg, "broken = [").unwrap();
+        let why = check_with(&repo, &cfg, || t(Some(&root), true)).unwrap_err();
+        assert!(why.contains("does not parse"), "{why}");
+        // Allowed, unspellable path: refused with the reason, which still says it would stop.
+        std::fs::write(&cfg, "").unwrap();
+        let why = check_with(&repo, &cfg, || t(Some("/r\"x"), true)).unwrap_err();
+        assert!(why.contains("cannot spell") && why.contains(PROMPT_PHRASE), "{why}");
+        // Codex's own trust never asks the allowance at all.
+        std::fs::write(&cfg, format!("[projects.\"{root}\"]\ntrust_level = \"trusted\"\n")).unwrap();
+        assert_eq!(check_with(&repo, &cfg, || panic!("asked the allowance")), Ok(()));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -461,7 +461,15 @@ pub fn launch(p: &Project, ui: &mut dyn Ui, wt: &str, session_in: &str, install_
         } else {
             format!("worktrees open {place_slug}{ai_retry} --force")
         };
-        ui.error(&format!("{why}. The place is ready; to launch anyway: {again}"));
+        // Forcing does not answer Codex's folder-trust prompt: it starts Codex
+        // AT it, and only the user can answer there (worktrees never types into
+        // it). Say that, rather than offering --force as the fix.
+        let anyway = if why.contains(crate::codextrust::PROMPT_PHRASE) {
+            "The place is ready. To start Codex anyway (it will wait at that prompt, to be answered in its pane)"
+        } else {
+            "The place is ready; to launch anyway"
+        };
+        ui.error(&format!("{why}. {anyway}: {again}"));
         crate::diag::EXIT_LAUNCH_REFUSED
     };
     // Held from the deciding live-agent count until `new-session` returns, so
@@ -2681,6 +2689,13 @@ pub fn cmd_doctor(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
         }
         return kimi_doctor(p, ui, json, true);
     }
+    if opts.iter().any(|a| a == "--codex") {
+        if let Some(extra) = opts.iter().chain(rest).find(|a| *a != "--codex" && *a != "--json") {
+            ui.error(&format!("doctor --codex takes only --json (got '{extra}')"));
+            return 1;
+        }
+        return codex_doctor(p, ui, json);
+    }
     let rc = doctor_config(p, ui, args);
     // The pi block rides on a HUMAN run only, and only once pi is in use here:
     // `--json`'s schema is the config report's, and a user who never chose pi
@@ -2692,6 +2707,12 @@ pub fn cmd_doctor(p: &Project, ui: &mut dyn Ui, args: &[String]) -> i32 {
     if !json && rc != 1 && harness_in_use(p, crate::provider::KIMI) {
         ui.plain("");
         kimi_doctor(p, ui, false, false);
+    }
+    // Codex's block is only the allowance: a plain read, no probe, so it shows
+    // whenever there is anything to say (Codex in use, or a repo allowed).
+    if !json && rc != 1 && (harness_in_use(p, crate::provider::CODEX) || !crate::trust::allowed("codex").is_empty()) {
+        ui.plain("");
+        codex_doctor(p, ui, false);
     }
     if !json && rc != 1 {
         let lines = unreadable_session_lines(&crate::agent::scan_probes().unreadable);
@@ -2733,6 +2754,58 @@ fn harness_in_use(p: &Project, h: &crate::provider::Provider) -> bool {
     crate::profile::ai_word_of(&crate::config::resolve_ai_cmd(None)) == h.match_word
         || crate::config::default_model(h.id).is_some()
         || crate::store::read_lenient(&p.main_root).places.values().any(|d| d.agent.as_ref().is_some_and(|a| a.harness == h.id))
+}
+
+/// `doctor --codex`: the user's Codex folder-trust allowance — each allowed
+/// repo and whether a launch would be trusted there — and how a launch from
+/// the place doctor runs in would be. Reads `~/.config/worktrees/config.toml`
+/// and, for the verdict, Codex's own `projects` (never writes either). Exit `2`
+/// (findings) when an allowed repo's launch cannot be trusted.
+fn codex_doctor(p: &Project, ui: &mut dyn Ui, json: bool) -> i32 {
+    let place = std::env::current_dir()
+        .ok()
+        .and_then(|d| {
+            let d = d.to_string_lossy().into_owned();
+            let slug = d.strip_prefix(&format!("{}/", p.wt_root))?.split('/').next()?.to_string();
+            Some(format!("{}/{slug}", p.wt_root))
+        })
+        .unwrap_or_else(|| p.main_root.clone());
+    let launch = crate::trust::codex_launch_trust(&place);
+    let own = crate::codextrust::check_in(Path::new(&place), &crate::codexmcp::config_path());
+    let repos: Vec<_> = crate::trust::allowed("codex")
+        .into_iter()
+        .map(|r| {
+            let t = crate::trust::codex_launch_trust_for(Some(&r), true);
+            let exists = Path::new(&r).is_dir();
+            serde_json::json!({ "repo": r, "trusted_launch": t.source == "allowance" && exists, "source": t.source, "exists": exists, "reason": t.reason })
+        })
+        .collect();
+    let broken = repos.iter().any(|r| r["trusted_launch"] == false && r["exists"] == true);
+    let rc = if broken { crate::diag::EXIT_FINDINGS } else { 0 };
+    if json {
+        ui.plain(&serde_json::json!({ "trust": launch, "codex_own": own.is_ok(), "allowed": repos }).to_string());
+        return rc;
+    }
+    ui.header("codex folder trust");
+    let here = match launch.source {
+        "allowance" => "this repo is ALLOWED — Codex lanes start trusted (a per-run -c; ~/.codex/config.toml is never written)".to_string(),
+        "unspellable" => format!("allowed, but {}", launch.reason.as_deref().unwrap_or("its path cannot be spelled")),
+        _ if own.is_ok() => "Codex's own config already trusts this folder (nothing is passed)".to_string(),
+        _ => "Codex asks once per repo (worktrees trust codex to allow this repo; launches are refused until then)".to_string(),
+    };
+    ui.info(&format!("trust {here}"));
+    if repos.is_empty() {
+        ui.info("allowed none");
+    }
+    for r in &repos {
+        let verdict = match (r["trusted_launch"] == true, r["exists"] == true) {
+            (true, _) => "launch trusted".to_string(),
+            (false, false) => "folder is gone (worktrees trust codex <repo> --revoke removes it)".to_string(),
+            _ => format!("launch NOT trusted: {}", r["reason"].as_str().unwrap_or("?")),
+        };
+        ui.info(&format!("allowed {}  {verdict}", r["repo"].as_str().unwrap_or("")));
+    }
+    rc
 }
 
 /// `doctor --kimi`: which kimi a pane gets, the trust posture for this repo,
@@ -4462,7 +4535,7 @@ mod tests {
         // doctor scans for `--pi`/`--kimi`/`--json` before its parser runs; no
         // scan may look past `--`. Last, so the unfixed code fails above and
         // never runs pi's or kimi's doctor (each shells out to its harness).
-        for flag in ["--pi", "--kimi"] {
+        for flag in ["--pi", "--kimi", "--codex"] {
             let (_, out) = run_cmd(&p, cmd_doctor, &["--", flag]);
             assert!(out.contains(&format!("No worktree '{flag}'")), "{flag}: {out}");
         }

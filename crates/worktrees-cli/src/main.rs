@@ -34,7 +34,8 @@ worktrees — one git worktree per branch, one active agent per worktree.
   worktrees doctor [<name>]             report file drift, declared and un- (--json --strict --config-only)
   worktrees doctor --pi                 which pi, on which node; each pi model and why it can't run (--json)
   worktrees doctor --kimi               which kimi; trust, MCP, its models, the last brief opener (--json)
-  worktrees trust pi|kimi [<repo>] [--revoke]  let a repo's own pi resources load / start kimi lanes trusted
+  worktrees doctor --codex              Codex folder trust: each allowed repo, and whether a launch here is trusted (--json)
+  worktrees trust pi|kimi|codex [<repo>] [--revoke]  let a repo's own pi resources load / start kimi and Codex lanes trusted
   worktrees status <name>               health verdict for one worktree (--json)
   worktrees show <file>[:line] [--line N]  ask the worktrees app to open a file (at a line)
   worktrees guide [--status] [--json]   what agents are told about places (--rules: the one-line rule;

@@ -5,6 +5,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 
 ## [Unreleased]
 
+### Added
+
+- **Codex folder trust: allow a repo once, and its Codex lanes stop at no prompt.** Codex asks "Trust this folder?" in every repo it
+  has not seen, nothing in Worktrees can answer it, and a launch into one was refused (or, forced, sat at the modal). Turn a repo
+  on in Settings → Agent policy → Codex folder trust, or run `worktrees trust codex [<repo>] [--revoke]`, and its Codex lanes
+  start trusted: Codex then reads the repo's `AGENTS.md` and `.codex/` config and runs without its folder prompt, so code the
+  repo ships runs inside Codex with no question. **Off for every repo until you turn it on**, and only you can: the CLI and the
+  desktop's Settings, never a repo's `.worktrees.toml`, an agent's MCP tools or a paired device. It rides on each launch as one
+  per-run `-c` (measured on Codex 0.172.0; the inline-table form, because the dotted `projects."<path>"` form is not read), so
+  nothing is saved: `~/.codex/config.toml` is never written, a plain `codex` outside Worktrees is unaffected, and turning a repo
+  off applies at its next launch. A path with a quote, backslash or control character in it cannot be spelled safely and is
+  refused in words. A repo that is not allowed is refused as before, and the refusal now names the new way instead of leaving
+  `--force` (which only starts Codex at its prompt) as the apparent fix. `worktrees doctor --codex` (and `doctor`, and the MCP
+  `doctor`) report each allowed repo and whether a launch there would be trusted.
+
 ### Fixed
 
 - **A chat answer can start with `#`, `!` or `@`.** Typing `#2. Also, let's use the prefix ot instead of go.` into a question's free-text row was refused ("An answer can't start with #"), because answers shared the composer's rule, where a leading `# ! @ /` runs something. An answer goes into a field the prompt itself opened, and on Claude 2.1.331 those symbols only insert text there (the free-text row, a preview question's notes, a permission prompt's amend field), so only a leading `/` is refused now. Messages and slash commands keep the composer's rule. Codex's question notes are not measured and keep refusing a leading `@ ! #`.

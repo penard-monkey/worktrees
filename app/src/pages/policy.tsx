@@ -14,6 +14,7 @@ import {
 import { GuardSection } from "../GuidancePanel";
 import { PiTrustSection, usePiStatus } from "../PiPanel";
 import { KimiTrustSection, useKimiStatus } from "../KimiPanel";
+import { CodexTrustSection, useCodexTrustStatus } from "../CodexTrustPanel";
 import { CrossProjectSection } from "../CrossProjectPanel";
 import { QuotaSection, QuotaThresholdSection, useQuota } from "../QuotaPanel";
 import { SlotsSection } from "../SlotsPanel";
@@ -276,6 +277,7 @@ export function PolicyPage() {
   } = useSheet();
   const pi = usePiStatus({ settings, repo: repo || null, onChange, onReport, onFail });
   const kimi = useKimiStatus(repo || null, onReport);
+  const codexTrust = useCodexTrustStatus(repo || null, onReport);
   const quota = useQuota(onReport);
   const [limitsProblem, setLimitsProblem] = useState(false);
   const preset = usePresetStatus(onReport);
@@ -316,6 +318,10 @@ export function PolicyPage() {
     <Sec id="pi-trust">
       {backTo("pi_trust")}
       <PiTrustSection pi={pi} />
+    </Sec>
+
+    <Sec id="codex-trust">
+      <CodexTrustSection status={codexTrust.status} allow={(r, on) => void codexTrust.allow(r, on)} />
     </Sec>
 
     <Sec id="kimi-trust">

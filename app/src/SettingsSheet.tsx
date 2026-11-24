@@ -46,6 +46,7 @@ import type { LimitsSettings } from "./LimitsPanel";
 import type { PresetStatus } from "./presets";
 import type { PiStatus } from "./ModelPicker";
 import type { KimiStatus } from "./KimiPanel";
+import type { CodexTrustStatus } from "./CodexTrustPanel";
 import type { ProfilesInfo } from "./ProfilesPanel";
 import type { CodexPermissions } from "./settings";
 
@@ -98,17 +99,18 @@ function useHostSnap(open: boolean, cat: PageId, installed: VisCtx["installed"])
       read<PresetStatus>("policy_preset_status"),
       installed.pi === false ? undefined : read<PiStatus>("pi_status", { repo: null }),
       installed.kimi === false ? undefined : read<KimiStatus>("kimi_status", { repo: null }),
+      installed.codex === false ? undefined : read<CodexTrustStatus>("codex_status", { repo: null }),
       read<ProfilesInfo | null>("profiles_info", { repo: null }),
-    ]).then(([codexPermissions, fetchInterval, termHistory, quota, slots, limits, preset, pi, kimi, profiles]) => {
+    ]).then(([codexPermissions, fetchInterval, termHistory, quota, slots, limits, preset, pi, kimi, codex, profiles]) => {
       if (!alive) return;
       setSnap({
-        codexPermissions, fetchInterval, termHistory, quota, slots, limits, preset, pi, kimi,
+        codexPermissions, fetchInterval, termHistory, quota, slots, limits, preset, pi, kimi, codex,
         profiles: profiles ? { count: profiles.profiles.length, hasDefault: !!profiles.default_id } : undefined,
       });
     });
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- re-read per page, not per App render
-  }, [open, cat, installed.pi, installed.kimi]);
+  }, [open, cat, installed.pi, installed.kimi, installed.codex]);
   return snap;
 }
 
@@ -193,6 +195,7 @@ export function SettingsSheet(props: SheetProps) {
     }
     if (snap.pi) { h.pi_trust = snap.pi.trust !== "never"; h.pi_allowed = snap.pi.allowed.length > 0; }
     if (snap.kimi) h.kimi_allowed = snap.kimi.allowed.length > 0;
+    if (snap.codex) h.codex_allowed = snap.codex.projects.some((p) => p.allowed) || snap.codex.stale.length > 0;
     if (snap.profiles) h.profiles = snap.profiles.count > 0;
     if (snap.preset) h.policy_preset = snap.preset.name !== "balanced" || snap.preset.modified.length > 0;
     if (guidance) {

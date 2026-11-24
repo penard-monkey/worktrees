@@ -1028,6 +1028,9 @@ commands! { cx, a;
     set_pi_trust: HostConsole => project::set_pi_trust(&cx.ctx, a.get("mode")?),
     set_pi_allowed: HostConsole [console, project(repo)] => project::set_pi_allowed(a.get("repo")?, a.get("allow")?),
     set_kimi_allowed: HostConsole [console, project(repo)] => project::set_kimi_allowed(a.get("repo")?, a.get("allow")?),
+    // Codex folder trust: a read of the allowance, and the console-only grant.
+    codex_status: Engine [read, opt_project(repo, Free), filtered(by_project)] => project::codex_status(&cx.ctx, a.get("repo")?),
+    set_codex_allowed: HostConsole [console, project(repo)] => project::set_codex_allowed(a.get("repo")?, a.get("allow")?),
     remote_url: Engine [read, project(repo)] => project::remote_url(a.get("repo")?),
     project_prs: Engine [read, project(repo), places(places)] => project::project_prs(a.get("repo")?, a.get("max_age_secs")?, a.get("places")?),
     open_editor: ClientLocal => refused(),
