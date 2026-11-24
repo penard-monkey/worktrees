@@ -1387,37 +1387,6 @@ this repo's settings in `.claude/close-out.md`).
   restyling it.
   _From: [2026-09-23 docs-viewer-zoom](docs/sessions/2026-09-23-docs-viewer-zoom/summary.md)_
 
-- **Codex needs a manual check doc, like AI profiles have.** Bats has no fake
-  `codex`, so the live side is unguarded: a Claude → Codex → Claude switch
-  leaving one session each step, resume after a switch, the adopted-session
-  refusal, the legacy both-sessions reconcile, and the missing-CLI and sign-in
-  prompts. Write it in the shape of `docs/ai-profiles-manual-checks.md` and
-  re-run it on a `codex` upgrade. Include the agent label: a mid-session
-  `/model` in the Codex TUI should change it within a few seconds with no
-  message sent. That case was verified only at the snapshot level, because the
-  rollout event it relies on (`thread_settings_applied`) is Codex's to rename.
-  Same for the nav dots: a turn lights green and ends in the afterglow ring,
-  and Esc ends it with no ring — they ride `task_started` / `task_complete` /
-  `turn_aborted`, also Codex's to rename.
-  _From: [2026-09-23 codex-support](docs/sessions/2026-09-23-codex-support/summary.md),
-  [2026-09-23 model-label](docs/sessions/2026-09-23-model-label/summary.md)_
-
-- **The Codex amber dot reads the screen, and the screen is Codex's to
-  change.** `codex::waiting_on_screen` matches the modal footers of the
-  0.157.1 TUI ("Press enter to confirm or esc to cancel", "to submit
-  answer"/"to submit all"). A reworded footer degrades quietly to busy (green)
-  rather than a false amber, so nothing will complain. Add it to the Codex
-  manual check: park a turn on an approval and on a plan-mode question, and
-  watch the dot go amber and back; then open `/model` and `/permissions` mid-turn
-  and check it stays green (on 0.157.1 their footers are "enter select · esc
-  back", and `/experimental`'s is "space toggle · enter save · esc save/close",
-  so neither matches). MCP elicitation's footer was never captured. Also kill a
-  codex mid-turn (`kill <pid>`): the dot must clear within a tick, since
-  nothing writes `turn_aborted` and only the pane going back to its shell says
-  so. Re-probe `notify` for an `approval-requested` event on each Codex
-  upgrade too — if it ever fires, it is the better source.
-  _From: codex-activity-nav (2026-09-26)_
-
 - **`CODEX_WATCH` keeps a removed project's worktrees.** The poll re-checks
   the model of every worktree a snapshot last saw with live Codex. A worktree
   is dropped only when a later snapshot of ITS repo sees Codex down, so
@@ -1433,13 +1402,34 @@ this repo's settings in `.claude/close-out.md`).
   match, or bound the walk by date.
   _From: [2026-09-23 codex-support](docs/sessions/2026-09-23-codex-support/summary.md)_
 
+- **Run the Codex checklist on the installed Codex.**
+  [`docs/codex-manual-checks.md`](docs/codex-manual-checks.md) landed on
+  2026-11-23 with most rows last verified on 0.157.1; 0.171.0 was installed.
+  Only the rows that need no model call were re-run.
+  _From: [2026-09-26 codex-parity](docs/sessions/2026-09-26-codex-parity/summary.md)_
+
+- **Two interactive Codex sessions in one cwd are ambiguous.** The nav dot,
+  `place_status` and the model label take the newest user-thread rollout for
+  the cwd (`codex::latest_rollout`), so a second `codex` started by hand in the
+  same worktree wins until the app's session starts a new thread. The chat
+  already prefers the rollout the pane's own process holds open
+  (`codex::held_rollout`); the dots could use it too.
+  _From: [2026-09-26 codex-parity](docs/sessions/2026-09-26-codex-parity/summary.md)_
+
+- **Codex hooks per launch would give exact activity.** `-c` hooks stopped on
+  "Hooks need review" on 0.157.1 (not re-measured since), so busy/waiting come
+  from the rollout plus a screen check. If a newer Codex lets hooks be trusted
+  non-interactively, `UserPromptSubmit` / `PermissionRequest` / `Stop` would
+  replace the screen scrape. Check on each upgrade with
+  [the checklist](docs/codex-manual-checks.md).
+  _From: [2026-09-26 codex-parity](docs/sessions/2026-09-26-codex-parity/summary.md)_
+
 - **One-click provider handoff.** The manual path works today: the outgoing
   agent writes `.planning/handoff.md`, then you switch, then the incoming agent
-  reads it. Automating it is blocked on a reliable "finished writing" signal
-  from the outgoing agent, plus timeout and error handling. The outgoing
-  session must close before the incoming one starts (proposal §Handoff
-  feasibility). CLAUDE.md's Architecture → Agents paragraph still describes
-  agents as Claude-only; update it alongside.
+  reads it. The missing "finished writing" signal now exists: MCP `report` from
+  the outgoing agent, and `wait until: idle` on it (#348). What remains is the
+  flow itself (close the outgoing session BEFORE the incoming one starts;
+  proposal §Handoff feasibility), with timeout and error handling.
   _From: [2026-09-23 codex-support](docs/sessions/2026-09-23-codex-support/summary.md)_
 
 - **`proc_cwd_follows_a_live_shell_into_a_new_directory` is order-dependent.**
