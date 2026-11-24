@@ -120,6 +120,16 @@ button.ix-row-main:hover { background: var(--bg-elev); }
 .ix-chat-row .ix-row-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ix-chat-menu-foot { display: flex; flex-wrap: wrap; gap: var(--s2); border-top: 1px solid var(--line); margin-top: var(--s1); padding-top: var(--s2); }
 .ix-chat-body { position: relative; flex: 1; min-height: 0; }
+/* The conversation's terminal, under its chat. The split's share is the
+   chat's height; both keep a floor, so neither can be dragged away. */
+.ix-chat-split { display: flex; flex-direction: column; }
+.ix-chat-view { position: relative; flex: 1 1 0; min-height: 200px; }
+.ix-term { flex: 0 1 auto; display: flex; flex-direction: column; min-width: 0; min-height: 100px; background: var(--term-bg); }
+.ix-term-bar { flex: none; height: 7px; cursor: row-resize; background: var(--bg-panel); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); touch-action: none; }
+.ix-term-bar:hover, .ix-term-bar:focus-visible { background: var(--accent); outline: none; }
+.ix-term-head { flex: none; display: flex; align-items: center; gap: var(--s2); padding: 2px var(--s2); background: var(--bg-panel); border-bottom: 1px solid var(--line); color: var(--txt-hi); font-size: var(--fs-meta); }
+.ix-term-head > span { flex: 1 1 auto; min-width: 0; }
+.ix-term .term-host { border-radius: 0; }
 .ix-chat-ended { display: flex; align-items: center; gap: var(--s3); padding: var(--s2) var(--s3); border-top: 1px solid var(--line); color: var(--txt-dim); flex-wrap: wrap; }
 .ix-chat .ix-none { padding: var(--s4); }
 /* A conversation's state: the hue is in the dot, never in the words. */

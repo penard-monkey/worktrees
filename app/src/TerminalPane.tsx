@@ -94,11 +94,18 @@ type Transport = {
   wheel?(lines: number): Promise<unknown>;
 };
 
-const tmuxTransport = (session: string): Transport => {
+/** An idea conversation (the Ideas window), by its idea's id and its own. */
+export type IdeaTerm = { id: string; conv: string };
+
+const tmuxTransport = (session: string, idea?: IdeaTerm): Transport => {
   let id: number | null = null;
   return {
     async open(cols, rows, onBytes) {
-      id = await invoke<number>("term_open", { session, cols, rows, onBytes });
+      // An idea conversation's session is no place's, so it opens by the
+      // conversation; what it answers is an attach like any other.
+      id = idea
+        ? await invoke<number>("idea_term_open", { id: idea.id, conv: idea.conv, cols, rows, onBytes })
+        : await invoke<number>("term_open", { session, cols, rows, onBytes });
       return { replay: 0, replayCols: null };
     },
     write: (data) => { if (id != null) invoke("term_write", { id, data }); },
@@ -952,6 +959,14 @@ export function TerminalPane({ session, provider = "claude", termVersion = 0, fo
       termVersion={termVersion} focusToken={focusToken} focusEnabled={focusEnabled} drop={provider ? "mention" : undefined} dropProvider={provider}
       links={links} {...find} />
   );
+}
+
+/** An idea conversation's terminal, in the Ideas window. No place is dropped
+ *  on it and no path in it opens: there is no place and no file viewer there. */
+export function IdeaTerminalPane({ session, idea, termVersion = 0, focusToken = 0 }: {
+  session: string; idea: IdeaTerm; termVersion?: number; focusToken?: number;
+}) {
+  return <TermSurface makeTransport={() => tmuxTransport(session, idea)} tkey={session} termVersion={termVersion} focusToken={focusToken} />;
 }
 
 export function ShellPane({ repo, slug, index, termVersion = 0, focusToken = 0, root, onOpenPath, onError, ...find }: {

@@ -14,7 +14,9 @@
 
 use std::path::Path;
 
-use tauri::{AppHandle, Manager, Runtime, WebviewUrl, WebviewWindowBuilder};
+use tauri::webview::NewWindowResponse;
+use tauri::{AppHandle, Manager, Runtime, Url, WebviewUrl, WebviewWindowBuilder};
+use tauri_plugin_opener::OpenerExt;
 
 use crate::winstate;
 
@@ -27,6 +29,35 @@ const PAGE: &str = "companion/index.html";
 const SIZE: (f64, f64) = (1040.0, 720.0);
 pub const MIN: (f64, f64) = (480.0, 360.0);
 
+/// Whether a navigation stays in the companion: its own origin and nothing
+/// else. The page never leaves itself on purpose, but WebKit can: its context
+/// menu's Open Link, and a link preview, load a URL with no DOM event for the
+/// page to cancel (measured in a bare WKWebView, 2026-11-23: a prevented click
+/// never navigates, Open Link always does). `dev` is the dev server's URL,
+/// `None` in a build.
+pub fn stays(url: &Url, dev: Option<&Url>) -> bool {
+    match url.scheme() {
+        "tauri" => url.host_str() == Some("localhost"),
+        "about" => url.path() == "blank",
+        _ => dev.is_some_and(|d| d.origin() == url.origin()),
+    }
+}
+
+/// A URL the window refused: a web page opens in the browser, as the page's
+/// own links do; anything else is only logged.
+fn outside<R: Runtime>(app: &AppHandle<R>, url: &Url) {
+    crate::applog("info", &format!("companion: refused to navigate to a {} URL", url.scheme()));
+    if !matches!(url.scheme(), "http" | "https") {
+        return;
+    }
+    let (app, url) = (app.clone(), url.to_string());
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Err(e) = app.opener().open_url(url, None::<&str>) {
+            crate::applog("error", &format!("companion: could not open a link in the browser: {e}"));
+        }
+    });
+}
+
 /// Bring the companion forward, making it first if it is not open. `dir` is
 /// the app's config dir, where its frame is kept.
 pub fn open<R: Runtime>(app: &AppHandle<R>, dir: &Path, why: &str) -> Result<(), String> {
@@ -36,6 +67,8 @@ pub fn open<R: Runtime>(app: &AppHandle<R>, dir: &Path, why: &str) -> Result<(),
         return w.set_focus().map_err(|e| e.to_string());
     }
     let restore = winstate::enabled_in(dir);
+    let dev = if tauri::is_dev() { app.config().build.dev_url.clone() } else { None };
+    let (nav, popup) = (app.clone(), app.clone());
     let w = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App(PAGE.into()))
         .title("Ideas")
         .inner_size(SIZE.0, SIZE.1)
@@ -43,6 +76,17 @@ pub fn open<R: Runtime>(app: &AppHandle<R>, dir: &Path, why: &str) -> Result<(),
         // As tauri.conf.json sets for `main`: the page owns drag and drop, and
         // the cross-window probe needs the webview's own HTML5 events.
         .disable_drag_drop_handler()
+        .on_navigation(move |url| {
+            let here = stays(url, dev.as_ref());
+            if !here {
+                outside(&nav, url);
+            }
+            here
+        })
+        .on_new_window(move |url, _| {
+            outside(&popup, &url);
+            NewWindowResponse::Deny
+        })
         .build()
         .map_err(|e| {
             crate::applog("error", &format!("companion: could not open: {e}"));
@@ -108,6 +152,31 @@ mod tests {
         assert!(beta(Some(&json!({ "beta_ideas": true }))));
         assert!(!beta(Some(&json!({ "beta_ideas": false }))));
         assert!(!beta(Some(&json!({ "beta_ideas": "yes" }))), "garbage is not a yes");
+    }
+
+    /// The chat can never take the window away: only the page's own origin is
+    /// a place to go, in a build and under `tauri dev`.
+    #[test]
+    fn the_window_navigates_to_its_own_page_and_nowhere_else() {
+        let u = |s: &str| Url::parse(s).unwrap();
+        let dev = u("http://localhost:1420");
+        for (url, built, served) in [
+            ("tauri://localhost/companion/index.html", true, true),
+            ("tauri://localhost/companion/index.html#idea:01J", true, true),
+            ("http://tauri.localhost/companion/index.html", false, false),
+            ("about:blank", true, true),
+            ("http://localhost:1420/companion/index.html", false, true),
+            ("http://localhost:1421/companion/index.html", false, false),
+            ("https://example.com/notes", false, false),
+            ("https://tauri.localhost.example.com/", false, false),
+            ("tauri://elsewhere/companion/index.html", false, false),
+            ("file:///etc/passwd", false, false),
+            ("data:text/html,x", false, false),
+            ("about:srcdoc", false, false),
+        ] {
+            assert_eq!(stays(&u(url), None), built, "{url} in a build");
+            assert_eq!(stays(&u(url), Some(&dev)), served, "{url} under tauri dev");
+        }
     }
 
     /// The launch rule, read from a real `ui-state.json` in a temp dir: the

@@ -1357,6 +1357,17 @@ commands! { cx, a;
     idea_answer_many: HostConsole [console, idea_conv(conv, id)] => ideasessions::idea_answer_many(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("choices")?, a.get("fingerprint")?),
     idea_send: HostConsole [console, idea_conv(conv, id)] => ideasessions::idea_send(&cx.ctx, a.get("id")?, a.get("conv")?, a.get("text")?),
     idea_interrupt: HostConsole [console, idea_conv(conv, id)] => ideasessions::idea_interrupt(&cx.ctx, a.get("id")?, a.get("conv")?),
+    // The companion's terminal pane: `term_open` for a conversation, whose
+    // session is no place's (`session(…)` refuses it). The client names the
+    // conversation and never a session; the attach it gets is this
+    // connection's, so the `term_*` rows carry the rest.
+    idea_term_open: HostConsole [console, idea_conv(conv, id)] => {
+        let (session, id) = ideasessions::idea_term_open(
+            &cx.ctx, a.get("id")?, a.get("conv")?, a.get("cols")?, a.get("rows")?, cx.frames.bytes(a.channel("on_bytes")?),
+        )?;
+        cx.frames.note_term(id, session);
+        Ok::<u32, String>(id)
+    },
 
     // ── group chat's shares (`docs/proposals/group-chat.md` §2, §2.2, §3.3) ──
     // The owner's acts are console rows: share a running Claude or Codex
@@ -1504,8 +1515,8 @@ mod tests {
     /// `idea_combine`, `idea_split`, `idea_related`, `idea_versions`,
     /// `idea_restore`), phase 4's ten plan and workspace rows (`plan_*`,
     /// `workspace_from_plan`, `workspace_set_plan`, `workspace_link_idea`,
-    /// `workspace_unlink_idea`, `workspace_overview`), and the chat's images (`read_place_image`, `agent_call_image`), and phase S's fifteen
-    /// idea-session console rows (`idea_conversation*`, `idea_*` over the agent bodies), and group
+    /// `workspace_unlink_idea`, `workspace_overview`), and the chat's images (`read_place_image`, `agent_call_image`), and phase S's sixteen
+    /// idea-session console rows (`idea_conversation*`, `idea_*` over the agent bodies, `idea_term_open`), and group
     /// chat's eighteen share rows (fourteen console with PR D's `share_used` and `share_check`, four
     /// `guest`), its thread's two (`thread_read`, `thread_post`, `guest`) and PR C's
     /// two `guest` history rows (`shared_turns`, `shared_tool_call`), and the host's sleep
@@ -1515,7 +1526,7 @@ mod tests {
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 286, "the table has 286 commands");
+        assert_eq!(TABLE.len(), 287, "the table has 287 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1931,7 +1942,7 @@ mod tests {
     /// `push_allow_security`); Settings → Agent policy → Limits'
     /// `limits_settings` (`read`) and `set_limits` (`admin`); and the policy
     /// presets' `policy_preset_status` (`read`) and `apply_policy_preset`
-    /// (console); the named workspaces' seven (console); and the idea board's seven and phase 3's seven (console); phase 4's ten (console); phase S's fifteen idea-session rows (console); `read_place_image` and `agent_call_image` are `read`; the host's sleep hold's `get_keep_awake` (`read`) and `set_keep_awake` (`admin`); and group chat's
+    /// (console); the named workspaces' seven (console); and the idea board's seven and phase 3's seven (console); phase 4's ten (console); phase S's sixteen idea-session rows (console); `read_place_image` and `agent_call_image` are `read`; the host's sleep hold's `get_keep_awake` (`read`) and `set_keep_awake` (`admin`); and group chat's
     /// shares: fourteen console rows (`share_*` for the owner, `share_used`, `share_check`, `guest_places_hide`,
     /// `shares_all`, `guests_list`, `guest_remove`, `owner_set_name`) and the
     /// four `guest` rows (`GUEST_ROWS`), the capability's first, the thread's
@@ -1953,7 +1964,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 71), ("write", 23), ("admin", 42), ("console", 108), ("stream", 10), ("instruct", 8), ("answer", 2),
+            ("read", 71), ("write", 23), ("admin", 42), ("console", 109), ("stream", 10), ("instruct", 8), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 7), ("guest", 8),
         ]
         .into();

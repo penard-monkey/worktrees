@@ -134,13 +134,23 @@ const inCompanion = (f) => f.startsWith(path.join(APP, "companion") + path.sep);
   check(JSON.stringify(cap.windows) === JSON.stringify(["companion"]), `capabilities/companion.json names the companion alone (${JSON.stringify(cap.windows)})`);
   check(JSON.stringify(main.windows) === JSON.stringify(["main"]), `capabilities/default.json still names main alone (${JSON.stringify(main.windows)})`);
   const ids = (c) => c.permissions.map((p) => (typeof p === "string" ? p : p.identifier));
-  const borrowed = ids(cap).filter((p) => p !== "core:default" && ids(main).includes(p));
+  // open-url is in both, each with its own scope: main's adds System Settings,
+  // the companion's is web pages alone, so it is held whole below.
+  const OPEN_URL = "opener:allow-open-url";
+  const borrowed = ids(cap).filter((p) => p !== "core:default" && p !== OPEN_URL && ids(main).includes(p));
   check(borrowed.length === 0, `the companion holds none of main's plugin permissions${borrowed.length ? `: ${borrowed.join(", ")}` : ""} (${ids(cap).join(", ")})`);
-  // Exactly what the window uses: Show in Finder's reveal, and no opener set
-  // (opener:default would also open URLs and paths).
-  const ALLOWED = ["core:default", "opener:allow-reveal-item-in-dir"];
-  const extra = ids(cap).filter((p) => !ALLOWED.includes(p));
-  check(extra.length === 0 && cap.permissions.every((p) => typeof p === "string"), `the companion's rights are ${ALLOWED.join(" + ")} at most${extra.length ? `: also ${extra.join(", ")}` : ""}`);
+  // Exactly what the window uses: Show in Finder's reveal, and a link in a
+  // conversation (http and https), with no opener set (opener:default would
+  // also open mailto, tel and paths).
+  const WANT = ["core:default", "opener:allow-reveal-item-in-dir", { identifier: OPEN_URL, allow: [{ url: "http://*" }, { url: "https://*" }] }];
+  check(JSON.stringify(cap.permissions) === JSON.stringify(WANT), `the companion's rights are exactly ${ids({ permissions: WANT }).join(" + ")} (http and https only): ${JSON.stringify(cap.permissions)}`);
+  // A link never takes the window: the page cancels every anchor's click
+  // before it renders anything, and the window goes nowhere but its own page
+  // (WebKit's menu has an Open Link that raises no DOM event).
+  const entry = code(read("companion/main.tsx"));
+  check(/guardLinks\(document\);/.test(entry) && entry.indexOf("guardLinks(document);") < entry.indexOf("createRoot("), "the page guards its links before it renders");
+  check(/\.on_navigation\(move \|url\| \{\s*let here = stays\(url, dev\.as_ref\(\)\);/.test(rs) && /\.on_new_window\(move \|url, _\| \{[\s\S]*?NewWindowResponse::Deny/.test(rs),
+    "the window navigates only where `stays` says, and opens no second one");
 }
 
 // ── 5. the build, when there is one ─────────────────────────────────────────

@@ -692,6 +692,65 @@ fn term_open_attaches_only_the_session_named_exactly() {
     assert_eq!(sb.terminate().code(), Some(0));
 }
 
+/// The companion's terminal pane attaches an idea conversation's own session,
+/// which no project owns and `term_open` therefore refuses. The client names
+/// the idea and the conversation, never a session: a conversation of ANOTHER
+/// idea, and one that is not running, attach nothing. Typing into the attach
+/// reaches the pane, and a close detaches without ending the session.
+#[test]
+fn idea_term_open_attaches_the_conversations_own_session() {
+    if !PrivateTmux::available() {
+        eprintln!("skipped: no tmux on PATH");
+        return;
+    }
+    let tmux = PrivateTmux::new("ideaterm");
+    let mut sb = Sandbox::new("ideaterm");
+    let folder = sb.root.join("ideas");
+    let idea = |t: &str| worktrees_core::ideas::create_at(&folder, t).unwrap().idea.id.unwrap();
+    let (a, b) = (idea("Talk"), idea("Other"));
+    let conv = worktrees_core::ideasessions::prepare_at(&folder, &a).unwrap().id;
+    let session = worktrees_core::ideasessions::session_name(&conv);
+    let made = tmux.run(&["-f", "/dev/null", "new-session", "-d", "-s", &session, "-c", folder.to_str().unwrap(), "-x", "80", "-y", "24", "cat"]);
+    assert!(made.status.success(), "private tmux: {}", String::from_utf8_lossy(&made.stderr));
+    let sf = sb.launch_env(
+        &["--allow-origin", "http://localhost:1420"],
+        &[("TMUX", &tmux.env()), ("WORKTREES_IDEAS_DIR", folder.to_str().unwrap())],
+    );
+    let mut ws = connect(&sf, "http://localhost:1420");
+    let open = |id: &str, conv: &str, ch: u32| json!({ "id": id, "conv": conv, "cols": 80, "rows": 24, "onBytes": format!("__CHANNEL__:{ch}") });
+
+    let r = rpc(&mut ws, 1, "term_open", json!({ "session": session, "cols": 80, "rows": 24, "onBytes": "__CHANNEL__:1" }));
+    assert!(r["err"].is_string(), "term_open attached an idea's session: {r}");
+    let r = rpc(&mut ws, 2, "idea_term_open", open(&b, &conv, 2));
+    assert!(r["err"].as_str().is_some_and(|e| e.contains("no conversation")), "another idea's id opened it: {r}");
+    let ended = worktrees_core::ideasessions::prepare_at(&folder, &a).unwrap().id;
+    let r = rpc(&mut ws, 3, "idea_term_open", open(&a, &ended, 3));
+    assert!(r["err"].as_str().is_some_and(|e| e.contains("no tmux session named")), "an ended conversation attached: {r}");
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(tmux.attached().is_empty(), "{:?}", tmux.attached());
+
+    let r = rpc(&mut ws, 4, "idea_term_open", open(&a, &conv, 4));
+    let id = r["ok"].as_u64().unwrap_or_else(|| panic!("the conversation's session was refused: {r}"));
+    let wait = |what: &str, done: &dyn Fn() -> bool| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !done() {
+            assert!(Instant::now() < deadline, "{what}");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    wait("nothing attached", &|| tmux.attached() == vec![session.clone()]);
+    let r = rpc(&mut ws, 5, "term_write", json!({ "id": id, "data": "hello-idea\r".bytes().collect::<Vec<u8>>() }));
+    assert!(r.get("err").is_none(), "{r}");
+    wait("the keys did not reach the pane", &|| {
+        String::from_utf8_lossy(&tmux.run(&["capture-pane", "-p", "-t", &format!("={session}:")]).stdout).contains("hello-idea")
+    });
+    let r = rpc(&mut ws, 6, "term_close", json!({ "id": id }));
+    assert_eq!(r["ok"], Value::Null, "{r}");
+    wait("the close left a client attached", &|| tmux.attached().is_empty());
+    assert!(tmux.run(&["has-session", "-t", &format!("={session}")]).status.success(), "the close ended the session");
+    assert_eq!(sb.terminate().code(), Some(0));
+}
+
 /// The whole life of a `serve`, end to end through the binary.
 #[test]
 fn serve_writes_its_file_answers_the_workspace_and_cleans_up_on_sigterm() {

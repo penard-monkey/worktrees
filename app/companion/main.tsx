@@ -15,6 +15,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import type { SocketDeps } from "../src/ipcws";
 import type { RetryEnv } from "../src/reconnect";
+import { guardLinks } from "./linkguard";
 
 /** As main.tsx's: everything a socket to serve is built from but the port and
  *  the token, which come from `engine_connect` alone. */
@@ -45,6 +46,7 @@ function retryEnv(): RetryEnv {
 }
 
 async function boot() {
+  guardLinks(document);
   if (import.meta.env.VITE_MOCK) {
     // The design harness: the same fake backend the main page installs, so
     // the page renders against it (it answers everything; no engine).
