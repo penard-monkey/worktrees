@@ -1,0 +1,832 @@
+<!doctype html>
+<html lang="en" data-theme="tokyo-night">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A place inside a workspace · workspace view</title>
+<!-- A static mockup for docs/proposals/workspace-view-design.md. No product code; the scaffold began as the fable lane's.
+     The colours are the app's own tokens, copied from app/src/tokens.css. ?theme=<name> picks one of the six. -->
+<style>
+/* ── copied from app/src/tokens.css ── */
+:root {
+  color-scheme: dark;
+
+  /* ── color layers ── */
+  --bg-abyss: #0f0f16;   /* app backdrop / rail base */
+  --bg-tree: #16161e;    /* nav surface */
+  --bg-panel: #1a1b26;   /* top bar, cards, popovers (raised) */
+  --bg-elev: #1e2030;    /* hover, selected wash, menus */
+  --bg-input: #12131c;   /* inset fields */
+  /* A field that must read as one on a --bg-tree surface (the Settings header's
+     search): a few shades LIGHTER than --bg-tree, where --bg-input is darker
+     and 4-10 RGB units off it. --bg-elev is lighter than --bg-tree by 18-31
+     units in five themes, and --txt-dim on it is already the app's own lowest
+     --txt-dim ratio there, so a placeholder on it is no worse than a hovered
+     row; catppuccin-latte, whose --bg-elev is DARKER, sets its own. */
+  --bg-field: var(--bg-elev);
+  --line: #252838;       /* hairline borders / dividers */
+  --line-strong: #33384f;/* focus base, active outline, splitter */
+
+  --txt-hi: #e6eaff;     /* slugs, headings */
+  --txt: #c0caf5;        /* body, notes */
+  --txt-dim: #8a93bf;    /* metadata: age, counts, commit subject */
+  --txt-mute: #565f89;   /* placeholders, disabled, broken node */
+
+  --accent: #7aa2f7;     /* brand / interactive / primary */
+  --accent-ink: #0f0f16; /* text on accent fills */
+  --branch: #9aa5ce;     /* branch text (calm) */
+  --branch-hi: #7dcfff;  /* branch text when it DIVERGES (work flowing through) */
+
+  --ok: #9ece6a;         /* live tmux / active / ahead / listening */
+  --ai: #bb9af7;         /* AI (claude) session */
+  /* Afterglow — "Claude finished a task here", decaying. Aliased to --ai and NOT
+     given its own hex, so every theme gets a correct ember for free. This works
+     because every theme block below re-declares --ai on :root, which is where
+     --done is declared and therefore where var(--ai) is substituted — a theme
+     that scoped --ai to a DESCENDANT instead would leave --done on the base
+     purple. Purple because it is the one free hue that already MEANS claude
+     here (green is busy, amber is waiting, accent-blue is the app's pending). */
+  --done: var(--ai);
+  --dirty: #e0af68;      /* uncommitted / behind */
+  --danger: #f7768e;     /* destructive / broken / error */
+  /* A workspace card's palette, by name (WS_COLORS in workspaces.ts, core's
+     workspaces::COLORS): each theme's OWN shade of each, so a card stays
+     readable and follows a theme switch. Every theme block defines all eight. */
+  --hue-blue: #7aa2f7;
+  --hue-purple: #bb9af7;
+  --hue-green: #9ece6a;
+  --hue-amber: #e0af68;
+  --hue-orange: #ff9e64;
+  --hue-red: #f7768e;
+  --hue-teal: #73daca;
+  --hue-gray: #737aa2;
+  --warn: #ff9e64;       /* attention / Claude waiting for input (amber) */
+  --idle: #7e8ab8;       /* dormant-but-recent */
+  --sticky: #565f89;     /* closed/saved/archived/abandoned dot */
+  --pin: #f2c97d;        /* pinned star */
+  /* ⌘F — literal hex, no color-mix(): xterm's search decorations only accept
+     #RRGGBB. `--find-hit` is a wash every match wears and must stay readable
+     UNDER the terminal's own foreground; `--find-on` is the one you are on. */
+  --find-hit: #4a3b23;
+  --find-on: #916418;
+  --find-on-ink: #f5f0e6;
+
+  /* ── type: ONE knob (--ui-rem) scales everything below (rem) ── */
+  --ui-rem: 15px;
+  --fs-micro: 0.6875rem; /* ahead/behind counts, tooltips */
+  --fs-meta: 0.75rem;    /* group counts, age, commit subject */
+  --fs-label: 0.8125rem; /* branch, chips, button labels */
+  --fs-body: 0.875rem;   /* secondary text, note */
+  --fs-row: 0.9375rem;   /* place slug — primary tree unit */
+  --fs-h: 0.9375rem;     /* top-bar slug (weight 600) */
+  --fs-title: 1.0625rem; /* settings headings */
+  --fw-body: 400;
+  --fw-med: 500;
+  --fw-bold: 600;
+  --fw-heavy: 700;   /* a heading over rows that are --fw-med: the Settings rail's groups */
+  --lh-row: 1.5;
+  --lh-prose: 1.6;
+  --font-ui: ui-sans-serif, -apple-system, "Inter", system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", monospace;
+
+  /* terminal — INDEPENDENT of --ui-rem (px), set only on .xterm */
+  --term-family: "SF Mono", Menlo, Monaco, monospace;
+  --term-size: 13px;
+
+  /* terminal colors (xterm reads these per theme; Tokyo Night terminal spec) */
+  --term-bg: #0f0f16;
+  --term-fg: #c0caf5;
+  --term-cursor: #c0caf5;
+  --term-sel: rgba(122, 162, 247, 0.3);
+  --ansi-0: #15161e;  --ansi-8: #414868;
+  --ansi-1: #f7768e;  --ansi-9: #ff899d;
+  --ansi-2: #9ece6a;  --ansi-10: #9fe044;
+  --ansi-3: #e0af68;  --ansi-11: #faba4a;
+  --ansi-4: #7aa2f7;  --ansi-12: #8db0ff;
+  --ansi-5: #bb9af7;  --ansi-13: #c7a9ff;
+  --ansi-6: #7dcfff;  --ansi-14: #a4daff;
+  --ansi-7: #a9b1d6;  --ansi-15: #c0caf5;
+
+  /* ── syntax highlighting (the dock's read-mode code viewer) ──
+   * A SEPARATE ramp from the chrome tokens: chrome colours are tuned against
+   * panel surfaces, and reused verbatim on the code background several of them
+   * fell under 3:1 on the light themes. Defaults below are the dark ramp; each
+   * light theme overrides the whole set. All values verified ≥ 4.5:1 against
+   * that theme's --bg-abyss. */
+  --syn-com: #6b7394;   /* comments */
+  --syn-str: #9ece6a;   /* strings */
+  --syn-num: #ff9e64;   /* numbers + literals */
+  --syn-kw: #bb9af7;    /* keywords */
+  --syn-typ: #7dcfff;   /* types */
+  --syn-fn: #7aa2f7;    /* call sites */
+  --syn-attr: #e0af68;  /* keys / attributes */
+  --syn-punc: #8a93bf;  /* punctuation */
+
+  --scrim: rgba(0, 0, 0, 0.4);
+
+  /* ── spacing (4px grid) ── */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 24px;
+  --s6: 32px;
+  --row-pad-v: 6px;
+  --row-pad-h: 10px;
+
+  /* ── layout ── */
+  --rail-w: 44px;
+  --float-top: 56px; /* the app-level toasts: below the place header, top centre */
+  --nav-w: 300px;
+  --ind: 14px; /* nav tree: one indent step — generous enough that nesting reads
+                  at a glance (Mux-style), tight enough to keep slug width */
+  /* nav tree plumb lines (ancestor spines) — rail x = each level's caret center */
+  --guide: #272c40;
+  --guide-hot: #3d4566;
+  --guide-sel: rgba(122, 162, 247, 0.5);
+  --gx1: calc(var(--s3) + 5px); /* project caret center */
+  --gx2: calc(var(--gx1) + var(--ind)); /* group caret center */
+  --gx3: calc(var(--s3) + var(--ind) * 2 + 2px); /* under dormant subdiv label */
+  /* the project header's icon column (caret 10px + gap + half the 16px icon −
+     half the 8px dot): the (main) row's dot centers under the project's folder
+     icon — parent and child status marks stack exactly */
+  --dotcol: calc(var(--s3) + 10px + var(--s2) + 4px);
+
+  /* ── radius ── */
+  --r-sm: 5px;
+  --r-md: 7px;
+  --r-lg: 10px;
+  --r-full: 999px;
+
+  /* ── motion + depth ── */
+  --dur-fast: 90ms;
+  --dur: 140ms;
+  --dur-slow: 180ms;
+  --ease: cubic-bezier(0.2, 0.7, 0.3, 1);
+  --shadow-float: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+/* ── themes ──────────────────────────────────────────────────────────────
+ * :root above = Tokyo Night (default). Each block below is a full color map;
+ * non-color tokens (type/spacing/layout) are theme-invariant. All palettes are
+ * the official upstream values, contrast-verified (text tiers vs surfaces,
+ * ANSI vs terminal bg); deviations from upstream are noted inline. */
+
+/* Tokyo Night Day — the light mode (folke/tokyonight day palette).
+ * txt/txt-hi are official fg darkened (official #3760bf is 3.99:1 on the
+ * sidebar); ansi 0/8 use day dark5/comment — kitty's near-bg blacks are
+ * illegible on a light terminal. */
+:root[data-theme="tokyo-day"] {
+  color-scheme: light;
+  --bg-abyss: #c1c9df;
+  --bg-tree: #d0d5e3;
+  --bg-panel: #e1e2e7;
+  --bg-elev: #eaebf0;
+  --bg-input: #cbd1e1;
+  --line: #c4c8da;
+  --line-strong: #a8aecb;
+  --txt-hi: #28458a;
+  --txt: #2b4c97;
+  --txt-dim: #6172b0;
+  --txt-mute: #848cb5;
+  --accent: #2e7de9;
+  --accent-ink: #0f0f16;
+  --branch: #6172b0;
+  --branch-hi: #007197;
+  --ok: #587539;
+  --ai: #9854f1;
+  --dirty: #b15c00;
+  --danger: #f52a65;
+  --hue-blue: #2e7de9;
+  --hue-purple: #9854f1;
+  --hue-green: #587539;
+  --hue-amber: #8c6c3e;
+  --hue-orange: #b15c00;
+  --hue-red: #f52a65;
+  --hue-teal: #118c74;
+  --hue-gray: #848cb5;
+  --warn: #b15c00;       /* amber, darkened for legibility on the light nav */
+  --idle: #68709a;
+  --sticky: #848cb5;
+  --pin: #a27629;
+  --find-hit: #dcc48a;
+  --find-on: #e8a33d;
+  --find-on-ink: #1a1b26;
+  --guide: #c4c8da;
+  --guide-hot: #8990b3;
+  --guide-sel: rgba(46, 125, 233, 0.5);
+  --shadow-float: 0 8px 24px rgba(0, 0, 0, 0.18);
+  --scrim: rgba(0, 0, 0, 0.25);
+  --term-bg: #e1e2e7;
+  --term-fg: #28458a;
+  --term-cursor: #3760bf;
+  --term-sel: rgba(120, 144, 221, 0.35);
+  --ansi-0: #68709a;  --ansi-8: #848cb5;
+  --ansi-1: #f52a65;  --ansi-9: #ff4774;
+  --ansi-2: #587539;  --ansi-10: #5c8524;
+  --ansi-3: #8c6c3e;  --ansi-11: #a27629;
+  --ansi-4: #2e7de9;  --ansi-12: #358aff;
+  --ansi-5: #9854f1;  --ansi-13: #a463ff;
+  --ansi-6: #007197;  --ansi-14: #007ea8;
+  --ansi-7: #6172b0;  --ansi-15: #3760bf;
+
+  /* syntax ramp — all ≥ 4.5:1 on --bg-abyss #c1c9df */
+  --syn-com: #4a5275;
+  --syn-str: #315d1b;
+  --syn-num: #754c0f;
+  --syn-kw: #7420a8;
+  --syn-typ: #0d5782;
+  --syn-fn: #204eac;
+  --syn-attr: #814407;
+  --syn-punc: #47517c;
+}
+
+/* Catppuccin Mocha — crust/mantle/base/surface ladder, official ANSI spec. */
+:root[data-theme="catppuccin-mocha"] {
+  color-scheme: dark;
+  --bg-abyss: #11111b;
+  --bg-tree: #181825;
+  --bg-panel: #1e1e2e;
+  --bg-elev: #313244;
+  --bg-input: #11111b;
+  --line: #313244;
+  --line-strong: #45475a;
+  --txt-hi: #cdd6f4;
+  --txt: #bac2de;
+  --txt-dim: #a6adc8;
+  --txt-mute: #6c7086;
+  --accent: #89b4fa;
+  --accent-ink: #11111b;
+  --branch: #b4befe;
+  --branch-hi: #89dceb;
+  --ok: #a6e3a1;
+  --ai: #cba6f7;
+  --dirty: #fab387;
+  --danger: #f38ba8;
+  --hue-blue: #89b4fa;
+  --hue-purple: #cba6f7;
+  --hue-green: #a6e3a1;
+  --hue-amber: #f9e2af;
+  --hue-orange: #fab387;
+  --hue-red: #f38ba8;
+  --hue-teal: #94e2d5;
+  --hue-gray: #9399b2;
+  --warn: #fab387;       /* Catppuccin peach — amber attention */
+  --idle: #7f849c;
+  --sticky: #585b70;
+  --pin: #f9e2af;
+  --find-hit: #4a3a2a;
+  --find-on: #9a6b3f;
+  --find-on-ink: #f5f0e6;
+  --guide: #313244;
+  --guide-hot: #45475a;
+  --guide-sel: rgba(137, 180, 250, 0.5);
+  --term-bg: #11111b;
+  --term-fg: #cdd6f4;
+  --term-cursor: #f5e0dc;
+  --term-sel: rgba(147, 153, 178, 0.3);
+  --ansi-0: #45475a;  --ansi-8: #585b70;
+  --ansi-1: #f38ba8;  --ansi-9: #f37799;
+  --ansi-2: #a6e3a1;  --ansi-10: #89d88b;
+  --ansi-3: #f9e2af;  --ansi-11: #ebd391;
+  --ansi-4: #89b4fa;  --ansi-12: #74a8fc;
+  --ansi-5: #f5c2e7;  --ansi-13: #f2aede;
+  --ansi-6: #94e2d5;  --ansi-14: #6bd7ca;
+  --ansi-7: #a6adc8;  --ansi-15: #bac2de;
+}
+
+/* Catppuccin Latte — light. ANSI yellow/magenta/brights swapped to
+ * peach/mauve/green (official Latte colors): the stock terminal table's pale
+ * shades fall under 2.5:1 on base. */
+:root[data-theme="catppuccin-latte"] {
+  color-scheme: light;
+  --bg-abyss: #dce0e8;
+  --bg-tree: #e6e9ef;
+  --bg-panel: #eff1f5;
+  --bg-elev: #ccd0da;
+  --bg-input: #e1e5eb;
+  /* --bg-elev is darker than --bg-tree here: white, 25 units lighter, and
+     the field keeps its --line-strong border (settings-browser measures). */
+  --bg-field: #ffffff;
+  --line: #ccd0da;
+  --line-strong: #acb0be;
+  --txt-hi: #4c4f69;
+  --txt: #5c5f77;
+  --txt-dim: #6c6f85;
+  --txt-mute: #8c8fa1;
+  --accent: #1e66f5;
+  --accent-ink: #ffffff;
+  --branch: #7c7f93;
+  --branch-hi: #209fb5;
+  --ok: #40a02b;
+  --ai: #8839ef;
+  --dirty: #df8e1d;
+  --danger: #d20f39;
+  --hue-blue: #1e66f5;
+  --hue-purple: #8839ef;
+  --hue-green: #40a02b;
+  --hue-amber: #df8e1d;
+  --hue-orange: #fe640b;
+  --hue-red: #d20f39;
+  --hue-teal: #179299;
+  --hue-gray: #7c7f93;
+  --warn: #fe640b;       /* Latte peach — amber, dark enough on the light nav */
+  --idle: #6c6f85;
+  --sticky: #8c8fa1;
+  --pin: #fe640b;
+  --find-hit: #e7d3ac;
+  --find-on: #e8963c;
+  --find-on-ink: #11111b;
+  --guide: #ccd0da;
+  --guide-hot: #9ca0b0;
+  --guide-sel: rgba(30, 102, 245, 0.5);
+  --shadow-float: 0 8px 24px rgba(76, 79, 105, 0.18);
+  --scrim: rgba(0, 0, 0, 0.25);
+  --term-bg: #eff1f5;
+  --term-fg: #4c4f69;
+  --term-cursor: #dc8a78;
+  --term-sel: rgba(30, 102, 245, 0.25);
+  --ansi-0: #5c5f77;  --ansi-8: #6c6f85;
+  --ansi-1: #d20f39;  --ansi-9: #de293e;
+  --ansi-2: #40a02b;  --ansi-10: #40a02b;
+  --ansi-3: #fe640b;  --ansi-11: #fe640b;
+  --ansi-4: #1e66f5;  --ansi-12: #456eff;
+  --ansi-5: #8839ef;  --ansi-13: #8839ef;
+  --ansi-6: #179299;  --ansi-14: #2d9fa8;
+  --ansi-7: #acb0be;  --ansi-15: #bcc0cc;
+
+  /* syntax ramp — all ≥ 4.5:1 on --bg-abyss #dce0e8 */
+  --syn-com: #5e6075;
+  --syn-str: #40620a;
+  --syn-num: #8f4b12;
+  --syn-kw: #7a1fa2;
+  --syn-typ: #0d5c73;
+  --syn-fn: #1e58c4;
+  --syn-attr: #8a4b06;
+  --syn-punc: #5c5f77;
+}
+
+/* Nord — Polar Night surfaces, Snow Storm text, Frost accent, Aurora status.
+ * bg-panel is nord1 darkened one hex step so txt-mute nord10 clears 2.5:1. */
+:root[data-theme="nord"] {
+  color-scheme: dark;
+  --bg-abyss: #242933;
+  --bg-tree: #2e3440;
+  --bg-panel: #3a4151;
+  --bg-elev: #434c5e;
+  --bg-input: #292e39;
+  --line: #4c566a;
+  --line-strong: #616e88;
+  --txt-hi: #eceff4;
+  --txt: #d8dee9;
+  --txt-dim: #81a1c1;
+  --txt-mute: #5e81ac;
+  --accent: #88c0d0;
+  --accent-ink: #2e3440;
+  --branch: #81a1c1;
+  --branch-hi: #88c0d0;
+  --ok: #a3be8c;
+  --ai: #b48ead;
+  --dirty: #ebcb8b;
+  --danger: #bf616a;
+  --hue-blue: #81a1c1;
+  --hue-purple: #b48ead;
+  --hue-green: #a3be8c;
+  --hue-amber: #ebcb8b;
+  --hue-orange: #d08770;
+  --hue-red: #bf616a;
+  --hue-teal: #8fbcbb;
+  --hue-gray: #7b88a1;
+  --warn: #ebcb8b;       /* Nord Aurora yellow — amber attention */
+  --idle: #5e81ac;
+  --sticky: #4c566a;
+  --pin: #d08770;
+  --find-hit: #4a4632;
+  --find-on: #a08b4a;
+  --find-on-ink: #eceff4;
+  --guide: #3b4252;
+  --guide-hot: #4c566a;
+  --guide-sel: rgba(136, 192, 208, 0.5);
+  --term-bg: #242933;
+  --term-fg: #d8dee9;
+  --term-cursor: #d8dee9;
+  --term-sel: rgba(136, 192, 208, 0.3);
+  --ansi-0: #3b4252;  --ansi-8: #4c566a;
+  --ansi-1: #bf616a;  --ansi-9: #bf616a;
+  --ansi-2: #a3be8c;  --ansi-10: #a3be8c;
+  --ansi-3: #ebcb8b;  --ansi-11: #ebcb8b;
+  --ansi-4: #81a1c1;  --ansi-12: #81a1c1;
+  --ansi-5: #b48ead;  --ansi-13: #b48ead;
+  --ansi-6: #88c0d0;  --ansi-14: #8fbcbb;
+  --ansi-7: #e5e9f0;  --ansi-15: #eceff4;
+}
+
+/* Gruvbox Dark — medium contrast, bg0_h/bg0/bg0_s/bg1 surface ramp,
+ * canonical terminal ANSI. */
+:root[data-theme="gruvbox-dark"] {
+  color-scheme: dark;
+  --bg-abyss: #1d2021;
+  --bg-tree: #282828;
+  --bg-panel: #32302f;
+  --bg-elev: #3c3836;
+  --bg-input: #222424;
+  --line: #504945;
+  --line-strong: #665c54;
+  --txt-hi: #fbf1c7;
+  --txt: #ebdbb2;
+  --txt-dim: #bdae93;
+  --txt-mute: #928374;
+  --accent: #fe8019;
+  --accent-ink: #1d2021;
+  --branch: #83a598;
+  --branch-hi: #8ec07c;
+  --ok: #b8bb26;
+  --ai: #d3869b;
+  --dirty: #d79921;
+  --danger: #fb4934;
+  --hue-blue: #83a598;
+  --hue-purple: #d3869b;
+  --hue-green: #b8bb26;
+  --hue-amber: #fabd2f;
+  --hue-orange: #fe8019;
+  --hue-red: #fb4934;
+  --hue-teal: #8ec07c;
+  --hue-gray: #a89984;
+  --warn: #fabd2f;       /* Gruvbox bright yellow — amber attention */
+  --idle: #a89984;
+  --sticky: #7c6f64;
+  --pin: #fabd2f;
+  --find-hit: #4d3f22;
+  --find-on: #a3801f;
+  --find-on-ink: #fbf1c7;
+  --guide: #3c3836;
+  --guide-hot: #504945;
+  --guide-sel: rgba(254, 128, 25, 0.5);
+  --term-bg: #1d2021;
+  --term-fg: #ebdbb2;
+  --term-cursor: #ebdbb2;
+  --term-sel: rgba(168, 153, 132, 0.3);
+  --ansi-0: #282828;  --ansi-8: #928374;
+  --ansi-1: #cc241d;  --ansi-9: #fb4934;
+  --ansi-2: #98971a;  --ansi-10: #b8bb26;
+  --ansi-3: #d79921;  --ansi-11: #fabd2f;
+  --ansi-4: #458588;  --ansi-12: #83a598;
+  --ansi-5: #b16286;  --ansi-13: #d3869b;
+  --ansi-6: #689d6a;  --ansi-14: #8ec07c;
+  --ansi-7: #a89984;  --ansi-15: #ebdbb2;
+}
+
+
+/* ── the mockup ── */
+
+* { box-sizing: border-box; }
+html { font-size: var(--ui-rem); }
+body { margin: 0; font-family: var(--font-ui); font-size: var(--fs-body); line-height: 1.4; background: var(--bg-abyss); color: var(--txt); -webkit-font-smoothing: antialiased; }
+button { font: inherit; cursor: default; }
+svg { display: block; }
+.win { height: 100vh; display: flex; flex-direction: column; overflow: hidden; }
+.app { flex: 1; min-height: 0; display: grid; grid-template-columns: var(--rail-w) var(--nav-w) minmax(0, 1fr) var(--rail-w); grid-template-rows: minmax(0, 1fr); }
+.app.nonav { grid-template-columns: var(--rail-w) minmax(0, 1fr) var(--rail-w); }
+.app.nonav > .nav { display: none; }
+@media (max-width: 1000px) { .app:not(.pin) { grid-template-columns: var(--rail-w) minmax(0, 1fr) var(--rail-w); } .app:not(.pin) > .nav { display: none; } }
+
+/* rail */
+.rail { display: flex; flex-direction: column; align-items: center; gap: var(--s1); padding: var(--s2) 0; background: var(--bg-abyss); border-right: 1px solid var(--line); }
+.rail.right { border-right: 0; border-left: 1px solid var(--line); }
+.rail-spacer { flex: 1; }
+.rail-sep { width: 28px; height: 1px; margin: var(--s1) 0; background: var(--line); }
+.rail-icon { position: relative; width: 32px; height: 32px; display: grid; place-items: center; background: transparent; border: 0; border-radius: var(--r-md); color: var(--txt-mute); }
+.rail-icon.active { color: var(--accent); }
+.rail-icon.active::before { content: ""; position: absolute; left: -6px; top: 6px; bottom: 6px; width: 2px; border-radius: var(--r-full); background: var(--accent); }
+.rail.right .rail-icon.active::before { left: auto; right: -6px; }
+.rail-icon.dim { opacity: 0.4; }
+.rail-icon.waiting::after { content: ""; position: absolute; top: 3px; right: 3px; width: 7px; height: 7px; border-radius: 50%; background: var(--warn); }
+.rail-icon.ws { color: var(--ws-hue, var(--accent)); }
+
+/* nav */
+.nav { display: flex; flex-direction: column; min-height: 0; background: var(--bg-tree); border-right: 1px solid var(--line); overflow: hidden; }
+.home-item { display: flex; align-items: center; gap: var(--s2); margin: var(--s2) var(--s2) 0; padding: var(--s2); border-radius: var(--r-md); color: var(--txt); font-size: var(--fs-label); font-weight: var(--fw-med); }
+.nav-head { display: flex; align-items: center; gap: var(--s2); padding: var(--s3) var(--s3) var(--s2); color: var(--txt-dim); }
+.nav-title { flex: 1; font-size: var(--fs-meta); letter-spacing: 0.08em; font-weight: var(--fw-bold); }
+.search { margin: 0 var(--s3) var(--s2); padding: var(--s2) var(--s3); background: var(--bg-input); color: var(--txt-mute); border: 1px solid var(--line); border-radius: var(--r-md); font-size: var(--fs-label); }
+.nav-view { display: flex; margin: 0 var(--s3) var(--s2); padding: 2px; background: var(--bg-input); border: 1px solid var(--line); border-radius: var(--r-md); }
+.nav-view-seg { position: relative; flex: 1 1 0; padding: 2px var(--s2); text-align: center; color: var(--txt-dim); border: 1px solid transparent; border-radius: var(--r-sm); font-size: var(--fs-label); }
+.nav-view-seg.on { background: var(--bg-panel); color: var(--txt-hi); border-color: var(--line); }
+.seg-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--warn); margin-left: 6px; vertical-align: 1px; }
+.nav-scroll { flex: 1; min-height: 0; overflow: hidden; padding-bottom: var(--s3); }
+.ws-group { --ws-head: 30px; --ws-hue: var(--accent); --ws-head-bg: color-mix(in srgb, var(--ws-hue) 16%, var(--bg-tree)); margin: var(--s2) var(--s2) 0; border: 1px solid var(--line-strong); border-radius: var(--r-md); background: var(--bg-tree); }
+.ws-group + .ws-group { margin-top: var(--s3); }
+.hue-teal { --ws-hue: var(--hue-teal); } .hue-amber { --ws-hue: var(--hue-amber); } .hue-purple { --ws-hue: var(--hue-purple); } .hue-gray { --ws-hue: var(--hue-gray); } .hue-green { --ws-hue: var(--hue-green); } .hue-blue { --ws-hue: var(--hue-blue); }
+.ws-h { height: var(--ws-head); display: flex; align-items: center; gap: var(--s2); padding: 0 var(--s3); background: var(--ws-head-bg); border-radius: calc(var(--r-md) - 1px) calc(var(--r-md) - 1px) 0 0; }
+.ws-h:last-child { border-radius: calc(var(--r-md) - 1px); }
+.ws-h.on { box-shadow: inset 3px 0 0 var(--ws-hue); }
+.caret { color: var(--txt-mute); width: 10px; flex: none; }
+.ws-icon { position: relative; width: 16px; height: 16px; display: grid; place-items: center; color: var(--txt-dim); flex: none; }
+.ws-icon.waiting::after, .ws-icon.busy::after { content: ""; position: absolute; top: -2px; right: -2px; width: 6px; height: 6px; border-radius: 50%; background: var(--warn); box-shadow: 0 0 0 2px var(--ws-head-bg); }
+.ws-icon.busy::after { background: var(--ok); }
+.ws-name { flex: 1; min-width: 0; font-size: var(--fs-row); font-weight: var(--fw-bold); color: var(--txt-hi); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pcount { font-size: var(--fs-micro); color: var(--txt-dim); background: var(--bg-elev); padding: 0 6px; border-radius: var(--r-full); }
+.mini { color: var(--txt-mute); padding: 0 3px; }
+.ws-kids { border-top: 1px solid var(--line-strong); padding-bottom: var(--s1); }
+/* NEW: the documents strip and the chats group, inside the card, above its projects */
+.ws-docs { display: flex; gap: var(--s1); padding: var(--s2) var(--s2) var(--s1); }
+.ws-doc { position: relative; display: inline-flex; align-items: center; gap: 5px; padding: 2px var(--s2); border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--bg-panel); color: var(--txt); font-size: var(--fs-meta); white-space: nowrap; }
+.ws-doc svg { color: var(--txt-dim); }
+.ws-doc.on { border-color: var(--line-strong); color: var(--txt-hi); background: var(--bg-elev); box-shadow: inset 0 -2px 0 var(--ws-hue); }
+.ws-doc.none { border-style: dashed; background: transparent; color: var(--txt-dim); }
+.ws-doc .n { color: var(--txt-dim); }
+.ws-doc .changed { width: 6px; height: 6px; border-radius: 50%; background: var(--done); }
+.ws-doc .flt { color: var(--txt-dim); }
+.group-h { display: flex; align-items: center; gap: var(--s2); padding: 3px var(--s3); font-size: var(--fs-meta); text-transform: uppercase; letter-spacing: 0.06em; color: var(--txt-dim); }
+.group-h.in { padding-left: calc(var(--s3) + var(--ind)); }
+.group-h .count { margin-left: auto; color: var(--txt-mute); text-transform: none; letter-spacing: 0; }
+.group-h .plus { color: var(--txt-dim); }
+.rows { list-style: none; margin: 0; padding: 0 var(--s1); }
+.row { position: relative; display: grid; grid-template-columns: 14px 1fr auto; align-items: center; gap: var(--s2); padding: var(--row-pad-v) var(--row-pad-h); border-radius: var(--r-md); }
+.row.sel { background: var(--bg-elev); }
+.row.sel::before { content: ""; position: absolute; left: 2px; top: 4px; bottom: 4px; width: 2px; border-radius: var(--r-full); background: var(--accent); }
+.row-name { font-size: var(--fs-row); font-weight: var(--fw-med); color: var(--txt-hi); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row.sel .row-name { color: var(--accent); font-weight: var(--fw-bold); }
+.row.closed .row-name { color: var(--txt-dim); font-weight: var(--fw-body); }
+.row-branch { display: block; font-size: var(--fs-meta); color: var(--branch-hi); font-weight: var(--fw-body); }
+.row-age { color: var(--txt-mute); font-size: var(--fs-micro); min-width: 2em; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.row-age.say { color: var(--txt-hi); }
+.dot { width: 8px; height: 8px; border-radius: 50%; flex: none; justify-self: center; }
+.dot.busy { background: var(--ok); }
+.dot.waiting { background: var(--warn); }
+.dot.open { box-shadow: inset 0 0 0 1.5px var(--ok); }
+.dot.folding { background: var(--done); box-shadow: 0 0 0 3px color-mix(in srgb, var(--done) 30%, transparent); }
+.dot.done { background: var(--done); }
+.dot.failed { background: var(--danger); }
+.row-more { padding: 2px var(--row-pad-h) 4px calc(var(--row-pad-h) + 14px + var(--s2) + var(--s1)); font-size: var(--fs-meta); color: var(--txt-dim); }
+.chat-new { display: inline-flex; align-items: center; gap: var(--s1); margin: 2px var(--s3) var(--s1); padding: 2px var(--s2); color: var(--txt-dim); border: 1px dashed var(--line-strong); border-radius: var(--r-sm); font-size: var(--fs-label); }
+.project-h { display: flex; align-items: center; gap: var(--s2); padding: var(--s2) var(--s3); }
+.project-h svg.folder { color: var(--txt-dim); flex: none; }
+.pname { flex: 1; font-size: var(--fs-row); font-weight: var(--fw-bold); color: var(--txt-hi); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pname.gone { color: var(--txt-dim); font-weight: var(--fw-body); }
+.ptag { font-size: var(--fs-micro); color: var(--txt-dim); }
+.proj-rows { margin-left: calc(var(--s3) + 5px); border-left: 1px solid var(--guide); }
+.empty { padding: var(--s2) var(--s3); color: var(--txt-dim); font-size: var(--fs-meta); }
+.ws-new-btn { display: inline-flex; align-items: center; gap: var(--s1); margin: var(--s3) var(--s3); padding: 2px var(--s2); color: var(--txt-dim); border: 1px dashed var(--line-strong); border-radius: var(--r-sm); font-size: var(--fs-label); }
+
+/* space */
+.space { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.topbar { display: flex; align-items: center; gap: var(--s3); padding: var(--s2) var(--s3); min-height: 49px; border-bottom: 1px solid var(--line); background: var(--bg-panel); white-space: nowrap; }
+.navhist { display: flex; gap: var(--s3); color: var(--txt-mute); padding: 0 var(--s2); }
+.identity { display: flex; align-items: center; gap: var(--s2); flex: 1; min-width: 0; overflow: hidden; }
+.ws-crumb { display: inline-flex; align-items: center; gap: 6px; padding: 2px var(--s2); border-radius: var(--r-sm); background: color-mix(in srgb, var(--ws-hue) 16%, var(--bg-panel)); color: var(--txt-hi); font-size: var(--fs-label); font-weight: var(--fw-med); }
+.ws-crumb svg { color: var(--txt-dim); }
+.crumb-sep { color: var(--txt-mute); }
+.slug { font-size: var(--fs-h); font-weight: var(--fw-bold); color: var(--txt-hi); overflow: hidden; text-overflow: ellipsis; }
+.topbar-proj { color: var(--txt-dim); font-size: var(--fs-label); }
+.meta { color: var(--txt-dim); font-size: var(--fs-meta); }
+.ctrl { display: inline-flex; align-items: center; gap: 5px; background: var(--bg-elev); color: var(--txt); border: 1px solid var(--line); border-radius: var(--r-sm); padding: var(--s2) var(--s3); font-size: var(--fs-label); white-space: nowrap; }
+.ctrl.sm { padding: 3px var(--s2); font-size: var(--fs-meta); }
+.ctrl.on { color: var(--txt-hi); border-color: var(--line-strong); }
+.ctrl.quiet { background: transparent; border-color: transparent; color: var(--txt); }
+.ctrl.armed { border-color: var(--danger); background: color-mix(in srgb, var(--danger) 16%, var(--bg-elev)); color: var(--txt-hi); }
+.enter-btn { display: inline-flex; align-items: center; gap: 5px; background: var(--accent); color: var(--accent-ink); border: 0; border-radius: var(--r-sm); padding: var(--s2) var(--s3); font-size: var(--fs-label); font-weight: var(--fw-bold); white-space: nowrap; }
+.enter-btn.sm { padding: 3px var(--s2); font-size: var(--fs-meta); }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: var(--r-sm); overflow: hidden; font-size: var(--fs-meta); }
+.seg span { padding: 3px var(--s2); color: var(--txt-dim); background: var(--bg-elev); display: inline-flex; gap: 5px; align-items: center; }
+.seg span.on { background: var(--accent); color: var(--accent-ink); font-weight: var(--fw-bold); }
+.seg.plain span.on { background: var(--bg-panel); color: var(--txt-hi); box-shadow: inset 0 0 0 1px var(--line-strong); }
+.body { flex: 1; min-height: 0; display: flex; }
+
+/* the chat side: the place view's agent cell, on a workspace chat */
+.chatside { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; background: var(--bg-abyss); }
+.agent-label { display: flex; align-items: center; gap: var(--s2); padding: 4px var(--s3); min-height: 34px; color: var(--txt-dim); font-size: var(--fs-meta); border-bottom: 1px solid var(--line); white-space: nowrap; }
+.agent-label > * { flex: none; }
+.agent-label > .grow { flex: 1 1 0; }
+.chat-title { flex: 0 1 auto !important; min-width: 7ch; display: inline-flex; align-items: center; gap: var(--s2); color: var(--txt-hi); font-size: var(--fs-label); font-weight: var(--fw-bold); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.grow { flex: 1; min-width: 0; }
+.chat-scroll { flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; }
+.chat-col { width: 100%; max-width: 46rem; margin: 0 auto; padding: var(--s3) var(--s4); display: flex; flex-direction: column; gap: var(--s2); }
+.chat-top { padding-bottom: var(--s2); border-bottom: 1px solid var(--line); color: var(--txt-dim); font-size: var(--fs-meta); text-align: center; }
+.chat-row-user { align-self: flex-end; max-width: 80%; }
+.bubble { padding: var(--s2) var(--s3); border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--bg-panel); color: var(--txt-hi); font-size: var(--fs-body); line-height: var(--lh-prose); }
+.bubble.user { background: var(--bg-elev); border-color: var(--line-strong); }
+.bubble code, .md code { font-family: var(--font-mono); font-size: 0.9em; background: var(--bg-input); padding: 0 4px; border-radius: 4px; }
+.chat-name { margin: var(--s2) 0 2px var(--s1); font-size: var(--fs-meta); font-weight: var(--fw-med); color: var(--txt-hi); }
+.chat-name span { font-weight: var(--fw-body); color: var(--txt-dim); }
+.tools { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 0 var(--s1); }
+.tool { font-family: var(--font-mono); font-size: var(--fs-micro); color: var(--txt-dim); border: 1px solid var(--line); border-radius: var(--r-full); padding: 0 var(--s2); background: var(--bg-tree); }
+.notice { align-self: center; max-width: 100%; display: inline-flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: var(--s2); padding: 2px var(--s3); border: 1px solid var(--line); border-radius: var(--r-full); background: var(--bg-tree); color: var(--txt-hi); font-size: var(--fs-meta); }
+.notice .d { width: 7px; height: 7px; border-radius: 50%; background: var(--done); }
+.notice u, .link { color: var(--txt-hi); text-decoration: underline; text-decoration-color: var(--txt-mute); text-underline-offset: 2px; }
+.typing { margin-left: var(--s1); color: var(--txt-dim); font-size: var(--fs-meta); }
+.composer { border-top: 1px solid var(--line); background: var(--bg-tree); }
+.composer-in { max-width: 46rem; margin: 0 auto; padding: var(--s3) var(--s4); display: flex; gap: var(--s2); align-items: center; }
+.field { flex: 1; padding: var(--s2) var(--s3); background: var(--bg-input); border: 1px solid var(--line); border-radius: var(--r-md); color: var(--txt-mute); font-size: var(--fs-body); }
+.send { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; background: var(--bg-elev); border: 1px solid var(--line); color: var(--txt-dim); }
+.strip { border-top: 1px solid var(--line); background: var(--bg-tree); }
+.strip-in { max-width: 46rem; margin: 0 auto; padding: var(--s3) var(--s4); display: flex; flex-wrap: wrap; gap: var(--s2) var(--s3); align-items: center; font-size: var(--fs-label); color: var(--txt-hi); }
+.strip-in .why { flex: 1 1 16rem; min-width: 0; }
+.strip-in .why small { display: block; color: var(--txt-dim); font-size: var(--fs-meta); }
+.strip.fold .strip-in { border-left: 3px solid var(--done); }
+.strip.wait .strip-in { border-left: 3px solid var(--warn); }
+.strip.fail .strip-in { border-left: 3px solid var(--danger); }
+.strip.ended .strip-in { border-left: 3px solid var(--line-strong); }
+
+/* the documents side: the dock's position, a workspace's documents */
+.docside { flex: 0 0 var(--doc-w, 50%); min-width: 0; display: flex; flex-direction: column; background: var(--bg-tree); border-left: 1px solid var(--line); }
+.docside.full { flex: 1 1 auto; border-left: 0; }
+@media (max-width: 1000px) { .docside:not(.full) { flex-basis: 340px; } .wide { display: none !important; } .dochead .state { display: none; } }
+.window .wide { display: none !important; }
+.window .agent-label .ctrl.quiet { display: none; }
+.tabs { display: flex; align-items: stretch; gap: 2px; padding: 0 var(--s2); min-height: 34px; border-bottom: 1px solid var(--line); background: var(--bg-tree); font-size: var(--fs-label); white-space: nowrap; }
+.tab { position: relative; display: inline-flex; align-items: center; gap: 6px; padding: 0 var(--s2); color: var(--txt-dim); }
+.tab.on { color: var(--txt-hi); font-weight: var(--fw-bold); }
+.tab.on::after { content: ""; position: absolute; left: var(--s2); right: var(--s2); bottom: -1px; height: 2px; background: var(--ws-hue, var(--accent)); border-radius: 2px 2px 0 0; }
+.tab .n { font-size: var(--fs-micro); color: var(--txt-dim); background: var(--bg-elev); padding: 0 5px; border-radius: var(--r-full); font-weight: var(--fw-body); }
+.tab .changed { width: 6px; height: 6px; border-radius: 50%; background: var(--done); }
+.tabs .end { margin-left: auto; display: inline-flex; align-items: center; gap: var(--s1); }
+.dochead { display: flex; align-items: center; gap: var(--s2); padding: var(--s2) var(--s3); border-bottom: 1px solid var(--line); background: var(--bg-panel); font-size: var(--fs-label); white-space: nowrap; }
+.dochead > * { flex: none; }
+.dochead > .grow { flex: 1 1 0; }
+.path { flex: 0 1 auto !important; display: inline-flex; align-items: center; gap: 5px; min-width: 4ch; overflow: hidden; color: var(--txt-dim); }
+.path > * { flex: none; }
+.path b { color: var(--txt-hi); font-weight: var(--fw-bold); overflow: hidden; text-overflow: ellipsis; }
+.state { flex: 0 1 auto !important; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--txt-dim); font-size: var(--fs-meta); }
+.docbody { flex: 1; min-height: 0; display: flex; overflow: hidden; background: var(--bg-abyss); }
+.tree { flex: 0 0 210px; border-right: 1px solid var(--line); background: var(--bg-tree); padding: var(--s2) 0; font-size: var(--fs-label); overflow: hidden; }
+.tree .filter { margin: 0 var(--s2) var(--s2); padding: 3px var(--s2); background: var(--bg-input); border: 1px solid var(--line); border-radius: var(--r-sm); color: var(--txt-mute); font-size: var(--fs-meta); }
+.tree-row { display: flex; align-items: center; gap: 6px; padding: 3px var(--s3); color: var(--txt); white-space: nowrap; overflow: hidden; }
+.tree-row.in { padding-left: calc(var(--s3) + var(--ind) + 4px); color: var(--txt); }
+.tree-row.on { background: var(--bg-elev); color: var(--txt-hi); box-shadow: inset 2px 0 0 var(--accent); }
+.tree-row .n { margin-left: auto; color: var(--txt-mute); font-size: var(--fs-micro); }
+.tree-row svg { color: var(--txt-dim); flex: none; }
+.tree-h { padding: var(--s2) var(--s3) 2px; font-size: var(--fs-micro); letter-spacing: 0.06em; color: var(--txt-dim); }
+.page { flex: 1; min-width: 0; overflow: hidden; }
+.md { max-width: 44rem; margin: 0 auto; padding: var(--s5) var(--s5) var(--s6); color: var(--txt); font-size: var(--fs-body); line-height: var(--lh-prose); }
+.md h1 { margin: 0 0 var(--s3); font-size: 1.4rem; color: var(--txt-hi); }
+.md h2 { margin: var(--s5) 0 var(--s2); font-size: 1.05rem; color: var(--txt-hi); }
+.md p { margin: 0 0 var(--s2); }
+.md ul { margin: 0 0 var(--s2); padding-left: 1.2em; }
+.md li { margin: 2px 0; }
+.md a { color: var(--txt-hi); text-decoration: underline; text-decoration-color: var(--accent); text-underline-offset: 2px; }
+.md .date { color: var(--txt-dim); font-variant-numeric: tabular-nums; }
+.md img, .md .img { display: block; margin: var(--s3) 0; border: 1px solid var(--line); border-radius: var(--r-md); }
+.md .img { height: 120px; background: repeating-linear-gradient(135deg, var(--bg-panel) 0 12px, var(--bg-tree) 12px 24px); display: grid; place-items: center; color: var(--txt-dim); font-size: var(--fs-meta); }
+.banner { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2) var(--s3); padding: var(--s2) var(--s3); border-bottom: 1px solid var(--line); border-left: 3px solid var(--done); background: var(--bg-panel); color: var(--txt-hi); font-size: var(--fs-label); }
+.banner.warn { border-left-color: var(--warn); }
+.banner .why { flex: 1 1 12rem; min-width: 0; }
+.banner small, .stat { color: var(--txt-dim); font-size: var(--fs-meta); }
+.stat b.add, .stat b.del { color: var(--txt-hi); font-weight: var(--fw-med); padding: 0 4px; border-radius: 4px; }
+.stat b.add { background: color-mix(in srgb, var(--ok) 22%, var(--bg-panel)); }
+.stat b.del { background: color-mix(in srgb, var(--danger) 20%, var(--bg-panel)); }
+/* CodeMirror, as the Ideas window draws markdown: the text that was typed, styled */
+.cm { max-width: 44rem; margin: 0 auto; padding: var(--s5); font-size: var(--fs-body); line-height: 1.75; color: var(--txt-hi); }
+.cm .l { white-space: pre-wrap; min-height: 1.75em; }
+.cm .fm { font-family: var(--font-mono); font-size: var(--fs-meta); color: var(--txt-dim); }
+.cm .h1 { font-size: 1.4rem; font-weight: var(--fw-bold); }
+.cm .h2 { font-size: 1.05rem; font-weight: var(--fw-bold); }
+.cm .mk { color: var(--txt-mute); }
+.cm .lk { color: var(--txt-dim); }
+.cm .cur { display: inline-block; width: 2px; height: 1.1em; background: var(--accent); vertical-align: -2px; }
+.cm .act { background: color-mix(in srgb, var(--accent) 7%, transparent); margin: 0 calc(-1 * var(--s2)); padding: 0 var(--s2); border-radius: 4px; }
+.picker { margin: 2px 0 0 7.5rem; width: 19rem; border: 1px solid var(--line-strong); border-radius: var(--r-md); background: var(--bg-elev); box-shadow: var(--shadow-float); font-size: var(--fs-label); padding: 4px; }
+.picker div { padding: 3px var(--s2); border-radius: var(--r-sm); color: var(--txt); display: flex; gap: var(--s2); }
+.picker div.on { background: var(--bg-panel); color: var(--txt-hi); box-shadow: inset 0 0 0 1px var(--line-strong); }
+.picker small { margin-left: auto; color: var(--txt-dim); }
+
+/* overview */
+.ov { flex: 1; min-height: 0; overflow: hidden; display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(300px, 0.75fr); gap: var(--s4); padding: var(--s4); background: var(--bg-abyss); }
+.ov.one { grid-template-columns: minmax(0, 1fr); overflow: hidden; }
+@media (max-width: 1000px) { .ov { display: flex; flex-direction: column; } .ov .col { flex: none; } .ov .col:nth-child(2) { order: 2; } .ov .attn { flex: none; } .ov .card { flex: none; } }
+.col { display: flex; flex-direction: column; gap: var(--s3); min-width: 0; min-height: 0; }
+.card { border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--bg-panel); min-width: 0; overflow: hidden; }
+.card.grow { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.card-h { display: flex; align-items: center; gap: var(--s2); padding: var(--s2) var(--s3); border-bottom: 1px solid var(--line); font-size: var(--fs-meta); letter-spacing: 0.08em; color: var(--txt-dim); white-space: nowrap; }
+.card-h .t { color: var(--txt-dim); font-weight: var(--fw-bold); }
+.card-h .x { margin-left: auto; display: inline-flex; gap: var(--s2); align-items: center; letter-spacing: 0; }
+.card .md { padding: var(--s3) var(--s4) var(--s4); max-width: none; margin: 0; }
+.card .md h1 { font-size: 1.15rem; }
+.card .md h2 { margin-top: var(--s4); font-size: 0.95rem; }
+.lrow { display: flex; align-items: center; gap: var(--s2); padding: 5px var(--s3); border-top: 1px solid var(--line); font-size: var(--fs-label); color: var(--txt-dim); white-space: nowrap; min-width: 0; }
+.lrow:first-child, .card-h + .lrow { border-top: 0; }
+.lrow > * { flex: none; }
+.lrow .nm { flex: 0 1 auto; color: var(--txt-hi); font-weight: var(--fw-med); overflow: hidden; text-overflow: ellipsis; min-width: 9ch; }
+.lrow .st { flex: 1 100 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: var(--fs-meta); }
+.lrow .r { margin-left: auto; flex: none; display: inline-flex; align-items: center; gap: var(--s2); font-size: var(--fs-meta); flex: none; }
+.lrow.sel { background: var(--bg-elev); }
+.chip { display: inline-flex; align-items: center; gap: 5px; padding: 2px var(--s2); border: 1px solid var(--line); border-radius: var(--r-sm); background: var(--bg-elev); color: var(--txt-hi); font-size: var(--fs-meta); }
+.chips { display: flex; flex-wrap: wrap; gap: var(--s2); padding: var(--s2) var(--s3); }
+.changed-line { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); padding: var(--s2) var(--s3); border-bottom: 1px solid var(--line); border-left: 3px solid var(--done); font-size: var(--fs-label); color: var(--txt-hi); background: var(--bg-panel); }
+.changed-line .r { margin-left: auto; display: inline-flex; gap: var(--s2); align-items: center; }
+
+/* history + diff */
+.hist { flex: 0 0 250px; border-right: 1px solid var(--line); background: var(--bg-tree); overflow: hidden; font-size: var(--fs-label); }
+.hrow { padding: var(--s2) var(--s3); border-bottom: 1px solid var(--line); color: var(--txt-dim); }
+.hrow b { display: block; color: var(--txt-hi); font-weight: var(--fw-med); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hrow small { font-size: var(--fs-meta); }
+.hrow.on { background: var(--bg-elev); box-shadow: inset 2px 0 0 var(--accent); }
+.diff { flex: 1; min-width: 0; overflow: hidden; padding: var(--s3); display: flex; flex-direction: column; gap: var(--s3); }
+.dfile { border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; background: var(--bg-panel); }
+.dfile-h { display: flex; align-items: center; gap: var(--s2); padding: 4px var(--s3); border-bottom: 1px solid var(--line); font-family: var(--font-mono); font-size: var(--fs-meta); color: var(--txt-hi); background: var(--bg-tree); }
+.dfile-h .r { margin-left: auto; font-family: var(--font-ui); display: inline-flex; gap: var(--s2); align-items: center; }
+.dl { display: grid; grid-template-columns: 2.4em 1.2em minmax(0, 1fr); font-family: var(--font-mono); font-size: 12px; line-height: 1.6; color: var(--txt); }
+.dl .no { text-align: right; padding-right: 6px; color: var(--txt-mute); background: var(--bg-tree); }
+.dl .sg { text-align: center; color: var(--txt-dim); }
+.dl .tx { white-space: pre-wrap; overflow-wrap: anywhere; padding-right: var(--s2); }
+.dl.add { background: color-mix(in srgb, var(--ok) 16%, var(--bg-panel)); color: var(--txt-hi); }
+.dl.add .no { background: color-mix(in srgb, var(--ok) 24%, var(--bg-tree)); }
+.dl.del { background: color-mix(in srgb, var(--danger) 14%, var(--bg-panel)); color: var(--txt-hi); }
+.dl.del .no { background: color-mix(in srgb, var(--danger) 22%, var(--bg-tree)); }
+.dl.hunk { color: var(--txt-dim); background: var(--bg-tree); }
+
+/* the place view's own dock, for screen 08 */
+.dock { flex: 0 0 420px; display: flex; flex-direction: column; min-width: 0; background: var(--bg-tree); border-left: 1px solid var(--line); }
+.dock-tabs { display: flex; align-items: center; gap: var(--s2); padding: var(--s2) var(--s3); border-bottom: 1px solid var(--line); font-size: var(--fs-label); color: var(--txt-hi); font-weight: var(--fw-bold); }
+
+/* the floated window and the desk behind it (screen 06) */
+.desk { height: 100vh; position: relative; overflow: hidden; background: linear-gradient(160deg, color-mix(in srgb, var(--bg-abyss) 70%, #5a6480), color-mix(in srgb, var(--bg-abyss) 82%, #2a3048)); }
+.window { position: absolute; display: flex; flex-direction: column; border: 1px solid var(--line-strong); border-radius: 11px; overflow: hidden; box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45); background: var(--bg-abyss); }
+.window .win { height: auto; flex: 1; min-height: 0; }
+.titlebar { flex: none; height: 28px; display: flex; align-items: center; gap: 7px; padding: 0 10px; background: var(--bg-panel); border-bottom: 1px solid var(--line); color: var(--txt-dim); font-size: var(--fs-meta); }
+.titlebar i { width: 11px; height: 11px; border-radius: 50%; background: var(--line-strong); }
+.titlebar span { flex: 1; text-align: center; margin-right: 54px; }
+.floated { flex: 1; display: grid; place-items: center; padding: var(--s5); background: var(--bg-abyss); }
+.floated-card { max-width: 24rem; text-align: center; border: 1px dashed var(--line-strong); border-radius: var(--r-lg); padding: var(--s5); color: var(--txt-dim); font-size: var(--fs-label); }
+.floated-card b { display: block; color: var(--txt-hi); font-size: var(--fs-body); margin-bottom: var(--s1); }
+.floated-card .btns { display: flex; gap: var(--s2); justify-content: center; margin-top: var(--s3); }
+.ix { flex: 1; min-height: 0; display: grid; grid-template-columns: 210px minmax(0, 1fr); }
+.ix-list { background: var(--bg-tree); border-right: 1px solid var(--line); padding: var(--s2) 0; font-size: var(--fs-label); }
+.scope { display: flex; margin: 0 var(--s2) var(--s2); }
+
+.ws-sep { height: 1px; background: var(--line); margin: var(--s1) var(--s3); }
+.tool-ic { display: inline-flex; }
+.attn { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); padding: var(--s2) var(--s3); border: 1px solid var(--line); border-left: 3px solid var(--warn); border-radius: var(--r-md); background: var(--bg-panel); color: var(--txt-hi); font-size: var(--fs-label); grid-column: 1 / -1; }
+.attn .r { margin-left: auto; }
+.ov { grid-template-rows: auto minmax(0, 1fr); }
+.picker div { align-items: center; } .more::before { content: ""; position: absolute; left: 0; right: 0; bottom: 100%; height: 56px; background: linear-gradient(transparent, var(--bg-panel)); pointer-events: none; }
+.more { margin-top: auto; padding: var(--s2) var(--s4); border-top: 1px solid var(--line); font-size: var(--fs-meta); color: var(--txt-dim); background: var(--bg-panel); position: relative; }
+.card.grow .md { overflow: hidden; min-height: 0; }
+.receipt { border: 1px solid var(--line-strong); border-left: 3px solid var(--done); border-radius: var(--r-md); background: var(--bg-panel); padding: var(--s3); font-size: var(--fs-label); color: var(--txt-hi); display: flex; flex-direction: column; gap: var(--s2); margin-top: var(--s2); }
+.receipt .btns { display: flex; flex-wrap: wrap; gap: var(--s2); }
+.receipt small { color: var(--txt-dim); font-size: var(--fs-meta); }
+.flist { border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; background: var(--bg-panel); flex: none; }
+.flist .lrow.on { background: var(--bg-elev); box-shadow: inset 2px 0 0 var(--accent); }
+.flist .nm { font-family: var(--font-mono); font-size: var(--fs-meta); }
+.diff.one { gap: var(--s3); }
+.frame.navfit .nav { width: 220px; } .board:not(.folds) > .frame > h3 + p { min-height: 4.6em; }
+.frame.navfit .nav .ws-doc { padding: 2px 5px; } .navfit .nav .ws-doc svg { display: none; }
+.cap { color: var(--txt-dim); font-size: var(--fs-meta); }
+.ovw { position: absolute; z-index: 5; left: var(--rail-w); top: 0; bottom: 0; width: 318px; box-shadow: var(--shadow-float); }
+/* boards (several small frames on one page) */
+.board { min-height: 100vh; padding: var(--s5); display: flex; gap: var(--s5); align-items: flex-start; flex-wrap: wrap; background: var(--bg-abyss); }
+.frame { display: flex; flex-direction: column; gap: var(--s2); }
+.frame > h3 { margin: 0; font-size: var(--fs-label); color: var(--txt-hi); font-weight: var(--fw-bold); }
+.frame > p { margin: 0; max-width: 34ch; font-size: var(--fs-meta); color: var(--txt-dim); }
+.frame .nav { width: 318px; height: 640px; border: 1px solid var(--line); border-radius: var(--r-md); }
+.frame .chatside { flex: none; width: 620px; border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; }
+.themes { position: fixed; right: 8px; bottom: 6px; font-size: 11px; opacity: 0.55; display: flex; gap: 8px; z-index: 9; }
+.themes a { color: var(--txt-dim); }
+
+:root { --nav-w: 318px; }
+</style>
+<script>
+  (function () { var p = new URLSearchParams(location.search); var t = p.get("theme"); if (t) document.documentElement.dataset.theme = t; if (p.has("shot")) document.documentElement.dataset.shot = "1"; })();
+</script>
+<style>html[data-shot] .themes { display: none; }</style>
+</head>
+<body>
+<div class="win"><div class="app  "><nav class="rail">
+  <span class="rail-icon active"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="M3 5h4M3 12h4M3 19h4M11 5h10M11 12h10M11 19h10"/></svg></span><span class="rail-spacer"></span>
+  <span class="rail-icon " title="Ideas: the library, in this window; it floats"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="M9 18h6M10 21h4"/><path d="M8.5 14.5A6 6 0 1 1 15.5 14.5c-.7.6-1 1.3-1 2H9.5c0-.7-.3-1.4-1-2Z"/></svg></span>
+  <span class="rail-icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="M3 6a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/><path d="M12 11v5M9.5 13.5h5"/></svg></span><span class="rail-icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></svg></span></nav><aside class="nav">
+  <div class="home-item"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="m3 11 9-7 9 7v9H3Z"/></svg> Home</div>
+  <div class="nav-head"><span class="nav-title">PLACES</span><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><circle cx="11" cy="11" r="6"/><path d="m20 20-4-4"/></svg></div>
+  <div class="search">filter places…</div>
+  <div class="nav-view"><span class="nav-view-seg on">Workspaces</span><span class="nav-view-seg ">All projects</span></div>
+  <div class="nav-scroll">
+    <div class="ws-group hue-teal">
+      <div class="ws-h "><span class="caret"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="m6 9 6 6 6-6"/></svg></span><span class="ws-icon waiting"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="M12 3 3 8l9 5 9-5-9-5Z"/><path d="m3 13 9 5 9-5"/><path d="m3 17.5 9 5 9-5" opacity=".55"/></svg></span><span class="ws-name">Jellyfin</span><span class="pcount">3</span><span class="mini"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></span></div>
+      <div class="ws-kids">
+        <div class="ws-docs">
+  <span class="ws-doc  "><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="M5 4h12a2 2 0 0 1 2 2v14H7a2 2 0 0 1-2-2Z"/><path d="M9 8h6M9 12h6"/></svg>Memory</span>
+  <span class="ws-doc  "><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="m3 7 2 2 4-4M3 17l2 2 4-4M13 7h8M13 17h8"/></svg>Plan</span>
+  <span class="ws-doc  "><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="M9 18h6M10 21h4"/><path d="M8.5 14.5A6 6 0 1 1 15.5 14.5c-.7.6-1 1.3-1 2H9.5c0-.7-.3-1.4-1-2Z"/></svg>Ideas <span class="n">2</span></span></div>
+        <div class="group-h"><span>Chats</span><span class="count">2 live</span><span class="plus"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="M12 5v14M5 12h14"/></svg></span></div>
+        <ul class="rows"><li class="row  "><span class="dot waiting"></span><span class="row-name">Who can see what</span><span class="row-age say">waiting 12m</span></li><li class="row  "><span class="dot busy"></span><span class="row-name">Release order</span><span class="row-age ">now</span></li><li class="row  closed"><span class="dot "></span><span class="row-name">Storage layout</span><span class="row-age ">1d</span></li><li class="row  closed"><span class="dot "></span><span class="row-name">First look</span><span class="row-age ">4d</span></li><li class="row  closed"><span class="dot "></span><span class="row-name">Naming</span><span class="row-age ">9d</span></li></ul>
+        <div class="row-more">All chats · 7 <svg style="display:inline;vertical-align:-1px" width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="m9 6 6 6-6 6"/></svg></div>
+        <div class="ws-sep"></div>
+        <div class="project"><div class="project-h"><span class="caret"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="m6 9 6 6 6-6"/></svg></span><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="folder"><path d="M3 6a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg><span class="pname">homelab-ansible</span><span class="pcount">3</span><span class="mini"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="M12 5v14M5 12h14"/></svg></span></div><div class="proj-rows"><ul class="rows"><li class="row "><span class="dot "></span><span class="row-name">◆ (main)</span><span class="row-age">2d</span></li><li class="row sel"><span class="dot busy"></span><span class="row-name">jellyfin-role<span class="row-branch">↗ feat/jellyfin-role</span></span><span class="row-age">1h</span></li><li class="row "><span class="dot "></span><span class="row-name">nas-mounts<span class="row-branch">↗ fix/nas-mounts</span></span><span class="row-age">3d</span></li></ul></div></div><div class="project"><div class="project-h"><span class="caret"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="m6 9 6 6 6-6"/></svg></span><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="folder"><path d="M3 6a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg><span class="pname">jellyfin-config</span><span class="pcount">1</span><span class="mini"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="M12 5v14M5 12h14"/></svg></span></div><div class="proj-rows"><ul class="rows"><li class="row "><span class="dot "></span><span class="row-name">◆ (main)</span><span class="row-age">6d</span></li></ul></div></div><div class="project"><div class="project-h"><span class="caret"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="m6 9 6 6 6-6"/></svg></span><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="folder"><path d="M3 6a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg><span class="pname">media-scripts</span><span class="ptag" title="private: this workspace's chats cannot read it"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg></span><span class="pcount">2</span><span class="mini"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="M12 5v14M5 12h14"/></svg></span></div></div>
+      </div>
+    </div>
+    <div class="ws-group hue-amber"><div class="ws-h "><span class="caret"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="m9 6 6 6-6 6"/></svg></span><span class="ws-icon busy"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="M12 3 3 8l9 5 9-5-9-5Z"/><path d="m3 13 9 5 9-5"/><path d="m3 17.5 9 5 9-5" opacity=".55"/></svg></span><span class="ws-name">Casa del Valle</span><span class="pcount">2</span><span class="mini"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></span></div></div>
+    <div class="ws-group hue-purple"><div class="ws-h "><span class="caret"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="m9 6 6 6-6 6"/></svg></span><span class="ws-icon "><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="M12 3 3 8l9 5 9-5-9-5Z"/><path d="m3 13 9 5 9-5"/><path d="m3 17.5 9 5 9-5" opacity=".55"/></svg></span><span class="ws-name">worktrees</span><span class="pcount">2</span><span class="mini"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></span></div></div>
+    <div class="ws-group hue-gray"><div class="ws-h "><span class="caret"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="m9 6 6 6-6 6"/></svg></span><span class="ws-icon "><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="M12 3 3 8l9 5 9-5-9-5Z"/><path d="m3 13 9 5 9-5"/><path d="m3 17.5 9 5 9-5" opacity=".55"/></svg></span><span class="ws-name">Everything Else</span><span class="pcount">4</span><span class="mini"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></span></div></div>
+    <div class="ws-new-btn"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="M12 5v14M5 12h14"/></svg> New workspace</div>
+  </div></aside><div class="space"><header class="topbar hue-teal"><span class="navhist"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="m15 6-6 6 6 6"/></svg><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="m9 6 6 6-6 6"/></svg></span><div class="identity"><span class="ws-crumb" title="Jellyfin: back to where you were in it"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="M12 3 3 8l9 5 9-5-9-5Z"/><path d="m3 13 9 5 9-5"/><path d="m3 17.5 9 5 9-5" opacity=".55"/></svg>Jellyfin</span><span class="crumb-sep"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="m9 6 6 6-6 6"/></svg></span><span class="topbar-proj">homelab-ansible /</span><span class="slug">jellyfin-role</span><span class="meta" style="color:var(--branch-hi)">feat/jellyfin-role</span></div><span class="meta" style="color:var(--txt-hi)">● live</span><span class="ctrl sm"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/></svg></span></header><div class="body"><section class="chatside"><div class="agent-label"><span>Claude · opus</span><span class="grow"></span><span class="seg"><span class="on"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="M4 5h16v11H9l-5 4Z"/></svg>Chat</span><span><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M13 15h4"/></svg>Terminal</span></span></div>
+    <div class="chat-scroll"><div class="chat-col"><div class="chat-row-user"><div class="bubble user">Read .planning/brief.md and begin.</div></div><div><div class="chat-name">Claude <span>· 13:20</span></div><div class="bubble">The brief asks for the Jellyfin role. I start with the mount unit it depends on, then the role's defaults.</div><div class="tools"><span class="tool">Read ×6</span><span class="tool">Bash</span></div></div><div class="typing">Claude is working…</div></div></div><div class="composer"><div class="composer-in"><div class="field">Message jellyfin-role…</div><span class="send"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="M12 19V5M6 11l6-6 6 6"/></svg></span></div></div></section><aside class="dock hue-teal"><div class="dock-tabs"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="M12 3 3 8l9 5 9-5-9-5Z"/><path d="m3 13 9 5 9-5"/><path d="m3 17.5 9 5 9-5" opacity=".55"/></svg> Jellyfin <span class="grow"></span><span class="seg plain" style="font-weight:400"><span class="on">Memory</span><span>Plan</span><span>Ideas 2</span></span></div>
+    <div class="dochead"><span class="path"><b>MEMORY.md</b></span><span class="grow"></span><span class="state">Changed 14:31</span><span class="ctrl sm" title="Opens it in the workspace, in Edit">Edit in Jellyfin <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="m9 6 6 6-6 6"/></svg></span><span class="ctrl sm"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="M14 4h6v6M20 4l-8 8"/><path d="M10 6H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4"/></svg></span></div>
+    <div class="docbody"><div class="page"><div class="md">
+  <h1>Memory: Jellyfin</h1>
+  <h2>What this workspace is for</h2>
+  <p>Jellyfin on the home server, for the family in and out of the house. Three repositories: the Ansible roles, the generated config, and the media scripts.</p>
+  <h2>Projects</h2>
+  <ul><li><b>homelab-ansible</b>: the roles. Deploys go through <code>make deploy</code>.</li><li><b>jellyfin-config</b>: generated from the role's defaults. Never edited by hand.</li><li><b>media-scripts</b>: private. Named here, not read by chats.</li></ul>
+  <h2>Decisions</h2>
+  <ul><li><span class="date">2026-11-24</span> The role ships before the config repo. <a>notes/2026-11-24-release-order.md</a></li><li><span class="date">2026-11-23</span> Media lives on the NAS, not the server. <a>notes/2026-11-23-storage-layout.md</a></li><li><span class="date">2026-11-23</span> One library per audience. Detail in <a>topics/nas-layout.md</a></li></ul>
+  </div></div></div></aside></div></div><nav class="rail right hue-teal"><span class="rail-icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="folder"><path d="M3 6a2 2 0 0 1 2-2h4l2 3h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/></svg></span><span class="rail-icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M13 15h4"/></svg></span><span class="rail-icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="M5 4h12a2 2 0 0 1 2 2v14H7a2 2 0 0 1-2-2Z"/><path d="M9 8h6M9 12h6"/></svg></span><span class="rail-icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="m3 7 2 2 4-4M3 17l2 2 4-4M13 7h8M13 17h8"/></svg></span><span class="rail-icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><circle cx="6" cy="6" r="2"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="18" r="2"/><path d="M6 8v8M18 16V9a3 3 0 0 0-3-3h-3"/></svg></span><span class="rail-sep"></span><span class="rail-icon ws active" title="Jellyfin: the workspace's documents"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" ><path d="M12 3 3 8l9 5 9-5-9-5Z"/><path d="m3 13 9 5 9-5"/><path d="m3 17.5 9 5 9-5" opacity=".55"/></svg></span></nav></div></div>
+<div class="themes"><a href="?theme=tokyo-night">tokyo-night</a><a href="?theme=tokyo-day">tokyo-day</a><a href="?theme=catppuccin-mocha">catppuccin-mocha</a><a href="?theme=catppuccin-latte">catppuccin-latte</a><a href="?theme=nord">nord</a><a href="?theme=gruvbox-dark">gruvbox-dark</a></div>
+</body></html>
