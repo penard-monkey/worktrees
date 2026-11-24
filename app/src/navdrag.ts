@@ -25,7 +25,11 @@ export type DragItem =
   // `ws`: the named workspace the row was dragged OUT of (workspaces.ts);
   // absent from All projects.
   | { kind: "project"; root: string; ws?: string }
-  | { kind: "workspace"; id: string };
+  | { kind: "workspace"; id: string }
+  // Idea board phase 4 (`plans.ts`): a plan or an idea from a workspace's
+  // overview, onto a workspace in the nav (set its plan; link the idea).
+  | { kind: "idea"; id: string; title: string }
+  | { kind: "plan"; id: string; title: string };
 
 export type DragSession<T, I extends { kind: string } = DragItem> = { item: I; x: number; y: number; target: T | null };
 

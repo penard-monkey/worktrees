@@ -32,6 +32,11 @@ pub struct WsRow {
     /// theme's accent. A name the palette does not have (a hand edit) is
     /// answered as `None`, so the page only ever sees one it can draw.
     pub color: Option<String>,
+    /// Its plan's id (phase 4), as stored; `plan_read` and
+    /// `workspace_overview` resolve it.
+    pub plan: Option<String>,
+    /// Ideas linked to it as context, by id, as stored.
+    pub ideas: Vec<String>,
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq, Default)]
@@ -58,6 +63,8 @@ fn view(ws: &Path, reg: &Path) -> Result<Workspaces, String> {
                         WsProject { name: e.map(|e| e.name.clone()), registered: e.is_some(), root: p.root }
                     })
                     .collect(),
+                plan: w.plan,
+                ideas: w.ideas,
             })
             .collect(),
     })
