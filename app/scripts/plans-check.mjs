@@ -19,13 +19,18 @@
 //     `## Work`) is said as "Line N: …", and N is the document's own line;
 //   - in the windows, each drop and its menu path end in the same function,
 //     and no plan or workspace row is invoked except through plans.ts;
-//   - the mock answers every phase 4 row (it must track every command);
+//   - phase 5: where a work item stands (from the snapshot, never stored), what
+//     may start it or take a place, its calls; the review in front of every
+//     Start and one item per Start; Clone and Create through the main window's
+//     own dialogs; a place dropped on an item and Link a place… in one call;
+//   - the mock answers every phase 4 and 5 row (it must track every command);
 //   - the cross-window hand-off keys: a request is taken once, and a stale
 //     or malformed one is ignored.
 //
 // Override, so a mutation can be shown red without touching the tree:
 //   PLANS_SRC=<copy of plans.ts>  COMPANION_SRC=<copy of Companion.tsx>  APP_SRC=<copy of App.tsx>
 //   OVERVIEW_SRC=<copy of WorkspaceOverview.tsx>  PANEL_SRC=<copy of PlanPanel.tsx>
+//   START_SRC=<copy of StartWork.tsx>
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
 import { transformWithEsbuild } from "vite";
@@ -36,6 +41,7 @@ const COMP = process.env.COMPANION_SRC ?? here("../companion/Companion.tsx");
 const APP = process.env.APP_SRC ?? here("../src/App.tsx");
 const OVERVIEW = process.env.OVERVIEW_SRC ?? here("../src/WorkspaceOverview.tsx");
 const PANEL = process.env.PANEL_SRC ?? here("../companion/PlanPanel.tsx");
+const START = process.env.START_SRC ?? here("../src/StartWork.tsx");
 let failed = 0;
 const check = (c, m) => { if (!c) failed++; console.log(`${c ? "ok" : "not ok"} — ${m}`); };
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -95,6 +101,9 @@ const calls = {
   clearPlan: P.setPlanCall(W1, null),
   link: P.linkIdeaCall(W1, A),
   unlink: P.unlinkIdeaCall(W1, A),
+  setProject: P.setProjectCall(PL, "ans", "/w/ans", 8),
+  linkPlace: P.linkPlaceCall(PL, { line: 23, title: "Role" }, "/w/ans", "role", 9),
+  start: P.startCall(PL, { line: 23, title: "Role", branch: "feat/role" }, "/w/ans", "Do it.", { provider: "claude", model: "" }, 10),
 };
 for (const [name, c] of Object.entries(calls)) {
   const want = rowArgs(c.cmd);
@@ -123,14 +132,59 @@ if (typo) {
 check(read.work.length === 2 && read.projects.length === 3, "the rest of the plan still reads around the bad line (both items, three projects)");
 check(P.STATE_WORDS["to-clone"] === "to clone" && P.STATE_WORDS["to-create"] === "to create" && P.STATE_WORDS["not-registered"],
   "projects are listed as registered, to clone or to create");
-check(P.workStatus({ started: null }) === "not started" && P.workStatus({ started: "a · b · 2026-11-12" }).includes("2026-11-12"), "a work item's started: line is shown as written");
+
+// ── phase 5: a work item, from the snapshot ────────────────────────────────
+const R = "/w/ans", none = new Set();
+const pl = (slug, branch, o = {}) => ({ slug, path: `${R}/.worktrees/${slug}`, branch, is_main: false, tmux_session: { up: false }, ...o });
+const snap = { projects: [{ root: R, name: "ans", ok: true, snapshot: { places: [pl("(main)", "main", { is_main: true }), pl("role", "feat/x"), pl("other", "o")] } }] };
+const it = (o = {}) => ({ line: 23, title: "Role", project: "ans", branch: "feat/role", brief: "Do it.", ai: null, model: null, started: null, place: null, ...o });
+const st = (o = {}) => ({ line: 23, project_state: "registered", root: R, ...o });
+const started = (slug) => it({ started: `${R} · ${slug} · 2026-11-12 09:30`, place: { project: R, slug, at: "2026-11-12 09:30" } });
+const at = (i, s, sn = snap, act = { busy: none, waiting: none }) => P.itemPlace(i, s, sn, act);
+const done = st({ place_root: R });
+check(at(it(), st()).kind === "none" && P.workStatus(it(), at(it(), st())) === "not started", "an item with no started: line is not started");
+check(at(started("role"), done).kind === "there" && P.workStatus(started("role"), at(started("role"), done)) === "started 2026-11-12 09:30 · there", "its place is there");
+check(at(started("role"), done, snap, { busy: new Set([`${R}/.worktrees/role`]), waiting: none }).kind === "busy", "…busy, from the same activity the nav dots use");
+check(at(started("role"), done, snap, { busy: none, waiting: new Set([`${R}/.worktrees/role`]) }).kind === "waiting", "…or waiting");
+check(at(started("nope"), done).kind === "gone" && P.workStatus(started("nope"), at(started("nope"), done)).endsWith("· place removed"), "a removed place reads “place removed”, its line kept");
+check(at(started("role"), done, null).kind === "unknown" && at(started("role"), done, { projects: [{ root: R, ok: false, snapshot: null }] }).kind === "unknown", "no snapshot, or one that failed, is never called removed");
+check(at(started("role"), st()).kind === "unregistered" && at(it({ started: "yesterday" }), st()).kind === "unreadable", "an unregistered project, and a line that is not three parts, are said");
+check(P.itemFree({ kind: "none" }) && P.itemFree({ kind: "gone" }) && P.itemFree({ kind: "unregistered" }) && !["there", "busy", "waiting", "unknown", "unreadable"].some((k) => P.itemFree({ kind: k })),
+  "only an item with no place, or one whose place is gone, takes a Start or a link");
+check(same(P.placeOntoItem(R, "other", it(), at(it(), st()), snap), { line: 23, title: "Role" }), "a place dropped on a free item is its place");
+check(P.placeOntoItem(R, "other", started("role"), at(started("role"), done), snap) === null && P.placeOntoItem(R, "nope", it(), at(it(), st()), snap) === null && P.placeOntoItem(R, "other", null, null, snap) === null,
+  "…and is no target on an item with a place, for a place that is not there, or on nothing");
+check(P.startProblem(it(), st(), at(it(), st()), snap) === null, "a free item with a registered project and a free branch can start");
+for (const [i, s, words] of [
+  [it({ project: null }), st({ project_state: null, root: undefined }), "no project"],
+  [it(), st({ project_state: "to-clone", root: undefined }), "not cloned yet"],
+  [it(), st({ project_state: "to-create", root: undefined }), "not created yet"],
+  [it(), st({ project_state: "not-registered", root: undefined }), "not a registered project"],
+  [it({ branch: null }), st(), "no branch"],
+  [it({ branch: "o" }), st(), "already in the place other"],
+  [it({ branch: "main" }), st(), "main checkout"],
+  [it({ branch: "other" }), st(), "a place named other already"],
+  [started("role"), done, "has a place"],
+]) check((P.startProblem(i, s, at(i, s), snap) ?? "").includes(words), `refused, said: ${words}`);
+check(same(P.agentFor(it(), { provider: "claude", models: { claude: "opus" } }), { provider: "claude", model: "opus" }) && same(P.agentFor(it({ ai: "codex" }), { provider: "claude", models: { claude: "opus" } }), { provider: "codex", model: "" })
+  && same(P.agentFor(it({ model: "sonnet" }), { provider: "claude", models: { claude: "opus" } }), { provider: "claude", model: "sonnet" }), "the agent is the app's default unless the item says otherwise; a default model never goes to another harness");
+check(same(P.newPath("~/workspace/jelly/"), { location: "~/workspace", name: "jelly" }) && same(P.newPath("/x"), { location: "/", name: "x" }), "a `new:` path is split for the New project dialog");
+check(same(calls.start.args, { id: PL, line: 23, title: "Role", repo: "/w/ans", branch: "feat/role", brief: "Do it.", provider: "claude", model: null, expectedMtime: 10 }), "start(item, brief): the reviewed text is a parameter, beside the item as it was seen");
+check(calls.linkPlace.args.slug === "role" && calls.linkPlace.args.expectedMtime === 9 && calls.setProject.args.expectedMtime === 8, "…and every phase 5 edit carries the plan's mtime");
+{
+  const rs = fs.readFileSync(here("../../crates/worktrees-core/src/diag.rs"), "utf8");
+  check(new RegExp(`EXIT_LAUNCH_REFUSED: i32 = ${P.LAUNCH_REFUSED};`).test(rs), "LAUNCH_REFUSED is core's EXIT_LAUNCH_REFUSED");
+  const V = await import(`data:text/javascript;base64,${Buffer.from((await transformWithEsbuild(fs.readFileSync(here("../src/privacypaths.ts"), "utf8"), "privacypaths.ts", { loader: "ts" })).code).toString("base64")}`);
+  check(V.privacyArea("~/Documents/x", true) === "Documents" && V.privacyArea("/Users/d/Desktop", true) === "Desktop" && V.privacyArea("/Users/d/downloads/x", true) === "Downloads", "Documents, Desktop and Downloads are warned about");
+  check(!V.privacyArea("~/workspace/Documents/x", true) && !V.privacyArea("/Users/d/DocumentsX/x", true) && !V.privacyArea("~/Documents/x", false), "…and nowhere else, and only on a Mac");
+}
 check(same(P.plansIn([{ id: PL, how: "planned-in" }, { id: PL, how: "planned-in" }, { id: B, how: "related" }]).map((r) => r.id), [PL]),
   "an idea's plans are its planned-in relations, once each");
 
 // ── the windows: one function per act, no second door ──────────────────────
 const comp = fs.readFileSync(COMP, "utf8");
 const app = fs.readFileSync(APP, "utf8");
-const ROWS = ["plan_make", "plan_add_ideas", "plan_remove_idea", "plan_add_project", "workspace_from_plan", "workspace_set_plan", "workspace_link_idea", "workspace_unlink_idea"];
+const ROWS = ["plan_set_project", "plan_start", "plan_link_place", "plan_make", "plan_add_ideas", "plan_remove_idea", "plan_add_project", "workspace_from_plan", "workspace_set_plan", "workspace_link_idea", "workspace_unlink_idea"];
 for (const cmd of ROWS) {
   check(!comp.includes(`"${cmd}"`) && !app.includes(`"${cmd}"`), `neither window invokes ${cmd} except through plans.ts's builder`);
 }
@@ -156,6 +210,32 @@ check(/ideaOntoPlan\(/.test(comp) && /projectOntoPlan\(item\.root, planView\)/.t
 check(/<PlanPanel[\s\S]{0,200}view=\{planView\}/.test(comp) && /\{v\.problems\.length > 0 &&/.test(fs.readFileSync(here("../companion/PlanPanel.tsx"), "utf8")),
   "a plan's problems are drawn above the editor, which shows the document whatever they are");
 
+// ── phase 5: the review, the drops, Clone and Create ───────────────────────
+const review = fs.readFileSync(START, "utf8"), panel = fs.readFileSync(PANEL, "utf8"), over = fs.readFileSync(OVERVIEW, "utf8");
+check((comp.match(/startCall\(/g) ?? []).length === 1 && (app.match(/startCall\(/g) ?? []).length === 1, "each window starts in ONE place");
+check(!/startCall|doStart|plan_start/.test(panel) && !/startCall|startItem|plan_start/.test(over), "a plan's list starts nothing: its button opens the review");
+check(/start=\{\(brief\) => doStart\(/.test(comp) && (comp.match(/doStart\(/g) ?? []).length === 1 && /start=\{\(brief\) => startItem\(/.test(app) && (app.match(/startItem\(/g) ?? []).length === 1,
+  "Start is reached through the review alone, with ITS text");
+check(/<textarea[^>]*data-testid="start-brief"[^>]*value=\{brief\}/.test(review) && /props\.start\(brief\)/.test(review) && (review.match(/props\.start\(/g) ?? []).length === 1, "the review shows the brief it sends, once");
+check(/if \(running\.current\) return;/.test(review) && /disabled=\{busy \|\| !!problem\}/.test(review), "a second press while it runs, or a refused item, starts nothing");
+check(/\n            readOnly\n/.test(app.slice(app.indexOf("<StartReview"), app.indexOf("/>", app.indexOf("<StartReview")))) && !/\breadOnly\b/.test(comp.slice(comp.indexOf("<StartReview"), comp.indexOf("/>", comp.indexOf("<StartReview")))),
+  "the brief is edited in the Ideas window and read-only in the overview");
+check(/if \(target\.kind === "work"\) \{ setPlaceFor\(null\); void doLinkPlace\(/.test(comp) && /setPlaceFor\(null\); void doLinkPlace\(planView\.doc\.id, w, root, slug\)/.test(comp), "a place dropped on an item and Link a place… end in doLinkPlace (Ideas)");
+check(/if \(target\.kind === "work"\) \{ void linkPlaceToItem\(/.test(app) && /setWorkPick\(null\); void linkPlaceToItem\(w, root, slug\)/.test(app), "…and in linkPlaceToItem (overview)");
+check(/placeOntoItem\(item\.root, item\.slug, w, itemPlace\(/.test(comp) && /placeOntoItem\(item\.repo, item\.slug, it\.item, it\.at, ws\)/.test(app), "both resolve through plans.ts's rule");
+check(app.indexOf("closest<HTMLElement>('[data-drop=\"work\"]')") > 0 && app.indexOf("closest<HTMLElement>('[data-drop=\"work\"]')") < app.indexOf("closest<HTMLElement>('[data-drop=\"mention\"]')"), "a work item is hit-tested before the terminal");
+check(!/clone_project|create_project/.test(comp + panel + over), "no second clone or create path: neither the Ideas window nor the overview has one");
+check((app.match(/"clone_project"/g) ?? []).length === 1 && (app.match(/"create_project"/g) ?? []).length === 1, "the main window's dialogs stay the one door to each");
+check(/commitWs\(after\);\s*setNpOpen\(false\);\s*await planArrive\(npSeed, newRoot\(before, after\)\)/.test(app) && /setCloneOpen\(false\);\s*await planArrive\(seed, done\.root\)/.test(app), "a plan's project, once here, is marked in its plan");
+check(/<PrivacyNote path=\{full\} \/>/.test(app) && /<PrivacyNote path=\{`\$\{trimmedParent\}\/\$\{folder\}`\} \/>/.test(app), "both dialogs warn on a guarded folder");
+{
+  const ops = fs.readFileSync(here("../../crates/worktrees-api/src/ops.rs"), "utf8"), api = fs.readFileSync(here("../../crates/worktrees-api/src/plans.rs"), "utf8");
+  const body = ops.slice(ops.indexOf("pub fn new_place_with("), ops.indexOf("pub fn switch_place("));
+  check(/\.value_opt\("--brief", brief\)/.test(body) && /args\.call\(p, ui, ops::cmd_new\)/.test(body) && /new_place_with\(ctx, r\.root\.clone\(\), [^;]*Some\(&r\.brief\)\)/.test(api), "a Start goes down `new --brief`'s own path, with the reviewed text");
+  check(/fn new_place\([\s\S]{0,400}?new_place_with\(ctx, repo, branch, base, name, provider, model, force, None\)/.test(ops) && !/brief/.test(rowLine("new_place") ?? "x"), "new_place, which a device holds, still takes no brief");
+}
+check(/askMain\(\{ act: "project", plan, name \}\)/.test(comp) && /invoke<PlanView>\("plan_read", \{ id: a\.plan \}\)/.test(app), "the Ideas window names the project; the main window reads the plan itself");
+
 // ── a press can START each drag, and Home leaves the overview ───────────────
 // `arm` (navdrag.ts) refuses a press inside a button that is not marked
 // `data-drag-handle`, so a chip without it drags nothing and says nothing.
@@ -164,8 +244,9 @@ check(/closest\("button,input,textarea,select,a"\);\s*if \(ctl && !ctl\.hasAttri
 for (const [file, text, want] of [
   ["WorkspaceOverview.tsx", fs.readFileSync(OVERVIEW, "utf8"), 3],
   ["PlanPanel.tsx", fs.readFileSync(PANEL, "utf8"), 1],
+  ["StartWork.tsx", review, 1],
 ]) {
-  const tags = [...text.matchAll(/onPointerDown=\{\(e\) => props\.arm\(/g)].map((m) => text.slice(text.lastIndexOf("<button", m.index), m.index));
+  const tags = [...text.matchAll(/onPointerDown=\{\(e\) => props\.arm(?:\?\.)?\(/g)].map((m) => text.slice(text.lastIndexOf("<button", m.index), m.index));
   check(tags.length === want, `${file}: ${want} drag source(s) (${tags.length})`);
   tags.forEach((t, i) => check(/^<button\b/.test(t) && /\sdata-drag-handle=""/.test(t), `${file}: drag source ${i + 1} is a data-drag-handle`));
 }
@@ -174,7 +255,7 @@ check(/setSel\(null\);/.test(homeItem) && /setWsOpen\(null\);/.test(homeItem), "
 const homeChord = app.match(/if \(target === "home"\) \{[^\n]*\}/)?.[0] ?? "";
 check(/setSel\(null\);/.test(homeChord) && /setWsOpen\(null\);/.test(homeChord), "…and so does ⌘1");
 
-// ── the mock answers every phase 4 row ──────────────────────────────────────
+// ── the mock answers every phase 4 and 5 row ──────────────────────────────────────
 const mock = fs.readFileSync(here("../src/mock/install.ts"), "utf8");
 for (const cmd of [...ROWS, "plan_read", "workspace_overview"]) check(mock.includes(`case "${cmd}":`), `the mock answers ${cmd}`);
 const ipc = fs.readFileSync(here("../src/ipc.ts"), "utf8");
@@ -187,6 +268,11 @@ check(P.showRequest(JSON.stringify({ id: A, at: now - 1000 }), now) === A, "a fr
 check(P.showRequest(JSON.stringify({ id: A, at: now - P.SHOW_TTL_MS - 1 }), now) === null, "a request older than a minute is ignored");
 check(P.showRequest(JSON.stringify({ id: "../x", at: now }), now) === null && P.showRequest("{", now) === null && P.showRequest(null, now) === null,
   "a malformed request is ignored");
+const ask = (o, t = now) => P.mainAsk(JSON.stringify({ at: now, ...o }), t);
+check(same(ask({ act: "project", plan: PL, name: "ans" }), { act: "project", plan: PL, name: "ans" }) && same(ask({ act: "place", root: R, slug: "role" }), { act: "place", root: R, slug: "role" }), "the Ideas window's asks are read");
+check(ask({ act: "project", plan: "../x", name: "a" }) === null && ask({ act: "project", plan: PL }) === null && ask({ act: "place", root: "rel", slug: "x" }) === null && ask({ act: "start", plan: PL }) === null
+  && ask({ act: "project", plan: PL, name: "a" }, now + P.SHOW_TTL_MS + 1) === null && P.mainAsk("{", now) === null, "…and a malformed, unknown or stale one is ignored");
+check(/window\.localStorage\.removeItem\(MAIN_ASK_KEY\)/.test(app), "the main window takes an ask once");
 check(/window\.localStorage\.removeItem\(SHOW_KEY\)/.test(comp) && /window\.localStorage\.removeItem\(WS_SHOW_KEY\)/.test(app),
   "each window takes a request once (removes the key it read)");
 

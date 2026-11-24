@@ -7,7 +7,7 @@
 // window runs (Companion.tsx's `act`).
 import { useMemo, useState } from "react";
 import { useEscape } from "../src/useEscape";
-import { STATE_WORDS, problemLine, workStatus, type PlanView } from "../src/plans";
+import { STATE_WORDS, itemFree, itemPlace, problemLine, workStatus, type Activity, type PlanView, type Snap, type WorkItem } from "../src/plans";
 
 export type RegProject = { root: string; name: string };
 export type WsOption = { id: string; name: string; plan: string | null; ideas: string[] };
@@ -31,9 +31,11 @@ export function PlanStrip(props: { plans: { id: string; title: string }[]; sourc
   );
 }
 
-/** A plan document's strip: what the reader read, read-only here (phase 5
- *  acts on projects and work). `data-drop-plan` makes it a drop target for an
- *  idea; its Projects box takes a project from the picker. */
+/** A plan document's strip: what the reader read, and what can be done with
+ *  it. A project to clone or create opens the main window's own dialog, filled
+ *  in (phase 5); a work item is reviewed and started, or linked to a place.
+ *  `data-drop-plan` makes it a drop target for an idea; its Projects box takes
+ *  a project from the picker, and a work item (`data-drop-work`) a place. */
 export function PlanPanel(props: {
   view: PlanView;
   busy: boolean;
@@ -41,6 +43,16 @@ export function PlanPanel(props: {
   projectsHot: boolean;
   /** An idea being dragged is over the strip. */
   ideasHot: boolean;
+  /** The work item (its line) a dragged place is over. */
+  workHot: number | null;
+  /** The projects and their places, as the nav reads them, and who works. */
+  snap: Snap;
+  activity: Activity;
+  /** Clone or create the project `name`, in the main window. */
+  bringProject(name: string): void;
+  review(w: WorkItem): void;
+  linkPlace(w: WorkItem): void;
+  showPlace(root: string, slug: string): void;
   openIdea(id: string): void;
   removeIdea(id: string): void;
   addIdea(): void;
@@ -112,6 +124,10 @@ export function PlanPanel(props: {
                     <span className="ix-plan-name">{p.name}</span>
                     <span className={`ix-plan-state ix-plan-${p.state}`}>{STATE_WORDS[p.state]}</span>
                     <span className="ix-plan-detail" title={p.root ?? p.url ?? p.path}>{p.root ?? p.url ?? p.path ?? ""}</span>
+                    {(p.state === "to-clone" || p.state === "to-create") && (
+                      <button className="ix-btn ix-btn-small" data-testid="plan-bring" data-name={p.name} disabled={props.busy} onClick={() => props.bringProject(p.name)}
+                        title="Opens the main window's dialog, filled in">{p.state === "to-clone" ? "Clone…" : "Create…"}</button>
+                    )}
                   </li>
                 ))}
               </ul>
@@ -123,16 +139,32 @@ export function PlanPanel(props: {
               <p className="ix-quiet">None yet. Each item is <code>### title</code> with <code>project:</code>, <code>branch:</code> and <code>brief: |</code>.</p>
             ) : (
               <ul className="ix-plan-rows">
-                {v.work.map((w) => (
-                  <li key={w.line} className="ix-plan-work" data-testid="plan-work">
-                    <button className="ix-plan-row ix-plan-row-btn" onClick={() => setBrief((b) => (b === w.line ? null : w.line))} aria-expanded={brief === w.line}>
-                      <span className="ix-plan-name">{w.title || "(no title)"}</span>
-                      <span className="ix-plan-detail">{[w.project, w.branch].filter(Boolean).join(" · ")}</span>
-                      <span className="ix-plan-state">{workStatus(w)}</span>
-                    </button>
-                    {brief === w.line && <pre className="ix-split-preview">{w.brief ?? "(no brief)"}</pre>}
-                  </li>
-                ))}
+                {v.work.map((w, n) => {
+                  const at = itemPlace(w, v.work_states[n], props.snap, props.activity);
+                  return (
+                    <li key={w.line} className={`ix-plan-work${props.workHot === w.line ? " ix-drop" : ""}`} data-testid="plan-work" data-drop-work={w.line} data-place={at.kind}>
+                      <div className="ix-plan-row">
+                        <button className="ix-plan-item" onClick={() => setBrief((b) => (b === w.line ? null : w.line))} aria-expanded={brief === w.line}>
+                          <span className="ix-plan-name">{w.title || "(no title)"}</span>
+                          <span className="ix-plan-detail">{[w.project, w.branch].filter(Boolean).join(" · ")}</span>
+                        </button>
+                        <span className={`ix-plan-state ix-plan-at-${at.kind}`} title={w.started ?? undefined}>{workStatus(w, at)}</span>
+                        {at.place && at.root && (
+                          <button className="ix-btn ix-btn-small ix-btn-quiet" data-testid="plan-show-place" onClick={() => props.showPlace(at.root!, at.place!.slug)} title="Show it in the main window">Show ▸</button>
+                        )}
+                        {itemFree(at) && (
+                          <>
+                            <button className="ix-btn ix-btn-small" data-testid="plan-review" disabled={props.busy} onClick={() => props.review(w)}
+                              title="Read and edit its brief, then Start">Review…</button>
+                            <button className="ix-btn ix-btn-small ix-btn-quiet" data-testid="plan-link-place" disabled={props.busy} onClick={() => props.linkPlace(w)}
+                              title="Record a place that exists already as this item's">Link a place…</button>
+                          </>
+                        )}
+                      </div>
+                      {brief === w.line && <pre className="ix-split-preview">{w.brief ?? "(no brief)"}</pre>}
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </div>

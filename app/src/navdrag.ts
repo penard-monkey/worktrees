@@ -91,7 +91,7 @@ export function useNavDrag<T, I extends { kind: string } = DragItem>(opts: {
   const g = useRef<{
     item: I; x0: number; y0: number; live: boolean;
     x: number; y: number; target: T | null; zone: HTMLElement | null;
-    raf: number; scroll: number;
+    raf: number; scroll: number; hadSel: boolean;
   } | null>(null);
   const stopScroll = () => {
     if (!g.current?.scroll) return;
@@ -105,6 +105,10 @@ export function useNavDrag<T, I extends { kind: string } = DragItem>(opts: {
   const end = useCallback((commit: boolean, stillDown = false) => {
     const s = g.current;
     g.current = null;
+    // The press began a text selection before the gesture was a drag, and
+    // WebKit stretches it over whatever the pointer crosses. One the person
+    // had made before is left alone.
+    if (s?.live && !s.hadSel && window.getSelection?.()?.type === "Range") window.getSelection()!.removeAllRanges();
     if (s?.scroll) cancelAnimationFrame(s.scroll);
     if (s?.raf) cancelAnimationFrame(s.raf);
     if (s) document.body.classList.remove("dragging", `dragging-${s.item.kind}`);
@@ -200,6 +204,7 @@ export function useNavDrag<T, I extends { kind: string } = DragItem>(opts: {
     g.current = {
       item, x0: e.clientX, y0: e.clientY, live: false,
       x: e.clientX, y: e.clientY, target: null, zone: null, raf: 0, scroll: 0,
+      hadSel: window.getSelection?.()?.type === "Range",
     };
   }, []);
 

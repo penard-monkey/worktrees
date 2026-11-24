@@ -2098,7 +2098,7 @@ function mockPlanRead(text: string) {
   if (lines[0] === "---") { const e = lines.indexOf("---", 1); start = e > 0 ? e + 1 : 0; }
   type P = { line: number; section: "projects" | "work"; text: string; words: string };
   const problems: P[] = [];
-  type W = { line: number; title: string; project: string | null; branch: string | null; brief: string | null; started: string | null };
+  type W = { line: number; title: string; project: string | null; branch: string | null; brief: string | null; ai: string | null; model: string | null; started: string | null; place: { project: string; slug: string; at: string } | null };
   let projects: { line: number; name: string; kind: string; url?: string; path?: string }[] | null = null;
   let work: W[] | null = null;
   let sec = "";
@@ -2126,15 +2126,18 @@ function mockPlanRead(text: string) {
     } else if (sec === "work") {
       if (brief && (!t || /^\s/.test(l))) { brief.push(l); continue; }
       if (brief && item) { item.brief = brief.map((x) => x.replace(/^ {2}/, "")).join("\n").trim(); brief = null; }
-      if (l.startsWith("### ")) { close(); item = { line: n, title: l.slice(4).trim(), project: null, branch: null, brief: null, started: null }; continue; }
+      if (l.startsWith("### ")) { close(); item = { line: n, title: l.slice(4).trim(), project: null, branch: null, brief: null, ai: null, model: null, started: null, place: null }; continue; }
       if (!t || /^<!--.*-->$/.test(t)) continue;
       if (!item) { problems.push({ line: n, section: "work", text: l, words: "text before the first work item: each item starts with `### <title>`" }); continue; }
       const kv = /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(t);
-      if (!kv) { problems.push({ line: n, section: "work", text: l, words: "not a work item line: expected `project:`, `branch:`, `brief:` or `started:`" }); continue; }
+      if (!kv) { problems.push({ line: n, section: "work", text: l, words: "not a work item line: expected `project:`, `branch:`, `brief:`, `ai:`, `model:` or `started:`" }); continue; }
       const [, k, v] = kv;
-      if (k === "project" || k === "branch" || k === "started") item[k] = v;
+      if (k === "project" || k === "branch" || k === "started" || k === "ai" || k === "model") {
+        item[k] = v;
+        if (k === "started") { const m = /^(.+?) · (\S+) · (.+)$/.exec(v); item.place = m ? { project: m[1], slug: m[2], at: m[3] } : null; }
+      }
       else if (k === "brief") { if (v === "|") brief = []; else item.brief = v; }
-      else problems.push({ line: n, section: "work", text: l, words: `unknown key \`${k}:\`: expected \`project:\`, \`branch:\`, \`brief:\` or \`started:\`` });
+      else problems.push({ line: n, section: "work", text: l, words: `unknown key \`${k}:\`: expected \`project:\`, \`branch:\`, \`brief:\`, \`ai:\`, \`model:\` or \`started:\`` });
     }
   }
   close();
@@ -2151,8 +2154,34 @@ function mockPlanView(d: MockIdea) {
     return hits.length === 1 ? { line: p.line, name: p.name, state: "registered", root: hits[0].root } : { line: p.line, name: p.name, state: "not-registered" };
   });
   const w = (mockWsDefs ?? []).find((x) => x.plan === d.id);
-  return { doc: { ...ideaRow(d), content: d.content }, ideas, projects: r.projects, work: r.work, problems: r.problems, project_states, workspace: w ? { id: w.id, name: w.name } : null };
+  const rootOf = (n: string) => { const hits = ws.projects.filter((x) => (n.startsWith("/") ? x.root === n : projectName(x.root) === n)); return hits.length === 1 ? hits[0].root : undefined; };
+  const work_states = (r.work ?? []).map((x) => {
+    const st = project_states.find((p) => p.name === x.project) as { state: string; root?: string } | undefined;
+    const root = st ? st.root : x.project ? rootOf(x.project) : undefined;
+    return { line: x.line, project_state: st?.state ?? (x.project ? (root ? "registered" : "not-registered") : null), root, place_root: x.place ? rootOf(x.place.project) : undefined };
+  });
+  return { doc: { ...ideaRow(d), content: d.content }, ideas, projects: r.projects, work: r.work, problems: r.problems, project_states, work_states, workspace: w ? { id: w.id, name: w.name } : null };
 }
+/** A work item's `started:` line set in the mock's document, as core's
+ *  `with_started`: the one it has, else after its last line with words. */
+function mockSetStarted(d: MockIdea, line: number, text: string) {
+  const ls = d.content.split("\n");
+  let end = line, has = -1;
+  for (let i = line; i < ls.length && !/^#{1,3} /.test(ls[i]); i++) { if (ls[i].trim()) end = i + 1; if (/^started:/.test(ls[i])) has = i; }
+  if (has >= 0) ls[has] = `started: ${text}`; else ls.splice(end, 0, `started: ${text}`);
+  ideaKeep(d.id!, d.content); d.content = ls.join("\n"); d.mtime_ms = ideaNow(); ideasTouched();
+}
+const mockPlanItem = (d: MockIdea, line: number, title: string) => {
+  const v = mockPlanView(d);
+  const n = (v.work ?? []).findIndex((w) => w.line === line && w.title === title);
+  if (n < 0) throw `the plan has no item “${title}”`;
+  const item = v.work![n], state = v.work_states[n];
+  const there = !!item.place && !!state.place_root && !!findProject(state.place_root)?.snapshot?.places.some((p) => p.slug === item.place!.slug);
+  if (there) throw `“${title}” already has a place: ${item.place!.slug} in ${item.place!.project}`;
+  return { item, state };
+};
+/** What `plan_start` was asked to write as each place's brief. */
+const mockBriefs: Record<string, string> = {};
 /** The mtime an outside act gives a file: later than anything before it,
  *  even inside one millisecond. */
 let mockIdeaClock = 0;
@@ -4364,6 +4393,58 @@ Phase 3: Frontend pane and mock harness
       if (d.content !== before) { ideaKeep(d.id!, before); d.mtime_ms = ideaNow(); ideasTouched(); }
       return { ...ideaRow(d), content: d.content };
     }
+    case "plan_set_project": {
+      const d = ideaById(args.id as string);
+      ideaCas(d, args.expectedMtime ?? args.expected_mtime);
+      const root = args.root as string, was = args.name as string;
+      if (!findProject(root)) throw `not a registered project: ${root}`;
+      const v = mockPlanView(d), p = v.project_states.find((x) => x.name === was);
+      if (!p) throw `the plan lists no project “${was}”`;
+      const to = projectName(root), ls = d.content.split("\n");
+      ls[p.line - 1] = `- ${to} (registered)`;
+      ideaKeep(d.id!, d.content);
+      d.content = ls.map((l) => (l === `project: ${was}` ? `project: ${to}` : l)).join("\n");
+      d.mtime_ms = ideaNow(); ideasTouched();
+      const w = (mockWsDefs ?? []).find((x) => x.plan === d.id);
+      if (w && !w.projects.includes(root)) w.projects.push(root);
+      return { ...ideaRow(d), content: d.content, workspace: w ? { id: w.id, name: w.name } : null };
+    }
+    // Through the mock's own `new_place`; a title naming "dead" takes the
+    // refused launch (the place is made, its agent is not).
+    case "plan_start": {
+      const d = ideaById(args.id as string);
+      ideaCas(d, args.expectedMtime ?? args.expected_mtime);
+      const { item, state } = mockPlanItem(d, args.line as number, args.title as string);
+      if (item.branch !== args.branch) throw `the plan's branch for “${item.title}” is ${item.branch}, not ${String(args.branch)}`;
+      if (!state.root || state.root !== args.repo) throw `“${item.project}” is not a registered project`;
+      if (!String(args.brief ?? "").trim()) throw "the brief is empty: say what the agent is to do";
+      const holder = findProject(state.root)?.snapshot?.places.find((p) => p.branch === args.branch);
+      if (holder) throw `the branch ${String(args.branch)} is already in the place ${holder.slug}: link that place to the item instead`;
+      const r = await mockInvoke("new_place", { repo: args.repo, branch: args.branch, provider: args.provider, model: args.model }) as { ok: boolean; code: number; output: string; slug?: string };
+      if (!r.slug) return { result: r, started: null, doc: null };
+      let result = r;
+      if (/dead/.test(item.title) && !args.force) {
+        editPlace(args.repo, r.slug, (p) => {
+          p.agent_sessions = agentSessions(sessionName(findProject(args.repo)?.snapshot?.prefix ?? "repo", r.slug!), null);
+          p.tmux_session = { ...p.tmux_session, up: false };
+          reconcile(p);
+        });
+        result = { ok: false, code: 5, slug: r.slug, output: `═══ Worktree ═══\nbrief: .planning/brief.md\n5 agents are running on this machine (the limit). The place is ready; to launch anyway: worktrees open ${r.slug} --force` };
+      }
+      mockBriefs[`${String(args.repo)}|${r.slug}`] = String(args.brief);
+      const started = { project: args.repo as string, slug: r.slug, at: "2026-11-23 10:00" };
+      mockSetStarted(d, item.line, `${started.project} · ${started.slug} · ${started.at}`);
+      emitEvent("places:changed", {});
+      return { result, started, doc: { ...ideaRow(d), content: d.content } };
+    }
+    case "plan_link_place": {
+      const d = ideaById(args.id as string);
+      ideaCas(d, args.expectedMtime ?? args.expected_mtime);
+      const { item } = mockPlanItem(d, args.line as number, args.title as string);
+      if (!findProject(args.repo)?.snapshot?.places.some((p) => p.slug === args.slug)) throw `no place named ${String(args.slug)}`;
+      mockSetStarted(d, item.line, `${String(args.repo)} · ${String(args.slug)} · 2026-11-23 10:05`);
+      return { ...ideaRow(d), content: d.content };
+    }
     case "workspace_from_plan": {
       mockWsView();
       const d = ideaLookup(args.plan as string).d;
@@ -4406,14 +4487,14 @@ Phase 3: Frontend pane and mock harness
       mockWsView();
       const w = mockWsGet(args.id);
       const look = (i: string) => { try { const r = ideaLookup(i); return { id: i, live: r.d.id, title: ideaRow(r.d).title, merged: r.via }; } catch { return { id: i, live: null, title: null, merged: false }; } };
-      const out = { id: w.id, name: w.name, plan: null as unknown, ideas: (w.ideas ?? []).map(look), projects: null as unknown, work: null as unknown, problems: [] as unknown[] };
+      const out = { id: w.id, name: w.name, plan: null as unknown, ideas: (w.ideas ?? []).map(look), projects: null as unknown, work: null as unknown, work_states: [] as unknown[], problems: [] as unknown[] };
       if (w.plan) {
         try {
           const v = mockPlanView(ideaLookup(w.plan).d);
-          out.plan = { id: w.plan, live: v.doc.id, title: v.doc.title, file: v.doc.file };
+          out.plan = { id: w.plan, live: v.doc.id, title: v.doc.title, file: v.doc.file, mtime_ms: v.doc.mtime_ms };
           out.projects = v.projects === null ? null : v.project_states.map((p) => ({ ...p, in_workspace: !!p.root && w.projects.includes(p.root) }));
-          out.work = v.work; out.problems = v.problems;
-        } catch (e) { out.plan = { id: w.plan, live: null, title: null, file: null, error: String(e) }; }
+          out.work = v.work; out.work_states = v.work_states; out.problems = v.problems;
+        } catch (e) { out.plan = { id: w.plan, live: null, title: null, file: null, mtime_ms: null, error: String(e) }; }
       }
       return out;
     }
@@ -6749,6 +6830,14 @@ let mockNotifyGranted = new URLSearchParams(location.search).get("notify") === "
   },
   /** A person drops a markdown file into the folder by hand. */
   ideaDrop(file: string, content: string) { mockIdeas.set(file, { id: null, file, content, mtime_ms: ideaNow(), created: null }); ideasTouched(); },
+  /** What `plan_start` wrote as each place's brief, by `root|slug`. */
+  placeBriefs: () => ({ ...mockBriefs }),
+  /** A place is removed elsewhere (`worktrees rm`). */
+  placeRemoveElsewhere(root: string, slug: string) {
+    const snap = findProject(root)?.snapshot;
+    if (snap) snap.places = snap.places.filter((p) => p.slug !== slug);
+    emitEvent("places:changed", {});
+  },
   /** Every notification the app sent, oldest first. */
   notifications: () => mockNotified.slice(),
   /** A backend provider switch, followed by its workspace push. `canonicalShell`

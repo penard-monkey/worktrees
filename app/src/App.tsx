@@ -64,7 +64,13 @@ import {
 import { groupChatBeta, ideasBeta } from "./beta";
 import { publishGroupChat } from "./betaLive";
 import { publishLanes } from "./laneLive";
-import { ideaOntoWorkspace, linkIdeaCall, planOntoWorkspace, setPlanCall, showRequest, SHOW_KEY, unlinkIdeaCall, WS_SHOW_KEY, type Overview } from "./plans";
+import {
+  agentFor, ideaOntoWorkspace, itemPlace, launchCall, linkIdeaCall, linkPlaceCall, mainAsk, MAIN_ASK_KEY, newPath, placeOntoItem, planOntoWorkspace,
+  setPlanCall, setProjectCall, showRequest, SHOW_KEY, startCall, unlinkIdeaCall, WS_SHOW_KEY,
+  type ItemRef, type Overview, type PlanView, type ProjectSet, type ProjectState, type StartDone, type WorkItem,
+} from "./plans";
+import { privacyArea, privacyWords } from "./privacypaths";
+import { PickPlace, StartReview } from "./StartWork";
 import { WorkspaceOverview, type DocLite } from "./WorkspaceOverview";
 import { remoteHostLabel, remoteTitle, remoteWebUrl } from "./remote";
 import { PrsPane } from "./PrsPane";
@@ -3540,8 +3546,20 @@ function AddProjectDialog({ dir, suggested, planningDefault, into, onAdd, onClos
   );
 }
 
-function NewProjectDialog({ defaultLocation, planningDefault, busy, error, into, onBrowse, onCreate, onClose }: {
+/** A plan's project on its way in (idea board phase 5): which line of which
+ *  plan, and the dialog's fields. The person still reads and presses the
+ *  dialog's own button. */
+type PlanSeed = { plan: string; name: string; url?: string; location?: string; folder?: string };
+const ON_MAC = /Mac|iPhone|iPad/.test(navigator.platform);
+/** Said before a project is written somewhere macOS guards. */
+function PrivacyNote({ path }: { path: string }) {
+  const area = privacyArea(path, ON_MAC);
+  return area ? <div className="sync-skipped" data-testid="dialog-privacy">{privacyWords(area)}</div> : null;
+}
+
+function NewProjectDialog({ defaultLocation, seed, planningDefault, busy, error, into, onBrowse, onCreate, onClose }: {
   defaultLocation: string;
+  seed?: PlanSeed | null;
   /** The workspace it then goes into, by name (`wsArrive`), if any. */
   into?: string | null;
   /** The global planning default the choice starts from. A fresh `git init`
@@ -3556,8 +3574,8 @@ function NewProjectDialog({ defaultLocation, planningDefault, busy, error, into,
   onCreate: (location: string, name: string, pick: PlanningPick) => void;
   onClose: () => void;
 }) {
-  const [name, setName] = useState("");
-  const [loc, setLoc] = useState(defaultLocation);
+  const [name, setName] = useState(seed?.folder ?? "");
+  const [loc, setLoc] = useState(seed?.location || defaultLocation);
   const [pick, setPick] = useState<PlanningPick>(() => initialPick(planningDefault, false));
   const nameRef = useRef<HTMLInputElement | null>(null);
   useEffect(() => { nameRef.current?.focus(); }, []);
@@ -3597,6 +3615,8 @@ function NewProjectDialog({ defaultLocation, planningDefault, busy, error, into,
           <div className="np-path" data-testid="np-path">
             will create <code>{full}</code>
           </div>
+          <PrivacyNote path={full} />
+          {seed && <div className="np-path" data-testid="dialog-plan">then marks <b>{seed.name}</b> registered in its plan</div>}
           {into && <div className="np-path" data-testid="dialog-into">then adds it to <b>{into}</b></div>}
           <PlanningChoice value={pick} onChange={setPick} dflt={planningDefault} disabled={busy} />
           {problem && <div className="sync-err" data-testid="np-error">{problem}</div>}
@@ -3627,8 +3647,9 @@ function NewProjectDialog({ defaultLocation, planningDefault, busy, error, into,
  *
  *  Module scope (CLAUDE.md): it owns three text inputs, and App re-renders on
  *  every refresh tick. */
-function CloneDialog({ defaultParent, planningDefault, running, cancelling, progress, error, note, into, onBrowse, onClone, onCancel, onClose }: {
+function CloneDialog({ defaultParent, seed, planningDefault, running, cancelling, progress, error, note, into, onBrowse, onClone, onCancel, onClose }: {
   defaultParent: string;
+  seed?: PlanSeed | null;
   /** The workspace it then goes into, by name (`wsArrive`), if any. */
   into?: string | null;
   /** The global planning default only: the repo does not exist until the
@@ -3646,7 +3667,7 @@ function CloneDialog({ defaultParent, planningDefault, running, cancelling, prog
   onCancel: () => void;
   onClose: () => void;
 }) {
-  const [url, setUrl] = useState("");
+  const [url, setUrl] = useState(seed?.url ?? "");
   const [pick, setPick] = useState<PlanningPick>(() => initialPick(planningDefault, false));
   const [parent, setParent] = useState(defaultParent);
   const [name, setName] = useState("");
@@ -3702,6 +3723,8 @@ function CloneDialog({ defaultParent, planningDefault, running, cancelling, prog
           <div className="np-path" data-testid="clone-path">
             will create <code>{`${trimmedParent || "…"}/${folder || "…"}`}</code>
           </div>
+          <PrivacyNote path={`${trimmedParent}/${folder}`} />
+          {seed && <div className="np-path" data-testid="dialog-plan">then marks <b>{seed.name}</b> registered in its plan</div>}
           {into && <div className="np-path" data-testid="dialog-into">then adds it to <b>{into}</b></div>}
           <PlanningChoice value={pick} onChange={setPick} dflt={planningDefault} disabled={running} />
           {problem && <div className="sync-err" data-testid="clone-problem">{problem}</div>}
@@ -4319,6 +4342,10 @@ function App() {
   const [initInto, setInitInto] = useState<string | null>(null);
   const [npInto, setNpInto] = useState<string | null>(null);
   const [cloneInto, setCloneInto] = useState<string | null>(null);
+  // Phase 5: the plan's project a dialog was opened for (`planArrive`), with
+  // what its fields start as.
+  const [npSeed, setNpSeed] = useState<PlanSeed | null>(null);
+  const [cloneSeed, setCloneSeed] = useState<PlanSeed | null>(null);
   // Add existing's confirm step (planning choice), and Clone's post-clone
   // planning line (owned-planning §2.3).
   const [addAsk, setAddAsk] = useState<{ dir: string; suggested: boolean; into: string | null } | null>(null);
@@ -6300,9 +6327,10 @@ function App() {
       await applyPick(newRoot(before, after), pick);
     } catch (e) { fail(e); }
   };
-  const openNewProject = (into: string | null = null) => {
+  const openNewProject = (into: string | null = null, seed: PlanSeed | null = null) => {
     closeCtx();
     setNpInto(into);
+    setNpSeed(seed);
     setNpErr("");
     setNpOpen(true);
   };
@@ -6330,6 +6358,7 @@ function App() {
       await wsArrive(into, before, after, null);
       commitWs(after);
       setNpOpen(false);
+      await planArrive(npSeed, newRoot(before, after));
       await applyPick(newRoot(before, after), pick);
       // The folder that just worked is the next dialog's default — for this
       // one and for "Clone from URL…" alike (one remembered answer).
@@ -6357,9 +6386,10 @@ function App() {
     return settings.projects_parent || best || "~/workspace";
   }, [ws, settings.projects_parent]);
 
-  const openClone = (into: string | null = null) => {
+  const openClone = (into: string | null = null, seed: PlanSeed | null = null) => {
     closeCtx();
     setCloneInto(into);
+    setCloneSeed(seed);
     setCloneErr("");
     setCloneNote("");
     setCloneProg(null);
@@ -6383,6 +6413,7 @@ function App() {
     const onProgress = new Channel<CloneProgress>();
     onProgress.onmessage = (p) => setCloneProg(p);
     const into = cloneInto;
+    const seed = cloneSeed;
     try {
       setErr("");
       const done = await invoke<{ workspace: Workspace; root: string; dir: string; has_submodules: boolean }>(
@@ -6391,6 +6422,7 @@ function App() {
       commitWs(done.workspace);
       updateSettings({ projects_parent: parent });
       setCloneOpen(false);
+      await planArrive(seed, done.root);
       await applyPick(done.root, pick);
       // The repo exists only now, so its `[plan]` suggestion is a line AFTER
       // the clone rather than a pre-set choice — and only while the project is
@@ -6402,7 +6434,8 @@ function App() {
         setPlanHint({ root: done.root, name: done.dir.split("/").filter(Boolean).pop() ?? done.dir });
       const pv = done.workspace.projects.find((p) => p.root === done.root);
       const main = pv?.snapshot?.places.find((p) => p.is_main);
-      if (main) selectSlug(done.root, main.slug);
+      // Cloned from a plan: stay on its overview, where the next step is.
+      if (main && !seed) selectSlug(done.root, main.slug);
       if (done.has_submodules)
         setNotice(`${done.dir} has submodules, which were not fetched — run \`git submodule update --init --recursive\` there if you need them.`);
     } catch (e) {
@@ -6710,6 +6743,90 @@ function App() {
     return () => { window.removeEventListener("focus", look); window.removeEventListener("storage", onStorage); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ideasOn]);
+  // ── what a plan does (idea board phase 5) ──
+  /** A plan's project is here: its line says so and the plan's workspace
+   *  references it. The plan is read fresh for its mtime: a clone takes
+   *  minutes, and the line is found by its name. */
+  const planArrive = async (seed: PlanSeed | null, root: string | null) => {
+    if (!seed) return;
+    if (!root) { setNotice(`The project was added, but ${seed.name} could not be matched to it in the plan. Write its line by hand.`); return; }
+    try {
+      const v = await invoke<PlanView>("plan_read", { id: seed.plan });
+      const c = setProjectCall(seed.plan, seed.name, root, v.doc.mtime_ms);
+      const o = await invoke<ProjectSet>(c.cmd, c.args);
+      if (o.workspace_error) setNotice(`The plan has it, but its workspace could not take it: ${o.workspace_error}`);
+      setIdeasTick((n) => n + 1);
+      setWsList(await invoke<WsList>("workspaces_list"));
+    } catch (e) { fail(e); }
+  };
+  /** A plan's "to clone" or "to create" project: the Add project dialogs,
+   *  filled in and waiting for the person. */
+  const bringProject = (plan: string, into: string | null, p: ProjectState) => {
+    if (npOpen || cloneOpen) { setNotice("Finish the Add project dialog that is open first."); return; }
+    if (p.state === "to-clone" && p.url) openClone(into, { plan, name: p.name, url: p.url });
+    else if (p.state === "to-create" && p.path) {
+      const at = newPath(p.path);
+      openNewProject(into, { plan, name: p.name, location: at.location, folder: at.name });
+    }
+  };
+  /** The Ideas window asks: a plan's project, or a place to show. The plan is
+   *  read here; the key only names it. */
+  const askRef = useRef<(raw: string | null) => void>(() => {});
+  askRef.current = (raw) => {
+    const a = mainAsk(raw, Date.now());
+    if (!a) return;
+    if (a.act === "place") { selectSlug(a.root, a.slug); return; }
+    invoke<PlanView>("plan_read", { id: a.plan }).then((v) => {
+      const p = v.project_states.find((x) => x.name === a.name);
+      if (p) bringProject(a.plan, v.workspace?.id ?? null, p);
+    }).catch(fail);
+  };
+  useEffect(() => {
+    if (!ideasOn) return;
+    const look = () => {
+      let raw: string | null = null;
+      try {
+        raw = window.localStorage.getItem(MAIN_ASK_KEY);
+        if (raw) window.localStorage.removeItem(MAIN_ASK_KEY);
+      } catch { return; }
+      askRef.current(raw);
+    };
+    const onStorage = (e: StorageEvent) => { if (e.key === MAIN_ASK_KEY && e.newValue) look(); };
+    look();
+    window.addEventListener("focus", look);
+    window.addEventListener("storage", onStorage);
+    return () => { window.removeEventListener("focus", look); window.removeEventListener("storage", onStorage); };
+  }, [ideasOn]);
+  // The item under review, and the one a place is picked for, in the overview.
+  const [workReview, setWorkReview] = useState<WorkItem | null>(null);
+  const [workPick, setWorkPick] = useState<WorkItem | null>(null);
+  useEffect(() => { setWorkReview(null); setWorkPick(null); }, [wsOpen]);
+  const ovHere = wsOv && wsOv.id === wsOpen ? wsOv.ov : null;
+  const activity = { busy: busyPaths, waiting: waitingPaths };
+  const agentDefaults = { provider: settings.default_provider as string, models: settings.default_models as Record<string, string | undefined> };
+  const ovItem = (line: number) => {
+    const n = ovHere?.work?.findIndex((w) => w.line === line) ?? -1;
+    return n < 0 ? null : { item: ovHere!.work![n], state: ovHere!.work_states[n], at: itemPlace(ovHere!.work![n], ovHere!.work_states[n], ws, activity) };
+  };
+  const linkPlaceToItem = async (item: ItemRef, root: string, slug: string) => {
+    const pl = ovHere?.plan;
+    if (!pl?.live) return;
+    try {
+      const c = linkPlaceCall(pl.live, item, root, slug, pl.mtime_ms);
+      await invoke(c.cmd, c.args);
+      setNotice(`“${item.title}” has the place ${slug} now.`);
+    } catch (e) { fail(e); }
+    setIdeasTick((n) => n + 1);
+  };
+  const startItem = async (item: WorkItem, root: string, brief: string): Promise<StartDone> => {
+    const pl = ovHere?.plan;
+    if (!pl?.live) throw "The plan cannot be read.";
+    const agent = agentFor(item, agentDefaults);
+    if (agent.provider === "codex" && !(await ensureCodexCli("codex"))) throw "Codex's CLI is not installed.";
+    const c = startCall(pl.live, item, root, brief, agent, pl.mtime_ms);
+    try { return await invoke<StartDone>(c.cmd, c.args); }
+    finally { setIdeasTick((n) => n + 1); void refresh(); }
+  };
   const wsCall = (c: { cmd: string; args: Record<string, unknown> }) => wsRun(c.cmd, c.args);
   const wsLite = () => (wsList?.workspaces ?? []).map((w) => ({ id: w.id, plan: w.plan ?? null, ideas: w.ideas ?? [] }));
 
@@ -7390,6 +7507,8 @@ function App() {
     // a workspace that does not link it.
     | { kind: "ws-plan"; id: string; plan: string }
     | { kind: "ws-idea"; id: string; idea: string }
+    // Phase 5: a place onto one of the plan's work items in the overview.
+    | { kind: "work"; item: ItemRef; repo: string; slug: string }
     // Dropping a place onto the TERMINAL is not a move at all — it types a
     // reference to that place into the Claude session running there. Onto the
     // CHAT (`intoPath`) it goes into the draft at the cursor instead, and the
@@ -7487,6 +7606,15 @@ function App() {
       );
       const i = pointerIndex(rows, ny);
       return { kind: "project", before: rows[i]?.slug ?? null };
+    }
+
+    // A work item in the overview: record the place as the item's. One that
+    // has a place takes none (no highlight, nothing happens).
+    const workEl = el?.closest<HTMLElement>('[data-drop="work"]');
+    if (workEl) {
+      const it = ovItem(Number(workEl.dataset.workLine));
+      const ref = it && placeOntoItem(item.repo, item.slug, it.item, it.at, ws);
+      return ref ? { kind: "work", item: ref, repo: item.repo, slug: item.slug } : null;
     }
 
     // The terminal, checked first: it is nowhere near the nav's tier zones, and
@@ -7590,6 +7718,7 @@ function App() {
     if (target.kind === "ws-add") { wsAddProject(target.id, target.root); return; }
     if (target.kind === "ws-plan") { void wsCall(setPlanCall(target.id, target.plan)); return; }
     if (target.kind === "ws-idea") { void wsCall(linkIdeaCall(target.id, target.idea)); return; }
+    if (target.kind === "work") { void linkPlaceToItem(target.item, target.repo, target.slug); return; }
     if (item.kind === "plan" || item.kind === "idea") return;
     if (target.kind === "ws-remove") { wsRemoveProject(target.id, target.root); return; }
     if (target.kind === "ws-move") { wsMoveProject(target.id, target.root, target.before); return; }
@@ -10106,6 +10235,13 @@ function App() {
                 linkIdea={(id) => void wsCall(linkIdeaCall(wsOpen, id))}
                 unlinkIdea={(id) => void wsCall(unlinkIdeaCall(wsOpen, id))}
                 arm={(e, d) => arm(e, { kind: d.kind, id: d.id, title: d.title })}
+                snap={ws}
+                activity={activity}
+                workHot={drag?.target?.kind === "work" ? drag.target.item.line : null}
+                bringProject={(name) => { const p = ovHere?.projects?.find((x) => x.name === name); if (p && ovHere?.plan?.live) bringProject(ovHere.plan.live, wsOpen, p); }}
+                review={setWorkReview}
+                linkPlace={setWorkPick}
+                showPlace={selectSlug}
               />
             ) : (
               /* Home scrolls in its own box. Without it a briefing taller
@@ -10638,6 +10774,7 @@ function App() {
           {drag.target?.kind === "ws-add" && <span className="drag-why">→ add to {wsById(drag.target.id)?.name}</span>}
           {drag.target?.kind === "ws-plan" && <span className="drag-why">→ {wsById(drag.target.id)?.name}'s plan</span>}
           {drag.target?.kind === "ws-idea" && <span className="drag-why">→ link to {wsById(drag.target.id)?.name}</span>}
+          {drag.target?.kind === "work" && <span className="drag-why">→ “{drag.target.item.title}”'s place</span>}
           {drag.target?.kind === "ws-remove" && <span className="drag-why">→ take out of {wsById(drag.target.id)?.name}</span>}
           {drag.target?.kind === "ws-move" && <span className="drag-why">→ move within {wsById(drag.target.id)?.name}</span>}
           {drag.target?.kind === "mention" && <span className="drag-why">{drag.target.intoPath
@@ -10811,9 +10948,41 @@ function App() {
           onError={fail}
         />
       )}
+      {ideasOn && wsOpen && ovHere && workReview && (() => {
+        const cur = ovItem(workReview.line);
+        return (
+          <StartReview
+            key={workReview.line}
+            item={workReview}
+            state={cur?.state}
+            at={cur?.at ?? { kind: "none" }}
+            snap={ws}
+            agent={agentFor(workReview, agentDefaults)}
+            readOnly
+            start={(brief) => startItem(workReview, cur?.state?.root ?? "", brief)}
+            launch={async (root, slug) => {
+              const c = launchCall(root, slug, agentFor(workReview, agentDefaults));
+              try { return await invoke<CmdResult>(c.cmd, c.args); } finally { void refresh(); }
+            }}
+            show={(root, slug) => { setWorkReview(null); selectSlug(root, slug); }}
+            edit={() => { setWorkReview(null); if (ovHere.plan?.live) openIdeaDoc(ovHere.plan.live); }}
+            close={() => setWorkReview(null)}
+          />
+        );
+      })()}
+      {ideasOn && wsOpen && ovHere && workPick && (
+        <PickPlace
+          title={`Link a place to “${workPick.title}”`}
+          snap={ws}
+          root={ovItem(workPick.line)?.state?.root}
+          act={(root, slug) => { const w = workPick; setWorkPick(null); void linkPlaceToItem(w, root, slug); }}
+          close={() => setWorkPick(null)}
+        />
+      )}
       {npOpen && (
         <NewProjectDialog
           defaultLocation={defaultLocation}
+          seed={npSeed}
           planningDefault={planning?.default}
           busy={npBusy}
           error={npErr}
@@ -10831,6 +11000,7 @@ function App() {
       {cloneOpen && (
         <CloneDialog
           defaultParent={defaultLocation}
+          seed={cloneSeed}
           planningDefault={planning?.default}
           running={cloneId !== null}
           cancelling={cloneCancelling}

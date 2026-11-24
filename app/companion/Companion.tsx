@@ -35,9 +35,11 @@ import {
 } from "./ideasrelate";
 import { PickProject, PickWorkspace, PlanPanel, PlanStrip, type RegProject, type WsOption } from "./PlanPanel";
 import {
-  addIdeasCall, addProjectCall, fromPlanCall, ideaOntoPlan, linkIdeaCall, makePlanCall, planSources, plansIn, projectOntoPlan,
-  removeIdeaCall, setPlanCall, showRequest, SHOW_KEY, WS_SHOW_KEY, type PlanView,
+  addIdeasCall, addProjectCall, agentFor, fromPlanCall, ideaOntoPlan, itemPlace, launchCall, linkIdeaCall, linkPlaceCall, makePlanCall, MAIN_ASK_KEY,
+  placeOntoItem, planSources, plansIn, projectOntoPlan, removeIdeaCall, setPlanCall, showRequest, SHOW_KEY, startCall, WS_SHOW_KEY,
+  type Activity, type ItemRef, type MainAsk, type PlanView, type Snap, type StartDone, type WorkItem,
 } from "../src/plans";
+import { PickPlace, StartReview } from "../src/StartWork";
 
 // ── the rows' shapes (worktrees_core::ideas) ────────────────────────────────
 type Problem = "no-id" | "bad-id" | "duplicate-id" | "too-large" | "not-text" | "unreadable";
@@ -394,13 +396,21 @@ export function Companion() {
   const [regProjects, setRegProjects] = useState<RegProject[] | null>(null);
   const [wsPick, setWsPick] = useState<{ mode: "link-idea" | "set-plan"; id: string; rows: WsOption[] } | null>(null);
   const [addIdeaPick, setAddIdeaPick] = useState<string | null>(null);
+  // Phase 5: the snapshot the nav reads (asked for while a plan is open), who
+  // works, the item under review, and the item a place is picked for.
+  const [snap, setSnap] = useState<Snap>(null);
+  const [activity, setActivity] = useState<Activity>({ busy: new Set(), waiting: new Set() });
+  const [placesTick, setPlacesTick] = useState(0);
+  const [reviewing, setReviewing] = useState<WorkItem | null>(null);
+  const [placeFor, setPlaceFor] = useState<WorkItem | null>(null);
+  const [agentPrefs, setAgentPrefs] = useState<{ provider: string; models: Record<string, string | undefined> }>({ provider: "claude", models: {} });
 
   // Once per socket: the window's theme from the shared settings (read only —
   // the main window owns ui-state.json's whole-blob save), and the connect
   // line. gen 0 is a door with no engine (the mock): nothing to log to.
   useEffect(() => {
     if (!up) return;
-    loadSettings().then((st) => { applySettings(st); setPrefs({ terminal: st.terminal_cmd, uiRem: st.ui_rem }); }).catch(() => {});
+    loadSettings().then((st) => { applySettings(st); setPrefs({ terminal: st.terminal_cmd, uiRem: st.ui_rem }); setAgentPrefs({ provider: st.default_provider, models: st.default_models }); }).catch(() => {});
     if (gen > 0) invoke("log_event", { level: "info", msg: connectLine(gen) }).catch(() => {});
   }, [up, gen]);
 
@@ -789,6 +799,59 @@ export function Companion() {
     return () => { gone = true; };
   }, [open?.id, open?.kind, open?.key, relTick, up]);
 
+  // ── phase 5: what a plan does (§2.4). Clone and Create are the main
+  // window's own dialogs, asked for by key; Start and Link a place are rows.
+  const planOpen = !!open && open.kind === "plan" && up;
+  useEffect(() => {
+    if (!planOpen) { setSnap(null); return; }
+    let gone = false;
+    invoke<Snap>("list_workspace").then((w) => { if (!gone) setSnap(w); }).catch((e) => { if (!gone) setNotice(`Could not read the places: ${errText(e)}`); });
+    return () => { gone = true; };
+  }, [planOpen, open?.id, placesTick, gen]);
+  useEffect(() => {
+    if (!planOpen) return;
+    const offs = [
+      listen("places:changed", () => setPlacesTick((n) => n + 1)),
+      listen<{ busy: string[]; waiting: string[] }>("sessions:busy", (e) => { if (e.payload) setActivity({ busy: new Set(e.payload.busy), waiting: new Set(e.payload.waiting) }); }),
+    ];
+    return () => { for (const u of offs) u.then((f) => f()).catch(() => {}); };
+  }, [planOpen]);
+  useEffect(() => { setReviewing(null); setPlaceFor(null); }, [open?.id]);
+  const askMain = useCallback((a: MainAsk) => {
+    try { window.localStorage.setItem(MAIN_ASK_KEY, JSON.stringify({ ...a, at: Date.now() })); } catch { setNotice("Could not reach the main window from here."); return; }
+    invoke("raise_window").catch(() => {});
+  }, []);
+  const bringProject = useCallback(async (plan: string, name: string) => {
+    await session.current?.flush();
+    trace(gen, `asked the main window for ${name} of plan ${plan}`);
+    askMain({ act: "project", plan, name });
+  }, [askMain, gen]);
+  const doLinkPlace = useCallback(async (plan: string, item: ItemRef, root: string, slug: string) => {
+    await session.current?.flush();
+    const d = await act<Doc>(linkPlaceCall(plan, item, root, slug, mtimeOf(plan)), `link ${slug} to “${item.title}”`);
+    if (!d) return;
+    setNotice(`“${item.title}” has the place ${slug} now.`);
+    await afterPlanEdit(d);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [act, afterPlanEdit]);
+  /** Start one reviewed item. Its refusals belong in the review, so they
+   *  reach it as they are rather than through `act`'s notice. */
+  const doStart = useCallback(async (plan: string, item: WorkItem, root: string, brief: string): Promise<StartDone> => {
+    const s = session.current;
+    if (s) {
+      await s.flush();
+      if (s.held() || s.current.kind === "error") throw "Save or reload the plan first: its text is not saved.";
+    }
+    const c = startCall(plan, item, root, brief, agentFor(item, agentPrefs), mtimeOf(plan));
+    const out = await invoke<StartDone>(c.cmd, c.args);
+    trace(gen, `plan_start ${plan} “${item.title}”: ${out.started ? `place ${out.started.slug}` : "no place"} rc=${out.result.code}`);
+    if (out.doc) await afterPlanEdit(out.doc as Doc);
+    setPlacesTick((n) => n + 1);
+    void refresh();
+    return out;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [afterPlanEdit, agentPrefs, gen, refresh]);
+
   // The main window asks for a document (a workspace's plan or idea):
   // written to localStorage just before it brings this window forward.
   useEffect(() => {
@@ -825,8 +888,8 @@ export function Companion() {
 
   // ── the drag: one idea onto another (the chooser), or the selected rows
   // onto "New idea" (Combine). navdrag's plumbing; Escape cancels there.
-  type IdeaDrag = { kind: "idea"; id: string } | { kind: "ideas"; ids: string[] } | { kind: "project"; root: string };
-  type IdeaTarget = { kind: "onto"; id: string } | { kind: "new"; ids: string[] } | { kind: "plan"; id: string; ids: string[] } | { kind: "plan-projects"; id: string; root: string };
+  type IdeaDrag = { kind: "idea"; id: string } | { kind: "ideas"; ids: string[] } | { kind: "project"; root: string } | { kind: "place"; root: string; slug: string };
+  type IdeaTarget = { kind: "work"; plan: string; item: ItemRef; root: string; slug: string } | { kind: "onto"; id: string } | { kind: "new"; ids: string[] } | { kind: "plan"; id: string; ids: string[] } | { kind: "plan-projects"; id: string; root: string };
   const ideaRows = listing?.ideas ?? [];
   const { drag, arm: armDrag } = useNavDrag<IdeaTarget, IdeaDrag>({
     scrollRef: listRef,
@@ -839,6 +902,15 @@ export function Companion() {
         const box = el?.closest<HTMLElement>("[data-drop-plan-projects]");
         return box && planView && box.dataset.dropPlanProjects === planView.doc.id && projectOntoPlan(item.root, planView)
           ? { kind: "plan-projects", id: planView.doc.id, root: item.root } : null;
+      }
+      // Phase 5: a place (from Link a place…) onto one of the plan's items.
+      if (item.kind === "place") {
+        const box = el?.closest<HTMLElement>("[data-drop-work]");
+        const n = box && planView?.work ? planView.work.findIndex((w) => w.line === Number(box.dataset.dropWork)) : -1;
+        if (n < 0 || !planView) return null;
+        const w = planView.work![n];
+        const ref = placeOntoItem(item.root, item.slug, w, itemPlace(w, planView.work_states[n], snap, activity), snap);
+        return ref ? { kind: "work", plan: planView.doc.id, item: ref, root: item.root, slug: item.slug } : null;
       }
       // An idea (or the selected ones) onto a plan: the open plan's strip,
       // or a plan's row in the list. Adds; never the relate/merge chooser.
@@ -866,6 +938,7 @@ export function Companion() {
       if (!target) return;
       if (target.kind === "plan") { void doAddIdeas(target.id, target.ids); return; }
       if (target.kind === "plan-projects") { void doAddProject(target.id, target.root); return; }
+      if (target.kind === "work") { setPlaceFor(null); void doLinkPlace(target.plan, target.item, target.root, target.slug); return; }
       if (target.kind === "new") { setCombineAsk(target.ids); return; }
       if (item.kind === "idea") setChooser({ from: item.id, onto: target.id, ...lastXY.current });
     },
@@ -1042,6 +1115,13 @@ export function Companion() {
                   busy={busy}
                   ideasHot={drag?.target?.kind === "plan" && drag.target.id === open.id}
                   projectsHot={drag?.target?.kind === "plan-projects"}
+                  workHot={drag?.target?.kind === "work" ? drag.target.item.line : null}
+                  snap={snap}
+                  activity={activity}
+                  bringProject={(name) => void bringProject(open.id, name)}
+                  review={setReviewing}
+                  linkPlace={setPlaceFor}
+                  showPlace={(root, slug) => askMain({ act: "place", root, slug })}
                   openIdea={(id) => void openIdea(id)}
                   removeIdea={(id) => void doRemoveIdea(open.id, id)}
                   addIdea={() => setAddIdeaPick(open.id)}
@@ -1163,6 +1243,34 @@ export function Companion() {
           act={(root) => { setRegProjects(null); void doAddProject(planView.doc.id, root); }}
           arm={(e, root) => armDrag(e, { kind: "project", root })}
           close={() => setRegProjects(null)}
+        />
+      )}
+      {reviewing && planView && open?.kind === "plan" && (() => {
+        const n = planView.work?.findIndex((w) => w.line === reviewing.line && w.title === reviewing.title) ?? -1;
+        const state = n < 0 ? undefined : planView.work_states[n];
+        return (
+          <StartReview
+            key={`${open.id}|${reviewing.line}`}
+            item={reviewing}
+            state={state}
+            at={itemPlace(n < 0 ? reviewing : planView.work![n], state, snap, activity)}
+            snap={snap}
+            agent={agentFor(reviewing, agentPrefs)}
+            start={(brief) => doStart(planView.doc.id, reviewing, state?.root ?? "", brief)}
+            launch={async (root, slug) => { const c = launchCall(root, slug, agentFor(reviewing, agentPrefs)); return invoke<{ ok: boolean; output: string }>(c.cmd, c.args); }}
+            show={(root, slug) => { setReviewing(null); askMain({ act: "place", root, slug }); }}
+            close={() => setReviewing(null)}
+          />
+        );
+      })()}
+      {placeFor && planView && open?.kind === "plan" && (
+        <PickPlace
+          title={`Link a place to “${placeFor.title}” (click, or drag onto an item)`}
+          snap={snap}
+          root={planView.work_states.find((w) => w.line === placeFor.line)?.root}
+          act={(root, slug) => { const w = placeFor; setPlaceFor(null); void doLinkPlace(planView.doc.id, w, root, slug); }}
+          arm={(e, root, slug) => armDrag(e, { kind: "place", root, slug })}
+          close={() => setPlaceFor(null)}
         />
       )}
       {wsPick && (
