@@ -142,16 +142,32 @@ export type Activity = { busy: ReadonlySet<string>; waiting: ReadonlySet<string>
 
 export type ItemPlace = { kind: "none" | "unreadable" | "unknown" | "unregistered" | "gone" | "there" | "busy" | "waiting"; place?: SnapPlace; root?: string };
 
-/** Where an item stands. `unknown` is a snapshot that has not come, or a
- *  project it could not read: never called gone. */
-export function itemPlace(item: WorkItem, state: WorkState | undefined, snap: Snap, act: Activity): ItemPlace {
+/** One item's place, as `started:` names it: what a snapshot is asked about. */
+export const placeKey = (root: string, p: Started): string => `${root}|${p.slug}|${p.at}`;
+/** The places these items name that `snap` does not have, in a project it
+ *  could read. Missing is not gone: the plan's `started:` line is read in a
+ *  moment and the list of places is a git fan-out, so right after a Start the
+ *  list is older than the line (found in the real app; the mock answers at
+ *  once). The window asks for the list again, and only that settles it. */
+export function missingPlaces(work: readonly WorkItem[] | null, states: readonly WorkState[], snap: Snap): string[] {
+  return (work ?? []).flatMap((w, n) => {
+    const root = states[n]?.place_root;
+    const p = root && snap?.projects.find((x) => x.root === root);
+    return w.place && root && p && p.ok && p.snapshot && !p.snapshot.places.some((x) => x.slug === w.place!.slug) ? [placeKey(root, w.place)] : [];
+  });
+}
+
+/** Where an item stands. `unknown` is a snapshot that has not come, a project
+ *  it could not read, or a place missing from a list that may be older than
+ *  the item's line (`gone`: the keys a later list settled). Never called gone. */
+export function itemPlace(item: WorkItem, state: WorkState | undefined, snap: Snap, act: Activity, gone: ReadonlySet<string>): ItemPlace {
   if (!item.place) return { kind: item.started ? "unreadable" : "none" };
   const root = state?.place_root;
   if (!root) return { kind: "unregistered" };
   const p = snap?.projects.find((x) => x.root === root);
   if (!p?.ok || !p.snapshot) return { kind: "unknown", root };
   const place = p.snapshot.places.find((x) => x.slug === item.place!.slug);
-  if (!place) return { kind: "gone", root };
+  if (!place) return { kind: gone.has(placeKey(root, item.place)) ? "gone" : "unknown", root };
   return { kind: act.waiting.has(place.path) ? "waiting" : act.busy.has(place.path) ? "busy" : "there", place, root };
 }
 /** An item a Start or a link may take: it has no place, or the one it names

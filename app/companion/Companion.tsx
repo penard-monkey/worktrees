@@ -37,11 +37,12 @@ import {
 } from "./ideasrelate";
 import { PickProject, PickWorkspace, PlanPanel, PlanStrip, type RegProject, type WsOption } from "./PlanPanel";
 import {
-  addIdeasCall, addProjectCall, agentFor, fromPlanCall, ideaOntoPlan, itemPlace, launchCall, linkIdeaCall, linkPlaceCall, makePlanCall, MAIN_ASK_KEY,
+  addIdeasCall, addProjectCall, agentFor, fromPlanCall, ideaOntoPlan, itemPlace, launchCall, linkIdeaCall, linkPlaceCall, makePlanCall, MAIN_ASK_KEY, missingPlaces,
   placeOntoItem, planSources, plansIn, projectOntoPlan, removeIdeaCall, setPlanCall, showRequest, SHOW_KEY, startCall, WS_SHOW_KEY,
   type Activity, type ItemRef, type MainAsk, type PlanView, type Snap, type StartDone, type WorkItem,
 } from "../src/plans";
 import { PickPlace, StartReview } from "../src/StartWork";
+import { useGone } from "../src/useGone";
 
 // ── the rows' shapes (worktrees_core::ideas) ────────────────────────────────
 type Problem = "no-id" | "bad-id" | "duplicate-id" | "too-large" | "not-text" | "unreadable";
@@ -808,12 +809,19 @@ export function Companion() {
   // ── phase 5: what a plan does (§2.4). Clone and Create are the main
   // window's own dialogs, asked for by key; Start and Link a place are rows.
   const planOpen = !!open && open.kind === "plan" && up;
+  // Two lists may be in flight; one asked for earlier never replaces a later's.
+  const listSeq = useRef({ asked: 0, shown: 0 });
+  const listPlaces = useCallback(async () => {
+    const n = ++listSeq.current.asked;
+    const w = await invoke<Snap>("list_workspace");
+    if (n < listSeq.current.shown) return;
+    listSeq.current.shown = n;
+    setSnap(w);
+  }, []);
   useEffect(() => {
-    if (!planOpen) { setSnap(null); return; }
-    let gone = false;
-    invoke<Snap>("list_workspace").then((w) => { if (!gone) setSnap(w); }).catch((e) => { if (!gone) setNotice(`Could not read the places: ${errText(e)}`); });
-    return () => { gone = true; };
-  }, [planOpen, open?.id, placesTick, gen]);
+    if (!planOpen) { listSeq.current.shown = ++listSeq.current.asked; setSnap(null); return; }
+    listPlaces().catch((e) => setNotice(`Could not read the places: ${errText(e)}`));
+  }, [planOpen, open?.id, placesTick, gen, listPlaces]);
   useEffect(() => {
     if (!planOpen) return;
     const offs = [
@@ -822,6 +830,10 @@ export function Companion() {
     ];
     return () => { for (const u of offs) u.then((f) => f()).catch(() => {}); };
   }, [planOpen]);
+  const gonePlaces = useGone(
+    useMemo(() => (planView ? missingPlaces(planView.work, planView.work_states, snap) : []), [planView, snap]),
+    listPlaces,
+  );
   useEffect(() => { setReviewing(null); setPlaceFor(null); }, [open?.id]);
   const askMain = useCallback((a: MainAsk) => {
     try { window.localStorage.setItem(MAIN_ASK_KEY, JSON.stringify({ ...a, at: Date.now() })); } catch { setNotice("Could not reach the main window from here."); return; }
@@ -915,7 +927,7 @@ export function Companion() {
         const n = box && planView?.work ? planView.work.findIndex((w) => w.line === Number(box.dataset.dropWork)) : -1;
         if (n < 0 || !planView) return null;
         const w = planView.work![n];
-        const ref = placeOntoItem(item.root, item.slug, w, itemPlace(w, planView.work_states[n], snap, activity), snap);
+        const ref = placeOntoItem(item.root, item.slug, w, itemPlace(w, planView.work_states[n], snap, activity, gonePlaces), snap);
         return ref ? { kind: "work", plan: planView.doc.id, item: ref, root: item.root, slug: item.slug } : null;
       }
       // An idea (or the selected ones) onto a plan: the open plan's strip,
@@ -1134,6 +1146,7 @@ export function Companion() {
                   workHot={drag?.target?.kind === "work" ? drag.target.item.line : null}
                   snap={snap}
                   activity={activity}
+                  gone={gonePlaces}
                   bringProject={(name) => void bringProject(open.id, name)}
                   review={setReviewing}
                   linkPlace={setPlaceFor}
@@ -1269,7 +1282,7 @@ export function Companion() {
             key={`${open.id}|${reviewing.line}`}
             item={reviewing}
             state={state}
-            at={itemPlace(n < 0 ? reviewing : planView.work![n], state, snap, activity)}
+            at={itemPlace(n < 0 ? reviewing : planView.work![n], state, snap, activity, gonePlaces)}
             snap={snap}
             agent={agentFor(reviewing, agentPrefs)}
             start={(brief) => doStart(planView.doc.id, reviewing, state?.root ?? "", brief)}

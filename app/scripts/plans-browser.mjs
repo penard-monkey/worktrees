@@ -13,7 +13,8 @@
 //   - a double press starts once; a branch in another place and an empty brief
 //     are refused before Start; a refused launch keeps the place and offers
 //     Launch anyway;
-//   - busy / there / removed follow the snapshot, and the line stays;
+//   - busy / there / removed follow the snapshot, and the line stays; with a
+//     slow list (?slowlist) a place just started is never called removed;
 //   - a place dragged onto a free item is recorded, and lights nothing on an
 //     item that has one; Link a place… does the same without a drag;
 //   - Clone… and Create… open the main window's dialogs filled in and waiting,
@@ -277,9 +278,50 @@ async function main(page, tag, name) {
   ok(await until(page, () => !document.querySelector("[data-testid=ws-overview]")), `${tag} Show ▸ selects the place`);
 }
 
+/** The list of places is slow (a git fan-out) and the plan's line is not: the
+ *  item just started must never read "place removed" in between. */
+async function slow(page, tag) {
+  await page.addInitScript((s) => {
+    if (!sessionStorage.getItem("wt-mock-ui-state")) sessionStorage.setItem("wt-mock-ui-state", JSON.stringify(s));
+  }, { places_side: "left", dock_side: "right", settings_rev: 5, nav_pinned: true, nav_view: "workspaces", beta_ideas: true });
+  for (const [where, sel, go] of [
+    ["overview", "ws-ov", async () => {
+      await page.goto(`${BASE}/?ideas=seed&workspaces=1&slowlist=900`);
+      await page.waitForSelector("[data-testid=ws-name]");
+      const id = (await call(page, "plan_make", { ideas: [JELLY], draft: BODY })).id;
+      await page.locator("[data-testid=ws-name]", { hasText: "Everything" }).click();
+      await page.click("[data-testid=ws-ov-link-plan]");
+      await page.click(`[data-testid=ws-ov-plan-pick-row][data-doc='${id}']`);
+    }],
+    ["Ideas", "plan", async () => {
+      await page.goto(`${BASE}/companion/index.html?ideas=seed&slowlist=900`);
+      await page.waitForSelector("[data-testid=ideas-rows] li");
+      const id = (await call(page, "plan_make", { ideas: [JELLY], draft: BODY })).id;
+      await page.click(`[data-idea='${id}'] button.ix-row-main`);
+    }],
+  ]) {
+    await go();
+    await page.waitForSelector(`[data-testid=${sel}-work]`);
+    await page.waitForTimeout(1500);
+    await page.evaluate((s) => {
+      window.__kinds = [];
+      new MutationObserver(() => { const k = document.querySelector(`[data-testid=${s}-work]`)?.dataset.place; if (k && window.__kinds.at(-1) !== k) window.__kinds.push(k); })
+        .observe(document.body, { subtree: true, childList: true, attributes: true });
+    }, sel);
+    await page.locator(`[data-testid=${sel}-work]`).nth(0).locator(`[data-testid=${sel}-review]`).click();
+    await page.click("[data-testid=start-go]");
+    await until(page, () => document.querySelector("[data-testid=start-done]"), null, 15000);
+    const there = await until(page, (s) => document.querySelector(`[data-testid=${s}-work]`)?.dataset.place === "there", sel, 15000);
+    const kinds = await page.evaluate(() => window.__kinds);
+    ok(there && !kinds.includes("gone"), `${tag} ${where}: a place just started is never called removed while the list is slow (${kinds})`);
+    await page.evaluate(([r, s]) => window.__mock.placeRemoveElsewhere(r, s), [ROOT, "feat-p5-role"]);
+    ok(await until(page, (s) => document.querySelector(`[data-testid=${s}-work]`)?.dataset.place === "gone", sel, 15000), `${tag} ${where}: …and one that is gone still says so`);
+  }
+}
+
 for (const [engine, name] of [[chromium, "chromium"], [webkit, "webkit"]]) {
   const browser = await engine.launch();
-  for (const part of [companion, main]) {
+  for (const part of [companion, main, slow]) {
     const page = await (await browser.newContext({ viewport: { width: 1200, height: 800 } })).newPage();
     const errors = [];
     // xterm throws this on ANY place selected in the dev harness (StrictMode's

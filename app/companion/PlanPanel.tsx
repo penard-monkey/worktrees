@@ -48,6 +48,7 @@ export function PlanPanel(props: {
   /** The projects and their places, as the nav reads them, and who works. */
   snap: Snap;
   activity: Activity;
+  gone: ReadonlySet<string>;
   /** Clone or create the project `name`, in the main window. */
   bringProject(name: string): void;
   review(w: WorkItem): void;
@@ -140,7 +141,7 @@ export function PlanPanel(props: {
             ) : (
               <ul className="ix-plan-rows">
                 {v.work.map((w, n) => {
-                  const at = itemPlace(w, v.work_states[n], props.snap, props.activity);
+                  const at = itemPlace(w, v.work_states[n], props.snap, props.activity, props.gone);
                   return (
                     <li key={w.line} className={`ix-plan-work${props.workHot === w.line ? " ix-drop" : ""}`} data-testid="plan-work" data-drop-work={w.line} data-place={at.kind}>
                       <div className="ix-plan-row">

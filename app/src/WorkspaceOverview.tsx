@@ -30,6 +30,7 @@ export function WorkspaceOverview(props: {
   arm(e: React.PointerEvent, d: DocLite): void;
   snap: Snap;
   activity: Activity;
+  gone: ReadonlySet<string>;
   /** The work item (its line) a dragged place is over. */
   workHot: number | null;
   bringProject(name: string): void;
@@ -137,7 +138,7 @@ export function WorkspaceOverview(props: {
                   : ov.work.length === 0 ? <div className="empty small">The plan lists no work yet.</div> : (
                   <div className="ws-ov-rows">
                     {ov.work.map((w, n) => {
-                      const at = itemPlace(w, ov.work_states[n], props.snap, props.activity);
+                      const at = itemPlace(w, ov.work_states[n], props.snap, props.activity, props.gone);
                       return (
                         <div key={w.line} className={props.workHot === w.line ? "ws-ov-work on" : "ws-ov-work"} data-testid="ws-ov-work" data-drop="work" data-work-line={w.line} data-place={at.kind}>
                           <div className="ws-ov-row">

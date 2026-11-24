@@ -140,13 +140,17 @@ const snap = { projects: [{ root: R, name: "ans", ok: true, snapshot: { places: 
 const it = (o = {}) => ({ line: 23, title: "Role", project: "ans", branch: "feat/role", brief: "Do it.", ai: null, model: null, started: null, place: null, ...o });
 const st = (o = {}) => ({ line: 23, project_state: "registered", root: R, ...o });
 const started = (slug) => it({ started: `${R} · ${slug} · 2026-11-12 09:30`, place: { project: R, slug, at: "2026-11-12 09:30" } });
-const at = (i, s, sn = snap, act = { busy: none, waiting: none }) => P.itemPlace(i, s, sn, act);
+const key = `${R}|nope|2026-11-12 09:30`;
+const at = (i, s, sn = snap, act = { busy: none, waiting: none }, gone = new Set([key])) => P.itemPlace(i, s, sn, act, gone);
 const done = st({ place_root: R });
 check(at(it(), st()).kind === "none" && P.workStatus(it(), at(it(), st())) === "not started", "an item with no started: line is not started");
 check(at(started("role"), done).kind === "there" && P.workStatus(started("role"), at(started("role"), done)) === "started 2026-11-12 09:30 · there", "its place is there");
 check(at(started("role"), done, snap, { busy: new Set([`${R}/.worktrees/role`]), waiting: none }).kind === "busy", "…busy, from the same activity the nav dots use");
 check(at(started("role"), done, snap, { busy: none, waiting: new Set([`${R}/.worktrees/role`]) }).kind === "waiting", "…or waiting");
 check(at(started("nope"), done).kind === "gone" && P.workStatus(started("nope"), at(started("nope"), done)).endsWith("· place removed"), "a removed place reads “place removed”, its line kept");
+check(at(started("nope"), done, snap, { busy: none, waiting: none }, none).kind === "unknown", "missing from a list older than its line is not removed yet");
+check(same(P.missingPlaces([started("nope"), started("role"), it()], [done, done, st()], snap), [key]) && same(P.missingPlaces([started("nope")], [done], null), []), "…it is what the window asks the list about again");
+check(/useGone\(/.test(fs.readFileSync(APP, "utf8")) && /useGone\(/.test(fs.readFileSync(COMP, "utf8")), "…in both windows");
 check(at(started("role"), done, null).kind === "unknown" && at(started("role"), done, { projects: [{ root: R, ok: false, snapshot: null }] }).kind === "unknown", "no snapshot, or one that failed, is never called removed");
 check(at(started("role"), st()).kind === "unregistered" && at(it({ started: "yesterday" }), st()).kind === "unreadable", "an unregistered project, and a line that is not three parts, are said");
 check(P.itemFree({ kind: "none" }) && P.itemFree({ kind: "gone" }) && P.itemFree({ kind: "unregistered" }) && !["there", "busy", "waiting", "unknown", "unreadable"].some((k) => P.itemFree({ kind: k })),

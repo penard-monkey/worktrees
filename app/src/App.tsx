@@ -67,12 +67,13 @@ import { zoomDir } from "./zoomkeys";
 import { publishGroupChat } from "./betaLive";
 import { publishLanes } from "./laneLive";
 import {
-  agentFor, ideaOntoWorkspace, itemPlace, launchCall, linkIdeaCall, linkPlaceCall, mainAsk, MAIN_ASK_KEY, newPath, placeOntoItem, planOntoWorkspace,
+  agentFor, ideaOntoWorkspace, itemPlace, launchCall, linkIdeaCall, linkPlaceCall, mainAsk, MAIN_ASK_KEY, missingPlaces, newPath, placeOntoItem, planOntoWorkspace,
   setPlanCall, setProjectCall, showRequest, SHOW_KEY, startCall, unlinkIdeaCall, WS_SHOW_KEY,
   type ItemRef, type Overview, type PlanView, type ProjectSet, type ProjectState, type StartDone, type WorkItem,
 } from "./plans";
 import { privacyArea, privacyWords } from "./privacypaths";
 import { PickPlace, StartReview } from "./StartWork";
+import { useGone } from "./useGone";
 import { WorkspaceOverview, type DocLite } from "./WorkspaceOverview";
 import { remoteHostLabel, remoteTitle, remoteWebUrl } from "./remote";
 import { PrsPane } from "./PrsPane";
@@ -4910,6 +4911,7 @@ function App() {
       if (seq < refreshDone.current) return;
       refreshErr.current = String(e); // same text fail() shows
       fail(e);
+      return false;
     }
   }, []);
   /** The ONLY other way `ws` may be replaced. `lastSnap` is the dedupe's record
@@ -6792,10 +6794,14 @@ function App() {
   useEffect(() => { setWorkReview(null); setWorkPick(null); }, [wsOpen]);
   const ovHere = wsOv && wsOv.id === wsOpen ? wsOv.ov : null;
   const activity = { busy: busyPaths, waiting: waitingPaths };
+  // `refresh` drops a read only for a newer one's, so afterwards the list on
+  // screen is newer than the ask; a failed one (`false`) settles nothing.
+  const gonePlaces = useGone(ovHere ? missingPlaces(ovHere.work, ovHere.work_states, ws) : [],
+    async () => { if ((await refresh()) === false) throw new Error("the places could not be read"); });
   const agentDefaults = { provider: settings.default_provider as string, models: settings.default_models as Record<string, string | undefined> };
   const ovItem = (line: number) => {
     const n = ovHere?.work?.findIndex((w) => w.line === line) ?? -1;
-    return n < 0 ? null : { item: ovHere!.work![n], state: ovHere!.work_states[n], at: itemPlace(ovHere!.work![n], ovHere!.work_states[n], ws, activity) };
+    return n < 0 ? null : { item: ovHere!.work![n], state: ovHere!.work_states[n], at: itemPlace(ovHere!.work![n], ovHere!.work_states[n], ws, activity, gonePlaces) };
   };
   const linkPlaceToItem = async (item: ItemRef, root: string, slug: string) => {
     const pl = ovHere?.plan;
@@ -10242,6 +10248,7 @@ function App() {
                 arm={(e, d) => arm(e, { kind: d.kind, id: d.id, title: d.title })}
                 snap={ws}
                 activity={activity}
+                gone={gonePlaces}
                 workHot={drag?.target?.kind === "work" ? drag.target.item.line : null}
                 bringProject={(name) => { const p = ovHere?.projects?.find((x) => x.name === name); if (p && ovHere?.plan?.live) bringProject(ovHere.plan.live, wsOpen, p); }}
                 review={setWorkReview}
