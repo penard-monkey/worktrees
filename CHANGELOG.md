@@ -69,6 +69,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   name it paired with (an older host's "owner" is skipped too). *Share… →
   Someone new* now asks "Your name, as they will see it" while it is unset.
 
+- **Two projects whose tmux sessions get the same name no longer share, or close, each other's session.** Two repositories in folders of the same name (or `app` with a place `x-feat` beside `app-x` with a place `feat`) name a session alike. `new` and `open` in the second reported the first one's session as its own, and `close` or `rm` there ended the other project's agent without asking. A session now belongs to a place by the folder it was created in: another project's is never shown, attached, typed into or closed as yours, and `new`/`open` say the name is taken, before anything is made, and how to give the project its own prefix. `doctor` names two registered places that clash. Needs tmux 3.2 or newer; on an older one the name still decides.
+
 - **The branch field: Enter takes the row you see highlighted.** When the list shrank under the highlight (the branches were read again), no row was lit and Enter took the typed text instead. Now the highlight moves to the last row left, and that row is the one drawn, announced to a screen reader and committed. (After #301 by t957095.)
 
 - **Markdown: more character references, and one id per heading.** The document view, the chat and the Ideas window now draw `&copy;`, `&hellip;`, `&mdash;` and a dozen more named references, and any numeric one (`&#169;`, `&#xA9;`); a reference inside `` `code` `` stays as it was written. A heading repeated in one document gets `-1`, `-2` on its id, as on GitHub, so `[x](#setup-1)` goes to the second *Setup*. (After #300 by t957095.)

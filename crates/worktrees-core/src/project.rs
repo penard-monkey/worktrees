@@ -98,7 +98,8 @@ impl Project {
 
     /// The tmux session actually LIVING in place `slug` (directory `dir`),
     /// whatever it is named, per the snapshot `panes`: the canonical name when
-    /// it exists, else any session with a pane cwd'd there (`PaneList::
+    /// it exists and is not `PaneList::elsewhere` (another repo's session of
+    /// the same name), else any session with a pane cwd'd there (`PaneList::
     /// session_in`, preferring the AI pane `ai_word` names).
     ///
     /// THE rule, and the only copy: `ops::live_session` (`close`, `rm`,
@@ -114,11 +115,29 @@ impl Project {
     /// worktree's session.
     pub fn live_session_in(&self, slug: &str, dir: &str, panes: &tmux::PaneList, ai_word: &str) -> Option<String> {
         let canonical = self.session_name(slug);
-        if panes.has_session(&canonical) {
+        let exclude = self.place_exclude(slug);
+        if panes.has_session(&canonical) && !panes.elsewhere(&canonical, dir, exclude) {
             return Some(canonical);
         }
-        let exclude = (slug == "(main)").then_some(self.wt_root.as_str());
         panes.session_in(dir, ai_word, exclude)
+    }
+
+    /// What lies under `(main)` and is not it: `.worktrees/`, whose places nest
+    /// in the main root. Nothing for any other place.
+    pub fn place_exclude(&self, slug: &str) -> Option<&str> {
+        (slug == "(main)").then_some(self.wt_root.as_str())
+    }
+
+    /// `panes` without another repo's sessions that carry this place's names
+    /// (`PaneList::for_place`): what any lookup by canonical or sidecar name
+    /// for `slug` must read.
+    pub fn place_panes<'a>(&self, slug: &str, panes: &'a tmux::PaneList) -> std::borrow::Cow<'a, tmux::PaneList> {
+        panes.for_place(&self.session_name(slug), &self.place_dir(slug), self.place_exclude(slug))
+    }
+
+    /// The live session named exactly `name`, when it is this place's.
+    pub fn owns_session(&self, slug: &str, name: &str, panes: &tmux::PaneList) -> bool {
+        panes.has_session(name) && !panes.elsewhere(name, &self.place_dir(slug), self.place_exclude(slug))
     }
 
     /// Gap 8's other half: a session an older binary named under `legacy`, the
@@ -151,7 +170,8 @@ impl Project {
         if !SWEPT.lock().map(|mut s| s.insert(self.main_root.clone())).unwrap_or(false) {
             return;
         }
-        let live = tmux::session_names();
+        let Some(panes) = tmux::PaneList::fetch_unnamed() else { return };
+        let live = panes.session_list();
         let head = format!("{legacy}-");
         if !live.iter().any(|s| s.starts_with(&head)) {
             return;
@@ -160,7 +180,14 @@ impl Project {
             .chain(self.worktree_dirs().iter().map(|d| basename(d)))
             .collect();
         for (old, new) in legacy_renames(legacy, &self.prefix, &slugs, &live) {
-            tmux::rename_session(&old, &new);
+            // Another repo's session can carry the old name too.
+            let theirs = slugs
+                .iter()
+                .find(|s| old.strip_prefix(&session_name_under(legacy, s)).is_some_and(|r| r.is_empty() || r.starts_with('~')))
+                .is_some_and(|s| panes.elsewhere(&old, &self.place_dir(s), self.place_exclude(s)));
+            if !theirs {
+                tmux::rename_session(&old, &new);
+            }
         }
     }
 
@@ -315,6 +342,7 @@ impl Project {
         }
         let now = now_epoch();
         let reg = self.registrations();
+        let panes = tmux::PaneList::fetch_unnamed().unwrap_or_default();
         let mut rows = Vec::new();
         for d in &dirs {
             let slug = basename(d);
@@ -340,7 +368,7 @@ impl Project {
                 let cepoch = self.commit_epoch(d);
                 let age = if cepoch > 0 { self.clock.ago(cepoch, now) } else { "-".to_string() };
                 let bcol = if branch.replace('/', "-") != slug { render::CYAN } else { "" };
-                let tmux_cell = if tmux::session_exists(&self.session_name(&slug)) {
+                let tmux_cell = if self.owns_session(&slug, &self.session_name(&slug), &panes) {
                     format!("{}●{}", render::GREEN, render::NC)
                 } else {
                     "○".to_string()
@@ -408,6 +436,8 @@ impl Project {
     fn place_json(&self, dir: &str, is_main: bool, reg: &HashSet<String>, panes: Option<&tmux::PaneList>, ai_word: &str, base_ref: &str, claude_root: &Path) -> Place {
         let slug = if is_main { "(main)".to_string() } else { basename(dir) };
         let canonical = self.session_name(&slug);
+        let panes = panes.map(|pl| pl.for_place(&canonical, dir, self.place_exclude(&slug)));
+        let panes = panes.as_deref();
         let sidecar = crate::provider::PROVIDERS.iter().map(|p| p.sidecar_name(&canonical))
             .find(|name| panes.is_some_and(|pl| pl.has_session(name)));
         // Canonical name first, else any session with a pane cwd'd in this dir

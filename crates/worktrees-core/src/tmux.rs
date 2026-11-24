@@ -58,10 +58,13 @@ pub fn session_names() -> Vec<String> {
     }
 }
 
-/// End EVERY shell sidecar of `canonical_session` — the dock's shells for a
-/// place. Called on close/remove (core, so the CLI cleans up too). Best-effort.
-pub fn kill_shell_sidecars(canonical_session: &str) {
-    for n in session_names() {
+/// End EVERY shell sidecar of `canonical_session` — the dock's shells for the
+/// place at `dir` (`exclude_under` as in `PaneList::elsewhere`, whose sessions
+/// are left alone: another repo can render the same name). Called on
+/// close/remove (core, so the CLI cleans up too). Best-effort.
+pub fn kill_shell_sidecars(canonical_session: &str, dir: &str, exclude_under: Option<&str>) {
+    let Some(panes) = PaneList::fetch_unnamed() else { return };
+    for n in panes.for_place(canonical_session, dir, exclude_under).session_list() {
         if shell_sidecar_index(canonical_session, &n).is_some() {
             kill_session(&n);
         }
@@ -253,6 +256,11 @@ pub struct Pane {
     /// (`agent::locate`). `None` from a row with no sixth field — an older
     /// row, or the bats fake's five.
     pub id: Option<String>,
+    /// `#{session_path}`: the folder the session was CREATED in. It outlives a
+    /// `cd` in the pane and keeps the old spelling when that folder is renamed,
+    /// which is what `PaneList::elsewhere` asks of it. `None` on a tmux too old
+    /// to say (3.1c prints nothing; 3.2a does) and in the bats fake.
+    pub start: Option<String>,
 }
 
 impl Pane {
@@ -283,20 +291,21 @@ pub fn normalize_tty(tty: &str) -> &str {
     tty.trim().strip_prefix("/dev/").unwrap_or(tty.trim())
 }
 
-/// `list-panes -a` rows (`session\tpath\tcmd[\tpid[\ttty]]`) as panes. A row
+/// `list-panes -a` rows (`session\tpath\tcmd[\tpid[\ttty[\tid[\tstart]]]]`) as panes. A row
 /// with fewer fields is a tmux, or a test shim, that printed fewer: the
 /// missing ones are `None`, never an error.
 pub fn parse_pane_rows(text: &str) -> Vec<Pane> {
     text.lines()
         .map(|line| {
-            let mut it = line.splitn(6, '\t');
+            let mut it = line.splitn(7, '\t');
             let mut field = || it.next().unwrap_or("").to_string();
             let (session, path, cmd) = (field(), field(), field());
             let some = |s: String| (!s.trim().is_empty()).then_some(s);
             let pid = some(field());
             let tty = some(field()).map(|t| normalize_tty(&t).to_string());
             let id = some(field()).filter(|i| PaneId::parse(i).is_some());
-            Pane { session, path, cmd, pid, tty, fg: None, id }
+            let start = some(field());
+            Pane { session, path, cmd, pid, tty, fg: None, id, start }
         })
         .collect()
 }
@@ -396,8 +405,9 @@ pub fn ps_foreground(ttys: &[&str]) -> Option<String> {
 /// Fetched ONCE per caller (one tmux shell-out, plus one `ps` only when a
 /// `node` pane needs naming) and reused: `ls`/`place_json` resolves adopted
 /// sessions for many worktrees against this instead of shelling out per
-/// place, and every question asked of it afterwards is pure.
-#[derive(Default)]
+/// place, and every question asked of it afterwards is pure (`elsewhere`
+/// stats one folder, and only for a name held outside the place).
+#[derive(Default, Clone)]
 pub struct PaneList {
     panes: Vec<Pane>,
 }
@@ -420,11 +430,15 @@ impl PaneList {
     /// the ones it cares about (`name_foregrounds`). `None` when tmux cannot
     /// answer, which is `session_fingerprint`'s empty string.
     pub fn fetch_unnamed() -> Option<PaneList> {
+        // `-u`: a client that tmux does not take for UTF-8 (LC_ALL=C, a bare
+        // container, cron) has every tab of its output printed as `_`, and a
+        // row with no tabs names no session at all.
         let o = tmux(&[
+            "-u",
             "list-panes",
             "-a",
             "-F",
-            "#{session_name}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_pid}\t#{pane_tty}\t#{pane_id}",
+            "#{session_name}\t#{pane_current_path}\t#{pane_current_command}\t#{pane_pid}\t#{pane_tty}\t#{pane_id}\t#{session_path}",
         ])
         .ok()?;
         if !o.status.success() {
@@ -477,6 +491,60 @@ impl PaneList {
     /// names them all and one shell-out replaces N `list-sessions` calls.
     pub fn has_session(&self, name: &str) -> bool {
         self.panes.iter().any(|p| p.session == name)
+    }
+
+    /// Every live session, once, per this snapshot.
+    pub fn session_list(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        for p in &self.panes {
+            if !p.session.is_empty() && !out.contains(&p.session) {
+                out.push(p.session.clone());
+            }
+        }
+        out
+    }
+
+    /// Is session `name` provably NOT in the place at `dir` (outside
+    /// `exclude_under`, which `(main)` passes because `.worktrees/` nests in
+    /// it)? A session NAME is no proof of whose it is: two repositories in
+    /// folders of one name render the same one, and so do `app` + `x-feat`
+    /// and `app-x` + `feat`. On 0.52.0 a `close` or `rm` in one of them ended
+    /// the other's agent, unasked.
+    ///
+    /// Provably: no pane of it is in the place, and the folder it was created
+    /// in still exists and is not in the place. So a lane whose pane `cd`'d
+    /// away stays the place's, a project whose folder moved keeps its sessions
+    /// (the old folder is gone, and the panes report the new one), and where
+    /// tmux does not say (< 3.2) the name decides, as it always had.
+    pub fn elsewhere(&self, name: &str, dir: &str, exclude_under: Option<&str>) -> bool {
+        let within = |p: &str, d: &str| p == d || p.strip_prefix(d).is_some_and(|r| r.starts_with('/'));
+        let here = |p: &str| within(p, dir) && !exclude_under.is_some_and(|x| within(p, x));
+        let mut start = None;
+        for p in self.panes.iter().filter(|p| p.session == name) {
+            if here(&p.path) {
+                return false;
+            }
+            start = start.or(p.start.as_deref());
+        }
+        let Some(start) = start.filter(|s| !here(s)) else { return false };
+        std::fs::canonicalize(start).is_ok_and(|real| !here(&real.to_string_lossy()))
+    }
+
+    /// This snapshot as the place at `dir` may read it BY NAME: without the
+    /// sessions named `canonical` or a sidecar of it that live `elsewhere`.
+    /// Every other session stays, so adoption and probes see what they did.
+    pub fn for_place(&self, canonical: &str, dir: &str, exclude_under: Option<&str>) -> std::borrow::Cow<'_, PaneList> {
+        let strangers: Vec<String> = self
+            .session_list()
+            .into_iter()
+            .filter(|n| n.strip_prefix(canonical).is_some_and(|r| r.is_empty() || r.starts_with('~')))
+            .filter(|n| self.elsewhere(n, dir, exclude_under))
+            .collect();
+        if strangers.is_empty() {
+            return std::borrow::Cow::Borrowed(self);
+        }
+        let panes = self.panes.iter().filter(|p| !strangers.contains(&p.session)).cloned().collect();
+        std::borrow::Cow::Owned(PaneList { panes })
     }
 
     /// The pane whose id is `id` (`%7`), per this snapshot. Pane ids are
@@ -1860,6 +1928,59 @@ pts/5     3007   3007 npm exec x
         assert_eq!(rows[0].tty.as_deref().and_then(|t| parse_foreground(PS_MACOS).get(t).cloned()).as_deref(), Some("pi"));
     }
 
+    /// A session's name is not proof of whose it is (`PaneList::elsewhere`),
+    /// and neither is a missing answer proof that it is someone else's.
+    #[test]
+    fn a_session_is_elsewhere_only_when_every_witness_says_so() {
+        let tmp = std::env::temp_dir().join(format!("wt-elsewhere-{}", std::process::id()));
+        std::fs::create_dir_all(tmp.join("one/.worktrees/feat")).unwrap();
+        std::fs::create_dir_all(tmp.join("two/.worktrees/feat")).unwrap();
+        let tmp = std::fs::canonicalize(&tmp).unwrap();
+        let at = |p: &str| format!("{}/{p}", tmp.display());
+        let list = |path: &str, start: Option<String>| {
+            PaneList::from_panes(vec![Pane { session: "app-feat".into(), path: path.into(), cmd: "zsh".into(), start, ..Pane::default() }])
+        };
+        let dir = at("two/.worktrees/feat");
+        let theirs = at("one/.worktrees/feat");
+        let away = |l: &PaneList| l.elsewhere("app-feat", &dir, None);
+        assert!(away(&list(&theirs, Some(theirs.clone()))), "created there, living there");
+        assert!(away(&list("/", Some(theirs.clone()))), "its pane cd'd away from a place that is not ours");
+        assert!(!away(&list(&dir, Some(dir.clone()))), "ours");
+        assert!(!away(&list("/", Some(dir.clone()))), "ours, and its pane cd'd away");
+        assert!(!away(&list(&dir, Some(theirs.clone()))), "a pane is here");
+        assert!(!away(&list("/", Some(at("gone/.worktrees/feat")))), "the folder it was made in is gone: a moved project");
+        assert!(!away(&list(&theirs, None)), "tmux does not say: the name decides, as before");
+        assert!(!list(&theirs, Some(theirs.clone())).elsewhere("other", &dir, None), "no such session");
+        // A sibling whose path merely starts with ours is not in it.
+        std::fs::create_dir_all(tmp.join("two/.worktrees/feat-2")).unwrap();
+        assert!(away(&list("/", Some(at("two/.worktrees/feat-2")))));
+        // `(main)`: what nests under `.worktrees/` is not it.
+        let (main, wts) = (at("two"), at("two/.worktrees"));
+        assert!(list("/", Some(dir.clone())).elsewhere("app-feat", &main, Some(&wts)));
+        assert!(!list("/", Some(main.clone())).elsewhere("app-feat", &main, Some(&wts)));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn a_places_panes_drop_only_a_strangers_session_of_its_name() {
+        let tmp = std::env::temp_dir().join(format!("wt-forplace-{}", std::process::id()));
+        std::fs::create_dir_all(tmp.join("one")).unwrap();
+        std::fs::create_dir_all(tmp.join("two")).unwrap();
+        let tmp = std::fs::canonicalize(&tmp).unwrap();
+        let (one, two) = (format!("{}/one", tmp.display()), format!("{}/two", tmp.display()));
+        let pane = |s: &str, d: &str| Pane { session: s.into(), path: d.into(), start: Some(d.into()), ..Pane::default() };
+        let all = PaneList::from_panes(vec![
+            pane("app-feat", &one),
+            pane("app-feat~agent~codex", &two),
+            pane("app-feat~term", &one),
+            pane("app-feat-2", &one),
+            pane("else", &one),
+        ]);
+        assert_eq!(all.for_place("app-feat", &two, None).session_list(), ["app-feat~agent~codex", "app-feat-2", "else"]);
+        assert_eq!(all.for_place("app-feat", &one, None).session_list(), ["app-feat", "app-feat~term", "app-feat-2", "else"]);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     #[test]
     fn pane_rows_parse_with_three_four_or_five_fields() {
         let rows = parse_pane_rows("a\t/w/a\tzsh\nb\t/w/b\tnode\t42\nc\t/w/c\tnode\t43\t/dev/pts/7\nd\t/w/d\tvim\t\t\n");
@@ -1871,6 +1992,7 @@ pts/5     3007   3007 npm exec x
             tty: tty.map(Into::into),
             fg: None,
             id: None,
+            start: None,
         };
         assert_eq!(
             rows,

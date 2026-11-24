@@ -1815,6 +1815,7 @@ fn reading_of_lane(reading: Option<activity::Activity>, lane: &Lane, label: &str
 pub fn live_agent_sessions(project: &Project, slug: &str, panes: &PaneList, ai_word: &str) -> Vec<(&'static dyn harness::Adapter, String)> {
     let canonical = project.session_name(slug);
     let path = project.place_dir(slug);
+    let panes = &*project.place_panes(slug, panes);
     let primary = project.live_session_in(slug, &path, panes, ai_word);
     let exclude = (slug == "(main)").then_some(project.wt_root.as_str());
     crate::workspace::agent_session_names(Some(panes), &canonical, primary.as_deref().unwrap_or(&canonical), primary.is_some(), &path, exclude)
@@ -1906,15 +1907,16 @@ impl AgentIo for Live {
         };
         let slug = slug.as_str();
         let adapter = harness::by_id(lane.harness).ok_or_else(|| format!("unknown harness {}", lane.harness))?;
-        let panes = PaneList::fetch().ok_or("tmux is not available")?;
-        let probes = agent::live_probes_in(Some(&panes));
-        let scan = harness::Scan { probes: &probes, panes: Some(&panes) };
+        let all = PaneList::fetch().ok_or("tmux is not available")?;
+        let probes = agent::live_probes_in(Some(&all));
+        let panes = &*project.place_panes(slug, &all);
+        let scan = harness::Scan { probes: &probes, panes: Some(panes) };
         let canonical = project.session_name(slug);
         let path = project.place_dir(slug);
         let exclude = exclude_for(project, slug);
         let reading = reading_of_lane(adapter.activity(&scan, &canonical, &path), lane, adapter.provider().label)?;
         let req = harness::SendRequest {
-            panes: &panes,
+            panes,
             canonical: &canonical,
             path: &path,
             exclude: exclude.as_deref(),
@@ -4295,6 +4297,31 @@ mod moved_tests {
         assert_eq!(ids, ["new-(main)"]);
         // And a place with nothing in it has no agents.
         assert!(live_agent_sessions(&project, "lane", &renamed, "claude").is_empty());
+    }
+
+    /// Another repo's session of this place's name is not this place's lane:
+    /// nothing here may read its screen or type into it.
+    #[test]
+    fn another_repos_same_named_session_is_no_lane_of_this_place() {
+        let (project, repo) = moved("stranger");
+        let theirs = std::fs::canonicalize(std::env::temp_dir()).unwrap().to_string_lossy().into_owned();
+        let lane = |session: &str, at: &str, cmd: &str| tmux::Pane {
+            session: session.into(),
+            path: at.into(),
+            cmd: cmd.into(),
+            start: Some(at.into()),
+            ..Default::default()
+        };
+        let found = |at: &str| {
+            let panes = PaneList::from_panes(vec![
+                lane("new-lane", at, "2.1.309"),
+                lane("new-lane~agent~codex", at, "codex"),
+            ]);
+            let project_panes = project.place_panes("lane", &panes).session_list().len();
+            (live_agent_sessions(&project, "lane", &panes, "claude").len(), project_panes, project.live_session_in("lane", &project.place_dir("lane"), &panes, "claude"))
+        };
+        assert_eq!(found(&theirs), (0, 0, None));
+        assert_eq!(found(&format!("{repo}/.worktrees/lane")), (2, 2, Some("new-lane".to_string())));
     }
 
     /// A send types only into the session the lane named: a harness reading
