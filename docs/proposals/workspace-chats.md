@@ -30,6 +30,13 @@ I did not. §8 lists what is still unknown.
 | "Folds on close make sense", "yes can read", "yeah applied" | Choices 6, 3 and 4 | Decided |
 | "IDK if we need to start tracking things … with an sqlite db" | Not raised | No, not yet (§5.7) |
 
+**Decided later the same day**, on revision 2's open choices: documents are
+edited in the main window with the same CodeMirror editor, "that brings
+codemirror into the main app rather than just outside", and "we may want to
+add a lane for all our documents now" (§4.5); the fold reaches the agent by
+the fixed opener; and the typed-line door for workspace chats is approved, on
+`idea_send`'s body.
+
 ## 0. The answer, on one page
 
 **A workspace gets a folder of its own. Its memory is a git repository inside
@@ -296,11 +303,10 @@ Undo.
    ends the session. With no note after five minutes the fold is marked
    failed, the session stays open, and the chat row says so.
 
-Why a relaunch and not a typed line: an opener reaches only a session the
-launch creates (AGENTS.md, the re-brief rule), and it is how every brief
-reaches Claude. It works the same for a chat whose Claude already exited. It
-types nothing. The alternative, a fixed line typed through `idea_send`'s body,
-is faster and widens the typing door; it is choice 1.
+Why a relaunch and not a typed line (decided 2026-11-24: the fixed opener):
+an opener reaches only a session the launch creates (AGENTS.md, the re-brief
+rule), and it is how every brief reaches Claude. It works the same for a chat
+whose Claude already exited. It types nothing.
 
 Rejected: a headless `claude -p --resume`. Print mode answers permission
 questions with no person there, and nobody can see or stop it.
@@ -384,11 +390,9 @@ Selecting a workspace, or one of its chats:
   area keeps the chat. This is the Ideas window, taught to open a workspace's
   memory file as well as an idea.
 
-**Reading here, editing where the editor is.** CodeMirror is admitted only
-inside the companion window's bundle, never `app/src` (AGENTS.md). So the main
-window renders documents with the markdown view it already has, and **Edit**
-floats the document into the companion, which has the editor. Putting the
-editor in the main window would mean changing that boundary; it is choice 2.
+**Edited here, with the same editor** (decided 2026-11-24). A document in
+this pane is edited in place with the CodeMirror editor the Ideas window has.
+That changes a standing rule, and §4.5 says how.
 
 An image in memory is shown by a new console row that reads a file under the
 workspace's memory folder. `read_place_image` cannot: it is the place's rule
@@ -397,8 +401,52 @@ workspace's memory folder. `read_place_image` cannot: it is the place's rule
 ### 4.4 The Ideas window
 
 Unchanged for ideas and plans. It gains the ability to open a memory file by
-(workspace, path), with its history, when a document is floated or Edit is
-pressed.
+(workspace, path), with its history, when a document is floated. It is the
+floated form of the same document pane, not a second editor.
+
+### 4.5 CodeMirror in the main window, and a lane for documents
+
+**Recommendation: one document pane, used by both windows, with the editor
+loaded on first use. Build it in its own lane, before or beside phase 3.**
+
+Today CodeMirror is the third admitted library exception, allowed only inside
+the Ideas companion window's own bundle (`app/companion/`) and never in
+`app/src`, and
+`companion-boundary-check.mjs` walks the app's import graph to hold that
+(AGENTS.md). The owner's decision moves the editor into the main app. What
+that takes:
+
+- **The rule is rewritten, not dropped.** CodeMirror may be imported by ONE
+  module, the document pane's editor, and that module is reached from the
+  main app only through a dynamic `import()`. So the editor is a chunk of its
+  own, fetched the first time a document is edited, and the app's start does
+  not carry it. The check changes from "never in `app/src`" to "only from
+  that module, and never in the entry chunk". AGENTS.md has a trap written
+  down for exactly this: a dynamic import kept as a namespace defeats
+  tree-shaking, so the import is destructured.
+- **One pane, three kinds of document.** An idea, a plan and a memory file
+  are all markdown saved as the text that was typed. The pane takes a source
+  (idea id, or workspace and path) and uses that source's read, write and
+  history rows. Ideas and plans keep `idea_write` and `expected_mtime`; a
+  memory file uses `workspace_memory_write`.
+- **Float is the same pane in the companion window.** A document open in both
+  windows is one file with two views; the existing "the file changed under
+  you" handling covers it (**checked**: phase 1 of ideas ships it).
+- **What moves with it.** The editor's drag sources, the selection quoted
+  into a chat, and the conversation panel all live in `app/companion/` today
+  (**checked**, `IdeaChat.tsx` imports from `../src`). The lane decides which
+  of them become shared modules and which stay the companion's.
+
+**The documents lane**, as its own brief: bring the editor into the main app
+under the rewritten rule; make the shared document pane; open ideas and plans
+in the main window wherever they are linked today (the workspace view's Plan
+and Ideas tabs, a plan's "plan ▸", an idea chip); keep the Ideas window as
+the floated form. It needs nothing from workspace chats, so it can start now.
+Phase 3 then adds Memory as a third source of the same pane.
+
+Not established: the editor chunk's size, and whether the main window's
+WKWebView and the companion's can share one built chunk or each build their
+own (**guess**: two builds stay, one source).
 
 ## 5. The engine
 
@@ -438,8 +486,9 @@ are declared this way).
 
 `workspace_send` and `workspace_answer_text` are `idea_send`'s and
 `idea_answer_text`'s bodies behind one more console-only door, with the same
-rule, checks and audit record. AGENTS.md's paragraph on typing into Claude
-names each door, so phase 1's PR must add this one, with the owner's yes.
+rule, checks and audit record. The owner approved this door on 2026-11-24
+("yes idea_send works"). AGENTS.md's paragraph on typing into Claude names
+each door, so phase 1's PR adds this one.
 
 ### 5.4 The MCP server's workspace mode (a later phase)
 
@@ -506,7 +555,8 @@ and the ideas folder at scratch paths and its own tmux server.
 |---|---|---|---|
 | **1** | A chat and a memory folder | Start a chat from the nav under a workspace. It has read the index and the projects. It writes into `memory/` when told, or when it judges something durable. The Memory tab shows the index and the files, read only. Close, resume, delete | M–L |
 | **2** | The fold, on the repository | Close a chat and see its note, the commit's diff, and Undo. History. Close without folding. Tidy… | M |
-| **3** | The workspace view | Plan and Ideas tabs beside Memory, the chat on the right, float any document, Edit in the floated window, images in memory | M |
+| **D** | The documents lane (§4.5) | Edit an idea or a plan in the main window with the same editor, and float it. Independent of the other phases; can start now | M–L |
+| **3** | The workspace view | Plan and Ideas tabs beside Memory, the chat on the right, memory files edited in place and floated, images in memory. Needs D | M |
 | **4** | The MCP workspace mode | Ask a chat what is running across the workspace and get a live answer. The chat proposes a work item; Review… and Start make the place | M |
 | **5** | Memory for the lanes | A place started from the workspace's plan gets one line in its brief naming the memory folder; its agent reads the index | S |
 | later | | Codex as the harness. Acting under `cross_project = "full"`. Messaging lanes through the MCP bus. A derived search index | |
@@ -515,19 +565,20 @@ Phase 1 makes the repository (`git init` and a first commit) so that phase 2
 has history from day one. It measures the first item of §8 before anything
 else.
 
-Phases 2 and 3 can run side by side.
+Phase D can run beside 1 and 2. Phase 3 needs D and 1.
 
 ## 7. Open choices for the owner
 
 Decided on 2026-11-24: memory is a folder; Close folds; the fold is applied;
-a workspace chat reads its workspace's projects.
+a workspace chat reads its workspace's projects; the fold reaches the agent by
+a fixed opener; documents are edited in the main window with CodeMirror, in a
+documents lane of its own; the typed-line door for workspace chats is
+approved.
 
-1. **How the fold reaches the agent.** My pick: relaunch on a fixed opener,
-   nothing typed. The other way: a fixed line typed into the live session,
-   faster, and a wider typing door.
-2. **Where a document is edited.** My pick: read in the main window, edit in
-   the floated window, so CodeMirror stays in the companion's bundle. The
-   other way: admit the editor into the main window and change that rule.
+1. **How CodeMirror enters the main app.** My pick: one module, loaded on
+   first use, with the boundary check rewritten to hold that (§4.5). The
+   other way: a plain import, and the check retired.
+2. **When the documents lane runs.** My pick: now, beside phase 1.
 3. **A git repository per workspace's memory, committed by the engine.** My
    pick: yes, as §2.5.
 4. **Are a private project's files readable by its workspace's chat?** My
@@ -537,8 +588,9 @@ a workspace chat reads its workspace's projects.
 6. **No database now.** My pick: as §5.7.
 7. **May a chat start places itself, later?** My pick: only under
    `cross_project = "full"`, after the plan-item road has been lived with.
-8. **One more door for a typed line** (`workspace_send`,
-   `workspace_answer_text`, §5.3). It needs your yes, as `idea_send` did.
+8. **AGENTS.md's library paragraph.** The documents lane's PR rewrites the
+   CodeMirror exception to say where it may now be imported. It needs your
+   OK on the words.
 9. **The index's budget.** My pick: 16 KB, said and never enforced by cutting.
 10. **The words.** My pick: "Memory" and "Chats".
 11. **AGENTS.md.** Phase 1's PR adds the workspace door to the paragraph on
@@ -570,7 +622,8 @@ a workspace chat reads its workspace's projects.
 - **`--resume <id>` with a positional opener** in an interactive Claude, which
   the fold needs. The CLI's help suggests it, and `launch_cmd` already puts an
   opener after a resume's words (**checked**, `profile.rs:729`), but I did not
-  run it. If Claude refuses the pair, choice 1 falls to the typed line.
+  run it. Phase 2 measures it first. If Claude refuses the pair, the fold
+  needs the typed line after all, and that comes back to the owner.
 - **How the MCP server learns its chat** in phase 4: an environment variable
   set at launch, or a per-chat `--mcp-config`. Not measured.
 - **How big a memory repository gets** with images over a year, and whether
