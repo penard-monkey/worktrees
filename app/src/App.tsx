@@ -1878,6 +1878,11 @@ function BranchCombo({
     ...matches.map((b) => ({ branch: b, create: false })),
     ...(creating ? [{ branch: q, create: true }] : []),
   ];
+  // The highlighted row. `hi` is where the arrows and the pointer left it, and
+  // the list can shrink under it (a re-read of the branches), so every index
+  // into `options` uses `at`: the row drawn lit, the row announced and the row
+  // Enter commits are one row, and it exists. -1 = no rows.
+  const at = Math.min(hi, options.length - 1);
 
   // One row, and it is the exact thing already typed: there is nothing to pick.
   // Left visible it would cover whatever sits under the field — in the dialog
@@ -1920,13 +1925,15 @@ function BranchCombo({
       e.preventDefault();
       if (!showPop) { show(); return; }
       const d = e.key === "ArrowDown" ? 1 : -1;
-      setHi((i) => (options.length ? (i + d + options.length) % options.length : 0));
+      // From the row on screen, not from a stale index past the end of the list.
+      const n = options.length;
+      setHi((i) => (n ? (Math.min(i, n - 1) + d + n) % n : 0));
       return;
     }
     if (e.key === "Enter") {
       // A highlighted row wins; otherwise the raw text does, so Enter still
       // works exactly as it did before the list existed.
-      commit(showPop && options[hi] ? options[hi].branch : value);
+      commit(showPop && at >= 0 ? options[at].branch : value);
       // Picking from a VISIBLE list is the whole keypress. Without this the
       // dialog hosting the field would also read it as "submit", so choosing a
       // branch would create the worktree before you had touched base or name.
@@ -1949,7 +1956,7 @@ function BranchCombo({
         aria-controls={showPop ? listId : undefined}
         // Focus never leaves the input, so WITHOUT this the arrow keys are
         // silent to a screen reader and Enter commits a row it never announced.
-        aria-activedescendant={showPop && options[hi] ? optId(hi) : undefined}
+        aria-activedescendant={showPop && at >= 0 ? optId(at) : undefined}
         data-testid={testid}
         spellCheck={false}
         autoCapitalize="off"
@@ -1987,9 +1994,9 @@ function BranchCombo({
               <button
                 key={(o.create ? "new:" : "b:") + o.branch}
                 id={optId(i)}
-                className={"combo-item" + (i === hi ? " hi" : "") + (o.create ? " create" : "")}
+                className={"combo-item" + (i === at ? " hi" : "") + (o.create ? " create" : "")}
                 role="option"
-                aria-selected={i === hi}
+                aria-selected={i === at}
                 // mousedown, not click: the input's blur would tear the row out
                 // from under the click
                 onMouseDown={(e) => { e.preventDefault(); commit(o.branch); }}
