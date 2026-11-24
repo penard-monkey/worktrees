@@ -4426,7 +4426,7 @@ Phase 3: Frontend pane and mock harness
       if (holder) throw `the branch ${String(args.branch)} is already in the place ${holder.slug}: link that place to the item instead`;
       const r = await mockInvoke("new_place", { repo: args.repo, branch: args.branch, provider: args.provider, model: args.model }) as { ok: boolean; code: number; output: string; slug?: string };
       if (!r.slug) return { result: r, started: null, doc: null };
-      let result = r;
+      let result: typeof r & { warnings?: string[] } = /Second/.test(item.title) ? { ...r, warnings: [".planning/ is not ignored by git in this repo"] } : r;
       if (/dead/.test(item.title) && !args.force) {
         editPlace(args.repo, r.slug, (p) => {
           p.agent_sessions = agentSessions(sessionName(findProject(args.repo)?.snapshot?.prefix ?? "repo", r.slug!), null);

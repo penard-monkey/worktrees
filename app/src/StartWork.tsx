@@ -87,6 +87,7 @@ export function StartReview(props: {
         {problem && <p className="sw-note sw-bad" role="alert" data-testid="start-problem">{problem}</p>}
         {err && <p className="sw-note sw-bad" role="alert" data-testid="start-error">{err}</p>}
         {started && !refused && !err && <p className="sw-note" data-testid="start-done">Started in {started.slug}. Its agent opens on the brief.</p>}
+        {started && !!done?.result.warnings?.length && <p className="sw-note sw-bad" data-testid="start-warnings">{done.result.warnings.join("\n")}</p>}
         {refused && <p className="sw-note sw-bad" role="alert" data-testid="start-refused">The place {started!.slug} is ready with its brief. Its agent was not started: {lastLine(done!.result.output)}</p>}
         {done?.plan_error && <p className="sw-note sw-bad" role="alert" data-testid="start-plan-error">{done.plan_error}</p>}
         <div className="sw-foot">

@@ -316,6 +316,10 @@ async function slow(page, tag) {
     ok(there && !kinds.includes("gone"), `${tag} ${where}: a place just started is never called removed while the list is slow (${kinds})`);
     await page.evaluate(([r, s]) => window.__mock.placeRemoveElsewhere(r, s), [ROOT, "feat-p5-role"]);
     ok(await until(page, (s) => document.querySelector(`[data-testid=${s}-work]`)?.dataset.place === "gone", sel, 15000), `${tag} ${where}: …and one that is gone still says so`);
+    await page.click("[data-testid=start-close]");
+    await page.locator(`[data-testid=${sel}-work]`).nth(1).locator(`[data-testid=${sel}-review]`).click();
+    await page.click("[data-testid=start-go]");
+    ok(await until(page, () => document.querySelector("[data-testid=start-warnings]")?.textContent.includes("not ignored"), null, 15000), `${tag} ${where}: a start that worked still says what it warned of`);
   }
 }
 
