@@ -135,7 +135,12 @@ impl Invite {
     /// The invite `pair_begin` names: `{"name": …}` for a new guest, or
     /// `{"guest": <id>}` for one the host has. A new name already used by a
     /// guest, in any case, is refused, so two people never share a name in a
-    /// thread and a re-invite pairs the person the host meant (F7).
+    /// thread and a re-invite pairs the person the host meant (F7). A name a
+    /// REMOVED guest had ([`super::devices::GuestView::removed`]) is not refused: it
+    /// re-admits that same person, so a thread names their old posts and
+    /// their new ones as one guest. A second principal of that name would be
+    /// two Brets in one thread, which F7 exists to prevent; and the owner is
+    /// told so before inviting (`LaneShare.tsx`'s Who step).
     pub fn from_value(v: &Value, devices: &DeviceRegistry) -> Result<Invite, String> {
         const SHAPE: &str = r#"an invite is {"name": "<a new guest's name>"} or {"guest": "<an existing guest's id>"}"#;
         let m = v.as_object().filter(|m| m.len() == 1).ok_or(SHAPE)?;
@@ -144,9 +149,15 @@ impl Invite {
             name_ok(&name)?;
             // F7: in any case or spacing ("bret" beside "Bret" was a second person).
             let guests = devices.guests()?;
-            let twin = guests.iter().find(|g| g.name == name).or_else(|| guests.iter().find(|g| super::devices::same_guest_name(&g.name, &name)));
-            if let Some(g) = twin {
+            let twin = |removed: bool| {
+                let of = || guests.iter().filter(move |g| g.removed() == removed);
+                of().find(|g| g.name == name).or_else(|| of().find(|g| super::devices::same_guest_name(&g.name, &name)))
+            };
+            if let Some(g) = twin(false) {
                 return Err(super::devices::guest_name_taken(&g.name));
+            }
+            if let Some(g) = twin(true) {
+                return Ok(Invite::Existing { id: g.id.clone(), name: g.name.clone() });
             }
             return Ok(Invite::New { id: super::devices::new_guest_id(), name });
         }

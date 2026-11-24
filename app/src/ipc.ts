@@ -90,6 +90,21 @@ export const ShimChannel = function <T>(onmessage?: (response: T) => void): Chan
   return door.localChannel ? door.localChannel<T>(onmessage) : door.channel<T>(onmessage);
 } as unknown as new <T>(onmessage?: (response: T) => void) => Channel<T>;
 
+/** What the menu bar sends the window in front (src-tauri/src/winmenu.rs). */
+export type MenuChosen = {
+  id: string;
+  chord: { key: string; code: string; shift: boolean; alt: boolean; focus: boolean } | null;
+};
+
+/** Hear the menu bar, which is the SHIM's and not the engine's: `listen` is
+ *  the socket's in the app. `label` is this window's, and the target matters:
+ *  an untargeted listener hears what was sent to the OTHER window too. A
+ *  browser page has no menu bar and never hears one. */
+export function listenMenu(label: string, handler: (m: MenuChosen) => void): Promise<UnlistenFn> {
+  if (!("__TAURI_INTERNALS__" in window)) return Promise.resolve(() => {});
+  return tauriListen<MenuChosen>("menu:item", (e) => handler(e.payload), { target: { kind: "WebviewWindow", label } });
+}
+
 // ── does this window run on the host ────────────────────────────────────────
 
 /** Why this window cannot act on its engine's paths, or null when it can.
@@ -150,7 +165,9 @@ export const CLIENT_LOCAL: readonly string[] = [
  *  `engine_connect` finds or starts serve and is the ONLY way its token reaches
  *  the page; `raise_window` brings the main window forward for `app:open-doc`;
  *  `open_companion` opens (or raises) the Ideas companion window, and
- *  `close_companion` closes it when the Ideas beta is turned off. The
+ *  `close_companion` closes it when the Ideas beta is turned off;
+ *  `window_zoom` is the calling window's own kept zoom and `menu_ideas` puts
+ *  the Ideas beta's items in the menu bar. The
  *  `remote_*` ones are the remote door's (src-tauri/src/remote.rs): the hosts
  *  this machine is paired with, pairing, the choice of engine, following a
  *  host that moved (its address code), the pinned pipe to a paired host
@@ -160,6 +177,8 @@ export const SHIM_COMMANDS: readonly string[] = [
   "raise_window",
   "open_companion",
   "close_companion",
+  "window_zoom",
+  "menu_ideas",
   "remote_hosts",
   "remote_choose",
   "remote_forget",
@@ -515,6 +534,9 @@ export const CONSOLE_ROWS: readonly string[] = [
   "share_used",
   // and the proof before it that the lane's live session is the bound one
   "share_check",
+  // plans and their workspaces (idea board phase 4): desktop only
+  "plan_make", "plan_read", "plan_add_ideas", "plan_remove_idea", "plan_add_project",
+  "workspace_from_plan", "workspace_set_plan", "workspace_link_idea", "workspace_unlink_idea", "workspace_overview",
 ];
 
 /** The device's capabilities on the host this window drives, from the remote

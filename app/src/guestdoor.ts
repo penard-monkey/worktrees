@@ -23,6 +23,14 @@
 // Nothing is queued while the app is closed: every (re)connect re-reads
 // `shares_list` (the guest store does), which is where a closed app's news is.
 //
+// A loss the HOST explains as this device's end is not offline: the host
+// closing with `revoked`, `removed` or `disabled` (conn.rs's `Clients::hear`),
+// or TLS refusing this device's key on a redial (pipe.rs's `upgrade_error`).
+// Then the state is `removed`, no timer redials (every try would be refused
+// the same way), and only a person's Retry dials again: a disabled device can
+// be turned back on. Until v0.52.0's three-VM run a removed guest read
+// "offline" and redialled forever.
+//
 // No runtime imports: transport-check loads this file as a `data:` module.
 import type { EventCallback, UnlistenFn } from "./ipc";
 import type { HostSummary } from "./ipcremote";
@@ -51,7 +59,28 @@ export type SharesChanged = { what: string; share?: string; seq?: number; to?: s
 export type GuestState =
   | { kind: "connecting" }
   | { kind: "up" }
-  | { kind: "offline"; why: string; retryAt: number | null };
+  | { kind: "offline"; why: string; retryAt: number | null }
+  | { kind: "removed"; why: string; by: RemovedBy };
+
+/** How the host ended this device: its close reason, or `refused` for a key
+ *  TLS turned away (revoked, disabled or expired there: TLS does not say). */
+export type RemovedBy = "revoked" | "removed" | "disabled" | "refused";
+
+/** pipe.rs's `HOST_CLOSED`: how the pipe's words for a host's close begin,
+ *  its reason after them. ipcws.ts has the same constant; this file may not
+ *  import it (transport-check holds it to pipe.rs). */
+export const HOST_CLOSED_BY = "the host closed the connection: ";
+/** pipe.rs's words when TLS refuses this device's key. */
+export const KEY_REFUSED = "the host refused this device's key";
+
+/** The host ended this device (`RemovedBy`), or null for any other loss: a
+ *  host that quit, no route, `unreadable` (the host's device file, which a
+ *  fix there brings back). Pure, for the check. */
+export function removedBy(why: string): RemovedBy | null {
+  const m = new RegExp(`${HOST_CLOSED_BY}(revoked|removed|disabled)(?![\\w-])`).exec(why);
+  if (m) return m[1] as RemovedBy;
+  return why.includes(KEY_REFUSED) ? "refused" : null;
+}
 
 /** A host this machine is a guest of (`HostSummary.guest`). */
 export const isGuestHost = (h: Pick<HostSummary, "guest">): boolean => h.guest === true;
@@ -82,8 +111,9 @@ export type GuestLink = {
   onChanged(f: (p: SharesChanged) => void): () => void;
   state(): GuestState;
   onState(f: () => void): () => void;
-  /** Try now (a person pressed Reconnect, or the window came back). */
-  retry(): void;
+  /** Try now: the window came back, or (`manual`) a person pressed Retry.
+   *  A removed link dials only on a person's Retry. */
+  retry(manual?: boolean): void;
   close(): void;
 };
 
@@ -113,6 +143,11 @@ export function guestLink(host: HostSummary, dial: GuestDial, env: GuestEnv): Gu
 
   const schedule = (why: string) => {
     if (closed) return;
+    const by = removedBy(why);
+    if (by) {
+      set({ kind: "removed", why, by });
+      return;
+    }
     const ms = RETRY_MS[Math.min(attempt, RETRY_MS.length - 1)];
     attempt += 1;
     set({ kind: "offline", why, retryAt: env.now() + ms });
@@ -170,7 +205,7 @@ export function guestLink(host: HostSummary, dial: GuestDial, env: GuestEnv): Gu
     call<T>(cmd: GuestCommand, args?: Record<string, unknown>): Promise<T> {
       const refused = notAGuestRow(cmd);
       if (refused) return Promise.reject(refused);
-      if (!sock) return Promise.reject(st.kind === "offline" ? st.why : `${host.name} is not connected yet`);
+      if (!sock) return Promise.reject(st.kind === "offline" || st.kind === "removed" ? st.why : `${host.name} is not connected yet`);
       return sock.invoke<T>(cmd, args);
     },
     onChanged(f) {
@@ -182,8 +217,9 @@ export function guestLink(host: HostSummary, dial: GuestDial, env: GuestEnv): Gu
       stateSubs.add(f);
       return () => { stateSubs.delete(f); };
     },
-    retry() {
+    retry(manual = false) {
       if (closed || st.kind === "up" || st.kind === "connecting") return;
+      if (st.kind === "removed" && !manual) return;
       void connect();
     },
     close() {

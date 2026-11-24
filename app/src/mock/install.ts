@@ -362,7 +362,7 @@ const projectName = (root: string) => root.split("/").filter(Boolean).pop() ?? r
 // ── named workspaces (idea board phase 2): `workspaces.json`, the core store's
 // shape. Empty unless `?workspaces=1`, which seeds two workspaces sharing a
 // project plus one reference to a root that is not registered.
-type MockWsDef = { id: string; name: string; projects: string[]; color?: string | null };
+type MockWsDef = { id: string; name: string; projects: string[]; color?: string | null; plan?: string | null; ideas?: string[] };
 /** Core's `workspaces::COLORS`; workspaces-check.mjs holds it to the page's. */
 const MOCK_WS_COLORS = ["blue", "purple", "green", "amber", "orange", "red", "teal", "gray"];
 let mockWsSeq = 0;
@@ -382,7 +382,7 @@ const mockWsView = () => {
   mockWsDefs ??= mockWsSeed();
   return {
     workspaces: mockWsDefs.map((w) => ({
-      id: w.id, name: w.name, color: w.color ?? null,
+      id: w.id, name: w.name, color: w.color ?? null, plan: w.plan ?? null, ideas: w.ideas ?? [],
       projects: w.projects.map((root) => {
         const on = ws.projects.some((p) => p.root === root);
         return { root, name: on ? projectName(root) : null, registered: on };
@@ -621,7 +621,7 @@ function mockGuidance(): Record<string, unknown> {
     skill_hash: mockHash(MOCK_SKILL_DEFAULT),
     skill_edit: mockSkillEdit,
     edit_path: "/Users/demo/.config/worktrees/guidance/SKILL.md",
-    rules: "Managed by worktrees: every branch lives in its own PLACE (a git worktree under .worktrees/ plus a tmux session). Do branch work in a place: create_worktree or `worktrees new <branch>`. Never `git worktree add`; never switch branches in (main). Run gates, builds and full test suites as `worktrees run --slot gate -- <cmd>` (the machine is shared with every lane); nudge or launch lanes at most three at a time. A lane commits, runs its gates and reports to the place that briefed it; that place, normally (main), pushes, opens the PR and merges, as far as the user asked. Brief a lane to push, open a PR, merge, deploy or upload only when the user asked that lane to, and never hand it credentials or send it to change anything live. For the how-to (handing work to another agent, messaging between places, finishing and releasing from a place), use the worktrees skill if you have it, or run `worktrees guide`.",
+    rules: "Managed by worktrees: every branch lives in its own PLACE (a git worktree under .worktrees/ plus a tmux session). Do branch work in a place: create_worktree or `worktrees new <branch>`. Never `git worktree add`; never switch branches in (main). Run gates, builds and full test suites as `worktrees run --slot gate -- <cmd>` (the machine is shared with every lane); nudge or launch lanes at most three at a time. A lane commits, runs its gates and reports to the place that briefed it; that place, normally (main), pushes, opens the PR and merges, as far as the user asked. Brief a lane to push, open a PR, merge, deploy or upload only when the user asked that lane to, and never hand it credentials or send it to change anything live. The user's ideas (their own notes) are readable from any place with the MCP tools ideas_list, idea_read and idea_related; only (main) writes them, and only when the user asks. For the how-to (handing work to another agent, messaging between places, finishing and releasing from a place), use the worktrees skill if you have it, or run `worktrees guide`.",
   };
 }
 let mockMcp: Record<string, unknown> = (() => {
@@ -1972,6 +1972,7 @@ const ideaNameFor = (d: MockIdea) => {
 const ideaRow = (d: MockIdea) => ({
   id: d.id && /^[0-9A-HJKMNP-TV-Z]{26}$/.test(d.id) ? d.id : null, title: ideaTitle(d.content) ?? d.file.replace(/\.md$/, ""), file: d.file, created: d.created,
   mtime_ms: d.mtime_ms, size: new TextEncoder().encode(d.content).length,
+  kind: /^---\r?\n[\s\S]*?^plan_of:/m.test(d.content.split(/\r?\n(?:---|\.\.\.)\r?\n/)[0] + "\n") ? "plan" : "idea",
   ...(d.id ? (/^[0-9A-HJKMNP-TV-Z]{26}$/.test(d.id) ? {} : { problem: "bad-id" }) : { problem: "no-id" }),
 });
 const ideaById = (id: string) => {
@@ -2088,6 +2089,70 @@ function ideaLookup(id: string): { d: MockIdea; via: boolean } {
 const ideaBody = (t: string) => t.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, "");
 const ideaBodyNoTitle = (t: string) => ideaBody(t).replace(/^ {0,3}# .*\r?\n?/m, "").replace(/^(\r?\n)+/, "").trimEnd().replace(/\r\n/g, "\n");
 const ideaToday = () => new Date().toISOString().slice(0, 10);
+/** A sketch of `worktrees_core::plans::read` for the harness: the two
+ *  sections, each line read or named. Core's reader is the one the app uses
+ *  (`plan_read`); this only lets the mock show problems and rows. */
+function mockPlanRead(text: string) {
+  const lines = text.split(/\r?\n/);
+  let start = 0;
+  if (lines[0] === "---") { const e = lines.indexOf("---", 1); start = e > 0 ? e + 1 : 0; }
+  type P = { line: number; section: "projects" | "work"; text: string; words: string };
+  const problems: P[] = [];
+  type W = { line: number; title: string; project: string | null; branch: string | null; brief: string | null; started: string | null };
+  let projects: { line: number; name: string; kind: string; url?: string; path?: string }[] | null = null;
+  let work: W[] | null = null;
+  let sec = "";
+  let item = null as W | null;
+  let brief = null as string[] | null;
+  const close = () => {
+    if (!item) return;
+    if (brief) { item.brief = brief.map((l) => l.replace(/^ {2}/, "")).join("\n").trim(); brief = null; }
+    for (const k of ["project", "branch"] as const) if (!item[k]) problems.push({ line: item.line, section: "work", text: `### ${item.title}`, words: `the item “${item.title}” has no \`${k}:\` line` });
+    work!.push(item); item = null;
+  };
+  for (let i = start; i < lines.length; i++) {
+    const l = lines[i], n = i + 1, t = l.trim();
+    const h = /^#{1,2} (.*)$/.exec(l);
+    if (h) { close(); sec = h[1].trim().toLowerCase(); if (sec === "projects") projects = []; if (sec === "work") work = []; continue; }
+    if (sec === "projects") {
+      if (!t || /^<!--.*-->$/.test(t)) continue;
+      const m = /^[-*] (.*)\(([^()]*)\)\s*$/.exec(t);
+      const kind = m?.[2].trim() ?? "";
+      if (!m || !m[1].trim()) { problems.push({ line: n, section: "projects", text: l, words: "not a project line: write `- <name> (registered)`, `- <name> (clone: <url>)` or `- <name> (new: <path>)`" }); continue; }
+      if (kind === "registered") projects!.push({ line: n, name: m[1].trim(), kind });
+      else if (/^clone:\s*\S/.test(kind)) projects!.push({ line: n, name: m[1].trim(), kind: "clone", url: kind.slice(6).trim() });
+      else if (/^new:\s*\S/.test(kind)) projects!.push({ line: n, name: m[1].trim(), kind: "new", path: kind.slice(4).trim() });
+      else problems.push({ line: n, section: "projects", text: l, words: `unknown kind \`(${kind})\`` });
+    } else if (sec === "work") {
+      if (brief && (!t || /^\s/.test(l))) { brief.push(l); continue; }
+      if (brief && item) { item.brief = brief.map((x) => x.replace(/^ {2}/, "")).join("\n").trim(); brief = null; }
+      if (l.startsWith("### ")) { close(); item = { line: n, title: l.slice(4).trim(), project: null, branch: null, brief: null, started: null }; continue; }
+      if (!t || /^<!--.*-->$/.test(t)) continue;
+      if (!item) { problems.push({ line: n, section: "work", text: l, words: "text before the first work item: each item starts with `### <title>`" }); continue; }
+      const kv = /^([A-Za-z0-9_-]+):\s*(.*)$/.exec(t);
+      if (!kv) { problems.push({ line: n, section: "work", text: l, words: "not a work item line: expected `project:`, `branch:`, `brief:` or `started:`" }); continue; }
+      const [, k, v] = kv;
+      if (k === "project" || k === "branch" || k === "started") item[k] = v;
+      else if (k === "brief") { if (v === "|") brief = []; else item.brief = v; }
+      else problems.push({ line: n, section: "work", text: l, words: `unknown key \`${k}:\`: expected \`project:\`, \`branch:\`, \`brief:\` or \`started:\`` });
+    }
+  }
+  close();
+  problems.sort((a, b) => a.line - b.line);
+  return { projects, work, problems };
+}
+function mockPlanView(d: MockIdea) {
+  const r = mockPlanRead(d.content);
+  const ideas = ideaList(d.content, "plan_of").map((i) => { try { const x = ideaLookup(i); return { id: i, live: x.d.id, title: ideaRow(x.d).title, merged: x.via }; } catch { return { id: i, live: null, title: null, merged: false }; } });
+  const project_states = (r.projects ?? []).map((p) => {
+    if (p.kind === "clone") return { line: p.line, name: p.name, state: "to-clone", url: p.url };
+    if (p.kind === "new") return { line: p.line, name: p.name, state: "to-create", path: p.path };
+    const hits = ws.projects.filter((x) => (p.name.startsWith("/") ? x.root === p.name : projectName(x.root) === p.name));
+    return hits.length === 1 ? { line: p.line, name: p.name, state: "registered", root: hits[0].root } : { line: p.line, name: p.name, state: "not-registered" };
+  });
+  const w = (mockWsDefs ?? []).find((x) => x.plan === d.id);
+  return { doc: { ...ideaRow(d), content: d.content }, ideas, projects: r.projects, work: r.work, problems: r.problems, project_states, workspace: w ? { id: w.id, name: w.name } : null };
+}
 /** The mtime an outside act gives a file: later than anything before it,
  *  even inside one millisecond. */
 let mockIdeaClock = 0;
@@ -3128,6 +3193,10 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     // `engine_connect` is never reached here — the harness boots on this mock,
     // not on an engine (main.tsx) — and says so if something ever calls it.
     case "raise_window":
+      return null;
+    // A browser tab has no menu bar, and no zoom of its own the shim kept.
+    case "menu_ideas":
+    case "window_zoom":
       return null;
     // The Ideas companion: a second Tauri window in the app; in the harness, a
     // second tab on the same dev server, carrying this page's query.
@@ -4239,6 +4308,118 @@ Phase 3: Frontend pane and mock harness
       }
       ideasTouched();
       return { ...ideaRow(d), content: d.content };
+    }
+    // ── plans (phase 4): `worktrees_api::plans` over `mockIdeas`, the reader
+    // `mockPlanRead` (a sketch of `worktrees_core::plans`, for the harness).
+    case "plan_make": {
+      const ids = [...new Set(((args.ideas as string[]) ?? []).map((i) => ideaLookup(i).d))];
+      if (!ids.length) throw "a plan is made from one idea or more";
+      if (ids.some((d) => ideaRow(d).kind === "plan")) throw "a plan is made from ideas";
+      const draft = args.draft as string | undefined;
+      if (draft != null && /^---\r?\n/.test(draft)) throw "the text must be the idea's body, without its frontmatter (the `---` block)";
+      const t0 = String(args.title ?? "").trim() || ideaRow(ids[0]).title;
+      const title = /^plan:/i.test(t0) ? t0 : `Plan: ${t0}`;
+      const links = ids.map((d) => `[${ideaRow(d).title}](idea:${d.id})`);
+      const from = links.length === 1 ? links[0] : `${links.slice(0, -1).join(", ")} and ${links[links.length - 1]}`;
+      const body = draft ?? `# ${title}\n\nFrom ${from}.\n\n## Goal\n\n## Projects\n\n## Work\n`;
+      const id = ideaId();
+      const d: MockIdea = { id, file: ideaFree(ideaSlug(ideaTitle(body) ?? title)), created: ideaToday(), mtime_ms: ideaNow(),
+        content: `---\nid: ${id}\nplan_of: [${ids.map((x) => x.id).join(", ")}]\ncreated: ${ideaToday()}\n---\n\n${body}` };
+      mockIdeas.set(d.file, d);
+      ideasTouched();
+      return { ...ideaRow(d), content: d.content };
+    }
+    case "plan_read": {
+      const d = ideaLookup(args.id as string).d;
+      if (ideaRow(d).kind !== "plan") throw `“${ideaRow(d).title}” is not a plan`;
+      return mockPlanView(d);
+    }
+    case "plan_add_ideas":
+    case "plan_remove_idea":
+    case "plan_add_project": {
+      const d = ideaById(args.id as string);
+      if (ideaRow(d).kind !== "plan") throw `“${ideaRow(d).title}” is not a plan`;
+      ideaCas(d, args.expectedMtime ?? args.expected_mtime);
+      const before = d.content;
+      let list = ideaList(d.content, "plan_of");
+      const live = (x: string) => { try { return ideaLookup(x).d.id; } catch { return null; } };
+      if (cmd === "plan_add_ideas") {
+        for (const i of (args.ideas as string[]) ?? []) {
+          const x = ideaLookup(i).d;
+          if (ideaRow(x).kind === "plan") throw `“${ideaRow(x).title}” is a plan: a plan is made from ideas`;
+          if (!list.some((y) => live(y) === x.id)) list.push(x.id!);
+        }
+      } else if (cmd === "plan_remove_idea") {
+        const gone = live(args.idea as string);
+        list = list.filter((y) => y !== args.idea && (gone === null || live(y) !== gone));
+      }
+      if (cmd === "plan_add_project") {
+        const root = args.root as string;
+        if (!ws.projects.some((p) => p.root === root)) throw `not a registered project: ${root}`;
+        const name = projectName(root);
+        if (!mockPlanRead(d.content).projects?.some((p) => p.name === name)) {
+          d.content = /^## Projects[ \t]*$/m.test(d.content)
+            ? d.content.replace(/^## Projects[ \t]*\n((?:(?!#{1,2} ).*\n)*?)(\n*)(?=#{1,2} |$(?![\s\S]))/m, (_m, body: string, gap: string) => `## Projects\n${body}- ${name} (registered)\n${gap}`)
+            : `${d.content.trimEnd()}\n\n## Projects\n\n- ${name} (registered)\n`;
+        }
+      } else {
+        d.content = list.length ? ideaSetList(d.content, "plan_of", list) : d.content.replace(/^plan_of:.*$/m, "plan_of: []");
+      }
+      if (d.content !== before) { ideaKeep(d.id!, before); d.mtime_ms = ideaNow(); ideasTouched(); }
+      return { ...ideaRow(d), content: d.content };
+    }
+    case "workspace_from_plan": {
+      mockWsView();
+      const d = ideaLookup(args.plan as string).d;
+      const had = mockWsDefs!.find((w) => w.plan === d.id);
+      if (had) return { ...mockWsView(), id: had.id, created: false };
+      const v = mockPlanView(d);
+      const base = ideaRow(d).title.replace(/^plan:\s*/i, "") || "Plan";
+      let name = base;
+      for (let n = 2; mockWsDefs!.some((w) => w.name.toLowerCase() === name.toLowerCase()); n++) name = `${base} ${n}`;
+      const w: MockWsDef = { id: mockWsId(), name, plan: d.id, ideas: v.ideas.map((i) => i.live).filter((x): x is string => !!x),
+        projects: v.project_states.map((p) => p.root).filter((x): x is string => !!x) };
+      mockWsDefs!.push(w);
+      return { ...mockWsView(), id: w.id, created: true };
+    }
+    case "workspace_set_plan": {
+      mockWsView();
+      const w = mockWsGet(args.id);
+      const plan = args.plan == null ? null : ideaLookup(args.plan as string).d;
+      if (plan && ideaRow(plan).kind !== "plan") throw `“${ideaRow(plan).title}” is not a plan`;
+      const other = plan && mockWsDefs!.find((x) => x.id !== w.id && x.plan === plan.id);
+      if (other) throw `that plan already has a workspace, '${other.name}': a plan has at most one`;
+      w.plan = plan?.id ?? null;
+      return mockWsView();
+    }
+    case "workspace_link_idea": {
+      mockWsView();
+      const w = mockWsGet(args.id);
+      const d = ideaLookup(args.idea as string).d;
+      if (ideaRow(d).kind === "plan") throw `“${ideaRow(d).title}” is a plan: set it as the workspace's plan`;
+      w.ideas = [...new Set([...(w.ideas ?? []), d.id!])];
+      return mockWsView();
+    }
+    case "workspace_unlink_idea": {
+      mockWsView();
+      const w = mockWsGet(args.id);
+      w.ideas = (w.ideas ?? []).filter((i) => i !== args.idea);
+      return mockWsView();
+    }
+    case "workspace_overview": {
+      mockWsView();
+      const w = mockWsGet(args.id);
+      const look = (i: string) => { try { const r = ideaLookup(i); return { id: i, live: r.d.id, title: ideaRow(r.d).title, merged: r.via }; } catch { return { id: i, live: null, title: null, merged: false }; } };
+      const out = { id: w.id, name: w.name, plan: null as unknown, ideas: (w.ideas ?? []).map(look), projects: null as unknown, work: null as unknown, problems: [] as unknown[] };
+      if (w.plan) {
+        try {
+          const v = mockPlanView(ideaLookup(w.plan).d);
+          out.plan = { id: w.plan, live: v.doc.id, title: v.doc.title, file: v.doc.file };
+          out.projects = v.projects === null ? null : v.project_states.map((p) => ({ ...p, in_workspace: !!p.root && w.projects.includes(p.root) }));
+          out.work = v.work; out.problems = v.problems;
+        } catch (e) { out.plan = { id: w.plan, live: null, title: null, file: null, error: String(e) }; }
+      }
+      return out;
     }
     // ── idea sessions (phase S): see `mockConvs` ─────────────────────────────
     case "idea_conversations": {
@@ -5714,11 +5895,13 @@ Phase 3: Frontend pane and mock harness
     case "share_allow": {
       consoleOnly(cmd);
       const sh = mockShare(args.share);
+      // As the host's ShareStore::allow: a guest the share did not name is
+      // named on it, allowed (Sharing…'s Add someone…).
+      if (!mockGuests.some((x) => x.id === args.principal)) throw `no guest ${args.principal}`;
       const g = sh.guests.find((x) => x.principal === args.principal);
-      if (!g) throw `${args.principal} is not on share ${sh.id}`;
-      if (g.state === "allowed") return false;
-      g.state = "allowed"; g.since = nowSec();
-      threadEvent(sh.id, "joined", g.principal);
+      if (g?.state === "allowed") return false;
+      if (g) { g.state = "allowed"; g.since = nowSec(); } else sh.guests.push({ principal: String(args.principal), state: "allowed", since: nowSec() });
+      threadEvent(sh.id, "joined", String(args.principal));
       sharesChanged("allowed", sh.id);
       return true;
     }
@@ -5859,9 +6042,14 @@ Phase 3: Frontend pane and mock harness
         if (inv.name !== undefined) {
           const name = String(inv.name).trim();
           if (!name || name.length > 64) throw "a name is 1 to 64 characters";
-          const twin = mockGuests.find((g) => g.name.trim().toLowerCase() === name.toLowerCase());
+          // As serve's `Invite::from_value`: a live guest's name is taken; a
+          // removed guest's (no device left unrevoked) re-admits that guest.
+          const live = (g: { id: string }) => mockDevices.some((d) => d.principal === g.id && d.revoked_at == null);
+          const twins = mockGuests.filter((g) => g.name.trim().toLowerCase() === name.toLowerCase());
+          const twin = twins.find(live);
           if (twin) throw `a guest named "${twin.name}" exists: pair another device for them, or use another name`;
-          invite = { kind: "new", id: `g_${Math.random().toString(36).slice(2, 12)}`, name };
+          const back = twins.find((g) => g.name === name) ?? twins[0];
+          invite = back ? { kind: "existing", id: back.id, name: back.name } : { kind: "new", id: `g_${Math.random().toString(36).slice(2, 12)}`, name };
         } else {
           const g = mockGuests.find((x) => x.id === inv.guest);
           if (!g) throw `no guest ${inv.guest}`;

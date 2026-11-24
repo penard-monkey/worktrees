@@ -72,9 +72,12 @@ const to = appLines.findIndex((l, i) => i > from && l.includes("if (!(e.metaKey 
 const gFrom = appLines.findIndex((l) => l.includes("if ((e.metaKey || e.ctrlKey) && modalOpen()) {"));
 const gTo = appLines.findIndex((l, i) => i > gFrom && l.trim() === "}");
 const zFrom = appLines.findIndex((l, i) => i > gTo && l.includes("if (dir !== undefined) {"));
-// The direction tables + `zoomDir` live at module scope; take them verbatim too,
-// so a layout face added there is a face this check actually exercises.
-const dirTables = fs.readFileSync(APP, "utf8").match(/const ZOOM_BY_KEY[\s\S]*?\nconst zoomDir = [^\n]*\n/);
+// The direction tables + `zoomDir` are zoomkeys.ts, which every window asks;
+// inline the real file, so a layout face added there is one this exercises.
+const zoomKeysSrc = read("../src/zoomkeys.ts").replace(/^export /gm, "");
+const dirTables = /const zoomDir = /.test(zoomKeysSrc) ? [zoomKeysSrc] : null;
+if (!/import \{ zoomDir \} from "\.\/zoomkeys";/.test(fs.readFileSync(APP, "utf8")))
+  fail("App.tsx no longer takes zoomDir from zoomkeys.ts — a second answer to what a size chord is");
 // The navigation-history chord (⌘[ ⌘] / ⌘← ⌘→) sits in the same slice, between
 // the zoom block and the meta-only gate, so its module-scope predicate comes in
 // verbatim too — a stub would be a second answer to "which keys are Back".
@@ -256,6 +259,52 @@ eq(nav("[", { code: "BracketLeft", modal: true }), [[], false, []], "⌘[ behind
 eq(nav("ArrowLeft", { shift: true }), [[], false, []], "⌘⇧← (select to line start) is not Back");
 eq(nav("ArrowLeft", { alt: true }), [[], false, []], "⌘⌥← is not Back");
 eq(nav("=", { code: "Equal" }), [[], true, [{ app_zoom: 1.1 }]], "⌘= is still zoom, never history");
+
+// ── the Ideas window: its own size, the same steps ─────────────────────────
+// The REAL companion/zoom.ts over the real settings.ts and zoomkeys.ts, with
+// `invoke` recording what reaches the shim.
+{
+  const calls = [];
+  globalThis.__wtInvoke = (cmd, args) => { calls.push([cmd, args]); return Promise.resolve(cmd === "window_zoom" ? globalThis.__wtKept : undefined); };
+  const zoomSrc = read("../companion/zoom.ts");
+  for (const m of ["../src/ipc", "../src/settings", "../src/zoomkeys"])
+    if (!zoomSrc.includes(`from "${m}"`)) fail(`companion/zoom.ts no longer imports ${m} — the inlining below is stale`);
+  const src = settingsSrc.replace("const invoke = () => Promise.resolve();", "const invoke = (c: string, a?: any) => (globalThis as any).__wtInvoke(c, a);")
+    + zoomKeysSrc + zoomSrc.replace(/^import .*$/gm, "");
+  const fresh = async () => { calls.length = 0; return new (await load(`${src}\n// ${Math.random()}`, "companion-zoom.ts")).WindowZoom(); };
+  const k = (key, o = {}) => { let p = 0; return { key, code: "", metaKey: true, ctrlKey: false, altKey: false, ...o, preventDefault: () => { p++; }, get prevented() { return p; } }; };
+
+  let z = await fresh();
+  z.inherit(1.1);
+  eq(calls, [["set_zoom", { factor: 1.1 }]], "the Ideas window opens at the app's size, and keeps nothing for having taken it");
+  calls.length = 0;
+  const e1 = k("+");
+  eq([z.key(e1), e1.prevented, calls], [true, 1, [["set_zoom", { factor: 1.25, keep: true }]]], "one ⌘+ is one step from there, kept as this window's own");
+  calls.length = 0;
+  z.inherit(2);
+  eq(calls, [], "a window with its own size stops taking the app's");
+  z.key(k("=")); z.key(k("-")); z.key(k("0"));
+  eq(calls.map((c) => c[1].factor), [1.5, 1.25, 1], "⌘= ⌘− ⌘0 walk the same steps");
+  for (const bad of [k("+", { metaKey: false, ctrlKey: true }), k("+", { altKey: true }), k("k")]) {
+    calls.length = 0;
+    eq([z.key(bad), bad.prevented, calls], [false, 0, []], "another chord is left alone");
+  }
+  z = await fresh();
+  globalThis.__wtKept = 1.5;
+  await z.load();
+  z.inherit(1.1);
+  eq(calls, [["window_zoom", undefined], ["set_zoom", { factor: 1.5 }]], "the kept size is restored, and the app's does not replace it");
+  z = await fresh();
+  globalThis.__wtKept = null;
+  await z.load();
+  z.inherit(1.1);
+  eq(calls.slice(1), [["set_zoom", { factor: 1.1 }]], "nothing kept: the app's");
+  for (let i = 0; i < 20; i++) z.key(k("+"));
+  eq(calls.at(-1)[1].factor, steps.at(-1), "the ceiling is the table's");
+  const comp = read("../companion/Companion.tsx");
+  if (!/const onKey = \(e: KeyboardEvent\) => \{ zoom\.key\(e\); \};\s*window\.addEventListener\("keydown", onKey\);/.test(comp)) fail("Companion.tsx: the size chords are not wired");
+  if (!/zoom\.inherit\(st\.app_zoom\)/.test(comp) || !/const zoomReady = zoom\.load\(\);/.test(comp)) fail("Companion.tsx: the saved size is not applied when the window opens");
+}
 
 // ── the wiring the chord hangs off ─────────────────────────────────────────
 // Everything above can pass with the feature entirely disconnected: delete the

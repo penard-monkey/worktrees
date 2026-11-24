@@ -26,7 +26,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Notice, Step } from "./chat";
 import { closeShare, guestLinkOf, joinShare, useGuests, type GuestHostView, type GuestShare } from "./guest";
-import { leavesGap, mergeNewest, mergeOlder, piecesOf, standing, type SharedPage, type SharedTurn } from "./guestview";
+import { leavesGap, mergeNewest, mergeOlder, piecesOf, removedWords, standing, type SharedPage, type SharedTurn } from "./guestview";
 import type { GuestLink } from "./guestdoor";
 import { Markdown } from "./markdown";
 import { ThreadPanel } from "./ThreadPanel";
@@ -271,7 +271,7 @@ function ShareView({ hv, share, binding }: { hv: GuestHostView; share: GuestShar
           )}
           <button className="ctrl sm" onClick={closeShare} title="Back to your own places">Close</button>
         </header>
-        {st.words && <div className={"guest-banner" + (hv.link.kind === "offline" ? " offline" : "")} role="status" data-testid="guest-banner">{st.words}{hv.link.kind === "offline" && turns.length ? ". Showing the last page read." : "."}</div>}
+        {st.words && <div className={"guest-banner" + (hv.link.kind === "offline" || hv.link.kind === "removed" ? " offline" : "")} role="status" data-testid="guest-banner">{st.words}{(hv.link.kind === "offline" || hv.link.kind === "removed") && turns.length ? ". Showing the last page read." : "."}</div>}
         {joinErr && <div className="guest-banner" role="alert">Couldn’t ask to join: {joinErr}</div>}
         <div className="chat-scroll guest-scroll" ref={scroll} onScroll={(e) => { const el = e.currentTarget; atEnd.current = el.scrollHeight - el.scrollTop - el.clientHeight < 32; }}>
           <div className="chat-col">
@@ -296,7 +296,7 @@ function ShareView({ hv, share, binding }: { hv: GuestHostView; share: GuestShar
             ownerName={hv.owner}
             refresh={(hv.threadBump[share.id] ?? 0) + hv.bump}
             pollMs={hv.link.kind === "up" ? 30_000 : 0}
-            readOnly={hv.link.kind === "offline" ? `${hv.owner}'s host is offline: posting waits until it is back.` : null}
+            readOnly={hv.link.kind === "removed" ? `${removedWords(hv.link.by, hv.owner)}: posting is closed.` : hv.link.kind === "offline" ? `${hv.owner}'s host is offline: posting waits until it is back.` : null}
             banner={b?.state === "ended" ? "The session ended. The thread is still open." : undefined}
           />
         ) : (

@@ -1,0 +1,63 @@
+# V1 on the real v0.52.0 release with three people (personas/v1-release.yaml).
+# One section per person and role: <person>_host is that person's own app
+# acting on their own share, <person>_guest the same app reading someone
+# else's. macOS sections are in POINTS with the window pinned to config.toml's
+# `window`; Cy's (Debian, the AppImage maximized on a 1464x931 screen) are in
+# PIXELS, a capture being 1:1 there. Measured from captures on 2026-11-14.
+# Positions on the share strip move with the guests' names ("Shared with Bret
+# and Cy"), so they hold for THESE names.
+
+[dana_host]
+open_lane = [151, 335]         # gc-lane's row in the nav (ACTIVE)
+updates_close = [315, 680]
+allow = [643, 157]             # "Bret asks to join · Allow" (the strip, while asked)
+thread = [552, 157]            # "Shared with Bret and Cy · Thread · Sharing…"
+sharing = [621, 157]
+share_again = [610, 157]       # "Shared with Bret and Cy · ended · Share again · Thread · Sharing…"
+share_again_confirm = [925, 420]
+thread_ended = [686, 157]
+sharing_ended = [756, 157]
+use_these = [1238, 662]        # "Use these…" under the thread
+use_these_after = [1238, 643]  # after the first send: "Sent to the agent." under it
+use_no_note = [1080, 362]      # "Send without a note" (#669)
+stop = [852, 379]              # Sharing… dialog: "Stop sharing…" (two guests, "2 earlier
+stop_confirm = [927, 387]      #   sessions stay readable too": measured in that state)
+stop_earlier_dy = 0
+request_dismiss = [1236, 677]  # "Dismiss" on "<guest> asks to see <place>"
+
+[bret_guest]
+# Bret's sidebar shows TWO "DAVID'S PLACES" (B3: the dead pairing beside the
+# new one); the live share is the second group.
+open_share = [151, 388]
+updates_close = [315, 681]
+composer = [1120, 708]
+post = [1262, 726]
+blur = [200, 650]              # empty nav: takes the focus off the composer
+ask_main = [326, 423]          # "Ask" beside (main) under DAVID'S PLACES
+ask_note = [224, 495]
+ask_send = [162, 530]          # "Ask David to share"
+ask_cancel = [256, 530]
+
+[cy_guest]
+open_share = [130, 390]
+composer = [1222, 875]         # "Write in the thread"
+post = [1387, 886]
+blur = [180, 650]        # gc-lane under DAVID'S PLACES (below his own cy-lane)
+
+[cy_host]
+open_lane = [128, 332]         # cy-lane under ACTIVE
+allow = [577, 153]             # "Shared with Dana · Dana asks to join · Allow"
+thread = [489, 153]            # "Shared with Dana · Thread · Sharing…"
+sharing = [556, 153]
+use_these = [1368, 827]
+stop = [909, 356]              # Sharing… dialog: "Stop sharing…" (one guest)
+stop_confirm = [979, 363]
+
+[dana_guest]
+open_share = [151, 385]        # cy-lane under "OWNER'S PLACES" (B5: Cy's host has no name)
+composer = [1120, 708]
+post = [1262, 726]
+
+[macos]
+banner_hover = [1180, 90]
+banner_close = [1010, 50]
