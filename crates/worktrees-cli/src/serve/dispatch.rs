@@ -1,4 +1,4 @@
-//! The 290 commands, each with its exposure, capability and objects, in ONE
+//! The 292 commands, each with its exposure, capability and objects, in ONE
 //! table.
 //!
 //! A row is `name: Exposure [capability, object, …] => body`, and the macro
@@ -1503,7 +1503,7 @@ mod tests {
         Args(v.as_object().cloned().unwrap_or_default())
     }
 
-    /// 290 rows, no duplicates: the command layer's (143 at the extraction;
+    /// 292 rows, no duplicates: the command layer's (143 at the extraction;
     /// host policy's three getters, Kimi's six, the slots pair and
     /// `privacy_denial` since),
     /// Phase 2 slice 5's sixteen — the device rows, pairing and step-up —
@@ -1537,7 +1537,7 @@ mod tests {
     fn the_table_has_every_command_once() {
         let names: HashSet<&str> = TABLE.iter().map(|r| r.name).collect();
         assert_eq!(names.len(), TABLE.len(), "a command is listed twice");
-        assert_eq!(TABLE.len(), 290, "the table has 290 commands");
+        assert_eq!(TABLE.len(), 292, "the table has 292 commands");
     }
 
     /// The client-local set, spelled out: these must never run on the host.
@@ -1975,7 +1975,7 @@ mod tests {
             *groups.entry(g).or_default() += 1;
         }
         let want: BTreeMap<&str, usize> = [
-            ("read", 71), ("write", 23), ("admin", 42), ("console", 112), ("stream", 10), ("instruct", 8), ("answer", 2),
+            ("read", 72), ("write", 23), ("admin", 42), ("console", 113), ("stream", 10), ("instruct", 8), ("answer", 2),
             ("client-local", 6), ("loopback-only", 1), ("own", 7), ("guest", 8),
         ]
         .into();
