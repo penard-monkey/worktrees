@@ -3437,7 +3437,13 @@ async function mockInvoke(cmd: string, args: Args = {}): Promise<unknown> {
     case "privacy_denial":
       return fsDenied.get(args.path as string) ?? null;
 
+    case "idea_term_open":
     case "term_open": {
+      if (cmd === "idea_term_open") {
+        const c = convOf(args.id as string, args.conv as string);
+        if (!c.live) throw `no tmux session named ${convSession(c)}`;
+        args.session = convSession(c);
+      }
       // best-effort: render a canned banner into the xterm via the Channel
       // The middle lines are paths in the shapes agents print, so the
       // ⌘-click links (`resolve_term_paths` below) are drivable here: three

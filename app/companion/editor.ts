@@ -93,6 +93,8 @@ export type EditorHooks = {
   follow?(id: string): void;
   /** Whether text is selected, when that changes. */
   selected?(has: boolean): void;
+  /** The selection, or the text under one, moved. */
+  selectionMoved?(): void;
 };
 
 /** The phase 3 pieces: the `[[` picker's trigger and keys, following a link,
@@ -108,6 +110,7 @@ function relateExtensions(hooks: EditorHooks): Extension[] {
       if (u.selectionSet || u.docChanged) {
         const r = u.state.selection.main;
         if (u.startState.selection.main.empty !== r.empty) hooks.selected?.(!r.empty);
+        if (!r.empty || !u.startState.selection.main.empty) hooks.selectionMoved?.();
         let open: Parameters<NonNullable<EditorHooks["picker"]>>[0] = null;
         if (r.empty && u.view.hasFocus) {
           const line = u.state.doc.lineAt(r.head);

@@ -18,7 +18,7 @@ import {
   dayLabel, draftIsOwnSend, draftProblem, fieldWords, foldCalls, itemsOf, keyFocusOf, lineDiff, loadPrompt, loadTurns, noSessionYet, permissionAnswerWords, rereadTurns, startingUp,
   promptBody, questionAnswerWords, selectChoice, sendAnswer, sendDraft, sendMany, setAnswerText, setBoxText, setDraft,
   sendRulesFor, showFull, splitAtRule, stopTurn, ticksOf, toggleCall, toggleTick, tookReference, turnsUnsupported, underRoot, useChat,
-  type AskedStep, type CallRead, type FullRead, type Item, type PromptChoice, type PromptDetail, type ReadablePrompt, type Target, type ToolCall,
+  withQuote, type AskedStep, type CallRead, type FullRead, type Item, type PromptChoice, type PromptDetail, type ReadablePrompt, type Target, type ToolCall,
 } from "./chat";
 import { previewOf, type ChoiceWay } from "./chat";
 import { referenceInDraft } from "./dnd";
@@ -109,6 +109,21 @@ export type ChatPaneProps = {
   /** Read-only: what stands in the composer's place (an ended idea
    *  conversation's Resume bar). Nothing can be sent from it. */
   readOnly?: ReactNode;
+  /** Text the next message can carry as a quote (an idea's selection). */
+  quote?: ComposerQuote | null;
+};
+
+/** A quote offered to the composer. `on`: it goes with the next message, and
+ *  is drawn whole above the field first; off, a button offers it. */
+export type ComposerQuote = {
+  /** What it is of, in a few words: "lines 12–15". */
+  label: string;
+  /** Exactly what goes before the message. */
+  text: string;
+  on: boolean;
+  setOn(on: boolean): void;
+  /** The message it went with was delivered. */
+  sent(): void;
 };
 
 export function ChatPane(props: ChatPaneProps) {
@@ -290,7 +305,7 @@ export function ChatPane(props: ChatPaneProps) {
       )}
       </div>
       {props.readOnly ? props.readOnly : <Composer target={target} agent={agent} harness={reported ?? provider} fieldRef={fieldRef} waiting={prompt ? (prompt.readable ? "above" : "terminal") : null} paneDraft={props.paneDraft} followUp={v.followUp}
-        busy={busy} uiRem={props.uiRem} onTerminal={props.onTerminal} onRefresh={refresh} loading={v.turns.loading || v.prompt.loading} />}
+        busy={busy} uiRem={props.uiRem} quote={props.quote ?? null} onTerminal={props.onTerminal} onRefresh={refresh} loading={v.turns.loading || v.prompt.loading} />}
       {menu}
       {/* Renders nothing: it reads the scroll before each commit (stickToBottom.ts). */}
       <BeforeCommit take={take} />
@@ -650,6 +665,31 @@ function SentFiles(props: { paths: string[] }) {
         </li>
       ))}
     </ul>
+  );
+}
+
+/** The quote beside the message: shown whole before it goes, with its way
+ *  off, or the button that puts it there. */
+function QuoteChip(props: { quote: ComposerQuote; sending: boolean; onTaken: () => void }) {
+  const { quote } = props;
+  if (!quote.on) {
+    return (
+      <button className="chat-linkbtn chat-quote-offer" disabled={props.sending} onClick={() => { quote.setOn(true); props.onTaken(); }} data-testid="chat-quote-offer">
+        Quote selection ({quote.label})
+      </button>
+    );
+  }
+  return (
+    <div className="chat-quote" role="group" aria-label={`Quoting ${quote.label}`} data-testid="chat-quote">
+      <div className="chat-quote-head">
+        <span className="chat-quote-label">Quoting {quote.label}</span>
+        <button className="chat-chip-x" onClick={() => { quote.setOn(false); props.onTaken(); }} disabled={props.sending}
+          aria-label="Remove the quote" title="Remove the quote" data-testid="chat-quote-remove">
+          <Icons.X size={11} />
+        </button>
+      </div>
+      <pre className="chat-quote-text" tabIndex={0} data-testid="chat-quote-text">{quote.text}</pre>
+    </div>
   );
 }
 
@@ -1139,6 +1179,7 @@ function Composer(props: {
   busy: boolean;
   /** Settings' `ui_rem` (ChatPane's): a fit trigger that moves with the font. */
   uiRem: number;
+  quote: ComposerQuote | null;
   onTerminal: () => void; onRefresh: () => void; loading: boolean;
 }) {
   const { target, agent } = props;
@@ -1152,9 +1193,14 @@ function Composer(props: {
   // (`agent_commands`) decides what it may be, and `agent_command` runs it.
   const slash = target.idea ? null : slashDraft(text);
   const cmds = v.commands.data?.commands ?? null;
-  const problem = slash
+  const own = slash
     ? (files ? "Files go with a message, not a command: remove them, or write a message." : commandProblem(cmds, text, (a) => draftProblem(a)) ?? (v.commands.error && !cmds ? commandWords(v.commands.error, agent).line : null))
     : files ? attachProblem(text, files, rules) : draftProblem(text, "message", rules);
+  // The quote's own trouble, or the two being too long together: said as the
+  // quote's, since removing it is what helps.
+  const quote = props.quote?.on ? props.quote.text : null;
+  const withIt = quote && !own ? draftProblem(withQuote(quote, text), "message", rules) : null;
+  const problem = own ?? (withIt && `With the quote: ${withIt}`);
   const cmd: SlashCommand | null = slash && cmds ? cmds.find((c) => c.name === slash.name) ?? null : null;
   useEffect(() => { if (slash) void loadCommands(target); }, [!!slash, target.session]); // eslint-disable-line react-hooks/exhaustive-deps
   // The menu: while a name is typed, until Esc closes it for this draft.
@@ -1175,7 +1221,7 @@ function Composer(props: {
     return () => clearTimeout(t);
   }, [armed]);
   useEffect(() => setArmed(null), [text]);
-  const n = bytes(text);
+  const n = bytes(withQuote(quote, text));
   const picker = useRef<HTMLInputElement>(null);
   const [dropping, setDropping] = useState(false);
   const withFiles = (e: React.DragEvent) => Array.from(e.dataTransfer?.types ?? []).includes("Files");
@@ -1266,7 +1312,13 @@ function Composer(props: {
     setArmed(step.armed);
     if (step.run) void sendCommand(target, cmd.name, args, (e) => commandWords(e, agent));
   };
-  const send = () => { if (!canSend) return; if (slash) runCommand(); else void sendDraft(target, agent, rules); };
+  const send = () => {
+    if (!canSend) return;
+    if (slash) runCommand(); else if (!quote) void sendDraft(target, agent, rules); else {
+      const sent = props.quote!.sent;
+      void sendDraft(target, agent, rules, quote).then((ok) => { if (ok) sent(); });
+    }
+  };
   // A menu row: the exact name runs (Enter), any other fills the field.
   const pick = (c: SlashCommand, how: "enter" | "tab" | "click") => {
     if (how !== "tab" && c.name === query) { setClosedAt(text); send(); return; }
@@ -1274,7 +1326,7 @@ function Composer(props: {
     field.current?.focus({ preventScroll: true });
   };
   // Only a line break or a tab is wrong: offer to join, by hand, never silently.
-  const joinable = !!(problem || v.sendWords?.join) && /[\n\r\t]/.test(text) && !draftProblem(text.replace(/\s*[\r\n\t]+\s*/g, " ").trim());
+  const joinable = !!(own || v.sendWords?.join) && /[\n\r\t]/.test(text) && !draftProblem(text.replace(/\s*[\r\n\t]+\s*/g, " ").trim());
 
   const stop = () => { if (!v.stopping) void stopTurn(target, agent); };
   const said = v.sendWords ?? v.attachWords ?? v.stopWords;
@@ -1300,6 +1352,7 @@ function Composer(props: {
   else if (problem) { line = problem; alert = true; }
   else if (props.waiting) line = `Messages can’t be sent while a prompt is waiting. Answer it ${props.waiting === "above" ? "above" : "in the terminal"}.`;
   else if (props.followUp && !text.trim()) line = props.followUp;
+  else if (quote && !text.trim()) line = "Write a message to go with the quote.";
   else if (cmd) line = `Enter runs /${cmd.name}${cmd.tier === "sensitive" ? " · a sensitive command, confirmed first" : confirmWords(cmd) ? " · confirmed first" : ""}`;
   else if (n >= rules.maxBytes - COUNT_LEFT) line = `${rules.lineBreaks ? "" : "One line · "}${n.toLocaleString()} of ${rules.maxBytes.toLocaleString()} bytes`;
   else {
@@ -1331,6 +1384,7 @@ function Composer(props: {
           <button className="chat-linkbtn" onClick={props.onTerminal}>in the terminal</button>.
         </p>
       )}
+      {props.quote && <QuoteChip quote={props.quote} sending={v.sending} onTaken={() => field.current?.focus({ preventScroll: true })} />}
       {files > 0 && <AttachChips attachments={v.attachments} sending={v.sending} path={target.path} />}
       {menuOn && (
         <SlashMenu id={`${ids}-m`} rows={rows} hi={hi} loading={!cmds && v.commands.loading}

@@ -18,6 +18,7 @@ import { engineState, invoke, listen, onEngineState, type EngineState } from "..
 import { Markdown } from "../src/markdown";
 import { revealOnHost } from "../src/onhost";
 import { applySettings, loadSettings } from "../src/settings";
+import { setTermScrollback } from "../src/TerminalPane";
 import { useArmed } from "../src/useArmed";
 import "../src/tokens.css";
 import "../src/App.css";
@@ -26,6 +27,7 @@ import { ideaState, type EditorHooks } from "./editor";
 import { Session, type IdeasChanged, type SaveState, type Saved } from "./ideasave";
 import { savedText } from "./ideastate";
 import { bodyOf, commentOnly, withId } from "./ideatext";
+import { quoteOf, type Quote } from "./ideaquote";
 import { IdeaChat, ideaDots, type ConvState, type IdeaSessionsEv } from "./IdeaChat";
 import { useNavDrag } from "../src/navdrag";
 import { CombineAsk, DropChooser, LinkPicker, PickIdea, RelatedStrip, SplitAsk, VersionsPanel, type Relation, type Version } from "./IdeaRelate";
@@ -254,7 +256,10 @@ export type EditorHandle = {
 function EditorHost(props: {
   docKey: string; initial: string; focus: boolean; handle: React.MutableRefObject<EditorHandle | null>; edited(): void; blurred(): void; hidden: boolean;
   /** Phase 3's hooks (`EditorHooks`), read through a ref so they stay current. */
-  more: Pick<EditorHooks, "picker" | "pickerKey" | "follow" | "selected">;
+  more: Pick<EditorHooks, "picker" | "pickerKey" | "follow" | "selected" | "selectionMoved"> & {
+    /** The text was replaced under the editor (a reload, Claude's edit). */
+    replaced?(): void;
+  };
   /** Text dragged out of the editor (an HTML5 drag CodeMirror starts). */
   textDrag(on: boolean): void;
 }) {
@@ -269,6 +274,7 @@ function EditorHost(props: {
     pickerKey: (k) => cb.current.more.pickerKey?.(k) ?? false,
     follow: (id) => cb.current.more.follow?.(id),
     selected: (h) => cb.current.more.selected?.(h),
+    selectionMoved: () => cb.current.more.selectionMoved?.(),
   }), []);
   useEffect(() => {
     const v = new EditorView({ parent: host.current! });
@@ -287,6 +293,7 @@ function EditorHost(props: {
       replace: (content) => {
         const sel = v.state.selection.main;
         v.setState(ideaState(content, hooks, { anchor: sel.anchor, head: sel.head }));
+        cb.current.more.replaced?.();
       },
       focus: () => v.focus(),
       selection: () => {
@@ -363,6 +370,10 @@ export function Companion() {
   const [related, setRelated] = useState<Relation[]>([]);
   const [relTick, setRelTick] = useState(0);
   const [hasSel, setHasSel] = useState(false);
+  // The selection as a message would quote it, read while a conversation's
+  // panel is open.
+  const [quote, setQuote] = useState<Quote | null>(null);
+  const quoteTimer = useRef<number | undefined>(undefined);
   const [picker, setPicker] = useState<{ from: number; to: number; query: string; x: number; y: number } | null>(null);
   const [pickIdx, setPickIdx] = useState(0);
   const pickerDismissed = useRef<number | null>(null);
@@ -376,7 +387,7 @@ export function Companion() {
   // line. gen 0 is a door with no engine (the mock): nothing to log to.
   useEffect(() => {
     if (!up) return;
-    loadSettings().then((st) => { applySettings(st); setPrefs({ terminal: st.terminal_cmd, uiRem: st.ui_rem }); }).catch(() => {});
+    loadSettings().then((st) => { applySettings(st); setTermScrollback(st.term_scrollback); setPrefs({ terminal: st.terminal_cmd, uiRem: st.ui_rem }); }).catch(() => {});
     if (gen > 0) invoke("log_event", { level: "info", msg: connectLine(gen) }).catch(() => {});
   }, [up, gen]);
 
@@ -447,6 +458,8 @@ export function Companion() {
     setReadText(d.content);
     setVersions((v) => (v === false ? false : null));
     setHasSel(false);
+    window.clearTimeout(quoteTimer.current);
+    setQuote(null);
     setPicker(null);
     setRelTick((n) => n + 1);
   }, [arm, gen, refresh]);
@@ -731,7 +744,23 @@ export function Companion() {
     trace(gen, `linked ${r.id} into ${open?.id}`);
     setPicker(null);
   };
-  const editorMore: Pick<EditorHooks, "picker" | "pickerKey" | "follow" | "selected"> = {
+  /** Read the selection into `quote`, once it has held still: a drag over a
+   *  long document moves it every frame. None is at once. */
+  const quoting = !!open && chatOpen && mode === "edit";
+  const readQuote = (auto: boolean, wait = 120) => {
+    window.clearTimeout(quoteTimer.current);
+    if (!quoting || !handle.current?.selection()) { setQuote(null); return; }
+    quoteTimer.current = window.setTimeout(() => {
+      const [h, sel] = [handle.current, handle.current?.selection()];
+      setQuote(h && sel && open ? quoteOf(open.title, h.text(), sel, auto) : null);
+    }, wait);
+  };
+  useEffect(() => {
+    readQuote(true, 0);
+    return () => window.clearTimeout(quoteTimer.current);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the panel opening, the view, or the idea is the trigger
+  }, [quoting, open?.key]);
+  const editorMore: Parameters<typeof EditorHost>[0]["more"] = {
     picker: (p) => {
       if (p && pickerDismissed.current === p.from) return;
       if (!p) pickerDismissed.current = null;
@@ -752,6 +781,9 @@ export function Companion() {
     },
     follow: (id) => void openIdea(id),
     selected: (h) => setHasSel(h),
+    selectionMoved: () => readQuote(true),
+    // The same offsets over another text: offered, never attached by itself.
+    replaced: () => readQuote(false),
   };
   const textDragOn = (on: boolean) => { textDragging.current = on; setTextDrag(on); };
   const onTextDrop = (extract: boolean) => {
@@ -947,7 +979,7 @@ export function Companion() {
       {combineAsk && <CombineAsk titles={combineAsk.map(titleOf)} act={(t) => void doCombine(combineAsk, t)} close={() => setCombineAsk(null)} />}
       {splitAsk && <SplitAsk preview={splitAsk.text} act={(o) => void doSplit(splitAsk, o.extract, o.title)} close={() => setSplitAsk(null)} />}
       {open && chatOpen
-        ? <IdeaChat ideaId={open.id} dir={listing?.dir ?? null} sessions={sessions} terminalCmd={prefs.terminal} uiRem={prefs.uiRem} onNotice={setNotice} />
+        ? <IdeaChat ideaId={open.id} dir={listing?.dir ?? null} sessions={sessions} terminalCmd={prefs.terminal} gen={gen} quote={quoting ? quote : null} uiRem={prefs.uiRem} onNotice={setNotice} />
         : <aside className="ix-side" aria-hidden="true" />}
     </main>
   );

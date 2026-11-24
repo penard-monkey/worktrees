@@ -248,6 +248,9 @@ fn by_caller(by: &Actor) -> Option<Caller> {
 /// records; the traffic in between is NOT — one record per keystroke is what
 /// §5.1 rules out — and is totalled into the close.
 const STREAM_OPEN: &[&str] = &["term_open", "shell_open"];
+/// The opens that are console rows: an idea conversation's terminal. Its
+/// traffic and its close are the `term_*` rows', tallied the same way.
+const CONSOLE_STREAM_OPEN: &[&str] = &["idea_term_open"];
 const STREAM_CLOSE: &[&str] = &["term_close", "shell_detach", "close_shell_session"];
 const STREAM_TRAFFIC: &[&str] = &["term_write", "shell_write", "term_wheel", "term_resize", "shell_resize"];
 
@@ -2012,7 +2015,7 @@ impl ConnAudit {
             return None;
         }
         let mut detail = Map::new();
-        let what = if STREAM_OPEN.contains(&name) {
+        let what = if STREAM_OPEN.contains(&name) || CONSOLE_STREAM_OPEN.contains(&name) {
             What::Open((name == "shell_open").then(|| shell_key(args)))
         } else if STREAM_CLOSE.contains(&name) {
             What::Close(if name == "term_close" { term_key(arg(args, "id").unwrap_or(&Value::Null)) } else { shell_key(args) })
@@ -2076,6 +2079,12 @@ impl ConnAudit {
                 if let Some(Value::String(s)) = arg(args, "session") {
                     detail.insert("session".into(), json!(ident(s)));
                 }
+                if let Some(Value::String(c)) = arg(args, "conv") {
+                    detail.insert("conv".into(), json!(ident(c)));
+                }
+            }
+            // An idea conversation's terminal: which conversation, by its id.
+            "idea_term_open" => {
                 if let Some(Value::String(c)) = arg(args, "conv") {
                     detail.insert("conv".into(), json!(ident(c)));
                 }
@@ -3181,6 +3190,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// An idea conversation's terminal is a stream too, opened by a console
+    /// row: its open names the conversation, and its keystrokes are totalled
+    /// into its close, never one record each.
+    #[test]
+    fn an_idea_terminals_open_and_close_are_records_and_its_keys_are_totalled() {
+        let d = dir("idea-stream");
+        let (a, _) = Audit::open(&d, None, Fleet::none());
+        let c = console(&a);
+        let p = begin(&c, "idea_term_open", &args(json!({ "id": "01IDEA", "conv": "01CONV", "cols": 80, "rows": 24, "on_bytes": 1 }))).unwrap();
+        c.end(p, Outcome::Ok(&json!(6)));
+        assert!(begin(&c, "term_write", &args(json!({ "id": 6, "data": [104, 105] }))).is_none());
+        call(&c, "term_close", json!({ "id": 6 }));
+        let l = live(&d);
+        assert_eq!(l.len(), 3, "a checkpoint, the open and the close: {l:?}");
+        assert_eq!((l[1]["kind"].as_str(), l[1]["detail"]["event"].as_str()), (Some("stream"), Some("opened")));
+        assert_eq!((l[1]["detail"]["conv"].as_str(), l[1]["detail"]["attach"].as_u64()), (Some("01CONV"), Some(6)));
+        assert_eq!((l[2]["detail"]["event"].as_str(), l[2]["detail"]["bytes_written"].as_u64()), (Some("closed"), Some(2)));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     /// The security review's finding: traffic to attaches this connection
     /// never opened — made-up ids, made-up shells, writes the body refuses —
     /// starts no tally, so a client cannot grow the map; and the map of the
@@ -3263,6 +3292,9 @@ mod tests {
         use super::super::dispatch::{Exposure, TABLE};
         for n in STREAM_OPEN.iter().chain(STREAM_CLOSE).chain(STREAM_TRAFFIC) {
             assert_eq!(row(n).cap, Some(Capability::Stream), "{n}");
+        }
+        for n in CONSOLE_STREAM_OPEN {
+            assert_eq!((row(n).exposure, row(n).cap), (Exposure::HostConsole, None), "{n}");
         }
         let reads = TABLE.iter().filter(|r| r.cap == Some(Capability::Read)).count();
         let quiet: Vec<&str> = TABLE.iter().filter(|r| r.exposure != Exposure::ClientLocal && !recorded(r)).map(|r| r.name).collect();

@@ -8,6 +8,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
 ### Added
 
 - **Workspaces view: an "Everything Else" group for projects in no workspace.** Every registered project that belongs to no named workspace now shows in a built-in card at the bottom of the Workspaces view, with its places under it as in All projects. It is worked out from the list each time and never saved, so adding a project to a workspace takes it out and removing it from its last workspace brings it back, with nothing to migrate. It has no menu, cannot be renamed, recoloured, reordered or deleted, and is not a drop target; drag a project out of it onto a workspace to add it there, and its project menu is All projects' own (no "Remove from workspace"). It folds like any card, remembered under its own reserved id, so a workspace of yours named "Everything Else" is a different card. With no workspaces yet, the "No workspaces yet" hint stays and Everything Else holds every project; with no members it is hidden.
+- **Ideas: a conversation's terminal, in the window.** **Terminal** on a running conversation shows its Claude under the chat, attached to the conversation's own tmux session: type in it, scroll it, drag the divider, Hide it. Hiding it, closing the conversation or opening another idea detaches; nothing is ended. With a terminal command set in Settings, **Open in terminal app** is beside Hide; the notice that told you to attach by hand is gone.
+- **Ideas: the selection, quoted into the chat.** With text selected in the idea's editor and a conversation open, the message box shows the quote that will go with your message, whole: the idea's title, its line numbers in the file, and the lines. ✕ removes it and **Quote selection** puts it back; after one message it is only offered again, and so is a selection whose text was replaced under it. The idea's file is never changed by it.
 
 ### Changed
 
@@ -21,6 +23,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning: [S
   *offline* and kept redialling forever; now the host's group says "David
   removed this device" (or that the host turned it off, or no longer accepts
   it), stops retrying on its own, and offers Retry and **Forget this host**.
+- Ideas: a link in a conversation opens in the browser. The window had no right
+  to open one ("not allowed by ACL"), and WebKit's right-click **Open Link**
+  loaded the page in the Ideas window itself. The window now goes nowhere but
+  its own page, whatever a link, a menu or a refused open does.
 
 ## [0.52.0] - 2026-11-14
 
